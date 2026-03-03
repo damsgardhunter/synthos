@@ -19,6 +19,7 @@ import {
   Cpu,
   FileText,
   Zap,
+  Magnet,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import type { LearningPhase } from "@shared/schema";
@@ -29,6 +30,7 @@ const navItems = [
   { title: "Atomic Explorer", url: "/atoms", icon: Atom },
   { title: "Materials Database", url: "/materials", icon: Database },
   { title: "Novel Discovery", url: "/discovery", icon: FlaskConical },
+  { title: "Superconductor Lab", url: "/superconductor", icon: Magnet },
   { title: "Research Pipeline", url: "/research", icon: FileText },
 ];
 

@@ -1,8 +1,13 @@
 import { db } from "./db";
-import { elements, materials, learningPhases, novelPredictions, researchLogs } from "@shared/schema";
+import {
+  elements, materials, learningPhases, novelPredictions, researchLogs,
+  synthesisProcesses, chemicalReactions, superconductorCandidates
+} from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
-  InsertElement, InsertMaterial, InsertLearningPhase, InsertNovelPrediction, InsertResearchLog
+  InsertElement, InsertMaterial, InsertLearningPhase, InsertNovelPrediction, InsertResearchLog,
+  SynthesisProcess, ChemicalReaction, SuperconductorCandidate,
+  InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate
 } from "@shared/schema";
 import { eq, desc, asc, sql } from "drizzle-orm";
 
@@ -28,7 +33,27 @@ export interface IStorage {
   getResearchLogs(limit?: number): Promise<ResearchLog[]>;
   insertResearchLog(log: InsertResearchLog): Promise<ResearchLog>;
 
-  getStats(): Promise<{ elementsLearned: number; materialsIndexed: number; predictionsGenerated: number; overallProgress: number }>;
+  getSynthesisProcesses(limit?: number): Promise<SynthesisProcess[]>;
+  insertSynthesisProcess(proc: InsertSynthesisProcess): Promise<SynthesisProcess>;
+  getSynthesisCount(): Promise<number>;
+
+  getChemicalReactions(limit?: number): Promise<ChemicalReaction[]>;
+  insertChemicalReaction(rxn: InsertChemicalReaction): Promise<ChemicalReaction>;
+  getReactionCount(): Promise<number>;
+
+  getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
+  insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
+  getSuperconductorCount(): Promise<number>;
+
+  getStats(): Promise<{
+    elementsLearned: number;
+    materialsIndexed: number;
+    predictionsGenerated: number;
+    overallProgress: number;
+    synthesisProcesses: number;
+    chemicalReactions: number;
+    superconductorCandidates: number;
+  }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -108,10 +133,55 @@ export class DatabaseStorage implements IStorage {
     return l;
   }
 
-  async getStats(): Promise<{ elementsLearned: number; materialsIndexed: number; predictionsGenerated: number; overallProgress: number }> {
+  async getSynthesisProcesses(limit = 50): Promise<SynthesisProcess[]> {
+    return db.select().from(synthesisProcesses).orderBy(desc(synthesisProcesses.discoveredAt)).limit(limit);
+  }
+
+  async insertSynthesisProcess(proc: InsertSynthesisProcess): Promise<SynthesisProcess> {
+    const [p] = await db.insert(synthesisProcesses).values(proc).onConflictDoNothing().returning();
+    return p;
+  }
+
+  async getSynthesisCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(synthesisProcesses);
+    return Number(count);
+  }
+
+  async getChemicalReactions(limit = 50): Promise<ChemicalReaction[]> {
+    return db.select().from(chemicalReactions).orderBy(desc(chemicalReactions.relevanceToSuperconductor)).limit(limit);
+  }
+
+  async insertChemicalReaction(rxn: InsertChemicalReaction): Promise<ChemicalReaction> {
+    const [r] = await db.insert(chemicalReactions).values(rxn).onConflictDoNothing().returning();
+    return r;
+  }
+
+  async getReactionCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(chemicalReactions);
+    return Number(count);
+  }
+
+  async getSuperconductorCandidates(limit = 50): Promise<SuperconductorCandidate[]> {
+    return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.ensembleScore)).limit(limit);
+  }
+
+  async insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate> {
+    const [s] = await db.insert(superconductorCandidates).values(sc).onConflictDoNothing().returning();
+    return s;
+  }
+
+  async getSuperconductorCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
+    return Number(count);
+  }
+
+  async getStats() {
     const [elCount] = await db.select({ count: sql<number>`count(*)` }).from(elements);
     const [matCount] = await db.select({ count: sql<number>`count(*)` }).from(materials);
     const [predCount] = await db.select({ count: sql<number>`count(*)` }).from(novelPredictions);
+    const [synthCount] = await db.select({ count: sql<number>`count(*)` }).from(synthesisProcesses);
+    const [rxnCount] = await db.select({ count: sql<number>`count(*)` }).from(chemicalReactions);
+    const [scCount] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
     const phases = await db.select().from(learningPhases);
     const overallProgress = phases.length > 0
       ? phases.reduce((sum, p) => sum + p.progress, 0) / phases.length
@@ -121,6 +191,9 @@ export class DatabaseStorage implements IStorage {
       materialsIndexed: Number(matCount.count),
       predictionsGenerated: Number(predCount.count),
       overallProgress,
+      synthesisProcesses: Number(synthCount.count),
+      chemicalReactions: Number(rxnCount.count),
+      superconductorCandidates: Number(scCount.count),
     };
   }
 }

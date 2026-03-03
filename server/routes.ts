@@ -140,5 +140,38 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/superconductor-candidates", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const candidates = await storage.getSuperconductorCandidates(limit);
+      const total = await storage.getSuperconductorCount();
+      res.json({ candidates, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch superconductor candidates" });
+    }
+  });
+
+  app.get("/api/synthesis-processes", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const processes = await storage.getSynthesisProcesses(limit);
+      const total = await storage.getSynthesisCount();
+      res.json({ processes, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch synthesis processes" });
+    }
+  });
+
+  app.get("/api/chemical-reactions", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const reactions = await storage.getChemicalReactions(limit);
+      const total = await storage.getReactionCount();
+      res.json({ reactions, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch chemical reactions" });
+    }
+  });
+
   return httpServer;
 }

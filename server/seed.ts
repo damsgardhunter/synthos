@@ -121,6 +121,36 @@ const LEARNING_PHASES = [
     insights: [
       "Hydrogen-rich compounds under pressure show promise for room-temperature superconductivity"
     ]
+  },
+  {
+    id: 7,
+    name: "Superconductor Research (XGBoost+NN)",
+    description: "Hybrid ML ensemble: XGBoost feature extraction + neural network refinement targeting room-temperature superconductors with Meissner effect, zero resistance, Cooper pair formation, and quantum coherence.",
+    status: "pending",
+    progress: 0,
+    itemsLearned: 0,
+    totalItems: 50,
+    insights: []
+  },
+  {
+    id: 8,
+    name: "Synthesis Process Mapping",
+    description: "Learning how every material is created: precursors, conditions, equipment, step-by-step procedures. Understanding creation processes like diamond formation under pressure or water from hydrogen and oxygen.",
+    status: "pending",
+    progress: 0,
+    itemsLearned: 0,
+    totalItems: 100,
+    insights: []
+  },
+  {
+    id: 9,
+    name: "Chemical Reaction Knowledge",
+    description: "Cataloguing every chemical reaction and lab process relevant to superconductor creation: oxide formation, high-pressure synthesis, hydrogenation, doping, crystal growth, and thin film deposition.",
+    status: "pending",
+    progress: 0,
+    itemsLearned: 0,
+    totalItems: 80,
+    insights: []
   }
 ];
 

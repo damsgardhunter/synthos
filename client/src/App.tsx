@@ -11,6 +11,7 @@ import AtomicExplorer from "@/pages/atomic-explorer";
 import MaterialsDatabase from "@/pages/materials-database";
 import NovelDiscovery from "@/pages/novel-discovery";
 import ResearchPipeline from "@/pages/research-pipeline";
+import SuperconductorLab from "@/pages/superconductor-lab";
 
 function Router() {
   return (
@@ -19,6 +20,7 @@ function Router() {
       <Route path="/atoms" component={AtomicExplorer} />
       <Route path="/materials" component={MaterialsDatabase} />
       <Route path="/discovery" component={NovelDiscovery} />
+      <Route path="/superconductor" component={SuperconductorLab} />
       <Route path="/research" component={ResearchPipeline} />
       <Route component={NotFound} />
     </Switch>

@@ -21,6 +21,9 @@ interface Stats {
   materialsIndexed: number;
   predictionsGenerated: number;
   overallProgress: number;
+  synthesisProcesses: number;
+  chemicalReactions: number;
+  superconductorCandidates: number;
 }
 
 function PhaseStatusBadge({ status }: { status: string }) {
@@ -81,6 +84,11 @@ export default function Dashboard() {
     "Internal": "bg-gray-100 text-gray-700 dark:bg-gray-950 dark:text-gray-300",
     "Internal ML Model": "bg-pink-100 text-pink-700 dark:bg-pink-950 dark:text-pink-300",
     "DFT Engine": "bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300",
+    "ML Engine": "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300",
+    "SC Research": "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
+    "Synthesis Engine": "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+    "Reaction Engine": "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300",
+    "OpenAI NLP": "bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300",
   };
 
   return (
@@ -99,15 +107,19 @@ export default function Dashboard() {
         messages={ws.messages}
       />
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {statsLoading ? (
-          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28" />)
+          Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-28" />)
         ) : (
           <>
             <StatCard title="Elements Learned" value={stats?.elementsLearned ?? 0} icon={Atom} sub="of 118 known elements" />
             <StatCard title="Materials Indexed" value={(stats?.materialsIndexed ?? 0).toLocaleString()} icon={Database} sub="from 4 scientific databases" />
             <StatCard title="Predictions Made" value={stats?.predictionsGenerated ?? 0} icon={FlaskConical} sub="novel material candidates" />
-            <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across all learning phases" />
+            <StatCard title="SC Candidates" value={stats?.superconductorCandidates ?? 0} icon={Zap} sub="superconductor predictions" />
+            <StatCard title="Synthesis Paths" value={stats?.synthesisProcesses ?? 0} icon={Microscope} sub="lab creation processes" />
+            <StatCard title="Reactions Learned" value={stats?.chemicalReactions ?? 0} icon={BookOpen} sub="chemical reaction database" />
+            <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 9 learning phases" />
+            <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 9}`} icon={TrendingUp} sub="currently running" />
           </>
         )}
       </div>

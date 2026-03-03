@@ -4,6 +4,8 @@ import { storage } from "../storage";
 import { fetchOQMDMaterials, fetchAFLOWMaterials, getNextSpecies, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
 import { generateNovelFormulas } from "./formula-generator";
+import { runSuperconductorResearch } from "./superconductor-research";
+import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -21,6 +23,9 @@ interface EngineStatus {
   totalMaterialsFetched: number;
   totalInsightsGenerated: number;
   totalPredictionsMade: number;
+  totalSynthesisDiscovered: number;
+  totalReactionsLearned: number;
+  totalScCandidates: number;
 }
 
 let wss: WebSocketServer | null = null;
@@ -30,6 +35,9 @@ let cycleCount = 0;
 let totalMaterialsFetched = 0;
 let totalInsightsGenerated = 0;
 let totalPredictionsMade = 0;
+let totalSynthesisDiscovered = 0;
+let totalReactionsLearned = 0;
+let totalScCandidates = 0;
 let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
@@ -186,6 +194,71 @@ async function runPhase6_Discovery() {
   }
 }
 
+async function runPhase7_Superconductor() {
+  if (!shouldContinue()) return;
+  activeTasks.add("SC Research");
+  broadcast("taskStart", { task: "SC Research" });
+  try {
+    await updatePhaseStatus(7, "active", 0, 0);
+    if (!shouldContinue()) return;
+
+    const result = await runSuperconductorResearch(emit, allInsights.slice(-15));
+    totalScCandidates += result.generated;
+    allInsights.push(...result.insights);
+    totalInsightsGenerated += result.insights.length;
+
+    await addInsightsToPhase(7, result.insights);
+    const scCount = await storage.getSuperconductorCount();
+    const progress = Math.min(100, Math.floor((scCount / 50) * 100));
+    await updatePhaseStatus(7, progress >= 100 ? "completed" : "active", progress, scCount);
+  } finally {
+    activeTasks.delete("SC Research");
+    broadcast("taskEnd", { task: "SC Research" });
+  }
+}
+
+async function runPhase8_Synthesis() {
+  if (!shouldContinue()) return;
+  activeTasks.add("Synthesis Mapping");
+  broadcast("taskStart", { task: "Synthesis Mapping" });
+  try {
+    await updatePhaseStatus(8, "active", 0, 0);
+    if (!shouldContinue()) return;
+
+    const mats = await storage.getMaterials(15, 0);
+    const discovered = await discoverSynthesisProcesses(emit, mats);
+    totalSynthesisDiscovered += discovered;
+
+    const synthCount = await storage.getSynthesisCount();
+    const progress = Math.min(100, Math.floor((synthCount / 100) * 100));
+    await updatePhaseStatus(8, progress >= 100 ? "completed" : "active", progress, synthCount);
+  } finally {
+    activeTasks.delete("Synthesis Mapping");
+    broadcast("taskEnd", { task: "Synthesis Mapping" });
+  }
+}
+
+async function runPhase9_Reactions() {
+  if (!shouldContinue()) return;
+  activeTasks.add("Reaction Discovery");
+  broadcast("taskStart", { task: "Reaction Discovery" });
+  try {
+    await updatePhaseStatus(9, "active", 0, 0);
+    if (!shouldContinue()) return;
+
+    const topic = getNextReactionTopic();
+    const discovered = await discoverChemicalReactions(emit, topic);
+    totalReactionsLearned += discovered;
+
+    const rxnCount = await storage.getReactionCount();
+    const progress = Math.min(100, Math.floor((rxnCount / 80) * 100));
+    await updatePhaseStatus(9, progress >= 100 ? "completed" : "active", progress, rxnCount);
+  } finally {
+    activeTasks.delete("Reaction Discovery");
+    broadcast("taskEnd", { task: "Reaction Discovery" });
+  }
+}
+
 async function runLearningCycle() {
   if (state !== "running" || isRunningCycle) return;
   isRunningCycle = true;
@@ -197,7 +270,7 @@ async function runLearningCycle() {
   emit("log", {
     phase: "engine",
     event: `Learning cycle ${cycleCount} started`,
-    detail: "Running all phases concurrently",
+    detail: "Running all 9 phases concurrently across data, NLP, ML, synthesis, and SC research",
     dataSource: "Internal",
   });
 
@@ -205,13 +278,21 @@ async function runLearningCycle() {
     await Promise.allSettled([
       runPhase4_Materials(),
       runPhase3_Bonding(),
+      runPhase9_Reactions(),
     ]);
 
     if (state !== "running") return;
 
     await Promise.allSettled([
       runPhase5_Prediction(),
+      runPhase8_Synthesis(),
+    ]);
+
+    if (state !== "running") return;
+
+    await Promise.allSettled([
       runPhase6_Discovery(),
+      runPhase7_Superconductor(),
     ]);
   } catch (err: any) {
     emit("log", {
@@ -254,7 +335,7 @@ export function startEngine() {
   emit("log", {
     phase: "engine",
     event: "Learning engine started",
-    detail: "All phases will run concurrently",
+    detail: "All 9 phases running: Data Fetching, Bonding, Prediction, Discovery, SC Research, Synthesis, Reactions",
     dataSource: "Internal",
   });
 
@@ -273,7 +354,7 @@ export function stopEngine() {
   emit("log", {
     phase: "engine",
     event: "Learning engine stopped",
-    detail: `Completed ${cycleCount} cycles`,
+    detail: `Completed ${cycleCount} cycles, ${totalScCandidates} SC candidates, ${totalSynthesisDiscovered} synthesis paths`,
     dataSource: "Internal",
   });
 
@@ -308,5 +389,8 @@ export function getStatus(): EngineStatus {
     totalMaterialsFetched,
     totalInsightsGenerated,
     totalPredictionsMade,
+    totalSynthesisDiscovered,
+    totalReactionsLearned,
+    totalScCandidates,
   };
 }
