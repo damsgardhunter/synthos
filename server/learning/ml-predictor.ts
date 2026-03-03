@@ -170,17 +170,29 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   return { score, tcEstimate: Math.round(tcEstimate), reasoning };
 }
 
+interface ResearchContext {
+  synthesisCount: number;
+  reactionCount: number;
+  hasSynthesisKnowledge: boolean;
+  hasReactionKnowledge: boolean;
+}
+
 export async function runMLPrediction(
   emit: EventEmitter,
-  materials: Material[]
+  materials: Material[],
+  context?: ResearchContext
 ): Promise<{ candidates: Partial<SuperconductorCandidate>[]; insights: string[] }> {
   const candidates: Partial<SuperconductorCandidate>[] = [];
   const insights: string[] = [];
 
+  const contextDetail = context
+    ? ` (informed by ${context.synthesisCount} synthesis processes and ${context.reactionCount} chemical reactions)`
+    : "";
+
   emit("log", {
     phase: "phase-7",
     event: "XGBoost+NN ensemble started",
-    detail: `Feature extraction and gradient boosting on ${materials.length} materials`,
+    detail: `Feature extraction and gradient boosting on ${materials.length} materials${contextDetail}`,
     dataSource: "ML Engine",
   });
 

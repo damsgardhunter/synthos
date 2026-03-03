@@ -14,6 +14,9 @@ const STATUS_COLORS: Record<string, string> = {
   "theoretical": "bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-300",
   "promising": "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300",
   "novel-design": "bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300",
+  "high-tc-candidate": "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+  "under-review": "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300",
+  "requires-verification": "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   "validated": "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
 };
 
@@ -139,24 +142,48 @@ function SynthesisCard({ process }: { process: SynthesisProcess }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {(conditions.temperature || conditions.pressure || conditions.atmosphere) && (
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            {conditions.temperature != null && (
-              <div className="p-2 bg-muted/50 rounded-md">
-                <span className="text-muted-foreground block">Temp</span>
-                <span className="font-mono font-bold">{conditions.temperature}C</span>
-              </div>
-            )}
-            {conditions.pressure != null && (
-              <div className="p-2 bg-muted/50 rounded-md">
-                <span className="text-muted-foreground block">Pressure</span>
-                <span className="font-mono font-bold">{conditions.pressure} atm</span>
-              </div>
-            )}
-            {conditions.atmosphere && (
-              <div className="p-2 bg-muted/50 rounded-md">
-                <span className="text-muted-foreground block">Atmosphere</span>
-                <span className="font-mono font-bold">{conditions.atmosphere}</span>
+        {(conditions.temperature || conditions.pressure || conditions.atmosphere || conditions.holdTime) && (
+          <div className="space-y-2">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              {conditions.temperature != null && (
+                <div className="p-2 bg-muted/50 rounded-md">
+                  <span className="text-muted-foreground block">Peak Temp</span>
+                  <span className="font-mono font-bold">{conditions.temperature}C</span>
+                </div>
+              )}
+              {conditions.pressure != null && (
+                <div className="p-2 bg-muted/50 rounded-md">
+                  <span className="text-muted-foreground block">Pressure</span>
+                  <span className="font-mono font-bold">{conditions.pressure} atm</span>
+                </div>
+              )}
+              {conditions.atmosphere && (
+                <div className="p-2 bg-muted/50 rounded-md">
+                  <span className="text-muted-foreground block">Atmosphere</span>
+                  <span className="font-mono font-bold">{conditions.atmosphere}</span>
+                </div>
+              )}
+            </div>
+            {(conditions.heatingRate || conditions.holdTime || conditions.coolingMethod) && (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                {conditions.heatingRate && (
+                  <div className="p-2 bg-muted/30 rounded-md">
+                    <span className="text-muted-foreground block">Heating Rate</span>
+                    <span className="font-mono text-xs">{conditions.heatingRate}</span>
+                  </div>
+                )}
+                {conditions.holdTime && (
+                  <div className="p-2 bg-muted/30 rounded-md">
+                    <span className="text-muted-foreground block">Hold Time</span>
+                    <span className="font-mono text-xs">{conditions.holdTime}</span>
+                  </div>
+                )}
+                {conditions.coolingMethod && (
+                  <div className="p-2 bg-muted/30 rounded-md">
+                    <span className="text-muted-foreground block">Cooling</span>
+                    <span className="font-mono text-xs">{conditions.coolingMethod}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>

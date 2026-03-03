@@ -45,49 +45,80 @@ A comprehensive materials science research platform that simulates an AI superco
 
 ### Database Tables
 - `elements` — 30+ real elements with properties (atomic mass, electronegativity, electron config, etc.)
-- `materials` — 15+ materials from NIST, Materials Project, OQMD, AFLOW (grows via live fetching)
+- `materials` — Materials from OQMD, AFLOW, and Materials Science Knowledge Base (grows via live fetching + known materials import)
 - `learning_phases` — 9 phases: Subatomic -> Elements -> Bonding -> Materials -> Prediction -> Discovery -> SC Research -> Synthesis -> Reactions
 - `novel_predictions` — AI-predicted novel materials (grows via formula generator)
 - `research_logs` — Activity log of research events by data source
-- `synthesis_processes` — How materials are created (method, steps, precursors, equipment, conditions, safety)
-- `chemical_reactions` — Lab reactions with equations, energetics, mechanisms, SC relevance scores
-- `superconductor_candidates` — ML-scored SC candidates with XGBoost/NN/ensemble scores, Meissner/Cooper pair/coherence data
+- `synthesis_processes` — How materials are created (method, exact temperatures, heating rates, hold times, cooling methods, precursors, equipment, safety)
+- `chemical_reactions` — Lab reactions with balanced equations, thermodynamic data, mechanisms, SC relevance scores
+- `superconductor_candidates` — ML-scored SC candidates with XGBoost/NN/ensemble scores, Meissner/Cooper pair/coherence data, verification status
 - `conversations` — Chat conversations (AI integrations)
 - `messages` — Chat messages (AI integrations)
 
 ## Learning Engine (server/learning/)
-The learning engine orchestrates concurrent AI research across 9 phases:
+The learning engine orchestrates balanced AI research across 9 phases:
 
-- **data-fetcher.ts** — Fetches real materials data from OQMD and AFLOW public APIs
+- **data-fetcher.ts** — Fetches real materials from OQMD/AFLOW APIs + imports known human-created materials (12 topic categories, beginner to master level) from OpenAI sourced from reputable journals/databases
 - **nlp-engine.ts** — Uses OpenAI to analyze bonding patterns, predict properties, classify materials
 - **formula-generator.ts** — Uses OpenAI to generate novel chemical compositions with predicted properties
-- **ml-predictor.ts** — XGBoost feature extraction (18 physics features) + OpenAI neural network refinement for superconductor scoring. Ensemble = XGB*0.4 + NN*0.6
-- **superconductor-research.ts** — Dedicated SC research: evaluates known materials, generates novel room-temp SC designs with synthesis pathways
-- **synthesis-tracker.ts** — Discovers how materials are made (lab processes, precursors, equipment) and catalogs chemical reactions
-- **engine.ts** — Main orchestrator: runs phases concurrently, manages WebSocket broadcasts, tracks progress
+- **ml-predictor.ts** — XGBoost feature extraction (18 physics features) + OpenAI neural network refinement for superconductor scoring. Ensemble = XGB*0.4 + NN*0.6. Now accepts ResearchContext (synthesis/reaction counts) for informed predictions.
+- **superconductor-research.ts** — Strict SC research: both zero resistance AND room temperature required. Multi-step verification pipeline: theoretical -> promising -> high-tc-candidate -> under-review -> requires-verification. No premature breakthroughs.
+- **synthesis-tracker.ts** — Discovers how materials are made with exact conditions (peak temperature in C, heating rate, hold time, cooling method, atmosphere, pressure). Broader reaction topics covering all materials chemistry.
+- **engine.ts** — Main orchestrator: balanced phase priority, manages WebSocket broadcasts, tracks progress
 
-### Engine Cycle
-1. Phase 4 (Materials) + Phase 3 (Bonding) + Phase 9 (Reactions) run in parallel
-2. Phase 5 (Prediction) + Phase 8 (Synthesis) run next
-3. Phase 6 (Discovery) + Phase 7 (SC Research) run last
-4. Cycles repeat every 60 seconds while engine is running
+### Engine Cycle (Balanced Priority)
+1. **Foundation first**: Phase 4 (Materials + Known Materials Import) + Phase 8 (Synthesis) + Phase 9 (Reactions) run in parallel
+2. **Analysis second**: Phase 3 (Bonding) + Phase 5 (Prediction) run next
+3. **Discovery third**: Phase 6 (Novel Discovery) runs
+4. **SC Research last**: Phase 7 (SC Research) only runs after minimum knowledge threshold (5+ materials, 3+ synthesis paths, 3+ reactions)
+5. Cycles repeat every 60 seconds while engine is running
 
 ### ML Prediction Engine
 - XGBoost layer: Pure TypeScript gradient boosting with 18 physics-informed features (electronegativity, Cooper pair strength, phonon coupling, Meissner potential, d-wave symmetry, layered structure, etc.)
 - Neural network layer: OpenAI gpt-4o-mini refines XGBoost predictions with deep physics reasoning
 - Ensemble: 40% XGBoost + 60% Neural Network weighted scoring
-- Room-temp criteria: Tc >= 293K, pressure < 50 GPa, Meissner effect, zero resistance, Cooper pair formation
+- Room-temp criteria (STRICT): Tc >= 293K AND zero electrical resistance AND Meissner effect AND ambient/low pressure (< 50 GPa) — ALL must be verified
+
+### SC Verification Pipeline
+Candidates go through multi-step verification before any claims:
+- `theoretical` — Initial ML prediction, criteria not fully met
+- `promising` — Some criteria met, needs more evaluation
+- `high-tc-candidate` — High Tc predicted with zero resistance
+- `under-review` — Room-temp + zero resistance + Meissner predicted, needs detailed review
+- `requires-verification` — All criteria appear met, requires: independent synthesis confirmation, four-probe resistance measurement, SQUID magnetometry, reproducibility by 2+ independent labs
+- No "breakthrough" or "confirmed" status exists — all predictions are theoretical until experimentally verified
+
+### Known Materials Import
+12 topic categories across 4 difficulty levels:
+- **Beginner**: Common everyday materials, basic ceramics and oxides
+- **Intermediate**: Semiconductors, batteries, structural alloys
+- **Advanced**: Known superconductors, topological materials, functional ceramics
+- **Master**: MXenes/MOFs/perovskites, extreme environment materials, metamaterials, high-entropy alloys
+
+### Chemical Reaction Topics (Broad Coverage)
+20 topics covering all materials chemistry: oxide formation, metal reduction, sol-gel chemistry, battery reactions, combustion synthesis, CVD, corrosion, precipitation, polymer synthesis, semiconductor doping, photocatalysis, ALD, and more (not just superconductor-focused).
+
+### Synthesis Process Detail Level
+Each synthesis process includes:
+- Peak temperature (exact C), heating rate (C/min), hold time (hours at specific temp)
+- Cooling method (furnace cool, quench, controlled ramp)
+- Atmosphere (specific gas, flow rate), pressure (atm)
+- Intermediate steps (regrinding, multiple sintering cycles)
+- Precursors with purity levels, equipment list, safety notes, yield percent
 
 ### OpenAI Configuration
 - Model: gpt-4o-mini for all NLP tasks
 - Uses Replit AI Integrations (env vars: AI_INTEGRATIONS_OPENAI_BASE_URL, AI_INTEGRATIONS_OPENAI_API_KEY)
 - Batch processing with p-limit (concurrency: 2) and p-retry (retries: 5)
+- Synthesis tracker: max_completion_tokens 3500 (batch size 4 materials for detail)
+- Reaction discovery: max_completion_tokens 2000 (5-7 reactions per topic)
 
 ## Data Sources
 - **NIST WebBook** — Thermodynamic data, spectroscopic properties
 - **Materials Project** — DFT-computed band gaps, formation energies
 - **OQMD** — `http://oqmd.org/oqmdapi/formationenergy` (live fetching, no auth)
 - **AFLOW** — `http://aflow.org/API/aflowlib/` (live fetching, no auth)
+- **Materials Science KB** — OpenAI-sourced real materials from peer-reviewed literature (Nature, Science, NIST, CRC Handbook, Callister textbook)
 
 ## File Structure
 ```
@@ -112,13 +143,13 @@ server/
   db.ts          — Drizzle DB connection
   seed.ts        — Seed data (elements, phases 1-9, materials, predictions, logs)
   learning/
-    engine.ts              — Main orchestrator + WebSocket server (9 phases)
-    data-fetcher.ts        — OQMD/AFLOW live data fetching
+    engine.ts              — Main orchestrator + WebSocket server (9 phases, balanced priority)
+    data-fetcher.ts        — OQMD/AFLOW live fetching + known materials import (12 categories)
     nlp-engine.ts          — OpenAI NLP analysis
     formula-generator.ts   — Novel formula generation
     ml-predictor.ts        — XGBoost + neural network ensemble for SC prediction
-    superconductor-research.ts — Room-temp SC discovery + novel design generation
-    synthesis-tracker.ts   — Lab synthesis process discovery + chemical reaction cataloguing
+    superconductor-research.ts — Strict SC discovery with multi-step verification pipeline
+    synthesis-tracker.ts   — Detailed synthesis process discovery (exact conditions) + broad chemical reactions
   replit_integrations/
     chat/    — OpenAI chat integration
     audio/   — Audio integration
@@ -139,3 +170,4 @@ shared/
 - Storage pattern: onConflictDoNothing().returning() for inserts; onConflictDoUpdate for upserts
 - Cycle timing: 60 seconds between learning cycles
 - Phases run with Promise.allSettled for fault-tolerant concurrency
+- SC status: NEVER use "breakthrough" or "confirmed" — all are theoretical until lab verification

@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { storage } from "../storage";
-import { fetchOQMDMaterials, fetchAFLOWMaterials, getNextSpecies, getNextOQMDOffset } from "./data-fetcher";
+import { fetchOQMDMaterials, fetchAFLOWMaterials, fetchKnownMaterials, getNextSpecies, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
 import { generateNovelFormulas } from "./formula-generator";
 import { runSuperconductorResearch } from "./superconductor-research";
@@ -134,12 +134,13 @@ async function runPhase4_Materials() {
   try {
     await updatePhaseStatus(4, "active", 0, 0);
 
-    const [oqmdCount, aflowCount] = await Promise.all([
+    const [oqmdCount, aflowCount, knownCount] = await Promise.all([
       fetchOQMDMaterials(emit, 10, getNextOQMDOffset()),
       fetchAFLOWMaterials(emit, getNextSpecies(), 5),
+      fetchKnownMaterials(emit),
     ]);
 
-    const total = oqmdCount + aflowCount;
+    const total = oqmdCount + aflowCount + knownCount;
     totalMaterialsFetched += total;
 
     const matCount = await storage.getMaterialCount();
@@ -270,30 +271,44 @@ async function runLearningCycle() {
   emit("log", {
     phase: "engine",
     event: `Learning cycle ${cycleCount} started`,
-    detail: "Running all 9 phases concurrently across data, NLP, ML, synthesis, and SC research",
+    detail: "Priority: materials + synthesis + reactions first, then bonding + prediction, then discovery. SC research runs last after knowledge is built.",
     dataSource: "Internal",
   });
 
   try {
     await Promise.allSettled([
       runPhase4_Materials(),
-      runPhase3_Bonding(),
+      runPhase8_Synthesis(),
       runPhase9_Reactions(),
     ]);
 
     if (state !== "running") return;
 
     await Promise.allSettled([
+      runPhase3_Bonding(),
       runPhase5_Prediction(),
-      runPhase8_Synthesis(),
     ]);
 
     if (state !== "running") return;
 
-    await Promise.allSettled([
-      runPhase6_Discovery(),
-      runPhase7_Superconductor(),
-    ]);
+    await runPhase6_Discovery();
+
+    if (state !== "running") return;
+
+    const matCount = await storage.getMaterialCount();
+    const synthCount = await storage.getSynthesisCount();
+    const rxnCount = await storage.getReactionCount();
+
+    if (matCount >= 5 && synthCount >= 3 && rxnCount >= 3) {
+      await runPhase7_Superconductor();
+    } else {
+      emit("log", {
+        phase: "phase-7",
+        event: "SC research deferred",
+        detail: `Waiting for more knowledge: ${matCount} materials (need 5+), ${synthCount} synthesis paths (need 3+), ${rxnCount} reactions (need 3+)`,
+        dataSource: "SC Research",
+      });
+    }
   } catch (err: any) {
     emit("log", {
       phase: "engine",
@@ -335,7 +350,7 @@ export function startEngine() {
   emit("log", {
     phase: "engine",
     event: "Learning engine started",
-    detail: "All 9 phases running: Data Fetching, Bonding, Prediction, Discovery, SC Research, Synthesis, Reactions",
+    detail: "Balanced learning: materials/synthesis/reactions run first, then analysis, then SC research (only after sufficient knowledge base).",
     dataSource: "Internal",
   });
 

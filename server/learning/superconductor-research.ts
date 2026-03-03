@@ -8,6 +8,100 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
+const VERIFICATION_CHECKLIST = [
+  "zero_resistance_confirmed",
+  "room_temperature_confirmed",
+  "meissner_effect_verified",
+  "crystal_structure_validated",
+  "synthesis_path_feasible",
+  "thermodynamic_stability_checked",
+  "reproducibility_assessed",
+  "pressure_requirements_acceptable",
+] as const;
+
+function determineStatus(candidate: any): string {
+  const tc = candidate.predictedTc ?? 0;
+  const pressure = candidate.pressureGpa ?? 999;
+  const hasZeroResistance = candidate.zeroResistance === true;
+  const hasMeissner = candidate.meissnerEffect === true;
+  const ensembleScore = candidate.ensembleScore ?? 0;
+
+  const isRoomTemp = tc >= 293;
+  const isLowPressure = pressure <= 50;
+  const isAmbientPressure = pressure <= 1;
+
+  if (!hasZeroResistance || !hasMeissner) {
+    return "theoretical";
+  }
+
+  if (isRoomTemp && isAmbientPressure && hasZeroResistance && hasMeissner && ensembleScore > 0.8) {
+    return "requires-verification";
+  }
+
+  if (isRoomTemp && isLowPressure && hasZeroResistance && hasMeissner && ensembleScore > 0.7) {
+    return "under-review";
+  }
+
+  if (isRoomTemp && hasZeroResistance && hasMeissner) {
+    return "promising";
+  }
+
+  if (tc > 100 && hasZeroResistance) {
+    return "high-tc-candidate";
+  }
+
+  if (ensembleScore > 0.5) {
+    return "promising";
+  }
+
+  return "theoretical";
+}
+
+function buildVerificationNotes(candidate: any): string {
+  const checks: string[] = [];
+  const failures: string[] = [];
+  const tc = candidate.predictedTc ?? 0;
+  const pressure = candidate.pressureGpa ?? null;
+
+  if (candidate.zeroResistance === true) {
+    checks.push("Zero electrical resistance: PREDICTED");
+  } else {
+    failures.push("MISSING: Zero electrical resistance not confirmed - fundamental SC requirement");
+  }
+
+  if (tc >= 293) {
+    checks.push(`Room temperature: Tc=${tc}K >= 293K (20C)`);
+  } else if (tc > 0) {
+    failures.push(`NOT room temperature: Tc=${tc}K < 293K required`);
+  } else {
+    failures.push("MISSING: No Tc prediction available");
+  }
+
+  if (candidate.meissnerEffect === true) {
+    checks.push("Meissner effect (magnetic flux expulsion): PREDICTED");
+  } else {
+    failures.push("MISSING: Meissner effect not confirmed - must expel magnetic flux");
+  }
+
+  if (pressure != null && pressure <= 1) {
+    checks.push(`Ambient pressure: ${pressure} GPa`);
+  } else if (pressure != null && pressure <= 50) {
+    checks.push(`Moderate pressure: ${pressure} GPa (lab achievable)`);
+  } else if (pressure != null) {
+    failures.push(`High pressure required: ${pressure} GPa - difficult to maintain`);
+  }
+
+  const status = determineStatus(candidate);
+  let prefix = "";
+  if (status === "requires-verification") {
+    prefix = "AWAITING VERIFICATION - All criteria appear met but requires: independent synthesis confirmation, four-probe resistance measurement to absolute zero, SQUID magnetometry for Meissner verification, and reproducibility by at least two independent labs. ";
+  } else if (status === "under-review") {
+    prefix = "UNDER REVIEW - Promising but needs: detailed synthesis attempt, resistance vs temperature measurement, and magnetic susceptibility testing. ";
+  }
+
+  return prefix + "Checks passed: " + checks.join("; ") + (failures.length > 0 ? ". Remaining issues: " + failures.join("; ") : "");
+}
+
 export async function runSuperconductorResearch(
   emit: EventEmitter,
   allInsights: string[]
@@ -18,17 +112,32 @@ export async function runSuperconductorResearch(
   emit("log", {
     phase: "phase-7",
     event: "Superconductor research cycle started",
-    detail: "XGBoost+NN ensemble targeting room-temperature superconductivity",
+    detail: "XGBoost+NN ensemble with strict verification: both zero resistance AND room temperature required",
     dataSource: "SC Research",
   });
 
   const materials = await storage.getMaterials(50, 0);
 
-  const mlResult = await runMLPrediction(emit, materials);
+  const synthesisProcesses = await storage.getSynthesisProcesses(20);
+  const chemicalReactions = await storage.getChemicalReactions(20);
+
+  const mlResult = await runMLPrediction(emit, materials, {
+    synthesisCount: synthesisProcesses.length,
+    reactionCount: chemicalReactions.length,
+    hasSynthesisKnowledge: synthesisProcesses.length > 0,
+    hasReactionKnowledge: chemicalReactions.length > 0,
+  });
   newInsights.push(...mlResult.insights);
 
   for (const candidate of mlResult.candidates) {
     const id = `sc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const status = determineStatus(candidate);
+    const verificationNotes = buildVerificationNotes(candidate);
+
+    const isActuallyRoomTemp = (candidate.predictedTc ?? 0) >= 293 &&
+      candidate.zeroResistance === true &&
+      candidate.meissnerEffect === true;
+
     try {
       await storage.insertSuperconductorCandidate({
         id,
@@ -47,9 +156,9 @@ export async function runSuperconductorResearch(
         xgboostScore: candidate.xgboostScore ?? null,
         neuralNetScore: candidate.neuralNetScore ?? null,
         ensembleScore: candidate.ensembleScore ?? null,
-        roomTempViable: candidate.roomTempViable ?? false,
-        status: candidate.status || "theoretical",
-        notes: candidate.notes ?? null,
+        roomTempViable: isActuallyRoomTemp,
+        status,
+        notes: verificationNotes,
       });
       generated++;
 
@@ -60,8 +169,10 @@ export async function runSuperconductorResearch(
         formula: candidate.formula,
         predictedTc: candidate.predictedTc,
         ensembleScore: candidate.ensembleScore,
-        roomTempViable: candidate.roomTempViable,
+        roomTempViable: isActuallyRoomTemp,
         meissnerEffect: candidate.meissnerEffect,
+        zeroResistance: candidate.zeroResistance,
+        status,
       });
     } catch (e: any) {
       emit("log", { phase: "phase-7", event: "SC candidate insert error", detail: `${candidate.formula}: ${e.message?.slice(0, 100)}`, dataSource: "SC Research" });
@@ -69,10 +180,13 @@ export async function runSuperconductorResearch(
   }
 
   if (generated > 0) {
+    const roomTempCount = mlResult.candidates.filter(c =>
+      (c.predictedTc ?? 0) >= 293 && c.zeroResistance === true && c.meissnerEffect === true
+    ).length;
     emit("log", {
       phase: "phase-7",
-      event: "Superconductor candidates generated",
-      detail: `${generated} candidates, ${mlResult.candidates.filter(c => c.roomTempViable).length} room-temp viable, ${mlResult.candidates.filter(c => c.meissnerEffect).length} with Meissner effect`,
+      event: "Superconductor candidates evaluated",
+      detail: `${generated} candidates scored. ${roomTempCount} meet both zero-resistance AND room-temperature criteria (pending verification). ${mlResult.candidates.filter(c => c.meissnerEffect).length} with Meissner effect predicted.`,
       dataSource: "SC Research",
     });
   }
@@ -105,7 +219,9 @@ async function generateNovelSuperconductors(
       predictedTc: c.predictedTc,
       ensembleScore: c.ensembleScore,
       meissnerEffect: c.meissnerEffect,
+      zeroResistance: c.zeroResistance,
       cooperPairMechanism: c.cooperPairMechanism,
+      status: c.status,
     }));
 
   try {
@@ -114,43 +230,42 @@ async function generateNovelSuperconductors(
       messages: [
         {
           role: "system",
-          content: `You are the discovery module of a superconductor AI. Based on the best candidates found so far and known patterns, propose 2-3 completely NEW chemical formulas that could be room-temperature superconductors.
+          content: `You are the discovery module of a superconductor AI. Based on the best candidates found so far and known patterns, propose 2-3 NEW chemical formulas that could be room-temperature superconductors.
 
-Requirements for ideal candidates:
-- Critical temperature (Tc) >= 293K (room temperature, 20C)
-- Achievable at low or ambient pressure (< 10 GPa ideal, < 50 GPa acceptable)
-- Must exhibit the Meissner effect (complete expulsion of magnetic flux from interior)
-- Must exhibit zero electrical resistance below Tc
-- Must support Cooper pair formation (phonon-mediated or unconventional)
-- Should maintain quantum coherence for potential qubit applications
-- Must be thermodynamically stable or metastable at operating conditions
+STRICT REQUIREMENTS - A true room-temperature superconductor MUST have ALL of these:
+1. ZERO electrical resistance (not just low resistance - absolute zero ohms below Tc). This means electrons flow with literally no energy loss.
+2. Critical temperature (Tc) >= 293K (20C, room temperature). The material must superconduct at normal room conditions.
+3. Meissner effect - complete expulsion of ALL magnetic flux from the material interior when cooled below Tc.
+4. Achievable at low or ambient pressure (< 10 GPa ideal, < 50 GPa maximum acceptable).
+5. Must support Cooper pair formation through a known mechanism (phonon-mediated BCS, spin-fluctuation, charge-density wave, or unconventional).
+6. Must be thermodynamically stable or metastable - it cannot decompose at room temperature.
 
-Consider these strategies:
-1. Hydrogen-rich compounds under moderate pressure (superhydrides)
-2. Layered cuprate-like structures with enhanced Cu-O planes
-3. Iron-based pnictide/chalcogenide variants with optimized doping
-4. Nickelate superconductors (infinite-layer structures)
-5. Topological superconductors with Majorana fermion potential
+IMPORTANT: Do NOT claim any candidate is a "confirmed breakthrough." All candidates are THEORETICAL PREDICTIONS that would require:
+- Independent laboratory synthesis
+- Four-probe resistance measurement from 300K down to 2K showing zero resistance below Tc
+- SQUID magnetometry confirming complete Meissner effect
+- Reproduction by at least 2 independent research groups
+- Crystal structure verification by X-ray diffraction
 
-For each candidate, also describe the synthesis pathway - exactly how it would be made in a lab.
+For each candidate, describe the synthesis pathway with exact temperatures, durations, and equipment.
 
 Return JSON with 'candidates' array:
 - 'name' (descriptive)
 - 'formula' (chemical formula)
-- 'predictedTc' (Kelvin)
-- 'pressureGpa' (required pressure)
-- 'meissnerEffect' (boolean)
-- 'zeroResistance' (boolean)
-- 'cooperPairMechanism' (description)
-- 'crystalStructure' (predicted)
-- 'quantumCoherence' (0-1)
-- 'roomTempViable' (boolean)
-- 'synthesisPath' (object with 'method', 'steps' array, 'precursors' array, 'conditions' object)
-- 'reasoning' (string under 200 chars explaining why this could work)`,
+- 'predictedTc' (Kelvin - be realistic based on known physics)
+- 'pressureGpa' (required pressure, 0 for ambient)
+- 'meissnerEffect' (boolean - predicted based on theory)
+- 'zeroResistance' (boolean - predicted based on Cooper pair mechanism)
+- 'cooperPairMechanism' (detailed description of how Cooper pairs would form)
+- 'crystalStructure' (predicted with space group if possible)
+- 'quantumCoherence' (0-1, realistic estimate)
+- 'roomTempViable' (boolean - ONLY true if Tc >= 293K AND zero resistance AND Meissner)
+- 'synthesisPath' (object with 'method', 'steps' array with exact temperatures/times, 'precursors' array, 'conditions' object)
+- 'reasoning' (string under 200 chars explaining the physics of why this could work)`,
         },
         {
           role: "user",
-          content: `Best candidates so far:\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}\n\nPropose novel room-temperature superconductor candidates that improve upon these.`,
+          content: `Best candidates so far:\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
         },
       ],
       response_format: { type: "json_object" },
@@ -174,6 +289,21 @@ Return JSON with 'candidates' array:
       const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const features = extractFeatures(c.formula);
 
+      const isActuallyRoomTemp = (c.predictedTc ?? 0) >= 293 &&
+        c.zeroResistance === true &&
+        c.meissnerEffect === true;
+
+      const status = determineStatus({
+        ...c,
+        ensembleScore: c.quantumCoherence ?? 0.5,
+        roomTempViable: isActuallyRoomTemp,
+      });
+
+      const verificationNotes = buildVerificationNotes({
+        ...c,
+        roomTempViable: isActuallyRoomTemp,
+      });
+
       try {
         await storage.insertSuperconductorCandidate({
           id,
@@ -192,9 +322,9 @@ Return JSON with 'candidates' array:
           xgboostScore: null,
           neuralNetScore: null,
           ensembleScore: c.quantumCoherence ?? 0.5,
-          roomTempViable: c.roomTempViable ?? false,
-          status: "novel-design",
-          notes: c.reasoning ?? null,
+          roomTempViable: isActuallyRoomTemp,
+          status,
+          notes: verificationNotes,
         });
         generated++;
 
@@ -204,8 +334,10 @@ Return JSON with 'candidates' array:
           name: c.name,
           formula: c.formula,
           predictedTc: c.predictedTc,
-          roomTempViable: c.roomTempViable,
+          roomTempViable: isActuallyRoomTemp,
           meissnerEffect: c.meissnerEffect,
+          zeroResistance: c.zeroResistance,
+          status,
           hasSynthesisPath: !!c.synthesisPath,
         });
       } catch (e: any) {
@@ -216,8 +348,8 @@ Return JSON with 'candidates' array:
     if (generated > 0) {
       emit("log", {
         phase: "phase-7",
-        event: "Novel superconductors designed",
-        detail: `${generated} new designs with synthesis pathways, targeting Tc >= 293K`,
+        event: "Novel superconductor designs proposed",
+        detail: `${generated} new theoretical designs with synthesis pathways - all require experimental verification before any claims`,
         dataSource: "SC Research",
       });
     }

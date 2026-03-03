@@ -22,7 +22,7 @@ export async function discoverSynthesisProcesses(
     dataSource: "Synthesis Engine",
   });
 
-  const batch = materials.slice(0, 8);
+  const batch = materials.slice(0, 4);
   const materialList = batch.map(m => `${m.name} (${m.formula})`).join(", ");
 
   try {
@@ -31,32 +31,51 @@ export async function discoverSynthesisProcesses(
       messages: [
         {
           role: "system",
-          content: `You are a materials synthesis expert. For each material, determine exactly how it is created in a laboratory. Think like a chemist: what raw materials (precursors) go in, what conditions (temperature, pressure, atmosphere, time) are needed, what equipment is used, what are the step-by-step synthesis instructions.
+          content: `You are a materials synthesis expert drawing from peer-reviewed literature (Journal of the American Chemical Society, Nature Materials, Acta Materialia, Journal of Materials Science) and established laboratory procedures.
 
-Consider all synthesis methods: solid-state reaction, sol-gel, chemical vapor deposition (CVD), hydrothermal, sputtering, molecular beam epitaxy, arc melting, ball milling, Czochralski growth, zone melting, electrodeposition, etc.
+For each material, determine EXACTLY how it is created in a real laboratory. Provide precise, quantitative details a lab technician could follow:
 
-For each material think about the fundamental chemistry: just as water is made by combining hydrogen and oxygen (2H2 + O2 -> 2H2O via combustion or electrolysis reversal), every material has a creation pathway from simpler building blocks.
+CRITICAL DETAILS TO INCLUDE:
+- EXACT temperatures in Celsius (not ranges - give specific values, e.g. "950C" not "high temperature")
+- EXACT heating durations (e.g. "hold at 950C for 12 hours" not "heat for a long time")
+- Heating rates (e.g. "ramp at 5C/min from room temperature to 950C")
+- Cooling rates (e.g. "furnace cool to room temperature over 6 hours" or "quench in liquid nitrogen")
+- Atmosphere (e.g. "flowing oxygen at 50 mL/min" or "argon with 5% hydrogen")
+- Pressure (e.g. "1 atm" or "200 MPa in hot isostatic press")
+- Intermediate grinding/mixing steps with specifics (e.g. "ball mill at 300 rpm for 4 hours with zirconia media")
+- Number of sintering cycles if applicable
+
+Consider all synthesis methods: solid-state reaction, sol-gel, chemical vapor deposition (CVD), hydrothermal, sputtering, molecular beam epitaxy (MBE), arc melting, ball milling, Czochralski growth, Bridgman method, zone melting, electrodeposition, co-precipitation, spray pyrolysis, pulsed laser deposition (PLD), etc.
 
 Return JSON with key 'processes' containing an array of objects:
 - 'materialName' (string)
 - 'formula' (string)
 - 'method' (primary synthesis method name)
-- 'conditions' (object with 'temperature' in Celsius, 'pressure' in atm, 'atmosphere' string, 'duration' string)
-- 'steps' (array of 3-6 step strings describing the process)
-- 'precursors' (array of starting material strings, e.g. "Y2O3", "BaCO3", "CuO")
+- 'conditions' (object with:
+    'temperature' (number in Celsius, the peak temperature),
+    'heatingRate' (string, e.g. "5C/min"),
+    'holdTime' (string, e.g. "12 hours at 950C"),
+    'coolingMethod' (string, e.g. "furnace cool over 8 hours"),
+    'pressure' (number in atm),
+    'atmosphere' (string, be specific),
+    'intermediateSteps' (string, e.g. "regrind after first sintering"),
+    'duration' (string, total process time)
+  )
+- 'steps' (array of 4-8 detailed step strings, each step should be specific enough to follow in a lab)
+- 'precursors' (array of starting material strings with purity, e.g. "Y2O3 (99.99% purity)")
 - 'equipment' (array of required equipment strings)
 - 'difficulty' ("easy"|"moderate"|"hard"|"extreme")
-- 'timeEstimate' (string like "24 hours", "3 days")
-- 'safetyNotes' (string, brief safety considerations)
-- 'yieldPercent' (number 0-100, typical yield)`,
+- 'timeEstimate' (string like "24 hours total including cooling")
+- 'safetyNotes' (string, specific hazards and precautions)
+- 'yieldPercent' (number 0-100, typical yield from literature)`,
         },
         {
           role: "user",
-          content: `Determine the complete synthesis process for each material: ${materialList}`,
+          content: `Determine the complete, detailed synthesis process for each material with exact temperatures, heating times, and conditions that a real lab could follow: ${materialList}`,
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 1500,
+      max_completion_tokens: 3500,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -66,7 +85,12 @@ Return JSON with key 'processes' containing an array of objects:
     try {
       parsed = JSON.parse(content);
     } catch {
-      emit("log", { phase: "phase-8", event: "Synthesis parse error", detail: content.slice(0, 200), dataSource: "Synthesis Engine" });
+      const truncatedResponse = content.length > 3000;
+      if (truncatedResponse) {
+        emit("log", { phase: "phase-8", event: "Synthesis response truncated", detail: `Response was ${content.length} chars - increasing detail may need more tokens. Retrying with fewer materials next cycle.`, dataSource: "Synthesis Engine" });
+      } else {
+        emit("log", { phase: "phase-8", event: "Synthesis parse error", detail: content.slice(0, 200), dataSource: "Synthesis Engine" });
+      }
       return 0;
     }
 
@@ -103,7 +127,7 @@ Return JSON with key 'processes' containing an array of objects:
       emit("log", {
         phase: "phase-8",
         event: "Synthesis processes discovered",
-        detail: `Mapped creation pathways for ${discovered} materials`,
+        detail: `Mapped ${discovered} detailed creation pathways with exact temperatures, durations, and conditions`,
         dataSource: "Synthesis Engine",
       });
       emit("progress", { phase: 8, newItems: discovered });
@@ -122,7 +146,7 @@ Return JSON with key 'processes' containing an array of objects:
 
 export async function discoverChemicalReactions(
   emit: EventEmitter,
-  focusArea: string = "superconductor synthesis"
+  focusArea: string = "general materials chemistry"
 ): Promise<number> {
   let discovered = 0;
 
@@ -139,40 +163,50 @@ export async function discoverChemicalReactions(
       messages: [
         {
           role: "system",
-          content: `You are a chemistry expert specializing in laboratory processes for advanced materials synthesis. Generate chemical reactions that are critical for creating superconducting materials and their precursors.
+          content: `You are a chemistry expert with deep knowledge from peer-reviewed sources (JACS, Angewandte Chemie, Chemical Reviews, Inorganic Chemistry). Generate chemical reactions that are fundamental to materials science and laboratory practice.
 
-Include reactions for:
-- Oxide formation (calcination, oxidation)
-- Reduction reactions (hydrogen reduction, carbothermic reduction)
-- High-pressure synthesis (diamond anvil cell reactions)
-- Hydride formation (hydrogenation under pressure)
-- Crystal growth reactions
-- Doping reactions (substitutional, interstitial)
-- Thin film deposition reactions (CVD precursor reactions)
-- Electrochemical reactions relevant to material processing
-- Solid-state reactions between precursor powders
+For each reaction provide PRECISE quantitative details:
+- Exact balanced equation with states (s, l, g, aq)
+- Specific temperature ranges from published literature
+- Exact thermodynamic values from NIST or CRC Handbook data
+- Mechanism at the atomic level: which bonds break (bond dissociation energy), which form, electron transfer details
+- Real laboratory procedure: what a chemist actually does step by step
 
-For each reaction, explain the exact mechanism: what bonds break, what bonds form, how electrons rearrange, what drives the reaction thermodynamically.
+Include reactions across ALL areas of materials chemistry, not just superconductors:
+- Oxide synthesis (calcination, oxidation, thermal decomposition)
+- Reduction reactions (hydrogen reduction, carbothermic, metallothermic)
+- Acid-base reactions in materials processing
+- Precipitation and co-precipitation for nanoparticles
+- Sol-gel hydrolysis and condensation
+- Combustion synthesis (self-propagating high-temperature)
+- Electrochemical reactions (electrodeposition, anodization)
+- Vapor-phase reactions (CVD, ALD precursor chemistry)
+- Solid-state diffusion reactions
+- High-pressure synthesis reactions
+- Polymerization reactions for polymer materials
+- Corrosion and oxidation reactions
+- Battery electrode reactions (charge/discharge chemistry)
 
 Return JSON with 'reactions' array of objects:
 - 'name' (descriptive name)
-- 'equation' (balanced chemical equation string)
-- 'reactionType' (e.g. "solid-state", "oxidation", "reduction", "hydrogenation", "decomposition", "precipitation", "CVD")
-- 'reactants' (array of objects with 'formula' and 'role' keys)
-- 'products' (array of objects with 'formula' and 'role' keys)
-- 'conditions' (object with 'temperature', 'pressure', 'atmosphere', 'catalyst' keys)
-- 'energetics' (object with 'deltaH' kJ/mol, 'deltaG' kJ/mol, 'activationEnergy' kJ/mol)
-- 'mechanism' (string explaining bond breaking/forming, 2-3 sentences)
-- 'relevanceToSuperconductor' (0-1 float, how relevant to room-temp superconductor discovery)
-- 'labProcess' (string describing the real lab procedure in 1-2 sentences)`,
+- 'equation' (balanced chemical equation with states, e.g. "2H2(g) + O2(g) -> 2H2O(l)")
+- 'reactionType' (e.g. "solid-state", "oxidation", "reduction", "hydrogenation", "decomposition", "precipitation", "CVD", "sol-gel", "combustion", "electrochemical")
+- 'reactants' (array of objects with 'formula', 'role', and 'state' keys)
+- 'products' (array of objects with 'formula', 'role', and 'state' keys)
+- 'conditions' (object with 'temperature' string with exact value and unit, 'pressure' string, 'atmosphere' string, 'catalyst' string or null, 'duration' string)
+- 'energetics' (object with 'deltaH' kJ/mol from published data, 'deltaG' kJ/mol, 'activationEnergy' kJ/mol)
+- 'mechanism' (string explaining bond breaking/forming at atomic level, 3-4 sentences)
+- 'relevanceToSuperconductor' (0-1 float)
+- 'labProcess' (string describing the real lab procedure in 2-3 sentences with specific details)
+- 'source' (string citing the type of source, e.g. "NIST Chemistry WebBook", "CRC Handbook", "Atkins Physical Chemistry")`,
         },
         {
           role: "user",
-          content: `Generate 4-6 chemical reactions critical for ${focusArea}. Focus on processes that could help create a room-temperature superconductor - including precursor synthesis, high-pressure reactions, and doping processes.`,
+          content: `Generate 5-7 important chemical reactions for the topic: ${focusArea}. Include exact thermodynamic values and detailed mechanisms. These should be real, well-documented reactions from established chemistry literature.`,
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 1500,
+      max_completion_tokens: 2000,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -205,7 +239,7 @@ Return JSON with 'reactions' array of objects:
           mechanism: rxn.mechanism || null,
           relevanceToSuperconductor: rxn.relevanceToSuperconductor ?? 0,
           labProcess: rxn.labProcess || null,
-          source: "AI Analysis",
+          source: rxn.source || "Chemistry Literature",
         });
         discovered++;
       } catch (e: any) {
@@ -217,7 +251,7 @@ Return JSON with 'reactions' array of objects:
       emit("log", {
         phase: "phase-9",
         event: "Chemical reactions catalogued",
-        detail: `Learned ${discovered} lab processes for ${focusArea}`,
+        detail: `Learned ${discovered} reactions with thermodynamic data for ${focusArea}`,
         dataSource: "Reaction Engine",
       });
       emit("progress", { phase: 9, newItems: discovered });
@@ -235,16 +269,26 @@ Return JSON with 'reactions' array of objects:
 }
 
 const REACTION_TOPICS = [
-  "superconductor synthesis",
-  "cuprate oxide formation",
-  "hydride compression under extreme pressure",
-  "thin film superconductor deposition",
-  "crystal growth for quantum materials",
-  "doping reactions for Tc enhancement",
-  "precursor powder preparation for YBCO",
-  "hydrogen loading into metal lattices",
-  "pnictide superconductor synthesis",
-  "topological material fabrication",
+  "fundamental oxide formation and thermal decomposition",
+  "metal reduction reactions in extractive metallurgy",
+  "sol-gel chemistry for ceramic nanoparticles",
+  "electrochemical reactions in lithium-ion batteries",
+  "combustion synthesis and self-propagating reactions",
+  "chemical vapor deposition precursor reactions",
+  "corrosion and passivation of structural metals",
+  "precipitation reactions for catalyst preparation",
+  "polymer synthesis and cross-linking reactions",
+  "superconductor precursor oxide formation",
+  "cuprate oxide formation for YBCO synthesis",
+  "hydride compression reactions under extreme pressure",
+  "thin film deposition chemistry (PLD, sputtering)",
+  "crystal growth reactions from solution and melt",
+  "doping reactions for semiconductor modification",
+  "high-temperature solid-state sintering reactions",
+  "acid-base reactions in materials processing",
+  "photocatalytic reactions on semiconductor surfaces",
+  "hydrogen evolution and oxygen evolution reactions",
+  "atomic layer deposition half-reactions",
 ];
 let topicIndex = 0;
 
