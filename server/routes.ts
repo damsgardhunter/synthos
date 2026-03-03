@@ -27,7 +27,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/materials", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const offset = Number(req.query.offset) || 0;
       const mats = await storage.getMaterials(limit, offset);
       const total = await storage.getMaterialCount();
@@ -67,7 +67,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/research-logs", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 100, 500);
       const logs = await storage.getResearchLogs(limit);
       res.json(logs);
     } catch (e) {
@@ -142,7 +142,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/superconductor-candidates", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const candidates = await storage.getSuperconductorCandidates(limit);
       const total = await storage.getSuperconductorCount();
       res.json({ candidates, total });
@@ -153,7 +153,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/synthesis-processes", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const processes = await storage.getSynthesisProcesses(limit);
       const total = await storage.getSynthesisCount();
       res.json({ processes, total });
@@ -164,7 +164,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/chemical-reactions", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const reactions = await storage.getChemicalReactions(limit);
       const total = await storage.getReactionCount();
       res.json({ reactions, total });
@@ -175,7 +175,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/crystal-structures", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const structures = await storage.getCrystalStructures(limit);
       const total = await storage.getCrystalStructureCount();
       res.json({ structures, total });
@@ -186,7 +186,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/computational-results", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const stage = req.query.stage ? Number(req.query.stage) : undefined;
       let results;
       if (stage !== undefined) {
@@ -203,7 +203,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/computational-results/failed", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const results = await storage.getFailedComputationalResults(limit);
       res.json({ results });
     } catch (e) {
@@ -226,7 +226,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/novel-insights", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const novelOnly = req.query.novelOnly === "true";
       const insights = novelOnly
         ? await storage.getNovelInsightsOnly(limit)

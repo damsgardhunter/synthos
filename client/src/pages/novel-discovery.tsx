@@ -1,4 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { queryClient } from "@/lib/queryClient";
+import { useWebSocket } from "@/hooks/use-websocket";
 import type { NovelPrediction } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -92,6 +95,16 @@ export default function NovelDiscovery() {
   const { data: predictions, isLoading } = useQuery<NovelPrediction[]>({
     queryKey: ["/api/novel-predictions"],
   });
+
+  const ws = useWebSocket();
+
+  useEffect(() => {
+    const relevantTypes = ["phaseUpdate", "progress", "prediction", "cycleEnd", "log"];
+    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
+    if (hasRelevant) {
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
+    }
+  }, [ws.messages.length]);
 
   const synthesized = predictions?.filter(p => p.status === "synthesized") ?? [];
   const underReview = predictions?.filter(p => p.status === "under_review") ?? [];
