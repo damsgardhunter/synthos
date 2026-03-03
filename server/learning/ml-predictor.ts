@@ -437,6 +437,19 @@ export async function runMLPrediction(
     }
     xgb.score = Math.min(1, xgb.score);
 
+    let tcKnowledgeBonus = 0;
+    if (depth) {
+      if (depth.hasSynthesis) tcKnowledgeBonus += 3;
+      if (depth.hasCrystal) tcKnowledgeBonus += 3;
+      if (depth.pipelineStagesPassed > 0) tcKnowledgeBonus += Math.min(8, depth.pipelineStagesPassed * 2);
+      if (depth.hasRelatedInsights) tcKnowledgeBonus += 2;
+      tcKnowledgeBonus = Math.min(15, tcKnowledgeBonus);
+    }
+    if (tcKnowledgeBonus > 0) {
+      xgb.tcEstimate += tcKnowledgeBonus;
+      xgb.reasoning.push(`Tc adjusted +${tcKnowledgeBonus}K from accumulated evidence`);
+    }
+
     scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });
   }
 

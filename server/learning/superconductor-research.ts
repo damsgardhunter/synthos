@@ -175,16 +175,23 @@ export async function runSuperconductorResearch(
 
     const existing = await storage.getSuperconductorByFormula(formula);
     if (existing) {
-      if (newScore > (existing.ensembleScore ?? 0)) {
-        await storage.updateSuperconductorCandidate(existing.id, {
-          predictedTc: candidate.predictedTc ?? existing.predictedTc,
-          ensembleScore: newScore,
+      const newTc = candidate.predictedTc ?? existing.predictedTc;
+      const existingTc = existing.predictedTc ?? 0;
+      const tcImproved = (newTc ?? 0) > existingTc;
+      if (newScore > (existing.ensembleScore ?? 0) || tcImproved) {
+        const updates: any = {
+          ensembleScore: Math.max(newScore, existing.ensembleScore ?? 0),
           xgboostScore: candidate.xgboostScore ?? existing.xgboostScore,
           neuralNetScore: candidate.neuralNetScore ?? existing.neuralNetScore,
           mlFeatures: candidate.mlFeatures ?? existing.mlFeatures,
           notes: buildVerificationNotes(candidate),
-        });
-        emit("log", { phase: "phase-7", event: "SC candidate upgraded", detail: `${formula}: score ${(existing.ensembleScore ?? 0).toFixed(3)} -> ${newScore.toFixed(3)}`, dataSource: "SC Research" });
+        };
+        if ((newTc ?? 0) > existingTc) {
+          updates.predictedTc = newTc;
+        }
+        await storage.updateSuperconductorCandidate(existing.id, updates);
+        const tcDetail = tcImproved ? `, Tc ${existingTc}K -> ${newTc}K` : "";
+        emit("log", { phase: "phase-7", event: "SC candidate upgraded", detail: `${formula}: score ${(existing.ensembleScore ?? 0).toFixed(3)} -> ${Math.max(newScore, existing.ensembleScore ?? 0).toFixed(3)}${tcDetail}`, dataSource: "SC Research" });
       } else {
         duplicatesSkipped++;
       }

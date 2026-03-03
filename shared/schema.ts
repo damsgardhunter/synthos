@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -102,7 +102,7 @@ export const chemicalReactions = pgTable("chemical_reactions", {
 export const superconductorCandidates = pgTable("superconductor_candidates", {
   id: varchar("id").primaryKey(),
   name: text("name").notNull(),
-  formula: text("formula").notNull(),
+  formula: text("formula").notNull().unique(),
   predictedTc: real("predicted_tc"),
   pressureGpa: real("pressure_gpa"),
   meissnerEffect: boolean("meissner_effect").default(false),

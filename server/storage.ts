@@ -49,10 +49,11 @@ export interface IStorage {
   getReactionCount(): Promise<number>;
 
   getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
+  getSuperconductorCandidatesByTc(limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   getSuperconductorCount(): Promise<number>;
-  getSuperconductorsByStage(stage: number): Promise<SuperconductorCandidate[]>;
+  getSuperconductorsByStage(stage: number, limit?: number): Promise<SuperconductorCandidate[]>;
 
   getCrystalStructures(limit?: number): Promise<CrystalStructure[]>;
   insertCrystalStructure(cs: InsertCrystalStructure): Promise<CrystalStructure>;
@@ -80,6 +81,7 @@ export interface IStorage {
   getStrategyHistory(limit?: number): Promise<ResearchStrategy[]>;
 
   insertConvergenceSnapshot(snapshot: InsertConvergenceSnapshot): Promise<ConvergenceSnapshot>;
+  deleteConvergenceSnapshotByCycle(cycle: number): Promise<void>;
   getConvergenceSnapshots(limit?: number): Promise<ConvergenceSnapshot[]>;
 
   insertMilestone(milestone: InsertMilestone): Promise<Milestone>;
@@ -215,8 +217,24 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.ensembleScore)).limit(limit);
   }
 
+  async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
+    return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.predictedTc)).limit(limit);
+  }
+
   async insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate> {
-    const [s] = await db.insert(superconductorCandidates).values(sc).onConflictDoNothing().returning();
+    const [s] = await db.insert(superconductorCandidates).values(sc)
+      .onConflictDoUpdate({
+        target: superconductorCandidates.formula,
+        set: {
+          ensembleScore: sql`GREATEST(${superconductorCandidates.ensembleScore}, EXCLUDED.ensemble_score)`,
+          xgboostScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.xgboost_score ELSE ${superconductorCandidates.xgboostScore} END`,
+          neuralNetScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.neural_net_score ELSE ${superconductorCandidates.neuralNetScore} END`,
+          predictedTc: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.predicted_tc ELSE ${superconductorCandidates.predictedTc} END`,
+          mlFeatures: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.ml_features ELSE ${superconductorCandidates.mlFeatures} END`,
+          notes: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.notes ELSE ${superconductorCandidates.notes} END`,
+        },
+      })
+      .returning();
     return s;
   }
 
@@ -229,10 +247,11 @@ export class DatabaseStorage implements IStorage {
     return Number(count);
   }
 
-  async getSuperconductorsByStage(stage: number): Promise<SuperconductorCandidate[]> {
+  async getSuperconductorsByStage(stage: number, limit = 100): Promise<SuperconductorCandidate[]> {
     return db.select().from(superconductorCandidates)
       .where(eq(superconductorCandidates.verificationStage, stage))
-      .orderBy(desc(superconductorCandidates.ensembleScore));
+      .orderBy(desc(superconductorCandidates.ensembleScore))
+      .limit(limit);
   }
 
   async getCrystalStructures(limit = 50): Promise<CrystalStructure[]> {
@@ -336,6 +355,10 @@ export class DatabaseStorage implements IStorage {
     return s;
   }
 
+  async deleteConvergenceSnapshotByCycle(cycle: number): Promise<void> {
+    await db.delete(convergenceSnapshots).where(eq(convergenceSnapshots.cycle, cycle));
+  }
+
   async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
     return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
   }
@@ -429,6 +452,18 @@ export class DatabaseStorage implements IStorage {
       computationalResults: Number(crCount.count),
       pipelineStages,
     };
+  }
+
+  async deduplicateSuperconductorCandidates(): Promise<number> {
+    const result = await db.execute(sql`
+      DELETE FROM superconductor_candidates
+      WHERE id NOT IN (
+        SELECT DISTINCT ON (formula) id
+        FROM superconductor_candidates
+        ORDER BY formula, COALESCE(ensemble_score, 0) DESC, generated_at DESC
+      )
+    `);
+    return Number((result as any).rowCount ?? 0);
   }
 }
 

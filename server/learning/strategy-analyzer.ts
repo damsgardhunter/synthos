@@ -207,37 +207,51 @@ export async function captureConvergenceSnapshot(
   strategyFocus?: string
 ): Promise<void> {
   try {
-    const topCandidates = await storage.getSuperconductorCandidates(10);
+    const topCandidates = await storage.getSuperconductorCandidates(50);
+    const topByTc = await storage.getSuperconductorCandidatesByTc(10);
     const totalCount = await storage.getSuperconductorCount();
     const insightCount = await storage.getNovelInsightCount();
+
+    const seenFormulas = new Set<string>();
+    const merged = [...topCandidates, ...topByTc];
+    const uniqueCandidates = merged.filter(c => {
+      if (seenFormulas.has(c.formula)) return false;
+      seenFormulas.add(c.formula);
+      return true;
+    });
 
     let bestTc = 0;
     let bestScore = 0;
     let topFormula = "";
     let scoreSum = 0;
+    const topByScore10 = uniqueCandidates
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
+      .slice(0, 10);
 
-    for (const c of topCandidates) {
+    for (const c of uniqueCandidates) {
       const tc = c.predictedTc ?? 0;
-      const score = c.ensembleScore ?? 0;
-      if (tc > bestTc) bestTc = tc;
-      if (score > bestScore) {
-        bestScore = score;
+      if (tc > bestTc) {
+        bestTc = tc;
         topFormula = c.formula;
       }
-      scoreSum += score;
+    }
+    for (const c of topByScore10) {
+      const score = c.ensembleScore ?? 0;
+      if (score > bestScore) bestScore = Math.min(score, 1);
+      scoreSum += Math.min(score, 1);
     }
 
-    const avgTopScore = topCandidates.length > 0 ? scoreSum / topCandidates.length : 0;
+    const avgTopScore = topByScore10.length > 0 ? scoreSum / topByScore10.length : 0;
 
     const stats = await storage.getStats();
     const totalPipelineResults = stats.pipelineStages.reduce((s, p) => s + p.count, 0);
     const totalPipelinePassed = stats.pipelineStages.reduce((s, p) => s + p.passed, 0);
     const pipelinePassRate = totalPipelineResults > 0 ? totalPipelinePassed / totalPipelineResults : 0;
 
-    const top50 = await storage.getSuperconductorCandidates(50);
-    const families = new Set(top50.map(c => classifyFamily(c.formula)));
+    const families = new Set(uniqueCandidates.map(c => classifyFamily(c.formula)));
     const familyDiversity = families.size;
 
+    await storage.deleteConvergenceSnapshotByCycle(cycleNumber);
     const snapshotId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     await storage.insertConvergenceSnapshot({
       id: snapshotId,

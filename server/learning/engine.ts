@@ -345,15 +345,26 @@ async function runPhase10_Physics() {
     await updatePhaseStatus(10, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const candidates = await storage.getSuperconductorCandidates(50);
-    const unanalyzed = candidates.filter(c => !c.verificationStage || c.verificationStage === 0);
-    const toAnalyze = shuffle(unanalyzed).slice(0, 2);
+    const stage0 = await storage.getSuperconductorsByStage(0);
+    const toAnalyze = shuffle(stage0).slice(0, 5);
 
     for (const candidate of toAnalyze) {
       if (!shouldContinue()) return;
       try {
         const result = await runFullPhysicsAnalysis(emit, candidate);
         totalPhysicsComputed++;
+
+        const rawPhysicsTc = result.eliashberg.predictedTc;
+        const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
+        const currentTc = candidate.predictedTc ?? 0;
+        let updatedTc = currentTc;
+        if (physicsTc > 0) {
+          if (physicsTc > currentTc) {
+            updatedTc = Math.round(Math.min(physicsTc, currentTc + 50));
+          } else if (physicsTc > currentTc * 0.3) {
+            updatedTc = Math.round(currentTc * 0.6 + physicsTc * 0.4);
+          }
+        }
 
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
@@ -370,8 +381,13 @@ async function runPhase10_Physics() {
           criticalCurrentDensity: result.criticalFields.criticalCurrentDensity,
           uncertaintyEstimate: result.uncertaintyEstimate,
           pairingMechanism: result.correlation.ratio > 0.6 ? "unconventional" : "phonon-mediated",
+          predictedTc: updatedTc,
           verificationStage: 1,
         });
+
+        if (updatedTc !== currentTc) {
+          emit("log", { phase: "phase-10", event: "Tc updated by physics", detail: `${candidate.formula}: ML estimate ${currentTc}K -> Eliashberg ${updatedTc}K`, dataSource: "Physics Engine" });
+        }
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
@@ -434,10 +450,10 @@ async function runPhase12_MultiFidelity() {
     await updatePhaseStatus(12, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const candidates = await storage.getSuperconductorCandidates(50);
-    const unscreened = shuffle(candidates.filter(c =>
-      (c.verificationStage ?? 0) <= 1 && (c.ensembleScore ?? 0) > 0.25
-    )).slice(0, 4);
+    const stage0 = await storage.getSuperconductorsByStage(0, 50);
+    const stage1 = await storage.getSuperconductorsByStage(1, 50);
+    const eligible = [...stage0, ...stage1].filter(c => (c.ensembleScore ?? 0) > 0.25);
+    const unscreened = shuffle(eligible).slice(0, 6);
 
     if (unscreened.length > 0) {
       const results = await runMultiFidelityPipeline(emit, unscreened);
