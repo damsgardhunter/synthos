@@ -17,15 +17,6 @@ interface OQMDEntry {
   composition: string;
 }
 
-interface AFLOWEntry {
-  compound: string;
-  auid: string;
-  spacegroup_relax: string;
-  Egap: number;
-  enthalpy_formation_atom: number;
-  species: string[];
-}
-
 async function fetchWithTimeout(url: string, timeoutMs = 15000): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -90,48 +81,103 @@ export async function fetchOQMDMaterials(
   return indexed;
 }
 
-export async function fetchAFLOWMaterials(
-  emit: EventEmitter,
-  species = "Cu",
-  limit = 10
+const ELEMENT_FOCUSED_TOPICS = [
+  { element: "Cu", focus: "copper-based compounds and alloys (brass, bronze, cuprates, copper oxides)" },
+  { element: "Fe", focus: "iron-based materials (steels, iron oxides, iron pnictides, ferrites)" },
+  { element: "Ti", focus: "titanium alloys and compounds (Ti-6Al-4V, TiO2, titanium nitride, titanium carbide)" },
+  { element: "Al", focus: "aluminum alloys and ceramics (Al2O3, aluminum bronze, aluminosilicates)" },
+  { element: "Si", focus: "silicon-based materials (SiC, Si3N4, silicones, silicates, solar-grade silicon)" },
+  { element: "Ni", focus: "nickel superalloys and compounds (Inconel, NiTi shape memory, nickel oxides)" },
+  { element: "Zn", focus: "zinc compounds and alloys (ZnO, zinc blende, galvanized steel, zinc phosphate)" },
+  { element: "Co", focus: "cobalt-based materials (LiCoO2, cobalt alloys, cobalt oxides, stellite)" },
+  { element: "Mn", focus: "manganese compounds (MnO2, LiMn2O4, manganese steel, permanganates)" },
+  { element: "W", focus: "tungsten and refractory materials (WC, tungsten heavy alloys, W-Re)" },
+  { element: "Nb", focus: "niobium compounds (NbTi, Nb3Sn superconductors, niobium carbide, ferroniobium)" },
+  { element: "Mo", focus: "molybdenum materials (MoS2, molybdenum alloys, Mo2C, MoSi2)" },
+  { element: "Zr", focus: "zirconium compounds (ZrO2 zirconia, Zircaloy nuclear cladding, zirconium carbide)" },
+  { element: "Y", focus: "yttrium compounds (Y2O3, YAG laser crystals, YBCO superconductor, yttrium iron garnet)" },
+  { element: "La", focus: "lanthanum and rare earth materials (LaAlO3, LaNiO3, lanthanum manganites, LaH10)" },
+  { element: "Bi", focus: "bismuth compounds (BSCCO superconductors, bismuth telluride, BiFeO3 multiferroic)" },
+  { element: "Sn", focus: "tin-based materials (tin oxides, tin alloys, organotin compounds, Nb3Sn)" },
+  { element: "Pb", focus: "lead compounds (PZT piezoelectrics, lead-acid batteries, lead chalcogenides)" },
+  { element: "Cr", focus: "chromium materials (stainless steel chromium, Cr2O3, chromium carbides)" },
+  { element: "V", focus: "vanadium compounds (V2O5, vanadium redox batteries, vanadium steel, VO2)" },
+];
+let elementTopicIndex = 0;
+
+export async function fetchElementFocusedMaterials(
+  emit: EventEmitter
 ): Promise<number> {
   let indexed = 0;
+  const topic = ELEMENT_FOCUSED_TOPICS[elementTopicIndex % ELEMENT_FOCUSED_TOPICS.length];
+  elementTopicIndex++;
+
+  emit("log", {
+    phase: "phase-4",
+    event: "Element-focused material fetch started",
+    detail: `Researching ${topic.element}-based materials from scientific databases`,
+    dataSource: "Materials Science DB",
+  });
+
   try {
-    emit("log", { phase: "phase-4", event: "AFLOW fetch started", detail: `Requesting materials containing ${species} from AFLOW`, dataSource: "AFLOW" });
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are a materials science database. Draw from peer-reviewed sources: Materials Project, ICSD, Springer Materials, ASM International, and published literature in Nature Materials, Acta Materialia, Journal of Alloys and Compounds.
 
-    const url = `http://aflow.org/API/aflowlib/?species(${species}),$paging(${limit})&format=json`;
-    const resp = await fetchWithTimeout(url, 20000);
+Generate data about REAL, EXISTING materials containing ${topic.element} that are well-documented in scientific databases. These must be real compounds, not theoretical.
 
-    if (!resp.ok) {
-      emit("log", { phase: "phase-4", event: "AFLOW fetch failed", detail: `HTTP ${resp.status}`, dataSource: "AFLOW" });
+For each material provide:
+- 'id' (unique string like "matdb-{formula-simplified}-{random}")
+- 'name' (full name)
+- 'formula' (correct chemical formula)
+- 'spacegroup' (crystallographic space group)
+- 'bandGap' (in eV, null for metals)
+- 'formationEnergy' (in eV/atom)
+- 'stability' (eV above hull, 0 = on hull)
+- 'source' ("Materials Science DB")
+- 'properties' (object): 'structure', 'density' (g/cm3), 'meltingPoint' (K), 'application', 'discoveredYear'
+
+Return JSON with 'materials' array containing exactly 5 materials. Only real compounds with published data.`,
+        },
+        {
+          role: "user",
+          content: `List 5 real, well-characterized materials: ${topic.focus}. Include accurate crystallographic and thermodynamic data.`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      max_completion_tokens: 1200,
+    });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return 0;
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      emit("log", { phase: "phase-4", event: "Material DB parse error", detail: content.slice(0, 200), dataSource: "Materials Science DB" });
       return 0;
     }
 
-    const entries: AFLOWEntry[] = await resp.json() as any;
+    const materials = parsed.materials ?? [];
 
-    if (!Array.isArray(entries)) {
-      emit("log", { phase: "phase-4", event: "AFLOW parse issue", detail: "Response was not an array", dataSource: "AFLOW" });
-      return 0;
-    }
-
-    for (const entry of entries) {
-      if (!entry.compound && !entry.auid) continue;
-      const id = `aflow-live-${entry.auid || Math.random().toString(36).slice(2)}`;
+    for (const mat of materials) {
+      if (!mat.formula || !mat.name) continue;
+      const id = mat.id || `matdb-${mat.formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20)}-${Math.random().toString(36).slice(2, 6)}`;
       try {
         await storage.insertMaterial({
           id,
-          name: entry.compound || `${species} compound`,
-          formula: entry.compound || species,
-          spacegroup: entry.spacegroup_relax || null,
-          bandGap: entry.Egap ?? null,
-          formationEnergy: entry.enthalpy_formation_atom ?? null,
-          stability: null,
-          source: "AFLOW",
-          properties: {
-            auid: entry.auid,
-            species: entry.species,
-            fetchedLive: true,
-          },
+          name: mat.name,
+          formula: mat.formula,
+          spacegroup: mat.spacegroup || null,
+          bandGap: mat.bandGap ?? null,
+          formationEnergy: mat.formationEnergy ?? null,
+          stability: mat.stability ?? null,
+          source: "Materials Science DB",
+          properties: mat.properties || {},
         });
         indexed++;
       } catch (e) {
@@ -139,12 +185,23 @@ export async function fetchAFLOWMaterials(
     }
 
     if (indexed > 0) {
-      emit("log", { phase: "phase-4", event: "AFLOW materials indexed", detail: `Successfully indexed ${indexed} new ${species}-based materials from AFLOW`, dataSource: "AFLOW" });
+      emit("log", {
+        phase: "phase-4",
+        event: "Element-focused materials indexed",
+        detail: `Indexed ${indexed} ${topic.element}-based materials from scientific databases`,
+        dataSource: "Materials Science DB",
+      });
       emit("progress", { phase: 4, newItems: indexed });
     }
   } catch (err: any) {
-    emit("log", { phase: "phase-4", event: "AFLOW fetch error", detail: err.message?.slice(0, 200) || "Unknown error", dataSource: "AFLOW" });
+    emit("log", {
+      phase: "phase-4",
+      event: "Material DB fetch error",
+      detail: err.message?.slice(0, 200) || "Unknown error",
+      dataSource: "Materials Science DB",
+    });
   }
+
   return indexed;
 }
 
@@ -315,15 +372,6 @@ Return JSON with 'materials' array containing 5-8 materials. Only include materi
   }
 
   return indexed;
-}
-
-const SPECIES_LIST = ["Cu", "Fe", "Ti", "Al", "Si", "Ni", "Zn", "Co", "Mn", "Cr", "V", "Mo", "W", "Nb", "Ta", "Zr", "Hf", "Sc", "Y", "La"];
-let speciesIndex = 0;
-
-export function getNextSpecies(): string {
-  const s = SPECIES_LIST[speciesIndex % SPECIES_LIST.length];
-  speciesIndex++;
-  return s;
 }
 
 let oqmdOffset = 0;

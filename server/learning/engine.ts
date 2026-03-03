@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { storage } from "../storage";
-import { fetchOQMDMaterials, fetchAFLOWMaterials, fetchKnownMaterials, getNextSpecies, getNextOQMDOffset } from "./data-fetcher";
+import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
 import { generateNovelFormulas } from "./formula-generator";
 import { runSuperconductorResearch } from "./superconductor-research";
@@ -119,8 +119,10 @@ async function runPhase3_Bonding() {
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(3, insights);
-    const progress = Math.min(100, 30 + cycleCount * 10);
-    await updatePhaseStatus(3, progress >= 100 ? "completed" : "active", progress, insights.length);
+    const phase3 = await storage.getLearningPhaseById(3);
+    const totalBondingInsights = (phase3?.insights ?? []).length;
+    const progress = Math.min(99, Math.floor((totalBondingInsights / 50) * 100));
+    await updatePhaseStatus(3, "active", progress, totalBondingInsights);
   } finally {
     activeTasks.delete("Bonding Analysis");
     broadcast("taskEnd", { task: "Bonding Analysis" });
@@ -134,18 +136,18 @@ async function runPhase4_Materials() {
   try {
     await updatePhaseStatus(4, "active", 0, 0);
 
-    const [oqmdCount, aflowCount, knownCount] = await Promise.all([
+    const [oqmdCount, elementCount, knownCount] = await Promise.all([
       fetchOQMDMaterials(emit, 10, getNextOQMDOffset()),
-      fetchAFLOWMaterials(emit, getNextSpecies(), 5),
+      fetchElementFocusedMaterials(emit),
       fetchKnownMaterials(emit),
     ]);
 
-    const total = oqmdCount + aflowCount + knownCount;
+    const total = oqmdCount + elementCount + knownCount;
     totalMaterialsFetched += total;
 
     const matCount = await storage.getMaterialCount();
-    const progress = Math.min(100, Math.floor((matCount / 200) * 100));
-    await updatePhaseStatus(4, progress >= 100 ? "completed" : "active", progress, matCount);
+    const progress = Math.min(99, Math.floor((matCount / 500) * 100));
+    await updatePhaseStatus(4, "active", progress, matCount);
   } finally {
     activeTasks.delete("Data Fetching");
     broadcast("taskEnd", { task: "Data Fetching" });
@@ -167,8 +169,10 @@ async function runPhase5_Prediction() {
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(5, insights);
-    const progress = Math.min(100, 20 + cycleCount * 12);
-    await updatePhaseStatus(5, progress >= 100 ? "completed" : "active", progress, insights.length);
+    const phase5 = await storage.getLearningPhaseById(5);
+    const totalPredInsights = (phase5?.insights ?? []).length;
+    const progress = Math.min(99, Math.floor((totalPredInsights / 50) * 100));
+    await updatePhaseStatus(5, "active", progress, totalPredInsights);
   } finally {
     activeTasks.delete("Property Prediction");
     broadcast("taskEnd", { task: "Property Prediction" });
@@ -187,8 +191,8 @@ async function runPhase6_Discovery() {
     totalPredictionsMade += generated;
 
     const predCount = (await storage.getNovelPredictions()).length;
-    const progress = Math.min(100, Math.floor((predCount / 30) * 100));
-    await updatePhaseStatus(6, progress >= 100 ? "completed" : "active", progress, predCount);
+    const progress = Math.min(99, Math.floor((predCount / 200) * 100));
+    await updatePhaseStatus(6, "active", progress, predCount);
   } finally {
     activeTasks.delete("Novel Discovery");
     broadcast("taskEnd", { task: "Novel Discovery" });
@@ -210,8 +214,8 @@ async function runPhase7_Superconductor() {
 
     await addInsightsToPhase(7, result.insights);
     const scCount = await storage.getSuperconductorCount();
-    const progress = Math.min(100, Math.floor((scCount / 50) * 100));
-    await updatePhaseStatus(7, progress >= 100 ? "completed" : "active", progress, scCount);
+    const progress = Math.min(99, Math.floor((scCount / 500) * 100));
+    await updatePhaseStatus(7, "active", progress, scCount);
   } finally {
     activeTasks.delete("SC Research");
     broadcast("taskEnd", { task: "SC Research" });
@@ -231,8 +235,8 @@ async function runPhase8_Synthesis() {
     totalSynthesisDiscovered += discovered;
 
     const synthCount = await storage.getSynthesisCount();
-    const progress = Math.min(100, Math.floor((synthCount / 100) * 100));
-    await updatePhaseStatus(8, progress >= 100 ? "completed" : "active", progress, synthCount);
+    const progress = Math.min(99, Math.floor((synthCount / 300) * 100));
+    await updatePhaseStatus(8, "active", progress, synthCount);
   } finally {
     activeTasks.delete("Synthesis Mapping");
     broadcast("taskEnd", { task: "Synthesis Mapping" });
@@ -252,8 +256,8 @@ async function runPhase9_Reactions() {
     totalReactionsLearned += discovered;
 
     const rxnCount = await storage.getReactionCount();
-    const progress = Math.min(100, Math.floor((rxnCount / 80) * 100));
-    await updatePhaseStatus(9, progress >= 100 ? "completed" : "active", progress, rxnCount);
+    const progress = Math.min(99, Math.floor((rxnCount / 300) * 100));
+    await updatePhaseStatus(9, "active", progress, rxnCount);
   } finally {
     activeTasks.delete("Reaction Discovery");
     broadcast("taskEnd", { task: "Reaction Discovery" });

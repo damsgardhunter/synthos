@@ -206,7 +206,7 @@ Return JSON with 'reactions' array of objects:
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 2000,
+      max_completion_tokens: 3500,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -216,7 +216,12 @@ Return JSON with 'reactions' array of objects:
     try {
       parsed = JSON.parse(content);
     } catch {
-      emit("log", { phase: "phase-9", event: "Reaction parse error", detail: content.slice(0, 200), dataSource: "Reaction Engine" });
+      const truncated = content.length > 3000;
+      if (truncated) {
+        emit("log", { phase: "phase-9", event: "Reaction response truncated", detail: `Response was ${content.length} chars - may need reduced detail per reaction`, dataSource: "Reaction Engine" });
+      } else {
+        emit("log", { phase: "phase-9", event: "Reaction parse error", detail: content.slice(0, 200), dataSource: "Reaction Engine" });
+      }
       return 0;
     }
 
