@@ -190,24 +190,28 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
     reasoning.push("Balanced electronegativity: optimal charge transfer between sublattices");
   }
 
-  if (features.correlationStrength > 0.6) {
+  const safeCorr = Number.isFinite(features.correlationStrength) ? features.correlationStrength : 0;
+  const safeDim = Number.isFinite(features.dimensionalityScore) ? features.dimensionalityScore : 0;
+  const safeLambda = Number.isFinite(features.electronPhononLambda) ? features.electronPhononLambda : 0;
+
+  if (safeCorr > 0.6) {
     score += 0.08;
-    reasoning.push(`Strong electron correlations (U/W=${features.correlationStrength.toFixed(2)}): unconventional pairing channel`);
+    reasoning.push(`Strong electron correlations (U/W=${safeCorr.toFixed(2)}): unconventional pairing channel`);
   }
-  if (features.dimensionalityScore > 0.6) {
+  if (safeDim > 0.6) {
     score += 0.06;
-    reasoning.push(`Favorable dimensionality (${features.dimensionalityScore.toFixed(1)}): 2D confinement enhances pairing`);
+    reasoning.push(`Favorable dimensionality (${safeDim.toFixed(1)}): 2D confinement enhances pairing`);
   }
   if (features.anharmonicityFlag) {
     score += 0.04;
     reasoning.push("Significant anharmonicity: may enhance e-ph coupling beyond harmonic approximation");
   }
-  if (features.electronPhononLambda > 1.0) {
+  if (safeLambda > 1.0) {
     score += 0.1;
-    reasoning.push(`Strong e-ph coupling (lambda=${features.electronPhononLambda.toFixed(2)}): Eliashberg strong-coupling regime`);
-  } else if (features.electronPhononLambda > 0.5) {
+    reasoning.push(`Strong e-ph coupling (lambda=${safeLambda.toFixed(2)}): Eliashberg strong-coupling regime`);
+  } else if (safeLambda > 0.5) {
     score += 0.05;
-    reasoning.push(`Moderate e-ph coupling (lambda=${features.electronPhononLambda.toFixed(2)}): BCS regime`);
+    reasoning.push(`Moderate e-ph coupling (lambda=${safeLambda.toFixed(2)}): BCS regime`);
   }
   if (features.fermiSurfaceType.includes("nested") || features.fermiSurfaceType.includes("multi-sheet")) {
     score += 0.06;
@@ -217,12 +221,15 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   score = Math.min(1, score);
 
   let tcEstimate = 0;
-  if (features.electronPhononLambda > 1.5 && features.hasHydrogen) {
-    const omega_log_K = features.logPhononFreq * 1.44;
+  if (safeLambda > 1.5 && features.hasHydrogen) {
+    const omega_log_K = (Number.isFinite(features.logPhononFreq) ? features.logPhononFreq : 500) * 1.44;
     const muStar = 0.12;
-    const exponent = -1.04 * (1 + features.electronPhononLambda) / (features.electronPhononLambda - muStar * (1 + 0.62 * features.electronPhononLambda));
-    tcEstimate = (omega_log_K / 1.2) * Math.exp(exponent);
-    if (tcEstimate < 50) tcEstimate = 50 + score * 200;
+    const denom = safeLambda - muStar * (1 + 0.62 * safeLambda);
+    if (Math.abs(denom) > 1e-6) {
+      const exponent = -1.04 * (1 + safeLambda) / denom;
+      tcEstimate = (omega_log_K / 1.2) * Math.exp(exponent);
+    }
+    if (!Number.isFinite(tcEstimate) || tcEstimate < 50) tcEstimate = 50 + score * 200;
   } else if (features.hasHydrogen && features.cooperPairStrength > 0.4) {
     tcEstimate = 150 + score * 200;
   } else if (features.dWaveSymmetry) {

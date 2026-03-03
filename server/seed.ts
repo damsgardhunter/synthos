@@ -73,8 +73,8 @@ const LEARNING_PHASES = [
     description: "Analyzing ionic, covalent, metallic, and van der Waals bonds, VSEPR theory, and molecular geometry.",
     status: "active",
     progress: 78,
-    itemsLearned: 3420,
-    totalItems: 4380,
+    itemsLearned: 39,
+    totalItems: 50,
     insights: [
       "Hybridization (sp, sp², sp³) determines molecular geometry and properties",
       "Hydrogen bonding creates anomalous properties in water and biological molecules",
@@ -88,8 +88,8 @@ const LEARNING_PHASES = [
     description: "Indexing all known materials from NIST, Materials Project, OQMD, and AFLOW databases with full property characterization.",
     status: "active",
     progress: 42,
-    itemsLearned: 84320,
-    totalItems: 200000,
+    itemsLearned: 210,
+    totalItems: 500,
     insights: [
       "BCC and FCC crystal structures exhibit different slip systems and mechanical properties",
       "Perovskite structures (ABO₃) host remarkable ferroelectric and superconducting properties",
@@ -103,8 +103,8 @@ const LEARNING_PHASES = [
     description: "Developing quantum mechanical models using DFT, molecular dynamics, and machine learning to predict material properties.",
     status: "pending",
     progress: 8,
-    itemsLearned: 1240,
-    totalItems: 15000,
+    itemsLearned: 4,
+    totalItems: 50,
     insights: [
       "DFT calculations accurately predict band gaps within 10-15% of experimental values",
       "Neural network potentials can approximate ab initio forces at classical MD speed"
@@ -116,8 +116,8 @@ const LEARNING_PHASES = [
     description: "Generating and evaluating new chemical compositions for targeted properties: superconductors, topological insulators, ultra-hard materials, and more.",
     status: "pending",
     progress: 2,
-    itemsLearned: 47,
-    totalItems: 2500,
+    itemsLearned: 4,
+    totalItems: 200,
     insights: [
       "Hydrogen-rich compounds under pressure show promise for room-temperature superconductivity"
     ]
@@ -129,7 +129,7 @@ const LEARNING_PHASES = [
     status: "pending",
     progress: 0,
     itemsLearned: 0,
-    totalItems: 50,
+    totalItems: 500,
     insights: []
   },
   {
@@ -139,7 +139,7 @@ const LEARNING_PHASES = [
     status: "pending",
     progress: 0,
     itemsLearned: 0,
-    totalItems: 100,
+    totalItems: 300,
     insights: []
   },
   {
@@ -149,7 +149,7 @@ const LEARNING_PHASES = [
     status: "pending",
     progress: 0,
     itemsLearned: 0,
-    totalItems: 80,
+    totalItems: 300,
     insights: []
   },
   {

@@ -18,6 +18,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - **AI**: OpenAI gpt-4o-mini (via Replit AI Integrations)
 - **Real-time**: WebSocket (ws)
 
+### Real-Time Updates
+- WebSocket hook (`client/src/hooks/use-websocket.ts`) provides real-time data refresh on all pages.
+- Each page listens for relevant WebSocket events and invalidates its TanStack Query cache keys.
+- Engine state changes, phase updates, and new data broadcast to all connected clients.
+
+### NaN Safety
+- Backend: `safeNumber()`, `safeDivide()`, `safeFixed()` in `server/learning/utils.ts` guard all physics calculations.
+- Frontend: `safeNum()` and `safeDisplay()` in `client/src/lib/utils.ts` prevent NaN display.
+- `Number.isFinite()` guards on all `.toFixed()` calls and conditional rendering of numeric values.
+- `PhysicsValue` component skips rendering if value is NaN/Infinity.
+- `toNum()` helper validates OpenAI JSON responses in structure predictor.
+
 ### Core Features
 - **Command Center**: Dashboard with system statistics, learning pipeline status, engine controls, and live activity feed.
 - **Atomic Explorer**: Element browser with Bohr model diagrams.
@@ -25,8 +37,8 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - **Novel Discovery**: AI-predicted new material candidates.
 - **Superconductor Lab**: Details on superconductor candidates, including physics fields, synthesis, reactions, and ML scores.
 - **Computational Physics**: Multi-fidelity screening pipeline, physics property cards, crystal structures, and negative results analysis.
-- **Research Pipeline**: Tracks the full learning phase progress and activity log.
-- **Learning Engine**: Orchestrates 12 distinct learning phases covering subatomic to multi-fidelity screening, with balanced priority and continuous cycling every 60 seconds.
+- **Research Pipeline**: Tracks the full learning phase progress and activity log. Finite phases (1-2) show fraction progress; open-ended phases (3-12) show activity bar with accumulated count and milestone tracking.
+- **Learning Engine**: Orchestrates 12 distinct learning phases covering subatomic to multi-fidelity screening, with balanced priority and continuous cycling every 15 seconds.
 - **ML Prediction Engine**: Hybrid XGBoost and OpenAI gpt-4o-mini neural network ensemble (40% XGBoost, 60% NN) for superconductor scoring, incorporating 18+ physics-informed features. Strict room-temperature criteria (Tc >= 293K, zero resistance, Meissner effect, ambient pressure).
 - **SC Verification Pipeline**: A multi-step process for superconductor candidates: theoretical -> promising -> high-tc-candidate -> under-review -> requires-verification, emphasizing no premature "breakthrough" claims.
 - **Multi-Fidelity Screening**: A 5-stage pipeline for candidate evaluation: ML filter, electronic structure, phonon/e-ph coupling, Tc prediction/competing phases, and synthesis feasibility/convex hull stability. Failures are logged with reasons.

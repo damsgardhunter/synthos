@@ -75,6 +75,7 @@ function parseFormulaElements(formula: string): string[] {
 }
 
 function estimateValenceElectrons(elements: string[]): number {
+  if (elements.length === 0) return 3;
   return elements.reduce((sum, el) => sum + (ELEMENT_VALENCE_ELECTRONS[el] ?? 3), 0) / elements.length;
 }
 
@@ -141,8 +142,8 @@ export function computePhononSpectrum(formula: string, electronicStructure: Elec
     Nb:93,Ba:137,La:139,Hf:178,Ta:181,W:184,Pb:207,Bi:209,
   }[e] ?? 50));
 
-  const lightestMass = Math.min(...masses);
-  const maxPhononFreq = hasH ? 4000 + Math.random() * 500 : 800 / Math.sqrt(lightestMass / 12) * (1 + Math.random() * 0.2);
+  const lightestMass = masses.length > 0 ? Math.min(...masses) : 50;
+  const maxPhononFreq = hasH ? 4000 + Math.random() * 500 : 800 / Math.sqrt(Math.max(lightestMass, 1) / 12) * (1 + Math.random() * 0.2);
 
   const logAvgFreq = maxPhononFreq * (hasH ? 0.35 : 0.45);
 
@@ -150,8 +151,8 @@ export function computePhononSpectrum(formula: string, electronicStructure: Elec
   const anharmonicityIndex = hasH ? 0.4 + Math.random() * 0.3 : 0.1 + Math.random() * 0.2;
   const softModePresent = electronicStructure.correlationStrength > 0.5 && Math.random() < 0.4;
 
-  const avgMass = masses.reduce((a, b) => a + b, 0) / masses.length;
-  const debyeTemperature = hasH ? 1500 + Math.random() * 500 : 300 * Math.sqrt(30 / avgMass) * (1 + Math.random() * 0.3);
+  const avgMass = masses.length > 0 ? masses.reduce((a, b) => a + b, 0) / masses.length : 50;
+  const debyeTemperature = hasH ? 1500 + Math.random() * 500 : 300 * Math.sqrt(30 / Math.max(avgMass, 1)) * (1 + Math.random() * 0.3);
 
   return {
     maxPhononFrequency: Math.round(maxPhononFreq),
@@ -203,17 +204,20 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling): Eliashber
   const omegaLogK = omegaLog * 1.44;
 
   let tc: number;
-  if (lambda < 1.5) {
+  const denominator = lambda - muStar * (1 + 0.62 * lambda);
+  if (Math.abs(denominator) < 1e-6) {
+    tc = 0;
+  } else if (lambda < 1.5) {
     const f1 = Math.pow(1 + (lambda / 2.46 / (1 + 3.8 * muStar)), 1/3);
-    const exponent = -1.04 * (1 + lambda) / (lambda - muStar * (1 + 0.62 * lambda));
+    const exponent = -1.04 * (1 + lambda) / denominator;
     tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   } else {
     const f1 = Math.sqrt(1 + (lambda / 2.46));
-    const exponent = -1.04 * (1 + lambda) / (lambda - muStar * (1 + 0.62 * lambda));
+    const exponent = -1.04 * (1 + lambda) / denominator;
     tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   }
 
-  tc = Math.max(0, tc);
+  tc = Number.isFinite(tc) ? Math.max(0, tc) : 0;
 
   const gapRatio = lambda > 1.5 ? 2 * 1.764 * (1 + 12.5 * (lambda / (lambda + 5)) * (lambda / (lambda + 5))) : 2 * 1.764;
   const isotropicGap = lambda < 1.0;
@@ -318,8 +322,9 @@ export function computeCriticalFields(
     };
   }
 
-  const xi0 = 1000 / (tc * coupling.lambda * 0.5);
-  const coherenceLength = Math.max(0.5, Math.min(500, xi0));
+  const xi0Denom = tc * Math.max(coupling.lambda, 0.01) * 0.5;
+  const xi0 = xi0Denom > 0 ? 1000 / xi0Denom : 500;
+  const coherenceLength = Math.max(0.5, Math.min(500, Number.isFinite(xi0) ? xi0 : 500));
 
   const PHI0 = 2.07e-15;
   const Hc2 = PHI0 / (2 * Math.PI * (coherenceLength * 1e-9) * (coherenceLength * 1e-9));
@@ -335,7 +340,7 @@ export function computeCriticalFields(
   const Jc = tc * 1e4 * coupling.lambda / (1 + anisotropyRatio * 0.1);
   const criticalCurrentDensity = Math.round(Jc);
 
-  const kappa = londonPenetrationDepth / coherenceLength;
+  const kappa = coherenceLength > 0 ? londonPenetrationDepth / coherenceLength : 1;
   const typeIorII = kappa > 0.707 ? "Type-II" : "Type-I";
 
   return {

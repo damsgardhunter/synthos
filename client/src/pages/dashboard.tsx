@@ -148,10 +148,13 @@ export default function Dashboard() {
                           <PhaseStatusBadge status={phase.status} />
                         </div>
                         <span className="text-xs font-mono text-muted-foreground">
-                          {phase.itemsLearned.toLocaleString()} / {phase.totalItems.toLocaleString()}
+                          {phase.id <= 2
+                            ? `${phase.itemsLearned.toLocaleString()} / ${phase.totalItems.toLocaleString()}`
+                            : `${phase.itemsLearned.toLocaleString()} items`
+                          }
                         </span>
                       </div>
-                      <Progress value={phase.progress} className="h-2" />
+                      <Progress value={phase.id <= 2 ? phase.progress : Math.min(100, phase.itemsLearned > 0 ? Math.max(5, Math.log10(phase.itemsLearned) * 25) : 0)} className="h-2" />
                     </div>
                   ))}
                 </div>

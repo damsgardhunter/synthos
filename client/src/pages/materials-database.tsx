@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "@/lib/queryClient";
+import { useWebSocket } from "@/hooks/use-websocket";
 import type { Material } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +49,7 @@ function MaterialCard({ material, selected, onClick }: { material: Material; sel
             <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${SOURCE_COLORS[material.source] ?? "bg-muted text-muted-foreground"}`}>
               {material.source}
             </span>
-            {material.bandGap !== null && material.bandGap !== undefined && (
+            {material.bandGap !== null && material.bandGap !== undefined && Number.isFinite(material.bandGap) && (
               <span className="text-xs text-muted-foreground">
                 Eg: <span className="font-mono">{material.bandGap.toFixed(2)} eV</span>
               </span>
@@ -68,6 +70,16 @@ export default function MaterialsDatabase() {
   const { data, isLoading } = useQuery<{ materials: Material[]; total: number }>({
     queryKey: ["/api/materials"],
   });
+
+  const ws = useWebSocket();
+
+  useEffect(() => {
+    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
+    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
+    if (hasRelevant) {
+      queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
+    }
+  }, [ws.messages.length]);
 
   const materials = data?.materials ?? [];
 
@@ -244,7 +256,7 @@ export default function MaterialsDatabase() {
                           <span className="text-sm font-medium text-blue-800 dark:text-blue-200">Superconducting Material</span>
                         </div>
                         <p className="text-sm text-blue-700 dark:text-blue-300 mt-1 font-mono">
-                          Critical Temperature: {selectedProps.criticalTemp} K ({(selectedProps.criticalTemp - 273.15).toFixed(1)}°C)
+                          Critical Temperature: {selectedProps.criticalTemp} K ({Number.isFinite(selectedProps.criticalTemp) ? (selectedProps.criticalTemp - 273.15).toFixed(1) : "--"}°C)
                         </p>
                       </div>
                     )}

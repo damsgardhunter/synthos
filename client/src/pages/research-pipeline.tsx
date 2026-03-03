@@ -1,4 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { queryClient } from "@/lib/queryClient";
+import { useWebSocket } from "@/hooks/use-websocket";
 import type { LearningPhase, ResearchLog, NovelInsight } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,10 +19,55 @@ function StatusIcon({ status }: { status: string }) {
   return <Clock className="h-5 w-5 text-muted-foreground" />;
 }
 
+const OPEN_ENDED_LABELS: Record<number, string> = {
+  3: "bonding patterns analyzed",
+  4: "materials indexed",
+  5: "property models trained",
+  6: "novel candidates generated",
+  7: "SC candidates evaluated",
+  8: "synthesis processes mapped",
+  9: "reactions catalogued",
+  10: "physics computations run",
+  11: "structures predicted",
+  12: "candidates screened",
+};
+
+function ActivityBar({ itemsLearned, isActive }: { itemsLearned: number; isActive: boolean }) {
+  const milestones = [10, 50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000];
+  const safeItems = Number.isFinite(itemsLearned) ? itemsLearned : 0;
+  const currentMilestone = milestones.find(m => safeItems < m) ?? milestones[milestones.length - 1];
+  const prevMilestone = milestones[milestones.indexOf(currentMilestone) - 1] ?? 0;
+  const range = currentMilestone - prevMilestone;
+  const progressInRange = range > 0 ? Math.min(100, ((safeItems - prevMilestone) / range) * 100) : 0;
+
+  return (
+    <div className="space-y-1">
+      <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${
+            isActive
+              ? "bg-blue-500 dark:bg-blue-400"
+              : itemsLearned > 0
+                ? "bg-primary/60"
+                : "bg-muted-foreground/20"
+          }`}
+          style={{ width: `${safeItems === 0 ? 0 : Math.max(5, progressInRange)}%` }}
+        />
+      </div>
+      {isActive && safeItems > 0 && (
+        <p className="text-[10px] text-muted-foreground/70 font-mono">
+          next milestone: {currentMilestone.toLocaleString()}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function PhaseCard({ phase, index }: { phase: LearningPhase; index: number }) {
   const insights = phase.insights ?? [];
   const isCompleted = phase.status === "completed";
   const isActive = phase.status === "active";
+  const isFinitePhase = phase.id <= 2;
 
   return (
     <Card
@@ -53,17 +101,44 @@ function PhaseCard({ phase, index }: { phase: LearningPhase; index: number }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">Progress</span>
-            <span className="text-xs font-mono font-bold text-primary">{phase.progress.toFixed(1)}%</span>
+        {isFinitePhase ? (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">Progress</span>
+              <span className={`text-xs font-mono font-bold ${isCompleted ? "text-green-600 dark:text-green-400" : "text-primary"}`}>
+                {Number.isFinite(phase.progress) ? phase.progress.toFixed(1) : "0.0"}%
+              </span>
+            </div>
+            <Progress
+              value={phase.progress}
+              className={`h-2 ${isCompleted ? "[&>div]:bg-green-500" : ""}`}
+            />
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-mono text-muted-foreground">
+                {phase.itemsLearned.toLocaleString()} / {phase.totalItems.toLocaleString()} learned
+              </span>
+              {isCompleted && (
+                <Badge className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-0 text-[10px]">
+                  COMPLETE
+                </Badge>
+              )}
+            </div>
           </div>
-          <Progress value={phase.progress} className="h-2" />
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-mono text-muted-foreground">{phase.itemsLearned.toLocaleString()} learned</span>
-            <span className="text-xs font-mono text-muted-foreground">{phase.totalItems.toLocaleString()} total</span>
+        ) : (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">Activity</span>
+              <span className={`text-xs font-mono font-bold ${
+                isActive ? "text-blue-600 dark:text-blue-400" :
+                phase.itemsLearned > 0 ? "text-foreground" :
+                "text-muted-foreground"
+              }`} data-testid={`phase-count-${phase.id}`}>
+                {phase.itemsLearned.toLocaleString()} {OPEN_ENDED_LABELS[phase.id] ?? "items processed"}
+              </span>
+            </div>
+            <ActivityBar itemsLearned={phase.itemsLearned} isActive={isActive} />
           </div>
-        </div>
+        )}
 
         {insights.length > 0 && (
           <div>
@@ -129,6 +204,18 @@ export default function ResearchPipeline() {
   const { data: insightData, isLoading: insightsLoading } = useQuery<{ insights: NovelInsight[]; total: number }>({
     queryKey: ["/api/novel-insights"],
   });
+
+  const ws = useWebSocket();
+
+  useEffect(() => {
+    const relevantTypes = ["phaseUpdate", "progress", "insight", "cycleEnd", "log"];
+    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
+    if (hasRelevant) {
+      queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
+    }
+  }, [ws.messages.length]);
 
   const logsByPhase: Record<string, ResearchLog[]> = {};
   logs?.forEach(log => {

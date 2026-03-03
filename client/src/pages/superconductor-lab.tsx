@@ -1,10 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { queryClient } from "@/lib/queryClient";
+import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, SynthesisProcess, ChemicalReaction } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { safeNum, safeDisplay } from "@/lib/utils";
 import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
   CheckCircle2, XCircle, ArrowRight, Gauge, Magnet,
@@ -41,7 +45,7 @@ function BoolIndicator({ value, label }: { value: boolean; label: string }) {
 }
 
 function ScoreBar({ label, score, color }: { label: string; score: number | null; color: string }) {
-  const pct = (score ?? 0) * 100;
+  const pct = safeNum(score) * 100;
   return (
     <div className="space-y-0.5">
       <div className="flex items-center justify-between">
@@ -104,19 +108,19 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
             {candidate.electronPhononCoupling != null && (
               <div className="p-1.5 bg-blue-50 dark:bg-blue-950/30 rounded">
                 <span className="text-muted-foreground block text-[10px]">e-ph lambda</span>
-                <span className="font-mono font-bold">{candidate.electronPhononCoupling.toFixed(2)}</span>
+                <span className="font-mono font-bold">{safeDisplay(candidate.electronPhononCoupling, 2)}</span>
               </div>
             )}
             {candidate.correlationStrength != null && (
               <div className="p-1.5 bg-purple-50 dark:bg-purple-950/30 rounded">
                 <span className="text-muted-foreground block text-[10px]">U/W ratio</span>
-                <span className="font-mono font-bold">{candidate.correlationStrength.toFixed(2)}</span>
+                <span className="font-mono font-bold">{safeDisplay(candidate.correlationStrength, 2)}</span>
               </div>
             )}
             {candidate.upperCriticalField != null && (
               <div className="p-1.5 bg-green-50 dark:bg-green-950/30 rounded">
                 <span className="text-muted-foreground block text-[10px]">Hc2</span>
-                <span className="font-mono font-bold">{candidate.upperCriticalField.toFixed(1)}T</span>
+                <span className="font-mono font-bold">{safeDisplay(candidate.upperCriticalField, 1)}T</span>
               </div>
             )}
           </div>
@@ -148,11 +152,11 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
             <span className="text-muted-foreground">Uncertainty:</span>
             <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
               <div
-                className={`h-full rounded-full ${candidate.uncertaintyEstimate > 0.6 ? "bg-red-500" : candidate.uncertaintyEstimate > 0.3 ? "bg-yellow-500" : "bg-green-500"}`}
-                style={{ width: `${(candidate.uncertaintyEstimate ?? 0) * 100}%` }}
+                className={`h-full rounded-full ${safeNum(candidate.uncertaintyEstimate) > 0.6 ? "bg-red-500" : safeNum(candidate.uncertaintyEstimate) > 0.3 ? "bg-yellow-500" : "bg-green-500"}`}
+                style={{ width: `${safeNum(candidate.uncertaintyEstimate) * 100}%` }}
               />
             </div>
-            <span className="font-mono text-[10px]">{((candidate.uncertaintyEstimate ?? 0) * 100).toFixed(0)}%</span>
+            <span className="font-mono text-[10px]">{(safeNum(candidate.uncertaintyEstimate) * 100).toFixed(0)}%</span>
           </div>
         )}
 
@@ -400,6 +404,18 @@ export default function SuperconductorLab() {
   const { data: rxnData, isLoading: rxnLoading } = useQuery<{ reactions: ChemicalReaction[]; total: number }>({
     queryKey: ["/api/chemical-reactions"],
   });
+
+  const ws = useWebSocket();
+
+  useEffect(() => {
+    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
+    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
+    if (hasRelevant) {
+      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/synthesis-processes"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/chemical-reactions"] });
+    }
+  }, [ws.messages.length]);
 
   const candidates = scData?.candidates ?? [];
   const processes = synthData?.processes ?? [];

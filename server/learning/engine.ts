@@ -76,13 +76,29 @@ const emit: EventEmitter = (type: string, data: any) => {
   }
 };
 
-async function updatePhaseStatus(phaseId: number, status: string, progress: number, itemsLearned: number) {
+const PHASE_TARGETS: Record<number, number> = {
+  1: 47,
+  2: 118,
+  3: 50,
+  4: 500,
+  5: 50,
+  6: 200,
+  7: 500,
+  8: 300,
+  9: 300,
+  10: 200,
+  11: 150,
+  12: 300,
+};
+
+async function updatePhaseStatus(phaseId: number, status: string, progress: number, itemsLearned: number, totalItems?: number) {
   try {
     const phase = await storage.getLearningPhaseById(phaseId);
     if (!phase) return;
 
     const newProgress = Math.min(100, progress);
-    const updates: any = { progress: newProgress, itemsLearned };
+    const resolvedTotal = totalItems ?? PHASE_TARGETS[phaseId] ?? phase.totalItems;
+    const updates: any = { progress: newProgress, itemsLearned, totalItems: resolvedTotal };
     if (status === "active" && phase.status !== "active") {
       updates.startedAt = new Date();
     }
@@ -96,7 +112,7 @@ async function updatePhaseStatus(phaseId: number, status: string, progress: numb
       ...updates,
     });
 
-    broadcast("phaseUpdate", { phaseId, status, progress: newProgress, itemsLearned });
+    broadcast("phaseUpdate", { phaseId, status, progress: newProgress, itemsLearned, totalItems: resolvedTotal });
   } catch (e) {}
 }
 

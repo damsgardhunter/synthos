@@ -113,25 +113,30 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
 
     const parsed = JSON.parse(content);
 
+    const toNum = (v: unknown, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
     const result: StructurePrediction = {
-      spaceGroup: parsed.spaceGroup ?? protoMatch?.spaceGroup ?? "P1",
-      crystalSystem: parsed.crystalSystem ?? protoMatch?.crystalSystem ?? "triclinic",
+      spaceGroup: (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1",
+      crystalSystem: (typeof parsed.crystalSystem === "string" && parsed.crystalSystem) || protoMatch?.crystalSystem || "triclinic",
       latticeParams: {
-        a: parsed.latticeA ?? 4.0,
-        b: parsed.latticeB ?? 4.0,
-        c: parsed.latticeC ?? 4.0,
-        alpha: parsed.alpha ?? 90,
-        beta: parsed.beta ?? 90,
-        gamma: parsed.gamma ?? 90,
+        a: toNum(parsed.latticeA, 4.0),
+        b: toNum(parsed.latticeB, 4.0),
+        c: toNum(parsed.latticeC, 4.0),
+        alpha: toNum(parsed.alpha, 90),
+        beta: toNum(parsed.beta, 90),
+        gamma: toNum(parsed.gamma, 90),
       },
-      prototype: parsed.prototype ?? protoMatch?.prototype ?? "unknown",
-      dimensionality: parsed.dimensionality ?? protoMatch?.dimensionality ?? "3D",
-      isStable: parsed.isStable ?? false,
-      isMetastable: parsed.isMetastable ?? false,
-      decompositionEnergy: parsed.decompositionEnergy ?? 0.1,
-      convexHullDistance: parsed.convexHullDistance ?? 0.05,
-      synthesizability: parsed.synthesizability ?? 0.5,
-      synthesisNotes: parsed.synthesisNotes ?? "Standard synthesis conditions expected",
+      prototype: (typeof parsed.prototype === "string" && parsed.prototype) || protoMatch?.prototype || "unknown",
+      dimensionality: (typeof parsed.dimensionality === "string" && parsed.dimensionality) || protoMatch?.dimensionality || "3D",
+      isStable: parsed.isStable === true,
+      isMetastable: parsed.isMetastable === true,
+      decompositionEnergy: toNum(parsed.decompositionEnergy, 0.1),
+      convexHullDistance: toNum(parsed.convexHullDistance, 0.05),
+      synthesizability: toNum(parsed.synthesizability, 0.5),
+      synthesisNotes: (typeof parsed.synthesisNotes === "string" && parsed.synthesisNotes) || "Standard synthesis conditions expected",
     };
 
     const id = `cs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

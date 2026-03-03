@@ -1,4 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { queryClient } from "@/lib/queryClient";
+import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, ComputationalResult, CrystalStructure } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -195,7 +198,7 @@ function PhysicsValue({
   value: number | null | undefined;
   format: (v: number) => string;
 }) {
-  if (value == null) return null;
+  if (value == null || !Number.isFinite(value)) return null;
   return (
     <div className="p-2 bg-muted/50 rounded-md">
       <div className="flex items-center gap-1 mb-0.5">
@@ -259,27 +262,27 @@ function CrystalStructureCard({ structure }: { structure: CrystalStructure }) {
           <div className="grid grid-cols-3 gap-1 text-[10px]">
             <div className="p-1 bg-muted/50 rounded text-center">
               <span className="text-muted-foreground">a=</span>
-              <span className="font-mono font-bold">{lattice.a?.toFixed(2)}</span>
+              <span className="font-mono font-bold">{Number.isFinite(lattice.a) ? lattice.a.toFixed(2) : "--"}</span>
             </div>
             <div className="p-1 bg-muted/50 rounded text-center">
               <span className="text-muted-foreground">b=</span>
-              <span className="font-mono font-bold">{lattice.b?.toFixed(2)}</span>
+              <span className="font-mono font-bold">{Number.isFinite(lattice.b) ? lattice.b.toFixed(2) : "--"}</span>
             </div>
             <div className="p-1 bg-muted/50 rounded text-center">
               <span className="text-muted-foreground">c=</span>
-              <span className="font-mono font-bold">{lattice.c?.toFixed(2)}</span>
+              <span className="font-mono font-bold">{Number.isFinite(lattice.c) ? lattice.c.toFixed(2) : "--"}</span>
             </div>
           </div>
         )}
 
         <div className="grid grid-cols-2 gap-2 text-xs">
-          {structure.decompositionEnergy != null && (
+          {structure.convexHullDistance != null && Number.isFinite(structure.convexHullDistance) && (
             <div>
               <span className="text-muted-foreground">Hull dist: </span>
-              <span className="font-mono">{structure.convexHullDistance?.toFixed(3)} eV/atom</span>
+              <span className="font-mono">{structure.convexHullDistance.toFixed(3)} eV/atom</span>
             </div>
           )}
-          {structure.synthesizability != null && (
+          {structure.synthesizability != null && Number.isFinite(structure.synthesizability) && (
             <div>
               <span className="text-muted-foreground">Synth: </span>
               <span className="font-mono">{(structure.synthesizability * 100).toFixed(0)}%</span>
@@ -307,6 +310,19 @@ export default function ComputationalPhysics() {
   const { data: structureData } = useQuery<{ structures: CrystalStructure[]; total: number }>({
     queryKey: ["/api/crystal-structures"],
   });
+
+  const ws = useWebSocket();
+
+  useEffect(() => {
+    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
+    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
+    if (hasRelevant) {
+      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/pipeline-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/computational-results/failed"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/crystal-structures"] });
+    }
+  }, [ws.messages.length]);
 
   const candidates = scData?.candidates ?? [];
   const physicsAnalyzed = candidates.filter(c => c.electronPhononCoupling != null || c.verificationStage != null && c.verificationStage > 0);
