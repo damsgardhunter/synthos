@@ -42,6 +42,23 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - `superconductor_candidates`: ML scores, physics fields, verification status.
 - `crystal_structures`: Space groups, lattice parameters, stability, synthesizability.
 - `computational_results`: Pipeline results, pass/fail, failure reasons.
+- `novel_insights`: Insight novelty tracking with deterministic deduplication (content+phase hash IDs), novelty scores, categories, and OpenAI evaluation.
+
+### Novel Insight Detection
+- Integrated into phases 3, 5, and 7 of the learning engine.
+- Pre-filters well-known textbook knowledge (25+ patterns).
+- Levenshtein similarity deduplication (>0.85 threshold).
+- OpenAI evaluates remaining insights for novelty (categories: novel-correlation, new-mechanism, cross-domain, computational-discovery, design-principle, textbook, known-pattern, incremental).
+- Deterministic IDs via SHA-256 hash of `{phaseId}:{insightText}` prevent duplicate storage.
+- Novel insights (score >= 0.4) emitted as WebSocket events and logged.
+- API: `GET /api/novel-insights?limit=50&novelOnly=true`
+- UI: "Insight Novelty Tracker" section on Research Pipeline page with novelty bars, category badges, and novel/textbook visual distinction.
+
+### Self-Improving SC Model
+- ML predictor loads verified physics data (lambda, Tc) and crystal structures for existing SC candidates from database.
+- XGBoost feature extraction enriched with physics context (+0.05 for physics-verified, +0.04 for stable crystal) and penalties (-0.08 for competing phases, -0.05 for low synthesizability).
+- Neural network prompt treats verifiedPhysics and crystalStructure as high-fidelity ground truth over estimates.
+- Enrichment counts logged during XGBoost screening.
 
 ## External Dependencies
 - **OpenAI**: Used for gpt-4o-mini via Replit AI Integrations for NLP, formula generation, ML refinement, and knowledge base sourcing.

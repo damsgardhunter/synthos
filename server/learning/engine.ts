@@ -9,6 +9,7 @@ import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionT
 import { runFullPhysicsAnalysis } from "./physics-engine";
 import { runStructurePredictionBatch } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
+import { evaluateInsightNovelty } from "./insight-detector";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -128,6 +129,8 @@ async function runPhase3_Bonding() {
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(3, insights);
+    const formulas = mats.slice(0, 5).map(m => m.formula);
+    await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas);
     const phase3 = await storage.getLearningPhaseById(3);
     const totalBondingInsights = (phase3?.insights ?? []).length;
     const progress = Math.min(99, Math.floor((totalBondingInsights / 50) * 100));
@@ -178,6 +181,8 @@ async function runPhase5_Prediction() {
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(5, insights);
+    const predFormulas = mats.slice(0, 5).map(m => m.formula);
+    await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas);
     const phase5 = await storage.getLearningPhaseById(5);
     const totalPredInsights = (phase5?.insights ?? []).length;
     const progress = Math.min(99, Math.floor((totalPredInsights / 50) * 100));
@@ -222,6 +227,7 @@ async function runPhase7_Superconductor() {
     totalInsightsGenerated += result.insights.length;
 
     await addInsightsToPhase(7, result.insights);
+    await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research");
     const scCount = await storage.getSuperconductorCount();
     const progress = Math.min(99, Math.floor((scCount / 500) * 100));
     await updatePhaseStatus(7, "active", progress, scCount);

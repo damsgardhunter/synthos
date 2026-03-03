@@ -2,15 +2,15 @@ import { db } from "./db";
 import {
   elements, materials, learningPhases, novelPredictions, researchLogs,
   synthesisProcesses, chemicalReactions, superconductorCandidates,
-  crystalStructures, computationalResults
+  crystalStructures, computationalResults, novelInsights
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
   InsertElement, InsertMaterial, InsertLearningPhase, InsertNovelPrediction, InsertResearchLog,
   SynthesisProcess, ChemicalReaction, SuperconductorCandidate,
   InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate,
-  CrystalStructure, ComputationalResult,
-  InsertCrystalStructure, InsertComputationalResult
+  CrystalStructure, ComputationalResult, NovelInsight,
+  InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight
 } from "@shared/schema";
 import { eq, desc, asc, sql } from "drizzle-orm";
 
@@ -60,6 +60,11 @@ export interface IStorage {
   getComputationalResultCount(): Promise<number>;
   getComputationalResultsByStage(stage: number): Promise<ComputationalResult[]>;
   getFailedComputationalResults(limit?: number): Promise<ComputationalResult[]>;
+
+  getNovelInsights(limit?: number): Promise<NovelInsight[]>;
+  getNovelInsightsOnly(limit?: number): Promise<NovelInsight[]>;
+  insertNovelInsight(ni: InsertNovelInsight): Promise<NovelInsight>;
+  getNovelInsightCount(): Promise<number>;
 
   getStats(): Promise<{
     elementsLearned: number;
@@ -247,6 +252,27 @@ export class DatabaseStorage implements IStorage {
       .where(eq(computationalResults.passed, false))
       .orderBy(desc(computationalResults.computedAt))
       .limit(limit);
+  }
+
+  async getNovelInsights(limit = 50): Promise<NovelInsight[]> {
+    return db.select().from(novelInsights).orderBy(desc(novelInsights.discoveredAt)).limit(limit);
+  }
+
+  async getNovelInsightsOnly(limit = 50): Promise<NovelInsight[]> {
+    return db.select().from(novelInsights)
+      .where(eq(novelInsights.isNovel, true))
+      .orderBy(desc(novelInsights.discoveredAt))
+      .limit(limit);
+  }
+
+  async insertNovelInsight(ni: InsertNovelInsight): Promise<NovelInsight> {
+    const [c] = await db.insert(novelInsights).values(ni).onConflictDoNothing().returning();
+    return c;
+  }
+
+  async getNovelInsightCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(novelInsights);
+    return Number(count);
   }
 
   async getStats() {

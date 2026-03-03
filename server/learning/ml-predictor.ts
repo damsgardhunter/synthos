@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { Material, SuperconductorCandidate } from "@shared/schema";
 import type { EventEmitter } from "./engine";
+import { storage } from "../storage";
 import {
   computeElectronicStructure,
   computePhononSpectrum,
@@ -63,7 +64,7 @@ function parseFormula(formula: string): string[] {
   return matches ? [...new Set(matches)] : [];
 }
 
-export function extractFeatures(formula: string, mat?: Partial<Material>): MLFeatureVector {
+export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext): MLFeatureVector {
   const elements = parseFormula(formula);
   const enValues = elements.map(e => ELECTRONEGATIVITY[e] ?? 1.5);
   const massValues = elements.map(e => ATOMIC_MASS[e] ?? 50);
@@ -100,9 +101,17 @@ export function extractFeatures(formula: string, mat?: Partial<Material>): MLFea
   const coupling = computeElectronPhononCoupling(electronic, phonon);
   const correlation = assessCorrelationStrength(formula);
 
-  const dimensionalityScore = layeredStructure ? 0.8 :
+  const useLambda = physics?.verifiedLambda ?? coupling.lambda;
+  const useCorrelation = physics?.correlationStrength ?? correlation.ratio;
+
+  const crystalDim = crystal?.dimensionality;
+  const dimensionalityScore = crystalDim === "2D" ? 0.9 :
+    crystalDim === "quasi-2D" ? 0.8 :
+    layeredStructure ? 0.75 :
     electronic.fermiSurfaceTopology.includes("2D") ? 0.7 :
     electronic.fermiSurfaceTopology.includes("multi") ? 0.5 : 0.3;
+
+  const useSpacegroup = crystal?.spaceGroup ?? mat?.spacegroup ?? null;
 
   return {
     avgElectronegativity: avgEN,
@@ -116,18 +125,18 @@ export function extractFeatures(formula: string, mat?: Partial<Material>): MLFea
     bandGap: mat?.bandGap ?? null,
     formationEnergy: mat?.formationEnergy ?? null,
     stability: mat?.stability ?? null,
-    crystalSymmetry: mat?.spacegroup ?? null,
+    crystalSymmetry: useSpacegroup,
     electronDensityEstimate,
     phononCouplingEstimate,
     dWaveSymmetry,
     layeredStructure,
     cooperPairStrength,
     meissnerPotential,
-    correlationStrength: correlation.ratio,
+    correlationStrength: useCorrelation,
     fermiSurfaceType: electronic.fermiSurfaceTopology,
     dimensionalityScore,
     anharmonicityFlag: phonon.anharmonicityIndex > 0.4,
-    electronPhononLambda: coupling.lambda,
+    electronPhononLambda: useLambda,
     logPhononFreq: coupling.omegaLog,
   };
 }
@@ -229,11 +238,31 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   return { score, tcEstimate: Math.round(tcEstimate), reasoning };
 }
 
+interface PhysicsContext {
+  verifiedLambda: number | null;
+  verifiedTc: number | null;
+  competingPhases: any[];
+  upperCriticalField: number | null;
+  correlationStrength: number | null;
+  verificationStage: number;
+}
+
+interface CrystalContext {
+  spaceGroup: string;
+  crystalSystem: string;
+  dimensionality: string;
+  isStable: boolean;
+  convexHullDistance: number | null;
+  synthesizability: number | null;
+}
+
 interface ResearchContext {
   synthesisCount: number;
   reactionCount: number;
   hasSynthesisKnowledge: boolean;
   hasReactionKnowledge: boolean;
+  physicsData?: Map<string, PhysicsContext>;
+  crystalData?: Map<string, CrystalContext>;
 }
 
 export async function runMLPrediction(
@@ -255,12 +284,65 @@ export async function runMLPrediction(
     dataSource: "ML Engine",
   });
 
-  const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict> }[] = [];
+  let physicsData = context?.physicsData;
+  let crystalData = context?.crystalData;
+  if (!physicsData || !crystalData) {
+    physicsData = physicsData ?? new Map();
+    crystalData = crystalData ?? new Map();
+    try {
+      const existingSC = await storage.getSuperconductorCandidates(50);
+      for (const sc of existingSC) {
+        if (sc.electronPhononCoupling != null || sc.verificationStage != null && sc.verificationStage > 0) {
+          physicsData.set(sc.formula, {
+            verifiedLambda: sc.electronPhononCoupling,
+            verifiedTc: sc.predictedTc,
+            competingPhases: (sc.competingPhases as any[]) ?? [],
+            upperCriticalField: sc.upperCriticalField,
+            correlationStrength: sc.correlationStrength,
+            verificationStage: sc.verificationStage ?? 0,
+          });
+        }
+      }
+      const structures = await storage.getCrystalStructures(100);
+      for (const cs of structures) {
+        crystalData.set(cs.formula, {
+          spaceGroup: cs.spaceGroup,
+          crystalSystem: cs.crystalSystem,
+          dimensionality: cs.dimensionality,
+          isStable: cs.isStable ?? false,
+          convexHullDistance: cs.convexHullDistance,
+          synthesizability: cs.synthesizability,
+        });
+      }
+    } catch {}
+  }
+
+  const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean }[] = [];
 
   for (const mat of materials.slice(0, 30)) {
-    const features = extractFeatures(mat.formula, mat);
+    const physics = physicsData.get(mat.formula);
+    const crystal = crystalData.get(mat.formula);
+    const features = extractFeatures(mat.formula, mat, physics, crystal);
     const xgb = xgboostPredict(features);
-    scored.push({ mat, features, xgb });
+
+    if (physics && physics.verificationStage > 0) {
+      xgb.score = Math.min(1, xgb.score + 0.05);
+      xgb.reasoning.push("Physics-verified: computational analysis confirms candidate viability");
+    }
+    if (crystal?.isStable) {
+      xgb.score = Math.min(1, xgb.score + 0.04);
+      xgb.reasoning.push(`Crystal structure verified stable (${crystal.spaceGroup}, hull dist: ${crystal.convexHullDistance?.toFixed(3) ?? '?'})`);
+    }
+    if (physics?.competingPhases?.some((p: any) => p.suppressesSC)) {
+      xgb.score = Math.max(0, xgb.score - 0.08);
+      xgb.reasoning.push("WARNING: Competing phase identified that may suppress superconductivity");
+    }
+    if (crystal?.synthesizability != null && crystal.synthesizability < 0.3) {
+      xgb.score = Math.max(0, xgb.score - 0.05);
+      xgb.reasoning.push(`Low synthesizability (${(crystal.synthesizability * 100).toFixed(0)}%): practical challenges expected`);
+    }
+
+    scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });
   }
 
   scored.sort((a, b) => b.xgb.score - a.xgb.score);
@@ -268,43 +350,73 @@ export async function runMLPrediction(
 
   if (topCandidates.length === 0) return { candidates, insights };
 
+  const physicsEnriched = scored.filter(s => s.hasPhysics).length;
+  const crystalEnriched = scored.filter(s => s.hasCrystal).length;
+  const enrichmentDetail = (physicsEnriched > 0 || crystalEnriched > 0)
+    ? ` [enriched: ${physicsEnriched} with physics, ${crystalEnriched} with crystal data]`
+    : "";
+
   emit("log", {
     phase: "phase-7",
     event: "XGBoost screening complete",
-    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc est: ${topCandidates[0].xgb.tcEstimate}K)`,
+    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc est: ${topCandidates[0].xgb.tcEstimate}K)${enrichmentDetail}`,
     dataSource: "ML Engine",
   });
 
   try {
-    const candidateSummaries = topCandidates.map(c => ({
-      formula: c.mat.formula,
-      name: c.mat.name,
-      xgboostScore: c.xgb.score,
-      tcEstimate: c.xgb.tcEstimate,
-      features: {
-        cooperPairStrength: c.features.cooperPairStrength,
-        phononCoupling: c.features.phononCouplingEstimate,
-        meissnerPotential: c.features.meissnerPotential,
-        dWaveSymmetry: c.features.dWaveSymmetry,
-        layeredStructure: c.features.layeredStructure,
-      },
-      physicsComputed: {
-        electronPhononLambda: c.features.electronPhononLambda,
-        logPhononFrequency: c.features.logPhononFreq,
-        correlationStrength: c.features.correlationStrength,
-        fermiSurfaceTopology: c.features.fermiSurfaceType,
-        dimensionalityScore: c.features.dimensionalityScore,
-        anharmonic: c.features.anharmonicityFlag,
-      },
-      xgboostReasoning: c.xgb.reasoning,
-    }));
+    const candidateSummaries = topCandidates.map(c => {
+      const physics = physicsData!.get(c.mat.formula);
+      const crystal = crystalData!.get(c.mat.formula);
+      return {
+        formula: c.mat.formula,
+        name: c.mat.name,
+        xgboostScore: c.xgb.score,
+        tcEstimate: c.xgb.tcEstimate,
+        features: {
+          cooperPairStrength: c.features.cooperPairStrength,
+          phononCoupling: c.features.phononCouplingEstimate,
+          meissnerPotential: c.features.meissnerPotential,
+          dWaveSymmetry: c.features.dWaveSymmetry,
+          layeredStructure: c.features.layeredStructure,
+        },
+        physicsComputed: {
+          electronPhononLambda: c.features.electronPhononLambda,
+          logPhononFrequency: c.features.logPhononFreq,
+          correlationStrength: c.features.correlationStrength,
+          fermiSurfaceTopology: c.features.fermiSurfaceType,
+          dimensionalityScore: c.features.dimensionalityScore,
+          anharmonic: c.features.anharmonicityFlag,
+        },
+        ...(physics ? {
+          verifiedPhysics: {
+            verifiedLambda: physics.verifiedLambda,
+            verifiedTc: physics.verifiedTc,
+            upperCriticalField: physics.upperCriticalField,
+            competingPhases: physics.competingPhases.length,
+            hasSuppressionRisk: physics.competingPhases.some((p: any) => p.suppressesSC),
+            verificationStage: physics.verificationStage,
+          }
+        } : {}),
+        ...(crystal ? {
+          crystalStructure: {
+            spaceGroup: crystal.spaceGroup,
+            crystalSystem: crystal.crystalSystem,
+            dimensionality: crystal.dimensionality,
+            isStable: crystal.isStable,
+            convexHullDistance: crystal.convexHullDistance,
+            synthesizability: crystal.synthesizability,
+          }
+        } : {}),
+        xgboostReasoning: c.xgb.reasoning,
+      };
+    });
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `You are an advanced neural network layer in a hybrid XGBoost+NN ensemble for superconductor prediction. The XGBoost layer has performed feature-based gradient boosting and ranked candidates. Physics computations (electronic structure, phonon spectrum, electron-phonon coupling lambda, Fermi surface topology, correlation strength U/W) are included.
+          content: `You are an advanced neural network layer in a hybrid XGBoost+NN ensemble for superconductor prediction. The XGBoost layer has performed feature-based gradient boosting and ranked candidates. Physics computations (electronic structure, phonon spectrum, electron-phonon coupling lambda, Fermi surface topology, correlation strength U/W) are included. Some candidates may also have VERIFIED physics data from computational analysis (verifiedPhysics) and/or predicted crystal structures (crystalStructure) - weight these heavily as they represent higher-fidelity data.
 
 Your role:
 1. Evaluate using: electron-phonon coupling (lambda), BCS/Eliashberg theory, Cooper pair formation, Meissner effect, competing phases (magnetism, CDW, Mott)
@@ -313,6 +425,9 @@ Your role:
 4. Identify pairing symmetry (s-wave, d-wave, p-wave, s+/-)
 5. Estimate dimensionality effects on Tc
 6. For each candidate, assign uncertainty and identify what physics is missing
+7. When verifiedPhysics is present, use the verified lambda and Tc as ground truth over estimates
+8. When crystalStructure is present, factor in thermodynamic stability (convexHullDistance < 0.05 = good), dimensionality effects on Tc, and synthesizability
+9. If competing phases suppress SC, lower the score and flag the risk
 
 Return JSON with:
 - 'candidates': array with 'formula', 'neuralNetScore' (0-1), 'refinedTc' (Kelvin), 'pressureGpa', 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism' (string), 'pairingSymmetry' (s-wave/d-wave/p-wave/s+-), 'pairingMechanism' (phonon-mediated/spin-fluctuation/charge-fluctuation/unconventional), 'dimensionality' (3D/quasi-2D/2D/1D), 'quantumCoherence' (0-1), 'roomTempViable' (boolean), 'crystalStructure', 'uncertaintyEstimate' (0-1), 'reasoning' (under 150 chars)

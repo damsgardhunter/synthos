@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import type { LearningPhase, ResearchLog } from "@shared/schema";
+import type { LearningPhase, ResearchLog, NovelInsight } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
@@ -95,12 +95,39 @@ const PROGRESS_HISTORY = [
   { day: "Today", atomic: 100, elements: 100, bonding: 78, materials: 42, prediction: 8, discovery: 2 },
 ];
 
+const CATEGORY_COLORS: Record<string, string> = {
+  "novel-correlation": "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
+  "new-mechanism": "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+  "cross-domain": "bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300",
+  "computational-discovery": "bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300",
+  "design-principle": "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+  "textbook": "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
+  "known-pattern": "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
+  "incremental": "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300",
+};
+
+function NoveltyBar({ score }: { score: number }) {
+  const pct = Math.round(score * 100);
+  const color = score >= 0.7 ? "bg-green-500" : score >= 0.4 ? "bg-blue-500" : "bg-gray-400";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-16 bg-muted rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-[10px] font-mono">{pct}%</span>
+    </div>
+  );
+}
+
 export default function ResearchPipeline() {
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({
     queryKey: ["/api/learning-phases"],
   });
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({
     queryKey: ["/api/research-logs"],
+  });
+  const { data: insightData, isLoading: insightsLoading } = useQuery<{ insights: NovelInsight[]; total: number }>({
+    queryKey: ["/api/novel-insights"],
   });
 
   const logsByPhase: Record<string, ResearchLog[]> = {};
@@ -235,6 +262,88 @@ export default function ResearchPipeline() {
           </Card>
         </div>
       </div>
+
+      {insightsLoading && (
+        <Card>
+          <CardContent className="p-6">
+            <Skeleton className="h-6 w-48 mb-4" />
+            <div className="space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-20" />)}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {insightData && insightData.insights.length > 0 && (
+        <Card data-testid="novel-insights-section">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Lightbulb className="h-4 w-4 text-primary" />
+                Insight Novelty Tracker
+              </CardTitle>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <span>{insightData.total} total insights evaluated</span>
+                <span className="font-bold text-green-600 dark:text-green-400">
+                  {insightData.insights.filter(i => i.isNovel).length} novel
+                </span>
+              </div>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Each insight is evaluated for novelty -- textbook knowledge is flagged, while genuinely new correlations and mechanisms are highlighted.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <ScrollArea className="h-[400px]">
+              <div className="space-y-2">
+                {insightData.insights.map((insight, i) => (
+                  <div
+                    key={insight.id ?? i}
+                    data-testid={`insight-row-${i}`}
+                    className={`p-3 rounded-lg border ${insight.isNovel ? "border-green-200 dark:border-green-900 bg-green-50/50 dark:bg-green-950/20" : "border-border bg-muted/30"}`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 shrink-0">
+                        {insight.isNovel ? (
+                          <Sparkles className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <BookOpen className="h-4 w-4 text-muted-foreground" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-1.5">
+                        <p className={`text-sm leading-relaxed ${insight.isNovel ? "text-foreground font-medium" : "text-muted-foreground"}`}>
+                          {insight.insightText}
+                        </p>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Badge
+                            className={`${CATEGORY_COLORS[insight.category ?? "known-pattern"]} border-0 text-[10px]`}
+                          >
+                            {insight.category ?? "unknown"}
+                          </Badge>
+                          <span className="text-[10px] text-muted-foreground">
+                            {insight.phaseName}
+                          </span>
+                          {insight.noveltyScore != null && (
+                            <NoveltyBar score={insight.noveltyScore} />
+                          )}
+                          {insight.isNovel && (
+                            <Badge className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-0 text-[10px]">
+                              NOVEL
+                            </Badge>
+                          )}
+                        </div>
+                        {insight.noveltyReason && (
+                          <p className="text-[10px] text-muted-foreground italic">{insight.noveltyReason}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

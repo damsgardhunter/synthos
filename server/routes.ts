@@ -224,5 +224,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/novel-insights", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const novelOnly = req.query.novelOnly === "true";
+      const insights = novelOnly
+        ? await storage.getNovelInsightsOnly(limit)
+        : await storage.getNovelInsights(limit);
+      const total = await storage.getNovelInsightCount();
+      res.json({ insights, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch novel insights" });
+    }
+  });
+
   return httpServer;
 }

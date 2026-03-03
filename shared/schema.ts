@@ -174,6 +174,19 @@ export const computationalResults = pgTable("computational_results", {
   computedAt: timestamp("computed_at").defaultNow(),
 });
 
+export const novelInsights = pgTable("novel_insights", {
+  id: varchar("id").primaryKey(),
+  phaseId: integer("phase_id").notNull(),
+  phaseName: text("phase_name").notNull(),
+  insightText: text("insight_text").notNull(),
+  isNovel: boolean("is_novel").default(false),
+  noveltyScore: real("novelty_score"),
+  noveltyReason: text("novelty_reason"),
+  category: text("category"),
+  relatedFormulas: text("related_formulas").array(),
+  discoveredAt: timestamp("discovered_at").defaultNow(),
+});
+
 export const insertElementSchema = createInsertSchema(elements);
 export const insertMaterialSchema = createInsertSchema(materials).omit({ learnedAt: true });
 export const insertLearningPhaseSchema = createInsertSchema(learningPhases).omit({ startedAt: true, completedAt: true });
@@ -184,6 +197,7 @@ export const insertChemicalReactionSchema = createInsertSchema(chemicalReactions
 export const insertSuperconductorCandidateSchema = createInsertSchema(superconductorCandidates).omit({ generatedAt: true });
 export const insertCrystalStructureSchema = createInsertSchema(crystalStructures).omit({ predictedAt: true });
 export const insertComputationalResultSchema = createInsertSchema(computationalResults).omit({ computedAt: true });
+export const insertNovelInsightSchema = createInsertSchema(novelInsights).omit({ discoveredAt: true });
 
 export type Element = typeof elements.$inferSelect;
 export type Material = typeof materials.$inferSelect;
@@ -195,6 +209,7 @@ export type ChemicalReaction = typeof chemicalReactions.$inferSelect;
 export type SuperconductorCandidate = typeof superconductorCandidates.$inferSelect;
 export type CrystalStructure = typeof crystalStructures.$inferSelect;
 export type ComputationalResult = typeof computationalResults.$inferSelect;
+export type NovelInsight = typeof novelInsights.$inferSelect;
 
 export type InsertElement = z.infer<typeof insertElementSchema>;
 export type InsertMaterial = z.infer<typeof insertMaterialSchema>;
@@ -206,5 +221,6 @@ export type InsertChemicalReaction = z.infer<typeof insertChemicalReactionSchema
 export type InsertSuperconductorCandidate = z.infer<typeof insertSuperconductorCandidateSchema>;
 export type InsertCrystalStructure = z.infer<typeof insertCrystalStructureSchema>;
 export type InsertComputationalResult = z.infer<typeof insertComputationalResultSchema>;
+export type InsertNovelInsight = z.infer<typeof insertNovelInsightSchema>;
 
 export * from "./models/chat";
