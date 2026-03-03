@@ -468,7 +468,7 @@ async function runLearningCycle() {
     broadcast("cycleEnd", { cycle: cycleCount });
 
     if (state === "running") {
-      cycleTimer = setTimeout(runLearningCycle, 60000);
+      cycleTimer = setTimeout(runLearningCycle, 15000);
     }
   }
 }
