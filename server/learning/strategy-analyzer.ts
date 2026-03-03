@@ -20,6 +20,8 @@ interface StrategyResult {
   performanceSignals: Record<string, any>;
 }
 
+let previousFocusAreas: FocusArea[] = [];
+
 export async function analyzeAndEvolveStrategy(
   emit: EventEmitter,
   cycleNumber: number
@@ -73,6 +75,12 @@ export async function analyzeAndEvolveStrategy(
       .map(([f, s]) => `${f}: ${s.count} candidates, avg score ${s.avgScore.toFixed(2)}, max Tc ${s.maxTc.toFixed(0)}K, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
       .join("\n");
 
+    let previousStrategyContext = "";
+    if (previousFocusAreas.length > 0) {
+      previousStrategyContext = `\nPrevious cycle priorities: ${previousFocusAreas.map(f => `${f.area} (${(f.priority * 100).toFixed(0)}%)`).join(", ")}`;
+      previousStrategyContext += `\nIf recommending different priorities than above, explicitly explain what changed and why in your summary.`;
+    }
+
     const prompt = `You are a materials science research strategist for an AI superconductor discovery platform.
 
 Current candidate family performance (cycle ${cycleNumber}):
@@ -83,9 +91,10 @@ Under-explored families: ${underExplored.join(", ") || "None"}
 Recent novel insights: ${insightSummary || "None yet"}
 
 Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${f}: ${n} failures`).join(", ") || "No failures yet"}
+${previousStrategyContext}
 
 Based on this data, recommend 3-5 material families to focus research on. For each, give a priority (0.0-1.0) and a brief reason.
-Also write a 1-2 sentence overall strategy summary.
+Also write a 1-2 sentence overall strategy summary that references specific data trends.
 
 Respond in JSON:
 {
@@ -134,6 +143,45 @@ Respond in JSON:
       detail: `Focus: ${focusAreas.map(f => `${f.area} (${(f.priority * 100).toFixed(0)}%)`).join(", ")}. ${summary}`,
       dataSource: "Strategy Analyzer",
     });
+
+    if (previousFocusAreas.length > 0) {
+      const pivots: string[] = [];
+      const prevMap = new Map(previousFocusAreas.map(f => [f.area, f.priority]));
+      const newMap = new Map(focusAreas.map(f => [f.area, f.priority]));
+
+      for (const fa of focusAreas) {
+        const prevPriority = prevMap.get(fa.area);
+        if (prevPriority === undefined) {
+          const newTop3 = focusAreas.slice(0, 3).map(f => f.area);
+          if (newTop3.includes(fa.area)) {
+            pivots.push(`${fa.area} is new in top priorities at ${(fa.priority * 100).toFixed(0)}%`);
+          }
+        } else {
+          const delta = fa.priority - prevPriority;
+          if (Math.abs(delta) > 0.15) {
+            const direction = delta > 0 ? "promoted" : "deprioritized";
+            pivots.push(`${fa.area} ${direction}: ${(prevPriority * 100).toFixed(0)}% -> ${(fa.priority * 100).toFixed(0)}%`);
+          }
+        }
+      }
+
+      for (const prev of previousFocusAreas) {
+        if (!newMap.has(prev.area) && prev.priority > 0.5) {
+          pivots.push(`${prev.area} dropped from focus (was ${(prev.priority * 100).toFixed(0)}%)`);
+        }
+      }
+
+      if (pivots.length > 0) {
+        emit("log", {
+          phase: "engine",
+          event: "Strategy pivot",
+          detail: pivots.join(". ") + ".",
+          dataSource: "Strategy Analyzer",
+        });
+      }
+    }
+
+    previousFocusAreas = [...focusAreas];
 
     return { focusAreas, summary, performanceSignals };
   } catch (err: any) {

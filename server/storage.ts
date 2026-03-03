@@ -3,7 +3,7 @@ import {
   elements, materials, learningPhases, novelPredictions, researchLogs,
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
-  researchStrategies, convergenceSnapshots
+  researchStrategies, convergenceSnapshots, milestones
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -12,8 +12,8 @@ import type {
   InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate,
   CrystalStructure, ComputationalResult, NovelInsight,
   InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight,
-  ResearchStrategy, ConvergenceSnapshot,
-  InsertResearchStrategy, InsertConvergenceSnapshot
+  ResearchStrategy, ConvergenceSnapshot, Milestone,
+  InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike } from "drizzle-orm";
 import { classifyFamily } from "./learning/utils";
@@ -81,6 +81,10 @@ export interface IStorage {
 
   insertConvergenceSnapshot(snapshot: InsertConvergenceSnapshot): Promise<ConvergenceSnapshot>;
   getConvergenceSnapshots(limit?: number): Promise<ConvergenceSnapshot[]>;
+
+  insertMilestone(milestone: InsertMilestone): Promise<Milestone>;
+  getMilestones(limit?: number): Promise<Milestone[]>;
+  getMilestoneCount(): Promise<number>;
 
   getSuperconductorByFormula(formula: string): Promise<SuperconductorCandidate | undefined>;
   getNovelPredictionByFormula(formula: string): Promise<NovelPrediction | undefined>;
@@ -334,6 +338,20 @@ export class DatabaseStorage implements IStorage {
 
   async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
     return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
+  }
+
+  async insertMilestone(milestone: InsertMilestone): Promise<Milestone> {
+    const [m] = await db.insert(milestones).values(milestone).returning();
+    return m;
+  }
+
+  async getMilestones(limit = 50): Promise<Milestone[]> {
+    return db.select().from(milestones).orderBy(desc(milestones.createdAt)).limit(limit);
+  }
+
+  async getMilestoneCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(milestones);
+    return Number(count);
   }
 
   async getSuperconductorByFormula(formula: string): Promise<SuperconductorCandidate | undefined> {

@@ -269,6 +269,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/milestones", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 20, 100);
+      const ms = await storage.getMilestones(limit);
+      const total = await storage.getMilestoneCount();
+      res.json({ milestones: ms, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch milestones" });
+    }
+  });
+
   app.get("/api/novel-insights", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);

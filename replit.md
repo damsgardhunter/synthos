@@ -59,6 +59,33 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - `captureConvergenceSnapshot()` records bestTc, bestScore, avgTopScore, candidatesTotal, pipelinePassRate, novelInsightCount, topFormula per cycle.
 - API: `GET /api/convergence?limit=50`
 - UI: "Convergence Tracker" on Research Pipeline page with dual-axis LineChart (Best Tc + Best Score over cycles), momentum indicator (Improving/Plateaued/Declining based on recent vs previous 3 snapshots), best candidate callout, and pipeline pass rate. Real-time updates via `convergenceUpdate` WebSocket event.
+- Learning velocity indicators: Tc velocity, Score velocity, Diversity velocity computed over last 5 cycles with green/yellow/red color coding.
+- "Cycles Since Last Improvement" counter resets when bestTc or bestScore increases.
+
+### Milestone Detection System
+- `server/learning/milestone-tracker.ts` detects 6 types: new-family, tc-record, pipeline-graduate, diversity-threshold, knowledge-milestone, insight-cascade.
+- Milestones stored in `milestones` DB table with id, cycle, type, title, description, significance (1-3), relatedFormula.
+- Broadcast via WebSocket `milestone` event; displayed with gold/amber styling in activity feed.
+- MilestoneTimeline component in research-pipeline.tsx shows compact timeline of discoveries.
+- Dashboard shows milestone count stat card.
+- API: `GET /api/milestones?limit=20`
+- State initialized from DB on startup to avoid duplicate milestones for pre-existing thresholds.
+
+### Adaptive Cycle Narration
+- Cycle start messages reference current strategy and Tc trends (not generic "Learning cycle N started").
+- Cycle end emits comparative summary: Tc delta, score delta, diversity change, insight count vs previous cycle.
+- `previousCycleMetrics` tracked as module-level variable in engine.ts for cross-cycle comparison.
+
+### Strategy Pivot Detection
+- `previousFocusAreas` tracked in strategy-analyzer.ts; diffs detect >0.15 priority changes or new top-3 families.
+- Emits "Strategy pivot" log event with specific percentage changes.
+- Previous strategy summary injected into LLM prompt for context-aware evolution.
+
+### Progressive Scoring
+- XGBoost uses sigmoid scoring `1 / (1 + Math.exp(-3 * (rawScore - 0.5)))` instead of hard `Math.min(1, score)` cap.
+- Knowledge depth bonus: +0.03 synthesis, +0.03 crystal, +0.02/stage pipeline (max +0.08), +0.02 insights; total capped at +0.15.
+- Final score clamped to [0, 1] after all bonuses applied.
+- Raised Tc ceilings: hydrogen max ~420K, cuprate d-wave max ~310K, correlated TM max ~230K.
 
 ### Database Schema Highlights
 - `elements`, `materials`, `learning_phases`, `novel_predictions`, `research_logs`.

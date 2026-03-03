@@ -240,7 +240,8 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
     }
   }
 
-  score = Math.min(1, score);
+  const rawScore = score;
+  score = 1 / (1 + Math.exp(-3 * (rawScore - 0.5)));
 
   let tcEstimate = 0;
   if (safeLambda > 1.5 && features.hasHydrogen) {
@@ -251,17 +252,17 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
       const exponent = -1.04 * (1 + safeLambda) / denom;
       tcEstimate = (omega_log_K / 1.2) * Math.exp(exponent);
     }
-    if (!Number.isFinite(tcEstimate) || tcEstimate < 50) tcEstimate = 50 + score * 200;
+    if (!Number.isFinite(tcEstimate) || tcEstimate < 100) tcEstimate = 100 + score * 300;
   } else if (features.hasHydrogen && features.cooperPairStrength > 0.4) {
-    tcEstimate = 150 + score * 200;
+    tcEstimate = 150 + score * 300;
   } else if (features.dWaveSymmetry) {
-    tcEstimate = 80 + score * 150;
+    tcEstimate = 80 + score * 250;
   } else if (features.correlationStrength > 0.6 && features.hasTransitionMetal) {
-    tcEstimate = 40 + score * 120;
+    tcEstimate = 40 + score * 200;
   } else if (features.hasTransitionMetal) {
-    tcEstimate = 20 + score * 100;
+    tcEstimate = 20 + score * 120;
   } else {
-    tcEstimate = 5 + score * 50;
+    tcEstimate = 5 + score * 100;
   }
 
   return { score, tcEstimate: Math.round(tcEstimate), reasoning };
@@ -285,6 +286,13 @@ interface CrystalContext {
   synthesizability: number | null;
 }
 
+interface KnowledgeDepth {
+  hasSynthesis: boolean;
+  hasCrystal: boolean;
+  pipelineStagesPassed: number;
+  hasRelatedInsights: boolean;
+}
+
 interface ResearchContext {
   synthesisCount: number;
   reactionCount: number;
@@ -294,6 +302,7 @@ interface ResearchContext {
   crystalData?: Map<string, CrystalContext>;
   strategyFocusAreas?: { area: string; priority: number }[];
   familyCounts?: Record<string, number>;
+  knowledgeDepth?: Map<string, KnowledgeDepth>;
 }
 
 export async function runMLPrediction(
@@ -398,8 +407,35 @@ export async function runMLPrediction(
 
     explorationBonus = Math.min(0.10, explorationBonus);
     if (explorationBonus > 0) {
-      xgb.score = Math.min(1, xgb.score + explorationBonus);
+      xgb.score = xgb.score + explorationBonus;
     }
+
+    let knowledgeBonus = 0;
+    const depth = context?.knowledgeDepth?.get(mat.formula);
+    if (depth) {
+      if (depth.hasSynthesis) {
+        knowledgeBonus += 0.03;
+        xgb.reasoning.push("Knowledge bonus: synthesis pathway documented");
+      }
+      if (depth.hasCrystal) {
+        knowledgeBonus += 0.03;
+        xgb.reasoning.push("Knowledge bonus: crystal structure predicted");
+      }
+      if (depth.pipelineStagesPassed > 0) {
+        const pipelineBonus = Math.min(0.08, depth.pipelineStagesPassed * 0.02);
+        knowledgeBonus += pipelineBonus;
+        xgb.reasoning.push(`Knowledge bonus: ${depth.pipelineStagesPassed} pipeline stages validated`);
+      }
+      if (depth.hasRelatedInsights) {
+        knowledgeBonus += 0.02;
+        xgb.reasoning.push("Knowledge bonus: related novel insights accumulated");
+      }
+    }
+    knowledgeBonus = Math.min(0.15, knowledgeBonus);
+    if (knowledgeBonus > 0) {
+      xgb.score += knowledgeBonus;
+    }
+    xgb.score = Math.min(1, xgb.score);
 
     scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });
   }

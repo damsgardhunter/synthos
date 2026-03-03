@@ -2,13 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
-import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot } from "@shared/schema";
+import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot, Milestone } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line
@@ -262,6 +262,45 @@ function ConvergenceTracker() {
     avgTopScore: s.avgTopScore ?? 0,
   }));
 
+  const velocityWindow = Math.min(5, sorted.length);
+  let tcVelocity = 0;
+  let scoreVelocity = 0;
+  let diversityVelocity = 0;
+  let cyclesSinceImprovement = 0;
+  if (sorted.length >= 2) {
+    const recent = sorted.slice(-velocityWindow);
+    if (recent.length >= 2) {
+      const first = recent[0];
+      const last = recent[recent.length - 1];
+      const cycles = last.cycle - first.cycle;
+      if (cycles > 0) {
+        tcVelocity = ((last.bestTc ?? 0) - (first.bestTc ?? 0)) / cycles;
+        scoreVelocity = ((last.bestScore ?? 0) - (first.bestScore ?? 0)) / cycles;
+        diversityVelocity = ((last.familyDiversity ?? 0) - (first.familyDiversity ?? 0)) / cycles;
+      }
+    }
+    let maxTcSoFar = 0;
+    let prevScore = 0;
+    let lastImprovementCycle = sorted[0].cycle;
+    for (let i = 0; i < sorted.length; i++) {
+      const s = sorted[i];
+      const tc = s.bestTc ?? 0;
+      const score = s.bestScore ?? 0;
+      if (tc > maxTcSoFar + 1 || score > prevScore + 0.005) {
+        lastImprovementCycle = s.cycle;
+        maxTcSoFar = Math.max(maxTcSoFar, tc);
+      }
+      prevScore = score;
+    }
+    cyclesSinceImprovement = (latest.cycle ?? 0) - lastImprovementCycle;
+  }
+
+  function velocityColor(v: number, threshold: number): string {
+    if (v > threshold) return "text-green-600 dark:text-green-400";
+    if (v < -threshold) return "text-red-600 dark:text-red-400";
+    return "text-yellow-600 dark:text-yellow-400";
+  }
+
   return (
     <Card data-testid="convergence-tracker">
       <CardHeader className="pb-3">
@@ -373,6 +412,103 @@ function ConvergenceTracker() {
             <span className="text-xs text-muted-foreground">Avg Top-10</span>
           </div>
         </div>
+
+        {sorted.length >= 2 && (
+          <div className="grid gap-3 sm:grid-cols-4 mt-2" data-testid="learning-velocity">
+            <div className="rounded-lg border border-border bg-muted/30 p-2.5">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Tc Velocity</p>
+              <p className={`text-sm font-bold font-mono ${velocityColor(tcVelocity, 0.5)}`} data-testid="velocity-tc">
+                {tcVelocity >= 0 ? "+" : ""}{tcVelocity.toFixed(1)}K/cycle
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/30 p-2.5">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Score Velocity</p>
+              <p className={`text-sm font-bold font-mono ${velocityColor(scoreVelocity, 0.003)}`} data-testid="velocity-score">
+                {scoreVelocity >= 0 ? "+" : ""}{scoreVelocity.toFixed(4)}/cycle
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/30 p-2.5">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Diversity Growth</p>
+              <p className={`text-sm font-bold font-mono ${velocityColor(diversityVelocity, 0.1)}`} data-testid="velocity-diversity">
+                {diversityVelocity >= 0 ? "+" : ""}{diversityVelocity.toFixed(2)}/cycle
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/30 p-2.5">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Since Improvement</p>
+              <p className={`text-sm font-bold font-mono ${cyclesSinceImprovement <= 1 ? "text-green-600 dark:text-green-400" : cyclesSinceImprovement <= 3 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400"}`} data-testid="cycles-since-improvement">
+                {cyclesSinceImprovement} cycle{cyclesSinceImprovement !== 1 ? "s" : ""}
+              </p>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+const MILESTONE_ICONS: Record<string, typeof Star> = {
+  "new-family": FlaskConical,
+  "tc-record": Trophy,
+  "pipeline-graduate": GraduationCap,
+  "diversity-threshold": Layers,
+  "knowledge-milestone": Database,
+  "insight-cascade": BrainCircuit,
+};
+
+function MilestoneTimeline() {
+  const { data, isLoading } = useQuery<{ milestones: Milestone[]; total: number }>({
+    queryKey: ["/api/milestones"],
+  });
+
+  if (isLoading || !data || data.milestones.length === 0) return null;
+
+  return (
+    <Card data-testid="milestone-timeline">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Star className="h-4 w-4 text-amber-500 fill-amber-500" />
+            Discovery Milestones
+          </CardTitle>
+          <Badge variant="secondary" className="text-xs border-0 bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300" data-testid="milestone-count">
+            {data.total} total
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          {data.milestones.slice(0, 8).map((ms) => {
+            const Icon = MILESTONE_ICONS[ms.type] || Star;
+            return (
+              <div
+                key={ms.id}
+                className="flex items-start gap-3 p-2.5 rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50/50 dark:bg-amber-950/20"
+                data-testid={`milestone-${ms.id}`}
+              >
+                <div className="p-1.5 rounded-md bg-amber-100 dark:bg-amber-900/50 flex-shrink-0">
+                  <Icon className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-amber-800 dark:text-amber-200">{ms.title}</span>
+                    <span className="text-amber-500 flex-shrink-0">
+                      {Array.from({ length: ms.significance }, (_, j) => (
+                        <Star key={j} className="h-2.5 w-2.5 inline fill-amber-400 text-amber-400" />
+                      ))}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">{ms.description}</p>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[10px] text-muted-foreground">Cycle {ms.cycle}</span>
+                    {ms.relatedFormula && (
+                      <Badge variant="secondary" className="text-[10px] border-0 h-4 px-1.5 font-mono">{ms.relatedFormula}</Badge>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </CardContent>
     </Card>
   );
@@ -402,6 +538,10 @@ export default function ResearchPipeline() {
     const hasConvergence = ws.messages.some((m) => m.type === "convergenceUpdate");
     if (hasConvergence) {
       queryClient.invalidateQueries({ queryKey: ["/api/convergence"] });
+    }
+    const hasMilestone = ws.messages.some((m) => m.type === "milestone");
+    if (hasMilestone) {
+      queryClient.invalidateQueries({ queryKey: ["/api/milestones"] });
     }
   }, [ws.messages.length]);
 
@@ -477,6 +617,8 @@ export default function ResearchPipeline() {
       </Card>
 
       <ConvergenceTracker />
+
+      <MilestoneTimeline />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-4">

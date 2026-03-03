@@ -11,6 +11,7 @@ import { runStructurePredictionBatch } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
+import { checkMilestones } from "./milestone-tracker";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -58,6 +59,19 @@ let currentStrategyHint: string | null = null;
 let currentStrategyFocusAreas: { area: string; priority: number }[] = [];
 let currentFamilyCounts: Record<string, number> = {};
 
+interface PreviousCycleMetrics {
+  bestTc: number;
+  bestScore: number;
+  candidateCount: number;
+  familyDiversity: number;
+  insightCount: number;
+  topFamily: string;
+  pipelinePassed: number;
+  pipelineTotal: number;
+}
+let previousCycleMetrics: PreviousCycleMetrics | null = null;
+let cycleInsightsThisCycle = 0;
+
 function broadcast(type: string, data: any) {
   if (!wss) return;
   const msg = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
@@ -78,6 +92,9 @@ const emit: EventEmitter = (type: string, data: any) => {
       detail: data.detail || null,
       dataSource: data.dataSource || null,
     }).catch(() => {});
+    if (data.event === "Novel insight discovered") {
+      cycleInsightsThisCycle++;
+    }
   }
 };
 
@@ -447,12 +464,28 @@ async function runLearningCycle() {
 
   cycleCount++;
   lastCycleAt = new Date().toISOString();
+  cycleInsightsThisCycle = 0;
   broadcast("cycleStart", { cycle: cycleCount });
+
+  let cycleStartDetail = "";
+  if (previousCycleMetrics && currentStrategyFocusAreas.length > 0) {
+    const topFocus = currentStrategyFocusAreas[0]?.area || "broad exploration";
+    if (previousCycleMetrics.bestTc > 0) {
+      const tcTrend = previousCycleMetrics.bestScore >= 0.9 ? "scores are strong" : "still building evidence";
+      cycleStartDetail = `Cycle ${cycleCount}: Focusing on ${topFocus} (${tcTrend}, best Tc: ${Math.round(previousCycleMetrics.bestTc)}K). ${previousCycleMetrics.familyDiversity} families explored so far.`;
+    } else {
+      cycleStartDetail = `Cycle ${cycleCount}: Building knowledge base. Targeting ${topFocus} for superconductor discovery.`;
+    }
+  } else if (cycleCount <= 3) {
+    cycleStartDetail = `Cycle ${cycleCount}: Initializing knowledge base. Gathering materials, synthesis paths, and reaction data before superconductor screening.`;
+  } else {
+    cycleStartDetail = `Cycle ${cycleCount}: Continuing exploration. Materials + synthesis + reactions first, then analysis, then SC research.`;
+  }
 
   emit("log", {
     phase: "engine",
     event: `Learning cycle ${cycleCount} started`,
-    detail: "Priority: materials + synthesis + reactions first, then bonding + prediction, then discovery. SC research runs last after knowledge is built.",
+    detail: cycleStartDetail,
     dataSource: "Internal",
   });
 
@@ -544,6 +577,75 @@ async function runLearningCycle() {
             total: snapshots.length,
           });
         }
+      } catch {}
+
+      try {
+        await checkMilestones(emit, broadcast, cycleCount, cycleInsightsThisCycle);
+      } catch {}
+
+      try {
+        const currentCandidates = await storage.getSuperconductorCandidates(50);
+        let currentBestTc = 0;
+        let currentBestScore = 0;
+        for (const c of currentCandidates) {
+          if ((c.predictedTc ?? 0) > currentBestTc) currentBestTc = c.predictedTc ?? 0;
+          if ((c.ensembleScore ?? 0) > currentBestScore) currentBestScore = c.ensembleScore ?? 0;
+        }
+        const { classifyFamily: classifyFam } = await import("./utils");
+        const currentFamilies = new Set(currentCandidates.map(c => classifyFam(c.formula)));
+        const currentDiversity = currentFamilies.size;
+        const currentInsightCount = await storage.getNovelInsightCount();
+        const stats = await storage.getStats();
+        const pipelineTotal = stats.pipelineStages.reduce((s, p) => s + p.count, 0);
+        const pipelinePassed = stats.pipelineStages.reduce((s, p) => s + p.passed, 0);
+
+        let endSummaryParts: string[] = [];
+        endSummaryParts.push(`${currentCandidates.length} total candidates`);
+
+        if (previousCycleMetrics) {
+          const tcDelta = currentBestTc - previousCycleMetrics.bestTc;
+          if (tcDelta > 1) {
+            endSummaryParts.push(`best Tc improved by ${Math.round(tcDelta)}K to ${Math.round(currentBestTc)}K`);
+          } else if (currentBestTc > 0) {
+            endSummaryParts.push(`best Tc unchanged at ${Math.round(currentBestTc)}K`);
+          }
+
+          const scoreDelta = currentBestScore - previousCycleMetrics.bestScore;
+          if (scoreDelta > 0.005) {
+            endSummaryParts.push(`top score rose to ${currentBestScore.toFixed(3)}`);
+          }
+
+          const diversityDelta = currentDiversity - previousCycleMetrics.familyDiversity;
+          if (diversityDelta > 0) {
+            endSummaryParts.push(`diversity expanded to ${currentDiversity} families (+${diversityDelta})`);
+          }
+
+          if (cycleInsightsThisCycle > 0) {
+            endSummaryParts.push(`${cycleInsightsThisCycle} novel insights`);
+          }
+        } else {
+          if (currentBestTc > 0) endSummaryParts.push(`best Tc: ${Math.round(currentBestTc)}K`);
+          if (cycleInsightsThisCycle > 0) endSummaryParts.push(`${cycleInsightsThisCycle} novel insights`);
+        }
+
+        emit("log", {
+          phase: "engine",
+          event: `Cycle ${cycleCount} complete`,
+          detail: endSummaryParts.join(". ") + ".",
+          dataSource: "Internal",
+        });
+
+        const topFamily = currentStrategyFocusAreas[0]?.area || "";
+        previousCycleMetrics = {
+          bestTc: currentBestTc,
+          bestScore: currentBestScore,
+          candidateCount: currentCandidates.length,
+          familyDiversity: currentDiversity,
+          insightCount: currentInsightCount,
+          topFamily,
+          pipelinePassed,
+          pipelineTotal,
+        };
       } catch {}
     }
   } catch (err: any) {

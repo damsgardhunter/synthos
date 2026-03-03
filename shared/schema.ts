@@ -212,6 +212,17 @@ export const convergenceSnapshots = pgTable("convergence_snapshots", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const milestones = pgTable("milestones", {
+  id: varchar("id").primaryKey(),
+  cycle: integer("cycle").notNull(),
+  type: varchar("type", { length: 50 }).notNull(),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  significance: integer("significance").notNull(),
+  relatedFormula: text("related_formula"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertElementSchema = createInsertSchema(elements);
 export const insertMaterialSchema = createInsertSchema(materials).omit({ learnedAt: true });
 export const insertLearningPhaseSchema = createInsertSchema(learningPhases).omit({ startedAt: true, completedAt: true });
@@ -225,6 +236,7 @@ export const insertComputationalResultSchema = createInsertSchema(computationalR
 export const insertNovelInsightSchema = createInsertSchema(novelInsights).omit({ discoveredAt: true });
 export const insertResearchStrategySchema = createInsertSchema(researchStrategies).omit({ createdAt: true });
 export const insertConvergenceSnapshotSchema = createInsertSchema(convergenceSnapshots).omit({ createdAt: true });
+export const insertMilestoneSchema = createInsertSchema(milestones).omit({ createdAt: true });
 
 export type Element = typeof elements.$inferSelect;
 export type Material = typeof materials.$inferSelect;
@@ -239,6 +251,7 @@ export type ComputationalResult = typeof computationalResults.$inferSelect;
 export type NovelInsight = typeof novelInsights.$inferSelect;
 export type ResearchStrategy = typeof researchStrategies.$inferSelect;
 export type ConvergenceSnapshot = typeof convergenceSnapshots.$inferSelect;
+export type Milestone = typeof milestones.$inferSelect;
 
 export type InsertElement = z.infer<typeof insertElementSchema>;
 export type InsertMaterial = z.infer<typeof insertMaterialSchema>;
@@ -253,5 +266,6 @@ export type InsertComputationalResult = z.infer<typeof insertComputationalResult
 export type InsertNovelInsight = z.infer<typeof insertNovelInsightSchema>;
 export type InsertResearchStrategy = z.infer<typeof insertResearchStrategySchema>;
 export type InsertConvergenceSnapshot = z.infer<typeof insertConvergenceSnapshotSchema>;
+export type InsertMilestone = z.infer<typeof insertMilestoneSchema>;
 
 export * from "./models/chat";

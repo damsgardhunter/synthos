@@ -11,7 +11,7 @@ import {
   Atom, Database, FlaskConical, Brain,
   TrendingUp, CheckCircle2, Clock, Loader2,
   Zap, BookOpen, Microscope, BarChart3, FileText,
-  Compass, RefreshCw
+  Compass, RefreshCw, Star
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip } from "recharts";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -155,6 +155,7 @@ export default function Dashboard() {
   const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"] });
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"] });
+  const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"] });
   const ws = useWebSocket();
 
   useEffect(() => {
@@ -171,6 +172,10 @@ export default function Dashboard() {
     if (hasStrategy) {
       queryClient.invalidateQueries({ queryKey: ["/api/research-strategy"] });
       queryClient.invalidateQueries({ queryKey: ["/api/research-strategy/history"] });
+    }
+    const hasMilestone = ws.messages.some((m) => m.type === "milestone");
+    if (hasMilestone) {
+      queryClient.invalidateQueries({ queryKey: ["/api/milestones"] });
     }
   }, [ws.messages.length]);
 
@@ -229,6 +234,7 @@ export default function Dashboard() {
             <StatCard title="Reactions Learned" value={stats?.chemicalReactions ?? 0} icon={BookOpen} sub="chemical reaction database" />
             <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 12 learning phases" />
             <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 12}`} icon={TrendingUp} sub="currently running" />
+            <StatCard title="Milestones" value={milestoneData?.total ?? 0} icon={Star} sub="discovery breakthroughs" />
           </>
         )}
       </div>
