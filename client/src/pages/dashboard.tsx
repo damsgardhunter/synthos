@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { queryClient } from "@/lib/queryClient";
 import type { LearningPhase, ResearchLog } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -11,6 +13,8 @@ import {
   Zap, BookOpen, Microscope, BarChart3, FileText
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip } from "recharts";
+import { useWebSocket } from "@/hooks/use-websocket";
+import { EngineControls } from "@/components/engine-controls";
 
 interface Stats {
   elementsLearned: number;
@@ -44,6 +48,19 @@ export default function Dashboard() {
   const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"] });
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"] });
+  const ws = useWebSocket();
+
+  useEffect(() => {
+    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
+    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
+    if (hasRelevant) {
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
+    }
+  }, [ws.messages.length]);
 
   const radarData = phases?.map(p => ({
     subject: p.name.split(" ").slice(0, 2).join(" "),
@@ -74,6 +91,13 @@ export default function Dashboard() {
           Real-time overview of the MatSci-∞ learning system and materials research progress.
         </p>
       </div>
+
+      <EngineControls
+        engineState={ws.engineState}
+        activeTasks={ws.activeTasks}
+        connected={ws.connected}
+        messages={ws.messages}
+      />
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {statsLoading ? (

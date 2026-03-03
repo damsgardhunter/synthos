@@ -83,3 +83,5 @@ export type InsertMaterial = z.infer<typeof insertMaterialSchema>;
 export type InsertLearningPhase = z.infer<typeof insertLearningPhaseSchema>;
 export type InsertNovelPrediction = z.infer<typeof insertNovelPredictionSchema>;
 export type InsertResearchLog = z.infer<typeof insertResearchLogSchema>;
+
+export * from "./models/chat";

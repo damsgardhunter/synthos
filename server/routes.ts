@@ -2,8 +2,10 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema } from "@shared/schema";
+import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus } from "./learning/engine";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  initWebSocket(httpServer);
   app.get("/api/elements", async (_req, res) => {
     try {
       const els = await storage.getElements();
@@ -90,6 +92,51 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(log);
     } catch (e) {
       res.status(500).json({ error: "Failed to insert log" });
+    }
+  });
+
+  app.post("/api/engine/start", async (_req, res) => {
+    try {
+      const status = startEngine();
+      res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to start engine" });
+    }
+  });
+
+  app.post("/api/engine/stop", async (_req, res) => {
+    try {
+      const status = stopEngine();
+      res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to stop engine" });
+    }
+  });
+
+  app.post("/api/engine/pause", async (_req, res) => {
+    try {
+      const status = pauseEngine();
+      res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to pause engine" });
+    }
+  });
+
+  app.post("/api/engine/resume", async (_req, res) => {
+    try {
+      const status = resumeEngine();
+      res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to resume engine" });
+    }
+  });
+
+  app.get("/api/engine/status", async (_req, res) => {
+    try {
+      const status = getStatus();
+      res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get engine status" });
     }
   });
 
