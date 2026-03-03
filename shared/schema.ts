@@ -187,6 +187,29 @@ export const novelInsights = pgTable("novel_insights", {
   discoveredAt: timestamp("discovered_at").defaultNow(),
 });
 
+export const researchStrategies = pgTable("research_strategies", {
+  id: varchar("id").primaryKey(),
+  cycle: integer("cycle").notNull(),
+  focusAreas: jsonb("focus_areas").notNull(),
+  summary: text("summary").notNull(),
+  performanceSignals: jsonb("performance_signals"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const convergenceSnapshots = pgTable("convergence_snapshots", {
+  id: varchar("id").primaryKey(),
+  cycle: integer("cycle").notNull(),
+  bestTc: real("best_tc"),
+  bestScore: real("best_score"),
+  avgTopScore: real("avg_top_score"),
+  candidatesTotal: integer("candidates_total"),
+  pipelinePassRate: real("pipeline_pass_rate"),
+  novelInsightCount: integer("novel_insight_count"),
+  topFormula: text("top_formula"),
+  strategyFocus: text("strategy_focus"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertElementSchema = createInsertSchema(elements);
 export const insertMaterialSchema = createInsertSchema(materials).omit({ learnedAt: true });
 export const insertLearningPhaseSchema = createInsertSchema(learningPhases).omit({ startedAt: true, completedAt: true });
@@ -198,6 +221,8 @@ export const insertSuperconductorCandidateSchema = createInsertSchema(supercondu
 export const insertCrystalStructureSchema = createInsertSchema(crystalStructures).omit({ predictedAt: true });
 export const insertComputationalResultSchema = createInsertSchema(computationalResults).omit({ computedAt: true });
 export const insertNovelInsightSchema = createInsertSchema(novelInsights).omit({ discoveredAt: true });
+export const insertResearchStrategySchema = createInsertSchema(researchStrategies).omit({ createdAt: true });
+export const insertConvergenceSnapshotSchema = createInsertSchema(convergenceSnapshots).omit({ createdAt: true });
 
 export type Element = typeof elements.$inferSelect;
 export type Material = typeof materials.$inferSelect;
@@ -210,6 +235,8 @@ export type SuperconductorCandidate = typeof superconductorCandidates.$inferSele
 export type CrystalStructure = typeof crystalStructures.$inferSelect;
 export type ComputationalResult = typeof computationalResults.$inferSelect;
 export type NovelInsight = typeof novelInsights.$inferSelect;
+export type ResearchStrategy = typeof researchStrategies.$inferSelect;
+export type ConvergenceSnapshot = typeof convergenceSnapshots.$inferSelect;
 
 export type InsertElement = z.infer<typeof insertElementSchema>;
 export type InsertMaterial = z.infer<typeof insertMaterialSchema>;
@@ -222,5 +249,7 @@ export type InsertSuperconductorCandidate = z.infer<typeof insertSuperconductorC
 export type InsertCrystalStructure = z.infer<typeof insertCrystalStructureSchema>;
 export type InsertComputationalResult = z.infer<typeof insertComputationalResultSchema>;
 export type InsertNovelInsight = z.infer<typeof insertNovelInsightSchema>;
+export type InsertResearchStrategy = z.infer<typeof insertResearchStrategySchema>;
+export type InsertConvergenceSnapshot = z.infer<typeof insertConvergenceSnapshotSchema>;
 
 export * from "./models/chat";

@@ -10,6 +10,7 @@ import { runFullPhysicsAnalysis } from "./physics-engine";
 import { runStructurePredictionBatch } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
+import { analyzeAndEvolveStrategy, captureConvergenceSnapshot } from "./strategy-analyzer";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -53,6 +54,7 @@ let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
 let isRunningCycle = false;
 let phase7Offset = 0;
+let currentStrategyHint: string | null = null;
 
 function broadcast(type: string, data: any) {
   if (!wss) return;
@@ -218,7 +220,7 @@ async function runPhase6_Discovery() {
     await updatePhaseStatus(6, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const generated = await generateNovelFormulas(emit, allInsights.slice(-10));
+    const generated = await generateNovelFormulas(emit, allInsights.slice(-10), undefined, currentStrategyHint || undefined);
     totalPredictionsMade += generated;
 
     const predCount = (await storage.getNovelPredictions()).length;
@@ -500,6 +502,34 @@ async function runLearningCycle() {
         detail: `Waiting for SC candidates: ${scCount} (need 3+)`,
         dataSource: "Physics Engine",
       });
+    }
+
+    if (state === "running") {
+      try {
+        const strategy = await analyzeAndEvolveStrategy(emit, cycleCount);
+        if (strategy) {
+          currentStrategyHint = strategy.focusAreas
+            .slice(0, 3)
+            .map(f => f.area)
+            .join(", ");
+          broadcast("strategyUpdate", {
+            cycle: cycleCount,
+            focusAreas: strategy.focusAreas,
+            summary: strategy.summary,
+          });
+        }
+      } catch {}
+
+      try {
+        await captureConvergenceSnapshot(emit, cycleCount, currentStrategyHint || undefined);
+        const snapshots = await storage.getConvergenceSnapshots(5);
+        if (snapshots.length > 0) {
+          broadcast("convergenceUpdate", {
+            latest: snapshots[snapshots.length - 1],
+            total: snapshots.length,
+          });
+        }
+      } catch {}
     }
   } catch (err: any) {
     emit("log", {

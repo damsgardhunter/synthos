@@ -45,7 +45,8 @@ interface GeneratedFormula {
 export async function generateNovelFormulas(
   emit: EventEmitter,
   insights: string[],
-  targetApp?: string
+  targetApp?: string,
+  strategyHint?: string
 ): Promise<number> {
   const application = targetApp || getNextTargetApplication();
   let generated = 0;
@@ -53,7 +54,7 @@ export async function generateNovelFormulas(
   emit("log", {
     phase: "phase-6",
     event: "Formula generation started",
-    detail: `Generating novel materials for: ${application}`,
+    detail: `Generating novel materials for: ${application}${strategyHint ? ` (strategy: ${strategyHint})` : ""}`,
     dataSource: "OpenAI NLP",
   });
 
@@ -61,6 +62,10 @@ export async function generateNovelFormulas(
     insights.length > 0
       ? `Known patterns from analysis:\n${insights.slice(0, 5).join("\n")}`
       : "Use general materials science knowledge.";
+
+  const strategyContext = strategyHint
+    ? `\n\nCurrent research strategy prioritizes: ${strategyHint}. When generating candidates, prefer compositions from these material families if relevant to the target application.`
+    : "";
 
   try {
     const response = await openai.chat.completions.create({
@@ -72,7 +77,7 @@ export async function generateNovelFormulas(
         },
         {
           role: "user",
-          content: `Target application: ${application}\n\n${insightContext}\n\nGenerate novel material candidates.`,
+          content: `Target application: ${application}\n\n${insightContext}${strategyContext}\n\nGenerate novel material candidates.`,
         },
       ],
       response_format: { type: "json_object" },

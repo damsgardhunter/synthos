@@ -48,6 +48,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - **Crystal Structure Prediction**: AI-powered prediction of crystal structures, including stability and synthesizability.
 - **Candidate Detail Page**: Unified profile at `/candidate/:formula` aggregating SC candidate data, ML scores, crystal structures, synthesis pathways, chemical reactions, and pipeline results. Cross-linked from SC Lab, Physics, Novel Discovery, and Materials pages via "View Full Profile" links.
 
+### Evolving Research Strategy
+- After each engine cycle, `analyzeAndEvolveStrategy()` in `server/learning/strategy-analyzer.ts` classifies top SC candidates by material family (Hydrides, Cuprates, Pnictides, Chalcogenides, Borides, Carbides, Nitrides, Oxides, Intermetallics, Other).
+- OpenAI generates ranked focus areas with priorities and reasoning based on per-family performance signals.
+- Strategy hint is passed to the formula generator (Phase 6) to bias LLM toward priority material families.
+- API: `GET /api/research-strategy`, `GET /api/research-strategy/history?limit=20`
+- UI: "Research Strategy" card on Dashboard showing ranked priority bars, AI summary, and evolution counter. Real-time updates via `strategyUpdate` WebSocket event.
+
+### Convergence Tracking
+- `captureConvergenceSnapshot()` records bestTc, bestScore, avgTopScore, candidatesTotal, pipelinePassRate, novelInsightCount, topFormula per cycle.
+- API: `GET /api/convergence?limit=50`
+- UI: "Convergence Tracker" on Research Pipeline page with dual-axis LineChart (Best Tc + Best Score over cycles), momentum indicator (Improving/Plateaued/Declining based on recent vs previous 3 snapshots), best candidate callout, and pipeline pass rate. Real-time updates via `convergenceUpdate` WebSocket event.
+
 ### Database Schema Highlights
 - `elements`, `materials`, `learning_phases`, `novel_predictions`, `research_logs`.
 - `synthesis_processes`: Detailed synthesis conditions.
@@ -56,6 +68,8 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - `crystal_structures`: Space groups, lattice parameters, stability, synthesizability.
 - `computational_results`: Pipeline results, pass/fail, failure reasons.
 - `novel_insights`: Insight novelty tracking with deterministic deduplication (content+phase hash IDs), novelty scores, categories, and OpenAI evaluation.
+- `research_strategies`: Strategy evolution history with focus areas (jsonb), summary, and performance signals.
+- `convergence_snapshots`: Per-cycle metrics tracking bestTc, bestScore, avgTopScore, pipelinePassRate, topFormula.
 
 ### Novel Insight Detection
 - Integrated into phases 3, 5, and 7 of the learning engine.

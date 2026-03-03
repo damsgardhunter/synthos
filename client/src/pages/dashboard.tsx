@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { queryClient } from "@/lib/queryClient";
-import type { LearningPhase, ResearchLog } from "@shared/schema";
+import type { LearningPhase, ResearchLog, ResearchStrategy } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -10,7 +10,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Atom, Database, FlaskConical, Brain,
   TrendingUp, CheckCircle2, Clock, Loader2,
-  Zap, BookOpen, Microscope, BarChart3, FileText
+  Zap, BookOpen, Microscope, BarChart3, FileText,
+  Compass, RefreshCw
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip } from "recharts";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -47,6 +48,109 @@ function StatCard({ title, value, icon: Icon, sub }: { title: string; value: str
   );
 }
 
+const FAMILY_COLORS: Record<string, string> = {
+  "Hydrides": "bg-red-500",
+  "Cuprates": "bg-blue-500",
+  "Pnictides": "bg-indigo-500",
+  "Chalcogenides": "bg-amber-500",
+  "Borides": "bg-emerald-500",
+  "Carbides": "bg-teal-500",
+  "Nitrides": "bg-cyan-500",
+  "Oxides": "bg-orange-500",
+  "Intermetallics": "bg-purple-500",
+  "Other": "bg-gray-400",
+};
+
+interface FocusArea {
+  area: string;
+  priority: number;
+  reasoning: string;
+}
+
+function StrategyCard() {
+  const { data: strategy, isLoading } = useQuery<ResearchStrategy | null>({
+    queryKey: ["/api/research-strategy"],
+  });
+  const { data: history } = useQuery<ResearchStrategy[]>({
+    queryKey: ["/api/research-strategy/history"],
+  });
+
+  const evolutionCount = history?.length ?? 0;
+  const focusAreas = (strategy?.focusAreas as FocusArea[] | undefined) ?? [];
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Compass className="h-4 w-4 text-primary" />
+            Research Strategy
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Skeleton className="h-32" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card data-testid="strategy-card">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Compass className="h-4 w-4 text-primary" />
+            Research Strategy
+          </CardTitle>
+          {evolutionCount > 0 && (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="strategy-evolution-count">
+              <RefreshCw className="h-3 w-3" />
+              Strategy evolved {evolutionCount} time{evolutionCount !== 1 ? "s" : ""}
+            </div>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!strategy ? (
+          <p className="text-sm text-muted-foreground italic" data-testid="strategy-placeholder">
+            Strategy will evolve once the engine begins learning
+          </p>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-2.5" data-testid="strategy-focus-areas">
+              {focusAreas.map((fa, i) => (
+                <div key={fa.area} className="space-y-1" data-testid={`focus-area-${i}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono font-bold text-muted-foreground w-4">#{i + 1}</span>
+                      <span className="text-sm font-medium">{fa.area}</span>
+                    </div>
+                    <span className="text-xs font-mono text-muted-foreground">
+                      {(fa.priority * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${FAMILY_COLORS[fa.area] ?? "bg-primary"}`}
+                      style={{ width: `${Math.max(5, fa.priority * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-muted-foreground pl-6 leading-relaxed">{fa.reasoning}</p>
+                </div>
+              ))}
+            </div>
+            {strategy.summary && (
+              <p className="text-xs text-muted-foreground leading-relaxed border-t border-border pt-3" data-testid="strategy-summary">
+                {strategy.summary}
+              </p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Dashboard() {
   const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"] });
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
@@ -54,7 +158,7 @@ export default function Dashboard() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
+    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log", "strategyUpdate"];
     const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
     if (hasRelevant) {
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
@@ -62,6 +166,11 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
+    }
+    const hasStrategy = ws.messages.some((m) => m.type === "strategyUpdate");
+    if (hasStrategy) {
+      queryClient.invalidateQueries({ queryKey: ["/api/research-strategy"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/research-strategy/history"] });
     }
   }, [ws.messages.length]);
 
@@ -208,6 +317,8 @@ export default function Dashboard() {
         </div>
 
         <div className="space-y-4">
+          <StrategyCard />
+
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base flex items-center gap-2">

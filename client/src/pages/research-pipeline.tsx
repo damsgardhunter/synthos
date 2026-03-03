@@ -2,15 +2,16 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
-import type { LearningPhase, ResearchLog, NovelInsight } from "@shared/schema";
+import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge } from "lucide-react";
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  LineChart, Line
 } from "recharts";
 
 function StatusIcon({ status }: { status: string }) {
@@ -194,6 +195,172 @@ function NoveltyBar({ score }: { score: number }) {
   );
 }
 
+function computeMomentum(snapshots: ConvergenceSnapshot[]): { icon: typeof TrendingUp; label: string; color: string } {
+  if (snapshots.length < 4) return { icon: Minus, label: "Insufficient data", color: "text-muted-foreground" };
+
+  const recent = snapshots.slice(-3);
+  const previous = snapshots.slice(-6, -3);
+  if (previous.length < 2) return { icon: Minus, label: "Gathering data", color: "text-muted-foreground" };
+
+  const recentAvg = recent.reduce((s, c) => s + (c.bestScore ?? 0), 0) / recent.length;
+  const prevAvg = previous.reduce((s, c) => s + (c.bestScore ?? 0), 0) / previous.length;
+  const delta = recentAvg - prevAvg;
+
+  if (delta > 0.02) return { icon: TrendingUp, label: "Improving", color: "text-green-600 dark:text-green-400" };
+  if (delta < -0.02) return { icon: TrendingDown, label: "Declining", color: "text-red-600 dark:text-red-400" };
+  return { icon: Minus, label: "Plateaued", color: "text-yellow-600 dark:text-yellow-400" };
+}
+
+function ConvergenceTracker() {
+  const { data: snapshots, isLoading } = useQuery<ConvergenceSnapshot[]>({
+    queryKey: ["/api/convergence"],
+  });
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Target className="h-4 w-4 text-primary" />
+            Convergence Tracker
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Skeleton className="h-48" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!snapshots || snapshots.length === 0) {
+    return (
+      <Card data-testid="convergence-tracker">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Target className="h-4 w-4 text-primary" />
+            Convergence Tracker
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground italic" data-testid="convergence-placeholder">
+            Convergence data will appear once the engine completes learning cycles
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const sorted = [...snapshots].sort((a, b) => a.cycle - b.cycle);
+  const latest = sorted[sorted.length - 1];
+  const momentum = computeMomentum(sorted);
+  const MomentumIcon = momentum.icon;
+
+  const chartData = sorted.map(s => ({
+    cycle: `C${s.cycle}`,
+    bestTc: s.bestTc ?? 0,
+    bestScore: s.bestScore ?? 0,
+    avgTopScore: s.avgTopScore ?? 0,
+  }));
+
+  return (
+    <Card data-testid="convergence-tracker">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Target className="h-4 w-4 text-primary" />
+            Convergence Tracker
+          </CardTitle>
+          <div className="flex items-center gap-4">
+            <div className={`flex items-center gap-1.5 text-xs font-medium ${momentum.color}`} data-testid="momentum-indicator">
+              <MomentumIcon className="h-4 w-4" />
+              {momentum.label}
+            </div>
+            {latest.pipelinePassRate != null && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="pipeline-pass-rate">
+                <Gauge className="h-3.5 w-3.5" />
+                Pipeline: {(latest.pipelinePassRate * 100).toFixed(1)}% pass rate
+              </div>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-3">
+          {latest.topFormula && (
+            <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="best-candidate-callout">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Best Candidate</p>
+              <p className="text-sm font-bold font-mono">{latest.topFormula}</p>
+              <div className="flex items-center gap-3 mt-1">
+                {latest.bestTc != null && (
+                  <span className="text-xs text-muted-foreground">Tc: <span className="font-mono font-bold text-foreground">{latest.bestTc.toFixed(1)}K</span></span>
+                )}
+                {latest.bestScore != null && (
+                  <span className="text-xs text-muted-foreground">Score: <span className="font-mono font-bold text-foreground">{latest.bestScore.toFixed(3)}</span></span>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-stats-total">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Total Candidates</p>
+            <p className="text-lg font-bold font-mono">{(latest.candidatesTotal ?? 0).toLocaleString()}</p>
+          </div>
+          <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-stats-cycles">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Cycles Tracked</p>
+            <p className="text-lg font-bold font-mono">{sorted.length}</p>
+            {latest.strategyFocus && (
+              <p className="text-[10px] text-muted-foreground mt-0.5 truncate">Focus: {latest.strategyFocus}</p>
+            )}
+          </div>
+        </div>
+
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={chartData} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+            <XAxis dataKey="cycle" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
+            <YAxis
+              yAxisId="tc"
+              orientation="left"
+              tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+              label={{ value: "Tc (K)", angle: -90, position: "insideLeft", style: { fontSize: 10, fill: "hsl(var(--muted-foreground))" } }}
+            />
+            <YAxis
+              yAxisId="score"
+              orientation="right"
+              domain={[0, 1]}
+              tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+              label={{ value: "Score", angle: 90, position: "insideRight", style: { fontSize: 10, fill: "hsl(var(--muted-foreground))" } }}
+            />
+            <Tooltip
+              contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
+              formatter={(v: any, name: string) => [
+                name === "bestTc" ? `${Number(v).toFixed(1)}K` : Number(v).toFixed(3),
+                name === "bestTc" ? "Best Tc" : name === "bestScore" ? "Best Score" : "Avg Top-10"
+              ]}
+            />
+            <Line yAxisId="tc" type="monotone" dataKey="bestTc" name="bestTc" stroke="#ef4444" strokeWidth={2} dot={{ r: 3 }} />
+            <Line yAxisId="score" type="monotone" dataKey="bestScore" name="bestScore" stroke="#6366f1" strokeWidth={2} dot={{ r: 3 }} />
+            <Line yAxisId="score" type="monotone" dataKey="avgTopScore" name="avgTopScore" stroke="#6366f1" strokeWidth={1} strokeDasharray="4 4" dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 justify-center">
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full bg-red-500" />
+            <span className="text-xs text-muted-foreground">Best Tc (K)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full bg-indigo-500" />
+            <span className="text-xs text-muted-foreground">Best Score</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full border border-indigo-500 bg-transparent" />
+            <span className="text-xs text-muted-foreground">Avg Top-10</span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ResearchPipeline() {
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({
     queryKey: ["/api/learning-phases"],
@@ -208,12 +375,16 @@ export default function ResearchPipeline() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "insight", "cycleEnd", "log"];
+    const relevantTypes = ["phaseUpdate", "progress", "insight", "cycleEnd", "log", "convergenceUpdate"];
     const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
     if (hasRelevant) {
       queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
       queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
+    }
+    const hasConvergence = ws.messages.some((m) => m.type === "convergenceUpdate");
+    if (hasConvergence) {
+      queryClient.invalidateQueries({ queryKey: ["/api/convergence"] });
     }
   }, [ws.messages.length]);
 
@@ -287,6 +458,8 @@ export default function ResearchPipeline() {
           </div>
         </CardContent>
       </Card>
+
+      <ConvergenceTracker />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-4">

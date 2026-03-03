@@ -240,6 +240,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/research-strategy", async (_req, res) => {
+    try {
+      const strategy = await storage.getLatestStrategy();
+      res.json(strategy || null);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch research strategy" });
+    }
+  });
+
+  app.get("/api/research-strategy/history", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 20, 100);
+      const history = await storage.getStrategyHistory(limit);
+      res.json(history);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch strategy history" });
+    }
+  });
+
+  app.get("/api/convergence", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const snapshots = await storage.getConvergenceSnapshots(limit);
+      res.json(snapshots);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch convergence data" });
+    }
+  });
+
   app.get("/api/novel-insights", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);

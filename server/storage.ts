@@ -2,7 +2,8 @@ import { db } from "./db";
 import {
   elements, materials, learningPhases, novelPredictions, researchLogs,
   synthesisProcesses, chemicalReactions, superconductorCandidates,
-  crystalStructures, computationalResults, novelInsights
+  crystalStructures, computationalResults, novelInsights,
+  researchStrategies, convergenceSnapshots
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -10,7 +11,9 @@ import type {
   SynthesisProcess, ChemicalReaction, SuperconductorCandidate,
   InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate,
   CrystalStructure, ComputationalResult, NovelInsight,
-  InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight
+  InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight,
+  ResearchStrategy, ConvergenceSnapshot,
+  InsertResearchStrategy, InsertConvergenceSnapshot
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike } from "drizzle-orm";
 
@@ -70,6 +73,13 @@ export interface IStorage {
   getNovelInsightsOnly(limit?: number): Promise<NovelInsight[]>;
   insertNovelInsight(ni: InsertNovelInsight): Promise<NovelInsight>;
   getNovelInsightCount(): Promise<number>;
+
+  insertResearchStrategy(strategy: InsertResearchStrategy): Promise<ResearchStrategy>;
+  getLatestStrategy(): Promise<ResearchStrategy | undefined>;
+  getStrategyHistory(limit?: number): Promise<ResearchStrategy[]>;
+
+  insertConvergenceSnapshot(snapshot: InsertConvergenceSnapshot): Promise<ConvergenceSnapshot>;
+  getConvergenceSnapshots(limit?: number): Promise<ConvergenceSnapshot[]>;
 
   getStats(): Promise<{
     elementsLearned: number;
@@ -294,6 +304,29 @@ export class DatabaseStorage implements IStorage {
   async getNovelInsightCount(): Promise<number> {
     const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(novelInsights);
     return Number(count);
+  }
+
+  async insertResearchStrategy(strategy: InsertResearchStrategy): Promise<ResearchStrategy> {
+    const [s] = await db.insert(researchStrategies).values(strategy).returning();
+    return s;
+  }
+
+  async getLatestStrategy(): Promise<ResearchStrategy | undefined> {
+    const [s] = await db.select().from(researchStrategies).orderBy(desc(researchStrategies.cycle)).limit(1);
+    return s;
+  }
+
+  async getStrategyHistory(limit = 20): Promise<ResearchStrategy[]> {
+    return db.select().from(researchStrategies).orderBy(desc(researchStrategies.cycle)).limit(limit);
+  }
+
+  async insertConvergenceSnapshot(snapshot: InsertConvergenceSnapshot): Promise<ConvergenceSnapshot> {
+    const [s] = await db.insert(convergenceSnapshots).values(snapshot).returning();
+    return s;
+  }
+
+  async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
+    return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
   }
 
   async getStats() {
