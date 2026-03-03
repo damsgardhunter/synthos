@@ -7,10 +7,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Link } from "wouter";
 import {
   Atom, Zap, Filter, XCircle, CheckCircle2,
   Activity, Layers, Magnet, Gauge, Target,
-  Beaker, ArrowDown,
+  Beaker, ArrowDown, ExternalLink,
 } from "lucide-react";
 
 const STAGE_NAMES = [
@@ -182,6 +183,13 @@ function PhysicsPropertyCard({ candidate }: { candidate: SuperconductorCandidate
             <span className="font-mono font-bold">{((candidate.uncertaintyEstimate ?? 0) * 100).toFixed(0)}%</span>
           </div>
         )}
+
+        <Link href={`/candidate/${encodeURIComponent(candidate.formula)}`} data-testid={`link-physics-profile-${candidate.id}`}>
+          <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline cursor-pointer mt-1">
+            <ExternalLink className="h-3 w-3" />
+            View Full Profile
+          </span>
+        </Link>
       </CardContent>
     </Card>
   );
@@ -289,6 +297,13 @@ function CrystalStructureCard({ structure }: { structure: CrystalStructure }) {
             </div>
           )}
         </div>
+
+        <Link href={`/candidate/${encodeURIComponent(structure.formula)}`} data-testid={`link-crystal-profile-${structure.id}`}>
+          <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline cursor-pointer mt-1">
+            <ExternalLink className="h-3 w-3" />
+            View Full Profile
+          </span>
+        </Link>
       </CardContent>
     </Card>
   );
@@ -327,7 +342,17 @@ export default function ComputationalPhysics() {
   const candidates = scData?.candidates ?? [];
   const physicsAnalyzed = candidates.filter(c => c.electronPhononCoupling != null || c.verificationStage != null && c.verificationStage > 0);
   const failedResults = failedData?.results ?? [];
-  const structures = structureData?.structures ?? [];
+  const rawStructures = structureData?.structures ?? [];
+  const structures = (() => {
+    const byFormula = new Map<string, CrystalStructure>();
+    for (const s of rawStructures) {
+      const existing = byFormula.get(s.formula);
+      if (!existing || (s.convexHullDistance != null && (existing.convexHullDistance == null || s.convexHullDistance < existing.convexHullDistance))) {
+        byFormula.set(s.formula, s);
+      }
+    }
+    return Array.from(byFormula.values());
+  })();
 
   return (
     <div className="p-6 space-y-6">

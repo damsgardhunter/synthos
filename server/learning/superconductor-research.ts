@@ -104,7 +104,8 @@ function buildVerificationNotes(candidate: any): string {
 
 export async function runSuperconductorResearch(
   emit: EventEmitter,
-  allInsights: string[]
+  allInsights: string[],
+  materialOffset: number = 0
 ): Promise<{ generated: number; insights: string[] }> {
   let generated = 0;
   const newInsights: string[] = [];
@@ -116,7 +117,7 @@ export async function runSuperconductorResearch(
     dataSource: "SC Research",
   });
 
-  const materials = await storage.getMaterials(50, 0);
+  const materials = await storage.getMaterials(50, materialOffset);
 
   const synthesisProcesses = await storage.getSynthesisProcesses(20);
   const chemicalReactions = await storage.getChemicalReactions(20);

@@ -9,7 +9,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Database, Search, Zap, Layers, ChevronRight, Info } from "lucide-react";
+import { Link } from "wouter";
+import { Database, Search, Zap, Layers, ChevronRight, Info, ExternalLink } from "lucide-react";
 
 const SOURCE_COLORS: Record<string, string> = {
   "NIST": "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
@@ -275,6 +276,13 @@ export default function MaterialsDatabase() {
                   </div>
                 </CardContent>
               </Card>
+
+              <Link href={`/candidate/${encodeURIComponent(selected.formula)}`} data-testid={`link-material-profile-${selected.id}`}>
+                <span className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline cursor-pointer">
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  View SC Candidate Profile for {selected.formula}
+                </span>
+              </Link>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-80 text-center">

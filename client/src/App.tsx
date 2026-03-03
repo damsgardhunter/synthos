@@ -13,6 +13,7 @@ import NovelDiscovery from "@/pages/novel-discovery";
 import ResearchPipeline from "@/pages/research-pipeline";
 import SuperconductorLab from "@/pages/superconductor-lab";
 import ComputationalPhysics from "@/pages/computational-physics";
+import CandidateDetail from "@/pages/candidate-detail";
 
 function Router() {
   return (
@@ -24,6 +25,7 @@ function Router() {
       <Route path="/superconductor" component={SuperconductorLab} />
       <Route path="/physics" component={ComputationalPhysics} />
       <Route path="/research" component={ResearchPipeline} />
+      <Route path="/candidate/:formula" component={CandidateDetail} />
       <Route component={NotFound} />
     </Switch>
   );

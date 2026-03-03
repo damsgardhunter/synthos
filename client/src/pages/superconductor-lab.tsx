@@ -9,9 +9,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { safeNum, safeDisplay } from "@/lib/utils";
+import { Link } from "wouter";
 import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
-  CheckCircle2, XCircle, ArrowRight, Gauge, Magnet,
+  CheckCircle2, XCircle, ArrowRight, Gauge, Magnet, ExternalLink,
 } from "lucide-react";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -175,6 +176,13 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
         {candidate.notes && (
           <p className="text-xs text-muted-foreground leading-relaxed border-t border-border pt-2">{candidate.notes}</p>
         )}
+
+        <Link href={`/candidate/${encodeURIComponent(candidate.formula)}`} data-testid={`link-profile-${candidate.id}`}>
+          <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline cursor-pointer mt-1">
+            <ExternalLink className="h-3 w-3" />
+            View Full Profile
+          </span>
+        </Link>
       </CardContent>
     </Card>
   );

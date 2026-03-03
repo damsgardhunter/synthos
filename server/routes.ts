@@ -224,6 +224,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/candidate-profile/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const [candidates, crystalStructures, computationalResults, synthesisProcesses, chemicalReactions] = await Promise.all([
+        storage.getSuperconductorsByFormula(formula),
+        storage.getCrystalStructuresByFormula(formula),
+        storage.getComputationalResultsByFormula(formula),
+        storage.getSynthesisProcessesByFormula(formula),
+        storage.getChemicalReactionsByFormula(formula),
+      ]);
+      res.json({ formula, candidates, crystalStructures, computationalResults, synthesisProcesses, chemicalReactions });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch candidate profile" });
+    }
+  });
+
   app.get("/api/novel-insights", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);

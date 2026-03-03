@@ -52,6 +52,7 @@ let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
 let isRunningCycle = false;
+let phase7Offset = 0;
 
 function broadcast(type: string, data: any) {
   if (!wss) return;
@@ -237,7 +238,12 @@ async function runPhase7_Superconductor() {
     await updatePhaseStatus(7, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const result = await runSuperconductorResearch(emit, allInsights.slice(-15));
+    const matTotal = await storage.getMaterialCount();
+    if (matTotal > 0) {
+      phase7Offset = phase7Offset % matTotal;
+    }
+    const result = await runSuperconductorResearch(emit, allInsights.slice(-15), phase7Offset);
+    phase7Offset += 50;
     totalScCandidates += result.generated;
     allInsights.push(...result.insights);
     totalInsightsGenerated += result.insights.length;
@@ -295,6 +301,15 @@ async function runPhase9_Reactions() {
   }
 }
 
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 async function runPhase10_Physics() {
   if (!shouldContinue()) return;
   activeTasks.add("Computational Physics");
@@ -303,9 +318,9 @@ async function runPhase10_Physics() {
     await updatePhaseStatus(10, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const candidates = await storage.getSuperconductorCandidates(8);
+    const candidates = await storage.getSuperconductorCandidates(50);
     const unanalyzed = candidates.filter(c => !c.verificationStage || c.verificationStage === 0);
-    const toAnalyze = unanalyzed.slice(0, 2);
+    const toAnalyze = shuffle(unanalyzed).slice(0, 2);
 
     for (const candidate of toAnalyze) {
       if (!shouldContinue()) return;
@@ -352,13 +367,27 @@ async function runPhase11_StructurePrediction() {
     await updatePhaseStatus(11, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const candidates = await storage.getSuperconductorCandidates(10);
-    const formulas = candidates
+    const candidates = await storage.getSuperconductorCandidates(50);
+    const uniqueFormulas = shuffle(candidates
       .map(c => c.formula)
-      .filter((f, i, arr) => arr.indexOf(f) === i)
-      .slice(0, 3);
+      .filter((f, i, arr) => arr.indexOf(f) === i));
 
-    const predicted = await runStructurePredictionBatch(emit, formulas);
+    const needsPrediction: string[] = [];
+    for (const formula of uniqueFormulas) {
+      if (needsPrediction.length >= 3) break;
+      const existing = await storage.getCrystalStructuresByFormula(formula);
+      if (existing.length === 0) {
+        needsPrediction.push(formula);
+      }
+    }
+
+    if (needsPrediction.length === 0) {
+      emit("log", { phase: "phase-11", event: "All top candidates have crystal structures", detail: `Checked ${uniqueFormulas.length} unique formulas, all already predicted`, dataSource: "Structure Predictor" });
+    }
+
+    const predicted = needsPrediction.length > 0
+      ? await runStructurePredictionBatch(emit, needsPrediction)
+      : 0;
     totalStructuresPredicted += predicted;
 
     const csCount = await storage.getCrystalStructureCount();
@@ -378,10 +407,10 @@ async function runPhase12_MultiFidelity() {
     await updatePhaseStatus(12, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const candidates = await storage.getSuperconductorCandidates(10);
-    const unscreened = candidates.filter(c =>
+    const candidates = await storage.getSuperconductorCandidates(50);
+    const unscreened = shuffle(candidates.filter(c =>
       (c.verificationStage ?? 0) <= 1 && (c.ensembleScore ?? 0) > 0.25
-    ).slice(0, 4);
+    )).slice(0, 4);
 
     if (unscreened.length > 0) {
       const results = await runMultiFidelityPipeline(emit, unscreened);

@@ -12,7 +12,7 @@ import type {
   CrystalStructure, ComputationalResult, NovelInsight,
   InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight
 } from "@shared/schema";
-import { eq, desc, asc, sql } from "drizzle-orm";
+import { eq, desc, asc, sql, ilike } from "drizzle-orm";
 
 export interface IStorage {
   getElements(): Promise<Element[]>;
@@ -60,6 +60,11 @@ export interface IStorage {
   getComputationalResultCount(): Promise<number>;
   getComputationalResultsByStage(stage: number): Promise<ComputationalResult[]>;
   getFailedComputationalResults(limit?: number): Promise<ComputationalResult[]>;
+
+  getSuperconductorsByFormula(formula: string): Promise<SuperconductorCandidate[]>;
+  getComputationalResultsByFormula(formula: string): Promise<ComputationalResult[]>;
+  getSynthesisProcessesByFormula(formula: string): Promise<SynthesisProcess[]>;
+  getChemicalReactionsByFormula(formula: string): Promise<ChemicalReaction[]>;
 
   getNovelInsights(limit?: number): Promise<NovelInsight[]>;
   getNovelInsightsOnly(limit?: number): Promise<NovelInsight[]>;
@@ -225,6 +230,22 @@ export class DatabaseStorage implements IStorage {
 
   async getCrystalStructuresByFormula(formula: string): Promise<CrystalStructure[]> {
     return db.select().from(crystalStructures).where(eq(crystalStructures.formula, formula));
+  }
+
+  async getSuperconductorsByFormula(formula: string): Promise<SuperconductorCandidate[]> {
+    return db.select().from(superconductorCandidates).where(eq(superconductorCandidates.formula, formula)).orderBy(desc(superconductorCandidates.ensembleScore));
+  }
+
+  async getComputationalResultsByFormula(formula: string): Promise<ComputationalResult[]> {
+    return db.select().from(computationalResults).where(eq(computationalResults.formula, formula)).orderBy(desc(computationalResults.computedAt));
+  }
+
+  async getSynthesisProcessesByFormula(formula: string): Promise<SynthesisProcess[]> {
+    return db.select().from(synthesisProcesses).where(eq(synthesisProcesses.formula, formula)).orderBy(desc(synthesisProcesses.discoveredAt));
+  }
+
+  async getChemicalReactionsByFormula(formula: string): Promise<ChemicalReaction[]> {
+    return db.select().from(chemicalReactions).where(ilike(chemicalReactions.equation, `%${formula}%`)).orderBy(desc(chemicalReactions.relevanceToSuperconductor));
   }
 
   async getComputationalResults(limit = 50): Promise<ComputationalResult[]> {

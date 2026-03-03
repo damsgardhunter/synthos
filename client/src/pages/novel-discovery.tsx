@@ -8,7 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
-import { FlaskConical, Zap, Star, CheckCircle2, Clock, Eye, Atom } from "lucide-react";
+import { Link } from "wouter";
+import { FlaskConical, Zap, Star, CheckCircle2, Clock, Eye, Atom, ExternalLink } from "lucide-react";
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   "predicted": {
@@ -86,6 +87,13 @@ function PredictionCard({ prediction }: { prediction: NovelPrediction }) {
         </div>
 
         <ConfidenceBar confidence={prediction.confidence} />
+
+        <Link href={`/candidate/${encodeURIComponent(prediction.formula)}`} data-testid={`link-discovery-profile-${prediction.id}`}>
+          <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline cursor-pointer">
+            <ExternalLink className="h-3 w-3" />
+            View Candidate Profile
+          </span>
+        </Link>
       </CardContent>
     </Card>
   );

@@ -46,6 +46,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - **Formula Generation**: AI-driven generation of novel chemical compositions.
 - **Synthesis & Reaction Tracking**: Detailed tracking of material synthesis processes and a broad chemical reaction knowledge base.
 - **Crystal Structure Prediction**: AI-powered prediction of crystal structures, including stability and synthesizability.
+- **Candidate Detail Page**: Unified profile at `/candidate/:formula` aggregating SC candidate data, ML scores, crystal structures, synthesis pathways, chemical reactions, and pipeline results. Cross-linked from SC Lab, Physics, Novel Discovery, and Materials pages via "View Full Profile" links.
 
 ### Database Schema Highlights
 - `elements`, `materials`, `learning_phases`, `novel_predictions`, `research_logs`.
@@ -65,6 +66,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - Novel insights (score >= 0.4) emitted as WebSocket events and logged.
 - API: `GET /api/novel-insights?limit=50&novelOnly=true`
 - UI: "Insight Novelty Tracker" section on Research Pipeline page with novelty bars, category badges, and novel/textbook visual distinction.
+
+### Engine Diversity & Deduplication
+- Phase 7 uses rotating material offset (increments by 50 each cycle, wraps around) to avoid re-scoring the same materials.
+- Phase 11 checks `getCrystalStructuresByFormula()` before predicting — skips formulas that already have structures.
+- Phases 10/11/12 fetch 50 candidates (not 8-10) and shuffle before slicing to ensure diverse candidate selection.
+- Crystal structures in UI are deduplicated by formula, keeping the entry with lowest `convexHullDistance`.
+
+### Cross-Page Navigation
+- `GET /api/candidate-profile/:formula` returns unified data: SC candidates, crystal structures, computational results, synthesis processes, and chemical reactions for a formula.
+- Storage methods: `getSuperconductorsByFormula`, `getComputationalResultsByFormula`, `getSynthesisProcessesByFormula`, `getChemicalReactionsByFormula` (plus existing `getCrystalStructuresByFormula`).
+- Route `/candidate/:formula` renders `candidate-detail.tsx` with all sections.
+- "View Full Profile" links on SC Lab, Physics, Crystal Structures, Novel Discovery, and Materials Database pages.
 
 ### Self-Improving SC Model
 - ML predictor loads verified physics data (lambda, Tc) and crystal structures for existing SC candidates from database.
