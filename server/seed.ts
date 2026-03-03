@@ -207,11 +207,11 @@ const NOVEL_PREDICTIONS = [
     id: "pred-001",
     name: "Hydrogen-Rich Lanthanum Superhydride",
     formula: "LaH₁₀",
-    predictedProperties: { criticalTemp: 286, pressure: 190, type: "phonon-mediated superconductor", confidence_tc: 0.78 },
+    predictedProperties: { criticalTemp: 250, pressure: 190, type: "phonon-mediated superconductor", confidence_tc: 0.78 },
     confidence: 0.87,
     targetApplication: "Near room-temperature superconductor for power transmission",
-    status: "synthesized",
-    notes: "Experimentally confirmed superconductivity at 286K under 190 GPa. Major breakthrough toward ambient-pressure targets."
+    status: "literature-reported",
+    notes: "Published experimental result (Drozdov et al. 2019): superconductivity observed at ~250K under ~190 GPa. Requires extreme pressure — not ambient-pressure viable. Included as reference from literature, not a platform prediction."
   },
   {
     id: "pred-002",
@@ -266,7 +266,7 @@ const NOVEL_PREDICTIONS = [
 ];
 
 const RESEARCH_LOGS = [
-  { phase: "phase-6", event: "Novel prediction generated", detail: "LaH₁₀ predicted at 286K superconducting Tc under 190 GPa", dataSource: "Internal ML Model" },
+  { phase: "phase-6", event: "Literature reference indexed", detail: "LaH₁₀ literature-reported Tc ~250K under ~190 GPa (Drozdov et al. 2019)", dataSource: "Published Literature" },
   { phase: "phase-4", event: "AFLOW sync completed", detail: "Indexed 2,847 new binary alloy structures from AFLOW library", dataSource: "AFLOW" },
   { phase: "phase-4", event: "Materials Project fetch", detail: "Retrieved 1,203 perovskite compounds with DFT-computed band gaps", dataSource: "Materials Project" },
   { phase: "phase-3", event: "Bonding analysis complete", detail: "Classified 892 hydrogen-bond networks in metal-organic frameworks", dataSource: "Internal" },

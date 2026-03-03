@@ -67,6 +67,11 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - API: `GET /api/novel-insights?limit=50&novelOnly=true`
 - UI: "Insight Novelty Tracker" section on Research Pipeline page with novelty bars, category badges, and novel/textbook visual distinction.
 
+### Status Taxonomy
+- Novel predictions use statuses: `predicted` (AI-generated), `under_review`, `literature-reported` (known from published research).
+- `synthesized` status is deprecated — mapped to `literature-reported` in UI for backward compatibility.
+- LaH₁₀ seed data: status `literature-reported`, Tc ~250K, citing Drozdov et al. 2019. Labeled as reference data, not a platform prediction.
+
 ### Engine Diversity & Deduplication
 - Phase 7 uses rotating material offset (increments by 50 each cycle, wraps around) to avoid re-scoring the same materials.
 - Phase 11 checks `getCrystalStructuresByFormula()` before predicting — skips formulas that already have structures.

@@ -9,11 +9,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
 import { Link } from "wouter";
-import { FlaskConical, Zap, Star, CheckCircle2, Clock, Eye, Atom, ExternalLink } from "lucide-react";
+import { FlaskConical, Zap, Star, CheckCircle2, Clock, Eye, Atom, ExternalLink, BookOpen } from "lucide-react";
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   "predicted": {
-    label: "Predicted",
+    label: "AI Prediction",
     color: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
     icon: Clock,
   },
@@ -22,10 +22,15 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }>
     color: "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300",
     icon: Eye,
   },
+  "literature-reported": {
+    label: "Literature-Reported",
+    color: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
+    icon: BookOpen,
+  },
   "synthesized": {
-    label: "Synthesized",
-    color: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
-    icon: CheckCircle2,
+    label: "Literature-Reported",
+    color: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
+    icon: BookOpen,
   },
 };
 
@@ -65,6 +70,12 @@ function PredictionCard({ prediction }: { prediction: NovelPrediction }) {
         </div>
       </CardHeader>
       <CardContent className="flex-1 space-y-4">
+        {(prediction.status === "literature-reported" || prediction.status === "synthesized") && (
+          <div className="flex items-center gap-1.5 text-[10px] text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 px-2 py-1 rounded">
+            <BookOpen className="h-3 w-3" />
+            Source: Published literature (not a platform prediction)
+          </div>
+        )}
         <p className="text-sm text-muted-foreground leading-relaxed">{prediction.notes}</p>
 
         <div className="p-3 bg-muted/50 rounded-md">
@@ -114,7 +125,7 @@ export default function NovelDiscovery() {
     }
   }, [ws.messages.length]);
 
-  const synthesized = predictions?.filter(p => p.status === "synthesized") ?? [];
+  const literatureReported = predictions?.filter(p => p.status === "literature-reported" || p.status === "synthesized") ?? [];
   const underReview = predictions?.filter(p => p.status === "under_review") ?? [];
   const predicted = predictions?.filter(p => p.status === "predicted") ?? [];
 
@@ -131,13 +142,13 @@ export default function NovelDiscovery() {
       </div>
 
       <div className="grid grid-cols-3 gap-3">
-        <Card data-testid="stat-synthesized">
+        <Card data-testid="stat-literature">
           <CardContent className="p-4">
             <div className="flex items-center gap-2 mb-1">
-              <CheckCircle2 className="h-4 w-4 text-green-500" />
-              <span className="text-xs text-muted-foreground">Synthesized</span>
+              <BookOpen className="h-4 w-4 text-emerald-500" />
+              <span className="text-xs text-muted-foreground">Literature-Reported</span>
             </div>
-            <div className="text-2xl font-bold font-mono">{synthesized.length}</div>
+            <div className="text-2xl font-bold font-mono">{literatureReported.length}</div>
           </CardContent>
         </Card>
         <Card data-testid="stat-under-review">
@@ -162,18 +173,19 @@ export default function NovelDiscovery() {
 
       <div className="space-y-2">
         <div className="flex items-center gap-2">
-          <Star className="h-4 w-4 text-green-500" />
-          <h2 className="text-base font-semibold">Confirmed Breakthroughs</h2>
-          <Badge variant="secondary" className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-0">{synthesized.length}</Badge>
+          <BookOpen className="h-4 w-4 text-emerald-500" />
+          <h2 className="text-base font-semibold">Literature-Reported Materials</h2>
+          <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-0">{literatureReported.length}</Badge>
         </div>
+        <p className="text-xs text-muted-foreground">Known materials from published research, included as reference data. Not predictions by this platform.</p>
         {isLoading ? (
           <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
-        ) : synthesized.length > 0 ? (
+        ) : literatureReported.length > 0 ? (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {synthesized.map(p => <PredictionCard key={p.id} prediction={p} />)}
+            {literatureReported.map(p => <PredictionCard key={p.id} prediction={p} />)}
           </div>
         ) : (
-          <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No synthesized materials yet</CardContent></Card>
+          <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No literature-reported materials indexed yet</CardContent></Card>
         )}
       </div>
 
