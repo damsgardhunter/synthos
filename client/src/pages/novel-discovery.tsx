@@ -1,0 +1,221 @@
+import { useQuery } from "@tanstack/react-query";
+import type { NovelPrediction } from "@shared/schema";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Progress } from "@/components/ui/progress";
+import { FlaskConical, Zap, Star, CheckCircle2, Clock, Eye, Atom } from "lucide-react";
+
+const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
+  "predicted": {
+    label: "Predicted",
+    color: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+    icon: Clock,
+  },
+  "under_review": {
+    label: "Under Review",
+    color: "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300",
+    icon: Eye,
+  },
+  "synthesized": {
+    label: "Synthesized",
+    color: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
+    icon: CheckCircle2,
+  },
+};
+
+function ConfidenceBar({ confidence }: { confidence: number }) {
+  const pct = confidence * 100;
+  const color = pct >= 80 ? "bg-green-500" : pct >= 60 ? "bg-yellow-500" : "bg-red-500";
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">Model Confidence</span>
+        <span className="text-xs font-mono font-bold">{pct.toFixed(0)}%</span>
+      </div>
+      <div className="h-2 bg-muted rounded-full overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function PredictionCard({ prediction }: { prediction: NovelPrediction }) {
+  const statusCfg = STATUS_CONFIG[prediction.status] ?? STATUS_CONFIG["predicted"];
+  const StatusIcon = statusCfg.icon;
+  const props = prediction.predictedProperties as Record<string, any> ?? {};
+
+  return (
+    <Card data-testid={`prediction-card-${prediction.id}`} className="flex flex-col">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div>
+            <CardTitle className="text-base leading-snug">{prediction.name}</CardTitle>
+            <p className="text-sm font-mono text-primary mt-1">{prediction.formula}</p>
+          </div>
+          <Badge className={`${statusCfg.color} border-0 flex items-center gap-1`}>
+            <StatusIcon className="h-3 w-3" />
+            {statusCfg.label}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="flex-1 space-y-4">
+        <p className="text-sm text-muted-foreground leading-relaxed">{prediction.notes}</p>
+
+        <div className="p-3 bg-muted/50 rounded-md">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Target Application</p>
+          <p className="text-sm font-medium">{prediction.targetApplication}</p>
+        </div>
+
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Predicted Properties</p>
+          <div className="space-y-1.5">
+            {Object.entries(props).slice(0, 5).map(([k, v]) => (
+              <div key={k} className="flex items-center justify-between text-sm border-b border-border pb-1.5 last:border-0">
+                <span className="text-muted-foreground capitalize">{k.replace(/([A-Z])/g, " $1").replace(/_/g, " ")}</span>
+                <span className="font-mono font-medium text-foreground">
+                  {typeof v === "boolean" ? (v ? "Yes" : "No") : String(v)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <ConfidenceBar confidence={prediction.confidence} />
+      </CardContent>
+    </Card>
+  );
+}
+
+export default function NovelDiscovery() {
+  const { data: predictions, isLoading } = useQuery<NovelPrediction[]>({
+    queryKey: ["/api/novel-predictions"],
+  });
+
+  const synthesized = predictions?.filter(p => p.status === "synthesized") ?? [];
+  const underReview = predictions?.filter(p => p.status === "under_review") ?? [];
+  const predicted = predictions?.filter(p => p.status === "predicted") ?? [];
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+          <FlaskConical className="h-6 w-6 text-primary" />
+          Novel Material Discovery
+        </h1>
+        <p className="text-muted-foreground text-sm mt-1">
+          AI-generated predictions for new materials with transformative properties — from superconductors to ultra-hard compounds.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <Card data-testid="stat-synthesized">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <CheckCircle2 className="h-4 w-4 text-green-500" />
+              <span className="text-xs text-muted-foreground">Synthesized</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{synthesized.length}</div>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-under-review">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Eye className="h-4 w-4 text-yellow-500" />
+              <span className="text-xs text-muted-foreground">Under Review</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{underReview.length}</div>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-predictions">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Clock className="h-4 w-4 text-blue-500" />
+              <span className="text-xs text-muted-foreground">Awaiting Synthesis</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{predicted.length}</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Star className="h-4 w-4 text-green-500" />
+          <h2 className="text-base font-semibold">Confirmed Breakthroughs</h2>
+          <Badge variant="secondary" className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-0">{synthesized.length}</Badge>
+        </div>
+        {isLoading ? (
+          <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
+        ) : synthesized.length > 0 ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {synthesized.map(p => <PredictionCard key={p.id} prediction={p} />)}
+          </div>
+        ) : (
+          <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No synthesized materials yet</CardContent></Card>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Eye className="h-4 w-4 text-yellow-500" />
+          <h2 className="text-base font-semibold">Under Scientific Review</h2>
+          <Badge variant="secondary" className="bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300 border-0">{underReview.length}</Badge>
+        </div>
+        {isLoading ? (
+          <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
+        ) : underReview.length > 0 ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {underReview.map(p => <PredictionCard key={p.id} prediction={p} />)}
+          </div>
+        ) : (
+          <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No materials under review</CardContent></Card>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Atom className="h-4 w-4 text-blue-500" />
+          <h2 className="text-base font-semibold">Predicted — Awaiting Synthesis</h2>
+          <Badge variant="secondary" className="bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border-0">{predicted.length}</Badge>
+        </div>
+        {isLoading ? (
+          <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
+        ) : predicted.length > 0 ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {predicted.map(p => <PredictionCard key={p.id} prediction={p} />)}
+          </div>
+        ) : (
+          <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No pending predictions</CardContent></Card>
+        )}
+      </div>
+
+      <Card className="border-primary/20">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Zap className="h-4 w-4 text-primary" />
+            Discovery Methodology
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              { step: "1", title: "High-Throughput Screening", desc: "DFT calculations evaluate millions of candidate compositions for thermodynamic stability" },
+              { step: "2", title: "ML Property Prediction", desc: "Graph neural networks predict band gaps, mechanical properties, and superconducting Tc" },
+              { step: "3", title: "Synthesizability Filter", desc: "Machine learning models predict likelihood of successful laboratory synthesis" },
+              { step: "4", title: "Experimental Validation", desc: "Top candidates sent to partner labs for synthesis and characterization" },
+            ].map(item => (
+              <div key={item.step} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="h-6 w-6 rounded-full bg-primary/10 text-primary text-xs font-bold flex items-center justify-center">{item.step}</div>
+                  <span className="text-sm font-medium">{item.title}</span>
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed pl-8">{item.desc}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
