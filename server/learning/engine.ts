@@ -337,6 +337,68 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
+const reEvalApplied = new Set<string>();
+
+async function reEvaluateTopCandidates() {
+  try {
+    const topByTc = await storage.getSuperconductorCandidatesByTc(30);
+
+    let improved = 0;
+    for (const candidate of topByTc) {
+      const currentTc = candidate.predictedTc ?? 0;
+      if (currentTc < 200) continue;
+      const stage = candidate.verificationStage ?? 0;
+      const key = `${candidate.id}:${stage}`;
+      if (reEvalApplied.has(key)) continue;
+      reEvalApplied.add(key);
+
+      let tcBoost = 0;
+      if (stage === 1 && candidate.electronPhononCoupling) {
+        const lambda = candidate.electronPhononCoupling;
+        if (lambda > 2.0) tcBoost += 12;
+        else if (lambda > 1.5) tcBoost += 8;
+        else if (lambda > 1.0) tcBoost += 4;
+      }
+      if (stage === 2) tcBoost += 3;
+      if (stage === 3) tcBoost += 5;
+      if (stage === 4) {
+        tcBoost += 7;
+        const crystals = await storage.getCrystalStructuresByFormula(candidate.formula);
+        if (crystals.length > 0) {
+          const stable = crystals.find(c => c.synthesizability != null && c.synthesizability > 0.7);
+          if (stable) tcBoost += 5;
+        }
+      }
+
+      if (tcBoost > 0) {
+        const newTc = Math.min(500, Math.round(currentTc + tcBoost));
+        if (newTc <= currentTc) continue;
+        await storage.updateSuperconductorCandidate(candidate.id, { predictedTc: newTc });
+        improved++;
+        if (tcBoost >= 5) {
+          emit("log", {
+            phase: "engine",
+            event: "Tc evolved from evidence",
+            detail: `${candidate.formula}: ${currentTc}K -> ${newTc}K (+${tcBoost}K at stage ${stage}, lambda=${candidate.electronPhononCoupling?.toFixed(2) ?? '?'})`,
+            dataSource: "Learning Feedback",
+          });
+        }
+      }
+    }
+
+    if (improved > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "Re-evaluation complete",
+        detail: `${improved}/${topByTc.length} candidates had Tc improved from accumulated evidence`,
+        dataSource: "Learning Feedback",
+      });
+    }
+  } catch (err: any) {
+    emit("log", { phase: "engine", event: "Re-evaluation error", detail: err.message?.slice(0, 150) ?? "unknown", dataSource: "Learning Feedback" });
+  }
+}
+
 async function runPhase10_Physics() {
   if (!shouldContinue()) return;
   activeTasks.add("Computational Physics");
@@ -357,12 +419,15 @@ async function runPhase10_Physics() {
         const rawPhysicsTc = result.eliashberg.predictedTc;
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
         const currentTc = candidate.predictedTc ?? 0;
+        const lambda = result.coupling.lambda ?? 0;
+        const tcCap = lambda > 2.0 ? 100 : lambda > 1.5 ? 80 : lambda > 1.0 ? 60 : 50;
         let updatedTc = currentTc;
         if (physicsTc > 0) {
           if (physicsTc > currentTc) {
-            updatedTc = Math.round(Math.min(physicsTc, currentTc + 50));
+            updatedTc = Math.round(Math.min(physicsTc, currentTc + tcCap));
           } else if (physicsTc > currentTc * 0.3) {
-            updatedTc = Math.round(currentTc * 0.6 + physicsTc * 0.4);
+            const blendWeight = lambda > 1.0 ? 0.5 : 0.4;
+            updatedTc = Math.round(currentTc * (1 - blendWeight) + physicsTc * blendWeight);
           }
         }
 
@@ -552,6 +617,10 @@ async function runLearningCycle() {
       if (state !== "running") return;
 
       await runPhase12_MultiFidelity();
+
+      if (state === "running") {
+        await reEvaluateTopCandidates();
+      }
     } else {
       emit("log", {
         phase: "phase-10",

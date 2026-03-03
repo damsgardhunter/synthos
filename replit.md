@@ -41,9 +41,17 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 ### Physics Tc Flowback
 - Phase 10 writes Eliashberg-calculated Tc back to candidate's `predictedTc`.
 - Raw physics Tc is clamped: must be >0 and <1000K, otherwise discarded.
-- If physics Tc > ML Tc: update to min(physicsTc, currentTc + 50) — gradual improvement.
-- If physics Tc > 30% of ML Tc: blend 60% ML + 40% physics.
-- If physics Tc < 30% of ML Tc: keep ML estimate (physics model likely doesn't capture this material).
+- Tc increase cap is coupling-aware: lambda>2.0: +100K, lambda>1.5: +80K, lambda>1.0: +60K, else +50K.
+- If physics Tc > ML Tc: update to min(physicsTc, currentTc + tcCap).
+- If physics Tc > 30% of ML Tc: blend with weight based on lambda (0.5 for lambda>1, 0.4 otherwise).
+- If physics Tc < 30% of ML Tc: keep ML estimate.
+
+### Learning Feedback Loop (Re-evaluation)
+- `reEvaluateTopCandidates()` runs every cycle after Phase 12.
+- Checks top 30 candidates by Tc; only applies boost when candidate reaches a NEW verification stage (tracked by `lastReEvalStage` Map).
+- Stage-based Tc boost: stage 1 with strong coupling (+4 to +12K based on lambda), stage 2 (+3K), stage 3 (+5K), stage 4 (+7K).
+- Crystal stability bonus (+5K) if synthesizability > 0.7.
+- Tc knowledge bonus in ML predictor raised to max +45K (was 15K): synthesis +5K, crystal +5K, pipeline stages +5K each (max +20K), insights +3K, verified lambda bonus up to +15K.
 
 ### Phase Throughput
 - Phase 10 (Physics): 5 candidates/cycle, queries `getSuperconductorsByStage(0)` directly.
@@ -53,6 +61,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - Merges top-by-score and top-by-Tc candidates to find true bestTc across all candidates.
 - Uses delete-before-insert per cycle to prevent duplicate cycle entries on engine restart.
 - Score clamped to max 1.0 in snapshot computation.
+- Ordered by `createdAt` (not cycle number) to handle engine restarts correctly.
 - `storage.getSuperconductorCandidatesByTc(limit)` provides Tc-ordered query.
 - `storage.deleteConvergenceSnapshotByCycle(cycle)` prevents duplicate cycle snapshots.
 

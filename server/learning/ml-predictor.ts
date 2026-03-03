@@ -439,15 +439,22 @@ export async function runMLPrediction(
 
     let tcKnowledgeBonus = 0;
     if (depth) {
-      if (depth.hasSynthesis) tcKnowledgeBonus += 3;
-      if (depth.hasCrystal) tcKnowledgeBonus += 3;
-      if (depth.pipelineStagesPassed > 0) tcKnowledgeBonus += Math.min(8, depth.pipelineStagesPassed * 2);
-      if (depth.hasRelatedInsights) tcKnowledgeBonus += 2;
-      tcKnowledgeBonus = Math.min(15, tcKnowledgeBonus);
+      if (depth.hasSynthesis) tcKnowledgeBonus += 5;
+      if (depth.hasCrystal) tcKnowledgeBonus += 5;
+      if (depth.pipelineStagesPassed > 0) tcKnowledgeBonus += Math.min(20, depth.pipelineStagesPassed * 5);
+      if (depth.hasRelatedInsights) tcKnowledgeBonus += 3;
+      tcKnowledgeBonus = Math.min(30, tcKnowledgeBonus);
     }
+    if (physics) {
+      const verifiedLambda = physics.verifiedLambda ?? 0;
+      if (verifiedLambda > 1.5) tcKnowledgeBonus += 15;
+      else if (verifiedLambda > 1.0) tcKnowledgeBonus += 8;
+      else if (verifiedLambda > 0.5) tcKnowledgeBonus += 3;
+    }
+    tcKnowledgeBonus = Math.min(45, tcKnowledgeBonus);
     if (tcKnowledgeBonus > 0) {
       xgb.tcEstimate += tcKnowledgeBonus;
-      xgb.reasoning.push(`Tc adjusted +${tcKnowledgeBonus}K from accumulated evidence`);
+      xgb.reasoning.push(`Tc adjusted +${tcKnowledgeBonus}K from accumulated evidence (${physics ? 'physics-verified' : 'knowledge-based'})`);
     }
 
     scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });

@@ -360,7 +360,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
-    return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
+    return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.createdAt)).limit(limit);
   }
 
   async insertMilestone(milestone: InsertMilestone): Promise<Milestone> {
