@@ -1,0 +1,386 @@
+import { storage } from "../storage";
+import type { EventEmitter } from "./engine";
+import type { SuperconductorCandidate } from "@shared/schema";
+import {
+  computeElectronicStructure,
+  computePhononSpectrum,
+  computeElectronPhononCoupling,
+  predictTcEliashberg,
+  evaluateCompetingPhases,
+  computeCriticalFields,
+  assessCorrelationStrength,
+} from "./physics-engine";
+import {
+  predictCrystalStructure,
+  evaluateConvexHullStability,
+} from "./structure-predictor";
+
+export interface PipelineResult {
+  candidateId: string;
+  formula: string;
+  finalStage: number;
+  passed: boolean;
+  failureReason: string | null;
+  physicsData: Record<string, any>;
+}
+
+async function logComputationalResult(
+  candidateId: string,
+  formula: string,
+  stage: number,
+  computationType: string,
+  results: any,
+  passed: boolean,
+  failureReason: string | null,
+  computeTimeMs: number,
+  confidence: number
+) {
+  const id = `cr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await storage.insertComputationalResult({
+      id,
+      candidateId,
+      formula,
+      computationType,
+      pipelineStage: stage,
+      inputParams: { stage, candidateId },
+      results,
+      confidence,
+      computeTimeMs,
+      passed,
+      failureReason,
+    });
+  } catch {}
+}
+
+async function stage0_MLFilter(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<{ passed: boolean; reason: string | null }> {
+  const start = Date.now();
+
+  const score = candidate.ensembleScore ?? 0;
+  const xgb = candidate.xgboostScore ?? 0;
+
+  const passed = score > 0.3 || xgb > 0.25;
+  const reason = passed ? null : `Ensemble score ${score.toFixed(2)} below threshold 0.3`;
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 0, "ML_filter",
+    { ensembleScore: score, xgboostScore: xgb, threshold: 0.3 },
+    passed, reason, Date.now() - start, passed ? 0.7 : 0.9
+  );
+
+  return { passed, reason };
+}
+
+async function stage1_ElectronicStructure(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<{ passed: boolean; reason: string | null; data: any }> {
+  const start = Date.now();
+
+  const electronic = computeElectronicStructure(candidate.formula, candidate.crystalStructure);
+  const correlation = assessCorrelationStrength(candidate.formula);
+
+  const isMetallic = electronic.metallicity > 0.4;
+  const hasDOS = electronic.densityOfStatesAtFermi > 0.5;
+
+  const passed = isMetallic && hasDOS;
+  const reason = passed ? null :
+    !isMetallic ? `Non-metallic (metallicity=${electronic.metallicity.toFixed(2)}) - cannot superconduct` :
+    `Insufficient DOS at Fermi level (${electronic.densityOfStatesAtFermi.toFixed(2)})`;
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 1, "electronic_structure",
+    { ...electronic, correlation },
+    passed, reason, Date.now() - start, passed ? 0.65 : 0.85
+  );
+
+  return { passed, reason, data: { electronic, correlation } };
+}
+
+async function stage2_PhononCoupling(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate,
+  electronicData: any
+): Promise<{ passed: boolean; reason: string | null; data: any }> {
+  const start = Date.now();
+
+  const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
+  const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon);
+
+  const hasStablePhonons = !phonon.hasImaginaryModes;
+  const hasCoupling = coupling.lambda > 0.3;
+
+  const passed = hasCoupling;
+  let reason = null;
+
+  if (!hasCoupling) {
+    reason = `Weak e-ph coupling (lambda=${coupling.lambda.toFixed(3)}) - insufficient for significant Tc`;
+  } else if (!hasStablePhonons) {
+    reason = null;
+  }
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 2, "phonon_coupling",
+    { phonon, coupling, stablePhonons: hasStablePhonons },
+    passed, reason, Date.now() - start, passed ? 0.6 : 0.8
+  );
+
+  return { passed, reason, data: { phonon, coupling } };
+}
+
+async function stage3_TcPrediction(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate,
+  couplingData: any,
+  electronicData: any
+): Promise<{ passed: boolean; reason: string | null; data: any }> {
+  const start = Date.now();
+
+  const eliashberg = predictTcEliashberg(couplingData.coupling);
+  const competingPhases = evaluateCompetingPhases(candidate.formula, electronicData.electronic);
+
+  const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
+  const hasSevereCompetition = suppressingPhases.length > 1 ||
+    suppressingPhases.some(p => p.strength > 0.8);
+
+  const tcAboveThreshold = eliashberg.predictedTc > 5;
+  const passed = tcAboveThreshold && !hasSevereCompetition;
+
+  let reason = null;
+  if (!tcAboveThreshold) {
+    reason = `Predicted Tc=${eliashberg.predictedTc}K too low for practical superconductivity`;
+  } else if (hasSevereCompetition) {
+    reason = `Suppressed by competing phases: ${suppressingPhases.map(p => p.phaseName).join(", ")}`;
+  }
+
+  let dimensionality = candidate.dimensionality || "3D";
+  const criticalFields = computeCriticalFields(
+    eliashberg.predictedTc, couplingData.coupling, dimensionality
+  );
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 3, "tc_prediction",
+    { eliashberg, competingPhases, criticalFields, dimensionality },
+    passed, reason, Date.now() - start, passed ? 0.5 : 0.75
+  );
+
+  return {
+    passed,
+    reason,
+    data: { eliashberg, competingPhases, criticalFields, dimensionality },
+  };
+}
+
+async function stage4_SynthesisFeasibility(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<{ passed: boolean; reason: string | null; data: any }> {
+  const start = Date.now();
+
+  const structure = await predictCrystalStructure(emit, candidate.formula);
+
+  if (!structure) {
+    await logComputationalResult(
+      candidate.id, candidate.formula, 4, "synthesis_feasibility",
+      { error: "Structure prediction failed" },
+      false, "Could not predict crystal structure", Date.now() - start, 0.3
+    );
+    return { passed: false, reason: "Could not predict crystal structure", data: {} };
+  }
+
+  const stability = evaluateConvexHullStability(structure.decompositionEnergy);
+  const isSynthesizable = structure.synthesizability > 0.3;
+  const isStableOrMetastable = stability.isStable || stability.isMetastable;
+  const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 10 || structure.isStable;
+
+  const passed = isSynthesizable && isStableOrMetastable;
+  let reason = null;
+
+  if (!isSynthesizable) {
+    reason = `Low synthesizability (${structure.synthesizability.toFixed(2)}) - ${structure.synthesisNotes}`;
+  } else if (!isStableOrMetastable) {
+    reason = `Thermodynamically unstable: ${stability.verdict}`;
+  }
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 4, "synthesis_feasibility",
+    { structure, stability, ambientPressureStable },
+    passed, reason, Date.now() - start, passed ? 0.45 : 0.7
+  );
+
+  return {
+    passed,
+    reason,
+    data: { structure, stability, ambientPressureStable },
+  };
+}
+
+export async function runMultiFidelityPipeline(
+  emit: EventEmitter,
+  candidates: SuperconductorCandidate[]
+): Promise<PipelineResult[]> {
+  const results: PipelineResult[] = [];
+
+  emit("log", {
+    phase: "phase-12",
+    event: "Multi-fidelity pipeline started",
+    detail: `Screening ${candidates.length} candidates through 5-stage pipeline: ML -> Electronic Structure -> Phonon/E-Ph -> Tc Prediction -> Synthesis`,
+    dataSource: "Pipeline",
+  });
+
+  for (const candidate of candidates.slice(0, 4)) {
+    const physicsData: Record<string, any> = {};
+
+    const s0 = await stage0_MLFilter(emit, candidate);
+    if (!s0.passed) {
+      results.push({
+        candidateId: candidate.id,
+        formula: candidate.formula,
+        finalStage: 0,
+        passed: false,
+        failureReason: s0.reason,
+        physicsData: {},
+      });
+      continue;
+    }
+
+    const s1 = await stage1_ElectronicStructure(emit, candidate);
+    physicsData.electronic = s1.data.electronic;
+    physicsData.correlation = s1.data.correlation;
+    if (!s1.passed) {
+      await updateCandidatePhysics(candidate.id, physicsData, 1, s1.data);
+      results.push({
+        candidateId: candidate.id,
+        formula: candidate.formula,
+        finalStage: 1,
+        passed: false,
+        failureReason: s1.reason,
+        physicsData,
+      });
+      continue;
+    }
+
+    const s2 = await stage2_PhononCoupling(emit, candidate, s1.data);
+    physicsData.phonon = s2.data.phonon;
+    physicsData.coupling = s2.data.coupling;
+    if (!s2.passed) {
+      await updateCandidatePhysics(candidate.id, physicsData, 2, { ...s1.data, ...s2.data });
+      results.push({
+        candidateId: candidate.id,
+        formula: candidate.formula,
+        finalStage: 2,
+        passed: false,
+        failureReason: s2.reason,
+        physicsData,
+      });
+      continue;
+    }
+
+    const s3 = await stage3_TcPrediction(emit, candidate, s2.data, s1.data);
+    physicsData.eliashberg = s3.data.eliashberg;
+    physicsData.competingPhases = s3.data.competingPhases;
+    physicsData.criticalFields = s3.data.criticalFields;
+    if (!s3.passed) {
+      await updateCandidatePhysics(candidate.id, physicsData, 3, { ...s1.data, ...s2.data, ...s3.data });
+      results.push({
+        candidateId: candidate.id,
+        formula: candidate.formula,
+        finalStage: 3,
+        passed: false,
+        failureReason: s3.reason,
+        physicsData,
+      });
+      continue;
+    }
+
+    const s4 = await stage4_SynthesisFeasibility(emit, candidate);
+    physicsData.structure = s4.data.structure;
+    physicsData.stability = s4.data.stability;
+
+    const allPassed = s4.passed;
+    const allData = { ...s1.data, ...s2.data, ...s3.data, ...s4.data };
+    await updateCandidatePhysics(candidate.id, physicsData, allPassed ? 4 : 3, allData);
+
+    results.push({
+      candidateId: candidate.id,
+      formula: candidate.formula,
+      finalStage: allPassed ? 4 : 3,
+      passed: allPassed,
+      failureReason: s4.reason,
+      physicsData,
+    });
+  }
+
+  const passedCount = results.filter(r => r.passed).length;
+  const stageCounts = [0, 1, 2, 3, 4].map(s => results.filter(r => r.finalStage === s).length);
+
+  emit("log", {
+    phase: "phase-12",
+    event: "Pipeline screening complete",
+    detail: `${results.length} screened: Stage0=${stageCounts[0]} filtered, Stage1=${stageCounts[1]}, Stage2=${stageCounts[2]}, Stage3=${stageCounts[3]}, Stage4=${stageCounts[4]} (${passedCount} passed all)`,
+    dataSource: "Pipeline",
+  });
+
+  return results;
+}
+
+async function updateCandidatePhysics(
+  candidateId: string,
+  physicsData: Record<string, any>,
+  stage: number,
+  allData: any
+) {
+  try {
+    const updates: any = {
+      verificationStage: stage,
+    };
+
+    if (allData.correlation) {
+      updates.correlationStrength = allData.correlation.ratio;
+    }
+    if (allData.electronic) {
+      updates.fermiSurfaceTopology = allData.electronic.fermiSurfaceTopology;
+    }
+    if (allData.coupling) {
+      updates.electronPhononCoupling = allData.coupling.lambda;
+      updates.logPhononFrequency = allData.coupling.omegaLog;
+      updates.coulombPseudopotential = allData.coupling.muStar;
+    }
+    if (allData.eliashberg) {
+      const tcRange = allData.eliashberg.confidenceBand;
+      updates.uncertaintyEstimate = tcRange
+        ? (tcRange[1] - tcRange[0]) / (allData.eliashberg.predictedTc || 1)
+        : 0.5;
+    }
+    if (allData.competingPhases) {
+      updates.competingPhases = allData.competingPhases;
+    }
+    if (allData.criticalFields) {
+      updates.upperCriticalField = allData.criticalFields.upperCriticalField;
+      updates.coherenceLength = allData.criticalFields.coherenceLength;
+      updates.londonPenetrationDepth = allData.criticalFields.londonPenetrationDepth;
+      updates.anisotropyRatio = allData.criticalFields.anisotropyRatio;
+      updates.criticalCurrentDensity = allData.criticalFields.criticalCurrentDensity;
+    }
+    if (allData.dimensionality) {
+      updates.dimensionality = allData.dimensionality;
+    }
+    if (allData.structure) {
+      updates.decompositionEnergy = allData.structure.decompositionEnergy;
+      updates.ambientPressureStable = allData.stability?.isStable ?? false;
+    }
+    if (allData.coupling) {
+      const mechanism = allData.correlation?.ratio > 0.6
+        ? "spin-fluctuation"
+        : allData.coupling.lambda > 1.5
+          ? "strong-coupling phonon-mediated"
+          : "phonon-mediated BCS";
+      updates.pairingMechanism = mechanism;
+    }
+
+    await storage.updateSuperconductorCandidate(candidateId, updates);
+  } catch {}
+}

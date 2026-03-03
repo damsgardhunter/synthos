@@ -118,8 +118,8 @@ export default function Dashboard() {
             <StatCard title="SC Candidates" value={stats?.superconductorCandidates ?? 0} icon={Zap} sub="superconductor predictions" />
             <StatCard title="Synthesis Paths" value={stats?.synthesisProcesses ?? 0} icon={Microscope} sub="lab creation processes" />
             <StatCard title="Reactions Learned" value={stats?.chemicalReactions ?? 0} icon={BookOpen} sub="chemical reaction database" />
-            <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 9 learning phases" />
-            <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 9}`} icon={TrendingUp} sub="currently running" />
+            <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 12 learning phases" />
+            <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 12}`} icon={TrendingUp} sub="currently running" />
           </>
         )}
       </div>

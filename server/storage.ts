@@ -1,13 +1,16 @@
 import { db } from "./db";
 import {
   elements, materials, learningPhases, novelPredictions, researchLogs,
-  synthesisProcesses, chemicalReactions, superconductorCandidates
+  synthesisProcesses, chemicalReactions, superconductorCandidates,
+  crystalStructures, computationalResults
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
   InsertElement, InsertMaterial, InsertLearningPhase, InsertNovelPrediction, InsertResearchLog,
   SynthesisProcess, ChemicalReaction, SuperconductorCandidate,
-  InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate
+  InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate,
+  CrystalStructure, ComputationalResult,
+  InsertCrystalStructure, InsertComputationalResult
 } from "@shared/schema";
 import { eq, desc, asc, sql } from "drizzle-orm";
 
@@ -43,7 +46,20 @@ export interface IStorage {
 
   getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
+  updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   getSuperconductorCount(): Promise<number>;
+  getSuperconductorsByStage(stage: number): Promise<SuperconductorCandidate[]>;
+
+  getCrystalStructures(limit?: number): Promise<CrystalStructure[]>;
+  insertCrystalStructure(cs: InsertCrystalStructure): Promise<CrystalStructure>;
+  getCrystalStructureCount(): Promise<number>;
+  getCrystalStructuresByFormula(formula: string): Promise<CrystalStructure[]>;
+
+  getComputationalResults(limit?: number): Promise<ComputationalResult[]>;
+  insertComputationalResult(cr: InsertComputationalResult): Promise<ComputationalResult>;
+  getComputationalResultCount(): Promise<number>;
+  getComputationalResultsByStage(stage: number): Promise<ComputationalResult[]>;
+  getFailedComputationalResults(limit?: number): Promise<ComputationalResult[]>;
 
   getStats(): Promise<{
     elementsLearned: number;
@@ -53,6 +69,9 @@ export interface IStorage {
     synthesisProcesses: number;
     chemicalReactions: number;
     superconductorCandidates: number;
+    crystalStructures: number;
+    computationalResults: number;
+    pipelineStages: { stage: number; count: number; passed: number }[];
   }>;
 }
 
@@ -170,9 +189,64 @@ export class DatabaseStorage implements IStorage {
     return s;
   }
 
+  async updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void> {
+    await db.update(superconductorCandidates).set(updates).where(eq(superconductorCandidates.id, id));
+  }
+
   async getSuperconductorCount(): Promise<number> {
     const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
     return Number(count);
+  }
+
+  async getSuperconductorsByStage(stage: number): Promise<SuperconductorCandidate[]> {
+    return db.select().from(superconductorCandidates)
+      .where(eq(superconductorCandidates.verificationStage, stage))
+      .orderBy(desc(superconductorCandidates.ensembleScore));
+  }
+
+  async getCrystalStructures(limit = 50): Promise<CrystalStructure[]> {
+    return db.select().from(crystalStructures).orderBy(desc(crystalStructures.predictedAt)).limit(limit);
+  }
+
+  async insertCrystalStructure(cs: InsertCrystalStructure): Promise<CrystalStructure> {
+    const [c] = await db.insert(crystalStructures).values(cs).onConflictDoNothing().returning();
+    return c;
+  }
+
+  async getCrystalStructureCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(crystalStructures);
+    return Number(count);
+  }
+
+  async getCrystalStructuresByFormula(formula: string): Promise<CrystalStructure[]> {
+    return db.select().from(crystalStructures).where(eq(crystalStructures.formula, formula));
+  }
+
+  async getComputationalResults(limit = 50): Promise<ComputationalResult[]> {
+    return db.select().from(computationalResults).orderBy(desc(computationalResults.computedAt)).limit(limit);
+  }
+
+  async insertComputationalResult(cr: InsertComputationalResult): Promise<ComputationalResult> {
+    const [c] = await db.insert(computationalResults).values(cr).onConflictDoNothing().returning();
+    return c;
+  }
+
+  async getComputationalResultCount(): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(computationalResults);
+    return Number(count);
+  }
+
+  async getComputationalResultsByStage(stage: number): Promise<ComputationalResult[]> {
+    return db.select().from(computationalResults)
+      .where(eq(computationalResults.pipelineStage, stage))
+      .orderBy(desc(computationalResults.computedAt));
+  }
+
+  async getFailedComputationalResults(limit = 50): Promise<ComputationalResult[]> {
+    return db.select().from(computationalResults)
+      .where(eq(computationalResults.passed, false))
+      .orderBy(desc(computationalResults.computedAt))
+      .limit(limit);
   }
 
   async getStats() {
@@ -182,10 +256,25 @@ export class DatabaseStorage implements IStorage {
     const [synthCount] = await db.select({ count: sql<number>`count(*)` }).from(synthesisProcesses);
     const [rxnCount] = await db.select({ count: sql<number>`count(*)` }).from(chemicalReactions);
     const [scCount] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
+    const [csCount] = await db.select({ count: sql<number>`count(*)` }).from(crystalStructures);
+    const [crCount] = await db.select({ count: sql<number>`count(*)` }).from(computationalResults);
     const phases = await db.select().from(learningPhases);
     const overallProgress = phases.length > 0
       ? phases.reduce((sum, p) => sum + p.progress, 0) / phases.length
       : 0;
+
+    const stageRows = await db.select({
+      stage: computationalResults.pipelineStage,
+      count: sql<number>`count(*)`,
+      passed: sql<number>`count(*) filter (where ${computationalResults.passed} = true)`,
+    }).from(computationalResults).groupBy(computationalResults.pipelineStage);
+
+    const pipelineStages = stageRows.map(r => ({
+      stage: r.stage,
+      count: Number(r.count),
+      passed: Number(r.passed),
+    }));
+
     return {
       elementsLearned: Number(elCount.count),
       materialsIndexed: Number(matCount.count),
@@ -194,6 +283,9 @@ export class DatabaseStorage implements IStorage {
       synthesisProcesses: Number(synthCount.count),
       chemicalReactions: Number(rxnCount.count),
       superconductorCandidates: Number(scCount.count),
+      crystalStructures: Number(csCount.count),
+      computationalResults: Number(crCount.count),
+      pipelineStages,
     };
   }
 }

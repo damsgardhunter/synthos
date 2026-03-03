@@ -173,5 +173,56 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/crystal-structures", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const structures = await storage.getCrystalStructures(limit);
+      const total = await storage.getCrystalStructureCount();
+      res.json({ structures, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch crystal structures" });
+    }
+  });
+
+  app.get("/api/computational-results", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const stage = req.query.stage ? Number(req.query.stage) : undefined;
+      let results;
+      if (stage !== undefined) {
+        results = await storage.getComputationalResultsByStage(stage);
+      } else {
+        results = await storage.getComputationalResults(limit);
+      }
+      const total = await storage.getComputationalResultCount();
+      res.json({ results, total });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch computational results" });
+    }
+  });
+
+  app.get("/api/computational-results/failed", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const results = await storage.getFailedComputationalResults(limit);
+      res.json({ results });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch failed results" });
+    }
+  });
+
+  app.get("/api/pipeline-stats", async (req, res) => {
+    try {
+      const stats = await storage.getStats();
+      res.json({
+        pipelineStages: stats.pipelineStages,
+        crystalStructures: stats.crystalStructures,
+        computationalResults: stats.computationalResults,
+      });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch pipeline stats" });
+    }
+  });
+
   return httpServer;
 }

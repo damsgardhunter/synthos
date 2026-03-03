@@ -120,6 +120,58 @@ export const superconductorCandidates = pgTable("superconductor_candidates", {
   status: text("status").notNull().default("theoretical"),
   notes: text("notes"),
   generatedAt: timestamp("generated_at").defaultNow(),
+  electronPhononCoupling: real("electron_phonon_coupling"),
+  logPhononFrequency: real("log_phonon_frequency"),
+  coulombPseudopotential: real("coulomb_pseudopotential"),
+  pairingSymmetry: text("pairing_symmetry"),
+  pairingMechanism: text("pairing_mechanism"),
+  competingPhases: jsonb("competing_phases"),
+  upperCriticalField: real("upper_critical_field"),
+  coherenceLength: real("coherence_length"),
+  londonPenetrationDepth: real("london_penetration_depth"),
+  anisotropyRatio: real("anisotropy_ratio"),
+  criticalCurrentDensity: real("critical_current_density"),
+  dimensionality: text("dimensionality"),
+  fermiSurfaceTopology: text("fermi_surface_topology"),
+  correlationStrength: real("correlation_strength"),
+  decompositionEnergy: real("decomposition_energy"),
+  ambientPressureStable: boolean("ambient_pressure_stable").default(false),
+  verificationStage: integer("verification_stage").default(0),
+  uncertaintyEstimate: real("uncertainty_estimate"),
+});
+
+export const crystalStructures = pgTable("crystal_structures", {
+  id: varchar("id").primaryKey(),
+  formula: text("formula").notNull(),
+  spaceGroup: text("space_group").notNull(),
+  crystalSystem: text("crystal_system").notNull(),
+  latticeParams: jsonb("lattice_params"),
+  atomicPositions: jsonb("atomic_positions"),
+  prototype: text("prototype"),
+  dimensionality: text("dimensionality").notNull().default("3D"),
+  isStable: boolean("is_stable").default(false),
+  isMetastable: boolean("is_metastable").default(false),
+  decompositionEnergy: real("decomposition_energy"),
+  convexHullDistance: real("convex_hull_distance"),
+  synthesizability: real("synthesizability"),
+  synthesisNotes: text("synthesis_notes"),
+  source: text("source"),
+  predictedAt: timestamp("predicted_at").defaultNow(),
+});
+
+export const computationalResults = pgTable("computational_results", {
+  id: varchar("id").primaryKey(),
+  candidateId: varchar("candidate_id"),
+  formula: text("formula").notNull(),
+  computationType: text("computation_type").notNull(),
+  pipelineStage: integer("pipeline_stage").notNull().default(0),
+  inputParams: jsonb("input_params"),
+  results: jsonb("results").notNull(),
+  confidence: real("confidence"),
+  computeTimeMs: integer("compute_time_ms"),
+  passed: boolean("passed").default(false),
+  failureReason: text("failure_reason"),
+  computedAt: timestamp("computed_at").defaultNow(),
 });
 
 export const insertElementSchema = createInsertSchema(elements);
@@ -130,6 +182,8 @@ export const insertResearchLogSchema = createInsertSchema(researchLogs).omit({ i
 export const insertSynthesisProcessSchema = createInsertSchema(synthesisProcesses).omit({ discoveredAt: true });
 export const insertChemicalReactionSchema = createInsertSchema(chemicalReactions).omit({ learnedAt: true });
 export const insertSuperconductorCandidateSchema = createInsertSchema(superconductorCandidates).omit({ generatedAt: true });
+export const insertCrystalStructureSchema = createInsertSchema(crystalStructures).omit({ predictedAt: true });
+export const insertComputationalResultSchema = createInsertSchema(computationalResults).omit({ computedAt: true });
 
 export type Element = typeof elements.$inferSelect;
 export type Material = typeof materials.$inferSelect;
@@ -139,6 +193,8 @@ export type ResearchLog = typeof researchLogs.$inferSelect;
 export type SynthesisProcess = typeof synthesisProcesses.$inferSelect;
 export type ChemicalReaction = typeof chemicalReactions.$inferSelect;
 export type SuperconductorCandidate = typeof superconductorCandidates.$inferSelect;
+export type CrystalStructure = typeof crystalStructures.$inferSelect;
+export type ComputationalResult = typeof computationalResults.$inferSelect;
 
 export type InsertElement = z.infer<typeof insertElementSchema>;
 export type InsertMaterial = z.infer<typeof insertMaterialSchema>;
@@ -148,5 +204,7 @@ export type InsertResearchLog = z.infer<typeof insertResearchLogSchema>;
 export type InsertSynthesisProcess = z.infer<typeof insertSynthesisProcessSchema>;
 export type InsertChemicalReaction = z.infer<typeof insertChemicalReactionSchema>;
 export type InsertSuperconductorCandidate = z.infer<typeof insertSuperconductorCandidateSchema>;
+export type InsertCrystalStructure = z.infer<typeof insertCrystalStructureSchema>;
+export type InsertComputationalResult = z.infer<typeof insertComputationalResultSchema>;
 
 export * from "./models/chat";

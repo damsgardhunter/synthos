@@ -1,6 +1,12 @@
 import OpenAI from "openai";
 import type { Material, SuperconductorCandidate } from "@shared/schema";
 import type { EventEmitter } from "./engine";
+import {
+  computeElectronicStructure,
+  computePhononSpectrum,
+  computeElectronPhononCoupling,
+  assessCorrelationStrength,
+} from "./physics-engine";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -26,6 +32,12 @@ interface MLFeatureVector {
   layeredStructure: boolean;
   cooperPairStrength: number;
   meissnerPotential: number;
+  correlationStrength: number;
+  fermiSurfaceType: string;
+  dimensionalityScore: number;
+  anharmonicityFlag: boolean;
+  electronPhononLambda: number;
+  logPhononFreq: number;
 }
 
 const TRANSITION_METALS = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg"];
@@ -83,6 +95,15 @@ export function extractFeatures(formula: string, mat?: Partial<Material>): MLFea
   const meissnerPotential = cooperPairStrength * 0.4 + phononCouplingEstimate * 0.3 +
     electronDensityEstimate * 0.2 + (layeredStructure ? 0.1 : 0);
 
+  const electronic = computeElectronicStructure(formula, mat?.spacegroup);
+  const phonon = computePhononSpectrum(formula, electronic);
+  const coupling = computeElectronPhononCoupling(electronic, phonon);
+  const correlation = assessCorrelationStrength(formula);
+
+  const dimensionalityScore = layeredStructure ? 0.8 :
+    electronic.fermiSurfaceTopology.includes("2D") ? 0.7 :
+    electronic.fermiSurfaceTopology.includes("multi") ? 0.5 : 0.3;
+
   return {
     avgElectronegativity: avgEN,
     maxAtomicMass: Math.max(...massValues, 0),
@@ -102,6 +123,12 @@ export function extractFeatures(formula: string, mat?: Partial<Material>): MLFea
     layeredStructure,
     cooperPairStrength,
     meissnerPotential,
+    correlationStrength: correlation.ratio,
+    fermiSurfaceType: electronic.fermiSurfaceTopology,
+    dimensionalityScore,
+    anharmonicityFlag: phonon.anharmonicityIndex > 0.4,
+    electronPhononLambda: coupling.lambda,
+    logPhononFreq: coupling.omegaLog,
   };
 }
 
@@ -154,13 +181,45 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
     reasoning.push("Balanced electronegativity: optimal charge transfer between sublattices");
   }
 
+  if (features.correlationStrength > 0.6) {
+    score += 0.08;
+    reasoning.push(`Strong electron correlations (U/W=${features.correlationStrength.toFixed(2)}): unconventional pairing channel`);
+  }
+  if (features.dimensionalityScore > 0.6) {
+    score += 0.06;
+    reasoning.push(`Favorable dimensionality (${features.dimensionalityScore.toFixed(1)}): 2D confinement enhances pairing`);
+  }
+  if (features.anharmonicityFlag) {
+    score += 0.04;
+    reasoning.push("Significant anharmonicity: may enhance e-ph coupling beyond harmonic approximation");
+  }
+  if (features.electronPhononLambda > 1.0) {
+    score += 0.1;
+    reasoning.push(`Strong e-ph coupling (lambda=${features.electronPhononLambda.toFixed(2)}): Eliashberg strong-coupling regime`);
+  } else if (features.electronPhononLambda > 0.5) {
+    score += 0.05;
+    reasoning.push(`Moderate e-ph coupling (lambda=${features.electronPhononLambda.toFixed(2)}): BCS regime`);
+  }
+  if (features.fermiSurfaceType.includes("nested") || features.fermiSurfaceType.includes("multi-sheet")) {
+    score += 0.06;
+    reasoning.push("Fermi surface nesting/multi-sheet topology: enhanced susceptibility to pairing instability");
+  }
+
   score = Math.min(1, score);
 
   let tcEstimate = 0;
-  if (features.hasHydrogen && features.cooperPairStrength > 0.4) {
+  if (features.electronPhononLambda > 1.5 && features.hasHydrogen) {
+    const omega_log_K = features.logPhononFreq * 1.44;
+    const muStar = 0.12;
+    const exponent = -1.04 * (1 + features.electronPhononLambda) / (features.electronPhononLambda - muStar * (1 + 0.62 * features.electronPhononLambda));
+    tcEstimate = (omega_log_K / 1.2) * Math.exp(exponent);
+    if (tcEstimate < 50) tcEstimate = 50 + score * 200;
+  } else if (features.hasHydrogen && features.cooperPairStrength > 0.4) {
     tcEstimate = 150 + score * 200;
   } else if (features.dWaveSymmetry) {
     tcEstimate = 80 + score * 150;
+  } else if (features.correlationStrength > 0.6 && features.hasTransitionMetal) {
+    tcEstimate = 40 + score * 120;
   } else if (features.hasTransitionMetal) {
     tcEstimate = 20 + score * 100;
   } else {
@@ -229,6 +288,14 @@ export async function runMLPrediction(
         dWaveSymmetry: c.features.dWaveSymmetry,
         layeredStructure: c.features.layeredStructure,
       },
+      physicsComputed: {
+        electronPhononLambda: c.features.electronPhononLambda,
+        logPhononFrequency: c.features.logPhononFreq,
+        correlationStrength: c.features.correlationStrength,
+        fermiSurfaceTopology: c.features.fermiSurfaceType,
+        dimensionalityScore: c.features.dimensionalityScore,
+        anharmonic: c.features.anharmonicityFlag,
+      },
       xgboostReasoning: c.xgb.reasoning,
     }));
 
@@ -237,16 +304,19 @@ export async function runMLPrediction(
       messages: [
         {
           role: "system",
-          content: `You are an advanced neural network layer in a hybrid XGBoost+NN ensemble for superconductor prediction. The XGBoost layer has already performed feature-based gradient boosting and ranked candidates. Your role is to:
-1. Evaluate each candidate using deep reasoning about electron-phonon coupling, Cooper pair formation, Meissner effect (magnetic flux expulsion), BCS theory, and quantum coherence
-2. Assess room-temperature viability (Tc >= 293K at manageable pressures)
-3. Predict if the material would exhibit true zero electrical resistance
-4. Estimate quantum bit compatibility (coherence times, decoherence mechanisms)
-5. For each candidate, refine the Tc prediction and assign a neural network confidence score
+          content: `You are an advanced neural network layer in a hybrid XGBoost+NN ensemble for superconductor prediction. The XGBoost layer has performed feature-based gradient boosting and ranked candidates. Physics computations (electronic structure, phonon spectrum, electron-phonon coupling lambda, Fermi surface topology, correlation strength U/W) are included.
+
+Your role:
+1. Evaluate using: electron-phonon coupling (lambda), BCS/Eliashberg theory, Cooper pair formation, Meissner effect, competing phases (magnetism, CDW, Mott)
+2. For strongly correlated materials (U/W > 0.6), consider unconventional pairing (spin-fluctuation, d-wave, p-wave)
+3. Assess room-temperature viability (Tc >= 293K AND ambient pressure AND zero resistance)
+4. Identify pairing symmetry (s-wave, d-wave, p-wave, s+/-)
+5. Estimate dimensionality effects on Tc
+6. For each candidate, assign uncertainty and identify what physics is missing
 
 Return JSON with:
-- 'candidates': array of objects with 'formula', 'neuralNetScore' (0-1), 'refinedTc' (Kelvin), 'pressureGpa' (pressure needed, 0 for ambient), 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism' (string description), 'quantumCoherence' (0-1), 'roomTempViable' (boolean), 'crystalStructure' (recommended), 'reasoning' (string under 150 chars)
-- 'insights': array of 3-5 scientific insights about superconductor physics (each under 120 chars)`,
+- 'candidates': array with 'formula', 'neuralNetScore' (0-1), 'refinedTc' (Kelvin), 'pressureGpa', 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism' (string), 'pairingSymmetry' (s-wave/d-wave/p-wave/s+-), 'pairingMechanism' (phonon-mediated/spin-fluctuation/charge-fluctuation/unconventional), 'dimensionality' (3D/quasi-2D/2D/1D), 'quantumCoherence' (0-1), 'roomTempViable' (boolean), 'crystalStructure', 'uncertaintyEstimate' (0-1), 'reasoning' (under 150 chars)
+- 'insights': array of 3-5 physics insights (each under 120 chars)`,
         },
         {
           role: "user",
@@ -297,6 +367,16 @@ Return JSON with:
         roomTempViable: nn.roomTempViable ?? false,
         status: ensembleScore > 0.7 ? "promising" : "theoretical",
         notes: nn.reasoning ?? xgb.xgb.reasoning[0],
+        electronPhononCoupling: xgb.features.electronPhononLambda,
+        logPhononFrequency: xgb.features.logPhononFreq,
+        coulombPseudopotential: 0.12,
+        pairingSymmetry: nn.pairingSymmetry ?? (xgb.features.dWaveSymmetry ? "d-wave" : "s-wave"),
+        pairingMechanism: nn.pairingMechanism ?? (xgb.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated"),
+        correlationStrength: xgb.features.correlationStrength,
+        dimensionality: nn.dimensionality ?? (xgb.features.layeredStructure ? "quasi-2D" : "3D"),
+        fermiSurfaceTopology: xgb.features.fermiSurfaceType,
+        uncertaintyEstimate: nn.uncertaintyEstimate ?? 0.5,
+        verificationStage: 0,
       });
     }
 

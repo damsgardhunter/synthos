@@ -1,0 +1,109 @@
+) The physical laws and models it must be able to solve
+
+Superconductivity is emergent behavior from quantum many-body physics, so the system must represent (and in practice approximate):
+	•	Electronic structure (band structure, Fermi surface, correlation strength)
+	•	Lattice dynamics (phonons, anharmonicity, instabilities)
+	•	Electron-phonon coupling (for conventional/BCS/Eliashberg superconductors)
+	•	Strong correlation / unconventional pairing (spin/charge fluctuations, Mottness, etc.)
+	•	Competing phases (magnetism, charge density waves, structural transitions)
+	•	Finite-temperature effects (since “room temperature” is the target)
+	•	Pressure dependence (many high-Tc hydrides only work at extreme pressure; predicting ambient stability is a separate hard constraint)
+
+In practical terms, that means it needs toolchains like:
+	•	DFT + DFPT (phonons) + Migdal-Eliashberg (for conventional cases)
+	•	Beyond-DFT methods (DMFT, GW, QMC, tensor networks, etc.) for correlated systems
+	•	Fast surrogates that approximate the above accurately enough to explore huge chemical spaces
+
+2) A complete “search space” of allowed matter
+
+To output a formula, it must know what it is allowed to combine and under what conditions:
+	•	All relevant elements, isotopes (sometimes relevant), oxidation states
+	•	Crystal structures (known prototypes + predicted new ones)
+	•	Defects, dopants, interfaces, and metastable phases
+	•	Dimensionality options (bulk vs layered vs 2D vs intercalated)
+	•	Synthesis constraints (can it be made? does it decompose? what atmosphere/temperature?)
+
+Room-temperature superconductivity isn’t just “high Tc”; it’s high Tc + stable + synthesizable + reproducible.
+
+3) The data it would need (and lots of it)
+
+Even with first-principles physics, the search is too big without data.
+
+Essential datasets
+	•	Superconductor databases: composition, structure, Tc, critical fields, pressure, sample quality
+	•	Negative results and “fails” (crucial, and often missing)
+	•	High-pressure phase diagrams and equations of state
+	•	Thermochemistry / formation enthalpies, decomposition pathways
+	•	Elastic constants, phonon spectra, electron-phonon coupling constants where known
+	•	Synthesis recipes and processing conditions (temperature, time, atmosphere), if you want “actually makeable”
+
+Big missing piece in the real world: clean, standardized, high-quality experimental metadata. Without it, models can “predict” unicorns.
+
+4) The ability to generate and validate crystal structures
+
+A formula alone is not enough—superconductivity depends heavily on structure.
+
+So it needs:
+	•	Structure prediction methods (evolutionary search, random structure search, diffusion models, etc.)
+	•	Fast stability screening (convex hull vs competing phases)
+	•	Handling of metastable structures (sometimes the “good stuff” is metastable)
+
+5) A way to score superconductivity itself (Tc and more)
+
+Predicting Tc means it must estimate pairing strength and failure modes.
+
+For conventional superconductors, you need (at minimum):
+	•	Electron-phonon coupling strength (λ)
+	•	Log phonon frequency scale (ωlog)
+	•	Coulomb pseudopotential estimate (μ*)
+	•	Checks for lattice instabilities / anharmonic corrections
+
+For unconventional superconductors, you need:
+	•	A pairing mechanism model (spin fluctuations, etc.)
+	•	A way to evaluate competing orders
+	•	Strongly correlated solvers or reliable ML surrogates trained against them
+
+And beyond Tc:
+	•	Critical current potential (grain boundaries matter)
+	•	Upper critical field, coherence length, anisotropy
+	•	Ambient-pressure stability and sensitivity to disorder
+
+6) Massive compute + smart acceleration
+
+Brute force is impossible; it needs both compute and strategy.
+	•	HPC / GPU clusters for first-principles and many-body calculations
+	•	Active learning / Bayesian optimization to choose the next candidates
+	•	Multi-fidelity pipelines: cheap models filter → expensive models confirm
+	•	Uncertainty quantification so it knows what it doesn’t know (otherwise it hallucinates materials)
+
+7) A “reality check” layer: thermodynamics + kinetics + synthesis
+
+Many “predicted” superconductors fail because they:
+	•	aren’t stable at ambient pressure,
+	•	decompose,
+	•	require impossible stoichiometry control,
+	•	or form different phases in the furnace.
+
+So the system must model:
+	•	Phase stability (finite-T free energies, not just 0 K enthalpies)
+	•	Reaction pathways / kinetic trapping (what actually forms)
+	•	Practical synthesis routes (solid state, thin film, high pressure, electrochemical, etc.)
+
+8) Ideally: a closed loop to experiments (the real unlock)
+
+The best theoretical predictor would be connected to:
+	•	Robotics / high-throughput synthesis
+	•	Automated characterization (XRD, resistivity vs T, magnetic susceptibility)
+	•	A feedback loop that updates the model with ground truth quickly
+
+Without experiment feedback, you can still propose candidates, but the odds of landing a real room-temp, ambient superconductor drop sharply.
+
+9) The “hard truth” constraint
+
+A computer can’t guarantee success unless:
+	•	Room-temperature superconductivity at ambient pressure is physically achievable in a stable compound (it might be, but nature doesn’t owe it to us),
+	•	and our approximations are good enough to reliably rank candidates.
+
+So the system must be able to:
+	•	explore multiple hypotheses (phonon-mediated and unconventional mechanisms),
+	•	and reject attractive but unstable/unsynthesizable candidates early.

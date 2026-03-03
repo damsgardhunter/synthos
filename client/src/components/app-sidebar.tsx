@@ -20,6 +20,7 @@ import {
   FileText,
   Zap,
   Magnet,
+  Activity,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import type { LearningPhase } from "@shared/schema";
@@ -31,6 +32,7 @@ const navItems = [
   { title: "Materials Database", url: "/materials", icon: Database },
   { title: "Novel Discovery", url: "/discovery", icon: FlaskConical },
   { title: "Superconductor Lab", url: "/superconductor", icon: Magnet },
+  { title: "Computational Physics", url: "/physics", icon: Activity },
   { title: "Research Pipeline", url: "/research", icon: FileText },
 ];
 

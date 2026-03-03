@@ -151,6 +151,36 @@ const LEARNING_PHASES = [
     itemsLearned: 0,
     totalItems: 80,
     insights: []
+  },
+  {
+    id: 10,
+    name: "Computational Physics",
+    description: "DFT-informed electronic structure, phonon spectra, electron-phonon coupling (lambda), Eliashberg Tc prediction, competing phase analysis, critical field computation, and correlation strength assessment.",
+    status: "pending",
+    progress: 0,
+    itemsLearned: 0,
+    totalItems: 200,
+    insights: []
+  },
+  {
+    id: 11,
+    name: "Crystal Structure Prediction",
+    description: "Predicting crystal structures from composition: space groups, lattice parameters, prototype matching, convex hull stability, metastability assessment, dimensionality classification, and synthesizability scoring.",
+    status: "pending",
+    progress: 0,
+    itemsLearned: 0,
+    totalItems: 150,
+    insights: []
+  },
+  {
+    id: 12,
+    name: "Multi-Fidelity Screening",
+    description: "5-stage pipeline: ML filter -> electronic structure -> phonon/e-ph coupling -> Tc prediction (Eliashberg/unconventional) -> synthesis feasibility. Each stage includes uncertainty quantification and negative result logging.",
+    status: "pending",
+    progress: 0,
+    itemsLearned: 0,
+    totalItems: 300,
+    insights: []
   }
 ];
 

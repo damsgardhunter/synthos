@@ -159,6 +159,16 @@ export async function runSuperconductorResearch(
         roomTempViable: isActuallyRoomTemp,
         status,
         notes: verificationNotes,
+        electronPhononCoupling: candidate.electronPhononCoupling ?? null,
+        logPhononFrequency: candidate.logPhononFrequency ?? null,
+        coulombPseudopotential: candidate.coulombPseudopotential ?? null,
+        pairingSymmetry: candidate.pairingSymmetry ?? null,
+        pairingMechanism: candidate.pairingMechanism ?? null,
+        correlationStrength: candidate.correlationStrength ?? null,
+        dimensionality: candidate.dimensionality ?? null,
+        fermiSurfaceTopology: candidate.fermiSurfaceTopology ?? null,
+        uncertaintyEstimate: candidate.uncertaintyEstimate ?? null,
+        verificationStage: candidate.verificationStage ?? 0,
       });
       generated++;
 
@@ -325,6 +335,16 @@ Return JSON with 'candidates' array:
           roomTempViable: isActuallyRoomTemp,
           status,
           notes: verificationNotes,
+          electronPhononCoupling: features.electronPhononLambda ?? null,
+          logPhononFrequency: features.logPhononFreq ?? null,
+          coulombPseudopotential: 0.12,
+          pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+          pairingMechanism: features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated",
+          correlationStrength: features.correlationStrength ?? null,
+          dimensionality: features.layeredStructure ? "quasi-2D" : "3D",
+          fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+          uncertaintyEstimate: 0.6,
+          verificationStage: 0,
         });
         generated++;
 

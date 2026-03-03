@@ -99,6 +99,37 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
           <BoolIndicator value={(candidate.quantumCoherence ?? 0) > 0.5} label="Quantum Coherent" />
         </div>
 
+        {(candidate.electronPhononCoupling || candidate.correlationStrength || candidate.upperCriticalField) && (
+          <div className="grid grid-cols-3 gap-1.5 text-xs">
+            {candidate.electronPhononCoupling != null && (
+              <div className="p-1.5 bg-blue-50 dark:bg-blue-950/30 rounded">
+                <span className="text-muted-foreground block text-[10px]">e-ph lambda</span>
+                <span className="font-mono font-bold">{candidate.electronPhononCoupling.toFixed(2)}</span>
+              </div>
+            )}
+            {candidate.correlationStrength != null && (
+              <div className="p-1.5 bg-purple-50 dark:bg-purple-950/30 rounded">
+                <span className="text-muted-foreground block text-[10px]">U/W ratio</span>
+                <span className="font-mono font-bold">{candidate.correlationStrength.toFixed(2)}</span>
+              </div>
+            )}
+            {candidate.upperCriticalField != null && (
+              <div className="p-1.5 bg-green-50 dark:bg-green-950/30 rounded">
+                <span className="text-muted-foreground block text-[10px]">Hc2</span>
+                <span className="font-mono font-bold">{candidate.upperCriticalField.toFixed(1)}T</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(candidate.pairingMechanism || candidate.dimensionality || candidate.pairingSymmetry) && (
+          <div className="flex flex-wrap gap-1">
+            {candidate.pairingMechanism && <Badge variant="outline" className="text-[10px]">{candidate.pairingMechanism}</Badge>}
+            {candidate.pairingSymmetry && <Badge variant="outline" className="text-[10px]">{candidate.pairingSymmetry}</Badge>}
+            {candidate.dimensionality && <Badge variant="outline" className="text-[10px]">{candidate.dimensionality}</Badge>}
+          </div>
+        )}
+
         {candidate.cooperPairMechanism && (
           <div className="text-xs text-muted-foreground">
             <span className="font-semibold text-foreground">Cooper Pairs: </span>
@@ -111,6 +142,31 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
           <ScoreBar label="Neural Net" score={candidate.neuralNetScore} color="bg-purple-500" />
           <ScoreBar label="Ensemble" score={candidate.ensembleScore} color="bg-primary" />
         </div>
+
+        {candidate.uncertaintyEstimate != null && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground">Uncertainty:</span>
+            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full ${candidate.uncertaintyEstimate > 0.6 ? "bg-red-500" : candidate.uncertaintyEstimate > 0.3 ? "bg-yellow-500" : "bg-green-500"}`}
+                style={{ width: `${(candidate.uncertaintyEstimate ?? 0) * 100}%` }}
+              />
+            </div>
+            <span className="font-mono text-[10px]">{((candidate.uncertaintyEstimate ?? 0) * 100).toFixed(0)}%</span>
+          </div>
+        )}
+
+        {candidate.verificationStage != null && candidate.verificationStage > 0 && (
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-muted-foreground">Pipeline Stage:</span>
+            <div className="flex gap-0.5">
+              {[0,1,2,3,4].map(s => (
+                <div key={s} className={`h-2 w-4 rounded-sm ${s <= (candidate.verificationStage ?? 0) ? "bg-primary" : "bg-muted"}`} />
+              ))}
+            </div>
+            <span className="font-mono text-[10px]">{candidate.verificationStage}/4</span>
+          </div>
+        )}
 
         {candidate.notes && (
           <p className="text-xs text-muted-foreground leading-relaxed border-t border-border pt-2">{candidate.notes}</p>
