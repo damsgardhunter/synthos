@@ -39,6 +39,7 @@ interface MLFeatureVector {
   anharmonicityFlag: boolean;
   electronPhononLambda: number;
   logPhononFreq: number;
+  upperCriticalField: number | null;
 }
 
 const TRANSITION_METALS = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg"];
@@ -113,6 +114,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const useSpacegroup = crystal?.spaceGroup ?? mat?.spacegroup ?? null;
 
+  const useHc2 = physics?.upperCriticalField ?? null;
+
   return {
     avgElectronegativity: avgEN,
     maxAtomicMass: Math.max(...massValues, 0),
@@ -138,6 +141,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     anharmonicityFlag: phonon.anharmonicityIndex > 0.4,
     electronPhononLambda: useLambda,
     logPhononFreq: coupling.omegaLog,
+    upperCriticalField: useHc2,
   };
 }
 
@@ -216,6 +220,23 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   if (features.fermiSurfaceType.includes("nested") || features.fermiSurfaceType.includes("multi-sheet")) {
     score += 0.06;
     reasoning.push("Fermi surface nesting/multi-sheet topology: enhanced susceptibility to pairing instability");
+  }
+
+  const safeHc2 = features.upperCriticalField != null && Number.isFinite(features.upperCriticalField) ? features.upperCriticalField : null;
+  if (safeHc2 != null) {
+    if (safeHc2 > 50) {
+      score += 0.08;
+      reasoning.push(`High Hc2 (${safeHc2.toFixed(1)}T): robust Type-II superconductor with strong vortex pinning`);
+    } else if (safeHc2 > 10) {
+      score += 0.04;
+      reasoning.push(`Moderate Hc2 (${safeHc2.toFixed(1)}T): viable Type-II superconductor`);
+    } else if (safeHc2 > 0) {
+      score += 0.02;
+      reasoning.push(`Low Hc2 (${safeHc2.toFixed(1)}T): weak magnetic robustness limits practical applications`);
+    } else {
+      score -= 0.10;
+      reasoning.push("WARNING: Hc2=0T — no upper critical field detected, superconductivity unlikely");
+    }
   }
 
   score = Math.min(1, score);
@@ -393,6 +414,7 @@ export async function runMLPrediction(
           fermiSurfaceTopology: c.features.fermiSurfaceType,
           dimensionalityScore: c.features.dimensionalityScore,
           anharmonic: c.features.anharmonicityFlag,
+          upperCriticalField_T: c.features.upperCriticalField,
         },
         ...(physics ? {
           verifiedPhysics: {
@@ -435,6 +457,7 @@ Your role:
 7. When verifiedPhysics is present, use the verified lambda and Tc as ground truth over estimates
 8. When crystalStructure is present, factor in thermodynamic stability (convexHullDistance < 0.05 = good), dimensionality effects on Tc, and synthesizability
 9. If competing phases suppress SC, lower the score and flag the risk
+10. CRITICAL: upperCriticalField_T (Hc2 in Tesla) is a key indicator. Real superconductors have Hc2 > 0. YBCO ~100-200T, MgB2 ~40T, hydrides ~100T+. If Hc2 is 0 or very low, the material likely does NOT superconduct. Penalize candidates with Hc2=0 severely. High Hc2 (>50T) strongly supports SC viability.
 
 Return JSON with:
 - 'candidates': array with 'formula', 'neuralNetScore' (0-1), 'refinedTc' (Kelvin), 'pressureGpa', 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism' (string), 'pairingSymmetry' (s-wave/d-wave/p-wave/s+-), 'pairingMechanism' (phonon-mediated/spin-fluctuation/charge-fluctuation/unconventional), 'dimensionality' (3D/quasi-2D/2D/1D), 'quantumCoherence' (0-1), 'roomTempViable' (boolean), 'crystalStructure', 'uncertaintyEstimate' (0-1), 'reasoning' (under 150 chars)

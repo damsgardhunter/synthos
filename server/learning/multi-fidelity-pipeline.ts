@@ -147,19 +147,23 @@ async function stage3_TcPrediction(
     suppressingPhases.some(p => p.strength > 0.8);
 
   const tcAboveThreshold = eliashberg.predictedTc > 5;
-  const passed = tcAboveThreshold && !hasSevereCompetition;
+
+  let dimensionality = candidate.dimensionality || "3D";
+  const criticalFields = computeCriticalFields(
+    eliashberg.predictedTc, couplingData.coupling, dimensionality
+  );
+
+  const hc2Suspicious = eliashberg.predictedTc > 50 && criticalFields.upperCriticalField < 1;
+  const passed = tcAboveThreshold && !hasSevereCompetition && !hc2Suspicious;
 
   let reason = null;
   if (!tcAboveThreshold) {
     reason = `Predicted Tc=${eliashberg.predictedTc}K too low for practical superconductivity`;
   } else if (hasSevereCompetition) {
     reason = `Suppressed by competing phases: ${suppressingPhases.map(p => p.phaseName).join(", ")}`;
+  } else if (hc2Suspicious) {
+    reason = `Hc2=${criticalFields.upperCriticalField.toFixed(1)}T inconsistent with Tc=${eliashberg.predictedTc.toFixed(0)}K — likely non-superconducting`;
   }
-
-  let dimensionality = candidate.dimensionality || "3D";
-  const criticalFields = computeCriticalFields(
-    eliashberg.predictedTc, couplingData.coupling, dimensionality
-  );
 
   await logComputationalResult(
     candidate.id, candidate.formula, 3, "tc_prediction",
@@ -196,13 +200,19 @@ async function stage4_SynthesisFeasibility(
   const isStableOrMetastable = stability.isStable || stability.isMetastable;
   const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 10 || structure.isStable;
 
-  const passed = isSynthesizable && isStableOrMetastable;
+  const candidateHc2 = candidate.upperCriticalField ?? 0;
+  const isRoomTempCandidate = (candidate.predictedTc ?? 0) >= 200;
+  const hc2TooLow = isRoomTempCandidate && candidateHc2 < 5;
+
+  const passed = isSynthesizable && isStableOrMetastable && !hc2TooLow;
   let reason = null;
 
   if (!isSynthesizable) {
     reason = `Low synthesizability (${structure.synthesizability.toFixed(2)}) - ${structure.synthesisNotes}`;
   } else if (!isStableOrMetastable) {
     reason = `Thermodynamically unstable: ${stability.verdict}`;
+  } else if (hc2TooLow) {
+    reason = `Insufficient magnetic robustness: Hc2=${candidateHc2.toFixed(1)}T too low for room-temperature candidate (Tc=${candidate.predictedTc}K)`;
   }
 
   await logComputationalResult(

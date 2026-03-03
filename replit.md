@@ -32,7 +32,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 
 ### Core Features
 - **Command Center**: Dashboard with system statistics, learning pipeline status, engine controls, and live activity feed.
-- **Atomic Explorer**: Element browser with Bohr model diagrams.
+- **Atomic Explorer**: Full periodic table (all 118 elements, H through Og) with Bohr model diagrams.
 - **Materials Database**: Comprehensive indexed materials from multiple sources.
 - **Novel Discovery**: AI-predicted new material candidates.
 - **Superconductor Lab**: Details on superconductor candidates, including physics fields, synthesis, reactions, and ML scores.
@@ -84,11 +84,20 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - Route `/candidate/:formula` renders `candidate-detail.tsx` with all sections.
 - "View Full Profile" links on SC Lab, Physics, Crystal Structures, Novel Discovery, and Materials Database pages.
 
+### Hc2 (Upper Critical Field) Integration
+- Physics engine computes Hc2 via BCS coherence length: `xi = hbar*vF / (pi*Delta0)` with `Delta0 = 1.764*kB*Tc*(1+lambda*0.3)`, then `Hc2 = Phi0/(2*pi*xi^2)`.
+- Realistic values: YBCO ~79T, MgB2 ~10T, hydrides ~700T, weak SC ~0.6T.
+- XGBoost scoring: Hc2>50T gets +0.08 bonus, Hc2=0 gets -0.10 penalty.
+- NN prompt instruction #10 explains Hc2 significance.
+- Multi-fidelity pipeline: stage 3 flags Hc2=0 with Tc>50K as suspicious; stage 4 flags Hc2<5T for room-temp candidates.
+- Seed migration resets stale Hc2=0 values to NULL for recomputation.
+
 ### Self-Improving SC Model
 - ML predictor loads verified physics data (lambda, Tc) and crystal structures for existing SC candidates from database.
 - XGBoost feature extraction enriched with physics context (+0.05 for physics-verified, +0.04 for stable crystal) and penalties (-0.08 for competing phases, -0.05 for low synthesizability).
 - Neural network prompt treats verifiedPhysics and crystalStructure as high-fidelity ground truth over estimates.
 - Enrichment counts logged during XGBoost screening.
+- `upperCriticalField` added to `MLFeatureVector` for Hc2-aware scoring.
 
 ## External Dependencies
 - **OpenAI**: Used for gpt-4o-mini via Replit AI Integrations for NLP, formula generation, ML refinement, and knowledge base sourcing.

@@ -322,22 +322,28 @@ export function computeCriticalFields(
     };
   }
 
-  const xi0Denom = tc * Math.max(coupling.lambda, 0.01) * 0.5;
-  const xi0 = xi0Denom > 0 ? 1000 / xi0Denom : 500;
-  const coherenceLength = Math.max(0.5, Math.min(500, Number.isFinite(xi0) ? xi0 : 500));
+  const lambda = Math.max(coupling.lambda, 0.01);
+  const vF = 2e5;
+  const kB = 1.381e-23;
+  const hbar = 1.055e-34;
+  const delta0 = 1.764 * kB * tc * (1 + lambda * 0.3);
+  const xiRaw = (hbar * vF) / (Math.PI * delta0);
+  const xiNm = xiRaw * 1e9;
+  const coherenceLength = Math.max(0.3, Math.min(500, Number.isFinite(xiNm) ? xiNm : 100));
 
   const PHI0 = 2.07e-15;
-  const Hc2 = PHI0 / (2 * Math.PI * (coherenceLength * 1e-9) * (coherenceLength * 1e-9));
-  const upperCriticalField = Math.round(Hc2 / 10000) / 100;
+  const xiM = coherenceLength * 1e-9;
+  const Hc2Tesla = PHI0 / (2 * Math.PI * xiM * xiM);
+  const upperCriticalField = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
 
-  const lambdaL = 50 + 200 * coupling.lambda * (1 + coupling.muStar);
+  const lambdaL = 50 + 200 * lambda * (1 + coupling.muStar);
   const londonPenetrationDepth = Math.max(30, Math.min(2000, lambdaL));
 
   let anisotropyRatio = 1.0;
   if (dimensionality === "2D" || dimensionality === "quasi-2D") anisotropyRatio = 5 + Math.random() * 15;
   else if (dimensionality === "layered") anisotropyRatio = 3 + Math.random() * 7;
 
-  const Jc = tc * 1e4 * coupling.lambda / (1 + anisotropyRatio * 0.1);
+  const Jc = tc * 1e4 * lambda / (1 + anisotropyRatio * 0.1);
   const criticalCurrentDensity = Math.round(Jc);
 
   const kappa = coherenceLength > 0 ? londonPenetrationDepth / coherenceLength : 1;
