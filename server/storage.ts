@@ -16,6 +16,7 @@ import type {
   InsertResearchStrategy, InsertConvergenceSnapshot
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike } from "drizzle-orm";
+import { classifyFamily } from "./learning/utils";
 
 export interface IStorage {
   getElements(): Promise<Element[]>;
@@ -80,6 +81,12 @@ export interface IStorage {
 
   insertConvergenceSnapshot(snapshot: InsertConvergenceSnapshot): Promise<ConvergenceSnapshot>;
   getConvergenceSnapshots(limit?: number): Promise<ConvergenceSnapshot[]>;
+
+  getSuperconductorByFormula(formula: string): Promise<SuperconductorCandidate | undefined>;
+  getNovelPredictionByFormula(formula: string): Promise<NovelPrediction | undefined>;
+  updateNovelPrediction(id: string, data: Partial<InsertNovelPrediction>): Promise<void>;
+  getTopPredictionFormulas(limit?: number): Promise<string[]>;
+  getDistinctScFamilyCount(): Promise<number>;
 
   getStats(): Promise<{
     elementsLearned: number;
@@ -327,6 +334,43 @@ export class DatabaseStorage implements IStorage {
 
   async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
     return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
+  }
+
+  async getSuperconductorByFormula(formula: string): Promise<SuperconductorCandidate | undefined> {
+    const [c] = await db.select().from(superconductorCandidates)
+      .where(eq(superconductorCandidates.formula, formula))
+      .orderBy(desc(superconductorCandidates.ensembleScore))
+      .limit(1);
+    return c;
+  }
+
+  async getNovelPredictionByFormula(formula: string): Promise<NovelPrediction | undefined> {
+    const [p] = await db.select().from(novelPredictions)
+      .where(eq(novelPredictions.formula, formula))
+      .limit(1);
+    return p;
+  }
+
+  async updateNovelPrediction(id: string, data: Partial<InsertNovelPrediction>): Promise<void> {
+    await db.update(novelPredictions).set(data).where(eq(novelPredictions.id, id));
+  }
+
+  async getTopPredictionFormulas(limit = 20): Promise<string[]> {
+    const rows = await db.select({ formula: novelPredictions.formula })
+      .from(novelPredictions)
+      .groupBy(novelPredictions.formula)
+      .orderBy(sql`count(*) desc`)
+      .limit(limit);
+    return rows.map(r => r.formula);
+  }
+
+  async getDistinctScFamilyCount(): Promise<number> {
+    const rows = await db.select({ formula: superconductorCandidates.formula })
+      .from(superconductorCandidates)
+      .orderBy(desc(superconductorCandidates.ensembleScore))
+      .limit(50);
+    const families = new Set(rows.map(r => classifyFamily(r.formula)));
+    return families.size;
   }
 
   async getStats() {

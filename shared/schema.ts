@@ -207,6 +207,8 @@ export const convergenceSnapshots = pgTable("convergence_snapshots", {
   novelInsightCount: integer("novel_insight_count"),
   topFormula: text("top_formula"),
   strategyFocus: text("strategy_focus"),
+  familyDiversity: integer("family_diversity"),
+  duplicatesSkipped: integer("duplicates_skipped"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

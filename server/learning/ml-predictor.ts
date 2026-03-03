@@ -8,6 +8,7 @@ import {
   computeElectronPhononCoupling,
   assessCorrelationStrength,
 } from "./physics-engine";
+import { classifyFamily } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -291,6 +292,8 @@ interface ResearchContext {
   hasReactionKnowledge: boolean;
   physicsData?: Map<string, PhysicsContext>;
   crystalData?: Map<string, CrystalContext>;
+  strategyFocusAreas?: { area: string; priority: number }[];
+  familyCounts?: Record<string, number>;
 }
 
 export async function runMLPrediction(
@@ -368,6 +371,34 @@ export async function runMLPrediction(
     if (crystal?.synthesizability != null && crystal.synthesizability < 0.3) {
       xgb.score = Math.max(0, xgb.score - 0.05);
       xgb.reasoning.push(`Low synthesizability (${(crystal.synthesizability * 100).toFixed(0)}%): practical challenges expected`);
+    }
+
+    const family = classifyFamily(mat.formula);
+    let explorationBonus = 0;
+
+    const familyCounts = context?.familyCounts;
+    if (familyCounts) {
+      const familyCount = familyCounts[family] ?? 0;
+      if (familyCount < 5) {
+        const underExploredBonus = familyCount < 2 ? 0.08 : 0.05;
+        explorationBonus += underExploredBonus;
+        xgb.reasoning.push(`Exploration bonus (+${(underExploredBonus * 100).toFixed(0)}%): ${family} under-explored (${familyCount} candidates)`);
+      }
+    }
+
+    const focusAreas = context?.strategyFocusAreas;
+    if (focusAreas) {
+      const match = focusAreas.find(f => f.area.toLowerCase() === family.toLowerCase());
+      if (match) {
+        const strategyBonus = Math.min(0.05, match.priority * 0.05);
+        explorationBonus += strategyBonus;
+        xgb.reasoning.push(`Strategy-aligned (+${(strategyBonus * 100).toFixed(0)}%): ${family} is a research priority`);
+      }
+    }
+
+    explorationBonus = Math.min(0.10, explorationBonus);
+    if (explorationBonus > 0) {
+      xgb.score = Math.min(1, xgb.score + explorationBonus);
     }
 
     scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });

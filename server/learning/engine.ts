@@ -10,7 +10,7 @@ import { runFullPhysicsAnalysis } from "./physics-engine";
 import { runStructurePredictionBatch } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
-import { analyzeAndEvolveStrategy, captureConvergenceSnapshot } from "./strategy-analyzer";
+import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -55,6 +55,8 @@ let allInsights: string[] = [];
 let isRunningCycle = false;
 let phase7Offset = 0;
 let currentStrategyHint: string | null = null;
+let currentStrategyFocusAreas: { area: string; priority: number }[] = [];
+let currentFamilyCounts: Record<string, number> = {};
 
 function broadcast(type: string, data: any) {
   if (!wss) return;
@@ -244,9 +246,15 @@ async function runPhase7_Superconductor() {
     if (matTotal > 0) {
       phase7Offset = phase7Offset % matTotal;
     }
-    const result = await runSuperconductorResearch(emit, allInsights.slice(-15), phase7Offset);
+    const result = await runSuperconductorResearch(emit, allInsights.slice(-15), phase7Offset, {
+      strategyFocusAreas: currentStrategyFocusAreas.length > 0 ? currentStrategyFocusAreas : undefined,
+      familyCounts: Object.keys(currentFamilyCounts).length > 0 ? currentFamilyCounts : undefined,
+    });
     phase7Offset += 50;
     totalScCandidates += result.generated;
+    if (result.duplicatesSkipped > 0) {
+      trackDuplicatesSkipped(result.duplicatesSkipped);
+    }
     allInsights.push(...result.insights);
     totalInsightsGenerated += result.insights.length;
 
@@ -512,6 +520,13 @@ async function runLearningCycle() {
             .slice(0, 3)
             .map(f => f.area)
             .join(", ");
+          currentStrategyFocusAreas = strategy.focusAreas.map(f => ({ area: f.area, priority: f.priority }));
+          if (strategy.performanceSignals?.familyStats) {
+            currentFamilyCounts = {};
+            for (const [fam, stats] of Object.entries(strategy.performanceSignals.familyStats as Record<string, { count: number }>)) {
+              currentFamilyCounts[fam] = stats.count;
+            }
+          }
           broadcast("strategyUpdate", {
             cycle: cycleCount,
             focusAreas: strategy.focusAreas,

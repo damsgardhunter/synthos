@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
+import { classifyFamily } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -102,10 +103,16 @@ function buildVerificationNotes(candidate: any): string {
   return prefix + "Checks passed: " + checks.join("; ") + (failures.length > 0 ? ". Remaining issues: " + failures.join("; ") : "");
 }
 
+interface StrategyContext {
+  strategyFocusAreas?: { area: string; priority: number }[];
+  familyCounts?: Record<string, number>;
+}
+
 export async function runSuperconductorResearch(
   emit: EventEmitter,
   allInsights: string[],
-  materialOffset: number = 0
+  materialOffset: number = 0,
+  strategyCtx?: StrategyContext
 ): Promise<{ generated: number; insights: string[] }> {
   let generated = 0;
   const newInsights: string[] = [];
@@ -127,10 +134,34 @@ export async function runSuperconductorResearch(
     reactionCount: chemicalReactions.length,
     hasSynthesisKnowledge: synthesisProcesses.length > 0,
     hasReactionKnowledge: chemicalReactions.length > 0,
+    strategyFocusAreas: strategyCtx?.strategyFocusAreas,
+    familyCounts: strategyCtx?.familyCounts,
   });
   newInsights.push(...mlResult.insights);
 
+  let duplicatesSkipped = 0;
   for (const candidate of mlResult.candidates) {
+    const formula = candidate.formula || "Unknown";
+    const newScore = candidate.ensembleScore ?? 0;
+
+    const existing = await storage.getSuperconductorByFormula(formula);
+    if (existing) {
+      if (newScore > (existing.ensembleScore ?? 0)) {
+        await storage.updateSuperconductorCandidate(existing.id, {
+          predictedTc: candidate.predictedTc ?? existing.predictedTc,
+          ensembleScore: newScore,
+          xgboostScore: candidate.xgboostScore ?? existing.xgboostScore,
+          neuralNetScore: candidate.neuralNetScore ?? existing.neuralNetScore,
+          mlFeatures: candidate.mlFeatures ?? existing.mlFeatures,
+          notes: buildVerificationNotes(candidate),
+        });
+        emit("log", { phase: "phase-7", event: "SC candidate upgraded", detail: `${formula}: score ${(existing.ensembleScore ?? 0).toFixed(3)} -> ${newScore.toFixed(3)}`, dataSource: "SC Research" });
+      } else {
+        duplicatesSkipped++;
+      }
+      continue;
+    }
+
     const id = `sc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const status = determineStatus(candidate);
     const verificationNotes = buildVerificationNotes(candidate);
@@ -143,7 +174,7 @@ export async function runSuperconductorResearch(
       await storage.insertSuperconductorCandidate({
         id,
         name: candidate.name || "Unknown",
-        formula: candidate.formula || "Unknown",
+        formula,
         predictedTc: candidate.predictedTc ?? null,
         pressureGpa: candidate.pressureGpa ?? null,
         meissnerEffect: candidate.meissnerEffect ?? false,
@@ -177,7 +208,7 @@ export async function runSuperconductorResearch(
         type: "superconductor",
         id,
         name: candidate.name,
-        formula: candidate.formula,
+        formula,
         predictedTc: candidate.predictedTc,
         ensembleScore: candidate.ensembleScore,
         roomTempViable: isActuallyRoomTemp,
@@ -186,8 +217,12 @@ export async function runSuperconductorResearch(
         status,
       });
     } catch (e: any) {
-      emit("log", { phase: "phase-7", event: "SC candidate insert error", detail: `${candidate.formula}: ${e.message?.slice(0, 100)}`, dataSource: "SC Research" });
+      emit("log", { phase: "phase-7", event: "SC candidate insert error", detail: `${formula}: ${e.message?.slice(0, 100)}`, dataSource: "SC Research" });
     }
+  }
+
+  if (duplicatesSkipped > 0) {
+    emit("log", { phase: "phase-7", event: "Duplicates skipped", detail: `${duplicatesSkipped} duplicate formulas already in database`, dataSource: "SC Research" });
   }
 
   if (generated > 0) {
@@ -212,7 +247,7 @@ export async function runSuperconductorResearch(
     emit("log", { phase: "phase-7", event: "Novel SC generation error", detail: err.message?.slice(0, 200), dataSource: "SC Research" });
   }
 
-  return { generated, insights: newInsights };
+  return { generated, insights: newInsights, duplicatesSkipped };
 }
 
 async function generateNovelSuperconductors(
@@ -222,18 +257,39 @@ async function generateNovelSuperconductors(
 ): Promise<number> {
   let generated = 0;
 
-  const bestCandidates = existingCandidates
-    .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
-    .slice(0, 5)
-    .map(c => ({
-      formula: c.formula,
-      predictedTc: c.predictedTc,
-      ensembleScore: c.ensembleScore,
-      meissnerEffect: c.meissnerEffect,
-      zeroResistance: c.zeroResistance,
-      cooperPairMechanism: c.cooperPairMechanism,
-      status: c.status,
-    }));
+  const sorted = existingCandidates
+    .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+
+  const seenFamilies = new Set<string>();
+  const diverseExamples: any[] = [];
+  for (const c of sorted) {
+    const family = classifyFamily(c.formula);
+    if (!seenFamilies.has(family) && diverseExamples.length < 5) {
+      seenFamilies.add(family);
+      diverseExamples.push(c);
+    }
+  }
+  if (diverseExamples.length < 3) {
+    for (const c of sorted) {
+      if (!diverseExamples.includes(c) && diverseExamples.length < 5) {
+        diverseExamples.push(c);
+      }
+    }
+  }
+
+  const bestCandidates = diverseExamples.map(c => ({
+    formula: c.formula,
+    family: classifyFamily(c.formula),
+    predictedTc: c.predictedTc,
+    ensembleScore: c.ensembleScore,
+    meissnerEffect: c.meissnerEffect,
+    zeroResistance: c.zeroResistance,
+    cooperPairMechanism: c.cooperPairMechanism,
+    status: c.status,
+  }));
+
+  const existingFormulas = sorted.slice(0, 20).map(c => c.formula);
+  const exclusionList = [...new Set(existingFormulas)].slice(0, 15).join(", ");
 
   try {
     const response = await openai.chat.completions.create({
@@ -276,7 +332,7 @@ Return JSON with 'candidates' array:
         },
         {
           role: "user",
-          content: `Best candidates so far:\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
+          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
         },
       ],
       response_format: { type: "json_object" },
@@ -297,6 +353,12 @@ Return JSON with 'candidates' array:
 
     for (const c of newCandidates) {
       if (!c.formula) continue;
+
+      const existingNovel = await storage.getSuperconductorByFormula(c.formula);
+      if (existingNovel) {
+        continue;
+      }
+
       const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const features = extractFeatures(c.formula);
 

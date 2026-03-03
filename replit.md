@@ -69,7 +69,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - `computational_results`: Pipeline results, pass/fail, failure reasons.
 - `novel_insights`: Insight novelty tracking with deterministic deduplication (content+phase hash IDs), novelty scores, categories, and OpenAI evaluation.
 - `research_strategies`: Strategy evolution history with focus areas (jsonb), summary, and performance signals.
-- `convergence_snapshots`: Per-cycle metrics tracking bestTc, bestScore, avgTopScore, pipelinePassRate, topFormula.
+- `convergence_snapshots`: Per-cycle metrics tracking bestTc, bestScore, avgTopScore, pipelinePassRate, topFormula, familyDiversity, duplicatesSkipped.
 
 ### Novel Insight Detection
 - Integrated into phases 3, 5, and 7 of the learning engine.
@@ -87,10 +87,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed for comprehensive ma
 - LaH₁₀ seed data: status `literature-reported`, Tc ~250K, citing Drozdov et al. 2019. Labeled as reference data, not a platform prediction.
 
 ### Engine Diversity & Deduplication
+- **SC Formula Deduplication**: Before inserting a new SC candidate, `getSuperconductorByFormula()` checks for existing records. If duplicate with higher score, updates in place; otherwise skips. Duplicates skipped count tracked per cycle.
+- **Novel Prediction Deduplication**: `getNovelPredictionByFormula()` prevents duplicate novel predictions. Higher-confidence duplicates update existing records.
+- **In-memory exclusion**: `recentlyGenerated` array (last 50 formulas) in formula generator prevents re-generating known formulas within a session.
+- **Exclusion lists in LLM prompts**: Both formula generator and SC novel generation include exclusion lists of top 20 existing formulas to prevent LLM from re-proposing known compositions.
+- **Exploration bonus**: XGBoost scoring adds +0.05-0.08 bonus for under-explored families (<5 candidates), +up to 0.05 for strategy-aligned families, capped at +0.10 total. Uses `classifyFamily()` from `server/learning/utils.ts`.
+- **Diversity-forcing novel SC generation**: Selects 1 example per distinct material family (not top-5 by score) for few-shot LLM prompt. Instructs LLM to generate from different families (pnictides, borides, kagome metals, clathrate hydrides, heavy fermion compounds).
+- **Convergence diversity metrics**: `familyDiversity` (distinct families in top 50) and `duplicatesSkipped` tracked per convergence snapshot and displayed in UI.
 - Phase 7 uses rotating material offset (increments by 50 each cycle, wraps around) to avoid re-scoring the same materials.
 - Phase 11 checks `getCrystalStructuresByFormula()` before predicting — skips formulas that already have structures.
 - Phases 10/11/12 fetch 50 candidates (not 8-10) and shuffle before slicing to ensure diverse candidate selection.
 - Crystal structures in UI are deduplicated by formula, keeping the entry with lowest `convexHullDistance`.
+- `classifyFamily()` shared utility in `server/learning/utils.ts` used by strategy-analyzer, ml-predictor, superconductor-research, and storage.
 
 ### Cross-Page Navigation
 - `GET /api/candidate-profile/:formula` returns unified data: SC candidates, crystal structures, computational results, synthesis processes, and chemical reactions for a formula.

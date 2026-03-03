@@ -313,6 +313,23 @@ function ConvergenceTracker() {
           </div>
         </div>
 
+        <div className="grid gap-3 sm:grid-cols-2">
+          {latest.familyDiversity != null && (
+            <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-family-diversity">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Family Diversity</p>
+              <p className="text-lg font-bold font-mono">{latest.familyDiversity}<span className="text-xs text-muted-foreground font-normal">/10 families</span></p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Distinct material families in top 50 candidates</p>
+            </div>
+          )}
+          {latest.duplicatesSkipped != null && latest.duplicatesSkipped > 0 && (
+            <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-duplicates-skipped">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Duplicates Skipped</p>
+              <p className="text-lg font-bold font-mono">{latest.duplicatesSkipped}</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Redundant formulas filtered this cycle</p>
+            </div>
+          )}
+        </div>
+
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={chartData} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />

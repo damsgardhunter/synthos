@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
+import { classifyFamily } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -17,25 +18,6 @@ interface StrategyResult {
   focusAreas: FocusArea[];
   summary: string;
   performanceSignals: Record<string, any>;
-}
-
-const MATERIAL_FAMILIES: Record<string, RegExp> = {
-  "Hydrides": /H\d|LaH|YH|CeH|CaH|BaH|SrH|MgH|hydride/i,
-  "Cuprates": /Cu.*O|Ba.*Cu|Sr.*Cu|La.*Cu|cuprate|YBCO|BSCCO/i,
-  "Pnictides": /Fe.*As|Ba.*Fe|Sr.*Fe|La.*Fe.*As|pnictide/i,
-  "Chalcogenides": /Se|Te|FeSe|FeTe|chalcogenide/i,
-  "Borides": /B\d|MgB|boride/i,
-  "Carbides": /C\d|carbide|SiC/i,
-  "Nitrides": /N\d|nitride|BN|GaN|AlN/i,
-  "Oxides": /O\d|oxide|perovskite|SrTiO|BaTiO/i,
-  "Intermetallics": /Nb.*Sn|Nb.*Ti|V.*Si|intermetallic/i,
-};
-
-function classifyFamily(formula: string): string {
-  for (const [family, pattern] of Object.entries(MATERIAL_FAMILIES)) {
-    if (pattern.test(formula)) return family;
-  }
-  return "Other";
 }
 
 export async function analyzeAndEvolveStrategy(
@@ -165,6 +147,12 @@ Respond in JSON:
   }
 }
 
+let cumulativeDuplicatesSkipped = 0;
+
+export function trackDuplicatesSkipped(count: number): void {
+  cumulativeDuplicatesSkipped += count;
+}
+
 export async function captureConvergenceSnapshot(
   emit: EventEmitter,
   cycleNumber: number,
@@ -198,6 +186,10 @@ export async function captureConvergenceSnapshot(
     const totalPipelinePassed = stats.pipelineStages.reduce((s, p) => s + p.passed, 0);
     const pipelinePassRate = totalPipelineResults > 0 ? totalPipelinePassed / totalPipelineResults : 0;
 
+    const top50 = await storage.getSuperconductorCandidates(50);
+    const families = new Set(top50.map(c => classifyFamily(c.formula)));
+    const familyDiversity = families.size;
+
     const snapshotId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     await storage.insertConvergenceSnapshot({
       id: snapshotId,
@@ -210,7 +202,11 @@ export async function captureConvergenceSnapshot(
       novelInsightCount: insightCount,
       topFormula,
       strategyFocus: strategyFocus || null,
+      familyDiversity,
+      duplicatesSkipped: cumulativeDuplicatesSkipped,
     });
+
+    cumulativeDuplicatesSkipped = 0;
   } catch (err: any) {
     emit("log", {
       phase: "engine",
