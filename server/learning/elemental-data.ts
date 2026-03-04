@@ -19,6 +19,8 @@ export interface ElementalProperties {
   electronAffinity: number | null;
   firstIonizationEnergy: number;
   elementalTc: number | null;
+  meltingPoint: number | null;
+  latticeConstant: number | null;
 }
 
 export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
@@ -29,7 +31,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 25, pettiforScale: 103, valenceElectrons: 1,
     paulingElectronegativity: 2.20, electronAffinity: 0.754, firstIonizationEnergy: 13.598,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 14, latticeConstant: 3.75
   },
   He: {
     symbol: "He", atomicNumber: 2, atomicMass: 4.003,
@@ -38,7 +41,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 31, pettiforScale: 1, valenceElectrons: 0,
     paulingElectronegativity: null, electronAffinity: 0.0, firstIonizationEnergy: 24.587,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1, latticeConstant: 3.57
   },
   Li: {
     symbol: "Li", atomicNumber: 3, atomicMass: 6.941,
@@ -47,7 +51,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.63, gruneisenParameter: 1.13,
     atomicRadius: 152, pettiforScale: 12, valenceElectrons: 1,
     paulingElectronegativity: 0.98, electronAffinity: 0.618, firstIonizationEnergy: 5.392,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 454, latticeConstant: 3.51
   },
   Be: {
     symbol: "Be", atomicNumber: 4, atomicMass: 9.012,
@@ -56,7 +61,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.17, gruneisenParameter: 1.16,
     atomicRadius: 112, pettiforScale: 77, valenceElectrons: 2,
     paulingElectronegativity: 1.57, electronAffinity: 0.0, firstIonizationEnergy: 9.323,
-    elementalTc: 0.026
+    elementalTc: 0.026,
+    meltingPoint: 1560, latticeConstant: 2.29
   },
   B: {
     symbol: "B", atomicNumber: 5, atomicMass: 10.81,
@@ -65,7 +71,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: 1.0,
     atomicRadius: 87, pettiforScale: 86, valenceElectrons: 3,
     paulingElectronegativity: 2.04, electronAffinity: 0.277, firstIonizationEnergy: 8.298,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 2349, latticeConstant: 5.06
   },
   C: {
     symbol: "C", atomicNumber: 6, atomicMass: 12.011,
@@ -74,7 +81,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: 1.0,
     atomicRadius: 77, pettiforScale: 95, valenceElectrons: 4,
     paulingElectronegativity: 2.55, electronAffinity: 1.263, firstIonizationEnergy: 11.260,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 3823, latticeConstant: 3.57
   },
   N: {
     symbol: "N", atomicNumber: 7, atomicMass: 14.007,
@@ -83,7 +91,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 75, pettiforScale: 100, valenceElectrons: 5,
     paulingElectronegativity: 3.04, electronAffinity: -0.07, firstIonizationEnergy: 14.534,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 63, latticeConstant: 5.66
   },
   O: {
     symbol: "O", atomicNumber: 8, atomicMass: 15.999,
@@ -92,7 +101,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 73, pettiforScale: 101, valenceElectrons: 6,
     paulingElectronegativity: 3.44, electronAffinity: 1.461, firstIonizationEnergy: 13.618,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 54, latticeConstant: 6.83
   },
   F: {
     symbol: "F", atomicNumber: 9, atomicMass: 18.998,
@@ -101,7 +111,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 72, pettiforScale: 102, valenceElectrons: 7,
     paulingElectronegativity: 3.98, electronAffinity: 3.401, firstIonizationEnergy: 17.422,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 53, latticeConstant: 5.5
   },
   Ne: {
     symbol: "Ne", atomicNumber: 10, atomicMass: 20.180,
@@ -110,7 +121,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 38, pettiforScale: 2, valenceElectrons: 0,
     paulingElectronegativity: null, electronAffinity: 0.0, firstIonizationEnergy: 21.565,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 25, latticeConstant: 4.43
   },
   Na: {
     symbol: "Na", atomicNumber: 11, atomicMass: 22.990,
@@ -119,7 +131,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.38, gruneisenParameter: 1.25,
     atomicRadius: 186, pettiforScale: 11, valenceElectrons: 1,
     paulingElectronegativity: 0.93, electronAffinity: 0.548, firstIonizationEnergy: 5.139,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 371, latticeConstant: 4.29
   },
   Mg: {
     symbol: "Mg", atomicNumber: 12, atomicMass: 24.305,
@@ -128,7 +141,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.3, gruneisenParameter: 1.52,
     atomicRadius: 160, pettiforScale: 73, valenceElectrons: 2,
     paulingElectronegativity: 1.31, electronAffinity: 0.0, firstIonizationEnergy: 7.646,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 923, latticeConstant: 3.21
   },
   Al: {
     symbol: "Al", atomicNumber: 13, atomicMass: 26.982,
@@ -137,7 +151,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.35, gruneisenParameter: 2.17,
     atomicRadius: 143, pettiforScale: 80, valenceElectrons: 3,
     paulingElectronegativity: 1.61, electronAffinity: 0.441, firstIonizationEnergy: 5.986,
-    elementalTc: 1.18
+    elementalTc: 1.18,
+    meltingPoint: 933, latticeConstant: 4.05
   },
   Si: {
     symbol: "Si", atomicNumber: 14, atomicMass: 28.086,
@@ -146,7 +161,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: 1.0,
     atomicRadius: 117, pettiforScale: 87, valenceElectrons: 4,
     paulingElectronegativity: 1.90, electronAffinity: 1.385, firstIonizationEnergy: 8.152,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1687, latticeConstant: 5.43
   },
   P: {
     symbol: "P", atomicNumber: 15, atomicMass: 30.974,
@@ -155,7 +171,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 110, pettiforScale: 91, valenceElectrons: 5,
     paulingElectronegativity: 2.19, electronAffinity: 0.746, firstIonizationEnergy: 10.487,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 317, latticeConstant: 7.17
   },
   S: {
     symbol: "S", atomicNumber: 16, atomicMass: 32.065,
@@ -164,7 +181,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 104, pettiforScale: 96, valenceElectrons: 6,
     paulingElectronegativity: 2.58, electronAffinity: 2.077, firstIonizationEnergy: 10.360,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 388, latticeConstant: 10.46
   },
   Cl: {
     symbol: "Cl", atomicNumber: 17, atomicMass: 35.453,
@@ -173,7 +191,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 99, pettiforScale: 99, valenceElectrons: 7,
     paulingElectronegativity: 3.16, electronAffinity: 3.617, firstIonizationEnergy: 12.968,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 172, latticeConstant: 6.24
   },
   Ar: {
     symbol: "Ar", atomicNumber: 18, atomicMass: 39.948,
@@ -182,7 +201,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 71, pettiforScale: 3, valenceElectrons: 0,
     paulingElectronegativity: null, electronAffinity: 0.0, firstIonizationEnergy: 15.760,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 84, latticeConstant: 5.26
   },
   K: {
     symbol: "K", atomicNumber: 19, atomicMass: 39.098,
@@ -191,7 +211,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.08, gruneisenParameter: 1.34,
     atomicRadius: 227, pettiforScale: 10, valenceElectrons: 1,
     paulingElectronegativity: 0.82, electronAffinity: 0.501, firstIonizationEnergy: 4.341,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 337, latticeConstant: 5.33
   },
   Ca: {
     symbol: "Ca", atomicNumber: 20, atomicMass: 40.078,
@@ -200,7 +221,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.72, gruneisenParameter: 1.04,
     atomicRadius: 197, pettiforScale: 16, valenceElectrons: 2,
     paulingElectronegativity: 1.00, electronAffinity: 0.025, firstIonizationEnergy: 6.113,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1115, latticeConstant: 5.59
   },
   Sc: {
     symbol: "Sc", atomicNumber: 21, atomicMass: 44.956,
@@ -209,7 +231,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 10.7, gruneisenParameter: 0.93,
     atomicRadius: 162, pettiforScale: 19, valenceElectrons: 3,
     paulingElectronegativity: 1.36, electronAffinity: 0.188, firstIonizationEnergy: 6.562,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1814, latticeConstant: 3.31
   },
   Ti: {
     symbol: "Ti", atomicNumber: 22, atomicMass: 47.867,
@@ -218,7 +241,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 3.35, gruneisenParameter: 1.23,
     atomicRadius: 147, pettiforScale: 51, valenceElectrons: 4,
     paulingElectronegativity: 1.54, electronAffinity: 0.079, firstIonizationEnergy: 6.828,
-    elementalTc: 0.40
+    elementalTc: 0.40,
+    meltingPoint: 1941, latticeConstant: 2.95
   },
   V: {
     symbol: "V", atomicNumber: 23, atomicMass: 50.942,
@@ -227,7 +251,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 9.26, gruneisenParameter: 1.34,
     atomicRadius: 134, pettiforScale: 52, valenceElectrons: 5,
     paulingElectronegativity: 1.63, electronAffinity: 0.525, firstIonizationEnergy: 6.746,
-    elementalTc: 5.40
+    elementalTc: 5.40,
+    meltingPoint: 2183, latticeConstant: 3.02
   },
   Cr: {
     symbol: "Cr", atomicNumber: 24, atomicMass: 51.996,
@@ -236,7 +261,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.40, gruneisenParameter: 1.21,
     atomicRadius: 128, pettiforScale: 54, valenceElectrons: 6,
     paulingElectronegativity: 1.66, electronAffinity: 0.666, firstIonizationEnergy: 6.767,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 2180, latticeConstant: 2.88
   },
   Mn: {
     symbol: "Mn", atomicNumber: 25, atomicMass: 54.938,
@@ -245,7 +271,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 9.20, gruneisenParameter: 1.40,
     atomicRadius: 127, pettiforScale: 55, valenceElectrons: 7,
     paulingElectronegativity: 1.55, electronAffinity: 0.0, firstIonizationEnergy: 7.434,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1519, latticeConstant: 8.91
   },
   Fe: {
     symbol: "Fe", atomicNumber: 26, atomicMass: 55.845,
@@ -254,7 +281,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.98, gruneisenParameter: 1.67,
     atomicRadius: 126, pettiforScale: 56, valenceElectrons: 8,
     paulingElectronegativity: 1.83, electronAffinity: 0.151, firstIonizationEnergy: 7.902,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1811, latticeConstant: 2.87
   },
   Co: {
     symbol: "Co", atomicNumber: 27, atomicMass: 58.933,
@@ -263,7 +291,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.73, gruneisenParameter: 1.87,
     atomicRadius: 125, pettiforScale: 58, valenceElectrons: 9,
     paulingElectronegativity: 1.88, electronAffinity: 0.662, firstIonizationEnergy: 7.881,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1768, latticeConstant: 2.51
   },
   Ni: {
     symbol: "Ni", atomicNumber: 28, atomicMass: 58.693,
@@ -272,7 +301,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 7.02, gruneisenParameter: 1.88,
     atomicRadius: 124, pettiforScale: 59, valenceElectrons: 10,
     paulingElectronegativity: 1.91, electronAffinity: 1.156, firstIonizationEnergy: 7.640,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1728, latticeConstant: 3.52
   },
   Cu: {
     symbol: "Cu", atomicNumber: 29, atomicMass: 63.546,
@@ -281,7 +311,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.695, gruneisenParameter: 1.96,
     atomicRadius: 128, pettiforScale: 60, valenceElectrons: 11,
     paulingElectronegativity: 1.90, electronAffinity: 1.236, firstIonizationEnergy: 7.726,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1358, latticeConstant: 3.61
   },
   Zn: {
     symbol: "Zn", atomicNumber: 30, atomicMass: 65.38,
@@ -290,7 +321,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.64, gruneisenParameter: 2.01,
     atomicRadius: 134, pettiforScale: 75, valenceElectrons: 12,
     paulingElectronegativity: 1.65, electronAffinity: 0.0, firstIonizationEnergy: 9.394,
-    elementalTc: 0.85
+    elementalTc: 0.85,
+    meltingPoint: 693, latticeConstant: 2.66
   },
   Ga: {
     symbol: "Ga", atomicNumber: 31, atomicMass: 69.723,
@@ -299,7 +331,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.596, gruneisenParameter: 2.01,
     atomicRadius: 135, pettiforScale: 81, valenceElectrons: 3,
     paulingElectronegativity: 1.81, electronAffinity: 0.43, firstIonizationEnergy: 5.999,
-    elementalTc: 1.08
+    elementalTc: 1.08,
+    meltingPoint: 303, latticeConstant: 4.51
   },
   Ge: {
     symbol: "Ge", atomicNumber: 32, atomicMass: 72.630,
@@ -308,7 +341,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: 1.1,
     atomicRadius: 122, pettiforScale: 88, valenceElectrons: 4,
     paulingElectronegativity: 2.01, electronAffinity: 1.233, firstIonizationEnergy: 7.900,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1211, latticeConstant: 5.66
   },
   As: {
     symbol: "As", atomicNumber: 33, atomicMass: 74.922,
@@ -317,7 +351,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 119, pettiforScale: 92, valenceElectrons: 5,
     paulingElectronegativity: 2.18, electronAffinity: 0.804, firstIonizationEnergy: 9.789,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1090, latticeConstant: 3.76
   },
   Se: {
     symbol: "Se", atomicNumber: 34, atomicMass: 78.960,
@@ -326,7 +361,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 120, pettiforScale: 97, valenceElectrons: 6,
     paulingElectronegativity: 2.55, electronAffinity: 2.021, firstIonizationEnergy: 9.752,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 494, latticeConstant: 4.36
   },
   Br: {
     symbol: "Br", atomicNumber: 35, atomicMass: 79.904,
@@ -335,7 +371,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 120, pettiforScale: 98, valenceElectrons: 7,
     paulingElectronegativity: 2.96, electronAffinity: 3.364, firstIonizationEnergy: 11.814,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 266, latticeConstant: 6.67
   },
   Kr: {
     symbol: "Kr", atomicNumber: 36, atomicMass: 83.798,
@@ -344,7 +381,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 88, pettiforScale: 4, valenceElectrons: 0,
     paulingElectronegativity: 3.00, electronAffinity: 0.0, firstIonizationEnergy: 14.000,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 116, latticeConstant: 5.72
   },
   Rb: {
     symbol: "Rb", atomicNumber: 37, atomicMass: 85.468,
@@ -353,7 +391,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.41, gruneisenParameter: 1.48,
     atomicRadius: 248, pettiforScale: 9, valenceElectrons: 1,
     paulingElectronegativity: 0.82, electronAffinity: 0.486, firstIonizationEnergy: 4.177,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 312, latticeConstant: 5.59
   },
   Sr: {
     symbol: "Sr", atomicNumber: 38, atomicMass: 87.620,
@@ -362,7 +401,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 3.6, gruneisenParameter: 1.05,
     atomicRadius: 215, pettiforScale: 15, valenceElectrons: 2,
     paulingElectronegativity: 0.95, electronAffinity: 0.052, firstIonizationEnergy: 5.695,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1050, latticeConstant: 6.08
   },
   Y: {
     symbol: "Y", atomicNumber: 39, atomicMass: 88.906,
@@ -371,7 +411,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 7.80, gruneisenParameter: 1.0,
     atomicRadius: 180, pettiforScale: 20, valenceElectrons: 3,
     paulingElectronegativity: 1.22, electronAffinity: 0.307, firstIonizationEnergy: 6.217,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1799, latticeConstant: 3.65
   },
   Zr: {
     symbol: "Zr", atomicNumber: 40, atomicMass: 91.224,
@@ -380,7 +421,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.80, gruneisenParameter: 0.95,
     atomicRadius: 160, pettiforScale: 48, valenceElectrons: 4,
     paulingElectronegativity: 1.33, electronAffinity: 0.426, firstIonizationEnergy: 6.634,
-    elementalTc: 0.61
+    elementalTc: 0.61,
+    meltingPoint: 2128, latticeConstant: 3.23
   },
   Nb: {
     symbol: "Nb", atomicNumber: 41, atomicMass: 92.906,
@@ -389,7 +431,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 7.79, gruneisenParameter: 1.63,
     atomicRadius: 146, pettiforScale: 49, valenceElectrons: 5,
     paulingElectronegativity: 1.60, electronAffinity: 0.893, firstIonizationEnergy: 6.759,
-    elementalTc: 9.25
+    elementalTc: 9.25,
+    meltingPoint: 2750, latticeConstant: 3.3
   },
   Mo: {
     symbol: "Mo", atomicNumber: 42, atomicMass: 95.950,
@@ -398,7 +441,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.0, gruneisenParameter: 1.57,
     atomicRadius: 139, pettiforScale: 50, valenceElectrons: 6,
     paulingElectronegativity: 2.16, electronAffinity: 0.746, firstIonizationEnergy: 7.092,
-    elementalTc: 0.915
+    elementalTc: 0.915,
+    meltingPoint: 2896, latticeConstant: 3.15
   },
   Tc: {
     symbol: "Tc", atomicNumber: 43, atomicMass: 98.0,
@@ -407,7 +451,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 6.28, gruneisenParameter: 1.5,
     atomicRadius: 136, pettiforScale: 53, valenceElectrons: 7,
     paulingElectronegativity: 1.90, electronAffinity: 0.55, firstIonizationEnergy: 7.28,
-    elementalTc: 7.8
+    elementalTc: 7.8,
+    meltingPoint: 2430, latticeConstant: 2.74
   },
   Ru: {
     symbol: "Ru", atomicNumber: 44, atomicMass: 101.07,
@@ -416,7 +461,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 3.3, gruneisenParameter: 1.45,
     atomicRadius: 134, pettiforScale: 57, valenceElectrons: 8,
     paulingElectronegativity: 2.20, electronAffinity: 1.05, firstIonizationEnergy: 7.361,
-    elementalTc: 0.49
+    elementalTc: 0.49,
+    meltingPoint: 2607, latticeConstant: 2.71
   },
   Rh: {
     symbol: "Rh", atomicNumber: 45, atomicMass: 102.91,
@@ -425,7 +471,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.9, gruneisenParameter: 2.2,
     atomicRadius: 134, pettiforScale: 61, valenceElectrons: 9,
     paulingElectronegativity: 2.28, electronAffinity: 1.137, firstIonizationEnergy: 7.459,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 2237, latticeConstant: 3.8
   },
   Pd: {
     symbol: "Pd", atomicNumber: 46, atomicMass: 106.42,
@@ -434,7 +481,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 9.42, gruneisenParameter: 2.23,
     atomicRadius: 137, pettiforScale: 62, valenceElectrons: 10,
     paulingElectronegativity: 2.20, electronAffinity: 0.562, firstIonizationEnergy: 8.337,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1828, latticeConstant: 3.89
   },
   Ag: {
     symbol: "Ag", atomicNumber: 47, atomicMass: 107.87,
@@ -443,7 +491,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.646, gruneisenParameter: 2.40,
     atomicRadius: 144, pettiforScale: 63, valenceElectrons: 11,
     paulingElectronegativity: 1.93, electronAffinity: 1.302, firstIonizationEnergy: 7.576,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1235, latticeConstant: 4.09
   },
   Cd: {
     symbol: "Cd", atomicNumber: 48, atomicMass: 112.41,
@@ -452,7 +501,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.688, gruneisenParameter: 2.14,
     atomicRadius: 151, pettiforScale: 76, valenceElectrons: 12,
     paulingElectronegativity: 1.69, electronAffinity: 0.0, firstIonizationEnergy: 8.994,
-    elementalTc: 0.517
+    elementalTc: 0.517,
+    meltingPoint: 594, latticeConstant: 2.98
   },
   In: {
     symbol: "In", atomicNumber: 49, atomicMass: 114.82,
@@ -461,7 +511,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.69, gruneisenParameter: 2.56,
     atomicRadius: 167, pettiforScale: 82, valenceElectrons: 3,
     paulingElectronegativity: 1.78, electronAffinity: 0.404, firstIonizationEnergy: 5.786,
-    elementalTc: 3.41
+    elementalTc: 3.41,
+    meltingPoint: 430, latticeConstant: 3.25
   },
   Sn: {
     symbol: "Sn", atomicNumber: 50, atomicMass: 118.71,
@@ -470,7 +521,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.78, gruneisenParameter: 2.14,
     atomicRadius: 140, pettiforScale: 89, valenceElectrons: 4,
     paulingElectronegativity: 1.96, electronAffinity: 1.112, firstIonizationEnergy: 7.344,
-    elementalTc: 3.72
+    elementalTc: 3.72,
+    meltingPoint: 505, latticeConstant: 5.83
   },
   Sb: {
     symbol: "Sb", atomicNumber: 51, atomicMass: 121.76,
@@ -479,7 +531,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: 1.09,
     atomicRadius: 141, pettiforScale: 93, valenceElectrons: 5,
     paulingElectronegativity: 2.05, electronAffinity: 1.047, firstIonizationEnergy: 8.608,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 904, latticeConstant: 4.31
   },
   Te: {
     symbol: "Te", atomicNumber: 52, atomicMass: 127.60,
@@ -488,7 +541,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: 1.68,
     atomicRadius: 143, pettiforScale: 94, valenceElectrons: 6,
     paulingElectronegativity: 2.10, electronAffinity: 1.971, firstIonizationEnergy: 9.010,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 723, latticeConstant: 4.45
   },
   I: {
     symbol: "I", atomicNumber: 53, atomicMass: 126.90,
@@ -497,7 +551,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 140, pettiforScale: 98.5, valenceElectrons: 7,
     paulingElectronegativity: 2.66, electronAffinity: 3.059, firstIonizationEnergy: 10.451,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 387, latticeConstant: 7.27
   },
   Xe: {
     symbol: "Xe", atomicNumber: 54, atomicMass: 131.29,
@@ -506,7 +561,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 108, pettiforScale: 5, valenceElectrons: 0,
     paulingElectronegativity: 2.60, electronAffinity: 0.0, firstIonizationEnergy: 12.130,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 161, latticeConstant: 6.2
   },
   Cs: {
     symbol: "Cs", atomicNumber: 55, atomicMass: 132.91,
@@ -515,7 +571,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 3.20, gruneisenParameter: 1.56,
     atomicRadius: 265, pettiforScale: 8, valenceElectrons: 1,
     paulingElectronegativity: 0.79, electronAffinity: 0.472, firstIonizationEnergy: 3.894,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 302, latticeConstant: 6.14
   },
   Ba: {
     symbol: "Ba", atomicNumber: 56, atomicMass: 137.33,
@@ -524,7 +581,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.7, gruneisenParameter: 0.73,
     atomicRadius: 222, pettiforScale: 14, valenceElectrons: 2,
     paulingElectronegativity: 0.89, electronAffinity: 0.145, firstIonizationEnergy: 5.212,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1000, latticeConstant: 5.03
   },
   La: {
     symbol: "La", atomicNumber: 57, atomicMass: 138.91,
@@ -533,7 +591,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 10.0, gruneisenParameter: 0.80,
     atomicRadius: 187, pettiforScale: 33, valenceElectrons: 3,
     paulingElectronegativity: 1.10, electronAffinity: 0.47, firstIonizationEnergy: 5.577,
-    elementalTc: 6.00
+    elementalTc: 6.00,
+    meltingPoint: 1193, latticeConstant: 3.77
   },
   Ce: {
     symbol: "Ce", atomicNumber: 58, atomicMass: 140.12,
@@ -542,7 +601,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 12.8, gruneisenParameter: 1.05,
     atomicRadius: 182, pettiforScale: 34, valenceElectrons: 4,
     paulingElectronegativity: 1.12, electronAffinity: 0.955, firstIonizationEnergy: 5.539,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1068, latticeConstant: 5.16
   },
   Pr: {
     symbol: "Pr", atomicNumber: 59, atomicMass: 140.91,
@@ -551,7 +611,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 11.0, gruneisenParameter: 0.82,
     atomicRadius: 182, pettiforScale: 35, valenceElectrons: 5,
     paulingElectronegativity: 1.13, electronAffinity: 0.962, firstIonizationEnergy: 5.464,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1208, latticeConstant: 3.67
   },
   Nd: {
     symbol: "Nd", atomicNumber: 60, atomicMass: 144.24,
@@ -560,7 +621,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 10.5, gruneisenParameter: 0.85,
     atomicRadius: 181, pettiforScale: 36, valenceElectrons: 6,
     paulingElectronegativity: 1.14, electronAffinity: 1.916, firstIonizationEnergy: 5.525,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1297, latticeConstant: 3.66
   },
   Pm: {
     symbol: "Pm", atomicNumber: 61, atomicMass: 145.0,
@@ -569,7 +631,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 10.0, gruneisenParameter: 0.85,
     atomicRadius: 183, pettiforScale: 37, valenceElectrons: 7,
     paulingElectronegativity: 1.13, electronAffinity: 0.129, firstIonizationEnergy: 5.582,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1315, latticeConstant: 3.65
   },
   Sm: {
     symbol: "Sm", atomicNumber: 62, atomicMass: 150.36,
@@ -578,7 +641,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 9.0, gruneisenParameter: 0.89,
     atomicRadius: 180, pettiforScale: 38, valenceElectrons: 8,
     paulingElectronegativity: 1.17, electronAffinity: 0.162, firstIonizationEnergy: 5.644,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1345, latticeConstant: 3.63
   },
   Eu: {
     symbol: "Eu", atomicNumber: 63, atomicMass: 151.96,
@@ -587,7 +651,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 6.5, gruneisenParameter: 1.15,
     atomicRadius: 180, pettiforScale: 17, valenceElectrons: 9,
     paulingElectronegativity: 1.20, electronAffinity: 0.116, firstIonizationEnergy: 5.670,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1099, latticeConstant: 4.58
   },
   Gd: {
     symbol: "Gd", atomicNumber: 64, atomicMass: 157.25,
@@ -596,7 +661,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 6.0, gruneisenParameter: 0.80,
     atomicRadius: 180, pettiforScale: 27, valenceElectrons: 10,
     paulingElectronegativity: 1.20, electronAffinity: 0.212, firstIonizationEnergy: 6.150,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1585, latticeConstant: 3.64
   },
   Tb: {
     symbol: "Tb", atomicNumber: 65, atomicMass: 158.93,
@@ -605,7 +671,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.5, gruneisenParameter: 0.79,
     atomicRadius: 177, pettiforScale: 28, valenceElectrons: 11,
     paulingElectronegativity: 1.10, electronAffinity: 1.165, firstIonizationEnergy: 5.864,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1629, latticeConstant: 3.6
   },
   Dy: {
     symbol: "Dy", atomicNumber: 66, atomicMass: 162.50,
@@ -614,7 +681,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.9, gruneisenParameter: 0.78,
     atomicRadius: 178, pettiforScale: 29, valenceElectrons: 12,
     paulingElectronegativity: 1.22, electronAffinity: 0.352, firstIonizationEnergy: 5.939,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1680, latticeConstant: 3.59
   },
   Ho: {
     symbol: "Ho", atomicNumber: 67, atomicMass: 164.93,
@@ -623,7 +691,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.7, gruneisenParameter: 0.78,
     atomicRadius: 176, pettiforScale: 30, valenceElectrons: 13,
     paulingElectronegativity: 1.23, electronAffinity: 0.338, firstIonizationEnergy: 6.022,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1734, latticeConstant: 3.58
   },
   Er: {
     symbol: "Er", atomicNumber: 68, atomicMass: 167.26,
@@ -632,7 +701,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.5, gruneisenParameter: 0.82,
     atomicRadius: 176, pettiforScale: 31, valenceElectrons: 14,
     paulingElectronegativity: 1.24, electronAffinity: 0.312, firstIonizationEnergy: 6.108,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1802, latticeConstant: 3.56
   },
   Tm: {
     symbol: "Tm", atomicNumber: 69, atomicMass: 168.93,
@@ -641,7 +711,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.3, gruneisenParameter: 0.84,
     atomicRadius: 176, pettiforScale: 32, valenceElectrons: 15,
     paulingElectronegativity: 1.25, electronAffinity: 1.029, firstIonizationEnergy: 6.184,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1818, latticeConstant: 3.54
   },
   Yb: {
     symbol: "Yb", atomicNumber: 70, atomicMass: 173.04,
@@ -650,7 +721,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 3.0, gruneisenParameter: 1.25,
     atomicRadius: 176, pettiforScale: 18, valenceElectrons: 16,
     paulingElectronegativity: 1.10, electronAffinity: -0.020, firstIonizationEnergy: 6.254,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1097, latticeConstant: 5.49
   },
   Lu: {
     symbol: "Lu", atomicNumber: 71, atomicMass: 174.97,
@@ -659,7 +731,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 8.19, gruneisenParameter: 0.75,
     atomicRadius: 174, pettiforScale: 21, valenceElectrons: 3,
     paulingElectronegativity: 1.27, electronAffinity: 0.34, firstIonizationEnergy: 5.426,
-    elementalTc: 0.1
+    elementalTc: 0.1,
+    meltingPoint: 1925, latticeConstant: 3.5
   },
   Hf: {
     symbol: "Hf", atomicNumber: 72, atomicMass: 178.49,
@@ -668,7 +741,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.16, gruneisenParameter: 1.06,
     atomicRadius: 159, pettiforScale: 47, valenceElectrons: 4,
     paulingElectronegativity: 1.30, electronAffinity: 0.178, firstIonizationEnergy: 6.825,
-    elementalTc: 0.128
+    elementalTc: 0.128,
+    meltingPoint: 2506, latticeConstant: 3.2
   },
   Ta: {
     symbol: "Ta", atomicNumber: 73, atomicMass: 180.95,
@@ -677,7 +751,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 5.9, gruneisenParameter: 1.65,
     atomicRadius: 146, pettiforScale: 46, valenceElectrons: 5,
     paulingElectronegativity: 1.50, electronAffinity: 0.322, firstIonizationEnergy: 7.550,
-    elementalTc: 4.47
+    elementalTc: 4.47,
+    meltingPoint: 3290, latticeConstant: 3.31
   },
   W: {
     symbol: "W", atomicNumber: 74, atomicMass: 183.84,
@@ -686,7 +761,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.01, gruneisenParameter: 1.62,
     atomicRadius: 139, pettiforScale: 45, valenceElectrons: 6,
     paulingElectronegativity: 2.36, electronAffinity: 0.816, firstIonizationEnergy: 7.864,
-    elementalTc: 0.015
+    elementalTc: 0.015,
+    meltingPoint: 3695, latticeConstant: 3.16
   },
   Re: {
     symbol: "Re", atomicNumber: 75, atomicMass: 186.21,
@@ -695,7 +771,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.35, gruneisenParameter: 1.66,
     atomicRadius: 137, pettiforScale: 44, valenceElectrons: 7,
     paulingElectronegativity: 1.90, electronAffinity: 0.15, firstIonizationEnergy: 7.834,
-    elementalTc: 1.70
+    elementalTc: 1.70,
+    meltingPoint: 3459, latticeConstant: 2.76
   },
   Os: {
     symbol: "Os", atomicNumber: 76, atomicMass: 190.23,
@@ -704,7 +781,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.35, gruneisenParameter: 1.60,
     atomicRadius: 135, pettiforScale: 43, valenceElectrons: 8,
     paulingElectronegativity: 2.20, electronAffinity: 1.10, firstIonizationEnergy: 8.438,
-    elementalTc: 0.66
+    elementalTc: 0.66,
+    meltingPoint: 3306, latticeConstant: 2.73
   },
   Ir: {
     symbol: "Ir", atomicNumber: 77, atomicMass: 192.22,
@@ -713,7 +791,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 3.1, gruneisenParameter: 1.74,
     atomicRadius: 136, pettiforScale: 42, valenceElectrons: 9,
     paulingElectronegativity: 2.20, electronAffinity: 1.565, firstIonizationEnergy: 8.967,
-    elementalTc: 0.11
+    elementalTc: 0.11,
+    meltingPoint: 2719, latticeConstant: 3.84
   },
   Pt: {
     symbol: "Pt", atomicNumber: 78, atomicMass: 195.08,
@@ -722,7 +801,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 6.8, gruneisenParameter: 2.54,
     atomicRadius: 139, pettiforScale: 64, valenceElectrons: 10,
     paulingElectronegativity: 2.28, electronAffinity: 2.128, firstIonizationEnergy: 8.959,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 2041, latticeConstant: 3.92
   },
   Au: {
     symbol: "Au", atomicNumber: 79, atomicMass: 196.97,
@@ -731,7 +811,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.729, gruneisenParameter: 3.03,
     atomicRadius: 144, pettiforScale: 65, valenceElectrons: 11,
     paulingElectronegativity: 2.54, electronAffinity: 2.309, firstIonizationEnergy: 9.226,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1337, latticeConstant: 4.08
   },
   Hg: {
     symbol: "Hg", atomicNumber: 80, atomicMass: 200.59,
@@ -740,7 +821,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.79, gruneisenParameter: 2.43,
     atomicRadius: 151, pettiforScale: 74, valenceElectrons: 12,
     paulingElectronegativity: 2.00, electronAffinity: 0.0, firstIonizationEnergy: 10.438,
-    elementalTc: 4.15
+    elementalTc: 4.15,
+    meltingPoint: 234, latticeConstant: 2.99
   },
   Tl: {
     symbol: "Tl", atomicNumber: 81, atomicMass: 204.38,
@@ -749,7 +831,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 1.47, gruneisenParameter: 2.84,
     atomicRadius: 170, pettiforScale: 83, valenceElectrons: 3,
     paulingElectronegativity: 1.62, electronAffinity: 0.377, firstIonizationEnergy: 6.108,
-    elementalTc: 2.38
+    elementalTc: 2.38,
+    meltingPoint: 577, latticeConstant: 3.46
   },
   Pb: {
     symbol: "Pb", atomicNumber: 82, atomicMass: 207.20,
@@ -758,7 +841,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.98, gruneisenParameter: 2.65,
     atomicRadius: 175, pettiforScale: 90, valenceElectrons: 4,
     paulingElectronegativity: 2.33, electronAffinity: 0.364, firstIonizationEnergy: 7.417,
-    elementalTc: 7.20
+    elementalTc: 7.20,
+    meltingPoint: 601, latticeConstant: 4.95
   },
   Bi: {
     symbol: "Bi", atomicNumber: 83, atomicMass: 208.98,
@@ -767,7 +851,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 0.008, gruneisenParameter: 1.20,
     atomicRadius: 156, pettiforScale: 85, valenceElectrons: 5,
     paulingElectronegativity: 2.02, electronAffinity: 0.942, firstIonizationEnergy: 7.286,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 544, latticeConstant: 4.75
   },
   Po: {
     symbol: "Po", atomicNumber: 84, atomicMass: 209.0,
@@ -776,7 +861,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 167, pettiforScale: 95, valenceElectrons: 6,
     paulingElectronegativity: 2.00, electronAffinity: 1.90, firstIonizationEnergy: 8.417,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 527, latticeConstant: 3.35
   },
   At: {
     symbol: "At", atomicNumber: 85, atomicMass: 210.0,
@@ -785,7 +871,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 140, pettiforScale: 98.7, valenceElectrons: 7,
     paulingElectronegativity: 2.20, electronAffinity: 2.80, firstIonizationEnergy: 9.30,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 575, latticeConstant: null
   },
   Rn: {
     symbol: "Rn", atomicNumber: 86, atomicMass: 222.0,
@@ -794,7 +881,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 120, pettiforScale: 6, valenceElectrons: 0,
     paulingElectronegativity: null, electronAffinity: 0.0, firstIonizationEnergy: 10.749,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 202, latticeConstant: null
   },
   Fr: {
     symbol: "Fr", atomicNumber: 87, atomicMass: 223.0,
@@ -803,7 +891,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 270, pettiforScale: 7, valenceElectrons: 1,
     paulingElectronegativity: 0.70, electronAffinity: 0.486, firstIonizationEnergy: 4.073,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 300, latticeConstant: null
   },
   Ra: {
     symbol: "Ra", atomicNumber: 88, atomicMass: 226.0,
@@ -812,7 +901,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 215, pettiforScale: 13, valenceElectrons: 2,
     paulingElectronegativity: 0.90, electronAffinity: 0.10, firstIonizationEnergy: 5.279,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 973, latticeConstant: 5.15
   },
   Ac: {
     symbol: "Ac", atomicNumber: 89, atomicMass: 227.0,
@@ -821,7 +911,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 195, pettiforScale: 22, valenceElectrons: 3,
     paulingElectronegativity: 1.10, electronAffinity: 0.35, firstIonizationEnergy: 5.17,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1323, latticeConstant: 5.31
   },
   Th: {
     symbol: "Th", atomicNumber: 90, atomicMass: 232.04,
@@ -830,7 +921,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 4.3, gruneisenParameter: 1.28,
     atomicRadius: 180, pettiforScale: 39, valenceElectrons: 4,
     paulingElectronegativity: 1.30, electronAffinity: 0.0, firstIonizationEnergy: 6.307,
-    elementalTc: 1.38
+    elementalTc: 1.38,
+    meltingPoint: 2115, latticeConstant: 5.08
   },
   Pa: {
     symbol: "Pa", atomicNumber: 91, atomicMass: 231.04,
@@ -839,7 +931,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 5.0, gruneisenParameter: 1.2,
     atomicRadius: 163, pettiforScale: 40, valenceElectrons: 5,
     paulingElectronegativity: 1.50, electronAffinity: 0.0, firstIonizationEnergy: 5.89,
-    elementalTc: 1.40
+    elementalTc: 1.40,
+    meltingPoint: 1841, latticeConstant: 3.93
   },
   U: {
     symbol: "U", atomicNumber: 92, atomicMass: 238.03,
@@ -848,7 +941,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 9.14, gruneisenParameter: 2.09,
     atomicRadius: 156, pettiforScale: 41, valenceElectrons: 6,
     paulingElectronegativity: 1.38, electronAffinity: 0.0, firstIonizationEnergy: 6.194,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1405, latticeConstant: 2.85
   },
   Np: {
     symbol: "Np", atomicNumber: 93, atomicMass: 237.0,
@@ -857,7 +951,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 13.9, gruneisenParameter: 1.8,
     atomicRadius: 155, pettiforScale: 41.5, valenceElectrons: 7,
     paulingElectronegativity: 1.36, electronAffinity: 0.0, firstIonizationEnergy: 6.266,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 917, latticeConstant: 4.72
   },
   Pu: {
     symbol: "Pu", atomicNumber: 94, atomicMass: 244.0,
@@ -866,7 +961,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 46.0, gruneisenParameter: 1.6,
     atomicRadius: 159, pettiforScale: 42, valenceElectrons: 8,
     paulingElectronegativity: 1.28, electronAffinity: 0.0, firstIonizationEnergy: 6.026,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 913, latticeConstant: 6.18
   },
   Am: {
     symbol: "Am", atomicNumber: 95, atomicMass: 243.0,
@@ -875,7 +971,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 2.0, gruneisenParameter: 1.0,
     atomicRadius: 173, pettiforScale: 23, valenceElectrons: 9,
     paulingElectronegativity: 1.30, electronAffinity: 0.0, firstIonizationEnergy: 5.974,
-    elementalTc: 0.6
+    elementalTc: 0.6,
+    meltingPoint: 1449, latticeConstant: 3.47
   },
   Cm: {
     symbol: "Cm", atomicNumber: 96, atomicMass: 247.0,
@@ -884,7 +981,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     sommerfeldGamma: 7.0, gruneisenParameter: 1.0,
     atomicRadius: 174, pettiforScale: 24, valenceElectrons: 10,
     paulingElectronegativity: 1.30, electronAffinity: 0.0, firstIonizationEnergy: 5.991,
-    elementalTc: null
+    elementalTc: null,
+    meltingPoint: 1613, latticeConstant: 3.5
   },
 };
 
@@ -993,6 +1091,16 @@ export function getDebyeTemperature(symbol: string): number | null {
 export function getElementalTc(symbol: string): number | null {
   const data = ELEMENTAL_DATA[symbol];
   return data?.elementalTc ?? null;
+}
+
+export function getMeltingPoint(symbol: string): number | null {
+  const data = ELEMENTAL_DATA[symbol];
+  return data?.meltingPoint ?? null;
+}
+
+export function getLatticeConstant(symbol: string): number | null {
+  const data = ELEMENTAL_DATA[symbol];
+  return data?.latticeConstant ?? null;
 }
 
 export const KNOWN_ELEMENTAL_SUPERCONDUCTORS: Record<string, number> = {};

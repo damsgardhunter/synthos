@@ -8,7 +8,6 @@ import {
   computeElectronPhononCoupling,
   assessCorrelationStrength,
 } from "./physics-engine";
-import { classifyFamily } from "./utils";
 import {
   ELEMENTAL_DATA,
   getElementData,
@@ -20,6 +19,7 @@ import {
   isActinide,
   hasDOrFElectrons,
 } from "./elemental-data";
+import { gbPredict } from "./gradient-boost";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -194,146 +194,20 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 }
 
 function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate: number; reasoning: string[] } {
-  const reasoning: string[] = [];
-  let score = 0;
-
-  if (features.hasHydrogen) {
-    score += 0.15;
-    reasoning.push("Hydrogen-rich: strong electron-phonon coupling (BCS theory)");
-  }
-  if (features.hasTransitionMetal) {
-    score += 0.12;
-    reasoning.push("Transition metal d-electrons enable Cooper pair formation");
-  }
-  if (features.hasRareEarth) {
-    score += 0.08;
-    reasoning.push("Rare earth f-electrons contribute to unconventional pairing");
-  }
-  if (features.dWaveSymmetry) {
-    score += 0.1;
-    reasoning.push("Cu-O planes: d-wave symmetry boosts Tc (cuprate mechanism)");
-  }
-  if (features.layeredStructure) {
-    score += 0.08;
-    reasoning.push("Layered crystal structure enhances 2D superconducting channels");
-  }
-  if (features.phononCouplingEstimate > 0.5) {
-    score += 0.12;
-    reasoning.push(`Strong phonon coupling (${(features.phononCouplingEstimate*100).toFixed(0)}%) enhances BCS pairing`);
-  }
-  if (features.cooperPairStrength > 0.5) {
-    score += 0.1;
-    reasoning.push(`Cooper pair formation strength: ${(features.cooperPairStrength*100).toFixed(0)}%`);
-  }
-  if (features.meissnerPotential > 0.4) {
-    score += 0.08;
-    reasoning.push(`Meissner effect potential: ${(features.meissnerPotential*100).toFixed(0)}% - magnetic flux expulsion likely`);
-  }
-  if (features.numElements >= 3 && features.numElements <= 5) {
-    score += 0.05;
-    reasoning.push("Ternary/quaternary composition allows property tuning");
-  }
-  if (features.bandGap === 0 || features.bandGap === null) {
-    score += 0.07;
-    reasoning.push("Zero/near-zero band gap: metallic character required for superconductivity");
-  }
-  if (features.avgElectronegativity > 1.5 && features.avgElectronegativity < 2.5) {
-    score += 0.05;
-    reasoning.push("Balanced electronegativity: optimal charge transfer between sublattices");
-  }
-
-  const safeCorr = Number.isFinite(features.correlationStrength) ? features.correlationStrength : 0;
-  const safeDim = Number.isFinite(features.dimensionalityScore) ? features.dimensionalityScore : 0;
-  const safeLambda = Number.isFinite(features.electronPhononLambda) ? features.electronPhononLambda : 0;
-  const safeMetal = Number.isFinite(features.metallicity) ? features.metallicity : 0.5;
-
-  if (safeMetal < 0.3) {
-    score -= 0.15;
-    reasoning.push(`Non-metallic (metallicity=${safeMetal.toFixed(2)}): no itinerant electrons for Cooper pairing`);
-  } else if (safeMetal < 0.5) {
-    score -= 0.06;
-    reasoning.push(`Weak metallicity (${safeMetal.toFixed(2)}): limited conduction electron density at Fermi level`);
-  }
-
-  if (safeCorr > 0.6 && safeCorr <= 0.85) {
-    score += 0.05;
-    reasoning.push(`Strong electron correlations (U/W=${safeCorr.toFixed(2)}): unconventional pairing possible if metallic`);
-  } else if (safeCorr > 0.85) {
-    score -= 0.08;
-    reasoning.push(`Very strong correlations (U/W=${safeCorr.toFixed(2)}): likely Mott insulator, phonon-mediated SC unlikely`);
-  }
-  if (safeDim > 0.6) {
-    score += 0.06;
-    reasoning.push(`Favorable dimensionality (${safeDim.toFixed(1)}): 2D confinement enhances pairing`);
-  }
-  if (features.anharmonicityFlag) {
-    score += 0.04;
-    reasoning.push("Significant anharmonicity: may enhance e-ph coupling beyond harmonic approximation");
-  }
-  if (safeLambda > 1.0) {
-    score += 0.1;
-    reasoning.push(`Strong e-ph coupling (lambda=${safeLambda.toFixed(2)}): Eliashberg strong-coupling regime`);
-  } else if (safeLambda > 0.5) {
-    score += 0.05;
-    reasoning.push(`Moderate e-ph coupling (lambda=${safeLambda.toFixed(2)}): BCS regime`);
-  }
-  if (features.fermiSurfaceType.includes("nested") || features.fermiSurfaceType.includes("multi-sheet")) {
-    score += 0.06;
-    reasoning.push("Fermi surface nesting/multi-sheet topology: enhanced susceptibility to pairing instability");
-  }
+  const gb = gbPredict(features);
 
   const safeHc2 = features.upperCriticalField != null && Number.isFinite(features.upperCriticalField) ? features.upperCriticalField : null;
   if (safeHc2 != null) {
     if (safeHc2 > 50) {
-      score += 0.08;
-      reasoning.push(`High Hc2 (${safeHc2.toFixed(1)}T): robust Type-II superconductor with strong vortex pinning`);
-    } else if (safeHc2 > 10) {
-      score += 0.04;
-      reasoning.push(`Moderate Hc2 (${safeHc2.toFixed(1)}T): viable Type-II superconductor`);
-    } else if (safeHc2 > 0) {
-      score += 0.02;
-      reasoning.push(`Low Hc2 (${safeHc2.toFixed(1)}T): weak magnetic robustness limits practical applications`);
-    } else {
-      score -= 0.10;
-      reasoning.push("WARNING: Hc2=0T — no upper critical field detected, superconductivity unlikely");
+      gb.score = Math.min(0.95, gb.score + 0.05);
+      gb.reasoning.push(`High Hc2 (${safeHc2.toFixed(1)}T): robust Type-II superconductor`);
+    } else if (safeHc2 === 0) {
+      gb.score = Math.max(0.01, gb.score - 0.10);
+      gb.reasoning.push("Hc2=0T: no upper critical field detected");
     }
   }
 
-  const rawScore = score;
-  score = 1 / (1 + Math.exp(-3 * (rawScore - 0.5)));
-
-  let tcEstimate = 0;
-  const lambdaScaling = safeLambda > 2.5 ? 1.4 : safeLambda > 2.0 ? 1.25 : safeLambda > 1.5 ? 1.12 : 1.0;
-  if (safeMetal < 0.3) {
-    tcEstimate = 1 + score * 15;
-    reasoning.push("Tc heavily suppressed: non-metallic composition cannot support BCS superconductivity");
-  } else if (safeMetal < 0.5) {
-    tcEstimate = 5 + score * 50;
-    reasoning.push("Tc limited by weak metallicity");
-  } else if (safeLambda > 1.5 && features.hasHydrogen) {
-    const omega_log_K = (Number.isFinite(features.logPhononFreq) ? features.logPhononFreq : 500) * 1.44;
-    const muStar = 0.12;
-    const denom = safeLambda - muStar * (1 + 0.62 * safeLambda);
-    if (Math.abs(denom) > 1e-6) {
-      const exponent = -1.04 * (1 + safeLambda) / denom;
-      tcEstimate = (omega_log_K / 1.2) * Math.exp(exponent);
-    }
-    if (!Number.isFinite(tcEstimate) || tcEstimate < 100) tcEstimate = 100 + score * 350 * lambdaScaling;
-  } else if (features.hasHydrogen && features.cooperPairStrength > 0.4) {
-    tcEstimate = 150 + score * 350 * lambdaScaling;
-  } else if (features.dWaveSymmetry) {
-    tcEstimate = 80 + score * 300 * lambdaScaling;
-  } else if (features.correlationStrength > 0.85 && features.hasTransitionMetal) {
-    tcEstimate = 5 + score * 80;
-  } else if (features.correlationStrength > 0.6 && features.hasTransitionMetal) {
-    tcEstimate = 30 + score * 180 * lambdaScaling;
-  } else if (features.hasTransitionMetal) {
-    tcEstimate = 20 + score * 150;
-  } else {
-    tcEstimate = 5 + score * 120;
-  }
-
-  return { score, tcEstimate: Math.round(tcEstimate), reasoning };
+  return { score: gb.score, tcEstimate: Math.round(gb.tcPredicted), reasoning: gb.reasoning };
 }
 
 interface PhysicsContext {
@@ -354,13 +228,6 @@ interface CrystalContext {
   synthesizability: number | null;
 }
 
-interface KnowledgeDepth {
-  hasSynthesis: boolean;
-  hasCrystal: boolean;
-  pipelineStagesPassed: number;
-  hasRelatedInsights: boolean;
-}
-
 interface ResearchContext {
   synthesisCount: number;
   reactionCount: number;
@@ -370,7 +237,6 @@ interface ResearchContext {
   crystalData?: Map<string, CrystalContext>;
   strategyFocusAreas?: { area: string; priority: number }[];
   familyCounts?: Record<string, number>;
-  knowledgeDepth?: Map<string, KnowledgeDepth>;
 }
 
 export async function runMLPrediction(
@@ -450,82 +316,7 @@ export async function runMLPrediction(
       xgb.reasoning.push(`Low synthesizability (${(crystal.synthesizability * 100).toFixed(0)}%): practical challenges expected`);
     }
 
-    const family = classifyFamily(mat.formula);
-    let explorationBonus = 0;
-
-    const familyCounts = context?.familyCounts;
-    if (familyCounts) {
-      const familyCount = familyCounts[family] ?? 0;
-      if (familyCount < 5) {
-        const underExploredBonus = familyCount < 2 ? 0.08 : 0.05;
-        explorationBonus += underExploredBonus;
-        xgb.reasoning.push(`Exploration bonus (+${(underExploredBonus * 100).toFixed(0)}%): ${family} under-explored (${familyCount} candidates)`);
-      }
-    }
-
-    const focusAreas = context?.strategyFocusAreas;
-    if (focusAreas) {
-      const match = focusAreas.find(f => f.area.toLowerCase() === family.toLowerCase());
-      if (match) {
-        const strategyBonus = Math.min(0.05, match.priority * 0.05);
-        explorationBonus += strategyBonus;
-        xgb.reasoning.push(`Strategy-aligned (+${(strategyBonus * 100).toFixed(0)}%): ${family} is a research priority`);
-      }
-    }
-
-    explorationBonus = Math.min(0.10, explorationBonus);
-    if (explorationBonus > 0) {
-      xgb.score = xgb.score + explorationBonus;
-    }
-
-    let knowledgeBonus = 0;
-    const depth = context?.knowledgeDepth?.get(mat.formula);
-    if (depth) {
-      if (depth.hasSynthesis) {
-        knowledgeBonus += 0.03;
-        xgb.reasoning.push("Knowledge bonus: synthesis pathway documented");
-      }
-      if (depth.hasCrystal) {
-        knowledgeBonus += 0.03;
-        xgb.reasoning.push("Knowledge bonus: crystal structure predicted");
-      }
-      if (depth.pipelineStagesPassed > 0) {
-        const pipelineBonus = Math.min(0.08, depth.pipelineStagesPassed * 0.02);
-        knowledgeBonus += pipelineBonus;
-        xgb.reasoning.push(`Knowledge bonus: ${depth.pipelineStagesPassed} pipeline stages validated`);
-      }
-      if (depth.hasRelatedInsights) {
-        knowledgeBonus += 0.02;
-        xgb.reasoning.push("Knowledge bonus: related novel insights accumulated");
-      }
-    }
-    knowledgeBonus = Math.min(0.15, knowledgeBonus);
-    if (knowledgeBonus > 0) {
-      xgb.score += knowledgeBonus;
-    }
     xgb.score = Math.min(1, xgb.score);
-
-    let tcKnowledgeBonus = 0;
-    if (depth) {
-      if (depth.hasSynthesis) tcKnowledgeBonus += 8;
-      if (depth.hasCrystal) tcKnowledgeBonus += 8;
-      if (depth.pipelineStagesPassed > 0) tcKnowledgeBonus += Math.min(30, depth.pipelineStagesPassed * 8);
-      if (depth.hasRelatedInsights) tcKnowledgeBonus += 5;
-      tcKnowledgeBonus = Math.min(50, tcKnowledgeBonus);
-    }
-    if (physics) {
-      const verifiedLambda = physics.verifiedLambda ?? 0;
-      if (verifiedLambda > 2.5) tcKnowledgeBonus += 30;
-      else if (verifiedLambda > 2.0) tcKnowledgeBonus += 22;
-      else if (verifiedLambda > 1.5) tcKnowledgeBonus += 15;
-      else if (verifiedLambda > 1.0) tcKnowledgeBonus += 8;
-      else if (verifiedLambda > 0.5) tcKnowledgeBonus += 3;
-    }
-    tcKnowledgeBonus = Math.min(80, tcKnowledgeBonus);
-    if (tcKnowledgeBonus > 0) {
-      xgb.tcEstimate = xgb.tcEstimate + tcKnowledgeBonus;
-      xgb.reasoning.push(`Tc adjusted +${tcKnowledgeBonus}K from accumulated evidence (${physics ? 'physics-verified' : 'knowledge-based'})`);
-    }
 
     scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });
   }
@@ -718,6 +509,7 @@ Return JSON with:
         fermiSurfaceTopology: xgb.features.fermiSurfaceType,
         uncertaintyEstimate: nn.uncertaintyEstimate ?? 0.5,
         verificationStage: 0,
+        dataConfidence: xgb.hasPhysics ? "high" : (xgb.hasCrystal ? "medium" : "low"),
       });
     }
 

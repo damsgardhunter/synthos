@@ -8,6 +8,66 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
+const SYNTHESIS_VALIDATION_BOUNDS = {
+  temperature: { min: 0, max: 4000 },
+  pressure: { min: 0, max: 500 },
+};
+
+interface SynthesisValidationResult {
+  valid: boolean;
+  rejectionReasons: string[];
+}
+
+function validateSynthesisConditions(proc: any): SynthesisValidationResult {
+  const rejectionReasons: string[] = [];
+  const conditions = proc.conditions || {};
+
+  if (conditions.temperature !== undefined && conditions.temperature !== null) {
+    const tempC = typeof conditions.temperature === "number" ? conditions.temperature : parseFloat(conditions.temperature);
+    if (!isNaN(tempC)) {
+      const tempK = tempC + 273.15;
+      if (tempK < SYNTHESIS_VALIDATION_BOUNDS.temperature.min) {
+        rejectionReasons.push(`Synthesis temperature ${tempC}C (${tempK.toFixed(0)}K) below absolute zero`);
+      }
+      if (tempK > SYNTHESIS_VALIDATION_BOUNDS.temperature.max) {
+        rejectionReasons.push(`Synthesis temperature ${tempC}C (${tempK.toFixed(0)}K) exceeds ${SYNTHESIS_VALIDATION_BOUNDS.temperature.max}K limit`);
+      }
+    }
+  }
+
+  if (conditions.pressure !== undefined && conditions.pressure !== null) {
+    const pressureAtm = typeof conditions.pressure === "number" ? conditions.pressure : parseFloat(conditions.pressure);
+    if (!isNaN(pressureAtm)) {
+      const pressureGpa = pressureAtm * 0.000101325;
+      if (pressureGpa < SYNTHESIS_VALIDATION_BOUNDS.pressure.min) {
+        rejectionReasons.push(`Synthesis pressure ${pressureAtm} atm is negative`);
+      }
+      if (pressureGpa > SYNTHESIS_VALIDATION_BOUNDS.pressure.max) {
+        rejectionReasons.push(`Synthesis pressure ${pressureGpa.toFixed(2)} GPa exceeds ${SYNTHESIS_VALIDATION_BOUNDS.pressure.max} GPa limit`);
+      }
+    }
+  }
+
+  if (conditions.duration !== undefined && conditions.duration !== null) {
+    const durationStr = String(conditions.duration).toLowerCase();
+    const numMatch = durationStr.match(/[\d.]+/);
+    if (numMatch) {
+      const durationVal = parseFloat(numMatch[0]);
+      if (durationVal <= 0) {
+        rejectionReasons.push(`Synthesis duration must be positive, got: ${conditions.duration}`);
+      }
+    }
+  }
+
+  if (proc.yieldPercent !== undefined && proc.yieldPercent !== null) {
+    if (proc.yieldPercent < 0 || proc.yieldPercent > 100) {
+      rejectionReasons.push(`Yield ${proc.yieldPercent}% outside valid range [0, 100]`);
+    }
+  }
+
+  return { valid: rejectionReasons.length === 0, rejectionReasons };
+}
+
 export async function discoverSynthesisProcesses(
   emit: EventEmitter,
   materials: Material[]
@@ -98,6 +158,13 @@ Return JSON with key 'processes' containing an array of objects:
 
     for (const proc of processes) {
       if (!proc.formula || !proc.method) continue;
+
+      const synthValidation = validateSynthesisConditions(proc);
+      if (!synthValidation.valid) {
+        emit("log", { phase: "phase-8", event: "Synthesis process rejected", detail: `${proc.formula}: ${synthValidation.rejectionReasons.join("; ")}`, dataSource: "Synthesis Engine" });
+        continue;
+      }
+
       const matchedMat = batch.find(m => m.formula === proc.formula || m.name === proc.materialName);
       const id = `synth-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 

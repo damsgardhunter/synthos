@@ -184,18 +184,31 @@ function estimateDOSatFermi(elements: string[], counts: Record<string, number>):
     return Math.max(0.1, Math.min(10, nEf));
   }
 
-  let dos = 0.5;
   const totalAtoms = getTotalAtoms(counts);
+  let totalVE = 0;
   for (const el of elements) {
     const data = getElementData(el);
-    if (!data) continue;
+    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
+  }
+  const vec = totalVE / totalAtoms;
+
+  let wAvg = 0;
+  for (const el of elements) {
     const frac = (counts[el] || 1) / totalAtoms;
-    if (isTransitionMetal(el)) {
-      dos += frac * (1.5 + data.valenceElectrons * 0.15);
-    } else if (isRareEarth(el)) {
-      dos += frac * 3.0;
-    } else {
-      dos += frac * 0.3;
+    wAvg += estimateBandwidthW(el) * frac;
+  }
+  wAvg = Math.max(1.0, wAvg);
+
+  let dos = vec / (2 * wAvg);
+
+  for (const el of elements) {
+    const I = getStonerParameter(el);
+    if (I !== null && I > 0) {
+      const frac = (counts[el] || 1) / totalAtoms;
+      const stonerProduct = I * dos;
+      if (stonerProduct < 1.0 && stonerProduct > 0) {
+        dos = dos / (1 - stonerProduct * frac);
+      }
     }
   }
 
@@ -212,67 +225,79 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
   }
 
   const totalAtoms = getTotalAtoms(counts);
-  const hasH = elements.includes("H");
-  const hasO = elements.includes("O");
-  const hCount = counts["H"] || 0;
-  const oCount = counts["O"] || 0;
-
-  let metalFrac = 0;
-  let nonmetalFrac = 0;
   const nonmetals = ["H", "He", "C", "N", "O", "F", "Ne", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "I", "Xe"];
   const halogens = ["F", "Cl", "Br", "I"];
+  const hasH = elements.includes("H");
+  const hCount = counts["H"] || 0;
+
+  const metalElements = elements.filter(e => !nonmetals.includes(e));
+  const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
+  const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+  if (hasH && hRatio >= 6) {
+    const metalPresence = metalAtomCount / totalAtoms;
+    return Math.max(0.05, Math.min(1.0, 0.80 + metalPresence * 0.1));
+  }
+
+  let cationEN = 0, cationWeight = 0;
+  let anionEN = 0, anionWeight = 0;
 
   for (const el of elements) {
+    const data = getElementData(el);
+    if (!data) continue;
     const frac = (counts[el] || 1) / totalAtoms;
+    const en = data.paulingElectronegativity;
+
     if (nonmetals.includes(el)) {
-      nonmetalFrac += frac;
+      anionEN += en * frac;
+      anionWeight += frac;
     } else {
-      metalFrac += frac;
+      cationEN += en * frac;
+      cationWeight += frac;
     }
   }
 
-  const halogenFrac = halogens.reduce((s, h) => s + ((counts[h] || 0) / totalAtoms), 0);
-  const enSpread = (() => {
-    const enValues = elements.map(el => getElementData(el)?.paulingElectronegativity ?? 1.8);
-    if (enValues.length < 2) return 0;
-    return Math.max(...enValues) - Math.min(...enValues);
-  })();
-
-  let metallicity: number;
-
-  if (hasH && hCount / totalAtoms > 0.5) {
-    const metalElements = elements.filter(e => !nonmetals.includes(e));
-    if (metalElements.length > 0) {
-      const metalPresence = metalElements.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
-      const hToMetal = hCount / Math.max(1, metalElements.reduce((s, e) => s + (counts[e] || 0), 0));
-      if (hToMetal >= 6) {
-        metallicity = 0.80 + metalPresence * 0.1;
-      } else {
-        metallicity = 0.5 + metalPresence * 0.4;
-      }
-    } else {
-      metallicity = 0.2;
+  if (elements.length === 1) {
+    const data = getElementData(elements[0]);
+    if (data) {
+      if (nonmetals.includes(elements[0])) return 0.1;
+      if (isTransitionMetal(elements[0]) || isRareEarth(elements[0]) || isActinide(elements[0])) return 0.92;
+      if (data.paulingElectronegativity < 1.8) return 0.90;
+      return 0.5;
     }
-  } else if (metalFrac < 0.15 && nonmetalFrac > 0.7) {
-    metallicity = 0.1;
-  } else if (halogenFrac > 0.3) {
-    metallicity = 0.12;
-  } else if (enSpread > 2.5) {
-    metallicity = 0.15;
-  } else if (metalFrac > 0.8 && enSpread < 0.5) {
-    metallicity = 0.92;
-  } else if (metalFrac > 0.5) {
-    metallicity = 0.6 + metalFrac * 0.3;
-  } else {
-    metallicity = 0.3 + metalFrac * 0.4;
   }
 
-  if (hasO && oCount / totalAtoms > 0.5) metallicity *= 0.6;
-  if (elements.some(e => isTransitionMetal(e)) && !hasO && elements.length <= 3) {
-    metallicity = Math.max(metallicity, 0.85);
+  if (anionWeight > 0 && cationWeight > 0) {
+    const avgCation = cationEN / cationWeight;
+    const avgAnion = anionEN / anionWeight;
+    const deltaEN = avgAnion - avgCation;
+
+    const k = 3.0;
+    const threshold = 1.4;
+    let metallicity = 1.0 / (1.0 + Math.exp(k * (deltaEN - threshold)));
+
+    const halogenFrac = halogens.reduce((s, h) => s + ((counts[h] || 0) / totalAtoms), 0);
+    if (halogenFrac > 0.2) metallicity *= 0.3;
+
+    const oCount = counts["O"] || 0;
+    const oFrac = oCount / totalAtoms;
+    if (oFrac > 0.5) metallicity *= 0.5;
+
+    if (metalElements.some(e => isTransitionMetal(e)) && oFrac < 0.3 && elements.length <= 3) {
+      metallicity = Math.max(metallicity, 0.85);
+    }
+
+    if (hasH && hRatio >= 2) {
+      const metalPresence = metalAtomCount / totalAtoms;
+      metallicity = Math.max(metallicity, 0.5 + metalPresence * 0.4);
+    }
+
+    return Math.max(0.05, Math.min(1.0, metallicity));
   }
 
-  return Math.max(0.05, Math.min(1.0, metallicity));
+  const metalFrac = metalAtomCount / totalAtoms;
+  if (metalFrac > 0.8) return 0.92;
+  if (metalFrac > 0.5) return 0.6 + metalFrac * 0.3;
+  return 0.3 + metalFrac * 0.4;
 }
 
 export function computeElectronicStructure(

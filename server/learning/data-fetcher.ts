@@ -1,11 +1,156 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
+import { fetchSummary, isApiAvailable } from "./materials-project-client";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
+
+type DataSourceTag = "dft-computed" | "experimental" | "llm-estimated";
+
+interface ValidationResult {
+  valid: boolean;
+  rejectionReasons: string[];
+  correctedFields: Record<string, { original: any; corrected: any; source: string }>;
+}
+
+const VALIDATION_BOUNDS = {
+  bandGap: { min: 0, max: 15 },
+  formationEnergy: { min: -5, max: 5 },
+  stability: { min: 0, max: 5 },
+  latticeParam: { min: 1, max: 30 },
+  density: { min: 0.5, max: 25 },
+  meltingPoint: { min: 50, max: 5000 },
+  synthesisTemp: { min: 0, max: 50000 },
+};
+
+function validateMaterialProperties(mat: any): ValidationResult {
+  const rejectionReasons: string[] = [];
+  const correctedFields: Record<string, { original: any; corrected: any; source: string }> = {};
+
+  if (mat.bandGap !== null && mat.bandGap !== undefined) {
+    if (mat.bandGap < 0) {
+      rejectionReasons.push(`Negative band gap (${mat.bandGap} eV) is unphysical`);
+    } else if (mat.bandGap > VALIDATION_BOUNDS.bandGap.max) {
+      rejectionReasons.push(`Band gap ${mat.bandGap} eV exceeds physical maximum of ${VALIDATION_BOUNDS.bandGap.max} eV`);
+    }
+  }
+
+  if (mat.formationEnergy !== null && mat.formationEnergy !== undefined) {
+    if (mat.formationEnergy < VALIDATION_BOUNDS.formationEnergy.min || mat.formationEnergy > VALIDATION_BOUNDS.formationEnergy.max) {
+      rejectionReasons.push(`Formation energy ${mat.formationEnergy} eV/atom outside valid range [${VALIDATION_BOUNDS.formationEnergy.min}, ${VALIDATION_BOUNDS.formationEnergy.max}]`);
+    }
+  }
+
+  if (mat.stability !== null && mat.stability !== undefined) {
+    if (mat.stability < VALIDATION_BOUNDS.stability.min || mat.stability > VALIDATION_BOUNDS.stability.max) {
+      rejectionReasons.push(`Stability ${mat.stability} eV outside valid range [${VALIDATION_BOUNDS.stability.min}, ${VALIDATION_BOUNDS.stability.max}]`);
+    }
+  }
+
+  const props = mat.properties || {};
+
+  if (props.density !== null && props.density !== undefined) {
+    if (props.density < VALIDATION_BOUNDS.density.min || props.density > VALIDATION_BOUNDS.density.max) {
+      rejectionReasons.push(`Density ${props.density} g/cm3 outside valid range [${VALIDATION_BOUNDS.density.min}, ${VALIDATION_BOUNDS.density.max}]`);
+    }
+  }
+
+  if (props.meltingPoint !== null && props.meltingPoint !== undefined) {
+    if (props.meltingPoint < VALIDATION_BOUNDS.meltingPoint.min || props.meltingPoint > VALIDATION_BOUNDS.meltingPoint.max) {
+      rejectionReasons.push(`Melting point ${props.meltingPoint} K outside valid range [${VALIDATION_BOUNDS.meltingPoint.min}, ${VALIDATION_BOUNDS.meltingPoint.max}]`);
+    }
+  }
+
+  if (props.latticeA !== undefined && props.latticeA !== null) {
+    if (props.latticeA < VALIDATION_BOUNDS.latticeParam.min || props.latticeA > VALIDATION_BOUNDS.latticeParam.max) {
+      rejectionReasons.push(`Lattice param a=${props.latticeA} angstrom outside valid range [${VALIDATION_BOUNDS.latticeParam.min}, ${VALIDATION_BOUNDS.latticeParam.max}]`);
+    }
+  }
+  if (props.latticeB !== undefined && props.latticeB !== null) {
+    if (props.latticeB < VALIDATION_BOUNDS.latticeParam.min || props.latticeB > VALIDATION_BOUNDS.latticeParam.max) {
+      rejectionReasons.push(`Lattice param b=${props.latticeB} angstrom outside valid range`);
+    }
+  }
+  if (props.latticeC !== undefined && props.latticeC !== null) {
+    if (props.latticeC < VALIDATION_BOUNDS.latticeParam.min || props.latticeC > VALIDATION_BOUNDS.latticeParam.max) {
+      rejectionReasons.push(`Lattice param c=${props.latticeC} angstrom outside valid range`);
+    }
+  }
+
+  return {
+    valid: rejectionReasons.length === 0,
+    rejectionReasons,
+    correctedFields,
+  };
+}
+
+async function crossValidateWithMP(
+  formula: string,
+  mat: any
+): Promise<{ corrected: any; dataSource: DataSourceTag; corrections: string[] }> {
+  const corrections: string[] = [];
+  const corrected = { ...mat };
+
+  if (!isApiAvailable()) {
+    return { corrected, dataSource: "llm-estimated", corrections };
+  }
+
+  try {
+    const mpData = await fetchSummary(formula);
+    if (!mpData) {
+      return { corrected, dataSource: "llm-estimated", corrections };
+    }
+
+    if (mpData.bandGap !== undefined && mpData.bandGap !== null) {
+      if (corrected.bandGap === null || corrected.bandGap === undefined ||
+          Math.abs(corrected.bandGap - mpData.bandGap) > 0.5) {
+        corrections.push(`bandGap: ${corrected.bandGap} -> ${mpData.bandGap} (MP)`);
+        corrected.bandGap = mpData.bandGap;
+      }
+    }
+
+    if (mpData.formationEnergyPerAtom !== undefined && mpData.formationEnergyPerAtom !== null) {
+      if (corrected.formationEnergy === null || corrected.formationEnergy === undefined ||
+          Math.abs(corrected.formationEnergy - mpData.formationEnergyPerAtom) > 0.3) {
+        corrections.push(`formationEnergy: ${corrected.formationEnergy} -> ${mpData.formationEnergyPerAtom} (MP)`);
+        corrected.formationEnergy = mpData.formationEnergyPerAtom;
+      }
+    }
+
+    if (mpData.energyAboveHull !== undefined && mpData.energyAboveHull !== null) {
+      if (corrected.stability === null || corrected.stability === undefined ||
+          Math.abs(corrected.stability - mpData.energyAboveHull) > 0.1) {
+        corrections.push(`stability: ${corrected.stability} -> ${mpData.energyAboveHull} (MP)`);
+        corrected.stability = mpData.energyAboveHull;
+      }
+    }
+
+    if (mpData.spaceGroup && !corrected.spacegroup) {
+      corrected.spacegroup = mpData.spaceGroup;
+      corrections.push(`spacegroup: null -> ${mpData.spaceGroup} (MP)`);
+    }
+
+    if (!corrected.properties) corrected.properties = {};
+    if (mpData.density) corrected.properties.density = mpData.density;
+    if (mpData.volume) corrected.properties.volume = mpData.volume;
+    corrected.properties.mpId = mpData.mpId;
+    corrected.properties.mpValidated = true;
+
+    return { corrected, dataSource: "dft-computed", corrections };
+  } catch {
+    return { corrected, dataSource: "llm-estimated", corrections };
+  }
+}
+
+function determineDataSource(source: string): DataSourceTag {
+  if (source === "OQMD") return "experimental";
+  if (source === "Materials Project" || source === "MP") return "dft-computed";
+  if (source === "Materials Science DB" || source === "Materials Science KB") return "llm-estimated";
+  return "llm-estimated";
+}
 
 interface OQMDEntry {
   name: string;
@@ -51,19 +196,33 @@ export async function fetchOQMDMaterials(
     for (const entry of entries) {
       if (!entry.name || !entry.composition) continue;
       const id = `oqmd-live-${entry.entry_id}`;
+
+      const matData = {
+        bandGap: entry.band_gap ?? null,
+        formationEnergy: entry.delta_e ?? null,
+        stability: entry.stability ?? null,
+        properties: { entry_id: entry.entry_id, fetchedLive: true },
+      };
+      const validation = validateMaterialProperties(matData);
+      if (!validation.valid) {
+        emit("log", { phase: "phase-4", event: "OQMD material rejected", detail: `${entry.name}: ${validation.rejectionReasons.join("; ")}`, dataSource: "OQMD" });
+        continue;
+      }
+
       try {
         await storage.insertMaterial({
           id,
           name: entry.name,
           formula: entry.composition || entry.name,
           spacegroup: entry.spacegroup || null,
-          bandGap: entry.band_gap ?? null,
-          formationEnergy: entry.delta_e ?? null,
-          stability: entry.stability ?? null,
+          bandGap: matData.bandGap,
+          formationEnergy: matData.formationEnergy,
+          stability: matData.stability,
           source: "OQMD",
           properties: {
             entry_id: entry.entry_id,
             fetchedLive: true,
+            dataSource: "experimental" as DataSourceTag,
           },
         });
         indexed++;
@@ -166,18 +325,43 @@ Return JSON with 'materials' array containing exactly 5 materials. Only real com
 
     for (const mat of materials) {
       if (!mat.formula || !mat.name) continue;
+
+      const validation = validateMaterialProperties(mat);
+      if (!validation.valid) {
+        emit("log", { phase: "phase-4", event: "LLM material rejected", detail: `${mat.formula}: ${validation.rejectionReasons.join("; ")}`, dataSource: "Materials Science DB" });
+        continue;
+      }
+
+      const { corrected, dataSource, corrections } = await crossValidateWithMP(mat.formula, mat);
+      if (corrections.length > 0) {
+        emit("log", { phase: "phase-4", event: "MP cross-validation corrections", detail: `${mat.formula}: ${corrections.join(", ")}`, dataSource: "Materials Project" });
+      }
+
+      const revalidation = validateMaterialProperties(corrected);
+      if (!revalidation.valid) {
+        emit("log", { phase: "phase-4", event: "Material rejected after MP validation", detail: `${mat.formula}: ${revalidation.rejectionReasons.join("; ")}`, dataSource: "Materials Science DB" });
+        continue;
+      }
+
       const id = mat.id || `matdb-${mat.formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20)}-${Math.random().toString(36).slice(2, 6)}`;
       try {
+        const props = corrected.properties || {};
+        props.dataSource = dataSource;
+        if (corrections.length > 0) {
+          props.mpCorrected = true;
+          props.corrections = corrections;
+        }
+
         await storage.insertMaterial({
           id,
-          name: mat.name,
-          formula: mat.formula,
-          spacegroup: mat.spacegroup || null,
-          bandGap: mat.bandGap ?? null,
-          formationEnergy: mat.formationEnergy ?? null,
-          stability: mat.stability ?? null,
+          name: corrected.name || mat.name,
+          formula: corrected.formula || mat.formula,
+          spacegroup: corrected.spacegroup || mat.spacegroup || null,
+          bandGap: corrected.bandGap ?? mat.bandGap ?? null,
+          formationEnergy: corrected.formationEnergy ?? mat.formationEnergy ?? null,
+          stability: corrected.stability ?? mat.stability ?? null,
           source: "Materials Science DB",
-          properties: mat.properties || {},
+          properties: props,
         });
         indexed++;
       } catch (e) {
@@ -188,7 +372,7 @@ Return JSON with 'materials' array containing exactly 5 materials. Only real com
       emit("log", {
         phase: "phase-4",
         event: "Element-focused materials indexed",
-        detail: `Indexed ${indexed} ${topic.element}-based materials from scientific databases`,
+        detail: `Indexed ${indexed} ${topic.element}-based materials (validated & tagged)`,
         dataSource: "Materials Science DB",
       });
       emit("progress", { phase: 4, newItems: indexed });
@@ -335,18 +519,43 @@ Return JSON with 'materials' array containing 5-8 materials. Only include materi
 
     for (const mat of materials) {
       if (!mat.formula || !mat.name) continue;
+
+      const validation = validateMaterialProperties(mat);
+      if (!validation.valid) {
+        emit("log", { phase: "phase-4", event: "LLM material rejected", detail: `${mat.formula}: ${validation.rejectionReasons.join("; ")}`, dataSource: "Materials Science KB" });
+        continue;
+      }
+
+      const { corrected, dataSource, corrections } = await crossValidateWithMP(mat.formula, mat);
+      if (corrections.length > 0) {
+        emit("log", { phase: "phase-4", event: "MP cross-validation corrections", detail: `${mat.formula}: ${corrections.join(", ")}`, dataSource: "Materials Project" });
+      }
+
+      const revalidation = validateMaterialProperties(corrected);
+      if (!revalidation.valid) {
+        emit("log", { phase: "phase-4", event: "Material rejected after MP validation", detail: `${mat.formula}: ${revalidation.rejectionReasons.join("; ")}`, dataSource: "Materials Science KB" });
+        continue;
+      }
+
       const id = mat.id || `kb-${mat.formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20)}-${Math.random().toString(36).slice(2, 6)}`;
       try {
+        const props = corrected.properties || {};
+        props.dataSource = dataSource;
+        if (corrections.length > 0) {
+          props.mpCorrected = true;
+          props.corrections = corrections;
+        }
+
         await storage.insertMaterial({
           id,
-          name: mat.name,
-          formula: mat.formula,
-          spacegroup: mat.spacegroup || null,
-          bandGap: mat.bandGap ?? null,
-          formationEnergy: mat.formationEnergy ?? null,
-          stability: mat.stability ?? null,
+          name: corrected.name || mat.name,
+          formula: corrected.formula || mat.formula,
+          spacegroup: corrected.spacegroup || mat.spacegroup || null,
+          bandGap: corrected.bandGap ?? mat.bandGap ?? null,
+          formationEnergy: corrected.formationEnergy ?? mat.formationEnergy ?? null,
+          stability: corrected.stability ?? mat.stability ?? null,
           source: "Materials Science KB",
-          properties: mat.properties || {},
+          properties: props,
         });
         indexed++;
       } catch (e) {
@@ -357,7 +566,7 @@ Return JSON with 'materials' array containing 5-8 materials. Only include materi
       emit("log", {
         phase: "phase-4",
         event: "Known materials imported",
-        detail: `Indexed ${indexed} real ${topic.category}-level materials for ${topic.topic}`,
+        detail: `Indexed ${indexed} real ${topic.category}-level materials for ${topic.topic} (validated & tagged)`,
         dataSource: "Materials Science KB",
       });
       emit("progress", { phase: 4, newItems: indexed });

@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
-import { ELEMENTAL_DATA } from "./elemental-data";
+import { ELEMENTAL_DATA, getElementData, getMeltingPoint, getLatticeConstant } from "./elemental-data";
 import { fetchSummary, fetchElasticity } from "./materials-project-client";
 
 const openai = new OpenAI({
@@ -291,25 +291,169 @@ function matchPrototype(formula: string): typeof KNOWN_PROTOTYPES[string] | null
   return null;
 }
 
-function estimateLatticeFromVolume(volume: number, nsites: number, crystalSystem: string): { a: number; b: number; c: number } {
-  const volPerAtom = volume / Math.max(nsites, 1);
-  const cubeRoot = Math.pow(volPerAtom, 1 / 3);
+const PROTOTYPE_CA_RATIOS: Record<string, number> = {
+  perovskite: 1.0,
+  rutile: 0.64,
+  wurtzite: 1.63,
+  fluorite: 1.0,
+  spinel: 1.0,
+  rocksalt: 1.0,
+  NaCl: 1.0,
+  CsCl: 1.0,
+  "A15": 1.0,
+  MgB2: 1.14,
+  cuprate: 3.2,
+  YBCO: 3.0,
+  "iron-pnictide": 2.2,
+  "ThCr2Si2": 2.6,
+  clathrate: 1.0,
+  sodalite: 1.0,
+  Laves: 1.0,
+  diamond: 1.0,
+  "bismuth-selenide": 7.0,
+};
 
-  switch (crystalSystem.toLowerCase()) {
-    case "cubic":
-      return { a: cubeRoot, b: cubeRoot, c: cubeRoot };
-    case "tetragonal":
-      return { a: cubeRoot, b: cubeRoot, c: cubeRoot * 1.2 };
-    case "hexagonal":
-    case "trigonal":
-      return { a: cubeRoot * 1.05, b: cubeRoot * 1.05, c: cubeRoot * 1.6 };
-    case "orthorhombic":
-      return { a: cubeRoot * 0.95, b: cubeRoot * 1.0, c: cubeRoot * 1.1 };
-    case "monoclinic":
-      return { a: cubeRoot * 0.9, b: cubeRoot * 1.0, c: cubeRoot * 1.15 };
-    default:
-      return { a: cubeRoot, b: cubeRoot, c: cubeRoot };
+function getPrototypeCARatio(prototype: string | null): number | null {
+  if (!prototype) return null;
+  for (const [key, ratio] of Object.entries(PROTOTYPE_CA_RATIOS)) {
+    if (prototype.toLowerCase().includes(key.toLowerCase())) return ratio;
   }
+  return null;
+}
+
+export function computeGoldschmidtTolerance(formula: string): { factor: number; prediction: string } | null {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+
+  if (elements.length < 3 || !elements.includes("O")) return null;
+
+  const oCount = counts["O"] || 0;
+  const nonO = elements.filter(e => e !== "O");
+  if (nonO.length < 2) return null;
+
+  const totalNonO = nonO.reduce((s, e) => s + (counts[e] || 0), 0);
+  const expectedOxygen = totalNonO > 0 ? oCount / totalNonO : 0;
+  if (expectedOxygen < 1.0 || expectedOxygen > 4.0) return null;
+
+  const sorted = nonO.sort((a, b) => {
+    const rA = getElementData(a)?.atomicRadius ?? 0;
+    const rB = getElementData(b)?.atomicRadius ?? 0;
+    return rB - rA;
+  });
+
+  const aSite = sorted[0];
+  const bSite = sorted[1];
+  const rA = (getElementData(aSite)?.atomicRadius ?? 150) / 100;
+  const rB = (getElementData(bSite)?.atomicRadius ?? 70) / 100;
+  const rO = 1.40;
+
+  const t = (rA + rO) / (Math.sqrt(2) * (rB + rO));
+
+  let prediction: string;
+  if (t > 1.05) {
+    prediction = "hexagonal polytypes likely";
+  } else if (t >= 0.95) {
+    prediction = "ideal cubic perovskite";
+  } else if (t >= 0.85) {
+    prediction = "distorted perovskite (orthorhombic/rhombohedral tilting)";
+  } else if (t >= 0.75) {
+    prediction = "strongly distorted perovskite, possible ilmenite";
+  } else {
+    prediction = "perovskite structure unlikely";
+  }
+
+  return { factor: Number(t.toFixed(4)), prediction };
+}
+
+export function vegardLatticeParameter(formula: string): number | null {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  if (elements.length < 2 || totalAtoms === 0) return null;
+
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  for (const el of elements) {
+    const lc = getLatticeConstant(el);
+    if (lc === null) continue;
+    const frac = (counts[el] || 0) / totalAtoms;
+    weightedSum += frac * lc;
+    totalWeight += frac;
+  }
+
+  if (totalWeight < 0.5) return null;
+  return weightedSum / totalWeight;
+}
+
+function estimateLatticeFromVolume(
+  volume: number,
+  nsites: number,
+  crystalSystem: string,
+  prototype?: string | null,
+  formula?: string | null
+): { a: number; b: number; c: number } {
+  const vegardA = formula ? vegardLatticeParameter(formula) : null;
+
+  const protoCARatio = getPrototypeCARatio(prototype || null);
+
+  const volPerAtom = volume / Math.max(nsites, 1);
+
+  if (vegardA && protoCARatio) {
+    const a = vegardA;
+    const c = a * protoCARatio;
+    const cs = crystalSystem.toLowerCase();
+    if (cs === "cubic") return { a, b: a, c: a };
+    if (cs === "tetragonal") return { a, b: a, c };
+    if (cs === "hexagonal" || cs === "trigonal") return { a, b: a, c };
+    if (cs === "orthorhombic") return { a, b: a * 1.02, c };
+    return { a, b: a, c };
+  }
+
+  const caRatio = protoCARatio || (() => {
+    switch (crystalSystem.toLowerCase()) {
+      case "cubic": return 1.0;
+      case "tetragonal": return 1.2;
+      case "hexagonal":
+      case "trigonal": return 1.63;
+      case "orthorhombic": return 1.1;
+      case "monoclinic": return 1.15;
+      default: return 1.0;
+    }
+  })();
+
+  const cs = crystalSystem.toLowerCase();
+  let a: number, b: number, c: number;
+
+  if (cs === "cubic") {
+    a = Math.pow(volPerAtom, 1 / 3);
+    b = a;
+    c = a;
+  } else if (cs === "tetragonal") {
+    a = Math.pow(volPerAtom / caRatio, 1 / 3);
+    b = a;
+    c = a * caRatio;
+  } else if (cs === "hexagonal" || cs === "trigonal") {
+    const hexVol = volPerAtom;
+    a = Math.pow(hexVol / (caRatio * Math.sqrt(3) / 2), 1 / 3);
+    b = a;
+    c = a * caRatio;
+  } else if (cs === "orthorhombic") {
+    a = Math.pow(volPerAtom / (1.02 * caRatio), 1 / 3);
+    b = a * 1.02;
+    c = a * caRatio;
+  } else if (cs === "monoclinic") {
+    a = Math.pow(volPerAtom / (1.0 * caRatio), 1 / 3);
+    b = a;
+    c = a * caRatio;
+  } else {
+    a = Math.pow(volPerAtom, 1 / 3);
+    b = a;
+    c = a;
+  }
+
+  return { a, b, c };
 }
 
 function anglesForCrystalSystem(cs: string): { alpha: number; beta: number; gamma: number } {
@@ -330,46 +474,93 @@ function anglesForCrystalSystem(cs: string): { alpha: number; beta: number; gamm
   }
 }
 
-function estimateSynthesizability(hullDistance: number, formationEnergy: number, elements: string[]): { score: number; notes: string } {
+function estimateSynthesizability(
+  hullDistance: number,
+  formationEnergy: number,
+  elements: string[],
+  formula?: string
+): { score: number; notes: string; estimatedSynthesisTemp?: number } {
   let score = 1.0;
   const notes: string[] = [];
 
+  const miedemaFormE = formula ? computeMiedemaFormationEnergy(formula) : formationEnergy;
+  const absMiedema = Math.abs(miedemaFormE);
+
+  if (miedemaFormE < -0.5) {
+    score += 0.1;
+    notes.push(`strongly exothermic (dHf=${miedemaFormE.toFixed(2)} eV/atom)`);
+  } else if (miedemaFormE < -0.1) {
+    notes.push(`mildly exothermic (dHf=${miedemaFormE.toFixed(2)} eV/atom)`);
+  } else if (miedemaFormE < 0.1) {
+    score -= 0.05;
+    notes.push(`near-zero formation energy (dHf=${miedemaFormE.toFixed(2)} eV/atom)`);
+  } else {
+    score -= 0.15 - Math.min(0.15, absMiedema * 0.1);
+    notes.push(`endothermic (dHf=${miedemaFormE.toFixed(2)} eV/atom)`);
+  }
+
   if (hullDistance > 0.3) {
-    score -= 0.5;
+    score -= 0.4;
     notes.push("far above convex hull");
   } else if (hullDistance > 0.1) {
-    score -= 0.25;
+    score -= 0.2;
     notes.push("moderately above hull");
   } else if (hullDistance > 0.05) {
-    score -= 0.1;
+    score -= 0.08;
     notes.push("slightly above hull");
   }
 
-  if (formationEnergy > 0) {
-    score -= 0.2;
-    notes.push("positive formation energy");
-  }
-
-  const toxic = ["Tl", "Pb", "Cd", "Hg", "Be", "As"];
-  const rare = ["Re", "Os", "Ir", "Ru", "Rh", "Pd", "Pt", "Au"];
-  const radioactive = ["Tc", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu"];
+  let maxMeltingPoint = 0;
+  let estimatedSynthesisTemp: number | undefined;
 
   for (const el of elements) {
-    if (radioactive.includes(el)) { score -= 0.3; notes.push(`radioactive element ${el}`); break; }
-    if (rare.includes(el)) { score -= 0.1; notes.push(`rare/expensive element ${el}`); break; }
-    if (toxic.includes(el)) { score -= 0.05; notes.push(`toxic element ${el}`); break; }
+    const mp = getMeltingPoint(el);
+    if (mp !== null && mp > maxMeltingPoint) {
+      maxMeltingPoint = mp;
+    }
+  }
+
+  if (maxMeltingPoint > 0) {
+    estimatedSynthesisTemp = Math.round(0.57 * maxMeltingPoint);
+    notes.push(`Tammann T_synth ~ ${estimatedSynthesisTemp} K (0.57 * T_melt of ${maxMeltingPoint} K)`);
+
+    if (estimatedSynthesisTemp > 3000) {
+      score -= 0.15;
+      notes.push("very high synthesis temperature required");
+    } else if (estimatedSynthesisTemp > 2000) {
+      score -= 0.05;
+    }
   }
 
   const hasH = elements.includes("H");
   if (hasH) {
-    score -= 0.15;
-    notes.push("hydride may require high pressure");
+    const counts = formula ? parseFormulaCounts(formula) : {};
+    const hCount = counts["H"] || 0;
+    const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
+    const hFrac = hCount / totalAtoms;
+
+    if (hFrac > 0.6) {
+      score -= 0.2;
+      notes.push("superhydride requires very high pressure synthesis (>100 GPa)");
+    } else if (hFrac > 0.3) {
+      score -= 0.1;
+      notes.push("hydride may require moderate-high pressure synthesis");
+    }
+  }
+
+  const radioactive = ["Tc", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu"];
+  for (const el of elements) {
+    if (radioactive.includes(el)) {
+      score -= 0.25;
+      notes.push(`radioactive element ${el}`);
+      break;
+    }
   }
 
   score = Math.max(0.05, Math.min(1.0, score));
   const noteStr = notes.length > 0 ? notes.join("; ") : "Standard synthesis conditions expected";
 
-  return { score, notes: noteStr };
+  return { score, notes: noteStr, estimatedSynthesisTemp };
 }
 
 export async function predictCrystalStructure(
@@ -386,7 +577,8 @@ export async function predictCrystalStructure(
       const cs = mpData.crystalSystem || protoMatch?.crystalSystem || "cubic";
       const sg = mpData.spaceGroup || protoMatch?.spaceGroup || "P1";
 
-      const lattice = estimateLatticeFromVolume(mpData.volume, mpData.nsites, cs);
+      const proto = protoMatch?.prototype || `${cs} (${sg})`;
+      const lattice = estimateLatticeFromVolume(mpData.volume, mpData.nsites, cs, proto, formula);
       const angles = anglesForCrystalSystem(cs);
 
       const eAboveHull = mpData.energyAboveHull;
@@ -401,9 +593,8 @@ export async function predictCrystalStructure(
         }
       }
 
-      const synth = estimateSynthesizability(eAboveHull, formE, elements);
-
-      const proto = protoMatch?.prototype || `${cs} (${sg})`;
+      const tolerance = computeGoldschmidtTolerance(formula);
+      const synth = estimateSynthesizability(eAboveHull, formE, elements, formula);
 
       const result: StructurePrediction = {
         spaceGroup: sg,
@@ -445,10 +636,11 @@ export async function predictCrystalStructure(
         source: "Materials Project + Structure Predictor",
       });
 
+      const toleranceInfo = tolerance ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
       emit("log", {
         phase: "phase-11",
         event: "Crystal structure predicted (MP data)",
-        detail: `${formula}: ${sg} (${cs}), hull=${eAboveHull.toFixed(3)} eV/atom, dHf=${formE.toFixed(3)} eV/atom`,
+        detail: `${formula}: ${sg} (${cs}), hull=${eAboveHull.toFixed(3)} eV/atom, dHf=${formE.toFixed(3)} eV/atom${toleranceInfo}`,
         dataSource: "Materials Project",
       });
 
@@ -498,7 +690,8 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
 
     const isStable = miedemaDecomp <= 0.005;
     const isMetastable = !isStable && miedemaDecomp <= 0.15;
-    const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements);
+    const tolerance = computeGoldschmidtTolerance(formula);
+    const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements, formula);
 
     const result: StructurePrediction = {
       spaceGroup: (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1",
@@ -540,10 +733,11 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
       source: "Miedema + Structure Predictor",
     });
 
+    const toleranceInfo2 = tolerance ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
     emit("log", {
       phase: "phase-11",
       event: "Crystal structure predicted (Miedema)",
-      detail: `${formula}: ${result.spaceGroup} (${result.crystalSystem}), Miedema dHf=${miedemaFormE.toFixed(3)} eV/atom, decomp=${miedemaDecomp.toFixed(3)} eV/atom`,
+      detail: `${formula}: ${result.spaceGroup} (${result.crystalSystem}), Miedema dHf=${miedemaFormE.toFixed(3)} eV/atom, decomp=${miedemaDecomp.toFixed(3)} eV/atom${toleranceInfo2}`,
       dataSource: "Miedema model",
     });
 

@@ -11,6 +11,21 @@ import {
   Shield, Target, Zap,
 } from "lucide-react";
 
+function ConfidenceBadge({ level }: { level?: string | null }) {
+  if (!level) return null;
+  const styles: Record<string, string> = {
+    high: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400",
+    medium: "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-400",
+    low: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
+  };
+  const labels: Record<string, string> = { high: "DFT", medium: "Model", low: "Est." };
+  return (
+    <span data-testid={`confidence-badge-${level}`} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[level] ?? styles.low}`}>
+      {labels[level] ?? level}
+    </span>
+  );
+}
+
 interface CandidateProfile {
   formula: string;
   candidates: SuperconductorCandidate[];
@@ -84,9 +99,12 @@ function CandidateHeader({ candidate }: { candidate: SuperconductorCandidate }) 
               <Thermometer className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="text-xs text-muted-foreground">Predicted Tc</span>
             </div>
-            <p className={`text-xl font-mono font-bold ${tcColor}`}>
-              {candidate.predictedTc ? `${candidate.predictedTc}K` : "N/A"}
-            </p>
+            <div className="flex items-center gap-1.5">
+              <p className={`text-xl font-mono font-bold ${tcColor}`}>
+                {candidate.predictedTc ? `${candidate.predictedTc}K` : "N/A"}
+              </p>
+              <ConfidenceBadge level={candidate.dataConfidence} />
+            </div>
           </div>
           <div className="p-3 bg-muted/50 rounded-md">
             <div className="flex items-center gap-1.5 mb-1">

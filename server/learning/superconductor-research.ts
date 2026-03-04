@@ -130,34 +130,6 @@ export async function runSuperconductorResearch(
   const synthesisProcesses = await storage.getSynthesisProcesses(20);
   const chemicalReactions = await storage.getChemicalReactions(20);
 
-  const knowledgeDepth = new Map<string, { hasSynthesis: boolean; hasCrystal: boolean; pipelineStagesPassed: number; hasRelatedInsights: boolean }>();
-  try {
-    const allSynth = await storage.getSynthesisProcesses(200);
-    const synthFormulas = new Set(allSynth.map(s => s.formula));
-    const allCrystals = await storage.getCrystalStructures(200);
-    const crystalFormulas = new Set(allCrystals.map(c => c.formula));
-    const allResults = await storage.getComputationalResults(200);
-    const pipelineByFormula = new Map<string, number>();
-    for (const r of allResults) {
-      if (r.passed) {
-        pipelineByFormula.set(r.formula, (pipelineByFormula.get(r.formula) ?? 0) + 1);
-      }
-    }
-    const recentInsights = await storage.getNovelInsightsOnly(20);
-    const insightTexts = recentInsights.map(i => i.insightText.toLowerCase());
-
-    for (const mat of materials) {
-      const f = mat.formula;
-      const family = classifyFamily(f).toLowerCase();
-      knowledgeDepth.set(f, {
-        hasSynthesis: synthFormulas.has(f),
-        hasCrystal: crystalFormulas.has(f),
-        pipelineStagesPassed: pipelineByFormula.get(f) ?? 0,
-        hasRelatedInsights: insightTexts.some(t => t.includes(f.toLowerCase()) || t.includes(family)),
-      });
-    }
-  } catch {}
-
   const mlResult = await runMLPrediction(emit, materials, {
     synthesisCount: synthesisProcesses.length,
     reactionCount: chemicalReactions.length,
@@ -165,7 +137,6 @@ export async function runSuperconductorResearch(
     hasReactionKnowledge: chemicalReactions.length > 0,
     strategyFocusAreas: strategyCtx?.strategyFocusAreas,
     familyCounts: strategyCtx?.familyCounts,
-    knowledgeDepth,
   });
   newInsights.push(...mlResult.insights);
 

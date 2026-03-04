@@ -138,6 +138,7 @@ export const superconductorCandidates = pgTable("superconductor_candidates", {
   ambientPressureStable: boolean("ambient_pressure_stable").default(false),
   verificationStage: integer("verification_stage").default(0),
   uncertaintyEstimate: real("uncertainty_estimate"),
+  dataConfidence: text("data_confidence").default("medium"),
 });
 
 export const crystalStructures = pgTable("crystal_structures", {

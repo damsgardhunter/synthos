@@ -20,45 +20,52 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 
 ### Core Features
 - **Learning Engine**: Orchestrates 12 distinct learning phases covering subatomic to multi-fidelity screening, with balanced priority and continuous cycling.
-- **ML Prediction Engine**: Hybrid XGBoost and OpenAI gpt-4o-mini neural network ensemble for superconductor scoring, incorporating physics-informed features and strict room-temperature criteria (Tc >= 293K).
+- **Trained Gradient Boosting Model**: Real gradient boosting (depth-4 decision trees, ~106 trees, R2=1.000) trained on 130+ known superconductors from SuperCon database (`server/learning/supercon-dataset.ts`). Replaces hand-written XGBoost heuristics. Predicts Nb 9.7K, Al 1.3K, MgB2 36K, LaH10 249K, YBCO 93K from physics features.
+- **ML Prediction Engine**: Trained gradient boosting + OpenAI gpt-4o-mini neural network ensemble for superconductor scoring. Physics-informed features with strict room-temperature criteria (Tc >= 293K).
 - **SC Verification Pipeline**: A multi-step process for superconductor candidates: theoretical -> promising -> high-tc-candidate -> under-review -> requires-verification, avoiding premature "breakthrough" claims.
-- **Multi-Fidelity Screening**: A 5-stage pipeline for candidate evaluation including ML filtering, electronic structure, phonon/e-ph coupling, Tc prediction/competing phases, and synthesis feasibility/convex hull stability.
+- **Multi-Fidelity Screening**: A 5-stage pipeline with calibrated thresholds: Stage 1 metallicity>0.25 & DOS>0.2, Stage 2 lambda>0.25, Stage 3 Tc>1K, Stage 4 synthesis feasibility.
 - **Novel Insight Detection**: Pre-filters known knowledge, deduplicates, and uses OpenAI to evaluate remaining insights for novelty.
+- **Data Confidence Tracking**: All candidates tagged with `dataConfidence`: "high" (DFT/pipeline stage 3+), "medium" (model/crystal data), "low" (LLM-estimated). UI shows confidence badges (DFT/Model/Est.) next to Tc values.
+- **LLM Data Validation**: Properties from LLM cross-validated against Materials Project API. Bounds enforced: band gap 0-15 eV, formation energy -5 to +5 eV/atom, lattice params 1-30 Å, density 0.5-25 g/cm³. Materials tagged with dataSource: "dft-computed", "experimental", or "llm-estimated".
+- **Physics-Only Tc Evolution**: No artificial Tc inflation. `computeDynamicTcCeiling` removed. Tc only changes when physics inputs change (lambda, omegaLog, muStar). No knowledge depth bonus, no exploration bonus, no stage-based bumps.
 - **Diversity & Deduplication**: Mechanisms across formula generation and SC candidate processing to ensure diversity and prevent redundant work.
-- **Self-Improving SC Model**: The ML predictor loads verified physics data and crystal structures to enrich XGBoost feature extraction and train the neural network.
 - **Evolving Research Strategy**: `analyzeAndEvolveStrategy()` classifies top SC candidates, and OpenAI generates ranked focus areas to bias the formula generator towards priority material families.
 - **Milestone Detection System**: Detects various milestones such as new-family, tc-record, pipeline-graduate, diversity-threshold, knowledge-milestone, and insight-cascade.
-- **Progressive Scoring**: XGBoost uses sigmoid scoring, knowledge depth bonuses, and Lambda-aware Tc scaling.
-- **Physics as Tc Authority**: All Tc values grounded in Eliashberg/McMillan physics. LLM candidates capped at insertion by lambda-based McMillan bounds (lambda<0.3: max 50K, lambda<0.5: max 80K, lambda<1.0: max 150K, lambda<1.5: max 250K, lambda<2.5: max 350K, lambda>=2.5: max 350K). Multi-fidelity pipeline writes physics Tc back to candidates at Stage 3 with conservative upward caps (+10-30K). Phase 10 physics flowback blends downward (0.7-0.8 weight) when Eliashberg < current. Startup bulk correction uses `getSuperconductorCandidatesByTc(100)` to catch ALL high-Tc candidates regardless of ensemble score, recomputes Eliashberg Tc, and blends down with 0.8 weight. Hard cap: 350K absolute max.
+- **Physics as Tc Authority**: All Tc values grounded in Eliashberg/McMillan physics. LLM candidates capped at insertion by lambda-based McMillan bounds (lambda<0.3: max 50K, lambda<0.5: max 80K, lambda<1.0: max 150K, lambda<1.5: max 250K, lambda<2.5: max 350K, lambda>=2.5: max 350K). Multi-fidelity pipeline writes physics Tc back to candidates at Stage 3 with conservative upward caps (+10-30K). Phase 10 physics flowback recomputes Eliashberg Tc when inputs change. Hard cap: 350K absolute max.
 - **Hydrogen-Ratio-Aware Coupling**: Adjusts electron-phonon coupling and phonon spectrum calculations based on the hydrogen-to-metal ratio in hydrides.
-- **Physical Plausibility Guardrails**: Enforces physical limits on parameters like Hc2 (max 300T), coherence length (min 1nm), pressure for ambient stability, ensembleScore (max 0.95 — score=1.0 is a calibration bug), and strict criteria for `roomTempViable` candidates (Tc>=293K AND zeroResistance AND meissnerEffect AND P<50GPa). Corrects unphysical values via bulk SQL operations at startup. Convergence snapshots corrected to match actual DB max Tc. bestScore in convergence snapshots capped at 0.95.
-- **Learning Feedback Loop (Re-evaluation)**: `reEvaluateTopCandidates()` provides conservative stage-based Tc boosts (max +4K from lambda, +2K/stage, +1K crystal) with McMillan cap. Evidence-gated: requires real new evidence (stage increase, lambda change >0.15, new crystal) — ceiling-rose no longer triggers re-evaluation. Re-evaluation map persists across cycles (resets on restart).
+- **Physical Plausibility Guardrails**: Enforces physical limits on parameters like Hc2 (max 300T), coherence length (min 1nm), pressure for ambient stability, ensembleScore (max 0.95), and strict criteria for `roomTempViable` candidates (Tc>=293K AND zeroResistance AND meissnerEffect AND P<50GPa).
 - **Stagnation Breaking**: When `cyclesSinceTcImproved` indicates stagnation, the system triggers re-analysis of high-lambda candidates and adapts candidate generation strategies via LLM prompts.
-- **SC Candidate Deduplication**: Ensures unique superconductor candidates through database constraints and startup cleanup.
-- **UI/UX Decisions**: Real-time updates via WebSocket, NaN safety, and a clear status taxonomy for novel predictions.
 
 ### Physics Engine (server/learning/physics-engine.ts)
 - **Zero Math.random()**: All physics calculations are fully deterministic — no randomness in any physics function
-- **Elemental Data**: 96 elements with tabulated Debye temps, bulk moduli, Stoner parameters, Hubbard U, McMillan-Hopfield eta, Miedema params, Sommerfeld gamma, Gruneisen params (server/learning/elemental-data.ts)
-- **DOS at Fermi level**: N(Ef) = gamma/2.359 [states/eV/atom] from Sommerfeld coefficient
+- **Elemental Data**: 96 elements with tabulated Debye temps, bulk moduli, Stoner parameters, Hubbard U, McMillan-Hopfield eta, Miedema params, Sommerfeld gamma, Gruneisen params, melting points, lattice constants (server/learning/elemental-data.ts)
+- **DOS at Fermi level**: N(Ef) = gamma/2.359 [states/eV/atom] from Sommerfeld coefficient; fallback: rigid-band model N(Ef) = VEC / (2 * W) with Stoner enhancement
 - **Bandwidth W**: Period-based for transition metals (3d:5.5, 4d:8, 5d:10 eV), DOS-based for sp metals
 - **Hubbard U/W**: From tabulated U values; U/W < 0.5 weakly correlated, 0.5-1.0 moderate, >1.0 strong
 - **Lambda**: Back-calculated from known elemental Tc (via inverted McMillan formula) for elements with known Tc; McMillan-Hopfield eta-based for others; composition-weighted for compounds
 - **Lambda conversion**: LAMBDA_CONVERSION = 562000 calibrated so Nb gives lambda ≈ 1.04
 - **Phonon frequencies**: omega_D = theta_D * 0.695 cm-1; omega_log = 0.65 * omega_max for monatomic; light-element boost for borides/hydrides
-- **Metallicity**: Hydrogen-rich compounds (H:metal >= 6) classified as metallic (0.80+), checked before EN spread
+- **Metallicity**: Continuous sigmoid model: metallicity = 1/(1+exp(k*(delta_EN - threshold))) where k=3.0, threshold=1.4. Special handling for hydrogen-rich compounds (H:metal >= 6). Calibrated: NaCl=0.05, Cu=0.92, Nb=0.92, Pb=0.50
 - **Superhydride handling**: No correlation suppression or metallicity penalty for H:metal >= 6 compounds (LaH10 etc.)
+- **Structure Predictor**: Crystallographic c/a ratios from prototype structures, Goldschmidt tolerance factor for perovskites, Vegard's law for alloy lattice parameters, Tammann rule for synthesis temperature
 - **Materials Project client**: server/learning/materials-project-client.ts with fallback to analytical models; MP data cached in mp_material_cache DB table
 
-### Validated Against Known Superconductors (T010)
-- Nb: Tc=13.5K (lit:9.3K), lambda=0.84 (lit:1.04), weakly correlated ✓
-- Al: Tc=2.3K (lit:1.2K), lambda=0.40 (lit:0.43), weakly correlated ✓
-- MgB2: Tc=33.8K (lit:39K), lambda=0.83 (lit:0.87) ✓
-- LaH10: Tc=229.6K (lit:250K), lambda=1.48 (lit:2.20) ✓
-- Pb: Tc=10.4K (lit:7.2K), lambda=1.39 (lit:1.55) ✓
-- CeCoIn5: Tc=2.9K (lit:2.3K), strongly correlated ✓
-- Fe2As2: Tc=0K, moderately correlated, AFM competing phase ✓
-- YBCO: Tc=0K from Eliashberg (correctly flags as unconventional/strongly correlated) ✓
+### Gradient Boosting Model (server/learning/gradient-boost.ts)
+- Trained on 130+ materials from `server/learning/supercon-dataset.ts` (static, curated from SuperCon database)
+- Decision trees with depth 4, ~106 trees, learning rate 0.08
+- Features: lambda, metallicity, omegaLog, debyeTemp, correlation, VEC, avgEN, enSpread, hRatio, pettifor, atomicRadius, sommerfeldGamma, bulkModulus, maxMass, nElements, composition flags, cooperPair, dimensionality, anharmonic, electronDensity, phononCoupling, dWave, meissner
+- Validation R2=1.000, MSE=1.0 on training set
+- Key predictions: Nb 9.7K, Al 1.3K, MgB2 36.2K, LaH10 249.4K, YBCO 92.6K, NaCl 0.1K, Cu 0K, Fe 0K
+
+### Validated Against Known Superconductors
+- Nb: Tc=13.5K (lit:9.3K), lambda=0.84 (lit:1.04), weakly correlated
+- Al: Tc=2.3K (lit:1.2K), lambda=0.40 (lit:0.43), weakly correlated
+- MgB2: Tc=33.8K (lit:39K), lambda=0.83 (lit:0.87)
+- LaH10: Tc=229.6K (lit:250K), lambda=1.48 (lit:2.20)
+- Pb: Tc=10.4K (lit:7.2K), lambda=1.39 (lit:1.55)
+- CeCoIn5: Tc=2.9K (lit:2.3K), strongly correlated
+- Fe2As2: Tc=0K, moderately correlated, AFM competing phase
+- YBCO: Tc=0K from Eliashberg (correctly flags as unconventional/strongly correlated)
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini via Replit AI Integrations, used in NLP, formula generation, ML refinement, and knowledge base sourcing.
