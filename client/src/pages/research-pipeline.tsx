@@ -11,7 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line
+  LineChart, Line, BarChart, Bar, Cell
 } from "recharts";
 
 function StatusIcon({ status }: { status: string }) {
@@ -162,14 +162,26 @@ function PhaseCard({ phase, index }: { phase: LearningPhase; index: number }) {
   );
 }
 
-const PROGRESS_HISTORY = [
-  { day: "Day 1", atomic: 20, elements: 15, bonding: 0, materials: 0, prediction: 0, discovery: 0 },
-  { day: "Day 3", atomic: 60, elements: 45, bonding: 5, materials: 0, prediction: 0, discovery: 0 },
-  { day: "Day 7", atomic: 100, elements: 85, bonding: 20, materials: 5, prediction: 0, discovery: 0 },
-  { day: "Day 14", atomic: 100, elements: 100, bonding: 45, materials: 15, prediction: 2, discovery: 0 },
-  { day: "Day 21", atomic: 100, elements: 100, bonding: 65, materials: 30, prediction: 5, discovery: 0 },
-  { day: "Today", atomic: 100, elements: 100, bonding: 78, materials: 42, prediction: 8, discovery: 2 },
-];
+function buildProgressFromPhases(phases: LearningPhase[]) {
+  const phaseMap = new Map(phases.map(p => [p.id, p.progress ?? 0]));
+  return [
+    {
+      label: "Current",
+      atomic: phaseMap.get(1) ?? 0,
+      elements: phaseMap.get(2) ?? 0,
+      bonding: phaseMap.get(3) ?? 0,
+      materials: phaseMap.get(4) ?? 0,
+      prediction: phaseMap.get(5) ?? 0,
+      discovery: phaseMap.get(6) ?? 0,
+      scResearch: phaseMap.get(7) ?? 0,
+      synthesis: phaseMap.get(8) ?? 0,
+      reactions: phaseMap.get(9) ?? 0,
+      compPhysics: phaseMap.get(10) ?? 0,
+      crystalStructures: phaseMap.get(11) ?? 0,
+      pipeline: phaseMap.get(12) ?? 0,
+    },
+  ];
+}
 
 const CATEGORY_COLORS: Record<string, string> = {
   "novel-correlation": "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
@@ -587,38 +599,55 @@ export default function ResearchPipeline() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={PROGRESS_HISTORY} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-              <XAxis dataKey="day" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-              <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} domain={[0, 100]} />
-              <Tooltip
-                contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
-                formatter={(v: any) => [`${v}%`]}
-              />
-              <Area type="monotone" dataKey="atomic" name="Subatomic" stroke="#6366f1" fill="#6366f120" strokeWidth={1.5} />
-              <Area type="monotone" dataKey="elements" name="Elements" stroke="#8b5cf6" fill="#8b5cf620" strokeWidth={1.5} />
-              <Area type="monotone" dataKey="bonding" name="Bonding" stroke="#06b6d4" fill="#06b6d420" strokeWidth={1.5} />
-              <Area type="monotone" dataKey="materials" name="Materials" stroke="#10b981" fill="#10b98120" strokeWidth={1.5} />
-              <Area type="monotone" dataKey="prediction" name="Prediction" stroke="#f59e0b" fill="#f59e0b20" strokeWidth={1.5} />
-              <Area type="monotone" dataKey="discovery" name="Discovery" stroke="#ef4444" fill="#ef444420" strokeWidth={1.5} />
-            </AreaChart>
-          </ResponsiveContainer>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 justify-center">
-            {[
-              { label: "Subatomic", color: "#6366f1" },
-              { label: "Elements", color: "#8b5cf6" },
-              { label: "Bonding", color: "#06b6d4" },
-              { label: "Materials", color: "#10b981" },
-              { label: "Prediction", color: "#f59e0b" },
-              { label: "Discovery", color: "#ef4444" },
-            ].map(item => (
-              <div key={item.label} className="flex items-center gap-1.5">
-                <div className="h-2 w-4 rounded-full" style={{ background: item.color }} />
-                <span className="text-xs text-muted-foreground">{item.label}</span>
-              </div>
-            ))}
-          </div>
+          {phases && phases.length > 0 ? (() => {
+            const progressData = buildProgressFromPhases(phases);
+            const barData = [
+              { name: "Subatomic", value: progressData[0].atomic, color: "#6366f1" },
+              { name: "Elements", value: progressData[0].elements, color: "#8b5cf6" },
+              { name: "Bonding", value: progressData[0].bonding, color: "#06b6d4" },
+              { name: "Materials", value: progressData[0].materials, color: "#10b981" },
+              { name: "Prediction", value: progressData[0].prediction, color: "#f59e0b" },
+              { name: "Discovery", value: progressData[0].discovery, color: "#ef4444" },
+              { name: "SC Research", value: progressData[0].scResearch, color: "#ec4899" },
+              { name: "Synthesis", value: progressData[0].synthesis, color: "#14b8a6" },
+              { name: "Reactions", value: progressData[0].reactions, color: "#a855f7" },
+              { name: "Comp. Physics", value: progressData[0].compPhysics, color: "#3b82f6" },
+              { name: "Crystals", value: progressData[0].crystalStructures, color: "#f97316" },
+              { name: "Pipeline", value: progressData[0].pipeline, color: "#84cc16" },
+            ];
+            return (
+              <>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={barData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                    <XAxis dataKey="name" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} angle={-35} textAnchor="end" height={60} />
+                    <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
+                      formatter={(v: any) => [`${Math.round(v)}%`]}
+                    />
+                    <Bar dataKey="value" name="Progress" radius={[4, 4, 0, 0]}>
+                      {barData.map((entry, i) => (
+                        <Cell key={i} fill={entry.color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 justify-center">
+                  {barData.map(item => (
+                    <div key={item.name} className="flex items-center gap-1.5">
+                      <div className="h-2 w-4 rounded-full" style={{ background: item.color }} />
+                      <span className="text-xs text-muted-foreground">{item.name} {Math.round(item.value)}%</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            );
+          })() : (
+            <p className="text-sm text-muted-foreground italic" data-testid="progress-placeholder">
+              Progress data will appear once the engine begins learning
+            </p>
+          )}
         </CardContent>
       </Card>
 

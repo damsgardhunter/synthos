@@ -101,7 +101,20 @@ function getTotalAtoms(counts: Record<string, number>): number {
 
 const LAMBDA_CONVERSION = 562000;
 
+const ELEMENT_BANDWIDTH: Record<string, number> = {
+  Li: 3.5, Be: 6.0, Na: 3.0, Mg: 6.0, Al: 11.0, K: 2.5, Ca: 3.0,
+  Sc: 4.0, Ti: 4.5, V: 5.0, Cr: 5.5, Mn: 4.0, Fe: 4.5, Co: 4.5,
+  Ni: 4.5, Cu: 4.0, Zn: 7.0, Ga: 8.0, Sr: 3.5, Y: 3.5, Zr: 6.0,
+  Nb: 5.5, Mo: 7.5, Tc: 7.0, Ru: 7.0, Rh: 6.5, Pd: 5.0, Ag: 4.0,
+  In: 7.5, Sn: 8.0, Ba: 3.0, La: 3.0, Hf: 5.5, Ta: 6.5, W: 9.0,
+  Re: 8.0, Os: 8.5, Ir: 7.5, Pt: 6.5, Au: 5.5, Tl: 6.0, Pb: 7.0,
+  Bi: 6.5, Th: 3.5, U: 2.5,
+};
+
 function estimateBandwidthW(el: string): number {
+  const known = ELEMENT_BANDWIDTH[el];
+  if (known !== undefined) return known;
+
   const data = getElementData(el);
   if (!data) return 6.0;
 

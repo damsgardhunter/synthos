@@ -40,7 +40,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Zero Math.random()**: All physics calculations are fully deterministic — no randomness in any physics function
 - **Elemental Data**: 96 elements with tabulated Debye temps, bulk moduli, Stoner parameters, Hubbard U, McMillan-Hopfield eta, Miedema params, Sommerfeld gamma, Gruneisen params, melting points, lattice constants (server/learning/elemental-data.ts)
 - **DOS at Fermi level**: N(Ef) = gamma/2.359 [states/eV/atom] from Sommerfeld coefficient; fallback: rigid-band model N(Ef) = VEC / (2 * W) with Stoner enhancement
-- **Bandwidth W**: Period-based for transition metals (3d:5.5, 4d:8, 5d:10 eV), DOS-based for sp metals
+- **Bandwidth W**: Per-element lookup table (ELEMENT_BANDWIDTH) with ~45 literature d-band/sp-band widths (e.g., Nb=5.5, Al=11.0, Cu=4.0, La=3.0, Pb=7.0 eV); fallback to period-based for unlisted elements (3d:5.5, 4d:8, 5d:10 eV), DOS-based for sp metals
 - **Hubbard U/W**: From tabulated U values; U/W < 0.5 weakly correlated, 0.5-1.0 moderate, >1.0 strong
 - **Lambda**: Back-calculated from known elemental Tc (via inverted McMillan formula) for elements with known Tc; McMillan-Hopfield eta-based for others; composition-weighted for compounds
 - **Lambda conversion**: LAMBDA_CONVERSION = 562000 calibrated so Nb gives lambda ≈ 1.04

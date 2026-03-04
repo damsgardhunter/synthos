@@ -215,7 +215,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSuperconductorCandidates(limit = 50): Promise<SuperconductorCandidate[]> {
-    return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.ensembleScore)).limit(limit);
+    return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.predictedTc)).limit(limit);
   }
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
