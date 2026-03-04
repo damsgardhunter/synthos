@@ -71,7 +71,7 @@ app.use((req, res, next) => {
   }
 
   try {
-    const { computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } = await import("./learning/physics-engine");
+    const { computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, assessCorrelationStrength } = await import("./learning/physics-engine");
     const allCandidates = await storage.getSuperconductorCandidates(2000);
     let corrected = 0;
     for (const c of allCandidates) {
@@ -117,8 +117,16 @@ app.use((req, res, next) => {
         updates.coulombPseudopotential = coupling.muStar;
       }
 
+      let mcMillanCap = 350;
+      if (coupling.lambda > 0.2 && eliashbergTc > 0) {
+        const multiplier = coupling.lambda > 2.5 ? 1.3 : coupling.lambda > 2.0 ? 1.5 : coupling.lambda > 1.5 ? 1.8 : 2.0;
+        mcMillanCap = Math.round(Math.min(350, eliashbergTc * multiplier));
+      }
       if (coupling.lambda < 0.2 && currentTc > 30) {
         updates.predictedTc = Math.round(Math.max(1, currentTc * 0.05));
+      } else if (currentTc > mcMillanCap) {
+        const downBlend = currentTc > mcMillanCap * 2 ? 0.8 : 0.7;
+        updates.predictedTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
       } else if (eliashbergTc > 0 && eliashbergTc < currentTc && currentTc > 50) {
         const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : 0.5;
         updates.predictedTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
@@ -159,17 +167,58 @@ app.use((req, res, next) => {
     await db.execute(sql`UPDATE superconductor_candidates SET ambient_pressure_stable = false WHERE ambient_pressure_stable = true AND (pressure_gpa > 1 OR pressure_gpa IS NULL)`);
     log("Applied bulk corrections: Hc2 cap 300T, coherence min 1nm, ensemble cap for unscored, pressure-gated roomTempViable/ambientPressure", "startup");
 
-    const topTcNow = allCandidates.reduce((mx, c) => Math.max(mx, c.predictedTc ?? 0), 0);
+    const highTcCandidates = await storage.getSuperconductorCandidatesByTc(100);
+    let bulkCorrected = 0;
+    for (const c of highTcCandidates) {
+      const tc = c.predictedTc ?? 0;
+      if (tc <= 100) continue;
+      const lambda = c.electronPhononCoupling ?? 0;
+      const electronic2 = computeElectronicStructure(c.formula, null);
+      const phonon2 = computePhononSpectrum(c.formula, electronic2);
+      const coupling2 = computeElectronPhononCoupling(electronic2, phonon2, c.formula);
+      const omK = coupling2.omegaLog * 1.44;
+      const dn = coupling2.lambda - coupling2.muStar * (1 + 0.62 * coupling2.lambda);
+      let eliTc = 0;
+      if (Math.abs(dn) > 1e-6 && coupling2.lambda > 0.2) {
+        eliTc = (omK / 1.2) * Math.exp(-1.04 * (1 + coupling2.lambda) / dn);
+        if (!Number.isFinite(eliTc) || eliTc < 0) eliTc = 0;
+      }
+      if (electronic2.metallicity < 0.4) eliTc *= Math.max(0.02, electronic2.metallicity);
+      const corr2 = assessCorrelationStrength(c.formula);
+      if (corr2.ratio > 0.85) eliTc *= 0.05;
+      else if (corr2.ratio > 0.7) eliTc *= 0.3;
+      const mult = coupling2.lambda > 2.5 ? 1.2 : coupling2.lambda > 2.0 ? 1.3 : coupling2.lambda > 1.5 ? 1.5 : 1.8;
+      const absMax = Math.min(350, Math.round(eliTc * mult));
+      if (tc > absMax && absMax > 0) {
+        const blendDown = 0.8;
+        const newTc = Math.round((1 - blendDown) * tc + blendDown * eliTc);
+        await storage.updateSuperconductorCandidate(c.id, { predictedTc: Math.min(newTc, absMax) });
+        log(`Bulk Tc correction: ${c.formula} ${tc}K -> ${Math.min(newTc, absMax)}K (eliashberg=${Math.round(eliTc)}K, cap=${absMax}K, lambda=${coupling2.lambda.toFixed(2)})`, "startup");
+        bulkCorrected++;
+      }
+    }
+    if (bulkCorrected > 0) {
+      log(`Bulk-corrected ${bulkCorrected} high-Tc candidates via Eliashberg physics`, "startup");
+    }
+
+    const tcQueryResult = await storage.getSuperconductorCandidatesByTc(1);
+    const topTcNow = tcQueryResult.length > 0 ? (tcQueryResult[0].predictedTc ?? 0) : 0;
+    const allForPhysCheck = await storage.getSuperconductorCandidatesByTc(50);
+    const physicsValidated = allForPhysCheck.filter(c => (c.verificationStage ?? 0) >= 1 && c.electronPhononCoupling != null);
+    const topPhysTcNow = physicsValidated.reduce((mx, c) => Math.max(mx, c.predictedTc ?? 0), 0);
+    log(`After corrections: actual best Tc=${topTcNow}K, best physics-validated Tc=${topPhysTcNow}K`, "startup");
+
     const snapshots = await storage.getConvergenceSnapshots(500);
     let snapFixed = 0;
     for (const s of snapshots) {
-      if ((s.bestTc ?? 0) > 500) {
+      const needsFix = (s.bestTc ?? 0) > topTcNow + 10 || (s.bestPhysicsTc ?? 0) > topPhysTcNow + 10;
+      if (needsFix) {
         await storage.deleteConvergenceSnapshotByCycle(s.cycle);
         await storage.insertConvergenceSnapshot({
-          id: s.id + "-fix",
+          id: s.id + "-fix2",
           cycle: s.cycle,
-          bestTc: Math.min(s.bestTc ?? 0, Math.max(topTcNow, 400)),
-          bestPhysicsTc: s.bestPhysicsTc,
+          bestTc: Math.min(s.bestTc ?? 0, topTcNow),
+          bestPhysicsTc: s.bestPhysicsTc != null ? Math.min(s.bestPhysicsTc, topPhysTcNow) : null,
           bestScore: s.bestScore,
           avgTopScore: s.avgTopScore,
           candidatesTotal: s.candidatesTotal,
@@ -184,7 +233,7 @@ app.use((req, res, next) => {
       }
     }
     if (snapFixed > 0) {
-      log(`Corrected ${snapFixed} convergence snapshots with inflated bestTc values`, "startup");
+      log(`Corrected ${snapFixed} convergence snapshots to match actual best Tc=${topTcNow}K, PhysTc=${topPhysTcNow}K`, "startup");
     }
   } catch (err: any) {
     log(`Tc correction error: ${err.message}`, "startup");

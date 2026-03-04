@@ -71,7 +71,7 @@ interface PreviousCycleMetrics {
 }
 let previousCycleMetrics: PreviousCycleMetrics | null = null;
 let cycleInsightsThisCycle = 0;
-let cachedDynamicCeiling = 550;
+let cachedDynamicCeiling = 300;
 let lastCeilingComputeCycle = -1;
 
 async function computeDynamicTcCeiling(): Promise<number> {
@@ -85,16 +85,18 @@ async function computeDynamicTcCeiling(): Promise<number> {
     const crystalCount = await storage.getCrystalStructureCount();
     const compCount = stats.computationalResults;
 
-    let ceiling = 500;
-    ceiling += Math.min(50, Math.floor(stage4Count / 10) * 3);
-    ceiling += Math.min(40, Math.floor(insightCount / 500) * 5);
-    ceiling += Math.min(30, Math.floor(crystalCount / 100) * 5);
-    ceiling += Math.min(30, Math.floor(compCount / 500) * 5);
+    let ceiling = 200;
+    ceiling += Math.min(30, Math.floor(stage4Count / 10) * 2);
+    ceiling += Math.min(20, Math.floor(insightCount / 500) * 3);
+    ceiling += Math.min(15, Math.floor(crystalCount / 100) * 3);
+    ceiling += Math.min(15, Math.floor(compCount / 500) * 3);
 
     const candidates = await storage.getSuperconductorCandidatesByTc(20);
     const avgTopLambda = candidates.reduce((s, c) => s + (c.electronPhononCoupling ?? 0), 0) / Math.max(candidates.length, 1);
-    if (avgTopLambda > 2.5) ceiling += 20;
-    else if (avgTopLambda > 2.0) ceiling += 10;
+    if (avgTopLambda > 2.5) ceiling += 10;
+    else if (avgTopLambda > 2.0) ceiling += 5;
+
+    ceiling = Math.min(350, ceiling);
 
     cachedDynamicCeiling = Math.round(ceiling);
     lastCeilingComputeCycle = cycleCount;
@@ -399,14 +401,12 @@ async function reEvaluateTopCandidates() {
       const hasCrystal = crystals.some(c => c.synthesizability != null && c.synthesizability > 0.7);
 
       const prev = reEvalApplied.get(candidate.id);
-      const ceilingRose = prev && currentTc >= (prev.lastCeiling ?? 550) - 5 && tcCeiling > (prev.lastCeiling ?? 550);
-      const hasNewEvidence = !prev ||
+      const hasRealEvidence = !prev ||
         stage > prev.stage ||
-        (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.1) ||
-        (hasCrystal && !prev.hasCrystal) ||
-        ceilingRose;
+        (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.15) ||
+        (hasCrystal && !prev.hasCrystal);
 
-      if (!hasNewEvidence) continue;
+      if (!hasRealEvidence) continue;
 
       reEvalApplied.set(candidate.id, { stage, lambda, hasCrystal, lastCeiling: tcCeiling });
 
@@ -437,27 +437,38 @@ async function reEvaluateTopCandidates() {
         if (stage >= 4) tcBoost += 2;
       } else {
         if (stage >= 1 && lambda > 0) {
-          if (lambda > 2.5) tcBoost += 15;
-          else if (lambda > 2.0) tcBoost += 12;
-          else if (lambda > 1.5) tcBoost += 8;
-          else if (lambda > 1.0) tcBoost += 4;
+          if (lambda > 2.5) tcBoost += 4;
+          else if (lambda > 2.0) tcBoost += 3;
+          else if (lambda > 1.5) tcBoost += 2;
+          else if (lambda > 1.0) tcBoost += 1;
         }
-        if (stage >= 2) tcBoost += 4;
-        if (stage >= 3) tcBoost += 6;
+        if (stage >= 2) tcBoost += 1;
+        if (stage >= 3) tcBoost += 2;
         if (stage >= 4) {
-          tcBoost += 8;
-          if (hasCrystal) tcBoost += 6;
+          tcBoost += 2;
+          if (hasCrystal) tcBoost += 1;
         }
       }
 
-      const hasRealEvidence = !prev || stage > prev.stage || (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.1) || (hasCrystal && !prev.hasCrystal);
-      if (ceilingRose && !hasRealEvidence) {
-        const ceilingDelta = Math.round((tcCeiling - (prev?.lastCeiling ?? 550)) * 0.5);
-        tcBoost = Math.max(tcBoost, ceilingDelta);
-      }
+      
 
       if (tcBoost > 0) {
-        const newTc = Math.min(tcCeiling, Math.round(currentTc + tcBoost));
+        const omegaLogK = (candidate.logPhononFrequency ?? 300) * 1.44;
+        const muStar = candidate.coulombPseudopotential ?? 0.12;
+        let mcMillanCap = 350;
+        if (lambda > 0.2) {
+          const denom = lambda - muStar * (1 + 0.62 * lambda);
+          if (Math.abs(denom) > 1e-6) {
+            const exp = -1.04 * (1 + lambda) / denom;
+            const rawMcM = (omegaLogK / 1.2) * Math.exp(exp);
+            if (Number.isFinite(rawMcM) && rawMcM > 0) {
+              mcMillanCap = Math.round(rawMcM * (lambda > 2.5 ? 1.3 : lambda > 2.0 ? 1.5 : lambda > 1.5 ? 1.8 : 2.0));
+            }
+          }
+        }
+        mcMillanCap = Math.min(tcCeiling, mcMillanCap);
+
+        const newTc = Math.min(mcMillanCap, Math.round(currentTc + tcBoost));
         if (newTc <= currentTc) continue;
         await storage.updateSuperconductorCandidate(candidate.id, { predictedTc: newTc });
         improved++;
@@ -465,7 +476,7 @@ async function reEvaluateTopCandidates() {
           emit("log", {
             phase: "engine",
             event: "Tc evolved from evidence",
-            detail: `${candidate.formula}: ${currentTc}K -> ${newTc}K (+${tcBoost}K at stage ${stage}, lambda=${lambda.toFixed(2)}, ceiling=${tcCeiling}K)`,
+            detail: `${candidate.formula}: ${currentTc}K -> ${newTc}K (+${tcBoost}K at stage ${stage}, lambda=${lambda.toFixed(2)}, ceiling=${tcCeiling}K, mcMillan=${mcMillanCap}K)`,
             dataSource: "Learning Feedback",
           });
         }
@@ -511,7 +522,7 @@ async function runPhase10_Physics() {
         const hasMott = result.competingPhases.some(p => p.type === "Mott");
         const isMottInsulator = hasMott && corrRatio > 0.7;
         const isNonMetallic = metalScore < 0.4;
-        const tcCap = isNonMetallic ? 5 : (isMottInsulator ? 10 : (corrRatio > 0.7 ? 30 : (lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50)));
+        const tcCap = isNonMetallic ? 5 : (isMottInsulator ? 10 : (corrRatio > 0.7 ? 20 : (lambda > 2.5 ? 40 : lambda > 2.0 ? 30 : lambda > 1.5 ? 25 : lambda > 1.0 ? 20 : 15)));
         const physicsCeiling = await computeDynamicTcCeiling();
         let updatedTc = currentTc;
         if (physicsTc > 0) {
@@ -520,10 +531,6 @@ async function runPhase10_Physics() {
           } else {
             const downBlend = physicsTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
             updatedTc = Math.round(currentTc * (1 - downBlend) + physicsTc * downBlend);
-          }
-          if (lambda > 2.0 && physicsTc > currentTc * 0.8 && !isMottInsulator && !isNonMetallic && corrRatio < 0.7) {
-            const strongCouplingBoost = Math.round((lambda - 2.0) * 15);
-            updatedTc = Math.max(updatedTc, Math.round(updatedTc + strongCouplingBoost));
           }
           updatedTc = Math.min(physicsCeiling, updatedTc);
         }

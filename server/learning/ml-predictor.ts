@@ -606,10 +606,49 @@ Return JSON with:
 
       const ensembleScore = (xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
 
+      let rawTc = nn.refinedTc ?? xgb.xgb.tcEstimate;
+      const featureLambda = xgb.features.electronPhononLambda ?? 0;
+      const featureMetal = xgb.features.metallicity ?? 0.5;
+      const featureCorr = xgb.features.correlationStrength ?? 0;
+      const omegaLogK = (xgb.features.logPhononFreq ?? 300) * 1.44;
+      const muStar = 0.12;
+      let mcMillanMax = 0;
+      const denomMcM = featureLambda - muStar * (1 + 0.62 * featureLambda);
+      if (featureLambda > 0.2 && Math.abs(denomMcM) > 1e-6) {
+        const exponent = -1.04 * (1 + featureLambda) / denomMcM;
+        mcMillanMax = (omegaLogK / 1.2) * Math.exp(exponent);
+        if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
+      }
+
+      let tcCap: number;
+      if (featureMetal < 0.3) {
+        tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
+      } else if (featureMetal < 0.5) {
+        tcCap = Math.min(80, mcMillanMax * 0.3 || 40);
+      } else if (featureCorr > 0.85) {
+        tcCap = Math.min(80, mcMillanMax * 0.3 || 30);
+      } else if (featureCorr > 0.7) {
+        tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
+      } else if (featureLambda < 0.3) {
+        tcCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 3.0 : 150);
+      } else if (featureLambda < 0.5) {
+        tcCap = Math.min(200, mcMillanMax > 0 ? mcMillanMax * 2.5 : 200);
+      } else if (featureLambda < 1.0) {
+        tcCap = Math.min(300, mcMillanMax > 0 ? mcMillanMax * 2.0 : 300);
+      } else if (featureLambda < 1.5) {
+        tcCap = mcMillanMax > 0 ? Math.min(400, mcMillanMax * 1.8) : 350;
+      } else if (featureLambda < 2.5) {
+        tcCap = mcMillanMax > 0 ? Math.min(450, mcMillanMax * 1.5) : 400;
+      } else {
+        tcCap = mcMillanMax > 0 ? Math.min(500, mcMillanMax * 1.3) : 450;
+      }
+      tcCap = Math.round(tcCap);
+      const cappedTc = Math.min(rawTc, tcCap);
+
       candidates.push({
         name: xgb.mat.name,
         formula: xgb.mat.formula,
-        predictedTc: nn.refinedTc ?? xgb.xgb.tcEstimate,
+        predictedTc: cappedTc,
         pressureGpa: nn.pressureGpa ?? null,
         meissnerEffect: nn.meissnerEffect ?? false,
         zeroResistance: nn.zeroResistance ?? false,
@@ -623,7 +662,7 @@ Return JSON with:
         ensembleScore,
         roomTempViable: nn.roomTempViable ?? false,
         status: ensembleScore > 0.7 ? "promising" : "theoretical",
-        notes: nn.reasoning ?? xgb.xgb.reasoning[0],
+        notes: (cappedTc < rawTc ? `[LLM proposed Tc=${rawTc}K, capped to ${cappedTc}K by McMillan physics] ` : '') + (nn.reasoning ?? xgb.xgb.reasoning[0]),
         electronPhononCoupling: xgb.features.electronPhononLambda,
         logPhononFrequency: xgb.features.logPhononFreq,
         coulombPseudopotential: 0.12,

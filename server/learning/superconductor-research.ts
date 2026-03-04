@@ -178,6 +178,7 @@ export async function runSuperconductorResearch(
     if (existing) {
       const newTc = candidate.predictedTc ?? existing.predictedTc;
       const existingTc = existing.predictedTc ?? 0;
+      const existingLambda = existing.electronPhononCoupling ?? candidate.electronPhononCoupling ?? 0;
       const tcImproved = (newTc ?? 0) > existingTc;
       if (newScore > (existing.ensembleScore ?? 0) || tcImproved) {
         const updates: any = {
@@ -188,7 +189,8 @@ export async function runSuperconductorResearch(
           notes: buildVerificationNotes(candidate),
         };
         if ((newTc ?? 0) > existingTc) {
-          updates.predictedTc = newTc;
+          const tcUpCap = existingLambda > 2.5 ? 150 : existingLambda > 2.0 ? 120 : existingLambda > 1.5 ? 90 : existingLambda > 1.0 ? 70 : 50;
+          updates.predictedTc = Math.min(newTc ?? 0, existingTc + tcUpCap);
         }
         await storage.updateSuperconductorCandidate(existing.id, updates);
         const tcDetail = tcImproved ? `, Tc ${existingTc}K -> ${newTc}K` : "";
@@ -440,17 +442,17 @@ Return JSON with 'candidates' array:
         } else if (corrStr > 0.7) {
           tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
         } else if (featureLambda < 0.3) {
-          tcCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 3.0 : 150);
+          tcCap = Math.min(50, mcMillanMax > 0 ? mcMillanMax * 2.0 : 30);
         } else if (featureLambda < 0.5) {
-          tcCap = Math.min(200, mcMillanMax > 0 ? mcMillanMax * 2.5 : 200);
+          tcCap = Math.min(80, mcMillanMax > 0 ? mcMillanMax * 2.0 : 50);
         } else if (featureLambda < 1.0) {
-          tcCap = Math.min(300, mcMillanMax > 0 ? mcMillanMax * 2.0 : 300);
+          tcCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 1.8 : 100);
         } else if (featureLambda < 1.5) {
-          tcCap = mcMillanMax > 0 ? Math.min(400, mcMillanMax * 1.8) : 350;
+          tcCap = mcMillanMax > 0 ? Math.min(250, mcMillanMax * 1.5) : 150;
         } else if (featureLambda < 2.5) {
-          tcCap = mcMillanMax > 0 ? Math.min(450, mcMillanMax * 1.5) : 400;
+          tcCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.3) : 250;
         } else {
-          tcCap = mcMillanMax > 0 ? Math.min(500, mcMillanMax * 1.3) : 450;
+          tcCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.2) : 300;
         }
         tcCap = Math.round(tcCap);
 

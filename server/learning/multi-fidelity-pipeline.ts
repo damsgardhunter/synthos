@@ -393,10 +393,10 @@ async function updateCandidatePhysics(
 
         if (currentTc > 0) {
           if (eliashbergTc > currentTc && !isMottInsulator && !isStronglyCorrelated && !isNonMetallic) {
-            const tcCap = lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50;
+            const tcCap = lambda > 2.5 ? 30 : lambda > 2.0 ? 25 : lambda > 1.5 ? 20 : lambda > 1.0 ? 15 : 10;
             updates.predictedTc = Math.round(Math.min(eliashbergTc, currentTc + tcCap));
           } else {
-            const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
+            const downBlend = eliashbergTc < currentTc * 0.3 ? 0.8 : eliashbergTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
             updates.predictedTc = Math.round(currentTc * (1 - downBlend) + eliashbergTc * downBlend);
           }
         } else {

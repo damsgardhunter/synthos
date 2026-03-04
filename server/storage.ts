@@ -361,7 +361,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
-    return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
+    const rows = await db.select().from(convergenceSnapshots).orderBy(desc(convergenceSnapshots.cycle)).limit(limit);
+    return rows.reverse();
   }
 
   async getMaxConvergenceCycle(): Promise<number> {
