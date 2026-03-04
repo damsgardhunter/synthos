@@ -429,8 +429,13 @@ Return JSON with 'candidates' array:
         }
 
         const corrStr = features.correlationStrength ?? 0;
+        const metalScore = features.metallicity ?? 0.5;
         let tcCap: number;
-        if (corrStr > 0.85) {
+        if (metalScore < 0.3) {
+          tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
+        } else if (metalScore < 0.5) {
+          tcCap = Math.min(80, mcMillanMax * 0.3 || 40);
+        } else if (corrStr > 0.85) {
           tcCap = Math.min(80, mcMillanMax * 0.3 || 30);
         } else if (corrStr > 0.7) {
           tcCap = Math.min(200, mcMillanMax * 0.5 || 80);

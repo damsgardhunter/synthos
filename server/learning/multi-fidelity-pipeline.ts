@@ -142,6 +142,12 @@ async function stage3_TcPrediction(
   const eliashberg = predictTcEliashberg(couplingData.coupling);
   const competingPhases = evaluateCompetingPhases(candidate.formula, electronicData.electronic);
 
+  const metalScore = electronicData.electronic?.metallicity ?? 0.5;
+  if (metalScore < 0.4) {
+    eliashberg.predictedTc = eliashberg.predictedTc * Math.max(0.02, metalScore);
+    eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
+  }
+
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
   const hasSevereCompetition = suppressingPhases.length > 1 ||
     suppressingPhases.some(p => p.strength > 0.8);
@@ -371,18 +377,22 @@ async function updateCandidatePhysics(
         const lambda = allData.coupling?.lambda ?? 0;
 
         const corrRatio = allData.correlation?.ratio ?? 0;
+        const metalScore = allData.electronic?.metallicity ?? 0.5;
         const hasMott = allData.competingPhases?.some((p: any) => p.type === "Mott") ?? false;
         const isMottInsulator = (hasMott && corrRatio > 0.7) || corrRatio > 0.85;
         const isStronglyCorrelated = corrRatio > 0.7;
+        const isNonMetallic = metalScore < 0.4;
 
-        if (isMottInsulator) {
+        if (isNonMetallic) {
+          eliashbergTc = eliashbergTc * Math.max(0.02, metalScore);
+        } else if (isMottInsulator) {
           eliashbergTc = eliashbergTc * 0.05;
         } else if (isStronglyCorrelated) {
           eliashbergTc = eliashbergTc * 0.3;
         }
 
         if (currentTc > 0) {
-          if (eliashbergTc > currentTc && !isMottInsulator && !isStronglyCorrelated) {
+          if (eliashbergTc > currentTc && !isMottInsulator && !isStronglyCorrelated && !isNonMetallic) {
             const tcCap = lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50;
             updates.predictedTc = Math.round(Math.min(eliashbergTc, currentTc + tcCap));
           } else {

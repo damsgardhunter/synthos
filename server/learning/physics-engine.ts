@@ -74,6 +74,19 @@ function parseFormulaElements(formula: string): string[] {
   return matches ? [...new Set(matches)] : [];
 }
 
+function parseFormulaCounts(formula: string): Record<string, number> {
+  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseFloat(match[2]) : 1;
+    counts[el] = (counts[el] || 0) + num;
+  }
+  return counts;
+}
+
 function estimateValenceElectrons(elements: string[]): number {
   if (elements.length === 0) return 3;
   return elements.reduce((sum, el) => sum + (ELEMENT_VALENCE_ELECTRONS[el] ?? 3), 0) / elements.length;
@@ -99,7 +112,64 @@ export function computeElectronicStructure(formula: string, spacegroup?: string 
   if (elements.includes("Fe") || elements.includes("Mn")) correlationStrength = Math.min(1, correlationStrength + 0.2);
 
   const densityOfStatesAtFermi = hasTM ? 2.5 + avgValence * 0.3 : hasH ? 1.8 : 1.2;
-  const metallicity = hasTM || hasH ? 0.85 : (avgValence > 4 ? 0.3 : 0.6);
+
+  const hasN = elements.includes("N");
+  const hasCl = elements.includes("Cl");
+  const hasBr = elements.includes("Br");
+  const hasF = elements.includes("F");
+  const hasS = elements.includes("S");
+  const halogens = [hasF, hasCl, hasBr].filter(Boolean).length;
+  const electronegativeCount = [hasO, hasN, hasF, hasCl, hasBr, hasS].filter(Boolean).length;
+  const tmCount = elements.filter(e => transitionMetals.includes(e)).length;
+
+  const counts = parseFormulaCounts(formula);
+  const totalMetalAtoms = elements.filter(e => transitionMetals.includes(e) || rareEarths.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const totalLightAtoms = ["H", "N", "O", "F", "Cl", "Br", "S"].reduce((s, e) => s + (counts[e] || 0), 0);
+  const hCount = counts["H"] || 0;
+  const nCount = counts["N"] || 0;
+  const lightToMetalRatio = totalMetalAtoms > 0 ? totalLightAtoms / totalMetalAtoms : totalLightAtoms;
+
+  const isLikelyMolecular = (hasN && hCount >= 3 * nCount && nCount >= 1 && lightToMetalRatio > 6) ||
+    (hasO && hasH && !hasTM && lightToMetalRatio > 4) ||
+    (halogens >= 2 && lightToMetalRatio > 4);
+
+  let metallicity = 0.5;
+  if (isLikelyMolecular) {
+    metallicity = 0.15;
+  } else if (hasTM && !hasO && !hasN && elements.length <= 3) {
+    metallicity = 0.9;
+  } else if (hasH && hasTM && hCount >= 4 && lightToMetalRatio <= 8) {
+    metallicity = 0.85;
+  } else if (hasH && elements.length <= 3 && hCount >= 3) {
+    metallicity = 0.8;
+  } else if (hasTM && hasH) {
+    metallicity = 0.75;
+  } else if (hasTM) {
+    metallicity = 0.7;
+  } else if (hasH && hCount >= 6) {
+    metallicity = 0.7;
+  } else if (hasH) {
+    metallicity = 0.5;
+  }
+
+  const nonHydrogenLightAtoms = totalLightAtoms - hCount;
+  const hasElectronegativeLigands = nonHydrogenLightAtoms >= 2;
+  if (hasElectronegativeLigands && lightToMetalRatio > 10 && totalMetalAtoms > 0) {
+    metallicity *= 0.3;
+  } else if (hasElectronegativeLigands && lightToMetalRatio > 6 && totalMetalAtoms > 0) {
+    metallicity *= 0.6;
+  } else if (!hasElectronegativeLigands && lightToMetalRatio > 15 && totalMetalAtoms > 0) {
+    metallicity *= 0.7;
+  }
+
+  if (electronegativeCount >= 3) metallicity *= 0.5;
+  else if (halogens >= 1 && !hasTM) metallicity *= 0.4;
+  else if (halogens >= 1) metallicity *= 0.7;
+  if (hasO && hasH && !hasTM && elements.length >= 3) metallicity *= 0.4;
+  if (correlationStrength > 0.8 && hasO) metallicity *= 0.6;
+  if (hasN && hCount >= 3 * nCount && nCount >= 1) metallicity *= 0.5;
+  metallicity = Math.max(0.05, Math.min(1.0, metallicity));
 
   let fermiSurfaceTopology = "simple spherical";
   if (hasCu && hasO) fermiSurfaceTopology = "quasi-2D cylindrical with nesting features at (pi,pi)";
@@ -114,7 +184,8 @@ export function computeElectronicStructure(formula: string, spacegroup?: string 
   else if (hasH) orbitalCharacter = "H-1s sigma-bonding network";
 
   let bandStructureType = "metallic";
-  if (!hasTM && !hasH && avgValence > 5) bandStructureType = "insulating";
+  if (metallicity < 0.3) bandStructureType = "insulating";
+  else if (metallicity < 0.5) bandStructureType = "semiconductor/semimetal";
   else if (correlationStrength > 0.6) bandStructureType = "strongly correlated metal";
 
   const nestingFeatures = correlationStrength > 0.5
@@ -435,8 +506,13 @@ export async function runFullPhysicsAnalysis(
   const competingPhases = evaluateCompetingPhases(formula, electronicStructure);
   const hasMottPhase = competingPhases.some(p => p.type === "Mott");
   const isMottInsulator = hasMottPhase && correlation.ratio > 0.7;
+  const isNonMetallic = electronicStructure.metallicity < 0.4;
 
-  if (isMottInsulator) {
+  if (isNonMetallic) {
+    const metalFactor = Math.max(0.02, electronicStructure.metallicity);
+    eliashberg.predictedTc = eliashberg.predictedTc * metalFactor;
+    eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
+  } else if (isMottInsulator) {
     eliashberg.predictedTc = eliashberg.predictedTc * 0.05;
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 3)];
   } else if (correlation.ratio > 0.7) {

@@ -49,7 +49,9 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Retroactive correction**: Startup corrects ALL candidates with physics data where Eliashberg Tc < current Tc and current > 100K. Applies Mott/correlation penalty before blend.
 - Raw physics Tc is clamped: must be >0 and <1000K, otherwise discarded.
 - Tc increase cap is coupling-aware: Mott: +10K, strongly correlated: +30K, else lambda>2.5: +150K, lambda>2.0: +120K, lambda>1.5: +90K, lambda>1.0: +70K, else +50K.
-- ML predictor: Mott insulators (corr>0.85) get score penalty (-0.08) and low Tc estimate (5+score*80). Moderate correlation (0.6-0.85) gets smaller bonus and capped Tc scaling.
+- ML predictor: Mott insulators (corr>0.85) get score penalty (-0.08) and low Tc estimate (5+score*80). Non-metallic materials (metallicity<0.3) get -0.15 score and Tc capped at 1+score*15. Moderate correlation (0.6-0.85) gets smaller bonus and capped Tc scaling.
+- **Metallicity gate**: `computeElectronicStructure` estimates metallicity from composition using stoichiometric ratio analysis. Key checks: (1) molecular detection (N-H ammine complexes, hydroxides, polyhalides), (2) light-to-metal atom ratio (high ratio = likely ionic/molecular), (3) electronegative ligand count. Non-metallic materials (metallicity<0.4) get Eliashberg Tc multiplied by metallicity factor. Applies in physics engine, engine flowback, multi-fidelity pipeline, LLM capping, and ML predictor.
+- **Formula parsing**: `parseFormulaCounts()` extracts element counts from formulas for stoichiometric analysis. Pure hydrides (LaH₁₀, TaH₉) are protected from ratio penalty since H IS the metallic sublattice; only penalized when electronegative ligands (N, O, Cl) are present alongside H.
 
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.

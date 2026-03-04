@@ -41,6 +41,7 @@ interface MLFeatureVector {
   electronPhononLambda: number;
   logPhononFreq: number;
   upperCriticalField: number | null;
+  metallicity: number;
 }
 
 const TRANSITION_METALS = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg"];
@@ -143,6 +144,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     electronPhononLambda: useLambda,
     logPhononFreq: coupling.omegaLog,
     upperCriticalField: useHc2,
+    metallicity: electronic.metallicity,
   };
 }
 
@@ -198,6 +200,15 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   const safeCorr = Number.isFinite(features.correlationStrength) ? features.correlationStrength : 0;
   const safeDim = Number.isFinite(features.dimensionalityScore) ? features.dimensionalityScore : 0;
   const safeLambda = Number.isFinite(features.electronPhononLambda) ? features.electronPhononLambda : 0;
+  const safeMetal = Number.isFinite(features.metallicity) ? features.metallicity : 0.5;
+
+  if (safeMetal < 0.3) {
+    score -= 0.15;
+    reasoning.push(`Non-metallic (metallicity=${safeMetal.toFixed(2)}): no itinerant electrons for Cooper pairing`);
+  } else if (safeMetal < 0.5) {
+    score -= 0.06;
+    reasoning.push(`Weak metallicity (${safeMetal.toFixed(2)}): limited conduction electron density at Fermi level`);
+  }
 
   if (safeCorr > 0.6 && safeCorr <= 0.85) {
     score += 0.05;
@@ -248,7 +259,13 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
 
   let tcEstimate = 0;
   const lambdaScaling = safeLambda > 2.5 ? 1.4 : safeLambda > 2.0 ? 1.25 : safeLambda > 1.5 ? 1.12 : 1.0;
-  if (safeLambda > 1.5 && features.hasHydrogen) {
+  if (safeMetal < 0.3) {
+    tcEstimate = 1 + score * 15;
+    reasoning.push("Tc heavily suppressed: non-metallic composition cannot support BCS superconductivity");
+  } else if (safeMetal < 0.5) {
+    tcEstimate = 5 + score * 50;
+    reasoning.push("Tc limited by weak metallicity");
+  } else if (safeLambda > 1.5 && features.hasHydrogen) {
     const omega_log_K = (Number.isFinite(features.logPhononFreq) ? features.logPhononFreq : 500) * 1.44;
     const muStar = 0.12;
     const denom = safeLambda - muStar * (1 + 0.62 * safeLambda);
