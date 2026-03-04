@@ -106,6 +106,7 @@ function buildVerificationNotes(candidate: any): string {
 interface StrategyContext {
   strategyFocusAreas?: { area: string; priority: number }[];
   familyCounts?: Record<string, number>;
+  stagnationInfo?: { cyclesSinceImproved: number; currentBestTc: number };
 }
 
 export async function runSuperconductorResearch(
@@ -113,7 +114,7 @@ export async function runSuperconductorResearch(
   allInsights: string[],
   materialOffset: number = 0,
   strategyCtx?: StrategyContext
-): Promise<{ generated: number; insights: string[] }> {
+): Promise<{ generated: number; insights: string[]; duplicatesSkipped: number }> {
   let generated = 0;
   const newInsights: string[] = [];
 
@@ -276,7 +277,7 @@ export async function runSuperconductorResearch(
   try {
     const existingCandidates = await storage.getSuperconductorCandidates(10);
     if (existingCandidates.length > 0) {
-      const novelResult = await generateNovelSuperconductors(emit, existingCandidates, allInsights);
+      const novelResult = await generateNovelSuperconductors(emit, existingCandidates, allInsights, strategyCtx?.stagnationInfo);
       generated += novelResult;
     }
   } catch (err: any) {
@@ -289,16 +290,20 @@ export async function runSuperconductorResearch(
 async function generateNovelSuperconductors(
   emit: EventEmitter,
   existingCandidates: any[],
-  allInsights: string[]
+  allInsights: string[],
+  stagnationInfo?: { cyclesSinceImproved: number; currentBestTc: number }
 ): Promise<number> {
   let generated = 0;
 
   const sorted = existingCandidates
     .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
 
+  const byTc = [...existingCandidates]
+    .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
+
   const seenFamilies = new Set<string>();
   const diverseExamples: any[] = [];
-  for (const c of sorted) {
+  for (const c of byTc) {
     const family = classifyFamily(c.formula);
     if (!seenFamilies.has(family) && diverseExamples.length < 5) {
       seenFamilies.add(family);
@@ -317,6 +322,7 @@ async function generateNovelSuperconductors(
     formula: c.formula,
     family: classifyFamily(c.formula),
     predictedTc: c.predictedTc,
+    electronPhononCoupling: c.electronPhononCoupling,
     ensembleScore: c.ensembleScore,
     meissnerEffect: c.meissnerEffect,
     zeroResistance: c.zeroResistance,
@@ -326,6 +332,17 @@ async function generateNovelSuperconductors(
 
   const existingFormulas = sorted.slice(0, 20).map(c => c.formula);
   const exclusionList = [...new Set(existingFormulas)].slice(0, 15).join(", ");
+
+  const stagnationCycles = stagnationInfo?.cyclesSinceImproved ?? 0;
+  const currentCeiling = stagnationInfo?.currentBestTc ?? 0;
+  const isStagnating = stagnationCycles > 5;
+  const stagnationContext = isStagnating
+    ? `\n\nCRITICAL CONTEXT: Our best Tc has been stuck at ${Math.round(currentCeiling)}K for ${stagnationCycles} cycles. We need candidates that can EXCEED this ceiling. Focus on:
+- Ultra-high electron-phonon coupling (lambda > 2.5) via light elements (H, B, C, N) in cage/clathrate structures
+- Multi-component hydrides with synergistic coupling (e.g., ternary/quaternary hydrides combining Ti, Sc, Y, La with H-rich sublattices)
+- Novel pairing mechanisms: combined phonon + spin-fluctuation, charge-density wave enhanced, or topological surface states
+- Predict Tc values ABOVE ${Math.round(currentCeiling)}K - push boundaries based on strong-coupling Eliashberg theory`
+    : "";
 
   try {
     const response = await openai.chat.completions.create({
@@ -368,7 +385,7 @@ Return JSON with 'candidates' array:
         },
         {
           role: "user",
-          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
+          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}${stagnationContext}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n- Prioritize candidates with very high electron-phonon coupling (lambda > 2.0) and light-element sublattices\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
         },
       ],
       response_format: { type: "json_object" },

@@ -33,25 +33,39 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - The system tracks research strategy evolution, convergence metrics (e.g., best Tc, best score), and detects significant strategy pivots.
 
 ### Milestone Detection System
-- Detects various types of milestones (e.g., new-family, tc-record, pipeline-graduate) and stores them with significance and related formula. These are broadcast via WebSocket events.
+- Detects various types of milestones: new-family, tc-record, pipeline-graduate, diversity-threshold, knowledge-milestone, insight-cascade.
+- Pipeline-graduate triggers at verification stage >= 4 (not 5), with batch milestones at 10/25/50/100 validated candidates.
+- tc-record fires when Tc improves by >5K over previous best.
 
 ### Progressive Scoring
 - XGBoost uses sigmoid scoring and incorporates knowledge depth bonuses for synthesis, crystal structure, pipeline stages, and insights. Final scores are clamped to [0, 1].
+- Lambda-aware Tc scaling: base Tc estimates scale with electron-phonon coupling (lambda > 2.5: x1.4, > 2.0: x1.25, > 1.5: x1.12).
 
 ### Physics Tc Flowback
 - Phase 10 writes Eliashberg-calculated Tc back to candidate's `predictedTc`.
 - Raw physics Tc is clamped: must be >0 and <1000K, otherwise discarded.
-- Tc increase cap is coupling-aware: lambda>2.0: +100K, lambda>1.5: +80K, lambda>1.0: +60K, else +50K.
-- If physics Tc > ML Tc: update to min(physicsTc, currentTc + tcCap).
-- If physics Tc > 30% of ML Tc: blend with weight based on lambda (0.5 for lambda>1, 0.4 otherwise).
-- If physics Tc < 30% of ML Tc: keep ML estimate.
+- Tc increase cap is coupling-aware: lambda>2.5: +150K, lambda>2.0: +120K, lambda>1.5: +90K, lambda>1.0: +70K, else +50K.
+- Strong coupling boost: lambda > 2.0 materials get additional +(lambda-2.0)*15K when physics Tc > 80% of ML Tc.
+- Blend weight: lambda>1.5: 0.6, lambda>1.0: 0.5, else 0.4.
 
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.
-- Checks top 30 candidates by Tc; only applies boost when candidate reaches a NEW verification stage (tracked by `lastReEvalStage` Map).
-- Stage-based Tc boost: stage 1 with strong coupling (+4 to +12K based on lambda), stage 2 (+3K), stage 3 (+5K), stage 4 (+7K).
-- Crystal stability bonus (+5K) if synthesizability > 0.7.
-- Tc knowledge bonus in ML predictor raised to max +45K (was 15K): synthesis +5K, crystal +5K, pipeline stages +5K each (max +20K), insights +3K, verified lambda bonus up to +15K.
+- Checks top 50 candidates by Tc; uses `Map<string, number>` for apply count tracking (max 3 applications per key).
+- Re-evaluation map clears every 8 cycles to allow repeat boosts with diminishing returns.
+- Diminishing returns: each reapplication reduces boost by 50% (1 / (1 + prevCount * 0.5)).
+- **Stagnation multiplier**: if Tc hasn't improved in N cycles, boosts are amplified (>20 cycles: x2.0, >10: x1.5, >5: x1.2).
+- Stage-based Tc boosts (cumulative, not stage-exact): stage>=1 with coupling (+4 to +15K by lambda), stage>=2 (+4K), stage>=3 (+6K), stage>=4 (+8K, +6K crystal stability).
+- Tc hard cap: 550K.
+- `cyclesSinceTcImproved` and `lastBestTcSeen` tracked as module-level vars.
+
+### Stagnation-Aware Candidate Generation
+- `generateNovelSuperconductors()` receives stagnation info (cycles since improved, current best Tc).
+- When stagnating (>5 cycles), the LLM prompt includes explicit context about the ceiling and instructions to generate candidates targeting higher Tc via ultra-high coupling, multi-component hydrides, and novel pairing mechanisms.
+
+### Tc Knowledge Bonus (ML Predictor)
+- Synthesis documented: +8K, Crystal structure: +8K, Pipeline stages: +8K each (max +30K), Related insights: +5K.
+- Verified lambda bonus: >2.5: +30K, >2.0: +22K, >1.5: +15K, >1.0: +8K, >0.5: +3K.
+- Total cap: +80K (was 45K).
 
 ### Phase Throughput
 - Phase 10 (Physics): 5 candidates/cycle, queries `getSuperconductorsByStage(0)` directly.

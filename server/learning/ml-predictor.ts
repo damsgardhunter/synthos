@@ -244,6 +244,7 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   score = 1 / (1 + Math.exp(-3 * (rawScore - 0.5)));
 
   let tcEstimate = 0;
+  const lambdaScaling = safeLambda > 2.5 ? 1.4 : safeLambda > 2.0 ? 1.25 : safeLambda > 1.5 ? 1.12 : 1.0;
   if (safeLambda > 1.5 && features.hasHydrogen) {
     const omega_log_K = (Number.isFinite(features.logPhononFreq) ? features.logPhononFreq : 500) * 1.44;
     const muStar = 0.12;
@@ -252,20 +253,20 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
       const exponent = -1.04 * (1 + safeLambda) / denom;
       tcEstimate = (omega_log_K / 1.2) * Math.exp(exponent);
     }
-    if (!Number.isFinite(tcEstimate) || tcEstimate < 100) tcEstimate = 100 + score * 300;
+    if (!Number.isFinite(tcEstimate) || tcEstimate < 100) tcEstimate = 100 + score * 350 * lambdaScaling;
   } else if (features.hasHydrogen && features.cooperPairStrength > 0.4) {
-    tcEstimate = 150 + score * 300;
+    tcEstimate = 150 + score * 350 * lambdaScaling;
   } else if (features.dWaveSymmetry) {
-    tcEstimate = 80 + score * 250;
+    tcEstimate = 80 + score * 300 * lambdaScaling;
   } else if (features.correlationStrength > 0.6 && features.hasTransitionMetal) {
-    tcEstimate = 40 + score * 200;
+    tcEstimate = 40 + score * 250 * lambdaScaling;
   } else if (features.hasTransitionMetal) {
-    tcEstimate = 20 + score * 120;
+    tcEstimate = 20 + score * 150;
   } else {
-    tcEstimate = 5 + score * 100;
+    tcEstimate = 5 + score * 120;
   }
 
-  return { score, tcEstimate: Math.round(tcEstimate), reasoning };
+  return { score, tcEstimate: Math.round(Math.min(tcEstimate, 550)), reasoning };
 }
 
 interface PhysicsContext {
@@ -439,21 +440,23 @@ export async function runMLPrediction(
 
     let tcKnowledgeBonus = 0;
     if (depth) {
-      if (depth.hasSynthesis) tcKnowledgeBonus += 5;
-      if (depth.hasCrystal) tcKnowledgeBonus += 5;
-      if (depth.pipelineStagesPassed > 0) tcKnowledgeBonus += Math.min(20, depth.pipelineStagesPassed * 5);
-      if (depth.hasRelatedInsights) tcKnowledgeBonus += 3;
-      tcKnowledgeBonus = Math.min(30, tcKnowledgeBonus);
+      if (depth.hasSynthesis) tcKnowledgeBonus += 8;
+      if (depth.hasCrystal) tcKnowledgeBonus += 8;
+      if (depth.pipelineStagesPassed > 0) tcKnowledgeBonus += Math.min(30, depth.pipelineStagesPassed * 8);
+      if (depth.hasRelatedInsights) tcKnowledgeBonus += 5;
+      tcKnowledgeBonus = Math.min(50, tcKnowledgeBonus);
     }
     if (physics) {
       const verifiedLambda = physics.verifiedLambda ?? 0;
-      if (verifiedLambda > 1.5) tcKnowledgeBonus += 15;
+      if (verifiedLambda > 2.5) tcKnowledgeBonus += 30;
+      else if (verifiedLambda > 2.0) tcKnowledgeBonus += 22;
+      else if (verifiedLambda > 1.5) tcKnowledgeBonus += 15;
       else if (verifiedLambda > 1.0) tcKnowledgeBonus += 8;
       else if (verifiedLambda > 0.5) tcKnowledgeBonus += 3;
     }
-    tcKnowledgeBonus = Math.min(45, tcKnowledgeBonus);
+    tcKnowledgeBonus = Math.min(80, tcKnowledgeBonus);
     if (tcKnowledgeBonus > 0) {
-      xgb.tcEstimate += tcKnowledgeBonus;
+      xgb.tcEstimate = Math.min(550, xgb.tcEstimate + tcKnowledgeBonus);
       xgb.reasoning.push(`Tc adjusted +${tcKnowledgeBonus}K from accumulated evidence (${physics ? 'physics-verified' : 'knowledge-based'})`);
     }
 

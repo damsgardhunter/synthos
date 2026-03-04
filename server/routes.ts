@@ -261,7 +261,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/convergence", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const limit = Math.min(Number(req.query.limit) || 200, 500);
       const snapshots = await storage.getConvergenceSnapshots(limit);
       res.json(snapshots);
     } catch (e) {

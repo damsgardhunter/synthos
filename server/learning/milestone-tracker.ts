@@ -98,17 +98,33 @@ export async function checkMilestones(
       }
     }
 
+    let newGraduates = 0;
     for (const c of candidates) {
       const stage = c.verificationStage ?? 0;
-      if (stage >= 5 && state.maxPipelineStage < 5) {
+      if (stage >= 4 && state.maxPipelineStage < 4) {
         detected.push({
           type: "pipeline-graduate",
           title: `Pipeline graduate: ${c.formula}`,
-          description: `${c.formula} passed all 5 multi-fidelity verification stages. Full computational validation complete.`,
+          description: `${c.formula} passed all multi-fidelity verification stages. Full computational validation complete with Tc=${Math.round(c.predictedTc ?? 0)}K.`,
           significance: 3,
           relatedFormula: c.formula,
         });
-        state.maxPipelineStage = 5;
+        state.maxPipelineStage = 4;
+        newGraduates++;
+      }
+    }
+
+    const stage4Count = candidates.filter(c => (c.verificationStage ?? 0) >= 4).length;
+    const stage4Thresholds = [10, 25, 50, 100];
+    for (const threshold of stage4Thresholds) {
+      if (stage4Count >= threshold && !state.knowledgeThresholds.has(threshold * 1000 + 4)) {
+        state.knowledgeThresholds.add(threshold * 1000 + 4);
+        detected.push({
+          type: "pipeline-graduate",
+          title: `${threshold} candidates fully validated`,
+          description: `${threshold} superconductor candidates have completed all pipeline stages. Deep computational validation accelerating.`,
+          significance: threshold >= 50 ? 3 : 2,
+        });
       }
     }
 
