@@ -41,12 +41,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - XGBoost uses sigmoid scoring and incorporates knowledge depth bonuses for synthesis, crystal structure, pipeline stages, and insights. Final scores are clamped to [0, 1].
 - Lambda-aware Tc scaling: base Tc estimates scale with electron-phonon coupling (lambda > 2.5: x1.4, > 2.0: x1.25, > 1.5: x1.12).
 
-### Physics Tc Flowback
-- Phase 10 writes Eliashberg-calculated Tc back to candidate's `predictedTc`.
+### Physics as Tc Authority
+- **LLM Tc capping** (superconductor-research.ts): New LLM-generated candidates have their Tc capped at physics-plausible maxima using McMillan formula and lambda-based tiers (lambda<0.3: 150K, <0.5: 200K, <1.0: 300K, <1.5: 400K, else 500K). Original LLM estimate stored in notes.
+- **Downward physics correction**: Phase 10 physics flowback always blends physics Tc with current Tc when physics is lower (no more `physicsTc > currentTc * 0.3` guard). Blend weight is 0.7 physics / 0.3 current when physics < 50% of current.
+- **Multi-fidelity Tc writeback**: Pipeline Stage 3 Eliashberg Tc now updates `predictedTc` using same directional blend logic.
+- **Retroactive correction**: Startup corrects existing inflated candidates (LLM-generated, has physics data, Tc>500K) using Eliashberg formula, blending 0.7 physics / 0.3 current.
 - Raw physics Tc is clamped: must be >0 and <1000K, otherwise discarded.
 - Tc increase cap is coupling-aware: lambda>2.5: +150K, lambda>2.0: +120K, lambda>1.5: +90K, lambda>1.0: +70K, else +50K.
 - Strong coupling boost: lambda > 2.0 materials get additional +(lambda-2.0)*15K when physics Tc > 80% of ML Tc.
-- Blend weight: lambda>1.5: 0.6, lambda>1.0: 0.5, else 0.4.
 
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.
@@ -84,6 +86,8 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 
 ### Convergence Snapshots
 - Merges top-by-score and top-by-Tc candidates to find true bestTc across all candidates.
+- `bestPhysicsTc` tracks highest Tc among physics-validated candidates (verificationStage >= 1 AND electronPhononCoupling IS NOT NULL).
+- Convergence chart shows two Tc lines: red for overall best, green for physics-validated best.
 - Uses delete-before-insert per cycle to prevent duplicate cycle entries on engine restart.
 - Score clamped to max 1.0 in snapshot computation.
 - Ordered by cycle number (ASC) for consistent trajectory display.

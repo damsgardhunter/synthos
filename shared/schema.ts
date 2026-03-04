@@ -200,6 +200,7 @@ export const convergenceSnapshots = pgTable("convergence_snapshots", {
   id: varchar("id").primaryKey(),
   cycle: integer("cycle").notNull(),
   bestTc: real("best_tc"),
+  bestPhysicsTc: real("best_physics_tc"),
   bestScore: real("best_score"),
   avgTopScore: real("avg_top_score"),
   candidatesTotal: integer("candidates_total"),

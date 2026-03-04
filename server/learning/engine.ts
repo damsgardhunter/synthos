@@ -486,9 +486,9 @@ async function runPhase10_Physics() {
         if (physicsTc > 0) {
           if (physicsTc > currentTc) {
             updatedTc = Math.round(Math.min(physicsTc, currentTc + tcCap));
-          } else if (physicsTc > currentTc * 0.3) {
-            const blendWeight = lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4;
-            updatedTc = Math.round(currentTc * (1 - blendWeight) + physicsTc * blendWeight);
+          } else {
+            const downBlend = physicsTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
+            updatedTc = Math.round(currentTc * (1 - downBlend) + physicsTc * downBlend);
           }
           if (lambda > 2.0 && physicsTc > currentTc * 0.8) {
             const strongCouplingBoost = Math.round((lambda - 2.0) * 15);

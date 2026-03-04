@@ -415,7 +415,39 @@ Return JSON with 'candidates' array:
       const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const features = extractFeatures(c.formula);
 
-      const isActuallyRoomTemp = (c.predictedTc ?? 0) >= 293 &&
+      let cappedTc = c.predictedTc ?? null;
+      if (cappedTc != null && cappedTc > 0) {
+        const featureLambda = features.electronPhononLambda ?? 0;
+        const omegaLogK = (features.logPhononFreq ?? 300) * 1.44;
+        const muStar = 0.12;
+        let mcMillanMax = 0;
+        const denom = featureLambda - muStar * (1 + 0.62 * featureLambda);
+        if (featureLambda > 0.2 && Math.abs(denom) > 1e-6) {
+          const exponent = -1.04 * (1 + featureLambda) / denom;
+          mcMillanMax = (omegaLogK / 1.2) * Math.exp(exponent);
+          if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
+        }
+
+        let tcCap: number;
+        if (featureLambda < 0.3) {
+          tcCap = 150;
+        } else if (featureLambda < 0.5) {
+          tcCap = Math.max(200, mcMillanMax * 2.5);
+        } else if (featureLambda < 1.0) {
+          tcCap = Math.max(300, mcMillanMax * 2.0);
+        } else if (featureLambda < 1.5) {
+          tcCap = Math.max(400, mcMillanMax * 1.8);
+        } else {
+          tcCap = Math.max(500, mcMillanMax * 1.5);
+        }
+        tcCap = Math.round(tcCap);
+
+        if (cappedTc > tcCap) {
+          cappedTc = tcCap;
+        }
+      }
+
+      const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
         c.zeroResistance === true &&
         c.meissnerEffect === true;
 
@@ -435,7 +467,7 @@ Return JSON with 'candidates' array:
           id,
           name: c.name || c.formula,
           formula: c.formula,
-          predictedTc: c.predictedTc ?? null,
+          predictedTc: cappedTc,
           pressureGpa: c.pressureGpa ?? null,
           meissnerEffect: c.meissnerEffect ?? false,
           zeroResistance: c.zeroResistance ?? false,
@@ -450,7 +482,7 @@ Return JSON with 'candidates' array:
           ensembleScore: c.quantumCoherence ?? 0.5,
           roomTempViable: isActuallyRoomTemp,
           status,
-          notes: verificationNotes,
+          notes: (cappedTc !== (c.predictedTc ?? null) ? `[LLM proposed Tc=${c.predictedTc}K, capped to ${cappedTc}K] ` : '') + verificationNotes,
           electronPhononCoupling: features.electronPhononLambda ?? null,
           logPhononFrequency: features.logPhononFreq ?? null,
           coulombPseudopotential: 0.12,

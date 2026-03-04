@@ -221,6 +221,7 @@ export async function captureConvergenceSnapshot(
     });
 
     let bestTc = 0;
+    let bestPhysicsTc = 0;
     let bestScore = 0;
     let topFormula = "";
     let scoreSum = 0;
@@ -233,6 +234,9 @@ export async function captureConvergenceSnapshot(
       if (tc > bestTc) {
         bestTc = tc;
         topFormula = c.formula;
+      }
+      if ((c.verificationStage ?? 0) >= 1 && c.electronPhononCoupling != null) {
+        if (tc > bestPhysicsTc) bestPhysicsTc = tc;
       }
     }
     for (const c of topByScore10) {
@@ -257,6 +261,7 @@ export async function captureConvergenceSnapshot(
       id: snapshotId,
       cycle: cycleNumber,
       bestTc: Math.round(bestTc * 100) / 100,
+      bestPhysicsTc: bestPhysicsTc > 0 ? Math.round(bestPhysicsTc * 100) / 100 : null,
       bestScore: Math.round(bestScore * 1000) / 1000,
       avgTopScore: Math.round(avgTopScore * 1000) / 1000,
       candidatesTotal: totalCount,

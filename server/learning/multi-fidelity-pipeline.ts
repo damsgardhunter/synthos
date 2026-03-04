@@ -242,7 +242,7 @@ export async function runMultiFidelityPipeline(
   });
 
   for (const candidate of candidates.slice(0, 4)) {
-    const physicsData: Record<string, any> = {};
+    const physicsData: Record<string, any> = { _currentPredictedTc: candidate.predictedTc ?? 0 };
 
     const s0 = await stage0_MLFilter(emit, candidate);
     if (!s0.passed) {
@@ -364,6 +364,23 @@ async function updateCandidatePhysics(
       updates.uncertaintyEstimate = tcRange
         ? (tcRange[1] - tcRange[0]) / (allData.eliashberg.predictedTc || 1)
         : 0.5;
+
+      const eliashbergTc = allData.eliashberg.predictedTc;
+      if (Number.isFinite(eliashbergTc) && eliashbergTc > 0) {
+        const currentTc = physicsData._currentPredictedTc ?? 0;
+        const lambda = allData.coupling?.lambda ?? 0;
+        if (currentTc > 0) {
+          if (eliashbergTc > currentTc) {
+            const tcCap = lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50;
+            updates.predictedTc = Math.round(Math.min(eliashbergTc, currentTc + tcCap));
+          } else {
+            const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
+            updates.predictedTc = Math.round(currentTc * (1 - downBlend) + eliashbergTc * downBlend);
+          }
+        } else {
+          updates.predictedTc = Math.round(eliashbergTc);
+        }
+      }
     }
     if (allData.competingPhases) {
       updates.competingPhases = allData.competingPhases;

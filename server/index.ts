@@ -67,6 +67,41 @@ app.use((req, res, next) => {
   if (removed > 0) {
     log(`Deduplicated SC candidates: removed ${removed} duplicate rows`, "startup");
   }
+
+  try {
+    const allCandidates = await storage.getSuperconductorCandidates(2000);
+    let corrected = 0;
+    for (const c of allCandidates) {
+      if (c.xgboostScore != null) continue;
+      if (c.electronPhononCoupling == null) continue;
+      if ((c.predictedTc ?? 0) <= 500) continue;
+
+      const lambda = c.electronPhononCoupling ?? 0;
+      const omegaLog = c.logPhononFrequency ?? 300;
+      const muStar = c.coulombPseudopotential ?? 0.12;
+      const omegaLogK = omegaLog * 1.44;
+      const denom = lambda - muStar * (1 + 0.62 * lambda);
+      let eliashbergTc = 0;
+      if (Math.abs(denom) > 1e-6 && lambda > 0.2) {
+        const exponent = -1.04 * (1 + lambda) / denom;
+        eliashbergTc = (omegaLogK / 1.2) * Math.exp(exponent);
+        if (!Number.isFinite(eliashbergTc) || eliashbergTc < 0) eliashbergTc = 0;
+      }
+
+      const currentTc = c.predictedTc ?? 0;
+      if (eliashbergTc > 0 && eliashbergTc < currentTc) {
+        const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : 0.5;
+        const newTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
+        await storage.updateSuperconductorCandidate(c.id, { predictedTc: newTc });
+        corrected++;
+      }
+    }
+    if (corrected > 0) {
+      log(`Retroactively corrected ${corrected} inflated Tc candidates using Eliashberg physics`, "startup");
+    }
+  } catch (err: any) {
+    log(`Tc correction error: ${err.message}`, "startup");
+  }
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

@@ -258,6 +258,7 @@ function ConvergenceTracker() {
   const chartData = sorted.map(s => ({
     cycle: `C${s.cycle}`,
     bestTc: s.bestTc ?? 0,
+    bestPhysicsTc: s.bestPhysicsTc ?? null,
     bestScore: s.bestScore ?? 0,
     avgTopScore: s.avgTopScore ?? 0,
   }));
@@ -389,11 +390,12 @@ function ConvergenceTracker() {
             <Tooltip
               contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
               formatter={(v: any, name: string) => [
-                name === "bestTc" ? `${Number(v).toFixed(1)}K` : Number(v).toFixed(3),
-                name === "bestTc" ? "Best Tc" : name === "bestScore" ? "Best Score" : "Avg Top-10"
+                name === "bestTc" || name === "bestPhysicsTc" ? `${v != null ? Number(v).toFixed(1) : '-'}K` : Number(v).toFixed(3),
+                name === "bestTc" ? "Best Tc" : name === "bestPhysicsTc" ? "Physics Tc" : name === "bestScore" ? "Best Score" : "Avg Top-10"
               ]}
             />
             <Line yAxisId="tc" type="monotone" dataKey="bestTc" name="bestTc" stroke="#ef4444" strokeWidth={2} dot={{ r: 3 }} />
+            <Line yAxisId="tc" type="monotone" dataKey="bestPhysicsTc" name="bestPhysicsTc" stroke="#22c55e" strokeWidth={2} dot={{ r: 3 }} connectNulls />
             <Line yAxisId="score" type="monotone" dataKey="bestScore" name="bestScore" stroke="#6366f1" strokeWidth={2} dot={{ r: 3 }} />
             <Line yAxisId="score" type="monotone" dataKey="avgTopScore" name="avgTopScore" stroke="#6366f1" strokeWidth={1} strokeDasharray="4 4" dot={false} />
           </LineChart>
@@ -402,6 +404,10 @@ function ConvergenceTracker() {
           <div className="flex items-center gap-1.5">
             <div className="h-2 w-4 rounded-full bg-red-500" />
             <span className="text-xs text-muted-foreground">Best Tc (K)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full bg-green-500" />
+            <span className="text-xs text-muted-foreground">Physics Tc (K)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className="h-2 w-4 rounded-full bg-indigo-500" />
