@@ -6,11 +6,22 @@ export interface WSMessage {
   timestamp: string;
 }
 
+export interface ThoughtMessage {
+  text: string;
+  category: "strategy" | "discovery" | "stagnation" | "milestone";
+  timestamp: string;
+}
+
+export type EngineTempo = "excited" | "exploring" | "contemplating";
+
 export function useWebSocket() {
   const [connected, setConnected] = useState(false);
   const [messages, setMessages] = useState<WSMessage[]>([]);
   const [engineState, setEngineState] = useState<string>("stopped");
   const [activeTasks, setActiveTasks] = useState<string[]>([]);
+  const [thoughts, setThoughts] = useState<ThoughtMessage[]>([]);
+  const [tempo, setTempo] = useState<EngineTempo>("exploring");
+  const [statusMessage, setStatusMessage] = useState<string>("");
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -20,6 +31,8 @@ export function useWebSocket() {
       .then((status) => {
         if (status.state) setEngineState(status.state);
         if (status.activeTasks) setActiveTasks(status.activeTasks);
+        if (status.tempo) setTempo(status.tempo);
+        if (status.statusMessage) setStatusMessage(status.statusMessage);
       })
       .catch(() => {});
   }, []);
@@ -62,6 +75,26 @@ export function useWebSocket() {
         if (msg.type === "taskEnd") {
           setActiveTasks((prev) => prev.filter((t) => t !== msg.data.task));
         }
+
+        if (msg.type === "thought") {
+          setThoughts((prev) => [
+            ...prev.slice(-30),
+            {
+              text: msg.data.text,
+              category: msg.data.category ?? "strategy",
+              timestamp: msg.timestamp,
+            },
+          ]);
+        }
+
+        if (msg.type === "tempoChange") {
+          setTempo(msg.data.tempo ?? "exploring");
+        }
+
+        if (msg.type === "statusMessage") {
+          setStatusMessage(msg.data.message ?? "");
+          if (msg.data.tempo) setTempo(msg.data.tempo);
+        }
       } catch (e) {
         console.warn("WebSocket parse error:", e);
       }
@@ -97,6 +130,9 @@ export function useWebSocket() {
     messages,
     engineState,
     activeTasks,
+    thoughts,
+    tempo,
+    statusMessage,
     clearMessages,
   };
 }

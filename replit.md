@@ -69,8 +69,20 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - Fe2As2: Tc=0K, moderately correlated, AFM competing phase
 - YBCO: Tc=0K from Eliashberg (correctly flags as unconventional/strongly correlated)
 
+### Alive Engine (v2.1)
+- **Thought Stream**: Engine broadcasts `thought` WS messages at decision points (strategy, discovery, stagnation, milestone categories). Client `use-websocket.ts` tracks `thoughts`, `tempo`, `statusMessage` state.
+- **Engine Thoughts Card**: Dashboard live-scrolling thought feed with color-coded categories (blue/green/amber/purple), fade-in animations, tempo-matching pulse dot.
+- **Sparklines**: Each dashboard stat card shows a 60px trend line (last 30 data points, in-memory) with session delta indicators.
+- **Knowledge Map**: Recharts Treemap on Research Pipeline showing material families by candidate count. Clickable for family details.
+- **Adaptive Tempo**: Cycle interval adapts: excited=10s (new candidates/Tc improving), exploring=15s (normal), contemplating=22s (stagnation). `EngineTempo` broadcast via WS.
+- **Research Memory**: GET `/api/engine/memory` — aggregated knowledge summary: current hypothesis, family stats, top insights, abandoned strategies, cycle narratives.
+- **Memory Card**: Collapsible dashboard card showing hypothesis, key discoveries, explored territory bars, abandoned paths.
+- **Cycle Narratives**: Per-cycle one-sentence summaries stored as `cycle-narrative` research logs, displayed in "Cycle Journal" on Research Pipeline.
+- **Dynamic Status Messages**: Sidebar shows contextual status (tempo label + generated message) instead of static Running/Stopped.
+- **Storage method**: `getResearchLogsByEvent(event, limit)` for filtered log retrieval.
+
 ### Infrastructure (v2.0)
-- **Rate Limiting**: express-rate-limit — 100 req/min general, 30 write, 10 engine control
+- **Rate Limiting**: express-rate-limit — 600 req/min general, 30 write, 10 engine control
 - **In-Memory Cache**: server/cache.ts — TTL cache for elements (1hr), stats (30s), crystal/computational results (5min)
 - **DB Indexes**: On formula columns, timestamps, predictedTc, ensembleScore, pipelineStage
 - **API Pagination**: novel-predictions endpoint supports limit/offset

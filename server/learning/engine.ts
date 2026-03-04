@@ -22,6 +22,7 @@ function shouldContinue(): boolean {
 }
 
 type EngineState = "stopped" | "running" | "paused";
+type EngineTempo = "excited" | "exploring" | "contemplating";
 
 interface EngineStatus {
   state: EngineState;
@@ -37,6 +38,8 @@ interface EngineStatus {
   totalPhysicsComputed: number;
   totalStructuresPredicted: number;
   totalPipelineScreened: number;
+  tempo: EngineTempo;
+  statusMessage: string;
 }
 
 let wss: WebSocketServer | null = null;
@@ -60,6 +63,11 @@ let phase7Offset = 0;
 let currentStrategyHint: string | null = null;
 let currentStrategyFocusAreas: { area: string; priority: number }[] = [];
 let currentFamilyCounts: Record<string, number> = {};
+let engineTempo: EngineTempo = "exploring";
+let cycleIntervalMs = 15000;
+let currentStatusMessage = "Initializing research systems";
+let recentTcImproved = false;
+let recentNewCandidates = 0;
 
 interface PreviousCycleMetrics {
   bestTc: number;
@@ -73,6 +81,51 @@ interface PreviousCycleMetrics {
 }
 let previousCycleMetrics: PreviousCycleMetrics | null = null;
 let cycleInsightsThisCycle = 0;
+
+type ThoughtCategory = "strategy" | "discovery" | "stagnation" | "milestone";
+
+function broadcastThought(text: string, category: ThoughtCategory) {
+  broadcast("thought", { text, category });
+}
+
+function updateTempo() {
+  const prevTempo = engineTempo;
+  if (recentTcImproved || recentNewCandidates >= 3) {
+    engineTempo = "excited";
+    cycleIntervalMs = 10000;
+  } else if (cyclesSinceTcImproved > 10) {
+    engineTempo = "contemplating";
+    cycleIntervalMs = 22000;
+  } else {
+    engineTempo = "exploring";
+    cycleIntervalMs = 15000;
+  }
+  if (prevTempo !== engineTempo) {
+    broadcast("tempoChange", { tempo: engineTempo, intervalMs: cycleIntervalMs });
+  }
+}
+
+function generateStatusMessage(): string {
+  if (state === "stopped") return "Engine offline";
+  if (state === "paused") return "Research paused";
+
+  const topFocus = currentStrategyFocusAreas[0]?.area || "";
+  const tasks = Array.from(activeTasks);
+
+  if (engineTempo === "excited") {
+    if (topFocus) return `Actively pursuing ${topFocus.toLowerCase()} candidates`;
+    return "Energized by recent discoveries";
+  }
+  if (engineTempo === "contemplating") {
+    if (cyclesSinceTcImproved > 15) return "Deep analysis mode — reconsidering approach";
+    return "Re-analyzing top candidates with stricter physics";
+  }
+  if (tasks.includes("SC Research")) return "Screening superconductor candidates";
+  if (tasks.includes("Computational Physics")) return "Running physics verification";
+  if (tasks.includes("Data Fetching")) return "Scanning scientific databases for new materials";
+  if (topFocus) return `Exploring ${topFocus.toLowerCase()} chemical space`;
+  return "Scanning chemical space for novel compositions";
+}
 
 function broadcast(type: string, data: any) {
   if (!wss) return;
@@ -621,6 +674,8 @@ async function runLearningCycle() {
   cycleCount++;
   lastCycleAt = new Date().toISOString();
   cycleInsightsThisCycle = 0;
+  recentNewCandidates = 0;
+  recentTcImproved = false;
   recentLogCache.clear();
   broadcast("cycleStart", { cycle: cycleCount });
 
@@ -630,11 +685,25 @@ async function runLearningCycle() {
     if (previousCycleMetrics.bestTc > 0) {
       const tcTrend = previousCycleMetrics.bestScore >= 0.9 ? "scores are strong" : "still building evidence";
       cycleStartDetail = `Cycle ${cycleCount}: Focusing on ${topFocus} (${tcTrend}, best Tc: ${Math.round(previousCycleMetrics.bestTc)}K). ${previousCycleMetrics.familyDiversity} families explored so far.`;
+
+      if (cyclesSinceTcImproved > 5) {
+        broadcastThought(
+          `No Tc improvement in ${cyclesSinceTcImproved} cycles. Current best: ${Math.round(previousCycleMetrics.bestTc)}K. Re-examining high-lambda candidates with stricter physics constraints...`,
+          "stagnation"
+        );
+      } else if (previousCycleMetrics.insightCount > 0) {
+        broadcastThought(
+          `Cycle ${cycleCount}: Last cycle produced ${cycleInsightsThisCycle || 0} insights. Focusing on ${topFocus} — ${previousCycleMetrics.familyDiversity} families in the search space, best Tc at ${Math.round(previousCycleMetrics.bestTc)}K.`,
+          "strategy"
+        );
+      }
     } else {
       cycleStartDetail = `Cycle ${cycleCount}: Building knowledge base. Targeting ${topFocus} for superconductor discovery.`;
+      broadcastThought(`Still building the knowledge foundation. Targeting ${topFocus} as the most promising direction.`, "strategy");
     }
   } else if (cycleCount <= 3) {
     cycleStartDetail = `Cycle ${cycleCount}: Initializing knowledge base. Gathering materials, synthesis paths, and reaction data before superconductor screening.`;
+    broadcastThought(`Starting up. Gathering materials from OQMD, AFLOW, and literature databases before I can begin screening for superconductors.`, "discovery");
   } else {
     cycleStartDetail = `Cycle ${cycleCount}: Continuing exploration. Materials + synthesis + reactions first, then analysis, then SC research.`;
   }
@@ -708,6 +777,7 @@ async function runLearningCycle() {
 
     if (state === "running") {
       try {
+        const prevFocusAreas = currentStrategyFocusAreas.map(f => ({ ...f }));
         const strategy = await analyzeAndEvolveStrategy(emit, cycleCount);
         if (strategy) {
           currentStrategyHint = strategy.focusAreas
@@ -726,6 +796,21 @@ async function runLearningCycle() {
             focusAreas: strategy.focusAreas,
             summary: strategy.summary,
           });
+
+          for (const fa of strategy.focusAreas) {
+            const prev = prevFocusAreas.find(p => p.area === fa.area);
+            if (prev && Math.abs(fa.priority - prev.priority) > 0.15) {
+              const dir = fa.priority > prev.priority ? "Promoting" : "Deprioritizing";
+              broadcastThought(
+                `${dir} ${fa.area} from ${(prev.priority * 100).toFixed(0)}% to ${(fa.priority * 100).toFixed(0)}% priority based on recent performance data.`,
+                "strategy"
+              );
+            }
+          }
+          const newFamilies = strategy.focusAreas.filter(fa => !prevFocusAreas.find(p => p.area === fa.area));
+          for (const nf of newFamilies) {
+            broadcastThought(`New focus area: ${nf.area} added to research strategy at ${(nf.priority * 100).toFixed(0)}% priority.`, "discovery");
+          }
         }
       } catch {}
 
@@ -767,6 +852,7 @@ async function runLearningCycle() {
           const tcDelta = currentBestTc - previousCycleMetrics.bestTc;
           if (tcDelta > 1) {
             endSummaryParts.push(`best Tc improved by ${Math.round(tcDelta)}K to ${Math.round(currentBestTc)}K`);
+            recentTcImproved = true;
           } else if (currentBestTc > 0) {
             endSummaryParts.push(`best Tc unchanged at ${Math.round(currentBestTc)}K`);
           }
@@ -779,7 +865,10 @@ async function runLearningCycle() {
           const diversityDelta = currentDiversity - previousCycleMetrics.familyDiversity;
           if (diversityDelta > 0) {
             endSummaryParts.push(`diversity expanded to ${currentDiversity} families (+${diversityDelta})`);
+            broadcastThought(`Search space expanded to ${currentDiversity} material families. New territory to explore.`, "discovery");
           }
+
+          recentNewCandidates = currentCandidates.length - previousCycleMetrics.candidateCount;
 
           if (cycleInsightsThisCycle > 0) {
             endSummaryParts.push(`${cycleInsightsThisCycle} novel insights`);
@@ -795,6 +884,25 @@ async function runLearningCycle() {
           detail: endSummaryParts.join(". ") + ".",
           dataSource: "Internal",
         });
+
+        const narrativeParts: string[] = [`Cycle ${cycleCount}:`];
+        if (recentNewCandidates > 0) narrativeParts.push(`${recentNewCandidates} new candidates discovered.`);
+        if (recentTcImproved) narrativeParts.push(`Tc record improved to ${Math.round(currentBestTc)}K.`);
+        else if (currentBestTc > 0) narrativeParts.push(`Best Tc holds at ${Math.round(currentBestTc)}K.`);
+        if (cycleInsightsThisCycle > 0) narrativeParts.push(`${cycleInsightsThisCycle} novel insight${cycleInsightsThisCycle > 1 ? "s" : ""} discovered.`);
+        const topFam = currentStrategyFocusAreas[0]?.area;
+        if (topFam) narrativeParts.push(`Strategy: ${topFam} focus.`);
+
+        storage.insertResearchLog({
+          phase: "engine",
+          event: "cycle-narrative",
+          detail: narrativeParts.join(" "),
+          dataSource: "Internal",
+        }).catch(() => {});
+
+        updateTempo();
+        currentStatusMessage = generateStatusMessage();
+        broadcast("statusMessage", { message: currentStatusMessage, tempo: engineTempo });
 
         const topFamily = currentStrategyFocusAreas[0]?.area || "";
         previousCycleMetrics = {
@@ -821,7 +929,7 @@ async function runLearningCycle() {
     broadcast("cycleEnd", { cycle: cycleCount });
 
     if (state === "running") {
-      cycleTimer = setTimeout(runLearningCycle, 15000);
+      cycleTimer = setTimeout(runLearningCycle, cycleIntervalMs);
     }
   }
 }
@@ -1068,5 +1176,7 @@ export function getStatus(): EngineStatus {
     totalPhysicsComputed,
     totalStructuresPredicted,
     totalPipelineScreened,
+    tempo: engineTempo,
+    statusMessage: currentStatusMessage,
   };
 }

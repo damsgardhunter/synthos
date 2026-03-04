@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot, Milestone } from "@shared/schema";
@@ -8,10 +8,10 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit, Map as MapIcon, Notebook } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, BarChart, Bar, Cell
+  LineChart, Line, BarChart, Bar, Cell, Treemap
 } from "recharts";
 
 function StatusIcon({ status }: { status: string }) {
@@ -532,6 +532,171 @@ function MilestoneTimeline() {
   );
 }
 
+const FAMILY_BUBBLE_COLORS: Record<string, string> = {
+  "Hydrides": "#ef4444",
+  "Cuprates": "#3b82f6",
+  "Pnictides": "#6366f1",
+  "Chalcogenides": "#f59e0b",
+  "Borides": "#10b981",
+  "Carbides": "#14b8a6",
+  "Nitrides": "#06b6d4",
+  "Oxides": "#f97316",
+  "Intermetallics": "#a855f7",
+  "Other": "#9ca3af",
+};
+
+function TreemapContent(props: any) {
+  const { x, y, width, height, name, count, bestTc, fill } = props;
+  if (width < 30 || height < 20) return null;
+  return (
+    <g>
+      <rect x={x} y={y} width={width} height={height} fill={fill} rx={4} stroke="hsl(var(--background))" strokeWidth={2} style={{ cursor: "pointer" }} />
+      {width > 50 && height > 35 && (
+        <>
+          <text x={x + width / 2} y={y + height / 2 - 6} textAnchor="middle" fill="white" fontSize={width > 80 ? 11 : 9} fontWeight="bold">{name}</text>
+          <text x={x + width / 2} y={y + height / 2 + 8} textAnchor="middle" fill="rgba(255,255,255,0.8)" fontSize={8}>{count} cand.</text>
+          {bestTc > 0 && height > 50 && (
+            <text x={x + width / 2} y={y + height / 2 + 20} textAnchor="middle" fill="rgba(255,255,255,0.7)" fontSize={8}>Tc: {Math.round(bestTc)}K</text>
+          )}
+        </>
+      )}
+    </g>
+  );
+}
+
+function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (family: string) => void; selectedFamily?: string | null }) {
+  const { data: rawData, isLoading } = useQuery<any>({
+    queryKey: ["/api/superconductor-candidates"],
+  });
+
+  const candidates = Array.isArray(rawData) ? rawData : rawData?.candidates ?? [];
+
+  const familyData = (() => {
+    if (!candidates || candidates.length === 0) return [];
+    const families: Record<string, { count: number; bestTc: number; bestScore: number }> = {};
+    for (const c of candidates) {
+      const fam = c.materialFamily ?? "Other";
+      if (!families[fam]) families[fam] = { count: 0, bestTc: 0, bestScore: 0 };
+      families[fam].count++;
+      if ((c.predictedTc ?? 0) > families[fam].bestTc) families[fam].bestTc = c.predictedTc ?? 0;
+      if ((c.ensembleScore ?? 0) > families[fam].bestScore) families[fam].bestScore = c.ensembleScore ?? 0;
+    }
+    return Object.entries(families)
+      .map(([name, data]) => ({
+        name,
+        size: data.count,
+        count: data.count,
+        bestTc: data.bestTc,
+        bestScore: data.bestScore,
+        fill: FAMILY_BUBBLE_COLORS[name] ?? "#9ca3af",
+      }))
+      .sort((a, b) => b.size - a.size);
+  })();
+
+  const selectedInfo = selectedFamily ? familyData.find(f => f.name === selectedFamily) : null;
+
+  return (
+    <Card data-testid="knowledge-map">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <MapIcon className="h-4 w-4 text-primary" />
+          Knowledge Map
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">Material families explored by the engine. Size reflects candidate count.</p>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-[260px] w-full" />
+        ) : familyData.length === 0 ? (
+          <p className="text-sm text-muted-foreground italic py-8 text-center" data-testid="knowledge-map-empty">
+            Knowledge map will populate once candidates are discovered
+          </p>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={260}>
+              <Treemap
+                data={familyData}
+                dataKey="size"
+                aspectRatio={4 / 3}
+                content={<TreemapContent />}
+                onClick={(node: any) => {
+                  if (node?.name && onFamilyClick) onFamilyClick(node.name);
+                }}
+              />
+            </ResponsiveContainer>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {familyData.map(f => (
+                <button
+                  key={f.name}
+                  className={`flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full border transition-colors ${selectedFamily === f.name ? "border-primary bg-primary/10 font-semibold" : "border-border hover:bg-muted/50"}`}
+                  onClick={() => onFamilyClick?.(f.name)}
+                  data-testid={`family-filter-${f.name.toLowerCase()}`}
+                >
+                  <div className="h-2 w-2 rounded-full" style={{ backgroundColor: f.fill }} />
+                  {f.name} ({f.count})
+                </button>
+              ))}
+            </div>
+            {selectedInfo && (
+              <div className="mt-3 p-3 rounded-lg border bg-muted/30" data-testid="family-detail">
+                <p className="text-xs font-semibold">{selectedInfo.name}</p>
+                <div className="flex gap-4 mt-1 text-[10px] text-muted-foreground">
+                  <span>{selectedInfo.count} candidates</span>
+                  <span>Best Tc: {Math.round(selectedInfo.bestTc)}K</span>
+                  <span>Top score: {selectedInfo.bestScore.toFixed(3)}</span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+interface CycleNarrative {
+  detail: string;
+  timestamp: string;
+}
+
+function CycleJournal() {
+  const { data: memory } = useQuery<{ cycleNarratives: CycleNarrative[] }>({
+    queryKey: ["/api/engine/memory"],
+    refetchInterval: 30000,
+  });
+
+  const narratives = memory?.cycleNarratives ?? [];
+  if (narratives.length === 0) return null;
+
+  return (
+    <Card data-testid="cycle-journal">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Notebook className="h-4 w-4 text-primary" />
+          Cycle Journal
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">Recent cycle summaries from the learning engine.</p>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          {narratives.slice(0, 5).map((n, i) => (
+            <div
+              key={i}
+              className="px-3 py-2 rounded-md bg-muted/40 border border-border/50"
+              data-testid={`narrative-${i}`}
+            >
+              <p className="text-xs text-foreground leading-relaxed">{n.detail}</p>
+              <span className="text-[9px] text-muted-foreground font-mono">
+                {new Date(n.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </span>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ResearchPipeline() {
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({
     queryKey: ["/api/learning-phases"],
@@ -542,6 +707,7 @@ export default function ResearchPipeline() {
   const { data: insightData, isLoading: insightsLoading } = useQuery<{ insights: NovelInsight[]; total: number }>({
     queryKey: ["/api/novel-insights"],
   });
+  const [familyFilter, setFamilyFilter] = useState<string | null>(null);
 
   const ws = useWebSocket();
 
@@ -552,6 +718,8 @@ export default function ResearchPipeline() {
       queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
       queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
     }
     const hasConvergence = ws.messages.some((m) => m.type === "convergenceUpdate");
     if (hasConvergence) {
@@ -652,6 +820,29 @@ export default function ResearchPipeline() {
       </Card>
 
       <ConvergenceTracker />
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <KnowledgeMap
+          onFamilyClick={(fam) => setFamilyFilter(prev => prev === fam ? null : fam)}
+          selectedFamily={familyFilter}
+        />
+        <CycleJournal />
+      </div>
+
+      {familyFilter && (
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="text-xs">
+            Filtered: {familyFilter}
+          </Badge>
+          <button
+            className="text-xs text-muted-foreground hover:text-foreground underline"
+            onClick={() => setFamilyFilter(null)}
+            data-testid="clear-family-filter"
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
 
       <MilestoneTimeline />
 

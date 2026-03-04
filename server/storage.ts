@@ -37,6 +37,7 @@ export interface IStorage {
   insertNovelPrediction(pred: InsertNovelPrediction): Promise<NovelPrediction>;
 
   getResearchLogs(limit?: number): Promise<ResearchLog[]>;
+  getResearchLogsByEvent(event: string, limit?: number): Promise<ResearchLog[]>;
   insertResearchLog(log: InsertResearchLog): Promise<ResearchLog>;
 
   getSynthesisProcesses(limit?: number): Promise<SynthesisProcess[]>;
@@ -177,6 +178,13 @@ export class DatabaseStorage implements IStorage {
 
   async getResearchLogs(limit = 100): Promise<ResearchLog[]> {
     return db.select().from(researchLogs).orderBy(desc(researchLogs.timestamp)).limit(limit);
+  }
+
+  async getResearchLogsByEvent(event: string, limit = 10): Promise<ResearchLog[]> {
+    return db.select().from(researchLogs)
+      .where(eq(researchLogs.event, event))
+      .orderBy(desc(researchLogs.timestamp))
+      .limit(limit);
   }
 
   async insertResearchLog(log: InsertResearchLog): Promise<ResearchLog> {

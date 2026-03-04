@@ -11,7 +11,7 @@ import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./l
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please try again later." },
@@ -425,6 +425,65 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch cross-validation data" });
+    }
+  });
+
+  app.get("/api/engine/memory", async (_req, res) => {
+    try {
+      const strategies = await storage.getStrategyHistory(10);
+      const latestStrategy = strategies[0] ?? null;
+      const insights = await storage.getNovelInsightsOnly(50);
+      const topInsights = insights.slice(0, 5);
+      const milestones = await storage.getMilestones(20);
+      const milestoneCount = await storage.getMilestoneCount();
+      const snapshots = await storage.getConvergenceSnapshots(50);
+      const latestSnapshot = snapshots[snapshots.length - 1] ?? null;
+
+      const familyStats = latestStrategy?.performanceSignals
+        ? (latestStrategy.performanceSignals as any).familyStats ?? {}
+        : {};
+
+      const focusAreas = (latestStrategy?.focusAreas as any[]) ?? [];
+      const currentHypothesis = focusAreas.length > 0
+        ? { family: focusAreas[0].area, priority: focusAreas[0].priority, reasoning: focusAreas[0].reasoning }
+        : null;
+
+      const abandonedStrategies: string[] = [];
+      if (strategies.length >= 2) {
+        const latestFamilies = new Set(((strategies[0]?.focusAreas as any[]) ?? []).map((f: any) => f.area));
+        for (let i = 1; i < strategies.length; i++) {
+          const oldFamilies = ((strategies[i]?.focusAreas as any[]) ?? []).map((f: any) => f.area);
+          for (const fam of oldFamilies) {
+            if (!latestFamilies.has(fam) && !abandonedStrategies.includes(fam)) {
+              abandonedStrategies.push(fam);
+            }
+          }
+        }
+      }
+
+      const narratives = await storage.getResearchLogsByEvent("cycle-narrative", 10);
+
+      res.json({
+        currentHypothesis,
+        familyStats,
+        topInsights: topInsights.map(i => ({
+          text: i.insightText,
+          noveltyScore: i.noveltyScore,
+          category: i.category,
+          discoveredAt: i.discoveredAt,
+        })),
+        abandonedStrategies,
+        milestoneCount,
+        recentMilestones: milestones.slice(0, 5),
+        totalCycles: latestSnapshot?.cycle ?? 0,
+        bestTc: latestSnapshot?.bestTc ?? 0,
+        bestScore: latestSnapshot?.bestScore ?? 0,
+        familyDiversity: latestSnapshot?.familyDiversity ?? 0,
+        pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
+        cycleNarratives: narratives.map(n => ({ detail: n.detail, timestamp: n.timestamp })),
+      });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch engine memory" });
     }
   });
 

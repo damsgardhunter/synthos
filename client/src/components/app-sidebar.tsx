@@ -25,6 +25,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import type { LearningPhase } from "@shared/schema";
 import { Progress } from "@/components/ui/progress";
+import { useWebSocket, type EngineTempo } from "@/hooks/use-websocket";
 
 const navItems = [
   { title: "Command Center", url: "/", icon: LayoutDashboard },
@@ -36,12 +37,24 @@ const navItems = [
   { title: "Research Pipeline", url: "/research", icon: FileText },
 ];
 
+const TEMPO_STYLES: Record<string, { dot: string; label: string }> = {
+  excited: { dot: "bg-green-500", label: "Excited" },
+  exploring: { dot: "bg-blue-500", label: "Exploring" },
+  contemplating: { dot: "bg-amber-500", label: "Contemplating" },
+};
+
 export function AppSidebar() {
   const [location] = useLocation();
   const { data: phases } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
+  const ws = useWebSocket();
 
   const activePhase = phases?.find(p => p.status === "active");
   const overallProgress = phases ? phases.reduce((sum, p) => sum + p.progress, 0) / Math.max(phases.length, 1) : 0;
+
+  const tempoStyle = TEMPO_STYLES[ws.tempo] ?? TEMPO_STYLES.exploring;
+  const isRunning = ws.engineState === "running";
+
+  const pulseSpeed = ws.tempo === "excited" ? "animate-pulse" : ws.tempo === "contemplating" ? "animate-[pulse_3s_ease-in-out_infinite]" : "animate-pulse";
 
   return (
     <Sidebar>
@@ -93,11 +106,37 @@ export function AppSidebar() {
               {activePhase && (
                 <div>
                   <div className="flex items-center gap-1.5 mb-1">
-                    <div className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+                    <div className={`h-1.5 w-1.5 rounded-full ${isRunning ? tempoStyle.dot : "bg-gray-400"} ${isRunning ? pulseSpeed : ""}`} />
                     <span className="text-xs text-muted-foreground truncate">Active: {activePhase.name.split(" ").slice(0, 2).join(" ")}</span>
                   </div>
                   <Progress value={activePhase.progress} className="h-1.5" />
                   <p className="text-xs font-mono text-primary mt-1">{activePhase.progress.toFixed(1)}%</p>
+                </div>
+              )}
+              {isRunning && (
+                <div className="space-y-1.5" data-testid="engine-status-message">
+                  <div className="flex items-center gap-1.5">
+                    <div className={`h-1.5 w-1.5 rounded-full ${tempoStyle.dot} ${pulseSpeed}`} />
+                    <span className="text-[10px] font-medium text-muted-foreground">{tempoStyle.label}</span>
+                  </div>
+                  {ws.statusMessage && (
+                    <p className="text-[10px] text-muted-foreground/80 leading-relaxed pl-3">
+                      {ws.statusMessage}
+                    </p>
+                  )}
+                </div>
+              )}
+              {!isRunning && ws.engineState !== "stopped" && ws.engineState !== "paused" && null}
+              {ws.engineState === "paused" && (
+                <div className="flex items-center gap-1.5">
+                  <div className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                  <span className="text-[10px] text-muted-foreground">Research paused</span>
+                </div>
+              )}
+              {ws.engineState === "stopped" && (
+                <div className="flex items-center gap-1.5">
+                  <div className="h-1.5 w-1.5 rounded-full bg-gray-400" />
+                  <span className="text-[10px] text-muted-foreground">Engine offline</span>
                 </div>
               )}
             </div>
