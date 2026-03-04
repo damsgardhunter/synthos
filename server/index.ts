@@ -245,6 +245,62 @@ app.use((req, res, next) => {
   } catch (err: any) {
     log(`Tc correction error: ${err.message}`, "startup");
   }
+
+  try {
+    const dupLogCheck = await db.execute(sql`
+      SELECT event, detail, COUNT(*) as cnt
+      FROM research_logs
+      GROUP BY event, detail
+      HAVING COUNT(*) > 5
+      LIMIT 1
+    `);
+    if (dupLogCheck.rows.length > 0) {
+      const deleteResult = await db.execute(sql`
+        DELETE FROM research_logs
+        WHERE id IN (
+          SELECT rl.id FROM research_logs rl
+          INNER JOIN (
+            SELECT event, detail FROM research_logs
+            GROUP BY event, detail HAVING COUNT(*) > 5
+          ) dup ON rl.event = dup.event AND (rl.detail = dup.detail OR (rl.detail IS NULL AND dup.detail IS NULL))
+          WHERE rl.id NOT IN (
+            SELECT id FROM (
+              SELECT id, ROW_NUMBER() OVER (PARTITION BY event, detail ORDER BY timestamp DESC) as rn
+              FROM research_logs
+            ) ranked WHERE rn <= 3
+          )
+        )
+      `);
+      const deletedLogs = deleteResult.rowCount ?? 0;
+      if (deletedLogs > 0) {
+        log(`Cleaned up ${deletedLogs} duplicate research log entries`, "startup");
+      }
+    }
+
+    const dupInsightCheck = await db.execute(sql`
+      SELECT COUNT(*) as cnt FROM novel_insights WHERE is_novel = false
+    `);
+    const nonNovelCount = Number(dupInsightCheck.rows[0]?.cnt ?? 0);
+    if (nonNovelCount > 5000) {
+      const delInsights = await db.execute(sql`
+        DELETE FROM novel_insights
+        WHERE is_novel = false
+        AND id NOT IN (
+          SELECT id FROM novel_insights
+          WHERE is_novel = false
+          ORDER BY discovered_at DESC
+          LIMIT 500
+        )
+      `);
+      const deletedInsights = delInsights.rowCount ?? 0;
+      if (deletedInsights > 0) {
+        log(`Cleaned up ${deletedInsights} stale non-novel insights`, "startup");
+      }
+    }
+  } catch (err: any) {
+    log(`Log cleanup error: ${err.message?.slice(0, 100)}`, "startup");
+  }
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

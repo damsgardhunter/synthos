@@ -19,6 +19,12 @@ const WELL_KNOWN_PATTERNS = [
   "noble gases maintain full outer shells",
   "transition metals exhibit variable oxidation states",
   "higher formation energy correlates with lower stability",
+  "higher stability correlates with lower formation energy",
+  "lower formation energy correlates with higher stability",
+  "formation energy correlates with stability",
+  "stability correlates with formation energy",
+  "negative formation energy indicates stability",
+  "lower formation energy indicates greater stability",
   "zero band gap materials are metallic",
   "negative formation energy indicates thermodynamic stability",
   "d-wave symmetry enhances superconductivity in cuprates",
@@ -38,6 +44,35 @@ const WELL_KNOWN_PATTERNS = [
   "face-centered cubic structures favorable for ductility",
   "pressure tuning can elevate transition temperatures",
   "critical temperature increases with electron-phonon coupling",
+  "higher pressure increases critical temperature",
+  "pressure enhances superconducting transition temperature",
+  "band gap determines metallic or insulating behavior",
+  "zero band gap indicates metallic behavior",
+  "large band gap indicates insulating behavior",
+  "metallic materials have zero or near-zero band gap",
+  "insulators have large band gaps",
+  "electron-phonon coupling is essential for bcs superconductivity",
+  "lighter elements have higher phonon frequencies",
+  "heavier elements tend to have lower phonon frequencies",
+  "crystal structure affects material properties",
+  "symmetry plays a role in superconducting pairing",
+  "density of states at fermi level affects superconductivity",
+  "higher density of states favors superconductivity",
+  "van hove singularities enhance density of states",
+  "ionic radius affects crystal structure",
+  "electronegativity difference determines bond character",
+  "lattice stability correlates with formation energy",
+  "thermodynamic stability indicated by negative formation energy",
+  "higher atomic mass leads to lower debye temperature",
+  "debye temperature relates to phonon spectrum",
+  "magnetic impurities suppress superconductivity",
+  "spin-orbit coupling affects band structure",
+  "hydrides show enhanced superconductivity under pressure",
+  "electron correlation effects important in transition metals",
+  "crystal field splitting affects electronic properties",
+  "bonding character influences material hardness",
+  "coordination number affects stability",
+  "oxidation state influences magnetic behavior",
 ];
 
 function isTextbookKnowledge(insight: string): boolean {
@@ -45,6 +80,34 @@ function isTextbookKnowledge(insight: string): boolean {
   return WELL_KNOWN_PATTERNS.some(pattern =>
     lower.includes(pattern) || pattern.split(" ").filter(w => w.length > 4).every(w => lower.includes(w))
   );
+}
+
+const INSIGHT_KEY_TERMS = [
+  "stability", "formation energy", "band gap", "metallic", "insulating",
+  "electron-phonon", "phonon", "coupling", "critical temperature", "tc",
+  "pressure", "superconductivity", "superconducting", "cooper pair",
+  "density of states", "fermi", "crystal structure", "lattice",
+  "electronegativity", "oxidation", "magnetic", "debye", "bcs",
+  "eliashberg", "meissner", "cuprate", "hydride", "perovskite",
+  "correlation", "symmetry", "spin-orbit", "transition temperature",
+  "thermodynamic", "ionic radius", "atomic radius", "band structure",
+];
+
+function extractKeyTerms(text: string): string[] {
+  const lower = text.toLowerCase();
+  return INSIGHT_KEY_TERMS.filter(term => lower.includes(term));
+}
+
+function hasKeywordOverlap(text: string, existingTexts: string[]): boolean {
+  const terms = extractKeyTerms(text);
+  if (terms.length < 4) return false;
+
+  for (const existing of existingTexts) {
+    const existingTerms = extractKeyTerms(existing);
+    const overlap = terms.filter(t => existingTerms.includes(t));
+    if (overlap.length >= 4) return true;
+  }
+  return false;
 }
 
 export async function evaluateInsightNovelty(
@@ -56,7 +119,15 @@ export async function evaluateInsightNovelty(
 ): Promise<{ novel: number; total: number }> {
   if (insights.length === 0) return { novel: 0, total: 0 };
 
-  const existingInsights = await storage.getNovelInsights(100);
+  const [recentInsights, novelInsights] = await Promise.all([
+    storage.getNovelInsights(200),
+    storage.getNovelInsightsOnly(300),
+  ]);
+
+  const combinedMap = new Map<string, typeof recentInsights[0]>();
+  for (const ins of recentInsights) combinedMap.set(ins.id, ins);
+  for (const ins of novelInsights) combinedMap.set(ins.id, ins);
+  const existingInsights = Array.from(combinedMap.values());
   const existingTexts = existingInsights.map(i => i.insightText.toLowerCase());
 
   const exactDuplicates = new Set<number>();
@@ -66,7 +137,7 @@ export async function evaluateInsightNovelty(
     const text = insights[i];
     const lower = text.toLowerCase();
 
-    if (existingTexts.some(e => e === lower || levenshteinSimilarity(e, lower) > 0.85)) {
+    if (existingTexts.some(e => e === lower || levenshteinSimilarity(e, lower) > 0.70)) {
       exactDuplicates.add(i);
       continue;
     }
@@ -88,6 +159,23 @@ export async function evaluateInsightNovelty(
       continue;
     }
 
+    if (hasKeywordOverlap(lower, existingTexts)) {
+      try {
+        await storage.insertNovelInsight({
+          id: insightId(text, phaseId),
+          phaseId,
+          phaseName,
+          insightText: text,
+          isNovel: false,
+          noveltyScore: 0.15,
+          noveltyReason: "Semantically similar to existing insight (keyword overlap)",
+          category: "known-pattern",
+          relatedFormulas: relatedFormulas ?? [],
+        });
+      } catch {}
+      continue;
+    }
+
     potentiallyNovel.push({ index: i, text });
   }
 
@@ -96,7 +184,7 @@ export async function evaluateInsightNovelty(
   let novelCount = 0;
 
   try {
-    const recentKnown = existingInsights.slice(0, 30).map(i => i.insightText);
+    const recentKnown = existingInsights.slice(0, 50).map(i => i.insightText);
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -118,6 +206,10 @@ A NON-NOVEL insight merely restates:
 - Basic chemistry (formation energy = stability)
 - Known facts about specific material families
 - General statements about superconductivity
+- Any variation of "stability correlates with formation energy" or vice versa
+- Any variation of "band gap determines metallic/insulating behavior"
+- Any variation of "pressure increases critical temperature"
+- Any variation of "electron-phonon coupling favors superconductivity"
 
 Previously discovered insights for deduplication:
 ${recentKnown.join("\n")}

@@ -335,7 +335,7 @@ export async function runMLPrediction(
   emit("log", {
     phase: "phase-7",
     event: "XGBoost screening complete",
-    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc est: ${topCandidates[0].xgb.tcEstimate}K)${enrichmentDetail}`,
+    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc raw: ${topCandidates[0].xgb.tcEstimate}K)${enrichmentDetail}`,
     dataSource: "ML Engine",
   });
 
@@ -516,7 +516,7 @@ Return JSON with:
     emit("log", {
       phase: "phase-7",
       event: "Ensemble prediction complete",
-      detail: `${candidates.length} candidates scored, ${candidates.filter(c => c.roomTempViable).length} room-temp viable`,
+      detail: `${candidates.length} candidates scored, ${candidates.filter(c => c.roomTempViable).length} room-temp viable${candidates.length > 0 ? `, top: ${candidates[0].formula} Tc=${candidates[0].predictedTc}K (capped)` : ''}`,
       dataSource: "ML Engine",
     });
   } catch (err: any) {

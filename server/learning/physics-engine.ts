@@ -1097,13 +1097,6 @@ export async function runFullPhysicsAnalysis(
   if (!mpSummary) uncertaintyEstimate += 0.05;
   uncertaintyEstimate = Math.min(0.95, uncertaintyEstimate);
 
-  emit("log", {
-    phase: "phase-10",
-    event: "Physics analysis complete",
-    detail: `${formula}: Tc=${eliashberg.predictedTc}K (${eliashberg.confidenceBand[0]}-${eliashberg.confidenceBand[1]}K), lambda=${coupling.lambda}, Hc2=${criticalFields.upperCriticalField}T, ${correlation.regime}, ${competingPhases.length} competing phases${mpSummary ? " [MP data]" : ""}`,
-    dataSource: "Physics Engine",
-  });
-
   return {
     electronicStructure,
     phononSpectrum,

@@ -84,7 +84,32 @@ function broadcast(type: string, data: any) {
   });
 }
 
+const recentLogCache = new Set<string>();
+const RECENT_LOG_CACHE_MAX = 100;
+
+const DEDUP_EVENT_PATTERNS = [
+  "started", "discovery started", "fetch started", "import started",
+  "analysis started", "Prediction patterns discovered",
+  "All top candidates have crystal structures",
+];
+
 const emit: EventEmitter = (type: string, data: any) => {
+  if (type === "log" && data.event && data.phase) {
+    const evt = data.event as string;
+    const shouldDedup = DEDUP_EVENT_PATTERNS.some(p => evt.includes(p));
+    if (shouldDedup) {
+      const cacheKey = `${evt}::${data.detail || ""}`;
+      if (recentLogCache.has(cacheKey)) {
+        return;
+      }
+      recentLogCache.add(cacheKey);
+      if (recentLogCache.size > RECENT_LOG_CACHE_MAX) {
+        const first = recentLogCache.values().next().value;
+        if (first !== undefined) recentLogCache.delete(first);
+      }
+    }
+  }
+
   broadcast(type, data);
 
   if (type === "log" && data.event && data.phase) {
@@ -462,7 +487,7 @@ async function runPhase10_Physics() {
         });
 
         if (updatedTc !== currentTc) {
-          emit("log", { phase: "phase-10", event: "Tc updated by physics", detail: `${candidate.formula}: ML estimate ${currentTc}K -> Eliashberg ${updatedTc}K`, dataSource: "Physics Engine" });
+          emit("log", { phase: "phase-10", event: "Tc updated by physics", detail: `${candidate.formula}: ML estimate ${currentTc}K -> Eliashberg ${updatedTc}K (lambda=${result.coupling.lambda.toFixed(2)}, Hc2=${result.criticalFields.upperCriticalField}T, ${result.correlation.regime}, ${result.competingPhases.length} competing phases)`, dataSource: "Physics Engine" });
         }
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
@@ -494,7 +519,7 @@ async function runPhase10_Physics() {
               predictedTc: updatedTc,
             });
             if (updatedTc !== currentTc) {
-              emit("log", { phase: "phase-10", event: "Re-physics corrected Tc", detail: `${candidate.formula}: ${currentTc}K -> ${updatedTc}K (lambda ${oldLambda.toFixed(2)} -> ${newLambda.toFixed(2)})`, dataSource: "Physics Engine" });
+              emit("log", { phase: "phase-10", event: "Re-physics corrected Tc", detail: `${candidate.formula}: ${currentTc}K -> ${updatedTc}K (lambda ${oldLambda.toFixed(2)} -> ${newLambda.toFixed(2)}, Hc2=${result.criticalFields.upperCriticalField}T, ${result.correlation.regime}, ${result.competingPhases.length} competing phases)`, dataSource: "Physics Engine" });
             }
           }
         } catch {}
@@ -589,6 +614,7 @@ async function runLearningCycle() {
   cycleCount++;
   lastCycleAt = new Date().toISOString();
   cycleInsightsThisCycle = 0;
+  recentLogCache.clear();
   broadcast("cycleStart", { cycle: cycleCount });
 
   let cycleStartDetail = "";
