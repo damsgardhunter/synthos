@@ -51,6 +51,7 @@ export interface IStorage {
   getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   getSuperconductorCandidatesByTc(limit?: number): Promise<SuperconductorCandidate[]>;
   getUnscoredCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
+  getCandidatesNeedingPhysicsRecalc(physicsVersion: number, limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   getSuperconductorCount(): Promise<number>;
@@ -226,6 +227,12 @@ export class DatabaseStorage implements IStorage {
   async getUnscoredCandidates(limit = 200): Promise<SuperconductorCandidate[]> {
     return db.select().from(superconductorCandidates).where(
       sql`${superconductorCandidates.xgboostScore} IS NULL OR ${superconductorCandidates.neuralNetScore} IS NULL`
+    ).limit(limit);
+  }
+
+  async getCandidatesNeedingPhysicsRecalc(physicsVersion: number, limit = 200): Promise<SuperconductorCandidate[]> {
+    return db.select().from(superconductorCandidates).where(
+      sql`(${superconductorCandidates.mlFeatures}->>'physicsVersion')::int IS DISTINCT FROM ${physicsVersion}`
     ).limit(limit);
   }
 

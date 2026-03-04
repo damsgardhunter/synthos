@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
+import { applyAmbientTcCap } from "./learning/physics-engine";
 
 const app = express();
 const httpServer = createServer(app);
@@ -131,6 +132,9 @@ app.use((req, res, next) => {
         const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : 0.5;
         updates.predictedTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
       }
+      if (updates.predictedTc != null) {
+        updates.predictedTc = applyAmbientTcCap(updates.predictedTc, coupling.lambda, c.pressureGpa ?? 0, electronic.metallicity ?? 0.5);
+      }
 
       if ((c.upperCriticalField ?? 0) > 300) {
         updates.upperCriticalField = 300;
@@ -192,8 +196,10 @@ app.use((req, res, next) => {
       const absMax = Math.min(350, Math.round(eliTc * mult));
       if (tc > absMax && absMax > 0) {
         const blendDown = 0.8;
-        const newTc = Math.round((1 - blendDown) * tc + blendDown * eliTc);
-        await storage.updateSuperconductorCandidate(c.id, { predictedTc: Math.min(newTc, absMax) });
+        let newTc = Math.round((1 - blendDown) * tc + blendDown * eliTc);
+        newTc = Math.min(newTc, absMax);
+        newTc = applyAmbientTcCap(newTc, coupling2.lambda, c.pressureGpa ?? 0, electronic2.metallicity ?? 0.5);
+        await storage.updateSuperconductorCandidate(c.id, { predictedTc: newTc });
         log(`Bulk Tc correction: ${c.formula} ${tc}K -> ${Math.min(newTc, absMax)}K (eliashberg=${Math.round(eliTc)}K, cap=${absMax}K, lambda=${coupling2.lambda.toFixed(2)})`, "startup");
         bulkCorrected++;
       }

@@ -6,7 +6,7 @@ import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp
 import { generateNovelFormulas } from "./formula-generator";
 import { runSuperconductorResearch } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap } from "./physics-engine";
 import { runStructurePredictionBatch } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
@@ -387,8 +387,11 @@ async function reEvaluateTopCandidates() {
 
       reEvalApplied.set(candidate.id, { lambda, omegaLog, muStar, hasCrystal });
 
-      const newTc = computeEliashbergTc(lambda, omegaLog, muStar);
+      let newTc = computeEliashbergTc(lambda, omegaLog, muStar);
       if (newTc <= 0) continue;
+
+      const features = extractFeatures(candidate.formula);
+      newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5);
 
       const currentTc = candidate.predictedTc ?? 0;
       if (newTc === currentTc) continue;
@@ -436,7 +439,8 @@ async function runPhase10_Physics() {
         const rawPhysicsTc = result.eliashberg.predictedTc;
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
         const currentTc = candidate.predictedTc ?? 0;
-        const updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
+        let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
+        updatedTc = applyAmbientTcCap(updatedTc, result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5);
 
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
@@ -482,7 +486,8 @@ async function runPhase10_Physics() {
             const rawTc = result.eliashberg.predictedTc;
             const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
             const currentTc = candidate.predictedTc ?? 0;
-            const updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
+            let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
+            updatedTc = applyAmbientTcCap(updatedTc, newLambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5);
             await storage.updateSuperconductorCandidate(candidate.id, {
               electronPhononCoupling: newLambda,
               logPhononFrequency: result.coupling.omegaLog,
@@ -849,6 +854,109 @@ async function backfillGBScores() {
   } catch {}
 }
 
+const PHYSICS_VERSION = 6;
+
+async function recalculatePhysics() {
+  try {
+    let totalRecalculated = 0;
+    const batchSize = 200;
+
+    while (true) {
+      const needsRecalc = await storage.getCandidatesNeedingPhysicsRecalc(PHYSICS_VERSION, batchSize);
+      if (needsRecalc.length === 0) break;
+
+      for (const c of needsRecalc) {
+        try {
+          const features = extractFeatures(c.formula);
+          const gb = gbPredict(features);
+          const nnScore = c.neuralNetScore ?? c.quantumCoherence ?? 0.3;
+          const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
+
+          const featureLambda = features.electronPhononLambda ?? 0;
+          const omegaLogK = (features.logPhononFreq ?? 300) * 1.44;
+          const muStar = 0.12;
+          let mcMillanMax = 0;
+          const denom = featureLambda - muStar * (1 + 0.62 * featureLambda);
+          if (featureLambda > 0.2 && Math.abs(denom) > 1e-6) {
+            const exponent = -1.04 * (1 + featureLambda) / denom;
+            mcMillanMax = (omegaLogK / 1.2) * Math.exp(exponent);
+            if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
+          }
+
+          const corrStr = features.correlationStrength ?? 0;
+          const metalScore = features.metallicity ?? 0.5;
+          const pressure = c.pressureGpa ?? 0;
+          const isAmbient = pressure < 10;
+          const isHighPressure = pressure >= 50;
+          const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressure - 10) / 40;
+
+          let tcCap: number;
+          if (metalScore < 0.3) {
+            tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
+          } else if (metalScore < 0.5) {
+            tcCap = Math.min(80, mcMillanMax * 0.3 || 40);
+          } else if (corrStr > 0.85) {
+            tcCap = Math.min(80, mcMillanMax * 0.3 || 30);
+          } else if (corrStr > 0.7) {
+            tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
+          } else if (featureLambda < 0.3) {
+            tcCap = Math.min(50, mcMillanMax > 0 ? mcMillanMax * 2.0 : 30);
+          } else if (featureLambda < 0.5) {
+            tcCap = Math.min(80, mcMillanMax > 0 ? mcMillanMax * 2.0 : 50);
+          } else if (featureLambda < 1.0) {
+            const hpCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 1.8 : 100);
+            tcCap = 80 + (hpCap - 80) * pressureFactor;
+          } else if (featureLambda < 1.5) {
+            const hpCap = mcMillanMax > 0 ? Math.min(250, mcMillanMax * 1.5) : 150;
+            tcCap = 120 + (hpCap - 120) * pressureFactor;
+          } else if (featureLambda < 2.5) {
+            const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.3) : 250;
+            tcCap = 160 + (hpCap - 160) * pressureFactor;
+          } else {
+            const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.2) : 300;
+            tcCap = 200 + (hpCap - 200) * pressureFactor;
+          }
+          tcCap = Math.round(tcCap);
+
+          let newTc = c.predictedTc;
+          if (newTc != null && newTc > tcCap) {
+            newTc = tcCap;
+          }
+
+          const updatedFeatures = { ...features, physicsVersion: PHYSICS_VERSION };
+
+          const isRoomTemp = (newTc ?? 0) >= 293 &&
+            c.zeroResistance === true &&
+            c.meissnerEffect === true &&
+            (c.pressureGpa ?? 999) <= 50;
+
+          await storage.updateSuperconductorCandidate(c.id, {
+            predictedTc: newTc,
+            mlFeatures: updatedFeatures as any,
+            xgboostScore: gb.score,
+            neuralNetScore: nnScore,
+            ensembleScore: ensemble,
+            electronPhononCoupling: features.electronPhononLambda ?? null,
+            roomTempViable: isRoomTemp,
+          });
+          totalRecalculated++;
+        } catch {}
+      }
+
+      if (totalRecalculated > 10000) break;
+    }
+
+    if (totalRecalculated > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "Physics recalculation complete",
+        detail: `Recalculated ${totalRecalculated} candidates with corrected metallicity, lambda, and ambient-pressure Tc caps (v${PHYSICS_VERSION})`,
+        dataSource: "Internal",
+      });
+    }
+  } catch {}
+}
+
 export async function startEngine() {
   if (state === "running") return getStatus();
   state = "running";
@@ -862,6 +970,7 @@ export async function startEngine() {
   } catch {}
 
   await backfillGBScores();
+  await recalculatePhysics();
 
   emit("log", {
     phase: "engine",

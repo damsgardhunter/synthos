@@ -4,6 +4,7 @@ import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily } from "./utils";
+import { applyAmbientTcCap } from "./physics-engine";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -146,6 +147,16 @@ export async function runSuperconductorResearch(
     const formula = candidate.formula || "Unknown";
     const newScore = candidate.ensembleScore ?? 0;
 
+    const mlFeatures = extractFeatures(formula);
+    const lambdaML = candidate.electronPhononCoupling ?? mlFeatures.electronPhononLambda ?? 0;
+    const pressureML = candidate.pressureGpa ?? 0;
+    const metallicityML = mlFeatures.metallicity ?? 0.5;
+
+    if (candidate.predictedTc != null) {
+      candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML);
+    }
+    const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML);
+
     const existing = await storage.getSuperconductorByFormula(formula);
     if (existing) {
       const newTc = candidate.predictedTc ?? existing.predictedTc;
@@ -162,7 +173,9 @@ export async function runSuperconductorResearch(
         };
         if ((newTc ?? 0) > existingTc) {
           const tcUpCap = existingLambda > 2.5 ? 150 : existingLambda > 2.0 ? 120 : existingLambda > 1.5 ? 90 : existingLambda > 1.0 ? 70 : 50;
-          updates.predictedTc = Math.min(newTc ?? 0, existingTc + tcUpCap);
+          let cappedUpTc = Math.min(newTc ?? 0, existingTc + tcUpCap);
+          cappedUpTc = Math.min(cappedUpTc, effectiveTcCapML);
+          updates.predictedTc = cappedUpTc;
         }
         await storage.updateSuperconductorCandidate(existing.id, updates);
         const tcDetail = tcImproved ? `, Tc ${existingTc}K -> ${newTc}K` : "";
@@ -405,6 +418,11 @@ Return JSON with 'candidates' array:
 
         const corrStr = features.correlationStrength ?? 0;
         const metalScore = features.metallicity ?? 0.5;
+        const pressure = c.pressureGpa ?? 0;
+        const isAmbient = pressure < 10;
+        const isHighPressure = pressure >= 50;
+        const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressure - 10) / 40;
+
         let tcCap: number;
         if (metalScore < 0.3) {
           tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
@@ -419,13 +437,21 @@ Return JSON with 'candidates' array:
         } else if (featureLambda < 0.5) {
           tcCap = Math.min(80, mcMillanMax > 0 ? mcMillanMax * 2.0 : 50);
         } else if (featureLambda < 1.0) {
-          tcCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 1.8 : 100);
+          const hpCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 1.8 : 100);
+          const ambientCap = 80;
+          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
         } else if (featureLambda < 1.5) {
-          tcCap = mcMillanMax > 0 ? Math.min(250, mcMillanMax * 1.5) : 150;
+          const hpCap = mcMillanMax > 0 ? Math.min(250, mcMillanMax * 1.5) : 150;
+          const ambientCap = 120;
+          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
         } else if (featureLambda < 2.5) {
-          tcCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.3) : 250;
+          const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.3) : 250;
+          const ambientCap = 160;
+          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
         } else {
-          tcCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.2) : 300;
+          const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.2) : 300;
+          const ambientCap = 200;
+          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
         }
         tcCap = Math.round(tcCap);
 

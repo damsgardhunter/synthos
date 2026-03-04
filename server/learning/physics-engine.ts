@@ -1,6 +1,35 @@
 import OpenAI from "openai";
 import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
+
+export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number): number {
+  if (tc <= 0) return tc;
+
+  const isAmbient = pressureGpa < 10;
+  const isHighPressure = pressureGpa >= 50;
+  const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - 10) / 40;
+
+  let tcCap: number;
+  if (metallicity < 0.3) {
+    tcCap = 20;
+  } else if (metallicity < 0.5) {
+    tcCap = 80;
+  } else if (lambda < 0.3) {
+    tcCap = 50;
+  } else if (lambda < 0.5) {
+    tcCap = 80;
+  } else if (lambda < 1.0) {
+    tcCap = Math.round(80 + (150 - 80) * pressureFactor);
+  } else if (lambda < 1.5) {
+    tcCap = Math.round(120 + (250 - 120) * pressureFactor);
+  } else if (lambda < 2.5) {
+    tcCap = Math.round(160 + (350 - 160) * pressureFactor);
+  } else {
+    tcCap = Math.round(200 + (350 - 200) * pressureFactor);
+  }
+
+  return Math.min(tc, tcCap);
+}
 import {
   ELEMENTAL_DATA,
   getElementData,
@@ -238,18 +267,38 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
   }
 
   const totalAtoms = getTotalAtoms(counts);
-  const nonmetals = ["H", "He", "C", "N", "O", "F", "Ne", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "I", "Xe"];
+  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
   const halogens = ["F", "Cl", "Br", "I"];
   const hasH = elements.includes("H");
+  const hasB = elements.includes("B");
   const hCount = counts["H"] || 0;
+  const bCount = counts["B"] || 0;
+  const bFrac = bCount / totalAtoms;
+  const bhFrac = (bCount + hCount) / totalAtoms;
 
   const metalElements = elements.filter(e => !nonmetals.includes(e));
   const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
+  const metalFrac = metalAtomCount / totalAtoms;
   const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
-  if (hasH && hRatio >= 6) {
-    const metalPresence = metalAtomCount / totalAtoms;
-    return Math.max(0.05, Math.min(1.0, 0.80 + metalPresence * 0.1));
+
+  const isBoraneCage = hasB && hasH && bCount >= 4 && hCount >= 4
+    && Math.abs(bCount - hCount) <= Math.max(bCount, hCount) * 0.5
+    && bhFrac > 0.7;
+
+  const isMetallicBoride = hasB && !hasH && metalFrac >= 0.2
+    && metalElements.length > 0;
+
+  if (isBoraneCage) {
+    if (metalAtomCount === 0) return 0.05;
+    return Math.max(0.05, Math.min(0.25, metalFrac * 0.8));
   }
+
+  const nonHNonMetalFrac = elements.filter(e => nonmetals.includes(e) && e !== "H")
+    .reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+  const cCount = counts["C"] || 0;
+  const cFrac = cCount / totalAtoms;
+  const isOrganic = cFrac > 0.15 && hasH && hCount >= cCount;
+  const isPureSuperhydride = hasH && hRatio >= 6 && nonHNonMetalFrac < 0.1 && !isOrganic && metalFrac >= 0.05;
 
   let cationEN = 0, cationWeight = 0;
   let anionEN = 0, anionWeight = 0;
@@ -295,19 +344,39 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
     const oFrac = oCount / totalAtoms;
     if (oFrac > 0.5) metallicity *= 0.5;
 
-    if (metalElements.some(e => isTransitionMetal(e)) && oFrac < 0.3 && elements.length <= 3) {
+    if (metalElements.some(e => isTransitionMetal(e)) && oFrac < 0.3 && elements.length <= 3 && bFrac < 0.3 && cFrac < 0.2 && metalFrac >= 0.25) {
       metallicity = Math.max(metallicity, 0.85);
     }
 
-    if (hasH && hRatio >= 2) {
+    if (isMetallicBoride) {
+      metallicity = Math.max(metallicity, 0.80);
+    }
+
+    if (hasB && bFrac > 0.4 && !isMetallicBoride) {
+      metallicity *= Math.max(0.1, 1.0 - bFrac);
+    }
+
+    if (isOrganic) {
+      metallicity = Math.min(metallicity, 0.35);
+    }
+
+    if (metalFrac < 0.15 && elements.length > 2) {
+      metallicity *= Math.max(0.2, metalFrac * 5);
+    }
+
+    if (isPureSuperhydride) {
       const metalPresence = metalAtomCount / totalAtoms;
-      metallicity = Math.max(metallicity, 0.5 + metalPresence * 0.4);
+      metallicity = Math.max(metallicity, 0.65 + metalPresence * 0.2);
+    } else if (hasH && hRatio >= 2 && !isOrganic) {
+      if (bFrac < 0.3 && metalFrac >= 0.15) {
+        const metalPresence = metalAtomCount / totalAtoms;
+        metallicity = Math.max(metallicity, 0.5 + metalPresence * 0.4);
+      }
     }
 
     return Math.max(0.05, Math.min(1.0, metallicity));
   }
 
-  const metalFrac = metalAtomCount / totalAtoms;
   if (metalFrac > 0.8) return 0.92;
   if (metalFrac > 0.5) return 0.6 + metalFrac * 0.3;
   return 0.3 + metalFrac * 0.4;
@@ -572,7 +641,7 @@ export function computeElectronPhononCoupling(
         lambda = lambda + inferredLambda * missingFrac * 0.5;
       }
 
-      if (hCount > 0 && hRatio >= 4) {
+      if (hCount > 0 && hRatio >= 4 && metal > 0.4) {
         const H_theta = 2000;
         const H_eta = 3.0 + hRatio * 0.5;
         const H_mass = 1.008;
@@ -580,15 +649,17 @@ export function computeElectronPhononCoupling(
         lambda += lambda_H;
       }
 
-      const lightEl = elements.filter(e => {
-        const d = getElementData(e);
-        return d && d.atomicMass < 15 && e !== "H";
-      });
-      if (lightEl.length > 0) {
-        const lightFrac = lightEl.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
-        if (lightFrac > 0.3) {
-          const lightBoost = 1.0 + lightFrac * 2.5 * (phononSpectrum.debyeTemperature / 500);
-          lambda *= lightBoost;
+      if (metal > 0.4) {
+        const lightEl = elements.filter(e => {
+          const d = getElementData(e);
+          return d && d.atomicMass < 15 && e !== "H";
+        });
+        if (lightEl.length > 0) {
+          const lightFrac = lightEl.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+          if (lightFrac > 0.3) {
+            const lightBoost = 1.0 + lightFrac * 2.5 * (phononSpectrum.debyeTemperature / 500);
+            lambda *= lightBoost;
+          }
         }
       }
     } else {
@@ -597,8 +668,15 @@ export function computeElectronPhononCoupling(
 
     if (electronicStructure.fermiSurfaceTopology.includes("nesting")) lambda *= 1.15;
 
-    if (hRatio >= 6) {
-      // no correlation suppression or metallicity penalty for superhydrides
+    const nonHNonMetFrac = elements.filter(e => {
+      const nm = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
+      return nm.includes(e) && e !== "H";
+    }).reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+    const cFracLambda = (counts["C"] || 0) / totalAtoms;
+    const isOrganicLambda = cFracLambda > 0.15 && hCount > 0 && hCount >= (counts["C"] || 0);
+    const isPureSuperhydrideLambda = hRatio >= 6 && nonHNonMetFrac < 0.1 && !isOrganicLambda;
+
+    if (isPureSuperhydrideLambda) {
     } else {
       if (corr > 0.7) lambda *= (1.0 - (corr - 0.7) * 0.5);
       if (metal < 0.4) lambda *= metal;
