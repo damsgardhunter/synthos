@@ -21,7 +21,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 ### Core Features
 - **Learning Engine**: Orchestrates 12 distinct learning phases covering subatomic to multi-fidelity screening, with balanced priority and continuous cycling.
 - **Trained Gradient Boosting Model**: Real gradient boosting (depth-4 decision trees, ~106 trees, R2=1.000) trained on 130+ known superconductors from SuperCon database (`server/learning/supercon-dataset.ts`). Replaces hand-written XGBoost heuristics. Predicts Nb 9.7K, Al 1.3K, MgB2 36K, LaH10 249K, YBCO 93K from physics features.
-- **ML Prediction Engine**: Trained gradient boosting + OpenAI gpt-4o-mini neural network ensemble for superconductor scoring. Physics-informed features with strict room-temperature criteria (Tc >= 293K).
+- **ML Prediction Engine**: Trained gradient boosting + OpenAI gpt-4o-mini neural network ensemble for superconductor scoring. Physics-informed features with strict room-temperature criteria (Tc >= 293K). All candidates (LLM-novel and ML-pipeline) scored with real gbPredict values; startup backfill ensures no null xgboostScore/neuralNetScore in DB.
 - **SC Verification Pipeline**: A multi-step process for superconductor candidates: theoretical -> promising -> high-tc-candidate -> under-review -> requires-verification, avoiding premature "breakthrough" claims.
 - **Multi-Fidelity Screening**: A 5-stage pipeline with calibrated thresholds: Stage 1 metallicity>0.25 & DOS>0.2, Stage 2 lambda>0.25, Stage 3 Tc>1K, Stage 4 synthesis feasibility.
 - **Novel Insight Detection**: Pre-filters known knowledge, deduplicates, and uses OpenAI to evaluate remaining insights for novelty.

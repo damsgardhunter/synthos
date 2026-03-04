@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
+import { gbPredict } from "./gradient-boost";
 import { classifyFamily } from "./utils";
 
 const openai = new OpenAI({
@@ -387,6 +388,7 @@ Return JSON with 'candidates' array:
 
       const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const features = extractFeatures(c.formula);
+      const gbResult = gbPredict(features);
 
       let cappedTc = c.predictedTc ?? null;
       if (cappedTc != null && cappedTc > 0) {
@@ -432,6 +434,10 @@ Return JSON with 'candidates' array:
         }
       }
 
+      const novelNNScore = c.quantumCoherence ?? 0.3;
+      const novelXGBScore = gbResult.score;
+      const novelEnsembleScore = Math.min(0.95, novelXGBScore * 0.4 + novelNNScore * 0.6);
+
       const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
         c.zeroResistance === true &&
         c.meissnerEffect === true &&
@@ -439,7 +445,7 @@ Return JSON with 'candidates' array:
 
       const status = determineStatus({
         ...c,
-        ensembleScore: Math.min(0.5, c.quantumCoherence ?? 0.3),
+        ensembleScore: novelEnsembleScore,
         roomTempViable: isActuallyRoomTemp,
       });
 
@@ -463,9 +469,9 @@ Return JSON with 'candidates' array:
           stabilityScore: features.cooperPairStrength,
           synthesisPath: c.synthesisPath ?? null,
           mlFeatures: features as any,
-          xgboostScore: null,
-          neuralNetScore: null,
-          ensembleScore: Math.min(0.5, c.quantumCoherence ?? 0.3),
+          xgboostScore: novelXGBScore,
+          neuralNetScore: novelNNScore,
+          ensembleScore: novelEnsembleScore,
           roomTempViable: isActuallyRoomTemp && (c.pressureGpa ?? 999) <= 50,
           status,
           notes: (cappedTc !== (c.predictedTc ?? null) ? `[LLM proposed Tc=${c.predictedTc}K, capped to ${cappedTc}K] ` : '') + verificationNotes,

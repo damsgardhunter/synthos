@@ -15,7 +15,7 @@ import type {
   ResearchStrategy, ConvergenceSnapshot, Milestone,
   InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone
 } from "@shared/schema";
-import { eq, desc, asc, sql, ilike } from "drizzle-orm";
+import { eq, desc, asc, sql, ilike, isNull } from "drizzle-orm";
 import { classifyFamily } from "./learning/utils";
 
 export interface IStorage {
@@ -50,6 +50,7 @@ export interface IStorage {
 
   getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   getSuperconductorCandidatesByTc(limit?: number): Promise<SuperconductorCandidate[]>;
+  getUnscoredCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   getSuperconductorCount(): Promise<number>;
@@ -220,6 +221,12 @@ export class DatabaseStorage implements IStorage {
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
     return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.predictedTc)).limit(limit);
+  }
+
+  async getUnscoredCandidates(limit = 200): Promise<SuperconductorCandidate[]> {
+    return db.select().from(superconductorCandidates).where(
+      sql`${superconductorCandidates.xgboostScore} IS NULL OR ${superconductorCandidates.neuralNetScore} IS NULL`
+    ).limit(limit);
   }
 
   async insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate> {

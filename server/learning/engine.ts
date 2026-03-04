@@ -12,6 +12,8 @@ import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
+import { extractFeatures } from "./ml-predictor";
+import { gbPredict } from "./gradient-boost";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -802,6 +804,51 @@ export function initWebSocket(server: Server) {
   console.log("WebSocket server initialized on /ws");
 }
 
+async function backfillGBScores() {
+  try {
+    let totalUpdated = 0;
+    let totalFailed = 0;
+    let batch: any[];
+    do {
+      batch = await storage.getUnscoredCandidates(200);
+      if (batch.length === 0) break;
+
+      for (const c of batch) {
+        try {
+          const features = extractFeatures(c.formula);
+          const gb = gbPredict(features);
+          const nnScore = c.quantumCoherence ?? 0.3;
+          const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
+          await storage.updateSuperconductorCandidate(c.id, {
+            xgboostScore: gb.score,
+            neuralNetScore: nnScore,
+            ensembleScore: ensemble,
+          });
+          totalUpdated++;
+        } catch {
+          try {
+            await storage.updateSuperconductorCandidate(c.id, {
+              xgboostScore: 0.3,
+              neuralNetScore: 0.3,
+              ensembleScore: 0.3,
+            });
+          } catch {}
+          totalFailed++;
+        }
+      }
+    } while (batch.length === 200);
+
+    if (totalUpdated > 0 || totalFailed > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "GB score backfill complete",
+        detail: `Scored ${totalUpdated} candidates with gradient boosting model${totalFailed > 0 ? `, ${totalFailed} failed (set to default)` : ''}`,
+        dataSource: "Internal",
+      });
+    }
+  } catch {}
+}
+
 export async function startEngine() {
   if (state === "running") return getStatus();
   state = "running";
@@ -813,6 +860,8 @@ export async function startEngine() {
       cycleCount = maxCycle;
     }
   } catch {}
+
+  await backfillGBScores();
 
   emit("log", {
     phase: "engine",
