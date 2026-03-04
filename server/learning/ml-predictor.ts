@@ -266,7 +266,7 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
     tcEstimate = 5 + score * 120;
   }
 
-  return { score, tcEstimate: Math.round(Math.min(tcEstimate, 550)), reasoning };
+  return { score, tcEstimate: Math.round(tcEstimate), reasoning };
 }
 
 interface PhysicsContext {
@@ -456,7 +456,7 @@ export async function runMLPrediction(
     }
     tcKnowledgeBonus = Math.min(80, tcKnowledgeBonus);
     if (tcKnowledgeBonus > 0) {
-      xgb.tcEstimate = Math.min(550, xgb.tcEstimate + tcKnowledgeBonus);
+      xgb.tcEstimate = xgb.tcEstimate + tcKnowledgeBonus;
       xgb.reasoning.push(`Tc adjusted +${tcKnowledgeBonus}K from accumulated evidence (${physics ? 'physics-verified' : 'knowledge-based'})`);
     }
 

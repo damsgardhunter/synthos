@@ -103,8 +103,15 @@ app.use((req, res, next) => {
       host: "0.0.0.0",
       reusePort: true,
     },
-    () => {
+    async () => {
       log(`serving on port ${port}`);
+      try {
+        const { startEngine } = await import("./learning/engine");
+        await startEngine();
+        log("Learning engine auto-started", "startup");
+      } catch (err: any) {
+        log(`Engine auto-start failed: ${err.message}`, "startup");
+      }
     },
   );
 })();

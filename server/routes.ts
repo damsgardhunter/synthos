@@ -97,7 +97,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/engine/start", async (_req, res) => {
     try {
-      const status = startEngine();
+      const status = await startEngine();
       res.json(status);
     } catch (e) {
       res.status(500).json({ error: "Failed to start engine" });

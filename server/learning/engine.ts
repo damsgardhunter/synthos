@@ -71,6 +71,39 @@ interface PreviousCycleMetrics {
 }
 let previousCycleMetrics: PreviousCycleMetrics | null = null;
 let cycleInsightsThisCycle = 0;
+let cachedDynamicCeiling = 550;
+let lastCeilingComputeCycle = -1;
+
+async function computeDynamicTcCeiling(): Promise<number> {
+  if (cycleCount - lastCeilingComputeCycle < 3 && lastCeilingComputeCycle >= 0) {
+    return cachedDynamicCeiling;
+  }
+  try {
+    const stats = await storage.getStats();
+    const stage4Count = stats.pipelineStages.find(s => s.stage === 4)?.passed ?? 0;
+    const insightCount = await storage.getNovelInsightCount();
+    const crystalCount = await storage.getCrystalStructureCount();
+    const compCount = stats.computationalResults;
+
+    let ceiling = 500;
+    ceiling += Math.min(50, Math.floor(stage4Count / 10) * 3);
+    ceiling += Math.min(40, Math.floor(insightCount / 500) * 5);
+    ceiling += Math.min(30, Math.floor(crystalCount / 100) * 5);
+    ceiling += Math.min(30, Math.floor(compCount / 500) * 5);
+
+    const candidates = await storage.getSuperconductorCandidatesByTc(20);
+    const avgTopLambda = candidates.reduce((s, c) => s + (c.electronPhononCoupling ?? 0), 0) / Math.max(candidates.length, 1);
+    if (avgTopLambda > 2.5) ceiling += 20;
+    else if (avgTopLambda > 2.0) ceiling += 10;
+
+    cachedDynamicCeiling = Math.round(ceiling);
+    lastCeilingComputeCycle = cycleCount;
+
+    return cachedDynamicCeiling;
+  } catch {
+    return cachedDynamicCeiling;
+  }
+}
 
 function broadcast(type: string, data: any) {
   if (!wss) return;
@@ -338,12 +371,13 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-const reEvalApplied = new Map<string, { stage: number; lambda: number; hasCrystal: boolean }>();
+const reEvalApplied = new Map<string, { stage: number; lambda: number; hasCrystal: boolean; lastCeiling: number }>();
 let cyclesSinceTcImproved = 0;
 let lastBestTcSeen = 0;
 
 async function reEvaluateTopCandidates() {
   try {
+    const tcCeiling = await computeDynamicTcCeiling();
     const topByTc = await storage.getSuperconductorCandidatesByTc(50);
 
     const currentBestTc = Math.max(...topByTc.map(c => c.predictedTc ?? 0), 0);
@@ -357,7 +391,7 @@ async function reEvaluateTopCandidates() {
     let improved = 0;
     for (const candidate of topByTc) {
       const currentTc = candidate.predictedTc ?? 0;
-      if (currentTc < 200 || currentTc >= 550) continue;
+      if (currentTc < 200) continue;
       const stage = candidate.verificationStage ?? 0;
       const lambda = candidate.electronPhononCoupling ?? 0;
 
@@ -365,14 +399,16 @@ async function reEvaluateTopCandidates() {
       const hasCrystal = crystals.some(c => c.synthesizability != null && c.synthesizability > 0.7);
 
       const prev = reEvalApplied.get(candidate.id);
+      const ceilingRose = prev && currentTc >= (prev.lastCeiling ?? 550) - 5 && tcCeiling > (prev.lastCeiling ?? 550);
       const hasNewEvidence = !prev ||
         stage > prev.stage ||
         (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.1) ||
-        (hasCrystal && !prev.hasCrystal);
+        (hasCrystal && !prev.hasCrystal) ||
+        ceilingRose;
 
       if (!hasNewEvidence) continue;
 
-      reEvalApplied.set(candidate.id, { stage, lambda, hasCrystal });
+      reEvalApplied.set(candidate.id, { stage, lambda, hasCrystal, lastCeiling: tcCeiling });
 
       let tcBoost = 0;
       if (stage >= 1 && lambda > 0) {
@@ -388,8 +424,14 @@ async function reEvaluateTopCandidates() {
         if (hasCrystal) tcBoost += 6;
       }
 
+      const hasRealEvidence = !prev || stage > prev.stage || (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.1) || (hasCrystal && !prev.hasCrystal);
+      if (ceilingRose && !hasRealEvidence) {
+        const ceilingDelta = Math.round((tcCeiling - (prev?.lastCeiling ?? 550)) * 0.5);
+        tcBoost = Math.max(tcBoost, ceilingDelta);
+      }
+
       if (tcBoost > 0) {
-        const newTc = Math.min(550, Math.round(currentTc + tcBoost));
+        const newTc = Math.min(tcCeiling, Math.round(currentTc + tcBoost));
         if (newTc <= currentTc) continue;
         await storage.updateSuperconductorCandidate(candidate.id, { predictedTc: newTc });
         improved++;
@@ -397,7 +439,7 @@ async function reEvaluateTopCandidates() {
           emit("log", {
             phase: "engine",
             event: "Tc evolved from evidence",
-            detail: `${candidate.formula}: ${currentTc}K -> ${newTc}K (+${tcBoost}K at stage ${stage}, lambda=${lambda.toFixed(2)})`,
+            detail: `${candidate.formula}: ${currentTc}K -> ${newTc}K (+${tcBoost}K at stage ${stage}, lambda=${lambda.toFixed(2)}, ceiling=${tcCeiling}K)`,
             dataSource: "Learning Feedback",
           });
         }
@@ -408,7 +450,7 @@ async function reEvaluateTopCandidates() {
       emit("log", {
         phase: "engine",
         event: "Re-evaluation complete",
-        detail: `${improved}/${topByTc.length} candidates improved from new evidence. Stagnation: ${cyclesSinceTcImproved} cycles. Best Tc: ${Math.round(lastBestTcSeen)}K`,
+        detail: `${improved}/${topByTc.length} candidates improved. Stagnation: ${cyclesSinceTcImproved} cycles. Best Tc: ${Math.round(lastBestTcSeen)}K. Dynamic ceiling: ${tcCeiling}K`,
         dataSource: "Learning Feedback",
       });
     }
@@ -439,6 +481,7 @@ async function runPhase10_Physics() {
         const currentTc = candidate.predictedTc ?? 0;
         const lambda = result.coupling.lambda ?? 0;
         const tcCap = lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50;
+        const physicsCeiling = await computeDynamicTcCeiling();
         let updatedTc = currentTc;
         if (physicsTc > 0) {
           if (physicsTc > currentTc) {
@@ -451,7 +494,7 @@ async function runPhase10_Physics() {
             const strongCouplingBoost = Math.round((lambda - 2.0) * 15);
             updatedTc = Math.max(updatedTc, Math.round(updatedTc + strongCouplingBoost));
           }
-          updatedTc = Math.min(550, updatedTc);
+          updatedTc = Math.min(physicsCeiling, updatedTc);
         }
 
         await storage.updateSuperconductorCandidate(candidate.id, {
@@ -478,6 +521,41 @@ async function runPhase10_Physics() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
+      }
+    }
+
+    if (cyclesSinceTcImproved > 3 && shouldContinue()) {
+      const stage4 = await storage.getSuperconductorsByStage(4, 20);
+      const highLambda = stage4
+        .filter(c => (c.electronPhononCoupling ?? 0) > 2.0)
+        .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
+      const toReanalyze = shuffle(highLambda).slice(0, 2);
+      for (const candidate of toReanalyze) {
+        if (!shouldContinue()) break;
+        try {
+          const result = await runFullPhysicsAnalysis(emit, candidate);
+          totalPhysicsComputed++;
+          const newLambda = result.coupling.lambda ?? 0;
+          const oldLambda = candidate.electronPhononCoupling ?? 0;
+          if (Math.abs(newLambda - oldLambda) > 0.05) {
+            const physicsCeiling = await computeDynamicTcCeiling();
+            const rawTc = result.eliashberg.predictedTc;
+            const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
+            const currentTc = candidate.predictedTc ?? 0;
+            let updatedTc = currentTc;
+            if (physicsTc > currentTc && newLambda > oldLambda) {
+              updatedTc = Math.min(physicsCeiling, Math.round(currentTc + (newLambda - oldLambda) * 20));
+            }
+            await storage.updateSuperconductorCandidate(candidate.id, {
+              electronPhononCoupling: newLambda,
+              logPhononFrequency: result.coupling.omegaLog,
+              predictedTc: Math.max(currentTc, updatedTc),
+            });
+            if (updatedTc > currentTc) {
+              emit("log", { phase: "phase-10", event: "Re-physics improved Tc", detail: `${candidate.formula}: ${currentTc}K -> ${updatedTc}K (lambda ${oldLambda.toFixed(2)} -> ${newLambda.toFixed(2)})`, dataSource: "Physics Engine" });
+            }
+          }
+        } catch {}
       }
     }
 
@@ -789,15 +867,22 @@ export function initWebSocket(server: Server) {
   console.log("WebSocket server initialized on /ws");
 }
 
-export function startEngine() {
+export async function startEngine() {
   if (state === "running") return getStatus();
   state = "running";
   broadcast("engineState", { state: "running" });
 
+  try {
+    const maxCycle = await storage.getMaxConvergenceCycle();
+    if (maxCycle > cycleCount) {
+      cycleCount = maxCycle;
+    }
+  } catch {}
+
   emit("log", {
     phase: "engine",
     event: "Learning engine started",
-    detail: "Balanced learning: materials/synthesis/reactions run first, then analysis, then SC research (only after sufficient knowledge base).",
+    detail: `Balanced learning: resuming from cycle ${cycleCount}. Materials/synthesis/reactions run first, then analysis, then SC research.`,
     dataSource: "Internal",
   });
 

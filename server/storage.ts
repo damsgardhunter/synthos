@@ -83,6 +83,7 @@ export interface IStorage {
   insertConvergenceSnapshot(snapshot: InsertConvergenceSnapshot): Promise<ConvergenceSnapshot>;
   deleteConvergenceSnapshotByCycle(cycle: number): Promise<void>;
   getConvergenceSnapshots(limit?: number): Promise<ConvergenceSnapshot[]>;
+  getMaxConvergenceCycle(): Promise<number>;
 
   insertMilestone(milestone: InsertMilestone): Promise<Milestone>;
   getMilestones(limit?: number): Promise<Milestone[]>;
@@ -360,7 +361,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getConvergenceSnapshots(limit = 50): Promise<ConvergenceSnapshot[]> {
-    return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.createdAt)).limit(limit);
+    return db.select().from(convergenceSnapshots).orderBy(asc(convergenceSnapshots.cycle)).limit(limit);
+  }
+
+  async getMaxConvergenceCycle(): Promise<number> {
+    const [row] = await db.select({ maxCycle: sql<number>`COALESCE(MAX(${convergenceSnapshots.cycle}), 0)` }).from(convergenceSnapshots);
+    return row?.maxCycle ?? 0;
   }
 
   async insertMilestone(milestone: InsertMilestone): Promise<Milestone> {

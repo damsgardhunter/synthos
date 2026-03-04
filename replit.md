@@ -50,13 +50,24 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.
-- Checks top 50 candidates by Tc; uses `Map<string, number>` for apply count tracking (max 3 applications per key).
-- Re-evaluation map clears every 8 cycles to allow repeat boosts with diminishing returns.
-- Diminishing returns: each reapplication reduces boost by 50% (1 / (1 + prevCount * 0.5)).
-- **Stagnation multiplier**: if Tc hasn't improved in N cycles, boosts are amplified (>20 cycles: x2.0, >10: x1.5, >5: x1.2).
-- Stage-based Tc boosts (cumulative, not stage-exact): stage>=1 with coupling (+4 to +15K by lambda), stage>=2 (+4K), stage>=3 (+6K), stage>=4 (+8K, +6K crystal stability).
-- Tc hard cap: 550K.
+- Evidence-gated: fires only when stage changes, lambda delta >0.1, new crystal, or ceiling rises.
+- Uses `Map<string, {stage, lambda, hasCrystal, lastCeiling}>` to track what's been applied.
+- Stage-based Tc boosts (cumulative): stage>=1 with coupling (+4 to +15K by lambda), stage>=2 (+4K), stage>=3 (+6K), stage>=4 (+8K, +6K crystal stability).
+- **Dynamic Tc ceiling** replaces fixed 550K cap. Ceiling grows with accumulated evidence:
+  - Base: 500K
+  - +3K per 10 stage-4 candidates (max +50K)
+  - +5K per 500 novel insights (max +40K)
+  - +5K per 100 crystal structures (max +30K)
+  - +5K per 500 computational results (max +30K)
+  - +10-20K for top-candidate avg lambda >2.0/2.5
+  - Cached for 3 cycles, recomputed via `computeDynamicTcCeiling()`
+- When ceiling rises, candidates near the old ceiling get a partial boost (50% of ceiling delta).
 - `cyclesSinceTcImproved` and `lastBestTcSeen` tracked as module-level vars.
+
+### Re-Physics for Stagnation Breaking
+- When `cyclesSinceTcImproved > 3`, Phase 10 re-analyzes 2 stage-4 high-lambda candidates.
+- If lambda changes by >0.05, Tc is updated based on the delta: `+(newLambda-oldLambda)*20K`.
+- This produces new evidence that triggers re-evaluation in the next cycle.
 
 ### Stagnation-Aware Candidate Generation
 - `generateNovelSuperconductors()` receives stagnation info (cycles since improved, current best Tc).
@@ -75,9 +86,15 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - Merges top-by-score and top-by-Tc candidates to find true bestTc across all candidates.
 - Uses delete-before-insert per cycle to prevent duplicate cycle entries on engine restart.
 - Score clamped to max 1.0 in snapshot computation.
-- Ordered by `createdAt` (not cycle number) to handle engine restarts correctly.
+- Ordered by cycle number (ASC) for consistent trajectory display.
 - `storage.getSuperconductorCandidatesByTc(limit)` provides Tc-ordered query.
 - `storage.deleteConvergenceSnapshotByCycle(cycle)` prevents duplicate cycle snapshots.
+- `storage.getMaxConvergenceCycle()` returns the highest cycle number for cumulative counting.
+
+### Cumulative Cycle Counter
+- `startEngine()` initializes `cycleCount` from `getMaxConvergenceCycle()` to resume from the last cycle.
+- Prevents cycle number collisions and ensures convergence trajectory is monotonically ordered.
+- ML predictor no longer caps Tc at 550K — ceiling enforcement is solely in engine.ts via `computeDynamicTcCeiling()`.
 
 ### SC Candidate Deduplication
 - `formula` column has UNIQUE constraint; `insertSuperconductorCandidate` uses upsert on formula conflict (keeps highest score).
