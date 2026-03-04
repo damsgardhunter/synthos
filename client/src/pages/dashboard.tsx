@@ -234,7 +234,7 @@ export default function Dashboard() {
             <StatCard title="Reactions Learned" value={stats?.chemicalReactions ?? 0} icon={BookOpen} sub="chemical reaction database" />
             <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 12 learning phases" />
             <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 12}`} icon={TrendingUp} sub="currently running" />
-            <StatCard title="Milestones" value={milestoneData?.total ?? 0} icon={Star} sub="discovery breakthroughs" />
+            <StatCard title="Milestones" value={milestoneData?.total ?? 0} icon={Star} sub="research milestones" />
           </>
         )}
       </div>

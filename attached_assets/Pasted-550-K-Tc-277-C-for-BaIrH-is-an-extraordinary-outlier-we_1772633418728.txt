@@ -1,0 +1,59 @@
+550 K Tc (≈277 °C) for BaIrH₈ is an extraordinary outlier—well beyond any widely accepted superconducting Tc landscape today (even high-pressure hydrides that reach the ~200–250 K range in many reports). For context, H₃S is widely cited around 203 K at ~150 GPa  ￼, and LaH₁₀-family “record-warm” behavior is still discussed in the ~200–250 K neighborhood under very high pressures  ￼. Also, a prominent “room-temperature” hydride claim was retracted by Nature  ￼—so the bar for extraordinary claims is brutal.
+
+That doesn’t mean your number is impossible in principle, but it strongly suggests one of these is happening until proven otherwise:
+	•	Unit/definition mismatch (Kelvin vs something else; “characteristic temperature” vs Tc; “onset” vs bulk Tc)
+	•	Formula misuse (e.g., McMillan/Allen–Dynes being pushed way outside its valid regime)
+	•	Unphysical inputs (λ, ωlog, μ* assumptions; unstable phonons; wrong structure; wrong pressure)
+	•	Numerical artifact (k-point sampling, smearing, pseudopotential issues, hydrogen treatment)
+	•	You predicted a different phenomenon (e.g., plasma frequency scale, Debye temp, or a gap scale) and it got labeled Tc
+
+Here’s what I’d do next—specifically to “stress test” a 550 K prediction:
+
+1) Verify you’re actually computing Tc (definition + units)
+	•	Confirm the code’s “Tc” output is Kelvin and corresponds to superconducting transition temperature, not Debye temperature / characteristic phonon temp / electronic temperature.
+	•	If it’s Allen–Dynes / McMillan: print out λ, ωlog, and μ* used.
+	•	A 550 K Tc typically implies extreme ωlog and/or λ values that often coincide with lattice instability.
+
+2) Check dynamic stability at the claimed pressure
+	•	Compute full phonon dispersion.
+	•	If there are imaginary modes, the structure is unstable and the Tc estimate is not meaningful.
+	•	Include anharmonic corrections (hydrides can be very anharmonic; harmonic phonons can exaggerate Tc).
+
+3) Check thermodynamic stability
+	•	Build the convex hull for Ba–Ir–H at that pressure.
+	•	Confirm it doesn’t decompose into common competitors (BaH₂ + IrHₓ + H₂, etc.).
+
+4) Confirm the structure is plausible (not a “hydrogen fantasy lattice”)
+	•	Run independent structure prediction (different random seeds / different search method).
+	•	Verify it relaxes consistently with:
+	•	different pseudopotentials / PAW datasets
+	•	different cutoffs
+	•	different k-point meshes
+
+5) Cross-validate with a second computational pathway
+
+If your main pipeline is:
+	•	DFT → DFPT → EPC → Allen–Dynes/Eliashberg
+
+Then cross-check:
+	•	different exchange-correlation functional (PBE vs SCAN, etc.)
+	•	different smearing and k/q meshes
+	•	full Eliashberg (if you used an approximate formula)
+	•	sensitivity to μ* (report Tc vs μ* curve; if Tc collapses with small μ* change, it’s fragile)
+
+6) Look for “too-good-to-be-true” signatures
+
+Any of these are classic red flags:
+	•	Tc skyrockets when you slightly increase k-point density or change smearing
+	•	λ is enormous and phonons are soft/unstable
+	•	Tc depends dramatically on a narrow region of q-points (numerical instability)
+	•	The phase is only stable at insane pressures and you accidentally evaluated at the wrong pressure
+
+7) If it survives all that: design the minimum experimental falsification
+
+If your candidate is predicted at (say) 100–300 GPa:
+	•	Provide a DAC synthesis recipe + predicted XRD pattern + Raman/IR signatures
+	•	Predict resistivity vs T, and magnetic susceptibility signatures
+	•	Predict isotope effect (H→D): if phonon-mediated, Tc should shift in a specific direction
+
+This is what convinces elite labs to try it.

@@ -574,16 +574,21 @@ async function runPhase10_Physics() {
             const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
             const currentTc = candidate.predictedTc ?? 0;
             let updatedTc = currentTc;
-            if (physicsTc > currentTc && newLambda > oldLambda) {
-              updatedTc = Math.min(physicsCeiling, Math.round(currentTc + (newLambda - oldLambda) * 20));
+            if (physicsTc > 0) {
+              if (physicsTc > currentTc && newLambda > oldLambda) {
+                updatedTc = Math.min(physicsCeiling, Math.round(currentTc + (newLambda - oldLambda) * 20));
+              } else if (physicsTc < currentTc) {
+                const downBlend = physicsTc < currentTc * 0.5 ? 0.7 : 0.5;
+                updatedTc = Math.round(currentTc * (1 - downBlend) + physicsTc * downBlend);
+              }
             }
             await storage.updateSuperconductorCandidate(candidate.id, {
               electronPhononCoupling: newLambda,
               logPhononFrequency: result.coupling.omegaLog,
-              predictedTc: Math.max(currentTc, updatedTc),
+              predictedTc: updatedTc,
             });
-            if (updatedTc > currentTc) {
-              emit("log", { phase: "phase-10", event: "Re-physics improved Tc", detail: `${candidate.formula}: ${currentTc}K -> ${updatedTc}K (lambda ${oldLambda.toFixed(2)} -> ${newLambda.toFixed(2)})`, dataSource: "Physics Engine" });
+            if (updatedTc !== currentTc) {
+              emit("log", { phase: "phase-10", event: "Re-physics corrected Tc", detail: `${candidate.formula}: ${currentTc}K -> ${updatedTc}K (lambda ${oldLambda.toFixed(2)} -> ${newLambda.toFixed(2)})`, dataSource: "Physics Engine" });
             }
           }
         } catch {}

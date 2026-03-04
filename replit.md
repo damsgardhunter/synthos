@@ -58,7 +58,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - Low-hydrogen hydrides (H:metal <= 3, e.g. ZrH₂) get 0.25x lambda; H:metal <= 5 get 0.5x; <= 7 get 0.75x.
 - `computePhononSpectrum` uses hydrogen ratio: H-rich (H:metal >= 6) get full 3500-4300 cm⁻¹ phonons; low-H hydrides get 1500-2100 cm⁻¹ (ionic H⁻ vibrations, not metallic H).
 - Rationale: ZrH₂ is fluorite-structure Zr⁴⁺ + 2H⁻ (ionic, not metallic H sublattice), experimentally Tc ≈ 0K. LaH₁₀/TaH₉ have H-dominated metallic cage.
-- **Retroactive correction at startup** now recomputes coupling from scratch using formula-aware functions, updating both lambda and Tc.
+- **Retroactive correction at startup** now recomputes coupling from scratch using formula-aware functions, updating both lambda and Tc. Also seeds physics data into candidates that had none (Tc > 200K), and hard-caps lambda < 0.2 candidates to Tc = max(1, 5% of stored Tc).
+
+### Physics-as-Authority Tc Governance
+- **LLM cap tightened**: New candidates capped using McMillan formula as ceiling, not floor. Lambda >= 2.5 caps at min(500, McMillan*1.3); lambda >= 1.5 at min(450, McMillan*1.5); lambda < 0.3 at min(150, McMillan*3.0).
+- **Re-physics downward correction**: When re-analyzing stage-4 candidates, physics Tc < current Tc now blends downward (0.7 weight for large gaps). Previously `Math.max(currentTc, updatedTc)` prevented any reduction.
+- **Multi-fidelity pipeline**: Already writes Eliashberg Tc back to `predictedTc` at Stage 3 with physics-dominant blending.
+- **Convergence dual-line**: `bestPhysicsTc` tracks highest Tc among physics-validated candidates (stage >= 1, lambda != null). Displayed alongside `bestTc` on convergence chart.
 
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.

@@ -440,15 +440,17 @@ Return JSON with 'candidates' array:
         } else if (corrStr > 0.7) {
           tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
         } else if (featureLambda < 0.3) {
-          tcCap = 150;
+          tcCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 3.0 : 150);
         } else if (featureLambda < 0.5) {
-          tcCap = Math.max(200, mcMillanMax * 2.5);
+          tcCap = Math.min(200, mcMillanMax > 0 ? mcMillanMax * 2.5 : 200);
         } else if (featureLambda < 1.0) {
-          tcCap = Math.max(300, mcMillanMax * 2.0);
+          tcCap = Math.min(300, mcMillanMax > 0 ? mcMillanMax * 2.0 : 300);
         } else if (featureLambda < 1.5) {
-          tcCap = Math.max(400, mcMillanMax * 1.8);
+          tcCap = mcMillanMax > 0 ? Math.min(400, mcMillanMax * 1.8) : 350;
+        } else if (featureLambda < 2.5) {
+          tcCap = mcMillanMax > 0 ? Math.min(450, mcMillanMax * 1.5) : 400;
         } else {
-          tcCap = Math.max(500, mcMillanMax * 1.5);
+          tcCap = mcMillanMax > 0 ? Math.min(500, mcMillanMax * 1.3) : 450;
         }
         tcCap = Math.round(tcCap);
 

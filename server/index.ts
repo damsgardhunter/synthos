@@ -73,8 +73,8 @@ app.use((req, res, next) => {
     const allCandidates = await storage.getSuperconductorCandidates(2000);
     let corrected = 0;
     for (const c of allCandidates) {
-      if (c.electronPhononCoupling == null) continue;
       const currentTc = c.predictedTc ?? 0;
+      const hasPhysics = c.electronPhononCoupling != null;
 
       const corrStrength = c.correlationStrength ?? 0;
       const hasMott = Array.isArray(c.competingPhases) && (c.competingPhases as any[]).some((p: any) => p.type === "Mott");
@@ -103,13 +103,21 @@ app.use((req, res, next) => {
       }
 
       const updates: any = {};
-      if (Math.abs(coupling.lambda - (c.electronPhononCoupling ?? 0)) > 0.3) {
+      if (hasPhysics && Math.abs(coupling.lambda - (c.electronPhononCoupling ?? 0)) > 0.3) {
         updates.electronPhononCoupling = coupling.lambda;
         updates.logPhononFrequency = coupling.omegaLog;
         updates.coulombPseudopotential = coupling.muStar;
       }
 
-      if (eliashbergTc > 0 && eliashbergTc < currentTc && currentTc > 50) {
+      if (!hasPhysics && currentTc > 200) {
+        updates.electronPhononCoupling = coupling.lambda;
+        updates.logPhononFrequency = coupling.omegaLog;
+        updates.coulombPseudopotential = coupling.muStar;
+      }
+
+      if (coupling.lambda < 0.2 && currentTc > 30) {
+        updates.predictedTc = Math.round(Math.max(1, currentTc * 0.05));
+      } else if (eliashbergTc > 0 && eliashbergTc < currentTc && currentTc > 50) {
         const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : 0.5;
         updates.predictedTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
       }
@@ -121,6 +129,34 @@ app.use((req, res, next) => {
     }
     if (corrected > 0) {
       log(`Retroactively corrected ${corrected} inflated Tc candidates using Eliashberg physics`, "startup");
+    }
+
+    const topTcNow = allCandidates.reduce((mx, c) => Math.max(mx, c.predictedTc ?? 0), 0);
+    const snapshots = await storage.getConvergenceSnapshots(500);
+    let snapFixed = 0;
+    for (const s of snapshots) {
+      if ((s.bestTc ?? 0) > 500) {
+        await storage.deleteConvergenceSnapshotByCycle(s.cycle);
+        await storage.insertConvergenceSnapshot({
+          id: s.id + "-fix",
+          cycle: s.cycle,
+          bestTc: Math.min(s.bestTc ?? 0, Math.max(topTcNow, 400)),
+          bestPhysicsTc: s.bestPhysicsTc,
+          bestScore: s.bestScore,
+          avgTopScore: s.avgTopScore,
+          candidatesTotal: s.candidatesTotal,
+          pipelinePassRate: s.pipelinePassRate,
+          novelInsightCount: s.novelInsightCount,
+          topFormula: s.topFormula,
+          strategyFocus: s.strategyFocus,
+          familyDiversity: s.familyDiversity,
+          duplicatesSkipped: s.duplicatesSkipped,
+        });
+        snapFixed++;
+      }
+    }
+    if (snapFixed > 0) {
+      log(`Corrected ${snapFixed} convergence snapshots with inflated bestTc values`, "startup");
     }
   } catch (err: any) {
     log(`Tc correction error: ${err.message}`, "startup");
