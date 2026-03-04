@@ -213,17 +213,41 @@ export function computePhononSpectrum(formula: string, electronicStructure: Elec
     Nb:93,Ba:137,La:139,Hf:178,Ta:181,W:184,Pb:207,Bi:209,
   }[e] ?? 50));
 
-  const lightestMass = masses.length > 0 ? Math.min(...masses) : 50;
-  const maxPhononFreq = hasH ? 4000 + Math.random() * 500 : 800 / Math.sqrt(Math.max(lightestMass, 1) / 12) * (1 + Math.random() * 0.2);
+  const counts = parseFormulaCounts(formula);
+  const hAtoms = counts["H"] || 0;
+  const transitionMetals = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Hf","Ta","W","Re","Os","Ir","Pt","Au"];
+  const rareEarths = ["La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu"];
+  const metalAtoms = elements.filter(e => transitionMetals.includes(e) || rareEarths.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hRatio = metalAtoms > 0 ? hAtoms / metalAtoms : 0;
+  const isHydrogenRich = hRatio >= 6;
 
-  const logAvgFreq = maxPhononFreq * (hasH ? 0.35 : 0.45);
+  const lightestMass = masses.length > 0 ? Math.min(...masses) : 50;
+  let maxPhononFreq: number;
+  if (hasH && isHydrogenRich) {
+    maxPhononFreq = 3500 + Math.random() * 800;
+  } else if (hasH) {
+    maxPhononFreq = 1500 + hRatio * 200 + Math.random() * 300;
+  } else {
+    maxPhononFreq = 800 / Math.sqrt(Math.max(lightestMass, 1) / 12) * (1 + Math.random() * 0.2);
+  }
+
+  const logAvgFreqRatio = isHydrogenRich ? 0.35 : (hasH ? 0.25 + hRatio * 0.01 : 0.45);
+  const logAvgFreq = maxPhononFreq * logAvgFreqRatio;
 
   const hasImaginaryModes = electronicStructure.correlationStrength > 0.7 && Math.random() < 0.3;
-  const anharmonicityIndex = hasH ? 0.4 + Math.random() * 0.3 : 0.1 + Math.random() * 0.2;
+  let anharmonicityIndex: number;
+  if (hasH && isHydrogenRich) {
+    anharmonicityIndex = 0.4 + Math.random() * 0.3;
+  } else if (hasH) {
+    anharmonicityIndex = 0.15 + hRatio * 0.03 + Math.random() * 0.1;
+  } else {
+    anharmonicityIndex = 0.1 + Math.random() * 0.2;
+  }
   const softModePresent = electronicStructure.correlationStrength > 0.5 && Math.random() < 0.4;
 
   const avgMass = masses.length > 0 ? masses.reduce((a, b) => a + b, 0) / masses.length : 50;
-  const debyeTemperature = hasH ? 1500 + Math.random() * 500 : 300 * Math.sqrt(30 / Math.max(avgMass, 1)) * (1 + Math.random() * 0.3);
+  const debyeTemperature = isHydrogenRich ? 1500 + Math.random() * 500 : (hasH ? 600 + hRatio * 80 + Math.random() * 200 : 300 * Math.sqrt(30 / Math.max(avgMass, 1)) * (1 + Math.random() * 0.3));
 
   return {
     maxPhononFrequency: Math.round(maxPhononFreq),
@@ -237,18 +261,41 @@ export function computePhononSpectrum(formula: string, electronicStructure: Elec
 
 export function computeElectronPhononCoupling(
   electronicStructure: ElectronicStructure,
-  phononSpectrum: PhononSpectrum
+  phononSpectrum: PhononSpectrum,
+  formula?: string
 ): ElectronPhononCoupling {
   const N_EF = electronicStructure.densityOfStatesAtFermi;
   const omega_log = phononSpectrum.logAverageFrequency;
   const corr = electronicStructure.correlationStrength;
+  const metal = electronicStructure.metallicity;
 
   let lambda = N_EF * 0.3 * (1 + phononSpectrum.anharmonicityIndex);
   if (electronicStructure.fermiSurfaceTopology.includes("nested")) lambda *= 1.4;
   if (electronicStructure.fermiSurfaceTopology.includes("multi-sheet")) lambda *= 1.2;
   if (corr > 0.6) lambda *= 0.7;
 
-  lambda = Math.max(0.1, Math.min(3.5, lambda + (Math.random() - 0.5) * 0.3));
+  if (formula) {
+    const counts = parseFormulaCounts(formula);
+    const elements = parseFormulaElements(formula);
+    const hAtoms = counts["H"] || 0;
+    const transitionMetals = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Hf","Ta","W","Re","Os","Ir","Pt","Au"];
+    const rareEarths = ["La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu"];
+    const metalAtoms = elements.filter(e => transitionMetals.includes(e) || rareEarths.includes(e))
+      .reduce((s, e) => s + (counts[e] || 0), 0);
+    const hRatio = metalAtoms > 0 ? hAtoms / metalAtoms : 0;
+
+    if (hAtoms > 0 && hRatio <= 3) {
+      lambda *= 0.25;
+    } else if (hAtoms > 0 && hRatio <= 5) {
+      lambda *= 0.5;
+    } else if (hAtoms > 0 && hRatio <= 7) {
+      lambda *= 0.75;
+    }
+  }
+
+  if (metal < 0.4) lambda *= metal;
+
+  lambda = Math.max(0.1, Math.min(3.5, lambda + (Math.random() - 0.5) * 0.15));
 
   const muStar = corr > 0.5 ? 0.13 + corr * 0.05 : 0.1 + Math.random() * 0.04;
 
@@ -498,7 +545,7 @@ export async function runFullPhysicsAnalysis(
   const electronicStructure = computeElectronicStructure(formula, candidate.crystalStructure);
 
   const phononSpectrum = computePhononSpectrum(formula, electronicStructure);
-  const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum);
+  const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula);
 
   let eliashberg: EliashbergResult;
   eliashberg = predictTcEliashberg(coupling);

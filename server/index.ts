@@ -69,39 +69,53 @@ app.use((req, res, next) => {
   }
 
   try {
+    const { computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } = await import("./learning/physics-engine");
     const allCandidates = await storage.getSuperconductorCandidates(2000);
     let corrected = 0;
     for (const c of allCandidates) {
       if (c.electronPhononCoupling == null) continue;
       const currentTc = c.predictedTc ?? 0;
 
-      const lambda = c.electronPhononCoupling ?? 0;
-      const omegaLog = c.logPhononFrequency ?? 300;
-      const muStar = c.coulombPseudopotential ?? 0.12;
       const corrStrength = c.correlationStrength ?? 0;
       const hasMott = Array.isArray(c.competingPhases) && (c.competingPhases as any[]).some((p: any) => p.type === "Mott");
       const isMottInsulator = (hasMott && corrStrength > 0.7) || corrStrength > 0.85;
       const isStronglyCorrelated = corrStrength > 0.7;
+      const electronic = computeElectronicStructure(c.formula, null);
+      const phonon = computePhononSpectrum(c.formula, electronic);
+      const coupling = computeElectronPhononCoupling(electronic, phonon, c.formula);
 
-      const omegaLogK = omegaLog * 1.44;
-      const denom = lambda - muStar * (1 + 0.62 * lambda);
+      const omegaLogK = coupling.omegaLog * 1.44;
+      const denom = coupling.lambda - coupling.muStar * (1 + 0.62 * coupling.lambda);
       let eliashbergTc = 0;
-      if (Math.abs(denom) > 1e-6 && lambda > 0.2) {
-        const exponent = -1.04 * (1 + lambda) / denom;
+      if (Math.abs(denom) > 1e-6 && coupling.lambda > 0.2) {
+        const exponent = -1.04 * (1 + coupling.lambda) / denom;
         eliashbergTc = (omegaLogK / 1.2) * Math.exp(exponent);
         if (!Number.isFinite(eliashbergTc) || eliashbergTc < 0) eliashbergTc = 0;
       }
 
-      if (isMottInsulator) {
+      const isNonMetallic = electronic.metallicity < 0.4;
+      if (isNonMetallic) {
+        eliashbergTc = eliashbergTc * Math.max(0.02, electronic.metallicity);
+      } else if (isMottInsulator) {
         eliashbergTc = eliashbergTc * 0.05;
       } else if (isStronglyCorrelated) {
         eliashbergTc = eliashbergTc * 0.3;
       }
 
-      if (eliashbergTc > 0 && eliashbergTc < currentTc && currentTc > 100) {
+      const updates: any = {};
+      if (Math.abs(coupling.lambda - (c.electronPhononCoupling ?? 0)) > 0.3) {
+        updates.electronPhononCoupling = coupling.lambda;
+        updates.logPhononFrequency = coupling.omegaLog;
+        updates.coulombPseudopotential = coupling.muStar;
+      }
+
+      if (eliashbergTc > 0 && eliashbergTc < currentTc && currentTc > 50) {
         const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : 0.5;
-        const newTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
-        await storage.updateSuperconductorCandidate(c.id, { predictedTc: newTc });
+        updates.predictedTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await storage.updateSuperconductorCandidate(c.id, updates);
         corrected++;
       }
     }

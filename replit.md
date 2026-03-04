@@ -53,10 +53,18 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Metallicity gate**: `computeElectronicStructure` estimates metallicity from composition using stoichiometric ratio analysis. Key checks: (1) molecular detection (N-H ammine complexes, hydroxides, polyhalides), (2) light-to-metal atom ratio (high ratio = likely ionic/molecular), (3) electronegative ligand count. Non-metallic materials (metallicity<0.4) get Eliashberg Tc multiplied by metallicity factor. Applies in physics engine, engine flowback, multi-fidelity pipeline, LLM capping, and ML predictor.
 - **Formula parsing**: `parseFormulaCounts()` extracts element counts from formulas for stoichiometric analysis. Pure hydrides (LaH₁₀, TaH₉) are protected from ratio penalty since H IS the metallic sublattice; only penalized when electronegative ligands (N, O, Cl) are present alongside H.
 
+### Hydrogen-Ratio-Aware Coupling
+- `computeElectronPhononCoupling` accepts optional `formula` parameter for stoichiometric analysis.
+- Low-hydrogen hydrides (H:metal <= 3, e.g. ZrH₂) get 0.25x lambda; H:metal <= 5 get 0.5x; <= 7 get 0.75x.
+- `computePhononSpectrum` uses hydrogen ratio: H-rich (H:metal >= 6) get full 3500-4300 cm⁻¹ phonons; low-H hydrides get 1500-2100 cm⁻¹ (ionic H⁻ vibrations, not metallic H).
+- Rationale: ZrH₂ is fluorite-structure Zr⁴⁺ + 2H⁻ (ionic, not metallic H sublattice), experimentally Tc ≈ 0K. LaH₁₀/TaH₉ have H-dominated metallic cage.
+- **Retroactive correction at startup** now recomputes coupling from scratch using formula-aware functions, updating both lambda and Tc.
+
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.
 - Evidence-gated: fires only when stage changes, lambda delta >0.1, new crystal, or ceiling rises.
 - Uses `Map<string, {stage, lambda, hasCrystal, lastCeiling}>` to track what's been applied.
+- **Blocked for**: Mott-like (corr>0.85), strongly correlated (only +2K at stage 4), and low-H-ratio hydrides (H:metal <= 3, zero boost).
 - Stage-based Tc boosts (cumulative): stage>=1 with coupling (+4 to +15K by lambda), stage>=2 (+4K), stage>=3 (+6K), stage>=4 (+8K, +6K crystal stability).
 - **Dynamic Tc ceiling** replaces fixed 550K cap. Ceiling grows with accumulated evidence:
   - Base: 500K

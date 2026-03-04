@@ -108,7 +108,7 @@ async function stage2_PhononCoupling(
   const start = Date.now();
 
   const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
-  const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon);
+  const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula);
 
   const hasStablePhonons = !phonon.hasImaginaryModes;
   const hasCoupling = coupling.lambda > 0.3;

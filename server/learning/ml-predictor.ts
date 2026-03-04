@@ -101,7 +101,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const electronic = computeElectronicStructure(formula, mat?.spacegroup);
   const phonon = computePhononSpectrum(formula, electronic);
-  const coupling = computeElectronPhononCoupling(electronic, phonon);
+  const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
   const correlation = assessCorrelationStrength(formula);
 
   const useLambda = physics?.verifiedLambda ?? coupling.lambda;

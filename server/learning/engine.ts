@@ -410,18 +410,44 @@ async function reEvaluateTopCandidates() {
 
       reEvalApplied.set(candidate.id, { stage, lambda, hasCrystal, lastCeiling: tcCeiling });
 
-      let tcBoost = 0;
-      if (stage >= 1 && lambda > 0) {
-        if (lambda > 2.5) tcBoost += 15;
-        else if (lambda > 2.0) tcBoost += 12;
-        else if (lambda > 1.5) tcBoost += 8;
-        else if (lambda > 1.0) tcBoost += 4;
+      const corrStr = candidate.correlationStrength ?? 0;
+      const isMottLike = corrStr > 0.85;
+      const isStrongCorr = corrStr > 0.7;
+
+      const formulaCounts: Record<string, number> = {};
+      const cleanedF = candidate.formula.replace(/[₀-₉]/g, (c: string) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+      const fRegex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+      let fMatch;
+      while ((fMatch = fRegex.exec(cleanedF)) !== null) {
+        const el = fMatch[1];
+        const num = fMatch[2] ? parseFloat(fMatch[2]) : 1;
+        formulaCounts[el] = (formulaCounts[el] || 0) + num;
       }
-      if (stage >= 2) tcBoost += 4;
-      if (stage >= 3) tcBoost += 6;
-      if (stage >= 4) {
-        tcBoost += 8;
-        if (hasCrystal) tcBoost += 6;
+      const hAtoms = formulaCounts["H"] || 0;
+      const tmList = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Ru","Rh","Pd","Ag","Hf","Ta","W","Re","Os","Ir","Pt","Au"];
+      const reList = ["La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu"];
+      const metalAtoms = Object.entries(formulaCounts).filter(([e]) => tmList.includes(e) || reList.includes(e)).reduce((s, [, n]) => s + n, 0);
+      const hRatio = metalAtoms > 0 ? hAtoms / metalAtoms : 0;
+      const isLowHRatioHydride = hAtoms > 0 && hRatio <= 3;
+
+      let tcBoost = 0;
+      if (isMottLike || isLowHRatioHydride) {
+        tcBoost = 0;
+      } else if (isStrongCorr) {
+        if (stage >= 4) tcBoost += 2;
+      } else {
+        if (stage >= 1 && lambda > 0) {
+          if (lambda > 2.5) tcBoost += 15;
+          else if (lambda > 2.0) tcBoost += 12;
+          else if (lambda > 1.5) tcBoost += 8;
+          else if (lambda > 1.0) tcBoost += 4;
+        }
+        if (stage >= 2) tcBoost += 4;
+        if (stage >= 3) tcBoost += 6;
+        if (stage >= 4) {
+          tcBoost += 8;
+          if (hasCrystal) tcBoost += 6;
+        }
       }
 
       const hasRealEvidence = !prev || stage > prev.stage || (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.1) || (hasCrystal && !prev.hasCrystal);
