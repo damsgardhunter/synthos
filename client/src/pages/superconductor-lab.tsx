@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, SynthesisProcess, ChemicalReaction } from "@shared/schema";
@@ -14,6 +14,42 @@ import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
   CheckCircle2, XCircle, ArrowRight, Gauge, Magnet, ExternalLink,
 } from "lucide-react";
+
+interface CalibrationResponse {
+  r2: number;
+  mae: number;
+  rmse: number;
+  absResidualPercentiles: { p50: number; p75: number; p90: number; p95: number };
+  residualCount: number;
+}
+
+function computeConfidenceBand(predictedTc: number, p90: number): { lower: number; upper: number } {
+  const scaleFactor = Math.max(1, predictedTc / 50);
+  const errorMargin = p90 * Math.sqrt(scaleFactor);
+  return {
+    lower: Math.round(Math.max(0, predictedTc - errorMargin) * 10) / 10,
+    upper: Math.round((predictedTc + errorMargin) * 10) / 10,
+  };
+}
+
+function TcErrorBar({ predictedTc, p90 }: { predictedTc: number; p90: number }) {
+  const band = computeConfidenceBand(predictedTc, p90);
+  return (
+    <div className="flex items-center gap-1 mt-0.5" data-testid="tc-error-bar">
+      <span className="text-[10px] text-muted-foreground font-mono">{band.lower}K</span>
+      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden relative min-w-[40px]">
+        <div
+          className="absolute inset-y-0 bg-primary/30 rounded-full"
+          style={{
+            left: `${(band.lower / band.upper) * 100}%`,
+            right: "0%",
+          }}
+        />
+      </div>
+      <span className="text-[10px] text-muted-foreground font-mono">{band.upper}K</span>
+    </div>
+  );
+}
 
 const STATUS_COLORS: Record<string, string> = {
   "theoretical": "bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-300",
@@ -75,7 +111,7 @@ function ScoreBar({ label, score, color }: { label: string; score: number | null
   );
 }
 
-function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
+function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate; p90?: number }) {
   const statusColor = STATUS_COLORS[candidate.status] ?? STATUS_COLORS["theoretical"];
   const tcColor = (candidate.predictedTc ?? 0) >= 293 ? "text-green-600 dark:text-green-400" : "text-foreground";
 
@@ -103,6 +139,9 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
               </p>
               <ConfidenceBadge level={candidate.dataConfidence} />
             </div>
+            {candidate.predictedTc != null && p90 != null && (
+              <TcErrorBar predictedTc={candidate.predictedTc} p90={p90} />
+            )}
           </div>
           <div className="p-2.5 bg-muted/50 rounded-md">
             <div className="flex items-center gap-1.5 mb-0.5">
@@ -157,7 +196,7 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
 
         {candidate.cooperPairMechanism && (
           <div className="text-xs text-muted-foreground">
-            <span className="font-semibold text-foreground">Cooper Pairs: </span>
+            <span className="font-semibold text-foreground">Cooper Pair Description: </span>
             {candidate.cooperPairMechanism}
           </div>
         )}
@@ -433,6 +472,12 @@ export default function SuperconductorLab() {
     queryKey: ["/api/chemical-reactions"],
   });
 
+  const { data: calibrationData } = useQuery<CalibrationResponse>({
+    queryKey: ["/api/ml-calibration"],
+  });
+
+  const p90 = calibrationData?.absResidualPercentiles?.p90;
+
   const ws = useWebSocket();
 
   useEffect(() => {
@@ -532,7 +577,7 @@ export default function SuperconductorLab() {
                 </Badge>
               </div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {roomTempCandidates.map(c => <CandidateCard key={c.id} candidate={c} />)}
+                {roomTempCandidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} />)}
               </div>
             </div>
           )}
@@ -549,7 +594,7 @@ export default function SuperconductorLab() {
                 <Badge variant="secondary">{candidates.length}</Badge>
               </div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {candidates.map(c => <CandidateCard key={c.id} candidate={c} />)}
+                {candidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} />)}
               </div>
             </div>
           ) : (

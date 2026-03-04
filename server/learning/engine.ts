@@ -162,7 +162,9 @@ async function updatePhaseStatus(phaseId: number, status: string, progress: numb
     });
 
     broadcast("phaseUpdate", { phaseId, status, progress: newProgress, itemsLearned, totalItems: resolvedTotal });
-  } catch (e) {}
+  } catch (e) {
+    console.error("updatePhaseStatus failed:", e);
+  }
 }
 
 async function addInsightsToPhase(phaseId: number, newInsights: string[]) {
@@ -176,7 +178,9 @@ async function addInsightsToPhase(phaseId: number, newInsights: string[]) {
       ...phase,
       insights: combined,
     });
-  } catch (e) {}
+  } catch (e) {
+    console.error("addInsightsToPhase failed:", e);
+  }
 }
 
 async function runPhase3_Bonding() {
@@ -482,6 +486,9 @@ async function runPhase10_Physics() {
           criticalCurrentDensity: result.criticalFields.criticalCurrentDensity,
           uncertaintyEstimate: result.uncertaintyEstimate,
           pairingMechanism: result.correlation.ratio > 0.6 ? "unconventional" : "phonon-mediated",
+          cooperPairMechanism: candidate.cooperPairMechanism ?? (result.correlation.ratio > 0.6
+            ? `Unconventional pairing via spin-fluctuation exchange (U/W=${result.correlation.ratio.toFixed(2)})`
+            : `Phonon-mediated BCS pairing with lambda=${result.coupling.lambda.toFixed(2)}`),
           predictedTc: updatedTc,
           verificationStage: 1,
         });

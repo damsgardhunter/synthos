@@ -11,8 +11,25 @@ import { Link } from "wouter";
 import {
   Atom, Zap, Filter, XCircle, CheckCircle2,
   Activity, Layers, Magnet, Gauge, Target,
-  Beaker, ArrowDown, ExternalLink,
+  Beaker, ArrowDown, ExternalLink, Thermometer,
 } from "lucide-react";
+
+interface CalibrationResponse {
+  r2: number;
+  mae: number;
+  rmse: number;
+  absResidualPercentiles: { p50: number; p75: number; p90: number; p95: number };
+  residualCount: number;
+}
+
+function computeConfidenceBand(predictedTc: number, p90: number): { lower: number; upper: number } {
+  const scaleFactor = Math.max(1, predictedTc / 50);
+  const errorMargin = p90 * Math.sqrt(scaleFactor);
+  return {
+    lower: Math.round(Math.max(0, predictedTc - errorMargin) * 10) / 10,
+    upper: Math.round((predictedTc + errorMargin) * 10) / 10,
+  };
+}
 
 const STAGE_NAMES = [
   "ML Filter",
@@ -97,8 +114,11 @@ function PipelineFunnel({ stages }: { stages: { stage: number; count: number; pa
   );
 }
 
-function PhysicsPropertyCard({ candidate }: { candidate: SuperconductorCandidate }) {
+function PhysicsPropertyCard({ candidate, p90 }: { candidate: SuperconductorCandidate; p90?: number }) {
   const competingPhases = (candidate.competingPhases as any[]) ?? [];
+  const tcBand = candidate.predictedTc != null && p90 != null
+    ? computeConfidenceBand(candidate.predictedTc, p90)
+    : null;
 
   return (
     <Card data-testid={`physics-card-${candidate.id}`}>
@@ -119,6 +139,34 @@ function PhysicsPropertyCard({ candidate }: { candidate: SuperconductorCandidate
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {candidate.predictedTc != null && tcBand && (
+          <div className="p-2 bg-muted/50 rounded-md" data-testid="tc-error-band">
+            <div className="flex items-center gap-1.5 mb-1">
+              <Thermometer className="h-3 w-3 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground">Tc Prediction with 90% CI</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono text-muted-foreground">{tcBand.lower}K</span>
+              <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden relative">
+                <div
+                  className="absolute inset-y-0 bg-primary/20 rounded-full"
+                  style={{
+                    left: `${(tcBand.lower / Math.max(tcBand.upper, 1)) * 100}%`,
+                    right: "0%",
+                  }}
+                />
+                <div
+                  className="absolute inset-y-0 w-0.5 bg-primary"
+                  style={{
+                    left: `${(candidate.predictedTc / Math.max(tcBand.upper, 1)) * 100}%`,
+                  }}
+                />
+              </div>
+              <span className="text-xs font-mono text-muted-foreground">{tcBand.upper}K</span>
+              <span className="text-xs font-mono font-bold">{candidate.predictedTc}K</span>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
           <PhysicsValue icon={Activity} label="e-ph lambda" value={candidate.electronPhononCoupling} format={(v) => v.toFixed(3)} />
           <PhysicsValue icon={Gauge} label="omega_log" value={candidate.logPhononFrequency} format={(v) => `${v.toFixed(0)} cm-1`} />
@@ -318,6 +366,12 @@ export default function ComputationalPhysics() {
     queryKey: ["/api/pipeline-stats"],
   });
 
+  const { data: calibrationData } = useQuery<CalibrationResponse>({
+    queryKey: ["/api/ml-calibration"],
+  });
+
+  const p90 = calibrationData?.absResidualPercentiles?.p90;
+
   const { data: failedData } = useQuery<{ results: ComputationalResult[] }>({
     queryKey: ["/api/computational-results/failed"],
   });
@@ -409,7 +463,7 @@ export default function ComputationalPhysics() {
             </div>
           ) : physicsAnalyzed.length > 0 ? (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {physicsAnalyzed.map(c => <PhysicsPropertyCard key={c.id} candidate={c} />)}
+              {physicsAnalyzed.map(c => <PhysicsPropertyCard key={c.id} candidate={c} p90={p90} />)}
             </div>
           ) : (
             <Card>

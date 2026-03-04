@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, real, boolean, timestamp, jsonb, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -64,7 +64,9 @@ export const researchLogs = pgTable("research_logs", {
   event: text("event").notNull(),
   detail: text("detail"),
   dataSource: text("data_source"),
-});
+}, (table) => [
+  index("research_logs_timestamp_idx").on(table.timestamp),
+]);
 
 export const synthesisProcesses = pgTable("synthesis_processes", {
   id: varchar("id").primaryKey(),
@@ -81,7 +83,9 @@ export const synthesisProcesses = pgTable("synthesis_processes", {
   safetyNotes: text("safety_notes"),
   yieldPercent: real("yield_percent"),
   discoveredAt: timestamp("discovered_at").defaultNow(),
-});
+}, (table) => [
+  index("synthesis_processes_formula_idx").on(table.formula),
+]);
 
 export const chemicalReactions = pgTable("chemical_reactions", {
   id: varchar("id").primaryKey(),
@@ -139,7 +143,10 @@ export const superconductorCandidates = pgTable("superconductor_candidates", {
   verificationStage: integer("verification_stage").default(0),
   uncertaintyEstimate: real("uncertainty_estimate"),
   dataConfidence: text("data_confidence").default("medium"),
-});
+}, (table) => [
+  index("sc_candidates_predicted_tc_idx").on(table.predictedTc),
+  index("sc_candidates_ensemble_score_idx").on(table.ensembleScore),
+]);
 
 export const crystalStructures = pgTable("crystal_structures", {
   id: varchar("id").primaryKey(),
@@ -158,7 +165,9 @@ export const crystalStructures = pgTable("crystal_structures", {
   synthesisNotes: text("synthesis_notes"),
   source: text("source"),
   predictedAt: timestamp("predicted_at").defaultNow(),
-});
+}, (table) => [
+  index("crystal_structures_formula_idx").on(table.formula),
+]);
 
 export const computationalResults = pgTable("computational_results", {
   id: varchar("id").primaryKey(),
@@ -173,7 +182,10 @@ export const computationalResults = pgTable("computational_results", {
   passed: boolean("passed").default(false),
   failureReason: text("failure_reason"),
   computedAt: timestamp("computed_at").defaultNow(),
-});
+}, (table) => [
+  index("computational_results_formula_idx").on(table.formula),
+  index("computational_results_pipeline_stage_idx").on(table.pipelineStage),
+]);
 
 export const novelInsights = pgTable("novel_insights", {
   id: varchar("id").primaryKey(),
@@ -186,7 +198,9 @@ export const novelInsights = pgTable("novel_insights", {
   category: text("category"),
   relatedFormulas: text("related_formulas").array(),
   discoveredAt: timestamp("discovered_at").defaultNow(),
-});
+}, (table) => [
+  index("novel_insights_discovered_at_idx").on(table.discoveredAt),
+]);
 
 export const researchStrategies = pgTable("research_strategies", {
   id: varchar("id").primaryKey(),
@@ -239,6 +253,23 @@ export const mpMaterialCache = pgTable("mp_material_cache", {
 export const insertMpMaterialCacheSchema = createInsertSchema(mpMaterialCache).omit({ fetchedAt: true } as any);
 export type MpMaterialCache = typeof mpMaterialCache.$inferSelect;
 export type InsertMpMaterialCache = z.infer<typeof insertMpMaterialCacheSchema>;
+
+export const experimentalValidations = pgTable("experimental_validations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  validationType: text("validation_type").notNull(),
+  result: text("result").notNull(),
+  measuredTc: real("measured_tc"),
+  measuredPressure: real("measured_pressure"),
+  notes: text("notes"),
+  performedAt: timestamp("performed_at").defaultNow(),
+}, (table) => [
+  index("experimental_validations_formula_idx").on(table.formula),
+]);
+
+export const insertExperimentalValidationSchema = createInsertSchema(experimentalValidations).omit({ id: true, performedAt: true });
+export type ExperimentalValidation = typeof experimentalValidations.$inferSelect;
+export type InsertExperimentalValidation = z.infer<typeof insertExperimentalValidationSchema>;
 
 export const insertElementSchema = createInsertSchema(elements);
 export const insertMaterialSchema = createInsertSchema(materials).omit({ learnedAt: true });

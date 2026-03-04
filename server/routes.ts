@@ -1,14 +1,49 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertMaterialSchema, insertResearchLogSchema } from "@shared/schema";
+import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus } from "./learning/engine";
+import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
+import { cache, TTL, CACHE_KEYS } from "./cache";
+import rateLimit from "express-rate-limit";
+import { fetchAllData as fetchMPAllData, isApiAvailable as isMPAvailable } from "./learning/materials-project-client";
+import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./learning/aflow-client";
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+
+const engineLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many engine control requests, please try again later." },
+});
+
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many write requests, please try again later." },
+});
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   initWebSocket(httpServer);
+
+  app.use("/api", generalLimiter);
+
   app.get("/api/elements", async (_req, res) => {
     try {
+      const cached = cache.get(CACHE_KEYS.ELEMENTS);
+      if (cached) return res.json(cached);
       const els = await storage.getElements();
+      cache.set(CACHE_KEYS.ELEMENTS, els, TTL.ELEMENTS);
       res.json(els);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch elements" });
@@ -22,6 +57,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(el);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch element" });
+    }
+  });
+
+  app.get("/api/elements/:symbol/related-counts", async (req, res) => {
+    try {
+      const symbol = req.params.symbol;
+      const [materialCount, candidateCount] = await Promise.all([
+        storage.getMaterialCountByElement(symbol),
+        storage.getCandidateCountByElement(symbol),
+      ]);
+      res.json({ materialCount, candidateCount });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch related counts" });
     }
   });
 
@@ -56,9 +104,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/novel-predictions", async (_req, res) => {
+  app.get("/api/novel-predictions", async (req, res) => {
     try {
-      const preds = await storage.getNovelPredictions();
+      const limit = Math.min(Number(req.query.limit) || 50, 500);
+      const offset = Number(req.query.offset) || 0;
+      const preds = await storage.getNovelPredictions(limit, offset);
       res.json(preds);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch predictions" });
@@ -77,26 +127,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/stats", async (_req, res) => {
     try {
+      const cached = cache.get(CACHE_KEYS.STATS);
+      if (cached) return res.json(cached);
       const stats = await storage.getStats();
+      cache.set(CACHE_KEYS.STATS, stats, TTL.STATS);
       res.json(stats);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch stats" });
     }
   });
 
-  app.post("/api/research-logs", async (req, res) => {
+  app.post("/api/research-logs", writeLimiter, async (req, res) => {
     try {
       const parsed = insertResearchLogSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error });
       const log = await storage.insertResearchLog(parsed.data);
+      cache.invalidate(CACHE_KEYS.STATS);
       res.json(log);
     } catch (e) {
       res.status(500).json({ error: "Failed to insert log" });
     }
   });
 
-  app.post("/api/engine/start", async (_req, res) => {
+  app.post("/api/engine/start", engineLimiter, async (_req, res) => {
     try {
+      cache.invalidate(CACHE_KEYS.STATS);
+      cache.invalidatePrefix("crystal-structures:");
+      cache.invalidatePrefix("computational-results:");
       const status = await startEngine();
       res.json(status);
     } catch (e) {
@@ -104,7 +161,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/engine/stop", async (_req, res) => {
+  app.post("/api/engine/stop", engineLimiter, async (_req, res) => {
     try {
       const status = stopEngine();
       res.json(status);
@@ -113,7 +170,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/engine/pause", async (_req, res) => {
+  app.post("/api/engine/pause", engineLimiter, async (_req, res) => {
     try {
       const status = pauseEngine();
       res.json(status);
@@ -122,7 +179,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/engine/resume", async (_req, res) => {
+  app.post("/api/engine/resume", engineLimiter, async (_req, res) => {
     try {
       const status = resumeEngine();
       res.json(status);
@@ -213,7 +270,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/pipeline-stats", async (req, res) => {
     try {
-      const stats = await storage.getStats();
+      const cached = cache.get<Awaited<ReturnType<typeof storage.getStats>>>(CACHE_KEYS.STATS);
+      const stats = cached || await storage.getStats();
+      if (!cached) cache.set(CACHE_KEYS.STATS, stats, TTL.STATS);
       res.json({
         pipelineStages: stats.pipelineStages,
         crystalStructures: stats.crystalStructures,
@@ -227,16 +286,37 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/candidate-profile/:formula", async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
+      const csKey = CACHE_KEYS.crystalStructuresByFormula(formula);
+      const crKey = CACHE_KEYS.computationalResultsByFormula(formula);
+
+      let crystalStructureData = cache.get(csKey);
+      let computationalResultData = cache.get(crKey);
+
       const [candidates, crystalStructures, computationalResults, synthesisProcesses, chemicalReactions] = await Promise.all([
         storage.getSuperconductorsByFormula(formula),
-        storage.getCrystalStructuresByFormula(formula),
-        storage.getComputationalResultsByFormula(formula),
+        crystalStructureData ? Promise.resolve(crystalStructureData) : storage.getCrystalStructuresByFormula(formula),
+        computationalResultData ? Promise.resolve(computationalResultData) : storage.getComputationalResultsByFormula(formula),
         storage.getSynthesisProcessesByFormula(formula),
         storage.getChemicalReactionsByFormula(formula),
       ]);
+
+      if (!crystalStructureData) cache.set(csKey, crystalStructures, TTL.CRYSTAL_STRUCTURES_BY_FORMULA);
+      if (!computationalResultData) cache.set(crKey, computationalResults, TTL.COMPUTATIONAL_RESULTS_BY_FORMULA);
+
       res.json({ formula, candidates, crystalStructures, computationalResults, synthesisProcesses, chemicalReactions });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch candidate profile" });
+    }
+  });
+
+  app.get("/api/ml-calibration", async (req, res) => {
+    try {
+      const calibration = getCalibrationData();
+      const tc = req.query.tc ? Number(req.query.tc) : undefined;
+      const confidenceBand = tc !== undefined && Number.isFinite(tc) ? getConfidenceBand(tc) : undefined;
+      res.json({ ...calibration, ...(confidenceBand ? { confidenceBand } : {}) });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute ML calibration" });
     }
   });
 
@@ -291,6 +371,90 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ insights, total });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch novel insights" });
+    }
+  });
+
+  app.get("/api/cross-validation/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const candidates = await storage.getSuperconductorsByFormula(formula);
+      const candidate = candidates[0] ?? { predictedTc: null, stabilityScore: null, electronPhononCoupling: null };
+
+      const mpAvailable = isMPAvailable();
+      let mpData = null;
+      let mpValidation: any[] = [];
+
+      if (mpAvailable) {
+        try {
+          mpData = await fetchMPAllData(formula);
+          mpValidation = crossValidateWithMP(candidate, mpData.summary, mpData.elasticity);
+        } catch {
+          console.log(`[Cross-validation] MP fetch failed for ${formula}`);
+        }
+      }
+
+      let aflowData = null;
+      let aflowValidation: any[] = [];
+      try {
+        aflowData = await fetchAflowData(formula);
+        aflowValidation = crossValidateWithAflow(candidate, aflowData);
+      } catch {
+        console.log(`[Cross-validation] AFLOW fetch failed for ${formula}`);
+      }
+
+      const allValidations = [...mpValidation, ...aflowValidation];
+      const hasDiscrepancies = allValidations.some(v => v.agreement === "major-discrepancy");
+
+      res.json({
+        formula,
+        materialsProject: {
+          available: mpAvailable,
+          hasData: !!mpData?.summary,
+          summary: mpData?.summary ?? null,
+          elasticity: mpData?.elasticity ?? null,
+          phonon: mpData?.phonon ?? null,
+          magnetism: mpData?.magnetism ?? null,
+        },
+        aflow: {
+          available: true,
+          hasData: (aflowData?.entries?.length ?? 0) > 0,
+          entries: aflowData?.entries ?? [],
+        },
+        crossValidation: allValidations,
+        hasDiscrepancies,
+      });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch cross-validation data" });
+    }
+  });
+
+  app.post("/api/validations", writeLimiter, async (req, res) => {
+    try {
+      const parsed = insertExperimentalValidationSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error });
+      const validation = await storage.insertValidation(parsed.data);
+      res.json(validation);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to insert validation" });
+    }
+  });
+
+  app.get("/api/validations/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const validations = await storage.getValidationsByFormula(formula);
+      res.json(validations);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch validations" });
+    }
+  });
+
+  app.get("/api/validation-stats", async (_req, res) => {
+    try {
+      const stats = await storage.getValidationStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch validation stats" });
     }
   });
 

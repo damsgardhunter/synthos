@@ -18,6 +18,94 @@ interface GBModel {
 
 let cachedModel: GBModel | null = null;
 
+interface CalibrationData {
+  r2: number;
+  mae: number;
+  mse: number;
+  rmse: number;
+  nSamples: number;
+  nTrees: number;
+  residuals: number[];
+  percentiles: { p5: number; p10: number; p25: number; p50: number; p75: number; p90: number; p95: number };
+  absResidualPercentiles: { p50: number; p75: number; p90: number; p95: number };
+  predictedVsActual: { formula: string; actual: number; predicted: number; residual: number }[];
+  computedAt: number;
+}
+
+let cachedCalibration: CalibrationData | null = null;
+
+function computePercentile(sorted: number[], p: number): number {
+  const idx = (p / 100) * (sorted.length - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (idx - lower) * (sorted[upper] - sorted[lower]);
+}
+
+function computeCalibration(model: GBModel): CalibrationData {
+  const details: { formula: string; actual: number; predicted: number; residual: number }[] = [];
+  const residuals: number[] = [];
+  let sse = 0;
+  let sst = 0;
+  let totalAbsError = 0;
+
+  const allTc = SUPERCON_TRAINING_DATA.map(e => e.tc);
+  const meanTc = allTc.reduce((s, v) => s + v, 0) / allTc.length;
+
+  for (const entry of SUPERCON_TRAINING_DATA) {
+    try {
+      const features = extractFeatures(entry.formula);
+      const x = featureVectorToArray(features);
+      if (x.some(v => !Number.isFinite(v))) continue;
+      const pred = predictWithModel(model, x);
+      const residual = entry.tc - pred;
+      residuals.push(residual);
+      details.push({ formula: entry.formula, actual: entry.tc, predicted: Math.round(pred * 10) / 10, residual: Math.round(residual * 10) / 10 });
+      sse += residual ** 2;
+      sst += (entry.tc - meanTc) ** 2;
+      totalAbsError += Math.abs(residual);
+    } catch {
+      continue;
+    }
+  }
+
+  const n = details.length;
+  const mse = sse / n;
+  const mae = totalAbsError / n;
+  const r2 = 1 - sse / sst;
+  const rmse = Math.sqrt(mse);
+
+  const sortedResiduals = [...residuals].sort((a, b) => a - b);
+  const absResiduals = residuals.map(r => Math.abs(r)).sort((a, b) => a - b);
+
+  return {
+    r2: Math.round(r2 * 10000) / 10000,
+    mae: Math.round(mae * 100) / 100,
+    mse: Math.round(mse * 100) / 100,
+    rmse: Math.round(rmse * 100) / 100,
+    nSamples: n,
+    nTrees: model.trees.length,
+    residuals,
+    percentiles: {
+      p5: Math.round(computePercentile(sortedResiduals, 5) * 100) / 100,
+      p10: Math.round(computePercentile(sortedResiduals, 10) * 100) / 100,
+      p25: Math.round(computePercentile(sortedResiduals, 25) * 100) / 100,
+      p50: Math.round(computePercentile(sortedResiduals, 50) * 100) / 100,
+      p75: Math.round(computePercentile(sortedResiduals, 75) * 100) / 100,
+      p90: Math.round(computePercentile(sortedResiduals, 90) * 100) / 100,
+      p95: Math.round(computePercentile(sortedResiduals, 95) * 100) / 100,
+    },
+    absResidualPercentiles: {
+      p50: Math.round(computePercentile(absResiduals, 50) * 100) / 100,
+      p75: Math.round(computePercentile(absResiduals, 75) * 100) / 100,
+      p90: Math.round(computePercentile(absResiduals, 90) * 100) / 100,
+      p95: Math.round(computePercentile(absResiduals, 95) * 100) / 100,
+    },
+    predictedVsActual: details,
+    computedAt: Date.now(),
+  };
+}
+
 function featureVectorToArray(f: MLFeatureVector): number[] {
   return [
     f.electronPhononLambda,
@@ -243,6 +331,7 @@ export function getTrainedModel(): GBModel {
   }
 
   cachedModel = trainGradientBoosting(X, y, 200, 0.1, 4);
+  cachedCalibration = computeCalibration(cachedModel);
   return cachedModel;
 }
 
@@ -319,5 +408,30 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
     r2: 1 - sse / sst,
     nTrees: model.trees.length,
     details,
+  };
+}
+
+export function getCalibrationData(): Omit<CalibrationData, 'residuals'> & { residualCount: number } {
+  getTrainedModel();
+  if (!cachedCalibration) {
+    const model = getTrainedModel();
+    cachedCalibration = computeCalibration(model);
+  }
+  const { residuals, ...rest } = cachedCalibration;
+  return { ...rest, residualCount: residuals.length };
+}
+
+export function getConfidenceBand(predictedTc: number): { lower: number; upper: number } {
+  getTrainedModel();
+  if (!cachedCalibration) {
+    const model = getTrainedModel();
+    cachedCalibration = computeCalibration(model);
+  }
+  const p90 = cachedCalibration.absResidualPercentiles.p90;
+  const scaleFactor = Math.max(1, predictedTc / 50);
+  const errorMargin = p90 * Math.sqrt(scaleFactor);
+  return {
+    lower: Math.round(Math.max(0, predictedTc - errorMargin) * 10) / 10,
+    upper: Math.round((predictedTc + errorMargin) * 10) / 10,
   };
 }

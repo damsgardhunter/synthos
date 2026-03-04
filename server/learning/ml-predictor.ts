@@ -19,14 +19,15 @@ import {
   isActinide,
   hasDOrFElectrons,
 } from "./elemental-data";
-import { gbPredict } from "./gradient-boost";
+import { gbPredict, getConfidenceBand } from "./gradient-boost";
+export { getConfidenceBand };
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
-interface MLFeatureVector {
+export interface MLFeatureVector {
   avgElectronegativity: number;
   maxAtomicMass: number;
   numElements: number;

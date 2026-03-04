@@ -436,6 +436,11 @@ async function updateCandidatePhysics(
           ? "strong-coupling phonon-mediated"
           : "phonon-mediated BCS";
       updates.pairingMechanism = mechanism;
+      if (!(updates as any).cooperPairMechanism) {
+        (updates as any).cooperPairMechanism = mechanism === "spin-fluctuation"
+          ? `Unconventional pairing via spin-fluctuation exchange (U/W=${(allData.correlation?.ratio ?? 0).toFixed(2)})`
+          : `${mechanism} with lambda=${allData.coupling.lambda.toFixed(2)}`;
+      }
     }
 
     await storage.updateSuperconductorCandidate(candidateId, updates);

@@ -3,7 +3,8 @@ import {
   elements, materials, learningPhases, novelPredictions, researchLogs,
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
-  researchStrategies, convergenceSnapshots, milestones
+  researchStrategies, convergenceSnapshots, milestones,
+  experimentalValidations
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -13,16 +14,15 @@ import type {
   CrystalStructure, ComputationalResult, NovelInsight,
   InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight,
   ResearchStrategy, ConvergenceSnapshot, Milestone,
-  InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone
+  InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone,
+  ExperimentalValidation, InsertExperimentalValidation
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike, isNull } from "drizzle-orm";
-import { classifyFamily } from "./learning/utils";
+
 
 export interface IStorage {
   getElements(): Promise<Element[]>;
   getElementById(id: number): Promise<Element | undefined>;
-  insertElement(element: InsertElement): Promise<Element>;
-
   getMaterials(limit?: number, offset?: number): Promise<Material[]>;
   getMaterialById(id: string): Promise<Material | undefined>;
   insertMaterial(material: InsertMaterial): Promise<Material>;
@@ -31,9 +31,8 @@ export interface IStorage {
   getLearningPhases(): Promise<LearningPhase[]>;
   getLearningPhaseById(id: number): Promise<LearningPhase | undefined>;
   upsertLearningPhase(phase: InsertLearningPhase): Promise<LearningPhase>;
-  updatePhaseProgress(id: number, progress: number, itemsLearned: number): Promise<void>;
 
-  getNovelPredictions(): Promise<NovelPrediction[]>;
+  getNovelPredictions(limit?: number, offset?: number): Promise<NovelPrediction[]>;
   getNovelPredictionById(id: string): Promise<NovelPrediction | undefined>;
   insertNovelPrediction(pred: InsertNovelPrediction): Promise<NovelPrediction>;
 
@@ -95,7 +94,13 @@ export interface IStorage {
   getNovelPredictionByFormula(formula: string): Promise<NovelPrediction | undefined>;
   updateNovelPrediction(id: string, data: Partial<InsertNovelPrediction>): Promise<void>;
   getTopPredictionFormulas(limit?: number): Promise<string[]>;
-  getDistinctScFamilyCount(): Promise<number>;
+
+  getMaterialCountByElement(symbol: string): Promise<number>;
+  getCandidateCountByElement(symbol: string): Promise<number>;
+
+  insertValidation(validation: InsertExperimentalValidation): Promise<ExperimentalValidation>;
+  getValidationsByFormula(formula: string): Promise<ExperimentalValidation[]>;
+  getValidationStats(): Promise<{ total: number; byResult: Record<string, number> }>;
 
   getStats(): Promise<{
     elementsLearned: number;
@@ -118,11 +123,6 @@ export class DatabaseStorage implements IStorage {
 
   async getElementById(id: number): Promise<Element | undefined> {
     const [el] = await db.select().from(elements).where(eq(elements.id, id));
-    return el;
-  }
-
-  async insertElement(element: InsertElement): Promise<Element> {
-    const [el] = await db.insert(elements).values(element).onConflictDoNothing().returning();
     return el;
   }
 
@@ -161,12 +161,8 @@ export class DatabaseStorage implements IStorage {
     return p;
   }
 
-  async updatePhaseProgress(id: number, progress: number, itemsLearned: number): Promise<void> {
-    await db.update(learningPhases).set({ progress, itemsLearned }).where(eq(learningPhases.id, id));
-  }
-
-  async getNovelPredictions(): Promise<NovelPrediction[]> {
-    return db.select().from(novelPredictions).orderBy(desc(novelPredictions.predictedAt));
+  async getNovelPredictions(limit = 50, offset = 0): Promise<NovelPrediction[]> {
+    return db.select().from(novelPredictions).orderBy(desc(novelPredictions.predictedAt)).limit(limit).offset(offset);
   }
 
   async getNovelPredictionById(id: string): Promise<NovelPrediction | undefined> {
@@ -426,24 +422,21 @@ export class DatabaseStorage implements IStorage {
     return rows.map(r => r.formula);
   }
 
-  async getDistinctScFamilyCount(): Promise<number> {
-    const rows = await db.select({ formula: superconductorCandidates.formula })
-      .from(superconductorCandidates)
-      .orderBy(desc(superconductorCandidates.ensembleScore))
-      .limit(50);
-    const families = new Set(rows.map(r => classifyFamily(r.formula)));
-    return families.size;
-  }
-
   async getStats() {
-    const [elCount] = await db.select({ count: sql<number>`count(*)` }).from(elements);
-    const [matCount] = await db.select({ count: sql<number>`count(*)` }).from(materials);
-    const [predCount] = await db.select({ count: sql<number>`count(*)` }).from(novelPredictions);
-    const [synthCount] = await db.select({ count: sql<number>`count(*)` }).from(synthesisProcesses);
-    const [rxnCount] = await db.select({ count: sql<number>`count(*)` }).from(chemicalReactions);
-    const [scCount] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
-    const [csCount] = await db.select({ count: sql<number>`count(*)` }).from(crystalStructures);
-    const [crCount] = await db.select({ count: sql<number>`count(*)` }).from(computationalResults);
+    const countsResult = await db.execute(sql`
+      SELECT
+        (SELECT count(*) FROM elements) AS elements_count,
+        (SELECT count(*) FROM materials) AS materials_count,
+        (SELECT count(*) FROM novel_predictions) AS predictions_count,
+        (SELECT count(*) FROM synthesis_processes) AS synthesis_count,
+        (SELECT count(*) FROM chemical_reactions) AS reactions_count,
+        (SELECT count(*) FROM superconductor_candidates) AS sc_count,
+        (SELECT count(*) FROM crystal_structures) AS cs_count,
+        (SELECT count(*) FROM computational_results) AS cr_count
+    `);
+    const rows = (countsResult as any).rows ?? countsResult;
+    const c = (Array.isArray(rows) ? rows[0] : rows) ?? {};
+
     const phases = await db.select().from(learningPhases);
     const overallProgress = phases.length > 0
       ? phases.reduce((sum, p) => sum + p.progress, 0) / phases.length
@@ -462,17 +455,56 @@ export class DatabaseStorage implements IStorage {
     }));
 
     return {
-      elementsLearned: Number(elCount.count),
-      materialsIndexed: Number(matCount.count),
-      predictionsGenerated: Number(predCount.count),
+      elementsLearned: Number(c.elements_count),
+      materialsIndexed: Number(c.materials_count),
+      predictionsGenerated: Number(c.predictions_count),
       overallProgress,
-      synthesisProcesses: Number(synthCount.count),
-      chemicalReactions: Number(rxnCount.count),
-      superconductorCandidates: Number(scCount.count),
-      crystalStructures: Number(csCount.count),
-      computationalResults: Number(crCount.count),
+      synthesisProcesses: Number(c.synthesis_count),
+      chemicalReactions: Number(c.reactions_count),
+      superconductorCandidates: Number(c.sc_count),
+      crystalStructures: Number(c.cs_count),
+      computationalResults: Number(c.cr_count),
       pipelineStages,
     };
+  }
+
+  async getMaterialCountByElement(symbol: string): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` })
+      .from(materials)
+      .where(sql`${materials.formula} ~ ('(^|[^a-z])' || ${symbol} || '([^a-z]|[0-9]|$)')`);
+    return Number(count);
+  }
+
+  async getCandidateCountByElement(symbol: string): Promise<number> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` })
+      .from(superconductorCandidates)
+      .where(sql`${superconductorCandidates.formula} ~ ('(^|[^a-z])' || ${symbol} || '([^a-z]|[0-9]|$)')`);
+    return Number(count);
+  }
+
+  async insertValidation(validation: InsertExperimentalValidation): Promise<ExperimentalValidation> {
+    const [v] = await db.insert(experimentalValidations).values(validation).returning();
+    return v;
+  }
+
+  async getValidationsByFormula(formula: string): Promise<ExperimentalValidation[]> {
+    return db.select().from(experimentalValidations)
+      .where(eq(experimentalValidations.formula, formula))
+      .orderBy(desc(experimentalValidations.performedAt));
+  }
+
+  async getValidationStats(): Promise<{ total: number; byResult: Record<string, number> }> {
+    const rows = await db.select({
+      result: experimentalValidations.result,
+      count: sql<number>`count(*)`,
+    }).from(experimentalValidations).groupBy(experimentalValidations.result);
+    const byResult: Record<string, number> = {};
+    let total = 0;
+    for (const r of rows) {
+      byResult[r.result] = Number(r.count);
+      total += Number(r.count);
+    }
+    return { total, byResult };
   }
 
   async deduplicateSuperconductorCandidates(): Promise<number> {

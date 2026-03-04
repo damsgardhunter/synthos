@@ -237,18 +237,60 @@ export async function fetchMagnetism(formula: string): Promise<MPMagnetismData |
   return result;
 }
 
+export async function fetchPhonon(formula: string): Promise<MPPhononData | null> {
+  const cached = await getCachedData(formula, "phonon");
+  if (cached) return cached as MPPhononData;
+
+  const normalizedFormula = normalizeFormula(formula);
+
+  const data = await mpFetch("/materials/phonon/", {
+    formula: normalizedFormula,
+    fields: "material_id,last_phonon_freq,ph_bs,ph_dos",
+    _limit: "1",
+  });
+
+  if (!data?.data?.length) {
+    const noData: MPPhononData = { hasPhononData: false, lastPhononFreq: null, phononBandStructure: null, phononDos: null };
+    await setCachedData(formula, "phonon", noData);
+    return noData;
+  }
+
+  const entry = data.data[0];
+  const result: MPPhononData = {
+    hasPhononData: true,
+    lastPhononFreq: entry.last_phonon_freq ?? null,
+    phononBandStructure: entry.ph_bs ? { available: true } : null,
+    phononDos: entry.ph_dos ? { available: true } : null,
+  };
+
+  await setCachedData(formula, "phonon", result, entry.material_id);
+  return result;
+}
+
+export async function fetchThermodynamicStability(formula: string): Promise<{ energyAboveHull: number; isStable: boolean; decompositionProducts: string[] } | null> {
+  const summary = await fetchSummary(formula);
+  if (!summary) return null;
+  return {
+    energyAboveHull: summary.energyAboveHull,
+    isStable: summary.isStable,
+    decompositionProducts: [],
+  };
+}
+
 export async function fetchAllData(formula: string): Promise<{
   summary: MPSummaryData | null;
   elasticity: MPElasticityData | null;
   magnetism: MPMagnetismData | null;
+  phonon: MPPhononData | null;
 }> {
-  const [summary, elasticity, magnetism] = await Promise.all([
+  const [summary, elasticity, magnetism, phonon] = await Promise.all([
     fetchSummary(formula),
     fetchElasticity(formula),
     fetchMagnetism(formula),
+    fetchPhonon(formula),
   ]);
 
-  return { summary, elasticity, magnetism };
+  return { summary, elasticity, magnetism, phonon };
 }
 
 export function isApiAvailable(): boolean {

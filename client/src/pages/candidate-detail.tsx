@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useRoute, Link } from "wouter";
 import type { SuperconductorCandidate, CrystalStructure, ComputationalResult, SynthesisProcess, ChemicalReaction } from "@shared/schema";
@@ -5,11 +6,61 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { safeNum, safeDisplay } from "@/lib/utils";
+import { useMutation } from "@tanstack/react-query";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
   ArrowLeft, Thermometer, Gauge, CheckCircle2, XCircle,
   Atom, Layers, Beaker, FlaskConical, Activity, Magnet,
-  Shield, Target, Zap,
+  Shield, Target, Zap, Database, AlertTriangle, ExternalLink,
+  ClipboardCheck, Plus,
 } from "lucide-react";
+
+interface CalibrationResponse {
+  r2: number;
+  mae: number;
+  rmse: number;
+  absResidualPercentiles: { p50: number; p75: number; p90: number; p95: number };
+  residualCount: number;
+}
+
+function computeConfidenceBand(predictedTc: number, p90: number): { lower: number; upper: number } {
+  const scaleFactor = Math.max(1, predictedTc / 50);
+  const errorMargin = p90 * Math.sqrt(scaleFactor);
+  return {
+    lower: Math.round(Math.max(0, predictedTc - errorMargin) * 10) / 10,
+    upper: Math.round((predictedTc + errorMargin) * 10) / 10,
+  };
+}
+
+function TcConfidenceRange({ predictedTc, p90 }: { predictedTc: number; p90: number }) {
+  const band = computeConfidenceBand(predictedTc, p90);
+  return (
+    <div className="flex items-center gap-1.5 mt-1" data-testid="tc-confidence-range">
+      <span className="text-[10px] text-muted-foreground">90% CI:</span>
+      <span className="text-xs font-mono text-muted-foreground">{band.lower}K</span>
+      <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden relative min-w-[50px]">
+        <div
+          className="absolute inset-y-0 bg-primary/25 rounded-full"
+          style={{
+            left: `${Math.min(95, (band.lower / Math.max(band.upper, 1)) * 100)}%`,
+            right: "0%",
+          }}
+        />
+        <div
+          className="absolute inset-y-0 w-0.5 bg-primary"
+          style={{
+            left: `${Math.min(95, (predictedTc / Math.max(band.upper, 1)) * 100)}%`,
+          }}
+        />
+      </div>
+      <span className="text-xs font-mono text-muted-foreground">{band.upper}K</span>
+    </div>
+  );
+}
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 
 function ConfidenceBadge({ level }: { level?: string | null }) {
   if (!level) return null;
@@ -73,7 +124,7 @@ function ScoreBar({ label, score, color }: { label: string; score: number | null
   );
 }
 
-function CandidateHeader({ candidate }: { candidate: SuperconductorCandidate }) {
+function CandidateHeader({ candidate, p90 }: { candidate: SuperconductorCandidate; p90?: number }) {
   const statusColor = STATUS_COLORS[candidate.status] ?? STATUS_COLORS["theoretical"];
   const tcColor = (candidate.predictedTc ?? 0) >= 293 ? "text-green-600 dark:text-green-400" : "text-foreground";
 
@@ -105,6 +156,9 @@ function CandidateHeader({ candidate }: { candidate: SuperconductorCandidate }) 
               </p>
               <ConfidenceBadge level={candidate.dataConfidence} />
             </div>
+            {candidate.predictedTc != null && p90 != null && (
+              <TcConfidenceRange predictedTc={candidate.predictedTc} p90={p90} />
+            )}
           </div>
           <div className="p-3 bg-muted/50 rounded-md">
             <div className="flex items-center gap-1.5 mb-1">
@@ -210,7 +264,7 @@ function MLScoresSection({ candidate }: { candidate: SuperconductorCandidate }) 
 
         {candidate.cooperPairMechanism && (
           <p className="text-xs text-muted-foreground">
-            <span className="font-semibold text-foreground">Cooper Pair Mechanism: </span>
+            <span className="font-semibold text-foreground">Cooper Pair Description: </span>
             {candidate.cooperPairMechanism}
           </p>
         )}
@@ -382,6 +436,234 @@ function ReactionsSection({ reactions }: { reactions: ChemicalReaction[] }) {
   );
 }
 
+interface CrossValidationEntry {
+  source: string;
+  property: string;
+  predictedValue: number | null;
+  externalValue: number;
+  deviationPercent: number | null;
+  agreement: "match" | "minor-discrepancy" | "major-discrepancy" | "no-comparison";
+  unit: string;
+}
+
+interface CrossValidationData {
+  formula: string;
+  materialsProject: {
+    available: boolean;
+    hasData: boolean;
+    summary: any;
+    elasticity: any;
+    phonon: any;
+    magnetism: any;
+  };
+  aflow: {
+    available: boolean;
+    hasData: boolean;
+    entries: any[];
+  };
+  crossValidation: CrossValidationEntry[];
+  hasDiscrepancies: boolean;
+}
+
+const AGREEMENT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  "match": { bg: "bg-green-100 dark:bg-green-950", text: "text-green-700 dark:text-green-400", label: "Match" },
+  "minor-discrepancy": { bg: "bg-yellow-100 dark:bg-yellow-950", text: "text-yellow-700 dark:text-yellow-400", label: "Minor Deviation" },
+  "major-discrepancy": { bg: "bg-red-100 dark:bg-red-950", text: "text-red-700 dark:text-red-400", label: "Major Deviation (>30%)" },
+  "no-comparison": { bg: "bg-gray-100 dark:bg-gray-900", text: "text-gray-600 dark:text-gray-400", label: "Reference Only" },
+};
+
+function ExternalDataSourcesSection({ formula }: { formula: string }) {
+  const { data, isLoading } = useQuery<CrossValidationData>({
+    queryKey: ["/api/cross-validation", encodeURIComponent(formula)],
+    enabled: !!formula,
+  });
+
+  if (isLoading) {
+    return (
+      <Card data-testid="external-data-sources">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Database className="h-5 w-5" />
+            External Data Sources
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Skeleton className="h-32" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!data) return null;
+
+  const mpStatus = data.materialsProject;
+  const aflowStatus = data.aflow;
+  const validations = data.crossValidation ?? [];
+
+  return (
+    <Card data-testid="external-data-sources">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-lg flex items-center gap-2">
+          <Database className="h-5 w-5" />
+          External Data Sources
+          {data.hasDiscrepancies && (
+            <Badge className="bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400 border-0 text-[10px]">
+              <AlertTriangle className="h-3 w-3 mr-1" />
+              Discrepancies Found
+            </Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="p-3 bg-muted/50 rounded-md" data-testid="mp-status">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-sm font-bold">Materials Project</span>
+              {mpStatus.available ? (
+                mpStatus.hasData ? (
+                  <Badge className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-0 text-[10px]">Data Found</Badge>
+                ) : (
+                  <Badge variant="outline" className="text-[10px]">No Match</Badge>
+                )
+              ) : (
+                <Badge variant="outline" className="text-[10px]">API Key Required</Badge>
+              )}
+            </div>
+            {mpStatus.hasData && mpStatus.summary && (
+              <div className="space-y-1 text-xs">
+                <div className="flex justify-between gap-1">
+                  <span className="text-muted-foreground">E above hull</span>
+                  <span className="font-mono">{mpStatus.summary.energyAboveHull?.toFixed(4)} eV/atom</span>
+                </div>
+                <div className="flex justify-between gap-1">
+                  <span className="text-muted-foreground">Band Gap</span>
+                  <span className="font-mono">{mpStatus.summary.bandGap?.toFixed(3)} eV</span>
+                </div>
+                <div className="flex justify-between gap-1">
+                  <span className="text-muted-foreground">Metallic</span>
+                  <span className="font-mono">{mpStatus.summary.isMetallic ? "Yes" : "No"}</span>
+                </div>
+                {mpStatus.summary.spaceGroup && (
+                  <div className="flex justify-between gap-1">
+                    <span className="text-muted-foreground">Space Group</span>
+                    <span className="font-mono">{mpStatus.summary.spaceGroup}</span>
+                  </div>
+                )}
+              </div>
+            )}
+            {mpStatus.hasData && mpStatus.elasticity && (
+              <div className="space-y-1 text-xs mt-2 pt-2 border-t border-border/50">
+                <div className="flex justify-between gap-1">
+                  <span className="text-muted-foreground">Bulk Modulus</span>
+                  <span className="font-mono">{mpStatus.elasticity.bulkModulus?.toFixed(1)} GPa</span>
+                </div>
+                <div className="flex justify-between gap-1">
+                  <span className="text-muted-foreground">Shear Modulus</span>
+                  <span className="font-mono">{mpStatus.elasticity.shearModulus?.toFixed(1)} GPa</span>
+                </div>
+              </div>
+            )}
+            {mpStatus.hasData && mpStatus.phonon && mpStatus.phonon.hasPhononData && (
+              <div className="space-y-1 text-xs mt-2 pt-2 border-t border-border/50">
+                <div className="flex justify-between gap-1">
+                  <span className="text-muted-foreground">Phonon Data</span>
+                  <span className="font-mono">Available</span>
+                </div>
+                {mpStatus.phonon.lastPhononFreq != null && (
+                  <div className="flex justify-between gap-1">
+                    <span className="text-muted-foreground">Last Phonon Freq</span>
+                    <span className="font-mono">{mpStatus.phonon.lastPhononFreq.toFixed(1)} THz</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="p-3 bg-muted/50 rounded-md" data-testid="aflow-status">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-sm font-bold">AFLOW</span>
+              {aflowStatus.hasData ? (
+                <Badge className="bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 border-0 text-[10px]">
+                  {aflowStatus.entries.length} {aflowStatus.entries.length === 1 ? "Entry" : "Entries"}
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-[10px]">No Match</Badge>
+              )}
+            </div>
+            {aflowStatus.hasData && aflowStatus.entries[0] && (
+              <div className="space-y-1 text-xs">
+                {aflowStatus.entries[0].spaceGroupSymbol && (
+                  <div className="flex justify-between gap-1">
+                    <span className="text-muted-foreground">Space Group</span>
+                    <span className="font-mono">{aflowStatus.entries[0].spaceGroupSymbol}</span>
+                  </div>
+                )}
+                {aflowStatus.entries[0].enthalpy_formation_atom != null && (
+                  <div className="flex justify-between gap-1">
+                    <span className="text-muted-foreground">Formation H</span>
+                    <span className="font-mono">{aflowStatus.entries[0].enthalpy_formation_atom.toFixed(4)} eV/atom</span>
+                  </div>
+                )}
+                {aflowStatus.entries[0].bandgap != null && (
+                  <div className="flex justify-between gap-1">
+                    <span className="text-muted-foreground">Band Gap</span>
+                    <span className="font-mono">{aflowStatus.entries[0].bandgap.toFixed(3)} eV</span>
+                  </div>
+                )}
+                {aflowStatus.entries[0].Bvoigt != null && (
+                  <div className="flex justify-between gap-1">
+                    <span className="text-muted-foreground">Bulk Modulus</span>
+                    <span className="font-mono">{aflowStatus.entries[0].Bvoigt.toFixed(1)} GPa</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {validations.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground">Cross-Validation Results</p>
+            <div className="space-y-1.5">
+              {validations.map((v: CrossValidationEntry, idx: number) => {
+                const style = AGREEMENT_STYLES[v.agreement] ?? AGREEMENT_STYLES["no-comparison"];
+                return (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between gap-2 p-2 bg-muted/30 rounded text-xs"
+                    data-testid={`cross-validation-${idx}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Badge variant="outline" className="text-[10px] shrink-0">{v.source}</Badge>
+                      <span className="text-muted-foreground truncate">{v.property}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-mono">
+                        {typeof v.externalValue === "number" ? v.externalValue.toFixed(3) : "--"} {v.unit}
+                      </span>
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${style.bg} ${style.text}`}>
+                        {v.agreement === "major-discrepancy" && <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />}
+                        {v.agreement === "match" && <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />}
+                        {style.label}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {validations.length === 0 && !mpStatus.hasData && !aflowStatus.hasData && (
+          <p className="text-xs text-muted-foreground text-center py-2">
+            No external data found for this composition in Materials Project or AFLOW databases.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function PipelineResultsSection({ results }: { results: ComputationalResult[] }) {
   if (results.length === 0) return null;
 
@@ -437,6 +719,178 @@ function PipelineResultsSection({ results }: { results: ComputationalResult[] })
   );
 }
 
+function ExperimentalValidationSection({ formula }: { formula: string }) {
+  const [showForm, setShowForm] = useState(false);
+  const [validationType, setValidationType] = useState("");
+  const [result, setResult] = useState("");
+  const [measuredTc, setMeasuredTc] = useState("");
+  const [measuredPressure, setMeasuredPressure] = useState("");
+  const [notes, setNotes] = useState("");
+
+  const { data: validations, isLoading } = useQuery<any[]>({
+    queryKey: ["/api/validations", encodeURIComponent(formula)],
+    enabled: !!formula,
+  });
+
+  const mutation = useMutation({
+    mutationFn: async (body: any) => {
+      await apiRequest("POST", "/api/validations", body);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/validations", encodeURIComponent(formula)] });
+      setShowForm(false);
+      setValidationType("");
+      setResult("");
+      setMeasuredTc("");
+      setMeasuredPressure("");
+      setNotes("");
+    },
+  });
+
+  const handleSubmit = () => {
+    if (!validationType || !result) return;
+    mutation.mutate({
+      formula,
+      validationType,
+      result,
+      measuredTc: measuredTc ? parseFloat(measuredTc) : null,
+      measuredPressure: measuredPressure ? parseFloat(measuredPressure) : null,
+      notes: notes || null,
+    });
+  };
+
+  const RESULT_COLORS: Record<string, string> = {
+    confirmed: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
+    partial: "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300",
+    failed: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+    inconclusive: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
+  };
+
+  return (
+    <Card data-testid="experimental-validations">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <ClipboardCheck className="h-5 w-5" />
+            Experimental Validations ({validations?.length ?? 0})
+          </CardTitle>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowForm(!showForm)}
+            data-testid="button-log-validation"
+          >
+            <Plus className="h-3.5 w-3.5 mr-1" />
+            Log Validation
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {showForm && (
+          <div className="p-3 bg-muted/50 rounded-md space-y-3 border border-border" data-testid="validation-form">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Test Type</label>
+                <Select value={validationType} onValueChange={setValidationType}>
+                  <SelectTrigger data-testid="select-validation-type"><SelectValue placeholder="Select type" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="resistance">Resistance Measurement</SelectItem>
+                    <SelectItem value="meissner">Meissner Effect Test</SelectItem>
+                    <SelectItem value="xrd">X-Ray Diffraction</SelectItem>
+                    <SelectItem value="tc_measurement">Tc Measurement</SelectItem>
+                    <SelectItem value="pressure_test">Pressure Test</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Result</label>
+                <Select value={result} onValueChange={setResult}>
+                  <SelectTrigger data-testid="select-validation-result"><SelectValue placeholder="Select result" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="confirmed">Confirmed</SelectItem>
+                    <SelectItem value="partial">Partial</SelectItem>
+                    <SelectItem value="failed">Failed</SelectItem>
+                    <SelectItem value="inconclusive">Inconclusive</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Measured Tc (K)</label>
+                <Input
+                  type="number"
+                  placeholder="Optional"
+                  value={measuredTc}
+                  onChange={e => setMeasuredTc(e.target.value)}
+                  data-testid="input-measured-tc"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Pressure (GPa)</label>
+                <Input
+                  type="number"
+                  placeholder="Optional"
+                  value={measuredPressure}
+                  onChange={e => setMeasuredPressure(e.target.value)}
+                  data-testid="input-measured-pressure"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Notes</label>
+              <Textarea
+                placeholder="Lab notes..."
+                value={notes}
+                onChange={e => setNotes(e.target.value)}
+                className="h-16"
+                data-testid="textarea-validation-notes"
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => setShowForm(false)} data-testid="button-cancel-validation">Cancel</Button>
+              <Button size="sm" onClick={handleSubmit} disabled={!validationType || !result || mutation.isPending} data-testid="button-submit-validation">
+                {mutation.isPending ? "Saving..." : "Save"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {isLoading ? (
+          <Skeleton className="h-20" />
+        ) : validations && validations.length > 0 ? (
+          <div className="space-y-2">
+            {validations.map((v: any) => (
+              <div key={v.id} className="p-3 bg-muted/50 rounded-md" data-testid={`validation-entry-${v.id}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium capitalize">{v.validationType?.replace(/_/g, " ")}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {v.performedAt ? new Date(v.performedAt).toLocaleDateString() : "Unknown date"}
+                    </p>
+                  </div>
+                  <Badge className={`${RESULT_COLORS[v.result] ?? RESULT_COLORS.inconclusive} border-0 text-[10px]`}>
+                    {v.result}
+                  </Badge>
+                </div>
+                {(v.measuredTc != null || v.measuredPressure != null) && (
+                  <div className="flex gap-4 mt-1.5 text-xs">
+                    {v.measuredTc != null && <span className="text-muted-foreground">Tc: <span className="font-mono font-medium text-foreground">{v.measuredTc}K</span></span>}
+                    {v.measuredPressure != null && <span className="text-muted-foreground">P: <span className="font-mono font-medium text-foreground">{v.measuredPressure} GPa</span></span>}
+                  </div>
+                )}
+                {v.notes && <p className="text-xs text-muted-foreground mt-1.5">{v.notes}</p>}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground text-center py-4">No experimental validations logged yet</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function CandidateDetail() {
   const [, params] = useRoute("/candidate/:formula");
   const formula = params?.formula ? decodeURIComponent(params.formula) : "";
@@ -445,6 +899,12 @@ export default function CandidateDetail() {
     queryKey: ["/api/candidate-profile", encodeURIComponent(formula)],
     enabled: !!formula,
   });
+
+  const { data: calibrationData } = useQuery<CalibrationResponse>({
+    queryKey: ["/api/ml-calibration"],
+  });
+
+  const p90 = calibrationData?.absResidualPercentiles?.p90;
 
   if (isLoading) {
     return (
@@ -491,7 +951,11 @@ export default function CandidateDetail() {
         </Card>
       )}
 
-      {candidate && <CandidateHeader candidate={candidate} />}
+      {candidate && <CandidateHeader candidate={candidate} p90={p90} />}
+
+      {formula && <ExternalDataSourcesSection formula={formula} />}
+
+      {formula && <ExperimentalValidationSection formula={formula} />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {candidate && <MLScoresSection candidate={candidate} />}

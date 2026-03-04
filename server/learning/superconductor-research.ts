@@ -489,7 +489,9 @@ Return JSON with 'candidates' array:
           pressureGpa: c.pressureGpa ?? null,
           meissnerEffect: c.meissnerEffect ?? false,
           zeroResistance: c.zeroResistance ?? false,
-          cooperPairMechanism: c.cooperPairMechanism ?? null,
+          cooperPairMechanism: c.cooperPairMechanism ?? (features.correlationStrength > 0.6
+            ? "Unconventional pairing via spin-fluctuation exchange"
+            : "Phonon-mediated BCS pairing"),
           crystalStructure: c.crystalStructure ?? null,
           quantumCoherence: c.quantumCoherence ?? null,
           stabilityScore: features.cooperPairStrength,

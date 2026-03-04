@@ -69,10 +69,21 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - Fe2As2: Tc=0K, moderately correlated, AFM competing phase
 - YBCO: Tc=0K from Eliashberg (correctly flags as unconventional/strongly correlated)
 
+### Infrastructure (v2.0)
+- **Rate Limiting**: express-rate-limit — 100 req/min general, 30 write, 10 engine control
+- **In-Memory Cache**: server/cache.ts — TTL cache for elements (1hr), stats (30s), crystal/computational results (5min)
+- **DB Indexes**: On formula columns, timestamps, predictedTc, ensembleScore, pipelineStage
+- **API Pagination**: novel-predictions endpoint supports limit/offset
+- **Experimental Validations**: experimental_validations table — types: resistance/meissner/xrd/tc_measurement/pressure_test, results: confirmed/partial/failed/inconclusive
+- **ML Calibration**: Confidence bands from gradient-boost training residuals; error bars on Tc predictions across UI
+- **Cross-Validation**: AFLOW REST API client (server/learning/aflow-client.ts, no key required) + enhanced Materials Project queries; External Data Sources section on candidate detail pages
+- **Interactive Periodic Table**: 18-column grid layout replacing list-based atomic explorer; element-to-materials/candidates links
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini via Replit AI Integrations, used in NLP, formula generation, ML refinement, and knowledge base sourcing.
 - **PostgreSQL**: For persistent data storage.
 - **OQMD API**: For live materials data fetching.
 - **NIST WebBook**: For thermodynamic and spectroscopic data.
 - **Materials Project**: For DFT-computed band gaps and formation energies (MATERIALS_PROJECT_API_KEY secret).
+- **AFLOW REST API**: For crystal structure and electronic property cross-validation (public, no key required).
 - **Materials Science Knowledge Base**: OpenAI-sourced real materials data from peer-reviewed literature.
