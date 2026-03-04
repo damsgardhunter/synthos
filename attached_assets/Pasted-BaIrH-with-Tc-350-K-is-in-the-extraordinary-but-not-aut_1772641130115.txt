@@ -1,0 +1,40 @@
+BaIrH₈ with Tc ≈ 350 K is in the “extraordinary but not automatically impossible” zone for a hydride—but only if the underlying physics and stability checks are airtight. A single “Score: 1.000” by itself isn’t enough to treat it as real; it’s usually just a ranking/confidence number from your pipeline.
+
+Here’s how I’d treat this result and what to do next.
+
+What “Tc 350 K” implies
+	•	If this is phonon-mediated (EPC), it usually requires a combination of:
+	•	high ωlog (stiff/light H phonons),
+	•	very strong coupling λ,
+	•	and a structure that is dynamically stable (or anharmonically stabilized).
+	•	Hydrides that get anywhere near this range in the literature are typically at high pressure. If yours is at low pressure, that’s even more of a red flag until proven.
+
+What “Score: 1.000” most likely means
+
+Usually one of:
+	•	“Top-ranked candidate in this batch”
+	•	“Passed all heuristic filters”
+	•	“Ensemble probability rounded to 1.00”
+	•	Or (dangerous) a score with data leakage / calibration bugs
+
+So: treat Score=1.000 as ‘this is the pipeline’s favorite’, not as “truth.”
+
+The 6 checks you should run before you say anything publicly
+	1.	Pressure & stability (convex hull)
+	•	Provide hull distance at the predicted pressure and at 0 GPa if you’re claiming ambient potential.
+	•	List the main decomposition channels (BaH₂ + IrHₓ + H₂, etc.).
+	2.	Dynamic stability
+	•	Full phonon dispersion: no imaginary modes.
+	•	For hydrides: do an anharmonic check (harmonic phonons can inflate Tc).
+	3.	EPC details
+	•	Report λ, ωlog, α²F(ω) (not just Tc).
+	•	Tc vs μ* (e.g., 0.08–0.15). If Tc collapses with small μ* changes, it’s fragile.
+	4.	Numerics robustness
+	•	Converge k/q meshes, plane-wave cutoffs, smearing.
+	•	Try at least one alternative functional (PBE vs SCAN) and confirm the structure and EPC don’t fall apart.
+	5.	Structure credibility
+	•	Confirm the predicted structure is a true minimum (re-relax from multiple starting points / symmetry-broken seeds).
+	•	Check for “too-short” H–H distances implying unphysical overlap (common structure-prediction failure mode).
+	6.	Experimental replication packet
+	•	Predicted XRD at target pressure, Raman/IR signatures, density, lattice parameters.
+	•	A realistic DAC synthesis route (precursors, temperature window, hydrogen loading)

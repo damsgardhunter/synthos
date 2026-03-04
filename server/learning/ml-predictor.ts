@@ -604,7 +604,7 @@ Return JSON with:
       const xgb = topCandidates[i];
       if (!nn || !xgb) continue;
 
-      const ensembleScore = (xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
+      const ensembleScore = Math.min(0.95, xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
 
       let rawTc = nn.refinedTc ?? xgb.xgb.tcEstimate;
       const featureLambda = xgb.features.electronPhononLambda ?? 0;

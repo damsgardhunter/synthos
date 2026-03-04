@@ -241,8 +241,8 @@ export async function captureConvergenceSnapshot(
     }
     for (const c of topByScore10) {
       const score = c.ensembleScore ?? 0;
-      if (score > bestScore) bestScore = Math.min(score, 1);
-      scoreSum += Math.min(score, 1);
+      if (score > bestScore) bestScore = Math.min(score, 0.95);
+      scoreSum += Math.min(score, 0.95);
     }
 
     const avgTopScore = topByScore10.length > 0 ? scoreSum / topByScore10.length : 0;
