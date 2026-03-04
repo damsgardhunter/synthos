@@ -224,6 +224,21 @@ export const milestones = pgTable("milestones", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const mpMaterialCache = pgTable("mp_material_cache", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  mpId: text("mp_id"),
+  dataType: text("data_type").notNull(),
+  data: jsonb("data").notNull(),
+  fetchedAt: timestamp("fetched_at").defaultNow(),
+}, (table) => [
+  uniqueIndex("mp_cache_formula_type_idx").on(table.formula, table.dataType),
+]);
+
+export const insertMpMaterialCacheSchema = createInsertSchema(mpMaterialCache).omit({ fetchedAt: true } as any);
+export type MpMaterialCache = typeof mpMaterialCache.$inferSelect;
+export type InsertMpMaterialCache = z.infer<typeof insertMpMaterialCacheSchema>;
+
 export const insertElementSchema = createInsertSchema(elements);
 export const insertMaterialSchema = createInsertSchema(materials).omit({ learnedAt: true });
 export const insertLearningPhaseSchema = createInsertSchema(learningPhases).omit({ startedAt: true, completedAt: true });

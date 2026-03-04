@@ -201,7 +201,7 @@ async function stage4_SynthesisFeasibility(
     return { passed: false, reason: "Could not predict crystal structure", data: {} };
   }
 
-  const stability = evaluateConvexHullStability(structure.decompositionEnergy);
+  const stability = await evaluateConvexHullStability(structure.decompositionEnergy, candidate.formula);
   const isSynthesizable = structure.synthesizability > 0.3;
   const isStableOrMetastable = stability.isStable || stability.isMetastable;
   const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 1 && (stability.isStable || stability.isMetastable);

@@ -9,6 +9,17 @@ import {
   assessCorrelationStrength,
 } from "./physics-engine";
 import { classifyFamily } from "./utils";
+import {
+  ELEMENTAL_DATA,
+  getElementData,
+  getCompositionWeightedProperty,
+  getAverageMass,
+  getLightestMass,
+  isTransitionMetal,
+  isRareEarth,
+  isActinide,
+  hasDOrFElectrons,
+} from "./elemental-data";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -42,24 +53,18 @@ interface MLFeatureVector {
   logPhononFreq: number;
   upperCriticalField: number | null;
   metallicity: number;
+  avgAtomicRadius: number;
+  pettiforNumber: number;
+  valenceElectronConcentration: number;
+  enSpread: number;
+  hydrogenRatio: number;
+  debyeTemperature: number;
+  avgSommerfeldGamma: number;
+  avgBulkModulus: number;
 }
 
-const TRANSITION_METALS = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg"];
-const RARE_EARTHS = ["La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu","Sc","Y"];
 const CHALCOGENS = ["O","S","Se","Te"];
 const PNICTOGENS = ["N","P","As","Sb","Bi"];
-const ELECTRONEGATIVITY: Record<string, number> = {
-  H:2.2,He:0,Li:0.98,Be:1.57,B:2.04,C:2.55,N:3.04,O:3.44,F:3.98,Na:0.93,Mg:1.31,Al:1.61,Si:1.9,P:2.19,S:2.58,Cl:3.16,
-  K:0.82,Ca:1.0,Ti:1.54,V:1.63,Cr:1.66,Mn:1.55,Fe:1.83,Co:1.88,Ni:1.91,Cu:1.9,Zn:1.65,Ga:1.81,Ge:2.01,As:2.18,Se:2.55,
-  Sr:0.95,Y:1.22,Zr:1.33,Nb:1.6,Mo:2.16,Ru:2.2,Rh:2.28,Pd:2.2,Ag:1.93,In:1.78,Sn:1.96,Sb:2.05,Te:2.1,
-  Ba:0.89,La:1.1,Hf:1.3,Ta:1.5,W:2.36,Re:1.9,Os:2.2,Ir:2.2,Pt:2.28,Au:2.54,Tl:1.62,Pb:2.33,Bi:2.02,
-};
-const ATOMIC_MASS: Record<string, number> = {
-  H:1,He:4,Li:7,Be:9,B:11,C:12,N:14,O:16,F:19,Na:23,Mg:24,Al:27,Si:28,P:31,S:32,Cl:35,
-  K:39,Ca:40,Ti:48,V:51,Cr:52,Mn:55,Fe:56,Co:59,Ni:59,Cu:64,Zn:65,Ga:70,Ge:73,As:75,Se:79,
-  Sr:88,Y:89,Zr:91,Nb:93,Mo:96,Ru:101,Rh:103,Pd:106,Ag:108,In:115,Sn:119,Sb:122,Te:128,
-  Ba:137,La:139,Hf:178,Ta:181,W:184,Re:186,Os:190,Ir:192,Pt:195,Au:197,Tl:204,Pb:207,Bi:209,
-};
 
 function parseFormula(formula: string): string[] {
   const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
@@ -67,18 +72,34 @@ function parseFormula(formula: string): string[] {
   return matches ? [...new Set(matches)] : [];
 }
 
+function parseFormulaCounts(formula: string): Record<string, number> {
+  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseFloat(match[2]) : 1;
+    counts[el] = (counts[el] || 0) + num;
+  }
+  return counts;
+}
+
 export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext): MLFeatureVector {
   const elements = parseFormula(formula);
-  const enValues = elements.map(e => ELECTRONEGATIVITY[e] ?? 1.5);
-  const massValues = elements.map(e => ATOMIC_MASS[e] ?? 50);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
 
-  const hasTransitionMetal = elements.some(e => TRANSITION_METALS.includes(e));
-  const hasRareEarth = elements.some(e => RARE_EARTHS.includes(e));
+  const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
+  const massValues = elements.map(e => getElementData(e)?.atomicMass ?? 50);
+
+  const hasTransitionMetal = elements.some(e => isTransitionMetal(e));
+  const hasRareEarth = elements.some(e => isRareEarth(e));
   const hasHydrogen = elements.includes("H");
   const hasChalcogen = elements.some(e => CHALCOGENS.includes(e));
   const hasPnictogen = elements.some(e => PNICTOGENS.includes(e));
 
-  const avgEN = enValues.length > 0 ? enValues.reduce((a,b) => a+b, 0) / enValues.length : 1.5;
+  const avgEN = getCompositionWeightedProperty(counts, "paulingElectronegativity") ?? 1.5;
   const enSpread = enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
 
   const hasCu = elements.includes("Cu");
@@ -89,16 +110,6 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const cooperPairStrength = (hasTransitionMetal ? 0.3 : 0) + (hasHydrogen ? 0.25 : 0) +
     (dWaveSymmetry ? 0.2 : 0) + (layeredStructure ? 0.15 : 0) + (enSpread > 1.5 ? 0.1 : 0);
 
-  const phononCouplingEstimate = hasHydrogen ? 0.8 :
-    (hasTransitionMetal && hasChalcogen) ? 0.5 :
-    hasRareEarth ? 0.4 : 0.2;
-
-  const electronDensityEstimate = hasTransitionMetal ? 0.7 :
-    (mat?.bandGap === 0 || mat?.bandGap === null) ? 0.6 : 0.3;
-
-  const meissnerPotential = cooperPairStrength * 0.4 + phononCouplingEstimate * 0.3 +
-    electronDensityEstimate * 0.2 + (layeredStructure ? 0.1 : 0);
-
   const electronic = computeElectronicStructure(formula, mat?.spacegroup);
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
@@ -106,6 +117,14 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const useLambda = physics?.verifiedLambda ?? coupling.lambda;
   const useCorrelation = physics?.correlationStrength ?? correlation.ratio;
+
+  const phononCouplingEstimate = Math.min(1.0, useLambda / 3.0);
+
+  const electronDensityEstimate = electronic.metallicity > 0.5 ? 0.5 + electronic.densityOfStatesAtFermi * 0.05 :
+    (mat?.bandGap === 0 || mat?.bandGap === null) ? 0.6 : 0.3;
+
+  const meissnerPotential = cooperPairStrength * 0.3 + phononCouplingEstimate * 0.35 +
+    electronDensityEstimate * 0.2 + (layeredStructure ? 0.1 : 0) + (electronic.metallicity > 0.7 ? 0.05 : 0);
 
   const crystalDim = crystal?.dimensionality;
   const dimensionalityScore = crystalDim === "2D" ? 0.9 :
@@ -115,8 +134,26 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     electronic.fermiSurfaceTopology.includes("multi") ? 0.5 : 0.3;
 
   const useSpacegroup = crystal?.spaceGroup ?? mat?.spacegroup ?? null;
-
   const useHc2 = physics?.upperCriticalField ?? null;
+
+  const avgAtomicRadius = getCompositionWeightedProperty(counts, "atomicRadius") ?? 130;
+  const pettiforNumber = getCompositionWeightedProperty(counts, "pettiforScale") ?? 50;
+
+  let totalVE = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
+  }
+  const valenceElectronConcentration = totalVE / totalAtoms;
+
+  const hCount = counts["H"] || 0;
+  const metalAtomCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hydrogenRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+
+  const debyeTemp = phonon.debyeTemperature;
+  const avgGamma = getCompositionWeightedProperty(counts, "sommerfeldGamma") ?? 0;
+  const avgBulk = getCompositionWeightedProperty(counts, "bulkModulus") ?? 0;
 
   return {
     avgElectronegativity: avgEN,
@@ -145,6 +182,14 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     logPhononFreq: coupling.omegaLog,
     upperCriticalField: useHc2,
     metallicity: electronic.metallicity,
+    avgAtomicRadius,
+    pettiforNumber,
+    valenceElectronConcentration,
+    enSpread,
+    hydrogenRatio,
+    debyeTemperature: debyeTemp,
+    avgSommerfeldGamma: avgGamma,
+    avgBulkModulus: avgBulk,
   };
 }
 
