@@ -2,6 +2,8 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 
 const app = express();
 const httpServer = createServer(app);
@@ -122,6 +124,25 @@ app.use((req, res, next) => {
         updates.predictedTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
       }
 
+      if ((c.upperCriticalField ?? 0) > 300) {
+        updates.upperCriticalField = 300;
+      }
+      if ((c.coherenceLength ?? 0) > 0 && (c.coherenceLength ?? 0) < 1.0) {
+        updates.coherenceLength = 1.0;
+      }
+
+      if (c.xgboostScore == null && c.neuralNetScore == null && (c.ensembleScore ?? 0) > 0.5) {
+        updates.ensembleScore = Math.min(0.5, c.ensembleScore ?? 0.3);
+      }
+
+      const pressure = c.pressureGpa ?? 999;
+      if (c.roomTempViable && pressure > 50) {
+        updates.roomTempViable = false;
+      }
+      if (c.ambientPressureStable && pressure > 1) {
+        updates.ambientPressureStable = false;
+      }
+
       if (Object.keys(updates).length > 0) {
         await storage.updateSuperconductorCandidate(c.id, updates);
         corrected++;
@@ -130,6 +151,13 @@ app.use((req, res, next) => {
     if (corrected > 0) {
       log(`Retroactively corrected ${corrected} inflated Tc candidates using Eliashberg physics`, "startup");
     }
+
+    await db.execute(sql`UPDATE superconductor_candidates SET upper_critical_field = 300 WHERE upper_critical_field > 300`);
+    await db.execute(sql`UPDATE superconductor_candidates SET coherence_length = 1.0 WHERE coherence_length > 0 AND coherence_length < 1.0`);
+    await db.execute(sql`UPDATE superconductor_candidates SET ensemble_score = 0.5 WHERE xgboost_score IS NULL AND neural_net_score IS NULL AND ensemble_score > 0.5`);
+    await db.execute(sql`UPDATE superconductor_candidates SET room_temp_viable = false WHERE room_temp_viable = true AND (predicted_tc < 293 OR pressure_gpa > 50 OR pressure_gpa IS NULL OR meissner_effect = false OR zero_resistance = false)`);
+    await db.execute(sql`UPDATE superconductor_candidates SET ambient_pressure_stable = false WHERE ambient_pressure_stable = true AND (pressure_gpa > 1 OR pressure_gpa IS NULL)`);
+    log("Applied bulk corrections: Hc2 cap 300T, coherence min 1nm, ensemble cap for unscored, pressure-gated roomTempViable/ambientPressure", "startup");
 
     const topTcNow = allCandidates.reduce((mx, c) => Math.max(mx, c.predictedTc ?? 0), 0);
     const snapshots = await storage.getConvergenceSnapshots(500);

@@ -204,7 +204,7 @@ async function stage4_SynthesisFeasibility(
   const stability = evaluateConvexHullStability(structure.decompositionEnergy);
   const isSynthesizable = structure.synthesizability > 0.3;
   const isStableOrMetastable = stability.isStable || stability.isMetastable;
-  const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 10 || structure.isStable;
+  const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 1 && (stability.isStable || stability.isMetastable);
 
   const candidateHc2 = candidate.upperCriticalField ?? 0;
   const isRoomTempCandidate = (candidate.predictedTc ?? 0) >= 200;

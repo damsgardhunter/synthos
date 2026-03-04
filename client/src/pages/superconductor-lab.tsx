@@ -92,7 +92,9 @@ function CandidateCard({ candidate }: { candidate: SuperconductorCandidate }) {
               <span className="text-xs text-muted-foreground">Pressure</span>
             </div>
             <p className="text-lg font-mono font-bold">
-              {candidate.pressureGpa != null ? `${candidate.pressureGpa} GPa` : "Ambient"}
+              {candidate.pressureGpa != null
+                ? (candidate.pressureGpa <= 0 ? "Ambient" : `${candidate.pressureGpa} GPa`)
+                : "Not specified"}
             </p>
           </div>
         </div>

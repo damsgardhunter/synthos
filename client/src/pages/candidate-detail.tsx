@@ -94,7 +94,9 @@ function CandidateHeader({ candidate }: { candidate: SuperconductorCandidate }) 
               <span className="text-xs text-muted-foreground">Pressure</span>
             </div>
             <p className="text-xl font-mono font-bold">
-              {candidate.pressureGpa != null ? `${candidate.pressureGpa} GPa` : "Ambient"}
+              {candidate.pressureGpa != null
+                ? (candidate.pressureGpa <= 0 ? "Ambient (0 GPa)" : `${candidate.pressureGpa} GPa`)
+                : "Not specified"}
             </p>
           </div>
           <div className="p-3 bg-muted/50 rounded-md">
@@ -403,7 +405,11 @@ function PipelineResultsSection({ results }: { results: ComputationalResult[] })
                 </div>
               )}
               {r.computeTimeMs != null && (
-                <p className="text-[10px] text-muted-foreground">Compute time: {r.computeTimeMs}ms</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {r.computeTimeMs < 100
+                    ? "Surrogate model (heuristic estimate)"
+                    : `Compute time: ${r.computeTimeMs}ms`}
+                </p>
               )}
             </div>
           );

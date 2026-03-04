@@ -447,12 +447,13 @@ export function computeCriticalFields(
   const delta0 = 1.764 * kB * tc * (1 + lambda * 0.3);
   const xiRaw = (hbar * vF) / (Math.PI * delta0);
   const xiNm = xiRaw * 1e9;
-  const coherenceLength = Math.max(0.3, Math.min(500, Number.isFinite(xiNm) ? xiNm : 100));
+  const coherenceLength = Math.max(1.0, Math.min(500, Number.isFinite(xiNm) ? xiNm : 100));
 
   const PHI0 = 2.07e-15;
   const xiM = coherenceLength * 1e-9;
   const Hc2Tesla = PHI0 / (2 * Math.PI * xiM * xiM);
-  const upperCriticalField = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
+  const hc2Raw = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
+  const upperCriticalField = Math.min(hc2Raw, 300);
 
   const lambdaL = 50 + 200 * lambda * (1 + coupling.muStar);
   const londonPenetrationDepth = Math.max(30, Math.min(2000, lambdaL));

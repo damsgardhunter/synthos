@@ -461,11 +461,12 @@ Return JSON with 'candidates' array:
 
       const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
         c.zeroResistance === true &&
-        c.meissnerEffect === true;
+        c.meissnerEffect === true &&
+        (c.pressureGpa ?? 999) <= 50;
 
       const status = determineStatus({
         ...c,
-        ensembleScore: c.quantumCoherence ?? 0.5,
+        ensembleScore: Math.min(0.5, c.quantumCoherence ?? 0.3),
         roomTempViable: isActuallyRoomTemp,
       });
 
@@ -491,8 +492,8 @@ Return JSON with 'candidates' array:
           mlFeatures: features as any,
           xgboostScore: null,
           neuralNetScore: null,
-          ensembleScore: c.quantumCoherence ?? 0.5,
-          roomTempViable: isActuallyRoomTemp,
+          ensembleScore: Math.min(0.5, c.quantumCoherence ?? 0.3),
+          roomTempViable: isActuallyRoomTemp && (c.pressureGpa ?? 999) <= 50,
           status,
           notes: (cappedTc !== (c.predictedTc ?? null) ? `[LLM proposed Tc=${c.predictedTc}K, capped to ${cappedTc}K] ` : '') + verificationNotes,
           electronPhononCoupling: features.electronPhononLambda ?? null,
