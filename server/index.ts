@@ -72,13 +72,17 @@ app.use((req, res, next) => {
     const allCandidates = await storage.getSuperconductorCandidates(2000);
     let corrected = 0;
     for (const c of allCandidates) {
-      if (c.xgboostScore != null) continue;
       if (c.electronPhononCoupling == null) continue;
-      if ((c.predictedTc ?? 0) <= 500) continue;
+      const currentTc = c.predictedTc ?? 0;
 
       const lambda = c.electronPhononCoupling ?? 0;
       const omegaLog = c.logPhononFrequency ?? 300;
       const muStar = c.coulombPseudopotential ?? 0.12;
+      const corrStrength = c.correlationStrength ?? 0;
+      const hasMott = Array.isArray(c.competingPhases) && (c.competingPhases as any[]).some((p: any) => p.type === "Mott");
+      const isMottInsulator = (hasMott && corrStrength > 0.7) || corrStrength > 0.85;
+      const isStronglyCorrelated = corrStrength > 0.7;
+
       const omegaLogK = omegaLog * 1.44;
       const denom = lambda - muStar * (1 + 0.62 * lambda);
       let eliashbergTc = 0;
@@ -88,8 +92,13 @@ app.use((req, res, next) => {
         if (!Number.isFinite(eliashbergTc) || eliashbergTc < 0) eliashbergTc = 0;
       }
 
-      const currentTc = c.predictedTc ?? 0;
-      if (eliashbergTc > 0 && eliashbergTc < currentTc) {
+      if (isMottInsulator) {
+        eliashbergTc = eliashbergTc * 0.05;
+      } else if (isStronglyCorrelated) {
+        eliashbergTc = eliashbergTc * 0.3;
+      }
+
+      if (eliashbergTc > 0 && eliashbergTc < currentTc && currentTc > 100) {
         const downBlend = eliashbergTc < currentTc * 0.5 ? 0.7 : 0.5;
         const newTc = Math.round((1 - downBlend) * currentTc + downBlend * eliashbergTc);
         await storage.updateSuperconductorCandidate(c.id, { predictedTc: newTc });

@@ -42,13 +42,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - Lambda-aware Tc scaling: base Tc estimates scale with electron-phonon coupling (lambda > 2.5: x1.4, > 2.0: x1.25, > 1.5: x1.12).
 
 ### Physics as Tc Authority
-- **LLM Tc capping** (superconductor-research.ts): New LLM-generated candidates have their Tc capped at physics-plausible maxima using McMillan formula and lambda-based tiers (lambda<0.3: 150K, <0.5: 200K, <1.0: 300K, <1.5: 400K, else 500K). Original LLM estimate stored in notes.
-- **Downward physics correction**: Phase 10 physics flowback always blends physics Tc with current Tc when physics is lower (no more `physicsTc > currentTc * 0.3` guard). Blend weight is 0.7 physics / 0.3 current when physics < 50% of current.
-- **Multi-fidelity Tc writeback**: Pipeline Stage 3 Eliashberg Tc now updates `predictedTc` using same directional blend logic.
-- **Retroactive correction**: Startup corrects existing inflated candidates (LLM-generated, has physics data, Tc>500K) using Eliashberg formula, blending 0.7 physics / 0.3 current.
+- **LLM Tc capping** (superconductor-research.ts): New LLM-generated candidates have their Tc capped at physics-plausible maxima using McMillan formula and lambda-based tiers (lambda<0.3: 150K, <0.5: 200K, <1.0: 300K, <1.5: 400K, else 500K). Strongly correlated materials (corr>0.7) capped at 200K; Mott insulators (corr>0.85) at 80K. Original LLM estimate stored in notes.
+- **Mott insulator penalty**: Eliashberg Tc is multiplied by 0.05 for Mott insulators (correlation>0.7 + Mott phase), 0.3 for strongly correlated, 0.7 for moderately correlated. Eliashberg theory assumes itinerant electrons; Mott insulators have localized electrons so the framework doesn't apply.
+- **Downward physics correction**: Phase 10 physics flowback always blends physics Tc with current Tc when physics is lower. Blend weight is 0.7 physics / 0.3 current when physics < 50% of current. Strong coupling boost disabled for Mott insulators and strongly correlated materials.
+- **Multi-fidelity Tc writeback**: Pipeline Stage 3 Eliashberg Tc now updates `predictedTc` using same directional blend logic with lambda-based weights.
+- **Retroactive correction**: Startup corrects ALL candidates with physics data where Eliashberg Tc < current Tc and current > 100K. Applies Mott/correlation penalty before blend.
 - Raw physics Tc is clamped: must be >0 and <1000K, otherwise discarded.
-- Tc increase cap is coupling-aware: lambda>2.5: +150K, lambda>2.0: +120K, lambda>1.5: +90K, lambda>1.0: +70K, else +50K.
-- Strong coupling boost: lambda > 2.0 materials get additional +(lambda-2.0)*15K when physics Tc > 80% of ML Tc.
+- Tc increase cap is coupling-aware: Mott: +10K, strongly correlated: +30K, else lambda>2.5: +150K, lambda>2.0: +120K, lambda>1.5: +90K, lambda>1.0: +70K, else +50K.
+- ML predictor: Mott insulators (corr>0.85) get score penalty (-0.08) and low Tc estimate (5+score*80). Moderate correlation (0.6-0.85) gets smaller bonus and capped Tc scaling.
 
 ### Learning Feedback Loop (Re-evaluation)
 - `reEvaluateTopCandidates()` runs every cycle after Phase 12.

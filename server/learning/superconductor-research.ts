@@ -428,8 +428,13 @@ Return JSON with 'candidates' array:
           if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
         }
 
+        const corrStr = features.correlationStrength ?? 0;
         let tcCap: number;
-        if (featureLambda < 0.3) {
+        if (corrStr > 0.85) {
+          tcCap = Math.min(80, mcMillanMax * 0.3 || 30);
+        } else if (corrStr > 0.7) {
+          tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
+        } else if (featureLambda < 0.3) {
           tcCap = 150;
         } else if (featureLambda < 0.5) {
           tcCap = Math.max(200, mcMillanMax * 2.5);

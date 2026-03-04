@@ -266,13 +266,13 @@ export function evaluateCompetingPhases(
     });
   }
 
-  if (electronicStructure.correlationStrength > 0.7) {
+  if (electronicStructure.correlationStrength > 0.6) {
     phases.push({
       phaseName: "Mott insulating phase",
       type: "Mott",
       transitionTemp: null,
       strength: electronicStructure.correlationStrength,
-      suppressesSC: electronicStructure.correlationStrength > 0.9,
+      suppressesSC: electronicStructure.correlationStrength > 0.75,
     });
   }
 
@@ -430,18 +430,28 @@ export async function runFullPhysicsAnalysis(
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum);
 
   let eliashberg: EliashbergResult;
-  if (correlation.ratio < 0.6) {
-    eliashberg = predictTcEliashberg(coupling);
-  } else {
-    eliashberg = predictTcEliashberg(coupling);
-    eliashberg.predictedTc = eliashberg.predictedTc * (1 + correlation.ratio * 0.5);
-    eliashberg.confidenceBand = [
-      Math.round(eliashberg.predictedTc * 0.5),
-      Math.round(eliashberg.predictedTc * 1.8),
-    ];
-  }
+  eliashberg = predictTcEliashberg(coupling);
 
   const competingPhases = evaluateCompetingPhases(formula, electronicStructure);
+  const hasMottPhase = competingPhases.some(p => p.type === "Mott");
+  const isMottInsulator = hasMottPhase && correlation.ratio > 0.7;
+
+  if (isMottInsulator) {
+    eliashberg.predictedTc = eliashberg.predictedTc * 0.05;
+    eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 3)];
+  } else if (correlation.ratio > 0.7) {
+    eliashberg.predictedTc = eliashberg.predictedTc * 0.3;
+    eliashberg.confidenceBand = [
+      Math.round(eliashberg.predictedTc * 0.3),
+      Math.round(eliashberg.predictedTc * 2.5),
+    ];
+  } else if (correlation.ratio > 0.5) {
+    eliashberg.predictedTc = eliashberg.predictedTc * 0.7;
+    eliashberg.confidenceBand = [
+      Math.round(eliashberg.predictedTc * 0.6),
+      Math.round(eliashberg.predictedTc * 1.5),
+    ];
+  }
 
   let dimensionality = candidate.dimensionality || "3D";
   if (!candidate.dimensionality) {

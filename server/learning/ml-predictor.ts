@@ -199,9 +199,12 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
   const safeDim = Number.isFinite(features.dimensionalityScore) ? features.dimensionalityScore : 0;
   const safeLambda = Number.isFinite(features.electronPhononLambda) ? features.electronPhononLambda : 0;
 
-  if (safeCorr > 0.6) {
-    score += 0.08;
-    reasoning.push(`Strong electron correlations (U/W=${safeCorr.toFixed(2)}): unconventional pairing channel`);
+  if (safeCorr > 0.6 && safeCorr <= 0.85) {
+    score += 0.05;
+    reasoning.push(`Strong electron correlations (U/W=${safeCorr.toFixed(2)}): unconventional pairing possible if metallic`);
+  } else if (safeCorr > 0.85) {
+    score -= 0.08;
+    reasoning.push(`Very strong correlations (U/W=${safeCorr.toFixed(2)}): likely Mott insulator, phonon-mediated SC unlikely`);
   }
   if (safeDim > 0.6) {
     score += 0.06;
@@ -258,8 +261,10 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
     tcEstimate = 150 + score * 350 * lambdaScaling;
   } else if (features.dWaveSymmetry) {
     tcEstimate = 80 + score * 300 * lambdaScaling;
+  } else if (features.correlationStrength > 0.85 && features.hasTransitionMetal) {
+    tcEstimate = 5 + score * 80;
   } else if (features.correlationStrength > 0.6 && features.hasTransitionMetal) {
-    tcEstimate = 40 + score * 250 * lambdaScaling;
+    tcEstimate = 30 + score * 180 * lambdaScaling;
   } else if (features.hasTransitionMetal) {
     tcEstimate = 20 + score * 150;
   } else {

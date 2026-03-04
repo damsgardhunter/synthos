@@ -365,12 +365,24 @@ async function updateCandidatePhysics(
         ? (tcRange[1] - tcRange[0]) / (allData.eliashberg.predictedTc || 1)
         : 0.5;
 
-      const eliashbergTc = allData.eliashberg.predictedTc;
+      let eliashbergTc = allData.eliashberg.predictedTc;
       if (Number.isFinite(eliashbergTc) && eliashbergTc > 0) {
         const currentTc = physicsData._currentPredictedTc ?? 0;
         const lambda = allData.coupling?.lambda ?? 0;
+
+        const corrRatio = allData.correlation?.ratio ?? 0;
+        const hasMott = allData.competingPhases?.some((p: any) => p.type === "Mott") ?? false;
+        const isMottInsulator = (hasMott && corrRatio > 0.7) || corrRatio > 0.85;
+        const isStronglyCorrelated = corrRatio > 0.7;
+
+        if (isMottInsulator) {
+          eliashbergTc = eliashbergTc * 0.05;
+        } else if (isStronglyCorrelated) {
+          eliashbergTc = eliashbergTc * 0.3;
+        }
+
         if (currentTc > 0) {
-          if (eliashbergTc > currentTc) {
+          if (eliashbergTc > currentTc && !isMottInsulator && !isStronglyCorrelated) {
             const tcCap = lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50;
             updates.predictedTc = Math.round(Math.min(eliashbergTc, currentTc + tcCap));
           } else {

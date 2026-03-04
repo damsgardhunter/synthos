@@ -480,7 +480,10 @@ async function runPhase10_Physics() {
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
         const currentTc = candidate.predictedTc ?? 0;
         const lambda = result.coupling.lambda ?? 0;
-        const tcCap = lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50;
+        const corrRatio = result.correlation.ratio ?? 0;
+        const hasMott = result.competingPhases.some(p => p.type === "Mott");
+        const isMottInsulator = hasMott && corrRatio > 0.7;
+        const tcCap = isMottInsulator ? 10 : (corrRatio > 0.7 ? 30 : (lambda > 2.5 ? 150 : lambda > 2.0 ? 120 : lambda > 1.5 ? 90 : lambda > 1.0 ? 70 : 50));
         const physicsCeiling = await computeDynamicTcCeiling();
         let updatedTc = currentTc;
         if (physicsTc > 0) {
@@ -490,7 +493,7 @@ async function runPhase10_Physics() {
             const downBlend = physicsTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
             updatedTc = Math.round(currentTc * (1 - downBlend) + physicsTc * downBlend);
           }
-          if (lambda > 2.0 && physicsTc > currentTc * 0.8) {
+          if (lambda > 2.0 && physicsTc > currentTc * 0.8 && !isMottInsulator && corrRatio < 0.7) {
             const strongCouplingBoost = Math.round((lambda - 2.0) * 15);
             updatedTc = Math.max(updatedTc, Math.round(updatedTc + strongCouplingBoost));
           }
