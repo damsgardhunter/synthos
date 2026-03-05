@@ -12,7 +12,8 @@ import {
   TrendingUp, CheckCircle2, Clock, Loader2,
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
-  MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive
+  MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
+  Cpu
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
@@ -375,6 +376,7 @@ export default function Dashboard() {
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"] });
   const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"] });
+  const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"] });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -409,6 +411,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dft-status"] });
     }
     const hasStrategy = ws.messages.some((m) => m.type === "strategyUpdate");
     if (hasStrategy) {
@@ -477,6 +480,7 @@ export default function Dashboard() {
             <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 12 learning phases" history={getHistory("progress")} />
             <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 12}`} icon={TrendingUp} sub="currently running" />
             <StatCard title="Milestones" value={milestoneData?.total ?? 0} icon={Star} sub="research milestones" history={getHistory("milestones")} />
+            <StatCard title="DFT Enriched" value={dftStatus?.dftEnrichedCount ?? 0} icon={Cpu} sub={`${dftStatus?.breakdown?.high ?? 0} high / ${dftStatus?.breakdown?.medium ?? 0} medium confidence`} data-testid="stat-dft-enriched" />
           </>
         )}
       </div>

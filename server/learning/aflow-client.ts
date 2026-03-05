@@ -1,4 +1,17 @@
+import { db } from "../db";
+import { mpMaterialCache } from "@shared/schema";
+import { eq, and } from "drizzle-orm";
+
 const AFLOW_API_BASE = "http://aflowlib.duke.edu/API/aflux";
+
+export interface AflowDFTData {
+  formula: string;
+  ael_debye: number | null;
+  agl_thermal_conductivity_300K: number | null;
+  energy_atom: number | null;
+  enthalpy_formation_cell: number | null;
+  source: "AFLOW";
+}
 
 export interface AflowEntry {
   auid: string;
@@ -85,6 +98,92 @@ export async function fetchAflowData(formula: string): Promise<AflowResult> {
   }
 
   return { entries, queryFormula: normalized, source: "AFLOW" };
+}
+
+async function getAflowCachedData(formula: string, dataType: string): Promise<any | null> {
+  try {
+    const normalizedFormula = normalizeFormulaForAflow(formula);
+    const results = await db
+      .select()
+      .from(mpMaterialCache)
+      .where(
+        and(
+          eq(mpMaterialCache.formula, normalizedFormula),
+          eq(mpMaterialCache.dataType, dataType)
+        )
+      )
+      .limit(1);
+
+    if (results.length > 0) {
+      const cached = results[0];
+      const age = Date.now() - new Date(cached.fetchedAt!).getTime();
+      const maxAge = 7 * 24 * 60 * 60 * 1000;
+      if (age < maxAge) {
+        return cached.data;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function setAflowCachedData(formula: string, dataType: string, data: any): Promise<void> {
+  try {
+    const normalizedFormula = normalizeFormulaForAflow(formula);
+    await db
+      .insert(mpMaterialCache)
+      .values({
+        formula: normalizedFormula,
+        mpId: null,
+        dataType,
+        data,
+      })
+      .onConflictDoUpdate({
+        target: [mpMaterialCache.formula, mpMaterialCache.dataType],
+        set: {
+          data,
+          fetchedAt: new Date(),
+        },
+      });
+  } catch {
+  }
+}
+
+export async function fetchAflowDFTData(formula: string): Promise<AflowDFTData | null> {
+  const cached = await getAflowCachedData(formula, "aflow_dft");
+  if (cached) return cached as AflowDFTData;
+
+  const normalized = normalizeFormulaForAflow(formula);
+
+  const query = `compound(${normalized}),paging(1),$auid,$compound,$ael_debye,$agl_thermal_conductivity_300K,$energy_atom,$enthalpy_formation_cell`;
+
+  const rawEntries = await aflowFetch(query);
+  if (!rawEntries || rawEntries.length === 0) return null;
+
+  const entry = rawEntries[0];
+
+  const hasAnyData =
+    entry.ael_debye != null ||
+    entry.agl_thermal_conductivity_300K != null ||
+    entry.energy_atom != null ||
+    entry.enthalpy_formation_cell != null;
+
+  if (!hasAnyData) return null;
+
+  const result: AflowDFTData = {
+    formula: normalized,
+    ael_debye: entry.ael_debye != null ? Number(entry.ael_debye) : null,
+    agl_thermal_conductivity_300K: entry.agl_thermal_conductivity_300K != null ? Number(entry.agl_thermal_conductivity_300K) : null,
+    energy_atom: entry.energy_atom != null ? Number(entry.energy_atom) : null,
+    enthalpy_formation_cell: entry.enthalpy_formation_cell != null ? Number(entry.enthalpy_formation_cell) : null,
+    source: "AFLOW",
+  };
+
+  await setAflowCachedData(formula, "aflow_dft", result);
+  console.log(`[AFLOW DFT] Cached DFT data for ${normalized}: debye=${result.ael_debye}, thermal_cond=${result.agl_thermal_conductivity_300K}, energy_atom=${result.energy_atom}`);
+
+  return result;
 }
 
 export interface CrossValidationResult {

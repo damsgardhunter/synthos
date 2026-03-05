@@ -14,6 +14,8 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
+import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
+import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -65,6 +67,7 @@ let currentStrategyFocusAreas: { area: string; priority: number }[] = [];
 let currentFamilyCounts: Record<string, number> = {};
 let engineTempo: EngineTempo = "exploring";
 let cycleIntervalMs = 15000;
+let totalDFTEnriched = 0;
 let currentStatusMessage = "Initializing research systems";
 let recentTcImproved = false;
 let recentNewCandidates = 0;
@@ -501,6 +504,84 @@ async function reEvaluateTopCandidates() {
   }
 }
 
+async function runDFTEnrichment() {
+  if (!shouldContinue()) return;
+  try {
+    const candidates = await storage.getSuperconductorCandidates(50);
+    const sorted = candidates
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+
+    const toEnrich: typeof candidates = [];
+    for (const c of sorted) {
+      if (toEnrich.length >= 5) break;
+      if (c.dataConfidence === "high") continue;
+      toEnrich.push(c);
+    }
+
+    if (toEnrich.length === 0) return;
+
+    broadcastThought(
+      `Cross-referencing top ${toEnrich.length} candidates against DFT databases...`,
+      "strategy"
+    );
+
+    let enriched = 0;
+    for (const candidate of toEnrich) {
+      if (!shouldContinue()) break;
+      try {
+        const dftData = await resolveDFTFeatures(candidate.formula);
+        if (dftData.dftCoverage === 0) continue;
+
+        const desc = describeDFTSources(dftData);
+        emit("log", {
+          phase: "engine",
+          event: "DFT enrichment",
+          detail: `${candidate.formula} -- found DFT data: ${desc}. Re-scoring...`,
+          dataSource: "DFT Resolver",
+        });
+
+        const features = extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
+        const gb = gbPredict(features);
+        const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
+        const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
+
+        const updates: any = {
+          xgboostScore: gb.score,
+          ensembleScore: ensemble,
+          dataConfidence: dftData.dftCoverage > 0.4 ? "high" : "medium",
+        };
+
+        if (dftData.formationEnergy.source !== "analytical") {
+          updates.formationEnergy = dftData.formationEnergy.value;
+        }
+        if (dftData.bandGap.source !== "analytical") {
+          updates.bandGap = dftData.bandGap.value;
+        }
+
+        await storage.updateSuperconductorCandidate(candidate.id, updates);
+        enriched++;
+        totalDFTEnriched++;
+      } catch (err: any) {
+        emit("log", {
+          phase: "engine",
+          event: "DFT enrichment error",
+          detail: `${candidate.formula}: ${err.message?.slice(0, 100)}`,
+          dataSource: "DFT Resolver",
+        });
+      }
+    }
+
+    if (enriched > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "DFT enrichment complete",
+        detail: `Enriched ${enriched} candidates with DFT data (${totalDFTEnriched} total)`,
+        dataSource: "DFT Resolver",
+      });
+    }
+  } catch {}
+}
+
 async function runPhase10_Physics() {
   if (!shouldContinue()) return;
   activeTasks.add("Computational Physics");
@@ -765,6 +846,10 @@ async function runLearningCycle() {
 
       if (state === "running") {
         await reEvaluateTopCandidates();
+      }
+
+      if (state === "running") {
+        await runDFTEnrichment();
       }
     } else {
       emit("log", {

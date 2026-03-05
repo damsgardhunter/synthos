@@ -51,11 +51,15 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Ambient-Pressure Tc Caps**: Applied via `applyAmbientTcCap()` in ALL Tc update paths (ML pipeline, LLM novel, physics analysis, re-evaluation, startup correction, bulk correction). Caps: metallicity<0.3→20K, <0.5→80K, lambda<0.3→50K, <0.5→80K, <1.0→80-150K, <1.5→120-250K, <2.5→160-350K, >=2.5→200-350K (interpolated by pressure 10-50 GPa).
 - **Structure Predictor**: Crystallographic c/a ratios from prototype structures, Goldschmidt tolerance factor for perovskites, Vegard's law for alloy lattice parameters, Tammann rule for synthesis temperature
 - **Materials Project client**: server/learning/materials-project-client.ts with fallback to analytical models; MP data cached in mp_material_cache DB table
+- **DFT Feature Resolver**: server/learning/dft-feature-resolver.ts — unified service merging MP + AFLOW DFT data. Priority: MP > AFLOW > analytical. Returns DFTResolvedFeatures with dftCoverage (0-1). Used by ML predictor (extractFeatures), physics engine (runFullPhysicsAnalysis), and auto-enrichment cycle.
+- **AFLOW DFT Client**: server/learning/aflow-client.ts extended with fetchAflowDFTData() for ael_debye, agl_thermal_conductivity_300K, energy_atom, enthalpy_formation_cell
+- **Auto-DFT Enrichment**: Engine cycle enriches top 5 candidates per cycle with DFT data from MP/AFLOW. Candidates re-scored with DFT-backed features. Rate-limited to 5/cycle.
+- **DFT Status API**: GET /api/dft-status returns total/enriched counts, breakdown (high/medium/analytical), recent enrichments
 
 ### Gradient Boosting Model (server/learning/gradient-boost.ts)
 - Trained on 130+ materials from `server/learning/supercon-dataset.ts` (static, curated from SuperCon database)
 - Decision trees with depth 4, ~106 trees, learning rate 0.08
-- Features: lambda, metallicity, omegaLog, debyeTemp, correlation, VEC, avgEN, enSpread, hRatio, pettifor, atomicRadius, sommerfeldGamma, bulkModulus, maxMass, nElements, composition flags, cooperPair, dimensionality, anharmonic, electronDensity, phononCoupling, dWave, meissner
+- Features: lambda, metallicity, omegaLog, debyeTemp, correlation, VEC, avgEN, enSpread, hRatio, pettifor, atomicRadius, sommerfeldGamma, bulkModulus, maxMass, nElements, composition flags, cooperPair, dimensionality, anharmonic, electronDensity, phononCoupling, dWave, meissner, dftConfidence
 - Validation R2=1.000, MSE=1.0 on training set
 - Key predictions: Nb 9.7K, Al 1.3K, MgB2 36.2K, LaH10 249.4K, YBCO 92.6K, NaCl 0.1K, Cu 0K, Fe 0K
 

@@ -20,6 +20,7 @@ import {
   hasDOrFElectrons,
 } from "./elemental-data";
 import { gbPredict, getConfidenceBand } from "./gradient-boost";
+import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 export { getConfidenceBand };
 
 const openai = new OpenAI({
@@ -62,6 +63,7 @@ export interface MLFeatureVector {
   debyeTemperature: number;
   avgSommerfeldGamma: number;
   avgBulkModulus: number;
+  dftConfidence: number;
 }
 
 const CHALCOGENS = ["O","S","Se","Te"];
@@ -86,7 +88,7 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
-export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext): MLFeatureVector {
+export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext, dftData?: DFTResolvedFeatures): MLFeatureVector {
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -121,7 +123,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const phononCouplingEstimate = Math.min(1.0, useLambda / 3.0);
 
-  const electronDensityEstimate = electronic.metallicity > 0.5 ? 0.5 + electronic.densityOfStatesAtFermi * 0.05 :
+  let electronDensityEstimate = electronic.metallicity > 0.5 ? 0.5 + electronic.densityOfStatesAtFermi * 0.05 :
     (mat?.bandGap === 0 || mat?.bandGap === null) ? 0.6 : 0.3;
 
   const meissnerPotential = cooperPairStrength * 0.3 + phononCouplingEstimate * 0.35 +
@@ -152,9 +154,32 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     .reduce((s, e) => s + (counts[e] || 0), 0);
   const hydrogenRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
 
-  const debyeTemp = phonon.debyeTemperature;
+  let debyeTemp = phonon.debyeTemperature;
   const avgGamma = getCompositionWeightedProperty(counts, "sommerfeldGamma") ?? 0;
-  const avgBulk = getCompositionWeightedProperty(counts, "bulkModulus") ?? 0;
+  let avgBulk = getCompositionWeightedProperty(counts, "bulkModulus") ?? 0;
+
+  let useMetallicity = electronic.metallicity;
+  let dftConfidence = 0;
+
+  if (dftData) {
+    if (dftData.debyeTemp.source !== "analytical" && dftData.debyeTemp.value > 0) {
+      debyeTemp = dftData.debyeTemp.value;
+    }
+    if (dftData.bulkModulus.source !== "analytical" && dftData.bulkModulus.value > 0) {
+      avgBulk = dftData.bulkModulus.value;
+    }
+    if (dftData.isMetallic.source !== "analytical") {
+      useMetallicity = dftData.isMetallic.value ? Math.max(useMetallicity, 0.85) : Math.min(useMetallicity, 0.15);
+    }
+    if (dftData.dosAtFermi.value != null && dftData.dosAtFermi.source !== "analytical") {
+      const dftDos = dftData.dosAtFermi.value;
+      if (dftDos > 0) {
+        const analyticalEd = electronDensityEstimate;
+        electronDensityEstimate = 0.3 * analyticalEd + 0.7 * Math.min(1.0, dftDos / 10.0);
+      }
+    }
+    dftConfidence = dftData.dftCoverage;
+  }
 
   return {
     avgElectronegativity: avgEN,
@@ -182,7 +207,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     electronPhononLambda: useLambda,
     logPhononFreq: coupling.omegaLog,
     upperCriticalField: useHc2,
-    metallicity: electronic.metallicity,
+    metallicity: useMetallicity,
     avgAtomicRadius,
     pettiforNumber,
     valenceElectronConcentration,
@@ -191,6 +216,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     debyeTemperature: debyeTemp,
     avgSommerfeldGamma: avgGamma,
     avgBulkModulus: avgBulk,
+    dftConfidence,
   };
 }
 

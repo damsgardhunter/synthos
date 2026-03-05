@@ -23,6 +23,7 @@ export interface MPSummaryData {
   magneticOrdering: string;
   totalMagnetization: number;
   isMetallic: boolean;
+  efermi: number | null;
 }
 
 export interface MPElasticityData {
@@ -41,6 +42,22 @@ export interface MPPhononData {
   lastPhononFreq: number | null;
   phononBandStructure: any | null;
   phononDos: any | null;
+}
+
+export interface MPElectronicStructureData {
+  dosAtFermi: number | null;
+  bandStructureType: string | null;
+  fermiEnergy: number | null;
+  bandGap: number | null;
+  isMetal: boolean;
+}
+
+export interface MPThermoData {
+  energyAboveHull: number;
+  debyeTemperature: number | null;
+  formationEnergyPerAtom: number;
+  isStable: boolean;
+  uncorrectedEnergy: number | null;
 }
 
 export interface MPMagnetismData {
@@ -149,7 +166,7 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
 
   const data = await mpFetch("/materials/summary/", {
     formula: normalizedFormula,
-    fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,is_stable,symmetry,volume,density,nsites,ordering,total_magnetization,is_metal",
+    fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,is_stable,symmetry,volume,density,nsites,ordering,total_magnetization,is_metal,efermi",
     _limit: "1",
     _sort_fields: "energy_above_hull",
   });
@@ -172,6 +189,7 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
     magneticOrdering: entry.ordering ?? "NM",
     totalMagnetization: entry.total_magnetization ?? 0,
     isMetallic: entry.is_metal ?? false,
+    efermi: entry.efermi ?? null,
   };
 
   await setCachedData(formula, "summary", result, result.mpId);
@@ -267,6 +285,95 @@ export async function fetchPhonon(formula: string): Promise<MPPhononData | null>
   return result;
 }
 
+export async function fetchElectronicStructure(formula: string): Promise<MPElectronicStructureData | null> {
+  const cached = await getCachedData(formula, "electronic_structure");
+  if (cached) return cached as MPElectronicStructureData;
+
+  const normalizedFormula = normalizeFormula(formula);
+
+  const data = await mpFetch("/materials/electronic_structure/", {
+    formula: normalizedFormula,
+    fields: "material_id,dos,band_gap,efermi,is_metal,bandstructure",
+    _limit: "1",
+  });
+
+  if (!data?.data?.length) return null;
+
+  const entry = data.data[0];
+
+  let dosAtFermi: number | null = null;
+  if (entry.dos && entry.dos.total && entry.efermi != null) {
+    try {
+      const totalDos = entry.dos.total;
+      if (totalDos.densities && totalDos.energies) {
+        const energies = totalDos.energies;
+        const densities = totalDos.densities;
+        let closestIdx = 0;
+        let closestDist = Math.abs(energies[0] - entry.efermi);
+        for (let i = 1; i < energies.length; i++) {
+          const dist = Math.abs(energies[i] - entry.efermi);
+          if (dist < closestDist) {
+            closestDist = dist;
+            closestIdx = i;
+          }
+        }
+        dosAtFermi = densities[closestIdx] ?? null;
+      }
+    } catch {
+      dosAtFermi = null;
+    }
+  }
+
+  let bandStructureType: string | null = null;
+  if (entry.bandstructure) {
+    bandStructureType = entry.band_gap > 0 ? "indirect" : "metallic";
+    if (entry.bandstructure.is_direct) {
+      bandStructureType = "direct";
+    }
+  } else if (entry.band_gap != null) {
+    bandStructureType = entry.band_gap > 0 ? (entry.is_metal ? "metallic" : "indirect") : "metallic";
+  }
+
+  const result: MPElectronicStructureData = {
+    dosAtFermi,
+    bandStructureType,
+    fermiEnergy: entry.efermi ?? null,
+    bandGap: entry.band_gap ?? null,
+    isMetal: entry.is_metal ?? false,
+  };
+
+  await setCachedData(formula, "electronic_structure", result, entry.material_id);
+  return result;
+}
+
+export async function fetchThermo(formula: string): Promise<MPThermoData | null> {
+  const cached = await getCachedData(formula, "thermo");
+  if (cached) return cached as MPThermoData;
+
+  const normalizedFormula = normalizeFormula(formula);
+
+  const data = await mpFetch("/materials/thermo/", {
+    formula: normalizedFormula,
+    fields: "material_id,energy_above_hull,debye_temperature,formation_energy_per_atom,is_stable,uncorrected_energy_per_atom",
+    _limit: "1",
+    _sort_fields: "energy_above_hull",
+  });
+
+  if (!data?.data?.length) return null;
+
+  const entry = data.data[0];
+  const result: MPThermoData = {
+    energyAboveHull: entry.energy_above_hull ?? 0,
+    debyeTemperature: entry.debye_temperature ?? null,
+    formationEnergyPerAtom: entry.formation_energy_per_atom ?? 0,
+    isStable: entry.is_stable ?? false,
+    uncorrectedEnergy: entry.uncorrected_energy_per_atom ?? null,
+  };
+
+  await setCachedData(formula, "thermo", result, entry.material_id);
+  return result;
+}
+
 export async function fetchThermodynamicStability(formula: string): Promise<{ energyAboveHull: number; isStable: boolean; decompositionProducts: string[] } | null> {
   const summary = await fetchSummary(formula);
   if (!summary) return null;
@@ -282,15 +389,19 @@ export async function fetchAllData(formula: string): Promise<{
   elasticity: MPElasticityData | null;
   magnetism: MPMagnetismData | null;
   phonon: MPPhononData | null;
+  electronicStructure: MPElectronicStructureData | null;
+  thermo: MPThermoData | null;
 }> {
-  const [summary, elasticity, magnetism, phonon] = await Promise.all([
+  const [summary, elasticity, magnetism, phonon, electronicStructure, thermo] = await Promise.all([
     fetchSummary(formula),
     fetchElasticity(formula),
     fetchMagnetism(formula),
     fetchPhonon(formula),
+    fetchElectronicStructure(formula),
+    fetchThermo(formula),
   ]);
 
-  return { summary, elasticity, magnetism, phonon };
+  return { summary, elasticity, magnetism, phonon, electronicStructure, thermo };
 }
 
 export function isApiAvailable(): boolean {

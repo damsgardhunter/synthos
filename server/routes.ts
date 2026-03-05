@@ -208,6 +208,40 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/dft-status", async (_req, res) => {
+    try {
+      const candidates = await storage.getSuperconductorCandidates(1000);
+      const total = await storage.getSuperconductorCount();
+      const dftEnriched = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "medium");
+      const dftHighCount = candidates.filter(c => c.dataConfidence === "high").length;
+      const dftMediumCount = candidates.filter(c => c.dataConfidence === "medium").length;
+      const analyticalCount = total - dftHighCount - dftMediumCount;
+
+      const recentEnriched = dftEnriched
+        .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))
+        .slice(0, 10)
+        .map(c => ({
+          formula: c.formula,
+          confidence: c.dataConfidence,
+          ensembleScore: c.ensembleScore,
+          predictedTc: c.predictedTc,
+        }));
+
+      res.json({
+        total,
+        dftEnrichedCount: dftEnriched.length,
+        breakdown: {
+          high: dftHighCount,
+          medium: dftMediumCount,
+          analytical: analyticalCount,
+        },
+        recentEnriched,
+      });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch DFT status" });
+    }
+  });
+
   app.get("/api/synthesis-processes", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);

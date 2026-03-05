@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
+import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 
 export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number): number {
   if (tc <= 0) return tc;
@@ -1035,6 +1036,7 @@ export async function runFullPhysicsAnalysis(
 
   let mpSummary: MPSummaryData | null = null;
   let mpElasticity: MPElasticityData | null = null;
+  let dftData: DFTResolvedFeatures | null = null;
   try {
     const mpClient = await import("./materials-project-client");
     if (mpClient.isApiAvailable()) {
@@ -1044,10 +1046,54 @@ export async function runFullPhysicsAnalysis(
     }
   } catch {}
 
+  try {
+    const dftResolver = await import("./dft-feature-resolver");
+    dftData = await dftResolver.resolveDFTFeatures(formula);
+    if (dftData.dftCoverage > 0) {
+      const desc = dftResolver.describeDFTSources(dftData);
+      emit("log", {
+        phase: "phase-10",
+        event: "DFT data resolved",
+        detail: `${formula}: ${desc} (coverage=${(dftData.dftCoverage * 100).toFixed(0)}%)`,
+        dataSource: "DFT Resolver",
+      });
+    }
+  } catch {}
+
   const correlation = assessCorrelationStrength(formula);
   const electronicStructure = computeElectronicStructure(formula, candidate.crystalStructure, mpSummary);
 
+  if (dftData) {
+    if (dftData.dosAtFermi.source !== "analytical" && dftData.dosAtFermi.value != null && dftData.dosAtFermi.value > 0) {
+      electronicStructure.densityOfStatesAtFermi = Number(dftData.dosAtFermi.value.toFixed(3));
+    }
+    if (dftData.isMetallic.source !== "analytical") {
+      electronicStructure.metallicity = dftData.isMetallic.value
+        ? Math.max(electronicStructure.metallicity, 0.85)
+        : Math.min(electronicStructure.metallicity, 0.15);
+    }
+  }
+
   const phononSpectrum = computePhononSpectrum(formula, electronicStructure, mpElasticity, mpSummary);
+
+  if (dftData) {
+    if (dftData.debyeTemp.source !== "analytical" && dftData.debyeTemp.value > 0) {
+      const analytical = phononSpectrum.debyeTemperature;
+      phononSpectrum.debyeTemperature = dftData.debyeTemp.value;
+      if (Math.abs(analytical - dftData.debyeTemp.value) > 20) {
+        emit("log", {
+          phase: "phase-10",
+          event: "DFT override",
+          detail: `Using DFT-computed Debye temp ${dftData.debyeTemp.value}K for ${formula} (vs analytical ${analytical}K)`,
+          dataSource: "DFT Resolver",
+        });
+      }
+    }
+    if (dftData.phononFreqMax.value != null && dftData.phononFreqMax.source !== "analytical") {
+      phononSpectrum.maxFrequency = dftData.phononFreqMax.value;
+    }
+  }
+
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula);
 
   let eliashberg: EliashbergResult;
@@ -1095,7 +1141,8 @@ export async function runFullPhysicsAnalysis(
   if (suppressingPhases.length > 0) uncertaintyEstimate += 0.1;
   if (phononSpectrum.anharmonicityIndex > 0.5) uncertaintyEstimate += 0.1;
   if (!mpSummary) uncertaintyEstimate += 0.05;
-  uncertaintyEstimate = Math.min(0.95, uncertaintyEstimate);
+  if (dftData && dftData.dftCoverage > 0.3) uncertaintyEstimate -= dftData.dftCoverage * 0.15;
+  uncertaintyEstimate = Math.max(0.05, Math.min(0.95, uncertaintyEstimate));
 
   return {
     electronicStructure,
