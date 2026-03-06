@@ -157,6 +157,8 @@ function featureVectorToArray(f: MLFeatureVector): number[] {
     f.fermiSurfaceNestingScore ?? 0,
     f.dosAtEF ?? 0,
     f.muStarEstimate ?? 0.13,
+    f.pressureGpa ?? 0,
+    f.optimalPressureGpa ?? 0,
   ];
 }
 
@@ -172,6 +174,7 @@ const FEATURE_NAMES = [
   "nestingScore", "vanHoveProx", "bandFlatness", "softModeScore",
   "motifScore", "orbitalDFrac", "mottProx", "topoScore", "dimScoreV2",
   "phononSoftening", "spinFluc", "fsNesting", "dosEF", "muStar",
+  "pressureGpa", "optimalPressure",
 ];
 
 function findBestSplitForSubset(

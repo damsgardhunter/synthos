@@ -97,6 +97,7 @@ let autonomousTotalPassed = 0;
 let autonomousBestTc = 0;
 let autonomousStartTime = Date.now();
 let autonomousGNNRetrainCount = 0;
+let lastActiveLearningCycle = 0;
 let recentTcImproved = false;
 let recentNewCandidates = 0;
 let failuresSinceLastRetrain = 0;
@@ -1751,9 +1752,17 @@ async function runLearningCycle() {
         await runPhase13_SynthesisReasoning();
       }
 
-      if (state === "running" && cycleCount >= 30 && cycleCount % 30 === 0) {
+      const alStats0 = getActiveLearningStats();
+      const alCooldown = cycleCount - lastActiveLearningCycle >= 5;
+      const shouldRunAL = state === "running" && cycleCount >= 30 && alCooldown && (
+        (cycleCount - lastActiveLearningCycle >= 30) ||
+        (alStats0.totalDFTRuns === 0 && lastActiveLearningCycle === 0)
+      );
+      if (shouldRunAL) {
         try {
+          console.log(`[Active Learning] Triggered at cycle ${cycleCount} (last AL cycle: ${lastActiveLearningCycle})`);
           const alStats = await runActiveLearningCycle(emit, { cycleCount });
+          lastActiveLearningCycle = cycleCount;
           emit("log", {
             phase: "engine",
             event: "Active learning cycle complete",
@@ -1762,6 +1771,8 @@ async function runLearningCycle() {
           });
           autonomousGNNRetrainCount += alStats.modelRetrains > 0 ? 1 : 0;
         } catch (err: any) {
+          lastActiveLearningCycle = cycleCount;
+          console.log(`[Active Learning] Error at cycle ${cycleCount}: ${err.message?.slice(0, 150)}`);
           emit("log", {
             phase: "engine",
             event: "Active learning error",

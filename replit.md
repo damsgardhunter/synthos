@@ -28,7 +28,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **LLM Data Validation**: Cross-validates LLM properties against external APIs, enforcing physical bounds.
 - **Physics as Tc Authority**: Grounds all Tc values in Eliashberg/McMillan physics with ambient-pressure caps.
 - **Diversity & Deduplication**: Mechanisms to ensure diverse formula generation and prevent redundant work.
-- **Evolving Research Strategy**: Balanced family scoring (40% normalized avg score + 40% normalized maxTc + 20% pipeline pass rate) with exploit-then-explore policy and dynamic switching. High-maxTc families are not penalized for low sample counts.
+- **Evolving Research Strategy**: Balanced family scoring (40% normalized avg score + 40% normalized maxTc + 20% pipeline pass rate) with confidence weighting `log2(count+1)/log2(maxCount+1)`. Low-sample guard: count < 5 caps priority at `0.3 + 0.14 * count`. Exploit-then-explore policy with dynamic switching.
 - **Milestone Detection System**: Identifies research milestones like new family discoveries and pipeline graduations.
 - **Tc Plateau Escalation**: Triggers progressive strategies (boundary hunting, inverse design, chemical space expansion) upon stagnation.
 - **Stability Filtering**: Incorporates formation energy bounds and a stability modifier in pairing scores.
@@ -45,7 +45,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Inverse Design**: Generates materials optimized for pairing susceptibility.
 - **Generative Crystal Structures**: Discovers structural variants and novel prototypes via LLM.
 - **Boundary Hunting Mode**: Targets instability edges in formula generation during stagnation.
-- **Enriched ML Features**: Uses approximately 48 diverse physical and structural features for ML prediction.
+- **Enriched ML Features**: Uses approximately 50 diverse physical and structural features for ML prediction, including `pressureGpa` and `optimalPressureGpa` for pressure-aware hydride predictions.
 - **CDW/SDW Auto-Kill**: Suppresses Tc for materials with strong charge/spin density wave instabilities.
 - **Metallicity Pre-Filter**: Rejects candidates with low metallicity or high band gaps early.
 - **Lambda-Based Tc Clamp**: Penalizes high Tc predictions for materials with low lambda values.
@@ -53,7 +53,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Forbidden Word Sanitizer**: Replaces "breakthrough" and "confirmed" with "notable finding" and "verified" in all API responses and LLM outputs.
 - **Milestone Deduplication**: Prevents repeated milestone events.
 - **End-to-End Pipeline Pass Rate**: Implements tightened stage thresholds for a more rigorous pipeline.
-- **Semantic Insight Deduplication**: Uses concept fingerprinting to identify and remove paraphrased duplicate insights.
+- **Semantic Insight Deduplication**: Uses concept fingerprinting (threshold 0.70), Jaccard similarity (threshold 0.50), correlation fingerprint dedup (property-pair tracking with R-value delta > 0.1), and rolling window (last 100 insights) to prevent repeated correlations.
 - **Structure Predictor**: Predicts structure and synthesis temperature using crystallographic rules.
 - **Novel Synthesis Reasoning**: Generates physics-constrained synthesis paths for metastable candidates.
 - **DFT Feature Resolver**: Unifies and resolves DFT data from various sources.
@@ -146,9 +146,11 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 
 ### Active Learning Loop
 - **Uncertainty-Driven DFT**: `selectForDFT(candidates, budget=10)` ranks by acquisition score = `0.5 × normalizedTc + 0.5 × uncertainty`.
-- **Model Retraining**: After DFT enrichment, retrains GNN surrogate with expanded dataset, calls `incorporateFailureData()` for Tc=0 candidates.
+- **Analytical DFT Fallback**: When external APIs (Materials Project, AFLOW) return no data, computes physics-based features locally (band gap from EN spread, Debye temp, bulk modulus, Miedema formation energy, DOS from Sommerfeld gamma). Sets `dftCoverage=0.3` so enrichment always succeeds.
+- **Formula Normalization**: Strips subscripts, standardizes element ordering before API queries.
+- **Model Retraining**: After DFT enrichment, retrains GNN surrogate with expanded dataset, calls `incorporateFailureData()` for Tc=0 candidates. Always retrains even when external DFT fails.
 - **Convergence Tracking**: Monitors totalDFTRuns, avgUncertaintyBefore/After, modelRetrains, bestTcFromLoop.
-- **Engine Integration**: Fires every 30 cycles.
+- **Reliable Triggering**: Uses gap-based check (`cycleCount - lastActiveLearningCycle >= 30`) instead of strict modulo. Auto-triggers on first eligible cycle if `totalDFTRuns=0`.
 
 ### Autonomous Discovery Loop
 - **Massive Generation Pipeline**: Generates 500-2000 candidates per cycle.

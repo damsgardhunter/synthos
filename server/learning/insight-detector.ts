@@ -192,7 +192,7 @@ function hasKeywordOverlap(text: string, existingTexts: string[]): boolean {
 function isDuplicateByJaccard(text: string, existingTexts: string[]): boolean {
   const lower = text.toLowerCase();
   for (const existing of existingTexts) {
-    if (jaccardSimilarity(lower, existing) > 0.6) return true;
+    if (jaccardSimilarity(lower, existing) > 0.5) return true;
   }
   return false;
 }
@@ -236,10 +236,76 @@ function isConceptualDuplicate(text: string, existingTexts: string[]): boolean {
       if (efp.has(t)) shared++;
     }
     const smaller = Math.min(fp.size, efp.size);
-    if (smaller > 0 && shared / smaller >= 0.8) return true;
+    if (smaller > 0 && shared / smaller >= 0.7) return true;
   }
   return false;
 }
+
+const CORRELATION_DIRECTIONS = ["higher", "lower", "greater", "less", "increase", "decrease", "enhance", "reduce", "correlat", "positive", "negative", "inverse"];
+
+interface CorrelationFingerprint {
+  propX: string;
+  propY: string;
+  direction: string;
+  rValue?: number;
+}
+
+function extractCorrelationFingerprint(text: string): CorrelationFingerprint | null {
+  const lower = text.toLowerCase();
+  const matchedProps: string[] = [];
+  for (const prop of QUANTITATIVE_PROPERTY_NAMES) {
+    if (lower.includes(prop)) {
+      matchedProps.push(prop);
+    }
+  }
+  if (matchedProps.length < 2) return null;
+
+  let direction = "unknown";
+  for (const dir of CORRELATION_DIRECTIONS) {
+    if (lower.includes(dir)) {
+      direction = dir;
+      break;
+    }
+  }
+
+  const sorted = matchedProps.slice(0, 2).sort();
+
+  const rMatch = lower.match(/r[\s=:]*([+-]?\d+\.?\d*)/);
+  const rValue = rMatch ? parseFloat(rMatch[1]) : undefined;
+
+  return { propX: sorted[0], propY: sorted[1], direction, rValue };
+}
+
+function normalizeDirection(dir: string): string {
+  if (["higher", "greater", "increase", "enhance", "positive", "correlat"].some(d => dir.startsWith(d))) return "positive";
+  if (["lower", "less", "decrease", "reduce", "negative", "inverse"].some(d => dir.startsWith(d))) return "negative";
+  return "unknown";
+}
+
+function isCorrelationDuplicate(text: string, existingTexts: string[]): boolean {
+  const fp = extractCorrelationFingerprint(text);
+  if (!fp) return false;
+
+  for (const existing of existingTexts) {
+    const efp = extractCorrelationFingerprint(existing);
+    if (!efp) continue;
+
+    if (fp.propX === efp.propX && fp.propY === efp.propY) {
+      const dirNew = normalizeDirection(fp.direction);
+      const dirExisting = normalizeDirection(efp.direction);
+      if (dirNew !== "unknown" && dirExisting !== "unknown" && dirNew !== dirExisting) {
+        continue;
+      }
+      if (fp.rValue !== undefined && efp.rValue !== undefined) {
+        if (Math.abs(fp.rValue - efp.rValue) > 0.1) continue;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+const ROLLING_WINDOW_SIZE = 100;
 
 const MAX_NOVEL_INSIGHTS_PER_CYCLE = 3;
 let novelInsightQueue: { text: string; phaseId: number; phaseName: string; relatedFormulas: string[] }[] = [];
@@ -254,14 +320,14 @@ export async function evaluateInsightNovelty(
   if (insights.length === 0) return { novel: 0, total: 0 };
 
   const [recentInsights, novelInsights] = await Promise.all([
-    storage.getNovelInsights(200),
-    storage.getNovelInsightsOnly(300),
+    storage.getNovelInsights(ROLLING_WINDOW_SIZE),
+    storage.getNovelInsightsOnly(ROLLING_WINDOW_SIZE),
   ]);
 
   const combinedMap = new Map<string, typeof recentInsights[0]>();
   for (const ins of recentInsights) combinedMap.set(ins.id, ins);
   for (const ins of novelInsights) combinedMap.set(ins.id, ins);
-  const existingInsights = Array.from(combinedMap.values());
+  const existingInsights = Array.from(combinedMap.values()).slice(0, ROLLING_WINDOW_SIZE);
   const existingTexts = existingInsights.map(i => i.insightText.toLowerCase());
 
   const exactDuplicates = new Set<number>();
@@ -286,6 +352,23 @@ export async function evaluateInsightNovelty(
           isNovel: false,
           noveltyScore: 0.12,
           noveltyReason: "Duplicate detected via semantic/concept similarity",
+          category: "known-pattern",
+          relatedFormulas: relatedFormulas ?? [],
+        });
+      } catch {}
+      continue;
+    }
+
+    if (isCorrelationDuplicate(lower, existingTexts)) {
+      try {
+        await storage.insertNovelInsight({
+          id: insightId(text, phaseId),
+          phaseId,
+          phaseName,
+          insightText: text,
+          isNovel: false,
+          noveltyScore: 0.1,
+          noveltyReason: "Duplicate correlation pair (same property_X ↔ property_Y already recorded)",
           category: "known-pattern",
           relatedFormulas: relatedFormulas ?? [],
         });

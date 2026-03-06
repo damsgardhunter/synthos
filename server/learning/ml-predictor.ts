@@ -9,6 +9,7 @@ import {
   assessCorrelationStrength,
   computeDimensionalityScore,
   detectStructuralMotifs,
+  simulatePressureEffects,
 } from "./physics-engine";
 import {
   ELEMENTAL_DATA,
@@ -88,6 +89,8 @@ export interface MLFeatureVector {
   fermiSurfaceNestingScore: number;
   dosAtEF: number;
   muStarEstimate: number;
+  pressureGpa: number;
+  optimalPressureGpa: number;
 }
 
 const CHALCOGENS = ["O","S","Se","Te"];
@@ -277,6 +280,14 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const muStarEstimate = coupling.muStar;
 
+  const candidatePressure = (mat as any)?.pressureGpa ?? 0;
+
+  let optimalPressureGpa = 0;
+  try {
+    const pressureResult = simulatePressureEffects(formula, electronic, phonon, coupling);
+    optimalPressureGpa = pressureResult.optimalPressure;
+  } catch {}
+
   return {
     avgElectronegativity: avgEN,
     maxAtomicMass: Math.max(...massValues, 0),
@@ -333,6 +344,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     fermiSurfaceNestingScore,
     dosAtEF,
     muStarEstimate,
+    pressureGpa: candidatePressure,
+    optimalPressureGpa,
   };
 }
 

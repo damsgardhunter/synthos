@@ -84,13 +84,15 @@ async function runDFTEnrichmentForCandidate(
 ): Promise<boolean> {
   try {
     const dftData = await resolveDFTFeatures(candidate.formula);
-    if (dftData.dftCoverage === 0) return false;
 
     const desc = describeDFTSources(dftData);
+    const hasExternalData = dftData.sources.mp || dftData.sources.aflow;
+    const sourceType = hasExternalData ? "external+analytical" : "analytical";
+
     emit("log", {
       phase: "active-learning",
       event: "DFT enrichment",
-      detail: `${candidate.formula} -- DFT data: ${desc}`,
+      detail: `${candidate.formula} -- DFT data (${sourceType}, coverage=${dftData.dftCoverage.toFixed(2)}): ${desc}`,
       dataSource: "Active Learning",
     });
 
@@ -99,10 +101,16 @@ async function runDFTEnrichmentForCandidate(
     const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
     const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
+    const hasExternalDFT = dftData.sources.mp || dftData.sources.aflow;
+    let confidence: string;
+    if (dftData.dftCoverage > 0.6 && hasExternalDFT) confidence = "high";
+    else if (dftData.dftCoverage > 0.2 && hasExternalDFT) confidence = "medium";
+    else confidence = "low";
+
     const updates: any = {
       xgboostScore: gb.score,
       ensembleScore: ensemble,
-      dataConfidence: dftData.dftCoverage > 0.4 ? "high" : "medium",
+      dataConfidence: confidence,
     };
 
     if (dftData.formationEnergy.source !== "analytical") {
@@ -114,7 +122,8 @@ async function runDFTEnrichmentForCandidate(
 
     await storage.updateSuperconductorCandidate(candidate.id, updates);
     return true;
-  } catch {
+  } catch (err) {
+    console.log(`[Active Learning] DFT enrichment failed for ${candidate.formula}: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 }
@@ -234,6 +243,16 @@ export async function runActiveLearningCycle(
   if (dftSuccessCount > 0) {
     retrainResult = await retrainGNNWithEnrichedData(emit);
     convergenceStats.modelRetrains++;
+  } else {
+    emit("log", {
+      phase: "active-learning",
+      event: "DFT enrichment warning",
+      detail: `All ${selected.length} candidates failed DFT enrichment. Retraining anyway with existing data.`,
+      dataSource: "Active Learning",
+    });
+    retrainResult = await retrainGNNWithEnrichedData(emit);
+    convergenceStats.modelRetrains++;
+    convergenceStats.totalDFTRuns++;
   }
 
   let avgUncertaintyAfter = avgUncertaintyBefore;

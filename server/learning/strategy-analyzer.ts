@@ -79,11 +79,15 @@ export async function analyzeAndEvolveStrategy(
     const globalMaxTc = Math.max(...Object.values(familyStats).map(s => s.maxTc), 1);
     const globalMaxAvgScore = Math.max(...Object.values(familyStats).map(s => s.avgScore), 0.001);
 
+    const maxCandidateCount = Math.max(...Object.values(familyStats).map(s => s.count), 1);
+
     for (const [family, stats] of Object.entries(familyStats)) {
       const normalizedAvgScore = stats.avgScore / globalMaxAvgScore;
       const normalizedMaxTc = stats.maxTc / globalMaxTc;
       const pipelinePassRate = stats.count > 0 ? stats.pipelinePasses / stats.count : 0;
-      const familyScore = 0.4 * normalizedAvgScore + 0.4 * normalizedMaxTc + 0.2 * pipelinePassRate;
+      const rawFamilyScore = 0.4 * normalizedAvgScore + 0.4 * normalizedMaxTc + 0.2 * pipelinePassRate;
+      const confidenceWeight = Math.log2(stats.count + 1) / Math.log2(maxCandidateCount + 1);
+      const familyScore = rawFamilyScore * confidenceWeight;
 
       adjustedFamilyStats[family] = {
         count: stats.count,
@@ -117,7 +121,7 @@ export async function analyzeAndEvolveStrategy(
 
     const prompt = `You are a materials science research strategist for an AI superconductor discovery platform.
 
-Current candidate family performance (cycle ${cycleNumber}, scored by balanced formula: 40% normalized avg score + 40% normalized max Tc + 20% pipeline pass rate — families with high maxTc are weighted equally to those with high average scores):
+Current candidate family performance (cycle ${cycleNumber}, scored by confidence-weighted formula: (40% normalized avg score + 40% normalized max Tc + 20% pipeline pass rate) × log2(count+1)/log2(maxCount+1) — families with fewer candidates have dampened scores):
 ${signalText}
 
 Under-explored families: ${underExplored.join(", ") || "None"}
@@ -127,7 +131,11 @@ Recent novel insights: ${insightSummary || "None yet"}
 Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${f}: ${n} failures`).join(", ") || "No failures yet"}
 ${previousStrategyContext}
 
-IMPORTANT: Families with high maxTc values represent breakthrough potential even if they have few samples. A single candidate with maxTc=89K is more significant than many candidates averaging Tc=30K.
+IMPORTANT SCORING RULES:
+- The familyScore shown above is already confidence-weighted by candidate count. Families with very few candidates (< 5) have dampened scores to reflect low statistical confidence.
+- Do NOT over-weight families with fewer than 5 candidates. A single high-Tc candidate is interesting but not statistically reliable — it could be a prediction artifact.
+- Families with >= 10 candidates and consistently high scores deserve the highest priorities.
+- Under-explored families should be allocated moderate exploration budget (priority 0.3-0.5) but should NOT dominate the strategy.
 
 Based on this data, recommend 3-5 material families to focus research on. For each, give a priority (0.0-1.0) and a brief reason.
 Also write a 1-2 sentence overall strategy summary that references specific data trends.
@@ -160,9 +168,9 @@ Respond in JSON:
         const area = String(fa.area || "Unknown");
         let priority = Math.max(0, Math.min(1, Number(fa.priority) || 0.5));
         const familySampleCount = familyStats[area]?.count ?? 0;
-        const familyMaxTc = familyStats[area]?.maxTc ?? 0;
-        if (familySampleCount < 3 && familyMaxTc < 50) {
-          priority = Math.min(priority, 0.5);
+        if (familySampleCount < 5) {
+          const cap = 0.3 + 0.14 * familySampleCount;
+          priority = Math.min(priority, cap);
         }
         const prevPriority = prevMap.get(area);
         if (prevPriority !== undefined) {
