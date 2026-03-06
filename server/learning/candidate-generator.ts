@@ -532,6 +532,7 @@ export function runMassiveGeneration(
     Sulfides: [["Mo", "S"], ["Nb", "S"], ["Ta", "S"], ["Ti", "S"]],
     Oxides: [["Sr", "Ti", "O"], ["Ba", "Ti", "O"], ["La", "Mn", "O"]],
     Alloys: [["Nb", "Ti"], ["Nb", "Zr"], ["Mo", "Re"], ["V", "Ti"]],
+    Kagome: [["K", "V", "Sb"], ["Rb", "V", "Sb"], ["Cs", "V", "Sb"], ["K", "V", "Bi"], ["Cs", "Ti", "Sb"], ["Ba", "V", "Sb"], ["Ca", "V", "Sb"], ["Sr", "V", "Bi"]],
   };
 
   const scBiasedSeeds: string[][] = [

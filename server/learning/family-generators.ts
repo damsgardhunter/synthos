@@ -94,11 +94,38 @@ export function generateIntercalatedNitride(): FamilyGenerationResult {
   return { formulas, family: "Intercalated-nitride" };
 }
 
+export function generateKagomeMetal(): FamilyGenerationResult {
+  const A = ["K", "Rb", "Cs", "Ca", "Sr", "Ba"];
+  const V_SITE = ["V", "Ti", "Cr", "Mn", "Fe", "Co", "Ni"];
+  const X = ["Sb", "Bi", "Sn", "Ge", "As"];
+  const formulas: string[] = [];
+
+  for (const a of A) {
+    for (const v of V_SITE) {
+      for (const x of X) {
+        formulas.push(`${a}${v}3${x}5`);
+      }
+    }
+  }
+
+  for (const a of A) {
+    for (const v of V_SITE) {
+      for (const x of X) {
+        formulas.push(`${a}${v}3${x}4`);
+        formulas.push(`${a}2${v}3${x}5`);
+      }
+    }
+  }
+
+  return { formulas, family: "Kagome" };
+}
+
 export function runFamilyAwareGeneration(): FamilyGenerationResult[] {
   return [
     generateMAXPhase(),
     generateBoride(),
     generateHydride(),
     generateIntercalatedNitride(),
+    generateKagomeMetal(),
   ];
 }

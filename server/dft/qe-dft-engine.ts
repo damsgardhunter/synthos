@@ -29,6 +29,14 @@ export interface DFTResult {
   error: string | null;
 }
 
+export interface PhononStability {
+  hasImaginaryModes: boolean;
+  imaginaryModeCount: number;
+  lowestFrequency: number;
+  frequencies: number[];
+  zeroPointEnergy: number | null;
+}
+
 export interface XTBEnrichedFeatures {
   bandGap: number;
   isMetallic: boolean;
@@ -39,6 +47,7 @@ export interface XTBEnrichedFeatures {
   converged: boolean;
   prototype: string;
   method: string;
+  phononStability: PhononStability | null;
 }
 
 interface AtomPosition {
@@ -220,6 +229,55 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     aRatio: 1.0,
     cOverA: 1.0,
     stoichiometryPattern: "A4",
+  },
+  {
+    name: "Layered",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.333, y: 0.667, z: 0.0 },
+      { site: "A", x: 0.667, y: 0.333, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.5 },
+      { site: "B", x: 0.333, y: 0.667, z: 0.5 },
+      { site: "B", x: 0.667, y: 0.333, z: 0.5 },
+    ],
+    latticeType: "hexagonal",
+    aRatio: 1.0,
+    cOverA: 2.0,
+    stoichiometryPattern: "A3B3",
+  },
+  {
+    name: "Kagome",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.5, y: 0.0, z: 0.25 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.25 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.25 },
+      { site: "C", x: 0.333, y: 0.167, z: 0.5 },
+      { site: "C", x: 0.167, y: 0.333, z: 0.5 },
+      { site: "C", x: 0.667, y: 0.833, z: 0.5 },
+      { site: "C", x: 0.833, y: 0.667, z: 0.5 },
+      { site: "C", x: 0.667, y: 0.167, z: 0.5 },
+    ],
+    latticeType: "hexagonal",
+    aRatio: 1.0,
+    cOverA: 2.7,
+    stoichiometryPattern: "A1B3C5",
+  },
+  {
+    name: "HexBoride",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.167, y: 0.333, z: 0.5 },
+      { site: "B", x: 0.333, y: 0.167, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.167, y: 0.833, z: 0.5 },
+      { site: "B", x: 0.833, y: 0.167, z: 0.5 },
+      { site: "B", x: 0.833, y: 0.667, z: 0.5 },
+    ],
+    latticeType: "hexagonal",
+    aRatio: 1.0,
+    cOverA: 1.15,
+    stoichiometryPattern: "A1B6",
   },
 ];
 
@@ -627,6 +685,114 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
 let totalXTBRuns = 0;
 let totalXTBSuccesses = 0;
 
+const phononCache = new Map<string, PhononStability | null>();
+
+export async function runXTBPhononCheck(formula: string): Promise<PhononStability | null> {
+  if (!isDFTAvailable()) return null;
+  if (phononCache.has(formula)) return phononCache.get(formula)!;
+
+  const calcDir = path.join(WORK_DIR, `phonon_${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`);
+  try {
+    fs.mkdirSync(calcDir, { recursive: true });
+
+    const { atoms, prototype } = generateCrystalStructure(formula);
+    if (atoms.length < 2) return null;
+
+    writeXYZ(atoms, path.join(calcDir, "input.xyz"), `${formula} phonon check (${prototype})`);
+
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "1G",
+    };
+
+    const output = execSync(
+      `${XTB_BIN} input.xyz --gfn 2 --hess --iterations 200 2>&1`,
+      { cwd: calcDir, timeout: TIMEOUT_MS * 2, env, maxBuffer: 50 * 1024 * 1024 }
+    ).toString();
+
+    const frequencies: number[] = [];
+    const freqSection = output.match(/projected vibrational frequencies[\s\S]*?(?=\n\n|\nreduced masses)/);
+    if (freqSection) {
+      const lines = freqSection[0].split("\n");
+      for (const line of lines) {
+        const nums = line.match(/-?\d+\.\d+/g);
+        if (nums) {
+          for (const n of nums) {
+            const freq = parseFloat(n);
+            if (Number.isFinite(freq) && Math.abs(freq) > 0.01) {
+              frequencies.push(freq);
+            }
+          }
+        }
+      }
+    }
+
+    if (frequencies.length === 0) {
+      const vibLines = output.match(/Frequency\s+.*cm/g);
+      if (vibLines) {
+        for (const line of vibLines) {
+          const nums = line.match(/-?\d+\.\d+/g);
+          if (nums) {
+            for (const n of nums) {
+              const freq = parseFloat(n);
+              if (Number.isFinite(freq) && Math.abs(freq) > 0.01) {
+                frequencies.push(freq);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (frequencies.length === 0) {
+      const allFreqs = output.match(/eigval\s*:[\s\S]*?(?=\n\s*\n)/);
+      if (allFreqs) {
+        const nums = allFreqs[0].match(/-?\d+\.\d+/g);
+        if (nums) {
+          for (const n of nums) {
+            const freq = parseFloat(n);
+            if (Number.isFinite(freq) && Math.abs(freq) > 0.01) {
+              frequencies.push(freq);
+            }
+          }
+        }
+      }
+    }
+
+    let zpe: number | null = null;
+    const zpeMatch = output.match(/zero point energy\s+([-\d.]+)\s+Eh/);
+    if (zpeMatch) zpe = parseFloat(zpeMatch[1]);
+
+    const IMAG_THRESHOLD = -50;
+    const imaginaryModes = frequencies.filter(f => f < IMAG_THRESHOLD);
+    const lowestFreq = frequencies.length > 0 ? Math.min(...frequencies) : 0;
+
+    const result: PhononStability = {
+      hasImaginaryModes: imaginaryModes.length > 0,
+      imaginaryModeCount: imaginaryModes.length,
+      lowestFrequency: lowestFreq,
+      frequencies: frequencies.slice(0, 20),
+      zeroPointEnergy: zpe,
+    };
+
+    phononCache.set(formula, result);
+    if (phononCache.size > 100) {
+      const oldest = phononCache.keys().next().value;
+      if (oldest) phononCache.delete(oldest);
+    }
+
+    return result;
+  } catch (err) {
+    console.log(`[DFT] ${formula}: Phonon check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  } finally {
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
 export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeatures | null> {
   if (!isDFTAvailable()) return null;
 
@@ -641,6 +807,11 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
 
   const formationE = await computeFormationEnergy(formula, dftResult);
 
+  let phononResult: PhononStability | null = null;
+  if (dftResult.atomCount <= 12) {
+    phononResult = await runXTBPhononCheck(formula);
+  }
+
   return {
     bandGap: dftResult.homoLumoGap,
     isMetallic: dftResult.isMetallic,
@@ -651,6 +822,7 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
     converged: true,
     prototype: dftResult.prototype,
     method: "GFN2-xTB",
+    phononStability: phononResult,
   };
 }
 

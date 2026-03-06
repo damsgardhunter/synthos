@@ -97,7 +97,8 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Integration**: Runs on EVERY candidate in the main screening pipeline via `runXTBEnrichment()` in `dft-feature-resolver.ts`. Falls back to analytical estimates only when xTB fails or formula is unsupported.
 - **DFT Source Type**: `"dft-xtb"` — tracked as a distinct source in DFTResolvedFeatures alongside `"analytical"`, `"mp"`, `"oqmd"`, `"aflow"`, `"nist"`.
 - **Performance**: ~5 seconds per calculation for typical 3-20 atom structures. ~85% success rate.
-- **Structure generation**: 8 crystallographic prototypes (A15, AlB2, NaCl, Perovskite, ThCr2Si2, Heusler, BCC, FCC) with real fractional coordinates and lattice parameters. Generic cluster fallback for unmatched stoichiometries. Structures capped at 20 atoms with proportional scaling.
+- **Structure generation**: 11 crystallographic prototypes (A15, AlB2, NaCl, Perovskite, ThCr2Si2, Heusler, BCC, FCC, Layered, Kagome, HexBoride) with real fractional coordinates and lattice parameters. Generic cluster fallback for unmatched stoichiometries. Structures capped at 20 atoms with proportional scaling.
+- **Phonon stability check**: xTB `--hess` Hessian calculation for structures ≤12 atoms. Detects imaginary vibrational modes (threshold: -50 cm⁻¹). Candidates with imaginary modes receive ensemble score penalties (0.1 per mode, max 0.3). Results cached (100 entries).
 - **Formation energy**: Computed relative to single-element dimer reference calculations. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
 - **Cache**: In-memory LRU caches for DFT results (200 entries) and elemental reference energies.
 - **Stats API**: `getXTBStats()` exposes runs, successes, cacheSize, refElements via `/api/dft-status`.
@@ -120,6 +121,11 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - Uses OpenAI text-embedding-3-small embeddings with cosine similarity (threshold 0.85) to reject semantically duplicate insights before LLM novelty scoring.
 - Category quotas (2 per 30-min window) across 10 categories: novel-correlation, new-mechanism, cross-domain, computational-discovery, design-principle, phonon-softening, fermi-nesting, charge-transfer, structural-motif, electron-density.
 - NLP prompts instruct diverse topic rotation: phonon softening, Fermi surface nesting, charge transfer layers, structural motifs, electron density redistribution, spin-orbit coupling, pressure-dependent phonon hardening.
+
+### Kagome Metals Family
+- Generates AV3X5, AV3X4, A2V3X5 stoichiometries with alkali/alkaline-earth A-sites and pnictogen/metalloid X-sites.
+- Family filter checks frustrated lattice metal count, pnictogen sublattice, DOS at Fermi, van Hove singularity proximity, 2D character, and electron-phonon coupling.
+- Seeds: KV3Sb5, CsV3Sb5, RbV3Sb5 and variants.
 
 ### Bayesian Family Strategy Scoring
 - Uses Bayesian shrinkage (prior_count=5) to prevent single-candidate families from dominating. Includes exploration bonus for under-explored families (<10 candidates).

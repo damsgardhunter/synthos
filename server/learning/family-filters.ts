@@ -270,6 +270,74 @@ function applyNitrideFilter(formula: string, features: MLFeatureVector): FamilyF
   return { pass, score, reasons };
 }
 
+function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFilterResult {
+  const counts = parseFormulaCounts(formula);
+  const elements = parseFormulaElements(formula);
+  const reasons: string[] = [];
+  let score = 0;
+  let pass = true;
+
+  const KAGOME_METALS = ["V", "Ti", "Cr", "Mn", "Fe", "Co", "Ni"];
+  const PNICTOGEN_ELEMENTS = ["Sb", "Bi", "Sn", "Ge", "As"];
+
+  const kagomeMetalCount = elements
+    .filter(e => KAGOME_METALS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const pnictogenCount = elements
+    .filter(e => PNICTOGEN_ELEMENTS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+
+  if (kagomeMetalCount >= 3) {
+    score += 0.25;
+    reasons.push(`Kagome metal count = ${kagomeMetalCount} >= 3 (frustrated lattice sites present)`);
+  } else {
+    pass = false;
+    reasons.push(`Kagome metal count = ${kagomeMetalCount} < 3 (insufficient frustrated lattice sites)`);
+  }
+
+  if (pnictogenCount >= 4) {
+    score += 0.20;
+    reasons.push(`Pnictogen/metalloid count = ${pnictogenCount} >= 4 (adequate sublattice)`);
+  } else {
+    reasons.push(`Pnictogen/metalloid count = ${pnictogenCount} < 4 (sparse sublattice)`);
+  }
+
+  if (features.dosAtEF > 2.0) {
+    score += 0.25;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} > 2.0 (van Hove singularity proximity)`);
+  } else if (features.dosAtEF > 1.0) {
+    score += 0.10;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} > 1.0 (moderate states at Fermi level)`);
+  } else {
+    pass = false;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} <= 1.0 (insufficient DOS for Kagome superconductivity)`);
+  }
+
+  const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
+  if (is2DLike) {
+    score += 0.15;
+    reasons.push(`2D character detected (dimensionality=${features.dimensionalityScore.toFixed(2)}, layered=${features.layeredStructure})`);
+  } else {
+    reasons.push(`Limited 2D character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+  }
+
+  if (features.electronPhononLambda >= 0.5) {
+    score += 0.15;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} >= 0.5 (adequate e-ph coupling for Kagome)`);
+  } else {
+    pass = false;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.5 (weak electron-phonon coupling)`);
+  }
+
+  if (features.metallicity < 0.4) {
+    pass = false;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for Kagome metal`);
+  }
+
+  score = Math.min(1.0, score);
+  return { pass, score, reasons };
+}
+
 export function applyFamilyFilter(
   formula: string,
   family: string,
@@ -285,6 +353,8 @@ export function applyFamilyFilter(
     case "Nitride":
     case "Intercalated-nitride":
       return applyNitrideFilter(formula, features);
+    case "Kagome":
+      return applyKagomeFilter(formula, features);
     default:
       return { pass: false, score: 0, reasons: [`Unknown family: ${family}`] };
   }
@@ -393,6 +463,8 @@ export function rankCandidate(
     synthesisFeasibility = 0.6;
   } else if (family === "Nitride") {
     synthesisFeasibility = 0.55;
+  } else if (family === "Kagome") {
+    synthesisFeasibility = 0.65;
   }
 
   const composite = 0.35 * tcNormalized +

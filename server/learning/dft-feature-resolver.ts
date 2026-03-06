@@ -11,7 +11,7 @@ import {
   isActinide,
 } from "./elemental-data";
 import { runXTBEnrichment, isDFTAvailable } from "../dft/qe-dft-engine";
-import type { XTBEnrichedFeatures } from "../dft/qe-dft-engine";
+import type { XTBEnrichedFeatures, PhononStability } from "../dft/qe-dft-engine";
 
 export type DFTSource = "dft-mp" | "dft-aflow" | "dft-xtb" | "analytical";
 
@@ -30,6 +30,7 @@ export interface DFTResolvedFeatures {
   energyAboveHull: DFTResolvedFeature<number | null>;
   phononFreqMax: DFTResolvedFeature<number | null>;
   thermalConductivity: DFTResolvedFeature<number | null>;
+  phononStability: PhononStability | null;
   dftCoverage: number;
   sources: { mp: boolean; aflow: boolean };
 }
@@ -416,6 +417,15 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
     console.log(`[DFT] ${formula}: Partial external data (coverage=${externalCoverage.toFixed(2)}). Effective coverage=${dftCoverage.toFixed(2)}.`);
   }
 
+  const xtbPhononStability = xtbData?.phononStability ?? null;
+  if (xtbPhononStability) {
+    if (xtbPhononStability.hasImaginaryModes) {
+      console.log(`[DFT] ${formula}: xTB Hessian found ${xtbPhononStability.imaginaryModeCount} imaginary mode(s), lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1`);
+    } else {
+      console.log(`[DFT] ${formula}: xTB Hessian confirms phonon stability, lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1`);
+    }
+  }
+
   return {
     bandGap,
     isMetallic,
@@ -426,6 +436,7 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
     energyAboveHull,
     phononFreqMax,
     thermalConductivity,
+    phononStability: xtbPhononStability,
     dftCoverage,
     sources: {
       mp: raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null,

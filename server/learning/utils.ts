@@ -21,6 +21,7 @@ const REGEX_FAMILIES: Record<string, RegExp> = {
   "Silicides": /(?:Fe|Co|Ni|Mn|Cr|V|Ti|Nb|Mo|W|Ru|Os|Ir|Pt|Pd|Re)Si\d|silicide|FeSi|CoSi|MnSi/i,
   "Phosphides": /(?:Fe|Co|Ni|Mn|Ga|In|Zn|Cd|Al|B)P\d*(?:[^btdm]|$)|phosphide|GaP|InP/i,
   "Intermetallics": /(?:Nb|V|Nb|Ta).*(?:Sn|Ge|Si|Ga|Al)|Nb.*Ti|NbSn|V3Si|Nb3Ge|Nb3Al|intermetallic/i,
+  "Kagome": /(?:K|Rb|Cs|Ca|Sr|Ba)(?:V|Ti|Cr|Mn|Fe|Co|Ni)3(?:Sb|Bi|Sn|Ge|As)\d|kagome/i,
 };
 
 export function classifyFamily(formula: string): string {
