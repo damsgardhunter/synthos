@@ -3,7 +3,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
-import { classifyFamily, getPrototypeHash } from "./utils";
+import { classifyFamily, getPrototypeHash, normalizeFormula } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
@@ -154,7 +154,8 @@ export async function runSuperconductorResearch(
   }
 
   for (const candidate of mlResult.candidates) {
-    const formula = candidate.formula || "Unknown";
+    const formula = normalizeFormula(candidate.formula || "Unknown");
+    candidate.formula = formula;
     const newScore = candidate.ensembleScore ?? 0;
 
     const mlFeatures = extractFeatures(formula);
@@ -188,6 +189,10 @@ export async function runSuperconductorResearch(
 
     if (candidate.predictedTc != null) {
       candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula);
+      if (candidate.predictedTc > 80 && lambdaML < 1.5) {
+        const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
+        candidate.predictedTc = Math.round(candidate.predictedTc * penalty);
+      }
     }
     const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML, formula);
 
@@ -429,6 +434,7 @@ Return JSON with 'candidates' array:
 
     for (const c of newCandidates) {
       if (!c.formula) continue;
+      c.formula = normalizeFormula(c.formula);
 
       const existingNovel = await storage.getSuperconductorByFormula(c.formula);
       if (existingNovel) {
@@ -442,6 +448,10 @@ Return JSON with 'candidates' array:
       let cappedTc = c.predictedTc ?? null;
       if (cappedTc != null && cappedTc > 0) {
         const featureLambda = features.electronPhononLambda ?? 0;
+        if (cappedTc > 80 && featureLambda < 1.5) {
+          const penalty = featureLambda < 0.5 ? 0.15 : featureLambda < 1.0 ? 0.25 : 0.3;
+          cappedTc = Math.round(cappedTc * penalty);
+        }
         const omegaLogK = (features.logPhononFreq ?? 300) * 1.44;
         const muStar = 0.12;
         let mcMillanMax = 0;
@@ -758,6 +768,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
 
     for (const c of candidates) {
       if (!c.formula) continue;
+      c.formula = normalizeFormula(c.formula);
 
       const existing = await storage.getSuperconductorByFormula(c.formula);
       if (existing) continue;
@@ -770,6 +781,10 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
       const lambdaML = features.electronPhononLambda ?? 0;
       const pressureML = c.pressureGpa ?? 0;
       const metallicityML = features.metallicity ?? 0.5;
+      if (cappedTc > 80 && lambdaML < 1.5) {
+        const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
+        cappedTc = Math.round(cappedTc * penalty);
+      }
       cappedTc = applyAmbientTcCap(cappedTc, lambdaML, pressureML, metallicityML, c.formula);
 
       const inverseDesignScore = Math.min(0.95, pairingSusc.score * 0.6 + gbResult.score * 0.4);

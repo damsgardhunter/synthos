@@ -460,7 +460,7 @@ export class DatabaseStorage implements IStorage {
       stage: r.stage,
       count: Number(r.count),
       passed: Number(r.passed),
-    }));
+    })).sort((a, b) => a.stage - b.stage);
 
     return {
       elementsLearned: Number(c.elements_count),

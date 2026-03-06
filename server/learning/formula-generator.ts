@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { trackDuplicatesSkipped } from "./strategy-analyzer";
+import { normalizeFormula } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -148,6 +149,7 @@ export async function generateNovelFormulas(
 
     for (const candidate of candidates) {
       if (!candidate.formula || !candidate.name) continue;
+      candidate.formula = normalizeFormula(candidate.formula);
 
       if (recentlyGenerated.includes(candidate.formula)) {
         trackDuplicatesSkipped(1);

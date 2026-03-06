@@ -14,6 +14,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
+import { normalizeFormula } from "./utils";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -192,7 +193,7 @@ const emit: EventEmitter = (type: string, data: any) => {
   }
 };
 
-const PHASE_TARGETS: Record<number, number> = {
+const PHASE_BASE_TARGETS: Record<number, number> = {
   1: 47,
   2: 118,
   3: 50,
@@ -207,13 +208,24 @@ const PHASE_TARGETS: Record<number, number> = {
   12: 300,
 };
 
+function dynamicTarget(phaseId: number, itemsLearned: number): number {
+  const base = PHASE_BASE_TARGETS[phaseId] ?? 100;
+  if (itemsLearned <= base) return base;
+  return Math.ceil(itemsLearned * 1.1);
+}
+
+function computeProgress(phaseId: number, itemsLearned: number): number {
+  const target = dynamicTarget(phaseId, itemsLearned);
+  return Math.min(99, Math.floor((itemsLearned / target) * 100));
+}
+
 async function updatePhaseStatus(phaseId: number, status: string, progress: number, itemsLearned: number, totalItems?: number) {
   try {
     const phase = await storage.getLearningPhaseById(phaseId);
     if (!phase) return;
 
     const newProgress = Math.min(100, progress);
-    const resolvedTotal = totalItems ?? PHASE_TARGETS[phaseId] ?? phase.totalItems;
+    const resolvedTotal = totalItems ?? dynamicTarget(phaseId, itemsLearned);
     const updates: any = { progress: newProgress, itemsLearned, totalItems: resolvedTotal };
     if (status === "active" && phase.status !== "active") {
       updates.startedAt = new Date();
@@ -269,7 +281,7 @@ async function runPhase3_Bonding() {
     await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas);
     const phase3 = await storage.getLearningPhaseById(3);
     const totalBondingInsights = (phase3?.insights ?? []).length;
-    const progress = Math.min(99, Math.floor((totalBondingInsights / 50) * 100));
+    const progress = computeProgress(3, totalBondingInsights);
     await updatePhaseStatus(3, "active", progress, totalBondingInsights);
   } finally {
     activeTasks.delete("Bonding Analysis");
@@ -294,7 +306,7 @@ async function runPhase4_Materials() {
     totalMaterialsFetched += total;
 
     const matCount = await storage.getMaterialCount();
-    const progress = Math.min(99, Math.floor((matCount / 500) * 100));
+    const progress = computeProgress(4, matCount);
     await updatePhaseStatus(4, "active", progress, matCount);
   } finally {
     activeTasks.delete("Data Fetching");
@@ -321,8 +333,11 @@ async function runPhase5_Prediction() {
     await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas);
     const phase5 = await storage.getLearningPhaseById(5);
     const totalPredInsights = (phase5?.insights ?? []).length;
-    const progress = Math.min(99, Math.floor((totalPredInsights / 50) * 100));
-    await updatePhaseStatus(5, "active", progress, totalPredInsights);
+    const crCount5 = await storage.getComputationalResultCount();
+    const scCount5 = await storage.getSuperconductorCount();
+    const predictionWork = totalPredInsights + crCount5 + scCount5;
+    const progress5 = computeProgress(5, predictionWork);
+    await updatePhaseStatus(5, "active", progress5, predictionWork);
   } finally {
     activeTasks.delete("Property Prediction");
     broadcast("taskEnd", { task: "Property Prediction" });
@@ -341,8 +356,8 @@ async function runPhase6_Discovery() {
     totalPredictionsMade += generated;
 
     const predCount = (await storage.getNovelPredictions()).length;
-    const progress = Math.min(99, Math.floor((predCount / 200) * 100));
-    await updatePhaseStatus(6, "active", progress, predCount);
+    const progress6 = computeProgress(6, predCount);
+    await updatePhaseStatus(6, "active", progress6, predCount);
   } finally {
     activeTasks.delete("Novel Discovery");
     broadcast("taskEnd", { task: "Novel Discovery" });
@@ -387,8 +402,8 @@ async function runPhase7_Superconductor() {
     }
 
     const scCount = await storage.getSuperconductorCount();
-    const progress = Math.min(99, Math.floor((scCount / 500) * 100));
-    await updatePhaseStatus(7, "active", progress, scCount);
+    const progress7 = computeProgress(7, scCount);
+    await updatePhaseStatus(7, "active", progress7, scCount);
   } finally {
     activeTasks.delete("SC Research");
     broadcast("taskEnd", { task: "SC Research" });
@@ -408,8 +423,8 @@ async function runPhase8_Synthesis() {
     totalSynthesisDiscovered += discovered;
 
     const synthCount = await storage.getSynthesisCount();
-    const progress = Math.min(99, Math.floor((synthCount / 300) * 100));
-    await updatePhaseStatus(8, "active", progress, synthCount);
+    const progress8 = computeProgress(8, synthCount);
+    await updatePhaseStatus(8, "active", progress8, synthCount);
   } finally {
     activeTasks.delete("Synthesis Mapping");
     broadcast("taskEnd", { task: "Synthesis Mapping" });
@@ -429,8 +444,8 @@ async function runPhase9_Reactions() {
     totalReactionsLearned += discovered;
 
     const rxnCount = await storage.getReactionCount();
-    const progress = Math.min(99, Math.floor((rxnCount / 300) * 100));
-    await updatePhaseStatus(9, "active", progress, rxnCount);
+    const progress9 = computeProgress(9, rxnCount);
+    await updatePhaseStatus(9, "active", progress9, rxnCount);
   } finally {
     activeTasks.delete("Reaction Discovery");
     broadcast("taskEnd", { task: "Reaction Discovery" });
@@ -546,27 +561,37 @@ async function runDFTEnrichment() {
 
     const toEnrich: typeof candidates = [];
     for (const c of sorted) {
-      if (toEnrich.length >= 10) break;
+      if (toEnrich.length >= 12) break;
       if (c.dataConfidence === "high") continue;
       toEnrich.push(c);
     }
 
+    const analyticalCandidates = candidates
+      .filter(c => !c.dataConfidence || c.dataConfidence === "analytical")
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+    for (const c of analyticalCandidates) {
+      if (toEnrich.length >= 20) break;
+      if (!toEnrich.some(e => e.id === c.id)) {
+        toEnrich.push(c);
+      }
+    }
+
     const stage1Candidates = candidates
-      .filter(c => (c.predictedTc ?? 0) > 80 && c.dataConfidence !== "high" && c.dataConfidence !== "medium")
+      .filter(c => (c.predictedTc ?? 0) > 40 && c.dataConfidence !== "high" && c.dataConfidence !== "medium")
       .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
     for (const c of stage1Candidates) {
-      if (toEnrich.length >= 15) break;
+      if (toEnrich.length >= 25) break;
       if (!toEnrich.some(e => e.id === c.id)) {
         toEnrich.push(c);
       }
     }
 
     const currentCycle = cycleCount;
-    const staleThreshold = 50;
+    const staleThreshold = 30;
     const staleMedium = candidates
       .filter(c => c.dataConfidence === "medium" && (currentCycle - (dftEnrichmentTracker.get(c.id) ?? 0)) > staleThreshold)
       .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
-      .slice(0, 3);
+      .slice(0, 5);
     for (const c of staleMedium) {
       if (!toEnrich.some(e => e.id === c.id)) {
         toEnrich.push(c);
@@ -740,8 +765,8 @@ async function runPhase10_Physics() {
     }
 
     const crCount = await storage.getComputationalResultCount();
-    const progress = Math.min(99, Math.floor((crCount / 200) * 100));
-    await updatePhaseStatus(10, "active", progress, crCount);
+    const progress10 = computeProgress(10, crCount);
+    await updatePhaseStatus(10, "active", progress10, crCount);
   } finally {
     activeTasks.delete("Computational Physics");
     broadcast("taskEnd", { task: "Computational Physics" });
@@ -789,6 +814,7 @@ async function runPhase11_StructurePrediction() {
           const variants = await runGenerativeStructureDiscovery(emit, topCandidates);
 
           for (const variant of variants) {
+            variant.formula = normalizeFormula(variant.formula);
             const existingSC = await storage.getSuperconductorByFormula(variant.formula);
             if (!existingSC) {
               const features = extractFeatures(variant.formula);
@@ -796,6 +822,10 @@ async function runPhase11_StructurePrediction() {
               const lambdaML = features.electronPhononLambda ?? 0;
               const metallicityML = features.metallicity ?? 0.5;
               let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+              if (rawTc > 80 && lambdaML < 1.5) {
+                const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
+                rawTc = Math.round(rawTc * penalty);
+              }
               rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
 
               const id = `sc-struct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -971,8 +1001,8 @@ async function runPhase11_StructurePrediction() {
     }
 
     const csCount = await storage.getCrystalStructureCount();
-    const progress = Math.min(99, Math.floor((csCount / 150) * 100));
-    await updatePhaseStatus(11, "active", progress, csCount);
+    const progress11 = computeProgress(11, csCount);
+    await updatePhaseStatus(11, "active", progress11, csCount);
   } finally {
     activeTasks.delete("Crystal Structure Prediction");
     broadcast("taskEnd", { task: "Crystal Structure Prediction" });
@@ -1003,8 +1033,8 @@ async function runPhase12_MultiFidelity() {
     }
 
     const crCount = await storage.getComputationalResultCount();
-    const progress = Math.min(99, Math.floor((crCount / 300) * 100));
-    await updatePhaseStatus(12, "active", progress, crCount);
+    const progress12 = computeProgress(12, crCount);
+    await updatePhaseStatus(12, "active", progress12, crCount);
   } finally {
     activeTasks.delete("Multi-Fidelity Screening");
     broadcast("taskEnd", { task: "Multi-Fidelity Screening" });

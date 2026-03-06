@@ -1,0 +1,194 @@
+Progress Logic Is Still Incorrect
+
+Example:
+
+Known Materials & Crystal Structures
+itemsLearned: 11027
+totalItems: 500
+progress: 99%
+
+This is mathematically impossible.
+
+11027 / 500 = 2205%
+
+So your progress value is hard-clamped to 99%.
+
+Why this is bad
+
+Your UI cannot distinguish:
+
+early learning
+
+moderate learning
+
+full dataset ingestion
+
+Fix
+
+Progress should be calculated dynamically.
+
+Example:
+
+progress = min(100, (itemsLearned / expectedDatasetSize) * 100)
+
+or if the dataset is open-ended:
+
+progress = log(itemsLearned) / log(targetScale)
+2️⃣ ML Predictions Still Look Physically Unrealistic
+
+Example predictions:
+
+ScC6 predictedTc: 153 K
+PdC4N2 predictedTc: 146 K
+NbC4N2 predictedTc: 125 K
+
+These values are very suspicious.
+
+Carbides and nitrides almost never reach these Tc values.
+
+Typical examples:
+
+Material	Tc
+NbC	~11 K
+NbN	~16 K
+MgB₂	39 K
+
+Your system predicting 153 K for a carbide is almost certainly ML hallucination.
+
+Cause
+
+Your ML model likely lacks these constraints:
+
+• electron-phonon coupling limits
+• phonon frequency limits
+• Coulomb pseudopotential μ*
+• lattice stability checks
+
+Recommended safeguard
+
+Clamp ML predictions before physics stage:
+
+if predictedTc > 80K and lambda < 1.5:
+    predictedTc *= 0.3
+3️⃣ Weird Formula Formatting
+
+Example formulas in logs:
+
+C1 Nb1
+C1 Tl1
+Fe0.07C
+
+These are not canonical chemical formulas.
+
+They indicate the system is using raw stoichiometric vectors instead of normalized formulas.
+
+Problems this causes
+
+duplicate detection fails
+
+ML features become inconsistent
+
+UI looks strange
+
+database indexing breaks
+
+Correct canonical forms
+C1 Nb1 → NbC
+C1 Tl1 → TlC
+Fe0.07C → Fe0.07C0.93 or FeC13 (depending on model)
+
+You should normalize using:
+
+reduceStoichiometry()
+sortByElectronegativity()
+4️⃣ Learning Phase 5 Is Not Actually Learning
+Property Prediction & Modeling
+progress: 0
+itemsLearned: 0
+
+But the system is clearly doing:
+
+DFT analysis
+
+ML predictions
+
+pipeline screening
+
+So this phase should be actively increasing.
+
+Problem
+
+The learning-phase counter is not connected to the prediction engine.
+
+You need to increment it when:
+
+DFT calculations run
+ML models train
+physics simulations complete
+5️⃣ Pipeline Stage Order Is Wrong
+
+Your stats show:
+
+stage 0
+stage 1
+stage 3
+stage 4
+stage 2
+
+Stage 2 appears last.
+
+0 -> 1 -> 3 -> 4 -> 2
+
+That means the array storing stages is not sorted.
+
+Fix
+
+Sort before returning API response.
+
+pipelineStages.sort((a,b)=>a.stage-b.stage)
+
+Otherwise UI visualizations will break.
+
+6️⃣ Insight System Is Producing Duplicates
+
+Example repeated insights:
+
+Higher stability correlates with lower formation energy
+Lower formation energy indicates higher stability
+Negative formation energy indicates stability
+
+These are the same insight repeated.
+
+Problem
+
+Your insight generator likely lacks semantic deduplication.
+
+Fix using cosine similarity:
+
+if similarity(newInsight, existingInsight) > 0.9:
+    discard
+7️⃣ DFT Confidence Distribution Is Odd
+
+Your DFT summary:
+
+total: 7969
+high: 31
+medium: 957
+analytical: 6981
+
+This means:
+
+Type	Count
+High fidelity	31
+Medium	957
+Analytical	6981
+
+That means 87% are analytical approximations.
+
+This is okay for early filtering, but for real discovery you want:
+
+analytical ~60%
+medium ~30%
+high ~10%
+
+Otherwise the ML model trains on too many approximations.

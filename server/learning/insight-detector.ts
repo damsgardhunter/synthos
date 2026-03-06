@@ -196,6 +196,50 @@ function isDuplicateByJaccard(text: string, existingTexts: string[]): boolean {
   return false;
 }
 
+const CONCEPT_SYNONYMS: [string, string][] = [
+  ["stability", "stable"],
+  ["formation energy", "energy of formation"],
+  ["lower formation energy", "negative formation energy"],
+  ["higher stability", "more stable"],
+  ["correlates with", "indicates"],
+  ["correlates with", "linked to"],
+  ["correlates with", "associated with"],
+  ["increases", "enhances"],
+  ["decreases", "reduces"],
+  ["high", "elevated"],
+  ["low", "reduced"],
+  ["critical temperature", "tc"],
+  ["superconducting", "superconductivity"],
+  ["electron-phonon coupling", "e-ph coupling"],
+  ["density of states", "dos"],
+];
+
+function extractConceptFingerprint(text: string): Set<string> {
+  let lower = text.toLowerCase().replace(/[.,;:!?]/g, " ");
+  for (const [a, b] of CONCEPT_SYNONYMS) {
+    lower = lower.replace(new RegExp(b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), a);
+  }
+  const keyTerms = INSIGHT_KEY_TERMS.filter(t => lower.includes(t));
+  return new Set(keyTerms);
+}
+
+function isConceptualDuplicate(text: string, existingTexts: string[]): boolean {
+  const fp = extractConceptFingerprint(text);
+  if (fp.size < 2) return false;
+
+  for (const existing of existingTexts) {
+    const efp = extractConceptFingerprint(existing);
+    if (efp.size < 2) continue;
+    let shared = 0;
+    for (const t of fp) {
+      if (efp.has(t)) shared++;
+    }
+    const smaller = Math.min(fp.size, efp.size);
+    if (smaller > 0 && shared / smaller >= 0.8) return true;
+  }
+  return false;
+}
+
 const MAX_NOVEL_INSIGHTS_PER_CYCLE = 3;
 let novelInsightQueue: { text: string; phaseId: number; phaseName: string; relatedFormulas: string[] }[] = [];
 
@@ -231,7 +275,7 @@ export async function evaluateInsightNovelty(
       continue;
     }
 
-    if (isDuplicateByJaccard(lower, existingTexts)) {
+    if (isDuplicateByJaccard(lower, existingTexts) || isConceptualDuplicate(lower, existingTexts)) {
       try {
         await storage.insertNovelInsight({
           id: insightId(text, phaseId),
@@ -240,7 +284,7 @@ export async function evaluateInsightNovelty(
           insightText: text,
           isNovel: false,
           noveltyScore: 0.12,
-          noveltyReason: "Duplicate detected via keyword-set Jaccard similarity (>0.6)",
+          noveltyReason: "Duplicate detected via semantic/concept similarity",
           category: "known-pattern",
           relatedFormulas: relatedFormulas ?? [],
         });
