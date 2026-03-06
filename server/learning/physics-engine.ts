@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
+import { classifyFamily } from "./utils";
 
 export interface PhysicsConstraintMode {
   allowBeyondEmpirical: boolean;
@@ -54,6 +55,13 @@ function computePhysicsDerivedBonus(formula: string, lambda: number): number {
   return bonus;
 }
 
+const FAMILY_TC_CAPS: Record<string, { ambient: number; highPressure: number }> = {
+  Carbides: { ambient: 45, highPressure: 80 },
+  Nitrides: { ambient: 50, highPressure: 90 },
+  Borides: { ambient: 55, highPressure: 120 },
+  Oxides: { ambient: 40, highPressure: 70 },
+};
+
 export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number, formula?: string): number {
   if (tc <= 0) return tc;
   const mode = activeConstraintMode;
@@ -62,8 +70,10 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
 
   let pressureThresholdLow = 10;
   let materialBonus = 0;
+  let familyName: string | null = null;
 
   if (formula) {
+    familyName = classifyFamily(formula);
     const cts = parseFormulaCounts(formula);
     const els = parseFormulaElements(formula);
     const hCount = cts["H"] || 0;
@@ -77,6 +87,12 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   const isAmbient = pressureGpa < pressureThresholdLow;
   const isHighPressure = pressureGpa >= 50;
   const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / (50 - pressureThresholdLow);
+
+  if (familyName && FAMILY_TC_CAPS[familyName]) {
+    const familyCaps = FAMILY_TC_CAPS[familyName];
+    const familyCap = Math.round(familyCaps.ambient + (familyCaps.highPressure - familyCaps.ambient) * pressureFactor);
+    tc = Math.min(tc, familyCap);
+  }
 
   if (!mode.allowBeyondEmpirical) {
     let tcCap: number;

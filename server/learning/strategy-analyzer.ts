@@ -293,12 +293,16 @@ export async function captureConvergenceSnapshot(
     const avgTopScore = topByScore10.length > 0 ? scoreSum / topByScore10.length : 0;
 
     const stats = await storage.getStats();
-    const totalPipelineResults = stats.pipelineStages.reduce((s, p) => s + p.count, 0);
-    const totalPipelinePassed = stats.pipelineStages.reduce((s, p) => s + p.passed, 0);
-    const pipelinePassRate = totalPipelineResults > 0 ? totalPipelinePassed / totalPipelineResults : 0;
+    const stage0 = stats.pipelineStages.find(p => p.stage === 0);
+    const stage4 = stats.pipelineStages.find(p => p.stage === 4);
+    const totalEnteredPipeline = stage0 ? stage0.count : 0;
+    const totalPassedAllStages = stage4 ? stage4.passed : 0;
+    const pipelinePassRate = totalEnteredPipeline > 0 ? totalPassedAllStages / totalEnteredPipeline : 0;
 
-    const families = new Set(uniqueCandidates.map(c => classifyFamily(c.formula)));
-    const familyDiversity = families.size;
+    const allCandidatesForDiversity = await storage.getSuperconductorCandidates(500);
+    const allFamilies = new Set(allCandidatesForDiversity.map(c => classifyFamily(c.formula)));
+    allFamilies.delete("Other");
+    const familyDiversity = allFamilies.size + (allCandidatesForDiversity.some(c => classifyFamily(c.formula) === "Other") ? 1 : 0);
 
     await storage.deleteConvergenceSnapshotByCycle(cycleNumber);
     const snapshotId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;

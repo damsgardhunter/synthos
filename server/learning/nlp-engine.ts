@@ -26,6 +26,43 @@ function validatePhysicsRules(insight: string): { valid: boolean; reason?: strin
   return { valid: true };
 }
 
+const VAGUE_PATTERNS: RegExp[] = [
+  /show\s+varied/i,
+  /can\s+have\s+different/i,
+  /display\s+varied/i,
+  /exhibit\s+(?:varied|various|diverse|different)/i,
+  /behave\s+differently/i,
+  /show\s+(?:a\s+)?(?:range|variety|mix)/i,
+  /materials?\s+(?:can|may|might)\s+(?:be|have|show)/i,
+  /(?:some|certain|many|several)\s+materials?\s+(?:have|show|display|exhibit)/i,
+  /tend\s+to\s+(?:be|have|show)/i,
+];
+
+const QUANTITATIVE_PATTERN = /\d+\.?\d*\s*(?:eV|K|GPa|%|nm|cm|T\b|meV|A\b|Å)/i;
+const SPECIFIC_MATERIAL_PATTERN = /[A-Z][a-z]?\d*[A-Z][a-z]?\d*/;
+
+function isInsightSpecificEnough(insight: string): { valid: boolean; reason?: string } {
+  for (const pattern of VAGUE_PATTERNS) {
+    if (pattern.test(insight)) {
+      return { valid: false, reason: `Vague language: "${insight.slice(0, 60)}..."` };
+    }
+  }
+
+  const hasNumber = QUANTITATIVE_PATTERN.test(insight);
+  const hasMaterial = SPECIFIC_MATERIAL_PATTERN.test(insight);
+  const hasCorrelation = /correlat|predict|increas|decreas|higher|lower|stronger|weaker/i.test(insight);
+
+  if (!hasNumber && !hasMaterial && !hasCorrelation) {
+    return { valid: false, reason: `Lacks quantitative data, specific materials, or clear correlation` };
+  }
+
+  if (insight.length < 30) {
+    return { valid: false, reason: `Too short to be meaningful` };
+  }
+
+  return { valid: true };
+}
+
 const MIN_DATASET_FOR_INSIGHTS = 100;
 
 function computeDatasetStatistics(materials: Material[]): string {
@@ -130,13 +167,23 @@ Return a JSON object with a single key 'insights' containing an array of 3-5 con
 
     const rawInsights = parsed.insights ?? [];
     const insights = rawInsights.filter(insight => {
-      const check = validatePhysicsRules(insight);
-      if (!check.valid) {
+      const physCheck = validatePhysicsRules(insight);
+      if (!physCheck.valid) {
         emit("log", {
           phase: "phase-3",
           event: "Insight rejected (physics violation)",
-          detail: `"${insight}" — ${check.reason}`,
+          detail: `"${insight}" — ${physCheck.reason}`,
           dataSource: "Physics Validator",
+        });
+        return false;
+      }
+      const qualCheck = isInsightSpecificEnough(insight);
+      if (!qualCheck.valid) {
+        emit("log", {
+          phase: "phase-3",
+          event: "Insight rejected (low quality)",
+          detail: `"${insight}" — ${qualCheck.reason}`,
+          dataSource: "Quality Filter",
         });
         return false;
       }
@@ -241,13 +288,23 @@ Return a JSON object with 'insights' (array of 3-5 concise prediction rules, eac
 
     const rawInsights = parsed.insights ?? [];
     const insights = rawInsights.filter(insight => {
-      const check = validatePhysicsRules(insight);
-      if (!check.valid) {
+      const physCheck = validatePhysicsRules(insight);
+      if (!physCheck.valid) {
         emit("log", {
           phase: "phase-5",
           event: "Insight rejected (physics violation)",
-          detail: `"${insight}" — ${check.reason}`,
+          detail: `"${insight}" — ${physCheck.reason}`,
           dataSource: "Physics Validator",
+        });
+        return false;
+      }
+      const qualCheck = isInsightSpecificEnough(insight);
+      if (!qualCheck.valid) {
+        emit("log", {
+          phase: "phase-5",
+          event: "Insight rejected (low quality)",
+          detail: `"${insight}" — ${qualCheck.reason}`,
+          dataSource: "Quality Filter",
         });
         return false;
       }

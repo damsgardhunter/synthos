@@ -1,0 +1,147 @@
+The 153 K Carbide Problem Is Still There
+Carbides:
+maxTc: 153
+
+This is very unlikely physically.
+
+Real carbide examples:
+
+Material	Tc
+NbC	~11K
+NbN	~16K
+MgB₂	39K
+
+A carbide prediction of 153K strongly suggests:
+
+ML model extrapolation
+
+missing physics constraints
+
+Recommended fix
+
+Clamp unrealistic Tc for weak coupling:
+
+if materialFamily in ["Carbides","Nitrides"]:
+    predictedTc = min(predictedTc, 80)
+
+Or better:
+
+if lambda < 1.5:
+    predictedTc *= 0.3
+
+This prevents ML hallucinated superconductors.
+
+2️⃣ Your "Other" Family Is Way Too Large
+Other: 74
+Borides: 13
+Carbides: 11
+Oxides: 1
+Nitrides: 1
+
+This means your family classifier is failing.
+
+74 materials being dumped into Other means the system cannot categorize them.
+
+Likely causes
+
+Bad pattern matching in:
+
+classifyMaterialFamily()
+
+Example mistake:
+
+Nb5Cr19Fe18NiMo4
+
+This is a metal alloy, not "Other".
+
+You should add categories like:
+
+Intermetallics
+Alloys
+Complex Oxides
+Hydrides
+
+Otherwise your strategy engine becomes meaningless.
+
+3️⃣ Your Insight Engine Is Producing Weak Insights
+
+Example:
+
+Materials with Cu and O show varied band gaps
+
+This is not really an insight.
+
+It is basically saying:
+
+"materials behave differently"
+
+Better insight criteria
+
+Require statistical significance.
+
+Example:
+
+if correlation > 0.6 and p_value < 0.05
+
+Otherwise you will accumulate thousands of trivial insights.
+
+4️⃣ Milestone System Is Spamming
+
+You have multiple identical events:
+
+10 candidates fully validated
+10 candidates fully validated
+10 candidates fully validated
+
+This should only fire once per threshold.
+
+Example milestones should be:
+
+10 candidates
+25 candidates
+50 candidates
+100 candidates
+
+Add milestone memory:
+
+if milestoneTriggeredBefore(threshold):
+    skip
+5️⃣ Pipeline Pass Rate Looks Suspicious
+pipelinePassRate: 0.666
+
+That means 2/3 of candidates pass the full pipeline, which is very unrealistic.
+
+Real discovery pipelines:
+
+Stage	Typical Pass Rate
+Candidate generation	100%
+ML screening	10–20%
+DFT validation	1–5%
+Experimental viability	<1%
+
+Your system is too optimistic.
+
+Suggested target
+overall pipeline pass rate ≈ 0.01–0.05
+6️⃣ Family Diversity Metric Looks Incorrect
+familyDiversity: 3
+
+But you have:
+
+Other
+Oxides
+Borides
+Carbides
+Nitrides
+
+That's 5 families, not 3.
+
+So the diversity metric calculation is likely wrong.
+
+Probably something like:
+
+familiesWithScore > threshold
+
+But it should likely be:
+
+uniqueFamiliesDetected

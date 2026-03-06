@@ -1,13 +1,18 @@
 const MATERIAL_FAMILIES: Record<string, RegExp> = {
   "Hydrides": /H\d|LaH|YH|CeH|CaH|BaH|SrH|MgH|hydride/i,
   "Cuprates": /(?:La|Y|Ba|Sr|Bi|Tl|Hg|Ca|Nd|Pr|Sm|Eu|Gd).*Cu.*O|cuprate|YBCO|BSCCO/i,
+  "Heavy Fermions": /(?:Ce|Yb|U|Pu|Np)(?:In|Co|Rh|Ir|Pd|Pt|Ni|Cu|Al|Ga|Ge|Si|Sn|Sb|Bi)\d|CeCoIn|UPt|UBe|CeCu/i,
   "Pnictides": /Fe.*As|Ba.*Fe.*As|Sr.*Fe.*As|La.*Fe.*As|Fe.*P(?:[^btdm]|$)|pnictide/i,
-  "Chalcogenides": /(?:Fe|Nb|Ta|Mo|W|Bi|Sb|Cu|Cd|Zn|Sn|Pb|In|Ga|Ti|Zr|Hf|V|Cr|Mn|Co|Ni|Pd|Pt|Re|Ir)(?:Se|Te)\d*|FeSe|FeTe|NbSe|TaSe|TaS|NbS|MoS|WS|chalcogenide/i,
+  "Chalcogenides": /(?:Fe|Nb|Ta|Mo|W|Bi|Sb|Cu|Cd|Zn|Sn|Pb|In|Ga|Ti|Zr|Hf|V|Cr|Mn|Co|Ni|Pd|Pt|Re|Ir)(?:Se|Te)\d*|FeSe|FeTe|NbSe|TaSe|chalcogenide/i,
+  "Sulfides": /(?:Fe|Cu|Zn|Mo|W|Nb|Ta|Ti|Ni|Co|Mn|V|Cr|Sn|Pb|Bi|Cd|In|Ga|La|Ce)S\d*(?:[^eicr]|$)|sulfide|MoS2|WS2|FeS|TaS|NbS|MoS|WS/i,
   "Borides": /(?:Mg|Ti|Zr|Hf|V|Nb|Ta|Cr|Mo|W|Mn|Fe|Co|Ni|La|Y|Ca|Sr|Sc|Al|Re|Ru|Os)B\d|MgB\d*|boride/i,
   "Carbides": /(?:Ti|Zr|Hf|V|Nb|Ta|Cr|Mo|W|Fe|Si|Sc|Y|La)C\d*(?:[^aeioulrs]|$)|carbide|SiC/i,
   "Nitrides": /(?:Ti|Zr|Hf|V|Nb|Ta|Cr|Mo|W|Al|Ga|In|Si|B|Sc|Y|La)N\d*(?:[^abeiodr]|$)|nitride|BN|GaN|AlN/i,
+  "Silicides": /(?:Fe|Co|Ni|Mn|Cr|V|Ti|Nb|Mo|W|Ru|Os|Ir|Pt|Pd|Re)Si\d|silicide|FeSi|CoSi|MnSi/i,
+  "Phosphides": /(?:Fe|Co|Ni|Mn|Ga|In|Zn|Cd|Al|B)P\d*(?:[^btdm]|$)|phosphide|GaP|InP/i,
   "Oxides": /(?:Sr|Ba|Pb|Bi|La|Y|Nd|Ca|Mg|Ti|Zr|Mn|Co|Ni|Fe|V|Cr|W|Mo).*O\d|oxide|perovskite|SrTiO|BaTiO/i,
-  "Intermetallics": /Nb.*Sn|Nb.*Ti|V.*Si|Nb.*Ge|intermetallic/i,
+  "Intermetallics": /(?:Nb|V|Nb|Ta).*(?:Sn|Ge|Si|Ga|Al)|Nb.*Ti|NbSn|V3Si|Nb3Ge|Nb3Al|intermetallic/i,
+  "Alloys": /(?:[A-Z][a-z]?\d*){3,}(?!.*(?:O\d|N\d|C\d|B\d|H\d|S\d|Se|Te|As|P\d))|(?:Fe|Co|Ni|Cr|Mn|Cu|Ti|V|Nb|Mo|W|Al|Zr|Hf|Ta|Re)\d*(?:Fe|Co|Ni|Cr|Mn|Cu|Ti|V|Nb|Mo|W|Al|Zr|Hf|Ta|Re)\d*(?:Fe|Co|Ni|Cr|Mn|Cu|Ti|V|Nb|Mo|W|Al|Zr|Hf|Ta|Re)/i,
 };
 
 export function classifyFamily(formula: string): string {

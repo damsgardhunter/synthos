@@ -14,7 +14,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
-import { normalizeFormula } from "./utils";
+import { normalizeFormula, classifyFamily } from "./utils";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -1564,7 +1564,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 12;
+const PHYSICS_VERSION = 13;
 
 async function recalculatePhysics() {
   try {
@@ -1600,6 +1600,14 @@ async function recalculatePhysics() {
           const isHighPressure = pressure >= 50;
           const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressure - 10) / 40;
 
+          const recalcFamily = classifyFamily(c.formula);
+          const RECALC_FAMILY_CAPS: Record<string, { ambient: number; hp: number }> = {
+            Carbides: { ambient: 45, hp: 80 },
+            Nitrides: { ambient: 50, hp: 90 },
+            Borides: { ambient: 55, hp: 120 },
+            Oxides: { ambient: 40, hp: 70 },
+          };
+
           let tcCap: number;
           if (metalScore < 0.3) {
             tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
@@ -1627,6 +1635,12 @@ async function recalculatePhysics() {
             tcCap = 200 + (hpCap - 200) * pressureFactor;
           }
           tcCap = Math.round(tcCap);
+
+          if (RECALC_FAMILY_CAPS[recalcFamily]) {
+            const fc = RECALC_FAMILY_CAPS[recalcFamily];
+            const familyCap = Math.round(fc.ambient + (fc.hp - fc.ambient) * pressureFactor);
+            tcCap = Math.min(tcCap, familyCap);
+          }
 
           let newTc = c.predictedTc;
           if (newTc != null && newTc > tcCap) {

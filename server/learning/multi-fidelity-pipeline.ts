@@ -18,14 +18,19 @@ import { classifyFamily } from "./utils";
 
 const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Cuprates: -1.2,
+  "Heavy Fermions": -0.6,
   Pnictides: -0.8,
   Chalcogenides: -0.6,
+  Sulfides: -0.5,
   Intermetallics: -0.5,
   Borides: -0.7,
   Carbides: -0.4,
   Nitrides: -0.9,
+  Silicides: -0.5,
+  Phosphides: -0.4,
   Hydrides: 0.1,
   Oxides: -1.0,
+  Alloys: -0.3,
   Other: -0.3,
 };
 
@@ -80,12 +85,12 @@ async function stage0_MLFilter(
   const score = candidate.ensembleScore ?? 0;
   const xgb = candidate.xgboostScore ?? 0;
 
-  const passed = score > 0.4 || xgb > 0.35;
-  const reason = passed ? null : `Ensemble score ${score.toFixed(2)} below threshold 0.4`;
+  const passed = score > 0.55 && xgb > 0.3;
+  const reason = passed ? null : `Ensemble score ${score.toFixed(2)} or XGBoost ${xgb.toFixed(2)} below thresholds (0.55/0.3)`;
 
   await logComputationalResult(
     candidate.id, candidate.formula, 0, "ML_filter",
-    { ensembleScore: score, xgboostScore: xgb, threshold: 0.4 },
+    { ensembleScore: score, xgboostScore: xgb, ensembleThreshold: 0.55, xgbThreshold: 0.3 },
     passed, reason, Date.now() - start, passed ? 0.7 : 0.9
   );
 
@@ -101,8 +106,8 @@ async function stage1_ElectronicStructure(
   const electronic = computeElectronicStructure(candidate.formula, candidate.crystalStructure);
   const correlation = assessCorrelationStrength(candidate.formula);
 
-  const isMetallic = electronic.metallicity > 0.35;
-  const hasDOS = electronic.densityOfStatesAtFermi > 0.5;
+  const isMetallic = electronic.metallicity > 0.45;
+  const hasDOS = electronic.densityOfStatesAtFermi > 0.8;
 
   const passed = isMetallic && hasDOS;
   const reason = passed ? null :
@@ -129,7 +134,7 @@ async function stage2_PhononCoupling(
   const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
 
   const hasStablePhonons = !phonon.hasImaginaryModes;
-  const hasCoupling = coupling.lambda > 0.35;
+  const hasCoupling = coupling.lambda > 0.5;
 
   const passed = hasCoupling && hasStablePhonons;
   let reason = null;
@@ -170,7 +175,7 @@ async function stage3_TcPrediction(
   const hasSevereCompetition = suppressingPhases.length > 1 ||
     suppressingPhases.some(p => p.strength > 0.7);
 
-  const tcAboveThreshold = eliashberg.predictedTc > 5;
+  const tcAboveThreshold = eliashberg.predictedTc > 10;
 
   let dimensionality = candidate.dimensionality || "3D";
   const criticalFields = computeCriticalFields(
@@ -220,7 +225,7 @@ async function stage4_SynthesisFeasibility(
   }
 
   const stability = await evaluateConvexHullStability(structure.decompositionEnergy, candidate.formula);
-  const isSynthesizable = structure.synthesizability > 0.4;
+  const isSynthesizable = structure.synthesizability > 0.55;
   const isStableOrMetastable = stability.isStable || stability.isMetastable;
   const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 1 && (stability.isStable || stability.isMetastable);
 

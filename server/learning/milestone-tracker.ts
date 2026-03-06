@@ -46,6 +46,13 @@ async function initState() {
         const match = m.description.match(/(\d+)/);
         if (match) state.knowledgeThresholds.add(Number(match[1]));
       }
+      if (m.type === "pipeline-graduate" && m.title) {
+        const thresholdMatch = m.title.match(/^(\d+)\s+candidates/);
+        if (thresholdMatch) {
+          const threshold = Number(thresholdMatch[1]);
+          state.knowledgeThresholds.add(threshold * 1000 + 4);
+        }
+      }
     }
   } catch {}
   initialized = true;
