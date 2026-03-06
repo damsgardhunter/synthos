@@ -19,7 +19,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Real-time**: WebSocket (ws)
 
 ### Core Features
-- **AI-Driven Learning Engine**: Orchestrates 12 distinct learning phases covering subatomic to multi-fidelity screening, with continuous cycling and balanced priority.
+- **AI-Driven Learning Engine**: Orchestrates 13 distinct learning phases covering subatomic to multi-fidelity screening and novel synthesis reasoning, with continuous cycling and balanced priority.
 - **ML Prediction Engine**: Employs a trained gradient boosting model (depth-4 decision trees, ~106 trees, R2=1.000) combined with an OpenAI gpt-4o-mini neural network ensemble. It uses physics-informed features and strict room-temperature criteria (Tc >= 293K) for superconductor scoring.
 - **SC Verification Pipeline**: A multi-step process for categorizing superconductor candidates from theoretical to `requires-verification`, preventing premature "breakthrough" claims.
 - **Multi-Fidelity Screening**: A 5-stage pipeline with calibrated thresholds for metallicity, density of states, lambda, Tc, and synthesis feasibility.
@@ -40,6 +40,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Specialized Material Handling**: Incorporates specific physics adjustments for superhydrides, High-Entropy Alloys (HEAs), and unconventional superconductor mechanisms.
 - **Ambient-Pressure Tc Caps**: Applies dynamic Tc caps based on metallicity, lambda, and pressure, with material-class specific bonuses.
 - **Structure Predictor**: Uses crystallographic rules, Goldschmidt tolerance factor, Vegard's law, and Tammann rule for structure and synthesis temperature prediction.
+- **Novel Synthesis Reasoning (Phase 13)**: Physics-constrained synthesis path generator in `server/learning/synthesis-reasoning.ts`. Analyzes thermodynamic landscape (hull distance, formation energy, decomposition barriers) and proposes non-equilibrium processing routes for metastable candidates. Material-class-specific routes: hydrides (DAC hydrogenation), HEAs (mechanical alloying + SPS, combinatorial sputtering), cuprates (sol-gel + O2 annealing), plus rapid quench, thin film, and reactive milling routes. Routes tagged `source: "physics-reasoned"` vs `"literature-based"`. Runs after DFT enrichment, limited to 3 candidates/cycle.
 - **DFT Feature Resolver**: A unified service merging Materials Project and AFLOW DFT data, providing DFT-resolved features for ML prediction and physics analysis.
 - **Auto-DFT Enrichment**: An engine cycle mechanism to enrich superconductor candidates with DFT data based on score, pipeline stage, and staleness.
 

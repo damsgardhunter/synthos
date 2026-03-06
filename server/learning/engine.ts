@@ -16,6 +16,7 @@ import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
+import { runSynthesisReasoning } from "./synthesis-reasoning";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -40,6 +41,7 @@ interface EngineStatus {
   totalPhysicsComputed: number;
   totalStructuresPredicted: number;
   totalPipelineScreened: number;
+  totalNovelSynthesisProposed: number;
   tempo: EngineTempo;
   statusMessage: string;
 }
@@ -57,6 +59,7 @@ let totalScCandidates = 0;
 let totalPhysicsComputed = 0;
 let totalStructuresPredicted = 0;
 let totalPipelineScreened = 0;
+let totalNovelSynthesisProposed = 0;
 let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
@@ -778,6 +781,63 @@ async function runPhase12_MultiFidelity() {
   }
 }
 
+async function runPhase13_SynthesisReasoning() {
+  if (!shouldContinue()) return;
+  activeTasks.add("Novel Synthesis Reasoning");
+  broadcast("taskStart", { task: "Novel Synthesis Reasoning" });
+  try {
+    const topCandidates = await storage.getSuperconductorCandidatesByTc(20);
+    const eligible = topCandidates.filter(c =>
+      (c.verificationStage ?? 0) >= 2 || (c.predictedTc ?? 0) > 100
+    );
+    const toProcess = eligible.slice(0, 3);
+
+    if (toProcess.length === 0) return;
+
+    let proposed = 0;
+    for (const candidate of toProcess) {
+      if (!shouldContinue()) return;
+      try {
+        const existingPath = candidate.synthesisPath as any;
+        const hasPhysicsReasoned = Array.isArray(existingPath?.routes)
+          && existingPath.routes.some((r: any) => r.source === "physics-reasoned");
+        if (hasPhysicsReasoned) continue;
+
+        const routes = await runSynthesisReasoning(emit, candidate);
+        if (routes && routes.length > 0) {
+          const existingRoutes = Array.isArray(existingPath?.routes) ? existingPath.routes : [];
+          const taggedExisting = existingRoutes.map((r: any) => ({
+            ...r,
+            source: r.source || "literature-based",
+          }));
+          await storage.updateSuperconductorCandidate(candidate.id, {
+            synthesisPath: {
+              routes: [...taggedExisting, ...routes],
+              lastUpdated: new Date().toISOString(),
+            },
+          });
+          proposed += routes.length;
+          totalNovelSynthesisProposed += routes.length;
+        }
+      } catch (err: any) {
+        emit("log", {
+          phase: "phase-13",
+          event: "Synthesis reasoning candidate error",
+          detail: `${candidate.formula}: ${err.message?.slice(0, 100)}`,
+          dataSource: "Synthesis Reasoning",
+        });
+      }
+    }
+
+    if (proposed > 0) {
+      allInsights.push(`Novel synthesis reasoning: proposed ${proposed} physics-reasoned routes for ${toProcess.length} candidates`);
+    }
+  } finally {
+    activeTasks.delete("Novel Synthesis Reasoning");
+    broadcast("taskEnd", { task: "Novel Synthesis Reasoning" });
+  }
+}
+
 async function runLearningCycle() {
   if (state !== "running" || isRunningCycle) return;
   isRunningCycle = true;
@@ -880,6 +940,10 @@ async function runLearningCycle() {
 
       if (state === "running") {
         await runDFTEnrichment();
+      }
+
+      if (state === "running") {
+        await runPhase13_SynthesisReasoning();
       }
     } else {
       emit("log", {
@@ -1294,6 +1358,7 @@ export function getStatus(): EngineStatus {
     totalPhysicsComputed,
     totalStructuresPredicted,
     totalPipelineScreened,
+    totalNovelSynthesisProposed,
     tempo: engineTempo,
     statusMessage: currentStatusMessage,
   };

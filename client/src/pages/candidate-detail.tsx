@@ -394,6 +394,159 @@ function SynthesisSection({ processes }: { processes: SynthesisProcess[] }) {
   );
 }
 
+interface NovelSynthesisRoute {
+  method: string;
+  steps: string[];
+  temperatureProfile: string;
+  pressureProfile: string;
+  estimatedCoolingRate: string;
+  atmosphere: string;
+  expectedYieldRange: string;
+  noveltyScore: number;
+  synthesisConfidence: "high" | "medium" | "low";
+  physicsJustification: string;
+  source: "physics-reasoned" | "literature-based";
+  keyInnovation: string;
+}
+
+const CONFIDENCE_COLORS: Record<string, string> = {
+  high: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300",
+  medium: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300",
+  low: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+};
+
+function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandidate }) {
+  const synthPath = candidate.synthesisPath as { routes?: any[]; lastUpdated?: string } | null;
+  const routes: NovelSynthesisRoute[] = (synthPath?.routes ?? []).filter(
+    (r: any) => r.source === "physics-reasoned" && r.steps
+  );
+  const literatureRoutes = (synthPath?.routes ?? []).filter(
+    (r: any) => r.source !== "physics-reasoned"
+  );
+
+  if (routes.length === 0 && literatureRoutes.length === 0) return null;
+
+  return (
+    <Card data-testid="novel-synthesis-routes" className="lg:col-span-2">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Zap className="h-5 w-5" />
+            Synthesis Routes ({routes.length + literatureRoutes.length})
+          </CardTitle>
+          {synthPath?.lastUpdated && (
+            <span className="text-[10px] text-muted-foreground">
+              Updated {new Date(synthPath.lastUpdated).toLocaleDateString()}
+            </span>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {routes.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Badge className="bg-primary/10 text-primary border border-primary/30 text-[10px]" data-testid="badge-physics-reasoned">
+                Physics-Reasoned
+              </Badge>
+              <span className="text-xs text-muted-foreground">{routes.length} route(s) derived from first-principles analysis</span>
+            </div>
+            {routes.map((route, i) => (
+              <NovelRouteCard key={`novel-${i}`} route={route} index={i} />
+            ))}
+          </div>
+        )}
+        {literatureRoutes.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-[10px]" data-testid="badge-literature-based">
+                Literature-Based
+              </Badge>
+              <span className="text-xs text-muted-foreground">{literatureRoutes.length} route(s) from known literature</span>
+            </div>
+            {literatureRoutes.map((route: any, i: number) => (
+              <div key={`lit-${i}`} className="p-3 bg-muted/30 rounded-md space-y-1" data-testid={`synthesis-literature-${i}`}>
+                <p className="text-sm font-bold">{route.method || route.name || "Unknown method"}</p>
+                {route.steps && Array.isArray(route.steps) && (
+                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
+                    {route.steps.slice(0, 5).map((s: string, j: number) => <li key={j}>{s}</li>)}
+                  </ol>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function NovelRouteCard({ route, index }: { route: NovelSynthesisRoute; index: number }) {
+  const confColor = CONFIDENCE_COLORS[route.synthesisConfidence] ?? CONFIDENCE_COLORS.medium;
+  const noveltyPct = Math.round(route.noveltyScore * 100);
+
+  return (
+    <div className="p-3 bg-muted/50 rounded-md space-y-2.5 border border-border/50" data-testid={`synthesis-novel-${index}`}>
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-sm font-bold leading-snug">{route.method}</p>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <Badge className={`${confColor} border-0 text-[10px]`} data-testid={`confidence-${index}`}>
+            {route.synthesisConfidence}
+          </Badge>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-muted-foreground">Novelty</span>
+            <div className="w-10 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div className="h-full bg-primary rounded-full" style={{ width: `${noveltyPct}%` }} />
+            </div>
+            <span className="text-[10px] font-mono">{noveltyPct}%</span>
+          </div>
+        </div>
+      </div>
+
+      {route.keyInnovation && (
+        <div className="p-2 bg-primary/5 border border-primary/20 rounded text-xs" data-testid={`innovation-${index}`}>
+          <span className="font-semibold text-primary">Key Innovation: </span>
+          {route.keyInnovation}
+        </div>
+      )}
+
+      <ol className="text-xs space-y-1 ml-4 list-decimal text-muted-foreground">
+        {route.steps.map((step, i) => <li key={i}>{step}</li>)}
+      </ol>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+        <div className="p-1.5 bg-background rounded">
+          <span className="text-muted-foreground block">Temperature</span>
+          <span className="font-mono">{route.temperatureProfile.length > 60 ? route.temperatureProfile.slice(0, 60) + "..." : route.temperatureProfile}</span>
+        </div>
+        <div className="p-1.5 bg-background rounded">
+          <span className="text-muted-foreground block">Pressure</span>
+          <span className="font-mono">{route.pressureProfile.length > 60 ? route.pressureProfile.slice(0, 60) + "..." : route.pressureProfile}</span>
+        </div>
+        <div className="p-1.5 bg-background rounded">
+          <span className="text-muted-foreground block">Cooling Rate</span>
+          <span className="font-mono">{route.estimatedCoolingRate}</span>
+        </div>
+        <div className="p-1.5 bg-background rounded">
+          <span className="text-muted-foreground block">Atmosphere</span>
+          <span className="font-mono">{route.atmosphere.length > 40 ? route.atmosphere.slice(0, 40) + "..." : route.atmosphere}</span>
+        </div>
+      </div>
+
+      {route.expectedYieldRange && (
+        <div className="text-xs">
+          <span className="text-muted-foreground">Expected Yield: </span>
+          <span className="font-mono">{route.expectedYieldRange}</span>
+        </div>
+      )}
+
+      <div className="text-xs p-2 bg-muted/30 rounded border-l-2 border-primary/40" data-testid={`justification-${index}`}>
+        <span className="font-semibold">Physics Justification: </span>
+        <span className="text-muted-foreground">{route.physicsJustification}</span>
+      </div>
+    </div>
+  );
+}
+
 function ReactionsSection({ reactions }: { reactions: ChemicalReaction[] }) {
   if (reactions.length === 0) return null;
   return (
@@ -961,6 +1114,7 @@ export default function CandidateDetail() {
         {candidate && <MLScoresSection candidate={candidate} />}
         <CrystalStructuresSection structures={data?.crystalStructures ?? []} />
         <SynthesisSection processes={data?.synthesisProcesses ?? []} />
+        {candidate && <NovelSynthesisSection candidate={candidate} />}
         <ReactionsSection reactions={data?.chemicalReactions ?? []} />
         <PipelineResultsSection results={data?.computationalResults ?? []} />
       </div>
