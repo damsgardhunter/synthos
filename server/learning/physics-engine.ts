@@ -1820,7 +1820,8 @@ export function computeCriticalFields(
   const xiM = coherenceLength * 1e-9;
   const Hc2Tesla = PHI0 / (2 * Math.PI * xiM * xiM);
   const hc2Raw = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
-  const upperCriticalField = Math.min(hc2Raw, 300);
+  const whhBound = 2.0 * tc;
+  const upperCriticalField = Math.min(hc2Raw, whhBound);
 
   const lambdaL = 50 + 200 * lambda * (1 + coupling.muStar);
   const londonPenetrationDepth = Math.max(30, Math.min(2000, lambdaL));

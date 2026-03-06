@@ -16,6 +16,9 @@ const PHYSICS_RULES: { pattern: RegExp; valid: boolean; reason: string }[] = [
   { pattern: /(?:negative|lower)\s+band\s*gap.*(?:metal|conduct)/i, valid: false, reason: "Band gap cannot be negative" },
   { pattern: /(?:superconducti|superconduct).*(?:increas|higher).*(?:temperatur|heat)/i, valid: false, reason: "Superconductivity is suppressed, not enhanced, by higher temperature" },
   { pattern: /(?:insulator|semiconductor).*(?:zero|no)\s+(?:resistance|resistiv)/i, valid: false, reason: "Insulators cannot have zero resistance" },
+  { pattern: /formation\s+energy.*(?:enhance|increas|boost|improv|correlat|predict|indicat).*(?:superconduct|tc|critical\s+temp|pairing)/i, valid: false, reason: "Formation energy measures thermodynamic stability, NOT superconducting tendency" },
+  { pattern: /(?:low|negative|lower)\s+formation\s+energy.*(?:enhance|favor|promot|lead).*(?:superconduct|tc|higher\s+tc)/i, valid: false, reason: "Formation energy does not predict superconductivity" },
+  { pattern: /Hc2\s*[=:>]\s*[12]\d{2,}/i, valid: false, reason: "Hc2 values above 100T are physically implausible for conventional superconductors" },
 ];
 
 function validatePhysicsRules(insight: string): { valid: boolean; reason?: string } {
@@ -327,6 +330,8 @@ PHYSICS RULES:
 - Band gap cannot be negative
 - Superconductivity occurs at LOW temperatures
 - Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
+- Formation energy measures THERMODYNAMIC STABILITY only. It does NOT predict or enhance superconductivity or Tc. Never claim formation energy correlates with Tc or superconducting properties.
+- Hc2 (upper critical field) for conventional superconductors is bounded by ~2*Tc Tesla (WHH limit). Do not claim Hc2 values above 100T for materials with Tc < 50K.
 
 Return a JSON object with a single key 'insights' containing an array of 3-5 concise cross-property correlation statements (each under 120 characters).`,
         },
@@ -471,6 +476,8 @@ PHYSICS RULES:
 - Band gap is always >= 0; metals have near-zero band gap
 - Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
 - Dimensionality affects pairing: 2D materials can have enhanced Tc via nesting effects
+- Formation energy measures THERMODYNAMIC STABILITY only. It does NOT predict or correlate with superconductivity or Tc. Never generate rules linking formation energy to Tc or superconducting properties.
+- Better Tc predictors: density of states at Fermi level, phonon frequency, electron-phonon coupling λ, dimensionality.
 
 Return a JSON object with 'insights' (array of 3-5 concise predictive correlation rules, each under 120 chars) and 'applications' (array of objects with 'pattern' and 'targetProperty' keys).`,
         },

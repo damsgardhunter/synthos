@@ -115,8 +115,23 @@ const WELL_KNOWN_PATTERNS = [
   "oxidation state influences magnetic behavior",
 ];
 
+const SPURIOUS_CORRELATION_PATTERNS = [
+  /formation\s+energy.*(?:enhance|increas|boost|improv|correlat|predict|indicat).*(?:superconduct|tc|critical\s+temp|pairing)/i,
+  /(?:superconduct|tc|critical\s+temp|pairing).*(?:enhance|increas|boost|improv|correlat|predict|indicat).*formation\s+energy/i,
+  /(?:low|negative|lower)\s+formation\s+energy.*(?:enhance|favor|promot|lead|indicat).*(?:superconduct|tc|higher\s+tc|pairing)/i,
+  /formation\s+energy\s*[<>]\s*-?\d+.*(?:superconduct|tc|pairing|coupling)/i,
+  /(?:superconduct|tc|pairing).*formation\s+energy\s*[<>]\s*-?\d+/i,
+  /Hc2\s*[=>]\s*[12]\d{2,}/i,
+  /upper\s+critical\s+field.*[=>]\s*[12]\d{2,}/i,
+];
+
+function isSpuriousCorrelation(insight: string): boolean {
+  return SPURIOUS_CORRELATION_PATTERNS.some(pattern => pattern.test(insight));
+}
+
 function isTextbookKnowledge(insight: string): boolean {
   const lower = insight.toLowerCase();
+  if (isSpuriousCorrelation(lower)) return true;
   return WELL_KNOWN_PATTERNS.some(pattern =>
     lower.includes(pattern) || pattern.split(" ").filter(w => w.length > 4).every(w => lower.includes(w))
   );
@@ -589,6 +604,8 @@ AUTOMATICALLY REJECT as non-novel:
 - Any variation of "band gap determines metallic/insulating behavior"
 - Any variation of "pressure increases critical temperature"
 - Any variation of "electron-phonon coupling favors superconductivity"
+- Any claim that formation energy directly enhances, predicts, or correlates with superconductivity or Tc (formation energy measures thermodynamic stability, NOT superconducting tendency)
+- Physically impossible critical field values (Hc2 above 100T for conventional superconductors)
 
 Previously discovered insights for deduplication:
 ${recentKnown.join("\n")}
