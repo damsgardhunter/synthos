@@ -1,0 +1,335 @@
+T001 — Massive Combinatorial Candidate Generator
+✅ What is good
+
+This is exactly how materials discovery engines scale search.
+
+Your generator covers four important exploration modes:
+
+Element substitution
+
+Composition interpolation
+
+Doping
+
+Stoichiometry sweeps
+
+That combination is excellent.
+
+The pipeline:
+
+generate 2000
+↓
+GB prescreen
+↓
+top 50 physics pipeline
+
+is very realistic computationally.
+
+Your throughput target:
+
+>1000 screened per hour
+
+is reasonable.
+
+⚠️ Potential issues
+1. Formula explosion
+
+Sweeping stoichiometries up to maxAtoms can explode combinatorially.
+
+Example:
+
+4 elements
+maxAtoms = 10
+
+You can easily generate tens of thousands.
+
+You should cap generation per element set.
+
+Suggested safeguard:
+
+if (generated.length > MAX_FORMULAS) {
+    break;
+}
+
+Where:
+
+MAX_FORMULAS ≈ 2000
+2. Duplicate formulas
+
+You absolutely need canonical normalization.
+
+Example duplicates:
+
+Nb1C1
+C1Nb1
+NbC
+
+Solution:
+
+normalizeFormula()
+reduceStoichiometry()
+sortElementsByElectronegativity()
+
+This should happen before deduplication.
+
+3. Chemically impossible combinations
+
+Your generator may create things like:
+
+LiCl4
+MgF7
+FeO0
+
+You should add a valence sanity filter.
+
+Example rule:
+
+0 < oxidation_state < typical_max
+
+or use a simple heuristic:
+
+chargeBalanceScore
+🔧 Suggested addition
+
+Add element compatibility maps.
+
+Example:
+
+carbide_formers
+nitride_formers
+boride_formers
+
+This massively improves candidate quality.
+
+T002 — Physics-Aware ML Predictor
+
+This is one of the best parts of your design.
+
+✅ Very good choices
+
+Predicting these four properties is exactly right:
+
+λ (electron-phonon coupling)
+DOS(EF)
+ωlog
+stability
+
+These are literally the parameters in the McMillan equation used for superconductors.
+
+Related concept: BCS theory
+
+⚠️ Main concern
+
+Your training data volume may be too small.
+
+Your model requires:
+
+lambda
+phonons
+formation energy
+
+But those only exist for materials that passed full physics analysis.
+
+If you only have 50–200 samples, the model will be noisy.
+
+🔧 Suggested improvement
+
+Use transfer priors from elemental data.
+
+Example:
+
+DOS(EF) ≈ weighted elemental DOS
+ωlog ≈ Debye temperature estimate
+λ ≈ function(DOS, mass, bonding)
+
+This stabilizes early predictions.
+
+🔧 Another improvement
+
+Instead of binary stability:
+
+stable / unstable
+
+Predict:
+
+distance_from_convex_hull
+
+This is the standard metric used by the Materials Project.
+
+T003 — Pattern Mining / Theory Generator
+
+This is a very interesting module.
+
+You are basically trying to create automatic superconductivity heuristics.
+
+That’s ambitious and good.
+
+✅ What is good
+
+You included:
+
+information gain
+F1 validation
+support counts
+
+This prevents random correlations.
+
+Good rule example:
+
+Tc > 40K when:
+λ > 1.5
+DOS(EF) > 2
+ωlog > 200K
+
+That is meaningful physics.
+
+⚠️ Possible issue
+
+Your rule search space is very large.
+
+If you allow:
+
+all thresholds
+all pairs
+all triples
+
+You get combinatorial explosion.
+
+🔧 Fix
+
+Limit rules to:
+
+max 2 conditions
+top 10 features
+
+Otherwise mining will become slow.
+
+🔧 Another improvement
+
+Add rule aging.
+
+Old rules may become invalid as data grows.
+
+Example:
+
+rule.weight *= decayFactor
+
+This prevents stale theory.
+
+T004 — Structural Mutation Engine
+
+This is excellent and uncommon in hobby systems.
+
+Real superconductivity is extremely sensitive to structure.
+
+Example concepts:
+
+Ruddlesden–Popper phase
+
+strain-enhanced superconductivity
+
+vacancy ordering
+
+Your mutation types are good:
+
+distortions
+layering
+vacancies
+strain
+⚠️ Issue
+
+You assume the system already knows the structure.
+
+But earlier pipeline stages may only know:
+
+composition
+
+You need a structure prototype generator.
+
+Example:
+
+rocksalt
+perovskite
+hexagonal
+layered
+bcc
+fcc
+
+Then apply mutations to the prototype.
+
+🔧 Add mutation scoring
+
+Right now mutations generate blindly.
+
+Add a heuristic energy penalty filter:
+
+estimatedEnergyPenalty < 0.5 eV
+
+Otherwise many structures will be impossible.
+
+T005 — Multi-Dimensional Phase Explorer
+
+This is very advanced and excellent.
+
+Exploring:
+
+composition
+pressure
+temperature
+
+is exactly how modern superconductors are discovered.
+
+Example:
+
+Lanthanum decahydride superconductivity only appears around 170 GPa.
+
+Your pressure sweep to 300 GPa is realistic.
+
+⚠️ Possible issue
+
+Your grid resolution could explode.
+
+Example:
+
+composition: 20 points
+pressure: 50 points
+
+That is:
+
+1000 predictions
+
+Multiply by many element sets and it grows quickly.
+
+🔧 Improvement
+
+Use adaptive sampling.
+
+Process:
+
+coarse scan
+↓
+identify peaks
+↓
+refine around peaks
+
+This reduces compute dramatically.
+
+One Missing Piece (Important)
+
+Your system lacks uncertainty estimation.
+
+Right now you choose candidates based on:
+
+highest predicted Tc
+
+But the model might be wrong.
+
+Add uncertainty-aware selection:
+
+score = predictedTc + explorationBonus
+
+Where:
+
+explorationBonus = modelVariance
+
+This prevents the engine from getting stuck in one region.
