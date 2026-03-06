@@ -1262,7 +1262,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 8;
+const PHYSICS_VERSION = 9;
 
 async function recalculatePhysics() {
   try {

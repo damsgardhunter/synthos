@@ -10,7 +10,7 @@ export interface PhysicsConstraintMode {
 
 const defaultConstraintMode: PhysicsConstraintMode = {
   allowBeyondEmpirical: true,
-  empiricalPenaltyStrength: 0.5,
+  empiricalPenaltyStrength: 2.5,
 };
 
 let activeConstraintMode: PhysicsConstraintMode = { ...defaultConstraintMode };
