@@ -38,12 +38,15 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Comprehensive Elemental Data**: Utilizes a database of 96 elements with tabulated properties.
 - **Advanced Parameter Calculation**: Includes methods for calculating DOS at Fermi level, bandwidth, Hubbard U/W, lambda, phonon frequencies, and metallicity using various models and lookups.
 - **Specialized Material Handling**: Incorporates specific physics adjustments for superhydrides, High-Entropy Alloys (HEAs), and unconventional superconductor mechanisms.
-- **Soft Empirical Limits (v8)**: Empirical Tc caps converted from hard walls to soft ceilings via `softCeiling()`. Lambda soft-capped above 4.0 (max 6.0). McMillan cap 600K soft ceiling. `PhysicsConstraintMode` allows toggling between conservative/exploratory. Material-class bonuses now physics-derived from composition.
+- **Physics v10 Material-Class-Aware Constraints**: Lambda caps are now material-class-specific: conventional metals 2.0, cuprates 1.5, iron-pnictides 1.8, superhydrides 3.5, light-element compounds 2.5. Light-element boost reduced from 2.5x to 1.2x. Hydrogen lambda contribution now pressure-gated and bonding-type-aware.
+- **Hydrogen Bonding Classification**: `classifyHydrogenBonding()` distinguishes metallic-network (LaH10-type), cage-clathrate (CaH6-type), covalent-molecular (NH3/CH4-type), and interstitial (PdH-type) hydrogen. Only metallic networks at high pressure get full lambda boost.
+- **Grounded Allen-Dynes Inputs**: omega_log clamped to class-appropriate ranges (conventional 50-400K, hydrides 500-1500K). mu* widened to 0.10-0.20 with corrections for electronegativity spread and d-electron character. McMillan cap reduced from 600K to 400K.
+- **Pairing Susceptibility Optimization**: Engine and LLM prompts now optimize for pairing conditions (DOS, nesting, coupling channels) rather than raw Tc. Stagnation detection considers pairing susceptibility improvement alongside Tc.
 - **Multiple Pairing Mechanisms**: `runUnifiedPairingAnalysis()` evaluates BCS, spin-fluctuation, excitonic, plasmonic, and flat-band mechanisms. Dominant mechanism determines Tc.
 - **Instability Proximity Scoring**: `computeInstabilityProximity()` scores materials near magnetic QCP, structural boundary, metal-insulator transition, CDW instability, and soft phonon collapse. Boundary-proximate materials get priority.
 - **Inverse Design**: `generateInverseDesignCandidates()` runs every 5th cycle, designing materials optimized for pairing susceptibility (lambda, DOS, nesting) rather than just Tc.
-- **Generative Crystal Structures**: `runGenerativeStructureDiscovery()` generates structural variants via chemical substitution, intercalation, and topology mapping (Kagome, pyrochlore, etc.) every 3rd cycle.
-- **Boundary Hunting Mode**: Activated on stagnation (>5 cycles without Tc improvement). Formula generator targets instability edges. Combined with inverse design mode.
+- **Generative Crystal Structures**: `runGenerativeStructureDiscovery()` generates structural variants via chemical substitution, intercalation, and topology mapping (Kagome, pyrochlore, etc.) every 3rd cycle. Novel crystal prototype generation via LLM runs every 10th cycle with design principles (flat bands, Kagome planes, breathing pyrochlore, etc.).
+- **Boundary Hunting Mode**: Activated on stagnation (>5 cycles without Tc/pairing improvement). Formula generator targets instability edges. Combined with inverse design mode.
 - **Enriched ML Features**: 34 features (was 28): orbital character, phonon spectral centroid/width, bond stiffness variance, charge transfer magnitude, connectivity index.
 - **Structure Predictor**: Uses crystallographic rules, Goldschmidt tolerance factor, Vegard's law, and Tammann rule for structure and synthesis temperature prediction.
 - **Novel Synthesis Reasoning (Phase 13)**: Physics-constrained synthesis path generator in `server/learning/synthesis-reasoning.ts`. Analyzes thermodynamic landscape (hull distance, formation energy, decomposition barriers) and proposes non-equilibrium processing routes for metastable candidates. Material-class-specific routes: hydrides (DAC hydrogenation), HEAs (mechanical alloying + SPS, combinatorial sputtering), cuprates (sol-gel + O2 annealing), plus rapid quench, thin film, and reactive milling routes. Routes tagged `source: "physics-reasoned"` vs `"literature-based"`. Runs after DFT enrichment, limited to 3 candidates/cycle.
@@ -51,8 +54,9 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to materials scienc
 - **Auto-DFT Enrichment**: An engine cycle mechanism to enrich superconductor candidates with DFT data based on score, pipeline stage, and staleness.
 
 ### Gradient Boosting Model
-- Trained on 130+ known superconductors from the SuperCon database.
-- Features include physical properties like lambda, metallicity, omegaLog, debyeTemp, and various compositional and structural indicators.
+- Trained on 500+ entries (superconductors and non-superconductors) from the SuperCon database.
+- 300 trees, learning rate 0.1, max depth 4, min samples per leaf 5.
+- Features include 34 physical properties like lambda, metallicity, omegaLog, debyeTemp, and various compositional and structural indicators.
 
 ### Alive Engine
 - **Real-time Feedback**: Broadcasts `thought` WebSocket messages at key decision points, providing a live-scrolling thought feed on the dashboard.

@@ -947,9 +947,296 @@ export function generateStructuralVariants(
 }
 
 let totalStructuralVariantsGenerated = 0;
+let totalNovelPrototypesGenerated = 0;
 
 export function getStructuralVariantCount(): number {
   return totalStructuralVariantsGenerated;
+}
+
+export function getNovelPrototypeCount(): number {
+  return totalNovelPrototypesGenerated;
+}
+
+export const DESIGN_PRINCIPLES = [
+  "Alternating flat-band and dispersive-band layers",
+  "Kagome planes separated by rattler-atom spacers",
+  "Cage structure with hydrogen channels along one crystallographic axis",
+  "Breathing pyrochlore with alternating large/small tetrahedra",
+  "Mixed-valence ladder structure with spin-liquid ground state",
+  "Honeycomb lattice with strong spin-orbit coupling and orbital degeneracy",
+  "Layered structure with van Hove singularity near Fermi level",
+  "Skutterudite-like cage with guest-atom rattling modes for enhanced phonon coupling",
+  "Bipartite lattice with sublattice-selective orbital ordering",
+  "Intercalated graphite-like sheets with heavy-metal spacer layers",
+];
+
+const VALID_SPACE_GROUPS = new Set([
+  "P1", "P-1", "P2", "P21", "C2", "Pm", "Pc", "Cm", "Cc", "P2/m", "P21/m", "C2/m", "P2/c", "P21/c", "C2/c",
+  "P222", "P2221", "P21212", "P212121", "C2221", "C222", "F222", "I222", "I212121",
+  "Pmm2", "Pmc21", "Pcc2", "Pma2", "Pca21", "Pnc2", "Pmn21", "Pba2", "Pna21", "Pnn2",
+  "Cmm2", "Cmc21", "Ccc2", "Amm2", "Abm2", "Ama2", "Aba2", "Fmm2", "Fdd2", "Imm2", "Iba2", "Ima2",
+  "Pmmm", "Pnnn", "Pccm", "Pban", "Pmma", "Pnna", "Pmna", "Pcca", "Pbam", "Pccn", "Pbcm", "Pnnm",
+  "Pmmn", "Pbcn", "Pbca", "Pnma", "Cmcm", "Cmca", "Cmmm", "Cccm", "Cmma", "Ccca",
+  "Fmmm", "Fddd", "Immm", "Ibam", "Ibca", "Imma",
+  "P4", "P41", "P42", "P43", "I4", "I41", "P-4", "I-4", "P4/m", "P42/m", "P4/n", "P42/n", "I4/m", "I41/a",
+  "P422", "P4212", "P4122", "P41212", "P4222", "P42212", "P4322", "P43212", "I422", "I4122",
+  "P4mm", "P4bm", "P42cm", "P42nm", "P4cc", "P4nc", "P42mc", "P42bc", "I4mm", "I4cm", "I41md", "I41cd",
+  "P-42m", "P-42c", "P-421m", "P-421c", "P-4m2", "P-4c2", "P-4b2", "P-4n2", "I-4m2", "I-4c2", "I-42m", "I-42d",
+  "P4/mmm", "P4/mcc", "P4/nbm", "P4/nnc", "P4/mbm", "P4/mnc", "P4/nmm", "P4/ncc",
+  "P42/mmc", "P42/mcm", "P42/nbc", "P42/nnm", "P42/mbc", "P42/mnm", "P42/nmc", "P42/ncm",
+  "I4/mmm", "I4/mcm", "I41/amd", "I41/acd",
+  "P3", "P31", "P32", "R3", "P-3", "R-3",
+  "P312", "P321", "P3112", "P3121", "P3212", "P3221", "R32",
+  "P3m1", "P31m", "P3c1", "P31c", "R3m", "R3c",
+  "P-31m", "P-3m1", "P-31c", "P-3c1", "R-3m", "R-3c",
+  "P6", "P61", "P65", "P62", "P64", "P63", "P-6", "P6/m", "P63/m",
+  "P622", "P6122", "P6522", "P6222", "P6422", "P6322",
+  "P6mm", "P6cc", "P63cm", "P63mc",
+  "P-6m2", "P-6c2", "P-62m", "P-62c",
+  "P6/mmm", "P6/mcc", "P63/mcm", "P63/mmc",
+  "P23", "F23", "I23", "P213", "I213",
+  "Pm-3", "Pn-3", "Fm-3", "Fd-3", "Im-3", "Pa-3", "Ia-3",
+  "P432", "P4232", "F432", "F4132", "I432", "P4332", "P4132", "I4132",
+  "P-43m", "F-43m", "I-43m", "P-43n", "F-43c", "I-43d",
+  "Pm-3m", "Pn-3n", "Pm-3n", "Pn-3m", "Fm-3m", "Fm-3c", "Fd-3m", "Fd-3c", "Im-3m", "Ia-3d",
+]);
+
+function isValidSpaceGroup(sg: string): boolean {
+  return VALID_SPACE_GROUPS.has(sg);
+}
+
+export interface NovelPrototype {
+  name: string;
+  spaceGroup: string;
+  crystalSystem: string;
+  dimensionality: string;
+  designPrinciple: string;
+  wyckoffPositions: Record<string, string>;
+  latticeRatios: { a: number; b: number; c: number };
+  physicsRationale: string;
+  noveltyScore: number;
+  suggestedElements: string[];
+}
+
+function computePrototypeNoveltyScore(
+  spaceGroup: string,
+  crystalSystem: string,
+  dimensionality: string,
+  latticeRatios: { a: number; b: number; c: number }
+): number {
+  const knownSGs = new Set(Object.values(KNOWN_PROTOTYPES).map(p => p.spaceGroup));
+  const knownCS = new Set(Object.values(KNOWN_PROTOTYPES).map(p => p.crystalSystem));
+  const knownDims = new Set(Object.values(KNOWN_PROTOTYPES).map(p => p.dimensionality));
+
+  let score = 0;
+
+  if (!knownSGs.has(spaceGroup)) {
+    score += 0.4;
+  } else {
+    score += 0.1;
+  }
+
+  if (!knownCS.has(crystalSystem)) {
+    score += 0.2;
+  }
+
+  if (!knownDims.has(dimensionality)) {
+    score += 0.2;
+  }
+
+  const knownCARatios = Object.values(PROTOTYPE_CA_RATIOS);
+  const ca = latticeRatios.c / latticeRatios.a;
+  const minDist = Math.min(...knownCARatios.map(r => Math.abs(ca - r)));
+  score += Math.min(0.2, minDist * 0.1);
+
+  return Math.min(1.0, Math.max(0.1, score));
+}
+
+export async function generateNovelPrototype(
+  emit: EventEmitter,
+  designPrinciple?: string
+): Promise<NovelPrototype | null> {
+  const principle = designPrinciple || DESIGN_PRINCIPLES[Math.floor(Math.random() * DESIGN_PRINCIPLES.length)];
+
+  const knownList = Object.entries(KNOWN_PROTOTYPES)
+    .map(([name, p]) => `${name}: ${p.spaceGroup} (${p.crystalSystem}, ${p.dimensionality})`)
+    .join("\n");
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert computational materials scientist specializing in crystal structure design for superconductors.
+
+Your task: propose a NOVEL crystal structure prototype that does NOT match any of these known prototypes:
+${knownList}
+
+Design principle to exploit: "${principle}"
+
+Requirements:
+- space_group: Must be a valid International Tables for Crystallography (ITC) Hermann-Mauguin symbol
+- lattice_a, lattice_b, lattice_c: Lattice parameter ratios (normalized so a=1.0). Must be physically reasonable (ratios between 0.5 and 10.0)
+- crystal_system: One of cubic, tetragonal, hexagonal, orthorhombic, monoclinic, triclinic, trigonal, rhombohedral
+- dimensionality: One of 3D, quasi-2D, 2D, 1D, mixed
+- wyckoff_positions: Object mapping element roles (e.g. "metal_A", "metal_B", "anion") to Wyckoff site labels (e.g. "4a", "8c", "2b")
+- name: A short descriptive name for this prototype
+- physics_rationale: Why this structure might support superconductivity (2-3 sentences)
+- suggested_elements: Array of 3-5 element symbols that would be good candidates for this structure
+- coordination_numbers: Object mapping element roles to their coordination numbers (must be chemically valid, 2-12)
+
+Return JSON with these fields. Be creative but physically grounded.`,
+        },
+        {
+          role: "user",
+          content: `Design a novel crystal structure prototype exploiting: "${principle}"`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      max_completion_tokens: 800,
+    });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content);
+
+    const spaceGroup = typeof parsed.space_group === "string" ? parsed.space_group : "P1";
+    const crystalSystem = typeof parsed.crystal_system === "string" ? parsed.crystal_system.toLowerCase() : "triclinic";
+    const dimensionality = typeof parsed.dimensionality === "string" ? parsed.dimensionality : "3D";
+    const name = typeof parsed.name === "string" ? parsed.name : `novel-${Date.now()}`;
+    const physicsRationale = typeof parsed.physics_rationale === "string" ? parsed.physics_rationale : "";
+    const suggestedElements = Array.isArray(parsed.suggested_elements) ? parsed.suggested_elements.filter((e: unknown) => typeof e === "string") : [];
+
+    const toNum = (v: unknown, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    let latticeA = toNum(parsed.lattice_a, 1.0);
+    let latticeB = toNum(parsed.lattice_b, 1.0);
+    let latticeC = toNum(parsed.lattice_c, 1.0);
+
+    latticeA = Math.max(0.5, Math.min(10.0, latticeA));
+    latticeB = Math.max(0.5, Math.min(10.0, latticeB));
+    latticeC = Math.max(0.5, Math.min(10.0, latticeC));
+
+    const validSG = isValidSpaceGroup(spaceGroup) ? spaceGroup : "P1";
+
+    const wyckoff: Record<string, string> = {};
+    if (parsed.wyckoff_positions && typeof parsed.wyckoff_positions === "object") {
+      for (const [role, site] of Object.entries(parsed.wyckoff_positions)) {
+        if (typeof site === "string") {
+          wyckoff[role] = site;
+        }
+      }
+    }
+
+    const coordNums = parsed.coordination_numbers;
+    if (coordNums && typeof coordNums === "object") {
+      for (const [role, cn] of Object.entries(coordNums)) {
+        const cnNum = Number(cn);
+        if (!Number.isFinite(cnNum) || cnNum < 2 || cnNum > 12) {
+          emit("log", {
+            phase: "phase-11",
+            event: "Novel prototype coordination warning",
+            detail: `Role ${role} has invalid coordination number ${cn}, structure may not be chemically valid`,
+            dataSource: "Novel Prototype Generator",
+          });
+        }
+      }
+    }
+
+    const latticeRatios = { a: latticeA, b: latticeB, c: latticeC };
+    const noveltyScore = computePrototypeNoveltyScore(validSG, crystalSystem, dimensionality, latticeRatios);
+
+    const isKnownDuplicate = Object.values(KNOWN_PROTOTYPES).some(
+      p => p.spaceGroup === validSG && p.crystalSystem === crystalSystem && p.dimensionality === dimensionality
+    );
+
+    if (isKnownDuplicate) {
+      emit("log", {
+        phase: "phase-11",
+        event: "Novel prototype rejected (matches known)",
+        detail: `${name}: ${validSG} (${crystalSystem}, ${dimensionality}) matches an existing known prototype`,
+        dataSource: "Novel Prototype Generator",
+      });
+      return null;
+    }
+
+    const prototype: NovelPrototype = {
+      name,
+      spaceGroup: validSG,
+      crystalSystem,
+      dimensionality,
+      designPrinciple: principle,
+      wyckoffPositions: wyckoff,
+      latticeRatios,
+      physicsRationale,
+      noveltyScore,
+      suggestedElements,
+    };
+
+    totalNovelPrototypesGenerated++;
+
+    emit("log", {
+      phase: "phase-11",
+      event: "Novel crystal prototype generated",
+      detail: `${name}: ${validSG} (${crystalSystem}, ${dimensionality}), principle="${principle}", novelty=${noveltyScore.toFixed(2)}, elements=[${suggestedElements.join(",")}]`,
+      dataSource: "Novel Prototype Generator",
+    });
+
+    return prototype;
+  } catch (err: any) {
+    emit("log", {
+      phase: "phase-11",
+      event: "Novel prototype generation error",
+      detail: err.message?.slice(0, 150) || "unknown error",
+      dataSource: "Novel Prototype Generator",
+    });
+    return null;
+  }
+}
+
+export async function runNovelPrototypeGeneration(
+  emit: EventEmitter,
+): Promise<GeneratedStructureVariant[]> {
+  const results: GeneratedStructureVariant[] = [];
+
+  const principleIdx1 = Math.floor(Math.random() * DESIGN_PRINCIPLES.length);
+  let principleIdx2 = (principleIdx1 + 1 + Math.floor(Math.random() * (DESIGN_PRINCIPLES.length - 1))) % DESIGN_PRINCIPLES.length;
+
+  const principles = [DESIGN_PRINCIPLES[principleIdx1], DESIGN_PRINCIPLES[principleIdx2]];
+
+  for (const principle of principles) {
+    const proto = await generateNovelPrototype(emit, principle);
+    if (!proto || proto.suggestedElements.length < 2) continue;
+
+    const elements = proto.suggestedElements.slice(0, 4);
+    const formulaParts = elements.map((el, i) => {
+      const count = i === 0 ? 1 : (1 + Math.floor(Math.random() * 3));
+      return count === 1 ? el : `${el}${count}`;
+    });
+    const formula = formulaParts.join("");
+
+    const existing = await storage.getSuperconductorByFormula(formula);
+    if (existing) continue;
+
+    results.push({
+      formula,
+      parentFormula: "novel-prototype",
+      variationType: "novel-prototype",
+      structuralNovelty: proto.noveltyScore,
+      topology: proto.name,
+      spaceGroup: proto.spaceGroup,
+      crystalSystem: proto.crystalSystem,
+      dimensionality: proto.dimensionality,
+      description: `Novel prototype "${proto.name}": ${proto.physicsRationale}. Design principle: ${proto.designPrinciple}`,
+    });
+  }
+
+  return results;
 }
 
 export async function runGenerativeStructureDiscovery(

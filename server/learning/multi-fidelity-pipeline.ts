@@ -111,7 +111,7 @@ async function stage2_PhononCoupling(
   const start = Date.now();
 
   const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
-  const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula);
+  const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
 
   const hasStablePhonons = !phonon.hasImaginaryModes;
   // Calibrated: Al lambda=0.40 is minimum known SC coupling

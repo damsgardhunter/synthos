@@ -268,7 +268,7 @@ function trainGradientBoosting(
   for (let iter = 0; iter < nEstimators; iter++) {
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
-    const tree = buildTree(X, residuals, allIndices, 0, maxDepth, 3);
+    const tree = buildTree(X, residuals, allIndices, 0, maxDepth, 5);
     if (typeof tree === "number") break;
 
     trees.push(tree);
@@ -339,7 +339,7 @@ export function getTrainedModel(): GBModel {
     return cachedModel;
   }
 
-  cachedModel = trainGradientBoosting(X, y, 200, 0.1, 4);
+  cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
   cachedCalibration = computeCalibration(cachedModel);
   return cachedModel;
 }

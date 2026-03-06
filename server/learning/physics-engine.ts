@@ -253,6 +253,125 @@ function getTotalAtoms(counts: Record<string, number>): number {
 
 const LAMBDA_CONVERSION = 562000;
 
+export type HydrogenBondingType = "metallic-network" | "cage-clathrate" | "covalent-molecular" | "interstitial" | "ambiguous" | "none";
+
+export function classifyHydrogenBonding(formula: string, pressureGpa: number = 0): HydrogenBondingType {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const hCount = counts["H"] || 0;
+  if (hCount === 0) return "none";
+
+  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
+  const metalElements = elements.filter(e => !nonmetals.includes(e));
+  const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
+  const metalFrac = metalAtomCount / totalAtoms;
+  const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+
+  const cCount = counts["C"] || 0;
+  const nCount = counts["N"] || 0;
+  const oCount = counts["O"] || 0;
+  const bCount = counts["B"] || 0;
+  const cFrac = cCount / totalAtoms;
+  const nonHNonMetFrac = elements.filter(e => nonmetals.includes(e) && e !== "H")
+    .reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+
+  const isOrganic = cFrac > 0.15 && hCount >= cCount;
+  if (isOrganic) return "covalent-molecular";
+
+  if ((cCount + nCount + oCount + bCount) / totalAtoms > 0.15 && hRatio < 6) {
+    return "covalent-molecular";
+  }
+
+  if (hRatio >= 6 && metalFrac > 0.05 && pressureGpa >= 100 && nonHNonMetFrac < 0.1) {
+    return "metallic-network";
+  }
+
+  if (hRatio >= 4 && metalFrac > 0.1 && pressureGpa >= 50) {
+    return "cage-clathrate";
+  }
+
+  if (hRatio < 3 && metalFrac > 0.3) {
+    return "interstitial";
+  }
+
+  if (pressureGpa < 50 && hRatio >= 4) {
+    return "covalent-molecular";
+  }
+
+  if (hRatio >= 4 && pressureGpa >= 50) {
+    return "cage-clathrate";
+  }
+
+  return "ambiguous";
+}
+
+type MaterialClass = "conventional-metal" | "cuprate" | "iron-pnictide" | "hydride-low-p" | "hydride-high-p" | "superhydride" | "light-element" | "heavy-fermion" | "other";
+
+function classifyMaterialForLambda(formula: string, pressureGpa: number = 0): MaterialClass {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const hCount = counts["H"] || 0;
+  const metalAtoms = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
+
+  if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3 &&
+      elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e))) {
+    return "cuprate";
+  }
+  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"))) {
+    return "iron-pnictide";
+  }
+  if (elements.some(e => isRareEarth(e) || isActinide(e)) &&
+      elements.some(e => isTransitionMetal(e)) && elements.length >= 3 &&
+      !elements.includes("H")) {
+    const reOrAct = elements.filter(e => isRareEarth(e) || isActinide(e));
+    if (reOrAct.length > 0) return "heavy-fermion";
+  }
+  if (hCount > 0 && hRatio >= 6 && pressureGpa >= 100) return "superhydride";
+  if (hCount > 0 && hRatio >= 4 && pressureGpa >= 50) return "hydride-high-p";
+  if (hCount > 0 && hRatio >= 2) return "hydride-low-p";
+
+  const lightEls = elements.filter(e => {
+    const d = getElementData(e);
+    return d && d.atomicMass < 15 && e !== "H";
+  });
+  const lightFrac = lightEls.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+  if (lightFrac > 0.3) return "light-element";
+
+  return "conventional-metal";
+}
+
+function getLambdaCapForClass(matClass: MaterialClass): number {
+  switch (matClass) {
+    case "conventional-metal": return 2.0;
+    case "cuprate": return 1.5;
+    case "iron-pnictide": return 1.8;
+    case "heavy-fermion": return 1.0;
+    case "hydride-low-p": return 2.5;
+    case "hydride-high-p": return 3.0;
+    case "superhydride": return 3.5;
+    case "light-element": return 2.5;
+    case "other": return 2.5;
+  }
+}
+
+function getOmegaLogRangeForClass(matClass: MaterialClass): [number, number] {
+  switch (matClass) {
+    case "conventional-metal": return [50, 400];
+    case "cuprate": return [100, 600];
+    case "iron-pnictide": return [100, 500];
+    case "heavy-fermion": return [20, 200];
+    case "hydride-low-p": return [200, 800];
+    case "hydride-high-p": return [500, 1500];
+    case "superhydride": return [500, 1500];
+    case "light-element": return [200, 1000];
+    case "other": return [100, 600];
+  }
+}
+
 const ELEMENT_BANDWIDTH: Record<string, number> = {
   Li: 3.5, Be: 6.0, Na: 3.0, Mg: 6.0, Al: 11.0, K: 2.5, Ca: 3.0,
   Sc: 4.0, Ti: 4.5, V: 5.0, Cr: 5.5, Mn: 4.0, Fe: 4.5, Co: 4.5,
@@ -625,7 +744,8 @@ export function computePhononSpectrum(
   const metalAtoms = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
   const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
-  const isHydrogenRich = hRatio >= 6;
+  const hBondType = hasH ? classifyHydrogenBonding(formula, hRatio >= 4 ? 150 : 0) : "none";
+  const isHydrogenRich = hBondType === "metallic-network" || hBondType === "cage-clathrate";
 
   const thetaDAvg = getCompositionWeightedProperty(counts, "debyeTemperature");
   const avgMass = getAverageMass(counts);
@@ -733,7 +853,8 @@ export function computePhononSpectrum(
 export function computeElectronPhononCoupling(
   electronicStructure: ElectronicStructure,
   phononSpectrum: PhononSpectrum,
-  formula?: string
+  formula?: string,
+  pressureGpa: number = 0
 ): ElectronPhononCoupling {
   const omega_log = phononSpectrum.logAverageFrequency;
   const metal = electronicStructure.metallicity;
@@ -787,12 +908,24 @@ export function computeElectronPhononCoupling(
         lambda = lambda + inferredLambda * missingFrac * 0.5;
       }
 
+      const hBondType = formula ? classifyHydrogenBonding(formula, pressureGpa) : "none";
+
       if (hCount > 0 && hRatio >= 4 && metal > 0.4) {
-        const H_theta = 2000;
-        const H_eta = 3.0 + hRatio * 0.5;
-        const H_mass = 1.008;
-        const lambda_H = (H_eta * LAMBDA_CONVERSION) / (H_mass * H_theta * H_theta) * (hCount / totalAtoms);
-        lambda += lambda_H;
+        if (hBondType === "metallic-network" || hBondType === "cage-clathrate") {
+          const H_theta = hBondType === "metallic-network" ? 2000 : 1500;
+          const H_eta = Math.min(3.0 + hRatio * 0.3, 5.0);
+          const H_mass = 1.008;
+          const pressureScale = pressureGpa >= 100 ? 1.0 : pressureGpa / 100;
+          const boostFraction = hBondType === "metallic-network" ? 1.0 : 0.7;
+          const lambda_H = (H_eta * LAMBDA_CONVERSION) / (H_mass * H_theta * H_theta) * (hCount / totalAtoms) * pressureScale * boostFraction;
+          lambda += lambda_H;
+        } else if (hBondType === "interstitial") {
+          const H_theta = 1200;
+          const H_eta = 1.5;
+          const H_mass = 1.008;
+          const lambda_H = (H_eta * LAMBDA_CONVERSION) / (H_mass * H_theta * H_theta) * (hCount / totalAtoms) * 0.3;
+          lambda += lambda_H;
+        }
       }
 
       if (metal > 0.4) {
@@ -803,7 +936,7 @@ export function computeElectronPhononCoupling(
         if (lightEl.length > 0) {
           const lightFrac = lightEl.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
           if (lightFrac > 0.3) {
-            const lightBoost = 1.0 + lightFrac * 2.5 * (phononSpectrum.debyeTemperature / 500);
+            const lightBoost = 1.0 + lightFrac * 1.2 * (phononSpectrum.debyeTemperature / 500);
             lambda *= lightBoost;
           }
         }
@@ -845,21 +978,50 @@ export function computeElectronPhononCoupling(
   }
 
   lambda = Math.max(0.05, lambda);
+
+  const matClass = formula ? classifyMaterialForLambda(formula, pressureGpa) : "other";
+  const classLambdaCap = getLambdaCapForClass(matClass);
+
   if (activeConstraintMode.allowBeyondEmpirical) {
-    if (lambda > 4.0) lambda = 4.0 + (lambda - 4.0) * 0.3;
-    lambda = Math.min(6.0, lambda);
+    if (lambda > classLambdaCap) {
+      lambda = classLambdaCap + (lambda - classLambdaCap) * 0.15;
+    }
+    lambda = Math.min(classLambdaCap * 1.2, lambda);
   } else {
-    lambda = Math.min(3.5, lambda);
+    lambda = Math.min(classLambdaCap, lambda);
   }
 
-  const avgEN = formula ? (getCompositionWeightedProperty(parseFormulaCounts(formula), "paulingElectronegativity") || 1.8) : 1.8;
-  const mu_bare = 0.1 + avgEN * 0.02;
+  if (lambda > 2.0 && matClass !== "superhydride" && matClass !== "hydride-high-p") {
+    const instabilityDamp = 1.0 - (lambda - 2.0) * 0.15;
+    lambda *= Math.max(0.5, instabilityDamp);
+  }
+
+  const omegaLogRange = getOmegaLogRangeForClass(matClass);
+  let clampedOmegaLog = omega_log;
+  const omegaLogK = omega_log * 1.44;
+  if (omegaLogK < omegaLogRange[0]) clampedOmegaLog = omegaLogRange[0] / 1.44;
+  if (omegaLogK > omegaLogRange[1]) clampedOmegaLog = omegaLogRange[1] / 1.44;
+
+  const formulaCounts = formula ? parseFormulaCounts(formula) : {};
+  const formulaElements = formula ? parseFormulaElements(formula) : [];
+  const avgEN = formula ? (getCompositionWeightedProperty(formulaCounts, "paulingElectronegativity") || 1.8) : 1.8;
+  let mu_bare = 0.1 + avgEN * 0.02;
+
+  if (formulaElements.length >= 2) {
+    const enValues = formulaElements.map(el => getElementData(el)?.paulingElectronegativity ?? 1.8);
+    const enSpread = Math.max(...enValues) - Math.min(...enValues);
+    if (enSpread > 1.5) mu_bare += 0.02 * (enSpread - 1.5);
+  }
+  if (formulaElements.some(e => isTransitionMetal(e) && hasDOrFElectrons(e))) {
+    mu_bare += 0.02;
+  }
+
   const thetaD = phononSpectrum.debyeTemperature;
   const E_F_eV = 5.0 + N_EF * 0.5;
   const omega_D_eV = thetaD * 8.617e-5;
   const logRatio = Math.log(Math.max(E_F_eV / Math.max(omega_D_eV, 0.001), 1.1));
   const muStar = mu_bare / (1 + mu_bare * logRatio);
-  const muStarClamped = Math.max(0.08, Math.min(0.20, muStar));
+  const muStarClamped = Math.max(0.10, Math.min(0.20, muStar));
 
   const isStrongCoupling = lambda > 1.5;
 
@@ -870,7 +1032,7 @@ export function computeElectronPhononCoupling(
 
   return {
     lambda: Number(lambda.toFixed(3)),
-    omegaLog: omega_log,
+    omegaLog: Math.round(clampedOmegaLog),
     muStar: Number(muStarClamped.toFixed(4)),
     isStrongCoupling,
     dominantPhononBranch,
@@ -902,7 +1064,14 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling): Eliashber
   const isotropicGap = lambda < 1.0;
   const strongCouplingCorrection = lambda > 1.5 ? 1 + 5.3 * (lambda / (lambda + 6)) * (lambda / (lambda + 6)) : 1.0;
 
-  const uncertainty = tc * 0.15;
+  let uncertaintyFrac = 0.15;
+  if (tc > 200 && lambda < 2.0) {
+    uncertaintyFrac = 0.5;
+  } else if (tc > 150 && lambda < 1.5) {
+    uncertaintyFrac = 0.4;
+  }
+
+  const uncertainty = tc * uncertaintyFrac;
   const confidenceBand: [number, number] = [
     Math.max(0, Math.round(tc - uncertainty)),
     Math.round(tc + uncertainty),
@@ -1556,7 +1725,8 @@ export async function runFullPhysicsAnalysis(
     }
   }
 
-  const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula);
+  const candidatePressure = candidate.pressureGpa ?? 0;
+  const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
 
   let eliashberg: EliashbergResult;
   eliashberg = predictTcEliashberg(coupling);

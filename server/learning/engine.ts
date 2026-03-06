@@ -7,7 +7,7 @@ import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, ge
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap } from "./physics-engine";
-import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount } from "./structure-predictor";
+import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
@@ -443,6 +443,7 @@ function shuffle<T>(arr: T[]): T[] {
 const reEvalApplied = new Map<string, { lambda: number; omegaLog: number; muStar: number; hasCrystal: boolean }>();
 let cyclesSinceTcImproved = 0;
 let lastBestTcSeen = 0;
+let lastBestPairingSusc = 0;
 
 function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): number {
   if (lambda < 0.05 || omegaLog <= 0) return 0;
@@ -460,9 +461,16 @@ async function reEvaluateTopCandidates() {
     const topByTc = await storage.getSuperconductorCandidatesByTc(50);
 
     const currentBestTc = Math.max(...topByTc.map(c => c.predictedTc ?? 0), 0);
-    if (currentBestTc > lastBestTcSeen + 2) {
+    const currentBestPairing = Math.max(...topByTc.map(c => {
+      const lambda = c.electronPhononCoupling ?? 0;
+      const score = c.ensembleScore ?? 0;
+      return lambda * 0.4 + score * 0.6;
+    }), 0);
+
+    if (currentBestTc > lastBestTcSeen + 2 || currentBestPairing > lastBestPairingSusc + 0.05) {
       cyclesSinceTcImproved = 0;
-      lastBestTcSeen = currentBestTc;
+      lastBestTcSeen = Math.max(lastBestTcSeen, currentBestTc);
+      lastBestPairingSusc = Math.max(lastBestPairingSusc, currentBestPairing);
     } else {
       cyclesSinceTcImproved++;
     }
@@ -823,6 +831,63 @@ async function runPhase11_StructurePrediction() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-11", event: "Generative structure error", detail: err.message?.slice(0, 150), dataSource: "Structure Generator" });
+      }
+    }
+
+    if (shouldContinue() && cycleCount % 10 === 0) {
+      try {
+        const novelVariants = await runNovelPrototypeGeneration(emit);
+
+        for (const variant of novelVariants) {
+          const existingSC = await storage.getSuperconductorByFormula(variant.formula);
+          if (!existingSC) {
+            const features = extractFeatures(variant.formula);
+            const gbResult = gbPredict(features);
+            const lambdaML = features.electronPhononLambda ?? 0;
+            const metallicityML = features.metallicity ?? 0.5;
+            let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+            rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
+
+            const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            try {
+              await storage.insertSuperconductorCandidate({
+                id,
+                name: variant.formula,
+                formula: variant.formula,
+                predictedTc: rawTc,
+                pressureGpa: null,
+                meissnerEffect: false,
+                zeroResistance: false,
+                cooperPairMechanism: `Novel prototype: ${variant.topology}`,
+                crystalStructure: `${variant.spaceGroup} (${variant.crystalSystem})`,
+                quantumCoherence: variant.structuralNovelty,
+                stabilityScore: features.cooperPairStrength,
+                synthesisPath: null,
+                mlFeatures: features as any,
+                xgboostScore: gbResult.score,
+                neuralNetScore: variant.structuralNovelty,
+                ensembleScore: Math.min(0.9, (gbResult.score + variant.structuralNovelty) / 2),
+                roomTempViable: false,
+                status: "theoretical",
+                notes: `[Novel prototype: ${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)}] ${variant.description}`,
+                electronPhononCoupling: features.electronPhononLambda ?? null,
+                logPhononFrequency: features.logPhononFreq ?? null,
+                coulombPseudopotential: 0.12,
+                pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                pairingMechanism: "phonon-mediated",
+                correlationStrength: features.correlationStrength ?? null,
+                dimensionality: variant.dimensionality,
+                fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+                uncertaintyEstimate: 0.7,
+                verificationStage: 0,
+                dataConfidence: "low",
+              });
+              totalScCandidates++;
+            } catch {}
+          }
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Novel prototype generation error", detail: err.message?.slice(0, 150), dataSource: "Novel Prototype Generator" });
       }
     }
 
@@ -1262,7 +1327,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 9;
+const PHYSICS_VERSION = 11;
 
 async function recalculatePhysics() {
   try {

@@ -85,7 +85,7 @@ app.use((req, res, next) => {
       const isStronglyCorrelated = corrStrength > 0.7;
       const electronic = computeElectronicStructure(c.formula, null);
       const phonon = computePhononSpectrum(c.formula, electronic);
-      const coupling = computeElectronPhononCoupling(electronic, phonon, c.formula);
+      const coupling = computeElectronPhononCoupling(electronic, phonon, c.formula, c.pressureGpa ?? 0);
 
       const omegaLogK = coupling.omegaLog * 1.44;
       const denom = coupling.lambda - coupling.muStar * (1 + 0.62 * coupling.lambda);
@@ -119,7 +119,7 @@ app.use((req, res, next) => {
       }
 
       const constraintMode = getConstraintMode();
-      const hardCap = constraintMode.allowBeyondEmpirical ? 600 : 350;
+      const hardCap = constraintMode.allowBeyondEmpirical ? 400 : 350;
       let mcMillanCap = hardCap;
       if (coupling.lambda > 0.2 && eliashbergTc > 0) {
         const multiplier = coupling.lambda > 2.5 ? 1.3 : coupling.lambda > 2.0 ? 1.5 : coupling.lambda > 1.5 ? 1.8 : 2.0;
@@ -186,7 +186,7 @@ app.use((req, res, next) => {
       const lambda = c.electronPhononCoupling ?? 0;
       const electronic2 = computeElectronicStructure(c.formula, null);
       const phonon2 = computePhononSpectrum(c.formula, electronic2);
-      const coupling2 = computeElectronPhononCoupling(electronic2, phonon2, c.formula);
+      const coupling2 = computeElectronPhononCoupling(electronic2, phonon2, c.formula, c.pressureGpa ?? 0);
       const omK = coupling2.omegaLog * 1.44;
       const dn = coupling2.lambda - coupling2.muStar * (1 + 0.62 * coupling2.lambda);
       let eliTc = 0;
@@ -199,7 +199,7 @@ app.use((req, res, next) => {
       if (corr2.ratio > 0.85) eliTc *= 0.05;
       else if (corr2.ratio > 0.7) eliTc *= 0.3;
       const mult = coupling2.lambda > 2.5 ? 1.2 : coupling2.lambda > 2.0 ? 1.3 : coupling2.lambda > 1.5 ? 1.5 : 1.8;
-      const bulkHardCap = getConstraintMode().allowBeyondEmpirical ? 600 : 350;
+      const bulkHardCap = getConstraintMode().allowBeyondEmpirical ? 400 : 350;
       const absMax = Math.min(bulkHardCap, Math.round(eliTc * mult));
       if (tc > absMax && absMax > 0) {
         const blendDown = 0.8;

@@ -324,11 +324,13 @@ async function generateNovelSuperconductors(
   const currentCeiling = stagnationInfo?.currentBestTc ?? 0;
   const isStagnating = stagnationCycles > 5;
   const stagnationContext = isStagnating
-    ? `\n\nCRITICAL CONTEXT: Our best Tc has been stuck at ${Math.round(currentCeiling)}K for ${stagnationCycles} cycles. We need candidates that can EXCEED this ceiling. Focus on:
-- Ultra-high electron-phonon coupling (lambda > 2.5) via light elements (H, B, C, N) in cage/clathrate structures
-- Multi-component hydrides with synergistic coupling (e.g., ternary/quaternary hydrides combining Ti, Sc, Y, La with H-rich sublattices)
-- Novel pairing mechanisms: combined phonon + spin-fluctuation, charge-density wave enhanced, or topological surface states
-- Predict Tc values ABOVE ${Math.round(currentCeiling)}K - push boundaries based on strong-coupling Eliashberg theory`
+    ? `\n\nCRITICAL CONTEXT: No pairing susceptibility improvement in ${stagnationCycles} cycles. Current best Tc: ${Math.round(currentCeiling)}K. Shift focus from Tc maximization to PAIRING CONDITIONS:
+- Maximize DOS at Fermi level (>3 states/eV/atom) via flat bands, van Hove singularities, or geometric frustration
+- Optimize Fermi surface nesting for strong electron-phonon or spin-fluctuation coupling channels
+- Target materials near quantum critical points (magnetic, structural, or charge instabilities)
+- Seek mixed stiff-soft bonding networks with high phonon spectral weight at moderate frequencies
+- Consider unconventional pairing: spin-fluctuation near AFM QCP, excitonic in mixed-dimensional systems
+Let Tc emerge from strong pairing conditions rather than targeting a specific Tc value.`
     : "";
 
   try {
@@ -372,7 +374,7 @@ Return JSON with 'candidates' array:
         },
         {
           role: "user",
-          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}${stagnationContext}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n- Prioritize candidates with very high electron-phonon coupling (lambda > 2.0) and light-element sublattices\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
+          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}${stagnationContext}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n- PRIORITIZE PAIRING SUSCEPTIBILITY over raw Tc: focus on high DOS(Ef), strong nesting, favorable phonon spectral weight, and proximity to quantum critical points\n- Materials with strong pairing indicators at moderate coupling are more physically credible than extreme-lambda claims\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
         },
       ],
       response_format: { type: "json_object" },

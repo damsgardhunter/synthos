@@ -111,7 +111,7 @@ export async function generateNovelFormulas(
       messages: [
         {
           role: "system",
-          content: `You are a materials science AI that generates novel chemical compositions. Based on the provided patterns and target application, propose 2-3 novel materials that could exhibit desired properties. Each material should be chemically plausible (valid stoichiometry, realistic oxidation states). Return JSON with key 'materials' containing an array of objects, each with: 'name' (descriptive), 'formula' (chemical formula), 'predictedProperties' (object with 'bandGap' number or null, 'formationEnergy' number or null, 'stability' number 0-1, 'description' string under 100 chars), 'confidence' (0-1 float), 'notes' (brief rationale under 150 chars).`,
+          content: `You are a materials science AI that generates novel chemical compositions optimized for strong pairing susceptibility. Rather than directly targeting high Tc, focus on compositions with: high density of states at the Fermi level, strong electron-phonon or electron-boson coupling channels, favorable Fermi surface nesting, proximity to quantum critical points, and mixed stiff-soft bonding networks. Each material should be chemically plausible (valid stoichiometry, realistic oxidation states). Return JSON with key 'materials' containing an array of objects, each with: 'name' (descriptive), 'formula' (chemical formula), 'predictedProperties' (object with 'bandGap' number or null, 'formationEnergy' number or null, 'stability' number 0-1, 'description' string under 100 chars), 'confidence' (0-1 float), 'notes' (brief rationale under 150 chars focusing on pairing mechanism).`,
         },
         {
           role: "user",
