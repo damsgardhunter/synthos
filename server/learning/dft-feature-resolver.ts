@@ -12,6 +12,7 @@ import {
 } from "./elemental-data";
 import { runXTBEnrichment, isDFTAvailable } from "../dft/qe-dft-engine";
 import type { XTBEnrichedFeatures, PhononStability } from "../dft/qe-dft-engine";
+import type { FiniteDisplacementPhononResult } from "../dft/phonon-calculator";
 import { estimatePhononStability } from "./crystal-prototypes";
 
 export type DFTSource = "dft-mp" | "dft-aflow" | "dft-xtb" | "analytical";
@@ -32,6 +33,7 @@ export interface DFTResolvedFeatures {
   phononFreqMax: DFTResolvedFeature<number | null>;
   thermalConductivity: DFTResolvedFeature<number | null>;
   phononStability: PhononStability | null;
+  finiteDisplacementPhonons: FiniteDisplacementPhononResult | null;
   dftCoverage: number;
   sources: { mp: boolean; aflow: boolean };
 }
@@ -393,9 +395,17 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const mpEhull = raw.mpSummary?.energyAboveHull ?? raw.mpThermo?.energyAboveHull ?? null;
   const energyAboveHull = resolve<number | null>(mpEhull, null, null);
 
+  const fdPhonons = xtbData?.finiteDisplacementPhonons ?? null;
+  const fdPhononMax = fdPhonons ? fdPhonons.highestFrequency : null;
+
   const mpPhononMax = raw.mpPhonon?.hasPhononData && raw.mpPhonon.lastPhononFreq
     ? raw.mpPhonon.lastPhononFreq : null;
-  const phononFreqMax = resolve<number | null>(mpPhononMax, null, analytical.phononFreqMax);
+  const phononFreqMax = resolve<number | null>(
+    mpPhononMax,
+    null,
+    fdPhononMax != null ? fdPhononMax : analytical.phononFreqMax,
+    fdPhononMax != null ? "dft-xtb" : "analytical",
+  );
 
   const thermalConductivity = resolve<number | null>(
     null,
@@ -437,6 +447,10 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
     }
   }
 
+  if (fdPhonons) {
+    console.log(`[DFT] ${formula}: Finite displacement phonons: stable=${fdPhonons.dynamicallyStable}, freq=[${fdPhonons.lowestFrequency.toFixed(1)}, ${fdPhonons.highestFrequency.toFixed(1)}] cm⁻¹${fdPhonons.omegaLog ? `, ω_log=${fdPhonons.omegaLog.toFixed(1)} cm⁻¹` : ""}`);
+  }
+
   return {
     bandGap,
     isMetallic,
@@ -448,6 +462,7 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
     phononFreqMax,
     thermalConductivity,
     phononStability: xtbPhononStability,
+    finiteDisplacementPhonons: fdPhonons,
     dftCoverage,
     sources: {
       mp: raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null,

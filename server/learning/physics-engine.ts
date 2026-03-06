@@ -3,6 +3,7 @@ import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { classifyFamily } from "./utils";
+import { computeFullTightBinding } from "./tight-binding";
 
 export interface PhysicsConstraintMode {
   allowBeyondEmpirical: boolean;
@@ -191,6 +192,18 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
+export interface TightBindingTopology {
+  hasFlatBand: boolean;
+  hasVHS: boolean;
+  hasDiracCrossing: boolean;
+  hasBandInversion: boolean;
+  topologyScore: number;
+  flatBandCount: number;
+  vhsCount: number;
+  diracCrossingCount: number;
+  dosAtFermi: number;
+}
+
 export interface ElectronicStructure {
   bandStructureType: string;
   fermiSurfaceTopology: string;
@@ -206,6 +219,7 @@ export interface ElectronicStructure {
   orbitalFractions: { s: number; p: number; d: number; f: number };
   topologicalBandScore: number;
   mottProximityScore: number;
+  tightBindingTopology?: TightBindingTopology;
 }
 
 export interface PhononSpectrum {
@@ -968,6 +982,49 @@ export function computeElectronicStructure(
 
   const dimensionalityScore = computeDimensionalityScore(formula, spacegroup);
 
+  let tightBindingTopology: TightBindingTopology | undefined;
+  try {
+    const tb = computeFullTightBinding(formula, spacegroup);
+    const topo = tb.topology;
+    tightBindingTopology = {
+      hasFlatBand: topo.hasFlatBand,
+      hasVHS: topo.hasVHS,
+      hasDiracCrossing: topo.hasDiracCrossing,
+      hasBandInversion: topo.hasBandInversion,
+      topologyScore: topo.topologyScore,
+      flatBandCount: topo.flatBands.length,
+      vhsCount: topo.vanHoveSingularities.length,
+      diracCrossingCount: topo.diracCrossings.length,
+      dosAtFermi: tb.dos.dosAtFermi,
+    };
+
+    if (tb.dos.dosAtFermi > 0) {
+      const tbDosScale = tb.dos.dosAtFermi * 50;
+      if (tbDosScale > 0.5) {
+        densityOfStatesAtFermi = densityOfStatesAtFermi * 0.6 + tbDosScale * 0.4;
+      }
+    }
+
+    if (topo.hasFlatBand) {
+      flatBandIndicator = Math.max(flatBandIndicator, 0.5 + topo.flatBands.length * 0.1);
+      flatBandIndicator = Math.min(1.0, flatBandIndicator);
+    }
+
+    const tbVhsNearFermi = topo.vanHoveSingularities.filter(
+      v => Math.abs(v.energy - tb.bands.fermiEnergy) < 0.5
+    );
+    if (tbVhsNearFermi.length > 0) {
+      vanHoveProximity = Math.max(vanHoveProximity, 0.4 + tbVhsNearFermi.length * 0.1);
+      vanHoveProximity = Math.min(1.0, vanHoveProximity);
+    }
+
+    if (topo.hasBandInversion || topo.hasDiracCrossing) {
+      topologicalBandScore = Math.max(topologicalBandScore, topo.topologyScore);
+      topologicalBandScore = Math.min(1.0, topologicalBandScore);
+    }
+  } catch {
+  }
+
   return {
     bandStructureType,
     fermiSurfaceTopology,
@@ -983,6 +1040,7 @@ export function computeElectronicStructure(
     orbitalFractions,
     topologicalBandScore: Number(topologicalBandScore.toFixed(3)),
     mottProximityScore: Number(mottProximityScore.toFixed(3)),
+    tightBindingTopology,
   };
 }
 

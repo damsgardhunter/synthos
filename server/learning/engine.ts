@@ -929,7 +929,7 @@ async function runPhase10_Physics() {
 
         const metallicHighTc = allCandidates.filter(c => {
           const tc = c.predictedTc ?? 0;
-          const met = c.metallicity ?? 0;
+          const met = ((c.mlFeatures as Record<string, any>)?.metallicity) ?? 0;
           const existingPressure = ((c.mlFeatures as Record<string, any>)?.pressureTcCurve?.optimalPressure) ?? null;
           return tc >= 20 && met > 0.4 && existingPressure === null && !hydrideCandidates.some(h => h.id === c.id);
         });
@@ -1385,25 +1385,37 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: gbResult.tcPredicted, reason: "low-gb-tc" };
     }
 
+    let gnnResult: ReturnType<typeof gnnPredictWithUncertainty> | null = null;
+    try {
+      gnnResult = gnnPredictWithUncertainty(formula);
+    } catch {}
+
+    let primaryTc = gbResult.tcPredicted;
+    let ensembleConfidence = 0.3;
+    if (gnnResult && gnnResult.confidence > 0.3) {
+      primaryTc = gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4;
+      ensembleConfidence = gnnResult.confidence * 0.6 + gbResult.score * 0.3 + 0.1;
+    }
+
     const physicsPred = physicsPredictor.predict(features);
     const preFilter = physicsPredictor.preFilter(physicsPred);
     if (!preFilter.pass) {
-      return { passed: false, tc: gbResult.tcPredicted, reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
+      return { passed: false, tc: Math.round(primaryTc), reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
     }
 
     const candidate = {
       formula,
       family,
-      predictedTc: Math.round(gbResult.tcPredicted),
+      predictedTc: Math.round(primaryTc),
       confidence: "low" as const,
       source: "autonomous-loop",
-      ensembleScore: 0.3,
+      ensembleScore: Math.min(0.95, ensembleConfidence),
       pressureGpa: 0,
       verificationStage: 0,
     };
 
     const structureBatch = await runStructurePredictionBatch(emit, [candidate as any]);
-    const structureResult = structureBatch?.[0];
+    const structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
 
     try {
       await runConvexHullAnalysis(emit, formula);
@@ -1484,13 +1496,19 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       londonPenetrationDepth: physicsResult.criticalFields.londonPenetrationDepth,
       pairingMechanism: physicsResult.pairingAnalysis.dominant.mechanism,
       cooperPairMechanism: physicsResult.pairingAnalysis.dominant.description,
-      ensembleScore: Math.min(0.95, 0.3 + (finalTc / 400) + (synthesizabilityScore * 0.2)),
+      ensembleScore: Math.min(0.95, (() => {
+        const gnnScore = gnnResult ? (Math.min(1, gnnResult.tc > 100 ? 0.8 : gnnResult.tc > 20 ? 0.5 : 0.2) * gnnResult.confidence) : 0;
+        const gbScore = gbResult.score;
+        const noveltyBonus = synthesizabilityScore * 0.1;
+        return gnnScore > 0 ? (gnnScore * 0.6 + gbScore * 0.3 + noveltyBonus) : (0.3 + (finalTc / 400) + (synthesizabilityScore * 0.2));
+      })()),
       verificationStage,
-      notes: `${pairingNote} ${instNote} ${tierNote} [autonomous-loop]`,
+      notes: `${pairingNote} ${instNote} ${tierNote} [autonomous-loop]${gnnResult ? ` [GNN: Tc=${gnnResult.tc}K, λ=${gnnResult.lambda}, conf=${(gnnResult.confidence * 100).toFixed(0)}%]` : ''}`,
       mlFeatures: {
         phononDOS: { totalStates: physicsResult.phononDOS.totalStates, binCount: physicsResult.phononDOS.frequencies.length },
         alpha2F: { integratedLambda: physicsResult.alpha2F.integratedLambda, binCount: physicsResult.alpha2F.frequencies.length },
         tier,
+        ...(gnnResult ? { gnnTc: gnnResult.tc, gnnLambda: gnnResult.lambda, gnnUncertainty: gnnResult.uncertainty, gnnConfidence: gnnResult.confidence } : {}),
       } as any,
     };
 
@@ -2055,7 +2073,7 @@ async function runLearningCycle() {
                     const inserted = await insertCandidateWithStabilityCheck({
                       formula: normalizeFormula(sf),
                       predictedTc: Math.round(gb.tcPredicted),
-                      confidence: "low",
+                      dataConfidence: "low",
                       source: "phase-explorer",
                       family: classifyFamily(sf),
                       ensembleScore: Math.min(0.9, gb.score),
@@ -2167,7 +2185,12 @@ async function runLearningCycle() {
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
             const isHydride = pc.prototype === "Clathrate" || pc.prototype === "Sodalite";
-            let predictedTc = Math.round(gbResult.tcPredicted);
+            let predictedTc: number;
+            if (gnnResult.confidence > 0.3 && gnnResult.tc > 0) {
+              predictedTc = Math.round(gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4);
+            } else {
+              predictedTc = Math.round(gbResult.tcPredicted);
+            }
             predictedTc = applyAmbientTcCap(predictedTc, lambdaML, isHydride ? 150 : 0, metallicityML, normalized);
 
             try {
@@ -2199,7 +2222,7 @@ async function runLearningCycle() {
                 },
                 xgboostScore: gbResult.score,
                 neuralNetScore: gnnResult.confidence,
-                ensembleScore: Math.min(0.9, (gbResult.score + gnnResult.confidence) / 2),
+                ensembleScore: Math.min(0.9, gnnResult.confidence * 0.6 + gbResult.score * 0.3 + (discoveryScore > 0.5 ? 0.1 : 0.05)),
                 roomTempViable: false,
                 status: "theoretical",
                 notes: `[${pc.prototype} prototype: ${pc.spaceGroup}, ${pc.crystalSystem}, ${pc.dimensionality}, sites: ${siteStr}] [Discovery: ${discoveryScore.toFixed(3)}]`,

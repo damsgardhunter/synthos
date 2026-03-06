@@ -495,7 +495,13 @@ export async function runMLPrediction(
     scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal, gnn: gnnResult });
   }
 
-  scored.sort((a, b) => b.xgb.score - a.xgb.score);
+  scored.sort((a, b) => {
+    const aGnnScore = a.gnn ? (Math.min(1, a.gnn.predictedTc > 100 ? 0.8 : a.gnn.predictedTc > 20 ? 0.5 : 0.2) * a.gnn.confidence) : 0;
+    const bGnnScore = b.gnn ? (Math.min(1, b.gnn.predictedTc > 100 ? 0.8 : b.gnn.predictedTc > 20 ? 0.5 : 0.2) * b.gnn.confidence) : 0;
+    const aEnsemble = aGnnScore * 0.6 + a.xgb.score * 0.3 + (a.hasCrystal ? 0.1 : 0) + (a.hasPhysics ? 0.05 : 0);
+    const bEnsemble = bGnnScore * 0.6 + b.xgb.score * 0.3 + (b.hasCrystal ? 0.1 : 0) + (b.hasPhysics ? 0.05 : 0);
+    return bEnsemble - aEnsemble;
+  });
   const topCandidates = scored.slice(0, 5);
 
   if (topCandidates.length === 0) return { candidates, insights };
@@ -627,13 +633,11 @@ Return JSON with:
 
       const gnnPred = xgb.gnn;
       const hasStructureData = xgb.hasCrystal;
+      const structuralNoveltyBonus = hasStructureData ? 0.1 : 0;
       let ensembleScore: number;
-      if (gnnPred && hasStructureData) {
+      if (gnnPred) {
         const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
-        ensembleScore = Math.min(0.95, xgb.xgb.score * 0.25 + (nn.neuralNetScore ?? 0.5) * 0.35 + gnnScore * 0.40);
-      } else if (gnnPred) {
-        const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
-        ensembleScore = Math.min(0.95, xgb.xgb.score * 0.30 + (nn.neuralNetScore ?? 0.5) * 0.50 + gnnScore * 0.20);
+        ensembleScore = Math.min(0.95, gnnScore * 0.6 + xgb.xgb.score * 0.3 + structuralNoveltyBonus);
       } else {
         ensembleScore = Math.min(0.95, xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
       }

@@ -21,9 +21,19 @@ export interface EdgeFeature {
   features: number[];
 }
 
+export interface ThreeBodyFeature {
+  center: number;
+  neighbor1: number;
+  neighbor2: number;
+  angle: number;
+  distance1: number;
+  distance2: number;
+}
+
 export interface CrystalGraph {
   nodes: NodeFeature[];
   edges: EdgeFeature[];
+  threeBodyFeatures: ThreeBodyFeature[];
   adjacency: number[][];
   formula: string;
   prototype?: string;
@@ -42,6 +52,8 @@ interface GNNWeights {
   W_attn_key2: number[][];
   W_attn_query3: number[][];
   W_attn_key3: number[][];
+  W_3body: number[][];
+  W_3body_update: number[][];
   W_mlp1: number[][];
   b_mlp1: number[];
   W_mlp2: number[][];
@@ -67,9 +79,9 @@ export interface GNNPredictionWithUncertainty {
   confidence: number;
 }
 
-const NODE_DIM = 13;
+const NODE_DIM = 16;
 const HIDDEN_DIM = 24;
-const EDGE_DIM = 4;
+const EDGE_DIM = 7;
 const OUTPUT_DIM = 5;
 
 let cachedGNNModel: GNNWeights | null = null;
@@ -394,12 +406,18 @@ export function buildPrototypeGraph(formula: string, prototype: string): Crystal
 
             const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
             const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
+            const massRatio = Math.min(nodes[i].mass, nodes[j].mass) / Math.max(nodes[i].mass, nodes[j].mass, 1);
+            const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
+            const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
             const edgeFeats = [
               Math.min(distance / 6.0, 1.0),
               bondOrder / 2.0,
               enDiff / 3.0,
               (nodes[i].valenceElectrons + nodes[j].valenceElectrons) / 16.0,
+              massRatio,
+              radiusSum,
+              ionicCharacter,
             ];
 
             edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -415,7 +433,7 @@ export function buildPrototypeGraph(formula: string, prototype: string): Crystal
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
       const j = (i + 1) % nodes.length;
-      const edgeFeats = [0.5, 0.5, 0.3, 0.3];
+      const edgeFeats = [0.5, 0.5, 0.3, 0.3, 0.5, 0.5, 0.3];
       edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       adjacency[i].push(j);
@@ -423,7 +441,110 @@ export function buildPrototypeGraph(formula: string, prototype: string): Crystal
     }
   }
 
-  return { nodes, edges, adjacency, formula, prototype };
+  const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, formula, prototype });
+  return { nodes, edges, threeBodyFeatures, adjacency, formula, prototype };
+}
+
+function computeStressDescriptor(atomicNumber: number, bulkModulus: number, mass: number): number {
+  if (bulkModulus <= 0 || mass <= 0) return 0.3;
+  return Math.min(1.0, Math.sqrt(bulkModulus / mass) / 10.0);
+}
+
+function computeForceDescriptor(electronegativity: number, atomicRadius: number): number {
+  return Math.min(1.0, (electronegativity * 100) / Math.max(atomicRadius, 50));
+}
+
+function computeSpinOrbitCoupling(atomicNumber: number): number {
+  if (atomicNumber < 20) return 0;
+  if (atomicNumber < 40) return 0.1;
+  if (atomicNumber < 57) return 0.3;
+  if (atomicNumber < 72) return 0.5;
+  return 0.7 + (atomicNumber - 72) * 0.003;
+}
+
+function compute3BodyFeatures(graph: CrystalGraph): ThreeBodyFeature[] {
+  const features: ThreeBodyFeature[] = [];
+  const edgeMap = new Map<string, number>();
+
+  for (const edge of graph.edges) {
+    edgeMap.set(`${edge.source}-${edge.target}`, edge.distance);
+  }
+
+  for (let center = 0; center < graph.nodes.length; center++) {
+    const neighbors = graph.adjacency[center];
+    if (neighbors.length < 2) continue;
+
+    for (let a = 0; a < neighbors.length; a++) {
+      for (let b = a + 1; b < neighbors.length; b++) {
+        const n1 = neighbors[a];
+        const n2 = neighbors[b];
+        const d1 = edgeMap.get(`${center}-${n1}`) ?? edgeMap.get(`${n1}-${center}`) ?? 2.5;
+        const d2 = edgeMap.get(`${center}-${n2}`) ?? edgeMap.get(`${n2}-${center}`) ?? 2.5;
+        const d12 = edgeMap.get(`${n1}-${n2}`) ?? edgeMap.get(`${n2}-${n1}`) ?? Math.sqrt(d1 * d1 + d2 * d2);
+
+        let cosAngle = (d1 * d1 + d2 * d2 - d12 * d12) / (2 * d1 * d2);
+        cosAngle = Math.max(-1, Math.min(1, cosAngle));
+        const angle = Math.acos(cosAngle);
+
+        features.push({ center, neighbor1: n1, neighbor2: n2, angle, distance1: d1, distance2: d2 });
+      }
+    }
+  }
+  return features;
+}
+
+function threeBodyInteractionLayer(
+  graph: CrystalGraph,
+  W_3body: number[][],
+  W_3body_update: number[][],
+): number[][] {
+  const nNodes = graph.nodes.length;
+  const embeddings = graph.nodes.map(n => {
+    const e = [...n.embedding];
+    while (e.length < HIDDEN_DIM) e.push(0);
+    return e.slice(0, HIDDEN_DIM);
+  });
+
+  const threeBodyAgg: number[][] = embeddings.map(() => initVector(HIDDEN_DIM));
+
+  for (const tb of graph.threeBodyFeatures) {
+    const angleFeature = tb.angle / Math.PI;
+    const distFeature = Math.min(1.0, (tb.distance1 + tb.distance2) / 12.0);
+    const asymmetry = Math.abs(tb.distance1 - tb.distance2) / Math.max(tb.distance1, tb.distance2, 0.01);
+
+    const n1Embed = embeddings[tb.neighbor1] ?? initVector(HIDDEN_DIM);
+    const n2Embed = embeddings[tb.neighbor2] ?? initVector(HIDDEN_DIM);
+
+    const pairMsg = n1Embed.map((v, i) => (v + (n2Embed[i] ?? 0)) * 0.5 * angleFeature);
+    const transformed = matVecMul(W_3body, pairMsg);
+
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      threeBodyAgg[tb.center][k] += (transformed[k] ?? 0) * (1.0 - asymmetry * 0.5) * distFeature;
+    }
+  }
+
+  const newEmbeddings: number[][] = [];
+  for (let i = 0; i < nNodes; i++) {
+    const neighborCount = graph.threeBodyFeatures.filter(tb => tb.center === i).length;
+    if (neighborCount > 0) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        threeBodyAgg[i][k] /= Math.max(neighborCount, 1);
+      }
+    }
+
+    const combined = embeddings[i].map((v, k) => v + (threeBodyAgg[i][k] ?? 0));
+    const updated = relu(matVecMul(W_3body_update, combined));
+    newEmbeddings.push(updated);
+  }
+
+  for (let i = 0; i < nNodes; i++) {
+    graph.nodes[i].embedding = newEmbeddings[i].slice(0, NODE_DIM);
+    while (graph.nodes[i].embedding.length < NODE_DIM) {
+      graph.nodes[i].embedding.push(0);
+    }
+  }
+
+  return newEmbeddings;
 }
 
 function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementData>, atomicNumber: number): number[] {
@@ -436,6 +557,7 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
   const mendeleev = getMendeleevNumber(atomicNumber);
   const dOcc = getDOrbitalOccupancy(atomicNumber);
   const fOcc = getFOrbitalOccupancy(atomicNumber);
+  const bulkMod = data?.bulkModulus ?? 50;
 
   return [
     atomicNumber / 100,
@@ -444,13 +566,16 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
     valence / 8,
     mass / 250,
     (data?.debyeTemperature ?? 300) / 2000,
-    (data?.bulkModulus ?? 50) / 500,
+    bulkMod / 500,
     (data?.firstIonizationEnergy ?? 7) / 25,
     mendeleev / 103,
     Math.max(0, electronAff) / 4.0,
     covalentR / 250,
     dOcc,
     fOcc,
+    computeStressDescriptor(atomicNumber, bulkMod, mass),
+    computeForceDescriptor(en, radius),
+    computeSpinOrbitCoupling(atomicNumber),
   ];
 }
 
@@ -513,11 +638,18 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
         const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
         const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
 
+        const massRatio = Math.min(nodes[i].mass, nodes[j].mass) / Math.max(nodes[i].mass, nodes[j].mass, 1);
+        const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
+        const ionicCharacter = Math.min(1.0, enDiff / 2.5);
+
         const edgeFeats = [
           Math.min(distance / cutoff, 1.0),
           bondOrder / 2.0,
           enDiff / 3.0,
           (nodes[i].valenceElectrons + nodes[j].valenceElectrons) / 16.0,
+          massRatio,
+          radiusSum,
+          ionicCharacter,
         ];
 
         edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -532,7 +664,7 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
       const j = (i + 1) % nodes.length;
-      const edgeFeats = [0.5, 0.5, 0.3, 0.3];
+      const edgeFeats = [0.5, 0.5, 0.3, 0.3, 0.5, 0.5, 0.3];
       edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       adjacency[i].push(j);
@@ -540,7 +672,9 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
     }
   }
 
-  return { nodes, edges, adjacency, formula };
+  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, formula };
+  partialGraph.threeBodyFeatures = compute3BodyFeatures(partialGraph);
+  return partialGraph;
 }
 
 export function attentionMessagePassingLayer(
@@ -652,6 +786,9 @@ export function messagePassingLayer(
 
 export function GNNPredict(graph: CrystalGraph, weights: GNNWeights): GNNPrediction {
   attentionMessagePassingLayer(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key);
+  if (graph.threeBodyFeatures.length > 0) {
+    threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
+  }
   attentionMessagePassingLayer(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2);
   attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
 
@@ -700,6 +837,8 @@ function initWeights(rng: () => number): GNNWeights {
     W_attn_key2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_query3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_mlp1: initMatrix(HIDDEN_DIM, NODE_DIM * 2, rng, 0.1),
     b_mlp1: initVector(HIDDEN_DIM),
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.1),
@@ -723,6 +862,8 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_attn_key2: w.W_attn_key2.map(r => [...r]),
     W_attn_query3: w.W_attn_query3.map(r => [...r]),
     W_attn_key3: w.W_attn_key3.map(r => [...r]),
+    W_3body: w.W_3body.map(r => [...r]),
+    W_3body_update: w.W_3body_update.map(r => [...r]),
     W_mlp1: w.W_mlp1.map(r => [...r]),
     b_mlp1: [...w.b_mlp1],
     W_mlp2: w.W_mlp2.map(r => [...r]),
@@ -793,6 +934,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[]): GNNWeights {
         weights.W_attn_query, weights.W_attn_key,
         weights.W_attn_query2, weights.W_attn_key2,
         weights.W_attn_query3, weights.W_attn_key3,
+        weights.W_3body, weights.W_3body_update,
         weights.W_mlp1,
       ]) {
         for (let i = 0; i < wMat.length; i++) {
@@ -866,6 +1008,8 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
   perturbMatrix(perturbed.W_attn_key2);
   perturbMatrix(perturbed.W_attn_query3);
   perturbMatrix(perturbed.W_attn_key3);
+  perturbMatrix(perturbed.W_3body);
+  perturbMatrix(perturbed.W_3body_update);
   perturbMatrix(perturbed.W_mlp1);
   perturbMatrix(perturbed.W_mlp2);
 

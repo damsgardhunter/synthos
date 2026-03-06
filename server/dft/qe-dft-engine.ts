@@ -3,6 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { getElementData } from "../learning/elemental-data";
 import { fillPrototype } from "../learning/crystal-prototypes";
+import { computeFiniteDisplacementPhonons } from "./phonon-calculator";
+import type { FiniteDisplacementPhononResult } from "./phonon-calculator";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -10,6 +12,16 @@ const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 const WORK_DIR = "/tmp/dft_calculations";
 const TIMEOUT_MS = 60_000;
+
+export interface OptimizationResult {
+  optimizedAtoms: AtomPosition[];
+  optimizedEnergy: number;
+  converged: boolean;
+  energyChange: number;
+  gradientNorm: number;
+  iterations: number;
+  wallTimeSeconds: number;
+}
 
 export interface DFTResult {
   formula: string;
@@ -28,6 +40,7 @@ export interface DFTResult {
   wallTimeSeconds: number;
   atomCount: number;
   error: string | null;
+  optimized: boolean;
 }
 
 export interface PhononStability {
@@ -49,6 +62,7 @@ export interface XTBEnrichedFeatures {
   prototype: string;
   method: string;
   phononStability: PhononStability | null;
+  finiteDisplacementPhonons: FiniteDisplacementPhononResult | null;
 }
 
 interface AtomPosition {
@@ -695,7 +709,160 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
 }
 
 const xtbResultCache = new Map<string, DFTResult>();
+const optimizedStructureCache = new Map<string, OptimizationResult>();
 const CACHE_MAX = 500;
+const OPT_TIMEOUT_MS = 30_000;
+
+function parseOptimizedXYZ(filepath: string): AtomPosition[] {
+  if (!fs.existsSync(filepath)) return [];
+  const content = fs.readFileSync(filepath, "utf-8").trim();
+  const lines = content.split("\n");
+  if (lines.length < 3) return [];
+
+  const atomCount = parseInt(lines[0].trim(), 10);
+  if (isNaN(atomCount) || atomCount < 1) return [];
+
+  const atoms: AtomPosition[] = [];
+  for (let i = 2; i < Math.min(lines.length, atomCount + 2); i++) {
+    const parts = lines[i].trim().split(/\s+/);
+    if (parts.length >= 4) {
+      const element = parts[0];
+      const x = parseFloat(parts[1]);
+      const y = parseFloat(parts[2]);
+      const z = parseFloat(parts[3]);
+      if (element.match(/^[A-Z][a-z]?$/) && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
+        atoms.push({ element, x, y, z });
+      }
+    }
+  }
+  return atoms;
+}
+
+function parseOptimizationOutput(output: string): { energyChange: number; gradientNorm: number; iterations: number; converged: boolean } {
+  let energyChange = 0;
+  let gradientNorm = 0;
+  let iterations = 0;
+  let converged = false;
+
+  const iterMatch = output.match(/(\d+)\s+ANC optimizer/g);
+  if (iterMatch) {
+    iterations = iterMatch.length;
+  }
+  const cycleMatch = output.match(/\.\.\.\. convergence criteria satisfied after\s+(\d+)\s+iterations/);
+  if (cycleMatch) {
+    iterations = parseInt(cycleMatch[1], 10);
+    converged = true;
+  }
+
+  if (output.includes("GEOMETRY OPTIMIZATION CONVERGED")) {
+    converged = true;
+  }
+
+  const deMatch = output.match(/Econv\s*=.*?([-\d.eE+]+)\s/);
+  if (deMatch) {
+    energyChange = Math.abs(parseFloat(deMatch[1]));
+  }
+  const lastEnergyChanges = output.match(/ΔE\s+([-\d.eE+]+)/g);
+  if (lastEnergyChanges && lastEnergyChanges.length > 0) {
+    const lastDE = lastEnergyChanges[lastEnergyChanges.length - 1].match(/([-\d.eE+]+)/);
+    if (lastDE) energyChange = Math.abs(parseFloat(lastDE[1]));
+  }
+
+  const gradMatch = output.match(/(?:gradient norm|grad\. norm:)\s+([-\d.eE+]+)/gi);
+  if (gradMatch && gradMatch.length > 0) {
+    const lastGrad = gradMatch[gradMatch.length - 1].match(/([-\d.eE+]+)/);
+    if (lastGrad) gradientNorm = Math.abs(parseFloat(lastGrad[1]));
+  }
+
+  if (output.includes("normal termination of xtb") && !output.includes("FAILED")) {
+    converged = true;
+  }
+
+  return { energyChange, gradientNorm, iterations, converged };
+}
+
+export async function runXTBOptimization(formula: string): Promise<OptimizationResult | null> {
+  if (!isDFTAvailable()) return null;
+
+  const cacheKey = formula.replace(/\s+/g, "");
+  if (optimizedStructureCache.has(cacheKey)) {
+    return optimizedStructureCache.get(cacheKey)!;
+  }
+
+  const startTime = Date.now();
+  const calcId = `opt_${cacheKey.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
+  const calcDir = path.join(WORK_DIR, calcId);
+  fs.mkdirSync(calcDir, { recursive: true });
+
+  const { atoms, prototype } = generateCrystalStructure(formula);
+  if (atoms.length < 2) return null;
+
+  const xyzPath = path.join(calcDir, "input.xyz");
+  writeXYZ(atoms, xyzPath, `${formula} [${prototype}] optimization`);
+
+  try {
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "512M",
+    };
+
+    const output = execSync(
+      `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`,
+      { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
+    ).toString();
+
+    const optInfo = parseOptimizationOutput(output);
+
+    const optXyzPath = path.join(calcDir, "xtbopt.xyz");
+    let optimizedAtoms = parseOptimizedXYZ(optXyzPath);
+
+    if (optimizedAtoms.length === 0) {
+      const altPath = path.join(calcDir, "xtbopt.coord");
+      if (fs.existsSync(altPath)) {
+        optimizedAtoms = parseOptimizedXYZ(altPath);
+      }
+    }
+
+    if (optimizedAtoms.length === 0) {
+      optimizedAtoms = atoms;
+    }
+
+    let optimizedEnergy = 0;
+    const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+    if (energyMatch) {
+      optimizedEnergy = parseFloat(energyMatch[1]);
+    }
+
+    const result: OptimizationResult = {
+      optimizedAtoms,
+      optimizedEnergy,
+      converged: optInfo.converged,
+      energyChange: optInfo.energyChange,
+      gradientNorm: optInfo.gradientNorm,
+      iterations: optInfo.iterations,
+      wallTimeSeconds: (Date.now() - startTime) / 1000,
+    };
+
+    if (result.converged && optimizedAtoms.length >= 2) {
+      optimizedStructureCache.set(cacheKey, result);
+      if (optimizedStructureCache.size > CACHE_MAX) {
+        const oldest = optimizedStructureCache.keys().next().value;
+        if (oldest) optimizedStructureCache.delete(oldest);
+      }
+    }
+
+    return result;
+  } catch (err: any) {
+    const isTimeout = err.killed || (err.message && err.message.includes("TIMEOUT"));
+    console.log(`[DFT] ${formula}: Geometry optimization ${isTimeout ? "timed out" : "failed"}: ${err.message?.slice(0, 100) || String(err)}`);
+    return null;
+  } finally {
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+  }
+}
 
 export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   const cacheKey = formula.replace(/\s+/g, "");
@@ -708,7 +875,17 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  const { atoms, prototype } = generateCrystalStructure(formula);
+  const { atoms: initialAtoms, prototype } = generateCrystalStructure(formula);
+
+  let atoms = initialAtoms;
+  let isOptimized = false;
+
+  const optResult = await runXTBOptimization(formula);
+  if (optResult && optResult.converged && optResult.optimizedAtoms.length >= 2) {
+    atoms = optResult.optimizedAtoms;
+    isOptimized = true;
+  }
+
   const xyzPath = path.join(calcDir, "input.xyz");
 
   const result: DFTResult = {
@@ -728,6 +905,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
     wallTimeSeconds: 0,
     atomCount: atoms.length,
     error: null,
+    optimized: isOptimized,
   };
 
   if (atoms.length < 2) {
@@ -735,7 +913,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
     return result;
   }
 
-  writeXYZ(atoms, xyzPath, `${formula} [${prototype}]`);
+  writeXYZ(atoms, xyzPath, `${formula} [${prototype}]${isOptimized ? " (optimized)" : ""}`);
 
   try {
     const env = {
@@ -753,6 +931,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
 
     const parsed = parseXtbOutput(output);
     Object.assign(result, parsed);
+    result.optimized = isOptimized;
 
     if (result.totalEnergy !== 0 && atoms.length > 0) {
       result.totalEnergyPerAtom = result.totalEnergy / atoms.length;
@@ -767,6 +946,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
       if (parsed.totalEnergy) {
         Object.assign(result, parsed);
         result.converged = false;
+        result.optimized = isOptimized;
         result.error = "Partial: " + result.error?.slice(0, 100);
       }
     }
@@ -852,6 +1032,15 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
   const actualAtomCount = dftResult.atomCount;
   if (actualAtomCount === 0) return null;
 
+  let compoundEnergy = dftResult.totalEnergy;
+  const optCacheKey = formula.replace(/\s+/g, "");
+  if (optimizedStructureCache.has(optCacheKey)) {
+    const optResult = optimizedStructureCache.get(optCacheKey)!;
+    if (optResult.converged && optResult.optimizedEnergy !== 0) {
+      compoundEnergy = Math.min(compoundEnergy, optResult.optimizedEnergy);
+    }
+  }
+
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
   const originalTotal = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
@@ -867,7 +1056,7 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
     elementalTotal += refE * scaledCount;
   }
 
-  const formationTotal = dftResult.totalEnergy - elementalTotal;
+  const formationTotal = compoundEnergy - elementalTotal;
   const HA_TO_EV = 27.2114;
   const efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
 
@@ -892,8 +1081,17 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
   try {
     fs.mkdirSync(calcDir, { recursive: true });
 
-    const { atoms, prototype } = generateCrystalStructure(formula);
-    if (atoms.length < 2) return null;
+    const { atoms: initialAtoms, prototype } = generateCrystalStructure(formula);
+    if (initialAtoms.length < 2) return null;
+
+    let atoms = initialAtoms;
+    const optCacheKey = formula.replace(/\s+/g, "");
+    if (optimizedStructureCache.has(optCacheKey)) {
+      const optResult = optimizedStructureCache.get(optCacheKey)!;
+      if (optResult.converged && optResult.optimizedAtoms.length >= 2) {
+        atoms = optResult.optimizedAtoms;
+      }
+    }
 
     writeXYZ(atoms, path.join(calcDir, "input.xyz"), `${formula} phonon check (${prototype})`);
 
@@ -990,6 +1188,22 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
   }
 }
 
+export async function runFiniteDisplacementPhonons(formula: string): Promise<FiniteDisplacementPhononResult | null> {
+  if (!isDFTAvailable()) return null;
+
+  const cacheKey = formula.replace(/\s+/g, "");
+  const optResult = optimizedStructureCache.get(cacheKey);
+  let atoms: { symbol: string; x: number; y: number; z: number }[];
+  if (optResult && optResult.converged && optResult.optimizedAtoms && optResult.optimizedAtoms.length >= 2) {
+    atoms = optResult.optimizedAtoms;
+  } else {
+    atoms = generateCrystalStructure(formula).atoms;
+  }
+  if (atoms.length < 2 || atoms.length > 8) return null;
+
+  return computeFiniteDisplacementPhonons(formula, atoms);
+}
+
 export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeatures | null> {
   if (!isDFTAvailable()) return null;
 
@@ -1005,7 +1219,22 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
   const formationE = await computeFormationEnergy(formula, dftResult);
 
   let phononResult: PhononStability | null = null;
-  if (dftResult.atomCount <= 12) {
+  let fdPhononResult: FiniteDisplacementPhononResult | null = null;
+
+  if (dftResult.atomCount <= 8) {
+    fdPhononResult = await runFiniteDisplacementPhonons(formula);
+    if (fdPhononResult) {
+      phononResult = {
+        hasImaginaryModes: fdPhononResult.hasImaginaryModes,
+        imaginaryModeCount: fdPhononResult.imaginaryModeCount,
+        lowestFrequency: fdPhononResult.lowestFrequency,
+        frequencies: fdPhononResult.gammaFrequencies.slice(0, 20),
+        zeroPointEnergy: null,
+      };
+    }
+  }
+
+  if (!phononResult && dftResult.atomCount <= 12) {
     phononResult = await runXTBPhononCheck(formula);
   }
 
@@ -1020,6 +1249,7 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
     prototype: dftResult.prototype,
     method: "GFN2-xTB",
     phononStability: phononResult,
+    finiteDisplacementPhonons: fdPhononResult,
   };
 }
 
@@ -1044,6 +1274,7 @@ export function getXTBStats() {
     runs: totalXTBRuns,
     successes: totalXTBSuccesses,
     cacheSize: xtbResultCache.size,
+    optimizedStructures: optimizedStructureCache.size,
     refElements: elementRefEnergies.size,
   };
 }

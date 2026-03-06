@@ -53,8 +53,11 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 ### Pressure Modeling Engine
 - Calculates volume compression, bulk modulus, pressure derivative, predicts hydrogen uptake, and determines high-pressure stability and pressure-Tc curves.
 
-### Graph Neural Network Surrogate (CGCNN-style)
-- Uses prototype-aware graph construction, enhanced node features, and attention-weighted message passing for multi-target predictions (formation energy, phonon stability, Tc, confidence, electron-phonon lambda) with uncertainty estimation.
+### Graph Neural Network Surrogate (CGCNN/MEGNet/M3GNet-style) — PRIMARY PREDICTOR
+- **Primary ML predictor** with 0.6 weight in ensemble scoring (GB reduced to 0.3 weight, 0.1 structural novelty).
+- Uses prototype-aware graph construction, enhanced 16-dimensional node features (including M3GNet-inspired stress/force/SOC descriptors), 7-dimensional edge features (with bond-angle encoding), and attention-weighted message passing with 3-body interaction layers for multi-target predictions (formation energy, phonon stability, Tc, confidence, electron-phonon lambda) with uncertainty estimation.
+- MEGNet-style multi-body interactions: 3-body angle features between bonded triplets with angular weighting.
+- GB retained as fast pre-filter (Tc < 5K rejection gate) but no longer drives ensemble scores.
 
 ### Massive Candidate Generator
 - Utilizes element substitution, composition interpolation, doped variants, and composition sweeps, with valence sanity filters and periodic table element validation.
@@ -99,7 +102,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **DFT Source Type**: `"dft-xtb"` — tracked as a distinct source in DFTResolvedFeatures alongside `"analytical"`, `"mp"`, `"oqmd"`, `"aflow"`, `"nist"`.
 - **Performance**: ~5 seconds per calculation for typical 3-20 atom structures. ~85% success rate.
 - **Structure generation**: 20 crystallographic prototypes (A15, AlB2, NaCl, Perovskite, ThCr2Si2, Heusler, BCC, FCC, Layered, Kagome, HexBoride, MX2, Anti-perovskite, CsCl, Cu2Mg-Laves, Fluorite, Cr3Si, Ni3Sn, Fe3C, Spinel) with real fractional coordinates and lattice parameters. Approximate prototype matching (ratio score < 0.5) for imperfect stoichiometries. Generic cluster fallback for fully unmatched cases. Structures capped at 20 atoms with proportional scaling.
-- **Phonon stability check**: xTB `--hess` Hessian calculation for structures ≤12 atoms. Detects imaginary vibrational modes. IMAG_THRESHOLD = -2000 cm⁻¹ (relaxed from -50 to accommodate xTB tolerance). Mild imaginary modes (-50 to -2000 cm⁻¹) accepted without penalty; severe modes (< -2000 cm⁻¹) penalized (0.08 per mode above 1, max 0.2). Results cached (100 entries).
+- **Geometry optimization**: Runs `xtb --gfn 2 --opt tight` before single-point calculations (30s timeout). Optimized geometry used for all subsequent energy and phonon calculations. Cached in `optimizedStructureCache`.
+- **Finite-displacement phonon calculator**: For structures ≤8 atoms, displaces each atom ±0.01 Å in x/y/z, runs xTB on each displaced structure, builds force constant matrix from finite differences (6N+1 calculations). Computes dynamical matrix D(q) at arbitrary q-points along high-symmetry paths. Produces phonon dispersion, phonon DOS, ω_log, and full Brillouin zone stability assessment. Uses optimized geometry when available.
+- **Phonon stability check**: For 9-12 atom structures, falls back to xTB `--hess` Hessian calculation. IMAG_THRESHOLD = -2000 cm⁻¹ (relaxed from -50 to accommodate xTB tolerance). Mild imaginary modes (-50 to -2000 cm⁻¹) accepted without penalty; severe modes (< -2000 cm⁻¹) penalized (0.08 per mode above 1, max 0.2). Results cached (100 entries).
 - **Formation energy**: Computed relative to molecular/dimer reference calculations using MOLECULAR_BOND_LENGTHS (H: 0.74 Å, N: 1.10, O: 1.21 Å) for accurate reference energies. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
 - **Cache**: In-memory LRU caches for DFT results (200 entries) and elemental reference energies.
 - **Stats API**: `getXTBStats()` exposes runs, successes, cacheSize, refElements via `/api/dft-status`.
@@ -140,6 +145,15 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - Targets Fe/Ni/Co/Cu in layered compounds for phonon + magnetic fluctuation superconductivity.
 - Generates FeAs-based, FeSe-based, NiO-based (infinite-layer nickelates), CuO-based (cuprates), and combinatorial TM-chalcogenide/pnictide.
 - Filter checks for magnetic TM presence, λ ≥ 0.3, magnetic fluctuation proximity, and layered character.
+
+### Tight-Binding Electronic Structure Model
+- **Slater-Koster tight-binding Hamiltonian**: Builds H(k) matrix from tabulated hopping parameters for s, p, d orbitals based on elemental properties.
+- **Band structure solver**: Solves H(k) along high-symmetry k-paths (Γ-X-M-Γ for cubic, Γ-K-M-Γ for hexagonal, Γ-H-P-Γ-N for BCC).
+- **Wannier projection**: Extracts orbital-resolved band character, effective hopping parameters, and Wannier spread/localization metrics.
+- **Band topology detection**: Identifies flat bands (bandwidth < 0.1 eV), van Hove singularities (∂²E/∂k² → 0), Dirac crossings (linear dispersion), and topological band inversions (parity eigenvalue check).
+- **TB DOS**: Histogram-based DOS from band eigenvalues with Gaussian broadening. Blended into physics-engine DOS estimate (60% heuristic + 40% TB-derived).
+- **Integration**: Called in `computeElectronicStructure()` to refine flatBandIndicator, vanHoveProximity, topologicalBandScore, and densityOfStatesAtFermi. Results cached (500 entries).
+- Files: `server/learning/tight-binding.ts`, `server/learning/physics-engine.ts`
 
 ### Flat-Band Detection
 - Computes DOS(EF)/avgDOS ratio as flat-band indicator.
