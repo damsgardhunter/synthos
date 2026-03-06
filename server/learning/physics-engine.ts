@@ -2204,6 +2204,30 @@ export async function runFullPhysicsAnalysis(
 
   const instabilityProximity = computeInstabilityProximity(formula, electronicStructure, phononSpectrum, competingPhases);
 
+  if (instabilityProximity.cdwInstability > 0.8 && coupling.lambda < 1.5) {
+    const cdwPenalty = Math.max(0.01, 1.0 - instabilityProximity.cdwInstability);
+    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty);
+    eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
+    emit("log", {
+      phase: "phase-10",
+      event: "CDW suppression applied",
+      detail: `${formula}: CDW=${instabilityProximity.cdwInstability.toFixed(2)} > 0.8, lambda=${coupling.lambda.toFixed(3)} < 1.5 — SC suppressed by charge ordering (Tc penalized by ${((1 - cdwPenalty) * 100).toFixed(0)}%)`,
+      dataSource: "Physics Engine",
+    });
+  }
+
+  if (instabilityProximity.sdwInstability > 0.8 && coupling.lambda < 1.5) {
+    const sdwPenalty = Math.max(0.01, 1.0 - instabilityProximity.sdwInstability);
+    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * sdwPenalty);
+    eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
+    emit("log", {
+      phase: "phase-10",
+      event: "SDW suppression applied",
+      detail: `${formula}: SDW=${instabilityProximity.sdwInstability.toFixed(2)} > 0.8, lambda=${coupling.lambda.toFixed(3)} < 1.5 — SC suppressed by spin ordering (Tc penalized by ${((1 - sdwPenalty) * 100).toFixed(0)}%)`,
+      dataSource: "Physics Engine",
+    });
+  }
+
   emit("log", {
     phase: "phase-10",
     event: "Instability proximity computed",

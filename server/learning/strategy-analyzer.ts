@@ -145,6 +145,9 @@ Respond in JSON:
 
     const parsed = JSON.parse(content) as { focusAreas: FocusArea[]; summary: string };
 
+    const prevMap = new Map(previousFocusAreas.map(f => [f.area, f.priority]));
+    const MOMENTUM = 0.7;
+
     const focusAreas = (parsed.focusAreas || [])
       .slice(0, 5)
       .map(fa => {
@@ -154,9 +157,13 @@ Respond in JSON:
         if (familySampleCount < 3) {
           priority = Math.min(priority, 0.5);
         }
+        const prevPriority = prevMap.get(area);
+        if (prevPriority !== undefined) {
+          priority = MOMENTUM * prevPriority + (1 - MOMENTUM) * priority;
+        }
         return {
           area,
-          priority,
+          priority: Math.round(priority * 1000) / 1000,
           reasoning: String(fa.reasoning || ""),
         };
       })

@@ -3,7 +3,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
-import { classifyFamily } from "./utils";
+import { classifyFamily, getPrototypeHash } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
@@ -144,6 +144,15 @@ export async function runSuperconductorResearch(
   newInsights.push(...mlResult.insights);
 
   let duplicatesSkipped = 0;
+  const existingCandidates = await storage.getSuperconductorCandidates(200);
+  const existingPrototypeMap = new Map<string, string>();
+  for (const ec of existingCandidates) {
+    const proto = getPrototypeHash(ec.formula);
+    if (!existingPrototypeMap.has(proto)) {
+      existingPrototypeMap.set(proto, ec.formula);
+    }
+  }
+
   for (const candidate of mlResult.candidates) {
     const formula = candidate.formula || "Unknown";
     const newScore = candidate.ensembleScore ?? 0;
@@ -152,6 +161,30 @@ export async function runSuperconductorResearch(
     const lambdaML = candidate.electronPhononCoupling ?? mlFeatures.electronPhononLambda ?? 0;
     const pressureML = candidate.pressureGpa ?? 0;
     const metallicityML = mlFeatures.metallicity ?? 0.5;
+
+    if (mlFeatures.bandGap !== null && mlFeatures.bandGap > 0.5) {
+      emit("log", { phase: "phase-7", event: "SC candidate rejected (insulator)", detail: `${formula}: bandGap=${mlFeatures.bandGap.toFixed(2)} eV > 0.5 eV — superconductors must be metallic`, dataSource: "SC Research" });
+      duplicatesSkipped++;
+      continue;
+    }
+
+    if (mlFeatures.metallicity < 0.2) {
+      emit("log", { phase: "phase-7", event: "SC candidate rejected (non-metallic)", detail: `${formula}: metallicity=${mlFeatures.metallicity.toFixed(2)} < 0.2 — insufficient metallicity for superconductivity`, dataSource: "SC Research" });
+      duplicatesSkipped++;
+      continue;
+    }
+
+    const protoHash = getPrototypeHash(formula);
+    const isostructuralMatch = existingPrototypeMap.get(protoHash);
+    if (isostructuralMatch && isostructuralMatch !== formula) {
+      const existingIso = await storage.getSuperconductorByFormula(isostructuralMatch);
+      if (existingIso && newScore <= (existingIso.ensembleScore ?? 0)) {
+        emit("log", { phase: "phase-7", event: "Isostructural duplicate skipped", detail: `${formula} matches prototype of ${isostructuralMatch} — skipping lower-score duplicate`, dataSource: "SC Research" });
+        duplicatesSkipped++;
+        continue;
+      }
+    }
+    existingPrototypeMap.set(protoHash, formula);
 
     if (candidate.predictedTc != null) {
       candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula);

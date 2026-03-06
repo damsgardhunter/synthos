@@ -33,3 +33,53 @@ export function safeFixed(val: number, digits: number = 2): number {
   if (!Number.isFinite(val)) return 0;
   return Number(val.toFixed(digits));
 }
+
+function parseFormulaCounts(formula: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const count = match[2] ? parseFloat(match[2]) : 1;
+    counts[el] = (counts[el] || 0) + count;
+  }
+  return counts;
+}
+
+export function getCompositionHash(formula: string): string {
+  const counts = parseFormulaCounts(formula);
+  const total = Object.values(counts).reduce((s, n) => s + n, 0);
+  if (total === 0) return formula;
+  const ratios = Object.entries(counts)
+    .map(([el, n]) => ({ el, ratio: Math.round((n / total) * 1000) / 1000 }))
+    .sort((a, b) => a.el.localeCompare(b.el));
+  return ratios.map(r => `${r.el}:${r.ratio}`).join("-");
+}
+
+export function getPrototypeHash(formula: string): string {
+  const counts = parseFormulaCounts(formula);
+  const vals = Object.values(counts);
+  if (vals.length === 0) return formula;
+  let g = vals[0];
+  for (let i = 1; i < vals.length; i++) {
+    let a = g, b = vals[i];
+    while (b > 0.001) { const t = b; b = a % b; a = t; }
+    g = a;
+  }
+  if (g < 0.001) g = 1;
+  const normalized = vals.map(v => Math.round(v / g)).sort((a, b) => a - b);
+  return normalized.join(":");
+}
+
+export function isIsostructuralDuplicate(formulaA: string, formulaB: string): boolean {
+  if (formulaA === formulaB) return true;
+  const countsA = parseFormulaCounts(formulaA);
+  const countsB = parseFormulaCounts(formulaB);
+  const elsA = Object.keys(countsA).sort();
+  const elsB = Object.keys(countsB).sort();
+  if (elsA.length !== elsB.length) return false;
+  const valsA = elsA.map(el => countsA[el]).sort((a, b) => a - b);
+  const valsB = elsB.map(el => countsB[el]).sort((a, b) => a - b);
+  return valsA.every((v, i) => v === valsB[i]);
+}

@@ -20,6 +20,7 @@ import {
   isRareEarth,
   isActinide,
   hasDOrFElectrons,
+  getStonerParameter,
 } from "./elemental-data";
 import { gbPredict, getConfidenceBand } from "./gradient-boost";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
@@ -81,6 +82,11 @@ export interface MLFeatureVector {
   mottProximityScore: number;
   topologicalBandScore: number;
   dimensionalityScoreV2: number;
+  phononSofteningIndex: number;
+  spinFluctuationStrength: number;
+  fermiSurfaceNestingScore: number;
+  dosAtEF: number;
+  muStarEstimate: number;
 }
 
 const CHALCOGENS = ["O","S","Se","Te"];
@@ -249,6 +255,27 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   else if (elements.length >= 4) connectivityIndex = 0.6;
   if (hasHydrogen && hydrogenRatio >= 6) connectivityIndex = Math.max(connectivityIndex, 0.7);
 
+  const phononSofteningIndex = phonon.softModePresent
+    ? Math.min(1.0, (phonon.softModeScore ?? 0.5) + phonon.anharmonicityIndex * 0.3)
+    : phonon.anharmonicityIndex * 0.5;
+
+  let spinFluctuationStrength = 0;
+  for (const el of elements) {
+    const stonerI = getStonerParameter(el);
+    if (stonerI !== null && stonerI > 0) {
+      const frac = (counts[el] || 1) / totalAtoms;
+      const stonerProduct = stonerI * electronic.densityOfStatesAtFermi;
+      spinFluctuationStrength = Math.max(spinFluctuationStrength, stonerProduct * frac);
+    }
+  }
+  spinFluctuationStrength = Math.min(1.0, spinFluctuationStrength);
+
+  const fermiSurfaceNestingScore = electronic.nestingScore ?? 0;
+
+  const dosAtEF = electronic.densityOfStatesAtFermi;
+
+  const muStarEstimate = coupling.muStar;
+
   return {
     avgElectronegativity: avgEN,
     maxAtomicMass: Math.max(...massValues, 0),
@@ -300,6 +327,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     mottProximityScore: electronic.mottProximityScore ?? 0,
     topologicalBandScore: electronic.topologicalBandScore ?? 0,
     dimensionalityScoreV2: computeDimensionalityScore(formula),
+    phononSofteningIndex,
+    spinFluctuationStrength,
+    fermiSurfaceNestingScore,
+    dosAtEF,
+    muStarEstimate,
   };
 }
 
