@@ -202,6 +202,7 @@ export interface ElectronicStructure {
   nestingScore: number;
   vanHoveProximity: number;
   bandFlatness: number;
+  flatBandIndicator: number;
   orbitalFractions: { s: number; p: number; d: number; f: number };
   topologicalBandScore: number;
   mottProximityScore: number;
@@ -930,6 +931,20 @@ export function computeElectronicStructure(
   }
   const bandFlatness = Math.max(0, Math.min(1.0, 1 - wAvgForFlatness / 3.0));
 
+  const avgDOS = vec / Math.max(0.5, wAvgForFlatness);
+  const dosRatio = avgDOS > 0.01 ? densityOfStatesAtFermi / avgDOS : 1.0;
+  let flatBandIndicator = 0;
+  if (dosRatio > 3.0) {
+    flatBandIndicator = Math.min(1.0, (dosRatio - 3.0) * 0.25 + 0.7);
+  } else if (dosRatio > 2.0) {
+    flatBandIndicator = Math.min(0.7, (dosRatio - 2.0) * 0.5 + 0.3);
+  } else if (dosRatio > 1.5) {
+    flatBandIndicator = Math.min(0.3, (dosRatio - 1.5) * 0.4);
+  }
+  if (isCuprate) flatBandIndicator = Math.max(flatBandIndicator, 0.8);
+  if (isKagome) flatBandIndicator = Math.max(flatBandIndicator, 0.7);
+  if (bandFlatness > 0.6 && hasTM) flatBandIndicator = Math.max(flatBandIndicator, 0.5);
+
   const locPenalty = Math.max(0, (correlationStrength - 0.5) * (1 - metallicity));
 
   let mottProximityScore = Math.max(0, Math.min(1.0,
@@ -964,6 +979,7 @@ export function computeElectronicStructure(
     nestingScore: Number(nestingScore.toFixed(3)),
     vanHoveProximity: Number(vanHoveProximity.toFixed(3)),
     bandFlatness: Number(bandFlatness.toFixed(3)),
+    flatBandIndicator: Number(flatBandIndicator.toFixed(3)),
     orbitalFractions,
     topologicalBandScore: Number(topologicalBandScore.toFixed(3)),
     mottProximityScore: Number(mottProximityScore.toFixed(3)),
@@ -1196,6 +1212,12 @@ export function computeElectronPhononCoupling(
 
     const ns = electronicStructure.nestingScore ?? 0;
     lambda *= (1 + ns * 0.2);
+
+    const fbi = electronicStructure.flatBandIndicator ?? 0;
+    if (fbi > 0.5) {
+      const flatBoost = 1.0 + (fbi - 0.5) * 0.8;
+      lambda *= flatBoost;
+    }
 
     const nonHNonMetFrac = elements.filter(e => {
       const nm = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];

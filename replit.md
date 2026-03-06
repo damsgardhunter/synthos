@@ -115,6 +115,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 ### Autonomous Discovery Loop
 - A massive generation pipeline generating 500-2000 candidates per cycle, undergoing multi-stage filtering (GB pre-screen, pattern mining, physics ML pre-filter) before a full pipeline processing.
 - **Tiered Acceptance System**: Tier 1 (Tc>70K, λ>1.2, hull<0.10) → high confidence; Tier 2 (Tc>25K, λ>0.5, hull<0.20) → medium; Tier 3 (Tc>10K, λ>0.3) → low. Tier 2/3 bypass stability gate.
+- **Exploration Probability**: 30% of cycles randomly explore an underexplored family instead of the strategy-recommended one. Pool: Pnictides, Chalcogenides, Cuprates, Hydrides, Kagome, Sulfides, Intermetallics, Alloys, Oxides, Nitrides.
+- **Unconventional Seeds**: scBiasedSeeds reduced to 4 random per cycle; 8 unconventional seeds (FeSe, FeAs, BaFeAs, KVSb, LaNiO, etc.) injected each cycle.
+- **Pressure Exploration**: Non-hydride metallic candidates with Tc>20K scanned at 5-50 GPa; pressure-enhanced Tc recorded with optimal pressure.
 - Pass rate ~46% after tiered acceptance fix.
 
 ### Semantic Insight Deduplication
@@ -126,6 +129,22 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - Generates AV3X5, AV3X4, A2V3X5 stoichiometries with alkali/alkaline-earth A-sites and pnictogen/metalloid X-sites.
 - Family filter checks frustrated lattice metal count, pnictogen sublattice, DOS at Fermi, van Hove singularity proximity, 2D character, and electron-phonon coupling.
 - Seeds: KV3Sb5, CsV3Sb5, RbV3Sb5 and variants.
+
+### Layered Structure Generators
+- **Layered Chalcogenides**: MX2/MX3/M2X3 (NbSe2, TaS2, MoSe2 pattern) with intercalated variants (Li/Na/K/Ca/Sr/Cu into MX2 hosts).
+- **Layered Pnictides**: Iron pnictide patterns — RE-TM-Pn-O (1111-type), AE-TM2-Pn2 (122-type), plus binary TM-Pn.
+- **Intercalated Layered**: MX2 intercalation compounds, graphite intercalation compounds (AC6/AC8/AC12), intercalated oxide layers.
+
+### Mixed-Mechanism Systems
+- Targets Fe/Ni/Co/Cu in layered compounds for phonon + magnetic fluctuation superconductivity.
+- Generates FeAs-based, FeSe-based, NiO-based (infinite-layer nickelates), CuO-based (cuprates), and combinatorial TM-chalcogenide/pnictide.
+- Filter checks for magnetic TM presence, λ ≥ 0.3, magnetic fluctuation proximity, and layered character.
+
+### Flat-Band Detection
+- Computes DOS(EF)/avgDOS ratio as flat-band indicator.
+- Ratio > 3 = strong flat-band (indicator ≥ 0.7), > 2 = moderate (≥ 0.3).
+- Cuprates get 0.8 floor, Kagome 0.7, TM with high bandFlatness 0.5.
+- Flat-band indicator > 0.5 boosts lambda by up to 40% (flatBoost = 1 + (fbi - 0.5) * 0.8).
 
 ### Bayesian Family Strategy Scoring
 - Uses Bayesian shrinkage (prior_count=5) to prevent single-candidate families from dominating. Includes exploration bonus for under-explored families (<10 candidates).

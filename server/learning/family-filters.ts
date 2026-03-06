@@ -338,6 +338,261 @@ function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFi
   return { pass, score, reasons };
 }
 
+function applyMixedMechanismFilter(formula: string, features: MLFeatureVector): FamilyFilterResult {
+  const counts = parseFormulaCounts(formula);
+  const elements = parseFormulaElements(formula);
+  const reasons: string[] = [];
+  let score = 0;
+  let pass = true;
+
+  const MAGNETIC_TM = ["Fe", "Ni", "Co", "Cu", "Mn", "Cr"];
+  const magneticCount = elements
+    .filter(e => MAGNETIC_TM.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+
+  if (magneticCount >= 1) {
+    score += 0.25;
+    reasons.push(`Magnetic TM count = ${magneticCount} >= 1 (Fe/Ni/Co/Cu present for spin fluctuations)`);
+  } else {
+    pass = false;
+    reasons.push(`No magnetic transition metals (Fe/Ni/Co/Cu) detected`);
+  }
+
+  if (features.electronPhononLambda >= 0.3) {
+    score += 0.25;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} >= 0.3 (phonon channel active)`);
+  } else {
+    pass = false;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.3 (phonon channel too weak)`);
+  }
+
+  const hasMagneticProximity = magneticCount >= 1 && features.dosAtEF > 1.0;
+  if (hasMagneticProximity) {
+    score += 0.25;
+    reasons.push(`Magnetic fluctuation proximity: DOS(EF)=${features.dosAtEF.toFixed(2)} > 1.0 with magnetic TM (spin channel active)`);
+  } else {
+    pass = false;
+    reasons.push(`No magnetic fluctuation proximity: DOS(EF)=${features.dosAtEF.toFixed(2)}, magnetic TM count=${magneticCount}`);
+  }
+
+  const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
+  if (is2DLike) {
+    score += 0.15;
+    reasons.push(`Layered/2D character detected (dimensionality=${features.dimensionalityScore.toFixed(2)}, layered=${features.layeredStructure})`);
+  } else {
+    reasons.push(`Limited 2D character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+  }
+
+  if (features.metallicity < 0.3) {
+    pass = false;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for mixed-mechanism superconductor`);
+  } else {
+    score += 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
+  }
+
+  score = Math.min(1.0, score);
+  return { pass, score, reasons };
+}
+
+function applyLayeredChalcogenideFilter(formula: string, features: MLFeatureVector): FamilyFilterResult {
+  const counts = parseFormulaCounts(formula);
+  const elements = parseFormulaElements(formula);
+  const reasons: string[] = [];
+  let score = 0;
+  let pass = true;
+
+  const CHALCOGENS = ["Se", "S", "Te"];
+  const LAYER_METALS = ["Nb", "Ta", "Mo", "W", "Ti", "Zr", "Hf", "V", "Re"];
+
+  const chalcogenCount = elements
+    .filter(e => CHALCOGENS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const metalCount = elements
+    .filter(e => LAYER_METALS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+
+  if (chalcogenCount >= 2 && metalCount >= 1) {
+    const ratio = chalcogenCount / metalCount;
+    score += 0.25;
+    reasons.push(`MX2-type stoichiometry: chalcogen/metal ratio = ${ratio.toFixed(1)} (layered structure likely)`);
+  } else {
+    pass = false;
+    reasons.push(`Insufficient MX2 stoichiometry: chalcogen=${chalcogenCount}, metal=${metalCount}`);
+  }
+
+  const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
+  if (is2DLike) {
+    score += 0.25;
+    reasons.push(`2D/layered character detected (dimensionality=${features.dimensionalityScore.toFixed(2)}, layered=${features.layeredStructure})`);
+  } else {
+    reasons.push(`Limited 2D character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+  }
+
+  if (features.dosAtEF > 1.0) {
+    score += 0.20;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} > 1.0 (adequate states at Fermi level for CDW/SC competition)`);
+  } else {
+    pass = false;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} <= 1.0 (insufficient density of states)`);
+  }
+
+  if (features.electronPhononLambda >= 0.4) {
+    score += 0.20;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} >= 0.4 (adequate electron-phonon coupling for layered chalcogenide)`);
+  } else {
+    pass = false;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.4 (weak electron-phonon coupling)`);
+  }
+
+  if (features.metallicity < 0.3) {
+    pass = false;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for metallic chalcogenide`);
+  } else {
+    score += 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
+  }
+
+  score = Math.min(1.0, score);
+  return { pass, score, reasons };
+}
+
+function applyLayeredPnictideFilter(formula: string, features: MLFeatureVector): FamilyFilterResult {
+  const counts = parseFormulaCounts(formula);
+  const elements = parseFormulaElements(formula);
+  const reasons: string[] = [];
+  let score = 0;
+  let pass = true;
+
+  const PNICTIDE_TM = ["Fe", "Co", "Ni", "Mn", "Ru"];
+  const PNICTOGENS = ["As", "P", "Sb"];
+  const SPACERS = ["La", "Ce", "Pr", "Nd", "Sm", "Gd", "Ba", "Sr", "Ca", "Y"];
+
+  const tmCount = elements
+    .filter(e => PNICTIDE_TM.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const pnCount = elements
+    .filter(e => PNICTOGENS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const spacerCount = elements
+    .filter(e => SPACERS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+
+  if (tmCount >= 1 && pnCount >= 1) {
+    score += 0.25;
+    reasons.push(`Iron-pnictide structure: TM=${tmCount}, pnictogen=${pnCount} (FeAs/FeP-type layers present)`);
+  } else {
+    pass = false;
+    reasons.push(`Missing iron-pnictide structure: TM=${tmCount}, pnictogen=${pnCount}`);
+  }
+
+  if (spacerCount >= 1) {
+    score += 0.15;
+    reasons.push(`Spacer/charge reservoir layer present (count=${spacerCount})`);
+  } else {
+    reasons.push(`No spacer layer detected`);
+  }
+
+  if (features.dosAtEF > 1.5) {
+    score += 0.25;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} > 1.5 (high density of states for nesting-driven SC)`);
+  } else if (features.dosAtEF > 0.8) {
+    score += 0.10;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} > 0.8 (moderate density of states)`);
+  } else {
+    pass = false;
+    reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} <= 0.8 (insufficient DOS for pnictide SC)`);
+  }
+
+  const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
+  if (is2DLike) {
+    score += 0.20;
+    reasons.push(`Layered/2D character detected (dimensionality=${features.dimensionalityScore.toFixed(2)}, layered=${features.layeredStructure})`);
+  } else {
+    pass = false;
+    reasons.push(`No layered character detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+  }
+
+  if (features.metallicity < 0.3) {
+    pass = false;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for pnictide superconductor`);
+  } else {
+    score += 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
+  }
+
+  score = Math.min(1.0, score);
+  return { pass, score, reasons };
+}
+
+function applyIntercalatedLayeredFilter(formula: string, features: MLFeatureVector): FamilyFilterResult {
+  const counts = parseFormulaCounts(formula);
+  const elements = parseFormulaElements(formula);
+  const reasons: string[] = [];
+  let score = 0;
+  let pass = true;
+
+  const INTERCALANTS = ["Li", "Na", "K", "Rb", "Cs", "Ca", "Sr", "Ba", "Eu", "Yb"];
+  const HOST_METALS = ["Nb", "Ta", "Mo", "W", "Ti", "Zr", "Hf", "V"];
+  const HOST_ANIONS = ["Se", "S", "Te", "O", "C"];
+
+  const intercalantCount = elements
+    .filter(e => INTERCALANTS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hostMetalCount = elements
+    .filter(e => HOST_METALS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hostAnionCount = elements
+    .filter(e => HOST_ANIONS.includes(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+
+  if (intercalantCount > 0) {
+    score += 0.25;
+    reasons.push(`Intercalant present (count=${intercalantCount}): electron doping into host layers`);
+  } else {
+    pass = false;
+    reasons.push(`No intercalant species detected`);
+  }
+
+  if (hostAnionCount >= 1) {
+    score += 0.20;
+    reasons.push(`Host lattice anions present (count=${hostAnionCount})`);
+  } else {
+    pass = false;
+    reasons.push(`No host lattice anions detected`);
+  }
+
+  const is2DFermiSurface = features.dimensionalityScore >= 0.6 ||
+    features.fermiSurfaceType.includes("2D") ||
+    features.layeredStructure;
+  if (is2DFermiSurface) {
+    score += 0.25;
+    reasons.push(`2D Fermi surface / layered character detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+  } else {
+    pass = false;
+    reasons.push(`No 2D Fermi surface detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+  }
+
+  if (features.electronPhononLambda >= 0.3) {
+    score += 0.15;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} >= 0.3 (adequate e-ph coupling for intercalated system)`);
+  } else {
+    pass = false;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.3 (insufficient electron-phonon coupling)`);
+  }
+
+  if (features.metallicity < 0.3) {
+    pass = false;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for intercalated superconductor`);
+  } else {
+    score += 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
+  }
+
+  score = Math.min(1.0, score);
+  return { pass, score, reasons };
+}
+
 export function applyFamilyFilter(
   formula: string,
   family: string,
@@ -355,6 +610,14 @@ export function applyFamilyFilter(
       return applyNitrideFilter(formula, features);
     case "Kagome":
       return applyKagomeFilter(formula, features);
+    case "Mixed-mechanism":
+      return applyMixedMechanismFilter(formula, features);
+    case "Layered-chalcogenide":
+      return applyLayeredChalcogenideFilter(formula, features);
+    case "Layered-pnictide":
+      return applyLayeredPnictideFilter(formula, features);
+    case "Intercalated-layered":
+      return applyIntercalatedLayeredFilter(formula, features);
     default:
       return { pass: false, score: 0, reasons: [`Unknown family: ${family}`] };
   }
@@ -465,6 +728,14 @@ export function rankCandidate(
     synthesisFeasibility = 0.55;
   } else if (family === "Kagome") {
     synthesisFeasibility = 0.65;
+  } else if (family === "Layered-chalcogenide") {
+    synthesisFeasibility = 0.7;
+  } else if (family === "Layered-pnictide") {
+    synthesisFeasibility = 0.6;
+  } else if (family === "Intercalated-layered") {
+    synthesisFeasibility = 0.55;
+  } else if (family === "Mixed-mechanism") {
+    synthesisFeasibility = 0.6;
   }
 
   const composite = 0.35 * tcNormalized +

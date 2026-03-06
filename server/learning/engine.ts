@@ -916,6 +916,47 @@ async function runPhase10_Physics() {
             emit("log", { phase: "phase-10", event: "Pressure scan error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Pressure Engine" });
           }
         }
+
+        const metallicHighTc = allCandidates.filter(c => {
+          const tc = c.predictedTc ?? 0;
+          const met = c.metallicity ?? 0;
+          const existingPressure = ((c.mlFeatures as Record<string, any>)?.pressureTcCurve?.optimalPressure) ?? null;
+          return tc >= 20 && met > 0.4 && existingPressure === null && !hydrideCandidates.some(h => h.id === c.id);
+        });
+        const nonHydrideToScan = shuffle(metallicHighTc).slice(0, 5);
+        for (const candidate of nonHydrideToScan) {
+          if (!shouldContinue()) break;
+          try {
+            const pressureResult = runPressureAnalysis(emit, candidate.formula);
+            const ambientTc = candidate.predictedTc ?? 0;
+            const pressureTc = pressureResult.maxTc;
+            const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
+            const updatedMlFeatures = {
+              ...existingMlFeatures,
+              pressureTcCurve: {
+                optimalPressure: pressureResult.optimalPressure,
+                maxTc: pressureTc,
+                points: pressureResult.pressureTcCurve.length,
+                stablePoints: pressureResult.pressureTcCurve.filter(p => p.stable).length,
+                pressureBoost: pressureTc > ambientTc,
+              },
+            };
+            const updates: any = { mlFeatures: updatedMlFeatures as any };
+            if (pressureTc > ambientTc && pressureResult.optimalPressure <= 50 && pressureResult.optimalPressure > 0) {
+              updates.pressureGpa = pressureResult.optimalPressure;
+              updates.optimalPressureGpa = pressureResult.optimalPressure;
+              emit("log", {
+                phase: "phase-10",
+                event: "Pressure-enhanced Tc",
+                detail: `${candidate.formula}: Tc ${ambientTc}K -> ${pressureTc.toFixed(1)}K at ${pressureResult.optimalPressure.toFixed(1)} GPa (moderate pressure, non-hydride)`,
+                dataSource: "Pressure Engine",
+              });
+            }
+            await storage.updateSuperconductorCandidate(candidate.id, updates);
+          } catch (err: any) {
+            emit("log", { phase: "phase-10", event: "Pressure scan error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Pressure Engine" });
+          }
+        }
       } catch {}
     }
 
@@ -1502,7 +1543,22 @@ async function runAutonomousFastPath() {
   broadcast("taskStart", { task: "Autonomous Screening" });
 
   try {
-    const focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
+    const EXPLORATION_FAMILIES = [
+      "Pnictides", "Chalcogenides", "Cuprates", "Hydrides", "Kagome",
+      "Sulfides", "Intermetallics", "Alloys", "Oxides", "Nitrides",
+    ];
+    const EXPLORATION_PROB = 0.30;
+    let focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
+    if (Math.random() < EXPLORATION_PROB) {
+      const explorationPool = EXPLORATION_FAMILIES.filter(f => f !== focusArea);
+      focusArea = explorationPool[Math.floor(Math.random() * explorationPool.length)];
+      emit("log", {
+        phase: "engine",
+        event: "exploration mode",
+        detail: `Randomly exploring ${focusArea} instead of strategy-recommended family (${EXPLORATION_PROB * 100}% exploration probability)`,
+        dataSource: "Exploration",
+      });
+    }
 
     let topCandidatesForGen: { formula: string; predictedTc?: number }[] = [];
     try {

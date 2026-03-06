@@ -533,20 +533,33 @@ export function runMassiveGeneration(
     Oxides: [["Sr", "Ti", "O"], ["Ba", "Ti", "O"], ["La", "Mn", "O"]],
     Alloys: [["Nb", "Ti"], ["Nb", "Zr"], ["Mo", "Re"], ["V", "Ti"]],
     Kagome: [["K", "V", "Sb"], ["Rb", "V", "Sb"], ["Cs", "V", "Sb"], ["K", "V", "Bi"], ["Cs", "Ti", "Sb"], ["Ba", "V", "Sb"], ["Ca", "V", "Sb"], ["Sr", "V", "Bi"]],
+    "Mixed-mechanism": [["La", "Fe", "As", "O"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Fe", "Se"], ["Fe", "Te"], ["La", "Ni", "O"], ["Nd", "Ni", "O"], ["La", "Cu", "O"], ["Y", "Cu", "O"], ["Ba", "Co", "As"], ["Sr", "Co", "As"], ["Ca", "Fe", "As"]],
+    Layered: [["Nb", "Se"], ["Ta", "Se"], ["Mo", "S"], ["W", "Se"], ["Ti", "Se"], ["Nb", "S"], ["Mo", "Se"], ["Ta", "S"]],
+    "Layered-chalcogenide": [["Nb", "Se"], ["Ta", "Se"], ["Mo", "S"], ["W", "Se"], ["Ti", "Se"], ["Nb", "S"], ["Mo", "Se"], ["Ta", "S"], ["Li", "Nb", "Se"], ["Cu", "Nb", "Se"]],
+    "Layered-pnictide": [["La", "Fe", "As"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Ce", "Fe", "As"], ["La", "Co", "As"], ["Ba", "Co", "As"], ["La", "Fe", "P"], ["Ba", "Ni", "As"]],
+    "Intercalated-layered": [["Li", "Nb", "Se"], ["Na", "Nb", "Se"], ["K", "Mo", "S"], ["Ca", "Ta", "Se"], ["Li", "C"], ["K", "C"], ["Ca", "C"], ["Sr", "Nb", "Se"]],
   };
 
   const scBiasedSeeds: string[][] = [
     ["Nb", "B", "C"], ["Ta", "B", "C"], ["V", "B", "N"], ["Ti", "B", "N"],
-    ["Nb", "B", "N"], ["Mo", "B", "C"], ["Hf", "B", "C"], ["W", "B", "N"],
-    ["Nb", "C", "N"], ["Ta", "C", "N"], ["V", "C", "N"], ["Ti", "C", "N"],
-    ["Nb", "B"], ["Ta", "B"], ["V", "B"], ["Ti", "B"],
-    ["La", "Nb", "B"], ["Y", "Nb", "B"], ["Ca", "Nb", "B"],
-    ["La", "Ti", "B", "C"], ["Y", "V", "B", "N"], ["Sc", "Nb", "C"],
-    ["Nb", "Ti", "B"], ["Ta", "V", "C"], ["Mo", "Nb", "N"],
+    ["Nb", "C", "N"], ["Ta", "C", "N"],
+    ["La", "Nb", "B"], ["Sc", "Nb", "C"],
+  ];
+
+  const unconventionalSeeds: string[][] = [
+    ["Nb", "Se"], ["Ta", "Se"], ["Nb", "S"], ["Mo", "Se"],
+    ["Fe", "Se"], ["Fe", "Te"], ["Fe", "As"],
+    ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["La", "Fe", "P"],
+    ["K", "V", "Sb"], ["Cs", "V", "Bi"], ["Rb", "V", "Sb"],
+    ["La", "Ni", "O"], ["Sr", "Co", "O"], ["Ba", "Cu", "O"],
+    ["Ca", "H"], ["La", "H"], ["Y", "H"],
+    ["Nb", "Se", "S"], ["Ta", "Se", "Te"], ["Mo", "S", "Se"],
   ];
 
   const focusPairs = focusElements[focusArea] || focusElements["Carbides"];
-  const combinedPairs = [...focusPairs, ...scBiasedSeeds];
+  const biasedSubset = scBiasedSeeds.sort(() => Math.random() - 0.5).slice(0, 4);
+  const unconvSubset = unconventionalSeeds.sort(() => Math.random() - 0.5).slice(0, 8);
+  const combinedPairs = [...focusPairs, ...biasedSubset, ...unconvSubset];
   const seedFormulas: string[] = [];
   for (const pair of combinedPairs) {
     const stoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3], [2, 3], [3, 2]];

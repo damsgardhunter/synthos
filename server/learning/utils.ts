@@ -13,6 +13,7 @@ const METALS = new Set([
 ]);
 
 const REGEX_FAMILIES: Record<string, RegExp> = {
+  "Mixed-mechanism": /(?:La|Ce|Pr|Nd|Sm|Gd|Ba|Sr|Ca|Y)(?:Fe|Ni|Co|Cu).*(?:As|Se|Te|O)|(?:Fe|Ni|Co|Cu)(?:As|Se|Te)(?:O|F)?|mixed.?mechanism/i,
   "Hydrides": /H\d|LaH|YH|CeH|CaH|BaH|SrH|MgH|hydride/i,
   "Cuprates": /(?:La|Y|Ba|Sr|Bi|Tl|Hg|Ca|Nd|Pr|Sm|Eu|Gd).*Cu.*O|cuprate|YBCO|BSCCO/i,
   "Heavy Fermions": /(?:Ce|Yb|U|Pu|Np)(?:In|Co|Rh|Ir|Pd|Pt|Ni|Cu|Al|Ga|Ge|Si|Sn|Sb|Bi)\d|CeCoIn|UPt|UBe|CeCu/i,
@@ -22,6 +23,9 @@ const REGEX_FAMILIES: Record<string, RegExp> = {
   "Phosphides": /(?:Fe|Co|Ni|Mn|Ga|In|Zn|Cd|Al|B)P\d*(?:[^btdm]|$)|phosphide|GaP|InP/i,
   "Intermetallics": /(?:Nb|V|Nb|Ta).*(?:Sn|Ge|Si|Ga|Al)|Nb.*Ti|NbSn|V3Si|Nb3Ge|Nb3Al|intermetallic/i,
   "Kagome": /(?:K|Rb|Cs|Ca|Sr|Ba)(?:V|Ti|Cr|Mn|Fe|Co|Ni)3(?:Sb|Bi|Sn|Ge|As)\d|kagome/i,
+  "Layered-chalcogenide": /(?:Nb|Ta|Mo|W|Ti|Zr|Hf|V|Re)(?:Se|S|Te)2|(?:Li|Na|K|Ca|Sr|Cu)(?:Nb|Ta|Mo|W|Ti)(?:Se|S|Te)2/i,
+  "Layered-pnictide": /(?:La|Ce|Pr|Nd|Sm|Gd|Y)(?:Fe|Co|Ni|Mn|Cr)(?:As|P|Sb)(?:O|F)|(?:Ba|Sr|Ca)(?:Fe|Co|Ni)2(?:As|P)2/i,
+  "Intercalated-layered": /(?:Li|Na|K|Ca|Rb|Cs|Cu|Ag|NH4|TMA).*(?:Se|S|Te)2|(?:Li|Na|K|Rb|Cs)C(?:6|8|12)/i,
 };
 
 export function classifyFamily(formula: string): string {
