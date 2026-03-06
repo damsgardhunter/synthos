@@ -98,6 +98,10 @@ function computeAnalyticalFallbacks(formula: string): {
   muStar: number;
   thermalConductivity: number | null;
   phononFreqMax: number;
+  density: number;
+  atomicPackingFraction: number;
+  averagePhononFreq: number;
+  estimatorCoverage: number;
 } {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -115,11 +119,18 @@ function computeAnalyticalFallbacks(formula: string): {
     bandGap = Math.max(0, enSpread * 0.8);
   }
 
-  const debyeWeighted = getCompositionWeightedProperty(counts, "debyeTemperature");
-  const debyeTemp = debyeWeighted && debyeWeighted > 0 ? debyeWeighted : 300;
-
   const bulkWeighted = getCompositionWeightedProperty(counts, "bulkModulus");
-  const bulkModulus = bulkWeighted && bulkWeighted > 0 ? bulkWeighted : 0;
+  const bulkModulus = bulkWeighted && bulkWeighted > 0 ? bulkWeighted : estimateBulkModulus(elements, counts);
+
+  const avgMass = getCompositionWeightedProperty(counts, "atomicMass") || 50;
+  const density = estimateDensity(elements, counts, totalAtoms);
+
+  const debyeWeighted = getCompositionWeightedProperty(counts, "debyeTemperature");
+  let debyeTemp = debyeWeighted && debyeWeighted > 0 ? debyeWeighted : 300;
+  if ((!debyeWeighted || debyeWeighted <= 0) && bulkModulus > 0 && density > 0) {
+    debyeTemp = 41.6 * Math.sqrt(bulkModulus / density);
+    debyeTemp = Math.max(50, Math.min(2500, debyeTemp));
+  }
 
   let formationEnergy = 0;
   if (elements.length >= 2) {
@@ -133,14 +144,17 @@ function computeAnalyticalFallbacks(formula: string): {
     const gammaAvg = getCompositionWeightedProperty(counts, "sommerfeldGamma");
     if (gammaAvg && gammaAvg > 0) {
       dosAtFermi = gammaAvg / 2.359;
+    } else {
+      dosAtFermi = estimateDOSAtFermi(elements, counts, totalAtoms, isMetallic);
     }
   }
 
   const omegaLog = 0.5 * debyeTemp;
 
+  const averagePhononFreq = estimateAveragePhononFreq(debyeTemp, avgMass);
+
   let lambda: number | null = null;
   if (isMetallic && dosAtFermi != null && dosAtFermi > 0) {
-    const avgMass = getCompositionWeightedProperty(counts, "atomicMass") || 50;
     const hopfieldEta = getCompositionWeightedProperty(counts, "mcMillanHopfieldEta");
     if (hopfieldEta && hopfieldEta > 0) {
       const omega2 = (debyeTemp * 0.695) ** 2;
@@ -171,7 +185,107 @@ function computeAnalyticalFallbacks(formula: string): {
 
   const phononFreqMax = 1.2 * debyeTemp;
 
-  return { bandGap, isMetallic, debyeTemp, bulkModulus, formationEnergy, dosAtFermi, omegaLog, lambda, muStar, thermalConductivity, phononFreqMax };
+  const atomicPackingFraction = estimateAtomicPacking(elements, counts);
+
+  let coveredProperties = 0;
+  const totalProperties = 11;
+  if (bandGap >= 0) coveredProperties++;
+  coveredProperties++;
+  if (debyeTemp > 0) coveredProperties++;
+  if (bulkModulus > 0) coveredProperties++;
+  if (formationEnergy !== 0) coveredProperties++;
+  if (dosAtFermi != null) coveredProperties++;
+  if (thermalConductivity != null) coveredProperties++;
+  if (phononFreqMax > 0) coveredProperties++;
+  if (density > 0) coveredProperties++;
+  if (atomicPackingFraction > 0) coveredProperties++;
+  if (averagePhononFreq > 0) coveredProperties++;
+  const estimatorCoverage = coveredProperties / totalProperties;
+
+  return { bandGap, isMetallic, debyeTemp, bulkModulus, formationEnergy, dosAtFermi, omegaLog, lambda, muStar, thermalConductivity, phononFreqMax, density, atomicPackingFraction, averagePhononFreq, estimatorCoverage };
+}
+
+function estimateBulkModulus(elements: string[], counts: Record<string, number>): number {
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  let totalB = 0;
+  let weight = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data?.bulkModulus && data.bulkModulus > 0) {
+      totalB += data.bulkModulus * (counts[el] || 1);
+      weight += counts[el] || 1;
+    } else if (data?.meltingPoint && data.meltingPoint > 0) {
+      const estB = data.meltingPoint * 0.07;
+      totalB += estB * (counts[el] || 1);
+      weight += counts[el] || 1;
+    }
+  }
+  if (weight > 0) return totalB / weight;
+  return 100;
+}
+
+function estimateDensity(elements: string[], counts: Record<string, number>, totalAtoms: number): number {
+  let totalMass = 0;
+  let totalVolume = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (!data) continue;
+    const n = counts[el] || 1;
+    totalMass += data.atomicMass * n;
+    const r_cm = (data.atomicRadius || 150) * 1e-10;
+    totalVolume += (4 / 3) * Math.PI * Math.pow(r_cm, 3) * n;
+  }
+  if (totalVolume <= 0) return 5.0;
+  const packingFraction = 0.68;
+  const cellVolume = totalVolume / packingFraction;
+  const amu_to_g = 1.66054e-24;
+  const density = (totalMass * amu_to_g) / cellVolume;
+  return Math.max(1.0, Math.min(25.0, density));
+}
+
+function estimateDOSAtFermi(elements: string[], counts: Record<string, number>, totalAtoms: number, isMetallic: boolean): number | null {
+  if (!isMetallic) return null;
+  let totalValence = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) {
+      totalValence += data.valenceElectrons * (counts[el] || 1);
+    }
+  }
+  const avgValence = totalValence / totalAtoms;
+  const baseDOS = 0.3 + avgValence * 0.15;
+  const tmCount = elements.filter(e => isTransitionMetal(e)).reduce((s, e) => s + (counts[e] || 0), 0);
+  const tmFrac = tmCount / totalAtoms;
+  const tmBoost = tmFrac > 0.3 ? 1.5 : 1.0;
+  return Math.min(5.0, baseDOS * tmBoost);
+}
+
+function estimateAveragePhononFreq(debyeTemp: number, avgMass: number): number {
+  const kB = 8.617e-5;
+  const omegaD_meV = kB * debyeTemp * 1000;
+  const avgFreq = omegaD_meV * 0.7 / Math.sqrt(avgMass / 50);
+  return Math.max(1, Math.min(200, avgFreq));
+}
+
+function estimateAtomicPacking(elements: string[], counts: Record<string, number>): number {
+  let totalAtomVol = 0;
+  let totalRadius = 0;
+  let totalCount = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (!data) continue;
+    const n = counts[el] || 1;
+    const r = data.atomicRadius || 150;
+    totalAtomVol += (4 / 3) * Math.PI * Math.pow(r, 3) * n;
+    totalRadius += r * n;
+    totalCount += n;
+  }
+  if (totalCount === 0) return 0.5;
+  const avgR = totalRadius / totalCount;
+  const cellVol = totalCount * Math.pow(2.2 * avgR, 3);
+  if (cellVol <= 0) return 0.5;
+  const apf = totalAtomVol / cellVol;
+  return Math.max(0.1, Math.min(0.85, apf));
 }
 
 async function fetchAllDFTSources(formula: string): Promise<RawDFTSources> {
@@ -268,10 +382,10 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const externalCoverage = allResolved.length > 0 ? dftCount / allResolved.length : 0;
 
   const hasExternalData = raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null || raw.aflowEntry != null || raw.aflowDFT != null;
-  const dftCoverage = externalCoverage > 0 ? externalCoverage : 0.5;
+  const dftCoverage = externalCoverage > 0 ? externalCoverage : Math.max(0.5, analytical.estimatorCoverage);
 
   if (!hasExternalData) {
-    console.log(`[DFT] ${formula}: No external API data found (MP/AFLOW). Using analytical fallbacks (coverage=${dftCoverage.toFixed(2)}).`);
+    console.log(`[DFT] ${formula}: No external API data found (MP/AFLOW). Using analytical fallbacks (coverage=${dftCoverage.toFixed(2)}, estimators: ${(analytical.estimatorCoverage * 100).toFixed(0)}%).`);
   } else if (externalCoverage < 0.5) {
     console.log(`[DFT] ${formula}: Partial external data (coverage=${externalCoverage.toFixed(2)}), supplemented with analytical. Effective coverage=${dftCoverage.toFixed(2)}.`);
   }

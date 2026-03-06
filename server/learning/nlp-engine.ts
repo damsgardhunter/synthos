@@ -313,6 +313,14 @@ CRITICAL INSTRUCTIONS:
 - Each insight must describe a correlation, trend, or causal relationship between two or more physical properties.
 - Reference specific material families, dimensionalities, or pairing mechanisms when the data supports it.
 - Include quantitative evidence (correlation coefficients, Tc values) from the provided statistics.
+- VARY your insight topics. Rotate through these categories:
+  * Phonon softening: How soft modes or anharmonic phonons in specific structures enhance Tc
+  * Fermi surface nesting: Nesting vectors, topology effects on pairing strength
+  * Charge transfer layers: How charge reservoir layers affect carrier density and Tc
+  * Structural motifs: Role of octahedral tilts, layering, cage structures, or rattler atoms
+  * Electron density redistribution: Charge localization, orbital hybridization effects on DOS
+  * Spin-orbit coupling: SOC effects on band topology and unconventional pairing
+  * Pressure-dependent phonon hardening: How lattice stiffening under pressure shifts omega_log
 
 PHYSICS RULES:
 - Lower (more negative) formation energy = MORE stable
@@ -449,6 +457,14 @@ CRITICAL INSTRUCTIONS:
 - Each insight must be a predictive rule linking two or more physical properties (e.g., "Low band gap metals with λ>1.5 predict Tc above 40K in boride families").
 - Reference specific material families, element groups, or structural features when the data supports it.
 - Include quantitative thresholds from the correlation data.
+- VARY your insight topics across these physics categories:
+  * Phonon softening effects on Tc predictions
+  * Fermi surface nesting strength as a Tc predictor
+  * Charge transfer between structural layers and carrier doping
+  * Structural motifs (cages, layers, chains) that predict high lambda
+  * Electron density at bond critical points as stability predictor
+  * Atomic packing fraction effects on phonon spectrum
+  * Debye temperature / bulk modulus ratio as Tc screening metric
 
 PHYSICS RULES:
 - Lower (more negative) formation energy = MORE stable

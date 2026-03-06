@@ -84,9 +84,19 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - Prioritizes higher-scoring candidates for DFT enrichment.
 
 ### Active Learning Loop
-- Uses uncertainty-driven DFT selection with analytical DFT fallback when external data is unavailable (coverage=0.50).
-- Budget: 20 DFT runs per cycle, triggered every 15 cycles, GNN retrain every 50 enriched candidates.
+- Uses uncertainty-driven DFT selection with analytical DFT fallback when external data is unavailable.
+- Budget: 20 DFT runs per cycle, triggered every 15 cycles.
+- GNN retrain triggers: 15+ enriched candidates since last retrain, OR avg uncertainty > 0.3, OR first retrain with any DFT success.
 - Retrains the GNN surrogate with expanded datasets and monitors convergence.
+
+### Analytical Physics Estimators (coverage ~1.00)
+- **Debye temperature**: θD ≈ 41.6 * sqrt(B / ρ) when elemental data unavailable.
+- **Bulk modulus**: Estimated from melting point (B ≈ 0.07 * T_melt) when elemental data missing.
+- **Density**: Computed from atomic masses and radii with BCC packing assumption.
+- **DOS at Fermi level**: Estimated from valence electron count with transition metal boost.
+- **Average phonon frequency**: Derived from Debye temperature and average atomic mass.
+- **Atomic packing fraction**: Geometric estimate from atomic radii.
+- Coverage metric tracks how many of 11 properties have valid estimates.
 
 ### Autonomous Discovery Loop
 - A massive generation pipeline generating 500-2000 candidates per cycle, undergoing multi-stage filtering (GB pre-screen, pattern mining, physics ML pre-filter) before a full pipeline processing.
@@ -95,6 +105,8 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 
 ### Semantic Insight Deduplication
 - Uses OpenAI text-embedding-3-small embeddings with cosine similarity (threshold 0.85) to reject semantically duplicate insights before LLM novelty scoring.
+- Category quotas (2 per 30-min window) across 10 categories: novel-correlation, new-mechanism, cross-domain, computational-discovery, design-principle, phonon-softening, fermi-nesting, charge-transfer, structural-motif, electron-density.
+- NLP prompts instruct diverse topic rotation: phonon softening, Fermi surface nesting, charge transfer layers, structural motifs, electron density redistribution, spin-orbit coupling, pressure-dependent phonon hardening.
 
 ### Bayesian Family Strategy Scoring
 - Uses Bayesian shrinkage (prior_count=5) to prevent single-candidate families from dominating. Includes exploration bonus for under-explored families (<10 candidates).

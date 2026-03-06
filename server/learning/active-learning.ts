@@ -258,8 +258,17 @@ export async function runActiveLearningCycle(
   totalEnrichedSinceLastRetrain += dftSuccessCount;
 
   let retrainResult = { r2Before: 0, maeBefore: 0, r2After: 0, maeAfter: 0 };
-  const shouldRetrain = totalEnrichedSinceLastRetrain >= 50;
+  const shouldRetrain =
+    totalEnrichedSinceLastRetrain >= 15 ||
+    avgUncertaintyBefore > 0.3 ||
+    (dftSuccessCount > 0 && convergenceStats.modelRetrains === 0);
   if (shouldRetrain) {
+    emit("log", {
+      phase: "active-learning",
+      event: "GNN retrain triggered",
+      detail: `Trigger: enriched=${totalEnrichedSinceLastRetrain}>=15 OR uncertainty=${avgUncertaintyBefore.toFixed(3)}>0.3 OR firstRetrain=${convergenceStats.modelRetrains === 0}`,
+      dataSource: "Active Learning",
+    });
     retrainResult = await retrainGNNWithEnrichedData(emit);
     convergenceStats.modelRetrains++;
     totalEnrichedSinceLastRetrain = 0;
@@ -267,7 +276,7 @@ export async function runActiveLearningCycle(
     emit("log", {
       phase: "active-learning",
       event: "GNN retrain deferred",
-      detail: `${totalEnrichedSinceLastRetrain} enriched since last retrain (threshold: 50). Will retrain after more data.`,
+      detail: `${totalEnrichedSinceLastRetrain} enriched since last retrain (threshold: 15). Uncertainty: ${avgUncertaintyBefore.toFixed(3)}. Will retrain after more data.`,
       dataSource: "Active Learning",
     });
   } else {

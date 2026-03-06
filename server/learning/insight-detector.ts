@@ -20,6 +20,11 @@ const CATEGORY_QUOTAS: Record<string, number> = {
   "cross-domain": 2,
   "computational-discovery": 2,
   "design-principle": 2,
+  "phonon-softening": 2,
+  "fermi-nesting": 2,
+  "charge-transfer": 2,
+  "structural-motif": 2,
+  "electron-density": 2,
 };
 
 const recentCategoryCounts: Record<string, number> = {};
@@ -593,7 +598,7 @@ Return JSON with 'evaluations' array, each with:
 - 'isNovel' (boolean)
 - 'noveltyScore' (0-1, where 1 = groundbreaking, 0.5 = interesting, 0.1 = textbook)
 - 'reason' (under 100 chars explaining why novel or not)
-- 'category' (one of: 'novel-correlation', 'new-mechanism', 'cross-domain', 'computational-discovery', 'design-principle', 'textbook', 'known-pattern', 'incremental')`,
+- 'category' (one of: 'novel-correlation', 'new-mechanism', 'cross-domain', 'computational-discovery', 'design-principle', 'phonon-softening', 'fermi-nesting', 'charge-transfer', 'structural-motif', 'electron-density', 'textbook', 'known-pattern', 'incremental')`,
         },
         {
           role: "user",
