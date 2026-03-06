@@ -12,6 +12,7 @@ import {
 } from "./elemental-data";
 import { runXTBEnrichment, isDFTAvailable } from "../dft/qe-dft-engine";
 import type { XTBEnrichedFeatures, PhononStability } from "../dft/qe-dft-engine";
+import { estimatePhononStability } from "./crystal-prototypes";
 
 export type DFTSource = "dft-mp" | "dft-aflow" | "dft-xtb" | "analytical";
 
@@ -336,13 +337,18 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
 
   let xtbData: XTBEnrichedFeatures | null = null;
   if (!hasExternalData && isDFTAvailable()) {
-    try {
-      xtbData = await runXTBEnrichment(formula);
-      if (xtbData) {
-        console.log(`[DFT] ${formula}: xTB DFT computed (${xtbData.prototype}): gap=${xtbData.bandGap.toFixed(3)}eV, metallic=${xtbData.isMetallic}, E/atom=${xtbData.totalEnergyPerAtom.toFixed(4)}Ha${xtbData.formationEnergyPerAtom != null ? `, Ef=${xtbData.formationEnergyPerAtom.toFixed(3)}eV/atom` : ""}`);
+    const preFilter = estimatePhononStability(formula);
+    if (!preFilter.stable) {
+      console.log(`[DFT] ${formula}: Pre-filter rejected (score=${preFilter.score.toFixed(2)}): ${preFilter.reasons.join("; ")}`);
+    } else {
+      try {
+        xtbData = await runXTBEnrichment(formula);
+        if (xtbData) {
+          console.log(`[DFT] ${formula}: xTB DFT computed (${xtbData.prototype}): gap=${xtbData.bandGap.toFixed(3)}eV, metallic=${xtbData.isMetallic}, E/atom=${xtbData.totalEnergyPerAtom.toFixed(4)}Ha${xtbData.formationEnergyPerAtom != null ? `, Ef=${xtbData.formationEnergyPerAtom.toFixed(3)}eV/atom` : ""}`);
+        }
+      } catch (err) {
+        xtbData = null;
       }
-    } catch (err) {
-      xtbData = null;
     }
   }
 

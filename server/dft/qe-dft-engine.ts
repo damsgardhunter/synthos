@@ -2,6 +2,7 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { getElementData } from "../learning/elemental-data";
+import { fillPrototype } from "../learning/crystal-prototypes";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -279,6 +280,32 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     cOverA: 1.15,
     stoichiometryPattern: "A1B6",
   },
+  {
+    name: "MX2",
+    fractionalPositions: [
+      { site: "A", x: 0.333, y: 0.667, z: 0.25 },
+      { site: "B", x: 0.333, y: 0.667, z: 0.621 },
+      { site: "B", x: 0.333, y: 0.667, z: -0.121 },
+    ],
+    latticeType: "hexagonal",
+    aRatio: 1.0,
+    cOverA: 3.9,
+    stoichiometryPattern: "A1B2",
+  },
+  {
+    name: "Anti-perovskite",
+    fractionalPositions: [
+      { site: "A", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "C", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "C", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "C", x: 0.0, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A1B1C3",
+  },
 ];
 
 function matchPrototype(counts: Record<string, number>): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
@@ -403,6 +430,17 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
 
   if (elements.length === 0) {
     return { atoms: [], prototype: "empty" };
+  }
+
+  const chemProto = fillPrototype(formula);
+  if (chemProto && chemProto.atoms.length >= 2) {
+    const atomPositions: AtomPosition[] = chemProto.atoms.map(a => ({
+      element: a.element,
+      x: a.x,
+      y: a.y,
+      z: a.z,
+    }));
+    return { atoms: atomPositions, prototype: `${chemProto.templateName} prototype lattice` };
   }
 
   const protoMatch = matchPrototype(counts);

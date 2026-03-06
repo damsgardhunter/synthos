@@ -2267,6 +2267,10 @@ export interface InstabilityProximity {
   sdwInstability: number;
   magneticSusceptibilityPeak: number;
   softPhononCollapse: number;
+  fermiSurfaceNestingStrength: number;
+  dosEfPeakScore: number;
+  vanHoveSingularityScore: number;
+  flatBandInstability: number;
   overallProximity: number;
   nearestBoundary: string;
 }
@@ -2360,6 +2364,55 @@ export function computeInstabilityProximity(
     softPhononCollapse = Math.max(softPhononCollapse, 0.5);
   }
 
+  let fermiSurfaceNestingStrength = 0;
+  const nestingScore = electronic.nestingScore ?? 0;
+  const vanHoveProx = electronic.vanHoveProximity ?? 0;
+  if (nestingScore > 0.7) {
+    fermiSurfaceNestingStrength = Math.min(1.0, nestingScore * 0.9 + (electronic.correlationStrength > 0.5 ? 0.15 : 0));
+  } else if (nestingScore > 0.4) {
+    fermiSurfaceNestingStrength = nestingScore * 0.6;
+  }
+  if (electronic.fermiSurfaceTopology.includes("nesting") || electronic.fermiSurfaceTopology.includes("2D")) {
+    fermiSurfaceNestingStrength = Math.max(fermiSurfaceNestingStrength, 0.4);
+  }
+
+  let dosEfPeakScore = 0;
+  const dosAtFermi = electronic.densityOfStatesAtFermi;
+  if (dosAtFermi > 3.0) {
+    dosEfPeakScore = Math.min(1.0, (dosAtFermi - 3.0) * 0.25 + 0.6);
+  } else if (dosAtFermi > 2.0) {
+    dosEfPeakScore = Math.min(0.6, (dosAtFermi - 2.0) * 0.3 + 0.3);
+  } else if (dosAtFermi > 1.5) {
+    dosEfPeakScore = (dosAtFermi - 1.5) * 0.4;
+  }
+  if (electronic.correlationStrength > 0.6 && dosAtFermi > 1.5) {
+    dosEfPeakScore = Math.min(1.0, dosEfPeakScore + 0.15);
+  }
+
+  let vanHoveSingularityScore = 0;
+  if (vanHoveProx > 0.7) {
+    vanHoveSingularityScore = Math.min(1.0, vanHoveProx * 0.85 + 0.1);
+  } else if (vanHoveProx > 0.4) {
+    vanHoveSingularityScore = vanHoveProx * 0.6;
+  }
+  if (dosEfPeakScore > 0.5 && vanHoveProx > 0.3) {
+    vanHoveSingularityScore = Math.min(1.0, vanHoveSingularityScore + dosEfPeakScore * 0.2);
+  }
+
+  let flatBandInstability = 0;
+  const fbi = electronic.flatBandIndicator ?? 0;
+  if (fbi > 0.7) {
+    flatBandInstability = Math.min(1.0, (fbi - 0.7) * 2.0 + 0.5);
+  } else if (fbi > 0.4) {
+    flatBandInstability = (fbi - 0.4) * 1.2;
+  }
+  if (electronic.mottProximityScore > 0.6 && fbi > 0.5) {
+    flatBandInstability = Math.min(1.0, flatBandInstability + 0.2);
+  }
+  if (electronic.bandFlatness > 0.6) {
+    flatBandInstability = Math.max(flatBandInstability, electronic.bandFlatness * 0.5);
+  }
+
   const scores = [
     { name: "Magnetic QCP", val: magneticQCP },
     { name: "Structural boundary", val: structuralBoundary },
@@ -2368,6 +2421,10 @@ export function computeInstabilityProximity(
     { name: "SDW instability", val: sdwInstability },
     { name: "Magnetic susceptibility peak", val: magneticSusceptibilityPeak },
     { name: "Soft phonon collapse", val: softPhononCollapse },
+    { name: "Fermi surface nesting", val: fermiSurfaceNestingStrength },
+    { name: "DOS(EF) peak", val: dosEfPeakScore },
+    { name: "Van Hove singularity", val: vanHoveSingularityScore },
+    { name: "Flat band instability", val: flatBandInstability },
   ];
 
   const overallProximity = Math.max(...scores.map(s => s.val));
@@ -2381,6 +2438,10 @@ export function computeInstabilityProximity(
     sdwInstability,
     magneticSusceptibilityPeak,
     softPhononCollapse,
+    fermiSurfaceNestingStrength,
+    dosEfPeakScore,
+    vanHoveSingularityScore,
+    flatBandInstability,
     overallProximity,
     nearestBoundary: nearest.name,
   };
@@ -2783,7 +2844,7 @@ export async function runFullPhysicsAnalysis(
   emit("log", {
     phase: "phase-10",
     event: "Instability proximity computed",
-    detail: `${formula}: nearest=${instabilityProximity.nearestBoundary} (${instabilityProximity.overallProximity.toFixed(2)}), QCP=${instabilityProximity.magneticQCP.toFixed(2)}, CDW=${instabilityProximity.cdwInstability.toFixed(2)}, SDW=${instabilityProximity.sdwInstability.toFixed(2)}, MIT=${instabilityProximity.metalInsulatorTransition.toFixed(2)}, chi=${instabilityProximity.magneticSusceptibilityPeak.toFixed(2)}`,
+    detail: `${formula}: nearest=${instabilityProximity.nearestBoundary} (${instabilityProximity.overallProximity.toFixed(2)}), QCP=${instabilityProximity.magneticQCP.toFixed(2)}, CDW=${instabilityProximity.cdwInstability.toFixed(2)}, SDW=${instabilityProximity.sdwInstability.toFixed(2)}, MIT=${instabilityProximity.metalInsulatorTransition.toFixed(2)}, chi=${instabilityProximity.magneticSusceptibilityPeak.toFixed(2)}, nesting=${instabilityProximity.fermiSurfaceNestingStrength.toFixed(2)}, DOS_peak=${instabilityProximity.dosEfPeakScore.toFixed(2)}, VHS=${instabilityProximity.vanHoveSingularityScore.toFixed(2)}, flatBand=${instabilityProximity.flatBandInstability.toFixed(2)}`,
     dataSource: "Physics Engine",
   });
 
