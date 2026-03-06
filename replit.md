@@ -104,10 +104,50 @@ MatSci-∞ is an AI-powered supercomputer platform aimed at accelerating the dis
 - **Ensemble Integration**: GNN gets 40% weight when structure data available, alongside XGBoost (25%) and LLM-NN (35%).
 - **Training**: Trains on known superconductor data with MSE loss, 30-minute cache TTL.
 
+### Massive Candidate Generator (`candidate-generator.ts`)
+- **Element Substitution**: Swaps each element with chemically similar alternatives using expanded 96-element atom swap maps with compatibility maps (carbide_formers, nitride_formers, boride_formers, hydride_formers).
+- **Composition Interpolation**: Interpolates between two promising compositions with integer rounding (10-20 per pair).
+- **Doped Variants**: Adds 1-3 dopant atoms from 14 common dopants at various concentrations (50+ per base).
+- **Composition Sweep**: Enumerates integer stoichiometries up to maxAtoms with MAX_FORMULAS=2000 cap per element set.
+- **Canonical Normalization**: `normalizeFormula()` + `reduceStoichiometry()` + sort by electronegativity before dedup.
+- **Valence Sanity Filter**: Rejects chemically impossible compositions using charge balance heuristic and max oxidation state checks.
+- **Rapid GB Screen**: Runs GB prediction only (no LLM, no physics) to filter 2000 candidates down to top 50 in milliseconds.
+
+### Physics-Aware ML Predictor (`PhysicsPredictor` in `ml-predictor.ts`)
+- **Multi-Target Prediction**: Predicts 4 key physics properties simultaneously: lambda, DOS(EF), omega_log, and hull distance.
+- **Transfer Priors**: Uses elemental data (weighted DOS, Debye temps, Miedema formation energy) as priors when training data < 100 samples.
+- **Uncertainty Estimation**: Computes model variance from tree ensemble disagreement. Returns `uncertainty: number` for each prediction.
+- **Pre-Filter**: Rejects candidates where predicted lambda < 0.3 OR hull_distance > 0.2 eV/atom OR DOS(EF) < 0.5 states/eV.
+- **Self-Reinforcing Loop**: Predicted physics values fed into Tc predictor feature vector. Retrains every 100 cycles.
+
+### Pattern Mining / Theory Generator (`pattern-miner.ts`)
+- **Quantitative Rules**: Decision-tree splitting on top 10 features (lambda, DOS_EF, omegaLog, correlationStrength, metallicity, VEC, dimensionality, nestingScore, hydrogenRatio, anharmonicity). Max 2 conditions per rule.
+- **Rule Validation**: 70/30 cross-validation with F1 > 0.5 threshold. Rules have precision, recall, support counts.
+- **Rule Aging**: `rule.weight *= 0.95` each re-mine cycle. Rules with weight < 0.1 removed.
+- **Screening**: `applyRulesToScreen()` scores candidates by weighted sum of satisfied rules (theory score 0-1).
+- **Integration**: `evolveRules()` runs every 50 cycles. `screenWithPatterns()` filters autonomous loop candidates.
+
+### Structural Mutation Engine (`structural-mutator.ts`)
+- **Prototype Assignment**: Assigns structure prototypes (rocksalt, perovskite, hexagonal, layered, bcc, fcc, spinel, fluorite, rutile, pyrite) from composition.
+- **Distorted Lattices**: Tetragonal (c/a ±10-30%), orthorhombic (b/a), monoclinic tilt (beta 85-95°). Energy penalty filter > 0.5 eV/atom.
+- **Layered Structures**: Ruddlesden-Popper series (n=1,2,3), spacer layers, superlattices.
+- **Vacancy Structures**: 5-25% element removal, ordered vacancies, anti-site defects. Energy penalty filter > 0.5 eV.
+- **Strain Variants**: Epitaxial strain from 5 substrates (SrTiO3, LaAlO3, MgO, Si, Al2O3) with lattice mismatch calculation.
+- **Integration**: Runs on top 10 candidates every 10 cycles. Viable mutants screened with GB and inserted as candidates.
+
+### Multi-Dimensional Phase Explorer (`phase-explorer.ts`)
+- **Composition Space**: 2-4 element composition grid scans at coarse (10%) then fine (2%) resolution.
+- **Pressure-Composition Sweep**: 2D adaptive sweep: composition x pressure 0-300 GPa. Identifies optimal (composition, pressure) pairs.
+- **Temperature Stability**: Sweeps 0-1000K estimating phonon stability, Gibbs free energy decomposition risk, max operating temperature.
+- **Adaptive Sampling**: Coarse scan → identify peaks → refine around peaks. Reduces compute.
+- **Uncertainty-Aware Selection**: `score = predictedTc + sqrt(modelVariance) * 15`. Encourages exploration of uncertain regions.
+- **Integration**: `findOptimalRegion()` runs every 20 cycles on focused element sets. Hotspots fed as seed compositions into candidate generator.
+
 ### Autonomous Discovery Loop
-- **Fast-Path Screening**: Generates 5-8 combinatorial formulas per cycle from focused element sets.
+- **Massive Generation Pipeline**: Generates 500-2000 candidates per cycle via element substitution, interpolation, doping, and composition sweep.
+- **Multi-Stage Filtering**: GB pre-screen (top 50) → pattern mining filter → physics ML pre-filter → full pipeline.
 - **Full Pipeline**: Each candidate runs through GB pre-screen -> structure prediction -> convex hull -> full physics (alpha2F) -> Tc cap -> synthesizability check -> store.
-- **Stats Tracking**: Total screened, passed, pass rate, throughput/hour, best Tc, GNN retrain count.
+- **Stats Tracking**: Total screened, passed, pass rate, throughput/hour, best Tc, GNN retrain count, physics ML training size.
 - **API Endpoint**: `autonomousLoopStats` included in `/api/engine/memory` response.
 
 ### NLP Engine

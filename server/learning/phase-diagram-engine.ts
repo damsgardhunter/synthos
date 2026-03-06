@@ -26,7 +26,7 @@ function getTotalAtoms(counts: Record<string, number>): number {
   return total > 0 ? total : 1;
 }
 
-function computeMiedemaFormationEnergy(formula: string): number {
+export function computeMiedemaFormationEnergy(formula: string): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   if (elements.length < 2) return 0;

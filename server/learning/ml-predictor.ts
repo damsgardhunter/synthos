@@ -96,7 +96,7 @@ const PNICTOGENS = ["N","P","As","Sb","Bi"];
 function parseFormula(formula: string): string[] {
   const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const matches = cleaned.match(/[A-Z][a-z]*/g);
-  return matches ? [...new Set(matches)] : [];
+  return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -711,3 +711,306 @@ Return JSON with:
 
   return { candidates, insights };
 }
+
+export interface PhysicsPrediction {
+  lambda: number;
+  dosAtEF: number;
+  omegaLog: number;
+  hullDistance: number;
+  lambdaUncertainty: number;
+  dosUncertainty: number;
+  omegaUncertainty: number;
+  hullUncertainty: number;
+}
+
+interface PhysicsTrainingSample {
+  features: number[];
+  lambda: number;
+  dosAtEF: number;
+  omegaLog: number;
+  hullDistance: number;
+}
+
+interface SimpleTree {
+  featureIndex: number;
+  threshold: number;
+  left: SimpleTree | number;
+  right: SimpleTree | number;
+}
+
+interface PhysicsGBModel {
+  trees: SimpleTree[];
+  basePrediction: number;
+  learningRate: number;
+  trainedAt: number;
+}
+
+function buildSimpleTree(
+  X: number[][], residuals: number[], indices: number[],
+  depth: number, maxDepth: number, minSamples: number
+): SimpleTree | number {
+  if (depth >= maxDepth || indices.length < minSamples) {
+    const sum = indices.reduce((s, i) => s + residuals[i], 0);
+    return sum / indices.length;
+  }
+  const nFeatures = X[0].length;
+  let bestFeature = -1, bestImprovement = -Infinity, bestThreshold = 0;
+  let bestLeft: number[] = [], bestRight: number[] = [];
+  for (let fi = 0; fi < nFeatures; fi++) {
+    const pairs = indices.map(i => ({ idx: i, val: X[i][fi], res: residuals[i] })).sort((a, b) => a.val - b.val);
+    const totalSum = pairs.reduce((s, p) => s + p.res, 0);
+    let leftSum = 0;
+    for (let i = 0; i < pairs.length - 1; i++) {
+      leftSum += pairs[i].res;
+      if (pairs[i].val === pairs[i + 1].val) continue;
+      const lc = i + 1, rc = pairs.length - lc;
+      const rightSum = totalSum - leftSum;
+      const imp = (leftSum * leftSum) / lc + (rightSum * rightSum) / rc;
+      if (imp > bestImprovement && lc >= 2 && rc >= 2) {
+        bestImprovement = imp;
+        bestFeature = fi;
+        bestThreshold = (pairs[i].val + pairs[i + 1].val) / 2;
+        bestLeft = pairs.slice(0, i + 1).map(p => p.idx);
+        bestRight = pairs.slice(i + 1).map(p => p.idx);
+      }
+    }
+  }
+  if (bestFeature === -1) {
+    return indices.reduce((s, i) => s + residuals[i], 0) / indices.length;
+  }
+  return {
+    featureIndex: bestFeature,
+    threshold: bestThreshold,
+    left: buildSimpleTree(X, residuals, bestLeft, depth + 1, maxDepth, minSamples),
+    right: buildSimpleTree(X, residuals, bestRight, depth + 1, maxDepth, minSamples),
+  };
+}
+
+function predictSimpleTree(tree: SimpleTree | number, x: number[]): number {
+  if (typeof tree === "number") return tree;
+  return x[tree.featureIndex] <= tree.threshold
+    ? predictSimpleTree(tree.left, x)
+    : predictSimpleTree(tree.right, x);
+}
+
+function trainPhysicsGB(X: number[][], y: number[], nTrees = 100, lr = 0.1, maxDepth = 3): PhysicsGBModel {
+  const n = X.length;
+  const allIdx = Array.from({ length: n }, (_, i) => i);
+  const basePred = y.reduce((s, v) => s + v, 0) / n;
+  const preds = new Array(n).fill(basePred);
+  const trees: SimpleTree[] = [];
+  for (let iter = 0; iter < nTrees; iter++) {
+    const res = y.map((yi, i) => yi - preds[i]);
+    const tree = buildSimpleTree(X, res, allIdx, 0, maxDepth, 3);
+    if (typeof tree === "number") break;
+    trees.push(tree);
+    for (let i = 0; i < n; i++) preds[i] += lr * predictSimpleTree(tree, X[i]);
+    const mse = y.reduce((s, yi, i) => s + (yi - preds[i]) ** 2, 0) / n;
+    if (mse < 0.01) break;
+  }
+  return { trees, basePrediction: basePred, learningRate: lr, trainedAt: Date.now() };
+}
+
+function predictPhysicsGB(model: PhysicsGBModel, x: number[]): number {
+  let pred = model.basePrediction;
+  for (const tree of model.trees) pred += model.learningRate * predictSimpleTree(tree, x);
+  return pred;
+}
+
+function computeTreeEnsembleUncertainty(model: PhysicsGBModel, x: number[]): number {
+  if (model.trees.length < 4) return 1.0;
+  const blockSize = Math.max(1, Math.floor(model.trees.length / 4));
+  const blockPreds: number[] = [];
+  for (let b = 0; b < 4; b++) {
+    let pred = model.basePrediction;
+    const start = b * blockSize;
+    const end = Math.min(start + blockSize, model.trees.length);
+    for (let i = start; i < end; i++) pred += model.learningRate * predictSimpleTree(model.trees[i], x);
+    blockPreds.push(pred);
+  }
+  const mean = blockPreds.reduce((s, v) => s + v, 0) / blockPreds.length;
+  const variance = blockPreds.reduce((s, v) => s + (v - mean) ** 2, 0) / blockPreds.length;
+  return Math.sqrt(variance);
+}
+
+function physicsFeatureVector(f: MLFeatureVector): number[] {
+  return [
+    f.electronPhononLambda,
+    f.metallicity,
+    f.logPhononFreq,
+    f.debyeTemperature,
+    f.correlationStrength,
+    f.valenceElectronConcentration,
+    f.avgElectronegativity,
+    f.enSpread,
+    f.hydrogenRatio,
+    f.avgAtomicRadius,
+    f.avgBulkModulus,
+    f.maxAtomicMass,
+    f.numElements,
+    f.hasTransitionMetal ? 1 : 0,
+    f.hasRareEarth ? 1 : 0,
+    f.hasHydrogen ? 1 : 0,
+    f.cooperPairStrength,
+    f.dimensionalityScore,
+    f.electronDensityEstimate,
+    f.phononCouplingEstimate,
+    f.nestingScore,
+    f.dosAtEF,
+    f.avgSommerfeldGamma,
+    f.orbitalDFraction,
+  ];
+}
+
+export class PhysicsPredictor {
+  private lambdaModel: PhysicsGBModel | null = null;
+  private dosModel: PhysicsGBModel | null = null;
+  private omegaModel: PhysicsGBModel | null = null;
+  private hullModel: PhysicsGBModel | null = null;
+  private trainingSamples: PhysicsTrainingSample[] = [];
+  private lastTrainedCycle = 0;
+  private sampleCount = 0;
+
+  addTrainingSample(features: MLFeatureVector, lambda: number, dosAtEF: number, omegaLog: number, hullDistance: number): void {
+    const fv = physicsFeatureVector(features);
+    if (fv.some(v => !Number.isFinite(v))) return;
+    this.trainingSamples.push({ features: fv, lambda, dosAtEF, omegaLog, hullDistance });
+    this.sampleCount++;
+  }
+
+  retrain(currentCycle: number): void {
+    if (this.trainingSamples.length < 5) return;
+    const X = this.trainingSamples.map(s => s.features);
+    const yLambda = this.trainingSamples.map(s => s.lambda);
+    const yDos = this.trainingSamples.map(s => s.dosAtEF);
+    const yOmega = this.trainingSamples.map(s => s.omegaLog);
+    const yHull = this.trainingSamples.map(s => s.hullDistance);
+    const nTrees = this.trainingSamples.length < 100 ? 50 : 100;
+    this.lambdaModel = trainPhysicsGB(X, yLambda, nTrees, 0.1, 3);
+    this.dosModel = trainPhysicsGB(X, yDos, nTrees, 0.1, 3);
+    this.omegaModel = trainPhysicsGB(X, yOmega, nTrees, 0.1, 3);
+    this.hullModel = trainPhysicsGB(X, yHull, nTrees, 0.1, 3);
+    this.lastTrainedCycle = currentCycle;
+  }
+
+  shouldRetrain(currentCycle: number): boolean {
+    return (currentCycle - this.lastTrainedCycle) >= 100 || (this.lambdaModel === null && this.trainingSamples.length >= 5);
+  }
+
+  private transferPriorLambda(features: MLFeatureVector): { value: number; uncertainty: number } {
+    const lambda = features.electronPhononLambda;
+    const eta = features.avgSommerfeldGamma > 0
+      ? 0.3 + features.avgSommerfeldGamma * 0.05
+      : features.hasTransitionMetal ? 0.7 : 0.4;
+    const massWeight = features.maxAtomicMass > 0 ? Math.sqrt(50 / features.maxAtomicMass) : 1.0;
+    const priorLambda = Math.max(0.05, Math.min(3.5, lambda > 0.1 ? lambda : eta * massWeight));
+    return { value: priorLambda, uncertainty: 0.5 };
+  }
+
+  private transferPriorDOS(features: MLFeatureVector): { value: number; uncertainty: number } {
+    const dos = features.dosAtEF;
+    if (dos > 0.1) return { value: dos, uncertainty: 0.4 };
+    const gamma = features.avgSommerfeldGamma;
+    if (gamma > 0) {
+      const nEf = gamma / 2.359;
+      return { value: Math.max(0.1, nEf), uncertainty: 0.35 };
+    }
+    const vec = features.valenceElectronConcentration;
+    const estimatedDos = vec > 0 ? vec / 8.0 : 0.5;
+    return { value: Math.max(0.1, estimatedDos), uncertainty: 0.6 };
+  }
+
+  private transferPriorOmega(features: MLFeatureVector): { value: number; uncertainty: number } {
+    const debye = features.debyeTemperature;
+    if (debye > 0) {
+      const omegaLog = debye * 0.695 * 0.65;
+      return { value: Math.max(50, omegaLog), uncertainty: 0.35 };
+    }
+    const bulkMod = features.avgBulkModulus;
+    const mass = features.maxAtomicMass;
+    if (bulkMod > 0 && mass > 0) {
+      const est = Math.sqrt(bulkMod / mass) * 50;
+      return { value: Math.max(50, est), uncertainty: 0.45 };
+    }
+    return { value: 200, uncertainty: 0.6 };
+  }
+
+  private transferPriorHull(features: MLFeatureVector): { value: number; uncertainty: number } {
+    const formEnergy = features.formationEnergy;
+    if (formEnergy !== null && formEnergy !== undefined) {
+      const hull = formEnergy > 0 ? formEnergy * 0.5 : Math.abs(formEnergy) * 0.05;
+      return { value: Math.max(0, Math.min(1.0, hull)), uncertainty: 0.3 };
+    }
+    const enSpread = features.enSpread;
+    const nEl = features.numElements;
+    let priorHull = 0.1 + nEl * 0.02;
+    if (enSpread > 2.0) priorHull += 0.05;
+    if (features.hasTransitionMetal && features.numElements <= 3) priorHull -= 0.03;
+    return { value: Math.max(0, Math.min(1.0, priorHull)), uncertainty: 0.5 };
+  }
+
+  predict(features: MLFeatureVector): PhysicsPrediction {
+    const fv = physicsFeatureVector(features);
+    const useModel = this.lambdaModel && this.dosModel && this.omegaModel && this.hullModel
+      && !fv.some(v => !Number.isFinite(v));
+
+    if (useModel) {
+      const lambda = Math.max(0, predictPhysicsGB(this.lambdaModel!, fv));
+      const dos = Math.max(0, predictPhysicsGB(this.dosModel!, fv));
+      const omega = Math.max(0, predictPhysicsGB(this.omegaModel!, fv));
+      const hull = Math.max(0, predictPhysicsGB(this.hullModel!, fv));
+
+      const lambdaU = computeTreeEnsembleUncertainty(this.lambdaModel!, fv);
+      const dosU = computeTreeEnsembleUncertainty(this.dosModel!, fv);
+      const omegaU = computeTreeEnsembleUncertainty(this.omegaModel!, fv);
+      const hullU = computeTreeEnsembleUncertainty(this.hullModel!, fv);
+
+      if (this.trainingSamples.length < 100) {
+        const priorL = this.transferPriorLambda(features);
+        const priorD = this.transferPriorDOS(features);
+        const priorO = this.transferPriorOmega(features);
+        const priorH = this.transferPriorHull(features);
+        const w = Math.min(1.0, this.trainingSamples.length / 100);
+        return {
+          lambda: lambda * w + priorL.value * (1 - w),
+          dosAtEF: dos * w + priorD.value * (1 - w),
+          omegaLog: omega * w + priorO.value * (1 - w),
+          hullDistance: hull * w + priorH.value * (1 - w),
+          lambdaUncertainty: lambdaU * w + priorL.uncertainty * (1 - w),
+          dosUncertainty: dosU * w + priorD.uncertainty * (1 - w),
+          omegaUncertainty: omegaU * w + priorO.uncertainty * (1 - w),
+          hullUncertainty: hullU * w + priorH.uncertainty * (1 - w),
+        };
+      }
+
+      return {
+        lambda, dosAtEF: dos, omegaLog: omega, hullDistance: hull,
+        lambdaUncertainty: lambdaU, dosUncertainty: dosU,
+        omegaUncertainty: omegaU, hullUncertainty: hullU,
+      };
+    }
+
+    const priorL = this.transferPriorLambda(features);
+    const priorD = this.transferPriorDOS(features);
+    const priorO = this.transferPriorOmega(features);
+    const priorH = this.transferPriorHull(features);
+    return {
+      lambda: priorL.value, dosAtEF: priorD.value,
+      omegaLog: priorO.value, hullDistance: priorH.value,
+      lambdaUncertainty: priorL.uncertainty, dosUncertainty: priorD.uncertainty,
+      omegaUncertainty: priorO.uncertainty, hullUncertainty: priorH.uncertainty,
+    };
+  }
+
+  preFilter(prediction: PhysicsPrediction): { pass: boolean; reason: string } {
+    if (prediction.lambda < 0.3) return { pass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < 0.3` };
+    if (prediction.hullDistance > 0.2) return { pass: false, reason: `hull_dist=${prediction.hullDistance.toFixed(3)} > 0.2 eV/atom` };
+    if (prediction.dosAtEF < 0.5) return { pass: false, reason: `DOS(EF)=${prediction.dosAtEF.toFixed(2)} < 0.5 states/eV` };
+    return { pass: true, reason: "passed" };
+  }
+
+  getTrainingSize(): number { return this.trainingSamples.length; }
+  getLastTrainedCycle(): number { return this.lastTrainedCycle; }
+}
+
+export const physicsPredictor = new PhysicsPredictor();

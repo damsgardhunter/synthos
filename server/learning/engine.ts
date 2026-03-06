@@ -13,14 +13,19 @@ import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty, requiresQuantitativeContent } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
-import { extractFeatures } from "./ml-predictor";
+import { extractFeatures, physicsPredictor } from "./ml-predictor";
+import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords } from "./utils";
+import { runMassiveGeneration, type MassiveGenerationStats } from "./candidate-generator";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
 import { runConvexHullAnalysis } from "./phase-diagram-engine";
 import { invalidateGNNModel, trainGNNSurrogate } from "./graph-neural-net";
+import { runStructuralMutations } from "./structural-mutator";
+import { evolveRules, screenWithPatterns, getMinedRules } from "./pattern-miner";
+import { findOptimalRegion, getPhaseExplorationSeedFormulas } from "./phase-explorer";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -787,6 +792,18 @@ async function runPhase10_Physics() {
         if (updatedTc !== currentTc) {
           emit("log", { phase: "phase-10", event: "Tc updated by physics", detail: `${candidate.formula}: ML estimate ${currentTc}K -> Eliashberg ${updatedTc}K (lambda=${result.coupling.lambda.toFixed(2)}, Hc2=${result.criticalFields.upperCriticalField}T, ${result.correlation.regime}, ${result.competingPhases.length} competing phases)`, dataSource: "Physics Engine" });
         }
+
+        try {
+          const trainFeatures = extractFeatures(candidate.formula);
+          const hullDist = result.competingPhases.length > 0 ? 0.05 * result.competingPhases.length : 0.02;
+          physicsPredictor.addTrainingSample(
+            trainFeatures,
+            result.coupling.lambda,
+            result.electronicStructure.densityOfStatesAtFermi,
+            result.coupling.omegaLog,
+            hullDist
+          );
+        } catch {}
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
@@ -1219,7 +1236,7 @@ async function runPhase13_SynthesisReasoning() {
   }
 }
 
-async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: boolean; tc: number; reason: string }> {
+async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
     const existingCandidate = await storage.getSuperconductorByFormula(formula);
     if (existingCandidate) {
@@ -1233,14 +1250,20 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     }
 
     const gbResult = gbPredict(features);
-    if (gbResult.predictedTc < 5) {
-      return { passed: false, tc: gbResult.predictedTc, reason: "low-gb-tc" };
+    if (gbResult.tcPredicted < 5) {
+      return { passed: false, tc: gbResult.tcPredicted, reason: "low-gb-tc" };
+    }
+
+    const physicsPred = physicsPredictor.predict(features);
+    const preFilter = physicsPredictor.preFilter(physicsPred);
+    if (!preFilter.pass) {
+      return { passed: false, tc: gbResult.tcPredicted, reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
     }
 
     const candidate = {
       formula,
       family,
-      predictedTc: Math.round(gbResult.predictedTc),
+      predictedTc: Math.round(gbResult.tcPredicted),
       confidence: "low" as const,
       source: "autonomous-loop",
       ensembleScore: 0.3,
@@ -1248,18 +1271,29 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       verificationStage: 0,
     };
 
-    const structureBatch = await runStructurePredictionBatch(emit, [candidate]);
+    const structureBatch = await runStructurePredictionBatch(emit, [candidate as any]);
     const structureResult = structureBatch?.[0];
 
     try {
       await runConvexHullAnalysis(emit, formula);
     } catch {}
 
-    const physicsResult = await runFullPhysicsAnalysis(emit, candidate);
+    const physicsResult = await runFullPhysicsAnalysis(emit, candidate as any);
     const rawTc = physicsResult.eliashberg.predictedTc;
     const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
-    let finalTc = physicsTc > 0 ? Math.round(physicsTc) : Math.round(gbResult.predictedTc);
+    let finalTc = physicsTc > 0 ? Math.round(physicsTc) : Math.round(gbResult.tcPredicted);
     finalTc = applyAmbientTcCap(finalTc, physicsResult.coupling.lambda, 0, physicsResult.electronicStructure.metallicity ?? 0.5, formula);
+
+    try {
+      const hullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
+      physicsPredictor.addTrainingSample(
+        features,
+        physicsResult.coupling.lambda,
+        physicsResult.electronicStructure.densityOfStatesAtFermi,
+        physicsResult.coupling.omegaLog,
+        hullDist
+      );
+    } catch {}
 
     if (finalTc < 10) {
       return { passed: false, tc: finalTc, reason: "low-physics-tc" };
@@ -1309,13 +1343,14 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       autonomousBestTc = finalTc;
     }
 
-    return { passed: true, tc: finalTc, reason: "accepted" };
+    return { passed: true, tc: finalTc, reason: "accepted", physicsPred };
   } catch (err: any) {
     return { passed: false, tc: 0, reason: `error: ${err.message?.slice(0, 80)}` };
   }
 }
 
 function generateFastPathFormulas(focusArea: string): string[] {
+  const topCandidatesForGen: { formula: string; predictedTc?: number }[] = [];
   const scElements: Record<string, string[][]> = {
     Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Zr","C"],["Hf","C"],["Ta","C"],["W","C"]],
     Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mo","B"],["V","B"],["Ta","B"],["Mg","B"],["Ca","B"]],
@@ -1325,19 +1360,12 @@ function generateFastPathFormulas(focusArea: string): string[] {
     Cuprates: [["Ba","Cu","O"],["La","Cu","O"],["Y","Ba","Cu","O"],["Bi","Sr","Cu","O"]],
   };
   const basePairs = scElements[focusArea] || scElements["Carbides"];
-  const results: string[] = [];
-  const dopants = ["Nb","V","Ti","Zr","Mo","Ta","Mg","Ca","La","Y","B","N","Si"];
-  for (let i = 0; i < 8 && results.length < 8; i++) {
-    const base = basePairs[Math.floor(Math.random() * basePairs.length)];
-    const dopant = dopants[Math.floor(Math.random() * dopants.length)];
-    if (base.includes(dopant)) continue;
-    const stoich1 = Math.floor(Math.random() * 3) + 1;
-    const stoich2 = Math.floor(Math.random() * 4) + 1;
-    const stoich3 = Math.floor(Math.random() * 3) + 1;
-    const formula = `${base[0]}${stoich1}${dopant}${stoich3}${base.slice(1).map(e => e + stoich2).join("")}`;
-    results.push(formula);
+  for (const pair of basePairs) {
+    topCandidatesForGen.push({ formula: pair.join(""), predictedTc: 20 });
   }
-  return results;
+  const { formulas, stats } = runMassiveGeneration(topCandidatesForGen, focusArea);
+  console.log(`Massive generation: ${stats.totalGenerated} generated, ${stats.uniqueAfterDedup} unique, ${stats.passedPreScreen} passed pre-screen`);
+  return formulas;
 }
 
 async function runAutonomousFastPath() {
@@ -1347,13 +1375,42 @@ async function runAutonomousFastPath() {
 
   try {
     const focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
-    const candidates = generateFastPathFormulas(focusArea);
+
+    let topCandidatesForGen: { formula: string; predictedTc?: number }[] = [];
+    try {
+      const existingTop = await storage.getSuperconductorCandidatesByTc(20);
+      topCandidatesForGen = existingTop.map(c => ({ formula: c.formula, predictedTc: c.predictedTc ?? 0 }));
+    } catch {}
+
+    const { formulas: candidates, stats: genStats } = runMassiveGeneration(topCandidatesForGen, focusArea);
+
+    emit("log", {
+      phase: "engine",
+      event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen`,
+      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Feeding top ${candidates.length} through autonomous pipeline.`,
+      dataSource: "Candidate Generator",
+    });
 
     let passed = 0;
     let bestTcThisBatch = 0;
     const failedFormulas: { formula: string; tc: number }[] = [];
 
-    for (const formula of candidates) {
+    const activeRules = getMinedRules();
+    let filteredCandidates = candidates;
+    let patternFiltered = 0;
+    if (activeRules.length > 0) {
+      const patternScores = screenWithPatterns(candidates);
+      const scored = patternScores.sort((a, b) => b.theoryScore - a.theoryScore);
+      const beforeCount = candidates.length;
+      filteredCandidates = scored
+        .filter(s => s.theoryScore >= 0.3)
+        .map(s => s.formula);
+      patternFiltered = beforeCount - filteredCandidates.length;
+      if (filteredCandidates.length === 0) filteredCandidates = candidates;
+    }
+
+    let physicsPrefiltered = 0;
+    for (const formula of filteredCandidates) {
       if (!shouldContinue()) break;
       autonomousTotalScreened++;
 
@@ -1362,8 +1419,18 @@ async function runAutonomousFastPath() {
         passed++;
         autonomousTotalPassed++;
         if (result.tc > bestTcThisBatch) bestTcThisBatch = result.tc;
+        if (result.physicsPred) {
+          const p = result.physicsPred;
+          emit("log", {
+            phase: "engine",
+            event: "Physics ML prediction",
+            detail: `Physics ML: lambda=${p.lambda.toFixed(2)}±${p.lambdaUncertainty.toFixed(2)}, DOS=${p.dosAtEF.toFixed(2)}±${p.dosUncertainty.toFixed(2)}, omega=${p.omegaLog.toFixed(0)}±${p.omegaUncertainty.toFixed(0)}, hull=${p.hullDistance.toFixed(3)}±${p.hullUncertainty.toFixed(3)} for ${formula}`,
+            dataSource: "Physics ML",
+          });
+        }
       } else {
         failedFormulas.push({ formula, tc: result.tc });
+        if (result.reason.startsWith("physics-prefilter")) physicsPrefiltered++;
       }
     }
 
@@ -1379,10 +1446,22 @@ async function runAutonomousFastPath() {
       } catch {}
     }
 
+    if (physicsPredictor.shouldRetrain(cycleCount)) {
+      physicsPredictor.retrain(cycleCount);
+      emit("log", {
+        phase: "engine",
+        event: "Physics ML retrained",
+        detail: `PhysicsPredictor retrained on ${physicsPredictor.getTrainingSize()} samples at cycle ${cycleCount}`,
+        dataSource: "Physics ML",
+      });
+    }
+
+    const patternDetail = patternFiltered > 0 ? ` Pattern filter removed ${patternFiltered}/${candidates.length} (${activeRules.length} rules active).` : "";
+    const physicsDetail = physicsPrefiltered > 0 ? ` Physics pre-filter rejected ${physicsPrefiltered}/${filteredCandidates.length}.` : "";
     emit("log", {
       phase: "engine",
-      event: "Autonomous loop: " + candidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `Fast-path screening of ${candidates.length} candidates from ${focusArea}. Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}.`,
+      event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
+      detail: `Massive generation pipeline from ${focusArea} (${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique).${patternDetail}${physicsDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
       dataSource: "Autonomous Loop",
     });
   } finally {
@@ -1590,8 +1669,161 @@ async function runLearningCycle() {
         }
       }
 
+      if (state === "running" && cycleCount % 50 === 0) {
+        try {
+          await evolveRules(emit);
+        } catch (err: any) {
+          emit("log", {
+            phase: "engine",
+            event: "Pattern mining error",
+            detail: err.message?.slice(0, 150) || "unknown",
+            dataSource: "Pattern Miner",
+          });
+        }
+      }
+
       if (state === "running") {
         await runPhase13_SynthesisReasoning();
+      }
+
+      if (state === "running" && cycleCount % 10 === 0) {
+        try {
+          const topForMutation = await storage.getSuperconductorCandidatesByTc(10);
+          if (topForMutation.length > 0) {
+            const mutationInput = topForMutation.map(c => ({
+              formula: c.formula,
+              predictedTc: c.predictedTc,
+            }));
+            const mutResult = runStructuralMutations(mutationInput, emit);
+
+            let mutInserted = 0;
+            const mutantFormulas = [
+              ...mutResult.distorted.filter(d => d.energyPenalty < 0.3).map(d => d.formula),
+              ...mutResult.layered.map(l => l.formula),
+              ...mutResult.vacancy.map(v => v.formula),
+              ...mutResult.strained.filter(s => Math.abs(s.strainPercent) < 5).map(s => s.formula),
+            ];
+            for (const mf of mutantFormulas.slice(0, 20)) {
+              if (!shouldContinue()) break;
+              const existing = await storage.getSuperconductorByFormula(mf);
+              if (!existing) {
+                const features = extractFeatures(mf);
+                const gb = gbPredict(features);
+                if (gb.tcPredicted >= 10) {
+                  const lambdaML = features.electronPhononLambda ?? 0;
+                  const metallicityML = features.metallicity ?? 0.5;
+                  let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+                  rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, mf);
+                  const id = `sc-mut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                  try {
+                    await storage.insertSuperconductorCandidate({
+                      id,
+                      name: mf,
+                      formula: mf,
+                      predictedTc: rawTc,
+                      pressureGpa: null,
+                      meissnerEffect: false,
+                      zeroResistance: false,
+                      cooperPairMechanism: "Structural mutation",
+                      crystalStructure: null,
+                      quantumCoherence: 0.5,
+                      stabilityScore: features.cooperPairStrength,
+                      synthesisPath: null,
+                      mlFeatures: features as any,
+                      xgboostScore: gb.score,
+                      neuralNetScore: 0.5,
+                      ensembleScore: Math.min(0.9, (gb.score + 0.5) / 2),
+                      roomTempViable: false,
+                      status: "theoretical",
+                      notes: "[structural-mutation]",
+                      electronPhononCoupling: lambdaML || null,
+                      logPhononFrequency: features.logPhononFreq ?? null,
+                      coulombPseudopotential: 0.12,
+                      pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                      pairingMechanism: "phonon-mediated",
+                      correlationStrength: features.correlationStrength ?? null,
+                      dimensionality: "3D",
+                      fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+                      uncertaintyEstimate: 0.6,
+                      verificationStage: 0,
+                      dataConfidence: "low",
+                    });
+                    totalScCandidates++;
+                    mutInserted++;
+                  } catch {}
+                }
+              }
+            }
+            if (mutInserted > 0) {
+              emit("log", {
+                phase: "engine",
+                event: "Structural mutation candidates inserted",
+                detail: `${mutInserted} viable mutant candidates from ${mutResult.totalGenerated} structural variants`,
+                dataSource: "Structural Mutator",
+              });
+            }
+          }
+        } catch (err: any) {
+          emit("log", {
+            phase: "engine",
+            event: "Structural mutation error",
+            detail: err.message?.slice(0, 150) || "unknown",
+            dataSource: "Structural Mutator",
+          });
+        }
+      }
+
+      if (state === "running" && cycleCount >= 20 && cycleCount % 20 === 0) {
+        try {
+          const focusFamily = currentStrategyFocusAreas[0]?.area || "Carbides";
+          const FAMILY_ELEMENT_SETS: Record<string, string[][]> = {
+            Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Nb","Ti","C"],["Nb","Mo","C"]],
+            Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mg","B"],["Nb","Ti","B"]],
+            Nitrides: [["Nb","N"],["Ti","N"],["Zr","N"],["V","N"],["Nb","Ti","N"]],
+            Hydrides: [["La","H"],["Y","H"],["Ca","H"],["Sr","H"],["La","Y","H"]],
+            Intermetallics: [["Nb","Sn"],["V","Si"],["Nb","Ge"],["Nb","Al"]],
+          };
+          const elementSets = FAMILY_ELEMENT_SETS[focusFamily] || FAMILY_ELEMENT_SETS["Carbides"];
+          const chosenSet = elementSets[cycleCount % elementSets.length];
+          const optimalResults = findOptimalRegion(chosenSet, emit);
+          const seedFormulas = optimalResults
+            .filter(r => r.predictedTc > 10 && r.hullDistance < 0.3)
+            .map(r => r.formula)
+            .slice(0, 5);
+          if (seedFormulas.length > 0) {
+            for (const sf of seedFormulas) {
+              if (!shouldContinue()) break;
+              const existing = await storage.getSuperconductorByFormula(sf);
+              if (!existing) {
+                const features = extractFeatures(sf);
+                const gb = gbPredict(features);
+                if (gb.tcPredicted >= 10) {
+                  try {
+                    await storage.insertSuperconductorCandidate({
+                      formula: normalizeFormula(sf),
+                      predictedTc: Math.round(gb.tcPredicted),
+                      confidence: "low",
+                      source: "phase-explorer",
+                      family: classifyFamily(sf),
+                      ensembleScore: Math.min(0.9, gb.score),
+                      verificationStage: 0,
+                      notes: `[phase-explorer: optimal from ${chosenSet.join("-")} scan]`,
+                    });
+                    totalScCandidates++;
+                    recentNewCandidates++;
+                  } catch {}
+                }
+              }
+            }
+          }
+        } catch (err: any) {
+          emit("log", {
+            phase: "engine",
+            event: "Phase exploration error",
+            detail: err.message?.slice(0, 150) || "unknown",
+            dataSource: "Phase Explorer",
+          });
+        }
       }
 
       if (state === "running" && cycleCount >= 10) {
