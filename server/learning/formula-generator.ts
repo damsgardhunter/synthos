@@ -28,6 +28,7 @@ let applicationIndex = 0;
 const recentlyGenerated: string[] = [];
 let inverseDesignMode = false;
 let boundaryHuntingMode = false;
+let chemicalSpaceExpansionMode = false;
 
 export function setInverseDesignMode(enabled: boolean): void {
   inverseDesignMode = enabled;
@@ -37,8 +38,12 @@ export function setBoundaryHuntingMode(enabled: boolean): void {
   boundaryHuntingMode = enabled;
 }
 
-export function getGenerationModes(): { inverseDesign: boolean; boundaryHunting: boolean } {
-  return { inverseDesign: inverseDesignMode, boundaryHunting: boundaryHuntingMode };
+export function setChemicalSpaceExpansionMode(enabled: boolean): void {
+  chemicalSpaceExpansionMode = enabled;
+}
+
+export function getGenerationModes(): { inverseDesign: boolean; boundaryHunting: boolean; chemicalSpaceExpansion: boolean } {
+  return { inverseDesign: inverseDesignMode, boundaryHunting: boundaryHuntingMode, chemicalSpaceExpansion: chemicalSpaceExpansionMode };
 }
 
 export function getNextTargetApplication(): string {
@@ -94,6 +99,10 @@ export async function generateNovelFormulas(
 
   if (boundaryHuntingMode) {
     strategyContext += `\n\nBOUNDARY HUNTING MODE ACTIVE: Design materials at the edge of phase instabilities. Target: (1) compositions near magnetic quantum critical points (almost-ferromagnetic metals, doped antiferromagnets), (2) materials at structural phase boundaries (tolerance factor ~0.85 or ~1.05), (3) systems near metal-insulator transitions (correlated electron systems with U/W ~ 1), (4) compounds prone to charge density wave instabilities. Place compositions AT the boundary, not safely inside a stable phase.`;
+  }
+
+  if (chemicalSpaceExpansionMode) {
+    strategyContext += `\n\nCHEMICAL SPACE EXPANSION MODE ACTIVE: The search has stagnated severely. You MUST incorporate elements rarely used in superconductor design. Specifically include at least 2 of: Sc, Hf, Zr, Ta, Re, Os, Ir, Ru, Rh, Pd, Pt, Ga, Ge, In, Tl, Cd, Ag, Au, Th, U, Ce, Pr, Nd, Sm, Eu, Gd, Dy, Er, Yb, Lu. Design ternary and quaternary compositions mixing these rare elements with known SC-active elements (Cu, Fe, Nb, B, N, H). Prioritize unexplored stoichiometries and crystal structure types (Laves phases, sigma phases, Heusler alloys, skutterudites, filled pyrochlores).`;
   }
 
   let exclusionContext = "";

@@ -8,6 +8,7 @@ interface MilestoneState {
   maxPipelineStage: number;
   maxFamilyDiversity: number;
   knowledgeThresholds: Set<number>;
+  lastCascadeCycle: number;
 }
 
 const state: MilestoneState = {
@@ -16,6 +17,7 @@ const state: MilestoneState = {
   maxPipelineStage: 0,
   maxFamilyDiversity: 0,
   knowledgeThresholds: new Set(),
+  lastCascadeCycle: -10,
 };
 
 let initialized = false;
@@ -154,13 +156,14 @@ export async function checkMilestones(
       }
     }
 
-    if (cycleInsightCount >= 3) {
+    if (cycleInsightCount >= 3 && (cycleNumber - state.lastCascadeCycle) >= 10) {
       detected.push({
         type: "insight-cascade",
         title: `Insight cascade: ${cycleInsightCount} discoveries`,
         description: `${cycleInsightCount} novel insights discovered in a single cycle. Rapid knowledge accumulation indicates productive exploration.`,
         significance: cycleInsightCount >= 5 ? 3 : 2,
       });
+      state.lastCascadeCycle = cycleNumber;
     }
   } catch {}
 

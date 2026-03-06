@@ -3,13 +3,13 @@ import type { Server } from "http";
 import { storage } from "../storage";
 import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
-import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, getGenerationModes } from "./formula-generator";
+import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode } from "./physics-engine";
-import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch } from "./structure-predictor";
+import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
-import { evaluateInsightNovelty } from "./insight-detector";
+import { evaluateInsightNovelty, requiresQuantitativeContent } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures } from "./ml-predictor";
@@ -72,6 +72,8 @@ let currentStrategyFocusAreas: { area: string; priority: number }[] = [];
 let currentFamilyCounts: Record<string, number> = {};
 let engineTempo: EngineTempo = "exploring";
 let cycleIntervalMs = 15000;
+let exploitCyclesRemaining = 0;
+let currentExploitFamily: string | null = null;
 let totalDFTEnriched = 0;
 let currentStatusMessage = "Initializing research systems";
 let recentTcImproved = false;
@@ -181,7 +183,11 @@ const emit: EventEmitter = (type: string, data: any) => {
       dataSource: data.dataSource || null,
     }).catch(() => {});
     if (data.event === "Novel insight discovered") {
-      cycleInsightsThisCycle++;
+      const detail = data.detail || "";
+      const insightText = detail.replace(/^\[NOVEL \d+%\]\s*/, "");
+      if (requiresQuantitativeContent(insightText)) {
+        cycleInsightsThisCycle++;
+      }
     }
   }
 };
@@ -529,7 +535,7 @@ async function reEvaluateTopCandidates() {
   }
 }
 
-const dftEnrichmentTracker = new Map<number, number>();
+const dftEnrichmentTracker = new Map<string, number>();
 
 async function runDFTEnrichment() {
   if (!shouldContinue()) return;
@@ -895,8 +901,8 @@ async function runPhase11_StructurePrediction() {
 
     if (shouldContinue() && cycleCount % 15 === 0) {
       try {
-        const topForEvo = await storage.getTopSuperconductorCandidates(20);
-        const evoInput = topForEvo.map(c => ({
+        const topForEvo = await storage.getSuperconductorCandidates(20);
+        const evoInput = topForEvo.map((c: any) => ({
           formula: c.formula,
           predictedTc: c.predictedTc ?? 0,
           ensembleScore: c.ensembleScore ?? 0,
@@ -1090,6 +1096,40 @@ async function runLearningCycle() {
         );
       }
 
+      if (cyclesSinceTcImproved >= 12 && cyclesSinceTcImproved < 16) {
+        setMutationIntensity(2);
+        emit("log", {
+          phase: "engine",
+          event: "Tc plateau level-2 diversification",
+          detail: `Tc plateau: ${cyclesSinceTcImproved} cycles without improvement. Increasing mutation magnitude (level 2: wider element swaps).`,
+          dataSource: "Engine",
+        });
+      } else if (cyclesSinceTcImproved >= 16 && cyclesSinceTcImproved < 20) {
+        setMutationIntensity(3);
+        exploitCyclesRemaining = 0;
+        currentExploitFamily = null;
+        emit("log", {
+          phase: "engine",
+          event: "Tc plateau level-3 diversification",
+          detail: `Tc plateau: ${cyclesSinceTcImproved} cycles without improvement. Forcing strategy switch + exotic element substitutions (level 3).`,
+          dataSource: "Engine",
+        });
+      } else if (cyclesSinceTcImproved >= 20) {
+        setMutationIntensity(3);
+        setChemicalSpaceExpansionMode(true);
+        exploitCyclesRemaining = 0;
+        currentExploitFamily = null;
+        emit("log", {
+          phase: "engine",
+          event: "Tc plateau level-4 chemical space expansion",
+          detail: `Tc plateau: ${cyclesSinceTcImproved} cycles without improvement. Activating chemical space expansion: novel elements + unexplored structure types.`,
+          dataSource: "Engine",
+        });
+      } else if (cyclesSinceTcImproved <= 5) {
+        setChemicalSpaceExpansionMode(false);
+        setMutationIntensity(1);
+      }
+
       if (cyclesSinceTcImproved >= 8 && cyclesSinceTcImproved % 8 === 0) {
         const savedMode = getConstraintMode();
         setConstraintMode({
@@ -1205,6 +1245,64 @@ async function runLearningCycle() {
         const prevFocusAreas = currentStrategyFocusAreas.map(f => ({ ...f }));
         const strategy = await analyzeAndEvolveStrategy(emit, cycleCount);
         if (strategy) {
+          const llmTopFamily = strategy.focusAreas[0]?.area || "";
+          const llmTopMaxTc = (strategy.performanceSignals?.familyStats as any)?.[llmTopFamily]?.maxTc ?? 0;
+          const currentMaxTc = currentExploitFamily
+            ? ((strategy.performanceSignals?.familyStats as any)?.[currentExploitFamily]?.maxTc ?? 0)
+            : 0;
+
+          const exploreProbability = 0.15;
+          const shouldRandomExplore = Math.random() < exploreProbability;
+          const underExplored = strategy.performanceSignals?.underExplored as string[] | undefined;
+
+          if (exploitCyclesRemaining > 0 && currentExploitFamily) {
+            const tcGapJustifiesSwitch = llmTopFamily !== currentExploitFamily && llmTopMaxTc > currentMaxTc + 20;
+
+            if (tcGapJustifiesSwitch) {
+              currentExploitFamily = llmTopFamily;
+              exploitCyclesRemaining = 8;
+              emit("log", {
+                phase: "engine",
+                event: "Strategy override",
+                detail: `Switching to ${llmTopFamily} (Tc ${llmTopMaxTc}K vs ${currentMaxTc}K) — large Tc gap overrides exploit window`,
+                dataSource: "Strategy Analyzer",
+              });
+            } else if (shouldRandomExplore && underExplored && underExplored.length > 0) {
+              const randomFamily = underExplored[Math.floor(Math.random() * underExplored.length)];
+              const explorationAreas = [
+                { area: randomFamily, priority: 0.8, reasoning: "Random exploration of under-explored family" },
+                ...strategy.focusAreas.filter(f => f.area !== randomFamily).slice(0, 4),
+              ];
+              strategy.focusAreas = explorationAreas as any;
+              emit("log", {
+                phase: "engine",
+                event: "Exploration probe",
+                detail: `Random exploration: probing ${randomFamily} (${exploitCyclesRemaining} exploit cycles remaining for ${currentExploitFamily})`,
+                dataSource: "Strategy Analyzer",
+              });
+            } else {
+              const currentFamilyArea = strategy.focusAreas.find(f => f.area === currentExploitFamily);
+              if (currentFamilyArea) {
+                currentFamilyArea.priority = Math.max(currentFamilyArea.priority, 0.8);
+              }
+              strategy.focusAreas.sort((a, b) => {
+                if (a.area === currentExploitFamily) return -1;
+                if (b.area === currentExploitFamily) return 1;
+                return b.priority - a.priority;
+              });
+            }
+            exploitCyclesRemaining--;
+          } else {
+            currentExploitFamily = llmTopFamily;
+            exploitCyclesRemaining = 8;
+            emit("log", {
+              phase: "engine",
+              event: "Exploit window started",
+              detail: `Locking onto ${llmTopFamily} for 8 cycles (Tc: ${llmTopMaxTc}K)`,
+              dataSource: "Strategy Analyzer",
+            });
+          }
+
           currentStrategyHint = strategy.focusAreas
             .slice(0, 3)
             .map(f => f.area)

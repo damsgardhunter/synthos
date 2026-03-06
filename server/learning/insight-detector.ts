@@ -82,6 +82,67 @@ function isTextbookKnowledge(insight: string): boolean {
   );
 }
 
+const BANNED_META_PHRASES = [
+  "overemphasis",
+  "remains unexplored",
+  "may mislead",
+  "should be considered",
+  "further investigation needed",
+  "more research required",
+  "warrants further study",
+  "needs more investigation",
+  "deserves attention",
+  "requires further analysis",
+];
+
+const QUANTITATIVE_PROPERTY_NAMES = [
+  "tc", "t_c", "critical temperature", "lambda", "electron-phonon",
+  "dos", "density of states", "nesting", "band gap", "formation energy",
+  "phonon", "omega", "debye", "coupling", "mu*", "coulomb",
+  "pressure", "gpa", "synthesizability", "hull distance",
+  "vanhove", "van hove", "fermi", "metallicity", "coherence",
+];
+
+const CHEMICAL_FORMULA_REGEX = /[A-Z][a-z]?\d+[A-Z]|[A-Z][a-z]?[A-Z][a-z]?\d|(?:La|Ba|Sr|Bi|Mg|Fe|Cu|Nb|Ti|Sc|Zr|Hf|Ta|Cr|Mo|Mn|Co|Ni|Zn|Ga|Ge|As|Se|Cd|In|Sn|Sb|Te|Pb|Tl|Hg|Ca|Al|Si|Ru|Rh|Pd|Pt|Ir|Os|Re)(?:H|O|N|C|B|S|F|Se|Te|As|P|Si|Ge|Sn)\d/;
+
+const NUMBER_WITH_UNIT_REGEX = /\d+\.?\d*\s*(%|K|eV|GPa|cm|meV|THz|Hz|Å|nm|T)\b/i;
+const BARE_NUMBER_REGEX = /(?:=|≈|~|>|<|≥|≤)\s*\d+\.?\d*/;
+const COMPARISON_WITH_NUMBER_REGEX = /(?:higher|lower|greater|less|increase|decrease|correlat)\w*\s+(?:than|with|by)\s+\d/i;
+
+function isMetaCommentary(text: string): boolean {
+  const lower = text.toLowerCase();
+  return BANNED_META_PHRASES.some(phrase => lower.includes(phrase));
+}
+
+function hasQuantitativeContent(text: string): boolean {
+  const hasNumber = /\d+\.?\d*/.test(text);
+  const hasFormula = CHEMICAL_FORMULA_REGEX.test(text);
+
+  if (NUMBER_WITH_UNIT_REGEX.test(text)) return true;
+  if (BARE_NUMBER_REGEX.test(text)) return true;
+  if (COMPARISON_WITH_NUMBER_REGEX.test(text)) return true;
+
+  if (hasFormula && hasNumber) return true;
+
+  if (hasFormula) {
+    const lower = text.toLowerCase();
+    if (QUANTITATIVE_PROPERTY_NAMES.some(prop => lower.includes(prop))) return true;
+  }
+
+  if (hasNumber) {
+    const lower = text.toLowerCase();
+    if (QUANTITATIVE_PROPERTY_NAMES.some(prop => lower.includes(prop))) return true;
+  }
+
+  return false;
+}
+
+export function requiresQuantitativeContent(text: string): boolean {
+  if (isMetaCommentary(text)) return false;
+  if (!hasQuantitativeContent(text)) return false;
+  return true;
+}
+
 const INSIGHT_KEY_TERMS = [
   "stability", "formation energy", "band gap", "metallic", "insulating",
   "electron-phonon", "phonon", "coupling", "critical temperature", "tc",
@@ -98,6 +159,23 @@ function extractKeyTerms(text: string): string[] {
   return INSIGHT_KEY_TERMS.filter(term => lower.includes(term));
 }
 
+function jaccardSimilarity(a: string, b: string): number {
+  const arrA = a.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const arrB = b.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const wordsA = new Set(arrA);
+  const wordsB = new Set(arrB);
+  if (wordsA.size === 0 && wordsB.size === 0) return 1;
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let intersection = 0;
+  const aArr = Array.from(wordsA);
+  for (const w of aArr) {
+    if (wordsB.has(w)) intersection++;
+  }
+  const combined = Array.from(wordsA).concat(Array.from(wordsB));
+  const union = new Set(combined).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
 function hasKeywordOverlap(text: string, existingTexts: string[]): boolean {
   const terms = extractKeyTerms(text);
   if (terms.length < 4) return false;
@@ -109,6 +187,17 @@ function hasKeywordOverlap(text: string, existingTexts: string[]): boolean {
   }
   return false;
 }
+
+function isDuplicateByJaccard(text: string, existingTexts: string[]): boolean {
+  const lower = text.toLowerCase();
+  for (const existing of existingTexts) {
+    if (jaccardSimilarity(lower, existing) > 0.6) return true;
+  }
+  return false;
+}
+
+const MAX_NOVEL_INSIGHTS_PER_CYCLE = 3;
+let novelInsightQueue: { text: string; phaseId: number; phaseName: string; relatedFormulas: string[] }[] = [];
 
 export async function evaluateInsightNovelty(
   emit: EventEmitter,
@@ -139,6 +228,23 @@ export async function evaluateInsightNovelty(
 
     if (existingTexts.some(e => e === lower || levenshteinSimilarity(e, lower) > 0.70)) {
       exactDuplicates.add(i);
+      continue;
+    }
+
+    if (isDuplicateByJaccard(lower, existingTexts)) {
+      try {
+        await storage.insertNovelInsight({
+          id: insightId(text, phaseId),
+          phaseId,
+          phaseName,
+          insightText: text,
+          isNovel: false,
+          noveltyScore: 0.12,
+          noveltyReason: "Duplicate detected via keyword-set Jaccard similarity (>0.6)",
+          category: "known-pattern",
+          relatedFormulas: relatedFormulas ?? [],
+        });
+      } catch {}
       continue;
     }
 
@@ -176,6 +282,25 @@ export async function evaluateInsightNovelty(
       continue;
     }
 
+    if (!requiresQuantitativeContent(text)) {
+      try {
+        await storage.insertNovelInsight({
+          id: insightId(text, phaseId),
+          phaseId,
+          phaseName,
+          insightText: text,
+          isNovel: false,
+          noveltyScore: 0.05,
+          noveltyReason: isMetaCommentary(text)
+            ? "Rejected: meta-commentary without actionable content"
+            : "Rejected: lacks quantitative content (no numbers, formulas, or specific properties)",
+          category: "known-pattern",
+          relatedFormulas: relatedFormulas ?? [],
+        });
+      } catch {}
+      continue;
+    }
+
     potentiallyNovel.push({ index: i, text });
   }
 
@@ -193,16 +318,23 @@ export async function evaluateInsightNovelty(
           role: "system",
           content: `You are a materials science novelty evaluator. Given a list of scientific insights, determine which ones are genuinely NOVEL (not just restating textbook knowledge or well-known facts).
 
-A NOVEL insight is one that:
-1. Identifies a NEW correlation between material properties not widely published
-2. Proposes an unexpected mechanism or relationship
-3. Connects disparate domains (e.g., linking crystal symmetry to a specific superconducting property in a new way)
-4. Identifies a pattern in computational results that contradicts conventional wisdom
-5. Suggests a new material design principle not in standard references
+A NOVEL insight MUST be quantitative and data-backed. It MUST contain at least one of:
+- A specific number, percentage, or measurement (e.g., "Tc=152K", "lambda=0.72", "30% increase")
+- A specific chemical formula (e.g., "ScC6", "LaH10", "MgB2")
+- A specific property name with a value or comparison (e.g., "nestingScore 0.72", "DOS at Fermi level exceeds 2.5 states/eV")
 
-A NON-NOVEL insight merely restates:
+A NOVEL insight is one that:
+1. Identifies a NEW correlation between material properties not widely published, backed by specific data
+2. Proposes an unexpected mechanism or relationship with quantitative evidence
+3. Connects disparate domains with specific material examples
+4. Identifies a pattern in computational results that contradicts conventional wisdom, citing specific values
+5. Suggests a new material design principle with concrete examples
+
+AUTOMATICALLY REJECT as non-novel:
+- Meta-commentary (e.g., "Overemphasis on X may mislead", "Y remains unexplored", "should be considered")
+- Vague qualitative statements without numbers, formulas, or specific property values
 - Standard periodic table trends
-- Well-known BCS/Eliashberg theory
+- Well-known BCS/Eliashberg theory without new data
 - Basic chemistry (formation energy = stability)
 - Known facts about specific material families
 - General statements about superconductivity
@@ -263,6 +395,16 @@ Return JSON with 'evaluations' array, each with:
       } catch {}
 
       if (isNovel) {
+        if (novelCount >= MAX_NOVEL_INSIGHTS_PER_CYCLE) {
+          novelInsightQueue.push({ text: entry.text, phaseId, phaseName, relatedFormulas: relatedFormulas ?? [] });
+          emit("log", {
+            phase: `phase-${phaseId}`,
+            event: "Novel insight queued",
+            detail: `[QUEUED] Cycle cap reached (${MAX_NOVEL_INSIGHTS_PER_CYCLE}). Queued: ${entry.text.slice(0, 80)}...`,
+            dataSource: "Insight Detector",
+          });
+          continue;
+        }
         novelCount++;
         emit("log", {
           phase: `phase-${phaseId}`,
@@ -289,6 +431,15 @@ Return JSON with 'evaluations' array, each with:
   }
 
   return { novel: novelCount, total: insights.length };
+}
+
+export function getQueuedInsightCount(): number {
+  return novelInsightQueue.length;
+}
+
+export function drainQueuedInsights(): { text: string; phaseId: number; phaseName: string; relatedFormulas: string[] }[] {
+  const queued = novelInsightQueue.splice(0, MAX_NOVEL_INSIGHTS_PER_CYCLE);
+  return queued;
 }
 
 function levenshteinSimilarity(a: string, b: string): number {

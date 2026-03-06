@@ -611,6 +611,11 @@ export function computePairingSusceptibility(formula: string): {
   const novelty = computeCompositionNovelty(formula);
   score = 0.85 * score + 0.15 * novelty;
 
+  const features = extractFeatures(formula);
+  const fe = features.formationEnergy ?? 0;
+  const stabilityFactor = fe < 0 ? 1.0 : Math.max(0.5, 1.0 - fe * 0.2);
+  score *= stabilityFactor;
+
   const nestingFactor = nestingScore;
   const phononSoftness = softModeScore;
 

@@ -64,15 +64,45 @@ export async function analyzeAndEvolveStrategy(
     const recentInsights = await storage.getNovelInsightsOnly(10);
     const insightSummary = recentInsights.map(i => i.insightText).join("; ");
 
+    const totalSamples = candidates.length;
+    const priorMean = 0.5;
+    const k = 10;
+
+    const adjustedFamilyStats: Record<string, {
+      count: number;
+      adjustedScore: number;
+      rawAvgScore: number;
+      maxTc: number;
+      maxScore: number;
+      pipelinePasses: number;
+      confidence: number;
+    }> = {};
+
+    for (const [family, stats] of Object.entries(familyStats)) {
+      const adjustedScore = (stats.totalScores + priorMean * k) / (stats.count + k);
+      const familyConfidence = Math.sqrt(stats.count / totalSamples);
+      const weightedScore = adjustedScore * familyConfidence;
+
+      adjustedFamilyStats[family] = {
+        count: stats.count,
+        adjustedScore: weightedScore,
+        rawAvgScore: stats.avgScore,
+        maxTc: stats.maxTc,
+        maxScore: stats.maxScore,
+        pipelinePasses: stats.pipelinePasses,
+        confidence: familyConfidence,
+      };
+    }
+
     const allFamilies = new Set([
       ...Object.keys(familyStats),
       "Hydrides", "Cuprates", "Pnictides", "Chalcogenides", "Borides"
     ]);
     const underExplored = [...allFamilies].filter(f => (familyStats[f]?.count ?? 0) < 3);
 
-    const signalText = Object.entries(familyStats)
-      .sort((a, b) => b[1].avgScore - a[1].avgScore)
-      .map(([f, s]) => `${f}: ${s.count} candidates, avg score ${s.avgScore.toFixed(2)}, max Tc ${s.maxTc.toFixed(0)}K, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
+    const signalText = Object.entries(adjustedFamilyStats)
+      .sort((a, b) => b[1].adjustedScore - a[1].adjustedScore)
+      .map(([f, s]) => `${f}: ${s.count} candidates, adjusted score ${s.adjustedScore.toFixed(3)} (raw avg ${s.rawAvgScore.toFixed(2)}, confidence ${s.confidence.toFixed(2)}), max Tc ${s.maxTc.toFixed(0)}K, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
       .join("\n");
 
     let previousStrategyContext = "";
@@ -83,7 +113,7 @@ export async function analyzeAndEvolveStrategy(
 
     const prompt = `You are a materials science research strategist for an AI superconductor discovery platform.
 
-Current candidate family performance (cycle ${cycleNumber}):
+Current candidate family performance (cycle ${cycleNumber}, scores are Bayesian-adjusted with confidence weighting — families with few samples are penalized):
 ${signalText}
 
 Under-explored families: ${underExplored.join(", ") || "None"}
@@ -117,11 +147,19 @@ Respond in JSON:
 
     const focusAreas = (parsed.focusAreas || [])
       .slice(0, 5)
-      .map(fa => ({
-        area: String(fa.area || "Unknown"),
-        priority: Math.max(0, Math.min(1, Number(fa.priority) || 0.5)),
-        reasoning: String(fa.reasoning || ""),
-      }))
+      .map(fa => {
+        const area = String(fa.area || "Unknown");
+        let priority = Math.max(0, Math.min(1, Number(fa.priority) || 0.5));
+        const familySampleCount = familyStats[area]?.count ?? 0;
+        if (familySampleCount < 3) {
+          priority = Math.min(priority, 0.5);
+        }
+        return {
+          area,
+          priority,
+          reasoning: String(fa.reasoning || ""),
+        };
+      })
       .sort((a, b) => b.priority - a.priority);
 
     const summary = String(parsed.summary || "Continuing broad exploration.");

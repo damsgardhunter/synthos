@@ -14,6 +14,24 @@ import {
   predictCrystalStructure,
   evaluateConvexHullStability,
 } from "./structure-predictor";
+import { classifyFamily } from "./utils";
+
+const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
+  Cuprates: -1.2,
+  Pnictides: -0.8,
+  Chalcogenides: -0.6,
+  Intermetallics: -0.5,
+  Borides: -0.7,
+  Carbides: -0.4,
+  Nitrides: -0.9,
+  Hydrides: 0.1,
+  Oxides: -1.0,
+  Other: -0.3,
+};
+
+function getFamilyAvgFormationEnergy(family: string): number {
+  return FAMILY_AVG_FORMATION_ENERGY[family] ?? FAMILY_AVG_FORMATION_ENERGY.Other;
+}
 
 export interface PipelineResult {
   candidateId: string;
@@ -62,12 +80,12 @@ async function stage0_MLFilter(
   const score = candidate.ensembleScore ?? 0;
   const xgb = candidate.xgboostScore ?? 0;
 
-  const passed = score > 0.3 || xgb > 0.25;
-  const reason = passed ? null : `Ensemble score ${score.toFixed(2)} below threshold 0.3`;
+  const passed = score > 0.4 || xgb > 0.35;
+  const reason = passed ? null : `Ensemble score ${score.toFixed(2)} below threshold 0.4`;
 
   await logComputationalResult(
     candidate.id, candidate.formula, 0, "ML_filter",
-    { ensembleScore: score, xgboostScore: xgb, threshold: 0.3 },
+    { ensembleScore: score, xgboostScore: xgb, threshold: 0.4 },
     passed, reason, Date.now() - start, passed ? 0.7 : 0.9
   );
 
@@ -83,11 +101,8 @@ async function stage1_ElectronicStructure(
   const electronic = computeElectronicStructure(candidate.formula, candidate.crystalStructure);
   const correlation = assessCorrelationStrength(candidate.formula);
 
-  // Calibrated: K3C60 met=0.27, Al DOS=0.57, Pb met=0.50
-  // All 20 known SCs pass met>0.25 AND DOS>0.2
-  // 18/20 non-SCs filtered by met<0.25 OR DOS<0.2
-  const isMetallic = electronic.metallicity > 0.25;
-  const hasDOS = electronic.densityOfStatesAtFermi > 0.2;
+  const isMetallic = electronic.metallicity > 0.35;
+  const hasDOS = electronic.densityOfStatesAtFermi > 0.5;
 
   const passed = isMetallic && hasDOS;
   const reason = passed ? null :
@@ -114,17 +129,15 @@ async function stage2_PhononCoupling(
   const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
 
   const hasStablePhonons = !phonon.hasImaginaryModes;
-  // Calibrated: Al lambda=0.40 is minimum known SC coupling
-  // 0.25 threshold passes all known phonon-mediated SCs
-  const hasCoupling = coupling.lambda > 0.25;
+  const hasCoupling = coupling.lambda > 0.35;
 
-  const passed = hasCoupling;
+  const passed = hasCoupling && hasStablePhonons;
   let reason = null;
 
-  if (!hasCoupling) {
+  if (!hasStablePhonons) {
+    reason = `Dynamically unstable: imaginary phonon modes detected — structure may not be physically realizable`;
+  } else if (!hasCoupling) {
     reason = `Weak e-ph coupling (lambda=${coupling.lambda.toFixed(3)}) - insufficient for significant Tc`;
-  } else if (!hasStablePhonons) {
-    reason = null;
   }
 
   await logComputationalResult(
@@ -155,11 +168,9 @@ async function stage3_TcPrediction(
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
   const hasSevereCompetition = suppressingPhases.length > 1 ||
-    suppressingPhases.some(p => p.strength > 0.8);
+    suppressingPhases.some(p => p.strength > 0.7);
 
-  // Calibrated: Al Tc=1.2K, Zn Tc=0.85K are lowest known SCs
-  // 1K threshold passes all practical superconductors
-  const tcAboveThreshold = eliashberg.predictedTc > 1;
+  const tcAboveThreshold = eliashberg.predictedTc > 5;
 
   let dimensionality = candidate.dimensionality || "3D";
   const criticalFields = computeCriticalFields(
@@ -209,18 +220,31 @@ async function stage4_SynthesisFeasibility(
   }
 
   const stability = await evaluateConvexHullStability(structure.decompositionEnergy, candidate.formula);
-  const isSynthesizable = structure.synthesizability > 0.3;
+  const isSynthesizable = structure.synthesizability > 0.4;
   const isStableOrMetastable = stability.isStable || stability.isMetastable;
   const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 1 && (stability.isStable || stability.isMetastable);
+
+  const formationEnergy = stability.formationEnergy ?? 0;
+  const formationEnergyTooHigh = formationEnergy > 2.0;
+  const formationEnergyDataError = formationEnergy < -5.0;
+
+  const family = classifyFamily(candidate.formula);
+  const familyAvgFormationEnergy = getFamilyAvgFormationEnergy(family);
+  const hullDistance = Math.max(0, formationEnergy - familyAvgFormationEnergy);
+  const isMetastableByHull = hullDistance > 0.5;
 
   const candidateHc2 = candidate.upperCriticalField ?? 0;
   const isRoomTempCandidate = (candidate.predictedTc ?? 0) >= 200;
   const hc2TooLow = isRoomTempCandidate && candidateHc2 < 5;
 
-  const passed = isSynthesizable && isStableOrMetastable && !hc2TooLow;
+  let passed = isSynthesizable && isStableOrMetastable && !hc2TooLow && !formationEnergyTooHigh && !formationEnergyDataError;
   let reason = null;
 
-  if (!isSynthesizable) {
+  if (formationEnergyDataError) {
+    reason = `Formation energy ${formationEnergy.toFixed(2)} eV/atom below -5.0 - likely data error`;
+  } else if (formationEnergyTooHigh) {
+    reason = `Formation energy ${formationEnergy.toFixed(2)} eV/atom exceeds 2.0 eV/atom - too unstable`;
+  } else if (!isSynthesizable) {
     reason = `Low synthesizability (${structure.synthesizability.toFixed(2)}) - ${structure.synthesisNotes}`;
   } else if (!isStableOrMetastable) {
     reason = `Thermodynamically unstable: ${stability.verdict}`;
@@ -228,16 +252,18 @@ async function stage4_SynthesisFeasibility(
     reason = `Insufficient magnetic robustness: Hc2=${candidateHc2.toFixed(1)}T too low for room-temperature candidate (Tc=${candidate.predictedTc}K)`;
   }
 
+  const metastableScorePenalty = (passed && isMetastableByHull) ? 0.80 : 1.0;
+
   await logComputationalResult(
     candidate.id, candidate.formula, 4, "synthesis_feasibility",
-    { structure, stability, ambientPressureStable },
-    passed, reason, Date.now() - start, passed ? 0.45 : 0.7
+    { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty },
+    passed, reason, Date.now() - start, (passed ? 0.45 : 0.7) * metastableScorePenalty
   );
 
   return {
     passed,
     reason,
-    data: { structure, stability, ambientPressureStable },
+    data: { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty },
   };
 }
 

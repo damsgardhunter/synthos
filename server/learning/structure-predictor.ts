@@ -1272,6 +1272,57 @@ export async function runGenerativeStructureDiscovery(
   return allVariants;
 }
 
+let mutationIntensityLevel = 1;
+
+const ATOM_SWAP_MAP_LEVEL1: Record<string, string[]> = {
+  Fe: ["Co", "Ni", "Mn", "Cr"],
+  Cu: ["Ni", "Ag", "Zn"],
+  O: ["S", "Se", "Te"],
+  As: ["P", "Sb", "Bi"],
+  Ba: ["Sr", "Ca", "La"],
+};
+
+const ATOM_SWAP_MAP_LEVEL2: Record<string, string[]> = {
+  Fe: ["Co", "Ni", "Mn", "Cr", "V", "Ti", "Ru", "Os"],
+  Cu: ["Ni", "Ag", "Zn", "Pd", "Pt", "Au"],
+  O: ["S", "Se", "Te", "N", "F"],
+  As: ["P", "Sb", "Bi", "Sn", "Ge"],
+  Ba: ["Sr", "Ca", "La", "K", "Rb", "Cs"],
+  Nb: ["Ta", "V", "Mo", "W", "Ti", "Zr"],
+  Ti: ["Zr", "Hf", "V", "Nb", "Sc"],
+  Si: ["Ge", "Sn", "Al", "Ga"],
+  B: ["C", "N", "Al", "Si"],
+};
+
+const ATOM_SWAP_MAP_LEVEL3: Record<string, string[]> = {
+  Fe: ["Co", "Ni", "Mn", "Cr", "V", "Ti", "Ru", "Os", "Ir", "Rh", "Re", "W"],
+  Cu: ["Ni", "Ag", "Zn", "Pd", "Pt", "Au", "Hg", "Tl", "In"],
+  O: ["S", "Se", "Te", "N", "F", "Cl"],
+  As: ["P", "Sb", "Bi", "Sn", "Ge", "Pb", "In", "Tl"],
+  Ba: ["Sr", "Ca", "La", "K", "Rb", "Cs", "Eu", "Yb"],
+  Nb: ["Ta", "V", "Mo", "W", "Ti", "Zr", "Hf", "Re"],
+  Ti: ["Zr", "Hf", "V", "Nb", "Sc", "Y", "La"],
+  Si: ["Ge", "Sn", "Al", "Ga", "In", "Pb"],
+  B: ["C", "N", "Al", "Si", "P", "Ga"],
+  La: ["Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Y", "Sc"],
+  C: ["N", "B", "Si", "P"],
+  N: ["C", "O", "P", "As"],
+};
+
+function getAtomSwapMap(): Record<string, string[]> {
+  if (mutationIntensityLevel >= 3) return ATOM_SWAP_MAP_LEVEL3;
+  if (mutationIntensityLevel >= 2) return ATOM_SWAP_MAP_LEVEL2;
+  return ATOM_SWAP_MAP_LEVEL1;
+}
+
+export function setMutationIntensity(level: number): void {
+  mutationIntensityLevel = Math.max(1, Math.min(3, level));
+}
+
+export function getMutationIntensity(): number {
+  return mutationIntensityLevel;
+}
+
 const ATOM_SWAP_MAP: Record<string, string[]> = {
   Fe: ["Co", "Ni", "Mn", "Cr"],
   Cu: ["Ni", "Ag", "Zn"],
@@ -1312,13 +1363,15 @@ export async function runEvolutionaryStructureSearch(
         if (m === 0) {
           const idx = Math.floor(Math.random() * elements.length);
           const el = elements[idx];
-          const scale = 0.85 + Math.random() * 0.3;
+          const distortionRange = mutationIntensityLevel >= 3 ? 0.5 : mutationIntensityLevel >= 2 ? 0.4 : 0.3;
+          const scale = (1 - distortionRange / 2) + Math.random() * distortionRange;
           counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
         } else if (m === 1) {
-          const swappable = elements.filter(e => e !== "H" && ATOM_SWAP_MAP[e]);
+          const activeSwapMap = getAtomSwapMap();
+          const swappable = elements.filter(e => e !== "H" && activeSwapMap[e]);
           if (swappable.length > 0) {
             const el = swappable[Math.floor(Math.random() * swappable.length)];
-            const replacements = ATOM_SWAP_MAP[el];
+            const replacements = activeSwapMap[el];
             if (el === "B" && Math.random() < 0.5) {
             } else {
               const replacement = replacements[Math.floor(Math.random() * replacements.length)];
