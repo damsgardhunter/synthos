@@ -385,7 +385,7 @@ async function runPhase7_Superconductor() {
       familyCounts: Object.keys(currentFamilyCounts).length > 0 ? currentFamilyCounts : undefined,
       stagnationInfo: lastBestTcSeen > 0 ? { cyclesSinceImproved: cyclesSinceTcImproved, currentBestTc: lastBestTcSeen } : undefined,
     });
-    phase7Offset += 50;
+    phase7Offset += 200;
     totalScCandidates += result.generated;
     if (result.duplicatesSkipped > 0) {
       trackDuplicatesSkipped(result.duplicatesSkipped);
@@ -1564,7 +1564,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 13;
+const PHYSICS_VERSION = 14;
 
 async function recalculatePhysics() {
   try {

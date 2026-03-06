@@ -435,7 +435,14 @@ export async function runMLPrediction(
 
   const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean }[] = [];
 
-  for (const mat of materials.slice(0, 30)) {
+  let preFilterSkipped = 0;
+  for (const mat of materials.slice(0, 100)) {
+    const preFeatures = extractFeatures(mat.formula);
+    if ((preFeatures.bandGap ?? 0) > 0.5 || (preFeatures.metallicity ?? 0.5) < 0.2) {
+      preFilterSkipped++;
+      continue;
+    }
+
     const physics = physicsData.get(mat.formula);
     const crystal = crystalData.get(mat.formula);
     const features = extractFeatures(mat.formula, mat, physics, crystal);
@@ -477,7 +484,7 @@ export async function runMLPrediction(
   emit("log", {
     phase: "phase-7",
     event: "XGBoost screening complete",
-    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc raw: ${topCandidates[0].xgb.tcEstimate}K)${enrichmentDetail}`,
+    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc raw: ${topCandidates[0].xgb.tcEstimate}K)${preFilterSkipped > 0 ? `, ${preFilterSkipped} non-metallic filtered` : ""}${enrichmentDetail}`,
     dataSource: "ML Engine",
   });
 

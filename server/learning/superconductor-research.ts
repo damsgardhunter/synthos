@@ -128,7 +128,7 @@ export async function runSuperconductorResearch(
     dataSource: "SC Research",
   });
 
-  const materials = await storage.getMaterials(50, materialOffset);
+  const materials = await storage.getMaterials(200, materialOffset);
 
   const synthesisProcesses = await storage.getSynthesisProcesses(20);
   const chemicalReactions = await storage.getChemicalReactions(20);

@@ -1,24 +1,47 @@
-const MATERIAL_FAMILIES: Record<string, RegExp> = {
+const TRANSITION_METALS = new Set([
+  "Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn",
+  "Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg",
+  "La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Th","U","Np","Pu",
+]);
+
+const METALS = new Set([
+  ...TRANSITION_METALS,
+  "Li","Na","K","Rb","Cs","Be","Mg","Ca","Sr","Ba",
+  "Al","Ga","In","Tl","Sn","Pb","Bi",
+]);
+
+const REGEX_FAMILIES: Record<string, RegExp> = {
   "Hydrides": /H\d|LaH|YH|CeH|CaH|BaH|SrH|MgH|hydride/i,
   "Cuprates": /(?:La|Y|Ba|Sr|Bi|Tl|Hg|Ca|Nd|Pr|Sm|Eu|Gd).*Cu.*O|cuprate|YBCO|BSCCO/i,
   "Heavy Fermions": /(?:Ce|Yb|U|Pu|Np)(?:In|Co|Rh|Ir|Pd|Pt|Ni|Cu|Al|Ga|Ge|Si|Sn|Sb|Bi)\d|CeCoIn|UPt|UBe|CeCu/i,
   "Pnictides": /Fe.*As|Ba.*Fe.*As|Sr.*Fe.*As|La.*Fe.*As|Fe.*P(?:[^btdm]|$)|pnictide/i,
   "Chalcogenides": /(?:Fe|Nb|Ta|Mo|W|Bi|Sb|Cu|Cd|Zn|Sn|Pb|In|Ga|Ti|Zr|Hf|V|Cr|Mn|Co|Ni|Pd|Pt|Re|Ir)(?:Se|Te)\d*|FeSe|FeTe|NbSe|TaSe|chalcogenide/i,
-  "Sulfides": /(?:Fe|Cu|Zn|Mo|W|Nb|Ta|Ti|Ni|Co|Mn|V|Cr|Sn|Pb|Bi|Cd|In|Ga|La|Ce)S\d*(?:[^eicr]|$)|sulfide|MoS2|WS2|FeS|TaS|NbS|MoS|WS/i,
-  "Borides": /(?:Mg|Ti|Zr|Hf|V|Nb|Ta|Cr|Mo|W|Mn|Fe|Co|Ni|La|Y|Ca|Sr|Sc|Al|Re|Ru|Os)B\d|MgB\d*|boride/i,
-  "Carbides": /(?:Ti|Zr|Hf|V|Nb|Ta|Cr|Mo|W|Fe|Si|Sc|Y|La)C\d*(?:[^aeioulrs]|$)|carbide|SiC/i,
-  "Nitrides": /(?:Ti|Zr|Hf|V|Nb|Ta|Cr|Mo|W|Al|Ga|In|Si|B|Sc|Y|La)N\d*(?:[^abeiodr]|$)|nitride|BN|GaN|AlN/i,
   "Silicides": /(?:Fe|Co|Ni|Mn|Cr|V|Ti|Nb|Mo|W|Ru|Os|Ir|Pt|Pd|Re)Si\d|silicide|FeSi|CoSi|MnSi/i,
   "Phosphides": /(?:Fe|Co|Ni|Mn|Ga|In|Zn|Cd|Al|B)P\d*(?:[^btdm]|$)|phosphide|GaP|InP/i,
-  "Oxides": /(?:Sr|Ba|Pb|Bi|La|Y|Nd|Ca|Mg|Ti|Zr|Mn|Co|Ni|Fe|V|Cr|W|Mo).*O\d|oxide|perovskite|SrTiO|BaTiO/i,
   "Intermetallics": /(?:Nb|V|Nb|Ta).*(?:Sn|Ge|Si|Ga|Al)|Nb.*Ti|NbSn|V3Si|Nb3Ge|Nb3Al|intermetallic/i,
-  "Alloys": /(?:[A-Z][a-z]?\d*){3,}(?!.*(?:O\d|N\d|C\d|B\d|H\d|S\d|Se|Te|As|P\d))|(?:Fe|Co|Ni|Cr|Mn|Cu|Ti|V|Nb|Mo|W|Al|Zr|Hf|Ta|Re)\d*(?:Fe|Co|Ni|Cr|Mn|Cu|Ti|V|Nb|Mo|W|Al|Zr|Hf|Ta|Re)\d*(?:Fe|Co|Ni|Cr|Mn|Cu|Ti|V|Nb|Mo|W|Al|Zr|Hf|Ta|Re)/i,
 };
 
 export function classifyFamily(formula: string): string {
-  for (const [family, pattern] of Object.entries(MATERIAL_FAMILIES)) {
+  for (const [family, pattern] of Object.entries(REGEX_FAMILIES)) {
     if (pattern.test(formula)) return family;
   }
+
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const has = (el: string) => (counts[el] ?? 0) > 0;
+  const hasMetal = elements.some(el => METALS.has(el));
+
+  if (has("H") && hasMetal && !has("O") && !has("S") && !has("Se") && elements.length <= 3) return "Hydrides";
+  if (has("S") && hasMetal && !has("O") && !has("Se") && !has("Te")) return "Sulfides";
+  if (has("B") && hasMetal && !has("O") && !has("N")) return "Borides";
+  if (has("C") && hasMetal && !has("O") && !has("H") && !has("Se") && !has("Te") && !has("As")) return "Carbides";
+  if (has("N") && hasMetal && !has("O") && !has("H") && !has("Se") && !has("Te") && !has("As")) return "Nitrides";
+  if (has("O") && hasMetal) return "Oxides";
+
+  if (elements.length >= 2 && elements.every(el => METALS.has(el))) return "Alloys";
+
   return "Other";
 }
 
@@ -96,7 +119,23 @@ export function normalizeFormula(raw: string): string {
   const elements = Object.keys(counts);
   if (elements.length === 0) return raw;
 
-  const vals = Object.values(counts);
+  let vals = Object.values(counts);
+  const hasFractions = vals.some(v => !Number.isInteger(v) || v < 1);
+
+  if (hasFractions && vals.every(v => v > 0)) {
+    const decimalPlaces = vals.map(v => {
+      const s = v.toString();
+      const dot = s.indexOf(".");
+      return dot >= 0 ? s.length - dot - 1 : 0;
+    });
+    const maxDec = Math.max(...decimalPlaces);
+    const pow10 = Math.pow(10, maxDec);
+    for (const el of elements) {
+      counts[el] = Math.round(counts[el] * pow10);
+    }
+    vals = Object.values(counts);
+  }
+
   const allInts = vals.every(v => Number.isInteger(v) && v >= 1);
 
   if (allInts) {

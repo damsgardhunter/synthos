@@ -1,0 +1,182 @@
+The System Thinks Water Is a Superconductor
+
+Log:
+
+Top candidate: H2O Tc raw: 144K
+
+This is physically impossible.
+
+Water:
+
+is an insulator
+
+band gap ≈ 8.7 eV
+
+no metallic electrons
+
+no Cooper pairing
+
+Superconductivity requires metallic conduction.
+
+Later you even detect this problem:
+
+SC candidate rejected (non-metallic)
+
+But the ML model still predicts Tc for it.
+
+Fix
+
+Add a hard physics rule before ML.
+
+if band_gap > 0.5 eV:
+    Tc = 0
+
+or
+
+if metallicity < 0.2:
+    superconductivity = impossible
+
+Your logs show metallicity checks exist but they occur too late.
+
+2️⃣ Carbides With Tc >100K Are Extremely Suspicious
+
+Example:
+
+PdC4N2 predictedTc:146
+
+Real carbides:
+
+Material	Tc
+NbC	~11K
+TaC	~10K
+MoC	~14K
+
+Your predictions:
+
+124K
+119K
+109K
+97K
+
+These are almost certainly ML extrapolation errors.
+
+Carbides typically have weak electron-phonon coupling.
+
+Fix
+
+Add McMillan equation sanity checks.
+
+Tc depends on:
+
+λ = electron-phonon coupling
+ω = phonon frequency
+μ* = Coulomb repulsion
+
+If:
+
+λ < 1.0
+
+Then:
+
+Tc < 40 K
+3️⃣ The ML Model Is Evaluating Only 50 Materials
+
+Log:
+
+Feature extraction on 50 materials
+
+That’s too small.
+
+Real ML screening uses:
+
+100,000 – 10,000,000 compositions
+
+Your model is effectively sampling randomly.
+
+Better pipeline:
+
+100k generated compositions
+↓
+ML filter → 5k
+↓
+DFT → 500
+↓
+phonons → 50
+↓
+experimental candidates → 5
+4️⃣ Metallic Fraction Looks Wrong
+
+You logged:
+
+metals = 7 / 85
+
+Only 8% metals.
+
+But most materials databases have:
+
+20–40% metals
+
+Your dataset likely over-represents oxides.
+
+That biases superconductivity searches.
+
+5️⃣ Your Generator Is Producing Nonsense Formulas
+
+Examples:
+
+Fe0.07C
+
+Fractional atomic ratios like this usually mean doping models, not compounds.
+
+Real formula:
+
+Fe7C100
+
+or
+
+FeC
+
+Your generator needs stoichiometry constraints.
+
+6️⃣ Phase 10 and 11 Are Not Running Yet
+
+These are very important:
+
+Computational Physics (DFT)
+Crystal Structure Prediction
+
+Currently:
+
+progress: 0
+
+Without them, the system cannot compute:
+
+phonons
+
+stability
+
+lattice structure
+
+Meaning Tc predictions are basically guesses.
+
+⚠️ Smaller but Important Issues
+JSON generator errors
+Generator JSON parse error
+
+Your material generator occasionally outputs broken JSON.
+
+You need strict schema validation.
+
+Too many vague insights
+
+Example:
+
+Lower formation energy correlates with higher stability
+
+This is already known physics.
+
+Insight engine should only accept:
+
+new correlations
+unexpected anomalies
+new structural motifs
