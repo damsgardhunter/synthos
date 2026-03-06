@@ -8,11 +8,12 @@ const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 const WORK_DIR = "/tmp/dft_calculations";
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 60_000;
 
 export interface DFTResult {
   formula: string;
   method: "GFN2-xTB";
+  prototype: string;
   totalEnergy: number;
   totalEnergyPerAtom: number;
   homoLumoGap: number;
@@ -22,20 +23,22 @@ export interface DFTResult {
   fermiLevel: number | null;
   dipoleMoment: number | null;
   charges: Record<string, number>;
-  wibergBondOrders: { atom1: string; atom2: string; order: number }[];
   converged: boolean;
   wallTimeSeconds: number;
   atomCount: number;
   error: string | null;
 }
 
-export interface FormationEnergyResult {
-  formula: string;
-  formationEnergyPerAtom: number;
-  formationEnergyTotal: number;
-  elementalEnergies: Record<string, number>;
-  compoundEnergy: number;
-  stable: boolean;
+export interface XTBEnrichedFeatures {
+  bandGap: number;
+  isMetallic: boolean;
+  totalEnergy: number;
+  totalEnergyPerAtom: number;
+  formationEnergyPerAtom: number | null;
+  fermiLevel: number | null;
+  converged: boolean;
+  prototype: string;
+  method: string;
 }
 
 interface AtomPosition {
@@ -44,8 +47,6 @@ interface AtomPosition {
   y: number;
   z: number;
 }
-
-const ELEMENTAL_REFERENCE_ENERGIES: Record<string, number> = {};
 
 const COVALENT_RADII: Record<string, number> = {
   H: 0.31, He: 0.28, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71,
@@ -57,72 +58,327 @@ const COVALENT_RADII: Record<string, number> = {
   Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, In: 1.42, Sn: 1.39,
   Sb: 1.39, Te: 1.38, I: 1.39, Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04,
   Hf: 1.75, Ta: 1.70, W: 1.62, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36,
-  Au: 1.36, Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48,
+  Au: 1.36, Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Tc: 1.47, Rb2: 2.20,
 };
 
 function parseFormula(formula: string): Record<string, number> {
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const cleaned = formula
+    .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
+    .replace(/\s+/g, "")
+    .replace(/-/g, "");
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+    if (num > 0) counts[el] = (counts[el] || 0) + num;
   }
   return counts;
 }
 
-function generateClusterStructure(formula: string): AtomPosition[] {
-  const counts = parseFormula(formula);
-  const atoms: AtomPosition[] = [];
-  const elements = Object.keys(counts);
+function getAvgRadius(el: string): number {
+  return COVALENT_RADII[el] || (getElementData(el)?.atomicRadius ?? 150) / 100;
+}
 
-  const sortedElements = [...elements].sort((a, b) => {
-    const elA = getElementData(a);
-    const elB = getElementData(b);
-    return (elA?.atomicRadius ?? 150) - (elB?.atomicRadius ?? 150);
-  });
-
-  let currentAtoms: AtomPosition[] = [];
-
-  const centralElement = sortedElements[sortedElements.length - 1];
-  const centralCount = Math.round(counts[centralElement]);
-
-  for (let i = 0; i < centralCount; i++) {
-    const angle = (2 * Math.PI * i) / centralCount;
-    const r = centralCount === 1 ? 0 : 2.5;
-    currentAtoms.push({
-      element: centralElement,
-      x: r * Math.cos(angle),
-      y: r * Math.sin(angle),
-      z: 0,
-    });
+function estimateLatticeParam(elements: string[], counts: Record<string, number>): number {
+  let totalR = 0;
+  let totalN = 0;
+  for (const el of elements) {
+    const n = Math.round(counts[el] || 1);
+    totalR += getAvgRadius(el) * n;
+    totalN += n;
   }
+  const avgR = totalR / Math.max(1, totalN);
+  return avgR * 2.8 + 0.5;
+}
 
-  for (const el of sortedElements) {
-    if (el === centralElement) continue;
-    const count = Math.round(counts[el]);
-    const bondLength = (COVALENT_RADII[centralElement] || 1.5) + (COVALENT_RADII[el] || 1.2);
+interface PrototypeStructure {
+  name: string;
+  fractionalPositions: { site: string; x: number; y: number; z: number }[];
+  latticeType: "cubic" | "hexagonal" | "tetragonal";
+  aRatio: number;
+  cOverA: number;
+  stoichiometryPattern: string;
+}
 
-    for (let i = 0; i < count; i++) {
-      const parentIdx = i % currentAtoms.length;
-      const parent = currentAtoms[parentIdx];
+const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
+  {
+    name: "A15",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.25, y: 0.0, z: 0.5 },
+      { site: "B", x: 0.75, y: 0.0, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.25, z: 0.0 },
+      { site: "B", x: 0.5, y: 0.75, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.25 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.75 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A2B6",
+  },
+  {
+    name: "NaCl",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A4B4",
+  },
+  {
+    name: "AlB2",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.333, y: 0.667, z: 0.5 },
+      { site: "B", x: 0.667, y: 0.333, z: 0.5 },
+    ],
+    latticeType: "hexagonal",
+    aRatio: 1.0,
+    cOverA: 1.08,
+    stoichiometryPattern: "A1B2",
+  },
+  {
+    name: "Perovskite",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "C", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "C", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "C", x: 0.0, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A1B1C3",
+  },
+  {
+    name: "ThCr2Si2",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.25 },
+      { site: "B", x: 0.5, y: 0.0, z: 0.25 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.75 },
+      { site: "B", x: 0.5, y: 0.0, z: 0.75 },
+      { site: "C", x: 0.0, y: 0.0, z: 0.35 },
+      { site: "C", x: 0.0, y: 0.0, z: 0.65 },
+      { site: "C", x: 0.5, y: 0.5, z: 0.85 },
+      { site: "C", x: 0.5, y: 0.5, z: 0.15 },
+    ],
+    latticeType: "tetragonal",
+    aRatio: 1.0,
+    cOverA: 2.5,
+    stoichiometryPattern: "A2B4C4",
+  },
+  {
+    name: "Heusler",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.25, y: 0.25, z: 0.25 },
+      { site: "B", x: 0.75, y: 0.75, z: 0.75 },
+      { site: "C", x: 0.5, y: 0.0, z: 0.0 },
+      { site: "C", x: 0.0, y: 0.5, z: 0.0 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A2B2C2",
+  },
+  {
+    name: "BCC",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A2",
+  },
+  {
+    name: "FCC",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A4",
+  },
+];
 
-      const theta = Math.PI * (0.3 + 0.4 * (i / count));
-      const phi = (2 * Math.PI * i) / count + parentIdx * 0.5;
-      const r = bondLength;
+function matchPrototype(counts: Record<string, number>): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
+  const elements = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+  const nElements = elements.length;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
 
-      currentAtoms.push({
-        element: el,
-        x: parent.x + r * Math.sin(theta) * Math.cos(phi),
-        y: parent.y + r * Math.sin(theta) * Math.sin(phi),
-        z: parent.z + r * Math.cos(theta),
-      });
+  const ratios = elements.map(el => Math.round(counts[el]));
+  const gcdVal = ratios.reduce((a, b) => gcd(a, b));
+  const reduced = ratios.map(r => r / gcdVal);
+
+  for (const proto of CRYSTAL_PROTOTYPES) {
+    const siteCounts: Record<string, number> = {};
+    for (const pos of proto.fractionalPositions) {
+      siteCounts[pos.site] = (siteCounts[pos.site] || 0) + 1;
+    }
+    const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
+
+    if (sites.length !== nElements) continue;
+
+    const siteRatios = sites.map(s => siteCounts[s]);
+    const siteGcd = siteRatios.reduce((a, b) => gcd(a, b));
+    const siteReduced = siteRatios.map(r => r / siteGcd);
+
+    const sortedReduced = [...reduced].sort((a, b) => b - a);
+    const sortedSiteReduced = [...siteReduced].sort((a, b) => b - a);
+
+    let match = true;
+    for (let i = 0; i < sortedReduced.length; i++) {
+      if (sortedReduced[i] !== sortedSiteReduced[i]) {
+        match = false;
+        break;
+      }
+    }
+
+    if (match) {
+      const siteMap: Record<string, string> = {};
+      const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+      const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
+      for (let i = 0; i < elementsByCount.length; i++) {
+        siteMap[sitesByCount[i]] = elementsByCount[i];
+      }
+      return { proto, siteMap };
     }
   }
 
-  return currentAtoms;
+  return null;
+}
+
+function gcd(a: number, b: number): number {
+  a = Math.abs(Math.round(a));
+  b = Math.abs(Math.round(b));
+  while (b) { [a, b] = [b, a % b]; }
+  return a || 1;
+}
+
+function buildStructureFromPrototype(
+  proto: PrototypeStructure,
+  siteMap: Record<string, string>,
+  elements: string[],
+  counts: Record<string, number>,
+  scaleFactor: number = 1
+): AtomPosition[] {
+  const a = estimateLatticeParam(elements, counts) * scaleFactor;
+  const c = a * proto.cOverA;
+
+  const atoms: AtomPosition[] = [];
+  for (const pos of proto.fractionalPositions) {
+    const element = siteMap[pos.site];
+    if (!element) continue;
+
+    let x: number, y: number, z: number;
+    if (proto.latticeType === "hexagonal") {
+      x = a * pos.x + a * 0.5 * pos.y;
+      y = a * (Math.sqrt(3) / 2) * pos.y;
+      z = c * pos.z;
+    } else {
+      x = a * pos.x;
+      y = a * pos.y;
+      z = (proto.latticeType === "tetragonal" ? c : a) * pos.z;
+    }
+    atoms.push({ element, x, y, z });
+  }
+
+  return atoms;
+}
+
+function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPosition[]; proto: string } {
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  const a = estimateLatticeParam(elements, counts);
+
+  const atoms: AtomPosition[] = [];
+  let idx = 0;
+
+  const gridSize = Math.ceil(Math.cbrt(totalAtoms));
+
+  for (const el of elements) {
+    const n = Math.round(counts[el]);
+    for (let i = 0; i < n; i++) {
+      const ix = idx % gridSize;
+      const iy = Math.floor(idx / gridSize) % gridSize;
+      const iz = Math.floor(idx / (gridSize * gridSize));
+
+      const jitter = ((idx * 7 + 3) % 11) / 55.0;
+      atoms.push({
+        element: el,
+        x: (ix + 0.5 + jitter * 0.3) * a / gridSize,
+        y: (iy + 0.5 - jitter * 0.2) * a / gridSize,
+        z: (iz + 0.5 + jitter * 0.1) * a / gridSize,
+      });
+      idx++;
+    }
+  }
+
+  return { atoms, proto: "generic-cluster" };
+}
+
+function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; prototype: string } {
+  const counts = parseFormula(formula);
+  const elements = Object.keys(counts);
+
+  if (elements.length === 0) {
+    return { atoms: [], prototype: "empty" };
+  }
+
+  const protoMatch = matchPrototype(counts);
+  if (protoMatch) {
+    const atoms = buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts);
+    if (atoms.length >= 2) {
+      return { atoms, prototype: protoMatch.proto.name };
+    }
+  }
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  const scaledCounts: Record<string, number> = {};
+  if (totalAtoms > 20) {
+    const scaleFactor = 20 / totalAtoms;
+    for (const [el, n] of Object.entries(counts)) {
+      scaledCounts[el] = Math.max(1, Math.round(n * scaleFactor));
+    }
+  } else {
+    Object.assign(scaledCounts, counts);
+    for (const el of Object.keys(scaledCounts)) {
+      scaledCounts[el] = Math.max(1, Math.round(scaledCounts[el]));
+    }
+  }
+
+  const scaledMatch = matchPrototype(scaledCounts);
+  if (scaledMatch) {
+    const atoms = buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts);
+    if (atoms.length >= 2) {
+      return { atoms, prototype: scaledMatch.proto.name + "-scaled" };
+    }
+  }
+
+  const { atoms, proto } = buildGenericStructure(scaledCounts);
+  return { atoms, prototype: proto };
 }
 
 function writeXYZ(atoms: AtomPosition[], filepath: string, comment: string = ""): void {
@@ -138,7 +394,6 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
   const result: Partial<DFTResult> = {
     converged: false,
     charges: {},
-    wibergBondOrders: [],
   };
 
   const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
@@ -161,42 +416,27 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
     result.fermiLevel = (result.homo + result.lumo) / 2;
   }
 
-  const dipoleMatch = output.match(/tot \(Debye\)\s*\n\s*full:\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)/);
-  if (dipoleMatch) {
-    result.dipoleMoment = parseFloat(dipoleMatch[1]);
-  } else {
-    const dipoleAlt = output.match(/molecular dipole:.*?tot \(Debye\).*?full:\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)/s);
-    if (dipoleAlt) result.dipoleMoment = parseFloat(dipoleAlt[1]);
-  }
+  const dipoleAlt = output.match(/molecular dipole:.*?tot \(Debye\).*?full:\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)/s);
+  if (dipoleAlt) result.dipoleMoment = parseFloat(dipoleAlt[1]);
 
-  const chargeSection = output.match(/Mulliken Charges.*?\n([\s\S]*?)(?:\n\n|\nWiberg)/);
-  if (chargeSection) {
-    const lines = chargeSection[1].trim().split("\n");
+  const chargeBlock = output.match(/#\s+Z\s+covCN\s+q\s+C6AA\s+.*?\n([\s\S]*?)(?:\n\n|\nWiberg|\nmolecular)/);
+  if (chargeBlock) {
+    const lines = chargeBlock[1].trim().split("\n");
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
-      if (parts.length >= 3) {
+      if (parts.length >= 4) {
         const el = parts[1];
-        const charge = parseFloat(parts[parts.length - 1]);
-        if (!isNaN(charge)) {
-          result.charges![el] = (result.charges![el] || 0) + charge;
+        const charge = parseFloat(parts[3]);
+        if (!isNaN(charge) && el.match(/^[A-Z][a-z]?$/)) {
+          if (!result.charges![el]) result.charges![el] = 0;
+          result.charges![el] += charge;
         }
       }
     }
   }
 
-  const wibergSection = output.match(/Wiberg\/Mayer.*?bond orders.*?\n([\s\S]*?)(?:\n\n|molecular)/);
-  if (wibergSection) {
-    const lines = wibergSection[1].trim().split("\n");
-    for (const line of lines) {
-      const bondMatch = line.match(/(\w+)\s*--\s*(\w+)\s*:\s*([\d.]+)/);
-      if (bondMatch) {
-        result.wibergBondOrders!.push({
-          atom1: bondMatch[1],
-          atom2: bondMatch[2],
-          order: parseFloat(bondMatch[3]),
-        });
-      }
-    }
+  if (output.includes("normal termination of xtb")) {
+    result.converged = true;
   }
 
   const wallMatch = output.match(/wall-time:\s+\d+ d,\s+\d+ h,\s+\d+ min,\s+([\d.]+) sec/);
@@ -204,73 +444,30 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
     result.wallTimeSeconds = parseFloat(wallMatch[1]);
   }
 
-  if (output.includes("normal termination of xtb")) {
-    result.converged = true;
-  }
-
   return result;
 }
 
-async function computeElementalEnergy(element: string): Promise<number> {
-  if (ELEMENTAL_REFERENCE_ENERGIES[element] !== undefined) {
-    return ELEMENTAL_REFERENCE_ENERGIES[element];
-  }
-
-  const calcDir = path.join(WORK_DIR, `ref_${element}`);
-  fs.mkdirSync(calcDir, { recursive: true });
-
-  const atoms: AtomPosition[] = [{ element, x: 0, y: 0, z: 0 }];
-
-  const elData = getElementData(element);
-  if (elData && elData.valenceElectrons > 1) {
-    const r = COVALENT_RADII[element] || 1.5;
-    atoms.push({ element, x: r * 2, y: 0, z: 0 });
-  }
-
-  const xyzPath = path.join(calcDir, `${element}.xyz`);
-  writeXYZ(atoms, xyzPath, `${element} reference`);
-
-  try {
-    const env = {
-      ...process.env,
-      XTBHOME: XTB_HOME,
-      XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
-      OMP_STACKSIZE: "512M",
-    };
-
-    const output = execSync(
-      `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp --uhf 0 2>&1`,
-      { timeout: 60000, env, maxBuffer: 10 * 1024 * 1024 }
-    ).toString();
-
-    const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
-    if (energyMatch) {
-      const energyPerAtom = parseFloat(energyMatch[1]) / atoms.length;
-      ELEMENTAL_REFERENCE_ENERGIES[element] = energyPerAtom;
-      return energyPerAtom;
-    }
-  } catch (err) {
-    console.log(`[DFT-xTB] Failed to compute reference energy for ${element}`);
-  }
-
-  ELEMENTAL_REFERENCE_ENERGIES[element] = NaN;
-  return NaN;
-}
+const xtbResultCache = new Map<string, DFTResult>();
+const CACHE_MAX = 500;
 
 export async function runDFTCalculation(formula: string): Promise<DFTResult> {
+  const cacheKey = formula.replace(/\s+/g, "");
+  if (xtbResultCache.has(cacheKey)) {
+    return xtbResultCache.get(cacheKey)!;
+  }
+
   const startTime = Date.now();
-  const calcId = `${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
+  const calcId = `${cacheKey.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  const atoms = generateClusterStructure(formula);
+  const { atoms, prototype } = generateCrystalStructure(formula);
   const xyzPath = path.join(calcDir, "input.xyz");
-  writeXYZ(atoms, xyzPath, formula);
 
   const result: DFTResult = {
     formula,
     method: "GFN2-xTB",
+    prototype,
     totalEnergy: 0,
     totalEnergyPerAtom: 0,
     homoLumoGap: 0,
@@ -280,12 +477,18 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
     fermiLevel: null,
     dipoleMoment: null,
     charges: {},
-    wibergBondOrders: [],
     converged: false,
     wallTimeSeconds: 0,
     atomCount: atoms.length,
     error: null,
   };
+
+  if (atoms.length < 2) {
+    result.error = "Too few atoms for DFT";
+    return result;
+  }
+
+  writeXYZ(atoms, xyzPath, `${formula} [${prototype}]`);
 
   try {
     const env = {
@@ -308,7 +511,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
       result.totalEnergyPerAtom = result.totalEnergy / atoms.length;
     }
 
-    fs.writeFileSync(path.join(calcDir, "output.log"), output);
+    result.prototype = prototype;
   } catch (err: any) {
     result.error = err.message?.slice(0, 200) || "DFT calculation failed";
     if (err.stdout) {
@@ -317,7 +520,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
       if (parsed.totalEnergy) {
         Object.assign(result, parsed);
         result.converged = false;
-        result.error = "Partial convergence: " + result.error;
+        result.error = "Partial: " + result.error?.slice(0, 100);
       }
     }
   }
@@ -328,55 +531,126 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
     fs.rmSync(calcDir, { recursive: true, force: true });
   } catch {}
 
-  return result;
-}
-
-export async function computeFormationEnergy(formula: string, dftResult?: DFTResult): Promise<FormationEnergyResult> {
-  const counts = parseFormula(formula);
-  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
-
-  const compoundResult = dftResult || await runDFTCalculation(formula);
-  const compoundEnergy = compoundResult.totalEnergy;
-
-  const elementalEnergies: Record<string, number> = {};
-  let elementalTotal = 0;
-  let hasInvalidReference = false;
-
-  for (const [el, count] of Object.entries(counts)) {
-    const n = Math.round(count);
-    const refEnergy = await computeElementalEnergy(el);
-    elementalEnergies[el] = refEnergy;
-    if (isNaN(refEnergy)) {
-      hasInvalidReference = true;
-      console.log(`[DFT-xTB] Invalid reference energy for ${el}, formation energy unreliable`);
-    } else {
-      elementalTotal += refEnergy * n;
+  if (result.converged) {
+    xtbResultCache.set(cacheKey, result);
+    if (xtbResultCache.size > CACHE_MAX) {
+      const oldest = xtbResultCache.keys().next().value;
+      if (oldest) xtbResultCache.delete(oldest);
     }
   }
 
-  if (hasInvalidReference) {
-    return {
-      formula,
-      formationEnergyPerAtom: NaN,
-      formationEnergyTotal: NaN,
-      elementalEnergies,
-      compoundEnergy,
-      stable: false,
-    };
+  return result;
+}
+
+const elementRefEnergies = new Map<string, number | null>();
+
+async function computeElementalEnergy(element: string): Promise<number | null> {
+  if (elementRefEnergies.has(element)) {
+    return elementRefEnergies.get(element) ?? null;
   }
 
-  const formationEnergyTotal = compoundEnergy - elementalTotal;
-  const formationEnergyPerAtom = totalAtoms > 0 ? formationEnergyTotal / totalAtoms : 0;
+  const calcDir = path.join(WORK_DIR, `ref_${element}_${Date.now()}`);
+  fs.mkdirSync(calcDir, { recursive: true });
 
+  const r = getAvgRadius(element);
+  const atoms: AtomPosition[] = [
+    { element, x: 0, y: 0, z: 0 },
+    { element, x: r * 2, y: 0, z: 0 },
+  ];
+
+  const xyzPath = path.join(calcDir, `${element}.xyz`);
+  writeXYZ(atoms, xyzPath, `${element} dimer reference`);
+
+  try {
+    const env = {
+      ...process.env,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "512M",
+    };
+
+    const output = execSync(
+      `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp 2>&1`,
+      { timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
+    ).toString();
+
+    const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+    if (energyMatch && output.includes("normal termination")) {
+      const energyPerAtom = parseFloat(energyMatch[1]) / 2;
+      elementRefEnergies.set(element, energyPerAtom);
+      return energyPerAtom;
+    }
+  } catch {}
+
+  try {
+    fs.rmSync(calcDir, { recursive: true, force: true });
+  } catch {}
+
+  elementRefEnergies.set(element, null);
+  return null;
+}
+
+export async function computeFormationEnergy(formula: string, dftResult: DFTResult): Promise<number | null> {
+  if (!dftResult.converged || dftResult.totalEnergy === 0) return null;
+
+  const actualAtomCount = dftResult.atomCount;
+  if (actualAtomCount === 0) return null;
+
+  const counts = parseFormula(formula);
+  const elements = Object.keys(counts);
+  const originalTotal = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  if (originalTotal === 0 || elements.length === 0) return null;
+
+  const scaleFactor = actualAtomCount / originalTotal;
+
+  let elementalTotal = 0;
+  for (const [el, count] of Object.entries(counts)) {
+    const scaledCount = Math.max(1, Math.round(Math.round(count) * scaleFactor));
+    const refE = await computeElementalEnergy(el);
+    if (refE === null) return null;
+    elementalTotal += refE * scaledCount;
+  }
+
+  const formationTotal = dftResult.totalEnergy - elementalTotal;
   const HA_TO_EV = 27.2114;
+  const efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
+
+  if (Math.abs(efPerAtom) > 15) {
+    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom exceeds sanity bounds, discarding`);
+    return null;
+  }
+
+  return efPerAtom;
+}
+
+let totalXTBRuns = 0;
+let totalXTBSuccesses = 0;
+
+export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeatures | null> {
+  if (!isDFTAvailable()) return null;
+
+  totalXTBRuns++;
+  const dftResult = await runDFTCalculation(formula);
+
+  if (!dftResult.converged || dftResult.totalEnergy === 0) {
+    return null;
+  }
+
+  totalXTBSuccesses++;
+
+  const formationE = await computeFormationEnergy(formula, dftResult);
 
   return {
-    formula,
-    formationEnergyPerAtom: formationEnergyPerAtom * HA_TO_EV,
-    formationEnergyTotal: formationEnergyTotal * HA_TO_EV,
-    elementalEnergies,
-    compoundEnergy,
-    stable: formationEnergyPerAtom < 0,
+    bandGap: dftResult.homoLumoGap,
+    isMetallic: dftResult.isMetallic,
+    totalEnergy: dftResult.totalEnergy,
+    totalEnergyPerAtom: dftResult.totalEnergyPerAtom,
+    formationEnergyPerAtom: formationE,
+    fermiLevel: dftResult.fermiLevel,
+    converged: true,
+    prototype: dftResult.prototype,
+    method: "GFN2-xTB",
   };
 }
 
@@ -393,5 +667,14 @@ export function getDFTMethodInfo(): { name: string; version: string; level: stri
     name: "GFN2-xTB",
     version: "6.7.1",
     level: "Semi-empirical DFT (Density Functional Tight Binding)",
+  };
+}
+
+export function getXTBStats() {
+  return {
+    runs: totalXTBRuns,
+    successes: totalXTBSuccesses,
+    cacheSize: xtbResultCache.size,
+    refElements: elementRefEnergies.size,
   };
 }

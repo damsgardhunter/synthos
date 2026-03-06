@@ -94,11 +94,13 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Engine**: xtb v6.7.1 (Grimme group) at `server/dft/xtb-dist/bin/xtb`.
 - **Method**: GFN2-xTB — semi-empirical density functional tight binding, providing real quantum-mechanical energies.
 - **Outputs**: Total energy (Hartree), HOMO-LUMO gap (eV), formation energy (eV/atom), metallicity assessment, dipole moment, Mulliken charges.
-- **Integration**: Runs on top candidates during active learning cycles; results stored in candidate DB with `dataConfidence: "high"`.
-- **Performance**: ~5 seconds per calculation for typical 3-8 atom clusters.
-- **Structure generation**: Automatic cluster geometry from formula using covalent radii and coordination.
-- **Formation energy**: Computed relative to single-element reference calculations.
-- **Cache**: In-memory LRU cache (200 entries) to avoid redundant calculations.
+- **Integration**: Runs on EVERY candidate in the main screening pipeline via `runXTBEnrichment()` in `dft-feature-resolver.ts`. Falls back to analytical estimates only when xTB fails or formula is unsupported.
+- **DFT Source Type**: `"dft-xtb"` — tracked as a distinct source in DFTResolvedFeatures alongside `"analytical"`, `"mp"`, `"oqmd"`, `"aflow"`, `"nist"`.
+- **Performance**: ~5 seconds per calculation for typical 3-20 atom structures. ~85% success rate.
+- **Structure generation**: 8 crystallographic prototypes (A15, AlB2, NaCl, Perovskite, ThCr2Si2, Heusler, BCC, FCC) with real fractional coordinates and lattice parameters. Generic cluster fallback for unmatched stoichiometries. Structures capped at 20 atoms with proportional scaling.
+- **Formation energy**: Computed relative to single-element dimer reference calculations. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
+- **Cache**: In-memory LRU caches for DFT results (200 entries) and elemental reference energies.
+- **Stats API**: `getXTBStats()` exposes runs, successes, cacheSize, refElements via `/api/dft-status`.
 
 ### Analytical Physics Estimators (coverage ~1.00)
 - **Debye temperature**: θD ≈ 41.6 * sqrt(B / ρ) when elemental data unavailable.

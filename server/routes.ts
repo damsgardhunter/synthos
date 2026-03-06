@@ -3,8 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
-import { getRealDFTStats } from "./learning/active-learning";
-import { isDFTAvailable, getDFTMethodInfo } from "./dft/qe-dft-engine";
+import { isDFTAvailable, getDFTMethodInfo, getXTBStats } from "./dft/qe-dft-engine";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -239,9 +238,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           predictedTc: c.predictedTc,
         }));
 
-      const realDft = getRealDFTStats();
       const dftAvailable = isDFTAvailable();
       const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
+      const xtbStats = getXTBStats();
 
       res.json({
         total,
@@ -257,9 +256,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           method: methodInfo?.name ?? "unavailable",
           version: methodInfo?.version ?? "N/A",
           level: methodInfo?.level ?? "N/A",
-          totalRuns: realDft.runs,
-          successfulRuns: realDft.successes,
-          cacheSize: realDft.cacheSize,
+          totalRuns: xtbStats.runs,
+          successfulRuns: xtbStats.successes,
+          successRate: xtbStats.runs > 0 ? (xtbStats.successes / xtbStats.runs * 100).toFixed(1) + "%" : "N/A",
+          cacheSize: xtbStats.cacheSize,
+          refElements: xtbStats.refElements,
         },
       });
     } catch (e) {

@@ -31,7 +31,8 @@ import { runFamilyAwareGeneration } from "./family-generators";
 import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./family-filters";
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { runActiveLearningCycle, getActiveLearningStats, getRealDFTStats } from "./active-learning";
+import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
+import { getXTBStats } from "../dft/qe-dft-engine";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1601,7 +1602,7 @@ async function runAutonomousFastPath() {
 export function getAutonomousLoopStats() {
   const elapsedHours = (Date.now() - autonomousStartTime) / 3600000;
   const alStats = getActiveLearningStats();
-  const dftStats = getRealDFTStats();
+  const xtbStats = getXTBStats();
   return {
     totalScreened: autonomousTotalScreened,
     totalPassed: autonomousTotalPassed,
@@ -1612,9 +1613,10 @@ export function getAutonomousLoopStats() {
     activeLearning: alStats,
     realDFT: {
       method: "GFN2-xTB v6.7.1",
-      runs: dftStats.runs,
-      successes: dftStats.successes,
-      cacheSize: dftStats.cacheSize,
+      runs: xtbStats.runs,
+      successes: xtbStats.successes,
+      cacheSize: xtbStats.cacheSize,
+      successRate: xtbStats.runs > 0 ? `${(xtbStats.successes / xtbStats.runs * 100).toFixed(1)}%` : "N/A",
     },
   };
 }

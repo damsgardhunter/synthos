@@ -10,8 +10,10 @@ import {
   isRareEarth,
   isActinide,
 } from "./elemental-data";
+import { runXTBEnrichment, isDFTAvailable } from "../dft/qe-dft-engine";
+import type { XTBEnrichedFeatures } from "../dft/qe-dft-engine";
 
-export type DFTSource = "dft-mp" | "dft-aflow" | "analytical";
+export type DFTSource = "dft-mp" | "dft-aflow" | "dft-xtb" | "analytical";
 
 export interface DFTResolvedFeature<T> {
   value: T;
@@ -317,10 +319,11 @@ function resolve<T>(
   mpValue: T | null | undefined,
   aflowValue: T | null | undefined,
   fallback: T,
+  fallbackSource: DFTSource = "analytical",
 ): DFTResolvedFeature<T> {
   if (mpValue != null && mpValue !== undefined) return { value: mpValue, source: "dft-mp" };
   if (aflowValue != null && aflowValue !== undefined) return { value: aflowValue, source: "dft-aflow" };
-  return { value: fallback, source: "analytical" };
+  return { value: fallback, source: fallbackSource };
 }
 
 export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFeatures> {
@@ -328,16 +331,32 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
 
   const analytical = computeAnalyticalFallbacks(formula);
 
+  const hasExternalData = raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null || raw.aflowEntry != null || raw.aflowDFT != null;
+
+  let xtbData: XTBEnrichedFeatures | null = null;
+  if (!hasExternalData && isDFTAvailable()) {
+    try {
+      xtbData = await runXTBEnrichment(formula);
+      if (xtbData) {
+        console.log(`[DFT] ${formula}: xTB DFT computed (${xtbData.prototype}): gap=${xtbData.bandGap.toFixed(3)}eV, metallic=${xtbData.isMetallic}, E/atom=${xtbData.totalEnergyPerAtom.toFixed(4)}Ha${xtbData.formationEnergyPerAtom != null ? `, Ef=${xtbData.formationEnergyPerAtom.toFixed(3)}eV/atom` : ""}`);
+      }
+    } catch (err) {
+      xtbData = null;
+    }
+  }
+
   const bandGap = resolve(
     raw.mpSummary?.bandGap ?? raw.mpElectronic?.bandGap,
     raw.aflowEntry?.bandgap,
-    analytical.bandGap,
+    xtbData ? xtbData.bandGap : analytical.bandGap,
+    xtbData ? "dft-xtb" : "analytical",
   );
 
   const isMetallic = resolve(
     raw.mpSummary?.isMetallic ?? raw.mpElectronic?.isMetal,
     raw.aflowEntry?.Egap_type === "metal" ? true : undefined,
-    analytical.isMetallic,
+    xtbData ? xtbData.isMetallic : analytical.isMetallic,
+    xtbData ? "dft-xtb" : "analytical",
   );
 
   const dosAtFermi = resolve<number | null>(
@@ -356,7 +375,13 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
 
   const mpFormE = raw.mpSummary?.formationEnergyPerAtom ?? raw.mpThermo?.formationEnergyPerAtom ?? null;
   const aflowFormE = raw.aflowEntry?.enthalpy_formation_atom ?? null;
-  const formationEnergy = resolve(mpFormE, aflowFormE, analytical.formationEnergy);
+  const xtbFormE = xtbData?.formationEnergyPerAtom ?? null;
+  const formationEnergy = resolve(
+    mpFormE,
+    aflowFormE,
+    xtbFormE != null ? xtbFormE : analytical.formationEnergy,
+    xtbFormE != null ? "dft-xtb" : "analytical",
+  );
 
   const mpEhull = raw.mpSummary?.energyAboveHull ?? raw.mpThermo?.energyAboveHull ?? null;
   const energyAboveHull = resolve<number | null>(mpEhull, null, null);
@@ -381,13 +406,14 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const dftCount = allResolved.filter(f => f.source !== "analytical").length;
   const externalCoverage = allResolved.length > 0 ? dftCount / allResolved.length : 0;
 
-  const hasExternalData = raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null || raw.aflowEntry != null || raw.aflowDFT != null;
-  const dftCoverage = externalCoverage > 0 ? externalCoverage : Math.max(0.5, analytical.estimatorCoverage);
+  const hasXTB = xtbData != null;
+  const dftCoverage = externalCoverage > 0 ? externalCoverage : (hasXTB ? 0.75 : Math.max(0.5, analytical.estimatorCoverage));
 
-  if (!hasExternalData) {
-    console.log(`[DFT] ${formula}: No external API data found (MP/AFLOW). Using analytical fallbacks (coverage=${dftCoverage.toFixed(2)}, estimators: ${(analytical.estimatorCoverage * 100).toFixed(0)}%).`);
-  } else if (externalCoverage < 0.5) {
-    console.log(`[DFT] ${formula}: Partial external data (coverage=${externalCoverage.toFixed(2)}), supplemented with analytical. Effective coverage=${dftCoverage.toFixed(2)}.`);
+  if (!hasExternalData && !hasXTB) {
+    console.log(`[DFT] ${formula}: No external API or xTB data. Using analytical fallbacks (coverage=${dftCoverage.toFixed(2)}).`);
+  } else if (!hasExternalData && hasXTB) {
+  } else if (hasExternalData && externalCoverage < 0.5) {
+    console.log(`[DFT] ${formula}: Partial external data (coverage=${externalCoverage.toFixed(2)}). Effective coverage=${dftCoverage.toFixed(2)}.`);
   }
 
   return {
@@ -415,6 +441,8 @@ export function describeDFTSources(features: DFTResolvedFeatures): string {
   if (features.bulkModulus.source !== "analytical" && features.bulkModulus.value > 0) parts.push(`B=${features.bulkModulus.value.toFixed(0)}GPa(${features.bulkModulus.source})`);
   if (features.dosAtFermi.value != null && features.dosAtFermi.source !== "analytical") parts.push(`DOS=${features.dosAtFermi.value.toFixed(2)}(${features.dosAtFermi.source})`);
   if (features.phononFreqMax.value != null && features.phononFreqMax.source !== "analytical") parts.push(`phMax=${features.phononFreqMax.value.toFixed(0)}cm-1(${features.phononFreqMax.source})`);
+  if (features.formationEnergy.source === "dft-xtb") parts.push(`Ef=${features.formationEnergy.value.toFixed(3)}eV(dft-xtb)`);
+  if (features.isMetallic.source === "dft-xtb") parts.push(`metallic=${features.isMetallic.value}(dft-xtb)`);
   if (parts.length === 0) {
     const analyticalParts: string[] = [];
     analyticalParts.push(`bandGap=${features.bandGap.value.toFixed(2)}eV`);
