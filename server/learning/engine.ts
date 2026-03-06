@@ -267,7 +267,7 @@ async function runPhase3_Bonding() {
   activeTasks.add("Bonding Analysis");
   broadcast("taskStart", { task: "Bonding Analysis" });
   try {
-    const mats = await storage.getMaterials(30, 0);
+    const mats = await storage.getMaterials(200, 0);
     if (mats.length === 0) return;
 
     await updatePhaseStatus(3, "active", 0, 0);
@@ -319,7 +319,7 @@ async function runPhase5_Prediction() {
   activeTasks.add("Property Prediction");
   broadcast("taskStart", { task: "Property Prediction" });
   try {
-    const mats = await storage.getMaterials(25, 0);
+    const mats = await storage.getMaterials(200, 0);
     if (mats.length === 0) return;
 
     await updatePhaseStatus(5, "active", 0, 0);
@@ -349,15 +349,19 @@ async function runPhase6_Discovery() {
   activeTasks.add("Novel Discovery");
   broadcast("taskStart", { task: "Novel Discovery" });
   try {
-    await updatePhaseStatus(6, "active", 0, 0);
+    const prevPredCount = (await storage.getNovelPredictions()).length;
+    const prevProgress = computeProgress(6, prevPredCount + totalPredictionsMade);
+    await updatePhaseStatus(6, "active", prevProgress, prevPredCount + totalPredictionsMade);
     if (!shouldContinue()) return;
 
     const generated = await generateNovelFormulas(emit, allInsights.slice(-10), undefined, currentStrategyHint || undefined);
     totalPredictionsMade += generated;
 
     const predCount = (await storage.getNovelPredictions()).length;
-    const progress6 = computeProgress(6, predCount);
-    await updatePhaseStatus(6, "active", progress6, predCount);
+    const scCount = await storage.getSuperconductorCount();
+    const discoveryWork = predCount + scCount;
+    const progress6 = computeProgress(6, discoveryWork);
+    await updatePhaseStatus(6, "active", progress6, discoveryWork);
   } finally {
     activeTasks.delete("Novel Discovery");
     broadcast("taskEnd", { task: "Novel Discovery" });
