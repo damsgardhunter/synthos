@@ -268,6 +268,89 @@ function MLScoresSection({ candidate }: { candidate: SuperconductorCandidate }) 
             {candidate.cooperPairMechanism}
           </p>
         )}
+
+        {candidate.notes && (
+          <div className="mt-2 space-y-1">
+            {candidate.notes.includes("[Inverse design:") && (
+              <Badge className="bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300 border-0 text-[10px]" data-testid="badge-inverse-design">
+                Inverse Design
+              </Badge>
+            )}
+            {candidate.notes.includes("[Structural variant:") && (
+              <Badge className="bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300 border-0 text-[10px]" data-testid="badge-structural-variant">
+                Structural Variant
+              </Badge>
+            )}
+            {(() => {
+              const noveltyMatch = candidate.notes.match(/novelty=([\d.]+)/);
+              if (noveltyMatch) {
+                const novelty = parseFloat(noveltyMatch[1]);
+                return (
+                  <div className="text-[10px] text-muted-foreground" data-testid="text-structural-novelty">
+                    Structural Novelty: <span className="font-mono font-bold">{novelty.toFixed(2)}</span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+            {(() => {
+              const psMatch = candidate.notes.match(/PS=([\d.]+)/);
+              if (psMatch) {
+                const ps = parseFloat(psMatch[1]);
+                return (
+                  <div className="text-[10px] text-muted-foreground" data-testid="text-pairing-susceptibility">
+                    Pairing Susceptibility: <span className="font-mono font-bold">{ps.toFixed(3)}</span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+            {(() => {
+              const instMatch = candidate.notes.match(/\[Instability: (.+?)=([\d.]+), QCP=([\d.]+), CDW=([\d.]+), MIT=([\d.]+)\]/);
+              if (instMatch) {
+                const boundary = instMatch[1];
+                const overall = parseFloat(instMatch[2]);
+                const qcp = parseFloat(instMatch[3]);
+                const cdw = parseFloat(instMatch[4]);
+                const mit = parseFloat(instMatch[5]);
+                return (
+                  <div className="mt-1.5 p-2 bg-muted/50 rounded space-y-1" data-testid="instability-proximity">
+                    <div className="text-[10px] font-semibold text-foreground">Instability Proximity</div>
+                    <div className="text-[10px] text-muted-foreground">
+                      Nearest: <span className="font-mono font-bold">{boundary}</span> ({overall.toFixed(2)})
+                    </div>
+                    <div className="flex gap-3 text-[10px] text-muted-foreground">
+                      <span>QCP: <span className="font-mono">{qcp.toFixed(2)}</span></span>
+                      <span>CDW: <span className="font-mono">{cdw.toFixed(2)}</span></span>
+                      <span>MIT: <span className="font-mono">{mit.toFixed(2)}</span></span>
+                    </div>
+                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${overall > 0.6 ? "bg-red-500" : overall > 0.3 ? "bg-yellow-500" : "bg-blue-500"}`}
+                        style={{ width: `${Math.min(100, overall * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+            {(() => {
+              const pairingMatch = candidate.notes.match(/\[Pairing: (.+?) \(Tc=([\d.]+)K, conf=([\d.]+)\)\]/);
+              if (pairingMatch) {
+                const mechanism = pairingMatch[1];
+                const tc = parseFloat(pairingMatch[2]);
+                const conf = parseFloat(pairingMatch[3]);
+                return (
+                  <div className="mt-1 text-[10px] text-muted-foreground" data-testid="text-pairing-analysis">
+                    Dominant Pairing: <span className="font-mono font-bold">{mechanism}</span> (Tc={tc.toFixed(0)}K, confidence={conf.toFixed(2)})
+                  </div>
+                );
+              }
+              return null;
+            })()}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

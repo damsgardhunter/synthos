@@ -13,6 +13,7 @@ import { Link } from "wouter";
 import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
   CheckCircle2, XCircle, ArrowRight, Gauge, Magnet, ExternalLink,
+  Microscope, Layers,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -476,6 +477,16 @@ export default function SuperconductorLab() {
     queryKey: ["/api/ml-calibration"],
   });
 
+  const { data: engineStatus } = useQuery<{
+    totalInverseDesigned: number;
+    totalStructuralVariants: number;
+    totalPhysicsComputed: number;
+    cycleCount: number;
+  }>({
+    queryKey: ["/api/engine/status"],
+    refetchInterval: 10000,
+  });
+
   const p90 = calibrationData?.absResidualPercentiles?.p90;
 
   const ws = useWebSocket();
@@ -546,6 +557,45 @@ export default function SuperconductorLab() {
               <span className="text-xs text-muted-foreground">Reactions</span>
             </div>
             <div className="text-2xl font-bold font-mono">{rxnData?.total ?? 0}</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Card data-testid="stat-inverse-designed">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Microscope className="h-4 w-4 text-violet-500" />
+              <span className="text-xs text-muted-foreground">Inverse Designed</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{engineStatus?.totalInverseDesigned ?? 0}</div>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-structural-variants">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Layers className="h-4 w-4 text-cyan-500" />
+              <span className="text-xs text-muted-foreground">Structural Variants</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{engineStatus?.totalStructuralVariants ?? 0}</div>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-high-score">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Zap className="h-4 w-4 text-amber-500" />
+              <span className="text-xs text-muted-foreground">High Score</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{highScoreCandidates.length}</div>
+          </CardContent>
+        </Card>
+        <Card data-testid="stat-meissner">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Magnet className="h-4 w-4 text-blue-500" />
+              <span className="text-xs text-muted-foreground">Meissner</span>
+            </div>
+            <div className="text-2xl font-bold font-mono">{meissnerCandidates.length}</div>
           </CardContent>
         </Card>
       </div>

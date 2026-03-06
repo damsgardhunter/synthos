@@ -3,67 +3,141 @@ import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 
+export interface PhysicsConstraintMode {
+  allowBeyondEmpirical: boolean;
+  empiricalPenaltyStrength: number;
+}
+
+const defaultConstraintMode: PhysicsConstraintMode = {
+  allowBeyondEmpirical: true,
+  empiricalPenaltyStrength: 0.5,
+};
+
+let activeConstraintMode: PhysicsConstraintMode = { ...defaultConstraintMode };
+
+export function setConstraintMode(mode: Partial<PhysicsConstraintMode>): void {
+  activeConstraintMode = { ...activeConstraintMode, ...mode };
+}
+
+export function getConstraintMode(): PhysicsConstraintMode {
+  return { ...activeConstraintMode };
+}
+
+function softCeiling(tc: number, threshold: number, penaltyStrength: number): number {
+  if (tc <= threshold) return tc;
+  const excess = tc - threshold;
+  const dampened = threshold + excess / (1 + penaltyStrength * excess / threshold);
+  return Math.round(dampened * 10) / 10;
+}
+
+function computePhysicsDerivedBonus(formula: string, lambda: number): number {
+  const els = parseFormulaElements(formula);
+  const cts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(cts);
+
+  const isCuprate = els.includes("Cu") && els.includes("O") && els.length >= 3
+    && els.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
+  const isHEA = detectHighEntropyAlloy(formula);
+
+  let bonus = 0;
+  if (isCuprate && lambda > 0.5) {
+    const cuFrac = (cts["Cu"] || 0) / totalAtoms;
+    const oFrac = (cts["O"] || 0) / totalAtoms;
+    bonus = Math.round(cuFrac * oFrac * 200 * Math.min(lambda, 2.0));
+  }
+  if (isHEA && lambda > 1.0) {
+    const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
+    const entropyFactor = Math.log(Math.max(2, metalEls.length)) / Math.log(6);
+    const heaBonus = Math.round(entropyFactor * lambda * 8);
+    bonus = Math.max(bonus, heaBonus);
+  }
+  return bonus;
+}
+
 export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number, formula?: string): number {
   if (tc <= 0) return tc;
+  const mode = activeConstraintMode;
+
+  if (metallicity <= 0) return 0;
 
   let pressureThresholdLow = 10;
   let materialBonus = 0;
 
   if (formula) {
-    const els = parseFormulaElements(formula);
     const cts = parseFormulaCounts(formula);
-    const totalAtoms = getTotalAtoms(cts);
+    const els = parseFormulaElements(formula);
     const hCount = cts["H"] || 0;
-    const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) ||
-      HEA_EXTRA_METALS.includes(e));
+    const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
     const metalAtomCount = metalEls.reduce((s, e) => s + (cts[e] || 0), 0);
     const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
-
-    const isCuprate = els.includes("Cu") && els.includes("O") && els.length >= 3
-      && els.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
-    const isHEA = detectHighEntropyAlloy(formula);
-    const isSuperhydride = hRatio >= 6;
-
-    if (isCuprate && lambda > 0.5) {
-      materialBonus = 15;
-    }
-    if (isHEA && lambda > 1.5) {
-      materialBonus = Math.max(materialBonus, 20);
-    }
-    if (isSuperhydride) {
-      pressureThresholdLow = 5;
-    }
+    if (hRatio >= 6) pressureThresholdLow = 5;
+    materialBonus = computePhysicsDerivedBonus(formula, lambda);
   }
 
   const isAmbient = pressureGpa < pressureThresholdLow;
   const isHighPressure = pressureGpa >= 50;
   const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / (50 - pressureThresholdLow);
 
-  let tcCap: number;
+  if (!mode.allowBeyondEmpirical) {
+    let tcCap: number;
+    if (metallicity < 0.3) {
+      tcCap = 20;
+    } else if (metallicity < 0.5) {
+      tcCap = 80;
+    } else if (lambda < 0.3) {
+      tcCap = 50;
+    } else if (lambda < 0.5) {
+      tcCap = 80;
+    } else if (lambda < 1.0) {
+      tcCap = Math.round(80 + (150 - 80) * pressureFactor);
+    } else if (lambda < 1.5) {
+      tcCap = Math.round(120 + (250 - 120) * pressureFactor);
+    } else if (lambda < 2.5) {
+      tcCap = Math.round(160 + (350 - 160) * pressureFactor);
+    } else {
+      tcCap = Math.round(200 + (350 - 200) * pressureFactor);
+    }
+    if (pressureGpa < 10) {
+      tcCap += materialBonus;
+      tcCap = Math.min(tcCap, 250);
+    }
+    return Math.min(tc, tcCap);
+  }
+
+  let baseExpectation: number;
   if (metallicity < 0.3) {
-    tcCap = 20;
+    baseExpectation = 20 + metallicity * 100;
   } else if (metallicity < 0.5) {
-    tcCap = 80;
+    baseExpectation = 50 + (metallicity - 0.3) * 200;
   } else if (lambda < 0.3) {
-    tcCap = 50;
+    baseExpectation = 30 + lambda * 100;
   } else if (lambda < 0.5) {
-    tcCap = 80;
+    baseExpectation = 50 + (lambda - 0.3) * 200;
   } else if (lambda < 1.0) {
-    tcCap = Math.round(80 + (150 - 80) * pressureFactor);
+    const ambientBase = 60;
+    const hpBase = 150;
+    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   } else if (lambda < 1.5) {
-    tcCap = Math.round(120 + (250 - 120) * pressureFactor);
+    const ambientBase = 100;
+    const hpBase = 250;
+    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   } else if (lambda < 2.5) {
-    tcCap = Math.round(160 + (350 - 160) * pressureFactor);
+    const ambientBase = 150;
+    const hpBase = 400;
+    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   } else {
-    tcCap = Math.round(200 + (350 - 200) * pressureFactor);
+    const ambientBase = 200;
+    const hpBase = 500;
+    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   }
 
-  if (pressureGpa < 10) {
-    tcCap += materialBonus;
-    tcCap = Math.min(tcCap, 250);
-  }
+  baseExpectation += materialBonus;
+  baseExpectation = Math.round(baseExpectation);
 
-  return Math.min(tc, tcCap);
+  const penaltyStr = mode.empiricalPenaltyStrength;
+  const result = softCeiling(tc, baseExpectation, penaltyStr);
+
+  return Math.round(result);
 }
 
 const HEA_EXTRA_METALS = ["Al", "Mg", "Ca", "Sr", "Ba", "Li", "Na", "K", "Ti", "Zn", "Ga", "Ge", "Sn"];
@@ -770,7 +844,13 @@ export function computeElectronPhononCoupling(
     if (metal < 0.4) lambda *= metal;
   }
 
-  lambda = Math.max(0.05, Math.min(3.5, lambda));
+  lambda = Math.max(0.05, lambda);
+  if (activeConstraintMode.allowBeyondEmpirical) {
+    if (lambda > 4.0) lambda = 4.0 + (lambda - 4.0) * 0.3;
+    lambda = Math.min(6.0, lambda);
+  } else {
+    lambda = Math.min(3.5, lambda);
+  }
 
   const avgEN = formula ? (getCompositionWeightedProperty(parseFormulaCounts(formula), "paulingElectronegativity") || 1.8) : 1.8;
   const mu_bare = 0.1 + avgEN * 0.02;
@@ -834,6 +914,214 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling): Eliashber
     isotropicGap,
     strongCouplingCorrection: Number(strongCouplingCorrection.toFixed(3)),
     confidenceBand,
+  };
+}
+
+export interface PairingMechanismResult {
+  mechanism: string;
+  tcEstimate: number;
+  confidence: number;
+  description: string;
+}
+
+export interface UnifiedPairingResult {
+  dominant: PairingMechanismResult;
+  all: PairingMechanismResult[];
+  enhancedTc: number;
+  uncertaintyFromMechanism: number;
+}
+
+function estimateSpinFluctuationTc(
+  formula: string,
+  electronic: ElectronicStructure,
+  competingPhases: CompetingPhase[]
+): PairingMechanismResult {
+  const elements = parseFormulaElements(formula);
+  const N_EF = electronic.densityOfStatesAtFermi;
+  const corr = electronic.correlationStrength;
+
+  let stonerMax = 0;
+  for (const el of elements) {
+    const I = getStonerParameter(el);
+    if (I !== null) stonerMax = Math.max(stonerMax, I * N_EF);
+  }
+
+  const nearQCP = stonerMax > 0.7 && stonerMax < 1.2;
+  const hasAFM = competingPhases.some(p => p.phaseName.includes("Antiferromagnetic"));
+
+  if (!nearQCP && !hasAFM && corr < 0.5) {
+    return { mechanism: "spin-fluctuation", tcEstimate: 0, confidence: 0.1, description: "No magnetic proximity" };
+  }
+
+  const T_sf = 200 * (1 - Math.abs(stonerMax - 1.0));
+  const V_sf = corr * 0.8;
+  const exponent = V_sf * N_EF;
+
+  let tc_sf = 0;
+  if (exponent > 0.1) {
+    tc_sf = T_sf * Math.exp(-1 / exponent);
+  }
+
+  if (nearQCP) tc_sf *= 2.0;
+  if (hasAFM) tc_sf *= 1.5;
+
+  const isCuprate = elements.includes("Cu") && elements.includes("O");
+  const isIronBased = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+  if (isCuprate) tc_sf = Math.max(tc_sf, 50 + corr * 100);
+  if (isIronBased) tc_sf = Math.max(tc_sf, 20 + corr * 60);
+
+  tc_sf = Math.max(0, Math.round(tc_sf));
+  const confidence = nearQCP ? 0.5 : (hasAFM ? 0.4 : 0.2);
+
+  return {
+    mechanism: "spin-fluctuation",
+    tcEstimate: tc_sf,
+    confidence,
+    description: nearQCP ? "Near magnetic quantum critical point" : (hasAFM ? "AFM-proximity-mediated pairing" : "Weak spin-fluctuation contribution"),
+  };
+}
+
+function estimateExcitonicPairingTc(
+  formula: string,
+  electronic: ElectronicStructure
+): PairingMechanismResult {
+  const corr = electronic.correlationStrength;
+  const metal = electronic.metallicity;
+
+  const isMixedDim = electronic.fermiSurfaceTopology.includes("2D") && electronic.orbitalCharacter.includes("hybridized");
+  const nearMIT = metal > 0.3 && metal < 0.6;
+
+  if (!isMixedDim && !nearMIT) {
+    return { mechanism: "excitonic", tcEstimate: 0, confidence: 0.05, description: "No excitonic conditions" };
+  }
+
+  let tc_exc = 0;
+  if (isMixedDim && nearMIT) {
+    const excStrength = (0.6 - metal) * corr * 2;
+    tc_exc = Math.round(50 * excStrength);
+  } else if (nearMIT) {
+    tc_exc = Math.round(20 * (0.6 - metal) * 3);
+  }
+
+  return {
+    mechanism: "excitonic",
+    tcEstimate: Math.max(0, tc_exc),
+    confidence: 0.2,
+    description: isMixedDim ? "Mixed-dimensional excitonic coupling" : "Near metal-insulator boundary",
+  };
+}
+
+function estimatePlasmonicPairingTc(
+  formula: string,
+  electronic: ElectronicStructure
+): PairingMechanismResult {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const N_EF = electronic.densityOfStatesAtFermi;
+
+  const totalAtoms = getTotalAtoms(counts);
+  let totalVE = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
+  }
+  const vec = totalVE / totalAtoms;
+  const carrierDensity = vec * electronic.metallicity;
+
+  const lowCarrier = carrierDensity < 3 && N_EF > 2;
+  if (!lowCarrier) {
+    return { mechanism: "plasmonic", tcEstimate: 0, confidence: 0.05, description: "No plasmonic conditions" };
+  }
+
+  const plasmaStrength = N_EF / Math.max(carrierDensity, 0.5);
+  const tc_pl = Math.round(Math.min(100, plasmaStrength * 10));
+
+  return {
+    mechanism: "plasmonic",
+    tcEstimate: Math.max(0, tc_pl),
+    confidence: 0.15,
+    description: "Low carrier density with high DOS — plasmon-mediated",
+  };
+}
+
+function estimateFlatBandTc(
+  formula: string,
+  electronic: ElectronicStructure,
+  coupling: ElectronPhononCoupling
+): PairingMechanismResult {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const N_EF = electronic.densityOfStatesAtFermi;
+
+  let wAvg = 0;
+  const totalAtoms = getTotalAtoms(counts);
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    wAvg += estimateBandwidthW(el) * frac;
+  }
+
+  const isFlatBand = wAvg < 1.5 && N_EF > 3.0;
+
+  if (!isFlatBand) {
+    return { mechanism: "flat-band", tcEstimate: 0, confidence: 0.05, description: "No flat-band conditions" };
+  }
+
+  const lambda = coupling.lambda;
+  const tc_fb = Math.round(wAvg * 11604 * Math.sqrt(Math.max(0.1, lambda)) * 0.01);
+
+  const isKagome = elements.length >= 2 && electronic.fermiSurfaceTopology.includes("nesting");
+
+  return {
+    mechanism: "flat-band",
+    tcEstimate: Math.max(0, Math.min(400, tc_fb * (isKagome ? 1.5 : 1.0))),
+    confidence: isKagome ? 0.35 : 0.25,
+    description: isKagome ? "Kagome-type flat band with geometric frustration" : `Narrow bandwidth (W=${wAvg.toFixed(1)}eV) with high DOS`,
+  };
+}
+
+export function runUnifiedPairingAnalysis(
+  formula: string,
+  electronic: ElectronicStructure,
+  coupling: ElectronPhononCoupling,
+  eliashberg: EliashbergResult,
+  competingPhases: CompetingPhase[]
+): UnifiedPairingResult {
+  const bcs: PairingMechanismResult = {
+    mechanism: "phonon-mediated BCS",
+    tcEstimate: eliashberg.predictedTc,
+    confidence: coupling.lambda > 0.3 ? 0.7 : 0.3,
+    description: `BCS: lambda=${coupling.lambda.toFixed(2)}, omega_log=${coupling.omegaLog}cm-1`,
+  };
+
+  const spinFluc = estimateSpinFluctuationTc(formula, electronic, competingPhases);
+  const excitonic = estimateExcitonicPairingTc(formula, electronic);
+  const plasmonic = estimatePlasmonicPairingTc(formula, electronic);
+  const flatBand = estimateFlatBandTc(formula, electronic, coupling);
+
+  const all = [bcs, spinFluc, excitonic, plasmonic, flatBand];
+
+  const weightedAll = all.map(m => ({
+    ...m,
+    effectiveTc: m.tcEstimate * m.confidence,
+  }));
+
+  weightedAll.sort((a, b) => b.effectiveTc - a.effectiveTc);
+  const dominant = weightedAll[0];
+
+  const activeCount = all.filter(m => m.tcEstimate > 0).length;
+  let enhancedTc = dominant.tcEstimate;
+  const secondary = weightedAll[1];
+  if (secondary && secondary.tcEstimate > 0 && secondary.mechanism !== dominant.mechanism) {
+    enhancedTc = Math.round(enhancedTc + secondary.tcEstimate * 0.15);
+  }
+
+  const uncertaintyFromMechanism = activeCount > 2 ? 0.4 : (dominant.confidence > 0.5 ? 0.2 : 0.35);
+
+  return {
+    dominant: { mechanism: dominant.mechanism, tcEstimate: dominant.tcEstimate, confidence: dominant.confidence, description: dominant.description },
+    all,
+    enhancedTc,
+    uncertaintyFromMechanism,
   };
 }
 
@@ -1088,6 +1376,101 @@ export function assessCorrelationStrength(formula: string): {
   };
 }
 
+export interface InstabilityProximity {
+  magneticQCP: number;
+  structuralBoundary: number;
+  metalInsulatorTransition: number;
+  cdwInstability: number;
+  softPhononCollapse: number;
+  overallProximity: number;
+  nearestBoundary: string;
+}
+
+export function computeInstabilityProximity(
+  formula: string,
+  electronic: ElectronicStructure,
+  phononSpectrum: PhononSpectrum,
+  competingPhases: CompetingPhase[]
+): InstabilityProximity {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+
+  let magneticQCP = 0;
+  for (const el of elements) {
+    const I = getStonerParameter(el);
+    if (I !== null) {
+      const stonerProduct = I * electronic.densityOfStatesAtFermi;
+      if (stonerProduct > 0.7 && stonerProduct < 1.2) {
+        const proximity = 1.0 - Math.abs(stonerProduct - 1.0) * 5;
+        magneticQCP = Math.max(magneticQCP, Math.max(0, proximity));
+      }
+    }
+  }
+  const hasAFM = competingPhases.some(p => p.type === "magnetism" && p.phaseName.includes("Antiferromagnetic"));
+  if (hasAFM) magneticQCP = Math.max(magneticQCP, 0.5);
+
+  let structuralBoundary = 0;
+  const structPhases = competingPhases.filter(p => p.type === "structural");
+  for (const sp of structPhases) {
+    const match = sp.phaseName.match(/t=([\d.]+)/);
+    if (match) {
+      const tf = parseFloat(match[1]);
+      if (tf >= 0.82 && tf <= 0.88) structuralBoundary = Math.max(structuralBoundary, 0.8);
+      else if (tf >= 1.02 && tf <= 1.08) structuralBoundary = Math.max(structuralBoundary, 0.7);
+      else if (tf < 0.82 || tf > 1.08) structuralBoundary = Math.max(structuralBoundary, 0.3);
+    }
+  }
+
+  const metallicity = electronic.metallicity;
+  let metalInsulatorTransition = 0;
+  if (metallicity > 0.3 && metallicity < 0.5) {
+    metalInsulatorTransition = 1.0 - Math.abs(metallicity - 0.4) * 10;
+    metalInsulatorTransition = Math.max(0, metalInsulatorTransition);
+  }
+
+  let cdwInstability = 0;
+  const cdwPhases = competingPhases.filter(p => p.type === "CDW");
+  for (const cdw of cdwPhases) {
+    cdwInstability = Math.max(cdwInstability, cdw.strength);
+  }
+  if (electronic.fermiSurfaceTopology.includes("nesting")) {
+    cdwInstability = Math.max(cdwInstability, 0.4);
+  }
+
+  let softPhononCollapse = 0;
+  if (phononSpectrum.softModePresent) {
+    softPhononCollapse = 0.6;
+  }
+  if (phononSpectrum.logAverageFrequency < 100) {
+    softPhononCollapse = Math.max(softPhononCollapse, 0.8);
+  }
+  if (phononSpectrum.anharmonicityIndex > 0.6) {
+    softPhononCollapse = Math.max(softPhononCollapse, 0.5);
+  }
+
+  const scores = [
+    { name: "Magnetic QCP", val: magneticQCP },
+    { name: "Structural boundary", val: structuralBoundary },
+    { name: "Metal-insulator transition", val: metalInsulatorTransition },
+    { name: "CDW instability", val: cdwInstability },
+    { name: "Soft phonon collapse", val: softPhononCollapse },
+  ];
+
+  const overallProximity = Math.max(...scores.map(s => s.val));
+  const nearest = scores.reduce((a, b) => b.val > a.val ? b : a);
+
+  return {
+    magneticQCP,
+    structuralBoundary,
+    metalInsulatorTransition,
+    cdwInstability,
+    softPhononCollapse,
+    overallProximity,
+    nearestBoundary: nearest.name,
+  };
+}
+
 export async function runFullPhysicsAnalysis(
   emit: EventEmitter,
   candidate: SuperconductorCandidate
@@ -1101,6 +1484,8 @@ export async function runFullPhysicsAnalysis(
   correlation: ReturnType<typeof assessCorrelationStrength>;
   dimensionality: string;
   uncertaintyEstimate: number;
+  pairingAnalysis: UnifiedPairingResult;
+  instabilityProximity: InstabilityProximity;
 }> {
   const formula = candidate.formula;
 
@@ -1167,7 +1552,7 @@ export async function runFullPhysicsAnalysis(
       }
     }
     if (dftData.phononFreqMax.value != null && dftData.phononFreqMax.source !== "analytical") {
-      phononSpectrum.maxFrequency = dftData.phononFreqMax.value;
+      phononSpectrum.maxPhononFrequency = dftData.phononFreqMax.value;
     }
   }
 
@@ -1218,6 +1603,20 @@ export async function runFullPhysicsAnalysis(
     else dimensionality = "3D";
   }
 
+  const pairingAnalysis = runUnifiedPairingAnalysis(formula, electronicStructure, coupling, eliashberg, competingPhases);
+
+  if (pairingAnalysis.dominant.mechanism !== "phonon-mediated BCS" && pairingAnalysis.dominant.tcEstimate > eliashberg.predictedTc) {
+    const unconvTc = pairingAnalysis.enhancedTc;
+    const blendWeight = pairingAnalysis.dominant.confidence;
+    eliashberg.predictedTc = Math.round(
+      eliashberg.predictedTc * (1 - blendWeight) + unconvTc * blendWeight
+    );
+    eliashberg.confidenceBand = [
+      Math.round(eliashberg.predictedTc * 0.5),
+      Math.round(eliashberg.predictedTc * 2.0),
+    ];
+  }
+
   const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality);
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
@@ -1228,7 +1627,17 @@ export async function runFullPhysicsAnalysis(
   if (phononSpectrum.anharmonicityIndex > 0.5) uncertaintyEstimate += 0.1;
   if (!mpSummary) uncertaintyEstimate += 0.05;
   if (dftData && dftData.dftCoverage > 0.3) uncertaintyEstimate -= dftData.dftCoverage * 0.15;
+  uncertaintyEstimate = Math.max(uncertaintyEstimate, pairingAnalysis.uncertaintyFromMechanism);
   uncertaintyEstimate = Math.max(0.05, Math.min(0.95, uncertaintyEstimate));
+
+  const instabilityProximity = computeInstabilityProximity(formula, electronicStructure, phononSpectrum, competingPhases);
+
+  emit("log", {
+    phase: "phase-10",
+    event: "Instability proximity computed",
+    detail: `${formula}: nearest=${instabilityProximity.nearestBoundary} (${instabilityProximity.overallProximity.toFixed(2)}), QCP=${instabilityProximity.magneticQCP.toFixed(2)}, CDW=${instabilityProximity.cdwInstability.toFixed(2)}, MIT=${instabilityProximity.metalInsulatorTransition.toFixed(2)}`,
+    dataSource: "Physics Engine",
+  });
 
   return {
     electronicStructure,
@@ -1240,5 +1649,7 @@ export async function runFullPhysicsAnalysis(
     correlation,
     dimensionality,
     uncertaintyEstimate,
+    pairingAnalysis,
+    instabilityProximity,
   };
 }

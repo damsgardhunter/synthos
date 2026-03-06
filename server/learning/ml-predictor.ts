@@ -64,6 +64,12 @@ export interface MLFeatureVector {
   avgSommerfeldGamma: number;
   avgBulkModulus: number;
   dftConfidence: number;
+  orbitalCharacterCode: number;
+  phononSpectralCentroid: number;
+  phononSpectralWidth: number;
+  bondStiffnessVariance: number;
+  chargeTransferMagnitude: number;
+  connectivityIndex: number;
 }
 
 const CHALCOGENS = ["O","S","Se","Te"];
@@ -187,6 +193,51 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     dftConfidence = dftData.dftCoverage;
   }
 
+  let orbitalCharacterCode = 0;
+  const orbChar = electronic.orbitalCharacter.toLowerCase();
+  if (orbChar.includes("f-electron") || orbChar.includes("f-")) orbitalCharacterCode = 3;
+  else if (orbChar.includes("d-") || orbChar.includes("d band")) orbitalCharacterCode = 2;
+  else if (orbChar.includes("1s") || orbChar.includes("sigma")) orbitalCharacterCode = 0.5;
+  else if (orbChar.includes("p-")) orbitalCharacterCode = 1;
+
+  const phononMax = phonon.maxPhononFrequency || 500;
+  const phononLog = phonon.logAverageFrequency || 200;
+  const phononSpectralCentroid = (phononMax + phononLog) / 2;
+  const phononSpectralWidth = Math.abs(phononMax - phononLog) / Math.max(phononMax, 1);
+
+  let bondStiffnessVariance = 0;
+  const bulkValues: number[] = [];
+  for (const el of elements) {
+    const d = getElementData(el);
+    if (d && d.bulkModulus && d.bulkModulus > 0) {
+      bulkValues.push(d.bulkModulus);
+    }
+  }
+  if (bulkValues.length > 1) {
+    const mean = bulkValues.reduce((s, v) => s + v, 0) / bulkValues.length;
+    bondStiffnessVariance = Math.sqrt(bulkValues.reduce((s, v) => s + (v - mean) ** 2, 0) / bulkValues.length) / Math.max(mean, 1);
+  }
+
+  let chargeTransferMagnitude = 0;
+  if (elements.length > 1) {
+    for (let i = 0; i < elements.length; i++) {
+      for (let j = i + 1; j < elements.length; j++) {
+        const en_i = getElementData(elements[i])?.paulingElectronegativity ?? 1.5;
+        const en_j = getElementData(elements[j])?.paulingElectronegativity ?? 1.5;
+        const frac_i = (counts[elements[i]] || 1) / totalAtoms;
+        const frac_j = (counts[elements[j]] || 1) / totalAtoms;
+        chargeTransferMagnitude += Math.abs(en_i - en_j) * Math.sqrt(frac_i * frac_j);
+      }
+    }
+  }
+
+  let connectivityIndex = 0.5;
+  if (layeredStructure) connectivityIndex = 0.3;
+  else if (dimensionalityScore > 0.7) connectivityIndex = 0.25;
+  else if (elements.length === 1) connectivityIndex = 0.8;
+  else if (elements.length >= 4) connectivityIndex = 0.6;
+  if (hasHydrogen && hydrogenRatio >= 6) connectivityIndex = Math.max(connectivityIndex, 0.7);
+
   return {
     avgElectronegativity: avgEN,
     maxAtomicMass: Math.max(...massValues, 0),
@@ -223,6 +274,12 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     avgSommerfeldGamma: avgGamma,
     avgBulkModulus: avgBulk,
     dftConfidence,
+    orbitalCharacterCode,
+    phononSpectralCentroid,
+    phononSpectralWidth,
+    bondStiffnessVariance,
+    chargeTransferMagnitude,
+    connectivityIndex,
   };
 }
 

@@ -4,7 +4,7 @@ import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily } from "./utils";
-import { applyAmbientTcCap } from "./physics-engine";
+import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } from "./physics-engine";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -543,6 +543,199 @@ Return JSON with 'candidates' array:
     }
   } catch (err: any) {
     emit("log", { phase: "phase-7", event: "Novel SC generation error", detail: err.message?.slice(0, 200), dataSource: "SC Research" });
+  }
+
+  return generated;
+}
+
+export function computePairingSusceptibility(formula: string): {
+  score: number;
+  lambda: number;
+  nestingFactor: number;
+  dosAtEf: number;
+  phononSoftness: number;
+} {
+  const electronic = computeElectronicStructure(formula);
+  const phonon = computePhononSpectrum(formula, electronic);
+  const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
+
+  const lambda = coupling.lambda;
+  const dosAtEf = electronic.densityOfStatesAtFermi;
+  const nestingFactor = electronic.fermiSurfaceTopology.includes("nesting") ? 0.8 : 0.3;
+  const phononSoftness = phonon.softModePresent ? 0.7 : (phonon.anharmonicityIndex > 0.3 ? 0.5 : 0.2);
+
+  const score = (
+    lambda * 0.35 +
+    Math.min(1.0, dosAtEf / 5.0) * 0.25 +
+    nestingFactor * 0.2 +
+    phononSoftness * 0.15 +
+    (electronic.metallicity > 0.7 ? 0.05 : 0)
+  );
+
+  return { score: Math.min(1.0, score), lambda, nestingFactor, dosAtEf, phononSoftness };
+}
+
+let totalInverseDesignGenerated = 0;
+
+export function getInverseDesignCount(): number {
+  return totalInverseDesignGenerated;
+}
+
+export async function generateInverseDesignCandidates(
+  emit: EventEmitter,
+  allInsights: string[]
+): Promise<number> {
+  let generated = 0;
+
+  emit("log", {
+    phase: "phase-7",
+    event: "Inverse design cycle started",
+    detail: "Generating candidates optimized for pairing susceptibility rather than Tc prediction",
+    dataSource: "Inverse Design",
+  });
+
+  const existingTop = await storage.getSuperconductorCandidates(20);
+  const topByPairing = existingTop
+    .map(c => {
+      const ps = computePairingSusceptibility(c.formula);
+      return { formula: c.formula, pairingScore: ps.score, lambda: ps.lambda, dos: ps.dosAtEf };
+    })
+    .sort((a, b) => b.pairingScore - a.pairingScore)
+    .slice(0, 5);
+
+  const existingFormulas = existingTop.map(c => c.formula).slice(0, 20);
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are an inverse materials designer. Instead of predicting Tc for known compositions, you DESIGN materials that maximize specific physical properties favorable for superconductivity.
+
+TARGET PHYSICS PROPERTIES to optimize:
+1. Electron-phonon coupling lambda > 2.0 (essential for high Tc)
+2. Density of States at Fermi level > 5 states/eV/atom (high pairing susceptibility)
+3. Log-average phonon frequency omega_log between 500-1500K (optimal for BCS)
+4. Quasi-2D Fermi surface with nesting features (enhances Cooper pairing)
+5. Flat bands near Fermi level (enhances DOS without requiring heavy atoms)
+6. Mixed stiff-soft bonding (stiff framework + soft rattler modes boost coupling)
+
+DESIGN STRATEGIES:
+- Clathrate/cage structures with light atoms (H, B, C, N) inside heavy-atom frameworks
+- Layered materials with electronically active planes
+- Materials at the edge of structural or magnetic instabilities
+- High-entropy combinations that break symmetry and create flat bands
+- Intercalated structures with enhanced phonon coupling
+
+Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 'pressureGpa', 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism', 'crystalStructure', 'roomTempViable' (boolean), 'inverseDesignTarget' (which property was optimized), 'reasoning' (under 150 chars)`,
+        },
+        {
+          role: "user",
+          content: `Materials with highest pairing susceptibility so far:\n${JSON.stringify(topByPairing, null, 2)}\n\nKnown patterns:\n${allInsights.slice(-5).join("\n")}\n\nDo NOT generate: ${existingFormulas.join(", ")}\n\nDesign 2-3 NEW compositions optimizing for pairing susceptibility. Focus on maximizing lambda and DOS(Ef) simultaneously. All predictions are theoretical.`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      max_completion_tokens: 1200,
+    });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return 0;
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return 0;
+    }
+
+    const candidates = parsed.candidates ?? [];
+
+    for (const c of candidates) {
+      if (!c.formula) continue;
+
+      const existing = await storage.getSuperconductorByFormula(c.formula);
+      if (existing) continue;
+
+      const features = extractFeatures(c.formula);
+      const gbResult = gbPredict(features);
+      const pairingSusc = computePairingSusceptibility(c.formula);
+
+      let cappedTc = c.predictedTc ?? Math.round(pairingSusc.lambda * 50);
+      const lambdaML = features.electronPhononLambda ?? 0;
+      const pressureML = c.pressureGpa ?? 0;
+      const metallicityML = features.metallicity ?? 0.5;
+      cappedTc = applyAmbientTcCap(cappedTc, lambdaML, pressureML, metallicityML, c.formula);
+
+      const inverseDesignScore = Math.min(0.95, pairingSusc.score * 0.6 + gbResult.score * 0.4);
+
+      const id = `sc-invdes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
+        c.zeroResistance === true &&
+        c.meissnerEffect === true &&
+        (c.pressureGpa ?? 999) <= 50;
+
+      try {
+        await storage.insertSuperconductorCandidate({
+          id,
+          name: c.name || c.formula,
+          formula: c.formula,
+          predictedTc: cappedTc,
+          pressureGpa: c.pressureGpa ?? null,
+          meissnerEffect: c.meissnerEffect ?? false,
+          zeroResistance: c.zeroResistance ?? false,
+          cooperPairMechanism: c.cooperPairMechanism ?? "Optimized for pairing susceptibility",
+          crystalStructure: c.crystalStructure ?? null,
+          quantumCoherence: pairingSusc.score,
+          stabilityScore: features.cooperPairStrength,
+          synthesisPath: null,
+          mlFeatures: features as any,
+          xgboostScore: gbResult.score,
+          neuralNetScore: pairingSusc.score,
+          ensembleScore: inverseDesignScore,
+          roomTempViable: isActuallyRoomTemp,
+          status: determineStatus({ ...c, predictedTc: cappedTc, ensembleScore: inverseDesignScore, roomTempViable: isActuallyRoomTemp }),
+          notes: `[Inverse design: target=${c.inverseDesignTarget ?? "pairing susceptibility"}, PS=${pairingSusc.score.toFixed(3)}, lambda=${pairingSusc.lambda.toFixed(2)}, DOS=${pairingSusc.dosAtEf.toFixed(2)}] ${c.reasoning ?? ""}`,
+          electronPhononCoupling: features.electronPhononLambda ?? null,
+          logPhononFrequency: features.logPhononFreq ?? null,
+          coulombPseudopotential: 0.12,
+          pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+          pairingMechanism: features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated",
+          correlationStrength: features.correlationStrength ?? null,
+          dimensionality: features.layeredStructure ? "quasi-2D" : "3D",
+          fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+          uncertaintyEstimate: 0.5,
+          verificationStage: 0,
+          dataConfidence: "medium",
+        });
+        generated++;
+        totalInverseDesignGenerated++;
+
+        emit("prediction", {
+          type: "inverse-design-superconductor",
+          id,
+          name: c.name,
+          formula: c.formula,
+          predictedTc: cappedTc,
+          pairingSusceptibility: pairingSusc.score,
+          inverseDesignTarget: c.inverseDesignTarget,
+        });
+      } catch (e: any) {
+        emit("log", { phase: "phase-7", event: "Inverse design insert error", detail: `${c.formula}: ${e.message?.slice(0, 100)}`, dataSource: "Inverse Design" });
+      }
+    }
+
+    if (generated > 0) {
+      emit("log", {
+        phase: "phase-7",
+        event: "Inverse design candidates created",
+        detail: `${generated} candidates designed for optimal pairing susceptibility`,
+        dataSource: "Inverse Design",
+      });
+    }
+  } catch (err: any) {
+    emit("log", { phase: "phase-7", event: "Inverse design error", detail: err.message?.slice(0, 200), dataSource: "Inverse Design" });
   }
 
   return generated;

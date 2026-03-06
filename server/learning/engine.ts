@@ -3,11 +3,11 @@ import type { Server } from "http";
 import { storage } from "../storage";
 import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
-import { generateNovelFormulas } from "./formula-generator";
-import { runSuperconductorResearch } from "./superconductor-research";
+import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, getGenerationModes } from "./formula-generator";
+import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap } from "./physics-engine";
-import { runStructurePredictionBatch } from "./structure-predictor";
+import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
@@ -42,6 +42,8 @@ interface EngineStatus {
   totalStructuresPredicted: number;
   totalPipelineScreened: number;
   totalNovelSynthesisProposed: number;
+  totalInverseDesigned: number;
+  totalStructuralVariants: number;
   tempo: EngineTempo;
   statusMessage: string;
 }
@@ -368,6 +370,16 @@ async function runPhase7_Superconductor() {
 
     await addInsightsToPhase(7, result.insights);
     await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research");
+
+    if (cycleCount % 5 === 0 && shouldContinue()) {
+      try {
+        const inverseDesigned = await generateInverseDesignCandidates(emit, allInsights);
+        totalScCandidates += inverseDesigned;
+      } catch (err: any) {
+        emit("log", { phase: "phase-7", event: "Inverse design error", detail: err.message?.slice(0, 150), dataSource: "Inverse Design" });
+      }
+    }
+
     const scCount = await storage.getSuperconductorCount();
     const progress = Math.min(99, Math.floor((scCount / 500) * 100));
     await updatePhaseStatus(7, "active", progress, scCount);
@@ -638,6 +650,17 @@ async function runPhase10_Physics() {
         let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
         updatedTc = applyAmbientTcCap(updatedTc, result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula);
 
+        const instProx = result.instabilityProximity;
+        const existingNotes = candidate.notes || "";
+        const instabilityNote = `[Instability: ${instProx.nearestBoundary}=${instProx.overallProximity.toFixed(2)}, QCP=${instProx.magneticQCP.toFixed(2)}, CDW=${instProx.cdwInstability.toFixed(2)}, MIT=${instProx.metalInsulatorTransition.toFixed(2)}]`;
+        const pairingNote = `[Pairing: ${result.pairingAnalysis.dominant.mechanism} (Tc=${result.pairingAnalysis.dominant.tcEstimate.toFixed(0)}K, conf=${result.pairingAnalysis.dominant.confidence.toFixed(2)})]`;
+        const newNotes = existingNotes.replace(/\[Instability:.*?\]/g, "").replace(/\[Pairing:.*?\]/g, "").trim();
+        const updatedNotes = `${pairingNote} ${instabilityNote} ${newNotes}`.trim();
+
+        const boundaryBoost = instProx.overallProximity > 0.5 ? instProx.overallProximity * 0.05 : 0;
+        const currentEnsemble = candidate.ensembleScore ?? 0;
+        const boostedEnsemble = Math.min(0.98, currentEnsemble + boundaryBoost);
+
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
           logPhononFrequency: result.coupling.omegaLog,
@@ -652,12 +675,12 @@ async function runPhase10_Physics() {
           anisotropyRatio: result.criticalFields.anisotropyRatio,
           criticalCurrentDensity: result.criticalFields.criticalCurrentDensity,
           uncertaintyEstimate: result.uncertaintyEstimate,
-          pairingMechanism: result.correlation.ratio > 0.6 ? "unconventional" : "phonon-mediated",
-          cooperPairMechanism: candidate.cooperPairMechanism ?? (result.correlation.ratio > 0.6
-            ? `Unconventional pairing via spin-fluctuation exchange (U/W=${result.correlation.ratio.toFixed(2)})`
-            : `Phonon-mediated BCS pairing with lambda=${result.coupling.lambda.toFixed(2)}`),
+          pairingMechanism: result.pairingAnalysis.dominant.mechanism,
+          cooperPairMechanism: result.pairingAnalysis.dominant.description,
           predictedTc: updatedTc,
           verificationStage: 1,
+          notes: updatedNotes,
+          ensembleScore: boostedEnsemble,
         });
 
         if (updatedTc !== currentTc) {
@@ -739,6 +762,69 @@ async function runPhase11_StructurePrediction() {
       ? await runStructurePredictionBatch(emit, needsPrediction)
       : 0;
     totalStructuresPredicted += predicted;
+
+    if (shouldContinue() && cycleCount % 3 === 0) {
+      try {
+        const topCandidates = candidates
+          .filter(c => (c.ensembleScore ?? 0) > 0.3)
+          .map(c => ({ formula: c.formula, predictedTc: c.predictedTc ?? 0, ensembleScore: c.ensembleScore ?? 0 }));
+
+        if (topCandidates.length > 0) {
+          const variants = await runGenerativeStructureDiscovery(emit, topCandidates);
+
+          for (const variant of variants) {
+            const existingSC = await storage.getSuperconductorByFormula(variant.formula);
+            if (!existingSC) {
+              const features = extractFeatures(variant.formula);
+              const gbResult = gbPredict(features);
+              const lambdaML = features.electronPhononLambda ?? 0;
+              const metallicityML = features.metallicity ?? 0.5;
+              let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+              rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
+
+              const id = `sc-struct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              try {
+                await storage.insertSuperconductorCandidate({
+                  id,
+                  name: variant.formula,
+                  formula: variant.formula,
+                  predictedTc: rawTc,
+                  pressureGpa: null,
+                  meissnerEffect: false,
+                  zeroResistance: false,
+                  cooperPairMechanism: `Structural variant from ${variant.parentFormula} via ${variant.variationType}`,
+                  crystalStructure: `${variant.spaceGroup} (${variant.crystalSystem})`,
+                  quantumCoherence: variant.structuralNovelty,
+                  stabilityScore: features.cooperPairStrength,
+                  synthesisPath: null,
+                  mlFeatures: features as any,
+                  xgboostScore: gbResult.score,
+                  neuralNetScore: variant.structuralNovelty,
+                  ensembleScore: Math.min(0.9, (gbResult.score + variant.structuralNovelty) / 2),
+                  roomTempViable: false,
+                  status: "theoretical",
+                  notes: `[Structural variant: ${variant.variationType}, topology=${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)}] ${variant.description}`,
+                  electronPhononCoupling: features.electronPhononLambda ?? null,
+                  logPhononFrequency: features.logPhononFreq ?? null,
+                  coulombPseudopotential: 0.12,
+                  pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                  pairingMechanism: "phonon-mediated",
+                  correlationStrength: features.correlationStrength ?? null,
+                  dimensionality: variant.dimensionality,
+                  fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+                  uncertaintyEstimate: 0.6,
+                  verificationStage: 0,
+                  dataConfidence: "low",
+                });
+                totalScCandidates++;
+              } catch {}
+            }
+          }
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Generative structure error", detail: err.message?.slice(0, 150), dataSource: "Structure Generator" });
+      }
+    }
 
     const csCount = await storage.getCrystalStructureCount();
     const progress = Math.min(99, Math.floor((csCount / 150) * 100));
@@ -858,8 +944,10 @@ async function runLearningCycle() {
       cycleStartDetail = `Cycle ${cycleCount}: Focusing on ${topFocus} (${tcTrend}, best Tc: ${Math.round(previousCycleMetrics.bestTc)}K). ${previousCycleMetrics.familyDiversity} families explored so far.`;
 
       if (cyclesSinceTcImproved > 5) {
+        setBoundaryHuntingMode(true);
+        setInverseDesignMode(true);
         broadcastThought(
-          `No Tc improvement in ${cyclesSinceTcImproved} cycles. Current best: ${Math.round(previousCycleMetrics.bestTc)}K. Re-examining high-lambda candidates with stricter physics constraints...`,
+          `No Tc improvement in ${cyclesSinceTcImproved} cycles. Current best: ${Math.round(previousCycleMetrics.bestTc)}K. Activating boundary hunting and inverse design modes to explore instability edges...`,
           "stagnation"
         );
       } else if (previousCycleMetrics.insightCount > 0) {
@@ -1174,7 +1262,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 7;
+const PHYSICS_VERSION = 8;
 
 async function recalculatePhysics() {
   try {
@@ -1359,6 +1447,8 @@ export function getStatus(): EngineStatus {
     totalStructuresPredicted,
     totalPipelineScreened,
     totalNovelSynthesisProposed,
+    totalInverseDesigned: getInverseDesignCount(),
+    totalStructuralVariants: getStructuralVariantCount(),
     tempo: engineTempo,
     statusMessage: currentStatusMessage,
   };

@@ -26,6 +26,20 @@ const TARGET_APPLICATIONS = [
 
 let applicationIndex = 0;
 const recentlyGenerated: string[] = [];
+let inverseDesignMode = false;
+let boundaryHuntingMode = false;
+
+export function setInverseDesignMode(enabled: boolean): void {
+  inverseDesignMode = enabled;
+}
+
+export function setBoundaryHuntingMode(enabled: boolean): void {
+  boundaryHuntingMode = enabled;
+}
+
+export function getGenerationModes(): { inverseDesign: boolean; boundaryHunting: boolean } {
+  return { inverseDesign: inverseDesignMode, boundaryHunting: boundaryHuntingMode };
+}
 
 export function getNextTargetApplication(): string {
   const app = TARGET_APPLICATIONS[applicationIndex % TARGET_APPLICATIONS.length];
@@ -70,9 +84,17 @@ export async function generateNovelFormulas(
       ? `Known patterns from analysis:\n${insights.slice(0, 5).join("\n")}`
       : "Use general materials science knowledge.";
 
-  const strategyContext = strategyHint
+  let strategyContext = strategyHint
     ? `\n\nCurrent research strategy prioritizes: ${strategyHint}. When generating candidates, prefer compositions from these material families if relevant to the target application.`
     : "";
+
+  if (inverseDesignMode) {
+    strategyContext += `\n\nINVERSE DESIGN MODE ACTIVE: Instead of predicting "good superconductors", design materials that maximize electron-boson coupling (lambda > 2.0). Focus on: high DOS at Fermi level (>5 states/eV/atom), mixed stiff-soft bonding networks, cage/clathrate structures with light intercalants, and flat bands near Ef. Optimize for pairing susceptibility, not just Tc.`;
+  }
+
+  if (boundaryHuntingMode) {
+    strategyContext += `\n\nBOUNDARY HUNTING MODE ACTIVE: Design materials at the edge of phase instabilities. Target: (1) compositions near magnetic quantum critical points (almost-ferromagnetic metals, doped antiferromagnets), (2) materials at structural phase boundaries (tolerance factor ~0.85 or ~1.05), (3) systems near metal-insulator transitions (correlated electron systems with U/W ~ 1), (4) compounds prone to charge density wave instabilities. Place compositions AT the boundary, not safely inside a stable phase.`;
+  }
 
   let exclusionContext = "";
   try {

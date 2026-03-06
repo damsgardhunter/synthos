@@ -136,6 +136,12 @@ function featureVectorToArray(f: MLFeatureVector): number[] {
     f.dWaveSymmetry ? 1 : 0,
     f.meissnerPotential,
     f.dftConfidence ?? 0,
+    f.orbitalCharacterCode ?? 0,
+    f.phononSpectralCentroid ?? 0,
+    f.phononSpectralWidth ?? 0,
+    f.bondStiffnessVariance ?? 0,
+    f.chargeTransferMagnitude ?? 0,
+    f.connectivityIndex ?? 0.5,
   ];
 }
 
@@ -146,6 +152,8 @@ const FEATURE_NAMES = [
   "hasTM", "hasRE", "hasH", "hasChalcogen", "hasPnictogen",
   "cooperPair", "dimensionality", "anharmonic", "electronDensity",
   "phononCoupling", "dWave", "meissner", "dftConfidence",
+  "orbitalChar", "phononCentroid", "phononWidth", "bondStiffVar",
+  "chargeTransfer", "connectivity",
 ];
 
 function findBestSplitForSubset(

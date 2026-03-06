@@ -4,7 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
-import { applyAmbientTcCap } from "./learning/physics-engine";
+import { applyAmbientTcCap, getConstraintMode } from "./learning/physics-engine";
 
 const app = express();
 const httpServer = createServer(app);
@@ -118,10 +118,16 @@ app.use((req, res, next) => {
         updates.coulombPseudopotential = coupling.muStar;
       }
 
-      let mcMillanCap = 350;
+      const constraintMode = getConstraintMode();
+      const hardCap = constraintMode.allowBeyondEmpirical ? 600 : 350;
+      let mcMillanCap = hardCap;
       if (coupling.lambda > 0.2 && eliashbergTc > 0) {
         const multiplier = coupling.lambda > 2.5 ? 1.3 : coupling.lambda > 2.0 ? 1.5 : coupling.lambda > 1.5 ? 1.8 : 2.0;
-        mcMillanCap = Math.round(Math.min(350, eliashbergTc * multiplier));
+        mcMillanCap = Math.round(Math.min(hardCap, eliashbergTc * multiplier));
+        if (constraintMode.allowBeyondEmpirical && mcMillanCap > 300) {
+          const excess = mcMillanCap - 300;
+          mcMillanCap = 300 + Math.round(excess / (1 + constraintMode.empiricalPenaltyStrength * excess / 300));
+        }
       }
       if (coupling.lambda < 0.2 && currentTc > 30) {
         updates.predictedTc = Math.round(Math.max(1, currentTc * 0.05));
@@ -193,7 +199,8 @@ app.use((req, res, next) => {
       if (corr2.ratio > 0.85) eliTc *= 0.05;
       else if (corr2.ratio > 0.7) eliTc *= 0.3;
       const mult = coupling2.lambda > 2.5 ? 1.2 : coupling2.lambda > 2.0 ? 1.3 : coupling2.lambda > 1.5 ? 1.5 : 1.8;
-      const absMax = Math.min(350, Math.round(eliTc * mult));
+      const bulkHardCap = getConstraintMode().allowBeyondEmpirical ? 600 : 350;
+      const absMax = Math.min(bulkHardCap, Math.round(eliTc * mult));
       if (tc > absMax && absMax > 0) {
         const blendDown = 0.8;
         let newTc = Math.round((1 - blendDown) * tc + blendDown * eliTc);

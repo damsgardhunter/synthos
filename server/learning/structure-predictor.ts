@@ -794,3 +794,192 @@ export async function runStructurePredictionBatch(
 
   return predicted;
 }
+
+const CHEMICAL_SUBSTITUTION_MAP: Record<string, string[]> = {
+  "La": ["Y", "Ce", "Pr", "Nd", "Gd"],
+  "Y": ["La", "Sc", "Lu", "Ho"],
+  "Ba": ["Sr", "Ca", "Mg"],
+  "Sr": ["Ba", "Ca"],
+  "Cu": ["Ni", "Co", "Fe", "Zn"],
+  "Fe": ["Co", "Mn", "Ni", "Ru"],
+  "Ti": ["Zr", "Hf", "V"],
+  "Nb": ["Ta", "V", "Mo"],
+  "As": ["P", "Sb"],
+  "Se": ["S", "Te"],
+  "O": ["S", "Se", "F"],
+  "H": ["Li", "Na"],
+  "B": ["C", "N", "Al"],
+  "N": ["P", "C", "B"],
+};
+
+const UNUSUAL_TOPOLOGIES = [
+  { name: "Kagome", spaceGroup: "P6/mmm", crystalSystem: "hexagonal", dimensionality: "quasi-2D", description: "Corner-sharing triangular lattice with geometric frustration" },
+  { name: "Pyrochlore", spaceGroup: "Fd-3m", crystalSystem: "cubic", dimensionality: "3D", description: "Corner-sharing tetrahedra with geometric frustration" },
+  { name: "Mixed-2D-1D", spaceGroup: "Cmcm", crystalSystem: "orthorhombic", dimensionality: "mixed", description: "2D conducting sheets connected by 1D chain bridges" },
+  { name: "Breathing-kagome", spaceGroup: "P-3m1", crystalSystem: "hexagonal", dimensionality: "quasi-2D", description: "Alternating large/small triangles with flat bands" },
+  { name: "Honeycomb", spaceGroup: "P6_3/mmc", crystalSystem: "hexagonal", dimensionality: "2D", description: "Graphene-like honeycomb connectivity" },
+];
+
+const INTERCALANTS = ["H", "Li", "Na", "K"];
+
+export interface GeneratedStructureVariant {
+  formula: string;
+  parentFormula: string;
+  variationType: string;
+  structuralNovelty: number;
+  topology: string;
+  spaceGroup: string;
+  crystalSystem: string;
+  dimensionality: string;
+  description: string;
+}
+
+function generateSubstitutionVariant(formula: string): GeneratedStructureVariant | null {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+
+  const substitutable = elements.filter(e => CHEMICAL_SUBSTITUTION_MAP[e] && CHEMICAL_SUBSTITUTION_MAP[e].length > 0);
+  if (substitutable.length === 0) return null;
+
+  const targetEl = substitutable[Math.floor(Math.random() * substitutable.length)];
+  const subs = CHEMICAL_SUBSTITUTION_MAP[targetEl];
+  const availableSubs = subs.filter(s => !elements.includes(s));
+  if (availableSubs.length === 0) return null;
+
+  const newEl = availableSubs[Math.floor(Math.random() * availableSubs.length)];
+  const newCounts = { ...counts };
+  newCounts[newEl] = (newCounts[newEl] || 0) + (newCounts[targetEl] || 1);
+  delete newCounts[targetEl];
+
+  const newFormula = Object.entries(newCounts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([el, n]) => n === 1 ? el : `${el}${n}`)
+    .join("");
+
+  const protoMatch = Object.entries(KNOWN_PROTOTYPES).find(([, v]) => {
+    const protoEls = parseFormulaElements(v.prototype);
+    return elements.some(e => protoEls.includes(e));
+  });
+  const proto = protoMatch ? protoMatch[1] : { spaceGroup: "P1", crystalSystem: "triclinic", dimensionality: "3D" };
+
+  return {
+    formula: newFormula,
+    parentFormula: formula,
+    variationType: "substitution",
+    structuralNovelty: 0.3 + Math.random() * 0.3,
+    topology: `${targetEl}->${newEl} substitution`,
+    spaceGroup: proto.spaceGroup,
+    crystalSystem: proto.crystalSystem,
+    dimensionality: proto.dimensionality,
+    description: `Chemical substitution: ${targetEl} replaced by ${newEl} in ${formula}`,
+  };
+}
+
+function generateIntercalationVariant(formula: string): GeneratedStructureVariant | null {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+
+  const availableIntercalants = INTERCALANTS.filter(i => !elements.includes(i) || (counts[i] || 0) < 4);
+  if (availableIntercalants.length === 0) return null;
+
+  const intercalant = availableIntercalants[Math.floor(Math.random() * availableIntercalants.length)];
+  const amount = 1 + Math.floor(Math.random() * 3);
+
+  const newCounts = { ...counts };
+  newCounts[intercalant] = (newCounts[intercalant] || 0) + amount;
+
+  const newFormula = Object.entries(newCounts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([el, n]) => n === 1 ? el : `${el}${n}`)
+    .join("");
+
+  return {
+    formula: newFormula,
+    parentFormula: formula,
+    variationType: "intercalation",
+    structuralNovelty: 0.4 + Math.random() * 0.3,
+    topology: `${intercalant} intercalation into layered host`,
+    spaceGroup: "P6_3/mmc",
+    crystalSystem: "hexagonal",
+    dimensionality: "quasi-2D",
+    description: `Intercalation of ${amount} ${intercalant} atoms into ${formula}`,
+  };
+}
+
+function generateTopologyVariant(formula: string): GeneratedStructureVariant | null {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+
+  const topology = UNUSUAL_TOPOLOGIES[Math.floor(Math.random() * UNUSUAL_TOPOLOGIES.length)];
+
+  return {
+    formula,
+    parentFormula: formula,
+    variationType: "topology-mapping",
+    structuralNovelty: 0.6 + Math.random() * 0.3,
+    topology: topology.name,
+    spaceGroup: topology.spaceGroup,
+    crystalSystem: topology.crystalSystem,
+    dimensionality: topology.dimensionality,
+    description: topology.description,
+  };
+}
+
+export function generateStructuralVariants(
+  formula: string,
+  maxVariants: number = 3
+): GeneratedStructureVariant[] {
+  const variants: GeneratedStructureVariant[] = [];
+  const seenFormulas = new Set<string>([formula]);
+
+  const generators = [generateSubstitutionVariant, generateIntercalationVariant, generateTopologyVariant];
+
+  for (const gen of generators) {
+    if (variants.length >= maxVariants) break;
+    const variant = gen(formula);
+    if (variant && !seenFormulas.has(variant.formula)) {
+      seenFormulas.add(variant.formula);
+      variants.push(variant);
+    }
+  }
+
+  return variants;
+}
+
+let totalStructuralVariantsGenerated = 0;
+
+export function getStructuralVariantCount(): number {
+  return totalStructuralVariantsGenerated;
+}
+
+export async function runGenerativeStructureDiscovery(
+  emit: EventEmitter,
+  topCandidates: { formula: string; predictedTc: number; ensembleScore: number }[]
+): Promise<GeneratedStructureVariant[]> {
+  const allVariants: GeneratedStructureVariant[] = [];
+
+  const sorted = [...topCandidates]
+    .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
+    .slice(0, 3);
+
+  for (const candidate of sorted) {
+    const variants = generateStructuralVariants(candidate.formula, 2);
+
+    for (const variant of variants) {
+      const existing = await storage.getSuperconductorByFormula(variant.formula);
+      if (existing) continue;
+
+      allVariants.push(variant);
+      totalStructuralVariantsGenerated++;
+
+      emit("log", {
+        phase: "phase-11",
+        event: "Structural variant generated",
+        detail: `${variant.formula} from ${variant.parentFormula} via ${variant.variationType} (${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)})`,
+        dataSource: "Structure Generator",
+      });
+    }
+  }
+
+  return allVariants;
+}
