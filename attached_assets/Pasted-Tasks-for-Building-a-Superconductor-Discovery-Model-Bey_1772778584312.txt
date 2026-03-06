@@ -1,0 +1,137 @@
+Tasks for Building a Superconductor Discovery Model Beyond Current Physics Limits
+1. Separate Physical Constraints from Physical Assumptions
+
+Definition:
+Physical constraints are laws that cannot be violated (e.g., charge conservation). Physical assumptions are empirical trends from existing materials that may not hold universally.
+
+Task:
+
+Hard-code fundamental constraints:
+
+charge neutrality
+
+thermodynamic stability bounds
+
+positive phonon frequencies (no imaginary modes)
+
+Fermi statistics
+
+Do not hard-code empirical limits such as:
+
+Tc ceilings
+
+maximum electron-phonon coupling values
+
+hydrogen-only high-Tc rules
+
+Goal: Allow the model to explore outside human expectations without producing physically impossible materials.
+
+2. Use Physics-Rich Descriptors Instead of Composition Only
+
+Definition:
+Descriptors are numerical features describing a material’s physical properties. Composition alone lacks information about electronic behavior.
+
+Task:
+Use descriptors including:
+
+Density of States at the Fermi Level (DOS(EF))
+Number of electronic states available for conduction.
+
+Orbital Character at EF
+Whether electrons come from s, p, or d orbitals.
+
+Phonon Density of States
+Distribution of lattice vibration frequencies.
+
+Bond Stiffness / Force Constants
+Measure of lattice rigidity and phonon strength.
+
+Charge Transfer Metrics
+Electron movement between atoms.
+
+Structural Topology Graphs
+Representation of crystal connectivity.
+
+Goal: Predict pairing mechanisms more accurately than composition-based models.
+
+3. Switch from Property Prediction to Inverse Design
+
+Definition:
+Inverse design searches for structures that maximize a desired physical phenomenon instead of predicting properties of known materials.
+
+Task:
+Optimize candidate materials for:
+
+Pairing susceptibility – tendency of electrons to form Cooper pairs
+
+Electron–boson coupling strength
+
+Fermi surface nesting
+
+Low-energy collective modes
+
+Goal: Directly search for materials likely to superconduct rather than predicting Tc after the fact.
+
+4. Evaluate Multiple Pairing Mechanisms
+
+Definition:
+Superconductivity can arise from several mechanisms, not just phonon-mediated pairing.
+
+Task:
+Include evaluation models for:
+
+Electron-phonon coupling – conventional BCS superconductivity
+
+Spin fluctuations – magnetic interaction pairing
+
+Excitonic pairing – electron–hole coupling
+
+Plasmonic pairing – charge oscillation mediated pairing
+
+Flat-band superconductivity – pairing enhanced by nearly zero band dispersion
+
+Goal: Discover superconductors outside conventional BCS mechanisms.
+
+5. Implement Generative Crystal Structure Discovery
+
+Definition:
+Generative models create entirely new crystal structures instead of screening known ones.
+
+Task:
+Use generative approaches such as:
+
+diffusion models for crystal graphs
+
+variational autoencoders
+
+evolutionary crystal structure search
+
+Generate structures featuring:
+
+unusual bonding networks
+
+cluster-based lattices
+
+mixed dimensional systems
+
+unconventional coordination environments
+
+Goal: Discover materials not present in existing databases.
+
+6. Target Instability Boundaries
+
+Definition:
+The strongest superconductivity often occurs near competing phases or lattice instabilities.
+
+Task:
+Search for materials with:
+
+soft phonon modes – low-energy lattice vibrations
+
+charge density wave proximity
+
+magnetic quantum critical points
+
+metal–insulator transition boundaries
+
+Goal: Locate materials near phase transitions where pairing interactions become strong.
