@@ -24,6 +24,7 @@ import {
 } from "./elemental-data";
 import { gbPredict, getConfidenceBand } from "./gradient-boost";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
+import { getGNNPrediction, type GNNPrediction } from "./graph-neural-net";
 export { getConfidenceBand };
 
 const openai = new OpenAI({
@@ -433,7 +434,7 @@ export async function runMLPrediction(
     } catch {}
   }
 
-  const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean }[] = [];
+  const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean; gnn: GNNPrediction | null }[] = [];
 
   let preFilterSkipped = 0;
   for (const mat of materials.slice(0, 100)) {
@@ -467,7 +468,16 @@ export async function runMLPrediction(
 
     xgb.score = Math.min(1, xgb.score);
 
-    scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal });
+    let gnnResult: GNNPrediction | null = null;
+    try {
+      const crystalStructure = crystal ? {
+        latticeParams: undefined,
+        atomicPositions: undefined,
+      } : undefined;
+      gnnResult = getGNNPrediction(mat.formula, crystalStructure);
+    } catch {}
+
+    scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal, gnn: gnnResult });
   }
 
   scored.sort((a, b) => b.xgb.score - a.xgb.score);
@@ -487,6 +497,17 @@ export async function runMLPrediction(
     detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc raw: ${topCandidates[0].xgb.tcEstimate}K)${preFilterSkipped > 0 ? `, ${preFilterSkipped} non-metallic filtered` : ""}${enrichmentDetail}`,
     dataSource: "ML Engine",
   });
+
+  const gnnPredicted = scored.filter(s => s.gnn !== null);
+  if (gnnPredicted.length > 0) {
+    const bestGnn = gnnPredicted.sort((a, b) => (b.gnn?.predictedTc ?? 0) - (a.gnn?.predictedTc ?? 0))[0];
+    emit("log", {
+      phase: "phase-7",
+      event: "GNN prediction",
+      detail: `${gnnPredicted.length} candidates evaluated, top: ${bestGnn.mat.formula} (formationEnergy: ${bestGnn.gnn?.formationEnergy}, Tc: ${bestGnn.gnn?.predictedTc}K, confidence: ${((bestGnn.gnn?.confidence ?? 0) * 100).toFixed(0)}%, phononStable: ${bestGnn.gnn?.phononStability})`,
+      dataSource: "GNN Surrogate",
+    });
+  }
 
   try {
     const candidateSummaries = topCandidates.map(c => {
@@ -589,7 +610,18 @@ Return JSON with:
       const xgb = topCandidates[i];
       if (!nn || !xgb) continue;
 
-      const ensembleScore = Math.min(0.95, xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
+      const gnnPred = xgb.gnn;
+      const hasStructureData = xgb.hasCrystal;
+      let ensembleScore: number;
+      if (gnnPred && hasStructureData) {
+        const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
+        ensembleScore = Math.min(0.95, xgb.xgb.score * 0.25 + (nn.neuralNetScore ?? 0.5) * 0.35 + gnnScore * 0.40);
+      } else if (gnnPred) {
+        const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
+        ensembleScore = Math.min(0.95, xgb.xgb.score * 0.30 + (nn.neuralNetScore ?? 0.5) * 0.50 + gnnScore * 0.20);
+      } else {
+        ensembleScore = Math.min(0.95, xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
+      }
 
       let rawTc = nn.refinedTc ?? xgb.xgb.tcEstimate;
       const featureLambda = xgb.features.electronPhononLambda ?? 0;

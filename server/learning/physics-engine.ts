@@ -1293,9 +1293,21 @@ export function computeElectronPhononCoupling(
   };
 }
 
-export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: PhononSpectrum): EliashbergResult {
-  const { lambda, omegaLog, muStar } = coupling;
+export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: PhononSpectrum, alpha2FData?: Alpha2FData): EliashbergResult {
+  let effectiveLambda = coupling.lambda;
+  let effectiveOmegaLog = coupling.omegaLog;
+  const { muStar } = coupling;
 
+  if (alpha2FData && alpha2FData.integratedLambda > 0) {
+    effectiveLambda = alpha2FData.integratedLambda;
+    const omegaLogFromAlpha2F = computeOmegaLogFromAlpha2F(alpha2FData);
+    if (omegaLogFromAlpha2F > 0) {
+      effectiveOmegaLog = omegaLogFromAlpha2F;
+    }
+  }
+
+  const lambda = effectiveLambda;
+  const omegaLog = effectiveOmegaLog;
   const omegaLogK = omegaLog * 1.44;
 
   let tc: number;
@@ -2411,6 +2423,124 @@ export function simulatePressureEffects(
   return { pressureOptimalTc: bestTc, optimalPressure: bestP, pressureTcCurve: curve };
 }
 
+export interface PhononDOSData {
+  frequencies: number[];
+  dos: number[];
+  totalStates: number;
+}
+
+export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhononFreq: number): PhononDOSData {
+  const nBins = 100;
+  if (!maxPhononFreq || maxPhononFreq <= 0) {
+    return { frequencies: new Array(nBins).fill(0).map((_, i) => (i + 0.5)), dos: new Array(nBins).fill(0), totalStates: 0 };
+  }
+  const binWidth = maxPhononFreq / nBins;
+  const dos = new Array(nBins).fill(0);
+  const frequencies = new Array(nBins).fill(0).map((_, i) => (i + 0.5) * binWidth);
+
+  let totalStates = 0;
+  for (const branch of phononDispersion.branches) {
+    for (const freq of branch.frequencies) {
+      const absFreq = Math.abs(freq);
+      if (absFreq <= 0 || absFreq > maxPhononFreq) continue;
+      const bin = Math.min(nBins - 1, Math.floor(absFreq / binWidth));
+      dos[bin] += 1;
+      totalStates++;
+    }
+  }
+
+  if (totalStates > 0) {
+    for (let i = 0; i < nBins; i++) {
+      dos[i] = dos[i] / (totalStates * binWidth);
+    }
+  }
+
+  return { frequencies, dos, totalStates };
+}
+
+export interface Alpha2FData {
+  frequencies: number[];
+  alpha2F: number[];
+  lambdaOmega: number[];
+  integratedLambda: number;
+}
+
+export function computeAlpha2F(
+  phononDOS: PhononDOSData,
+  formula: string,
+  electronicStructure: ElectronicStructure
+): Alpha2FData {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const N_EF = electronicStructure.densityOfStatesAtFermi;
+
+  let avgEta = 0;
+  let totalWeight = 0;
+  for (const el of elements) {
+    const eta = getMcMillanHopfieldEta(el);
+    const frac = (counts[el] || 1) / totalAtoms;
+    if (eta !== null && eta > 0) {
+      avgEta += eta * frac;
+      totalWeight += frac;
+    }
+  }
+  if (totalWeight > 0) {
+    avgEta = avgEta / totalWeight;
+  } else {
+    avgEta = N_EF * 0.3;
+  }
+
+  const couplingPrefactor = avgEta * N_EF * 0.5;
+
+  const nBins = phononDOS.frequencies.length;
+  const alpha2F = new Array(nBins).fill(0);
+  const lambdaOmega = new Array(nBins).fill(0);
+  let integratedLambda = 0;
+
+  const binWidth = nBins > 1 ? phononDOS.frequencies[1] - phononDOS.frequencies[0] : 1;
+
+  for (let i = 0; i < nBins; i++) {
+    const omega = phononDOS.frequencies[i];
+    const g = phononDOS.dos[i];
+    if (omega <= 0 || g <= 0) continue;
+
+    alpha2F[i] = couplingPrefactor * g * omega * 0.01;
+    alpha2F[i] = Number(alpha2F[i].toFixed(6));
+
+    const lambdaContrib = 2 * alpha2F[i] / omega * binWidth;
+    integratedLambda += lambdaContrib;
+    lambdaOmega[i] = Number(integratedLambda.toFixed(6));
+  }
+
+  integratedLambda = Number(integratedLambda.toFixed(4));
+
+  return {
+    frequencies: phononDOS.frequencies,
+    alpha2F,
+    lambdaOmega,
+    integratedLambda,
+  };
+}
+
+export function computeOmegaLogFromAlpha2F(alpha2FData: Alpha2FData): number {
+  const { frequencies, alpha2F, integratedLambda } = alpha2FData;
+  if (integratedLambda <= 0) return 0;
+
+  const nBins = frequencies.length;
+  const binWidth = nBins > 1 ? frequencies[1] - frequencies[0] : 1;
+  let logSum = 0;
+
+  for (let i = 0; i < nBins; i++) {
+    const omega = frequencies[i];
+    if (omega <= 0 || alpha2F[i] <= 0) continue;
+    logSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
+  }
+
+  const omegaLog = Math.exp((2 / integratedLambda) * logSum);
+  return Number.isFinite(omegaLog) ? Math.round(omegaLog * 10) / 10 : 0;
+}
+
 export async function runFullPhysicsAnalysis(
   emit: EventEmitter,
   candidate: SuperconductorCandidate
@@ -2430,6 +2560,8 @@ export async function runFullPhysicsAnalysis(
   manyBodyCorrections: ManyBodyCorrections;
   nestingFunction: NestingFunctionData;
   spinSusceptibility: DynamicSpinSusceptibility;
+  phononDOS: PhononDOSData;
+  alpha2F: Alpha2FData;
 }> {
   const formula = candidate.formula;
 
@@ -2503,8 +2635,25 @@ export async function runFullPhysicsAnalysis(
   const candidatePressure = candidate.pressureGpa ?? 0;
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
 
+  const earlyPhononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);
+  const phononDOS = computePhononDOS(earlyPhononDispersion, phononSpectrum.maxPhononFrequency);
+  emit("log", {
+    phase: "phase-10",
+    event: "Phonon DOS computed",
+    detail: `${formula}: ${phononDOS.totalStates} states binned into ${phononDOS.frequencies.length} bins, maxFreq=${phononSpectrum.maxPhononFrequency} cm⁻¹`,
+    dataSource: "Physics Engine",
+  });
+
+  const alpha2FResult = computeAlpha2F(phononDOS, formula, electronicStructure);
+  emit("log", {
+    phase: "phase-10",
+    event: "alpha2F spectral function computed",
+    detail: `${formula}: integratedLambda=${alpha2FResult.integratedLambda.toFixed(4)}, omegaLog(alpha2F)=${computeOmegaLogFromAlpha2F(alpha2FResult).toFixed(1)} cm⁻¹`,
+    dataSource: "Physics Engine",
+  });
+
   let eliashberg: EliashbergResult;
-  eliashberg = predictTcEliashberg(coupling, phononSpectrum);
+  eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
 
   const competingPhases = evaluateCompetingPhases(formula, electronicStructure, mpSummary);
   const hasMottPhase = competingPhases.some(p => p.type === "Mott");
@@ -2613,7 +2762,7 @@ export async function runFullPhysicsAnalysis(
     dataSource: "Physics Engine",
   });
 
-  const phononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);
+  const phononDispersion = earlyPhononDispersion;
   emit("log", {
     phase: "phase-10",
     event: "Phonon dispersion computed",
@@ -2661,5 +2810,7 @@ export async function runFullPhysicsAnalysis(
     manyBodyCorrections,
     nestingFunction,
     spinSusceptibility,
+    phononDOS,
+    alpha2F: alpha2FResult,
   };
 }

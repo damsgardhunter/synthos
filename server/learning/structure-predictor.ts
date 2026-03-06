@@ -4,6 +4,7 @@ import type { EventEmitter } from "./engine";
 import { ELEMENTAL_DATA, getElementData, getMeltingPoint, getLatticeConstant } from "./elemental-data";
 import { fetchSummary, fetchElasticity } from "./materials-project-client";
 import { computeDimensionalityScore, detectStructuralMotifs } from "./physics-engine";
+import { getCompetingPhases, assessMetastability } from "./phase-diagram-engine";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -214,32 +215,61 @@ export async function evaluateConvexHullStability(
     } catch {
     }
 
-    const miedemaFormE = computeMiedemaFormationEnergy(formula);
-    const miedemaDecomp = estimateDecompositionEnergy(formula);
-    const effectiveDecomp = miedemaDecomp > 0 ? miedemaDecomp : Math.max(0, decompositionEnergy);
+    try {
+      const hullResult = await getCompetingPhases(formula);
+      const metastability = assessMetastability(formula, hullResult.energyAboveHull);
+      const miedemaFormE = computeMiedemaFormationEnergy(formula);
+      const eAboveHull = hullResult.energyAboveHull;
+      const isStable = hullResult.isOnHull;
+      const isMetastable = metastability.isMetastable;
 
-    const isStable = effectiveDecomp <= 0.005;
-    const isMetastable = !isStable && effectiveDecomp <= 0.15;
+      let verdict: string;
+      if (isStable) {
+        verdict = `Thermodynamically stable (convex hull, dHf=${miedemaFormE.toFixed(3)} eV/atom)`;
+      } else if (eAboveHull <= 0.05) {
+        verdict = `Near hull (${eAboveHull.toFixed(3)} eV/atom, barrier=${metastability.kineticBarrier.toFixed(2)} eV) - likely synthesizable`;
+      } else if (isMetastable) {
+        verdict = `Metastable (${eAboveHull.toFixed(3)} eV/atom, lifetime=${metastability.estimatedLifetime}) - kinetically trapped`;
+      } else {
+        verdict = `Far above hull (${eAboveHull.toFixed(3)} eV/atom, decomp=${hullResult.decompositionProducts.join("+")}) - unlikely to be synthesized`;
+      }
 
-    let verdict: string;
-    if (isStable) {
-      verdict = `Thermodynamically stable (Miedema dHf=${miedemaFormE.toFixed(3)} eV/atom)`;
-    } else if (effectiveDecomp <= 0.05) {
-      verdict = `Near hull (${effectiveDecomp.toFixed(3)} eV/atom, Miedema dHf=${miedemaFormE.toFixed(3)}) - likely synthesizable`;
-    } else if (isMetastable) {
-      verdict = `Moderately above hull (${effectiveDecomp.toFixed(3)} eV/atom, Miedema) - may be kinetically trapped`;
-    } else {
-      verdict = `Far above hull (${effectiveDecomp.toFixed(3)} eV/atom, Miedema) - unlikely to be synthesized`;
+      return {
+        isStable,
+        isMetastable,
+        verdict,
+        formationEnergy: miedemaFormE,
+        hullDistance: eAboveHull,
+        source: "Convex Hull Engine",
+      };
+    } catch {
+      const miedemaFormE = computeMiedemaFormationEnergy(formula);
+      const miedemaDecomp = estimateDecompositionEnergy(formula);
+      const effectiveDecomp = miedemaDecomp > 0 ? miedemaDecomp : Math.max(0, decompositionEnergy);
+
+      const isStable = effectiveDecomp <= 0.005;
+      const isMetastable = !isStable && effectiveDecomp <= 0.15;
+
+      let verdict: string;
+      if (isStable) {
+        verdict = `Thermodynamically stable (Miedema dHf=${miedemaFormE.toFixed(3)} eV/atom)`;
+      } else if (effectiveDecomp <= 0.05) {
+        verdict = `Near hull (${effectiveDecomp.toFixed(3)} eV/atom, Miedema dHf=${miedemaFormE.toFixed(3)}) - likely synthesizable`;
+      } else if (isMetastable) {
+        verdict = `Moderately above hull (${effectiveDecomp.toFixed(3)} eV/atom, Miedema) - may be kinetically trapped`;
+      } else {
+        verdict = `Far above hull (${effectiveDecomp.toFixed(3)} eV/atom, Miedema) - unlikely to be synthesized`;
+      }
+
+      return {
+        isStable,
+        isMetastable,
+        verdict,
+        formationEnergy: miedemaFormE,
+        hullDistance: effectiveDecomp,
+        source: "Miedema model",
+      };
     }
-
-    return {
-      isStable,
-      isMetastable,
-      verdict,
-      formationEnergy: miedemaFormE,
-      hullDistance: effectiveDecomp,
-      source: "Miedema model",
-    };
   }
 
   const isStable = decompositionEnergy <= 0.005;

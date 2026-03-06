@@ -6,7 +6,8 @@ import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements } from "./physics-engine";
+import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty, requiresQuantitativeContent } from "./insight-detector";
@@ -18,6 +19,8 @@ import { normalizeFormula, classifyFamily, sanitizeForbiddenWords } from "./util
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
+import { runConvexHullAnalysis } from "./phase-diagram-engine";
+import { invalidateGNNModel, trainGNNSurrogate } from "./graph-neural-net";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -77,6 +80,12 @@ let exploitCyclesRemaining = 0;
 let currentExploitFamily: string | null = null;
 let totalDFTEnriched = 0;
 let currentStatusMessage = "Initializing research systems";
+
+let autonomousTotalScreened = 0;
+let autonomousTotalPassed = 0;
+let autonomousBestTc = 0;
+let autonomousStartTime = Date.now();
+let autonomousGNNRetrainCount = 0;
 let recentTcImproved = false;
 let recentNewCandidates = 0;
 let failuresSinceLastRetrain = 0;
@@ -742,6 +751,14 @@ async function runPhase10_Physics() {
             stonerEnhancement: result.spinSusceptibility.stonerEnhancement,
             isNearQCP: result.spinSusceptibility.isNearQCP,
           },
+          phononDOS: {
+            totalStates: result.phononDOS.totalStates,
+            binCount: result.phononDOS.frequencies.length,
+          },
+          alpha2F: {
+            integratedLambda: result.alpha2F.integratedLambda,
+            binCount: result.alpha2F.frequencies.length,
+          },
         };
 
         await storage.updateSuperconductorCandidate(candidate.id, {
@@ -773,6 +790,48 @@ async function runPhase10_Physics() {
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
+    }
+
+    if (shouldContinue()) {
+      try {
+        const allCandidates = await storage.getSuperconductorCandidates(50);
+        const hydrideCandidates = allCandidates.filter(c => {
+          const els = parseFormulaElements(c.formula);
+          const cts: Record<string, number> = {};
+          const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+          let m;
+          while ((m = regex.exec(c.formula)) !== null) {
+            cts[m[1]] = (cts[m[1]] || 0) + (m[2] ? parseFloat(m[2]) : 1);
+          }
+          const hCount = cts["H"] || 0;
+          const nonmetals = ["H","He","B","C","N","O","F","Ne","Si","P","S","Cl","Ar","Ge","As","Se","Br","Kr","Te","I","Xe"];
+          const metalAtoms = els.filter(e => !nonmetals.includes(e)).reduce((s, e) => s + (cts[e] || 0), 0);
+          return hCount > 0 && metalAtoms > 0 && hCount / metalAtoms >= 2;
+        });
+        const hydrideToScan = shuffle(hydrideCandidates).slice(0, 3);
+        for (const candidate of hydrideToScan) {
+          if (!shouldContinue()) break;
+          try {
+            const pressureResult = runPressureAnalysis(emit, candidate.formula);
+            const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
+            const updatedMlFeatures = {
+              ...existingMlFeatures,
+              pressureTcCurve: {
+                optimalPressure: pressureResult.optimalPressure,
+                maxTc: pressureResult.maxTc,
+                points: pressureResult.pressureTcCurve.length,
+                stablePoints: pressureResult.pressureTcCurve.filter(p => p.stable).length,
+                hydridePhases: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
+              },
+            };
+            await storage.updateSuperconductorCandidate(candidate.id, {
+              mlFeatures: updatedMlFeatures as any,
+            });
+          } catch (err: any) {
+            emit("log", { phase: "phase-10", event: "Pressure scan error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Pressure Engine" });
+          }
+        }
+      } catch {}
     }
 
     if (cyclesSinceTcImproved > 3 && shouldContinue()) {
@@ -846,6 +905,25 @@ async function runPhase11_StructurePrediction() {
       ? await runStructurePredictionBatch(emit, needsPrediction)
       : 0;
     totalStructuresPredicted += predicted;
+
+    if (shouldContinue()) {
+      for (const f of uniqueFormulas.slice(0, 5)) {
+        if (!shouldContinue()) break;
+        try {
+          const hullResult = await runConvexHullAnalysis(emit, f);
+          const matchingCandidates = candidates.filter(c => c.formula === f);
+          for (const cand of matchingCandidates) {
+            const existingNotes = cand.notes || "";
+            const hullNote = `[ConvexHull: eAboveHull=${hullResult.energyAboveHull.toFixed(4)}, onHull=${hullResult.isOnHull}, decomp=${hullResult.decompositionProducts.join("+")}]`;
+            if (!existingNotes.includes("[ConvexHull:")) {
+              await storage.updateSuperconductorCandidate(cand.id, {
+                notes: `${existingNotes} ${hullNote}`.trim(),
+              });
+            }
+          }
+        } catch {}
+      }
+    }
 
     if (shouldContinue() && cycleCount % 3 === 0) {
       try {
@@ -1141,6 +1219,190 @@ async function runPhase13_SynthesisReasoning() {
   }
 }
 
+async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: boolean; tc: number; reason: string }> {
+  try {
+    const existingCandidate = await storage.getSuperconductorByFormula(formula);
+    if (existingCandidate) {
+      return { passed: false, tc: existingCandidate.predictedTc ?? 0, reason: "duplicate" };
+    }
+
+    const family = classifyFamily(formula);
+    const features = extractFeatures(formula);
+    if (!features) {
+      return { passed: false, tc: 0, reason: "feature-extraction-failed" };
+    }
+
+    const gbResult = gbPredict(features);
+    if (gbResult.predictedTc < 5) {
+      return { passed: false, tc: gbResult.predictedTc, reason: "low-gb-tc" };
+    }
+
+    const candidate = {
+      formula,
+      family,
+      predictedTc: Math.round(gbResult.predictedTc),
+      confidence: "low" as const,
+      source: "autonomous-loop",
+      ensembleScore: 0.3,
+      pressureGpa: 0,
+      verificationStage: 0,
+    };
+
+    const structureBatch = await runStructurePredictionBatch(emit, [candidate]);
+    const structureResult = structureBatch?.[0];
+
+    try {
+      await runConvexHullAnalysis(emit, formula);
+    } catch {}
+
+    const physicsResult = await runFullPhysicsAnalysis(emit, candidate);
+    const rawTc = physicsResult.eliashberg.predictedTc;
+    const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
+    let finalTc = physicsTc > 0 ? Math.round(physicsTc) : Math.round(gbResult.predictedTc);
+    finalTc = applyAmbientTcCap(finalTc, physicsResult.coupling.lambda, 0, physicsResult.electronicStructure.metallicity ?? 0.5, formula);
+
+    if (finalTc < 10) {
+      return { passed: false, tc: finalTc, reason: "low-physics-tc" };
+    }
+
+    const synthesizabilityScore = structureResult?.synthesizability ?? 0.5;
+    if (synthesizabilityScore < 0.3) {
+      return { passed: false, tc: finalTc, reason: "low-synthesizability" };
+    }
+
+    const confidenceLevel = finalTc > 60 ? "high" : finalTc > 30 ? "medium" : "low";
+    const instProx = physicsResult.instabilityProximity;
+    const pairingNote = `[Pairing: ${physicsResult.pairingAnalysis.dominant.mechanism} (Tc=${physicsResult.pairingAnalysis.dominant.tcEstimate.toFixed(0)}K)]`;
+    const instNote = `[Instability: ${instProx.nearestBoundary}=${instProx.overallProximity.toFixed(2)}]`;
+
+    await storage.insertSuperconductorCandidate({
+      formula: normalizeFormula(formula),
+      predictedTc: finalTc,
+      confidence: confidenceLevel,
+      source: "autonomous-loop",
+      family,
+      electronPhononCoupling: physicsResult.coupling.lambda,
+      logPhononFrequency: physicsResult.coupling.omegaLog,
+      coulombPseudopotential: physicsResult.coupling.muStar,
+      correlationStrength: physicsResult.correlation.ratio,
+      fermiSurfaceTopology: physicsResult.electronicStructure.fermiSurfaceTopology,
+      dimensionality: physicsResult.dimensionality,
+      competingPhases: physicsResult.competingPhases as any,
+      upperCriticalField: physicsResult.criticalFields.upperCriticalField,
+      coherenceLength: physicsResult.criticalFields.coherenceLength,
+      londonPenetrationDepth: physicsResult.criticalFields.londonPenetrationDepth,
+      pairingMechanism: physicsResult.pairingAnalysis.dominant.mechanism,
+      cooperPairMechanism: physicsResult.pairingAnalysis.dominant.description,
+      ensembleScore: Math.min(0.95, 0.3 + (finalTc / 400) + (synthesizabilityScore * 0.2)),
+      verificationStage: 1,
+      notes: `${pairingNote} ${instNote} [autonomous-loop]`,
+      mlFeatures: {
+        phononDOS: { totalStates: physicsResult.phononDOS.totalStates, binCount: physicsResult.phononDOS.frequencies.length },
+        alpha2F: { integratedLambda: physicsResult.alpha2F.integratedLambda, binCount: physicsResult.alpha2F.frequencies.length },
+      } as any,
+    });
+
+    totalScCandidates++;
+    recentNewCandidates++;
+
+    if (finalTc > autonomousBestTc) {
+      autonomousBestTc = finalTc;
+    }
+
+    return { passed: true, tc: finalTc, reason: "accepted" };
+  } catch (err: any) {
+    return { passed: false, tc: 0, reason: `error: ${err.message?.slice(0, 80)}` };
+  }
+}
+
+function generateFastPathFormulas(focusArea: string): string[] {
+  const scElements: Record<string, string[][]> = {
+    Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Zr","C"],["Hf","C"],["Ta","C"],["W","C"]],
+    Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mo","B"],["V","B"],["Ta","B"],["Mg","B"],["Ca","B"]],
+    Nitrides: [["Nb","N"],["Ti","N"],["Zr","N"],["V","N"],["Mo","N"],["Ta","N"],["Hf","N"]],
+    Hydrides: [["La","H"],["Y","H"],["Ca","H"],["Sr","H"],["Ba","H"],["Th","H"],["Sc","H"]],
+    Intermetallics: [["Nb","Ge"],["Nb","Sn"],["V","Si"],["Nb","Al"],["Mo","Ge"],["V","Ga"]],
+    Cuprates: [["Ba","Cu","O"],["La","Cu","O"],["Y","Ba","Cu","O"],["Bi","Sr","Cu","O"]],
+  };
+  const basePairs = scElements[focusArea] || scElements["Carbides"];
+  const results: string[] = [];
+  const dopants = ["Nb","V","Ti","Zr","Mo","Ta","Mg","Ca","La","Y","B","N","Si"];
+  for (let i = 0; i < 8 && results.length < 8; i++) {
+    const base = basePairs[Math.floor(Math.random() * basePairs.length)];
+    const dopant = dopants[Math.floor(Math.random() * dopants.length)];
+    if (base.includes(dopant)) continue;
+    const stoich1 = Math.floor(Math.random() * 3) + 1;
+    const stoich2 = Math.floor(Math.random() * 4) + 1;
+    const stoich3 = Math.floor(Math.random() * 3) + 1;
+    const formula = `${base[0]}${stoich1}${dopant}${stoich3}${base.slice(1).map(e => e + stoich2).join("")}`;
+    results.push(formula);
+  }
+  return results;
+}
+
+async function runAutonomousFastPath() {
+  if (!shouldContinue()) return;
+  activeTasks.add("Autonomous Screening");
+  broadcast("taskStart", { task: "Autonomous Screening" });
+
+  try {
+    const focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
+    const candidates = generateFastPathFormulas(focusArea);
+
+    let passed = 0;
+    let bestTcThisBatch = 0;
+    const failedFormulas: { formula: string; tc: number }[] = [];
+
+    for (const formula of candidates) {
+      if (!shouldContinue()) break;
+      autonomousTotalScreened++;
+
+      const result = await runAutonomousDiscoveryCycle(formula);
+      if (result.passed) {
+        passed++;
+        autonomousTotalPassed++;
+        if (result.tc > bestTcThisBatch) bestTcThisBatch = result.tc;
+      } else {
+        failedFormulas.push({ formula, tc: result.tc });
+      }
+    }
+
+    if (failedFormulas.length > 0 && autonomousTotalScreened % 100 === 0) {
+      try {
+        const failureTrainingData = failedFormulas
+          .filter(f => f.tc > 0)
+          .map(f => ({ formula: f.formula, tc: f.tc, formationEnergy: undefined as number | undefined, structure: undefined as any }));
+        if (failureTrainingData.length >= 5) {
+          invalidateGNNModel();
+          autonomousGNNRetrainCount++;
+        }
+      } catch {}
+    }
+
+    emit("log", {
+      phase: "engine",
+      event: "Autonomous loop: " + candidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
+      detail: `Fast-path screening of ${candidates.length} candidates from ${focusArea}. Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}.`,
+      dataSource: "Autonomous Loop",
+    });
+  } finally {
+    activeTasks.delete("Autonomous Screening");
+    broadcast("taskEnd", { task: "Autonomous Screening" });
+  }
+}
+
+export function getAutonomousLoopStats() {
+  const elapsedHours = (Date.now() - autonomousStartTime) / 3600000;
+  return {
+    totalScreened: autonomousTotalScreened,
+    totalPassed: autonomousTotalPassed,
+    passRate: autonomousTotalScreened > 0 ? autonomousTotalPassed / autonomousTotalScreened : 0,
+    bestTc: autonomousBestTc,
+    throughputPerHour: elapsedHours > 0 ? Math.round(autonomousTotalScreened / elapsedHours) : 0,
+    gnnRetrainCount: autonomousGNNRetrainCount,
+  };
+}
+
 async function runLearningCycle() {
   if (state !== "running" || isRunningCycle) return;
   isRunningCycle = true;
@@ -1330,6 +1592,10 @@ async function runLearningCycle() {
 
       if (state === "running") {
         await runPhase13_SynthesisReasoning();
+      }
+
+      if (state === "running" && cycleCount >= 10) {
+        await runAutonomousFastPath();
       }
     } else {
       emit("log", {

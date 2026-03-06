@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
-import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus } from "./learning/engine";
+import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -532,6 +532,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         familyDiversity: latestSnapshot?.familyDiversity ?? 0,
         pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
         cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
+        autonomousLoopStats: getAutonomousLoopStats(),
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch engine memory" });

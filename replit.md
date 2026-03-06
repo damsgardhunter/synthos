@@ -79,9 +79,36 @@ MatSci-∞ is an AI-powered supercomputer platform aimed at accelerating the dis
 
 ### Advanced Quantum Physics Modeling
 - **Phonon Dispersion**: Computes phonon branches along high-symmetry path (Gamma-X-M-Gamma) with soft mode detection and imaginary frequency identification.
+- **Phonon DOS**: Histogram of phonon frequencies from dispersion branches (100 bins). Computed via `computePhononDOS()`.
+- **Eliashberg Spectral Function**: alpha2F(omega) computed from phonon DOS weighted by McMillan-Hopfield eta parameters. Integrated lambda and omega_log used in Allen-Dynes Tc. Via `computeAlpha2F()`.
 - **GW Many-Body Corrections**: Quasiparticle renormalization (Z factor), DOS and bandwidth corrections, vertex corrections to lambda.
 - **Dynamic Spin Susceptibility**: Lindhard-function-based chi(q,omega) with Stoner enhancement, magnetic correlation length, and QCP proximity detection.
 - **Fermi Surface Nesting**: chi_0(q) along high-symmetry vectors (Gamma, X, M, R, A) identifying SDW/AFM, stripe-SDW, and CDW instabilities.
+
+### Convex Hull Phase Diagram Engine (`phase-diagram-engine.ts`)
+- **Convex Hull**: Computes energy above hull, decomposition products, and hull vertices for binary/ternary systems.
+- **Competing Phases**: Queries storage for materials with same element set, builds hull, identifies decomposition pathways.
+- **Metastability Assessment**: Arrhenius-based kinetic barrier estimation, lifetime prediction, decomposition pathway analysis.
+- **Phase Diagram**: Full binary/ternary phase diagrams with stable/unstable phases and phase boundaries.
+
+### Pressure Modeling Engine (`pressure-engine.ts`)
+- **Birch-Murnaghan EOS**: Volume compression at pressure, bulk modulus, pressure derivative.
+- **Hydride Formation**: Predicts hydrogen uptake, formation enthalpy under pressure, stable hydride stoichiometry.
+- **High-Pressure Stability**: Combines volume compression, phonon stability, and enthalpy comparison with decomposition products.
+- **Pressure-Tc Curves**: Sweeps pressure 0-300 GPa, computing Tc at each point to find optimal pressure.
+
+### Graph Neural Network Surrogate (`graph-neural-net.ts`)
+- **Crystal Graph Builder**: Converts formula + structure into graph with atom nodes and bond edges.
+- **Message Passing**: 3-layer message-passing GNN with learned weight matrices.
+- **Predictions**: Formation energy, phonon stability, Tc, and confidence.
+- **Ensemble Integration**: GNN gets 40% weight when structure data available, alongside XGBoost (25%) and LLM-NN (35%).
+- **Training**: Trains on known superconductor data with MSE loss, 30-minute cache TTL.
+
+### Autonomous Discovery Loop
+- **Fast-Path Screening**: Generates 5-8 combinatorial formulas per cycle from focused element sets.
+- **Full Pipeline**: Each candidate runs through GB pre-screen -> structure prediction -> convex hull -> full physics (alpha2F) -> Tc cap -> synthesizability check -> store.
+- **Stats Tracking**: Total screened, passed, pass rate, throughput/hour, best Tc, GNN retrain count.
+- **API Endpoint**: `autonomousLoopStats` included in `/api/engine/memory` response.
 
 ### NLP Engine
 - Statistical analysis dataset: 2000 materials (up from 200).
