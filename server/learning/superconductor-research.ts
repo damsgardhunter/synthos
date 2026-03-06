@@ -4,7 +4,8 @@ import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily } from "./utils";
-import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } from "./physics-engine";
+import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
+import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -563,18 +564,82 @@ export function computePairingSusceptibility(formula: string): {
 
   const lambda = coupling.lambda;
   const dosAtEf = electronic.densityOfStatesAtFermi;
-  const nestingFactor = electronic.fermiSurfaceTopology.includes("nesting") ? 0.8 : 0.3;
-  const phononSoftness = phonon.softModePresent ? 0.7 : (phonon.anharmonicityIndex > 0.3 ? 0.5 : 0.2);
+  const nestingScore = electronic.nestingScore ?? 0;
+  const vanHoveProx = electronic.vanHoveProximity ?? 0;
+  const bandFlat = electronic.bandFlatness ?? 0;
+  const softModeScore = phonon.softModeScore ?? (phonon.softModePresent ? 0.6 : 0.2);
+  const mottProx = electronic.mottProximityScore ?? 0;
+  const topoScore = electronic.topologicalBandScore ?? 0;
+  const dimScore = computeDimensionalityScore(formula);
+  const motifResult = detectStructuralMotifs(formula);
 
-  const score = (
-    lambda * 0.35 +
-    Math.min(1.0, dosAtEf / 5.0) * 0.25 +
-    nestingFactor * 0.2 +
-    phononSoftness * 0.15 +
-    (electronic.metallicity > 0.7 ? 0.05 : 0)
+  const locPenalty = Math.max(0, (electronic.correlationStrength - 0.5) * (1 - electronic.metallicity));
+  const dosWithPenalty = Math.min(1.0, dosAtEf / 5.0) * (1 - locPenalty * 0.3);
+
+  const competingPhases = evaluateCompetingPhases(formula, electronic);
+  let competingOrderProx = 0;
+  if (electronic.metallicity > 0.4) {
+    const bestProx = competingPhases.reduce((mx, p) => Math.max(mx, p.strength * (p.suppressesSC ? 0.5 : 1.0)), 0);
+    competingOrderProx = Math.min(1.0, bestProx);
+  }
+
+  const orbD = electronic.orbitalFractions?.d ?? 0;
+  const orbP = electronic.orbitalFractions?.p ?? 0;
+  const orbitalCharScore = Math.min(1.0, orbD * 0.7 + orbP * 0.5);
+
+  let score = (
+    Math.min(1.0, lambda / 2.5) * 0.22 +
+    dosWithPenalty * 0.15 +
+    nestingScore * 0.14 +
+    competingOrderProx * 0.12 +
+    softModeScore * 0.10 +
+    vanHoveProx * 0.08 +
+    bandFlat * 0.05 +
+    dimScore * 0.05 +
+    orbitalCharScore * 0.05 +
+    (electronic.metallicity > 0.7 ? 0.04 : electronic.metallicity * 0.04)
   );
 
+  if (mottProx > 0.5 && mottProx < 0.8) {
+    score *= (1 + (mottProx - 0.5) * 0.15);
+  }
+
+  if (topoScore > 0.6) {
+    score *= 1.05;
+  }
+
+  const novelty = computeCompositionNovelty(formula);
+  score = 0.85 * score + 0.15 * novelty;
+
+  const nestingFactor = nestingScore;
+  const phononSoftness = softModeScore;
+
   return { score: Math.min(1.0, score), lambda, nestingFactor, dosAtEf, phononSoftness };
+}
+
+export function computeCompositionNovelty(formula: string): number {
+  const targetElements = new Set(parseFormulaElements(formula));
+  if (targetElements.size === 0) return 1;
+
+  let minDistance = 1;
+
+  for (const entry of SUPERCON_TRAINING_DATA) {
+    const entryElements = new Set(parseFormulaElements(entry.formula));
+    if (entryElements.size === 0) continue;
+
+    const intersectionSize = Array.from(targetElements).filter(e => entryElements.has(e)).length;
+    const unionSize = new Set(Array.from(targetElements).concat(Array.from(entryElements))).size;
+
+    const jaccard = unionSize > 0 ? 1 - intersectionSize / unionSize : 1;
+
+    if (jaccard < minDistance) {
+      minDistance = jaccard;
+    }
+
+    if (minDistance === 0) break;
+  }
+
+  return Math.max(0, Math.min(1, minDistance));
 }
 
 let totalInverseDesignGenerated = 0;

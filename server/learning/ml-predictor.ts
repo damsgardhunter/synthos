@@ -7,6 +7,8 @@ import {
   computePhononSpectrum,
   computeElectronPhononCoupling,
   assessCorrelationStrength,
+  computeDimensionalityScore,
+  detectStructuralMotifs,
 } from "./physics-engine";
 import {
   ELEMENTAL_DATA,
@@ -70,6 +72,15 @@ export interface MLFeatureVector {
   bondStiffnessVariance: number;
   chargeTransferMagnitude: number;
   connectivityIndex: number;
+  nestingScore: number;
+  vanHoveProximity: number;
+  bandFlatness: number;
+  softModeScore: number;
+  motifScore: number;
+  orbitalDFraction: number;
+  mottProximityScore: number;
+  topologicalBandScore: number;
+  dimensionalityScoreV2: number;
 }
 
 const CHALCOGENS = ["O","S","Se","Te"];
@@ -280,6 +291,15 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     bondStiffnessVariance,
     chargeTransferMagnitude,
     connectivityIndex,
+    nestingScore: electronic.nestingScore ?? 0,
+    vanHoveProximity: electronic.vanHoveProximity ?? 0,
+    bandFlatness: electronic.bandFlatness ?? 0,
+    softModeScore: phonon.softModeScore ?? (phonon.softModePresent ? 0.6 : 0.2),
+    motifScore: detectStructuralMotifs(formula).motifScore,
+    orbitalDFraction: electronic.orbitalFractions?.d ?? 0,
+    mottProximityScore: electronic.mottProximityScore ?? 0,
+    topologicalBandScore: electronic.topologicalBandScore ?? 0,
+    dimensionalityScoreV2: computeDimensionalityScore(formula),
   };
 }
 

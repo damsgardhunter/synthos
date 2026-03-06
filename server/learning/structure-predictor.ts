@@ -3,6 +3,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { ELEMENTAL_DATA, getElementData, getMeltingPoint, getLatticeConstant } from "./elemental-data";
 import { fetchSummary, fetchElasticity } from "./materials-project-client";
+import { computeDimensionalityScore, detectStructuralMotifs } from "./physics-engine";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -1269,4 +1270,113 @@ export async function runGenerativeStructureDiscovery(
   }
 
   return allVariants;
+}
+
+const ATOM_SWAP_MAP: Record<string, string[]> = {
+  Fe: ["Co", "Ni", "Mn", "Cr"],
+  Cu: ["Ni", "Ag", "Zn"],
+  O: ["S", "Se", "Te"],
+  As: ["P", "Sb", "Bi"],
+  Ba: ["Sr", "Ca", "La"],
+  Y: ["La", "Sc", "Gd"],
+  Se: ["S", "Te"],
+  Nb: ["Ta", "V", "Mo"],
+  B: ["C", "N"],
+};
+
+const EVO_INTERCALANTS = ["Li", "Na", "K", "H"];
+
+function reconstructFormula(elements: string[], counts: Record<string, number>): string {
+  return elements.map(e => counts[e] > 1 ? e + counts[e] : e).join("");
+}
+
+export async function runEvolutionaryStructureSearch(
+  candidates: Array<{ formula: string; predictedTc: number; ensembleScore: number }>,
+  emit: EventEmitter
+): Promise<string[]> {
+  let parents = [...candidates]
+    .sort((a, b) => b.ensembleScore - a.ensembleScore)
+    .slice(0, 5);
+
+  for (let gen = 0; gen < 3; gen++) {
+    const mutants: Array<{ formula: string; score: number; parentTc: number }> = [];
+
+    for (const parent of parents) {
+      const parentElements = parseFormulaElements(parent.formula);
+      const parentCounts = parseFormulaCounts(parent.formula);
+
+      for (let m = 0; m < 4; m++) {
+        const elements = [...parentElements];
+        const counts: Record<string, number> = { ...parentCounts };
+
+        if (m === 0) {
+          const idx = Math.floor(Math.random() * elements.length);
+          const el = elements[idx];
+          const scale = 0.85 + Math.random() * 0.3;
+          counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
+        } else if (m === 1) {
+          const swappable = elements.filter(e => e !== "H" && ATOM_SWAP_MAP[e]);
+          if (swappable.length > 0) {
+            const el = swappable[Math.floor(Math.random() * swappable.length)];
+            const replacements = ATOM_SWAP_MAP[el];
+            if (el === "B" && Math.random() < 0.5) {
+            } else {
+              const replacement = replacements[Math.floor(Math.random() * replacements.length)];
+              const elIdx = elements.indexOf(el);
+              if (elIdx !== -1 && !elements.includes(replacement)) {
+                elements[elIdx] = replacement;
+                counts[replacement] = counts[el];
+                delete counts[el];
+              }
+            }
+          }
+        } else if (m === 2) {
+          const available = EVO_INTERCALANTS.filter(i => !elements.includes(i));
+          if (available.length > 0) {
+            const intercalant = available[Math.floor(Math.random() * available.length)];
+            elements.push(intercalant);
+            counts[intercalant] = 1 + Math.floor(Math.random() * 2);
+          }
+        } else {
+          const idx = Math.floor(Math.random() * elements.length);
+          const el = elements[idx];
+          const scale = 0.85 + Math.random() * 0.3;
+          counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
+
+          const available = EVO_INTERCALANTS.filter(i => !elements.includes(i));
+          if (available.length > 0) {
+            const intercalant = available[Math.floor(Math.random() * available.length)];
+            elements.push(intercalant);
+            counts[intercalant] = 1;
+          }
+        }
+
+        const formula = reconstructFormula(elements, counts);
+        const dimensionalityScore = computeDimensionalityScore(formula);
+        const motifResult = detectStructuralMotifs(formula);
+        const mutantScore = 0.5 * motifResult.motifScore + 0.3 * dimensionalityScore + 0.2 * (parent.predictedTc / 400);
+
+        mutants.push({ formula, score: mutantScore, parentTc: parent.predictedTc });
+      }
+    }
+
+    const sorted = mutants.sort((a, b) => b.score - a.score).slice(0, 5);
+
+    const bestScore = sorted[0]?.score ?? 0;
+    emit("log", {
+      phase: "phase-11",
+      event: `Evolutionary generation ${gen + 1}`,
+      detail: `Best score: ${bestScore.toFixed(4)}, top formula: ${sorted[0]?.formula ?? "N/A"}`,
+      dataSource: "Structure Evolution",
+    });
+
+    parents = sorted.map(s => ({
+      formula: s.formula,
+      predictedTc: s.parentTc,
+      ensembleScore: s.score,
+    }));
+  }
+
+  const uniqueFormulas = Array.from(new Set(parents.map(p => p.formula)));
+  return uniqueFormulas;
 }

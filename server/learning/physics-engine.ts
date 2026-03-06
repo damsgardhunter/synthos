@@ -183,6 +183,12 @@ export interface ElectronicStructure {
   metallicity: number;
   orbitalCharacter: string;
   nestingFeatures: string;
+  nestingScore: number;
+  vanHoveProximity: number;
+  bandFlatness: number;
+  orbitalFractions: { s: number; p: number; d: number; f: number };
+  topologicalBandScore: number;
+  mottProximityScore: number;
 }
 
 export interface PhononSpectrum {
@@ -191,6 +197,7 @@ export interface PhononSpectrum {
   hasImaginaryModes: boolean;
   anharmonicityIndex: number;
   softModePresent: boolean;
+  softModeScore: number;
   debyeTemperature: number;
 }
 
@@ -227,7 +234,7 @@ export interface CriticalFieldResult {
   typeIorII: string;
 }
 
-function parseFormulaElements(formula: string): string[] {
+export function parseFormulaElements(formula: string): string[] {
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? [...new Set(matches)] : [];
@@ -624,6 +631,104 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
   return 0.3 + metalFrac * 0.4;
 }
 
+export function computeDimensionalityScore(formula: string, spacegroup?: string | null): number {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  let score = 0.2;
+
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+  const isKagome = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
+    (elements.includes("Sb") || elements.includes("Sn"));
+  const hasBoronHoneycomb = elements.includes("B") && elements.some(e => isTransitionMetal(e) || isRareEarth(e));
+  const isDichalcogenide = (elements.includes("Nb") || elements.includes("Ta") || elements.includes("Mo") || elements.includes("W")) &&
+    (elements.includes("Se") || elements.includes("S") || elements.includes("Te"));
+
+  if (isCuprate) score = 0.9;
+  else if (isPnictide) score = 0.85;
+  else if (isKagome) score = 0.85;
+  else if (hasBoronHoneycomb) score = 0.8;
+  else if (isDichalcogenide) score = 0.8;
+  else if (elements.includes("O") && elements.some(e => isTransitionMetal(e)) && elements.length >= 3) score = 0.5;
+  else if (elements.some(e => ["Se", "S", "Te"].includes(e)) && elements.some(e => isTransitionMetal(e))) score = 0.5;
+
+  if (spacegroup) {
+    const sg = spacegroup.toLowerCase();
+    if (sg.includes("p4/mmm") || sg.includes("i4/mmm") || sg.includes("p6/mmm")) {
+      score = Math.max(score, 0.75);
+    }
+    if (sg.includes("cmcm") || sg.includes("pmmm") || sg.includes("c2/m")) {
+      score = Math.max(score, 0.6);
+    }
+  }
+
+  return Math.max(0, Math.min(1.0, score));
+}
+
+export function detectStructuralMotifs(formula: string, crystalStructure?: string | null): StructuralMotifResult {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const motifs: string[] = [];
+  let motifScore = 0.2;
+
+  const cuCount = counts["Cu"] || 0;
+  const oCount = counts["O"] || 0;
+  if (elements.includes("Cu") && elements.includes("O") && oCount >= cuCount * 2 && elements.length >= 3) {
+    motifs.push("CuO2 planes");
+    motifScore = Math.max(motifScore, 0.9);
+  }
+
+  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"))) {
+    motifs.push("FeAs/FeSe tetrahedra");
+    motifScore = Math.max(motifScore, 0.8);
+  }
+
+  const tmElements = elements.filter(e => isTransitionMetal(e));
+  if (tmElements.length > 0 && (elements.includes("O") || elements.some(e => ["Se", "S", "Te"].includes(e)))) {
+    const tmFrac = tmElements.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+    if (tmFrac > 0.15 && tmFrac < 0.5) {
+      motifs.push("Square-planar TM planes");
+      motifScore = Math.max(motifScore, 0.85);
+    }
+  }
+
+  if (elements.includes("B")) {
+    const bFrac = (counts["B"] || 0) / totalAtoms;
+    if (bFrac > 0.3 && elements.some(e => isTransitionMetal(e) || isRareEarth(e) || ["Mg", "Al", "Ca", "Sr", "Ba"].includes(e))) {
+      motifs.push("B honeycomb layers");
+      motifScore = Math.max(motifScore, 0.7);
+    }
+  }
+
+  if ((elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
+    (elements.includes("Sb") || elements.includes("Sn"))) {
+    motifs.push("Kagome net");
+    motifScore = Math.max(motifScore, 0.85);
+  }
+
+  if (elements.length >= 3 && elements.includes("O")) {
+    const metalCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || ["Ca", "Sr", "Ba", "La", "Y"].includes(e)).length;
+    if (metalCount >= 2 && oCount >= 3) {
+      motifs.push("Perovskite blocks");
+      motifScore = Math.max(motifScore, 0.6);
+    }
+  }
+
+  const hCount = counts["H"] || 0;
+  const metalAtoms = elements.filter(e => isTransitionMetal(e) || isRareEarth(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  if (hCount > 0 && metalAtoms > 0 && hCount / metalAtoms >= 6) {
+    motifs.push("H cage/clathrate");
+    motifScore = Math.max(motifScore, 0.7);
+  }
+
+  if (motifs.length === 0) motifs.push("No recognized SC motif");
+
+  return { motifs, motifScore: Math.max(0, Math.min(1.0, motifScore)) };
+}
+
 export function computeElectronicStructure(
   formula: string,
   spacegroup?: string | null,
@@ -714,10 +819,121 @@ export function computeElectronicStructure(
     orbitalCharacter = `multi-principal d-orbital cocktail (${elements.filter(e => isTransitionMetal(e)).join("/")})`; 
   }
 
-  const nestingStrength = correlationStrength > 0.5 || (vec > 4 && vec < 7 && hasTM);
-  const nestingFeatures = nestingStrength
-    ? "Significant Fermi surface nesting promoting spin/charge instabilities"
-    : "Weak nesting, conventional metallic behavior";
+  let nestingScore = 0;
+  const vecNesting = Math.max(0, 1 - Math.abs(vec - 5.5) / 3);
+  nestingScore += vecNesting * 0.3;
+  nestingScore += correlationStrength * 0.2;
+
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+  const isKagome = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
+    (elements.includes("Sb") || elements.includes("Sn"));
+  const isDichalcogenide = (elements.includes("Nb") || elements.includes("Ta") || elements.includes("Mo") || elements.includes("W")) &&
+    (elements.includes("Se") || elements.includes("S") || elements.includes("Te"));
+
+  if (isCuprate) nestingScore = Math.max(nestingScore, 0.9);
+  else if (isPnictide) nestingScore = Math.max(nestingScore, 0.8);
+  else if (isKagome) nestingScore = Math.max(nestingScore, 0.85);
+  else if (isDichalcogenide) nestingScore = Math.max(nestingScore, 0.7);
+  else if (hasH && hRatio >= 6) nestingScore = Math.max(nestingScore, 0.5);
+
+  if (fermiSurfaceTopology.includes("2D") || isCuprate || isPnictide) {
+    nestingScore = Math.min(1.0, nestingScore + 0.1);
+  }
+
+  if (isPnictide || isDichalcogenide) {
+    const hasDonorAcceptor = elements.some(e => {
+      const d = getElementData(e);
+      return d && d.paulingElectronegativity < 1.5;
+    }) && elements.some(e => {
+      const d = getElementData(e);
+      return d && d.paulingElectronegativity > 2.0;
+    });
+    if (hasDonorAcceptor) nestingScore = Math.min(1.0, nestingScore + 0.08);
+  }
+
+  nestingScore = Math.max(0, Math.min(1.0, nestingScore));
+
+  const nestingFeatures = nestingScore > 0.6
+    ? "Strong Fermi surface nesting promoting spin/charge instabilities"
+    : nestingScore > 0.3
+      ? "Moderate nesting with partial electron-hole pocket matching"
+      : "Weak nesting, conventional metallic behavior";
+
+  let orbitalFractions = { s: 0, p: 0, d: 0, f: 0 };
+  let totalOrbWeight = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (!data) continue;
+    const frac = (counts[el] || 1) / totalAtoms;
+    const ve = data.valenceElectrons;
+    const weight = frac * ve;
+    totalOrbWeight += weight;
+    if (el === "H") {
+      orbitalFractions.s += weight;
+    } else if (["B", "C", "N", "O", "Si", "P", "S", "Se", "Te", "F", "Cl", "Br", "I"].includes(el)) {
+      orbitalFractions.p += weight;
+    } else if (isTransitionMetal(el)) {
+      orbitalFractions.d += weight;
+    } else if (isRareEarth(el) || isActinide(el)) {
+      orbitalFractions.f += weight;
+    } else {
+      const period = data.atomicNumber <= 2 ? 1 : data.atomicNumber <= 10 ? 2 : data.atomicNumber <= 18 ? 3 : 4;
+      if (period <= 2) orbitalFractions.s += weight;
+      else if (period === 3) orbitalFractions.p += weight;
+      else orbitalFractions.d += weight * 0.5 + weight * 0.5;
+    }
+  }
+  if (totalOrbWeight > 0) {
+    orbitalFractions.s = Number((orbitalFractions.s / totalOrbWeight).toFixed(3));
+    orbitalFractions.p = Number((orbitalFractions.p / totalOrbWeight).toFixed(3));
+    orbitalFractions.d = Number((orbitalFractions.d / totalOrbWeight).toFixed(3));
+    orbitalFractions.f = Number((orbitalFractions.f / totalOrbWeight).toFixed(3));
+  }
+
+  const freeElectronDOS = vec / (2 * Math.max(0.5, (() => {
+    let wAvg = 0;
+    for (const el of elements) {
+      const frac = (counts[el] || 1) / totalAtoms;
+      wAvg += estimateBandwidthW(el) * frac;
+    }
+    return wAvg;
+  })()));
+  const vhsRatio = densityOfStatesAtFermi / Math.max(0.1, freeElectronDOS);
+  let vanHoveProximity = Math.max(0, Math.min(1.0, (vhsRatio - 1.0) * 0.5));
+  if (isCuprate) vanHoveProximity = Math.max(vanHoveProximity, 0.8);
+  else if (isKagome) vanHoveProximity = Math.max(vanHoveProximity, 0.7);
+  else if (elements.includes("B") && hasTM && densityOfStatesAtFermi > 1.5) vanHoveProximity = Math.max(vanHoveProximity, 0.6);
+
+  let wAvgForFlatness = 0;
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    wAvgForFlatness += estimateBandwidthW(el) * frac;
+  }
+  const bandFlatness = Math.max(0, Math.min(1.0, 1 - wAvgForFlatness / 3.0));
+
+  const locPenalty = Math.max(0, (correlationStrength - 0.5) * (1 - metallicity));
+
+  let mottProximityScore = Math.max(0, Math.min(1.0,
+    correlationStrength * (1 - metallicity) + (0.5 - wAvgForFlatness / 5)
+  ));
+
+  let topologicalBandScore = 0;
+  const heavyElements = ["Bi", "Pb", "Sb", "Te", "W", "Hg", "Tl", "Po"];
+  let avgZFour = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data && heavyElements.includes(el)) {
+      avgZFour += Math.pow(data.atomicNumber / 83, 4) * ((counts[el] || 1) / totalAtoms);
+    }
+  }
+  const socScore = Math.min(1.0, avgZFour * 3);
+  const pdMixing = Math.min(1.0, orbitalFractions.p * orbitalFractions.d * 8);
+  const bandInversionProxy = (socScore > 0.2 && pdMixing > 0.1) ? Math.min(1.0, socScore * pdMixing * 5) : 0;
+  topologicalBandScore = 0.4 * socScore + 0.3 * bandInversionProxy + 0.3 * pdMixing;
+  topologicalBandScore = Math.max(0, Math.min(1.0, topologicalBandScore));
+
+  const dimensionalityScore = computeDimensionalityScore(formula, spacegroup);
 
   return {
     bandStructureType,
@@ -727,6 +943,12 @@ export function computeElectronicStructure(
     metallicity: Number(metallicity.toFixed(4)),
     orbitalCharacter,
     nestingFeatures,
+    nestingScore: Number(nestingScore.toFixed(3)),
+    vanHoveProximity: Number(vanHoveProximity.toFixed(3)),
+    bandFlatness: Number(bandFlatness.toFixed(3)),
+    orbitalFractions,
+    topologicalBandScore: Number(topologicalBandScore.toFixed(3)),
+    mottProximityScore: Number(mottProximityScore.toFixed(3)),
   };
 }
 
@@ -832,13 +1054,21 @@ export function computePhononSpectrum(
   }
   anharmonicityIndex = Math.max(0.0, Math.min(1.0, anharmonicityIndex));
 
-  let softModePresent = false;
+  let softModeScore = 0;
+  const minPhononFreq = logAvgFreq * 0.3;
+  softModeScore = Math.max(0, Math.min(1.0, 1 - (minPhononFreq / Math.max(1, logAvgFreq))));
+
   if (electronicStructure.correlationStrength > 0.6 && electronicStructure.densityOfStatesAtFermi > 3.0) {
-    softModePresent = true;
+    softModeScore = Math.max(softModeScore, 0.6);
   }
   if (elements.some(e => ["Ba", "Sr", "Ca", "Pb"].includes(e)) && elements.includes("O") && elements.length >= 3) {
-    softModePresent = true;
+    softModeScore = Math.max(softModeScore, 0.55);
   }
+  if (anharmonicityIndex > 0.5) {
+    softModeScore = Math.min(1.0, softModeScore + anharmonicityIndex * 0.2);
+  }
+  softModeScore = Math.max(0, Math.min(1.0, softModeScore));
+  const softModePresent = softModeScore > 0.4;
 
   return {
     maxPhononFrequency: Math.round(maxPhononFreq),
@@ -846,6 +1076,7 @@ export function computePhononSpectrum(
     hasImaginaryModes,
     anharmonicityIndex: Number(anharmonicityIndex.toFixed(3)),
     softModePresent,
+    softModeScore: Number(softModeScore.toFixed(3)),
     debyeTemperature,
   };
 }
@@ -945,7 +1176,8 @@ export function computeElectronPhononCoupling(
       lambda = N_EF * 0.15 * (1 + phononSpectrum.anharmonicityIndex * 0.5);
     }
 
-    if (electronicStructure.fermiSurfaceTopology.includes("nesting")) lambda *= 1.15;
+    const ns = electronicStructure.nestingScore ?? 0;
+    lambda *= (1 + ns * 0.2);
 
     const nonHNonMetFrac = elements.filter(e => {
       const nm = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
@@ -972,12 +1204,18 @@ export function computeElectronPhononCoupling(
     }
   } else {
     lambda = N_EF * 0.15 * (1 + phononSpectrum.anharmonicityIndex * 0.5);
-    if (electronicStructure.fermiSurfaceTopology.includes("nesting")) lambda *= 1.15;
+    const nsNoFormula = electronicStructure.nestingScore ?? 0;
+    lambda *= (1 + nsNoFormula * 0.2);
     if (corr > 0.7) lambda *= 0.6;
     if (metal < 0.4) lambda *= metal;
   }
 
   lambda = Math.max(0.05, lambda);
+
+  if (phononSpectrum.softModeScore > 0.7 && lambda > 2.5) {
+    const guard = 1.0 - (phononSpectrum.softModeScore - 0.7) * 0.5;
+    lambda *= Math.max(0.8, guard);
+  }
 
   const matClass = formula ? classifyMaterialForLambda(formula, pressureGpa) : "other";
   const classLambdaCap = getLambdaCapForClass(matClass);
@@ -1039,7 +1277,7 @@ export function computeElectronPhononCoupling(
   };
 }
 
-export function predictTcEliashberg(coupling: ElectronPhononCoupling): EliashbergResult {
+export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: PhononSpectrum): EliashbergResult {
   const { lambda, omegaLog, muStar } = coupling;
 
   const omegaLogK = omegaLog * 1.44;
@@ -1059,6 +1297,13 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling): Eliashber
   }
 
   tc = Number.isFinite(tc) ? Math.max(0, tc) : 0;
+
+  if (phonon && tc > 0) {
+    const freqRatio = phonon.maxPhononFrequency / Math.max(1, phonon.logAverageFrequency);
+    const phononSpectrumSpread = Math.max(0, Math.min(3, freqRatio - 1));
+    const shapeFactor = 1 + 0.05 * phononSpectrumSpread;
+    tc *= shapeFactor;
+  }
 
   const gapRatio = lambda > 1.5 ? 2 * 1.764 * (1 + 12.5 * (lambda / (lambda + 5)) * (lambda / (lambda + 5))) : 2 * 1.764;
   const isotropicGap = lambda < 1.0;
@@ -1138,6 +1383,17 @@ function estimateSpinFluctuationTc(
   const isIronBased = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
   if (isCuprate) tc_sf = Math.max(tc_sf, 50 + corr * 100);
   if (isIronBased) tc_sf = Math.max(tc_sf, 20 + corr * 60);
+
+  const mottProx = electronic.mottProximityScore ?? 0;
+  if (mottProx > 0.5 && mottProx < 0.8) {
+    tc_sf *= (1 + (mottProx - 0.5) * 0.67);
+  }
+
+  const dDom = (electronic.orbitalFractions?.d ?? 0) /
+    Math.max(0.01, (electronic.orbitalFractions?.s ?? 0) + (electronic.orbitalFractions?.p ?? 0));
+  if (dDom * corr > 0.6) {
+    tc_sf *= 1.2;
+  }
 
   tc_sf = Math.max(0, Math.round(tc_sf));
   const confidence = nearQCP ? 0.5 : (hasAFM ? 0.4 : 0.2);
@@ -1407,11 +1663,58 @@ export function evaluateCompetingPhases(
     });
     const T_sdw = Math.round(80 + electronicStructure.correlationStrength * 150);
     phases.push({
-      phaseName: "Spin-density wave",
+      phaseName: "Spin-density wave (cuprate)",
       type: "SDW",
       transitionTemp: Math.min(350, T_sdw),
-      strength: 0.6,
+      strength: Math.min(1.0, 0.5 + electronicStructure.correlationStrength * 0.3),
       suppressesSC: true,
+    });
+  }
+
+  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+  if (isPnictide) {
+    let stonerMax = 0;
+    for (const el of elements) {
+      const I = getStonerParameter(el);
+      if (I !== null) stonerMax = Math.max(stonerMax, I * electronicStructure.densityOfStatesAtFermi);
+    }
+    const sdwStrength = Math.min(1.0, 0.4 + electronicStructure.correlationStrength * 0.4 + stonerMax * 0.2);
+    const T_sdw_pn = Math.round(100 + electronicStructure.correlationStrength * 100);
+    phases.push({
+      phaseName: "Spin-density wave (pnictide)",
+      type: "SDW",
+      transitionTemp: Math.min(250, T_sdw_pn),
+      strength: sdwStrength,
+      suppressesSC: sdwStrength > 0.7,
+    });
+  }
+
+  const isKagomeSC = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
+    (elements.includes("Sb") || elements.includes("Sn"));
+  if (isKagomeSC) {
+    const nestScore = electronicStructure.nestingScore ?? 0;
+    const sdwStrengthK = Math.min(1.0, 0.3 + nestScore * 0.5);
+    phases.push({
+      phaseName: "Spin-density wave (Kagome)",
+      type: "SDW",
+      transitionTemp: Math.round(80 + nestScore * 100),
+      strength: sdwStrengthK,
+      suppressesSC: false,
+    });
+  }
+
+  const isDichalcogenideSC = (elements.includes("Nb") || elements.includes("Ta") || elements.includes("Mo") || elements.includes("W")) &&
+    (elements.includes("Se") || elements.includes("S") || elements.includes("Te"));
+  const existingCDW = phases.some(p => p.type === "CDW");
+  if (isDichalcogenideSC && !existingCDW) {
+    const cdwStr = Math.min(1.0, 0.5 + (electronicStructure.nestingScore ?? 0) * 0.3);
+    const T_cdw_dc = Math.round(100 + electronicStructure.densityOfStatesAtFermi * 20);
+    phases.push({
+      phaseName: "CDW (dichalcogenide)",
+      type: "CDW",
+      transitionTemp: Math.min(300, T_cdw_dc),
+      strength: cdwStr,
+      suppressesSC: cdwStr > 0.6,
     });
   }
 
@@ -1550,9 +1853,16 @@ export interface InstabilityProximity {
   structuralBoundary: number;
   metalInsulatorTransition: number;
   cdwInstability: number;
+  sdwInstability: number;
+  magneticSusceptibilityPeak: number;
   softPhononCollapse: number;
   overallProximity: number;
   nearestBoundary: string;
+}
+
+export interface StructuralMotifResult {
+  motifs: string[];
+  motifScore: number;
 }
 
 export function computeInstabilityProximity(
@@ -1607,10 +1917,31 @@ export function computeInstabilityProximity(
     cdwInstability = Math.max(cdwInstability, 0.4);
   }
 
-  let softPhononCollapse = 0;
-  if (phononSpectrum.softModePresent) {
-    softPhononCollapse = 0.6;
+  let sdwInstability = 0;
+  const sdwPhases = competingPhases.filter(p => p.type === "SDW");
+  for (const sdw of sdwPhases) {
+    sdwInstability = Math.max(sdwInstability, sdw.strength);
   }
+  if (electronic.nestingScore != null && electronic.nestingScore > 0.6) {
+    sdwInstability = Math.max(sdwInstability, electronic.nestingScore * 0.7);
+  }
+
+  let magneticSusceptibilityPeak = 0;
+  for (const el of elements) {
+    const I = getStonerParameter(el);
+    if (I !== null) {
+      const stonerProduct = I * electronic.densityOfStatesAtFermi;
+      if (stonerProduct > 0.5) {
+        const chi = 1 / Math.max(0.01, 1 - stonerProduct);
+        magneticSusceptibilityPeak = Math.max(magneticSusceptibilityPeak,
+          Math.min(1.0, chi / 10));
+      }
+    }
+  }
+
+  let softPhononCollapse = 0;
+  const sms = phononSpectrum.softModeScore ?? (phononSpectrum.softModePresent ? 0.6 : 0);
+  softPhononCollapse = Math.max(softPhononCollapse, sms * 0.8);
   if (phononSpectrum.logAverageFrequency < 100) {
     softPhononCollapse = Math.max(softPhononCollapse, 0.8);
   }
@@ -1623,6 +1954,8 @@ export function computeInstabilityProximity(
     { name: "Structural boundary", val: structuralBoundary },
     { name: "Metal-insulator transition", val: metalInsulatorTransition },
     { name: "CDW instability", val: cdwInstability },
+    { name: "SDW instability", val: sdwInstability },
+    { name: "Magnetic susceptibility peak", val: magneticSusceptibilityPeak },
     { name: "Soft phonon collapse", val: softPhononCollapse },
   ];
 
@@ -1634,10 +1967,74 @@ export function computeInstabilityProximity(
     structuralBoundary,
     metalInsulatorTransition,
     cdwInstability,
+    sdwInstability,
+    magneticSusceptibilityPeak,
     softPhononCollapse,
     overallProximity,
     nearestBoundary: nearest.name,
   };
+}
+
+export function simulatePressureEffects(
+  formula: string,
+  electronic: ElectronicStructure,
+  phonon: PhononSpectrum,
+  coupling: ElectronPhononCoupling
+): { pressureOptimalTc: number; optimalPressure: number; pressureTcCurve: { pressure: number; tc: number }[] } {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const hasH = elements.includes("H");
+  const hCount = counts["H"] || 0;
+  const metalAtoms = elements.filter(e => isTransitionMetal(e) || isRareEarth(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
+
+  const isPressureSensitive = hasH || elements.includes("S") || elements.includes("Se") ||
+    elements.some(e => isRareEarth(e)) || hRatio >= 4;
+
+  if (!isPressureSensitive) {
+    const baseTc = predictTcEliashberg(coupling, phonon).predictedTc;
+    return {
+      pressureOptimalTc: baseTc,
+      optimalPressure: 0,
+      pressureTcCurve: [{ pressure: 0, tc: baseTc }],
+    };
+  }
+
+  const pressures = [0, 10, 25, 50, 100, 150, 200];
+  const curve: { pressure: number; tc: number }[] = [];
+  let bestTc = 0;
+  let bestP = 0;
+
+  for (const p of pressures) {
+    const bwFactor = 1 + p * 0.008;
+    const phononBoost = 1 + p * 0.012;
+    const lambdaDecay = Math.max(0.7, 1 - p * 0.003);
+
+    let adjLambda = coupling.lambda * lambdaDecay;
+    if (hRatio >= 6 && p >= 50) {
+      adjLambda = coupling.lambda * (1 + (p - 50) * 0.005);
+      adjLambda = Math.min(adjLambda, coupling.lambda * 1.8);
+    }
+
+    const adjOmegaLog = coupling.omegaLog * phononBoost;
+    const adjCoupling: ElectronPhononCoupling = {
+      ...coupling,
+      lambda: adjLambda,
+      omegaLog: Math.min(adjOmegaLog, 2000),
+    };
+
+    const result = predictTcEliashberg(adjCoupling, phonon);
+    const tc = result.predictedTc;
+    curve.push({ pressure: p, tc });
+
+    if (tc > bestTc) {
+      bestTc = tc;
+      bestP = p;
+    }
+  }
+
+  return { pressureOptimalTc: bestTc, optimalPressure: bestP, pressureTcCurve: curve };
 }
 
 export async function runFullPhysicsAnalysis(
@@ -1729,7 +2126,7 @@ export async function runFullPhysicsAnalysis(
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
 
   let eliashberg: EliashbergResult;
-  eliashberg = predictTcEliashberg(coupling);
+  eliashberg = predictTcEliashberg(coupling, phononSpectrum);
 
   const competingPhases = evaluateCompetingPhases(formula, electronicStructure, mpSummary);
   const hasMottPhase = competingPhases.some(p => p.type === "Mott");
@@ -1798,6 +2195,11 @@ export async function runFullPhysicsAnalysis(
   if (!mpSummary) uncertaintyEstimate += 0.05;
   if (dftData && dftData.dftCoverage > 0.3) uncertaintyEstimate -= dftData.dftCoverage * 0.15;
   uncertaintyEstimate = Math.max(uncertaintyEstimate, pairingAnalysis.uncertaintyFromMechanism);
+
+  if (candidatePressure < 50 && eliashberg.predictedTc > 200) {
+    uncertaintyEstimate = Math.max(uncertaintyEstimate, 0.8);
+  }
+
   uncertaintyEstimate = Math.max(0.05, Math.min(0.95, uncertaintyEstimate));
 
   const instabilityProximity = computeInstabilityProximity(formula, electronicStructure, phononSpectrum, competingPhases);
@@ -1805,7 +2207,7 @@ export async function runFullPhysicsAnalysis(
   emit("log", {
     phase: "phase-10",
     event: "Instability proximity computed",
-    detail: `${formula}: nearest=${instabilityProximity.nearestBoundary} (${instabilityProximity.overallProximity.toFixed(2)}), QCP=${instabilityProximity.magneticQCP.toFixed(2)}, CDW=${instabilityProximity.cdwInstability.toFixed(2)}, MIT=${instabilityProximity.metalInsulatorTransition.toFixed(2)}`,
+    detail: `${formula}: nearest=${instabilityProximity.nearestBoundary} (${instabilityProximity.overallProximity.toFixed(2)}), QCP=${instabilityProximity.magneticQCP.toFixed(2)}, CDW=${instabilityProximity.cdwInstability.toFixed(2)}, SDW=${instabilityProximity.sdwInstability.toFixed(2)}, MIT=${instabilityProximity.metalInsulatorTransition.toFixed(2)}, chi=${instabilityProximity.magneticSusceptibilityPeak.toFixed(2)}`,
     dataSource: "Physics Engine",
   });
 

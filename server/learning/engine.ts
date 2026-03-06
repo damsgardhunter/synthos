@@ -6,8 +6,8 @@ import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap } from "./physics-engine";
-import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount } from "./structure-predictor";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode } from "./physics-engine";
+import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
@@ -444,6 +444,8 @@ const reEvalApplied = new Map<string, { lambda: number; omegaLog: number; muStar
 let cyclesSinceTcImproved = 0;
 let lastBestTcSeen = 0;
 let lastBestPairingSusc = 0;
+let explorationModeActive = false;
+let explorationModeSavedConstraints: { allowBeyondEmpirical: boolean; empiricalPenaltyStrength: number } | null = null;
 
 function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): number {
   if (lambda < 0.05 || omegaLog <= 0) return 0;
@@ -891,6 +893,77 @@ async function runPhase11_StructurePrediction() {
       }
     }
 
+    if (shouldContinue() && cycleCount % 15 === 0) {
+      try {
+        const topForEvo = await storage.getTopSuperconductorCandidates(20);
+        const evoInput = topForEvo.map(c => ({
+          formula: c.formula,
+          predictedTc: c.predictedTc ?? 0,
+          ensembleScore: c.ensembleScore ?? 0,
+        }));
+        const evoResults = await runEvolutionaryStructureSearch(evoInput, emit);
+        let evoInserted = 0;
+        for (const evoFormula of evoResults) {
+          const existingSC = await storage.getSuperconductorByFormula(evoFormula);
+          if (!existingSC) {
+            const features = extractFeatures(evoFormula);
+            const gbResult = gbPredict(features);
+            const lambdaML = features.electronPhononLambda ?? 0;
+            const metallicityML = features.metallicity ?? 0.5;
+            let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+            rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, evoFormula);
+            const id = `sc-evo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            try {
+              await storage.insertSuperconductorCandidate({
+                id,
+                name: evoFormula,
+                formula: evoFormula,
+                predictedTc: rawTc,
+                pressureGpa: null,
+                meissnerEffect: false,
+                zeroResistance: false,
+                cooperPairMechanism: "Evolutionary structure search",
+                crystalStructure: null,
+                quantumCoherence: 0.5,
+                stabilityScore: features.cooperPairStrength,
+                synthesisPath: null,
+                mlFeatures: features as any,
+                xgboostScore: gbResult.score,
+                neuralNetScore: 0.5,
+                ensembleScore: Math.min(0.9, (gbResult.score + 0.5) / 2),
+                roomTempViable: false,
+                status: "theoretical",
+                notes: `[Evolutionary structure search: mutated from top candidates]`,
+                electronPhononCoupling: lambdaML || null,
+                logPhononFrequency: features.logPhononFreq ?? null,
+                coulombPseudopotential: 0.12,
+                pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                pairingMechanism: "phonon-mediated",
+                correlationStrength: features.correlationStrength ?? null,
+                dimensionality: "3D",
+                fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+                uncertaintyEstimate: 0.6,
+                verificationStage: 0,
+                dataConfidence: "low",
+              });
+              totalScCandidates++;
+              evoInserted++;
+            } catch {}
+          }
+        }
+        if (evoInserted > 0) {
+          emit("log", {
+            phase: "phase-11",
+            event: "Evolutionary candidates inserted",
+            detail: `${evoInserted} novel structures from evolutionary search`,
+            dataSource: "Structure Evolution",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Evolutionary search error", detail: err.message?.slice(0, 150), dataSource: "Structure Evolution" });
+      }
+    }
+
     const csCount = await storage.getCrystalStructureCount();
     const progress = Math.min(99, Math.floor((csCount / 150) * 100));
     await updatePhaseStatus(11, "active", progress, csCount);
@@ -1015,6 +1088,26 @@ async function runLearningCycle() {
           `No Tc improvement in ${cyclesSinceTcImproved} cycles. Current best: ${Math.round(previousCycleMetrics.bestTc)}K. Activating boundary hunting and inverse design modes to explore instability edges...`,
           "stagnation"
         );
+      }
+
+      if (cyclesSinceTcImproved >= 8 && cyclesSinceTcImproved % 8 === 0) {
+        const savedMode = getConstraintMode();
+        setConstraintMode({
+          empiricalPenaltyStrength: 0.5,
+          allowBeyondEmpirical: true,
+        });
+        explorationModeActive = true;
+        explorationModeSavedConstraints = savedMode;
+        broadcastThought(
+          `Activating adaptive exploration mode: relaxing physics constraints for 1 cycle to search unexplored compositional space. Penalty strength reduced to 0.5, lambda caps raised 30%.`,
+          "strategy"
+        );
+        emit("log", {
+          phase: "phase-6",
+          event: "Adaptive exploration activated",
+          detail: `Stagnation at ${cyclesSinceTcImproved} cycles. Temporarily relaxing empirical penalties for broader search.`,
+          dataSource: "Engine",
+        });
       } else if (previousCycleMetrics.insightCount > 0) {
         broadcastThought(
           `Cycle ${cycleCount}: Last cycle produced ${cycleInsightsThisCycle || 0} insights. Focusing on ${topFocus} — ${previousCycleMetrics.familyDiversity} families in the search space, best Tc at ${Math.round(previousCycleMetrics.bestTc)}K.`,
@@ -1257,6 +1350,18 @@ async function runLearningCycle() {
       dataSource: "Internal",
     });
   } finally {
+    if (explorationModeActive && explorationModeSavedConstraints) {
+      setConstraintMode(explorationModeSavedConstraints);
+      explorationModeActive = false;
+      explorationModeSavedConstraints = null;
+      emit("log", {
+        phase: "engine",
+        event: "Adaptive exploration deactivated",
+        detail: "Restored normal physics constraints after exploration cycle.",
+        dataSource: "Engine",
+      });
+    }
+
     isRunningCycle = false;
     broadcast("cycleEnd", { cycle: cycleCount });
 
@@ -1327,7 +1432,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 11;
+const PHYSICS_VERSION = 12;
 
 async function recalculatePhysics() {
   try {
