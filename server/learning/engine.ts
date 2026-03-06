@@ -97,6 +97,8 @@ let autonomousTotalPassed = 0;
 let autonomousBestTc = 0;
 let autonomousStartTime = Date.now();
 let autonomousGNNRetrainCount = 0;
+const alreadyScreenedFormulas = new Set<string>();
+const MAX_SCREENED_CACHE_SIZE = 10000;
 let lastActiveLearningCycle = 0;
 let recentTcImproved = false;
 let recentNewCandidates = 0;
@@ -1464,7 +1466,7 @@ function generateFastPathFormulas(focusArea: string): string[] {
   const topCandidatesForGen: { formula: string; predictedTc?: number }[] = [];
   const scElements: Record<string, string[][]> = {
     Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Zr","C"],["Hf","C"],["Ta","C"],["W","C"]],
-    Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mo","B"],["V","B"],["Ta","B"],["Mg","B"],["Ca","B"]],
+    Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mo","B"],["V","B"],["Ta","B"],["Hf","B"],["W","B"]],
     Nitrides: [["Nb","N"],["Ti","N"],["Zr","N"],["V","N"],["Mo","N"],["Ta","N"],["Hf","N"]],
     Hydrides: [["La","H"],["Y","H"],["Ca","H"],["Sr","H"],["Ba","H"],["Th","H"],["Sc","H"]],
     Intermetallics: [["Nb","Ge"],["Nb","Sn"],["V","Si"],["Nb","Al"],["Mo","Ge"],["V","Ga"]],
@@ -1493,12 +1495,23 @@ async function runAutonomousFastPath() {
       topCandidatesForGen = existingTop.map(c => ({ formula: c.formula, predictedTc: c.predictedTc ?? 0 }));
     } catch {}
 
-    const { formulas: candidates, stats: genStats } = runMassiveGeneration(topCandidatesForGen, focusArea);
+    const shuffled = [...topCandidatesForGen].sort(() => Math.random() - 0.5);
+    const { formulas: candidates, stats: genStats } = runMassiveGeneration(shuffled, focusArea);
+
+    const novelCandidates = candidates.filter(f => !alreadyScreenedFormulas.has(f));
+    for (const f of candidates) alreadyScreenedFormulas.add(f);
+    if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE) {
+      const toRemove = alreadyScreenedFormulas.size - MAX_SCREENED_CACHE_SIZE;
+      const iter = alreadyScreenedFormulas.values();
+      for (let i = 0; i < toRemove; i++) {
+        alreadyScreenedFormulas.delete(iter.next().value as string);
+      }
+    }
 
     emit("log", {
       phase: "engine",
-      event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen`,
-      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Feeding top ${candidates.length} through autonomous pipeline.`,
+      event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen, ${novelCandidates.length} novel`,
+      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Already screened cache: ${alreadyScreenedFormulas.size}. Feeding ${novelCandidates.length} novel formulas through autonomous pipeline.`,
       dataSource: "Candidate Generator",
     });
 
@@ -1507,17 +1520,17 @@ async function runAutonomousFastPath() {
     const failedFormulas: { formula: string; tc: number }[] = [];
 
     const activeRules = getMinedRules();
-    let filteredCandidates = candidates;
+    let filteredCandidates = novelCandidates;
     let patternFiltered = 0;
     if (activeRules.length > 0) {
-      const patternScores = screenWithPatterns(candidates);
+      const patternScores = screenWithPatterns(novelCandidates);
       const scored = patternScores.sort((a, b) => b.theoryScore - a.theoryScore);
-      const beforeCount = candidates.length;
+      const beforeCount = novelCandidates.length;
       filteredCandidates = scored
         .filter(s => s.theoryScore >= 0.3)
         .map(s => s.formula);
       patternFiltered = beforeCount - filteredCandidates.length;
-      if (filteredCandidates.length === 0) filteredCandidates = candidates;
+      if (filteredCandidates.length === 0) filteredCandidates = novelCandidates;
     }
 
     let physicsPrefiltered = 0;

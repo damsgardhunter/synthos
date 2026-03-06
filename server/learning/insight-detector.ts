@@ -14,6 +14,40 @@ function insightId(text: string, phaseId: number): string {
   return `ni-${phaseId}-${hash}`;
 }
 
+const CATEGORY_QUOTAS: Record<string, number> = {
+  "novel-correlation": 2,
+  "new-mechanism": 2,
+  "cross-domain": 2,
+  "computational-discovery": 2,
+  "design-principle": 2,
+};
+
+const recentCategoryCounts: Record<string, number> = {};
+let lastCategoryResetTime = 0;
+const CATEGORY_RESET_INTERVAL_MS = 30 * 60 * 1000;
+
+function getCategoryCount(category: string): number {
+  const now = Date.now();
+  if (now - lastCategoryResetTime > CATEGORY_RESET_INTERVAL_MS) {
+    for (const key of Object.keys(recentCategoryCounts)) {
+      delete recentCategoryCounts[key];
+    }
+    lastCategoryResetTime = now;
+  }
+  return recentCategoryCounts[category] ?? 0;
+}
+
+function incrementCategoryCount(category: string): void {
+  const now = Date.now();
+  if (now - lastCategoryResetTime > CATEGORY_RESET_INTERVAL_MS) {
+    for (const key of Object.keys(recentCategoryCounts)) {
+      delete recentCategoryCounts[key];
+    }
+    lastCategoryResetTime = now;
+  }
+  recentCategoryCounts[category] = (recentCategoryCounts[category] ?? 0) + 1;
+}
+
 const WELL_KNOWN_PATTERNS = [
   "electronegativity increases across periods",
   "atomic radius follows inverse trend to ionization energy",
@@ -607,6 +641,18 @@ Return JSON with 'evaluations' array, each with:
       } catch {}
 
       if (isNovel) {
+        const evCategory = ev.category ?? "known-pattern";
+        const categoryQuota = CATEGORY_QUOTAS[evCategory] ?? 3;
+        const currentCategoryCount = getCategoryCount(evCategory);
+        if (currentCategoryCount >= categoryQuota) {
+          emit("log", {
+            phase: `phase-${phaseId}`,
+            event: "Insight category quota reached",
+            detail: `[QUOTA] Category "${evCategory}" has ${currentCategoryCount}/${categoryQuota} insights. Skipping: ${entry.text.slice(0, 80)}...`,
+            dataSource: "Insight Detector",
+          });
+          continue;
+        }
         if (novelCount >= MAX_NOVEL_INSIGHTS_PER_CYCLE) {
           novelInsightQueue.push({ text: entry.text, phaseId, phaseName, relatedFormulas: relatedFormulas ?? [] });
           emit("log", {
@@ -617,6 +663,7 @@ Return JSON with 'evaluations' array, each with:
           });
           continue;
         }
+        incrementCategoryCount(evCategory);
         novelCount++;
         emit("log", {
           phase: `phase-${phaseId}`,

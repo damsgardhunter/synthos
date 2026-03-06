@@ -1,0 +1,158 @@
+Duplicate Explosion (Biggest Issue Right Now)
+
+Your logs show a large fraction of candidates rejected as duplicates:
+
+REJECTED: CaZnB2C reason=duplicate
+REJECTED: BaZnB2C reason=duplicate
+REJECTED: SrZnB2C reason=duplicate
+REJECTED: MgZnB2C reason=duplicate
+
+What’s happening:
+
+Your generator is producing near-identical substitutions in the same template.
+
+Example pattern:
+
+MZnB2C
+M = Ca, Ba, Sr, Mg
+
+These are chemically trivial substitutions, and the system is wasting cycles generating them.
+
+Why this is bad
+
+It reduces search-space diversity.
+
+Right now:
+
+43 screened
+0 passed
+~25 duplicates
+
+So the generator is effectively stuck in a small compositional neighborhood.
+
+Fix: Element Substitution Distance
+
+Add a periodic-table distance rule.
+
+Example:
+
+if substitutionDistance(elementA, elementB) < threshold:
+    reject generation
+
+Distance can be computed from:
+
+group difference
+period difference
+electronegativity difference
+atomic radius difference
+
+Example rule:
+
+distance = |groupA-groupB|
+         + |periodA-periodB|
+         + |EN_A - EN_B|
+
+if distance < 1.2:
+    treat as duplicate
+
+This forces the generator to explore chemically different compositions.
+
+2️⃣ Autonomous Pipeline Still Passing Nothing
+
+You still have:
+
+totalPassed: 0
+passRate: 0
+
+But now the cause is clearer.
+
+Your rejection reasons are mostly:
+
+duplicate
+below-tier3-thresholds
+
+Example:
+
+ZrScBC3 Tc=2K → rejected
+
+That’s actually correct physics, but the problem is too many low-Tc structures are being generated.
+
+Fix: Generator Physics Bias
+
+Before candidate generation, bias elements toward known superconducting behavior.
+
+Good categories:
+
+High electron-phonon coupling metals
+
+Nb
+Ta
+Mo
+V
+Ti
+Hf
+
+Light phonon elements
+
+B
+C
+N
+H
+
+Charge reservoir elements
+
+La
+Y
+Ca
+Sr
+
+Then generate formulas like:
+
+NbB2C
+TaBC3
+TiB2N
+HfBC2
+
+Avoid:
+
+Zn
+Tl
+Ba
+Pd
+
+in most templates unless specifically exploring alloys.
+
+3️⃣ Insight System Is Still Repeating the Same Physics
+
+All insights currently revolve around:
+
+λ correlation with Tc
+2D vs 3D dimensionality
+boride coupling strength
+
+Example duplicates:
+
+2D materials Tc > 40K with λ > 0.6
+λ > 0.74 predicts Tc > 40K in 2D
+2D structures reveal Tc > 40K
+
+These are essentially the same discovery.
+
+Your engine has not yet learned new physics relationships.
+
+Fix: Force New Insight Categories
+
+Add category quotas:
+
+maxInsightsPerCategory = 3
+
+Categories:
+
+electron-phonon trends
+dimensionality effects
+chemical family trends
+band structure features
+phonon softening
+structural motifs
+
+This forces the system to discover new relationships.

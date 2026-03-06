@@ -165,6 +165,41 @@ const SIMILAR_ELEMENTS: Record<string, string[]> = {
 
 const DOPANT_ELEMENTS = ["Li", "Na", "K", "Mg", "Ca", "Sr", "Ba", "La", "Y", "Sc", "H", "B", "N", "F"];
 
+const HIGH_COUPLING_METALS = new Set(["Nb", "Ta", "Mo", "V", "Ti", "Hf", "W", "Re", "Zr"]);
+const LIGHT_PHONON_ELEMENTS = new Set(["B", "C", "N", "H"]);
+const CHARGE_RESERVOIR_ELEMENTS = new Set(["La", "Y", "Ca", "Sr", "Sc", "Ce", "Nd"]);
+const WEAK_SC_ELEMENTS = new Set(["Zn", "Tl", "Pd", "Cd", "Hg", "Au", "Ag", "Bi", "Pb"]);
+
+function elementSubstitutionDistance(elA: string, elB: string): number {
+  const enA = ELECTRONEGATIVITY[elA] ?? 2.0;
+  const enB = ELECTRONEGATIVITY[elB] ?? 2.0;
+  const dataA = getElementData(elA);
+  const dataB = getElementData(elB);
+  const radiusA = dataA?.atomicRadius ?? 150;
+  const radiusB = dataB?.atomicRadius ?? 150;
+  const zA = dataA?.atomicNumber ?? 50;
+  const zB = dataB?.atomicNumber ?? 50;
+
+  const enDiff = Math.abs(enA - enB);
+  const radiusDiff = Math.abs(radiusA - radiusB) / 100;
+  const periodDiff = Math.abs(Math.floor(Math.log2(zA + 1)) - Math.floor(Math.log2(zB + 1)));
+
+  return enDiff + radiusDiff + periodDiff * 0.5;
+}
+
+const MIN_SUBSTITUTION_DISTANCE = 1.0;
+
+function hasSuperconductingPotential(formula: string): boolean {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const hasHighCoupling = elements.some(el => HIGH_COUPLING_METALS.has(el));
+  const hasLightPhonon = elements.some(el => LIGHT_PHONON_ELEMENTS.has(el));
+  const weakCount = elements.filter(el => WEAK_SC_ELEMENTS.has(el)).length;
+  if (weakCount > 1) return false;
+  if (!hasHighCoupling && !hasLightPhonon) return false;
+  return true;
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
@@ -274,6 +309,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
       const similar = SIMILAR_ELEMENTS[el] || [];
       for (const sub of similar) {
         if (elements.includes(sub)) continue;
+        if (elementSubstitutionDistance(el, sub) < MIN_SUBSTITUTION_DISTANCE) continue;
         const newCounts = { ...counts };
         newCounts[sub] = newCounts[el];
         delete newCounts[el];
@@ -286,11 +322,13 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
 
       for (const sub of similar) {
         if (elements.includes(sub)) continue;
+        if (elementSubstitutionDistance(el, sub) < MIN_SUBSTITUTION_DISTANCE) continue;
         for (const el2 of elements) {
           if (el2 === el) continue;
           const similar2 = SIMILAR_ELEMENTS[el2] || [];
           for (const sub2 of similar2) {
             if (sub2 === sub || elements.includes(sub2)) continue;
+            if (elementSubstitutionDistance(el2, sub2) < MIN_SUBSTITUTION_DISTANCE) continue;
             const newCounts = { ...counts };
             newCounts[sub] = newCounts[el];
             delete newCounts[el];
@@ -496,9 +534,20 @@ export function runMassiveGeneration(
     Alloys: [["Nb", "Ti"], ["Nb", "Zr"], ["Mo", "Re"], ["V", "Ti"]],
   };
 
+  const scBiasedSeeds: string[][] = [
+    ["Nb", "B", "C"], ["Ta", "B", "C"], ["V", "B", "N"], ["Ti", "B", "N"],
+    ["Nb", "B", "N"], ["Mo", "B", "C"], ["Hf", "B", "C"], ["W", "B", "N"],
+    ["Nb", "C", "N"], ["Ta", "C", "N"], ["V", "C", "N"], ["Ti", "C", "N"],
+    ["Nb", "B"], ["Ta", "B"], ["V", "B"], ["Ti", "B"],
+    ["La", "Nb", "B"], ["Y", "Nb", "B"], ["Ca", "Nb", "B"],
+    ["La", "Ti", "B", "C"], ["Y", "V", "B", "N"], ["Sc", "Nb", "C"],
+    ["Nb", "Ti", "B"], ["Ta", "V", "C"], ["Mo", "Nb", "N"],
+  ];
+
   const focusPairs = focusElements[focusArea] || focusElements["Carbides"];
+  const combinedPairs = [...focusPairs, ...scBiasedSeeds];
   const seedFormulas: string[] = [];
-  for (const pair of focusPairs) {
+  for (const pair of combinedPairs) {
     const stoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3], [2, 3], [3, 2]];
     for (const s of stoichs) {
       if (pair.length === 2) {
@@ -528,6 +577,27 @@ export function runMassiveGeneration(
 
   const doped = generateRandomDopedVariants(allSeeds.slice(0, 20), DOPANT_ELEMENTS, 200);
   for (const f of doped) allGenerated.add(f);
+
+  const hcMetals = ["Nb", "Ta", "Mo", "V", "Ti", "Hf", "W", "Re", "Zr"];
+  const lpElements = ["B", "C", "N"];
+  const reservoirs = ["La", "Y", "Ca", "Sr", "Sc", "Ce"];
+  for (let i = 0; i < 100; i++) {
+    const m1 = hcMetals[Math.floor(Math.random() * hcMetals.length)];
+    const lp = lpElements[Math.floor(Math.random() * lpElements.length)];
+    const s1 = Math.floor(Math.random() * 3) + 1;
+    const s2 = Math.floor(Math.random() * 3) + 1;
+    allGenerated.add(canonicalize(`${m1}${s1}${lp}${s2}`));
+    if (Math.random() > 0.5) {
+      const m2 = hcMetals[Math.floor(Math.random() * hcMetals.length)];
+      if (m2 !== m1) {
+        allGenerated.add(canonicalize(`${m1}${s1}${m2}1${lp}${s2}`));
+      }
+    }
+    if (Math.random() > 0.6) {
+      const res = reservoirs[Math.floor(Math.random() * reservoirs.length)];
+      allGenerated.add(canonicalize(`${res}1${m1}${s1}${lp}${s2}`));
+    }
+  }
 
   for (const pair of focusPairs) {
     if (allGenerated.size >= MAX_FORMULAS) break;
@@ -561,7 +631,7 @@ export function runMassiveGeneration(
 
   const compatFiltered: string[] = [];
   for (const f of valenceFiltered) {
-    if (passesCompatibilityFilter(f)) {
+    if (passesCompatibilityFilter(f) && hasSuperconductingPotential(f)) {
       compatFiltered.push(f);
     }
   }
