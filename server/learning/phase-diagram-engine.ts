@@ -418,6 +418,81 @@ export function computePhaseDiagram(
   };
 }
 
+export interface StabilityGateResult {
+  pass: boolean;
+  verdict: "stable" | "near-hull" | "metastable" | "unstable";
+  reason: string;
+  hullDistance: number;
+  formationEnergy: number;
+  kineticBarrier?: number;
+}
+
+export async function passesStabilityGate(formula: string): Promise<StabilityGateResult> {
+  const formationEnergy = computeMiedemaFormationEnergy(formula);
+  let hullDistance: number;
+  let decompositionProducts: string[] = [];
+
+  try {
+    const hullResult = await getCompetingPhases(formula);
+    hullDistance = hullResult.energyAboveHull;
+    decompositionProducts = hullResult.decompositionProducts;
+  } catch {
+    hullDistance = Math.max(0, formationEnergy * 0.3);
+  }
+
+  if (hullDistance > 0.1) {
+    return {
+      pass: false,
+      verdict: "unstable",
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.1 threshold` +
+        (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
+      hullDistance,
+      formationEnergy,
+    };
+  }
+
+  if (hullDistance <= 0.005) {
+    return {
+      pass: true,
+      verdict: "stable",
+      reason: `on convex hull (distance=${hullDistance.toFixed(4)} eV/atom)`,
+      hullDistance,
+      formationEnergy,
+    };
+  }
+
+  if (hullDistance <= 0.05) {
+    return {
+      pass: true,
+      verdict: "near-hull",
+      reason: `near hull (distance=${hullDistance.toFixed(4)} eV/atom)`,
+      hullDistance,
+      formationEnergy,
+    };
+  }
+
+  const metastability = assessMetastability(formula, hullDistance);
+  if (metastability.kineticBarrier > 0.5) {
+    return {
+      pass: true,
+      verdict: "metastable",
+      reason: `metastable (distance=${hullDistance.toFixed(4)} eV/atom, barrier=${metastability.kineticBarrier.toFixed(3)} eV, lifetime=${metastability.estimatedLifetime})`,
+      hullDistance,
+      formationEnergy,
+      kineticBarrier: metastability.kineticBarrier,
+    };
+  }
+
+  return {
+    pass: false,
+    verdict: "unstable",
+    reason: `hull distance ${hullDistance.toFixed(4)} eV/atom in metastable range but kinetic barrier ${metastability.kineticBarrier.toFixed(3)} eV <= 0.5 eV`,
+    hullDistance,
+    formationEnergy,
+    kineticBarrier: metastability.kineticBarrier,
+  };
+}
+
 export async function runConvexHullAnalysis(
   emit: EventEmitter,
   formula: string

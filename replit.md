@@ -82,10 +82,12 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **High-Pressure Stability**: Combines volume compression, phonon stability, and enthalpy comparison.
 - **Pressure-Tc Curves**: Sweeps pressure 0-300 GPa to find optimal conditions.
 
-### Graph Neural Network Surrogate
-- **Crystal Graph Builder**: Converts formula + structure into a graph.
-- **Message Passing**: 3-layer message-passing GNN for predictions.
-- **Predictions**: Formation energy, phonon stability, Tc, and confidence.
+### Graph Neural Network Surrogate (CGCNN-style)
+- **Prototype-Aware Graph Construction**: `buildPrototypeGraph(formula, prototype)` uses prototype-specific coordination environments (AlB2: B bonded to 3B+2M; Perovskite: B-site octahedral 6O; A15: chain connectivity).
+- **Enhanced Node Features**: 13-dimensional embeddings: atomic number, electronegativity, atomic radius, valence electrons, mass, Debye temperature, bulk modulus, ionization energy, Mendeleev number, electron affinity, covalent radius, d-orbital occupancy, f-orbital occupancy.
+- **Attention-Weighted Message Passing**: 3-layer GNN with dot-product attention coefficients + softmax normalization for expressive aggregation.
+- **Multi-Target Predictions**: Formation energy, phonon stability, Tc, confidence, and electron-phonon lambda.
+- **Ensemble Uncertainty**: `gnnPredictWithUncertainty(formula, prototype?)` runs 3× with dropout-style perturbation, returns mean ± std as uncertainty estimate.
 - **Ensemble Integration**: GNN is integrated with XGBoost and LLM-NN for predictions.
 
 ### Massive Candidate Generator
@@ -123,6 +125,30 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Temperature Stability**: Estimates phonon stability, Gibbs free energy decomposition risk, and max operating temperature.
 - **Adaptive Sampling**: Coarse scan to identify peaks, then refines around them.
 - **Uncertainty-Aware Selection**: Scores encourage exploration of uncertain regions.
+
+### Crystal Prototype Structure Generator
+- **10 Structure Types**: AlB2, Perovskite, A15, Clathrate/Sodalite, ThCr2Si2, Spinel, MAX-phase, Layered nitride, Laves, Heusler.
+- **807+ Structurally-Typed Candidates**: Each includes formula, prototype, spaceGroup, crystalSystem, dimensionality, siteAssignment.
+- **Prototype-Aware Naming**: Candidates stored as "AlB2-type NbB2", "Perovskite BaTiO3", "A15-type Nb3Sn", etc.
+- **Engine Integration**: Fires every 25 cycles, replaces old family-aware generation.
+
+### Convex Hull Stability Gate
+- **Hard Rejection**: All candidates must pass hull distance ≤ 0.1 eV/atom before database insertion.
+- **`passesStabilityGate(formula)`**: Computes Miedema formation energy → convex hull distance → verdict (stable/near-hull/metastable/unstable).
+- **Metastability Assessment**: Borderline candidates (0.05-0.1 eV/atom) require kinetic barrier > 0.5 eV.
+- **Universal Enforcement**: All 10 insertion points (7 in engine.ts + 3 in superconductor-research.ts) route through the stability gate.
+
+### Discovery Score
+- **Composite Metric**: `0.4 × normalizedTc + 0.3 × noveltyScore + 0.2 × stabilityScore + 0.1 × synthesisFeasibility`.
+- **Chemical Novelty**: Bonuses for multi-element combos, rare elements, unexplored prototypes, distance from known SCs.
+- **Stored in DB**: `discovery_score` column on superconductor_candidates table.
+- **DFT Queue Priority**: Higher-scoring candidates selected first for DFT enrichment.
+
+### Active Learning Loop
+- **Uncertainty-Driven DFT**: `selectForDFT(candidates, budget=10)` ranks by acquisition score = `0.5 × normalizedTc + 0.5 × uncertainty`.
+- **Model Retraining**: After DFT enrichment, retrains GNN surrogate with expanded dataset, calls `incorporateFailureData()` for Tc=0 candidates.
+- **Convergence Tracking**: Monitors totalDFTRuns, avgUncertaintyBefore/After, modelRetrains, bestTcFromLoop.
+- **Engine Integration**: Fires every 30 cycles.
 
 ### Autonomous Discovery Loop
 - **Massive Generation Pipeline**: Generates 500-2000 candidates per cycle.

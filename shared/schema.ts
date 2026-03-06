@@ -142,6 +142,7 @@ export const superconductorCandidates = pgTable("superconductor_candidates", {
   ambientPressureStable: boolean("ambient_pressure_stable").default(false),
   verificationStage: integer("verification_stage").default(0),
   uncertaintyEstimate: real("uncertainty_estimate"),
+  discoveryScore: real("discovery_score"),
   dataConfidence: text("data_confidence").default("medium"),
 }, (table) => [
   index("sc_candidates_predicted_tc_idx").on(table.predictedTc),

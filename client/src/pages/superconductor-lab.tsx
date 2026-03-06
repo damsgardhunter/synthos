@@ -13,7 +13,7 @@ import { Link } from "wouter";
 import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
   CheckCircle2, XCircle, ArrowRight, Gauge, Magnet, ExternalLink,
-  Microscope, Layers,
+  Microscope, Layers, Star, Hexagon,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -112,9 +112,52 @@ function ScoreBar({ label, score, color }: { label: string; score: number | null
   );
 }
 
+function extractPrototype(candidate: SuperconductorCandidate): string | null {
+  const name = candidate.name ?? "";
+  const protoMatch = name.match(/^(AlB2-type|Perovskite|A15-type|Clathrate|Sodalite|ThCr2Si2-type|Spinel|MAX|Layered|Laves|Heusler)/i);
+  if (protoMatch) return protoMatch[1];
+  const notes = candidate.notes ?? "";
+  const notesMatch = notes.match(/prototype:\s*(\S+)/i);
+  if (notesMatch) return notesMatch[1];
+  return null;
+}
+
+function extractSpaceGroup(candidate: SuperconductorCandidate): string | null {
+  const cs = candidate.crystalStructure;
+  if (!cs) return null;
+  const match = cs.match(/^([A-Za-z0-9\-\/]+)/);
+  return match ? match[1] : cs;
+}
+
+function DiscoveryScoreIndicator({ score }: { score: number | null | undefined }) {
+  if (score == null || !Number.isFinite(score)) return null;
+  const pct = Math.round(score * 100);
+  const color = score < 0.3
+    ? "bg-red-500"
+    : score < 0.6
+      ? "bg-yellow-500"
+      : "bg-green-500";
+  const textColor = score < 0.3
+    ? "text-red-600 dark:text-red-400"
+    : score < 0.6
+      ? "text-yellow-600 dark:text-yellow-400"
+      : "text-green-600 dark:text-green-400";
+  return (
+    <div className="flex items-center gap-1.5" data-testid="discovery-score-indicator">
+      <Star className="h-3 w-3 text-muted-foreground" />
+      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden min-w-[30px]">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className={`text-[10px] font-mono font-bold ${textColor}`}>{pct}%</span>
+    </div>
+  );
+}
+
 function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate; p90?: number }) {
   const statusColor = STATUS_COLORS[candidate.status] ?? STATUS_COLORS["theoretical"];
   const tcColor = (candidate.predictedTc ?? 0) >= 293 ? "text-green-600 dark:text-green-400" : "text-foreground";
+  const prototype = extractPrototype(candidate);
+  const spaceGroup = extractSpaceGroup(candidate);
 
   return (
     <Card data-testid={`sc-candidate-${candidate.id}`} className="flex flex-col">
@@ -123,8 +166,30 @@ function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate;
           <div>
             <CardTitle className="text-base leading-snug">{candidate.name}</CardTitle>
             <p className="text-sm font-mono text-primary mt-1">{candidate.formula}</p>
+            {(prototype || spaceGroup || candidate.dimensionality) && (
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {prototype && (
+                  <Badge variant="secondary" className="text-[10px]" data-testid={`badge-prototype-${candidate.id}`}>
+                    <Hexagon className="h-2.5 w-2.5 mr-0.5" />
+                    {prototype}
+                  </Badge>
+                )}
+                {spaceGroup && (
+                  <Badge variant="outline" className="text-[10px]" data-testid={`badge-spacegroup-${candidate.id}`}>
+                    {spaceGroup}
+                  </Badge>
+                )}
+                {candidate.dimensionality && (
+                  <Badge variant="outline" className="text-[10px]" data-testid={`badge-dimensionality-${candidate.id}`}>
+                    {candidate.dimensionality}
+                  </Badge>
+                )}
+              </div>
+            )}
           </div>
-          <Badge className={`${statusColor} border-0`}>{candidate.status}</Badge>
+          <div className="flex flex-col items-end gap-1">
+            <Badge className={`${statusColor} border-0`}>{candidate.status}</Badge>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="flex-1 space-y-3">
@@ -207,6 +272,13 @@ function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate;
           <ScoreBar label="Neural Net" score={candidate.neuralNetScore} color="bg-purple-500" />
           <ScoreBar label="Ensemble" score={candidate.ensembleScore} color="bg-primary" />
         </div>
+
+        {candidate.discoveryScore != null && (
+          <div className="space-y-0.5" data-testid={`discovery-score-${candidate.id}`}>
+            <span className="text-xs text-muted-foreground">Discovery Score</span>
+            <DiscoveryScoreIndicator score={candidate.discoveryScore} />
+          </div>
+        )}
 
         {candidate.uncertaintyEstimate != null && (
           <div className="flex items-center gap-2 text-xs">

@@ -5,6 +5,7 @@ import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
+import { passesStabilityGate } from "./phase-diagram-engine";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
 const openai = new OpenAI({
@@ -240,6 +241,10 @@ export async function runSuperconductorResearch(
       candidate.meissnerEffect === true;
 
     try {
+      const stabilityCheck = passesStabilityGate(formula);
+      if (!stabilityCheck.pass) {
+        continue;
+      }
       await storage.insertSuperconductorCandidate({
         id,
         name: candidate.name || "Unknown",
@@ -537,6 +542,10 @@ Return JSON with 'candidates' array:
       });
 
       try {
+        const stabilityCheck = passesStabilityGate(c.formula);
+        if (!stabilityCheck.pass) {
+          continue;
+        }
         await storage.insertSuperconductorCandidate({
           id,
           name: c.name || c.formula,
@@ -811,6 +820,10 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
         (c.pressureGpa ?? 999) <= 50;
 
       try {
+        const stabilityCheck = passesStabilityGate(c.formula);
+        if (!stabilityCheck.pass) {
+          continue;
+        }
         await storage.insertSuperconductorCandidate({
           id,
           name: c.name || c.formula,

@@ -288,6 +288,85 @@ export function applyFamilyFilter(
   }
 }
 
+export interface DiscoveryScoreInput {
+  predictedTc: number;
+  formula: string;
+  hullDistance?: number | null;
+  synthesisScore?: number | null;
+  prototype?: string | null;
+  existingFormulas?: string[];
+}
+
+export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
+  discoveryScore: number;
+  normalizedTc: number;
+  noveltyScore: number;
+  stabilityScore: number;
+  synthesisFeasibility: number;
+} {
+  const normalizedTc = Math.min(1.0, Math.max(0, (candidate.predictedTc || 0) / 300));
+
+  const hullDist = candidate.hullDistance ?? 0.05;
+  const stabilityScore = Math.min(1.0, Math.max(0, 1.0 - hullDist / 0.1));
+
+  const synthesisFeasibility = Math.min(1.0, Math.max(0, candidate.synthesisScore ?? 0.5));
+
+  let noveltyScore = 0.5;
+
+  const elements = parseFormulaElements(candidate.formula);
+  const counts = parseFormulaCounts(candidate.formula);
+  const totalAtoms = getTotalAtoms(counts);
+
+  if (elements.length >= 4) {
+    noveltyScore += 0.15;
+  } else if (elements.length >= 3) {
+    noveltyScore += 0.05;
+  }
+
+  const rareElements = ["Sc", "Y", "Hf", "Ta", "Re", "Os", "Ir", "Ru", "Rh", "Pd"];
+  const hasRare = elements.some(e => rareElements.includes(e));
+  if (hasRare) {
+    noveltyScore += 0.1;
+  }
+
+  if (candidate.prototype) {
+    const exploredPrototypes = ["Perovskite", "A15", "ThCr2Si2"];
+    const isExplored = exploredPrototypes.some(p =>
+      candidate.prototype!.toLowerCase().includes(p.toLowerCase())
+    );
+    if (!isExplored) {
+      noveltyScore += 0.15;
+    }
+  }
+
+  if (candidate.existingFormulas && candidate.existingFormulas.length > 0) {
+    let minDistance = 1.0;
+    for (const existing of candidate.existingFormulas) {
+      const existingElements = parseFormulaElements(existing);
+      const allElements = Array.from(new Set(elements.concat(existingElements)));
+      const commonElements = elements.filter(e => existingElements.includes(e));
+      const jaccard = allElements.length > 0 ? commonElements.length / allElements.length : 0;
+      const distance = 1.0 - jaccard;
+      if (distance < minDistance) {
+        minDistance = distance;
+      }
+    }
+    noveltyScore += minDistance * 0.1;
+  }
+
+  noveltyScore = Math.min(1.0, Math.max(0, noveltyScore));
+
+  const discoveryScore = 0.4 * normalizedTc + 0.3 * noveltyScore + 0.2 * stabilityScore + 0.1 * synthesisFeasibility;
+
+  return {
+    discoveryScore: Math.round(discoveryScore * 1000) / 1000,
+    normalizedTc,
+    noveltyScore: Math.round(noveltyScore * 1000) / 1000,
+    stabilityScore: Math.round(stabilityScore * 1000) / 1000,
+    synthesisFeasibility: Math.round(synthesisFeasibility * 1000) / 1000,
+  };
+}
+
 export function rankCandidate(
   formula: string,
   family: string,

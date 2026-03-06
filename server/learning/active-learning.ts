@@ -1,0 +1,289 @@
+import { storage } from "../storage";
+import type { SuperconductorCandidate } from "@shared/schema";
+import type { EventEmitter } from "./engine";
+import { gnnPredictWithUncertainty } from "./graph-neural-net";
+import { invalidateGNNModel, trainGNNSurrogate } from "./graph-neural-net";
+import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
+import { extractFeatures } from "./ml-predictor";
+import { gbPredict, incorporateFailureData, validateModel } from "./gradient-boost";
+import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
+import { computeDiscoveryScore } from "./family-filters";
+
+export interface ActiveLearningConvergence {
+  totalDFTRuns: number;
+  avgUncertaintyBefore: number;
+  avgUncertaintyAfter: number;
+  modelRetrains: number;
+  bestTcFromLoop: number;
+}
+
+let convergenceStats: ActiveLearningConvergence = {
+  totalDFTRuns: 0,
+  avgUncertaintyBefore: 1.0,
+  avgUncertaintyAfter: 1.0,
+  modelRetrains: 0,
+  bestTcFromLoop: 0,
+};
+
+export function getActiveLearningStats(): ActiveLearningConvergence {
+  return { ...convergenceStats };
+}
+
+interface RankedCandidate {
+  candidate: SuperconductorCandidate;
+  acquisitionScore: number;
+  normalizedTc: number;
+  uncertainty: number;
+}
+
+export function selectForDFT(
+  candidates: SuperconductorCandidate[],
+  budget: number = 10
+): RankedCandidate[] {
+  const ranked: RankedCandidate[] = [];
+
+  for (const candidate of candidates) {
+    const tc = candidate.predictedTc ?? 0;
+    const normalizedTc = Math.min(1.0, Math.max(0, tc / 300));
+
+    let uncertainty = candidate.uncertaintyEstimate ?? 0.5;
+
+    try {
+      const gnnResult = gnnPredictWithUncertainty(candidate.formula);
+      uncertainty = Math.max(uncertainty, gnnResult.uncertainty);
+    } catch {}
+
+    const acquisitionScore = 0.5 * normalizedTc + 0.5 * uncertainty;
+
+    ranked.push({
+      candidate,
+      acquisitionScore,
+      normalizedTc,
+      uncertainty,
+    });
+  }
+
+  ranked.sort((a, b) => b.acquisitionScore - a.acquisitionScore);
+
+  const selected: RankedCandidate[] = [];
+  const seenFormulas = new Set<string>();
+
+  for (const r of ranked) {
+    if (selected.length >= budget) break;
+    if (seenFormulas.has(r.candidate.formula)) continue;
+    seenFormulas.add(r.candidate.formula);
+    selected.push(r);
+  }
+
+  return selected;
+}
+
+async function runDFTEnrichmentForCandidate(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<boolean> {
+  try {
+    const dftData = await resolveDFTFeatures(candidate.formula);
+    if (dftData.dftCoverage === 0) return false;
+
+    const desc = describeDFTSources(dftData);
+    emit("log", {
+      phase: "active-learning",
+      event: "DFT enrichment",
+      detail: `${candidate.formula} -- DFT data: ${desc}`,
+      dataSource: "Active Learning",
+    });
+
+    const features = extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
+    const gb = gbPredict(features);
+    const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
+    const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
+
+    const updates: any = {
+      xgboostScore: gb.score,
+      ensembleScore: ensemble,
+      dataConfidence: dftData.dftCoverage > 0.4 ? "high" : "medium",
+    };
+
+    if (dftData.formationEnergy.source !== "analytical") {
+      updates.formationEnergy = dftData.formationEnergy.value;
+    }
+    if (dftData.bandGap.source !== "analytical") {
+      updates.bandGap = dftData.bandGap.value;
+    }
+
+    await storage.updateSuperconductorCandidate(candidate.id, updates);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function retrainGNNWithEnrichedData(
+  emit: EventEmitter
+): Promise<{ r2Before: number; maeBefore: number; r2After: number; maeAfter: number }> {
+  const validationBefore = validateModel();
+  const r2Before = validationBefore.r2;
+  const maeBefore = Math.sqrt(validationBefore.mse);
+
+  const trainingData = SUPERCON_TRAINING_DATA
+    .filter(e => e.isSuperconductor)
+    .map(e => ({
+      formula: e.formula,
+      tc: e.tc,
+      formationEnergy: undefined as number | undefined,
+      structure: undefined,
+      prototype: undefined as string | undefined,
+    }));
+
+  try {
+    const enrichedCandidates = await storage.getSuperconductorCandidates(100);
+    for (const c of enrichedCandidates) {
+      if (c.dataConfidence === "high" || c.dataConfidence === "medium") {
+        if (c.predictedTc != null && c.predictedTc > 0) {
+          const existing = trainingData.find(t => t.formula === c.formula);
+          if (!existing) {
+            trainingData.push({
+              formula: c.formula,
+              tc: c.predictedTc,
+              formationEnergy: c.decompositionEnergy ?? undefined,
+              structure: undefined,
+              prototype: undefined,
+            });
+          }
+        }
+      }
+    }
+  } catch {}
+
+  invalidateGNNModel();
+  trainGNNSurrogate(trainingData);
+
+  await incorporateFailureData();
+
+  const validationAfter = validateModel();
+  const r2After = validationAfter.r2;
+  const maeAfter = Math.sqrt(validationAfter.mse);
+
+  emit("log", {
+    phase: "active-learning",
+    event: "GNN model retrained",
+    detail: `R² ${r2Before.toFixed(4)} → ${r2After.toFixed(4)}, MAE ${maeBefore.toFixed(2)} → ${maeAfter.toFixed(2)}, training samples: ${trainingData.length}`,
+    dataSource: "Active Learning",
+  });
+
+  return { r2Before, maeBefore, r2After, maeAfter };
+}
+
+export async function runActiveLearningCycle(
+  emit: EventEmitter,
+  memory: { cycleCount: number }
+): Promise<ActiveLearningConvergence> {
+  emit("log", {
+    phase: "active-learning",
+    event: "Active learning cycle started",
+    detail: `Cycle ${memory.cycleCount}: selecting uncertain candidates for DFT enrichment`,
+    dataSource: "Active Learning",
+  });
+
+  const allCandidates = await storage.getSuperconductorCandidates(200);
+
+  const eligibleCandidates = allCandidates.filter(c =>
+    c.dataConfidence !== "high" &&
+    (c.predictedTc ?? 0) > 5
+  );
+
+  if (eligibleCandidates.length === 0) {
+    emit("log", {
+      phase: "active-learning",
+      event: "Active learning skipped",
+      detail: "No eligible candidates for DFT enrichment",
+      dataSource: "Active Learning",
+    });
+    return convergenceStats;
+  }
+
+  const selected = selectForDFT(eligibleCandidates, 10);
+
+  const avgUncertaintyBefore = selected.length > 0
+    ? selected.reduce((sum, r) => sum + r.uncertainty, 0) / selected.length
+    : 0;
+
+  emit("log", {
+    phase: "active-learning",
+    event: "DFT candidates selected",
+    detail: `Selected ${selected.length} candidates (avg uncertainty: ${avgUncertaintyBefore.toFixed(3)}, top: ${selected[0]?.candidate.formula ?? 'none'} acq=${selected[0]?.acquisitionScore.toFixed(3) ?? 0})`,
+    dataSource: "Active Learning",
+  });
+
+  let dftSuccessCount = 0;
+  let bestTcThisLoop = 0;
+
+  for (const { candidate } of selected) {
+    const enriched = await runDFTEnrichmentForCandidate(emit, candidate);
+    if (enriched) {
+      dftSuccessCount++;
+      convergenceStats.totalDFTRuns++;
+    }
+    if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
+      bestTcThisLoop = candidate.predictedTc ?? 0;
+    }
+  }
+
+  let retrainResult = { r2Before: 0, maeBefore: 0, r2After: 0, maeAfter: 0 };
+  if (dftSuccessCount > 0) {
+    retrainResult = await retrainGNNWithEnrichedData(emit);
+    convergenceStats.modelRetrains++;
+  }
+
+  let avgUncertaintyAfter = avgUncertaintyBefore;
+  if (selected.length > 0) {
+    let totalUncertaintyAfter = 0;
+    for (const { candidate } of selected) {
+      try {
+        const gnnResult = gnnPredictWithUncertainty(candidate.formula);
+        totalUncertaintyAfter += gnnResult.uncertainty;
+      } catch {
+        totalUncertaintyAfter += 0.5;
+      }
+    }
+    avgUncertaintyAfter = totalUncertaintyAfter / selected.length;
+  }
+
+  convergenceStats.avgUncertaintyBefore = avgUncertaintyBefore;
+  convergenceStats.avgUncertaintyAfter = avgUncertaintyAfter;
+  if (bestTcThisLoop > convergenceStats.bestTcFromLoop) {
+    convergenceStats.bestTcFromLoop = bestTcThisLoop;
+  }
+
+  for (const { candidate } of selected) {
+    try {
+      const existingCandidate = await storage.getSuperconductorByFormula(candidate.formula);
+      if (existingCandidate) {
+        const hullDist = (existingCandidate.mlFeatures as any)?.stabilityGate?.hullDistance ?? 0.05;
+        const discoveryResult = computeDiscoveryScore({
+          predictedTc: existingCandidate.predictedTc ?? 0,
+          formula: existingCandidate.formula,
+          hullDistance: hullDist,
+          synthesisScore: existingCandidate.stabilityScore ?? 0.5,
+        });
+        await storage.updateSuperconductorCandidate(existingCandidate.id, {
+          discoveryScore: discoveryResult.discoveryScore,
+        });
+      }
+    } catch {}
+  }
+
+  const uncertaintyReduction = avgUncertaintyBefore > 0
+    ? ((avgUncertaintyBefore - avgUncertaintyAfter) / avgUncertaintyBefore * 100).toFixed(1)
+    : "0";
+
+  emit("log", {
+    phase: "active-learning",
+    event: "Active learning cycle complete",
+    detail: `DFT enriched: ${dftSuccessCount}/${selected.length}, uncertainty reduction: ${uncertaintyReduction}%, model retrains: ${convergenceStats.modelRetrains}, best Tc: ${convergenceStats.bestTcFromLoop.toFixed(1)}K`,
+    dataSource: "Active Learning",
+  });
+
+  return convergenceStats;
+}

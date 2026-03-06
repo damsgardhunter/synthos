@@ -12,6 +12,7 @@ import {
   Atom, Zap, Filter, XCircle, CheckCircle2,
   Activity, Layers, Magnet, Gauge, Target,
   Beaker, ArrowDown, ExternalLink, Thermometer,
+  FlaskConical, Star,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -380,6 +381,15 @@ export default function ComputationalPhysics() {
     queryKey: ["/api/crystal-structures"],
   });
 
+  const { data: dftStatus } = useQuery<{
+    total: number;
+    dftEnrichedCount: number;
+    breakdown: { high: number; medium: number; analytical: number };
+    recentEnriched: { formula: string; confidence: string; ensembleScore: number; predictedTc: number }[];
+  }>({
+    queryKey: ["/api/dft-status"],
+  });
+
   const ws = useWebSocket();
 
   useEffect(() => {
@@ -448,6 +458,7 @@ export default function ComputationalPhysics() {
         <TabsList data-testid="physics-tabs">
           <TabsTrigger value="pipeline" data-testid="tab-pipeline">Pipeline</TabsTrigger>
           <TabsTrigger value="physics" data-testid="tab-physics">Physics Properties</TabsTrigger>
+          <TabsTrigger value="dft-selections" data-testid="tab-dft-selections">DFT Selections</TabsTrigger>
           <TabsTrigger value="structures" data-testid="tab-structures">Crystal Structures</TabsTrigger>
           <TabsTrigger value="failures" data-testid="tab-failures">Negative Results</TabsTrigger>
         </TabsList>
@@ -473,6 +484,116 @@ export default function ComputationalPhysics() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        <TabsContent value="dft-selections" className="space-y-4" data-testid="dft-selections-content">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <FlaskConical className="h-5 w-5" />
+                Uncertainty-Driven DFT Selections
+              </CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Candidates selected for DFT enrichment based on acquisition score (0.5 x Tc + 0.5 x uncertainty)
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-2.5 bg-muted/50 rounded-md" data-testid="dft-high-confidence">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">High Confidence</p>
+                  <p className="text-xl font-mono font-bold text-green-600 dark:text-green-400">{dftStatus?.breakdown?.high ?? 0}</p>
+                </div>
+                <div className="p-2.5 bg-muted/50 rounded-md" data-testid="dft-medium-confidence">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Medium Confidence</p>
+                  <p className="text-xl font-mono font-bold text-yellow-600 dark:text-yellow-400">{dftStatus?.breakdown?.medium ?? 0}</p>
+                </div>
+                <div className="p-2.5 bg-muted/50 rounded-md" data-testid="dft-analytical">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Analytical Only</p>
+                  <p className="text-xl font-mono font-bold text-muted-foreground">{dftStatus?.breakdown?.analytical ?? 0}</p>
+                </div>
+              </div>
+
+              {(() => {
+                const highUncertainty = candidates
+                  .filter(c => c.uncertaintyEstimate != null && c.uncertaintyEstimate > 0.3)
+                  .sort((a, b) => {
+                    const aScore = 0.5 * Math.min(1, (a.predictedTc ?? 0) / 300) + 0.5 * (a.uncertaintyEstimate ?? 0);
+                    const bScore = 0.5 * Math.min(1, (b.predictedTc ?? 0) / 300) + 0.5 * (b.uncertaintyEstimate ?? 0);
+                    return bScore - aScore;
+                  })
+                  .slice(0, 10);
+
+                if (highUncertainty.length === 0) {
+                  return (
+                    <div className="text-center py-6 text-muted-foreground text-sm" data-testid="no-uncertain-candidates">
+                      <Target className="h-6 w-6 mx-auto mb-2 opacity-50" />
+                      <p>No high-uncertainty candidates awaiting DFT enrichment</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-2" data-testid="uncertain-candidates-list">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Top Candidates for DFT (by acquisition score)</p>
+                    {highUncertainty.map((c, i) => {
+                      const acqScore = 0.5 * Math.min(1, (c.predictedTc ?? 0) / 300) + 0.5 * (c.uncertaintyEstimate ?? 0);
+                      return (
+                        <div key={c.id} className="flex items-center gap-3 p-2.5 bg-muted/30 rounded-md" data-testid={`dft-candidate-${i}`}>
+                          <span className="text-xs font-mono text-muted-foreground w-4">#{i + 1}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-mono font-medium truncate">{c.formula}</span>
+                              {c.dataConfidence && (
+                                <Badge variant={c.dataConfidence === "high" ? "default" : "secondary"} className="text-[10px]">
+                                  {c.dataConfidence === "high" ? "DFT" : c.dataConfidence === "medium" ? "Model" : "Est."}
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3 mt-0.5 text-[10px] text-muted-foreground">
+                              <span>Tc: <span className="font-mono font-bold text-foreground">{c.predictedTc ?? 0}K</span></span>
+                              <span>Uncertainty: <span className="font-mono font-bold text-foreground">{((c.uncertaintyEstimate ?? 0) * 100).toFixed(0)}%</span></span>
+                              <span>Acquisition: <span className="font-mono font-bold text-foreground">{(acqScore * 100).toFixed(0)}%</span></span>
+                            </div>
+                          </div>
+                          <div className="w-16">
+                            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${(c.uncertaintyEstimate ?? 0) > 0.6 ? "bg-red-500" : "bg-yellow-500"}`}
+                                style={{ width: `${(c.uncertaintyEstimate ?? 0) * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                          <Link href={`/candidate/${encodeURIComponent(c.formula)}`} data-testid={`link-dft-profile-${i}`}>
+                            <ExternalLink className="h-3.5 w-3.5 text-primary cursor-pointer" />
+                          </Link>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
+              {(dftStatus?.recentEnriched?.length ?? 0) > 0 && (
+                <div className="space-y-2" data-testid="recent-enriched-list">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Recently DFT-Enriched</p>
+                  {dftStatus!.recentEnriched.map((item, i) => (
+                    <div key={i} className="flex items-center justify-between p-2 bg-muted/30 rounded-md text-xs" data-testid={`enriched-${i}`}>
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                        <span className="font-mono font-medium">{item.formula}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-muted-foreground">
+                        <span>Tc: <span className="font-mono font-bold text-foreground">{item.predictedTc}K</span></span>
+                        <Badge variant={item.confidence === "high" ? "default" : "secondary"} className="text-[10px]">
+                          {item.confidence === "high" ? "DFT" : "Model"}
+                        </Badge>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="structures" className="space-y-4">

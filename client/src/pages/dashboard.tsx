@@ -13,7 +13,7 @@ import {
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
-  Cpu
+  Cpu, Shield, Activity,
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
@@ -29,6 +29,24 @@ interface Stats {
   superconductorCandidates: number;
 }
 
+interface ActiveLearningStats {
+  totalDFTRuns: number;
+  avgUncertaintyBefore: number;
+  avgUncertaintyAfter: number;
+  modelRetrains: number;
+  bestTcFromLoop: number;
+}
+
+interface AutonomousLoopStats {
+  totalScreened: number;
+  totalPassed: number;
+  passRate: number;
+  bestTc: number;
+  throughputPerHour: number;
+  gnnRetrainCount: number;
+  activeLearning: ActiveLearningStats;
+}
+
 interface EngineMemory {
   currentHypothesis: { family: string; priority: number; reasoning: string } | null;
   familyStats: Record<string, any>;
@@ -42,6 +60,7 @@ interface EngineMemory {
   familyDiversity: number;
   pipelinePassRate: number;
   cycleNarratives: { detail: string; timestamp: string }[];
+  autonomousLoopStats?: AutonomousLoopStats;
 }
 
 function PhaseStatusBadge({ status }: { status: string }) {
@@ -377,6 +396,8 @@ export default function Dashboard() {
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"] });
   const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"] });
   const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"] });
+  const { data: engineMemory } = useQuery<EngineMemory>({ queryKey: ["/api/engine/memory"], refetchInterval: 15000 });
+  const { data: scData } = useQuery<{ candidates: any[]; total: number }>({ queryKey: ["/api/superconductor-candidates"] });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -483,6 +504,157 @@ export default function Dashboard() {
             <StatCard title="DFT Enriched" value={dftStatus?.dftEnrichedCount ?? 0} icon={Cpu} sub={`${dftStatus?.breakdown?.high ?? 0} high / ${dftStatus?.breakdown?.medium ?? 0} medium confidence`} data-testid="stat-dft-enriched" />
           </>
         )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card data-testid="active-learning-stats">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Activity className="h-4 w-4 text-primary" />
+              Active Learning
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const al = engineMemory?.autonomousLoopStats?.activeLearning;
+              if (!al || (al.totalDFTRuns === 0 && al.modelRetrains === 0)) {
+                return (
+                  <p className="text-sm text-muted-foreground italic" data-testid="active-learning-placeholder">
+                    Active learning stats will appear once the engine runs DFT cycles
+                  </p>
+                );
+              }
+              const uncertaintyReduction = al.avgUncertaintyBefore > 0
+                ? ((al.avgUncertaintyBefore - al.avgUncertaintyAfter) / al.avgUncertaintyBefore * 100)
+                : 0;
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-dft-runs">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">DFT Runs</p>
+                      <p className="text-xl font-mono font-bold">{al.totalDFTRuns}</p>
+                    </div>
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-model-retrains">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Model Retrains</p>
+                      <p className="text-xl font-mono font-bold">{al.modelRetrains}</p>
+                    </div>
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-best-tc">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc (Loop)</p>
+                      <p className="text-xl font-mono font-bold">{Math.round(al.bestTcFromLoop)}K</p>
+                    </div>
+                  </div>
+                  <div className="space-y-1" data-testid="al-uncertainty-trend">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">Uncertainty Trend</span>
+                      <span className={`font-mono font-bold ${uncertaintyReduction > 0 ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
+                        {uncertaintyReduction > 0 ? `-${uncertaintyReduction.toFixed(1)}%` : "No change"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px]">
+                      <span className="text-muted-foreground">Before:</span>
+                      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                        <div className="h-full rounded-full bg-amber-500" style={{ width: `${al.avgUncertaintyBefore * 100}%` }} />
+                      </div>
+                      <span className="font-mono w-8 text-right">{(al.avgUncertaintyBefore * 100).toFixed(0)}%</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px]">
+                      <span className="text-muted-foreground">After:</span>
+                      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                        <div className="h-full rounded-full bg-green-500" style={{ width: `${al.avgUncertaintyAfter * 100}%` }} />
+                      </div>
+                      <span className="font-mono w-8 text-right">{(al.avgUncertaintyAfter * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+
+        <Card data-testid="hull-stability-summary">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Shield className="h-4 w-4 text-primary" />
+              Hull Stability Gate
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const loopStats = engineMemory?.autonomousLoopStats;
+              const candidates = scData?.candidates ?? [];
+              const withStability = candidates.filter((c: any) => c.stabilityScore != null);
+              const stableCount = withStability.filter((c: any) => (c.stabilityScore ?? 0) >= 0.95).length;
+              const nearHullCount = withStability.filter((c: any) => {
+                const s = c.stabilityScore ?? 0;
+                return s >= 0.5 && s < 0.95;
+              }).length;
+              const metastableCount = withStability.filter((c: any) => {
+                const s = c.stabilityScore ?? 0;
+                return s > 0 && s < 0.5;
+              }).length;
+              const totalScreened = loopStats?.totalScreened ?? 0;
+              const totalPassed = loopStats?.totalPassed ?? 0;
+              const rejected = totalScreened - totalPassed;
+
+              if (totalScreened === 0 && withStability.length === 0) {
+                return (
+                  <p className="text-sm text-muted-foreground italic" data-testid="hull-placeholder">
+                    Stability data will appear once the engine screens candidates
+                  </p>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="hull-screened">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Screened</p>
+                      <p className="text-xl font-mono font-bold">{totalScreened}</p>
+                    </div>
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="hull-pass-rate">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pass Rate</p>
+                      <p className="text-xl font-mono font-bold">
+                        {totalScreened > 0 ? `${((totalPassed / totalScreened) * 100).toFixed(1)}%` : "--"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-2.5 w-2.5 rounded-sm bg-green-500" />
+                        <span>Stable (hull ≤0.005)</span>
+                      </div>
+                      <span className="font-mono font-bold" data-testid="hull-stable-count">{stableCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-2.5 w-2.5 rounded-sm bg-yellow-500" />
+                        <span>Near-hull (≤0.05)</span>
+                      </div>
+                      <span className="font-mono font-bold" data-testid="hull-nearhull-count">{nearHullCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-2.5 w-2.5 rounded-sm bg-orange-500" />
+                        <span>Metastable (≤0.1)</span>
+                      </div>
+                      <span className="font-mono font-bold" data-testid="hull-metastable-count">{metastableCount}</span>
+                    </div>
+                    {rejected > 0 && (
+                      <div className="flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <div className="h-2.5 w-2.5 rounded-sm bg-red-500" />
+                          <span>Rejected ({">"}0.1 eV/atom)</span>
+                        </div>
+                        <span className="font-mono font-bold text-red-500" data-testid="hull-rejected-count">{rejected}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
