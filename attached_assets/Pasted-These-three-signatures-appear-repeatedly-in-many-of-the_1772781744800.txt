@@ -1,0 +1,164 @@
+These three signatures appear repeatedly in many of the highest-Tc superconductors discovered so far. If you were designing a discovery engine like yours, they are excellent heuristics to detect materials sitting near a superconducting instability.
+
+1. Competing Electronic Orders
+4
+Definition
+
+Competing orders occur when multiple electronic ground states are nearly equal in energy.
+
+Common examples:
+
+Charge density wave (CDW) — periodic modulation of electron density.
+
+Spin density wave (SDW) — periodic magnetic ordering.
+
+Antiferromagnetism
+
+Structural distortions
+
+Superconductivity often appears right at the boundary where one of these orders collapses.
+
+Examples:
+
+Material	Competing Order
+Cuprates	Antiferromagnetism
+Iron pnictides	Spin density waves
+AV₃Sb₅ Kagome metals	Charge density waves
+2H-NbSe₂	CDW
+Why it matters
+
+Near the boundary of these phases:
+
+electronic fluctuations become extremely strong
+
+these fluctuations can mediate Cooper pairing
+
+Task Definition
+
+For each candidate material:
+
+Detect proximity to:
+
+charge density wave instabilities
+
+spin density waves
+
+antiferromagnetic ordering
+
+Score materials higher when they are near a phase boundary but still metallic.
+
+Track instability indicators such as:
+
+soft phonon modes
+
+magnetic susceptibility peaks
+
+Fermi surface nesting.
+
+2. Fermi Surface Nesting
+4
+Definition
+
+Fermi surface nesting occurs when large sections of the Fermi surface can be mapped onto each other by a single momentum vector Q.
+
+Mathematically:
+
+E(k) ≈ E(k + Q)
+
+This enhances scattering between those states.
+
+Why it matters
+
+Strong nesting produces:
+
+spin fluctuations
+
+charge density waves
+
+enhanced electron pairing interactions
+
+Examples:
+
+Material	Mechanism
+Iron pnictides	SDW fluctuations
+Cuprates	antiferromagnetic fluctuations
+Kagome metals	CDW fluctuations
+Task Definition
+
+For each candidate material:
+
+compute approximate Fermi surface topology
+
+measure nesting strength
+
+Possible proxy metrics:
+
+DOS(Ef)
+
+flat band proximity
+
+symmetry of electron/hole pockets
+
+Increase pairing score when:
+
+nesting_strength > threshold
+
+especially when combined with moderate correlations.
+
+3. High Density of States at the Fermi Level
+4
+Definition
+
+The density of states at the Fermi level (DOS(Ef)) determines how many electrons can participate in pairing.
+
+A high DOS(Ef) often arises from:
+
+flat bands
+
+Van Hove singularities
+
+heavy effective masses
+
+Why it matters
+
+In the BCS relation:
+
+Tc ∝ exp(-1 / (N(Ef)V))
+
+Where:
+
+N(Ef) = density of states
+V = interaction strength
+
+Higher DOS means:
+
+stronger pairing probability
+
+higher Tc potential.
+
+Examples:
+
+Material	Feature
+MgB₂	high DOS from σ-bands
+Cuprates	Van Hove singularities
+Twisted graphene	flat bands
+Kagome metals	flat bands
+Task Definition
+
+For each candidate:
+
+Compute or estimate:
+
+DOS(Ef)
+
+proximity to Van Hove singularity
+
+band flatness
+
+Increase pairing score when:
+
+DOS(Ef) is high
+AND
+band dispersion is low
+
+but apply penalties if DOS comes from localized states that suppress conduction.

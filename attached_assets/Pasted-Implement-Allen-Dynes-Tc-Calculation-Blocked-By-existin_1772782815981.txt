@@ -1,0 +1,405 @@
+Implement Allen–Dynes Tc Calculation
+
+Blocked By: [existing phonon + lambda calculations]
+
+Objective
+
+Replace heuristic phonon Tc estimates with a physically grounded Allen–Dynes equation for phonon-mediated superconductivity.
+
+Details
+
+In server/learning/physics-engine.ts:
+
+Implement function:
+
+computeAllenDynesTc(lambda, omegaLog, muStar)
+
+Use equation:
+
+𝑇
+𝑐
+=
+𝜔
+𝑙
+𝑜
+𝑔
+1.2
+exp
+⁡
+(
+−
+1.04
+(
+1
++
+𝜆
+)
+𝜆
+−
+𝜇
+∗
+(
+1
++
+0.62
+𝜆
+)
+)
+T
+c
+	​
+
+=
+1.2
+ω
+log
+	​
+
+	​
+
+exp(
+λ−μ
+∗
+(1+0.62λ)
+−1.04(1+λ)
+	​
+
+)
+
+Parameters:
+
+lambda = electron phonon coupling
+omegaLog = log averaged phonon frequency
+muStar = Coulomb pseudopotential
+
+Add μ* estimation:
+
+muStar = 0.1 + 0.05 * correlationFactor
+
+Clamp range:
+
+0.1 ≤ μ* ≤ 0.2
+
+Add correction factors:
+
+strongCouplingFactor = 1 + 0.1*(lambda-1)
+shapeFactor = 1 + 0.05*(phononSpectrumSpread)
+
+Final Tc:
+
+Tc = allenDynesTc * strongCouplingFactor * shapeFactor
+Files
+server/learning/physics-engine.ts
+server/learning/superconductor-research.ts
+Acceptance
+
+System predicts reasonable Tc values for known materials:
+
+Material	Expected
+MgB2	~39K
+Nb3Sn	~18K
+Pb	~7K
+T013: Add Mott Proximity Score
+
+Blocked By: [existing correlation U/W]
+
+Objective
+
+Detect Mott physics and strong correlation regimes.
+
+Many high Tc superconductors sit near a Mott insulating state.
+
+Details
+
+Add function:
+
+computeMottProximity(correlation, bandwidth, metallicity)
+
+Score:
+
+mottScore =
+clamp(
+    correlation * (1 - metallicity) + (0.5 - bandwidth/5),
+    0,
+    1
+)
+
+Interpretation:
+
+Score	Meaning
+0–0.2	weak correlation
+0.3–0.6	moderate correlation
+0.7–1.0	Mott proximity
+
+Add field:
+
+mottProximityScore
+
+Modify pairing scoring:
+
+if 0.5 < mottScore < 0.8
+    add spin-fluctuation pairing bonus
+Files
+server/learning/physics-engine.ts
+server/learning/superconductor-research.ts
+Acceptance
+Material	Expected score
+La2CuO4	high
+SrVO3	moderate
+Al	low
+T014: Add Topological Band Structure Score
+
+Blocked By: []
+
+Objective
+
+Detect materials with topological electronic structures that can enhance pairing.
+
+Details
+
+Add function:
+
+computeTopologicalScore(elements, SOC, bandInversionProxy)
+
+Proxies:
+
+Heavy element presence:
+
+Bi, Pb, Sb, Te, W
+
+Spin orbit coupling estimate:
+
+SOC ≈ Z^4 scaling
+
+Band inversion proxy:
+
+high p + d orbital mixing
+
+Score formula:
+
+topologicalScore =
+0.4*SOC +
+0.3*bandInversionProxy +
+0.3*p_d_mixing
+
+Add field:
+
+topologicalBandScore
+
+Boost pairing:
+
+if topologicalScore > 0.6
+    pairingScore += 5%
+Files
+server/learning/physics-engine.ts
+Acceptance
+
+Higher score for:
+
+Material
+FeSe
+Bi2Se3
+T015: Pressure Phase Simulation
+
+Blocked By: []
+
+Objective
+
+Simulate pressure effects on superconductivity.
+
+Hydrides and some transition metals only superconduct under pressure.
+
+Details
+
+Add function:
+
+simulatePressureEffects(material)
+
+Evaluate pressures:
+
+[0, 10, 25, 50, 100] GPa
+
+Adjust parameters:
+
+bandwidth += pressure * 0.01
+phononFreq += pressure * 0.015
+lambda -= pressure * 0.005
+
+Recompute Tc at each pressure.
+
+Return:
+
+pressureOptimalTc
+optimalPressure
+Files
+server/learning/physics-engine.ts
+Acceptance
+
+System identifies pressure dependence for:
+
+Material
+H3S
+LaH10
+T016: Orbital Selectivity Model
+
+Blocked By: [orbital fractions]
+
+Objective
+
+Model orbital selective pairing.
+
+Important for:
+
+iron pnictides
+
+heavy fermion superconductors
+
+Details
+
+Add function:
+
+computeOrbitalSelectivity(orbitalFractions)
+
+Compute dominance:
+
+dDominance = d / (s+p)
+
+Score:
+
+orbitalSelectivity =
+clamp(dDominance * correlationFactor, 0, 1)
+
+Boost spin fluctuation pairing:
+
+if orbitalSelectivity > 0.6
+    spinFluctuationTc *= 1.2
+Files
+server/learning/physics-engine.ts
+Acceptance
+
+Higher score for:
+
+Material
+BaFe2As2
+T017: Hydrogen Network Detection
+
+Blocked By: []
+
+Objective
+
+Detect superhydride structures capable of extremely high Tc.
+
+Details
+
+Add function:
+
+detectHydrogenNetwork(formula)
+
+Check:
+
+H fraction > 0.6
+metal present
+
+Add score:
+
+hydrogenNetworkScore
+
+Boost phonon frequency:
+
+omegaLog *= 1 + hydrogenNetworkScore
+Files
+server/learning/physics-engine.ts
+Acceptance
+
+High score for:
+
+Material
+LaH10
+T018: Structural Instability Score
+
+Blocked By: []
+
+Objective
+
+Detect materials near lattice instabilities, which often enhance superconductivity.
+
+Details
+
+Add function:
+
+computeStructuralInstability()
+
+Signals:
+
+softModeScore
+CDW proximity
+low phonon frequencies
+high lambda
+
+Formula:
+
+instabilityScore =
+0.4*softModeScore +
+0.3*cdwScore +
+0.3*lambdaNormalized
+
+Add field:
+
+latticeInstabilityScore
+T019: Discovery Bias Correction
+
+Blocked By: []
+
+Objective
+
+Prevent the model from rediscovering already known materials.
+
+Details
+
+Add novelty score:
+
+compositionDistance from known materials
+
+Dataset:
+
+SuperCon database
+Materials Project
+
+Compute:
+
+noveltyScore
+
+Adjust final score:
+
+finalScore =
+0.8 * physicsScore +
+0.2 * noveltyScore
+T020: Evolutionary Structure Generator
+
+Blocked By: []
+
+Objective
+
+Generate new crystal structures, not just compositions.
+
+Details
+
+Implement evolutionary algorithm:
+
+Steps:
+
+1 Generate random structures
+2 Mutate lattice
+3 Swap elements
+4 Score with physics engine
+5 Select best candidates
+
+Population size:
+
+50 structures
+
+Mutation operators:
+
+lattice distortion
+atom swap
+layer insertion

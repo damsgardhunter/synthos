@@ -1,0 +1,254 @@
+T006: Add Doping / Carrier Concentration Simulation
+
+Priority: Very High
+
+Problem
+
+Many of the most important superconductors only exist when doped.
+
+Examples:
+
+Material	Undoped	Doped
+YBCO	insulator	92K superconductor
+La₂CuO₄	AFM insulator	superconducting
+BaFe₂As₂	magnetic	superconducting
+SrTiO₃	insulator	superconducting
+
+Your engine currently evaluates only the parent compound.
+
+That means it may miss:
+
+cuprates
+
+pnictides
+
+nickelates
+
+oxide superconductors
+
+Implementation
+
+Add a virtual doping system.
+
+In computeElectronicStructure():
+
+Create a loop evaluating carrier concentration shifts:
+
+dopingLevels = [-0.2, -0.1, 0, +0.1, +0.2]
+
+Interpretation:
+
+negative = hole doping
+positive = electron doping
+
+For each level:
+
+Adjust:
+
+VEC_doped = VEC + doping
+Ef_shift ≈ doping * bandWidth
+
+Recompute:
+
+DOS(Ef)
+
+VHS proximity
+
+nestingScore
+
+Keep the maximum pairing susceptibility across doping levels.
+
+Acceptance
+
+Engine should detect:
+
+Material	Result
+La₂CuO₄	pairing only when hole-doped
+BaFe₂As₂	pairing only when electron-doped
+SrTiO₃	weak pairing at low carrier density
+T007: Add Dimensionality Score
+
+Priority: High
+
+Layered materials dominate high-Tc superconductivity.
+
+Examples:
+
+System	Dimensionality
+Cuprates	2D
+Pnictides	quasi-2D
+MgB₂	quasi-2D
+Kagome metals	2D
+
+Right now dimensionality is only indirectly represented.
+
+Implementation
+
+Add a dimensionalityScore (0–1).
+
+Compute from:
+
+anisotropy = c / a
+layerIndicators = O, Cu, Fe, B planes etc
+coordination geometry
+
+Example heuristic:
+
+if c/a > 2 → layered
+if square planar coordination → layered
+if honeycomb/kagome network → layered
+
+Mapping:
+
+3D metal → 0.2
+quasi-2D → 0.6
+layered system → 0.9
+Use it in pairing score
+
+Add weight:
+
+dimensionalityScore → 5%
+
+This improves discovery of:
+
+cuprates
+
+pnictides
+
+Kagome metals
+
+borides
+
+T008: Add Orbital Character at EF
+
+Priority: Medium-High
+
+Superconductivity strongly depends on which orbitals dominate near EF.
+
+Examples:
+
+Orbital	Effect
+Cu d(x²-y²)	cuprate pairing
+Fe d	pnictide pairing
+B pσ	MgB₂
+H s	hydrides
+
+Right now the engine tracks DOS but not orbital source.
+
+Implementation
+
+Add:
+
+orbitalCharacter = {
+  s_fraction
+  p_fraction
+  d_fraction
+}
+
+Heuristic based on elements:
+
+Cu → d
+Fe → d
+B → p
+H → s
+
+Use simple weighting.
+
+Pairing modifier
+p orbitals → +10% phonon pairing
+d orbitals → +10% spin fluctuation pairing
+s orbitals → strong phonon coupling
+T009: Add Soft Phonon Mode Detector
+
+Priority: Medium
+
+Many superconductors emerge when a phonon mode nearly goes unstable.
+
+Examples:
+
+Material	Soft Mode
+SrTiO₃	ferroelectric soft mode
+NbSe₂	CDW phonon
+Hydrides	hydrogen lattice softening
+Implementation
+
+If:
+
+minPhononFrequency < threshold
+
+then compute:
+
+softModeScore =
+  1 - (minPhononFreq / avgPhononFreq)
+
+Range:
+
+0 → stiff lattice
+1 → near instability
+
+Add to pairing score.
+
+T010: Add Structural Motif Recognition
+
+Priority: Medium
+
+Your system generates structures, but it doesn't recognize motifs that historically produce superconductivity.
+
+Add detectors for:
+
+CuO2 planes
+FeAs tetrahedra
+B honeycomb layers
+Kagome nets
+perovskite blocks
+Implementation
+
+Add:
+
+motifScore
+
+Example:
+
+CuO2 plane → 0.9
+FeAs layer → 0.8
+B honeycomb → 0.7
+random metal → 0.2
+Updated Pairing Score (Recommended)
+
+Your current scoring is already good.
+I’d evolve it slightly:
+
+PairingScore =
+
+Lambda                25%
+DOS(Ef)               15%
+Nesting               12%
+Competing Order       10%
+Phonon Softness       10%
+Van Hove              8%
+Band Flatness         5%
+Dimensionality        5%
+Orbital Character     5%
+Metallicity           5%
+One Last Critical Suggestion
+
+Your system is now very physics aware, which is great.
+
+But discovery engines fail when they become too conservative.
+
+I recommend adding a controlled "physics exploration mode":
+
+Every ~20 cycles:
+
+disable 20% of heuristics
+let ML propose unusual candidates
+
+That’s how systems discover things like:
+
+MgB₂
+
+twisted graphene
+
+nickelates
+
+because those initially look wrong to traditional heuristics.

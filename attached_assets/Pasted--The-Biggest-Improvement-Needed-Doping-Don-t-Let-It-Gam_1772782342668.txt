@@ -1,0 +1,183 @@
+. The Biggest Improvement Needed: Doping → Don’t Let It “Game” the System
+
+Your T004 doping simulation is excellent, but there is a subtle failure mode.
+
+Right now you:
+
+choose the doping level that maximizes pairing susceptibility.
+
+This can accidentally cause the engine to invent unrealistic doping levels.
+
+Example:
+
+real materials rarely exceed ~0.3 carriers per unit cell
+
+optimal doping is usually 0.1–0.2
+
+Fix
+
+Add a doping penalty term.
+
+Example:
+
+dopingPenalty = |doping| * 0.5
+effectivePairing = pairingScore - dopingPenalty
+
+or weight pairing by
+
+exp(-|doping| / 0.15)
+
+That encourages the engine to prefer physically realistic doping levels.
+
+Acceptance improvement
+
+Add:
+
+optimal doping should rarely exceed |0.25|
+
+2. Nesting Score Should Include Fermi Surface Pocket Matching
+
+Your nesting metric is already good:
+
+vec proximity
++ dimensionality
++ family heuristics
++ correlation
+
+But nesting in pnictides depends on electron–hole pocket matching.
+
+Add a small heuristic:
+
+if formula contains both electron-donor and acceptor atoms
+   nestingScore += 0.05–0.1
+
+Examples:
+
+System	Effect
+FeAs	strong nesting
+BaFe₂As₂	electron–hole pockets
+
+This helps your engine reproduce pnictide physics.
+
+3. Soft Phonon Score Needs a Stability Guard
+
+Soft modes can accidentally appear in unstable lattices.
+
+Add a simple rule:
+
+if softModeScore > 0.7 and lambda > 2.5
+    apply latticeInstabilityPenalty
+
+Reason:
+
+Very large λ + soft phonons often mean
+
+CDW
+
+structural collapse
+
+phase transition
+
+This prevents false high-Tc hydrides at ambient pressure.
+
+4. Structural Motif Detection: Add One Critical Motif
+
+Your motif list is very good, but one major motif is missing:
+
+Square lattice transition-metal planes
+
+These appear in:
+
+cuprates
+
+nickelates
+
+pnictides
+
+Add detection:
+
+transition metal + planar oxygen/chalcogen environment
+→ motifScore 0.85
+
+This improves discovery of:
+
+nickelates
+
+oxide superconductors
+
+layered pnictides
+
+5. Pairing Score Weights Are Excellent (Minor Adjustment)
+
+Your final weighting is very balanced.
+
+Current:
+
+Lambda 25
+DOS 15
+Nesting 12
+Competing order 10
+Phonon softness 10
+VHS 8
+Band flatness 5
+Dimensionality 5
+Orbital 5
+Metallicity 5
+
+I would make one tiny change:
+
+Lambda: 22%
+Nesting: 14%
+Competing order: 12%
+
+Why:
+
+Modern high-Tc systems rely more on spin fluctuations and nesting than pure λ.
+
+But your current version is already fine.
+
+6. Exploration Mode Is a Very Good Idea
+
+Your T010 exploration cycle is exactly how discovery engines avoid stagnation.
+
+One improvement:
+
+Instead of every 20 cycles fixed, use:
+
+if no score improvement for 8 cycles
+    trigger exploration mode
+
+That makes it adaptive.
+
+7. Feature Vector Size (~41) Is Perfect
+
+Your ML features now include:
+
+nesting
+
+VHS
+
+flat bands
+
+orbital fractions
+
+motif score
+
+soft phonons
+
+dimensionality
+
+That’s exactly the right scale for gradient boosting.
+
+Too many features (>100) tends to hurt performance.
+
+8. Final Physics Sanity Check You Should Add
+
+Add one global rule in the physics engine:
+
+if pressure < 50 GPa AND predicted Tc > 200 K
+   uncertainty = 0.8
+
+Reason:
+
+Room-temperature superconductivity at ambient pressure is extraordinary and should automatically carry high uncertainty.
