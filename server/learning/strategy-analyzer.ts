@@ -64,33 +64,37 @@ export async function analyzeAndEvolveStrategy(
     const recentInsights = await storage.getNovelInsightsOnly(10);
     const insightSummary = recentInsights.map(i => i.insightText).join("; ");
 
-    const totalSamples = candidates.length;
-    const priorMean = 0.5;
-    const k = 10;
-
     const adjustedFamilyStats: Record<string, {
       count: number;
-      adjustedScore: number;
+      familyScore: number;
       rawAvgScore: number;
       maxTc: number;
       maxScore: number;
       pipelinePasses: number;
-      confidence: number;
+      normalizedMaxTc: number;
+      normalizedAvgScore: number;
+      pipelinePassRate: number;
     }> = {};
 
+    const globalMaxTc = Math.max(...Object.values(familyStats).map(s => s.maxTc), 1);
+    const globalMaxAvgScore = Math.max(...Object.values(familyStats).map(s => s.avgScore), 0.001);
+
     for (const [family, stats] of Object.entries(familyStats)) {
-      const adjustedScore = (stats.totalScores + priorMean * k) / (stats.count + k);
-      const familyConfidence = Math.sqrt(stats.count / totalSamples);
-      const weightedScore = adjustedScore * familyConfidence;
+      const normalizedAvgScore = stats.avgScore / globalMaxAvgScore;
+      const normalizedMaxTc = stats.maxTc / globalMaxTc;
+      const pipelinePassRate = stats.count > 0 ? stats.pipelinePasses / stats.count : 0;
+      const familyScore = 0.4 * normalizedAvgScore + 0.4 * normalizedMaxTc + 0.2 * pipelinePassRate;
 
       adjustedFamilyStats[family] = {
         count: stats.count,
-        adjustedScore: weightedScore,
+        familyScore,
         rawAvgScore: stats.avgScore,
         maxTc: stats.maxTc,
         maxScore: stats.maxScore,
         pipelinePasses: stats.pipelinePasses,
-        confidence: familyConfidence,
+        normalizedMaxTc,
+        normalizedAvgScore,
+        pipelinePassRate,
       };
     }
 
@@ -101,8 +105,8 @@ export async function analyzeAndEvolveStrategy(
     const underExplored = [...allFamilies].filter(f => (familyStats[f]?.count ?? 0) < 3);
 
     const signalText = Object.entries(adjustedFamilyStats)
-      .sort((a, b) => b[1].adjustedScore - a[1].adjustedScore)
-      .map(([f, s]) => `${f}: ${s.count} candidates, adjusted score ${s.adjustedScore.toFixed(3)} (raw avg ${s.rawAvgScore.toFixed(2)}, confidence ${s.confidence.toFixed(2)}), max Tc ${s.maxTc.toFixed(0)}K, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
+      .sort((a, b) => b[1].familyScore - a[1].familyScore)
+      .map(([f, s]) => `${f}: familyScore=${s.familyScore.toFixed(3)} (40% normalizedAvg=${s.normalizedAvgScore.toFixed(2)} + 40% normalizedMaxTc=${s.normalizedMaxTc.toFixed(2)} + 20% passRate=${s.pipelinePassRate.toFixed(2)}), maxTc=${s.maxTc.toFixed(0)}K, ${s.count} candidates, raw avg score ${s.rawAvgScore.toFixed(2)}, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
       .join("\n");
 
     let previousStrategyContext = "";
@@ -113,7 +117,7 @@ export async function analyzeAndEvolveStrategy(
 
     const prompt = `You are a materials science research strategist for an AI superconductor discovery platform.
 
-Current candidate family performance (cycle ${cycleNumber}, scores are Bayesian-adjusted with confidence weighting — families with few samples are penalized):
+Current candidate family performance (cycle ${cycleNumber}, scored by balanced formula: 40% normalized avg score + 40% normalized max Tc + 20% pipeline pass rate — families with high maxTc are weighted equally to those with high average scores):
 ${signalText}
 
 Under-explored families: ${underExplored.join(", ") || "None"}
@@ -122,6 +126,8 @@ Recent novel insights: ${insightSummary || "None yet"}
 
 Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${f}: ${n} failures`).join(", ") || "No failures yet"}
 ${previousStrategyContext}
+
+IMPORTANT: Families with high maxTc values represent breakthrough potential even if they have few samples. A single candidate with maxTc=89K is more significant than many candidates averaging Tc=30K.
 
 Based on this data, recommend 3-5 material families to focus research on. For each, give a priority (0.0-1.0) and a brief reason.
 Also write a 1-2 sentence overall strategy summary that references specific data trends.
@@ -154,7 +160,8 @@ Respond in JSON:
         const area = String(fa.area || "Unknown");
         let priority = Math.max(0, Math.min(1, Number(fa.priority) || 0.5));
         const familySampleCount = familyStats[area]?.count ?? 0;
-        if (familySampleCount < 3) {
+        const familyMaxTc = familyStats[area]?.maxTc ?? 0;
+        if (familySampleCount < 3 && familyMaxTc < 50) {
           priority = Math.min(priority, 0.5);
         }
         const prevPriority = prevMap.get(area);

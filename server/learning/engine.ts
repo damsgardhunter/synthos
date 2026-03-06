@@ -16,7 +16,7 @@ import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount } from "./gradient-boost";
-import { normalizeFormula, classifyFamily, sanitizeForbiddenWords } from "./utils";
+import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { runMassiveGeneration, type MassiveGenerationStats } from "./candidate-generator";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
@@ -952,6 +952,7 @@ async function runPhase11_StructurePrediction() {
           const variants = await runGenerativeStructureDiscovery(emit, topCandidates);
 
           for (const variant of variants) {
+            if (!isValidFormula(variant.formula)) continue;
             variant.formula = normalizeFormula(variant.formula);
             const existingSC = await storage.getSuperconductorByFormula(variant.formula);
             if (!existingSC) {
@@ -1015,6 +1016,7 @@ async function runPhase11_StructurePrediction() {
         const novelVariants = await runNovelPrototypeGeneration(emit);
 
         for (const variant of novelVariants) {
+          if (!isValidFormula(variant.formula)) continue;
           const existingSC = await storage.getSuperconductorByFormula(variant.formula);
           if (!existingSC) {
             const features = extractFeatures(variant.formula);
@@ -1078,6 +1080,7 @@ async function runPhase11_StructurePrediction() {
         const evoResults = await runEvolutionaryStructureSearch(evoInput, emit);
         let evoInserted = 0;
         for (const evoFormula of evoResults) {
+          if (!isValidFormula(evoFormula)) continue;
           const existingSC = await storage.getSuperconductorByFormula(evoFormula);
           if (!existingSC) {
             const features = extractFeatures(evoFormula);
@@ -1238,6 +1241,10 @@ async function runPhase13_SynthesisReasoning() {
 
 async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
+    if (!isValidFormula(formula)) {
+      return { passed: false, tc: 0, reason: "invalid-elements" };
+    }
+
     const existingCandidate = await storage.getSuperconductorByFormula(formula);
     if (existingCandidate) {
       return { passed: false, tc: existingCandidate.predictedTc ?? 0, reason: "duplicate" };
@@ -1705,6 +1712,7 @@ async function runLearningCycle() {
             ];
             for (const mf of mutantFormulas.slice(0, 20)) {
               if (!shouldContinue()) break;
+              if (!isValidFormula(mf)) continue;
               const existing = await storage.getSuperconductorByFormula(mf);
               if (!existing) {
                 const features = extractFeatures(mf);
@@ -1793,6 +1801,7 @@ async function runLearningCycle() {
           if (seedFormulas.length > 0) {
             for (const sf of seedFormulas) {
               if (!shouldContinue()) break;
+              if (!isValidFormula(sf)) continue;
               const existing = await storage.getSuperconductorByFormula(sf);
               if (!existing) {
                 const features = extractFeatures(sf);

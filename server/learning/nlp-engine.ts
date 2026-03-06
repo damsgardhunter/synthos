@@ -1,9 +1,9 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
 import { batchProcess } from "../replit_integrations/batch/utils";
-import type { Material } from "@shared/schema";
+import type { Material, SuperconductorCandidate } from "@shared/schema";
 import type { EventEmitter } from "./engine";
-import { sanitizeForbiddenWords } from "./utils";
+import { sanitizeForbiddenWords, classifyFamily } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -39,6 +39,20 @@ const VAGUE_PATTERNS: RegExp[] = [
   /tend\s+to\s+(?:be|have|show)/i,
 ];
 
+const STATISTICAL_SUMMARY_PATTERNS: RegExp[] = [
+  /\d+\s*%\s+(?:of\s+)?materials?\s+have/i,
+  /\d+\s*%\s+(?:of\s+)?materials?\s+(?:are|show|exhibit|display|fall)/i,
+  /average\s+band\s*gap/i,
+  /average\s+formation\s+energy/i,
+  /majority\s+of\s+materials/i,
+  /most\s+(?:of\s+the\s+)?materials/i,
+  /the\s+dataset\s+(?:contains|shows|has|includes)/i,
+  /out\s+of\s+\d+\s+materials/i,
+  /\d+\s+out\s+of\s+\d+/i,
+  /distribution\s+of\s+(?:band\s*gap|formation|stability)/i,
+  /(?:mean|median|mode)\s+(?:value|band\s*gap|formation|stability)/i,
+];
+
 const QUANTITATIVE_PATTERN = /\d+\.?\d*\s*(?:eV|K|GPa|%|nm|cm|T\b|meV|A\b|Å)/i;
 const SPECIFIC_MATERIAL_PATTERN = /[A-Z][a-z]?\d*[A-Z][a-z]?\d*/;
 
@@ -46,6 +60,12 @@ function isInsightSpecificEnough(insight: string): { valid: boolean; reason?: st
   for (const pattern of VAGUE_PATTERNS) {
     if (pattern.test(insight)) {
       return { valid: false, reason: `Vague language: "${insight.slice(0, 60)}..."` };
+    }
+  }
+
+  for (const pattern of STATISTICAL_SUMMARY_PATTERNS) {
+    if (pattern.test(insight)) {
+      return { valid: false, reason: `Statistical summary, not a correlation insight: "${insight.slice(0, 60)}..."` };
     }
   }
 
@@ -66,57 +86,159 @@ function isInsightSpecificEnough(insight: string): { valid: boolean; reason?: st
 
 const MIN_DATASET_FOR_INSIGHTS = 100;
 
+function pearsonCorrelation(xs: number[], ys: number[]): number {
+  const n = xs.length;
+  if (n < 5) return 0;
+  const avgX = xs.reduce((s, v) => s + v, 0) / n;
+  const avgY = ys.reduce((s, v) => s + v, 0) / n;
+  let cov = 0, varX = 0, varY = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (xs[i] - avgX) * (ys[i] - avgY);
+    varX += (xs[i] - avgX) ** 2;
+    varY += (ys[i] - avgY) ** 2;
+  }
+  return varX > 0 && varY > 0 ? cov / Math.sqrt(varX * varY) : 0;
+}
+
+function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]): string {
+  const stats: string[] = [];
+  if (candidates.length < 5) return "";
+
+  stats.push(`\n--- SUPERCONDUCTOR CROSS-PROPERTY CORRELATIONS (${candidates.length} candidates) ---`);
+
+  const withLambdaAndTc = candidates.filter(c => c.electronPhononCoupling != null && c.predictedTc != null);
+  if (withLambdaAndTc.length >= 5) {
+    const lambdas = withLambdaAndTc.map(c => c.electronPhononCoupling as number);
+    const tcs = withLambdaAndTc.map(c => c.predictedTc as number);
+    const r = pearsonCorrelation(lambdas, tcs);
+    const avgLambdaHighTc = withLambdaAndTc.filter(c => (c.predictedTc ?? 0) > 30).map(c => c.electronPhononCoupling as number);
+    const avgLambdaLowTc = withLambdaAndTc.filter(c => (c.predictedTc ?? 0) <= 30).map(c => c.electronPhononCoupling as number);
+    stats.push(`Correlation(electron_phonon_coupling λ, predicted_Tc): r=${r.toFixed(3)} (n=${withLambdaAndTc.length})`);
+    if (avgLambdaHighTc.length > 0) stats.push(`  Mean λ for Tc>30K: ${(avgLambdaHighTc.reduce((s,v) => s+v, 0) / avgLambdaHighTc.length).toFixed(3)}`);
+    if (avgLambdaLowTc.length > 0) stats.push(`  Mean λ for Tc≤30K: ${(avgLambdaLowTc.reduce((s,v) => s+v, 0) / avgLambdaLowTc.length).toFixed(3)}`);
+  }
+
+  const withStabAndTc = candidates.filter(c => c.stabilityScore != null && c.predictedTc != null);
+  if (withStabAndTc.length >= 5) {
+    const stabs = withStabAndTc.map(c => c.stabilityScore as number);
+    const tcs = withStabAndTc.map(c => c.predictedTc as number);
+    const r = pearsonCorrelation(stabs, tcs);
+    stats.push(`Correlation(stability_score, predicted_Tc): r=${r.toFixed(3)} (n=${withStabAndTc.length})`);
+  }
+
+  const withCorrAndTc = candidates.filter(c => c.correlationStrength != null && c.predictedTc != null);
+  if (withCorrAndTc.length >= 5) {
+    const corrs = withCorrAndTc.map(c => c.correlationStrength as number);
+    const tcs = withCorrAndTc.map(c => c.predictedTc as number);
+    const r = pearsonCorrelation(corrs, tcs);
+    stats.push(`Correlation(correlation_strength, predicted_Tc): r=${r.toFixed(3)} (n=${withCorrAndTc.length})`);
+  }
+
+  const dimensionGroups: Record<string, number[]> = {};
+  for (const c of candidates) {
+    if (c.dimensionality && c.predictedTc != null) {
+      if (!dimensionGroups[c.dimensionality]) dimensionGroups[c.dimensionality] = [];
+      dimensionGroups[c.dimensionality].push(c.predictedTc);
+    }
+  }
+  const dimEntries = Object.entries(dimensionGroups).filter(([, tcs]) => tcs.length >= 2);
+  if (dimEntries.length >= 2) {
+    const dimStats = dimEntries.map(([dim, tcs]) => {
+      const avg = tcs.reduce((s, v) => s + v, 0) / tcs.length;
+      const maxTc = Math.max(...tcs);
+      return `${dim}: avgTc=${avg.toFixed(1)}K, maxTc=${maxTc.toFixed(1)}K, n=${tcs.length}`;
+    });
+    stats.push(`Dimensionality vs Tc breakdown: ${dimStats.join("; ")}`);
+  }
+
+  const dimLambdaGroups: Record<string, number[]> = {};
+  for (const c of candidates) {
+    if (c.dimensionality && c.electronPhononCoupling != null) {
+      if (!dimLambdaGroups[c.dimensionality]) dimLambdaGroups[c.dimensionality] = [];
+      dimLambdaGroups[c.dimensionality].push(c.electronPhononCoupling);
+    }
+  }
+  const dimLambdaEntries = Object.entries(dimLambdaGroups).filter(([, ls]) => ls.length >= 2);
+  if (dimLambdaEntries.length >= 2) {
+    const dlStats = dimLambdaEntries.map(([dim, ls]) => {
+      const avg = ls.reduce((s, v) => s + v, 0) / ls.length;
+      return `${dim}: avgλ=${avg.toFixed(3)}, n=${ls.length}`;
+    });
+    stats.push(`Dimensionality vs λ breakdown: ${dlStats.join("; ")}`);
+  }
+
+  const familyGroups: Record<string, { tcs: number[]; lambdas: number[] }> = {};
+  for (const c of candidates) {
+    const family = classifyFamily(c.formula);
+    if (!familyGroups[family]) familyGroups[family] = { tcs: [], lambdas: [] };
+    if (c.predictedTc != null) familyGroups[family].tcs.push(c.predictedTc);
+    if (c.electronPhononCoupling != null) familyGroups[family].lambdas.push(c.electronPhononCoupling);
+  }
+  const familyEntries = Object.entries(familyGroups).filter(([, g]) => g.tcs.length >= 2);
+  if (familyEntries.length >= 2) {
+    const famStats = familyEntries.map(([fam, g]) => {
+      const avgTc = g.tcs.length > 0 ? g.tcs.reduce((s, v) => s + v, 0) / g.tcs.length : 0;
+      const maxTc = g.tcs.length > 0 ? Math.max(...g.tcs) : 0;
+      const avgL = g.lambdas.length > 0 ? g.lambdas.reduce((s, v) => s + v, 0) / g.lambdas.length : 0;
+      return `${fam}: avgTc=${avgTc.toFixed(1)}K, maxTc=${maxTc.toFixed(1)}K, avgλ=${avgL.toFixed(3)}, n=${g.tcs.length}`;
+    });
+    stats.push(`Per-family breakdown: ${famStats.join("; ")}`);
+  }
+
+  const mechGroups: Record<string, number[]> = {};
+  for (const c of candidates) {
+    if (c.pairingMechanism && c.predictedTc != null) {
+      if (!mechGroups[c.pairingMechanism]) mechGroups[c.pairingMechanism] = [];
+      mechGroups[c.pairingMechanism].push(c.predictedTc);
+    }
+  }
+  const mechEntries = Object.entries(mechGroups).filter(([, tcs]) => tcs.length >= 2);
+  if (mechEntries.length >= 2) {
+    const mechStats = mechEntries.map(([mech, tcs]) => {
+      const avg = tcs.reduce((s, v) => s + v, 0) / tcs.length;
+      return `${mech}: avgTc=${avg.toFixed(1)}K, n=${tcs.length}`;
+    });
+    stats.push(`Pairing mechanism vs Tc: ${mechStats.join("; ")}`);
+  }
+
+  return stats.join("\n");
+}
+
 function computeDatasetStatistics(materials: Material[]): string {
   const withBG = materials.filter(m => m.bandGap !== null && m.bandGap !== undefined);
   const withFE = materials.filter(m => m.formationEnergy !== null && m.formationEnergy !== undefined);
   const withStab = materials.filter(m => m.stability !== null && m.stability !== undefined);
 
   const stats: string[] = [];
-  stats.push(`Total materials analyzed: ${materials.length}`);
+  stats.push(`Sample size: n=${materials.length}`);
 
-  if (withBG.length >= 10) {
-    const bgVals = withBG.map(m => m.bandGap as number);
-    const avgBG = bgVals.reduce((s, v) => s + v, 0) / bgVals.length;
-    const metals = bgVals.filter(v => v < 0.1).length;
-    const semis = bgVals.filter(v => v >= 0.1 && v <= 3.0).length;
-    const insulators = bgVals.filter(v => v > 3.0).length;
-    const stdBG = Math.sqrt(bgVals.reduce((s, v) => s + (v - avgBG) ** 2, 0) / bgVals.length);
-    stats.push(`Band gap: avg=${avgBG.toFixed(2)} eV (std=${stdBG.toFixed(2)}), metals=${metals}, semiconductors=${semis}, insulators=${insulators} (total=${bgVals.length}), range=[${Math.min(...bgVals).toFixed(1)}, ${Math.max(...bgVals).toFixed(1)}]`);
-    const bins = [0, 0.5, 1, 2, 3, 5, 10];
-    const hist = bins.map((b, i) => {
-      const next = bins[i + 1] ?? Infinity;
-      return bgVals.filter(v => v >= b && v < next).length;
-    });
-    stats.push(`Band gap histogram (eV): [0-0.5)=${hist[0]}, [0.5-1)=${hist[1]}, [1-2)=${hist[2]}, [2-3)=${hist[3]}, [3-5)=${hist[4]}, [5-10)=${hist[5]}, [10+)=${hist[6]}`);
-  }
-  if (withFE.length >= 10) {
-    const feVals = withFE.map(m => m.formationEnergy as number);
-    const avgFE = feVals.reduce((s, v) => s + v, 0) / feVals.length;
-    const negFE = feVals.filter(v => v < 0).length;
-    const stdFE = Math.sqrt(feVals.reduce((s, v) => s + (v - avgFE) ** 2, 0) / feVals.length);
-    stats.push(`Formation energy: avg=${avgFE.toFixed(2)} eV/atom (std=${stdFE.toFixed(2)}), negative=${negFE}/${feVals.length} (lower=more stable), range=[${Math.min(...feVals).toFixed(1)}, ${Math.max(...feVals).toFixed(1)}]`);
-  }
-  if (withStab.length >= 10) {
-    const stabVals = withStab.map(m => m.stability as number);
-    const avgStab = stabVals.reduce((s, v) => s + v, 0) / stabVals.length;
-    stats.push(`Stability: avg=${avgStab.toFixed(3)}, range=[${Math.min(...stabVals).toFixed(2)}, ${Math.max(...stabVals).toFixed(2)}]`);
-  }
-
-  if (withBG.length >= 20 && withFE.length >= 20) {
+  if (withBG.length >= 10 && withFE.length >= 10) {
     const paired = materials.filter(m => m.bandGap != null && m.formationEnergy != null);
-    if (paired.length >= 20) {
+    if (paired.length >= 10) {
       const bgs = paired.map(m => m.bandGap as number);
       const fes = paired.map(m => m.formationEnergy as number);
-      const avgBG2 = bgs.reduce((s, v) => s + v, 0) / bgs.length;
-      const avgFE2 = fes.reduce((s, v) => s + v, 0) / fes.length;
-      let cov = 0, varBG = 0, varFE = 0;
-      for (let i = 0; i < paired.length; i++) {
-        cov += (bgs[i] - avgBG2) * (fes[i] - avgFE2);
-        varBG += (bgs[i] - avgBG2) ** 2;
-        varFE += (fes[i] - avgFE2) ** 2;
-      }
-      const r = varBG > 0 && varFE > 0 ? cov / Math.sqrt(varBG * varFE) : 0;
+      const r = pearsonCorrelation(bgs, fes);
       stats.push(`Correlation(band_gap, formation_energy): r=${r.toFixed(3)} (n=${paired.length})`);
+    }
+  }
+
+  if (withBG.length >= 10 && withStab.length >= 10) {
+    const paired = materials.filter(m => m.bandGap != null && m.stability != null);
+    if (paired.length >= 10) {
+      const bgs = paired.map(m => m.bandGap as number);
+      const stabs = paired.map(m => m.stability as number);
+      const r = pearsonCorrelation(bgs, stabs);
+      stats.push(`Correlation(band_gap, stability): r=${r.toFixed(3)} (n=${paired.length})`);
+    }
+  }
+
+  if (withFE.length >= 10 && withStab.length >= 10) {
+    const paired = materials.filter(m => m.formationEnergy != null && m.stability != null);
+    if (paired.length >= 10) {
+      const fes = paired.map(m => m.formationEnergy as number);
+      const stabs = paired.map(m => m.stability as number);
+      const r = pearsonCorrelation(fes, stabs);
+      stats.push(`Correlation(formation_energy, stability): r=${r.toFixed(3)} (n=${paired.length})`);
     }
   }
 
@@ -154,10 +276,16 @@ export async function analyzeBondingPatterns(
 
   const dataStats = computeDatasetStatistics(dataset);
 
+  let scCorrelations = "";
+  try {
+    const candidates = await storage.getSuperconductorCandidates(500);
+    scCorrelations = computeSuperconductorCorrelations(candidates);
+  } catch (_) {}
+
   emit("log", {
     phase: "phase-3",
     event: "Bonding statistical analysis started",
-    detail: `Analyzing bonding patterns across ${dataset.length} materials. ${dataStats.split("\n")[0] || ""}`,
+    detail: `Analyzing cross-property correlations across ${dataset.length} materials. ${dataStats.split("\n")[0] || ""}`,
     dataSource: "Statistical Analysis",
   });
 
@@ -177,16 +305,26 @@ export async function analyzeBondingPatterns(
         {
           role: "system",
           content:
-            `You are a materials science AI. Analyze the provided materials data and identify bonding patterns, structural trends, and property correlations. IMPORTANT PHYSICS RULES that MUST be followed:
-- Lower (more negative) formation energy = MORE stable (thermodynamically favorable)
-- Higher formation energy = LESS stable
+            `You are a condensed matter physics AI specializing in superconductor discovery. Your task is to identify CROSS-PROPERTY CORRELATIONS and PHYSICS RELATIONSHIPS from the provided correlation data.
+
+CRITICAL INSTRUCTIONS:
+- Do NOT produce dataset statistics or summaries (e.g., "85% of materials have...", "the average band gap is...").
+- Only produce insights about RELATIONSHIPS BETWEEN PROPERTIES (e.g., "Higher electron-phonon coupling λ correlates with elevated Tc in hydrides").
+- Each insight must describe a correlation, trend, or causal relationship between two or more physical properties.
+- Reference specific material families, dimensionalities, or pairing mechanisms when the data supports it.
+- Include quantitative evidence (correlation coefficients, Tc values) from the provided statistics.
+
+PHYSICS RULES:
+- Lower (more negative) formation energy = MORE stable
 - Band gap cannot be negative
-- Superconductivity occurs at LOW temperatures, not high
-Return a JSON object with a single key 'insights' containing an array of 3-5 concise scientific insight strings (each under 120 characters). Only include insights supported by statistical evidence in the data.`,
+- Superconductivity occurs at LOW temperatures
+- Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
+
+Return a JSON object with a single key 'insights' containing an array of 3-5 concise cross-property correlation statements (each under 120 characters).`,
         },
         {
           role: "user",
-          content: `Dataset statistics (${dataset.length} materials):\n${dataStats}\n\nSample data:\n${JSON.stringify(materialSummaries.slice(0, 100), null, 2)}`,
+          content: `Cross-property correlation data:\n${dataStats}\n${scCorrelations}\n\nSample materials:\n${JSON.stringify(materialSummaries.slice(0, 50), null, 2)}`,
         },
       ],
       response_format: { type: "json_object" },
@@ -275,10 +413,16 @@ export async function analyzePropertyPredictionPatterns(
 
   const dataStats = computeDatasetStatistics(dataset);
 
+  let scCorrelations = "";
+  try {
+    const candidates = await storage.getSuperconductorCandidates(500);
+    scCorrelations = computeSuperconductorCorrelations(candidates);
+  } catch (_) {}
+
   emit("log", {
     phase: "phase-5",
     event: "Property prediction statistical analysis started",
-    detail: `Analyzing ${dataset.length} materials for predictive patterns. ${dataStats.split("\n")[0] || ""}`,
+    detail: `Analyzing cross-property correlations across ${dataset.length} materials for predictive rules. ${dataStats.split("\n")[0] || ""}`,
     dataSource: "Statistical Analysis",
   });
 
@@ -297,17 +441,26 @@ export async function analyzePropertyPredictionPatterns(
         {
           role: "system",
           content:
-            `You are a materials science AI specializing in property prediction. Analyze the provided materials data and identify patterns that could predict properties of unknown materials. Focus on relationships between composition and band gap, formation energy, and stability.
-IMPORTANT PHYSICS RULES that MUST be followed:
-- Lower (more negative) formation energy = MORE stable (thermodynamically favorable)
-- Higher formation energy = LESS stable (this is a fundamental thermodynamic law)
-- Band gap is always >= 0
-- Metals have zero or near-zero band gap; insulators have large band gap
-Return a JSON object with 'insights' (array of 3-5 concise prediction rules, each under 120 chars, supported by statistical evidence) and 'applications' (array of objects with 'pattern' and 'targetProperty' keys).`,
+            `You are a condensed matter physics AI specializing in superconductor property prediction. Your task is to derive PREDICTIVE RULES from cross-property correlations.
+
+CRITICAL INSTRUCTIONS:
+- Do NOT produce dataset statistics or summaries (e.g., "X% of materials have...", "average band gap is...").
+- Only produce insights about RELATIONSHIPS BETWEEN PROPERTIES that can predict unknown material behavior.
+- Each insight must be a predictive rule linking two or more physical properties (e.g., "Low band gap metals with λ>1.5 predict Tc above 40K in boride families").
+- Reference specific material families, element groups, or structural features when the data supports it.
+- Include quantitative thresholds from the correlation data.
+
+PHYSICS RULES:
+- Lower (more negative) formation energy = MORE stable
+- Band gap is always >= 0; metals have near-zero band gap
+- Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
+- Dimensionality affects pairing: 2D materials can have enhanced Tc via nesting effects
+
+Return a JSON object with 'insights' (array of 3-5 concise predictive correlation rules, each under 120 chars) and 'applications' (array of objects with 'pattern' and 'targetProperty' keys).`,
         },
         {
           role: "user",
-          content: `Dataset statistics (${dataset.length} materials):\n${dataStats}\n\nSample data:\n${JSON.stringify(materialSummaries.slice(0, 100), null, 2)}`,
+          content: `Cross-property correlation data:\n${dataStats}\n${scCorrelations}\n\nSample materials:\n${JSON.stringify(materialSummaries.slice(0, 50), null, 2)}`,
         },
       ],
       response_format: { type: "json_object" },

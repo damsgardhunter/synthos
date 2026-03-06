@@ -3,7 +3,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
-import { classifyFamily, getPrototypeHash, normalizeFormula } from "./utils";
+import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
@@ -154,7 +154,13 @@ export async function runSuperconductorResearch(
   }
 
   for (const candidate of mlResult.candidates) {
-    const formula = normalizeFormula(candidate.formula || "Unknown");
+    const rawFormula = candidate.formula || "Unknown";
+    if (!isValidFormula(rawFormula)) {
+      emit("log", { phase: "phase-7", event: "SC candidate rejected (invalid elements)", detail: `${rawFormula}: contains elements not in the periodic table`, dataSource: "SC Research" });
+      duplicatesSkipped++;
+      continue;
+    }
+    const formula = normalizeFormula(rawFormula);
     candidate.formula = formula;
     const newScore = candidate.ensembleScore ?? 0;
 
@@ -434,6 +440,10 @@ Return JSON with 'candidates' array:
 
     for (const c of newCandidates) {
       if (!c.formula) continue;
+      if (!isValidFormula(c.formula)) {
+        emit("log", { phase: "phase-7", event: "Novel SC rejected (invalid elements)", detail: `${c.formula}: contains elements not in the periodic table`, dataSource: "SC Research" });
+        continue;
+      }
       c.formula = normalizeFormula(c.formula);
 
       const existingNovel = await storage.getSuperconductorByFormula(c.formula);
@@ -768,6 +778,10 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
 
     for (const c of candidates) {
       if (!c.formula) continue;
+      if (!isValidFormula(c.formula)) {
+        emit("log", { phase: "phase-7", event: "Inverse design rejected (invalid elements)", detail: `${c.formula}: contains elements not in the periodic table`, dataSource: "SC Research" });
+        continue;
+      }
       c.formula = normalizeFormula(c.formula);
 
       const existing = await storage.getSuperconductorByFormula(c.formula);

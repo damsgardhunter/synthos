@@ -114,7 +114,30 @@ const ELECTRONEGATIVITY: Record<string, number> = {
   Po: 2.00, At: 2.20, Th: 1.30, U: 1.38,
 };
 
+const VALID_ELEMENTS = new Set([
+  ...Object.keys(ELECTRONEGATIVITY),
+  "Rn", "Fr", "Ra", "Ac", "Pa", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+  "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
+  "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og", "Pm"
+]);
+
+export function isValidFormula(formula: string): boolean {
+  let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[()[\]{},;δ−+\-\.x\s]/g, "");
+  cleaned = cleaned.replace(/\d+/g, " ").trim();
+  const elementTokens = cleaned.match(/[A-Z][a-z]?/g);
+  if (!elementTokens || elementTokens.length === 0) return false;
+  for (const el of elementTokens) {
+    if (!VALID_ELEMENTS.has(el)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function normalizeFormula(raw: string): string {
+  if (!isValidFormula(raw)) return raw;
+
   const counts = parseFormulaCounts(raw);
   const elements = Object.keys(counts);
   if (elements.length === 0) return raw;
