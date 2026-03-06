@@ -42,7 +42,14 @@ function normalizeFormulaForAflow(formula: string): string {
     .replace(/\s+/g, "");
 }
 
+let aflowConsecutiveFailures = 0;
+let aflowBackoffUntil = 0;
+
 async function aflowFetch(query: string): Promise<any[] | null> {
+  if (Date.now() < aflowBackoffUntil) {
+    return null;
+  }
+
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
     const response = await fetch(url, {
@@ -52,17 +59,34 @@ async function aflowFetch(query: string): Promise<any[] | null> {
 
     if (!response.ok) {
       if (response.status === 429) {
-        console.log("[AFLOW API] Rate limited");
+        console.log("[AFLOW API] Rate limited, backing off");
+        aflowConsecutiveFailures++;
+        aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
       }
       return null;
     }
 
-    const data = await response.json();
+    const text = await response.text();
+    if (!text || !text.trim().startsWith("[")) {
+      if (aflowConsecutiveFailures === 0) {
+        console.log("[AFLOW API] Non-JSON response from server, backing off");
+      }
+      aflowConsecutiveFailures++;
+      aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
+      return null;
+    }
+
+    const data = JSON.parse(text);
+    aflowConsecutiveFailures = 0;
     if (Array.isArray(data)) return data;
     return null;
   } catch (err: any) {
     if (err?.name !== "AbortError") {
-      console.log(`[AFLOW API] Request failed: ${err?.message || "unknown"}`);
+      if (aflowConsecutiveFailures === 0) {
+        console.log(`[AFLOW API] Request failed: ${err?.message || "unknown"}, backing off`);
+      }
+      aflowConsecutiveFailures++;
+      aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
     }
     return null;
   }
