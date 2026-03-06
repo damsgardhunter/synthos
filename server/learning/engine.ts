@@ -476,7 +476,7 @@ async function reEvaluateTopCandidates() {
       if (newTc <= 0) continue;
 
       const features = extractFeatures(candidate.formula);
-      newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5);
+      newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5, candidate.formula);
 
       const currentTc = candidate.predictedTc ?? 0;
       if (newTc === currentTc) continue;
@@ -504,24 +504,53 @@ async function reEvaluateTopCandidates() {
   }
 }
 
+const dftEnrichmentTracker = new Map<number, number>();
+
 async function runDFTEnrichment() {
   if (!shouldContinue()) return;
   try {
-    const candidates = await storage.getSuperconductorCandidates(50);
+    const candidates = await storage.getSuperconductorCandidates(100);
     const sorted = candidates
       .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
 
     const toEnrich: typeof candidates = [];
     for (const c of sorted) {
-      if (toEnrich.length >= 5) break;
+      if (toEnrich.length >= 10) break;
       if (c.dataConfidence === "high") continue;
       toEnrich.push(c);
     }
 
+    const stage1Candidates = candidates
+      .filter(c => (c.predictedTc ?? 0) > 80 && c.dataConfidence !== "high" && c.dataConfidence !== "medium")
+      .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
+    for (const c of stage1Candidates) {
+      if (toEnrich.length >= 15) break;
+      if (!toEnrich.some(e => e.id === c.id)) {
+        toEnrich.push(c);
+      }
+    }
+
+    const currentCycle = cycleCount;
+    const staleThreshold = 50;
+    const staleMedium = candidates
+      .filter(c => c.dataConfidence === "medium" && (currentCycle - (dftEnrichmentTracker.get(c.id) ?? 0)) > staleThreshold)
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
+      .slice(0, 3);
+    for (const c of staleMedium) {
+      if (!toEnrich.some(e => e.id === c.id)) {
+        toEnrich.push(c);
+      }
+    }
+
     if (toEnrich.length === 0) return;
 
+    const totalCount = await storage.getSuperconductorCount();
+    const highCount = candidates.filter(c => c.dataConfidence === "high").length;
+    const medCount = candidates.filter(c => c.dataConfidence === "medium").length;
+    const coveragePct = totalCount > 0 ? ((highCount + medCount) / totalCount * 100).toFixed(1) : "0";
+
     broadcastThought(
-      `Cross-referencing top ${toEnrich.length} candidates against DFT databases...`,
+      `DFT coverage at ${coveragePct}% -- enriching next batch of ${toEnrich.length} candidates...`,
       "strategy"
     );
 
@@ -530,6 +559,7 @@ async function runDFTEnrichment() {
       if (!shouldContinue()) break;
       try {
         const dftData = await resolveDFTFeatures(candidate.formula);
+        dftEnrichmentTracker.set(candidate.id, currentCycle);
         if (dftData.dftCoverage === 0) continue;
 
         const desc = describeDFTSources(dftData);
@@ -575,7 +605,7 @@ async function runDFTEnrichment() {
       emit("log", {
         phase: "engine",
         event: "DFT enrichment complete",
-        detail: `Enriched ${enriched} candidates with DFT data (${totalDFTEnriched} total)`,
+        detail: `Enriched ${enriched}/${toEnrich.length} candidates with DFT data (${totalDFTEnriched} total, coverage ~${coveragePct}%)`,
         dataSource: "DFT Resolver",
       });
     }
@@ -603,7 +633,7 @@ async function runPhase10_Physics() {
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
         const currentTc = candidate.predictedTc ?? 0;
         let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
-        updatedTc = applyAmbientTcCap(updatedTc, result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5);
+        updatedTc = applyAmbientTcCap(updatedTc, result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula);
 
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
@@ -653,7 +683,7 @@ async function runPhase10_Physics() {
             const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
             const currentTc = candidate.predictedTc ?? 0;
             let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
-            updatedTc = applyAmbientTcCap(updatedTc, newLambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5);
+            updatedTc = applyAmbientTcCap(updatedTc, newLambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula);
             await storage.updateSuperconductorCandidate(candidate.id, {
               electronPhononCoupling: newLambda,
               logPhononFrequency: result.coupling.omegaLog,
@@ -1080,7 +1110,7 @@ async function backfillGBScores() {
   } catch {}
 }
 
-const PHYSICS_VERSION = 6;
+const PHYSICS_VERSION = 7;
 
 async function recalculatePhysics() {
   try {
@@ -1147,6 +1177,9 @@ async function recalculatePhysics() {
           let newTc = c.predictedTc;
           if (newTc != null && newTc > tcCap) {
             newTc = tcCap;
+          }
+          if (newTc != null) {
+            newTc = applyAmbientTcCap(newTc, featureLambda, pressure, metalScore, c.formula);
           }
 
           const updatedFeatures = { ...features, physicsVersion: PHYSICS_VERSION };

@@ -3,12 +3,41 @@ import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 
-export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number): number {
+export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number, formula?: string): number {
   if (tc <= 0) return tc;
 
-  const isAmbient = pressureGpa < 10;
+  let pressureThresholdLow = 10;
+  let materialBonus = 0;
+
+  if (formula) {
+    const els = parseFormulaElements(formula);
+    const cts = parseFormulaCounts(formula);
+    const totalAtoms = getTotalAtoms(cts);
+    const hCount = cts["H"] || 0;
+    const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) ||
+      HEA_EXTRA_METALS.includes(e));
+    const metalAtomCount = metalEls.reduce((s, e) => s + (cts[e] || 0), 0);
+    const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+
+    const isCuprate = els.includes("Cu") && els.includes("O") && els.length >= 3
+      && els.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
+    const isHEA = detectHighEntropyAlloy(formula);
+    const isSuperhydride = hRatio >= 6;
+
+    if (isCuprate && lambda > 0.5) {
+      materialBonus = 15;
+    }
+    if (isHEA && lambda > 1.5) {
+      materialBonus = Math.max(materialBonus, 20);
+    }
+    if (isSuperhydride) {
+      pressureThresholdLow = 5;
+    }
+  }
+
+  const isAmbient = pressureGpa < pressureThresholdLow;
   const isHighPressure = pressureGpa >= 50;
-  const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - 10) / 40;
+  const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / (50 - pressureThresholdLow);
 
   let tcCap: number;
   if (metallicity < 0.3) {
@@ -29,7 +58,26 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     tcCap = Math.round(200 + (350 - 200) * pressureFactor);
   }
 
+  if (pressureGpa < 10) {
+    tcCap += materialBonus;
+    tcCap = Math.min(tcCap, 250);
+  }
+
   return Math.min(tc, tcCap);
+}
+
+const HEA_EXTRA_METALS = ["Al", "Mg", "Ca", "Sr", "Ba", "Li", "Na", "K", "Ti", "Zn", "Ga", "Ge", "Sn"];
+
+function detectHighEntropyAlloy(formula: string): boolean {
+  const els = parseFormulaElements(formula);
+  const cts = parseFormulaCounts(formula);
+  const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) ||
+    HEA_EXTRA_METALS.includes(e));
+  if (metalEls.length < 4) return false;
+  const metalCounts = metalEls.map(e => cts[e] || 1);
+  const totalMetal = metalCounts.reduce((s, n) => s + n, 0);
+  const maxFrac = Math.max(...metalCounts) / totalMetal;
+  return maxFrac <= 0.4;
 }
 import {
   ELEMENTAL_DATA,
@@ -406,7 +454,7 @@ export function computeElectronicStructure(
     correlationStrength = Math.max(correlationStrength, 0.55);
   }
 
-  const metallicity = estimateMetallicity(elements, counts, mpData);
+  let metallicity = estimateMetallicity(elements, counts, mpData);
   const densityOfStatesAtFermi = estimateDOSatFermi(elements, counts);
 
   const hasTM = elements.some(e => isTransitionMetal(e));
@@ -463,6 +511,16 @@ export function computeElectronicStructure(
   else if (metallicity < 0.4) bandStructureType = "semiconductor/semimetal";
   else if (correlationStrength > 0.65) bandStructureType = "strongly correlated metal";
 
+  const isHEA = detectHighEntropyAlloy(formula);
+  if (isHEA) {
+    metallicity = Math.min(1.0, metallicity + 0.08);
+    if (bandStructureType === "semiconductor/semimetal" && metallicity >= 0.4) {
+      bandStructureType = "metallic";
+    }
+    fermiSurfaceTopology = "multi-band with entropy-stabilized metallic bonding";
+    orbitalCharacter = `multi-principal d-orbital cocktail (${elements.filter(e => isTransitionMetal(e)).join("/")})`; 
+  }
+
   const nestingStrength = correlationStrength > 0.5 || (vec > 4 && vec < 7 && hasTM);
   const nestingFeatures = nestingStrength
     ? "Significant Fermi surface nesting promoting spin/charge instabilities"
@@ -497,8 +555,21 @@ export function computePhononSpectrum(
 
   const thetaDAvg = getCompositionWeightedProperty(counts, "debyeTemperature");
   const avgMass = getAverageMass(counts);
+  const isHEAPhonon = detectHighEntropyAlloy(formula);
   let debyeTemperature: number;
-  if (thetaDAvg !== null && thetaDAvg > 0) {
+  if (isHEAPhonon && !isHydrogenRich) {
+    let logSum = 0;
+    let totalFrac = 0;
+    for (const el of elements) {
+      const data = getElementData(el);
+      if (data && data.debyeTemperature && data.debyeTemperature > 0) {
+        const frac = (counts[el] || 1) / totalAtoms;
+        logSum += frac * Math.log(data.debyeTemperature);
+        totalFrac += frac;
+      }
+    }
+    debyeTemperature = totalFrac > 0 ? Math.exp(logSum / totalFrac) : 300;
+  } else if (thetaDAvg !== null && thetaDAvg > 0) {
     debyeTemperature = thetaDAvg;
     if (isHydrogenRich) {
       const hFraction = hCount / totalAtoms;
@@ -677,7 +748,13 @@ export function computeElectronPhononCoupling(
     const isOrganicLambda = cFracLambda > 0.15 && hCount > 0 && hCount >= (counts["C"] || 0);
     const isPureSuperhydrideLambda = hRatio >= 6 && nonHNonMetFrac < 0.1 && !isOrganicLambda;
 
+    const isHEALambda = formula ? detectHighEntropyAlloy(formula) : false;
+
     if (isPureSuperhydrideLambda) {
+    } else if (isHEALambda && metal > 0.4) {
+      const massDisorderBoost = 1.0 + elements.length * 0.03;
+      lambda *= massDisorderBoost;
+      if (corr > 0.7) lambda *= (1.0 - (corr - 0.7) * 0.3);
     } else {
       if (corr > 0.7) lambda *= (1.0 - (corr - 0.7) * 0.5);
       if (metal < 0.4) lambda *= metal;
@@ -1104,6 +1181,12 @@ export async function runFullPhysicsAnalysis(
   const isMottInsulator = hasMottPhase && correlation.ratio > 0.7;
   const isNonMetallic = electronicStructure.metallicity < 0.4;
 
+  const formulaEls = parseFormulaElements(formula);
+  const hasDWaveSymmetry = formulaEls.includes("Cu") && formulaEls.includes("O") && formulaEls.length >= 3;
+  const hasLayeredStructure = electronicStructure.fermiSurfaceTopology.includes("2D") ||
+    (electronicStructure.orbitalCharacter.includes("hybridized") && formula.includes("O"));
+  const isHEAPhysics = detectHighEntropyAlloy(formula);
+
   if (isNonMetallic) {
     const metalFactor = Math.max(0.02, electronicStructure.metallicity);
     eliashberg.predictedTc = eliashberg.predictedTc * metalFactor;
@@ -1112,13 +1195,15 @@ export async function runFullPhysicsAnalysis(
     eliashberg.predictedTc = eliashberg.predictedTc * 0.05;
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 3)];
   } else if (correlation.ratio > 0.7) {
-    eliashberg.predictedTc = eliashberg.predictedTc * 0.3;
+    const corrFactor = hasDWaveSymmetry ? 0.5 : hasLayeredStructure ? 0.4 : 0.3;
+    eliashberg.predictedTc = eliashberg.predictedTc * corrFactor;
     eliashberg.confidenceBand = [
       Math.round(eliashberg.predictedTc * 0.3),
-      Math.round(eliashberg.predictedTc * 2.5),
+      Math.round(eliashberg.predictedTc * (hasDWaveSymmetry ? 3.0 : 2.5)),
     ];
   } else if (correlation.ratio > 0.5) {
-    eliashberg.predictedTc = eliashberg.predictedTc * 0.7;
+    const corrFactor = hasLayeredStructure ? 0.85 : hasDWaveSymmetry ? 0.8 : 0.7;
+    eliashberg.predictedTc = eliashberg.predictedTc * corrFactor;
     eliashberg.confidenceBand = [
       Math.round(eliashberg.predictedTc * 0.6),
       Math.round(eliashberg.predictedTc * 1.5),
@@ -1127,7 +1212,8 @@ export async function runFullPhysicsAnalysis(
 
   let dimensionality = candidate.dimensionality || "3D";
   if (!candidate.dimensionality) {
-    if (electronicStructure.fermiSurfaceTopology.includes("2D")) dimensionality = "quasi-2D";
+    if (isHEAPhysics) dimensionality = "3D-HEA";
+    else if (electronicStructure.fermiSurfaceTopology.includes("2D")) dimensionality = "quasi-2D";
     else if (electronicStructure.orbitalCharacter.includes("hybridized") && formula.includes("O")) dimensionality = "layered";
     else dimensionality = "3D";
   }

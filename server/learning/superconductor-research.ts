@@ -153,9 +153,9 @@ export async function runSuperconductorResearch(
     const metallicityML = mlFeatures.metallicity ?? 0.5;
 
     if (candidate.predictedTc != null) {
-      candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML);
+      candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula);
     }
-    const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML);
+    const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML, formula);
 
     const existing = await storage.getSuperconductorByFormula(formula);
     if (existing) {

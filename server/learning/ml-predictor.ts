@@ -110,8 +110,14 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const dWaveSymmetry = hasCu && hasO && elements.length >= 3;
   const layeredStructure = (mat?.spacegroup?.includes("P4") || mat?.spacegroup?.includes("Pmmm") || mat?.spacegroup?.includes("I4")) ?? false;
 
-  const cooperPairStrength = (hasTransitionMetal ? 0.3 : 0) + (hasHydrogen ? 0.25 : 0) +
+  let cooperPairStrength = (hasTransitionMetal ? 0.3 : 0) + (hasHydrogen ? 0.25 : 0) +
     (dWaveSymmetry ? 0.2 : 0) + (layeredStructure ? 0.15 : 0) + (enSpread > 1.5 ? 0.1 : 0);
+
+  const corrForCooper = physics?.correlationStrength ?? 0;
+  if (corrForCooper >= 0.5 && corrForCooper <= 0.8) {
+    if (dWaveSymmetry) cooperPairStrength += 0.15;
+    else if (layeredStructure) cooperPairStrength += 0.1;
+  }
 
   const electronic = computeElectronicStructure(formula, mat?.spacegroup);
   const phonon = computePhononSpectrum(formula, electronic);
