@@ -59,10 +59,31 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - MEGNet-style multi-body interactions: 3-body angle features between bonded triplets with angular weighting.
 - GB retained as fast pre-filter (Tc < 5K rejection gate) but no longer drives ensemble scores.
 
+### Reinforcement Learning Chemical Space Agent
+- **REINFORCE policy gradient** agent that learns which elements, stoichiometries, and structures produce better superconductors.
+- **State**: best Tc, family diversity, stagnation cycles, exploration budget, element success entropy.
+- **Action space**: (1) element group pair (9 groups: alkali, alkaline-earth, 3d/4d/5d TM, lanthanide, p-block metal, metalloid, nonmetal), (2) stoichiometry template (10 templates: binary-metal-rich, AB, AB3, 122, perovskite, balanced, quaternary, hydride-rich AH10, ternary-hydride ABH6, boride-carbide A2B3C), (3) crystal structure type (20 prototypes).
+- **Policy**: softmax over learned weights with temperature annealing (1.0 → 0.3), epsilon-greedy exploration with decay (0.15 → 0.05), stagnation-boosted exploration.
+- **Reward**: Tc improvement (normalized to 400K) × 2.0 + relative improvement × 5.0 + pipeline pass bonus (1.0) + stability × 0.5 + novelty × 0.3.
+- **Experience replay**: 2000-entry buffer with periodic 32-sample batch replay for stable learning.
+- **Element pair tracking**: Records element-group success rates and element-pair average Tc for contextual biasing.
+- **Physics-informed priors**: 4d-transition metals, hydride-rich stoichiometries, A15/ThCr2Si2 structures initialized with positive bias.
+- Files: `server/learning/rl-agent.ts`
+
+### Bayesian Optimization for Chemical Space Search
+- **Gaussian Process surrogate** with Matern 5/2 kernel over composition feature vectors (62-dim: element fractions + structural descriptors).
+- **Acquisition functions**: Upper Confidence Bound (UCB, beta=2.0), Expected Improvement (EI, xi=0.01), Thompson Sampling.
+- **Mixed acquisition**: 0.4×UCB + 0.3×EI + 0.3×Thompson for balanced exploration/exploitation.
+- **GP inference**: Cholesky decomposition for O(n^3) exact GP, capped at 200 training points for efficiency.
+- **Observation management**: 500-entry LRU, retaining 70% top-Tc observations + 50% random sampling of remainder.
+- **Integration**: BO ranks combined candidate pool (RL-generated + massive-generation) by acquisition value; top-50 BO-ranked candidates screened first, followed by remaining candidates.
+- Files: `server/learning/bayesian-optimizer.ts`
+
 ### Massive Candidate Generator
 - Utilizes element substitution, composition interpolation, doped variants, and composition sweeps, with valence sanity filters and periodic table element validation.
 - **Fractional doping generator**: `generateFractionalDopedVariants()` creates fine-grained doped variants with fractions [0.05..0.25] across 19 SC-relevant dopants. Seeds include known SC materials (MgB2, LaH10, NbN, etc.). Generates ~150 variants per cycle.
 - Employs a rapid Gradient Boosting screen to pre-filter candidates.
+- **RL+BO integration**: RL agent generates 30 directed candidates per cycle; combined pool ranked by BO acquisition function before screening.
 
 ### Physics-Aware ML Predictor
 - Performs multi-target prediction (lambda, DOS(EF), omega_log, hull distance) with transfer priors and uncertainty estimation.

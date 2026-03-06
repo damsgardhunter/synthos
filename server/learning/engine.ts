@@ -28,6 +28,8 @@ import { runStructuralMutations } from "./structural-mutator";
 import { evolveRules, screenWithPatterns, getMinedRules } from "./pattern-miner";
 import { findOptimalRegion, getPhaseExplorationSeedFormulas } from "./phase-explorer";
 import { runFamilyAwareGeneration } from "./family-generators";
+import { bayesianOptimizer } from "./bayesian-optimizer";
+import { rlAgent } from "./rl-agent";
 import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./family-filters";
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
@@ -1571,22 +1573,39 @@ async function runAutonomousFastPath() {
   broadcast("taskStart", { task: "Autonomous Screening" });
 
   try {
+    const rlState = {
+      bestTc: autonomousBestTc || (previousCycleMetrics?.bestTc ?? 0),
+      avgRecentTc: previousCycleMetrics?.bestTc ?? 0,
+      recentRewardTrend: 0,
+      familyDiversity: previousCycleMetrics?.familyDiversity ?? 1,
+      stagnationCycles: cyclesSinceTcImproved,
+      explorationBudgetUsed: autonomousTotalScreened / Math.max(1, autonomousTotalScreened + 1000),
+      elementSuccessEntropy: 0.5,
+      cycleNumber: cycleCount,
+    };
+
+    const rlAction = rlAgent.selectAction(rlState);
+    const rlDescription = rlAgent.getActionDescription(rlAction);
+
+    const rlCandidates = rlAgent.generateCandidatesFromAction(rlAction, 30);
+
+    let focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
     const EXPLORATION_FAMILIES = [
       "Pnictides", "Chalcogenides", "Cuprates", "Hydrides", "Kagome",
       "Sulfides", "Intermetallics", "Alloys", "Oxides", "Nitrides",
     ];
-    const EXPLORATION_PROB = 0.30;
-    let focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
+    const EXPLORATION_PROB = 0.15;
     if (Math.random() < EXPLORATION_PROB) {
       const explorationPool = EXPLORATION_FAMILIES.filter(f => f !== focusArea);
       focusArea = explorationPool[Math.floor(Math.random() * explorationPool.length)];
-      emit("log", {
-        phase: "engine",
-        event: "exploration mode",
-        detail: `Randomly exploring ${focusArea} instead of strategy-recommended family (${EXPLORATION_PROB * 100}% exploration probability)`,
-        dataSource: "Exploration",
-      });
     }
+
+    emit("log", {
+      phase: "engine",
+      event: "RL agent action",
+      detail: `RL selected: ${rlDescription}. Generated ${rlCandidates.length} RL-directed candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}`,
+      dataSource: "RL Agent",
+    });
 
     let topCandidatesForGen: { formula: string; predictedTc?: number }[] = [];
     try {
@@ -1595,9 +1614,27 @@ async function runAutonomousFastPath() {
     } catch {}
 
     const shuffled = [...topCandidatesForGen].sort(() => Math.random() - 0.5);
-    const { formulas: candidates, stats: genStats } = runMassiveGeneration(shuffled, focusArea);
+    const { formulas: massiveCandidates, stats: genStats } = runMassiveGeneration(shuffled, focusArea);
+
+    const boCandidatePool = [...new Set([...rlCandidates, ...massiveCandidates])];
+    const boSuggestions = bayesianOptimizer.suggestNextCandidates(boCandidatePool, 50, "mixed");
+    const boTopFormulas = boSuggestions.map(s => s.formula);
+
+    const remainingMassive = massiveCandidates.filter(f => !boTopFormulas.includes(f));
+    const candidates = [...boTopFormulas, ...remainingMassive];
+
+    if (boSuggestions.length > 0) {
+      const topBO = boSuggestions[0];
+      emit("log", {
+        phase: "engine",
+        event: "Bayesian optimization ranking",
+        detail: `BO ranked ${boSuggestions.length} candidates. Top: ${topBO.formula} (acq=${topBO.acquisitionValue.toFixed(2)}, mean=${topBO.predictedMean.toFixed(1)}K, std=${topBO.predictedStd.toFixed(2)}, source=${topBO.source}). GP observations: ${bayesianOptimizer.getStats().observationCount}`,
+        dataSource: "Bayesian Optimizer",
+      });
+    }
 
     const novelCandidates = candidates.filter(f => !alreadyScreenedFormulas.has(f));
+    const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(f)).length / Math.max(1, rlCandidates.length);
     for (const f of candidates) alreadyScreenedFormulas.add(f);
     if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE) {
       const toRemove = alreadyScreenedFormulas.size - MAX_SCREENED_CACHE_SIZE;
@@ -1638,6 +1675,14 @@ async function runAutonomousFastPath() {
       autonomousTotalScreened++;
 
       const result = await runAutonomousDiscoveryCycle(formula);
+
+      bayesianOptimizer.addObservation(formula, result.tc, result.physicsPred?.lambda ?? 0, result.passed ? 1 : 0);
+
+      try {
+        const els = parseFormulaElements(formula);
+        rlAgent.recordElementOutcome(els, result.tc, result.passed);
+      } catch {}
+
       if (result.passed) {
         passed++;
         autonomousTotalPassed++;
@@ -1683,12 +1728,24 @@ async function runAutonomousFastPath() {
       });
     }
 
+    const rlReward = rlAgent.computeReward(
+      bestTcThisBatch,
+      autonomousBestTc,
+      passed > 0,
+      passed / Math.max(1, filteredCandidates.length),
+      rlNoveltyRatio * 0.5
+    );
+    rlAgent.updatePolicy(rlState, rlAction, rlReward);
+
+    const boStats = bayesianOptimizer.getStats();
+    const rlStats = rlAgent.getStats();
+
     const patternDetail = patternFiltered > 0 ? ` Pattern filter removed ${patternFiltered}/${candidates.length} (${activeRules.length} rules active).` : "";
     const physicsDetail = physicsPrefiltered > 0 ? ` Physics pre-filter rejected ${physicsPrefiltered}/${filteredCandidates.length}.` : "";
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `Massive generation pipeline from ${focusArea} (${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique).${patternDetail}${physicsDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
+      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
       dataSource: "Autonomous Loop",
     });
   } finally {
@@ -1716,6 +1773,8 @@ export function getAutonomousLoopStats() {
       cacheSize: xtbStats.cacheSize,
       successRate: xtbStats.runs > 0 ? `${(xtbStats.successes / xtbStats.runs * 100).toFixed(1)}%` : "N/A",
     },
+    rlAgent: rlAgent.getStats(),
+    bayesianOptimizer: bayesianOptimizer.getStats(),
   };
 }
 
@@ -2239,6 +2298,8 @@ async function runLearningCycle() {
                 dataConfidence: "low",
                 discoveryScore,
               });
+              bayesianOptimizer.addObservation(normalized, predictedTc, gnnResult.lambda || lambdaML, discoveryScore);
+
               if (inserted) {
                 prototypeCounts[pc.prototype].passed++;
                 protoPassedStability++;
