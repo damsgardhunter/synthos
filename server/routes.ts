@@ -3,6 +3,8 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
+import { getRealDFTStats } from "./learning/active-learning";
+import { isDFTAvailable, getDFTMethodInfo } from "./dft/qe-dft-engine";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -237,6 +239,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           predictedTc: c.predictedTc,
         }));
 
+      const realDft = getRealDFTStats();
+      const dftAvailable = isDFTAvailable();
+      const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
+
       res.json({
         total,
         dftEnrichedCount: dftEnriched.length,
@@ -246,6 +252,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           analytical: analyticalCount,
         },
         recentEnriched,
+        realDFT: {
+          available: dftAvailable,
+          method: methodInfo?.name ?? "unavailable",
+          version: methodInfo?.version ?? "N/A",
+          level: methodInfo?.level ?? "N/A",
+          totalRuns: realDft.runs,
+          successfulRuns: realDft.successes,
+          cacheSize: realDft.cacheSize,
+        },
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch DFT status" });

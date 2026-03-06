@@ -31,7 +31,7 @@ import { runFamilyAwareGeneration } from "./family-generators";
 import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./family-filters";
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
+import { runActiveLearningCycle, getActiveLearningStats, getRealDFTStats } from "./active-learning";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1601,6 +1601,7 @@ async function runAutonomousFastPath() {
 export function getAutonomousLoopStats() {
   const elapsedHours = (Date.now() - autonomousStartTime) / 3600000;
   const alStats = getActiveLearningStats();
+  const dftStats = getRealDFTStats();
   return {
     totalScreened: autonomousTotalScreened,
     totalPassed: autonomousTotalPassed,
@@ -1609,6 +1610,12 @@ export function getAutonomousLoopStats() {
     throughputPerHour: elapsedHours > 0 ? Math.round(autonomousTotalScreened / elapsedHours) : 0,
     gnnRetrainCount: autonomousGNNRetrainCount,
     activeLearning: alStats,
+    realDFT: {
+      method: "GFN2-xTB v6.7.1",
+      runs: dftStats.runs,
+      successes: dftStats.successes,
+      cacheSize: dftStats.cacheSize,
+    },
   };
 }
 

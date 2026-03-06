@@ -8,6 +8,8 @@ import { extractFeatures } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, validateModel } from "./gradient-boost";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { computeDiscoveryScore } from "./family-filters";
+import { runDFTCalculation, computeFormationEnergy, isDFTAvailable, getDFTMethodInfo } from "../dft/qe-dft-engine";
+import type { DFTResult } from "../dft/qe-dft-engine";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -144,6 +146,85 @@ async function runDFTEnrichmentForCandidate(
   }
 }
 
+let realDFTRunCount = 0;
+let realDFTSuccessCount = 0;
+const realDFTCache = new Map<string, DFTResult>();
+
+export function getRealDFTStats() {
+  return { runs: realDFTRunCount, successes: realDFTSuccessCount, cacheSize: realDFTCache.size };
+}
+
+async function runRealDFTForCandidate(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<DFTResult | null> {
+  if (!isDFTAvailable()) return null;
+
+  if (realDFTCache.has(candidate.formula)) {
+    return realDFTCache.get(candidate.formula)!;
+  }
+
+  try {
+    realDFTRunCount++;
+    const methodInfo = getDFTMethodInfo();
+    emit("log", {
+      phase: "active-learning",
+      event: "Real DFT calculation started",
+      detail: `Running ${methodInfo.name} (${methodInfo.level}) for ${candidate.formula}`,
+      dataSource: "xTB DFT",
+    });
+
+    const dftResult = await runDFTCalculation(candidate.formula);
+
+    if (dftResult.converged && dftResult.totalEnergy !== 0) {
+      realDFTSuccessCount++;
+
+      const formEnergy = await computeFormationEnergy(candidate.formula, dftResult);
+
+      const updates: any = {
+        dataConfidence: "medium",
+      };
+
+      if (!isNaN(formEnergy.formationEnergyPerAtom) && formEnergy.formationEnergyPerAtom < 0) {
+        updates.formationEnergy = formEnergy.formationEnergyPerAtom;
+        updates.dataConfidence = "high";
+      }
+
+      if (dftResult.homoLumoGap !== undefined) {
+        updates.bandGap = dftResult.homoLumoGap;
+      }
+
+      await storage.updateSuperconductorCandidate(candidate.id, updates);
+
+      realDFTCache.set(candidate.formula, dftResult);
+      if (realDFTCache.size > 200) {
+        const oldestKey = realDFTCache.keys().next().value;
+        if (oldestKey) realDFTCache.delete(oldestKey);
+      }
+
+      emit("log", {
+        phase: "active-learning",
+        event: "Real DFT completed",
+        detail: `${candidate.formula}: E=${dftResult.totalEnergy.toFixed(4)} Ha (${dftResult.totalEnergyPerAtom.toFixed(4)} Ha/atom), gap=${dftResult.homoLumoGap.toFixed(3)} eV, metallic=${dftResult.isMetallic}, Ef=${formEnergy.formationEnergyPerAtom.toFixed(3)} eV/atom (${formEnergy.stable ? "stable" : "metastable"}), ${dftResult.wallTimeSeconds.toFixed(1)}s`,
+        dataSource: "xTB DFT",
+      });
+
+      return dftResult;
+    } else {
+      emit("log", {
+        phase: "active-learning",
+        event: "Real DFT failed",
+        detail: `${candidate.formula}: ${dftResult.error || "did not converge"}`,
+        dataSource: "xTB DFT",
+      });
+      return null;
+    }
+  } catch (err) {
+    console.log(`[Active Learning] Real DFT failed for ${candidate.formula}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 async function retrainGNNWithEnrichedData(
   emit: EventEmitter
 ): Promise<{ r2Before: number; maeBefore: number; r2After: number; maeAfter: number }> {
@@ -252,6 +333,30 @@ export async function runActiveLearningCycle(
     }
     if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
       bestTcThisLoop = candidate.predictedTc ?? 0;
+    }
+  }
+
+  if (isDFTAvailable()) {
+    const topCandidatesForRealDFT = selected
+      .filter(r => r.normalizedTc > 0.05 || r.acquisitionScore > 0.3)
+      .sort((a, b) => b.acquisitionScore - a.acquisitionScore)
+      .slice(0, 3);
+
+    if (topCandidatesForRealDFT.length > 0) {
+      const methodInfo = getDFTMethodInfo();
+      emit("log", {
+        phase: "active-learning",
+        event: "Real DFT tier started",
+        detail: `Running ${methodInfo.name} v${methodInfo.version} on top ${topCandidatesForRealDFT.length} candidates: ${topCandidatesForRealDFT.map(r => r.candidate.formula).join(", ")}`,
+        dataSource: "xTB DFT",
+      });
+
+      for (const { candidate } of topCandidatesForRealDFT) {
+        const dftResult = await runRealDFTForCandidate(emit, candidate);
+        if (dftResult) {
+          totalEnrichedSinceLastRetrain++;
+        }
+      }
     }
   }
 
