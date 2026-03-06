@@ -310,6 +310,59 @@ const ROLLING_WINDOW_SIZE = 100;
 const MAX_NOVEL_INSIGHTS_PER_CYCLE = 3;
 let novelInsightQueue: { text: string; phaseId: number; phaseName: string; relatedFormulas: string[] }[] = [];
 
+interface EmbeddingEntry {
+  text: string;
+  embedding: Float32Array;
+}
+
+const embeddingCache: EmbeddingEntry[] = [];
+
+export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+export async function computeInsightEmbedding(text: string): Promise<Float32Array | null> {
+  try {
+    const response = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: text,
+    });
+    const vec = response.data[0]?.embedding;
+    if (!vec) return null;
+    return new Float32Array(vec);
+  } catch {
+    return null;
+  }
+}
+
+function addToEmbeddingCache(text: string, embedding: Float32Array): void {
+  embeddingCache.push({ text, embedding });
+  while (embeddingCache.length > ROLLING_WINDOW_SIZE) {
+    embeddingCache.shift();
+  }
+}
+
+function isSemanticDuplicate(embedding: Float32Array): { isDuplicate: boolean; bestSimilarity: number; matchText: string } {
+  let bestSimilarity = 0;
+  let matchText = "";
+  for (const entry of embeddingCache) {
+    const sim = cosineSimilarity(embedding, entry.embedding);
+    if (sim > bestSimilarity) {
+      bestSimilarity = sim;
+      matchText = entry.text;
+    }
+  }
+  return { isDuplicate: bestSimilarity > 0.85, bestSimilarity, matchText };
+}
+
 export async function evaluateInsightNovelty(
   emit: EventEmitter,
   insights: string[],
@@ -434,6 +487,33 @@ export async function evaluateInsightNovelty(
 
   if (potentiallyNovel.length === 0) return { novel: 0, total: insights.length };
 
+  const afterEmbeddingFilter: { index: number; text: string; embedding: Float32Array | null }[] = [];
+  for (const candidate of potentiallyNovel) {
+    const embedding = await computeInsightEmbedding(candidate.text);
+    if (embedding) {
+      const { isDuplicate, bestSimilarity, matchText } = isSemanticDuplicate(embedding);
+      if (isDuplicate) {
+        try {
+          await storage.insertNovelInsight({
+            id: insightId(candidate.text, phaseId),
+            phaseId,
+            phaseName,
+            insightText: candidate.text,
+            isNovel: false,
+            noveltyScore: 0.08,
+            noveltyReason: `Semantic duplicate (cosine=${bestSimilarity.toFixed(3)}) of: "${matchText.slice(0, 60)}..."`,
+            category: "known-pattern",
+            relatedFormulas: relatedFormulas ?? [],
+          });
+        } catch {}
+        continue;
+      }
+    }
+    afterEmbeddingFilter.push({ ...candidate, embedding });
+  }
+
+  if (afterEmbeddingFilter.length === 0) return { novel: 0, total: insights.length };
+
   let novelCount = 0;
 
   try {
@@ -483,7 +563,7 @@ Return JSON with 'evaluations' array, each with:
         },
         {
           role: "user",
-          content: `Evaluate these insights for novelty:\n${potentiallyNovel.map((p, i) => `${i}. "${p.text}"`).join("\n")}`,
+          content: `Evaluate these insights for novelty:\n${afterEmbeddingFilter.map((p, i) => `${i}. "${p.text}"`).join("\n")}`,
         },
       ],
       response_format: { type: "json_object" },
@@ -503,10 +583,14 @@ Return JSON with 'evaluations' array, each with:
     const evaluations = parsed.evaluations ?? [];
 
     for (const ev of evaluations) {
-      const entry = potentiallyNovel[ev.index];
+      const entry = afterEmbeddingFilter[ev.index];
       if (!entry) continue;
 
       const isNovel = ev.isNovel === true && (ev.noveltyScore ?? 0) >= 0.4;
+
+      if (entry.embedding) {
+        addToEmbeddingCache(entry.text, entry.embedding);
+      }
 
       try {
         await storage.insertNovelInsight({

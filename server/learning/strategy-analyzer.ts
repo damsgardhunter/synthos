@@ -71,35 +71,48 @@ export async function analyzeAndEvolveStrategy(
       maxTc: number;
       maxScore: number;
       pipelinePasses: number;
-      normalizedMaxTc: number;
-      normalizedAvgScore: number;
+      bayesianTc: number;
+      successRate: number;
+      explorationBonus: number;
       pipelinePassRate: number;
     }> = {};
 
-    const globalMaxTc = Math.max(...Object.values(familyStats).map(s => s.maxTc), 1);
-    const globalMaxAvgScore = Math.max(...Object.values(familyStats).map(s => s.avgScore), 0.001);
+    const allAvgTcs = Object.values(familyStats).map(s => s.maxTc).sort((a, b) => a - b);
+    const globalMedianTc = allAvgTcs.length > 0
+      ? (allAvgTcs.length % 2 === 0
+        ? (allAvgTcs[allAvgTcs.length / 2 - 1] + allAvgTcs[allAvgTcs.length / 2]) / 2
+        : allAvgTcs[Math.floor(allAvgTcs.length / 2)])
+      : 30;
+    const priorCount = 5;
+    const priorTc = globalMedianTc;
 
-    const maxCandidateCount = Math.max(...Object.values(familyStats).map(s => s.count), 1);
+    const rawScores: number[] = [];
 
     for (const [family, stats] of Object.entries(familyStats)) {
-      const normalizedAvgScore = stats.avgScore / globalMaxAvgScore;
-      const normalizedMaxTc = stats.maxTc / globalMaxTc;
-      const pipelinePassRate = stats.count > 0 ? stats.pipelinePasses / stats.count : 0;
-      const rawFamilyScore = 0.4 * normalizedAvgScore + 0.4 * normalizedMaxTc + 0.2 * pipelinePassRate;
-      const confidenceWeight = Math.log2(stats.count + 1) / Math.log2(maxCandidateCount + 1);
-      const familyScore = rawFamilyScore * confidenceWeight;
+      const representativeTc = stats.maxTc;
+      const bayesianTc = (stats.count * representativeTc + priorCount * priorTc) / (stats.count + priorCount);
+      const successRate = stats.pipelinePasses / Math.max(1, stats.count);
+      const explorationBonus = stats.count < 10 ? 0.1 : 0;
+      const rawScore = bayesianTc * Math.log2(stats.count + 1) * (0.5 + 0.5 * successRate) + explorationBonus;
+      rawScores.push(rawScore);
 
       adjustedFamilyStats[family] = {
         count: stats.count,
-        familyScore,
+        familyScore: rawScore,
         rawAvgScore: stats.avgScore,
         maxTc: stats.maxTc,
         maxScore: stats.maxScore,
         pipelinePasses: stats.pipelinePasses,
-        normalizedMaxTc,
-        normalizedAvgScore,
-        pipelinePassRate,
+        bayesianTc: Math.round(bayesianTc * 100) / 100,
+        successRate: Math.round(successRate * 1000) / 1000,
+        explorationBonus,
+        pipelinePassRate: stats.count > 0 ? stats.pipelinePasses / stats.count : 0,
       };
+    }
+
+    const maxRawScore = Math.max(...rawScores, 0.001);
+    for (const family of Object.keys(adjustedFamilyStats)) {
+      adjustedFamilyStats[family].familyScore = adjustedFamilyStats[family].familyScore / maxRawScore;
     }
 
     const allFamilies = new Set([
@@ -110,7 +123,7 @@ export async function analyzeAndEvolveStrategy(
 
     const signalText = Object.entries(adjustedFamilyStats)
       .sort((a, b) => b[1].familyScore - a[1].familyScore)
-      .map(([f, s]) => `${f}: familyScore=${s.familyScore.toFixed(3)} (40% normalizedAvg=${s.normalizedAvgScore.toFixed(2)} + 40% normalizedMaxTc=${s.normalizedMaxTc.toFixed(2)} + 20% passRate=${s.pipelinePassRate.toFixed(2)}), maxTc=${s.maxTc.toFixed(0)}K, ${s.count} candidates, raw avg score ${s.rawAvgScore.toFixed(2)}, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
+      .map(([f, s]) => `${f}: familyScore=${s.familyScore.toFixed(3)} (bayesianTc=${s.bayesianTc.toFixed(1)} × log2(${s.count}+1) × (0.5+0.5×successRate=${s.successRate.toFixed(2)})${s.explorationBonus > 0 ? ' +explorationBonus=0.1' : ''}), maxTc=${s.maxTc.toFixed(0)}K, ${s.count} candidates, raw avg score ${s.rawAvgScore.toFixed(2)}, ${s.pipelinePasses} pipeline passes, ${failureByFamily[f] || 0} failures`)
       .join("\n");
 
     let previousStrategyContext = "";
@@ -121,7 +134,7 @@ export async function analyzeAndEvolveStrategy(
 
     const prompt = `You are a materials science research strategist for an AI superconductor discovery platform.
 
-Current candidate family performance (cycle ${cycleNumber}, scored by confidence-weighted formula: (40% normalized avg score + 40% normalized max Tc + 20% pipeline pass rate) × log2(count+1)/log2(maxCount+1) — families with fewer candidates have dampened scores):
+Current candidate family performance (cycle ${cycleNumber}, scored by Bayesian formula: bayesianTc × log2(count+1) × (0.5 + 0.5 × successRate), normalized to [0,1]. bayesianTc shrinks small-sample maxTc toward the global median using a prior of 5 samples. Families with < 10 candidates get a +0.1 exploration bonus):
 ${signalText}
 
 Under-explored families: ${underExplored.join(", ") || "None"}
@@ -132,10 +145,12 @@ Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${
 ${previousStrategyContext}
 
 IMPORTANT SCORING RULES:
-- The familyScore shown above is already confidence-weighted by candidate count. Families with very few candidates (< 5) have dampened scores to reflect low statistical confidence.
+- The familyScore uses Bayesian shrinkage: small-sample families have their Tc pulled toward the global median, preventing single outliers from dominating.
+- The log2(count+1) factor means families need statistical mass (many candidates) to score high.
+- The successRate factor rewards families with actual pipeline passes, not just high predicted Tc.
 - Do NOT over-weight families with fewer than 5 candidates. A single high-Tc candidate is interesting but not statistically reliable — it could be a prediction artifact.
 - Families with >= 10 candidates and consistently high scores deserve the highest priorities.
-- Under-explored families should be allocated moderate exploration budget (priority 0.3-0.5) but should NOT dominate the strategy.
+- Under-explored families (< 10 candidates) receive a small exploration bonus but should NOT dominate the strategy.
 
 Based on this data, recommend 3-5 material families to focus research on. For each, give a priority (0.0-1.0) and a brief reason.
 Also write a 1-2 sentence overall strategy summary that references specific data trends.

@@ -48,12 +48,14 @@ const KNOWN_PROTOTYPES: Record<string, { spaceGroup: string; crystalSystem: stri
 };
 
 function parseFormulaElements(formula: string): string[] {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;

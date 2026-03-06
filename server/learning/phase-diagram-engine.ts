@@ -3,12 +3,14 @@ import type { EventEmitter } from "./engine";
 import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
 
 function parseFormulaElements(formula: string): string[] {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -440,14 +442,37 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
     hullDistance = Math.max(0, formationEnergy * 0.3);
   }
 
-  if (hullDistance > 0.1) {
+  if (hullDistance > 0.25) {
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.1 threshold` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.25 threshold` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,
+    };
+  }
+
+  if (hullDistance > 0.1) {
+    const metastabilityCheck = assessMetastability(formula, hullDistance);
+    if (metastabilityCheck.kineticBarrier > 0.3) {
+      return {
+        pass: true,
+        verdict: "metastable",
+        reason: `metastable-tier3 (distance=${hullDistance.toFixed(4)} eV/atom, barrier=${metastabilityCheck.kineticBarrier.toFixed(3)} eV, lifetime=${metastabilityCheck.estimatedLifetime})`,
+        hullDistance,
+        formationEnergy,
+        kineticBarrier: metastabilityCheck.kineticBarrier,
+      };
+    }
+    return {
+      pass: false,
+      verdict: "unstable",
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.1, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.3 eV` +
+        (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
+      hullDistance,
+      formationEnergy,
+      kineticBarrier: metastabilityCheck.kineticBarrier,
     };
   }
 

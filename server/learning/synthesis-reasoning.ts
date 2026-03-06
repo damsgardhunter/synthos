@@ -13,11 +13,13 @@ import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
 
 function parseFormulaElements(formula: string): string[] {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const matches = formula.match(/[A-Z][a-z]*/g);
   return matches ? [...new Set(matches)] : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]*)(\d*\.?\d*)/g;
   let match;

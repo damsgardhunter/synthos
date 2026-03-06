@@ -45,6 +45,7 @@ const TEMPERATURE_STEPS = [0, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1
 
 
 function parseFormulaToElements(formula: string): { elements: string[]; counts: Record<string, number> } {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const counts: Record<string, number> = {};
   const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;

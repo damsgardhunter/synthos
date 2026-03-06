@@ -25,6 +25,8 @@ let convergenceStats: ActiveLearningConvergence = {
   bestTcFromLoop: 0,
 };
 
+let totalEnrichedSinceLastRetrain = 0;
+
 export function getActiveLearningStats(): ActiveLearningConvergence {
   return { ...convergenceStats };
 }
@@ -38,9 +40,10 @@ interface RankedCandidate {
 
 export function selectForDFT(
   candidates: SuperconductorCandidate[],
-  budget: number = 10
+  budget: number = 20
 ): RankedCandidate[] {
   const ranked: RankedCandidate[] = [];
+  const highUncertainty: RankedCandidate[] = [];
 
   for (const candidate of candidates) {
     const tc = candidate.predictedTc ?? 0;
@@ -55,18 +58,31 @@ export function selectForDFT(
 
     const acquisitionScore = 0.5 * normalizedTc + 0.5 * uncertainty;
 
-    ranked.push({
+    const entry: RankedCandidate = {
       candidate,
       acquisitionScore,
       normalizedTc,
       uncertainty,
-    });
+    };
+
+    if (uncertainty > 0.3) {
+      highUncertainty.push(entry);
+    }
+    ranked.push(entry);
   }
 
   ranked.sort((a, b) => b.acquisitionScore - a.acquisitionScore);
+  highUncertainty.sort((a, b) => b.uncertainty - a.uncertainty);
 
   const selected: RankedCandidate[] = [];
   const seenFormulas = new Set<string>();
+
+  for (const r of highUncertainty) {
+    if (selected.length >= budget) break;
+    if (seenFormulas.has(r.candidate.formula)) continue;
+    seenFormulas.add(r.candidate.formula);
+    selected.push(r);
+  }
 
   for (const r of ranked) {
     if (selected.length >= budget) break;
@@ -212,7 +228,7 @@ export async function runActiveLearningCycle(
     return convergenceStats;
   }
 
-  const selected = selectForDFT(eligibleCandidates, 10);
+  const selected = selectForDFT(eligibleCandidates, 20);
 
   const avgUncertaintyBefore = selected.length > 0
     ? selected.reduce((sum, r) => sum + r.uncertainty, 0) / selected.length
@@ -239,10 +255,21 @@ export async function runActiveLearningCycle(
     }
   }
 
+  totalEnrichedSinceLastRetrain += dftSuccessCount;
+
   let retrainResult = { r2Before: 0, maeBefore: 0, r2After: 0, maeAfter: 0 };
-  if (dftSuccessCount > 0) {
+  const shouldRetrain = totalEnrichedSinceLastRetrain >= 50;
+  if (shouldRetrain) {
     retrainResult = await retrainGNNWithEnrichedData(emit);
     convergenceStats.modelRetrains++;
+    totalEnrichedSinceLastRetrain = 0;
+  } else if (dftSuccessCount > 0) {
+    emit("log", {
+      phase: "active-learning",
+      event: "GNN retrain deferred",
+      detail: `${totalEnrichedSinceLastRetrain} enriched since last retrain (threshold: 50). Will retrain after more data.`,
+      dataSource: "Active Learning",
+    });
   } else {
     emit("log", {
       phase: "active-learning",
@@ -253,6 +280,7 @@ export async function runActiveLearningCycle(
     retrainResult = await retrainGNNWithEnrichedData(emit);
     convergenceStats.modelRetrains++;
     convergenceStats.totalDFTRuns++;
+    totalEnrichedSinceLastRetrain = 0;
   }
 
   let avgUncertaintyAfter = avgUncertaintyBefore;

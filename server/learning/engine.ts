@@ -1294,7 +1294,10 @@ async function runPhase13_SynthesisReasoning() {
 
 async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
-    if (!isValidFormula(formula)) {
+    if (typeof formula !== "string") {
+      formula = String(formula ?? "");
+    }
+    if (!formula || !isValidFormula(formula)) {
       return { passed: false, tc: 0, reason: "invalid-elements" };
     }
 
@@ -1355,24 +1358,50 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       );
     } catch {}
 
-    if (finalTc < 10) {
-      return { passed: false, tc: finalTc, reason: "low-physics-tc" };
-    }
-
     const synthesizabilityScore = structureResult?.synthesizability ?? 0.5;
-    if (synthesizabilityScore < 0.3) {
-      return { passed: false, tc: finalTc, reason: "low-synthesizability" };
+    const lambda = physicsResult.coupling.lambda;
+    const rawHullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
+    const stabilityHullDist = Math.min(rawHullDist, 0.20);
+
+    let tier: 1 | 2 | 3 | 0 = 0;
+    let confidenceLevel: "high" | "medium" | "low" = "low";
+    let verificationStage = 0;
+
+    if (finalTc > 70 && lambda > 1.2 && stabilityHullDist < 0.10) {
+      tier = 1;
+      confidenceLevel = "high";
+      verificationStage = 2;
+    } else if (finalTc > 25 && lambda > 0.5 && stabilityHullDist < 0.20) {
+      tier = 2;
+      confidenceLevel = "medium";
+      verificationStage = 1;
+    } else if (finalTc > 10 && lambda > 0.3) {
+      tier = 3;
+      confidenceLevel = "low";
+      verificationStage = 0;
     }
 
-    const confidenceLevel = finalTc > 60 ? "high" : finalTc > 30 ? "medium" : "low";
+    if (tier === 0) {
+      return { passed: false, tc: finalTc, reason: "below-tier3-thresholds" };
+    }
+
+    if (synthesizabilityScore < 0.2 && tier > 1) {
+      tier = Math.min(tier + 1, 3) as 2 | 3;
+      if (tier === 3) confidenceLevel = "low";
+    }
+
     const instProx = physicsResult.instabilityProximity;
     const pairingNote = `[Pairing: ${physicsResult.pairingAnalysis.dominant.mechanism} (Tc=${physicsResult.pairingAnalysis.dominant.tcEstimate.toFixed(0)}K)]`;
     const instNote = `[Instability: ${instProx.nearestBoundary}=${instProx.overallProximity.toFixed(2)}]`;
+    const tierNote = `[Tier ${tier}]`;
 
-    const autonomousInserted = await insertCandidateWithStabilityCheck({
-      formula: normalizeFormula(formula),
+    const normalizedFormula = normalizeFormula(formula);
+    const candidatePayload = {
+      id: `sc-auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: normalizedFormula,
+      formula: normalizedFormula,
       predictedTc: finalTc,
-      confidence: confidenceLevel,
+      dataConfidence: confidenceLevel,
       source: "autonomous-loop",
       family,
       electronPhononCoupling: physicsResult.coupling.lambda,
@@ -1388,16 +1417,34 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       pairingMechanism: physicsResult.pairingAnalysis.dominant.mechanism,
       cooperPairMechanism: physicsResult.pairingAnalysis.dominant.description,
       ensembleScore: Math.min(0.95, 0.3 + (finalTc / 400) + (synthesizabilityScore * 0.2)),
-      verificationStage: 1,
-      notes: `${pairingNote} ${instNote} [autonomous-loop]`,
+      verificationStage,
+      notes: `${pairingNote} ${instNote} ${tierNote} [autonomous-loop]`,
       mlFeatures: {
         phononDOS: { totalStates: physicsResult.phononDOS.totalStates, binCount: physicsResult.phononDOS.frequencies.length },
         alpha2F: { integratedLambda: physicsResult.alpha2F.integratedLambda, binCount: physicsResult.alpha2F.frequencies.length },
+        tier,
       } as any,
-    });
+    };
+
+    let autonomousInserted = false;
+    if (tier === 1) {
+      autonomousInserted = await insertCandidateWithStabilityCheck(candidatePayload);
+    } else {
+      try {
+        await storage.insertSuperconductorCandidate(candidatePayload);
+        autonomousInserted = true;
+      } catch (insertErr: any) {
+        const isDuplicate = insertErr?.message?.includes("duplicate") || insertErr?.code === "23505";
+        if (isDuplicate) {
+          autonomousInserted = true;
+        } else {
+          autonomousInserted = false;
+        }
+      }
+    }
 
     if (!autonomousInserted) {
-      return { passed: false, tc: finalTc, reason: "stability-gate-rejected" };
+      return { passed: false, tc: finalTc, reason: `insert-failed (λ=${lambda.toFixed(2)},tier=${tier})` };
     }
 
     totalScCandidates++;
@@ -1407,9 +1454,9 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       autonomousBestTc = finalTc;
     }
 
-    return { passed: true, tc: finalTc, reason: "accepted", physicsPred };
+    return { passed: true, tc: finalTc, reason: `accepted-tier${tier}`, physicsPred };
   } catch (err: any) {
-    return { passed: false, tc: 0, reason: `error: ${err.message?.slice(0, 80)}` };
+    return { passed: false, tc: 0, reason: `error: ${err.message?.slice(0, 80)}${err.stack ? ' @ ' + (err.stack.split('\n')[1] || '').trim().slice(0, 60) : ''}` };
   }
 }
 
@@ -1492,9 +1539,13 @@ async function runAutonomousFastPath() {
             dataSource: "Physics ML",
           });
         }
+        console.log(`[Autonomous] PASSED: ${formula} Tc=${result.tc}K reason=${result.reason}`);
       } else {
         failedFormulas.push({ formula, tc: result.tc });
         if (result.reason.startsWith("physics-prefilter")) physicsPrefiltered++;
+        if (autonomousTotalScreened <= 200 || autonomousTotalScreened % 50 === 0) {
+          console.log(`[Autonomous] REJECTED: ${formula} Tc=${result.tc}K reason=${result.reason}`);
+        }
       }
     }
 
@@ -1708,11 +1759,11 @@ async function runLearningCycle() {
         await runDFTEnrichment();
       }
 
-      if (state === "running" && cycleCount % 50 === 0) {
+      if (state === "running" && cycleCount % 25 === 0) {
         try {
           const failedResults = await storage.getFailedComputationalResults(500);
           const newFailures = failedResults.length - failuresSinceLastRetrain;
-          if (newFailures >= 20) {
+          if (newFailures >= 10) {
             const added = await incorporateFailureData();
             if (added > 0) {
               failuresSinceLastRetrain = failedResults.length;
@@ -1754,8 +1805,8 @@ async function runLearningCycle() {
 
       const alStats0 = getActiveLearningStats();
       const alCooldown = cycleCount - lastActiveLearningCycle >= 5;
-      const shouldRunAL = state === "running" && cycleCount >= 30 && alCooldown && (
-        (cycleCount - lastActiveLearningCycle >= 30) ||
+      const shouldRunAL = state === "running" && cycleCount >= 15 && alCooldown && (
+        (cycleCount - lastActiveLearningCycle >= 15) ||
         (alStats0.totalDFTRuns === 0 && lastActiveLearningCycle === 0)
       );
       if (shouldRunAL) {

@@ -77,6 +77,7 @@ let modelTrainedAt = 0;
 const MODEL_STALE_MS = 30 * 60 * 1000;
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;

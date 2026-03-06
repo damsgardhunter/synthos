@@ -119,6 +119,7 @@ async function setCachedData(formula: string, dataType: string, data: any, mpId?
 }
 
 function normalizeFormula(formula: string): string {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   return formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
 }
 

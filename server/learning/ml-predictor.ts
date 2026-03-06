@@ -97,12 +97,14 @@ const CHALCOGENS = ["O","S","Se","Te"];
 const PNICTOGENS = ["N","P","As","Sb","Bi"];
 
 function parseFormula(formula: string): string[] {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -1016,9 +1018,9 @@ export class PhysicsPredictor {
   }
 
   preFilter(prediction: PhysicsPrediction): { pass: boolean; reason: string } {
-    if (prediction.lambda < 0.3) return { pass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < 0.3` };
-    if (prediction.hullDistance > 0.2) return { pass: false, reason: `hull_dist=${prediction.hullDistance.toFixed(3)} > 0.2 eV/atom` };
-    if (prediction.dosAtEF < 0.5) return { pass: false, reason: `DOS(EF)=${prediction.dosAtEF.toFixed(2)} < 0.5 states/eV` };
+    if (prediction.lambda < 0.15) return { pass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < 0.15` };
+    if (prediction.hullDistance > 0.3) return { pass: false, reason: `hull_dist=${prediction.hullDistance.toFixed(3)} > 0.3 eV/atom` };
+    if (prediction.dosAtEF < 0.2) return { pass: false, reason: `DOS(EF)=${prediction.dosAtEF.toFixed(2)} < 0.2 states/eV` };
     return { pass: true, reason: "passed" };
   }
 

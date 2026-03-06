@@ -43,6 +43,7 @@ interface RawDFTSources {
 }
 
 function normalizeFormula(formula: string): string {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   let normalized = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -65,12 +66,14 @@ function normalizeFormula(formula: string): string {
 }
 
 function parseFormulaElements(formula: string): string[] {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -90,6 +93,11 @@ function computeAnalyticalFallbacks(formula: string): {
   bulkModulus: number;
   formationEnergy: number;
   dosAtFermi: number | null;
+  omegaLog: number;
+  lambda: number | null;
+  muStar: number;
+  thermalConductivity: number | null;
+  phononFreqMax: number;
 } {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -128,7 +136,42 @@ function computeAnalyticalFallbacks(formula: string): {
     }
   }
 
-  return { bandGap, isMetallic, debyeTemp, bulkModulus, formationEnergy, dosAtFermi };
+  const omegaLog = 0.5 * debyeTemp;
+
+  let lambda: number | null = null;
+  if (isMetallic && dosAtFermi != null && dosAtFermi > 0) {
+    const avgMass = getCompositionWeightedProperty(counts, "atomicMass") || 50;
+    const hopfieldEta = getCompositionWeightedProperty(counts, "mcMillanHopfieldEta");
+    if (hopfieldEta && hopfieldEta > 0) {
+      const omega2 = (debyeTemp * 0.695) ** 2;
+      lambda = (dosAtFermi * hopfieldEta) / (avgMass * omega2) * 1e4;
+      lambda = Math.min(Math.max(lambda, 0.1), 3.0);
+    }
+  }
+
+  const muStar = 0.13 - 0.01 * metalFrac;
+
+  let thermalConductivity: number | null = null;
+  if (isMetallic) {
+    const lorenzNumber = 2.44e-8;
+    const T = 300;
+    const avgConductivity = elements.reduce((sum, el) => {
+      const data = getElementData(el);
+      if (data && data.sommerfeldGamma != null && data.sommerfeldGamma > 0) {
+        return sum + (counts[el] || 0);
+      }
+      return sum;
+    }, 0);
+    if (avgConductivity > 0) {
+      const bulkEst = bulkModulus > 0 ? bulkModulus : 100;
+      thermalConductivity = lorenzNumber * bulkEst * 1e9 * T / 1e6;
+      thermalConductivity = Math.min(thermalConductivity, 500);
+    }
+  }
+
+  const phononFreqMax = 1.2 * debyeTemp;
+
+  return { bandGap, isMetallic, debyeTemp, bulkModulus, formationEnergy, dosAtFermi, omegaLog, lambda, muStar, thermalConductivity, phononFreqMax };
 }
 
 async function fetchAllDFTSources(formula: string): Promise<RawDFTSources> {
@@ -206,12 +249,12 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
 
   const mpPhononMax = raw.mpPhonon?.hasPhononData && raw.mpPhonon.lastPhononFreq
     ? raw.mpPhonon.lastPhononFreq : null;
-  const phononFreqMax = resolve<number | null>(mpPhononMax, null, null);
+  const phononFreqMax = resolve<number | null>(mpPhononMax, null, analytical.phononFreqMax);
 
   const thermalConductivity = resolve<number | null>(
     null,
     raw.aflowDFT?.agl_thermal_conductivity_300K ?? null,
-    null,
+    analytical.thermalConductivity,
   );
 
   const coreFeatures: DFTResolvedFeature<any>[] = [
@@ -225,7 +268,7 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const externalCoverage = allResolved.length > 0 ? dftCount / allResolved.length : 0;
 
   const hasExternalData = raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null || raw.aflowEntry != null || raw.aflowDFT != null;
-  const dftCoverage = externalCoverage > 0 ? externalCoverage : 0.3;
+  const dftCoverage = externalCoverage > 0 ? externalCoverage : 0.5;
 
   if (!hasExternalData) {
     console.log(`[DFT] ${formula}: No external API data found (MP/AFLOW). Using analytical fallbacks (coverage=${dftCoverage.toFixed(2)}).`);

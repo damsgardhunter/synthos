@@ -63,6 +63,7 @@ export function safeFixed(val: number, digits: number = 2): number {
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
   const counts: Record<string, number> = {};
   const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -122,6 +123,7 @@ const VALID_ELEMENTS = new Set([
 ]);
 
 export function isValidFormula(formula: string): boolean {
+  if (typeof formula !== "string") return false;
   let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   cleaned = cleaned.replace(/[()[\]{},;δ−+\-\.x\s]/g, "");
   cleaned = cleaned.replace(/\d+/g, " ").trim();
@@ -136,6 +138,7 @@ export function isValidFormula(formula: string): boolean {
 }
 
 export function normalizeFormula(raw: string): string {
+  if (typeof raw !== "string") raw = String(raw ?? "");
   if (!isValidFormula(raw)) return raw;
 
   const counts = parseFormulaCounts(raw);
