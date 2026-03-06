@@ -26,6 +26,8 @@ import { invalidateGNNModel, trainGNNSurrogate } from "./graph-neural-net";
 import { runStructuralMutations } from "./structural-mutator";
 import { evolveRules, screenWithPatterns, getMinedRules } from "./pattern-miner";
 import { findOptimalRegion, getPhaseExplorationSeedFormulas } from "./phase-explorer";
+import { runFamilyAwareGeneration } from "./family-generators";
+import { applyFamilyFilter, rankCandidate } from "./family-filters";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1831,6 +1833,112 @@ async function runLearningCycle() {
             event: "Phase exploration error",
             detail: err.message?.slice(0, 150) || "unknown",
             dataSource: "Phase Explorer",
+          });
+        }
+      }
+
+      if (state === "running" && cycleCount >= 15 && cycleCount % 25 === 0) {
+        try {
+          const familyResults = runFamilyAwareGeneration();
+          let familyGenerated = 0;
+          let familyPassed = 0;
+          let familyInserted = 0;
+          const familyCounts: Record<string, { generated: number; passed: number; inserted: number }> = {};
+
+          for (const result of familyResults) {
+            const fam = result.family;
+            familyCounts[fam] = { generated: result.formulas.length, passed: 0, inserted: 0 };
+            familyGenerated += result.formulas.length;
+
+            const ranked: { formula: string; rank: number; gbResult: any; features: any }[] = [];
+
+            for (const formula of result.formulas) {
+              if (!shouldContinue()) break;
+              if (!isValidFormula(formula)) continue;
+              const normalized = normalizeFormula(formula);
+              const existing = await storage.getSuperconductorByFormula(normalized);
+              if (existing) continue;
+
+              const features = extractFeatures(normalized);
+              const gbResult = gbPredict(features);
+
+              const filterResult = applyFamilyFilter(normalized, fam, features);
+              if (!filterResult.pass) continue;
+
+              familyCounts[fam].passed++;
+              familyPassed++;
+
+              const rank = rankCandidate(normalized, fam, features, gbResult);
+              ranked.push({ formula: normalized, rank, gbResult, features });
+            }
+
+            ranked.sort((a, b) => b.rank - a.rank);
+            const topN = ranked.slice(0, 10);
+
+            for (const candidate of topN) {
+              if (!shouldContinue()) break;
+              const lambdaML = candidate.features.electronPhononLambda ?? 0;
+              const metallicityML = candidate.features.metallicity ?? 0.5;
+              let predictedTc = Math.round(candidate.gbResult.tcPredicted);
+              predictedTc = applyAmbientTcCap(predictedTc, lambdaML, 0, metallicityML, candidate.formula);
+
+              try {
+                const id = `sc-fam-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                await storage.insertSuperconductorCandidate({
+                  id,
+                  name: candidate.formula,
+                  formula: candidate.formula,
+                  predictedTc,
+                  pressureGpa: fam === "Hydride" ? 150 : null,
+                  meissnerEffect: false,
+                  zeroResistance: false,
+                  cooperPairMechanism: `${fam} family search`,
+                  crystalStructure: null,
+                  quantumCoherence: null,
+                  stabilityScore: candidate.features.cooperPairStrength ?? null,
+                  synthesisPath: null,
+                  mlFeatures: candidate.features as any,
+                  xgboostScore: candidate.gbResult.score,
+                  neuralNetScore: null,
+                  ensembleScore: Math.min(0.9, (candidate.gbResult.score + candidate.rank) / 2),
+                  roomTempViable: false,
+                  status: "theoretical",
+                  notes: `[${fam} family generator: rank=${candidate.rank.toFixed(3)}, lambda=${lambdaML.toFixed(2)}]`,
+                  electronPhononCoupling: lambdaML || null,
+                  logPhononFrequency: candidate.features.logPhononFreq ?? null,
+                  coulombPseudopotential: fam === "Hydride" ? 0.10 : 0.12,
+                  pairingSymmetry: candidate.features.dWaveSymmetry ? "d-wave" : "s-wave",
+                  pairingMechanism: "phonon-mediated",
+                  correlationStrength: candidate.features.correlationStrength ?? null,
+                  dimensionality: candidate.features.dimensionalityScore >= 0.7 ? "3D" : "2D",
+                  fermiSurfaceTopology: candidate.features.fermiSurfaceType ?? null,
+                  uncertaintyEstimate: 0.5,
+                  verificationStage: 0,
+                  dataConfidence: "low",
+                });
+                familyCounts[fam].inserted++;
+                familyInserted++;
+                totalScCandidates++;
+                recentNewCandidates++;
+              } catch {}
+            }
+          }
+
+          const familySummary = Object.entries(familyCounts)
+            .map(([f, c]) => `${f}: ${c.generated}→${c.passed}→${c.inserted}`)
+            .join(", ");
+          emit("log", {
+            phase: "engine",
+            event: "Family-aware search complete",
+            detail: `${familyGenerated} generated, ${familyPassed} passed filters, ${familyInserted} inserted. ${familySummary}`,
+            dataSource: "Family Generators",
+          });
+        } catch (err: any) {
+          emit("log", {
+            phase: "engine",
+            event: "Family-aware search error",
+            detail: err.message?.slice(0, 150) || "unknown",
+            dataSource: "Family Generators",
           });
         }
       }

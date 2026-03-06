@@ -1,0 +1,317 @@
+Objective
+
+Enable the system to automatically generate and evaluate MAX-phase layered carbides, which have the general formula:
+
+Mn+1AXn
+
+Where
+M = transition metal
+A = group 13–16 element
+X = C or N
+
+Example: Ti3SiC2
+
+Tasks
+Task 1 — Create a MAX-phase generator
+
+Implement a formula generator using allowed element pools.
+
+M_elements = [Ti, V, Cr, Nb, Mo]
+A_elements = [Al, Si, Ga, Ge, Sn]
+X_elements = [C, N]
+n = [1,2,3]
+
+Generation rule:
+
+for M in M_elements:
+ for A in A_elements:
+  for X in X_elements:
+   for n in [1,2,3]:
+      formula = M(n+1) A X(n)
+
+Example outputs
+
+Nb2AlC
+Ti3SiC2
+Mo4GaC3
+V2GeN
+Task 2 — Add layered-structure constraint
+
+Before sending materials to ML prediction, enforce:
+
+layer_ratio = (metal_layers / A_layers)
+
+if layer_ratio < 2:
+    reject_candidate
+
+Reason:
+Superconductivity benefits from metal-rich conductive layers.
+
+Task 3 — Add electron density filter
+
+Layered carbides should be metallic.
+
+Reject candidates if:
+
+density_of_states(Ef) < threshold
+
+Recommended threshold:
+
+DOS(Ef) > 1.5 states/eV
+Task 4 — Add phonon softness check
+
+Strong superconductors need soft phonon modes.
+
+Reject if:
+
+max_phonon_frequency < 5 THz
+Task 5 — Score layered anisotropy
+
+Compute electronic anisotropy:
+
+anisotropy = conductivity_in_plane / conductivity_out_of_plane
+
+Score higher if:
+
+anisotropy > 3
+2️⃣ Implement Boron Network Discovery
+4
+
+Example material: Magnesium diboride
+
+Objective
+
+Search compounds where boron forms covalent networks responsible for strong phonons.
+
+Tasks
+Task 1 — Create boride generators
+
+Implement structure families:
+
+MB2
+MB4
+MB6
+MB12
+M2B5
+
+Element pool
+
+M = [Mg, Ca, Sc, Y, Ti, Zr, Hf]
+
+Example outputs
+
+CaB2
+ScB2
+YB6
+ZrB12
+Task 2 — Detect boron network topology
+
+Add bonding rule:
+
+if B-B coordination < 3:
+    reject
+
+Boron networks should form 3D or layered bonding.
+
+Task 3 — Detect σ-band potential
+
+Check boron orbital overlap.
+
+Compute:
+
+sigma_band_weight = B_px + B_py orbital contribution near EF
+
+Accept if:
+
+sigma_band_weight > 30%
+Task 4 — Phonon frequency threshold
+
+Boron superconductors require high phonon frequencies.
+
+phonon_avg > 20 THz
+
+Reject otherwise.
+
+Task 5 — Electron donor requirement
+
+Ensure metal atoms donate electrons to boron.
+
+Check:
+
+metal_electronegativity < boron
+
+Example good donors:
+
+Mg
+Ca
+Y
+3️⃣ Implement Hydride High-Tc Search
+4
+
+Example: LaH10
+
+Objective
+
+Search superhydrides, the class responsible for the highest Tc values ever observed.
+
+Tasks
+Task 1 — Hydride composition generator
+M = [La, Y, Ca, Sc, Th]
+
+stoichiometries = [H6, H9, H10, H12]
+
+Generate:
+
+MH6
+MH9
+MH10
+MH12
+
+Examples
+
+YH9
+CaH6
+ScH9
+LaH10
+Task 2 — Hydrogen cage detection
+
+Superhydrides form clathrate cages.
+
+Check coordination:
+
+H_neighbors >= 4
+
+Reject if hydrogen forms simple chains.
+
+Task 3 — Pressure stability filter
+
+Simulate stability across pressures.
+
+Accept if stable in:
+
+50–200 GPa
+Task 4 — Electron-phonon coupling threshold
+
+Hydrides require strong coupling.
+
+Reject if:
+
+lambda < 1.5
+Task 5 — Coulomb pseudopotential correction
+
+Use:
+
+μ* = 0.10
+
+Apply McMillan equation to avoid inflated Tc predictions.
+
+4️⃣ Implement Intercalated Nitride Search
+4
+
+Example: Li-intercalated ZrNCl
+
+Objective
+
+Explore electron-doped layered nitrides.
+
+Tasks
+Task 1 — Base lattice generator
+
+Generate base materials:
+
+MNX
+
+Where:
+
+M = [Zr, Hf, Ti]
+X = [Cl, Br, I]
+
+Example:
+
+ZrNCl
+HfNCl
+TiNBr
+Task 2 — Intercalation engine
+
+Insert alkali atoms between layers.
+
+A = [Li, Na, K]
+x = 0.1 – 1.0
+
+Generate:
+
+AxMNX
+
+Examples
+
+Li0.3ZrNCl
+Na0.5HfNCl
+K0.2TiNBr
+Task 3 — Electron doping calculation
+
+Calculate added electrons:
+
+extra_electrons = x * valence(A)
+
+Reject if:
+
+extra_electrons < 0.1
+Task 4 — Layer expansion test
+
+Intercalation should increase spacing.
+
+Accept if:
+
+layer_spacing_increase > 5%
+Task 5 — 2D Fermi surface detection
+
+Check if electronic states form 2D pockets.
+
+Score if:
+
+Fermi_surface_dimensionality == 2D
+5️⃣ System-Level Integration Tasks
+
+These are critical for your system.
+
+Task — Add Family-Aware Search
+
+Instead of random generation:
+
+candidate_sources = [
+  MAX_phase_generator,
+  boride_generator,
+  hydride_generator,
+  nitride_intercalation_generator
+]
+Task — Family-specific physics filters
+
+Each family uses different constraints:
+
+filters = {
+ MAX_phase: anisotropy_check,
+ boride: sigma_band_check,
+ hydride: pressure_stability,
+ nitride: electron_doping
+}
+Task — Ranking Engine
+
+Score candidates:
+
+score =
+0.35 * predicted_Tc +
+0.25 * stability +
+0.20 * lambda +
+0.20 * synthesis_feasibility
+6️⃣ Result
+
+After implementation your system will search:
+
+Layered carbides
+Boron network materials
+Superhydrides
+Intercalated nitrides
+
+These represent four of the most successful superconductivity mechanisms discovered so far.
+
+This dramatically increases the probability of finding high-Tc candidates.
