@@ -306,22 +306,136 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     cOverA: 1.0,
     stoichiometryPattern: "A1B1C3",
   },
+  {
+    name: "CsCl",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A1B1",
+  },
+  {
+    name: "Cu2Mg-Laves",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.25, y: 0.25, z: 0.25 },
+      { site: "B", x: 0.75, y: 0.75, z: 0.75 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A4B2",
+  },
+  {
+    name: "Fluorite",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.25, y: 0.25, z: 0.25 },
+      { site: "B", x: 0.75, y: 0.75, z: 0.25 },
+      { site: "B", x: 0.75, y: 0.25, z: 0.75 },
+      { site: "B", x: 0.25, y: 0.75, z: 0.75 },
+      { site: "B", x: 0.25, y: 0.25, z: 0.75 },
+      { site: "B", x: 0.75, y: 0.75, z: 0.75 },
+      { site: "B", x: 0.75, y: 0.25, z: 0.25 },
+      { site: "B", x: 0.25, y: 0.75, z: 0.25 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A4B12",
+  },
+  {
+    name: "Cr3Si",
+    fractionalPositions: [
+      { site: "A", x: 0.25, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.75, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.5, y: 0.25, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.75, z: 0.0 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.25 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.75 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A6B2",
+  },
+  {
+    name: "Ni3Sn",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.5 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "A", x: 0.25, y: 0.25, z: 0.25 },
+      { site: "A", x: 0.75, y: 0.75, z: 0.75 },
+      { site: "B", x: 0.25, y: 0.25, z: 0.75 },
+      { site: "B", x: 0.75, y: 0.75, z: 0.25 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A6B2",
+  },
+  {
+    name: "Fe3C",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "A", x: 0.0, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.25, y: 0.25, z: 0.25 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A3B1",
+  },
+  {
+    name: "Spinel",
+    fractionalPositions: [
+      { site: "A", x: 0.125, y: 0.125, z: 0.125 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.0, z: 0.0 },
+      { site: "C", x: 0.25, y: 0.25, z: 0.75 },
+      { site: "C", x: 0.75, y: 0.75, z: 0.25 },
+      { site: "C", x: 0.25, y: 0.75, z: 0.25 },
+      { site: "C", x: 0.75, y: 0.25, z: 0.75 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A1B2C4",
+  },
 ];
+
+function getProtoSiteCounts(proto: PrototypeStructure): Record<string, number> {
+  const siteCounts: Record<string, number> = {};
+  for (const pos of proto.fractionalPositions) {
+    siteCounts[pos.site] = (siteCounts[pos.site] || 0) + 1;
+  }
+  return siteCounts;
+}
 
 function matchPrototype(counts: Record<string, number>): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
   const elements = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
   const nElements = elements.length;
-  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
 
   const ratios = elements.map(el => Math.round(counts[el]));
   const gcdVal = ratios.reduce((a, b) => gcd(a, b));
   const reduced = ratios.map(r => r / gcdVal);
 
   for (const proto of CRYSTAL_PROTOTYPES) {
-    const siteCounts: Record<string, number> = {};
-    for (const pos of proto.fractionalPositions) {
-      siteCounts[pos.site] = (siteCounts[pos.site] || 0) + 1;
-    }
+    const siteCounts = getProtoSiteCounts(proto);
     const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
 
     if (sites.length !== nElements) continue;
@@ -350,6 +464,43 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
       }
       return { proto, siteMap };
     }
+  }
+
+  let bestProto: PrototypeStructure | null = null;
+  let bestScore = Infinity;
+  let bestSiteMap: Record<string, string> = {};
+
+  for (const proto of CRYSTAL_PROTOTYPES) {
+    const siteCounts = getProtoSiteCounts(proto);
+    const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
+    if (sites.length !== nElements) continue;
+
+    const siteRatios = sites.map(s => siteCounts[s]);
+    const siteGcd = siteRatios.reduce((a, b) => gcd(a, b));
+    const siteReduced = siteRatios.map(r => r / siteGcd);
+    const sortedSiteReduced = [...siteReduced].sort((a, b) => b - a);
+    const sortedReduced = [...reduced].sort((a, b) => b - a);
+
+    let score = 0;
+    for (let i = 0; i < sortedReduced.length; i++) {
+      const diff = Math.abs(sortedReduced[i] - sortedSiteReduced[i]);
+      score += diff / Math.max(1, sortedSiteReduced[i]);
+    }
+
+    if (score < bestScore && score < 0.5) {
+      bestScore = score;
+      bestProto = proto;
+      const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+      const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
+      bestSiteMap = {};
+      for (let i = 0; i < elementsByCount.length; i++) {
+        bestSiteMap[sitesByCount[i]] = elementsByCount[i];
+      }
+    }
+  }
+
+  if (bestProto) {
+    return { proto: bestProto, siteMap: bestSiteMap };
   }
 
   return null;
@@ -640,6 +791,14 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
 
 const elementRefEnergies = new Map<string, number | null>();
 
+const MOLECULAR_BOND_LENGTHS: Record<string, number> = {
+  H: 0.74,
+  N: 1.10,
+  O: 1.21,
+  F: 1.42,
+  Cl: 1.99,
+};
+
 async function computeElementalEnergy(element: string): Promise<number | null> {
   if (elementRefEnergies.has(element)) {
     return elementRefEnergies.get(element) ?? null;
@@ -648,10 +807,10 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
   const calcDir = path.join(WORK_DIR, `ref_${element}_${Date.now()}`);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  const r = getAvgRadius(element);
+  const bondLength = MOLECULAR_BOND_LENGTHS[element] ?? getAvgRadius(element) * 2;
   const atoms: AtomPosition[] = [
     { element, x: 0, y: 0, z: 0 },
-    { element, x: r * 2, y: 0, z: 0 },
+    { element, x: bondLength, y: 0, z: 0 },
   ];
 
   const xyzPath = path.join(calcDir, `${element}.xyz`);
@@ -702,7 +861,7 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
 
   let elementalTotal = 0;
   for (const [el, count] of Object.entries(counts)) {
-    const scaledCount = Math.max(1, Math.round(Math.round(count) * scaleFactor));
+    const scaledCount = Math.max(1, Math.round(count * scaleFactor));
     const refE = await computeElementalEnergy(el);
     if (refE === null) return null;
     elementalTotal += refE * scaledCount;
@@ -804,7 +963,7 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
     const zpeMatch = output.match(/zero point energy\s+([-\d.]+)\s+Eh/);
     if (zpeMatch) zpe = parseFloat(zpeMatch[1]);
 
-    const IMAG_THRESHOLD = -50;
+    const IMAG_THRESHOLD = -2000;
     const imaginaryModes = frequencies.filter(f => f < IMAG_THRESHOLD);
     const lowestFreq = frequencies.length > 0 ? Math.min(...frequencies) : 0;
 

@@ -2687,6 +2687,16 @@ export async function runFullPhysicsAnalysis(
   const correlation = assessCorrelationStrength(formula);
   const electronicStructure = computeElectronicStructure(formula, candidate.crystalStructure, mpSummary);
 
+  if (electronicStructure.flatBandIndicator > 0.3) {
+    const avgDOS = electronicStructure.densityOfStatesAtFermi;
+    emit("log", {
+      phase: "phase-10",
+      event: "Flat band detected",
+      detail: `${formula}: flatBandIndicator=${electronicStructure.flatBandIndicator.toFixed(2)}, bandFlatness=${electronicStructure.bandFlatness.toFixed(2)}, DOS(EF)=${avgDOS.toFixed(2)}, mottProximity=${electronicStructure.mottProximityScore.toFixed(2)}`,
+      dataSource: "Physics Engine",
+    });
+  }
+
   if (dftData) {
     if (dftData.dosAtFermi.source !== "analytical" && dftData.dosAtFermi.value != null && dftData.dosAtFermi.value > 0) {
       electronicStructure.densityOfStatesAtFermi = Number(dftData.dosAtFermi.value.toFixed(3));

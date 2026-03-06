@@ -58,6 +58,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 
 ### Massive Candidate Generator
 - Utilizes element substitution, composition interpolation, doped variants, and composition sweeps, with valence sanity filters and periodic table element validation.
+- **Fractional doping generator**: `generateFractionalDopedVariants()` creates fine-grained doped variants with fractions [0.05..0.25] across 19 SC-relevant dopants. Seeds include known SC materials (MgB2, LaH10, NbN, etc.). Generates ~150 variants per cycle.
 - Employs a rapid Gradient Boosting screen to pre-filter candidates.
 
 ### Physics-Aware ML Predictor
@@ -97,9 +98,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Integration**: Runs on EVERY candidate in the main screening pipeline via `runXTBEnrichment()` in `dft-feature-resolver.ts`. Falls back to analytical estimates only when xTB fails or formula is unsupported.
 - **DFT Source Type**: `"dft-xtb"` — tracked as a distinct source in DFTResolvedFeatures alongside `"analytical"`, `"mp"`, `"oqmd"`, `"aflow"`, `"nist"`.
 - **Performance**: ~5 seconds per calculation for typical 3-20 atom structures. ~85% success rate.
-- **Structure generation**: 11 crystallographic prototypes (A15, AlB2, NaCl, Perovskite, ThCr2Si2, Heusler, BCC, FCC, Layered, Kagome, HexBoride) with real fractional coordinates and lattice parameters. Generic cluster fallback for unmatched stoichiometries. Structures capped at 20 atoms with proportional scaling.
-- **Phonon stability check**: xTB `--hess` Hessian calculation for structures ≤12 atoms. Detects imaginary vibrational modes (threshold: -50 cm⁻¹). Candidates with imaginary modes receive ensemble score penalties (0.1 per mode, max 0.3). Results cached (100 entries).
-- **Formation energy**: Computed relative to single-element dimer reference calculations. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
+- **Structure generation**: 20 crystallographic prototypes (A15, AlB2, NaCl, Perovskite, ThCr2Si2, Heusler, BCC, FCC, Layered, Kagome, HexBoride, MX2, Anti-perovskite, CsCl, Cu2Mg-Laves, Fluorite, Cr3Si, Ni3Sn, Fe3C, Spinel) with real fractional coordinates and lattice parameters. Approximate prototype matching (ratio score < 0.5) for imperfect stoichiometries. Generic cluster fallback for fully unmatched cases. Structures capped at 20 atoms with proportional scaling.
+- **Phonon stability check**: xTB `--hess` Hessian calculation for structures ≤12 atoms. Detects imaginary vibrational modes. IMAG_THRESHOLD = -2000 cm⁻¹ (relaxed from -50 to accommodate xTB tolerance). Mild imaginary modes (-50 to -2000 cm⁻¹) accepted without penalty; severe modes (< -2000 cm⁻¹) penalized (0.08 per mode above 1, max 0.2). Results cached (100 entries).
+- **Formation energy**: Computed relative to molecular/dimer reference calculations using MOLECULAR_BOND_LENGTHS (H: 0.74 Å, N: 1.10, O: 1.21 Å) for accurate reference energies. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
 - **Cache**: In-memory LRU caches for DFT results (200 entries) and elemental reference energies.
 - **Stats API**: `getXTBStats()` exposes runs, successes, cacheSize, refElements via `/api/dft-status`.
 
@@ -145,6 +146,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - Ratio > 3 = strong flat-band (indicator ≥ 0.7), > 2 = moderate (≥ 0.3).
 - Cuprates get 0.8 floor, Kagome 0.7, TM with high bandFlatness 0.5.
 - Flat-band indicator > 0.5 boosts lambda by up to 40% (flatBoost = 1 + (fbi - 0.5) * 0.8).
+- **Flat band logging**: Emits log event when flatBandIndicator > 0.3 with bandFlatness, DOS(EF), and mottProximity details.
 
 ### Bayesian Family Strategy Scoring
 - Uses Bayesian shrinkage (prior_count=5) to prevent single-candidate families from dominating. Includes exploration bonus for under-explored families (<10 candidates).

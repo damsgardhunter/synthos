@@ -430,6 +430,46 @@ export function generateRandomDopedVariants(baseFormulas: string[], dopantElemen
   return Array.from(results).slice(0, count);
 }
 
+const DOPING_FRACTIONS = [0.05, 0.1, 0.15, 0.2, 0.25];
+const SC_DOPANTS = ["Al", "Mg", "C", "N", "Li", "Na", "Ca", "Sr", "La", "Y", "Sc", "F", "Si", "Ge", "P", "Cu", "Fe", "Co", "Ni"];
+
+export function generateFractionalDopedVariants(baseFormulas: string[], count: number = 100): string[] {
+  const results = new Set<string>();
+
+  for (const base of baseFormulas) {
+    const counts = parseFormulaCounts(base);
+    const elements = Object.keys(counts);
+    if (elements.length < 1) continue;
+
+    for (const hostEl of elements) {
+      const hostCount = counts[hostEl];
+      if (hostCount < 1) continue;
+
+      for (const dopant of SC_DOPANTS) {
+        if (elements.includes(dopant)) continue;
+
+        for (const frac of DOPING_FRACTIONS) {
+          const dopantAmount = +(hostCount * frac).toFixed(2);
+          const hostRemain = +(hostCount - dopantAmount).toFixed(2);
+          if (dopantAmount < 0.05 || hostRemain < 0.05) continue;
+
+          const newCounts = { ...counts };
+          newCounts[hostEl] = hostRemain;
+          newCounts[dopant] = dopantAmount;
+          const formula = canonicalize(countsToFormula(newCounts));
+          if (formula && formula.length > 2) results.add(formula);
+          if (results.size >= count) break;
+        }
+        if (results.size >= count) break;
+      }
+      if (results.size >= count) break;
+    }
+    if (results.size >= count) break;
+  }
+
+  return Array.from(results).slice(0, count);
+}
+
 export function generateCompositionSweep(elements: string[], maxAtoms: number = 8): string[] {
   const results: string[] = [];
   const n = elements.length;
@@ -591,6 +631,12 @@ export function runMassiveGeneration(
 
   const doped = generateRandomDopedVariants(allSeeds.slice(0, 20), DOPANT_ELEMENTS, 200);
   for (const f of doped) allGenerated.add(f);
+
+  const topSCFormulas = sorted.slice(0, 10).map(c => c.formula);
+  const knownSC = ["MgB2", "NbN", "Nb3Sn", "Nb3Ge", "MgCNi3", "YBa2Cu3O7", "LaH10", "NbC", "V3Si", "NbTi"];
+  const fractionalSeeds = [...new Set([...topSCFormulas, ...knownSC])];
+  const fractionalDoped = generateFractionalDopedVariants(fractionalSeeds, 150);
+  for (const f of fractionalDoped) allGenerated.add(f);
 
   const hcMetals = ["Nb", "Ta", "Mo", "V", "Ti", "Hf", "W", "Re", "Zr"];
   const lpElements = ["B", "C", "N"];

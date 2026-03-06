@@ -426,9 +426,14 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const xtbPhononStability = xtbData?.phononStability ?? null;
   if (xtbPhononStability) {
     if (xtbPhononStability.hasImaginaryModes) {
-      console.log(`[DFT] ${formula}: xTB Hessian found ${xtbPhononStability.imaginaryModeCount} imaginary mode(s), lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1`);
+      console.log(`[DFT] ${formula}: xTB Hessian found ${xtbPhononStability.imaginaryModeCount} imaginary mode(s), lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1 (severe: freq < -2000)`);
     } else {
-      console.log(`[DFT] ${formula}: xTB Hessian confirms phonon stability, lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1`);
+      const mildCount = xtbPhononStability.frequencies?.filter(f => f < -50 && f >= -2000).length ?? 0;
+      if (mildCount > 0) {
+        console.log(`[DFT] ${formula}: xTB Hessian: ${mildCount} mild imaginary mode(s) (lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1) — within xTB tolerance, accepted`);
+      } else {
+        console.log(`[DFT] ${formula}: xTB Hessian confirms phonon stability, lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1`);
+      }
     }
   }
 

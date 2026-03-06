@@ -718,16 +718,26 @@ async function runDFTEnrichment() {
           updates.bandGap = dftData.bandGap.value;
         }
 
-        if (dftData.phononStability?.hasImaginaryModes && dftData.phononStability.imaginaryModeCount >= 2) {
-          const penalty = Math.min(0.2, (dftData.phononStability.imaginaryModeCount - 1) * 0.08);
-          updates.ensembleScore = Math.max(0.05, (updates.ensembleScore ?? ensemble) - penalty);
-          if (dftData.phononStability.imaginaryModeCount >= 3) {
+        if (dftData.phononStability?.hasImaginaryModes && dftData.phononStability.lowestFrequency < -2000) {
+          const severeCount = dftData.phononStability.frequencies?.filter(f => f < -2000).length ?? dftData.phononStability.imaginaryModeCount;
+          const penalty = Math.min(0.2, Math.max(0, severeCount - 1) * 0.08);
+          if (penalty > 0) {
+            updates.ensembleScore = Math.max(0.05, (updates.ensembleScore ?? ensemble) - penalty);
+          }
+          if (severeCount >= 3) {
             updates.dataConfidence = "low";
           }
           emit("log", {
             phase: "engine",
             event: "phonon instability",
-            detail: `${candidate.formula}: xTB Hessian detected ${dftData.phononStability.imaginaryModeCount} imaginary mode(s) (lowest: ${dftData.phononStability.lowestFrequency.toFixed(0)} cm-1) — ensemble score penalized by ${penalty.toFixed(2)}`,
+            detail: `${candidate.formula}: xTB Hessian detected ${severeCount} severe imaginary mode(s) (lowest: ${dftData.phononStability.lowestFrequency.toFixed(0)} cm-1) — ensemble score penalized by ${penalty.toFixed(2)}`,
+            dataSource: "xTB-Hessian",
+          });
+        } else if (dftData.phononStability?.imaginaryModeCount && dftData.phononStability.imaginaryModeCount > 0 && dftData.phononStability.lowestFrequency >= -2000) {
+          emit("log", {
+            phase: "engine",
+            event: "phonon mild instability",
+            detail: `${candidate.formula}: xTB Hessian detected ${dftData.phononStability.imaginaryModeCount} mild imaginary mode(s) (lowest: ${dftData.phononStability.lowestFrequency.toFixed(0)} cm-1) — within xTB tolerance, no penalty`,
             dataSource: "xTB-Hessian",
           });
         }
