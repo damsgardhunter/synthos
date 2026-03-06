@@ -1,0 +1,195 @@
+1. Major Statistical Bias: Hydride Hypothesis Is Misleading
+
+Your current hypothesis:
+
+Hydrides priority: 0.9
+count: 1
+maxTc: 70
+pipelinePasses: 0
+
+This is a statistical artifact.
+
+Your engine thinks hydrides are promising because they are under-sampled, not because they performed well.
+
+Current situation:
+
+Family	Count	Max Tc	Pipeline Passes
+Carbides	29	153	3
+Borides	41	124	2
+Hydrides	1	70	0
+
+The system should not assign 0.9 priority to a family with 1 data point.
+
+Fix
+
+Add confidence weighting:
+
+familyConfidence = sqrt(count / totalSamples)
+adjustedScore = avgScore * familyConfidence
+
+or Bayesian prior:
+
+adjustedScore = (sumScores + priorMean*k) / (count + k)
+
+Example:
+
+k = 10
+priorMean = 0.5
+
+This prevents single-sample bias.
+
+2. Insight Engine Producing Generic Statements
+
+Your insights:
+
+"Overemphasis on Tc estimates may mislead material selection."
+"Unconventional pairing in high U/W materials remains unexplored."
+
+These are meta observations, not material insights.
+
+Good discovery insights look like:
+
+High Tc candidates cluster when:
+nestingScore > 0.7
+vanHoveProximity > 0.6
+dimensionalityScore > 0.75
+
+Your engine is currently producing philosophical insights instead of physics insights.
+
+Fix
+
+Require insights to reference quantitative signals:
+
+Insight must include at least 2 metrics
+
+Example rule:
+
+if correlation(metricA, metricB) > 0.6
+generate insight
+3. Strategy Switching Is Too Chaotic
+
+Recent cycles:
+
+2214 Hydrides
+2213 Cuprates
+2212 Carbides
+2211 Carbides
+2210 Nitrides
+2207 Oxides
+
+This means your exploration policy is thrashing.
+
+Good discovery engines usually follow:
+
+exploit best region for N cycles
+then explore
+
+Example:
+
+exploitWindow = 10 cycles
+exploreProbability = 0.2
+
+Your engine appears to switch strategy every cycle, which reduces learning.
+
+4. Pipeline Pass Rate Might Be Too High
+
+Your pipeline pass rate:
+
+pipelinePassRate = 0.669
+
+That means 66% of candidates pass filters.
+
+In most discovery systems, typical rates are:
+
+5–20%
+
+If too many candidates pass:
+
+filters are weak
+
+ranking becomes noisy
+
+search space explodes
+
+You want high precision filters early.
+
+5. Family Detection Error
+
+Log entry:
+
+New material family: Cuprates
+First candidate: CuFeCo2Se2
+
+This is not a cuprate.
+
+Cuprates require Cu–O planes, e.g.:
+
+La2CuO4
+
+YBa2Cu3O7
+
+Your classifier seems to use:
+
+if element == Cu → cuprate
+
+This will generate incorrect physics heuristics.
+
+Fix
+
+Require:
+
+Cu + O + layered motif
+6. Best Tc Plateau
+
+Your best Tc:
+
+153 K
+
+And it has not changed across multiple cycles.
+
+That suggests one of three things:
+
+Search space too small
+
+Tc model saturating
+
+Candidate generator not mutating enough
+
+You should monitor:
+
+Tc improvement rate
+
+If no improvement after N cycles:
+
+expand chemical space
+increase mutation magnitude
+activate exploration mode
+7. Insight Cascade Might Be Artificial
+
+Multiple logs:
+
+Insight cascade: 5 discoveries
+Insight cascade: 3 discoveries
+
+Real scientific discovery rarely happens in bursts like this unless the engine:
+
+lowered thresholds
+
+or generated correlated insights
+
+You may be counting duplicate insights.
+
+Add:
+
+similarityCheck(insightA, insightB)
+8. Potential Missing Metric: Stability
+
+Your log tracks:
+
+Tc
+score
+pairing
+
+But I do not see formation energy or hull distance.
+
+Without stability filtering the system may propose unsynthesizable materials.
