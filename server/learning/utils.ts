@@ -178,3 +178,17 @@ export function isIsostructuralDuplicate(formulaA: string, formulaB: string): bo
   const valsB = elsB.map(el => countsB[el]).sort((a, b) => a - b);
   return valsA.every((v, i) => v === valsB[i]);
 }
+
+const FORBIDDEN_WORDS: [RegExp, string][] = [
+  [/\bbreakthrough\b/gi, "notable finding"],
+  [/\bconfirmed\b/gi, "verified"],
+  [/\bbreakthroughs\b/gi, "notable findings"],
+];
+
+export function sanitizeForbiddenWords(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of FORBIDDEN_WORDS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}

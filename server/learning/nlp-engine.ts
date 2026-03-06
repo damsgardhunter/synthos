@@ -3,6 +3,7 @@ import { storage } from "../storage";
 import { batchProcess } from "../replit_integrations/batch/utils";
 import type { Material } from "@shared/schema";
 import type { EventEmitter } from "./engine";
+import { sanitizeForbiddenWords } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -71,23 +72,64 @@ function computeDatasetStatistics(materials: Material[]): string {
   const withStab = materials.filter(m => m.stability !== null && m.stability !== undefined);
 
   const stats: string[] = [];
+  stats.push(`Total materials analyzed: ${materials.length}`);
+
   if (withBG.length >= 10) {
     const bgVals = withBG.map(m => m.bandGap as number);
     const avgBG = bgVals.reduce((s, v) => s + v, 0) / bgVals.length;
     const metals = bgVals.filter(v => v < 0.1).length;
-    stats.push(`Band gap: avg=${avgBG.toFixed(2)} eV, metals=${metals}/${bgVals.length}, range=[${Math.min(...bgVals).toFixed(1)}, ${Math.max(...bgVals).toFixed(1)}]`);
+    const semis = bgVals.filter(v => v >= 0.1 && v <= 3.0).length;
+    const insulators = bgVals.filter(v => v > 3.0).length;
+    const stdBG = Math.sqrt(bgVals.reduce((s, v) => s + (v - avgBG) ** 2, 0) / bgVals.length);
+    stats.push(`Band gap: avg=${avgBG.toFixed(2)} eV (std=${stdBG.toFixed(2)}), metals=${metals}, semiconductors=${semis}, insulators=${insulators} (total=${bgVals.length}), range=[${Math.min(...bgVals).toFixed(1)}, ${Math.max(...bgVals).toFixed(1)}]`);
+    const bins = [0, 0.5, 1, 2, 3, 5, 10];
+    const hist = bins.map((b, i) => {
+      const next = bins[i + 1] ?? Infinity;
+      return bgVals.filter(v => v >= b && v < next).length;
+    });
+    stats.push(`Band gap histogram (eV): [0-0.5)=${hist[0]}, [0.5-1)=${hist[1]}, [1-2)=${hist[2]}, [2-3)=${hist[3]}, [3-5)=${hist[4]}, [5-10)=${hist[5]}, [10+)=${hist[6]}`);
   }
   if (withFE.length >= 10) {
     const feVals = withFE.map(m => m.formationEnergy as number);
     const avgFE = feVals.reduce((s, v) => s + v, 0) / feVals.length;
     const negFE = feVals.filter(v => v < 0).length;
-    stats.push(`Formation energy: avg=${avgFE.toFixed(2)} eV/atom, negative=${negFE}/${feVals.length} (lower=more stable), range=[${Math.min(...feVals).toFixed(1)}, ${Math.max(...feVals).toFixed(1)}]`);
+    const stdFE = Math.sqrt(feVals.reduce((s, v) => s + (v - avgFE) ** 2, 0) / feVals.length);
+    stats.push(`Formation energy: avg=${avgFE.toFixed(2)} eV/atom (std=${stdFE.toFixed(2)}), negative=${negFE}/${feVals.length} (lower=more stable), range=[${Math.min(...feVals).toFixed(1)}, ${Math.max(...feVals).toFixed(1)}]`);
   }
   if (withStab.length >= 10) {
     const stabVals = withStab.map(m => m.stability as number);
     const avgStab = stabVals.reduce((s, v) => s + v, 0) / stabVals.length;
     stats.push(`Stability: avg=${avgStab.toFixed(3)}, range=[${Math.min(...stabVals).toFixed(2)}, ${Math.max(...stabVals).toFixed(2)}]`);
   }
+
+  if (withBG.length >= 20 && withFE.length >= 20) {
+    const paired = materials.filter(m => m.bandGap != null && m.formationEnergy != null);
+    if (paired.length >= 20) {
+      const bgs = paired.map(m => m.bandGap as number);
+      const fes = paired.map(m => m.formationEnergy as number);
+      const avgBG2 = bgs.reduce((s, v) => s + v, 0) / bgs.length;
+      const avgFE2 = fes.reduce((s, v) => s + v, 0) / fes.length;
+      let cov = 0, varBG = 0, varFE = 0;
+      for (let i = 0; i < paired.length; i++) {
+        cov += (bgs[i] - avgBG2) * (fes[i] - avgFE2);
+        varBG += (bgs[i] - avgBG2) ** 2;
+        varFE += (fes[i] - avgFE2) ** 2;
+      }
+      const r = varBG > 0 && varFE > 0 ? cov / Math.sqrt(varBG * varFE) : 0;
+      stats.push(`Correlation(band_gap, formation_energy): r=${r.toFixed(3)} (n=${paired.length})`);
+    }
+  }
+
+  const elementFreq: Record<string, number> = {};
+  for (const m of materials) {
+    const els = (m.formula || "").match(/[A-Z][a-z]?/g) || [];
+    for (const el of els) elementFreq[el] = (elementFreq[el] || 0) + 1;
+  }
+  const topElements = Object.entries(elementFreq).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  if (topElements.length > 0) {
+    stats.push(`Most common elements: ${topElements.map(([el, n]) => `${el}(${n})`).join(", ")}`);
+  }
+
   return stats.join("\n");
 }
 
@@ -97,7 +139,7 @@ export async function analyzeBondingPatterns(
 ): Promise<string[]> {
   if (materials.length === 0) return [];
 
-  const allMats = await storage.getMaterials(200, 0);
+  const allMats = await storage.getMaterials(2000, 0);
   const dataset = allMats.length >= MIN_DATASET_FOR_INSIGHTS ? allMats : materials;
 
   if (dataset.length < 30) {
@@ -144,7 +186,7 @@ Return a JSON object with a single key 'insights' containing an array of 3-5 con
         },
         {
           role: "user",
-          content: `Dataset statistics (${dataset.length} materials):\n${dataStats}\n\nSample data:\n${JSON.stringify(materialSummaries.slice(0, 50), null, 2)}`,
+          content: `Dataset statistics (${dataset.length} materials):\n${dataStats}\n\nSample data:\n${JSON.stringify(materialSummaries.slice(0, 100), null, 2)}`,
         },
       ],
       response_format: { type: "json_object" },
@@ -165,7 +207,7 @@ Return a JSON object with a single key 'insights' containing an array of 3-5 con
       return [];
     }
 
-    const rawInsights = parsed.insights ?? [];
+    const rawInsights = (parsed.insights ?? []).map(s => sanitizeForbiddenWords(s));
     const insights = rawInsights.filter(insight => {
       const physCheck = validatePhysicsRules(insight);
       if (!physCheck.valid) {
@@ -218,7 +260,7 @@ export async function analyzePropertyPredictionPatterns(
 ): Promise<string[]> {
   if (materials.length === 0) return [];
 
-  const allMats = await storage.getMaterials(200, 0);
+  const allMats = await storage.getMaterials(2000, 0);
   const dataset = allMats.length >= MIN_DATASET_FOR_INSIGHTS ? allMats : materials;
 
   if (dataset.length < 30) {
@@ -265,7 +307,7 @@ Return a JSON object with 'insights' (array of 3-5 concise prediction rules, eac
         },
         {
           role: "user",
-          content: `Dataset statistics (${dataset.length} materials):\n${dataStats}\n\nSample data:\n${JSON.stringify(materialSummaries.slice(0, 50), null, 2)}`,
+          content: `Dataset statistics (${dataset.length} materials):\n${dataStats}\n\nSample data:\n${JSON.stringify(materialSummaries.slice(0, 100), null, 2)}`,
         },
       ],
       response_format: { type: "json_object" },
@@ -286,7 +328,7 @@ Return a JSON object with 'insights' (array of 3-5 concise prediction rules, eac
       return [];
     }
 
-    const rawInsights = parsed.insights ?? [];
+    const rawInsights = (parsed.insights ?? []).map(s => sanitizeForbiddenWords(s));
     const insights = rawInsights.filter(insight => {
       const physCheck = validatePhysicsRules(insight);
       if (!physCheck.valid) {

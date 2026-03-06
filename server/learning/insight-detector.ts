@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import crypto from "crypto";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
+import { sanitizeForbiddenWords } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,

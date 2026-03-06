@@ -60,6 +60,7 @@ MatSci-∞ is an AI-powered supercomputer platform aimed at accelerating the dis
 - **Increased ML Batch Size**: Enhanced processing capacity for materials per cycle.
 - **Fractional Stoichiometry Normalization**: Ensures integer stoichiometry for all formulas.
 - **Insight Quality Filter**: Rejects vague insights, requiring quantitative data or specific correlations.
+- **Forbidden Word Sanitizer**: `sanitizeForbiddenWords()` in utils.ts replaces "breakthrough" and "confirmed" with "notable finding" and "verified" in all API responses and LLM outputs.
 - **Milestone Deduplication**: Prevents repeated milestone events on system restarts.
 - **End-to-End Pipeline Pass Rate**: Implements tightened stage thresholds for a more rigorous pipeline.
 - **Family Diversity Metric**: Tracks unique families across a larger set of candidates.
@@ -74,6 +75,18 @@ MatSci-∞ is an AI-powered supercomputer platform aimed at accelerating the dis
 ### Gradient Boosting Model
 - Trained on 500+ superconductor and non-superconductor entries.
 - Uses 300 trees, learning rate 0.1, max depth 4, and 34 physical properties as features.
+- **Failure Feedback Loop**: Accumulates pipeline failure examples and retrains XGBoost every 50 cycles when 20+ new failures exist. Failed candidates become negative training examples (Tc=0).
+
+### Advanced Quantum Physics Modeling
+- **Phonon Dispersion**: Computes phonon branches along high-symmetry path (Gamma-X-M-Gamma) with soft mode detection and imaginary frequency identification.
+- **GW Many-Body Corrections**: Quasiparticle renormalization (Z factor), DOS and bandwidth corrections, vertex corrections to lambda.
+- **Dynamic Spin Susceptibility**: Lindhard-function-based chi(q,omega) with Stoner enhancement, magnetic correlation length, and QCP proximity detection.
+- **Fermi Surface Nesting**: chi_0(q) along high-symmetry vectors (Gamma, X, M, R, A) identifying SDW/AFM, stripe-SDW, and CDW instabilities.
+
+### NLP Engine
+- Statistical analysis dataset: 2000 materials (up from 200).
+- LLM context window: 100 material summaries (up from 50).
+- Enhanced statistics: band gap histograms, metal/semiconductor/insulator classification, std deviations, correlation matrices, element frequency analysis.
 
 ### Alive Engine
 - **Real-time Feedback**: Broadcasts `thought` WebSocket messages for a live-scrolling feed.

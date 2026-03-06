@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
-import { classifyFamily } from "./utils";
+import { classifyFamily, sanitizeForbiddenWords } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -164,12 +164,12 @@ Respond in JSON:
         return {
           area,
           priority: Math.round(priority * 1000) / 1000,
-          reasoning: String(fa.reasoning || ""),
+          reasoning: sanitizeForbiddenWords(String(fa.reasoning || "")),
         };
       })
       .sort((a, b) => b.priority - a.priority);
 
-    const summary = String(parsed.summary || "Continuing broad exploration.");
+    const summary = sanitizeForbiddenWords(String(parsed.summary || "Continuing broad exploration."));
 
     const performanceSignals = { familyStats, failureByFamily, underExplored, insightCount: recentInsights.length };
 

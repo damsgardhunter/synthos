@@ -1,5 +1,6 @@
-import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
+import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
+import { storage } from "../storage";
 
 interface TreeNode {
   featureIndex: number;
@@ -460,4 +461,68 @@ export function getConfidenceBand(predictedTc: number): { lower: number; upper: 
     lower: Math.round(Math.max(0, predictedTc - errorMargin) * 10) / 10,
     upper: Math.round((predictedTc + errorMargin) * 10) / 10,
   };
+}
+
+let failureExamples: SuperconEntry[] = [];
+
+export function invalidateModel(): void {
+  cachedModel = null;
+  cachedCalibration = null;
+}
+
+export async function incorporateFailureData(): Promise<number> {
+  const failedResults = await storage.getFailedComputationalResults(500);
+  if (failedResults.length === 0) return 0;
+
+  const seenFormulas = new Set<string>(
+    [...SUPERCON_TRAINING_DATA, ...failureExamples].map(e => e.formula)
+  );
+
+  let added = 0;
+  for (const result of failedResults) {
+    const formula = result.formula;
+    if (seenFormulas.has(formula)) continue;
+    seenFormulas.add(formula);
+    failureExamples.push({
+      formula,
+      tc: 0,
+      family: "Failed",
+      isSuperconductor: false,
+    });
+    added++;
+  }
+
+  if (added > 0) {
+    invalidateModel();
+
+    const augmentedData = [...SUPERCON_TRAINING_DATA, ...failureExamples];
+
+    const X: number[][] = [];
+    const y: number[] = [];
+
+    for (const entry of augmentedData) {
+      try {
+        const features = extractFeatures(entry.formula);
+        const fArr = featureVectorToArray(features);
+        if (fArr.some(v => !Number.isFinite(v))) continue;
+        X.push(fArr);
+        y.push(entry.tc);
+      } catch {
+        continue;
+      }
+    }
+
+    if (X.length >= 10) {
+      cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+      cachedCalibration = computeCalibration(cachedModel);
+    }
+
+    console.log(`XGBoost model retrained with ${failureExamples.length} failure examples`);
+  }
+
+  return added;
+}
+
+export function getFailureExampleCount(): number {
+  return failureExamples.length;
 }

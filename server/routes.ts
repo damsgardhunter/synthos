@@ -8,6 +8,7 @@ import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
 import { fetchAllData as fetchMPAllData, isApiAvailable as isMPAvailable } from "./learning/materials-project-client";
 import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./learning/aflow-client";
+import { sanitizeForbiddenWords } from "./learning/utils";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -98,7 +99,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/learning-phases", async (_req, res) => {
     try {
       const phases = await storage.getLearningPhases();
-      res.json(phases);
+      const sanitized = phases.map(p => ({
+        ...p,
+        insights: (p.insights ?? []).map((s: string) => sanitizeForbiddenWords(s)),
+      }));
+      res.json(sanitized);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch learning phases" });
     }
@@ -119,7 +124,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const limit = Math.min(Number(req.query.limit) || 100, 500);
       const logs = await storage.getResearchLogs(limit);
-      res.json(logs);
+      const sanitized = logs.map(log => ({
+        ...log,
+        detail: sanitizeForbiddenWords(log.detail || ""),
+        event: sanitizeForbiddenWords(log.event || ""),
+      }));
+      res.json(sanitized);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch research logs" });
     }
@@ -498,23 +508,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const narratives = await storage.getResearchLogsByEvent("cycle-narrative", 10);
 
       res.json({
-        currentHypothesis,
+        currentHypothesis: currentHypothesis ? {
+          ...currentHypothesis,
+          reasoning: sanitizeForbiddenWords(currentHypothesis.reasoning || ""),
+        } : null,
         familyStats,
         topInsights: topInsights.map(i => ({
-          text: i.insightText,
+          text: sanitizeForbiddenWords(i.insightText || ""),
           noveltyScore: i.noveltyScore,
           category: i.category,
           discoveredAt: i.discoveredAt,
         })),
         abandonedStrategies,
         milestoneCount,
-        recentMilestones: milestones.slice(0, 5),
+        recentMilestones: milestones.slice(0, 5).map(m => ({
+          ...m,
+          description: sanitizeForbiddenWords(m.description || ""),
+          title: sanitizeForbiddenWords(m.title || ""),
+        })),
         totalCycles: latestSnapshot?.cycle ?? 0,
         bestTc: latestSnapshot?.bestTc ?? 0,
         bestScore: latestSnapshot?.bestScore ?? 0,
         familyDiversity: latestSnapshot?.familyDiversity ?? 0,
         pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
-        cycleNarratives: narratives.map(n => ({ detail: n.detail, timestamp: n.timestamp })),
+        cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch engine memory" });

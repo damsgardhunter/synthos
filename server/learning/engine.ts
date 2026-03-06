@@ -13,8 +13,8 @@ import { evaluateInsightNovelty, requiresQuantitativeContent } from "./insight-d
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures } from "./ml-predictor";
-import { gbPredict } from "./gradient-boost";
-import { normalizeFormula, classifyFamily } from "./utils";
+import { gbPredict, incorporateFailureData, getFailureExampleCount } from "./gradient-boost";
+import { normalizeFormula, classifyFamily, sanitizeForbiddenWords } from "./utils";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -79,6 +79,8 @@ let totalDFTEnriched = 0;
 let currentStatusMessage = "Initializing research systems";
 let recentTcImproved = false;
 let recentNewCandidates = 0;
+let failuresSinceLastRetrain = 0;
+let lastRetrainCycle = 0;
 
 interface PreviousCycleMetrics {
   bestTc: number;
@@ -252,7 +254,7 @@ async function addInsightsToPhase(phaseId: number, newInsights: string[]) {
     const phase = await storage.getLearningPhaseById(phaseId);
     if (!phase) return;
     const existing = phase.insights ?? [];
-    const combined = [...existing, ...newInsights].slice(-20);
+    const combined = [...existing, ...newInsights.map(s => sanitizeForbiddenWords(s))].slice(-20);
     await storage.upsertLearningPhase({
       ...phase,
       insights: combined,
@@ -706,6 +708,42 @@ async function runPhase10_Physics() {
         const currentEnsemble = candidate.ensembleScore ?? 0;
         const boostedEnsemble = Math.min(0.98, currentEnsemble + boundaryBoost);
 
+        const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
+        const updatedMlFeatures = {
+          ...existingMlFeatures,
+          phononDispersion: {
+            qPath: result.phononDispersion.qPath,
+            branchCount: result.phononDispersion.branches.length,
+            softModeQPoints: result.phononDispersion.softModeQPoints,
+            imaginaryFrequencies: result.phononDispersion.imaginaryFrequencies,
+            maxAcousticFreq: result.phononDispersion.maxAcousticFreq,
+            minOpticalFreq: result.phononDispersion.minOpticalFreq,
+            phononGap: result.phononDispersion.phononGap,
+          },
+          manyBodyCorrections: {
+            quasiparticleWeight: result.manyBodyCorrections.quasiparticleWeight,
+            gwDOSRenormalization: result.manyBodyCorrections.gwDOSRenormalization,
+            gwBandwidthCorrection: result.manyBodyCorrections.gwBandwidthCorrection,
+            vertexCorrectionLambda: result.manyBodyCorrections.vertexCorrectionLambda,
+            correctedLambda: result.manyBodyCorrections.correctedLambda,
+          },
+          nestingFunction: {
+            peakNestingQ: result.nestingFunction.peakNestingQ,
+            peakNestingValue: result.nestingFunction.peakNestingValue,
+            averageNesting: result.nestingFunction.averageNesting,
+            nestingAnisotropy: result.nestingFunction.nestingAnisotropy,
+            dominantInstability: result.nestingFunction.dominantInstability,
+          },
+          spinSusceptibility: {
+            chiStaticPeak: result.spinSusceptibility.chiStaticPeak,
+            chiDynamicPeak: result.spinSusceptibility.chiDynamicPeak,
+            spinFluctuationEnergy: result.spinSusceptibility.spinFluctuationEnergy,
+            correlationLength: result.spinSusceptibility.correlationLength,
+            stonerEnhancement: result.spinSusceptibility.stonerEnhancement,
+            isNearQCP: result.spinSusceptibility.isNearQCP,
+          },
+        };
+
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
           logPhononFrequency: result.coupling.omegaLog,
@@ -726,6 +764,7 @@ async function runPhase10_Physics() {
           verificationStage: 1,
           notes: updatedNotes,
           ensembleScore: boostedEnsemble,
+          mlFeatures: updatedMlFeatures as any,
         });
 
         if (updatedTc !== currentTc) {
@@ -1260,6 +1299,33 @@ async function runLearningCycle() {
 
       if (state === "running") {
         await runDFTEnrichment();
+      }
+
+      if (state === "running" && cycleCount % 50 === 0) {
+        try {
+          const failedResults = await storage.getFailedComputationalResults(500);
+          const newFailures = failedResults.length - failuresSinceLastRetrain;
+          if (newFailures >= 20) {
+            const added = await incorporateFailureData();
+            if (added > 0) {
+              failuresSinceLastRetrain = failedResults.length;
+              lastRetrainCycle = cycleCount;
+              emit("log", {
+                phase: "engine",
+                event: `XGBoost model retrained with ${getFailureExampleCount()} failure examples`,
+                detail: `Added ${added} new failure examples from pipeline. Total failure training data: ${getFailureExampleCount()}. Retrain triggered at cycle ${cycleCount}.`,
+                dataSource: "ML Engine",
+              });
+            }
+          }
+        } catch (err: any) {
+          emit("log", {
+            phase: "engine",
+            event: "XGBoost retrain error",
+            detail: err.message?.slice(0, 150) || "unknown",
+            dataSource: "ML Engine",
+          });
+        }
       }
 
       if (state === "running") {

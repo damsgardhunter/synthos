@@ -1383,8 +1383,10 @@ function estimateSpinFluctuationTc(
     return { mechanism: "spin-fluctuation", tcEstimate: 0, confidence: 0.1, description: "No magnetic proximity" };
   }
 
-  const T_sf = 200 * (1 - Math.abs(stonerMax - 1.0));
-  const V_sf = corr * 0.8;
+  const spinSusc = computeDynamicSpinSusceptibility(formula, electronic);
+
+  const T_sf = spinSusc.spinFluctuationEnergy * (1 + spinSusc.stonerEnhancement * 0.1);
+  const V_sf = corr * 0.8 * Math.min(spinSusc.stonerEnhancement / 10, 2.0);
   const exponent = V_sf * N_EF;
 
   let tc_sf = 0;
@@ -1392,8 +1394,13 @@ function estimateSpinFluctuationTc(
     tc_sf = T_sf * Math.exp(-1 / exponent);
   }
 
-  if (nearQCP) tc_sf *= 2.0;
+  if (spinSusc.isNearQCP) tc_sf *= 2.0;
+  else if (nearQCP) tc_sf *= 1.8;
   if (hasAFM) tc_sf *= 1.5;
+
+  if (spinSusc.correlationLength > 5) {
+    tc_sf *= (1 + Math.log(spinSusc.correlationLength) * 0.15);
+  }
 
   const isCuprate = elements.includes("Cu") && elements.includes("O");
   const isIronBased = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
@@ -1412,13 +1419,20 @@ function estimateSpinFluctuationTc(
   }
 
   tc_sf = Math.max(0, Math.round(tc_sf));
-  const confidence = nearQCP ? 0.5 : (hasAFM ? 0.4 : 0.2);
+  const confidence = spinSusc.isNearQCP ? 0.55 : nearQCP ? 0.5 : (hasAFM ? 0.4 : 0.2);
+
+  const descParts: string[] = [];
+  if (spinSusc.isNearQCP) descParts.push("Near magnetic quantum critical point");
+  else if (nearQCP) descParts.push("Near magnetic QCP (Stoner)");
+  else if (hasAFM) descParts.push("AFM-proximity-mediated pairing");
+  else descParts.push("Weak spin-fluctuation contribution");
+  descParts.push(`χ(q,ω): peak=${spinSusc.chiStaticPeak.toFixed(1)}, ξ=${spinSusc.correlationLength.toFixed(1)}a`);
 
   return {
     mechanism: "spin-fluctuation",
     tcEstimate: tc_sf,
     confidence,
-    description: nearQCP ? "Near magnetic quantum critical point" : (hasAFM ? "AFM-proximity-mediated pairing" : "Weak spin-fluctuation contribution"),
+    description: descParts.join("; "),
   };
 }
 
@@ -1817,6 +1831,350 @@ export function computeCriticalFields(
   };
 }
 
+export interface PhononDispersionData {
+  qPath: string[];
+  branches: { label: string; frequencies: number[]; isSoft: boolean }[];
+  softModeQPoints: string[];
+  imaginaryFrequencies: number;
+  maxAcousticFreq: number;
+  minOpticalFreq: number;
+  phononGap: number;
+}
+
+export function computePhononDispersion(
+  formula: string,
+  electronicStructure: ElectronicStructure,
+  phononSpectrum: PhononSpectrum
+): PhononDispersionData {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const avgMass = getAverageMass(counts);
+  const lightestMass = getLightestMass(elements);
+
+  const qPath = ["Γ", "X", "M", "Γ"];
+  const nQPoints = 20;
+  const nAtoms = Math.max(1, Math.round(totalAtoms));
+  const nAcoustic = 3;
+  const nOptical = Math.max(0, nAtoms * 3 - 3);
+  const nBranches = Math.min(nAcoustic + nOptical, 12);
+
+  const thetaD = phononSpectrum.debyeTemperature;
+  const maxFreq = phononSpectrum.maxPhononFrequency;
+  const logAvg = phononSpectrum.logAverageFrequency;
+
+  const springConstant = thetaD * 0.695;
+
+  const branches: { label: string; frequencies: number[]; isSoft: boolean }[] = [];
+  const softModeQPoints: string[] = [];
+  let imaginaryCount = 0;
+  let maxAcousticFreq = 0;
+  let minOpticalFreq = Infinity;
+
+  for (let b = 0; b < nBranches; b++) {
+    const isAcoustic = b < nAcoustic;
+    const branchLabel = isAcoustic
+      ? (b === 0 ? "LA" : b === 1 ? "TA1" : "TA2")
+      : `O${b - nAcoustic + 1}`;
+
+    const frequencies: number[] = [];
+    let isSoft = false;
+
+    const branchScale = isAcoustic
+      ? springConstant * (b === 0 ? 1.0 : 0.7 - b * 0.1)
+      : logAvg + (maxFreq - logAvg) * ((b - nAcoustic) / Math.max(1, nBranches - nAcoustic));
+
+    for (let qi = 0; qi < nQPoints; qi++) {
+      const qFrac = qi / (nQPoints - 1);
+
+      let segmentPhase: number;
+      if (qi < nQPoints / 3) {
+        segmentPhase = (qi / (nQPoints / 3)) * Math.PI;
+      } else if (qi < (2 * nQPoints) / 3) {
+        segmentPhase = ((qi - nQPoints / 3) / (nQPoints / 3)) * Math.PI;
+      } else {
+        segmentPhase = ((qi - 2 * nQPoints / 3) / (nQPoints / 3)) * Math.PI;
+      }
+
+      let freq: number;
+      if (isAcoustic) {
+        freq = branchScale * Math.abs(Math.sin(segmentPhase / 2));
+
+        if (electronicStructure.correlationStrength > 0.7 && qFrac > 0.3 && qFrac < 0.7) {
+          const softening = 1 - (electronicStructure.correlationStrength - 0.7) * 0.8;
+          freq *= Math.max(0.1, softening);
+        }
+      } else {
+        const baseline = branchScale;
+        const dispersion = (maxFreq - logAvg) * 0.15 * Math.cos(segmentPhase);
+        freq = baseline + dispersion;
+
+        if (phononSpectrum.softModePresent && b === nAcoustic) {
+          const softDip = 1 - phononSpectrum.softModeScore * 0.6 * Math.exp(-Math.pow(qFrac - 0.5, 2) * 20);
+          freq *= Math.max(0.05, softDip);
+        }
+      }
+
+      const anharmonicNoise = 1 + (Math.sin(qi * 7 + b * 3) * 0.03 * phononSpectrum.anharmonicityIndex);
+      freq *= anharmonicNoise;
+
+      if (phononSpectrum.hasImaginaryModes && isAcoustic && b === 2 && qFrac > 0.4 && qFrac < 0.6) {
+        freq = -Math.abs(freq) * 0.3;
+        imaginaryCount++;
+      }
+
+      if (freq < 0) {
+        imaginaryCount++;
+        const segIdx = Math.floor(qFrac * 3);
+        const segLabel = segIdx === 0 ? "Γ-X" : segIdx === 1 ? "X-M" : "M-Γ";
+        if (!softModeQPoints.includes(segLabel)) softModeQPoints.push(segLabel);
+      }
+
+      if (Math.abs(freq) < logAvg * 0.15 && !isAcoustic) {
+        isSoft = true;
+      }
+
+      freq = Math.round(freq * 10) / 10;
+      frequencies.push(freq);
+
+      if (isAcoustic && freq > maxAcousticFreq) maxAcousticFreq = freq;
+      if (!isAcoustic && freq > 0 && freq < minOpticalFreq) minOpticalFreq = freq;
+    }
+
+    branches.push({ label: branchLabel, frequencies, isSoft });
+  }
+
+  if (minOpticalFreq === Infinity) minOpticalFreq = logAvg;
+  const phononGap = Math.max(0, minOpticalFreq - maxAcousticFreq);
+
+  return {
+    qPath,
+    branches,
+    softModeQPoints,
+    imaginaryFrequencies: imaginaryCount,
+    maxAcousticFreq: Math.round(maxAcousticFreq * 10) / 10,
+    minOpticalFreq: Math.round(minOpticalFreq * 10) / 10,
+    phononGap: Math.round(phononGap * 10) / 10,
+  };
+}
+
+export interface ManyBodyCorrections {
+  gwDOSRenormalization: number;
+  gwBandwidthCorrection: number;
+  vertexCorrectionLambda: number;
+  quasiparticleWeight: number;
+  selfEnergyShift: number;
+  correctedDOS: number;
+  correctedBandwidth: number;
+  correctedLambda: number;
+}
+
+export function applyManyBodyCorrections(
+  electronicStructure: ElectronicStructure,
+  coupling: ElectronPhononCoupling,
+  formula: string
+): ManyBodyCorrections {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const corr = electronicStructure.correlationStrength;
+  const N_EF = electronicStructure.densityOfStatesAtFermi;
+  const lambda = coupling.lambda;
+
+  let wAvg = 0;
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    wAvg += estimateBandwidthW(el) * frac;
+  }
+  wAvg = Math.max(1.0, wAvg);
+
+  const Z = 1 / (1 + lambda);
+  const quasiparticleWeight = Math.max(0.1, Math.min(1.0, Z));
+
+  const gwDOSRenormalization = 1 + corr * 0.3 + lambda * 0.15;
+  const correctedDOS = N_EF * gwDOSRenormalization;
+
+  const gwBandwidthCorrection = 1 - corr * 0.25 - lambda * 0.1;
+  const correctedBandwidth = wAvg * Math.max(0.3, gwBandwidthCorrection);
+
+  const uOverW = estimateHubbardUoverW(elements, counts);
+  const vertexParam = uOverW * corr;
+  const vertexCorrectionLambda = 1 + vertexParam * 0.2 - vertexParam * vertexParam * 0.15;
+  const correctedLambda = lambda * Math.max(0.5, vertexCorrectionLambda);
+
+  const selfEnergyShift = -corr * 0.5 * wAvg * (1 + lambda * 0.3);
+
+  return {
+    gwDOSRenormalization: Number(gwDOSRenormalization.toFixed(4)),
+    gwBandwidthCorrection: Number(gwBandwidthCorrection.toFixed(4)),
+    vertexCorrectionLambda: Number(vertexCorrectionLambda.toFixed(4)),
+    quasiparticleWeight: Number(quasiparticleWeight.toFixed(4)),
+    selfEnergyShift: Number(selfEnergyShift.toFixed(4)),
+    correctedDOS: Number(correctedDOS.toFixed(3)),
+    correctedBandwidth: Number(correctedBandwidth.toFixed(3)),
+    correctedLambda: Number(correctedLambda.toFixed(4)),
+  };
+}
+
+export interface NestingFunctionData {
+  qVectors: { label: string; q: [number, number, number] }[];
+  nestingValues: number[];
+  peakNestingQ: string;
+  peakNestingValue: number;
+  averageNesting: number;
+  nestingAnisotropy: number;
+  dominantInstability: string;
+}
+
+export function computeNestingFunction(
+  formula: string,
+  electronicStructure: ElectronicStructure
+): NestingFunctionData {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const N_EF = electronicStructure.densityOfStatesAtFermi;
+  const nestingScore = electronicStructure.nestingScore;
+  const corr = electronicStructure.correlationStrength;
+
+  const qVectors: { label: string; q: [number, number, number] }[] = [
+    { label: "Γ", q: [0, 0, 0] },
+    { label: "X", q: [0.5, 0, 0] },
+    { label: "M", q: [0.5, 0.5, 0] },
+    { label: "R", q: [0.5, 0.5, 0.5] },
+    { label: "A", q: [0.5, 0, 0.5] },
+    { label: "(π,π)", q: [0.5, 0.5, 0] },
+    { label: "(π,0)", q: [0.5, 0, 0] },
+    { label: "(π/2,π/2)", q: [0.25, 0.25, 0] },
+  ];
+
+  let totalVE = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
+  }
+  const vec = totalVE / totalAtoms;
+
+  const kF = Math.pow(3 * Math.PI * Math.PI * Math.max(vec, 0.5), 1 / 3) * 0.5;
+
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+
+  const nestingValues: number[] = [];
+
+  for (const qv of qVectors) {
+    const qMag = Math.sqrt(qv.q[0] ** 2 + qv.q[1] ** 2 + qv.q[2] ** 2);
+
+    let chi0: number;
+    if (qMag < 0.01) {
+      chi0 = N_EF;
+    } else {
+      const x = qMag / (2 * kF);
+      if (x < 0.01) {
+        chi0 = N_EF;
+      } else if (x >= 1.0) {
+        chi0 = N_EF * 0.5 * (1 + (1 - x * x) / (2 * x) * Math.log(Math.abs((1 + x) / (1 - x + 0.001))));
+      } else {
+        chi0 = N_EF * (0.5 + (1 - x * x) / (4 * x) * Math.log(Math.abs((1 + x) / (Math.abs(1 - x) + 0.001))));
+      }
+    }
+
+    chi0 = Math.max(0, chi0);
+
+    if (isCuprate && qv.label === "(π,π)") {
+      chi0 *= (1 + corr * 2.5);
+    }
+    if (isPnictide && (qv.label === "(π,0)" || qv.label === "(π,π)")) {
+      chi0 *= (1 + corr * 1.8);
+    }
+
+    chi0 *= (1 + nestingScore * 0.5);
+
+    nestingValues.push(Number(chi0.toFixed(4)));
+  }
+
+  const peakIdx = nestingValues.indexOf(Math.max(...nestingValues));
+  const peakNestingQ = qVectors[peakIdx].label;
+  const peakNestingValue = nestingValues[peakIdx];
+  const averageNesting = Number((nestingValues.reduce((a, b) => a + b, 0) / nestingValues.length).toFixed(4));
+  const nestingAnisotropy = peakNestingValue > 0
+    ? Number(((peakNestingValue - Math.min(...nestingValues)) / peakNestingValue).toFixed(4))
+    : 0;
+
+  let dominantInstability = "none";
+  if (peakNestingValue > N_EF * 2) {
+    if (peakNestingQ === "(π,π)" || peakNestingQ === "M") dominantInstability = "SDW/AFM";
+    else if (peakNestingQ === "(π,0)" || peakNestingQ === "X") dominantInstability = "stripe-SDW";
+    else dominantInstability = "CDW";
+  } else if (peakNestingValue > N_EF * 1.3) {
+    dominantInstability = "weak-nesting";
+  }
+
+  return {
+    qVectors,
+    nestingValues,
+    peakNestingQ,
+    peakNestingValue,
+    averageNesting,
+    nestingAnisotropy,
+    dominantInstability,
+  };
+}
+
+export interface DynamicSpinSusceptibility {
+  chiStaticPeak: number;
+  chiDynamicPeak: number;
+  spinFluctuationEnergy: number;
+  correlationLength: number;
+  stonerEnhancement: number;
+  isNearQCP: boolean;
+}
+
+function computeDynamicSpinSusceptibility(
+  formula: string,
+  electronic: ElectronicStructure
+): DynamicSpinSusceptibility {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const N_EF = electronic.densityOfStatesAtFermi;
+  const corr = electronic.correlationStrength;
+
+  let stonerMax = 0;
+  for (const el of elements) {
+    const I = getStonerParameter(el);
+    if (I !== null) stonerMax = Math.max(stonerMax, I);
+  }
+
+  const stonerProduct = stonerMax * N_EF;
+  const stonerEnhancement = stonerProduct < 1.0
+    ? 1 / Math.max(0.01, 1 - stonerProduct)
+    : 1 / 0.01;
+
+  const chiStaticPeak = N_EF * Math.min(stonerEnhancement, 100);
+
+  const omega_sf = stonerProduct < 1.0
+    ? 50 * Math.max(0.01, 1 - stonerProduct)
+    : 0.5;
+
+  const chiDynamicPeak = chiStaticPeak * 0.8;
+
+  const xiSpin = stonerProduct < 1.0
+    ? 1 / Math.sqrt(Math.max(0.01, 1 - stonerProduct))
+    : 10;
+  const correlationLength = Math.min(50, xiSpin);
+
+  const isNearQCP = stonerProduct > 0.7 && stonerProduct < 1.2;
+
+  return {
+    chiStaticPeak: Number(chiStaticPeak.toFixed(3)),
+    chiDynamicPeak: Number(chiDynamicPeak.toFixed(3)),
+    spinFluctuationEnergy: Number(omega_sf.toFixed(3)),
+    correlationLength: Number(correlationLength.toFixed(3)),
+    stonerEnhancement: Number(Math.min(stonerEnhancement, 100).toFixed(3)),
+    isNearQCP,
+  };
+}
+
 export function assessCorrelationStrength(formula: string): {
   ratio: number;
   regime: string;
@@ -2068,6 +2426,10 @@ export async function runFullPhysicsAnalysis(
   uncertaintyEstimate: number;
   pairingAnalysis: UnifiedPairingResult;
   instabilityProximity: InstabilityProximity;
+  phononDispersion: PhononDispersionData;
+  manyBodyCorrections: ManyBodyCorrections;
+  nestingFunction: NestingFunctionData;
+  spinSusceptibility: DynamicSpinSusceptibility;
 }> {
   const formula = candidate.formula;
 
@@ -2251,6 +2613,38 @@ export async function runFullPhysicsAnalysis(
     dataSource: "Physics Engine",
   });
 
+  const phononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);
+  emit("log", {
+    phase: "phase-10",
+    event: "Phonon dispersion computed",
+    detail: `${formula}: ${phononDispersion.branches.length} branches along ${phononDispersion.qPath.join("-")}, imaginary=${phononDispersion.imaginaryFrequencies}, soft q-points=[${phononDispersion.softModeQPoints.join(",")}], gap=${phononDispersion.phononGap.toFixed(1)} cm⁻¹`,
+    dataSource: "Physics Engine",
+  });
+
+  const manyBodyCorrections = applyManyBodyCorrections(electronicStructure, coupling, formula);
+  emit("log", {
+    phase: "phase-10",
+    event: "GW many-body corrections applied",
+    detail: `${formula}: Z=${manyBodyCorrections.quasiparticleWeight.toFixed(3)}, DOS renorm=${manyBodyCorrections.gwDOSRenormalization.toFixed(3)}, BW corr=${manyBodyCorrections.gwBandwidthCorrection.toFixed(3)}, vertex λ-corr=${manyBodyCorrections.vertexCorrectionLambda.toFixed(3)}, corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)}`,
+    dataSource: "Physics Engine",
+  });
+
+  const nestingFunction = computeNestingFunction(formula, electronicStructure);
+  emit("log", {
+    phase: "phase-10",
+    event: "Nesting function computed",
+    detail: `${formula}: peak χ(q)=${nestingFunction.peakNestingValue.toFixed(3)} at ${nestingFunction.peakNestingQ}, avg=${nestingFunction.averageNesting.toFixed(3)}, anisotropy=${nestingFunction.nestingAnisotropy.toFixed(3)}, instability=${nestingFunction.dominantInstability}`,
+    dataSource: "Physics Engine",
+  });
+
+  const spinSusceptibility = computeDynamicSpinSusceptibility(formula, electronicStructure);
+  emit("log", {
+    phase: "phase-10",
+    event: "Dynamic spin susceptibility computed",
+    detail: `${formula}: χ_static=${spinSusceptibility.chiStaticPeak.toFixed(2)}, χ_dynamic=${spinSusceptibility.chiDynamicPeak.toFixed(2)}, ω_sf=${spinSusceptibility.spinFluctuationEnergy.toFixed(2)} meV, ξ=${spinSusceptibility.correlationLength.toFixed(2)}a, Stoner=${spinSusceptibility.stonerEnhancement.toFixed(2)}, QCP=${spinSusceptibility.isNearQCP}`,
+    dataSource: "Physics Engine",
+  });
+
   return {
     electronicStructure,
     phononSpectrum,
@@ -2263,5 +2657,9 @@ export async function runFullPhysicsAnalysis(
     uncertaintyEstimate,
     pairingAnalysis,
     instabilityProximity,
+    phononDispersion,
+    manyBodyCorrections,
+    nestingFunction,
+    spinSusceptibility,
   };
 }
