@@ -350,6 +350,10 @@ export function classifyHydrogenBonding(formula: string, pressureGpa: number = 0
 
 type MaterialClass = "conventional-metal" | "cuprate" | "iron-pnictide" | "hydride-low-p" | "hydride-high-p" | "superhydride" | "light-element" | "heavy-fermion" | "other";
 
+function isHydrideForLambda(matClass: MaterialClass): boolean {
+  return matClass === "superhydride" || matClass === "hydride-high-p" || matClass === "hydride-low-p";
+}
+
 function classifyMaterialForLambda(formula: string, pressureGpa: number = 0): MaterialClass {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -1452,6 +1456,20 @@ export function computeElectronPhononCoupling(
     lambda = Math.min(classLambdaCap * 1.2, lambda);
   } else {
     lambda = Math.min(classLambdaCap, lambda);
+  }
+
+  if (formula) {
+    const cts = parseFormulaCounts(formula);
+    const els = Object.keys(cts);
+    const totalAt = Object.values(cts).reduce((s, n) => s + n, 0);
+    const hFrac = (cts["H"] || 0) / Math.max(1, totalAt);
+    if (hFrac < 0.1 && !isHydrideForLambda(matClass)) {
+      const lowHCap = 1.3;
+      if (lambda > lowHCap) {
+        lambda = lowHCap + (lambda - lowHCap) * 0.1;
+        lambda = Math.min(lambda, 1.5);
+      }
+    }
   }
 
   if (lambda > 2.0 && matClass !== "superhydride" && matClass !== "hydride-high-p") {

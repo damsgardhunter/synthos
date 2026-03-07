@@ -11,6 +11,7 @@ import {
   detectStructuralMotifs,
   simulatePressureEffects,
 } from "./physics-engine";
+import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import {
   ELEMENTAL_DATA,
   getElementData,
@@ -300,7 +301,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     hasChalcogen,
     hasPnictogen,
     bandGap: mat?.bandGap ?? null,
-    formationEnergy: mat?.formationEnergy ?? null,
+    formationEnergy: mat?.formationEnergy ?? (() => { try { return computeMiedemaFormationEnergy(formula); } catch { return null; } })(),
     stability: mat?.stability ?? null,
     crystalSymmetry: useSpacegroup,
     electronDensityEstimate,
@@ -679,12 +680,19 @@ Return JSON with:
         tcCap = mcMillanMax > 0 ? Math.min(500, mcMillanMax * 1.3) : 450;
       }
       tcCap = Math.round(tcCap);
-      const cappedTc = Math.min(rawTc, tcCap);
+      let finalTc: number;
+      if (mcMillanMax > 0 && rawTc > tcCap) {
+        const physicsTc = mcMillanMax;
+        finalTc = Math.round(0.6 * physicsTc + 0.3 * rawTc + 0.1 * tcCap);
+        finalTc = Math.min(finalTc, tcCap);
+      } else {
+        finalTc = Math.min(rawTc, tcCap);
+      }
 
       candidates.push({
         name: xgb.mat.name,
         formula: xgb.mat.formula,
-        predictedTc: cappedTc,
+        predictedTc: finalTc,
         pressureGpa: nn.pressureGpa ?? null,
         meissnerEffect: nn.meissnerEffect ?? false,
         zeroResistance: nn.zeroResistance ?? false,
@@ -698,7 +706,7 @@ Return JSON with:
         ensembleScore,
         roomTempViable: nn.roomTempViable ?? false,
         status: ensembleScore > 0.7 ? "promising" : "theoretical",
-        notes: (cappedTc < rawTc ? `[LLM proposed Tc=${rawTc}K, capped to ${cappedTc}K by McMillan physics] ` : '') + (nn.reasoning ?? xgb.xgb.reasoning[0]),
+        notes: (finalTc < rawTc ? `[LLM proposed Tc=${rawTc}K, physics-weighted to ${finalTc}K (Allen-Dynes=${mcMillanMax}K)] ` : '') + (nn.reasoning ?? xgb.xgb.reasoning[0]),
         electronPhononCoupling: xgb.features.electronPhononLambda,
         logPhononFrequency: xgb.features.logPhononFreq,
         coulombPseudopotential: 0.12,

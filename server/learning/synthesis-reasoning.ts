@@ -150,7 +150,8 @@ export async function analyzeThermodynamicLandscape(
     ? competingPhases.some((p: any) => p.type === "structural")
     : false;
 
-  const maxSynthesisTemp = Math.round(meltingPointEstimate * 0.85);
+  const meltingCelsius = meltingPointEstimate > 300 ? meltingPointEstimate - 273 : meltingPointEstimate;
+  const maxSynthesisTemp = Math.round(Math.min(1600, meltingCelsius * 0.65));
 
   return {
     formula,
@@ -303,7 +304,8 @@ export function proposeNovelSynthesisRoutes(
 
 function createHEAOptimizedRoute(formula: string, landscape: ThermodynamicLandscape, elements: string[]): NovelSynthesisRoute {
   const tmElements = elements.filter(e => isTransitionMetal(e));
-  const sinterTemp = Math.round(landscape.meltingPointEstimate * 0.7);
+  const heaMeltC = landscape.meltingPointEstimate > 300 ? landscape.meltingPointEstimate - 273 : landscape.meltingPointEstimate;
+  const sinterTemp = Math.round(Math.min(1400, heaMeltC * 0.6));
 
   return {
     method: "Entropy-Stabilized Synthesis via Mechanical Alloying + SPS",
@@ -406,7 +408,7 @@ function createConventionalOptimizedRoute(formula: string, landscape: Thermodyna
     expectedYieldRange: "80-95%",
     noveltyScore: 0.3,
     synthesisConfidence: "high",
-    physicsJustification: `Thermodynamically stable compound (hull distance ${landscape.energyAboveHull.toFixed(3)} eV/atom) — standard solid-state synthesis is thermodynamically favorable. Multi-step firing with intermediate grinding ensures complete reaction and phase homogeneity. Sintering temperature set at 85% of estimated melting point (${landscape.meltingPointEstimate}K) for optimal densification without decomposition.`,
+    physicsJustification: `Thermodynamically stable compound (hull distance ${landscape.energyAboveHull.toFixed(3)} eV/atom) — standard solid-state synthesis is thermodynamically favorable. Multi-step firing with intermediate grinding ensures complete reaction and phase homogeneity. Sintering temperature set at 65% of melting point (${landscape.meltingPointEstimate}K -> ${landscape.maxSynthesisTemp}C) for optimal densification without decomposition.`,
     source: "physics-reasoned",
     keyInnovation: `Physics-guided sintering temperature (${sinterTemp}C) based on compositionally-weighted melting point estimate with iterative phase-purity feedback`,
   };
