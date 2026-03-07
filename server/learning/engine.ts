@@ -59,6 +59,8 @@ import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
 import { getZoneBonus, getLandscapeRLBias } from "../landscape/landscape-guidance";
 import { getZoneMap } from "../landscape/zone-detector";
+import { getConstraintGuidanceForGenerator } from "../inverse/constraint-solver";
+import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pathway";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 
@@ -2098,6 +2100,21 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       addMaterialToDataset(formula, finalTc, physicsResult.coupling.lambda, physicsResult.pairingAnalysis?.symmetry ?? "unknown", family);
     } catch {}
 
+    const candidatePressure = features.pressureGpa ?? candidate.pressureGpa ?? 0;
+    if (finalTc > 50 && candidatePressure > 10) {
+      try {
+        const pathway = getPathwayForCandidate(formula, finalTc, candidatePressure);
+        if (pathway.bestAmbientTc > 20 && pathway.strategies.length > 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Pressure-to-ambient pathway",
+            detail: `${formula} (Tc=${finalTc}K, P=${candidatePressure}GPa): best ambient candidate ${pathway.bestAmbientFormula} est. Tc=${pathway.bestAmbientTc}K (${pathway.retentionPercent}% retention). Strategy: ${pathway.strategies[0]?.type}. Feasibility: ${pathway.feasibility}`,
+            dataSource: "Pressure Pathway",
+          });
+        }
+      } catch {}
+    }
+
     if (finalTc > autonomousBestTc) {
       autonomousBestTc = finalTc;
     }
@@ -2163,10 +2180,16 @@ async function runAutonomousFastPath() {
       focusArea = explorationPool[Math.floor(Math.random() * explorationPool.length)];
     }
 
+    let constraintGuidance: ReturnType<typeof getConstraintGuidanceForGenerator> | null = null;
+    try {
+      const targetTcForConstraints = Math.max(100, autonomousBestTc * 1.1, 200);
+      constraintGuidance = getConstraintGuidanceForGenerator(targetTcForConstraints);
+    } catch {}
+
     emit("log", {
       phase: "engine",
       event: "RL agent action",
-      detail: `RL selected: ${rlDescription}. Generated ${rlCandidates.length} RL-directed candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}`,
+      detail: `RL selected: ${rlDescription}. Generated ${rlCandidates.length} RL-directed candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}${constraintGuidance ? `. Constraint solver: lambda=[${constraintGuidance.lambdaRange[0].toFixed(2)},${constraintGuidance.lambdaRange[1].toFixed(2)}], omegaLog=[${constraintGuidance.omegaLogRange[0]},${constraintGuidance.omegaLogRange[1]}]K, prefer=[${constraintGuidance.preferredElements.slice(0,4).join(",")}], feasibility=${constraintGuidance.feasibility.toFixed(2)}` : ""}`,
       dataSource: "RL Agent",
     });
 
@@ -2453,6 +2476,7 @@ export function getAutonomousLoopStats() {
     generatorAllocations: getGeneratorAllocations(),
     fermiSurfaceClusters: getClusterGuidance(),
     discoveryLandscape: getLandscapeStats(),
+    pressurePathways: getPathwayStats(),
   };
 }
 

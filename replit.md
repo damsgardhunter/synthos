@@ -172,6 +172,19 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Pipeline integration**: Materials added to landscape in Phase 10 and autonomous loop. Landscape updated every 5 cycles. Zone bonus applied to candidate Tc scoring. Stats logged in autonomous loop summary.
 - **APIs**: `GET /api/landscape/embedding` (3D points), `/api/landscape/zones` (discovery zones), `/api/landscape/stats` (statistics), `/api/landscape/guidance` (generator biases).
 
+### Constraint-Based Physics Solver
+- **Backward McMillan/Eliashberg solver** (`server/inverse/constraint-solver.ts`): Given a target Tc, binary-searches for required electron-phonon coupling (lambda) and logarithmic phonon frequency (omegaLog) ranges.
+- **Feasibility scoring**: Assesses how achievable the required parameters are, with structural targets and element suggestions.
+- **Formula evaluation**: Evaluates any formula against computed constraints, showing lambda/omegaLog satisfaction and gap to target.
+- **Generator guidance**: Provides constraint-aware guidance for candidate generators.
+- **APIs**: `GET /api/constraint-solver/solve?targetTc=200&muStar=0.10&pressure=0`, `GET /api/constraint-solver/evaluate/:formula?targetTc=200&pressure=0`
+
+### Pressure-to-Ambient Pathway Search
+- **Stabilization strategies** (`server/inverse/pressure-pathway.ts`): For high-pressure superconductors, generates isovalent substitution, chemical doping, and anion substitution pathways to stabilize at ambient pressure.
+- **Tc retention estimation**: Estimates how much Tc is retained after pressure reduction, with feasibility scoring.
+- **Pipeline integration**: Triggered in autonomous loop when Tc > 50K and pressure > 10 GPa. Best ambient candidates logged.
+- **APIs**: `GET /api/pressure-pathways/search/:formula?tc=250&pressure=180`, `GET /api/pressure-pathways/stats`
+
 ### Quantum Criticality Detector
 - **Unified quantum critical point (QCP) detector** formalizing existing spin susceptibility, CDW, SDW, Mott detection into a single QuantumCriticalScore.
 - **Six QCP channels**: Mott (Hubbard U/W ratio), SDW (Stoner enhancement + nesting), CDW (nesting + DOS), nematic (orbital anisotropy), structural (soft phonon modes), orbital-selective (mixed d-orbital).

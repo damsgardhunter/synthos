@@ -62,6 +62,8 @@ import { getGeneratorAllocations } from "./learning/generator-manager";
 import { getEmbeddingDataset, getLandscapeStats } from "./landscape/discovery-landscape";
 import { getZoneMap } from "./landscape/zone-detector";
 import { getFullLandscapeGuidance } from "./landscape/landscape-guidance";
+import { solveConstraints, evaluateFormulaAgainstConstraints } from "./inverse/constraint-solver";
+import { searchPressurePathways, getPathwayStats, getAmbientCandidatesFromPathways } from "./inverse/pressure-pathway";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1385,6 +1387,54 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(guidance);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch landscape guidance", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/constraint-solver/solve", generalLimiter, (req, res) => {
+    try {
+      const targetTc = Number(req.query.targetTc) || 200;
+      const muStar = Number(req.query.muStar) || 0.10;
+      const pressure = Number(req.query.pressure) || 0;
+      const solution = solveConstraints(targetTc, muStar, pressure);
+      res.json(solution);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to solve constraints", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/constraint-solver/evaluate/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = req.params.formula;
+      const targetTc = Number(req.query.targetTc) || 200;
+      const muStar = Number(req.query.muStar) || 0.10;
+      const pressure = Number(req.query.pressure) || 0;
+      const solution = solveConstraints(targetTc, muStar, pressure);
+      const evaluation = evaluateFormulaAgainstConstraints(formula, solution);
+      res.json({ ...evaluation, targetConstraints: solution });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to evaluate formula against constraints", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-pathways/search/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = req.params.formula;
+      const sourceTc = Number(req.query.tc) || 100;
+      const sourcePressure = Number(req.query.pressure) || 100;
+      const pathway = searchPressurePathways(formula, sourceTc, sourcePressure);
+      res.json(pathway);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to search pressure pathways", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-pathways/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getPathwayStats();
+      const candidates = getAmbientCandidatesFromPathways();
+      res.json({ ...stats, ambientCandidates: candidates });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch pathway stats", detail: e.message?.slice(0, 200) });
     }
   });
 
