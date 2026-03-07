@@ -82,6 +82,18 @@ import { getExperimentPlannerStats } from "../experiment-planner";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 import { runHypothesisCycle, getTopHypothesesForGeneratorBias, getHypothesisStats } from "../theory/hypothesis-engine";
+import { createPipeline, runPipelineIteration, getPipelineStats, getAllPipelines, type PipelineState } from "../inverse/next-gen-pipeline";
+import { createLab, runLabIteration, getLabStats, type LabState } from "../inverse/self-improving-lab";
+import { generateDesignProgram, executeDesignProgram, registerProgram, getDesignRepresentationStats, type DesignProgram } from "../inverse/design-representations";
+import {
+  runSymbolicPhysicsDiscovery, generateSyntheticDataset, getSymbolicDiscoveryStats,
+  getTheoryDatabase, generateDiscoveryFeedback,
+} from "../theory/symbolic-physics-discovery";
+import {
+  runCausalDiscovery, generateCausalDataset, getCausalDiscoveryStats,
+  getDiscoveredHypotheses as getCausalHypotheses, getCausalRules,
+  getLatestGraph, type CausalRule,
+} from "../theory/causal-physics-discovery";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -164,6 +176,12 @@ let recentTcImproved = false;
 let recentNewCandidates = 0;
 let failuresSinceLastRetrain = 0;
 let lastRetrainCycle = 0;
+let integratedPipelineId: string | null = null;
+let integratedLabId: string | null = null;
+let lastTheoryDiscoveryCycle = 0;
+let lastCausalDiscoveryCycle = 0;
+let causalDesignGuidance: { variable: string; direction: string; causalImpactOnTc: number }[] = [];
+let theoryFeedbackBias: { biasedVariables: string[]; biasedElements: string[] } = { biasedVariables: [], biasedElements: [] };
 
 interface PreviousCycleMetrics {
   bestTc: number;
@@ -2523,7 +2541,87 @@ async function runAutonomousFastPath() {
       }
     }
 
-    const allEngineCandidates = [...physicsCleanCandidates, ...inverseDesignCandidates, ...structDiffusionCandidates];
+    let integratedCandidates: string[] = [];
+    try {
+      if (integratedPipelineId) {
+        const pipelineResult = runPipelineIteration(integratedPipelineId);
+        if (pipelineResult) {
+          for (const c of (pipelineResult.topCandidates ?? [])) {
+            if (c.formula && isValidFormula(c.formula) && !alreadyScreenedFormulas.has(normalizeFormula(c.formula))) {
+              integratedCandidates.push(normalizeFormula(c.formula));
+            }
+          }
+          const pStats = getPipelineStats(integratedPipelineId);
+          if (pipelineResult.topCandidates?.length > 0 || (pStats && pStats.iteration % 5 === 0)) {
+            emit("log", { phase: "engine", event: "Integrated pipeline iteration", detail: `Pipeline ${integratedPipelineId}: ${pipelineResult.candidatesGenerated} generated, ${pipelineResult.topCandidates?.length ?? 0} top candidates, ${integratedCandidates.length} novel. Best Tc: ${pipelineResult.bestTcThisIteration?.toFixed(1) ?? "N/A"}K`, dataSource: "Integrated Subsystems" });
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      if (integratedLabId) {
+        const labResult = runLabIteration(integratedLabId);
+        if (labResult) {
+          for (const c of (labResult.topCandidates ?? [])) {
+            if (c.formula && isValidFormula(c.formula) && !alreadyScreenedFormulas.has(normalizeFormula(c.formula))) {
+              integratedCandidates.push(normalizeFormula(c.formula));
+            }
+          }
+          if ((labResult.topCandidates?.length ?? 0) > 0) {
+            emit("log", { phase: "engine", event: "Integrated lab iteration", detail: `Lab ${integratedLabId}: strategy=${labResult.activeStrategy}, ${labResult.candidatesGenerated} generated, ${labResult.topCandidates?.length ?? 0} top, ${integratedCandidates.length} total novel. Best: ${labResult.bestFormula} Tc=${labResult.bestTc?.toFixed(1)}K`, dataSource: "Integrated Subsystems" });
+          }
+        }
+      }
+    } catch {}
+
+    if (cycleCount % 4 === 0) {
+      try {
+        const strategies = ["hydride-cage-optimizer", "layered-intercalation", "high-entropy-alloy", "light-element-phonon", "topological-edge", "pressure-stabilized", "electron-phonon-resonance", "charge-transfer-layer"] as const;
+        const st = strategies[cycleCount % strategies.length];
+        const elemPool = theoryFeedbackBias.biasedElements.length > 0
+          ? theoryFeedbackBias.biasedElements.slice(0, 7)
+          : ["La", "Y", "H", "Ca", "B", "Nb", "Ti"];
+        const prog = generateDesignProgram(st, elemPool);
+        const execResult = executeDesignProgram(prog);
+        if (execResult.formula && isValidFormula(execResult.formula) && !alreadyScreenedFormulas.has(normalizeFormula(execResult.formula))) {
+          integratedCandidates.push(normalizeFormula(execResult.formula));
+          registerProgram(prog, execResult.predictedTc ?? 0);
+        }
+      } catch {}
+    }
+
+    if (cycleCount - lastTheoryDiscoveryCycle >= 15 && cycleCount % 15 === 0) {
+      try {
+        const synthDataset = generateSyntheticDataset(40);
+        const theories = runSymbolicPhysicsDiscovery(synthDataset);
+        lastTheoryDiscoveryCycle = cycleCount;
+        if (theories.length > 0) {
+          const allTheories = getTheoryDatabase();
+          const feedback = generateDiscoveryFeedback(allTheories);
+          theoryFeedbackBias = { biasedVariables: feedback.biasedVariables ?? [], biasedElements: feedback.biasedElements ?? [] };
+          emit("log", { phase: "engine", event: "Theory discovery cycle", detail: `Symbolic physics: ${theories.length} theories. Top: ${theories[0]?.equation?.slice(0, 80)} (score=${theories[0]?.theoryScore?.toFixed(3)})`, dataSource: "Integrated Subsystems" });
+        }
+      } catch {}
+    }
+
+    if (cycleCount - lastCausalDiscoveryCycle >= 20 && cycleCount % 20 === 0) {
+      try {
+        const causalDataset = generateCausalDataset(60);
+        const causalResult = runCausalDiscovery(causalDataset);
+        lastCausalDiscoveryCycle = cycleCount;
+        if (causalResult.designGuidance.length > 0) {
+          causalDesignGuidance = causalResult.designGuidance.map(g => ({
+            variable: g.variable,
+            direction: g.direction,
+            causalImpactOnTc: g.causalImpactOnTc,
+          }));
+        }
+        emit("log", { phase: "engine", event: "Causal discovery cycle", detail: `Causal graph: ${causalResult.graph.edges.length} edges, ${causalResult.hypotheses.length} hypotheses, ${causalResult.rules.length} rules. Top guidance: ${causalResult.designGuidance[0]?.variable ?? "none"} (${causalResult.designGuidance[0]?.direction ?? ""})`, dataSource: "Integrated Subsystems" });
+      } catch {}
+    }
+
+    const allEngineCandidates = [...physicsCleanCandidates, ...inverseDesignCandidates, ...structDiffusionCandidates, ...integratedCandidates];
     const novelCandidates = allEngineCandidates.filter(f => !alreadyScreenedFormulas.has(f));
     const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(f)).length / Math.max(1, rlCandidates.length);
     for (const f of allEngineCandidates) alreadyScreenedFormulas.add(f);
@@ -2538,7 +2636,7 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen, ${novelCandidates.length} novel`,
-      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Already screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}. Feeding ${novelCandidates.length} novel formulas through autonomous pipeline.`,
+      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}, integrated=${integratedCandidates.length}. Feeding ${novelCandidates.length} novel formulas through pipeline.`,
       dataSource: "Candidate Generator",
     });
 
@@ -2911,6 +3009,17 @@ export async function getAutonomousLoopStats() {
     lastCycleCandidates,
     lastCycleFamilyCounts,
     fullDFTQueue: await getDFTQueueStats().catch(() => null),
+    integratedSubsystems: {
+      pipelineId: integratedPipelineId,
+      labId: integratedLabId,
+      designRepresentations: getDesignRepresentationStats(),
+      theoryDiscovery: getSymbolicDiscoveryStats(),
+      causalDiscovery: getCausalDiscoveryStats(),
+      causalDesignGuidance,
+      theoryFeedbackBias,
+      lastTheoryDiscoveryCycle,
+      lastCausalDiscoveryCycle,
+    },
   };
 }
 
@@ -4058,10 +4167,89 @@ export async function startEngine() {
     }
   } catch {}
 
+  try {
+    const existingPipelines = getAllPipelines();
+    if (existingPipelines.length === 0) {
+      const pipelineId = `integrated-pipeline-${Date.now()}`;
+      createPipeline(pipelineId, {
+        targetTc: 293,
+        maxPressure: 50,
+        minLambda: 0.8,
+        metallicRequired: true,
+        phononStable: true,
+        preferredElements: ["La", "Y", "H", "Ca", "B", "Nb"],
+      });
+      integratedPipelineId = pipelineId;
+      emit("log", { phase: "engine", event: "Inverse design pipeline auto-started", detail: `Created integrated pipeline ${pipelineId} targeting 293K`, dataSource: "Integrated Subsystems" });
+    } else {
+      integratedPipelineId = existingPipelines[0].id;
+    }
+  } catch (e: any) {
+    emit("log", { phase: "engine", event: "Pipeline auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
+  }
+
+  try {
+    const labId = `integrated-lab-${Date.now()}`;
+    createLab(labId, 293, 50, 1000);
+    integratedLabId = labId;
+    emit("log", { phase: "engine", event: "Design lab auto-started", detail: `Created integrated design lab ${labId} with 8 strategies targeting 293K`, dataSource: "Integrated Subsystems" });
+  } catch (e: any) {
+    emit("log", { phase: "engine", event: "Design lab auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
+  }
+
+  try {
+    const strategyTypes = ["hydride-cage-optimizer", "layered-intercalation", "light-element-phonon"] as const;
+    let reprGenerated = 0;
+    for (const st of strategyTypes) {
+      try {
+        const prog = generateDesignProgram(st, ["La", "Y", "H", "Ca", "B", "Nb", "Ti"]);
+        const result = executeDesignProgram(prog);
+        if (result.formula && isValidFormula(result.formula)) {
+          registerProgram(prog, result.predictedTc ?? 0);
+          alreadyScreenedFormulas.add(normalizeFormula(result.formula));
+          reprGenerated++;
+        }
+      } catch {}
+    }
+    if (reprGenerated > 0) {
+      emit("log", { phase: "engine", event: "Design representations seeded", detail: `Generated ${reprGenerated} initial design programs from 3 strategy types`, dataSource: "Integrated Subsystems" });
+    }
+  } catch {}
+
+  try {
+    const synthDataset = generateSyntheticDataset(40);
+    const theories = runSymbolicPhysicsDiscovery(synthDataset);
+    lastTheoryDiscoveryCycle = cycleCount;
+    if (theories.length > 0) {
+      const allTheories = getTheoryDatabase();
+      const feedback = generateDiscoveryFeedback(allTheories);
+      theoryFeedbackBias = { biasedVariables: feedback.biasedVariables ?? [], biasedElements: feedback.biasedElements ?? [] };
+      emit("log", { phase: "engine", event: "Theory discovery auto-started", detail: `Initial run: ${theories.length} theories discovered, top score=${theories[0]?.theoryScore?.toFixed(3)}`, dataSource: "Integrated Subsystems" });
+    }
+  } catch (e: any) {
+    emit("log", { phase: "engine", event: "Theory discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
+  }
+
+  try {
+    const causalDataset = generateCausalDataset(60);
+    const causalResult = runCausalDiscovery(causalDataset);
+    lastCausalDiscoveryCycle = cycleCount;
+    if (causalResult.designGuidance.length > 0) {
+      causalDesignGuidance = causalResult.designGuidance.map(g => ({
+        variable: g.variable,
+        direction: g.direction,
+        causalImpactOnTc: g.causalImpactOnTc,
+      }));
+    }
+    emit("log", { phase: "engine", event: "Causal discovery auto-started", detail: `Initial run: ${causalResult.graph.edges.length} causal edges, ${causalResult.hypotheses.length} mechanism hypotheses, ${causalResult.rules.length} causal rules, ${causalResult.designGuidance.length} design guidance vars`, dataSource: "Integrated Subsystems" });
+  } catch (e: any) {
+    emit("log", { phase: "engine", event: "Causal discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
+  }
+
   emit("log", {
     phase: "engine",
     event: "Learning engine started",
-    detail: `Balanced learning: resuming from cycle ${cycleCount}. Materials/synthesis/reactions run first, then analysis, then SC research.`,
+    detail: `Balanced learning: resuming from cycle ${cycleCount}. All subsystems initialized: pipeline, design lab, representations, theory discovery, causal discovery.`,
     dataSource: "Internal",
   });
 
