@@ -1087,6 +1087,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
 
 const elementRefEnergies = new Map<string, number | null>();
 
+const MOLECULAR_ELEMENTS = new Set(["H", "N", "O", "F", "Cl"]);
 const MOLECULAR_BOND_LENGTHS: Record<string, number> = {
   H: 0.74,
   N: 1.10,
@@ -1103,14 +1104,24 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
   const calcDir = path.join(WORK_DIR, `ref_${element}_${Date.now()}`);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  const bondLength = MOLECULAR_BOND_LENGTHS[element] ?? getAvgRadius(element) * 2;
-  const atoms: AtomPosition[] = [
-    { element, x: 0, y: 0, z: 0 },
-    { element, x: bondLength, y: 0, z: 0 },
-  ];
+  const isMolecular = MOLECULAR_ELEMENTS.has(element);
+  let atoms: AtomPosition[];
+  let divisor: number;
+
+  if (isMolecular) {
+    const bondLength = MOLECULAR_BOND_LENGTHS[element] ?? 1.5;
+    atoms = [
+      { element, x: 0, y: 0, z: 0 },
+      { element, x: bondLength, y: 0, z: 0 },
+    ];
+    divisor = 2;
+  } else {
+    atoms = [{ element, x: 0, y: 0, z: 0 }];
+    divisor = 1;
+  }
 
   const xyzPath = path.join(calcDir, `${element}.xyz`);
-  writeXYZ(atoms, xyzPath, `${element} dimer reference`);
+  writeXYZ(atoms, xyzPath, `${element} ${isMolecular ? "dimer" : "atom"} reference`);
 
   try {
     const env = {
@@ -1121,15 +1132,27 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
       OMP_STACKSIZE: "512M",
     };
 
+    const UNPAIRED_ELECTRONS: Record<string, number> = {
+      H: 1, He: 0, Li: 1, Be: 0, B: 1, C: 2, N: 3, O: 2, F: 1, Ne: 0,
+      Na: 1, Mg: 0, Al: 1, Si: 2, P: 3, S: 2, Cl: 1, Ar: 0,
+      K: 1, Ca: 0, Sc: 1, Ti: 2, V: 3, Cr: 6, Mn: 5, Fe: 4, Co: 3, Ni: 2, Cu: 1, Zn: 0,
+      Ga: 1, Ge: 2, As: 3, Se: 2, Br: 1, Kr: 0,
+      Rb: 1, Sr: 0, Y: 1, Zr: 2, Nb: 5, Mo: 6, Pd: 0, Sn: 2, Te: 2,
+      Cs: 1, Ba: 0, La: 1, Ce: 2, W: 4, Pt: 2, Pb: 2, Bi: 3,
+      Ta: 3, Hf: 2,
+    };
+    const uhf = isMolecular ? 0 : (UNPAIRED_ELECTRONS[element] ?? 0);
+    const uhfFlag = uhf > 0 ? `--uhf ${uhf}` : "";
     const output = execSync(
-      `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp 2>&1`,
+      `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp ${uhfFlag} 2>&1`,
       { timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
     ).toString();
 
     const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
     if (energyMatch && output.includes("normal termination")) {
-      const energyPerAtom = parseFloat(energyMatch[1]) / 2;
+      const energyPerAtom = parseFloat(energyMatch[1]) / divisor;
       elementRefEnergies.set(element, energyPerAtom);
+      try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
       return energyPerAtom;
     }
   } catch {}
@@ -1144,6 +1167,10 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
 
 export async function computeFormationEnergy(formula: string, dftResult: DFTResult): Promise<number | null> {
   if (!dftResult.converged || dftResult.totalEnergy === 0) return null;
+  if (dftResult.totalEnergy > 0) {
+    console.log(`[DFT] ${formula}: Positive total energy (${dftResult.totalEnergy.toFixed(4)} Ha) — xTB produced invalid result, skipping Ef`);
+    return null;
+  }
 
   const actualAtomCount = dftResult.atomCount;
   if (actualAtomCount === 0) return null;

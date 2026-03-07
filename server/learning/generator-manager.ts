@@ -47,7 +47,7 @@ const DEFAULT_ALLOCATIONS: Record<string, number> = {
 const generators: Map<string, GeneratorEntry> = new Map();
 let rebalanceCount = 0;
 let cyclesSinceRebalance = 0;
-const REBALANCE_INTERVAL = 5;
+const REBALANCE_INTERVAL = 3;
 
 function initializeGenerators() {
   if (generators.size > 0) return;
@@ -215,4 +215,10 @@ export function rebalanceWeights() {
 
   rebalanceCount++;
   cyclesSinceRebalance = 0;
+
+  const summary = names.map(n => {
+    const e = generators.get(n)!;
+    return `${n}=${(e.stats.currentWeight * 100).toFixed(1)}%`;
+  }).join(", ");
+  console.log(`[Generator] Rebalanced weights (#${rebalanceCount}): ${summary}`);
 }

@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { selectPrototype } from "../learning/crystal-prototypes";
-import { isTransitionMetal } from "../learning/elemental-data";
+import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
 
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
 const QE_WORK_DIR = "/tmp/qe_calculations";
@@ -579,12 +579,15 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
     return { valid: false, reason: `Too many atoms (${totalAtoms}), max 16 for available resources` };
   }
 
+  const ALKALINE_EARTH_SYMBOLS = new Set(["Ca", "Sr", "Ba", "Mg"]);
   const hCount = counts["H"] || 0;
   if (hCount > 0 && totalAtoms > 2) {
     const hRatio = hCount / totalAtoms;
-    const hasTM = elements.some(el => el !== "H" && isTransitionMetal(el));
-    if (hRatio > 0.9 && !hasTM) {
-      return { valid: false, reason: `Hydrogen ratio ${(hRatio * 100).toFixed(0)}% with no transition metal — likely unphysical` };
+    const hasHydrideMetal = elements.some(el => el !== "H" && (
+      isTransitionMetal(el) || isRareEarth(el) || ALKALINE_EARTH_SYMBOLS.has(el)
+    ));
+    if (hRatio > 0.9 && !hasHydrideMetal) {
+      return { valid: false, reason: `Hydrogen ratio ${(hRatio * 100).toFixed(0)}% with no metal host — likely unphysical` };
     }
   }
 

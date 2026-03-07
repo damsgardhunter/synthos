@@ -1645,9 +1645,41 @@ export function getDesignRepresentationStats(): DesignRepresentationStats {
     for (const e of g.edges) edgeFreq[e.type] = (edgeFreq[e.type] || 0) + 1;
   }
 
-  const avgFeatureCorr = designPrograms.length > 0 && designGraphs.length > 0
-    ? Math.round((0.5 + Math.random() * 0.3) * 100) / 100
-    : 0;
+  let avgFeatureCorr = 0;
+  if (designPrograms.length > 0 && designGraphs.length > 0) {
+    let corrSum = 0;
+    let corrCount = 0;
+    for (const prog of designPrograms) {
+      if (prog.featureVector.length === 0) continue;
+      const matchingGraph = designGraphs.find(g => g.name.includes(prog.name) || g.id.includes(prog.id));
+      if (!matchingGraph) continue;
+      const gNodes = matchingGraph.nodes;
+      const gvec: number[] = [
+        gNodes.length / 20,
+        matchingGraph.edges.length / 50,
+        matchingGraph.metadata.connectivity,
+        gNodes.filter(n => n.type === "element").length / 10,
+        gNodes.filter(n => n.type === "structural" || n.type === "functional").length / 10,
+        gNodes.reduce((s, n) => s + (n.properties.electronegativity || 0), 0) / Math.max(1, gNodes.length) / 4,
+        gNodes.reduce((s, n) => s + (n.properties.ionicRadius || 0), 0) / Math.max(1, gNodes.length) / 2,
+        matchingGraph.edges.filter(e => e.type === "bonding" || e.type === "hybridization").length / 20,
+      ];
+      const pv = prog.featureVector.slice(0, gvec.length);
+      while (pv.length < gvec.length) pv.push(0);
+      let dot = 0, magP = 0, magG = 0;
+      for (let i = 0; i < gvec.length; i++) {
+        dot += pv[i] * gvec[i];
+        magP += pv[i] * pv[i];
+        magG += gvec[i] * gvec[i];
+      }
+      const denom = Math.sqrt(magP) * Math.sqrt(magG);
+      if (denom > 0) {
+        corrSum += dot / denom;
+        corrCount++;
+      }
+    }
+    avgFeatureCorr = corrCount > 0 ? Math.round(corrSum / corrCount * 100) / 100 : 0;
+  }
 
   return {
     programs: {

@@ -2390,7 +2390,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     } catch {}
 
     const candidatePressure = features.pressureGpa ?? candidate.pressureGpa ?? 0;
-    if (finalTc > 50 && candidatePressure > 10) {
+    if (finalTc > 30 && candidatePressure > 5) {
       try {
         const pathway = getPathwayForCandidate(formula, finalTc, candidatePressure);
         if (pathway.bestAmbientTc > 20 && pathway.strategies.length > 0) {
@@ -2887,6 +2887,8 @@ async function runAutonomousFastPath() {
         }
       } catch {}
 
+      const isPromising = result.passed || result.tc >= 15;
+
       if (result.passed) {
         try {
           const electronic = computeElectronicStructure(formula);
@@ -2897,6 +2899,8 @@ async function runAutonomousFastPath() {
           const fsResult = computeFermiSurface(formula);
           assignToCluster(formula, fsResult, result.tc);
         } catch {}
+      }
+      if (isPromising) {
         try {
           const family = classifyFamily(formula);
           const synthCtx: MaterialContext = {
@@ -3009,7 +3013,7 @@ async function runAutonomousFastPath() {
             }
           } catch {}
 
-          if (result.tc > 40 && cycleCount % 5 === 0) {
+          if (result.tc > 25 && cycleCount % 3 === 0) {
             try {
               const expCandidate: ExperimentCandidate = {
                 formula,
@@ -3032,6 +3036,9 @@ async function runAutonomousFastPath() {
             } catch {}
           }
         } catch {}
+      }
+
+      if (result.passed) {
         passed++;
         autonomousTotalPassed++;
         if (result.tc > bestTcThisBatch) {
