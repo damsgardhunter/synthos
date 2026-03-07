@@ -46,6 +46,12 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Inverse Design (LLM)**: Generates materials optimized for pairing susceptibility via GPT-4o-mini.
 - **Generative Crystal Structures**: Discovers structural variants and novel prototypes via LLM.
 - **Enriched ML Features**: Uses approximately 50 diverse physical and structural features for ML prediction, including `pressureGpa` and `optimalPressureGpa`.
+- **Lambda Caps (per class)**: conventional-metal 1.5, cuprate 1.2, iron-pnictide 1.5, heavy-fermion 0.8, hydride-low-p 2.0, hydride-high-p 3.0, superhydride 3.5, light-element 1.8, other 1.5. CouplingPrefactor = avgEta × N_EF × 1.2.
+- **Magnetic/Stoner Tc Suppression**: Competing magnetic phases with strength > 0.3 reduce Tc by up to 70%. Stoner enhancement > 5 (stonerProduct > 0.8) suppresses phonon-mediated SC.
+- **CDW/SDW Gradual Suppression**: Threshold lowered to 0.4 with gradual penalty (1 - instability × 0.6). Hydrides with lambda > 2.0 are exempt.
+- **Van Hove Proximity**: Formula `(vhsRatio - 2.0) × 0.25` prevents over-triggering. Cuprate floor 0.7, kagome 0.6.
+- **Phonon Frequency Diversity**: logAvgFreqRatio computed from average atomic mass (4 buckets: >100→0.25, >60→0.35, >30→0.40, else→0.50) with mass-range correction.
+- **Formula Normalization**: Strips whitespace, handles fractional coefficients via integer scaling with GCD reduction. Rejects formulas with >50 atoms after scaling (returns cleaned raw).
 
 ### Topological Superconductor Detection Engine
 - **Band structure topology**: Estimates Z2 invariant, Chern number indicator, and mirror symmetry indicator from SOC strength, orbital mixing, and band inversion probability.

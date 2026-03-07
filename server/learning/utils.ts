@@ -144,6 +144,7 @@ export function isValidFormula(formula: string): boolean {
 
 export function normalizeFormula(raw: string): string {
   if (typeof raw !== "string") raw = String(raw ?? "");
+  raw = raw.replace(/\s+/g, "");
   if (!isValidFormula(raw)) return raw;
 
   const counts = parseFormulaCounts(raw);
@@ -165,6 +166,10 @@ export function normalizeFormula(raw: string): string {
       counts[el] = Math.round(counts[el] * pow10);
     }
     vals = Object.values(counts);
+    const totalAtoms = vals.reduce((s, v) => s + v, 0);
+    if (totalAtoms > 50) {
+      return raw.replace(/\s+/g, "");
+    }
   }
 
   const allInts = vals.every(v => Number.isInteger(v) && v >= 1);

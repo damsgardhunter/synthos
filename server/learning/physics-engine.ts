@@ -490,15 +490,15 @@ function getCorrelationPenaltyForClass(matClass: MaterialClass, uOverW: number, 
 
 function getLambdaCapForClass(matClass: MaterialClass): number {
   switch (matClass) {
-    case "conventional-metal": return 2.0;
-    case "cuprate": return 1.5;
-    case "iron-pnictide": return 1.8;
-    case "heavy-fermion": return 1.0;
-    case "hydride-low-p": return 2.5;
+    case "conventional-metal": return 1.5;
+    case "cuprate": return 1.2;
+    case "iron-pnictide": return 1.5;
+    case "heavy-fermion": return 0.8;
+    case "hydride-low-p": return 2.0;
     case "hydride-high-p": return 3.0;
     case "superhydride": return 3.5;
-    case "light-element": return 2.5;
-    case "other": return 2.5;
+    case "light-element": return 1.8;
+    case "other": return 1.5;
   }
 }
 
@@ -1037,10 +1037,10 @@ export function computeElectronicStructure(
     return wAvg;
   })()));
   const vhsRatio = densityOfStatesAtFermi / Math.max(0.1, freeElectronDOS);
-  let vanHoveProximity = Math.max(0, Math.min(1.0, (vhsRatio - 1.0) * 0.5));
-  if (isCuprate) vanHoveProximity = Math.max(vanHoveProximity, 0.8);
-  else if (isKagome) vanHoveProximity = Math.max(vanHoveProximity, 0.7);
-  else if (elements.includes("B") && hasTM && densityOfStatesAtFermi > 1.5) vanHoveProximity = Math.max(vanHoveProximity, 0.6);
+  let vanHoveProximity = Math.max(0, Math.min(1.0, (vhsRatio - 2.0) * 0.25));
+  if (isCuprate) vanHoveProximity = Math.max(vanHoveProximity, 0.7);
+  else if (isKagome) vanHoveProximity = Math.max(vanHoveProximity, 0.6);
+  else if (elements.includes("B") && hasTM && densityOfStatesAtFermi > 2.5) vanHoveProximity = Math.max(vanHoveProximity, 0.4);
 
   let wAvgForFlatness = 0;
   for (const el of elements) {
@@ -1221,7 +1221,20 @@ export function computePhononSpectrum(
   } else if (elements.length === 1) {
     logAvgFreqRatio = 0.65;
   } else {
-    logAvgFreqRatio = 0.45;
+    const massRange = (() => {
+      const masses = elements.map(el => getElementData(el)?.atomicMass ?? 30);
+      return Math.max(...masses) / Math.max(Math.min(...masses), 1);
+    })();
+    if (avgMass > 100) {
+      logAvgFreqRatio = 0.25 + Math.random() * 0.1;
+    } else if (avgMass > 60) {
+      logAvgFreqRatio = 0.35 + Math.random() * 0.1;
+    } else if (avgMass > 30) {
+      logAvgFreqRatio = 0.40 + Math.random() * 0.1;
+    } else {
+      logAvgFreqRatio = 0.50 + Math.random() * 0.1;
+    }
+    if (massRange > 3) logAvgFreqRatio *= 0.85;
   }
   const logAvgFreq = Math.max(20, Math.round(maxPhononFreq * logAvgFreqRatio));
 
@@ -2759,7 +2772,7 @@ export function computeAlpha2F(
     avgEta = N_EF * 0.3;
   }
 
-  const couplingPrefactor = avgEta * N_EF * 2.5;
+  const couplingPrefactor = avgEta * N_EF * 1.2;
 
   const nBins = phononDOS.frequencies.length;
   const alpha2F = new Array(nBins).fill(0);
@@ -3006,6 +3019,21 @@ export async function runFullPhysicsAnalysis(
     ];
   }
 
+  const magneticPhases = competingPhases.filter(p => p.type === "magnetism");
+  for (const mp of magneticPhases) {
+    if (mp.suppressesSC && mp.strength > 0.3) {
+      const magSuppression = Math.max(0.1, 1.0 - mp.strength * 0.7);
+      eliashberg.predictedTc = Math.round(eliashberg.predictedTc * magSuppression);
+      emit("log", {
+        phase: "phase-10",
+        event: "Magnetic suppression applied",
+        detail: `${formula}: magnetic phase strength=${mp.strength.toFixed(2)}, Tc suppressed by ${((1 - magSuppression) * 100).toFixed(0)}%`,
+        dataSource: "Physics Engine",
+      });
+      break;
+    }
+  }
+
   const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality);
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
@@ -3026,26 +3054,27 @@ export async function runFullPhysicsAnalysis(
 
   const instabilityProximity = computeInstabilityProximity(formula, electronicStructure, phononSpectrum, competingPhases);
 
-  if (instabilityProximity.cdwInstability > 0.8 && coupling.lambda < 1.5) {
-    const cdwPenalty = Math.max(0.01, 1.0 - instabilityProximity.cdwInstability);
+  const isHydrideForCDW = matClass === "superhydride" || matClass === "hydride-high-p" || matClass === "hydride-low-p";
+  if (instabilityProximity.cdwInstability > 0.4 && !(isHydrideForCDW && coupling.lambda > 2.0)) {
+    const cdwPenalty = Math.max(0.05, 1.0 - instabilityProximity.cdwInstability * 0.6);
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty);
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
     emit("log", {
       phase: "phase-10",
       event: "CDW suppression applied",
-      detail: `${formula}: CDW=${instabilityProximity.cdwInstability.toFixed(2)} > 0.8, lambda=${coupling.lambda.toFixed(3)} < 1.5 — SC suppressed by charge ordering (Tc penalized by ${((1 - cdwPenalty) * 100).toFixed(0)}%)`,
+      detail: `${formula}: CDW=${instabilityProximity.cdwInstability.toFixed(2)}, lambda=${coupling.lambda.toFixed(3)} — SC suppressed by charge ordering (Tc penalized by ${((1 - cdwPenalty) * 100).toFixed(0)}%)`,
       dataSource: "Physics Engine",
     });
   }
 
-  if (instabilityProximity.sdwInstability > 0.8 && coupling.lambda < 1.5) {
-    const sdwPenalty = Math.max(0.01, 1.0 - instabilityProximity.sdwInstability);
+  if (instabilityProximity.sdwInstability > 0.4 && !(isHydrideForCDW && coupling.lambda > 2.0)) {
+    const sdwPenalty = Math.max(0.05, 1.0 - instabilityProximity.sdwInstability * 0.6);
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * sdwPenalty);
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
     emit("log", {
       phase: "phase-10",
       event: "SDW suppression applied",
-      detail: `${formula}: SDW=${instabilityProximity.sdwInstability.toFixed(2)} > 0.8, lambda=${coupling.lambda.toFixed(3)} < 1.5 — SC suppressed by spin ordering (Tc penalized by ${((1 - sdwPenalty) * 100).toFixed(0)}%)`,
+      detail: `${formula}: SDW=${instabilityProximity.sdwInstability.toFixed(2)}, lambda=${coupling.lambda.toFixed(3)} — SC suppressed by spin ordering (Tc penalized by ${((1 - sdwPenalty) * 100).toFixed(0)}%)`,
       dataSource: "Physics Engine",
     });
   }
@@ -3088,6 +3117,17 @@ export async function runFullPhysicsAnalysis(
     detail: `${formula}: χ_static=${spinSusceptibility.chiStaticPeak.toFixed(2)}, χ_dynamic=${spinSusceptibility.chiDynamicPeak.toFixed(2)}, ω_sf=${spinSusceptibility.spinFluctuationEnergy.toFixed(2)} meV, ξ=${spinSusceptibility.correlationLength.toFixed(2)}a, Stoner=${spinSusceptibility.stonerEnhancement.toFixed(2)}, QCP=${spinSusceptibility.isNearQCP}`,
     dataSource: "Physics Engine",
   });
+
+  if (spinSusceptibility.stonerEnhancement > 5 && coupling.lambda < 2.5) {
+    const stonerSuppression = Math.max(0.1, 1.0 / (1.0 + (spinSusceptibility.stonerEnhancement - 5) * 0.08));
+    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * stonerSuppression);
+    emit("log", {
+      phase: "phase-10",
+      event: "Stoner suppression applied",
+      detail: `${formula}: Stoner enhancement=${spinSusceptibility.stonerEnhancement.toFixed(1)}, phonon SC suppressed by ${((1 - stonerSuppression) * 100).toFixed(0)}%`,
+      dataSource: "Physics Engine",
+    });
+  }
 
   return {
     electronicStructure,

@@ -1,0 +1,238 @@
+Stainless Steel predicted Tc ≈ 45 K
+
+Your system predicts:
+
+Material
+
+Stainless Steel 304 (Fe-Cr-Ni)
+formula: Fe0.07C
+predictedTc: 45 K
+lambda ≈ 2.5
+
+This is physically impossible.
+
+Real iron-based alloys behave like:
+
+Material	Tc
+Fe	not superconducting
+Steel	not superconducting
+Fe-based superconductors	~30–55 K but only in layered pnictides
+
+The reason is magnetism suppresses phonon superconductivity.
+
+Your model detects magnetism:
+
+competingPhase:
+Antiferromagnetic order
+
+But it does not reduce Tc accordingly.
+
+Fix
+
+Add a magnetism suppression factor.
+
+Example:
+
+if spinFluctuationStrength > 0.3:
+    Tc *= 0.4
+
+if StonerFactor > 0.9:
+    Tc *= 0.2
+
+Without this correction your system will produce many false high-Tc metals.
+
+2. Formula Normalization Still Broken
+
+You still have formulas like:
+
+Fe0.07C
+Be2 C1
+C1 Re1
+C1 Nb2
+
+These are not canonical.
+
+Example corrections:
+
+Raw	Canonical
+Fe0.07C	FeC14 or Fe0.07C0.93
+Be2 C1	Be2C
+C1 Re1	ReC
+C1 Nb2	Nb2C
+
+Why this matters:
+
+duplicates enter the dataset
+
+ML features become inconsistent
+
+convex hull calculations break
+
+Required normalization step
+
+Every material must pass through:
+
+reduceStoichiometry()
+sortByElectronegativity()
+removeUnitCoefficients()
+
+Example result:
+
+Be2C
+Nb2C
+ReC
+TaC
+3. Lambda Values Are Now Too High
+
+Earlier your λ values were too small.
+
+Now they are too large.
+
+Example:
+
+electronPhononLambda = 2.47
+
+For non-hydrides at ambient pressure, λ ≈ 2.5 is extremely rare.
+
+Typical ranges:
+
+Material class	λ
+metals	0.3–0.8
+strong coupling	1.0–1.5
+extreme	1.8
+
+Only high-pressure hydrides reach:
+
+λ ≈ 2–3
+
+Your system assigns λ ≈ 2.3 to:
+
+steel
+carbides
+nitrides
+
+This suggests λ is overestimated by your phonon model.
+
+Quick correction
+
+Clamp λ based on material class:
+
+if hydrogenRatio < 0.2 and pressure < 50 GPa:
+    lambda = min(lambda, 1.8)
+4. Phonon Frequency Values Too Uniform
+
+Almost every material shows:
+
+logPhononFreq = 694
+
+or
+
+phononSpectralCentroid ≈ 1200–1700
+
+Real materials vary widely.
+
+Example:
+
+Material	ω_log
+Pb	90 cm⁻¹
+Nb	250 cm⁻¹
+MgB₂	700 cm⁻¹
+Hydrides	1200–2000 cm⁻¹
+
+Your system appears to use a default phonon template.
+
+This will strongly bias Tc predictions.
+
+Fix
+
+Compute phonon scale from:
+
+ω ≈ sqrt(k/m)
+
+Where:
+
+m = atomic mass
+k = bond stiffness
+
+You already track:
+
+bondStiffnessVariance
+avgAtomicMass
+
+Use those to compute phonon frequencies.
+
+5. Pressure Model Missing Important Constraint
+
+Example:
+
+optimalPressure = 300 GPa
+
+But system still labels:
+
+roomTempViable: false
+
+Pressure constraints should affect viability.
+
+Add logic:
+
+if optimalPressure > 100 GPa:
+    ambientViable = false
+6. Competing Phase Detection Is Good (Nice improvement)
+
+This part of your system is actually very strong now.
+
+Example:
+
+competingPhases:
+CDW strength = 0.86
+transitionTemp = 223 K
+
+That is exactly the kind of feature modern superconductivity models use.
+
+You also track:
+
+spin fluctuations
+CDW
+MIT
+QCP
+
+That is excellent physics coverage.
+
+7. But Competing Phases Are Not Affecting Tc
+
+Even when:
+
+CDW strength = 0.86
+
+Your Tc remains high.
+
+But in real materials:
+
+strong CDW → suppress superconductivity
+
+Add suppression:
+
+Tc *= (1 - CDW_strength * 0.6)
+8. One Subtle Issue: van Hove Detection
+
+You have:
+
+vanHoveProximity = 1
+
+for almost every material.
+
+That is unrealistic.
+
+Van Hove singularities are rare features in band structures.
+
+Typical probability:
+
+5–10% of materials
+
+Your detection likely uses DOS peak heuristic, which over-detects.
+
+Better detection:
+
+d²E/dk² ≈ 0
+
+at Fermi level.
