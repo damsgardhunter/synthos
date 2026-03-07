@@ -2340,9 +2340,103 @@ async function runAutonomousFastPath() {
       });
     }
 
-    const novelCandidates = physicsCleanCandidates.filter(f => !alreadyScreenedFormulas.has(f));
+    let inverseDesignCandidates: string[] = [];
+    if (cycleCount % 2 === 0) {
+      try {
+        let campaigns = getAllActiveCampaigns();
+        if (campaigns.length === 0) {
+          const campaign = createCampaign(`fastpath-200K-${Date.now()}`, {
+            targetTc: 200,
+            maxPressure: 50,
+            minLambda: 0.5,
+            maxHullDistance: 0.3,
+            metallicRequired: true,
+            phononStable: true,
+            preferredElements: ["Nb", "Ti", "B", "C", "N", "La", "Y", "H"],
+          }, 200);
+          try {
+            await storage.insertInverseDesignCampaign({
+              id: campaign.id,
+              targetTc: 200,
+              targetPressure: 0,
+              status: "active",
+              cyclesRun: 0,
+              bestTcAchieved: 0,
+              bestDistance: 1,
+              candidatesGenerated: 0,
+              candidatesPassedPipeline: 0,
+              learningState: {} as any,
+              convergenceHistory: [],
+              topCandidates: [],
+            });
+          } catch {}
+          campaigns = getAllActiveCampaigns();
+          emit("log", {
+            phase: "engine",
+            event: "Auto-created inverse design campaign",
+            detail: `No active campaigns found. Created fastpath campaign targeting 200K.`,
+            dataSource: "Inverse Optimizer",
+          });
+        }
+
+        const inverseSeen = new Set<string>();
+        for (const campaign of campaigns) {
+          const inverseCandidates = runInverseCycle(campaign);
+          for (const ic of inverseCandidates) {
+            if (ic.formula && isValidFormula(ic.formula) && !alreadyScreenedFormulas.has(ic.formula) && !inverseSeen.has(ic.formula)) {
+              const norm = normalizeFormula(ic.formula);
+              inverseSeen.add(norm);
+              inverseDesignCandidates.push(norm);
+            }
+          }
+
+          const gradResult = runGradientDescentCycle(campaign.target, 4, 12);
+          for (const r of gradResult.results) {
+            if (r.finalTc > 10 && isValidFormula(r.finalFormula) && !alreadyScreenedFormulas.has(r.finalFormula) && !inverseSeen.has(r.finalFormula)) {
+              const norm = normalizeFormula(r.finalFormula);
+              inverseSeen.add(norm);
+              inverseDesignCandidates.push(norm);
+            }
+          }
+
+          emit("log", {
+            phase: "engine",
+            event: `Inverse + gradient in fast path`,
+            detail: `Campaign ${campaign.id}: ${inverseCandidates.length} inverse + ${gradResult.results.length} gradient candidates. Best gradient: ${gradResult.bestFormula} Tc=${gradResult.bestTc.toFixed(1)}K`,
+            dataSource: "Inverse Optimizer",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "engine", event: "Fast-path inverse error", detail: err.message?.slice(0, 200), dataSource: "Inverse Optimizer" });
+      }
+    }
+
+    let structDiffusionCandidates: string[] = [];
+    if (cycleCount % 3 === 0) {
+      try {
+        const structResult = runStructureDiffusionCycle(200, 3, 3);
+        for (const formula of structResult.formulas) {
+          if (isValidFormula(formula) && !alreadyScreenedFormulas.has(formula)) {
+            structDiffusionCandidates.push(normalizeFormula(formula));
+          }
+        }
+        if (structResult.formulas.length > 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Structure-first design in fast path",
+            detail: `Generated ${structResult.formulas.length} from motifs [${structResult.motifsUsed.join(", ")}], ${structDiffusionCandidates.length} novel. Best: ${structResult.bestFormula} Tc=${structResult.bestTc.toFixed(1)}K`,
+            dataSource: "Structure Diffusion",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "engine", event: "Fast-path structure diffusion error", detail: err.message?.slice(0, 150), dataSource: "Structure Diffusion" });
+      }
+    }
+
+    const allEngineCandidates = [...physicsCleanCandidates, ...inverseDesignCandidates, ...structDiffusionCandidates];
+    const novelCandidates = allEngineCandidates.filter(f => !alreadyScreenedFormulas.has(f));
     const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(f)).length / Math.max(1, rlCandidates.length);
-    for (const f of physicsCleanCandidates) alreadyScreenedFormulas.add(f);
+    for (const f of allEngineCandidates) alreadyScreenedFormulas.add(f);
     if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE) {
       const toRemove = alreadyScreenedFormulas.size - MAX_SCREENED_CACHE_SIZE;
       const iter = alreadyScreenedFormulas.values();
@@ -2354,7 +2448,7 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen, ${novelCandidates.length} novel`,
-      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Already screened cache: ${alreadyScreenedFormulas.size}. Feeding ${novelCandidates.length} novel formulas through autonomous pipeline.`,
+      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Already screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}. Feeding ${novelCandidates.length} novel formulas through autonomous pipeline.`,
       dataSource: "Candidate Generator",
     });
 

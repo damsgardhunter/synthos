@@ -2939,7 +2939,9 @@ export async function runFullPhysicsAnalysis(
       }
     }
     if (dftData.phononFreqMax.value != null && dftData.phononFreqMax.source !== "analytical") {
-      phononSpectrum.maxPhononFrequency = dftData.phononFreqMax.value;
+      let cappedPhMax = dftData.phononFreqMax.value;
+      if (cappedPhMax > 5000) cappedPhMax = cappedPhMax / 20;
+      phononSpectrum.maxPhononFrequency = Math.min(5000, cappedPhMax);
     }
   }
 

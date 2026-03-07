@@ -408,7 +408,8 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const energyAboveHull = resolve<number | null>(mpEhull, null, null);
 
   const fdPhonons = xtbData?.finiteDisplacementPhonons ?? null;
-  const fdPhononMax = fdPhonons ? fdPhonons.highestFrequency : null;
+  const rawFdPhononMax = fdPhonons ? fdPhonons.highestFrequency : null;
+  const fdPhononMax = rawFdPhononMax != null ? (rawFdPhononMax > 5000 ? rawFdPhononMax / 20 : rawFdPhononMax) : null;
 
   const mpPhononMax = raw.mpPhonon?.hasPhononData && raw.mpPhonon.lastPhononFreq
     ? raw.mpPhonon.lastPhononFreq : null;
