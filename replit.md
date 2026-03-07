@@ -174,9 +174,14 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 
 ### Constraint-Based Physics Solver
 - **Backward McMillan/Eliashberg solver** (`server/inverse/constraint-solver.ts`): Given a target Tc, binary-searches for required electron-phonon coupling (lambda) and logarithmic phonon frequency (omegaLog) ranges.
-- **Feasibility scoring**: Assesses how achievable the required parameters are, with structural targets and element suggestions.
-- **Formula evaluation**: Evaluates any formula against computed constraints, showing lambda/omegaLog satisfaction and gap to target.
-- **Generator guidance**: Provides constraint-aware guidance for candidate generators.
+- **4 additional constraint solvers**:
+  - **DOS Constraint**: Solves required DOS(Ef) from target Tc (strong SC > 4 states/eV, weak < 2), with orbital character and VHS proximity requirements.
+  - **Phonon Frequency Constraint**: Determines required bond stiffness, light-element fraction, Debye temperature range, and max avg atomic mass from target omegaLog.
+  - **Electron-Phonon Coupling Constraint**: Computes required Hopfield parameter, orbital overlap, bonding network type, and phonon softness from target lambda and DOS.
+  - **Charge Transfer Constraint**: Identifies when unconventional charge-transfer mechanism is needed (low omegaLog + high lambda or layered high-Tc), with donor/acceptor candidates and interlayer coupling requirements.
+- **Composite feasibility scoring**: Weighted average across all constraint dimensions (lambda/omega 30%, DOS 20%, phonon 20%, coupling 20%, charge transfer 10%).
+- **Formula evaluation**: Evaluates any formula against all constraints, returning per-constraint satisfaction (5 boolean checks), gap analysis, Hopfield estimates, and a composite match score.
+- **Generator guidance**: Provides constraint-aware guidance including DOS range, phonon-preferred elements, charge transfer requirement, and Hopfield parameter range.
 - **APIs**: `GET /api/constraint-solver/solve?targetTc=200&muStar=0.10&pressure=0`, `GET /api/constraint-solver/evaluate/:formula?targetTc=200&pressure=0`
 
 ### Pressure-to-Ambient Pathway Search
