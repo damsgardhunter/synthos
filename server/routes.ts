@@ -59,6 +59,9 @@ import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAna
 import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
 import { getPerformanceMetrics, recordPrediction } from "./theory/model-performance-tracker";
 import { getGeneratorAllocations } from "./learning/generator-manager";
+import { getEmbeddingDataset, getLandscapeStats } from "./landscape/discovery-landscape";
+import { getZoneMap } from "./landscape/zone-detector";
+import { getFullLandscapeGuidance } from "./landscape/landscape-guidance";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1340,6 +1343,48 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(cluster);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch Fermi cluster", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape/embedding", generalLimiter, (_req, res) => {
+    try {
+      const points = getEmbeddingDataset();
+      res.json({ points, count: points.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch landscape embedding", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape/zones", generalLimiter, (_req, res) => {
+    try {
+      const zoneMap = getZoneMap();
+      res.json(zoneMap);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch discovery zones", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getLandscapeStats();
+      const zoneMap = getZoneMap();
+      res.json({
+        ...stats,
+        zoneCount: zoneMap.zones.length,
+        topZoneCount: zoneMap.topZones.length,
+        coveragePercent: zoneMap.coveragePercent,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch landscape stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape/guidance", generalLimiter, (_req, res) => {
+    try {
+      const guidance = getFullLandscapeGuidance();
+      res.json(guidance);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch landscape guidance", detail: e.message?.slice(0, 200) });
     }
   });
 

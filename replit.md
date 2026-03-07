@@ -165,6 +165,13 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Pipeline integration**: After FS computation in Phase 10, `assignToCluster(formula, fsResult, tc)` assigns materials. Cluster ID stored in `mlFeatures.fermiCluster`.
 - **APIs**: `GET /api/fermi-clusters`, `GET /api/fermi-clusters/:clusterId`
 
+### Materials Discovery Landscape
+- **UMAP embedding engine** (`server/landscape/discovery-landscape.ts`): Pure TypeScript UMAP reducing 256D Materials Genome vectors to 3D latent space. k=15 neighbors, fuzzy simplicial set, spectral initialization, SGD optimization (200 epochs). Full recompute when dataset grows 50%+, otherwise incremental k-NN interpolation.
+- **Discovery zone detection** (`server/landscape/zone-detector.ts`): 8x8x8 voxel grid over latent space. Per-voxel density, SC-probability (Tc>20K fraction), Tc gradient (steepest increase direction). Zone scoring: tcProximity*0.35 + lowDensity*0.25 + gradient*0.2 + scFraction*0.2. Top zones identified for targeted exploration.
+- **Landscape guidance** (`server/landscape/landscape-guidance.ts`): Converts zone data into generator biases. RL element-group weights from high-Tc zone compositions. Inverse design seeds from zone-proximal materials. Diffusion guidance from zone structural motifs. Zone-based Tc bonus (up to ~15% of zone score) for candidates in discovery zones.
+- **Pipeline integration**: Materials added to landscape in Phase 10 and autonomous loop. Landscape updated every 5 cycles. Zone bonus applied to candidate Tc scoring. Stats logged in autonomous loop summary.
+- **APIs**: `GET /api/landscape/embedding` (3D points), `/api/landscape/zones` (discovery zones), `/api/landscape/stats` (statistics), `/api/landscape/guidance` (generator biases).
+
 ### Quantum Criticality Detector
 - **Unified quantum critical point (QCP) detector** formalizing existing spin susceptibility, CDW, SDW, Mott detection into a single QuantumCriticalScore.
 - **Six QCP channels**: Mott (Hubbard U/W ratio), SDW (Stoner enhancement + nesting), CDW (nesting + DOS), nematic (orbital anisotropy), structural (soft phonon modes), orbital-selective (mixed d-orbital).

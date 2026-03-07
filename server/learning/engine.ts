@@ -56,6 +56,9 @@ import { discoveryMemory, buildFingerprint } from "./discovery-memory";
 import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, rebalanceWeights } from "./generator-manager";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
+import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
+import { getZoneBonus, getLandscapeRLBias } from "../landscape/landscape-guidance";
+import { getZoneMap } from "../landscape/zone-detector";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 
@@ -1233,6 +1236,10 @@ async function runPhase10_Physics() {
           recordPrediction(candidate.formula, currentTc, updatedTc);
           updatePhysicsParameters(updatedTc, currentTc, [], candidate.formula);
         } catch {}
+
+        try {
+          addMaterialToDataset(candidate.formula, updatedTc, result.coupling.lambda, result.pairingAnalysis?.symmetry ?? "unknown", result.pairingAnalysis?.dominantMechanism ?? "unknown");
+        } catch {}
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
@@ -1961,6 +1968,14 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       }
     } catch {}
 
+    try {
+      const zoneInfo = getZoneBonus(formula);
+      if (zoneInfo.inZone && zoneInfo.bonus > 0.01) {
+        const zoneTcBoost = 1 + zoneInfo.bonus * 0.1;
+        finalTc = Math.min(400, Math.round(finalTc * zoneTcBoost));
+      }
+    } catch {}
+
     const synthesizabilityScore = structureResult?.synthesizability ?? 0.5;
     const lambda = physicsResult.coupling.lambda;
     const rawHullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
@@ -2076,6 +2091,11 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       recordPrediction(formula, gbResult.tcPredicted, finalTc);
       recordCandidateOutcome(formula, true);
       updatePhysicsParameters(finalTc, gbResult.tcPredicted, [], formula);
+    } catch {}
+
+    try {
+      const family = physicsResult.pairingAnalysis?.dominantMechanism ?? "unknown";
+      addMaterialToDataset(formula, finalTc, physicsResult.coupling.lambda, physicsResult.pairingAnalysis?.symmetry ?? "unknown", family);
     } catch {}
 
     if (finalTc > autonomousBestTc) {
@@ -2347,6 +2367,23 @@ async function runAutonomousFastPath() {
 
     rebalanceWeights();
 
+    if (cycleCount % 5 === 0) {
+      try {
+        const landscapeUpdate = updateLandscape([]);
+        const lStats = getLandscapeStats();
+        const zoneMap = getZoneMap();
+        if (lStats.embeddedMaterials > 5) {
+          const rlBias = getLandscapeRLBias();
+          emit("log", {
+            phase: "engine",
+            event: "Discovery landscape update",
+            detail: `Landscape: ${lStats.embeddedMaterials} embedded materials, ${zoneMap.zones.length} zones (${zoneMap.topZones.length} high-priority). Coverage: ${zoneMap.coveragePercent}%. Tc range: ${lStats.tcRange.min}-${lStats.tcRange.max}K (avg ${lStats.tcRange.avg}K). RL bias: ${Object.entries(rlBias.elementGroupWeights).filter(([,v]) => v > 0.3).map(([k,v]) => `${k}=${v.toFixed(2)}`).join(", ")}. ${zoneMap.suggestions[0] ?? ""}`,
+            dataSource: "Discovery Landscape",
+          });
+        }
+      } catch {}
+    }
+
     const clusterGuidance = getClusterGuidance();
     if (clusterGuidance.highPotentialClusters.length > 0 || clusterGuidance.underExploredClusters.length > 0) {
       const highPotential = clusterGuidance.highPotentialClusters.map(c => `${c.clusterId}(avgTc=${c.avgTc.toFixed(0)}K)`).join(", ");
@@ -2371,10 +2408,12 @@ async function runAutonomousFastPath() {
     const perfDetail = perfMetrics.totalPredictions > 0 ? ` PerfTrack: MAE=${perfMetrics.overall.mae.toFixed(1)}K, R²=${perfMetrics.overall.r2.toFixed(3)}.` : "";
     const genDetail = ` Generators: ${genAllocations.generators.map(g => `${g.name}=${(g.weight * 100).toFixed(0)}%`).join(", ")}.`;
     const fsClusterDetail = clusterGuidance.totalMaterials > 0 ? ` FS clusters: ${clusterGuidance.totalMaterials} materials in ${clusterGuidance.highPotentialClusters.length} high-potential clusters.` : "";
+    const lsStats = getLandscapeStats();
+    const landscapeDetail = lsStats.embeddedMaterials > 0 ? ` Landscape: ${lsStats.embeddedMaterials} embedded, ${lsStats.tcRange.max.toFixed(0)}K max.` : "";
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
+      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail}${landscapeDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
       dataSource: "Autonomous Loop",
     });
   } finally {
@@ -2413,6 +2452,7 @@ export function getAutonomousLoopStats() {
     scPillarsOptimizer: getPillarOptimizerStats(),
     generatorAllocations: getGeneratorAllocations(),
     fermiSurfaceClusters: getClusterGuidance(),
+    discoveryLandscape: getLandscapeStats(),
   };
 }
 
