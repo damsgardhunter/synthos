@@ -182,14 +182,17 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `POST /api/gradient-design/optimize` (single formula), `POST /api/gradient-design/batch` (multi-seed), `GET /api/gradient-design/stats`.
 - File: `server/inverse/differentiable-optimizer.ts`
 
-### 5-Pillar SC Optimizer (Multi-Objective Superconductivity Targeting)
-- **5 SC pillars**: (1) Strong electron-phonon coupling λ≥1.5, (2) High phonon frequencies ω_log≥700K, (3) High DOS at Fermi level ≥2.0 states/eV, (4) Fermi surface nesting ≥0.5, (5) Favorable structural motifs (cage/layered/kagome).
-- **Pillar evaluation**: `evaluatePillars()` computes all 5 pillar scores (0-1 each), composite weighted fitness, satisfied pillar count (0-5), and weakest pillar identification.
-- **8 design templates**: clathrate-hydride, metal-boride, metal-carbide, metal-nitride, ternary-hydride, high-DOS-intermetallic, layered-pnictide, cuprate-layered.
-- **Adaptive pillar weights**: Learned via RL reward from Tc outcomes. Successful pillar patterns get increased weights. Weights auto-normalize to sum to 1.0.
-- **Weakness-targeted mutation**: Existing candidates are mutated specifically to improve their weakest pillar (e.g., if weak coupling → add light atoms; if weak nesting → add pnictogen layers).
-- **Pipeline integration**: Runs every 9 engine cycles. Uses top existing SC candidates + pillar-guided generation + weakness mutation. Inserts candidates with Tc≥8K.
-- **API**: `POST /api/sc-pillars/evaluate` (single formula), `POST /api/sc-pillars/generate` (full generation), `GET /api/sc-pillars/stats`.
+### 8-Pillar SC Optimizer (Multi-Objective Superconductivity Targeting)
+- **8 SC pillars**: (1) Electron-phonon coupling λ≥1.5, (2) Phonon frequencies ω_log≥700K, (3) DOS at Fermi level ≥2.0, (4) Fermi nesting ≥0.5, (5) Structural motifs (cage/layered/kagome), (6) Pairing glue strength ≥0.5, (7) Electronic instability proximity ≥0.4, (8) Hydrogen cage geometry ≥0.5 (hydrides only, 7 active pillars for non-hydrides).
+- **Pairing glue score**: Composite of phonon (50%), spin-fluctuation (25%), charge-fluctuation (10%), excitonic (15%) contributions. Uses `computeDynamicSpinSusceptibility` for Stoner enhancement and QCP proximity. Cuprates/pnictides correctly identify spin-fluctuation as dominant mechanism.
+- **Electronic instability proximity**: Combines van Hove proximity (20%), nesting (15%), DOS (10%), spin susceptibility (15%), Mott proximity (15%), CDW (10%), SDW (10%), structural (5%). Uses competing phase evaluation for SDW detection. NbSe2 correctly flags CDW, BaFe2As2 flags SDW.
+- **Hydrogen cage geometry**: Evaluates H-network dimensionality (1D-3D), cage score (sodalite/clathrate detection), H-H bond distribution, cage symmetry, H coordination. LaH10 scores 0.98 (metallic-network sodalite), CaH6 scores 0.96. Non-hydrides get pillar weight redistributed to other 7 pillars.
+- **Pillar evaluation**: `evaluatePillars()` computes all 8 pillar scores (0-1 each), composite weighted fitness, satisfied count, weakest pillar identification. Non-hydrides automatically redistribute H-cage weight across other pillars.
+- **11 design templates**: clathrate-hydride, metal-boride, metal-carbide, metal-nitride, ternary-hydride, high-DOS-intermetallic, layered-pnictide, cuprate-layered, sodalite-superhydride, spin-fluctuation-pnictide, mott-proximate.
+- **Adaptive pillar weights**: 8 weights (coupling=0.18, phonon=0.12, dos=0.12, nesting=0.10, structure=0.10, pairingGlue=0.18, instability=0.10, hydrogenCage=0.10). RL-learned via Tc delta from running baseline (not raw Tc).
+- **Weakness-targeted mutation**: 8 mutation strategies including pairingGlue (add magnetic elements + pnictogens), instability (add CuO planes or TM), hydrogenCage (increase H count + add cage formers).
+- **Pipeline integration**: Runs every 9 engine cycles. Adaptive targets scale with targetTc. Inserts candidates with Tc≥8K.
+- **API**: `POST /api/sc-pillars/evaluate` (returns full PairingGlueBreakdown, InstabilityBreakdown, HydrogenCageMetrics), `POST /api/sc-pillars/generate` (full generation with all 3 new scores), `GET /api/sc-pillars/stats`.
 - File: `server/inverse/sc-pillars-optimizer.ts`
 
 ### Physics-Constrained Generative AI (Rule-Aware Material Creation)

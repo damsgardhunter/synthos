@@ -2346,7 +2346,7 @@ export interface DynamicSpinSusceptibility {
   isNearQCP: boolean;
 }
 
-function computeDynamicSpinSusceptibility(
+export function computeDynamicSpinSusceptibility(
   formula: string,
   electronic: ElectronicStructure
 ): DynamicSpinSusceptibility {

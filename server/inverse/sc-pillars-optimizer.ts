@@ -2,6 +2,9 @@ import {
   computeElectronicStructure,
   computePhononSpectrum,
   computeElectronPhononCoupling,
+  computeDynamicSpinSusceptibility,
+  evaluateCompetingPhases,
+  classifyHydrogenBonding,
   parseFormulaElements,
 } from "../learning/physics-engine";
 import {
@@ -20,6 +23,9 @@ export interface SCPillarTargets {
   minDOS: number;
   minNesting: number;
   minFlatBand: number;
+  minPairingGlue: number;
+  minInstability: number;
+  minHydrogenCage: number;
   preferredMotifs: ("layered" | "cage" | "kagome" | "A15" | "perovskite")[];
 }
 
@@ -29,8 +35,44 @@ export const DEFAULT_PILLAR_TARGETS: SCPillarTargets = {
   minDOS: 2.0,
   minNesting: 0.5,
   minFlatBand: 0.5,
+  minPairingGlue: 0.5,
+  minInstability: 0.4,
+  minHydrogenCage: 0.5,
   preferredMotifs: ["cage", "layered", "kagome"],
 };
+
+export interface PairingGlueBreakdown {
+  electronPhononContribution: number;
+  spinFluctuationContribution: number;
+  chargeFluctuationContribution: number;
+  excitonicContribution: number;
+  compositePairingGlue: number;
+  dominantMechanism: string;
+}
+
+export interface InstabilityBreakdown {
+  vanHoveProximity: number;
+  nestingContribution: number;
+  dosContribution: number;
+  spinSusceptibility: number;
+  mottProximity: number;
+  cdwSusceptibility: number;
+  sdwSusceptibility: number;
+  structuralInstability: number;
+  compositeInstability: number;
+  dominantInstability: string;
+}
+
+export interface HydrogenCageMetrics {
+  hydrogenNetworkDimensionality: number;
+  hydrogenCageScore: number;
+  hhBondDistribution: number;
+  cageSymmetry: number;
+  hCoordination: number;
+  bondingType: string;
+  compositeHydrogenScore: number;
+  isHydride: boolean;
+}
 
 export interface PillarEvaluation {
   formula: string;
@@ -41,12 +83,18 @@ export interface PillarEvaluation {
   flatBandScore: number;
   motifMatch: string;
   motifScore: number;
+  pairingGlue: PairingGlueBreakdown;
+  instability: InstabilityBreakdown;
+  hydrogenCage: HydrogenCageMetrics;
   pillarScores: {
     coupling: number;
     phonon: number;
     dos: number;
     nesting: number;
     structure: number;
+    pairingGlue: number;
+    instability: number;
+    hydrogenCage: number;
   };
   compositeFitness: number;
   satisfiedPillars: number;
@@ -82,6 +130,9 @@ const LAYER_FORMERS = ["Cu", "Fe", "Ni", "Co", "Mn"];
 const KAGOME_ELEMENTS = ["V", "Mn", "Fe", "Co", "Nb"];
 const PNICTOGEN_ELEMENTS = ["As", "P", "Sb", "Bi"];
 const CHALCOGEN_ELEMENTS = ["S", "Se", "Te"];
+
+const SODALITE_CAGE_ELEMENTS = ["La", "Y", "Ce", "Th", "Ac", "Ca", "Sr", "Ba"];
+const CLATHRATE_CAGE_ELEMENTS = ["La", "Y", "Ca", "Ba", "Sr", "Sc", "Ce"];
 
 function parseCounts(formula: string): Record<string, number> {
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
@@ -161,12 +212,261 @@ function scorePillar(value: number, target: number, softness: number = 0.5): num
   return Math.pow(ratio, softness);
 }
 
+function computePairingGlue(
+  formula: string,
+  lambda: number,
+  electronic: ReturnType<typeof computeElectronicStructure>,
+): PairingGlueBreakdown {
+  const elements = parseFormulaElements(formula);
+  const spin = computeDynamicSpinSusceptibility(formula, electronic);
+
+  const phononContribution = Math.min(1.0, lambda / 2.0);
+
+  let spinContribution = 0;
+  if (spin.stonerEnhancement > 2.0) {
+    spinContribution = Math.min(1.0, (spin.stonerEnhancement - 1) / 10);
+  }
+  if (spin.isNearQCP) {
+    spinContribution = Math.max(spinContribution, 0.7);
+  }
+  const hasMagnetic = elements.some(e => ["Fe", "Co", "Ni", "Mn", "Cr", "Cu"].includes(e));
+  const hasPnictogenOrChalcogen = elements.some(e =>
+    PNICTOGEN_ELEMENTS.includes(e) || CHALCOGEN_ELEMENTS.includes(e) || e === "O"
+  );
+  if (hasMagnetic && hasPnictogenOrChalcogen) {
+    spinContribution = Math.max(spinContribution, 0.4 + electronic.correlationStrength * 0.4);
+  }
+
+  let chargeContribution = 0;
+  const nestingVal = electronic.nestingScore ?? 0;
+  if (nestingVal > 0.5 && electronic.densityOfStatesAtFermi > 2.0) {
+    chargeContribution = Math.min(1.0, nestingVal * 0.5 + electronic.densityOfStatesAtFermi * 0.05);
+  }
+
+  let excitonicContribution = 0;
+  if (electronic.correlationStrength > 0.5 && electronic.metallicity > 0.3) {
+    const mottScore = electronic.mottProximityScore ?? 0;
+    if (mottScore > 0.3) {
+      excitonicContribution = Math.min(0.8, mottScore * 0.6 + electronic.correlationStrength * 0.2);
+    }
+  }
+
+  const compositePairingGlue =
+    0.50 * phononContribution +
+    0.25 * spinContribution +
+    0.10 * chargeContribution +
+    0.15 * excitonicContribution;
+
+  let dominantMechanism = "phonon";
+  const contributions = [
+    { name: "phonon", val: phononContribution * 0.50 },
+    { name: "spin-fluctuation", val: spinContribution * 0.25 },
+    { name: "charge-fluctuation", val: chargeContribution * 0.10 },
+    { name: "excitonic", val: excitonicContribution * 0.15 },
+  ];
+  contributions.sort((a, b) => b.val - a.val);
+  if (contributions[0].val > 0) dominantMechanism = contributions[0].name;
+
+  return {
+    electronPhononContribution: Number(phononContribution.toFixed(4)),
+    spinFluctuationContribution: Number(spinContribution.toFixed(4)),
+    chargeFluctuationContribution: Number(chargeContribution.toFixed(4)),
+    excitonicContribution: Number(excitonicContribution.toFixed(4)),
+    compositePairingGlue: Number(compositePairingGlue.toFixed(4)),
+    dominantMechanism,
+  };
+}
+
+function computeInstabilityProximity(
+  formula: string,
+  electronic: ReturnType<typeof computeElectronicStructure>,
+  lambda: number,
+): InstabilityBreakdown {
+  const elements = parseFormulaElements(formula);
+  const spin = computeDynamicSpinSusceptibility(formula, electronic);
+  const competing = evaluateCompetingPhases(formula, electronic);
+
+  const vanHove = Math.min(1.0, electronic.vanHoveProximity ?? 0);
+  const nestingVal = Math.min(1.0, electronic.nestingScore ?? 0);
+  const dosVal = Math.min(1.0, electronic.densityOfStatesAtFermi / 5.0);
+  const spinSusc = Math.min(1.0, (spin.stonerEnhancement - 1) / 15);
+
+  const mottProx = Math.min(1.0, electronic.mottProximityScore ?? 0);
+
+  let cdwSusc = 0;
+  const hasDichalcogenide = elements.some(e => CHALCOGEN_ELEMENTS.includes(e)) &&
+    elements.some(e => ["Nb", "Ta", "Ti", "V", "Mo", "W"].includes(e));
+  if (hasDichalcogenide && nestingVal > 0.4) {
+    cdwSusc = Math.min(1.0, nestingVal * 0.6 + dosVal * 0.4);
+  }
+  if (electronic.flatBandIndicator > 0.5 && nestingVal > 0.3) {
+    cdwSusc = Math.max(cdwSusc, electronic.flatBandIndicator * 0.5);
+  }
+
+  let sdwSusc = 0;
+  const hasMagnetic = elements.some(e => ["Fe", "Cr", "Mn", "Co", "V"].includes(e));
+  if (hasMagnetic && nestingVal > 0.5) {
+    sdwSusc = Math.min(1.0, spinSusc * 0.5 + nestingVal * 0.3 + electronic.correlationStrength * 0.2);
+  }
+  for (const phase of competing) {
+    if (phase.type === "magnetism" && !phase.suppressesSC) {
+      sdwSusc = Math.max(sdwSusc, phase.strength * 0.7);
+    }
+  }
+
+  let structInstab = 0;
+  const hasH = elements.includes("H");
+  if (hasH) {
+    const counts = parseCounts(formula);
+    const hRatio = (counts["H"] || 0) / Math.max(1, Object.values(counts).reduce((s, n) => s + n, 0) - (counts["H"] || 0));
+    if (hRatio >= 4) structInstab = Math.min(1.0, 0.5 + hRatio * 0.05);
+    if (lambda > 2.0) structInstab = Math.max(structInstab, Math.min(1.0, lambda * 0.3));
+  }
+  if (electronic.flatBandIndicator > 0.6) {
+    structInstab = Math.max(structInstab, electronic.flatBandIndicator * 0.4);
+  }
+
+  const compositeInstability =
+    0.20 * vanHove +
+    0.15 * nestingVal +
+    0.10 * dosVal +
+    0.15 * Math.max(spinSusc, 0) +
+    0.15 * mottProx +
+    0.10 * cdwSusc +
+    0.10 * sdwSusc +
+    0.05 * structInstab;
+
+  const instabilities = [
+    { name: "van-Hove", val: vanHove },
+    { name: "Mott", val: mottProx },
+    { name: "CDW", val: cdwSusc },
+    { name: "SDW", val: sdwSusc },
+    { name: "structural", val: structInstab },
+    { name: "nesting", val: nestingVal },
+  ];
+  instabilities.sort((a, b) => b.val - a.val);
+  const dominantInstability = instabilities[0].val > 0.1 ? instabilities[0].name : "none";
+
+  return {
+    vanHoveProximity: Number(vanHove.toFixed(4)),
+    nestingContribution: Number(nestingVal.toFixed(4)),
+    dosContribution: Number(dosVal.toFixed(4)),
+    spinSusceptibility: Number(Math.max(0, spinSusc).toFixed(4)),
+    mottProximity: Number(mottProx.toFixed(4)),
+    cdwSusceptibility: Number(cdwSusc.toFixed(4)),
+    sdwSusceptibility: Number(sdwSusc.toFixed(4)),
+    structuralInstability: Number(structInstab.toFixed(4)),
+    compositeInstability: Number(compositeInstability.toFixed(4)),
+    dominantInstability,
+  };
+}
+
+function computeHydrogenCageMetrics(
+  formula: string,
+  elements: string[],
+  counts: Record<string, number>,
+): HydrogenCageMetrics {
+  const hCount = counts["H"] || 0;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const nonHAtoms = totalAtoms - hCount;
+
+  if (hCount === 0) {
+    return {
+      hydrogenNetworkDimensionality: 0,
+      hydrogenCageScore: 0,
+      hhBondDistribution: 0,
+      cageSymmetry: 0,
+      hCoordination: 0,
+      bondingType: "none",
+      compositeHydrogenScore: 0,
+      isHydride: false,
+    };
+  }
+
+  const hRatio = hCount / Math.max(1, nonHAtoms);
+  const bondingType = classifyHydrogenBonding(formula, hRatio >= 6 ? 150 : hRatio >= 4 ? 100 : 50);
+
+  let networkDim = 0;
+  if (hRatio >= 6) networkDim = 3.0;
+  else if (hRatio >= 4) networkDim = 2.5;
+  else if (hRatio >= 2) networkDim = 2.0;
+  else if (hRatio >= 1) networkDim = 1.5;
+  else networkDim = 1.0;
+
+  let cageScore = 0;
+  const hasSodaliteFormer = elements.some(e => SODALITE_CAGE_ELEMENTS.includes(e));
+  const hasClathFormer = elements.some(e => CLATHRATE_CAGE_ELEMENTS.includes(e));
+
+  if (hRatio >= 6 && hasSodaliteFormer) {
+    cageScore = 0.95;
+    if (hRatio >= 8 && hRatio <= 12) cageScore = 1.0;
+  } else if (hRatio >= 4 && hasClathFormer) {
+    cageScore = 0.80;
+    if (hRatio >= 6) cageScore = 0.90;
+  } else if (hRatio >= 4) {
+    cageScore = 0.60;
+  } else if (hRatio >= 2) {
+    cageScore = 0.35;
+  } else {
+    cageScore = 0.15;
+  }
+
+  let hhBondDist = 0;
+  if (hRatio >= 6) {
+    hhBondDist = 0.90;
+    if (nonHAtoms === 1) hhBondDist = 0.95;
+  } else if (hRatio >= 4) {
+    hhBondDist = 0.70;
+  } else if (hRatio >= 2) {
+    hhBondDist = 0.50;
+  } else {
+    hhBondDist = 0.20;
+  }
+
+  let cageSymmetry = 0;
+  if (cageScore >= 0.8) {
+    const metalCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) ||
+      SODALITE_CAGE_ELEMENTS.includes(e)).length;
+    if (metalCount === 1 && nonHAtoms <= 2) {
+      cageSymmetry = 0.95;
+    } else if (metalCount <= 2) {
+      cageSymmetry = 0.75;
+    } else {
+      cageSymmetry = 0.50;
+    }
+  } else if (cageScore >= 0.5) {
+    cageSymmetry = 0.40;
+  }
+
+  const hCoordination = Math.min(12, Math.round(hRatio * 2));
+
+  const compositeHydrogenScore =
+    0.25 * (networkDim / 3.0) +
+    0.35 * cageScore +
+    0.20 * hhBondDist +
+    0.20 * cageSymmetry;
+
+  return {
+    hydrogenNetworkDimensionality: Number(networkDim.toFixed(2)),
+    hydrogenCageScore: Number(cageScore.toFixed(4)),
+    hhBondDistribution: Number(hhBondDist.toFixed(4)),
+    cageSymmetry: Number(cageSymmetry.toFixed(4)),
+    hCoordination,
+    bondingType,
+    compositeHydrogenScore: Number(compositeHydrogenScore.toFixed(4)),
+    isHydride: hCount > 0,
+  };
+}
+
 let pillarWeights = {
-  coupling: 0.30,
-  phonon: 0.20,
-  dos: 0.20,
-  nesting: 0.15,
-  structure: 0.15,
+  coupling: 0.18,
+  phonon: 0.12,
+  dos: 0.12,
+  nesting: 0.10,
+  structure: 0.10,
+  pairingGlue: 0.18,
+  instability: 0.10,
+  hydrogenCage: 0.10,
 };
 
 let totalEvaluated = 0;
@@ -177,6 +477,7 @@ let bestFormula = "";
 let bestTc = 0;
 let pillarSatisfied: Record<string, number> = {
   coupling: 0, phonon: 0, dos: 0, nesting: 0, structure: 0,
+  pairingGlue: 0, instability: 0, hydrogenCage: 0,
 };
 let elementAffinity: Record<string, { totalFitness: number; count: number }> = {};
 let topCandidates: { formula: string; fitness: number; tc: number; pillars: number }[] = [];
@@ -203,8 +504,27 @@ export function evaluatePillars(
   const metallicity = electronic.metallicity;
 
   const motif = detectMotif(formula, elements, counts);
+  const pairingGlue = computePairingGlue(formula, lambda, electronic);
+  const instability = computeInstabilityProximity(formula, electronic, lambda);
+  const hydrogenCage = computeHydrogenCageMetrics(formula, elements, counts);
 
   const motifBonus = targets.preferredMotifs.some(pm => motif.match.includes(pm)) ? 0.2 : 0;
+
+  const isHydride = hydrogenCage.isHydride;
+  const hydrogenCageWeight = isHydride ? pillarWeights.hydrogenCage : 0;
+
+  const activeWeights = { ...pillarWeights };
+  if (!isHydride) {
+    activeWeights.hydrogenCage = 0;
+    const redistrib = pillarWeights.hydrogenCage / 7;
+    activeWeights.coupling += redistrib;
+    activeWeights.phonon += redistrib;
+    activeWeights.dos += redistrib;
+    activeWeights.nesting += redistrib;
+    activeWeights.structure += redistrib;
+    activeWeights.pairingGlue += redistrib;
+    activeWeights.instability += redistrib;
+  }
 
   const pillarScores = {
     coupling: scorePillar(lambda, targets.minLambda, 0.6),
@@ -212,27 +532,47 @@ export function evaluatePillars(
     dos: scorePillar(dos, targets.minDOS, 0.5),
     nesting: scorePillar(nestingScore, targets.minNesting, 0.3),
     structure: Math.min(1.0, motif.score + motifBonus + scorePillar(flatBandScore, targets.minFlatBand, 0.3) * 0.3),
+    pairingGlue: scorePillar(pairingGlue.compositePairingGlue, targets.minPairingGlue, 0.5),
+    instability: scorePillar(instability.compositeInstability, targets.minInstability, 0.4),
+    hydrogenCage: isHydride ? scorePillar(hydrogenCage.compositeHydrogenScore, targets.minHydrogenCage, 0.5) : 0,
   };
 
   let compositeFitness =
-    pillarWeights.coupling * pillarScores.coupling +
-    pillarWeights.phonon * pillarScores.phonon +
-    pillarWeights.dos * pillarScores.dos +
-    pillarWeights.nesting * pillarScores.nesting +
-    pillarWeights.structure * pillarScores.structure;
+    activeWeights.coupling * pillarScores.coupling +
+    activeWeights.phonon * pillarScores.phonon +
+    activeWeights.dos * pillarScores.dos +
+    activeWeights.nesting * pillarScores.nesting +
+    activeWeights.structure * pillarScores.structure +
+    activeWeights.pairingGlue * pillarScores.pairingGlue +
+    activeWeights.instability * pillarScores.instability +
+    activeWeights.hydrogenCage * pillarScores.hydrogenCage;
 
   if (metallicity < 0.3) {
     compositeFitness *= 0.5;
   }
 
+  const activePillarScores = isHydride ? pillarScores : {
+    coupling: pillarScores.coupling,
+    phonon: pillarScores.phonon,
+    dos: pillarScores.dos,
+    nesting: pillarScores.nesting,
+    structure: pillarScores.structure,
+    pairingGlue: pillarScores.pairingGlue,
+    instability: pillarScores.instability,
+  };
+
+  const totalPillars = isHydride ? 8 : 7;
   const satisfiedPillars =
     (lambda >= targets.minLambda ? 1 : 0) +
     (omegaLogK >= targets.minOmegaLogK ? 1 : 0) +
     (dos >= targets.minDOS ? 1 : 0) +
     (nestingScore >= targets.minNesting ? 1 : 0) +
-    (flatBandScore >= targets.minFlatBand || motif.score >= 0.7 ? 1 : 0);
+    (flatBandScore >= targets.minFlatBand || motif.score >= 0.7 ? 1 : 0) +
+    (pairingGlue.compositePairingGlue >= targets.minPairingGlue ? 1 : 0) +
+    (instability.compositeInstability >= targets.minInstability ? 1 : 0) +
+    (isHydride && hydrogenCage.compositeHydrogenScore >= targets.minHydrogenCage ? 1 : 0);
 
-  const weakestPillar = (Object.entries(pillarScores) as [string, number][])
+  const weakestPillar = (Object.entries(activePillarScores) as [string, number][])
     .reduce((a, b) => a[1] < b[1] ? a : b)[0];
 
   let tcPredicted = 0;
@@ -283,6 +623,9 @@ export function evaluatePillars(
     flatBandScore,
     motifMatch: motif.match,
     motifScore: motif.score,
+    pairingGlue,
+    instability,
+    hydrogenCage,
     pillarScores,
     compositeFitness,
     satisfiedPillars,
@@ -392,6 +735,39 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     stoichiometryRange: [1, 3],
     lightAtomRange: [4, 7],
   },
+  {
+    name: "sodalite-superhydride",
+    targetMotif: "cage",
+    baseElements: [
+      ["La", "H"], ["Y", "H"], ["Ce", "H"], ["Th", "H"],
+      ["Ca", "H"], ["Ba", "H"], ["Sc", "H"],
+    ],
+    lightAtom: "H",
+    stoichiometryRange: [1, 1],
+    lightAtomRange: [8, 12],
+  },
+  {
+    name: "spin-fluctuation-pnictide",
+    targetMotif: "layered",
+    baseElements: [
+      ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Ca", "Fe", "As"],
+      ["Ba", "Fe", "P"], ["Sr", "Co", "As"], ["La", "Fe", "As", "O"],
+    ],
+    lightAtom: "",
+    stoichiometryRange: [1, 2],
+    lightAtomRange: [2, 2],
+  },
+  {
+    name: "mott-proximate",
+    targetMotif: "layered",
+    baseElements: [
+      ["La", "Sr", "Cu", "O"], ["La", "Ba", "Cu", "O"],
+      ["Ca", "V", "O"], ["Sr", "V", "O"], ["La", "Ni", "O"],
+    ],
+    lightAtom: "O",
+    stoichiometryRange: [1, 2],
+    lightAtomRange: [3, 7],
+  },
 ];
 
 function generateFromTemplate(template: DesignTemplate, count: number): string[] {
@@ -456,10 +832,13 @@ export function runPillarGuidedGeneration(
       if (evaluation.pillarScores.dos >= 0.7) strengths.push(`high DOS (${evaluation.dos.toFixed(2)})`);
       if (evaluation.pillarScores.nesting >= 0.7) strengths.push(`good nesting (${evaluation.nestingScore.toFixed(2)})`);
       if (evaluation.pillarScores.structure >= 0.7) strengths.push(`favorable ${evaluation.motifMatch}`);
+      if (evaluation.pillarScores.pairingGlue >= 0.7) strengths.push(`strong ${evaluation.pairingGlue.dominantMechanism} glue (${evaluation.pairingGlue.compositePairingGlue.toFixed(2)})`);
+      if (evaluation.pillarScores.instability >= 0.7) strengths.push(`near ${evaluation.instability.dominantInstability} instability (${evaluation.instability.compositeInstability.toFixed(2)})`);
+      if (evaluation.pillarScores.hydrogenCage >= 0.7) strengths.push(`H-cage ${evaluation.hydrogenCage.bondingType} (${evaluation.hydrogenCage.compositeHydrogenScore.toFixed(2)})`);
 
       const rationale = strengths.length > 0
-        ? `${evaluation.satisfiedPillars}/5 pillars met: ${strengths.join("; ")}. Weakest: ${evaluation.weakestPillar}`
-        : `Low pillar satisfaction (${evaluation.satisfiedPillars}/5). Weakest: ${evaluation.weakestPillar}`;
+        ? `${evaluation.satisfiedPillars}/${evaluation.hydrogenCage.isHydride ? 8 : 7} pillars met: ${strengths.join("; ")}. Weakest: ${evaluation.weakestPillar}`
+        : `Low pillar satisfaction (${evaluation.satisfiedPillars}/${evaluation.hydrogenCage.isHydride ? 8 : 7}). Weakest: ${evaluation.weakestPillar}`;
 
       results.push({
         formula,
@@ -509,6 +888,9 @@ export function runPillarCycle(
     minLambda: targetTc > 150 ? 2.0 : targetTc > 50 ? 1.5 : 1.0,
     minOmegaLogK: targetTc > 150 ? 800 : targetTc > 50 ? 600 : 400,
     minDOS: targetTc > 150 ? 3.0 : 2.0,
+    minPairingGlue: targetTc > 150 ? 0.6 : targetTc > 50 ? 0.45 : 0.3,
+    minInstability: targetTc > 150 ? 0.5 : targetTc > 50 ? 0.35 : 0.25,
+    minHydrogenCage: targetTc > 150 ? 0.6 : 0.4,
   };
 
   const guided = runPillarGuidedGeneration(targets, 6);
@@ -634,6 +1016,52 @@ function mutateTowardWeakPillar(
       }
       if (!elements.includes("H") && !elements.includes("B")) {
         mutated["H"] = 6;
+      }
+      break;
+    }
+    case "pairingGlue": {
+      if (evaluation.pairingGlue.spinFluctuationContribution < 0.3) {
+        const hasMagnetic = elements.some(e => ["Fe", "Co", "Mn"].includes(e));
+        if (!hasMagnetic) {
+          mutated["Fe"] = 2;
+          if (!elements.some(e => PNICTOGEN_ELEMENTS.includes(e))) {
+            mutated["As"] = 2;
+          }
+        }
+      } else {
+        const hasLight = elements.some(e => LIGHT_ATOMS.includes(e));
+        if (!hasLight) {
+          mutated["H"] = 4 + Math.floor(Math.random() * 4);
+        }
+      }
+      break;
+    }
+    case "instability": {
+      if (evaluation.instability.mottProximity < 0.3) {
+        if (!elements.includes("Cu") && !elements.includes("O")) {
+          mutated["Cu"] = 1;
+          mutated["O"] = 4;
+          const hasRE = elements.some(e => isRareEarth(e));
+          if (!hasRE) mutated["La"] = 1;
+        }
+      }
+      if (evaluation.instability.vanHoveProximity < 0.3) {
+        const hasTM = elements.some(e => isTransitionMetal(e));
+        if (!hasTM) {
+          mutated["V"] = 2;
+        }
+      }
+      break;
+    }
+    case "hydrogenCage": {
+      if (!elements.includes("H")) {
+        mutated["H"] = 8;
+      } else {
+        mutated["H"] = Math.min(12, (mutated["H"] || 0) + 3);
+      }
+      const hasCage = elements.some(e => SODALITE_CAGE_ELEMENTS.includes(e));
+      if (!hasCage) {
+        mutated["La"] = 1;
       }
       break;
     }
