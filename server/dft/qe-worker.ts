@@ -11,6 +11,7 @@ const QE_PSEUDO_DIR = "/tmp/qe_pseudo";
 const QE_TIMEOUT_MS = 120_000;
 
 const PROJECT_ROOT = path.resolve(process.cwd());
+const PP_SOURCE_DIR = path.join(PROJECT_ROOT, "server/dft/pseudo");
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
@@ -205,17 +206,45 @@ function validatePseudopotential(filePath: string): boolean {
   try {
     if (!fs.existsSync(filePath)) return false;
     const stats = fs.statSync(filePath);
-    if (stats.size < 5000) return false;
-    const content = fs.readFileSync(filePath, "utf-8");
-    if (!content.includes("</UPF>")) return false;
-    if (!content.includes("<PP_HEADER")) return false;
-    if (!content.includes("<PP_MESH>")) return false;
-    if (!content.includes("<PP_LOCAL") && !content.includes("<PP_NONLOCAL")) return false;
+    if (stats.size < 10000) return false;
+    const head = Buffer.alloc(4096);
+    const fd = fs.openSync(filePath, "r");
+    fs.readSync(fd, head, 0, 4096, 0);
+    fs.closeSync(fd);
+    const headStr = head.toString("utf-8");
+    if (headStr.includes("<!DOCTYPE") || headStr.includes("<html")) return false;
+    if (!headStr.includes("<UPF") && !headStr.includes("<PP_HEADER")) return false;
+    const tail = Buffer.alloc(256);
+    const fd2 = fs.openSync(filePath, "r");
+    const readPos = Math.max(0, stats.size - 256);
+    fs.readSync(fd2, tail, 0, 256, readPos);
+    fs.closeSync(fd2);
+    if (!tail.toString("utf-8").includes("</UPF>")) return false;
     return true;
   } catch {
     return false;
   }
 }
+
+function cleanupPseudoDir(): void {
+  if (!fs.existsSync(QE_PSEUDO_DIR)) return;
+  const entries = fs.readdirSync(QE_PSEUDO_DIR);
+  for (const entry of entries) {
+    const fullPath = path.join(QE_PSEUDO_DIR, entry);
+    const stat = fs.statSync(fullPath);
+    if (stat.isDirectory()) {
+      try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch {}
+      console.log(`[QE-Worker] Removed stale directory: ${entry}`);
+      continue;
+    }
+    if (entry.endsWith(".UPF") && !validatePseudopotential(fullPath)) {
+      try { fs.unlinkSync(fullPath); } catch {}
+      console.log(`[QE-Worker] Removed invalid PP from cache: ${entry} (${stat.size} bytes)`);
+    }
+  }
+}
+
+cleanupPseudoDir();
 
 function ensurePseudopotential(element: string): string {
   if (!fs.existsSync(QE_PSEUDO_DIR)) {
@@ -229,10 +258,17 @@ function ensurePseudopotential(element: string): string {
 
   if (fs.existsSync(ppFile)) {
     console.log(`[QE-Worker] Invalid PP for ${element} (${fs.statSync(ppFile).size} bytes), removing`);
-    fs.unlinkSync(ppFile);
+    try { fs.unlinkSync(ppFile); } catch {}
   }
 
-  throw new Error(`No valid pseudopotential for ${element} — place a verified UPF file (PseudoDojo/SSSP/PSLibrary) in ${QE_PSEUDO_DIR}/${element}.UPF`);
+  const sourceFile = path.join(PP_SOURCE_DIR, `${element}.UPF`);
+  if (fs.existsSync(sourceFile) && validatePseudopotential(sourceFile)) {
+    fs.copyFileSync(sourceFile, ppFile);
+    console.log(`[QE-Worker] Copied valid PP for ${element} from repo (${fs.statSync(ppFile).size} bytes)`);
+    return ppFile;
+  }
+
+  throw new Error(`No valid pseudopotential for ${element} — need a verified UPF file in ${PP_SOURCE_DIR}/${element}.UPF`);
 }
 
 function autoKPoints(latticeA: number): string {

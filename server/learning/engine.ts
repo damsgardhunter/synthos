@@ -2547,7 +2547,7 @@ async function runAutonomousFastPath() {
     }
 
     let inverseDesignCandidates: string[] = [];
-    if (cycleCount % 2 === 0) {
+    {
       try {
         let campaigns = getAllActiveCampaigns();
         if (campaigns.length === 0) {
@@ -2618,7 +2618,7 @@ async function runAutonomousFastPath() {
     }
 
     let structDiffusionCandidates: string[] = [];
-    if (cycleCount % 3 === 0) {
+    {
       try {
         const structResult = runStructureDiffusionCycle(200, 3, 3);
         for (const formula of structResult.formulas) {
@@ -2636,6 +2636,30 @@ async function runAutonomousFastPath() {
         }
       } catch (err: any) {
         emit("log", { phase: "engine", event: "Fast-path structure diffusion error", detail: err.message?.slice(0, 150), dataSource: "Structure Diffusion" });
+      }
+    }
+
+    let motifDiffusionCandidates: string[] = [];
+    if (cycleCount % 2 === 0) {
+      try {
+        const diffResult = runDiffusionGenerationCycle(15);
+        for (const crystal of diffResult.structures) {
+          if (!isValidFormula(crystal.formula)) continue;
+          const normalized = normalizeFormula(crystal.formula);
+          if (alreadyScreenedFormulas.has(normalized)) continue;
+          motifDiffusionCandidates.push(normalized);
+          recordGeneratorOutcome("motif_diffusion", true, 0, crystal.noveltyScore);
+        }
+        if (diffResult.structures.length > 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Fast-path motif diffusion",
+            detail: `Generated ${diffResult.structures.length} structures, ${motifDiffusionCandidates.length} novel. Avg novelty: ${diffResult.stats.avgNovelty}`,
+            dataSource: "Motif Diffusion",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "engine", event: "Fast-path motif diffusion error", detail: err.message?.slice(0, 150), dataSource: "Motif Diffusion" });
       }
     }
 
@@ -2719,7 +2743,7 @@ async function runAutonomousFastPath() {
       } catch {}
     }
 
-    const allEngineCandidates = [...physicsCleanCandidates, ...inverseDesignCandidates, ...structDiffusionCandidates, ...integratedCandidates];
+    const allEngineCandidates = [...physicsCleanCandidates, ...inverseDesignCandidates, ...structDiffusionCandidates, ...motifDiffusionCandidates, ...integratedCandidates];
     const novelCandidates = allEngineCandidates.filter(f => !alreadyScreenedFormulas.has(f));
     const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(f)).length / Math.max(1, rlCandidates.length);
     for (const f of allEngineCandidates) alreadyScreenedFormulas.add(f);
@@ -2734,7 +2758,7 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen, ${novelCandidates.length} novel`,
-      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}, integrated=${integratedCandidates.length}. Feeding ${novelCandidates.length} novel formulas through pipeline.`,
+      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}, motifDiffusion=${motifDiffusionCandidates.length}, integrated=${integratedCandidates.length}. Feeding ${novelCandidates.length} novel formulas through pipeline.`,
       dataSource: "Candidate Generator",
     });
 

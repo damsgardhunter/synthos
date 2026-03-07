@@ -589,6 +589,102 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
   return { atoms, proto: "generic-cluster" };
 }
 
+const MIN_PAIRWISE_DISTANCE = 0.6;
+const MIN_VOLUME_PER_ATOM = 5.0;
+const MAX_SCALE_ATTEMPTS = 5;
+
+function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; pairI: number; pairJ: number } {
+  let minDist = Infinity;
+  let pairI = -1;
+  let pairJ = -1;
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const dx = atoms[i].x - atoms[j].x;
+      const dy = atoms[i].y - atoms[j].y;
+      const dz = atoms[i].z - atoms[j].z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < minDist) {
+        minDist = dist;
+        pairI = i;
+        pairJ = j;
+      }
+    }
+  }
+  return { minDist, pairI, pairJ };
+}
+
+function computeBoundingVolume(atoms: AtomPosition[]): number {
+  if (atoms.length < 2) return 0;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const a of atoms) {
+    if (a.x < minX) minX = a.x;
+    if (a.y < minY) minY = a.y;
+    if (a.z < minZ) minZ = a.z;
+    if (a.x > maxX) maxX = a.x;
+    if (a.y > maxY) maxY = a.y;
+    if (a.z > maxZ) maxZ = a.z;
+  }
+  const pad = 1.5;
+  const lx = Math.max(maxX - minX, pad);
+  const ly = Math.max(maxY - minY, pad);
+  const lz = Math.max(maxZ - minZ, pad);
+  return lx * ly * lz;
+}
+
+function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {
+  let cx = 0, cy = 0, cz = 0;
+  for (const a of atoms) { cx += a.x; cy += a.y; cz += a.z; }
+  cx /= atoms.length; cy /= atoms.length; cz /= atoms.length;
+  return atoms.map(a => ({
+    element: a.element,
+    x: cx + (a.x - cx) * factor,
+    y: cy + (a.y - cy) * factor,
+    z: cz + (a.z - cz) * factor,
+  }));
+}
+
+function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPosition[] | null {
+  if (atoms.length < 2) return atoms;
+
+  let current = atoms;
+
+  for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
+    const { minDist } = computePairwiseDistances(current);
+    const volume = computeBoundingVolume(current);
+    const volumePerAtom = volume / current.length;
+
+    const distOk = minDist >= MIN_PAIRWISE_DISTANCE;
+    const volOk = volumePerAtom >= MIN_VOLUME_PER_ATOM;
+
+    if (distOk && volOk) return current;
+
+    let scaleFactor = 1.0;
+    if (!distOk) {
+      scaleFactor = Math.max(scaleFactor, (MIN_PAIRWISE_DISTANCE + 0.1) / Math.max(minDist, 0.01));
+    }
+    if (!volOk) {
+      const neededFactor = Math.cbrt(MIN_VOLUME_PER_ATOM / Math.max(volumePerAtom, 0.01));
+      scaleFactor = Math.max(scaleFactor, neededFactor);
+    }
+
+    scaleFactor = Math.min(scaleFactor, 3.0);
+    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, vol/atom=${volumePerAtom.toFixed(1)}ų — scaling by ${scaleFactor.toFixed(2)}`);
+    current = scaleStructure(current, scaleFactor);
+  }
+
+  const { minDist } = computePairwiseDistances(current);
+  const volume = computeBoundingVolume(current);
+  const volumePerAtom = volume / current.length;
+
+  if (minDist < MIN_PAIRWISE_DISTANCE || volumePerAtom < MIN_VOLUME_PER_ATOM) {
+    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, vol/atom=${volumePerAtom.toFixed(1)}ų`);
+    return null;
+  }
+
+  return current;
+}
+
 function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; prototype: string } {
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
@@ -605,14 +701,18 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
       y: a.y,
       z: a.z,
     }));
-    return { atoms: atomPositions, prototype: `${chemProto.templateName} prototype lattice` };
+    const validated = validateAndFixStructure(atomPositions, formula);
+    if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+    return { atoms: validated, prototype: `${chemProto.templateName} prototype lattice` };
   }
 
   const protoMatch = matchPrototype(counts);
   if (protoMatch) {
     const atoms = buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts);
     if (atoms.length >= 2) {
-      return { atoms, prototype: protoMatch.proto.name };
+      const validated = validateAndFixStructure(atoms, formula);
+      if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+      return { atoms: validated, prototype: protoMatch.proto.name };
     }
   }
 
@@ -634,12 +734,16 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (scaledMatch) {
     const atoms = buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts);
     if (atoms.length >= 2) {
-      return { atoms, prototype: scaledMatch.proto.name + "-scaled" };
+      const validated = validateAndFixStructure(atoms, formula);
+      if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+      return { atoms: validated, prototype: scaledMatch.proto.name + "-scaled" };
     }
   }
 
   const { atoms, proto } = buildGenericStructure(scaledCounts);
-  return { atoms, prototype: proto };
+  const validated = validateAndFixStructure(atoms, formula);
+  if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+  return { atoms: validated, prototype: proto };
 }
 
 function writeXYZ(atoms: AtomPosition[], filepath: string, comment: string = ""): void {
@@ -887,6 +991,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   fs.mkdirSync(calcDir, { recursive: true });
 
   const { atoms: initialAtoms, prototype } = generateCrystalStructure(formula);
+  if (initialAtoms.length < 2) return null;
 
   let atoms = initialAtoms;
   let isOptimized = false;
@@ -1104,6 +1209,13 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       }
     }
 
+    const prePhononCheck = validateAndFixStructure(atoms, formula);
+    if (!prePhononCheck) {
+      console.log(`[DFT] ${formula}: Phonon check skipped — structure has atom overlaps`);
+      return null;
+    }
+    atoms = prePhononCheck;
+
     writeXYZ(atoms, path.join(calcDir, "input.xyz"), `${formula} phonon check (${prototype})`);
 
     const env: Record<string, string> = {
@@ -1220,15 +1332,21 @@ export async function runFiniteDisplacementPhonons(formula: string): Promise<Fin
 
   const cacheKey = formula.replace(/\s+/g, "");
   const optResult = optimizedStructureCache.get(cacheKey);
-  let atoms: { symbol: string; x: number; y: number; z: number }[];
+  let rawAtoms: AtomPosition[];
   if (optResult && optResult.converged && optResult.optimizedAtoms && optResult.optimizedAtoms.length >= 2) {
-    atoms = optResult.optimizedAtoms;
+    rawAtoms = optResult.optimizedAtoms;
   } else {
-    atoms = generateCrystalStructure(formula).atoms;
+    rawAtoms = generateCrystalStructure(formula).atoms;
   }
-  if (atoms.length < 2 || atoms.length > 8) return null;
+  if (rawAtoms.length < 2 || rawAtoms.length > 8) return null;
 
-  return computeFiniteDisplacementPhonons(formula, atoms);
+  const validatedAtoms = validateAndFixStructure(rawAtoms, formula);
+  if (!validatedAtoms) {
+    console.log(`[DFT] ${formula}: Finite displacement phonons skipped — structure has atom overlaps`);
+    return null;
+  }
+
+  return computeFiniteDisplacementPhonons(formula, validatedAtoms);
 }
 
 export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeatures | null> {

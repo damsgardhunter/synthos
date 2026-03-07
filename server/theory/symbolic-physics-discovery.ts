@@ -937,6 +937,9 @@ export function runSymbolicPhysicsDiscovery(
           : 0;
 
         const dimValid = isDimensionallyValidForTarget(tree, target);
+
+        if (!dimValid) continue;
+
         let constraintViolations = 0;
         for (const row of dataset) {
           const pred = evaluateNode(tree, row as any);
@@ -946,14 +949,14 @@ export function runSymbolicPhysicsDiscovery(
         const complexity = treeSize(tree);
         const simplicity = Math.max(0, 1 - complexity / 25);
         const novelty = computeNovelty(equation, [...theoryDatabase, ...discovered]);
-        const physicsCompliance = fit.physicsScore * (dimValid ? 1.0 : 0.7);
+        const physicsCompliance = fit.physicsScore;
 
         const theoryScore =
-          0.35 * fit.r2 +
-          0.20 * simplicity +
-          0.20 * avgGenR2 +
-          0.15 * physicsCompliance +
-          0.10 * novelty;
+          0.30 * fit.r2 +
+          0.15 * simplicity +
+          0.15 * avgGenR2 +
+          0.25 * physicsCompliance +
+          0.15 * novelty;
 
         const variables = extractVariables(tree);
         const featureImportance = computeFeatureImportance(tree, dataset, target);
@@ -1016,10 +1019,15 @@ export function runSymbolicPhysicsDiscovery(
   }
 
   for (const theory of discovered) {
+    if (!theory.dimensionallyValid) continue;
     if (!theoryDatabase.some(t => t.equation === theory.equation)) {
       theoryDatabase.push(theory);
     }
   }
+
+  const validTheories = theoryDatabase.filter(t => t.dimensionallyValid);
+  theoryDatabase.length = 0;
+  theoryDatabase.push(...validTheories);
 
   if (theoryDatabase.length > 100) {
     theoryDatabase.sort((a, b) => b.theoryScore - a.theoryScore);
@@ -1109,7 +1117,7 @@ export interface DiscoveryFeedback {
 }
 
 export function generateDiscoveryFeedback(theories: DiscoveredTheory[]): DiscoveryFeedback {
-  const topTheories = theories.filter(t => t.theoryScore > 0.3).slice(0, 5);
+  const topTheories = theories.filter(t => t.theoryScore > 0.3 && t.dimensionallyValid).slice(0, 5);
   const biased: Map<string, { direction: "increase" | "decrease"; totalImportance: number }> = new Map();
 
   for (const theory of topTheories) {
@@ -1213,7 +1221,7 @@ export function getSymbolicDiscoveryStats(): SymbolicDiscoveryStats {
     totalRuns: totalDiscoveryRuns,
     totalEquationsEvaluated,
     theoriesDiscovered: theoryDatabase.length,
-    topTheories: theoryDatabase.slice(0, 10).map(t => ({
+    topTheories: theoryDatabase.filter(t => t.dimensionallyValid).slice(0, 10).map(t => ({
       id: t.id,
       equation: t.equation,
       simplified: t.simplified,

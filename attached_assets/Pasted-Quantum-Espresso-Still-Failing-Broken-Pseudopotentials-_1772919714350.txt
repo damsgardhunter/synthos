@@ -1,0 +1,230 @@
+Quantum Espresso Still Failing (Broken Pseudopotentials)
+
+This error appears repeatedly:
+
+pw.x exited with code 2
+At line 1207 of file xmltools.f90
+Fortran runtime error:
+Sequential READ or WRITE not allowed after EOF marker
+__read_upf_new_module_MOD_read_upf_new
+
+This exact error always means the pseudopotential file is corrupted or incomplete.
+
+Your earlier logs already hinted at this:
+
+generateMinimalPP produced ~700-byte skeleton UPF files.
+
+Quantum Espresso cannot read those.
+
+Evidence from your queue:
+
+LaH8
+LaH9
+LaH11
+
+All failing instantly.
+
+Wall time:
+
+0.47s
+0.50s
+1.0s
+
+That means QE crashed before SCF even started.
+
+Root cause
+
+Your pseudopotential generator is still producing invalid files.
+
+Example of what QE expects inside a .UPF file:
+
+<UPF version="2.0.1">
+<PP_HEADER
+...
+</UPF>
+
+Your validation rules should be:
+
+file size > 5 KB
+contains <UPF
+contains <PP_HEADER
+contains </UPF>
+
+Right now those checks are not working because your log shows:
+
+ppValidated: null
+
+So the validator isn't being executed.
+
+Fix
+
+Inside ensurePseudopotential():
+
+if (!validatePseudopotential(path)) {
+   delete file
+   regenerate
+}
+
+And if it still fails:
+
+reject job before pw.x launch
+
+Until this is fixed no real DFT runs will succeed.
+
+🚨 Critical Issue 2 — xTB Hessian Crashing
+
+You have multiple failures like:
+
+xtb input.xyz --gfn 2 --hess
+Phonon check failed
+
+and
+
+Geometry optimization failed
+
+But the more important lines are:
+
+7 xTB numerical artifact modes (< -5000 cm-1) discarded
+
+and
+
+11 imaginary modes detected
+
+Your imaginary-mode filter is now working, which is good:
+
+REJECTED — 11 imaginary modes detected
+
+However the huge negative frequencies:
+
+-5000 cm⁻¹
+
+mean the geometry generator is still producing extremely bad structures.
+
+Typical unstable phonon:
+
+-50 to -150 cm⁻¹
+
+Your system is seeing values 50–100× worse.
+
+Root cause
+
+Structure generator is making atoms overlap.
+
+Most common causes:
+
+• lattice too small
+• hydrogen cage collisions
+• missing geometry relaxation
+
+Fix
+
+Add minimum distance filter before xTB:
+
+min_pairwise_distance > 0.6 Å
+
+Also enforce:
+
+volume_per_atom > 5 Å³
+
+This will remove most catastrophic structures.
+
+🚨 Critical Issue 3 — DFT Queue Completely Dead
+
+Your queue stats show:
+
+completed: 0
+failed: 105
+success: 0
+
+So currently:
+
+real DFT = 0% success
+
+Your xTB runs are working:
+
+successRate: 88.6%
+runs: 44
+
+But QE has never completed a single SCF calculation.
+
+Until the pseudopotential issue is fixed the DFT subsystem is effectively offline.
+
+⚠️ Architecture Warning — Theory Engine Producing Unphysical Equations
+
+Your theory discovery produced:
+
+Tc = bandwidth * coupling_strength
+
+and
+
+Tc = coupling_strength²
+
+But your logs say:
+
+dimensionallyValid: false
+
+Which is correct.
+
+Example:
+
+bandwidth → energy
+coupling_strength → dimensionless
+
+So the result has units of energy, not temperature.
+
+Fix
+
+Your theory generator needs unit consistency constraints.
+
+For example:
+
+Tc ∝ ω_log exp(-1/λ)
+
+is dimensionally correct.
+
+You already have a unit registry, so enforce:
+
+dimensional_equivalence(Tc)
+
+when generating formulas.
+
+⚠️ Generator Allocation Problem
+
+Generator stats:
+
+RL generator: 38 candidates
+structure diffusion: 22
+combinatorial: 13
+inverse design: 0
+motif diffusion: 0
+
+Two generators are completely unused:
+
+inverse_design
+motif_diffusion
+
+So your architecture is under-utilizing its strongest discovery tools.
+
+Especially motif diffusion — that's usually the best performer.
+
+⚠️ Design Programs Still Too Simple
+
+Stats:
+
+avgInstructions: 11.8
+avgComplexity: 1
+
+Better than before but still low.
+
+Typical high-quality structure generators use:
+
+20–40 instructions
+
+More instructions allow:
+
+• symmetry operations
+• multi-layer structures
+• interface physics
+• charge reservoirs
+
+Right now the structures are still chemically simple.
