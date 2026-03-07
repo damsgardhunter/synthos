@@ -789,6 +789,11 @@ export async function runXTBOptimization(formula: string): Promise<OptimizationR
     return optimizedStructureCache.get(cacheKey)!;
   }
 
+  if (!fs.existsSync(XTB_BIN)) {
+    console.log(`[DFT] xTB binary not found at ${XTB_BIN}`);
+    return null;
+  }
+
   const startTime = Date.now();
   const calcId = `opt_${cacheKey.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
   const calcDir = path.join(WORK_DIR, calcId);
@@ -809,8 +814,14 @@ export async function runXTBOptimization(formula: string): Promise<OptimizationR
       OMP_STACKSIZE: "512M",
     };
 
+    const cmd = `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`;
+    if (!cmd.includes("/xtb ")) {
+      console.log(`[DFT] WARNING: Geometry optimization command malformed: ${cmd.slice(0, 200)}`);
+      return null;
+    }
+
     const output = execSync(
-      `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`,
+      cmd,
       { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
     ).toString();
 
@@ -1060,8 +1071,8 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
   const HA_TO_EV = 27.2114;
   const efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
 
-  if (Math.abs(efPerAtom) > 15) {
-    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom exceeds sanity bounds, discarding`);
+  if (Math.abs(efPerAtom) > 5) {
+    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom exceeds sanity bounds (>5 eV/atom), discarding`);
     return null;
   }
 
@@ -1161,17 +1172,33 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
     const zpeMatch = output.match(/zero point energy\s+([-\d.]+)\s+Eh/);
     if (zpeMatch) zpe = parseFloat(zpeMatch[1]);
 
-    const IMAG_THRESHOLD = -2000;
-    const imaginaryModes = frequencies.filter(f => f < IMAG_THRESHOLD);
+    const ARTIFACT_THRESHOLD = -5000;
+    const PHYSICAL_IMAG_THRESHOLD = -5;
     const lowestFreq = frequencies.length > 0 ? Math.min(...frequencies) : 0;
+    const physicalImagModes = frequencies.filter(f => f < PHYSICAL_IMAG_THRESHOLD && f >= ARTIFACT_THRESHOLD);
+    const artifactModes = frequencies.filter(f => f < ARTIFACT_THRESHOLD);
 
     const result: PhononStability = {
-      hasImaginaryModes: imaginaryModes.length > 0,
-      imaginaryModeCount: imaginaryModes.length,
+      hasImaginaryModes: physicalImagModes.length > 0,
+      imaginaryModeCount: physicalImagModes.length,
       lowestFrequency: lowestFreq,
       frequencies: frequencies.slice(0, 20),
       zeroPointEnergy: zpe,
     };
+
+    if (physicalImagModes.length > 3) {
+      (result as any).severeInstability = true;
+      (result as any).instabilityReason = `${physicalImagModes.length} imaginary modes detected (max 3 allowed)`;
+      console.log(`[DFT] ${formula}: Severe phonon instability — ${physicalImagModes.length} imaginary modes`);
+    }
+    if (lowestFreq < -500 && lowestFreq >= ARTIFACT_THRESHOLD) {
+      (result as any).severeInstability = true;
+      (result as any).instabilityReason = `Lowest frequency ${lowestFreq.toFixed(0)} cm-1 (threshold: -500 cm-1)`;
+      console.log(`[DFT] ${formula}: Severe phonon instability — lowest freq = ${lowestFreq.toFixed(0)} cm-1`);
+    }
+    if (artifactModes.length > 0) {
+      console.log(`[DFT] ${formula}: ${artifactModes.length} xTB numerical artifact modes (< ${ARTIFACT_THRESHOLD} cm-1) discarded`);
+    }
 
     phononCache.set(formula, result);
     if (phononCache.size > 100) {

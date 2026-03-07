@@ -42,7 +42,7 @@ import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./famil
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
-import { getXTBStats } from "../dft/qe-dft-engine";
+import { getXTBStats, runXTBPhononCheck } from "../dft/qe-dft-engine";
 import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
@@ -171,6 +171,42 @@ let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 10000;
+
+const KNOWN_COMPOUNDS = new Set<string>([
+  "MgB2", "NbTi", "Nb3Sn", "Nb3Ge", "Nb3Al", "NbN", "NbC", "V3Si", "V3Ga",
+  "YBa2Cu3O7", "Bi2Sr2CaCu2O8", "Bi2Sr2Ca2Cu3O10", "Tl2Ba2CaCu2O8",
+  "HgBa2CaCu2O6", "HgBa2Ca2Cu3O8", "La2CuO4", "LaFeAsO", "BaFe2As2",
+  "FeSe", "LiFeAs", "NaFeAs", "SrFe2As2", "CaFe2As2",
+  "LaH10", "YH6", "YH9", "CeH9", "CeH10", "ThH10", "ThH9", "PrH9",
+  "CaH6", "ScH9", "LaBeH8", "BaH12",
+  "H3S", "SH3", "PH3", "AsH3", "GeH4", "SiH4", "SnH4",
+  "TiH2", "TiH3", "VH2", "CrH", "MnH", "FeH", "CoH", "NiH", "CuH",
+  "ZrH2", "ZrH3", "NbH", "NbH2", "MoH", "PdH", "AgH",
+  "HfH2", "TaH", "WH", "PtH", "AuH",
+  "YH2", "YH3", "LaH2", "LaH3", "LaH4", "LaH5",
+  "CeH2", "CeH3", "PrH2", "PrH3", "NdH2", "NdH3", "GdH2", "GdH3",
+  "ScH2", "ScH3", "TiH", "VH", "CrH2",
+  "MgH2", "CaH2", "SrH2", "BaH2", "LiH", "NaH", "KH", "RbH", "CsH",
+  "AlH3", "GaH3", "BeH2",
+  "TiC", "ZrC", "HfC", "VC", "NbC2", "TaC", "WC", "MoC", "Mo2C",
+  "TiN", "ZrN", "HfN", "VN", "NbN2", "TaN", "WN", "MoN", "CrN",
+  "TiB2", "ZrB2", "HfB2", "VB2", "NbB2", "TaB2", "MoB2", "WB2", "CrB2",
+  "MgB4", "AlB2", "CaB6", "LaB6", "YB6",
+  "PbTe", "SnTe", "GeTe", "Bi2Te3", "Bi2Se3", "Sb2Te3",
+  "ZrTe5", "HfTe5", "WTe2", "MoTe2", "MoS2", "WS2", "NbSe2", "TaSe2",
+  "Fe2O3", "TiO2", "SrTiO3", "BaTiO3", "LaAlO3", "LaNiO3",
+  "PbMo6S8", "Pb", "Nb", "V", "Ta", "Hg", "Sn", "In", "Al", "Ti",
+]);
+
+const FAMILY_CAPS: Record<string, number> = {
+  Hydrides: 0.40,
+  Carbides: 0.15,
+  Nitrides: 0.12,
+  Borides: 0.10,
+  Chalcogenides: 0.12,
+  Oxides: 0.10,
+  Sulfides: 0.08,
+};
 let lastActiveLearningCycle = 0;
 let recentTcImproved = false;
 let recentNewCandidates = 0;
@@ -2121,6 +2157,18 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
 
+    try {
+      const miedemaEf = computeMiedemaFormationEnergy(formula);
+      if (Math.abs(miedemaEf) > 5) {
+        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom is physically insane (>5), rejecting`);
+        return { passed: false, tc: 0, reason: `formation-energy-insane: ${miedemaEf.toFixed(3)} eV/atom` };
+      }
+    } catch {}
+
+    if (KNOWN_COMPOUNDS.has(normalizeFormula(formula))) {
+      return { passed: false, tc: 0, reason: "known-compound" };
+    }
+
     const family = classifyFamily(formula);
     const features = extractFeatures(formula);
     if (!features) {
@@ -2166,6 +2214,18 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     try {
       await runConvexHullAnalysis(emit, formula);
+    } catch {}
+
+    try {
+      const phononCheck = await runXTBPhononCheck(formula);
+      if (phononCheck) {
+        const severeInstability = (phononCheck as any).severeInstability;
+        if (severeInstability) {
+          const reason = (phononCheck as any).instabilityReason || "severe phonon instability";
+          console.log(`[Autonomous] ${formula}: REJECTED — ${reason}`);
+          return { passed: false, tc: 0, reason: `phonon-instability: ${reason}` };
+        }
+      }
     } catch {}
 
     const physicsResult = await runFullPhysicsAnalysis(emit, candidate as any);
@@ -2698,6 +2758,30 @@ async function runAutonomousFastPath() {
       patternFiltered = beforeCount - filteredCandidates.length;
       if (filteredCandidates.length === 0) filteredCandidates = novelCandidates;
     }
+
+    const familyQuotaCounts: Record<string, number> = {};
+    const totalBatchSize = filteredCandidates.length;
+    const quotaBalanced: string[] = [];
+    for (const formula of filteredCandidates) {
+      const fam = classifyFamily(formula);
+      const cap = FAMILY_CAPS[fam];
+      if (cap !== undefined) {
+        const currentCount = familyQuotaCounts[fam] || 0;
+        const maxAllowed = Math.max(3, Math.ceil(totalBatchSize * cap));
+        if (currentCount >= maxAllowed) {
+          continue;
+        }
+        familyQuotaCounts[fam] = currentCount + 1;
+      } else {
+        familyQuotaCounts[fam] = (familyQuotaCounts[fam] || 0) + 1;
+      }
+      quotaBalanced.push(formula);
+    }
+    const quotaSkipped = filteredCandidates.length - quotaBalanced.length;
+    if (quotaSkipped > 0) {
+      console.log(`[Autonomous] Family quota: skipped ${quotaSkipped} excess candidates (caps: ${Object.entries(familyQuotaCounts).map(([k,v]) => `${k}=${v}`).join(", ")})`);
+    }
+    filteredCandidates = quotaBalanced;
 
     let physicsPrefiltered = 0;
     for (const formula of filteredCandidates) {

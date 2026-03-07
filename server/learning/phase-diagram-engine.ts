@@ -442,11 +442,33 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
     hullDistance = Math.max(0, formationEnergy * 0.3);
   }
 
-  if (hullDistance > 0.25) {
+  if (hullDistance > 0.50) {
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.25 threshold` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.50 threshold` +
+        (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
+      hullDistance,
+      formationEnergy,
+    };
+  }
+
+  if (hullDistance > 0.25) {
+    const metastabilityCheck = assessMetastability(formula, hullDistance);
+    if (metastabilityCheck.kineticBarrier > 0.2) {
+      return {
+        pass: true,
+        verdict: "metastable" as any,
+        reason: `exploratory-metastable (distance=${hullDistance.toFixed(4)} eV/atom, barrier=${metastabilityCheck.kineticBarrier.toFixed(3)} eV, lifetime=${metastabilityCheck.estimatedLifetime})`,
+        hullDistance,
+        formationEnergy,
+        kineticBarrier: metastabilityCheck.kineticBarrier,
+      };
+    }
+    return {
+      pass: false,
+      verdict: "unstable",
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.25, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.2 eV` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,

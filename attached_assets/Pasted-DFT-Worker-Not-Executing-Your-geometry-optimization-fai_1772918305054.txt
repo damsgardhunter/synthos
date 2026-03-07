@@ -1,0 +1,227 @@
+DFT Worker Not Executing
+
+Your geometry optimization failures show this command:
+
+cd /tmp/dft_calculations/opt_GdCaH10_1772918196263 && /home/runner/workspace/server/
+
+Notice the problem:
+
+The command stops at the directory path.
+
+There is no executable after it.
+
+A correct command should look like:
+
+cd ... && pw.x -in scf.in > scf.out
+
+or
+
+cd ... && xtb structure.xyz --opt
+
+Your worker is trying to execute:
+
+/home/runner/workspace/server/
+
+which is a directory, not a program.
+
+So the shell fails immediately.
+
+Fix
+
+In qe-worker.ts you probably have something like:
+
+exec(`cd ${dir} && ${process.cwd()}`)
+
+Replace with something like:
+
+exec(`cd ${dir} && pw.x -in scf.in > scf.out`)
+
+or whatever your actual binary is.
+
+This is the main reason geometry optimizations fail.
+
+🚨 Critical Issue 2 — Physics Sanity Filter Is Failing Too Late
+
+This line is very important:
+
+Formation energy 153.190 eV/atom exceeds sanity bounds
+
+This is astronomically impossible.
+
+Typical formation energies:
+
+stable:  -5 → 0 eV/atom
+metastable: 0 → 0.3 eV/atom
+unstable: 0.3 → 1 eV/atom
+
+153 eV/atom means the structure is physically nonsense.
+
+But the pipeline still ran:
+
+xTB
+Hessian
+Tc prediction
+
+Then even worse:
+
+PASSED: DyBeH10 Tc=13K
+
+This is a logic bug.
+
+Fix
+
+Add a hard stop:
+
+if formation_energy > 5 eV/atom:
+    reject immediately
+
+before any other stage.
+
+🚨 Critical Issue 3 — Severe Phonon Instability Accepted
+
+This is also very important:
+
+xTB Hessian found 15 imaginary mode(s)
+lowest freq = -25066 cm⁻¹
+
+This means the structure is violently unstable.
+
+Normal acceptable instability:
+
+1–2 imaginary modes
+~ -50 to -100 cm⁻¹
+
+Your structure:
+
+15 modes
+-25066 cm⁻¹
+
+This means the atoms are exploding apart.
+
+Yet your system accepted it:
+
+PASSED: DyBeH10 Tc=13K
+Fix
+
+Add rule:
+
+if imaginary_modes > 2:
+    reject
+
+if lowest_freq < -300:
+    reject
+⚠️ Issue 4 — Your Search Is Mostly Producing Duplicates
+
+Many entries say:
+
+reason: duplicate
+
+Examples:
+
+TiH3
+YH3
+LaH4
+LaH5
+MoH
+
+These are known materials already.
+
+Your generator is rediscovering known compounds repeatedly.
+
+Your stats confirm this:
+
+Hydrides generated: 121
+
+Hydrides dominate your search.
+
+Fix
+
+Add a novelty filter.
+
+Before evaluation check databases:
+
+Materials Project
+OQMD
+ICSD
+
+If the formula already exists:
+
+skip
+⚠️ Issue 5 — Hull Distance Filter Might Be Too Strict
+
+You are rejecting materials with:
+
+hull_dist > 0.3 eV/atom
+
+This is scientifically correct, but for exploratory discovery it can be too strict.
+
+Many experimentally synthesized materials lie around:
+
+0.3 – 0.6 eV/atom
+
+Example:
+
+CaCuSO2
+CaCuSeO2
+
+These were rejected even with decent predicted Tc.
+
+Suggestion
+
+Use:
+
+hull_dist < 0.5 eV/atom
+
+for exploration.
+
+⚠️ Issue 6 — Your Hydrogen Generator Is Too Dominant
+
+Family distribution:
+
+Hydrides: 121
+Carbides: 5
+Borides: 1
+Sulfides: 2
+Mixed: 9
+
+Your search is almost entirely hydrides.
+
+This biases the discovery engine.
+
+Hydrides are important but also require extreme pressure.
+
+Fix
+
+Add generator quotas:
+
+Hydrides max 40%
+Oxides 20%
+Carbides 15%
+Borides 10%
+Chalcogenides 15%
+⚠️ Issue 7 — Instruction Programs Are Too Simple
+
+Your design programs:
+
+avgInstructions: 5.8
+avgComplexity: 1
+
+That means your architecture generator is very shallow.
+
+Typical generative design programs should have:
+
+15–40 instructions
+
+Examples:
+
+create_lattice
+set_symmetry
+create_substructure
+add_charge_layer
+add_cage
+dope
+strain
+optimize_bond_network
+add_interface
+
+Right now your structures are too simple.

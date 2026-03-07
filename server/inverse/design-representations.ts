@@ -226,8 +226,14 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "create_lattice", params: { latticeType: "cubic", a: 5.0 }, order: 0 },
     { type: "set_symmetry", params: { group: "Im-3m" }, order: 1 },
     { type: "populate_sites", params: { elements: ["La"], site: "vertex" }, order: 2 },
-    { type: "add_hydrogen_cage", params: { count: 10, cageType: "clathrate", bondLength: 1.1 }, order: 3 },
-    { type: "optimize_dos", params: { targetDOS: 5.0, method: "van-hove" }, order: 4 },
+    { type: "add_sublattice", params: { elements: ["La"], pattern: "bcc-center", count: 1 }, order: 3 },
+    { type: "add_hydrogen_cage", params: { count: 10, cageType: "clathrate", bondLength: 1.1 }, order: 4 },
+    { type: "add_channel_network", params: { levels: 2, branchingFactor: 6, channelWidth: 1.0 }, order: 5 },
+    { type: "optimize_dos", params: { targetDOS: 5.0, method: "van-hove" }, order: 6 },
+    { type: "add_phonon_enhancer", params: { mode: "H-stretching", frequency: 1200 }, order: 7 },
+    { type: "apply_pressure_stabilization", params: { targetPressure: 150, method: "chemical-precompression" }, order: 8 },
+    { type: "apply_strain", params: { type: "hydrostatic", magnitude: 0.01 }, order: 9 },
+    { type: "dope_sites", params: { dopant: "Y", fraction: 0.05, site: "vertex" }, order: 10 },
   ],
   "layered-cuprate": [
     { type: "create_lattice", params: { latticeType: "tetragonal", a: 3.9, c: 11.7 }, order: 0 },
@@ -236,6 +242,12 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "add_charge_reservoir", params: { elements: ["Ba", "La"], layers: 2 }, order: 3 },
     { type: "add_intercalation_layer", params: { element: "O", spacing: 2.4 }, order: 4 },
     { type: "dope_sites", params: { dopant: "Sr", fraction: 0.15, site: "reservoir" }, order: 5 },
+    { type: "add_interface", params: { type: "charge-transfer", width: 1 }, order: 6 },
+    { type: "optimize_dos", params: { targetDOS: 8.0, method: "saddle-point" }, order: 7 },
+    { type: "add_phonon_enhancer", params: { mode: "breathing", frequency: 400 }, order: 8 },
+    { type: "apply_strain", params: { type: "biaxial", magnitude: 0.02 }, order: 9 },
+    { type: "dope_sites", params: { dopant: "Ca", fraction: 0.10, site: "spacer" }, order: 10 },
+    { type: "add_sublattice", params: { elements: ["O"], pattern: "apical", count: 1 }, order: 11 },
   ],
   "a15-compound": [
     { type: "create_lattice", params: { latticeType: "cubic", a: 5.3 }, order: 0 },
@@ -243,13 +255,24 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "populate_sites", params: { elements: ["Nb"], site: "chain" }, order: 2 },
     { type: "populate_sites", params: { elements: ["Sn"], site: "body-center" }, order: 3 },
     { type: "add_phonon_enhancer", params: { mode: "soft-phonon", frequency: 80 }, order: 4 },
+    { type: "add_sublattice", params: { elements: ["Nb"], pattern: "1d-chain", count: 3 }, order: 5 },
+    { type: "optimize_dos", params: { targetDOS: 6.0, method: "van-hove" }, order: 6 },
+    { type: "apply_strain", params: { type: "uniaxial", magnitude: 0.015 }, order: 7 },
+    { type: "dope_sites", params: { dopant: "Al", fraction: 0.08, site: "body-center" }, order: 8 },
+    { type: "add_channel_network", params: { levels: 2, branchingFactor: 3, channelWidth: 1.5 }, order: 9 },
   ],
   "hea-superconductor": [
     { type: "create_lattice", params: { latticeType: "cubic", a: 3.2 }, order: 0 },
     { type: "set_symmetry", params: { group: "Im-3m" }, order: 1 },
     { type: "populate_sites", params: { elements: ["Nb", "Ti", "Zr", "Hf", "V"], site: "random" }, order: 2 },
-    { type: "apply_strain", params: { type: "hydrostatic", magnitude: 0.02 }, order: 3 },
-    { type: "optimize_dos", params: { targetDOS: 4.0, method: "disorder-enhanced" }, order: 4 },
+    { type: "add_sublattice", params: { elements: ["Nb", "V"], pattern: "bcc-center", count: 2 }, order: 3 },
+    { type: "apply_strain", params: { type: "hydrostatic", magnitude: 0.02 }, order: 4 },
+    { type: "optimize_dos", params: { targetDOS: 4.0, method: "disorder-enhanced" }, order: 5 },
+    { type: "add_phonon_enhancer", params: { mode: "disorder-softening", frequency: 200 }, order: 6 },
+    { type: "dope_sites", params: { dopant: "Mo", fraction: 0.12, site: "random" }, order: 7 },
+    { type: "add_interface", params: { type: "grain-boundary", width: 2 }, order: 8 },
+    { type: "add_channel_network", params: { levels: 3, branchingFactor: 4, channelWidth: 1.0 }, order: 9 },
+    { type: "apply_strain", params: { type: "biaxial", magnitude: 0.01 }, order: 10 },
   ],
   "topological-sc": [
     { type: "create_lattice", params: { latticeType: "rhombohedral", a: 4.14, c: 28.6 }, order: 0 },
@@ -257,6 +280,12 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "add_sublattice", params: { elements: ["Bi", "Se"], pattern: "quintuple-layer", count: 3 }, order: 2 },
     { type: "add_interface", params: { type: "topological-surface", width: 2 }, order: 3 },
     { type: "dope_sites", params: { dopant: "Cu", fraction: 0.10, site: "intercalated" }, order: 4 },
+    { type: "add_sublattice", params: { elements: ["Se"], pattern: "vdw-gap", count: 1 }, order: 5 },
+    { type: "add_charge_reservoir", params: { elements: ["Bi"], layers: 1 }, order: 6 },
+    { type: "optimize_dos", params: { targetDOS: 3.0, method: "dirac-cone" }, order: 7 },
+    { type: "add_phonon_enhancer", params: { mode: "surface-phonon", frequency: 150 }, order: 8 },
+    { type: "apply_strain", params: { type: "biaxial", magnitude: 0.03 }, order: 9 },
+    { type: "add_intercalation_layer", params: { element: "Nb", spacing: 3.0 }, order: 10 },
   ],
   "phonon-optimized": [
     { type: "create_lattice", params: { latticeType: "hexagonal", a: 3.1, c: 3.5 }, order: 0 },
@@ -264,6 +293,12 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "populate_sites", params: { elements: ["Mg"], site: "vertex" }, order: 2 },
     { type: "populate_sites", params: { elements: ["B"], site: "honeycomb" }, order: 3 },
     { type: "add_phonon_enhancer", params: { mode: "E2g", frequency: 600 }, order: 4 },
+    { type: "add_sublattice", params: { elements: ["B"], pattern: "graphene-like", count: 2 }, order: 5 },
+    { type: "optimize_dos", params: { targetDOS: 7.0, method: "sigma-band" }, order: 6 },
+    { type: "add_interface", params: { type: "substrate-coupling", width: 1 }, order: 7 },
+    { type: "apply_strain", params: { type: "biaxial", magnitude: 0.025 }, order: 8 },
+    { type: "dope_sites", params: { dopant: "Al", fraction: 0.06, site: "vertex" }, order: 9 },
+    { type: "add_channel_network", params: { levels: 2, branchingFactor: 6, channelWidth: 0.8 }, order: 10 },
   ],
   "pressure-hydride": [
     { type: "create_lattice", params: { latticeType: "cubic", a: 3.7 }, order: 0 },
@@ -272,6 +307,12 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "add_hydrogen_cage", params: { count: 10, cageType: "sodalite", bondLength: 0.98 }, order: 3 },
     { type: "apply_pressure_stabilization", params: { targetPressure: 150, method: "chemical-precompression" }, order: 4 },
     { type: "add_channel_network", params: { levels: 3, branchingFactor: 4, channelWidth: 1.2 }, order: 5 },
+    { type: "add_sublattice", params: { elements: ["H"], pattern: "cage-interstitial", count: 4 }, order: 6 },
+    { type: "optimize_dos", params: { targetDOS: 6.0, method: "van-hove" }, order: 7 },
+    { type: "add_phonon_enhancer", params: { mode: "H-stretching", frequency: 1500 }, order: 8 },
+    { type: "add_interface", params: { type: "stabilization-layer", width: 1 }, order: 9 },
+    { type: "apply_strain", params: { type: "isotropic", magnitude: 0.015 }, order: 10 },
+    { type: "dope_sites", params: { dopant: "Ce", fraction: 0.08, site: "fcc" }, order: 11 },
   ],
   "charge-transfer": [
     { type: "create_lattice", params: { latticeType: "orthorhombic", a: 3.82, b: 3.89, c: 11.68 }, order: 0 },
@@ -280,6 +321,12 @@ const INSTRUCTION_TEMPLATES: Record<string, ProgramInstruction[]> = {
     { type: "add_charge_reservoir", params: { elements: ["Y", "Ba"], layers: 3 }, order: 3 },
     { type: "add_intercalation_layer", params: { element: "O", spacing: 2.0 }, order: 4 },
     { type: "optimize_dos", params: { targetDOS: 6.0, method: "saddle-point" }, order: 5 },
+    { type: "add_interface", params: { type: "charge-transfer", width: 2 }, order: 6 },
+    { type: "dope_sites", params: { dopant: "Ca", fraction: 0.12, site: "reservoir" }, order: 7 },
+    { type: "add_phonon_enhancer", params: { mode: "apical-oxygen", frequency: 350 }, order: 8 },
+    { type: "apply_strain", params: { type: "uniaxial", magnitude: 0.02 }, order: 9 },
+    { type: "add_sublattice", params: { elements: ["O"], pattern: "chain", count: 1 }, order: 10 },
+    { type: "add_channel_network", params: { levels: 2, branchingFactor: 4, channelWidth: 1.4 }, order: 11 },
   ],
 };
 
@@ -568,9 +615,19 @@ export function mutateDesignProgram(parent: DesignProgram, elementPool: string[]
       { type: "dope_sites", params: { dopant: elementPool[Math.floor(Math.random() * Math.max(1, elementPool.length))] || "Sr", fraction: 0.05 + Math.random() * 0.15, site: "random" }, order: child.instructions.length },
       { type: "add_phonon_enhancer", params: { mode: "soft-phonon", frequency: 50 + Math.random() * 300 }, order: child.instructions.length },
       { type: "add_interface", params: { type: "heterostructure", width: 1 + Math.floor(Math.random() * 3) }, order: child.instructions.length },
+      { type: "add_sublattice", params: { elements: [elementPool[Math.floor(Math.random() * Math.max(1, elementPool.length))] || "O"], pattern: "interstitial", count: 1 + Math.floor(Math.random() * 3) }, order: child.instructions.length },
+      { type: "add_charge_reservoir", params: { elements: [elementPool[Math.floor(Math.random() * Math.max(1, elementPool.length))] || "Ba"], layers: 1 + Math.floor(Math.random() * 2) }, order: child.instructions.length },
+      { type: "add_channel_network", params: { levels: 1 + Math.floor(Math.random() * 4), branchingFactor: 2 + Math.floor(Math.random() * 5), channelWidth: 0.5 + Math.random() * 1.5 }, order: child.instructions.length },
+      { type: "optimize_dos", params: { targetDOS: 2.0 + Math.random() * 6.0, method: "van-hove" }, order: child.instructions.length },
+      { type: "apply_pressure_stabilization", params: { targetPressure: 10 + Math.random() * 200, method: "chemical-precompression" }, order: child.instructions.length },
+      { type: "add_intercalation_layer", params: { element: elementPool[Math.floor(Math.random() * Math.max(1, elementPool.length))] || "Li", spacing: 1.0 + Math.random() * 3.0 }, order: child.instructions.length },
     ];
-    child.instructions.push(insertable[Math.floor(Math.random() * insertable.length)]);
-    child.metadata.mutationHistory.push("insert-instruction");
+    const numToInsert = Math.random() < 0.4 ? 2 : 1;
+    const shuffled = insertable.sort(() => Math.random() - 0.5);
+    for (let i = 0; i < Math.min(numToInsert, shuffled.length); i++) {
+      child.instructions.push({ ...shuffled[i], order: child.instructions.length });
+    }
+    child.metadata.mutationHistory.push(`insert-${numToInsert}-instructions`);
   } else if (mutationType < 0.65 && child.instructions.length > 3) {
     const removeIdx = 2 + Math.floor(Math.random() * (child.instructions.length - 2));
     child.instructions.splice(removeIdx, 1);

@@ -95,10 +95,17 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - `/api/milestones` — reads milestones from DB
 
 ### Physics Filtering Rules
-- **Phonon artifact threshold**: Imaginary modes with freq < -2000 cm⁻¹ are xTB numerical artifacts — discarded entirely, not penalized
-- **Physical instability threshold**: -100 cm⁻¹
+- **Phonon artifact threshold**: Imaginary modes with freq < -5000 cm⁻¹ are xTB numerical artifacts — discarded entirely, not penalized
+- **Phonon severe instability**: >3 imaginary modes OR lowest freq < -500 cm⁻¹ → hard rejection ("phonon-unstable")
+- **Physical instability threshold**: -5 cm⁻¹
 - **Penalty**: Physical imaginary modes penalize ensemble score by 0.05 per mode (max 0.25); >= 5 modes → dataConfidence = "low"
+- **Formation energy hard stop**: |Ef| > 5 eV/atom → immediate rejection ("formation-energy-insane") before DFT pipeline
+- **Hull distance**: Hard reject > 0.50 eV/atom; 0.25-0.50 = "exploratory-metastable" (requires kinetic barrier > 0.2 eV)
+- **Family quotas**: FAMILY_CAPS dict (Hydrides 40%, Intermetallics 25%, Borides/Carbides/Nitrides/Oxides 15% each, Sulfides/Pnictides 10%)
+- **Known compound filter**: ~200 known compounds (hydrides, carbides, cuprates, iron-based, binary) rejected pre-evaluation
+- **xTB binary check**: Validates XTB_BIN exists before geometry optimization commands
 - **Discovery score weights**: 0.55 Tc + 0.15 stability + 0.10 novelty + 0.10 synthesis + 0.05 topology + 0.05 uncertainty
+- **Design program templates**: 11-12 instructions per template; mutation pool has 10 insertable instruction types with 40% chance to insert 2 at once
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).
