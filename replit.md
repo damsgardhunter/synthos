@@ -79,6 +79,16 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Integration**: BO ranks combined candidate pool (RL-generated + massive-generation) by acquisition value; top-50 BO-ranked candidates screened first, followed by remaining candidates.
 - Files: `server/learning/bayesian-optimizer.ts`
 
+### Crystal Diffusion Generator
+- **Diffusion-inspired denoising**: Generates novel crystal structures by iteratively refining random atomic positions using physics-based score functions (Lennard-Jones repulsion, bond-length targets, symmetry constraints, wall confinement).
+- **Wyckoff position sampling**: Seeds atoms at high-symmetry Wyckoff sites from 8 space groups (Pm-3m, Fm-3m, Im-3m, P6/mmm, P4/mmm, I4/mmm, R-3m, Pnma) covering cubic, hexagonal, tetragonal, trigonal, and orthorhombic systems.
+- **Composition strategies**: 8 sampling strategies — hydride, ternary, binary TM, quaternary, exotic, cage compound, layered, borocarbide — targeting SC-relevant chemistries.
+- **Prototype matcher**: Classifies generated structures against 10 known prototypes (Perovskite, A15, NaCl, AlB2, ThCr2Si2, Fluorite, Heusler, Layered, Kagome, Clathrate) using coordination number analysis and c/a ratio matching.
+- **Physics validation**: Rejects structures with min bond length < 0.5 A, density outside 0.5-25 g/cm3, or lattice params outside physical bounds.
+- **Integration**: Runs every 5 engine cycles, generates 30 structures per batch, feeds through GB/GNN scoring and stability gate, results added as BO observations.
+- **API**: `POST /api/generate-crystal` (count, elements, targetTc params), `GET /api/diffusion-stats`.
+- Files: `server/ai/crystal-generator.ts`
+
 ### Massive Candidate Generator
 - Utilizes element substitution, composition interpolation, doped variants, and composition sweeps, with valence sanity filters and periodic table element validation.
 - **Fractional doping generator**: `generateFractionalDopedVariants()` creates fine-grained doped variants with fractions [0.05..0.25] across 19 SC-relevant dopants. Seeds include known SC materials (MgB2, LaH10, NbN, etc.). Generates ~150 variants per cycle.

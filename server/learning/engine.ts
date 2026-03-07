@@ -35,6 +35,7 @@ import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-gen
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
 import { getXTBStats } from "../dft/qe-dft-engine";
+import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1264,6 +1265,81 @@ async function runPhase11_StructurePrediction() {
       }
     }
 
+    if (shouldContinue() && cycleCount % 5 === 0) {
+      try {
+        const diffResult = runDiffusionGenerationCycle(30);
+        let diffInserted = 0;
+        for (const crystal of diffResult.structures) {
+          if (!isValidFormula(crystal.formula)) continue;
+          const normalized = normalizeFormula(crystal.formula);
+          const existing = await storage.getSuperconductorByFormula(normalized);
+          if (existing) continue;
+
+          const features = extractFeatures(normalized);
+          const gbResult = gbPredict(features);
+          const lambdaML = features.electronPhononLambda ?? 0;
+          const metallicityML = features.metallicity ?? 0.5;
+          let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+          if (rawTc > 80 && lambdaML < 1.5) {
+            const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
+            rawTc = Math.round(rawTc * penalty);
+          }
+          rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, normalized);
+
+          const id = `sc-diff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          try {
+            const inserted = await insertCandidateWithStabilityCheck({
+              id,
+              name: normalized,
+              formula: normalized,
+              predictedTc: rawTc,
+              pressureGpa: null,
+              meissnerEffect: false,
+              zeroResistance: false,
+              cooperPairMechanism: `Diffusion-generated ${crystal.spaceGroup} (${crystal.crystalSystem})`,
+              crystalStructure: `${crystal.spaceGroup} (${crystal.crystalSystem})`,
+              quantumCoherence: crystal.noveltyScore,
+              stabilityScore: features.cooperPairStrength,
+              synthesisPath: null,
+              mlFeatures: features as any,
+              xgboostScore: gbResult.score,
+              neuralNetScore: crystal.noveltyScore,
+              ensembleScore: Math.min(0.9, (gbResult.score + crystal.noveltyScore) / 2),
+              roomTempViable: false,
+              status: "theoretical",
+              notes: `[Crystal diffusion: ${crystal.prototypeMatch || "novel"}, SG=${crystal.spaceGroup}, density=${crystal.densityGcm3} g/cm3, novelty=${crystal.noveltyScore.toFixed(2)}]`,
+              electronPhononCoupling: features.electronPhononLambda ?? null,
+              logPhononFrequency: features.logPhononFreq ?? null,
+              coulombPseudopotential: 0.12,
+              pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+              pairingMechanism: "phonon-mediated",
+              correlationStrength: features.correlationStrength ?? null,
+              dimensionality: "3D",
+              fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+              uncertaintyEstimate: crystal.prototypeMatch ? 0.55 : 0.7,
+              verificationStage: 0,
+              dataConfidence: "low",
+            });
+            if (inserted) {
+              totalScCandidates++;
+              diffInserted++;
+              bayesianOptimizer.addObservation(normalized, rawTc, lambdaML, crystal.noveltyScore);
+            }
+          } catch {}
+        }
+        if (diffInserted > 0 || diffResult.structures.length > 0) {
+          emit("log", {
+            phase: "phase-11",
+            event: "Crystal diffusion generation",
+            detail: `Generated ${diffResult.structures.length} structures (${diffResult.stats.novel} novel), inserted ${diffInserted}. Avg novelty: ${diffResult.stats.avgNovelty}, protos: ${Object.entries(diffResult.stats.protoBreakdown).map(([k, v]) => `${k}:${v}`).join(", ")}`,
+            dataSource: "Crystal Diffusion",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Crystal diffusion error", detail: err.message?.slice(0, 150), dataSource: "Crystal Diffusion" });
+      }
+    }
+
     const csCount = await storage.getCrystalStructureCount();
     const progress11 = computeProgress(11, csCount);
     await updatePhaseStatus(11, "active", progress11, csCount);
@@ -1775,6 +1851,7 @@ export function getAutonomousLoopStats() {
     },
     rlAgent: rlAgent.getStats(),
     bayesianOptimizer: bayesianOptimizer.getStats(),
+    crystalDiffusion: getDiffusionStats(),
   };
 }
 

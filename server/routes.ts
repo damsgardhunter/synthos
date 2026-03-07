@@ -10,6 +10,7 @@ import rateLimit from "express-rate-limit";
 import { fetchAllData as fetchMPAllData, isApiAvailable as isMPAvailable } from "./learning/materials-project-client";
 import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./learning/aflow-client";
 import { sanitizeForbiddenWords } from "./learning/utils";
+import { runDiffusionGenerationCycle, getDiffusionStats as getDiffusionGeneratorStats } from "./ai/crystal-generator";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -582,6 +583,41 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(stats);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch validation stats" });
+    }
+  });
+
+  app.post("/api/generate-crystal", writeLimiter, async (req, res) => {
+    try {
+      const { count = 30, elements, targetTc } = req.body || {};
+      const safeCount = Math.max(5, Math.min(50, Number(count) || 30));
+      const targetEls = Array.isArray(elements) ? elements.filter((e: any) => typeof e === "string") : undefined;
+      const result = runDiffusionGenerationCycle(safeCount, targetEls);
+      res.json({
+        generated: result.structures.length,
+        formulas: result.formulas,
+        structures: result.structures.map(s => ({
+          formula: s.formula,
+          spaceGroup: s.spaceGroup,
+          crystalSystem: s.crystalSystem,
+          prototypeMatch: s.prototypeMatch,
+          noveltyScore: s.noveltyScore,
+          densityGcm3: s.densityGcm3,
+          minBondLength: s.minBondLength,
+          atomCount: s.atoms.length,
+          lattice: s.lattice,
+        })),
+        stats: result.stats,
+      });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to generate crystal structures" });
+    }
+  });
+
+  app.get("/api/diffusion-stats", async (_req, res) => {
+    try {
+      res.json(getDiffusionGeneratorStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch diffusion stats" });
     }
   });
 
