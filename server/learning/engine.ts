@@ -41,6 +41,7 @@ import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-gen
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
 import { getXTBStats } from "../dft/qe-dft-engine";
+import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
 import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
@@ -1027,6 +1028,58 @@ async function runDFTEnrichment() {
         event: "DFT enrichment complete",
         detail: `Enriched ${enriched}/${toEnrich.length} candidates with DFT data (${totalDFTEnriched} total, coverage ~${coveragePct}%)`,
         dataSource: "DFT Resolver",
+      });
+    }
+
+    try {
+      const allCandidates = await storage.getSuperconductorCandidates(5000);
+      const scoredCandidates = allCandidates
+        .filter(c => (c.ensembleScore ?? 0) > 0)
+        .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+
+      if (scoredCandidates.length >= 10) {
+        const topIdx = Math.max(1, Math.floor(scoredCandidates.length * 0.001));
+        const eliteCandidates = scoredCandidates.slice(0, topIdx);
+
+        let submitted = 0;
+        for (const elite of eliteCandidates) {
+          const mlFeatures = (elite.mlFeatures as Record<string, any>) ?? {};
+          if (mlFeatures.qeDFT) continue;
+
+          try {
+            const priority = Math.round((elite.ensembleScore ?? 0) * 100);
+            await submitDFTJob(elite.formula, null, priority, "scf");
+            submitted++;
+
+            emit("log", {
+              phase: "engine",
+              event: "full DFT queued",
+              detail: `${elite.formula} (top 0.1%, score=${(elite.ensembleScore ?? 0).toFixed(3)}, Tc=${(elite.predictedTc ?? 0).toFixed(1)}K) → Quantum ESPRESSO SCF+phonon queue`,
+              dataSource: "QE-DFT Queue",
+            });
+          } catch (err: any) {
+            emit("log", {
+              phase: "engine",
+              event: "full DFT queue error",
+              detail: `Failed to queue ${elite.formula}: ${err.message?.slice(0, 100)}`,
+              dataSource: "QE-DFT Queue",
+            });
+          }
+        }
+
+        if (submitted > 0) {
+          broadcastThought(
+            `Submitted ${submitted} top-0.1% candidates to Quantum ESPRESSO full DFT queue (${topIdx} elite out of ${scoredCandidates.length})`,
+            "computation"
+          );
+        }
+      }
+    } catch (err: any) {
+      emit("log", {
+        phase: "engine",
+        event: "full DFT queue error",
+        detail: `Top 0.1% DFT submission failed: ${err.message?.slice(0, 200)}`,
+        dataSource: "QE-DFT Queue",
       });
     }
   } catch {}
@@ -2809,7 +2862,7 @@ async function runAutonomousFastPath() {
   }
 }
 
-export function getAutonomousLoopStats() {
+export async function getAutonomousLoopStats() {
   const elapsedHours = (Date.now() - autonomousStartTime) / 3600000;
   const alStats = getActiveLearningStats();
   const xtbStats = getXTBStats();
@@ -2853,6 +2906,7 @@ export function getAutonomousLoopStats() {
     experimentPlanner: getExperimentPlannerStats(),
     lastCycleCandidates,
     lastCycleFamilyCounts,
+    fullDFTQueue: await getDFTQueueStats().catch(() => null),
   };
 }
 
@@ -3670,6 +3724,10 @@ export function initWebSocket(server: Server) {
         timestamp: new Date().toISOString(),
       })
     );
+  });
+
+  setDFTBroadcast((event: string, data: any) => {
+    broadcast(event, data);
   });
 
   console.log("WebSocket server initialized on /ws");

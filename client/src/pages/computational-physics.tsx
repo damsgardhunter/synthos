@@ -13,6 +13,7 @@ import {
   Activity, Layers, Magnet, Gauge, Target,
   Beaker, ArrowDown, ExternalLink, Thermometer,
   FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
+  Cpu, Clock, Loader2,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -621,6 +622,143 @@ function AdvancedPhysicsPanel() {
   );
 }
 
+interface DFTQueueJob {
+  id: number;
+  formula: string;
+  status: string;
+  jobType: string;
+  priority: number;
+  createdAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  wallTime: number | null;
+  converged: boolean;
+  totalEnergy: number | null;
+  error: string | null;
+}
+
+interface DFTQueueStatsData {
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  totalProcessed: number;
+  totalSucceeded: number;
+  totalFailed: number;
+  isProcessing: boolean;
+  currentFormula: string | null;
+  qeAvailable: boolean;
+  recentJobs: DFTQueueJob[];
+}
+
+function DFTQueuePanel() {
+  const { lastMessage } = useWebSocket();
+  const { data: queueStats, isLoading } = useQuery<DFTQueueStatsData>({
+    queryKey: ["/api/dft-queue/stats"],
+    refetchInterval: 15000,
+  });
+
+  useEffect(() => {
+    if (lastMessage?.type === "dftJobQueued" || lastMessage?.type === "dftJobCompleted" || lastMessage?.type === "dftJobStarted") {
+      queryClient.invalidateQueries({ queryKey: ["/api/dft-queue/stats"] });
+    }
+  }, [lastMessage]);
+
+  if (isLoading) return <Skeleton className="h-48 w-full" />;
+  if (!queueStats) return null;
+
+  const statusColors: Record<string, string> = {
+    queued: "bg-blue-500/10 text-blue-700 border-blue-300",
+    running: "bg-amber-500/10 text-amber-700 border-amber-300",
+    completed: "bg-green-500/10 text-green-700 border-green-300",
+    failed: "bg-red-500/10 text-red-700 border-red-300",
+  };
+
+  return (
+    <Card data-testid="dft-queue-panel">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-lg flex items-center gap-2">
+          <Cpu className="h-5 w-5 text-violet-500" />
+          Quantum ESPRESSO Full DFT Queue
+          {queueStats.qeAvailable && (
+            <Badge variant="outline" className="ml-2 text-[10px] bg-green-500/10 text-green-700 border-green-300" data-testid="badge-qe-available">
+              QE 7.2 Active
+            </Badge>
+          )}
+          {queueStats.isProcessing && (
+            <Badge variant="outline" className="ml-1 text-[10px] bg-amber-500/10 text-amber-700 border-amber-300 flex items-center gap-1" data-testid="badge-qe-processing">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Processing
+            </Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3" data-testid="dft-queue-counters">
+          <div className="p-3 rounded-md bg-blue-500/10 border border-blue-200">
+            <p className="text-xs text-muted-foreground">Queued</p>
+            <p className="text-xl font-bold text-blue-700" data-testid="text-dft-queued">{queueStats.queued}</p>
+          </div>
+          <div className="p-3 rounded-md bg-amber-500/10 border border-amber-200">
+            <p className="text-xs text-muted-foreground">Running</p>
+            <p className="text-xl font-bold text-amber-700" data-testid="text-dft-running">{queueStats.running}</p>
+          </div>
+          <div className="p-3 rounded-md bg-green-500/10 border border-green-200">
+            <p className="text-xs text-muted-foreground">Completed</p>
+            <p className="text-xl font-bold text-green-700" data-testid="text-dft-completed">{queueStats.completed}</p>
+          </div>
+          <div className="p-3 rounded-md bg-red-500/10 border border-red-200">
+            <p className="text-xs text-muted-foreground">Failed</p>
+            <p className="text-xl font-bold text-red-700" data-testid="text-dft-failed">{queueStats.failed}</p>
+          </div>
+        </div>
+
+        {queueStats.currentFormula && (
+          <div className="p-3 rounded-md bg-amber-500/5 border border-amber-200 flex items-center gap-3" data-testid="dft-current-job">
+            <Loader2 className="h-4 w-4 animate-spin text-amber-600" />
+            <div>
+              <p className="text-sm font-medium">Currently computing: {queueStats.currentFormula}</p>
+              <p className="text-xs text-muted-foreground">PBE/SCF + Phonon via pw.x / ph.x</p>
+            </div>
+          </div>
+        )}
+
+        {queueStats.recentJobs.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-muted-foreground mb-2">Recent DFT Jobs (top 0.1% candidates)</p>
+            <div className="max-h-48 overflow-y-auto space-y-1" data-testid="dft-recent-jobs">
+              {queueStats.recentJobs.map((job) => (
+                <div key={job.id} className="flex items-center justify-between p-2 rounded bg-muted/30 text-xs" data-testid={`dft-job-${job.id}`}>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className={`text-[9px] px-1.5 ${statusColors[job.status] || ""}`}>
+                      {job.status}
+                    </Badge>
+                    <span className="font-mono font-medium">{job.formula}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-muted-foreground">
+                    {job.converged && job.totalEnergy && (
+                      <span>E={job.totalEnergy.toFixed(2)} eV</span>
+                    )}
+                    {job.wallTime !== null && (
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {job.wallTime.toFixed(1)}s
+                      </span>
+                    )}
+                    {job.error && (
+                      <span className="text-red-500 truncate max-w-32" title={job.error}>{job.error.slice(0, 40)}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ComputationalPhysics() {
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
     queryKey: ["/api/superconductor-candidates", { limit: 100 }],
@@ -765,6 +903,8 @@ export default function ComputationalPhysics() {
           </CardContent>
         </Card>
       </div>
+
+      <DFTQueuePanel />
 
       <Tabs defaultValue="pipeline" className="space-y-4">
         <TabsList data-testid="physics-tabs">

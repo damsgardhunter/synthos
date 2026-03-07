@@ -255,6 +255,28 @@ export const insertMpMaterialCacheSchema = createInsertSchema(mpMaterialCache).o
 export type MpMaterialCache = typeof mpMaterialCache.$inferSelect;
 export type InsertMpMaterialCache = z.infer<typeof insertMpMaterialCacheSchema>;
 
+export const dftJobs = pgTable("dft_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  candidateId: integer("candidate_id"),
+  status: varchar("status", { length: 20 }).notNull().default("queued"),
+  jobType: varchar("job_type", { length: 20 }).notNull().default("scf"),
+  priority: integer("priority").notNull().default(50),
+  inputData: jsonb("input_data"),
+  outputData: jsonb("output_data"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+}, (table) => [
+  index("dft_jobs_status_priority_idx").on(table.status, table.priority),
+  index("dft_jobs_formula_idx").on(table.formula),
+]);
+
+export const insertDftJobSchema = createInsertSchema(dftJobs).omit({ id: true, createdAt: true, startedAt: true, completedAt: true });
+export type DftJob = typeof dftJobs.$inferSelect;
+export type InsertDftJob = z.infer<typeof insertDftJobSchema>;
+
 export const experimentalValidations = pgTable("experimental_validations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   formula: text("formula").notNull(),

@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats } from "./dft/qe-dft-engine";
+import { getDFTQueueStats, startDFTWorkerLoop } from "./dft/dft-job-queue";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -113,6 +114,8 @@ const writeLimiter = rateLimit({
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   initWebSocket(httpServer);
+
+  startDFTWorkerLoop();
 
   app.use("/api", generalLimiter);
 
@@ -341,6 +344,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch DFT status" });
+    }
+  });
+
+  app.get("/api/dft-queue/stats", async (_req, res) => {
+    try {
+      const stats = await getDFTQueueStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch DFT queue stats" });
     }
   });
 
@@ -624,14 +636,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         familyDiversity: latestSnapshot?.familyDiversity ?? 0,
         pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
         cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
-        ...(() => {
-          const loopStats = getAutonomousLoopStats();
+        ...(await (async () => {
+          const loopStats = await getAutonomousLoopStats();
           return {
             autonomousLoopStats: loopStats,
             lastCycleCandidates: loopStats.lastCycleCandidates ?? [],
             lastCycleFamilyCounts: loopStats.lastCycleFamilyCounts ?? {},
           };
-        })(),
+        })()),
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch engine memory" });

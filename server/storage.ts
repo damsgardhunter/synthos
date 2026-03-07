@@ -4,7 +4,7 @@ import {
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
   researchStrategies, convergenceSnapshots, milestones,
-  experimentalValidations, inverseDesignCampaigns
+  experimentalValidations, inverseDesignCampaigns, dftJobs
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -16,7 +16,8 @@ import type {
   ResearchStrategy, ConvergenceSnapshot, Milestone,
   InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone,
   ExperimentalValidation, InsertExperimentalValidation,
-  InverseDesignCampaign, InsertInverseDesignCampaign
+  InverseDesignCampaign, InsertInverseDesignCampaign,
+  DftJob, InsertDftJob
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike, isNull } from "drizzle-orm";
 
@@ -122,6 +123,14 @@ export interface IStorage {
   getInverseDesignCampaignById(id: string): Promise<InverseDesignCampaign | undefined>;
   updateInverseDesignCampaign(id: string, updates: Partial<InsertInverseDesignCampaign>): Promise<void>;
   deleteInverseDesignCampaign(id: string): Promise<void>;
+
+  insertDftJob(job: InsertDftJob): Promise<DftJob>;
+  getDftJob(id: number): Promise<DftJob | undefined>;
+  getQueuedDftJobs(limit?: number): Promise<DftJob[]>;
+  updateDftJob(id: number, updates: Partial<DftJob>): Promise<void>;
+  getDftJobsByFormula(formula: string): Promise<DftJob[]>;
+  getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }>;
+  getRecentDftJobs(limit?: number): Promise<DftJob[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -554,6 +563,51 @@ export class DatabaseStorage implements IStorage {
       )
     `);
     return Number((result as any).rowCount ?? 0);
+  }
+
+  async insertDftJob(job: InsertDftJob): Promise<DftJob> {
+    const [result] = await db.insert(dftJobs).values(job).returning();
+    return result;
+  }
+
+  async getDftJob(id: number): Promise<DftJob | undefined> {
+    const [result] = await db.select().from(dftJobs).where(eq(dftJobs.id, id));
+    return result;
+  }
+
+  async getQueuedDftJobs(limit = 10): Promise<DftJob[]> {
+    return db.select().from(dftJobs)
+      .where(eq(dftJobs.status, "queued"))
+      .orderBy(desc(dftJobs.priority), asc(dftJobs.createdAt))
+      .limit(limit);
+  }
+
+  async updateDftJob(id: number, updates: Partial<DftJob>): Promise<void> {
+    await db.update(dftJobs).set(updates).where(eq(dftJobs.id, id));
+  }
+
+  async getDftJobsByFormula(formula: string): Promise<DftJob[]> {
+    return db.select().from(dftJobs)
+      .where(eq(dftJobs.formula, formula))
+      .orderBy(desc(dftJobs.createdAt));
+  }
+
+  async getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }> {
+    const rows = await db.execute(sql`
+      SELECT status, COUNT(*)::int as count FROM dft_jobs GROUP BY status
+    `);
+    const stats = { queued: 0, running: 0, completed: 0, failed: 0 };
+    for (const row of (rows as any).rows || rows) {
+      const s = (row as any).status as keyof typeof stats;
+      if (s in stats) stats[s] = (row as any).count;
+    }
+    return stats;
+  }
+
+  async getRecentDftJobs(limit = 20): Promise<DftJob[]> {
+    return db.select().from(dftJobs)
+      .orderBy(desc(dftJobs.createdAt))
+      .limit(limit);
   }
 }
 
