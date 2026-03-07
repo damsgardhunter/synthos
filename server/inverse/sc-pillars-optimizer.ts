@@ -5,6 +5,7 @@ import {
   computeDynamicSpinSusceptibility,
   evaluateCompetingPhases,
   classifyHydrogenBonding,
+  computeDimensionalityScore,
   parseFormulaElements,
 } from "../learning/physics-engine";
 import {
@@ -13,6 +14,7 @@ import {
   isTransitionMetal,
   isRareEarth,
 } from "../learning/elemental-data";
+import { computeFullTightBinding } from "../learning/tight-binding";
 import { extractFeatures } from "../learning/ml-predictor";
 import { gbPredict } from "../learning/gradient-boost";
 import { checkPhysicsConstraints } from "./physics-constraint-engine";
@@ -74,6 +76,20 @@ export interface HydrogenCageMetrics {
   isHydride: boolean;
 }
 
+export interface FermiSurfaceGeometry {
+  cylindricalScore: number;
+  kzVariance: number;
+  fsDimensionality: number;
+  nestingStrength: number;
+  electronHolePocketOverlap: number;
+  nestingVectorQ: string;
+  vanHoveDistance: number;
+  vanHoveSaddleCount: number;
+  vanHoveNearFermi: boolean;
+  compositeFSScore: number;
+  dominantGeometry: string;
+}
+
 export interface PillarEvaluation {
   formula: string;
   lambda: number;
@@ -86,6 +102,7 @@ export interface PillarEvaluation {
   pairingGlue: PairingGlueBreakdown;
   instability: InstabilityBreakdown;
   hydrogenCage: HydrogenCageMetrics;
+  fermiSurface: FermiSurfaceGeometry;
   pillarScores: {
     coupling: number;
     phonon: number;
@@ -458,6 +475,142 @@ function computeHydrogenCageMetrics(
   };
 }
 
+function computeFermiSurfaceGeometry(
+  formula: string,
+  electronic: ReturnType<typeof computeElectronicStructure>,
+  elements: string[],
+): FermiSurfaceGeometry {
+  const dimScore = computeDimensionalityScore(formula, null);
+
+  const fsTopology = electronic.fermiSurfaceTopology;
+  const is2D = fsTopology.includes("2D") || fsTopology.includes("cylindrical");
+  const hasNestingFS = fsTopology.includes("nesting");
+  const hasMultiBand = fsTopology.includes("multi-band") || fsTopology.includes("multi-sheet");
+  const hasPockets = fsTopology.includes("pocket") || fsTopology.includes("hole");
+
+  let cylindricalScore = dimScore;
+  if (is2D) cylindricalScore = Math.max(cylindricalScore, 0.85);
+
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+  const isPnictide = elements.some(e => ["Fe", "Co", "Ni"].includes(e)) &&
+    elements.some(e => PNICTOGEN_ELEMENTS.includes(e) || CHALCOGEN_ELEMENTS.includes(e));
+  const isDichalcogenide = elements.some(e => ["Nb", "Ta", "Mo", "W"].includes(e)) &&
+    elements.some(e => CHALCOGEN_ELEMENTS.includes(e));
+  const isNickelate = elements.includes("Ni") && elements.includes("O") && elements.length >= 3;
+
+  if (isCuprate) cylindricalScore = Math.max(cylindricalScore, 0.95);
+  else if (isPnictide) cylindricalScore = Math.max(cylindricalScore, 0.90);
+  else if (isDichalcogenide) cylindricalScore = Math.max(cylindricalScore, 0.85);
+  else if (isNickelate) cylindricalScore = Math.max(cylindricalScore, 0.88);
+
+  const kzVariance = Math.max(0, 1.0 - cylindricalScore);
+  const fsDimensionality = cylindricalScore >= 0.8 ? 2.0 :
+    cylindricalScore >= 0.5 ? 2.0 + (0.8 - cylindricalScore) / 0.3 :
+    3.0;
+
+  let nestingStrength = electronic.nestingScore ?? 0;
+  let electronHolePocketOverlap = 0;
+  let nestingVectorQ = "none";
+
+  if (isPnictide) {
+    nestingStrength = Math.max(nestingStrength, 0.80);
+    electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.9);
+    nestingVectorQ = "(pi,pi)";
+  } else if (isCuprate) {
+    nestingStrength = Math.max(nestingStrength, 0.85);
+    electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.85);
+    nestingVectorQ = "(pi,pi)";
+  } else if (isNickelate) {
+    nestingStrength = Math.max(nestingStrength, 0.75);
+    electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.80);
+    nestingVectorQ = "(pi,pi)";
+  } else if (isDichalcogenide) {
+    nestingStrength = Math.max(nestingStrength, 0.65);
+    electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.7);
+    nestingVectorQ = "(2/3pi,0)";
+  }
+
+  if (hasMultiBand && hasPockets) {
+    electronHolePocketOverlap = Math.max(electronHolePocketOverlap, 0.5);
+    if (nestingVectorQ === "none") nestingVectorQ = "(pi,0)";
+  }
+  if (hasNestingFS) {
+    nestingStrength = Math.max(nestingStrength, 0.6);
+    electronHolePocketOverlap = Math.max(electronHolePocketOverlap, 0.4);
+  }
+
+  const correlation = electronic.correlationStrength ?? 0;
+  if (correlation > 0.5 && nestingStrength > 0.4) {
+    nestingStrength = Math.min(1.0, nestingStrength + correlation * 0.15);
+  }
+
+  let vanHoveDistance = 1.0;
+  let vanHoveSaddleCount = 0;
+  let vanHoveNearFermi = false;
+
+  const vanHoveProx = electronic.vanHoveProximity ?? 0;
+  if (vanHoveProx > 0) {
+    vanHoveDistance = Math.max(0, (1.0 - vanHoveProx) * 0.5);
+  }
+
+  try {
+    const tb = computeFullTightBinding(formula, null);
+    if (tb.bands.tbConfidence > 0.3 && tb.topology.vanHoveSingularities.length > 0) {
+      vanHoveSaddleCount = tb.topology.vanHoveSingularities.length;
+
+      let minDist = Infinity;
+      for (const vhs of tb.topology.vanHoveSingularities) {
+        const dist = Math.abs(vhs.energy - tb.bands.fermiEnergy);
+        if (dist < minDist) minDist = dist;
+      }
+      vanHoveDistance = Number(Math.min(1.0, minDist).toFixed(4));
+      vanHoveNearFermi = vanHoveDistance < 0.05;
+
+      if (vanHoveNearFermi) {
+        vanHoveDistance = Math.min(vanHoveDistance, 0.01 + vanHoveSaddleCount * 0.002);
+      }
+    }
+  } catch {}
+
+  if (isCuprate) {
+    vanHoveNearFermi = true;
+    vanHoveDistance = Math.min(vanHoveDistance, 0.02);
+    vanHoveSaddleCount = Math.max(vanHoveSaddleCount, 2);
+  }
+
+  const cylindricalContrib = cylindricalScore;
+  const nestingContrib = nestingStrength;
+  const vhContrib = Math.min(1.0, 1.0 / (1.0 + vanHoveDistance * 20));
+
+  const compositeFSScore =
+    0.35 * cylindricalContrib +
+    0.35 * nestingContrib +
+    0.30 * vhContrib;
+
+  let dominantGeometry = "spherical";
+  const geoScores = [
+    { name: "cylindrical-2D", val: cylindricalContrib },
+    { name: "nested-pockets", val: nestingContrib },
+    { name: "van-Hove-saddle", val: vhContrib },
+  ];
+  geoScores.sort((a, b) => b.val - a.val);
+  if (geoScores[0].val > 0.3) dominantGeometry = geoScores[0].name;
+
+  return {
+    cylindricalScore: Number(cylindricalScore.toFixed(4)),
+    kzVariance: Number(kzVariance.toFixed(4)),
+    fsDimensionality: Number(fsDimensionality.toFixed(2)),
+    nestingStrength: Number(nestingStrength.toFixed(4)),
+    electronHolePocketOverlap: Number(electronHolePocketOverlap.toFixed(4)),
+    nestingVectorQ,
+    vanHoveDistance: Number(vanHoveDistance.toFixed(4)),
+    vanHoveSaddleCount,
+    vanHoveNearFermi,
+    compositeFSScore: Number(compositeFSScore.toFixed(4)),
+    dominantGeometry,
+  };
+}
+
 let pillarWeights = {
   coupling: 0.18,
   phonon: 0.12,
@@ -507,6 +660,7 @@ export function evaluatePillars(
   const pairingGlue = computePairingGlue(formula, lambda, electronic);
   const instability = computeInstabilityProximity(formula, electronic, lambda);
   const hydrogenCage = computeHydrogenCageMetrics(formula, elements, counts);
+  const fermiSurface = computeFermiSurfaceGeometry(formula, electronic, elements);
 
   const motifBonus = targets.preferredMotifs.some(pm => motif.match.includes(pm)) ? 0.2 : 0;
 
@@ -526,13 +680,21 @@ export function evaluatePillars(
     activeWeights.instability += redistrib;
   }
 
+  const fsNestingBoost = fermiSurface.nestingStrength > nestingScore
+    ? (fermiSurface.nestingStrength - nestingScore) * 0.4
+    : 0;
+  const enhancedNesting = Math.min(1.0, nestingScore + fsNestingBoost);
+
+  const vhBoost = fermiSurface.vanHoveNearFermi ? 0.15 : 0;
+  const cylindricalBoost = fermiSurface.cylindricalScore > 0.7 ? 0.10 : 0;
+
   const pillarScores = {
     coupling: scorePillar(lambda, targets.minLambda, 0.6),
     phonon: scorePillar(omegaLogK, targets.minOmegaLogK, 0.4),
-    dos: scorePillar(dos, targets.minDOS, 0.5),
-    nesting: scorePillar(nestingScore, targets.minNesting, 0.3),
-    structure: Math.min(1.0, motif.score + motifBonus + scorePillar(flatBandScore, targets.minFlatBand, 0.3) * 0.3),
-    pairingGlue: scorePillar(pairingGlue.compositePairingGlue, targets.minPairingGlue, 0.5),
+    dos: Math.min(1.0, scorePillar(dos, targets.minDOS, 0.5) + vhBoost),
+    nesting: scorePillar(enhancedNesting, targets.minNesting, 0.3),
+    structure: Math.min(1.0, motif.score + motifBonus + scorePillar(flatBandScore, targets.minFlatBand, 0.3) * 0.3 + cylindricalBoost),
+    pairingGlue: Math.min(1.0, scorePillar(pairingGlue.compositePairingGlue, targets.minPairingGlue, 0.5) + fermiSurface.compositeFSScore * 0.1),
     instability: scorePillar(instability.compositeInstability, targets.minInstability, 0.4),
     hydrogenCage: isHydride ? scorePillar(hydrogenCage.compositeHydrogenScore, targets.minHydrogenCage, 0.5) : 0,
   };
@@ -626,6 +788,7 @@ export function evaluatePillars(
     pairingGlue,
     instability,
     hydrogenCage,
+    fermiSurface,
     pillarScores,
     compositeFitness,
     satisfiedPillars,
@@ -767,6 +930,28 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "O",
     stoichiometryRange: [1, 2],
     lightAtomRange: [3, 7],
+  },
+  {
+    name: "dichalcogenide-nested",
+    targetMotif: "layered",
+    baseElements: [
+      ["Nb", "Se"], ["Nb", "S"], ["Ta", "Se"], ["Ta", "S"],
+      ["Mo", "Se"], ["Mo", "S"], ["W", "Se"], ["W", "Te"],
+    ],
+    lightAtom: "",
+    stoichiometryRange: [1, 2],
+    lightAtomRange: [2, 3],
+  },
+  {
+    name: "nickelate-layered",
+    targetMotif: "layered",
+    baseElements: [
+      ["La", "Ni", "O"], ["Nd", "Ni", "O"], ["Pr", "Ni", "O"],
+      ["La", "Sr", "Ni", "O"], ["Nd", "Sr", "Ni", "O"],
+    ],
+    lightAtom: "O",
+    stoichiometryRange: [1, 2],
+    lightAtomRange: [2, 4],
   },
 ];
 

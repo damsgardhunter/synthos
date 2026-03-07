@@ -187,12 +187,17 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Pairing glue score**: Composite of phonon (50%), spin-fluctuation (25%), charge-fluctuation (10%), excitonic (15%) contributions. Uses `computeDynamicSpinSusceptibility` for Stoner enhancement and QCP proximity. Cuprates/pnictides correctly identify spin-fluctuation as dominant mechanism.
 - **Electronic instability proximity**: Combines van Hove proximity (20%), nesting (15%), DOS (10%), spin susceptibility (15%), Mott proximity (15%), CDW (10%), SDW (10%), structural (5%). Uses competing phase evaluation for SDW detection. NbSe2 correctly flags CDW, BaFe2As2 flags SDW.
 - **Hydrogen cage geometry**: Evaluates H-network dimensionality (1D-3D), cage score (sodalite/clathrate detection), H-H bond distribution, cage symmetry, H coordination. LaH10 scores 0.98 (metallic-network sodalite), CaH6 scores 0.96. Non-hydrides get pillar weight redistributed to other 7 pillars.
-- **Pillar evaluation**: `evaluatePillars()` computes all 8 pillar scores (0-1 each), composite weighted fitness, satisfied count, weakest pillar identification. Non-hydrides automatically redistribute H-cage weight across other pillars.
-- **11 design templates**: clathrate-hydride, metal-boride, metal-carbide, metal-nitride, ternary-hydride, high-DOS-intermetallic, layered-pnictide, cuprate-layered, sodalite-superhydride, spin-fluctuation-pnictide, mott-proximate.
+- **Fermi surface geometry** (`FermiSurfaceGeometry`): Three SC-critical FS shape detectors that feed into existing pillar scores:
+  - *Cylindrical (2D) FS*: `cylindricalScore` (0-1), `kzVariance`, `fsDimensionality` (2.0=quasi-2D, 3.0=3D). Detects layered structures (cuprates=0.95, pnictides=0.90, dichalcogenides=0.85). Uses `computeDimensionalityScore` + FS topology.
+  - *Nested electron-hole pockets*: `nestingStrength` (0-1), `electronHolePocketOverlap` (0-1), `nestingVectorQ` (e.g., "(pi,pi)"). BaFe2As2=1.0 with Q=(pi,pi), NbSe2=0.70 with Q=(2/3pi,0). Enhances nesting pillar.
+  - *Van Hove saddle points*: `vanHoveDistance` (eV from EF), `vanHoveSaddleCount`, `vanHoveNearFermi` (true if <0.05eV). Uses tight-binding VHS detection. YBa2Cu3O7=0.0015eV, H3S=0.0026eV. Boosts DOS pillar.
+  - `compositeFSScore` = 0.35*cylindrical + 0.35*nesting + 0.30*vanHove. Feeds into nesting (+40% boost), DOS (+15% vH boost), structure (+10% cylindrical boost), pairingGlue (+10% composite) pillars.
+- **Pillar evaluation**: `evaluatePillars()` computes all 8 pillar scores (0-1 each) + FS geometry, composite weighted fitness, satisfied count, weakest pillar identification. Non-hydrides automatically redistribute H-cage weight across other pillars.
+- **13 design templates**: clathrate-hydride, metal-boride, metal-carbide, metal-nitride, ternary-hydride, high-DOS-intermetallic, layered-pnictide, cuprate-layered, sodalite-superhydride, spin-fluctuation-pnictide, mott-proximate, dichalcogenide-nested, nickelate-layered.
 - **Adaptive pillar weights**: 8 weights (coupling=0.18, phonon=0.12, dos=0.12, nesting=0.10, structure=0.10, pairingGlue=0.18, instability=0.10, hydrogenCage=0.10). RL-learned via Tc delta from running baseline (not raw Tc).
 - **Weakness-targeted mutation**: 8 mutation strategies including pairingGlue (add magnetic elements + pnictogens), instability (add CuO planes or TM), hydrogenCage (increase H count + add cage formers).
 - **Pipeline integration**: Runs every 9 engine cycles. Adaptive targets scale with targetTc. Inserts candidates with Tc≥8K.
-- **API**: `POST /api/sc-pillars/evaluate` (returns full PairingGlueBreakdown, InstabilityBreakdown, HydrogenCageMetrics), `POST /api/sc-pillars/generate` (full generation with all 3 new scores), `GET /api/sc-pillars/stats`.
+- **API**: `POST /api/sc-pillars/evaluate` (returns full PairingGlueBreakdown, InstabilityBreakdown, HydrogenCageMetrics, FermiSurfaceGeometry), `POST /api/sc-pillars/generate` (all scores + FS data), `GET /api/sc-pillars/stats`.
 - File: `server/inverse/sc-pillars-optimizer.ts`
 
 ### Physics-Constrained Generative AI (Rule-Aware Material Creation)

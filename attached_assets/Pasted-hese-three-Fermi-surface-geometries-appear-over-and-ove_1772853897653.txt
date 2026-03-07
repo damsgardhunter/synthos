@@ -1,0 +1,146 @@
+hese three Fermi-surface geometries appear over and over again in many of the highest-Tc superconductors. If your system can detect and target these shapes, it dramatically improves the probability of finding good candidates.
+
+1. Cylindrical (2D) Fermi Surfaces
+4
+What it looks like
+
+Instead of a sphere, the Fermi surface forms tubes (cylinders) extending through the Brillouin zone.
+
+Mathematically:
+
+E(kx, ky, kz) ≈ E(kx, ky)
+
+Energy barely depends on kz, meaning the system is quasi-2D.
+
+Why this helps superconductivity
+
+2D electronic structures produce:
+
+high density of states
+
+strong nesting
+
+enhanced spin fluctuations
+
+All of which help pairing.
+
+Found in
+Material family	Tc
+cuprates	up to 135 K
+iron pnictides	~55 K
+nickelates	~20 K
+NbSe2	~7 K
+
+The common factor is layered crystal structures.
+
+Examples:
+
+CuO₂ planes
+
+FeAs layers
+
+transition metal dichalcogenide sheets
+
+Feature you should calculate
+fsDimensionality
+
+Example metric:
+
+kz_variance = variance(E(kx,ky,kz) - E(kx,ky,0))
+dimensionality = 1 / (1 + kz_variance)
+
+High score → 2D cylinder-like FS.
+
+2. Nested Electron–Hole Pockets
+4
+What it looks like
+
+Multiple pockets:
+
+hole pockets at Γ
+electron pockets at M
+
+The shapes match so that shifting by vector Q overlaps them.
+
+E(k) ≈ E(k + Q)
+
+This is Fermi surface nesting.
+
+Why this helps superconductivity
+
+Nesting amplifies spin fluctuations, which mediate pairing in unconventional superconductors.
+
+Mechanism:
+
+electron scattering:
+k → k + Q
+
+This produces the pairing interaction.
+
+Found in
+Material	Tc
+FeSe	~37 K
+BaFe2As2	~38 K
+LaFeAsO	~55 K
+Feature your system should compute
+nestingStrength
+
+Algorithm:
+
+Map Fermi surface points.
+
+Compute overlap with shifted surface:
+
+FS(k) vs FS(k + Q)
+
+Measure overlap.
+
+Example metric:
+
+nestingScore = overlap_area / total_FS_area
+3. Van Hove Saddle Points
+4
+What it looks like
+
+A saddle point in the band structure near the Fermi level.
+
+Energy dispersion:
+
+E(kx, ky) ≈ ax² − by²
+
+This produces a van Hove singularity.
+
+Why this helps superconductivity
+
+At a van Hove singularity:
+
+DOS(EF) → very large
+
+Large DOS increases pairing probability.
+
+Found in
+Material	Tc
+cuprates	~135 K
+H3S	~203 K
+AV3Sb5	~5 K
+many nickelates	predicted
+Feature to compute
+vanHoveDistance
+
+Algorithm:
+
+Compute curvature of bands near EF:
+
+∂²E/∂k²
+
+Detect sign change (saddle).
+
+Measure energy distance from EF.
+
+Example metric:
+
+vH_distance = |E_saddle - EF|
+
+Target:
+
+vH_distance < 0.05 eV
