@@ -1,6 +1,9 @@
 import { execSync, spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import * as crypto from "crypto";
+import { selectPrototype } from "../learning/crystal-prototypes";
+import { isTransitionMetal } from "../learning/elemental-data";
 
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
 const QE_WORK_DIR = "/tmp/qe_calculations";
@@ -100,6 +103,77 @@ export interface QEFullResult {
   xtbPreRelaxed?: boolean;
   ppValidated?: boolean;
   rejectionReason?: string;
+  failureStage?: string;
+  prototypeUsed?: string;
+  kPoints?: string;
+}
+
+const structureHashCache = new Set<string>();
+
+const stageFailureCounts: Record<string, number> = {
+  formula_filter: 0,
+  pp_validation: 0,
+  geometry: 0,
+  duplicate: 0,
+  xtb_prefilter: 0,
+  scf: 0,
+  phonon: 0,
+};
+
+export function getStageFailureCounts(): Record<string, number> {
+  return { ...stageFailureCounts };
+}
+
+function computeStructureHash(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+): string {
+  const sorted = [...positions]
+    .sort((a, b) => a.element.localeCompare(b.element) || a.x - b.x || a.y - b.y || a.z - b.z)
+    .map(p => `${p.element}:${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`)
+    .join("|");
+  const key = `${latticeA.toFixed(3)}|${sorted}`;
+  return crypto.createHash("md5").update(key).digest("hex");
+}
+
+function runXTBStabilityCheck(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+  workDir: string,
+): { stable: boolean; ePerAtom: number } | null {
+  try {
+    let xyz = `${positions.length}\nstability check\n`;
+    for (const p of positions) {
+      xyz += `${p.element}  ${(p.x * latticeA).toFixed(6)}  ${(p.y * latticeA).toFixed(6)}  ${(p.z * latticeA).toFixed(6)}\n`;
+    }
+    const xyzFile = path.join(workDir, "stability.xyz");
+    fs.writeFileSync(xyzFile, xyz);
+
+    const env = {
+      ...process.env,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "1G",
+    };
+
+    const out = execSync(`${XTB_BIN} ${xyzFile} --gfn 2 --sp 2>&1 || true`, {
+      cwd: workDir,
+      timeout: 15000,
+      maxBuffer: 5 * 1024 * 1024,
+      env,
+    }).toString();
+
+    const eMatch = out.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+    if (!eMatch) return null;
+    const totalEHa = parseFloat(eMatch[1]);
+    const ePerAtomHa = totalEHa / positions.length;
+    const ePerAtomEv = ePerAtomHa * 27.2114;
+    const isStable = ePerAtomEv < -1.0;
+    return { stable: isStable, ePerAtom: ePerAtomEv };
+  } catch {
+    return null;
+  }
 }
 
 function parseFormula(formula: string): Record<string, number> {
@@ -154,179 +228,16 @@ function ensurePseudopotential(element: string): string {
   }
 
   if (fs.existsSync(ppFile)) {
-    console.log(`[QE-Worker] Invalid PP for ${element} (${fs.statSync(ppFile).size} bytes), regenerating`);
+    console.log(`[QE-Worker] Invalid PP for ${element} (${fs.statSync(ppFile).size} bytes), removing`);
     fs.unlinkSync(ppFile);
   }
 
-  const ld1Input = generateLd1Input(element);
-  if (!ld1Input) {
-    throw new Error(`Cannot generate pseudopotential for ${element}: unsupported element`);
-  }
-
-  const ld1Bin = path.join(QE_BIN_DIR, "ld1.x");
-  const ld1WorkDir = path.join(QE_PSEUDO_DIR, `gen_${element}`);
-  fs.mkdirSync(ld1WorkDir, { recursive: true });
-
-  const inputFile = path.join(ld1WorkDir, "ld1.in");
-  fs.writeFileSync(inputFile, ld1Input);
-
-  try {
-    execSync(`${ld1Bin} < ${inputFile}`, {
-      cwd: ld1WorkDir,
-      timeout: 60000,
-      maxBuffer: 10 * 1024 * 1024,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const generatedPP = path.join(ld1WorkDir, `${element}.UPF`);
-    if (fs.existsSync(generatedPP) && validatePseudopotential(generatedPP)) {
-      fs.copyFileSync(generatedPP, ppFile);
-      return ppFile;
-    }
-
-    const files = fs.readdirSync(ld1WorkDir);
-    const upfFile = files.find(f => f.endsWith(".UPF"));
-    if (upfFile) {
-      const srcPath = path.join(ld1WorkDir, upfFile);
-      if (validatePseudopotential(srcPath)) {
-        fs.copyFileSync(srcPath, ppFile);
-        return ppFile;
-      }
-    }
-  } catch (err: any) {
-    console.log(`[QE-Worker] ld1.x PP generation failed for ${element}: ${err.message?.slice(0, 200)}`);
-  }
-
-  throw new Error(`Failed to generate valid pseudopotential for ${element} — ld1.x could not produce a usable UPF file`);
+  throw new Error(`No valid pseudopotential for ${element} — place a verified UPF file (PseudoDojo/SSSP/PSLibrary) in ${QE_PSEUDO_DIR}/${element}.UPF`);
 }
 
-function generateLd1Input(element: string): string | null {
-  const data = ELEMENT_DATA[element];
-  if (!data) return null;
-
-  const Z = getAtomicNumber(element);
-  if (!Z) return null;
-
-  const config = getElectronConfig(element);
-
-  return `&input
-  title='${element}',
-  zed=${Z}.0,
-  rel=1,
-  config='${config}',
-  iswitch=3,
-  dft='PBE'
-/
-&inputp
-  pseudotype=3,
-  file_pseudopw='${element}.UPF',
-  lloc=-1,
-  nlcc=.true.,
-  tm=.true.
-/
-6
-${getPPOrbitals(element)}
-`;
-}
-
-function getAtomicNumber(el: string): number | null {
-  const table = [
-    "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
-    "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
-    "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
-    "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
-    "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi"
-  ];
-  const idx = table.indexOf(el);
-  return idx >= 0 ? idx + 1 : null;
-}
-
-function getElectronConfig(el: string): string {
-  const configs: Record<string, string> = {
-    H: "1s1",       Li: "[He] 2s1",      Be: "[He] 2s2",
-    B: "[He] 2s2 2p1", C: "[He] 2s2 2p2", N: "[He] 2s2 2p3",
-    O: "[He] 2s2 2p4", F: "[He] 2s2 2p5",
-    Na: "[Ne] 3s1",    Mg: "[Ne] 3s2",     Al: "[Ne] 3s2 3p1",
-    Si: "[Ne] 3s2 3p2", K: "[Ar] 4s1",     Ca: "[Ar] 4s2",
-    Sc: "[Ar] 3d1 4s2", Ti: "[Ar] 3d2 4s2", V: "[Ar] 3d3 4s2",
-    Cr: "[Ar] 3d5 4s1", Mn: "[Ar] 3d5 4s2", Fe: "[Ar] 3d6 4s2",
-    Co: "[Ar] 3d7 4s2", Ni: "[Ar] 3d8 4s2", Cu: "[Ar] 3d10 4s1",
-    Zn: "[Ar] 3d10 4s2", Sr: "[Kr] 5s2",    Y: "[Kr] 4d1 5s2",
-    Zr: "[Kr] 4d2 5s2", Nb: "[Kr] 4d4 5s1", Mo: "[Kr] 4d5 5s1",
-    La: "[Xe] 5d1 6s2", Ba: "[Xe] 6s2",    Hf: "[Xe] 4f14 5d2 6s2",
-    Ta: "[Xe] 4f14 5d3 6s2", W: "[Xe] 4f14 5d4 6s2", Re: "[Xe] 4f14 5d5 6s2",
-    Ce: "[Xe] 4f1 5d1 6s2",
-  };
-  return configs[el] || "[core] valence";
-}
-
-function getPPOrbitals(_el: string): string {
-  return `1S  1  0  1.00  0.00  1.20  1.40  0.0
-2S  2  0  2.00  0.00  1.20  1.40  0.0
-2P  2  1  6.00  0.00  1.20  1.40  0.0
-3S  3  0  2.00  0.00  1.40  1.60  0.0
-3P  3  1  6.00  0.00  1.40  1.60  0.0
-3D  3  2  0.00  0.10  1.40  1.60  0.0`;
-}
-
-function generateMinimalPP(element: string, outPath: string) {
-  const data = ELEMENT_DATA[element];
-  if (!data) throw new Error(`No element data for ${element}`);
-  const Z = getAtomicNumber(element) || 1;
-  const zv = data.zValence;
-
-  const pp = `<UPF version="2.0.1">
-<PP_INFO>
-  Generated minimal PAW pseudopotential for ${element}
-  Element: ${element}   Atomic number: ${Z}
-  Pseudopotential type: NC
-  Exchange-correlation: PBE
-  Z valence: ${zv}
-  Total PSCF energy: 0.0 Ry
-  Suggested cutoff: 40.0 Ry
-</PP_INFO>
-<PP_HEADER
-  generated="MatSci-Infinity minimal PP"
-  author="auto-generated"
-  date="2025"
-  comment=""
-  element="${element}"
-  pseudo_type="NC"
-  relativistic="scalar"
-  is_ultrasoft="F"
-  is_paw="F"
-  is_coulomb="F"
-  has_so="F"
-  has_wfc="F"
-  has_gipaw="F"
-  paw_as_gipaw="F"
-  core_correction="F"
-  functional="PBE"
-  z_valence="${zv}.0"
-  total_psenergy="0.0"
-  wfc_cutoff="40.0"
-  rho_cutoff="200.0"
-  l_max="2"
-  l_max_rho="0"
-  l_local="-3"
-  mesh_size="1"
-  number_of_wfc="0"
-  number_of_proj="0"
-/>
-<PP_MESH>
-  <PP_R>
-    0.0
-  </PP_R>
-  <PP_RAB>
-    0.01
-  </PP_RAB>
-</PP_MESH>
-<PP_LOCAL>
-  0.0
-</PP_LOCAL>
-</UPF>
-`;
-  fs.writeFileSync(outPath, pp);
+function autoKPoints(latticeA: number): string {
+  const k = Math.max(1, Math.ceil(30 / latticeA));
+  return `  ${k} ${k} ${k}  0 0 0`;
 }
 
 function generateSCFInput(
@@ -388,14 +299,35 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-  4 4 4  0 0 0
+${autoKPoints(latticeA)}
 `;
 }
 
 function generateAtomicPositions(
   elements: string[],
   counts: Record<string, number>,
+  formula?: string,
 ): Array<{ element: string; x: number; y: number; z: number }> {
+  if (formula) {
+    try {
+      const proto = selectPrototype(formula);
+      if (proto) {
+        const { template, siteMap } = proto;
+        const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
+        for (const site of template.sites) {
+          const element = siteMap[site.label];
+          if (element) {
+            positions.push({ element, x: site.x, y: site.y, z: site.z });
+          }
+        }
+        if (positions.length > 0) {
+          console.log(`[QE-Worker] Using ${template.name} prototype for ${formula} (${positions.length} atoms)`);
+          return positions;
+        }
+      }
+    } catch {}
+  }
+
   const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
 
@@ -578,6 +510,9 @@ function validateGeometry(
   if (positions.length === 0) return { valid: false, reason: "No atomic positions" };
   if (positions.length > 16) return { valid: false, reason: `Too many atoms (${positions.length}), max 16 for available resources` };
 
+  if (latticeA < 3) return { valid: false, reason: `Lattice constant too small: ${latticeA.toFixed(2)} A (min 3)` };
+  if (latticeA > 40) return { valid: false, reason: `Lattice constant too large: ${latticeA.toFixed(2)} A (max 40)` };
+
   const totalAtoms = positions.length;
   const volumeAng3 = latticeA ** 3;
   const volumePerAtom = volumeAng3 / totalAtoms;
@@ -589,8 +524,8 @@ function validateGeometry(
       const dy = (positions[i].y - positions[j].y) * latticeA;
       const dz = (positions[i].z - positions[j].z) * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist < 0.6) {
-        return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A` };
+      if (dist < 0.7) {
+        return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A (min 0.7)` };
       }
     }
   }
@@ -609,8 +544,12 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   }
 
   const hCount = counts["H"] || 0;
-  if (hCount > 0 && totalAtoms > 2 && hCount / totalAtoms > 0.85) {
-    return { valid: false, reason: `Hydrogen ratio too high (${(hCount / totalAtoms * 100).toFixed(0)}%), likely unphysical` };
+  if (hCount > 0 && totalAtoms > 2) {
+    const hRatio = hCount / totalAtoms;
+    const hasTM = elements.some(el => el !== "H" && isTransitionMetal(el));
+    if (hRatio > 0.9 && !hasTM) {
+      return { valid: false, reason: `Hydrogen ratio ${(hRatio * 100).toFixed(0)}% with no transition metal — likely unphysical` };
+    }
   }
 
   for (const el of elements) {
@@ -705,12 +644,14 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
   const ecutwfc = 45;
   const ecutrho = 360;
+  const smearing = params.smearing || "mv";
+  const degauss = params.degauss || 0.02;
 
   let atomicSpecies = "";
   for (const el of elements) {
@@ -743,8 +684,8 @@ function generateSCFInputWithParams(
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
   occupations = 'smearing',
-  smearing = 'mv',
-  degauss = 0.02,
+  smearing = '${smearing}',
+  degauss = ${degauss},
   nspin = 1,
 /
 &ELECTRONS
@@ -759,7 +700,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-  4 4 4  0 0 0
+${autoKPoints(latticeA)}
 `;
 }
 
@@ -823,6 +764,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
   if (!formulaCheck.valid) {
     result.error = `Pre-filter rejected: ${formulaCheck.reason}`;
     result.rejectionReason = formulaCheck.reason;
+    result.failureStage = "formula_filter";
+    stageFailureCounts.formula_filter++;
     console.log(`[QE-Worker] ${formula} rejected: ${formulaCheck.reason}`);
     return result;
   }
@@ -838,6 +781,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
         result.error = ppErr.message;
         result.ppValidated = false;
         result.rejectionReason = `PP: ${ppErr.message}`;
+        result.failureStage = "pp_validation";
+        stageFailureCounts.pp_validation++;
         console.log(`[QE-Worker] PP validation failed for ${formula}: ${ppErr.message}`);
         recordFormulaFailure(formula);
         return result;
@@ -845,17 +790,45 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     }
 
     const latticeA = estimateLatticeConstant(elements);
-    let positions = generateAtomicPositions(elements, counts);
+    let positions = generateAtomicPositions(elements, counts, formula);
+
+    try {
+      const proto = selectPrototype(formula);
+      if (proto) result.prototypeUsed = proto.template.name;
+    } catch {}
 
     const geomCheck = validateGeometry(positions, latticeA);
     if (!geomCheck.valid) {
       result.error = `Geometry rejected: ${geomCheck.reason}`;
+      result.failureStage = "geometry";
+      stageFailureCounts.geometry++;
       console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
       recordFormulaFailure(formula);
       return result;
     }
 
+    const hash = computeStructureHash(positions, latticeA);
+    if (structureHashCache.has(hash)) {
+      result.error = `Duplicate structure (hash=${hash.slice(0, 8)})`;
+      result.failureStage = "duplicate";
+      result.rejectionReason = "Duplicate structure already computed";
+      stageFailureCounts.duplicate++;
+      console.log(`[QE-Worker] ${formula} skipped: duplicate structure`);
+      return result;
+    }
+    structureHashCache.add(hash);
+
     result.ppValidated = true;
+
+    const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir);
+    if (stabilityCheck && !stabilityCheck.stable) {
+      result.error = `xTB stability pre-filter: E/atom = ${stabilityCheck.ePerAtom.toFixed(3)} eV (must be < -1.0 eV/atom)`;
+      result.failureStage = "xtb_prefilter";
+      result.rejectionReason = `Unstable: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV`;
+      stageFailureCounts.xtb_prefilter++;
+      console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV (threshold: < -1.0 eV/atom)`);
+      return result;
+    }
 
     const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir);
     result.xtbPreRelaxed = !!relaxed;
@@ -864,10 +837,13 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
     }
 
-    const retryConfigs = [
+    result.kPoints = autoKPoints(latticeA).trim();
+
+    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number }> = [
       { mixingBeta: 0.3, maxSteps: 100, diag: "david" },
       { mixingBeta: 0.2, maxSteps: 200, diag: "david" },
       { mixingBeta: 0.1, maxSteps: 300, diag: "cg" },
+      { mixingBeta: 0.1, maxSteps: 300, diag: "cg", smearing: "gaussian", degauss: 0.02 },
     ];
 
     let scfConverged = false;
@@ -886,7 +862,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
         } catch {}
       }
 
-      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps})`);
+      const smearInfo = params.smearing ? `, smearing=${params.smearing}` : "";
+      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${smearInfo})`);
 
       const scfResult = await runQECommand(
         path.join(QE_BIN_DIR, "pw.x"),
@@ -921,6 +898,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     result.retryCount = retryCount;
 
     if (!scfConverged) {
+      result.failureStage = "scf";
+      stageFailureCounts.scf++;
       recordFormulaFailure(formula);
     }
 
@@ -942,6 +921,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
       if (phResult.exitCode !== 0 && !result.phonon.converged) {
         result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(0, 500)}`;
+        result.failureStage = "phonon";
+        stageFailureCounts.phonon++;
         console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(0, 200)}`);
       } else {
         console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);

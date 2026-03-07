@@ -1,5 +1,5 @@
 import { storage } from "../storage";
-import { runFullDFT, isQEAvailable, isFormulaBlocked } from "./qe-worker";
+import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts } from "./qe-worker";
 import type { QEFullResult } from "./qe-worker";
 import type { DftJob } from "@shared/schema";
 
@@ -252,6 +252,7 @@ export async function getDFTQueueStats() {
     isProcessing,
     currentFormula: currentJob?.formula || null,
     qeAvailable: isQEAvailable(),
+    stageFailures: getStageFailureCounts(),
     recentJobs: recentJobs.map(j => {
       const out = j.outputData as any;
       return {
@@ -270,6 +271,9 @@ export async function getDFTQueueStats() {
         xtbPreRelaxed: out?.xtbPreRelaxed ?? null,
         ppValidated: out?.ppValidated ?? null,
         rejectionReason: out?.rejectionReason ?? null,
+        failureStage: out?.failureStage ?? null,
+        prototypeUsed: out?.prototypeUsed ?? null,
+        kPoints: out?.kPoints ?? null,
         error: j.errorMessage,
       };
     }),

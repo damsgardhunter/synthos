@@ -1,0 +1,252 @@
+Pseudopotential Validation
+
+Your plan is correct but do NOT regenerate PPs with ld1.x automatically.
+
+Reason:
+
+ld1.x requires:
+
+atomic configuration
+exchange functional
+cutoff radii
+reference states
+
+Automatically generating these will produce bad pseudopotentials.
+
+Better approach
+
+Use a pre-built pseudopotential library.
+
+Recommended:
+
+PseudoDojo
+SSSP Efficiency
+PSLibrary
+
+Example directory:
+
+pseudo/
+  H.pbe-kjpaw.UPF
+  La.pbe-spn-kjpaw.UPF
+  Ta.pbe-spn-kjpaw.UPF
+
+Then validate.
+
+Example validation:
+
+function validatePseudopotential(file) {
+
+  const text = fs.readFileSync(file, 'utf8')
+
+  if (text.length < 5000) return false
+  if (!text.includes("<UPF")) return false
+  if (!text.includes("</UPF>")) return false
+  if (!text.includes("PP_HEADER")) return false
+
+  return true
+}
+
+If missing:
+
+reject job
+
+not regenerate.
+
+T002 — Geometry Validation
+
+Excellent.
+
+But I recommend two additional checks.
+
+Check 1 — atomic overlap
+
+You already have:
+
+min distance > 0.6 Å
+
+Better:
+
+min distance > 0.7 Å
+
+Hydrogen bonds can go down to ~0.74.
+
+Check 2 — lattice sanity
+
+Add:
+
+lattice constant > 3 Å
+lattice constant < 40 Å
+
+Sometimes generators create:
+
+1 Å boxes
+
+which explode SCF.
+
+xTB Pre-relaxation
+
+Perfect idea.
+
+Run:
+
+xtb structure.xyz --opt --gfn 2
+
+Time cost:
+
+~0.5 seconds
+
+Huge stability gain.
+
+T003 — SCF Retry Logic
+
+This is exactly what real workflows do.
+
+Your parameters are good.
+
+But add one more fallback.
+
+Retry 3
+occupations = 'smearing'
+smearing = 'gaussian'
+degauss = 0.02
+
+Metals often need smearing.
+
+T004 — Element Compatibility Filter
+
+Very good but the hydrogen rule is too aggressive.
+
+You wrote:
+
+Reject if H > 85%
+
+But many superconductors are:
+
+LaH10
+YH6
+YH9
+
+which are ~90% hydrogen.
+
+Instead:
+
+Better rule
+if hydrogen_ratio > 0.9 AND no transition metal:
+    reject
+
+Also add:
+
+Oxidation sanity
+
+Example:
+
+Co + In + H7 + C
+
+likely impossible.
+
+Rule:
+
+max oxidation imbalance < 3
+T005 — Monitoring Improvements
+
+Excellent.
+
+Add one more stat:
+
+stage_failure
+
+Example:
+
+failed_geometry
+failed_xtb
+failed_scf
+failed_pp
+
+This helps diagnose issues fast.
+
+🚨 Missing Task 1 (Very Important)
+T006 — Structure Generator Repair
+
+Right now your generator produced:
+
+InCoBH7C
+TaBTeH8
+
+These are chemically improbable.
+
+You need a structure template system.
+
+Instead of random atoms:
+
+Generate structures like:
+
+perovskite
+rocksalt
+layered
+hydride cage
+
+Example:
+
+ABX3
+ABH6
+AB2
+
+This increases success rate massively.
+
+🚨 Missing Task 2 (Huge Improvement)
+T007 — Pre-DFT ML Stability Predictor
+
+Before DFT run a machine learning stability model.
+
+Examples:
+
+M3GNet
+MEGNet
+ALIGNN
+
+They predict:
+
+formation energy
+stability
+bandgap
+
+in:
+
+~20 milliseconds
+
+Then only run DFT if:
+
+E_form < 0.2 eV/atom
+
+This reduces DFT jobs by 100x.
+
+🚨 Missing Task 3
+T008 — Structure Canonicalization
+
+Many generated structures are duplicates.
+
+Add a hash:
+
+structure_hash = hash(sorted_atomic_positions + lattice)
+
+Reject duplicates.
+
+Otherwise you may run DFT on the same structure repeatedly.
+
+🚨 Missing Task 4
+T009 — k-point Auto Generation
+
+Right now your SCF probably uses fixed k-points.
+
+Instead generate automatically.
+
+Example:
+
+kpoints = ceil(30 / lattice_length)
+
+Example code:
+
+const k = Math.max(1, Math.floor(30 / latticeA))
+kpoints = `${k} ${k} ${k}`
+
+This improves convergence.
