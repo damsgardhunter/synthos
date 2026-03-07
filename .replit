@@ -7,6 +7,10 @@ channel = "stable-24_05"
 packages = ["libcint", "libxc", "libxcrypt", "pkg-config", "quantum-espresso", "xcfun", "xsimd"]
 
 [[ports]]
+localPort = 1024
+externalPort = 5173
+
+[[ports]]
 localPort = 5000
 externalPort = 80
 

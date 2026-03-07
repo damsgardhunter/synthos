@@ -6,6 +6,7 @@ import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB, createCampaign } from "../inverse/inverse-optimizer";
+import { getNextGenPipelineStats as getNextGenPipelineStatsForEngine } from "../inverse/next-gen-pipeline";
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
@@ -2886,6 +2887,7 @@ export async function getAutonomousLoopStats() {
     crystalDiffusion: getDiffusionStats(),
     topologyDetection: getTopologyStats(),
     inverseOptimizer: getInverseOptimizerStats(),
+    nextGenPipeline: getNextGenPipelineStatsForEngine(),
     differentiableOptimizer: getDifferentiableOptimizerStats(),
     structureFirstDesign: getStructureDiffusionStats(),
     physicsConstraints: getConstraintEngineStats(),

@@ -5,6 +5,14 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats } from "./dft/qe-dft-engine";
 import { getDFTQueueStats, startDFTWorkerLoop } from "./dft/dft-job-queue";
+import {
+  createPipeline as createNextGenPipeline,
+  runPipelineIteration as runNextGenIteration,
+  getPipelineStats as getNextGenPipelineDetail,
+  pausePipeline as pauseNextGenPipeline,
+  resumePipeline as resumeNextGenPipeline,
+  getNextGenPipelineStats as getNextGenStats,
+} from "./inverse/next-gen-pipeline";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -1760,6 +1768,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, plan });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to generate experiment plan", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/next-gen-pipeline", writeLimiter, (req, res) => {
+    try {
+      const { id, goal } = req.body;
+      if (!id) return res.status(400).json({ error: "Pipeline id required" });
+      const pipeline = createNextGenPipeline(id, goal);
+      res.json({ id, status: pipeline.status, iteration: pipeline.iteration });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to create pipeline", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/next-gen-pipeline/:id/iterate", writeLimiter, (req, res) => {
+    try {
+      const result = runNextGenIteration(req.params.id);
+      if (!result) return res.status(404).json({ error: "Pipeline not found or completed" });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run iteration", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/next-gen-pipeline/stats", (_req, res) => {
+    try {
+      res.json(getNextGenStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch pipeline stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/next-gen-pipeline/:id", (req, res) => {
+    try {
+      const stats = getNextGenPipelineDetail(req.params.id);
+      if (!stats) return res.status(404).json({ error: "Pipeline not found" });
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch pipeline detail", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/next-gen-pipeline/:id/pause", writeLimiter, (req, res) => {
+    try {
+      const success = pauseNextGenPipeline(req.params.id);
+      res.json({ success });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to pause pipeline", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/next-gen-pipeline/:id/resume", writeLimiter, (req, res) => {
+    try {
+      const success = resumeNextGenPipeline(req.params.id);
+      res.json({ success });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to resume pipeline", detail: e.message?.slice(0, 200) });
     }
   });
 

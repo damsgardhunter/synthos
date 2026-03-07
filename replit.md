@@ -65,6 +65,7 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Full DFT Backend (Quantum ESPRESSO 7.2)**: pw.x and ph.x calculations for top 0.1% candidates via async job queue.
 - **Async DFT Job Queue**: PostgreSQL-backed job queue with priority scheduling, status tracking, and WebSocket broadcast.
 - **Inverse Design Optimizer Engine**: 5-layer architecture for goal-driven candidate generation, inverse learning, and closed-loop optimization.
+- **Next-Generation Inverse Design Pipeline**: Unified 5-component orchestrator (Goal Spec → Design Generator → Constraint Solver → Surrogate Model → Learning Loop) with convergence tracking, gradient refinement after iteration 3, and real-time stats. API at `/api/next-gen-pipeline/`. Frontend tab in Computational Physics.
 - **Differentiable Materials Design**: Computes analytical McMillan gradients and numerical element gradients for Tc.
 - **8-Pillar SC Optimizer**: Targets 8 superconductivity pillars with adaptive weights and weakness-targeted mutation strategies.
 - **Physics-Constrained Generative AI**: Enforces charge neutrality, atomic radius compatibility, coordination number limits, and bond stability.

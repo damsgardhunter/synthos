@@ -1,10 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
-import { queryClient } from "@/lib/queryClient";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useEffect } from "react";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, ComputationalResult, CrystalStructure } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link } from "wouter";
@@ -356,6 +357,259 @@ function CrystalStructureCard({ structure }: { structure: CrystalStructure }) {
         </Link>
       </CardContent>
     </Card>
+  );
+}
+
+function NextGenPipelinePanel() {
+  const { data: stats, isLoading } = useQuery<{
+    activePipelines: number;
+    totalRuns: number;
+    totalCandidatesProcessed: number;
+    pipelines: { id: string; status: string; iteration: number; bestTc: number; bestDistance: number; bestFormula: string }[];
+  }>({ queryKey: ["/api/next-gen-pipeline/stats"], refetchInterval: 8000 });
+
+  const defaultPipelineId = stats?.pipelines?.[0]?.id;
+
+  const { data: detail } = useQuery<{
+    status: string;
+    iteration: number;
+    bestTc: number;
+    bestFormula: string;
+    bestDistance: number;
+    totalGenerated: number;
+    totalPassed: number;
+    convergenceHistory: number[];
+    surrogateAccuracy: number;
+    constraintPassRate: number;
+    topCandidates: { formula: string; tc: number; distance: number; source: string }[];
+    iterationsPerMinute: number;
+    estimatedIterationsToConverge: number | null;
+  }>({
+    queryKey: ["/api/next-gen-pipeline", defaultPipelineId],
+    enabled: !!defaultPipelineId,
+    refetchInterval: 5000,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const id = `pipeline-${Date.now()}`;
+      await apiRequest("POST", "/api/next-gen-pipeline", { id, goal: { targetTc: 293, maxPressure: 50, minLambda: 1.5, maxHullDistance: 0.05, metallicRequired: true, phononStable: true, maxIterations: 200, convergenceThreshold: 0.02, surrogateWeight: 0.7, constraintStrictness: "standard" } });
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline/stats"] }); },
+  });
+
+  const iterateMutation = useMutation({
+    mutationFn: async () => {
+      if (!defaultPipelineId) return;
+      await apiRequest("POST", `/api/next-gen-pipeline/${defaultPipelineId}/iterate`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline", defaultPipelineId] });
+    },
+  });
+
+  const togglePauseMutation = useMutation({
+    mutationFn: async () => {
+      if (!defaultPipelineId || !detail) return;
+      const endpoint = detail.status === "paused" ? "resume" : "pause";
+      await apiRequest("POST", `/api/next-gen-pipeline/${defaultPipelineId}/${endpoint}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline", defaultPipelineId] });
+    },
+  });
+
+  if (isLoading) return <Skeleton className="h-64" />;
+
+  const stageFlow = [
+    { label: "Goal Spec", icon: Target, color: "text-blue-500", desc: `Tc ${"\u2265"} 293K, P < 50 GPa` },
+    { label: "Design Generator", icon: Brain, color: "text-purple-500", desc: `${detail?.totalGenerated ?? 0} candidates` },
+    { label: "Constraint Solver", icon: Filter, color: "text-amber-500", desc: `${Math.round((detail?.constraintPassRate ?? 0) * 100)}% pass rate` },
+    { label: "Surrogate Model", icon: Cpu, color: "text-green-500", desc: `${Math.round((detail?.surrogateAccuracy ?? 0) * 100)}% accuracy` },
+    { label: "Learning Loop", icon: Activity, color: "text-red-500", desc: `${detail?.iteration ?? 0} iterations` },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <Card data-testid="card-nextgen-overview">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Brain className="h-5 w-5 text-purple-500" />
+              Next-Generation Inverse Design Pipeline
+            </CardTitle>
+            <div className="flex gap-2">
+              {!defaultPipelineId && (
+                <Button size="sm" onClick={() => createMutation.mutate()} disabled={createMutation.isPending} className="bg-purple-500 hover:bg-purple-600 text-white text-xs" data-testid="btn-create-pipeline">
+                  {createMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                  Initialize Pipeline
+                </Button>
+              )}
+              {defaultPipelineId && detail?.status !== "converged" && detail?.status !== "completed" && (
+                <>
+                  <Button size="sm" onClick={() => iterateMutation.mutate()} disabled={iterateMutation.isPending || detail?.status === "paused"} className="bg-green-500 hover:bg-green-600 text-white text-xs" data-testid="btn-run-iteration">
+                    {iterateMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                    Run Iteration
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => togglePauseMutation.mutate()} disabled={togglePauseMutation.isPending} data-testid="btn-toggle-pause">
+                    {detail?.status === "paused" ? "Resume" : "Pause"}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between gap-1 mb-4" data-testid="pipeline-flow">
+            {stageFlow.map((stage, i) => (
+              <div key={stage.label} className="flex items-center gap-1">
+                <div className="flex flex-col items-center text-center min-w-[80px]">
+                  <div className={`w-10 h-10 rounded-full bg-muted/50 border border-border flex items-center justify-center ${stage.color}`}>
+                    <stage.icon className="h-5 w-5" />
+                  </div>
+                  <p className="text-[10px] font-medium mt-1">{stage.label}</p>
+                  <p className="text-[9px] text-muted-foreground">{stage.desc}</p>
+                </div>
+                {i < stageFlow.length - 1 && (
+                  <ArrowDown className="h-3 w-3 text-muted-foreground rotate-[-90deg] flex-shrink-0" />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {detail && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3" data-testid="pipeline-metrics">
+              <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Status</p>
+                <Badge variant={detail.status === "running" ? "default" : detail.status === "converged" ? "secondary" : "outline"} className="mt-1" data-testid="badge-pipeline-status">
+                  {detail.status}
+                </Badge>
+              </div>
+              <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc Predicted</p>
+                <p className="text-lg font-mono font-bold text-foreground" data-testid="text-pipeline-best-tc">
+                  {detail.bestTc > 0 ? `${Math.round(detail.bestTc)}K` : "--"}
+                </p>
+              </div>
+              <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Target Distance</p>
+                <p className="text-lg font-mono font-bold text-foreground" data-testid="text-pipeline-distance">
+                  {detail.bestDistance < 1 ? detail.bestDistance.toFixed(3) : "--"}
+                </p>
+              </div>
+              <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Iterations / min</p>
+                <p className="text-lg font-mono font-bold text-foreground" data-testid="text-pipeline-speed">
+                  {detail.iterationsPerMinute > 0 ? detail.iterationsPerMinute : "--"}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {!detail && !defaultPipelineId && (
+            <div className="text-center py-8 text-muted-foreground" data-testid="pipeline-empty-state">
+              <Brain className="h-12 w-12 mx-auto mb-3 opacity-50" />
+              <p className="text-sm">No pipeline active. Initialize one to begin inverse design optimization.</p>
+              <p className="text-xs mt-1">Goal: Tc {"\u2265"} 293K, zero resistance, Meissner effect, P {"<"} 50 GPa</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {detail && detail.convergenceHistory.length > 0 && (
+        <Card data-testid="card-convergence">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Activity className="h-5 w-5 text-green-500" />
+              Convergence Trajectory
+              {detail.estimatedIterationsToConverge !== null && (
+                <span className="text-xs text-muted-foreground font-normal ml-2">
+                  Est. {detail.estimatedIterationsToConverge} iterations to converge
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="h-24 flex items-end gap-[2px]" data-testid="convergence-chart">
+              {detail.convergenceHistory.slice(-60).map((d, i) => {
+                const maxD = Math.max(...detail.convergenceHistory.slice(-60), 0.001);
+                const h = Math.max(2, (d / maxD) * 96);
+                return (
+                  <div key={i} className="flex-1 bg-green-500/60 rounded-t-sm transition-all" style={{ height: `${h}px` }} title={`Iter ${i + 1}: dist=${d.toFixed(4)}`} />
+                );
+              })}
+            </div>
+            <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+              <span>Target distance (lower = closer to goal)</span>
+              <span>Current: {detail.bestDistance.toFixed(4)}</span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {detail && detail.topCandidates.length > 0 && (
+        <Card data-testid="card-top-candidates">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Star className="h-5 w-5 text-amber-500" />
+              Top Pipeline Candidates
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {detail.topCandidates.slice(0, 8).map((c, i) => (
+                <div key={i} className="flex items-center justify-between p-2 bg-muted/30 rounded-md border border-border" data-testid={`candidate-row-${i}`}>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono text-muted-foreground w-5">#{i + 1}</span>
+                    <Link href={`/candidate/${encodeURIComponent(c.formula)}`}>
+                      <span className="text-sm font-mono font-medium text-foreground hover:text-primary cursor-pointer" data-testid={`text-candidate-formula-${i}`}>
+                        {c.formula}
+                      </span>
+                    </Link>
+                    <Badge variant="outline" className="text-[10px]" data-testid={`badge-source-${i}`}>{c.source}</Badge>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs">
+                    <span className="font-mono" data-testid={`text-candidate-tc-${i}`}>
+                      {Math.round(c.tc)}K
+                    </span>
+                    <span className="text-muted-foreground font-mono" data-testid={`text-candidate-dist-${i}`}>
+                      d={c.distance.toFixed(3)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card data-testid="card-pipeline-architecture">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Layers className="h-5 w-5 text-blue-500" />
+            5-Component Architecture
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+            {[
+              { name: "Goal Specification", desc: "SC criteria: Tc, resistance, Meissner, pressure constraints", color: "border-blue-500/30 bg-blue-500/5" },
+              { name: "Design Generator", desc: "Composition generation from learning bias + gradient refinement", color: "border-purple-500/30 bg-purple-500/5" },
+              { name: "Constraint Solver", desc: "Physics constraints, 8-pillar SC evaluation, feasibility", color: "border-amber-500/30 bg-amber-500/5" },
+              { name: "Surrogate Model", desc: "GB + GNN ensemble Tc prediction with uncertainty", color: "border-green-500/30 bg-green-500/5" },
+              { name: "Learning Loop", desc: "Reward-driven bias updates, convergence tracking", color: "border-red-500/30 bg-red-500/5" },
+            ].map((comp, i) => (
+              <div key={i} className={`p-3 rounded-lg border ${comp.color}`} data-testid={`arch-component-${i}`}>
+                <p className="text-xs font-semibold">{comp.name}</p>
+                <p className="text-[10px] text-muted-foreground mt-1">{comp.desc}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -915,6 +1169,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="failures" data-testid="tab-failures">Negative Results</TabsTrigger>
           <TabsTrigger value="synthesis" data-testid="tab-synthesis">Synthesis Variables</TabsTrigger>
           <TabsTrigger value="advanced-physics" data-testid="tab-advanced-physics">Advanced Physics</TabsTrigger>
+          <TabsTrigger value="next-gen-pipeline" data-testid="tab-next-gen-pipeline">Inverse Design</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -1442,6 +1697,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="advanced-physics" className="space-y-4" data-testid="advanced-physics-content">
           <AdvancedPhysicsPanel />
+        </TabsContent>
+
+        <TabsContent value="next-gen-pipeline" className="space-y-4" data-testid="next-gen-pipeline-content">
+          <NextGenPipelinePanel />
         </TabsContent>
       </Tabs>
     </div>
