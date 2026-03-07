@@ -1,0 +1,162 @@
+Add a Real Electronic Structure Surrogate (Band Structure Neural Network)
+
+Right now your system approximates electronic structure using:
+
+Tight-binding model
+
+DOS heuristics
+
+physics estimators
+
+This is good — but room-temperature superconductivity is extremely sensitive to band structure shape.
+
+What matters most:
+
+van Hove singularities
+
+Fermi surface topology
+
+band flatness
+
+nesting vectors
+
+multi-band coupling
+
+Your tight-binding model approximates these, but you can push accuracy much higher.
+
+What to Implement
+
+A Band Structure Neural Network Surrogate
+
+Inspired by:
+
+DeepDFT
+
+OrbNet
+
+ALIGNN
+
+M3GNet band models
+
+Input:
+
+Crystal structure graph
+Atomic species
+Bond geometry
+Symmetry
+
+Output:
+
+E(k) band energies
+band gap
+flat bands
+van Hove singularity
+Fermi surface topology
+Why This Is Powerful
+
+Right now your system estimates:
+
+DOS(EF)
+nestingScore
+flatBandIndicator
+
+But these should actually come from:
+
+true band dispersion
+
+Example:
+
+Instead of
+
+flatBandIndicator = DOS(EF)/avgDOS
+
+you detect:
+
+bandwidth < 0.05 eV
+
+directly from predicted bands.
+
+Integration Into Your Pipeline
+
+Add after:
+
+Crystal Structure Generation
+
+Pipeline becomes:
+
+structure generation
+     ↓
+band-structure surrogate
+     ↓
+DOS / nesting / van Hove extraction
+     ↓
+pairing simulator
+     ↓
+Tc physics model
+Why This Matters for Room-Temperature SC
+
+Nearly every high-Tc material shares band features:
+
+Material	Feature
+Cuprates	van Hove singularity
+Iron pnictides	nested electron-hole pockets
+MgB2	multi-band coupling
+Hydrides	extremely wide phonon-coupled bands
+Kagome metals	flat bands
+
+Your system already detects these heuristically.
+
+But direct band prediction will make it far more accurate.
+
+2. Add Phase Stability Prediction Network
+
+Right now you use:
+
+convex hull calculations
+
+Good — but the problem is:
+
+convex hull requires existing phases.
+
+But your system generates novel compositions.
+
+You need something that predicts:
+
+Will this compound even exist?
+What to Implement
+
+A Phase Stability GNN
+
+Input:
+
+composition
+structure
+atomic environment
+
+Output:
+
+probability of synthesizability
+expected formation energy
+likely decomposition phases
+
+Inspired by:
+
+Materials Project formation energy models
+
+M3GNet energy predictor
+
+Integration
+
+Add before expensive physics.
+
+Pipeline becomes:
+
+candidate generation
+      ↓
+stability predictor
+      ↓
+reject unstable compounds
+      ↓
+run expensive physics
+
+This will reduce your search space by 90%.

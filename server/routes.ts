@@ -47,6 +47,8 @@ import {
 } from "./physics/hydrogen-network-engine";
 import { analyzeReactionNetwork } from "./physics/reaction-network-engine";
 import { computeFermiSurface } from "./physics/fermi-surface-engine";
+import { predictBandStructure } from "./physics/band-structure-surrogate";
+import { predictStability } from "./physics/stability-predictor";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1121,6 +1123,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getGenomeCacheStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to get genome stats" });
+    }
+  });
+
+  app.get("/api/band-surrogate/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length > 80 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const prediction = predictBandStructure(formula);
+      res.json(prediction);
+    } catch (e: any) {
+      res.status(500).json({ error: "Band structure surrogate prediction failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/stability-predict/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const prediction = predictStability(formula);
+      res.json(prediction);
+    } catch (e: any) {
+      res.status(500).json({ error: "Stability prediction failed", detail: e.message?.slice(0, 200) });
     }
   });
 

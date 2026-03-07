@@ -48,6 +48,8 @@ import { encodeGenome, genomeDiversity, type MaterialGenome } from "../physics/m
 import { computeFermiSurface, type FermiSurfaceResult } from "../physics/fermi-surface-engine";
 import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetworkAnalysis } from "../physics/hydrogen-network-engine";
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
+import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
+import { passesStabilityPreFilter } from "../physics/stability-predictor";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -674,6 +676,17 @@ function shuffle<T>(arr: T[]): T[] {
 
 async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeof storage.insertSuperconductorCandidate>[0]): Promise<boolean> {
   try {
+    const preFilter = passesStabilityPreFilter(candidateData.formula);
+    if (!preFilter.pass) {
+      emit("log", {
+        phase: "engine",
+        event: "Stability pre-filter rejected",
+        detail: `Fast stability screen rejected ${candidateData.formula}: ${preFilter.reason}`,
+        dataSource: "Stability Predictor (GNN)",
+      });
+      return false;
+    }
+
     const stabilityResult = await passesStabilityGate(candidateData.formula);
 
     if (!stabilityResult.pass) {
@@ -1113,6 +1126,23 @@ async function runPhase10_Physics() {
               event: "Fermi surface reconstructed",
               detail: `${candidate.formula}: pockets=${fermiSurfaceAnalysis.pocketCount} (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), e-h balance=${fermiSurfaceAnalysis.electronHoleBalance.toFixed(3)}, nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)}, dim=${fermiSurfaceAnalysis.fsDimensionality}, sigma=${fermiSurfaceAnalysis.sigmaBandPresence.toFixed(3)}, multiBand=${fermiSurfaceAnalysis.multiBandScore.toFixed(3)}`,
               dataSource: "Fermi Surface Engine",
+            });
+          }
+        } catch {}
+
+        let bandSurrogatePrediction: BandSurrogatePrediction | undefined;
+        try {
+          bandSurrogatePrediction = predictBandStructure(
+            candidate.formula,
+            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
+          );
+          (updatedMlFeatures as any).bandSurrogate = getBandSurrogateMLFeatures(bandSurrogatePrediction);
+          if (bandSurrogatePrediction.flatBandScore > 0.5 || bandSurrogatePrediction.vhsProximity > 0.4 || bandSurrogatePrediction.nestingFromBands > 0.4) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Band structure surrogate prediction",
+              detail: `${candidate.formula}: gap=${bandSurrogatePrediction.bandGap}eV(${bandSurrogatePrediction.bandGapType}), flatBand=${bandSurrogatePrediction.flatBandScore.toFixed(3)}, VHS=${bandSurrogatePrediction.vhsProximity.toFixed(3)}, nesting=${bandSurrogatePrediction.nestingFromBands.toFixed(3)}, DOS(EF)=${bandSurrogatePrediction.dosPredicted.toFixed(3)}, fsDim=${bandSurrogatePrediction.fsDimensionality}, multiBand=${bandSurrogatePrediction.multiBandScore.toFixed(3)}, bwMin=${bandSurrogatePrediction.bandwidthMin.toFixed(4)}, topo=${bandSurrogatePrediction.bandTopologyClass}, conf=${bandSurrogatePrediction.confidence.toFixed(2)}`,
+              dataSource: "Band Structure Surrogate",
             });
           }
         } catch {}
@@ -1788,6 +1818,17 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     const existingCandidate = await storage.getSuperconductorByFormula(formula);
     if (existingCandidate) {
       return { passed: false, tc: existingCandidate.predictedTc ?? 0, reason: "duplicate" };
+    }
+
+    const stabilityScreen = passesStabilityPreFilter(formula);
+    if (!stabilityScreen.pass) {
+      emit("log", {
+        phase: "autonomous-loop",
+        event: "Stability pre-filter rejected",
+        detail: `${formula}: ${stabilityScreen.reason}`,
+        dataSource: "Stability Predictor (GNN)",
+      });
+      return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
 
     const family = classifyFamily(formula);
