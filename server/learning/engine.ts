@@ -143,6 +143,16 @@ let autonomousTotalScreened = 0;
 let autonomousTotalPassed = 0;
 let autonomousBestTc = 0;
 let autonomousStartTime = Date.now();
+
+interface LastCycleCandidate {
+  formula: string;
+  tc: number;
+  passed: boolean;
+  reason: string;
+  family: string;
+}
+let lastCycleCandidates: LastCycleCandidate[] = [];
+let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 10000;
@@ -2467,6 +2477,8 @@ async function runAutonomousFastPath() {
     let bestTcThisBatch = 0;
     let bestFormulaThisBatch = "";
     const failedFormulas: { formula: string; tc: number }[] = [];
+    const thisCycleCandidates: LastCycleCandidate[] = [];
+    const thisCycleFamilyCounts: Record<string, number> = {};
 
     const activeRules = getMinedRules();
     let filteredCandidates = novelCandidates;
@@ -2488,6 +2500,16 @@ async function runAutonomousFastPath() {
       autonomousTotalScreened++;
 
       const result = await runAutonomousDiscoveryCycle(formula);
+
+      const candFamily = classifyFamily(formula);
+      thisCycleCandidates.push({
+        formula,
+        tc: result.tc,
+        passed: result.passed,
+        reason: result.reason,
+        family: candFamily,
+      });
+      thisCycleFamilyCounts[candFamily] = (thisCycleFamilyCounts[candFamily] || 0) + 1;
 
       bayesianOptimizer.addObservation(formula, result.tc, result.physicsPred?.lambda ?? 0, result.passed ? 1 : 0);
 
@@ -2630,6 +2652,9 @@ async function runAutonomousFastPath() {
         }
       }
     }
+
+    lastCycleCandidates = thisCycleCandidates;
+    lastCycleFamilyCounts = thisCycleFamilyCounts;
 
     if (failedFormulas.length > 0 && autonomousTotalScreened % 100 === 0) {
       try {
@@ -2812,6 +2837,8 @@ export function getAutonomousLoopStats() {
     correlationEngine: getCorrelationEngineStats(),
     crystalGrowth: getCrystalGrowthStats(),
     experimentPlanner: getExperimentPlannerStats(),
+    lastCycleCandidates,
+    lastCycleFamilyCounts,
   };
 }
 

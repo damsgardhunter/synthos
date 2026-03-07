@@ -12,7 +12,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit, Map as MapIcon, Notebook, ExternalLink } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, BarChart, Bar, Cell, Treemap
+  LineChart, Line, BarChart, Bar, Cell,
 } from "recharts";
 
 function StatusIcon({ status }: { status: string }) {
@@ -538,68 +538,92 @@ function MilestoneTimeline() {
   );
 }
 
-const FAMILY_BUBBLE_COLORS: Record<string, string> = {
-  "Hydrides": "#ef4444",
-  "Cuprates": "#3b82f6",
-  "Pnictides": "#6366f1",
-  "Chalcogenides": "#f59e0b",
-  "Borides": "#10b981",
-  "Carbides": "#14b8a6",
-  "Nitrides": "#06b6d4",
-  "Oxides": "#f97316",
-  "Intermetallics": "#a855f7",
-  "Other": "#9ca3af",
+const FAMILY_COLORS: Record<string, { bg: string; text: string; border: string; tagBg: string }> = {
+  "Hydrides":       { bg: "bg-red-500",    text: "text-red-400",    border: "border-red-500/40",    tagBg: "bg-red-500/20" },
+  "Cuprates":       { bg: "bg-blue-500",   text: "text-blue-400",   border: "border-blue-500/40",   tagBg: "bg-blue-500/20" },
+  "Pnictides":      { bg: "bg-indigo-500", text: "text-indigo-400", border: "border-indigo-500/40", tagBg: "bg-indigo-500/20" },
+  "Chalcogenides":  { bg: "bg-amber-500",  text: "text-amber-400",  border: "border-amber-500/40",  tagBg: "bg-amber-500/20" },
+  "Borides":        { bg: "bg-emerald-500",text: "text-emerald-400",border: "border-emerald-500/40",tagBg: "bg-emerald-500/20" },
+  "Carbides":       { bg: "bg-teal-500",   text: "text-teal-400",   border: "border-teal-500/40",   tagBg: "bg-teal-500/20" },
+  "Nitrides":       { bg: "bg-cyan-500",   text: "text-cyan-400",   border: "border-cyan-500/40",   tagBg: "bg-cyan-500/20" },
+  "Oxides":         { bg: "bg-orange-500", text: "text-orange-400", border: "border-orange-500/40",  tagBg: "bg-orange-500/20" },
+  "Intermetallics": { bg: "bg-purple-500", text: "text-purple-400", border: "border-purple-500/40", tagBg: "bg-purple-500/20" },
+  "Sulfides":       { bg: "bg-yellow-500", text: "text-yellow-400", border: "border-yellow-500/40", tagBg: "bg-yellow-500/20" },
+  "Other":          { bg: "bg-gray-500",   text: "text-gray-400",   border: "border-gray-500/40",   tagBg: "bg-gray-500/20" },
 };
 
-function TreemapContent(props: any) {
-  const { x, y, width, height, name, count, bestTc, fill } = props;
-  if (width < 30 || height < 20) return null;
-  return (
-    <g>
-      <rect x={x} y={y} width={width} height={height} fill={fill} rx={4} stroke="hsl(var(--background))" strokeWidth={2} style={{ cursor: "pointer" }} />
-      {width > 50 && height > 35 && (
-        <>
-          <text x={x + width / 2} y={y + height / 2 - 6} textAnchor="middle" fill="white" fontSize={width > 80 ? 11 : 9} fontWeight="bold">{name}</text>
-          <text x={x + width / 2} y={y + height / 2 + 8} textAnchor="middle" fill="rgba(255,255,255,0.8)" fontSize={8}>{count} cand.</text>
-          {bestTc > 0 && height > 50 && (
-            <text x={x + width / 2} y={y + height / 2 + 20} textAnchor="middle" fill="rgba(255,255,255,0.7)" fontSize={8}>Tc: {Math.round(bestTc)}K</text>
-          )}
-        </>
-      )}
-    </g>
-  );
+function parseFormulaElements(formula: string): string[] {
+  const elements: string[] = [];
+  const regex = /([A-Z][a-z]?)/g;
+  let match;
+  while ((match = regex.exec(formula)) !== null) {
+    if (!elements.includes(match[1])) elements.push(match[1]);
+  }
+  return elements;
+}
+
+function heatOpacity(count: number, maxCount: number): number {
+  if (maxCount === 0) return 0.15;
+  return Math.max(0.15, Math.min(1, count / maxCount));
+}
+
+interface CycleCandidate {
+  formula: string;
+  tc: number;
+  passed: boolean;
+  reason: string;
+  family: string;
 }
 
 function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (family: string) => void; selectedFamily?: string | null }) {
-  const { data: rawData, isLoading } = useQuery<any>({
-    queryKey: ["/api/superconductor-candidates"],
+  const { data: memory, isLoading: memLoading } = useQuery<{
+    familyStats: Record<string, { count: number; maxTc: number; avgScore: number }>;
+    lastCycleCandidates: CycleCandidate[];
+    lastCycleFamilyCounts: Record<string, number>;
+  }>({
+    queryKey: ["/api/engine/memory"],
+    refetchInterval: 15000,
   });
 
-  const candidates = Array.isArray(rawData) ? rawData : rawData?.candidates ?? [];
-
-  const familyData = (() => {
-    if (!candidates || candidates.length === 0) return [];
-    const families: Record<string, { count: number; bestTc: number; bestScore: number }> = {};
-    for (const c of candidates) {
-      const fam = c.materialFamily ?? "Other";
-      if (!families[fam]) families[fam] = { count: 0, bestTc: 0, bestScore: 0 };
-      families[fam].count++;
-      if ((c.predictedTc ?? 0) > families[fam].bestTc) families[fam].bestTc = c.predictedTc ?? 0;
-      if ((c.ensembleScore ?? 0) > families[fam].bestScore) families[fam].bestScore = c.ensembleScore ?? 0;
+  const { messages } = useWebSocket();
+  useEffect(() => {
+    const engineEvents = messages.filter(m => m.type === "log" && m.data?.phase === "engine");
+    if (engineEvents.length > 0) {
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
     }
-    return Object.entries(families)
-      .map(([name, data]) => ({
-        name,
-        size: data.count,
-        count: data.count,
-        bestTc: data.bestTc,
-        bestScore: data.bestScore,
-        fill: FAMILY_BUBBLE_COLORS[name] ?? "#9ca3af",
-      }))
-      .sort((a, b) => b.size - a.size);
-  })();
+  }, [messages]);
 
-  const selectedInfo = selectedFamily ? familyData.find(f => f.name === selectedFamily) : null;
+  const familyStats = memory?.familyStats ?? {};
+  const cycleCandidates = memory?.lastCycleCandidates ?? [];
+  const cycleFamilyCounts = memory?.lastCycleFamilyCounts ?? {};
+
+  const families = Object.entries(familyStats)
+    .map(([name, stats]) => ({
+      name,
+      totalCount: stats.count,
+      maxTc: stats.maxTc,
+      avgScore: stats.avgScore,
+      lastCycleCount: cycleFamilyCounts[name] || 0,
+      elements: new Set<string>(),
+      colors: FAMILY_COLORS[name] || FAMILY_COLORS["Other"],
+    }))
+    .sort((a, b) => b.totalCount - a.totalCount);
+
+  for (const c of cycleCandidates) {
+    const fam = families.find(f => f.name === c.family);
+    if (fam) {
+      for (const el of parseFormulaElements(c.formula)) {
+        fam.elements.add(el);
+      }
+    }
+  }
+
+  const maxCycleCount = Math.max(1, ...families.map(f => f.lastCycleCount));
+  const maxTotalCount = Math.max(1, ...families.map(f => f.totalCount));
+
+  const filteredCycleCandidates = selectedFamily
+    ? cycleCandidates.filter(c => c.family === selectedFamily)
+    : cycleCandidates;
 
   return (
     <Card data-testid="knowledge-map">
@@ -608,51 +632,141 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
           <MapIcon className="h-4 w-4 text-primary" />
           Knowledge Map
         </CardTitle>
-        <p className="text-xs text-muted-foreground">Material families explored by the engine. Size reflects candidate count.</p>
+        <p className="text-xs text-muted-foreground">
+          Live heatmap of material families under exploration. Intensity reflects last-cycle activity.
+        </p>
       </CardHeader>
-      <CardContent>
-        {isLoading ? (
+      <CardContent className="space-y-4">
+        {memLoading ? (
           <Skeleton className="h-[260px] w-full" />
-        ) : familyData.length === 0 ? (
+        ) : families.length === 0 ? (
           <p className="text-sm text-muted-foreground italic py-8 text-center" data-testid="knowledge-map-empty">
             Knowledge map will populate once candidates are discovered
           </p>
         ) : (
           <>
-            <ResponsiveContainer width="100%" height={260}>
-              <Treemap
-                data={familyData}
-                dataKey="size"
-                aspectRatio={4 / 3}
-                content={<TreemapContent />}
-                onClick={(node: any) => {
-                  if (node?.name && onFamilyClick) onFamilyClick(node.name);
-                }}
-              />
-            </ResponsiveContainer>
-            <div className="flex flex-wrap gap-2 mt-3">
-              {familyData.map(f => (
-                <button
-                  key={f.name}
-                  className={`flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full border transition-colors ${selectedFamily === f.name ? "border-primary bg-primary/10 font-semibold" : "border-border hover:bg-muted/50"}`}
-                  onClick={() => onFamilyClick?.(f.name)}
-                  data-testid={`family-filter-${f.name.toLowerCase()}`}
-                >
-                  <div className="h-2 w-2 rounded-full" style={{ backgroundColor: f.fill }} />
-                  {f.name} ({f.count})
-                </button>
-              ))}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" data-testid="family-heatmap">
+              {families.map(fam => {
+                const intensity = heatOpacity(fam.lastCycleCount, maxCycleCount);
+                const sizeScale = 0.7 + 0.3 * (fam.totalCount / maxTotalCount);
+                const isSelected = selectedFamily === fam.name;
+                const isActive = fam.lastCycleCount > 0;
+
+                return (
+                  <button
+                    key={fam.name}
+                    className={`relative rounded-lg border-2 p-2.5 transition-all text-left overflow-hidden ${
+                      isSelected ? `${fam.colors.border} ring-2 ring-primary/30` : "border-border/50 hover:border-border"
+                    }`}
+                    style={{
+                      minHeight: `${Math.round(64 * sizeScale)}px`,
+                    }}
+                    onClick={() => onFamilyClick?.(fam.name)}
+                    data-testid={`family-heatmap-${fam.name.toLowerCase()}`}
+                  >
+                    <div
+                      className={`absolute inset-0 ${fam.colors.bg} transition-opacity`}
+                      style={{ opacity: intensity * 0.25 }}
+                    />
+                    <div className="relative z-10">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className={`text-xs font-semibold ${isActive ? fam.colors.text : "text-muted-foreground"}`}>
+                          {fam.name}
+                        </span>
+                        {isActive && (
+                          <span className={`h-2 w-2 rounded-full ${fam.colors.bg} animate-pulse`} />
+                        )}
+                      </div>
+                      <div className="flex items-baseline gap-1.5 mt-1">
+                        <span className="text-lg font-bold font-mono" data-testid={`text-family-count-${fam.name.toLowerCase()}`}>
+                          {fam.totalCount}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">total</span>
+                        {fam.lastCycleCount > 0 && (
+                          <span className={`text-[10px] font-mono font-semibold ${fam.colors.text}`}>
+                            +{fam.lastCycleCount}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                        Tc: {Math.round(fam.maxTc)}K
+                      </div>
+                      {fam.elements.size > 0 && (
+                        <div className="flex flex-wrap gap-0.5 mt-1.5">
+                          {Array.from(fam.elements).slice(0, 8).map(el => (
+                            <span
+                              key={el}
+                              className={`text-[9px] font-mono px-1 py-px rounded ${fam.colors.tagBg} ${fam.colors.text}`}
+                              data-testid={`element-tag-${el}`}
+                            >
+                              {el}
+                            </span>
+                          ))}
+                          {fam.elements.size > 8 && (
+                            <span className="text-[9px] text-muted-foreground">+{fam.elements.size - 8}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
-            {selectedInfo && (
-              <div className="mt-3 p-3 rounded-lg border bg-muted/30" data-testid="family-detail">
-                <p className="text-xs font-semibold">{selectedInfo.name}</p>
-                <div className="flex gap-4 mt-1 text-[10px] text-muted-foreground">
-                  <span>{selectedInfo.count} candidates</span>
-                  <span>Best Tc: {Math.round(selectedInfo.bestTc)}K</span>
-                  <span>Top score: {selectedInfo.bestScore.toFixed(3)}</span>
-                </div>
+
+            <div data-testid="last-cycle-candidates">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                  Last Cycle Candidates ({filteredCycleCandidates.length})
+                </h4>
+                {selectedFamily && (
+                  <Badge variant="outline" className="text-[10px]">{selectedFamily}</Badge>
+                )}
               </div>
-            )}
+              {filteredCycleCandidates.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic py-4 text-center">
+                  {cycleCandidates.length === 0 ? "Waiting for first cycle to complete" : "No candidates in this family last cycle"}
+                </p>
+              ) : (
+                <ScrollArea className="h-[200px]">
+                  <div className="space-y-1">
+                    {filteredCycleCandidates.map((c, i) => {
+                      const colors = FAMILY_COLORS[c.family] || FAMILY_COLORS["Other"];
+                      return (
+                        <div
+                          key={`${c.formula}-${i}`}
+                          className={`flex items-center justify-between px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
+                            c.passed ? "bg-green-500/5 border-green-500/20" : "bg-muted/30 border-border/50"
+                          }`}
+                          data-testid={`cycle-candidate-${i}`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${c.passed ? "bg-green-500" : "bg-muted-foreground/40"}`} />
+                            <Link href={`/candidate/${encodeURIComponent(c.formula)}`}>
+                              <span className="font-mono font-semibold text-primary hover:underline cursor-pointer truncate" data-testid={`link-cycle-formula-${i}`}>
+                                {c.formula}
+                              </span>
+                            </Link>
+                            <Badge variant="outline" className={`text-[9px] px-1 py-0 ${colors.text} ${colors.border}`}>
+                              {c.family}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                            <span className="font-mono text-muted-foreground">
+                              {c.tc > 0 ? `${Math.round(c.tc)}K` : "--"}
+                            </span>
+                            {c.passed ? (
+                              <CheckCircle2 className="h-3 w-3 text-green-500" />
+                            ) : (
+                              <span className="text-[9px] text-muted-foreground/60 max-w-[80px] truncate">{c.reason}</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </ScrollArea>
+              )}
+            </div>
           </>
         )}
       </CardContent>
