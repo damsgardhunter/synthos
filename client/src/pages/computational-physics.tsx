@@ -613,6 +613,387 @@ function NextGenPipelinePanel() {
   );
 }
 
+function SelfImprovingLabPanel() {
+  const { data: overview, isLoading } = useQuery<{
+    activeLabs: number;
+    totalRuns: number;
+    labs: { id: string; status: string; iteration: number; bestTc: number; bestFormula: string; strategiesEvolved: number; knowledgeEntries: number }[];
+  }>({ queryKey: ["/api/self-improving-lab/stats"], refetchInterval: 8000 });
+
+  const defaultLabId = overview?.labs?.[0]?.id;
+
+  const { data: detail } = useQuery<{
+    id: string;
+    status: string;
+    iteration: number;
+    bestTc: number;
+    bestFormula: string;
+    bestDistance: number;
+    totalGenerated: number;
+    totalPassed: number;
+    activeStrategy: { id: string; name: string; type: string; fitness: number; bestTc: number } | null;
+    strategies: { id: string; name: string; type: string; fitness: number; uses: number; bestTc: number; generation: number }[];
+    knowledgeBaseSize: number;
+    failureBreakdown: Record<string, number>;
+    topKnowledge: { pattern: string; suggestion: string; confidence: number }[];
+    convergenceHistory: number[];
+    topCandidates: { formula: string; tc: number; distance: number; strategy: string }[];
+    strategiesEvolved: number;
+    iterationsPerMinute: number;
+  }>({
+    queryKey: ["/api/self-improving-lab", defaultLabId],
+    enabled: !!defaultLabId,
+    refetchInterval: 5000,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const id = `lab-${Date.now()}`;
+      await apiRequest("POST", "/api/self-improving-lab", { id, targetTc: 293, maxPressure: 50, maxIterations: 500 });
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab/stats"] }); },
+  });
+
+  const iterateMutation = useMutation({
+    mutationFn: async () => {
+      if (!defaultLabId) return;
+      await apiRequest("POST", `/api/self-improving-lab/${defaultLabId}/iterate`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab", defaultLabId] });
+    },
+  });
+
+  const togglePauseMutation = useMutation({
+    mutationFn: async () => {
+      if (!defaultLabId || !detail) return;
+      const endpoint = detail.status === "paused" ? "resume" : "pause";
+      await apiRequest("POST", `/api/self-improving-lab/${defaultLabId}/${endpoint}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab", defaultLabId] });
+    },
+  });
+
+  if (isLoading) return <Skeleton className="h-64" />;
+
+  const STRATEGY_COLORS: Record<string, string> = {
+    "hydride-cage-optimizer": "text-blue-500 bg-blue-500/10 border-blue-500/30",
+    "layered-intercalation": "text-purple-500 bg-purple-500/10 border-purple-500/30",
+    "high-entropy-alloy": "text-green-500 bg-green-500/10 border-green-500/30",
+    "light-element-phonon": "text-amber-500 bg-amber-500/10 border-amber-500/30",
+    "topological-edge": "text-cyan-500 bg-cyan-500/10 border-cyan-500/30",
+    "pressure-stabilized": "text-red-500 bg-red-500/10 border-red-500/30",
+    "electron-phonon-resonance": "text-pink-500 bg-pink-500/10 border-pink-500/30",
+    "charge-transfer-layer": "text-orange-500 bg-orange-500/10 border-orange-500/30",
+    custom: "text-gray-500 bg-gray-500/10 border-gray-500/30",
+  };
+
+  const FAILURE_LABELS: Record<string, string> = {
+    "low-tc": "Low Tc",
+    "constraint-violation": "Constraint Violation",
+    "high-pressure": "High Pressure",
+    "thermodynamic-instability": "Thermodynamic Instability",
+    "poor-electron-phonon": "Weak E-Ph Coupling",
+    "synthesis-infeasible": "Synthesis Infeasible",
+    "phonon-instability": "Phonon Instability",
+    "insufficient-dos": "Insufficient DOS",
+  };
+
+  return (
+    <div className="space-y-4">
+      <Card data-testid="card-lab-overview">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Brain className="h-5 w-5 text-purple-500" />
+              Self-Improving Design Lab
+            </CardTitle>
+            <div className="flex gap-2">
+              {!defaultLabId && (
+                <Button size="sm" onClick={() => createMutation.mutate()} disabled={createMutation.isPending} className="bg-purple-500 hover:bg-purple-600 text-white text-xs" data-testid="btn-create-lab">
+                  {createMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                  Initialize Lab
+                </Button>
+              )}
+              {defaultLabId && detail?.status !== "converged" && detail?.status !== "completed" && (
+                <>
+                  <Button size="sm" onClick={() => iterateMutation.mutate()} disabled={iterateMutation.isPending || detail?.status === "paused"} className="bg-green-500 hover:bg-green-600 text-white text-xs" data-testid="btn-run-lab-iteration">
+                    {iterateMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                    Run Iteration
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => togglePauseMutation.mutate()} disabled={togglePauseMutation.isPending} data-testid="btn-toggle-lab-pause">
+                    {detail?.status === "paused" ? "Resume" : "Pause"}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {detail ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3" data-testid="lab-metrics">
+                <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Status</p>
+                  <Badge variant={detail.status === "running" ? "default" : detail.status === "converged" ? "secondary" : "outline"} className="mt-1" data-testid="badge-lab-status">
+                    {detail.status}
+                  </Badge>
+                </div>
+                <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc Predicted</p>
+                  <p className="text-lg font-mono font-bold text-foreground" data-testid="text-lab-best-tc">
+                    {detail.bestTc > 0 ? `${Math.round(detail.bestTc)}K` : "--"}
+                  </p>
+                </div>
+                <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Active Strategy</p>
+                  <p className="text-sm font-medium truncate" data-testid="text-lab-active-strategy">
+                    {detail.activeStrategy?.name ?? "--"}
+                  </p>
+                </div>
+                <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Strategies Evolved</p>
+                  <p className="text-lg font-mono font-bold text-foreground" data-testid="text-lab-evolved">
+                    {detail.strategiesEvolved}
+                  </p>
+                </div>
+                <div className="p-2.5 bg-muted/30 rounded-lg border border-border">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Knowledge Entries</p>
+                  <p className="text-lg font-mono font-bold text-foreground" data-testid="text-lab-knowledge">
+                    {detail.knowledgeBaseSize}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1 overflow-x-auto" data-testid="lab-pipeline-flow">
+                {[
+                  { label: "Goal Spec", icon: Target, color: "text-blue-500" },
+                  { label: "Strategy Gen", icon: Brain, color: "text-purple-500" },
+                  { label: "Design Gen", icon: Cpu, color: "text-green-500" },
+                  { label: "Constraints", icon: Filter, color: "text-amber-500" },
+                  { label: "Surrogate", icon: Gauge, color: "text-cyan-500" },
+                  { label: "INR Field", icon: Diamond, color: "text-pink-500" },
+                  { label: "Evaluation", icon: CheckCircle2, color: "text-green-500" },
+                  { label: "Failure Analysis", icon: Bug, color: "text-red-500" },
+                  { label: "Strategy Evolve", icon: Activity, color: "text-orange-500" },
+                ].map((stage, i) => (
+                  <div key={stage.label} className="flex items-center gap-1 flex-shrink-0">
+                    <div className="flex flex-col items-center text-center min-w-[62px]">
+                      <div className={`w-8 h-8 rounded-full bg-muted/50 border border-border flex items-center justify-center ${stage.color}`}>
+                        <stage.icon className="h-4 w-4" />
+                      </div>
+                      <p className="text-[9px] font-medium mt-0.5">{stage.label}</p>
+                    </div>
+                    {i < 8 && <ArrowDown className="h-2.5 w-2.5 text-muted-foreground rotate-[-90deg] flex-shrink-0" />}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-8 text-muted-foreground" data-testid="lab-empty-state">
+              <Brain className="h-12 w-12 mx-auto mb-3 opacity-50" />
+              <p className="text-sm">No design lab active. Initialize one to begin self-improving material design.</p>
+              <p className="text-xs mt-1">The lab learns design strategies, not just parameters -- evolving its approach over time.</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {detail && detail.strategies.length > 0 && (
+        <Card data-testid="card-strategy-pool">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Layers className="h-5 w-5 text-blue-500" />
+              Strategy Pool ({detail.strategies.length} active)
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+              {detail.strategies
+                .sort((a, b) => b.fitness - a.fitness)
+                .map((s, i) => {
+                  const colors = STRATEGY_COLORS[s.type] ?? STRATEGY_COLORS.custom;
+                  const isActive = s.id === detail.activeStrategy?.id;
+                  return (
+                    <div key={i} className={`p-2.5 rounded-lg border ${colors} ${isActive ? "ring-1 ring-primary" : ""}`} data-testid={`strategy-card-${i}`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-xs font-semibold truncate">{s.name}</p>
+                        {isActive && <Badge variant="default" className="text-[8px] px-1 py-0">Active</Badge>}
+                      </div>
+                      <div className="grid grid-cols-3 gap-1 text-[10px]">
+                        <div>
+                          <span className="text-muted-foreground">Fit</span>
+                          <p className="font-mono font-bold">{s.fitness.toFixed(2)}</p>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Best</span>
+                          <p className="font-mono font-bold">{s.bestTc > 0 ? `${s.bestTc}K` : "--"}</p>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Gen</span>
+                          <p className="font-mono font-bold">{s.generation}</p>
+                        </div>
+                      </div>
+                      <p className="text-[9px] text-muted-foreground mt-1">{s.uses} uses</p>
+                    </div>
+                  );
+                })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {detail && Object.keys(detail.failureBreakdown).length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <Card data-testid="card-failure-analysis">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Bug className="h-5 w-5 text-red-500" />
+                Failure Analysis
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {Object.entries(detail.failureBreakdown)
+                  .sort(([, a], [, b]) => b - a)
+                  .map(([type, count], i) => {
+                    const total = Object.values(detail.failureBreakdown).reduce((s, v) => s + v, 0);
+                    const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+                    return (
+                      <div key={i} className="flex items-center gap-2" data-testid={`failure-row-${i}`}>
+                        <span className="text-xs w-36 truncate">{FAILURE_LABELS[type] ?? type}</span>
+                        <div className="flex-1 h-4 bg-muted/30 rounded-full overflow-hidden">
+                          <div className="h-full bg-red-500/50 rounded-full" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-xs font-mono text-muted-foreground w-12 text-right">{count}</span>
+                      </div>
+                    );
+                  })}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card data-testid="card-knowledge-base">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <ClipboardList className="h-5 w-5 text-amber-500" />
+                Knowledge Base
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {detail.topKnowledge.map((k, i) => (
+                  <div key={i} className="p-2 bg-muted/30 rounded-md border border-border" data-testid={`knowledge-entry-${i}`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <Badge variant="outline" className="text-[9px]">{k.pattern}</Badge>
+                      <span className="text-[10px] text-muted-foreground">{Math.round(k.confidence * 100)}% conf</span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">{k.suggestion}</p>
+                  </div>
+                ))}
+                {detail.topKnowledge.length === 0 && (
+                  <p className="text-xs text-muted-foreground text-center py-4">No knowledge entries yet. Run iterations to build the knowledge base.</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {detail && detail.convergenceHistory.length > 0 && (
+        <Card data-testid="card-lab-convergence">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Activity className="h-5 w-5 text-green-500" />
+              Convergence Trajectory
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="h-24 flex items-end gap-[2px]" data-testid="lab-convergence-chart">
+              {detail.convergenceHistory.slice(-80).map((d, i) => {
+                const maxD = Math.max(...detail.convergenceHistory.slice(-80), 0.001);
+                const h = Math.max(2, (d / maxD) * 96);
+                return (
+                  <div key={i} className="flex-1 bg-purple-500/60 rounded-t-sm transition-all" style={{ height: `${h}px` }} title={`Iter ${i + 1}: dist=${d.toFixed(4)}`} />
+                );
+              })}
+            </div>
+            <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+              <span>Target distance (lower = closer to goal)</span>
+              <span>Best: {detail.bestDistance.toFixed(4)}</span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {detail && detail.topCandidates.length > 0 && (
+        <Card data-testid="card-lab-candidates">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Star className="h-5 w-5 text-amber-500" />
+              Top Lab Candidates
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {detail.topCandidates.slice(0, 8).map((c, i) => (
+                <div key={i} className="flex items-center justify-between p-2 bg-muted/30 rounded-md border border-border" data-testid={`lab-candidate-row-${i}`}>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono text-muted-foreground w-5">#{i + 1}</span>
+                    <Link href={`/candidate/${encodeURIComponent(c.formula)}`}>
+                      <span className="text-sm font-mono font-medium text-foreground hover:text-primary cursor-pointer" data-testid={`text-lab-formula-${i}`}>
+                        {c.formula}
+                      </span>
+                    </Link>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs">
+                    <span className="font-mono" data-testid={`text-lab-tc-${i}`}>
+                      {Math.round(c.tc)}K
+                    </span>
+                    <span className="text-muted-foreground font-mono">
+                      d={c.distance.toFixed(3)}
+                    </span>
+                    <Badge variant="outline" className="text-[9px]">{c.strategy}</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card data-testid="card-lab-architecture">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Layers className="h-5 w-5 text-blue-500" />
+            Self-Improving Architecture
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[
+              { name: "Strategy-Level Optimization", desc: "Evolves design strategies (architectures), not just parameters. 8 concurrent strategy types compete.", color: "border-purple-500/30 bg-purple-500/5" },
+              { name: "Failure Analysis Engine", desc: "Classifies why designs fail (low Tc, constraint violations, instability) and generates corrective suggestions.", color: "border-red-500/30 bg-red-500/5" },
+              { name: "Implicit Neural Representations", desc: "MLP(x,y,z) maps to material density, enabling infinite-resolution geometry with gradient and curvature.", color: "border-pink-500/30 bg-pink-500/5" },
+              { name: "Knowledge Base", desc: "Stores failure patterns and suggestions with confidence scores. Drives strategy evolution.", color: "border-amber-500/30 bg-amber-500/5" },
+              { name: "Strategy Evolution", desc: "Replaces low-performing strategies with evolved children. Uses crossover, mutation, and knowledge-guided adaptation.", color: "border-green-500/30 bg-green-500/5" },
+              { name: "Surrogate + Real Physics", desc: "GB+GNN ensemble surrogate with 8-pillar SC evaluation. Physics constraint validation.", color: "border-cyan-500/30 bg-cyan-500/5" },
+            ].map((comp, i) => (
+              <div key={i} className={`p-3 rounded-lg border ${comp.color}`} data-testid={`lab-arch-component-${i}`}>
+                <p className="text-xs font-semibold">{comp.name}</p>
+                <p className="text-[10px] text-muted-foreground mt-1">{comp.desc}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function AdvancedPhysicsPanel() {
   const { data: defectStats, isLoading: defectLoading } = useQuery<{
     totalDefectsGenerated: number;
@@ -1170,6 +1551,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="synthesis" data-testid="tab-synthesis">Synthesis Variables</TabsTrigger>
           <TabsTrigger value="advanced-physics" data-testid="tab-advanced-physics">Advanced Physics</TabsTrigger>
           <TabsTrigger value="next-gen-pipeline" data-testid="tab-next-gen-pipeline">Inverse Design</TabsTrigger>
+          <TabsTrigger value="self-improving-lab" data-testid="tab-self-improving-lab">Design Lab</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -1701,6 +2083,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="next-gen-pipeline" className="space-y-4" data-testid="next-gen-pipeline-content">
           <NextGenPipelinePanel />
+        </TabsContent>
+
+        <TabsContent value="self-improving-lab" className="space-y-4" data-testid="self-improving-lab-content">
+          <SelfImprovingLabPanel />
         </TabsContent>
       </Tabs>
     </div>

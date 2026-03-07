@@ -13,6 +13,14 @@ import {
   resumePipeline as resumeNextGenPipeline,
   getNextGenPipelineStats as getNextGenStats,
 } from "./inverse/next-gen-pipeline";
+import {
+  createLab as createSelfImprovingLab,
+  runLabIteration as runSelfImprovingIteration,
+  getLabStats as getSelfImprovingLabDetail,
+  pauseLab as pauseSelfImprovingLab,
+  resumeLab as resumeSelfImprovingLab,
+  getAllLabStats as getSelfImprovingLabOverview,
+} from "./inverse/self-improving-lab";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -1825,6 +1833,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ success });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to resume pipeline", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/self-improving-lab", writeLimiter, (req, res) => {
+    try {
+      const { id, targetTc, maxPressure, maxIterations } = req.body;
+      if (!id) return res.status(400).json({ error: "Lab id required" });
+      const lab = createSelfImprovingLab(id, targetTc ?? 293, maxPressure ?? 50, maxIterations ?? 500);
+      res.json({ id, status: lab.status, iteration: lab.iteration });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to create lab", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/self-improving-lab/:id/iterate", writeLimiter, (req, res) => {
+    try {
+      const result = runSelfImprovingIteration(req.params.id);
+      if (!result) return res.status(404).json({ error: "Lab not found or completed" });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run lab iteration", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/self-improving-lab/stats", (_req, res) => {
+    try {
+      res.json(getSelfImprovingLabOverview());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch lab stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/self-improving-lab/:id", (req, res) => {
+    try {
+      const stats = getSelfImprovingLabDetail(req.params.id);
+      if (!stats) return res.status(404).json({ error: "Lab not found" });
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch lab detail", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/self-improving-lab/:id/pause", writeLimiter, (req, res) => {
+    try {
+      const success = pauseSelfImprovingLab(req.params.id);
+      res.json({ success });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to pause lab", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/self-improving-lab/:id/resume", writeLimiter, (req, res) => {
+    try {
+      const success = resumeSelfImprovingLab(req.params.id);
+      res.json({ success });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to resume lab", detail: e.message?.slice(0, 200) });
     }
   });
 

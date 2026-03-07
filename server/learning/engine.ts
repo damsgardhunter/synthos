@@ -7,6 +7,7 @@ import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, se
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB, createCampaign } from "../inverse/inverse-optimizer";
 import { getNextGenPipelineStats as getNextGenPipelineStatsForEngine } from "../inverse/next-gen-pipeline";
+import { getAllLabStats as getSelfImprovingLabStatsForEngine } from "../inverse/self-improving-lab";
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
@@ -2888,6 +2889,7 @@ export async function getAutonomousLoopStats() {
     topologyDetection: getTopologyStats(),
     inverseOptimizer: getInverseOptimizerStats(),
     nextGenPipeline: getNextGenPipelineStatsForEngine(),
+    selfImprovingLab: getSelfImprovingLabStatsForEngine(),
     differentiableOptimizer: getDifferentiableOptimizerStats(),
     structureFirstDesign: getStructureDiffusionStats(),
     physicsConstraints: getConstraintEngineStats(),

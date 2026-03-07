@@ -1,0 +1,246 @@
+Self-Improving Design Lab Architecture
+Goal / Spec
+     ↓
+Design Strategy Generator
+     ↓
+Programmatic Design Generator
+     ↓
+Constraint Solver
+     ↓
+Surrogate Physics Model
+     ↓
+Real Physics Simulation
+     ↓
+Evaluation + Failure Analysis
+     ↓
+Strategy Improvement
+     ↓
+Dataset + Knowledge Base
+
+The key difference is a layer that learns how to design better over time.
+
+Core Idea
+
+Traditional optimization:
+
+optimize(parameters)
+
+Self-improving system:
+
+optimize(design_strategies)
+
+Example strategies:
+
+• lattice heat exchanger
+• spiral cooling pipe
+• multi-stage turbine
+• branching channel network
+
+Instead of tuning dimensions, the system explores architectures.
+
+Key Subsystems
+1. Design Strategy Generator
+
+Generates design programs instead of parameters.
+
+Example program:
+
+def design_strategy():
+
+    structure = Lattice()
+
+    structure.add_channel_network(branching_factor=3)
+
+    structure.add_fins(height=0.02)
+
+    structure.optimize_flow_paths()
+
+    return structure
+
+Strategies can come from:
+
+• procedural generators
+• evolutionary algorithms
+• language models
+
+2. Design Program Executor
+
+Programs generate geometry or parameter sets.
+
+Example:
+
+design program → geometry → feature vector
+
+Outputs may include:
+
+• meshes
+• voxel grids
+• parametric CAD models
+
+3. Constraint Solver
+
+Ensures designs are physically possible.
+
+Typical constraints:
+
+max_stress
+min_wall_thickness
+manufacturability
+material limits
+
+Good tools:
+
+Pyomo
+
+OR-Tools
+
+4. Surrogate Physics Model
+
+Fast prediction of performance.
+
+Typical mapping:
+
+design features → physics metrics
+
+Metrics might include:
+
+efficiency
+pressure drop
+heat transfer
+structural stress
+
+Built with tools like:
+
+PyTorch
+
+JAX
+
+5. Real Simulation Layer
+
+The surrogate occasionally calls a real simulator to stay accurate.
+
+Example simulators:
+
+• CFD
+• FEM
+• rigid body physics
+
+Examples include:
+
+OpenFOAM
+
+COMSOL Multiphysics
+
+The New Piece: Failure Analysis Engine
+
+This is what makes the system self-improving.
+
+After every design evaluation, analyze:
+
+Why did the design fail?
+
+Examples:
+
+• turbulence caused inefficiency
+• stress exceeded material limit
+• heat transfer too low
+
+Store findings in a design knowledge base.
+
+Knowledge Base Structure
+
+Example record:
+
+{
+  "design_type": "branched channel network",
+  "failure_reason": "pressure drop too high",
+  "suggestion": "reduce branching factor"
+}
+
+This becomes experience data.
+
+Strategy Evolution Engine
+
+The system modifies design programs using the knowledge base.
+
+Example:
+
+original strategy:
+branching_factor = 5
+
+analysis:
+pressure drop too high
+
+new strategy:
+branching_factor = 3
+
+Or invents new structures.
+
+Full Self-Improving Loop
+for iteration in range(N):
+
+    strategy = strategy_generator()
+
+    program = create_design_program(strategy)
+
+    design = execute(program)
+
+    if not constraints_valid(design):
+        continue
+
+    prediction = surrogate(design)
+
+    score = objective(prediction)
+
+    optimizer.update(strategy, score)
+
+    if uncertainty_high(prediction):
+
+        result = simulator(design)
+
+        dataset.append((design, result))
+
+        surrogate.train(dataset)
+
+        failure_analysis(result)
+
+        update_knowledge_base()
+Strategy Search Methods
+
+Several search algorithms work well here.
+
+Bayesian optimization
+
+Good for small design spaces.
+
+Libraries:
+
+BoTorch
+
+Optuna
+
+Evolutionary algorithms
+
+Very good for architecture discovery.
+
+Example:
+
+mutate(strategy)
+crossover(strategy)
+select(best)
+Reinforcement learning
+
+Treat design as sequential decision making.
+
+State:
+
+current geometry
+
+Action:
+
+add component
+modify dimension
+
+Reward:
+
+design performance
