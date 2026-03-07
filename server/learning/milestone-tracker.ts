@@ -25,6 +25,11 @@ let initialized = false;
 async function initState() {
   if (initialized) return;
   try {
+    const topByTc = await storage.getSuperconductorCandidatesByTc(1);
+    if (topByTc.length > 0) {
+      state.bestTcEver = topByTc[0].predictedTc ?? 0;
+    }
+
     const candidates = await storage.getSuperconductorCandidates(100);
     for (const c of candidates) {
       state.knownFamilies.add(classifyFamily(c.formula));
@@ -42,6 +47,13 @@ async function initState() {
 
     const existingMilestones = await storage.getMilestones(1000);
     for (const m of existingMilestones) {
+      if (m.type === "tc-record" && m.title) {
+        const tcMatch = m.title.match(/(\d+)\s*K/);
+        if (tcMatch) {
+          const milestoneTC = Number(tcMatch[1]);
+          if (milestoneTC > state.bestTcEver) state.bestTcEver = milestoneTC;
+        }
+      }
       if (m.type === "knowledge-milestone") {
         const match = m.description.match(/(\d+)/);
         if (match) state.knowledgeThresholds.add(Number(match[1]));

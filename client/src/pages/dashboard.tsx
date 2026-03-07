@@ -3,13 +3,12 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import { queryClient } from "@/lib/queryClient";
 import type { LearningPhase, ResearchLog, ResearchStrategy } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Atom, Database, FlaskConical, Brain,
-  TrendingUp, CheckCircle2, Clock, Loader2,
+  TrendingUp,
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
@@ -61,12 +60,6 @@ interface EngineMemory {
   pipelinePassRate: number;
   cycleNarratives: { detail: string; timestamp: string }[];
   autonomousLoopStats?: AutonomousLoopStats;
-}
-
-function PhaseStatusBadge({ status }: { status: string }) {
-  if (status === "completed") return <Badge variant="secondary" className="text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950 border-0 text-xs"><CheckCircle2 className="h-3 w-3 mr-1" />Completed</Badge>;
-  if (status === "active") return <Badge variant="secondary" className="text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950 border-0 text-xs"><Loader2 className="h-3 w-3 mr-1 animate-spin" />Active</Badge>;
-  return <Badge variant="secondary" className="text-muted-foreground text-xs"><Clock className="h-3 w-3 mr-1" />Pending</Badge>;
 }
 
 function MiniSparkline({ data }: { data: number[] }) {
@@ -398,6 +391,10 @@ export default function Dashboard() {
   const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"] });
   const { data: engineMemory } = useQuery<EngineMemory>({ queryKey: ["/api/engine/memory"], refetchInterval: 15000 });
   const { data: scData } = useQuery<{ candidates: any[]; total: number }>({ queryKey: ["/api/superconductor-candidates"] });
+  const { data: novelInsightData } = useQuery<{
+    insights: { id: string; insightText: string; noveltyScore: number | null; category: string | null; phaseName: string; discoveredAt: string }[];
+    total: number;
+  }>({ queryKey: ["/api/novel-insights", "recent"], refetchInterval: 30000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -433,6 +430,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dft-status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights", "recent"] });
     }
     const hasStrategy = ws.messages.some((m) => m.type === "strategyUpdate");
     if (hasStrategy) {
@@ -657,45 +655,9 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <div className="md:col-span-2 space-y-4">
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-4">
           <ThoughtFeed thoughts={ws.thoughts} tempo={ws.tempo} />
-
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <TrendingUp className="h-4 w-4 text-primary" />
-                Learning Pipeline
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {phasesLoading ? (
-                <div className="space-y-4">
-                  {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-14" />)}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {phases?.map((phase) => (
-                    <div key={phase.id} data-testid={`phase-${phase.id}`} className="space-y-1.5">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-medium">{phase.name}</span>
-                          <PhaseStatusBadge status={phase.status} />
-                        </div>
-                        <span className="text-xs font-mono text-muted-foreground">
-                          {phase.id <= 2
-                            ? `${phase.itemsLearned.toLocaleString()} / ${phase.totalItems.toLocaleString()}`
-                            : `${phase.itemsLearned.toLocaleString()} items`
-                          }
-                        </span>
-                      </div>
-                      <Progress value={phase.id <= 2 ? phase.progress : Math.min(100, phase.itemsLearned > 0 ? Math.max(5, Math.log10(phase.itemsLearned) * 25) : 0)} className="h-2" />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
           <Card>
             <CardHeader className="pb-3">
@@ -804,25 +766,47 @@ export default function Dashboard() {
 
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base flex items-center gap-2">
-                <BookOpen className="h-4 w-4 text-primary" />
-                Learning Insights
-              </CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <BookOpen className="h-4 w-4 text-primary" />
+                  Learning Insights
+                </CardTitle>
+                {(novelInsightData?.total ?? 0) > 0 && (
+                  <Badge variant="secondary" className="text-xs border-0" data-testid="insight-total-count">
+                    {novelInsightData!.total} total
+                  </Badge>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
-              <ScrollArea className="h-44">
-                {phasesLoading ? (
+              <ScrollArea className="h-52">
+                {(novelInsightData?.insights?.length ?? 0) > 0 ? (
                   <div className="space-y-2">
-                    {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {phases?.filter(p => p.insights?.length).flatMap(p => p.insights ?? []).slice(0, 6).map((insight, i) => (
-                      <div key={i} className="text-xs text-muted-foreground bg-muted/50 rounded-md px-2 py-2 leading-relaxed">
-                        {insight}
+                    {novelInsightData!.insights.slice(0, 10).map((insight) => (
+                      <div key={insight.id} className="bg-muted/50 rounded-md px-3 py-2" data-testid={`insight-${insight.id}`}>
+                        <p className="text-xs text-foreground leading-relaxed">{insight.insightText}</p>
+                        <div className="flex items-center gap-2 mt-1.5">
+                          {insight.category && (
+                            <Badge variant="outline" className="text-[10px] h-4 px-1.5 border-0 bg-primary/10 text-primary">
+                              {insight.category}
+                            </Badge>
+                          )}
+                          {insight.noveltyScore != null && (
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              novelty: {(insight.noveltyScore * 100).toFixed(0)}%
+                            </span>
+                          )}
+                          <span className="text-[10px] text-muted-foreground ml-auto">
+                            {insight.phaseName}
+                          </span>
+                        </div>
                       </div>
                     ))}
                   </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground italic py-4" data-testid="insights-placeholder">
+                    Insights will appear as the engine discovers novel patterns
+                  </p>
                 )}
               </ScrollArea>
             </CardContent>

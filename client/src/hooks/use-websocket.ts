@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 
 export interface WSMessage {
   type: string;
@@ -14,125 +14,181 @@ export interface ThoughtMessage {
 
 export type EngineTempo = "excited" | "exploring" | "contemplating";
 
-export function useWebSocket() {
-  const [connected, setConnected] = useState(false);
-  const [messages, setMessages] = useState<WSMessage[]>([]);
-  const [engineState, setEngineState] = useState<string>("stopped");
-  const [activeTasks, setActiveTasks] = useState<string[]>([]);
-  const [thoughts, setThoughts] = useState<ThoughtMessage[]>([]);
-  const [tempo, setTempo] = useState<EngineTempo>("exploring");
-  const [statusMessage, setStatusMessage] = useState<string>("");
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+interface GlobalWSState {
+  connected: boolean;
+  messages: WSMessage[];
+  engineState: string;
+  activeTasks: string[];
+  thoughts: ThoughtMessage[];
+  tempo: EngineTempo;
+  statusMessage: string;
+}
 
-  useEffect(() => {
+const globalState: GlobalWSState = {
+  connected: false,
+  messages: [],
+  engineState: "stopped",
+  activeTasks: [],
+  thoughts: [],
+  tempo: "exploring",
+  statusMessage: "",
+};
+
+let listeners: Set<() => void> = new Set();
+let wsInstance: WebSocket | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let wsInitialized = false;
+let statusFetched = false;
+
+function notifyListeners() {
+  listeners.forEach((fn) => fn());
+}
+
+function updateState(partial: Partial<GlobalWSState>) {
+  Object.assign(globalState, partial);
+  notifyListeners();
+}
+
+function connectWS() {
+  if (wsInstance?.readyState === WebSocket.OPEN) return;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  wsInstance = ws;
+
+  ws.onopen = () => {
+    updateState({ connected: true });
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg: WSMessage = JSON.parse(event.data);
+
+      globalState.messages = [...globalState.messages.slice(-100), msg];
+
+      if (msg.type === "status" || msg.type === "engineState") {
+        globalState.engineState = msg.data.state ?? msg.data;
+        if (msg.data.activeTasks) {
+          globalState.activeTasks = msg.data.activeTasks;
+        }
+      }
+
+      if (msg.type === "taskStart") {
+        if (!globalState.activeTasks.includes(msg.data.task)) {
+          globalState.activeTasks = [...globalState.activeTasks, msg.data.task];
+        }
+      }
+
+      if (msg.type === "taskEnd") {
+        globalState.activeTasks = globalState.activeTasks.filter((t) => t !== msg.data.task);
+      }
+
+      if (msg.type === "thought") {
+        globalState.thoughts = [
+          ...globalState.thoughts.slice(-30),
+          {
+            text: msg.data.text,
+            category: msg.data.category ?? "strategy",
+            timestamp: msg.timestamp,
+          },
+        ];
+      }
+
+      if (msg.type === "tempoChange") {
+        globalState.tempo = msg.data.tempo ?? "exploring";
+      }
+
+      if (msg.type === "statusMessage") {
+        globalState.statusMessage = msg.data.message ?? "";
+        if (msg.data.tempo) globalState.tempo = msg.data.tempo;
+      }
+
+      notifyListeners();
+    } catch (e) {
+      console.warn("WebSocket parse error:", e);
+    }
+  };
+
+  ws.onclose = () => {
+    globalState.connected = false;
+    notifyListeners();
+    wsInstance = null;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+function initWS() {
+  if (wsInitialized) return;
+  wsInitialized = true;
+
+  if (!statusFetched) {
+    statusFetched = true;
     fetch("/api/engine/status")
       .then((r) => r.json())
       .then((status) => {
-        if (status.state) setEngineState(status.state);
-        if (status.activeTasks) setActiveTasks(status.activeTasks);
-        if (status.tempo) setTempo(status.tempo);
-        if (status.statusMessage) setStatusMessage(status.statusMessage);
+        if (status.state) globalState.engineState = status.state;
+        if (status.activeTasks) globalState.activeTasks = status.activeTasks;
+        if (status.tempo) globalState.tempo = status.tempo;
+        if (status.statusMessage) globalState.statusMessage = status.statusMessage;
+        notifyListeners();
       })
       .catch(() => {});
+  }
+
+  connectWS();
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  initWS();
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+let snapshotRef = { ...globalState };
+
+function getSnapshot() {
+  if (
+    snapshotRef.connected !== globalState.connected ||
+    snapshotRef.messages !== globalState.messages ||
+    snapshotRef.engineState !== globalState.engineState ||
+    snapshotRef.activeTasks !== globalState.activeTasks ||
+    snapshotRef.thoughts !== globalState.thoughts ||
+    snapshotRef.tempo !== globalState.tempo ||
+    snapshotRef.statusMessage !== globalState.statusMessage
+  ) {
+    snapshotRef = { ...globalState };
+  }
+  return snapshotRef;
+}
+
+export function useWebSocket() {
+  const state = useSyncExternalStore(subscribe, getSnapshot);
+
+  const clearMessages = useCallback(() => {
+    globalState.messages = [];
+    notifyListeners();
   }, []);
-
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setConnected(true);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg: WSMessage = JSON.parse(event.data);
-
-        setMessages((prev) => [...prev.slice(-100), msg]);
-
-        if (msg.type === "status" || msg.type === "engineState") {
-          setEngineState(msg.data.state ?? msg.data);
-          if (msg.data.activeTasks) {
-            setActiveTasks(msg.data.activeTasks);
-          }
-        }
-
-        if (msg.type === "taskStart") {
-          setActiveTasks((prev) =>
-            prev.includes(msg.data.task) ? prev : [...prev, msg.data.task]
-          );
-        }
-
-        if (msg.type === "taskEnd") {
-          setActiveTasks((prev) => prev.filter((t) => t !== msg.data.task));
-        }
-
-        if (msg.type === "thought") {
-          setThoughts((prev) => [
-            ...prev.slice(-30),
-            {
-              text: msg.data.text,
-              category: msg.data.category ?? "strategy",
-              timestamp: msg.timestamp,
-            },
-          ]);
-        }
-
-        if (msg.type === "tempoChange") {
-          setTempo(msg.data.tempo ?? "exploring");
-        }
-
-        if (msg.type === "statusMessage") {
-          setStatusMessage(msg.data.message ?? "");
-          if (msg.data.tempo) setTempo(msg.data.tempo);
-        }
-      } catch (e) {
-        console.warn("WebSocket parse error:", e);
-      }
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-      wsRef.current = null;
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = setTimeout(connect, 3000);
-    };
-
-    ws.onerror = () => {
-      ws.close();
-    };
-  }, []);
-
-  useEffect(() => {
-    connect();
-    return () => {
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-      wsRef.current?.close();
-    };
-  }, [connect]);
-
-  const clearMessages = useCallback(() => setMessages([]), []);
 
   return {
-    connected,
-    messages,
-    engineState,
-    activeTasks,
-    thoughts,
-    tempo,
-    statusMessage,
+    connected: state.connected,
+    messages: state.messages,
+    engineState: state.engineState,
+    activeTasks: state.activeTasks,
+    thoughts: state.thoughts,
+    tempo: state.tempo,
+    statusMessage: state.statusMessage,
     clearMessages,
   };
 }

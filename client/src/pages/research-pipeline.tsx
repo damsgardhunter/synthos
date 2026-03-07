@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { Link } from "wouter";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot, Milestone } from "@shared/schema";
@@ -8,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit, Map as MapIcon, Notebook } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit, Map as MapIcon, Notebook, ExternalLink } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line, BarChart, Bar, Cell, Treemap
@@ -519,7 +520,12 @@ function MilestoneTimeline() {
                   <div className="flex items-center gap-2 mt-1">
                     <span className="text-[10px] text-muted-foreground">Cycle {ms.cycle}</span>
                     {ms.relatedFormula && (
-                      <Badge variant="secondary" className="text-[10px] border-0 h-4 px-1.5 font-mono">{ms.relatedFormula}</Badge>
+                      <Link href={`/candidate/${encodeURIComponent(ms.relatedFormula)}`}>
+                        <Badge variant="secondary" className="text-[10px] border-0 h-4 px-1.5 font-mono cursor-pointer hover-elevate flex items-center gap-1" data-testid={`link-candidate-${ms.relatedFormula}`}>
+                          {ms.relatedFormula}
+                          <ExternalLink className="h-2.5 w-2.5 flex-shrink-0" />
+                        </Badge>
+                      </Link>
                     )}
                   </div>
                 </div>
