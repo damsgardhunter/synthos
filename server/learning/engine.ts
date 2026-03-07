@@ -65,6 +65,8 @@ import { getConstraintGuidanceForGenerator } from "../inverse/constraint-solver"
 import { getConstraintGraphGuidance } from "../inverse/constraint-graph-solver";
 import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pathway";
 import { triggerSynthesisPathwayForCandidate } from "../synthesis/reaction-pathway";
+import { optimizeSynthesisConditions, getSynthesisOptimizerStats, type MaterialContext } from "../synthesis/synthesis-condition-optimizer";
+import { getParameterSpace } from "../synthesis/synthesis-variables";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 import { runHypothesisCycle, getTopHypothesesForGeneratorBias, getHypothesisStats } from "../theory/hypothesis-engine";
@@ -2520,6 +2522,25 @@ async function runAutonomousFastPath() {
           const fsResult = computeFermiSurface(formula);
           assignToCluster(formula, fsResult, result.tc);
         } catch {}
+        try {
+          const family = classifyFamily(formula);
+          const synthCtx: MaterialContext = {
+            formula,
+            materialClass: family,
+            predictedTc: result.tc,
+            lambda: result.physicsPred?.lambda ?? 0.5,
+            pressure: 0,
+            isHydride: family.toLowerCase().includes("hydride"),
+            isCuprate: family.toLowerCase().includes("cuprate"),
+            isLayered: false,
+            meltingPointEstimate: 1500,
+            stabilityClass: result.physicsPred?.hullDistance != null && result.physicsPred.hullDistance < 0.005 ? "thermodynamically-stable"
+              : result.physicsPred?.hullDistance != null && result.physicsPred.hullDistance < 0.1 ? "metastable-accessible"
+              : "metastable-difficult",
+            energyAboveHull: result.physicsPred?.hullDistance ?? 0.1,
+          };
+          optimizeSynthesisConditions(synthCtx);
+        } catch {}
         passed++;
         autonomousTotalPassed++;
         if (result.tc > bestTcThisBatch) {
@@ -2718,6 +2739,8 @@ export function getAutonomousLoopStats() {
     landscapeIntelligence: getLandscapeIntelligenceStats(),
     pressurePathways: getPathwayStats(),
     hypothesisEngine: getHypothesisStats(),
+    synthesisOptimizer: getSynthesisOptimizerStats(),
+    synthesisParameterSpace: getParameterSpace(),
   };
 }
 

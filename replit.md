@@ -231,6 +231,19 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Pipeline integration**: Triggered in Phase 12 (multi-fidelity) when candidates pass stage 4.
 - **APIs**: `GET /api/synthesis-pathway/:formula`, `GET /api/synthesis-pathway/stats`
 
+### Synthesis Variables Parameter Space
+- **Comprehensive synthesis parameter definitions** (`server/synthesis/synthesis-variables.ts`): 10 categories (thermal, pressure, electrical, magnetic, mechanical, thermal-cycling, atmosphere, structural, doping, interface-layer) with 20 numeric variables and 2 discrete variables.
+- **Each variable**: parameter name, units, grid values, importance notes, applicable material classes.
+- **Grid coverage**: 150 total grid points across all numeric variables.
+
+### Synthesis Condition Optimizer
+- **Material-aware optimization** (`server/synthesis/synthesis-condition-optimizer.ts`): Selects optimal synthesis conditions (temperature, pressure, cooling rate, atmosphere, dopants) based on material class.
+- **Feasibility scoring**: Combines material-specific thresholds with physics-based evaluation (stability class, coupling strength, energy above hull).
+- **Complexity/duration estimation**: Rates synthesis complexity (simple/moderate/complex/extreme) with estimated lab time.
+- **Stats tracking**: Method distribution, complexity breakdown, category usage, parameter ranges explored.
+- **Engine integration**: Called in fast path for every candidate passing the pipeline; stats exposed via `/api/synthesis-variables/stats`.
+- **Frontend**: Synthesis Variables tab in Computational Physics page showing categories, optimizer performance, method/complexity distributions, and top conditions.
+
 ### Band Structure Neural Operator
 - **Full E(k) dispersion predictor** (`server/physics/band-structure-operator.ts`): Predicts complete band structure along high-symmetry k-paths, not just features.
 - **Output**: Energy values at ~50 k-points per band, for up to 12 bands near the Fermi level. Supports cubic, hexagonal, and tetragonal lattices.

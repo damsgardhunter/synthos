@@ -1,0 +1,420 @@
+Below is a complete task list of synthesis variables, organized by category, with recommended ranges, step sizes, and notes on why they matter for superconductivity. This structure is similar to what advanced computational materials platforms would use.
+
+1️⃣ Thermal Processing Variables
+
+These control phase formation, defects, and phonon behavior.
+
+Temperature
+
+Parameter: synthesisTemperature
+
+Units: Kelvin (K)
+
+Typical Range:
+200 – 2500 K
+
+Suggested Sampling:
+
+200, 300, 400, 500, 600, 700, 800, 900, 1000,
+1100, 1200, 1300, 1400, 1500, 1700, 2000, 2500
+
+Why important
+
+Controls crystal phase formation
+
+Influences diffusion rates
+
+Affects defect density
+
+Annealing Temperature
+
+Parameter: annealTemperature
+
+Range:
+300 – 1500 K
+
+Example values:
+
+300
+500
+700
+900
+1100
+1300
+1500
+
+Annealing changes:
+
+grain size
+
+oxygen ordering
+
+lattice strain
+
+Annealing Time
+
+Parameter: annealTime
+
+Units: hours
+
+Example values:
+
+0.5
+1
+2
+5
+10
+24
+72
+
+Long annealing allows:
+
+dopant diffusion
+
+ordering transitions
+
+Cooling Rate
+
+Parameter: coolingRate
+
+Units: K/s
+
+Example range:
+
+0.01
+0.1
+1
+5
+10
+50
+100
+500
+1000
+5000
+10000
+
+Key regimes:
+
+Cooling Rate	Effect
+<1 K/s	equilibrium crystals
+1–50 K/s	moderate defects
+100–1000 K/s	metastable structures
+>5000 K/s	amorphous / glass states
+2️⃣ Pressure Variables
+
+Pressure strongly affects bonding and phonon frequencies.
+
+Synthesis Pressure
+
+Parameter: synthesisPressure
+
+Units: GPa
+
+Suggested grid:
+
+0
+0.1
+1
+2
+5
+10
+20
+50
+100
+150
+200
+300
+
+Important regimes:
+
+Pressure	Examples
+<1 GPa	normal synthesis
+1–10 GPa	high-pressure ceramics
+50–200 GPa	hydride superconductors
+Pressure Ramp Rate
+
+Parameter: pressureRampRate
+
+Units: GPa/min
+
+Example values:
+
+0.1
+0.5
+1
+2
+5
+10
+20
+
+Rapid compression can trap metastable phases.
+
+3️⃣ Electrical Processing Variables
+
+Electric fields can alter electron density and defect migration.
+
+Current Density
+
+Parameter: currentDensity
+
+Units: A/cm²
+
+Example range:
+
+0
+1
+5
+10
+20
+50
+100
+200
+
+Used in:
+
+Spark Plasma Sintering
+
+Electrochemical growth
+
+Effects:
+
+grain boundary alignment
+
+dopant migration
+
+Electric Field
+
+Parameter: electricField
+
+Units: V/cm
+
+Example:
+
+0
+10
+50
+100
+500
+1000
+5000
+
+High electric fields can:
+
+induce ion migration
+
+change electronic ordering
+
+4️⃣ Magnetic Field Variables
+
+Magnetic fields can influence crystal orientation and spin interactions.
+
+Magnetic Field Strength
+
+Parameter: magneticField
+
+Units: Tesla
+
+Example grid:
+
+0
+0.1
+0.5
+1
+2
+5
+10
+15
+20
+
+Effects:
+
+grain alignment
+
+spin ordering
+
+5️⃣ Mechanical Processing Variables
+
+Mechanical stress modifies lattice strain.
+
+Applied Stress
+
+Parameter: mechanicalStress
+
+Units: GPa
+
+Example values:
+
+0
+0.1
+0.5
+1
+2
+5
+10
+20
+
+Stress can:
+
+distort lattice
+
+modify electron bands
+
+Strain
+
+Parameter: latticeStrain
+
+Units: %
+
+Example:
+
+0
+0.1
+0.5
+1
+2
+5
+
+Strain is known to enhance Tc in some materials.
+
+6️⃣ Thermal Cycling Variables
+
+Repeated heating/cooling alters defect structures.
+
+Thermal Cycles
+
+Parameter: thermalCycles
+
+Example:
+
+0
+1
+2
+5
+10
+20
+50
+Cycle Temperature Range
+
+Example:
+
+300–800 K
+300–1000 K
+500–1200 K
+
+Thermal cycling can cause:
+
+phase transitions
+
+strain accumulation
+
+7️⃣ Atmosphere / Chemical Environment
+
+The surrounding gas dramatically affects superconductors.
+
+Oxygen Partial Pressure
+0
+10⁻⁶ atm
+10⁻⁴ atm
+10⁻² atm
+0.1 atm
+1 atm
+
+Important for:
+
+cuprates
+
+oxide superconductors
+
+Hydrogen Pressure
+0
+0.1
+1
+5
+10
+50
+100 GPa
+
+Important for:
+
+hydrides
+
+Gas Environment
+
+Discrete variable:
+
+vacuum
+argon
+nitrogen
+oxygen
+hydrogen
+ammonia
+8️⃣ Structural Processing Variables
+
+These affect microstructure.
+
+Grain Size
+
+Units: nm
+
+10
+50
+100
+500
+1000
+5000
+
+Smaller grains → more boundaries.
+
+Defect Density
+10^14
+10^16
+10^18
+10^20 defects/cm³
+
+Defects can:
+
+scatter electrons
+
+alter pairing interactions
+
+9️⃣ Doping and Composition Controls
+Dopant Concentration
+0
+0.01
+0.02
+0.05
+0.1
+0.2
+Vacancy Fraction
+0
+0.01
+0.02
+0.05
+0.1
+
+Vacancies often influence superconductivity.
+
+🔟 Interface / Layer Engineering (Very Important)
+
+Layered materials are extremely promising.
+
+Layer Thickness
+1 nm
+2 nm
+5 nm
+10 nm
+20 nm
+Interlayer Spacing
+3 Å
+4 Å
+5 Å
+6 Å
+7 Å
+
+Important for:
+
+layered carbides
+
+nitrides
+
+cuprates

@@ -67,6 +67,8 @@ import { solveConstraints, evaluateFormulaAgainstConstraints } from "./inverse/c
 import { searchPressurePathways, getPathwayStats, getAmbientCandidatesFromPathways } from "./inverse/pressure-pathway";
 import { solveConstraintGraph, getFeasibleRegions } from "./inverse/constraint-graph-solver";
 import { computeSynthesisPathway, getSynthesisPathwayStats } from "./synthesis/reaction-pathway";
+import { getParameterSpace } from "./synthesis/synthesis-variables";
+import { getSynthesisOptimizerStats } from "./synthesis/synthesis-condition-optimizer";
 import {
   analyzeFrontier, computeNoveltyScore, analyzeZoneIntelligence,
   generateExplorationStrategy, getLandscapeIntelligenceStats,
@@ -1595,6 +1597,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(strategy);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to generate exploration strategy", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-variables/stats", generalLimiter, (_req, res) => {
+    try {
+      const parameterSpace = getParameterSpace();
+      const optimizerStats = getSynthesisOptimizerStats();
+      res.json({ parameterSpace, optimizerStats });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch synthesis variable stats", detail: e.message?.slice(0, 200) });
     }
   });
 

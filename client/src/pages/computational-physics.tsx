@@ -390,6 +390,27 @@ export default function ComputationalPhysics() {
     queryKey: ["/api/dft-status"],
   });
 
+  const { data: synthesisData } = useQuery<{
+    parameterSpace: {
+      totalVariables: number;
+      categories: { name: string; count: number; parameters: string[] }[];
+      totalGridPoints: number;
+      discreteVariables: { name: string; options: string[] }[];
+    };
+    optimizerStats: {
+      totalOptimized: number;
+      avgFeasibility: number;
+      complexityBreakdown: Record<string, number>;
+      methodBreakdown: Record<string, number>;
+      categoryUsage: Record<string, number>;
+      topConditions: { formula: string; method: string; feasibility: number; tc: number }[];
+      parameterRangesExplored: Record<string, { min: number; max: number; count: number }>;
+    };
+  }>({
+    queryKey: ["/api/synthesis-variables/stats"],
+    refetchInterval: 30000,
+  });
+
   const ws = useWebSocket();
 
   useEffect(() => {
@@ -400,6 +421,7 @@ export default function ComputationalPhysics() {
       queryClient.invalidateQueries({ queryKey: ["/api/pipeline-stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/computational-results/failed"] });
       queryClient.invalidateQueries({ queryKey: ["/api/crystal-structures"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/synthesis-variables/stats"] });
     }
   }, [ws.messages.length]);
 
@@ -461,6 +483,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="dft-selections" data-testid="tab-dft-selections">DFT Selections</TabsTrigger>
           <TabsTrigger value="structures" data-testid="tab-structures">Crystal Structures</TabsTrigger>
           <TabsTrigger value="failures" data-testid="tab-failures">Negative Results</TabsTrigger>
+          <TabsTrigger value="synthesis" data-testid="tab-synthesis">Synthesis Variables</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -624,6 +647,191 @@ export default function ComputationalPhysics() {
               <CardContent className="pt-8 pb-8 text-center text-muted-foreground">
                 <XCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
                 <p>No failed screenings yet. Failed candidates will be tracked here with failure reasons.</p>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="synthesis" className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Parameter Categories</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-synth-categories">
+                  {synthesisData?.parameterSpace?.categories?.length ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Total Variables</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-synth-variables">
+                  {synthesisData?.parameterSpace?.totalVariables ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Grid Points</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-synth-gridpoints">
+                  {synthesisData?.parameterSpace?.totalGridPoints ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Conditions Optimized</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-synth-optimized">
+                  {synthesisData?.optimizerStats?.totalOptimized ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card data-testid="card-synth-categories">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Layers className="h-5 w-5" />
+                  Parameter Space Categories
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {(synthesisData?.parameterSpace?.categories ?? []).map((cat, i) => (
+                    <div key={i} className="p-3 bg-muted/30 rounded-md" data-testid={`synth-category-${i}`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium">{cat.name}</span>
+                        <Badge variant="secondary" className="text-xs">{cat.count} params</Badge>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {cat.parameters.map((p, j) => (
+                          <span key={j} className="text-[10px] px-1.5 py-0.5 bg-background rounded border text-muted-foreground">
+                            {p}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {(synthesisData?.parameterSpace?.discreteVariables?.length ?? 0) > 0 && (
+                  <div className="mt-4 pt-3 border-t">
+                    <p className="text-xs font-medium text-muted-foreground mb-2">Discrete Variables</p>
+                    <div className="space-y-1">
+                      {synthesisData!.parameterSpace.discreteVariables.map((dv, i) => (
+                        <div key={i} className="flex items-center justify-between text-xs" data-testid={`synth-discrete-${i}`}>
+                          <span className="font-medium">{dv.name}</span>
+                          <span className="text-muted-foreground">{dv.options.length} options</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <div className="space-y-4">
+              <Card data-testid="card-synth-feasibility">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Gauge className="h-5 w-5" />
+                    Optimizer Performance
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 gap-3 mb-4">
+                    <div className="p-2 bg-muted/30 rounded-md text-center">
+                      <p className="text-xs text-muted-foreground">Avg Feasibility</p>
+                      <p className="text-lg font-mono font-bold" data-testid="stat-avg-feasibility">
+                        {((synthesisData?.optimizerStats?.avgFeasibility ?? 0) * 100).toFixed(1)}%
+                      </p>
+                    </div>
+                    <div className="p-2 bg-muted/30 rounded-md text-center">
+                      <p className="text-xs text-muted-foreground">Total Optimized</p>
+                      <p className="text-lg font-mono font-bold" data-testid="stat-total-optimized">
+                        {synthesisData?.optimizerStats?.totalOptimized ?? 0}
+                      </p>
+                    </div>
+                  </div>
+
+                  {Object.keys(synthesisData?.optimizerStats?.methodBreakdown ?? {}).length > 0 && (
+                    <div className="mb-3">
+                      <p className="text-xs font-medium text-muted-foreground mb-1">Method Distribution</p>
+                      <div className="space-y-1">
+                        {Object.entries(synthesisData!.optimizerStats.methodBreakdown).map(([method, count]) => (
+                          <div key={method} className="flex items-center justify-between text-xs" data-testid={`method-${method}`}>
+                            <span>{method}</span>
+                            <span className="font-mono">{count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {Object.keys(synthesisData?.optimizerStats?.complexityBreakdown ?? {}).length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-muted-foreground mb-1">Complexity Distribution</p>
+                      <div className="flex gap-2">
+                        {Object.entries(synthesisData!.optimizerStats.complexityBreakdown).map(([level, count]) => (
+                          <Badge key={level} variant="outline" className="text-[10px]" data-testid={`complexity-${level}`}>
+                            {level}: {count}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card data-testid="card-synth-top-conditions">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <FlaskConical className="h-5 w-5" />
+                    Top Synthesis Conditions
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {(synthesisData?.optimizerStats?.topConditions?.length ?? 0) > 0 ? (
+                    <div className="space-y-2">
+                      {synthesisData!.optimizerStats.topConditions.slice(0, 8).map((cond, i) => (
+                        <div key={i} className="flex items-center justify-between p-2 bg-muted/30 rounded-md text-xs" data-testid={`synth-cond-${i}`}>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-medium">{cond.formula}</span>
+                            <Badge variant="secondary" className="text-[10px]">{cond.method}</Badge>
+                          </div>
+                          <span className="font-mono">{(cond.feasibility * 100).toFixed(0)}% feasible</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground text-center py-4">
+                      Synthesis conditions will appear as the engine optimizes candidates
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+
+          {Object.keys(synthesisData?.optimizerStats?.categoryUsage ?? {}).length > 0 && (
+            <Card data-testid="card-synth-category-usage">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Activity className="h-5 w-5" />
+                  Category Usage in Optimizations
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                  {Object.entries(synthesisData!.optimizerStats.categoryUsage)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([cat, count]) => (
+                      <div key={cat} className="p-2 bg-muted/30 rounded-md text-center" data-testid={`usage-${cat}`}>
+                        <p className="text-[10px] text-muted-foreground truncate">{cat}</p>
+                        <p className="text-sm font-mono font-bold">{count}</p>
+                      </div>
+                    ))}
+                </div>
               </CardContent>
             </Card>
           )}
