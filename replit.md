@@ -116,6 +116,30 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 ### Advanced Quantum Physics Modeling
 - Computes phonon dispersion, phonon DOS, Eliashberg spectral function, GW many-body corrections, dynamic spin susceptibility, and Fermi surface nesting.
 
+### Autonomous Theory Discovery Engine
+- **Symbolic regression** (genetic programming) discovers mathematical relationships from simulation data.
+- **Unified Physics Feature Database** (`server/theory/physics-feature-db.ts`): 20-dim feature vector (DOS_EF, VHS, band_flatness, FS_dim, phonon_log_freq, lambda, nesting, orbital_degeneracy, charge_transfer, lattice_anisotropy, mott_proximity, spin_fluctuation, cdw_proximity, quantum_critical_score, pairing_strength, H_density, correlation, bandwidth, debye_temp, anharmonicity). LRU cache 2000 entries.
+- **Symbolic Regression** (`server/theory/symbolic-regression.ts`): Expression tree GP with operations (+,-,*,/,^,sqrt,exp,log). Population 200, 50 generations, tournament selection. Physics constraint filters (reject negative Tc scaling, exponents >5). Theory knowledge base stores best equations.
+- **Theory feedback**: Discovered equations (e.g., Tc ∝ DOS^1.2 * nesting^0.8) translate into design constraints for inverse design guidance.
+- **APIs**: `GET /api/theory/features/:formula`, `GET /api/theory/discovered`, `POST /api/theory/discover`
+- **Pipeline integration**: Features recorded after every physics evaluation; symbolic regression runs every 10 autonomous cycles when ≥20 records.
+
+### Multi-Scale Physics Modeling
+- **Three formalized feature layers** (`server/theory/multi-scale-engine.ts`):
+  - Atomic: mass, bond length distribution, coordination, charge transfer, radius variance, EN spread
+  - Electronic: DOS_EF, bandwidth, VHS distance, orbital character (s/p/d/f), FS shape, nesting, flatness, Mott proximity
+  - Mesoscopic: layeredness, lattice anisotropy, strain sensitivity, defect tolerance, interlayer coupling, dimensionality
+- **Cross-Scale Coupling**: electron_phonon_mass_ratio, strain_band_shift, layer_coupling_strength, bond_stiffness_vs_phonon, orbital_phonon_coupling, charge_transfer_vs_nesting
+- **Sensitivity Analysis**: Gradient-based (finite-difference perturbation) importance of each scale for Tc prediction, identifies dominant scale.
+- **APIs**: `GET /api/theory/multi-scale/:formula`, `GET /api/theory/sensitivity/:formula`
+
+### Self-Improving Physics Models
+- **Parameterized physics equations** (`server/theory/self-improving-physics.ts`): mu_star (screening, logRatio, blending), phonon_scale (H-Debye, maxFreq, logAvg), anharmonic_factor (Gruneisen, H-fraction, lambda suppression), pairing_weight (correlation penalty, soft-mode threshold).
+- **Bayesian parameter optimization**: GP regression on prediction error with RBF kernel, Expected Improvement acquisition. Conservative blending (30%) of suggested updates. Minimum 10 observations, 60s throttle.
+- **Model Performance Tracker** (`server/theory/model-performance-tracker.ts`): MAE/RMSE/R² across rolling windows (50/100/500/all), retrain triggers (MAE increase >20% or R² < 0.3), theory discovery rate, candidate success rate, parameter drift tracking.
+- **Continuous Learning Loop**: generate → simulate → extract features → update dataset → discover equations → update parameters → improve surrogates → guide next search.
+- **APIs**: `GET /api/theory/parameters`, `GET /api/theory/performance`
+
 ### Multi-Material Interface Discovery Engine
 - **Heterostructure superconductivity analyzer** for interface SC discovery (2D superconductors).
 - **Interface analysis**: charge transfer (electronegativity/work function mismatch, doping type), interface phonon enhancement (acoustic mismatch model, soft-mode coupling), epitaxial strain (lattice mismatch, critical thickness, dome-shaped strain coupling), dimensional confinement (2D enhancement factor).

@@ -52,6 +52,10 @@ import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePre
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
+import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
+import { updatePhysicsParameters } from "../theory/self-improving-physics";
+import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
+import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1210,6 +1214,12 @@ async function runPhase10_Physics() {
             hullDist
           );
         } catch {}
+
+        try {
+          buildAndStoreFeatureRecord(candidate.formula, updatedTc);
+          recordPrediction(candidate.formula, currentTc, updatedTc);
+          updatePhysicsParameters(updatedTc, currentTc, [], candidate.formula);
+        } catch {}
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
@@ -2042,6 +2052,13 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       discoveryMemory.recordDiscovery(formula, memFingerprint, finalTc);
     } catch {}
 
+    try {
+      buildAndStoreFeatureRecord(formula, finalTc);
+      recordPrediction(formula, gbResult.tcPredicted, finalTc);
+      recordCandidateOutcome(formula, true);
+      updatePhysicsParameters(finalTc, gbResult.tcPredicted, [], formula);
+    } catch {}
+
     if (finalTc > autonomousBestTc) {
       autonomousBestTc = finalTc;
     }
@@ -2274,16 +2291,39 @@ async function runAutonomousFastPath() {
 
     rlAgent.updatePolicy(rlState, rlAction, rlReward);
 
+    if (cycleCount % 10 === 0 && getDatasetSize() >= 20) {
+      try {
+        const dataset = getFeatureDataset();
+        const srData = dataset
+          .filter(r => r.tc > 0 && Number.isFinite(r.tc))
+          .map(r => ({ features: r.featureVector as Record<string, number>, target: r.tc }));
+        if (srData.length >= 15) {
+          const theories = runSymbolicRegression(srData, "tc", { populationSize: 100, generations: 25 });
+          if (theories.length > 0) {
+            emit("log", {
+              phase: "engine",
+              event: "Theory discovery cycle",
+              detail: `Symbolic regression on ${srData.length} samples: found ${theories.length} candidate equations. Best: ${theories[0].equation} (R²=${theories[0].accuracy.toFixed(3)}, complexity=${theories[0].complexity}, plausibility=${theories[0].plausibilityScore.toFixed(2)})`,
+              dataSource: "Theory Discovery Engine",
+            });
+          }
+        }
+      } catch {}
+    }
+
+    const perfMetrics = getPerformanceMetrics();
     const boStats = bayesianOptimizer.getStats();
     const rlStats = rlAgent.getStats();
 
     const patternDetail = patternFiltered > 0 ? ` Pattern filter removed ${patternFiltered}/${candidates.length} (${activeRules.length} rules active).` : "";
     const physicsDetail = physicsPrefiltered > 0 ? ` Physics pre-filter rejected ${physicsPrefiltered}/${filteredCandidates.length}.` : "";
     const memDetail = memStats.totalRecords > 0 ? ` Memory: ${memStats.totalRecords} patterns, ${memStats.clusterCount} clusters.` : "";
+    const theoryDetail = getDatasetSize() > 0 ? ` FeatureDB: ${getDatasetSize()} records, theories: ${getDiscoveredTheories().length}.` : "";
+    const perfDetail = perfMetrics.totalPredictions > 0 ? ` PerfTrack: MAE=${perfMetrics.overall.mae.toFixed(1)}K, R²=${perfMetrics.overall.r2.toFixed(3)}.` : "";
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
+      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
       dataSource: "Autonomous Loop",
     });
   } finally {

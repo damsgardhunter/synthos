@@ -52,6 +52,11 @@ import { predictStability } from "./physics/stability-predictor";
 import { analyzeInterface, generateHeterostructureCandidates } from "./physics/interface-engine";
 import { detectQuantumCriticality } from "./physics/quantum-criticality";
 import { discoveryMemory } from "./learning/discovery-memory";
+import { computeFeatureVector, buildAndStoreFeatureRecord, getFeatureDataset, getDatasetSize, getFeatureRecord } from "./theory/physics-feature-db";
+import { runSymbolicRegression, getDiscoveredTheories, theoryKnowledgeBase } from "./theory/symbolic-regression";
+import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAnalysis } from "./theory/multi-scale-engine";
+import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
+import { getPerformanceMetrics, recordPrediction } from "./theory/model-performance-tracker";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1200,6 +1205,107 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ topPatterns, stats, clusters, bias });
     } catch (e: any) {
       res.status(500).json({ error: "Discovery memory query failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory/features/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula as string);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const existing = getFeatureRecord(formula);
+      if (existing) return res.json(existing);
+      const record = buildAndStoreFeatureRecord(formula);
+      res.json(record);
+    } catch (e: any) {
+      res.status(500).json({ error: "Feature extraction failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory/discovered", generalLimiter, (_req, res) => {
+    try {
+      const theories = getDiscoveredTheories();
+      const datasetSize = getDatasetSize();
+      res.json({ theories, datasetSize, theoryCount: theories.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Theory query failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/theory/discover", generalLimiter, (_req, res) => {
+    try {
+      const dataset = getFeatureDataset();
+      if (dataset.length < 10) {
+        return res.status(400).json({ error: "Insufficient data", detail: `Need at least 10 feature records, have ${dataset.length}` });
+      }
+      const targets: Array<"tc" | "pairing_strength" | "lambda"> = ["tc", "pairing_strength"];
+      const results: Record<string, any> = {};
+      for (const target of targets) {
+        const fieldMap: Record<string, string> = { tc: "tc", pairing_strength: "pairingStrength", lambda: "lambda" };
+        const targetField = fieldMap[target];
+        const validData = dataset.filter(r => {
+          const val = target === "tc" ? r.tc : target === "pairing_strength" ? r.pairingStrength : r.featureVector.electron_phonon_lambda;
+          return val !== undefined && val !== null && Number.isFinite(val) && val > 0;
+        });
+        if (validData.length < 10) continue;
+        const dataForSR = validData.map(r => ({
+          features: r.featureVector as Record<string, number>,
+          target: target === "tc" ? r.tc : target === "pairing_strength" ? r.pairingStrength : r.featureVector.electron_phonon_lambda,
+        }));
+        const theories = runSymbolicRegression(dataForSR, target, { populationSize: 100, generations: 30 });
+        results[target] = theories.slice(0, 5);
+      }
+      res.json({ results, datasetSize: dataset.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Theory discovery failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory/multi-scale/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula as string);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const multiScale = computeMultiScaleFeatures(formula);
+      const crossScale = computeCrossScaleCoupling(multiScale);
+      res.json({ multiScale, crossScale });
+    } catch (e: any) {
+      res.status(500).json({ error: "Multi-scale analysis failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory/sensitivity/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula as string);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const sensitivity = runSensitivityAnalysis(formula);
+      res.json(sensitivity);
+    } catch (e: any) {
+      res.status(500).json({ error: "Sensitivity analysis failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory/parameters", generalLimiter, (_req, res) => {
+    try {
+      const params = getPhysicsParameters();
+      const history = getParameterHistory();
+      const performance = getModelPerformance();
+      res.json({ current: params, history, performance });
+    } catch (e: any) {
+      res.status(500).json({ error: "Parameter query failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory/performance", generalLimiter, (_req, res) => {
+    try {
+      const metrics = getPerformanceMetrics();
+      res.json(metrics);
+    } catch (e: any) {
+      res.status(500).json({ error: "Performance metrics failed", detail: e.message?.slice(0, 200) });
     }
   });
 
