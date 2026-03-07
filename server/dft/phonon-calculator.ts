@@ -416,12 +416,19 @@ export function assessDynamicStability(dispersion: PhononDispersionPoint[]): {
   imaginaryCount: number;
   worstQPoint: string | null;
   worstFrequency: number;
+  numericalArtifact: boolean;
+  physicalImaginaryCount: number;
 } {
   let imaginaryCount = 0;
+  let physicalImaginaryCount = 0;
+  let artifactCount = 0;
   let worstFreq = 0;
+  let worstPhysicalFreq = 0;
   let worstQ: string | null = null;
 
   const ACOUSTIC_THRESHOLD = -50;
+  const ARTIFACT_THRESHOLD = -2000;
+  const PHYSICAL_INSTABILITY_THRESHOLD = -100;
 
   for (const point of dispersion) {
     for (const freq of point.frequencies) {
@@ -431,15 +438,27 @@ export function assessDynamicStability(dispersion: PhononDispersionPoint[]): {
           worstFreq = freq;
           worstQ = point.qLabel || `(${point.qFrac.map(v => v.toFixed(2)).join(",")})`;
         }
+
+        if (freq < ARTIFACT_THRESHOLD) {
+          artifactCount++;
+        } else if (freq < PHYSICAL_INSTABILITY_THRESHOLD) {
+          physicalImaginaryCount++;
+          if (freq < worstPhysicalFreq) worstPhysicalFreq = freq;
+        }
       }
     }
   }
 
+  const numericalArtifact = artifactCount > 0;
+  const hasPhysicalInstability = physicalImaginaryCount > 0;
+
   return {
-    stable: imaginaryCount === 0,
+    stable: !hasPhysicalInstability && !numericalArtifact ? imaginaryCount === 0 : false,
     imaginaryCount,
+    physicalImaginaryCount,
     worstQPoint: worstQ,
     worstFrequency: worstFreq,
+    numericalArtifact,
   };
 }
 
@@ -503,6 +522,13 @@ export async function computeFiniteDisplacementPhonons(
 
     const wallTime = (Date.now() - startTime) / 1000;
 
+    const effectiveImaginaryCount = stability.numericalArtifact
+      ? stability.physicalImaginaryCount
+      : stability.imaginaryCount;
+    const effectiveStable = stability.numericalArtifact
+      ? stability.physicalImaginaryCount === 0
+      : stability.stable;
+
     const result: FiniteDisplacementPhononResult = {
       formula,
       atomCount: N,
@@ -512,16 +538,19 @@ export async function computeFiniteDisplacementPhonons(
       dos,
       omegaLog,
       lambdaContribution,
-      hasImaginaryModes: !stability.stable,
-      imaginaryModeCount: stability.imaginaryCount,
+      hasImaginaryModes: !effectiveStable,
+      imaginaryModeCount: effectiveImaginaryCount,
       lowestFrequency: lowestFreq,
       highestFrequency: highestFreq,
-      dynamicallyStable: stability.stable,
+      dynamicallyStable: effectiveStable,
       calculationCount: fcResult.calcCount,
       wallTimeSeconds: wallTime,
     };
 
-    console.log(`[Phonon] ${formula}: Finite displacement complete in ${wallTime.toFixed(1)}s — ${fcResult.calcCount} calcs, stable=${stability.stable}, freq range [${lowestFreq.toFixed(1)}, ${highestFreq.toFixed(1)}] cm⁻¹${omegaLog ? `, ω_log=${omegaLog.toFixed(1)} cm⁻¹` : ""}`);
+    if (stability.numericalArtifact) {
+      console.log(`[Phonon] ${formula}: ARTIFACT DETECTED — ${stability.imaginaryCount - stability.physicalImaginaryCount} modes below -2000 cm⁻¹ are xTB numerical explosions (lowest=${lowestFreq.toFixed(0)} cm⁻¹), discarded. ${stability.physicalImaginaryCount} physical imaginary modes remain.`);
+    }
+    console.log(`[Phonon] ${formula}: Finite displacement complete in ${wallTime.toFixed(1)}s — ${fcResult.calcCount} calcs, stable=${effectiveStable}, freq range [${lowestFreq.toFixed(1)}, ${highestFreq.toFixed(1)}] cm⁻¹${omegaLog ? `, ω_log=${omegaLog.toFixed(1)} cm⁻¹` : ""}`);
 
     phononResultCache.set(cacheKey, result);
     if (phononResultCache.size > PHONON_CACHE_MAX) {

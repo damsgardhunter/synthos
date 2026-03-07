@@ -68,7 +68,7 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Multi-Dimensional Phase Explorer**: Scans composition, pressure, and temperature spaces with adaptive sampling.
 - **Crystal Prototype Structure Generator**: Generates 10 distinct crystal structure types, producing over 807 structurally-typed candidates.
 - **Convex Hull Stability Gate**: Hard rejection criteria for candidates with hull distance > 0.1 eV/atom.
-- **Discovery Score**: Unified composite metric: `0.35 Tc + 0.20 stability + 0.15 novelty + 0.10 synthesis + 0.10 topology + 0.10 uncertainty_bonus`.
+- **Discovery Score**: Tc-weighted composite metric: `0.55 Tc + 0.15 stability + 0.10 novelty + 0.10 synthesis + 0.05 topology + 0.05 uncertainty_bonus`.
 - **Active Learning Loop**: Uncertainty-driven DFT selection with analytical DFT fallback, retraining GNN surrogates with expanded datasets.
 - **Real DFT Backend (GFN2-xTB)**: Integrates xtb v6.7.1 for quantum-mechanical total energy, HOMO-LUMO gap, formation energy, and metallicity, including geometry optimization and finite-displacement phonon calculations.
 - **Inverse Design Optimizer Engine**: 5-layer architecture for goal-driven candidate generation, inverse learning, and closed-loop optimization based on target properties.
@@ -103,6 +103,12 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - `/api/engine/memory` returns `lastCycleCandidates`, `lastCycleFamilyCounts` at top level (spread from `autonomousLoopStats`)
 - `autonomousLoopStats.inverseOptimizer.bestTcAcrossAll` — inverse optimizer best Tc, displayed in Active Learning card and Knowledge Map
 - `/api/milestones` — reads milestones from DB (persisted by milestone-tracker.ts during engine cycles)
+
+### Physics Filtering Rules
+- **Phonon artifact threshold**: Imaginary modes with freq < -2000 cm⁻¹ are xTB numerical artifacts — discarded entirely, not penalized
+- **Physical instability threshold**: -100 cm⁻¹ (real imaginary phonons are typically -10 to -500 cm⁻¹)
+- **Penalty**: Physical imaginary modes penalize ensemble score by 0.05 per mode (max 0.25); >= 5 modes → dataConfidence = "low"
+- **Discovery score weights**: 0.55 Tc (primary driver) + 0.15 stability + 0.10 novelty + 0.10 synthesis + 0.05 topology + 0.05 uncertainty
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).

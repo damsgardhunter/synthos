@@ -970,28 +970,42 @@ async function runDFTEnrichment() {
           updates.bandGap = dftData.bandGap.value;
         }
 
-        if (dftData.phononStability?.hasImaginaryModes && dftData.phononStability.lowestFrequency < -2000) {
-          const severeCount = dftData.phononStability.frequencies?.filter(f => f < -2000).length ?? dftData.phononStability.imaginaryModeCount;
-          const penalty = Math.min(0.2, Math.max(0, severeCount - 1) * 0.08);
-          if (penalty > 0) {
-            updates.ensembleScore = Math.max(0.05, (updates.ensembleScore ?? ensemble) - penalty);
-          }
-          if (severeCount >= 3) {
+        if (dftData.phononStability) {
+          const ps = dftData.phononStability;
+          const lowestFreq = ps.lowestFrequency ?? 0;
+          const imaCount = ps.imaginaryModeCount ?? 0;
+
+          if (lowestFreq < -2000) {
+            emit("log", {
+              phase: "engine",
+              event: "phonon artifact discarded",
+              detail: `${candidate.formula}: xTB Hessian produced ${imaCount} imaginary mode(s) with lowest freq ${lowestFreq.toFixed(0)} cm-1 — values below -2000 cm-1 are xTB numerical artifacts, discarded. Phonon data unreliable for this structure.`,
+              dataSource: "xTB-Hessian",
+            });
             updates.dataConfidence = "low";
+          } else if (ps.hasImaginaryModes && lowestFreq < -100) {
+            const physicalCount = ps.frequencies?.filter((f: number) => f < -100).length ?? imaCount;
+            const penalty = Math.min(0.25, physicalCount * 0.05);
+            if (penalty > 0) {
+              updates.ensembleScore = Math.max(0.05, (updates.ensembleScore ?? ensemble) - penalty);
+            }
+            if (physicalCount >= 5) {
+              updates.dataConfidence = "low";
+            }
+            emit("log", {
+              phase: "engine",
+              event: "phonon instability",
+              detail: `${candidate.formula}: ${physicalCount} physical imaginary mode(s) (lowest: ${lowestFreq.toFixed(0)} cm-1, threshold: -100 cm-1) — ensemble score penalized by ${penalty.toFixed(2)}`,
+              dataSource: "xTB-Hessian",
+            });
+          } else if (imaCount > 0 && lowestFreq >= -100) {
+            emit("log", {
+              phase: "engine",
+              event: "phonon mild instability",
+              detail: `${candidate.formula}: ${imaCount} soft mode(s) (lowest: ${lowestFreq.toFixed(0)} cm-1) — within acoustic/soft-mode tolerance (-100 cm-1), no penalty`,
+              dataSource: "xTB-Hessian",
+            });
           }
-          emit("log", {
-            phase: "engine",
-            event: "phonon instability",
-            detail: `${candidate.formula}: xTB Hessian detected ${severeCount} severe imaginary mode(s) (lowest: ${dftData.phononStability.lowestFrequency.toFixed(0)} cm-1) — ensemble score penalized by ${penalty.toFixed(2)}`,
-            dataSource: "xTB-Hessian",
-          });
-        } else if (dftData.phononStability?.imaginaryModeCount && dftData.phononStability.imaginaryModeCount > 0 && dftData.phononStability.lowestFrequency >= -2000) {
-          emit("log", {
-            phase: "engine",
-            event: "phonon mild instability",
-            detail: `${candidate.formula}: xTB Hessian detected ${dftData.phononStability.imaginaryModeCount} mild imaginary mode(s) (lowest: ${dftData.phononStability.lowestFrequency.toFixed(0)} cm-1) — within xTB tolerance, no penalty`,
-            dataSource: "xTB-Hessian",
-          });
         }
 
         await storage.updateSuperconductorCandidate(candidate.id, updates);

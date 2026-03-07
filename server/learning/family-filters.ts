@@ -701,12 +701,12 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   const uncertaintyBonus = Math.min(1.0, Math.max(0, rawUncertainty * 1.2));
 
   const discoveryScore =
-    0.35 * normalizedTc +
-    0.20 * stabilityScore +
-    0.15 * noveltyScore +
+    0.55 * normalizedTc +
+    0.15 * stabilityScore +
+    0.10 * noveltyScore +
     0.10 * synthesisFeasibility +
-    0.10 * topologyContribution +
-    0.10 * uncertaintyBonus;
+    0.05 * topologyContribution +
+    0.05 * uncertaintyBonus;
 
   return {
     discoveryScore: Math.round(discoveryScore * 1000) / 1000,
