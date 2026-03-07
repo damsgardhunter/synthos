@@ -580,6 +580,9 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
     familyStats: Record<string, { count: number; maxTc: number; avgScore: number }>;
     lastCycleCandidates: CycleCandidate[];
     lastCycleFamilyCounts: Record<string, number>;
+    autonomousLoopStats?: {
+      inverseOptimizer?: { bestTcAcrossAll: number; activeCampaigns: number };
+    };
   }>({
     queryKey: ["/api/engine/memory"],
     refetchInterval: 15000,
@@ -712,6 +715,23 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
                 );
               })}
             </div>
+
+            {(() => {
+              const invOpt = memory?.autonomousLoopStats?.inverseOptimizer;
+              const inverseTc = invOpt?.bestTcAcrossAll ?? 0;
+              if (inverseTc <= 0) return null;
+              return (
+                <div className={`flex items-center justify-between p-2.5 rounded-lg border ${inverseTc > 200 ? "border-amber-500/30 bg-amber-500/5" : "border-border bg-muted/30"}`} data-testid="inverse-optimizer-tc">
+                  <div className="flex items-center gap-2">
+                    <Target className="h-3.5 w-3.5 text-amber-500" />
+                    <span className="text-xs font-semibold">Inverse Optimizer Best Tc</span>
+                  </div>
+                  <span className={`text-sm font-mono font-bold ${inverseTc > 200 ? "text-amber-600 dark:text-amber-400" : "text-foreground"}`} data-testid="text-inverse-best-tc">
+                    {Math.round(inverseTc)}K
+                  </span>
+                </div>
+              );
+            })()}
 
             <div data-testid="last-cycle-candidates">
               <div className="flex items-center justify-between mb-2">

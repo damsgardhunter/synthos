@@ -88,6 +88,21 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Bayesian Family Strategy Scoring**: Uses Bayesian shrinkage to prevent single-candidate families from dominating.
 - **NLP Engine**: Generates cross-property correlation insights and superconductor correlation analysis.
 - **Alive Engine**: Provides real-time feedback, adjusts tempo, and maintains research memory.
+- **Milestone Event Tracker**: Detects and persists research milestones (new families, Tc records, pipeline graduates, diversity thresholds, knowledge milestones, insight cascades) to DB via `milestone-tracker.ts`, displayed on Research Pipeline page.
+
+### Navigation Order (Sidebar)
+1. Command Center (bold, text-base)
+2. Research Pipeline (bold, text-[15px])
+3. Computational Physics
+4. Materials Database
+5. Novel Discovery
+6. Superconductor Lab
+7. Atomic Explorer
+
+### Key Data Paths
+- `/api/engine/memory` returns `lastCycleCandidates`, `lastCycleFamilyCounts` at top level (spread from `autonomousLoopStats`)
+- `autonomousLoopStats.inverseOptimizer.bestTcAcrossAll` — inverse optimizer best Tc, displayed in Active Learning card and Knowledge Map
+- `/api/milestones` — reads milestones from DB (persisted by milestone-tracker.ts during engine cycles)
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).

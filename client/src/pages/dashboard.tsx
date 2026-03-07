@@ -44,6 +44,12 @@ interface AutonomousLoopStats {
   throughputPerHour: number;
   gnnRetrainCount: number;
   activeLearning: ActiveLearningStats;
+  inverseOptimizer?: {
+    bestTcAcrossAll: number;
+    activeCampaigns: number;
+    totalCandidatesGenerated: number;
+    totalPassed: number;
+  };
 }
 
 interface EngineMemory {
@@ -515,54 +521,68 @@ export default function Dashboard() {
           <CardContent>
             {(() => {
               const al = engineMemory?.autonomousLoopStats?.activeLearning;
-              if (!al || (al.totalDFTRuns === 0 && al.modelRetrains === 0)) {
-                return (
-                  <p className="text-sm text-muted-foreground italic" data-testid="active-learning-placeholder">
-                    Active learning stats will appear once the engine runs DFT cycles
-                  </p>
-                );
-              }
-              const uncertaintyReduction = al.avgUncertaintyBefore > 0
-                ? ((al.avgUncertaintyBefore - al.avgUncertaintyAfter) / al.avgUncertaintyBefore * 100)
-                : 0;
+              const invOpt = engineMemory?.autonomousLoopStats?.inverseOptimizer;
+              const inverseBestTc = invOpt?.bestTcAcrossAll ?? 0;
+              const hasALData = al && (al.totalDFTRuns > 0 || al.modelRetrains > 0);
+
               return (
                 <div className="space-y-3">
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-dft-runs">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">DFT Runs</p>
-                      <p className="text-xl font-mono font-bold">{al.totalDFTRuns}</p>
-                    </div>
-                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-model-retrains">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Model Retrains</p>
-                      <p className="text-xl font-mono font-bold">{al.modelRetrains}</p>
-                    </div>
-                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-best-tc">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc (Loop)</p>
-                      <p className="text-xl font-mono font-bold">{Math.round(al.bestTcFromLoop)}K</p>
-                    </div>
+                  <div className={`p-2.5 rounded-md ${inverseBestTc > 200 ? "bg-amber-500/10 border border-amber-500/20" : "bg-muted/50"}`} data-testid="al-inverse-best-tc">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Inverse Optimizer Best Tc</p>
+                    <p className={`text-xl font-mono font-bold ${inverseBestTc > 200 ? "text-amber-600 dark:text-amber-400" : ""}`}>
+                      {inverseBestTc > 0 ? `${Math.round(inverseBestTc)}K` : "--"}
+                    </p>
                   </div>
-                  <div className="space-y-1" data-testid="al-uncertainty-trend">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">Uncertainty Trend</span>
-                      <span className={`font-mono font-bold ${uncertaintyReduction > 0 ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
-                        {uncertaintyReduction > 0 ? `-${uncertaintyReduction.toFixed(1)}%` : "No change"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px]">
-                      <span className="text-muted-foreground">Before:</span>
-                      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                        <div className="h-full rounded-full bg-amber-500" style={{ width: `${al.avgUncertaintyBefore * 100}%` }} />
-                      </div>
-                      <span className="font-mono w-8 text-right">{(al.avgUncertaintyBefore * 100).toFixed(0)}%</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px]">
-                      <span className="text-muted-foreground">After:</span>
-                      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                        <div className="h-full rounded-full bg-green-500" style={{ width: `${al.avgUncertaintyAfter * 100}%` }} />
-                      </div>
-                      <span className="font-mono w-8 text-right">{(al.avgUncertaintyAfter * 100).toFixed(0)}%</span>
-                    </div>
-                  </div>
+
+                  {!hasALData ? (
+                    <p className="text-sm text-muted-foreground italic" data-testid="active-learning-placeholder">
+                      Active learning DFT stats will appear once the engine runs DFT cycles
+                    </p>
+                  ) : (() => {
+                    const uncertaintyReduction = al!.avgUncertaintyBefore > 0
+                      ? ((al!.avgUncertaintyBefore - al!.avgUncertaintyAfter) / al!.avgUncertaintyBefore * 100)
+                      : 0;
+                    return (
+                      <>
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-dft-runs">
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">DFT Runs</p>
+                            <p className="text-xl font-mono font-bold">{al!.totalDFTRuns}</p>
+                          </div>
+                          <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-model-retrains">
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Model Retrains</p>
+                            <p className="text-xl font-mono font-bold">{al!.modelRetrains}</p>
+                          </div>
+                          <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-best-tc">
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc (Loop)</p>
+                            <p className="text-xl font-mono font-bold">{Math.round(al!.bestTcFromLoop)}K</p>
+                          </div>
+                        </div>
+                        <div className="space-y-1" data-testid="al-uncertainty-trend">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">Uncertainty Trend</span>
+                            <span className={`font-mono font-bold ${uncertaintyReduction > 0 ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
+                              {uncertaintyReduction > 0 ? `-${uncertaintyReduction.toFixed(1)}%` : "No change"}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px]">
+                            <span className="text-muted-foreground">Before:</span>
+                            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                              <div className="h-full rounded-full bg-amber-500" style={{ width: `${al!.avgUncertaintyBefore * 100}%` }} />
+                            </div>
+                            <span className="font-mono w-8 text-right">{(al!.avgUncertaintyBefore * 100).toFixed(0)}%</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px]">
+                            <span className="text-muted-foreground">After:</span>
+                            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                              <div className="h-full rounded-full bg-green-500" style={{ width: `${al!.avgUncertaintyAfter * 100}%` }} />
+                            </div>
+                            <span className="font-mono w-8 text-right">{(al!.avgUncertaintyAfter * 100).toFixed(0)}%</span>
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               );
             })()}
