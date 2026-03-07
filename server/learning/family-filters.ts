@@ -630,6 +630,7 @@ export interface DiscoveryScoreInput {
   synthesisScore?: number | null;
   prototype?: string | null;
   existingFormulas?: string[];
+  topologicalScore?: number | null;
 }
 
 export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
@@ -638,6 +639,7 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   noveltyScore: number;
   stabilityScore: number;
   synthesisFeasibility: number;
+  topologyContribution: number;
 } {
   const normalizedTc = Math.min(1.0, Math.max(0, (candidate.predictedTc || 0) / 300));
 
@@ -691,7 +693,9 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
 
   noveltyScore = Math.min(1.0, Math.max(0, noveltyScore));
 
-  const discoveryScore = 0.4 * normalizedTc + 0.3 * noveltyScore + 0.2 * stabilityScore + 0.1 * synthesisFeasibility;
+  const topologyContribution = Math.min(1.0, Math.max(0, candidate.topologicalScore ?? 0));
+
+  const discoveryScore = 0.35 * normalizedTc + 0.25 * noveltyScore + 0.2 * stabilityScore + 0.1 * synthesisFeasibility + 0.1 * topologyContribution;
 
   return {
     discoveryScore: Math.round(discoveryScore * 1000) / 1000,
@@ -699,6 +703,7 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
     noveltyScore: Math.round(noveltyScore * 1000) / 1000,
     stabilityScore: Math.round(stabilityScore * 1000) / 1000,
     synthesisFeasibility: Math.round(synthesisFeasibility * 1000) / 1000,
+    topologyContribution: Math.round(topologyContribution * 1000) / 1000,
   };
 }
 

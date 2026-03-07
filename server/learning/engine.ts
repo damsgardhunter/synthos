@@ -6,7 +6,7 @@ import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
@@ -36,6 +36,7 @@ import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
 import { getXTBStats } from "../dft/qe-dft-engine";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
+import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -846,6 +847,37 @@ async function runPhase10_Physics() {
             binCount: result.alpha2F.frequencies.length,
           },
         };
+
+        let topoAnalysis: TopologicalAnalysis | undefined;
+        try {
+          topoAnalysis = analyzeTopology(
+            candidate.formula,
+            result.electronicStructure,
+            candidate.crystalStructure?.split(" ")[0],
+            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1]
+          );
+          trackTopologyResult(topoAnalysis);
+          (updatedMlFeatures as any).topology = {
+            topologicalScore: topoAnalysis.topologicalScore,
+            z2Invariant: topoAnalysis.z2Invariant,
+            chernIndicator: topoAnalysis.chernIndicator,
+            mirrorSymmetryIndicator: topoAnalysis.mirrorSymmetryIndicator,
+            socStrength: topoAnalysis.socStrength,
+            bandInversionProbability: topoAnalysis.bandInversionProbability,
+            diracNodeProbability: topoAnalysis.diracNodeProbability,
+            majoranaFeasibility: topoAnalysis.majoranaFeasibility,
+            topologicalClass: topoAnalysis.topologicalClass,
+            indicators: topoAnalysis.indicators,
+          };
+          if (topoAnalysis.topologicalScore > 0.4) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Topological candidate detected",
+              detail: `${candidate.formula}: class=${topoAnalysis.topologicalClass}, score=${topoAnalysis.topologicalScore}, SOC=${topoAnalysis.socStrength}, Z2=${topoAnalysis.z2Invariant}, Majorana=${topoAnalysis.majoranaFeasibility}, [${topoAnalysis.indicators.join(", ")}]`,
+              dataSource: "Topology Engine",
+            });
+          }
+        } catch {}
 
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
@@ -1852,6 +1884,7 @@ export function getAutonomousLoopStats() {
     rlAgent: rlAgent.getStats(),
     bayesianOptimizer: bayesianOptimizer.getStats(),
     crystalDiffusion: getDiffusionStats(),
+    topologyDetection: getTopologyStats(),
   };
 }
 
@@ -2286,6 +2319,14 @@ async function runLearningCycle() {
               if (!filterResult.pass) continue;
             }
 
+            let protoTopoScore = 0;
+            try {
+              const protoElectronic = computeElectronicStructure(normalized, null);
+              const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
+              protoTopoScore = protoTopo.topologicalScore;
+              trackTopologyResult(protoTopo);
+            } catch {}
+
             const discoveryDetails = computeDiscoveryScore({
               predictedTc: gbResult.tcPredicted,
               formula: normalized,
@@ -2293,6 +2334,7 @@ async function runLearningCycle() {
               synthesisScore: null,
               prototype: pc.prototype,
               existingFormulas: existingFormulaList.slice(0, 100),
+              topologicalScore: protoTopoScore,
             });
 
             if (!prototypeCounts[pc.prototype]) {

@@ -11,6 +11,8 @@ import { fetchAllData as fetchMPAllData, isApiAvailable as isMPAvailable } from 
 import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./learning/aflow-client";
 import { sanitizeForbiddenWords } from "./learning/utils";
 import { runDiffusionGenerationCycle, getDiffusionStats as getDiffusionGeneratorStats } from "./ai/crystal-generator";
+import { analyzeTopology, getTopologyStats } from "./physics/topology-engine";
+import { computeElectronicStructure } from "./learning/physics-engine";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -618,6 +620,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getDiffusionGeneratorStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch diffusion stats" });
+    }
+  });
+
+  app.get("/api/topology-stats", async (_req, res) => {
+    try {
+      res.json(getTopologyStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch topology stats" });
+    }
+  });
+
+  app.get("/api/topology/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const crystalSystem = typeof req.query.crystalSystem === "string" ? req.query.crystalSystem : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const analysis = analyzeTopology(formula, electronic, spaceGroup, crystalSystem);
+      res.json(analysis);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to analyze topology" });
     }
   });
 

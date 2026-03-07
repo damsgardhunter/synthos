@@ -44,6 +44,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Generative Crystal Structures**: Discovers structural variants and novel prototypes via LLM.
 - **Enriched ML Features**: Uses approximately 50 diverse physical and structural features for ML prediction, including `pressureGpa` and `optimalPressureGpa`.
 
+### Topological Superconductor Detection Engine
+- **Band structure topology**: Estimates Z2 invariant, Chern number indicator, and mirror symmetry indicator from SOC strength, orbital mixing, and band inversion probability.
+- **SOC modeling**: Z^4 scaling with 60+ elements mapped to SOC strength values; weighted by concentration for multi-element compounds.
+- **Band inversion detection**: Combines SOC, p-d orbital mixing, tight-binding band inversions, and Dirac crossings to estimate band inversion probability.
+- **Material pattern matching**: 16 known topological material patterns (Bi2Se3-class TI, WTe2-class Weyl, CuxBi2Se3 TSC, Sr2RuO4-type TSC, etc.) with pattern-specific bonuses.
+- **Majorana feasibility**: Estimates Majorana quasiparticle hosting potential from Z2, SOC, band inversion, and Dirac node probabilities.
+- **Topological classification**: Classifies as topological-superconductor, strong-TI, Chern-insulator, topological-crystalline-insulator, weak-topological, SOC-enhanced, or trivial.
+- **Score composition**: topologicalScore = 0.30 SOC + 0.25 band_inversion + 0.25 symmetry_invariants + 0.20 flat_band + pattern_bonus.
+- **Discovery score integration**: Weights rebalanced to 0.35 Tc + 0.25 novelty + 0.20 stability + 0.10 synthesis + 0.10 topology.
+- **API**: `GET /api/topology/:formula` (full analysis), `GET /api/topology-stats` (aggregate stats).
+- Files: `server/physics/topology-engine.ts`
+
 ### Advanced Quantum Physics Modeling
 - Computes phonon dispersion, phonon DOS, Eliashberg spectral function, GW many-body corrections, dynamic spin susceptibility, and Fermi surface nesting.
 
