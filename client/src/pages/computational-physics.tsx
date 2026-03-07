@@ -16,6 +16,7 @@ import {
   FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
   Cpu, Clock, Loader2, Network, Code2, GitBranch, ArrowLeftRight,
   BookOpen, Sigma, FlaskRound, Search, TrendingUp, ShieldCheck, Lightbulb,
+  GitMerge, ArrowRight, Play, Microscope, Settings2,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -1555,6 +1556,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="self-improving-lab" data-testid="tab-self-improving-lab">Design Lab</TabsTrigger>
           <TabsTrigger value="design-repr" data-testid="tab-design-repr">Representations</TabsTrigger>
           <TabsTrigger value="theory-discovery" data-testid="tab-theory-discovery">Theory Discovery</TabsTrigger>
+          <TabsTrigger value="causal-discovery" data-testid="tab-causal-discovery">Causal Discovery</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -2098,6 +2100,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="theory-discovery" className="space-y-4" data-testid="theory-discovery-content">
           <TheoryDiscoveryPanel />
+        </TabsContent>
+
+        <TabsContent value="causal-discovery" className="space-y-4" data-testid="causal-discovery-content">
+          <CausalDiscoveryPanel />
         </TabsContent>
       </Tabs>
     </div>
@@ -3298,6 +3304,598 @@ function TheoryDiscoveryPanel() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function CausalDiscoveryPanel() {
+  const [causalView, setCausalView] = useState<"overview" | "graph" | "hypotheses" | "intervention" | "ontology" | "rules" | "pressure">("overview");
+  const [interventionFormula, setInterventionFormula] = useState("LaH10");
+  const [interventionVar, setInterventionVar] = useState("pressure");
+  const [interventionValue, setInterventionValue] = useState("100");
+  const [counterfactualVar, setCounterfactualVar] = useState("phonon_freq");
+  const [counterfactualPct, setCounterfactualPct] = useState("20");
+
+  const statsQuery = useQuery<any>({ queryKey: ["/api/causal-discovery/stats"] });
+  const variablesQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/variables"] });
+  const ontologyQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/ontology"] });
+  const graphQuery = useQuery<any>({ queryKey: ["/api/causal-discovery/graph"] });
+  const hypothesesQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/hypotheses"] });
+  const rulesQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/rules"] });
+
+  const runMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/causal-discovery/run", { datasetSize: 60 }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/graph"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/hypotheses"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/rules"] });
+    },
+  });
+
+  const interventionMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/causal-discovery/intervene", {
+      formula: interventionFormula,
+      variable: interventionVar,
+      newValue: parseFloat(interventionValue),
+    }),
+  });
+
+  const counterfactualMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/causal-discovery/counterfactual", {
+      formula: interventionFormula,
+      variable: counterfactualVar,
+      modificationPercent: parseFloat(counterfactualPct),
+    }),
+  });
+
+  const stats = statsQuery.data;
+  const graph = graphQuery.data;
+  const hypotheses = hypothesesQuery.data ?? [];
+  const rules = rulesQuery.data ?? [];
+  const variables = variablesQuery.data ?? [];
+  const ontology = ontologyQuery.data ?? [];
+
+  const viewButtons: { key: typeof causalView; label: string; icon: any }[] = [
+    { key: "overview", label: "Overview", icon: Activity },
+    { key: "graph", label: "Causal Graph", icon: GitMerge },
+    { key: "hypotheses", label: "Hypotheses", icon: Lightbulb },
+    { key: "intervention", label: "Interventions", icon: Settings2 },
+    { key: "ontology", label: "Ontology", icon: Network },
+    { key: "rules", label: "Causal Rules", icon: BookOpen },
+    { key: "pressure", label: "Pressure Regimes", icon: Gauge },
+  ];
+
+  return (
+    <div className="space-y-4" data-testid="causal-discovery-panel">
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2" data-testid="text-causal-discovery-title">
+              <GitMerge className="h-5 w-5 text-purple-500" />
+              Causal Physics Discovery Engine
+            </CardTitle>
+            <Button
+              onClick={() => runMutation.mutate()}
+              disabled={runMutation.isPending}
+              size="sm"
+              data-testid="button-run-causal-discovery"
+            >
+              {runMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Play className="h-4 w-4 mr-1" />}
+              Run Causal Discovery
+            </Button>
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">
+            Discovers causal mechanisms (not just correlations) underlying superconductivity using PC-algorithm-inspired graph inference with physics ontology constraints.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap gap-2 mb-4">
+            {viewButtons.map(vb => (
+              <Button
+                key={vb.key}
+                variant={causalView === vb.key ? "default" : "outline"}
+                size="sm"
+                onClick={() => setCausalView(vb.key)}
+                data-testid={`button-causal-view-${vb.key}`}
+              >
+                <vb.icon className="h-3.5 w-3.5 mr-1" />
+                {vb.label}
+              </Button>
+            ))}
+          </div>
+
+          {causalView === "overview" && (
+            <div className="space-y-4">
+              {statsQuery.isLoading ? (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[0,1,2,3].map(i => <Skeleton key={i} className="h-20" />)}
+                </div>
+              ) : stats ? (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-2xl font-bold text-purple-600" data-testid="text-causal-total-runs">{stats.totalRuns}</div>
+                        <div className="text-xs text-muted-foreground">Discovery Runs</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-2xl font-bold text-blue-600" data-testid="text-causal-variables">{stats.causalVariableCount}</div>
+                        <div className="text-xs text-muted-foreground">Causal Variables</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-2xl font-bold text-green-600" data-testid="text-causal-hypotheses">{stats.totalHypotheses}</div>
+                        <div className="text-xs text-muted-foreground">Hypotheses</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-2xl font-bold text-amber-600" data-testid="text-causal-rules">{stats.totalCausalRules}</div>
+                        <div className="text-xs text-muted-foreground">Causal Rules</div>
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-lg font-bold" data-testid="text-causal-ontology-nodes">{stats.ontologyNodeCount}</div>
+                        <div className="text-xs text-muted-foreground">Ontology Nodes</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-lg font-bold" data-testid="text-causal-intervention-vars">{stats.interventionVariableCount}</div>
+                        <div className="text-xs text-muted-foreground">Intervention Variables</div>
+                      </CardContent>
+                    </Card>
+                    <Card>
+                      <CardContent className="pt-4 pb-3 text-center">
+                        <div className="text-lg font-bold" data-testid="text-causal-graph-size">
+                          {stats.latestGraphSize.nodes}N / {stats.latestGraphSize.edges}E
+                        </div>
+                        <div className="text-xs text-muted-foreground">Latest Graph (Nodes/Edges)</div>
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  {stats.variableCategories && (
+                    <Card>
+                      <CardHeader className="pb-2"><CardTitle className="text-sm">Variable Categories</CardTitle></CardHeader>
+                      <CardContent>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(stats.variableCategories).map(([cat, count]) => (
+                            <Badge key={cat} variant="secondary" data-testid={`badge-cat-${cat}`}>
+                              {cat.replace(/_/g, " ")}: {count as number}
+                            </Badge>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {stats.topEdges && stats.topEdges.length > 0 && (
+                    <Card>
+                      <CardHeader className="pb-2"><CardTitle className="text-sm">Top Causal Edges</CardTitle></CardHeader>
+                      <CardContent>
+                        <div className="space-y-2">
+                          {stats.topEdges.slice(0, 6).map((e: any, i: number) => (
+                            <div key={i} className="flex items-center gap-2 text-sm" data-testid={`causal-edge-${i}`}>
+                              <Badge variant="outline" className="font-mono text-xs">{e.source}</Badge>
+                              <ArrowRight className="h-3 w-3 text-purple-500" />
+                              <Badge variant="outline" className="font-mono text-xs">{e.target}</Badge>
+                              <span className="text-muted-foreground ml-auto text-xs">strength: {e.strength}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">No causal discovery data yet. Click "Run Causal Discovery" to begin.</p>
+              )}
+            </div>
+          )}
+
+          {causalView === "graph" && (
+            <div className="space-y-4">
+              {graph && graph.edges && graph.edges.length > 0 ? (
+                <>
+                  <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                    <span>Method: {graph.method}</span>
+                    <span>Nodes: {graph.nodes?.length ?? 0}</span>
+                    <span>Edges: {graph.edges?.length ?? 0}</span>
+                    <span>Dataset: {graph.datasetSize} records</span>
+                  </div>
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">Discovered Causal Edges</CardTitle></CardHeader>
+                    <CardContent>
+                      <div className="max-h-96 overflow-y-auto space-y-2">
+                        {graph.edges.map((e: any, i: number) => (
+                          <div key={i} className="border rounded p-2 text-sm" data-testid={`graph-edge-${i}`}>
+                            <div className="flex items-center gap-2 mb-1">
+                              <code className="text-xs bg-muted px-1 rounded">{e.source}</code>
+                              <ArrowRight className="h-3 w-3" />
+                              <code className="text-xs bg-muted px-1 rounded">{e.target}</code>
+                              <Badge variant={e.strength > 0.5 ? "default" : "secondary"} className="ml-auto text-xs">
+                                {(e.strength).toFixed(3)}
+                              </Badge>
+                              {e.validated && <CheckCircle2 className="h-3 w-3 text-green-500" />}
+                            </div>
+                            <p className="text-xs text-muted-foreground">{e.mechanism}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">No causal graph discovered yet. Run causal discovery first.</p>
+              )}
+            </div>
+          )}
+
+          {causalView === "hypotheses" && (
+            <div className="space-y-4">
+              {hypotheses.length > 0 ? (
+                <div className="space-y-3">
+                  {hypotheses.map((h: any, i: number) => (
+                    <Card key={h.id || i} data-testid={`hypothesis-card-${i}`}>
+                      <CardContent className="pt-4 pb-3">
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium" data-testid={`text-hypothesis-${i}`}>{h.statement}</p>
+                            <div className="flex items-center gap-1 mt-1">
+                              {h.causalChain?.map((v: string, ci: number) => (
+                                <span key={ci} className="flex items-center gap-0.5">
+                                  <code className="text-xs bg-muted px-1 rounded">{v}</code>
+                                  {ci < h.causalChain.length - 1 && <ArrowRight className="h-2.5 w-2.5 text-muted-foreground" />}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <Badge variant={h.confidence > 0.5 ? "default" : "secondary"}>
+                            {(h.confidence * 100).toFixed(0)}%
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">{h.mechanism?.slice(0, 200)}</p>
+                        {h.testableIntervention && (
+                          <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                            <Microscope className="h-3 w-3 inline mr-1" />
+                            {h.testableIntervention}
+                          </p>
+                        )}
+                        {h.materialFamilies && h.materialFamilies.length > 0 && (
+                          <div className="flex gap-1 mt-1">
+                            {h.materialFamilies.map((f: string) => (
+                              <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
+                            ))}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">No hypotheses generated yet. Run causal discovery first.</p>
+              )}
+            </div>
+          )}
+
+          {causalView === "intervention" && (
+            <div className="space-y-4">
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Intervention Simulator</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1">Formula</label>
+                      <input
+                        className="w-full border rounded px-2 py-1.5 text-sm bg-background"
+                        value={interventionFormula}
+                        onChange={e => setInterventionFormula(e.target.value)}
+                        data-testid="input-intervention-formula"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1">Variable</label>
+                      <select
+                        className="w-full border rounded px-2 py-1.5 text-sm bg-background"
+                        value={interventionVar}
+                        onChange={e => setInterventionVar(e.target.value)}
+                        data-testid="select-intervention-var"
+                      >
+                        {variables.filter((v: any) => v.isIntervention).map((v: any) => (
+                          <option key={v.name} value={v.name}>{v.name} ({v.unit})</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1">New Value</label>
+                      <input
+                        className="w-full border rounded px-2 py-1.5 text-sm bg-background"
+                        value={interventionValue}
+                        onChange={e => setInterventionValue(e.target.value)}
+                        type="number"
+                        data-testid="input-intervention-value"
+                      />
+                    </div>
+                  </div>
+                  <Button
+                    onClick={() => interventionMutation.mutate()}
+                    disabled={interventionMutation.isPending}
+                    size="sm"
+                    data-testid="button-run-intervention"
+                  >
+                    {interventionMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Zap className="h-4 w-4 mr-1" />}
+                    Simulate Intervention
+                  </Button>
+
+                  {interventionMutation.data && (
+                    <div className="mt-4 border rounded p-3 space-y-2" data-testid="intervention-result">
+                      {(() => {
+                        const r: any = interventionMutation.data;
+                        return (
+                          <>
+                            <div className="flex items-center gap-4 text-sm">
+                              <span>Tc: {r.tcOriginal}K</span>
+                              <ArrowRight className="h-3 w-3" />
+                              <span className={r.tcChange > 0 ? "text-green-600 font-medium" : r.tcChange < 0 ? "text-red-600 font-medium" : ""}>
+                                {r.tcNew}K ({r.tcChange > 0 ? "+" : ""}{r.tcChange}K)
+                              </span>
+                            </div>
+                            {r.causalPathway && r.causalPathway.length > 1 && (
+                              <div className="text-xs text-muted-foreground">
+                                Causal pathway: {r.causalPathway.join(" -> ")}
+                              </div>
+                            )}
+                            {r.effects && r.effects.length > 0 && (
+                              <div className="space-y-1 mt-2">
+                                <p className="text-xs font-medium">Propagated Effects:</p>
+                                {r.effects.slice(0, 8).map((eff: any, i: number) => (
+                                  <div key={i} className="text-xs flex items-center gap-2" data-testid={`effect-${i}`}>
+                                    <code className="bg-muted px-1 rounded">{eff.variable}</code>
+                                    <span>{eff.originalValue?.toFixed(2)}</span>
+                                    <ArrowRight className="h-2.5 w-2.5" />
+                                    <span>{eff.newValue?.toFixed(2)}</span>
+                                    <span className={eff.changePercent > 0 ? "text-green-600" : "text-red-600"}>
+                                      ({eff.changePercent > 0 ? "+" : ""}{eff.changePercent}%)
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Counterfactual Simulator</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1">Variable</label>
+                      <select
+                        className="w-full border rounded px-2 py-1.5 text-sm bg-background"
+                        value={counterfactualVar}
+                        onChange={e => setCounterfactualVar(e.target.value)}
+                        data-testid="select-counterfactual-var"
+                      >
+                        {variables.map((v: any) => (
+                          <option key={v.name} value={v.name}>{v.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground block mb-1">Modification %</label>
+                      <input
+                        className="w-full border rounded px-2 py-1.5 text-sm bg-background"
+                        value={counterfactualPct}
+                        onChange={e => setCounterfactualPct(e.target.value)}
+                        type="number"
+                        data-testid="input-counterfactual-pct"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <Button
+                        onClick={() => counterfactualMutation.mutate()}
+                        disabled={counterfactualMutation.isPending}
+                        size="sm"
+                        data-testid="button-run-counterfactual"
+                      >
+                        {counterfactualMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Microscope className="h-4 w-4 mr-1" />}
+                        Ask "What If?"
+                      </Button>
+                    </div>
+                  </div>
+
+                  {counterfactualMutation.data && (
+                    <div className="mt-3 border rounded p-3 space-y-2" data-testid="counterfactual-result">
+                      {(() => {
+                        const r: any = counterfactualMutation.data;
+                        return (
+                          <>
+                            <p className="text-sm font-medium">{r.question}</p>
+                            <div className="flex items-center gap-4 text-sm">
+                              <span>Tc: {r.originalTc?.toFixed(1)}K</span>
+                              <ArrowRight className="h-3 w-3" />
+                              <span className={r.tcDelta > 0 ? "text-green-600 font-medium" : r.tcDelta < 0 ? "text-red-600 font-medium" : ""}>
+                                {r.counterfactualTc?.toFixed(1)}K ({r.tcDelta > 0 ? "+" : ""}{r.tcDelta?.toFixed(1)}K, {r.tcDeltaPercent > 0 ? "+" : ""}{r.tcDeltaPercent}%)
+                              </span>
+                            </div>
+                            <p className="text-xs text-blue-600 dark:text-blue-400">{r.designImplication}</p>
+                            {r.propagatedEffects && r.propagatedEffects.length > 0 && (
+                              <div className="mt-2">
+                                <p className="text-xs font-medium">Downstream effects:</p>
+                                <div className="flex flex-wrap gap-2 mt-1">
+                                  {r.propagatedEffects.slice(0, 6).map((pe: any, i: number) => (
+                                    <Badge key={i} variant="outline" className="text-xs">
+                                      {pe.variable}: {pe.change > 0 ? "+" : ""}{pe.change?.toFixed(1)}%
+                                    </Badge>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {causalView === "ontology" && (
+            <div className="space-y-4">
+              {ontology.length > 0 ? (
+                <>
+                  {["atomic_structure", "electronic_structure", "phonon_properties", "pairing_interactions", "thermodynamic_conditions", "superconducting_properties", "topological"].map(cat => {
+                    const nodes = ontology.filter((n: any) => n.category === cat);
+                    if (nodes.length === 0) return null;
+                    return (
+                      <Card key={cat}>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm capitalize">{cat.replace(/_/g, " ")}</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="space-y-2">
+                            {nodes.map((n: any) => (
+                              <div key={n.variable} className="border rounded p-2 text-xs" data-testid={`ontology-node-${n.variable}`}>
+                                <div className="flex items-center justify-between mb-1">
+                                  <code className="font-medium">{n.variable}</code>
+                                  <Badge variant="secondary">Level {n.level}</Badge>
+                                </div>
+                                {n.parents.length > 0 && (
+                                  <div className="text-muted-foreground">
+                                    Parents: {n.parents.map((p: string) => <code key={p} className="bg-muted px-0.5 rounded mr-1">{p}</code>)}
+                                  </div>
+                                )}
+                                {n.children.length > 0 && (
+                                  <div className="text-muted-foreground mt-0.5">
+                                    Children: {n.children.map((c: string) => <code key={c} className="bg-muted px-0.5 rounded mr-1">{c}</code>)}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">Loading ontology...</p>
+              )}
+            </div>
+          )}
+
+          {causalView === "rules" && (
+            <div className="space-y-3">
+              {rules.length > 0 ? (
+                rules.map((r: any, i: number) => (
+                  <Card key={i} data-testid={`causal-rule-${i}`}>
+                    <CardContent className="pt-4 pb-3">
+                      <div className="flex items-center gap-2 text-sm mb-1">
+                        <Badge variant="outline">{r.antecedent}</Badge>
+                        <ArrowRight className="h-3 w-3 text-purple-500" />
+                        <Badge variant="outline">{r.consequent}</Badge>
+                        <span className="ml-auto text-xs text-muted-foreground">strength: {r.strength?.toFixed(3)}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{r.mechanism}</p>
+                      {r.validatedAcross && r.validatedAcross.length > 0 && (
+                        <div className="flex gap-1 mt-1">
+                          <span className="text-xs text-muted-foreground">Validated:</span>
+                          {r.validatedAcross.map((f: string) => (
+                            <Badge key={f} variant="secondary" className="text-xs">{f}</Badge>
+                          ))}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">No causal rules extracted yet. Run causal discovery first.</p>
+              )}
+            </div>
+          )}
+
+          {causalView === "pressure" && (
+            <div className="space-y-4">
+              {runMutation.data ? (
+                (() => {
+                  const pc: any = (runMutation.data as any).pressureComparison;
+                  if (!pc) return <p className="text-sm text-muted-foreground text-center py-8">No pressure comparison data. Run discovery first.</p>;
+                  return (
+                    <>
+                      <Card>
+                        <CardHeader className="pb-2"><CardTitle className="text-sm">Decompression Insight</CardTitle></CardHeader>
+                        <CardContent>
+                          <p className="text-sm" data-testid="text-decompression-insight">{pc.decompressionInsight}</p>
+                        </CardContent>
+                      </Card>
+
+                      {pc.survivingMechanisms && pc.survivingMechanisms.length > 0 && (
+                        <Card>
+                          <CardHeader className="pb-2"><CardTitle className="text-sm">Mechanisms Surviving Across Pressure Regimes</CardTitle></CardHeader>
+                          <CardContent>
+                            <div className="space-y-2">
+                              {pc.survivingMechanisms.map((m: any, i: number) => (
+                                <div key={i} className="flex items-center gap-2 text-sm border rounded p-2" data-testid={`surviving-mechanism-${i}`}>
+                                  <code className="text-xs">{m.source}</code>
+                                  <ArrowRight className="h-3 w-3" />
+                                  <code className="text-xs">{m.target}</code>
+                                  <span className="ml-auto text-xs text-muted-foreground">
+                                    ambient: {m.ambientStrength?.toFixed(3)} | high-P: {m.hpStrength?.toFixed(3)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )}
+
+                      {pc.newMechanisms && pc.newMechanisms.length > 0 && (
+                        <Card>
+                          <CardHeader className="pb-2"><CardTitle className="text-sm">Regime-Specific Mechanisms</CardTitle></CardHeader>
+                          <CardContent>
+                            <div className="space-y-2">
+                              {pc.newMechanisms.map((m: any, i: number) => (
+                                <div key={i} className="flex items-center gap-2 text-sm" data-testid={`new-mechanism-${i}`}>
+                                  <Badge variant={m.regime === "ambient" ? "default" : "secondary"}>{m.regime}</Badge>
+                                  <code className="text-xs">{m.source}</code>
+                                  <ArrowRight className="h-3 w-3" />
+                                  <code className="text-xs">{m.target}</code>
+                                  <span className="ml-auto text-xs">{m.strength?.toFixed(3)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )}
+                    </>
+                  );
+                })()
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">Run causal discovery to see pressure regime comparison data.</p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

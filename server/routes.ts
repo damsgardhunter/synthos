@@ -87,6 +87,12 @@ import {
   validatePhysicsConstraints, PHYSICS_VARIABLES,
   type PhysicsDiscoveryRecord, type SymbolicDiscoveryConfig,
 } from "./theory/symbolic-physics-discovery";
+import {
+  runCausalDiscovery, generateCausalDataset, getCausalDiscoveryStats,
+  buildCausalDataRecord, simulateIntervention, runCounterfactual,
+  getOntology, getCausalVariables, getDiscoveredHypotheses,
+  getCausalRules, getLatestGraph,
+} from "./theory/causal-physics-discovery";
 import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAnalysis } from "./theory/multi-scale-engine";
 import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
 import { getPerformanceMetrics, recordPrediction } from "./theory/model-performance-tracker";
@@ -2154,6 +2160,123 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(feedback);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to generate feedback", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getCausalDiscoveryStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get causal stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/variables", generalLimiter, (_req, res) => {
+    try {
+      res.json(getCausalVariables());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get variables", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/ontology", generalLimiter, (_req, res) => {
+    try {
+      res.json(getOntology());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get ontology", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/graph", generalLimiter, (_req, res) => {
+    try {
+      const graph = getLatestGraph();
+      res.json(graph ?? { nodes: [], edges: [], discoveredAt: 0, method: "none", datasetSize: 0 });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get graph", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/hypotheses", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDiscoveredHypotheses());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get hypotheses", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/rules", generalLimiter, (_req, res) => {
+    try {
+      res.json(getCausalRules());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get rules", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/causal-discovery/run", writeLimiter, (req, res) => {
+    try {
+      const count = req.body?.datasetSize ?? 60;
+      const dataset = generateCausalDataset(Math.min(count, 100));
+      const result = runCausalDiscovery(dataset);
+      res.json({
+        graphNodes: result.graph.nodes.length,
+        graphEdges: result.graph.edges.length,
+        hypothesesDiscovered: result.hypotheses.length,
+        rulesExtracted: result.rules.length,
+        graph: result.graph,
+        hypotheses: result.hypotheses.slice(0, 10),
+        rules: result.rules.slice(0, 15),
+        crossFamilyValidation: result.crossFamilyValidation,
+        designGuidance: result.designGuidance,
+        pressureComparison: result.pressureComparison,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Causal discovery failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/causal-discovery/intervene", writeLimiter, (req, res) => {
+    try {
+      const { formula, variable, newValue } = req.body;
+      if (!formula || !variable || newValue === undefined) {
+        return res.status(400).json({ error: "Missing formula, variable, or newValue" });
+      }
+      const graph = getLatestGraph();
+      if (!graph) {
+        return res.status(400).json({ error: "No causal graph discovered yet. Run discovery first." });
+      }
+      const record = buildCausalDataRecord(formula);
+      const result = simulateIntervention(record, variable, newValue, graph);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Intervention failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/causal-discovery/counterfactual", writeLimiter, (req, res) => {
+    try {
+      const { formula, variable, modificationPercent } = req.body;
+      if (!formula || !variable || modificationPercent === undefined) {
+        return res.status(400).json({ error: "Missing formula, variable, or modificationPercent" });
+      }
+      const graph = getLatestGraph();
+      if (!graph) {
+        return res.status(400).json({ error: "No causal graph discovered yet. Run discovery first." });
+      }
+      const record = buildCausalDataRecord(formula);
+      const result = runCounterfactual(record, variable, modificationPercent, graph);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Counterfactual failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/causal-discovery/dataset", writeLimiter, (req, res) => {
+    try {
+      const count = req.body?.count ?? 60;
+      const dataset = generateCausalDataset(Math.min(count, 100));
+      res.json({ count: dataset.length, records: dataset.slice(0, 20) });
+    } catch (e: any) {
+      res.status(500).json({ error: "Dataset generation failed", detail: e.message?.slice(0, 200) });
     }
   });
 
