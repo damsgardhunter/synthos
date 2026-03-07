@@ -5,6 +5,8 @@ import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, 
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
+import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB } from "../inverse/inverse-optimizer";
+import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
@@ -432,6 +434,83 @@ async function runPhase7_Superconductor() {
         totalScCandidates += inverseDesigned;
       } catch (err: any) {
         emit("log", { phase: "phase-7", event: "Inverse design error", detail: err.message?.slice(0, 150), dataSource: "Inverse Design" });
+      }
+    }
+
+    if (cycleCount % 8 === 0 && shouldContinue()) {
+      try {
+        const activeCampaigns = getAllActiveCampaigns();
+        for (const campaign of activeCampaigns) {
+          const inverseCandidates = runInverseCycle(campaign);
+          if (inverseCandidates.length === 0) continue;
+
+          emit("log", {
+            phase: "inverse-optimizer",
+            event: `Inverse design cycle ${campaign.cyclesRun}`,
+            detail: `Campaign ${campaign.id}: ${inverseCandidates.length} candidates, target Tc=${campaign.target.targetTc}K`,
+          });
+
+          const inverseResults: { formula: string; tc: number; lambda: number; hull: number; pressure: number; passedPipeline: boolean }[] = [];
+
+          for (const ic of inverseCandidates) {
+            try {
+              const features = extractFeatures(ic.formula);
+              if (!features) continue;
+              const gbResult = gbPredict(features);
+              if (!gbResult || gbResult.tcPredicted < 3) continue;
+
+              const candidateId = `inv-cand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              const passedStability = await insertCandidateWithStabilityCheck({
+                id: candidateId,
+                name: `Inverse-${ic.formula}`,
+                formula: ic.formula,
+                predictedTc: gbResult.tcPredicted,
+                status: "theoretical",
+                xgboostScore: gbResult.score,
+                mlFeatures: features as any,
+                notes: `Inverse design campaign ${campaign.id}, target Tc=${campaign.target.targetTc}K`,
+                electronPhononCoupling: features.electronPhononLambda,
+                crystalStructure: ic.prototype ?? null,
+              });
+
+              inverseResults.push({
+                formula: ic.formula,
+                tc: gbResult.tcPredicted,
+                lambda: features.electronPhononLambda,
+                hull: features.formationEnergy !== null ? Math.abs(features.formationEnergy) * 0.1 : 0.05,
+                pressure: features.pressureGpa ?? 0,
+                passedPipeline: passedStability,
+              });
+
+              if (passedStability) totalScCandidates++;
+            } catch {}
+          }
+
+          processInverseResults(campaign, inverseResults);
+
+          {
+            const serializable = getSerializableCampaignState(campaign);
+            await storage.updateInverseDesignCampaign(campaign.id, {
+              cyclesRun: campaign.cyclesRun,
+              bestTcAchieved: campaign.bestTcAchieved,
+              bestDistance: campaign.learningState.bestDistance,
+              candidatesGenerated: campaign.candidatesGenerated,
+              candidatesPassedPipeline: campaign.candidatesPassedPipeline,
+              status: campaign.status,
+              learningState: serializable.learningState,
+              convergenceHistory: serializable.convergenceHistory,
+              topCandidates: serializable.topCandidates,
+            });
+
+            emit("log", {
+              phase: "inverse-optimizer",
+              event: `Inverse results processed`,
+              detail: `Campaign ${campaign.id}: ${inverseResults.length} evaluated, ${inverseResults.filter(r => r.passedPipeline).length} passed, best distance=${campaign.learningState.bestDistance.toFixed(3)}, best Tc=${campaign.bestTcAchieved.toFixed(1)}K`,
+            });
+          }
+        }
+      } catch (err: any) {
+        emit("log", { phase: "inverse-optimizer", event: "Inverse optimizer error", detail: err.message?.slice(0, 200) });
       }
     }
 
@@ -1885,6 +1964,7 @@ export function getAutonomousLoopStats() {
     bayesianOptimizer: bayesianOptimizer.getStats(),
     crystalDiffusion: getDiffusionStats(),
     topologyDetection: getTopologyStats(),
+    inverseOptimizer: getInverseOptimizerStats(),
   };
 }
 
@@ -2243,11 +2323,9 @@ async function runLearningCycle() {
                       formula: normalizeFormula(sf),
                       predictedTc: Math.round(gb.tcPredicted),
                       dataConfidence: "low",
-                      source: "phase-explorer",
-                      family: classifyFamily(sf),
                       ensembleScore: Math.min(0.9, gb.score),
                       verificationStage: 0,
-                      notes: `[phase-explorer: optimal from ${chosenSet.join("-")} scan]`,
+                      notes: `[phase-explorer: optimal from ${chosenSet.join("-")} scan, family=${classifyFamily(sf)}]`,
                     });
                     if (inserted) {
                       totalScCandidates++;
@@ -2889,6 +2967,16 @@ export async function startEngine() {
 
   await backfillGBScores();
   await recalculatePhysics();
+
+  try {
+    const dbCampaigns = await storage.getInverseDesignCampaigns();
+    if (dbCampaigns.length > 0) {
+      const restored = await restoreCampaignsFromDB(dbCampaigns as any);
+      if (restored > 0) {
+        emit("log", { phase: "inverse-optimizer", event: "Campaigns restored", detail: `${restored} inverse design campaigns restored from database` });
+      }
+    }
+  } catch {}
 
   emit("log", {
     phase: "engine",

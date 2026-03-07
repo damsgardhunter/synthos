@@ -277,6 +277,31 @@ export const insertMaterialSchema = createInsertSchema(materials).omit({ learned
 export const insertLearningPhaseSchema = createInsertSchema(learningPhases).omit({ startedAt: true, completedAt: true });
 export const insertNovelPredictionSchema = createInsertSchema(novelPredictions).omit({ predictedAt: true });
 export const insertResearchLogSchema = createInsertSchema(researchLogs).omit({ id: true, timestamp: true });
+export const inverseDesignCampaigns = pgTable("inverse_design_campaigns", {
+  id: varchar("id").primaryKey(),
+  targetTc: real("target_tc").notNull(),
+  maxPressure: real("max_pressure").notNull().default(1),
+  minLambda: real("min_lambda").notNull().default(1.5),
+  maxHullDistance: real("max_hull_distance").notNull().default(0.05),
+  metallicRequired: boolean("metallic_required").notNull().default(true),
+  phononStable: boolean("phonon_stable").notNull().default(true),
+  preferredPrototypes: text("preferred_prototypes").array(),
+  preferredElements: text("preferred_elements").array(),
+  excludeElements: text("exclude_elements").array(),
+  status: text("status").notNull().default("active"),
+  cyclesRun: integer("cycles_run").notNull().default(0),
+  bestTcAchieved: real("best_tc_achieved").notNull().default(0),
+  bestDistance: real("best_distance").notNull().default(1.0),
+  candidatesGenerated: integer("candidates_generated").notNull().default(0),
+  candidatesPassedPipeline: integer("candidates_passed_pipeline").notNull().default(0),
+  learningState: jsonb("learning_state"),
+  convergenceHistory: jsonb("convergence_history"),
+  topCandidates: jsonb("top_candidates"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertInverseDesignCampaignSchema = createInsertSchema(inverseDesignCampaigns).omit({ createdAt: true });
+
 export const insertSynthesisProcessSchema = createInsertSchema(synthesisProcesses).omit({ discoveredAt: true });
 export const insertChemicalReactionSchema = createInsertSchema(chemicalReactions).omit({ learnedAt: true });
 export const insertSuperconductorCandidateSchema = createInsertSchema(superconductorCandidates).omit({ generatedAt: true });
@@ -316,5 +341,7 @@ export type InsertNovelInsight = z.infer<typeof insertNovelInsightSchema>;
 export type InsertResearchStrategy = z.infer<typeof insertResearchStrategySchema>;
 export type InsertConvergenceSnapshot = z.infer<typeof insertConvergenceSnapshotSchema>;
 export type InsertMilestone = z.infer<typeof insertMilestoneSchema>;
+export type InverseDesignCampaign = typeof inverseDesignCampaigns.$inferSelect;
+export type InsertInverseDesignCampaign = z.infer<typeof insertInverseDesignCampaignSchema>;
 
 export * from "./models/chat";

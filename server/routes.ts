@@ -13,6 +13,12 @@ import { sanitizeForbiddenWords } from "./learning/utils";
 import { runDiffusionGenerationCycle, getDiffusionStats as getDiffusionGeneratorStats } from "./ai/crystal-generator";
 import { analyzeTopology, getTopologyStats } from "./physics/topology-engine";
 import { computeElectronicStructure } from "./learning/physics-engine";
+import {
+  createCampaign, getCampaign, getAllActiveCampaigns, pauseCampaign,
+  removeCampaign, getCampaignStats, getInverseDesignStats,
+  loadCampaign, getSerializableCampaignState,
+} from "./inverse/inverse-optimizer";
+import type { TargetProperties } from "./inverse/target-schema";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -644,6 +650,134 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(analysis);
     } catch (e) {
       res.status(500).json({ error: "Failed to analyze topology" });
+    }
+  });
+
+  app.post("/api/inverse-design/start", generalLimiter, async (req, res) => {
+    try {
+      const { targetTc, maxPressure, minLambda, maxHullDistance, metallicRequired, phononStable, preferredPrototypes, preferredElements, excludeElements } = req.body;
+      if (!targetTc || typeof targetTc !== "number" || targetTc < 1 || targetTc > 500) {
+        return res.status(400).json({ error: "targetTc must be between 1 and 500" });
+      }
+      const id = `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const target: TargetProperties = {
+        targetTc,
+        maxPressure: maxPressure ?? 1,
+        minLambda: minLambda ?? 1.5,
+        maxHullDistance: maxHullDistance ?? 0.05,
+        metallicRequired: metallicRequired ?? true,
+        phononStable: phononStable ?? true,
+        preferredPrototypes: preferredPrototypes ?? [],
+        preferredElements: preferredElements ?? [],
+        excludeElements: excludeElements ?? [],
+      };
+      const campaign = createCampaign(id, target);
+      await storage.insertInverseDesignCampaign({
+        id,
+        targetTc: target.targetTc,
+        maxPressure: target.maxPressure,
+        minLambda: target.minLambda,
+        maxHullDistance: target.maxHullDistance,
+        metallicRequired: target.metallicRequired,
+        phononStable: target.phononStable,
+        preferredPrototypes: target.preferredPrototypes ?? [],
+        preferredElements: target.preferredElements ?? [],
+        excludeElements: target.excludeElements ?? [],
+        status: "active",
+        cyclesRun: 0,
+        bestTcAchieved: 0,
+        bestDistance: 1.0,
+        candidatesGenerated: 0,
+        candidatesPassedPipeline: 0,
+      });
+      res.json({ id, status: "active", target });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || "Failed to start campaign" });
+    }
+  });
+
+  app.get("/api/inverse-design/campaigns", generalLimiter, async (_req, res) => {
+    try {
+      const dbCampaigns = await storage.getInverseDesignCampaigns();
+      const results = dbCampaigns.map(c => {
+        const live = getCampaign(c.id);
+        if (live) {
+          return getCampaignStats(live);
+        }
+        return {
+          id: c.id,
+          target: { targetTc: c.targetTc, maxPressure: c.maxPressure, minLambda: c.minLambda, maxHullDistance: c.maxHullDistance, metallicRequired: c.metallicRequired, phononStable: c.phononStable },
+          status: c.status,
+          cyclesRun: c.cyclesRun,
+          bestTcAchieved: c.bestTcAchieved,
+          bestDistance: c.bestDistance,
+          candidatesGenerated: c.candidatesGenerated,
+          candidatesPassedPipeline: c.candidatesPassedPipeline,
+          topCandidates: (c.topCandidates as any) ?? [],
+          convergenceHistory: (c.convergenceHistory as any) ?? [],
+        };
+      });
+      res.json(results);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch campaigns" });
+    }
+  });
+
+  app.get("/api/inverse-design/campaign/:id", generalLimiter, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const live = getCampaign(id);
+      if (live) {
+        return res.json(getCampaignStats(live));
+      }
+      const dbCampaign = await storage.getInverseDesignCampaignById(id);
+      if (!dbCampaign) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+      res.json({
+        id: dbCampaign.id,
+        target: { targetTc: dbCampaign.targetTc, maxPressure: dbCampaign.maxPressure, minLambda: dbCampaign.minLambda, maxHullDistance: dbCampaign.maxHullDistance },
+        status: dbCampaign.status,
+        cyclesRun: dbCampaign.cyclesRun,
+        bestTcAchieved: dbCampaign.bestTcAchieved,
+        bestDistance: dbCampaign.bestDistance,
+        candidatesGenerated: dbCampaign.candidatesGenerated,
+        candidatesPassedPipeline: dbCampaign.candidatesPassedPipeline,
+        topCandidates: (dbCampaign.topCandidates as any) ?? [],
+        convergenceHistory: (dbCampaign.convergenceHistory as any) ?? [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch campaign" });
+    }
+  });
+
+  app.delete("/api/inverse-design/campaign/:id", generalLimiter, async (req, res) => {
+    try {
+      const { id } = req.params;
+      removeCampaign(id);
+      await storage.deleteInverseDesignCampaign(id);
+      res.json({ deleted: true });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to delete campaign" });
+    }
+  });
+
+  app.post("/api/inverse-design/campaign/:id/pause", generalLimiter, async (req, res) => {
+    try {
+      const { id } = req.params;
+      pauseCampaign(id);
+      await storage.updateInverseDesignCampaign(id, { status: "paused" });
+      res.json({ paused: true });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to pause campaign" });
+    }
+  });
+
+  app.get("/api/inverse-design/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getInverseDesignStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get stats" });
     }
   });
 

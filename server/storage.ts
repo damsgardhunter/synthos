@@ -4,7 +4,7 @@ import {
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
   researchStrategies, convergenceSnapshots, milestones,
-  experimentalValidations
+  experimentalValidations, inverseDesignCampaigns
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -15,7 +15,8 @@ import type {
   InsertCrystalStructure, InsertComputationalResult, InsertNovelInsight,
   ResearchStrategy, ConvergenceSnapshot, Milestone,
   InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone,
-  ExperimentalValidation, InsertExperimentalValidation
+  ExperimentalValidation, InsertExperimentalValidation,
+  InverseDesignCampaign, InsertInverseDesignCampaign
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike, isNull } from "drizzle-orm";
 
@@ -115,6 +116,12 @@ export interface IStorage {
     computationalResults: number;
     pipelineStages: { stage: number; count: number; passed: number }[];
   }>;
+
+  insertInverseDesignCampaign(campaign: InsertInverseDesignCampaign): Promise<InverseDesignCampaign>;
+  getInverseDesignCampaigns(): Promise<InverseDesignCampaign[]>;
+  getInverseDesignCampaignById(id: string): Promise<InverseDesignCampaign | undefined>;
+  updateInverseDesignCampaign(id: string, updates: Partial<InsertInverseDesignCampaign>): Promise<void>;
+  deleteInverseDesignCampaign(id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -513,6 +520,28 @@ export class DatabaseStorage implements IStorage {
       total += Number(r.count);
     }
     return { total, byResult };
+  }
+
+  async insertInverseDesignCampaign(campaign: InsertInverseDesignCampaign): Promise<InverseDesignCampaign> {
+    const [result] = await db.insert(inverseDesignCampaigns).values(campaign).returning();
+    return result;
+  }
+
+  async getInverseDesignCampaigns(): Promise<InverseDesignCampaign[]> {
+    return db.select().from(inverseDesignCampaigns).orderBy(desc(inverseDesignCampaigns.createdAt));
+  }
+
+  async getInverseDesignCampaignById(id: string): Promise<InverseDesignCampaign | undefined> {
+    const [result] = await db.select().from(inverseDesignCampaigns).where(eq(inverseDesignCampaigns.id, id));
+    return result;
+  }
+
+  async updateInverseDesignCampaign(id: string, updates: Partial<InsertInverseDesignCampaign>): Promise<void> {
+    await db.update(inverseDesignCampaigns).set(updates).where(eq(inverseDesignCampaigns.id, id));
+  }
+
+  async deleteInverseDesignCampaign(id: string): Promise<void> {
+    await db.delete(inverseDesignCampaigns).where(eq(inverseDesignCampaigns.id, id));
   }
 
   async deduplicateSuperconductorCandidates(): Promise<number> {

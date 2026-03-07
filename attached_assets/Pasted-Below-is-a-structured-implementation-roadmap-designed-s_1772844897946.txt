@@ -1,0 +1,294 @@
+Below is a structured implementation roadmap designed specifically for the architecture you described.
+The goal is to add a full inverse-design engine without breaking your existing pipeline while maximizing learning efficiency and physics validity.
+
+I organized this into 5 implementation layers, each with specific engineering tasks and how they plug into your current MatSci-∞ architecture.
+
+Layer 1 — Define the Target-Property Interface
+
+This is the entry point for inverse design. The system must understand what properties it is trying to achieve.
+
+Your inverse system should accept goal vectors.
+
+Example target:
+
+target = {
+  Tc: 290,
+  pressure: 0,
+  lambda: 2.0,
+  hullDistance: <0.05,
+  metallic: true,
+  phononStable: true
+}
+Implementation Tasks
+
+• Create target property schema
+
+Create:
+
+server/inverse/target-schema.ts
+
+Example structure:
+
+export interface TargetProperties {
+  targetTc: number
+  maxPressure: number
+  minLambda: number
+  maxHullDistance: number
+  metallicRequired: boolean
+  phononStable: boolean
+}
+
+• Add API endpoint
+
+POST /api/inverse-design/start
+
+Payload:
+
+{
+  "targetTc": 290,
+  "maxPressure": 1,
+  "minLambda": 2.0
+}
+
+• Store active targets
+
+Create table:
+
+inverseTargets
+
+Fields:
+
+id
+targetTc
+maxPressure
+lambdaTarget
+createdAt
+status
+
+This lets your system run multiple inverse design campaigns simultaneously.
+
+Layer 2 — Candidate Generator (Goal-Driven)
+
+The inverse engine must generate materials that could satisfy the targets.
+
+Instead of random exploration, this generator should:
+
+target properties → composition proposals
+Implementation Tasks
+
+Create module:
+
+server/inverse/inverse-generator.ts
+
+Responsibilities:
+
+target → generate candidate formulas
+Step 1 — Build Constraint Solver
+
+Your solver should reason about physical drivers of Tc.
+
+Use your existing physics model relationships.
+
+Example heuristic rules:
+
+High Tc requires:
+• large DOS(EF)
+• strong electron phonon coupling
+• high phonon frequencies
+• metallicity
+
+Translate those into composition bias.
+
+Example:
+
+High phonon frequency → light elements
+High lambda → covalent bonding
+High DOS → transition metals
+
+Candidate generator template:
+
+Transition metal + light element network
+
+Examples produced:
+
+NbBH4
+TiB2H4
+CaB3H6
+LaC2H6
+Step 2 — Add structure templates
+
+Use your existing prototypes:
+
+From your system:
+
+A15
+AlB2
+ThCr2Si2
+Perovskite
+Layered
+Kagome
+
+Inverse generator should pick a structure and populate it.
+
+Example:
+
+structure = AlB2
+elements = Nb + B + H
+
+Result:
+
+NbB2H4
+Step 3 — Add compositional optimizer
+
+Use iterative adjustment:
+
+Candidate
+↓
+Physics estimate
+↓
+Adjust stoichiometry
+
+Example:
+
+NbBH4
+NbBH5
+NbBH6
+NbBH8
+Layer 3 — Integration with Your Existing Pipeline
+
+This is where your architecture already shines.
+
+Your system already has:
+
+ML predictor
+GNN
+xTB DFT
+phonon stability
+convex hull
+Tc modeling
+
+You only need to feed inverse candidates into the same pipeline.
+
+Implementation Tasks
+
+Create:
+
+inverse-candidate-queue.ts
+
+Structure:
+
+interface InverseCandidate {
+  formula: string
+  source: "inverse"
+  targetId: string
+}
+
+Modify your main discovery loop:
+
+Current:
+
+massiveGenerator → pipeline
+
+Add:
+
+inverseGenerator → pipeline
+
+Example merge:
+
+candidatePool = [
+ ...massiveCandidates,
+ ...inverseCandidates
+]
+
+Now both engines share the same pipeline.
+
+Layer 4 — Inverse Learning System
+
+The inverse engine must learn from results.
+
+Every candidate evaluated returns:
+
+Tc
+lambda
+DOS
+stability
+
+This is the training signal.
+
+Implementation Tasks
+
+Create module:
+
+server/inverse/inverse-learning.ts
+Step 1 — Compute distance from target
+
+Example metric:
+
+score = 
+|Tc_target - Tc| * weight +
+|lambda_target - lambda| +
+hullPenalty
+
+Example:
+
+target Tc = 290
+predicted Tc = 110
+
+distance = 180
+Step 2 — Reward near-solutions
+
+Instead of binary success/failure, reward closeness.
+
+Example:
+
+reward = exp(-distance / scale)
+
+This allows gradual improvement.
+
+Step 3 — Update generator biases
+
+Example:
+
+Nb-B-H systems performed well
+increase probability of B-H systems
+
+Store:
+
+element success matrix
+structure success matrix
+Layer 5 — Closed-Loop Optimization
+
+This is the core of inverse design.
+
+The system should iteratively refine candidates.
+
+Cycle:
+
+target
+↓
+generate candidate
+↓
+physics evaluation
+↓
+compare to target
+↓
+update generator
+↓
+repeat
+Implementation Tasks
+
+Create:
+
+inverse-optimizer.ts
+
+Algorithm:
+
+for iteration in 1..N:
+
+  candidates = generateCandidates(target)
+
+  results = evaluateInPipeline(candidates)
+
+  updateModel(results)
+
+  refineCandidates()

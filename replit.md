@@ -43,7 +43,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Anharmonic Phonon Correction**: `lambda_corrected = lambda / (1 + anharmonic_factor)`. Hydride-specific stronger corrections: superhydrides factor 0.8× with min floor 0.25, high-p hydrides floor 0.15. Tracks both corrected and uncorrected lambda via `lambdaUncorrected` and `anharmonicCorrectionFactor`.
 - **Electron Correlation Correction**: U/W-based lambda suppression per material class. Cuprates: nonlinear suppression via `1/(1 + 1.8*(U-0.6)^1.5)` (min 0.3). Heavy fermion: strongest via `1/(1 + 2.5*(U-0.3)^2)` (min 0.15). Iron pnictides: moderate. Nickelates detected as distinct class (Ni+O+RE).
 - **Pairing Susceptibility Optimization**: Optimizes for pairing conditions (DOS, nesting, coupling channels) rather than just raw Tc, evaluating multiple pairing mechanisms.
-- **Inverse Design**: Generates materials optimized for pairing susceptibility.
+- **Inverse Design (LLM)**: Generates materials optimized for pairing susceptibility via GPT-4o-mini.
 - **Generative Crystal Structures**: Discovers structural variants and novel prototypes via LLM.
 - **Enriched ML Features**: Uses approximately 50 diverse physical and structural features for ML prediction, including `pressureGpa` and `optimalPressureGpa`.
 
@@ -158,6 +158,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Formation energy**: Computed relative to molecular/dimer reference calculations using MOLECULAR_BOND_LENGTHS (H: 0.74 Å, N: 1.10, O: 1.21 Å) for accurate reference energies. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
 - **Cache**: In-memory LRU caches for DFT results (200 entries) and elemental reference energies.
 - **Stats API**: `getXTBStats()` exposes runs, successes, cacheSize, refElements via `/api/dft-status`.
+
+### Inverse Design Optimizer Engine
+- **5-layer architecture**: Target property interface, goal-driven candidate generator, pipeline integration, inverse learning system, closed-loop optimization.
+- **Target property schema**: `TargetProperties` interface with targetTc, maxPressure, minLambda, maxHullDistance, metallicRequired, phononStable, preferred/excluded elements and prototypes.
+- **Campaign system**: Multiple simultaneous inverse design campaigns with independent learning states. DB-persisted via `inverse_design_campaigns` table.
+- **Constraint-driven generator**: Maps target properties to composition bias rules (high Tc → light elements + TM, high lambda → covalent bonding). 12 prototype-Tc affinity mappings (A15, AlB2, Perovskite, ThCr2Si2, Heusler, Layered, Kagome, NaCl, BCC, FCC, Clathrate, Fluorite). Element substitution and stoichiometry sweep for refinement.
+- **Inverse learning**: Element success matrix, pair success matrix, prototype success matrix tracking total reward and avg distance. Reward = exp(-distance/0.3) for gradual improvement. Composition bias derived from learned weights. Stagnation detection with randomized exploration.
+- **Target distance metric**: 0.50 Tc + 0.20 lambda + 0.15 hull + 0.15 pressure (weighted, normalized).
+- **Closed-loop optimizer**: Generate → evaluate in existing pipeline (GB/stability gate) → compare to target → update biases → refine top performers → repeat. Convergence detection when best distance range < 0.005 over 10 cycles.
+- **Pipeline integration**: Runs every 8 engine cycles. Inverse candidates fed through same stability gate and scoring as all other candidates. 30 fresh + 15 refined per cycle.
+- **API**: `POST /api/inverse-design/start`, `GET /api/inverse-design/campaigns`, `GET /api/inverse-design/campaign/:id`, `DELETE /api/inverse-design/campaign/:id`, `POST /api/inverse-design/campaign/:id/pause`, `GET /api/inverse-design/stats`.
+- Files: `server/inverse/target-schema.ts`, `server/inverse/inverse-generator.ts`, `server/inverse/inverse-learning.ts`, `server/inverse/inverse-optimizer.ts`
 
 ### Chemical Synthesis Realism
 - **Precursor availability scoring**: ~70-element lookup table (COMMON_ELEMENTS) mapping elements to availability scores (1.0 for Fe/Al/Si/O down to 0.2 for Os/Ir). Weighted by compositional fraction.
