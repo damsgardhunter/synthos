@@ -631,6 +631,7 @@ export interface DiscoveryScoreInput {
   prototype?: string | null;
   existingFormulas?: string[];
   topologicalScore?: number | null;
+  uncertaintyEstimate?: number | null;
 }
 
 export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
@@ -640,6 +641,7 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   stabilityScore: number;
   synthesisFeasibility: number;
   topologyContribution: number;
+  uncertaintyBonus: number;
 } {
   const normalizedTc = Math.min(1.0, Math.max(0, (candidate.predictedTc || 0) / 300));
 
@@ -695,7 +697,16 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
 
   const topologyContribution = Math.min(1.0, Math.max(0, candidate.topologicalScore ?? 0));
 
-  const discoveryScore = 0.35 * normalizedTc + 0.25 * noveltyScore + 0.2 * stabilityScore + 0.1 * synthesisFeasibility + 0.1 * topologyContribution;
+  const rawUncertainty = candidate.uncertaintyEstimate ?? 0.5;
+  const uncertaintyBonus = Math.min(1.0, Math.max(0, rawUncertainty * 1.2));
+
+  const discoveryScore =
+    0.35 * normalizedTc +
+    0.20 * stabilityScore +
+    0.15 * noveltyScore +
+    0.10 * synthesisFeasibility +
+    0.10 * topologyContribution +
+    0.10 * uncertaintyBonus;
 
   return {
     discoveryScore: Math.round(discoveryScore * 1000) / 1000,
@@ -704,6 +715,152 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
     stabilityScore: Math.round(stabilityScore * 1000) / 1000,
     synthesisFeasibility: Math.round(synthesisFeasibility * 1000) / 1000,
     topologyContribution: Math.round(topologyContribution * 1000) / 1000,
+    uncertaintyBonus: Math.round(uncertaintyBonus * 1000) / 1000,
+  };
+}
+
+const COMMON_ELEMENTS: Record<string, number> = {
+  Fe: 1.0, Al: 1.0, Si: 1.0, O: 1.0, C: 1.0, N: 0.95, Ti: 0.95,
+  Cu: 0.9, Ni: 0.9, Zn: 0.85, Mg: 0.85, Ca: 0.85, Na: 0.85, K: 0.85,
+  Mn: 0.8, Cr: 0.8, Co: 0.75, V: 0.75, B: 0.75, S: 0.8, P: 0.8,
+  Mo: 0.7, W: 0.7, Nb: 0.65, Sn: 0.7, Zr: 0.65, Ba: 0.65, Sr: 0.6,
+  Y: 0.55, La: 0.55, Ce: 0.55, Bi: 0.55, Se: 0.6, Te: 0.5,
+  Ga: 0.5, Ge: 0.5, Sb: 0.5, In: 0.45, Hf: 0.4, Ta: 0.4,
+  Pd: 0.35, Pt: 0.3, Ru: 0.3, Rh: 0.25, Os: 0.2, Ir: 0.2, Re: 0.25,
+  Sc: 0.35, Tl: 0.3, H: 0.9, Li: 0.6, Rb: 0.35, Cs: 0.3,
+  Nd: 0.45, Sm: 0.4, Gd: 0.4, Pr: 0.4, Eu: 0.35, Yb: 0.35,
+  As: 0.5, Pb: 0.6,
+};
+
+const FAMILY_SYNTHESIS_DEFAULTS: Record<string, {
+  baseScore: number;
+  typicalTempC: number;
+  pressureGPa: number;
+  atmosphereComplexity: number;
+}> = {
+  "MAX-phase": { baseScore: 0.70, typicalTempC: 1400, pressureGPa: 0, atmosphereComplexity: 0.1 },
+  "Boride": { baseScore: 0.55, typicalTempC: 1800, pressureGPa: 0, atmosphereComplexity: 0.15 },
+  "Hydride": { baseScore: 0.25, typicalTempC: 1500, pressureGPa: 150, atmosphereComplexity: 0.4 },
+  "Nitride": { baseScore: 0.55, typicalTempC: 1200, pressureGPa: 0, atmosphereComplexity: 0.2 },
+  "Intercalated-nitride": { baseScore: 0.50, typicalTempC: 1000, pressureGPa: 0, atmosphereComplexity: 0.25 },
+  "Kagome": { baseScore: 0.60, typicalTempC: 1100, pressureGPa: 0, atmosphereComplexity: 0.1 },
+  "Layered-chalcogenide": { baseScore: 0.65, typicalTempC: 900, pressureGPa: 0, atmosphereComplexity: 0.15 },
+  "Layered-pnictide": { baseScore: 0.55, typicalTempC: 1100, pressureGPa: 0, atmosphereComplexity: 0.2 },
+  "Intercalated-layered": { baseScore: 0.50, typicalTempC: 800, pressureGPa: 0, atmosphereComplexity: 0.2 },
+  "Mixed-mechanism": { baseScore: 0.55, typicalTempC: 1200, pressureGPa: 0, atmosphereComplexity: 0.15 },
+};
+
+export interface SynthesisScoreBreakdown {
+  total: number;
+  precursorAvailability: number;
+  temperatureFactor: number;
+  phaseCompetitionPenalty: number;
+  familyBase: number;
+  pressurePenalty: number;
+}
+
+export function computeSynthesisScore(
+  formula: string,
+  family: string,
+  features: MLFeatureVector,
+  hullDistance?: number | null,
+  competingPhaseCount?: number | null
+): SynthesisScoreBreakdown {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+
+  const defaults = FAMILY_SYNTHESIS_DEFAULTS[family] ?? {
+    baseScore: 0.5, typicalTempC: 1200, pressureGPa: 0, atmosphereComplexity: 0.15
+  };
+
+  let precursorAvailability = 0;
+  for (const el of elements) {
+    const availability = COMMON_ELEMENTS[el] ?? 0.15;
+    const fraction = (counts[el] || 1) / totalAtoms;
+    precursorAvailability += availability * fraction;
+  }
+  precursorAvailability = Math.min(1.0, Math.max(0, precursorAvailability));
+
+  const meltingPoints: number[] = [];
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data?.meltingPoint) meltingPoints.push(data.meltingPoint);
+  }
+  const avgMeltingPoint = meltingPoints.length > 0
+    ? meltingPoints.reduce((a, b) => a + b, 0) / meltingPoints.length
+    : 1500;
+
+  const requiredTempK = defaults.typicalTempC + 273;
+  let temperatureFactor = 1.0;
+  if (requiredTempK > avgMeltingPoint * 0.9) {
+    temperatureFactor = 0.4;
+  } else if (requiredTempK > avgMeltingPoint * 0.7) {
+    temperatureFactor = 0.7;
+  } else if (requiredTempK > 2000) {
+    temperatureFactor = 0.6;
+  } else if (requiredTempK > 1500) {
+    temperatureFactor = 0.8;
+  }
+
+  let phaseCompetitionPenalty = 0;
+  const hull = hullDistance ?? 0.05;
+  if (hull > 0.2) {
+    phaseCompetitionPenalty = 0.3;
+  } else if (hull > 0.1) {
+    phaseCompetitionPenalty = 0.2;
+  } else if (hull > 0.05) {
+    phaseCompetitionPenalty = 0.1;
+  } else if (hull > 0.01) {
+    phaseCompetitionPenalty = 0.05;
+  }
+
+  const phases = competingPhaseCount ?? 0;
+  if (phases > 5) {
+    phaseCompetitionPenalty += 0.15;
+  } else if (phases > 3) {
+    phaseCompetitionPenalty += 0.1;
+  } else if (phases > 1) {
+    phaseCompetitionPenalty += 0.05;
+  }
+  phaseCompetitionPenalty = Math.min(0.5, phaseCompetitionPenalty);
+
+  let pressurePenalty = 0;
+  if (defaults.pressureGPa > 100) {
+    pressurePenalty = 0.35;
+  } else if (defaults.pressureGPa > 50) {
+    pressurePenalty = 0.2;
+  } else if (defaults.pressureGPa > 10) {
+    pressurePenalty = 0.1;
+  }
+
+  if (family === "Hydride") {
+    const hCount = counts["H"] || 0;
+    const metalAtoms = elements.filter(e => e !== "H").reduce((s, e) => s + (counts[e] || 0), 0);
+    const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
+    if (hRatio >= 10) {
+      pressurePenalty = Math.min(0.5, pressurePenalty + 0.15);
+    } else if (hRatio >= 6) {
+      pressurePenalty = Math.min(0.45, pressurePenalty + 0.1);
+    }
+  }
+
+  const total = Math.min(1.0, Math.max(0,
+    defaults.baseScore * 0.3 +
+    precursorAvailability * 0.25 +
+    temperatureFactor * 0.2 -
+    phaseCompetitionPenalty -
+    pressurePenalty +
+    (1 - defaults.atmosphereComplexity) * 0.1
+  ));
+
+  return {
+    total: Math.round(total * 1000) / 1000,
+    precursorAvailability: Math.round(precursorAvailability * 1000) / 1000,
+    temperatureFactor: Math.round(temperatureFactor * 1000) / 1000,
+    phaseCompetitionPenalty: Math.round(phaseCompetitionPenalty * 1000) / 1000,
+    familyBase: Math.round(defaults.baseScore * 1000) / 1000,
+    pressurePenalty: Math.round(pressurePenalty * 1000) / 1000,
   };
 }
 
@@ -722,31 +879,15 @@ export function rankCandidate(
 
   const lambdaNormalized = Math.min(1.0, features.electronPhononLambda / 3.0);
 
-  let synthesisFeasibility = 0.5;
-  if (family === "Hydride") {
-    synthesisFeasibility = features.hydrogenRatio >= 6 ? 0.3 : 0.5;
-  } else if (family === "MAX-phase") {
-    synthesisFeasibility = 0.7;
-  } else if (family === "Boride") {
-    synthesisFeasibility = 0.6;
-  } else if (family === "Nitride") {
-    synthesisFeasibility = 0.55;
-  } else if (family === "Kagome") {
-    synthesisFeasibility = 0.65;
-  } else if (family === "Layered-chalcogenide") {
-    synthesisFeasibility = 0.7;
-  } else if (family === "Layered-pnictide") {
-    synthesisFeasibility = 0.6;
-  } else if (family === "Intercalated-layered") {
-    synthesisFeasibility = 0.55;
-  } else if (family === "Mixed-mechanism") {
-    synthesisFeasibility = 0.6;
-  }
+  const synthesisBreakdown = computeSynthesisScore(formula, family, features);
+  const synthesisFeasibility = synthesisBreakdown.total;
 
   const composite = 0.35 * tcNormalized +
-    0.25 * stability +
-    0.20 * lambdaNormalized +
-    0.20 * synthesisFeasibility;
+    0.20 * stability +
+    0.15 * lambdaNormalized +
+    0.10 * synthesisFeasibility +
+    0.10 * Math.min(1.0, (features as any)?.topology?.topologicalScore ?? 0) +
+    0.10 * Math.min(1.0, Math.max(0, ((features as any)?.uncertaintyEstimate ?? 0.5) * 1.2));
 
   return Math.round(composite * 1000) / 1000;
 }

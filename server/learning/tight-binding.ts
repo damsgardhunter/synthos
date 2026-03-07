@@ -40,6 +40,7 @@ export interface TBBandStructure {
   fermiEnergy: number;
   nOrbitals: number;
   formula: string;
+  tbConfidence: number;
 }
 
 export interface WannierProjection {
@@ -510,6 +511,52 @@ function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: numbe
   return eigenvalues;
 }
 
+const KNOWN_SK_ELEMENTS = new Set([
+  "Li", "Be", "B", "C", "N", "O", "F",
+  "Na", "Mg", "Al", "Si", "P", "S", "Cl",
+  "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Ga", "Ge", "As", "Se", "Br",
+  "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
+  "In", "Sn", "Sb", "Te", "I",
+  "Cs", "Ba", "La", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
+  "Tl", "Pb", "Bi",
+]);
+
+function computeTbConfidence(
+  elements: string[],
+  latticeType: string,
+  formula: string,
+): number {
+  const knownPrototypes = ["bcc", "fcc", "hexagonal"];
+  const structurePrototypeScore = knownPrototypes.includes(latticeType) ? 1.0 : 0.5;
+
+  const elementsWithParams = elements.filter(el => KNOWN_SK_ELEMENTS.has(el));
+  const elementCoverage = elements.length > 0
+    ? elementsWithParams.length / elements.length
+    : 0;
+
+  let orbitalCompleteness = 1.0;
+  const tmElements = elements.filter(el => isTransitionMetal(el) || isRareEarth(el) || isActinide(el));
+  if (tmElements.length > 0) {
+    const tmWithParams = tmElements.filter(el => KNOWN_SK_ELEMENTS.has(el));
+    const tmCoverage = tmWithParams.length / tmElements.length;
+    orbitalCompleteness = tmCoverage;
+
+    if (isActinide(elements[0]) || elements.some(el => isActinide(el))) {
+      orbitalCompleteness *= 0.6;
+    } else if (elements.some(el => isRareEarth(el))) {
+      orbitalCompleteness *= 0.75;
+    }
+  }
+
+  if (elements.includes("O") && tmElements.length > 0) {
+    orbitalCompleteness *= 0.85;
+  }
+
+  const confidence = structurePrototypeScore * elementCoverage * orbitalCompleteness;
+  return Number(Math.min(1.0, Math.max(0.0, confidence)).toFixed(4));
+}
+
 export function computeTightBindingBands(
   formula: string,
   structure?: string | null,
@@ -559,6 +606,8 @@ export function computeTightBindingBands(
     }
   }
 
+  const tbConfidence = computeTbConfidence(elements, latticeType, formula);
+
   return {
     kPoints,
     kLabels,
@@ -567,6 +616,7 @@ export function computeTightBindingBands(
     fermiEnergy,
     nOrbitals,
     formula,
+    tbConfidence,
   };
 }
 

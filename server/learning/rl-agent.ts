@@ -55,11 +55,42 @@ interface Experience {
   timestamp: number;
 }
 
+interface ElementPairPrior {
+  el1: string;
+  el2: string;
+  bias: number;
+  reason: string;
+}
+
+const KNOWN_PAIR_PRIORS: ElementPairPrior[] = [
+  { el1: "La", el2: "H", bias: 0.6, reason: "LaH10 high-Tc hydride" },
+  { el1: "Y", el2: "H", bias: 0.5, reason: "YH6/YH9 high-Tc hydride" },
+  { el1: "Ca", el2: "H", bias: 0.4, reason: "CaH6 superconducting hydride" },
+  { el1: "Ba", el2: "H", bias: 0.35, reason: "BaH hydride family" },
+  { el1: "Fe", el2: "As", bias: 0.45, reason: "Iron pnictide superconductors" },
+  { el1: "Fe", el2: "Se", bias: 0.4, reason: "FeSe superconductor family" },
+  { el1: "Cu", el2: "O", bias: 0.5, reason: "Cuprate superconductors" },
+  { el1: "Nb", el2: "B", bias: 0.35, reason: "MgB2-type boride superconductors" },
+  { el1: "Nb", el2: "N", bias: 0.3, reason: "NbN conventional superconductor" },
+  { el1: "Nb", el2: "Ge", bias: 0.3, reason: "Nb3Ge A15 superconductor" },
+  { el1: "Nb", el2: "Sn", bias: 0.3, reason: "Nb3Sn A15 superconductor" },
+  { el1: "Y", el2: "Ba", bias: 0.45, reason: "YBCO cuprate superconductor" },
+  { el1: "Bi", el2: "Se", bias: 0.3, reason: "Topological superconductor candidate" },
+  { el1: "Bi", el2: "Sr", bias: 0.35, reason: "BSCCO cuprate superconductor" },
+  { el1: "Mg", el2: "B", bias: 0.4, reason: "MgB2 conventional superconductor" },
+  { el1: "La", el2: "Cu", bias: 0.35, reason: "LSCO cuprate family" },
+  { el1: "Ir", el2: "H", bias: 0.3, reason: "Iridium hydride candidate" },
+  { el1: "Ce", el2: "H", bias: 0.35, reason: "Cerium hydride candidate" },
+  { el1: "Th", el2: "H", bias: 0.3, reason: "Thorium hydride candidate" },
+  { el1: "V", el2: "Si", bias: 0.25, reason: "V3Si A15 superconductor" },
+];
+
 interface PolicyWeights {
   elementGroup: number[];
   stoichTemplate: number[];
   structureType: number[];
   elementPairBias: number[][];
+  elementPairSpecific: Map<string, number>;
 }
 
 function softmax(logits: number[], temperature: number = 1.0): number[] {
@@ -118,9 +149,14 @@ export class RLChemicalSpaceAgent {
         { length: ELEMENT_GROUPS.length },
         () => new Array(ELEMENT_GROUPS.length).fill(0)
       ),
+      elementPairSpecific: new Map<string, number>(),
     };
 
     this.initializePriors();
+  }
+
+  private makeElementPairKey(el1: string, el2: string): string {
+    return [el1, el2].sort().join("-");
   }
 
   private initializePriors(): void {
@@ -140,6 +176,11 @@ export class RLChemicalSpaceAgent {
     this.policy.structureType[3] = 0.15;
     this.policy.structureType[4] = 0.2;
     this.policy.structureType[8] = 0.1;
+
+    for (const prior of KNOWN_PAIR_PRIORS) {
+      const key = this.makeElementPairKey(prior.el1, prior.el2);
+      this.policy.elementPairSpecific.set(key, prior.bias);
+    }
   }
 
   selectAction(state: RLState): RLAction {
@@ -200,6 +241,23 @@ export class RLChemicalSpaceAgent {
       if (idx >= 0 && stats.total > 5) {
         const successRate = stats.successes / stats.total;
         elementBias[idx] += (successRate - 0.5) * 0.3;
+      }
+    }
+
+    for (let gi = 0; gi < ELEMENT_GROUPS.length; gi++) {
+      let groupPairBoost = 0;
+      let pairCount = 0;
+      for (const el of ELEMENT_GROUPS[gi].elements) {
+        for (const [pairKey, bias] of this.policy.elementPairSpecific) {
+          const pairParts = pairKey.split("-");
+          if ((pairParts[0] === el || pairParts[1] === el) && Math.abs(bias) > 0.05) {
+            groupPairBoost += bias;
+            pairCount++;
+          }
+        }
+      }
+      if (pairCount > 0) {
+        elementBias[gi] += (groupPairBoost / pairCount) * 0.4;
       }
     }
 
@@ -284,7 +342,7 @@ export class RLChemicalSpaceAgent {
 
   recordElementOutcome(elements: string[], tc: number, passed: boolean): void {
     for (const el of elements) {
-      const group = ELEMENT_GROUPS.find(g => g.elements.includes(el));
+      const group = ELEMENT_GROUPS.find(g => (g.elements as readonly string[]).includes(el));
       if (!group) continue;
 
       const stats = this.elementSuccessRates.get(group.name) || { successes: 0, total: 0 };
@@ -296,12 +354,21 @@ export class RLChemicalSpaceAgent {
     if (elements.length >= 2) {
       for (let i = 0; i < elements.length; i++) {
         for (let j = i + 1; j < elements.length; j++) {
-          const pair = [elements[i], elements[j]].sort().join("-");
+          const pair = this.makeElementPairKey(elements[i], elements[j]);
           const stats = this.pairSuccessRates.get(pair) || { successes: 0, total: 0, avgTc: 0 };
           stats.total++;
           if (tc > 20) stats.successes++;
           stats.avgTc = (stats.avgTc * (stats.total - 1) + tc) / stats.total;
           this.pairSuccessRates.set(pair, stats);
+
+          const currentBias = this.policy.elementPairSpecific.get(pair) ?? 0;
+          const lr = this.learningRate * 0.3;
+          if (tc > 50) {
+            const tcBonus = Math.min(0.5, (tc - 50) / 400);
+            this.policy.elementPairSpecific.set(pair, currentBias + lr * tcBonus);
+          } else if (tc < 5 && stats.total > 5) {
+            this.policy.elementPairSpecific.set(pair, Math.max(-0.3, currentBias - lr * 0.1));
+          }
         }
       }
     }
@@ -315,9 +382,12 @@ export class RLChemicalSpaceAgent {
     const candidates: string[] = [];
     const seen = new Set<string>();
 
+    const pairWeightedElements1 = this.getWeightedElements(group1.elements, group2.elements);
+    const pairWeightedElements2 = this.getWeightedElements(group2.elements, group1.elements);
+
     for (let attempt = 0; attempt < count * 5 && candidates.length < count; attempt++) {
-      const el1 = group1.elements[Math.floor(Math.random() * group1.elements.length)];
-      const el2 = group2.elements[Math.floor(Math.random() * group2.elements.length)];
+      const el1 = this.sampleWeightedElement(pairWeightedElements1, group1.elements);
+      const el2 = this.sampleWeightedElement(pairWeightedElements2, group2.elements);
       if (el1 === el2) continue;
 
       let formula: string;
@@ -347,6 +417,46 @@ export class RLChemicalSpaceAgent {
     }
 
     return candidates;
+  }
+
+  private getWeightedElements(
+    elements: readonly string[],
+    partnerElements: readonly string[]
+  ): Map<string, number> {
+    const weights = new Map<string, number>();
+    for (const el of elements) {
+      let w = 1.0;
+      for (const partner of partnerElements) {
+        const key = this.makeElementPairKey(el, partner);
+        const pairBias = this.policy.elementPairSpecific.get(key) ?? 0;
+        w += pairBias;
+      }
+      const pairStats = this.pairSuccessRates;
+      for (const partner of partnerElements) {
+        const key = this.makeElementPairKey(el, partner);
+        const stats = pairStats.get(key);
+        if (stats && stats.total >= 3) {
+          const successRate = stats.successes / stats.total;
+          w += (successRate - 0.3) * 0.5;
+        }
+      }
+      weights.set(el, Math.max(0.1, w));
+    }
+    return weights;
+  }
+
+  private sampleWeightedElement(
+    weights: Map<string, number>,
+    elements: readonly string[]
+  ): string {
+    const totalWeight = Array.from(weights.values()).reduce((a, b) => a + b, 0);
+    let r = Math.random() * totalWeight;
+    for (const el of elements) {
+      const w = weights.get(el) ?? 1.0;
+      r -= w;
+      if (r <= 0) return el;
+    }
+    return elements[elements.length - 1];
   }
 
   computeReward(

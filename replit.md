@@ -39,6 +39,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Deterministic Calculations**: All physics calculations are fully deterministic, utilizing a comprehensive elemental database of 96 elements.
 - **Advanced Parameter Calculation**: Includes methods for DOS at Fermi level, bandwidth, Hubbard U/W, lambda, phonon frequencies, and metallicity.
 - **Specialized Material Handling**: Incorporates specific physics adjustments for superhydrides, High-Entropy Alloys (HEAs), and unconventional superconductor mechanisms.
+- **Screened Coulomb Pseudopotential (mu*)**: Thomas-Fermi screening from DOS(EF), bandwidth-aware Morel-Anderson renormalization, material-class-specific defaults (hydrides ~0.10, cuprates ~0.13, conventional ~0.12, heavy fermion ~0.15). Blends 50/50 with class default. Range [0.08, 0.20].
+- **Anharmonic Phonon Correction**: `lambda_corrected = lambda / (1 + anharmonic_factor)`. Hydride-specific stronger corrections: superhydrides factor 0.8× with min floor 0.25, high-p hydrides floor 0.15. Tracks both corrected and uncorrected lambda via `lambdaUncorrected` and `anharmonicCorrectionFactor`.
+- **Electron Correlation Correction**: U/W-based lambda suppression per material class. Cuprates: nonlinear suppression via `1/(1 + 1.8*(U-0.6)^1.5)` (min 0.3). Heavy fermion: strongest via `1/(1 + 2.5*(U-0.3)^2)` (min 0.15). Iron pnictides: moderate. Nickelates detected as distinct class (Ni+O+RE).
 - **Pairing Susceptibility Optimization**: Optimizes for pairing conditions (DOS, nesting, coupling channels) rather than just raw Tc, evaluating multiple pairing mechanisms.
 - **Inverse Design**: Generates materials optimized for pairing susceptibility.
 - **Generative Crystal Structures**: Discovers structural variants and novel prototypes via LLM.
@@ -52,7 +55,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Majorana feasibility**: Estimates Majorana quasiparticle hosting potential from Z2, SOC, band inversion, and Dirac node probabilities.
 - **Topological classification**: Classifies as topological-superconductor, strong-TI, Chern-insulator, topological-crystalline-insulator, weak-topological, SOC-enhanced, or trivial.
 - **Score composition**: topologicalScore = 0.30 SOC + 0.25 band_inversion + 0.25 symmetry_invariants + 0.20 flat_band + pattern_bonus.
-- **Discovery score integration**: Weights rebalanced to 0.35 Tc + 0.25 novelty + 0.20 stability + 0.10 synthesis + 0.10 topology.
+- **Discovery score integration**: Weights unified to 0.35 Tc + 0.20 stability + 0.15 novelty + 0.10 synthesis + 0.10 topology + 0.10 uncertainty_bonus.
 - **API**: `GET /api/topology/:formula` (full analysis), `GET /api/topology-stats` (aggregate stats).
 - Files: `server/physics/topology-engine.ts`
 
@@ -78,7 +81,10 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Policy**: softmax over learned weights with temperature annealing (1.0 → 0.3), epsilon-greedy exploration with decay (0.15 → 0.05), stagnation-boosted exploration.
 - **Reward**: Tc improvement (normalized to 400K) × 2.0 + relative improvement × 5.0 + pipeline pass bonus (1.0) + stability × 0.5 + novelty × 0.3.
 - **Experience replay**: 2000-entry buffer with periodic 32-sample batch replay for stable learning.
-- **Element pair tracking**: Records element-group success rates and element-pair average Tc for contextual biasing.
+- **Element pair tracking**: Records element-group success rates and element-pair average Tc for contextual biasing. `elementPairSpecific` Map stores per-pair learned weights.
+- **Known pair priors**: 20 explicit superconducting element pair priors (La+H, Fe+As, Nb+B, Cu+O, Y+Ba, Bi+Se, Mg+B, etc.) with calibrated initial biases.
+- **Pair-weighted sampling**: `getWeightedElements` and `sampleWeightedElement` preferentially sample elements with higher pair priors and historical success rates during candidate generation.
+- **Pair reward feedback**: Element pair specific weights updated based on observed Tc (Tc>50 reinforced, Tc<5 with sufficient samples penalized).
 - **Physics-informed priors**: 4d-transition metals, hydride-rich stoichiometries, A15/ThCr2Si2 structures initialized with positive bias.
 - Files: `server/learning/rl-agent.ts`
 
@@ -127,7 +133,8 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - Enforces a hard rejection criteria for candidates with hull distance > 0.1 eV/atom, with additional metastability assessment for borderline cases.
 
 ### Discovery Score
-- A composite metric (`0.4 × normalizedTc + 0.3 × noveltyScore + 0.2 × stabilityScore + 0.1 × synthesisFeasibility`) that includes bonuses for chemical novelty.
+- Unified composite metric: `0.35 Tc + 0.20 stability + 0.15 novelty + 0.10 synthesis + 0.10 topology + 0.10 uncertainty_bonus`.
+- Uncertainty bonus encourages exploration of under-sampled chemical regions (scaled 1.2× from raw uncertainty estimate).
 - Prioritizes higher-scoring candidates for DFT enrichment.
 
 ### Active Learning Loop
@@ -151,6 +158,15 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Formation energy**: Computed relative to molecular/dimer reference calculations using MOLECULAR_BOND_LENGTHS (H: 0.74 Å, N: 1.10, O: 1.21 Å) for accurate reference energies. Sanity guard: |Ef| > 15 eV/atom is discarded as unphysical. Uses actual DFT atom count (not formula count) to handle scaled structures correctly.
 - **Cache**: In-memory LRU caches for DFT results (200 entries) and elemental reference energies.
 - **Stats API**: `getXTBStats()` exposes runs, successes, cacheSize, refElements via `/api/dft-status`.
+
+### Chemical Synthesis Realism
+- **Precursor availability scoring**: ~70-element lookup table (COMMON_ELEMENTS) mapping elements to availability scores (1.0 for Fe/Al/Si/O down to 0.2 for Os/Ir). Weighted by compositional fraction.
+- **Family-specific synthesis defaults**: Calibrated per-family base scores, reaction temperatures, pressure requirements, and atmosphere complexity (e.g., hydrides: base 0.25, 150 GPa; MAX-phases: base 0.70, no pressure).
+- **Reaction temperature factor**: Penalizes materials where synthesis temperature approaches or exceeds constituent melting points.
+- **Phase competition penalty**: Combines hull distance and competing phase count. Materials with hull > 0.2 eV or > 5 competing phases receive significant penalties.
+- **Pressure penalty**: High-pressure synthesis requirements (especially hydrides with high H/metal ratios) penalized for difficulty and cost.
+- **Exported**: `computeSynthesisScore()` with `SynthesisScoreBreakdown` interface for transparency.
+- Files: `server/learning/family-filters.ts`
 
 ### Analytical Physics Estimators (coverage ~1.00)
 - **Debye temperature**: θD ≈ 41.6 * sqrt(B / ρ) when elemental data unavailable.
@@ -194,6 +210,7 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Band structure solver**: Solves H(k) along high-symmetry k-paths (Γ-X-M-Γ for cubic, Γ-K-M-Γ for hexagonal, Γ-H-P-Γ-N for BCC).
 - **Wannier projection**: Extracts orbital-resolved band character, effective hopping parameters, and Wannier spread/localization metrics.
 - **Band topology detection**: Identifies flat bands (bandwidth < 0.1 eV), van Hove singularities (∂²E/∂k² → 0), Dirac crossings (linear dispersion), and topological band inversions (parity eigenvalue check).
+- **TB Confidence Score**: `tbConfidence = structurePrototypeScore × elementCoverage × orbitalCompleteness`. structurePrototypeScore: 1.0 for known lattices (BCC/FCC/HEX), 0.5 for guessed. elementCoverage: fraction of elements with proper Slater-Koster params. orbitalCompleteness: reduced for actinides (0.6×), rare earths (0.75×), TM oxides (0.85×).
 - **TB DOS**: Histogram-based DOS from band eigenvalues with Gaussian broadening. Blended into physics-engine DOS estimate (60% heuristic + 40% TB-derived).
 - **Integration**: Called in `computeElectronicStructure()` to refine flatBandIndicator, vanHoveProximity, topologicalBandScore, and densityOfStatesAtFermi. Results cached (500 entries).
 - Files: `server/learning/tight-binding.ts`, `server/learning/physics-engine.ts`

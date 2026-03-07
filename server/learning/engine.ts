@@ -2335,6 +2335,7 @@ async function runLearningCycle() {
               prototype: pc.prototype,
               existingFormulas: existingFormulaList.slice(0, 100),
               topologicalScore: protoTopoScore,
+              uncertaintyEstimate: gnnResult?.uncertainty ?? 0.5,
             });
 
             if (!prototypeCounts[pc.prototype]) {

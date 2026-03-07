@@ -322,6 +322,7 @@ export async function runActiveLearningCycle(
           formula: existingCandidate.formula,
           hullDistance: hullDist,
           synthesisScore: existingCandidate.stabilityScore ?? 0.5,
+          uncertaintyEstimate: (existingCandidate.mlFeatures as any)?.uncertaintyEstimate ?? 0.5,
         });
         await storage.updateSuperconductorCandidate(existingCandidate.id, {
           discoveryScore: discoveryResult.discoveryScore,

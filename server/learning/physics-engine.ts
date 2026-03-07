@@ -234,6 +234,8 @@ export interface PhononSpectrum {
 
 export interface ElectronPhononCoupling {
   lambda: number;
+  lambdaUncorrected: number;
+  anharmonicCorrectionFactor: number;
   omegaLog: number;
   muStar: number;
   isStrongCoupling: boolean;
@@ -382,6 +384,108 @@ function classifyMaterialForLambda(formula: string, pressureGpa: number = 0): Ma
   if (lightFrac > 0.3) return "light-element";
 
   return "conventional-metal";
+}
+
+function getMuStarDefaultForClass(matClass: MaterialClass): number {
+  switch (matClass) {
+    case "superhydride": return 0.10;
+    case "hydride-high-p": return 0.10;
+    case "hydride-low-p": return 0.11;
+    case "cuprate": return 0.13;
+    case "iron-pnictide": return 0.12;
+    case "conventional-metal": return 0.12;
+    case "heavy-fermion": return 0.15;
+    case "light-element": return 0.11;
+    case "other": return 0.12;
+  }
+}
+
+function computeScreenedMuStar(
+  elements: string[],
+  counts: Record<string, number>,
+  matClass: MaterialClass,
+  dosAtFermi: number,
+  debyeTemperature: number,
+): number {
+  const classDefault = getMuStarDefaultForClass(matClass);
+
+  if (elements.length === 0) return classDefault;
+
+  const totalAtoms = getTotalAtoms(counts);
+  const avgEN = getCompositionWeightedProperty(counts, "paulingElectronegativity") || 1.8;
+  let mu_bare = 0.10 + avgEN * 0.02;
+
+  if (elements.length >= 2) {
+    const enValues = elements.map(el => getElementData(el)?.paulingElectronegativity ?? 1.8);
+    const enSpread = Math.max(...enValues) - Math.min(...enValues);
+    if (enSpread > 1.5) mu_bare += 0.02 * (enSpread - 1.5);
+  }
+  if (elements.some(e => isTransitionMetal(e) && hasDOrFElectrons(e))) {
+    mu_bare += 0.02;
+  }
+
+  let wAvg = 0;
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    wAvg += estimateBandwidthW(el) * frac;
+  }
+  wAvg = Math.max(1.0, wAvg);
+
+  const N_EF = Math.max(0.1, dosAtFermi);
+  const k_TF_sq = 4 * Math.PI * N_EF;
+  const screeningFactor = k_TF_sq / (k_TF_sq + 1.0);
+  mu_bare *= screeningFactor;
+
+  const E_F_eV = Math.max(1.0, wAvg * 0.5 + N_EF * 0.5);
+  const omega_D_eV = Math.max(0.001, debyeTemperature * 8.617e-5);
+  const logRatio = Math.log(Math.max(E_F_eV / omega_D_eV, 1.1));
+  const muStarMA = mu_bare / (1 + mu_bare * logRatio);
+
+  const muStarBlended = 0.5 * muStarMA + 0.5 * classDefault;
+
+  return Number(Math.max(0.08, Math.min(0.20, muStarBlended)).toFixed(4));
+}
+
+function getCorrelationPenaltyForClass(matClass: MaterialClass, uOverW: number, correlationStrength: number): number {
+  if (uOverW < 0.2 && correlationStrength < 0.3) return 1.0;
+
+  let penalty = 1.0;
+
+  switch (matClass) {
+    case "cuprate": {
+      const effectiveU = Math.max(uOverW, 0.85);
+      if (effectiveU > 0.6) {
+        penalty = 1.0 / (1.0 + 1.8 * Math.pow(effectiveU - 0.6, 1.5));
+      }
+      penalty *= Math.max(0.3, 1.0 - correlationStrength * 0.5);
+      break;
+    }
+    case "heavy-fermion": {
+      const effectiveU = Math.max(uOverW, 0.7);
+      penalty = 1.0 / (1.0 + 2.5 * Math.pow(effectiveU - 0.3, 2));
+      penalty *= Math.max(0.15, 1.0 - correlationStrength * 0.7);
+      break;
+    }
+    case "iron-pnictide": {
+      const effectiveU = Math.max(uOverW, 0.55);
+      if (effectiveU > 0.4) {
+        penalty = 1.0 / (1.0 + 1.2 * Math.pow(effectiveU - 0.4, 1.3));
+      }
+      penalty *= Math.max(0.4, 1.0 - correlationStrength * 0.4);
+      break;
+    }
+    default: {
+      if (uOverW > 0.5) {
+        penalty = 1.0 / (1.0 + 0.8 * Math.pow(uOverW - 0.5, 1.2));
+      }
+      if (correlationStrength > 0.5) {
+        penalty *= Math.max(0.5, 1.0 - (correlationStrength - 0.5) * 0.6);
+      }
+      break;
+    }
+  }
+
+  return Math.max(0.05, Math.min(1.0, penalty));
 }
 
 function getLambdaCapForClass(matClass: MaterialClass): number {
@@ -592,10 +696,10 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
     const en = data.paulingElectronegativity;
 
     if (nonmetals.includes(el)) {
-      anionEN += en * frac;
+      anionEN += (en ?? 0) * frac;
       anionWeight += frac;
     } else {
-      cationEN += en * frac;
+      cationEN += (en ?? 0) * frac;
       cationWeight += frac;
     }
   }
@@ -605,7 +709,7 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
     if (data) {
       if (nonmetals.includes(elements[0])) return 0.1;
       if (isTransitionMetal(elements[0]) || isRareEarth(elements[0]) || isActinide(elements[0])) return 0.92;
-      if (data.paulingElectronegativity < 1.8) return 0.90;
+      if ((data.paulingElectronegativity ?? 0) < 1.8) return 0.90;
       return 0.5;
     }
   }
@@ -786,7 +890,7 @@ export function computeElectronicStructure(
   }
 
   let metallicity = estimateMetallicity(elements, counts, mpData);
-  const densityOfStatesAtFermi = estimateDOSatFermi(elements, counts);
+  let densityOfStatesAtFermi = estimateDOSatFermi(elements, counts);
 
   const hasTM = elements.some(e => isTransitionMetal(e));
   const hasRE = elements.some(e => isRareEarth(e));
@@ -877,10 +981,10 @@ export function computeElectronicStructure(
   if (isPnictide || isDichalcogenide) {
     const hasDonorAcceptor = elements.some(e => {
       const d = getElementData(e);
-      return d && d.paulingElectronegativity < 1.5;
+      return d && (d.paulingElectronegativity ?? 0) < 1.5;
     }) && elements.some(e => {
       const d = getElementData(e);
-      return d && d.paulingElectronegativity > 2.0;
+      return d && (d.paulingElectronegativity ?? 0) > 2.0;
     });
     if (hasDonorAcceptor) nestingScore = Math.min(1.0, nestingScore + 0.08);
   }
@@ -1287,13 +1391,17 @@ export function computeElectronPhononCoupling(
 
     const isHEALambda = formula ? detectHighEntropyAlloy(formula) : false;
 
+    const uOverWForCorr = estimateHubbardUoverW(elements, counts);
+    const matClassForCorr = classifyMaterialForLambda(formula, pressureGpa);
+    const correlationPenalty = getCorrelationPenaltyForClass(matClassForCorr, uOverWForCorr, corr);
+
     if (isPureSuperhydrideLambda) {
     } else if (isHEALambda && metal > 0.4) {
       const massDisorderBoost = 1.0 + elements.length * 0.03;
       lambda *= massDisorderBoost;
-      if (corr > 0.7) lambda *= (1.0 - (corr - 0.7) * 0.3);
+      lambda *= Math.max(0.5, correlationPenalty);
     } else {
-      if (corr > 0.7) lambda *= (1.0 - (corr - 0.7) * 0.5);
+      lambda *= correlationPenalty;
       if (metal < 0.4) lambda *= metal;
     }
 
@@ -1304,7 +1412,10 @@ export function computeElectronPhononCoupling(
     lambda = N_EF * 0.15 * (1 + phononSpectrum.anharmonicityIndex * 0.5);
     const nsNoFormula = electronicStructure.nestingScore ?? 0;
     lambda *= (1 + nsNoFormula * 0.2);
-    if (corr > 0.7) lambda *= 0.6;
+    if (corr > 0.5) {
+      const noFormulaCorrPenalty = 1.0 / (1.0 + 1.5 * Math.pow(corr - 0.5, 1.5));
+      lambda *= noFormulaCorrPenalty;
+    }
     if (metal < 0.4) lambda *= metal;
   }
 
@@ -1332,6 +1443,28 @@ export function computeElectronPhononCoupling(
     lambda *= Math.max(0.5, instabilityDamp);
   }
 
+  const lambdaUncorrected = lambda;
+
+  let anharmonicFactor = phononSpectrum.anharmonicityIndex * 0.5;
+
+  const isHydrideClass = matClass === "superhydride" || matClass === "hydride-high-p" || matClass === "hydride-low-p";
+  if (isHydrideClass) {
+    anharmonicFactor = phononSpectrum.anharmonicityIndex * 0.8;
+    if (matClass === "superhydride") {
+      anharmonicFactor = Math.max(anharmonicFactor, 0.25);
+    } else if (matClass === "hydride-high-p") {
+      anharmonicFactor = Math.max(anharmonicFactor, 0.15);
+    }
+  }
+
+  if (phononSpectrum.anharmonicityIndex > 0.3) {
+    anharmonicFactor += (phononSpectrum.anharmonicityIndex - 0.3) * 0.2;
+  }
+
+  anharmonicFactor = Math.max(0, Math.min(0.6, anharmonicFactor));
+
+  lambda = lambda / (1 + anharmonicFactor);
+
   const omegaLogRange = getOmegaLogRangeForClass(matClass);
   let clampedOmegaLog = omega_log;
   const omegaLogK = omega_log * 1.44;
@@ -1340,24 +1473,10 @@ export function computeElectronPhononCoupling(
 
   const formulaCounts = formula ? parseFormulaCounts(formula) : {};
   const formulaElements = formula ? parseFormulaElements(formula) : [];
-  const avgEN = formula ? (getCompositionWeightedProperty(formulaCounts, "paulingElectronegativity") || 1.8) : 1.8;
-  let mu_bare = 0.1 + avgEN * 0.02;
 
-  if (formulaElements.length >= 2) {
-    const enValues = formulaElements.map(el => getElementData(el)?.paulingElectronegativity ?? 1.8);
-    const enSpread = Math.max(...enValues) - Math.min(...enValues);
-    if (enSpread > 1.5) mu_bare += 0.02 * (enSpread - 1.5);
-  }
-  if (formulaElements.some(e => isTransitionMetal(e) && hasDOrFElectrons(e))) {
-    mu_bare += 0.02;
-  }
-
-  const thetaD = phononSpectrum.debyeTemperature;
-  const E_F_eV = 5.0 + N_EF * 0.5;
-  const omega_D_eV = thetaD * 8.617e-5;
-  const logRatio = Math.log(Math.max(E_F_eV / Math.max(omega_D_eV, 0.001), 1.1));
-  const muStar = mu_bare / (1 + mu_bare * logRatio);
-  const muStarClamped = Math.max(0.10, Math.min(0.20, muStar));
+  const muStarClamped = computeScreenedMuStar(
+    formulaElements, formulaCounts, matClass, N_EF, phononSpectrum.debyeTemperature
+  );
 
   const isStrongCoupling = lambda > 1.5;
 
@@ -1368,6 +1487,8 @@ export function computeElectronPhononCoupling(
 
   return {
     lambda: Number(lambda.toFixed(3)),
+    lambdaUncorrected: Number(lambdaUncorrected.toFixed(3)),
+    anharmonicCorrectionFactor: Number(anharmonicFactor.toFixed(4)),
     omegaLog: Math.round(clampedOmegaLog),
     muStar: Number(muStarClamped.toFixed(4)),
     isStrongCoupling,
@@ -2815,10 +2936,16 @@ export async function runFullPhysicsAnalysis(
   const isNonMetallic = electronicStructure.metallicity < 0.4;
 
   const formulaEls = parseFormulaElements(formula);
+  const formulaCts = parseFormulaCounts(formula);
   const hasDWaveSymmetry = formulaEls.includes("Cu") && formulaEls.includes("O") && formulaEls.length >= 3;
   const hasLayeredStructure = electronicStructure.fermiSurfaceTopology.includes("2D") ||
     (electronicStructure.orbitalCharacter.includes("hybridized") && formula.includes("O"));
+  const isNickelate = formulaEls.includes("Ni") && formulaEls.includes("O") && formulaEls.length >= 3
+    && formulaEls.some(e => isRareEarth(e) || ["La", "Nd", "Pr", "Sr"].includes(e));
   const isHEAPhysics = detectHighEntropyAlloy(formula);
+  const tcUoverW = estimateHubbardUoverW(formulaEls, formulaCts);
+  const tcMatClass = classifyMaterialForLambda(formula, candidatePressure);
+  const tcCorrelationPenalty = getCorrelationPenaltyForClass(tcMatClass, tcUoverW, correlation.ratio);
 
   if (isNonMetallic) {
     const metalFactor = Math.max(0.02, electronicStructure.metallicity);
@@ -2828,19 +2955,30 @@ export async function runFullPhysicsAnalysis(
     eliashberg.predictedTc = eliashberg.predictedTc * 0.05;
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 3)];
   } else if (correlation.ratio > 0.7) {
-    const corrFactor = hasDWaveSymmetry ? 0.5 : hasLayeredStructure ? 0.4 : 0.3;
+    const baseFactor = hasDWaveSymmetry ? 0.5 : isNickelate ? 0.35 : hasLayeredStructure ? 0.4 : 0.3;
+    const uWBoost = tcUoverW > 1.0 ? Math.max(0.5, 1.0 - (tcUoverW - 1.0) * 0.3) : 1.0;
+    const corrFactor = baseFactor * uWBoost * Math.sqrt(tcCorrelationPenalty);
     eliashberg.predictedTc = eliashberg.predictedTc * corrFactor;
     eliashberg.confidenceBand = [
       Math.round(eliashberg.predictedTc * 0.3),
-      Math.round(eliashberg.predictedTc * (hasDWaveSymmetry ? 3.0 : 2.5)),
+      Math.round(eliashberg.predictedTc * (hasDWaveSymmetry ? 3.0 : isNickelate ? 2.5 : 2.0)),
     ];
+    emit("log", {
+      phase: "phase-10",
+      event: "Correlation Tc suppression",
+      detail: `${formula}: U/W=${tcUoverW.toFixed(3)}, corrRatio=${correlation.ratio.toFixed(3)}, penalty=${tcCorrelationPenalty.toFixed(3)}, class=${tcMatClass}, corrFactor=${corrFactor.toFixed(3)}`,
+      dataSource: "Physics Engine",
+    });
   } else if (correlation.ratio > 0.5) {
-    const corrFactor = hasLayeredStructure ? 0.85 : hasDWaveSymmetry ? 0.8 : 0.7;
+    const baseFactor = hasLayeredStructure ? 0.85 : hasDWaveSymmetry ? 0.8 : isNickelate ? 0.65 : 0.7;
+    const corrFactor = baseFactor * Math.sqrt(tcCorrelationPenalty);
     eliashberg.predictedTc = eliashberg.predictedTc * corrFactor;
     eliashberg.confidenceBand = [
       Math.round(eliashberg.predictedTc * 0.6),
       Math.round(eliashberg.predictedTc * 1.5),
     ];
+  } else if (correlation.ratio > 0.3 && tcCorrelationPenalty < 0.9) {
+    eliashberg.predictedTc = eliashberg.predictedTc * tcCorrelationPenalty;
   }
 
   let dimensionality = candidate.dimensionality || "3D";
