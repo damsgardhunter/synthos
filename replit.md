@@ -75,7 +75,7 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Physics-Constrained Generative AI**: Enforces charge neutrality, atomic radius compatibility, coordination number limits, and bond stability.
 - **Structure-First Design**: Selects SC structural motifs, fills site roles with element candidates, and evaluates using GB Tc prediction.
 - **Chemical Synthesis Realism**: Scores precursor availability, family-specific synthesis defaults, reaction temperature factors, and phase competition penalties.
-- **Autonomous Discovery Loop**: Massive generation pipeline (500-2000 candidates/cycle) with multi-stage filtering and a tiered acceptance system.
+- **Autonomous Discovery Loop**: Massive generation pipeline (500-2000 candidates/cycle) with multi-stage filtering and a tiered acceptance system. Closed-loop feedback from all 6 analysis subsystems: Defect Engine (adds mutated formulas to candidate pool), Correlation Engine (boosts Tc for strongly-correlated materials), Synthesis Optimizer (feasibility bonuses), Crystal Growth Simulator (quality bonuses), Experiment Planner (generates plans for top candidates every 5 cycles), Pressure Pathways (ambient retention boosts and ambient variant candidates). All feedback metrics tracked in `feedbackLoopStats` and exposed via `/api/engine/memory` under `autonomousLoopStats.feedbackLoops`. Feedback signals also feed into RL reward computation.
 - **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication of insights.
 - **NLP Engine**: Generates cross-property correlation insights and superconductor correlation analysis.
 - **Milestone Event Tracker**: Detects and persists research milestones to DB, displayed on Research Pipeline page.

@@ -78,7 +78,7 @@ import { recordSynthesisResult, getSynthesisLearningStats } from "../synthesis/s
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "../physics/defect-engine";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "../physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "../synthesis/crystal-growth-simulator";
-import { getExperimentPlannerStats } from "../experiment-planner";
+import { getExperimentPlannerStats, generateExperimentPlan, type ExperimentCandidate } from "../experiment-planner";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 import { runHypothesisCycle, getTopHypothesesForGeneratorBias, getHypothesisStats } from "../theory/hypothesis-engine";
@@ -182,6 +182,22 @@ let lastTheoryDiscoveryCycle = 0;
 let lastCausalDiscoveryCycle = 0;
 let causalDesignGuidance: { variable: string; direction: string; causalImpactOnTc: number }[] = [];
 let theoryFeedbackBias: { biasedVariables: string[]; biasedElements: string[] } = { biasedVariables: [], biasedElements: [] };
+
+let feedbackLoopStats = {
+  defectCandidatesAdded: 0,
+  defectTotalTcBoost: 0,
+  correlationBoostsApplied: 0,
+  correlationTotalTcBoost: 0,
+  synthesisFeasibilityBonuses: 0,
+  synthesisTotalFeasibilityBoost: 0,
+  growthQualityBonuses: 0,
+  growthTotalQualityBoost: 0,
+  experimentPlansGenerated: 0,
+  experimentDFTPrioritized: 0,
+  pressurePathwayBoosts: 0,
+  pressurePathwayBestAmbientTc: 0,
+  pressurePathwayBestFormula: "",
+};
 
 interface PreviousCycleMetrics {
   bestTc: number;
@@ -2318,10 +2334,32 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       try {
         const pathway = getPathwayForCandidate(formula, finalTc, candidatePressure);
         if (pathway.bestAmbientTc > 20 && pathway.strategies.length > 0) {
+          if (pathway.retentionPercent > 50) {
+            const retentionBoost = 1 + (pathway.retentionPercent / 100) * 0.08;
+            finalTc = Math.min(400, Math.round(finalTc * retentionBoost));
+            feedbackLoopStats.pressurePathwayBoosts++;
+          }
+          if (pathway.bestAmbientTc > feedbackLoopStats.pressurePathwayBestAmbientTc) {
+            feedbackLoopStats.pressurePathwayBestAmbientTc = pathway.bestAmbientTc;
+            feedbackLoopStats.pressurePathwayBestFormula = pathway.bestAmbientFormula;
+          }
+          if (pathway.bestAmbientFormula && !alreadyScreenedFormulas.has(pathway.bestAmbientFormula)) {
+            alreadyScreenedFormulas.add(pathway.bestAmbientFormula);
+            try {
+              await storage.createSuperconductorCandidate({
+                formula: pathway.bestAmbientFormula,
+                predictedTc: pathway.bestAmbientTc,
+                score: Math.min(1, pathway.bestAmbientTc / 293 * 0.6),
+                structure: "pressure-stabilized",
+                elements: formula,
+                magneticProperties: `Ambient variant of ${formula} (${pathway.retentionPercent}% Tc retention from ${candidatePressure}GPa). Strategy: ${pathway.strategies[0]?.type}`,
+              });
+            } catch {}
+          }
           emit("log", {
             phase: "engine",
             event: "Pressure-to-ambient pathway",
-            detail: `${formula} (Tc=${finalTc}K, P=${candidatePressure}GPa): best ambient candidate ${pathway.bestAmbientFormula} est. Tc=${pathway.bestAmbientTc}K (${pathway.retentionPercent}% retention). Strategy: ${pathway.strategies[0]?.type}. Feasibility: ${pathway.feasibility}`,
+            detail: `${formula} (Tc=${finalTc}K, P=${candidatePressure}GPa): best ambient candidate ${pathway.bestAmbientFormula} est. Tc=${pathway.bestAmbientTc}K (${pathway.retentionPercent}% retention). Strategy: ${pathway.strategies[0]?.type}. Feasibility: ${pathway.feasibility}. Variant added to pool.`,
             dataSource: "Pressure Pathway",
           });
         }
@@ -2737,11 +2775,18 @@ async function runAutonomousFastPath() {
               : "metastable-difficult",
             energyAboveHull: result.physicsPred?.hullDistance ?? 0.1,
           };
-          optimizeSynthesisConditions(synthCtx);
+          const synthResult = optimizeSynthesisConditions(synthCtx);
 
           const sv = defaultSynthesisVector(family);
           const effects = simulateSynthesisEffects(formula, family, sv);
           recordSynthesisResult(formula, family, sv, result.tc, 1 - (result.physicsPred?.hullDistance ?? 0.1));
+
+          if (synthResult.overallFeasibility > 0.6) {
+            const feasBonus = synthResult.overallFeasibility * 0.05;
+            result.tc = Math.min(400, Math.round(result.tc * (1 + feasBonus)));
+            feedbackLoopStats.synthesisFeasibilityBonuses++;
+            feedbackLoopStats.synthesisTotalFeasibilityBoost += feasBonus;
+          }
 
           if (result.tc > 30 && cycleCount % 10 === 0) {
             try {
@@ -2773,7 +2818,24 @@ async function runAutonomousFastPath() {
                 return adj.tcModifier > (best?.tcMod ?? 0) ? { defect: d, tcMod: adj.tcModifier } : best;
               }, null as { defect: any; tcMod: number } | null);
               if (bestDefect && bestDefect.tcMod > 1.05) {
-                emit("log", { phase: "defect-engine", event: "Defect enhancement found", detail: `${formula}: ${bestDefect.defect.type} defect at ${bestDefect.defect.element} -> Tc modifier ${bestDefect.tcMod.toFixed(3)}` });
+                const defectTc = Math.round(result.tc * bestDefect.tcMod);
+                const defectFormula = bestDefect.defect.mutatedFormula || formula;
+                if (!alreadyScreenedFormulas.has(defectFormula) && defectFormula !== formula) {
+                  alreadyScreenedFormulas.add(defectFormula);
+                  feedbackLoopStats.defectCandidatesAdded++;
+                  feedbackLoopStats.defectTotalTcBoost += bestDefect.tcMod - 1;
+                  try {
+                    await storage.createSuperconductorCandidate({
+                      formula: defectFormula,
+                      predictedTc: defectTc,
+                      score: Math.min(1, (result.tc > 0 ? defectTc / 293 : 0) * 0.7),
+                      structure: "defect-engineered",
+                      elements: formula,
+                      magneticProperties: `Defect: ${bestDefect.defect.type} at ${bestDefect.defect.element}, Tc boost ${bestDefect.tcMod.toFixed(3)}x from ${formula}`,
+                    });
+                  } catch {}
+                }
+                emit("log", { phase: "defect-engine", event: "Defect enhancement found", detail: `${formula}: ${bestDefect.defect.type} defect at ${bestDefect.defect.element} -> Tc modifier ${bestDefect.tcMod.toFixed(3)}, defect variant ${defectFormula} (est. ${defectTc}K) added to pool` });
               }
             }
           } catch {}
@@ -2783,17 +2845,53 @@ async function runAutonomousFastPath() {
               UoverW: result.physicsPred?.UoverW,
               dosAtEF: result.physicsPred?.dosAtEF,
             });
-            if (corrEffects.tcModifier > 1.1) {
-              emit("log", { phase: "correlation-engine", event: "Strong correlation boost", detail: `${formula}: ${corrEffects.regime.regime} regime, Tc modifier ${corrEffects.tcModifier.toFixed(3)}, patterns: ${corrEffects.materialPatterns.join(", ")}` });
+            if (corrEffects.tcModifier > 1.05) {
+              const corrBoost = Math.min(corrEffects.tcModifier, 1.5);
+              const boostedTc = Math.min(400, Math.round(result.tc * corrBoost));
+              if (boostedTc > result.tc) {
+                feedbackLoopStats.correlationBoostsApplied++;
+                feedbackLoopStats.correlationTotalTcBoost += corrBoost - 1;
+                result.tc = boostedTc;
+              }
+              emit("log", { phase: "correlation-engine", event: "Correlation boost applied", detail: `${formula}: ${corrEffects.regime.regime} regime, Tc ${result.tc}K -> ${boostedTc}K (modifier ${corrEffects.tcModifier.toFixed(3)}), patterns: ${corrEffects.materialPatterns.join(", ")}` });
             }
           } catch {}
 
           try {
             const growthResult = simulateCrystalGrowth(formula, family, sv);
+            if (growthResult.qualityScore >= 0.6) {
+              const growthBonus = growthResult.qualityScore * 0.03;
+              result.tc = Math.min(400, Math.round(result.tc * (1 + growthBonus)));
+              feedbackLoopStats.growthQualityBonuses++;
+              feedbackLoopStats.growthTotalQualityBoost += growthBonus;
+            }
             if (growthResult.qualityScore < 0.3) {
               emit("log", { phase: "crystal-growth", event: "Growth challenge identified", detail: `${formula}: quality=${growthResult.qualityScore.toFixed(2)}, grain=${growthResult.grainStructure.grainSize.toFixed(0)}nm` });
             }
           } catch {}
+
+          if (result.tc > 40 && cycleCount % 5 === 0) {
+            try {
+              const expCandidate: ExperimentCandidate = {
+                formula,
+                predictedTc: result.tc,
+                stability: 1 - (result.physicsPred?.hullDistance ?? 0.1),
+                synthesisFeasibility: synthResult?.overallFeasibility ?? 0.5,
+                novelty: alreadyScreenedFormulas.has(formula) ? 0.3 : 0.8,
+                uncertainty: result.physicsPred?.lambdaUncertainty ?? 0.5,
+                materialClass: family,
+                crystalStructure: "predicted",
+              };
+              const plan = generateExperimentPlan(expCandidate);
+              feedbackLoopStats.experimentPlansGenerated++;
+              if (plan.ranking.experimentScore > 0.6) {
+                feedbackLoopStats.experimentDFTPrioritized++;
+                const expBonus = (plan.ranking.experimentScore - 0.6) * 0.08;
+                result.tc = Math.min(400, Math.round(result.tc * (1 + expBonus)));
+                emit("log", { phase: "experiment-planner", event: "Experiment plan generated", detail: `${formula}: score=${plan.ranking.experimentScore.toFixed(3)}, Tc boosted by ${(expBonus * 100).toFixed(1)}%, timeline=${plan.timeline}, risk=${plan.riskAssessment}. ${plan.characterization.length} characterization methods suggested.` });
+              }
+            } catch {}
+          }
         } catch {}
         passed++;
         autonomousTotalPassed++;
@@ -2860,6 +2958,25 @@ async function runAutonomousFastPath() {
         const memBonus = discoveryMemory.computeMemoryRewardBonus(topFp);
         rlReward += memBonus.bonus * 0.5;
       } catch {}
+    }
+
+    if (feedbackLoopStats.defectCandidatesAdded > 0) {
+      rlReward += 0.05 * Math.min(3, feedbackLoopStats.defectCandidatesAdded);
+    }
+    if (feedbackLoopStats.correlationBoostsApplied > 0) {
+      rlReward += 0.03 * Math.min(5, feedbackLoopStats.correlationBoostsApplied);
+    }
+    if (feedbackLoopStats.synthesisFeasibilityBonuses > 0) {
+      rlReward += 0.02 * Math.min(5, feedbackLoopStats.synthesisFeasibilityBonuses);
+    }
+    if (feedbackLoopStats.growthQualityBonuses > 0) {
+      rlReward += 0.02 * Math.min(5, feedbackLoopStats.growthQualityBonuses);
+    }
+    if (feedbackLoopStats.experimentDFTPrioritized > 0) {
+      rlReward += 0.03 * Math.min(3, feedbackLoopStats.experimentDFTPrioritized);
+    }
+    if (feedbackLoopStats.pressurePathwayBoosts > 0) {
+      rlReward += 0.04 * Math.min(3, feedbackLoopStats.pressurePathwayBoosts);
     }
 
     rlAgent.updatePolicy(rlState, rlAction, rlReward);
@@ -2953,7 +3070,7 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail}${landscapeDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
+      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail}${landscapeDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples. Feedback loops: defect=${feedbackLoopStats.defectCandidatesAdded} added, corr=${feedbackLoopStats.correlationBoostsApplied} boosts, synth=${feedbackLoopStats.synthesisFeasibilityBonuses} bonuses, growth=${feedbackLoopStats.growthQualityBonuses}, exp-plans=${feedbackLoopStats.experimentPlansGenerated}, pressure=${feedbackLoopStats.pressurePathwayBoosts}.`,
       dataSource: "Autonomous Loop",
     });
   } finally {
@@ -3019,6 +3136,33 @@ export async function getAutonomousLoopStats() {
       theoryFeedbackBias,
       lastTheoryDiscoveryCycle,
       lastCausalDiscoveryCycle,
+    },
+    feedbackLoops: {
+      defect: {
+        candidatesAdded: feedbackLoopStats.defectCandidatesAdded,
+        avgTcBoost: feedbackLoopStats.defectCandidatesAdded > 0 ? feedbackLoopStats.defectTotalTcBoost / feedbackLoopStats.defectCandidatesAdded : 0,
+      },
+      correlation: {
+        boostsApplied: feedbackLoopStats.correlationBoostsApplied,
+        avgTcBoost: feedbackLoopStats.correlationBoostsApplied > 0 ? feedbackLoopStats.correlationTotalTcBoost / feedbackLoopStats.correlationBoostsApplied : 0,
+      },
+      synthesis: {
+        feasibilityBonuses: feedbackLoopStats.synthesisFeasibilityBonuses,
+        avgBoost: feedbackLoopStats.synthesisFeasibilityBonuses > 0 ? feedbackLoopStats.synthesisTotalFeasibilityBoost / feedbackLoopStats.synthesisFeasibilityBonuses : 0,
+      },
+      crystalGrowth: {
+        qualityBonuses: feedbackLoopStats.growthQualityBonuses,
+        avgBoost: feedbackLoopStats.growthQualityBonuses > 0 ? feedbackLoopStats.growthTotalQualityBoost / feedbackLoopStats.growthQualityBonuses : 0,
+      },
+      experimentPlanner: {
+        plansGenerated: feedbackLoopStats.experimentPlansGenerated,
+        dftPrioritized: feedbackLoopStats.experimentDFTPrioritized,
+      },
+      pressurePathways: {
+        boostsApplied: feedbackLoopStats.pressurePathwayBoosts,
+        bestAmbientTc: feedbackLoopStats.pressurePathwayBestAmbientTc,
+        bestAmbientFormula: feedbackLoopStats.pressurePathwayBestFormula,
+      },
     },
   };
 }
