@@ -46,12 +46,14 @@ import { analyzeTopology, trackTopologyResult, getTopologyStats, type Topologica
 import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
 import { encodeGenome, genomeDiversity, type MaterialGenome } from "../physics/materials-genome";
 import { computeFermiSurface, type FermiSurfaceResult } from "../physics/fermi-surface-engine";
+import { assignToCluster, getClusterGuidance } from "../physics/fermi-surface-clustering";
 import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetworkAnalysis } from "../physics/hydrogen-network-engine";
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
+import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, rebalanceWeights } from "./generator-manager";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
@@ -449,6 +451,9 @@ async function runPhase7_Superconductor() {
       try {
         const inverseDesigned = await generateInverseDesignCandidates(emit, allInsights);
         totalScCandidates += inverseDesigned;
+        if (inverseDesigned > 0) {
+          recordGeneratorOutcome("inverse_design", true, 0, 0.5);
+        }
       } catch (err: any) {
         emit("log", { phase: "phase-7", event: "Inverse design error", detail: err.message?.slice(0, 150), dataSource: "Inverse Design" });
       }
@@ -1134,6 +1139,14 @@ async function runPhase10_Physics() {
               dataSource: "Fermi Surface Engine",
             });
           }
+          try {
+            const clusterResult = assignToCluster(candidate.formula, fermiSurfaceAnalysis, candidate.predictedTc ?? 0);
+            (updatedMlFeatures as any).fermiCluster = {
+              clusterId: clusterResult.clusterId,
+              clusterName: clusterResult.clusterName,
+              similarity: clusterResult.similarity,
+            };
+          } catch {}
         } catch {}
 
         let bandSurrogatePrediction: BandSurrogatePrediction | undefined;
@@ -1685,6 +1698,9 @@ async function runPhase11_StructurePrediction() {
               totalScCandidates++;
               diffInserted++;
               bayesianOptimizer.addObservation(normalized, rawTc, lambdaML, crystal.noveltyScore);
+              recordGeneratorOutcome("motif_diffusion", true, rawTc, crystal.noveltyScore);
+            } else {
+              recordGeneratorOutcome("motif_diffusion", false, rawTc, 0.1);
             }
           } catch {}
         }
@@ -1726,6 +1742,9 @@ async function runPhase11_StructurePrediction() {
               if (inserted) {
                 totalScCandidates++;
                 structInserted++;
+                recordGeneratorOutcome("structure_diffusion", true, Math.round(gbResult.tcPredicted), 0.5);
+              } else {
+                recordGeneratorOutcome("structure_diffusion", false, Math.round(gbResult.tcPredicted), 0.1);
               }
             }
           } catch {}
@@ -2108,7 +2127,10 @@ async function runAutonomousFastPath() {
     const rlAction = rlAgent.selectAction(rlState);
     const rlDescription = rlAgent.getActionDescription(rlAction);
 
-    const rlCandidates = rlAgent.generateCandidatesFromAction(rlAction, 30);
+    const budget = allocateBudget(200);
+    const rlSlots = budget.allocations["rl"] ?? 30;
+
+    const rlCandidates = rlAgent.generateCandidatesFromAction(rlAction, rlSlots);
 
     let focusArea = currentStrategyFocusAreas[0]?.area || "Carbides";
     const EXPLORATION_FAMILIES = [
@@ -2212,6 +2234,18 @@ async function runAutonomousFastPath() {
 
       bayesianOptimizer.addObservation(formula, result.tc, result.physicsPred?.lambda ?? 0, result.passed ? 1 : 0);
 
+      const isRlCandidate = rlCandidates.includes(formula);
+      const isBoCandidate = boTopFormulas.includes(formula);
+      if (isRlCandidate) {
+        recordGeneratorOutcome("rl", result.passed, result.tc, result.passed ? 0.6 : 0.1);
+      }
+      if (isBoCandidate) {
+        recordGeneratorOutcome("bo_exploration", result.passed, result.tc, result.passed ? 0.7 : 0.1);
+      }
+      if (!isRlCandidate && !isBoCandidate) {
+        recordGeneratorOutcome("massive_combinatorial", result.passed, result.tc, result.passed ? 0.5 : 0.1);
+      }
+
       try {
         const els = parseFormulaElements(formula);
         rlAgent.recordElementOutcome(els, result.tc, result.passed);
@@ -2296,14 +2330,14 @@ async function runAutonomousFastPath() {
         const dataset = getFeatureDataset();
         const srData = dataset
           .filter(r => r.tc > 0 && Number.isFinite(r.tc))
-          .map(r => ({ features: r.featureVector as Record<string, number>, target: r.tc }));
+          .map(r => ({ ...(r.featureVector as Record<string, number>), tc: r.tc }));
         if (srData.length >= 15) {
           const theories = runSymbolicRegression(srData, "tc", { populationSize: 100, generations: 25 });
           if (theories.length > 0) {
             emit("log", {
               phase: "engine",
               event: "Theory discovery cycle",
-              detail: `Symbolic regression on ${srData.length} samples: found ${theories.length} candidate equations. Best: ${theories[0].equation} (R²=${theories[0].accuracy.toFixed(3)}, complexity=${theories[0].complexity}, plausibility=${theories[0].plausibilityScore.toFixed(2)})`,
+              detail: `Symbolic regression on ${srData.length} samples: found ${theories.length} candidate equations. Best: ${theories[0].equation} (R²=${theories[0].r2.toFixed(3)}, cvScore=${theories[0].cvScore.toFixed(3)}, complexity=${theories[0].complexity}, plausibility=${theories[0].plausibility.toFixed(2)}, overfit=${theories[0].isOverfit})`,
               dataSource: "Theory Discovery Engine",
             });
           }
@@ -2311,19 +2345,36 @@ async function runAutonomousFastPath() {
       } catch {}
     }
 
+    rebalanceWeights();
+
+    const clusterGuidance = getClusterGuidance();
+    if (clusterGuidance.highPotentialClusters.length > 0 || clusterGuidance.underExploredClusters.length > 0) {
+      const highPotential = clusterGuidance.highPotentialClusters.map(c => `${c.clusterId}(avgTc=${c.avgTc.toFixed(0)}K)`).join(", ");
+      const underExplored = clusterGuidance.underExploredClusters.map(c => c.clusterId).join(", ");
+      emit("log", {
+        phase: "engine",
+        event: "Fermi surface cluster guidance",
+        detail: `High-potential FS clusters: [${highPotential}]. Under-explored: [${underExplored}]. Total clustered: ${clusterGuidance.totalMaterials}. Suggestions: ${clusterGuidance.suggestions.slice(0, 2).join("; ")}`,
+        dataSource: "FS Clustering",
+      });
+    }
+
     const perfMetrics = getPerformanceMetrics();
     const boStats = bayesianOptimizer.getStats();
     const rlStats = rlAgent.getStats();
+    const genAllocations = getGeneratorAllocations();
 
     const patternDetail = patternFiltered > 0 ? ` Pattern filter removed ${patternFiltered}/${candidates.length} (${activeRules.length} rules active).` : "";
     const physicsDetail = physicsPrefiltered > 0 ? ` Physics pre-filter rejected ${physicsPrefiltered}/${filteredCandidates.length}.` : "";
     const memDetail = memStats.totalRecords > 0 ? ` Memory: ${memStats.totalRecords} patterns, ${memStats.clusterCount} clusters.` : "";
     const theoryDetail = getDatasetSize() > 0 ? ` FeatureDB: ${getDatasetSize()} records, theories: ${getDiscoveredTheories().length}.` : "";
     const perfDetail = perfMetrics.totalPredictions > 0 ? ` PerfTrack: MAE=${perfMetrics.overall.mae.toFixed(1)}K, R²=${perfMetrics.overall.r2.toFixed(3)}.` : "";
+    const genDetail = ` Generators: ${genAllocations.generators.map(g => `${g.name}=${(g.weight * 100).toFixed(0)}%`).join(", ")}.`;
+    const fsClusterDetail = clusterGuidance.totalMaterials > 0 ? ` FS clusters: ${clusterGuidance.totalMaterials} materials in ${clusterGuidance.highPotentialClusters.length} high-potential clusters.` : "";
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
+      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
       dataSource: "Autonomous Loop",
     });
   } finally {
@@ -2360,6 +2411,8 @@ export function getAutonomousLoopStats() {
     structureFirstDesign: getStructureDiffusionStats(),
     physicsConstraints: getConstraintEngineStats(),
     scPillarsOptimizer: getPillarOptimizerStats(),
+    generatorAllocations: getGeneratorAllocations(),
+    fermiSurfaceClusters: getClusterGuidance(),
   };
 }
 

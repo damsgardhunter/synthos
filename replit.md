@@ -120,8 +120,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Symbolic regression** (genetic programming) discovers mathematical relationships from simulation data.
 - **Unified Physics Feature Database** (`server/theory/physics-feature-db.ts`): 20-dim feature vector (DOS_EF, VHS, band_flatness, FS_dim, phonon_log_freq, lambda, nesting, orbital_degeneracy, charge_transfer, lattice_anisotropy, mott_proximity, spin_fluctuation, cdw_proximity, quantum_critical_score, pairing_strength, H_density, correlation, bandwidth, debye_temp, anharmonicity). LRU cache 2000 entries.
 - **Symbolic Regression** (`server/theory/symbolic-regression.ts`): Expression tree GP with operations (+,-,*,/,^,sqrt,exp,log). Population 200, 50 generations, tournament selection. Physics constraint filters (reject negative Tc scaling, exponents >5). Theory knowledge base stores best equations.
+- **Overfitting Mitigation**: K-fold cross-validation (k=5, uses avg validation R² as fitness), holdout validation (20% reserved), physics plausibility scoring (dimensional consistency, monotonicity checks, McMillan-like term bonuses). `TheoryCandidate` includes `validationR2`, `validationMAE`, `cvScore`, `overfitRatio`, `isOverfit`, `plausibilityDetails`. Overfit flag when overfitRatio > 1.5 or cvScore < 0.3. `getValidationStats()` provides aggregate validation metrics.
 - **Theory feedback**: Discovered equations (e.g., Tc ∝ DOS^1.2 * nesting^0.8) translate into design constraints for inverse design guidance.
-- **APIs**: `GET /api/theory/features/:formula`, `GET /api/theory/discovered`, `POST /api/theory/discover`
+- **APIs**: `GET /api/theory/features/:formula`, `GET /api/theory/discovered` (includes validationStats), `POST /api/theory/discover`
 - **Pipeline integration**: Features recorded after every physics evaluation; symbolic regression runs every 10 autonomous cycles when ≥20 records.
 
 ### Multi-Scale Physics Modeling
@@ -147,6 +148,22 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Known system calibration**: FeSe/SrTiO3 (~65K), LAO/STO (~0.3K interface SC), twisted bilayer graphene (~1.7K).
 - **APIs**: `GET /api/interface/:layerA/:layerB`, `GET /api/interface-candidates`
 - Files: `server/physics/interface-engine.ts`
+
+### Generator Resource Manager
+- **Centralized allocation** (`server/learning/generator-manager.ts`) for 7 candidate generators: RL (40%), inverse_design (15%), BO_exploration (15%), massive_combinatorial (10%), structure_diffusion (10%), motif_diffusion (5%), random_exploration (5%).
+- **Adaptive rebalancing**: Every 5 cycles, adjusts weights via softmax on normalized yield scores (pass rate 40% + best Tc 40% + novelty 20%). Minimum 2% floor per generator.
+- **Budget system**: `allocateBudget(totalSlots)` distributes candidate slots proportionally. Each generator gets at least 1 slot.
+- **Stats tracking**: Per-generator candidates generated/passed, best Tc, avg Tc, novelty score (exponential moving average).
+- **Pipeline integration**: Called at start of autonomous loop, parameterizes RL/massive gen counts, records outcomes after screening.
+- **API**: `GET /api/generator-allocations`
+
+### Fermi Surface Topology Clustering
+- **9-dim FS feature vector** (`server/physics/fermi-surface-clustering.ts`): pocketCount, electronPocketCount, holePocketCount, electronHoleBalance, cylindricalCharacter, nestingScore, fsDimensionality, sigmaBandPresence, multiBandScore.
+- **5 archetype clusters**: cuprate_cylinder (high cylindrical, 2D, strong nesting), pnictide_eh_pockets (balanced e-h, moderate nesting), kagome_flat (high multiBand, 2D), hydride_multiband (high pockets, 3D, high sigma), conventional_3d (3D, low nesting, few pockets).
+- **Clustering**: Cosine similarity to archetypes (threshold 0.65). Novel clusters auto-discovered when no archetype matches.
+- **Search guidance**: `getClusterGuidance()` identifies high-Tc clusters and under-explored clusters for targeted search.
+- **Pipeline integration**: After FS computation in Phase 10, `assignToCluster(formula, fsResult, tc)` assigns materials. Cluster ID stored in `mlFeatures.fermiCluster`.
+- **APIs**: `GET /api/fermi-clusters`, `GET /api/fermi-clusters/:clusterId`
 
 ### Quantum Criticality Detector
 - **Unified quantum critical point (QCP) detector** formalizing existing spin susceptibility, CDW, SDW, Mott detection into a single QuantumCriticalScore.

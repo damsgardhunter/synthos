@@ -47,16 +47,18 @@ import {
 } from "./physics/hydrogen-network-engine";
 import { analyzeReactionNetwork } from "./physics/reaction-network-engine";
 import { computeFermiSurface } from "./physics/fermi-surface-engine";
+import { getAllClusters, getCluster, getClusterGuidance, getClusterStats } from "./physics/fermi-surface-clustering";
 import { predictBandStructure } from "./physics/band-structure-surrogate";
 import { predictStability } from "./physics/stability-predictor";
 import { analyzeInterface, generateHeterostructureCandidates } from "./physics/interface-engine";
 import { detectQuantumCriticality } from "./physics/quantum-criticality";
 import { discoveryMemory } from "./learning/discovery-memory";
 import { computeFeatureVector, buildAndStoreFeatureRecord, getFeatureDataset, getDatasetSize, getFeatureRecord } from "./theory/physics-feature-db";
-import { runSymbolicRegression, getDiscoveredTheories, theoryKnowledgeBase } from "./theory/symbolic-regression";
+import { runSymbolicRegression, getDiscoveredTheories, theoryKnowledgeBase, getValidationStats } from "./theory/symbolic-regression";
 import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAnalysis } from "./theory/multi-scale-engine";
 import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
 import { getPerformanceMetrics, recordPrediction } from "./theory/model-performance-tracker";
+import { getGeneratorAllocations } from "./learning/generator-manager";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1227,7 +1229,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const theories = getDiscoveredTheories();
       const datasetSize = getDatasetSize();
-      res.json({ theories, datasetSize, theoryCount: theories.length });
+      const validationStats = getValidationStats();
+      res.json({ theories, datasetSize, theoryCount: theories.length, validationStats });
     } catch (e: any) {
       res.status(500).json({ error: "Theory query failed", detail: e.message?.slice(0, 200) });
     }
@@ -1300,12 +1303,43 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/generator-allocations", generalLimiter, (_req, res) => {
+    try {
+      const allocations = getGeneratorAllocations();
+      res.json(allocations);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch generator allocations", detail: e.message?.slice(0, 200) });
+    }
+  });
+
   app.get("/api/theory/performance", generalLimiter, (_req, res) => {
     try {
       const metrics = getPerformanceMetrics();
       res.json(metrics);
     } catch (e: any) {
       res.status(500).json({ error: "Performance metrics failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/fermi-clusters", generalLimiter, (_req, res) => {
+    try {
+      const clusters = getAllClusters();
+      const stats = getClusterStats();
+      const guidance = getClusterGuidance();
+      res.json({ clusters, stats, guidance });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch Fermi clusters", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/fermi-clusters/:clusterId", generalLimiter, (req, res) => {
+    try {
+      const clusterId = req.params.clusterId;
+      const cluster = getCluster(clusterId);
+      if (!cluster) return res.status(404).json({ error: "Cluster not found" });
+      res.json(cluster);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch Fermi cluster", detail: e.message?.slice(0, 200) });
     }
   });
 
