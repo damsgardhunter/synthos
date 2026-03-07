@@ -49,6 +49,7 @@ import { analyzeReactionNetwork } from "./physics/reaction-network-engine";
 import { computeFermiSurface } from "./physics/fermi-surface-engine";
 import { getAllClusters, getCluster, getClusterGuidance, getClusterStats } from "./physics/fermi-surface-clustering";
 import { predictBandStructure } from "./physics/band-structure-surrogate";
+import { predictBandDispersion, getBandOperatorStats } from "./physics/band-structure-operator";
 import { predictStability } from "./physics/stability-predictor";
 import { analyzeInterface, generateHeterostructureCandidates } from "./physics/interface-engine";
 import { detectQuantumCriticality } from "./physics/quantum-criticality";
@@ -64,6 +65,8 @@ import { getZoneMap } from "./landscape/zone-detector";
 import { getFullLandscapeGuidance } from "./landscape/landscape-guidance";
 import { solveConstraints, evaluateFormulaAgainstConstraints } from "./inverse/constraint-solver";
 import { searchPressurePathways, getPathwayStats, getAmbientCandidatesFromPathways } from "./inverse/pressure-pathway";
+import { solveConstraintGraph, getFeasibleRegions } from "./inverse/constraint-graph-solver";
+import { computeSynthesisPathway, getSynthesisPathwayStats } from "./synthesis/reaction-pathway";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1435,6 +1438,81 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ ...stats, ambientCandidates: candidates });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch pathway stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-pathway/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getSynthesisPathwayStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch synthesis pathway stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-pathway/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = computeSynthesisPathway(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute synthesis pathway", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/band-operator/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getBandOperatorStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch band operator stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/band-operator/dispersion/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = predictBandDispersion(formula);
+      res.json({
+        formula: result.formula,
+        dispersion: result.dispersion,
+        derivedQuantities: result.derivedQuantities,
+        confidence: result.confidence,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict band dispersion", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/band-operator/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = predictBandDispersion(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict band structure", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/constraint-graph/solve", generalLimiter, (req, res) => {
+    try {
+      const targetTc = Number(req.query.targetTc) || 200;
+      const muStar = Number(req.query.muStar) || 0.10;
+      const solution = solveConstraintGraph(targetTc, muStar);
+      res.json(solution);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to solve constraint graph", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/constraint-graph/feasible-regions", generalLimiter, (req, res) => {
+    try {
+      const targetTc = Number(req.query.targetTc) || 200;
+      const muStar = Number(req.query.muStar) || 0.10;
+      const result = getFeasibleRegions(targetTc, muStar);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute feasible regions", detail: e.message?.slice(0, 200) });
     }
   });
 

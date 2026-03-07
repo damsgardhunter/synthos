@@ -50,6 +50,7 @@ import { assignToCluster, getClusterGuidance } from "../physics/fermi-surface-cl
 import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetworkAnalysis } from "../physics/hydrogen-network-engine";
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
+import { predictBandDispersion, getBandOperatorMLFeatures, type BandOperatorResult } from "../physics/band-structure-operator";
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
@@ -60,7 +61,9 @@ import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../lan
 import { getZoneBonus, getLandscapeRLBias } from "../landscape/landscape-guidance";
 import { getZoneMap } from "../landscape/zone-detector";
 import { getConstraintGuidanceForGenerator } from "../inverse/constraint-solver";
+import { getConstraintGraphGuidance } from "../inverse/constraint-graph-solver";
 import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pathway";
+import { triggerSynthesisPathwayForCandidate } from "../synthesis/reaction-pathway";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 
@@ -1171,6 +1174,23 @@ async function runPhase10_Physics() {
           }
         } catch {}
 
+        let bandOperatorResult: BandOperatorResult | undefined;
+        try {
+          bandOperatorResult = predictBandDispersion(
+            candidate.formula,
+            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
+          );
+          (updatedMlFeatures as any).bandOperator = getBandOperatorMLFeatures(bandOperatorResult);
+          if (bandOperatorResult.derivedQuantities.vhsPositions.length > 0 || bandOperatorResult.derivedQuantities.topologicalInvariants.bandInversionCount > 0) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Band operator dispersion predicted",
+              detail: `${candidate.formula}: path=${bandOperatorResult.dispersion.path}, nBands=${bandOperatorResult.dispersion.nBands}, VHS=${bandOperatorResult.derivedQuantities.vhsPositions.length}, inversions=${bandOperatorResult.derivedQuantities.topologicalInvariants.bandInversionCount}, topo=${bandOperatorResult.derivedQuantities.topologicalInvariants.topologicalClass}, berry=${bandOperatorResult.derivedQuantities.topologicalInvariants.berryPhaseProxy.toFixed(3)}, conf=${bandOperatorResult.confidence.toFixed(2)}`,
+              dataSource: "Band Structure Operator",
+            });
+          }
+        } catch {}
+
         let qcAnalysis: QuantumCriticalAnalysis | undefined;
         try {
           qcAnalysis = detectQuantumCriticality(candidate.formula, {
@@ -1801,6 +1821,37 @@ async function runPhase12_MultiFidelity() {
       if (passedCount > 0) {
         allInsights.push(`Multi-fidelity pipeline: ${passedCount}/${results.length} candidates passed all 5 stages`);
       }
+
+      for (const r of results.filter(pr => pr.passed)) {
+        try {
+          const candidate = unscreened.find(c => c.id === r.candidateId);
+          if (!candidate) continue;
+          const pathwayResult = triggerSynthesisPathwayForCandidate(
+            r.formula,
+            candidate.predictedTc ?? 0,
+            r.finalStage,
+          );
+          if (pathwayResult && pathwayResult.bestRoute) {
+            emit("log", {
+              phase: "phase-12",
+              event: "Synthesis pathway computed",
+              detail: `${r.formula}: best=${pathwayResult.bestRoute.routeName} (${(pathwayResult.bestRoute.feasibilityScore * 100).toFixed(1)}%), ${pathwayResult.routes.length} routes, max ${pathwayResult.bestRoute.maxTemperature} C`,
+              dataSource: "Synthesis Pathway Engine",
+            });
+            const existingPath = (candidate.synthesisPath as any) ?? {};
+            const existingRoutes = Array.isArray(existingPath?.routes) ? existingPath.routes : [];
+            await storage.updateSuperconductorCandidate(candidate.id, {
+              synthesisPath: {
+                routes: [...existingRoutes, ...pathwayResult.routes.slice(0, 3).map(route => ({
+                  ...route,
+                  source: "reaction-pathway-engine",
+                }))],
+                lastUpdated: new Date().toISOString(),
+              },
+            });
+          }
+        } catch {}
+      }
     }
 
     const crCount = await storage.getComputationalResultCount();
@@ -2181,15 +2232,19 @@ async function runAutonomousFastPath() {
     }
 
     let constraintGuidance: ReturnType<typeof getConstraintGuidanceForGenerator> | null = null;
+    let graphGuidance: ReturnType<typeof getConstraintGraphGuidance> | null = null;
     try {
       const targetTcForConstraints = Math.max(100, autonomousBestTc * 1.1, 200);
       constraintGuidance = getConstraintGuidanceForGenerator(targetTcForConstraints);
+      if (cycleCount % 5 === 0) {
+        graphGuidance = getConstraintGraphGuidance(targetTcForConstraints);
+      }
     } catch {}
 
     emit("log", {
       phase: "engine",
       event: "RL agent action",
-      detail: `RL selected: ${rlDescription}. Generated ${rlCandidates.length} RL-directed candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}${constraintGuidance ? `. Constraint solver: lambda=[${constraintGuidance.lambdaRange[0].toFixed(2)},${constraintGuidance.lambdaRange[1].toFixed(2)}], omegaLog=[${constraintGuidance.omegaLogRange[0]},${constraintGuidance.omegaLogRange[1]}]K, prefer=[${constraintGuidance.preferredElements.slice(0,4).join(",")}], feasibility=${constraintGuidance.feasibility.toFixed(2)}` : ""}`,
+      detail: `RL selected: ${rlDescription}. Generated ${rlCandidates.length} RL-directed candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}${constraintGuidance ? `. Constraint solver: lambda=[${constraintGuidance.lambdaRange[0].toFixed(2)},${constraintGuidance.lambdaRange[1].toFixed(2)}], omegaLog=[${constraintGuidance.omegaLogRange[0]},${constraintGuidance.omegaLogRange[1]}]K, prefer=[${constraintGuidance.preferredElements.slice(0,4).join(",")}], feasibility=${constraintGuidance.feasibility.toFixed(2)}` : ""}${graphGuidance ? `. Graph solver: regimes=[${graphGuidance.topRegimes.join(",")}], elements=[${graphGuidance.preferredElements.slice(0,4).join(",")}], rare=${graphGuidance.rareOpportunities.length}` : ""}`,
       dataSource: "RL Agent",
     });
 

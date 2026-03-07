@@ -190,6 +190,33 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Pipeline integration**: Triggered in autonomous loop when Tc > 50K and pressure > 10 GPa. Best ambient candidates logged.
 - **APIs**: `GET /api/pressure-pathways/search/:formula?tc=250&pressure=180`, `GET /api/pressure-pathways/stats`
 
+### Physics Constraint Graph Solver
+- **Coupled constraint system** (`server/inverse/constraint-graph-solver.ts`): Solves all SC physics constraints simultaneously as a graph rather than sequentially.
+- **15 parameter nodes**: Tc, lambda, omegaLog, DOS, phonon_softness, hopfield_eta, nesting, charge_transfer, structure, pressure, element_mass, bond_stiffness, orbital_character, debye_temp, gap_ratio.
+- **29 coupling edges**: Representing physical dependencies (McMillan, Allen-Dynes, Hopfield, etc.) between parameters.
+- **Constraint propagation**: Starting from target Tc, narrows parameter ranges through the coupled graph.
+- **8 feasibility regimes**: conventional-BCS, strong-coupling-metal, light-element-compound, hydride-moderate-pressure, superhydride, unconventional-layered, kagome-flat-band, topological-SC.
+- **8 rare chemical space regions**: ternary hydrides, borohydrides, nickelates, kagome VHS, heavy-fermion, topological heterostructures, HEA, carbon intercalated.
+- **Pipeline integration**: Graph guidance applied every 5th autonomous cycle for regime and element suggestions.
+- **APIs**: `GET /api/constraint-graph/solve?targetTc=200`, `GET /api/constraint-graph/feasible-regions?targetTc=200`
+
+### Synthesis Pathway Modeling
+- **Multi-step reaction pathway simulation** (`server/synthesis/reaction-pathway.ts`): Models precursors → intermediates → target phase with thermodynamics.
+- **6 synthesis methods**: solid-state reaction, arc-melting, high-pressure (DAC/laser heating), ball-milling, CVD, magnetron sputtering.
+- **Per-step detail**: reactants, products, temperature, pressure, atmosphere, reaction type, duration, lab notes.
+- **Thermodynamic scoring**: Gibbs free energy chain (Miedema model), kinetic barriers (Arrhenius), metastable quenching feasibility.
+- **Family-aware routing**: Different synthesis methods prioritized per material family (Cuprates, Hydrides, Intermetallics, etc.).
+- **Pipeline integration**: Triggered in Phase 12 (multi-fidelity) when candidates pass stage 4.
+- **APIs**: `GET /api/synthesis-pathway/:formula`, `GET /api/synthesis-pathway/stats`
+
+### Band Structure Neural Operator
+- **Full E(k) dispersion predictor** (`server/physics/band-structure-operator.ts`): Predicts complete band structure along high-symmetry k-paths, not just features.
+- **Output**: Energy values at ~50 k-points per band, for up to 12 bands near the Fermi level. Supports cubic, hexagonal, and tetragonal lattices.
+- **Derived quantities**: effective masses, Fermi velocities, band curvatures, exact VHS positions, nesting vectors, Berry phase proxy, Z2 topological index, band inversion count.
+- **Physics calibration**: Reference band structures for MgB2 (sigma bands), YBa2Cu3O7 (flat bands), LaH10 (multi-band), FeSe (hole/electron pockets), Nb3Sn (A15 narrow bands).
+- **Pipeline integration**: Called after band surrogate in Phase 10, enriches Fermi surface analysis with ML features.
+- **APIs**: `GET /api/band-operator/:formula`, `GET /api/band-operator/dispersion/:formula`, `GET /api/band-operator/stats`
+
 ### Quantum Criticality Detector
 - **Unified quantum critical point (QCP) detector** formalizing existing spin susceptibility, CDW, SDW, Mott detection into a single QuantumCriticalScore.
 - **Six QCP channels**: Mott (Hubbard U/W ratio), SDW (Stoner enhancement + nesting), CDW (nesting + DOS), nematic (orbital anisotropy), structural (soft phonon modes), orbital-selective (mixed d-orbital).
