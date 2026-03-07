@@ -35,6 +35,9 @@ import {
   evaluatePillars, runPillarGuidedGeneration,
   getPillarOptimizerStats, DEFAULT_PILLAR_TARGETS,
 } from "./inverse/sc-pillars-optimizer";
+import {
+  computePairingProfile, computePairingFeatureVector,
+} from "./physics/pairing-mechanisms";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -970,6 +973,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getPillarOptimizerStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to get pillar optimizer stats" });
+    }
+  });
+
+  app.get("/api/pairing/profile/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length > 80) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const profile = computePairingProfile(formula);
+      res.json(profile);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pairing profile failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pairing/features/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length > 80) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const features = computePairingFeatureVector(formula);
+      res.json(features);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pairing features failed", detail: e.message?.slice(0, 200) });
     }
   });
 

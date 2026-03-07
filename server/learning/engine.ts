@@ -43,6 +43,7 @@ import { runActiveLearningCycle, getActiveLearningStats } from "./active-learnin
 import { getXTBStats } from "../dft/qe-dft-engine";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
+import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1051,6 +1052,19 @@ async function runPhase10_Physics() {
           }
         } catch {}
 
+        let pairingProfile: PairingProfile | undefined;
+        try {
+          pairingProfile = computePairingProfile(candidate.formula);
+          if (pairingProfile.compositePairingStrength > 0.4) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Pairing mechanism analysis",
+              detail: `${candidate.formula}: dominant=${pairingProfile.dominantMechanism}, secondary=${pairingProfile.secondaryMechanism}, symmetry=${pairingProfile.pairingSymmetry}, composite=${pairingProfile.compositePairingStrength.toFixed(3)}, phonon=${pairingProfile.phonon.phononPairingStrength.toFixed(3)}, spin=${pairingProfile.spin.spinPairingStrength.toFixed(3)}, orbital=${pairingProfile.orbital.orbitalPairingStrength.toFixed(3)}`,
+              dataSource: "Pairing Mechanism Simulator",
+            });
+          }
+        } catch {}
+
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
           logPhononFrequency: result.coupling.omegaLog,
@@ -1065,8 +1079,8 @@ async function runPhase10_Physics() {
           anisotropyRatio: result.criticalFields.anisotropyRatio,
           criticalCurrentDensity: result.criticalFields.criticalCurrentDensity,
           uncertaintyEstimate: result.uncertaintyEstimate,
-          pairingMechanism: result.pairingAnalysis.dominant.mechanism,
-          cooperPairMechanism: result.pairingAnalysis.dominant.description,
+          pairingMechanism: pairingProfile?.dominantMechanism ?? result.pairingAnalysis.dominant.mechanism,
+          cooperPairMechanism: pairingProfile ? `${pairingProfile.dominantMechanism} (${pairingProfile.pairingSymmetry}), composite=${pairingProfile.compositePairingStrength.toFixed(3)}` : result.pairingAnalysis.dominant.description,
           predictedTc: updatedTc,
           verificationStage: 1,
           notes: updatedNotes,

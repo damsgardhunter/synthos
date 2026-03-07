@@ -526,7 +526,7 @@ const ELEMENT_BANDWIDTH: Record<string, number> = {
   Bi: 6.5, Th: 3.5, U: 2.5,
 };
 
-function estimateBandwidthW(el: string): number {
+export function estimateBandwidthW(el: string): number {
   const known = ELEMENT_BANDWIDTH[el];
   if (known !== undefined) return known;
 

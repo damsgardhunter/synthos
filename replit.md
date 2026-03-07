@@ -59,6 +59,16 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `GET /api/topology/:formula` (full analysis), `GET /api/topology-stats` (aggregate stats).
 - Files: `server/physics/topology-engine.ts`
 
+### Quantum Pairing Mechanism Simulator
+- **4 pairing channels**: phonon (mode-resolved λ_qν from dispersion branches), spin-fluctuation (χ(q) from DOS(EF)×nestingScore×correlationFactor via Hubbard U/W), orbital-fluctuation (d-orbital degeneracy, inter-orbital hopping, Hund's coupling), excitonic (DOS(EF)/bandGap proxy, electron-hole asymmetry, dielectric screening).
+- **Mode-resolved phonon coupling**: Decomposes total λ into acoustic/optical/high-freq/soft-mode contributions per dispersion branch with frequency ranges.
+- **Material-aware weighting**: Cuprates → 55% spin + 25% orbital; pnictides → 40% spin + 35% orbital; hydrides → 75% phonon; excitonic candidates → 40% excitonic.
+- **Pairing symmetry inference**: d-wave (dx2-y2) for cuprates, s+/- for pnictides, anisotropic s-wave for soft-mode phonon, s-wave for conventional.
+- **Composite pairing strength**: Weighted sum across all 4 channels, integrated into autonomous loop candidate notes.
+- **Feature vector export**: 6-dimensional pairing feature vector (phononPairing, spinPairing, orbitalPairing, excitonPairing, dominantType, composite) for ML integration.
+- **API**: `GET /api/pairing/profile/:formula` (full 4-channel analysis), `GET /api/pairing/features/:formula` (ML feature vector).
+- Files: `server/physics/pairing-mechanisms.ts`
+
 ### Advanced Quantum Physics Modeling
 - Computes phonon dispersion, phonon DOS, Eliashberg spectral function, GW many-body corrections, dynamic spin susceptibility, and Fermi surface nesting.
 
