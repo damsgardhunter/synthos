@@ -35,6 +35,42 @@ const STOICH_PATTERNS = [
   { name: "ABCD", slots: 4, ratios: [[1,1,1,1],[2,1,1,1],[1,2,1,1]] },
 ];
 
+function parseFormulaElements(formula: string): Map<string, number> {
+  const elMap = new Map<string, number>();
+  const matches = formula.match(/([A-Z][a-z]?)(\d*)/g) || [];
+  for (const m of matches) {
+    const elMatch = m.match(/^([A-Z][a-z]?)(\d*)$/);
+    if (elMatch) {
+      const el = elMatch[1];
+      const count = elMatch[2] ? parseInt(elMatch[2]) : 1;
+      elMap.set(el, (elMap.get(el) || 0) + count);
+    }
+  }
+  return elMap;
+}
+
+function estimateQuickTc(formula: string, prototype: string, target: TargetProperties): number {
+  const protoInfo = PROTOTYPE_TC_AFFINITY[prototype];
+  if (!protoInfo) return 10;
+  const baseTc = (protoInfo.minTc + protoInfo.maxTc) / 2;
+  const elMap = parseFormulaElements(formula);
+  const elements = [...elMap.keys()];
+  const hasH = elMap.has("H");
+  const hCount = elMap.get("H") || 0;
+  let tc = baseTc;
+  if (hasH && hCount >= 6) tc *= 1.3 + hCount * 0.05;
+  if (hasH && hCount >= 10) tc *= 1.2;
+  const hasTM = HIGH_COUPLING_TM.some(el => elements.includes(el));
+  if (hasTM) tc *= 1.15;
+  const hasRE = RARE_EARTH.some(el => elements.includes(el));
+  if (hasRE) tc *= 1.1;
+  if (prototype === "Clathrate" && hasH) tc *= 1.5;
+  if (prototype === "A15" && hasTM) tc *= 1.2;
+  if (elements.length >= 3) tc *= 1.05;
+  if (elements.length >= 4) tc *= 1.05;
+  return Math.min(400, Math.max(1, tc + (Math.random() - 0.5) * 10));
+}
+
 function selectPrototypes(target: TargetProperties): string[] {
   if (target.preferredPrototypes && target.preferredPrototypes.length > 0) {
     return target.preferredPrototypes;
@@ -193,11 +229,12 @@ export function generateInverseCandidates(
         const sv = defaultSynthesisVector(matClass);
         const synthVec = Math.random() < 0.5 ? mutateSynthesisVector(sv) : sv;
 
+        const estimatedTc = estimateQuickTc(formula, proto, target);
         candidates.push({
           formula,
           source: "inverse",
           campaignId,
-          targetDistance: 1.0,
+          targetDistance: Math.max(0, 1 - estimatedTc / Math.max(1, target.targetTc)),
           iteration,
           prototype: proto,
           synthesisVector: {
@@ -224,11 +261,12 @@ export function generateInverseCandidates(
         const formula = `${metal}H${hCount}`;
         if (!seen.has(formula)) {
           seen.add(formula);
+          const estTc = estimateQuickTc(formula, "Clathrate", target);
           candidates.push({
             formula,
             source: "inverse",
             campaignId,
-            targetDistance: 1.0,
+            targetDistance: Math.max(0, 1 - estTc / Math.max(1, target.targetTc)),
             iteration,
             prototype: "Clathrate",
           });

@@ -563,7 +563,7 @@ async function runPhase7_Superconductor() {
       }
     }
 
-    if (cycleCount % 8 === 0 && shouldContinue()) {
+    if (cycleCount % 3 === 0 && shouldContinue()) {
       try {
         const activeCampaigns = getAllActiveCampaigns();
         for (const campaign of activeCampaigns) {
@@ -2808,9 +2808,17 @@ async function runAutonomousFastPath() {
     filteredCandidates = quotaBalanced;
 
     let physicsPrefiltered = 0;
+    let batchRewardAccum = 0;
+    let batchBestTc = 0;
+    let batchPassCount = 0;
+    let batchNovelCount = 0;
+    let batchCount = 0;
+    const RL_UPDATE_INTERVAL = 25;
+
     for (const formula of filteredCandidates) {
       if (!shouldContinue()) break;
       autonomousTotalScreened++;
+      batchCount++;
 
       const result = await runAutonomousDiscoveryCycle(formula);
 
@@ -2842,6 +2850,29 @@ async function runAutonomousFastPath() {
         const els = parseFormulaElements(formula);
         rlAgent.recordElementOutcome(els, result.tc, result.passed);
       } catch {}
+
+      if (result.tc > batchBestTc) batchBestTc = result.tc;
+      if (result.passed) batchPassCount++;
+      if (!alreadyScreenedFormulas.has(formula)) batchNovelCount++;
+      batchRewardAccum += (result.tc > 0 ? Math.min(1, result.tc / 400) * 0.5 : 0)
+        + (result.passed ? 0.3 : 0)
+        + (result.tc > autonomousBestTc ? 0.5 : 0);
+
+      if (batchCount % RL_UPDATE_INTERVAL === 0) {
+        const batchSize = RL_UPDATE_INTERVAL;
+        const interimReward = rlAgent.computeReward(
+          batchBestTc,
+          autonomousBestTc,
+          batchPassCount > 0,
+          batchPassCount / batchSize,
+          batchNovelCount / batchSize * 0.5
+        );
+        rlAgent.updatePolicy(rlState, rlAction, interimReward);
+        batchBestTc = 0;
+        batchPassCount = 0;
+        batchNovelCount = 0;
+        batchRewardAccum = 0;
+      }
 
       try {
         const constraintDetail = constraintFiltered.details.find(d => d.formula === formula);

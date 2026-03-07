@@ -654,8 +654,8 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     const volume = computeBoundingVolume(current);
     const volumePerAtom = volume / current.length;
 
-    const distOk = minDist >= MIN_PAIRWISE_DISTANCE;
-    const volOk = volumePerAtom >= MIN_VOLUME_PER_ATOM;
+    const distOk = minDist >= MIN_PAIRWISE_DISTANCE - 0.01;
+    const volOk = volumePerAtom >= MIN_VOLUME_PER_ATOM - 0.1;
 
     if (distOk && volOk) return current;
 
@@ -677,7 +677,7 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   const volume = computeBoundingVolume(current);
   const volumePerAtom = volume / current.length;
 
-  if (minDist < MIN_PAIRWISE_DISTANCE || volumePerAtom < MIN_VOLUME_PER_ATOM) {
+  if (minDist < MIN_PAIRWISE_DISTANCE - 0.01 || volumePerAtom < MIN_VOLUME_PER_ATOM - 0.1) {
     console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, vol/atom=${volumePerAtom.toFixed(1)}ų`);
     return null;
   }

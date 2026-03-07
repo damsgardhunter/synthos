@@ -52,7 +52,7 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Convex Hull Phase Diagram Engine**: Computes energy above hull, decomposition products, and assesses metastability.
 - **Pressure Modeling Engine**: Calculates volume compression, bulk modulus, and predicts high-pressure stability and pressure-Tc curves.
 - **Graph Neural Network Surrogate**: Primary ML predictor for formation energy, phonon stability, Tc, confidence, and electron-phonon lambda, with uncertainty estimation.
-- **Reinforcement Learning Chemical Space Agent**: REINFORCE policy gradient agent learning optimal elements, stoichiometries, and structures with physics-aware rewards.
+- **Reinforcement Learning Chemical Space Agent**: REINFORCE policy gradient agent learning optimal elements, stoichiometries, and structures with physics-aware rewards. Incremental RL updates every 25 candidates (RL_UPDATE_INTERVAL=25) during autonomous loop with per-batch reward computation (batchBestTc, batchPassCount, batchNovelCount reset after each update).
 - **Bayesian Optimization for Chemical Space Search**: Gaussian Process surrogate with mixed acquisition functions.
 - **Crystal Diffusion Generator**: Generates novel crystal structures by refining random atomic positions.
 - **Massive Candidate Generator**: Utilizes element substitution, composition interpolation, doped variants, and composition sweeps with a rapid Gradient Boosting screen.

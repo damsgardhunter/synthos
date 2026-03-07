@@ -77,7 +77,10 @@ export type EdgeType =
   | "structural"
   | "proximity"
   | "epitaxial"
-  | "hybridization";
+  | "hybridization"
+  | "sublattice"
+  | "interlayer"
+  | "pairing";
 
 export interface GraphNode {
   id: string;
@@ -1300,37 +1303,161 @@ export function programToGraph(program: DesignProgram): DesignGraph {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
 
+  const elementNodeIds: Record<string, string[]> = {};
+
   for (const el of result.elements) {
     const info = getElementInfo(el);
     const role = inferRoleFromElement(el, result);
-    nodes.push({
-      id: `n-${nodes.length}`,
-      type: role,
-      element: el,
-      properties: {
-        electronCount: info.electrons * (result.stoichiometry[el] || 1),
-        atomicMass: info.mass,
-        electronegativity: info.eneg,
-        ionicRadius: info.radius,
-        oxidationState: estimateOxidationState(el, role),
-        orbitalCharacter: info.orbital,
-      },
-      position: [Math.random(), Math.random()],
-      weight: (result.stoichiometry[el] || 1) / Math.max(1, Object.values(result.stoichiometry).reduce((a, b) => a + b, 0)),
-    });
+    const stoich = result.stoichiometry[el] || 1;
+    const totalAtoms = Object.values(result.stoichiometry).reduce((a, b) => a + b, 0);
+    const siteCount = Math.min(stoich, 4);
+    elementNodeIds[el] = [];
+
+    for (let s = 0; s < siteCount; s++) {
+      const nodeId = `n-${nodes.length}`;
+      elementNodeIds[el].push(nodeId);
+      const angle = (2 * Math.PI * nodes.length) / (result.elements.length * 2);
+      nodes.push({
+        id: nodeId,
+        type: role,
+        element: el,
+        properties: {
+          electronCount: info.electrons,
+          atomicMass: info.mass,
+          electronegativity: info.eneg,
+          ionicRadius: info.radius,
+          oxidationState: estimateOxidationState(el, role),
+          orbitalCharacter: info.orbital,
+        },
+        position: [0.5 + 0.3 * Math.cos(angle + s * 0.3), 0.5 + 0.3 * Math.sin(angle + s * 0.3)],
+        weight: 1 / Math.max(1, totalAtoms),
+      });
+
+      if (s > 0) {
+        edges.push({
+          source: elementNodeIds[el][0],
+          target: nodeId,
+          type: "sublattice",
+          strength: 0.9,
+          properties: {
+            bondLength: info.radius * 2,
+            overlapIntegral: 0.8,
+            couplingConstant: 0.3,
+          },
+        });
+      }
+    }
   }
 
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const enegDiff = Math.abs(nodes[i].properties.electronegativity - nodes[j].properties.electronegativity);
+  const structuralNodeTypes: Array<{ type: ComponentType; label: string; condition: boolean }> = [
+    { type: "phonon_mediator", label: "phonon-bridge", condition: result.elements.some(el => ["H", "B", "C", "N", "O"].includes(el)) },
+    { type: "charge_reservoir", label: "charge-layer", condition: result.elements.some(el => ["La", "Y", "Ba", "Sr", "Ca", "Ce"].includes(el)) },
+    { type: "structural_backbone", label: "lattice-frame", condition: true },
+    { type: "pairing_channel", label: "cooper-channel", condition: result.elements.length >= 2 },
+    { type: "dos_enhancer", label: "dos-peak", condition: result.elements.some(el => ["V", "Nb", "Ta", "Mo", "W", "Fe", "Co", "Ni"].includes(el)) },
+    { type: "strain_buffer", label: "strain-layer", condition: result.elements.length >= 3 },
+  ];
+
+  for (const snt of structuralNodeTypes) {
+    if (!snt.condition) continue;
+    const nodeId = `n-${nodes.length}`;
+    nodes.push({
+      id: nodeId,
+      type: snt.type,
+      element: snt.label,
+      properties: {
+        electronCount: 0,
+        atomicMass: 0,
+        electronegativity: 0,
+        ionicRadius: 0,
+        oxidationState: 0,
+        orbitalCharacter: "functional",
+      },
+      position: [Math.random() * 0.8 + 0.1, Math.random() * 0.8 + 0.1],
+      weight: 0.1,
+    });
+
+    const relatedElements = result.elements.filter(el => {
+      if (snt.type === "phonon_mediator") return ["H", "B", "C", "N", "O"].includes(el);
+      if (snt.type === "charge_reservoir") return ["La", "Y", "Ba", "Sr", "Ca", "Ce"].includes(el);
+      if (snt.type === "dos_enhancer") return ["V", "Nb", "Ta", "Mo", "W", "Fe", "Co", "Ni"].includes(el);
+      return true;
+    });
+
+    for (const el of relatedElements) {
+      const elNodes = elementNodeIds[el];
+      if (elNodes && elNodes.length > 0) {
+        const edgeType: EdgeType = snt.type === "phonon_mediator" ? "phonon_coupling"
+          : snt.type === "charge_reservoir" ? "charge_transfer"
+          : snt.type === "pairing_channel" ? "pairing"
+          : "bonding";
+        edges.push({
+          source: elNodes[0],
+          target: nodeId,
+          type: edgeType,
+          strength: 0.6 + Math.random() * 0.3,
+          properties: {
+            bondLength: 2.0 + Math.random(),
+            overlapIntegral: 0.4 + Math.random() * 0.3,
+            couplingConstant: 0.2 + Math.random() * 0.3,
+          },
+        });
+      }
+    }
+  }
+
+  for (const inst of program.instructions) {
+    if (inst.type === "add_interface" || inst.type === "add_intercalation_layer") {
+      const nodeId = `n-${nodes.length}`;
+      nodes.push({
+        id: nodeId,
+        type: "topological_surface",
+        element: inst.type === "add_interface" ? "interface" : "intercalation",
+        properties: {
+          electronCount: 0, atomicMass: 0, electronegativity: 0,
+          ionicRadius: 0, oxidationState: 0, orbitalCharacter: "interface",
+        },
+        position: [Math.random(), Math.random()],
+        weight: 0.08,
+      });
+
+      const randomElNodes = Object.values(elementNodeIds).flat();
+      if (randomElNodes.length >= 2) {
+        edges.push({
+          source: randomElNodes[0],
+          target: nodeId,
+          type: "interlayer",
+          strength: 0.5,
+          properties: { bondLength: 3.0, overlapIntegral: 0.3, couplingConstant: 0.15 },
+        });
+        edges.push({
+          source: randomElNodes[randomElNodes.length - 1],
+          target: nodeId,
+          type: "interlayer",
+          strength: 0.5,
+          properties: { bondLength: 3.0, overlapIntegral: 0.3, couplingConstant: 0.15 },
+        });
+      }
+    }
+  }
+
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  const allElementNodes = Object.values(elementNodeIds).flat();
+  for (let i = 0; i < allElementNodes.length; i++) {
+    for (let j = i + 1; j < allElementNodes.length; j++) {
+      const ni = nodeMap.get(allElementNodes[i]);
+      const nj = nodeMap.get(allElementNodes[j]);
+      if (!ni || !nj) continue;
+      if (ni.element === nj.element) continue;
+      const enegDiff = Math.abs(ni.properties.electronegativity - nj.properties.electronegativity);
       const edgeType: EdgeType = enegDiff > 1.5 ? "charge_transfer" : enegDiff > 0.5 ? "bonding" : "hybridization";
       edges.push({
-        source: nodes[i].id,
-        target: nodes[j].id,
+        source: allElementNodes[i],
+        target: allElementNodes[j],
         type: edgeType,
         strength: Math.max(0.2, 1 - enegDiff / 3),
         properties: {
-          bondLength: nodes[i].properties.ionicRadius + nodes[j].properties.ionicRadius,
+          bondLength: ni.properties.ionicRadius + nj.properties.ionicRadius,
           overlapIntegral: Math.max(0, 1 - enegDiff / 3),
           couplingConstant: Math.max(0.1, 0.5 - enegDiff / 6),
         },

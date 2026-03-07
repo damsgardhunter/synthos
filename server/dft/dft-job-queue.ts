@@ -36,9 +36,16 @@ export async function submitDFTJob(
     return activeJob;
   }
 
-  const recentFailed = existing.filter(j => j.status === "failed");
+  const oneDayAgo = new Date(Date.now() - 24 * 3600_000);
+  const recentFailed = existing.filter(j => {
+    if (j.status !== "failed") return false;
+    if (!j.completedAt || new Date(j.completedAt) < oneDayAgo) return false;
+    const out = j.outputData as any;
+    if (out?.ppValidated === false || out?.ppValidated === null || out?.ppValidated === undefined) return false;
+    return true;
+  });
   if (recentFailed.length >= 3) {
-    console.log(`[DFT-Queue] Formula ${formula} has ${recentFailed.length} prior failures, skipping`);
+    console.log(`[DFT-Queue] Formula ${formula} has ${recentFailed.length} validated recent failures, skipping`);
     return null;
   }
 
