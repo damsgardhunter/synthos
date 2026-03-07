@@ -28,13 +28,13 @@ import { Progress } from "@/components/ui/progress";
 import { useWebSocket, type EngineTempo } from "@/hooks/use-websocket";
 
 const navItems = [
-  { title: "Command Center", url: "/", icon: LayoutDashboard },
-  { title: "Atomic Explorer", url: "/atoms", icon: Atom },
-  { title: "Materials Database", url: "/materials", icon: Database },
-  { title: "Novel Discovery", url: "/discovery", icon: FlaskConical },
-  { title: "Superconductor Lab", url: "/superconductor", icon: Magnet },
-  { title: "Computational Physics", url: "/physics", icon: Activity },
-  { title: "Research Pipeline", url: "/research", icon: FileText },
+  { title: "Command Center", url: "/", icon: LayoutDashboard, fontClass: "text-base font-bold" },
+  { title: "Research Pipeline", url: "/research", icon: FileText, fontClass: "text-[15px] font-bold" },
+  { title: "Computational Physics", url: "/physics", icon: Activity, fontClass: "" },
+  { title: "Materials Database", url: "/materials", icon: Database, fontClass: "" },
+  { title: "Novel Discovery", url: "/discovery", icon: FlaskConical, fontClass: "" },
+  { title: "Superconductor Lab", url: "/superconductor", icon: Magnet, fontClass: "" },
+  { title: "Atomic Explorer", url: "/atoms", icon: Atom, fontClass: "" },
 ];
 
 const TEMPO_STYLES: Record<string, { dot: string; label: string }> = {
@@ -82,7 +82,7 @@ export function AppSidebar() {
                     <SidebarMenuButton asChild data-active={isActive}>
                       <Link href={item.url} data-testid={`nav-${item.title.toLowerCase().replace(/ /g, "-")}`}>
                         <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
+                        <span className={item.fontClass}>{item.title}</span>
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

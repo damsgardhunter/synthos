@@ -624,7 +624,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         familyDiversity: latestSnapshot?.familyDiversity ?? 0,
         pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
         cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
-        autonomousLoopStats: getAutonomousLoopStats(),
+        ...(() => {
+          const loopStats = getAutonomousLoopStats();
+          return {
+            autonomousLoopStats: loopStats,
+            lastCycleCandidates: loopStats.lastCycleCandidates ?? [],
+            lastCycleFamilyCounts: loopStats.lastCycleFamilyCounts ?? {},
+          };
+        })(),
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch engine memory" });
