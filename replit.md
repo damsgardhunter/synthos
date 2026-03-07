@@ -182,6 +182,16 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `POST /api/gradient-design/optimize` (single formula), `POST /api/gradient-design/batch` (multi-seed), `GET /api/gradient-design/stats`.
 - File: `server/inverse/differentiable-optimizer.ts`
 
+### Physics-Constrained Generative AI (Rule-Aware Material Creation)
+- **Constraint checks**: Charge neutrality (with metallic compound bypass), atomic radius compatibility, coordination number limits, bond stability (electronegativity spread, composition dominance, atom count), electron count rules, noble gas rejection, stoichiometry excess.
+- **Metallic compound awareness**: Intermetallics (Nb3Sn), hydrides (LaH10, CaH6), borides (MgB2), and metal-metalloid compounds bypass ionic charge balance since bonding is metallic/covalent.
+- **Hydrogen handling**: H bonds treated specially — no radius incompatibility violations for H pairs, coordination bypass, compatible in all metallic contexts.
+- **Constraint-guided generation**: `constraintGuidedGenerate()` processes raw formula arrays, splitting into valid/repaired/rejected. Invalid formulas are auto-repaired when possible (charge balance adjustment, stoichiometry reduction, noble gas removal).
+- **RL integration**: `updateConstraintWeightsFromReward()` adjusts constraint weights based on Tc reward from the autonomous loop. Constraints that reject good SCs get softened; constraints that pass bad candidates get strengthened.
+- **Pipeline integration**: Inserted into autonomous fast-path between massive generation and screening loop. Filters all candidates before they enter the expensive physics pipeline.
+- **API**: `POST /api/physics-constraints/check` (single formula), `POST /api/physics-constraints/batch` (up to 200 formulas), `GET /api/physics-constraints/stats`.
+- File: `server/inverse/physics-constraint-engine.ts`
+
 ### Structure-First Design (Structure Diffusion)
 - **Motif library**: 12 SC structural motifs (CuO2-plane, FeAs-layer, clathrate-cage, A15-chain, kagome-flat, hexagonal-layer, perovskite-3D, layered-hydride, NaCl-rocksalt, H-channel, breathing-kagome, Laves-MgZn2). Each motif defines site roles, space group, Tc range, SC affinity, and pairing mechanism.
 - **Structural embedding**: 8D vectors encoding layering, cage-character, H-density, correlation, flatness, bond-covalency, dimensionality, spin-orbit.

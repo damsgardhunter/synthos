@@ -27,6 +27,10 @@ import {
   runStructureDiffusionCycle, getStructureDiffusionStats,
   getMotifLibrarySummary, runStructureFirstDesign,
 } from "./ai/structure-diffusion";
+import {
+  checkPhysicsConstraints, constraintGuidedGenerate,
+  getConstraintEngineStats,
+} from "./inverse/physics-constraint-engine";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -869,6 +873,40 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getStructureDiffusionStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to get structure design stats" });
+    }
+  });
+
+  app.post("/api/physics-constraints/check", writeLimiter, (req, res) => {
+    try {
+      const { formula } = req.body;
+      if (!formula || typeof formula !== "string") {
+        return res.status(400).json({ error: "formula is required" });
+      }
+      const result = checkPhysicsConstraints(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Constraint check failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/physics-constraints/batch", writeLimiter, (req, res) => {
+    try {
+      const { formulas } = req.body;
+      if (!Array.isArray(formulas) || formulas.length === 0) {
+        return res.status(400).json({ error: "formulas array is required" });
+      }
+      const result = constraintGuidedGenerate(formulas.slice(0, 200));
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Batch constraint check failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-constraints/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getConstraintEngineStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get constraint stats" });
     }
   });
 

@@ -8,6 +8,7 @@ import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseD
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB } from "../inverse/inverse-optimizer";
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
+import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
@@ -1902,9 +1903,21 @@ async function runAutonomousFastPath() {
       });
     }
 
-    const novelCandidates = candidates.filter(f => !alreadyScreenedFormulas.has(f));
+    const constraintFiltered = constraintGuidedGenerate(candidates);
+    const physicsCleanCandidates = [...constraintFiltered.valid, ...constraintFiltered.repaired];
+
+    if (constraintFiltered.rejected.length > 0 || constraintFiltered.repaired.length > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "Physics constraint filter",
+        detail: `${candidates.length} candidates → ${constraintFiltered.valid.length} valid, ${constraintFiltered.repaired.length} repaired, ${constraintFiltered.rejected.length} rejected. Violations: ${Object.entries(getConstraintEngineStats().violationCounts).map(([k, v]) => `${k}:${v}`).join(", ")}`,
+        dataSource: "Physics Constraints",
+      });
+    }
+
+    const novelCandidates = physicsCleanCandidates.filter(f => !alreadyScreenedFormulas.has(f));
     const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(f)).length / Math.max(1, rlCandidates.length);
-    for (const f of candidates) alreadyScreenedFormulas.add(f);
+    for (const f of physicsCleanCandidates) alreadyScreenedFormulas.add(f);
     if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE) {
       const toRemove = alreadyScreenedFormulas.size - MAX_SCREENED_CACHE_SIZE;
       const iter = alreadyScreenedFormulas.values();
@@ -1950,6 +1963,13 @@ async function runAutonomousFastPath() {
       try {
         const els = parseFormulaElements(formula);
         rlAgent.recordElementOutcome(els, result.tc, result.passed);
+      } catch {}
+
+      try {
+        const constraintDetail = constraintFiltered.details.find(d => d.formula === formula);
+        if (constraintDetail && constraintDetail.violations.length > 0) {
+          updateConstraintWeightsFromReward(formula, result.tc, constraintDetail.violations);
+        }
       } catch {}
 
       if (result.passed) {
@@ -2049,6 +2069,7 @@ export function getAutonomousLoopStats() {
     inverseOptimizer: getInverseOptimizerStats(),
     differentiableOptimizer: getDifferentiableOptimizerStats(),
     structureFirstDesign: getStructureDiffusionStats(),
+    physicsConstraints: getConstraintEngineStats(),
   };
 }
 
