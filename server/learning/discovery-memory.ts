@@ -314,9 +314,9 @@ export class DiscoveryMemory {
     const preferredStoichiometries: { pattern: string; weight: number }[] = [];
     const hDensities = topRecords.map(r => r.fingerprint.hydrogenDensity);
     const avgHDensity = hDensities.reduce((s, v) => s + v, 0) / hDensities.length;
-    if (avgHDensity > 4) {
-      preferredStoichiometries.push({ pattern: "AH10", weight: 0.4 });
-      preferredStoichiometries.push({ pattern: "ABH6", weight: 0.3 });
+    if (avgHDensity > 3) {
+      preferredStoichiometries.push({ pattern: "AH3", weight: 0.4 });
+      preferredStoichiometries.push({ pattern: "ABH4", weight: 0.3 });
     }
 
     const dims = topRecords.map(r => r.fingerprint.dimensionality);

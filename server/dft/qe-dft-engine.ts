@@ -106,15 +106,23 @@ function getAvgRadius(el: string): number {
 }
 
 function estimateLatticeParam(elements: string[], counts: Record<string, number>): number {
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  let maxR = 0;
   let totalR = 0;
   let totalN = 0;
   for (const el of elements) {
+    const r = getAvgRadius(el);
     const n = Math.round(counts[el] || 1);
-    totalR += getAvgRadius(el) * n;
+    totalR += r * n;
     totalN += n;
+    if (r > maxR) maxR = r;
   }
   const avgR = totalR / Math.max(1, totalN);
-  return avgR * 2.8 + 0.5;
+  const effectiveR = avgR * 0.6 + maxR * 0.4;
+  const volumePerAtom = (4 / 3) * Math.PI * Math.pow(effectiveR + 0.8, 3);
+  const totalVolume = volumePerAtom * totalAtoms;
+  const latticeA = Math.cbrt(totalVolume);
+  return Math.max(latticeA, 3.0);
 }
 
 interface PrototypeStructure {
@@ -589,14 +597,23 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
   return { atoms, proto: "generic-cluster" };
 }
 
-const MIN_PAIRWISE_DISTANCE = 0.6;
-const MIN_VOLUME_PER_ATOM = 5.0;
+const MIN_VOLUME_PER_ATOM = 8.0;
 const MAX_SCALE_ATTEMPTS = 5;
 
-function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; pairI: number; pairJ: number } {
+function getMinInteratomicDistance(el1: string, el2: string): number {
+  const r1 = COVALENT_RADII[el1] ?? 1.5;
+  const r2 = COVALENT_RADII[el2] ?? 1.5;
+  const bondLength = r1 + r2;
+  return Math.max(bondLength * 0.85, 1.0);
+}
+
+function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
   let minDist = Infinity;
+  let minRatio = Infinity;
   let pairI = -1;
   let pairJ = -1;
+  let worstI = -1;
+  let worstJ = -1;
   for (let i = 0; i < atoms.length; i++) {
     for (let j = i + 1; j < atoms.length; j++) {
       const dx = atoms[i].x - atoms[j].x;
@@ -608,9 +625,16 @@ function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; pai
         pairI = i;
         pairJ = j;
       }
+      const minAllowed = getMinInteratomicDistance(atoms[i].element, atoms[j].element);
+      const ratio = dist / minAllowed;
+      if (ratio < minRatio) {
+        minRatio = ratio;
+        worstI = i;
+        worstJ = j;
+      }
     }
   }
-  return { minDist, pairI, pairJ };
+  return { minDist, minRatio, worstI, worstJ, pairI, pairJ };
 }
 
 function computeBoundingVolume(atoms: AtomPosition[]): number {
@@ -650,18 +674,18 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   let current = atoms;
 
   for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
-    const { minDist } = computePairwiseDistances(current);
+    const { minDist, minRatio } = computePairwiseDistances(current);
     const volume = computeBoundingVolume(current);
     const volumePerAtom = volume / current.length;
 
-    const distOk = minDist >= MIN_PAIRWISE_DISTANCE - 0.01;
+    const distOk = minRatio >= 0.99;
     const volOk = volumePerAtom >= MIN_VOLUME_PER_ATOM - 0.1;
 
     if (distOk && volOk) return current;
 
     let scaleFactor = 1.0;
     if (!distOk) {
-      scaleFactor = Math.max(scaleFactor, (MIN_PAIRWISE_DISTANCE + 0.1) / Math.max(minDist, 0.01));
+      scaleFactor = Math.max(scaleFactor, 1.05 / Math.max(minRatio, 0.01));
     }
     if (!volOk) {
       const neededFactor = Math.cbrt(MIN_VOLUME_PER_ATOM / Math.max(volumePerAtom, 0.01));
@@ -669,16 +693,16 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     }
 
     scaleFactor = Math.min(scaleFactor, 3.0);
-    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, vol/atom=${volumePerAtom.toFixed(1)}ų — scaling by ${scaleFactor.toFixed(2)}`);
+    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų — scaling by ${scaleFactor.toFixed(2)}`);
     current = scaleStructure(current, scaleFactor);
   }
 
-  const { minDist } = computePairwiseDistances(current);
+  const { minDist, minRatio } = computePairwiseDistances(current);
   const volume = computeBoundingVolume(current);
   const volumePerAtom = volume / current.length;
 
-  if (minDist < MIN_PAIRWISE_DISTANCE - 0.01 || volumePerAtom < MIN_VOLUME_PER_ATOM - 0.1) {
-    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, vol/atom=${volumePerAtom.toFixed(1)}ų`);
+  if (minRatio < 0.99 || volumePerAtom < MIN_VOLUME_PER_ATOM - 0.1) {
+    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
     return null;
   }
 
@@ -1203,8 +1227,13 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
   const HA_TO_EV = 27.2114;
   const efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
 
-  if (Math.abs(efPerAtom) > 5) {
-    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom exceeds sanity bounds (>5 eV/atom), discarding`);
+  if (efPerAtom > 1.0) {
+    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom is positive (>1.0), discarding — compound less stable than elements`);
+    return null;
+  }
+
+  if (efPerAtom < -5.0) {
+    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom unrealistically negative (<-5.0), likely reference energy mismatch — discarding`);
     return null;
   }
 

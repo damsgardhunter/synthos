@@ -99,10 +99,13 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Phonon severe instability**: >3 imaginary modes OR lowest freq < -500 cm⁻¹ → hard rejection ("phonon-unstable")
 - **Physical instability threshold**: -5 cm⁻¹
 - **Penalty**: Physical imaginary modes penalize ensemble score by 0.05 per mode (max 0.25); >= 5 modes → dataConfidence = "low"
-- **Formation energy hard stop**: |Ef| > 5 eV/atom → immediate rejection ("formation-energy-insane") before DFT pipeline
+- **Formation energy hard stop**: Ef > 1.0 eV/atom (positive, less stable than elements) or Ef < -5.0 eV/atom (unrealistically negative, reference mismatch) → immediate rejection before DFT pipeline
 - **Hull distance**: Hard reject > 0.50 eV/atom; 0.25-0.50 = "exploratory-metastable" (requires kinetic barrier > 0.2 eV)
 - **Family quotas**: FAMILY_CAPS dict (Hydrides 40%, Intermetallics 25%, Borides/Carbides/Nitrides/Oxides 15% each, Sulfides/Pnictides 10%)
 - **Known compound filter**: ~200 known compounds (hydrides, carbides, cuprates, iron-based, binary) rejected pre-evaluation
+- **Interatomic distance validation**: Element-pair-aware minimum distances based on covalent radii sums × 0.85, floor of 1.0 Å (not a flat constant). Applied in both xTB structure gen and QE geometry checks.
+- **Hydrogen stoichiometry limits**: H/metal ratio capped at 6 and H fraction at 75% for ambient-pressure candidates. Known superhydrides (LaH10, YH6, etc.) exempted. RL templates use AH3/ABH4 (not AH10/ABH6).
+- **MIN_VOLUME_PER_ATOM**: 8.0 ų in xTB structure gen; 5.0 ų in QE geometry check
 - **xTB binary check**: Validates XTB_BIN exists before geometry optimization commands
 - **Discovery score weights**: 0.55 Tc + 0.15 stability + 0.10 novelty + 0.10 synthesis + 0.05 topology + 0.05 uncertainty
 - **Design program templates**: 11-12 instructions per template; mutation pool has 10 insertable instruction types with 40% chance to insert 2 at once

@@ -18,8 +18,8 @@ const STOICH_TEMPLATES = [
   { name: "ternary-perovskite", pattern: "ABC3", nElements: 3 },
   { name: "ternary-balanced", pattern: "A2BC", nElements: 3 },
   { name: "quaternary", pattern: "ABCD", nElements: 4 },
-  { name: "hydride-rich", pattern: "AH10", nElements: 2 },
-  { name: "ternary-hydride", pattern: "ABH6", nElements: 3 },
+  { name: "hydride-rich", pattern: "AH3", nElements: 2 },
+  { name: "ternary-hydride", pattern: "ABH4", nElements: 3 },
   { name: "boride-carbide", pattern: "A2B3C", nElements: 3 },
 ] as const;
 
@@ -39,9 +39,9 @@ const LAYERING_DIMENSIONS = [
 
 const HYDROGEN_DENSITIES = [
   { name: "no-hydrogen", ratio: 0, description: "No hydrogen content" },
-  { name: "low-H", ratio: 2, description: "Interstitial hydrogen (H/M ~ 1-3)" },
-  { name: "medium-H", ratio: 6, description: "Clathrate hydrogen (H/M ~ 4-8)" },
-  { name: "high-H", ratio: 10, description: "Superhydride (H/M >= 9)" },
+  { name: "low-H", ratio: 2, description: "Interstitial hydrogen (H/M ~ 1-2)" },
+  { name: "medium-H", ratio: 4, description: "Moderate hydrogen (H/M ~ 3-4)" },
+  { name: "high-H", ratio: 6, description: "High hydrogen at ambient limits (H/M ~ 5-6)" },
 ] as const;
 
 const ELECTRON_COUNTS = [
@@ -614,8 +614,8 @@ export class RLChemicalSpaceAgent {
       let formula: string;
       const pattern = template.pattern;
 
-      if (hDensity.ratio >= 6 && !pattern.includes("H")) {
-        const hCount = hDensity.ratio;
+      if (hDensity.ratio >= 4 && !pattern.includes("H")) {
+        const hCount = Math.min(hDensity.ratio, 6);
         if (template.nElements === 2) {
           formula = `${el1}${el2}H${hCount}`;
         } else {
@@ -879,7 +879,7 @@ function applyBinaryPattern(el1: string, el2: string, pattern: string): string {
     case "A3B": return `${el1}3${el2}`;
     case "AB": return `${el1}${el2}`;
     case "AB3": return `${el1}${el2}3`;
-    case "AH10": return `${el1}${el2}10`;
+    case "AH3": return `${el1}${el2}3`;
     default: return `${el1}${el2}`;
   }
 }
@@ -889,7 +889,7 @@ function applyTernaryPattern(el1: string, el2: string, el3: string, pattern: str
     case "AB2C2": return `${el1}${el2}2${el3}2`;
     case "ABC3": return `${el1}${el2}${el3}3`;
     case "A2BC": return `${el1}2${el2}${el3}`;
-    case "ABH6": return `${el1}${el2}${el3}6`;
+    case "ABH4": return `${el1}${el2}${el3}4`;
     case "A2B3C": return `${el1}2${el2}3${el3}`;
     default: return `${el1}${el2}${el3}`;
   }

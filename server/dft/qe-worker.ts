@@ -554,14 +554,25 @@ function validateGeometry(
   const volumePerAtom = volumeAng3 / totalAtoms;
   if (volumePerAtom < 5) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min 5)` };
 
+  const COVALENT_R: Record<string, number> = {
+    H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
+    Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
+    K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
+    Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
+    Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
+    Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39, Pb: 1.46, Bi: 1.48,
+  };
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
       const dx = (positions[i].x - positions[j].x) * latticeA;
       const dy = (positions[i].y - positions[j].y) * latticeA;
       const dz = (positions[i].z - positions[j].z) * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist < 0.7) {
-        return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A (min 0.7)` };
+      const r1 = COVALENT_R[positions[i].element] ?? 1.3;
+      const r2 = COVALENT_R[positions[j].element] ?? 1.3;
+      const minDist = Math.max((r1 + r2) * 0.85, 1.0);
+      if (dist < minDist) {
+        return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A (min ${minDist.toFixed(2)})` };
       }
     }
   }
@@ -580,14 +591,28 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   }
 
   const ALKALINE_EARTH_SYMBOLS = new Set(["Ca", "Sr", "Ba", "Mg"]);
+  const KNOWN_SUPERHYDRIDES = new Set(["LaH10", "YH6", "YH9", "CeH9", "CeH10", "ThH10", "CaH6", "ScH9", "BaH12", "LaBeH8"]);
   const hCount = counts["H"] || 0;
   if (hCount > 0 && totalAtoms > 2) {
     const hRatio = hCount / totalAtoms;
     const hasHydrideMetal = elements.some(el => el !== "H" && (
       isTransitionMetal(el) || isRareEarth(el) || ALKALINE_EARTH_SYMBOLS.has(el)
     ));
+
     if (hRatio > 0.9 && !hasHydrideMetal) {
       return { valid: false, reason: `Hydrogen ratio ${(hRatio * 100).toFixed(0)}% with no metal host — likely unphysical` };
+    }
+
+    const nonHAtoms = totalAtoms - hCount;
+    const hPerMetal = nonHAtoms > 0 ? hCount / nonHAtoms : hCount;
+    const isKnownSuperhydride = KNOWN_SUPERHYDRIDES.has(formula.replace(/\s+/g, ""));
+
+    if (!isKnownSuperhydride && hPerMetal > 6) {
+      return { valid: false, reason: `H/metal ratio ${hPerMetal.toFixed(1)} too high — superhydrides (H/M>6) require >100 GPa, not ambient pressure` };
+    }
+
+    if (hRatio > 0.75 && !isKnownSuperhydride) {
+      return { valid: false, reason: `Hydrogen fraction ${(hRatio * 100).toFixed(0)}% too high for ambient pressure — only known superhydrides under extreme pressure have H>75%` };
     }
   }
 
