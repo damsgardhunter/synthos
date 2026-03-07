@@ -6,6 +6,7 @@ import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB } from "../inverse/inverse-optimizer";
+import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
@@ -511,6 +512,44 @@ async function runPhase7_Superconductor() {
         }
       } catch (err: any) {
         emit("log", { phase: "inverse-optimizer", event: "Inverse optimizer error", detail: err.message?.slice(0, 200) });
+      }
+    }
+
+    if (cycleCount % 12 === 0 && shouldContinue()) {
+      try {
+        const activeCampaignList = getAllActiveCampaigns();
+        for (const campaign of activeCampaignList) {
+          const gradResult = runGradientDescentCycle(campaign.target, 4, 12);
+          if (gradResult.bestTc > 10) {
+            for (const r of gradResult.results) {
+              if (r.finalTc > 10) {
+                try {
+                  const features = extractFeatures(r.finalFormula);
+                  if (!features) continue;
+                  const gb = gbPredict(features);
+                  if (gb.tcPredicted >= 10) {
+                    await insertCandidateWithStabilityCheck({
+                      formula: normalizeFormula(r.finalFormula),
+                      predictedTc: Math.round(gb.tcPredicted),
+                      dataConfidence: "low",
+                      ensembleScore: Math.min(0.9, gb.score),
+                      verificationStage: 0,
+                      notes: `[gradient-descent: ${r.totalSteps} steps, ${r.initialFormula}->${r.finalFormula}, improvement=${r.improvementRatio}]`,
+                    });
+                    totalScCandidates++;
+                  }
+                } catch {}
+              }
+            }
+            emit("log", {
+              phase: "gradient-optimizer",
+              event: `Gradient descent cycle`,
+              detail: `Campaign ${campaign.id}: best=${gradResult.bestFormula} Tc=${gradResult.bestTc.toFixed(1)}K from ${gradResult.results.length} seeds`,
+            });
+          }
+        }
+      } catch (err: any) {
+        emit("log", { phase: "gradient-optimizer", event: "Gradient optimizer error", detail: err.message?.slice(0, 200) });
       }
     }
 
@@ -1965,6 +2004,7 @@ export function getAutonomousLoopStats() {
     crystalDiffusion: getDiffusionStats(),
     topologyDetection: getTopologyStats(),
     inverseOptimizer: getInverseOptimizerStats(),
+    differentiableOptimizer: getDifferentiableOptimizerStats(),
   };
 }
 

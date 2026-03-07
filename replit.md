@@ -171,6 +171,17 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `POST /api/inverse-design/start`, `GET /api/inverse-design/campaigns`, `GET /api/inverse-design/campaign/:id`, `DELETE /api/inverse-design/campaign/:id`, `POST /api/inverse-design/campaign/:id/pause`, `GET /api/inverse-design/stats`.
 - Files: `server/inverse/target-schema.ts`, `server/inverse/inverse-generator.ts`, `server/inverse/inverse-learning.ts`, `server/inverse/inverse-optimizer.ts`
 
+### Differentiable Materials Design (Gradient-Based Inverse Physics)
+- **Analytic McMillan gradients**: Computes ∂Tc/∂λ, ∂Tc/∂ωlog, ∂Tc/∂μ* analytically from the Allen-Dynes equation. Full chain rule through prefactor and exponent terms.
+- **Numerical element gradients**: Finite-difference ∂Tc/∂composition by perturbing each element count ±1 and re-evaluating the full physics pipeline (electronic structure → phonon spectrum → electron-phonon coupling → Tc).
+- **Gradient-to-composition mapping**: Interprets gradient signals into discrete composition actions — add light covalent elements (boost phonon freq), add high-coupling TM (boost λ), increase DOS, improve metallicity. Substitution groups for stagnation escape (e.g., Nb↔V↔Ta, La↔Y↔Ce).
+- **Loss function**: Weighted L2 loss: 0.60 Tc gap + 0.15 lambda deficit + 0.10 metallicity + 0.15 stability.
+- **Iterative optimizer**: Up to 20 gradient-descent steps per seed. Stagnation detection after 4 non-improving steps triggers element substitution from chemically similar groups. Atom count capped at 20 with proportional scaling.
+- **Seed generation**: Target-Tc-aware seed selection (>200K: hydride seeds like LaH10/YH6; >100K: A15 seeds like Nb3Ge; >30K: MgB2/NbN).
+- **Pipeline integration**: Runs every 12 engine cycles using active campaign targets. 4 seeds × 12 steps per campaign. Results passing GB gate (Tc≥10K) inserted as SC candidates.
+- **API**: `POST /api/gradient-design/optimize` (single formula), `POST /api/gradient-design/batch` (multi-seed), `GET /api/gradient-design/stats`.
+- File: `server/inverse/differentiable-optimizer.ts`
+
 ### Chemical Synthesis Realism
 - **Precursor availability scoring**: ~70-element lookup table (COMMON_ELEMENTS) mapping elements to availability scores (1.0 for Fe/Al/Si/O down to 0.2 for Os/Ir). Weighted by compositional fraction.
 - **Family-specific synthesis defaults**: Calibrated per-family base scores, reaction temperatures, pressure requirements, and atmosphere complexity (e.g., hydrides: base 0.25, 150 GPa; MAX-phases: base 0.70, no pressure).

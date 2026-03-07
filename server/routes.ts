@@ -19,6 +19,10 @@ import {
   loadCampaign, getSerializableCampaignState,
 } from "./inverse/inverse-optimizer";
 import type { TargetProperties } from "./inverse/target-schema";
+import {
+  runDifferentiableOptimization, runGradientDescentCycle,
+  getDifferentiableOptimizerStats, generateGradientSeeds,
+} from "./inverse/differentiable-optimizer";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -778,6 +782,56 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getInverseDesignStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to get stats" });
+    }
+  });
+
+  app.post("/api/gradient-design/optimize", writeLimiter, async (req, res) => {
+    try {
+      const { formula, targetTc, maxPressure, minLambda, maxSteps } = req.body;
+      if (!formula || !targetTc) {
+        return res.status(400).json({ error: "formula and targetTc are required" });
+      }
+      const target: TargetProperties = {
+        targetTc: Number(targetTc),
+        maxPressure: Number(maxPressure ?? 50),
+        minLambda: Number(minLambda ?? 1.5),
+        maxHullDistance: 0.05,
+        metallicRequired: true,
+        phononStable: true,
+      };
+      const result = runDifferentiableOptimization(formula, target, Number(maxSteps ?? 20));
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Gradient optimization failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/gradient-design/batch", writeLimiter, async (req, res) => {
+    try {
+      const { targetTc, maxPressure, minLambda, seedCount, stepsPerSeed } = req.body;
+      if (!targetTc) {
+        return res.status(400).json({ error: "targetTc is required" });
+      }
+      const target: TargetProperties = {
+        targetTc: Number(targetTc),
+        maxPressure: Number(maxPressure ?? 50),
+        minLambda: Number(minLambda ?? 1.5),
+        maxHullDistance: 0.05,
+        metallicRequired: true,
+        phononStable: true,
+      };
+      const cycle = runGradientDescentCycle(target, Number(seedCount ?? 6), Number(stepsPerSeed ?? 15));
+      res.json(cycle);
+    } catch (e: any) {
+      res.status(500).json({ error: "Batch gradient optimization failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/gradient-design/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDifferentiableOptimizerStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get gradient design stats" });
     }
   });
 
