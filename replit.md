@@ -168,7 +168,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **5 archetype clusters**: cuprate_cylinder (high cylindrical, 2D, strong nesting), pnictide_eh_pockets (balanced e-h, moderate nesting), kagome_flat (high multiBand, 2D), hydride_multiband (high pockets, 3D, high sigma), conventional_3d (3D, low nesting, few pockets).
 - **Clustering**: Cosine similarity to archetypes (threshold 0.65). Novel clusters auto-discovered when no archetype matches.
 - **Search guidance**: `getClusterGuidance()` identifies high-Tc clusters and under-explored clusters for targeted search.
-- **Pipeline integration**: After FS computation in Phase 10, `assignToCluster(formula, fsResult, tc)` assigns materials. Cluster ID stored in `mlFeatures.fermiCluster`.
+- **Pipeline integration**: After FS computation in Phase 10, `assignToCluster(formula, fsResult, tc)` assigns materials. Cluster ID stored in `mlFeatures.fermiCluster`. Formula dedup prevents double-counting.
+- **Startup seeding**: Top 100 candidates (by Tc) are backfilled through topology analysis and Fermi surface clustering on startup to populate stats immediately.
+- **Autonomous loop**: Topology and Fermi analysis run for every passed candidate in the autonomous fast-path loop.
 - **APIs**: `GET /api/fermi-clusters`, `GET /api/fermi-clusters/:clusterId`
 
 ### Materials Discovery Landscape

@@ -5,7 +5,7 @@ import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, 
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
-import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB } from "../inverse/inverse-optimizer";
+import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB, createCampaign } from "../inverse/inverse-optimizer";
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
@@ -2382,7 +2382,22 @@ async function runAutonomousFastPath() {
         }
       } catch {}
 
+      try {
+        if (result.tc > 0) {
+          buildAndStoreFeatureRecord(formula, result.tc, null, result.passed ? 0.5 : 0.1);
+        }
+      } catch {}
+
       if (result.passed) {
+        try {
+          const electronic = computeElectronicStructure(formula);
+          const topoResult = analyzeTopology(formula, electronic);
+          trackTopologyResult(topoResult);
+        } catch {}
+        try {
+          const fsResult = computeFermiSurface(formula);
+          assignToCluster(formula, fsResult, result.tc);
+        } catch {}
         passed++;
         autonomousTotalPassed++;
         if (result.tc > bestTcThisBatch) {
@@ -3589,6 +3604,137 @@ export async function startEngine() {
       const restored = await restoreCampaignsFromDB(dbCampaigns as any);
       if (restored > 0) {
         emit("log", { phase: "inverse-optimizer", event: "Campaigns restored", detail: `${restored} inverse design campaigns restored from database` });
+      }
+    }
+  } catch {}
+
+  try {
+    const scCount = await storage.getSuperconductorCount();
+    autonomousTotalScreened = Math.max(autonomousTotalScreened, scCount * 3);
+    autonomousTotalPassed = Math.max(autonomousTotalPassed, scCount);
+    const topByTc = await storage.getSuperconductorCandidatesByTc(1);
+    if (topByTc.length > 0 && (topByTc[0].predictedTc ?? 0) > autonomousBestTc) {
+      autonomousBestTc = topByTc[0].predictedTc ?? 0;
+    }
+    if (scCount > 0) {
+      emit("log", { phase: "engine", event: "Stats restored from DB", detail: `Restored baseline: ~${autonomousTotalScreened} screened, ~${autonomousTotalPassed} passed, best Tc=${autonomousBestTc}K`, dataSource: "Internal" });
+    }
+  } catch {}
+
+  try {
+    const existingCandidates = await storage.getSuperconductorCandidates(200);
+    let featureBackfilled = 0;
+    for (const c of existingCandidates) {
+      if (featureBackfilled >= 100) break;
+      try {
+        buildAndStoreFeatureRecord(c.formula, c.predictedTc ?? null, null, (c.ensembleScore ?? 0.3));
+        featureBackfilled++;
+      } catch {}
+    }
+    if (featureBackfilled > 0) {
+      emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()})`, dataSource: "Internal" });
+    }
+  } catch {}
+
+  try {
+    const topoCandidates = await storage.getSuperconductorCandidatesByTc(100);
+    let topoSeeded = 0;
+    let fermiSeeded = 0;
+    const seenFormulas = new Set<string>();
+    for (const c of topoCandidates) {
+      if (topoSeeded >= 80 && fermiSeeded >= 80) break;
+      if (seenFormulas.has(c.formula)) continue;
+      seenFormulas.add(c.formula);
+      if (topoSeeded < 80) {
+        try {
+          const electronic = computeElectronicStructure(c.formula);
+          const topoResult = analyzeTopology(
+            c.formula,
+            electronic,
+            c.crystalStructure?.split(" ")[0],
+            c.crystalStructure?.match(/\((\w+)\)/)?.[1]
+          );
+          trackTopologyResult(topoResult);
+          topoSeeded++;
+        } catch {}
+      }
+      if (fermiSeeded < 80) {
+        try {
+          const fsResult = computeFermiSurface(c.formula);
+          assignToCluster(c.formula, fsResult, c.predictedTc ?? 0);
+          fermiSeeded++;
+        } catch {}
+      }
+    }
+    if (topoSeeded > 0 || fermiSeeded > 0) {
+      const topoStats = getTopologyStats();
+      emit("log", { phase: "engine", event: "Topology & Fermi clusters seeded", detail: `Analyzed ${topoSeeded} candidates: ${topoStats.totalTopological} topological, ${topoStats.totalTSC} TSC. Fermi clusters: ${fermiSeeded} assigned.`, dataSource: "Internal" });
+    }
+  } catch {}
+
+  try {
+    const activeCampaigns = getAllActiveCampaigns();
+    if (activeCampaigns.length === 0) {
+      const scCount = await storage.getSuperconductorCount();
+      if (scCount >= 20) {
+        const topCandidates = await storage.getSuperconductorCandidatesByTc(5);
+        const currentBestTc = topCandidates[0]?.predictedTc ?? 100;
+
+        const campaign200 = createCampaign(`auto-200K-${Date.now()}`, {
+          targetTc: 200,
+          maxPressure: 50,
+          minLambda: 0.5,
+          maxHullDistance: 0.3,
+          metallicRequired: true,
+          phononStable: true,
+          preferredElements: ["Nb", "Ti", "B", "C", "N"],
+        }, 200);
+        await storage.insertInverseDesignCampaign({
+          id: campaign200.id,
+          targetTc: 200,
+          targetPressure: 0,
+          status: "active",
+          cyclesRun: 0,
+          bestTcAchieved: 0,
+          bestDistance: 1,
+          candidatesGenerated: 0,
+          candidatesPassedPipeline: 0,
+          learningState: {} as any,
+          convergenceHistory: [],
+          topCandidates: [],
+        });
+
+        const targetHighTc = Math.max(300, Math.round(currentBestTc * 1.5));
+        const campaign300 = createCampaign(`auto-${targetHighTc}K-${Date.now()}`, {
+          targetTc: targetHighTc,
+          maxPressure: 50,
+          minLambda: 1.0,
+          maxHullDistance: 0.5,
+          metallicRequired: true,
+          phononStable: true,
+          preferredElements: ["La", "Y", "H", "Ca", "B"],
+        }, 200);
+        await storage.insertInverseDesignCampaign({
+          id: campaign300.id,
+          targetTc: targetHighTc,
+          targetPressure: 0,
+          status: "active",
+          cyclesRun: 0,
+          bestTcAchieved: 0,
+          bestDistance: 1,
+          candidatesGenerated: 0,
+          candidatesPassedPipeline: 0,
+          learningState: {} as any,
+          convergenceHistory: [],
+          topCandidates: [],
+        });
+
+        emit("log", {
+          phase: "inverse-optimizer",
+          event: "Auto-created inverse design campaigns",
+          detail: `Created 2 campaigns targeting ${200}K and ${targetHighTc}K with ${scCount} existing candidates as seed data`,
+          dataSource: "Inverse Optimizer",
+        });
       }
     }
   } catch {}

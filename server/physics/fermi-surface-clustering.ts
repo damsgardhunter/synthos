@@ -144,8 +144,11 @@ function topElements(members: FSClusterMember[], n: number): string[] {
     .map(([el]) => el);
 }
 
+const assignedFormulas = new Set<string>();
+
 export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, tc: number = 0): ClusterAssignment {
   const vec = fsResultToVector(fsResult);
+  const alreadyAssigned = assignedFormulas.has(formula);
   let bestId = "conventional_3d";
   let bestSim = -1;
 
@@ -189,14 +192,17 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
 
   const member: FSClusterMember = { formula, tc, featureVector: vec, similarity: bestSim };
 
-  if (assignedId.startsWith("novel_")) {
-    const arr = novelClusterMembers.get(assignedId) || [];
-    arr.push(member);
-    novelClusterMembers.set(assignedId, arr);
-  } else {
-    const arr = clusterMembers.get(assignedId) || [];
-    arr.push(member);
-    clusterMembers.set(assignedId, arr);
+  if (!alreadyAssigned) {
+    assignedFormulas.add(formula);
+    if (assignedId.startsWith("novel_")) {
+      const arr = novelClusterMembers.get(assignedId) || [];
+      arr.push(member);
+      novelClusterMembers.set(assignedId, arr);
+    } else {
+      const arr = clusterMembers.get(assignedId) || [];
+      arr.push(member);
+      clusterMembers.set(assignedId, arr);
+    }
   }
 
   const assignment: ClusterAssignment = {

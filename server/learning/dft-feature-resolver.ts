@@ -347,9 +347,10 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
   const analytical = computeAnalyticalFallbacks(formula);
 
   const hasExternalData = raw.mpSummary != null || raw.mpElectronic != null || raw.mpThermo != null || raw.mpElasticity != null || raw.aflowEntry != null || raw.aflowDFT != null;
+  const hasPartialExternal = hasExternalData && !(raw.mpElectronic != null && raw.mpThermo != null);
 
   let xtbData: XTBEnrichedFeatures | null = null;
-  if (!hasExternalData && isDFTAvailable()) {
+  if ((!hasExternalData || hasPartialExternal) && isDFTAvailable()) {
     const preFilter = estimatePhononStability(formula);
     if (!preFilter.stable) {
       console.log(`[DFT] ${formula}: Pre-filter rejected (score=${preFilter.score.toFixed(2)}): ${preFilter.reasons.join("; ")}`);
