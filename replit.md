@@ -182,6 +182,16 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `POST /api/gradient-design/optimize` (single formula), `POST /api/gradient-design/batch` (multi-seed), `GET /api/gradient-design/stats`.
 - File: `server/inverse/differentiable-optimizer.ts`
 
+### 5-Pillar SC Optimizer (Multi-Objective Superconductivity Targeting)
+- **5 SC pillars**: (1) Strong electron-phonon coupling λ≥1.5, (2) High phonon frequencies ω_log≥700K, (3) High DOS at Fermi level ≥2.0 states/eV, (4) Fermi surface nesting ≥0.5, (5) Favorable structural motifs (cage/layered/kagome).
+- **Pillar evaluation**: `evaluatePillars()` computes all 5 pillar scores (0-1 each), composite weighted fitness, satisfied pillar count (0-5), and weakest pillar identification.
+- **8 design templates**: clathrate-hydride, metal-boride, metal-carbide, metal-nitride, ternary-hydride, high-DOS-intermetallic, layered-pnictide, cuprate-layered.
+- **Adaptive pillar weights**: Learned via RL reward from Tc outcomes. Successful pillar patterns get increased weights. Weights auto-normalize to sum to 1.0.
+- **Weakness-targeted mutation**: Existing candidates are mutated specifically to improve their weakest pillar (e.g., if weak coupling → add light atoms; if weak nesting → add pnictogen layers).
+- **Pipeline integration**: Runs every 9 engine cycles. Uses top existing SC candidates + pillar-guided generation + weakness mutation. Inserts candidates with Tc≥8K.
+- **API**: `POST /api/sc-pillars/evaluate` (single formula), `POST /api/sc-pillars/generate` (full generation), `GET /api/sc-pillars/stats`.
+- File: `server/inverse/sc-pillars-optimizer.ts`
+
 ### Physics-Constrained Generative AI (Rule-Aware Material Creation)
 - **Constraint checks**: Charge neutrality (with metallic compound bypass), atomic radius compatibility, coordination number limits, bond stability (electronegativity spread, composition dominance, atom count), electron count rules, noble gas rejection, stoichiometry excess.
 - **Metallic compound awareness**: Intermetallics (Nb3Sn), hydrides (LaH10, CaH6), borides (MgB2), and metal-metalloid compounds bypass ionic charge balance since bonding is metallic/covalent.

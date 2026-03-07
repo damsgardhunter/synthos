@@ -31,6 +31,10 @@ import {
   checkPhysicsConstraints, constraintGuidedGenerate,
   getConstraintEngineStats,
 } from "./inverse/physics-constraint-engine";
+import {
+  evaluatePillars, runPillarGuidedGeneration,
+  getPillarOptimizerStats, DEFAULT_PILLAR_TARGETS,
+} from "./inverse/sc-pillars-optimizer";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -907,6 +911,55 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getConstraintEngineStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to get constraint stats" });
+    }
+  });
+
+  app.post("/api/sc-pillars/evaluate", writeLimiter, (req, res) => {
+    try {
+      const { formula, targets } = req.body;
+      if (!formula || typeof formula !== "string") {
+        return res.status(400).json({ error: "formula is required" });
+      }
+      const result = evaluatePillars(formula, targets ?? DEFAULT_PILLAR_TARGETS);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pillar evaluation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/sc-pillars/generate", writeLimiter, (req, res) => {
+    try {
+      const { candidatesPerTemplate, targets } = req.body;
+      const result = runPillarGuidedGeneration(
+        targets ?? DEFAULT_PILLAR_TARGETS,
+        Number(candidatesPerTemplate ?? 6),
+      );
+      res.json({
+        totalGenerated: result.length,
+        candidates: result.slice(0, 50).map(c => ({
+          formula: c.formula,
+          fitness: c.evaluation.compositeFitness,
+          tc: c.evaluation.tcPredicted,
+          pillars: c.evaluation.satisfiedPillars,
+          lambda: c.evaluation.lambda,
+          omegaLogK: c.evaluation.omegaLogK,
+          dos: c.evaluation.dos,
+          nesting: c.evaluation.nestingScore,
+          motif: c.evaluation.motifMatch,
+          weakest: c.evaluation.weakestPillar,
+          rationale: c.designRationale,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Pillar generation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/sc-pillars/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getPillarOptimizerStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get pillar optimizer stats" });
     }
   });
 

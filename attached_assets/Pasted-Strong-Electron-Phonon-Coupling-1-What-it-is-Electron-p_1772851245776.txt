@@ -1,0 +1,286 @@
+Strong Electron-Phonon Coupling (λ ≥ ~1)
+What it is
+
+Electron-phonon coupling describes how strongly lattice vibrations interact with electrons.
+
+When atoms vibrate, they distort the lattice potential.
+Electrons feel this distortion and attract each other indirectly, forming Cooper pairs.
+
+In BCS/Eliashberg theory:
+
+𝑇
+𝑐
+∝
+𝜔
+𝑙
+𝑜
+𝑔
+exp
+⁡
+(
+−
+1.04
+(
+1
++
+𝜆
+)
+𝜆
+−
+𝜇
+∗
+(
+1
++
+0.62
+𝜆
+)
+)
+T
+c
+	​
+
+∝ω
+log
+	​
+
+exp(
+λ−μ
+∗
+(1+0.62λ)
+−1.04(1+λ)
+	​
+
+)
+
+Where:
+
+λ = electron-phonon coupling
+
+ω_log = phonon frequency
+
+μ* = Coulomb repulsion
+
+Higher λ → stronger pairing → higher Tc.
+
+Where it appears
+
+Examples:
+
+Material	λ
+LaH10	~2.5–3
+H3S	~2
+MgB2	~0.8–1
+
+Hydrides achieve extremely large λ because hydrogen vibrates strongly.
+
+How to target it in inverse design
+
+Optimize:
+
+λ = N(EF) * <I²> / (M * <ω²>)
+
+Where:
+
+N(EF) = density of states at Fermi level
+
+I² = electron-phonon matrix element
+
+M = atomic mass
+
+ω = phonon frequency
+
+Implementation targets
+
+Your generator should prefer:
+
+light atoms (H, B, C)
+
+covalent bonding networks
+
+layered structures
+
+metal-light atom bonds
+
+Examples:
+
+metal + hydrogen
+metal + boron
+metal + carbon
+2. High Phonon Frequencies (ω_log)
+What it is
+
+Higher lattice vibration frequencies increase Tc directly.
+
+In BCS/Eliashberg:
+
+Tc ∝ phonon frequency
+
+Light atoms vibrate faster.
+
+Where it appears
+Material	High-frequency atom
+LaH10	hydrogen
+H3S	hydrogen
+MgB2	boron
+
+Hydrogen produces phonon modes above 1000 cm⁻¹.
+
+Why hydrides dominate
+
+Hydrogen:
+
+mass = 1
+
+Phonon frequency roughly scales as:
+
+ω ~ sqrt(k / M)
+
+Lower mass → higher ω.
+
+Implementation targets
+
+Your inverse system should strongly bias toward:
+
+H
+B
+C
+N
+
+especially:
+
+metal hydrides
+borides
+carbides
+3. High Density of States at the Fermi Level (DOS(EF))
+What it is
+
+DOS(EF) = number of electronic states available at the Fermi energy.
+
+More states = more electrons available to pair.
+
+Where it appears
+
+Examples:
+
+Material	DOS(EF) feature
+MgB2	σ-band peak
+LaH10	hydrogen bands
+YBCO	van Hove singularity
+Important effect
+
+Many high-Tc materials sit near a van Hove singularity.
+
+This causes:
+
+DOS(EF) spike
+
+which amplifies pairing.
+
+Implementation targets
+
+Your system should reward:
+
+DOS(EF) / avgDOS > 2
+
+You already implemented something similar with flat-band detection.
+
+4. Fermi Surface Nesting
+What it is
+
+Nesting occurs when large portions of the Fermi surface match when shifted by a wave vector.
+
+This enhances interactions like:
+
+phonons
+spin fluctuations
+charge density waves
+Where it appears
+
+Examples:
+
+Material	Nesting feature
+FeSe	electron–hole pocket nesting
+BaFe2As2	Γ–M nesting
+MgB2	σ-band nesting
+Implementation targets
+
+Good nesting occurs when:
+
+quasi-2D band structure
+layered structures
+multiple Fermi sheets
+
+This is why layered materials dominate high-Tc systems.
+
+5. Structural Motifs that Amplify Pairing
+
+Certain crystal structures appear repeatedly in high-Tc systems.
+
+These geometries enhance interactions automatically.
+
+Important motifs
+Layered structures
+
+Examples:
+
+YBCO
+
+FeSe
+
+Layering creates:
+
+2D electronic structure
+enhanced correlations
+better nesting
+Cage structures
+
+Examples:
+
+LaH10
+
+Hydrogen cages create:
+
+strong phonons
+high DOS
+strong coupling
+Kagome lattices
+
+Examples:
+
+KV3Sb5
+
+These create:
+
+flat bands
+Dirac points
+strong correlations
+The Key Insight
+
+High-Tc superconductivity usually appears when several of these occur simultaneously.
+
+Example:
+
+Feature	Hydrides
+strong λ	yes
+high phonons	yes
+high DOS	yes
+nesting	moderate
+special structure	cage
+How Your Inverse System Should Use These
+
+Instead of targeting only Tc, target these five features:
+
+maximize λ
+maximize phonon frequency
+maximize DOS(EF)
+maximize nesting
+favor superconducting structures
+
+Your optimizer should try to satisfy:
+
+λ > 1.5
+ω_log > 700 K
+DOS(EF) > 2 states/eV
+flatBandIndicator > 0.5
+layered or cage structure

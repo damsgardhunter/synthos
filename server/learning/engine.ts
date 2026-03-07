@@ -9,6 +9,7 @@ import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSeria
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
+import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
@@ -552,6 +553,57 @@ async function runPhase7_Superconductor() {
         }
       } catch (err: any) {
         emit("log", { phase: "gradient-optimizer", event: "Gradient optimizer error", detail: err.message?.slice(0, 200) });
+      }
+    }
+
+    if (cycleCount % 9 === 0 && shouldContinue()) {
+      try {
+        const topExisting = await storage.getSuperconductorCandidatesByTc(10);
+        const existingFormulas = topExisting.map(c => c.formula);
+        const targetTc = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
+        const pillarResult = runPillarCycle(existingFormulas, targetTc);
+        let pillarInserted = 0;
+
+        for (const formula of pillarResult.formulas) {
+          if (!isValidFormula(formula)) continue;
+          const normalized = normalizeFormula(formula);
+          const existing = await storage.getSuperconductorByFormula(normalized);
+          if (existing) continue;
+
+          try {
+            const features = extractFeatures(normalized);
+            const gb = gbPredict(features);
+            if (gb.tcPredicted >= 8) {
+              const eval5 = pillarResult.evaluations.find(e => e.formula === formula);
+              const inserted = await insertCandidateWithStabilityCheck({
+                formula: normalized,
+                predictedTc: Math.round(gb.tcPredicted),
+                dataConfidence: "low",
+                ensembleScore: Math.min(0.9, gb.score),
+                verificationStage: 0,
+                notes: `[5-pillar: fitness=${eval5?.compositeFitness.toFixed(2) ?? "?"}, pillars=${eval5?.satisfiedPillars ?? "?"}/5, motif=${eval5?.motifMatch ?? "?"}, weak=${eval5?.weakestPillar ?? "?"}]`,
+              });
+              if (inserted) {
+                totalScCandidates++;
+                pillarInserted++;
+                if (eval5) {
+                  updatePillarWeightsFromReward(gb.tcPredicted, eval5);
+                }
+              }
+            }
+          } catch {}
+        }
+
+        if (pillarResult.formulas.length > 0) {
+          emit("log", {
+            phase: "pillar-optimizer",
+            event: "5-pillar guided generation",
+            detail: `Generated ${pillarResult.evaluations.length} candidates, ${pillarResult.formulas.length} passed fitness threshold, inserted ${pillarInserted}. Best: ${pillarResult.bestFormula} (fitness=${pillarResult.bestFitness.toFixed(2)}, Tc=${pillarResult.bestTc.toFixed(1)}K)`,
+            dataSource: "SC Pillars Optimizer",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "pillar-optimizer", event: "5-pillar optimizer error", detail: err.message?.slice(0, 200) });
       }
     }
 
@@ -2070,6 +2122,7 @@ export function getAutonomousLoopStats() {
     differentiableOptimizer: getDifferentiableOptimizerStats(),
     structureFirstDesign: getStructureDiffusionStats(),
     physicsConstraints: getConstraintEngineStats(),
+    scPillarsOptimizer: getPillarOptimizerStats(),
   };
 }
 
