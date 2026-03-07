@@ -15,6 +15,7 @@ import {
   Beaker, ArrowDown, ExternalLink, Thermometer,
   FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
   Cpu, Clock, Loader2, Network, Code2, GitBranch, ArrowLeftRight,
+  BookOpen, Sigma, FlaskRound, Search, TrendingUp, ShieldCheck, Lightbulb,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -1553,6 +1554,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="next-gen-pipeline" data-testid="tab-next-gen-pipeline">Inverse Design</TabsTrigger>
           <TabsTrigger value="self-improving-lab" data-testid="tab-self-improving-lab">Design Lab</TabsTrigger>
           <TabsTrigger value="design-repr" data-testid="tab-design-repr">Representations</TabsTrigger>
+          <TabsTrigger value="theory-discovery" data-testid="tab-theory-discovery">Theory Discovery</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -2092,6 +2094,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="design-repr" className="space-y-4" data-testid="design-repr-content">
           <DesignRepresentationsPanel />
+        </TabsContent>
+
+        <TabsContent value="theory-discovery" className="space-y-4" data-testid="theory-discovery-content">
+          <TheoryDiscoveryPanel />
         </TabsContent>
       </Tabs>
     </div>
@@ -2714,6 +2720,579 @@ function DesignRepresentationsPanel() {
                 <Skeleton className="h-4 w-full mb-1" />
                 <Skeleton className="h-4 w-3/4 mb-1" />
                 <Skeleton className="h-4 w-1/2" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface TheoryData {
+  id: string;
+  equation: string;
+  simplified: string;
+  target: string;
+  theoryScore: number;
+  accuracy: number;
+  mae: number;
+  complexity: number;
+  simplicity: number;
+  generalization: number;
+  physicsCompliance: number;
+  novelty: number;
+  dimensionallyValid: boolean;
+  variables: string[];
+  applicableFamilies: string[];
+  crossScaleValidation: { family: string; sampleCount: number; r2: number; mae: number }[];
+  featureImportance: { variable: string; importance: number }[];
+  discoveredAt: number;
+}
+
+interface DiscoveryStats {
+  totalRuns: number;
+  totalEquationsEvaluated: number;
+  theoriesDiscovered: number;
+  featureLibrarySize: number;
+  averageTheoryScore: number;
+  bestTheoryScore: number;
+  physicsVariablesUsed: string[];
+  familyCoverage: Record<string, number>;
+  topTheories: {
+    id: string;
+    equation: string;
+    simplified: string;
+    theoryScore: number;
+    r2: number;
+    complexity: number;
+    generalization: number;
+    physicsCompliance: number;
+    novelty: number;
+    dimensionallyValid: boolean;
+    variables: string[];
+    applicableFamilies: string[];
+  }[];
+  unitRegistry: { variable: string; unit: string }[];
+}
+
+interface FeatureLibraryItem {
+  name: string;
+  expression: string;
+  variables: string[];
+  category: string;
+  physicsInspired: boolean;
+}
+
+function TheoryDiscoveryPanel() {
+  const [activeView, setActiveView] = useState<"overview" | "theories" | "features" | "units" | "feedback">("overview");
+  const [familyFilter, setFamilyFilter] = useState<string>("all");
+  const [mechanismFilter, setMechanismFilter] = useState<string>("all");
+
+  const statsQuery = useQuery<DiscoveryStats>({
+    queryKey: ["/api/symbolic-discovery/stats"],
+  });
+
+  const theoriesQuery = useQuery<TheoryData[]>({
+    queryKey: ["/api/symbolic-discovery/theories"],
+  });
+
+  const featureLibraryQuery = useQuery<FeatureLibraryItem[]>({
+    queryKey: ["/api/symbolic-discovery/feature-library"],
+  });
+
+  const feedbackQuery = useQuery<{
+    biasedVariables: { variable: string; direction: string; strength: number }[];
+    suggestedCompositions: string[];
+    theoreticalInsight: string;
+  }>({
+    queryKey: ["/api/symbolic-discovery/feedback"],
+  });
+
+  const runDiscoveryMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/symbolic-discovery/run", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/symbolic-discovery/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/symbolic-discovery/theories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/symbolic-discovery/feedback"] });
+    },
+  });
+
+  const stats = statsQuery.data;
+  const theories = theoriesQuery.data ?? [];
+  const features = featureLibraryQuery.data ?? [];
+  const feedback = feedbackQuery.data;
+
+  const filteredTheories = theories.filter(t => {
+    if (familyFilter !== "all" && !t.applicableFamilies.includes(familyFilter)) return false;
+    return true;
+  });
+
+  const allFamilies = [...new Set(theories.flatMap(t => t.applicableFamilies))];
+
+  return (
+    <div className="space-y-4" data-testid="theory-discovery-panel">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold flex items-center gap-2" data-testid="text-theory-discovery-title">
+            <Sigma className="h-5 w-5 text-violet-500" />
+            Symbolic Physics Discovery Layer
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            Multi-objective symbolic equation search with physics constraints, dimensional analysis, and cross-scale validation
+          </p>
+        </div>
+        <Button
+          onClick={() => runDiscoveryMutation.mutate()}
+          disabled={runDiscoveryMutation.isPending}
+          data-testid="button-run-discovery"
+        >
+          {runDiscoveryMutation.isPending ? (
+            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Running...</>
+          ) : (
+            <><Search className="h-4 w-4 mr-2" />Run Discovery</>
+          )}
+        </Button>
+      </div>
+
+      <div className="flex gap-2 flex-wrap">
+        {(["overview", "theories", "features", "units", "feedback"] as const).map(view => (
+          <Button
+            key={view}
+            variant={activeView === view ? "default" : "outline"}
+            size="sm"
+            onClick={() => setActiveView(view)}
+            data-testid={`button-view-${view}`}
+          >
+            {view === "overview" && <><Activity className="h-3 w-3 mr-1" />Overview</>}
+            {view === "theories" && <><BookOpen className="h-3 w-3 mr-1" />Theories</>}
+            {view === "features" && <><Layers className="h-3 w-3 mr-1" />Feature Library</>}
+            {view === "units" && <><ShieldCheck className="h-3 w-3 mr-1" />Unit Registry</>}
+            {view === "feedback" && <><Lightbulb className="h-3 w-3 mr-1" />Feedback Loop</>}
+          </Button>
+        ))}
+      </div>
+
+      {activeView === "overview" && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card>
+              <CardContent className="pt-6">
+                <div className="text-2xl font-bold" data-testid="text-total-runs">{stats?.totalRuns ?? 0}</div>
+                <div className="text-xs text-muted-foreground">Discovery Runs</div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-6">
+                <div className="text-2xl font-bold" data-testid="text-equations-evaluated">{(stats?.totalEquationsEvaluated ?? 0).toLocaleString()}</div>
+                <div className="text-xs text-muted-foreground">Equations Evaluated</div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-6">
+                <div className="text-2xl font-bold" data-testid="text-theories-discovered">{stats?.theoriesDiscovered ?? 0}</div>
+                <div className="text-xs text-muted-foreground">Theories Discovered</div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-6">
+                <div className="text-2xl font-bold" data-testid="text-best-score">{stats?.bestTheoryScore ?? 0}</div>
+                <div className="text-xs text-muted-foreground">Best Theory Score</div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <TrendingUp className="h-4 w-4 text-emerald-500" />
+                  Top Discovered Equations
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {stats?.topTheories && stats.topTheories.length > 0 ? (
+                  <div className="space-y-3">
+                    {stats.topTheories.slice(0, 5).map((t, i) => (
+                      <div key={t.id} className="border rounded-lg p-3 space-y-1" data-testid={`card-top-theory-${i}`}>
+                        <div className="flex items-center justify-between">
+                          <code className="text-xs bg-muted px-2 py-1 rounded font-mono max-w-[70%] overflow-hidden text-ellipsis" data-testid={`text-theory-equation-${i}`}>
+                            {t.simplified}
+                          </code>
+                          <Badge variant={t.theoryScore > 0.5 ? "default" : "secondary"} data-testid={`badge-theory-score-${i}`}>
+                            {t.theoryScore}
+                          </Badge>
+                        </div>
+                        <div className="flex gap-2 text-xs text-muted-foreground">
+                          <span>R2: {t.r2}</span>
+                          <span>Gen: {t.generalization}</span>
+                          <span>Complexity: {t.complexity}</span>
+                          {t.dimensionallyValid && <Badge variant="outline" className="text-[10px] px-1">Dim Valid</Badge>}
+                        </div>
+                        <div className="flex gap-1 flex-wrap">
+                          {t.applicableFamilies.map(f => (
+                            <Badge key={f} variant="outline" className="text-[10px] px-1">{f}</Badge>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground" data-testid="text-no-theories">
+                    No theories discovered yet. Click "Run Discovery" to start symbolic equation search.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Target className="h-4 w-4 text-blue-500" />
+                  Material Family Coverage
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {stats?.familyCoverage && Object.keys(stats.familyCoverage).length > 0 ? (
+                  <div className="space-y-2">
+                    {Object.entries(stats.familyCoverage).sort((a, b) => b[1] - a[1]).map(([family, count]) => (
+                      <div key={family} className="flex items-center justify-between" data-testid={`row-family-${family}`}>
+                        <span className="text-sm">{family}</span>
+                        <div className="flex items-center gap-2">
+                          <div className="w-24 bg-muted rounded-full h-2">
+                            <div
+                              className="bg-violet-500 rounded-full h-2"
+                              style={{ width: `${Math.min(100, (count / Math.max(1, stats.theoriesDiscovered)) * 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-muted-foreground w-8 text-right">{count}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No family coverage data yet.</p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Sigma className="h-4 w-4 text-violet-500" />
+                Discovery Pipeline
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-7 gap-1 text-center text-xs">
+                {[
+                  { label: "Simulation Data", icon: "data", desc: "Multi-scale features" },
+                  { label: "Feature Library", icon: "lib", desc: `${stats?.featureLibrarySize ?? 0} terms` },
+                  { label: "Equation Search", icon: "search", desc: "Evolutionary GP" },
+                  { label: "Physics Filter", icon: "filter", desc: "Constraint validation" },
+                  { label: "Cross-Scale", icon: "scale", desc: "Family generalization" },
+                  { label: "Theory Ranking", icon: "rank", desc: "Multi-objective score" },
+                  { label: "Integration", icon: "integrate", desc: "Feedback loop" },
+                ].map((stage, i) => (
+                  <div key={i} className="flex flex-col items-center gap-1">
+                    <div className="w-10 h-10 rounded-full bg-violet-500/10 border border-violet-500/30 flex items-center justify-center text-violet-500 font-bold">
+                      {i + 1}
+                    </div>
+                    <span className="font-medium">{stage.label}</span>
+                    <span className="text-muted-foreground">{stage.desc}</span>
+                    {i < 6 && <ArrowDown className="h-3 w-3 text-muted-foreground mt-1" />}
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {activeView === "theories" && (
+        <>
+          <div className="flex gap-2 items-center">
+            <span className="text-sm text-muted-foreground">Filter by family:</span>
+            <select
+              className="text-sm border rounded px-2 py-1 bg-background"
+              value={familyFilter}
+              onChange={e => setFamilyFilter(e.target.value)}
+              data-testid="select-family-filter"
+            >
+              <option value="all">All Families</option>
+              {allFamilies.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+          </div>
+
+          {filteredTheories.length > 0 ? (
+            <div className="space-y-3">
+              {filteredTheories.map((theory, i) => (
+                <Card key={theory.id} data-testid={`card-theory-${i}`}>
+                  <CardContent className="pt-4 space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div className="space-y-1 flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="default" data-testid={`badge-theory-rank-${i}`}>#{i + 1}</Badge>
+                          <span className="text-xs text-muted-foreground">Score: {theory.theoryScore}</span>
+                          {theory.dimensionallyValid && (
+                            <Badge variant="outline" className="text-green-600 border-green-300">
+                              <ShieldCheck className="h-3 w-3 mr-1" />Dim Valid
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="mt-1">
+                          <code className="text-sm bg-muted px-2 py-1 rounded font-mono block overflow-x-auto" data-testid={`text-theory-full-eq-${i}`}>
+                            Tc = {theory.simplified}
+                          </code>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                      <div>
+                        <span className="text-muted-foreground">Accuracy (R2)</span>
+                        <div className="font-medium" data-testid={`text-theory-accuracy-${i}`}>{theory.accuracy}</div>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Simplicity</span>
+                        <div className="font-medium">{theory.simplicity}</div>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Generalization</span>
+                        <div className="font-medium">{theory.generalization}</div>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Physics</span>
+                        <div className="font-medium">{theory.physicsCompliance}</div>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Novelty</span>
+                        <div className="font-medium">{theory.novelty}</div>
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-muted-foreground">
+                      Score = 0.35*accuracy + 0.20*simplicity + 0.20*generalization + 0.15*physics + 0.10*novelty
+                    </div>
+
+                    {theory.crossScaleValidation.length > 0 && (
+                      <div>
+                        <span className="text-xs font-medium">Cross-Scale Validation:</span>
+                        <div className="flex gap-2 flex-wrap mt-1">
+                          {theory.crossScaleValidation.map(csv => (
+                            <Badge
+                              key={csv.family}
+                              variant={csv.r2 > 0.3 ? "default" : "secondary"}
+                              className="text-[10px]"
+                              data-testid={`badge-csv-${csv.family}-${i}`}
+                            >
+                              {csv.family}: R2={csv.r2.toFixed(2)} (n={csv.sampleCount})
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {theory.featureImportance.length > 0 && (
+                      <div>
+                        <span className="text-xs font-medium">Feature Importance:</span>
+                        <div className="flex gap-1 flex-wrap mt-1">
+                          {theory.featureImportance.slice(0, 5).map(fi => (
+                            <Badge key={fi.variable} variant="outline" className="text-[10px]">
+                              {fi.variable}: {fi.importance.toFixed(3)}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex gap-1 flex-wrap">
+                      {theory.variables.map(v => (
+                        <Badge key={v} variant="outline" className="text-[10px] bg-violet-50 dark:bg-violet-950">{v}</Badge>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground" data-testid="text-no-filtered-theories">
+                {theories.length === 0
+                  ? "No theories discovered yet. Run a discovery cycle first."
+                  : "No theories match the selected filter."}
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+
+      {activeView === "features" && (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Layers className="h-4 w-4 text-amber-500" />
+                Symbolic Feature Library ({features.length} terms)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                {["basic", "quadratic", "interaction", "ratio", "transform", "physics"].map(category => {
+                  const catFeatures = features.filter(f => f.category === category);
+                  if (catFeatures.length === 0) return null;
+                  return (
+                    <div key={category}>
+                      <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">{category} ({catFeatures.length})</h4>
+                      <div className="flex gap-1 flex-wrap">
+                        {catFeatures.map(f => (
+                          <Badge
+                            key={f.name}
+                            variant={f.physicsInspired ? "default" : "outline"}
+                            className="text-[10px] font-mono"
+                            data-testid={`badge-feature-${f.name}`}
+                          >
+                            {f.expression}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {activeView === "units" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm flex items-center gap-2">
+              <ShieldCheck className="h-4 w-4 text-emerald-500" />
+              Dimensional Analysis Unit Registry
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {stats?.unitRegistry?.map(entry => (
+                <div key={entry.variable} className="flex items-center justify-between border rounded px-3 py-2 text-sm" data-testid={`row-unit-${entry.variable}`}>
+                  <code className="font-mono text-xs">{entry.variable}</code>
+                  <Badge variant="outline" className="text-[10px] font-mono">{entry.unit}</Badge>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground mt-3">
+              Equations with mismatched left/right hand side units are automatically rejected during discovery.
+              Only dimensionally consistent theories pass the physics constraint filter.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {activeView === "feedback" && (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Lightbulb className="h-4 w-4 text-yellow-500" />
+                Discovery Feedback Loop
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {feedback ? (
+                <>
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Theoretical Insight</h4>
+                    <p className="text-sm" data-testid="text-theoretical-insight">{feedback.theoreticalInsight}</p>
+                  </div>
+
+                  {feedback.biasedVariables.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Generator Bias from Discovered Theories</h4>
+                      <div className="space-y-2">
+                        {feedback.biasedVariables.map(bv => (
+                          <div key={bv.variable} className="flex items-center gap-3" data-testid={`row-bias-${bv.variable}`}>
+                            <code className="text-xs font-mono w-40">{bv.variable}</code>
+                            <Badge variant={bv.direction === "increase" ? "default" : "secondary"}>
+                              {bv.direction}
+                            </Badge>
+                            <div className="flex-1 bg-muted rounded-full h-2">
+                              <div
+                                className={`rounded-full h-2 ${bv.direction === "increase" ? "bg-emerald-500" : "bg-orange-500"}`}
+                                style={{ width: `${bv.strength * 100}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-muted-foreground">{(bv.strength * 100).toFixed(0)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {feedback.suggestedCompositions.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Suggested Material Directions</h4>
+                      <div className="space-y-1">
+                        {feedback.suggestedCompositions.map((s, i) => (
+                          <div key={i} className="text-sm flex items-start gap-2" data-testid={`text-suggestion-${i}`}>
+                            <FlaskRound className="h-4 w-4 mt-0.5 text-violet-500 flex-shrink-0" />
+                            {s}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground" data-testid="text-no-feedback">
+                  Run a discovery cycle to generate feedback for the candidate generator.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm flex items-center gap-2">
+                <GitBranch className="h-4 w-4 text-blue-500" />
+                Theory-Design Integration Cycle
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-4 gap-2 text-center text-xs">
+                {[
+                  { label: "Discovered Theory", desc: "Symbolic equation for Tc" },
+                  { label: "Feature Analysis", desc: "Key variables identified" },
+                  { label: "Generator Bias", desc: "Candidate search directed" },
+                  { label: "New Data", desc: "Validates / refines theory" },
+                ].map((step, i) => (
+                  <div key={i} className="flex flex-col items-center gap-1 p-2 border rounded">
+                    <div className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-500 font-bold text-xs">
+                      {i + 1}
+                    </div>
+                    <span className="font-medium">{step.label}</span>
+                    <span className="text-muted-foreground">{step.desc}</span>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {statsQuery.isLoading && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {[0, 1].map(i => (
+            <Card key={i}>
+              <CardContent className="pt-6">
+                <Skeleton className="h-4 w-32 mb-2" />
+                <Skeleton className="h-4 w-full mb-1" />
+                <Skeleton className="h-4 w-3/4" />
               </CardContent>
             </Card>
           ))}

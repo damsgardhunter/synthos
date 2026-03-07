@@ -80,6 +80,13 @@ import { detectQuantumCriticality } from "./physics/quantum-criticality";
 import { discoveryMemory } from "./learning/discovery-memory";
 import { computeFeatureVector, buildAndStoreFeatureRecord, getFeatureDataset, getDatasetSize, getFeatureRecord } from "./theory/physics-feature-db";
 import { runSymbolicRegression, getDiscoveredTheories, theoryKnowledgeBase, getValidationStats } from "./theory/symbolic-regression";
+import {
+  runSymbolicPhysicsDiscovery, buildPhysicsDiscoveryRecord,
+  generateSyntheticDataset, generateDiscoveryFeedback,
+  getSymbolicDiscoveryStats, getTheoryDatabase, getFeatureLibrary,
+  validatePhysicsConstraints, PHYSICS_VARIABLES,
+  type PhysicsDiscoveryRecord, type SymbolicDiscoveryConfig,
+} from "./theory/symbolic-physics-discovery";
 import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAnalysis } from "./theory/multi-scale-engine";
 import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
 import { getPerformanceMetrics, recordPrediction } from "./theory/model-performance-tracker";
@@ -2018,6 +2025,135 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ program, execution });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to convert graph to program", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/symbolic-discovery/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getSymbolicDiscoveryStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get discovery stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/symbolic-discovery/theories", generalLimiter, (_req, res) => {
+    try {
+      const theories = getTheoryDatabase();
+      res.json(theories.map(t => ({
+        id: t.id,
+        equation: t.equation,
+        simplified: t.simplified,
+        target: t.target,
+        theoryScore: Math.round(t.theoryScore * 1000) / 1000,
+        accuracy: Math.round(t.r2 * 1000) / 1000,
+        mae: Math.round(t.mae * 100) / 100,
+        complexity: t.complexity,
+        simplicity: Math.round(t.simplicity * 1000) / 1000,
+        generalization: Math.round(t.generalization * 1000) / 1000,
+        physicsCompliance: Math.round(t.physicsCompliance * 1000) / 1000,
+        novelty: Math.round(t.novelty * 1000) / 1000,
+        dimensionallyValid: t.dimensionallyValid,
+        variables: t.variables,
+        applicableFamilies: t.applicableFamilies,
+        crossScaleValidation: t.crossScaleValidation,
+        featureImportance: t.featureImportance,
+        discoveredAt: t.discoveredAt,
+      })));
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get theories", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/symbolic-discovery/feature-library", generalLimiter, (_req, res) => {
+    try {
+      const library = getFeatureLibrary();
+      res.json(library.map(t => ({
+        name: t.name,
+        expression: t.expression,
+        variables: t.variables,
+        category: t.category,
+        physicsInspired: t.physicsInspired,
+      })));
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get feature library", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/symbolic-discovery/run", writeLimiter, (req, res) => {
+    try {
+      const config: Partial<SymbolicDiscoveryConfig> = req.body.config ?? {};
+      const dataset = generateSyntheticDataset(50);
+      const discovered = runSymbolicPhysicsDiscovery(dataset, config);
+      const feedback = generateDiscoveryFeedback(discovered);
+      res.json({
+        theoriesDiscovered: discovered.length,
+        topTheories: discovered.slice(0, 10).map(t => ({
+          id: t.id,
+          equation: t.equation,
+          simplified: t.simplified,
+          theoryScore: Math.round(t.theoryScore * 1000) / 1000,
+          r2: Math.round(t.r2 * 1000) / 1000,
+          mae: Math.round(t.mae * 100) / 100,
+          complexity: t.complexity,
+          generalization: Math.round(t.generalization * 1000) / 1000,
+          physicsCompliance: Math.round(t.physicsCompliance * 1000) / 1000,
+          novelty: Math.round(t.novelty * 1000) / 1000,
+          dimensionallyValid: t.dimensionallyValid,
+          variables: t.variables,
+          applicableFamilies: t.applicableFamilies,
+        })),
+        feedback,
+        datasetSize: dataset.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run discovery", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-discovery-dataset", generalLimiter, (_req, res) => {
+    try {
+      const dataset = generateSyntheticDataset(50);
+      res.json({
+        records: dataset,
+        featureCount: PHYSICS_VARIABLES.length,
+        variables: PHYSICS_VARIABLES,
+        recordCount: dataset.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate dataset", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/physics-discovery-dataset/record", writeLimiter, (req, res) => {
+    try {
+      const { formula } = req.body;
+      if (!formula) return res.status(400).json({ error: "formula is required" });
+      const record = buildPhysicsDiscoveryRecord(formula);
+      res.json(record);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to build record", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/symbolic-discovery/validate-constraints", writeLimiter, (req, res) => {
+    try {
+      const { record } = req.body;
+      if (!record) return res.status(400).json({ error: "record is required" });
+      const checks = validatePhysicsConstraints(record);
+      res.json({ checks, allSatisfied: checks.every(c => c.satisfied) });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to validate constraints", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/symbolic-discovery/feedback", generalLimiter, (_req, res) => {
+    try {
+      const theories = getTheoryDatabase();
+      const feedback = generateDiscoveryFeedback(theories);
+      res.json(feedback);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate feedback", detail: e.message?.slice(0, 200) });
     }
   });
 
