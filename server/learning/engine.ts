@@ -7,6 +7,7 @@ import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, se
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB } from "../inverse/inverse-optimizer";
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
+import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
@@ -1490,6 +1491,48 @@ async function runPhase11_StructurePrediction() {
       }
     }
 
+    if (shouldContinue() && cycleCount % 7 === 0) {
+      try {
+        const structResult = runStructureDiffusionCycle(200, 3, 3);
+        let structInserted = 0;
+        for (const formula of structResult.formulas) {
+          if (!isValidFormula(formula)) continue;
+          const normalized = normalizeFormula(formula);
+          const existing = await storage.getSuperconductorByFormula(normalized);
+          if (existing) continue;
+
+          try {
+            const features = extractFeatures(normalized);
+            const gbResult = gbPredict(features);
+            if (gbResult.tcPredicted >= 10) {
+              const inserted = await insertCandidateWithStabilityCheck({
+                formula: normalized,
+                predictedTc: Math.round(gbResult.tcPredicted),
+                dataConfidence: "low",
+                ensembleScore: Math.min(0.9, gbResult.score),
+                verificationStage: 0,
+                notes: `[structure-first: motif-designed, target=200K]`,
+              });
+              if (inserted) {
+                totalScCandidates++;
+                structInserted++;
+              }
+            }
+          } catch {}
+        }
+        if (structResult.formulas.length > 0) {
+          emit("log", {
+            phase: "phase-11",
+            event: "Structure-first design",
+            detail: `Generated ${structResult.formulas.length} from motifs [${structResult.motifsUsed.join(", ")}], inserted ${structInserted}, best=${structResult.bestFormula} Tc=${structResult.bestTc.toFixed(1)}K`,
+            dataSource: "Structure Diffusion",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Structure-first design error", detail: err.message?.slice(0, 150), dataSource: "Structure Diffusion" });
+      }
+    }
+
     const csCount = await storage.getCrystalStructureCount();
     const progress11 = computeProgress(11, csCount);
     await updatePhaseStatus(11, "active", progress11, csCount);
@@ -2005,6 +2048,7 @@ export function getAutonomousLoopStats() {
     topologyDetection: getTopologyStats(),
     inverseOptimizer: getInverseOptimizerStats(),
     differentiableOptimizer: getDifferentiableOptimizerStats(),
+    structureFirstDesign: getStructureDiffusionStats(),
   };
 }
 

@@ -182,6 +182,15 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `POST /api/gradient-design/optimize` (single formula), `POST /api/gradient-design/batch` (multi-seed), `GET /api/gradient-design/stats`.
 - File: `server/inverse/differentiable-optimizer.ts`
 
+### Structure-First Design (Structure Diffusion)
+- **Motif library**: 12 SC structural motifs (CuO2-plane, FeAs-layer, clathrate-cage, A15-chain, kagome-flat, hexagonal-layer, perovskite-3D, layered-hydride, NaCl-rocksalt, H-channel, breathing-kagome, Laves-MgZn2). Each motif defines site roles, space group, Tc range, SC affinity, and pairing mechanism.
+- **Structural embedding**: 8D vectors encoding layering, cage-character, H-density, correlation, flatness, bond-covalency, dimensionality, spin-orbit.
+- **Design flow**: Motifs selected by SC affinity + learned weights → site roles filled with element candidates → combinatorial evaluation → GB Tc prediction → ranked by structural score.
+- **Learned motif weights**: Updated by Tc reward signal (motifWeight += 0.01 * normalized_tc). Successful motifs get preferentially selected in future cycles.
+- **Pipeline integration**: Runs every 7 engine cycles. Generates formulas from top motifs, evaluates via GB model, inserts candidates with Tc≥10K.
+- **API**: `POST /api/structure-design/generate` (params: targetTc, motifCount, elementsPerSite), `GET /api/structure-design/motifs`, `GET /api/structure-design/stats`.
+- File: `server/ai/structure-diffusion.ts`
+
 ### Chemical Synthesis Realism
 - **Precursor availability scoring**: ~70-element lookup table (COMMON_ELEMENTS) mapping elements to availability scores (1.0 for Fe/Al/Si/O down to 0.2 for Os/Ir). Weighted by compositional fraction.
 - **Family-specific synthesis defaults**: Calibrated per-family base scores, reaction temperatures, pressure requirements, and atmosphere complexity (e.g., hydrides: base 0.25, 150 GPa; MAX-phases: base 0.70, no pressure).

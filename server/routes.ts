@@ -23,6 +23,10 @@ import {
   runDifferentiableOptimization, runGradientDescentCycle,
   getDifferentiableOptimizerStats, generateGradientSeeds,
 } from "./inverse/differentiable-optimizer";
+import {
+  runStructureDiffusionCycle, getStructureDiffusionStats,
+  getMotifLibrarySummary, runStructureFirstDesign,
+} from "./ai/structure-diffusion";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -832,6 +836,39 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getDifferentiableOptimizerStats());
     } catch (e) {
       res.status(500).json({ error: "Failed to get gradient design stats" });
+    }
+  });
+
+  app.post("/api/structure-design/generate", writeLimiter, async (req, res) => {
+    try {
+      const { targetTc, motifCount, elementsPerSite } = req.body;
+      if (!targetTc) {
+        return res.status(400).json({ error: "targetTc is required" });
+      }
+      const results = runStructureFirstDesign(
+        Number(targetTc),
+        Number(motifCount ?? 4),
+        Number(elementsPerSite ?? 3),
+      );
+      res.json(results);
+    } catch (e: any) {
+      res.status(500).json({ error: "Structure-first design failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/structure-design/motifs", generalLimiter, (_req, res) => {
+    try {
+      res.json(getMotifLibrarySummary());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get motif library" });
+    }
+  });
+
+  app.get("/api/structure-design/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getStructureDiffusionStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get structure design stats" });
     }
   });
 
