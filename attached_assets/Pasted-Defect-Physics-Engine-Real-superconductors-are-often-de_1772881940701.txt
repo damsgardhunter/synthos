@@ -1,0 +1,199 @@
+Defect Physics Engine
+
+Real superconductors are often defect-driven.
+
+Examples:
+
+Material	Defect effect
+FeSe	vacancy ordering affects Tc
+YBCO	oxygen vacancies control Tc
+NbN	nitrogen vacancies modify DOS
+
+Your system models perfect crystals, but many discoveries depend on:
+
+vacancies
+
+substitutions
+
+interstitial atoms
+
+dislocations
+
+Tasks to Implement
+
+Create module:
+
+/physics/defectEngine
+Step 1 — Generate Defect Structures
+
+Add mutation operators:
+
+vacancy
+interstitial
+antisite
+dopant
+
+Example:
+
+NbC → Nb0.95C
+NbC → NbC0.95
+NbC → NbC + interstitial H
+Step 2 — Compute Defect Formation Energy
+
+Approximation:
+
+E_defect = E_defected - E_perfect + μ_atom
+
+Estimate stability.
+
+Step 3 — Estimate Defect Density
+
+Add variable:
+
+defectDensity
+
+Example values:
+
+10^14
+10^16
+10^18
+10^20 defects/cm³
+Step 4 — Adjust Electronic Structure
+
+Defects influence:
+
+density of states
+carrier concentration
+scattering rate
+
+Modify:
+
+DOS(EF)
+pairing strength
+4. Missing Capability #2
+Strong Correlation Physics Engine
+
+Many high-Tc materials are strongly correlated systems.
+
+Examples:
+
+Material	Mechanism
+Cuprates	Mott physics
+Fe pnictides	spin fluctuations
+Heavy fermions	Kondo lattice
+
+Your engine includes Hubbard U/W but does not fully model correlated phases.
+
+Tasks
+
+Create module:
+
+/physics/correlationEngine
+Step 1 — Detect Correlated Regime
+
+Condition:
+
+U/W > 1
+
+Signals:
+
+Mott proximity
+spin fluctuations
+orbital ordering
+Step 2 — Compute Correlation Score
+correlationScore =
+0.3 * U/W
++ 0.3 * DOS(EF)
++ 0.2 * flatBandScore
++ 0.2 * nesting
+Step 3 — Adjust Pairing Weights
+
+Modify pairing channels:
+
+spinFluctuationWeight
+orbitalFluctuationWeight
+5. Missing Capability #3
+Crystal Growth Simulator
+
+Your system models synthesis conditions, but real materials form through growth dynamics.
+
+Examples:
+
+nucleation
+grain formation
+phase competition
+segregation
+
+These determine whether a material can actually form.
+
+Tasks
+
+Create module:
+
+/synthesis/crystalGrowthSimulator
+Step 1 — Nucleation Modeling
+
+Estimate probability:
+
+P_nucleation =
+exp(-ΔG / kT)
+Step 2 — Growth Rate Estimation
+
+Parameters:
+
+diffusionRate
+supersaturation
+temperature
+Step 3 — Grain Structure Prediction
+
+Output:
+
+grainSize
+grainOrientation
+boundaryDensity
+
+These influence:
+
+critical current
+transport
+stability
+6. Missing Capability #4
+Experimental Validation Planner
+
+Your system can discover materials, but the best next step is selecting experiments for real labs.
+
+This is extremely valuable.
+
+Tasks
+
+Create module:
+
+/experimentPlanner
+Step 1 — Identify Best Candidates
+
+Rank using:
+
+Tc
+stability
+synthesis feasibility
+prediction uncertainty
+Step 2 — Generate Lab Instructions
+
+Example output:
+
+Material: CaB2H8
+
+Synthesis:
+pressure: 25 GPa
+temperature: 1200K
+cooling: 500 K/s
+anneal: 700K 8h
+Step 3 — Suggest Characterization Methods
+
+Examples:
+
+XRD
+ARPES
+STM
+transport measurements
+magnetic susceptibility

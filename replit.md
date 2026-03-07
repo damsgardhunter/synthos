@@ -45,6 +45,10 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Synthesis Condition Optimizer**: Selects optimal synthesis conditions, estimates complexity/duration, and tracks feasibility.
 - **Synthesis Simulator & Active Optimization**: Co-searches material composition and 9 active synthesis variables, simulating synthesis effects on material properties.
 - **Synthesis Learning Database**: In-memory store for synthesis results, enabling similarity queries and pattern detection.
+- **Defect Physics Engine**: Models vacancy, interstitial, antisite, and dopant defects with formation energy, defect density, and electronic structure adjustment (DOS, lambda, scattering rate).
+- **Strong Correlation Physics Engine**: Detects correlated regimes (weakly/moderately/strongly/Mott-proximate) with U/W gating, computes correlation scores, and adjusts spin/orbital/phonon pairing weights.
+- **Crystal Growth Simulator**: Models nucleation probability, growth rate, grain structure, and critical current impact for synthesized materials.
+- **Experimental Validation Planner**: Ranks candidates for lab experiments, generates synthesis instructions, and suggests characterization methods (XRD, ARPES, STM, transport, etc.).
 - **Band Structure Neural Operator**: Predicts complete band structure along high-symmetry k-paths, deriving effective masses, Fermi velocities, and topological indices.
 - **Autonomous Hypothesis Engine**: AI for generating, testing, and ranking superconductivity theories based on pattern discovery and evidence.
 - **Discovery Landscape Intelligence**: Frontier analysis, novelty scoring, and strategic exploration based on UMAP + zones.

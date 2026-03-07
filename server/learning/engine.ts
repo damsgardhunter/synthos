@@ -72,6 +72,10 @@ import {
   defaultSynthesisVector, type SynthesisVector,
 } from "../physics/synthesis-simulator";
 import { recordSynthesisResult, getSynthesisLearningStats } from "../synthesis/synthesis-learning-db";
+import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "../physics/defect-engine";
+import { estimateCorrelationEffects, getCorrelationEngineStats } from "../physics/correlation-engine";
+import { simulateCrystalGrowth, getCrystalGrowthStats } from "../synthesis/crystal-growth-simulator";
+import { getExperimentPlannerStats } from "../experiment-planner";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 import { runHypothesisCycle, getTopHypothesesForGeneratorBias, getHypothesisStats } from "../theory/hypothesis-engine";
@@ -2565,6 +2569,42 @@ async function runAutonomousFastPath() {
               }
             } catch {}
           }
+
+          try {
+            const defects = generateDefectVariants(formula);
+            if (defects.length > 0 && result.physicsPred) {
+              const bestDefect = defects.reduce((best, d) => {
+                const adj = adjustElectronicStructure(
+                  result.physicsPred!.dosAtEF ?? 1.0,
+                  result.physicsPred!.lambda ?? 0.5,
+                  d.defectDensity,
+                  d.type,
+                  formula
+                );
+                return adj.tcModifier > (best?.tcMod ?? 0) ? { defect: d, tcMod: adj.tcModifier } : best;
+              }, null as { defect: any; tcMod: number } | null);
+              if (bestDefect && bestDefect.tcMod > 1.05) {
+                emit("log", { phase: "defect-engine", event: "Defect enhancement found", detail: `${formula}: ${bestDefect.defect.type} defect at ${bestDefect.defect.element} -> Tc modifier ${bestDefect.tcMod.toFixed(3)}` });
+              }
+            }
+          } catch {}
+
+          try {
+            const corrEffects = estimateCorrelationEffects(formula, {
+              UoverW: result.physicsPred?.UoverW,
+              dosAtEF: result.physicsPred?.dosAtEF,
+            });
+            if (corrEffects.tcModifier > 1.1) {
+              emit("log", { phase: "correlation-engine", event: "Strong correlation boost", detail: `${formula}: ${corrEffects.regime.regime} regime, Tc modifier ${corrEffects.tcModifier.toFixed(3)}, patterns: ${corrEffects.materialPatterns.join(", ")}` });
+            }
+          } catch {}
+
+          try {
+            const growthResult = simulateCrystalGrowth(formula, family, sv);
+            if (growthResult.qualityScore < 0.3) {
+              emit("log", { phase: "crystal-growth", event: "Growth challenge identified", detail: `${formula}: quality=${growthResult.qualityScore.toFixed(2)}, grain=${growthResult.grainStructure.grainSize.toFixed(0)}nm` });
+            }
+          } catch {}
         } catch {}
         passed++;
         autonomousTotalPassed++;
@@ -2768,6 +2808,10 @@ export function getAutonomousLoopStats() {
     synthesisParameterSpace: getParameterSpace(),
     synthesisSimulator: getSimulatorStats(),
     synthesisLearning: getSynthesisLearningStats(),
+    defectEngine: getDefectEngineStats(),
+    correlationEngine: getCorrelationEngineStats(),
+    crystalGrowth: getCrystalGrowthStats(),
+    experimentPlanner: getExperimentPlannerStats(),
   };
 }
 

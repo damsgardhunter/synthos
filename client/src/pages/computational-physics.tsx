@@ -12,7 +12,7 @@ import {
   Atom, Zap, Filter, XCircle, CheckCircle2,
   Activity, Layers, Magnet, Gauge, Target,
   Beaker, ArrowDown, ExternalLink, Thermometer,
-  FlaskConical, Star,
+  FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -358,6 +358,269 @@ function CrystalStructureCard({ structure }: { structure: CrystalStructure }) {
   );
 }
 
+function AdvancedPhysicsPanel() {
+  const { data: defectStats, isLoading: defectLoading } = useQuery<{
+    totalDefectsGenerated: number;
+    typeBreakdown: Record<string, number>;
+    bestTcImprovement: number;
+    bestTcFormula: string;
+    totalFormulasProcessed: number;
+  }>({ queryKey: ["/api/defect-engine/stats"] });
+
+  const { data: corrStats, isLoading: corrLoading } = useQuery<{
+    materialsAnalyzed: number;
+    regimeBreakdown: Record<string, number>;
+    avgCorrelationScore: number;
+  }>({ queryKey: ["/api/correlation-engine/stats"] });
+
+  const { data: growthStats, isLoading: growthLoading } = useQuery<{
+    totalSimulations: number;
+    avgGrainSize: number;
+    qualityDistribution: Record<string, number>;
+    bestQualityScore: number;
+    bestFormula: string;
+  }>({ queryKey: ["/api/crystal-growth/stats"] });
+
+  const { data: plannerStats, isLoading: plannerLoading } = useQuery<{
+    totalPlansGenerated: number;
+    totalMethodsSuggested: number;
+    methodFrequency: Record<string, number>;
+    topCandidates: { formula: string; score: number }[];
+    avgExperimentScore: number;
+  }>({ queryKey: ["/api/experiment-planner/stats"] });
+
+  const { messages } = useWebSocket();
+  useEffect(() => {
+    const engineEvents = messages.filter(m => m.type === "log" && (m.data?.phase === "defect-engine" || m.data?.phase === "correlation-engine" || m.data?.phase === "crystal-growth"));
+    if (engineEvents.length > 0) {
+      queryClient.invalidateQueries({ queryKey: ["/api/defect-engine/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/correlation-engine/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/crystal-growth/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/experiment-planner/stats"] });
+    }
+  }, [messages]);
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <Card data-testid="card-defect-engine">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Bug className="h-5 w-5 text-orange-500" />
+            Defect Physics Engine
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Vacancy, interstitial, antisite, and dopant defect modeling
+          </p>
+        </CardHeader>
+        <CardContent>
+          {defectLoading ? <Skeleton className="h-32" /> : defectStats ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-defects-generated">
+                    {defectStats.totalDefectsGenerated}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Defects Generated</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-formulas-processed">
+                    {defectStats.totalFormulasProcessed}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Formulas Processed</div>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="text-xs font-medium text-muted-foreground">Type Breakdown</div>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(defectStats.typeBreakdown).map(([type, count]) => (
+                    <Badge key={type} variant="outline" className="text-xs font-mono" data-testid={`badge-defect-${type}`}>
+                      {type}: {count}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+              {defectStats.bestTcFormula && (
+                <div className="text-xs text-muted-foreground">
+                  Best Tc improvement: <span className="font-mono text-foreground">{defectStats.bestTcImprovement.toFixed(1)}x</span>
+                  {" "}on <Link href={`/candidate/${encodeURIComponent(defectStats.bestTcFormula)}`}><span className="text-primary hover:underline cursor-pointer">{defectStats.bestTcFormula}</span></Link>
+                </div>
+              )}
+            </div>
+          ) : <div className="text-sm text-muted-foreground">No data available</div>}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-correlation-engine">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Brain className="h-5 w-5 text-purple-500" />
+            Strong Correlation Engine
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Mott physics, spin fluctuations, and Kondo lattice detection
+          </p>
+        </CardHeader>
+        <CardContent>
+          {corrLoading ? <Skeleton className="h-32" /> : corrStats ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-materials-analyzed">
+                    {corrStats.materialsAnalyzed}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Materials Analyzed</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-avg-correlation">
+                    {corrStats.avgCorrelationScore.toFixed(3)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Avg Correlation Score</div>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="text-xs font-medium text-muted-foreground">Regime Breakdown</div>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(corrStats.regimeBreakdown).filter(([, c]) => c > 0).map(([regime, count]) => (
+                    <Badge key={regime} variant="outline" className="text-xs font-mono" data-testid={`badge-regime-${regime}`}>
+                      {regime}: {count}
+                    </Badge>
+                  ))}
+                  {Object.values(corrStats.regimeBreakdown).every(c => c === 0) && (
+                    <span className="text-xs text-muted-foreground">Awaiting candidate analysis</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : <div className="text-sm text-muted-foreground">No data available</div>}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-crystal-growth">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Diamond className="h-5 w-5 text-cyan-500" />
+            Crystal Growth Simulator
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Nucleation, grain structure, and critical current modeling
+          </p>
+        </CardHeader>
+        <CardContent>
+          {growthLoading ? <Skeleton className="h-32" /> : growthStats ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-growth-simulations">
+                    {growthStats.totalSimulations}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Simulations Run</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-avg-grain-size">
+                    {growthStats.avgGrainSize > 0 ? `${growthStats.avgGrainSize.toFixed(0)} nm` : "--"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Avg Grain Size</div>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="text-xs font-medium text-muted-foreground">Quality Distribution</div>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(growthStats.qualityDistribution).map(([quality, count]) => {
+                    const colors: Record<string, string> = {
+                      poor: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+                      fair: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
+                      good: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+                      excellent: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
+                    };
+                    return (
+                      <span key={quality} className={`text-xs font-mono px-2 py-0.5 rounded ${colors[quality] || ""}`} data-testid={`badge-quality-${quality}`}>
+                        {quality}: {count}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              {growthStats.bestFormula && (
+                <div className="text-xs text-muted-foreground">
+                  Best quality: <span className="font-mono text-foreground">{growthStats.bestQualityScore.toFixed(2)}</span>
+                  {" "}on <Link href={`/candidate/${encodeURIComponent(growthStats.bestFormula)}`}><span className="text-primary hover:underline cursor-pointer">{growthStats.bestFormula}</span></Link>
+                </div>
+              )}
+            </div>
+          ) : <div className="text-sm text-muted-foreground">No data available</div>}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-experiment-planner">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <ClipboardList className="h-5 w-5 text-green-500" />
+            Experimental Validation Planner
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Lab instructions, characterization methods, and candidate ranking
+          </p>
+        </CardHeader>
+        <CardContent>
+          {plannerLoading ? <Skeleton className="h-32" /> : plannerStats ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-plans-generated">
+                    {plannerStats.totalPlansGenerated}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Plans Generated</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold font-mono" data-testid="text-methods-suggested">
+                    {plannerStats.totalMethodsSuggested}
+                  </div>
+                  <div className="text-xs text-muted-foreground">Methods Suggested</div>
+                </div>
+              </div>
+              {Object.keys(plannerStats.methodFrequency).length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs font-medium text-muted-foreground">Top Characterization Methods</div>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(plannerStats.methodFrequency)
+                      .sort(([, a], [, b]) => b - a)
+                      .slice(0, 6)
+                      .map(([method, count]) => (
+                        <Badge key={method} variant="outline" className="text-xs font-mono" data-testid={`badge-method-${method}`}>
+                          {method}: {count}
+                        </Badge>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {plannerStats.topCandidates.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs font-medium text-muted-foreground">Top Candidates for Experiment</div>
+                  <div className="space-y-1">
+                    {plannerStats.topCandidates.slice(0, 3).map((c, i) => (
+                      <div key={i} className="flex items-center justify-between text-xs">
+                        <Link href={`/candidate/${encodeURIComponent(c.formula)}`}>
+                          <span className="text-primary hover:underline cursor-pointer font-mono" data-testid={`link-candidate-${i}`}>{c.formula}</span>
+                        </Link>
+                        <span className="font-mono text-muted-foreground">score: {c.score.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {plannerStats.avgExperimentScore > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  Avg experiment score: <span className="font-mono text-foreground">{plannerStats.avgExperimentScore.toFixed(2)}</span>
+                </div>
+              )}
+            </div>
+          ) : <div className="text-sm text-muted-foreground">No data available</div>}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function ComputationalPhysics() {
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
     queryKey: ["/api/superconductor-candidates", { limit: 100 }],
@@ -511,6 +774,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="structures" data-testid="tab-structures">Crystal Structures</TabsTrigger>
           <TabsTrigger value="failures" data-testid="tab-failures">Negative Results</TabsTrigger>
           <TabsTrigger value="synthesis" data-testid="tab-synthesis">Synthesis Variables</TabsTrigger>
+          <TabsTrigger value="advanced-physics" data-testid="tab-advanced-physics">Advanced Physics</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -1034,6 +1298,10 @@ export default function ComputationalPhysics() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        <TabsContent value="advanced-physics" className="space-y-4" data-testid="advanced-physics-content">
+          <AdvancedPhysicsPanel />
         </TabsContent>
       </Tabs>
     </div>

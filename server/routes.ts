@@ -74,6 +74,10 @@ import {
   optimizeSynthesisForFixedMaterial, optimizeSynthesisPath,
 } from "./physics/synthesis-simulator";
 import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
+import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
+import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
+import { simulateCrystalGrowth, getCrystalGrowthStats } from "./synthesis/crystal-growth-simulator";
+import { generateExperimentPlan, getExperimentPlannerStats, type ExperimentCandidate } from "./experiment-planner";
 import {
   analyzeFrontier, computeNoveltyScore, analyzeZoneIntelligence,
   generateExplorationStrategy, getLandscapeIntelligenceStats,
@@ -1649,6 +1653,94 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute synthesis discovery", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/defect-engine/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDefectEngineStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch defect engine stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/defect-engine/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const variants = generateDefectVariants(formula);
+      const withAdjustments = variants.map(v => {
+        const adj = adjustElectronicStructure(1.0, 0.5, v.defectDensity, v.type);
+        return { ...v, electronicAdjustment: adj };
+      });
+      res.json({ formula, defectVariants: withAdjustments });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate defect variants", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/correlation-engine/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getCorrelationEngineStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch correlation engine stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/correlation-engine/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const analysis = estimateCorrelationEffects(formula, {});
+      res.json({ formula, ...analysis });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to analyze correlations", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/crystal-growth/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getCrystalGrowthStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch crystal growth stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/crystal-growth/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const matClass = formula.includes("H") ? "Hydrides" : "default";
+      const result = simulateCrystalGrowth(formula, matClass, {});
+      res.json({ formula, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to simulate crystal growth", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/experiment-planner/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getExperimentPlannerStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch experiment planner stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/experiment-planner/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const matClass = formula.includes("H") ? "Hydrides" : formula.includes("C") ? "Carbides" : "default";
+      const candidate: ExperimentCandidate = {
+        formula,
+        predictedTc: 50,
+        stability: 0.7,
+        synthesisFeasibility: 0.6,
+        novelty: 0.5,
+        uncertainty: 0.3,
+        materialClass: matClass,
+        crystalStructure: "cubic",
+      };
+      const plan = generateExperimentPlan(candidate);
+      res.json({ formula, plan });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate experiment plan", detail: e.message?.slice(0, 200) });
     }
   });
 
