@@ -67,6 +67,11 @@ import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pat
 import { triggerSynthesisPathwayForCandidate } from "../synthesis/reaction-pathway";
 import { optimizeSynthesisConditions, getSynthesisOptimizerStats, type MaterialContext } from "../synthesis/synthesis-condition-optimizer";
 import { getParameterSpace } from "../synthesis/synthesis-variables";
+import {
+  simulateSynthesisEffects, getSimulatorStats, optimizeSynthesisForFixedMaterial,
+  defaultSynthesisVector, type SynthesisVector,
+} from "../physics/synthesis-simulator";
+import { recordSynthesisResult, getSynthesisLearningStats } from "../synthesis/synthesis-learning-db";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
 import { runHypothesisCycle, getTopHypothesesForGeneratorBias, getHypothesisStats } from "../theory/hypothesis-engine";
@@ -2540,6 +2545,26 @@ async function runAutonomousFastPath() {
             energyAboveHull: result.physicsPred?.hullDistance ?? 0.1,
           };
           optimizeSynthesisConditions(synthCtx);
+
+          const sv = defaultSynthesisVector(family);
+          const effects = simulateSynthesisEffects(formula, family, sv);
+          recordSynthesisResult(formula, family, sv, result.tc, 1 - (result.physicsPred?.hullDistance ?? 0.1));
+
+          if (result.tc > 30 && cycleCount % 10 === 0) {
+            try {
+              const synthOpt = optimizeSynthesisForFixedMaterial(
+                formula, family,
+                (testSv: SynthesisVector) => {
+                  const eff = simulateSynthesisEffects(formula, family, testSv);
+                  return result.tc * eff.effectiveTcMultiplier;
+                },
+                15, 8
+              );
+              if (synthOpt.bestTc > result.tc) {
+                recordSynthesisResult(formula, family, synthOpt.bestVector, synthOpt.bestTc, 0.7);
+              }
+            } catch {}
+          }
         } catch {}
         passed++;
         autonomousTotalPassed++;
@@ -2741,6 +2766,8 @@ export function getAutonomousLoopStats() {
     hypothesisEngine: getHypothesisStats(),
     synthesisOptimizer: getSynthesisOptimizerStats(),
     synthesisParameterSpace: getParameterSpace(),
+    synthesisSimulator: getSimulatorStats(),
+    synthesisLearning: getSynthesisLearningStats(),
   };
 }
 

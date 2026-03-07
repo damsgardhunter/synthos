@@ -13,6 +13,11 @@ import {
 import { extractFeatures } from "../learning/ml-predictor";
 import { gbPredict } from "../learning/gradient-boost";
 import type { TargetProperties } from "./target-schema";
+import {
+  type SynthesisVector, defaultSynthesisVector, mutateSynthesisVector,
+  simulateSynthesisEffects, computeSynthesisCost, computeSynthesisComplexity,
+  clampSynthesisVector, checkSynthesisFeasibility,
+} from "../physics/synthesis-simulator";
 
 const EPSILON = 1e-4;
 
@@ -20,6 +25,7 @@ interface MaterialState {
   elements: string[];
   counts: Record<string, number>;
   pressure: number;
+  synthesisVector?: SynthesisVector;
 }
 
 interface PhysicsOutput {
@@ -143,16 +149,27 @@ function parseToState(formula: string, pressure: number = 0): MaterialState {
   return { elements: uniqueEls, counts, pressure };
 }
 
-function evaluatePhysics(formula: string, pressure: number = 0): PhysicsOutput {
+function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: SynthesisVector): PhysicsOutput {
   const electronic = computeElectronicStructure(formula, null);
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressure);
 
-  const omegaLogK = coupling.omegaLog * 1.44;
-  const denom = coupling.lambda - coupling.muStar * (1 + 0.62 * coupling.lambda);
+  let lambda = coupling.lambda;
+  let omegaLog = coupling.omegaLog;
+
+  if (synthVec) {
+    const matClass = formula.includes("H") && Object.values(parseFormulaElements(formula)).length > 1
+      ? "hydride" : "default";
+    const effects = simulateSynthesisEffects(formula, matClass, synthVec);
+    lambda *= effects.lambdaModifier;
+    omegaLog *= effects.omegaLogModifier;
+  }
+
+  const omegaLogK = omegaLog * 1.44;
+  const denom = lambda - coupling.muStar * (1 + 0.62 * lambda);
   let tc = 0;
-  if (Math.abs(denom) > 1e-6 && coupling.lambda > 0.2) {
-    const exponent = -1.04 * (1 + coupling.lambda) / denom;
+  if (Math.abs(denom) > 1e-6 && lambda > 0.2) {
+    const exponent = -1.04 * (1 + lambda) / denom;
     tc = (omegaLogK / 1.2) * Math.exp(exponent);
     if (!Number.isFinite(tc) || tc < 0) tc = 0;
   }
@@ -176,8 +193,8 @@ function evaluatePhysics(formula: string, pressure: number = 0): PhysicsOutput {
 
   return {
     tc: Math.max(tc, gbTc * 0.3),
-    lambda: coupling.lambda,
-    omegaLog: coupling.omegaLog,
+    lambda,
+    omegaLog,
     muStar: coupling.muStar,
     metallicity: electronic.metallicity,
     dos: electronic.densityOfStatesAtFermi,
@@ -483,20 +500,25 @@ function getSubstitutionGroup(el: string): string[] {
   return [];
 }
 
-function computeLoss(physics: PhysicsOutput, target: TargetProperties): number {
-  const tcLoss = Math.pow(Math.max(0, target.targetTc - physics.tc) / target.targetTc, 2) * 0.6;
+function computeLoss(physics: PhysicsOutput, target: TargetProperties, synthVec?: SynthesisVector): number {
+  const tcLoss = Math.pow(Math.max(0, target.targetTc - physics.tc) / target.targetTc, 2) * 0.55;
   const lambdaLoss = physics.lambda < target.minLambda
     ? Math.pow((target.minLambda - physics.lambda) / target.minLambda, 2) * 0.15
     : 0;
   const metalLoss = target.metallicRequired && physics.metallicity < 0.5
     ? Math.pow(0.5 - physics.metallicity, 2) * 0.1
     : 0;
-  const pressureLoss = physics.tc > 0 && target.maxPressure < 50
-    ? 0
-    : 0;
   const stabilityLoss = physics.stability < 0.3 ? (0.3 - physics.stability) * 0.15 : 0;
 
-  return tcLoss + lambdaLoss + metalLoss + pressureLoss + stabilityLoss;
+  let synthLoss = 0;
+  if (synthVec) {
+    const complexity = computeSynthesisComplexity(synthVec);
+    const feasibility = checkSynthesisFeasibility(synthVec);
+    const infeasibilityPenalty = feasibility.labFeasible ? 0 : (1 - feasibility.feasibilityScore) * 0.15;
+    synthLoss = Math.min(0.1, complexity * 0.02) + infeasibilityPenalty;
+  }
+
+  return tcLoss + lambdaLoss + metalLoss + stabilityLoss + synthLoss;
 }
 
 export function runDifferentiableOptimization(
@@ -506,19 +528,21 @@ export function runDifferentiableOptimization(
   learningRate: number = 1.0
 ): DifferentiableResult {
   let state = parseToState(initialFormula, target.maxPressure < 200 ? 0 : target.maxPressure);
+  const matClass = initialFormula.includes("H") ? "hydride" : "default";
+  state.synthesisVector = defaultSynthesisVector(matClass);
   const steps: OptimizationStep[] = [];
   let bestTc = 0;
   let bestFormula = initialFormula;
   let bestState = state;
   let stagnationCount = 0;
 
-  const initialPhysics = evaluatePhysics(initialFormula, state.pressure);
+  const initialPhysics = evaluatePhysics(initialFormula, state.pressure, state.synthesisVector);
   const initialTc = initialPhysics.tc;
 
   for (let step = 0; step < maxSteps; step++) {
     const formula = formulaFromState(state);
-    const physics = evaluatePhysics(formula, state.pressure);
-    const loss = computeLoss(physics, target);
+    const physics = evaluatePhysics(formula, state.pressure, state.synthesisVector);
+    const loss = computeLoss(physics, target, state.synthesisVector);
 
     const analyticGrad = computeAnalyticMcMillanGradients(
       physics.lambda, physics.omegaLog, physics.muStar
@@ -551,7 +575,7 @@ export function runDifferentiableOptimization(
     if (physics.tc > bestTc) {
       bestTc = physics.tc;
       bestFormula = formula;
-      bestState = { ...state, counts: { ...state.counts } };
+      bestState = { ...state, counts: { ...state.counts }, synthesisVector: state.synthesisVector ? { ...state.synthesisVector } : undefined };
       stagnationCount = 0;
     } else {
       stagnationCount++;
@@ -578,6 +602,10 @@ export function runDifferentiableOptimization(
     }
 
     state = stateUpdate(state);
+
+    if (state.synthesisVector && step % 3 === 0) {
+      state.synthesisVector = mutateSynthesisVector(state.synthesisVector);
+    }
 
     const totalAtoms = Object.values(state.counts).reduce((s, n) => s + n, 0);
     if (totalAtoms > 20) {

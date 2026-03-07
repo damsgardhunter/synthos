@@ -244,6 +244,26 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Engine integration**: Called in fast path for every candidate passing the pipeline; stats exposed via `/api/synthesis-variables/stats`.
 - **Frontend**: Synthesis Variables tab in Computational Physics page showing categories, optimizer performance, method/complexity distributions, and top conditions.
 
+### Synthesis Simulator & Active Optimization
+- **Synthesis parameter vector** (`server/physics/synthesis-simulator.ts`): `SynthesisVector` with 9 active variables (temperature, pressure, coolingRate, annealTime, currentDensity, magneticField, thermalCycles, strain, oxygenPressure) co-searched alongside material composition.
+- **Synthesis effects**: `simulateSynthesisEffects()` modifies lambda, omegaLog, defect density, lattice strain, grain size based on synthesis conditions. Cooling rate > 500 K/s enables metastable phases; pressure > 50 GPa compresses bonds; strain > 2% shifts bands.
+- **Constraints**: Temperature ≤ 2500K, pressure ≤ 300 GPa, coolingRate ≤ 10000 K/s. `checkSynthesisFeasibility()` classifies lab/industrial feasibility.
+- **Cost function**: `computeSynthesisCost()` balances predicted Tc vs complexity, pressure, and instability.
+- **Mutation operators**: `mutateSynthesisVector()` perturbs parameters within physical bounds; `crossoverSynthesisVectors()` blends two vectors.
+- **Multi-stage paths**: `SynthesisPath` with ordered `SynthesisStep` entries (method, temperature, pressure, cooling, atmosphere). `optimizeSynthesisPath()` generates material-class-aware multi-stage synthesis routes.
+- **Dual optimization modes**: Mode A = material + synthesis co-discovery; Mode B = synthesis-only optimization for fixed material (`optimizeSynthesisForFixedMaterial()`).
+- **Differentiable optimizer integration**: `MaterialState` includes `synthesisVector`; synthesis effects applied in `evaluatePhysics()`; feasibility penalty in `computeLoss()`; synthesis mutation every 3 steps.
+- **Inverse generator integration**: `InverseCandidate` extended with `synthesisVector` and `synthesisPath`; inverse generator produces synthesis vectors alongside formulas.
+
+### Synthesis Learning Database
+- **In-memory learning store** (`server/synthesis/synthesis-learning-db.ts`): Records synthesis results (formula, vector, Tc, stability, material class).
+- **Similarity queries**: `querySimilarSynthesis()` finds strategies for similar materials via Jaccard element similarity.
+- **Pattern detection**: `getSynthesisPatterns()` identifies correlations (pressure, cooling rate, strain, anneal time vs Tc).
+- **Parameter-Tc correlations**: Computes per-parameter correlation coefficients.
+- **Engine integration**: Records results for every passing candidate in fast path; triggers `optimizeSynthesisForFixedMaterial()` every 10 cycles for candidates with Tc > 30K.
+- **APIs**: `GET /api/synthesis-simulator/stats` (simulator + learning stats), `GET /api/synthesis-discovery/:formula` (synthesis path + effects for a formula).
+- **Frontend**: Extended Synthesis Variables tab shows simulator stats, learning records, learned patterns, parameter-Tc correlations, and material class breakdown.
+
 ### Band Structure Neural Operator
 - **Full E(k) dispersion predictor** (`server/physics/band-structure-operator.ts`): Predicts complete band structure along high-symmetry k-paths, not just features.
 - **Output**: Energy values at ~50 k-points per band, for up to 12 bands near the Fermi level. Supports cubic, hexagonal, and tetragonal lattices.

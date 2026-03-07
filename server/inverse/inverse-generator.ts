@@ -1,4 +1,5 @@
 import { TargetProperties, CompositionBias, InverseCandidate } from "./target-schema";
+import { defaultSynthesisVector, mutateSynthesisVector, optimizeSynthesisPath } from "../physics/synthesis-simulator";
 
 const LIGHT_PHONON_ELEMENTS = ["H", "B", "C", "N", "O"];
 const HIGH_COUPLING_TM = ["Nb", "V", "Ti", "Ta", "Mo", "W", "Zr", "Hf"];
@@ -187,6 +188,11 @@ export function generateInverseCandidates(
         if (seen.has(formula)) continue;
         seen.add(formula);
 
+        const isHydride = formula.includes("H");
+        const matClass = isHydride ? "hydride" : proto === "Perovskite" ? "cuprate" : "default";
+        const sv = defaultSynthesisVector(matClass);
+        const synthVec = Math.random() < 0.5 ? mutateSynthesisVector(sv) : sv;
+
         candidates.push({
           formula,
           source: "inverse",
@@ -194,6 +200,13 @@ export function generateInverseCandidates(
           targetDistance: 1.0,
           iteration,
           prototype: proto,
+          synthesisVector: {
+            temperature: synthVec.temperature,
+            pressure: synthVec.pressure,
+            coolingRate: synthVec.coolingRate,
+            annealTime: synthVec.annealTime,
+            strain: synthVec.strain,
+          },
         });
 
         if (candidates.length >= count) break;
@@ -255,11 +268,22 @@ export function refineCandidate(
       const newFormula = buildFormula(elements, newCounts);
       if (!seen.has(newFormula)) {
         seen.add(newFormula);
+        const baseSynth = base.synthesisVector;
+        const mutSv = baseSynth
+          ? mutateSynthesisVector({ ...defaultSynthesisVector(), temperature: baseSynth.temperature, pressure: baseSynth.pressure, coolingRate: baseSynth.coolingRate, annealTime: baseSynth.annealTime, strain: baseSynth.strain, currentDensity: 0, magneticField: 0, thermalCycles: 1, oxygenPressure: 0 })
+          : mutateSynthesisVector(defaultSynthesisVector());
         refined.push({
           ...base,
           formula: newFormula,
           targetDistance: 1.0,
           iteration: base.iteration + 1,
+          synthesisVector: {
+            temperature: mutSv.temperature,
+            pressure: mutSv.pressure,
+            coolingRate: mutSv.coolingRate,
+            annealTime: mutSv.annealTime,
+            strain: mutSv.strain,
+          },
         });
       }
     }

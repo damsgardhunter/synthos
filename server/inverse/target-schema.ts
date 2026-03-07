@@ -22,6 +22,18 @@ export interface InverseCandidate {
   predictedPressure?: number;
   prototype?: string;
   reward?: number;
+  synthesisVector?: {
+    temperature: number;
+    pressure: number;
+    coolingRate: number;
+    annealTime: number;
+    strain: number;
+  };
+  synthesisPath?: {
+    steps: { order: number; method: string; temperature: number; pressure: number }[];
+    complexity: number;
+    feasibility: number;
+  };
 }
 
 export interface InverseLearningState {

@@ -411,6 +411,32 @@ export default function ComputationalPhysics() {
     refetchInterval: 30000,
   });
 
+  const { data: simData } = useQuery<{
+    simulator: {
+      totalSimulations: number;
+      totalMutations: number;
+      totalPathsOptimized: number;
+      avgTcImprovement: number;
+      bestTcImprovement: number;
+      bestFormula: string;
+      feasibilityBreakdown: Record<string, number>;
+      modeBreakdown: Record<string, number>;
+    };
+    learning: {
+      totalRecords: number;
+      uniqueFormulas: number;
+      avgTc: number;
+      bestTc: number;
+      bestFormula: string;
+      patterns: { description: string; confidence: number; sampleCount: number; avgTcImprovement: number }[];
+      classBreakdown: Record<string, { count: number; avgTc: number; bestTc: number }>;
+      parameterCorrelations: { parameter: string; correlation: number }[];
+    };
+  }>({
+    queryKey: ["/api/synthesis-simulator/stats"],
+    refetchInterval: 30000,
+  });
+
   const ws = useWebSocket();
 
   useEffect(() => {
@@ -422,6 +448,7 @@ export default function ComputationalPhysics() {
       queryClient.invalidateQueries({ queryKey: ["/api/computational-results/failed"] });
       queryClient.invalidateQueries({ queryKey: ["/api/crystal-structures"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-variables/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/synthesis-simulator/stats"] });
     }
   }, [ws.messages.length]);
 
@@ -829,6 +856,178 @@ export default function ComputationalPhysics() {
                       <div key={cat} className="p-2 bg-muted/30 rounded-md text-center" data-testid={`usage-${cat}`}>
                         <p className="text-[10px] text-muted-foreground truncate">{cat}</p>
                         <p className="text-sm font-mono font-bold">{count}</p>
+                      </div>
+                    ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Simulations Run</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-sim-total">
+                  {simData?.simulator?.totalSimulations ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Mutations Applied</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-sim-mutations">
+                  {simData?.simulator?.totalMutations ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Learning Records</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-learn-records">
+                  {simData?.learning?.totalRecords ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Unique Formulas</p>
+                <p className="text-2xl font-mono font-bold" data-testid="stat-learn-unique">
+                  {simData?.learning?.uniqueFormulas ?? 0}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card data-testid="card-sim-stats">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Zap className="h-5 w-5" />
+                  Synthesis Simulator
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div className="p-2 bg-muted/30 rounded-md text-center">
+                    <p className="text-xs text-muted-foreground">Paths Optimized</p>
+                    <p className="text-lg font-mono font-bold" data-testid="stat-paths-optimized">
+                      {simData?.simulator?.totalPathsOptimized ?? 0}
+                    </p>
+                  </div>
+                  <div className="p-2 bg-muted/30 rounded-md text-center">
+                    <p className="text-xs text-muted-foreground">Best Tc Gain</p>
+                    <p className="text-lg font-mono font-bold" data-testid="stat-best-tc-gain">
+                      +{(simData?.simulator?.bestTcImprovement ?? 0).toFixed(1)}K
+                    </p>
+                  </div>
+                </div>
+                {simData?.simulator?.bestFormula && (
+                  <div className="p-2 bg-muted/30 rounded-md text-xs mb-3">
+                    <span className="text-muted-foreground">Best improved: </span>
+                    <span className="font-mono font-medium" data-testid="stat-best-improved">{simData.simulator.bestFormula}</span>
+                  </div>
+                )}
+                {Object.keys(simData?.simulator?.feasibilityBreakdown ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Feasibility Classification</p>
+                    <div className="flex gap-2">
+                      {Object.entries(simData!.simulator.feasibilityBreakdown).map(([level, count]) => (
+                        <Badge key={level} variant="outline" className="text-[10px]" data-testid={`feasibility-${level}`}>
+                          {level}: {count}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {Object.keys(simData?.simulator?.modeBreakdown ?? {}).length > 0 && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Optimization Modes</p>
+                    <div className="flex gap-2">
+                      {Object.entries(simData!.simulator.modeBreakdown)
+                        .filter(([, c]) => c > 0)
+                        .map(([mode, count]) => (
+                          <Badge key={mode} variant="secondary" className="text-[10px]" data-testid={`mode-${mode}`}>
+                            {mode}: {count}
+                          </Badge>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card data-testid="card-learn-patterns">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Star className="h-5 w-5" />
+                  Learned Synthesis Patterns
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {(simData?.learning?.patterns?.length ?? 0) > 0 ? (
+                  <div className="space-y-2">
+                    {simData!.learning.patterns.slice(0, 6).map((pat, i) => (
+                      <div key={i} className="p-2 bg-muted/30 rounded-md text-xs" data-testid={`pattern-${i}`}>
+                        <p className="mb-1">{pat.description}</p>
+                        <div className="flex gap-3 text-muted-foreground">
+                          <span>Confidence: {(pat.confidence * 100).toFixed(0)}%</span>
+                          <span>Samples: {pat.sampleCount}</span>
+                          <span>Avg Tc+: {pat.avgTcImprovement.toFixed(1)}K</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    Patterns will emerge as the engine accumulates synthesis data
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {(simData?.learning?.parameterCorrelations?.length ?? 0) > 0 && (
+            <Card data-testid="card-param-correlations">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Target className="h-5 w-5" />
+                  Parameter-Tc Correlations
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {simData!.learning.parameterCorrelations.map((pc, i) => (
+                    <div key={i} className="p-2 bg-muted/30 rounded-md text-center" data-testid={`corr-${i}`}>
+                      <p className="text-[10px] text-muted-foreground">{pc.parameter}</p>
+                      <p className={`text-sm font-mono font-bold ${pc.correlation > 0 ? "text-green-500" : pc.correlation < -0.1 ? "text-red-500" : ""}`}>
+                        {pc.correlation > 0 ? "+" : ""}{pc.correlation.toFixed(3)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {Object.keys(simData?.learning?.classBreakdown ?? {}).length > 0 && (
+            <Card data-testid="card-class-breakdown">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Beaker className="h-5 w-5" />
+                  Synthesis by Material Class
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {Object.entries(simData!.learning.classBreakdown)
+                    .sort(([, a], [, b]) => b.bestTc - a.bestTc)
+                    .map(([cls, info]) => (
+                      <div key={cls} className="p-2 bg-muted/30 rounded-md" data-testid={`class-${cls}`}>
+                        <p className="text-xs font-medium truncate">{cls}</p>
+                        <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+                          <span>{info.count} records</span>
+                          <span>Best: {info.bestTc.toFixed(0)}K</span>
+                        </div>
                       </div>
                     ))}
                 </div>

@@ -70,6 +70,11 @@ import { computeSynthesisPathway, getSynthesisPathwayStats } from "./synthesis/r
 import { getParameterSpace } from "./synthesis/synthesis-variables";
 import { getSynthesisOptimizerStats } from "./synthesis/synthesis-condition-optimizer";
 import {
+  getSimulatorStats, simulateSynthesisEffects, defaultSynthesisVector,
+  optimizeSynthesisForFixedMaterial, optimizeSynthesisPath,
+} from "./physics/synthesis-simulator";
+import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
+import {
   analyzeFrontier, computeNoveltyScore, analyzeZoneIntelligence,
   generateExplorationStrategy, getLandscapeIntelligenceStats,
 } from "./landscape/landscape-intelligence";
@@ -1607,6 +1612,43 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ parameterSpace, optimizerStats });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch synthesis variable stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-simulator/stats", generalLimiter, (_req, res) => {
+    try {
+      const simulator = getSimulatorStats();
+      const learning = getSynthesisLearningStats();
+      res.json({ simulator, learning });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch synthesis simulator stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-discovery/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const matClass = formula.includes("H") ? "Hydrides" : "default";
+
+      const path = optimizeSynthesisPath(formula, matClass);
+      const similar = querySimilarSynthesis(formula, 5);
+      const sv = defaultSynthesisVector(matClass);
+      const effects = simulateSynthesisEffects(formula, matClass, sv);
+
+      res.json({
+        formula,
+        synthesisPath: path,
+        defaultEffects: effects,
+        similarSyntheses: similar.map(s => ({
+          formula: s.formula,
+          tc: s.resultTc,
+          temperature: s.synthesisVector.temperature,
+          pressure: s.synthesisVector.pressure,
+          coolingRate: s.synthesisVector.coolingRate,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute synthesis discovery", detail: e.message?.slice(0, 200) });
     }
   });
 
