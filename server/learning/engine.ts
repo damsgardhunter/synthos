@@ -865,11 +865,21 @@ async function runDFTEnrichment() {
       }
     }
 
+    const highScoreAnalytical = candidates
+      .filter(c => (c.ensembleScore ?? 0) > 0.7 && (!c.dataConfidence || c.dataConfidence === "analytical"))
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+    for (const c of highScoreAnalytical) {
+      if (toEnrich.length >= 25) break;
+      if (!toEnrich.some(e => e.id === c.id)) {
+        toEnrich.push(c);
+      }
+    }
+
     const stage1Candidates = candidates
       .filter(c => (c.predictedTc ?? 0) > 40 && c.dataConfidence !== "high" && c.dataConfidence !== "medium")
       .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
     for (const c of stage1Candidates) {
-      if (toEnrich.length >= 25) break;
+      if (toEnrich.length >= 30) break;
       if (!toEnrich.some(e => e.id === c.id)) {
         toEnrich.push(c);
       }
@@ -997,6 +1007,20 @@ async function runPhase10_Physics() {
       try {
         const result = await runFullPhysicsAnalysis(emit, candidate);
         totalPhysicsComputed++;
+
+        if (result.electronicStructure.metallicity < 0.1 && result.electronicStructure.bandGap > 0.3) {
+          emit("log", {
+            phase: "phase-10",
+            event: "Insulator skipped",
+            detail: `${candidate.formula}: bandGap=${result.electronicStructure.bandGap.toFixed(2)} eV, metallicity=${result.electronicStructure.metallicity.toFixed(2)} - suppressing SC predictions`,
+            dataSource: "Physics Engine",
+          });
+          await storage.updateSuperconductorCandidate(candidate.id, {
+            predictedTc: 0,
+            notes: `${candidate.notes || ""} [Insulator: bandGap=${result.electronicStructure.bandGap.toFixed(2)}eV]`.trim(),
+          });
+          continue;
+        }
 
         const rawPhysicsTc = result.eliashberg.predictedTc;
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
@@ -2703,10 +2727,9 @@ async function runLearningCycle() {
 
     const scCount = await storage.getSuperconductorCount();
     if (scCount >= 3) {
-      await Promise.allSettled([
-        runPhase10_Physics(),
-        runPhase11_StructurePrediction(),
-      ]);
+      await runPhase11_StructurePrediction();
+      if (state !== "running") return;
+      await runPhase10_Physics();
 
       if (state !== "running") return;
 

@@ -1047,7 +1047,7 @@ export function computeElectronicStructure(
     const frac = (counts[el] || 1) / totalAtoms;
     wAvgForFlatness += estimateBandwidthW(el) * frac;
   }
-  const bandFlatness = Math.max(0, Math.min(1.0, 1 - wAvgForFlatness / 3.0));
+  let bandFlatness = Math.max(0, Math.min(1.0, 1 - wAvgForFlatness / 3.0));
 
   const avgDOS = vec / Math.max(0.5, wAvgForFlatness);
   const dosRatio = avgDOS > 0.01 ? densityOfStatesAtFermi / avgDOS : 1.0;
@@ -1062,6 +1062,9 @@ export function computeElectronicStructure(
   if (isCuprate) flatBandIndicator = Math.max(flatBandIndicator, 0.8);
   if (isKagome) flatBandIndicator = Math.max(flatBandIndicator, 0.7);
   if (bandFlatness > 0.6 && hasTM) flatBandIndicator = Math.max(flatBandIndicator, 0.5);
+  if (flatBandIndicator > 0.5 && bandFlatness < 0.1) {
+    bandFlatness = Math.max(bandFlatness, flatBandIndicator * 0.6);
+  }
 
   const locPenalty = Math.max(0, (correlationStrength - 0.5) * (1 - metallicity));
 
@@ -2379,7 +2382,7 @@ export function computeDynamicSpinSusceptibility(
     : 10;
   const correlationLength = Math.min(50, xiSpin);
 
-  const isNearQCP = stonerProduct > 0.7 && stonerProduct < 1.2;
+  const isNearQCP = stonerProduct > 0.7 || stonerEnhancement > 10;
 
   return {
     chiStaticPeak: Number(chiStaticPeak.toFixed(3)),
@@ -2756,7 +2759,7 @@ export function computeAlpha2F(
     avgEta = N_EF * 0.3;
   }
 
-  const couplingPrefactor = avgEta * N_EF * 0.5;
+  const couplingPrefactor = avgEta * N_EF * 2.5;
 
   const nBins = phononDOS.frequencies.length;
   const alpha2F = new Array(nBins).fill(0);

@@ -600,6 +600,11 @@ export async function predictCrystalStructure(
   emit: EventEmitter,
   formula: string
 ): Promise<StructurePrediction | null> {
+  if (typeof formula !== "string") {
+    formula = (formula as any)?.formula || String(formula ?? "");
+  }
+  if (!formula || formula === "[object Object]") return null;
+
   const protoMatch = matchPrototype(formula);
   const elements = parseFormulaElements(formula);
 

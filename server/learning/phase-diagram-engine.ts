@@ -305,8 +305,8 @@ export function assessMetastability(
   const kB = 8.617e-5;
   const attemptFrequency = 1e13;
   const kineticBarrier = eAboveHull > 0
-    ? Math.max(0.1, eAboveHull * 15 + 0.3 * Math.log(avgMeltingPoint / 300))
-    : 2.0;
+    ? Math.max(0.1, Math.min(2.5, eAboveHull * 6 + 0.2 * Math.log(avgMeltingPoint / 300)))
+    : 1.5;
 
   const roomTempRate = attemptFrequency * Math.exp(-kineticBarrier / (kB * 300));
   let estimatedLifetime: string;

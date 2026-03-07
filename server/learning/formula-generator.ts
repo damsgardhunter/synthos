@@ -91,7 +91,7 @@ export async function generateNovelFormulas(
       : "Use general materials science knowledge.";
 
   let strategyContext = strategyHint
-    ? `\n\nCurrent research strategy prioritizes: ${strategyHint}. When generating candidates, prefer compositions from these material families if relevant to the target application.`
+    ? `\n\nCurrent research strategy prioritizes: ${strategyHint}. When generating candidates, prefer compositions from these material families if relevant to the target application. IMPORTANT: Do NOT generate materials from families not listed in the strategy priorities unless exploring novel chemical space. If a family (e.g., Hydrides, Carbides) is not listed above, reduce generation probability for that family.`
     : "";
 
   if (inverseDesignMode) {

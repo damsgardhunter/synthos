@@ -66,7 +66,18 @@ function normalizeFormula(formula: string): string {
     }
   }
   
-  parts.sort((a, b) => a.el.localeCompare(b.el));
+  const ELECTRONEG: Record<string, number> = {
+    H: 2.20, Li: 0.98, Be: 1.57, B: 2.04, C: 2.55, N: 3.04, O: 3.44, F: 3.98,
+    Na: 0.93, Mg: 1.31, Al: 1.61, Si: 1.90, P: 2.19, S: 2.58, Cl: 3.16,
+    K: 0.82, Ca: 1.00, Sc: 1.36, Ti: 1.54, V: 1.63, Cr: 1.66, Mn: 1.55,
+    Fe: 1.83, Co: 1.88, Ni: 1.91, Cu: 1.90, Zn: 1.65, Ga: 1.81, Ge: 2.01,
+    As: 2.18, Se: 2.55, Br: 2.96, Rb: 0.82, Sr: 0.95, Y: 1.22, Zr: 1.33,
+    Nb: 1.60, Mo: 1.80, Ru: 2.20, Rh: 2.28, Pd: 2.20, Ag: 1.93, Cd: 1.69,
+    In: 1.78, Sn: 1.96, Sb: 2.05, Te: 2.10, I: 2.66, Cs: 0.79, Ba: 0.89,
+    La: 1.10, Ce: 1.12, Hf: 1.30, Ta: 1.50, W: 1.70, Re: 1.90, Os: 2.20,
+    Ir: 2.20, Pt: 2.28, Au: 2.54, Tl: 1.62, Pb: 2.33, Bi: 2.02, Th: 1.30, U: 1.38,
+  };
+  parts.sort((a, b) => (ELECTRONEG[a.el] ?? 2.0) - (ELECTRONEG[b.el] ?? 2.0));
   
   return parts.map(p => p.count === 1 ? p.el : `${p.el}${p.count}`).join("");
 }

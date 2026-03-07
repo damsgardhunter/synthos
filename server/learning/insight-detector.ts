@@ -246,7 +246,7 @@ function hasKeywordOverlap(text: string, existingTexts: string[]): boolean {
 function isDuplicateByJaccard(text: string, existingTexts: string[]): boolean {
   const lower = text.toLowerCase();
   for (const existing of existingTexts) {
-    if (jaccardSimilarity(lower, existing) > 0.5) return true;
+    if (jaccardSimilarity(lower, existing) > 0.4) return true;
   }
   return false;
 }
@@ -414,7 +414,7 @@ function isSemanticDuplicate(embedding: Float32Array): { isDuplicate: boolean; b
       matchText = entry.text;
     }
   }
-  return { isDuplicate: bestSimilarity > 0.85, bestSimilarity, matchText };
+  return { isDuplicate: bestSimilarity > 0.75, bestSimilarity, matchText };
 }
 
 export async function evaluateInsightNovelty(
