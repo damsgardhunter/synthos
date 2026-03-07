@@ -7,6 +7,15 @@ const QE_WORK_DIR = "/tmp/qe_calculations";
 const QE_PSEUDO_DIR = "/tmp/qe_pseudo";
 const QE_TIMEOUT_MS = 120_000;
 
+const PROJECT_ROOT = path.resolve(process.cwd());
+const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
+const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
+const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
+
+const failedFormulaTracker = new Map<string, { count: number; lastAttempt: number }>();
+const MAX_FORMULA_FAILURES = 3;
+const FAILURE_COOLDOWN_MS = 3600_000;
+
 const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   H:  { mass: 1.008,   zValence: 1  }, He: { mass: 4.003,   zValence: 2  },
   Li: { mass: 6.941,   zValence: 3  }, Be: { mass: 9.012,   zValence: 4  },
@@ -87,6 +96,10 @@ export interface QEFullResult {
   phonon: QEPhononResult | null;
   wallTimeTotal: number;
   error: string | null;
+  retryCount?: number;
+  xtbPreRelaxed?: boolean;
+  ppValidated?: boolean;
+  rejectionReason?: string;
 }
 
 function parseFormula(formula: string): Record<string, number> {
@@ -114,17 +127,35 @@ function estimateLatticeConstant(elements: string[]): number {
   return avgR * 2.8 + 0.5;
 }
 
+function validatePseudopotential(filePath: string): boolean {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const stats = fs.statSync(filePath);
+    if (stats.size < 5000) return false;
+    const content = fs.readFileSync(filePath, "utf-8");
+    if (!content.includes("</UPF>")) return false;
+    if (!content.includes("<PP_HEADER")) return false;
+    if (!content.includes("<PP_MESH>")) return false;
+    if (!content.includes("<PP_LOCAL") && !content.includes("<PP_NONLOCAL")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function ensurePseudopotential(element: string): string {
   if (!fs.existsSync(QE_PSEUDO_DIR)) {
     fs.mkdirSync(QE_PSEUDO_DIR, { recursive: true });
   }
 
   const ppFile = path.join(QE_PSEUDO_DIR, `${element}.UPF`);
+  if (fs.existsSync(ppFile) && validatePseudopotential(ppFile)) {
+    return ppFile;
+  }
+
   if (fs.existsSync(ppFile)) {
-    const content = fs.readFileSync(ppFile, "utf-8");
-    if (content.includes("<PP_INFO>") || content.includes("UPF version")) {
-      return ppFile;
-    }
+    console.log(`[QE-Worker] Invalid PP for ${element} (${fs.statSync(ppFile).size} bytes), regenerating`);
+    fs.unlinkSync(ppFile);
   }
 
   const ld1Input = generateLd1Input(element);
@@ -148,7 +179,7 @@ function ensurePseudopotential(element: string): string {
     });
 
     const generatedPP = path.join(ld1WorkDir, `${element}.UPF`);
-    if (fs.existsSync(generatedPP)) {
+    if (fs.existsSync(generatedPP) && validatePseudopotential(generatedPP)) {
       fs.copyFileSync(generatedPP, ppFile);
       return ppFile;
     }
@@ -156,15 +187,17 @@ function ensurePseudopotential(element: string): string {
     const files = fs.readdirSync(ld1WorkDir);
     const upfFile = files.find(f => f.endsWith(".UPF"));
     if (upfFile) {
-      fs.copyFileSync(path.join(ld1WorkDir, upfFile), ppFile);
-      return ppFile;
+      const srcPath = path.join(ld1WorkDir, upfFile);
+      if (validatePseudopotential(srcPath)) {
+        fs.copyFileSync(srcPath, ppFile);
+        return ppFile;
+      }
     }
   } catch (err: any) {
     console.log(`[QE-Worker] ld1.x PP generation failed for ${element}: ${err.message?.slice(0, 200)}`);
   }
 
-  generateMinimalPP(element, ppFile);
-  return ppFile;
+  throw new Error(`Failed to generate valid pseudopotential for ${element} — ld1.x could not produce a usable UPF file`);
 }
 
 function generateLd1Input(element: string): string | null {
@@ -538,6 +571,198 @@ function parsePhononOutput(stdout: string): QEPhononResult {
   return result;
 }
 
+function validateGeometry(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+): { valid: boolean; reason: string } {
+  if (positions.length === 0) return { valid: false, reason: "No atomic positions" };
+  if (positions.length > 16) return { valid: false, reason: `Too many atoms (${positions.length}), max 16 for available resources` };
+
+  const totalAtoms = positions.length;
+  const volumeAng3 = latticeA ** 3;
+  const volumePerAtom = volumeAng3 / totalAtoms;
+  if (volumePerAtom < 5) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min 5)` };
+
+  for (let i = 0; i < positions.length; i++) {
+    for (let j = i + 1; j < positions.length; j++) {
+      const dx = (positions[i].x - positions[j].x) * latticeA;
+      const dy = (positions[i].y - positions[j].y) * latticeA;
+      const dz = (positions[i].z - positions[j].z) * latticeA;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < 0.6) {
+        return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A` };
+      }
+    }
+  }
+  return { valid: true, reason: "OK" };
+}
+
+function validateFormulaForDFT(formula: string, counts: Record<string, number>): { valid: boolean; reason: string } {
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+
+  if (elements.length > 5) {
+    return { valid: false, reason: `Too many distinct elements (${elements.length}), max 5 for simple cubic DFT` };
+  }
+  if (totalAtoms > 16) {
+    return { valid: false, reason: `Too many atoms (${totalAtoms}), max 16 for available resources` };
+  }
+
+  const hCount = counts["H"] || 0;
+  if (hCount > 0 && totalAtoms > 2 && hCount / totalAtoms > 0.85) {
+    return { valid: false, reason: `Hydrogen ratio too high (${(hCount / totalAtoms * 100).toFixed(0)}%), likely unphysical` };
+  }
+
+  for (const el of elements) {
+    if (!ELEMENT_DATA[el]) {
+      return { valid: false, reason: `Unsupported element: ${el}` };
+    }
+  }
+
+  return { valid: true, reason: "OK" };
+}
+
+function tryXTBPreRelaxation(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+  workDir: string,
+): Array<{ element: string; x: number; y: number; z: number }> | null {
+  try {
+    if (!fs.existsSync(XTB_BIN)) return null;
+
+    const xyzPath = path.join(workDir, "pre_relax.xyz");
+    const nAtoms = positions.length;
+    let xyzContent = `${nAtoms}\npre-relaxation\n`;
+    for (const pos of positions) {
+      xyzContent += `${pos.element}  ${(pos.x * latticeA).toFixed(6)}  ${(pos.y * latticeA).toFixed(6)}  ${(pos.z * latticeA).toFixed(6)}\n`;
+    }
+    fs.writeFileSync(xyzPath, xyzContent);
+
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "512M",
+    };
+
+    execSync(
+      `${XTB_BIN} pre_relax.xyz --gfn 2 --opt crude 2>&1`,
+      { cwd: workDir, timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
+    );
+
+    const optPath = path.join(workDir, "xtbopt.xyz");
+    if (!fs.existsSync(optPath)) return null;
+
+    const optContent = fs.readFileSync(optPath, "utf-8");
+    const lines = optContent.trim().split("\n");
+    if (lines.length < 3) return null;
+
+    const relaxed: Array<{ element: string; x: number; y: number; z: number }> = [];
+    for (let i = 2; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length >= 4) {
+        relaxed.push({
+          element: parts[0],
+          x: parseFloat(parts[1]) / latticeA,
+          y: parseFloat(parts[2]) / latticeA,
+          z: parseFloat(parts[3]) / latticeA,
+        });
+      }
+    }
+
+    if (relaxed.length === positions.length) {
+      console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${positions.length} atoms`);
+      return relaxed;
+    }
+    return null;
+  } catch (err: any) {
+    console.log(`[QE-Worker] xTB pre-relaxation failed: ${err.message?.slice(0, 100)}`);
+    return null;
+  }
+}
+
+export function isFormulaBlocked(formula: string): boolean {
+  const tracker = failedFormulaTracker.get(formula);
+  if (!tracker) return false;
+  if (Date.now() - tracker.lastAttempt > FAILURE_COOLDOWN_MS) {
+    failedFormulaTracker.delete(formula);
+    return false;
+  }
+  return tracker.count >= MAX_FORMULA_FAILURES;
+}
+
+function recordFormulaFailure(formula: string) {
+  const tracker = failedFormulaTracker.get(formula) || { count: 0, lastAttempt: 0 };
+  tracker.count++;
+  tracker.lastAttempt = Date.now();
+  failedFormulaTracker.set(formula, tracker);
+}
+
+function generateSCFInputWithParams(
+  formula: string,
+  elements: string[],
+  counts: Record<string, number>,
+  latticeA: number,
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  params: { mixingBeta: number; maxSteps: number; diag: string },
+): string {
+  const totalAtoms = positions.length;
+  const nTypes = elements.length;
+  const ecutwfc = 45;
+  const ecutrho = 360;
+
+  let atomicSpecies = "";
+  for (const el of elements) {
+    const data = ELEMENT_DATA[el];
+    const mass = data?.mass ?? 50;
+    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${el}.UPF\n`;
+  }
+
+  let atomicPositions = "";
+  for (const pos of positions) {
+    atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+  }
+
+  return `&CONTROL
+  calculation = 'scf',
+  restart_mode = 'from_scratch',
+  prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
+  outdir = './tmp',
+  pseudo_dir = '${QE_PSEUDO_DIR}',
+  tprnfor = .true.,
+  tstress = .true.,
+  forc_conv_thr = 1.0d-3,
+  etot_conv_thr = 1.0d-5,
+/
+&SYSTEM
+  ibrav = 1,
+  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
+  nat = ${totalAtoms},
+  ntyp = ${nTypes},
+  ecutwfc = ${ecutwfc},
+  ecutrho = ${ecutrho},
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.02,
+  nspin = 1,
+/
+&ELECTRONS
+  electron_maxstep = ${params.maxSteps},
+  conv_thr = 1.0d-6,
+  mixing_beta = ${params.mixingBeta},
+  mixing_mode = 'plain',
+  diagonalization = '${params.diag}',
+/
+ATOMIC_SPECIES
+${atomicSpecies}
+ATOMIC_POSITIONS {crystal}
+${atomicPositions}
+K_POINTS {automatic}
+  4 4 4  0 0 0
+`;
+}
+
 function runQECommand(binary: string, inputFile: string, workDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     const proc = spawn(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
@@ -576,7 +801,15 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     phonon: null,
     wallTimeTotal: 0,
     error: null,
+    retryCount: 0,
+    xtbPreRelaxed: false,
+    ppValidated: false,
   };
+
+  if (isFormulaBlocked(formula)) {
+    result.error = `Formula ${formula} blocked after ${MAX_FORMULA_FAILURES} consecutive failures (cooldown ${FAILURE_COOLDOWN_MS / 60000} min)`;
+    return result;
+  }
 
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
@@ -586,11 +819,12 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     return result;
   }
 
-  for (const el of elements) {
-    if (!ELEMENT_DATA[el]) {
-      result.error = `Unsupported element: ${el}`;
-      return result;
-    }
+  const formulaCheck = validateFormulaForDFT(formula, counts);
+  if (!formulaCheck.valid) {
+    result.error = `Pre-filter rejected: ${formulaCheck.reason}`;
+    result.rejectionReason = formulaCheck.reason;
+    console.log(`[QE-Worker] ${formula} rejected: ${formulaCheck.reason}`);
+    return result;
   }
 
   const jobDir = path.join(QE_WORK_DIR, `job_${Date.now()}_${formula.replace(/[^a-zA-Z0-9]/g, "")}`);
@@ -598,34 +832,99 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
   try {
     for (const el of elements) {
-      ensurePseudopotential(el);
+      try {
+        ensurePseudopotential(el);
+      } catch (ppErr: any) {
+        result.error = ppErr.message;
+        result.ppValidated = false;
+        result.rejectionReason = `PP: ${ppErr.message}`;
+        console.log(`[QE-Worker] PP validation failed for ${formula}: ${ppErr.message}`);
+        recordFormulaFailure(formula);
+        return result;
+      }
     }
 
     const latticeA = estimateLatticeConstant(elements);
-    const scfInput = generateSCFInput(formula, elements, counts, latticeA);
-    const scfInputFile = path.join(jobDir, "scf.in");
-    fs.writeFileSync(scfInputFile, scfInput);
+    let positions = generateAtomicPositions(elements, counts);
 
-    console.log(`[QE-Worker] Starting SCF for ${formula} (a=${latticeA.toFixed(2)} A, ${Object.values(counts).reduce((s,n)=>s+Math.round(n),0)} atoms)`);
-
-    const scfResult = await runQECommand(
-      path.join(QE_BIN_DIR, "pw.x"),
-      scfInputFile,
-      jobDir,
-    );
-
-    fs.writeFileSync(path.join(jobDir, "scf.out"), scfResult.stdout);
-
-    result.scf = parseSCFOutput(scfResult.stdout);
-
-    if (scfResult.exitCode !== 0 && !result.scf.converged) {
-      result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${scfResult.stderr.slice(0, 500)}`;
-      console.log(`[QE-Worker] SCF failed for ${formula}: ${result.scf.error.slice(0, 200)}`);
-    } else {
-      console.log(`[QE-Worker] SCF done for ${formula}: E=${result.scf.totalEnergy.toFixed(4)} eV, converged=${result.scf.converged}, Ef=${result.scf.fermiEnergy ?? "N/A"}`);
+    const geomCheck = validateGeometry(positions, latticeA);
+    if (!geomCheck.valid) {
+      result.error = `Geometry rejected: ${geomCheck.reason}`;
+      console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
+      recordFormulaFailure(formula);
+      return result;
     }
 
-    if (result.scf.converged) {
+    result.ppValidated = true;
+
+    const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir);
+    result.xtbPreRelaxed = !!relaxed;
+    if (relaxed) {
+      positions = relaxed;
+      console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
+    }
+
+    const retryConfigs = [
+      { mixingBeta: 0.3, maxSteps: 100, diag: "david" },
+      { mixingBeta: 0.2, maxSteps: 200, diag: "david" },
+      { mixingBeta: 0.1, maxSteps: 300, diag: "cg" },
+    ];
+
+    let scfConverged = false;
+    let retryCount = 0;
+
+    for (let attempt = 0; attempt < retryConfigs.length && !scfConverged; attempt++) {
+      const params = retryConfigs[attempt];
+      const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, params);
+      const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
+      fs.writeFileSync(scfInputFile, scfInput);
+
+      if (attempt > 0) {
+        try {
+          fs.rmSync(path.join(jobDir, "tmp"), { recursive: true, force: true });
+          fs.mkdirSync(path.join(jobDir, "tmp"), { recursive: true });
+        } catch {}
+      }
+
+      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps})`);
+
+      const scfResult = await runQECommand(
+        path.join(QE_BIN_DIR, "pw.x"),
+        scfInputFile,
+        jobDir,
+      );
+
+      fs.writeFileSync(path.join(jobDir, `scf_attempt${attempt}.out`), scfResult.stdout);
+      result.scf = parseSCFOutput(scfResult.stdout);
+
+      if (scfResult.exitCode !== 0 && !result.scf.converged) {
+        const isPPError = scfResult.stderr.includes("read_upf") || scfResult.stderr.includes("readpp") || scfResult.stderr.includes("EOF marker");
+        if (isPPError) {
+          result.scf.error = `Pseudopotential read failure: ${scfResult.stderr.slice(0, 300)}`;
+          console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
+          recordFormulaFailure(formula);
+          break;
+        }
+        result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${scfResult.stderr.slice(0, 500)}`;
+        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}: ${result.scf.error.slice(0, 200)}`);
+        retryCount = attempt + 1;
+      } else if (result.scf.converged) {
+        scfConverged = true;
+        retryCount = attempt;
+        console.log(`[QE-Worker] SCF converged for ${formula} on attempt ${attempt + 1}: E=${result.scf.totalEnergy.toFixed(4)} eV, Ef=${result.scf.fermiEnergy ?? "N/A"}`);
+      } else {
+        retryCount = attempt + 1;
+        console.log(`[QE-Worker] SCF attempt ${attempt + 1} did not converge for ${formula}`);
+      }
+    }
+
+    result.retryCount = retryCount;
+
+    if (!scfConverged) {
+      recordFormulaFailure(formula);
+    }
+
+    if (result.scf?.converged) {
       const phInput = generatePhononInput(formula);
       const phInputFile = path.join(jobDir, "ph.in");
       fs.writeFileSync(phInputFile, phInput);

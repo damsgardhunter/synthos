@@ -1,5 +1,5 @@
 import { storage } from "../storage";
-import { runFullDFT, isQEAvailable } from "./qe-worker";
+import { runFullDFT, isQEAvailable, isFormulaBlocked } from "./qe-worker";
 import type { QEFullResult } from "./qe-worker";
 import type { DftJob } from "@shared/schema";
 
@@ -23,12 +23,23 @@ export async function submitDFTJob(
   candidateId: number | null,
   priority: number = 50,
   jobType: string = "scf",
-): Promise<DftJob> {
+): Promise<DftJob | null> {
+  if (isFormulaBlocked(formula)) {
+    console.log(`[DFT-Queue] Formula ${formula} blocked due to repeated failures, skipping`);
+    return null;
+  }
+
   const existing = await storage.getDftJobsByFormula(formula);
   const activeJob = existing.find(j => j.status === "queued" || j.status === "running");
   if (activeJob) {
     console.log(`[DFT-Queue] Job already queued/running for ${formula}, skipping`);
     return activeJob;
+  }
+
+  const recentFailed = existing.filter(j => j.status === "failed");
+  if (recentFailed.length >= 3) {
+    console.log(`[DFT-Queue] Formula ${formula} has ${recentFailed.length} prior failures, skipping`);
+    return null;
   }
 
   const job = await storage.insertDftJob({
@@ -170,6 +181,25 @@ async function processNextJob(): Promise<boolean> {
   }
 }
 
+async function cleanupStaleJobs() {
+  try {
+    const staleRunning = await storage.getDftJobsByStatus("running");
+    for (const job of staleRunning) {
+      await storage.updateDftJob(job.id, {
+        status: "failed",
+        completedAt: new Date(),
+        errorMessage: "Stale job from previous server session",
+      } as any);
+      console.log(`[DFT-Queue] Cleaned up stale running job #${job.id} (${job.formula})`);
+    }
+    if (staleRunning.length > 0) {
+      console.log(`[DFT-Queue] Cleaned ${staleRunning.length} stale running job(s)`);
+    }
+  } catch (err: any) {
+    console.log(`[DFT-Queue] Stale job cleanup error: ${err.message}`);
+  }
+}
+
 export function startDFTWorkerLoop() {
   if (workerLoopTimer) return;
 
@@ -178,6 +208,8 @@ export function startDFTWorkerLoop() {
   } else {
     console.log("[DFT-Queue] Quantum ESPRESSO detected at pw.x, full DFT worker ready");
   }
+
+  cleanupStaleJobs().catch(() => {});
 
   console.log("[DFT-Queue] Starting DFT worker loop (poll every 30s)");
 
@@ -220,19 +252,26 @@ export async function getDFTQueueStats() {
     isProcessing,
     currentFormula: currentJob?.formula || null,
     qeAvailable: isQEAvailable(),
-    recentJobs: recentJobs.map(j => ({
-      id: j.id,
-      formula: j.formula,
-      status: j.status,
-      jobType: j.jobType,
-      priority: j.priority,
-      createdAt: j.createdAt,
-      startedAt: j.startedAt,
-      completedAt: j.completedAt,
-      wallTime: (j.outputData as any)?.wallTimeTotal || null,
-      converged: (j.outputData as any)?.scf?.converged || false,
-      totalEnergy: (j.outputData as any)?.scf?.totalEnergy || null,
-      error: j.errorMessage,
-    })),
+    recentJobs: recentJobs.map(j => {
+      const out = j.outputData as any;
+      return {
+        id: j.id,
+        formula: j.formula,
+        status: j.status,
+        jobType: j.jobType,
+        priority: j.priority,
+        createdAt: j.createdAt,
+        startedAt: j.startedAt,
+        completedAt: j.completedAt,
+        wallTime: out?.wallTimeTotal || null,
+        converged: out?.scf?.converged || false,
+        totalEnergy: out?.scf?.totalEnergy || null,
+        retryCount: out?.retryCount ?? null,
+        xtbPreRelaxed: out?.xtbPreRelaxed ?? null,
+        ppValidated: out?.ppValidated ?? null,
+        rejectionReason: out?.rejectionReason ?? null,
+        error: j.errorMessage,
+      };
+    }),
   };
 }

@@ -129,6 +129,7 @@ export interface IStorage {
   getQueuedDftJobs(limit?: number): Promise<DftJob[]>;
   updateDftJob(id: number, updates: Partial<DftJob>): Promise<void>;
   getDftJobsByFormula(formula: string): Promise<DftJob[]>;
+  getDftJobsByStatus(status: string): Promise<DftJob[]>;
   getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }>;
   getRecentDftJobs(limit?: number): Promise<DftJob[]>;
 }
@@ -589,6 +590,12 @@ export class DatabaseStorage implements IStorage {
   async getDftJobsByFormula(formula: string): Promise<DftJob[]> {
     return db.select().from(dftJobs)
       .where(eq(dftJobs.formula, formula))
+      .orderBy(desc(dftJobs.createdAt));
+  }
+
+  async getDftJobsByStatus(status: string): Promise<DftJob[]> {
+    return db.select().from(dftJobs)
+      .where(eq(dftJobs.status, status))
       .orderBy(desc(dftJobs.createdAt));
   }
 
