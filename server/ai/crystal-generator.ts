@@ -29,6 +29,7 @@ export interface GeneratedCrystal {
   prototypeMatch: string | null;
   prototypeMatchScore: number;
   noveltyScore: number;
+  symmetryScore: number;
   densityGcm3: number;
   minBondLength: number;
   coordNumbers: number[];
@@ -261,6 +262,312 @@ function symmetryScore(atoms: AtomPosition[], lattice: LatticeParams): number {
   return symPenalty;
 }
 
+interface SymmetryOperation {
+  transform: (fx: number, fy: number, fz: number) => [number, number, number];
+}
+
+function getSpaceGroupOperations(sgName: string): SymmetryOperation[] {
+  const ops: SymmetryOperation[] = [
+    { transform: (x, y, z) => [x, y, z] },
+  ];
+
+  if (sgName.includes("m-3m") || sgName.includes("Fm-3m") || sgName.includes("Im-3m") || sgName.includes("Pm-3m")) {
+    ops.push(
+      { transform: (x, y, z) => [1 - x, y, z] },
+      { transform: (x, y, z) => [x, 1 - y, z] },
+      { transform: (x, y, z) => [x, y, 1 - z] },
+      { transform: (x, y, z) => [1 - x, 1 - y, z] },
+      { transform: (x, y, z) => [1 - x, y, 1 - z] },
+      { transform: (x, y, z) => [x, 1 - y, 1 - z] },
+      { transform: (x, y, z) => [1 - x, 1 - y, 1 - z] },
+      { transform: (x, y, z) => [y, x, z] },
+      { transform: (x, y, z) => [z, y, x] },
+      { transform: (x, y, z) => [x, z, y] },
+    );
+  } else if (sgName.includes("4/mmm") || sgName.includes("P4") || sgName.includes("I4")) {
+    ops.push(
+      { transform: (x, y, z) => [1 - x, 1 - y, z] },
+      { transform: (x, y, z) => [1 - y, x, z] },
+      { transform: (x, y, z) => [y, 1 - x, z] },
+      { transform: (x, y, z) => [x, y, 1 - z] },
+      { transform: (x, y, z) => [1 - x, y, z] },
+      { transform: (x, y, z) => [x, 1 - y, z] },
+    );
+  } else if (sgName.includes("6/mmm") || sgName.includes("P6")) {
+    ops.push(
+      { transform: (x, y, z) => [1 - y, x - y, z] },
+      { transform: (x, y, z) => [y - x, 1 - x, z] },
+      { transform: (x, y, z) => [1 - x, 1 - y, z] },
+      { transform: (x, y, z) => [y, y - x, z] },
+      { transform: (x, y, z) => [x - y, x, z] },
+      { transform: (x, y, z) => [x, y, 1 - z] },
+    );
+  } else if (sgName.includes("R-3m")) {
+    ops.push(
+      { transform: (x, y, z) => [1 - x, 1 - y, 1 - z] },
+      { transform: (x, y, z) => [1 - y, x - y, z] },
+      { transform: (x, y, z) => [y - x, 1 - x, z] },
+    );
+  } else if (sgName.includes("Pnma")) {
+    ops.push(
+      { transform: (x, y, z) => [0.5 - x, 1 - y, 0.5 + z] },
+      { transform: (x, y, z) => [1 - x, 0.5 + y, 1 - z] },
+      { transform: (x, y, z) => [0.5 + x, 0.5 - y, 0.5 - z] },
+    );
+  } else {
+    ops.push(
+      { transform: (x, y, z) => [1 - x, 1 - y, 1 - z] },
+    );
+  }
+
+  return ops;
+}
+
+function wrapFractional(v: number): number {
+  let w = v % 1.0;
+  if (w < 0) w += 1.0;
+  return w;
+}
+
+function projectToWyckoffPositions(
+  atoms: AtomPosition[],
+  lattice: LatticeParams,
+  sgIdx: number,
+  strength: number
+): AtomPosition[] {
+  const sg = SPACE_GROUPS[sgIdx];
+  const projected = atoms.map(a => ({ ...a }));
+
+  for (let i = 0; i < projected.length; i++) {
+    const fx = projected[i].x / lattice.a;
+    const fy = projected[i].y / lattice.b;
+    const fz = projected[i].z / lattice.c;
+
+    let bestDist = Infinity;
+    let bestPos: [number, number, number] | null = null;
+
+    for (const site of sg.wyckoff) {
+      for (const pos of site.positions) {
+        const dx = wrapFractional(fx) - wrapFractional(pos[0]);
+        const dy = wrapFractional(fy) - wrapFractional(pos[1]);
+        const dz = wrapFractional(fz) - wrapFractional(pos[2]);
+        const mdx = Math.abs(dx) < 0.5 ? dx : (dx > 0 ? dx - 1 : dx + 1);
+        const mdy = Math.abs(dy) < 0.5 ? dy : (dy > 0 ? dy - 1 : dy + 1);
+        const mdz = Math.abs(dz) < 0.5 ? dz : (dz > 0 ? dz - 1 : dz + 1);
+        const dist = Math.sqrt(
+          (mdx * lattice.a) ** 2 + (mdy * lattice.b) ** 2 + (mdz * lattice.c) ** 2
+        );
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPos = pos;
+        }
+      }
+    }
+
+    if (bestPos && bestDist < lattice.a * 0.4) {
+      projected[i].x += strength * (bestPos[0] * lattice.a - projected[i].x);
+      projected[i].y += strength * (bestPos[1] * lattice.b - projected[i].y);
+      projected[i].z += strength * (bestPos[2] * lattice.c - projected[i].z);
+    }
+  }
+
+  return projected;
+}
+
+function enforceSpaceGroupSymmetry(
+  atoms: AtomPosition[],
+  lattice: LatticeParams,
+  sgName: string,
+  strength: number
+): AtomPosition[] {
+  const ops = getSpaceGroupOperations(sgName);
+  const result = atoms.map(a => ({ ...a }));
+
+  const byElement: Record<string, number[]> = {};
+  for (let i = 0; i < atoms.length; i++) {
+    const el = atoms[i].symbol;
+    if (!byElement[el]) byElement[el] = [];
+    byElement[el].push(i);
+  }
+
+  for (const indices of Object.values(byElement)) {
+    if (indices.length < 2) continue;
+
+    for (const idx of indices) {
+      const fx = result[idx].x / lattice.a;
+      const fy = result[idx].y / lattice.b;
+      const fz = result[idx].z / lattice.c;
+
+      let symForceX = 0, symForceY = 0, symForceZ = 0;
+      let symCount = 0;
+
+      for (const op of ops) {
+        const [tx, ty, tz] = op.transform(fx, fy, fz);
+        const wxT = wrapFractional(tx) * lattice.a;
+        const wyT = wrapFractional(ty) * lattice.b;
+        const wzT = wrapFractional(tz) * lattice.c;
+
+        let nearestDist = Infinity;
+        let nearestIdx = -1;
+        for (const jIdx of indices) {
+          if (jIdx === idx) continue;
+          const dx = wxT - result[jIdx].x;
+          const dy = wyT - result[jIdx].y;
+          const dz = wzT - result[jIdx].z;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (d < nearestDist) {
+            nearestDist = d;
+            nearestIdx = jIdx;
+          }
+        }
+
+        if (nearestIdx >= 0 && nearestDist < lattice.a * 0.3) {
+          symForceX += (wxT - result[nearestIdx].x);
+          symForceY += (wyT - result[nearestIdx].y);
+          symForceZ += (wzT - result[nearestIdx].z);
+          symCount++;
+        }
+      }
+
+      if (symCount > 0) {
+        result[idx].x += strength * symForceX / symCount * 0.1;
+        result[idx].y += strength * symForceY / symCount * 0.1;
+        result[idx].z += strength * symForceZ / symCount * 0.1;
+      }
+    }
+  }
+
+  return result;
+}
+
+function computeSymmetryPenalty(
+  atoms: AtomPosition[],
+  lattice: LatticeParams,
+  sgName: string
+): number {
+  const ops = getSpaceGroupOperations(sgName);
+  let totalPenalty = 0;
+  let pairCount = 0;
+
+  const byElement: Record<string, number[]> = {};
+  for (let i = 0; i < atoms.length; i++) {
+    const el = atoms[i].symbol;
+    if (!byElement[el]) byElement[el] = [];
+    byElement[el].push(i);
+  }
+
+  for (const indices of Object.values(byElement)) {
+    if (indices.length < 2) continue;
+
+    for (const idx of indices) {
+      const fx = atoms[idx].x / lattice.a;
+      const fy = atoms[idx].y / lattice.b;
+      const fz = atoms[idx].z / lattice.c;
+
+      for (const op of ops) {
+        const [tx, ty, tz] = op.transform(fx, fy, fz);
+        const wxT = wrapFractional(tx) * lattice.a;
+        const wyT = wrapFractional(ty) * lattice.b;
+        const wzT = wrapFractional(tz) * lattice.c;
+
+        let nearestDist = Infinity;
+        for (const jIdx of indices) {
+          const dx = wxT - atoms[jIdx].x;
+          const dy = wyT - atoms[jIdx].y;
+          const dz = wzT - atoms[jIdx].z;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (d < nearestDist) nearestDist = d;
+        }
+
+        totalPenalty += Math.min(nearestDist, 2.0);
+        pairCount++;
+      }
+    }
+  }
+
+  return pairCount > 0 ? totalPenalty / pairCount : 0;
+}
+
+function computeFinalSymmetryScore(
+  atoms: AtomPosition[],
+  lattice: LatticeParams,
+  sgName: string
+): number {
+  const penalty = computeSymmetryPenalty(atoms, lattice, sgName);
+
+  const inversionScore = computeInversionSymmetryScore(atoms, lattice);
+
+  const mirrorScore = computeMirrorSymmetryScore(atoms, lattice);
+
+  const maxPenalty = 2.0;
+  const symFromOps = Math.max(0, 1 - penalty / maxPenalty);
+
+  return symFromOps * 0.5 + inversionScore * 0.25 + mirrorScore * 0.25;
+}
+
+function computeInversionSymmetryScore(atoms: AtomPosition[], lattice: LatticeParams): number {
+  const cx = lattice.a / 2;
+  const cy = lattice.b / 2;
+  const cz = lattice.c / 2;
+  let totalDev = 0;
+
+  for (const atom of atoms) {
+    const invX = 2 * cx - atom.x;
+    const invY = 2 * cy - atom.y;
+    const invZ = 2 * cz - atom.z;
+    let minDist = Infinity;
+    for (const other of atoms) {
+      if (other.symbol !== atom.symbol) continue;
+      const dx = invX - other.x;
+      const dy = invY - other.y;
+      const dz = invZ - other.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d < minDist) minDist = d;
+    }
+    totalDev += Math.min(minDist, 2.0);
+  }
+
+  const avgDev = atoms.length > 0 ? totalDev / atoms.length : 0;
+  return Math.max(0, 1 - avgDev / 2.0);
+}
+
+function computeMirrorSymmetryScore(atoms: AtomPosition[], lattice: LatticeParams): number {
+  let totalScore = 0;
+  let planeCount = 0;
+
+  const planes: { axis: 'x' | 'y' | 'z'; value: number }[] = [
+    { axis: 'x', value: lattice.a / 2 },
+    { axis: 'y', value: lattice.b / 2 },
+    { axis: 'z', value: lattice.c / 2 },
+  ];
+
+  for (const plane of planes) {
+    let planeDev = 0;
+    for (const atom of atoms) {
+      let mx = atom.x, my = atom.y, mz = atom.z;
+      if (plane.axis === 'x') mx = 2 * plane.value - atom.x;
+      if (plane.axis === 'y') my = 2 * plane.value - atom.y;
+      if (plane.axis === 'z') mz = 2 * plane.value - atom.z;
+
+      let minDist = Infinity;
+      for (const other of atoms) {
+        if (other.symbol !== atom.symbol) continue;
+        const dx = mx - other.x;
+        const dy = my - other.y;
+        const dz = mz - other.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < minDist) minDist = d;
+      }
+      planeDev += Math.min(minDist, 2.0);
+    }
+    const avgPlaneDev = atoms.length > 0 ? planeDev / atoms.length : 0;
+    totalScore += Math.max(0, 1 - avgPlaneDev / 2.0);
+    planeCount++;
+  }
+
+  return planeCount > 0 ? totalScore / planeCount : 0;
+}
+
 function denoiseStep(
   atoms: AtomPosition[],
   lattice: LatticeParams,
@@ -388,7 +695,9 @@ function generateFromWyckoff(
 function runDiffusion(
   atoms: AtomPosition[],
   lattice: LatticeParams,
-  nSteps: number = 50
+  nSteps: number = 50,
+  sgIdx?: number,
+  sgName?: string
 ): AtomPosition[] {
   let current = atoms.map(a => ({ ...a }));
   let bestAtoms = current;
@@ -401,7 +710,26 @@ function runDiffusion(
 
     current = denoiseStep(current, lattice, stepSize, temperature);
 
-    const score = geometricPenalty(current, lattice) + bondLengthScore(current) + symmetryScore(current, lattice);
+    const progress = step / nSteps;
+
+    if (sgIdx !== undefined && progress > 0.3) {
+      const projStrength = Math.min(0.8, (progress - 0.3) * 1.5);
+      current = projectToWyckoffPositions(current, lattice, sgIdx, projStrength);
+    }
+
+    if (sgName && progress > 0.4) {
+      const symStrength = Math.min(1.0, (progress - 0.4) * 2.0);
+      current = enforceSpaceGroupSymmetry(current, lattice, sgName, symStrength);
+    }
+
+    for (let i = 0; i < current.length; i++) {
+      current[i].x = Math.max(0.1, Math.min(lattice.a - 0.1, current[i].x));
+      current[i].y = Math.max(0.1, Math.min(lattice.b - 0.1, current[i].y));
+      current[i].z = Math.max(0.1, Math.min(lattice.c - 0.1, current[i].z));
+    }
+
+    const symPenalty = sgName ? computeSymmetryPenalty(current, lattice, sgName) * 2.0 : 0;
+    const score = geometricPenalty(current, lattice) + bondLengthScore(current) + symmetryScore(current, lattice) + symPenalty;
     if (score < bestScore) {
       bestScore = score;
       bestAtoms = current.map(a => ({ ...a }));
@@ -616,7 +944,7 @@ function trackFormula(formula: string): boolean {
   if (globalFormulaHistory.size > HISTORY_MAX) {
     const iter = globalFormulaHistory.values();
     for (let i = 0; i < 500; i++) {
-      globalFormulaHistory.delete(iter.next().value);
+      globalFormulaHistory.delete(iter.next().value as string);
     }
   }
   return true;
@@ -646,7 +974,7 @@ export function generateCrystals(
 
       let { atoms, lattice } = generated;
 
-      atoms = runDiffusion(atoms, lattice, 40);
+      atoms = runDiffusion(atoms, lattice, 40, sgIdx, SPACE_GROUPS[sgIdx].name);
 
       if (!isPhysicallyValid(atoms, lattice)) continue;
 
@@ -655,6 +983,7 @@ export function generateCrystals(
       const minBond = computeMinBondLength(atoms);
       const density = computeDensity(atoms, lattice);
       const novelty = computeNoveltyScore(formula, protoResult.name);
+      const symScore = computeFinalSymmetryScore(atoms, lattice, SPACE_GROUPS[sgIdx].name);
 
       results.push({
         atoms,
@@ -665,6 +994,7 @@ export function generateCrystals(
         prototypeMatch: protoResult.score > 0.5 ? protoResult.name : null,
         prototypeMatchScore: protoResult.score,
         noveltyScore: novelty,
+        symmetryScore: Math.round(symScore * 1000) / 1000,
         densityGcm3: Math.round(density * 100) / 100,
         minBondLength: Math.round(minBond * 1000) / 1000,
         coordNumbers,
@@ -702,6 +1032,7 @@ export function runDiffusionGenerationCycle(count: number = 30, targetElements?:
     novel: number;
     avgNovelty: number;
     avgDensity: number;
+    avgSymmetry: number;
     protoBreakdown: Record<string, number>;
   };
 } {
@@ -724,6 +1055,9 @@ export function runDiffusionGenerationCycle(count: number = 30, targetElements?:
   const avgDensity = crystals.length > 0
     ? crystals.reduce((s, c) => s + c.densityGcm3, 0) / crystals.length
     : 0;
+  const avgSymmetry = crystals.length > 0
+    ? crystals.reduce((s, c) => s + c.symmetryScore, 0) / crystals.length
+    : 0;
 
   return {
     formulas: crystals.map(c => c.formula),
@@ -734,6 +1068,7 @@ export function runDiffusionGenerationCycle(count: number = 30, targetElements?:
       novel: novel.length,
       avgNovelty: Math.round(avgNovelty * 1000) / 1000,
       avgDensity: Math.round(avgDensity * 100) / 100,
+      avgSymmetry: Math.round(avgSymmetry * 1000) / 1000,
       protoBreakdown,
     },
   };

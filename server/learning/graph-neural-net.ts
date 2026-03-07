@@ -79,8 +79,8 @@ export interface GNNPredictionWithUncertainty {
   confidence: number;
 }
 
-const NODE_DIM = 16;
-const HIDDEN_DIM = 24;
+const NODE_DIM = 20;
+const HIDDEN_DIM = 28;
 const EDGE_DIM = 7;
 const OUTPUT_DIM = 5;
 
@@ -167,6 +167,25 @@ function softmax(values: number[]): number[] {
   return exps.map(e => e / Math.max(sumExps, 1e-10));
 }
 
+function getSOrbitalOccupancy(atomicNumber: number): number {
+  if (atomicNumber <= 2) return atomicNumber / 2;
+  if (atomicNumber <= 10) return 1.0;
+  if (atomicNumber <= 18) return 1.0;
+  if (atomicNumber <= 36) return 1.0;
+  if (atomicNumber <= 54) return 1.0;
+  return 1.0;
+}
+
+function getPOrbitalOccupancy(atomicNumber: number): number {
+  if (atomicNumber <= 4) return 0;
+  if (atomicNumber >= 5 && atomicNumber <= 10) return Math.min((atomicNumber - 4) / 6, 1.0);
+  if (atomicNumber >= 13 && atomicNumber <= 18) return Math.min((atomicNumber - 12) / 6, 1.0);
+  if (atomicNumber >= 31 && atomicNumber <= 36) return Math.min((atomicNumber - 30) / 6, 1.0);
+  if (atomicNumber >= 49 && atomicNumber <= 54) return Math.min((atomicNumber - 48) / 6, 1.0);
+  if (atomicNumber >= 81 && atomicNumber <= 86) return Math.min((atomicNumber - 80) / 6, 1.0);
+  return 0;
+}
+
 function getDOrbitalOccupancy(atomicNumber: number): number {
   if (atomicNumber >= 21 && atomicNumber <= 30) return Math.min((atomicNumber - 20) / 10, 1.0);
   if (atomicNumber >= 39 && atomicNumber <= 48) return Math.min((atomicNumber - 38) / 10, 1.0);
@@ -180,6 +199,30 @@ function getFOrbitalOccupancy(atomicNumber: number): number {
   if (atomicNumber >= 57 && atomicNumber <= 71) return Math.min((atomicNumber - 56) / 14, 1.0);
   if (atomicNumber >= 89 && atomicNumber <= 103) return Math.min((atomicNumber - 88) / 14, 1.0);
   return 0;
+}
+
+function computeMagneticMomentProxy(atomicNumber: number): number {
+  const unpairedElectrons: Record<number, number> = {
+    24: 6, 25: 5, 26: 4, 27: 3, 28: 2, 29: 1,
+    42: 6, 43: 5, 44: 4, 45: 3, 46: 0, 47: 1,
+    74: 4, 75: 5, 76: 4, 77: 3, 78: 2, 79: 1,
+    57: 1, 58: 2, 59: 3, 60: 4, 61: 5, 62: 6, 63: 7,
+    64: 7, 65: 6, 66: 5, 67: 4, 68: 3, 69: 2, 70: 1, 71: 0,
+  };
+  const n = unpairedElectrons[atomicNumber] ?? 0;
+  return Math.min(1.0, Math.sqrt(n * (n + 2)) / 8.0);
+}
+
+function computeValenceShellEncoding(atomicNumber: number, valenceElectrons: number): number {
+  let period = 1;
+  if (atomicNumber > 2) period = 2;
+  if (atomicNumber > 10) period = 3;
+  if (atomicNumber > 18) period = 4;
+  if (atomicNumber > 36) period = 5;
+  if (atomicNumber > 54) period = 6;
+  if (atomicNumber > 86) period = 7;
+  const shellFill = Math.min(1.0, valenceElectrons / (2 * period * period));
+  return shellFill;
 }
 
 function getCovalentRadius(atomicNumber: number, atomicRadius: number): number {
@@ -455,11 +498,15 @@ function computeForceDescriptor(electronegativity: number, atomicRadius: number)
 }
 
 function computeSpinOrbitCoupling(atomicNumber: number): number {
-  if (atomicNumber < 20) return 0;
-  if (atomicNumber < 40) return 0.1;
-  if (atomicNumber < 57) return 0.3;
-  if (atomicNumber < 72) return 0.5;
-  return 0.7 + (atomicNumber - 72) * 0.003;
+  if (atomicNumber < 10) return 0;
+  if (atomicNumber < 20) return 0.02 * (atomicNumber - 10) / 10;
+  if (atomicNumber < 30) return 0.05 + 0.05 * (atomicNumber - 20) / 10;
+  if (atomicNumber < 40) return 0.10 + 0.10 * (atomicNumber - 30) / 10;
+  if (atomicNumber < 48) return 0.20 + 0.15 * (atomicNumber - 40) / 8;
+  if (atomicNumber < 57) return 0.35 + 0.05 * (atomicNumber - 48) / 9;
+  if (atomicNumber < 72) return 0.40 + 0.20 * (atomicNumber - 57) / 15;
+  if (atomicNumber < 80) return 0.60 + 0.20 * (atomicNumber - 72) / 8;
+  return Math.min(1.0, 0.80 + 0.02 * (atomicNumber - 80));
 }
 
 function compute3BodyFeatures(graph: CrystalGraph): ThreeBodyFeature[] {
@@ -555,6 +602,8 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
   const covalentR = getCovalentRadius(atomicNumber, radius);
   const electronAff = data?.electronAffinity ?? 0;
   const mendeleev = getMendeleevNumber(atomicNumber);
+  const sOcc = getSOrbitalOccupancy(atomicNumber);
+  const pOcc = getPOrbitalOccupancy(atomicNumber);
   const dOcc = getDOrbitalOccupancy(atomicNumber);
   const fOcc = getFOrbitalOccupancy(atomicNumber);
   const bulkMod = data?.bulkModulus ?? 50;
@@ -571,11 +620,15 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
     mendeleev / 103,
     Math.max(0, electronAff) / 4.0,
     covalentR / 250,
+    sOcc,
+    pOcc,
     dOcc,
     fOcc,
     computeStressDescriptor(atomicNumber, bulkMod, mass),
     computeForceDescriptor(en, radius),
     computeSpinOrbitCoupling(atomicNumber),
+    computeMagneticMomentProxy(atomicNumber),
+    computeValenceShellEncoding(atomicNumber, valence),
   ];
 }
 

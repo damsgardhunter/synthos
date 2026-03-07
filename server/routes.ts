@@ -38,6 +38,15 @@ import {
 import {
   computePairingProfile, computePairingFeatureVector,
 } from "./physics/pairing-mechanisms";
+import {
+  encodeGenome, findSimilar, genomeDiversity,
+  genomeGuidedInverseDesign, getGenomeCacheStats,
+} from "./physics/materials-genome";
+import {
+  analyzeHydrogenNetwork, getHydrogenNetworkStats,
+} from "./physics/hydrogen-network-engine";
+import { analyzeReactionNetwork } from "./physics/reaction-network-engine";
+import { computeFermiSurface } from "./physics/fermi-surface-engine";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -672,6 +681,40 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/fermi-surface/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const result = computeFermiSurface(formula);
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute Fermi surface" });
+    }
+  });
+
+  app.get("/api/hydrogen-network/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const analysis = analyzeHydrogenNetwork(formula);
+      res.json(analysis);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to analyze hydrogen network" });
+    }
+  });
+
+  app.get("/api/hydrogen-network-stats", async (_req, res) => {
+    try {
+      res.json(getHydrogenNetworkStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch hydrogen network stats" });
+    }
+  });
+
   app.post("/api/inverse-design/start", generalLimiter, async (req, res) => {
     try {
       const { targetTc, maxPressure, minLambda, maxHullDistance, metallicRequired, phononStable, preferredPrototypes, preferredElements, excludeElements } = req.body;
@@ -999,6 +1042,85 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(features);
     } catch (e: any) {
       res.status(500).json({ error: "Pairing features failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/reaction-network/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const result = analyzeReactionNetwork(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Reaction network analysis failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/genome/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length > 80) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const genome = encodeGenome(formula);
+      res.json(genome);
+    } catch (e: any) {
+      res.status(500).json({ error: "Genome encoding failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/genome/similarity", generalLimiter, (req, res) => {
+    try {
+      const { target, candidates, topK } = req.body;
+      if (!target || typeof target !== "string") {
+        return res.status(400).json({ error: "Missing target formula" });
+      }
+      if (!candidates || !Array.isArray(candidates) || candidates.length === 0) {
+        return res.status(400).json({ error: "Missing candidates array" });
+      }
+      const results = findSimilar(target, candidates.slice(0, 100), topK ?? 10);
+      res.json({ target, results });
+    } catch (e: any) {
+      res.status(500).json({ error: "Similarity search failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/genome/diversity", generalLimiter, (req, res) => {
+    try {
+      const { formulas } = req.body;
+      if (!formulas || !Array.isArray(formulas) || formulas.length < 2) {
+        return res.status(400).json({ error: "Need at least 2 formulas" });
+      }
+      const diversity = genomeDiversity(formulas.slice(0, 50));
+      res.json({ diversity, count: Math.min(formulas.length, 50) });
+    } catch (e: any) {
+      res.status(500).json({ error: "Diversity computation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/genome/inverse", generalLimiter, (req, res) => {
+    try {
+      const { target, pool, topK } = req.body;
+      if (!target || typeof target !== "string") {
+        return res.status(400).json({ error: "Missing target formula" });
+      }
+      if (!pool || !Array.isArray(pool) || pool.length === 0) {
+        return res.status(400).json({ error: "Missing candidate pool" });
+      }
+      const results = genomeGuidedInverseDesign(target, pool.slice(0, 100), topK ?? 5);
+      res.json({ target, results });
+    } catch (e: any) {
+      res.status(500).json({ error: "Genome inverse design failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/genome/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getGenomeCacheStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to get genome stats" });
     }
   });
 

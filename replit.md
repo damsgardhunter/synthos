@@ -59,15 +59,59 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `GET /api/topology/:formula` (full analysis), `GET /api/topology-stats` (aggregate stats).
 - Files: `server/physics/topology-engine.ts`
 
-### Quantum Pairing Mechanism Simulator
-- **4 pairing channels**: phonon (mode-resolved λ_qν from dispersion branches), spin-fluctuation (χ(q) from DOS(EF)×nestingScore×correlationFactor via Hubbard U/W), orbital-fluctuation (d-orbital degeneracy, inter-orbital hopping, Hund's coupling), excitonic (DOS(EF)/bandGap proxy, electron-hole asymmetry, dielectric screening).
-- **Mode-resolved phonon coupling**: Decomposes total λ into acoustic/optical/high-freq/soft-mode contributions per dispersion branch with frequency ranges.
-- **Material-aware weighting**: Cuprates → 55% spin + 25% orbital; pnictides → 40% spin + 35% orbital; hydrides → 75% phonon; excitonic candidates → 40% excitonic.
-- **Pairing symmetry inference**: d-wave (dx2-y2) for cuprates, s+/- for pnictides, anisotropic s-wave for soft-mode phonon, s-wave for conventional.
-- **Composite pairing strength**: Weighted sum across all 4 channels, integrated into autonomous loop candidate notes.
-- **Feature vector export**: 6-dimensional pairing feature vector (phononPairing, spinPairing, orbitalPairing, excitonPairing, dominantType, composite) for ML integration.
-- **API**: `GET /api/pairing/profile/:formula` (full 4-channel analysis), `GET /api/pairing/features/:formula` (ML feature vector).
+### Quantum Pairing Mechanism Simulator (7-Channel)
+- **7 pairing channels**: phonon (mode-resolved λ_qν), spin-fluctuation (χ(q) via Hubbard U/W), orbital-fluctuation (d-orbital degeneracy, Hund's coupling), excitonic (DOS/bandGap), CDW (nestingScore + vanHoveProximity, CDW-SC competition), polaronic (strong-coupling BCS-BEC crossover, bipolaron binding), plasmon (collective electron oscillations, dimensionality-driven).
+- **Mode-resolved phonon coupling**: Decomposes total λ into acoustic/optical/high-freq/soft-mode contributions per dispersion branch.
+- **CDW coupling**: Models CDW-SC competition; strong CDW order suppresses SC; recognizes NbSe2/TaSe2-type materials.
+- **Polaronic coupling**: BCS-BEC crossover physics for lambda > 2.0; bipolaron binding for low metallicity; recognizes bismuthate/titanate families.
+- **Plasmon pairing**: Collective electron oscillations in low-carrier-density and 2D systems; relevant for SrTiO3-type materials.
+- **Material-aware weighting**: 7 weights summing to 1.0, class-specific (cuprates, pnictides, hydrides, nickelates, bismuthates, CDW materials).
+- **Pairing symmetry inference**: d-wave, s+/-, CDW-modulated s-wave, polaronic/BEC-like s-wave, anisotropic s-wave.
+- **API**: `GET /api/pairing/profile/:formula` (full 7-channel analysis), `GET /api/pairing/features/:formula` (ML feature vector).
 - Files: `server/physics/pairing-mechanisms.ts`
+
+### Fermi Surface Reconstruction Engine
+- **Full BZ grid computation**: E(k) across entire Brillouin zone (not just high-symmetry paths) using tight-binding Hamiltonians.
+- **Isosurface detection**: Finds FS surfaces where E(k) = EF, classifies pockets as electron/hole type with orbital character.
+- **Extracted features**: pocket_count, pocket_volume, cylindrical_character, electron_hole_balance, nesting_vectors.
+- **ML features**: fermiPocketCount, electronHoleBalance, fsDimensionality, sigmaBandPresence, multiBandScore.
+- **Lattice-aware sampling**: BCC, FCC, hexagonal, cubic BZ grids with proper high-symmetry awareness.
+- **LRU cache**: 200-entry cache for performance.
+- **API**: `GET /api/fermi-surface/:formula`
+- Files: `server/physics/fermi-surface-engine.ts`
+
+### Hydrogen Network Topology Analyzer
+- **H-H distance distribution**: Metallic bond fractions, mean/min/max distances based on H:M ratio and bonding type.
+- **Network dimensionality**: 0-3D classification based on bonding type and hydrogen ratio.
+- **Cage topology**: Classifies as sodalite, clathrate-I/II, dodecahedron, icosahedron with cage completeness and symmetry.
+- **Coordination number**: Estimated from cage topology and hydrogen ratio.
+- **Hydrogen density**: Volume-based H density estimation.
+- **Phonon coupling score**: Integrated with physics engine for H-specific phonon contributions.
+- **Network class**: sodalite-cage, clathrate-cage, 3D-metallic-network, layered-hydride, etc.
+- **ML features**: hydrogenNetworkDim, hydrogenCageScore, Hcoordination, hydrogenConnectivity, hydrogenPhononCouplingScore.
+- **API**: `GET /api/hydrogen-network/:formula`, `GET /api/hydrogen-network-stats`
+- Files: `server/physics/hydrogen-network-engine.ts`
+
+### Chemical Stability Reaction Network
+- **Reaction graph engine**: Builds compound → decomposition pathway graphs with competing phases.
+- **Decomposition pathways**: Binary/ternary phase decomposition with Miedema formation energies.
+- **Kinetic barriers**: Arrhenius-based barrier estimation from melting points and structural complexity.
+- **Metastable lifetime**: Estimated from reaction barriers (effectively infinite to seconds).
+- **Decomposition mechanisms**: elemental, oxidative, dehydrogenation, hydrogen-redistribution, binary-disproportionation, multi-phase, phase-separation.
+- **Features**: reactionStabilityScore, metastableLifetime, decompositionComplexity.
+- **API**: `GET /api/reaction-network/:formula`
+- Files: `server/physics/reaction-network-engine.ts`
+
+### Materials Genome Representation (256-dim)
+- **Latent genome vector**: 256-dimensional encoding from 8 physics-derived segments: structure (40d), orbitals (36d), phonons (32d), coupling (32d), topology (28d), dimensionality (24d), composition (40d), pairing (24d).
+- **Fourier + hash encoding**: Rich feature representation using existing physics engines.
+- **Genome-space similarity search**: Cosine + Euclidean distance with segment-level analysis.
+- **Genome-guided inverse design**: Searches candidate pool in genome space rather than chemical space.
+- **Genome diversity**: Average pairwise distance for diversity assessment.
+- **Genome interpolation**: Linear interpolation between material genomes.
+- **LRU cache**: 500-entry cache.
+- **API**: `GET /api/genome/:formula`, `POST /api/genome/similarity`, `POST /api/genome/diversity`, `POST /api/genome/inverse`, `GET /api/genome/stats`
+- Files: `server/physics/materials-genome.ts`
 
 ### Advanced Quantum Physics Modeling
 - Computes phonon dispersion, phonon DOS, Eliashberg spectral function, GW many-body corrections, dynamic spin susceptibility, and Fermi surface nesting.
@@ -80,16 +124,18 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 
 ### Graph Neural Network Surrogate (CGCNN/MEGNet/M3GNet-style) — PRIMARY PREDICTOR
 - **Primary ML predictor** with 0.6 weight in ensemble scoring (GB reduced to 0.3 weight, 0.1 structural novelty).
-- Uses prototype-aware graph construction, enhanced 16-dimensional node features (including M3GNet-inspired stress/force/SOC descriptors), 7-dimensional edge features (with bond-angle encoding), and attention-weighted message passing with 3-body interaction layers for multi-target predictions (formation energy, phonon stability, Tc, confidence, electron-phonon lambda) with uncertainty estimation.
+- Uses prototype-aware graph construction, enhanced 20-dimensional node features (s/p/d/f orbital occupancy, magnetic moment proxy, valence shell encoding, stress/force/SOC descriptors), 7-dimensional edge features (with bond-angle encoding), and attention-weighted message passing with 3-body interaction layers for multi-target predictions (formation energy, phonon stability, Tc, confidence, electron-phonon lambda) with uncertainty estimation.
+- **Orbital-aware features**: Explicit [s,p,d,f] occupancy channels, magnetic moment proxy via Hund's rule √(n(n+2)), valence shell filling fraction, enhanced piecewise-linear SOC model.
 - MEGNet-style multi-body interactions: 3-body angle features between bonded triplets with angular weighting.
 - GB retained as fast pre-filter (Tc < 5K rejection gate) but no longer drives ensemble scores.
 
 ### Reinforcement Learning Chemical Space Agent
 - **REINFORCE policy gradient** agent that learns which elements, stoichiometries, and structures produce better superconductors.
 - **State**: best Tc, family diversity, stagnation cycles, exploration budget, element success entropy.
-- **Action space**: (1) element group pair (9 groups: alkali, alkaline-earth, 3d/4d/5d TM, lanthanide, p-block metal, metalloid, nonmetal), (2) stoichiometry template (10 templates: binary-metal-rich, AB, AB3, 122, perovskite, balanced, quaternary, hydride-rich AH10, ternary-hydride ABH6, boride-carbide A2B3C), (3) crystal structure type (20 prototypes).
+- **Action space**: (1) element group pair (9 groups), (2) stoichiometry template (10 templates), (3) crystal structure type (20 prototypes), (4) layering dimension (3D-isotropic/quasi-2D/quasi-1D/mixed-dim), (5) hydrogen density (none/low/medium/high H/M), (6) electron count (low/mid/high/very-high VEC targets), (7) orbital configuration (s/p/d/f-dominant, sp-hybrid, sd-hybrid).
 - **Policy**: softmax over learned weights with temperature annealing (1.0 → 0.3), epsilon-greedy exploration with decay (0.15 → 0.05), stagnation-boosted exploration.
-- **Reward**: Tc improvement (normalized to 400K) × 2.0 + relative improvement × 5.0 + pipeline pass bonus (1.0) + stability × 0.5 + novelty × 0.3.
+- **Physics-aware rewards**: lambda range, metallicity, nesting, VHS proximity, dimensionality, hydrogen ratio, d/sd orbital character, band flatness, phonon frequencies, correlation strength.
+- **Reward**: Tc improvement × 2.0 + relative improvement × 5.0 + pipeline bonus (1.0) + stability × 0.5 + novelty × 0.3 + physics-principle reward.
 - **Experience replay**: 2000-entry buffer with periodic 32-sample batch replay for stable learning.
 - **Element pair tracking**: Records element-group success rates and element-pair average Tc for contextual biasing. `elementPairSpecific` Map stores per-pair learned weights.
 - **Known pair priors**: 20 explicit superconducting element pair priors (La+H, Fe+As, Nb+B, Cu+O, Y+Ba, Bi+Se, Mg+B, etc.) with calibrated initial biases.
@@ -109,9 +155,10 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 
 ### Crystal Diffusion Generator
 - **Diffusion-inspired denoising**: Generates novel crystal structures by iteratively refining random atomic positions using physics-based score functions (Lennard-Jones repulsion, bond-length targets, symmetry constraints, wall confinement).
+- **Symmetry enforcement**: Space group constraint projection during denoising (gradual Wyckoff position pull after 30% progress), symmetry-aware denoising preserving Wyckoff positions via symmetry operation forces (after 40% progress), symmetry penalty in scoring (50% space group ops + 25% inversion + 25% mirror).
 - **Wyckoff position sampling**: Seeds atoms at high-symmetry Wyckoff sites from 8 space groups (Pm-3m, Fm-3m, Im-3m, P6/mmm, P4/mmm, I4/mmm, R-3m, Pnma) covering cubic, hexagonal, tetragonal, trigonal, and orthorhombic systems.
 - **Composition strategies**: 8 sampling strategies — hydride, ternary, binary TM, quaternary, exotic, cage compound, layered, borocarbide — targeting SC-relevant chemistries.
-- **Prototype matcher**: Classifies generated structures against 10 known prototypes (Perovskite, A15, NaCl, AlB2, ThCr2Si2, Fluorite, Heusler, Layered, Kagome, Clathrate) using coordination number analysis and c/a ratio matching.
+- **Prototype matcher**: Classifies generated structures against 10 known prototypes using coordination number analysis and c/a ratio matching.
 - **Physics validation**: Rejects structures with min bond length < 0.5 A, density outside 0.5-25 g/cm3, or lattice params outside physical bounds.
 - **Integration**: Runs every 5 engine cycles, generates 30 structures per batch, feeds through GB/GNN scoring and stability gate, results added as BO observations.
 - **API**: `POST /api/generate-crystal` (count, elements, targetTc params), `GET /api/diffusion-stats`.

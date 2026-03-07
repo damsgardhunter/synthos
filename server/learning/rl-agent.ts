@@ -30,6 +30,36 @@ const STRUCTURE_TYPES = [
   "Cu2Mg-Laves", "Fluorite", "Cr3Si", "Ni3Sn", "Fe3C", "Spinel",
 ] as const;
 
+const LAYERING_DIMENSIONS = [
+  { name: "3D-isotropic", dim: 3, description: "Fully 3D metallic bonding" },
+  { name: "quasi-2D", dim: 2, description: "Layered with weak interlayer coupling" },
+  { name: "quasi-1D", dim: 1, description: "Chain-like with 1D channels" },
+  { name: "mixed-dim", dim: 2.5, description: "Intermediate dimensionality" },
+] as const;
+
+const HYDROGEN_DENSITIES = [
+  { name: "no-hydrogen", ratio: 0, description: "No hydrogen content" },
+  { name: "low-H", ratio: 2, description: "Interstitial hydrogen (H/M ~ 1-3)" },
+  { name: "medium-H", ratio: 6, description: "Clathrate hydrogen (H/M ~ 4-8)" },
+  { name: "high-H", ratio: 10, description: "Superhydride (H/M >= 9)" },
+] as const;
+
+const ELECTRON_COUNTS = [
+  { name: "low-VEC", vec: 3, description: "Low valence electron count (1-4)" },
+  { name: "mid-VEC", vec: 5, description: "Mid valence electron count (5-7)" },
+  { name: "high-VEC", vec: 9, description: "High valence electron count (8-10)" },
+  { name: "very-high-VEC", vec: 12, description: "Very high VEC (11+)" },
+] as const;
+
+const ORBITAL_CONFIGS = [
+  { name: "s-dominant", orbital: "s", description: "s-orbital dominated bonding" },
+  { name: "p-dominant", orbital: "p", description: "p-orbital dominated bonding" },
+  { name: "d-dominant", orbital: "d", description: "d-orbital dominated bonding" },
+  { name: "f-dominant", orbital: "f", description: "f-orbital dominated bonding" },
+  { name: "sp-hybrid", orbital: "sp", description: "sp hybridized bonding" },
+  { name: "sd-hybrid", orbital: "sd", description: "sd hybridized bonding" },
+] as const;
+
 interface RLState {
   bestTc: number;
   avgRecentTc: number;
@@ -46,6 +76,10 @@ interface RLAction {
   elementGroup2: number;
   stoichTemplate: number;
   structureType: number;
+  layeringDimension: number;
+  hydrogenDensity: number;
+  electronCount: number;
+  orbitalConfiguration: number;
 }
 
 interface Experience {
@@ -91,6 +125,23 @@ interface PolicyWeights {
   structureType: number[];
   elementPairBias: number[][];
   elementPairSpecific: Map<string, number>;
+  layeringDimension: number[];
+  hydrogenDensity: number[];
+  electronCount: number[];
+  orbitalConfiguration: number[];
+}
+
+export interface PhysicsAwareRewardContext {
+  lambda?: number;
+  metallicity?: number;
+  nestingScore?: number;
+  vanHoveProximity?: number;
+  dimensionality?: number;
+  hydrogenRatio?: number;
+  orbitalCharacter?: string;
+  correlationStrength?: number;
+  phononFrequency?: number;
+  bandFlatness?: number;
 }
 
 function softmax(logits: number[], temperature: number = 1.0): number[] {
@@ -123,6 +174,83 @@ function stateToFeatures(state: RLState): number[] {
   ];
 }
 
+function computePhysicsPrincipleReward(context: PhysicsAwareRewardContext): number {
+  let reward = 0;
+
+  if (context.lambda !== undefined) {
+    if (context.lambda >= 0.5 && context.lambda <= 3.0) {
+      reward += 0.3 * Math.min(1, context.lambda / 2.0);
+    }
+    if (context.lambda > 3.5) {
+      reward -= 0.2;
+    }
+  }
+
+  if (context.metallicity !== undefined) {
+    if (context.metallicity >= 0.5) {
+      reward += 0.2 * context.metallicity;
+    } else if (context.metallicity < 0.2) {
+      reward -= 0.3;
+    }
+  }
+
+  if (context.nestingScore !== undefined && context.nestingScore > 0.5) {
+    reward += 0.15 * context.nestingScore;
+  }
+
+  if (context.vanHoveProximity !== undefined && context.vanHoveProximity > 0.7) {
+    reward += 0.2 * context.vanHoveProximity;
+  }
+
+  if (context.dimensionality !== undefined) {
+    if (context.dimensionality >= 1.5 && context.dimensionality <= 2.5) {
+      reward += 0.15;
+    }
+  }
+
+  if (context.hydrogenRatio !== undefined && context.hydrogenRatio >= 6) {
+    const hBonus = Math.min(0.3, (context.hydrogenRatio - 5) * 0.05);
+    reward += hBonus;
+  }
+
+  if (context.orbitalCharacter !== undefined) {
+    if (context.orbitalCharacter === "d" || context.orbitalCharacter === "sd") {
+      reward += 0.1;
+    }
+  }
+
+  if (context.bandFlatness !== undefined && context.bandFlatness > 0.5) {
+    reward += 0.1 * context.bandFlatness;
+  }
+
+  if (context.phononFrequency !== undefined) {
+    if (context.phononFrequency > 500 && context.phononFrequency < 2000) {
+      reward += 0.1;
+    }
+  }
+
+  if (context.correlationStrength !== undefined) {
+    if (context.correlationStrength > 0.3 && context.correlationStrength < 0.8) {
+      reward += 0.1;
+    } else if (context.correlationStrength >= 0.8) {
+      reward -= 0.1;
+    }
+  }
+
+  return reward;
+}
+
+function inferLayeringFromAction(action: RLAction): string {
+  const structName = STRUCTURE_TYPES[action.structureType];
+  const layeringChoice = LAYERING_DIMENSIONS[action.layeringDimension];
+  const layeredStructures = ["Layered", "MX2", "ThCr2Si2"];
+  const chainStructures = ["Kagome"];
+  if (layeringChoice.dim === 2 || layeredStructures.includes(structName)) return "quasi-2D";
+  if (layeringChoice.dim === 1 || chainStructures.includes(structName)) return "quasi-1D";
+  if (layeringChoice.dim === 2.5) return "mixed-dim";
+  return "3D-isotropic";
+}
+
 export class RLChemicalSpaceAgent {
   private policy: PolicyWeights;
   private replayBuffer: Experience[] = [];
@@ -150,6 +278,10 @@ export class RLChemicalSpaceAgent {
         () => new Array(ELEMENT_GROUPS.length).fill(0)
       ),
       elementPairSpecific: new Map<string, number>(),
+      layeringDimension: new Array(LAYERING_DIMENSIONS.length).fill(0),
+      hydrogenDensity: new Array(HYDROGEN_DENSITIES.length).fill(0),
+      electronCount: new Array(ELECTRON_COUNTS.length).fill(0),
+      orbitalConfiguration: new Array(ORBITAL_CONFIGS.length).fill(0),
     };
 
     this.initializePriors();
@@ -177,6 +309,20 @@ export class RLChemicalSpaceAgent {
     this.policy.structureType[4] = 0.2;
     this.policy.structureType[8] = 0.1;
 
+    this.policy.layeringDimension[0] = 0.1;
+    this.policy.layeringDimension[1] = 0.25;
+    this.policy.layeringDimension[3] = 0.1;
+
+    this.policy.hydrogenDensity[0] = 0.0;
+    this.policy.hydrogenDensity[2] = 0.2;
+    this.policy.hydrogenDensity[3] = 0.3;
+
+    this.policy.electronCount[1] = 0.15;
+    this.policy.electronCount[2] = 0.2;
+
+    this.policy.orbitalConfiguration[2] = 0.25;
+    this.policy.orbitalConfiguration[5] = 0.15;
+
     for (const prior of KNOWN_PAIR_PRIORS) {
       const key = this.makeElementPairKey(prior.el1, prior.el2);
       this.policy.elementPairSpecific.set(key, prior.bias);
@@ -195,6 +341,10 @@ export class RLChemicalSpaceAgent {
         elementGroup2: Math.floor(Math.random() * ELEMENT_GROUPS.length),
         stoichTemplate: Math.floor(Math.random() * STOICH_TEMPLATES.length),
         structureType: Math.floor(Math.random() * STRUCTURE_TYPES.length),
+        layeringDimension: Math.floor(Math.random() * LAYERING_DIMENSIONS.length),
+        hydrogenDensity: Math.floor(Math.random() * HYDROGEN_DENSITIES.length),
+        electronCount: Math.floor(Math.random() * ELECTRON_COUNTS.length),
+        orbitalConfiguration: Math.floor(Math.random() * ORBITAL_CONFIGS.length),
       };
     }
 
@@ -218,13 +368,36 @@ export class RLChemicalSpaceAgent {
     const structProbs = softmax(structLogits, this.temperature);
     const structureType = sampleFromDistribution(structProbs);
 
-    return { elementGroup1, elementGroup2, stoichTemplate, structureType };
+    const layerLogits = this.policy.layeringDimension.map((w, i) => w + contextBias.layering[i]);
+    const layerProbs = softmax(layerLogits, this.temperature);
+    const layeringDimension = sampleFromDistribution(layerProbs);
+
+    const hDensLogits = this.policy.hydrogenDensity.map((w, i) => w + contextBias.hDensity[i]);
+    const hDensProbs = softmax(hDensLogits, this.temperature);
+    const hydrogenDensity = sampleFromDistribution(hDensProbs);
+
+    const vecLogits = this.policy.electronCount.map((w, i) => w + contextBias.eCount[i]);
+    const vecProbs = softmax(vecLogits, this.temperature);
+    const electronCount = sampleFromDistribution(vecProbs);
+
+    const orbLogits = this.policy.orbitalConfiguration.map((w, i) => w + contextBias.orbital[i]);
+    const orbProbs = softmax(orbLogits, this.temperature);
+    const orbitalConfiguration = sampleFromDistribution(orbProbs);
+
+    return {
+      elementGroup1, elementGroup2, stoichTemplate, structureType,
+      layeringDimension, hydrogenDensity, electronCount, orbitalConfiguration,
+    };
   }
 
   private computeContextBias(stateFeatures: number[]): {
     element: number[];
     stoich: number[];
     struct: number[];
+    layering: number[];
+    hDensity: number[];
+    eCount: number[];
+    orbital: number[];
   } {
     const stagnation = stateFeatures[4];
     const bestTcNorm = stateFeatures[0];
@@ -269,7 +442,42 @@ export class RLChemicalSpaceAgent {
 
     const structBias = new Array(STRUCTURE_TYPES.length).fill(0);
 
-    return { element: elementBias, stoich: stoichBias, struct: structBias };
+    const layeringBias = new Array(LAYERING_DIMENSIONS.length).fill(0);
+    if (bestTcNorm > 0.2) {
+      layeringBias[1] += 0.15;
+    }
+    if (stagnation > 0.4) {
+      for (let i = 0; i < layeringBias.length; i++) {
+        layeringBias[i] += (Math.random() - 0.5) * stagnation * 0.3;
+      }
+    }
+
+    const hDensityBias = new Array(HYDROGEN_DENSITIES.length).fill(0);
+    if (bestTcNorm > 0.4) {
+      hDensityBias[2] += 0.15;
+      hDensityBias[3] += 0.25;
+    }
+
+    const eCountBias = new Array(ELECTRON_COUNTS.length).fill(0);
+    if (bestTcNorm > 0.15) {
+      eCountBias[1] += 0.1;
+      eCountBias[2] += 0.15;
+    }
+
+    const orbitalBias = new Array(ORBITAL_CONFIGS.length).fill(0);
+    if (bestTcNorm > 0.1) {
+      orbitalBias[2] += 0.15;
+    }
+
+    return {
+      element: elementBias,
+      stoich: stoichBias,
+      struct: structBias,
+      layering: layeringBias,
+      hDensity: hDensityBias,
+      eCount: eCountBias,
+      orbital: orbitalBias,
+    };
   }
 
   updatePolicy(state: RLState, action: RLAction, reward: number): void {
@@ -300,6 +508,11 @@ export class RLChemicalSpaceAgent {
     this.policy.elementGroup[action.elementGroup2] += lr * advantageReward * 0.7;
     this.policy.stoichTemplate[action.stoichTemplate] += lr * advantageReward;
     this.policy.structureType[action.structureType] += lr * advantageReward;
+
+    this.policy.layeringDimension[action.layeringDimension] += lr * advantageReward * 0.8;
+    this.policy.hydrogenDensity[action.hydrogenDensity] += lr * advantageReward * 0.9;
+    this.policy.electronCount[action.electronCount] += lr * advantageReward * 0.7;
+    this.policy.orbitalConfiguration[action.orbitalConfiguration] += lr * advantageReward * 0.7;
 
     this.policy.elementPairBias[action.elementGroup1][action.elementGroup2] += lr * advantageReward * 0.5;
     this.policy.elementPairBias[action.elementGroup2][action.elementGroup1] += lr * advantageReward * 0.5;
@@ -337,6 +550,10 @@ export class RLChemicalSpaceAgent {
       this.policy.elementGroup[exp.action.elementGroup1] += lr * advantage * decay;
       this.policy.stoichTemplate[exp.action.stoichTemplate] += lr * advantage * decay;
       this.policy.structureType[exp.action.structureType] += lr * advantage * decay;
+      this.policy.layeringDimension[exp.action.layeringDimension] += lr * advantage * decay * 0.8;
+      this.policy.hydrogenDensity[exp.action.hydrogenDensity] += lr * advantage * decay * 0.9;
+      this.policy.electronCount[exp.action.electronCount] += lr * advantage * decay * 0.7;
+      this.policy.orbitalConfiguration[exp.action.orbitalConfiguration] += lr * advantage * decay * 0.7;
     }
   }
 
@@ -378,6 +595,10 @@ export class RLChemicalSpaceAgent {
     const group1 = ELEMENT_GROUPS[action.elementGroup1];
     const group2 = ELEMENT_GROUPS[action.elementGroup2];
     const template = STOICH_TEMPLATES[action.stoichTemplate];
+    const hDensity = HYDROGEN_DENSITIES[action.hydrogenDensity];
+    const vecTarget = ELECTRON_COUNTS[action.electronCount];
+    const orbConfig = ORBITAL_CONFIGS[action.orbitalConfiguration];
+    const layering = inferLayeringFromAction(action);
 
     const candidates: string[] = [];
     const seen = new Set<string>();
@@ -393,12 +614,24 @@ export class RLChemicalSpaceAgent {
       let formula: string;
       const pattern = template.pattern;
 
-      if (template.nElements === 2) {
+      if (hDensity.ratio >= 6 && !pattern.includes("H")) {
+        const hCount = hDensity.ratio;
+        if (template.nElements === 2) {
+          formula = `${el1}${el2}H${hCount}`;
+        } else {
+          formula = `${el1}${el2}H${hCount}`;
+        }
+      } else if (template.nElements === 2) {
         formula = applyBinaryPattern(el1, el2, pattern);
       } else if (template.nElements === 3) {
-        const thirdGroupIdx = Math.floor(Math.random() * ELEMENT_GROUPS.length);
-        const group3 = ELEMENT_GROUPS[thirdGroupIdx];
-        const el3 = group3.elements[Math.floor(Math.random() * group3.elements.length)];
+        let el3: string;
+        if (hDensity.ratio >= 2) {
+          el3 = "H";
+        } else {
+          const thirdGroupIdx = selectThirdGroupByOrbital(orbConfig.orbital, vecTarget.vec);
+          const group3 = ELEMENT_GROUPS[thirdGroupIdx];
+          el3 = group3.elements[Math.floor(Math.random() * group3.elements.length)];
+        }
         if (el3 === el1 || el3 === el2) continue;
         formula = applyTernaryPattern(el1, el2, el3, pattern);
       } else {
@@ -408,6 +641,10 @@ export class RLChemicalSpaceAgent {
         const el4 = g4.elements[Math.floor(Math.random() * g4.elements.length)];
         if (new Set([el1, el2, el3, el4]).size < 4) continue;
         formula = `${el1}${el2}${el3}${el4}`;
+      }
+
+      if (layering === "quasi-2D" && !formula.includes("O") && Math.random() < 0.3) {
+        formula = formula + "O";
       }
 
       if (!seen.has(formula)) {
@@ -464,7 +701,8 @@ export class RLChemicalSpaceAgent {
     bestTcBefore: number,
     pipelinePassed: boolean,
     stabilityScore: number,
-    noveltyBonus: number = 0
+    noveltyBonus: number = 0,
+    physicsContext?: PhysicsAwareRewardContext
   ): number {
     let reward = 0;
 
@@ -487,6 +725,10 @@ export class RLChemicalSpaceAgent {
       reward -= 0.5;
     }
 
+    if (physicsContext) {
+      reward += computePhysicsPrincipleReward(physicsContext);
+    }
+
     return reward;
   }
 
@@ -495,7 +737,11 @@ export class RLChemicalSpaceAgent {
     const g2 = ELEMENT_GROUPS[action.elementGroup2].name;
     const st = STOICH_TEMPLATES[action.stoichTemplate].name;
     const str = STRUCTURE_TYPES[action.structureType];
-    return `${g1}+${g2} / ${st} / ${str}`;
+    const lay = LAYERING_DIMENSIONS[action.layeringDimension].name;
+    const hd = HYDROGEN_DENSITIES[action.hydrogenDensity].name;
+    const vec = ELECTRON_COUNTS[action.electronCount].name;
+    const orb = ORBITAL_CONFIGS[action.orbitalConfiguration].name;
+    return `${g1}+${g2} / ${st} / ${str} | dim=${lay} H=${hd} VEC=${vec} orb=${orb}`;
   }
 
   getStats(): {
@@ -509,6 +755,10 @@ export class RLChemicalSpaceAgent {
     elementSuccessRates: { group: string; rate: number; total: number }[];
     topPairs: { pair: string; avgTc: number; count: number }[];
     recentAvgReward: number;
+    topLayeringDimensions: { name: string; weight: number }[];
+    topHydrogenDensities: { name: string; weight: number }[];
+    topElectronCounts: { name: string; weight: number }[];
+    topOrbitalConfigs: { name: string; weight: number }[];
   } {
     const elWeights = this.policy.elementGroup.map((w, i) => ({
       name: ELEMENT_GROUPS[i].name,
@@ -555,6 +805,30 @@ export class RLChemicalSpaceAgent {
       ? recent.reduce((s, e) => s + e.reward, 0) / recent.length
       : 0;
 
+    const layWeights = this.policy.layeringDimension.map((w, i) => ({
+      name: LAYERING_DIMENSIONS[i].name,
+      weight: Math.round(w * 1000) / 1000,
+    }));
+    layWeights.sort((a, b) => b.weight - a.weight);
+
+    const hdWeights = this.policy.hydrogenDensity.map((w, i) => ({
+      name: HYDROGEN_DENSITIES[i].name,
+      weight: Math.round(w * 1000) / 1000,
+    }));
+    hdWeights.sort((a, b) => b.weight - a.weight);
+
+    const ecWeights = this.policy.electronCount.map((w, i) => ({
+      name: ELECTRON_COUNTS[i].name,
+      weight: Math.round(w * 1000) / 1000,
+    }));
+    ecWeights.sort((a, b) => b.weight - a.weight);
+
+    const orbWeights = this.policy.orbitalConfiguration.map((w, i) => ({
+      name: ORBITAL_CONFIGS[i].name,
+      weight: Math.round(w * 1000) / 1000,
+    }));
+    orbWeights.sort((a, b) => b.weight - a.weight);
+
     return {
       totalUpdates: this.totalUpdates,
       epsilon: Math.round(this.epsilon * 1000) / 1000,
@@ -566,12 +840,38 @@ export class RLChemicalSpaceAgent {
       elementSuccessRates: elSuccess.slice(0, 5),
       topPairs: topPairs.slice(0, 10),
       recentAvgReward: Math.round(recentAvgReward * 1000) / 1000,
+      topLayeringDimensions: layWeights,
+      topHydrogenDensities: hdWeights,
+      topElectronCounts: ecWeights,
+      topOrbitalConfigs: orbWeights,
     };
   }
 
   getElementGroups(): typeof ELEMENT_GROUPS { return ELEMENT_GROUPS; }
   getStoichTemplates(): typeof STOICH_TEMPLATES { return STOICH_TEMPLATES; }
   getStructureTypes(): typeof STRUCTURE_TYPES { return STRUCTURE_TYPES; }
+  getLayeringDimensions(): typeof LAYERING_DIMENSIONS { return LAYERING_DIMENSIONS; }
+  getHydrogenDensities(): typeof HYDROGEN_DENSITIES { return HYDROGEN_DENSITIES; }
+  getElectronCounts(): typeof ELECTRON_COUNTS { return ELECTRON_COUNTS; }
+  getOrbitalConfigs(): typeof ORBITAL_CONFIGS { return ORBITAL_CONFIGS; }
+}
+
+function selectThirdGroupByOrbital(orbitalPref: string, vecTarget: number): number {
+  switch (orbitalPref) {
+    case "d":
+    case "sd":
+      if (vecTarget >= 8) return 2;
+      return 3;
+    case "f":
+      return 5;
+    case "p":
+    case "sp":
+      return 6;
+    case "s":
+      return 0;
+    default:
+      return Math.floor(Math.random() * ELEMENT_GROUPS.length);
+  }
 }
 
 function applyBinaryPattern(el1: string, el2: string, pattern: string): string {

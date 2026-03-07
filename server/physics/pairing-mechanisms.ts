@@ -70,14 +70,47 @@ export interface ExcitonicPairingResult {
   isExcitonicCandidate: boolean;
 }
 
+export interface CDWPairingResult {
+  nestingDrivenCDW: number;
+  vanHoveAmplification: number;
+  anharmonicSuppression: number;
+  cdwOrderParameter: number;
+  cdwScCompetition: number;
+  cdwPairingStrength: number;
+  isCDWCandidate: boolean;
+}
+
+export interface PolaronicPairingResult {
+  polaronCoupling: number;
+  bcsBecCrossover: number;
+  massEnhancement: number;
+  bipolaronBindingProxy: number;
+  latticeDistortion: number;
+  polaronicPairingStrength: number;
+  isPolaronicCandidate: boolean;
+}
+
+export interface PlasmonPairingResult {
+  plasmaFrequency: number;
+  plasmonCoupling: number;
+  dimensionalityFactor: number;
+  metallicScreening: number;
+  collectiveOscillationStrength: number;
+  plasmonPairingStrength: number;
+  isPlasmonCandidate: boolean;
+}
+
 export interface PairingProfile {
   formula: string;
   phonon: PhononPairingResult;
   spin: SpinPairingResult;
   orbital: OrbitalPairingResult;
   excitonic: ExcitonicPairingResult;
+  cdw: CDWPairingResult;
+  polaronic: PolaronicPairingResult;
+  plasmon: PlasmonPairingResult;
   compositePairingStrength: number;
-  mechanismWeights: { phonon: number; spin: number; orbital: number; excitonic: number };
+  mechanismWeights: { phonon: number; spin: number; orbital: number; excitonic: number; cdw: number; polaronic: number; plasmon: number };
   dominantMechanism: string;
   secondaryMechanism: string;
   pairingSymmetry: string;
@@ -441,6 +474,200 @@ export function computeExcitonicPairing(
   };
 }
 
+export function computeCDWPairing(
+  formula: string,
+  electronic: ElectronicStructure,
+  phonon: PhononSpectrum,
+  coupling: ElectronPhononCoupling,
+): CDWPairingResult {
+  const nestingScore = electronic.nestingScore ?? 0;
+  const vanHoveProximity = electronic.vanHoveProximity ?? 0;
+  const anharmonicityIndex = phonon.anharmonicityIndex ?? 0;
+  const dosEF = electronic.densityOfStatesAtFermi;
+  const lambda = coupling.lambda;
+
+  const nestingDrivenCDW = Math.min(1.0, nestingScore * dosEF * 0.5);
+
+  const vanHoveAmplification = vanHoveProximity > 0.3
+    ? 1.0 + (vanHoveProximity - 0.3) * 2.5
+    : 1.0;
+
+  const anharmonicSuppression = Math.max(0.3, 1.0 - anharmonicityIndex * 0.6);
+
+  const cdwOrderParameter = Math.min(1.0,
+    nestingDrivenCDW * vanHoveAmplification * anharmonicSuppression
+  );
+
+  const cdwScCompetition = cdwOrderParameter > 0.5
+    ? Math.max(0.0, 1.0 - (cdwOrderParameter - 0.5) * 1.5)
+    : 1.0;
+
+  let cdwPairingStrength = Math.min(1.0,
+    cdwOrderParameter * 0.3 * cdwScCompetition +
+    nestingScore * 0.2 +
+    (vanHoveProximity > 0.5 ? 0.15 : 0) +
+    (lambda > 0.5 && nestingScore > 0.4 ? 0.1 : 0) +
+    (phonon.softModePresent ? 0.1 : 0)
+  );
+
+  const elements = parseFormulaElements(formula);
+  const isNbSe2Type = elements.includes("Nb") && elements.includes("Se");
+  const isTaSe2Type = elements.includes("Ta") && elements.includes("Se");
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+
+  if (isNbSe2Type) cdwPairingStrength = Math.max(cdwPairingStrength, 0.70);
+  if (isTaSe2Type) cdwPairingStrength = Math.max(cdwPairingStrength, 0.65);
+  if (isCuprate && nestingScore > 0.4) cdwPairingStrength = Math.max(cdwPairingStrength, 0.50);
+
+  const isCDWCandidate = cdwOrderParameter > 0.3 && nestingScore > 0.3;
+
+  return {
+    nestingDrivenCDW: Number(nestingDrivenCDW.toFixed(4)),
+    vanHoveAmplification: Number(vanHoveAmplification.toFixed(4)),
+    anharmonicSuppression: Number(anharmonicSuppression.toFixed(4)),
+    cdwOrderParameter: Number(cdwOrderParameter.toFixed(4)),
+    cdwScCompetition: Number(cdwScCompetition.toFixed(4)),
+    cdwPairingStrength: Number(cdwPairingStrength.toFixed(4)),
+    isCDWCandidate,
+  };
+}
+
+export function computePolaronicPairing(
+  formula: string,
+  electronic: ElectronicStructure,
+  coupling: ElectronPhononCoupling,
+): PolaronicPairingResult {
+  const lambda = coupling.lambda;
+  const metallicity = electronic.metallicity;
+  const dosEF = electronic.densityOfStatesAtFermi;
+
+  const polaronCoupling = lambda > 1.5
+    ? Math.min(1.0, (lambda - 1.5) * 0.5 + 0.3)
+    : lambda > 0.8
+    ? Math.min(0.3, (lambda - 0.8) * 0.4)
+    : 0;
+
+  const bcsBecCrossover = lambda > 2.0
+    ? Math.min(1.0, (lambda - 2.0) * 0.3 + 0.5)
+    : lambda > 1.0
+    ? Math.min(0.5, (lambda - 1.0) * 0.5)
+    : 0;
+
+  const massEnhancement = 1.0 + lambda;
+
+  const bipolaronBindingProxy = lambda > 1.5 && metallicity < 0.5
+    ? Math.min(1.0, (lambda - 1.5) * 0.6 * (1.0 - metallicity))
+    : 0;
+
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  let latticeDistortion = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) {
+      const frac = (counts[el] || 1) / totalAtoms;
+      if (data.atomicMass > 80) {
+        latticeDistortion += frac * 0.4;
+      }
+    }
+  }
+  latticeDistortion = Math.min(1.0, latticeDistortion + lambda * 0.15);
+
+  let polaronicPairingStrength = Math.min(1.0,
+    polaronCoupling * 0.35 +
+    bcsBecCrossover * 0.2 +
+    bipolaronBindingProxy * 0.15 +
+    latticeDistortion * 0.1 +
+    (lambda > 2.0 && metallicity < 0.4 ? 0.2 : 0) +
+    (metallicity < 0.3 && lambda > 1.0 ? 0.1 : 0)
+  );
+
+  const isBismuthate = elements.includes("Bi") && elements.includes("O") &&
+    elements.some(e => ["Ba", "K", "Rb"].includes(e));
+  const isTitanate = elements.includes("Ti") && elements.includes("O") &&
+    elements.some(e => ["Sr", "Ba", "Ca"].includes(e));
+
+  if (isBismuthate) polaronicPairingStrength = Math.max(polaronicPairingStrength, 0.65);
+  if (isTitanate) polaronicPairingStrength = Math.max(polaronicPairingStrength, 0.45);
+
+  const isPolaronicCandidate = lambda > 1.0 && (metallicity < 0.5 || bipolaronBindingProxy > 0.2);
+
+  return {
+    polaronCoupling: Number(polaronCoupling.toFixed(4)),
+    bcsBecCrossover: Number(bcsBecCrossover.toFixed(4)),
+    massEnhancement: Number(massEnhancement.toFixed(4)),
+    bipolaronBindingProxy: Number(bipolaronBindingProxy.toFixed(4)),
+    latticeDistortion: Number(latticeDistortion.toFixed(4)),
+    polaronicPairingStrength: Number(polaronicPairingStrength.toFixed(4)),
+    isPolaronicCandidate,
+  };
+}
+
+export function computePlasmonPairing(
+  formula: string,
+  electronic: ElectronicStructure,
+): PlasmonPairingResult {
+  const metallicity = electronic.metallicity;
+  const dosEF = electronic.densityOfStatesAtFermi;
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+
+  let totalVE = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
+  }
+  const electronDensity = totalVE / Math.max(1, totalAtoms);
+
+  const plasmaFrequency = Math.min(1.0, Math.sqrt(electronDensity * metallicity) * 0.3);
+
+  const dimensionalityFactor = electronic.bandFlatness > 0.5
+    ? 0.7
+    : electronic.bandFlatness > 0.3
+    ? 0.85
+    : 1.0;
+
+  const metallicScreening = metallicity > 0.7
+    ? Math.min(1.0, (metallicity - 0.7) * 3.0 + 0.5)
+    : metallicity * 0.7;
+
+  const plasmonCoupling = plasmaFrequency * dimensionalityFactor * (1.0 - metallicScreening * 0.3);
+
+  const collectiveOscillationStrength = Math.min(1.0,
+    plasmonCoupling * dosEF * 0.3
+  );
+
+  let plasmonPairingStrength = Math.min(1.0,
+    plasmonCoupling * 0.3 +
+    collectiveOscillationStrength * 0.2 +
+    (metallicity > 0.3 && metallicity < 0.7 ? 0.15 : 0) +
+    (dosEF > 2.0 ? 0.1 : 0) +
+    (electronDensity > 4 ? 0.1 : 0) +
+    (dimensionalityFactor < 0.9 ? 0.1 : 0)
+  );
+
+  const isSrTiO3Type = elements.includes("Sr") && elements.includes("Ti") && elements.includes("O");
+  const isLowCarrier = metallicity > 0.2 && metallicity < 0.5 &&
+    elements.some(e => ["Sr", "Ba", "K"].includes(e)) && elements.includes("O");
+
+  if (isSrTiO3Type) plasmonPairingStrength = Math.max(plasmonPairingStrength, 0.60);
+  if (isLowCarrier) plasmonPairingStrength = Math.max(plasmonPairingStrength, 0.40);
+
+  const isPlasmonCandidate = plasmonCoupling > 0.2 && metallicity > 0.2 && metallicity < 0.8;
+
+  return {
+    plasmaFrequency: Number(plasmaFrequency.toFixed(4)),
+    plasmonCoupling: Number(plasmonCoupling.toFixed(4)),
+    dimensionalityFactor: Number(dimensionalityFactor.toFixed(4)),
+    metallicScreening: Number(metallicScreening.toFixed(4)),
+    collectiveOscillationStrength: Number(collectiveOscillationStrength.toFixed(4)),
+    plasmonPairingStrength: Number(plasmonPairingStrength.toFixed(4)),
+    isPlasmonCandidate,
+  };
+}
+
 export function computePairingProfile(formula: string): PairingProfile {
   const electronic = computeElectronicStructure(formula, null);
   const phonon = computePhononSpectrum(formula, electronic);
@@ -450,6 +677,9 @@ export function computePairingProfile(formula: string): PairingProfile {
   const spinResult = computeSpinPairing(formula, electronic);
   const orbitalResult = computeOrbitalPairing(formula, electronic);
   const excitonicResult = computeExcitonicPairing(formula, electronic);
+  const cdwResult = computeCDWPairing(formula, electronic, phonon, coupling);
+  const polaronicResult = computePolaronicPairing(formula, electronic, coupling);
+  const plasmonResult = computePlasmonPairing(formula, electronic);
 
   const elements = parseFormulaElements(formula);
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
@@ -457,30 +687,51 @@ export function computePairingProfile(formula: string): PairingProfile {
     elements.some(e => ["As", "P", "Se", "S"].includes(e));
   const isHydride = elements.includes("H") &&
     elements.some(e => isTransitionMetal(e) || isRareEarth(e));
+  const isNickelate = elements.includes("Ni") && elements.includes("O") && elements.length >= 3;
+  const isCDWMaterial = cdwResult.isCDWCandidate && cdwResult.cdwPairingStrength > 0.4;
+  const isBismuthate = elements.includes("Bi") && elements.includes("O") &&
+    elements.some(e => ["Ba", "K", "Rb"].includes(e));
+  const isTitanate = elements.includes("Sr") && elements.includes("Ti") && elements.includes("O");
 
-  let wPhonon = 0.40, wSpin = 0.30, wOrbital = 0.20, wExcitonic = 0.10;
+  let wPhonon = 0.30, wSpin = 0.22, wOrbital = 0.15, wExcitonic = 0.08, wCDW = 0.10, wPolaronic = 0.08, wPlasmon = 0.07;
 
   if (isCuprate) {
-    wPhonon = 0.10; wSpin = 0.55; wOrbital = 0.25; wExcitonic = 0.10;
+    wPhonon = 0.08; wSpin = 0.40; wOrbital = 0.18; wExcitonic = 0.05; wCDW = 0.15; wPolaronic = 0.07; wPlasmon = 0.07;
   } else if (isPnictide) {
-    wPhonon = 0.15; wSpin = 0.40; wOrbital = 0.35; wExcitonic = 0.10;
+    wPhonon = 0.12; wSpin = 0.30; wOrbital = 0.25; wExcitonic = 0.05; wCDW = 0.13; wPolaronic = 0.08; wPlasmon = 0.07;
   } else if (isHydride) {
-    wPhonon = 0.75; wSpin = 0.10; wOrbital = 0.10; wExcitonic = 0.05;
+    wPhonon = 0.55; wSpin = 0.08; wOrbital = 0.07; wExcitonic = 0.03; wCDW = 0.05; wPolaronic = 0.15; wPlasmon = 0.07;
+  } else if (isNickelate) {
+    wPhonon = 0.10; wSpin = 0.35; wOrbital = 0.20; wExcitonic = 0.05; wCDW = 0.12; wPolaronic = 0.10; wPlasmon = 0.08;
+  } else if (isBismuthate) {
+    wPhonon = 0.20; wSpin = 0.10; wOrbital = 0.10; wExcitonic = 0.05; wCDW = 0.10; wPolaronic = 0.35; wPlasmon = 0.10;
+  } else if (isTitanate) {
+    wPhonon = 0.15; wSpin = 0.08; wOrbital = 0.07; wExcitonic = 0.05; wCDW = 0.05; wPolaronic = 0.20; wPlasmon = 0.40;
+  } else if (isCDWMaterial) {
+    wPhonon = 0.20; wSpin = 0.15; wOrbital = 0.10; wExcitonic = 0.05; wCDW = 0.30; wPolaronic = 0.10; wPlasmon = 0.10;
   } else if (excitonicResult.isExcitonicCandidate) {
-    wPhonon = 0.25; wSpin = 0.20; wOrbital = 0.15; wExcitonic = 0.40;
+    wPhonon = 0.18; wSpin = 0.15; wOrbital = 0.10; wExcitonic = 0.30; wCDW = 0.10; wPolaronic = 0.10; wPlasmon = 0.07;
+  } else if (plasmonResult.isPlasmonCandidate) {
+    wPhonon = 0.20; wSpin = 0.15; wOrbital = 0.10; wExcitonic = 0.05; wCDW = 0.10; wPolaronic = 0.10; wPlasmon = 0.30;
   }
 
   const compositePairingStrength =
     wPhonon * phononResult.phononPairingStrength +
     wSpin * spinResult.spinPairingStrength +
     wOrbital * orbitalResult.orbitalPairingStrength +
-    wExcitonic * excitonicResult.excitonicPairingStrength;
+    wExcitonic * excitonicResult.excitonicPairingStrength +
+    wCDW * cdwResult.cdwPairingStrength +
+    wPolaronic * polaronicResult.polaronicPairingStrength +
+    wPlasmon * plasmonResult.plasmonPairingStrength;
 
   const mechanisms = [
     { name: "phonon", strength: phononResult.phononPairingStrength * wPhonon },
     { name: "spin-fluctuation", strength: spinResult.spinPairingStrength * wSpin },
     { name: "orbital-fluctuation", strength: orbitalResult.orbitalPairingStrength * wOrbital },
     { name: "excitonic", strength: excitonicResult.excitonicPairingStrength * wExcitonic },
+    { name: "cdw-mediated", strength: cdwResult.cdwPairingStrength * wCDW },
+    { name: "polaronic", strength: polaronicResult.polaronicPairingStrength * wPolaronic },
+    { name: "plasmon-mediated", strength: plasmonResult.plasmonPairingStrength * wPlasmon },
   ];
   mechanisms.sort((a, b) => b.strength - a.strength);
 
@@ -493,6 +744,12 @@ export function computePairingProfile(formula: string): PairingProfile {
       pairingSymmetry = "anisotropic s-wave";
     }
   }
+  if (mechanisms[0].name === "cdw-mediated" && cdwResult.cdwPairingStrength > 0.5) {
+    pairingSymmetry = "CDW-modulated s-wave";
+  }
+  if (mechanisms[0].name === "polaronic" && polaronicResult.polaronicPairingStrength > 0.5) {
+    pairingSymmetry = polaronicResult.bcsBecCrossover > 0.5 ? "BEC-like s-wave" : "polaronic s-wave";
+  }
 
   let estimatedTcFromPairing = phononResult.tcAllenDynes;
   if (mechanisms[0].name === "spin-fluctuation" && spinResult.spinPairingStrength > 0.5) {
@@ -503,6 +760,18 @@ export function computePairingProfile(formula: string): PairingProfile {
     const orbTc = orbitalResult.orbitalFluctuation * 20;
     estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(200, orbTc));
   }
+  if (mechanisms[0].name === "cdw-mediated" && cdwResult.cdwPairingStrength > 0.5) {
+    const cdwTc = cdwResult.cdwPairingStrength * cdwResult.cdwScCompetition * 30;
+    estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(100, cdwTc));
+  }
+  if (mechanisms[0].name === "polaronic" && polaronicResult.polaronicPairingStrength > 0.4) {
+    const polTc = polaronicResult.polaronicPairingStrength * 40;
+    estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(150, polTc));
+  }
+  if (mechanisms[0].name === "plasmon-mediated" && plasmonResult.plasmonPairingStrength > 0.4) {
+    const plasTc = plasmonResult.plasmonPairingStrength * plasmonResult.collectiveOscillationStrength * 20;
+    estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(50, plasTc));
+  }
 
   return {
     formula,
@@ -510,12 +779,18 @@ export function computePairingProfile(formula: string): PairingProfile {
     spin: spinResult,
     orbital: orbitalResult,
     excitonic: excitonicResult,
+    cdw: cdwResult,
+    polaronic: polaronicResult,
+    plasmon: plasmonResult,
     compositePairingStrength: Number(compositePairingStrength.toFixed(4)),
     mechanismWeights: {
       phonon: Number(wPhonon.toFixed(2)),
       spin: Number(wSpin.toFixed(2)),
       orbital: Number(wOrbital.toFixed(2)),
       excitonic: Number(wExcitonic.toFixed(2)),
+      cdw: Number(wCDW.toFixed(2)),
+      polaronic: Number(wPolaronic.toFixed(2)),
+      plasmon: Number(wPlasmon.toFixed(2)),
     },
     dominantMechanism: mechanisms[0].name,
     secondaryMechanism: mechanisms[1]?.name ?? "none",
@@ -529,6 +804,9 @@ export function computePairingFeatureVector(formula: string): {
   spinPairingStrength: number;
   orbitalPairingStrength: number;
   excitonPairingStrength: number;
+  cdwPairingStrength: number;
+  polaronicPairingStrength: number;
+  plasmonPairingStrength: number;
   dominantPairingType: number;
   compositePairing: number;
 } {
@@ -539,6 +817,9 @@ export function computePairingFeatureVector(formula: string): {
     "spin-fluctuation": 2.0,
     "orbital-fluctuation": 3.0,
     "excitonic": 4.0,
+    "cdw-mediated": 5.0,
+    "polaronic": 6.0,
+    "plasmon-mediated": 7.0,
   };
 
   return {
@@ -546,6 +827,9 @@ export function computePairingFeatureVector(formula: string): {
     spinPairingStrength: profile.spin.spinPairingStrength,
     orbitalPairingStrength: profile.orbital.orbitalPairingStrength,
     excitonPairingStrength: profile.excitonic.excitonicPairingStrength,
+    cdwPairingStrength: profile.cdw.cdwPairingStrength,
+    polaronicPairingStrength: profile.polaronic.polaronicPairingStrength,
+    plasmonPairingStrength: profile.plasmon.plasmonPairingStrength,
     dominantPairingType: typeMap[profile.dominantMechanism] ?? 0,
     compositePairing: profile.compositePairingStrength,
   };

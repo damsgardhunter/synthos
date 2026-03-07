@@ -44,6 +44,10 @@ import { getXTBStats } from "../dft/qe-dft-engine";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
 import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
+import { encodeGenome, genomeDiversity, type MaterialGenome } from "../physics/materials-genome";
+import { computeFermiSurface, type FermiSurfaceResult } from "../physics/fermi-surface-engine";
+import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetworkAnalysis } from "../physics/hydrogen-network-engine";
+import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1065,6 +1069,54 @@ async function runPhase10_Physics() {
           }
         } catch {}
 
+        try {
+          const reactionResult = analyzeReactionNetwork(candidate.formula);
+          (updatedMlFeatures as any).reactionNetwork = {
+            reactionStabilityScore: reactionResult.reactionStabilityScore,
+            metastableLifetime: reactionResult.metastableLifetime,
+            decompositionComplexity: reactionResult.decompositionComplexity,
+            pathwayCount: reactionResult.reactionGraph?.edges?.length ?? 0,
+          };
+          if (reactionResult.reactionStabilityScore < 0.3) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Reaction stability warning",
+              detail: `${candidate.formula}: stabilityScore=${reactionResult.reactionStabilityScore.toFixed(3)}, lifetime=${reactionResult.metastableLifetime}, complexity=${reactionResult.decompositionComplexity.toFixed(3)}, verdict=${reactionResult.stabilityVerdict}`,
+              dataSource: "Reaction Network Engine",
+            });
+          }
+        } catch {}
+
+        let genomeResult: MaterialGenome | undefined;
+        try {
+          genomeResult = encodeGenome(candidate.formula);
+          (updatedMlFeatures as any).genome = {
+            family: genomeResult.metadata.family,
+            dominantOrbital: genomeResult.metadata.dominantOrbital,
+            genomeDim: genomeResult.vector.length,
+          };
+        } catch {}
+
+        let fermiSurfaceAnalysis: FermiSurfaceResult | undefined;
+        try {
+          fermiSurfaceAnalysis = computeFermiSurface(candidate.formula);
+          (updatedMlFeatures as any).fermiSurface = {
+            fermiPocketCount: fermiSurfaceAnalysis.mlFeatures.fermiPocketCount,
+            electronHoleBalance: fermiSurfaceAnalysis.mlFeatures.electronHoleBalance,
+            fsDimensionality: fermiSurfaceAnalysis.mlFeatures.fsDimensionality,
+            sigmaBandPresence: fermiSurfaceAnalysis.mlFeatures.sigmaBandPresence,
+            multiBandScore: fermiSurfaceAnalysis.mlFeatures.multiBandScore,
+          };
+          if (fermiSurfaceAnalysis.pocketCount > 1 || fermiSurfaceAnalysis.nestingScore > 0.3) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Fermi surface reconstructed",
+              detail: `${candidate.formula}: pockets=${fermiSurfaceAnalysis.pocketCount} (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), e-h balance=${fermiSurfaceAnalysis.electronHoleBalance.toFixed(3)}, nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)}, dim=${fermiSurfaceAnalysis.fsDimensionality}, sigma=${fermiSurfaceAnalysis.sigmaBandPresence.toFixed(3)}, multiBand=${fermiSurfaceAnalysis.multiBandScore.toFixed(3)}`,
+              dataSource: "Fermi Surface Engine",
+            });
+          }
+        } catch {}
+
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
           logPhononFrequency: result.coupling.omegaLog,
@@ -1130,6 +1182,31 @@ async function runPhase10_Physics() {
           try {
             const pressureResult = runPressureAnalysis(emit, candidate.formula);
             const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
+
+            let hydrogenNetworkData: Record<string, any> = {};
+            try {
+              const hNetwork = analyzeHydrogenNetwork(candidate.formula);
+              trackHydrogenNetworkResult(hNetwork);
+              hydrogenNetworkData = {
+                hydrogenNetworkDim: hNetwork.hydrogenNetworkDim,
+                hydrogenCageScore: hNetwork.hydrogenCageScore,
+                Hcoordination: hNetwork.Hcoordination,
+                hydrogenConnectivity: hNetwork.hydrogenConnectivity,
+                hydrogenPhononCouplingScore: hNetwork.hydrogenPhononCouplingScore,
+                networkClass: hNetwork.networkClass,
+                compositeSCScore: hNetwork.compositeSCScore,
+                bondingType: hNetwork.bondingType,
+              };
+              if (hNetwork.compositeSCScore > 0.4) {
+                emit("log", {
+                  phase: "phase-10",
+                  event: "Hydrogen network analysis",
+                  detail: `${candidate.formula}: class=${hNetwork.networkClass}, dim=${hNetwork.hydrogenNetworkDim}, cage=${hNetwork.hydrogenCageScore.toFixed(3)}, coord=${hNetwork.Hcoordination}, phonon=${hNetwork.hydrogenPhononCouplingScore.toFixed(3)}, composite=${hNetwork.compositeSCScore.toFixed(3)}`,
+                  dataSource: "Hydrogen Network Engine",
+                });
+              }
+            } catch {}
+
             const updatedMlFeatures = {
               ...existingMlFeatures,
               pressureTcCurve: {
@@ -1139,6 +1216,7 @@ async function runPhase10_Physics() {
                 stablePoints: pressureResult.pressureTcCurve.filter(p => p.stable).length,
                 hydridePhases: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
               },
+              ...(Object.keys(hydrogenNetworkData).length > 0 ? { hydrogenNetwork: hydrogenNetworkData } : {}),
             };
             await storage.updateSuperconductorCandidate(candidate.id, {
               mlFeatures: updatedMlFeatures as any,
