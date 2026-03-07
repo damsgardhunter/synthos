@@ -14,7 +14,7 @@ import {
   Activity, Layers, Magnet, Gauge, Target,
   Beaker, ArrowDown, ExternalLink, Thermometer,
   FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
-  Cpu, Clock, Loader2,
+  Cpu, Clock, Loader2, Network, Code2, GitBranch, ArrowLeftRight,
 } from "lucide-react";
 
 interface CalibrationResponse {
@@ -1552,6 +1552,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="advanced-physics" data-testid="tab-advanced-physics">Advanced Physics</TabsTrigger>
           <TabsTrigger value="next-gen-pipeline" data-testid="tab-next-gen-pipeline">Inverse Design</TabsTrigger>
           <TabsTrigger value="self-improving-lab" data-testid="tab-self-improving-lab">Design Lab</TabsTrigger>
+          <TabsTrigger value="design-repr" data-testid="tab-design-repr">Representations</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -2088,7 +2089,636 @@ export default function ComputationalPhysics() {
         <TabsContent value="self-improving-lab" className="space-y-4" data-testid="self-improving-lab-content">
           <SelfImprovingLabPanel />
         </TabsContent>
+
+        <TabsContent value="design-repr" className="space-y-4" data-testid="design-repr-content">
+          <DesignRepresentationsPanel />
+        </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+interface DesignReprStats {
+  programs: {
+    total: number;
+    avgComplexity: number;
+    avgInstructions: number;
+    bestFormula: string;
+    bestTc: number;
+    instructionFrequency: Record<string, number>;
+    generationDistribution: Record<number, number>;
+  };
+  graphs: {
+    total: number;
+    avgNodes: number;
+    avgEdges: number;
+    avgConnectivity: number;
+    bestFormula: string;
+    bestTc: number;
+    componentFrequency: Record<string, number>;
+    edgeTypeFrequency: Record<string, number>;
+  };
+  crossRepresentation: {
+    programToGraphConversions: number;
+    graphToProgramConversions: number;
+    avgFeatureCorrelation: number;
+  };
+}
+
+interface GeneratedProgram {
+  program: {
+    id: string;
+    name: string;
+    instructions: { type: string; params: Record<string, any>; order: number }[];
+    outputFormula: string;
+    outputPrototype: string;
+    metadata: { complexity: number; expressiveness: number; generation: number; mutationHistory: string[] };
+    featureVector: number[];
+  };
+  execution: {
+    formula: string;
+    prototype: string;
+    elements: string[];
+    stoichiometry: Record<string, number>;
+    latticeType: string;
+    symmetryGroup: string;
+    hydrogenFraction: number;
+    layerCount: number;
+    channelDensity: number;
+    strainApplied: number;
+    dopingLevel: number;
+    interfaceCount: number;
+    complexity: number;
+  };
+}
+
+interface GeneratedGraph {
+  graph: {
+    id: string;
+    name: string;
+    nodes: { id: string; type: string; element: string; properties: Record<string, any>; position: [number, number]; weight: number }[];
+    edges: { source: string; target: string; type: string; strength: number; properties: Record<string, number> }[];
+    outputFormula: string;
+    metadata: { nodeCount: number; edgeCount: number; connectivity: number; avgDegree: number; clusteringCoeff: number; generation: number };
+    embedding: number[];
+  };
+  analysis: {
+    centralNodes: { id: string; element: string; centrality: number }[];
+    bottleneckEdges: { source: string; target: string; betweenness: number }[];
+    communities: { id: number; members: string[]; avgWeight: number }[];
+    pathLengths: { avg: number; max: number; diameter: number };
+    spectralGap: number;
+    isConnected: boolean;
+  };
+}
+
+function DesignRepresentationsPanel() {
+  const [selectedStrategy, setSelectedStrategy] = useState("hydride-cage-optimizer");
+  const [activeView, setActiveView] = useState<"program" | "graph" | "stats">("stats");
+  const [generatedProgram, setGeneratedProgram] = useState<GeneratedProgram | null>(null);
+  const [generatedGraph, setGeneratedGraph] = useState<GeneratedGraph | null>(null);
+
+  const statsQuery = useQuery<DesignReprStats>({
+    queryKey: ["/api/design-representations/stats"],
+    refetchInterval: 10000,
+  });
+
+  const generateProgramMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/design-representations/program/generate", {
+        strategyType: selectedStrategy,
+        elementPool: ["La", "Y", "H", "Nb", "Cu", "O", "Ba", "Sr"],
+      });
+      return res.json();
+    },
+    onSuccess: (data: GeneratedProgram) => {
+      setGeneratedProgram(data);
+      setActiveView("program");
+      queryClient.invalidateQueries({ queryKey: ["/api/design-representations/stats"] });
+    },
+  });
+
+  const mutateProgramMutation = useMutation({
+    mutationFn: async () => {
+      if (!generatedProgram) return;
+      const res = await apiRequest("POST", "/api/design-representations/program/mutate", {
+        program: generatedProgram.program,
+        elementPool: ["La", "Y", "H", "Nb", "Cu", "O", "Ba", "Sr", "Ti", "Zr"],
+      });
+      return res.json();
+    },
+    onSuccess: (data: GeneratedProgram) => {
+      if (data) setGeneratedProgram(data);
+    },
+  });
+
+  const generateGraphMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/design-representations/graph/generate", {
+        strategyType: selectedStrategy,
+        elementPool: ["La", "Y", "H", "Nb", "Cu", "O", "Ba", "Sr"],
+      });
+      return res.json();
+    },
+    onSuccess: (data: GeneratedGraph) => {
+      setGeneratedGraph(data);
+      setActiveView("graph");
+      queryClient.invalidateQueries({ queryKey: ["/api/design-representations/stats"] });
+    },
+  });
+
+  const mutateGraphMutation = useMutation({
+    mutationFn: async () => {
+      if (!generatedGraph) return;
+      const res = await apiRequest("POST", "/api/design-representations/graph/mutate", {
+        graph: generatedGraph.graph,
+        elementPool: ["La", "Y", "H", "Nb", "Cu", "O", "Ba", "Sr", "Bi", "Se"],
+      });
+      return res.json();
+    },
+    onSuccess: (data: GeneratedGraph) => {
+      if (data) setGeneratedGraph(data);
+    },
+  });
+
+  const convertProgramToGraphMutation = useMutation({
+    mutationFn: async () => {
+      if (!generatedProgram) return;
+      const res = await apiRequest("POST", "/api/design-representations/convert/program-to-graph", {
+        program: generatedProgram.program,
+      });
+      return res.json();
+    },
+    onSuccess: (data: GeneratedGraph) => {
+      if (data) {
+        setGeneratedGraph(data);
+        setActiveView("graph");
+      }
+    },
+  });
+
+  const convertGraphToProgramMutation = useMutation({
+    mutationFn: async () => {
+      if (!generatedGraph) return;
+      const res = await apiRequest("POST", "/api/design-representations/convert/graph-to-program", {
+        graph: generatedGraph.graph,
+      });
+      return res.json();
+    },
+    onSuccess: (data: GeneratedProgram) => {
+      if (data) {
+        setGeneratedProgram(data);
+        setActiveView("program");
+      }
+    },
+  });
+
+  const stats = statsQuery.data;
+  const strategies = [
+    "hydride-cage-optimizer", "layered-intercalation", "high-entropy-alloy",
+    "light-element-phonon", "topological-edge", "pressure-stabilized",
+    "electron-phonon-resonance", "charge-transfer-layer",
+  ];
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Code2 className="h-5 w-5 text-purple-500" />
+            Design Representations
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            Dual representation system: Programmatic (procedural structure generation) and
+            Graph-based (component-connection architecture). Both representations are interconvertible
+            and integrated into the design lab iteration cycle.
+          </p>
+
+          <div className="flex flex-wrap gap-2 mb-4">
+            <Button
+              variant={activeView === "stats" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setActiveView("stats")}
+              data-testid="btn-view-stats"
+            >
+              <Activity className="h-3.5 w-3.5 mr-1" /> Stats
+            </Button>
+            <Button
+              variant={activeView === "program" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setActiveView("program")}
+              data-testid="btn-view-program"
+            >
+              <Code2 className="h-3.5 w-3.5 mr-1" /> Program View
+            </Button>
+            <Button
+              variant={activeView === "graph" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setActiveView("graph")}
+              data-testid="btn-view-graph"
+            >
+              <Network className="h-3.5 w-3.5 mr-1" /> Graph View
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap gap-2 mb-4">
+            <select
+              className="text-sm border rounded px-2 py-1 bg-background"
+              value={selectedStrategy}
+              onChange={(e) => setSelectedStrategy(e.target.value)}
+              data-testid="select-strategy"
+            >
+              {strategies.map(s => (
+                <option key={s} value={s}>{s.split("-").map(w => w[0].toUpperCase() + w.slice(1)).join(" ")}</option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              onClick={() => generateProgramMutation.mutate()}
+              disabled={generateProgramMutation.isPending}
+              data-testid="btn-generate-program"
+            >
+              {generateProgramMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Code2 className="h-3.5 w-3.5 mr-1" />}
+              Generate Program
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => generateGraphMutation.mutate()}
+              disabled={generateGraphMutation.isPending}
+              data-testid="btn-generate-graph"
+            >
+              {generateGraphMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Network className="h-3.5 w-3.5 mr-1" />}
+              Generate Graph
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {activeView === "stats" && stats && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Code2 className="h-4 w-4 text-blue-500" /> Procedural Programs
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Total Programs</span><span className="font-medium" data-testid="text-program-total">{stats.programs.total}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Avg Complexity</span><span className="font-medium">{stats.programs.avgComplexity.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Avg Instructions</span><span className="font-medium">{stats.programs.avgInstructions.toFixed(1)}</span></div>
+                {stats.programs.bestFormula && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">Best Formula</span><span className="font-medium" data-testid="text-program-best">{stats.programs.bestFormula} ({stats.programs.bestTc}K)</span></div>
+                )}
+                {Object.keys(stats.programs.instructionFrequency).length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-xs text-muted-foreground mb-1">Instruction Usage</div>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(stats.programs.instructionFrequency)
+                        .sort(([, a], [, b]) => b - a)
+                        .slice(0, 6)
+                        .map(([type, count]) => (
+                          <Badge key={type} variant="secondary" className="text-xs">
+                            {type.replace(/_/g, " ")} ({count})
+                          </Badge>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Network className="h-4 w-4 text-green-500" /> Component Graphs
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Total Graphs</span><span className="font-medium" data-testid="text-graph-total">{stats.graphs.total}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Avg Nodes</span><span className="font-medium">{stats.graphs.avgNodes.toFixed(1)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Avg Edges</span><span className="font-medium">{stats.graphs.avgEdges.toFixed(1)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Avg Connectivity</span><span className="font-medium">{stats.graphs.avgConnectivity.toFixed(3)}</span></div>
+                {stats.graphs.bestFormula && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">Best Formula</span><span className="font-medium" data-testid="text-graph-best">{stats.graphs.bestFormula} ({stats.graphs.bestTc}K)</span></div>
+                )}
+                {Object.keys(stats.graphs.componentFrequency).length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-xs text-muted-foreground mb-1">Component Types</div>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(stats.graphs.componentFrequency)
+                        .sort(([, a], [, b]) => b - a)
+                        .slice(0, 6)
+                        .map(([type, count]) => (
+                          <Badge key={type} variant="secondary" className="text-xs">
+                            {type.replace(/_/g, " ")} ({count})
+                          </Badge>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <ArrowLeftRight className="h-4 w-4 text-amber-500" /> Cross-Representation
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Program to Graph</span><span className="font-medium">{stats.crossRepresentation.programToGraphConversions}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Graph to Program</span><span className="font-medium">{stats.crossRepresentation.graphToProgramConversions}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Feature Correlation</span><span className="font-medium">{stats.crossRepresentation.avgFeatureCorrelation.toFixed(2)}</span></div>
+                {Object.keys(stats.graphs.edgeTypeFrequency).length > 0 && (
+                  <div className="mt-2">
+                    <div className="text-xs text-muted-foreground mb-1">Edge Types</div>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(stats.graphs.edgeTypeFrequency)
+                        .sort(([, a], [, b]) => b - a)
+                        .slice(0, 5)
+                        .map(([type, count]) => (
+                          <Badge key={type} variant="secondary" className="text-xs">
+                            {type.replace(/_/g, " ")} ({count})
+                          </Badge>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {activeView === "program" && generatedProgram && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Code2 className="h-4 w-4 text-blue-500" /> Design Program
+                <Badge variant="outline" className="ml-auto">{generatedProgram.program.name}</Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="bg-muted rounded-md p-3 font-mono text-xs space-y-1 mb-3 max-h-72 overflow-y-auto" data-testid="program-code-view">
+                <div className="text-muted-foreground">{"// Procedural structure generator"}</div>
+                <div className="text-blue-500">function generate_structure() {"{"}</div>
+                {generatedProgram.program.instructions
+                  .sort((a: { order: number }, b: { order: number }) => a.order - b.order)
+                  .map((inst: { type: string; params: Record<string, any>; order: number }, i: number) => (
+                  <div key={i} className="pl-4">
+                    <span className="text-green-600">{inst.type}</span>
+                    <span className="text-muted-foreground">(</span>
+                    <span className="text-amber-600">
+                      {Object.entries(inst.params)
+                        .filter(([k]) => k !== "order")
+                        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                        .join(", ")}
+                    </span>
+                    <span className="text-muted-foreground">)</span>
+                  </div>
+                ))}
+                <div className="text-blue-500">{"}"}</div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => mutateProgramMutation.mutate()} disabled={mutateProgramMutation.isPending} data-testid="btn-mutate-program">
+                  {mutateProgramMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <GitBranch className="h-3.5 w-3.5 mr-1" />}
+                  Mutate
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => convertProgramToGraphMutation.mutate()} disabled={convertProgramToGraphMutation.isPending} data-testid="btn-convert-to-graph">
+                  {convertProgramToGraphMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <ArrowLeftRight className="h-3.5 w-3.5 mr-1" />}
+                  Convert to Graph
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Beaker className="h-4 w-4 text-purple-500" /> Execution Result
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Formula</span><span className="font-bold text-lg" data-testid="text-exec-formula">{generatedProgram.execution.formula}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Prototype</span><span className="font-medium">{generatedProgram.execution.prototype}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Lattice</span><span className="font-medium">{generatedProgram.execution.latticeType}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Elements</span><span className="font-medium">{generatedProgram.execution.elements.join(", ")}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Complexity</span><span className="font-medium">{generatedProgram.execution.complexity.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">H Fraction</span><span className="font-medium">{(generatedProgram.execution.hydrogenFraction * 100).toFixed(1)}%</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Layers</span><span className="font-medium">{generatedProgram.execution.layerCount}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Interfaces</span><span className="font-medium">{generatedProgram.execution.interfaceCount}</span></div>
+                {generatedProgram.execution.strainApplied > 0 && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">Strain</span><span className="font-medium">{(generatedProgram.execution.strainApplied * 100).toFixed(1)}%</span></div>
+                )}
+                {generatedProgram.execution.dopingLevel > 0 && (
+                  <div className="flex justify-between"><span className="text-muted-foreground">Doping</span><span className="font-medium">{(generatedProgram.execution.dopingLevel * 100).toFixed(1)}%</span></div>
+                )}
+                <div className="mt-2">
+                  <div className="text-xs text-muted-foreground mb-1">Stoichiometry</div>
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(generatedProgram.execution.stoichiometry).map(([el, count]) => (
+                      <Badge key={el} variant="outline" className="text-xs">{el}: {count as number}</Badge>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-2">
+                  <div className="text-xs text-muted-foreground mb-1">Feature Vector ({generatedProgram.program.featureVector.length}D)</div>
+                  <div className="bg-muted rounded p-1.5 text-xs font-mono truncate">
+                    [{generatedProgram.program.featureVector.map((v: number) => v.toFixed(3)).join(", ")}]
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {activeView === "graph" && generatedGraph && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Network className="h-4 w-4 text-green-500" /> Component Graph
+                <Badge variant="outline" className="ml-auto">{generatedGraph.graph.name}</Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="relative bg-muted rounded-md mb-3 overflow-hidden" style={{ height: 260 }} data-testid="graph-visual">
+                <svg width="100%" height="100%" viewBox="0 0 400 260">
+                  {generatedGraph.graph.edges.map((edge, i) => {
+                    const src = generatedGraph.graph.nodes.find(n => n.id === edge.source);
+                    const tgt = generatedGraph.graph.nodes.find(n => n.id === edge.target);
+                    if (!src || !tgt) return null;
+                    const x1 = src.position[0] * 360 + 20;
+                    const y1 = src.position[1] * 220 + 20;
+                    const x2 = tgt.position[0] * 360 + 20;
+                    const y2 = tgt.position[1] * 220 + 20;
+                    const colors: Record<string, string> = {
+                      bonding: "#3b82f6", electron_transfer: "#ef4444", phonon_coupling: "#22c55e",
+                      charge_transfer: "#f59e0b", structural: "#6b7280", proximity: "#a855f7",
+                      epitaxial: "#06b6d4", hybridization: "#ec4899",
+                    };
+                    return (
+                      <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
+                        stroke={colors[edge.type] || "#6b7280"}
+                        strokeWidth={Math.max(1, edge.strength * 3)}
+                        strokeOpacity={0.6} />
+                    );
+                  })}
+                  {generatedGraph.graph.nodes.map((node, i) => {
+                    const cx = node.position[0] * 360 + 20;
+                    const cy = node.position[1] * 220 + 20;
+                    const r = 14 + node.weight * 8;
+                    const colors: Record<string, string> = {
+                      electron_source: "#ef4444", phonon_mediator: "#22c55e", charge_reservoir: "#f59e0b",
+                      structural_backbone: "#3b82f6", hydrogen_cage: "#06b6d4", intercalation_host: "#8b5cf6",
+                      dopant_site: "#ec4899", interface_layer: "#14b8a6", strain_buffer: "#6b7280",
+                      topological_surface: "#a855f7", pairing_channel: "#f97316", dos_enhancer: "#64748b",
+                    };
+                    return (
+                      <g key={i}>
+                        <circle cx={cx} cy={cy} r={r} fill={colors[node.type] || "#6b7280"} fillOpacity={0.85} stroke="white" strokeWidth={1.5} />
+                        <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={10} fontWeight="bold">
+                          {node.element}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+
+              <div className="flex flex-wrap gap-1 mb-3">
+                {generatedGraph.graph.nodes.map((node, i) => (
+                  <Badge key={i} variant="outline" className="text-xs">
+                    {node.element} ({node.type.replace(/_/g, " ")})
+                  </Badge>
+                ))}
+              </div>
+
+              <div className="text-xs text-muted-foreground mb-2">Edges</div>
+              <div className="space-y-1 max-h-28 overflow-y-auto mb-3">
+                {generatedGraph.graph.edges.map((edge, i) => {
+                  const src = generatedGraph.graph.nodes.find(n => n.id === edge.source);
+                  const tgt = generatedGraph.graph.nodes.find(n => n.id === edge.target);
+                  return (
+                    <div key={i} className="flex items-center gap-1.5 text-xs">
+                      <span className="font-medium">{src?.element || "?"}</span>
+                      <span className="text-muted-foreground">--[{edge.type.replace(/_/g, " ")} {(edge.strength * 100).toFixed(0)}%]--</span>
+                      <span className="font-medium">{tgt?.element || "?"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => mutateGraphMutation.mutate()} disabled={mutateGraphMutation.isPending} data-testid="btn-mutate-graph">
+                  {mutateGraphMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <GitBranch className="h-3.5 w-3.5 mr-1" />}
+                  Mutate
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => convertGraphToProgramMutation.mutate()} disabled={convertGraphToProgramMutation.isPending} data-testid="btn-convert-to-program">
+                  {convertGraphToProgramMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <ArrowLeftRight className="h-3.5 w-3.5 mr-1" />}
+                  Convert to Program
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Brain className="h-4 w-4 text-amber-500" /> Graph Analysis
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-muted-foreground">Formula</span><span className="font-bold text-lg" data-testid="text-graph-formula">{generatedGraph.graph.outputFormula}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Nodes</span><span className="font-medium">{generatedGraph.graph.metadata.nodeCount}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Edges</span><span className="font-medium">{generatedGraph.graph.metadata.edgeCount}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Connectivity</span><span className="font-medium">{generatedGraph.graph.metadata.connectivity.toFixed(3)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Avg Degree</span><span className="font-medium">{generatedGraph.graph.metadata.avgDegree.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Clustering</span><span className="font-medium">{generatedGraph.graph.metadata.clusteringCoeff.toFixed(3)}</span></div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Connected</span>
+                  <span className="font-medium">{generatedGraph.analysis.isConnected ? "Yes" : "No"}</span>
+                </div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Spectral Gap</span><span className="font-medium">{generatedGraph.analysis.spectralGap.toFixed(3)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Path Avg/Max</span><span className="font-medium">{generatedGraph.analysis.pathLengths.avg.toFixed(2)} / {generatedGraph.analysis.pathLengths.max}</span></div>
+
+                <div className="mt-3">
+                  <div className="text-xs text-muted-foreground mb-1">Central Nodes</div>
+                  <div className="space-y-0.5">
+                    {generatedGraph.analysis.centralNodes.map((cn, i) => (
+                      <div key={i} className="flex justify-between text-xs">
+                        <span>{cn.element} ({cn.id})</span>
+                        <span className="font-medium">centrality: {cn.centrality.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-2">
+                  <div className="text-xs text-muted-foreground mb-1">Communities ({generatedGraph.analysis.communities.length})</div>
+                  <div className="flex flex-wrap gap-1">
+                    {generatedGraph.analysis.communities.map((c) => (
+                      <Badge key={c.id} variant="secondary" className="text-xs">
+                        Cluster {c.id}: {c.members.length} nodes (w={c.avgWeight.toFixed(2)})
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-2">
+                  <div className="text-xs text-muted-foreground mb-1">Graph Embedding ({generatedGraph.graph.embedding.length}D)</div>
+                  <div className="bg-muted rounded p-1.5 text-xs font-mono truncate">
+                    [{generatedGraph.graph.embedding.map((v: number) => v.toFixed(3)).join(", ")}]
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {activeView === "program" && !generatedProgram && (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            Click "Generate Program" to create a procedural design representation.
+          </CardContent>
+        </Card>
+      )}
+
+      {activeView === "graph" && !generatedGraph && (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            Click "Generate Graph" to create a component graph representation.
+          </CardContent>
+        </Card>
+      )}
+
+      {statsQuery.isLoading && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {[0, 1, 2].map(i => (
+            <Card key={i}>
+              <CardContent className="pt-6">
+                <Skeleton className="h-4 w-32 mb-2" />
+                <Skeleton className="h-4 w-full mb-1" />
+                <Skeleton className="h-4 w-3/4 mb-1" />
+                <Skeleton className="h-4 w-1/2" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

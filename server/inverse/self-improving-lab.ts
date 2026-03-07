@@ -9,6 +9,14 @@ import { updateLearningState, deriveCompositionBias, createInitialLearningState,
 import { gbPredict } from "../learning/gradient-boost";
 import { extractFeatures } from "../learning/ml-predictor";
 import { gnnPredictWithUncertainty } from "../learning/graph-neural-net";
+import {
+  type DesignProgram, type DesignGraph, type GraphAnalysis,
+  generateDesignProgram, executeDesignProgram, mutateDesignProgram, crossoverPrograms,
+  generateDesignGraph, mutateDesignGraph, analyzeGraph,
+  programToGraph, graphToProgram,
+  registerProgram, registerGraph, recordConversion,
+  getDesignRepresentationStats,
+} from "./design-representations";
 
 export type StrategyType =
   | "hydride-cage-optimizer"
@@ -108,6 +116,8 @@ export interface DesignCandidate {
   } | null;
   inrField: ImplicitNeuralField | null;
   inrDensity: number;
+  designProgram: DesignProgram | null;
+  designGraph: DesignGraph | null;
   targetDistance: number;
   reward: number;
   physicsValidated: boolean;
@@ -128,6 +138,9 @@ export interface LabIterationResult {
   strategiesEvolved: number;
   convergenceDelta: number;
   topCandidates: { formula: string; tc: number; distance: number; strategy: string }[];
+  programsGenerated: number;
+  graphsGenerated: number;
+  crossRepresentationConversions: number;
   wallTimeMs: number;
 }
 
@@ -744,6 +757,9 @@ export function runLabIteration(id: string): LabIterationResult | null {
   state.totalGenerated += deduplicated.length;
 
   const candidates: DesignCandidate[] = [];
+  let iterConversions = 0;
+  let iterProgramsGenerated = 0;
+  let iterGraphsGenerated = 0;
 
   for (const raw of deduplicated) {
     const candidate: DesignCandidate = {
@@ -755,6 +771,8 @@ export function runLabIteration(id: string): LabIterationResult | null {
       surrogateScores: null,
       inrField: null,
       inrDensity: 0,
+      designProgram: null,
+      designGraph: null,
       targetDistance: 1.0,
       reward: 0,
       physicsValidated: false,
@@ -880,6 +898,31 @@ export function runLabIteration(id: string): LabIterationResult | null {
       const centerPred = evaluateINR(candidate.inrField, 0, 0, 0);
       candidate.inrDensity = centerPred.density;
     } catch {}
+
+    try {
+      candidate.designProgram = generateDesignProgram(
+        strategy.type, strategy.parameters.elementPool, state.iteration, null);
+      const tc = candidate.surrogateScores?.ensembleTc ?? 0;
+      registerProgram(candidate.designProgram, tc);
+      iterProgramsGenerated++;
+    } catch {}
+
+    try {
+      candidate.designGraph = generateDesignGraph(
+        strategy.type, strategy.parameters.elementPool, state.iteration, null);
+      const tc = candidate.surrogateScores?.ensembleTc ?? 0;
+      registerGraph(candidate.designGraph, tc);
+      iterGraphsGenerated++;
+    } catch {}
+
+    if (candidate.designProgram && Math.random() < 0.2) {
+      try {
+        const convertedGraph = programToGraph(candidate.designProgram);
+        registerGraph(convertedGraph, candidate.surrogateScores?.ensembleTc ?? 0);
+        recordConversion();
+        iterConversions++;
+      } catch {}
+    }
 
     candidates.push(candidate);
   }
@@ -1012,6 +1055,9 @@ export function runLabIteration(id: string): LabIterationResult | null {
     strategiesEvolved,
     convergenceDelta,
     topCandidates: topCands,
+    programsGenerated: iterProgramsGenerated,
+    graphsGenerated: iterGraphsGenerated,
+    crossRepresentationConversions: iterConversions,
     wallTimeMs: Date.now() - startTime,
   };
 

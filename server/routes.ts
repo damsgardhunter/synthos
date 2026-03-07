@@ -21,6 +21,13 @@ import {
   resumeLab as resumeSelfImprovingLab,
   getAllLabStats as getSelfImprovingLabOverview,
 } from "./inverse/self-improving-lab";
+import {
+  generateDesignProgram, executeDesignProgram, mutateDesignProgram, crossoverPrograms,
+  generateDesignGraph, mutateDesignGraph, analyzeGraph,
+  programToGraph, graphToProgram,
+  getDesignRepresentationStats,
+  type DesignProgram, type DesignGraph,
+} from "./inverse/design-representations";
 import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -660,6 +667,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             lastCycleFamilyCounts: loopStats.lastCycleFamilyCounts ?? {},
           };
         })()),
+        designRepresentations: getDesignRepresentationStats(),
       });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch engine memory" });
@@ -1890,6 +1898,126 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ success });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to resume lab", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/design-representations/stats", (_req, res) => {
+    try {
+      res.json(getDesignRepresentationStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get design representation stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/program/generate", writeLimiter, (req, res) => {
+    try {
+      const { strategyType, elementPool, generation } = req.body;
+      const program = generateDesignProgram(
+        strategyType || "hydride-cage-optimizer",
+        elementPool || ["La", "Y", "H", "Nb"],
+        generation || 0,
+      );
+      const execution = executeDesignProgram(program);
+      res.json({ program, execution });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate program", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/program/mutate", writeLimiter, (req, res) => {
+    try {
+      const { program, elementPool } = req.body;
+      if (!program) return res.status(400).json({ error: "program is required" });
+      const mutated = mutateDesignProgram(program, elementPool || []);
+      const execution = executeDesignProgram(mutated);
+      res.json({ program: mutated, execution });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to mutate program", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/program/crossover", writeLimiter, (req, res) => {
+    try {
+      const { parent1, parent2 } = req.body;
+      if (!parent1 || !parent2) return res.status(400).json({ error: "parent1 and parent2 are required" });
+      const child = crossoverPrograms(parent1, parent2);
+      const execution = executeDesignProgram(child);
+      res.json({ program: child, execution });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to crossover programs", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/program/execute", writeLimiter, (req, res) => {
+    try {
+      const { program } = req.body;
+      if (!program) return res.status(400).json({ error: "program is required" });
+      const execution = executeDesignProgram(program);
+      res.json(execution);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to execute program", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/graph/generate", writeLimiter, (req, res) => {
+    try {
+      const { strategyType, elementPool, generation } = req.body;
+      const graph = generateDesignGraph(
+        strategyType || "hydride-cage-optimizer",
+        elementPool || ["La", "Y", "H", "Nb"],
+        generation || 0,
+      );
+      const analysis = analyzeGraph(graph);
+      res.json({ graph, analysis });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate graph", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/graph/mutate", writeLimiter, (req, res) => {
+    try {
+      const { graph, elementPool } = req.body;
+      if (!graph) return res.status(400).json({ error: "graph is required" });
+      const mutated = mutateDesignGraph(graph, elementPool || []);
+      const analysis = analyzeGraph(mutated);
+      res.json({ graph: mutated, analysis });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to mutate graph", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/graph/analyze", writeLimiter, (req, res) => {
+    try {
+      const { graph } = req.body;
+      if (!graph) return res.status(400).json({ error: "graph is required" });
+      const analysis = analyzeGraph(graph);
+      res.json(analysis);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to analyze graph", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/convert/program-to-graph", writeLimiter, (req, res) => {
+    try {
+      const { program } = req.body;
+      if (!program) return res.status(400).json({ error: "program is required" });
+      const graph = programToGraph(program);
+      const analysis = analyzeGraph(graph);
+      res.json({ graph, analysis });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to convert program to graph", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/design-representations/convert/graph-to-program", writeLimiter, (req, res) => {
+    try {
+      const { graph } = req.body;
+      if (!graph) return res.status(400).json({ error: "graph is required" });
+      const program = graphToProgram(graph);
+      const execution = executeDesignProgram(program);
+      res.json({ program, execution });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to convert graph to program", detail: e.message?.slice(0, 200) });
     }
   });
 
