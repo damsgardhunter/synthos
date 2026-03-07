@@ -49,6 +49,9 @@ import { analyzeReactionNetwork } from "./physics/reaction-network-engine";
 import { computeFermiSurface } from "./physics/fermi-surface-engine";
 import { predictBandStructure } from "./physics/band-structure-surrogate";
 import { predictStability } from "./physics/stability-predictor";
+import { analyzeInterface, generateHeterostructureCandidates } from "./physics/interface-engine";
+import { detectQuantumCriticality } from "./physics/quantum-criticality";
+import { discoveryMemory } from "./learning/discovery-memory";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1149,6 +1152,54 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(prediction);
     } catch (e: any) {
       res.status(500).json({ error: "Stability prediction failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/interface/:layerA/:layerB", generalLimiter, (req, res) => {
+    try {
+      const layerA = decodeURIComponent(req.params.layerA as string);
+      const layerB = decodeURIComponent(req.params.layerB as string);
+      if (!layerA || !layerB || layerA.length > 100 || layerB.length > 100) {
+        return res.status(400).json({ error: "Invalid layer formulas" });
+      }
+      const analysis = analyzeInterface(layerA, layerB);
+      res.json(analysis);
+    } catch (e: any) {
+      res.status(500).json({ error: "Interface analysis failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/interface-candidates", generalLimiter, (_req, res) => {
+    try {
+      const candidates = generateHeterostructureCandidates();
+      res.json({ candidates, count: candidates.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Heterostructure generation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/quantum-criticality/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula as string);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const analysis = detectQuantumCriticality(formula);
+      res.json(analysis);
+    } catch (e: any) {
+      res.status(500).json({ error: "Quantum criticality analysis failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/discovery-memory/patterns", generalLimiter, (_req, res) => {
+    try {
+      const topPatterns = discoveryMemory.getTopPatterns(20);
+      const stats = discoveryMemory.getStats();
+      const clusters = discoveryMemory.getClusters();
+      const bias = discoveryMemory.biasGenerationFromMemory();
+      res.json({ topPatterns, stats, clusters, bias });
+    } catch (e: any) {
+      res.status(500).json({ error: "Discovery memory query failed", detail: e.message?.slice(0, 200) });
     }
   });
 

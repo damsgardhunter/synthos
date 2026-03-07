@@ -116,6 +116,32 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 ### Advanced Quantum Physics Modeling
 - Computes phonon dispersion, phonon DOS, Eliashberg spectral function, GW many-body corrections, dynamic spin susceptibility, and Fermi surface nesting.
 
+### Multi-Material Interface Discovery Engine
+- **Heterostructure superconductivity analyzer** for interface SC discovery (2D superconductors).
+- **Interface analysis**: charge transfer (electronegativity/work function mismatch, doping type), interface phonon enhancement (acoustic mismatch model, soft-mode coupling), epitaxial strain (lattice mismatch, critical thickness, dome-shaped strain coupling), dimensional confinement (2D enhancement factor).
+- **Heterostructure generation**: Generates A/B/A/B stacked candidates from substrate/film pools (SrTiO3, LaAlO3, MgO, TiO2 substrates; FeSe, NbSe2, WTe2, FeTe, cuprate films), ranks top 50 by interface SC score.
+- **Known system calibration**: FeSe/SrTiO3 (~65K), LAO/STO (~0.3K interface SC), twisted bilayer graphene (~1.7K).
+- **APIs**: `GET /api/interface/:layerA/:layerB`, `GET /api/interface-candidates`
+- Files: `server/physics/interface-engine.ts`
+
+### Quantum Criticality Detector
+- **Unified quantum critical point (QCP) detector** formalizing existing spin susceptibility, CDW, SDW, Mott detection into a single QuantumCriticalScore.
+- **Six QCP channels**: Mott (Hubbard U/W ratio), SDW (Stoner enhancement + nesting), CDW (nesting + DOS), nematic (orbital anisotropy), structural (soft phonon modes), orbital-selective (mixed d-orbital).
+- **Dome model**: SC enhancement follows Gaussian profile around optimal QCP proximity — boosts Tc when near but not past the transition. Optimal at control parameter ~0.75, suppressed past 0.95 (ordered phase).
+- **Known calibration**: Cuprates → Mott QCP (score ≥ 0.90), Fe-pnictides → SDW (0.85) + Mott, NbSe2 → CDW (0.89), nickelates → Mott (0.75) + orbital-selective.
+- **Pipeline integration**: Runs in Phase 10 (physics evaluation) and autonomous loop. QC score > 0.5 with pairingBoost > 0.1 applies Tc enhancement (capped at 15% boost, max 400K).
+- **API**: `GET /api/quantum-criticality/:formula`
+- Files: `server/physics/quantum-criticality.ts`
+
+### Discovery Memory System
+- **Pattern-based learning system** that remembers which physics patterns produced high Tc discoveries.
+- **14-dim fingerprint**: DOS level, flat band score, VHS proximity, nesting score, coupling strength, hydrogen density, dimensionality, element classes, orbital character, pairing channel, correlation strength, metallicity, pressure, family.
+- **Memory operations**: `recordDiscovery()` (Tc ≥ 20K threshold), `queryPatternSimilarity()` (cosine similarity k-nearest), `getTopPatterns()`, `biasGenerationFromMemory()` (element/structure/stoichiometry preferences from top clusters).
+- **RL integration**: Memory reward bonus (capped at 0.3) applied to RL agent reward when pattern matches successful discoveries. Auto-clustering at 0.75 cosine similarity threshold.
+- **Capacity**: 500 records max, pruned by Tc ranking. Automatic clustering for generation bias.
+- **API**: `GET /api/discovery-memory/patterns`
+- Files: `server/learning/discovery-memory.ts`
+
 ### Band Structure Neural Network Surrogate
 - **GNN-based band structure predictor** inspired by DeepDFT/OrbNet/ALIGNN/M3GNet approaches.
 - **Input**: Crystal structure graph (20-dim node features, 7-dim edge features, 3-body interactions) from prototype or generic construction.

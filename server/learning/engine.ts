@@ -50,6 +50,8 @@ import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetwor
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
+import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
+import { discoveryMemory, buildFingerprint } from "./discovery-memory";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1147,6 +1149,29 @@ async function runPhase10_Physics() {
           }
         } catch {}
 
+        let qcAnalysis: QuantumCriticalAnalysis | undefined;
+        try {
+          qcAnalysis = detectQuantumCriticality(candidate.formula, {
+            electronic: result.electronicStructure,
+            coupling: result.coupling,
+          });
+          (updatedMlFeatures as any).quantumCriticality = {
+            score: qcAnalysis.quantumCriticalScore,
+            primaryQCP: qcAnalysis.primaryQCP,
+            pairingBoost: qcAnalysis.pairingBoostFromQCP,
+          };
+          if (qcAnalysis.quantumCriticalScore > 0.5) {
+            const qcBoost = 1 + qcAnalysis.pairingBoostFromQCP * 0.15;
+            updatedTc = Math.min(400, updatedTc * qcBoost);
+            emit("log", {
+              phase: "phase-10",
+              event: "Quantum criticality detected",
+              detail: `${candidate.formula}: QCP=${qcAnalysis.primaryQCP}, score=${qcAnalysis.quantumCriticalScore.toFixed(3)}, dome=${qcAnalysis.domeProfile.domeCenter.toFixed(2)}, boost=${qcAnalysis.pairingBoostFromQCP.toFixed(3)}, channels=[mott=${qcAnalysis.channelScores.mott.toFixed(2)},sdw=${qcAnalysis.channelScores.sdw.toFixed(2)},cdw=${qcAnalysis.channelScores.cdw.toFixed(2)},nematic=${qcAnalysis.channelScores.nematic.toFixed(2)}]`,
+              dataSource: "Quantum Criticality Detector",
+            });
+          }
+        } catch {}
+
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
           logPhononFrequency: result.coupling.omegaLog,
@@ -1895,6 +1920,18 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       );
     } catch {}
 
+    let autonomousQC: QuantumCriticalAnalysis | undefined;
+    try {
+      autonomousQC = detectQuantumCriticality(formula, {
+        electronic: physicsResult.electronicStructure,
+        coupling: physicsResult.coupling,
+      });
+      if (autonomousQC.quantumCriticalScore > 0.5 && autonomousQC.pairingBoostFromQCP > 0.1) {
+        const qcTcBoost = 1 + autonomousQC.pairingBoostFromQCP * 0.15;
+        finalTc = Math.min(400, Math.round(finalTc * qcTcBoost));
+      }
+    } catch {}
+
     const synthesizabilityScore = structureResult?.synthesizability ?? 0.5;
     const lambda = physicsResult.coupling.lambda;
     const rawHullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
@@ -1992,6 +2029,18 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     totalScCandidates++;
     recentNewCandidates++;
+
+    try {
+      const memFingerprint = buildFingerprint(formula, finalTc, {
+        lambda: physicsResult.coupling.lambda,
+        metallicity: physicsResult.electronicStructure.metallicity,
+        nestingScore: physicsResult.electronicStructure.nestingScore,
+        vanHoveProximity: physicsResult.electronicStructure.vanHoveProximity,
+        dimensionality: physicsResult.dimensionality,
+        correlationStrength: physicsResult.correlation.ratio,
+      });
+      discoveryMemory.recordDiscovery(formula, memFingerprint, finalTc);
+    } catch {}
 
     if (finalTc > autonomousBestTc) {
       autonomousBestTc = finalTc;
@@ -2120,6 +2169,7 @@ async function runAutonomousFastPath() {
 
     let passed = 0;
     let bestTcThisBatch = 0;
+    let bestFormulaThisBatch = "";
     const failedFormulas: { formula: string; tc: number }[] = [];
 
     const activeRules = getMinedRules();
@@ -2160,7 +2210,10 @@ async function runAutonomousFastPath() {
       if (result.passed) {
         passed++;
         autonomousTotalPassed++;
-        if (result.tc > bestTcThisBatch) bestTcThisBatch = result.tc;
+        if (result.tc > bestTcThisBatch) {
+          bestTcThisBatch = result.tc;
+          bestFormulaThisBatch = formula;
+        }
         if (result.physicsPred) {
           const p = result.physicsPred;
           emit("log", {
@@ -2202,13 +2255,23 @@ async function runAutonomousFastPath() {
       });
     }
 
-    const rlReward = rlAgent.computeReward(
+    let rlReward = rlAgent.computeReward(
       bestTcThisBatch,
       autonomousBestTc,
       passed > 0,
       passed / Math.max(1, filteredCandidates.length),
       rlNoveltyRatio * 0.5
     );
+
+    const memStats = discoveryMemory.getStats();
+    if (memStats.totalRecords > 5 && bestTcThisBatch > 20 && bestFormulaThisBatch) {
+      try {
+        const topFp = buildFingerprint(bestFormulaThisBatch, bestTcThisBatch, {});
+        const memBonus = discoveryMemory.computeMemoryRewardBonus(topFp);
+        rlReward += memBonus.bonus * 0.5;
+      } catch {}
+    }
+
     rlAgent.updatePolicy(rlState, rlAction, rlReward);
 
     const boStats = bayesianOptimizer.getStats();
@@ -2216,10 +2279,11 @@ async function runAutonomousFastPath() {
 
     const patternDetail = patternFiltered > 0 ? ` Pattern filter removed ${patternFiltered}/${candidates.length} (${activeRules.length} rules active).` : "";
     const physicsDetail = physicsPrefiltered > 0 ? ` Physics pre-filter rejected ${physicsPrefiltered}/${filteredCandidates.length}.` : "";
+    const memDetail = memStats.totalRecords > 0 ? ` Memory: ${memStats.totalRecords} patterns, ${memStats.clusterCount} clusters.` : "";
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
+      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples.`,
       dataSource: "Autonomous Loop",
     });
   } finally {
