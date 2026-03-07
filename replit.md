@@ -116,6 +116,26 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 ### Advanced Quantum Physics Modeling
 - Computes phonon dispersion, phonon DOS, Eliashberg spectral function, GW many-body corrections, dynamic spin susceptibility, and Fermi surface nesting.
 
+### Band Structure Neural Network Surrogate
+- **GNN-based band structure predictor** inspired by DeepDFT/OrbNet/ALIGNN/M3GNet approaches.
+- **Input**: Crystal structure graph (20-dim node features, 7-dim edge features, 3-body interactions) from prototype or generic construction.
+- **Output heads**: bandGap (direct/indirect), flatBandScore, vhsProximity, nestingFromBands, dosPredicted, fsDimensionality, multiBandScore, bandwidthMin, bandTopologyClass (trivial/TI/Dirac/Weyl), highSymmetryEnergies (Γ/X/M/R/Z/A).
+- **Architecture**: 3 attention message passing layers + 3-body interaction layer → mean+max pooling → 2-layer MLP with multi-head outputs.
+- **Physics calibration**: Post-GNN heuristic corrections for known material classes (cuprates enhance VHS/nesting, hydrides enhance multiBand, pnictides enhance nesting).
+- **Pipeline position**: Runs after crystal structure assignment, feeds predicted electronic features into pairing/coupling models before full Eliashberg physics.
+- **API**: `GET /api/band-surrogate/:formula`
+- Files: `server/physics/band-structure-surrogate.ts`
+
+### Phase Stability Prediction Network
+- **GNN-based stability pre-filter** for rapid screening before expensive physics calculations.
+- **Input**: Composition graph (elements as nodes with 14-dim features including Miedema φ*/nws, Pettifor scale; compositional relationship edges with 8-dim features).
+- **Output**: synthesizabilityScore (0-1), predictedFormationEnergy (eV/atom), stabilityClass (stable/metastable/unstable), decompositionRisk (0-1).
+- **Heuristic knowledge**: Goldschmidt tolerance factor, Pettifor map proximity, electronegativity spread, element compatibility, prototype matching, valence mismatch, size ratio scoring, Miedema formation energy.
+- **Pipeline position**: Runs FIRST in `insertCandidateWithStabilityCheck` and `runAutonomousDiscoveryCycle` before feature extraction, ML screening, structure prediction, and expensive physics. Rejects unstable candidates (synth < 0.25, decomp risk > 0.85, incompatible elements < 0.15).
+- **Impact**: Reduces search space by filtering thermodynamically implausible candidates before expensive calculations.
+- **API**: `GET /api/stability-predict/:formula`
+- Files: `server/physics/stability-predictor.ts`
+
 ### Convex Hull Phase Diagram Engine
 - Computes energy above hull, decomposition products, hull vertices, and assesses metastability for binary/ternary systems.
 
