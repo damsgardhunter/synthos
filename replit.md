@@ -217,6 +217,29 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **Pipeline integration**: Called after band surrogate in Phase 10, enriches Fermi surface analysis with ML features.
 - **APIs**: `GET /api/band-operator/:formula`, `GET /api/band-operator/dispersion/:formula`, `GET /api/band-operator/stats`
 
+### Autonomous Hypothesis Engine
+- **Scientific theory generation & testing** (`server/theory/hypothesis-engine.ts`): AI that invents, tests, and ranks superconductivity theories automatically.
+- **Pattern discovery**: Three analysis engines:
+  - Feature correlation analysis (which features cluster in high-Tc materials)
+  - Conditional rule discovery (IF nesting > 0.6 AND DOS > 4 THEN Tc > 50K)
+  - Co-occurrence pattern mining (structural/compositional patterns correlating with SC)
+- **Hypothesis structure**: ID, natural language statement, mathematical form, supporting evidence, confidence score, test/support/refute counts, required conditions, predicted Tc range, status (proposed/testing/supported/weakened/refuted).
+- **Testing loop**: Evaluates materials meeting hypothesis conditions, computes support score, updates confidence via Bayesian update, marks status based on evidence threshold.
+- **Generator bias**: Top hypotheses produce preferred conditions, feature targets, and family preferences to guide material generation.
+- **Pipeline integration**: `runHypothesisCycle()` runs every 10 autonomous cycles. Stats included in autonomous loop stats.
+- **APIs**: `GET /api/hypothesis/active`, `GET /api/hypothesis/all`, `GET /api/hypothesis/test/:id`
+- Files: `server/theory/hypothesis-engine.ts`
+
+### Discovery Landscape Intelligence
+- **Frontier analysis, novelty scoring, and strategic exploration** (`server/landscape/landscape-intelligence.ts`): Enhanced landscape intelligence beyond UMAP + zones.
+- **Frontier analysis**: Convex hull vertex detection, 12-direction frontier scoring with Tc gradient extrapolation, discovery corridors (steepest Tc increase directions), explored volume fraction.
+- **Novelty scoring**: Per-candidate novelty = nearest neighbor distance (40%) + local density (35%) + family dissimilarity (25%). Returns `isInExploredRegion` flag.
+- **Zone intelligence**: UCB acquisition function (Tc_mean + 1.5 * uncertainty), zone evolution tracking (improving/stable/declining/new), cross-zone correlation (shared elements), suggested elements/structures/stoichiometries per zone.
+- **Exploration strategy**: Interpolation candidates between high-Tc materials from different families, bridge candidates connecting high-Tc clusters, budget allocation proportional to acquisition scores, natural language recommendation.
+- **Pipeline integration**: `updateZoneHistory()` called every 5 cycles. Intelligence stats logged in discovery landscape update events.
+- **APIs**: `GET /api/landscape-intelligence/frontier`, `GET /api/landscape-intelligence/novelty/:formula`, `GET /api/landscape-intelligence/zones`, `GET /api/landscape-intelligence/strategy`
+- Files: `server/landscape/landscape-intelligence.ts`
+
 ### Quantum Criticality Detector
 - **Unified quantum critical point (QCP) detector** formalizing existing spin susceptibility, CDW, SDW, Mott detection into a single QuantumCriticalScore.
 - **Six QCP channels**: Mott (Hubbard U/W ratio), SDW (Stoner enhancement + nesting), CDW (nesting + DOS), nematic (orbital anisotropy), structural (soft phonon modes), orbital-selective (mixed d-orbital).

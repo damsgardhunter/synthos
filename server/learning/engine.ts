@@ -60,12 +60,14 @@ import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
 import { getZoneBonus, getLandscapeRLBias } from "../landscape/landscape-guidance";
 import { getZoneMap } from "../landscape/zone-detector";
+import { updateZoneHistory, getIntelligenceGeneratorBias, getLandscapeIntelligenceStats } from "../landscape/landscape-intelligence";
 import { getConstraintGuidanceForGenerator } from "../inverse/constraint-solver";
 import { getConstraintGraphGuidance } from "../inverse/constraint-graph-solver";
 import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pathway";
 import { triggerSynthesisPathwayForCandidate } from "../synthesis/reaction-pathway";
 import { recordPrediction, shouldRetrain as shouldRetrainPerf, getPerformanceMetrics, recordCandidateOutcome } from "../theory/model-performance-tracker";
 import { runSymbolicRegression, theoryKnowledgeBase, getDiscoveredTheories } from "../theory/symbolic-regression";
+import { runHypothesisCycle, getTopHypothesesForGeneratorBias, getHypothesisStats } from "../theory/hypothesis-engine";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -2441,6 +2443,19 @@ async function runAutonomousFastPath() {
           }
         }
       } catch {}
+
+      try {
+        const hypResult = runHypothesisCycle();
+        if (hypResult.newHypotheses > 0 || hypResult.testedHypotheses > 0) {
+          const hypStats = getHypothesisStats();
+          emit("log", {
+            phase: "engine",
+            event: "Hypothesis engine cycle",
+            detail: `Generated ${hypResult.newHypotheses} new hypotheses, tested ${hypResult.testedHypotheses}. Active: ${hypResult.activeCount}, supported: ${hypResult.supportedCount}, refuted: ${hypResult.refutedCount}. Avg confidence: ${hypStats.avgConfidence.toFixed(3)}.${hypStats.topHypothesis ? ` Top: "${hypStats.topHypothesis.statement.slice(0, 100)}" (conf=${hypStats.topHypothesis.confidenceScore.toFixed(3)})` : ""}`,
+            dataSource: "Hypothesis Engine",
+          });
+        }
+      } catch {}
     }
 
     rebalanceWeights();
@@ -2452,10 +2467,18 @@ async function runAutonomousFastPath() {
         const zoneMap = getZoneMap();
         if (lStats.embeddedMaterials > 5) {
           const rlBias = getLandscapeRLBias();
+
+          updateZoneHistory(cycleCount);
+          const intelStats = getLandscapeIntelligenceStats();
+          const intelBias = getIntelligenceGeneratorBias();
+          const intelDetail = intelStats.highPriorityZoneCount > 0
+            ? ` Intelligence: ${intelStats.highPriorityZoneCount} high-priority zones, ${intelStats.frontierRegionCount} frontier regions. Exploration ratio: ${intelBias.explorationRatio.toFixed(2)}.`
+            : "";
+
           emit("log", {
             phase: "engine",
             event: "Discovery landscape update",
-            detail: `Landscape: ${lStats.embeddedMaterials} embedded materials, ${zoneMap.zones.length} zones (${zoneMap.topZones.length} high-priority). Coverage: ${zoneMap.coveragePercent}%. Tc range: ${lStats.tcRange.min}-${lStats.tcRange.max}K (avg ${lStats.tcRange.avg}K). RL bias: ${Object.entries(rlBias.elementGroupWeights).filter(([,v]) => v > 0.3).map(([k,v]) => `${k}=${v.toFixed(2)}`).join(", ")}. ${zoneMap.suggestions[0] ?? ""}`,
+            detail: `Landscape: ${lStats.embeddedMaterials} embedded materials, ${zoneMap.zones.length} zones (${zoneMap.topZones.length} high-priority). Coverage: ${zoneMap.coveragePercent}%. Tc range: ${lStats.tcRange.min}-${lStats.tcRange.max}K (avg ${lStats.tcRange.avg}K). RL bias: ${Object.entries(rlBias.elementGroupWeights).filter(([,v]) => v > 0.3).map(([k,v]) => `${k}=${v.toFixed(2)}`).join(", ")}. ${zoneMap.suggestions[0] ?? ""}${intelDetail}`,
             dataSource: "Discovery Landscape",
           });
         }
@@ -2531,7 +2554,9 @@ export function getAutonomousLoopStats() {
     generatorAllocations: getGeneratorAllocations(),
     fermiSurfaceClusters: getClusterGuidance(),
     discoveryLandscape: getLandscapeStats(),
+    landscapeIntelligence: getLandscapeIntelligenceStats(),
     pressurePathways: getPathwayStats(),
+    hypothesisEngine: getHypothesisStats(),
   };
 }
 

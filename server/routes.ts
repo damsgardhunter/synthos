@@ -67,6 +67,14 @@ import { solveConstraints, evaluateFormulaAgainstConstraints } from "./inverse/c
 import { searchPressurePathways, getPathwayStats, getAmbientCandidatesFromPathways } from "./inverse/pressure-pathway";
 import { solveConstraintGraph, getFeasibleRegions } from "./inverse/constraint-graph-solver";
 import { computeSynthesisPathway, getSynthesisPathwayStats } from "./synthesis/reaction-pathway";
+import {
+  analyzeFrontier, computeNoveltyScore, analyzeZoneIntelligence,
+  generateExplorationStrategy, getLandscapeIntelligenceStats,
+} from "./landscape/landscape-intelligence";
+import {
+  getActiveHypotheses, getAllHypotheses, testHypothesisById,
+  getHypothesisStats, runHypothesisCycle,
+} from "./theory/hypothesis-engine";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1513,6 +1521,80 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute feasible regions", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/hypothesis/active", generalLimiter, (_req, res) => {
+    try {
+      const hypotheses = getActiveHypotheses();
+      const stats = getHypothesisStats();
+      res.json({ hypotheses, stats });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch active hypotheses", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/hypothesis/all", generalLimiter, (_req, res) => {
+    try {
+      const hypotheses = getAllHypotheses();
+      const stats = getHypothesisStats();
+      res.json({ hypotheses, stats });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch all hypotheses", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/hypothesis/test/:id", generalLimiter, (req, res) => {
+    try {
+      const id = req.params.id;
+      const result = testHypothesisById(id);
+      if (!result.hypothesis) {
+        return res.status(404).json({ error: "Hypothesis not found" });
+      }
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to test hypothesis", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape-intelligence/frontier", generalLimiter, (_req, res) => {
+    try {
+      const frontier = analyzeFrontier();
+      res.json(frontier);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to analyze frontier", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape-intelligence/novelty/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const novelty = computeNoveltyScore(formula);
+      res.json(novelty);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute novelty score", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape-intelligence/zones", generalLimiter, (_req, res) => {
+    try {
+      const zones = analyzeZoneIntelligence();
+      const stats = getLandscapeIntelligenceStats();
+      res.json({ zones, stats });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to analyze zone intelligence", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/landscape-intelligence/strategy", generalLimiter, (_req, res) => {
+    try {
+      const strategy = generateExplorationStrategy();
+      res.json(strategy);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate exploration strategy", detail: e.message?.slice(0, 200) });
     }
   });
 
