@@ -98,6 +98,20 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **API**: `GET /api/hydrogen-network/:formula`, `GET /api/hydrogen-network-stats`
 - Files: `server/physics/hydrogen-network-engine.ts`
 
+### Advanced Physics Constraints (8-Channel)
+- **Fermi Surface Nesting**: Evaluates FS topology, pocket count, quasi-2D character, peak nesting vs DOS ratio. Penalizes weak nesting (score < 0.2).
+- **Orbital Hybridization**: d-p overlap, s-p overlap, sigma-bond contribution. Detects Cu-d/O-p, Fe-d multi-orbital, sigma-bond (MgB2-like) types. Penalizes score < 0.15.
+- **Lifshitz Transition Proximity**: Band edge distance to Fermi level, DOS spike detection, pocket transition probability. Uses vanHoveProximity, flatBandIndicator.
+- **Quantum Critical Fluctuation**: Stoner enhancement, spin fluctuation energy, near-QCP detection. Classifies QCP type (magnetic-HF, doping-driven, magnetic-pnictide, itinerant).
+- **Electronic Dimensionality**: Band dispersion anisotropy (bandwidth_xy/bandwidth_z), classifies strongly-2D/quasi-2D/3D-isotropic. Cuprates get anisotropy >= 15, pnictides >= 8.
+- **Phonon Soft Mode**: Stable soft mode scoring, enhancement factor for coupling, imaginary mode penalty. Rejects unstable materials (hasImaginaryModes).
+- **Charge Transfer Energy**: Delta = |d_band_center - p_band_center|, optimal range 0-3 eV. Cuprates fixed at 1.8 eV, pnictides 2.5 eV.
+- **Lattice Polarizability**: Dielectric constant estimation from ionic/anion contributions, soft mode enhancement. SrTiO3 >= 300, BaTiO3 >= 1000. Threshold epsilon > 20.
+- **Composite scoring**: Weighted sum (nesting 0.15, hybridization 0.15, lifshitz 0.10, QCP 0.12, dimensionality 0.10, soft-mode 0.13, charge-transfer 0.10, polarizability 0.15).
+- **Tc boost/penalty**: compositeBoost = 1.0 + (compositeScore - 0.5) * 0.3 - penalty * 0.2, clamped [0.7, 1.4]. Applied to Eliashberg Tc.
+- **ML feature storage**: All 8 constraint scores + types stored in mlFeatures.advancedConstraints.
+- Files: `server/physics/advanced-constraints.ts`, integrated in `server/learning/physics-engine.ts` runFullPhysicsAnalysis.
+
 ### Chemical Stability Reaction Network
 - **Reaction graph engine**: Builds compound → decomposition pathway graphs with competing phases.
 - **Decomposition pathways**: Binary/ternary phase decomposition with Miedema formation energies.

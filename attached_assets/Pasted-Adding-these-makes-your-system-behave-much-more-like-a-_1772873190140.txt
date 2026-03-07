@@ -1,0 +1,249 @@
+Adding these makes your system behave much more like a real physicist designing a material, rather than just an ML search engine. 🚀
+
+1️⃣ Fermi Surface Nesting Constraint
+4
+Why this matters
+
+Many high-Tc superconductors rely on strong Fermi surface nesting.
+
+Examples:
+
+Material	Role
+Iron pnictides	nesting between electron + hole pockets
+Cuprates	quasi-2D nested bands
+Charge density wave superconductors	nesting drives pairing
+
+Good nesting increases:
+
+electron scattering
+spin fluctuations
+pairing interaction
+How to compute it
+
+Compute the nesting function
+
+ξ(q) = Σ_k δ(ε(k)) δ(ε(k+q))
+
+High ξ(q) means many states connectable by momentum q.
+
+Inverse constraint
+
+Your optimizer should enforce:
+
+maximize nesting score
+prefer quasi-2D Fermi surfaces
+prefer multiple Fermi pockets
+Implementation
+
+Add after band structure calculation.
+
+function computeFermiSurfaceNesting(bandStructure){
+   return nestingScore
+}
+
+Then constrain:
+
+if nestingScore < threshold:
+    reject material
+2️⃣ Orbital Hybridization Constraint
+4
+Why this matters
+
+High Tc often requires specific orbital mixing.
+
+Examples:
+
+Material	Hybridization
+Cuprates	Cu d + O p
+MgB₂	B pσ bands
+Iron pnictides	Fe d orbitals
+
+This hybridization:
+
+increases electron mobility
+improves electron-phonon coupling
+creates favorable band structures
+Implementation
+
+From DFT projection:
+
+Projected Density of States (PDOS)
+
+Compute orbital mixing ratio:
+
+hybridization = overlap(d_orbitals, p_orbitals)
+
+Constraint:
+
+if hybridization < threshold:
+    reject
+3️⃣ Lifshitz Transition Proximity
+4
+Why it matters
+
+Many superconductors sit near a Lifshitz transition.
+
+This is when:
+
+a new Fermi surface pocket appears
+
+Near this point:
+
+density of states spikes
+pairing strength increases
+Tc rises
+
+Examples:
+
+Material	Behavior
+FeSe	Tc enhanced near Lifshitz
+H₃S	pressure induced Lifshitz
+Cuprates	doping driven
+Implementation
+
+From band structure:
+
+distance = |band_edge - fermi_level|
+
+Constraint:
+
+if distance > 0.1 eV:
+    penalize
+
+Goal:
+
+band edge near Fermi level
+4️⃣ Quantum Critical Fluctuation Constraint
+4
+Why this matters
+
+Many unconventional superconductors occur near quantum critical points.
+
+Examples:
+
+Material	QCP
+Cuprates	doping critical point
+Heavy fermions	magnetic QCP
+Iron pnictides	magnetic instability
+
+Near QCP:
+
+spin fluctuations increase
+pairing interaction strengthens
+Implementation
+
+Proxy indicators:
+
+large spin susceptibility
+nearly magnetic state
+small magnetic energy difference
+
+Constraint:
+
+|E_nonmagnetic − E_magnetic| < threshold
+5️⃣ Electronic Dimensionality Constraint
+4
+Why this matters
+
+Many high-Tc superconductors are quasi-2D.
+
+Examples:
+
+Material	Structure
+Cuprates	layered
+Fe pnictides	layered
+MgB₂	quasi 2D
+
+2D systems have:
+
+stronger correlations
+better nesting
+higher pairing probability
+Implementation
+
+Compute band dispersion anisotropy.
+
+anisotropy = bandwidth_xy / bandwidth_z
+
+Constraint:
+
+anisotropy > 5
+6️⃣ Phonon Soft Mode Constraint
+4
+Why it matters
+
+Soft phonon modes can enhance electron-phonon coupling.
+
+Seen in:
+
+Material	Behavior
+BaTiO₃	soft mode
+H₃S	strong phonon softening
+Pb	phonon anomaly
+
+Soft modes mean:
+
+lattice strongly interacts with electrons
+Implementation
+
+From phonon dispersion:
+
+ω_min
+
+Constraint:
+
+0 < ω_min < small threshold
+
+Reject if:
+
+ω_min < 0
+
+because that means instability.
+
+7️⃣ Charge Transfer Energy Constraint
+4
+Why this matters
+
+Cuprates are charge transfer superconductors.
+
+Key parameter:
+
+Δ = E_d − E_p
+
+If Δ is optimal:
+
+electrons move easily between orbitals
+pairing increases
+Implementation
+
+From PDOS:
+
+delta = d_band_center − p_band_center
+
+Constraint:
+
+0 eV < Δ < 3 eV
+8️⃣ Lattice Polarizability Constraint
+4
+Why this matters
+
+Highly polarizable lattices:
+
+screen Coulomb repulsion
+increase pairing strength
+
+Seen in:
+
+Material	Behavior
+PbTe	strong polarizability
+SrTiO₃	high dielectric constant
+Hydrides	strong ionic response
+Implementation
+
+Estimate:
+
+dielectric_constant ε
+
+Constraint:
+
+ε > 20

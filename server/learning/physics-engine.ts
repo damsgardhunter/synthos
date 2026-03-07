@@ -4,6 +4,7 @@ import type { SuperconductorCandidate } from "@shared/schema";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { classifyFamily } from "./utils";
 import { computeFullTightBinding } from "./tight-binding";
+import { computeAdvancedConstraints, type AdvancedPhysicsConstraints } from "../physics/advanced-constraints";
 
 export interface PhysicsConstraintMode {
   allowBeyondEmpirical: boolean;
@@ -2861,6 +2862,7 @@ export async function runFullPhysicsAnalysis(
   spinSusceptibility: DynamicSpinSusceptibility;
   phononDOS: PhononDOSData;
   alpha2F: Alpha2FData;
+  advancedConstraints: AdvancedPhysicsConstraints;
 }> {
   const formula = candidate.formula;
 
@@ -3072,7 +3074,7 @@ export async function runFullPhysicsAnalysis(
 
   const instabilityProximity = computeInstabilityProximity(formula, electronicStructure, phononSpectrum, competingPhases);
 
-  const isHydrideForCDW = matClass === "superhydride" || matClass === "hydride-high-p" || matClass === "hydride-low-p";
+  const isHydrideForCDW = tcMatClass === "superhydride" || tcMatClass === "hydride-high-p" || tcMatClass === "hydride-low-p";
   if (instabilityProximity.cdwInstability > 0.4 && !(isHydrideForCDW && coupling.lambda > 2.0)) {
     const cdwPenalty = Math.max(0.05, 1.0 - instabilityProximity.cdwInstability * 0.6);
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty);
@@ -3147,6 +3149,31 @@ export async function runFullPhysicsAnalysis(
     });
   }
 
+  const advancedConstraints = computeAdvancedConstraints(
+    formula, electronicStructure, phononSpectrum, coupling,
+    nestingFunction, spinSusceptibility,
+    formulaEls, formulaCts, getTotalAtoms(formulaCts), dimensionality
+  );
+
+  if (advancedConstraints.compositeBoost !== 1.0 && eliashberg.predictedTc > 0) {
+    const preTc = eliashberg.predictedTc;
+    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * advancedConstraints.compositeBoost);
+    eliashberg.predictedTc = Math.max(0, eliashberg.predictedTc);
+    emit("log", {
+      phase: "phase-10",
+      event: "Advanced constraints applied",
+      detail: `${formula}: ${advancedConstraints.summary} | Tc ${preTc}K -> ${eliashberg.predictedTc}K`,
+      dataSource: "Physics Engine",
+    });
+  }
+
+  emit("log", {
+    phase: "phase-10",
+    event: "Advanced physics constraints evaluated",
+    detail: `${formula}: nesting=${advancedConstraints.fermiSurfaceNesting.nestingStrength}(${advancedConstraints.fermiSurfaceNesting.score.toFixed(2)}), hybrid=${advancedConstraints.orbitalHybridization.hybridizationType}(${advancedConstraints.orbitalHybridization.score.toFixed(2)}), lifshitz=${advancedConstraints.lifshitzProximity.score.toFixed(2)}, QCP=${advancedConstraints.quantumCriticalFluctuation.qcpType}(${advancedConstraints.quantumCriticalFluctuation.score.toFixed(2)}), dim=${advancedConstraints.electronicDimensionality.dimensionClass}(anis=${advancedConstraints.electronicDimensionality.anisotropy.toFixed(1)}), softMode=${advancedConstraints.phononSoftMode.score.toFixed(2)}(stable=${advancedConstraints.phononSoftMode.isStable}), CT-delta=${advancedConstraints.chargeTransferEnergy.delta.toFixed(2)}(${advancedConstraints.chargeTransferEnergy.chargeTransferType}), epsilon=${advancedConstraints.latticePolarizability.dielectricConstant.toFixed(0)}(${advancedConstraints.latticePolarizability.screeningStrength})`,
+    dataSource: "Physics Engine",
+  });
+
   return {
     electronicStructure,
     phononSpectrum,
@@ -3165,5 +3192,6 @@ export async function runFullPhysicsAnalysis(
     spinSusceptibility,
     phononDOS,
     alpha2F: alpha2FResult,
+    advancedConstraints,
   };
 }

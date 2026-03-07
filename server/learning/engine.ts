@@ -1087,6 +1087,26 @@ async function runPhase10_Physics() {
             integratedLambda: result.alpha2F.integratedLambda,
             binCount: result.alpha2F.frequencies.length,
           },
+          advancedConstraints: {
+            compositeScore: result.advancedConstraints.compositeScore,
+            compositeBoost: result.advancedConstraints.compositeBoost,
+            nesting: result.advancedConstraints.fermiSurfaceNesting.score,
+            nestingStrength: result.advancedConstraints.fermiSurfaceNesting.nestingStrength,
+            hybridization: result.advancedConstraints.orbitalHybridization.score,
+            hybridizationType: result.advancedConstraints.orbitalHybridization.hybridizationType,
+            lifshitz: result.advancedConstraints.lifshitzProximity.score,
+            qcp: result.advancedConstraints.quantumCriticalFluctuation.score,
+            qcpType: result.advancedConstraints.quantumCriticalFluctuation.qcpType,
+            dimensionality: result.advancedConstraints.electronicDimensionality.score,
+            dimensionClass: result.advancedConstraints.electronicDimensionality.dimensionClass,
+            anisotropy: result.advancedConstraints.electronicDimensionality.anisotropy,
+            softMode: result.advancedConstraints.phononSoftMode.score,
+            softModeStable: result.advancedConstraints.phononSoftMode.isStable,
+            chargeTransfer: result.advancedConstraints.chargeTransferEnergy.score,
+            chargeTransferDelta: result.advancedConstraints.chargeTransferEnergy.delta,
+            polarizability: result.advancedConstraints.latticePolarizability.score,
+            dielectricConstant: result.advancedConstraints.latticePolarizability.dielectricConstant,
+          },
         };
 
         let topoAnalysis: TopologicalAnalysis | undefined;
