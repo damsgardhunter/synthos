@@ -3,6 +3,7 @@ import type { FermiSurfaceResult } from "../physics/fermi-surface-engine";
 import type { PairingProfile } from "../physics/pairing-mechanisms";
 import type { DefectStructure, ElectronicAdjustment } from "../physics/defect-engine";
 import type { PressureTcPoint, HydrideFormationResult } from "./pressure-engine";
+import { normalizeFormula } from "./utils";
 
 export interface TopologyInsight {
   topologicalScore: number;
@@ -160,11 +161,12 @@ class CrossEngineHub {
 
   recordInsight(engine: EngineType, formula: string, data: any): void {
     if (!formula || typeof formula !== "string") return;
+    const normalized = normalizeFormula(formula);
 
-    let insight = this.insightStore.get(formula);
+    let insight = this.insightStore.get(normalized);
     if (!insight) {
-      insight = { formula, timestamp: Date.now() };
-      this.insightStore.set(formula, insight);
+      insight = { formula: normalized, timestamp: Date.now() };
+      this.insightStore.set(normalized, insight);
     }
     insight.timestamp = Date.now();
 
@@ -198,10 +200,10 @@ class CrossEngineHub {
         break;
     }
 
-    let history = this.insightHistory.get(formula);
+    let history = this.insightHistory.get(normalized);
     if (!history) {
       history = [];
-      this.insightHistory.set(formula, history);
+      this.insightHistory.set(normalized, history);
     }
     history.push({ ...insight });
     if (history.length > MAX_INSIGHTS_PER_FORMULA) {
@@ -217,11 +219,11 @@ class CrossEngineHub {
   }
 
   getInsightsFor(formula: string): EngineInsight | null {
-    return this.insightStore.get(formula) ?? null;
+    return this.insightStore.get(normalizeFormula(formula)) ?? null;
   }
 
   getInsightHistoryFor(formula: string): EngineInsight[] {
-    return this.insightHistory.get(formula) ?? [];
+    return this.insightHistory.get(normalizeFormula(formula)) ?? [];
   }
 
   getAllFormulas(): string[] {

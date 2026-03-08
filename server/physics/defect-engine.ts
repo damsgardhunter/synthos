@@ -145,7 +145,25 @@ function getElementEnergy(el: string): number {
   if (!data) return 3.0;
   const ie = data.firstIonizationEnergy || 7;
   const ea = data.electronAffinity || 0;
-  return (ie - ea) * 0.5;
+  return (ie + ea) * 0.3;
+}
+
+function getDeterministicDopant(hostEl: string, neighbors: string[], existingElements: string[]): string | null {
+  const hostData = ELEMENTAL_DATA[hostEl];
+  const hostRadius = hostData?.atomicRadius || 100;
+  let bestDopant: string | null = null;
+  let bestRadiusDiff = Infinity;
+  for (const neighbor of neighbors) {
+    if (existingElements.includes(neighbor)) continue;
+    const neighborData = ELEMENTAL_DATA[neighbor];
+    const neighborRadius = neighborData?.atomicRadius || 100;
+    const diff = Math.abs(neighborRadius - hostRadius);
+    if (diff < bestRadiusDiff) {
+      bestRadiusDiff = diff;
+      bestDopant = neighbor;
+    }
+  }
+  return bestDopant;
 }
 
 function getCoordinationFactor(el: string): number {
@@ -189,7 +207,7 @@ export function computeDefectFormationEnergy(
     }
     case DefectType.Dopant: {
       const neighbors = NEIGHBOR_MAP[element] || [];
-      const dopant = neighbors.length > 0 ? neighbors[Math.floor(Math.random() * neighbors.length)] : element;
+      const dopant = neighbors.length > 0 ? (getDeterministicDopant(element, neighbors, []) || neighbors[0]) : element;
       const dopantEnergy = getElementEnergy(dopant);
       Ef = Math.abs(elEnergy - dopantEnergy) * 0.5 + hostEnergy * 0.15 + 0.3;
       break;
@@ -289,8 +307,8 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
   for (const el of elements) {
     const neighbors = NEIGHBOR_MAP[el];
     if (!neighbors || neighbors.length === 0) continue;
-    const dopant = neighbors[Math.floor(Math.random() * neighbors.length)];
-    if (elements.includes(dopant)) continue;
+    const dopant = getDeterministicDopant(el, neighbors, elements);
+    if (!dopant) continue;
     const Ef = computeDefectFormationEnergy(formula, DefectType.Dopant, el);
     const density = estimateDefectDensity(Ef);
 

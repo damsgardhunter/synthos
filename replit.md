@@ -135,6 +135,19 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - engine.ts: Formula dedup Set (formulasInFlight) prevents duplicate processing in autonomous fast-path; Phase 13 synthesis reasoning marks reasoningFailed=true on error to prevent repeated LLM token waste.
   - gradient-boost.ts: 3 new features — multiBandScore (composite from nesting/DOS/orbital), miedemaFormEnergy (explicit from phase-diagram-engine), nonCentrosymmetric (binary flag from space group); formula parameter threaded through featureVectorToArray.
   - pressure-engine.ts: Birch-Murnaghan eta floor raised 0.3→0.5 for extreme compression; nickelate pressure dome (Gaussian centered at 20 GPa, sigma=15) for La3Ni2O7-type materials.
+- **Round 16 comprehensive fixes**:
+  - engine.ts: Crystal diffusion Tc penalty applied (low-lambda/high-Tc guard matching estimateRawTc); ensemble confidence bias +0.1 removed, weights redistributed to GNN 0.6 + GB 0.4.
+  - physics-engine.ts: Hc2 uses proper Pauli limit 1.84*Tc*sqrt(1+lambda) instead of 2.0*Tc; CDW suppression unified to >0.5 threshold with gradual onset; ambient Tc cap raised 250→300K.
+  - phase-diagram-engine.ts: Stability gates tightened (unstable 0.5→0.2 eV/atom, metastable 0.25→0.15); melting point guard in log term; Miedema R* p-d hybridization correction for mixed TM/non-TM pairs.
+  - hydrogen-network-engine.ts: Sodalite/clathrate classification fixed (LaH10-type now correctly sodalite); H coordination cap raised 6→9; phonon 0.8 multiplier removed for superhydrides; anharmonic correction included in composite SC score.
+  - defect-engine.ts: Deterministic dopant selection by ionic radius match (replaces Math.random()); vacancy formation energy uses cohesive energy proxy (IE+EA)*0.3 for physical 1-5 eV range.
+  - ml-predictor.ts: Electron density cliff removed (continuous metallicity*0.8 fallback); cooperPairStrength clamped to [0,1].
+  - active-learning.ts: GNN retraining feedback loop broken — uses GB-derived Tc from DFT features instead of model's own predictions; DFT validation gating.
+  - cross-engine-hub.ts: Formula normalization applied before insightStore/insightHistory storage and lookups; prevents MgB2/Mg1B2 duplication.
+  - structural-mutator.ts: Vacancy energy multiplier 4→40 for physical range; superhydride prototype "clathrate" for H/M ratio ≥ 8.
+  - synthesis-discovery.ts: GA mutation rate decreasing over generations (exploration→exploitation); engine normalization uses sqrt(engineCount) to reward multi-engine support.
+  - symbolic-physics-discovery.ts: Fractional exponents (1/3, 2/3, 1/2, 3/2) allowed in unit propagation; penalty magnitude reduced 1e6→1e4 for smoother GA fitness landscape.
+  - band-structure-operator.ts: Fermi energy uses electron-counting approach instead of mid-band average; VHS detection window tightened to 0.2 eV from Fermi level.
 - **Round 15 comprehensive fixes**:
   - physics-engine.ts: Removed anharmonic double-counting (lambda numerator boost removed, only denominator suppression kept); negative DOS guard when Stoner denom <= 0 (sets dos=0.2 baseline, flags material as strongly magnetic); muStar heavy-fermion sensitivity improved (floor ratio 1.1→1.5); superhydride pressure threshold raised 5→50 GPa; metallicity suppressed for high-H compounds at low pressure; Nitrides ambient Tc cap raised 65→80K; FAMILY_TC_CAPS exported for use in engine.ts re-evaluation.
   - pairing-mechanisms.ts: Allen-Dynes f1 corrected to include inner ^(3/2) exponent per Allen & Dynes 1975; superhydride phonon weight 0.85 (was 0.52) for H ratio > 0.6.

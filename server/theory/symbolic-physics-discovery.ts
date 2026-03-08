@@ -42,15 +42,15 @@ function evaluateNode(node: ExprNode, row: Record<string, number>): number {
     case "+": return vals[0] + vals[1];
     case "-": return vals[0] - vals[1];
     case "*": return vals[0] * vals[1];
-    case "/": return Math.abs(vals[1]) < 1e-10 ? 1e6 : vals[0] / vals[1];
+    case "/": return Math.abs(vals[1]) < 1e-10 ? 1e4 : vals[0] / vals[1];
     case "^": {
-      if (Math.abs(vals[1]) > 5) return 1e6;
-      if (vals[0] < 0 && Math.abs(vals[1] - Math.round(vals[1])) > 1e-6) return 1e6;
+      if (Math.abs(vals[1]) > 5) return 1e4;
+      if (vals[0] < 0 && Math.abs(vals[1] - Math.round(vals[1])) > 1e-6) return 1e4;
       return Math.pow(Math.abs(vals[0]) + 1e-10, vals[1]);
     }
-    case "sqrt": return vals[0] >= 0 ? Math.sqrt(vals[0]) : 1e6;
-    case "exp": return Math.abs(vals[0]) > 50 ? 1e6 : Math.exp(vals[0]);
-    case "log": return vals[0] > 1e-10 ? Math.log(vals[0]) : -1e6;
+    case "sqrt": return vals[0] >= 0 ? Math.sqrt(vals[0]) : 1e4;
+    case "exp": return Math.abs(vals[0]) > 50 ? 1e4 : Math.exp(vals[0]);
+    case "log": return vals[0] > 1e-10 ? Math.log(vals[0]) : -1e4;
     case "sin": return Math.sin(vals[0]);
     case "abs": return Math.abs(vals[0]);
     default: return 0;
@@ -110,6 +110,8 @@ const VARIABLE_UNITS: Record<string, UnitSpec> = {
 
 const ZERO_UNIT: UnitSpec = { energy: 0, frequency: 0, length: 0, temperature: 0, pressure: 0, mass: 0, charge: 0 };
 
+const ALLOWED_FRAC_EXPS = new Set([1/3, 2/3, 1/2, 3/2]);
+
 function getVariableUnit(name: string): UnitSpec {
   return VARIABLE_UNITS[name] ?? { ...ZERO_UNIT };
 }
@@ -162,7 +164,7 @@ function propagateUnits(node: ExprNode): UnitSpec | null {
       if (isDimensionless(u[0])) return { ...ZERO_UNIT };
       if (node.children[1].type === "const") {
         const exp = node.children[1].value;
-        if (Number.isInteger(exp)) {
+        if (Number.isInteger(exp) || ALLOWED_FRAC_EXPS.has(exp)) {
           return {
             energy: u[0].energy * exp,
             frequency: u[0].frequency * exp,
@@ -579,7 +581,7 @@ function crossScaleValidate(tree: ExprNode, dataset: PhysicsDiscoveryRecord[]): 
     const validPreds: number[] = [];
     const validActuals: number[] = [];
     for (let i = 0; i < allPredictions.length; i++) {
-      if (isFinite(allPredictions[i]) && Math.abs(allPredictions[i]) < 1e6) {
+      if (isFinite(allPredictions[i]) && Math.abs(allPredictions[i]) < 1e4) {
         validPreds.push(allPredictions[i]);
         validActuals.push(allActuals[i]);
       }
@@ -635,10 +637,10 @@ function simplifyTree(node: ExprNode): ExprNode {
       case "+": result = vals[0] + vals[1]; break;
       case "-": result = vals[0] - vals[1]; break;
       case "*": result = vals[0] * vals[1]; break;
-      case "/": result = Math.abs(vals[1]) < 1e-10 ? 1e6 : vals[0] / vals[1]; break;
+      case "/": result = Math.abs(vals[1]) < 1e-10 ? 1e4 : vals[0] / vals[1]; break;
       case "sqrt": result = vals[0] >= 0 ? Math.sqrt(vals[0]) : 0; break;
       case "log": result = vals[0] > 0 ? Math.log(vals[0]) : 0; break;
-      case "exp": result = Math.abs(vals[0]) > 50 ? 1e6 : Math.exp(vals[0]); break;
+      case "exp": result = Math.abs(vals[0]) > 50 ? 1e4 : Math.exp(vals[0]); break;
       default: result = vals[0]; break;
     }
     if (isFinite(result)) return { type: "const", value: Math.round(result * 1000) / 1000 };
@@ -778,7 +780,7 @@ function computeEquationFitness(
 
   for (const row of dataset) {
     const predicted = evaluateNode(tree, row as any);
-    if (!isFinite(predicted) || Math.abs(predicted) > 1e6) {
+    if (!isFinite(predicted) || Math.abs(predicted) > 1e4) {
       predictions.push(0);
     } else {
       predictions.push(predicted);

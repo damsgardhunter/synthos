@@ -40,7 +40,7 @@ function buildFormula(counts: Record<string, number>): string {
 
 export type PrototypeType =
   | "rocksalt" | "perovskite" | "hexagonal" | "layered"
-  | "bcc" | "fcc" | "spinel" | "fluorite" | "rutile" | "pyrite";
+  | "bcc" | "fcc" | "spinel" | "fluorite" | "rutile" | "pyrite" | "clathrate";
 
 const PROTOTYPE_LATTICE: Record<PrototypeType, { a: number; c_over_a: number; crystalSystem: string }> = {
   rocksalt:   { a: 4.2,  c_over_a: 1.0,  crystalSystem: "cubic" },
@@ -53,6 +53,7 @@ const PROTOTYPE_LATTICE: Record<PrototypeType, { a: number; c_over_a: number; cr
   fluorite:   { a: 5.5,  c_over_a: 1.0,  crystalSystem: "cubic" },
   rutile:     { a: 4.6,  c_over_a: 0.64, crystalSystem: "tetragonal" },
   pyrite:     { a: 5.4,  c_over_a: 1.0,  crystalSystem: "cubic" },
+  clathrate:  { a: 5.0,  c_over_a: 1.0,  crystalSystem: "cubic" },
 };
 
 export function assignPrototype(formula: string): PrototypeType {
@@ -105,7 +106,9 @@ export function assignPrototype(formula: string): PrototypeType {
   if (hasH && metalEls.length >= 1) {
     const hCount = counts["H"] || 0;
     const metalCount = metalEls.reduce((s, e) => s + (counts[e] || 0), 0);
-    if (hCount / Math.max(1, metalCount) >= 3) return "fcc";
+    const hRatio = hCount / Math.max(1, metalCount);
+    if (hRatio >= 8) return "clathrate";
+    if (hRatio >= 3) return "fcc";
     return "rocksalt";
   }
 
@@ -318,7 +321,7 @@ function estimateVacancyFormationEnergy(element: string, concentration: number, 
   if (d.meltingPoint && d.meltingPoint > 2000) baseEnergy += 0.1;
   if (isTransitionMetal(element)) baseEnergy += 0.05;
 
-  return baseEnergy * concentration * 4;
+  return baseEnergy * concentration * 40;
 }
 
 export function generateVacancyStructures(formula: string, prototype: PrototypeType): VacancyStructure[] {

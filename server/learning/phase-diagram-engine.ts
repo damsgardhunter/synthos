@@ -41,7 +41,6 @@ export function computeMiedemaFormationEnergy(formula: string): number {
 
   const P = 14.1;
   const Q_P = 9.4;
-  const R_P = 0;
 
   let deltaH = 0;
 
@@ -82,6 +81,8 @@ export function computeMiedemaFormationEnergy(formula: string): number {
       } else if (!isTransitionA && !isTransitionB) {
         Q = Q_P * 0.73;
       }
+
+      const R_P = (isTransitionA !== isTransitionB) ? 0.5 : 0;
 
       const vAvg = (vA * fractions[elA] + vB * fractions[elB]) / (fractions[elA] + fractions[elB]);
       const interfaceEnergy = -P * deltaPhi * deltaPhi + Q * deltaNws * deltaNws - R_P;
@@ -306,7 +307,7 @@ export function assessMetastability(
   const kB = 8.617e-5;
   const attemptFrequency = 1e13;
   const kineticBarrier = eAboveHull > 0
-    ? Math.max(0.1, Math.min(2.5, eAboveHull * 6 + 0.2 * Math.log(avgMeltingPoint / 300)))
+    ? Math.max(0.1, Math.min(2.5, eAboveHull * 6 + 0.2 * Math.log(Math.max(avgMeltingPoint, 300) / 300)))
     : 1.5;
 
   const roomTempRate = attemptFrequency * Math.exp(-kineticBarrier / (kB * 300));
@@ -443,18 +444,18 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
     hullDistance = Math.max(0, formationEnergy * 0.3);
   }
 
-  if (hullDistance > 0.50) {
+  if (hullDistance > 0.20) {
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.50 threshold` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.20 threshold` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,
     };
   }
 
-  if (hullDistance > 0.25) {
+  if (hullDistance > 0.15) {
     const metastabilityCheck = assessMetastability(formula, hullDistance);
     if (metastabilityCheck.kineticBarrier > 0.2) {
       return {
@@ -469,7 +470,7 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.25, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.2 eV` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > 0.15, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.2 eV` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,

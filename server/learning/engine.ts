@@ -2307,7 +2307,12 @@ async function runPhase11_StructurePrediction() {
 
           const features = extractFeatures(normalized);
           const gbResult = gbPredict(features);
-          const rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
+          let rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
+          if (rawTc > 80 && crystal.lambda < 1.5) {
+            const penalty = crystal.lambda < 0.5 ? 0.15 : crystal.lambda < 1.0 ? 0.25 : 0.3;
+            rawTc = Math.round(rawTc * penalty);
+          }
+          rawTc = Math.max(0, Math.min(400, rawTc));
           const cappedTc = applyAmbientTcCap(rawTc, crystal.lambda, 0, features.metallicity ?? 0.5, normalized);
 
           const id = `sc-cdvae-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2379,7 +2384,12 @@ async function runPhase11_StructurePrediction() {
           if (existing) continue;
           const features = extractFeatures(normalized);
           const gbResult = gbPredict(features);
-          const rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
+          let rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
+          if (rawTc > 80 && crystal.lambda < 1.5) {
+            const penalty = crystal.lambda < 0.5 ? 0.15 : crystal.lambda < 1.0 ? 0.25 : 0.3;
+            rawTc = Math.round(rawTc * penalty);
+          }
+          rawTc = Math.max(0, Math.min(400, rawTc));
           const cappedTc = applyAmbientTcCap(rawTc, crystal.lambda, 0, features.metallicity ?? 0.5, normalized);
           const id = `sc-distdiff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           try {
@@ -2761,7 +2771,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     let ensembleConfidence = 0.3;
     if (gnnResult && gnnResult.confidence > 0.3) {
       primaryTc = gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4;
-      ensembleConfidence = gnnResult.confidence * 0.6 + gbResult.score * 0.3 + 0.1;
+      ensembleConfidence = gnnResult.confidence * 0.6 + gbResult.score * 0.4;
     }
 
     crossEngineHub.recordInsight("ml", formula, {

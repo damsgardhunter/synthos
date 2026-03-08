@@ -117,7 +117,7 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     }
     if (pressureGpa < 10) {
       tcCap += materialBonus;
-      tcCap = Math.min(tcCap, 250);
+      tcCap = Math.min(tcCap, 300);
     }
     return Math.min(tc, tcCap);
   }
@@ -1980,7 +1980,7 @@ export function evaluateCompetingPhases(
       type: "CDW",
       transitionTemp: T_cdw,
       strength: Math.min(1.0, cdwStrength),
-      suppressesSC: cdwStrength > 0.6,
+      suppressesSC: cdwStrength > 0.5,
     });
   }
 
@@ -2059,7 +2059,7 @@ export function evaluateCompetingPhases(
       type: "CDW",
       transitionTemp: Math.min(300, T_cdw_dc),
       strength: cdwStr,
-      suppressesSC: cdwStr > 0.6,
+      suppressesSC: cdwStr > 0.5,
     });
   }
 
@@ -2122,8 +2122,8 @@ export function computeCriticalFields(
   const xiM = coherenceLength * 1e-9;
   const Hc2Tesla = PHI0 / (2 * Math.PI * xiM * xiM);
   const hc2Raw = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
-  const whhBound = 2.0 * tc;
-  const upperCriticalField = Math.min(hc2Raw, whhBound);
+  const pauliLimit = 1.84 * tc * Math.sqrt(1 + lambda);
+  const upperCriticalField = Math.min(hc2Raw, pauliLimit);
 
   const lambdaL = 50 + 200 * lambda * (1 + coupling.muStar);
   const londonPenetrationDepth = Math.max(30, Math.min(2000, lambdaL));
@@ -3162,8 +3162,9 @@ export async function runFullPhysicsAnalysis(
 
   const isHydrideForCDW = tcMatClass === "superhydride" || tcMatClass === "hydride-high-p" || tcMatClass === "hydride-low-p";
   const hydrideBypassCDW = isHydrideForCDW && coupling.lambda > 1.5 && (phononSpectrum.debyeTemperature ?? 0) > 1000;
-  if (instabilityProximity.cdwInstability > 0.4 && !hydrideBypassCDW) {
-    const cdwPenalty = Math.max(0.05, 1.0 - instabilityProximity.cdwInstability * 0.6);
+  if (instabilityProximity.cdwInstability > 0.5 && !hydrideBypassCDW) {
+    const cdwOnset = Math.min(1.0, (instabilityProximity.cdwInstability - 0.5) / 0.5);
+    const cdwPenalty = Math.max(0.05, 1.0 - cdwOnset * 0.6);
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty);
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
     emit("log", {

@@ -575,7 +575,7 @@ function computeFitnessScore(
     engineCount++;
   }
 
-  const engineNorm = engineCount > 0 ? Math.min(1.0, engineScore / Math.max(1, engineCount * 0.15)) : 0.5;
+  const engineNorm = engineCount > 0 ? Math.min(1.0, engineScore / Math.max(1, Math.sqrt(engineCount))) : 0.5;
 
   return tcWeight * tcNorm + feasWeight * feasNorm + novelWeight * novelNorm + engineWeight * engineNorm;
 }
@@ -726,7 +726,7 @@ export function discoverNovelSynthesisPaths(
       if (r < 0.4) {
         childGenome = crossoverGenomes(parent1.genome, parent2.genome);
       } else if (r < 0.8) {
-        childGenome = mutateGenome(parent1.genome, 0.15 + gen * 0.01);
+        childGenome = mutateGenome(parent1.genome, 0.15 + 0.10 * Math.max(0, 1 - gen / generations));
       } else {
         childGenome = randomGenome();
       }

@@ -467,7 +467,7 @@ function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsP
       const d2E = bandEnergies[i + 1] - 2 * bandEnergies[i] + bandEnergies[i - 1];
       const isExtremum = (bandEnergies[i] >= bandEnergies[i - 1] && bandEnergies[i] >= bandEnergies[i + 1]) ||
                           (bandEnergies[i] <= bandEnergies[i - 1] && bandEnergies[i] <= bandEnergies[i + 1]);
-      const nearFermi = Math.abs(bandEnergies[i] - dispersion.fermiEnergy) < 0.5;
+      const nearFermi = Math.abs(bandEnergies[i] - dispersion.fermiEnergy) < 0.2;
 
       if (isExtremum && nearFermi && Math.abs(d2E) < 0.5) {
         vhsPositions.push({
@@ -648,10 +648,20 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
     });
   }
 
-  const allEnergies = bands.flatMap(b => b.energies);
-  const midBandIdx = Math.floor(nBands / 2);
-  const fermiEnergy = bands.length > 0
-    ? Number((bands.reduce((s, b) => s + (b.energies[midBandIdx] ?? 0), 0) / bands.length).toFixed(4))
+  const allEnergies = bands.flatMap(b => b.energies).sort((a, b) => a - b);
+  let totalElectrons = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data && data.atomicNumber) {
+      totalElectrons += data.atomicNumber * (counts[el] || 1);
+    }
+  }
+  const fermiIndex = Math.min(
+    Math.max(0, Math.floor(totalElectrons / 2) - 1),
+    allEnergies.length - 1,
+  );
+  const fermiEnergy = allEnergies.length > 0
+    ? Number(allEnergies[fermiIndex].toFixed(4))
     : 0;
 
   const dispersion: BandDispersion = {

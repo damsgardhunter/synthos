@@ -165,17 +165,27 @@ async function retrainGNNWithEnrichedData(
     const enrichedCandidates = await storage.getSuperconductorCandidates(100);
     for (const c of enrichedCandidates) {
       if (c.dataConfidence === "high" || c.dataConfidence === "medium") {
-        if (c.predictedTc != null && c.predictedTc > 0) {
-          const existing = trainingData.find(t => t.formula === c.formula);
-          if (!existing) {
-            trainingData.push({
-              formula: c.formula,
-              tc: c.predictedTc,
-              formationEnergy: c.decompositionEnergy ?? undefined,
-              structure: undefined,
-              prototype: undefined,
-            });
-          }
+        const mlf = c.mlFeatures as Record<string, any> | null;
+        const hasDFTBandGap = mlf?.bandGap != null && mlf.bandGap >= 0;
+        const hasDFTFormationEnergy = c.decompositionEnergy != null;
+        const hasDFTValidation = hasDFTBandGap || hasDFTFormationEnergy;
+        if (!hasDFTValidation) continue;
+
+        const existing = trainingData.find(t => t.formula === c.formula);
+        if (existing) continue;
+
+        const dftFeatures = extractFeatures(c.formula, undefined, undefined, undefined, undefined);
+        const gb = gbPredict(dftFeatures);
+        const dftCorrectedTc = gb.tcPredicted;
+
+        if (dftCorrectedTc > 0) {
+          trainingData.push({
+            formula: c.formula,
+            tc: dftCorrectedTc,
+            formationEnergy: c.decompositionEnergy ?? undefined,
+            structure: undefined,
+            prototype: undefined,
+          });
         }
       }
     }

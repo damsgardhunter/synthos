@@ -184,14 +184,14 @@ function classifyCageTopology(
   let sodaliteChar = 0;
   let clathrateChar = 0;
 
-  if (hRatio >= 10 && hasSodaliteFormer) {
-    bestTemplate = "H32-clathrate-I";
-    sodaliteChar = 0.3;
-    clathrateChar = 0.95;
-  } else if (hRatio >= 8 && hasSodaliteFormer) {
+  if (hRatio >= 8 && hasSodaliteFormer) {
     bestTemplate = "H24-sodalite";
     sodaliteChar = 0.95;
-    clathrateChar = 0.4;
+    clathrateChar = 0.3;
+  } else if (hRatio >= 6 && hasClathFormer && !hasSodaliteFormer) {
+    bestTemplate = "H32-clathrate-I";
+    sodaliteChar = 0.2;
+    clathrateChar = 0.95;
   } else if (hRatio >= 6 && hasClathFormer) {
     bestTemplate = "H20-dodecahedron";
     sodaliteChar = 0.6;
@@ -287,7 +287,8 @@ function computeCoordinationNumber(
     coord = 3;
   }
 
-  return Math.min(6, coord);
+  const maxCoord = (hRatio >= 6) ? 9 : 6;
+  return Math.min(maxCoord, coord);
 }
 
 function computeHydrogenConnectivity(
@@ -380,21 +381,24 @@ function computeCompositeSCScore(
   connectivity: number,
   phononCoupling: number,
   hhDist: HHDistanceDistribution,
+  anharmonicCorrection: number = 1.0,
 ): number {
   const dimContrib = networkDim / 3.0;
   const cageContrib = cageScore;
-  const coordContrib = coordination / 6.0;
+  const coordContrib = coordination / 9.0;
   const connContrib = connectivity;
   const phononContrib = phononCoupling;
   const bondContrib = hhDist.metallicBondFraction;
+  const anharmonicContrib = Math.min(1.0, Math.max(0, anharmonicCorrection - 0.8) / 0.4);
 
   const composite =
-    0.15 * dimContrib +
-    0.20 * cageContrib +
-    0.10 * coordContrib +
-    0.15 * connContrib +
-    0.25 * phononContrib +
-    0.15 * bondContrib;
+    0.13 * dimContrib +
+    0.18 * cageContrib +
+    0.08 * coordContrib +
+    0.13 * connContrib +
+    0.23 * phononContrib +
+    0.13 * bondContrib +
+    0.12 * anharmonicContrib;
 
   return Number(Math.min(1.0, composite).toFixed(4));
 }
@@ -510,8 +514,16 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     networkPercolation = Math.min(0.6, hRatio * 0.15);
   }
 
+  let anharmonicCorrectionValue = 1.0;
+  try {
+    const elec = computeElectronicStructure(formula, null);
+    const phon = computePhononSpectrum(formula, elec);
+    const coup = computeElectronPhononCoupling(elec, phon, formula, 0);
+    anharmonicCorrectionValue = coup.anharmonicCorrectionFactor;
+  } catch {}
+
   const compositeSCScore = computeCompositeSCScore(
-    networkDim, cageScore, coordination, connectivity, phononCoupling, hhDist
+    networkDim, cageScore, coordination, connectivity, phononCoupling, hhDist, anharmonicCorrectionValue
   );
 
   const networkClass = classifyNetworkClass(bondingType, networkDim, cageTopology, hRatio);
@@ -524,7 +536,7 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     const phonon = computePhononSpectrum(formula, electronic);
     const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
 
-    hydrogenPhononFreq = phonon.maxPhononFrequency * (hRatio >= 4 ? 0.8 : 0.5);
+    hydrogenPhononFreq = phonon.maxPhononFrequency * (hRatio >= 4 ? 1.0 : 0.5);
     hydrogenPhononLambda = coupling.lambda * (hRatio >= 6 ? 0.7 : hRatio >= 4 ? 0.5 : 0.3);
     anharmonicCorrection = coupling.anharmonicCorrectionFactor;
   } catch {}

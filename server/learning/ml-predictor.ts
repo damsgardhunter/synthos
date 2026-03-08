@@ -149,6 +149,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     if (dWaveSymmetry) cooperPairStrength += 0.15;
     else if (layeredStructure) cooperPairStrength += 0.1;
   }
+  cooperPairStrength = Math.min(1, Math.max(0, cooperPairStrength));
 
   const electronic = computeElectronicStructure(formula, mat?.spacegroup);
   const phonon = computePhononSpectrum(formula, electronic);
@@ -165,10 +166,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     electronDensityEstimate = Math.min(1.0, 0.5 + electronic.densityOfStatesAtFermi * 0.05);
   } else if (mat?.bandGap != null && mat.bandGap > 0) {
     electronDensityEstimate = mat.bandGap > 3.0 ? 0.05 : Math.max(0, 0.3 - mat.bandGap * 0.08);
-  } else if (hasTransitionMetal || hasRareEarth || hasHydrogen) {
-    electronDensityEstimate = 0.5;
   } else {
-    electronDensityEstimate = 0.2;
+    electronDensityEstimate = electronic.metallicity * 0.8;
   }
 
   const meissnerPotential = cooperPairStrength * 0.3 + phononCouplingEstimate * 0.35 +
