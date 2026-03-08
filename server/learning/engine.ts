@@ -3026,13 +3026,16 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
           if (pathway.bestAmbientFormula && isValidFormula(pathway.bestAmbientFormula) && !alreadyScreenedFormulas.has(normalizeFormula(pathway.bestAmbientFormula))) {
             alreadyScreenedFormulas.add(normalizeFormula(pathway.bestAmbientFormula));
             try {
-              await storage.createSuperconductorCandidate({
+              const ppId = `sc-pp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              await insertCandidateWithStabilityCheck({
+                id: ppId,
+                name: pathway.bestAmbientFormula,
                 formula: pathway.bestAmbientFormula,
                 predictedTc: pathway.bestAmbientTc,
-                score: Math.min(1, pathway.bestAmbientTc / 293 * 0.6),
-                structure: "pressure-stabilized",
-                elements: formula,
-                magneticProperties: `Ambient variant of ${formula} (${pathway.retentionPercent}% Tc retention from ${candidatePressure}GPa). Strategy: ${pathway.strategies[0]?.type}`,
+                ensembleScore: Math.min(1, pathway.bestAmbientTc / 293 * 0.6),
+                crystalStructure: "pressure-stabilized",
+                status: "theoretical",
+                notes: `Ambient variant of ${formula} (${pathway.retentionPercent}% Tc retention from ${candidatePressure}GPa). Strategy: ${pathway.strategies[0]?.type}`,
               });
             } catch (e) { console.error(`[Autonomous] Pressure pathway candidate insert failed for ${formula}:`, e); }
           }
@@ -3852,13 +3855,16 @@ async function runAutonomousFastPath() {
                   feedbackLoopStats.defectCandidatesAdded++;
                   feedbackLoopStats.defectTotalTcBoost += bestDefect.tcMod - 1;
                   try {
-                    await storage.createSuperconductorCandidate({
+                    const defectId = `sc-def-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                    await insertCandidateWithStabilityCheck({
+                      id: defectId,
+                      name: defectFormula,
                       formula: defectFormula,
                       predictedTc: defectTc,
-                      score: Math.min(1, (result.tc > 0 ? defectTc / 293 : 0) * 0.7),
-                      structure: "defect-engineered",
-                      elements: formula,
-                      magneticProperties: `Defect: ${bestDefect.defect.type} at ${bestDefect.defect.element}, Tc boost ${bestDefect.tcMod.toFixed(3)}x from ${formula}`,
+                      ensembleScore: Math.min(1, (result.tc > 0 ? defectTc / 293 : 0) * 0.7),
+                      crystalStructure: "defect-engineered",
+                      status: "theoretical",
+                      notes: `Defect: ${bestDefect.defect.type} at ${bestDefect.defect.element}, Tc boost ${bestDefect.tcMod.toFixed(3)}x from ${formula}`,
                     });
                   } catch (e) { console.error(`[Engine] Defect candidate insert failed for ${defectFormula}:`, e); }
                 }

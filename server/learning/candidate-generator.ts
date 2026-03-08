@@ -254,6 +254,10 @@ function canonicalize(formula: string): string {
   return countsToFormula(reduced);
 }
 
+const ALKALINE_EARTH_METALS = new Set(["Be", "Mg", "Ca", "Sr", "Ba"]);
+const ANION_ELEMENTS = new Set(["H", "B", "C", "N", "O", "F", "S", "Se", "Te", "Cl", "Br", "I", "P", "As", "Sb"]);
+const HEA_ELEMENTS = new Set(["Ti", "Zr", "Hf", "V", "Nb", "Ta", "Cr", "Mo", "W", "Mn", "Fe", "Co", "Ni", "Cu", "Al"]);
+
 export function passesValenceFilter(formula: string): boolean {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -268,6 +272,21 @@ export function passesValenceFilter(formula: string): boolean {
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   if (totalAtoms < 2 || totalAtoms > 50) return false;
 
+  const metalElements = elements.filter(el => !ANION_ELEMENTS.has(el));
+  const anionElements = elements.filter(el => ANION_ELEMENTS.has(el));
+  const totalMetalCount = metalElements.reduce((s, el) => s + counts[el], 0);
+  const totalAnionCount = anionElements.reduce((s, el) => s + counts[el], 0);
+
+  if (elements.length > 5) {
+    const isHEA = metalElements.length >= 4 && metalElements.every(el => HEA_ELEMENTS.has(el)) && anionElements.length <= 1;
+    if (!isHEA) return false;
+  }
+
+  if (totalAnionCount > 0 && totalMetalCount > 3 * totalAnionCount) return false;
+
+  const alkalineEarthCount = elements.filter(el => ALKALINE_EARTH_METALS.has(el)).length;
+  if (alkalineEarthCount > 3) return false;
+
   let maxChargeSum = 0;
   let minChargeSum = 0;
   for (const el of elements) {
@@ -281,6 +300,14 @@ export function passesValenceFilter(formula: string): boolean {
   if (maxChargeSum < 0 && minChargeSum < 0) return false;
 
   return minChargeSum <= 0 && maxChargeSum >= 0;
+}
+
+export function passesCompositionComplexityFilter(formula: string): boolean {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  if (elements.length > 6 && totalAtoms > 20) return false;
+  return true;
 }
 
 function passesCompatibilityFilter(formula: string): boolean {
@@ -683,7 +710,7 @@ export function runMassiveGeneration(
 
   const valenceFiltered: string[] = [];
   for (const f of uniqueFormulas) {
-    if (passesValenceFilter(f)) {
+    if (passesValenceFilter(f) && passesCompositionComplexityFilter(f)) {
       valenceFiltered.push(f);
     }
   }

@@ -236,6 +236,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - symbolic-physics-discovery.ts: 3-fold cross-validation in `crossScaleValidate`; equations with CV-R² < 0.3 rejected.
   - rl-agent.ts: element pair success tracking feeds into reward; novelty bonus for < 3 trials, success bonus for avgTc > 50K.
 
+- **DFT Pipeline Fixes (7 tasks)**:
+  - qe-dft-engine.ts: `deduplicateSites()` function added — detects and perturbs duplicate atom positions (0.01 Å tolerance) before validation; applied at all 5 structure generation paths (fillPrototype, hydrideCage, buildStructureFromPrototype, scaled, chem-match). Hydride cage overflow H-site loop now adds unique perturbation vectors to prevent identical coordinates. BVS pre-filter (`computeBondValenceSum` deviation > 1.0) and ionic radius compatibility check added before prototype matching. Element count capped at 5, total atoms at 20 for DFT submissions.
+  - qe-dft-engine.ts + crystal-prototypes.ts: Lattice constant estimation enforces minimum volume per atom (8 Å³ non-hydride, 5 Å³ hydride); hydride cage lattice constant floor based on metal + H radii.
+  - candidate-generator.ts: Strengthened `passesValenceFilter` — rejects >5 elements (unless HEA), >3× cation:anion ratio, >3 alkaline earth metals. New `passesCompositionComplexityFilter` rejects >6 elements AND >20 atoms.
+  - formula-generator.ts: NLP-generated formulas now filtered through valence and complexity filters.
+  - engine.ts: Fixed `storage.createSuperconductorCandidate` → `insertCandidateWithStabilityCheck` at lines 3029 and 3855; fixed `score` → `ensembleScore`, `structure` → `crystalStructure`; added required `status: "theoretical"`.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

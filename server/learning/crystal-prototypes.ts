@@ -118,7 +118,15 @@ export function estimateLatticeConstant(
   }
 
   const packingFactor = PACKING_FACTORS[template.name] ?? DEFAULT_PACKING_FACTOR;
-  const cellVolume = totalVolume / packingFactor;
+  let cellVolume = totalVolume / packingFactor;
+
+  const totalAtoms = elements.reduce((s, el) => s + Math.round(counts[el] || 1), 0);
+  const hasH = elements.includes("H");
+  const minVolPerAtom = hasH ? 5.0 : 8.0;
+  const minCellVolume = totalAtoms * minVolPerAtom;
+  if (cellVolume < minCellVolume) {
+    cellVolume = minCellVolume;
+  }
 
   let a: number;
   let c: number;

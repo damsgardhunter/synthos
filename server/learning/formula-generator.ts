@@ -3,6 +3,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { trackDuplicatesSkipped } from "./strategy-analyzer";
 import { normalizeFormula } from "./utils";
+import { passesValenceFilter, passesCompositionComplexityFilter } from "./candidate-generator";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -150,6 +151,11 @@ export async function generateNovelFormulas(
     for (const candidate of candidates) {
       if (!candidate.formula || !candidate.name) continue;
       candidate.formula = normalizeFormula(candidate.formula);
+
+      if (!passesValenceFilter(candidate.formula) || !passesCompositionComplexityFilter(candidate.formula)) {
+        emit("log", { phase: "phase-6", event: "NLP formula rejected by filter", detail: `${candidate.formula}: failed valence or complexity filter`, dataSource: "OpenAI NLP" });
+        continue;
+      }
 
       if (recentlyGenerated.includes(candidate.formula)) {
         trackDuplicatesSkipped(1);

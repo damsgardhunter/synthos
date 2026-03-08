@@ -2,7 +2,7 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { getElementData } from "../learning/elemental-data";
-import { fillPrototype } from "../learning/crystal-prototypes";
+import { fillPrototype, computeBondValenceSum, checkIonicRadiusCompatibility } from "../learning/crystal-prototypes";
 import { computeFiniteDisplacementPhonons } from "./phonon-calculator";
 import type { FiniteDisplacementPhononResult } from "./phonon-calculator";
 
@@ -154,7 +154,16 @@ function validateVolumeRatio(generatedVolume: number, expectedVolume: number): {
 
 function estimateLatticeParam(elements: string[], counts: Record<string, number>, protoName?: string): number {
   const packingFactor = protoName ? (PROTOTYPE_PACKING[protoName] ?? 0.68) : 0.68;
-  const expectedVolume = computeExpectedVolume(counts, 1.0 / packingFactor);
+  let expectedVolume = computeExpectedVolume(counts, 1.0 / packingFactor);
+
+  const totalAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
+  const hasH = counts["H"] !== undefined && counts["H"] > 0;
+  const minVolPerAtom = hasH ? 5.0 : 8.0;
+  const minTotalVolume = totalAtoms * minVolPerAtom;
+  if (expectedVolume < minTotalVolume) {
+    expectedVolume = minTotalVolume;
+  }
+
   const latticeA = Math.cbrt(expectedVolume);
   return Math.max(latticeA, 3.0);
 }
@@ -1402,8 +1411,10 @@ function generateHydrideCageStructure(
     return s + r;
   }, 0);
   const avgMetalRadius = metalRadiiSum / metals.length;
+  const hRadius = 0.31;
   const latticeA = cage.baseLatticeFactor * (avgMetalRadius / 1.5);
-  const a = Math.max(latticeA, 3.0);
+  const minLattice = 2.0 * avgMetalRadius + 1.5 * hRadius;
+  const a = Math.max(latticeA, minLattice, 3.0);
   const c = a * cage.cOverA;
 
   const metalSiteCount = cage.metalFrac.length;
@@ -1461,30 +1472,66 @@ function generateHydrideCageStructure(
     }
   }
 
+  let overflowIdx = 0;
   while (hPlaced < hCount && nCopies > 0) {
     const pos = cage.hydrogenFrac[hPlaced % hSiteCount];
     const copy = Math.floor(hPlaced / hSiteCount) % nCopies;
     const offsetX = (copy % 2) * a;
     const offsetY = (Math.floor(copy / 2) % 2) * a;
     const offsetZ = Math.floor(copy / 4) * a;
+    const perturbAngle = overflowIdx * 2.399;
+    const perturbR = 0.3 + 0.1 * (overflowIdx % 5);
+    const px = perturbR * Math.cos(perturbAngle);
+    const py = perturbR * Math.sin(perturbAngle);
+    const pz = perturbR * Math.cos(perturbAngle + 1.5);
     let x: number, y: number, z: number;
     if (cage.latticeType === "hexagonal") {
-      x = a * pos.x + a * 0.5 * pos.y + offsetX;
-      y = a * (Math.sqrt(3) / 2) * pos.y + offsetY;
-      z = c * pos.z + offsetZ;
+      x = a * pos.x + a * 0.5 * pos.y + offsetX + px;
+      y = a * (Math.sqrt(3) / 2) * pos.y + offsetY + py;
+      z = c * pos.z + offsetZ + pz;
     } else {
-      x = a * pos.x + offsetX;
-      y = a * pos.y + offsetY;
-      z = a * pos.z + offsetZ;
+      x = a * pos.x + offsetX + px;
+      y = a * pos.y + offsetY + py;
+      z = a * pos.z + offsetZ + pz;
     }
     atoms.push({ element: "H", x, y, z });
     hPlaced++;
+    overflowIdx++;
   }
 
   if (atoms.length < 2) return null;
 
   console.log(`[DFT] ${formula}: Using hydride cage motif ${cage.name} (H/metal=${hPerMetal.toFixed(1)}, ${atoms.length} atoms)`);
   return { atoms, prototype: `hydride-cage-${cage.name}` };
+}
+
+function deduplicateSites(atoms: AtomPosition[]): AtomPosition[] {
+  const TOLERANCE = 0.01;
+  const result: AtomPosition[] = [];
+  for (const atom of atoms) {
+    let isDuplicate = false;
+    for (const existing of result) {
+      const dx = Math.abs(atom.x - existing.x);
+      const dy = Math.abs(atom.y - existing.y);
+      const dz = Math.abs(atom.z - existing.z);
+      if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
+        isDuplicate = true;
+        const angle = result.length * 2.399;
+        const r = 0.4;
+        result.push({
+          element: atom.element,
+          x: atom.x + r * Math.cos(angle),
+          y: atom.y + r * Math.sin(angle),
+          z: atom.z + r * Math.cos(angle + 1.0),
+        });
+        break;
+      }
+    }
+    if (!isDuplicate) {
+      result.push({ ...atom });
+    }
+  }
+  return result;
 }
 
 function getMinInteratomicDistance(el1: string, el2: string): number {
@@ -1643,9 +1690,32 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
     return { atoms: [], prototype: "empty" };
   }
 
+  if (elements.length > 5) {
+    console.log(`[DFT] ${formula}: Rejected — ${elements.length} distinct elements exceeds limit of 5`);
+    return { atoms: [], prototype: "rejected-too-complex" };
+  }
+
+  const totalAtomCount = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  if (totalAtomCount > 20) {
+    console.log(`[DFT] ${formula}: Rejected — ${totalAtomCount} total atoms exceeds limit of 20`);
+    return { atoms: [], prototype: "rejected-too-complex" };
+  }
+
   if (!checkRadiusCompatibility(elements)) {
     console.log(`[DFT] ${formula}: Radius incompatibility — non-H element radii ratio > 3.0`);
     return { atoms: [], prototype: "rejected-radius" };
+  }
+
+  const bvsResult = computeBondValenceSum(formula);
+  if (bvsResult.deviation > 1.0) {
+    console.log(`[DFT] ${formula}: BVS deviation too high (${bvsResult.deviation.toFixed(2)} > 1.0) — rejecting before structure generation`);
+    return { atoms: [], prototype: "rejected-bvs" };
+  }
+
+  const ionicResult = checkIonicRadiusCompatibility(formula);
+  if (!ionicResult.compatible) {
+    console.log(`[DFT] ${formula}: Ionic radius incompatibility (ratio=${ionicResult.radiusRatio.toFixed(2)}, tolerance=${ionicResult.toleranceFactor?.toFixed(2) ?? "N/A"}) — rejecting`);
+    return { atoms: [], prototype: "rejected-ionic-radius" };
   }
 
   prototypeAttempts++;
@@ -1658,7 +1728,8 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
       y: a.y,
       z: a.z,
     }));
-    const validated = validateAndFixStructure(atomPositions, formula);
+    const deduped = deduplicateSites(atomPositions);
+    const validated = validateAndFixStructure(deduped, formula);
     if (!validated) return { atoms: [], prototype: "rejected-overlap" };
     if (!checkVolumeRatioForAtoms(validated, counts, chemProto.templateName, formula)) {
       return { atoms: [], prototype: "rejected-volume-ratio" };
@@ -1673,7 +1744,8 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (hCount > 0 && totalMetalCount > 0 && (hCount / totalMetalCount) >= 4) {
     const hydrideCage = generateHydrideCageStructure(formula, counts);
     if (hydrideCage && hydrideCage.atoms.length >= 2) {
-      const validated = validateAndFixStructure(hydrideCage.atoms, formula);
+      const dedupedHydride = deduplicateSites(hydrideCage.atoms);
+      const validated = validateAndFixStructure(dedupedHydride, formula);
       if (validated) {
         prototypeSuccesses++;
         return { atoms: validated, prototype: hydrideCage.prototype };
@@ -1683,7 +1755,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
 
   const protoMatch = matchPrototype(counts);
   if (protoMatch) {
-    const atoms = buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts);
+    const atoms = deduplicateSites(buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts));
     if (atoms.length >= 2) {
       const validated = validateAndFixStructure(atoms, formula);
       if (!validated) return { atoms: [], prototype: "rejected-overlap" };
@@ -1711,7 +1783,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
 
   const scaledMatch = matchPrototype(scaledCounts);
   if (scaledMatch) {
-    const atoms = buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts);
+    const atoms = deduplicateSites(buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts));
     if (atoms.length >= 2) {
       const validated = validateAndFixStructure(atoms, formula);
       if (!validated) return { atoms: [], prototype: "rejected-overlap" };
@@ -1726,7 +1798,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   chemistryMatchAttempts++;
   const chemMatch = selectBestPrototypeByChemistry(scaledCounts, elements);
   if (chemMatch) {
-    const atoms = buildStructureFromPrototype(chemMatch.proto, chemMatch.siteMap, elements, scaledCounts);
+    const atoms = deduplicateSites(buildStructureFromPrototype(chemMatch.proto, chemMatch.siteMap, elements, scaledCounts));
     if (atoms.length >= 2) {
       const validated = validateAndFixStructure(atoms, formula);
       if (validated) {
