@@ -80,11 +80,48 @@ const HYDRIDE_FORMERS = new Set([
   "Al", "Ga", "In", "Sn", "Pb", "Bi",
 ]);
 
+const OXIDE_FORMERS = new Set([
+  "Li", "Na", "K", "Mg", "Ca", "Sr", "Ba", "La", "Y", "Ce", "Nd", "Pr", "Sm", "Eu", "Gd",
+  "Ti", "Zr", "Hf", "V", "Nb", "Ta", "Cr", "Mo", "W", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Al", "Ga", "In", "Sn", "Pb", "Bi", "Sc", "Ru", "Rh", "Ir", "Th", "U", "Si", "Ge",
+]);
+
+const PHOSPHIDE_FORMERS = new Set([
+  "Fe", "Co", "Ni", "Mn", "Cu", "Zn", "Ga", "In", "La", "Ce", "Ba", "Sr", "Ca",
+  "Ti", "Zr", "Nb", "Mo", "V", "Ta", "W", "Ru",
+]);
+
+const SELENIDE_FORMERS = new Set([
+  "Fe", "Cu", "Ni", "Co", "Nb", "Ta", "Mo", "W", "Ti", "Zr", "Hf", "V",
+  "Bi", "Pb", "Sn", "In", "Ga", "La", "Ce", "Ba", "Sr", "Ca",
+]);
+
+const SULFIDE_FORMERS = new Set([
+  "Fe", "Cu", "Ni", "Co", "Mo", "Nb", "Ta", "Ti", "Zr", "V", "W", "Mn",
+  "Pb", "Bi", "Sn", "In", "La", "Ce", "Ba", "Sr", "Ca",
+]);
+
+const TELLURIDE_FORMERS = new Set([
+  "Fe", "Cu", "Bi", "Pb", "Sn", "Nb", "Mo", "Ti", "Zr", "V", "Sb",
+  "La", "Ce", "Ba", "Sr", "Ca",
+]);
+
+const ARSENIDE_FORMERS = new Set([
+  "Fe", "Co", "Ni", "Mn", "Cu", "Ba", "Sr", "Ca", "La", "Ce",
+  "Nb", "V", "Mo", "Ti",
+]);
+
 const ELEMENT_COMPATIBILITY: Record<string, Set<string>> = {
   C: CARBIDE_FORMERS,
   N: NITRIDE_FORMERS,
   B: BORIDE_FORMERS,
   H: HYDRIDE_FORMERS,
+  O: OXIDE_FORMERS,
+  P: PHOSPHIDE_FORMERS,
+  Se: SELENIDE_FORMERS,
+  S: SULFIDE_FORMERS,
+  Te: TELLURIDE_FORMERS,
+  As: ARSENIDE_FORMERS,
 };
 
 const SIMILAR_ELEMENTS: Record<string, string[]> = {
@@ -166,9 +203,11 @@ const SIMILAR_ELEMENTS: Record<string, string[]> = {
 const DOPANT_ELEMENTS = ["Li", "Na", "K", "Mg", "Ca", "Sr", "Ba", "La", "Y", "Sc", "H", "B", "N", "F"];
 
 const HIGH_COUPLING_METALS = new Set(["Nb", "Ta", "Mo", "V", "Ti", "Hf", "W", "Re", "Zr"]);
+const SC_ACTIVE_TM = new Set(["Fe", "Ni", "Cu", "Ru", "Co", "Mn", "Ir", "Os", "Rh", "Pd", "Pt"]);
+const SC_ACTIVE_MAIN = new Set(["Pb", "Bi", "Sn", "In", "Al", "Ga", "Tl", "Mg"]);
 const LIGHT_PHONON_ELEMENTS = new Set(["B", "C", "N", "H"]);
-const CHARGE_RESERVOIR_ELEMENTS = new Set(["La", "Y", "Ca", "Sr", "Sc", "Ce", "Nd"]);
-const WEAK_SC_ELEMENTS = new Set(["Zn", "Tl", "Pd", "Cd", "Hg", "Au", "Ag", "Bi", "Pb"]);
+const CHARGE_RESERVOIR_ELEMENTS = new Set(["La", "Y", "Ca", "Sr", "Sc", "Ce", "Nd", "Ba", "K"]);
+const WEAK_SC_ELEMENTS = new Set(["Zn", "Cd", "Hg", "Au", "Ag"]);
 
 function elementSubstitutionDistance(elA: string, elB: string): number {
   const enA = ELECTRONEGATIVITY[elA] ?? 2.0;
@@ -194,9 +233,14 @@ function hasSuperconductingPotential(formula: string): boolean {
   const elements = Object.keys(counts);
   const hasHighCoupling = elements.some(el => HIGH_COUPLING_METALS.has(el));
   const hasLightPhonon = elements.some(el => LIGHT_PHONON_ELEMENTS.has(el));
+  const hasSCActiveTM = elements.some(el => SC_ACTIVE_TM.has(el));
+  const hasSCActiveMain = elements.some(el => SC_ACTIVE_MAIN.has(el));
+  const hasReservoir = elements.some(el => CHARGE_RESERVOIR_ELEMENTS.has(el));
   const weakCount = elements.filter(el => WEAK_SC_ELEMENTS.has(el)).length;
   if (weakCount > 1) return false;
-  if (!hasHighCoupling && !hasLightPhonon) return false;
+  const hasPrimarySCElement = hasHighCoupling || hasSCActiveTM || hasLightPhonon;
+  if (!hasPrimarySCElement && !hasSCActiveMain) return false;
+  if (!hasPrimarySCElement && hasSCActiveMain && !hasReservoir) return false;
   return true;
 }
 
@@ -774,30 +818,62 @@ export function runMassiveGeneration(
   for (const f of doped) allGenerated.add(f);
 
   const topSCFormulas = sorted.slice(0, 10).map(c => c.formula);
-  const knownSC = ["MgB2", "NbN", "Nb3Sn", "Nb3Ge", "MgCNi3", "YBa2Cu3O7", "LaH10", "NbC", "V3Si", "NbTi"];
+  const knownSC = [
+    "MgB2", "NbN", "Nb3Sn", "Nb3Ge", "MgCNi3", "YBa2Cu3O7", "LaH10", "NbC", "V3Si", "NbTi",
+    "FeSe", "Sr2RuO4", "LaFeAsO", "BaFe2As2", "LiFeAs", "NaFeAs", "FeTe",
+    "La2CuO4", "Bi2Sr2CaCu2O8", "Tl2Ba2CuO6", "HgBa2CuO4", "Bi2Sr2Ca2Cu3O10",
+    "Nb3Al", "NbGe2", "MoN", "TaC", "ZrN", "HfN", "TaN", "WC",
+    "LaOFeAs", "SmFeAsO", "CeFeAsO", "NdFeAsO", "BaKFe2As2",
+    "KV3Sb5", "CsV3Sb5", "RbV3Sb5",
+    "PbMo6S8", "SnMo6S8", "CuMo6S8",
+    "LaNiO3", "NdNiO2", "PrNiO2", "LaNiO2",
+    "Ba0.6K0.4BiO3", "SrTiO3",
+    "LaRu2P2", "BaNi2As2", "SrPd2Ge2",
+    "CeCoIn5", "CeIrIn5", "CeRhIn5", "PuCoGa5",
+    "UPt3", "UBe13", "URu2Si2",
+    "YNi2B2C", "LuNi2B2C", "ErNi2B2C",
+    "NbSe2", "TaSe2", "MoS2", "NbS2", "TaS2",
+    "CaH6", "YH6", "YH9", "ThH10", "ScH9", "CeH10",
+    "LaH10", "BaH12", "SrH10",
+    "PbMo6S8", "InSn", "SnNb3", "AlNb3", "GaN",
+    "K3C60", "Rb3C60", "Cs3C60",
+    "CaBeSi", "LaPt2B2C",
+    "Sr2VO3FeAs", "Ca10Pt4As8",
+    "BiS2LaO", "NbSe3", "Li0.9Mo6O17",
+  ];
   const fractionalSeeds = [...new Set([...topSCFormulas, ...knownSC])];
   const fractionalDoped = generateFractionalDopedVariants(fractionalSeeds, 150);
   for (const f of fractionalDoped) allGenerated.add(f);
 
-  const hcMetals = ["Nb", "Ta", "Mo", "V", "Ti", "Hf", "W", "Re", "Zr"];
-  const lpElements = ["B", "C", "N"];
-  const reservoirs = ["La", "Y", "Ca", "Sr", "Sc", "Ce"];
-  for (let i = 0; i < 100; i++) {
-    const m1 = hcMetals[Math.floor(Math.random() * hcMetals.length)];
-    const lp = lpElements[Math.floor(Math.random() * lpElements.length)];
-    const s1 = Math.floor(Math.random() * 3) + 1;
-    const s2 = Math.floor(Math.random() * 3) + 1;
-    allGenerated.add(canonicalize(`${m1}${s1}${lp}${s2}`));
-    if (Math.random() > 0.5) {
-      const m2 = hcMetals[Math.floor(Math.random() * hcMetals.length)];
-      if (m2 !== m1) {
-        allGenerated.add(canonicalize(`${m1}${s1}${m2}1${lp}${s2}`));
-      }
+  const PROTO_TEMPLATES: { name: string; slots: string[][]; stoichs: number[][] }[] = [
+    { name: "AlB2", slots: [["Mg", "Ca", "Ti", "Zr", "Nb", "Ta"], ["B"]], stoichs: [[1,2]] },
+    { name: "A15", slots: [["Nb", "V", "Ta", "Mo", "W", "Cr"], ["Sn", "Ge", "Si", "Al", "Ga"]], stoichs: [[3,1]] },
+    { name: "Perovskite", slots: [["La", "Y", "Ba", "Sr", "Ca", "Nd", "Ce"], ["Cu", "Ni", "Fe", "Co", "Mn", "Ti", "Ru"], ["O"]], stoichs: [[1,1,3], [2,1,4]] },
+    { name: "ThCr2Si2", slots: [["Ba", "Sr", "Ca", "La", "Ce", "Eu", "K"], ["Fe", "Co", "Ni", "Ru", "Pd"], ["As", "P", "Se", "S"]], stoichs: [[1,2,2]] },
+    { name: "CuO2-layered", slots: [["La", "Y", "Bi", "Tl", "Hg", "Ba", "Sr"], ["Cu"], ["O"]], stoichs: [[2,1,4], [1,2,3], [2,2,5]] },
+    { name: "Kagome", slots: [["K", "Cs", "Rb", "Ca", "Sr", "Ba"], ["V", "Ti", "Mn", "Cr", "Fe"], ["Sb", "Sn", "Bi"]], stoichs: [[1,3,5]] },
+    { name: "NaCl", slots: [["Nb", "V", "Ti", "Ta", "Mo", "Zr", "Hf", "W"], ["N", "C", "O"]], stoichs: [[1,1]] },
+    { name: "Chevrel", slots: [["Cu", "Sn", "Pb", "La", "Ba"], ["Mo"], ["S", "Se"]], stoichs: [[1,6,8]] },
+    { name: "Heusler", slots: [["Li", "Cu", "Ni", "Co"], ["Mn", "Ti", "V", "Fe"], ["Al", "Ga", "Sn", "Sb", "Si"]], stoichs: [[2,1,1], [1,1,1]] },
+    { name: "Borocarbide", slots: [["Y", "Lu", "Tm", "Er", "Ho"], ["Ni", "Pd", "Pt", "Co"], ["B", "C"]], stoichs: [[1,2,2], [1,2,3]] },
+    { name: "Clathrate", slots: [["La", "Y", "Ca", "Sr", "Ba", "Th", "Sc"], ["H"]], stoichs: [[1,6], [1,9], [1,10]] },
+    { name: "Laves", slots: [["Zr", "Hf", "Sc", "Y", "La", "Ce"], ["V", "Nb", "Fe", "Co", "Ni", "Ru"]], stoichs: [[1,2]] },
+    { name: "Pyrite", slots: [["Fe", "Co", "Ni", "Cu", "Ru", "Os"], ["S", "Se", "Te"]], stoichs: [[1,2]] },
+    { name: "Skutterudite", slots: [["Co", "Rh", "Ir", "Fe", "Ni"], ["Sb", "As", "P"]], stoichs: [[1,3], [4,12]] },
+  ];
+  for (let i = 0; i < 150; i++) {
+    const proto = PROTO_TEMPLATES[Math.floor(Math.random() * PROTO_TEMPLATES.length)];
+    const chosen: string[] = [];
+    for (const slotGroup of proto.slots) {
+      chosen.push(slotGroup[Math.floor(Math.random() * slotGroup.length)]);
     }
-    if (Math.random() > 0.6) {
-      const res = reservoirs[Math.floor(Math.random() * reservoirs.length)];
-      allGenerated.add(canonicalize(`${res}1${m1}${s1}${lp}${s2}`));
+    if (new Set(chosen).size < chosen.length) continue;
+    const stoich = proto.stoichs[Math.floor(Math.random() * proto.stoichs.length)];
+    let formula = "";
+    for (let ei = 0; ei < chosen.length; ei++) {
+      formula += chosen[ei] + (stoich[ei] > 1 ? stoich[ei] : "");
     }
+    allGenerated.add(canonicalize(formula));
   }
 
   for (const pair of focusPairs) {
