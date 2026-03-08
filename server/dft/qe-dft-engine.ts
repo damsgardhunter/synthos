@@ -116,20 +116,43 @@ const PROTOTYPE_PACKING: Record<string, number> = {
   "Pyrite": 0.68, "Wurtzite": 0.74, "Antifluorite": 0.74,
   "Laves-C14": 0.71, "Laves-C15": 0.71, "HfFe6Ge6": 0.68,
   "CeCu2Si2": 0.68, "PuCoGa5-115": 0.68, "Infinite-layer": 0.60,
-  "T-prime": 0.60,
+  "T-prime": 0.60, "Ruddlesden-Popper": 0.65, "Double-perovskite": 0.74,
+  "Garnet": 0.68,
 };
 
-function estimateLatticeParam(elements: string[], counts: Record<string, number>, protoName?: string): number {
-  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+const ATOMIC_VOLUMES: Record<string, number> = {
+  H: 5.0, He: 4.0, Li: 21.0, Be: 8.0, B: 7.5, C: 12.0, N: 13.0,
+  O: 14.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 23.0, Al: 16.6, Si: 20.0,
+  P: 17.0, S: 15.5, Cl: 22.0, Ar: 24.0, K: 45.5, Ca: 26.0, Sc: 25.0,
+  Ti: 17.6, V: 14.0, Cr: 12.0, Mn: 12.2, Fe: 11.8, Co: 11.0, Ni: 10.9,
+  Cu: 11.8, Zn: 15.2, Ga: 19.6, Ge: 22.6, As: 21.4, Se: 16.4, Br: 23.5,
+  Kr: 27.0, Rb: 56.0, Sr: 34.0, Y: 33.0, Zr: 23.3, Nb: 18.0, Mo: 15.6,
+  Ru: 13.6, Rh: 13.7, Pd: 14.7, Ag: 17.1, Cd: 21.6, In: 26.2, Sn: 27.3,
+  Sb: 30.3, Te: 33.8, I: 25.7, Cs: 70.0, Ba: 37.0, La: 37.0, Ce: 34.4,
+  Hf: 22.3, Ta: 18.0, W: 15.8, Re: 14.7, Os: 14.0, Ir: 14.2, Pt: 15.1,
+  Au: 17.0, Hg: 23.4, Tl: 28.6, Pb: 30.3, Bi: 35.4, Th: 33.0, U: 20.8,
+  Tc: 14.3,
+};
+
+function computeExpectedVolume(counts: Record<string, number>, packingFactor: number = 1.0): number {
   let totalVolume = 0;
-  for (const el of elements) {
-    const r = getAvgRadius(el);
-    const n = Math.round(counts[el] || 1);
-    totalVolume += n * (4.0 / 3.0) * Math.PI * Math.pow(r, 3);
+  for (const [el, count] of Object.entries(counts)) {
+    const vol = ATOMIC_VOLUMES[el] ?? 15.0;
+    totalVolume += vol * Math.round(count);
   }
+  return totalVolume * packingFactor;
+}
+
+function validateVolumeRatio(generatedVolume: number, expectedVolume: number): { valid: boolean; ratio: number } {
+  if (expectedVolume <= 0) return { valid: true, ratio: 1.0 };
+  const ratio = generatedVolume / expectedVolume;
+  return { valid: ratio >= 0.6 && ratio <= 1.6, ratio };
+}
+
+function estimateLatticeParam(elements: string[], counts: Record<string, number>, protoName?: string): number {
   const packingFactor = protoName ? (PROTOTYPE_PACKING[protoName] ?? 0.68) : 0.68;
-  const cellVolume = totalVolume / packingFactor;
-  const latticeA = Math.cbrt(cellVolume);
+  const expectedVolume = computeExpectedVolume(counts, 1.0 / packingFactor);
+  const latticeA = Math.cbrt(expectedVolume);
   return Math.max(latticeA, 3.0);
 }
 
@@ -772,6 +795,67 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     cOverA: 3.1,
     stoichiometryPattern: "A2B2C4",
   },
+  {
+    name: "Ruddlesden-Popper",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.0, y: 0.0, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.25 },
+      { site: "C", x: 0.5, y: 0.0, z: 0.25 },
+      { site: "C", x: 0.0, y: 0.5, z: 0.25 },
+      { site: "C", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "C", x: 0.5, y: 0.5, z: 0.5 },
+    ],
+    latticeType: "tetragonal",
+    aRatio: 1.0,
+    cOverA: 3.3,
+    stoichiometryPattern: "A2B1C4",
+  },
+  {
+    name: "Double-perovskite",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.5 },
+      { site: "C", x: 0.25, y: 0.0, z: 0.0 },
+      { site: "C", x: 0.75, y: 0.0, z: 0.0 },
+      { site: "C", x: 0.0, y: 0.25, z: 0.0 },
+      { site: "C", x: 0.0, y: 0.75, z: 0.0 },
+      { site: "C", x: 0.0, y: 0.0, z: 0.25 },
+      { site: "C", x: 0.0, y: 0.0, z: 0.75 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A2B2C6",
+  },
+  {
+    name: "Garnet",
+    fractionalPositions: [
+      { site: "A", x: 0.125, y: 0.0, z: 0.25 },
+      { site: "A", x: 0.875, y: 0.0, z: 0.75 },
+      { site: "A", x: 0.375, y: 0.5, z: 0.25 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.5, y: 0.5, z: 0.5 },
+      { site: "C", x: 0.375, y: 0.0, z: 0.25 },
+      { site: "C", x: 0.625, y: 0.0, z: 0.75 },
+      { site: "C", x: 0.125, y: 0.5, z: 0.25 },
+      { site: "C", x: 0.875, y: 0.5, z: 0.75 },
+      { site: "C", x: 0.25, y: 0.125, z: 0.0 },
+      { site: "C", x: 0.75, y: 0.875, z: 0.0 },
+      { site: "C", x: 0.25, y: 0.375, z: 0.5 },
+      { site: "C", x: 0.75, y: 0.625, z: 0.5 },
+      { site: "C", x: 0.0, y: 0.25, z: 0.125 },
+      { site: "C", x: 0.0, y: 0.75, z: 0.875 },
+      { site: "C", x: 0.5, y: 0.25, z: 0.625 },
+      { site: "C", x: 0.5, y: 0.75, z: 0.375 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A3B2C12",
+  },
 ];
 
 function getProtoSiteCounts(proto: PrototypeStructure): Record<string, number> {
@@ -780,6 +864,98 @@ function getProtoSiteCounts(proto: PrototypeStructure): Record<string, number> {
     siteCounts[pos.site] = (siteCounts[pos.site] || 0) + 1;
   }
   return siteCounts;
+}
+
+const RARE_EARTHS = new Set(["La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Y", "Sc"]);
+const TRANSITION_METALS = new Set(["Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"]);
+const ANIONS = new Set(["O", "S", "Se", "Te", "F", "Cl", "Br", "I", "N", "P", "As"]);
+const ALKALINE_EARTH = new Set(["Ca", "Sr", "Ba", "Mg"]);
+const ALKALI = new Set(["Li", "Na", "K", "Rb", "Cs"]);
+
+function classifyElement(el: string): "H" | "rare-earth" | "TM" | "anion" | "alkaline" | "alkali" | "metalloid" | "other" {
+  if (el === "H") return "H";
+  if (RARE_EARTHS.has(el)) return "rare-earth";
+  if (TRANSITION_METALS.has(el)) return "TM";
+  if (ANIONS.has(el)) return "anion";
+  if (ALKALINE_EARTH.has(el)) return "alkaline";
+  if (ALKALI.has(el)) return "alkali";
+  if (["B", "Si", "Ge", "Sn", "Sb", "Bi", "Al", "Ga", "In", "Tl", "Pb"].includes(el)) return "metalloid";
+  return "other";
+}
+
+function selectBestPrototypeByChemistry(counts: Record<string, number>, elements: string[]): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
+  const roles = elements.map(el => classifyElement(el));
+  const nElements = elements.length;
+  const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+
+  const hasRE = roles.includes("rare-earth");
+  const hasTM = roles.includes("TM");
+  const hasAnion = roles.includes("anion");
+  const hasAlkaline = roles.includes("alkaline");
+  const hasAlkali = roles.includes("alkali");
+  const hasMetalloid = roles.includes("metalloid");
+
+  let targetProtoName: string | null = null;
+
+  if (nElements === 3 && (hasRE || hasAlkaline || hasAlkali) && hasTM && hasAnion) {
+    const anionEl = elements.find(e => ANIONS.has(e))!;
+    const anionCount = counts[anionEl] || 0;
+    const totalNonAnion = Object.values(counts).reduce((s, n) => s + n, 0) - anionCount;
+    const anionRatio = anionCount / Math.max(1, totalNonAnion);
+    if (anionRatio >= 2.5) targetProtoName = "Ruddlesden-Popper";
+    else if (anionRatio >= 1.2) targetProtoName = "Perovskite";
+    else targetProtoName = "ThCr2Si2";
+  } else if (nElements === 3 && hasTM && hasAnion && hasMetalloid) {
+    targetProtoName = "BiS2-layered";
+  } else if (nElements === 2 && hasTM && hasAnion) {
+    const tmEl = elements.find(e => TRANSITION_METALS.has(e))!;
+    const anEl = elements.find(e => ANIONS.has(e))!;
+    const tmCount = counts[tmEl] || 0;
+    const anCount = counts[anEl] || 0;
+    if (anCount / tmCount >= 1.8) targetProtoName = "Pyrite";
+    else if (tmCount / anCount >= 2.5) targetProtoName = "Cr3Si";
+    else targetProtoName = "NaCl";
+  } else if (nElements === 2 && hasTM && hasMetalloid) {
+    const tmEl = elements.find(e => TRANSITION_METALS.has(e))!;
+    const mEl = elements.find(e => classifyElement(e) === "metalloid")!;
+    const tmCount = counts[tmEl] || 0;
+    const mCount = counts[mEl] || 0;
+    if (tmCount / mCount >= 2.5) targetProtoName = "A15";
+    else if (mCount / tmCount >= 2) targetProtoName = "AlB2";
+    else targetProtoName = "CsCl";
+  } else if (nElements === 2 && (hasRE || hasAlkaline) && hasTM) {
+    targetProtoName = "Cu2Mg-Laves";
+  } else if (nElements === 1) {
+    const el = elements[0];
+    const role = classifyElement(el);
+    if (role === "TM") {
+      const count = Math.round(counts[el]);
+      if (count <= 2) targetProtoName = "BCC";
+      else targetProtoName = "FCC";
+    } else {
+      targetProtoName = "FCC";
+    }
+  } else if (nElements >= 4) {
+    targetProtoName = "Perovskite";
+  }
+
+  if (!targetProtoName) return null;
+
+  const proto = CRYSTAL_PROTOTYPES.find(p => p.name === targetProtoName);
+  if (!proto) return null;
+
+  const siteCounts = getProtoSiteCounts(proto);
+  const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
+  const siteMap: Record<string, string> = {};
+
+  for (let i = 0; i < Math.min(sites.length, elementsByCount.length); i++) {
+    siteMap[sites[i]] = elementsByCount[i];
+  }
+  for (let i = elementsByCount.length; i < sites.length; i++) {
+    siteMap[sites[i]] = elementsByCount[elementsByCount.length - 1];
+  }
+
+  return { proto, siteMap };
 }
 
 function matchPrototype(counts: Record<string, number>): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
@@ -857,6 +1033,62 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
 
   if (bestProto) {
     return { proto: bestProto, siteMap: bestSiteMap };
+  }
+
+  for (const proto of CRYSTAL_PROTOTYPES) {
+    const siteCounts = getProtoSiteCounts(proto);
+    const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
+    if (sites.length >= nElements) continue;
+
+    const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+    const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
+
+    const siteRatios = sitesByCount.map(s => siteCounts[s]);
+    const siteGcd = siteRatios.reduce((a, b) => gcd(a, b));
+    const siteReduced = siteRatios.map(r => r / siteGcd);
+
+    const mergedReduced: number[] = [];
+    for (let i = 0; i < sitesByCount.length; i++) {
+      if (i < elementsByCount.length) {
+        mergedReduced.push(Math.round(counts[elementsByCount[i]]));
+      }
+    }
+    for (let i = sitesByCount.length; i < elementsByCount.length; i++) {
+      mergedReduced[mergedReduced.length - 1] += Math.round(counts[elementsByCount[i]]);
+    }
+    const mergedGcd = mergedReduced.reduce((a, b) => gcd(a, b));
+    const mergedNorm = mergedReduced.map(r => r / mergedGcd);
+
+    const sortedMerged = [...mergedNorm].sort((a, b) => b - a);
+    const sortedSite = [...siteReduced].sort((a, b) => b - a);
+
+    let score = 0;
+    for (let i = 0; i < sortedMerged.length; i++) {
+      const diff = Math.abs(sortedMerged[i] - sortedSite[i]);
+      score += diff / Math.max(1, sortedSite[i]);
+    }
+
+    if (score < bestScore && score < 0.8) {
+      bestScore = score;
+      bestProto = proto;
+      bestSiteMap = {};
+      for (let i = 0; i < Math.min(sitesByCount.length, elementsByCount.length); i++) {
+        bestSiteMap[sitesByCount[i]] = elementsByCount[i];
+      }
+      for (let i = elementsByCount.length; i < sitesByCount.length; i++) {
+        bestSiteMap[sitesByCount[i]] = elementsByCount[elementsByCount.length - 1];
+      }
+    }
+  }
+
+  if (bestProto) {
+    return { proto: bestProto, siteMap: bestSiteMap };
+  }
+
+  const chemMatch = selectBestPrototypeByChemistry(counts, elements);
+  if (chemMatch) {
+    chemistryMatchSuccesses++;
+    return chemMatch;
   }
 
   if (nElements === 1) {
@@ -953,9 +1185,266 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
   return { atoms, proto: "generic-cluster" };
 }
 
-const MIN_VOLUME_PER_ATOM = 6.0;
-const MIN_VOLUME_PER_ATOM_HYDRIDE = 3.5;
+const MIN_VOLUME_PER_ATOM = 10.0;
+const MIN_VOLUME_PER_ATOM_HYDRIDE = 5.0;
 const MAX_SCALE_ATTEMPTS = 5;
+
+interface HydrideCageMotif {
+  name: string;
+  hPerMetal: number;
+  metalFrac: { x: number; y: number; z: number }[];
+  hydrogenFrac: { x: number; y: number; z: number }[];
+  latticeType: "cubic" | "hexagonal";
+  cOverA: number;
+  baseLatticeFactor: number;
+}
+
+const HYDRIDE_CAGE_LIBRARY: HydrideCageMotif[] = [
+  {
+    name: "Sodalite-H32",
+    hPerMetal: 10,
+    metalFrac: [
+      { x: 0.0, y: 0.0, z: 0.0 },
+      { x: 0.5, y: 0.5, z: 0.0 },
+      { x: 0.5, y: 0.0, z: 0.5 },
+      { x: 0.0, y: 0.5, z: 0.5 },
+    ],
+    hydrogenFrac: [
+      { x: 0.120, y: 0.120, z: 0.120 },
+      { x: 0.880, y: 0.120, z: 0.120 },
+      { x: 0.120, y: 0.880, z: 0.120 },
+      { x: 0.120, y: 0.120, z: 0.880 },
+      { x: 0.880, y: 0.880, z: 0.120 },
+      { x: 0.880, y: 0.120, z: 0.880 },
+      { x: 0.120, y: 0.880, z: 0.880 },
+      { x: 0.880, y: 0.880, z: 0.880 },
+      { x: 0.250, y: 0.0, z: 0.5 },
+      { x: 0.750, y: 0.0, z: 0.5 },
+      { x: 0.0, y: 0.250, z: 0.5 },
+      { x: 0.0, y: 0.750, z: 0.5 },
+      { x: 0.5, y: 0.250, z: 0.0 },
+      { x: 0.5, y: 0.750, z: 0.0 },
+      { x: 0.250, y: 0.5, z: 0.0 },
+      { x: 0.750, y: 0.5, z: 0.0 },
+      { x: 0.0, y: 0.5, z: 0.250 },
+      { x: 0.0, y: 0.5, z: 0.750 },
+      { x: 0.5, y: 0.0, z: 0.250 },
+      { x: 0.5, y: 0.0, z: 0.750 },
+      { x: 0.620, y: 0.620, z: 0.620 },
+      { x: 0.380, y: 0.380, z: 0.620 },
+      { x: 0.380, y: 0.620, z: 0.380 },
+      { x: 0.620, y: 0.380, z: 0.380 },
+      { x: 0.185, y: 0.185, z: 0.5 },
+      { x: 0.815, y: 0.815, z: 0.5 },
+      { x: 0.185, y: 0.5, z: 0.185 },
+      { x: 0.815, y: 0.5, z: 0.815 },
+      { x: 0.5, y: 0.185, z: 0.185 },
+      { x: 0.5, y: 0.815, z: 0.815 },
+      { x: 0.5, y: 0.185, z: 0.815 },
+      { x: 0.5, y: 0.815, z: 0.185 },
+    ],
+    latticeType: "cubic",
+    cOverA: 1.0,
+    baseLatticeFactor: 5.0,
+  },
+  {
+    name: "Clathrate-H6",
+    hPerMetal: 6,
+    metalFrac: [
+      { x: 0.0, y: 0.0, z: 0.0 },
+    ],
+    hydrogenFrac: [
+      { x: 0.25, y: 0.0, z: 0.0 },
+      { x: 0.75, y: 0.0, z: 0.0 },
+      { x: 0.0, y: 0.25, z: 0.0 },
+      { x: 0.0, y: 0.75, z: 0.0 },
+      { x: 0.0, y: 0.0, z: 0.25 },
+      { x: 0.0, y: 0.0, z: 0.75 },
+    ],
+    latticeType: "cubic",
+    cOverA: 1.0,
+    baseLatticeFactor: 3.65,
+  },
+  {
+    name: "TriCappedPrism-H9",
+    hPerMetal: 9,
+    metalFrac: [
+      { x: 0.0, y: 0.0, z: 0.0 },
+      { x: 0.5, y: 0.5, z: 0.5 },
+    ],
+    hydrogenFrac: [
+      { x: 0.167, y: 0.167, z: 0.0 },
+      { x: 0.833, y: 0.167, z: 0.0 },
+      { x: 0.167, y: 0.833, z: 0.0 },
+      { x: 0.167, y: 0.167, z: 0.333 },
+      { x: 0.833, y: 0.167, z: 0.333 },
+      { x: 0.167, y: 0.833, z: 0.333 },
+      { x: 0.5, y: 0.0, z: 0.167 },
+      { x: 0.0, y: 0.5, z: 0.167 },
+      { x: 0.5, y: 0.5, z: 0.0 },
+      { x: 0.667, y: 0.667, z: 0.5 },
+      { x: 0.333, y: 0.667, z: 0.5 },
+      { x: 0.667, y: 0.333, z: 0.5 },
+      { x: 0.667, y: 0.667, z: 0.833 },
+      { x: 0.333, y: 0.667, z: 0.833 },
+      { x: 0.667, y: 0.333, z: 0.833 },
+      { x: 0.0, y: 0.5, z: 0.667 },
+      { x: 0.5, y: 0.0, z: 0.667 },
+      { x: 0.0, y: 0.0, z: 0.5 },
+    ],
+    latticeType: "hexagonal",
+    cOverA: 1.73,
+    baseLatticeFactor: 4.2,
+  },
+  {
+    name: "Clathrate-H8",
+    hPerMetal: 8,
+    metalFrac: [
+      { x: 0.0, y: 0.0, z: 0.0 },
+    ],
+    hydrogenFrac: [
+      { x: 0.185, y: 0.185, z: 0.185 },
+      { x: 0.815, y: 0.185, z: 0.185 },
+      { x: 0.185, y: 0.815, z: 0.185 },
+      { x: 0.185, y: 0.185, z: 0.815 },
+      { x: 0.815, y: 0.815, z: 0.185 },
+      { x: 0.815, y: 0.185, z: 0.815 },
+      { x: 0.185, y: 0.815, z: 0.815 },
+      { x: 0.815, y: 0.815, z: 0.815 },
+    ],
+    latticeType: "cubic",
+    cOverA: 1.0,
+    baseLatticeFactor: 3.8,
+  },
+  {
+    name: "H4-Tetrahedral",
+    hPerMetal: 4,
+    metalFrac: [
+      { x: 0.0, y: 0.0, z: 0.0 },
+    ],
+    hydrogenFrac: [
+      { x: 0.25, y: 0.25, z: 0.25 },
+      { x: 0.75, y: 0.75, z: 0.25 },
+      { x: 0.75, y: 0.25, z: 0.75 },
+      { x: 0.25, y: 0.75, z: 0.75 },
+    ],
+    latticeType: "cubic",
+    cOverA: 1.0,
+    baseLatticeFactor: 3.5,
+  },
+];
+
+function selectHydrideCage(hPerMetal: number): HydrideCageMotif {
+  const sorted = [...HYDRIDE_CAGE_LIBRARY].sort(
+    (a, b) => Math.abs(a.hPerMetal - hPerMetal) - Math.abs(b.hPerMetal - hPerMetal)
+  );
+  return sorted[0];
+}
+
+function generateHydrideCageStructure(
+  formula: string,
+  counts: Record<string, number>
+): { atoms: AtomPosition[]; prototype: string } | null {
+  const elements = Object.keys(counts);
+  const metals = elements.filter(el => el !== "H");
+  const hCount = Math.round(counts["H"] || 0);
+  if (metals.length === 0 || hCount === 0) return null;
+
+  const totalMetalCount = metals.reduce((s, el) => s + Math.round(counts[el] || 0), 0);
+  const hPerMetal = hCount / totalMetalCount;
+  if (hPerMetal < 4) return null;
+
+  const cage = selectHydrideCage(hPerMetal);
+
+  const metalRadiiSum = metals.reduce((s, el) => {
+    const r = COVALENT_RADII[el] ?? 1.5;
+    return s + r;
+  }, 0);
+  const avgMetalRadius = metalRadiiSum / metals.length;
+  const latticeA = cage.baseLatticeFactor * (avgMetalRadius / 1.5);
+  const a = Math.max(latticeA, 3.0);
+  const c = a * cage.cOverA;
+
+  const metalSiteCount = cage.metalFrac.length;
+  const hSiteCount = cage.hydrogenFrac.length;
+
+  const nCopies = Math.max(1, Math.round(totalMetalCount / metalSiteCount));
+
+  const atoms: AtomPosition[] = [];
+
+  const metalList: string[] = [];
+  for (const el of metals) {
+    const n = Math.round(counts[el] || 0);
+    for (let i = 0; i < n; i++) metalList.push(el);
+  }
+
+  let metalIdx = 0;
+  let hPlaced = 0;
+
+  for (let copy = 0; copy < nCopies; copy++) {
+    const offsetX = (copy % 2) * a;
+    const offsetY = (Math.floor(copy / 2) % 2) * a;
+    const offsetZ = Math.floor(copy / 4) * a;
+
+    for (let i = 0; i < metalSiteCount && metalIdx < metalList.length; i++) {
+      const pos = cage.metalFrac[i];
+      let x: number, y: number, z: number;
+      if (cage.latticeType === "hexagonal") {
+        x = a * pos.x + a * 0.5 * pos.y + offsetX;
+        y = a * (Math.sqrt(3) / 2) * pos.y + offsetY;
+        z = c * pos.z + offsetZ;
+      } else {
+        x = a * pos.x + offsetX;
+        y = a * pos.y + offsetY;
+        z = a * pos.z + offsetZ;
+      }
+      atoms.push({ element: metalList[metalIdx], x, y, z });
+      metalIdx++;
+    }
+
+    const hPerCopy = Math.min(Math.round(hCount / nCopies), hSiteCount);
+    for (let i = 0; i < hPerCopy && hPlaced < hCount; i++) {
+      const pos = cage.hydrogenFrac[i % hSiteCount];
+      let x: number, y: number, z: number;
+      if (cage.latticeType === "hexagonal") {
+        x = a * pos.x + a * 0.5 * pos.y + offsetX;
+        y = a * (Math.sqrt(3) / 2) * pos.y + offsetY;
+        z = c * pos.z + offsetZ;
+      } else {
+        x = a * pos.x + offsetX;
+        y = a * pos.y + offsetY;
+        z = a * pos.z + offsetZ;
+      }
+      atoms.push({ element: "H", x, y, z });
+      hPlaced++;
+    }
+  }
+
+  while (hPlaced < hCount && nCopies > 0) {
+    const pos = cage.hydrogenFrac[hPlaced % hSiteCount];
+    const copy = Math.floor(hPlaced / hSiteCount) % nCopies;
+    const offsetX = (copy % 2) * a;
+    const offsetY = (Math.floor(copy / 2) % 2) * a;
+    const offsetZ = Math.floor(copy / 4) * a;
+    let x: number, y: number, z: number;
+    if (cage.latticeType === "hexagonal") {
+      x = a * pos.x + a * 0.5 * pos.y + offsetX;
+      y = a * (Math.sqrt(3) / 2) * pos.y + offsetY;
+      z = c * pos.z + offsetZ;
+    } else {
+      x = a * pos.x + offsetX;
+      y = a * pos.y + offsetY;
+      z = a * pos.z + offsetZ;
+    }
+    atoms.push({ element: "H", x, y, z });
+    hPlaced++;
+  }
+
+  if (atoms.length < 2) return null;
+
+  console.log(`[DFT] ${formula}: Using hydride cage motif ${cage.name} (H/metal=${hPerMetal.toFixed(1)}, ${atoms.length} atoms)`);
+  return { atoms, prototype: `hydride-cage-${cage.name}` };
+}
 
 function getMinInteratomicDistance(el1: string, el2: string): number {
   const r1 = COVALENT_RADII[el1] ?? 1.5;
@@ -1033,6 +1522,10 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   const hasHydrogen = atoms.some(a => a.element === "H");
   const minVol = hasHydrogen ? MIN_VOLUME_PER_ATOM_HYDRIDE : MIN_VOLUME_PER_ATOM;
 
+  const counts = parseFormula(formula);
+  const expectedVolume = computeExpectedVolume(counts);
+  const targetVolPerAtom = Math.max(minVol, expectedVolume / Math.max(atoms.length, 1));
+
   let current = atoms;
 
   for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
@@ -1041,21 +1534,24 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     const volumePerAtom = volume / current.length;
 
     const distOk = minRatio >= 0.99;
-    const volOk = volumePerAtom >= minVol - 0.1;
+    const volOk = volumePerAtom >= targetVolPerAtom - 0.1;
 
-    if (distOk && volOk) return current;
+    if (distOk && volOk) {
+      const volRatioCheck = validateVolumeRatio(volume, expectedVolume);
+      if (volRatioCheck.valid) return current;
+    }
 
     let scaleFactor = 1.0;
     if (!distOk) {
       scaleFactor = Math.max(scaleFactor, 1.05 / Math.max(minRatio, 0.01));
     }
     if (!volOk) {
-      const neededFactor = Math.cbrt(minVol / Math.max(volumePerAtom, 0.01));
+      const neededFactor = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
       scaleFactor = Math.max(scaleFactor, neededFactor);
     }
 
     scaleFactor = Math.min(scaleFactor, 3.0);
-    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų — scaling by ${scaleFactor.toFixed(2)}`);
+    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(2)}`);
     current = scaleStructure(current, scaleFactor);
   }
 
@@ -1071,6 +1567,17 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   return current;
 }
 
+function checkVolumeRatioForAtoms(atoms: AtomPosition[], counts: Record<string, number>, label: string, formula: string): boolean {
+  if (atoms.length < 2) return false;
+  const volume = computeBoundingVolume(atoms);
+  const expectedVol = computeExpectedVolume(counts);
+  const { valid, ratio } = validateVolumeRatio(volume, expectedVol);
+  if (!valid) {
+    console.log(`[DFT] ${formula}: Volume ratio check FAILED for ${label} — generated=${volume.toFixed(1)}ų, expected=${expectedVol.toFixed(1)}ų, ratio=${ratio.toFixed(2)} (must be 0.6-1.6)`);
+  }
+  return valid;
+}
+
 function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; prototype: string } {
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
@@ -1078,6 +1585,8 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (elements.length === 0) {
     return { atoms: [], prototype: "empty" };
   }
+
+  prototypeAttempts++;
 
   const chemProto = fillPrototype(formula);
   if (chemProto && chemProto.atoms.length >= 2) {
@@ -1089,7 +1598,25 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
     }));
     const validated = validateAndFixStructure(atomPositions, formula);
     if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+    if (!checkVolumeRatioForAtoms(validated, counts, chemProto.templateName, formula)) {
+      return { atoms: [], prototype: "rejected-volume-ratio" };
+    }
+    prototypeSuccesses++;
     return { atoms: validated, prototype: `${chemProto.templateName} prototype lattice` };
+  }
+
+  const hCount = counts["H"] || 0;
+  const metalElements = elements.filter(el => el !== "H");
+  const totalMetalCount = metalElements.reduce((s, el) => s + Math.round(counts[el] || 0), 0);
+  if (hCount > 0 && totalMetalCount > 0 && (hCount / totalMetalCount) >= 4) {
+    const hydrideCage = generateHydrideCageStructure(formula, counts);
+    if (hydrideCage && hydrideCage.atoms.length >= 2) {
+      const validated = validateAndFixStructure(hydrideCage.atoms, formula);
+      if (validated) {
+        prototypeSuccesses++;
+        return { atoms: validated, prototype: hydrideCage.prototype };
+      }
+    }
   }
 
   const protoMatch = matchPrototype(counts);
@@ -1098,6 +1625,10 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
     if (atoms.length >= 2) {
       const validated = validateAndFixStructure(atoms, formula);
       if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+      if (!checkVolumeRatioForAtoms(validated, counts, protoMatch.proto.name, formula)) {
+        return { atoms: [], prototype: "rejected-volume-ratio" };
+      }
+      prototypeSuccesses++;
       return { atoms: validated, prototype: protoMatch.proto.name };
     }
   }
@@ -1122,13 +1653,37 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
     if (atoms.length >= 2) {
       const validated = validateAndFixStructure(atoms, formula);
       if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+      if (!checkVolumeRatioForAtoms(validated, scaledCounts, scaledMatch.proto.name + "-scaled", formula)) {
+        return { atoms: [], prototype: "rejected-volume-ratio" };
+      }
+      prototypeSuccesses++;
       return { atoms: validated, prototype: scaledMatch.proto.name + "-scaled" };
+    }
+  }
+
+  chemistryMatchAttempts++;
+  const chemMatch = selectBestPrototypeByChemistry(scaledCounts, elements);
+  if (chemMatch) {
+    const atoms = buildStructureFromPrototype(chemMatch.proto, chemMatch.siteMap, elements, scaledCounts);
+    if (atoms.length >= 2) {
+      const validated = validateAndFixStructure(atoms, formula);
+      if (validated) {
+        if (checkVolumeRatioForAtoms(validated, scaledCounts, chemMatch.proto.name + "-chem", formula)) {
+          prototypeSuccesses++;
+          chemistryMatchSuccesses++;
+          console.log(`[DFT] ${formula}: Chemistry-based prototype match → ${chemMatch.proto.name}`);
+          return { atoms: validated, prototype: chemMatch.proto.name + "-chem" };
+        }
+      }
     }
   }
 
   const { atoms, proto } = buildGenericStructure(scaledCounts);
   const validated = validateAndFixStructure(atoms, formula);
   if (!validated) return { atoms: [], prototype: "rejected-overlap" };
+  if (!checkVolumeRatioForAtoms(validated, scaledCounts, proto, formula)) {
+    return { atoms: [], prototype: "rejected-volume-ratio" };
+  }
   return { atoms: validated, prototype: proto };
 }
 
@@ -1628,6 +2183,10 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
 
 let totalXTBRuns = 0;
 let totalXTBSuccesses = 0;
+let prototypeAttempts = 0;
+let prototypeSuccesses = 0;
+let chemistryMatchAttempts = 0;
+let chemistryMatchSuccesses = 0;
 
 const phononCache = new Map<string, PhononStability | null>();
 
@@ -1914,6 +2473,10 @@ export function getXTBStats() {
     cacheSize: xtbResultCache.size,
     optimizedStructures: optimizedStructureCache.size,
     refElements: elementRefEnergies.size,
+    prototypeAttempts,
+    prototypeSuccesses,
+    chemistryMatchAttempts,
+    chemistryMatchSuccesses,
   };
 }
 

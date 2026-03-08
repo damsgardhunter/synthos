@@ -95,6 +95,9 @@ MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the di
 - **DFT Metric Clarity**: Stats keys renamed: `realDFT` → `xtb`, `fullDFTQueue` → `qeDFT` for clear xTB vs QE distinction.
 - **Motif Entropy Regularization**: Epsilon-greedy (15%) + min 5% floor + max 40% cap per motif in structure/crystal diffusion.
 - **Log Truncation Fix**: Live event feed and log details use `break-words line-clamp-3` instead of CSS truncate.
+- **Volume Prior in Structure Generation**: Per-element atomic volume table; `computeExpectedVolume` + `validateVolumeRatio` (0.6–1.6 range); `estimateLatticeParam` uses atomic volumes instead of covalent radii cubed; `MIN_VOLUME_PER_ATOM` raised to 10.0 Å³ (non-hydride) and 5.0 Å³ (hydride).
+- **Hydrogen Cage Library**: 5 cage motifs (Sodalite-H32, Clathrate-H6, TriCappedPrism-H9, Clathrate-H8, H4-Tetrahedral) for hydrides with H/metal ≥ 4. `generateHydrideCageStructure` places metal at cage center, H at cage vertices.
+- **Prototype-First Generation**: Added Ruddlesden-Popper, Double-perovskite, Garnet prototypes. Chemistry-aware element classification + `selectBestPrototypeByChemistry` for fuzzy matching. `prototypeAttempts`/`prototypeSuccesses` counters tracked.
 
 ### Physics Filtering Rules
 - **Phonon stability**: Hard rejection for severe instability (>3 imaginary modes or lowest freq < -500 cm⁻¹). Penalties for physical imaginary modes.

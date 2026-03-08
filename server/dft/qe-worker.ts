@@ -555,7 +555,7 @@ function validateGeometry(
   const volumeAng3 = latticeA ** 3;
   const volumePerAtom = volumeAng3 / totalAtoms;
   const hasHydrogen = positions.some(p => p.element === "H");
-  const minVolPerAtom = hasHydrogen ? 3.5 : 5;
+  const minVolPerAtom = hasHydrogen ? 5.0 : 10.0;
   if (volumePerAtom < minVolPerAtom) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})` };
 
   const COVALENT_R: Record<string, number> = {

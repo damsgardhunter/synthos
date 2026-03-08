@@ -1,0 +1,141 @@
+Geometry failures dominate QE
+QE totalProcessed: 312
+totalSucceeded: 1
+totalFailed: 311
+
+That’s a 99.7% failure rate.
+
+Most failures are:
+
+geometry invalid
+atoms too close
+volume per atom too small
+
+Example:
+
+Atoms La(0) and H(5) too close: 1.66 Å
+
+This means the structure generator is producing unrealistic lattices.
+
+🚨 Bottleneck 2 — xTB phonon explosions
+
+You repeatedly see:
+
+ARTIFACT DETECTED — 574 modes below -2000 cm⁻¹
+
+These are numerical explosions from xTB Hessian calculations.
+
+Typical physical phonon frequencies are:
+
+-200 cm⁻¹ to +1000 cm⁻¹
+
+Not:
+
+-86140 cm⁻¹
+
+Your artifact detection is correctly catching them, which is good.
+
+🚨 Bottleneck 3 — Unrealistic volumes
+
+Example:
+
+vol/atom=1.7 Å³
+vol/atom=0.9 Å³
+
+Real materials usually fall in:
+
+10–25 Å³ per atom
+
+Hydrides under pressure may go:
+
+5–12 Å³
+
+So your generator is collapsing lattices too much.
+
+🚨 Bottleneck 4 — RL agent not learning yet
+rlAgent:
+totalUpdates: 0
+replayBufferSize: 0
+recentAvgReward: 0
+
+Meaning:
+
+RL exists
+
+but no training signal yet
+
+3️⃣ The Most Important Fixes
+
+If you implement just these three fixes, performance will improve dramatically.
+
+Fix 1 — Volume prior in generator
+
+Add a physics-based volume predictor.
+
+Before generating coordinates:
+
+expected_volume =
+Σ atomic_volume(element) × packing_factor
+
+Typical atomic volumes:
+
+H ~ 5 Å³
+C ~ 12 Å³
+O ~ 14 Å³
+Fe ~ 11 Å³
+La ~ 37 Å³
+
+Then enforce:
+
+0.6 < V_generated / V_expected < 1.6
+
+This will eliminate most geometry failures.
+
+Fix 2 — Prototype-first generation
+
+Your system should generate structures like:
+
+prototype → substitute elements
+
+Examples:
+
+A15
+
+ThCr2Si2
+
+perovskite
+
+AlB2
+
+clathrate cages
+
+Instead of:
+
+random lattice + atoms
+
+Your logs show:
+
+prototypeAttempts: 1
+prototypeSuccesses: 0
+
+Prototype generation should be >60% of structures.
+
+Fix 3 — Hydrogen cage generator
+
+Hydride failures like:
+
+LaH10
+LaH11
+LaH9
+
+are happening because hydrogen positions are random.
+
+Hydrides must use known cage motifs:
+
+Example:
+
+LaH10 → sodalite cage
+LaH6 → octahedral cage
+YH6 → clathrate
+
+Your generator needs a hydrogen cage library.
