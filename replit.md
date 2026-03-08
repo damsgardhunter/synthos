@@ -74,6 +74,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **COHESIVE_ENERGIES_EV**: 60+ elements including all 4d/5d TMs, lanthanides, actinides.
 - **ELEMENT_DATA (QE)**: 77+ elements including Br, Tc, Cd, lanthanides, Th, U, Pa.
 - **RL agent**: Weight clamping floor -0.5 (allows demotion); physics bonus factor 0.08; hydride anionGroups includes nonmetals [8,9]; expanded ELEMENT_GROUPS (Tc, Cd, Hg, Eu, Tb, Ho, Tm).
+- **Phonon frequency**: `logAvgFreqRatio` uses deterministic formula hash (not Math.random()).
+- **Crystal prototypes**: Added 1111-Type (LaFeAsO/P4/nmm) and K2NiF4-214 (La2CuO4/I4/mmm).
+- **GB crystalSymmetry**: String-to-numeric mapping (cubic=7, hexagonal=6, tetragonal=5, etc.).
+- **Synthesis display**: Units corrected to K (temperature) and GPa (pressure).
+- **Multi-fidelity pipeline**: catch block now logs errors with candidate ID.
+- **Validation route**: Auto-promotes candidate to stage 5 on positive experimental result.
+- **STATUS_COLORS**: Expanded with experimentally-tested, dft-verified, failed, rejected.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

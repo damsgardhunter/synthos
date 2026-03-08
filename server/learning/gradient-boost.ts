@@ -167,7 +167,13 @@ function featureVectorToArray(f: MLFeatureVector): number[] {
     sanitize((f as any).bandGap, 0),
     sanitize((f as any).formationEnergy, 0),
     sanitize((f as any).stability, 0.5),
-    sanitize((f as any).crystalSymmetry, 0),
+    (() => {
+      const sym = (f as any).crystalSymmetry;
+      if (!sym || typeof sym !== "string") return 0;
+      const SG_MAP: Record<string, number> = { cubic: 7, hexagonal: 6, tetragonal: 5, orthorhombic: 4, monoclinic: 3, triclinic: 2, trigonal: 1 };
+      for (const [key, val] of Object.entries(SG_MAP)) { if (sym.toLowerCase().includes(key)) return val; }
+      return 0;
+    })(),
   ];
 }
 

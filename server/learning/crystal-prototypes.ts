@@ -382,6 +382,52 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
+    name: "1111-Type",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 2.2,
+    sites: [
+      { label: "R", x: 0.0, y: 0.0, z: 0.14, role: "spacer" },
+      { label: "T", x: 0.5, y: 0.0, z: 0.5, role: "TM-layer" },
+      { label: "X", x: 0.5, y: 0.5, z: 0.66, role: "pnictide" },
+      { label: "O", x: 0.0, y: 0.0, z: 0.66, role: "oxide" },
+    ],
+    stoichiometryRatio: [1, 1, 1, 1],
+    coordination: [8, 4, 4, 4],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 4) return false;
+      const hasSpacer = elements.some(e => ["La", "Ce", "Pr", "Nd", "Sm", "Gd", "Ba", "Sr", "Ca"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Mn"].includes(e));
+      const hasPnictide = elements.some(e => ["As", "P", "Sb"].includes(e));
+      const hasO = elements.includes("O") || elements.includes("F");
+      return hasSpacer && hasTM && hasPnictide && hasO;
+    },
+  },
+  {
+    name: "K2NiF4-214",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 3.3,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.36, role: "spacer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.64, role: "spacer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "TM-square-planar" },
+      { label: "X", x: 0.5, y: 0.0, z: 0.0, role: "in-plane-O" },
+      { label: "X", x: 0.0, y: 0.5, z: 0.0, role: "in-plane-O" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.17, role: "apical-O" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.83, role: "apical-O" },
+    ],
+    stoichiometryRatio: [2, 1, 4],
+    coordination: [9, 6, 2],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 3) return false;
+      const hasSpacer = elements.some(e => ["La", "Sr", "Ba", "Ca", "Nd", "Pr", "K"].includes(e));
+      const hasTM = elements.some(e => ["Cu", "Ni", "Co", "Mn", "Fe", "Ru"].includes(e));
+      const hasAnion = elements.some(e => ["O", "F", "S"].includes(e));
+      return hasSpacer && hasTM && hasAnion;
+    },
+  },
+  {
     name: "Laves-C15",
     spaceGroup: "Fd-3m",
     latticeType: "cubic",

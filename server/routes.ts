@@ -692,6 +692,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const parsed = insertExperimentalValidationSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error });
       const validation = await storage.insertValidation(parsed.data);
+      if (parsed.data.result === "positive" || parsed.data.result === "confirmed") {
+        try {
+          const candidate = await storage.getSuperconductorByFormula(parsed.data.formula);
+          if (candidate && (candidate.verificationStage ?? 0) < 5) {
+            await storage.updateSuperconductorCandidate(candidate.id, { verificationStage: 5, status: "experimentally-tested" });
+          }
+        } catch {}
+      }
       res.json(validation);
     } catch (e) {
       res.status(500).json({ error: "Failed to insert validation" });

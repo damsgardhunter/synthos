@@ -1230,14 +1230,17 @@ export function computePhononSpectrum(
       const masses = elements.map(el => getElementData(el)?.atomicMass ?? 30);
       return Math.max(...masses) / Math.max(Math.min(...masses), 1);
     })();
+    let fHash = 0;
+    for (let ci = 0; ci < formula.length; ci++) fHash = ((fHash << 5) - fHash + formula.charCodeAt(ci)) | 0;
+    const pseudoRand = ((fHash * 2654435761) >>> 0) / 4294967296;
     if (avgMass > 100) {
-      logAvgFreqRatio = 0.25 + Math.random() * 0.1;
+      logAvgFreqRatio = 0.25 + pseudoRand * 0.1;
     } else if (avgMass > 60) {
-      logAvgFreqRatio = 0.35 + Math.random() * 0.1;
+      logAvgFreqRatio = 0.35 + pseudoRand * 0.1;
     } else if (avgMass > 30) {
-      logAvgFreqRatio = 0.40 + Math.random() * 0.1;
+      logAvgFreqRatio = 0.40 + pseudoRand * 0.1;
     } else {
-      logAvgFreqRatio = 0.50 + Math.random() * 0.1;
+      logAvgFreqRatio = 0.50 + pseudoRand * 0.1;
     }
     if (massRange > 3) logAvgFreqRatio *= 0.85;
   }

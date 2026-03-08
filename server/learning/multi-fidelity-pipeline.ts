@@ -475,5 +475,7 @@ async function updateCandidatePhysics(
     }
 
     await storage.updateSuperconductorCandidate(candidateId, updates);
-  } catch {}
+  } catch (pipeErr) {
+    console.log(`[Pipeline] updateCandidatePhysics failed for candidate ${candidateId}: ${pipeErr instanceof Error ? pipeErr.message.slice(0, 100) : "unknown"}`);
+  }
 }

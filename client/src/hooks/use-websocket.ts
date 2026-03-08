@@ -8,7 +8,7 @@ export interface WSMessage {
 
 export interface ThoughtMessage {
   text: string;
-  category: "strategy" | "discovery" | "stagnation" | "milestone";
+  category: "strategy" | "discovery" | "stagnation" | "milestone" | "computation";
   timestamp: string;
 }
 

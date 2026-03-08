@@ -60,6 +60,10 @@ const STATUS_COLORS: Record<string, string> = {
   "under-review": "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300",
   "requires-verification": "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   "validated": "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
+  "experimentally-tested": "bg-teal-100 text-teal-700 dark:bg-teal-950 dark:text-teal-300",
+  "dft-verified": "bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300",
+  "failed": "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+  "rejected": "bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400",
 };
 
 const DIFFICULTY_COLORS: Record<string, string> = {
@@ -348,13 +352,13 @@ function SynthesisCard({ process }: { process: SynthesisProcess }) {
               {conditions.temperature != null && (
                 <div className="p-2 bg-muted/50 rounded-md">
                   <span className="text-muted-foreground block">Peak Temp</span>
-                  <span className="font-mono font-bold">{conditions.temperature}C</span>
+                  <span className="font-mono font-bold">{conditions.temperature}K</span>
                 </div>
               )}
               {conditions.pressure != null && (
                 <div className="p-2 bg-muted/50 rounded-md">
                   <span className="text-muted-foreground block">Pressure</span>
-                  <span className="font-mono font-bold">{conditions.pressure} atm</span>
+                  <span className="font-mono font-bold">{conditions.pressure} GPa</span>
                 </div>
               )}
               {conditions.atmosphere && (
