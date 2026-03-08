@@ -7,7 +7,8 @@ const ELEMENT_GROUPS = [
   { name: "lanthanide", elements: ["La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu"] },
   { name: "p-block-metal", elements: ["Al", "Ga", "In", "Sn", "Tl", "Pb", "Bi"] },
   { name: "metalloid", elements: ["B", "Si", "Ge", "As", "Sb", "Te", "Se"] },
-  { name: "nonmetal", elements: ["H", "C", "N", "O", "F", "P", "S", "Cl"] },
+  { name: "nonmetal", elements: ["H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"] },
+  { name: "actinide", elements: ["Th", "U", "Np", "Pu"] },
 ] as const;
 
 const STOICH_TEMPLATES = [
@@ -710,22 +711,41 @@ export class RLChemicalSpaceAgent {
 
     const advantageReward = reward - this.getBaselineReward();
 
-    this.policy.elementGroup[action.elementGroup1] += lr * advantageReward;
-    this.policy.elementGroup[action.elementGroup2] += lr * advantageReward * 0.7;
-    this.policy.stoichTemplate[action.stoichTemplate] += lr * advantageReward;
-    this.policy.structureType[action.structureType] += lr * advantageReward;
+    if (action.elementGroup1 >= 0 && action.elementGroup1 < this.policy.elementGroup.length) {
+      this.policy.elementGroup[action.elementGroup1] += lr * advantageReward;
+    }
+    if (action.elementGroup2 >= 0 && action.elementGroup2 < this.policy.elementGroup.length) {
+      this.policy.elementGroup[action.elementGroup2] += lr * advantageReward * 0.7;
+    }
+    if (action.stoichTemplate >= 0 && action.stoichTemplate < this.policy.stoichTemplate.length) {
+      this.policy.stoichTemplate[action.stoichTemplate] += lr * advantageReward;
+    }
+    if (action.structureType >= 0 && action.structureType < this.policy.structureType.length) {
+      this.policy.structureType[action.structureType] += lr * advantageReward;
+    }
 
-    this.policy.layeringDimension[action.layeringDimension] += lr * advantageReward * 0.8;
-    this.policy.hydrogenDensity[action.hydrogenDensity] += lr * advantageReward * 0.9;
-    this.policy.electronCount[action.electronCount] += lr * advantageReward * 0.7;
-    this.policy.orbitalConfiguration[action.orbitalConfiguration] += lr * advantageReward * 0.7;
+    if (action.layeringDimension >= 0 && action.layeringDimension < this.policy.layeringDimension.length) {
+      this.policy.layeringDimension[action.layeringDimension] += lr * advantageReward * 0.8;
+    }
+    if (action.hydrogenDensity >= 0 && action.hydrogenDensity < this.policy.hydrogenDensity.length) {
+      this.policy.hydrogenDensity[action.hydrogenDensity] += lr * advantageReward * 0.9;
+    }
+    if (action.electronCount >= 0 && action.electronCount < this.policy.electronCount.length) {
+      this.policy.electronCount[action.electronCount] += lr * advantageReward * 0.7;
+    }
+    if (action.orbitalConfiguration >= 0 && action.orbitalConfiguration < this.policy.orbitalConfiguration.length) {
+      this.policy.orbitalConfiguration[action.orbitalConfiguration] += lr * advantageReward * 0.7;
+    }
 
-    if (action.chemicalFamily !== undefined && action.chemicalFamily < this.policy.chemicalFamily.length) {
+    if (action.chemicalFamily !== undefined && action.chemicalFamily >= 0 && action.chemicalFamily < this.policy.chemicalFamily.length) {
       this.policy.chemicalFamily[action.chemicalFamily] += lr * advantageReward * 1.0;
     }
 
-    this.policy.elementPairBias[action.elementGroup1][action.elementGroup2] += lr * advantageReward * 0.5;
-    this.policy.elementPairBias[action.elementGroup2][action.elementGroup1] += lr * advantageReward * 0.5;
+    if (action.elementGroup1 >= 0 && action.elementGroup1 < this.policy.elementPairBias.length &&
+        action.elementGroup2 >= 0 && action.elementGroup2 < this.policy.elementPairBias[action.elementGroup1].length) {
+      this.policy.elementPairBias[action.elementGroup1][action.elementGroup2] += lr * advantageReward * 0.5;
+      this.policy.elementPairBias[action.elementGroup2][action.elementGroup1] += lr * advantageReward * 0.5;
+    }
 
     this.clampAllWeights();
     this.applyEntropyRegularization();
@@ -760,14 +780,28 @@ export class RLChemicalSpaceAgent {
       const advantage = exp.reward - baseline;
       const decay = Math.pow(this.gamma, (buffer.length - idx) / buffer.length);
 
-      this.policy.elementGroup[exp.action.elementGroup1] += lr * advantage * decay;
-      this.policy.stoichTemplate[exp.action.stoichTemplate] += lr * advantage * decay;
-      this.policy.structureType[exp.action.structureType] += lr * advantage * decay;
-      this.policy.layeringDimension[exp.action.layeringDimension] += lr * advantage * decay * 0.8;
-      this.policy.hydrogenDensity[exp.action.hydrogenDensity] += lr * advantage * decay * 0.9;
-      this.policy.electronCount[exp.action.electronCount] += lr * advantage * decay * 0.7;
-      this.policy.orbitalConfiguration[exp.action.orbitalConfiguration] += lr * advantage * decay * 0.7;
-      if (exp.action.chemicalFamily !== undefined && exp.action.chemicalFamily < this.policy.chemicalFamily.length) {
+      if (exp.action.elementGroup1 >= 0 && exp.action.elementGroup1 < this.policy.elementGroup.length) {
+        this.policy.elementGroup[exp.action.elementGroup1] += lr * advantage * decay;
+      }
+      if (exp.action.stoichTemplate >= 0 && exp.action.stoichTemplate < this.policy.stoichTemplate.length) {
+        this.policy.stoichTemplate[exp.action.stoichTemplate] += lr * advantage * decay;
+      }
+      if (exp.action.structureType >= 0 && exp.action.structureType < this.policy.structureType.length) {
+        this.policy.structureType[exp.action.structureType] += lr * advantage * decay;
+      }
+      if (exp.action.layeringDimension >= 0 && exp.action.layeringDimension < this.policy.layeringDimension.length) {
+        this.policy.layeringDimension[exp.action.layeringDimension] += lr * advantage * decay * 0.8;
+      }
+      if (exp.action.hydrogenDensity >= 0 && exp.action.hydrogenDensity < this.policy.hydrogenDensity.length) {
+        this.policy.hydrogenDensity[exp.action.hydrogenDensity] += lr * advantage * decay * 0.9;
+      }
+      if (exp.action.electronCount >= 0 && exp.action.electronCount < this.policy.electronCount.length) {
+        this.policy.electronCount[exp.action.electronCount] += lr * advantage * decay * 0.7;
+      }
+      if (exp.action.orbitalConfiguration >= 0 && exp.action.orbitalConfiguration < this.policy.orbitalConfiguration.length) {
+        this.policy.orbitalConfiguration[exp.action.orbitalConfiguration] += lr * advantage * decay * 0.7;
+      }
+      if (exp.action.chemicalFamily !== undefined && exp.action.chemicalFamily >= 0 && exp.action.chemicalFamily < this.policy.chemicalFamily.length) {
         this.policy.chemicalFamily[exp.action.chemicalFamily] += lr * advantage * decay;
       }
     }

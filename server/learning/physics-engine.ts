@@ -522,6 +522,7 @@ function getOmegaLogRangeForClass(matClass: MaterialClass): [number, number] {
 }
 
 const ELEMENT_BANDWIDTH: Record<string, number> = {
+  H: 15.0, C: 12.0, N: 11.0, O: 10.0, P: 8.5, S: 9.0, Se: 7.5,
   Li: 3.5, Be: 6.0, Na: 3.0, Mg: 6.0, Al: 11.0, K: 2.5, Ca: 3.0,
   Sc: 4.0, Ti: 4.5, V: 5.0, Cr: 5.5, Mn: 4.0, Fe: 4.5, Co: 4.5,
   Ni: 4.5, Cu: 4.0, Zn: 7.0, Ga: 8.0, Sr: 3.5, Y: 3.5, Zr: 6.0,
@@ -2075,11 +2076,13 @@ export function computeCriticalFields(
   let anisotropyRatio = 1.0;
   if (dimensionality === "2D" || dimensionality === "quasi-2D") anisotropyRatio = 8.0 + lambda * 2;
   else if (dimensionality === "layered") anisotropyRatio = 4.0 + lambda;
+  if (!Number.isFinite(anisotropyRatio)) anisotropyRatio = 1.0;
 
   const Jc = tc * 1e4 * lambda / (1 + anisotropyRatio * 0.1);
   const criticalCurrentDensity = Math.round(Jc);
 
-  const kappa = coherenceLength > 0 ? londonPenetrationDepth / coherenceLength : 1;
+  const kappaRaw = coherenceLength > 0 ? londonPenetrationDepth / coherenceLength : 1;
+  const kappa = Number.isFinite(kappaRaw) ? kappaRaw : 1;
   const typeIorII = kappa > 0.707 ? "Type-II" : "Type-I";
 
   return {

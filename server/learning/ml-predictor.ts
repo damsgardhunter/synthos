@@ -192,7 +192,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     const data = getElementData(el);
     if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
   }
-  const valenceElectronConcentration = totalVE / totalAtoms;
+  const valenceElectronConcentration = totalAtoms > 0 ? totalVE / totalAtoms : 0;
 
   const hCount = counts["H"] || 0;
   const metalAtomCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
@@ -257,8 +257,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       for (let j = i + 1; j < elements.length; j++) {
         const en_i = getElementData(elements[i])?.paulingElectronegativity ?? 1.5;
         const en_j = getElementData(elements[j])?.paulingElectronegativity ?? 1.5;
-        const frac_i = (counts[elements[i]] || 1) / totalAtoms;
-        const frac_j = (counts[elements[j]] || 1) / totalAtoms;
+        const frac_i = totalAtoms > 0 ? (counts[elements[i]] || 1) / totalAtoms : 0;
+        const frac_j = totalAtoms > 0 ? (counts[elements[j]] || 1) / totalAtoms : 0;
         chargeTransferMagnitude += Math.abs(en_i - en_j) * Math.sqrt(frac_i * frac_j);
       }
     }
@@ -279,7 +279,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   for (const el of elements) {
     const stonerI = getStonerParameter(el);
     if (stonerI !== null && stonerI > 0) {
-      const frac = (counts[el] || 1) / totalAtoms;
+      const frac = totalAtoms > 0 ? (counts[el] || 1) / totalAtoms : 0;
       const stonerProduct = stonerI * electronic.densityOfStatesAtFermi;
       spinFluctuationStrength = Math.max(spinFluctuationStrength, stonerProduct * frac);
     }
@@ -302,7 +302,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   return {
     avgElectronegativity: avgEN,
-    maxAtomicMass: Math.max(...massValues, 0),
+    maxAtomicMass: massValues.length > 0 ? Math.max(...massValues) : 0,
     numElements: elements.length,
     hasTransitionMetal,
     hasRareEarth,

@@ -507,8 +507,9 @@ function detectFermiPockets(
       kxyVariation = Math.max(...kxyValues) - Math.min(...kxyValues);
     }
 
-    const cylindricalCharacter = kxyVariation > 0.01
-      ? Math.min(1.0, kzVariation > 0.01 ? kxyVariation / (kxyVariation + kzVariation) : 1.0)
+    const kxyPlusKz = kxyVariation + kzVariation;
+    const cylindricalCharacter = kxyVariation > 0.01 && kxyPlusKz > 0.001
+      ? Math.min(1.0, kzVariation > 0.01 ? kxyVariation / kxyPlusKz : 1.0)
       : 0.0;
 
     const orbChar = charCount > 0
@@ -738,7 +739,7 @@ export function computeFermiSurface(formula: string): FermiSurfaceResult {
     : 0;
 
   const nestingScore = nestingVectors.length > 0
-    ? Number(Math.min(1.0, nestingVectors.reduce((s, nv) => s + nv.strength, 0) / nestingVectors.length).toFixed(4))
+    ? Number(Math.min(1.0, nestingVectors.reduce((s, nv) => s + nv.strength, 0) / Math.max(1, nestingVectors.length)).toFixed(4))
     : 0;
 
   const fsDimensionality = computeFSDimensionality(pockets, evaluations, fermiEnergy);

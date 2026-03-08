@@ -31,6 +31,20 @@ function getTotalAtoms(counts: Record<string, number>): number {
   return total > 0 ? total : 1;
 }
 
+function estimateDefaultBulkModulus(el: string): number {
+  if (el === "H") return 1;
+  if (["He", "Ne", "Ar", "Kr", "Xe"].includes(el)) return 2;
+  if (["Li", "Na", "K", "Rb", "Cs"].includes(el)) return 12;
+  if (["Be", "Mg", "Ca", "Sr", "Ba"].includes(el)) return 25;
+  if (["B", "C", "Si", "Ge"].includes(el)) return 40;
+  if (["N", "O", "F", "Cl", "Br", "I"].includes(el)) return 10;
+  if (["P", "S", "Se", "Te"].includes(el)) return 15;
+  if (isTransitionMetal(el)) return 120;
+  if (isRareEarth(el)) return 35;
+  if (isActinide(el)) return 50;
+  return 50;
+}
+
 export interface BirchMurnaghanResult {
   compressedVolume: number;
   compressedLattice: { a: number; b: number; c: number };
@@ -74,12 +88,12 @@ export function relaxStructureAtPressure(
     const data = getElementData(el);
     if (!data) continue;
     const frac = (counts[el] || 1) / totalAtoms;
-    const elBulk = data.bulkModulus ?? 100;
+    const elBulk = data.bulkModulus ?? estimateDefaultBulkModulus(el);
     B0 += elBulk * frac;
     totalWeight += frac;
   }
   if (totalWeight > 0) B0 /= totalWeight;
-  else B0 = 100;
+  else B0 = 50;
   B0 = Math.max(10, B0);
 
   const B0p = 4.0 + (elements.length - 1) * 0.3;
@@ -230,9 +244,6 @@ export function assessHighPressureStability(
 
   const bm = relaxStructureAtPressure(formula, targetPressure);
 
-  const a0est = Math.pow(bm.compressedVolume / (bm.compressedLattice.a > 0 ? bm.compressedLattice.a : 1), 1/3);
-  const compressionRatio = a0est > 0 ? bm.compressedLattice.a / a0est : 1.0;
-
   const hCount = counts["H"] || 0;
   const hRatio = (totalAtoms - hCount) > 0 ? hCount / (totalAtoms - hCount) : 0;
 
@@ -313,7 +324,7 @@ export function scanPressureTcCurve(
     const data = getElementData(el);
     if (!data) continue;
     const frac = (counts[el] || 1) / totalAtoms;
-    B0 += (data.bulkModulus ?? 100) * frac;
+    B0 += (data.bulkModulus ?? estimateDefaultBulkModulus(el)) * frac;
     weightSum += frac;
   }
   if (weightSum > 0) B0 /= weightSum;

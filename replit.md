@@ -95,9 +95,20 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **COVALENT_R alignment**: Worker and engine both default to 1.4 A for unknown elements; Tc, I, Kr added to worker.
 - **NEIGHBOR_MAP**: Added Be, Hg, Cd, Tc, F, Cl, Br, I, Th, U to defect-engine.
 - **Inverse generator**: Clathrate hydrides now generated only when maxPressure >= 50 GPa (was < 50).
-- **Engine catch blocks**: 20+ previously silent catch blocks now log errors in Phase 10 and elsewhere.
+- **Engine catch blocks**: 65+ previously silent catch blocks now log errors across entire engine.ts.
 - **Supercon dataset**: Removed duplicate entries (ScH9, NbC, SrTiO3); 550 entries total.
 - **Auto-promote catch**: Routes validation auto-promote now logs errors on failure.
+- **Round 7 comprehensive fixes**:
+  - ml-predictor.ts: Guards for totalAtoms=0 division, enSpread empty array, chargeTransfer NaN, massValues spread.
+  - fermi-surface-engine.ts: Guards for nestingVectors.length=0, kxy+kz variations near zero.
+  - pairing-mechanisms.ts: Allen-Dynes denominator guard (>1e-6), empty catch fixed, isFinite check.
+  - physics-engine.ts: ELEMENT_BANDWIDTH added for H(15), C(12), N(11), O(10), P(8.5), S(9), Se(7.5); isFinite on kappa+anisotropyRatio.
+  - topology-engine.ts: ATOMIC_NUMBERS expanded to full 118 elements (was ~70).
+  - rl-agent.ts: Bounds checking on all updatePolicy/replayBatch array accesses; Br, I added to nonmetal; new actinide group (Th, U, Np, Pu).
+  - pressure-engine.ts: Removed unused a0est/compressionRatio; element-class bulk modulus defaults (H=1, noble=2, alkali=12, etc.) replacing flat 100.
+  - qe-worker.ts: ATOMIC_VOLUMES expanded with lanthanides (Pm-Lu), Tc, noble gases, actinides (Pa, Np, Pu).
+  - elemental-data.ts: mcMillanHopfieldEta added for Si(1.0), P(1.5), S(2.0), Cl(0.5), Ge(1.2), As(1.8), Se(2.5), Br(0.8), Sb(1.5), Te(2.2), I(1.0).
+  - engine.ts: Phase 10 candidates 5→8, hydride scan 3→5, symbolic regression generations 25→40.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

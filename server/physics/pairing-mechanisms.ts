@@ -139,10 +139,12 @@ export function computePhononPairing(
   const muStar = coupling.muStar;
 
   let tcAllenDynes = 0;
-  if (lambda > muStar * (1 + 0.62 * lambda)) {
+  const allenDynesDenom = lambda - muStar * (1 + 0.62 * lambda);
+  if (allenDynesDenom > 1e-6) {
     const prefactor = omegaLogK / 1.2;
-    const exponent = -1.04 * (1 + lambda) / (lambda - muStar * (1 + 0.62 * lambda));
+    const exponent = -1.04 * (1 + lambda) / allenDynesDenom;
     tcAllenDynes = prefactor * Math.exp(exponent);
+    if (!Number.isFinite(tcAllenDynes)) tcAllenDynes = 0;
     tcAllenDynes = Math.max(0, Math.min(400, tcAllenDynes));
   }
 
@@ -360,7 +362,9 @@ export function computeOrbitalPairing(
       const flatBands = tb.topology.flatBands.length;
       interOrbitalHopping = Math.min(1.0, (nOrb / 10) * 0.3 + flatBands * 0.1);
     }
-  } catch {}
+  } catch (err) {
+    console.error(`[OrbitalPairing] tight-binding computation failed for ${formula}:`, err);
+  }
 
   if (interOrbitalHopping === 0 && dFraction > 0.3) {
     interOrbitalHopping = dFraction * 0.5;

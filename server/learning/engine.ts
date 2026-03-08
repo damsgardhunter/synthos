@@ -1115,7 +1115,7 @@ async function runDFTEnrichment() {
         } else if (candidate.formationEnergy == null) {
           try {
             updates.formationEnergy = computeMiedemaFormationEnergy(candidate.formula);
-          } catch {}
+          } catch (e) { console.error("[Engine] Miedema formation energy failed:", e); }
         }
         if (dftData.bandGap.source !== "analytical") {
           updates.bandGap = dftData.bandGap.value;
@@ -1232,7 +1232,7 @@ async function runDFTEnrichment() {
         dataSource: "QE-DFT Queue",
       });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] DFT enrichment outer error:", e); }
 }
 
 async function runPhase10_Physics() {
@@ -1244,7 +1244,7 @@ async function runPhase10_Physics() {
     if (!shouldContinue()) return;
 
     const stage0 = await storage.getSuperconductorsByStage(0);
-    const toAnalyze = shuffle(stage0).slice(0, 5);
+    const toAnalyze = shuffle(stage0).slice(0, 8);
 
     for (const candidate of toAnalyze) {
       if (!shouldContinue()) break;
@@ -1597,7 +1597,7 @@ async function runPhase10_Physics() {
           const metalAtoms = els.filter(e => !nonmetals.includes(e)).reduce((s, e) => s + (cts[e] || 0), 0);
           return hCount > 0 && metalAtoms > 0 && hCount / metalAtoms >= 2;
         });
-        const hydrideToScan = shuffle(hydrideCandidates).slice(0, 3);
+        const hydrideToScan = shuffle(hydrideCandidates).slice(0, 5);
         for (const candidate of hydrideToScan) {
           if (!shouldContinue()) break;
           try {
@@ -1626,7 +1626,7 @@ async function runPhase10_Physics() {
                   dataSource: "Hydrogen Network Engine",
                 });
               }
-            } catch {}
+            } catch (e) { console.error(`[Engine] Hydrogen network analysis failed for ${candidate.formula}:`, e); }
 
             const updatedMlFeatures = {
               ...existingMlFeatures,
@@ -1687,7 +1687,7 @@ async function runPhase10_Physics() {
             emit("log", { phase: "phase-10", event: "Pressure scan error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Pressure Engine" });
           }
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Pressure scan outer error:", e); }
     }
 
     if (cyclesSinceTcImproved > 3 && shouldContinue()) {
@@ -1718,7 +1718,7 @@ async function runPhase10_Physics() {
               emit("log", { phase: "phase-10", event: "Re-physics corrected Tc", detail: `${candidate.formula}: ${currentTc}K -> ${updatedTc}K (lambda ${oldLambda.toFixed(2)} -> ${newLambda.toFixed(2)}, Hc2=${result.criticalFields.upperCriticalField}T, ${result.correlation.regime}, ${result.competingPhases.length} competing phases)`, dataSource: "Physics Engine" });
             }
           }
-        } catch {}
+        } catch (e) { console.error("[Engine] Re-physics correction failed:", e); }
       }
     }
 
@@ -1843,7 +1843,7 @@ async function runPhase11_StructurePrediction() {
                   dataConfidence: "low",
                 });
                 if (inserted) totalScCandidates++;
-              } catch {}
+              } catch (e) { console.error("[Engine] Structural variant insert failed:", e); }
             }
           }
         }
@@ -1902,7 +1902,7 @@ async function runPhase11_StructurePrediction() {
                 dataConfidence: "low",
               });
               if (inserted) totalScCandidates++;
-            } catch {}
+            } catch (e) { console.error("[Engine] Mutation variant insert failed:", e); }
           }
         }
       } catch (err: any) {
@@ -1968,7 +1968,7 @@ async function runPhase11_StructurePrediction() {
                 totalScCandidates++;
                 evoInserted++;
               }
-            } catch {}
+            } catch (e) { console.error("[Engine] Evolutionary structure insert failed:", e); }
           }
         }
         if (evoInserted > 0) {
@@ -2047,7 +2047,7 @@ async function runPhase11_StructurePrediction() {
             } else {
               recordGeneratorOutcome("motif_diffusion", false, rawTc, 0.1);
             }
-          } catch {}
+          } catch (e) { console.error("[Engine] Motif diffusion candidate insert failed:", e); }
         }
         if (diffInserted > 0 || diffResult.structures.length > 0) {
           emit("log", {
@@ -2119,7 +2119,7 @@ async function runPhase11_StructurePrediction() {
               recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
               incorporateSuccessData(normalized, cappedTc);
             }
-          } catch {}
+          } catch (e) { console.error("[Engine] CDVAE crystal insert failed:", e); }
         }
         if (cdvaeCrystals.length > 0) {
           const cdvaeStats = getCrystalDiffusionStats();
@@ -2190,7 +2190,7 @@ async function runPhase11_StructurePrediction() {
               recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
               incorporateSuccessData(normalized, cappedTc);
             }
-          } catch {}
+          } catch (e) { console.error("[Engine] Distribution diffusion insert failed:", e); }
         }
         if (distCrystals.length > 0) {
           const dStats = getDistributionDiffusionStats();
@@ -2252,7 +2252,7 @@ async function runPhase11_StructurePrediction() {
               recordGeneratorOutcome("inverse_design", true, cappedTc, 0.6);
               incorporateSuccessData(normalized, cappedTc);
             }
-          } catch {}
+          } catch (e) { console.error("[Engine] VAE inverse design insert failed:", e); }
         }
         const vStats = getVAEStats();
         emit("log", {
@@ -2296,7 +2296,7 @@ async function runPhase11_StructurePrediction() {
                 recordGeneratorOutcome("structure_diffusion", false, Math.round(gbResult.tcPredicted), 0.1);
               }
             }
-          } catch {}
+          } catch (e) { console.error("[Engine] Structure-first design insert failed:", e); }
         }
         if (structResult.formulas.length > 0) {
           emit("log", {
@@ -2370,7 +2370,7 @@ async function runPhase12_MultiFidelity() {
               },
             });
           }
-        } catch {}
+        } catch (e) { console.error("[Engine] Reaction pathway failed:", e); }
       }
     }
 
@@ -2487,7 +2487,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-4, 2], rejecting`);
         return { passed: false, tc: 0, reason: `formation-energy-insane: ${miedemaEf.toFixed(3)} eV/atom` };
       }
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Formation energy check failed for ${formula}:`, e); }
 
     if (KNOWN_COMPOUNDS.has(normalizeFormula(formula))) {
       pipelineStageMetrics.duplicateRejects++;
@@ -2510,12 +2510,12 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     let gnnResult: ReturnType<typeof gnnPredictWithUncertainty> | null = null;
     try {
       gnnResult = gnnPredictWithUncertainty(formula);
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] GNN prediction failed for ${formula}:`, e); }
 
     try {
       const mtPred = multiTaskPredict(formula);
       trackMultiTaskPrediction(mtPred);
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Multi-task prediction failed for ${formula}:`, e); }
 
     let primaryTc = gbResult.tcPredicted;
     let ensembleConfidence = 0.3;
@@ -2551,7 +2551,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     try {
       await runConvexHullAnalysis(emit, formula);
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Convex hull analysis failed for ${formula}:`, e); }
 
     try {
       pipelineStageMetrics.xtbAttempts++;
@@ -2566,7 +2566,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
           return { passed: false, tc: 0, reason: `phonon-instability: ${reason}` };
         }
       }
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] xTB phonon check failed for ${formula}:`, e); }
 
     const physicsResult = await runFullPhysicsAnalysis(emit, candidate as any);
     const rawTc = physicsResult.eliashberg.predictedTc;
@@ -2583,7 +2583,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         physicsResult.coupling.omegaLog,
         hullDist
       );
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Physics predictor training failed for ${formula}:`, e); }
 
     let autonomousQC: QuantumCriticalAnalysis | undefined;
     try {
@@ -2595,7 +2595,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         const qcTcBoost = 1 + autonomousQC.pairingBoostFromQCP * 0.15;
         finalTc = Math.min(400, Math.round(finalTc * qcTcBoost));
       }
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Quantum criticality detection failed for ${formula}:`, e); }
 
     try {
       const zoneInfo = getZoneBonus(formula);
@@ -2603,7 +2603,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         const zoneTcBoost = 1 + zoneInfo.bonus * 0.1;
         finalTc = Math.min(400, Math.round(finalTc * zoneTcBoost));
       }
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Zone bonus check failed for ${formula}:`, e); }
 
     const synthesizabilityScore = structureResult?.synthesizability ?? 0.5;
     const lambda = physicsResult.coupling.lambda;
@@ -2716,19 +2716,19 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         correlationStrength: physicsResult.correlation.ratio,
       });
       discoveryMemory.recordDiscovery(formula, memFingerprint, finalTc);
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Discovery memory record failed for ${formula}:`, e); }
 
     try {
       buildAndStoreFeatureRecord(formula, finalTc);
       recordPrediction(formula, gbResult.tcPredicted, finalTc);
       recordCandidateOutcome(formula, true);
       updatePhysicsParameters(finalTc, gbResult.tcPredicted, [], formula);
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Feature record/physics update failed for ${formula}:`, e); }
 
     try {
       const family = physicsResult.pairingAnalysis?.dominantMechanism ?? "unknown";
       addMaterialToDataset(formula, finalTc, physicsResult.coupling.lambda, physicsResult.pairingAnalysis?.symmetry ?? "unknown", family);
-    } catch {}
+    } catch (e) { console.error(`[Autonomous] Landscape dataset add failed for ${formula}:`, e); }
 
     const candidatePressure = features.pressureGpa ?? candidate.pressureGpa ?? 0;
     if (finalTc > 30 && candidatePressure > 5) {
@@ -2755,7 +2755,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
                 elements: formula,
                 magneticProperties: `Ambient variant of ${formula} (${pathway.retentionPercent}% Tc retention from ${candidatePressure}GPa). Strategy: ${pathway.strategies[0]?.type}`,
               });
-            } catch {}
+            } catch (e) { console.error(`[Autonomous] Pressure pathway candidate insert failed for ${formula}:`, e); }
           }
           emit("log", {
             phase: "engine",
@@ -2764,7 +2764,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
             dataSource: "Pressure Pathway",
           });
         }
-      } catch {}
+      } catch (e) { console.error(`[Autonomous] Pressure pathway analysis failed for ${formula}:`, e); }
     }
 
     if (finalTc > autonomousBestTc) {
@@ -2850,7 +2850,7 @@ async function runAutonomousFastPath() {
       if (cycleCount % 5 === 0) {
         graphGuidance = getConstraintGraphGuidance(targetTcForConstraints);
       }
-    } catch {}
+    } catch (e) { console.error("[Engine] Constraint guidance failed:", e); }
 
     emit("log", {
       phase: "engine",
@@ -2863,7 +2863,7 @@ async function runAutonomousFastPath() {
     try {
       const existingTop = await storage.getSuperconductorCandidatesByTc(20);
       topCandidatesForGen = existingTop.map(c => ({ formula: c.formula, predictedTc: c.predictedTc ?? 0 }));
-    } catch {}
+    } catch (e) { console.error("[Engine] Top candidates fetch for generation failed:", e); }
 
     const shuffled = [...topCandidatesForGen].sort(() => Math.random() - 0.5);
     const { formulas: massiveCandidates, stats: genStats } = runMassiveGeneration(shuffled, focusArea);
@@ -2926,7 +2926,7 @@ async function runAutonomousFastPath() {
               convergenceHistory: [],
               topCandidates: [],
             });
-          } catch {}
+          } catch (e) { console.error("[Engine] Auto-create inverse campaign failed:", e); }
           campaigns = getAllActiveCampaigns();
           emit("log", {
             phase: "engine",
@@ -3126,7 +3126,7 @@ async function runAutonomousFastPath() {
           }
         }
       }
-    } catch {}
+    } catch (e) { console.error("[Engine] Integrated pipeline iteration failed:", e); }
 
     try {
       if (integratedLabId) {
@@ -3146,7 +3146,7 @@ async function runAutonomousFastPath() {
           }
         }
       }
-    } catch {}
+    } catch (e) { console.error("[Engine] Integrated lab iteration failed:", e); }
 
     if (cycleCount % 4 === 0) {
       try {
@@ -3189,7 +3189,7 @@ async function runAutonomousFastPath() {
             registerProgram(prog, execResult.predictedTc ?? 0);
           }
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Design program generation failed:", e); }
     }
 
     if (cycleCount - lastTheoryDiscoveryCycle >= 15 && cycleCount % 15 === 0) {
@@ -3203,7 +3203,7 @@ async function runAutonomousFastPath() {
           theoryFeedbackBias = { biasedVariables: feedback.biasedVariables ?? [], biasedElements: feedback.biasedElements ?? [] };
           emit("log", { phase: "engine", event: "Theory discovery cycle", detail: `Symbolic physics: ${theories.length} theories. Top: ${theories[0]?.equation?.slice(0, 80)} (score=${theories[0]?.theoryScore?.toFixed(3)})`, dataSource: "Integrated Subsystems" });
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Theory discovery cycle failed:", e); }
     }
 
     if (cycleCount - lastCausalDiscoveryCycle >= 20 && cycleCount % 20 === 0) {
@@ -3219,7 +3219,7 @@ async function runAutonomousFastPath() {
           }));
         }
         emit("log", { phase: "engine", event: "Causal discovery cycle", detail: `Causal graph: ${causalResult.graph.edges.length} edges, ${causalResult.hypotheses.length} hypotheses, ${causalResult.rules.length} rules. Top guidance: ${causalResult.designGuidance[0]?.variable ?? "none"} (${causalResult.designGuidance[0]?.direction ?? ""})`, dataSource: "Integrated Subsystems" });
-      } catch {}
+      } catch (e) { console.error("[Engine] Causal discovery cycle failed:", e); }
     }
 
     if (
@@ -3272,7 +3272,7 @@ async function runAutonomousFastPath() {
             dataSource: "Theory-Guided Generator",
           });
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Theory-driven generator bias failed:", e); }
     }
 
     const normalizedPhysicsClean = physicsCleanCandidates.map(f => normalizeFormula(f));
@@ -3407,7 +3407,7 @@ async function runAutonomousFastPath() {
           }
         }
         rlAgent.recordElementOutcome(els, result.tc, result.passed, rejectCategory);
-      } catch {}
+      } catch (e) { console.error("[Engine] RL element outcome recording failed:", e); }
 
       if (result.tc > batchBestTc) batchBestTc = result.tc;
       if (result.passed) batchPassCount++;
@@ -3437,13 +3437,13 @@ async function runAutonomousFastPath() {
         if (constraintDetail && constraintDetail.violations.length > 0) {
           updateConstraintWeightsFromReward(formula, result.tc, constraintDetail.violations);
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Constraint weight update failed:", e); }
 
       try {
         if (result.tc > 0) {
           buildAndStoreFeatureRecord(formula, result.tc, null, result.passed ? 0.5 : 0.1);
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Feature record build failed:", e); }
 
       const isPromising = result.passed || result.tc >= 15;
 
@@ -3452,11 +3452,11 @@ async function runAutonomousFastPath() {
           const electronic = computeElectronicStructure(formula);
           const topoResult = analyzeTopology(formula, electronic);
           trackTopologyResult(topoResult);
-        } catch {}
+        } catch (e) { console.error(`[Engine] Topology analysis failed for ${formula}:`, e); }
         try {
           const fsResult = computeFermiSurface(formula);
           assignToCluster(formula, fsResult, result.tc);
-        } catch {}
+        } catch (e) { console.error(`[Engine] Fermi surface cluster assignment failed for ${formula}:`, e); }
       }
       if (isPromising) {
         try {
@@ -3502,7 +3502,7 @@ async function runAutonomousFastPath() {
               if (synthOpt.bestTc > result.tc) {
                 recordSynthesisResult(formula, family, synthOpt.bestVector, synthOpt.bestTc, 0.7);
               }
-            } catch {}
+            } catch (e) { console.error(`[Engine] Synthesis optimization failed for ${formula}:`, e); }
           }
 
           try {
@@ -3535,12 +3535,12 @@ async function runAutonomousFastPath() {
                       elements: formula,
                       magneticProperties: `Defect: ${bestDefect.defect.type} at ${bestDefect.defect.element}, Tc boost ${bestDefect.tcMod.toFixed(3)}x from ${formula}`,
                     });
-                  } catch {}
+                  } catch (e) { console.error(`[Engine] Defect candidate insert failed for ${defectFormula}:`, e); }
                 }
                 emit("log", { phase: "defect-engine", event: "Defect enhancement found", detail: `${formula}: ${bestDefect.defect.type} defect at ${bestDefect.defect.element} -> Tc modifier ${bestDefect.tcMod.toFixed(3)}, defect variant ${defectFormula} (est. ${defectTc}K) added to pool` });
               }
             }
-          } catch {}
+          } catch (e) { console.error(`[Engine] Defect variant generation failed for ${formula}:`, e); }
 
           try {
             const corrEffects = estimateCorrelationEffects(formula, {
@@ -3557,7 +3557,7 @@ async function runAutonomousFastPath() {
               }
               emit("log", { phase: "correlation-engine", event: "Correlation boost applied", detail: `${formula}: ${corrEffects.regime.regime} regime, Tc ${result.tc}K -> ${boostedTc}K (modifier ${corrEffects.tcModifier.toFixed(3)}), patterns: ${corrEffects.materialPatterns.join(", ")}` });
             }
-          } catch {}
+          } catch (e) { console.error(`[Engine] Correlation effects estimation failed for ${formula}:`, e); }
 
           try {
             const growthResult = simulateCrystalGrowth(formula, family, sv);
@@ -3570,7 +3570,7 @@ async function runAutonomousFastPath() {
             if (growthResult.qualityScore < 0.3) {
               emit("log", { phase: "crystal-growth", event: "Growth challenge identified", detail: `${formula}: quality=${growthResult.qualityScore.toFixed(2)}, grain=${growthResult.grainStructure.grainSize.toFixed(0)}nm` });
             }
-          } catch {}
+          } catch (e) { console.error(`[Engine] Crystal growth simulation failed for ${formula}:`, e); }
 
           if (result.tc > 25 && cycleCount % 3 === 0) {
             try {
@@ -3592,9 +3592,9 @@ async function runAutonomousFastPath() {
                 result.tc = Math.min(400, Math.round(result.tc * (1 + expBonus)));
                 emit("log", { phase: "experiment-planner", event: "Experiment plan generated", detail: `${formula}: score=${plan.ranking.experimentScore.toFixed(3)}, Tc boosted by ${(expBonus * 100).toFixed(1)}%, timeline=${plan.timeline}, risk=${plan.riskAssessment}. ${plan.characterization.length} characterization methods suggested.` });
               }
-            } catch {}
+            } catch (e) { console.error(`[Engine] Experiment plan generation failed for ${formula}:`, e); }
           }
-        } catch {}
+        } catch (e) { console.error(`[Engine] Synthesis/feedback loop failed for ${formula}:`, e); }
       }
 
       if (result.passed) {
@@ -3636,7 +3636,7 @@ async function runAutonomousFastPath() {
           invalidateGNNModel();
           autonomousGNNRetrainCount++;
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] GNN model invalidation failed:", e); }
     }
 
     if (physicsPredictor.shouldRetrain(cycleCount)) {
@@ -3663,7 +3663,7 @@ async function runAutonomousFastPath() {
         const topFp = buildFingerprint(bestFormulaThisBatch, bestTcThisBatch, {});
         const memBonus = discoveryMemory.computeMemoryRewardBonus(topFp);
         rlReward += memBonus.bonus * 0.5;
-      } catch {}
+      } catch (e) { console.error("[Engine] Memory reward bonus computation failed:", e); }
     }
 
     if (feedbackLoopStats.defectCandidatesAdded > 0) {
@@ -3694,7 +3694,7 @@ async function runAutonomousFastPath() {
           .filter(r => r.tc > 0 && Number.isFinite(r.tc))
           .map(r => ({ ...(r.featureVector as Record<string, number>), tc: r.tc }));
         if (srData.length >= 15) {
-          const theories = runSymbolicRegression(srData, "tc", { populationSize: 100, generations: 25 });
+          const theories = runSymbolicRegression(srData, "tc", { populationSize: 100, generations: 40 });
           if (theories.length > 0) {
             emit("log", {
               phase: "engine",
@@ -3704,7 +3704,7 @@ async function runAutonomousFastPath() {
             });
           }
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Symbolic regression cycle failed:", e); }
 
       try {
         const hypResult = runHypothesisCycle();
@@ -3717,7 +3717,7 @@ async function runAutonomousFastPath() {
             dataSource: "Hypothesis Engine",
           });
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Hypothesis engine cycle failed:", e); }
     }
 
     rebalanceWeights();
@@ -3744,7 +3744,7 @@ async function runAutonomousFastPath() {
             dataSource: "Discovery Landscape",
           });
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Discovery landscape update failed:", e); }
     }
 
     const clusterGuidance = getClusterGuidance();
@@ -4382,7 +4382,7 @@ async function runLearningCycle() {
               const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
               protoTopoScore = protoTopo.topologicalScore;
               trackTopologyResult(protoTopo);
-            } catch {}
+            } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
 
             const discoveryDetails = computeDiscoveryScore({
               predictedTc: gbResult.tcPredicted,
@@ -4488,7 +4488,7 @@ async function runLearningCycle() {
                   bestDiscoveryScore = discoveryScore;
                 }
               }
-            } catch {}
+            } catch (e) { console.error(`[Engine] Prototype candidate insert failed:`, e); }
           }
 
           const protoSummary = Object.entries(prototypeCounts)
@@ -4617,7 +4617,7 @@ async function runLearningCycle() {
             broadcastThought(`New focus area: ${nf.area} added to research strategy at ${(nf.priority * 100).toFixed(0)}% priority.`, "discovery");
           }
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Strategy analysis failed:", e); }
 
       try {
         await captureConvergenceSnapshot(emit, cycleCount, currentStrategyHint || undefined);
@@ -4628,11 +4628,11 @@ async function runLearningCycle() {
             total: snapshots.length,
           });
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Convergence snapshot failed:", e); }
 
       try {
         await checkMilestones(emit, broadcast, cycleCount, cycleInsightsThisCycle);
-      } catch {}
+      } catch (e) { console.error("[Engine] Milestone check failed:", e); }
 
       try {
         const currentCandidates = await storage.getSuperconductorCandidates(50);
@@ -4720,7 +4720,7 @@ async function runLearningCycle() {
           pipelinePassed,
           pipelineTotal,
         };
-      } catch {}
+      } catch (e) { console.error("[Engine] Cycle metrics capture failed:", e); }
     }
   } catch (err: any) {
     emit("log", {
@@ -4799,7 +4799,7 @@ async function backfillGBScores() {
               neuralNetScore: 0.3,
               ensembleScore: 0.3,
             });
-          } catch {}
+          } catch (e) { console.error("[Engine] GB score backfill update failed:", e); }
           totalFailed++;
         }
       }
@@ -4813,7 +4813,7 @@ async function backfillGBScores() {
         dataSource: "Internal",
       });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] GB score backfill failed:", e); }
 }
 
 const PHYSICS_VERSION = 14;
@@ -4919,7 +4919,7 @@ async function recalculatePhysics() {
             roomTempViable: isRoomTemp,
           });
           totalRecalculated++;
-        } catch {}
+        } catch (e) { console.error("[Engine] Physics recalculation update failed:", e); }
       }
 
       if (totalRecalculated > 10000) break;
@@ -4933,7 +4933,7 @@ async function recalculatePhysics() {
         dataSource: "Internal",
       });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Physics recalculation failed:", e); }
 }
 
 export async function startEngine() {
@@ -4946,7 +4946,7 @@ export async function startEngine() {
     if (maxCycle > cycleCount) {
       cycleCount = maxCycle;
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Max convergence cycle restore failed:", e); }
 
   try {
     const xtbHealth = await checkXTBHealth();
@@ -4971,7 +4971,7 @@ export async function startEngine() {
         emit("log", { phase: "inverse-optimizer", event: "Campaigns restored", detail: `${restored} inverse design campaigns restored from database` });
       }
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Campaign restoration failed:", e); }
 
   try {
     const scCount = await storage.getSuperconductorCount();
@@ -4984,7 +4984,7 @@ export async function startEngine() {
     if (scCount > 0) {
       emit("log", { phase: "engine", event: "Stats restored from DB", detail: `Restored baseline: ~${autonomousTotalScreened} screened, ~${autonomousTotalPassed} passed, best Tc=${autonomousBestTc}K`, dataSource: "Internal" });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Stats restore from DB failed:", e); }
 
   try {
     const existingCandidates = await storage.getSuperconductorCandidates(200);
@@ -4994,12 +4994,12 @@ export async function startEngine() {
       try {
         buildAndStoreFeatureRecord(c.formula, c.predictedTc ?? null, null, (c.ensembleScore ?? 0.3));
         featureBackfilled++;
-      } catch {}
+      } catch (e) { console.error(`[Engine] Feature backfill failed for ${c.formula}:`, e); }
     }
     if (featureBackfilled > 0) {
       emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()})`, dataSource: "Internal" });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Feature DB backfill outer error:", e); }
 
   try {
     const topoCandidates = await storage.getSuperconductorCandidatesByTc(100);
@@ -5021,21 +5021,21 @@ export async function startEngine() {
           );
           trackTopologyResult(topoResult);
           topoSeeded++;
-        } catch {}
+        } catch (e) { console.error(`[Engine] Topology seed failed for ${c.formula}:`, e); }
       }
       if (fermiSeeded < 80) {
         try {
           const fsResult = computeFermiSurface(c.formula);
           assignToCluster(c.formula, fsResult, c.predictedTc ?? 0);
           fermiSeeded++;
-        } catch {}
+        } catch (e) { console.error(`[Engine] Fermi cluster seed failed for ${c.formula}:`, e); }
       }
     }
     if (topoSeeded > 0 || fermiSeeded > 0) {
       const topoStats = getTopologyStats();
       emit("log", { phase: "engine", event: "Topology & Fermi clusters seeded", detail: `Analyzed ${topoSeeded} candidates: ${topoStats.totalTopological} topological, ${topoStats.totalTSC} TSC. Fermi clusters: ${fermiSeeded} assigned.`, dataSource: "Internal" });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Topology/Fermi seed outer error:", e); }
 
   try {
     const activeCampaigns = getAllActiveCampaigns();
@@ -5102,7 +5102,7 @@ export async function startEngine() {
         });
       }
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Inverse campaign auto-create failed:", e); }
 
   try {
     const existingPipelines = getAllPipelines();
@@ -5146,12 +5146,12 @@ export async function startEngine() {
           alreadyScreenedFormulas.add(normalizeFormula(result.formula));
           reprGenerated++;
         }
-      } catch {}
+      } catch (e) { console.error("[Engine] Design representation seed failed:", e); }
     }
     if (reprGenerated > 0) {
       emit("log", { phase: "engine", event: "Design representations seeded", detail: `Generated ${reprGenerated} initial design programs from 3 strategy types`, dataSource: "Integrated Subsystems" });
     }
-  } catch {}
+  } catch (e) { console.error("[Engine] Design representation seed outer error:", e); }
 
   try {
     const synthDataset = generateSyntheticDataset(40);
