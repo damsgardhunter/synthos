@@ -1576,6 +1576,92 @@ async function runPhase10_Physics() {
         } catch (dsErr) {
           console.error(`[Engine] Dataset add failed for ${candidate.formula}:`, dsErr instanceof Error ? dsErr.message.slice(0, 80) : "unknown");
         }
+
+        if (updatedTc > 5) {
+          const candFamily = classifyFamily(candidate.formula);
+          try {
+            const defects = generateDefectVariants(candidate.formula);
+            if (defects.length > 0) {
+              const bestDefect = defects.reduce((best: any, d: any) => {
+                const adj = adjustElectronicStructure(
+                  result.electronicStructure.densityOfStatesAtFermi ?? 1.0,
+                  result.coupling.lambda ?? 0.5,
+                  d.defectDensity,
+                  d.type,
+                  candidate.formula
+                );
+                return adj.tcModifier > (best?.tcMod ?? 0) ? { defect: d, tcMod: adj.tcModifier } : best;
+              }, null as { defect: any; tcMod: number } | null);
+              if (bestDefect && bestDefect.tcMod > 1.05) {
+                feedbackLoopStats.defectCandidatesAdded++;
+                feedbackLoopStats.defectTotalTcBoost += bestDefect.tcMod - 1;
+              }
+            }
+          } catch (e) { console.error(`[Engine] Phase-10 defect analysis failed for ${candidate.formula}:`, e); }
+
+          try {
+            const corrEffects = estimateCorrelationEffects(candidate.formula, {
+              UoverW: result.correlation?.ratio,
+              dosAtEF: result.electronicStructure?.densityOfStatesAtFermi,
+            });
+            if (corrEffects.tcModifier > 1.05) {
+              feedbackLoopStats.correlationBoostsApplied++;
+              feedbackLoopStats.correlationTotalTcBoost += Math.min(corrEffects.tcModifier, 1.5) - 1;
+            }
+          } catch (e) { console.error(`[Engine] Phase-10 correlation analysis failed for ${candidate.formula}:`, e); }
+
+          try {
+            const sv = defaultSynthesisVector(candFamily);
+            const growthResult = simulateCrystalGrowth(candidate.formula, candFamily, sv);
+            if (growthResult.qualityScore >= 0.6) {
+              feedbackLoopStats.growthQualityBonuses++;
+              feedbackLoopStats.growthTotalQualityBoost += growthResult.qualityScore * 0.03;
+            }
+          } catch (e) { console.error(`[Engine] Phase-10 crystal growth failed for ${candidate.formula}:`, e); }
+
+          try {
+            const synthCtx: MaterialContext = {
+              formula: candidate.formula,
+              materialClass: candFamily,
+              predictedTc: updatedTc,
+              lambda: result.coupling.lambda ?? 0.5,
+              pressure: 0,
+              isHydride: candFamily.toLowerCase().includes("hydride"),
+              isCuprate: candFamily.toLowerCase().includes("cuprate"),
+              isLayered: false,
+              meltingPointEstimate: 1500,
+              stabilityClass: "metastable-accessible",
+              energyAboveHull: 0.05,
+            };
+            const synthResult = optimizeSynthesisConditions(synthCtx);
+            const sv = defaultSynthesisVector(candFamily);
+            recordSynthesisResult(candidate.formula, candFamily, sv, updatedTc, 0.7);
+            if (synthResult.overallFeasibility > 0.6) {
+              feedbackLoopStats.synthesisFeasibilityBonuses++;
+              feedbackLoopStats.synthesisTotalFeasibilityBoost += synthResult.overallFeasibility * 0.05;
+            }
+          } catch (e) { console.error(`[Engine] Phase-10 synthesis analysis failed for ${candidate.formula}:`, e); }
+
+          if (updatedTc > 25 && cycleCount % 3 === 0) {
+            try {
+              const expCandidate: ExperimentCandidate = {
+                formula: candidate.formula,
+                predictedTc: updatedTc,
+                stability: 0.7,
+                synthesisFeasibility: 0.5,
+                novelty: 0.6,
+                uncertainty: 0.5,
+                materialClass: candFamily,
+                crystalStructure: "predicted",
+              };
+              const plan = generateExperimentPlan(expCandidate);
+              feedbackLoopStats.experimentPlansGenerated++;
+              if (plan.ranking.experimentScore > 0.6) {
+                feedbackLoopStats.experimentDFTPrioritized++;
+              }
+            } catch (e) { console.error(`[Engine] Phase-10 experiment plan failed for ${candidate.formula}:`, e); }
+          }
+        }
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
@@ -2730,7 +2816,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       addMaterialToDataset(formula, finalTc, physicsResult.coupling.lambda, physicsResult.pairingAnalysis?.symmetry ?? "unknown", family);
     } catch (e) { console.error(`[Autonomous] Landscape dataset add failed for ${formula}:`, e); }
 
-    const candidatePressure = features.pressureGpa ?? candidate.pressureGpa ?? 0;
+    const candidatePressure = features.pressureGpa ?? 0;
     if (finalTc > 30 && candidatePressure > 5) {
       try {
         const pathway = getPathwayForCandidate(formula, finalTc, candidatePressure);
@@ -3445,7 +3531,7 @@ async function runAutonomousFastPath() {
         }
       } catch (e) { console.error("[Engine] Feature record build failed:", e); }
 
-      const isPromising = result.passed || result.tc >= 15;
+      const isPromising = result.passed || result.tc >= 5;
 
       if (result.passed) {
         try {
@@ -5000,6 +5086,23 @@ export async function startEngine() {
       emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()})`, dataSource: "Internal" });
     }
   } catch (e) { console.error("[Engine] Feature DB backfill outer error:", e); }
+
+  try {
+    const topForBO = await storage.getSuperconductorCandidatesByTc(50);
+    let boSeeded = 0;
+    for (const c of topForBO) {
+      try {
+        const tc = c.predictedTc ?? 0;
+        const lambda = c.electronPhononCoupling ?? 0.5;
+        const score = c.ensembleScore ?? 0.3;
+        bayesianOptimizer.addObservation(c.formula, tc, lambda, score);
+        boSeeded++;
+      } catch (e) { /* skip */ }
+    }
+    if (boSeeded > 0) {
+      emit("log", { phase: "engine", event: "Bayesian optimizer seeded from DB", detail: `Loaded ${boSeeded} observations into BO. Stats: ${bayesianOptimizer.getStats().observationCount} obs, best Tc=${bayesianOptimizer.getStats().bestTc}K`, dataSource: "Internal" });
+    }
+  } catch (e) { console.error("[Engine] BO seeding from DB failed:", e); }
 
   try {
     const topoCandidates = await storage.getSuperconductorCandidatesByTc(100);
