@@ -501,10 +501,10 @@ export function mutateSynthesisPath(path: SynthesisPath): SynthesisPath {
     newSteps[idx].pressure *= randRange(0.8, 1.2);
     newSteps[idx].coolingRate *= randRange(0.7, 1.5);
     newSteps[idx].duration *= randRange(0.5, 2);
-    newSteps[idx].temperature = Math.max(200, newSteps[idx].temperature);
-    newSteps[idx].pressure = Math.max(0, newSteps[idx].pressure);
-    newSteps[idx].coolingRate = Math.max(0.1, newSteps[idx].coolingRate);
-    newSteps[idx].duration = Math.max(0.01, newSteps[idx].duration);
+    newSteps[idx].temperature = Math.min(2500, Math.max(200, newSteps[idx].temperature));
+    newSteps[idx].pressure = Math.min(300, Math.max(0, newSteps[idx].pressure));
+    newSteps[idx].coolingRate = Math.min(1000, Math.max(0.1, newSteps[idx].coolingRate));
+    newSteps[idx].duration = Math.min(168, Math.max(0.01, newSteps[idx].duration));
   } else if (mutType < 0.6 && newSteps.length > 2) {
     const i = Math.floor(Math.random() * (newSteps.length - 1));
     [newSteps[i], newSteps[i + 1]] = [newSteps[i + 1], newSteps[i]];

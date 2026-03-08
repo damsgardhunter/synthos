@@ -45,6 +45,12 @@ const KNOWN_PROTOTYPES: Record<string, { spaceGroup: string; crystalSystem: stri
   "diamond": { spaceGroup: "Fd-3m", crystalSystem: "cubic", prototype: "C", dimensionality: "3D" },
   "graphite": { spaceGroup: "P63/mmc", crystalSystem: "hexagonal", prototype: "C", dimensionality: "2D" },
   "bismuth-selenide": { spaceGroup: "R-3m", crystalSystem: "rhombohedral", prototype: "Bi2Se3", dimensionality: "2D" },
+  "Heusler": { spaceGroup: "Fm-3m", crystalSystem: "cubic", prototype: "Cu2MnAl", dimensionality: "3D" },
+  "Skutterudite": { spaceGroup: "Im-3", crystalSystem: "cubic", prototype: "CoSb3", dimensionality: "3D" },
+  "Chevrel": { spaceGroup: "R-3", crystalSystem: "rhombohedral", prototype: "PbMo6S8", dimensionality: "3D" },
+  "K2NiF4": { spaceGroup: "I4/mmm", crystalSystem: "tetragonal", prototype: "K2NiF4", dimensionality: "quasi-2D" },
+  "infinite-layer": { spaceGroup: "P4/mmm", crystalSystem: "tetragonal", prototype: "NdNiO2", dimensionality: "quasi-2D" },
+  "Pyrochlore": { spaceGroup: "Fd-3m", crystalSystem: "cubic", prototype: "Cd2Re2O7", dimensionality: "3D" },
 };
 
 function parseFormulaElements(formula: string): string[] {
@@ -75,6 +81,7 @@ function computeMiedemaFormationEnergy(formula: string): number {
   if (elements.length < 2) return 0;
 
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (totalAtoms === 0) return 0;
   const fractions: Record<string, number> = {};
   for (const el of elements) {
     fractions[el] = counts[el] / totalAtoms;
@@ -317,8 +324,34 @@ function matchPrototype(formula: string): typeof KNOWN_PROTOTYPES[string] | null
   if (elements.includes("Nb") && elements.includes("Sn")) {
     return KNOWN_PROTOTYPES["A15"];
   }
+  if (elements.includes("Mo") && (elements.includes("S") || elements.includes("Se") || elements.includes("Te"))) {
+    return KNOWN_PROTOTYPES["Chevrel"];
+  }
+  if ((elements.includes("Co") || elements.includes("Rh") || elements.includes("Ir")) &&
+      (elements.includes("Sb") || elements.includes("As") || elements.includes("P")) &&
+      elements.length === 2) {
+    return KNOWN_PROTOTYPES["Skutterudite"];
+  }
+  if (elements.includes("Ni") && elements.includes("O") && elements.length === 3 &&
+      (elements.includes("Nd") || elements.includes("Pr") || elements.includes("La"))) {
+    return KNOWN_PROTOTYPES["infinite-layer"];
+  }
   if (elements.includes("O") && elements.length === 3) {
     return KNOWN_PROTOTYPES["perovskite"];
+  }
+  if (elements.length === 3 &&
+      (elements.includes("Mn") || elements.includes("Ti") || elements.includes("V")) &&
+      (elements.includes("Al") || elements.includes("Ga") || elements.includes("Sn") || elements.includes("Sb"))) {
+    return KNOWN_PROTOTYPES["Heusler"];
+  }
+  if (elements.includes("F") && elements.length === 3 &&
+      (elements.includes("K") || elements.includes("Rb") || elements.includes("Ba") || elements.includes("Sr"))) {
+    return KNOWN_PROTOTYPES["K2NiF4"];
+  }
+  if (elements.includes("O") && elements.length === 3 &&
+      (elements.includes("Cd") || elements.includes("Os") || elements.includes("Tl")) &&
+      (elements.includes("Re") || elements.includes("Os") || elements.includes("Ir"))) {
+    return KNOWN_PROTOTYPES["Pyrochlore"];
   }
 
   return null;
@@ -344,6 +377,12 @@ const PROTOTYPE_CA_RATIOS: Record<string, number> = {
   Laves: 1.0,
   diamond: 1.0,
   "bismuth-selenide": 7.0,
+  Heusler: 1.0,
+  Skutterudite: 1.0,
+  Chevrel: 1.4,
+  K2NiF4: 3.2,
+  "infinite-layer": 1.7,
+  Pyrochlore: 1.0,
 };
 
 function getPrototypeCARatio(prototype: string | null): number | null {

@@ -24,6 +24,11 @@ const PROTOTYPE_TC_AFFINITY: Record<string, { minTc: number; maxTc: number; pref
   FCC: { minTc: 5, maxTc: 40, preferredElements: [["Pb", "Sn", "In", "Al"]] },
   Clathrate: { minTc: 100, maxTc: 400, preferredElements: [RARE_EARTH, ["H"]] },
   Fluorite: { minTc: 5, maxTc: 60, preferredElements: [RARE_EARTH, ["H", "F"]] },
+  Skutterudite: { minTc: 3, maxTc: 40, preferredElements: [["Co", "Rh", "Ir", "Fe"], ["Sb", "As", "P"]] },
+  Chevrel: { minTc: 5, maxTc: 30, preferredElements: [["Mo"], ["S", "Se", "Te"]] },
+  Borocarbide: { minTc: 5, maxTc: 25, preferredElements: [["Y", "Lu", "Tm", "Er"], ["Ni", "Pd"], ["B", "C"]] },
+  Pyrochlore: { minTc: 2, maxTc: 15, preferredElements: [["Cd", "Os", "Tl"], ["Re", "Os"], ["O"]] },
+  InfiniteLayer: { minTc: 30, maxTc: 120, preferredElements: [["Nd", "Pr", "La"], ["Ni", "Cu"], ["O"]] },
 };
 
 const STOICH_PATTERNS = [
@@ -95,6 +100,11 @@ function selectPrototypes(target: TargetProperties): string[] {
   return candidates.slice(0, 5).map(c => c.proto);
 }
 
+const FORBIDDEN_ELEMENTS = new Set([
+  "He", "Ne", "Ar", "Kr", "Xe", "Rn",
+  "Po", "At", "Fr", "Ra", "Pm", "Tc",
+]);
+
 function selectElements(
   target: TargetProperties,
   prototype: string,
@@ -106,6 +116,7 @@ function selectElements(
   const result: string[][] = [];
   for (const group of baseGroups) {
     let filtered = group.filter(el => {
+      if (FORBIDDEN_ELEMENTS.has(el)) return false;
       if (target.excludeElements && target.excludeElements.includes(el)) return false;
       return true;
     });

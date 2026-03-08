@@ -923,7 +923,7 @@ export class RLChemicalSpaceAgent {
       if (hDensity.ratio >= 4 && !pattern.includes("H")) {
         const hCount = Math.min(hDensity.ratio, 6);
         if (template.nElements === 2) {
-          formula = `${el1}${el2}H${hCount}`;
+          formula = `${el1}H${hCount}`;
         } else {
           formula = `${el1}${el2}H${hCount}`;
         }

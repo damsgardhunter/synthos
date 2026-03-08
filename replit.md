@@ -98,6 +98,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Engine catch blocks**: 65+ previously silent catch blocks now log errors across entire engine.ts.
 - **Supercon dataset**: Removed duplicate entries (ScH9, NbC, SrTiO3); 550 entries total.
 - **Auto-promote catch**: Routes validation auto-promote now logs errors on failure.
+- **Round 9 comprehensive fixes**:
+  - phonon-calculator.ts: Frequency artifact threshold raised 5000→8000 cm⁻¹ and scaling /20→/10, protecting legitimate H-H stretching modes in pressurized hydrides.
+  - structure-predictor.ts: totalAtoms=0 guard in computeMiedemaFormationEnergy; 6 new KNOWN_PROTOTYPES (Heusler, Skutterudite, Chevrel, K2NiF4, infinite-layer, Pyrochlore); matchPrototype extended for all 6; PROTOTYPE_CA_RATIOS added for all 6.
+  - rl-agent.ts: Binary hydride formula fix — 2-element templates now generate `${el1}H${hCount}` instead of duplicating `${el1}${el2}H${hCount}`.
+  - elemental-data.ts: Bi mcMillanHopfieldEta=0.15; Ac bulkModulus=12/eta=0.3/gamma=1.0/gruneisen=1.0; sommerfeldGamma filled for B(0.1), C(0.05), N(0.05), Si(0.1).
+  - synthesis-simulator.ts: Upper bound clamping on mutated parameters (temp≤2500K, pressure≤300GPa, coolingRate≤1000, duration≤168h).
+  - supercon-dataset.ts: Lambda added for V3Si(1.60), NbC(0.98), VN(0.94), TaC(0.86), MoC(1.10), MoN(1.04), ZrN(1.12); pressure+lambda for LaH6(110GPa), SnH4(96GPa), GeH4(220GPa), SiH4(125GPa), PH3(200GPa).
+  - inverse-generator.ts: 5 new PROTOTYPE_TC_AFFINITY entries (Skutterudite, Chevrel, Borocarbide, Pyrochlore, InfiniteLayer); FORBIDDEN_ELEMENTS set blocking noble gases (He/Ne/Ar/Kr/Xe/Rn) and radioactive elements (Po/At/Fr/Ra/Pm/Tc).
 - **Round 8 comprehensive fixes**:
   - ml-predictor.ts: electronDensityEstimate clamped to [0,1]; phononSpectralWidth NaN guard with isFinite fallback.
   - physics-engine.ts: Stoner enhancement denominator guard (stonerProduct<0.95, |denom|>1e-6); FAMILY_TC_CAPS raised (Nitrides 65K/110K, Borides 55K/150K, Carbides 45K/100K).
