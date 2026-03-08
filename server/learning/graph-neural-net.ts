@@ -46,14 +46,19 @@ interface GNNWeights {
   W_update2: number[][];
   W_message3: number[][];
   W_update3: number[][];
+  W_message4: number[][];
+  W_update4: number[][];
   W_attn_query: number[][];
   W_attn_key: number[][];
   W_attn_query2: number[][];
   W_attn_key2: number[][];
   W_attn_query3: number[][];
   W_attn_key3: number[][];
+  W_attn_query4: number[][];
+  W_attn_key4: number[][];
   W_3body: number[][];
   W_3body_update: number[][];
+  W_attn_pool: number[][];
   W_mlp1: number[][];
   b_mlp1: number[];
   W_mlp2: number[][];
@@ -79,12 +84,19 @@ export interface GNNPredictionWithUncertainty {
   confidence: number;
 }
 
-const NODE_DIM = 20;
-const HIDDEN_DIM = 28;
-const EDGE_DIM = 7;
+const NODE_DIM = 32;
+const HIDDEN_DIM = 48;
+const EDGE_DIM = 24;
 const OUTPUT_DIM = 5;
+const ENSEMBLE_SIZE = 5;
+const MC_DROPOUT_PASSES = 5;
+const MC_DROPOUT_RATE = 0.1;
+const N_GAUSSIAN_BASIS = 20;
+const GAUSSIAN_START = 0.5;
+const GAUSSIAN_END = 6.0;
+const GAUSSIAN_WIDTH = 0.5;
 
-let cachedGNNModel: GNNWeights | null = null;
+let cachedEnsembleModels: GNNWeights[] | null = null;
 let modelTrainedAt = 0;
 const MODEL_STALE_MS = 30 * 60 * 1000;
 
@@ -165,6 +177,57 @@ function softmax(values: number[]): number[] {
   const exps = values.map(v => Math.exp(Math.min(v - maxVal, 20)));
   const sumExps = exps.reduce((s, e) => s + e, 0);
   return exps.map(e => e / Math.max(sumExps, 1e-10));
+}
+
+function gaussianDistanceExpansion(distance: number): number[] {
+  const step = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
+  const basis: number[] = [];
+  for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
+    const center = GAUSSIAN_START + i * step;
+    const diff = distance - center;
+    basis.push(Math.exp(-(diff * diff) / (2 * GAUSSIAN_WIDTH * GAUSSIAN_WIDTH)));
+  }
+  return basis;
+}
+
+function applyDropout(vec: number[], rate: number, rng: () => number): number[] {
+  if (rate <= 0) return vec;
+  const scale = 1.0 / (1.0 - rate);
+  return vec.map(v => rng() < rate ? 0 : v * scale);
+}
+
+function getPeriod(atomicNumber: number): number {
+  if (atomicNumber <= 2) return 1;
+  if (atomicNumber <= 10) return 2;
+  if (atomicNumber <= 18) return 3;
+  if (atomicNumber <= 36) return 4;
+  if (atomicNumber <= 54) return 5;
+  if (atomicNumber <= 86) return 6;
+  return 7;
+}
+
+function getGroup(atomicNumber: number): number {
+  const groupMap: Record<number, number> = {
+    1: 1, 2: 18, 3: 1, 4: 2, 5: 13, 6: 14, 7: 15, 8: 16, 9: 17, 10: 18,
+    11: 1, 12: 2, 13: 13, 14: 14, 15: 15, 16: 16, 17: 17, 18: 18,
+    19: 1, 20: 2, 21: 3, 22: 4, 23: 5, 24: 6, 25: 7, 26: 8, 27: 9, 28: 10,
+    29: 11, 30: 12, 31: 13, 32: 14, 33: 15, 34: 16, 35: 17, 36: 18,
+    37: 1, 38: 2, 39: 3, 40: 4, 41: 5, 42: 6, 43: 7, 44: 8, 45: 9, 46: 10,
+    47: 11, 48: 12, 49: 13, 50: 14, 51: 15, 52: 16, 53: 17, 54: 18,
+    55: 1, 56: 2, 72: 4, 73: 5, 74: 6, 75: 7, 76: 8, 77: 9, 78: 10,
+    79: 11, 80: 12, 81: 13, 82: 14, 83: 15,
+  };
+  return groupMap[atomicNumber] ?? 0;
+}
+
+function getBlockEncoding(atomicNumber: number): number {
+  if (atomicNumber <= 2) return 0;
+  if ([3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88].includes(atomicNumber)) return 0;
+  if (atomicNumber >= 57 && atomicNumber <= 71) return 0.75;
+  if (atomicNumber >= 89 && atomicNumber <= 103) return 0.75;
+  if ((atomicNumber >= 21 && atomicNumber <= 30) || (atomicNumber >= 39 && atomicNumber <= 48) || (atomicNumber >= 72 && atomicNumber <= 80)) return 0.5;
+  if ((atomicNumber >= 5 && atomicNumber <= 10) || (atomicNumber >= 13 && atomicNumber <= 18) || (atomicNumber >= 31 && atomicNumber <= 36) || (atomicNumber >= 49 && atomicNumber <= 54) || (atomicNumber >= 81 && atomicNumber <= 86)) return 0.25;
+  return 0;
 }
 
 function getSOrbitalOccupancy(atomicNumber: number): number {
@@ -453,14 +516,13 @@ export function buildPrototypeGraph(formula: string, prototype: string): Crystal
             const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
             const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
+            const gaussianBasis = gaussianDistanceExpansion(distance);
             const edgeFeats = [
-              Math.min(distance / 6.0, 1.0),
+              ...gaussianBasis,
               bondOrder / 2.0,
               enDiff / 3.0,
-              (nodes[i].valenceElectrons + nodes[j].valenceElectrons) / 16.0,
-              massRatio,
-              radiusSum,
               ionicCharacter,
+              radiusSum,
             ];
 
             edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -476,7 +538,8 @@ export function buildPrototypeGraph(formula: string, prototype: string): Crystal
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
       const j = (i + 1) % nodes.length;
-      const edgeFeats = [0.5, 0.5, 0.3, 0.3, 0.5, 0.5, 0.3];
+      const defaultGaussian = gaussianDistanceExpansion(2.5);
+      const edgeFeats = [...defaultGaussian, 0.5, 0.3, 0.3, 0.5];
       edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       adjacency[i].push(j);
@@ -607,6 +670,10 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
   const fOcc = getFOrbitalOccupancy(atomicNumber);
   const bulkMod = data?.bulkModulus ?? 50;
 
+  const period = getPeriod(atomicNumber);
+  const group = getGroup(atomicNumber);
+  const block = getBlockEncoding(atomicNumber);
+
   return [
     atomicNumber / 100,
     en / 4.0,
@@ -628,6 +695,18 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
     computeSpinOrbitCoupling(atomicNumber),
     computeMagneticMomentProxy(atomicNumber),
     computeValenceShellEncoding(atomicNumber, valence),
+    period / 7.0,
+    group / 18.0,
+    block,
+    Math.min(1.0, (data?.meltingPoint ?? 1000) / 4000),
+    Math.min(1.0, (data?.density ?? 5) / 25),
+    Math.min(1.0, (data?.thermalConductivity ?? 50) / 500),
+    Math.min(1.0, Math.abs(data?.electronAffinity ?? 0) / 4.0),
+    Math.min(1.0, (data?.atomicVolume ?? 15) / 80),
+    en > 2.0 ? 1.0 : en > 1.5 ? 0.5 : 0.0,
+    atomicNumber <= 20 ? 0.0 : atomicNumber <= 30 ? 0.5 : 1.0,
+    Math.min(1.0, valence * en / 16.0),
+    Math.min(1.0, covalentR * dOcc / 100),
   ];
 }
 
@@ -694,14 +773,13 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
         const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
         const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
+        const gaussianBasis = gaussianDistanceExpansion(distance);
         const edgeFeats = [
-          Math.min(distance / cutoff, 1.0),
+          ...gaussianBasis,
           bondOrder / 2.0,
           enDiff / 3.0,
-          (nodes[i].valenceElectrons + nodes[j].valenceElectrons) / 16.0,
-          massRatio,
-          radiusSum,
           ionicCharacter,
+          radiusSum,
         ];
 
         edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -716,7 +794,8 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
       const j = (i + 1) % nodes.length;
-      const edgeFeats = [0.5, 0.5, 0.3, 0.3, 0.5, 0.5, 0.3];
+      const defaultGaussian = gaussianDistanceExpansion(2.5);
+      const edgeFeats = [...defaultGaussian, 0.5, 0.3, 0.3, 0.5];
       edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       adjacency[i].push(j);
@@ -848,13 +927,97 @@ export function messagePassingLayer(
   return newEmbeddings;
 }
 
-export function GNNPredict(graph: CrystalGraph, weights: GNNWeights): GNNPrediction {
+function attentionPooling(graph: CrystalGraph, W_pool: number[][]): number[] {
+  const nNodes = graph.nodes.length;
+  if (nNodes === 0) return initVector(HIDDEN_DIM);
+
+  const scores: number[] = [];
+  for (const node of graph.nodes) {
+    const e = [...node.embedding];
+    while (e.length < HIDDEN_DIM) e.push(0);
+    const attnVec = matVecMul(W_pool, e.slice(0, HIDDEN_DIM));
+    scores.push(attnVec.reduce((s, v) => s + v, 0));
+  }
+
+  const attnWeights = softmax(scores);
+  const pooled = initVector(HIDDEN_DIM);
+  for (let n = 0; n < nNodes; n++) {
+    const e = graph.nodes[n].embedding;
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      pooled[k] += (e[k] ?? 0) * attnWeights[n];
+    }
+  }
+  return pooled;
+}
+
+export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?: () => number): GNNPrediction {
+  const saveResidual = (nodes: CrystalGraph["nodes"]) =>
+    nodes.map(n => {
+      const e = [...n.embedding];
+      while (e.length < HIDDEN_DIM) e.push(0);
+      return e.slice(0, HIDDEN_DIM);
+    });
+
+  const residual0 = saveResidual(graph.nodes);
+
   attentionMessagePassingLayer(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key);
+  if (dropoutRng) {
+    for (const node of graph.nodes) {
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+    }
+  }
+
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
   }
+
+  for (let i = 0; i < graph.nodes.length; i++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * 0.3;
+    }
+  }
+
+  const residual1 = saveResidual(graph.nodes);
   attentionMessagePassingLayer(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2);
+  if (dropoutRng) {
+    for (const node of graph.nodes) {
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+    }
+  }
+
+  for (let i = 0; i < graph.nodes.length; i++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual1[i][k] ?? 0) * 0.3;
+    }
+  }
+
+  const residual2 = saveResidual(graph.nodes);
   attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+  if (dropoutRng) {
+    for (const node of graph.nodes) {
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+    }
+  }
+
+  for (let i = 0; i < graph.nodes.length; i++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * 0.3;
+    }
+  }
+
+  const residual3 = saveResidual(graph.nodes);
+  attentionMessagePassingLayer(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+  if (dropoutRng) {
+    for (const node of graph.nodes) {
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+    }
+  }
+
+  for (let i = 0; i < graph.nodes.length; i++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * 0.3;
+    }
+  }
 
   const nNodes = graph.nodes.length;
   const meanPool = initVector(HIDDEN_DIM);
@@ -867,9 +1030,18 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights): GNNPredict
     }
   }
 
+  const attnPool = attentionPooling(graph, weights.W_attn_pool);
+
   const pooled = [...meanPool, ...maxPool.map(v => v === -Infinity ? 0 : v)];
+  for (let k = 0; k < HIDDEN_DIM; k++) {
+    pooled[k] = pooled[k] * 0.5 + attnPool[k] * 0.5;
+  }
 
   const h1 = relu(vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1));
+  if (dropoutRng) {
+    const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
+    for (let i = 0; i < h1.length; i++) h1[i] = dropped[i];
+  }
   const out = vecAdd(matVecMul(weights.W_mlp2, h1), weights.b_mlp2);
 
   const formationEnergy = out[0] ?? 0;
@@ -895,14 +1067,19 @@ function initWeights(rng: () => number): GNNWeights {
     W_update2: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
     W_message3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
     W_update3: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
+    W_message4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
+    W_update4: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
     W_attn_query: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_key: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_query2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_key2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_query3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_attn_query4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_attn_key4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.1),
     b_mlp1: initVector(HIDDEN_DIM),
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.1),
@@ -920,14 +1097,19 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_update2: w.W_update2.map(r => [...r]),
     W_message3: w.W_message3.map(r => [...r]),
     W_update3: w.W_update3.map(r => [...r]),
+    W_message4: w.W_message4.map(r => [...r]),
+    W_update4: w.W_update4.map(r => [...r]),
     W_attn_query: w.W_attn_query.map(r => [...r]),
     W_attn_key: w.W_attn_key.map(r => [...r]),
     W_attn_query2: w.W_attn_query2.map(r => [...r]),
     W_attn_key2: w.W_attn_key2.map(r => [...r]),
     W_attn_query3: w.W_attn_query3.map(r => [...r]),
     W_attn_key3: w.W_attn_key3.map(r => [...r]),
+    W_attn_query4: w.W_attn_query4.map(r => [...r]),
+    W_attn_key4: w.W_attn_key4.map(r => [...r]),
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
+    W_attn_pool: w.W_attn_pool.map(r => [...r]),
     W_mlp1: w.W_mlp1.map(r => [...r]),
     b_mlp1: [...w.b_mlp1],
     W_mlp2: w.W_mlp2.map(r => [...r]),
@@ -945,9 +1127,9 @@ interface TrainingSample {
   prototype?: string;
 }
 
-export function trainGNNSurrogate(trainingData: TrainingSample[]): GNNWeights {
+export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights): GNNWeights {
   const rng = seededRandom(42);
-  const weights = initWeights(rng);
+  const weights = preInitWeights ?? initWeights(rng);
 
   if (trainingData.length < 5) {
     weights.trainedAt = Date.now();
@@ -1052,10 +1234,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[]): GNNWeights {
   return weights;
 }
 
-export function getGNNModel(): GNNWeights {
+function getEnsembleModels(): GNNWeights[] {
   const now = Date.now();
-  if (cachedGNNModel && (now - modelTrainedAt) < MODEL_STALE_MS) {
-    return cachedGNNModel;
+  if (cachedEnsembleModels && (now - modelTrainedAt) < MODEL_STALE_MS) {
+    return cachedEnsembleModels;
   }
 
   const trainingData: TrainingSample[] = SUPERCON_TRAINING_DATA
@@ -1067,14 +1249,34 @@ export function getGNNModel(): GNNWeights {
       structure: undefined,
     }));
 
-  cachedGNNModel = trainGNNSurrogate(trainingData);
+  cachedEnsembleModels = trainEnsemble(trainingData);
   modelTrainedAt = now;
-  return cachedGNNModel;
+  return cachedEnsembleModels;
+}
+
+export function trainEnsemble(trainingData: TrainingSample[]): GNNWeights[] {
+  const models: GNNWeights[] = [];
+  for (let i = 0; i < ENSEMBLE_SIZE; i++) {
+    const rng = seededRandom(42 + i * 7919);
+    const w = initWeights(rng);
+    const trained = trainGNNSurrogate(trainingData, w);
+    models.push(trained);
+  }
+  return models;
+}
+
+export function getGNNModel(): GNNWeights {
+  return getEnsembleModels()[0];
 }
 
 export function invalidateGNNModel(): void {
-  cachedGNNModel = null;
+  cachedEnsembleModels = null;
   modelTrainedAt = 0;
+}
+
+export function setCachedEnsemble(models: GNNWeights[]): void {
+  cachedEnsembleModels = models;
+  modelTrainedAt = Date.now();
 }
 
 export function getGNNPrediction(formula: string, structure?: any): GNNPrediction {
@@ -1101,14 +1303,19 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
   perturbMatrix(perturbed.W_update2);
   perturbMatrix(perturbed.W_message3);
   perturbMatrix(perturbed.W_update3);
+  perturbMatrix(perturbed.W_message4);
+  perturbMatrix(perturbed.W_update4);
   perturbMatrix(perturbed.W_attn_query);
   perturbMatrix(perturbed.W_attn_key);
   perturbMatrix(perturbed.W_attn_query2);
   perturbMatrix(perturbed.W_attn_key2);
   perturbMatrix(perturbed.W_attn_query3);
   perturbMatrix(perturbed.W_attn_key3);
+  perturbMatrix(perturbed.W_attn_query4);
+  perturbMatrix(perturbed.W_attn_key4);
   perturbMatrix(perturbed.W_3body);
   perturbMatrix(perturbed.W_3body_update);
+  perturbMatrix(perturbed.W_attn_pool);
   perturbMatrix(perturbed.W_mlp1);
   perturbMatrix(perturbed.W_mlp2);
 
@@ -1116,24 +1323,20 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
 }
 
 export function gnnPredictWithUncertainty(formula: string, prototype?: string): GNNPredictionWithUncertainty {
-  const weights = getGNNModel();
-  const ensembleSize = 3;
+  const ensembleModels = getEnsembleModels();
   const predictions: GNNPrediction[] = [];
 
-  const baseGraph = prototype
-    ? buildPrototypeGraph(formula, prototype)
-    : buildCrystalGraph(formula);
-  const basePred = GNNPredict(baseGraph, weights);
-  predictions.push(basePred);
+  for (let m = 0; m < ensembleModels.length; m++) {
+    const modelWeights = ensembleModels[m];
 
-  for (let run = 1; run < ensembleSize; run++) {
-    const rng = seededRandom(42 + run * 137);
-    const perturbedWeights = perturbWeights(weights, rng, 0.15);
-    const graph = prototype
-      ? buildPrototypeGraph(formula, prototype)
-      : buildCrystalGraph(formula);
-    const pred = GNNPredict(graph, perturbedWeights);
-    predictions.push(pred);
+    for (let d = 0; d < MC_DROPOUT_PASSES; d++) {
+      const dropoutRng = seededRandom(m * 1000 + d * 137 + 7);
+      const graph = prototype
+        ? buildPrototypeGraph(formula, prototype)
+        : buildCrystalGraph(formula);
+      const pred = GNNPredict(graph, modelWeights, dropoutRng);
+      predictions.push(pred);
+    }
   }
 
   const tcValues = predictions.map(p => p.predictedTc);
@@ -1156,16 +1359,23 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string): 
   const normalizedFeUncertainty = feStd;
   const normalizedLambdaUncertainty = meanLambda > 0 ? lambdaStd / Math.max(meanLambda, 0.1) : lambdaStd;
 
+  const epistemicUncertainty = tcValues.length > 0
+    ? Math.sqrt(tcValues.reduce((s, v) => s + (v - meanTc) ** 2, 0) / tcValues.length) / Math.max(meanTc, 1)
+    : 1.0;
+
   const combinedUncertainty = Math.min(1.0,
-    0.5 * normalizedTcUncertainty +
-    0.3 * normalizedFeUncertainty +
-    0.2 * normalizedLambdaUncertainty
+    0.4 * normalizedTcUncertainty +
+    0.2 * normalizedFeUncertainty +
+    0.15 * normalizedLambdaUncertainty +
+    0.25 * epistemicUncertainty
   );
 
+  const totalPredictions = predictions.length;
   const phononStabilityVotes = predictions.filter(p => p.phononStability).length;
-  const phononStable = phononStabilityVotes > ensembleSize / 2;
+  const phononStable = phononStabilityVotes > totalPredictions / 2;
 
-  const avgConfidence = predictions.reduce((s, p) => s + p.confidence, 0) / predictions.length;
+  const avgConfidence = predictions.reduce((s, p) => s + p.confidence, 0) / totalPredictions;
+  const confidenceAdjusted = avgConfidence * (1.0 - combinedUncertainty * 0.5);
 
   return {
     tc: Math.round(meanTc * 10) / 10,
@@ -1173,7 +1383,7 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string): 
     lambda: Math.round(meanLambda * 1000) / 1000,
     uncertainty: Math.round(combinedUncertainty * 1000) / 1000,
     phononStability: phononStable,
-    confidence: Math.round(avgConfidence * 100) / 100,
+    confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceAdjusted)) * 100) / 100,
   };
 }
 

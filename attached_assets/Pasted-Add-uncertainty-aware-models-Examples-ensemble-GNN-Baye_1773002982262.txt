@@ -1,0 +1,138 @@
+Add uncertainty-aware models.
+
+Examples:
+
+ensemble GNN
+Bayesian neural network
+Monte Carlo dropout
+
+Example pipeline:
+
+predict Tc
+predict uncertainty σ
+score = Tc + α * σ
+
+This forces exploration of unknown regions of materials space.
+
+Task list
+AL001: add uncertainty output to surrogate
+AL002: ensemble model training
+AL003: candidate acquisition function
+AL004: automatic retraining pipeline
+AL005: DFT results → dataset ingestion
+2️⃣ Crystal Graph Neural Network (Structure-Aware Surrogate)
+
+Your logs show predictions based on chemistry + heuristics:
+
+dosEF
+lambda
+chargeTransfer
+
+But modern systems use graph neural networks on the crystal structure.
+
+Examples:
+
+CGCNN
+
+MEGNet
+
+M3GNet
+
+ALIGNN
+
+MatterGen GNN
+
+These learn from:
+
+atomic species
+bond distances
+angles
+coordination
+
+Instead of hand-engineered descriptors.
+
+Why this matters
+
+Current surrogate models often fail when:
+
+same chemistry
+different structure
+
+Example:
+
+FeSe layered → superconducting
+FeSe rocksalt → not superconducting
+
+A GNN sees this difference.
+
+Implementation tasks
+GNN001: structure → graph conversion
+GNN002: atomic embeddings
+GNN003: message passing layers
+GNN004: Tc prediction head
+GNN005: training dataset integration
+
+Libraries that help:
+
+PyTorch Geometric
+DGL
+MatGL
+3️⃣ Generative Crystal Structure Model
+
+Your system currently generates structures with:
+
+heuristics
+prototypes
+diffusion attempts
+
+The next upgrade is true generative crystal models.
+
+Examples used in research:
+
+DiffCSP
+
+CDVAE
+
+MatterGen
+
+Crystal Diffusion Models
+
+They generate:
+
+composition
+lattice
+atomic positions
+
+simultaneously.
+
+Why this matters
+
+Heuristic generators often produce:
+
+impossible structures
+overlaps
+unstable bonding
+
+Generative models learn real crystal statistics.
+
+Example:
+
+probability distributions of bond lengths
+coordination numbers
+space groups
+
+Result:
+
+valid structures increase 5×–20×
+Implementation tasks
+GEN001: train crystal diffusion model
+GEN002: integrate composition conditioning
+GEN003: generate lattice vectors
+GEN004: atomic position sampling
+GEN005: validity post-filter
+
+Training datasets:
+
+Materials Project
+OQMD
+ICSD

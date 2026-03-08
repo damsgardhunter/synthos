@@ -403,20 +403,60 @@ function computeLatticeFromMotif(
   };
 }
 
+function cosineNoiseSchedule(step: number, totalSteps: number): number {
+  const s = 0.008;
+  const t = step / totalSteps;
+  const alphaBar = Math.cos((t + s) / (1 + s) * Math.PI / 2) ** 2;
+  return Math.sqrt(1 - alphaBar);
+}
+
+function computeCoordinationPenalty(
+  atoms: CrystalAtom[],
+  lattice: { a: number; b: number; c: number },
+  targetCoord: number = 6
+): number {
+  let penalty = 0;
+  for (let i = 0; i < atoms.length; i++) {
+    let coord = 0;
+    const maxMetalCoord = isTransitionMetal(atoms[i].element) ? 12 : 8;
+    for (let j = 0; j < atoms.length; j++) {
+      if (i === j) continue;
+      const dx = (atoms[j].fx - atoms[i].fx) * lattice.a;
+      const dy = (atoms[j].fy - atoms[i].fy) * lattice.b;
+      const dz = (atoms[j].fz - atoms[i].fz) * lattice.c;
+      const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const ri = ELEMENT_EMBEDDINGS[atoms[i].element]?.[2] ?? 1.5;
+      const rj = ELEMENT_EMBEDDINGS[atoms[j].element]?.[2] ?? 1.5;
+      if (r < (ri + rj) * 1.3) coord++;
+    }
+    if (coord < 2) penalty += (2 - coord) * 0.5;
+    if (coord > maxMetalCoord) penalty += (coord - maxMetalCoord) * 0.3;
+    penalty += Math.abs(coord - targetCoord) * 0.05;
+  }
+  return penalty / Math.max(atoms.length, 1);
+}
+
 function runDenoising(
   atoms: CrystalAtom[],
   lattice: { a: number; b: number; c: number },
   steps: number,
-  motif: StructuralMotif
+  motif: StructuralMotif,
+  compositionCondition?: number[]
 ): CrystalAtom[] {
   let current = atoms.map(a => ({ ...a }));
   let bestEnergy = Infinity;
   let bestConfig = current.map(a => ({ ...a }));
+  const totalSteps = Math.max(steps, 50);
 
-  for (let step = 0; step < steps; step++) {
-    const t = 1 - step / steps;
-    const noiseScale = t * 0.05;
-    const forceScale = (1 - t) * 0.3;
+  const condBias = compositionCondition ?? [];
+  const avgCondZ = condBias.length > 0 ? condBias[0] * 50 : 30;
+  const idealDist = 1.5 + avgCondZ * 0.015;
+
+  for (let step = 0; step < totalSteps; step++) {
+    const noiseScale = cosineNoiseSchedule(step, totalSteps) * 0.03;
+    const t = step / totalSteps;
+    const forceScale = t * 0.35;
+    const coordWeight = Math.min(1.0, t * 2) * 0.1;
 
     for (let i = 0; i < current.length; i++) {
       let fx = 0, fy = 0, fz = 0;
@@ -433,8 +473,12 @@ function runDenoising(
         const rj = (ELEMENT_EMBEDDINGS[current[j].element]?.[2] ?? 1.5) / lattice.a;
         const sigma = (ri + rj) * 0.5;
         const sigma6 = Math.pow(sigma / r, 6);
-        const force = 24 * (2 * sigma6 * sigma6 - sigma6) / r;
+        const ljForce = 24 * (2 * sigma6 * sigma6 - sigma6) / r;
 
+        const idealR = idealDist / lattice.a;
+        const springForce = -(r - idealR) * coordWeight;
+
+        const force = ljForce + springForce;
         fx += force * dx / r * forceScale;
         fy += force * dy / r * forceScale;
         fz += force * dz / r * forceScale;
@@ -464,6 +508,8 @@ function runDenoising(
       }
     }
 
+    energy += computeCoordinationPenalty(current, lattice, motif.embedding.coordination) * 5;
+
     if (energy < bestEnergy) {
       bestEnergy = energy;
       bestConfig = current.map(a => ({ ...a }));
@@ -471,6 +517,110 @@ function runDenoising(
   }
 
   return bestConfig;
+}
+
+const COVALENT_RADII: Record<string, number> = {
+  H: 0.31, He: 0.28, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66,
+  F: 0.57, Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
+  K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39, Fe: 1.32,
+  Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20, As: 1.19, Se: 1.20,
+  Br: 1.20, Rb: 2.20, Sr: 1.95, Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, Ru: 1.46,
+  Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, In: 1.42, Sn: 1.39, Sb: 1.39, Te: 1.38,
+  I: 1.39, Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04, Hf: 1.75, Ta: 1.70, W: 1.62,
+  Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36, Bi: 1.48,
+};
+
+function getOxidationStates(el: string): number[] {
+  const states: Record<string, number[]> = {
+    H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+    Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+    B: [3], Al: [3], Ga: [3], In: [3],
+    C: [4, -4], Si: [4, -4], Ge: [4],
+    N: [-3, 3, 5], P: [-3, 3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5],
+    O: [-2], S: [-2, 4, 6], Se: [-2, 4, 6], Te: [-2, 4, 6],
+    F: [-1], Cl: [-1], Br: [-1], I: [-1],
+    Sc: [3], Y: [3], La: [3], Ce: [3, 4],
+    Ti: [3, 4], Zr: [4], Hf: [4],
+    V: [3, 4, 5], Nb: [3, 5], Ta: [5],
+    Cr: [3, 6], Mo: [4, 6], W: [4, 6],
+    Mn: [2, 4, 7], Re: [4, 7],
+    Fe: [2, 3], Ru: [3, 4], Os: [4],
+    Co: [2, 3], Rh: [3], Ir: [3, 4],
+    Ni: [2], Pd: [2, 4], Pt: [2, 4],
+    Cu: [1, 2], Ag: [1], Au: [1, 3],
+    Zn: [2], Cd: [2],
+    Sn: [2, 4], Bi: [3],
+  };
+  return states[el] ?? [0];
+}
+
+function passesValidityFilter(
+  atoms: CrystalAtom[],
+  lattice: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number },
+  composition: Record<string, number>
+): boolean {
+  if (atoms.length === 0) return false;
+
+  const vol = lattice.a * lattice.b * lattice.c;
+  const volPerAtom = vol / atoms.length;
+  if (volPerAtom < 5 || volPerAtom > 50) {
+    return false;
+  }
+
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const dx = (atoms[j].fx - atoms[i].fx) * lattice.a;
+      const dy = (atoms[j].fy - atoms[i].fy) * lattice.b;
+      const dz = (atoms[j].fz - atoms[i].fz) * lattice.c;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const ri = COVALENT_RADII[atoms[i].element] ?? 1.4;
+      const rj = COVALENT_RADII[atoms[j].element] ?? 1.4;
+      const minAllowed = (ri + rj) * 0.8;
+      if (dist < minAllowed) {
+        return false;
+      }
+    }
+  }
+
+  for (let i = 0; i < atoms.length; i++) {
+    let coord = 0;
+    const isMetal = isTransitionMetal(atoms[i].element) || isRareEarth(atoms[i].element);
+    const maxCoord = isMetal ? 12 : 8;
+    for (let j = 0; j < atoms.length; j++) {
+      if (i === j) continue;
+      const dx = (atoms[j].fx - atoms[i].fx) * lattice.a;
+      const dy = (atoms[j].fy - atoms[i].fy) * lattice.b;
+      const dz = (atoms[j].fz - atoms[i].fz) * lattice.c;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const ri = COVALENT_RADII[atoms[i].element] ?? 1.4;
+      const rj = COVALENT_RADII[atoms[j].element] ?? 1.4;
+      if (dist < (ri + rj) * 1.5) coord++;
+    }
+    if (coord < 1 || coord > maxCoord) {
+      return false;
+    }
+  }
+
+  const elements = Object.entries(composition);
+  let bestChargeImbalance = Infinity;
+  const tryOxStates = (idx: number, currentCharge: number): void => {
+    if (idx >= elements.length) {
+      bestChargeImbalance = Math.min(bestChargeImbalance, Math.abs(currentCharge));
+      return;
+    }
+    const [el, count] = elements[idx];
+    for (const ox of getOxidationStates(el)) {
+      tryOxStates(idx + 1, currentCharge + ox * count);
+    }
+  };
+  if (elements.length <= 5) {
+    tryOxStates(0, 0);
+    if (bestChargeImbalance > 0.5) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function computeStructureScore(crystal: DiffusedCrystal): number {
@@ -586,7 +736,13 @@ export function runCrystalDiffusionCycle(
       const lattice = computeLatticeFromMotif(composition, motif);
       let atoms = generateAtomicPositions(composition, motif, 0.08);
 
-      atoms = runDenoising(atoms, lattice, diffusionSteps, motif);
+      const compCondition = encodeComposition(composition);
+      atoms = runDenoising(atoms, lattice, diffusionSteps, motif, compCondition);
+
+      if (!passesValidityFilter(atoms, lattice, composition)) {
+        diffusionStats.totalGenerated++;
+        continue;
+      }
 
       let predictedTc = 0;
       let lambda = 0;
