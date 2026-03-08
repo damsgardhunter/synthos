@@ -1546,6 +1546,7 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
 
 export function isDFTAvailable(): boolean {
   try {
+    if (xtbHealthy) return true;
     return fs.existsSync(XTB_BIN);
   } catch {
     return false;
@@ -1568,4 +1569,93 @@ export function getXTBStats() {
     optimizedStructures: optimizedStructureCache.size,
     refElements: elementRefEnergies.size,
   };
+}
+
+let xtbHealthy = false;
+
+export async function checkXTBHealth(): Promise<{ available: boolean; version: string; canOptimize: boolean; canHess: boolean; error?: string }> {
+  const result = { available: false, version: "", canOptimize: false, canHess: false, error: undefined as string | undefined };
+
+  if (!fs.existsSync(XTB_BIN)) {
+    result.error = `xTB binary not found at ${XTB_BIN}`;
+    console.log(`[xTB-Health] FAIL: ${result.error}`);
+    return result;
+  }
+
+  try {
+    const env = {
+      ...process.env,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "100M",
+      PATH: `${path.join(XTB_HOME, "bin")}:${process.env.PATH}`,
+    };
+
+    const versionOutput = execSync(`${XTB_BIN} --version 2>&1`, { timeout: 10000, env }).toString();
+    const vMatch = versionOutput.match(/xtb version (\S+)/);
+    result.version = vMatch ? vMatch[1] : "unknown";
+    result.available = true;
+    console.log(`[xTB-Health] Binary found: v${result.version}`);
+
+    const testDir = path.join(WORK_DIR, `health_check_${Date.now()}`);
+    fs.mkdirSync(testDir, { recursive: true });
+
+    const h2Xyz = `2\nH2 molecule test\nH  0.0  0.0  0.0\nH  0.0  0.0  0.74\n`;
+    fs.writeFileSync(path.join(testDir, "input.xyz"), h2Xyz);
+
+    try {
+      const optOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`, { timeout: 15000, env }).toString();
+      if (optOut.includes("normal termination")) {
+        result.canOptimize = true;
+        console.log(`[xTB-Health] Geometry optimization: OK`);
+      } else {
+        console.log(`[xTB-Health] Geometry optimization: completed but no normal termination marker`);
+        result.canOptimize = optOut.includes("TOTAL ENERGY");
+      }
+    } catch (e: any) {
+      const msg = e.stdout?.toString() || e.message || "";
+      if (msg.includes("TOTAL ENERGY")) {
+        result.canOptimize = true;
+        console.log(`[xTB-Health] Geometry optimization: OK (non-zero exit but energy computed)`);
+      } else {
+        console.log(`[xTB-Health] Geometry optimization: FAILED — ${msg.slice(0, 200)}`);
+      }
+    }
+
+    try {
+      const hessOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --hess 2>&1`, { timeout: 20000, env }).toString();
+      if (hessOut.includes("projected vibrational frequencies") || hessOut.includes("normal termination")) {
+        result.canHess = true;
+        console.log(`[xTB-Health] Hessian calculation: OK`);
+      } else {
+        console.log(`[xTB-Health] Hessian calculation: completed but missing expected output`);
+      }
+    } catch (e: any) {
+      const msg = e.stdout?.toString() || e.message || "";
+      if (msg.includes("vibrational frequencies")) {
+        result.canHess = true;
+        console.log(`[xTB-Health] Hessian calculation: OK (non-zero exit but frequencies computed)`);
+      } else {
+        console.log(`[xTB-Health] Hessian calculation: FAILED — ${msg.slice(0, 200)}`);
+      }
+    }
+
+    try { fs.rmSync(testDir, { recursive: true, force: true }); } catch {}
+
+  } catch (e: any) {
+    result.error = e.message || "Unknown error";
+    console.log(`[xTB-Health] FAIL: ${result.error}`);
+  }
+
+  xtbHealthy = result.available && result.canOptimize && result.canHess;
+  if (!xtbHealthy) {
+    console.warn(`[xTB-Health] WARNING: xTB is not fully functional. DFT calculations may fail or use fallbacks.`);
+  }
+  console.log(`[xTB-Health] Summary: available=${result.available}, opt=${result.canOptimize}, hess=${result.canHess}, healthy=${xtbHealthy}`);
+  return result;
+}
+
+export function isXTBHealthy(): boolean {
+  return xtbHealthy;
 }

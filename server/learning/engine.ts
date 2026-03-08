@@ -23,7 +23,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, getFailureExampleCount } from "./gradient-boost";
+import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { runMassiveGeneration, type MassiveGenerationStats } from "./candidate-generator";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
@@ -42,7 +42,7 @@ import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./famil
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
-import { getXTBStats, runXTBPhononCheck } from "../dft/qe-dft-engine";
+import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
 import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
@@ -833,6 +833,12 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       mlFeatures: enrichedMlFeatures as any,
       notes: `${existingNotes} ${stabilityNote}`.trim(),
     });
+
+    const candidateTc = candidateData.predictedTc ?? 0;
+    if (candidateTc > 0) {
+      incorporateSuccessData(candidateData.formula, candidateTc).catch(() => {});
+    }
+
     return true;
   } catch (err: any) {
     try {
@@ -2157,6 +2163,11 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
 
+    const surrogateResult = surrogateScreen(formula, 3);
+    if (!surrogateResult.pass) {
+      return { passed: false, tc: surrogateResult.predictedTc, reason: `surrogate-reject: Tc=${surrogateResult.predictedTc}K, ${surrogateResult.reasoning.join("; ")}` };
+    }
+
     try {
       const miedemaEf = computeMiedemaFormationEnergy(formula);
       if (Math.abs(miedemaEf) > 5) {
@@ -3244,6 +3255,7 @@ export async function getAutonomousLoopStats() {
       cacheSize: xtbStats.cacheSize,
       successRate: xtbStats.runs > 0 ? `${(xtbStats.successes / xtbStats.runs * 100).toFixed(1)}%` : "N/A",
     },
+    surrogateModel: getSurrogateStats(),
     rlAgent: rlAgent.getStats(),
     bayesianOptimizer: bayesianOptimizer.getStats(),
     crystalDiffusion: getDiffusionStats(),
@@ -3500,6 +3512,19 @@ async function runLearningCycle() {
       }
 
       if (state === "running" && cycleCount % 50 === 0) {
+        try {
+          const surrogateRetrained = await retrainWithAccumulatedData();
+          if (surrogateRetrained > 0) {
+            const sStats = getSurrogateStats();
+            emit("log", {
+              phase: "engine",
+              event: `Surrogate model retrained`,
+              detail: `${sStats.successExamples} success + ${sStats.failureExamples} failure examples. Screen stats: ${sStats.totalScreened} screened, ${sStats.totalPassed} passed (${(sStats.passRate * 100).toFixed(1)}%)`,
+              dataSource: "Surrogate Model",
+            });
+          }
+        } catch {}
+
         try {
           await evolveRules(emit);
         } catch (err: any) {
@@ -4312,6 +4337,18 @@ export async function startEngine() {
       cycleCount = maxCycle;
     }
   } catch {}
+
+  try {
+    const xtbHealth = await checkXTBHealth();
+    emit("log", {
+      phase: "engine",
+      event: "xTB health check",
+      detail: `xTB ${xtbHealth.available ? "v" + xtbHealth.version : "NOT FOUND"}. Opt: ${xtbHealth.canOptimize ? "OK" : "FAIL"}. Hess: ${xtbHealth.canHess ? "OK" : "FAIL"}${xtbHealth.error ? ". Error: " + xtbHealth.error : ""}`,
+      dataSource: "xTB Health Check",
+    });
+  } catch (e: any) {
+    emit("log", { phase: "engine", event: "xTB health check failed", detail: e.message, dataSource: "xTB Health Check" });
+  }
 
   await backfillGBScores();
   await recalculatePhysics();

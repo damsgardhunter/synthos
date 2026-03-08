@@ -467,10 +467,112 @@ export function getConfidenceBand(predictedTc: number): { lower: number; upper: 
 }
 
 let failureExamples: SuperconEntry[] = [];
+let successExamples: SuperconEntry[] = [];
+let surrogateScreenCount = 0;
+let surrogatePassCount = 0;
+let surrogateRejectCount = 0;
+let lastRetrainCycle = 0;
 
 export function invalidateModel(): void {
   cachedModel = null;
   cachedCalibration = null;
+}
+
+export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
+  pass: boolean;
+  predictedTc: number;
+  score: number;
+  reasoning: string[];
+} {
+  surrogateScreenCount++;
+  try {
+    const features = extractFeatures(formula);
+
+    if (features.metallicity < 0.15) {
+      surrogateRejectCount++;
+      return { pass: false, predictedTc: 0, score: 0, reasoning: ["Insulator: metallicity too low"] };
+    }
+
+    const result = gbPredict(features);
+
+    if (result.tcPredicted < minTcThreshold) {
+      surrogateRejectCount++;
+      return { pass: false, ...result };
+    }
+
+    if (result.score < 0.1) {
+      surrogateRejectCount++;
+      return { pass: false, ...result };
+    }
+
+    surrogatePassCount++;
+    return { pass: true, ...result };
+  } catch {
+    surrogatePassCount++;
+    return { pass: true, predictedTc: 0, score: 0.5, reasoning: ["Feature extraction failed — passing to physics"] };
+  }
+}
+
+export function getSurrogateStats() {
+  return {
+    totalScreened: surrogateScreenCount,
+    totalPassed: surrogatePassCount,
+    totalRejected: surrogateRejectCount,
+    passRate: surrogateScreenCount > 0 ? surrogatePassCount / surrogateScreenCount : 0,
+    successExamples: successExamples.length,
+    failureExamples: failureExamples.length,
+    lastRetrainCycle,
+  };
+}
+
+export async function incorporateSuccessData(formula: string, tc: number): Promise<void> {
+  const existing = new Set([
+    ...SUPERCON_TRAINING_DATA.map(e => e.formula),
+    ...successExamples.map(e => e.formula),
+  ]);
+  if (existing.has(formula)) return;
+
+  successExamples.push({
+    formula,
+    tc,
+    family: "Discovered",
+    isSuperconductor: tc > 0,
+  });
+
+  if (successExamples.length % 20 === 0) {
+    await retrainWithAccumulatedData();
+  }
+}
+
+export async function retrainWithAccumulatedData(): Promise<number> {
+  const augmentedData = [...SUPERCON_TRAINING_DATA, ...successExamples, ...failureExamples];
+
+  const X: number[][] = [];
+  const y: number[] = [];
+
+  for (const entry of augmentedData) {
+    try {
+      const features = extractFeatures(entry.formula);
+      const fArr = featureVectorToArray(features);
+      if (fArr.some(v => !Number.isFinite(v))) continue;
+      X.push(fArr);
+      y.push(entry.tc);
+    } catch {
+      continue;
+    }
+  }
+
+  if (X.length < 10) return 0;
+
+  invalidateModel();
+  cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+  cachedCalibration = computeCalibration(cachedModel);
+  lastRetrainCycle = Date.now();
+
+  const totalNew = successExamples.length + failureExamples.length;
+  console.log(`[Surrogate] Model retrained with ${totalNew} new examples (${successExamples.length} successes, ${failureExamples.length} failures). Total training size: ${X.length}`);
+
+  return totalNew;
 }
 
 export async function incorporateFailureData(): Promise<number> {

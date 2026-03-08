@@ -829,8 +829,14 @@ function pick(arr: string[]): string {
 
 function sampleHydride(targetElements?: string[]): Record<string, number> {
   const metal = targetElements?.[0] || pick(["La", "Y", "Ca", "Sr", "Ba", "Sc", "Ce", "Th", "Pr", "Nd"]);
-  const hCount = 6 + Math.floor(Math.random() * 8);
-  return { [metal]: 1, H: hCount };
+  const hCount = 2 + Math.floor(Math.random() * 5);
+  const templates = [
+    { [metal]: 1, H: hCount },
+    { [metal]: 1, [pick(["B", "C", "N"])]: 1, H: Math.min(hCount, 4) },
+    { [metal]: 2, H: Math.min(hCount + 1, 6) },
+    { [metal]: 1, [pick(["Li", "Mg", "Al"])]: 1, H: Math.min(hCount, 4) },
+  ];
+  return templates[Math.floor(Math.random() * templates.length)];
 }
 
 function sampleTernary(targetElements?: string[]): Record<string, number> {
@@ -889,6 +895,96 @@ function sampleBorocarbide(targetElements?: string[]): Record<string, number> {
   const tm = targetElements?.[0] || pick(["Ni", "Co", "Pd", "Pt"]);
   const re = pick(["Y", "La", "Lu", "Sc"]);
   return { [re]: 1, [tm]: 2, B: 2, C: 1 };
+}
+
+const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);
+const METALS = new Set([
+  "Li", "Na", "K", "Rb", "Cs", "Be", "Mg", "Ca", "Sr", "Ba",
+  "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
+  "La", "Ce", "Pr", "Nd", "Sm", "Gd", "Dy", "Er", "Yb", "Lu",
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
+  "Al", "Ga", "In", "Sn", "Tl", "Pb", "Bi", "Th",
+]);
+
+const TYPICAL_OXIDATION: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  B: [3], Al: [3], Ga: [3], In: [3],
+  C: [4, -4], Si: [4, -4], Ge: [4], Sn: [2, 4],
+  N: [-3, 3, 5], P: [-3, 3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4], Te: [-2, 4],
+  F: [-1], Cl: [-1, 1],
+  Sc: [3], Ti: [2, 3, 4], V: [2, 3, 4, 5], Cr: [2, 3, 6], Mn: [2, 3, 4, 7],
+  Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2, 3], Zn: [2],
+  Y: [3], Zr: [4], Nb: [3, 5], Mo: [2, 4, 6], Ru: [2, 3, 4], Rh: [3], Pd: [2, 4],
+  La: [3], Ce: [3, 4], Hf: [4], Ta: [3, 5], W: [4, 6], Re: [4, 7],
+  Pb: [2, 4], Bi: [3, 5], Th: [4],
+};
+
+export function validateChemistryGrammar(composition: Record<string, number>): boolean {
+  const elements = Object.keys(composition);
+  const counts = Object.values(composition);
+  const totalAtoms = counts.reduce((a, b) => a + b, 0);
+
+  if (elements.length > 5 || elements.length < 2) return false;
+
+  if (totalAtoms > 20) return false;
+
+  for (const el of elements) {
+    if (NOBLE_GASES.has(el)) return false;
+  }
+
+  const hasMetal = elements.some(el => METALS.has(el));
+  if (!hasMetal) return false;
+
+  const hCount = composition["H"] || 0;
+  if (hCount > 0) {
+    const hFraction = hCount / totalAtoms;
+    if (hFraction > 0.65) return false;
+
+    const metalCount = elements
+      .filter(el => METALS.has(el))
+      .reduce((sum, el) => sum + (composition[el] || 0), 0);
+    if (metalCount > 0 && hCount / metalCount > 6) return false;
+  }
+
+  const maxSingle = Math.max(...counts);
+  if (maxSingle / totalAtoms > 0.8 && totalAtoms > 2) return false;
+
+  const anions = ["O", "S", "Se", "Te", "F", "Cl", "N", "P", "As", "H"];
+  const anionCount = elements
+    .filter(el => anions.includes(el))
+    .reduce((sum, el) => sum + (composition[el] || 0), 0);
+  const cationCount = totalAtoms - anionCount;
+  if (cationCount > 0 && anionCount / cationCount > 5) return false;
+  if (anionCount > 0 && cationCount / anionCount > 6) return false;
+
+  if (elements.length <= 4) {
+    const elOxStates = elements.map(el => TYPICAL_OXIDATION[el] || [0]);
+    const elCounts = elements.map(el => composition[el]);
+    const canBalance = checkChargeBalance(elOxStates, elCounts, 0);
+    if (!canBalance) return false;
+  }
+
+  return true;
+}
+
+function checkChargeBalance(
+  oxStatesPerElement: number[][],
+  counts: number[],
+  idx: number,
+  currentSum: number = 0
+): boolean {
+  if (idx === oxStatesPerElement.length) {
+    return Math.abs(currentSum) < 0.01;
+  }
+  for (const ox of oxStatesPerElement[idx]) {
+    if (checkChargeBalance(oxStatesPerElement, counts, idx + 1, currentSum + ox * counts[idx])) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isPhysicallyValid(atoms: AtomPosition[], lattice: LatticeParams): boolean {
@@ -962,6 +1058,9 @@ export function generateCrystals(
   for (let attempt = 0; attempt < maxAttempts && results.length < count; attempt++) {
     try {
       const composition = sampleComposition(targetElements);
+
+      if (!validateChemistryGrammar(composition)) continue;
+
       const formula = buildFormula(composition);
 
       if (seenFormulas.has(formula)) continue;
