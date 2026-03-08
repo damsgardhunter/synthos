@@ -10,6 +10,7 @@ import {
   type PhononSpectrum,
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
+import { analyzeTopology } from "./topology-engine";
 import {
   getElementData,
   getHubbardU,
@@ -694,6 +695,18 @@ export function computePairingProfile(formula: string): PairingProfile {
   const excitonicResult = computeExcitonicPairing(formula, electronic);
   const cdwResult = computeCDWPairing(formula, electronic, phonon, coupling);
   const polaronicResult = computePolaronicPairing(formula, electronic, coupling);
+
+  let topoStrength = 0;
+  let topoPairingSymmetry = "p-wave";
+  try {
+    const topoAnalysis = analyzeTopology(formula, electronic);
+    topoStrength = Math.min(1, topoAnalysis.majoranaFeasibility * 0.6 + topoAnalysis.z2Invariant * 0.3 + topoAnalysis.socStrength * 0.1);
+    if (topoAnalysis.topologicalClass === "strong-TI" || topoAnalysis.z2Invariant > 0.7) {
+      topoPairingSymmetry = "p+ip (topological)";
+    }
+  } catch (_) {
+    topoStrength = 0;
+  }
   const plasmonResult = computePlasmonPairing(formula, electronic);
 
   const elements = parseFormulaElements(formula);
@@ -708,26 +721,33 @@ export function computePairingProfile(formula: string): PairingProfile {
     elements.some(e => ["Ba", "K", "Rb"].includes(e));
   const isTitanate = elements.includes("Sr") && elements.includes("Ti") && elements.includes("O");
 
-  let wPhonon = 0.30, wSpin = 0.22, wOrbital = 0.15, wExcitonic = 0.08, wCDW = 0.10, wPolaronic = 0.08, wPlasmon = 0.07;
+  let wPhonon = 0.28, wSpin = 0.21, wOrbital = 0.14, wExcitonic = 0.07, wCDW = 0.09, wPolaronic = 0.07, wPlasmon = 0.07, wTopo = 0.07;
 
   if (isCuprate) {
-    wPhonon = 0.08; wSpin = 0.40; wOrbital = 0.18; wExcitonic = 0.05; wCDW = 0.15; wPolaronic = 0.07; wPlasmon = 0.07;
+    wPhonon = 0.08; wSpin = 0.38; wOrbital = 0.17; wExcitonic = 0.05; wCDW = 0.14; wPolaronic = 0.06; wPlasmon = 0.06; wTopo = 0.06;
   } else if (isPnictide) {
-    wPhonon = 0.12; wSpin = 0.30; wOrbital = 0.25; wExcitonic = 0.05; wCDW = 0.13; wPolaronic = 0.08; wPlasmon = 0.07;
+    wPhonon = 0.11; wSpin = 0.28; wOrbital = 0.23; wExcitonic = 0.05; wCDW = 0.12; wPolaronic = 0.07; wPlasmon = 0.06; wTopo = 0.08;
   } else if (isHydride) {
-    wPhonon = 0.55; wSpin = 0.08; wOrbital = 0.07; wExcitonic = 0.03; wCDW = 0.05; wPolaronic = 0.15; wPlasmon = 0.07;
+    wPhonon = 0.52; wSpin = 0.07; wOrbital = 0.07; wExcitonic = 0.03; wCDW = 0.05; wPolaronic = 0.14; wPlasmon = 0.07; wTopo = 0.05;
   } else if (isNickelate) {
-    wPhonon = 0.10; wSpin = 0.35; wOrbital = 0.20; wExcitonic = 0.05; wCDW = 0.12; wPolaronic = 0.10; wPlasmon = 0.08;
+    wPhonon = 0.09; wSpin = 0.33; wOrbital = 0.18; wExcitonic = 0.05; wCDW = 0.11; wPolaronic = 0.09; wPlasmon = 0.07; wTopo = 0.08;
   } else if (isBismuthate) {
-    wPhonon = 0.20; wSpin = 0.10; wOrbital = 0.10; wExcitonic = 0.05; wCDW = 0.10; wPolaronic = 0.35; wPlasmon = 0.10;
+    wPhonon = 0.18; wSpin = 0.09; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.09; wPolaronic = 0.33; wPlasmon = 0.09; wTopo = 0.08;
   } else if (isTitanate) {
-    wPhonon = 0.15; wSpin = 0.08; wOrbital = 0.07; wExcitonic = 0.05; wCDW = 0.05; wPolaronic = 0.20; wPlasmon = 0.40;
+    wPhonon = 0.14; wSpin = 0.07; wOrbital = 0.06; wExcitonic = 0.05; wCDW = 0.05; wPolaronic = 0.18; wPlasmon = 0.38; wTopo = 0.07;
   } else if (isCDWMaterial) {
-    wPhonon = 0.20; wSpin = 0.15; wOrbital = 0.10; wExcitonic = 0.05; wCDW = 0.30; wPolaronic = 0.10; wPlasmon = 0.10;
+    wPhonon = 0.18; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.28; wPolaronic = 0.09; wPlasmon = 0.09; wTopo = 0.08;
   } else if (excitonicResult.isExcitonicCandidate) {
-    wPhonon = 0.18; wSpin = 0.15; wOrbital = 0.10; wExcitonic = 0.30; wCDW = 0.10; wPolaronic = 0.10; wPlasmon = 0.07;
+    wPhonon = 0.16; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.28; wCDW = 0.09; wPolaronic = 0.09; wPlasmon = 0.06; wTopo = 0.09;
   } else if (plasmonResult.isPlasmonCandidate) {
-    wPhonon = 0.20; wSpin = 0.15; wOrbital = 0.10; wExcitonic = 0.05; wCDW = 0.10; wPolaronic = 0.10; wPlasmon = 0.30;
+    wPhonon = 0.18; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.09; wPolaronic = 0.09; wPlasmon = 0.28; wTopo = 0.08;
+  }
+
+  if (topoStrength > 0.5) {
+    const topoBoost = Math.min(0.08, topoStrength * 0.1);
+    wTopo += topoBoost;
+    wPhonon -= topoBoost * 0.5;
+    wSpin -= topoBoost * 0.5;
   }
 
   const compositePairingStrength =
@@ -737,7 +757,8 @@ export function computePairingProfile(formula: string): PairingProfile {
     wExcitonic * excitonicResult.excitonicPairingStrength +
     wCDW * cdwResult.cdwPairingStrength +
     wPolaronic * polaronicResult.polaronicPairingStrength +
-    wPlasmon * plasmonResult.plasmonPairingStrength;
+    wPlasmon * plasmonResult.plasmonPairingStrength +
+    wTopo * topoStrength;
 
   const mechanisms = [
     { name: "phonon", strength: phononResult.phononPairingStrength * wPhonon },
@@ -747,6 +768,7 @@ export function computePairingProfile(formula: string): PairingProfile {
     { name: "cdw-mediated", strength: cdwResult.cdwPairingStrength * wCDW },
     { name: "polaronic", strength: polaronicResult.polaronicPairingStrength * wPolaronic },
     { name: "plasmon-mediated", strength: plasmonResult.plasmonPairingStrength * wPlasmon },
+    { name: "topological", strength: topoStrength * wTopo },
   ];
   mechanisms.sort((a, b) => b.strength - a.strength);
 
@@ -765,10 +787,13 @@ export function computePairingProfile(formula: string): PairingProfile {
   if (mechanisms[0].name === "polaronic" && polaronicResult.polaronicPairingStrength > 0.5) {
     pairingSymmetry = polaronicResult.bcsBecCrossover > 0.5 ? "BEC-like s-wave" : "polaronic s-wave";
   }
+  if (mechanisms[0].name === "topological" && topoStrength > 0.5) {
+    pairingSymmetry = topoPairingSymmetry;
+  }
 
   let estimatedTcFromPairing = phononResult.tcAllenDynes;
   if (mechanisms[0].name === "spin-fluctuation" && spinResult.spinPairingStrength > 0.5) {
-    const spinTc = spinResult.spinFluctuationEnergy * spinResult.spinPairingStrength * 5.0;
+    const spinTc = spinResult.spinFluctuationEnergy * spinResult.spinPairingStrength * 0.5;
     estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(300, spinTc));
   }
   if (mechanisms[0].name === "orbital-fluctuation" && orbitalResult.orbitalPairingStrength > 0.5) {
@@ -786,6 +811,10 @@ export function computePairingProfile(formula: string): PairingProfile {
   if (mechanisms[0].name === "plasmon-mediated" && plasmonResult.plasmonPairingStrength > 0.4) {
     const plasTc = plasmonResult.plasmonPairingStrength * plasmonResult.collectiveOscillationStrength * 20;
     estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(50, plasTc));
+  }
+  if (mechanisms[0].name === "topological" && topoStrength > 0.4) {
+    const topoTc = topoStrength * 30;
+    estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(30, topoTc));
   }
 
   return {
@@ -806,6 +835,7 @@ export function computePairingProfile(formula: string): PairingProfile {
       cdw: Number(wCDW.toFixed(2)),
       polaronic: Number(wPolaronic.toFixed(2)),
       plasmon: Number(wPlasmon.toFixed(2)),
+      topological: Number(wTopo.toFixed(2)),
     },
     dominantMechanism: mechanisms[0].name,
     secondaryMechanism: mechanisms[1]?.name ?? "none",

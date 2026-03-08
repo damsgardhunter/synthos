@@ -230,6 +230,26 @@ export class BayesianOptimizer {
     this.cachedL = null;
     this.cachedAlpha = null;
     this.cachedGPObs = null;
+
+    if (this.observations.length > 50 && this.observations.length % 25 === 0) {
+      this.adaptLengthScale();
+    }
+  }
+
+  private adaptLengthScale(): void {
+    const recent = this.observations.slice(-20);
+    const predictions = recent.map(o => this.predictFromFeatures(o.features));
+    const avgStd = predictions.reduce((s, p) => s + p.std, 0) / predictions.length;
+    const avgMean = predictions.reduce((s, p) => s + Math.abs(p.mean), 0) / predictions.length;
+    const relUncertainty = avgMean > 0 ? avgStd / avgMean : avgStd;
+    if (relUncertainty > 0.8) {
+      this.lengthScale = Math.min(2.0, this.lengthScale * 1.15);
+    } else if (relUncertainty < 0.2) {
+      this.lengthScale = Math.max(0.15, this.lengthScale * 0.9);
+    }
+    this.cachedL = null;
+    this.cachedAlpha = null;
+    this.cachedGPObs = null;
   }
 
   private cachedGPObs: BayesianObservation[] | null = null;
@@ -247,9 +267,21 @@ export class BayesianOptimizer {
       return { L: [], alpha: [], obs: [] };
     }
 
-    const obs = n > 200
-      ? [...this.observations].sort((a, b) => b.tc - a.tc).slice(0, 200)
-      : [...this.observations];
+    let obs: typeof this.observations;
+    if (n > 200) {
+      const sorted = [...this.observations].sort((a, b) => b.tc - a.tc);
+      const topSlice = sorted.slice(0, 140);
+      const remaining = sorted.slice(140);
+      const randomSample: typeof this.observations = [];
+      for (let i = remaining.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+      }
+      randomSample.push(...remaining.slice(0, 60));
+      obs = [...topSlice, ...randomSample];
+    } else {
+      obs = [...this.observations];
+    }
 
     const K: number[][] = Array.from({ length: obs.length }, () => new Array(obs.length).fill(0));
     for (let i = 0; i < obs.length; i++) {

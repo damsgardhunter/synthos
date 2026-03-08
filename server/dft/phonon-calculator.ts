@@ -61,7 +61,10 @@ function writeXYZ(atoms: AtomPosition[], filepath: string, comment: string = "")
 
 function getAtomicMass(element: string): number {
   const data = getElementData(element);
-  return data?.atomicMass ?? 50;
+  if (!data?.atomicMass) {
+    throw new Error(`Missing atomic mass for element "${element}" — cannot compute phonon spectrum`);
+  }
+  return data.atomicMass;
 }
 
 function runXTBSinglePoint(atoms: AtomPosition[], calcDir: string, label: string): number[] | null {
@@ -501,7 +504,31 @@ export async function computeFiniteDisplacementPhonons(
     const dispersion: PhononDispersionPoint[] = [];
     for (const qp of qPoints) {
       const dynMatrix = buildDynamicalMatrix(fcResult.matrix, masses, qp.q, atoms);
-      const eigenvalues = eigenvaluesSymmetric(dynMatrix.realPart);
+      const isGamma = qp.q[0] === 0 && qp.q[1] === 0 && qp.q[2] === 0;
+      let eigenvalues: number[];
+      if (isGamma) {
+        eigenvalues = eigenvaluesSymmetric(dynMatrix.realPart);
+      } else {
+        const dim = dynMatrix.realPart.length;
+        const blockDim = 2 * dim;
+        const block: number[][] = Array.from({ length: blockDim }, () => new Array(blockDim).fill(0));
+        for (let i = 0; i < dim; i++) {
+          for (let j = 0; j < dim; j++) {
+            const re = dynMatrix.realPart[i][j];
+            const im = dynMatrix.imagPart[i][j];
+            block[i][j] = re;
+            block[i][j + dim] = -im;
+            block[i + dim][j] = im;
+            block[i + dim][j + dim] = re;
+          }
+        }
+        const blockEigs = eigenvaluesSymmetric(block);
+        const positiveEigs: number[] = [];
+        for (let i = 0; i < blockEigs.length; i += 2) {
+          positiveEigs.push(blockEigs[i]);
+        }
+        eigenvalues = positiveEigs.sort((a, b) => a - b);
+      }
       const frequencies = eigenvaluesToFrequencies(eigenvalues);
 
       dispersion.push({

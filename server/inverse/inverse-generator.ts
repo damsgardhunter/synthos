@@ -38,8 +38,53 @@ const STOICH_PATTERNS = [
   { name: "ABC3", slots: 3, ratios: [[1,1,3],[1,1,2],[2,1,3]] },
   { name: "AB2C2", slots: 3, ratios: [[1,2,2],[1,2,3],[2,2,5]] },
   { name: "A2B3C", slots: 3, ratios: [[2,3,1],[3,2,1],[2,3,2]] },
+  { name: "A2B2C", slots: 3, ratios: [[2,2,1],[2,2,3],[2,2,5]] },
+  { name: "A3BC", slots: 3, ratios: [[3,1,1],[3,1,3],[3,2,1]] },
   { name: "ABCD", slots: 4, ratios: [[1,1,1,1],[2,1,1,1],[1,2,1,1]] },
+  { name: "ABCD2", slots: 4, ratios: [[1,1,1,2],[1,1,1,3],[2,1,1,2]] },
 ];
+
+const COMMON_OXIDATION_STATES: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  Sc: [3], Y: [3], La: [3], Ce: [3, 4], Gd: [3], Nd: [3], Pr: [3, 4], Sm: [3], Eu: [2, 3],
+  Ti: [2, 3, 4], Zr: [4], Hf: [4],
+  V: [2, 3, 4, 5], Nb: [3, 5], Ta: [5],
+  Cr: [2, 3, 6], Mo: [4, 6], W: [4, 6],
+  Mn: [2, 3, 4, 7], Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2], Zn: [2],
+  Ru: [3, 4], Rh: [3], Pd: [2, 4], Ag: [1], Ir: [3, 4], Pt: [2, 4], Au: [1, 3],
+  Al: [3], Ga: [3], In: [3], Sn: [2, 4], Pb: [2, 4],
+  B: [3], C: [4, -4], N: [-3, 3, 5], Si: [4, -4], Ge: [4],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4], Te: [-2, 4],
+  F: [-1], Cl: [-1], Br: [-1], I: [-1],
+  P: [-3, 3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5], Bi: [3, 5],
+};
+
+function hasPlausibleChargeBalance(formula: string): boolean {
+  const elMap = parseFormulaElements(formula);
+  if (elMap.size === 0) return false;
+  if (elMap.size === 1) return true;
+
+  const entries = Array.from(elMap.entries());
+  const allMetallic = entries.every(([el]) => {
+    const states = COMMON_OXIDATION_STATES[el];
+    return states ? states.every(s => s >= 0) : true;
+  });
+  if (allMetallic) return true;
+
+  function canBalance(idx: number, runningSum: number): boolean {
+    if (idx === entries.length) return runningSum === 0;
+    const [el, count] = entries[idx];
+    const states = COMMON_OXIDATION_STATES[el];
+    if (!states) return canBalance(idx + 1, runningSum);
+    for (const ox of states) {
+      if (canBalance(idx + 1, runningSum + ox * count)) return true;
+    }
+    return false;
+  }
+
+  return canBalance(0, 0);
+}
 
 function parseFormulaElements(formula: string): Map<string, number> {
   const elMap = new Map<string, number>();
@@ -60,7 +105,7 @@ function estimateQuickTc(formula: string, prototype: string, target: TargetPrope
   if (!protoInfo) return 10;
   const baseTc = (protoInfo.minTc + protoInfo.maxTc) / 2;
   const elMap = parseFormulaElements(formula);
-  const elements = [...elMap.keys()];
+  const elements = Array.from(elMap.keys());
   const hasH = elMap.has("H");
   const hCount = elMap.get("H") || 0;
   let tc = baseTc;
@@ -289,7 +334,7 @@ export function generateInverseCandidates(
     }
   }
 
-  return candidates.filter(c => isValidFormula(c.formula)).slice(0, count);
+  return candidates.filter(c => isValidFormula(c.formula) && hasPlausibleChargeBalance(c.formula)).slice(0, count);
 }
 
 export function refineCandidate(
@@ -371,7 +416,7 @@ export function refineCandidate(
     }
   }
 
-  return refined;
+  return refined.filter(c => hasPlausibleChargeBalance(c.formula));
 }
 
 export function createInitialBias(target: TargetProperties): CompositionBias {
@@ -412,7 +457,10 @@ export function createInitialBias(target: TargetProperties): CompositionBias {
     { pattern: "AB3", weight: 0.8 },
     { pattern: "ABC3", weight: 1.2 },
     { pattern: "AB2C2", weight: 1.3 },
+    { pattern: "A2B2C", weight: 1.1 },
+    { pattern: "A3BC", weight: 1.0 },
     { pattern: "ABH", weight: target.targetTc > 200 ? 2.0 : 0.5 },
+    { pattern: "ABCD2", weight: 1.0 },
   ];
 
   return { elementWeights, prototypeWeights, stoichiometryPatterns };

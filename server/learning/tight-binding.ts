@@ -234,11 +234,43 @@ function interpolateKPoints(path: { points: number[][]; labels: string[] }, nPer
   return { kPoints, kLabels };
 }
 
+function getNeighborVectors(latticeType: string): number[][] {
+  switch (latticeType) {
+    case "bcc":
+      return [
+        [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5],
+        [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, -0.5, -0.5],
+      ];
+    case "fcc":
+      return [
+        [0.5, 0.5, 0], [0.5, -0.5, 0], [-0.5, 0.5, 0], [-0.5, -0.5, 0],
+        [0.5, 0, 0.5], [0.5, 0, -0.5], [-0.5, 0, 0.5], [-0.5, 0, -0.5],
+        [0, 0.5, 0.5], [0, 0.5, -0.5], [0, -0.5, 0.5], [0, -0.5, -0.5],
+      ];
+    case "hexagonal":
+      return [
+        [1, 0, 0], [-1, 0, 0],
+        [0.5, Math.sqrt(3) / 2, 0], [-0.5, -Math.sqrt(3) / 2, 0],
+        [-0.5, Math.sqrt(3) / 2, 0], [0.5, -Math.sqrt(3) / 2, 0],
+        [0, 0, 0.5], [0, 0, -0.5],
+        [0.5, Math.sqrt(3) / 6, 0.5], [-0.5, -Math.sqrt(3) / 6, -0.5],
+        [-0.5, Math.sqrt(3) / 6, 0.5], [0.5, -Math.sqrt(3) / 6, -0.5],
+      ];
+    default:
+      return [
+        [1, 0, 0], [-1, 0, 0],
+        [0, 1, 0], [0, -1, 0],
+        [0, 0, 1], [0, 0, -1],
+      ];
+  }
+}
+
 function buildHamiltonianAtK(
   k: number[],
   elements: string[],
   counts: Record<string, number>,
   latticeConstant: number,
+  latticeType: string,
 ): { eigenvalues: number[]; orbChars: { s: number; p: number; d: number }[] } {
   const atomList: { el: string; orbitalStart: number }[] = [];
   let nOrbitals = 0;
@@ -308,11 +340,7 @@ function buildHamiltonianAtK(
 
       const sk = getSlaterKosterParams(a1.el, a2.el, bondDist);
 
-      const neighbors = [
-        [1, 0, 0], [-1, 0, 0],
-        [0, 1, 0], [0, -1, 0],
-        [0, 0, 1], [0, 0, -1],
-      ];
+      const neighbors = getNeighborVectors(latticeType);
 
       for (const [dx, dy, dz] of neighbors) {
         const phase = Math.cos(kDotR(dx, dy, dz));
@@ -583,7 +611,7 @@ export function computeTightBindingBands(
   let nOrbitals = 0;
 
   for (let ki = 0; ki < kPoints.length; ki++) {
-    const result = buildHamiltonianAtK(kPoints[ki], elements, counts, latticeConstant);
+    const result = buildHamiltonianAtK(kPoints[ki], elements, counts, latticeConstant, latticeType);
     bands.push(result.eigenvalues);
     orbitalChars.push(result.orbChars);
     if (ki === 0) nOrbitals = result.eigenvalues.length;

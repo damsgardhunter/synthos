@@ -747,6 +747,11 @@ export function attentionMessagePassingLayer(
   const newEmbeddings: number[][] = [];
   const scaleFactor = Math.sqrt(HIDDEN_DIM);
 
+  const edgeMap = new Map<string, number[]>();
+  for (const edge of graph.edges) {
+    edgeMap.set(`${edge.source}-${edge.target}`, edge.features);
+  }
+
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
     if (neighbors.length === 0) {
@@ -761,7 +766,15 @@ export function attentionMessagePassingLayer(
 
     for (const j of neighbors) {
       const key = matVecMul(W_key, padded[j]);
-      const score = dotProduct(query, key) / scaleFactor;
+      let score = dotProduct(query, key) / scaleFactor;
+
+      const edgeFeats = edgeMap.get(`${i}-${j}`) ?? edgeMap.get(`${j}-${i}`);
+      if (edgeFeats) {
+        for (let ef = 0; ef < edgeFeats.length && ef < HIDDEN_DIM; ef++) {
+          score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
+        }
+      }
+
       attentionScores.push(score);
       messages.push(matVecMul(W_message, padded[j]));
     }
@@ -776,7 +789,7 @@ export function attentionMessagePassingLayer(
       }
     }
 
-    const combined = [...padded[i], ...aggMessage].slice(0, HIDDEN_DIM);
+    const combined = [...padded[i], ...aggMessage];
     const updated = relu(matVecMul(W_update, combined));
     newEmbeddings.push(updated);
   }
@@ -821,7 +834,7 @@ export function messagePassingLayer(
       }
     }
 
-    const combined = [...padded[i], ...aggMessage].slice(0, HIDDEN_DIM);
+    const combined = [...padded[i], ...aggMessage];
     const updated = relu(matVecMul(W_update, combined));
     newEmbeddings.push(updated);
   }
@@ -877,11 +890,11 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights): GNNPredict
 function initWeights(rng: () => number): GNNWeights {
   return {
     W_message: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
+    W_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
     W_message2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
+    W_update2: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
     W_message3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
+    W_update3: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
     W_attn_query: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_key: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_query2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),

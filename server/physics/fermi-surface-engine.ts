@@ -87,13 +87,35 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
 
   switch (latticeType) {
     case "hexagonal": {
+      const hexA = 2.0 / Math.sqrt(3.0);
       for (let i = 0; i <= gridSize; i++) {
         for (let j = 0; j <= gridSize; j++) {
           for (let k = 0; k <= gridSize; k++) {
             const kx = -0.5 + i * step;
             const ky = -0.5 + j * step;
             const kz = -0.5 + k * step;
-            if (kx * kx + ky * ky + kz * kz <= 0.75) {
+            if (Math.abs(kz) <= 0.5) {
+              const absY = Math.abs(ky);
+              const absX = Math.abs(kx);
+              const inHex = absY <= (0.5 * hexA) && (absY + absX * Math.sqrt(3.0)) <= hexA * Math.sqrt(3.0) * 0.5;
+              if (inHex) {
+                grid.push([kx, ky, kz]);
+              }
+            }
+          }
+        }
+      }
+      break;
+    }
+    case "bcc": {
+      for (let i = 0; i <= gridSize; i++) {
+        for (let j = 0; j <= gridSize; j++) {
+          for (let k = 0; k <= gridSize; k++) {
+            const kx = -0.5 + i * step;
+            const ky = -0.5 + j * step;
+            const kz = -0.5 + k * step;
+            const truncOct = Math.abs(kx) + Math.abs(ky) + Math.abs(kz);
+            if (truncOct <= 0.75 && Math.abs(kx) <= 0.5 && Math.abs(ky) <= 0.5 && Math.abs(kz) <= 0.5) {
               grid.push([kx, ky, kz]);
             }
           }
@@ -101,8 +123,26 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
       }
       break;
     }
-    case "bcc":
-    case "fcc":
+    case "fcc": {
+      for (let i = 0; i <= gridSize; i++) {
+        for (let j = 0; j <= gridSize; j++) {
+          for (let k = 0; k <= gridSize; k++) {
+            const kx = -0.5 + i * step;
+            const ky = -0.5 + j * step;
+            const kz = -0.5 + k * step;
+            const maxPairSum = Math.max(
+              Math.abs(kx) + Math.abs(ky),
+              Math.abs(ky) + Math.abs(kz),
+              Math.abs(kx) + Math.abs(kz),
+            );
+            if (maxPairSum <= 0.75 && Math.abs(kx) <= 0.5 && Math.abs(ky) <= 0.5 && Math.abs(kz) <= 0.5) {
+              grid.push([kx, ky, kz]);
+            }
+          }
+        }
+      }
+      break;
+    }
     case "cubic":
     default: {
       for (let i = 0; i <= gridSize; i++) {
@@ -564,7 +604,7 @@ function computeNestingVectors(
     : fermiKPoints;
 
   const qBins: Map<string, { q: number[]; count: number; pockets: Set<string> }> = new Map();
-  const qResolution = 0.1;
+  const qResolution = 0.05;
 
   for (let i = 0; i < sampled.length; i++) {
     for (let j = i + 1; j < sampled.length; j++) {

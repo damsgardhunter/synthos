@@ -173,10 +173,6 @@ export function normalizeFormula(raw: string): string {
       counts[el] = Math.round(counts[el] * pow10);
     }
     vals = Object.values(counts);
-    const totalAtoms = vals.reduce((s, v) => s + v, 0);
-    if (totalAtoms > 50) {
-      return raw.replace(/\s+/g, "");
-    }
   }
 
   const allInts = vals.every(v => Number.isInteger(v) && v >= 1);
@@ -190,6 +186,20 @@ export function normalizeFormula(raw: string): string {
     }
     if (g > 1) {
       for (const el of elements) counts[el] = counts[el] / g;
+    }
+  }
+
+  vals = Object.values(counts);
+  const totalAtoms = vals.reduce((s, v) => s + v, 0);
+  if (totalAtoms > 50) {
+    let g2 = vals[0];
+    for (let i = 1; i < vals.length; i++) {
+      let a = g2, b = vals[i];
+      while (b > 0.001) { const t = b; b = a % b; a = t; }
+      g2 = a;
+    }
+    if (g2 > 0.001) {
+      for (const el of elements) counts[el] = Math.round(counts[el] / g2);
     }
   }
 
@@ -217,8 +227,21 @@ export function isIsostructuralDuplicate(formulaA: string, formulaB: string): bo
   const elsA = Object.keys(countsA).sort();
   const elsB = Object.keys(countsB).sort();
   if (elsA.length !== elsB.length) return false;
-  const valsA = elsA.map(el => countsA[el]).sort((a, b) => a - b);
-  const valsB = elsB.map(el => countsB[el]).sort((a, b) => a - b);
+
+  function gcdReduce(vals: number[]): number[] {
+    if (vals.length === 0) return vals;
+    let g = vals[0];
+    for (let i = 1; i < vals.length; i++) {
+      let a = g, b = vals[i];
+      while (b > 0.001) { const t = b; b = a % b; a = t; }
+      g = a;
+    }
+    if (g < 0.001) g = 1;
+    return vals.map(v => Math.round(v / g));
+  }
+
+  const valsA = gcdReduce(elsA.map(el => countsA[el]).sort((a, b) => a - b));
+  const valsB = gcdReduce(elsB.map(el => countsB[el]).sort((a, b) => a - b));
   return valsA.every((v, i) => v === valsB[i]);
 }
 
