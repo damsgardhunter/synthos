@@ -32,20 +32,45 @@ const PROTOTYPE_TC_AFFINITY: Record<string, { minTc: number; maxTc: number; pref
 };
 
 const STOICH_PATTERNS = [
-  { name: "AB", slots: 2, ratios: [[1,1],[2,1],[3,1],[1,2],[1,3]] },
-  { name: "AB2", slots: 2, ratios: [[1,2],[1,3],[1,4],[2,3]] },
-  { name: "AB3", slots: 2, ratios: [[1,3],[1,4],[2,3],[1,5]] },
-  { name: "ABH", slots: 3, ratios: [[1,1,4],[1,1,6],[1,1,8],[1,1,10],[1,2,6]] },
-  { name: "ABC3", slots: 3, ratios: [[1,1,3],[1,1,2],[2,1,3]] },
-  { name: "AB2C2", slots: 3, ratios: [[1,2,2],[1,2,3],[2,2,5]] },
-  { name: "A2B3C", slots: 3, ratios: [[2,3,1],[3,2,1],[2,3,2]] },
-  { name: "A2B2C", slots: 3, ratios: [[2,2,1],[2,2,3],[2,2,5]] },
-  { name: "A3BC", slots: 3, ratios: [[3,1,1],[3,1,3],[3,2,1]] },
-  { name: "A4B3C", slots: 3, ratios: [[4,3,1],[4,3,2],[4,3,3]] },
-  { name: "AB3C4", slots: 3, ratios: [[1,3,4],[1,3,3],[2,3,4]] },
-  { name: "ABCD", slots: 4, ratios: [[1,1,1,1],[2,1,1,1],[1,2,1,1]] },
-  { name: "ABCD2", slots: 4, ratios: [[1,1,1,2],[1,1,1,3],[2,1,1,2]] },
+  { name: "AB", slots: 2, ratios: [[1,1],[2,1],[3,1],[1,2],[1,3]], weight: 2.0 },
+  { name: "AB2", slots: 2, ratios: [[1,2],[1,3],[1,4],[2,3]], weight: 2.0 },
+  { name: "AB3", slots: 2, ratios: [[1,3],[1,4],[2,3],[1,5]], weight: 2.0 },
+  { name: "ABH", slots: 3, ratios: [[1,1,4],[1,1,6],[1,1,8],[1,1,10],[1,2,6]], weight: 2.0 },
+  { name: "ABC3", slots: 3, ratios: [[1,1,3],[1,1,2],[2,1,3]], weight: 2.0 },
+  { name: "AB2C2", slots: 3, ratios: [[1,2,2],[1,2,3],[2,2,5]], weight: 2.0 },
+  { name: "A2B3C", slots: 3, ratios: [[2,3,1],[3,2,1],[2,3,2]], weight: 2.0 },
+  { name: "A2B2C", slots: 3, ratios: [[2,2,1],[2,2,3],[2,2,5]], weight: 2.0 },
+  { name: "A3BC", slots: 3, ratios: [[3,1,1],[3,1,3],[3,2,1]], weight: 1.5 },
+  { name: "A4B3C", slots: 3, ratios: [[4,3,1],[4,3,2],[4,3,3]], weight: 1.0 },
+  { name: "AB3C4", slots: 3, ratios: [[1,3,4],[1,3,3],[2,3,4]], weight: 1.5 },
+  { name: "ABCD", slots: 4, ratios: [[1,1,1,1],[2,1,1,1],[1,2,1,1]], weight: 0.5 },
+  { name: "ABCD2", slots: 4, ratios: [[1,1,1,2],[1,1,1,3],[2,1,1,2]], weight: 0.5 },
 ];
+
+function variantPassesChargeBalance(elements: string[], ratios: number[]): boolean {
+  if (elements.length <= 1) return true;
+  const allMetallic = elements.every(el => {
+    const states = COMMON_OXIDATION_STATES[el];
+    if (!states) return true;
+    return states.every(s => s >= 0);
+  });
+  const hasAnion = elements.some(el => {
+    const states = COMMON_OXIDATION_STATES[el];
+    return states ? states.some(s => s < 0) : false;
+  });
+  if (allMetallic && !hasAnion) return true;
+
+  let best = Infinity;
+  const enumerate = (idx: number, charge: number): void => {
+    if (best === 0) return;
+    if (idx === elements.length) { best = Math.min(best, Math.abs(charge)); return; }
+    const states = COMMON_OXIDATION_STATES[elements[idx]];
+    if (!states) { enumerate(idx + 1, charge); return; }
+    for (const ox of states) enumerate(idx + 1, charge + ox * ratios[idx]);
+  };
+  enumerate(0, 0);
+  return best <= 1;
+}
 
 const COMMON_OXIDATION_STATES: Record<string, number[]> = {
   H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
@@ -213,11 +238,13 @@ function generateStoichiometryVariants(
     const newRatios = [...baseRatios];
     const idx = Math.floor(Math.random() * newRatios.length);
     const delta = Math.random() < 0.5 ? 1 : -1;
-    newRatios[idx] = Math.max(1, Math.min(20, newRatios[idx] + delta));
+    newRatios[idx] = Math.max(1, Math.min(12, newRatios[idx] + delta));
 
     const key = newRatios.join("-");
     if (!variants.some(v => v.ratios.join("-") === key)) {
-      variants.push({ elements: baseElements, ratios: newRatios });
+      if (variantPassesChargeBalance(baseElements, newRatios)) {
+        variants.push({ elements: baseElements, ratios: newRatios });
+      }
     }
   }
 
@@ -246,7 +273,7 @@ export function generateInverseCandidates(
 
     const weightedPatterns = matchingPatterns.map(p => {
       const biasEntry = bias.stoichiometryPatterns.find(sp => p.name.startsWith(sp.pattern) || sp.pattern === p.name);
-      return { pattern: p, weight: biasEntry?.weight ?? 1.0 };
+      return { pattern: p, weight: (biasEntry?.weight ?? 1.0) * (p.weight ?? 1.0) };
     });
 
     for (let attempt = 0; attempt < candidatesPerProto * 4 && candidates.length < count; attempt++) {
@@ -343,7 +370,15 @@ export function generateInverseCandidates(
     }
   }
 
-  return candidates.filter(c => isValidFormula(c.formula) && hasPlausibleChargeBalance(c.formula)).slice(0, count);
+  return candidates.filter(c => {
+    if (!isValidFormula(c.formula)) return false;
+    if (!hasPlausibleChargeBalance(c.formula)) return false;
+    const elMap = parseFormulaElements(c.formula);
+    const els = Array.from(elMap.keys());
+    const nonH = els.filter(e => e !== "H");
+    if (nonH.length > 4 || els.length > 5) return false;
+    return true;
+  }).slice(0, count);
 }
 
 export function refineCandidate(

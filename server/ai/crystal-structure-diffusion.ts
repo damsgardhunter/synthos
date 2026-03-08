@@ -2,7 +2,7 @@ import { SC_MOTIF_LIBRARY, type StructuralMotif, type ChemicalFamily, selectFami
 import { extractFeatures } from "../learning/ml-predictor";
 import { gbPredict, surrogateScreen } from "../learning/gradient-boost";
 import { isValidFormula, normalizeFormula } from "../learning/utils";
-import { passesValenceFilter } from "../learning/candidate-generator";
+import { passesValenceFilter, passesElementCountCap } from "../learning/candidate-generator";
 import {
   computeElectronicStructure,
   computePhononSpectrum,
@@ -730,6 +730,7 @@ export function runCrystalDiffusionCycle(
       if (seenFormulas.has(formula)) continue;
       if (!isValidFormula(formula)) continue;
       if (!passesValenceFilter(formula)) continue;
+      if (!passesElementCountCap(formula)) continue;
       if (sharedScreenedSet && sharedScreenedSet.has(formula)) continue;
       seenFormulas.add(formula);
 
@@ -984,6 +985,7 @@ export function runDistributionBasedDiffusion(
       if (seenFormulas.has(formula)) continue;
       if (!isValidFormula(formula)) continue;
       if (!passesValenceFilter(formula)) continue;
+      if (!passesElementCountCap(formula)) continue;
       if (sharedScreenedSet && sharedScreenedSet.has(formula)) continue;
       seenFormulas.add(formula);
 

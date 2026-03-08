@@ -1220,6 +1220,20 @@ function buildStructureFromPrototype(
     atoms.push({ element, x, y, z });
   }
 
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const dx = atoms[j].x - atoms[i].x;
+      const dy = atoms[j].y - atoms[i].y;
+      const dz = atoms[j].z - atoms[i].z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < 0.05) {
+        atoms[j].x += 0.1 * a;
+        atoms[j].y += 0.1 * a;
+        atoms[j].z += 0.1 * (proto.latticeType === "tetragonal" ? c : a);
+      }
+    }
+  }
+
   return atoms;
 }
 
@@ -1240,14 +1254,30 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
       const iy = Math.floor(idx / gridSize) % gridSize;
       const iz = Math.floor(idx / (gridSize * gridSize));
 
-      const jitter = ((idx * 7 + 3) % 11) / 55.0;
+      const jx = ((idx * 7 + 3) % 17) / 34.0;
+      const jy = ((idx * 11 + 5) % 13) / 26.0;
+      const jz = ((idx * 13 + 7) % 19) / 38.0;
       atoms.push({
         element: el,
-        x: (ix + 0.5 + jitter * 0.3) * a / gridSize,
-        y: (iy + 0.5 - jitter * 0.2) * a / gridSize,
-        z: (iz + 0.5 + jitter * 0.1) * a / gridSize,
+        x: (ix + 0.5 + jx * 0.4) * a / gridSize,
+        y: (iy + 0.5 + jy * 0.4 - 0.2) * a / gridSize,
+        z: (iz + 0.5 + jz * 0.4 - 0.2) * a / gridSize,
       });
       idx++;
+    }
+  }
+
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const dx = atoms[j].x - atoms[i].x;
+      const dy = atoms[j].y - atoms[i].y;
+      const dz = atoms[j].z - atoms[i].z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < 0.3) {
+        atoms[j].x += 0.15 * a / gridSize;
+        atoms[j].y += 0.1 * a / gridSize;
+        atoms[j].z += 0.12 * a / gridSize;
+      }
     }
   }
 
@@ -1502,23 +1532,40 @@ function generateHydrideCageStructure(
     const offsetX = (copy % 2) * a;
     const offsetY = (Math.floor(copy / 2) % 2) * a;
     const offsetZ = Math.floor(copy / 4) * a;
-    const perturbAngle = overflowIdx * 2.399;
-    const perturbR = 0.3 + 0.1 * (overflowIdx % 5);
-    const px = perturbR * Math.cos(perturbAngle);
-    const py = perturbR * Math.sin(perturbAngle);
-    const pz = perturbR * Math.cos(perturbAngle + 1.5);
-    let x: number, y: number, z: number;
-    if (cage.latticeType === "hexagonal") {
-      x = a * pos.x + a * 0.5 * pos.y + offsetX + px;
-      y = a * (Math.sqrt(3) / 2) * pos.y + offsetY + py;
-      z = c * pos.z + offsetZ + pz;
-    } else {
-      x = a * pos.x + offsetX + px;
-      y = a * pos.y + offsetY + py;
-      z = a * pos.z + offsetZ + pz;
+
+    let placed = false;
+    for (let retry = 0; retry < 10 && !placed; retry++) {
+      const perturbAngle = overflowIdx * 2.399 + retry * 1.1;
+      const perturbR = 0.5 + 0.2 * (overflowIdx % 5) + retry * 0.15;
+      const px = perturbR * Math.cos(perturbAngle);
+      const py = perturbR * Math.sin(perturbAngle);
+      const pz = perturbR * Math.cos(perturbAngle + 1.5);
+      let x: number, y: number, z: number;
+      if (cage.latticeType === "hexagonal") {
+        x = a * pos.x + a * 0.5 * pos.y + offsetX + px;
+        y = a * (Math.sqrt(3) / 2) * pos.y + offsetY + py;
+        z = c * pos.z + offsetZ + pz;
+      } else {
+        x = a * pos.x + offsetX + px;
+        y = a * pos.y + offsetY + py;
+        z = a * pos.z + offsetZ + pz;
+      }
+
+      let tooClose = false;
+      for (const existing of atoms) {
+        const dx = x - existing.x;
+        const dy = y - existing.y;
+        const dz = z - existing.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < 0.5) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        atoms.push({ element: "H", x, y, z });
+        placed = true;
+      }
     }
-    atoms.push({ element: "H", x, y, z });
-    hPlaced++;
+    if (placed) hPlaced++;
+    else break;
     overflowIdx++;
   }
 
@@ -1529,7 +1576,7 @@ function generateHydrideCageStructure(
 }
 
 function deduplicateSites(atoms: AtomPosition[]): AtomPosition[] {
-  const TOLERANCE = 0.01;
+  const TOLERANCE = 0.05;
   const result: AtomPosition[] = [];
   for (const atom of atoms) {
     let isDuplicate = false;

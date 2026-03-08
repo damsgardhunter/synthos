@@ -256,7 +256,123 @@ function canonicalize(formula: string): string {
 
 const ALKALINE_EARTH_METALS = new Set(["Be", "Mg", "Ca", "Sr", "Ba"]);
 const ANION_ELEMENTS = new Set(["H", "B", "C", "N", "O", "F", "S", "Se", "Te", "Cl", "Br", "I", "P", "As", "Sb"]);
-const HEA_ELEMENTS = new Set(["Ti", "Zr", "Hf", "V", "Nb", "Ta", "Cr", "Mo", "W", "Mn", "Fe", "Co", "Ni", "Cu", "Al"]);
+
+const CHARGE_BALANCE_OX_STATES: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  Sc: [3], Y: [3], La: [3], Ce: [3, 4], Gd: [3], Nd: [3], Pr: [3, 4], Sm: [3], Eu: [2, 3],
+  Ti: [2, 3, 4], Zr: [4], Hf: [4],
+  V: [2, 3, 4, 5], Nb: [3, 4, 5], Ta: [5],
+  Cr: [2, 3, 6], Mo: [4, 6], W: [4, 6],
+  Mn: [2, 3, 4, 7], Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2], Zn: [2],
+  Ru: [3, 4], Rh: [3], Pd: [2, 4], Ag: [1], Ir: [3, 4], Pt: [2, 4], Au: [1, 3],
+  Al: [3], Ga: [3], In: [3], Sn: [2, 4], Pb: [2, 4], Tl: [1, 3], Bi: [3, 5],
+  B: [3], C: [4, -4], N: [-3, 3, 5], Si: [4, -4], Ge: [4],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4], Te: [-2, 4],
+  F: [-1], Cl: [-1], Br: [-1], I: [-1],
+  P: [-3, 3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5],
+  Th: [4], U: [4, 6], Re: [4, 7], Os: [4], Hg: [2], Cd: [2],
+  Tb: [3, 4], Dy: [3], Ho: [3], Er: [3], Tm: [3], Yb: [2, 3], Lu: [3],
+};
+
+function passesStrictChargeBalance(elements: string[], counts: Record<string, number>): boolean {
+  if (elements.length <= 1) return true;
+
+  const allMetallic = elements.every(el => {
+    const states = CHARGE_BALANCE_OX_STATES[el];
+    if (!states) return true;
+    return states.every(s => s >= 0);
+  });
+  const hasAnion = elements.some(el => {
+    const states = CHARGE_BALANCE_OX_STATES[el];
+    return states ? states.some(s => s < 0) : false;
+  });
+  if (allMetallic && !hasAnion) return true;
+
+  if (elements.length <= 5) {
+    let bestImbalance = Infinity;
+    const enumerate = (idx: number, charge: number): void => {
+      if (bestImbalance === 0) return;
+      if (idx === elements.length) {
+        bestImbalance = Math.min(bestImbalance, Math.abs(charge));
+        return;
+      }
+      const el = elements[idx];
+      const c = counts[el] ?? 1;
+      const states = CHARGE_BALANCE_OX_STATES[el];
+      if (!states) { enumerate(idx + 1, charge); return; }
+      for (const ox of states) {
+        enumerate(idx + 1, charge + ox * c);
+      }
+    };
+    enumerate(0, 0);
+    return bestImbalance <= 1;
+  }
+
+  let maxCharge = 0;
+  let minCharge = 0;
+  for (const el of elements) {
+    const c = counts[el] ?? 1;
+    const states = CHARGE_BALANCE_OX_STATES[el];
+    if (!states) continue;
+    const maxOx = Math.max(...states);
+    const minOx = Math.min(...states);
+    maxCharge += maxOx * c;
+    minCharge += minOx * c;
+  }
+  return minCharge <= 0 && maxCharge >= 0;
+}
+
+const FAMILY_TEMPLATES = [
+  { name: "hydride", metals: ["La", "Y", "Sc", "Ca", "Sr", "Ba", "Mg", "Th"], anions: ["H"], maxElements: 3 },
+  { name: "boride", metals: ["Mg", "Nb", "Ta", "Mo", "Ti", "Zr", "Hf", "V", "W"], anions: ["B"], extras: ["C", "N"], maxElements: 4 },
+  { name: "nitride-carbide", metals: ["Nb", "Ti", "Zr", "Hf", "V", "Ta", "Mo", "W"], anions: ["N", "C"], maxElements: 3 },
+  { name: "cuprate", metals: ["La", "Y", "Ba", "Sr", "Ca", "Bi", "Tl"], anions: ["O"], required: ["Cu"], maxElements: 4 },
+  { name: "pnictide", metals: ["La", "Ce", "Ba", "Sr", "Ca"], transition: ["Fe", "Co", "Ni"], anions: ["As", "P", "Se", "S"], maxElements: 4 },
+  { name: "intermetallic", metals: ["Nb", "V", "Ti", "Zr", "Mo", "W", "Ta", "Re"], anions: [], maxElements: 3 },
+];
+
+function pickFromFamily(familyIdx: number): string[] {
+  const fam = FAMILY_TEMPLATES[familyIdx];
+  const nElements = 2 + Math.floor(Math.random() * Math.min(2, fam.maxElements - 1));
+  const chosen: string[] = [];
+
+  if (fam.required) {
+    for (const r of fam.required) chosen.push(r);
+  }
+
+  const nMetals = Math.max(1, nElements - (fam.anions.length > 0 ? 1 : 0) - chosen.length);
+  const shuffledMetals = [...fam.metals].sort(() => Math.random() - 0.5);
+  for (let i = 0; i < nMetals && chosen.length < nElements; i++) {
+    if (!chosen.includes(shuffledMetals[i])) chosen.push(shuffledMetals[i]);
+  }
+
+  if (fam.transition) {
+    const tm = fam.transition[Math.floor(Math.random() * fam.transition.length)];
+    if (!chosen.includes(tm) && chosen.length < nElements) chosen.push(tm);
+  }
+
+  if (fam.anions.length > 0) {
+    const an = fam.anions[Math.floor(Math.random() * fam.anions.length)];
+    if (!chosen.includes(an)) chosen.push(an);
+  }
+
+  if (fam.extras && Math.random() < 0.3 && chosen.length < fam.maxElements) {
+    const ex = fam.extras[Math.floor(Math.random() * fam.extras.length)];
+    if (!chosen.includes(ex)) chosen.push(ex);
+  }
+
+  return chosen.slice(0, fam.maxElements);
+}
+
+export function passesElementCountCap(formula: string): boolean {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const distinctNonH = elements.filter(el => el !== "H");
+  if (distinctNonH.length > 4) return false;
+  if (elements.length > 5) return false;
+  return true;
+}
 
 export function passesValenceFilter(formula: string): boolean {
   const counts = parseFormulaCounts(formula);
@@ -277,53 +393,34 @@ export function passesValenceFilter(formula: string): boolean {
   const totalMetalCount = metalElements.reduce((s, el) => s + counts[el], 0);
   const totalAnionCount = anionElements.reduce((s, el) => s + counts[el], 0);
 
-  const nonHMetals = metalElements.filter(el => el !== "H");
-  if (nonHMetals.length > 3) {
-    const isHEA = nonHMetals.length >= 4 && nonHMetals.every(el => HEA_ELEMENTS.has(el)) && anionElements.filter(el => el !== "H").length <= 1;
-    if (!isHEA) return false;
-  }
-
   const distinctNonH = elements.filter(el => el !== "H");
-  if (distinctNonH.length > 4) {
-    const isHEA = nonHMetals.length >= 4 && nonHMetals.every(el => HEA_ELEMENTS.has(el)) && anionElements.filter(el => el !== "H").length <= 1;
-    if (!isHEA) return false;
-  }
+  if (distinctNonH.length > 4) return false;
+  if (elements.length > 5) return false;
 
-  if (elements.length > 5) {
-    const isHEA = metalElements.length >= 4 && metalElements.every(el => HEA_ELEMENTS.has(el)) && anionElements.length <= 1;
-    if (!isHEA) return false;
-  }
+  const nonHMetals = metalElements.filter(el => el !== "H");
+  if (nonHMetals.length > 3) return false;
 
   if (totalAnionCount > 0 && totalMetalCount > 3 * totalAnionCount) return false;
 
   const alkalineEarthCount = elements.filter(el => ALKALINE_EARTH_METALS.has(el)).length;
-  if (alkalineEarthCount > 3) return false;
+  if (alkalineEarthCount > 2) return false;
 
   const alkaliCount = elements.filter(el => ["Li", "Na", "K", "Rb", "Cs"].includes(el)).length;
   if (alkaliCount > 2) return false;
 
-  let maxChargeSum = 0;
-  let minChargeSum = 0;
-  for (const el of elements) {
-    const maxOx = MAX_OXIDATION_STATE[el] ?? 4;
-    const minOx = MIN_OXIDATION_STATE[el] ?? -2;
-    maxChargeSum += maxOx * counts[el];
-    minChargeSum += minOx * counts[el];
-  }
+  if (!passesStrictChargeBalance(elements, counts)) return false;
 
-  if (minChargeSum > 0 && maxChargeSum > 0) return false;
-  if (maxChargeSum < 0 && minChargeSum < 0) return false;
-
-  return minChargeSum <= 0 && maxChargeSum >= 0;
+  return true;
 }
 
 export function passesCompositionComplexityFilter(formula: string): boolean {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  if (elements.length > 5 && totalAtoms > 15) return false;
-  if (elements.length > 6) return false;
-  if (totalAtoms > 30) return false;
+  const distinctNonH = elements.filter(el => el !== "H");
+  if (distinctNonH.length > 4) return false;
+  if (elements.length > 5) return false;
+  if (totalAtoms > 20) return false;
   return true;
 }
 
@@ -710,6 +807,20 @@ export function runMassiveGeneration(
       allGenerated.add(f);
       if (allGenerated.size >= MAX_FORMULAS) break;
     }
+  }
+
+  const familyStoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3], [2, 3], [3, 2], [1, 4], [1, 6]];
+  for (let fi = 0; fi < 200 && allGenerated.size < MAX_FORMULAS; fi++) {
+    const famIdx = Math.floor(Math.random() * FAMILY_TEMPLATES.length);
+    const els = pickFromFamily(famIdx);
+    if (els.length < 2) continue;
+    const s = familyStoichs[Math.floor(Math.random() * familyStoichs.length)];
+    let formula = "";
+    for (let ei = 0; ei < els.length; ei++) {
+      const count = ei < s.length ? s[ei] : 1;
+      formula += els[ei] + (count > 1 ? count : "");
+    }
+    allGenerated.add(canonicalize(formula));
   }
 
   stats.totalGenerated = allGenerated.size;

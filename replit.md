@@ -63,6 +63,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Formation energy**: Hard stop for Ef > 1.0 eV/atom or Ef < -5.0 eV/atom.
 - **Hull distance**: Hard reject > 0.50 eV/atom.
 - **Chemistry grammar validation**: Pre-filters compositions based on various chemical constraints.
+- **Hard element count cap**: Max 4 distinct non-H elements, max 5 total elements. Enforced in `passesValenceFilter`, `passesCompositionComplexityFilter`, `passesElementCountCap`, RL agent `generateCandidatesFromAction`, inverse generator output filter, and crystal diffusion cycle. HEA exception path removed.
+- **Strict charge balance**: `passesStrictChargeBalance` enumerates all oxidation state combinations recursively (for up to 5 elements) and rejects if best charge imbalance > 1. Used in `passesValenceFilter` and inverse `generateStoichiometryVariants`.
+- **Composition complexity cap**: Max 20 atoms total (down from 30). Applied in `passesCompositionComplexityFilter`.
+- **Chemistry family templates**: 6 families (hydride, boride, nitride-carbide, cuprate, pnictide, intermetallic) with constrained element pools. `pickFromFamily()` selects elements within a single family. Used in `runMassiveGeneration` for 200 family-biased candidates.
+- **Binary/ternary distribution bias**: RL agent stoich template priors favor binary/ternary (weight 0.25 each) over quaternary (weight 0.05). Inverse generator STOICH_PATTERNS have weights (2-slot: 2.0, 3-slot: 1.0-2.0, 4-slot: 0.5).
+- **Overlapping atom prevention**: Hydride cage overflow uses min 0.5 A perturbation with retry loop and pairwise distance check. `buildStructureFromPrototype` and `buildGenericStructure` enforce post-placement minimum distance. `deduplicateSites` tolerance increased from 0.01 to 0.05 A. Generic structure uses independent jitter per axis to avoid grid coincidences.
 - **Surrogate pre-filter pipeline**: Screens candidates with GB model before expensive physics evaluation; failed feature extraction rejects (not passes).
 - **Deterministic phonon estimates**: Analytical phonon fallback uses formula-hash seeding for reproducible frequencies.
 - **RL agent templates**: STOICH_TEMPLATES includes superhydride patterns (AH6/AH9/AH10/AH12, ABH8), quaternary-2211, quaternary-HEA, binary-diboride; quaternary generation uses policy weights (not random); reward improvement clamped to 5.0; success threshold lowered to Tc>10; 30+ element pair priors.

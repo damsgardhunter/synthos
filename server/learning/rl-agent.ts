@@ -245,6 +245,18 @@ const MOTIF_FAMILY_MAP: Record<string, string[]> = {
   "Chevrel-phase": ["chalcogenide", "intermetallic"],
 };
 
+function parseFormulaElementsRL(formula: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*)/g;
+  let match;
+  while ((match = regex.exec(formula)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseInt(match[2]) : 1;
+    if (el) counts[el] = (counts[el] || 0) + num;
+  }
+  return counts;
+}
+
 function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
   if (!context.motifName) return 0;
   if (KNOWN_SC_MOTIFS.has(context.motifName)) return 1.0;
@@ -483,10 +495,14 @@ export class RLChemicalSpaceAgent {
     this.policy.elementGroup[7] = 0.15;
     this.policy.elementGroup[8] = 0.1;
 
-    this.policy.stoichTemplate[3] = 0.2;
-    this.policy.stoichTemplate[4] = 0.15;
-    this.policy.stoichTemplate[7] = 0.3;
-    this.policy.stoichTemplate[8] = 0.2;
+    for (let i = 0; i < STOICH_TEMPLATES.length; i++) {
+      const t = STOICH_TEMPLATES[i];
+      if (t.nElements === 2) this.policy.stoichTemplate[i] = 0.25;
+      else if (t.nElements === 3) this.policy.stoichTemplate[i] = 0.25;
+      else if (t.nElements === 4) this.policy.stoichTemplate[i] = 0.05;
+    }
+    this.policy.stoichTemplate[3] = 0.3;
+    this.policy.stoichTemplate[4] = 0.2;
 
     this.policy.structureType[0] = 0.2;
     this.policy.structureType[3] = 0.15;
@@ -995,6 +1011,11 @@ export class RLChemicalSpaceAgent {
       }
 
       if (!seen.has(formula)) {
+        const elCounts = parseFormulaElementsRL(formula);
+        const elKeys = Object.keys(elCounts);
+        const nonH = elKeys.filter(e => e !== "H");
+        if (nonH.length > 4 || elKeys.length > 5) continue;
+
         const isHydride = /(?<![a-z])H(?![a-z])/.test(formula);
         if (isHydride && hydrideCount >= maxHydrides) continue;
         seen.add(formula);
