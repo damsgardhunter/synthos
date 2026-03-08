@@ -54,7 +54,7 @@ export function selectForDFT(
     try {
       const gnnResult = gnnPredictWithUncertainty(candidate.formula);
       uncertainty = Math.max(uncertainty, gnnResult.uncertainty);
-    } catch {}
+    } catch (e: any) { console.error("[ActiveLearning] GNN predict error:", e?.message?.slice(0, 200)); }
 
     const acquisitionScore = 0.5 * normalizedTc + 0.5 * uncertainty;
 
@@ -179,7 +179,7 @@ async function retrainGNNWithEnrichedData(
         }
       }
     }
-  } catch {}
+  } catch (e: any) { console.error("[ActiveLearning] enrichment error:", e?.message?.slice(0, 200)); }
 
   invalidateGNNModel();
   trainGNNSurrogate(trainingData);
@@ -328,7 +328,7 @@ export async function runActiveLearningCycle(
           discoveryScore: discoveryResult.discoveryScore,
         });
       }
-    } catch {}
+    } catch (e: any) { console.error("[ActiveLearning] discovery score error:", e?.message?.slice(0, 200)); }
   }
 
   const uncertaintyReduction = avgUncertaintyBefore > 0

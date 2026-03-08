@@ -1,5 +1,6 @@
 import { TargetProperties, CompositionBias, InverseCandidate } from "./target-schema";
 import { defaultSynthesisVector, mutateSynthesisVector, optimizeSynthesisPath } from "../physics/synthesis-simulator";
+import { isValidFormula } from "../learning/utils";
 
 const LIGHT_PHONON_ELEMENTS = ["H", "B", "C", "N", "O"];
 const HIGH_COUPLING_TM = ["Nb", "V", "Ti", "Ta", "Mo", "W", "Zr", "Hf"];
@@ -275,7 +276,7 @@ export function generateInverseCandidates(
     }
   }
 
-  return candidates.slice(0, count);
+  return candidates.filter(c => isValidFormula(c.formula)).slice(0, count);
 }
 
 export function refineCandidate(

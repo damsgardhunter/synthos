@@ -140,11 +140,11 @@ export function createPipeline(id: string, goal?: Partial<PipelineGoal>): Pipeli
 
   try {
     constraintSolution = solveConstraints(fullGoal.targetTc, 0.10);
-  } catch {}
+  } catch (e: any) { console.error("[NextGenPipeline] solveConstraints error:", e?.message?.slice(0, 200)); }
 
   try {
     graphSolution = solveConstraintGraph(fullGoal.targetTc, 0.10);
-  } catch {}
+  } catch (e: any) { console.error("[NextGenPipeline] solveConstraintGraph error:", e?.message?.slice(0, 200)); }
 
   const state: PipelineState = {
     goal: fullGoal,
@@ -224,7 +224,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
             rank: 0,
           });
         }
-      } catch {}
+      } catch (e: any) { console.error("[NextGenPipeline] RL generate error:", e?.message?.slice(0, 200)); }
     }
   }
 
@@ -247,7 +247,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
             rank: 0,
           });
         }
-      } catch {}
+      } catch (e: any) { console.error("[NextGenPipeline] diff optimization error:", e?.message?.slice(0, 200)); }
     }
   }
 
@@ -271,7 +271,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
       if (result.isValid || result.totalPenalty < constraintThreshold) {
         constraintPassed.push(candidate);
       }
-    } catch {}
+    } catch (e: any) { console.error("[NextGenPipeline] constraint check error:", e?.message?.slice(0, 200)); }
   }
 
   state.totalConstraintsPassed += constraintPassed.length;
@@ -291,7 +291,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
   for (const candidate of constraintPassed) {
     try {
       candidate.pillarEvaluation = evaluatePillars(candidate.formula, pillarTargets);
-    } catch {}
+    } catch (e: any) { console.error("[NextGenPipeline] pillar eval error:", e?.message?.slice(0, 200)); }
   }
 
   for (const candidate of constraintPassed) {
@@ -320,7 +320,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
       candidate.targetDistance = computeTargetDistance(target, predicted);
       candidate.reward = computeReward(candidate.targetDistance);
       candidate.physicsValidated = true;
-    } catch {}
+    } catch (e: any) { console.error("[NextGenPipeline] surrogate eval error:", e?.message?.slice(0, 200)); }
   }
 
   state.totalSurrogateEvaluated += constraintPassed.filter(c => c.surrogateScores !== null).length;

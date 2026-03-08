@@ -56,7 +56,6 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   Bi: { mass: 208.98,  zValence: 5  },
   Br: { mass: 79.904,  zValence: 7  },
   Tc: { mass: 98.0,    zValence: 7  },
-  Cd: { mass: 112.41,  zValence: 12 },
   Pr: { mass: 140.91,  zValence: 13 },
   Nd: { mass: 144.24,  zValence: 14 },
   Sm: { mass: 150.36,  zValence: 16 },
@@ -853,14 +852,15 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
   const ELEMENT_CUTOFFS2: Record<string, number> = {
     O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
   };
-  const ecutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), 45);
+  const baseEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), 45);
+  const ecutwfc = baseEcutwfc + (params.ecutwfcBoost ?? 0);
   const ecutrho = ecutwfc * 8;
   const smearing = params.smearing || "mv";
   const degauss = params.degauss || 0.02;
@@ -1057,11 +1057,11 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
     result.kPoints = autoKPoints(latticeA).trim();
 
-    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number }> = [
+    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number }> = [
       { mixingBeta: 0.3, maxSteps: 100, diag: "david" },
-      { mixingBeta: 0.2, maxSteps: 200, diag: "david" },
-      { mixingBeta: 0.1, maxSteps: 300, diag: "cg" },
-      { mixingBeta: 0.1, maxSteps: 300, diag: "cg", smearing: "gaussian", degauss: 0.02 },
+      { mixingBeta: 0.2, maxSteps: 200, diag: "david", ecutwfcBoost: 10 },
+      { mixingBeta: 0.1, maxSteps: 300, diag: "cg", ecutwfcBoost: 20 },
+      { mixingBeta: 0.1, maxSteps: 300, diag: "cg", smearing: "gaussian", degauss: 0.02, ecutwfcBoost: 20 },
     ];
 
     let scfConverged = false;

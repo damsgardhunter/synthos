@@ -3,17 +3,19 @@ export interface SuperconEntry {
   tc: number;
   family: string;
   isSuperconductor: boolean;
+  lambda?: number;
+  pressureGPa?: number;
 }
 
 export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   // === ELEMENTAL SUPERCONDUCTORS ===
-  { formula: "Nb", tc: 9.3, family: "Elemental", isSuperconductor: true },
-  { formula: "Pb", tc: 7.2, family: "Elemental", isSuperconductor: true },
-  { formula: "V", tc: 5.4, family: "Elemental", isSuperconductor: true },
-  { formula: "Ta", tc: 4.5, family: "Elemental", isSuperconductor: true },
-  { formula: "Sn", tc: 3.7, family: "Elemental", isSuperconductor: true },
-  { formula: "In", tc: 3.4, family: "Elemental", isSuperconductor: true },
-  { formula: "Al", tc: 1.2, family: "Elemental", isSuperconductor: true },
+  { formula: "Nb", tc: 9.3, family: "Elemental", isSuperconductor: true, lambda: 0.82 },
+  { formula: "Pb", tc: 7.2, family: "Elemental", isSuperconductor: true, lambda: 1.55 },
+  { formula: "V", tc: 5.4, family: "Elemental", isSuperconductor: true, lambda: 0.80 },
+  { formula: "Ta", tc: 4.5, family: "Elemental", isSuperconductor: true, lambda: 0.69 },
+  { formula: "Sn", tc: 3.7, family: "Elemental", isSuperconductor: true, lambda: 0.72 },
+  { formula: "In", tc: 3.4, family: "Elemental", isSuperconductor: true, lambda: 0.81 },
+  { formula: "Al", tc: 1.2, family: "Elemental", isSuperconductor: true, lambda: 0.43 },
   { formula: "Zn", tc: 0.85, family: "Elemental", isSuperconductor: true },
   { formula: "Ti", tc: 0.4, family: "Elemental", isSuperconductor: true },
   { formula: "Zr", tc: 0.61, family: "Elemental", isSuperconductor: true },
@@ -28,7 +30,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "Th", tc: 1.4, family: "Elemental", isSuperconductor: true },
   { formula: "Ga", tc: 1.08, family: "Elemental", isSuperconductor: true },
   { formula: "Tl", tc: 2.38, family: "Elemental", isSuperconductor: true },
-  { formula: "Hg", tc: 4.15, family: "Elemental", isSuperconductor: true },
+  { formula: "Hg", tc: 4.15, family: "Elemental", isSuperconductor: true, lambda: 1.60 },
   { formula: "Cd", tc: 0.52, family: "Elemental", isSuperconductor: true },
   { formula: "Tc", tc: 7.8, family: "Elemental", isSuperconductor: true },
   { formula: "Rh", tc: 0.0003, family: "Elemental", isSuperconductor: true },
@@ -38,9 +40,9 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "Bi", tc: 0.00053, family: "Elemental", isSuperconductor: true },
 
   // === A15 COMPOUNDS ===
-  { formula: "Nb3Sn", tc: 18.3, family: "A15", isSuperconductor: true },
-  { formula: "Nb3Ge", tc: 23.2, family: "A15", isSuperconductor: true },
-  { formula: "Nb3Al", tc: 18.7, family: "A15", isSuperconductor: true },
+  { formula: "Nb3Sn", tc: 18.3, family: "A15", isSuperconductor: true, lambda: 1.80 },
+  { formula: "Nb3Ge", tc: 23.2, family: "A15", isSuperconductor: true, lambda: 1.95 },
+  { formula: "Nb3Al", tc: 18.7, family: "A15", isSuperconductor: true, lambda: 1.70 },
   { formula: "Nb3Ga", tc: 20.3, family: "A15", isSuperconductor: true },
   { formula: "V3Si", tc: 17.0, family: "A15", isSuperconductor: true },
   { formula: "V3Ga", tc: 16.5, family: "A15", isSuperconductor: true },
@@ -60,7 +62,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
 
   // === BINARY ALLOYS AND COMPOUNDS ===
   { formula: "NbTi", tc: 10.0, family: "Alloy", isSuperconductor: true },
-  { formula: "NbN", tc: 16.0, family: "Nitride", isSuperconductor: true },
+  { formula: "NbN", tc: 16.0, family: "Nitride", isSuperconductor: true, lambda: 1.46 },
   { formula: "NbC", tc: 12.0, family: "Carbide", isSuperconductor: true },
   { formula: "TiN", tc: 5.6, family: "Nitride", isSuperconductor: true },
   { formula: "VN", tc: 8.5, family: "Nitride", isSuperconductor: true },
@@ -69,7 +71,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "MoC", tc: 14.3, family: "Carbide", isSuperconductor: true },
   { formula: "MoN", tc: 12.0, family: "Nitride", isSuperconductor: true },
   { formula: "ZrN", tc: 10.7, family: "Nitride", isSuperconductor: true },
-  { formula: "PbMo6S8", tc: 15.0, family: "Chevrel", isSuperconductor: true },
+  { formula: "PbMo6S8", tc: 15.0, family: "Chevrel", isSuperconductor: true, lambda: 1.20 },
   { formula: "NbSe2", tc: 7.2, family: "Chalcogenide", isSuperconductor: true },
   { formula: "MoRe", tc: 12.0, family: "Alloy", isSuperconductor: true },
   { formula: "HfN", tc: 8.8, family: "Nitride", isSuperconductor: true },
@@ -108,7 +110,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "LaPt2", tc: 0.5, family: "Laves", isSuperconductor: true },
 
   // === MgB2 AND BORIDES ===
-  { formula: "MgB2", tc: 39.0, family: "Boride", isSuperconductor: true },
+  { formula: "MgB2", tc: 39.0, family: "Boride", isSuperconductor: true, lambda: 0.87 },
   { formula: "NbB2", tc: 0.62, family: "Boride", isSuperconductor: true },
   { formula: "ZrB2", tc: 5.5, family: "Boride", isSuperconductor: true },
   { formula: "TaB2", tc: 9.5, family: "Boride", isSuperconductor: true },
@@ -150,7 +152,6 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "Ca2CuO3", tc: 0, family: "Cuprate", isSuperconductor: false },
   { formula: "Sr2CuO3", tc: 0, family: "Cuprate", isSuperconductor: false },
   { formula: "Tl2Ba2Ca3Cu4O12", tc: 112.0, family: "Cuprate", isSuperconductor: true },
-  { formula: "Bi2Sr2Cu1O6", tc: 12.0, family: "Cuprate", isSuperconductor: true },
   { formula: "GdBa2Cu3O7", tc: 94.0, family: "Cuprate", isSuperconductor: true },
   { formula: "EuBa2Cu3O7", tc: 95.0, family: "Cuprate", isSuperconductor: true },
   { formula: "SmBa2Cu3O7", tc: 94.0, family: "Cuprate", isSuperconductor: true },
@@ -217,20 +218,20 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "NpPd5Al2", tc: 4.9, family: "Heavy Fermion", isSuperconductor: true },
 
   // === HYDRIDES (HIGH PRESSURE) ===
-  { formula: "LaH10", tc: 250.0, family: "Hydride", isSuperconductor: true },
-  { formula: "YH9", tc: 243.0, family: "Hydride", isSuperconductor: true },
-  { formula: "CeH9", tc: 100.0, family: "Hydride", isSuperconductor: true },
-  { formula: "YH6", tc: 224.0, family: "Hydride", isSuperconductor: true },
-  { formula: "CaH6", tc: 215.0, family: "Hydride", isSuperconductor: true },
-  { formula: "H3S", tc: 203.0, family: "Hydride", isSuperconductor: true },
+  { formula: "LaH10", tc: 250.0, family: "Hydride", isSuperconductor: true, lambda: 2.2, pressureGPa: 170 },
+  { formula: "YH9", tc: 243.0, family: "Hydride", isSuperconductor: true, lambda: 2.6, pressureGPa: 201 },
+  { formula: "CeH9", tc: 100.0, family: "Hydride", isSuperconductor: true, lambda: 1.5, pressureGPa: 150 },
+  { formula: "YH6", tc: 224.0, family: "Hydride", isSuperconductor: true, lambda: 2.0, pressureGPa: 166 },
+  { formula: "CaH6", tc: 215.0, family: "Hydride", isSuperconductor: true, lambda: 2.7, pressureGPa: 172 },
+  { formula: "H3S", tc: 203.0, family: "Hydride", isSuperconductor: true, lambda: 2.19, pressureGPa: 155 },
   { formula: "LaH6", tc: 150.0, family: "Hydride", isSuperconductor: true },
-  { formula: "ThH10", tc: 161.0, family: "Hydride", isSuperconductor: true },
-  { formula: "ScH9", tc: 170.0, family: "Hydride", isSuperconductor: true },
+  { formula: "ThH10", tc: 161.0, family: "Hydride", isSuperconductor: true, lambda: 1.6, pressureGPa: 175 },
+  { formula: "ScH9", tc: 170.0, family: "Hydride", isSuperconductor: true, lambda: 1.9, pressureGPa: 300 },
   { formula: "BaH12", tc: 20.0, family: "Hydride", isSuperconductor: true },
   { formula: "PrH9", tc: 9.0, family: "Hydride", isSuperconductor: true },
   { formula: "NdH9", tc: 4.5, family: "Hydride", isSuperconductor: true },
   { formula: "SrH6", tc: 72.0, family: "Hydride", isSuperconductor: true },
-  { formula: "MgH6", tc: 260.0, family: "Hydride", isSuperconductor: true },
+  { formula: "MgH6", tc: 260.0, family: "Hydride", isSuperconductor: true, lambda: 2.8, pressureGPa: 300 },
   { formula: "BaH6", tc: 38.0, family: "Hydride", isSuperconductor: true },
   { formula: "AcH10", tc: 204.0, family: "Hydride", isSuperconductor: true },
   { formula: "LuH6", tc: 15.0, family: "Hydride", isSuperconductor: true },

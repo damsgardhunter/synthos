@@ -82,6 +82,7 @@ function evaluateNode(node: ExprNode, row: Record<string, number>): number {
   if (node.type === "var") return row[node.name] ?? 0;
 
   const vals = node.children.map(c => evaluateNode(c, row));
+  if (vals.some(v => !Number.isFinite(v))) return 1e6;
   switch (node.op) {
     case "+": return vals[0] + vals[1];
     case "-": return vals[0] - vals[1];
@@ -281,7 +282,8 @@ function computeFitness(tree: ExprNode, dataset: DataPoint[], target: string, va
     maeSum += Math.abs(actuals[i] - predictions[i]);
   }
 
-  const r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  const rawR2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  const r2 = Math.max(-1, Math.min(1, rawR2));
   const mae = maeSum / actuals.length;
   const complexity = treeSize(tree);
   const complexityPenalty = 0.005 * complexity;
@@ -326,7 +328,8 @@ function computeR2AndMAE(tree: ExprNode, dataset: DataPoint[], target: string): 
     maeSum += Math.abs(actuals[i] - predictions[i]);
   }
 
-  const r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  const rawR2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  const r2 = Math.max(-1, Math.min(1, rawR2));
   const mae = maeSum / actuals.length;
   return { r2, mae };
 }

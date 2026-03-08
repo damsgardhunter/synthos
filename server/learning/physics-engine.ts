@@ -58,9 +58,9 @@ function computePhysicsDerivedBonus(formula: string, lambda: number): number {
 }
 
 const FAMILY_TC_CAPS: Record<string, { ambient: number; highPressure: number }> = {
-  Carbides: { ambient: 45, highPressure: 80 },
-  Nitrides: { ambient: 50, highPressure: 90 },
-  Borides: { ambient: 55, highPressure: 120 },
+  Carbides: { ambient: 45, highPressure: 100 },
+  Nitrides: { ambient: 65, highPressure: 110 },
+  Borides: { ambient: 55, highPressure: 150 },
   Oxides: { ambient: 40, highPressure: 70 },
 };
 
@@ -640,8 +640,11 @@ function estimateDOSatFermi(elements: string[], counts: Record<string, number>):
     if (I !== null && I > 0) {
       const frac = (counts[el] || 1) / totalAtoms;
       const stonerProduct = I * dos;
-      if (stonerProduct < 1.0 && stonerProduct > 0) {
-        dos = dos / (1 - stonerProduct * frac);
+      if (stonerProduct < 0.95 && stonerProduct > 0) {
+        const denom = 1 - stonerProduct * frac;
+        if (Math.abs(denom) > 1e-6) {
+          dos = dos / denom;
+        }
       }
     }
   }

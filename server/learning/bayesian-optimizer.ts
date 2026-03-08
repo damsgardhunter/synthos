@@ -124,7 +124,7 @@ function choleskyDecompose(K: number[][]): number[][] {
       }
       if (i === j) {
         const diag = K[i][i] - sum;
-        L[i][j] = diag > 0 ? Math.sqrt(diag) : 1e-6;
+        L[i][j] = diag > 1e-10 ? Math.sqrt(diag) : 1e-4;
       } else {
         L[i][j] = L[j][j] > 1e-10 ? (K[i][j] - sum) / L[j][j] : 0;
       }
@@ -177,7 +177,7 @@ export class BayesianOptimizer {
   private observations: Observation[] = [];
   private lengthScale = 0.5;
   private signalVariance = 1.0;
-  private noiseVariance = 0.01;
+  private noiseVariance = 0.1;
   private bestTcObserved = 0;
   private cachedL: number[][] | null = null;
   private cachedAlpha: number[] | null = null;
@@ -312,15 +312,17 @@ export class BayesianOptimizer {
     if (std < 1e-8) return 0;
     const improvement = mean - this.bestTcObserved - xi;
     const z = improvement / std;
-    return improvement * standardNormalCDF(z) + std * standardNormalPDF(z);
+    const result = improvement * standardNormalCDF(z) + std * standardNormalPDF(z);
+    return Number.isFinite(result) ? result : 0;
   }
 
   thompsonSample(formula: string): number {
     const { mean, std } = this.predict(formula);
-    const u1 = Math.random();
+    const u1 = Math.max(1e-15, Math.random());
     const u2 = Math.random();
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    return mean + std * z;
+    const sample = mean + std * z;
+    return Number.isFinite(sample) ? sample : mean;
   }
 
   suggestNextCandidates(

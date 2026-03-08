@@ -292,6 +292,39 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
+    name: "Heusler-L21",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "main-metal" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "main-metal" },
+      { label: "A", x: 0.25, y: 0.75, z: 0.75, role: "main-metal" },
+      { label: "A", x: 0.75, y: 0.25, z: 0.25, role: "main-metal" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.25, role: "main-metal" },
+      { label: "A", x: 0.25, y: 0.25, z: 0.75, role: "main-metal" },
+      { label: "A", x: 0.75, y: 0.25, z: 0.75, role: "main-metal" },
+      { label: "A", x: 0.25, y: 0.75, z: 0.25, role: "main-metal" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "secondary-metal" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.0, role: "secondary-metal" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.5, role: "secondary-metal" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.5, role: "secondary-metal" },
+      { label: "C", x: 0.5, y: 0.5, z: 0.5, role: "sp-element" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.5, role: "sp-element" },
+      { label: "C", x: 0.0, y: 0.5, z: 0.0, role: "sp-element" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.0, role: "sp-element" },
+    ],
+    stoichiometryRatio: [2, 1, 1],
+    coordination: [4, 8, 8],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasTM = elements.some(e => ["Cu", "Ni", "Co", "Fe", "Mn", "Pd", "Pt", "Rh", "Ir"].includes(e));
+      const hasSecondTM = elements.filter(e => ["Ti", "V", "Mn", "Zr", "Nb", "Hf", "Ta", "Sc", "Y"].includes(e)).length >= 1;
+      const hasSp = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi"].includes(e));
+      return hasTM && (hasSecondTM || hasSp);
+    },
+  },
+  {
     name: "Skutterudite",
     spaceGroup: "Im-3",
     latticeType: "cubic",
@@ -305,7 +338,7 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       { label: "X", x: 0.34, y: 0.16, z: 0.0, role: "pnicogen" },
       { label: "X", x: 0.16, y: 0.0, z: 0.34, role: "pnicogen" },
     ],
-    stoichiometryRatio: [1, 3],
+    stoichiometryRatio: [4, 12],
     coordination: [6, 2],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;

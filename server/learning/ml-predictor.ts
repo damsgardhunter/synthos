@@ -162,9 +162,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   let electronDensityEstimate: number;
   if (electronic.metallicity > 0.5) {
-    electronDensityEstimate = 0.5 + electronic.densityOfStatesAtFermi * 0.05;
+    electronDensityEstimate = Math.min(1.0, 0.5 + electronic.densityOfStatesAtFermi * 0.05);
   } else if (mat?.bandGap != null && mat.bandGap > 0) {
-    electronDensityEstimate = mat.bandGap > 3.0 ? 0.05 : 0.3 - mat.bandGap * 0.08;
+    electronDensityEstimate = mat.bandGap > 3.0 ? 0.05 : Math.max(0, 0.3 - mat.bandGap * 0.08);
   } else if (hasTransitionMetal || hasRareEarth || hasHydrogen) {
     electronDensityEstimate = 0.5;
   } else {
@@ -220,7 +220,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       const dftDos = dftData.dosAtFermi.value;
       if (dftDos > 0) {
         const analyticalEd = electronDensityEstimate;
-        electronDensityEstimate = 0.3 * analyticalEd + 0.7 * Math.min(1.0, dftDos / 10.0);
+        electronDensityEstimate = Math.min(1.0, 0.3 * analyticalEd + 0.7 * Math.min(1.0, dftDos / 10.0));
       }
     }
     dftConfidence = dftData.dftCoverage;
@@ -236,7 +236,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const phononMax = phonon.maxPhononFrequency || 500;
   const phononLog = phonon.logAverageFrequency || 200;
   const phononSpectralCentroid = (phononMax + phononLog) / 2;
-  const phononSpectralWidth = Math.abs(phononMax - phononLog) / Math.max(phononMax, 1);
+  const rawSpectralWidth = Math.abs(phononMax - phononLog) / Math.max(phononMax, 1);
+  const phononSpectralWidth = Number.isFinite(rawSpectralWidth) ? rawSpectralWidth : 0;
 
   let bondStiffnessVariance = 0;
   const bulkValues: number[] = [];

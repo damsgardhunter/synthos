@@ -1746,7 +1746,7 @@ async function runPhase11_StructurePrediction() {
 
     const needsPrediction: string[] = [];
     for (const formula of uniqueFormulas) {
-      if (needsPrediction.length >= 3) break;
+      if (needsPrediction.length >= 5) break;
       const existing = await storage.getCrystalStructuresByFormula(formula);
       if (existing.length === 0) {
         needsPrediction.push(formula);
@@ -2331,7 +2331,7 @@ async function runPhase12_MultiFidelity() {
     const stage0 = await storage.getSuperconductorsByStage(0, 50);
     const stage1 = await storage.getSuperconductorsByStage(1, 50);
     const eligible = [...stage0, ...stage1].filter(c => (c.ensembleScore ?? 0) > 0.25);
-    const unscreened = shuffle(eligible).slice(0, 6);
+    const unscreened = shuffle(eligible).slice(0, 8);
 
     if (unscreened.length > 0) {
       const results = await runMultiFidelityPipeline(emit, unscreened);
@@ -2744,7 +2744,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
             feedbackLoopStats.pressurePathwayBestAmbientTc = pathway.bestAmbientTc;
             feedbackLoopStats.pressurePathwayBestFormula = pathway.bestAmbientFormula;
           }
-          if (pathway.bestAmbientFormula && !alreadyScreenedFormulas.has(normalizeFormula(pathway.bestAmbientFormula))) {
+          if (pathway.bestAmbientFormula && isValidFormula(pathway.bestAmbientFormula) && !alreadyScreenedFormulas.has(normalizeFormula(pathway.bestAmbientFormula))) {
             alreadyScreenedFormulas.add(normalizeFormula(pathway.bestAmbientFormula));
             try {
               await storage.createSuperconductorCandidate({

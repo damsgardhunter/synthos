@@ -98,6 +98,18 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Engine catch blocks**: 65+ previously silent catch blocks now log errors across entire engine.ts.
 - **Supercon dataset**: Removed duplicate entries (ScH9, NbC, SrTiO3); 550 entries total.
 - **Auto-promote catch**: Routes validation auto-promote now logs errors on failure.
+- **Round 8 comprehensive fixes**:
+  - ml-predictor.ts: electronDensityEstimate clamped to [0,1]; phononSpectralWidth NaN guard with isFinite fallback.
+  - physics-engine.ts: Stoner enhancement denominator guard (stonerProduct<0.95, |denom|>1e-6); FAMILY_TC_CAPS raised (Nitrides 65K/110K, Borides 55K/150K, Carbides 45K/100K).
+  - bayesian-optimizer.ts: noiseVariance 0.01→0.1 for better GP conditioning; Cholesky fallback 1e-6→1e-4; thompsonSample Math.log(0) guard; acquisitionEI isFinite check.
+  - symbolic-regression.ts: R² clamped to [-1,1]; evaluateNode NaN propagation guard (early return 1e6).
+  - supercon-dataset.ts: Added lambda and pressureGPa fields; lambda values for 15+ key superconductors (Nb=0.82, Pb=1.55, MgB2=0.87, Nb3Sn=1.80, H3S=2.19, LaH10=2.2, etc.); pressure for 8 hydrides; removed duplicate Bi2Sr2Cu1O6.
+  - crystal-prototypes.ts: Skutterudite stoichiometryRatio fixed [1,3]→[4,12]; new Heusler-L21 prototype (Fm-3m, 16-atom conventional cell, 8c/4a/4b Wyckoff, A2BC).
+  - inverse-generator.ts: Added isValidFormula import and filtering before returning candidates.
+  - engine.ts: Phase 11 needsPrediction cap 3→5; Phase 12 unscreened cap 6→8; isValidFormula check on pressure pathway insertions.
+  - qe-worker.ts: Removed duplicate Cd entry; ecutwfcBoost in retry configs (0/+10/+20/+20 Ry); generateSCFInputWithParams accepts boost.
+  - next-gen-pipeline.ts: 7 empty catch blocks now log errors with module prefix.
+  - active-learning.ts: 3 empty catch blocks now log errors with module prefix.
 - **Round 7 comprehensive fixes**:
   - ml-predictor.ts: Guards for totalAtoms=0 division, enSpread empty array, chargeTransfer NaN, massValues spread.
   - fermi-surface-engine.ts: Guards for nestingVectors.length=0, kxy+kz variations near zero.
