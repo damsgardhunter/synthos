@@ -1,0 +1,131 @@
+Prototype generator failure
+
+You have this:
+
+prototypeAttempts: 134
+prototypeSuccesses: 0
+prototypeSuccessRate: 0
+
+This is the largest red flag.
+
+It means your crystal prototype generator never produced a valid structure.
+
+Everything after that is falling back to analytical approximations.
+
+So instead of:
+
+formula → crystal prototype → xTB
+
+you're effectively running:
+
+formula → heuristic geometry → xTB
+
+Which is why you're seeing so many:
+
+radius incompatibility
+bond valence deviation
+anion:cation ratio 0.2
+Second Big Issue
+Duplicate generation
+
+You have a lot of:
+
+duplicate
+duplicate
+duplicate
+
+Example:
+
+EuH2 duplicate
+NbH5 duplicate
+NbH4 duplicate
+
+Your generator is revisiting the same formula space repeatedly.
+
+You need a composition hash registry.
+
+Example fix:
+
+const formulaHash = normalizeFormula(formula)
+
+if (seenFormulas.has(formulaHash)) {
+   reject("duplicate")
+}
+
+seenFormulas.add(formulaHash)
+Third Issue
+Hydride bias
+
+Your system is extremely hydride heavy.
+
+Stats:
+
+Hydrides: 90
+Others: <10
+
+This is caused by:
+
+RL + Bayesian optimizer learning hydrides → high Tc → exploitation
+
+So exploration collapses into:
+
+metal + hydrogen
+
+You need exploration penalties.
+
+Example:
+
+familyWeight = 1 / (familyFrequency^0.5)
+Fourth Issue
+Impossible chemistries still appear
+
+Examples:
+
+Ba7NaSr2LaMoH7Se2S3
+
+This has:
+
+5 metals
+
+2 chalcogens
+
+hydride
+
+Very unlikely chemistry.
+
+Your chemistry prior is too weak.
+
+You should add constraints like:
+
+max metals = 3
+max elements = 4
+Interesting Discovery Signals
+
+Your logs contain some genuinely interesting results.
+
+Example:
+
+LaFeH3O5 Tc=81K
+LaFeH2O3 Tc=72K
+
+These look like hydrogenated iron oxypnictide analogs, which is actually a real research direction.
+
+Also:
+
+KFe2HC Tc=42K
+
+That resembles intercalated Fe-based superconductors.
+
+So your generator is hitting plausible motifs.
+
+The RL Agent Looks Undertrained
+
+Your RL stats:
+
+totalUpdates: 11
+replayBufferSize: 11
+epsilon: 0.149
+
+This means the RL system is barely trained yet.
+
+So the generator behavior is still mostly random.
