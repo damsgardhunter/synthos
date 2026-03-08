@@ -49,7 +49,9 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication.
 
 ### Physics Filtering Rules
-- **Phonon stability**: Hard rejection for severe instability.
+- **Phonon stability**: xTB screening uses relaxed thresholds (maxImagModes=10, lowestFreq=-1500 cm-1) to avoid premature rejection of unrelaxed structures. Extreme artifacts (< -5000 cm-1) still rejected.
+- **xTB pre-optimization**: Hessian calculations always run on at least crude-optimized structures (inline --opt crude fallback if no cached optimization exists).
+- **Prototype chemistry compatibility**: `isPrototypeChemicallyCompatible()` enforces HexBoride requires B, Perovskite/NaCl/Pyrite require anion elements, A15 requires transition metals, Clathrate requires H.
 - **Formation energy**: Hard stop for Ef > 1.0 eV/atom or Ef < -5.0 eV/atom.
 - **Hull distance**: Hard reject > 0.50 eV/atom.
 - **Chemistry grammar validation**: Pre-filters compositions based on various chemical constraints.

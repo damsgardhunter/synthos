@@ -1,0 +1,191 @@
+Major Problem: Geometry Generator Is Producing Unrealistic Structures
+
+Example from your logs:
+
+LaH10: Atoms La(0) and H(5) too close: 1.66 A (min 1.67)
+LaH11: Volume per atom too small: 4.7 A^3 (min 5)
+LaC7: volume ratio check FAILED ratio=1.82
+
+This means the structure generator is not respecting element radii.
+
+Right now it likely:
+
+place atoms randomly
+scale lattice
+hope it works
+
+That is why validation keeps retrying.
+
+Fix: Add Atomic Radius Aware Lattice Builder
+
+Use covalent radius + packing factor.
+
+Example:
+
+lattice_a = avg_atomic_radius * packing_factor * n_atoms^(1/3)
+
+Typical values:
+
+packing_factor ≈ 2.2 – 2.8
+
+Implementation:
+
+function estimateLatticeConstant(elements, stoich) {
+
+  let totalRadius = 0
+  let totalAtoms = 0
+
+  for (e of elements) {
+    totalRadius += covalentRadius[e] * stoich[e]
+    totalAtoms += stoich[e]
+  }
+
+  const avgRadius = totalRadius / totalAtoms
+
+  const packing = 2.5
+
+  return avgRadius * packing * Math.pow(totalAtoms, 1/3)
+}
+
+Then generate positions relative to lattice size.
+
+This alone will eliminate ~60% of your geometry failures.
+
+2. xTB Hessian Failure
+
+Log:
+
+xtb --hess failed
+xtb input.xyz --g
+
+This means xtb is being called incorrectly or the geometry is invalid.
+
+xTB requires:
+
+xtb input.xyz --gfn 2 --opt
+
+For Hessian:
+
+xtb input.xyz --gfn 2 --hess
+
+But never run Hessian before optimization.
+
+Correct pipeline
+1 generate structure
+2 xtb optimize
+3 xtb hessian
+4 phonon check
+
+Your logs suggest you're skipping step 2 sometimes.
+
+Fix
+runXTBOptimization()
+
+if success:
+
+    runXTBHessian()
+
+else:
+
+    reject structure
+3. Phonon Instability Rejection Too Strict
+
+Example:
+
+Severe phonon instability — 8 imaginary modes
+
+Your threshold:
+
+maxImagModes = 3
+
+This is too strict for early screening.
+
+Real materials often show imaginary modes before relaxation.
+
+Recommended thresholds
+Stage	Imaginary modes allowed
+xTB screening	≤ 12
+DFT pre-relax	≤ 6
+Final phonon	≤ 2
+
+So change:
+
+maxImagModes = 3
+
+to
+
+maxImagModes = 10
+
+during early pipeline stages.
+
+4. Surrogate Model Returning Tc = undefined
+
+Example:
+
+surrogate-reject: Tc=undefined
+
+This means:
+
+feature vector contains NaN
+
+Most likely missing features:
+
+DOS_EF
+phonon_freq
+Debye_temp
+
+Your log confirms:
+
+Using analytical fallbacks (coverage=0.82)
+
+But fallback isn't filling all variables.
+
+Fix
+
+Before prediction:
+
+if (!isFinite(feature)) {
+    feature = defaultValue
+}
+
+Example defaults:
+
+DOS_EF = 2
+lambda = 0.8
+omega_log = 300
+mu_star = 0.1
+
+This ensures surrogate always produces a number.
+
+5. Structure Generator Using Wrong Prototype
+
+Example:
+
+LaC7: prototype HexBoride
+
+That is chemically wrong.
+
+Boride prototypes assume:
+
+B6 cages
+
+but C7 is totally different.
+
+Fix: Prototype Compatibility Filter
+
+Add:
+
+function prototypeCompatible(formula, prototype) {
+
+if prototype == "hex_boride":
+    return formula contains B
+
+if prototype == "perovskite":
+    return stoich matches ABX3
+
+if prototype == "A15":
+    return A3B ratio
+
+}
+
+Reject mismatched prototypes early.

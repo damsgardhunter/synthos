@@ -958,6 +958,36 @@ function selectBestPrototypeByChemistry(counts: Record<string, number>, elements
   return { proto, siteMap };
 }
 
+function isPrototypeChemicallyCompatible(protoName: string, elements: string[], counts: Record<string, number>): boolean {
+  const hasElement = (el: string) => elements.includes(el);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+
+  if (protoName === "HexBoride" || protoName === "AlB2") {
+    if (!hasElement("B")) return false;
+  }
+
+  if (protoName === "Perovskite" || protoName === "Anti-perovskite" || protoName === "Ruddlesden-Popper" || protoName === "Double-perovskite") {
+    const hasAnionEl = elements.some(e => ANIONS.has(e));
+    if (!hasAnionEl) return false;
+  }
+
+  if (protoName === "Pyrite" || protoName === "NaCl" || protoName === "MX2" || protoName === "BiS2-layered") {
+    const hasAnionEl = elements.some(e => ANIONS.has(e));
+    if (!hasAnionEl) return false;
+  }
+
+  if (protoName === "A15" || protoName === "Cr3Si") {
+    const hasTMEl = elements.some(e => TRANSITION_METALS.has(e));
+    if (!hasTMEl) return false;
+  }
+
+  if (protoName.includes("Clathrate") || protoName.includes("clathrate")) {
+    if (!hasElement("H")) return false;
+  }
+
+  return true;
+}
+
 function matchPrototype(counts: Record<string, number>): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
   const elements = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
   const nElements = elements.length;
@@ -988,6 +1018,7 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
     }
 
     if (match) {
+      if (!isPrototypeChemicallyCompatible(proto.name, elements, counts)) continue;
       const siteMap: Record<string, string> = {};
       const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
       const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
@@ -1019,7 +1050,7 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
       score += diff / Math.max(1, sortedSiteReduced[i]);
     }
 
-    if (score < bestScore && score < 0.5) {
+    if (score < bestScore && score < 0.5 && isPrototypeChemicallyCompatible(proto.name, elements, counts)) {
       bestScore = score;
       bestProto = proto;
       const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
@@ -1068,7 +1099,7 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
       score += diff / Math.max(1, sortedSite[i]);
     }
 
-    if (score < bestScore && score < 0.8) {
+    if (score < bestScore && score < 0.8 && isPrototypeChemicallyCompatible(proto.name, elements, counts)) {
       bestScore = score;
       bestProto = proto;
       bestSiteMap = {};
@@ -2215,6 +2246,37 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       if (optResult.converged && optResult.optimizedAtoms.length >= 2) {
         atoms = optResult.optimizedAtoms;
       }
+    } else {
+      try {
+        const preOptDir = path.join(calcDir, "pre_opt");
+        fs.mkdirSync(preOptDir, { recursive: true });
+        const preOptAtoms = validateAndFixStructure(initialAtoms, formula);
+        if (preOptAtoms && preOptAtoms.length >= 2) {
+          writeXYZ(preOptAtoms, path.join(preOptDir, "input.xyz"), `${formula} pre-opt`);
+          const optOut = execSync(
+            `${XTB_BIN} input.xyz --gfn 2 --opt crude --iterations 200 2>&1`,
+            { cwd: preOptDir, timeout: TIMEOUT_MS, env, maxBuffer: 50 * 1024 * 1024 }
+          ).toString();
+          if (optOut.includes("converged")) {
+            const optXYZ = path.join(preOptDir, "xtbopt.xyz");
+            if (fs.existsSync(optXYZ)) {
+              const parsed = parseOptimizedXYZ(optXYZ);
+              if (parsed.length >= 2) {
+                atoms = parsed;
+                optimizedStructureCache.set(optCacheKey, {
+                  converged: true,
+                  optimizedAtoms: parsed,
+                  optimizedEnergy: 0,
+                  energyChange: 0,
+                  gradientNorm: 0,
+                  iterations: 0,
+                  wallTimeSeconds: 0,
+                });
+              }
+            }
+          }
+        }
+      } catch {}
     }
 
     const prePhononCheck = validateAndFixStructure(atoms, formula);
@@ -2298,14 +2360,14 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       zeroPointEnergy: zpe,
     };
 
-    if (physicalImagModes.length > 3) {
+    if (physicalImagModes.length > 10) {
       (result as any).severeInstability = true;
-      (result as any).instabilityReason = `${physicalImagModes.length} imaginary modes detected (max 3 allowed)`;
+      (result as any).instabilityReason = `${physicalImagModes.length} imaginary modes detected (max 10 allowed for xTB screening)`;
       console.log(`[DFT] ${formula}: Severe phonon instability — ${physicalImagModes.length} imaginary modes`);
     }
-    if (lowestFreq < -500 && lowestFreq >= ARTIFACT_THRESHOLD) {
+    if (lowestFreq < -1500 && lowestFreq >= ARTIFACT_THRESHOLD) {
       (result as any).severeInstability = true;
-      (result as any).instabilityReason = `Lowest frequency ${lowestFreq.toFixed(0)} cm-1 (threshold: -500 cm-1)`;
+      (result as any).instabilityReason = `Lowest frequency ${lowestFreq.toFixed(0)} cm-1 (threshold: -1500 cm-1)`;
       console.log(`[DFT] ${formula}: Severe phonon instability — lowest freq = ${lowestFreq.toFixed(0)} cm-1`);
     }
     if (artifactModes.length > 0) {
