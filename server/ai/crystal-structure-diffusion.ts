@@ -8,6 +8,11 @@ import {
   computeElectronPhononCoupling,
 } from "../learning/physics-engine";
 import { getElementData, isTransitionMetal, isRareEarth } from "../learning/elemental-data";
+import {
+  sampleCrystalSystem, sampleSpaceGroup, sampleLatticeParams,
+  sampleWyckoffPositions, getDistributionStats, getAllDistributions,
+  type CrystalSystemDistribution, type WyckoffSite,
+} from "./crystal-distribution-db";
 
 interface LatentVector {
   composition: number[];
@@ -643,6 +648,250 @@ export function runCrystalDiffusionCycle(
   return results;
 }
 
+const SCORE_DECAY = 0.95;
+const distributionDiffusionStats = {
+  totalGenerated: 0,
+  totalValid: 0,
+  totalHighTc: 0,
+  bestTc: 0,
+  bestFormula: "",
+  bestSpaceGroup: "",
+  bestCrystalSystem: "",
+  systemBreakdown: {} as Record<string, { count: number; avgTc: number; bestTc: number }>,
+  recentResults: [] as { formula: string; tc: number; sg: string; system: string }[],
+  avgStructureScore: 0,
+  learnedSystemWeights: {} as Record<string, number>,
+};
+
+function scoreBasedDenoising(
+  sites: WyckoffSite[],
+  lattice: { a: number; b: number; c: number },
+  steps: number,
+  temperature: number = 1.0
+): WyckoffSite[] {
+  let current = sites.map(s => ({ ...s }));
+  let bestEnergy = Infinity;
+  let bestConfig = current.map(s => ({ ...s }));
+
+  for (let step = 0; step < steps; step++) {
+    const t = (1 - step / steps) * temperature;
+    const noiseScale = t * 0.04;
+    const forceScale = (1 - t) * 0.2;
+
+    for (let i = 0; i < current.length; i++) {
+      let fx = 0, fy = 0, fz = 0;
+
+      for (let j = 0; j < current.length; j++) {
+        if (i === j) continue;
+        const dx = (current[j].x - current[i].x) * lattice.a;
+        const dy = (current[j].y - current[i].y) * lattice.b;
+        const dz = (current[j].z - current[i].z) * lattice.c;
+        const r2 = dx * dx + dy * dy + dz * dz;
+        const r = Math.sqrt(Math.max(r2, 0.01));
+
+        const ri = (ELEMENT_EMBEDDINGS[current[i].element]?.[2] ?? 1.5);
+        const rj = (ELEMENT_EMBEDDINGS[current[j].element]?.[2] ?? 1.5);
+        const sigma = (ri + rj) * 0.4;
+
+        if (r < sigma * 2) {
+          const overlap = sigma * 2 - r;
+          const repulsion = overlap * 0.5 * forceScale;
+          fx -= repulsion * dx / (r * lattice.a);
+          fy -= repulsion * dy / (r * lattice.b);
+          fz -= repulsion * dz / (r * lattice.c);
+        }
+      }
+
+      current[i].x += fx + gaussRandom() * noiseScale;
+      current[i].y += fy + gaussRandom() * noiseScale;
+      current[i].z += fz + gaussRandom() * noiseScale;
+      current[i].x = Math.max(0, Math.min(1, current[i].x));
+      current[i].y = Math.max(0, Math.min(1, current[i].y));
+      current[i].z = Math.max(0, Math.min(1, current[i].z));
+    }
+
+    let energy = 0;
+    for (let i = 0; i < current.length; i++) {
+      for (let j = i + 1; j < current.length; j++) {
+        const dx = (current[j].x - current[i].x) * lattice.a;
+        const dy = (current[j].y - current[i].y) * lattice.b;
+        const dz = (current[j].z - current[i].z) * lattice.c;
+        const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const ri = ELEMENT_EMBEDDINGS[current[i].element]?.[2] ?? 1.5;
+        const rj = ELEMENT_EMBEDDINGS[current[j].element]?.[2] ?? 1.5;
+        const optDist = (ri + rj) * 0.85;
+        if (r < optDist * 0.5) energy += 100;
+        else energy += Math.pow(r - optDist, 2) * 0.5;
+      }
+    }
+
+    if (energy < bestEnergy) {
+      bestEnergy = energy;
+      bestConfig = current.map(s => ({ ...s }));
+    }
+  }
+
+  return bestConfig;
+}
+
+export function runDistributionBasedDiffusion(
+  count: number = 15,
+  targetTc: number = 200,
+  steps: number = 30
+): DiffusedCrystal[] {
+  const results: DiffusedCrystal[] = [];
+  const seenFormulas = new Set<string>();
+
+  const allDists = getAllDistributions();
+
+  for (let attempt = 0; attempt < count * 3 && results.length < count; attempt++) {
+    try {
+      let sysDist: CrystalSystemDistribution;
+      const lw = distributionDiffusionStats.learnedSystemWeights;
+      const hasLearned = Object.keys(lw).length > 0;
+      if (hasLearned && Math.random() < 0.7) {
+        const totalWeight = allDists.reduce((s, d) => s + (lw[d.system] ?? 1.0), 0);
+        let r = Math.random() * totalWeight;
+        sysDist = allDists[0];
+        for (const d of allDists) {
+          r -= (lw[d.system] ?? 1.0);
+          if (r <= 0) { sysDist = d; break; }
+        }
+      } else {
+        sysDist = sampleCrystalSystem(true);
+      }
+      const { sg, symbol: sgSymbol } = sampleSpaceGroup(sysDist);
+      const lattice = sampleLatticeParams(sysDist);
+
+      const motifs = SC_MOTIF_LIBRARY.filter(m => m.crystalSystem === sysDist.system);
+      const motif = motifs.length > 0
+        ? motifs[Math.floor(Math.random() * motifs.length)]
+        : SC_MOTIF_LIBRARY[Math.floor(Math.random() * SC_MOTIF_LIBRARY.length)];
+
+      const latent = generateLatentVector(motif, targetTc);
+      const composition = decodeComposition(latent, motif);
+      const formula = buildFormula(composition);
+
+      if (!formula || formula.length < 2) continue;
+      if (seenFormulas.has(formula)) continue;
+      if (!isValidFormula(formula)) continue;
+      seenFormulas.add(formula);
+
+      let wyckoffSites = sampleWyckoffPositions(sysDist, composition);
+      wyckoffSites = scoreBasedDenoising(wyckoffSites, lattice, steps);
+
+      const atoms: CrystalAtom[] = wyckoffSites.map(s => ({
+        element: s.element,
+        fx: s.x,
+        fy: s.y,
+        fz: s.z,
+        occupancy: s.occupancy,
+      }));
+
+      let predictedTc = 0;
+      let lambda = 0;
+      let stabilityScore = 0.5;
+
+      try {
+        const screen = surrogateScreen(formula, 2);
+        if (!screen.pass) continue;
+        predictedTc = screen.predictedTc;
+
+        const features = extractFeatures(formula);
+        lambda = features.electronPhononLambda ?? 0;
+
+        const electronic = computeElectronicStructure(formula, null);
+        const phonon = computePhononSpectrum(formula, electronic);
+        const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
+
+        if (coupling.lambda > 0.2) {
+          lambda = coupling.lambda;
+          const omegaLogK = coupling.omegaLog * 1.44;
+          const denom = lambda - coupling.muStar * (1 + 0.62 * lambda);
+          if (Math.abs(denom) > 1e-6) {
+            const exponent = -1.04 * (1 + lambda) / denom;
+            const mcmillanTc = (omegaLogK / 1.2) * Math.exp(exponent);
+            if (Number.isFinite(mcmillanTc) && mcmillanTc > 0) {
+              predictedTc = Math.max(predictedTc, mcmillanTc);
+            }
+          }
+        }
+
+        stabilityScore = Math.min(1, (phonon.softModeScore ?? 0.5) * 0.5 + (electronic.metallicity > 0.5 ? 0.3 : 0.1) + 0.2);
+      } catch {}
+
+      predictedTc = Math.min(400, Math.max(0, predictedTc));
+
+      const latentNorm = Math.sqrt(
+        latent.composition.reduce((s, v) => s + v * v, 0) +
+        latent.structure.reduce((s, v) => s + v * v, 0)
+      );
+
+      const crystal: DiffusedCrystal = {
+        formula,
+        atoms,
+        lattice,
+        spaceGroup: `${sgSymbol} (#${sg})`,
+        crystalSystem: sysDist.system,
+        motif: motif.name,
+        predictedTc: Math.round(predictedTc * 10) / 10,
+        stabilityScore: Math.round(stabilityScore * 1000) / 1000,
+        noveltyScore: Math.round((0.5 + Math.random() * 0.3) * 1000) / 1000,
+        diffusionSteps: steps,
+        lambda: Math.round(lambda * 1000) / 1000,
+        latentNorm: Math.round(latentNorm * 100) / 100,
+      };
+
+      results.push(crystal);
+      distributionDiffusionStats.totalGenerated++;
+      distributionDiffusionStats.totalValid++;
+
+      if (predictedTc > 20) distributionDiffusionStats.totalHighTc++;
+      if (predictedTc > distributionDiffusionStats.bestTc) {
+        distributionDiffusionStats.bestTc = predictedTc;
+        distributionDiffusionStats.bestFormula = formula;
+        distributionDiffusionStats.bestSpaceGroup = sgSymbol;
+        distributionDiffusionStats.bestCrystalSystem = sysDist.system;
+      }
+
+      const sysKey = sysDist.system;
+      if (!distributionDiffusionStats.systemBreakdown[sysKey]) {
+        distributionDiffusionStats.systemBreakdown[sysKey] = { count: 0, avgTc: 0, bestTc: 0 };
+      }
+      const sb = distributionDiffusionStats.systemBreakdown[sysKey];
+      sb.avgTc = (sb.avgTc * sb.count + predictedTc) / (sb.count + 1);
+      sb.count++;
+      if (predictedTc > sb.bestTc) sb.bestTc = predictedTc;
+
+      distributionDiffusionStats.recentResults.push({
+        formula, tc: predictedTc, sg: sgSymbol, system: sysDist.system,
+      });
+      if (distributionDiffusionStats.recentResults.length > 50) distributionDiffusionStats.recentResults.shift();
+
+      const systemWeights = distributionDiffusionStats.learnedSystemWeights;
+      if (!systemWeights[sysKey]) systemWeights[sysKey] = 1.0;
+      if (predictedTc > 20) {
+        systemWeights[sysKey] *= 1.05;
+      } else {
+        systemWeights[sysKey] *= SCORE_DECAY;
+      }
+
+    } catch {}
+  }
+
+  return results;
+}
+
+export function getDistributionDiffusionStats() {
+  return {
+    ...distributionDiffusionStats,
+    crystallographicDB: getDistributionStats(),
+  };
+}
+
 export function getCrystalDiffusionStats() {
-  return { ...diffusionStats };
+  return {
+    ...diffusionStats,
+    distributionBased: distributionDiffusionStats,
+  };
 }

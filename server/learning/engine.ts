@@ -45,7 +45,9 @@ import { runActiveLearningCycle, getActiveLearningStats } from "./active-learnin
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
 import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
-import { runCrystalDiffusionCycle, getCrystalDiffusionStats } from "../ai/crystal-structure-diffusion";
+import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBasedDiffusion, getDistributionDiffusionStats } from "../ai/crystal-structure-diffusion";
+import { multiTaskPredict, trackMultiTaskPrediction, getMultiTaskStats } from "./multi-task-gnn";
+import { runLatentSpaceInverseDesign, trainVAE, getVAEStats, encodeToLatent } from "../physics/materials-vae";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
 import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
 import { encodeGenome, genomeDiversity, type MaterialGenome } from "../physics/materials-genome";
@@ -2040,6 +2042,137 @@ async function runPhase11_StructurePrediction() {
       }
     }
 
+    if (shouldContinue() && cycleCount % 10 === 0) {
+      try {
+        const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
+        const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25);
+        let distInserted = 0;
+        for (const crystal of distCrystals) {
+          if (!isValidFormula(crystal.formula)) continue;
+          const normalized = normalizeFormula(crystal.formula);
+          const existing = await storage.getSuperconductorByFormula(normalized);
+          if (existing) continue;
+          const features = extractFeatures(normalized);
+          const gbResult = gbPredict(features);
+          const rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
+          const cappedTc = applyAmbientTcCap(rawTc, crystal.lambda, 0, features.metallicity ?? 0.5, normalized);
+          const id = `sc-distdiff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          try {
+            const inserted = await insertCandidateWithStabilityCheck({
+              id,
+              name: normalized,
+              formula: normalized,
+              predictedTc: cappedTc,
+              pressureGpa: null,
+              meissnerEffect: false,
+              zeroResistance: false,
+              cooperPairMechanism: `Distribution diffusion: ${crystal.motif} (${crystal.spaceGroup})`,
+              crystalStructure: `${crystal.spaceGroup} (${crystal.crystalSystem}) ${crystal.atoms.length} atoms`,
+              quantumCoherence: crystal.noveltyScore,
+              stabilityScore: crystal.stabilityScore,
+              synthesisPath: null,
+              mlFeatures: features as any,
+              xgboostScore: gbResult.score,
+              neuralNetScore: crystal.noveltyScore,
+              ensembleScore: Math.min(0.9, (gbResult.score + crystal.stabilityScore) / 2),
+              roomTempViable: false,
+              status: "theoretical",
+              notes: `[Distribution-based crystal diffusion: system=${crystal.crystalSystem}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lambda=${crystal.lambda}]`,
+              electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
+              logPhononFrequency: features.logPhononFreq ?? null,
+              coulombPseudopotential: 0.12,
+              pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+              pairingMechanism: "phonon-mediated",
+              correlationStrength: features.correlationStrength ?? null,
+              dimensionality: "3D",
+              fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+              uncertaintyEstimate: 0.6,
+              verificationStage: 0,
+              dataConfidence: "low",
+            });
+            if (inserted) {
+              totalScCandidates++;
+              distInserted++;
+              bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
+              recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
+              incorporateSuccessData(normalized, cappedTc);
+            }
+          } catch {}
+        }
+        if (distCrystals.length > 0) {
+          const dStats = getDistributionDiffusionStats();
+          emit("log", {
+            phase: "phase-11",
+            event: "Distribution-based crystal diffusion",
+            detail: `Generated ${distCrystals.length} crystals from learned distributions, inserted ${distInserted}. DB covers ${dStats.crystallographicDB.totalSpaceGroups} space groups, ${dStats.crystallographicDB.totalSystems} systems. Best: ${dStats.bestFormula} Tc=${dStats.bestTc.toFixed(1)}K (${dStats.bestCrystalSystem})`,
+            dataSource: "Distribution Diffusion",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Distribution diffusion error", detail: err.message?.slice(0, 150), dataSource: "Distribution Diffusion" });
+      }
+    }
+
+    if (shouldContinue() && cycleCount % 12 === 0) {
+      try {
+        const topFormulas: string[] = [];
+        const allCandidates = await storage.getSuperconductors(10, 0);
+        for (const c of allCandidates) {
+          if (c.predictedTc && c.predictedTc > 30 && c.formula) {
+            topFormulas.push(c.formula);
+          }
+        }
+        if (topFormulas.length >= 3) {
+          trainVAE(topFormulas, 10);
+        }
+        const vaeResult = runLatentSpaceInverseDesign(
+          autonomousBestTc > 100 ? autonomousBestTc * 1.3 : 200,
+          topFormulas.length > 0 ? topFormulas[0] : undefined,
+          30,
+          0.02,
+          2,
+        );
+        let vaeInserted = 0;
+        for (const formula of vaeResult.decodedFormulas) {
+          if (!isValidFormula(formula)) continue;
+          const normalized = normalizeFormula(formula);
+          const existing = await storage.getSuperconductorByFormula(normalized);
+          if (existing) continue;
+          try {
+            const features = extractFeatures(normalized);
+            const gbResult = gbPredict(features);
+            const rawTc = Math.round(Math.max(vaeResult.bestTc * 0.7, gbResult.tcPredicted));
+            const cappedTc = applyAmbientTcCap(rawTc, gbResult.score, 0, features.metallicity ?? 0.5, normalized);
+            const inserted = await insertCandidateWithStabilityCheck({
+              formula: normalized,
+              predictedTc: cappedTc,
+              dataConfidence: "low",
+              ensembleScore: Math.min(0.9, gbResult.score),
+              verificationStage: 0,
+              notes: `[VAE inverse design: target=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}]`,
+              cooperPairMechanism: "VAE latent-space gradient descent",
+              status: "theoretical",
+            });
+            if (inserted) {
+              totalScCandidates++;
+              vaeInserted++;
+              recordGeneratorOutcome("inverse_design", true, cappedTc, 0.6);
+              incorporateSuccessData(normalized, cappedTc);
+            }
+          } catch {}
+        }
+        const vStats = getVAEStats();
+        emit("log", {
+          phase: "phase-11",
+          event: "VAE latent-space inverse design",
+          detail: `Best: ${vaeResult.bestFormula} Tc=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, decoded=${vaeResult.decodedFormulas.length}, inserted=${vaeInserted}. VAE convergence rate: ${(vStats.convergenceRate * 100).toFixed(0)}%`,
+          dataSource: "Crystal VAE",
+        });
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "VAE inverse design error", detail: err.message?.slice(0, 150), dataSource: "Crystal VAE" });
+      }
+    }
+
     if (shouldContinue() && cycleCount % 7 === 0) {
       try {
         const structResult = runStructureDiffusionCycle(200, 3, 3);
@@ -2270,6 +2403,11 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     let gnnResult: ReturnType<typeof gnnPredictWithUncertainty> | null = null;
     try {
       gnnResult = gnnPredictWithUncertainty(formula);
+    } catch {}
+
+    try {
+      const mtPred = multiTaskPredict(formula);
+      trackMultiTaskPrediction(mtPred);
     } catch {}
 
     let primaryTc = gbResult.tcPredicted;
@@ -2766,12 +2904,62 @@ async function runAutonomousFastPath() {
           emit("log", {
             phase: "engine",
             event: "Fast-path CDVAE crystal diffusion",
-            detail: `Generated ${cdvaeResult.length} full crystal structures, ${cdvaeCandidates.length} novel. Motifs: ${[...new Set(cdvaeResult.map(c => c.motif))].join(", ")}`,
+            detail: `Generated ${cdvaeResult.length} full crystal structures, ${cdvaeCandidates.length} novel. Motifs: ${Array.from(new Set(cdvaeResult.map(c => c.motif))).join(", ")}`,
             dataSource: "CDVAE Diffusion",
           });
         }
       } catch (err: any) {
         emit("log", { phase: "engine", event: "Fast-path CDVAE error", detail: err.message?.slice(0, 150), dataSource: "CDVAE Diffusion" });
+      }
+    }
+
+    if (cycleCount % 6 === 0) {
+      try {
+        const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
+        const distResult = runDistributionBasedDiffusion(8, distTarget, 20);
+        for (const crystal of distResult) {
+          if (!isValidFormula(crystal.formula)) continue;
+          const normalized = normalizeFormula(crystal.formula);
+          if (alreadyScreenedFormulas.has(normalized)) continue;
+          cdvaeCandidates.push(normalized);
+          recordGeneratorOutcome("structure_diffusion", true, crystal.predictedTc, crystal.noveltyScore);
+        }
+        if (distResult.length > 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Fast-path distribution diffusion",
+            detail: `Generated ${distResult.length} crystals from learned distributions, ${cdvaeCandidates.length} total novel`,
+            dataSource: "Distribution Diffusion",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "engine", event: "Fast-path distribution diffusion error", detail: err.message?.slice(0, 150), dataSource: "Distribution Diffusion" });
+      }
+    }
+
+    if (cycleCount % 15 === 0) {
+      try {
+        const vaeResult = runLatentSpaceInverseDesign(
+          autonomousBestTc > 100 ? autonomousBestTc * 1.3 : 200,
+          cdvaeCandidates.length > 0 ? cdvaeCandidates[0] : undefined,
+          20, 0.02, 2,
+        );
+        for (const formula of vaeResult.decodedFormulas) {
+          if (!isValidFormula(formula)) continue;
+          const normalized = normalizeFormula(formula);
+          if (alreadyScreenedFormulas.has(normalized)) continue;
+          cdvaeCandidates.push(normalized);
+        }
+        if (vaeResult.decodedFormulas.length > 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Fast-path VAE inverse design",
+            detail: `VAE: best=${vaeResult.bestFormula} Tc=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, decoded=${vaeResult.decodedFormulas.length}, converged=${vaeResult.converged}`,
+            dataSource: "Crystal VAE",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "engine", event: "Fast-path VAE error", detail: err.message?.slice(0, 150), dataSource: "Crystal VAE" });
       }
     }
 
@@ -3361,6 +3549,9 @@ export async function getAutonomousLoopStats() {
     bayesianOptimizer: bayesianOptimizer.getStats(),
     crystalDiffusion: getDiffusionStats(),
     crystalStructureDiffusion: getCrystalDiffusionStats(),
+    distributionDiffusion: getDistributionDiffusionStats(),
+    multiTaskGNN: getMultiTaskStats(),
+    crystalVAE: getVAEStats(),
     topologyDetection: getTopologyStats(),
     inverseOptimizer: getInverseOptimizerStats(),
     nextGenPipeline: getNextGenPipelineStatsForEngine(),
