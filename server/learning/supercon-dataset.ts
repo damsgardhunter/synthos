@@ -5,6 +5,8 @@ export interface SuperconEntry {
   isSuperconductor: boolean;
   lambda?: number;
   pressureGPa?: number;
+  spaceGroup?: string;
+  crystalSystem?: string;
 }
 
 export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
@@ -40,7 +42,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "Bi", tc: 0.00053, family: "Elemental", isSuperconductor: true },
 
   // === A15 COMPOUNDS ===
-  { formula: "Nb3Sn", tc: 18.3, family: "A15", isSuperconductor: true, lambda: 1.80 },
+  { formula: "Nb3Sn", tc: 18.3, family: "A15", isSuperconductor: true, lambda: 1.80, spaceGroup: "Pm-3n", crystalSystem: "cubic" },
   { formula: "Nb3Ge", tc: 23.2, family: "A15", isSuperconductor: true, lambda: 1.95 },
   { formula: "Nb3Al", tc: 18.7, family: "A15", isSuperconductor: true, lambda: 1.70 },
   { formula: "Nb3Ga", tc: 20.3, family: "A15", isSuperconductor: true },
@@ -71,7 +73,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "MoC", tc: 14.3, family: "Carbide", isSuperconductor: true, lambda: 1.10 },
   { formula: "MoN", tc: 12.0, family: "Nitride", isSuperconductor: true, lambda: 1.04 },
   { formula: "ZrN", tc: 10.7, family: "Nitride", isSuperconductor: true, lambda: 1.12 },
-  { formula: "PbMo6S8", tc: 15.0, family: "Chevrel", isSuperconductor: true, lambda: 1.20 },
+  { formula: "PbMo6S8", tc: 15.0, family: "Chevrel", isSuperconductor: true, lambda: 1.20, spaceGroup: "R-3", crystalSystem: "trigonal" },
   { formula: "NbSe2", tc: 7.2, family: "Chalcogenide", isSuperconductor: true },
   { formula: "MoRe", tc: 12.0, family: "Alloy", isSuperconductor: true },
   { formula: "HfN", tc: 8.8, family: "Nitride", isSuperconductor: true },
@@ -110,7 +112,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "LaPt2", tc: 0.5, family: "Laves", isSuperconductor: true },
 
   // === MgB2 AND BORIDES ===
-  { formula: "MgB2", tc: 39.0, family: "Boride", isSuperconductor: true, lambda: 0.87 },
+  { formula: "MgB2", tc: 39.0, family: "Boride", isSuperconductor: true, lambda: 0.87, spaceGroup: "P6/mmm", crystalSystem: "hexagonal" },
   { formula: "NbB2", tc: 0.62, family: "Boride", isSuperconductor: true },
   { formula: "ZrB2", tc: 5.5, family: "Boride", isSuperconductor: true },
   { formula: "TaB2", tc: 9.5, family: "Boride", isSuperconductor: true },
@@ -128,14 +130,14 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "CrB2", tc: 0, family: "Boride", isSuperconductor: false },
 
   // === CUPRATE SUPERCONDUCTORS ===
-  { formula: "YBa2Cu3O7", tc: 92.0, family: "Cuprate", isSuperconductor: true },
+  { formula: "YBa2Cu3O7", tc: 92.0, family: "Cuprate", isSuperconductor: true, spaceGroup: "Pmmm", crystalSystem: "orthorhombic" },
   { formula: "Bi2Sr2CaCu2O8", tc: 85.0, family: "Cuprate", isSuperconductor: true },
   { formula: "Bi2Sr2Ca2Cu3O10", tc: 110.0, family: "Cuprate", isSuperconductor: true },
   { formula: "La2CuO4", tc: 0, family: "Cuprate", isSuperconductor: false },
   { formula: "La1.85Sr0.15CuO4", tc: 38.0, family: "Cuprate", isSuperconductor: true },
   { formula: "Tl2Ba2CaCu2O8", tc: 108.0, family: "Cuprate", isSuperconductor: true },
   { formula: "Tl2Ba2Ca2Cu3O10", tc: 125.0, family: "Cuprate", isSuperconductor: true },
-  { formula: "HgBa2Ca2Cu3O8", tc: 133.0, family: "Cuprate", isSuperconductor: true },
+  { formula: "HgBa2Ca2Cu3O8", tc: 133.0, family: "Cuprate", isSuperconductor: true, spaceGroup: "P4/mmm", crystalSystem: "tetragonal" },
   { formula: "HgBa2CuO4", tc: 97.0, family: "Cuprate", isSuperconductor: true },
   { formula: "Nd2CuO4", tc: 0, family: "Cuprate", isSuperconductor: false },
   { formula: "Bi2Sr2CuO6", tc: 10.0, family: "Cuprate", isSuperconductor: true },
@@ -162,12 +164,12 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "LaBa2Cu3O7", tc: 90.0, family: "Cuprate", isSuperconductor: true },
 
   // === IRON-BASED SUPERCONDUCTORS ===
-  { formula: "LaFeAsO", tc: 26.0, family: "Pnictide", isSuperconductor: true },
+  { formula: "LaFeAsO", tc: 26.0, family: "Pnictide", isSuperconductor: true, spaceGroup: "P4/nmm", crystalSystem: "tetragonal" },
   { formula: "LaFeAsO0.9F0.1", tc: 26.0, family: "Pnictide", isSuperconductor: true },
   { formula: "SmFeAsO0.85F0.15", tc: 55.0, family: "Pnictide", isSuperconductor: true },
   { formula: "BaFe2As2", tc: 0, family: "Pnictide", isSuperconductor: false },
-  { formula: "Ba0.6K0.4Fe2As2", tc: 38.0, family: "Pnictide", isSuperconductor: true },
-  { formula: "FeSe", tc: 8.0, family: "Chalcogenide", isSuperconductor: true },
+  { formula: "Ba0.6K0.4Fe2As2", tc: 38.0, family: "Pnictide", isSuperconductor: true, spaceGroup: "I4/mmm", crystalSystem: "tetragonal" },
+  { formula: "FeSe", tc: 8.0, family: "Chalcogenide", isSuperconductor: true, spaceGroup: "P4/nmm", crystalSystem: "tetragonal" },
   { formula: "Fe2As2", tc: 0, family: "Pnictide", isSuperconductor: false },
   { formula: "LiFeAs", tc: 18.0, family: "Pnictide", isSuperconductor: true },
   { formula: "NaFeAs", tc: 9.0, family: "Pnictide", isSuperconductor: true },
@@ -194,11 +196,12 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "BaCo2As2", tc: 0, family: "Pnictide", isSuperconductor: false },
   { formula: "BaRu2As2", tc: 0, family: "Pnictide", isSuperconductor: false },
   { formula: "ThFeAsN", tc: 30.0, family: "Pnictide", isSuperconductor: true },
+  { formula: "CaKFe4As4", tc: 35.0, family: "Pnictide", isSuperconductor: true, spaceGroup: "P4/mmm", crystalSystem: "tetragonal" },
 
   // === HEAVY FERMION ===
-  { formula: "CeCoIn5", tc: 2.3, family: "Heavy Fermion", isSuperconductor: true },
+  { formula: "CeCoIn5", tc: 2.3, family: "Heavy Fermion", isSuperconductor: true, spaceGroup: "P4/mmm", crystalSystem: "tetragonal" },
   { formula: "CeIrIn5", tc: 0.4, family: "Heavy Fermion", isSuperconductor: true },
-  { formula: "CeCu2Si2", tc: 0.6, family: "Heavy Fermion", isSuperconductor: true },
+  { formula: "CeCu2Si2", tc: 0.6, family: "Heavy Fermion", isSuperconductor: true, spaceGroup: "I4/mmm", crystalSystem: "tetragonal" },
   { formula: "UPt3", tc: 0.5, family: "Heavy Fermion", isSuperconductor: true },
   { formula: "UBe13", tc: 0.9, family: "Heavy Fermion", isSuperconductor: true },
   { formula: "URu2Si2", tc: 1.5, family: "Heavy Fermion", isSuperconductor: true },
@@ -216,14 +219,16 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "CePt3Si", tc: 0.75, family: "Heavy Fermion", isSuperconductor: true },
   { formula: "CeIr3Si2", tc: 0, family: "Heavy Fermion", isSuperconductor: false },
   { formula: "NpPd5Al2", tc: 4.9, family: "Heavy Fermion", isSuperconductor: true },
+  { formula: "UTe2", tc: 2.0, family: "Heavy Fermion", isSuperconductor: true, spaceGroup: "Immm", crystalSystem: "orthorhombic" },
+  { formula: "CeRh2As2", tc: 0.3, family: "Heavy Fermion", isSuperconductor: true, spaceGroup: "P4/nmm", crystalSystem: "tetragonal" },
 
   // === HYDRIDES (HIGH PRESSURE) ===
-  { formula: "LaH10", tc: 250.0, family: "Hydride", isSuperconductor: true, lambda: 2.2, pressureGPa: 170 },
+  { formula: "LaH10", tc: 250.0, family: "Hydride", isSuperconductor: true, lambda: 2.2, pressureGPa: 170, spaceGroup: "Fm-3m", crystalSystem: "cubic" },
   { formula: "YH9", tc: 243.0, family: "Hydride", isSuperconductor: true, lambda: 2.6, pressureGPa: 201 },
   { formula: "CeH9", tc: 100.0, family: "Hydride", isSuperconductor: true, lambda: 1.5, pressureGPa: 150 },
   { formula: "YH6", tc: 224.0, family: "Hydride", isSuperconductor: true, lambda: 2.0, pressureGPa: 166 },
   { formula: "CaH6", tc: 215.0, family: "Hydride", isSuperconductor: true, lambda: 2.7, pressureGPa: 172 },
-  { formula: "H3S", tc: 203.0, family: "Hydride", isSuperconductor: true, lambda: 2.19, pressureGPa: 155 },
+  { formula: "H3S", tc: 203.0, family: "Hydride", isSuperconductor: true, lambda: 2.19, pressureGPa: 155, spaceGroup: "Im-3m", crystalSystem: "cubic" },
   { formula: "LaH6", tc: 150.0, family: "Hydride", isSuperconductor: true, lambda: 1.4, pressureGPa: 110 },
   { formula: "ThH10", tc: 161.0, family: "Hydride", isSuperconductor: true, lambda: 1.6, pressureGPa: 175 },
   { formula: "ScH9", tc: 170.0, family: "Hydride", isSuperconductor: true, lambda: 1.9, pressureGPa: 300 },
@@ -240,6 +245,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "SiH4", tc: 17.0, family: "Hydride", isSuperconductor: true, lambda: 0.55, pressureGPa: 125 },
   { formula: "PH3", tc: 103.0, family: "Hydride", isSuperconductor: true, lambda: 1.3, pressureGPa: 200 },
   { formula: "LaBH8", tc: 126.0, family: "Hydride", isSuperconductor: true },
+  { formula: "YH10", tc: 300.0, family: "Hydride", isSuperconductor: true, lambda: 2.8, pressureGPa: 250, spaceGroup: "Fm-3m", crystalSystem: "cubic" },
 
   // === ORGANIC AND FULLERIDE ===
   { formula: "K3C60", tc: 19.3, family: "Fulleride", isSuperconductor: true },
@@ -273,6 +279,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "Lu2Fe3Si5", tc: 6.1, family: "Silicide", isSuperconductor: true },
   { formula: "Y2Fe3Si5", tc: 2.4, family: "Silicide", isSuperconductor: true },
   { formula: "Sc5Co4Si10", tc: 5.0, family: "Silicide", isSuperconductor: true },
+  { formula: "AuSn4", tc: 2.4, family: "Intermetallic", isSuperconductor: true, spaceGroup: "Aea2", crystalSystem: "orthorhombic" },
   { formula: "SrPd2Ge2", tc: 3.0, family: "Intermetallic", isSuperconductor: true },
   { formula: "BaPd2Ge2", tc: 0, family: "Intermetallic", isSuperconductor: false },
   { formula: "BaPt2Ge2", tc: 0, family: "Intermetallic", isSuperconductor: false },
@@ -288,7 +295,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "BaMo6S8", tc: 2.5, family: "Chevrel", isSuperconductor: true },
 
   // === TOPOLOGICAL AND UNCONVENTIONAL ===
-  { formula: "Sr2RuO4", tc: 1.5, family: "Unconventional", isSuperconductor: true },
+  { formula: "Sr2RuO4", tc: 1.5, family: "Unconventional", isSuperconductor: true, spaceGroup: "I4/mmm", crystalSystem: "tetragonal" },
   { formula: "Na0.35CoO2", tc: 4.5, family: "Unconventional", isSuperconductor: true },
   { formula: "Sn1In1Te2", tc: 1.2, family: "Topological", isSuperconductor: true },
   { formula: "Bi2Te3", tc: 0, family: "Topological", isSuperconductor: false },
@@ -312,10 +319,11 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "TiS2", tc: 0, family: "Chalcogenide", isSuperconductor: false },
 
   // === NICKELATE SUPERCONDUCTORS ===
-  { formula: "NdNiO2", tc: 15.0, family: "Nickelate", isSuperconductor: true },
+  { formula: "NdNiO2", tc: 15.0, family: "Nickelate", isSuperconductor: true, spaceGroup: "P4/mmm", crystalSystem: "tetragonal" },
   { formula: "LaNiO2", tc: 0, family: "Nickelate", isSuperconductor: false },
   { formula: "PrNiO2", tc: 12.0, family: "Nickelate", isSuperconductor: true },
-  { formula: "La3Ni2O7", tc: 80.0, family: "Nickelate", isSuperconductor: true },
+  { formula: "La3Ni2O7", tc: 80.0, family: "Nickelate", isSuperconductor: true, pressureGPa: 14.0, spaceGroup: "Amam", crystalSystem: "orthorhombic" },
+  { formula: "La4Ni3O10", tc: 25.0, family: "Nickelate", isSuperconductor: true, spaceGroup: "P4/mmm", crystalSystem: "tetragonal" },
 
   // === NON-SUPERCONDUCTORS (NEGATIVE EXAMPLES) ===
   { formula: "NaCl", tc: 0, family: "Halide", isSuperconductor: false },

@@ -13,7 +13,7 @@ export interface PhysicsConstraintMode {
 
 const defaultConstraintMode: PhysicsConstraintMode = {
   allowBeyondEmpirical: true,
-  empiricalPenaltyStrength: 2.5,
+  empiricalPenaltyStrength: 1.8,
 };
 
 let activeConstraintMode: PhysicsConstraintMode = { ...defaultConstraintMode };
@@ -3138,7 +3138,8 @@ export async function runFullPhysicsAnalysis(
   const instabilityProximity = computeInstabilityProximity(formula, electronicStructure, phononSpectrum, competingPhases);
 
   const isHydrideForCDW = tcMatClass === "superhydride" || tcMatClass === "hydride-high-p" || tcMatClass === "hydride-low-p";
-  if (instabilityProximity.cdwInstability > 0.4 && !(isHydrideForCDW && coupling.lambda > 2.0)) {
+  const hydrideBypassCDW = isHydrideForCDW && coupling.lambda > 1.5 && (phononSpectrum.debyeTemperature ?? 0) > 1000;
+  if (instabilityProximity.cdwInstability > 0.4 && !hydrideBypassCDW) {
     const cdwPenalty = Math.max(0.05, 1.0 - instabilityProximity.cdwInstability * 0.6);
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty);
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
@@ -3150,7 +3151,7 @@ export async function runFullPhysicsAnalysis(
     });
   }
 
-  if (instabilityProximity.sdwInstability > 0.4 && !(isHydrideForCDW && coupling.lambda > 2.0)) {
+  if (instabilityProximity.sdwInstability > 0.4 && !hydrideBypassCDW) {
     const sdwPenalty = Math.max(0.05, 1.0 - instabilityProximity.sdwInstability * 0.6);
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * sdwPenalty);
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];

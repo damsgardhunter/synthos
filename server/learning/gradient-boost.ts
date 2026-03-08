@@ -1,5 +1,6 @@
 import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
+import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { storage } from "../storage";
 
 interface TreeNode {
@@ -56,7 +57,7 @@ function computeCalibration(model: GBModel): CalibrationData {
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
       const features = extractFeatures(entry.formula);
-      const x = featureVectorToArray(features);
+      const x = featureVectorToArray(features, entry.formula);
       if (x.some(v => !Number.isFinite(v))) continue;
       const pred = predictWithModel(model, x);
       const residual = entry.tc - pred;
@@ -112,7 +113,49 @@ function sanitize(v: number | undefined | null, fallback: number = 0): number {
   return v;
 }
 
-function featureVectorToArray(f: MLFeatureVector): number[] {
+function deriveMultiBandScore(f: MLFeatureVector): number {
+  let score = 0;
+  if ((f.nestingScore ?? 0) > 0.3) score += 0.3;
+  if ((f.fermiSurfaceNestingScore ?? 0) > 0.3) score += 0.2;
+  if ((f.dosAtEF ?? 0) > 2.0) score += 0.2;
+  if (f.hasTransitionMetal && f.numElements >= 3) score += 0.15;
+  if ((f.orbitalDFraction ?? 0) > 0.3) score += 0.15;
+  return Math.min(1, score);
+}
+
+function deriveNonCentrosymmetric(f: MLFeatureVector): number {
+  const sym = (f as any).crystalSymmetry;
+  if (!sym || typeof sym !== "string") return 0;
+  const sg = sym.trim();
+  const NON_CENTRO_GROUPS = [
+    "P4mm", "P4bm", "P42cm", "P42nm", "P4cc", "P4nc",
+    "I4mm", "I4cm", "I41md", "I41cd",
+    "P6mm", "P6cc", "P63mc", "P63cm",
+    "R3m", "R3c",
+    "P21", "P1", "Pca21", "Pna21", "Pmc21", "Pmn21",
+    "Fdd2", "Aba2", "Ima2", "Cmc21",
+    "F-43m", "I-4m2", "I-42d", "P-4m2", "P-42m",
+    "P213", "I213",
+  ];
+  for (const g of NON_CENTRO_GROUPS) {
+    if (sg.includes(g)) return 1;
+  }
+  const normalized = sg.toLowerCase();
+  if (normalized.includes("non-centrosymmetric") || normalized.includes("noncentro")) return 1;
+  return 0;
+}
+
+function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
+  let miedemaEnergy = 0;
+  if (formula) {
+    try {
+      miedemaEnergy = computeMiedemaFormationEnergy(formula);
+      if (!Number.isFinite(miedemaEnergy)) miedemaEnergy = 0;
+    } catch {
+      miedemaEnergy = 0;
+    }
+  }
+
   return [
     sanitize(f.electronPhononLambda, 0.5),
     sanitize(f.metallicity, 0.5),
@@ -175,6 +218,9 @@ function featureVectorToArray(f: MLFeatureVector): number[] {
       for (const [key, val] of Object.entries(SG_MAP)) { if (normalized.includes(key)) return val; }
       return 0;
     })(),
+    deriveMultiBandScore(f),
+    sanitize(miedemaEnergy, 0),
+    deriveNonCentrosymmetric(f),
   ];
 }
 
@@ -192,6 +238,7 @@ const FEATURE_NAMES = [
   "phononSoftening", "spinFluc", "fsNesting", "dosEF", "muStar",
   "pressureGpa", "optimalPressure",
   "bandGap", "formationEnergy", "stability", "crystalSymmetry",
+  "multiBandScore", "miedemaFormEnergy", "nonCentrosymmetric",
 ];
 
 function findBestSplitForSubset(
@@ -361,7 +408,7 @@ export function getTrainedModel(): GBModel {
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
       const features = extractFeatures(entry.formula);
-      const fArr = featureVectorToArray(features);
+      const fArr = featureVectorToArray(features, entry.formula);
       if (fArr.some(v => !Number.isFinite(v))) continue;
       X.push(fArr);
       y.push(entry.tc);
@@ -386,9 +433,9 @@ export function getTrainedModel(): GBModel {
   return cachedModel;
 }
 
-export function gbPredict(features: MLFeatureVector): { tcPredicted: number; score: number; reasoning: string[] } {
+export function gbPredict(features: MLFeatureVector, formula?: string): { tcPredicted: number; score: number; reasoning: string[] } {
   const model = getTrainedModel();
-  const x = featureVectorToArray(features);
+  const x = featureVectorToArray(features, formula);
   const tcPredicted = predictWithModel(model, x);
 
   const reasoning: string[] = [];
@@ -445,7 +492,7 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
       const features = extractFeatures(entry.formula);
-      const x = featureVectorToArray(features);
+      const x = featureVectorToArray(features, entry.formula);
       if (x.some(v => !Number.isFinite(v))) continue;
       const pred = predictWithModel(model, x);
       details.push({ formula: entry.formula, actual: entry.tc, predicted: Math.round(pred * 10) / 10 });
@@ -516,7 +563,7 @@ export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
       return { pass: false, predictedTc: 0, score: 0, reasoning: ["Insulator: metallicity too low"] };
     }
 
-    const result = gbPredict(features);
+    const result = gbPredict(features, formula);
     const predictedTc = Number.isFinite(result.tcPredicted) ? result.tcPredicted : 0;
 
     if (predictedTc < minTcThreshold) {
@@ -577,7 +624,7 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   for (const entry of augmentedData) {
     try {
       const features = extractFeatures(entry.formula);
-      const fArr = featureVectorToArray(features);
+      const fArr = featureVectorToArray(features, entry.formula);
       if (fArr.some(v => !Number.isFinite(v))) continue;
       X.push(fArr);
       y.push(entry.tc);
@@ -632,7 +679,7 @@ export async function incorporateFailureData(): Promise<number> {
     for (const entry of augmentedData) {
       try {
         const features = extractFeatures(entry.formula);
-        const fArr = featureVectorToArray(features);
+        const fArr = featureVectorToArray(features, entry.formula);
         if (fArr.some(v => !Number.isFinite(v))) continue;
         X.push(fArr);
         y.push(entry.tc);

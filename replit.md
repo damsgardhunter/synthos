@@ -126,6 +126,15 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - inverse-generator.ts: Stoichiometry variant generation capped at 20 per element (was unbounded); empty elementGroups guard added; elWeights.length===0 guard added — prevents division by zero and unbounded growth.
   - qe-worker.ts: Magnetic element detection (Fe/Co/Ni/Mn/Cr/V/Gd/Eu/Nd/Sm) triggers nspin=2 and starting_magnetization in both generateSCFInput and generateSCFInputWithParams — fixes incorrect non-magnetic electronic structure for transition metal superconductors.
   - dashboard.tsx: All non-null assertions (!) replaced with optional chaining and defaults; data-testid added to research-events, knowledge-radar, data-sources, learning-insights cards.
+- **Round 12 comprehensive fixes**:
+  - rl-agent.ts: applyBinaryPattern now handles AH6/AH9/AH10/AH12/AB2 templates (was falling through to default); applyTernaryPattern handles ABH8; hydride patterns use literal "H" instead of el2/el3; replayBatch now updates elementGroup2 and elementPairBias — fixes 50% learning signal loss during experience replay.
+  - supercon-dataset.ts: Added spaceGroup/crystalSystem optional fields to SuperconEntry; 6 new entries (YH10 300K/250GPa, La4Ni3O10 25K, CaKFe4As4 35K, UTe2 2K, CeRh2As2 0.3K, AuSn4 2.4K); pressureGPa added to La3Ni2O7; structural metadata populated for 20+ key entries.
+  - crystal-prototypes.ts: Added BiS2-type (P4/nmm, layered, c/a=2.8) and CaBe2Ge2-type (P4/nmm, non-centrosymmetric, c/a=2.4) prototypes; Chevrel expanded from 6→15 sites (complete M6X8 cluster); packing fractions lowered to 0.52 for all layered types (MX2, BiS2, CaBe2Ge2, FeSe-11, K2NiF4-214, 1111-Type, Infinite-layer, T-prime).
+  - physics-engine.ts: CDW/SDW hydride bypass now conditional on lambda>1.5 AND debyeTemp>1000K (was unconditional lambda>2.0); soft ceiling penaltyStrength reduced 2.5→1.8 for less aggressive dampening of novel predictions.
+  - elemental-data.ts: H mcMillanHopfieldEta=0.8 (metallic phase); Nb eta corrected 12.8→8.0 (literature value); sommerfeldGamma added for Ge(0.6), Se(0.5), Sb(0.4), Te(0.4).
+  - engine.ts: Formula dedup Set (formulasInFlight) prevents duplicate processing in autonomous fast-path; Phase 13 synthesis reasoning marks reasoningFailed=true on error to prevent repeated LLM token waste.
+  - gradient-boost.ts: 3 new features — multiBandScore (composite from nesting/DOS/orbital), miedemaFormEnergy (explicit from phase-diagram-engine), nonCentrosymmetric (binary flag from space group); formula parameter threaded through featureVectorToArray.
+  - pressure-engine.ts: Birch-Murnaghan eta floor raised 0.3→0.5 for extreme compression; nickelate pressure dome (Gaussian centered at 20 GPa, sigma=15) for La3Ni2O7-type materials.
 - **Round 8 comprehensive fixes**:
   - ml-predictor.ts: electronDensityEstimate clamped to [0,1]; phononSpectralWidth NaN guard with isFinite fallback.
   - physics-engine.ts: Stoner enhancement denominator guard (stonerProduct<0.95, |denom|>1e-6); FAMILY_TC_CAPS raised (Nitrides 65K/110K, Borides 55K/150K, Carbides 45K/100K).

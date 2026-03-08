@@ -71,8 +71,15 @@ const PACKING_FACTORS: Record<string, number> = {
   "AlB2": 0.74,
   "ThCr2Si2": 0.68,
   "Perovskite": 0.74,
-  "MX2": 0.60,
+  "MX2": 0.52,
   "Anti-perovskite": 0.74,
+  "BiS2-type": 0.52,
+  "CaBe2Ge2": 0.52,
+  "FeSe-11": 0.52,
+  "K2NiF4-214": 0.52,
+  "1111-Type": 0.52,
+  "Infinite-layer": 0.52,
+  "T-prime": 0.52,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -356,9 +363,18 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "guest" },
       { label: "M", x: 0.15, y: 0.15, z: 0.15, role: "cluster-metal" },
       { label: "M", x: 0.85, y: 0.85, z: 0.85, role: "cluster-metal" },
+      { label: "M", x: 0.85, y: 0.15, z: 0.15, role: "cluster-metal" },
+      { label: "M", x: 0.15, y: 0.85, z: 0.15, role: "cluster-metal" },
+      { label: "M", x: 0.15, y: 0.15, z: 0.85, role: "cluster-metal" },
+      { label: "M", x: 0.85, y: 0.85, z: 0.15, role: "cluster-metal" },
       { label: "X", x: 0.22, y: 0.0, z: 0.28, role: "chalcogen" },
       { label: "X", x: 0.0, y: 0.28, z: 0.22, role: "chalcogen" },
       { label: "X", x: 0.28, y: 0.22, z: 0.0, role: "chalcogen" },
+      { label: "X", x: 0.78, y: 0.0, z: 0.72, role: "chalcogen" },
+      { label: "X", x: 0.0, y: 0.72, z: 0.78, role: "chalcogen" },
+      { label: "X", x: 0.72, y: 0.78, z: 0.0, role: "chalcogen" },
+      { label: "X", x: 0.28, y: 0.0, z: 0.72, role: "chalcogen" },
+      { label: "X", x: 0.0, y: 0.72, z: 0.28, role: "chalcogen" },
     ],
     stoichiometryRatio: [1, 6, 8],
     coordination: [12, 5, 3],
@@ -597,6 +613,50 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasTM = elements.some(e => ["Cu", "Ni", "Co"].includes(e));
       const hasO = elements.includes("O");
       return hasRE && hasTM && hasO;
+    },
+  },
+  {
+    name: "BiS2-type",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 2.8,
+    sites: [
+      { label: "R", x: 0.25, y: 0.25, z: 0.10, role: "spacer-layer" },
+      { label: "T", x: 0.75, y: 0.25, z: 0.50, role: "conducting-layer" },
+      { label: "X", x: 0.25, y: 0.25, z: 0.63, role: "chalcogen-top" },
+      { label: "X", x: 0.75, y: 0.75, z: 0.37, role: "chalcogen-bot" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [8, 4, 3],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 3) return false;
+      const hasSpacer = elements.some(e => ["La", "Ce", "Pr", "Nd", "Sr", "Ba", "Bi"].includes(e));
+      const hasTM = elements.some(e => ["Bi", "Pb", "Sn", "Sb", "Ni", "Cu"].includes(e));
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te", "O"].includes(e));
+      return hasSpacer && hasTM && hasChalcogen;
+    },
+  },
+  {
+    name: "CaBe2Ge2",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 2.4,
+    sites: [
+      { label: "A", x: 0.25, y: 0.25, z: 0.0, role: "spacer" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.5, role: "spacer" },
+      { label: "B", x: 0.75, y: 0.25, z: 0.14, role: "TM-layer-1" },
+      { label: "B", x: 0.25, y: 0.75, z: 0.64, role: "TM-layer-2" },
+      { label: "C", x: 0.25, y: 0.25, z: 0.25, role: "sp-up" },
+      { label: "C", x: 0.75, y: 0.75, z: 0.75, role: "sp-down" },
+    ],
+    stoichiometryRatio: [1, 2, 2],
+    coordination: [8, 4, 4],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 3) return false;
+      const hasSpacer = elements.some(e => CATIONS_LARGE.has(e));
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      const hasSp = elements.some(e => ["Si", "Ge", "Sn", "Sb", "As", "P", "Ga", "Al"].includes(e));
+      return hasSpacer && hasTM && hasSp;
     },
   },
 ];

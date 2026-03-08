@@ -127,7 +127,7 @@ export function relaxStructureAtPressure(
     } else {
       eta = 0.5;
     }
-    eta = Math.max(0.3, Math.min(1.0, eta));
+    eta = Math.max(0.5, Math.min(1.0, eta));
   }
 
   const compressedVolume = V0 * eta;
@@ -321,6 +321,9 @@ export function scanPressureTcCurve(
 
   const isHydride = hCount > 0 && hRatio >= 2;
   const isSuperhydride = hRatio >= 6;
+  const hasNi = elements.includes("Ni");
+  const hasO = elements.includes("O");
+  const isNickelate = hasNi && hasO && elements.some(e => ["La", "Nd", "Pr", "Sr", "Ba", "Ca"].includes(e));
 
   let B0 = 0;
   let weightSum = 0;
@@ -394,6 +397,11 @@ export function scanPressureTcCurve(
         const overPressure = (P - 250) / 100;
         lambdaP *= Math.max(0.7, 1 - overPressure * 0.3);
       }
+    } else if (isNickelate) {
+      const optP = 20;
+      const sigmaP = 15;
+      const domeBoost = 1.0 + 1.5 * Math.exp(-Math.pow(P - optP, 2) / (2 * sigmaP * sigmaP));
+      lambdaP = lambda0 * domeBoost;
     } else {
       const dosEnhancement = 1 + P / 500 * 0.3;
       lambdaP = lambda0 * dosEnhancement / hardeningFactor;

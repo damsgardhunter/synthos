@@ -807,6 +807,13 @@ export class RLChemicalSpaceAgent {
       if (exp.action.chemicalFamily !== undefined && exp.action.chemicalFamily >= 0 && exp.action.chemicalFamily < this.policy.chemicalFamily.length) {
         this.policy.chemicalFamily[exp.action.chemicalFamily] += lr * advantage * decay;
       }
+      if (exp.action.elementGroup2 >= 0 && exp.action.elementGroup2 < this.policy.elementGroup.length) {
+        this.policy.elementGroup[exp.action.elementGroup2] += lr * advantage * decay * 0.8;
+      }
+      if (exp.action.elementGroup1 >= 0 && exp.action.elementGroup1 < this.policy.elementPairBias.length &&
+          exp.action.elementGroup2 >= 0 && exp.action.elementGroup2 < this.policy.elementPairBias[exp.action.elementGroup1].length) {
+        this.policy.elementPairBias[exp.action.elementGroup1][exp.action.elementGroup2] += lr * advantage * decay * 0.6;
+      }
     }
 
     this.clampAllWeights();
@@ -1266,8 +1273,13 @@ function applyBinaryPattern(el1: string, el2: string, pattern: string): string {
   switch (pattern) {
     case "A3B": return `${el1}3${el2}`;
     case "AB": return `${el1}${el2}`;
+    case "AB2": return `${el1}${el2}2`;
     case "AB3": return `${el1}${el2}3`;
-    case "AH3": return `${el1}${el2}3`;
+    case "AH3": return `${el1}H3`;
+    case "AH6": return `${el1}H6`;
+    case "AH9": return `${el1}H9`;
+    case "AH10": return `${el1}H10`;
+    case "AH12": return `${el1}H12`;
     default: return `${el1}${el2}`;
   }
 }
@@ -1277,7 +1289,8 @@ function applyTernaryPattern(el1: string, el2: string, el3: string, pattern: str
     case "AB2C2": return `${el1}${el2}2${el3}2`;
     case "ABC3": return `${el1}${el2}${el3}3`;
     case "A2BC": return `${el1}2${el2}${el3}`;
-    case "ABH4": return `${el1}${el2}${el3}4`;
+    case "ABH4": return `${el1}${el2}H4`;
+    case "ABH8": return `${el1}${el2}H8`;
     case "A2B3C": return `${el1}2${el2}3${el3}`;
     default: return `${el1}${el2}${el3}`;
   }

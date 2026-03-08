@@ -2626,6 +2626,8 @@ async function runPhase13_SynthesisReasoning() {
         const hasPhysicsReasoned = Array.isArray(existingPath?.routes)
           && existingPath.routes.some((r: any) => r.source === "physics-reasoned");
         if (hasPhysicsReasoned) continue;
+        const hasReasoningFailed = existingPath?.reasoningFailed === true;
+        if (hasReasoningFailed) continue;
 
         const routes = await runSynthesisReasoning(emit, candidate);
         if (routes && routes.length > 0) {
@@ -2650,6 +2652,12 @@ async function runPhase13_SynthesisReasoning() {
           detail: `${candidate.formula}: ${err.message?.slice(0, 100)}`,
           dataSource: "Synthesis Reasoning",
         });
+        try {
+          const failPath = candidate.synthesisPath as any;
+          await storage.updateSuperconductorCandidate(candidate.id, {
+            synthesisPath: { ...(failPath || {}), reasoningFailed: true },
+          });
+        } catch (_) {}
       }
     }
 
@@ -3560,6 +3568,7 @@ async function runAutonomousFastPath() {
     const failedFormulas: { formula: string; tc: number }[] = [];
     const thisCycleCandidates: LastCycleCandidate[] = [];
     const thisCycleFamilyCounts: Record<string, number> = {};
+    const formulasInFlight = new Set<string>();
 
     const activeRules = getMinedRules();
     let filteredCandidates = novelCandidates;
@@ -3609,6 +3618,9 @@ async function runAutonomousFastPath() {
 
     for (const formula of filteredCandidates) {
       if (!shouldContinue()) break;
+      const normF = normalizeFormula(formula);
+      if (formulasInFlight.has(normF)) continue;
+      formulasInFlight.add(normF);
       autonomousTotalScreened++;
       batchCount++;
 
