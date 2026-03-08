@@ -1,0 +1,249 @@
+Critical Bug: Negative RL Weights
+
+From your RL agent:
+
+"topElementGroups":[
+{"name":"alkali","weight":0.567},
+{"name":"4d-transition","weight":0.315},
+{"name":"metalloid","weight":0.1},
+{"name":"5d-transition","weight":0},
+{"name":"3d-transition","weight":-0.012}
+]
+
+and
+
+"topStoichTemplates":[
+{"name":"hydride-rich","weight":1.566},
+{"name":"ternary-hydride","weight":0.2},
+{"name":"binary-anion-rich","weight":-0.071},
+{"name":"binary-balanced","weight":-0.077},
+{"name":"ternary-perovskite","weight":-0.088}
+]
+Problem
+
+Negative weights mean your policy is not normalized.
+
+This can cause:
+
+invalid probability distributions
+
+generator collapse
+
+unstable exploration
+
+Fix
+
+Clamp weights:
+
+weight = Math.max(weight, 0)
+
+or use softmax:
+
+const probs = softmax(weights)
+
+This is likely affecting candidate diversity.
+
+2. Major Bug: avgTc = null
+
+Example:
+
+"avgTc": null
+
+Seen in:
+
+crystalStructureDiffusion
+motifBreakdown
+systemBreakdown
+Cause
+
+Your average calculation is probably:
+
+avgTc = totalTc / count
+
+But when count = 0:
+
+NaN → serialized as null
+Fix
+avgTc = count > 0 ? totalTc / count : 0
+3. Critical Modeling Error: Impossible Compounds
+
+Examples generated:
+
+FO2
+FO
+FN3O2
+CMg2
+
+These are chemically unrealistic.
+
+Examples:
+
+FO2 → fluorine oxide with +2 oxidation → unstable
+
+FO → radical
+
+FN3O2 → nonsense stoichiometry
+
+Cause
+
+Your generator lacks oxidation state checks.
+
+Fix
+
+Add chemistry constraint:
+
+Σ oxidation states = 0
+
+before candidate acceptance.
+
+4. Duplicate Results
+
+Example:
+
+"Nb3Si" appears twice
+
+and
+
+CeC7 repeated multiple times
+ScH3 repeated many times
+Problem
+
+Your system is re-evaluating identical structures.
+
+This wastes compute.
+
+Fix
+
+Add structure hashing.
+
+Example:
+
+hash = hash(formula + lattice + positions)
+
+Reject duplicates.
+
+5. Invalid Throughput Metric
+
+Earlier logs showed:
+
+throughputPerHour: 807833
+
+Now:
+
+throughputPerHour: 43899
+
+But:
+
+totalScreened: 37093
+
+Meaning the throughput calculation is incorrect.
+
+Likely bug
+
+You're dividing by wall clock since start incorrectly.
+
+Check:
+
+throughput = candidates / elapsed_hours
+
+Make sure elapsed_hours isn't near zero.
+
+6. Diffusion Generator Problem
+crystalDiffusion:
+totalGenerated: 840
+totalValid: 51
+validRate: 0.061
+
+6% validity is very low.
+
+Typical materials diffusion models get:
+
+30–70%
+Cause
+
+Your diffusion generator is producing random stoichiometry without constraints.
+
+Add:
+
+chemistry priors
+prototype conditioning
+space group constraints
+7. Suspicious Tc Prediction
+
+From the differentiable optimizer:
+
+bestTcAchieved: 250.28
+bestFormula: YH6
+
+But known physics:
+
+YH6 predicted ~220K under pressure
+
+250K may be surrogate model extrapolation error.
+
+Fix
+
+Clamp predictions:
+
+Tc ≤ 200 K
+
+unless validated by DFT.
+
+8. Strange Structure Generation
+
+Example candidates:
+
+ScZr
+Cr3Zr3
+Nb2Mo3
+
+These violate electron count rules.
+
+Your generator needs:
+
+valence electron filtering
+radius compatibility
+9. Suspicious Success Rate
+realDFT:
+runs: 277
+successes: 191
+successRate: 69%
+
+But earlier you had:
+
+1 success / 261
+
+This suggests xTB results are being counted as DFT success.
+
+Check this metric carefully.
+
+10. Motif Bias Collapse
+clathrate-cage tried: 277
+layered-hydride tried: 160
+others: near zero
+
+Your RL agent is collapsing exploration.
+
+Classic RL failure.
+
+Fix
+
+Add entropy regularization:
+
+loss = reward - λ * entropy(policy)
+
+or enforce minimum exploration.
+
+11. Minor Logging Bug
+
+Beginning of log:
+
+0) and a significant maxTc (108K) with a reasonable number of candidates (28).
+
+Looks like truncated logging string.
+
+Probably missing:
+
+familyIndex
+
+or similar.
