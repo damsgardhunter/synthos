@@ -58,31 +58,31 @@ const ARCHETYPES: FSClusterArchetype[] = [
     id: "cuprate_cylinder",
     name: "Cuprate Cylindrical",
     description: "High cylindrical character, 2D, strong nesting",
-    centroid: [3, 1, 2, 0.6, 0.85, 0.75, 2.0, 0.2, 0.5],
+    centroid: [0.3, 0.2, 0.4, 0.6, 0.85, 0.75, 0.667, 0.2, 0.5],
   },
   {
     id: "pnictide_eh_pockets",
     name: "Pnictide Electron-Hole",
     description: "Balanced electron-hole pockets, moderate nesting",
-    centroid: [4, 2, 2, 0.9, 0.4, 0.55, 2.5, 0.3, 0.7],
+    centroid: [0.4, 0.4, 0.4, 0.9, 0.4, 0.55, 0.833, 0.3, 0.7],
   },
   {
     id: "kagome_flat",
     name: "Kagome Flat Band",
     description: "High multiBandScore, 2D flat bands",
-    centroid: [3, 1, 2, 0.5, 0.6, 0.4, 2.0, 0.3, 0.85],
+    centroid: [0.3, 0.2, 0.4, 0.5, 0.6, 0.4, 0.667, 0.3, 0.85],
   },
   {
     id: "hydride_multiband",
     name: "Hydride Multiband",
     description: "High pocket count, 3D, high sigma band presence",
-    centroid: [6, 3, 3, 0.8, 0.2, 0.3, 3.0, 0.85, 0.8],
+    centroid: [0.6, 0.6, 0.6, 0.8, 0.2, 0.3, 1.0, 0.85, 0.8],
   },
   {
     id: "conventional_3d",
     name: "Conventional 3D",
     description: "3D, low nesting, few pockets",
-    centroid: [2, 1, 1, 0.7, 0.15, 0.15, 3.0, 0.4, 0.25],
+    centroid: [0.2, 0.2, 0.2, 0.7, 0.15, 0.15, 1.0, 0.4, 0.25],
   },
 ];
 
@@ -93,13 +93,13 @@ let novelClusterCount = 0;
 
 function fsResultToVector(fs: FermiSurfaceResult): number[] {
   return [
-    fs.pocketCount,
-    fs.electronPocketCount,
-    fs.holePocketCount,
+    Math.min(fs.pocketCount / 10, 1.0),
+    Math.min(fs.electronPocketCount / 5, 1.0),
+    Math.min(fs.holePocketCount / 5, 1.0),
     fs.electronHoleBalance,
     fs.cylindricalCharacter,
     fs.nestingScore,
-    fs.fsDimensionality,
+    fs.fsDimensionality / 3,
     fs.sigmaBandPresence,
     fs.multiBandScore,
   ];

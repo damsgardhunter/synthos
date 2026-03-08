@@ -145,6 +145,17 @@ export function computePhononPairing(
     const exponent = -1.04 * (1 + lambda) / allenDynesDenom;
     tcAllenDynes = prefactor * Math.exp(exponent);
     if (!Number.isFinite(tcAllenDynes)) tcAllenDynes = 0;
+
+    if (lambda > 1.5 && coupling.omegaLog > 0) {
+      const omega2Avg = coupling.omega2Avg ?? (coupling.omegaLog * coupling.omegaLog * 1.2);
+      const sqrtLambda = Math.sqrt(lambda);
+      const f1 = Math.pow(1 + (lambda / 2.46 / (1 + 3.8 * muStar)), 1/3);
+      const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / coupling.omegaLog : 1.0;
+      const f2Exponent = -1 * (1 - lambda * lambda) / (1 + lambda * lambda);
+      const f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
+      tcAllenDynes *= f1 * Math.max(1, f2);
+    }
+
     tcAllenDynes = Math.max(0, Math.min(400, tcAllenDynes));
   }
 

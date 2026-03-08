@@ -518,7 +518,10 @@ export async function computeFiniteDisplacementPhonons(
 
     const lowestFreq = allDispersionFreqs.length > 0 ? Math.min(...allDispersionFreqs) : 0;
     const rawHighestFreq = allDispersionFreqs.length > 0 ? Math.max(...allDispersionFreqs) : 0;
-    const highestFreq = rawHighestFreq > 8000 ? rawHighestFreq / 10 : rawHighestFreq;
+    const highestFreq = rawHighestFreq;
+    if (rawHighestFreq > 8000) {
+      console.log(`[Phonon] ${formula}: WARNING — highest frequency ${rawHighestFreq.toFixed(0)} cm⁻¹ exceeds physical range, likely numerical artifact`);
+    }
 
     const wallTime = (Date.now() - startTime) / 1000;
 

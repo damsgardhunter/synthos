@@ -89,10 +89,10 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
     case "hexagonal": {
       for (let i = 0; i <= gridSize; i++) {
         for (let j = 0; j <= gridSize; j++) {
-          for (let k = 0; k <= Math.floor(gridSize / 2); k++) {
+          for (let k = 0; k <= gridSize; k++) {
             const kx = -0.5 + i * step;
             const ky = -0.5 + j * step;
-            const kz = -0.5 + k * step * 2;
+            const kz = -0.5 + k * step;
             if (kx * kx + ky * ky + kz * kz <= 0.75) {
               grid.push([kx, ky, kz]);
             }

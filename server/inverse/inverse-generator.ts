@@ -159,7 +159,7 @@ function generateStoichiometryVariants(
     const newRatios = [...baseRatios];
     const idx = Math.floor(Math.random() * newRatios.length);
     const delta = Math.random() < 0.5 ? 1 : -1;
-    newRatios[idx] = Math.max(1, newRatios[idx] + delta);
+    newRatios[idx] = Math.max(1, Math.min(20, newRatios[idx] + delta));
 
     const key = newRatios.join("-");
     if (!variants.some(v => v.ratios.join("-") === key)) {
@@ -207,15 +207,17 @@ export function generateInverseCandidates(
       if (!pattern) continue;
 
       const chosenElements: string[] = [];
+      if (elementGroups.length === 0) continue;
       for (let s = 0; s < pattern.slots; s++) {
         const groupIdx = s % elementGroups.length;
         const group = elementGroups[groupIdx];
-        if (group.length === 0) continue;
+        if (!group || group.length === 0) continue;
 
         const elWeights = group.map(el => ({
           el,
           w: (bias.elementWeights.get(el) ?? 1.0) * protoWeight + Math.random() * 0.2,
         }));
+        if (elWeights.length === 0) continue;
         const totalW = elWeights.reduce((s, e) => s + e.w, 0);
         let r = Math.random() * totalW;
         let chosen = elWeights[0].el;

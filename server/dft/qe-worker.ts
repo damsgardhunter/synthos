@@ -312,6 +312,11 @@ function autoKPoints(latticeA: number): string {
   return `  ${k} ${k} ${k}  0 0 0`;
 }
 
+const MAGNETIC_ELEMENTS: Record<string, number> = {
+  Fe: 2.0, Co: 1.5, Ni: 0.8, Mn: 3.0, Cr: 1.5,
+  V: 0.5, Gd: 7.0, Eu: 7.0, Nd: 3.0, Sm: 1.0,
+};
+
 function generateSCFInput(
   formula: string,
   elements: string[],
@@ -325,6 +330,18 @@ function generateSCFInput(
   };
   const ecutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), 45);
   const ecutrho = ecutwfc * 8;
+
+  const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
+  const nspin = hasMagnetic ? 2 : 1;
+
+  let startingMagLines = "";
+  if (hasMagnetic) {
+    for (let idx = 0; idx < elements.length; idx++) {
+      const el = elements[idx];
+      const mag = MAGNETIC_ELEMENTS[el] ?? 0.0;
+      startingMagLines += `  starting_magnetization(${idx + 1}) = ${mag.toFixed(1)},\n`;
+    }
+  }
 
   let atomicSpecies = "";
   for (const el of elements) {
@@ -360,8 +377,8 @@ function generateSCFInput(
   occupations = 'smearing',
   smearing = 'mv',
   degauss = 0.02,
-  nspin = 1,
-/
+  nspin = ${nspin},
+${startingMagLines}/
 &ELECTRONS
   electron_maxstep = 100,
   conv_thr = 1.0d-6,
@@ -898,8 +915,8 @@ function generateSCFInputWithParams(
   occupations = 'smearing',
   smearing = '${smearing}',
   degauss = ${degauss},
-  nspin = 1,
-/
+  nspin = ${elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1},
+${elements.some(el => el in MAGNETIC_ELEMENTS) ? elements.map((el, idx) => `  starting_magnetization(${idx + 1}) = ${(MAGNETIC_ELEMENTS[el] ?? 0.0).toFixed(1)},`).join('\n') + '\n' : ''}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
   conv_thr = 1.0d-6,

@@ -116,6 +116,16 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - synthesis-simulator.ts: Upper bound clamping on mutated parameters (temp≤2500K, pressure≤300GPa, coolingRate≤10000, duration≤168h); non-linear phasePurity^2 degradation; atmosphere compatibility check (oxygen penalizes hydrides).
   - supercon-dataset.ts: Lambda added for V3Si(1.60), NbC(0.98), VN(0.94), TaC(0.86), MoC(1.10), MoN(1.04), ZrN(1.12); pressure+lambda for LaH6(110GPa), SnH4(96GPa), GeH4(220GPa), SiH4(125GPa), PH3(200GPa).
   - inverse-generator.ts: 5 new PROTOTYPE_TC_AFFINITY entries (Skutterudite, Chevrel, Borocarbide, Pyrochlore, InfiniteLayer); FORBIDDEN_ELEMENTS set blocking noble gases (He/Ne/Ar/Kr/Xe/Rn) and radioactive elements (Po/At/Fr/Ra/Pm/Tc).
+- **Round 11 comprehensive fixes**:
+  - bayesian-optimizer.ts: buildGP now returns observation subset (`cachedGPObs`), predictFromFeatures uses same subset — fixes critical GP index mismatch where alpha coefficients could misalign with kStar kernel values.
+  - graph-neural-net.ts: Embedding propagation stores full HIDDEN_DIM (28) instead of truncating to NODE_DIM (20) after each layer — fixes 28% representation loss; pooling updated from NODE_DIM to HIDDEN_DIM; W_mlp1 init updated to HIDDEN_DIM*2; training gradient applies combined (70% tcGrad + 30% feGrad) to shared backbone — fixes formation energy task not training GNN layers; neighbors.length guard added in messagePassingLayer.
+  - phonon-calculator.ts: Removed unphysical /10 frequency scaling for >8000 cm⁻¹ modes; now logs warning and keeps raw value for proper artifact detection downstream.
+  - fermi-surface-engine.ts: Hexagonal BZ grid kz now iterates symmetrically from -0.5 to 0.5 (was only 0 to 0.5) — fixes asymmetric Brillouin Zone sampling.
+  - fermi-surface-clustering.ts: Feature vectors normalized to 0-1 range (pocketCount/10, electronPockets/5, holePockets/5, dimensionality/3); ARCHETYPE centroids updated to match normalized scale — fixes pocketCount dominating cosine similarity.
+  - pairing-mechanisms.ts: Allen-Dynes f1*f2 strong-coupling correction applied for lambda>1.5 — improves Tc accuracy for superhydrides; uses omega2Avg fallback estimation.
+  - inverse-generator.ts: Stoichiometry variant generation capped at 20 per element (was unbounded); empty elementGroups guard added; elWeights.length===0 guard added — prevents division by zero and unbounded growth.
+  - qe-worker.ts: Magnetic element detection (Fe/Co/Ni/Mn/Cr/V/Gd/Eu/Nd/Sm) triggers nspin=2 and starting_magnetization in both generateSCFInput and generateSCFInputWithParams — fixes incorrect non-magnetic electronic structure for transition metal superconductors.
+  - dashboard.tsx: All non-null assertions (!) replaced with optional chaining and defaults; data-testid added to research-events, knowledge-radar, data-sources, learning-insights cards.
 - **Round 8 comprehensive fixes**:
   - ml-predictor.ts: electronDensityEstimate clamped to [0,1]; phononSpectralWidth NaN guard with isFinite fallback.
   - physics-engine.ts: Stoner enhancement denominator guard (stonerProduct<0.95, |denom|>1e-6); FAMILY_TC_CAPS raised (Nitrides 65K/110K, Borides 55K/150K, Carbides 45K/100K).

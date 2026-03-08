@@ -585,10 +585,9 @@ function threeBodyInteractionLayer(
   }
 
   for (let i = 0; i < nNodes; i++) {
-    graph.nodes[i].embedding = newEmbeddings[i].slice(0, NODE_DIM);
-    while (graph.nodes[i].embedding.length < NODE_DIM) {
-      graph.nodes[i].embedding.push(0);
-    }
+    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
+    while (stored.length < HIDDEN_DIM) stored.push(0);
+    graph.nodes[i].embedding = stored;
   }
 
   return newEmbeddings;
@@ -783,10 +782,9 @@ export function attentionMessagePassingLayer(
   }
 
   for (let i = 0; i < nNodes; i++) {
-    graph.nodes[i].embedding = newEmbeddings[i].slice(0, NODE_DIM);
-    while (graph.nodes[i].embedding.length < NODE_DIM) {
-      graph.nodes[i].embedding.push(0);
-    }
+    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
+    while (stored.length < HIDDEN_DIM) stored.push(0);
+    graph.nodes[i].embedding = stored;
   }
 
   return newEmbeddings;
@@ -809,16 +807,17 @@ export function messagePassingLayer(
 
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
-    if (neighbors.length === 0) {
+    if (!neighbors || neighbors.length === 0) {
       newEmbeddings.push([...padded[i]]);
       continue;
     }
 
     const aggMessage = initVector(HIDDEN_DIM);
+    const nCount = Math.max(1, neighbors.length);
     for (const j of neighbors) {
       const msg = matVecMul(W_message, padded[j]);
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggMessage[k] += msg[k] / neighbors.length;
+        aggMessage[k] += msg[k] / nCount;
       }
     }
 
@@ -828,10 +827,9 @@ export function messagePassingLayer(
   }
 
   for (let i = 0; i < nNodes; i++) {
-    graph.nodes[i].embedding = newEmbeddings[i].slice(0, NODE_DIM);
-    while (graph.nodes[i].embedding.length < NODE_DIM) {
-      graph.nodes[i].embedding.push(0);
-    }
+    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
+    while (stored.length < HIDDEN_DIM) stored.push(0);
+    graph.nodes[i].embedding = stored;
   }
 
   return newEmbeddings;
@@ -846,11 +844,11 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights): GNNPredict
   attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
 
   const nNodes = graph.nodes.length;
-  const meanPool = initVector(NODE_DIM);
-  const maxPool = new Array(NODE_DIM).fill(-Infinity);
+  const meanPool = initVector(HIDDEN_DIM);
+  const maxPool = new Array(HIDDEN_DIM).fill(-Infinity);
 
   for (const node of graph.nodes) {
-    for (let k = 0; k < NODE_DIM; k++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
       meanPool[k] += (node.embedding[k] ?? 0) / nNodes;
       maxPool[k] = Math.max(maxPool[k], node.embedding[k] ?? 0);
     }
@@ -892,7 +890,7 @@ function initWeights(rng: () => number): GNNWeights {
     W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_mlp1: initMatrix(HIDDEN_DIM, NODE_DIM * 2, rng, 0.1),
+    W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.1),
     b_mlp1: initVector(HIDDEN_DIM),
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.1),
     b_mlp2: initVector(OUTPUT_DIM),
@@ -992,7 +990,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[]): GNNWeights {
       ]) {
         for (let i = 0; i < wMat.length; i++) {
           for (let j = 0; j < wMat[i].length; j++) {
-            wMat[i][j] -= tcGrad * (rng() - 0.5) * 0.01;
+            const combinedGrad = tcGrad * 0.7 + feGrad * 0.3;
+            wMat[i][j] -= combinedGrad * (rng() - 0.5) * 0.01;
           }
         }
       }

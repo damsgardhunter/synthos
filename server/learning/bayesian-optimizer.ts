@@ -201,6 +201,7 @@ export class BayesianOptimizer {
         existing.timestamp = Date.now();
         this.cachedL = null;
         this.cachedAlpha = null;
+        this.cachedGPObs = null;
       }
       return;
     }
@@ -228,24 +229,27 @@ export class BayesianOptimizer {
 
     this.cachedL = null;
     this.cachedAlpha = null;
+    this.cachedGPObs = null;
   }
 
-  private buildGP(): { L: number[][]; alpha: number[] } {
-    if (this.cachedL && this.cachedAlpha) {
-      return { L: this.cachedL, alpha: this.cachedAlpha };
+  private cachedGPObs: BayesianObservation[] | null = null;
+
+  private buildGP(): { L: number[][]; alpha: number[]; obs: BayesianObservation[] } {
+    if (this.cachedL && this.cachedAlpha && this.cachedGPObs) {
+      return { L: this.cachedL, alpha: this.cachedAlpha, obs: this.cachedGPObs };
     }
 
     const n = this.observations.length;
     if (n === 0) {
       this.cachedL = [];
       this.cachedAlpha = [];
-      return { L: [], alpha: [] };
+      this.cachedGPObs = [];
+      return { L: [], alpha: [], obs: [] };
     }
 
-    const maxN = Math.min(n, 200);
-    const obs = n > maxN
-      ? [...this.observations].sort((a, b) => b.tc - a.tc).slice(0, maxN)
-      : this.observations;
+    const obs = n > 200
+      ? [...this.observations].sort((a, b) => b.tc - a.tc).slice(0, 200)
+      : [...this.observations];
 
     const K: number[][] = Array.from({ length: obs.length }, () => new Array(obs.length).fill(0));
     for (let i = 0; i < obs.length; i++) {
@@ -263,7 +267,8 @@ export class BayesianOptimizer {
 
     this.cachedL = L;
     this.cachedAlpha = alpha;
-    return { L, alpha };
+    this.cachedGPObs = obs;
+    return { L, alpha, obs };
   }
 
   predict(formula: string): GPPrediction {
@@ -277,10 +282,7 @@ export class BayesianOptimizer {
       return { mean: 0, std: Math.sqrt(this.signalVariance) };
     }
 
-    const { L, alpha } = this.buildGP();
-    const usedObs = n > 200
-      ? [...this.observations].sort((a, b) => b.tc - a.tc).slice(0, 200)
-      : this.observations;
+    const { L, alpha, obs: usedObs } = this.buildGP();
 
     const kStar: number[] = new Array(usedObs.length);
     for (let i = 0; i < usedObs.length; i++) {

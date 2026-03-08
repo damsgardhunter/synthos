@@ -567,19 +567,21 @@ export default function Dashboard() {
                       Active learning DFT stats will appear once the engine runs DFT cycles
                     </p>
                   ) : (() => {
-                    const uncertaintyReduction = al!.avgUncertaintyBefore > 0
-                      ? ((al!.avgUncertaintyBefore - al!.avgUncertaintyAfter) / al!.avgUncertaintyBefore * 100)
+                    const avgBefore = al?.avgUncertaintyBefore ?? 0;
+                    const avgAfter = al?.avgUncertaintyAfter ?? 0;
+                    const uncertaintyReduction = avgBefore > 0
+                      ? ((avgBefore - avgAfter) / avgBefore * 100)
                       : 0;
                     return (
                       <>
                         <div className="grid grid-cols-2 gap-3">
                           <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-dft-runs">
                             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">DFT Runs</p>
-                            <p className="text-xl font-mono font-bold">{al!.totalDFTRuns}</p>
+                            <p className="text-xl font-mono font-bold">{al?.totalDFTRuns ?? 0}</p>
                           </div>
                           <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-model-retrains">
                             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Model Retrains</p>
-                            <p className="text-xl font-mono font-bold">{al!.modelRetrains}</p>
+                            <p className="text-xl font-mono font-bold">{al?.modelRetrains ?? 0}</p>
                           </div>
                         </div>
                         <div className="space-y-1" data-testid="al-uncertainty-trend">
@@ -592,16 +594,16 @@ export default function Dashboard() {
                           <div className="flex items-center gap-2 text-[10px]">
                             <span className="text-muted-foreground">Before:</span>
                             <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                              <div className="h-full rounded-full bg-amber-500" style={{ width: `${al!.avgUncertaintyBefore * 100}%` }} />
+                              <div className="h-full rounded-full bg-amber-500" style={{ width: `${avgBefore * 100}%` }} />
                             </div>
-                            <span className="font-mono w-8 text-right">{(al!.avgUncertaintyBefore * 100).toFixed(0)}%</span>
+                            <span className="font-mono w-8 text-right">{(avgBefore * 100).toFixed(0)}%</span>
                           </div>
                           <div className="flex items-center gap-2 text-[10px]">
                             <span className="text-muted-foreground">After:</span>
                             <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                              <div className="h-full rounded-full bg-green-500" style={{ width: `${al!.avgUncertaintyAfter * 100}%` }} />
+                              <div className="h-full rounded-full bg-green-500" style={{ width: `${avgAfter * 100}%` }} />
                             </div>
-                            <span className="font-mono w-8 text-right">{(al!.avgUncertaintyAfter * 100).toFixed(0)}%</span>
+                            <span className="font-mono w-8 text-right">{(avgAfter * 100).toFixed(0)}%</span>
                           </div>
                         </div>
                       </>
@@ -822,7 +824,7 @@ export default function Dashboard() {
         <div className="space-y-4">
           <ThoughtFeed thoughts={ws.thoughts} tempo={ws.tempo} />
 
-          <Card>
+          <Card data-testid="card-research-events">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <FileText className="h-4 w-4 text-primary" />
@@ -871,7 +873,7 @@ export default function Dashboard() {
           <StrategyCard />
           <ResearchMemoryCard />
 
-          <Card>
+          <Card data-testid="card-knowledge-radar">
             <CardHeader className="pb-2">
               <CardTitle className="text-base flex items-center gap-2">
                 <BarChart3 className="h-4 w-4 text-primary" />
@@ -897,7 +899,7 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card data-testid="card-data-sources">
             <CardHeader className="pb-2">
               <CardTitle className="text-base flex items-center gap-2">
                 <Microscope className="h-4 w-4 text-primary" />
@@ -927,7 +929,7 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card data-testid="card-learning-insights">
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base flex items-center gap-2">
@@ -936,7 +938,7 @@ export default function Dashboard() {
                 </CardTitle>
                 {(novelInsightData?.total ?? 0) > 0 && (
                   <Badge variant="secondary" className="text-xs border-0" data-testid="insight-total-count">
-                    {novelInsightData!.total} total
+                    {novelInsightData?.total ?? 0} total
                   </Badge>
                 )}
               </div>
@@ -945,7 +947,7 @@ export default function Dashboard() {
               <ScrollArea className="h-52">
                 {(novelInsightData?.insights?.length ?? 0) > 0 ? (
                   <div className="space-y-2">
-                    {novelInsightData!.insights.slice(0, 10).map((insight) => (
+                    {(novelInsightData?.insights ?? []).slice(0, 10).map((insight) => (
                       <div key={insight.id} className="bg-muted/50 rounded-md px-3 py-2" data-testid={`insight-${insight.id}`}>
                         <p className="text-xs text-foreground leading-relaxed">{insight.insightText}</p>
                         <div className="flex items-center gap-2 mt-1.5">
