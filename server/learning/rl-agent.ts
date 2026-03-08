@@ -2,9 +2,9 @@ const ELEMENT_GROUPS = [
   { name: "alkali", elements: ["Li", "Na", "K", "Rb", "Cs"] },
   { name: "alkaline-earth", elements: ["Be", "Mg", "Ca", "Sr", "Ba"] },
   { name: "3d-transition", elements: ["Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn"] },
-  { name: "4d-transition", elements: ["Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag"] },
-  { name: "5d-transition", elements: ["Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"] },
-  { name: "lanthanide", elements: ["La", "Ce", "Pr", "Nd", "Sm", "Gd", "Dy", "Er", "Yb", "Lu"] },
+  { name: "4d-transition", elements: ["Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd"] },
+  { name: "5d-transition", elements: ["Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg"] },
+  { name: "lanthanide", elements: ["La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu"] },
   { name: "p-block-metal", elements: ["Al", "Ga", "In", "Sn", "Tl", "Pb", "Bi"] },
   { name: "metalloid", elements: ["B", "Si", "Ge", "As", "Sb", "Te", "Se"] },
   { name: "nonmetal", elements: ["H", "C", "N", "O", "F", "P", "S", "Cl"] },
@@ -81,7 +81,7 @@ interface RLState {
 }
 
 const CHEMICAL_FAMILY_ACTIONS = [
-  { name: "hydride", hostGroups: [5, 1], anionGroups: [8], biasStructures: [6, 7, 8, 20] },
+  { name: "hydride", hostGroups: [5, 1], anionGroups: [8, 9], biasStructures: [6, 7, 8, 20] },
   { name: "intermetallic", hostGroups: [2, 3, 4], anionGroups: [6, 7], biasStructures: [0, 14, 5, 21, 28, 29] },
   { name: "layered-pnictide", hostGroups: [1, 5], anionGroups: [7], biasStructures: [4, 8, 22, 31] },
   { name: "boride", hostGroups: [1, 2], anionGroups: [7], biasStructures: [8, 10] },
@@ -779,7 +779,7 @@ export class RLChemicalSpaceAgent {
   private clampAllWeights(): void {
     const clampArray = (arr: number[]) => {
       for (let i = 0; i < arr.length; i++) {
-        arr[i] = Math.max(0, arr[i]);
+        arr[i] = Math.max(-0.5, arr[i]);
       }
     };
     clampArray(this.policy.elementGroup);
@@ -1071,7 +1071,7 @@ export class RLChemicalSpaceAgent {
 
     if (physicsContext) {
       const physicsBonus = computePhysicsPrincipleReward(physicsContext);
-      return reward + physicsBonus * 0.15;
+      return reward + physicsBonus * 0.08;
     }
 
     return reward;

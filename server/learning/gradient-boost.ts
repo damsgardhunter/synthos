@@ -164,6 +164,10 @@ function featureVectorToArray(f: MLFeatureVector): number[] {
     f.muStarEstimate ?? 0.13,
     f.pressureGpa ?? 0,
     f.optimalPressureGpa ?? 0,
+    sanitize((f as any).bandGap, 0),
+    sanitize((f as any).formationEnergy, 0),
+    sanitize((f as any).stability, 0.5),
+    sanitize((f as any).crystalSymmetry, 0),
   ];
 }
 
@@ -180,6 +184,7 @@ const FEATURE_NAMES = [
   "motifScore", "orbitalDFrac", "mottProx", "topoScore", "dimScoreV2",
   "phononSoftening", "spinFluc", "fsNesting", "dosEF", "muStar",
   "pressureGpa", "optimalPressure",
+  "bandGap", "formationEnergy", "stability", "crystalSymmetry",
 ];
 
 function findBestSplitForSubset(
@@ -397,7 +402,8 @@ export function gbPredict(features: MLFeatureVector): { tcPredicted: number; sco
   }
 
   let score = 0;
-  if (tcPredicted > 200) score = 0.85;
+  if (tcPredicted > 293) score = 0.92;
+  else if (tcPredicted > 200) score = 0.85;
   else if (tcPredicted > 100) score = 0.70;
   else if (tcPredicted > 50) score = 0.55;
   else if (tcPredicted > 20) score = 0.40;
@@ -416,7 +422,7 @@ export function gbPredict(features: MLFeatureVector): { tcPredicted: number; sco
 
   score = Math.max(0.01, Math.min(0.95, score));
 
-  const safeTc = Number.isFinite(tcPredicted) ? Math.min(200, Math.max(0, Math.round(tcPredicted * 10) / 10)) : 0;
+  const safeTc = Number.isFinite(tcPredicted) ? Math.min(350, Math.max(0, Math.round(tcPredicted * 10) / 10)) : 0;
   return { tcPredicted: safeTc, score, reasoning };
 }
 

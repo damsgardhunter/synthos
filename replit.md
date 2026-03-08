@@ -65,6 +65,15 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Deterministic phonon estimates**: Analytical phonon fallback uses formula-hash seeding for reproducible frequencies.
 - **RL agent templates**: STOICH_TEMPLATES includes superhydride patterns (AH6/AH9/AH10/AH12, ABH8); 30+ element pair priors.
 - **WebSocket reconnect**: Exponential backoff (3s→30s max), resets on successful connection.
+- **Fluorite prototype**: Corrected to A4B8 (Fm-3m symmetry, 8 anion sites).
+- **GB model**: Tc cap raised to 350K; 54 features including bandGap, formationEnergy, stability, crystalSymmetry; score tier for >293K.
+- **QE timeout**: 300s (was 120s) for higher-cutoff calculations.
+- **Hydride phonon Debye**: Scaled by H-ratio (1200 cm⁻¹ for hRatio>0.7, 800 for >0.5).
+- **Hydride cage positions**: Supports up to 12 H atoms per metal (was 10).
+- **Defect engine**: Boltzmann-scaled concentrations for all 4 defect types (vacancy, interstitial, antisite, dopant).
+- **COHESIVE_ENERGIES_EV**: 60+ elements including all 4d/5d TMs, lanthanides, actinides.
+- **ELEMENT_DATA (QE)**: 77+ elements including Br, Tc, Cd, lanthanides, Th, U, Pa.
+- **RL agent**: Weight clamping floor -0.5 (allows demotion); physics bonus factor 0.08; hydride anionGroups includes nonmetals [8,9]; expanded ELEMENT_GROUPS (Tc, Cd, Hg, Eu, Tb, Ho, Tm).
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

@@ -219,7 +219,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
     if ((comp[el] || 0) < 0.01) continue;
     const Ef = computeDefectFormationEnergy(formula, DefectType.Vacancy, el);
     const density = estimateDefectDensity(Ef, 300);
-    const vacConc = 0.05;
+    const vacConc = Math.min(0.10, Math.max(0.005, 0.05 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
     const newComp = { ...comp, [el]: comp[el] * (1 - vacConc) };
 
     variants.push({
@@ -239,7 +239,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
     if (elements.includes(intEl) && comp[intEl] > 1) continue;
     const Ef = computeDefectFormationEnergy(formula, DefectType.Interstitial, intEl);
     const density = estimateDefectDensity(Ef, 300);
-    const intConc = 0.02;
+    const intConc = Math.min(0.05, Math.max(0.002, 0.02 * Math.exp(-Math.max(0, Ef - 1.5) / 0.5)));
 
     const intComp = { ...comp, [intEl]: (comp[intEl] || 0) + intConc };
     variants.push({
@@ -264,14 +264,14 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
         const density = estimateDefectDensity(Ef, 300);
 
         const asComp = { ...comp };
-        const swapFrac = 0.03;
+        const swapFrac = Math.min(0.08, Math.max(0.005, 0.03 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
         asComp[elA] = (asComp[elA] || 0) - swapFrac * (asComp[elA] || 1);
         asComp[elB] = (asComp[elB] || 0) + swapFrac * (asComp[elA] || 1);
         variants.push({
           type: DefectType.Antisite,
           site: `${elA}<->${elB}`,
           element: `${elA}/${elB}`,
-          concentration: 0.03,
+          concentration: swapFrac,
           formationEnergy: Ef,
           defectDensity: density,
           mutatedFormula: formulaFromComposition(asComp),
@@ -290,14 +290,15 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
     const Ef = computeDefectFormationEnergy(formula, DefectType.Dopant, el);
     const density = estimateDefectDensity(Ef, 300);
 
+    const dopFrac = Math.min(0.10, Math.max(0.005, 0.05 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
     const dopComp = { ...comp };
-    dopComp[el] = (dopComp[el] || 1) * 0.95;
-    dopComp[dopant] = (dopComp[dopant] || 0) + (comp[el] || 1) * 0.05;
+    dopComp[el] = (dopComp[el] || 1) * (1 - dopFrac);
+    dopComp[dopant] = (dopComp[dopant] || 0) + (comp[el] || 1) * dopFrac;
     variants.push({
       type: DefectType.Dopant,
       site: el,
       element: dopant,
-      concentration: 0.05,
+      concentration: dopFrac,
       formationEnergy: Ef,
       defectDensity: density,
       mutatedFormula: formulaFromComposition(dopComp),

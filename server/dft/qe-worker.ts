@@ -8,7 +8,7 @@ import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
 const QE_WORK_DIR = "/tmp/qe_calculations";
 const QE_PSEUDO_DIR = "/tmp/qe_pseudo";
-const QE_TIMEOUT_MS = 120_000;
+const QE_TIMEOUT_MS = 300_000;
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const PP_SOURCE_DIR = path.join(PROJECT_ROOT, "server/dft/pseudo");
@@ -53,19 +53,26 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   Pt: { mass: 195.08,  zValence: 18 }, Au: { mass: 196.97,  zValence: 11 },
   Tl: { mass: 204.38,  zValence: 13 }, Pb: { mass: 207.2,   zValence: 4  },
   Bi: { mass: 208.98,  zValence: 5  },
+  Br: { mass: 79.904,  zValence: 7  },
+  Tc: { mass: 98.0,    zValence: 7  },
+  Cd: { mass: 112.41,  zValence: 12 },
+  Pr: { mass: 140.91,  zValence: 13 },
+  Nd: { mass: 144.24,  zValence: 14 },
+  Sm: { mass: 150.36,  zValence: 16 },
+  Eu: { mass: 151.96,  zValence: 17 },
+  Gd: { mass: 157.25,  zValence: 18 },
+  Tb: { mass: 158.93,  zValence: 19 },
+  Dy: { mass: 162.50,  zValence: 20 },
+  Ho: { mass: 164.93,  zValence: 21 },
+  Er: { mass: 167.26,  zValence: 22 },
+  Tm: { mass: 168.93,  zValence: 23 },
+  Yb: { mass: 173.04,  zValence: 24 },
+  Lu: { mass: 174.97,  zValence: 25 },
+  Th: { mass: 232.04,  zValence: 12 },
+  U:  { mass: 238.03,  zValence: 14 },
+  Pa: { mass: 231.04,  zValence: 13 },
 };
 
-const COVALENT_RADII: Record<string, number> = {
-  H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
-  Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
-  K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
-  Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
-  As: 1.19, Se: 1.20, Rb: 2.20, Sr: 1.95, Y: 1.90, Zr: 1.75, Nb: 1.64,
-  Mo: 1.54, Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, In: 1.42,
-  Sn: 1.39, Sb: 1.39, Te: 1.38, I: 1.39, Cs: 2.44, Ba: 2.15, La: 2.07,
-  Ce: 2.04, Hf: 1.75, Ta: 1.70, W: 1.62, Re: 1.51, Os: 1.44, Ir: 1.41,
-  Pt: 1.36, Au: 1.36, Tl: 1.45, Pb: 1.46, Bi: 1.48,
-};
 
 export interface QESCFResult {
   totalEnergy: number;
@@ -482,8 +489,14 @@ function generateHydrideCagePositions(
       hSites = cubeVertexH.slice(0, hPerMetal);
     } else if (hPerMetal === 9) {
       hSites = [...cubeVertexH, { x: 0.5, y: 0.5, z: 0.0 }];
+    } else if (hPerMetal <= 10) {
+      hSites = clathrateH10.slice(0, hPerMetal);
     } else {
-      hSites = clathrateH10.slice(0, Math.min(hPerMetal, 10));
+      const extraH = [
+        { x: 0.0, y: 0.5, z: 0.75 },
+        { x: 0.5, y: 0.0, z: 0.75 },
+      ];
+      hSites = [...clathrateH10, ...extraH.slice(0, Math.min(hPerMetal - 10, 2))];
     }
     for (const h of hSites) {
       positions.push({ element: "H", ...h });

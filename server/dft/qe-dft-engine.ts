@@ -399,15 +399,15 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
       { site: "B", x: 0.75, y: 0.75, z: 0.25 },
       { site: "B", x: 0.75, y: 0.25, z: 0.75 },
       { site: "B", x: 0.25, y: 0.75, z: 0.75 },
+      { site: "B", x: 0.25, y: 0.75, z: 0.25 },
+      { site: "B", x: 0.75, y: 0.25, z: 0.25 },
       { site: "B", x: 0.25, y: 0.25, z: 0.75 },
       { site: "B", x: 0.75, y: 0.75, z: 0.75 },
-      { site: "B", x: 0.75, y: 0.25, z: 0.25 },
-      { site: "B", x: 0.25, y: 0.75, z: 0.25 },
     ],
     latticeType: "cubic",
     aRatio: 1.0,
     cOverA: 1.0,
-    stoichiometryPattern: "A4B12",
+    stoichiometryPattern: "A4B8",
   },
   {
     name: "Cr3Si",
@@ -2111,10 +2111,12 @@ const COHESIVE_ENERGIES_EV: Record<string, number> = {
   K: 0.93, Ca: 1.84, Sc: 3.90, Ti: 4.85, V: 5.31, Cr: 4.10, Mn: 2.92,
   Fe: 4.28, Co: 4.39, Ni: 4.44, Cu: 3.49, Zn: 1.35, Ga: 2.81, Ge: 3.85,
   As: 2.96, Se: 2.46, Br: 1.22,
-  Rb: 0.85, Sr: 1.72, Y: 4.37, Zr: 6.25, Nb: 7.57, Mo: 6.82,
-  Pd: 3.89, Sn: 3.14, Te: 2.02,
-  Cs: 0.80, Ba: 1.90, La: 4.47, Ce: 4.32, Hf: 6.44, Ta: 8.10, W: 8.90,
-  Pt: 5.84, Pb: 2.03, Bi: 2.18,
+  Rb: 0.85, Sr: 1.72, Y: 4.37, Zr: 6.25, Nb: 7.57, Mo: 6.82, Tc: 6.85,
+  Ru: 6.74, Rh: 5.75, Pd: 3.89, Ag: 2.95, Cd: 1.16, In: 2.52, Sn: 3.14, Sb: 2.75, Te: 2.02,
+  Cs: 0.80, Ba: 1.90, La: 4.47, Ce: 4.32, Pr: 3.70, Nd: 3.40, Sm: 2.14, Eu: 1.86,
+  Gd: 4.14, Tb: 4.05, Dy: 3.04, Ho: 3.14, Er: 3.29, Tm: 2.42, Yb: 1.60, Lu: 4.43,
+  Hf: 6.44, Ta: 8.10, W: 8.90, Re: 8.03, Os: 8.17, Ir: 6.94, Pt: 5.84, Au: 3.81,
+  Tl: 1.88, Pb: 2.03, Bi: 2.18, Th: 6.20, U: 5.55, Pa: 5.89,
 };
 
 async function computeElementalEnergy(element: string): Promise<number | null> {
@@ -2438,7 +2440,10 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       }, 0) / Object.values(counts).reduce((s, n) => s + n, 0);
 
       const hasHydrogen = !!counts["H"];
-      const baseDebye = hasHydrogen ? 400 : (avgMass < 30 ? 500 : avgMass < 60 ? 350 : avgMass < 100 ? 250 : 180);
+      const hRatio = hasHydrogen ? (counts["H"] ?? 0) / Object.values(counts).reduce((s, n) => s + n, 0) : 0;
+      const baseDebye = hasHydrogen
+        ? (hRatio > 0.7 ? 1200 : hRatio > 0.5 ? 800 : 400)
+        : (avgMass < 30 ? 500 : avgMass < 60 ? 350 : avgMass < 100 ? 250 : 180);
       const debyeFreq = baseDebye * (converged ? 1.0 : 0.8);
       const nAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
       const nModes = Math.max(1, 3 * nAtoms - 6);
