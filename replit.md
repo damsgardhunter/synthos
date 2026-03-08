@@ -130,6 +130,11 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Throughput**: `throughputPerHour` uses session-only `autonomousTotalScreened / elapsedHours` (not all-time DB totals) to avoid inflation after restarts.
 - **Theory discovery**: Dimensional validity is a 10% score bonus, not a hard gate. Theories no longer require exact unit consistency to be accepted.
 - **Crystal growth defaults**: Cooling rates reduced to 5-50 K/s (was 100-500) for realistic grain sizes. Default anneal times increased to 8-16h.
+- **Crystal prototypes**: 35 prototypes in `qe-dft-engine.ts` CRYSTAL_PROTOTYPES array (was 20). New: Clathrate-H32, Skutterudite, BiS2-layered, Kagome-variant, Chevrel, Pyrite, Wurtzite, Antifluorite, Laves-C14, Laves-C15, HfFe6Ge6, CeCu2Si2, PuCoGa5-115, Infinite-layer, T-prime. Also 16 PROTOTYPE_TEMPLATES in `crystal-prototypes.ts`.
+- **Lattice parameter estimation**: Uses sum of covalent sphere volumes / packing factor in both `qe-dft-engine.ts` (with PROTOTYPE_PACKING per-prototype factors) and `crystal-prototypes.ts` (with PACKING_FACTORS per-template). BCC=0.68, FCC=0.74, hexagonal=0.74, clathrate=0.55, Chevrel=0.65, etc.
+- **Pipeline stage metrics**: `pipelineStageMetrics` object in engine.ts tracks: chemistryRejects, stabilityPrefilterRejects, surrogateRejects, formationEnergyRejects, gbTcRejects, physicsPrefilterRejects, phononRejects, belowTierRejects, duplicateRejects, featureExtractionFails, prototypeAttempts/Successes, xtbAttempts/Successes, totalPassed. Exposed in `getAutonomousLoopStats()` with computed rates.
+- **RL rejection feedback**: `recordElementOutcome` accepts optional `rejectCategory` (chemistry_reject, stability_reject, phonon_reject, tc_too_low). Chemistry/stability rejects apply extra negative bias to element pair weights. `getStats()` includes `rejectionCategories` breakdown.
+- **RL structure types**: 35 structure types (was 20), matches CRYSTAL_PROTOTYPES. KNOWN_SC_MOTIFS and MOTIF_FAMILY_MAP updated with new prototypes. CHEMICAL_FAMILY_ACTIONS biasStructures include new prototype indices.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).

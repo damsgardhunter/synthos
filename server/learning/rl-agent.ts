@@ -28,6 +28,10 @@ const STRUCTURE_TYPES = [
   "Heusler", "BCC", "FCC", "Layered", "Kagome",
   "HexBoride", "MX2", "Anti-perovskite", "CsCl",
   "Cu2Mg-Laves", "Fluorite", "Cr3Si", "Ni3Sn", "Fe3C", "Spinel",
+  "Clathrate-H32", "Skutterudite", "BiS2-layered", "Kagome-variant",
+  "Chevrel", "Pyrite", "Wurtzite", "Antifluorite",
+  "Laves-C14", "Laves-C15", "HfFe6Ge6", "CeCu2Si2",
+  "PuCoGa5-115", "Infinite-layer", "T-prime",
 ] as const;
 
 const LAYERING_DIMENSIONS = [
@@ -72,14 +76,14 @@ interface RLState {
 }
 
 const CHEMICAL_FAMILY_ACTIONS = [
-  { name: "hydride", hostGroups: [5, 1], anionGroups: [8], biasStructures: [6, 7, 8] },
-  { name: "intermetallic", hostGroups: [2, 3, 4], anionGroups: [6, 7], biasStructures: [0, 14, 5] },
-  { name: "layered-pnictide", hostGroups: [1, 5], anionGroups: [7], biasStructures: [4, 8] },
+  { name: "hydride", hostGroups: [5, 1], anionGroups: [8], biasStructures: [6, 7, 8, 20] },
+  { name: "intermetallic", hostGroups: [2, 3, 4], anionGroups: [6, 7], biasStructures: [0, 14, 5, 21, 28, 29] },
+  { name: "layered-pnictide", hostGroups: [1, 5], anionGroups: [7], biasStructures: [4, 8, 22, 31] },
   { name: "boride", hostGroups: [1, 2], anionGroups: [7], biasStructures: [8, 10] },
-  { name: "cuprate", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 8] },
-  { name: "chalcogenide", hostGroups: [2, 3, 4], anionGroups: [7], biasStructures: [11, 8] },
-  { name: "kagome-metal", hostGroups: [2, 3], anionGroups: [6, 7], biasStructures: [9] },
-  { name: "oxide-perovskite", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 12] },
+  { name: "cuprate", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 8, 33, 34] },
+  { name: "chalcogenide", hostGroups: [2, 3, 4], anionGroups: [7], biasStructures: [11, 8, 25] },
+  { name: "kagome-metal", hostGroups: [2, 3], anionGroups: [6, 7], biasStructures: [9, 23, 30] },
+  { name: "oxide-perovskite", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 12, 34] },
 ] as const;
 
 interface RLAction {
@@ -170,6 +174,9 @@ const KNOWN_SC_MOTIFS = new Set([
   "infinite-layer", "Ruddlesden-Popper", "nickelate", "MgB2-sigma",
   "TMD", "fullerene", "heavy-fermion", "borocarbide", "BiS2-layer",
   "1T-prime-TMD", "carbon-clathrate", "oxide-interface", "kagome",
+  "Clathrate-H32", "Kagome-variant", "Laves-C14", "Laves-C15",
+  "HfFe6Ge6", "CeCu2Si2", "PuCoGa5-115", "T-prime",
+  "pyrite", "wurtzite", "antifluorite",
 ]);
 
 const KNOWN_FAMILIES = new Set([
@@ -204,6 +211,17 @@ const MOTIF_FAMILY_MAP: Record<string, string[]> = {
   "carbon-clathrate": ["intermetallic"],
   "oxide-interface": ["oxide-perovskite"],
   "kagome": ["kagome-metal"],
+  "Clathrate-H32": ["hydride"],
+  "Kagome-variant": ["kagome-metal"],
+  "Laves-C14": ["intermetallic"],
+  "Laves-C15": ["intermetallic"],
+  "HfFe6Ge6": ["kagome-metal", "intermetallic"],
+  "CeCu2Si2": ["intermetallic"],
+  "PuCoGa5-115": ["intermetallic"],
+  "T-prime": ["cuprate", "oxide-perovskite"],
+  "pyrite": ["chalcogenide"],
+  "wurtzite": ["chalcogenide"],
+  "antifluorite": ["intermetallic"],
 };
 
 function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
@@ -738,8 +756,15 @@ export class RLChemicalSpaceAgent {
     }
   }
 
-  recordElementOutcome(elements: string[], tc: number, passed: boolean): void {
+  private rejectionCategoryCounts: Record<string, number> = {};
+
+  recordElementOutcome(elements: string[], tc: number, passed: boolean, rejectCategory?: string): void {
     const safeTc = (tc != null && Number.isFinite(tc)) ? tc : 0;
+
+    if (rejectCategory) {
+      this.rejectionCategoryCounts[rejectCategory] = (this.rejectionCategoryCounts[rejectCategory] || 0) + 1;
+    }
+
     for (const el of elements) {
       const group = ELEMENT_GROUPS.find(g => (g.elements as readonly string[]).includes(el));
       if (!group) continue;
@@ -767,6 +792,10 @@ export class RLChemicalSpaceAgent {
             this.policy.elementPairSpecific.set(pair, currentBias + lr * tcBonus);
           } else if (tc < 5 && stats.total > 5) {
             this.policy.elementPairSpecific.set(pair, Math.max(-0.3, currentBias - lr * 0.1));
+          }
+
+          if (rejectCategory === "chemistry_reject" || rejectCategory === "stability_reject") {
+            this.policy.elementPairSpecific.set(pair, Math.max(-0.5, currentBias - lr * 0.15));
           }
         }
       }
@@ -1014,6 +1043,7 @@ export class RLChemicalSpaceAgent {
     topHydrogenDensities: { name: string; weight: number }[];
     topElectronCounts: { name: string; weight: number }[];
     topOrbitalConfigs: { name: string; weight: number }[];
+    rejectionCategories: Record<string, number>;
   } {
     const elWeights = this.policy.elementGroup.map((w, i) => ({
       name: ELEMENT_GROUPS[i].name,
@@ -1099,6 +1129,7 @@ export class RLChemicalSpaceAgent {
       topHydrogenDensities: hdWeights,
       topElectronCounts: ecWeights,
       topOrbitalConfigs: orbWeights,
+      rejectionCategories: { ...this.rejectionCategoryCounts },
     };
   }
 

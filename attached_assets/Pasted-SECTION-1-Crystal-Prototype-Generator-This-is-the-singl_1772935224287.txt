@@ -1,0 +1,312 @@
+SECTION 1 — Crystal Prototype Generator
+
+This is the single biggest improvement you can make.
+
+Right now structures are likely random lattices, which causes geometry failures.
+
+Instead generate structures using known superconducting prototypes.
+
+T100: Prototype Database
+
+Create a prototype library.
+
+File:
+
+server/crystal/prototype-library.ts
+
+Example:
+
+export const PROTOTYPES = {
+  A15: {
+    spaceGroup: 223,
+    lattice: "cubic",
+    sites: [
+      { element: "A", position: [0,0,0] },
+      { element: "B", position: [0.25,0.5,0] },
+      { element: "B", position: [0.5,0.25,0] },
+    ]
+  },
+
+  perovskite: {
+    spaceGroup: 221,
+    lattice: "cubic",
+    sites: [
+      { element: "A", position: [0,0,0] },
+      { element: "B", position: [0.5,0.5,0.5] },
+      { element: "O", position: [0.5,0.5,0] }
+    ]
+  },
+
+  ThCr2Si2: {
+    spaceGroup: 139,
+    lattice: "tetragonal"
+  }
+}
+
+Include prototypes relevant to superconductors:
+
+A15
+MgB2
+ThCr2Si2
+perovskite
+layered
+AlB2
+clathrate
+kagome
+rocksalt
+
+Target: 20–50 prototypes.
+
+T101: Prototype Structure Builder
+
+File:
+
+server/crystal/prototype-builder.ts
+
+Function:
+
+generateStructureFromPrototype(formula)
+
+Workflow:
+
+1 parse formula
+2 choose compatible prototype
+3 assign elements to prototype sites
+4 estimate lattice constant
+5 build structure
+
+Example:
+
+LaH10 → clathrate
+MgB2 → AlB2
+FeSe → layered
+T102: Prototype Selection Model
+
+Use your RL engine to choose prototypes.
+
+File:
+
+learning/prototype-selector.ts
+
+Example:
+
+selectPrototype(formula, family)
+
+Features:
+
+atomic radii
+valence
+family
+stoichiometry
+
+Output:
+
+prototype name
+T103: Lattice Parameter Estimator
+
+Estimate lattice constants.
+
+File:
+
+server/crystal/lattice-estimator.ts
+
+Basic model:
+
+a ≈ 2.2 * average_atomic_radius
+
+Better:
+
+a ≈ f(sum of covalent volumes)
+
+Example code:
+
+const volume = atoms.reduce(
+  (v,a) => v + covalentVolume[a.element],
+  0
+)
+
+const a = Math.cbrt(volume * packingFactor)
+SECTION 2 — Chemistry Priors
+
+This prevents the generator from creating impossible chemistry.
+
+T110: Oxidation State Solver
+
+File:
+
+chemistry/oxidation-solver.ts
+
+Goal:
+
+Σ oxidation states = 0
+
+Example:
+
+FeO2 → Fe4+ O2-
+
+Implementation:
+
+Use constraint solver:
+
+possible oxidation states per element
+
+Example:
+
+Fe: [2,3,4]
+O: [-2]
+
+Solve:
+
+Fe + 2O = 0
+T111: Electronegativity Filter
+
+File:
+
+chemistry/electronegativity.ts
+
+Rule:
+
+Δχ > 0.2 → stable bond
+
+Reject combinations like:
+
+Na + Cs
+T112: Radius Compatibility
+
+File:
+
+chemistry/radius-compatibility.ts
+
+Rule:
+
+0.7 < rA/rB < 1.4
+
+Used in:
+
+perovskites
+intermetallics
+T113: Valence Electron Count Rules
+
+File:
+
+chemistry/electron-count.ts
+
+Example superconducting rules:
+
+A15: VEC ≈ 4.5–5.5
+MgB2-like: high σ-band filling
+
+Reject candidates outside ranges.
+
+SECTION 3 — Phonon Stability Filter
+
+This prevents wasting DFT on unstable structures.
+
+T120: Fast Elastic Stability Check
+
+File:
+
+physics/elastic-stability.ts
+
+Rules for cubic crystals:
+
+C11 - C12 > 0
+C11 + 2C12 > 0
+C44 > 0
+
+Approximate using ML model.
+
+T121: Phonon ML Predictor
+
+File:
+
+physics/phonon-surrogate.ts
+
+Train a model predicting:
+
+min phonon frequency
+
+Features:
+
+atomic masses
+bond lengths
+density
+bulk modulus estimate
+
+Reject if:
+
+ω_min < -1 THz
+T122: Hydrogen Cage Stability
+
+Important for hydrides.
+
+File:
+
+physics/hydrogen-cage-check.ts
+
+Check:
+
+H–H distances
+cage symmetry
+
+Reject unstable cages.
+
+SECTION 4 — Integrating Into Learning Engine
+
+Now wire these into your generator.
+
+T130: Pre-DFT Validation Pipeline
+
+File:
+
+server/engine/candidate-validator.ts
+
+Pipeline:
+
+candidate
+  │
+  ├ chemistry priors
+  ├ prototype generator
+  ├ geometry validation
+  ├ xtb relaxation
+  ├ phonon stability
+  │
+  ▼
+DFT queue
+T131: Feedback to Learning Engine
+
+Every rejection must update the model.
+
+Example:
+
+reject_reason: "phonon_instability"
+reject_reason: "oxidation_fail"
+
+Update:
+
+RL reward
+surrogate training
+BO dataset
+T132: Learning Signals
+
+Store:
+
+structure
+prototype
+chemistry features
+stability
+DFT results
+
+This dataset becomes your materials foundation model.
+
+SECTION 5 — Metrics You Should Track
+
+Add stats:
+
+prototypeSuccessRate
+chemistryRejectRate
+phononRejectRate
+xtbSuccessRate
+DFTSuccessRate
+
+These reveal bottlenecks.

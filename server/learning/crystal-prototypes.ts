@@ -53,6 +53,67 @@ const OXIDATION_STATES: Record<string, number[]> = {
   F: [-1], Cl: [-1], Br: [-1], I: [-1],
 };
 
+const COVALENT_RADII: Record<string, number> = {
+  H: 0.31, He: 0.28, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
+  Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
+  K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
+  Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
+  As: 1.19, Se: 1.20, Br: 1.20, Rb: 2.20, Sr: 1.95, Y: 1.90, Zr: 1.75,
+  Nb: 1.64, Mo: 1.54, Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44,
+  In: 1.42, Sn: 1.39, Sb: 1.39, Te: 1.38, I: 1.39, Cs: 2.44, Ba: 2.15,
+  La: 2.07, Ce: 2.04, Pr: 2.03, Nd: 2.01, Sm: 1.98, Gd: 1.96,
+  Hf: 1.75, Ta: 1.70, W: 1.62, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36,
+  Au: 1.36, Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48,
+};
+
+const PACKING_FACTORS: Record<string, number> = {
+  "A15": 0.68,
+  "AlB2": 0.74,
+  "ThCr2Si2": 0.68,
+  "Perovskite": 0.74,
+  "MX2": 0.60,
+  "Anti-perovskite": 0.74,
+};
+
+const DEFAULT_PACKING_FACTOR = 0.68;
+
+function getCovalentRadius(el: string): number {
+  return COVALENT_RADII[el] ?? 1.3;
+}
+
+export function estimateLatticeConstant(
+  elements: string[],
+  counts: Record<string, number>,
+  template: PrototypeTemplate
+): { a: number; c: number } {
+  let totalVolume = 0;
+  for (const el of elements) {
+    const n = Math.round(counts[el] || 1);
+    const r = getCovalentRadius(el);
+    totalVolume += n * (4.0 / 3.0) * Math.PI * r * r * r;
+  }
+
+  const packingFactor = PACKING_FACTORS[template.name] ?? DEFAULT_PACKING_FACTOR;
+  const cellVolume = totalVolume / packingFactor;
+
+  let a: number;
+  let c: number;
+
+  if (template.latticeType === "cubic") {
+    a = Math.pow(cellVolume, 1.0 / 3.0);
+    c = a;
+  } else if (template.latticeType === "hexagonal") {
+    const hexFactor = (Math.sqrt(3) / 2) * template.cOverA;
+    a = Math.pow(cellVolume / hexFactor, 1.0 / 3.0);
+    c = a * template.cOverA;
+  } else {
+    a = Math.pow(cellVolume / template.cOverA, 1.0 / 3.0);
+    c = a * template.cOverA;
+  }
+
+  return { a, c };
+}
+
 const ANIONS = new Set(["O", "F", "Cl", "Br", "I", "S", "Se", "Te", "N", "P", "As"]);
 const CATIONS_LARGE = new Set(["K", "Rb", "Cs", "Ba", "Sr", "Ca", "La", "Ce", "Pr", "Nd", "Y", "Na", "Pb", "Bi", "Tl"]);
 const CATIONS_SMALL_TM = new Set(["Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Nb", "Mo", "W", "Ta", "Ru", "Rh", "Ir", "Pd", "Pt", "Re", "Os", "Hf", "Zr", "Sc"]);
@@ -187,6 +248,204 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       return hasAnion && hasMetal;
     },
   },
+  {
+    name: "Clathrate-H32",
+    spaceGroup: "Im-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "metal-center" },
+      { label: "H", x: 0.18, y: 0.18, z: 0.18, role: "cage" },
+      { label: "H", x: 0.31, y: 0.31, z: 0.0, role: "cage" },
+      { label: "H", x: 0.0, y: 0.31, z: 0.31, role: "cage" },
+      { label: "H", x: 0.31, y: 0.0, z: 0.31, role: "cage" },
+    ],
+    stoichiometryRatio: [1, 10],
+    coordination: [32, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.includes("H") && elements.some(e => isRareEarth(e) || ["Ca", "Sr", "Ba", "Y", "Sc", "Th"].includes(e));
+    },
+  },
+  {
+    name: "Skutterudite",
+    spaceGroup: "Im-3",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "metal" },
+      { label: "M", x: 0.5, y: 0.5, z: 0.0, role: "metal" },
+      { label: "M", x: 0.0, y: 0.5, z: 0.5, role: "metal" },
+      { label: "M", x: 0.5, y: 0.0, z: 0.5, role: "metal" },
+      { label: "X", x: 0.0, y: 0.34, z: 0.16, role: "pnicogen" },
+      { label: "X", x: 0.34, y: 0.16, z: 0.0, role: "pnicogen" },
+      { label: "X", x: 0.16, y: 0.0, z: 0.34, role: "pnicogen" },
+    ],
+    stoichiometryRatio: [1, 3],
+    coordination: [6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Co", "Rh", "Ir", "Fe", "Ru", "Os", "Ni"].includes(e));
+      const hasPn = elements.some(e => ["Sb", "As", "P", "Bi"].includes(e));
+      return hasTM && hasPn;
+    },
+  },
+  {
+    name: "Chevrel",
+    spaceGroup: "R-3",
+    latticeType: "hexagonal",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "guest" },
+      { label: "M", x: 0.15, y: 0.15, z: 0.15, role: "cluster-metal" },
+      { label: "M", x: 0.85, y: 0.85, z: 0.85, role: "cluster-metal" },
+      { label: "X", x: 0.22, y: 0.0, z: 0.28, role: "chalcogen" },
+      { label: "X", x: 0.0, y: 0.28, z: 0.22, role: "chalcogen" },
+      { label: "X", x: 0.28, y: 0.22, z: 0.0, role: "chalcogen" },
+    ],
+    stoichiometryRatio: [1, 6, 8],
+    coordination: [12, 5, 3],
+    chemistryRules: (elements) => {
+      if (elements.length < 2 || elements.length > 3) return false;
+      const hasMo = elements.includes("Mo") || elements.includes("Re") || elements.includes("W");
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
+      return hasMo && hasChalcogen;
+    },
+  },
+  {
+    name: "Infinite-layer",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 1.7,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "spacer" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "TM-square-planar" },
+      { label: "O", x: 0.5, y: 0.0, z: 0.5, role: "in-plane-O" },
+      { label: "O", x: 0.0, y: 0.5, z: 0.5, role: "in-plane-O" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [8, 4, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasSpacer = elements.some(e => ["Sr", "Ca", "Ba", "La", "Nd", "Pr"].includes(e));
+      const hasTM = elements.some(e => ["Cu", "Ni", "Co"].includes(e));
+      const hasO = elements.includes("O");
+      return hasSpacer && hasTM && hasO;
+    },
+  },
+  {
+    name: "Pyrite",
+    spaceGroup: "Pa-3",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "metal" },
+      { label: "M", x: 0.5, y: 0.5, z: 0.0, role: "metal" },
+      { label: "M", x: 0.0, y: 0.5, z: 0.5, role: "metal" },
+      { label: "M", x: 0.5, y: 0.0, z: 0.5, role: "metal" },
+      { label: "X", x: 0.38, y: 0.38, z: 0.38, role: "dimer-1" },
+      { label: "X", x: 0.62, y: 0.62, z: 0.62, role: "dimer-1" },
+      { label: "X", x: 0.88, y: 0.12, z: 0.62, role: "dimer-2" },
+      { label: "X", x: 0.12, y: 0.88, z: 0.38, role: "dimer-2" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te", "As", "Sb", "P"].includes(e));
+      return hasTM && hasChalcogen;
+    },
+  },
+  {
+    name: "PuCoGa5-115",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 1.6,
+    sites: [
+      { label: "R", x: 0.0, y: 0.0, z: 0.0, role: "rare-earth" },
+      { label: "T", x: 0.5, y: 0.5, z: 0.0, role: "TM" },
+      { label: "X", x: 0.5, y: 0.0, z: 0.31, role: "p-block-1" },
+      { label: "X", x: 0.0, y: 0.5, z: 0.31, role: "p-block-1" },
+      { label: "X", x: 0.5, y: 0.0, z: 0.69, role: "p-block-2" },
+      { label: "X", x: 0.0, y: 0.5, z: 0.69, role: "p-block-2" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.5, role: "p-block-3" },
+    ],
+    stoichiometryRatio: [1, 1, 5],
+    coordination: [16, 9, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasRE = elements.some(e => isRareEarth(e) || ["U", "Pu", "Np"].includes(e));
+      const hasTM = elements.some(e => ["Co", "Rh", "Ir", "Ni", "Fe"].includes(e));
+      const hasPBlock = elements.some(e => ["Ga", "In", "Al", "Si", "Ge", "Sn"].includes(e));
+      return hasRE && hasTM && hasPBlock;
+    },
+  },
+  {
+    name: "Laves-C15",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "large-atom" },
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "large-atom" },
+      { label: "B", x: 0.625, y: 0.625, z: 0.625, role: "small-atom" },
+      { label: "B", x: 0.625, y: 0.375, z: 0.375, role: "small-atom" },
+      { label: "B", x: 0.375, y: 0.625, z: 0.375, role: "small-atom" },
+      { label: "B", x: 0.375, y: 0.375, z: 0.625, role: "small-atom" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [16, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      return hasTM;
+    },
+  },
+  {
+    name: "Kagome-variant",
+    spaceGroup: "P6/mmm",
+    latticeType: "hexagonal",
+    cOverA: 2.7,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "spacer" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.25, role: "kagome" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.25, role: "kagome" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.25, role: "kagome" },
+      { label: "C", x: 0.333, y: 0.167, z: 0.5, role: "honeycomb" },
+      { label: "C", x: 0.167, y: 0.333, z: 0.5, role: "honeycomb" },
+    ],
+    stoichiometryRatio: [1, 6, 6],
+    coordination: [12, 4, 3],
+    chemistryRules: (elements) => {
+      if (elements.length < 2 || elements.length > 3) return false;
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      return hasTM;
+    },
+  },
+  {
+    name: "T-prime",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 3.0,
+    sites: [
+      { label: "R", x: 0.0, y: 0.0, z: 0.35, role: "rare-earth" },
+      { label: "R", x: 0.0, y: 0.0, z: 0.65, role: "rare-earth" },
+      { label: "T", x: 0.5, y: 0.5, z: 0.0, role: "TM" },
+      { label: "O", x: 0.0, y: 0.5, z: 0.0, role: "apical-O" },
+      { label: "O", x: 0.0, y: 0.0, z: 0.17, role: "planar-O" },
+      { label: "O", x: 0.0, y: 0.0, z: 0.83, role: "planar-O" },
+    ],
+    stoichiometryRatio: [2, 1, 4],
+    coordination: [8, 4, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasRE = elements.some(e => isRareEarth(e));
+      const hasTM = elements.some(e => ["Cu", "Ni", "Co"].includes(e));
+      const hasO = elements.includes("O");
+      return hasRE && hasTM && hasO;
+    },
+  },
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -304,15 +563,7 @@ export function fillPrototype(formula: string): FilledPrototype | null {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
 
-  let totalR = 0, totalN = 0;
-  for (const el of elements) {
-    const n = Math.round(counts[el] || 1);
-    totalR += getAvgRadius(el) * n;
-    totalN += n;
-  }
-  const avgR = totalR / Math.max(1, totalN);
-  const a = avgR * 2.8 + 0.5;
-  const c = a * template.cOverA;
+  const { a, c } = estimateLatticeConstant(elements, counts, template);
 
   const atoms: { element: string; x: number; y: number; z: number }[] = [];
   for (const site of template.sites) {

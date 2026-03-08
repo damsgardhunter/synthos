@@ -164,6 +164,24 @@ let autonomousTotalPassed = 0;
 let autonomousBestTc = 0;
 let autonomousStartTime = Date.now();
 
+const pipelineStageMetrics = {
+  chemistryRejects: 0,
+  stabilityPrefilterRejects: 0,
+  surrogateRejects: 0,
+  formationEnergyRejects: 0,
+  gbTcRejects: 0,
+  physicsPrefilterRejects: 0,
+  phononRejects: 0,
+  belowTierRejects: 0,
+  duplicateRejects: 0,
+  featureExtractionFails: 0,
+  prototypeAttempts: 0,
+  prototypeSuccesses: 0,
+  xtbAttempts: 0,
+  xtbSuccesses: 0,
+  totalPassed: 0,
+};
+
 interface LastCycleCandidate {
   formula: string;
   tc: number;
@@ -2394,16 +2412,19 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       formula = String(formula ?? "");
     }
     if (!formula || !isValidFormula(formula)) {
+      pipelineStageMetrics.chemistryRejects++;
       return { passed: false, tc: 0, reason: "invalid-elements" };
     }
 
     const existingCandidate = await storage.getSuperconductorByFormula(formula);
     if (existingCandidate) {
+      pipelineStageMetrics.duplicateRejects++;
       return { passed: false, tc: existingCandidate.predictedTc ?? 0, reason: "duplicate" };
     }
 
     const stabilityScreen = passesStabilityPreFilter(formula);
     if (!stabilityScreen.pass) {
+      pipelineStageMetrics.stabilityPrefilterRejects++;
       emit("log", {
         phase: "autonomous-loop",
         event: "Stability pre-filter rejected",
@@ -2415,29 +2436,34 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     const surrogateResult = surrogateScreen(formula, 3);
     if (!surrogateResult.pass) {
+      pipelineStageMetrics.surrogateRejects++;
       return { passed: false, tc: surrogateResult.predictedTc, reason: `surrogate-reject: Tc=${surrogateResult.predictedTc}K, ${surrogateResult.reasoning.join("; ")}` };
     }
 
     try {
       const miedemaEf = computeMiedemaFormationEnergy(formula);
       if (miedemaEf < -4.0 || miedemaEf > 2.0) {
+        pipelineStageMetrics.formationEnergyRejects++;
         console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-4, 2], rejecting`);
         return { passed: false, tc: 0, reason: `formation-energy-insane: ${miedemaEf.toFixed(3)} eV/atom` };
       }
     } catch {}
 
     if (KNOWN_COMPOUNDS.has(normalizeFormula(formula))) {
+      pipelineStageMetrics.duplicateRejects++;
       return { passed: false, tc: 0, reason: "known-compound" };
     }
 
     const family = classifyFamily(formula);
     const features = extractFeatures(formula);
     if (!features) {
+      pipelineStageMetrics.featureExtractionFails++;
       return { passed: false, tc: 0, reason: "feature-extraction-failed" };
     }
 
     const gbResult = gbPredict(features);
     if (gbResult.tcPredicted < 5) {
+      pipelineStageMetrics.gbTcRejects++;
       return { passed: false, tc: gbResult.tcPredicted, reason: "low-gb-tc" };
     }
 
@@ -2461,6 +2487,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     const physicsPred = physicsPredictor.predict(features);
     const preFilter = physicsPredictor.preFilter(physicsPred);
     if (!preFilter.pass) {
+      pipelineStageMetrics.physicsPrefilterRejects++;
       return { passed: false, tc: Math.round(primaryTc), reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
     }
 
@@ -2475,18 +2502,25 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       verificationStage: 0,
     };
 
+    pipelineStageMetrics.prototypeAttempts++;
     const structureBatch = await runStructurePredictionBatch(emit, [candidate as any]);
     const structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
+    if (structureResult) {
+      pipelineStageMetrics.prototypeSuccesses++;
+    }
 
     try {
       await runConvexHullAnalysis(emit, formula);
     } catch {}
 
     try {
+      pipelineStageMetrics.xtbAttempts++;
       const phononCheck = await runXTBPhononCheck(formula);
       if (phononCheck) {
+        pipelineStageMetrics.xtbSuccesses++;
         const severeInstability = (phononCheck as any).severeInstability;
         if (severeInstability) {
+          pipelineStageMetrics.phononRejects++;
           const reason = (phononCheck as any).instabilityReason || "severe phonon instability";
           console.log(`[Autonomous] ${formula}: REJECTED — ${reason}`);
           return { passed: false, tc: 0, reason: `phonon-instability: ${reason}` };
@@ -2555,6 +2589,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     }
 
     if (tier === 0) {
+      pipelineStageMetrics.belowTierRejects++;
       return { passed: false, tc: finalTc, reason: "below-tier3-thresholds" };
     }
 
@@ -3279,7 +3314,21 @@ async function runAutonomousFastPath() {
 
       try {
         const els = parseFormulaElements(formula);
-        rlAgent.recordElementOutcome(els, result.tc, result.passed);
+        let rejectCategory: string | undefined;
+        if (!result.passed && result.reason) {
+          if (result.reason.startsWith("invalid-elements") || result.reason.startsWith("formation-energy")) {
+            rejectCategory = "chemistry_reject";
+          } else if (result.reason.startsWith("stability-prefilter") || result.reason.startsWith("surrogate-reject")) {
+            rejectCategory = "stability_reject";
+          } else if (result.reason.startsWith("phonon-instability")) {
+            rejectCategory = "phonon_reject";
+          } else if (result.reason.startsWith("physics-prefilter") || result.reason.startsWith("low-gb-tc")) {
+            rejectCategory = "tc_too_low";
+          } else if (result.reason.startsWith("below-tier3")) {
+            rejectCategory = "tc_too_low";
+          }
+        }
+        rlAgent.recordElementOutcome(els, result.tc, result.passed, rejectCategory);
       } catch {}
 
       if (result.tc > batchBestTc) batchBestTc = result.tc;
@@ -3472,6 +3521,7 @@ async function runAutonomousFastPath() {
       if (result.passed) {
         passed++;
         autonomousTotalPassed++;
+        pipelineStageMetrics.totalPassed++;
         if (result.tc > bestTcThisBatch) {
           bestTcThisBatch = result.tc;
           bestFormulaThisBatch = formula;
@@ -3712,6 +3762,19 @@ export async function getAutonomousLoopStats() {
     correlationEngine: getCorrelationEngineStats(),
     crystalGrowth: getCrystalGrowthStats(),
     experimentPlanner: getExperimentPlannerStats(),
+    pipelineStageMetrics: {
+      ...pipelineStageMetrics,
+      prototypeSuccessRate: pipelineStageMetrics.prototypeAttempts > 0
+        ? Math.round(pipelineStageMetrics.prototypeSuccesses / pipelineStageMetrics.prototypeAttempts * 1000) / 1000 : 0,
+      chemistryRejectRate: autonomousTotalScreened > 0
+        ? Math.round((pipelineStageMetrics.chemistryRejects + pipelineStageMetrics.stabilityPrefilterRejects) / autonomousTotalScreened * 1000) / 1000 : 0,
+      phononRejectRate: autonomousTotalScreened > 0
+        ? Math.round(pipelineStageMetrics.phononRejects / autonomousTotalScreened * 1000) / 1000 : 0,
+      xtbSuccessRate: pipelineStageMetrics.xtbAttempts > 0
+        ? Math.round(pipelineStageMetrics.xtbSuccesses / pipelineStageMetrics.xtbAttempts * 1000) / 1000 : 0,
+      overallPassRate: autonomousTotalScreened > 0
+        ? Math.round(pipelineStageMetrics.totalPassed / autonomousTotalScreened * 1000) / 1000 : 0,
+    },
     lastCycleCandidates,
     lastCycleFamilyCounts,
     fullDFTQueue: await getDFTQueueStats().catch(() => null),
