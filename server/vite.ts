@@ -29,12 +29,6 @@ export async function setupVite(server: Server, app: Express) {
     appType: "custom",
   });
 
-  app.use("/@vite/client", (_req, res) => {
-    res.status(200).set({ "Content-Type": "application/javascript" }).end(
-      "export function createHotContext(){return{accept(){},dispose(){},prune(){},decline(){},invalidate(){},on(){},send(){},data:{}};}export function updateStyle(){}export function removeStyle(){}export default {};"
-    );
-  });
-
   app.use(vite.middlewares);
 
   app.use("/{*path}", async (req, res, next) => {
@@ -54,8 +48,7 @@ export async function setupVite(server: Server, app: Express) {
         `src="/src/main.tsx"`,
         `src="/src/main.tsx?v=${nanoid()}"`,
       );
-      let page = await vite.transformIndexHtml(url, template);
-      page = page.replace(/<script type="module" src="\/@vite\/client"><\/script>\s*/g, '');
+      const page = await vite.transformIndexHtml(url, template);
       res.status(200).set({ "Content-Type": "text/html" }).end(page);
     } catch (e) {
       vite.ssrFixStacktrace(e as Error);
