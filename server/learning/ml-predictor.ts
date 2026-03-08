@@ -138,7 +138,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const hasCu = elements.includes("Cu");
   const hasO = elements.includes("O");
   const dWaveSymmetry = hasCu && hasO && elements.length >= 3;
-  const layeredStructure = (mat?.spacegroup?.includes("P4") || mat?.spacegroup?.includes("Pmmm") || mat?.spacegroup?.includes("I4")) ?? false;
+  const sg = mat?.spacegroup ?? "";
+  const layeredStructure = sg.includes("P4") || sg.includes("Pmmm") || sg.includes("I4") || sg.includes("R-3m") || sg.includes("P63/mmc") || sg.includes("P6/mmm") || sg.includes("C2/m") || sg.includes("Cmcm");
 
   let cooperPairStrength = (hasTransitionMetal ? 0.3 : 0) + (hasHydrogen ? 0.25 : 0) +
     (dWaveSymmetry ? 0.2 : 0) + (layeredStructure ? 0.15 : 0) + (enSpread > 1.5 ? 0.1 : 0);
@@ -159,8 +160,16 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const phononCouplingEstimate = Math.min(1.0, useLambda / 3.0);
 
-  let electronDensityEstimate = electronic.metallicity > 0.5 ? 0.5 + electronic.densityOfStatesAtFermi * 0.05 :
-    (mat?.bandGap === 0 || mat?.bandGap === null) ? 0.6 : 0.3;
+  let electronDensityEstimate: number;
+  if (electronic.metallicity > 0.5) {
+    electronDensityEstimate = 0.5 + electronic.densityOfStatesAtFermi * 0.05;
+  } else if (mat?.bandGap != null && mat.bandGap > 0) {
+    electronDensityEstimate = mat.bandGap > 3.0 ? 0.05 : 0.3 - mat.bandGap * 0.08;
+  } else if (hasTransitionMetal || hasRareEarth || hasHydrogen) {
+    electronDensityEstimate = 0.5;
+  } else {
+    electronDensityEstimate = 0.2;
+  }
 
   const meissnerPotential = cooperPairStrength * 0.3 + phononCouplingEstimate * 0.35 +
     electronDensityEstimate * 0.2 + (layeredStructure ? 0.1 : 0) + (electronic.metallicity > 0.7 ? 0.05 : 0);

@@ -117,14 +117,15 @@ const ELECTRONEGATIVITY: Record<string, number> = {
   Pr: 1.13, Nd: 1.14, Sm: 1.17, Eu: 1.20, Gd: 1.20, Tb: 1.10, Dy: 1.22, Ho: 1.23,
   Er: 1.24, Tm: 1.25, Yb: 1.10, Lu: 1.27, Hf: 1.30, Ta: 1.50, W: 2.36, Re: 1.90,
   Os: 2.20, Ir: 2.20, Pt: 2.28, Au: 2.54, Hg: 2.00, Tl: 1.62, Pb: 2.33, Bi: 2.02,
-  Po: 2.00, At: 2.20, Th: 1.30, U: 1.38,
+  Po: 2.00, At: 2.20, Fr: 0.70, Ra: 0.90, Ac: 1.10,
+  Th: 1.30, Pa: 1.50, U: 1.38, Np: 1.36, Pu: 1.28, Am: 1.30, Pm: 1.13,
 };
 
 const VALID_ELEMENTS = new Set([
   ...Object.keys(ELECTRONEGATIVITY),
-  "Rn", "Fr", "Ra", "Ac", "Pa", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+  "Rn", "Cm", "Bk", "Cf",
   "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
-  "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og", "Pm"
+  "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"
 ]);
 
 const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);

@@ -638,7 +638,9 @@ async function runPhase7_Superconductor() {
               });
 
               if (passedStability) totalScCandidates++;
-            } catch {}
+            } catch (invErr: any) {
+              console.log(`[Engine] Inverse design candidate insert failed: ${invErr?.message?.slice(0, 100) ?? "unknown"}`);
+            }
           }
 
           processInverseResults(campaign, inverseResults);
@@ -694,7 +696,9 @@ async function runPhase7_Superconductor() {
                     });
                     totalScCandidates++;
                   }
-                } catch {}
+                } catch (gdErr: any) {
+                  console.log(`[Engine] Gradient descent candidate insert failed: ${gdErr?.message?.slice(0, 100) ?? "unknown"}`);
+                }
               }
             }
             emit("log", {
@@ -744,7 +748,9 @@ async function runPhase7_Superconductor() {
                 }
               }
             }
-          } catch {}
+          } catch (pillarErr: any) {
+            console.log(`[Engine] Pillar search failed: ${pillarErr?.message?.slice(0, 100) ?? "unknown"}`);
+          }
         }
 
         if (pillarResult.formulas.length > 0) {
@@ -867,7 +873,9 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           dataSource: "Kinetic Stability Engine",
         });
       }
-    } catch {}
+    } catch (kineticErr: any) {
+      console.log(`[Engine] Kinetic stability check failed: ${kineticErr?.message?.slice(0, 80) ?? "unknown"}`);
+    }
 
     const existingMlFeatures = (candidateData.mlFeatures as Record<string, any>) ?? {};
     const enrichedMlFeatures = {

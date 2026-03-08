@@ -230,14 +230,18 @@ export function assessHighPressureStability(
 
   const bm = relaxStructureAtPressure(formula, targetPressure);
 
-  const compressionRatio = bm.compressedVolume / (bm.compressedVolume / Math.pow(bm.compressedLattice.a / (bm.compressedLattice.a * 1.0), 3) || bm.compressedVolume);
+  const a0est = Math.pow(bm.compressedVolume / (bm.compressedLattice.a > 0 ? bm.compressedLattice.a : 1), 1/3);
+  const compressionRatio = a0est > 0 ? bm.compressedLattice.a / a0est : 1.0;
 
   const hCount = counts["H"] || 0;
   const hRatio = (totalAtoms - hCount) > 0 ? hCount / (totalAtoms - hCount) : 0;
 
   let phononStable = true;
   if (targetPressure > 300) {
-    phononStable = Math.random() > 0.3;
+    let fHash = 0;
+    for (let ci = 0; ci < formula.length; ci++) fHash = ((fHash << 5) - fHash + formula.charCodeAt(ci)) | 0;
+    const pseudoRand = ((fHash * 2654435761) >>> 0) / 4294967296;
+    phononStable = pseudoRand > 0.3 && bm.bulkModulus > 30;
   } else if (targetPressure > 200) {
     phononStable = bm.bulkModulus > 50;
   }

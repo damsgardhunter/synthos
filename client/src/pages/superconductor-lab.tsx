@@ -424,7 +424,7 @@ function SynthesisCard({ process }: { process: SynthesisProcess }) {
           {equipment.length > 0 && <span>Equipment: {equipment.length} items</span>}
         </div>
 
-        {process.safetyNotes && (
+        {process.safetyNotes && process.safetyNotes.trim().length > 0 && (
           <div className="flex items-start gap-1.5 p-2 bg-red-50 dark:bg-red-950/30 rounded-md text-xs text-red-700 dark:text-red-400">
             <Shield className="h-3 w-3 mt-0.5 flex-shrink-0" />
             <span>{process.safetyNotes}</span>

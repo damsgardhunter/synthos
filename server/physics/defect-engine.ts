@@ -265,8 +265,9 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
 
         const asComp = { ...comp };
         const swapFrac = Math.min(0.08, Math.max(0.005, 0.03 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
-        asComp[elA] = (asComp[elA] || 0) - swapFrac * (asComp[elA] || 1);
-        asComp[elB] = (asComp[elB] || 0) + swapFrac * (asComp[elA] || 1);
+        const originalA = asComp[elA] || 1;
+        asComp[elA] = (asComp[elA] || 0) - swapFrac * originalA;
+        asComp[elB] = (asComp[elB] || 0) + swapFrac * originalA;
         variants.push({
           type: DefectType.Antisite,
           site: `${elA}<->${elB}`,

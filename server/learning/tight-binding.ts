@@ -811,8 +811,9 @@ export function computeTightBindingDOS(bands: TBBandStructure): TBDOS {
   const eMin = Math.min(...allEnergies);
   const eMax = Math.max(...allEnergies);
   const nBins = 200;
-  const dE = (eMax - eMin) / nBins || 0.1;
-  const broadening = dE * 2;
+  const rawDE = (eMax - eMin) / nBins;
+  const dE = rawDE > 1e-6 ? rawDE : 0.01;
+  const broadening = Math.max(dE * 2, 0.005);
 
   const energies: number[] = [];
   const dos: number[] = [];
