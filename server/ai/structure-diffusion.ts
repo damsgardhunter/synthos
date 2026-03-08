@@ -899,7 +899,8 @@ function checkFamilyConstraints(formula: string, family: ChemicalFamily | null):
   return true;
 }
 
-export { CHEMICAL_FAMILIES, VALENCE_ELECTRONS, validateElectronCount, parseFormulaElements };
+export { SC_MOTIF_LIBRARY, CHEMICAL_FAMILIES, VALENCE_ELECTRONS, validateElectronCount, parseFormulaElements, selectFamilyForMotif };
+export type { StructuralMotif, ChemicalFamily };
 
 const stats: StructureDiffusionStats = {
   totalMotifGenerated: 0,
