@@ -71,6 +71,17 @@ interface RLState {
   cycleNumber: number;
 }
 
+const CHEMICAL_FAMILY_ACTIONS = [
+  { name: "hydride", hostGroups: [5, 1], anionGroups: [8], biasStructures: [6, 7, 8] },
+  { name: "intermetallic", hostGroups: [2, 3, 4], anionGroups: [6, 7], biasStructures: [0, 14, 5] },
+  { name: "layered-pnictide", hostGroups: [1, 5], anionGroups: [7], biasStructures: [4, 8] },
+  { name: "boride", hostGroups: [1, 2], anionGroups: [7], biasStructures: [8, 10] },
+  { name: "cuprate", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 8] },
+  { name: "chalcogenide", hostGroups: [2, 3, 4], anionGroups: [7], biasStructures: [11, 8] },
+  { name: "kagome-metal", hostGroups: [2, 3], anionGroups: [6, 7], biasStructures: [9] },
+  { name: "oxide-perovskite", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 12] },
+] as const;
+
 interface RLAction {
   elementGroup1: number;
   elementGroup2: number;
@@ -80,6 +91,7 @@ interface RLAction {
   hydrogenDensity: number;
   electronCount: number;
   orbitalConfiguration: number;
+  chemicalFamily: number;
 }
 
 interface Experience {
@@ -129,6 +141,7 @@ interface PolicyWeights {
   hydrogenDensity: number[];
   electronCount: number[];
   orbitalConfiguration: number[];
+  chemicalFamily: number[];
 }
 
 export interface PhysicsAwareRewardContext {
@@ -142,6 +155,110 @@ export interface PhysicsAwareRewardContext {
   correlationStrength?: number;
   phononFrequency?: number;
   bandFlatness?: number;
+  motifName?: string;
+  chemicalFamily?: string;
+  electronCountValid?: boolean;
+  vecPerTM?: number;
+  dElectronCount?: number;
+  synthesisScore?: number;
+}
+
+const KNOWN_SC_MOTIFS = new Set([
+  "A15", "perovskite", "ThCr2Si2", "NaCl-type", "AlB2-type",
+  "clathrate", "layered-cuprate", "BCC-hydride", "FCC-hydride",
+  "Heusler", "Chevrel", "skutterudite", "pyrochlore", "anti-perovskite",
+  "infinite-layer", "Ruddlesden-Popper", "nickelate", "MgB2-sigma",
+  "TMD", "fullerene", "heavy-fermion", "borocarbide", "BiS2-layer",
+  "1T-prime-TMD", "carbon-clathrate", "oxide-interface", "kagome",
+]);
+
+const KNOWN_FAMILIES = new Set([
+  "hydride", "intermetallic", "layered-pnictide", "boride",
+  "cuprate", "chalcogenide", "kagome-metal", "oxide-perovskite",
+]);
+
+const MOTIF_FAMILY_MAP: Record<string, string[]> = {
+  "A15": ["intermetallic"],
+  "perovskite": ["oxide-perovskite", "cuprate"],
+  "ThCr2Si2": ["layered-pnictide", "intermetallic"],
+  "AlB2-type": ["boride"],
+  "MgB2-sigma": ["boride"],
+  "clathrate": ["hydride"],
+  "BCC-hydride": ["hydride"],
+  "FCC-hydride": ["hydride"],
+  "layered-cuprate": ["cuprate"],
+  "infinite-layer": ["cuprate"],
+  "Ruddlesden-Popper": ["cuprate", "oxide-perovskite"],
+  "nickelate": ["cuprate", "oxide-perovskite"],
+  "Heusler": ["intermetallic"],
+  "Chevrel": ["chalcogenide", "intermetallic"],
+  "skutterudite": ["intermetallic"],
+  "pyrochlore": ["oxide-perovskite"],
+  "anti-perovskite": ["oxide-perovskite", "intermetallic"],
+  "TMD": ["chalcogenide"],
+  "1T-prime-TMD": ["chalcogenide"],
+  "BiS2-layer": ["chalcogenide"],
+  "fullerene": ["intermetallic"],
+  "heavy-fermion": ["intermetallic"],
+  "borocarbide": ["boride", "intermetallic"],
+  "carbon-clathrate": ["intermetallic"],
+  "oxide-interface": ["oxide-perovskite"],
+  "kagome": ["kagome-metal"],
+};
+
+function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
+  if (!context.motifName) return 0;
+  if (KNOWN_SC_MOTIFS.has(context.motifName)) return 1.0;
+  const motifArray = Array.from(KNOWN_SC_MOTIFS);
+  for (let i = 0; i < motifArray.length; i++) {
+    if (context.motifName.toLowerCase().includes(motifArray[i].toLowerCase())) return 0.7;
+  }
+  return 0.2;
+}
+
+function computeFamilyConsistencyScore(context: PhysicsAwareRewardContext): number {
+  if (!context.chemicalFamily && !context.motifName) return 0;
+  if (context.chemicalFamily && KNOWN_FAMILIES.has(context.chemicalFamily)) {
+    if (context.motifName) {
+      const allowedFamilies = MOTIF_FAMILY_MAP[context.motifName];
+      if (allowedFamilies && allowedFamilies.includes(context.chemicalFamily)) {
+        return 1.0;
+      }
+      if (allowedFamilies) return 0.2;
+    }
+    return 0.6;
+  }
+  if (context.chemicalFamily) return 0.3;
+  return 0;
+}
+
+function computeElectronCountStabilityScore(context: PhysicsAwareRewardContext): number {
+  if (context.electronCountValid === true) return 1.0;
+  if (context.electronCountValid === false) return 0.0;
+
+  let score = 0.5;
+  if (context.vecPerTM !== undefined) {
+    if (context.vecPerTM > 12) return 0.0;
+    if (context.vecPerTM >= 4 && context.vecPerTM <= 10) score = 0.8;
+    else if (context.vecPerTM >= 2 && context.vecPerTM <= 12) score = 0.5;
+    else score = 0.2;
+  }
+  if (context.dElectronCount !== undefined) {
+    if (context.motifName) {
+      const motifLower = context.motifName.toLowerCase();
+      if (motifLower.includes("cuprate") || motifLower.includes("infinite-layer")) {
+        if (context.dElectronCount === 9) score = Math.max(score, 1.0);
+        else if (context.dElectronCount === 8 || context.dElectronCount === 10) score = Math.max(score, 0.6);
+        else score = Math.min(score, 0.3);
+      }
+      if (motifLower.includes("pnictide") || motifLower === "thcr2si2") {
+        if (context.dElectronCount === 6) score = Math.max(score, 1.0);
+        else if (context.dElectronCount >= 5 && context.dElectronCount <= 7) score = Math.max(score, 0.7);
+        else score = Math.min(score, 0.3);
+      }
+    }
+  }
+  return score;
 }
 
 function softmax(logits: number[], temperature: number = 1.0): number[] {
@@ -237,6 +354,15 @@ function computePhysicsPrincipleReward(context: PhysicsAwareRewardContext): numb
     }
   }
 
+  const motifScore = computeMotifValidityScore(context);
+  reward += motifScore * 0.25;
+
+  const familyScore = computeFamilyConsistencyScore(context);
+  reward += familyScore * 0.2;
+
+  const electronScore = computeElectronCountStabilityScore(context);
+  reward += electronScore * 0.15;
+
   return reward;
 }
 
@@ -282,6 +408,7 @@ export class RLChemicalSpaceAgent {
       hydrogenDensity: new Array(HYDROGEN_DENSITIES.length).fill(0),
       electronCount: new Array(ELECTRON_COUNTS.length).fill(0),
       orbitalConfiguration: new Array(ORBITAL_CONFIGS.length).fill(0),
+      chemicalFamily: new Array(CHEMICAL_FAMILY_ACTIONS.length).fill(0),
     };
 
     this.initializePriors();
@@ -323,6 +450,12 @@ export class RLChemicalSpaceAgent {
     this.policy.orbitalConfiguration[2] = 0.25;
     this.policy.orbitalConfiguration[5] = 0.15;
 
+    this.policy.chemicalFamily[0] = 0.3;
+    this.policy.chemicalFamily[1] = 0.2;
+    this.policy.chemicalFamily[2] = 0.25;
+    this.policy.chemicalFamily[3] = 0.2;
+    this.policy.chemicalFamily[4] = 0.3;
+
     for (const prior of KNOWN_PAIR_PRIORS) {
       const key = this.makeElementPairKey(prior.el1, prior.el2);
       this.policy.elementPairSpecific.set(key, prior.bias);
@@ -336,7 +469,9 @@ export class RLChemicalSpaceAgent {
     const effectiveEpsilon = Math.min(this.epsilon + stagnationBoost, 0.5);
 
     if (Math.random() < effectiveEpsilon) {
+      const famIdx = Math.floor(Math.random() * CHEMICAL_FAMILY_ACTIONS.length);
       return {
+        chemicalFamily: famIdx,
         elementGroup1: Math.floor(Math.random() * ELEMENT_GROUPS.length),
         elementGroup2: Math.floor(Math.random() * ELEMENT_GROUPS.length),
         stoichTemplate: Math.floor(Math.random() * STOICH_TEMPLATES.length),
@@ -350,12 +485,30 @@ export class RLChemicalSpaceAgent {
 
     const contextBias = this.computeContextBias(stateFeatures);
 
-    const elLogits = this.policy.elementGroup.map((w, i) => w + contextBias.element[i]);
+    const famLogits = this.policy.chemicalFamily.map((w, i) => w + (contextBias.family?.[i] ?? 0));
+    const famProbs = softmax(famLogits, this.temperature);
+    const chemicalFamily = sampleFromDistribution(famProbs);
+
+    const selectedFamily = CHEMICAL_FAMILY_ACTIONS[chemicalFamily];
+
+    const hostSet = new Set(selectedFamily.hostGroups as readonly number[]);
+    const anionSet = new Set(selectedFamily.anionGroups as readonly number[]);
+    const structSet = new Set(selectedFamily.biasStructures as readonly number[]);
+
+    const elLogits = this.policy.elementGroup.map((w, i) => {
+      let bias = w + contextBias.element[i];
+      if (hostSet.has(i)) bias += 0.4;
+      return bias;
+    });
     const elProbs = softmax(elLogits, this.temperature);
     const elementGroup1 = sampleFromDistribution(elProbs);
 
     const pairLogits = this.policy.elementPairBias[elementGroup1].map(
-      (w, i) => w + this.policy.elementGroup[i] + contextBias.element[i]
+      (w, i) => {
+        let bias = w + this.policy.elementGroup[i] + contextBias.element[i];
+        if (anionSet.has(i)) bias += 0.3;
+        return bias;
+      }
     );
     const pairProbs = softmax(pairLogits, this.temperature);
     const elementGroup2 = sampleFromDistribution(pairProbs);
@@ -364,7 +517,11 @@ export class RLChemicalSpaceAgent {
     const stoichProbs = softmax(stoichLogits, this.temperature);
     const stoichTemplate = sampleFromDistribution(stoichProbs);
 
-    const structLogits = this.policy.structureType.map((w, i) => w + contextBias.struct[i]);
+    const structLogits = this.policy.structureType.map((w, i) => {
+      let bias = w + contextBias.struct[i];
+      if (structSet.has(i)) bias += 0.3;
+      return bias;
+    });
     const structProbs = softmax(structLogits, this.temperature);
     const structureType = sampleFromDistribution(structProbs);
 
@@ -372,7 +529,11 @@ export class RLChemicalSpaceAgent {
     const layerProbs = softmax(layerLogits, this.temperature);
     const layeringDimension = sampleFromDistribution(layerProbs);
 
-    const hDensLogits = this.policy.hydrogenDensity.map((w, i) => w + contextBias.hDensity[i]);
+    const hDensLogits = this.policy.hydrogenDensity.map((w, i) => {
+      let bias = w + contextBias.hDensity[i];
+      if (chemicalFamily === 0 && i >= 2) bias += 0.4;
+      return bias;
+    });
     const hDensProbs = softmax(hDensLogits, this.temperature);
     const hydrogenDensity = sampleFromDistribution(hDensProbs);
 
@@ -385,7 +546,7 @@ export class RLChemicalSpaceAgent {
     const orbitalConfiguration = sampleFromDistribution(orbProbs);
 
     return {
-      elementGroup1, elementGroup2, stoichTemplate, structureType,
+      chemicalFamily, elementGroup1, elementGroup2, stoichTemplate, structureType,
       layeringDimension, hydrogenDensity, electronCount, orbitalConfiguration,
     };
   }
@@ -398,6 +559,7 @@ export class RLChemicalSpaceAgent {
     hDensity: number[];
     eCount: number[];
     orbital: number[];
+    family: number[];
   } {
     const stagnation = stateFeatures[4];
     const bestTcNorm = stateFeatures[0];
@@ -469,6 +631,17 @@ export class RLChemicalSpaceAgent {
       orbitalBias[2] += 0.15;
     }
 
+    const familyBias = new Array(CHEMICAL_FAMILY_ACTIONS.length).fill(0);
+    if (bestTcNorm > 0.3) {
+      familyBias[0] += 0.2;
+      familyBias[4] += 0.15;
+    }
+    if (stagnation > 0.3) {
+      for (let i = 0; i < familyBias.length; i++) {
+        familyBias[i] += (Math.random() - 0.5) * stagnation * 0.4;
+      }
+    }
+
     return {
       element: elementBias,
       stoich: stoichBias,
@@ -477,6 +650,7 @@ export class RLChemicalSpaceAgent {
       hDensity: hDensityBias,
       eCount: eCountBias,
       orbital: orbitalBias,
+      family: familyBias,
     };
   }
 
@@ -513,6 +687,10 @@ export class RLChemicalSpaceAgent {
     this.policy.hydrogenDensity[action.hydrogenDensity] += lr * advantageReward * 0.9;
     this.policy.electronCount[action.electronCount] += lr * advantageReward * 0.7;
     this.policy.orbitalConfiguration[action.orbitalConfiguration] += lr * advantageReward * 0.7;
+
+    if (action.chemicalFamily !== undefined && action.chemicalFamily < this.policy.chemicalFamily.length) {
+      this.policy.chemicalFamily[action.chemicalFamily] += lr * advantageReward * 1.0;
+    }
 
     this.policy.elementPairBias[action.elementGroup1][action.elementGroup2] += lr * advantageReward * 0.5;
     this.policy.elementPairBias[action.elementGroup2][action.elementGroup1] += lr * advantageReward * 0.5;
@@ -554,6 +732,9 @@ export class RLChemicalSpaceAgent {
       this.policy.hydrogenDensity[exp.action.hydrogenDensity] += lr * advantage * decay * 0.9;
       this.policy.electronCount[exp.action.electronCount] += lr * advantage * decay * 0.7;
       this.policy.orbitalConfiguration[exp.action.orbitalConfiguration] += lr * advantage * decay * 0.7;
+      if (exp.action.chemicalFamily !== undefined && exp.action.chemicalFamily < this.policy.chemicalFamily.length) {
+        this.policy.chemicalFamily[exp.action.chemicalFamily] += lr * advantage * decay;
+      }
     }
   }
 
@@ -704,29 +885,100 @@ export class RLChemicalSpaceAgent {
     noveltyBonus: number = 0,
     physicsContext?: PhysicsAwareRewardContext
   ): number {
-    let reward = 0;
+    const W_TC = 0.35;
+    const W_STABILITY = 0.20;
+    const W_MOTIF = 0.15;
+    const W_ELECTRON_TOPOLOGY = 0.10;
+    const W_NOVELTY = 0.10;
+    const W_SYNTHESIS = 0.10;
 
     const tcNorm = Math.min(1, tcPredicted / 400);
-    reward += tcNorm * 2.0;
-
+    let tcScore = tcNorm * 2.0;
     if (tcPredicted > bestTcBefore) {
       const improvement = (tcPredicted - bestTcBefore) / Math.max(1, bestTcBefore);
-      reward += improvement * 5.0;
+      tcScore += improvement * 3.0;
     }
-
     if (pipelinePassed) {
-      reward += 1.0;
+      tcScore += 0.5;
     }
-
-    reward += stabilityScore * 0.5;
-    reward += noveltyBonus * 0.3;
-
     if (tcPredicted < 5) {
-      reward -= 0.5;
+      tcScore -= 0.5;
     }
+
+    const stabilityComponent = stabilityScore;
+
+    let motifScore = 0;
+    if (physicsContext) {
+      motifScore = computeMotifValidityScore(physicsContext);
+      const familyScore = computeFamilyConsistencyScore(physicsContext);
+      motifScore = motifScore * 0.6 + familyScore * 0.4;
+    }
+
+    let electronTopologyScore = 0;
+    if (physicsContext) {
+      const electronScore = computeElectronCountStabilityScore(physicsContext);
+      let topologyBonus = 0;
+      if (physicsContext.nestingScore !== undefined && physicsContext.nestingScore > 0.5) {
+        topologyBonus += physicsContext.nestingScore * 0.3;
+      }
+      if (physicsContext.vanHoveProximity !== undefined && physicsContext.vanHoveProximity > 0.7) {
+        topologyBonus += physicsContext.vanHoveProximity * 0.3;
+      }
+      if (physicsContext.bandFlatness !== undefined && physicsContext.bandFlatness > 0.5) {
+        topologyBonus += physicsContext.bandFlatness * 0.2;
+      }
+      if (physicsContext.dimensionality !== undefined) {
+        if (physicsContext.dimensionality >= 1.5 && physicsContext.dimensionality <= 2.5) {
+          topologyBonus += 0.2;
+        }
+      }
+      electronTopologyScore = electronScore * 0.5 + Math.min(1, topologyBonus) * 0.5;
+    }
+
+    const noveltyComponent = Math.min(1, noveltyBonus);
+
+    let synthesisComponent = 0;
+    if (physicsContext) {
+      if (physicsContext.synthesisScore !== undefined) {
+        synthesisComponent = Math.min(1, physicsContext.synthesisScore);
+      } else {
+        synthesisComponent = 0.5;
+        if (physicsContext.lambda !== undefined && physicsContext.lambda >= 0.5 && physicsContext.lambda <= 3.0) {
+          synthesisComponent += 0.15;
+        }
+        if (physicsContext.metallicity !== undefined && physicsContext.metallicity >= 0.5) {
+          synthesisComponent += 0.1 * physicsContext.metallicity;
+        }
+        if (physicsContext.orbitalCharacter !== undefined) {
+          if (physicsContext.orbitalCharacter === "d" || physicsContext.orbitalCharacter === "sd") {
+            synthesisComponent += 0.1;
+          }
+        }
+        if (physicsContext.phononFrequency !== undefined && physicsContext.phononFrequency > 500 && physicsContext.phononFrequency < 2000) {
+          synthesisComponent += 0.1;
+        }
+        if (physicsContext.correlationStrength !== undefined) {
+          if (physicsContext.correlationStrength > 0.3 && physicsContext.correlationStrength < 0.8) {
+            synthesisComponent += 0.1;
+          } else if (physicsContext.correlationStrength >= 0.8) {
+            synthesisComponent -= 0.15;
+          }
+        }
+        synthesisComponent = Math.min(1, Math.max(0, synthesisComponent));
+      }
+    }
+
+    const reward =
+      W_TC * tcScore +
+      W_STABILITY * stabilityComponent +
+      W_MOTIF * motifScore +
+      W_ELECTRON_TOPOLOGY * electronTopologyScore +
+      W_NOVELTY * noveltyComponent +
+      W_SYNTHESIS * synthesisComponent;
 
     if (physicsContext) {
-      reward += computePhysicsPrincipleReward(physicsContext);
+      const physicsBonus = computePhysicsPrincipleReward(physicsContext);
+      return reward + physicsBonus * 0.15;
     }
 
     return reward;

@@ -325,7 +325,581 @@ const SC_MOTIF_LIBRARY: StructuralMotif[] = [
     tcRange: [1, 15],
     pairingMechanism: "conventional phonon-mediated",
   },
+  {
+    name: "TMD-2H",
+    spaceGroup: "P6_3/mmc",
+    crystalSystem: "hexagonal",
+    embedding: {
+      coordination: 6, avgBondAngle: 82, layerSpacing: 6.2, cOverA: 3.6,
+      symmetryOrder: 24, electronCountPerSite: 4, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0, connectivityIndex: 0.75,
+      anisotropy: 0.85, voidFraction: 0.2,
+    },
+    siteRoles: [
+      { label: "M", multiplicity: 2, position: [0.333, 0.667, 0.25], role: "plane", preferredCategories: ["highCouplingTM"] },
+      { label: "X1", multiplicity: 2, position: [0.333, 0.667, 0.12], role: "plane", preferredCategories: ["chalcogen"] },
+      { label: "X2", multiplicity: 2, position: [0.333, 0.667, 0.38], role: "plane", preferredCategories: ["chalcogen"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 3.6 },
+    scAffinity: 0.74,
+    tcRange: [2, 15],
+    pairingMechanism: "CDW-phonon coupled",
+  },
+  {
+    name: "fullerene-A3C60",
+    spaceGroup: "Fm-3m",
+    crystalSystem: "cubic",
+    embedding: {
+      coordination: 12, avgBondAngle: 60, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 48, electronCountPerSite: 3, dimensionality: 3,
+      cageFraction: 0.85, interstitialFraction: 0.15, connectivityIndex: 0.65,
+      anisotropy: 0, voidFraction: 0.35,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 3, position: [0.25, 0.25, 0.25], role: "interstitial", preferredCategories: ["alkalineEarth", "rareEarth"] },
+      { label: "C60", multiplicity: 1, position: [0, 0, 0], role: "cage", preferredCategories: ["lightPhonon"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.70,
+    tcRange: [15, 45],
+    pairingMechanism: "molecular phonon-mediated",
+  },
+  {
+    name: "heavy-fermion-115",
+    spaceGroup: "P4/mmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 8, avgBondAngle: 90, layerSpacing: 7.5, cOverA: 1.6,
+      symmetryOrder: 16, electronCountPerSite: 5, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0.05, connectivityIndex: 0.7,
+      anisotropy: 0.8, voidFraction: 0.1,
+    },
+    siteRoles: [
+      { label: "RE", multiplicity: 1, position: [0, 0, 0], role: "reservoir", preferredCategories: ["rareEarth"] },
+      { label: "TM", multiplicity: 1, position: [0, 0, 0.5], role: "plane", preferredCategories: ["magneticTM"] },
+      { label: "X", multiplicity: 4, position: [0.5, 0, 0.31], role: "plane", preferredCategories: ["pBlockMetal", "pnictogen"] },
+      { label: "X2", multiplicity: 1, position: [0.5, 0.5, 0], role: "spacer", preferredCategories: ["pBlockMetal", "pnictogen"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1.6 },
+    scAffinity: 0.62,
+    tcRange: [0.5, 5],
+    pairingMechanism: "magnetically mediated",
+  },
+  {
+    name: "borocarbide-RTBC",
+    spaceGroup: "I4/mmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 6, avgBondAngle: 90, layerSpacing: 5.3, cOverA: 3.5,
+      symmetryOrder: 16, electronCountPerSite: 4, dimensionality: 2.5,
+      cageFraction: 0, interstitialFraction: 0.1, connectivityIndex: 0.82,
+      anisotropy: 0.55, voidFraction: 0.12,
+    },
+    siteRoles: [
+      { label: "R", multiplicity: 2, position: [0, 0, 0.35], role: "reservoir", preferredCategories: ["rareEarth"] },
+      { label: "T", multiplicity: 4, position: [0, 0.5, 0], role: "plane", preferredCategories: ["highCouplingTM", "magneticTM"] },
+      { label: "B", multiplicity: 4, position: [0, 0, 0.15], role: "framework", preferredCategories: ["lightPhonon"] },
+      { label: "C", multiplicity: 2, position: [0, 0, 0], role: "interstitial", preferredCategories: ["lightPhonon"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 3.5 },
+    scAffinity: 0.72,
+    tcRange: [5, 25],
+    pairingMechanism: "conventional phonon-mediated",
+  },
+  {
+    name: "carbon-clathrate",
+    spaceGroup: "Pm-3n",
+    crystalSystem: "cubic",
+    embedding: {
+      coordination: 4, avgBondAngle: 109.5, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 48, electronCountPerSite: 4, dimensionality: 3,
+      cageFraction: 0.9, interstitialFraction: 0.1, connectivityIndex: 0.95,
+      anisotropy: 0, voidFraction: 0.25,
+    },
+    siteRoles: [
+      { label: "C1", multiplicity: 24, position: [0.18, 0.18, 0], role: "cage", preferredCategories: ["lightPhonon"] },
+      { label: "C2", multiplicity: 16, position: [0.12, 0.12, 0.12], role: "cage", preferredCategories: ["lightPhonon"] },
+      { label: "G", multiplicity: 6, position: [0.25, 0, 0.5], role: "interstitial", preferredCategories: ["alkalineEarth", "rareEarth"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.78,
+    tcRange: [20, 100],
+    pairingMechanism: "covalent phonon-mediated",
+  },
+  {
+    name: "ThCr2Si2-pnictide",
+    spaceGroup: "I4/mmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 4, avgBondAngle: 109.5, layerSpacing: 6.5, cOverA: 3.2,
+      symmetryOrder: 16, electronCountPerSite: 6, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0.05, connectivityIndex: 0.78,
+      anisotropy: 0.82, voidFraction: 0.1,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 2, position: [0, 0, 0], role: "spacer", preferredCategories: ["alkalineEarth", "rareEarth"] },
+      { label: "T", multiplicity: 4, position: [0, 0.5, 0.25], role: "plane", preferredCategories: ["magneticTM", "highCouplingTM"] },
+      { label: "X", multiplicity: 4, position: [0, 0, 0.35], role: "plane", preferredCategories: ["pnictogen"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 3.2 },
+    scAffinity: 0.84,
+    tcRange: [15, 60],
+    pairingMechanism: "s+- spin fluctuation",
+  },
+  {
+    name: "anti-perovskite-SC",
+    spaceGroup: "Pm-3m",
+    crystalSystem: "cubic",
+    embedding: {
+      coordination: 6, avgBondAngle: 90, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 48, electronCountPerSite: 3, dimensionality: 3,
+      cageFraction: 0, interstitialFraction: 0.1, connectivityIndex: 0.92,
+      anisotropy: 0, voidFraction: 0.08,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 1, position: [0.5, 0.5, 0.5], role: "framework", preferredCategories: ["lightPhonon", "anion"] },
+      { label: "B", multiplicity: 1, position: [0, 0, 0], role: "framework", preferredCategories: ["highCouplingTM"] },
+      { label: "X", multiplicity: 3, position: [0.5, 0, 0], role: "framework", preferredCategories: ["highCouplingTM", "pBlockMetal"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.68,
+    tcRange: [3, 20],
+    pairingMechanism: "conventional phonon-mediated",
+  },
+  {
+    name: "Chevrel-phase",
+    spaceGroup: "R-3",
+    crystalSystem: "trigonal",
+    embedding: {
+      coordination: 6, avgBondAngle: 90, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 6, electronCountPerSite: 4, dimensionality: 3,
+      cageFraction: 0.4, interstitialFraction: 0.15, connectivityIndex: 0.75,
+      anisotropy: 0.15, voidFraction: 0.2,
+    },
+    siteRoles: [
+      { label: "M", multiplicity: 1, position: [0, 0, 0], role: "interstitial", preferredCategories: ["alkalineEarth", "rareEarth", "pBlockMetal"] },
+      { label: "Mo", multiplicity: 6, position: [0.2, 0.2, 0.2], role: "cage", preferredCategories: ["highCouplingTM"] },
+      { label: "X", multiplicity: 8, position: [0.35, 0.35, 0.05], role: "cage", preferredCategories: ["chalcogen"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.73,
+    tcRange: [5, 20],
+    pairingMechanism: "conventional phonon-mediated",
+  },
+  {
+    name: "BiS2-layer",
+    spaceGroup: "P4/nmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 4, avgBondAngle: 90, layerSpacing: 6.8, cOverA: 2.8,
+      symmetryOrder: 8, electronCountPerSite: 5, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0.08, connectivityIndex: 0.68,
+      anisotropy: 0.88, voidFraction: 0.18,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 2, position: [0, 0, 0], role: "spacer", preferredCategories: ["rareEarth"] },
+      { label: "O", multiplicity: 2, position: [0, 0.5, 0.1], role: "spacer", preferredCategories: ["anion"] },
+      { label: "Bi", multiplicity: 2, position: [0, 0, 0.35], role: "plane", preferredCategories: ["pBlockMetal"] },
+      { label: "S", multiplicity: 4, position: [0, 0.5, 0.4], role: "plane", preferredCategories: ["chalcogen"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 2.8 },
+    scAffinity: 0.60,
+    tcRange: [2, 12],
+    pairingMechanism: "conventional phonon-mediated",
+  },
+  {
+    name: "infinite-layer",
+    spaceGroup: "P4/mmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 4, avgBondAngle: 90, layerSpacing: 3.4, cOverA: 0.85,
+      symmetryOrder: 16, electronCountPerSite: 9, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0, connectivityIndex: 0.9,
+      anisotropy: 0.7, voidFraction: 0.05,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 1, position: [0.5, 0.5, 0.5], role: "reservoir", preferredCategories: ["alkalineEarth", "rareEarth"] },
+      { label: "B", multiplicity: 1, position: [0, 0, 0], role: "plane", preferredCategories: ["magneticTM"] },
+      { label: "O", multiplicity: 2, position: [0.5, 0, 0], role: "plane", preferredCategories: ["anion"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 0.85 },
+    scAffinity: 0.80,
+    tcRange: [10, 80],
+    pairingMechanism: "d-wave spin fluctuation",
+  },
+  {
+    name: "skutterudite",
+    spaceGroup: "Im-3",
+    crystalSystem: "cubic",
+    embedding: {
+      coordination: 6, avgBondAngle: 90, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 24, electronCountPerSite: 5, dimensionality: 3,
+      cageFraction: 0.55, interstitialFraction: 0.12, connectivityIndex: 0.82,
+      anisotropy: 0, voidFraction: 0.22,
+    },
+    siteRoles: [
+      { label: "M", multiplicity: 8, position: [0.25, 0.25, 0.25], role: "framework", preferredCategories: ["highCouplingTM", "magneticTM"] },
+      { label: "X", multiplicity: 24, position: [0, 0.34, 0.16], role: "framework", preferredCategories: ["pnictogen"] },
+      { label: "G", multiplicity: 2, position: [0, 0, 0], role: "cage", preferredCategories: ["rareEarth", "alkalineEarth"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.58,
+    tcRange: [1, 10],
+    pairingMechanism: "conventional phonon-mediated",
+  },
+  {
+    name: "Heusler-L21",
+    spaceGroup: "Fm-3m",
+    crystalSystem: "cubic",
+    embedding: {
+      coordination: 8, avgBondAngle: 109.5, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 48, electronCountPerSite: 5, dimensionality: 3,
+      cageFraction: 0, interstitialFraction: 0, connectivityIndex: 0.88,
+      anisotropy: 0, voidFraction: 0.05,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 8, position: [0.25, 0.25, 0.25], role: "framework", preferredCategories: ["highCouplingTM", "magneticTM"] },
+      { label: "B", multiplicity: 4, position: [0, 0, 0], role: "framework", preferredCategories: ["highCouplingTM"] },
+      { label: "C", multiplicity: 4, position: [0.5, 0.5, 0.5], role: "framework", preferredCategories: ["pBlockMetal", "alkalineEarth"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.55,
+    tcRange: [1, 15],
+    pairingMechanism: "conventional phonon-mediated",
+  },
+  {
+    name: "pyrochlore",
+    spaceGroup: "Fd-3m",
+    crystalSystem: "cubic",
+    embedding: {
+      coordination: 6, avgBondAngle: 109.5, layerSpacing: 0, cOverA: 1.0,
+      symmetryOrder: 48, electronCountPerSite: 4, dimensionality: 3,
+      cageFraction: 0.3, interstitialFraction: 0.08, connectivityIndex: 0.72,
+      anisotropy: 0, voidFraction: 0.15,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 16, position: [0.5, 0.5, 0.5], role: "cage", preferredCategories: ["rareEarth", "alkalineEarth"] },
+      { label: "B", multiplicity: 16, position: [0, 0, 0], role: "framework", preferredCategories: ["highCouplingTM", "magneticTM"] },
+      { label: "O1", multiplicity: 48, position: [0.33, 0.125, 0.125], role: "framework", preferredCategories: ["anion"] },
+      { label: "O2", multiplicity: 8, position: [0.375, 0.375, 0.375], role: "interstitial", preferredCategories: ["anion"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1 },
+    scAffinity: 0.56,
+    tcRange: [0.5, 8],
+    pairingMechanism: "geometrically frustrated",
+  },
+  {
+    name: "1T-prime-TMD",
+    spaceGroup: "P2_1/m",
+    crystalSystem: "monoclinic",
+    embedding: {
+      coordination: 6, avgBondAngle: 85, layerSpacing: 6.4, cOverA: 3.4,
+      symmetryOrder: 4, electronCountPerSite: 4, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0, connectivityIndex: 0.72,
+      anisotropy: 0.9, voidFraction: 0.18,
+    },
+    siteRoles: [
+      { label: "M", multiplicity: 2, position: [0.25, 0.25, 0], role: "plane", preferredCategories: ["highCouplingTM"] },
+      { label: "X1", multiplicity: 2, position: [0.1, 0.6, 0.1], role: "plane", preferredCategories: ["chalcogen"] },
+      { label: "X2", multiplicity: 2, position: [0.4, 0.6, 0.9], role: "plane", preferredCategories: ["chalcogen"] },
+    ],
+    latticeRatios: { a: 1, b: 1.73, c: 3.4 },
+    scAffinity: 0.70,
+    tcRange: [1, 10],
+    pairingMechanism: "topological-enhanced phonon",
+  },
+  {
+    name: "Ruddlesden-Popper",
+    spaceGroup: "I4/mmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 6, avgBondAngle: 90, layerSpacing: 12.5, cOverA: 6.3,
+      symmetryOrder: 16, electronCountPerSite: 5, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0.05, connectivityIndex: 0.75,
+      anisotropy: 0.92, voidFraction: 0.1,
+    },
+    siteRoles: [
+      { label: "A1", multiplicity: 2, position: [0, 0, 0.5], role: "spacer", preferredCategories: ["rareEarth", "alkalineEarth"] },
+      { label: "A2", multiplicity: 2, position: [0, 0, 0.18], role: "reservoir", preferredCategories: ["alkalineEarth", "rareEarth"] },
+      { label: "B", multiplicity: 2, position: [0, 0, 0], role: "plane", preferredCategories: ["magneticTM", "highCouplingTM"] },
+      { label: "O1", multiplicity: 4, position: [0.5, 0, 0], role: "plane", preferredCategories: ["anion"] },
+      { label: "O2", multiplicity: 4, position: [0, 0, 0.09], role: "spacer", preferredCategories: ["anion"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 6.3 },
+    scAffinity: 0.78,
+    tcRange: [15, 100],
+    pairingMechanism: "d-wave spin fluctuation",
+  },
+  {
+    name: "nickelate-IL",
+    spaceGroup: "P4/mmm",
+    crystalSystem: "tetragonal",
+    embedding: {
+      coordination: 4, avgBondAngle: 90, layerSpacing: 3.3, cOverA: 0.85,
+      symmetryOrder: 16, electronCountPerSite: 8, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0, connectivityIndex: 0.88,
+      anisotropy: 0.72, voidFraction: 0.06,
+    },
+    siteRoles: [
+      { label: "A", multiplicity: 1, position: [0.5, 0.5, 0.5], role: "reservoir", preferredCategories: ["rareEarth"] },
+      { label: "Ni", multiplicity: 1, position: [0, 0, 0], role: "plane", preferredCategories: ["magneticTM"] },
+      { label: "O", multiplicity: 2, position: [0.5, 0, 0], role: "plane", preferredCategories: ["anion"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 0.85 },
+    scAffinity: 0.82,
+    tcRange: [8, 30],
+    pairingMechanism: "d-wave spin fluctuation",
+  },
+  {
+    name: "MgB2-sigma",
+    spaceGroup: "P6/mmm",
+    crystalSystem: "hexagonal",
+    embedding: {
+      coordination: 6, avgBondAngle: 120, layerSpacing: 3.5, cOverA: 1.14,
+      symmetryOrder: 24, electronCountPerSite: 3, dimensionality: 2,
+      cageFraction: 0, interstitialFraction: 0.05, connectivityIndex: 0.92,
+      anisotropy: 0.55, voidFraction: 0.12,
+    },
+    siteRoles: [
+      { label: "M", multiplicity: 1, position: [0, 0, 0], role: "spacer", preferredCategories: ["alkalineEarth", "rareEarth"] },
+      { label: "B1", multiplicity: 2, position: [0.333, 0.667, 0.5], role: "plane", preferredCategories: ["lightPhonon"] },
+    ],
+    latticeRatios: { a: 1, b: 1, c: 1.14 },
+    scAffinity: 0.88,
+    tcRange: [20, 60],
+    pairingMechanism: "sigma-band phonon-mediated",
+  },
 ];
+
+interface ChemicalFamily {
+  name: string;
+  hostElements: string[];
+  allowedAnions: string[];
+  allowedStoichiometries: string[];
+  compatibleMotifs: string[];
+  maxAtomRatio: Record<string, number>;
+  electronCountRange: [number, number];
+  description: string;
+}
+
+const CHEMICAL_FAMILIES: ChemicalFamily[] = [
+  {
+    name: "hydride",
+    hostElements: ["La", "Y", "Ce", "Ca", "Sr", "Ba", "Sc", "Th", "Ac", "Nd", "Gd"],
+    allowedAnions: ["H"],
+    allowedStoichiometries: ["AH3", "AH4", "AH6", "AH10", "ABH4", "ABH6"],
+    compatibleMotifs: ["clathrate-cage", "layered-hydride", "H-channel"],
+    maxAtomRatio: { H: 6 },
+    electronCountRange: [1, 6],
+    description: "High-Tc hydrogen clathrate and layered hydride family",
+  },
+  {
+    name: "intermetallic",
+    hostElements: ["Nb", "V", "Ta", "Mo", "W", "Ti", "Zr", "Hf", "Re", "Cr"],
+    allowedAnions: ["Sn", "Ge", "Al", "Ga", "In", "Si"],
+    allowedStoichiometries: ["A3B", "AB", "AB2", "A2B"],
+    compatibleMotifs: ["A15-chain", "Laves-MgZn2", "Heusler-L21", "NaCl-rocksalt"],
+    maxAtomRatio: {},
+    electronCountRange: [3, 10],
+    description: "Classical A15 and Laves-phase intermetallics",
+  },
+  {
+    name: "layered-pnictide",
+    hostElements: ["Ba", "Sr", "Ca", "K", "Rb", "Cs", "La", "Ce", "Nd", "Sm"],
+    allowedAnions: ["As", "P", "Se", "Te", "S"],
+    allowedStoichiometries: ["AB2C2", "ABC3", "A2BC", "AB2"],
+    compatibleMotifs: ["FeAs-layer", "ThCr2Si2-pnictide", "BiS2-layer"],
+    maxAtomRatio: {},
+    electronCountRange: [4, 8],
+    description: "Iron-based and pnictide layered superconductors",
+  },
+  {
+    name: "boride",
+    hostElements: ["Mg", "Ca", "Sr", "Ba", "Al", "Y", "Sc", "La", "Ti", "Zr"],
+    allowedAnions: ["B", "C"],
+    allowedStoichiometries: ["AB2", "AB", "A2B3", "AB3"],
+    compatibleMotifs: ["hexagonal-layer", "MgB2-sigma", "borocarbide-RTBC"],
+    maxAtomRatio: { B: 4, C: 2 },
+    electronCountRange: [2, 6],
+    description: "MgB2-type borides and borocarbides",
+  },
+  {
+    name: "cuprate",
+    hostElements: ["La", "Y", "Bi", "Tl", "Hg", "Ba", "Sr", "Ca", "Nd", "Gd"],
+    allowedAnions: ["O", "F"],
+    allowedStoichiometries: ["A2BO4", "ABC3O7", "A2B2C3O10"],
+    compatibleMotifs: ["CuO2-plane", "infinite-layer", "Ruddlesden-Popper", "nickelate-IL"],
+    maxAtomRatio: {},
+    electronCountRange: [7, 11],
+    description: "Cuprate and nickelate high-Tc superconductors",
+  },
+  {
+    name: "chalcogenide",
+    hostElements: ["Nb", "Ta", "Mo", "W", "Ti", "Zr", "Hf", "V", "Fe"],
+    allowedAnions: ["S", "Se", "Te"],
+    allowedStoichiometries: ["AB2", "AB", "A2B3"],
+    compatibleMotifs: ["TMD-2H", "1T-prime-TMD", "Chevrel-phase", "NaCl-rocksalt"],
+    maxAtomRatio: {},
+    electronCountRange: [3, 8],
+    description: "Transition metal dichalcogenides and Chevrel phases",
+  },
+  {
+    name: "kagome-metal",
+    hostElements: ["V", "Ti", "Cr", "Mn", "Fe", "Co", "Ni", "Nb"],
+    allowedAnions: ["Sb", "Sn", "Ge", "As", "Bi"],
+    allowedStoichiometries: ["AB3C5", "AB3C2", "AB2"],
+    compatibleMotifs: ["kagome-flat", "breathing-kagome"],
+    maxAtomRatio: {},
+    electronCountRange: [3, 7],
+    description: "Kagome lattice metals with flat bands",
+  },
+  {
+    name: "oxide-perovskite",
+    hostElements: ["Sr", "Ba", "Ca", "La", "Y", "Bi", "Pb", "K", "Na"],
+    allowedAnions: ["O", "F", "N"],
+    allowedStoichiometries: ["ABO3", "A2BO4", "AB2O6"],
+    compatibleMotifs: ["perovskite-3D", "anti-perovskite-SC", "Ruddlesden-Popper", "pyrochlore"],
+    maxAtomRatio: {},
+    electronCountRange: [2, 8],
+    description: "Perovskite and anti-perovskite oxide superconductors",
+  },
+];
+
+const VALENCE_ELECTRONS: Record<string, number> = {
+  H: 1, He: 2, Li: 1, Be: 2, B: 3, C: 4, N: 5, O: 6, F: 7,
+  Na: 1, Mg: 2, Al: 3, Si: 4, P: 5, S: 6, Cl: 7,
+  K: 1, Ca: 2, Sc: 3, Ti: 4, V: 5, Cr: 6, Mn: 7, Fe: 8, Co: 9, Ni: 10, Cu: 11, Zn: 12,
+  Ga: 3, Ge: 4, As: 5, Se: 6, Br: 7,
+  Rb: 1, Sr: 2, Y: 3, Zr: 4, Nb: 5, Mo: 6, Ru: 8, Rh: 9, Pd: 10, Ag: 11,
+  In: 3, Sn: 4, Sb: 5, Te: 6,
+  Cs: 1, Ba: 2, La: 3, Ce: 4, Pr: 5, Nd: 6, Sm: 8, Gd: 10,
+  Hf: 4, Ta: 5, W: 6, Re: 7, Os: 8, Ir: 9, Pt: 10, Au: 11,
+  Tl: 3, Pb: 4, Bi: 5,
+  Ac: 3, Th: 4,
+  Dy: 12, Er: 14, Yb: 16, Lu: 17,
+};
+
+const TM_ELEMENTS = new Set([
+  "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
+]);
+
+function parseFormulaElements(formula: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*)/g;
+  let m;
+  while ((m = regex.exec(formula)) !== null) {
+    if (!m[1]) continue;
+    const el = m[1];
+    const n = m[2] ? parseInt(m[2], 10) : 1;
+    counts[el] = (counts[el] || 0) + n;
+  }
+  return counts;
+}
+
+function validateElectronCount(formula: string, motifName?: string): { valid: boolean; reason: string; vec: number } {
+  const counts = parseFormulaElements(formula);
+  const elements = Object.keys(counts);
+  if (elements.length === 0) return { valid: false, reason: "empty formula", vec: 0 };
+
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  let totalVE = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    totalVE += (VALENCE_ELECTRONS[el] ?? 4) * n;
+  }
+  const avgVEC = totalVE / totalAtoms;
+
+  const tmElements = elements.filter(e => TM_ELEMENTS.has(e));
+  const tmCount = tmElements.reduce((s, e) => s + (counts[e] || 0), 0);
+
+  if (tmCount > 0 && totalVE / tmCount > 12) {
+    return { valid: false, reason: "VEC/TM ratio exceeds 12", vec: avgVEC };
+  }
+
+  if (motifName) {
+    if ((motifName === "CuO2-plane" || motifName === "infinite-layer" || motifName === "nickelate-IL") && tmCount > 0) {
+      for (const tm of tmElements) {
+        const ve = VALENCE_ELECTRONS[tm] ?? 4;
+        if (ve < 7 || ve > 11) {
+          return { valid: false, reason: `${motifName} requires d7-d11 TM, ${tm} has VE=${ve}`, vec: avgVEC };
+        }
+      }
+    }
+
+    if ((motifName === "FeAs-layer" || motifName === "ThCr2Si2-pnictide") && tmCount > 0) {
+      for (const tm of tmElements) {
+        const ve = VALENCE_ELECTRONS[tm] ?? 4;
+        if (ve < 4 || ve > 10) {
+          return { valid: false, reason: `${motifName} requires d4-d10 TM, ${tm} has VE=${ve}`, vec: avgVEC };
+        }
+      }
+    }
+
+    if (motifName === "A15-chain" && tmCount > 0) {
+      for (const tm of tmElements) {
+        const ve = VALENCE_ELECTRONS[tm] ?? 4;
+        if (ve < 4 || ve > 7) {
+          return { valid: false, reason: `A15 requires d4-d7 TM, ${tm} has VE=${ve}`, vec: avgVEC };
+        }
+      }
+    }
+  }
+
+  if (avgVEC > 14) {
+    return { valid: false, reason: "average VEC too high (>14)", vec: avgVEC };
+  }
+
+  return { valid: true, reason: "passed", vec: avgVEC };
+}
+
+function selectFamilyForMotif(motifName: string): ChemicalFamily | null {
+  for (const fam of CHEMICAL_FAMILIES) {
+    if (fam.compatibleMotifs.includes(motifName)) return fam;
+  }
+  return null;
+}
+
+function selectElementsForSiteConstrained(
+  site: SiteRole,
+  family: ChemicalFamily | null,
+): string[] {
+  const candidates: string[] = [];
+  for (const cat of site.preferredCategories) {
+    const pool = ELEMENT_CATEGORIES[cat];
+    if (pool) candidates.push(...pool);
+  }
+
+  let filtered = Array.from(new Set(candidates));
+
+  if (family) {
+    const familyAllowed = new Set([...family.hostElements, ...family.allowedAnions]);
+    const familyFiltered = filtered.filter(e => familyAllowed.has(e));
+    if (familyFiltered.length >= 2) {
+      filtered = familyFiltered;
+    }
+  }
+
+  const shuffled = filtered.sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(4, shuffled.length));
+}
+
+function checkFamilyConstraints(formula: string, family: ChemicalFamily | null): boolean {
+  if (!family) return true;
+  const counts = parseFormulaElements(formula);
+
+  for (const [el, maxR] of Object.entries(family.maxAtomRatio)) {
+    const elCount = counts[el] || 0;
+    const nonElCount = Object.entries(counts)
+      .filter(([k]) => k !== el)
+      .reduce((s, [, v]) => s + v, 0);
+    if (nonElCount > 0 && elCount / nonElCount > maxR) return false;
+  }
+
+  return true;
+}
+
+export { CHEMICAL_FAMILIES, VALENCE_ELECTRONS, validateElectronCount, parseFormulaElements };
 
 const stats: StructureDiffusionStats = {
   totalMotifGenerated: 0,
@@ -376,7 +950,7 @@ function selectElementsForSite(site: SiteRole, triedCombos: Set<string>): string
     if (pool) candidates.push(...pool);
   }
 
-  const unique = [...new Set(candidates)];
+  const unique = Array.from(new Set(candidates));
   const shuffled = unique.sort(() => Math.random() - 0.5);
   return shuffled.slice(0, Math.min(4, shuffled.length));
 }
@@ -508,9 +1082,11 @@ export function runStructureFirstDesign(
     const triedCombos = new Set<string>();
     const elementsTriedPerSite: Record<string, string[]> = {};
 
+    const family = selectFamilyForMotif(motif.name);
+
     const siteLists: Record<string, string[]> = {};
     for (const site of motif.siteRoles) {
-      siteLists[site.label] = selectElementsForSite(site, triedCombos);
+      siteLists[site.label] = selectElementsForSiteConstrained(site, family);
       elementsTriedPerSite[site.label] = siteLists[site.label];
     }
 
@@ -522,6 +1098,11 @@ export function runStructureFirstDesign(
       if (!formula || formula.length < 2) continue;
       if (triedCombos.has(formula)) continue;
       triedCombos.add(formula);
+
+      if (!checkFamilyConstraints(formula, family)) continue;
+
+      const vecCheck = validateElectronCount(formula, motif.name);
+      if (!vecCheck.valid) continue;
 
       const result = evaluateCandidate(formula);
       if (!result) continue;

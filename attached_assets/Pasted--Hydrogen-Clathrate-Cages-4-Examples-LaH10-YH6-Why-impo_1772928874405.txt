@@ -1,0 +1,262 @@
+. Hydrogen Clathrate Cages
+4
+
+Examples
+
+LaH10
+
+YH6
+
+Why important
+
+Hydrogen cages produce:
+
+extremely high phonon frequencies
+
+very strong electron-phonon coupling
+
+Which drives very high Tc.
+
+Generator rules
+
+host = rare_earth | alkaline_earth
+hydrogen_ratio = 4–10
+structure = clathrate cage
+pressure_bias = high
+
+Design parameters
+
+H-H distance
+
+cage symmetry
+
+metal charge transfer
+
+2. AlB₂-Type Layered Boron Networks
+4
+
+Example
+
+MgB2
+
+Why important
+
+Boron layers create:
+
+strong covalent bonds
+
+high phonon energy
+
+large σ-band coupling
+
+Generator rules
+
+layer = B or C honeycomb
+interlayer = metal donor
+electron_count ≈ 2 per B
+
+Mutation space
+
+B → C substitution
+
+interlayer metal changes
+
+lattice compression
+
+3. CuO₂ Plane Perovskite Structures
+4
+
+Examples
+
+YBa2Cu3O7
+
+La2CuO4
+
+Why important
+
+Cuprates hold the ambient-pressure Tc record for decades.
+
+Key physics:
+
+strong electron correlations
+
+spin fluctuations
+
+layered electronic structure
+
+Generator rules
+
+square lattice CuO2
+Cu valence ≈ d9
+hole doping required
+4. Iron Pnictide Tetrahedral Layers
+4
+
+Examples
+
+BaFe2As2
+
+FeSe
+
+Why important
+
+These produce:
+
+nested Fermi surfaces
+
+strong spin fluctuations
+
+multi-band superconductivity
+
+Generator rules
+
+Fe square lattice
+tetrahedral pnictogen coordination
+electron_count ≈ d6
+5. A15 Intermetallic Networks
+4
+
+Example
+
+Nb3Sn
+
+Why important
+
+A15 structures create:
+
+high electronic density of states
+
+strong phonon coupling
+
+Generator rules
+
+formula = A3B
+A = transition metal
+B = p-block element
+6. Kagome Metal Lattices
+4
+
+Example
+
+AV3Sb5
+
+Why important
+
+Kagome lattices generate:
+
+flat bands
+
+van Hove singularities
+
+topological states
+
+Generator rules
+
+triangular metal lattice
+hexagonal symmetry
+flat-band bias
+7. Carbon Clathrate Frameworks
+4
+
+Example
+
+C46 carbon clathrate
+
+Why promising
+
+Combines:
+
+diamond-like stiffness
+
+cage phonons
+
+doping-induced carriers
+
+Predicted Tc can be very high.
+
+8. Layered Transition-Metal Dichalcogenides
+4
+
+Example
+
+NbSe2
+
+Physics
+
+2D Fermi surface
+
+charge density waves
+
+phonon coupling
+
+9. Fullerene Molecular Crystals
+4
+
+Example
+
+K3C60
+
+Mechanism
+
+molecular phonons
+
+strong electron-phonon coupling
+
+10. Heavy Fermion Layered Systems
+4
+
+Example
+
+CeCoIn5
+
+Physics
+
+strong correlations
+
+quantum criticality
+
+11. Borocarbide Networks
+4
+
+Example
+
+YNi2B2C
+
+Key physics
+
+Mixed covalent-metal bonding.
+
+12. Oxide Perovskite Interfaces
+4
+
+Example
+
+LaAlO3 SrTiO3 interface
+
+Mechanism
+
+2D electron gas
+
+interface phonons
+
+How To Integrate These Into Your System
+
+Create a motif-driven generator:
+
+motif → site roles → element candidates → structure → evaluation
+
+Example:
+
+motif = "AlB2"
+
+sites:
+  metal_layer
+  boron_layer
+
+candidates:
+  metal_layer = Mg,Ca,Sc,Y
+  boron_layer = B,C
+
+generate structures
+
+Then RL learns which motifs perform best.

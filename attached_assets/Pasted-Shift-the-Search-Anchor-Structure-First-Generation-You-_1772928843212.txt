@@ -1,0 +1,294 @@
+Shift the Search Anchor: Structure-First Generation
+
+You already partially implemented this, but it needs to become the primary generator.
+
+Your current architecture contains:
+
+Crystal Prototype Structure Generator
+
+Structure-First Design
+
+Structural Mutation Engine
+
+But they are still subordinate to composition generation.
+
+Correct hierarchy
+
+Instead of:
+
+composition generator
+ → structure assignment
+ → physics evaluation
+
+Move to:
+
+structure motif selection
+ → site chemistry filling
+ → compositional tuning
+ → physics evaluation
+Implement a Motif Library
+
+Define ~30 superconducting structural motifs.
+
+Example motifs:
+
+Motif	Example
+MgB2	AlB2 layered
+YBa2Cu3O7	CuO2 plane
+Nb3Sn	A15
+LaH10	clathrate cage
+AV3Sb5	kagome lattice
+
+Each motif should define:
+
+structure
+site roles
+coordination
+typical electron counts
+typical bond lengths
+
+Example schema:
+
+interface StructureMotif {
+  name: string
+  prototype: string
+  siteRoles: SiteRole[]
+  electronTopology: string
+  pairingBias: {
+     phonon: number
+     spin: number
+  }
+}
+
+Then generation becomes:
+
+motif
+ → fill sites
+ → relax
+
+This alone reduces randomness by 10–50×.
+
+2. Add Electron Count Rules (Huge Impact)
+
+Most superconductors obey simple electron-count heuristics.
+
+Examples:
+
+Cuprates
+Cu d9 configuration
+hole doped planes
+
+Example:
+
+La2CuO4
+
+Iron-based superconductors
+Fe d6
+tetrahedral coordination
+
+Example:
+
+BaFe2As2
+
+Phonon superconductors
+high DOS
+light atoms
+strong covalent bonding
+
+Example:
+
+MgB2
+
+Implementation
+
+Add a valence filter before evaluation:
+
+compute electron count
+predict band filling
+reject unrealistic fillings
+
+Example rule:
+
+reject if valence electrons / transition metal > 12
+
+This removes huge portions of nonsense space.
+
+3. Replace Random Composition With Chemical Families
+
+Right now candidates like:
+
+TaB3TeH12
+Ta2TeH12F4
+
+appear because generators mix unrelated chemistries.
+
+Instead restrict generation to families.
+
+Families
+intermetallic
+layered pnictide
+boride
+hydride
+oxide
+chalcogenide
+kagome metal
+
+Each family defines:
+
+allowed elements
+allowed stoichiometries
+allowed motifs
+
+Example:
+
+HydrideFamily = {
+  hostElements: [La,Y,Ce,Ca,Sr,Ba,Sc]
+  maxHydrogenRatio: 6
+  motifs: ["clathrate","layered-hydride"]
+}
+
+Your RL agent should choose families first.
+
+4. Add Materials-Genome Similarity Guidance
+
+You already have a 256-dim genome vector.
+
+Use it more aggressively.
+
+Instead of random exploration:
+
+sample near known superconductors
+
+Example anchor points:
+
+MgB2 cluster
+cuprate cluster
+pnictide cluster
+hydride cluster
+A15 cluster
+
+Use latent distance:
+
+candidate = mutate(known_superconductor)
+
+Not:
+
+candidate = random elements
+5. Implement Structural Evolution (Not Composition Evolution)
+
+Your mutation engine mostly changes elements.
+
+Instead mutate:
+
+bond length
+layer spacing
+dopant level
+strain
+vacancies
+
+Example pipeline:
+
+MgB2
+ → substitute B → C
+ → compress lattice
+ → Mg → Ca
+
+This mirrors real materials research.
+
+6. Add Topology-Driven Search
+
+You already compute:
+
+Fermi surface
+Chern number
+Z2 invariant
+
+But they are post-analysis.
+
+Turn them into search drivers.
+
+Example rule:
+
+prefer materials with
+   van Hove singularity near EF
+   flat bands
+   nested Fermi surface
+
+That is how many superconductors are discovered.
+
+7. Introduce Chemical Reaction Realism
+
+Real materials must be synthesizable.
+
+Add precursor-based generation:
+
+precursor database
+reaction templates
+
+Example:
+
+Mg + B → MgB2
+
+Your generator can create candidates from valid reactions.
+
+8. Add Stability Priors From Materials Databases
+
+Instead of random stoichiometries:
+
+Sample from patterns seen in:
+
+binary phase diagrams
+ternary phase diagrams
+
+For example:
+
+AB
+AB2
+AB3
+A2B
+
+Avoid weird ratios like:
+
+A2B7C3H12
+9. Strengthen the RL Reward Function
+
+Right now reward is mostly:
+
+Tc + novelty
+
+Add structure reward:
+
+motif validity
+electron count stability
+family consistency
+Fermi surface nesting
+
+Example reward:
+
+R =
+ 0.35 Tc
+ 0.20 stability
+ 0.15 motif score
+ 0.10 electron topology
+ 0.10 novelty
+ 0.10 synthesis
+10. Most Important Architecture Upgrade
+
+Introduce a Design Grammar.
+
+Instead of random formulas, generate candidates with a grammar like:
+
+Material =
+   LayeredStructure
+ | CageStructure
+ | KagomeStructure
+ | IntermetallicNetwork
+
+Example:
+
+LayeredStructure →
+   metal_layer
+   spacer_layer
+   dopant
+
+This constrains search massively.
