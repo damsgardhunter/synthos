@@ -285,6 +285,8 @@ export interface ElectronPhononCoupling {
   muStar: number;
   isStrongCoupling: boolean;
   dominantPhononBranch: string;
+  bandwidth: number;
+  omega2Avg: number;
 }
 
 export interface EliashbergResult {
@@ -305,6 +307,7 @@ export interface CompetingPhase {
 
 export interface CriticalFieldResult {
   upperCriticalField: number;
+  lowerCriticalField: number;
   coherenceLength: number;
   londonPenetrationDepth: number;
   anisotropyRatio: number;
@@ -1583,6 +1586,18 @@ export function computeElectronPhononCoupling(
   else if (phononSpectrum.softModePresent) dominantPhononBranch = "soft optical mode";
   else if (lambda > 1.0) dominantPhononBranch = "low-energy optical";
 
+  let bandwidth = 0;
+  const bwElements = formula ? parseFormulaElements(formula) : [];
+  const bwCounts = formula ? parseFormulaCounts(formula) : {};
+  const bwTotalAtoms = getTotalAtoms(bwCounts);
+  for (const el of bwElements) {
+    const frac = (bwCounts[el] || 1) / bwTotalAtoms;
+    bandwidth += estimateBandwidthW(el) * frac;
+  }
+  bandwidth = Math.max(1.0, bandwidth);
+
+  const omega2Avg = phononSpectrum.logAverageFrequency * phononSpectrum.logAverageFrequency * 1.2;
+
   return {
     lambda: Number(lambda.toFixed(3)),
     lambdaUncorrected: Number(lambdaUncorrected.toFixed(3)),
@@ -1591,6 +1606,8 @@ export function computeElectronPhononCoupling(
     muStar: Number(muStarClamped.toFixed(4)),
     isStrongCoupling,
     dominantPhononBranch,
+    bandwidth: Number(bandwidth.toFixed(4)),
+    omega2Avg: Number(omega2Avg.toFixed(4)),
   };
 }
 
@@ -1622,7 +1639,7 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   } else {
     const lambdaBar = 2.46 * (1 + 3.8 * muStar);
     const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3/2), 1/3);
-    const omega2Avg = phonon?.logAverageFrequency ? phonon.logAverageFrequency * phonon.logAverageFrequency * 1.2 : omegaLog * omegaLog * 1.2;
+    const omega2Avg = coupling.omega2Avg;
     const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / omegaLog : 1.0;
     const f2Base = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
     const f2Exp = (1 - lambda * lambda) / (1 + lambda * lambda);
@@ -2104,6 +2121,7 @@ export function computeCriticalFields(
   if (tc <= 0) {
     return {
       upperCriticalField: 0,
+      lowerCriticalField: 0,
       coherenceLength: 0,
       londonPenetrationDepth: 0,
       anisotropyRatio: 1,
@@ -2113,7 +2131,7 @@ export function computeCriticalFields(
   }
 
   const lambda = Math.max(coupling.lambda, 0.01);
-  const bw = coupling.bandwidth ?? 2.0;
+  const bw = coupling.bandwidth;
   const vF = 2e5 * Math.sqrt(Math.max(0.1, bw) / 2.0);
   const kB = 1.381e-23;
   const hbar = 1.055e-34;
@@ -2144,8 +2162,16 @@ export function computeCriticalFields(
   const kappa = Number.isFinite(kappaRaw) ? kappaRaw : 1;
   const typeIorII = kappa > 0.707 ? "Type-II" : "Type-I";
 
+  let lowerCriticalField = 0;
+  if (kappa > 0 && londonPenetrationDepth > 0) {
+    const lambdaLM = londonPenetrationDepth * 1e-9;
+    const Hc1Tesla = (PHI0 / (4 * Math.PI * lambdaLM * lambdaLM)) * Math.log(Math.max(kappa, 1.001));
+    lowerCriticalField = Math.max(0, Number.isFinite(Hc1Tesla) ? Hc1Tesla : 0);
+  }
+
   return {
     upperCriticalField: Number(upperCriticalField.toFixed(2)),
+    lowerCriticalField: Number(lowerCriticalField.toFixed(4)),
     coherenceLength: Number(coherenceLength.toFixed(1)),
     londonPenetrationDepth: Number(londonPenetrationDepth.toFixed(1)),
     anisotropyRatio: Number(anisotropyRatio.toFixed(2)),

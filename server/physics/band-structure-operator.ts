@@ -55,12 +55,20 @@ export interface PhysicsCalibration {
   knownFeatures: string[];
 }
 
+export interface OrbitalDOS {
+  s: number;
+  p: number;
+  d: number;
+  f: number;
+}
+
 export interface BandOperatorResult {
   formula: string;
   dispersion: BandDispersion;
   derivedQuantities: DerivedQuantities;
   calibration: PhysicsCalibration;
   surrogateInput: BandSurrogatePrediction;
+  orbitalDOS: OrbitalDOS;
   confidence: number;
 }
 
@@ -573,6 +581,69 @@ function computeTopologicalInvariants(
   };
 }
 
+function computeOrbitalDOS(
+  dispersion: BandDispersion,
+  formula: string,
+): OrbitalDOS {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+
+  let sWeight = 0;
+  let pWeight = 0;
+  let dWeight = 0;
+  let fWeight = 0;
+
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    const data = getElementData(el);
+    const valence = data?.valenceElectrons ?? 1;
+
+    if (isRareEarth(el) || isActinide(el)) {
+      sWeight += 0.05 * frac;
+      pWeight += 0.05 * frac;
+      dWeight += 0.2 * frac;
+      fWeight += 0.7 * frac;
+    } else if (isTransitionMetal(el)) {
+      sWeight += 0.1 * frac;
+      pWeight += 0.1 * frac;
+      dWeight += 0.75 * frac;
+      fWeight += 0.05 * frac;
+    } else if (valence >= 3) {
+      sWeight += 0.25 * frac;
+      pWeight += 0.65 * frac;
+      dWeight += 0.1 * frac;
+      fWeight += 0.0 * frac;
+    } else {
+      sWeight += 0.7 * frac;
+      pWeight += 0.2 * frac;
+      dWeight += 0.1 * frac;
+      fWeight += 0.0 * frac;
+    }
+  }
+
+  let totalDOSAtFermi = 0;
+  const fermiTol = 0.15;
+  for (let b = 0; b < dispersion.nBands; b++) {
+    for (const pt of dispersion.bands) {
+      const e = pt.energies[b] ?? 0;
+      if (Math.abs(e - dispersion.fermiEnergy) < fermiTol) {
+        totalDOSAtFermi += 1.0 / (Math.abs(e - dispersion.fermiEnergy) + 0.01);
+      }
+    }
+  }
+
+  const norm = sWeight + pWeight + dWeight + fWeight || 1;
+  const scale = totalDOSAtFermi / (dispersion.nKPoints * dispersion.nBands || 1);
+
+  return {
+    s: Number((sWeight / norm * scale).toFixed(6)),
+    p: Number((pWeight / norm * scale).toFixed(6)),
+    d: Number((dWeight / norm * scale).toFixed(6)),
+    f: Number((fWeight / norm * scale).toFixed(6)),
+  };
+}
+
 function computeOverallConfidence(
   surrogateData: BandSurrogatePrediction,
   refMatch: { ref: string; similarity: number } | null,
@@ -693,6 +764,8 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
     topologicalInvariants,
   };
 
+  const orbitalDOS = computeOrbitalDOS(dispersion, formula);
+
   const refMatch = findClosestReference(formula);
   const calibration: PhysicsCalibration = {
     referenceMaterial: refMatch?.ref ?? null,
@@ -712,6 +785,7 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
     derivedQuantities,
     calibration,
     surrogateInput: surrogateData,
+    orbitalDOS,
     confidence,
   };
 }
@@ -737,6 +811,10 @@ export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<st
     nestingStrengthMax: Number(nestingStrengthMax.toFixed(4)),
     berryPhaseProxy: result.derivedQuantities.topologicalInvariants.berryPhaseProxy,
     bandInversionCount: result.derivedQuantities.topologicalInvariants.bandInversionCount,
+    orbitalDOS_s: result.orbitalDOS.s,
+    orbitalDOS_p: result.orbitalDOS.p,
+    orbitalDOS_d: result.orbitalDOS.d,
+    orbitalDOS_f: result.orbitalDOS.f,
     confidence: result.confidence,
   };
 }

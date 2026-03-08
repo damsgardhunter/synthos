@@ -148,7 +148,7 @@ export function computePhononPairing(
     if (!Number.isFinite(tcAllenDynes)) tcAllenDynes = 0;
 
     if (lambda > 1.5 && coupling.omegaLog > 0) {
-      const omega2Avg = coupling.omega2Avg ?? (coupling.omegaLog * coupling.omegaLog * 1.2);
+      const omega2Avg = coupling.omega2Avg;
       const sqrtLambda = Math.sqrt(lambda);
       const f1 = Math.pow(1 + Math.pow(lambda / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
       const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / coupling.omegaLog : 1.0;

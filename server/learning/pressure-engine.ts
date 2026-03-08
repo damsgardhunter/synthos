@@ -73,6 +73,7 @@ export interface PressureTcPoint {
   Tc: number;
   lambda: number;
   stable: boolean;
+  hc2: number;
 }
 
 export function relaxStructureAtPressure(
@@ -450,11 +451,14 @@ export function scanPressureTcCurve(
 
     const stability = assessHighPressureStability(formula, P);
 
+    const hc2 = Tc > 0 ? 1.84 * Tc * Math.sqrt(1 + lambdaP) : 0;
+
     result.push({
       pressure: Math.round(P),
       Tc: Math.round(Tc * 10) / 10,
       lambda: Math.round(lambdaP * 1000) / 1000,
       stable: stability.isStable,
+      hc2: Math.round(hc2 * 10) / 10,
     });
   }
 

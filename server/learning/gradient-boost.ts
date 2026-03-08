@@ -205,6 +205,13 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     }
   }
 
+  let pressureGpa = sanitize(f.pressureGpa, FEATURE_MEANS.pressureGpa);
+  if (pressureGpa === 0 && f.hasHydrogen && f.hydrogenRatio > 0.3) {
+    if (f.hydrogenRatio >= 8) pressureGpa = 200;
+    else if (f.hydrogenRatio >= 6) pressureGpa = 150;
+    else if (f.hydrogenRatio >= 4) pressureGpa = 100;
+  }
+
   return [
     sanitize(f.electronPhononLambda, FEATURE_MEANS.electronPhononLambda),
     sanitize(f.metallicity, FEATURE_MEANS.metallicity),
@@ -254,7 +261,7 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     sanitize(f.fermiSurfaceNestingScore, FEATURE_MEANS.fermiSurfaceNestingScore),
     sanitize(f.dosAtEF, FEATURE_MEANS.dosAtEF),
     sanitize(f.muStarEstimate, FEATURE_MEANS.muStarEstimate),
-    sanitize(f.pressureGpa, FEATURE_MEANS.pressureGpa),
+    pressureGpa,
     sanitize(f.optimalPressureGpa, FEATURE_MEANS.optimalPressureGpa),
     sanitize((f as any).bandGap, FEATURE_MEANS.bandGap),
     sanitize((f as any).formationEnergy, FEATURE_MEANS.formationEnergy),

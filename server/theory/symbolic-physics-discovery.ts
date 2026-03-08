@@ -573,31 +573,67 @@ function crossScaleValidate(tree: ExprNode, dataset: PhysicsDiscoveryRecord[]): 
     families.get(fam)!.push(rec);
   }
 
+  const K_FOLDS = 3;
+
   const results: CrossScaleValidation[] = [];
   for (const [family, records] of families) {
     if (records.length < 3) continue;
-    const allPredictions = records.map(r => evaluateNode(tree, r as any));
     const allActuals = records.map(r => r.Tc);
-    const validPreds: number[] = [];
-    const validActuals: number[] = [];
-    for (let i = 0; i < allPredictions.length; i++) {
-      if (isFinite(allPredictions[i]) && Math.abs(allPredictions[i]) < 1e4) {
-        validPreds.push(allPredictions[i]);
-        validActuals.push(allActuals[i]);
+
+    const foldR2s: number[] = [];
+    const foldMAEs: number[] = [];
+    const allFoldPreds: number[] = [];
+    const allFoldActuals: number[] = [];
+
+    for (let fold = 0; fold < K_FOLDS; fold++) {
+      const holdout: PhysicsDiscoveryRecord[] = [];
+      const train: PhysicsDiscoveryRecord[] = [];
+      for (let i = 0; i < records.length; i++) {
+        if (i % K_FOLDS === fold) {
+          holdout.push(records[i]);
+        } else {
+          train.push(records[i]);
+        }
       }
+      if (holdout.length === 0 || train.length === 0) continue;
+
+      const holdoutPreds = holdout.map(r => evaluateNode(tree, r as any));
+      const holdoutActuals = holdout.map(r => r.Tc);
+      const validPreds: number[] = [];
+      const validActuals: number[] = [];
+      for (let i = 0; i < holdoutPreds.length; i++) {
+        if (isFinite(holdoutPreds[i]) && Math.abs(holdoutPreds[i]) < 1e4) {
+          validPreds.push(holdoutPreds[i]);
+          validActuals.push(holdoutActuals[i]);
+        }
+      }
+      if (validPreds.length < 1) {
+        foldR2s.push(0);
+        foldMAEs.push(999);
+        continue;
+      }
+      const { r2, mae } = computeR2(validPreds, validActuals);
+      foldR2s.push(Math.max(0, r2));
+      foldMAEs.push(mae);
+      allFoldPreds.push(...validPreds);
+      allFoldActuals.push(...validActuals);
     }
-    if (validPreds.length < 2) {
-      results.push({ family, sampleCount: records.length, r2: 0, mae: 999, meanPredicted: 0, meanActual: allActuals.reduce((a,b)=>a+b,0)/allActuals.length });
+
+    if (foldR2s.length === 0) {
+      results.push({ family, sampleCount: records.length, r2: 0, mae: 999, meanPredicted: 0, meanActual: allActuals.reduce((a, b) => a + b, 0) / allActuals.length });
       continue;
     }
-    const { r2, mae } = computeR2(validPreds, validActuals);
+
+    const avgR2 = foldR2s.reduce((a, b) => a + b, 0) / foldR2s.length;
+    const avgMAE = foldMAEs.reduce((a, b) => a + b, 0) / foldMAEs.length;
+
     results.push({
       family,
       sampleCount: records.length,
-      r2: Math.max(0, r2),
-      mae,
-      meanPredicted: validPreds.reduce((a,b)=>a+b,0)/validPreds.length,
-      meanActual: validActuals.reduce((a,b)=>a+b,0)/validActuals.length,
+      r2: Math.max(0, avgR2),
+      mae: avgMAE,
+      meanPredicted: allFoldPreds.length > 0 ? allFoldPreds.reduce((a, b) => a + b, 0) / allFoldPreds.length : 0,
+      meanActual: allFoldActuals.length > 0 ? allFoldActuals.reduce((a, b) => a + b, 0) / allFoldActuals.length : allActuals.reduce((a, b) => a + b, 0) / allActuals.length,
     });
   }
 
@@ -937,6 +973,8 @@ export function runSymbolicPhysicsDiscovery(
         const avgGenR2 = crossScale.length > 0
           ? crossScale.reduce((s, c) => s + c.r2, 0) / crossScale.length
           : 0;
+
+        if (avgGenR2 < 0.3) continue;
 
         const dimValid = isDimensionallyValidForTarget(tree, target);
 

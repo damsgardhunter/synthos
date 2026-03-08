@@ -222,6 +222,20 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - elemental-data.ts: mcMillanHopfieldEta added for Si(1.0), P(1.5), S(2.0), Cl(0.5), Ge(1.2), As(1.8), Se(2.5), Br(0.8), Sb(1.5), Te(2.2), I(1.0).
   - engine.ts: Phase 10 candidates 5→8, hydride scan 3→5, symbolic regression generations 25→40.
 
+- **Round 18 (12 tasks)**:
+  - physics-engine.ts: `bandwidth` and `omega2Avg` added to `ElectronPhononCoupling` interface; computed in `computeElectronPhononCoupling` from weighted `estimateBandwidthW` and phonon spectrum; fallback `??` removed from consumers. `lowerCriticalField` (Hc1) added to `CriticalFieldResult` via GL formula Hc1 = (Φ₀/4πλ_L²)·ln(κ).
+  - pairing-mechanisms.ts: omega2Avg fallback removed; uses `coupling.omega2Avg` directly.
+  - pressure-engine.ts: `hc2` field added to `PressureTcPoint`; computed at each pressure step via Pauli limit.
+  - fermi-surface-engine.ts: quasi-1D chain-like Fermi surface classification added; dimensionality < 1.5 when kz variation > 3× kxy variation.
+  - topology-engine.ts: non-centrosymmetric SC classification ("non-centrosymmetric-SC") for Rashba-type SCs with SOC > 0.3, low mirror, non-trivial Z2.
+  - band-structure-operator.ts: orbital-resolved DOS (`orbitalDOS: {s,p,d,f}`) added to `BandOperatorResult`; weights by element orbital character.
+  - defect-engine.ts: grain boundary defect type added; Miedema-based surface energy; positive Tc modifier for d-wave, negative for s-wave.
+  - hydrogen-network-engine.ts: percolation check (`percolates: boolean`); 50% score penalty for non-percolating H networks (coordination × H-fraction < 2.0).
+  - phase-diagram-engine.ts: entropy-stabilized phase detection; ΔS_mix > 1.5R + formation energy < 0.1 eV/atom → "entropy-stabilized" verdict.
+  - gradient-boost.ts + ml-predictor.ts: hydride pressure inference from H/M ratio (≥8→200, ≥6→150, ≥4→100 GPa) when pressureGpa defaults to 0.
+  - symbolic-physics-discovery.ts: 3-fold cross-validation in `crossScaleValidate`; equations with CV-R² < 0.3 rejected.
+  - rl-agent.ts: element pair success tracking feeds into reward; novelty bonus for < 3 trials, success bonus for avgTc > 50K.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

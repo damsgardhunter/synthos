@@ -292,7 +292,13 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const muStarEstimate = coupling.muStar;
 
-  const candidatePressure = (mat as any)?.pressureGpa ?? 0;
+  let candidatePressure = (mat as any)?.pressureGpa ?? 0;
+
+  if (candidatePressure === 0 && hasHydrogen && hydrogenRatio > 0.3) {
+    if (hydrogenRatio >= 8) candidatePressure = 200;
+    else if (hydrogenRatio >= 6) candidatePressure = 150;
+    else if (hydrogenRatio >= 4) candidatePressure = 100;
+  }
 
   let optimalPressureGpa = 0;
   try {

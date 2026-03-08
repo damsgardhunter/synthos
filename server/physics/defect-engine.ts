@@ -5,6 +5,7 @@ export enum DefectType {
   Interstitial = "interstitial",
   Antisite = "antisite",
   Dopant = "dopant",
+  GrainBoundary = "grain-boundary",
 }
 
 export interface DefectStructure {
@@ -104,6 +105,34 @@ const NEIGHBOR_MAP: Record<string, string[]> = {
   U: ["Th", "Np", "Nd"],
 };
 
+function estimateMiedemaSurfaceEnergy(elements: string[]): number {
+  let totalSurfaceEnergy = 0;
+  for (const el of elements) {
+    const data = ELEMENTAL_DATA[el];
+    const meltingPoint = data?.meltingPoint || 1500;
+    const atomicRadius = data?.atomicRadius || 150;
+    const surfaceAreaPerMole = 4.0e8 * (atomicRadius / 100) ** 2;
+    const surfaceEnergy = 0.0005 * meltingPoint * surfaceAreaPerMole / 6.022e23;
+    totalSurfaceEnergy += surfaceEnergy;
+  }
+  return totalSurfaceEnergy / Math.max(1, elements.length);
+}
+
+function estimateGrainBoundaryConcentration(grainSizeNm: number): number {
+  const grainBoundaryThickness = 0.5;
+  const ratio = grainBoundaryThickness / Math.max(1, grainSizeNm);
+  return Math.min(0.15, Math.max(0.001, 3.0 * ratio));
+}
+
+function isDWaveLikely(formula: string): boolean {
+  const comp = parseFormula(formula);
+  const elements = Object.keys(comp);
+  const cuprateLike = elements.some(el => el === "Cu") && elements.some(el => ["O", "La", "Y", "Ba", "Sr", "Ca"].includes(el));
+  const heavyFermion = elements.some(el => ["Ce", "U", "Yb", "Pr"].includes(el));
+  const ironBased = elements.some(el => el === "Fe") && elements.some(el => ["As", "Se", "P", "Te"].includes(el));
+  return cuprateLike || heavyFermion || ironBased;
+}
+
 const defectStats = {
   totalDefectsGenerated: 0,
   typeBreakdown: {
@@ -111,6 +140,7 @@ const defectStats = {
     [DefectType.Interstitial]: 0,
     [DefectType.Antisite]: 0,
     [DefectType.Dopant]: 0,
+    [DefectType.GrainBoundary]: 0,
   } as Record<string, number>,
   bestTcImprovement: 0,
   bestTcFormula: "",
@@ -210,6 +240,11 @@ export function computeDefectFormationEnergy(
       const dopant = neighbors.length > 0 ? (getDeterministicDopant(element, neighbors, []) || neighbors[0]) : element;
       const dopantEnergy = getElementEnergy(dopant);
       Ef = Math.abs(elEnergy - dopantEnergy) * 0.5 + hostEnergy * 0.15 + 0.3;
+      break;
+    }
+    case DefectType.GrainBoundary: {
+      const surfaceEnergy = estimateMiedemaSurfaceEnergy(elements);
+      Ef = surfaceEnergy * 0.8 + hostEnergy * 0.2;
       break;
     }
     default:
@@ -329,6 +364,22 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
     defectStats.typeBreakdown[DefectType.Dopant]++;
   }
 
+  const grainSizeNm = 100;
+  const gbConc = estimateGrainBoundaryConcentration(grainSizeNm);
+  const gbEf = computeDefectFormationEnergy(formula, DefectType.GrainBoundary, elements[0]);
+  const gbDensity = estimateDefectDensity(gbEf);
+  variants.push({
+    type: DefectType.GrainBoundary,
+    site: "grain-boundary",
+    element: elements.join("/"),
+    concentration: gbConc,
+    formationEnergy: gbEf,
+    defectDensity: gbDensity,
+    mutatedFormula: formula,
+  });
+  defectStats.totalDefectsGenerated++;
+  defectStats.typeBreakdown[DefectType.GrainBoundary]++;
+
   return variants;
 }
 
@@ -374,6 +425,19 @@ export function adjustElectronicStructure(
       lambdaModifier = 1.0 + normalizedDensity * 0.08;
       scatteringRate = normalizedDensity * 0.05;
       break;
+    case DefectType.GrainBoundary: {
+      const dWave = formula ? isDWaveLikely(formula) : false;
+      if (dWave) {
+        dosModifier = 1.0 + normalizedDensity * 0.10;
+        lambdaModifier = 1.0 + normalizedDensity * 0.05;
+        scatteringRate = normalizedDensity * 0.08;
+      } else {
+        dosModifier = 1.0 - normalizedDensity * 0.05;
+        lambdaModifier = 1.0 - normalizedDensity * 0.10;
+        scatteringRate = normalizedDensity * 0.25;
+      }
+      break;
+    }
   }
 
   const adjustedDos = dosAtEF * dosModifier;
@@ -399,6 +463,11 @@ export function adjustElectronicStructure(
     notes = "Interstitials can enhance both DOS and electron-phonon coupling through new bonding channels";
   } else if (defectType === DefectType.Antisite) {
     notes = "Antisite defects primarily act as pair-breaking scattering centers";
+  } else if (defectType === DefectType.GrainBoundary) {
+    const dWave = formula ? isDWaveLikely(formula) : false;
+    notes = dWave
+      ? "Grain boundaries in d-wave SCs host Andreev bound states that can locally enhance pairing"
+      : "Grain boundaries act as Josephson weak links and pair-breaking scatterers in s-wave SCs";
   } else {
     notes = "Dopants tune carrier concentration and can enhance pairing via optimized Fermi surface";
   }

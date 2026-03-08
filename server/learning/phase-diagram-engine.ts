@@ -426,11 +426,50 @@ export function computePhaseDiagram(
 
 export interface StabilityGateResult {
   pass: boolean;
-  verdict: "stable" | "near-hull" | "metastable" | "unstable";
+  verdict: "stable" | "near-hull" | "metastable" | "unstable" | "entropy-stabilized";
   reason: string;
   hullDistance: number;
   formationEnergy: number;
   kineticBarrier?: number;
+  configurationalEntropy?: number;
+}
+
+function computeConfigurationalEntropy(formula: string): { deltaSMix: number; numElements: number; fractions: number[] } {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (totalAtoms === 0 || elements.length < 2) {
+    return { deltaSMix: 0, numElements: elements.length, fractions: [] };
+  }
+  const fractions = elements.map(el => counts[el] / totalAtoms);
+  const R = 8.314;
+  const deltaSMix = -R * fractions.reduce((sum, xi) => sum + (xi > 0 ? xi * Math.log(xi) : 0), 0);
+  return { deltaSMix, numElements: elements.length, fractions };
+}
+
+function isEntropyStabilized(formula: string, formationEnergy: number): { qualifies: boolean; deltaSMix: number; reason: string } {
+  const R = 8.314;
+  const { deltaSMix, numElements, fractions } = computeConfigurationalEntropy(formula);
+
+  if (numElements < 4) {
+    return { qualifies: false, deltaSMix, reason: "fewer than 4 elements" };
+  }
+
+  if (deltaSMix <= 1.5 * R) {
+    return { qualifies: false, deltaSMix, reason: `configurational entropy ${(deltaSMix / R).toFixed(2)}R <= 1.5R` };
+  }
+
+  if (formationEnergy > 0.1) {
+    return { qualifies: false, deltaSMix, reason: `formation energy ${formationEnergy.toFixed(4)} eV/atom > 0.1 threshold` };
+  }
+
+  const synthesisTempK = 1000;
+  const tDeltaS_eV = (deltaSMix * synthesisTempK) / 96485;
+  return {
+    qualifies: true,
+    deltaSMix,
+    reason: `high-entropy alloy (${numElements} elements, ΔS_mix=${(deltaSMix / R).toFixed(2)}R, T·ΔS@1000K=${tDeltaS_eV.toFixed(3)} eV/atom overcomes ΔH=${formationEnergy.toFixed(4)} eV/atom)`,
+  };
 }
 
 export async function passesStabilityGate(formula: string): Promise<StabilityGateResult> {
@@ -447,6 +486,17 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
   }
 
   if (hullDistance > 0.20) {
+    const entropyCheck = isEntropyStabilized(formula, formationEnergy);
+    if (entropyCheck.qualifies) {
+      return {
+        pass: true,
+        verdict: "entropy-stabilized",
+        reason: entropyCheck.reason,
+        hullDistance,
+        formationEnergy,
+        configurationalEntropy: entropyCheck.deltaSMix,
+      };
+    }
     return {
       pass: false,
       verdict: "unstable",
@@ -469,6 +519,17 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
         kineticBarrier: metastabilityCheck.kineticBarrier,
       };
     }
+    const entropyCheck = isEntropyStabilized(formula, formationEnergy);
+    if (entropyCheck.qualifies) {
+      return {
+        pass: true,
+        verdict: "entropy-stabilized",
+        reason: entropyCheck.reason,
+        hullDistance,
+        formationEnergy,
+        configurationalEntropy: entropyCheck.deltaSMix,
+      };
+    }
     return {
       pass: false,
       verdict: "unstable",
@@ -489,6 +550,17 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
         hullDistance,
         formationEnergy,
         kineticBarrier: metastabilityCheck.kineticBarrier,
+      };
+    }
+    const entropyCheck2 = isEntropyStabilized(formula, formationEnergy);
+    if (entropyCheck2.qualifies) {
+      return {
+        pass: true,
+        verdict: "entropy-stabilized",
+        reason: entropyCheck2.reason,
+        hullDistance,
+        formationEnergy,
+        configurationalEntropy: entropyCheck2.deltaSMix,
       };
     }
     return {
@@ -531,6 +603,18 @@ export async function passesStabilityGate(formula: string): Promise<StabilityGat
       hullDistance,
       formationEnergy,
       kineticBarrier: metastability.kineticBarrier,
+    };
+  }
+
+  const entropyCheck3 = isEntropyStabilized(formula, formationEnergy);
+  if (entropyCheck3.qualifies) {
+    return {
+      pass: true,
+      verdict: "entropy-stabilized",
+      reason: entropyCheck3.reason,
+      hullDistance,
+      formationEnergy,
+      configurationalEntropy: entropyCheck3.deltaSMix,
     };
   }
 

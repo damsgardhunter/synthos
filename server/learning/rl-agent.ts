@@ -1042,7 +1042,8 @@ export class RLChemicalSpaceAgent {
     pipelinePassed: boolean,
     stabilityScore: number,
     noveltyBonus: number = 0,
-    physicsContext?: PhysicsAwareRewardContext
+    physicsContext?: PhysicsAwareRewardContext,
+    elementPairs?: Array<[string, string]>
   ): number {
     const W_TC = 0.35;
     const W_STABILITY = 0.20;
@@ -1137,12 +1138,40 @@ export class RLChemicalSpaceAgent {
       W_NOVELTY * noveltyComponent +
       W_SYNTHESIS * synthesisComponent;
 
-    if (physicsContext) {
-      const physicsBonus = computePhysicsPrincipleReward(physicsContext);
-      return reward + physicsBonus * 0.08;
+    let pairBonus = 0;
+    if (elementPairs && elementPairs.length > 0) {
+      let pairNoveltyBonus = 0;
+      let pairSuccessBonus = 0;
+      let pairCount = 0;
+
+      for (const [el1, el2] of elementPairs) {
+        const key = this.makeElementPairKey(el1, el2);
+        const stats = this.pairSuccessRates.get(key);
+        pairCount++;
+
+        if (!stats || stats.total < 3) {
+          pairNoveltyBonus += 1.0;
+        }
+
+        if (stats && stats.total >= 3 && stats.avgTc > 50) {
+          pairSuccessBonus += Math.min(1.0, stats.avgTc / 200);
+        }
+      }
+
+      if (pairCount > 0) {
+        pairNoveltyBonus /= pairCount;
+        pairSuccessBonus /= pairCount;
+      }
+
+      pairBonus = 0.1 * (pairNoveltyBonus + pairSuccessBonus);
     }
 
-    return reward;
+    if (physicsContext) {
+      const physicsBonus = computePhysicsPrincipleReward(physicsContext);
+      return reward + physicsBonus * 0.08 + pairBonus;
+    }
+
+    return reward + pairBonus;
   }
 
   getActionDescription(action: RLAction): string {

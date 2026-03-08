@@ -795,6 +795,38 @@ function computeFSDimensionality(
 
   if (totalWeight < 0.001) return 3;
 
+  let totalKzVar = 0;
+  let totalKxyVar = 0;
+  let varWeight = 0;
+
+  for (const pocket of pockets) {
+    const crossingPoints = evaluations.filter(ev =>
+      pocket.bandIndex < ev.eigenvalues.length &&
+      Math.abs(ev.eigenvalues[pocket.bandIndex] - fermiEnergy) < fermiTolerance
+    );
+
+    if (crossingPoints.length < 2) continue;
+
+    const kzValues = crossingPoints.map(ev => ev.k[2]);
+    const kxyValues = crossingPoints.map(ev => Math.sqrt(ev.k[0] ** 2 + ev.k[1] ** 2));
+
+    const kzSpread = Math.max(...kzValues) - Math.min(...kzValues);
+    const kxySpread = Math.max(...kxyValues) - Math.min(...kxyValues);
+
+    totalKzVar += kzSpread * pocket.volume;
+    totalKxyVar += kxySpread * pocket.volume;
+    varWeight += pocket.volume;
+  }
+
+  if (varWeight > 0.001) {
+    const avgKzVar = totalKzVar / varWeight;
+    const avgKxyVar = totalKxyVar / varWeight;
+
+    if (avgKzVar > 3 * avgKxyVar) {
+      return 1.0 + avgKxyVar / (avgKzVar + 1e-6);
+    }
+  }
+
   const avgCylindrical = totalCylindrical / totalWeight;
 
   if (avgCylindrical > 0.8) return 2;

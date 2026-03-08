@@ -305,6 +305,7 @@ function classifyTopologicalState(
   if (z2 > 0.6 && socStrength > 0.4) return "strong-topological-insulator";
   if (chern > 0.5 && socStrength > 0.3) return "Chern-insulator";
   if (mirror > 0.5 && z2 > 0.3) return "topological-crystalline-insulator";
+  if (socStrength > 0.3 && mirror < 0.3 && z2 > 0.2) return "non-centrosymmetric-SC";
   if (z2 > 0.3 || chern > 0.3) return "weak-topological";
   if (socStrength > 0.2) return "SOC-enhanced";
   return "trivial";

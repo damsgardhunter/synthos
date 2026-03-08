@@ -57,6 +57,7 @@ export interface HydrogenNetworkAnalysis {
     anharmonicCorrection: number;
   };
 
+  percolates: boolean;
   compositeSCScore: number;
   networkClass: string;
   insights: string[];
@@ -469,6 +470,10 @@ function generateInsights(analysis: Omit<HydrogenNetworkAnalysis, "insights">): 
     insights.push("Hydrogen network fully percolated - continuous metallic H sublattice");
   }
 
+  if (analysis.isHydride && !analysis.percolates) {
+    insights.push(`Non-percolating hydrogen network (coordination×H-fraction=${(analysis.Hcoordination * analysis.hydrogenFraction).toFixed(2)} < 2.0) - SC score reduced by 50%`);
+  }
+
   return insights;
 }
 
@@ -514,6 +519,9 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     networkPercolation = Math.min(0.6, hRatio * 0.15);
   }
 
+  const percolationMetric = coordination * hFraction;
+  const percolates = isHydride ? percolationMetric > 2.0 : false;
+
   let anharmonicCorrectionValue = 1.0;
   try {
     const elec = computeElectronicStructure(formula, null);
@@ -522,9 +530,13 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     anharmonicCorrectionValue = coup.anharmonicCorrectionFactor;
   } catch {}
 
-  const compositeSCScore = computeCompositeSCScore(
+  let compositeSCScore = computeCompositeSCScore(
     networkDim, cageScore, coordination, connectivity, phononCoupling, hhDist, anharmonicCorrectionValue
   );
+
+  if (isHydride && !percolates) {
+    compositeSCScore = Number((compositeSCScore * 0.5).toFixed(4));
+  }
 
   const networkClass = classifyNetworkClass(bondingType, networkDim, cageTopology, hRatio);
 
@@ -557,6 +569,7 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     cageTopology,
     hydrogenDensity,
     networkPercolation: Number(networkPercolation.toFixed(4)),
+    percolates,
     phononContribution: {
       hydrogenPhononFreq: Number(hydrogenPhononFreq.toFixed(2)),
       hydrogenPhononLambda: Number(hydrogenPhononLambda.toFixed(4)),
