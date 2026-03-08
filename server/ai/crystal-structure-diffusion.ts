@@ -1,7 +1,8 @@
 import { SC_MOTIF_LIBRARY, type StructuralMotif, type ChemicalFamily, selectFamilyForMotif } from "./structure-diffusion";
 import { extractFeatures } from "../learning/ml-predictor";
 import { gbPredict, surrogateScreen } from "../learning/gradient-boost";
-import { isValidFormula } from "../learning/utils";
+import { isValidFormula, normalizeFormula } from "../learning/utils";
+import { passesValenceFilter } from "../learning/candidate-generator";
 import {
   computeElectronicStructure,
   computePhononSpectrum,
@@ -529,27 +530,57 @@ const diffusionStats = {
 export function runCrystalDiffusionCycle(
   count: number = 20,
   targetTc: number = 200,
-  diffusionSteps: number = 30
+  diffusionSteps: number = 30,
+  sharedScreenedSet?: Set<string>
 ): DiffusedCrystal[] {
   const results: DiffusedCrystal[] = [];
   const motifs = SC_MOTIF_LIBRARY;
   const seenFormulas = new Set<string>();
 
+  const EPSILON = 0.15;
+  const MIN_EXPLORATION_RATE = 0.05;
+  const MAX_MOTIF_FRACTION = 0.40;
+  const maxPerMotif = Math.max(1, Math.ceil(count * MAX_MOTIF_FRACTION));
+  const motifTrialCounts: Record<string, number> = {};
+
   const motifWeights = motifs.map(m => m.scAffinity);
-  const motifProbs = softmax(motifWeights.map(w => w * 5), 1.0);
+  const baseMotifProbs = softmax(motifWeights.map(w => w * 5), 1.0);
+  const flooredProbs = baseMotifProbs.map(p => Math.max(MIN_EXPLORATION_RATE, p));
+  const flooredSum = flooredProbs.reduce((s, p) => s + p, 0);
+  const motifProbs = flooredProbs.map(p => p / flooredSum);
 
   for (let attempt = 0; attempt < count * 3 && results.length < count; attempt++) {
     try {
-      const motifIdx = sampleFromDistribution(motifProbs);
+      let motifIdx: number;
+      if (Math.random() < EPSILON) {
+        motifIdx = Math.floor(Math.random() * motifs.length);
+      } else {
+        const adjustedProbs = motifProbs.map((p, i) => {
+          const name = motifs[i].name;
+          if ((motifTrialCounts[name] || 0) >= maxPerMotif) return 0;
+          return p;
+        });
+        const adjSum = adjustedProbs.reduce((s, p) => s + p, 0);
+        if (adjSum <= 0) {
+          motifIdx = Math.floor(Math.random() * motifs.length);
+        } else {
+          const normalized = adjustedProbs.map(p => p / adjSum);
+          motifIdx = sampleFromDistribution(normalized);
+        }
+      }
+      motifTrialCounts[motifs[motifIdx].name] = (motifTrialCounts[motifs[motifIdx].name] || 0) + 1;
       const motif = motifs[motifIdx];
 
       const latent = generateLatentVector(motif, targetTc);
       const composition = decodeComposition(latent, motif);
 
-      const formula = buildFormula(composition);
-      if (!formula || formula.length < 2) continue;
+      const rawFormula = buildFormula(composition);
+      if (!rawFormula || rawFormula.length < 2) continue;
+      const formula = normalizeFormula(rawFormula);
       if (seenFormulas.has(formula)) continue;
       if (!isValidFormula(formula)) continue;
+      if (!passesValenceFilter(formula)) continue;
+      if (sharedScreenedSet && sharedScreenedSet.has(formula)) continue;
       seenFormulas.add(formula);
 
       const lattice = computeLatticeFromMotif(composition, motif);
@@ -629,7 +660,8 @@ export function runCrystalDiffusionCycle(
         diffusionStats.motifBreakdown[motif.name] = { count: 0, avgTc: 0, bestTc: 0 };
       }
       const mb = diffusionStats.motifBreakdown[motif.name];
-      mb.avgTc = (mb.avgTc * mb.count + predictedTc) / (mb.count + 1);
+      const newAvg = (mb.avgTc * mb.count + predictedTc) / (mb.count + 1);
+      mb.avgTc = Number.isFinite(newAvg) ? newAvg : 0;
       mb.count++;
       if (predictedTc > mb.bestTc) mb.bestTc = predictedTc;
 
@@ -642,7 +674,8 @@ export function runCrystalDiffusionCycle(
   }
 
   if (diffusionStats.recentResults.length > 0) {
-    diffusionStats.avgTc = diffusionStats.recentResults.reduce((s, r) => s + r.tc, 0) / diffusionStats.recentResults.length;
+    const avg = diffusionStats.recentResults.reduce((s, r) => s + r.tc, 0) / diffusionStats.recentResults.length;
+    diffusionStats.avgTc = Number.isFinite(avg) ? avg : 0;
   }
 
   return results;
@@ -737,29 +770,47 @@ function scoreBasedDenoising(
 export function runDistributionBasedDiffusion(
   count: number = 15,
   targetTc: number = 200,
-  steps: number = 30
+  steps: number = 30,
+  sharedScreenedSet?: Set<string>
 ): DiffusedCrystal[] {
   const results: DiffusedCrystal[] = [];
   const seenFormulas = new Set<string>();
 
   const allDists = getAllDistributions();
 
+  const DIST_EPSILON = 0.15;
+  const DIST_MIN_FLOOR = 0.05;
+  const DIST_MAX_FRACTION = 0.40;
+  const maxPerSystem = Math.max(1, Math.ceil(count * DIST_MAX_FRACTION));
+  const systemTrialCounts: Record<string, number> = {};
+
   for (let attempt = 0; attempt < count * 3 && results.length < count; attempt++) {
     try {
       let sysDist: CrystalSystemDistribution;
       const lw = distributionDiffusionStats.learnedSystemWeights;
       const hasLearned = Object.keys(lw).length > 0;
-      if (hasLearned && Math.random() < 0.7) {
-        const totalWeight = allDists.reduce((s, d) => s + (lw[d.system] ?? 1.0), 0);
-        let r = Math.random() * totalWeight;
-        sysDist = allDists[0];
-        for (const d of allDists) {
-          r -= (lw[d.system] ?? 1.0);
-          if (r <= 0) { sysDist = d; break; }
+      if (Math.random() < DIST_EPSILON) {
+        sysDist = allDists[Math.floor(Math.random() * allDists.length)];
+      } else if (hasLearned && Math.random() < 0.7) {
+        const weights = allDists.map(d => {
+          if ((systemTrialCounts[d.system] || 0) >= maxPerSystem) return 0;
+          return Math.max(DIST_MIN_FLOOR, lw[d.system] ?? 1.0);
+        });
+        const totalWeight = weights.reduce((s, w) => s + w, 0);
+        if (totalWeight <= 0) {
+          sysDist = allDists[Math.floor(Math.random() * allDists.length)];
+        } else {
+          let r = Math.random() * totalWeight;
+          sysDist = allDists[0];
+          for (let i = 0; i < allDists.length; i++) {
+            r -= weights[i];
+            if (r <= 0) { sysDist = allDists[i]; break; }
+          }
         }
       } else {
         sysDist = sampleCrystalSystem(true);
       }
+      systemTrialCounts[sysDist.system] = (systemTrialCounts[sysDist.system] || 0) + 1;
       const { sg, symbol: sgSymbol } = sampleSpaceGroup(sysDist);
       const lattice = sampleLatticeParams(sysDist);
 
@@ -770,11 +821,14 @@ export function runDistributionBasedDiffusion(
 
       const latent = generateLatentVector(motif, targetTc);
       const composition = decodeComposition(latent, motif);
-      const formula = buildFormula(composition);
+      const rawFormula = buildFormula(composition);
 
-      if (!formula || formula.length < 2) continue;
+      if (!rawFormula || rawFormula.length < 2) continue;
+      const formula = normalizeFormula(rawFormula);
       if (seenFormulas.has(formula)) continue;
       if (!isValidFormula(formula)) continue;
+      if (!passesValenceFilter(formula)) continue;
+      if (sharedScreenedSet && sharedScreenedSet.has(formula)) continue;
       seenFormulas.add(formula);
 
       let wyckoffSites = sampleWyckoffPositions(sysDist, composition);
@@ -859,7 +913,8 @@ export function runDistributionBasedDiffusion(
         distributionDiffusionStats.systemBreakdown[sysKey] = { count: 0, avgTc: 0, bestTc: 0 };
       }
       const sb = distributionDiffusionStats.systemBreakdown[sysKey];
-      sb.avgTc = (sb.avgTc * sb.count + predictedTc) / (sb.count + 1);
+      const newSbAvg = (sb.avgTc * sb.count + predictedTc) / (sb.count + 1);
+      sb.avgTc = Number.isFinite(newSbAvg) ? newSbAvg : 0;
       sb.count++;
       if (predictedTc > sb.bestTc) sb.bestTc = predictedTc;
 

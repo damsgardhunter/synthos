@@ -193,7 +193,7 @@ function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: Synth
     tc = tc * dampFactor;
   }
 
-  tc = Math.min(400, tc);
+  tc = Math.min(200, tc);
 
   let gbTc = 0;
   let gbScore = 0;

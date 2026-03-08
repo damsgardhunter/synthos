@@ -416,7 +416,7 @@ export function gbPredict(features: MLFeatureVector): { tcPredicted: number; sco
 
   score = Math.max(0.01, Math.min(0.95, score));
 
-  const safeTc = Number.isFinite(tcPredicted) ? Math.max(0, Math.round(tcPredicted * 10) / 10) : 0;
+  const safeTc = Number.isFinite(tcPredicted) ? Math.min(200, Math.max(0, Math.round(tcPredicted * 10) / 10)) : 0;
   return { tcPredicted: safeTc, score, reasoning };
 }
 

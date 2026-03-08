@@ -254,7 +254,7 @@ function canonicalize(formula: string): string {
   return countsToFormula(reduced);
 }
 
-function passesValenceFilter(formula: string): boolean {
+export function passesValenceFilter(formula: string): boolean {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   if (elements.length === 0) return false;

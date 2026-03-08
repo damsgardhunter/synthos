@@ -1,7 +1,7 @@
 # MatSci-∞ Supercomputer — Materials Science AI Platform
 
 ## Overview
-MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of room-temperature superconductors. It integrates AI for natural language processing, novel material generation, and machine learning predictions. The platform aims to revolutionize material discovery by continuously learning and expanding its knowledge base, from subatomic modeling to advanced computational physics and synthesis tracking, with significant market potential across high-tech industries. Its core mission is to find materials with a critical temperature (Tc) >= 293K.
+MatSci-∞ is an AI-powered supercomputer platform designed to accelerate the discovery of room-temperature superconductors (Tc >= 293K). It integrates advanced AI for natural language processing, novel material generation, and machine learning predictions, aiming to revolutionize material discovery from subatomic modeling to synthesis tracking. The platform continuously learns and expands its knowledge base, offering significant market potential across high-tech industries.
 
 ## User Preferences
 - No emoji in UI text
@@ -19,122 +19,94 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Real-time**: WebSocket (ws)
 
 ### Core Features
-- **AI-Driven Learning Engine**: Orchestrates 13 distinct learning phases covering subatomic to multi-fidelity screening and novel synthesis reasoning.
-- **ML Prediction Engine**: Combines a gradient boosting model with an OpenAI gpt-4o-mini neural network ensemble for superconductor scoring, applying strict room-temperature criteria (Tc >= 293K).
-- **Physics Engine**: Deterministic calculations using a 96-element database, including advanced parameter calculation (DOS, bandwidth, Hubbard U/W, lambda, phonon frequencies, metallicity). Includes specialized adjustments for superhydrides, High-Entropy Alloys (HEAs), and unconventional superconductors.
-- **Topological Superconductor Detection Engine**: Estimates Z2 invariant, Chern number, and Majorana feasibility.
-- **Quantum Pairing Mechanism Simulator (7-Channel)**: Analyzes phonon, spin-fluctuation, orbital-fluctuation, excitonic, CDW, polaronic, and plasmon pairing channels.
-- **Fermi Surface Reconstruction Engine**: Computes Fermi surface isosurfaces, classifies pockets, and extracts features.
-- **Hydrogen Network Topology Analyzer**: Analyzes H-H distance distribution, network dimensionality, and cage topology for hydrides.
-- **Chemical Stability Reaction Network**: Builds compound decomposition pathway graphs with kinetic barriers and metastable lifetime estimation.
-- **Materials Genome Representation (256-dim)**: Latent genome vector encoding for similarity search and inverse design.
-- **Autonomous Theory Discovery Engine**: Uses symbolic regression to discover mathematical relationships from simulation data.
+- **AI-Driven Learning Engine**: Orchestrates 13 distinct learning phases covering multi-fidelity screening and novel synthesis reasoning.
+- **ML Prediction Engine**: Combines gradient boosting and OpenAI gpt-4o-mini for superconductor scoring, focusing on Tc >= 293K.
+- **Physics Engine**: Performs deterministic calculations using a 96-element database, including advanced parameter calculations and specialized adjustments for superhydrides, HEAs, and unconventional superconductors.
+- **Topological Superconductor Detection**: Estimates Z2 invariant, Chern number, and Majorana feasibility.
+- **Quantum Pairing Mechanism Simulator**: Analyzes 7 pairing channels (phonon, spin-fluctuation, orbital-fluctuation, excitonic, CDW, polaronic, plasmon).
+- **Fermi Surface Reconstruction Engine**: Computes and analyzes Fermi surface features.
+- **Hydrogen Network Topology Analyzer**: Analyzes H-H distances and network topology for hydrides.
+- **Chemical Stability Reaction Network**: Builds compound decomposition graphs with kinetic and metastable lifetime estimation.
+- **Materials Genome Representation**: 256-dimensional latent vector for similarity search and inverse design.
+- **Autonomous Theory Discovery Engine**: Uses symbolic regression to uncover mathematical relationships from simulation data.
 - **Multi-Scale Physics Modeling**: Analyzes atomic, electronic, and mesoscopic feature layers and their cross-scale coupling.
-- **Self-Improving Physics Models**: Parameterized physics equations optimized via Bayesian methods with continuous learning loops.
-- **Multi-Material Interface Discovery Engine**: Analyzes heterostructure superconductivity, including charge transfer, interface phonon enhancement, epitaxial strain, and dimensional confinement for 2D superconductors.
-- **Generator Resource Manager**: Centralized allocation and adaptive rebalancing for 5 candidate generators. Default weights: structure_diffusion=0.35, rl=0.25, bo_exploration=0.20, motif_diffusion=0.15, random_exploration=0.05.
-- **Fermi Surface Topology Clustering**: Clusters FS feature vectors into 5 archetype clusters for search guidance.
-- **Materials Discovery Landscape**: UMAP embedding engine for 256D genome vectors, 3D latent space, and discovery zone detection.
-- **Constraint-Based Physics Solver**: Backward McMillan/Eliashberg solver and 4 additional constraint solvers for inverse design.
-- **Pressure-to-Ambient Pathway Search**: Generates stabilization strategies for high-pressure superconductors to achieve ambient pressure stability.
-- **Physics Constraint Graph Solver**: Solves all SC physics constraints simultaneously as a graph.
-- **Synthesis Pathway Modeling**: Simulates multi-step reaction pathways, including thermodynamics and kinetic barriers for 6 synthesis methods.
-- **Synthesis Condition Optimizer**: Selects optimal synthesis conditions, estimates complexity/duration, and tracks feasibility.
-- **Synthesis Simulator & Active Optimization**: Co-searches material composition and 9 active synthesis variables, simulating synthesis effects on material properties.
-- **Defect Physics Engine**: Models various defects with formation energy, defect density, and electronic structure adjustment.
-- **Strong Correlation Physics Engine**: Detects correlated regimes, computes correlation scores, and adjusts pairing weights.
-- **Experimental Validation Planner**: Ranks candidates for lab experiments, generates synthesis instructions, and suggests characterization methods.
-- **Band Structure Neural Operator**: Predicts complete band structure along high-symmetry k-paths, deriving effective masses, Fermi velocities, and topological indices.
+- **Self-Improving Physics Models**: Parameterized physics equations optimized via Bayesian methods with continuous learning.
+- **Multi-Material Interface Discovery Engine**: Analyzes heterostructure superconductivity phenomena.
+- **Generator Resource Manager**: Centralized allocation and adaptive rebalancing for 5 candidate generators (structure_diffusion, rl, bo_exploration, motif_diffusion, random_exploration).
+- **Fermi Surface Topology Clustering**: Clusters FS feature vectors into 5 archetypes for search guidance.
+- **Constraint-Based Physics Solver**: Multiple solvers, including backward McMillan/Eliashberg, for inverse design.
+- **Pressure-to-Ambient Pathway Search**: Generates stabilization strategies for high-pressure superconductors.
+- **Physics Constraint Graph Solver**: Solves all SC physics constraints simultaneously.
+- **Synthesis Pathway Modeling & Optimizer**: Simulates multi-step reaction pathways and optimizes synthesis conditions across 6 methods.
+- **Synthesis Simulator & Active Optimization**: Co-searches material composition and 9 active synthesis variables.
+- **Defect Physics Engine**: Models defects, formation energy, and electronic structure adjustments.
+- **Strong Correlation Physics Engine**: Detects correlated regimes and adjusts pairing weights.
+- **Experimental Validation Planner**: Ranks candidates, generates synthesis instructions, and suggests characterization methods.
+- **Band Structure Neural Operator**: Predicts complete band structure, effective masses, and topological indices.
 - **Autonomous Hypothesis Engine**: AI for generating, testing, and ranking superconductivity theories.
 - **Quantum Criticality Detector**: Unified QCP detector formalizing various detections into a `QuantumCriticalScore`.
-- **Discovery Memory System**: Pattern-based learning system that remembers physics patterns leading to high Tc discoveries.
-- **Phase Stability Prediction Network**: GNN-based pre-filter for rapid screening of material stability.
-- **Convex Hull Phase Diagram Engine**: Computes energy above hull, decomposition products, and assesses metastability.
-- **Pressure Modeling Engine**: Calculates volume compression, bulk modulus, and predicts high-pressure stability and pressure-Tc curves.
+- **Discovery Memory System**: Pattern-based learning that remembers physics patterns leading to high Tc discoveries.
+- **Phase Stability Prediction Network**: GNN-based pre-filter for rapid stability screening.
+- **Convex Hull Phase Diagram Engine**: Computes energy above hull and assesses metastability.
+- **Pressure Modeling Engine**: Calculates volume compression, bulk modulus, and predicts high-pressure stability/pressure-Tc curves.
 - **Graph Neural Network Surrogate**: Primary ML predictor for formation energy, phonon stability, Tc, confidence, and electron-phonon lambda, with uncertainty estimation.
-- **Reinforcement Learning Chemical Space Agent**: REINFORCE policy gradient agent learning optimal elements, stoichiometries, and structures with physics-aware rewards. Incremental RL updates every 25 candidates (RL_UPDATE_INTERVAL=25) during autonomous loop with per-batch reward computation (batchBestTc, batchPassCount, batchNovelCount reset after each update). Generator rebalancing every 3 cycles (REBALANCE_INTERVAL=3).
+- **Reinforcement Learning Chemical Space Agent**: REINFORCE policy gradient agent learning optimal elements, stoichiometries, and structures with physics-aware rewards.
 - **Bayesian Optimization for Chemical Space Search**: Gaussian Process surrogate with mixed acquisition functions.
 - **Crystal Diffusion Generator**: Generates novel crystal structures by refining random atomic positions.
 - **Massive Candidate Generator**: Utilizes element substitution, composition interpolation, doped variants, and composition sweeps with a rapid Gradient Boosting screen.
 - **Physics-Aware ML Predictor**: Multi-target prediction with transfer priors and uncertainty estimation.
-- **Structural Mutation Engine**: Assigns structure prototypes, generates distorted lattices, layered structures, vacancy structures, and strain variants.
+- **Structural Mutation Engine**: Assigns prototypes, generates distorted lattices, layered structures, and strain variants.
 - **Multi-Dimensional Phase Explorer**: Scans composition, pressure, and temperature spaces with adaptive sampling.
 - **Crystal Prototype Structure Generator**: Generates 10 distinct crystal structure types, producing over 807 structurally-typed candidates.
-- **Active Learning Loop**: Uncertainty-driven DFT selection with analytical DFT fallback, retraining GNN surrogates.
-- **Real DFT Backend (GFN2-xTB)**: Integrates xtb v6.7.1 for quantum-mechanical properties, geometry optimization, and finite-displacement phonon calculations. Formation energy uses bulk-corrected references: isolated atom energies corrected by experimental cohesive energies (COHESIVE_ENERGIES_EV lookup table, 40+ elements) so E_ref represents bulk standard state, not free atom. Molecular elements (H,N,O,F,Cl) use dimer/2 references without cohesive correction. Phonon Hessian has analytical fallback: when xTB --hess fails for metals, runs geometry optimization only and estimates phonon spectrum from Debye model based on average atomic mass. Positive total energies rejected as xTB failures.
-- **Full DFT Backend (Quantum ESPRESSO 7.2)**: pw.x and ph.x calculations for top 0.1% candidates via async job queue. Multi-layer reliability: pseudopotential validation (size >10KB, valid UPF structure with `<UPF`/`<PP_HEADER`/`</UPF>` tags, HTML content detection rejects corrupted 404 pages, auto-copy from `server/dft/pseudo/` repo to `/tmp/qe_pseudo/`, startup cleanup of stale cache — no ld1.x regeneration), xTB pre-relaxation before SCF, xTB stability pre-filter (rejects E/atom > -1.0 eV), geometry validation (min pairwise distance >0.6A with auto-scaling repair, lattice bounds 3-40A, volume/atom >5A^3), formula pre-filter (max 16 atoms, max 5 elements, reject >90% H if no metal host — transition metals, rare earths La/Y/Ce, and alkaline earths Ca/Sr/Ba/Mg all accepted as hydride hosts), structure dedup via MD5 hash of sorted positions+lattice, prototype-based atomic position generation (Perovskite/NaCl/A15/AlB2/etc. from crystal-prototypes.ts with cubic fallback), auto k-points via ceil(30/latticeA), SCF retry with parameter variation (4 attempts: david/0.3 -> david/0.2 -> cg/0.1 -> cg/0.1+gaussian smearing), PP read error detection (no retry on UPF parse failure), repeated failure blocking (3 strikes per formula, 1hr cooldown), stage-failure stats tracking (formula_filter/pp_validation/geometry/duplicate/xtb_prefilter/scf/phonon). 29 valid PSlibrary/SG15 UPF pseudopotentials in repo for: Al, B, Ba, C, Ca, Ce, Cu, Fe, H, Hf, K, La, Li, Mg, Mo, N, Nb, O, Re, Sc, Si, Sr, Ta, Ti, V, W, Y, Zn, Zr.
-- **Async DFT Job Queue**: PostgreSQL-backed job queue with priority scheduling, status tracking, and WebSocket broadcast.
-- **Inverse Design Optimizer Engine**: 5-layer architecture for goal-driven candidate generation, inverse learning, and closed-loop optimization.
-- **Next-Generation Inverse Design Pipeline**: Unified 5-component orchestrator (Goal Spec → Design Generator → Constraint Solver → Surrogate Model → Learning Loop) with convergence tracking, gradient refinement after iteration 3, and real-time stats. API at `/api/next-gen-pipeline/`. Frontend tab in Computational Physics.
-- **Self-Improving Design Lab**: Strategy-level optimization that evolves design architectures (not just parameters). 8 concurrent strategy types (hydride-cage, layered-intercalation, HEA, light-element-phonon, topological-edge, pressure-stabilized, e-ph resonance, charge-transfer). Includes: Failure Analysis Engine (classifies 8 failure types with corrective suggestions), Knowledge Base (pattern→suggestion with confidence), Strategy Evolution (mutation, crossover, knowledge-guided adaptation), Implicit Neural Representations (MLP(x,y,z)→density with gradient/curvature). API at `/api/self-improving-lab/`. Frontend "Design Lab" tab in Computational Physics.
-- **Design Representations System**: Dual representation for material design — Programmatic/Procedural (instruction-based structure generation with 15+ instruction types, 8 templates at 22-23 instructions each) and Graph-based (component-connection architecture with 12 node types, 8 edge types). Features: program execution to formula+properties, mutation/crossover operators (10 insertable instruction types, 30% chance insert 3, 20% chance insert 2), graph analysis (centrality, clustering, communities, spectral gap), bidirectional conversion (program↔graph), 16D/12D feature vectors. Integrated into lab iteration cycle — every candidate gets both representations. API at `/api/design-representations/`. Frontend "Representations" tab in Computational Physics. File: `server/inverse/design-representations.ts`.
-- **Symbolic Physics Discovery Layer**: 12-component subsystem for automated physics equation discovery. Sits between Multi-Scale Physics Modeling and Autonomous Hypothesis Engine. Components: (1) Unified Scientific Dataset Layer — builds 20-variable physics records from multi-scale features, (2) Symbolic Feature Library — 71 candidate terms (basic/quadratic/interaction/ratio/transform/physics-inspired including McMillan core, screened coupling, nesting-enhanced coupling), (3) Multi-Objective Evolutionary Equation Search — GP with population 100, 60 generations, multi-objective fitness (accuracy+simplicity+physics+constraints), (4) Dimensional Analysis Engine — unit registry and propagation system rejecting dimensionally invalid equations, (5) Physics Constraint Validation — enforces lambda<5, mu_star<0.3, U/W<Mott threshold, etc., (6) Cross-Scale Theory Validation — validates discovered equations across hydride/cuprate/iron-based/HEA/topological/intermetallic/layered families, (7) Equation Simplification — constant folding, identity removal, term cancellation, (8) Theory Ranking System — score = 0.35*accuracy + 0.20*simplicity + 0.20*generalization + 0.15*physics + 0.10*novelty, stored in symbolic_theory_database, (9) Theory Integration Pipeline — discovered equations feed into self-improving physics, (10) Discovery Feedback Loop — top theories bias candidate generation toward high-Tc features, (11) Hypothesis Generator Integration — hypothesis engine seeds symbolic search, (12) Theory Discovery UI — "Theory Discovery" tab in Computational Physics with 5 sub-views (Overview/Theories/Features/Units/Feedback). API at `/api/symbolic-discovery/` and `/api/physics-discovery-dataset`. File: `server/theory/symbolic-physics-discovery.ts`.
-- **Causal Physics Discovery Layer**: 11-component subsystem for causal mechanism discovery in superconductivity. Discovers directed causal graphs (not just correlations) identifying mechanisms like `phonon_freq -> lambda -> Tc`. Components: (1) Causal Feature Dataset — 32 causal variables from multi-scale features, pairing profiles, and ML predictions, (2) Causal Variable Ontology — 30-node physics hierarchy with parent-child relationships across 7 categories, (3) Causal Graph Discovery — PC-algorithm-inspired with partial correlation tests and physics ontology constraints, (4) Pairing Mechanism Integration — validates causal edges using 7-channel pairing simulator, (5) Intervention Engine — simulates do(X=x) interventions propagating through causal graph, (6) Counterfactual Simulator — "what-if" analysis with design implications, (7) Mechanism Hypothesis Generator — generates testable causal chain hypotheses with material family validation, (8) Causal Discovery Memory — persistent storage of graphs/hypotheses/rules across runs, (9) Cross-Family Validation — validates causal mechanisms across hydride/cuprate/iron-based/intermetallic families, (10) Design Guidance — ranks intervention variables by causal impact on Tc, (11) Pressure Regime Comparison — identifies mechanisms surviving decompression for ambient-pressure SC. API at `/api/causal-discovery/`. Frontend "Causal Discovery" tab in Computational Physics with 7 sub-views (Overview/Graph/Hypotheses/Interventions/Ontology/Rules/Pressure Regimes). File: `server/theory/causal-physics-discovery.ts`.
-- **Crystal Distribution Database**: Learned crystallographic distributions from ~500k structures (ICSD/MP/OQMD). 6 crystal systems (cubic/hex/tet/ortho/trig/mono), 60+ space groups with empirical weights, lattice parameter distributions, Wyckoff site sampling with element-specific site preferences for 28 elements. Used by distribution-based crystal diffusion to generate physically realistic structures. File: `server/ai/crystal-distribution-db.ts`.
-- **Distribution-Based Crystal Diffusion**: Alternative crystal structure generator that samples from learned crystallographic distributions instead of fixed motif prototypes. Uses adaptive system weights (learnedSystemWeights) that evolve based on which crystal systems produce high-Tc candidates. Score-based Wyckoff denoising with element-aware repulsion. Runs every 10 cycles (deep) and every 6 cycles (fast-path). File: `server/ai/crystal-structure-diffusion.ts` (runDistributionBasedDiffusion).
-- **Multi-Task GNN Surrogate**: Extended GNN predicting 18 properties simultaneously: formation energy, phonon stability, Tc, lambda, confidence (base 5), plus band gap, DOS@Fermi, bulk/shear modulus, Debye temperature, magnetic moment, omegaLog, muStar, nesting strength, correlation strength, dimensionality, metallicity, topological index. Uses physics engine cross-validation. Tracked via trackMultiTaskPrediction() in screening loop. File: `server/learning/multi-task-gnn.ts`.
-- **Crystal VAE Latent Space**: Variational autoencoder wrapping the 256D MaterialGenome. Encoder (256→128→64 with LeakyReLU) maps to mu/logvar, reparameterization trick for sampling, decoder (64→128→256 with tanh). VAE inverse design: Adam optimizer in 64D latent space with multi-restart, stochastic dim selection, stagnation jumps. Genome vector decoded to formula via composition analysis. trainVAE() incrementally trains on top candidates. Runs every 12 cycles (deep) and every 15 cycles (fast-path). File: `server/physics/materials-vae.ts`.
-- **Theory-Guided Generator Bias**: Closes the loop from theory/causal discovery → generator weight changes. Maps causal variables (hydrogen_density, lambda, phonon_freq, nesting_score, etc.) to generator weight boosts, chemical family preferences, element boosts, motif biases, and structural guidance. Applies biases every 10 cycles after theory/causal discovery. Tracks effectiveness via feedback-on-feedback (records Tc improvements post-bias). 60% probability of theory-driven strategy selection; element boosts feed into design programs and motif diffusion target elements. File: `server/learning/theory-guided-generator.ts`. `applyTheoryBias()` in `generator-manager.ts`.
-- **Kinetic Metastability Prediction Model**: Predicts metastable material lifetimes with multi-factor analysis: grain boundary energy (from melting points, bulk moduli, compositional complexity), diffusion barriers (Arrhenius model from masses, radii, melting points — identifies rate-controlling element), nucleation barriers (classical nucleation theory with surface energy and driving force from hull distance), pressure stabilization pathways (bulk modulus, compressibility, critical decompression rate, ambient stabilizability). Predicts lifetime at 300K with confidence bounds (±3x uncertainty). Gates candidates: kineticScore < 0.15 with no stabilization strategies → rejected. Identifies 7 stabilization strategies: nanostructuring, alloying with slow diffusers, epitaxial strain, encapsulation, chemical pre-compression, kinetic quenching, point defect engineering. File: `server/physics/kinetic-stability.ts`.
+- **Active Learning Loop**: Uncertainty-driven DFT selection and GNN surrogate retraining.
+- **Real DFT Backend (GFN2-xTB)**: Integrates xtb for quantum-mechanical properties, geometry optimization, and finite-displacement phonon calculations with bulk-corrected formation energies.
+- **Full DFT Backend (Quantum ESPRESSO 7.2)**: pw.x and ph.x calculations for top candidates via async job queue, with multi-layer reliability checks and extensive pre-filters (pseudopotential, xTB pre-relaxation, geometry, formula, structure dedup, k-points, SCF retry). Supports 29 PSlibrary/SG15 UPF pseudopotentials.
+- **Async DFT Job Queue**: PostgreSQL-backed job queue with priority scheduling and status tracking.
+- **Inverse Design Optimizer Engine**: 5-layer architecture for goal-driven candidate generation and closed-loop optimization.
+- **Next-Generation Inverse Design Pipeline**: Unified 5-component orchestrator for design generation and learning, with convergence tracking and real-time stats.
+- **Self-Improving Design Lab**: Strategy-level optimization that evolves design architectures across 8 concurrent strategy types. Includes Failure Analysis, Knowledge Base, and Strategy Evolution.
+- **Design Representations System**: Dual representation for material design (Programmatic/Procedural and Graph-based) with mutation/crossover operators and bidirectional conversion.
+- **Symbolic Physics Discovery Layer**: 12-component subsystem for automated physics equation discovery, using multi-objective evolutionary search, dimensional analysis, and physics constraint validation.
+- **Causal Physics Discovery Layer**: 11-component subsystem for causal mechanism discovery in superconductivity, identifying directed causal graphs and enabling intervention/counterfactual simulations.
+- **Crystal Distribution Database**: Learned crystallographic distributions from ~500k structures used by diffusion generators.
+- **Distribution-Based Crystal Diffusion**: Generates crystal structures by sampling from learned crystallographic distributions, with adaptive system weights and Wyckoff denoising.
+- **Multi-Task GNN Surrogate**: Extended GNN predicting 18 properties simultaneously, including formation energy, phonon stability, and Tc.
+- **Crystal VAE Latent Space**: Variational autoencoder wrapping the 256D MaterialGenome for inverse design in a 64D latent space.
+- **Theory-Guided Generator Bias**: Integrates theory/causal discoveries to bias generator weights, chemical family preferences, and structural guidance.
+- **Kinetic Metastability Prediction Model**: Predicts metastable material lifetimes based on multi-factor analysis, gates candidates, and identifies stabilization strategies.
 - **Differentiable Materials Design**: Computes analytical McMillan gradients and numerical element gradients for Tc.
-- **8-Pillar SC Optimizer**: Targets 8 superconductivity pillars with adaptive weights and weakness-targeted mutation strategies.
-- **Physics-Constrained Generative AI**: Enforces charge neutrality, atomic radius compatibility, coordination number limits, and bond stability.
-- **Structure-First Design (Primary Generator)**: Motif-first architecture with 29 superconducting structural motifs in SC_MOTIF_LIBRARY (structure-diffusion.ts). Motifs include: CuO2-plane, FeAs-layer, clathrate-cage, A15-chain, kagome-flat, hexagonal-layer, perovskite-3D, layered-hydride, NaCl-rocksalt, H-channel, breathing-kagome, Laves-MgZn2, TMD-2H, fullerene-A3C60, heavy-fermion-115, borocarbide-RTBC, carbon-clathrate, ThCr2Si2-pnictide, anti-perovskite-SC, Chevrel-phase, BiS2-layer, infinite-layer, skutterudite, Heusler-L21, pyrochlore, 1T-prime-TMD, Ruddlesden-Popper, nickelate-IL, MgB2-sigma. Each motif defines: spaceGroup, crystalSystem, structural embedding (12 params), site roles with preferred element categories, lattice ratios, scAffinity, tcRange, pairingMechanism. Generation hierarchy: motif selection → family-constrained site chemistry → electron count validation → physics evaluation. 8 Chemical Families constrain element selection: hydride, intermetallic, layered-pnictide, boride, cuprate, chalcogenide, kagome-metal, oxide-perovskite. Each family defines host elements, allowed anions, stoichiometry patterns, compatible motifs, and max atom ratios. Electron count validation (VALENCE_ELECTRONS lookup for 60+ elements) rejects: VEC/TM > 12, wrong d-electron counts for motif type (d9 for cuprate, d6 for pnictide, d4-d7 for A15), avgVEC > 14.
-- **RL Family-First Action Selection**: RLAction now includes chemicalFamily dimension (8 families). RL selects family first → biases element groups to family-compatible choices → biases structure types to family-preferred prototypes. Hydride family automatically boosts hydrogen density. Policy weights updated via REINFORCE for all 9 dimensions including chemicalFamily. RL reward function uses 6 weighted components: Tc (0.35), stability (0.20), motif validity (0.15), electron topology (0.10), novelty (0.10), synthesis (0.10). Physics principle reward includes motif validity score, family consistency score, and electron count stability score.
-- **Chemical Synthesis Realism**: Scores precursor availability, family-specific synthesis defaults, reaction temperature factors, and phase competition penalties.
-- **Autonomous Discovery Loop**: Massive generation pipeline (500-2000 candidates/cycle) with multi-stage filtering and a tiered acceptance system. Closed-loop feedback from all 6 analysis subsystems triggered by `isPromising` guard (result.passed OR Tc>=15K): Defect Engine (adds mutated formulas to candidate pool), Correlation Engine (boosts Tc for strongly-correlated materials), Synthesis Optimizer (feasibility bonuses), Crystal Growth Simulator (quality bonuses), Experiment Planner (generates plans for Tc>25K candidates every 3 cycles), Pressure Pathways (ambient retention boosts for Tc>30K, pressure>5GPa). Topology/Fermi surface analysis still requires full pass. All feedback metrics tracked in `feedbackLoopStats` and exposed via `/api/engine/memory` under `autonomousLoopStats.feedbackLoops`. Feedback signals also feed into RL reward computation.
-- **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication of insights.
+- **8-Pillar SC Optimizer**: Targets 8 superconductivity pillars with adaptive weights and weakness-targeted mutation.
+- **Physics-Constrained Generative AI**: Enforces charge neutrality, atomic radius compatibility, coordination number, and bond stability.
+- **Structure-First Design (Primary Generator)**: Motif-first architecture with 29 superconducting structural motifs and 8 chemical families.
+- **RL Family-First Action Selection**: RL incorporates chemicalFamily dimension, biasing element groups and structure types.
+- **Chemical Synthesis Realism**: Scores precursor availability, family-specific synthesis defaults, and phase competition penalties.
+- **Autonomous Discovery Loop**: Massive generation pipeline with multi-stage filtering and a tiered acceptance system, providing closed-loop feedback from all analysis subsystems.
+- **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication.
 - **NLP Engine**: Generates cross-property correlation insights and superconductor correlation analysis.
-- **Milestone Event Tracker**: Detects and persists research milestones to DB, displayed on Research Pipeline page.
+- **Milestone Event Tracker**: Detects and persists research milestones to DB.
 
-### Navigation Order (Sidebar)
-1. Command Center (bold, text-base)
-2. Research Pipeline (bold, text-[15px])
-3. Computational Physics
-4. Materials Database
-5. Novel Discovery
-6. Superconductor Lab
-7. Atomic Explorer
-
-### Key Data Paths
-- `/api/engine/memory` returns `lastCycleCandidates`, `lastCycleFamilyCounts`
-- `autonomousLoopStats.inverseOptimizer.bestTcAcrossAll` — inverse optimizer best Tc, displayed in Active Learning card and Knowledge Map
-- `/api/milestones` — reads milestones from DB
+### Bug Fixes Applied (Session 2026-03-08)
+- **RL Weight Clamping**: All RL policy weights clamped to >= 0 after updates; entropy regularization prevents exploration collapse (top weight > 3x mean gets 0.9 decay).
+- **avgTc Null Guard**: All avgTc calculations guarded with `Number.isFinite()`; `sanitizeStatsNumeric()` recursively cleans stats before API response.
+- **Valence Filter Enforcement**: `passesValenceFilter` applied in engine pipeline, crystal diffusion, and structure diffusion to reject impossible compounds (FO2, FN3O2, etc.).
+- **Duplicate Detection**: Formulas normalized before dedup checks; shared screened set passed to all generators; intra-batch dedup added.
+- **Throughput Metric**: Reports 0 for first 5 minutes; minimum divisor increased to 0.1 hours.
+- **Surrogate Tc Cap**: Differentiable optimizer and gradient boost predictions capped at 200K (was 400K).
+- **DFT Metric Clarity**: Stats keys renamed: `realDFT` → `xtb`, `fullDFTQueue` → `qeDFT` for clear xTB vs QE distinction.
+- **Motif Entropy Regularization**: Epsilon-greedy (15%) + min 5% floor + max 40% cap per motif in structure/crystal diffusion.
+- **Log Truncation Fix**: Live event feed and log details use `break-words line-clamp-3` instead of CSS truncate.
 
 ### Physics Filtering Rules
-- **Phonon artifact threshold**: Imaginary modes with freq < -5000 cm⁻¹ are xTB numerical artifacts — discarded entirely, not penalized
-- **Phonon severe instability**: >3 imaginary modes OR lowest freq < -500 cm⁻¹ → hard rejection ("phonon-unstable")
-- **Physical instability threshold**: -5 cm⁻¹
-- **Penalty**: Physical imaginary modes penalize ensemble score by 0.05 per mode (max 0.25); >= 5 modes → dataConfidence = "low"
-- **Formation energy hard stop**: Ef > 1.0 eV/atom (positive, less stable than elements) or Ef < -5.0 eV/atom (unrealistically negative, reference mismatch) → immediate rejection before DFT pipeline
-- **Hull distance**: Hard reject > 0.50 eV/atom; 0.25-0.50 = "exploratory-metastable" (requires kinetic barrier > 0.2 eV)
-- **Family quotas**: FAMILY_CAPS dict (Hydrides 40%, Intermetallics 25%, Borides/Carbides/Nitrides/Oxides 15% each, Sulfides/Pnictides 10%)
-- **Known compound filter**: ~200 known compounds (hydrides, carbides, cuprates, iron-based, binary) rejected pre-evaluation
-- **Interatomic distance validation**: Element-pair-aware minimum distances based on covalent radii sums × 0.85, floor of 1.0 Å (not a flat constant). Applied in both xTB structure gen and QE geometry checks.
-- **Hydrogen stoichiometry limits**: H/metal ratio > 6 or H fraction > 75% → tagged as high-pressure candidates (not rejected). Estimated pressure computed from stoichiometry. Known superhydrides (LaH10, YH6, etc.) exempted from tagging. RL templates use AH3/ABH4 (not AH10/ABH6). QEFullResult carries `highPressure` and `estimatedPressureGPa` fields.
-- **DFT queue stats**: `totalProcessed/totalSucceeded/totalFailed` use `Math.max(sessionCounter, dbCount)` to stay consistent across server restarts.
-- **RL agent Tc guards**: `recordElementOutcome` and `computeReward` sanitize null/undefined/NaN Tc to 0 before use.
-- **Pipeline pass rate**: `getAutonomousLoopStats` reconciles session counters with DB pipeline stage counts using `Math.max` to avoid inconsistency.
-- **MIN_VOLUME_PER_ATOM**: Element-dependent: 6.0 ų (non-hydride) / 3.5 ų (hydride) in xTB structure gen (qe-dft-engine.ts); 5.0/3.5 ų in QE geometry check (qe-worker.ts)
-- **xTB binary check**: Validates XTB_BIN exists before geometry optimization commands
-- **xTB health check on startup**: `checkXTBHealth()` runs at engine start — tests binary version, H2 geometry optimization, and H2 Hessian calculation. Sets `xtbHealthy` flag gating `isDFTAvailable()`. Logs results as engine event.
-- **Interatomic distance validation**: Element-pair-aware. H-containing pairs: factor=0.70, floor=0.6 Å. Non-H pairs: factor=0.80, floor=0.9 Å. Applied in both qe-worker.ts and qe-dft-engine.ts.
-- **DFT structure pipeline**: `runDFTCalculation` tries `runXTBOptimization` first (single validation), falls back to `generateCrystalStructure` only on xTB failure. No duplicate structure generation.
-- **H ratio filter**: Rejects only at H > 95% without metal host. H/metal > 12 rejected in crystal-generator.ts. H/metal 6-12 tagged as high-pressure.
-- **Chemistry grammar validation**: `validateChemistryGrammar()` in crystal-generator.ts pre-filters compositions before crystal generation. Rules: max 5 elements, max 20 atoms, no noble gases, must have metal, H fraction ≤0.65, H/metal ratio ≤12, max single element ≤80% (for >2 atoms), anion:cation ratio ≤5, cation:anion ratio ≤6, charge balance check using recursive oxidation state search (TYPICAL_OXIDATION table for 50+ elements). `sampleHydride` now generates H count 2-6 (was 6-13) with 4 templates including ternary hydrides.
-- **Surrogate pre-filter pipeline**: `surrogateScreen()` in gradient-boost.ts screens candidates with GB model before expensive physics evaluation. Rejects: metallicity <0.15 (insulator), predicted Tc <3K, GB score <0.1. `incorporateSuccessData()` adds successful candidates to training set. `retrainWithAccumulatedData()` retrains GB model with accumulated success + failure examples every 50 engine cycles. `getSurrogateStats()` reports screen/pass/reject counts and training set sizes.
-- **Discovery score weights**: 0.55 Tc + 0.15 stability + 0.10 novelty + 0.10 synthesis + 0.05 topology + 0.05 uncertainty
-- **Design program templates**: 11-12 instructions per template; mutation pool has 10 insertable instruction types with 40% chance to insert 2 at once
-- **Bayesian optimizer**: `addObservation` sanitizes tc/lambda/stability (NaN/undefined → 0) before storing. `getStats().avgTc` now always returns a valid number.
-- **GNN correlations**: `trackMultiTaskPrediction` computes proper running Pearson correlation (tc_lambda, tc_dos, tc_metallicity) using accumulator sums, not error metrics.
-- **Throughput**: `throughputPerHour` uses session-only `autonomousTotalScreened / elapsedHours` (not all-time DB totals) to avoid inflation after restarts.
-- **Theory discovery**: Dimensional validity is a 10% score bonus, not a hard gate. Theories no longer require exact unit consistency to be accepted.
-- **Crystal growth defaults**: Cooling rates reduced to 5-50 K/s (was 100-500) for realistic grain sizes. Default anneal times increased to 8-16h.
-- **Crystal prototypes**: 35 prototypes in `qe-dft-engine.ts` CRYSTAL_PROTOTYPES array (was 20). New: Clathrate-H32, Skutterudite, BiS2-layered, Kagome-variant, Chevrel, Pyrite, Wurtzite, Antifluorite, Laves-C14, Laves-C15, HfFe6Ge6, CeCu2Si2, PuCoGa5-115, Infinite-layer, T-prime. Also 16 PROTOTYPE_TEMPLATES in `crystal-prototypes.ts`.
-- **Lattice parameter estimation**: Uses sum of covalent sphere volumes / packing factor in both `qe-dft-engine.ts` (with PROTOTYPE_PACKING per-prototype factors) and `crystal-prototypes.ts` (with PACKING_FACTORS per-template). BCC=0.68, FCC=0.74, hexagonal=0.74, clathrate=0.55, Chevrel=0.65, etc.
-- **Pipeline stage metrics**: `pipelineStageMetrics` object in engine.ts tracks: chemistryRejects, stabilityPrefilterRejects, surrogateRejects, formationEnergyRejects, gbTcRejects, physicsPrefilterRejects, phononRejects, belowTierRejects, duplicateRejects, featureExtractionFails, prototypeAttempts/Successes, xtbAttempts/Successes, totalPassed. Exposed in `getAutonomousLoopStats()` with computed rates.
-- **RL rejection feedback**: `recordElementOutcome` accepts optional `rejectCategory` (chemistry_reject, stability_reject, phonon_reject, tc_too_low). Chemistry/stability rejects apply extra negative bias to element pair weights. `getStats()` includes `rejectionCategories` breakdown.
-- **RL structure types**: 35 structure types (was 20), matches CRYSTAL_PROTOTYPES. KNOWN_SC_MOTIFS and MOTIF_FAMILY_MAP updated with new prototypes. CHEMICAL_FAMILY_ACTIONS biasStructures include new prototype indices.
+- **Phonon stability**: Hard rejection for severe instability (>3 imaginary modes or lowest freq < -500 cm⁻¹). Penalties for physical imaginary modes.
+- **Formation energy**: Hard stop for Ef > 1.0 eV/atom or Ef < -5.0 eV/atom.
+- **Hull distance**: Hard reject > 0.50 eV/atom; exploratory for 0.25-0.50 eV/atom (requires kinetic barrier).
+- **Family quotas**: Apply caps to prevent over-representation of specific material families.
+- **Known compound filter**: Rejects ~200 known compounds.
+- **Interatomic distance validation**: Element-pair-aware minimum distances.
+- **Hydrogen stoichiometry limits**: Tags high-pressure candidates for H/metal > 6 or H fraction > 75%.
+- **Chemistry grammar validation**: Pre-filters compositions based on max elements, atoms, noble gases, metal presence, H fraction, anion/cation ratios, and charge balance.
+- **Surrogate pre-filter pipeline**: Screens candidates with GB model before expensive physics evaluation, rejecting insulators, low Tc, or low GB scores.
+- **Discovery score weights**: Combines Tc, stability, novelty, synthesis, topology, and uncertainty.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).

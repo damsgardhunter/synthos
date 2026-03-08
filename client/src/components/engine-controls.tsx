@@ -202,7 +202,7 @@ export function EngineControls({ engineState, activeTasks, connected, messages }
                             ))}
                           </span>
                         )}
-                        <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                        <p className="text-xs text-muted-foreground mt-0.5 break-words line-clamp-3">
                           {isMilestone
                             ? msg.data.description
                             : msg.type === "log"

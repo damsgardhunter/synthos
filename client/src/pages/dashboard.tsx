@@ -701,14 +701,14 @@ export default function Dashboard() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm font-medium truncate">{log.event}</span>
+                            <span className="text-sm font-medium break-words">{log.event}</span>
                             {log.dataSource && (
                               <span className={`text-xs px-1.5 py-0.5 rounded-sm font-medium ${sourceColors[log.dataSource] || "bg-muted text-muted-foreground"}`}>
                                 {log.dataSource}
                               </span>
                             )}
                           </div>
-                          <p className="text-xs text-muted-foreground mt-0.5 truncate">{log.detail}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5 break-words line-clamp-3">{log.detail}</p>
                         </div>
                         {log.timestamp && (
                           <span className="text-xs text-muted-foreground font-mono flex-shrink-0 hidden sm:block">

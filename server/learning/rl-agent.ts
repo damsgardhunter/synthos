@@ -713,6 +713,9 @@ export class RLChemicalSpaceAgent {
     this.policy.elementPairBias[action.elementGroup1][action.elementGroup2] += lr * advantageReward * 0.5;
     this.policy.elementPairBias[action.elementGroup2][action.elementGroup1] += lr * advantageReward * 0.5;
 
+    this.clampAllWeights();
+    this.applyEntropyRegularization();
+
     if (this.totalUpdates % 20 === 0 && this.replayBuffer.length >= 32) {
       this.replayBatch(32);
     }
@@ -754,6 +757,50 @@ export class RLChemicalSpaceAgent {
         this.policy.chemicalFamily[exp.action.chemicalFamily] += lr * advantage * decay;
       }
     }
+
+    this.clampAllWeights();
+    this.applyEntropyRegularization();
+  }
+
+  private clampAllWeights(): void {
+    const clampArray = (arr: number[]) => {
+      for (let i = 0; i < arr.length; i++) {
+        arr[i] = Math.max(0, arr[i]);
+      }
+    };
+    clampArray(this.policy.elementGroup);
+    clampArray(this.policy.stoichTemplate);
+    clampArray(this.policy.structureType);
+    clampArray(this.policy.layeringDimension);
+    clampArray(this.policy.hydrogenDensity);
+    clampArray(this.policy.electronCount);
+    clampArray(this.policy.orbitalConfiguration);
+    clampArray(this.policy.chemicalFamily);
+    for (let i = 0; i < this.policy.elementPairBias.length; i++) {
+      clampArray(this.policy.elementPairBias[i]);
+    }
+  }
+
+  private applyEntropyRegularization(): void {
+    const regularizeArray = (arr: number[]) => {
+      if (arr.length === 0) return;
+      const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+      if (mean <= 0) return;
+      const threshold = mean * 3;
+      for (let i = 0; i < arr.length; i++) {
+        if (arr[i] > threshold) {
+          arr[i] *= 0.9;
+        }
+      }
+    };
+    regularizeArray(this.policy.elementGroup);
+    regularizeArray(this.policy.stoichTemplate);
+    regularizeArray(this.policy.structureType);
+    regularizeArray(this.policy.layeringDimension);
+    regularizeArray(this.policy.hydrogenDensity);
+    regularizeArray(this.policy.electronCount);
+    regularizeArray(this.policy.orbitalConfiguration);
+    regularizeArray(this.policy.chemicalFamily);
   }
 
   private rejectionCategoryCounts: Record<string, number> = {};
@@ -1045,21 +1092,23 @@ export class RLChemicalSpaceAgent {
     topOrbitalConfigs: { name: string; weight: number }[];
     rejectionCategories: Record<string, number>;
   } {
+    const clampW = (v: number) => Math.round(Math.max(0, v) * 1000) / 1000;
+
     const elWeights = this.policy.elementGroup.map((w, i) => ({
       name: ELEMENT_GROUPS[i].name,
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     elWeights.sort((a, b) => b.weight - a.weight);
 
     const stWeights = this.policy.stoichTemplate.map((w, i) => ({
       name: STOICH_TEMPLATES[i].name,
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     stWeights.sort((a, b) => b.weight - a.weight);
 
     const strWeights = this.policy.structureType.map((w, i) => ({
       name: STRUCTURE_TYPES[i],
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     strWeights.sort((a, b) => b.weight - a.weight);
 
@@ -1092,25 +1141,25 @@ export class RLChemicalSpaceAgent {
 
     const layWeights = this.policy.layeringDimension.map((w, i) => ({
       name: LAYERING_DIMENSIONS[i].name,
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     layWeights.sort((a, b) => b.weight - a.weight);
 
     const hdWeights = this.policy.hydrogenDensity.map((w, i) => ({
       name: HYDROGEN_DENSITIES[i].name,
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     hdWeights.sort((a, b) => b.weight - a.weight);
 
     const ecWeights = this.policy.electronCount.map((w, i) => ({
       name: ELECTRON_COUNTS[i].name,
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     ecWeights.sort((a, b) => b.weight - a.weight);
 
     const orbWeights = this.policy.orbitalConfiguration.map((w, i) => ({
       name: ORBITAL_CONFIGS[i].name,
-      weight: Math.round(w * 1000) / 1000,
+      weight: clampW(w),
     }));
     orbWeights.sort((a, b) => b.weight - a.weight);
 

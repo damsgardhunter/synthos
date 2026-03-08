@@ -366,7 +366,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           analytical: analyticalCount,
         },
         recentEnriched,
-        realDFT: {
+        xtb: {
           available: dftAvailable,
           method: methodInfo?.name ?? "unavailable",
           version: methodInfo?.version ?? "N/A",

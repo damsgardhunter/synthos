@@ -25,7 +25,7 @@ import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
-import { runMassiveGeneration, type MassiveGenerationStats } from "./candidate-generator";
+import { runMassiveGeneration, passesValenceFilter, type MassiveGenerationStats } from "./candidate-generator";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -194,6 +194,10 @@ let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 10000;
+
+export function getAlreadyScreenedFormulas(): Set<string> {
+  return alreadyScreenedFormulas;
+}
 
 const KNOWN_COMPOUNDS = new Set<string>([
   "MgB2", "NbTi", "Nb3Sn", "Nb3Ge", "Nb3Al", "NbN", "NbC", "V3Si", "V3Ga",
@@ -2031,7 +2035,7 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue() && cycleCount % 8 === 0) {
       try {
         const targetTcForDiffusion = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
-        const cdvaeCrystals = runCrystalDiffusionCycle(15, targetTcForDiffusion, 25);
+        const cdvaeCrystals = runCrystalDiffusionCycle(15, targetTcForDiffusion, 25, alreadyScreenedFormulas);
         let cdvaeInserted = 0;
         for (const crystal of cdvaeCrystals) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -2104,7 +2108,7 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue() && cycleCount % 10 === 0) {
       try {
         const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
-        const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25);
+        const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25, alreadyScreenedFormulas);
         let distInserted = 0;
         for (const crystal of distCrystals) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -2416,6 +2420,11 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: 0, reason: "invalid-elements" };
     }
 
+    if (!passesValenceFilter(formula)) {
+      pipelineStageMetrics.chemistryRejects++;
+      return { passed: false, tc: 0, reason: "valence-filter-failed" };
+    }
+
     const existingCandidate = await storage.getSuperconductorByFormula(formula);
     if (existingCandidate) {
       pipelineStageMetrics.duplicateRejects++;
@@ -2704,8 +2713,8 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
             feedbackLoopStats.pressurePathwayBestAmbientTc = pathway.bestAmbientTc;
             feedbackLoopStats.pressurePathwayBestFormula = pathway.bestAmbientFormula;
           }
-          if (pathway.bestAmbientFormula && !alreadyScreenedFormulas.has(pathway.bestAmbientFormula)) {
-            alreadyScreenedFormulas.add(pathway.bestAmbientFormula);
+          if (pathway.bestAmbientFormula && !alreadyScreenedFormulas.has(normalizeFormula(pathway.bestAmbientFormula))) {
+            alreadyScreenedFormulas.add(normalizeFormula(pathway.bestAmbientFormula));
             try {
               await storage.createSuperconductorCandidate({
                 formula: pathway.bestAmbientFormula,
@@ -2815,7 +2824,7 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: "RL agent action",
-      detail: `RL selected: ${rlDescription}. Generated ${rlCandidates.length} RL-directed candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}${constraintGuidance ? `. Constraint solver: lambda=[${constraintGuidance.lambdaRange[0].toFixed(2)},${constraintGuidance.lambdaRange[1].toFixed(2)}], omegaLog=[${constraintGuidance.omegaLogRange[0]},${constraintGuidance.omegaLogRange[1]}]K, prefer=[${constraintGuidance.preferredElements.slice(0,4).join(",")}], feasibility=${constraintGuidance.feasibility.toFixed(2)}` : ""}${graphGuidance ? `. Graph solver: regimes=[${graphGuidance.topRegimes.join(",")}], elements=[${graphGuidance.preferredElements.slice(0,4).join(",")}], rare=${graphGuidance.rareOpportunities.length}` : ""}`,
+      detail: `RL selected: ${rlDescription}. ${rlCandidates.length} RL candidates. Focus: ${focusArea}. Epsilon=${rlAgent.getStats().epsilon.toFixed(3)}, temp=${rlAgent.getStats().temperature.toFixed(3)}${constraintGuidance ? `. Constraints: lambda=[${constraintGuidance.lambdaRange[0].toFixed(2)},${constraintGuidance.lambdaRange[1].toFixed(2)}], feasibility=${constraintGuidance.feasibility.toFixed(2)}` : ""}${graphGuidance ? `. Graph: regimes=[${graphGuidance.topRegimes.join(",")}], rare=${graphGuidance.rareOpportunities.length}` : ""}`,
       dataSource: "RL Agent",
     });
 
@@ -2900,19 +2909,25 @@ async function runAutonomousFastPath() {
         for (const campaign of campaigns) {
           const inverseCandidates = runInverseCycle(campaign);
           for (const ic of inverseCandidates) {
-            if (ic.formula && isValidFormula(ic.formula) && !alreadyScreenedFormulas.has(ic.formula) && !inverseSeen.has(ic.formula)) {
+            if (ic.formula && isValidFormula(ic.formula)) {
               const norm = normalizeFormula(ic.formula);
-              inverseSeen.add(norm);
-              inverseDesignCandidates.push(norm);
+              if (!alreadyScreenedFormulas.has(norm) && !inverseSeen.has(norm)) {
+                inverseSeen.add(norm);
+                alreadyScreenedFormulas.add(norm);
+                inverseDesignCandidates.push(norm);
+              }
             }
           }
 
           const gradResult = runGradientDescentCycle(campaign.target, 4, 12);
           for (const r of gradResult.results) {
-            if (r.finalTc > 10 && isValidFormula(r.finalFormula) && !alreadyScreenedFormulas.has(r.finalFormula) && !inverseSeen.has(r.finalFormula)) {
+            if (r.finalTc > 10 && isValidFormula(r.finalFormula)) {
               const norm = normalizeFormula(r.finalFormula);
-              inverseSeen.add(norm);
-              inverseDesignCandidates.push(norm);
+              if (!alreadyScreenedFormulas.has(norm) && !inverseSeen.has(norm)) {
+                inverseSeen.add(norm);
+                alreadyScreenedFormulas.add(norm);
+                inverseDesignCandidates.push(norm);
+              }
             }
           }
 
@@ -2933,8 +2948,12 @@ async function runAutonomousFastPath() {
       try {
         const structResult = runStructureDiffusionCycle(200, 3, 3);
         for (const formula of structResult.formulas) {
-          if (isValidFormula(formula) && !alreadyScreenedFormulas.has(formula)) {
-            structDiffusionCandidates.push(normalizeFormula(formula));
+          if (isValidFormula(formula)) {
+            const normalized = normalizeFormula(formula);
+            if (!alreadyScreenedFormulas.has(normalized)) {
+              alreadyScreenedFormulas.add(normalized);
+              structDiffusionCandidates.push(normalized);
+            }
           }
         }
         if (structResult.formulas.length > 0) {
@@ -2961,6 +2980,7 @@ async function runAutonomousFastPath() {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
           if (alreadyScreenedFormulas.has(normalized)) continue;
+          alreadyScreenedFormulas.add(normalized);
           motifDiffusionCandidates.push(normalized);
           recordGeneratorOutcome("motif_diffusion", true, 0, crystal.noveltyScore);
         }
@@ -2981,11 +3001,12 @@ async function runAutonomousFastPath() {
     if (cycleCount % 4 === 0) {
       try {
         const cdvaeTargetTc = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
-        const cdvaeResult = runCrystalDiffusionCycle(10, cdvaeTargetTc, 20);
+        const cdvaeResult = runCrystalDiffusionCycle(10, cdvaeTargetTc, 20, alreadyScreenedFormulas);
         for (const crystal of cdvaeResult) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
           if (alreadyScreenedFormulas.has(normalized)) continue;
+          alreadyScreenedFormulas.add(normalized);
           cdvaeCandidates.push(normalized);
           recordGeneratorOutcome("structure_diffusion", true, crystal.predictedTc, crystal.noveltyScore);
         }
@@ -3005,11 +3026,12 @@ async function runAutonomousFastPath() {
     if (cycleCount % 6 === 0) {
       try {
         const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
-        const distResult = runDistributionBasedDiffusion(8, distTarget, 20);
+        const distResult = runDistributionBasedDiffusion(8, distTarget, 20, alreadyScreenedFormulas);
         for (const crystal of distResult) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
           if (alreadyScreenedFormulas.has(normalized)) continue;
+          alreadyScreenedFormulas.add(normalized);
           cdvaeCandidates.push(normalized);
           recordGeneratorOutcome("structure_diffusion", true, crystal.predictedTc, crystal.noveltyScore);
         }
@@ -3037,6 +3059,7 @@ async function runAutonomousFastPath() {
           if (!isValidFormula(formula)) continue;
           const normalized = normalizeFormula(formula);
           if (alreadyScreenedFormulas.has(normalized)) continue;
+          alreadyScreenedFormulas.add(normalized);
           cdvaeCandidates.push(normalized);
         }
         if (vaeResult.decodedFormulas.length > 0) {
@@ -3058,8 +3081,12 @@ async function runAutonomousFastPath() {
         const pipelineResult = runPipelineIteration(integratedPipelineId);
         if (pipelineResult) {
           for (const c of (pipelineResult.topCandidates ?? [])) {
-            if (c.formula && isValidFormula(c.formula) && !alreadyScreenedFormulas.has(normalizeFormula(c.formula))) {
-              integratedCandidates.push(normalizeFormula(c.formula));
+            if (c.formula && isValidFormula(c.formula)) {
+              const norm = normalizeFormula(c.formula);
+              if (!alreadyScreenedFormulas.has(norm)) {
+                alreadyScreenedFormulas.add(norm);
+                integratedCandidates.push(norm);
+              }
             }
           }
           const pStats = getPipelineStats(integratedPipelineId);
@@ -3075,8 +3102,12 @@ async function runAutonomousFastPath() {
         const labResult = runLabIteration(integratedLabId);
         if (labResult) {
           for (const c of (labResult.topCandidates ?? [])) {
-            if (c.formula && isValidFormula(c.formula) && !alreadyScreenedFormulas.has(normalizeFormula(c.formula))) {
-              integratedCandidates.push(normalizeFormula(c.formula));
+            if (c.formula && isValidFormula(c.formula)) {
+              const norm = normalizeFormula(c.formula);
+              if (!alreadyScreenedFormulas.has(norm)) {
+                alreadyScreenedFormulas.add(norm);
+                integratedCandidates.push(norm);
+              }
             }
           }
           if ((labResult.topCandidates?.length ?? 0) > 0) {
@@ -3119,9 +3150,13 @@ async function runAutonomousFastPath() {
         }
         const prog = generateDesignProgram(st, elemPool);
         const execResult = executeDesignProgram(prog);
-        if (execResult.formula && isValidFormula(execResult.formula) && !alreadyScreenedFormulas.has(normalizeFormula(execResult.formula))) {
-          integratedCandidates.push(normalizeFormula(execResult.formula));
-          registerProgram(prog, execResult.predictedTc ?? 0);
+        if (execResult.formula && isValidFormula(execResult.formula)) {
+          const norm = normalizeFormula(execResult.formula);
+          if (!alreadyScreenedFormulas.has(norm)) {
+            alreadyScreenedFormulas.add(norm);
+            integratedCandidates.push(norm);
+            registerProgram(prog, execResult.predictedTc ?? 0);
+          }
         }
       } catch {}
     }
@@ -3209,10 +3244,22 @@ async function runAutonomousFastPath() {
       } catch {}
     }
 
-    const allEngineCandidates = [...physicsCleanCandidates, ...inverseDesignCandidates, ...structDiffusionCandidates, ...motifDiffusionCandidates, ...cdvaeCandidates, ...integratedCandidates];
-    const novelCandidates = allEngineCandidates.filter(f => !alreadyScreenedFormulas.has(f));
-    const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(f)).length / Math.max(1, rlCandidates.length);
-    for (const f of allEngineCandidates) alreadyScreenedFormulas.add(f);
+    const normalizedPhysicsClean = physicsCleanCandidates.map(f => normalizeFormula(f));
+    const dedupedPhysicsClean: string[] = [];
+    for (const f of normalizedPhysicsClean) {
+      if (!alreadyScreenedFormulas.has(f)) {
+        alreadyScreenedFormulas.add(f);
+        dedupedPhysicsClean.push(f);
+      }
+    }
+    const allEngineCandidates = [...dedupedPhysicsClean, ...inverseDesignCandidates, ...structDiffusionCandidates, ...motifDiffusionCandidates, ...cdvaeCandidates, ...integratedCandidates];
+    const seenInBatch = new Set<string>();
+    const novelCandidates = allEngineCandidates.filter(f => {
+      if (seenInBatch.has(f)) return false;
+      seenInBatch.add(f);
+      return true;
+    });
+    const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(normalizeFormula(f))).length / Math.max(1, rlCandidates.length);
     if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE) {
       const toRemove = alreadyScreenedFormulas.size - MAX_SCREENED_CACHE_SIZE;
       const iter = alreadyScreenedFormulas.values();
@@ -3442,7 +3489,8 @@ async function runAutonomousFastPath() {
               }, null as { defect: any; tcMod: number } | null);
               if (bestDefect && bestDefect.tcMod > 1.05) {
                 const defectTc = Math.round(result.tc * bestDefect.tcMod);
-                const defectFormula = bestDefect.defect.mutatedFormula || formula;
+                const defectFormulaRaw = bestDefect.defect.mutatedFormula || formula;
+                const defectFormula = normalizeFormula(defectFormulaRaw);
                 if (!alreadyScreenedFormulas.has(defectFormula) && defectFormula !== formula) {
                   alreadyScreenedFormulas.add(defectFormula);
                   feedbackLoopStats.defectCandidatesAdded++;
@@ -3661,7 +3709,7 @@ async function runAutonomousFastPath() {
           emit("log", {
             phase: "engine",
             event: "Discovery landscape update",
-            detail: `Landscape: ${lStats.embeddedMaterials} embedded materials, ${zoneMap.zones.length} zones (${zoneMap.topZones.length} high-priority). Coverage: ${zoneMap.coveragePercent}%. Tc range: ${lStats.tcRange.min}-${lStats.tcRange.max}K (avg ${lStats.tcRange.avg}K). RL bias: ${Object.entries(rlBias.elementGroupWeights).filter(([,v]) => v > 0.3).map(([k,v]) => `${k}=${v.toFixed(2)}`).join(", ")}. ${zoneMap.suggestions[0] ?? ""}${intelDetail}`,
+            detail: `Landscape: ${lStats.embeddedMaterials} materials, ${zoneMap.zones.length} zones (${zoneMap.topZones.length} high-priority). Coverage: ${zoneMap.coveragePercent}%. Tc: ${lStats.tcRange.min}-${lStats.tcRange.max}K. RL bias: ${Object.entries(rlBias.elementGroupWeights).filter(([,v]) => v > 0.3).map(([k,v]) => `${k}=${v.toFixed(2)}`).slice(0, 5).join(", ")}.${intelDetail}`,
             dataSource: "Discovery Landscape",
           });
         }
@@ -3670,7 +3718,7 @@ async function runAutonomousFastPath() {
 
     const clusterGuidance = getClusterGuidance();
     if (clusterGuidance.highPotentialClusters.length > 0 || clusterGuidance.underExploredClusters.length > 0) {
-      const highPotential = clusterGuidance.highPotentialClusters.map(c => `${c.clusterId}(avgTc=${c.avgTc.toFixed(0)}K)`).join(", ");
+      const highPotential = clusterGuidance.highPotentialClusters.map(c => `${c.clusterId}(avgTc=${(c.avgTc ?? 0).toFixed(0)}K)`).join(", ");
       const underExplored = clusterGuidance.underExploredClusters.map(c => c.clusterId).join(", ");
       emit("log", {
         phase: "engine",
@@ -3697,13 +3745,34 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: "Autonomous loop: " + filteredCandidates.length + " screened, " + passed + " passed" + (bestTcThisBatch > 0 ? ", best Tc = " + bestTcThisBatch + "K" : ""),
-      detail: `RL+BO guided pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL-directed). RL reward=${rlReward.toFixed(3)}, updates=${rlStats.totalUpdates}, BO obs=${boStats.observationCount}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail}${landscapeDetail} Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}. PhysicsML training: ${physicsPredictor.getTrainingSize()} samples. Feedback loops: defect=${feedbackLoopStats.defectCandidatesAdded} added, corr=${feedbackLoopStats.correlationBoostsApplied} boosts, synth=${feedbackLoopStats.synthesisFeasibilityBonuses} bonuses, growth=${feedbackLoopStats.growthQualityBonuses}, exp-plans=${feedbackLoopStats.experimentPlansGenerated}, pressure=${feedbackLoopStats.pressurePathwayBoosts}.`,
+      detail: `RL+BO pipeline from ${focusArea} (${genStats.totalGenerated} massive + ${rlCandidates.length} RL). RL reward=${rlReward.toFixed(3)}, BO obs=${boStats.observationCount}. Pass rate: ${(autonomousTotalPassed / Math.max(1, autonomousTotalScreened) * 100).toFixed(1)}%. Total screened: ${autonomousTotalScreened}.${patternDetail}${physicsDetail}${memDetail}${theoryDetail}${perfDetail}${genDetail}${fsClusterDetail}${landscapeDetail}`,
       dataSource: "Autonomous Loop",
     });
   } finally {
     activeTasks.delete("Autonomous Screening");
     broadcast("taskEnd", { task: "Autonomous Screening" });
   }
+}
+
+function sanitizeStatsNumeric(obj: any): any {
+  if (obj === null || obj === undefined) return 0;
+  if (typeof obj === "number") return Number.isFinite(obj) ? obj : 0;
+  if (typeof obj === "string") return obj;
+  if (typeof obj === "boolean") return obj;
+  if (Array.isArray(obj)) return obj.map(sanitizeStatsNumeric);
+  if (typeof obj === "object") {
+    const result: any = {};
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (val === null || val === undefined) {
+        result[key] = 0;
+      } else {
+        result[key] = sanitizeStatsNumeric(val);
+      }
+    }
+    return result;
+  }
+  return obj;
 }
 
 export async function getAutonomousLoopStats() {
@@ -3717,16 +3786,17 @@ export async function getAutonomousLoopStats() {
   const reconciledScreened = Math.max(autonomousTotalScreened, allTimePipelineTotal);
   const reconciledPassed = Math.max(autonomousTotalPassed, allTimePipelinePassed);
 
-  return {
+  const rawStats = {
     totalScreened: reconciledScreened,
     totalPassed: reconciledPassed,
     passRate: reconciledScreened > 0 ? reconciledPassed / reconciledScreened : 0,
     bestTc: autonomousBestTc,
-    throughputPerHour: (elapsedHours > 0.01 && autonomousTotalScreened > 0) ? Math.round(autonomousTotalScreened / Math.max(elapsedHours, 0.05)) : 0,
+    throughputPerHour: (elapsedHours >= (5 / 60) && autonomousTotalScreened > 0) ? Math.round(autonomousTotalScreened / Math.max(elapsedHours, 0.1)) : 0,
     gnnRetrainCount: autonomousGNNRetrainCount,
     activeLearning: alStats,
-    realDFT: {
+    xtb: {
       method: "GFN2-xTB v6.7.1",
+      level: "Semi-empirical (tight-binding DFT)",
       runs: xtbStats.runs,
       successes: xtbStats.successes,
       cacheSize: xtbStats.cacheSize,
@@ -3777,7 +3847,7 @@ export async function getAutonomousLoopStats() {
     },
     lastCycleCandidates,
     lastCycleFamilyCounts,
-    fullDFTQueue: await getDFTQueueStats().catch(() => null),
+    qeDFT: await getDFTQueueStats().catch(() => null),
     integratedSubsystems: {
       pipelineId: integratedPipelineId,
       labId: integratedLabId,
@@ -3818,6 +3888,8 @@ export async function getAutonomousLoopStats() {
       },
     },
   };
+
+  return sanitizeStatsNumeric(rawStats);
 }
 
 async function runLearningCycle() {

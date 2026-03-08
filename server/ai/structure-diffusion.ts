@@ -5,6 +5,8 @@ import {
 } from "../learning/physics-engine";
 import { extractFeatures } from "../learning/ml-predictor";
 import { gbPredict } from "../learning/gradient-boost";
+import { passesValenceFilter } from "../learning/candidate-generator";
+import { normalizeFormula } from "../learning/utils";
 
 interface StructuralEmbedding {
   coordination: number;
@@ -1045,6 +1047,10 @@ function perturbEmbedding(base: StructuralEmbedding, intensity: number): Structu
 }
 
 function selectMotifs(targetTc: number, count: number): StructuralMotif[] {
+  const EPSILON = 0.15;
+  const MIN_EXPLORATION_RATE = 0.05;
+  const MAX_MOTIF_FRACTION = 0.40;
+
   const scored = SC_MOTIF_LIBRARY.map(m => {
     const tcFit = m.tcRange[0] <= targetTc && targetTc <= m.tcRange[1] * 1.5 ? 1.0 :
       Math.max(0, 1.0 - Math.abs(targetTc - (m.tcRange[0] + m.tcRange[1]) / 2) / (m.tcRange[1] - m.tcRange[0] + 50));
@@ -1052,18 +1058,38 @@ function selectMotifs(targetTc: number, count: number): StructuralMotif[] {
     return { motif: m, score: tcFit * 0.5 + learned * 0.3 + m.scAffinity * 0.2 };
   });
 
-  scored.sort((a, b) => b.score - a.score);
-
   const selected: StructuralMotif[] = [];
-  for (let i = 0; i < Math.min(count, scored.length); i++) {
-    selected.push(scored[i].motif);
-  }
+  const motifCounts: Record<string, number> = {};
+  const maxPerMotif = Math.max(1, Math.ceil(count * MAX_MOTIF_FRACTION));
 
-  if (selected.length < count) {
-    const remaining = SC_MOTIF_LIBRARY.filter(m => !selected.includes(m));
-    for (let i = 0; selected.length < count && i < remaining.length; i++) {
-      selected.push(remaining[i]);
+  for (let i = 0; i < count; i++) {
+    let chosen: StructuralMotif;
+
+    if (Math.random() < EPSILON) {
+      chosen = SC_MOTIF_LIBRARY[Math.floor(Math.random() * SC_MOTIF_LIBRARY.length)];
+    } else {
+      const weights = scored.map(s => {
+        const currentCount = motifCounts[s.motif.name] || 0;
+        if (currentCount >= maxPerMotif) return 0;
+        return Math.max(MIN_EXPLORATION_RATE, s.score);
+      });
+      const totalWeight = weights.reduce((s, w) => s + w, 0);
+      if (totalWeight <= 0) {
+        chosen = SC_MOTIF_LIBRARY[Math.floor(Math.random() * SC_MOTIF_LIBRARY.length)];
+      } else {
+        const normalized = weights.map(w => w / totalWeight);
+        let r = Math.random();
+        let idx = 0;
+        for (let j = 0; j < normalized.length; j++) {
+          r -= normalized[j];
+          if (r <= 0) { idx = j; break; }
+        }
+        chosen = scored[idx].motif;
+      }
     }
+
+    selected.push(chosen);
+    motifCounts[chosen.name] = (motifCounts[chosen.name] || 0) + 1;
   }
 
   return selected;
@@ -1095,9 +1121,11 @@ export function runStructureFirstDesign(
     generateAssignments(motif.siteRoles, siteLists, 0, {}, assignments, elementsPerSite * 8);
 
     for (const assignment of assignments) {
-      const formula = buildFormula(assignment, motif);
-      if (!formula || formula.length < 2) continue;
+      const rawFormula = buildFormula(assignment, motif);
+      if (!rawFormula || rawFormula.length < 2) continue;
+      const formula = normalizeFormula(rawFormula);
       if (triedCombos.has(formula)) continue;
+      if (!passesValenceFilter(formula)) continue;
       triedCombos.add(formula);
 
       if (!checkFamilyConstraints(formula, family)) continue;
@@ -1134,7 +1162,8 @@ export function runStructureFirstDesign(
     mStats.tried += candidates.length;
     mStats.passed += candidates.filter(c => c.predictedTc > 5).length;
     const totalTc = candidates.reduce((s, c) => s + c.predictedTc, 0);
-    mStats.avgTc = candidates.length > 0 ? totalTc / candidates.length : 0;
+    const rawAvgTc = candidates.length > 0 ? totalTc / candidates.length : 0;
+    mStats.avgTc = Number.isFinite(rawAvgTc) ? rawAvgTc : 0;
 
     if (best) {
       if (best.predictedTc > stats.bestTcAchieved) {
@@ -1152,7 +1181,14 @@ export function runStructureFirstDesign(
 
       const reward = best.predictedTc / Math.max(1, targetTc);
       const currentW = stats.learnedWeights[motif.name] ?? motif.scAffinity;
-      stats.learnedWeights[motif.name] = currentW * 0.9 + reward * 0.1;
+      let newWeight = currentW * 0.9 + reward * 0.1;
+
+      const allWeights = Object.values(stats.learnedWeights);
+      const meanWeight = allWeights.length > 0 ? allWeights.reduce((s, w) => s + w, 0) / allWeights.length : 1.0;
+      if (newWeight > meanWeight * 3) {
+        newWeight = newWeight * 0.85;
+      }
+      stats.learnedWeights[motif.name] = newWeight;
     }
 
     results.push({
