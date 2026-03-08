@@ -158,6 +158,50 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   return Math.round(result);
 }
 
+export interface TcMethodEstimates {
+  gbPredicted?: number;
+  physicsTc?: number;
+  xTbTc?: number;
+  dftTc?: number;
+}
+
+export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: number; confidence: string; methods: TcMethodEstimates } {
+  const weights: { method: string; tc: number; weight: number }[] = [];
+  if (estimates.dftTc != null && estimates.dftTc > 0)
+    weights.push({ method: "dft", tc: estimates.dftTc, weight: 4.0 });
+  if (estimates.xTbTc != null && estimates.xTbTc > 0)
+    weights.push({ method: "xtb", tc: estimates.xTbTc, weight: 3.0 });
+  if (estimates.physicsTc != null && estimates.physicsTc > 0)
+    weights.push({ method: "physics", tc: estimates.physicsTc, weight: 2.0 });
+  if (estimates.gbPredicted != null && estimates.gbPredicted > 0)
+    weights.push({ method: "gb", tc: estimates.gbPredicted, weight: 1.0 });
+
+  if (weights.length === 0) return { reconciledTc: 0, confidence: "none", methods: estimates };
+  if (weights.length === 1) {
+    const only = weights[0];
+    const conf = only.method === "dft" ? "high" : only.method === "xtb" ? "medium" : "low";
+    return { reconciledTc: Math.round(only.tc), confidence: conf, methods: estimates };
+  }
+
+  weights.sort((a, b) => b.weight - a.weight);
+  const best = weights[0];
+  const tcs = weights.map(w => w.tc);
+  const maxTc = Math.max(...tcs);
+  const minTc = Math.min(...tcs);
+  const spread = maxTc > 0 ? (maxTc - minTc) / maxTc : 0;
+
+  let reconciledTc: number;
+  if (spread <= 0.25) {
+    const totalWeight = weights.reduce((s, w) => s + w.weight, 0);
+    reconciledTc = weights.reduce((s, w) => s + w.tc * w.weight, 0) / totalWeight;
+  } else {
+    reconciledTc = best.tc;
+  }
+
+  const conf = best.method === "dft" ? "high" : best.method === "xtb" ? "medium" : "low";
+  return { reconciledTc: Math.round(reconciledTc), confidence: conf, methods: estimates };
+}
+
 const HEA_EXTRA_METALS = ["Al", "Mg", "Ca", "Sr", "Ba", "Li", "Na", "K", "Ti", "Zn", "Ga", "Ge", "Sn"];
 
 function detectHighEntropyAlloy(formula: string): boolean {

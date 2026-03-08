@@ -14,7 +14,7 @@ import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeig
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
@@ -99,6 +99,8 @@ import {
   getDiscoveredHypotheses as getCausalHypotheses, getCausalRules,
   getLatestGraph, type CausalRule,
 } from "../theory/causal-physics-discovery";
+import { crossEngineHub } from "./cross-engine-hub";
+import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, type MultiEngineInsights } from "./synthesis-discovery";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -644,6 +646,27 @@ async function runPhase7_Superconductor() {
           }
 
           processInverseResults(campaign, inverseResults);
+
+          try {
+            const ls = campaign.learningState;
+            if (ls.elementSuccessMatrix && ls.elementSuccessMatrix.size > 0) {
+              for (const [el, stats] of ls.elementSuccessMatrix) {
+                if (stats.count >= 2 && stats.totalReward > 0) {
+                  const avgReward = stats.totalReward / stats.count;
+                  const syntheticTc = avgReward * campaign.target.targetTc;
+                  rlAgent.recordElementOutcome([el], syntheticTc, syntheticTc > 20);
+                }
+              }
+            }
+            for (const r of inverseResults) {
+              if (r.tc > 3 && r.passedPipeline) {
+                bayesianOptimizer.addObservation(r.formula, r.tc, r.lambda, r.passedPipeline ? 1 : 0);
+                incorporateSuccessData(r.formula, r.tc).catch(() => {});
+              }
+            }
+          } catch (crossPollErr) {
+            console.error(`[Engine] Inverse->RL/BO cross-pollination failed:`, crossPollErr instanceof Error ? crossPollErr.message.slice(0, 100) : "unknown");
+          }
 
           {
             const serializable = getSerializableCampaignState(campaign);
@@ -1266,11 +1289,31 @@ async function runPhase10_Physics() {
           continue;
         }
 
+        crossEngineHub.recordInsight("physics", candidate.formula, {
+          lambda: result.coupling.lambda,
+          dosAtFermi: result.electronicStructure.densityOfStatesAtFermi,
+          omegaLog: result.coupling.omegaLog,
+          metallicity: result.electronicStructure.metallicity,
+          correlationStrength: result.correlation?.ratio ?? 0,
+          instabilityFlags: result.instabilityProximity?.nearestBoundary ? [result.instabilityProximity.nearestBoundary] : [],
+        });
+
         const rawPhysicsTc = result.eliashberg.predictedTc;
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
         const currentTc = candidate.predictedTc ?? 0;
-        let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
-        updatedTc = applyAmbientTcCap(updatedTc, result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula);
+        const cappedPhysicsTc = physicsTc > 0
+          ? applyAmbientTcCap(Math.round(physicsTc), result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula)
+          : 0;
+        const existingMlF = (candidate.mlFeatures as Record<string, any>) ?? {};
+        const xTbTcFromPrior = (existingMlF.xTbTc as number) ?? undefined;
+        const dftTcFromPrior = (existingMlF.dftTc as number) ?? undefined;
+        const reconciled = reconcileTc({
+          gbPredicted: candidate.xgboostScore != null ? currentTc : undefined,
+          physicsTc: cappedPhysicsTc > 0 ? cappedPhysicsTc : undefined,
+          xTbTc: xTbTcFromPrior,
+          dftTc: dftTcFromPrior,
+        });
+        let updatedTc = reconciled.reconciledTc > 0 ? reconciled.reconciledTc : (cappedPhysicsTc > 0 ? cappedPhysicsTc : currentTc);
 
         const instProx = result.instabilityProximity;
         const existingNotes = candidate.notes || "";
@@ -1356,6 +1399,7 @@ async function runPhase10_Physics() {
             candidate.crystalStructure?.match(/\((\w+)\)/)?.[1]
           );
           trackTopologyResult(topoAnalysis);
+          crossEngineHub.recordInsight("topology", candidate.formula, topoAnalysis);
           (updatedMlFeatures as any).topology = {
             topologicalScore: topoAnalysis.topologicalScore,
             z2Invariant: topoAnalysis.z2Invariant,
@@ -1383,6 +1427,7 @@ async function runPhase10_Physics() {
         let pairingProfile: PairingProfile | undefined;
         try {
           pairingProfile = computePairingProfile(candidate.formula);
+          crossEngineHub.recordInsight("pairing", candidate.formula, pairingProfile);
           if (pairingProfile.compositePairingStrength > 0.4) {
             emit("log", {
               phase: "phase-10",
@@ -1430,6 +1475,7 @@ async function runPhase10_Physics() {
         let fermiSurfaceAnalysis: FermiSurfaceResult | undefined;
         try {
           fermiSurfaceAnalysis = computeFermiSurface(candidate.formula);
+          crossEngineHub.recordInsight("fermi", candidate.formula, fermiSurfaceAnalysis);
           (updatedMlFeatures as any).fermiSurface = {
             fermiPocketCount: fermiSurfaceAnalysis.mlFeatures.fermiPocketCount,
             electronHoleBalance: fermiSurfaceAnalysis.mlFeatures.electronHoleBalance,
@@ -1595,6 +1641,13 @@ async function runPhase10_Physics() {
               if (bestDefect && bestDefect.tcMod > 1.05) {
                 feedbackLoopStats.defectCandidatesAdded++;
                 feedbackLoopStats.defectTotalTcBoost += bestDefect.tcMod - 1;
+                crossEngineHub.recordInsight("defect", candidate.formula, {
+                  optimalDopants: [bestDefect.defect.element],
+                  bestTcModifier: bestDefect.tcMod,
+                  bestDefectType: bestDefect.defect.type,
+                  variantCount: defects.length,
+                  bestMutatedFormula: bestDefect.defect.mutatedFormula || candidate.formula,
+                });
               }
             }
           } catch (e) { console.error(`[Engine] Phase-10 defect analysis failed for ${candidate.formula}:`, e); }
@@ -1636,11 +1689,77 @@ async function runPhase10_Physics() {
             const synthResult = optimizeSynthesisConditions(synthCtx);
             const sv = defaultSynthesisVector(candFamily);
             recordSynthesisResult(candidate.formula, candFamily, sv, updatedTc, 0.7);
+            crossEngineHub.recordInsight("synthesis", candidate.formula, {
+              feasibilityScore: synthResult.overallFeasibility,
+              complexity: 0.5,
+              bestMethod: candFamily.toLowerCase().includes("hydride") ? "high-pressure" : "solid-state",
+              pathStepCount: 4,
+            });
             if (synthResult.overallFeasibility > 0.6) {
               feedbackLoopStats.synthesisFeasibilityBonuses++;
               feedbackLoopStats.synthesisTotalFeasibilityBoost += synthResult.overallFeasibility * 0.05;
             }
           } catch (e) { console.error(`[Engine] Phase-10 synthesis analysis failed for ${candidate.formula}:`, e); }
+
+          if (updatedTc > 15) {
+            try {
+              const hubInsights = crossEngineHub.getInsightsFor(candidate.formula);
+              const multiInsights: MultiEngineInsights = {
+                formula: candidate.formula,
+                materialClass: candFamily,
+                predictedTc: updatedTc,
+                physics: hubInsights?.physics ? {
+                  lambda: hubInsights.physics.lambda,
+                  omegaLog: hubInsights.physics.omegaLog,
+                  dosAtFermi: hubInsights.physics.dosAtFermi,
+                  metallicity: hubInsights.physics.metallicity,
+                  stabilityScore: 1 - (result.instabilityProximity?.overallProximity ?? 0.5),
+                  correlationStrength: hubInsights.physics.correlationStrength,
+                } : undefined,
+                topology: topoAnalysis ? {
+                  topologicalScore: topoAnalysis.topologicalScore,
+                  z2Invariant: topoAnalysis.z2Invariant,
+                  socStrength: topoAnalysis.socStrength,
+                  topologicalClass: topoAnalysis.topologicalClass,
+                  majoranaFeasibility: topoAnalysis.majoranaFeasibility,
+                  bandInversionProbability: topoAnalysis.bandInversionProbability,
+                } : undefined,
+                fermi: fermiSurfaceAnalysis ? {
+                  nestingScore: fermiSurfaceAnalysis.nestingScore,
+                  pocketCount: fermiSurfaceAnalysis.pocketCount,
+                  electronHoleBalance: fermiSurfaceAnalysis.electronHoleBalance,
+                  cylindricalCharacter: fermiSurfaceAnalysis.mlFeatures.fsDimensionality > 2 ? 0.3 : 0.7,
+                  multiBandScore: fermiSurfaceAnalysis.mlFeatures.multiBandScore,
+                  sigmaBandPresence: fermiSurfaceAnalysis.mlFeatures.sigmaBandPresence,
+                } : undefined,
+                pairing: pairingProfile ? {
+                  dominantMechanism: pairingProfile.dominantMechanism,
+                  pairingSymmetry: pairingProfile.pairingSymmetry,
+                  compositePairingStrength: pairingProfile.compositePairingStrength,
+                  phononStrength: pairingProfile.phonon.phononPairingStrength,
+                  spinStrength: pairingProfile.spin.spinPairingStrength,
+                  orbitalStrength: pairingProfile.orbital.orbitalPairingStrength,
+                } : undefined,
+              };
+              const synthDiscovery = discoverNovelSynthesisPaths(multiInsights, 12, 8);
+              if (synthDiscovery.bestRoute) {
+                crossEngineHub.recordInsight("synthesis", candidate.formula, {
+                  feasibilityScore: synthDiscovery.bestRoute.feasibilityScore,
+                  complexity: synthDiscovery.bestRoute.steps.length,
+                  bestMethod: synthDiscovery.bestRoute.steps[0]?.method ?? "novel",
+                  pathStepCount: synthDiscovery.bestRoute.steps.length,
+                });
+                if (synthDiscovery.bestRoute.fitnessScore > 0.5) {
+                  emit("log", {
+                    phase: "phase-10",
+                    event: "Novel synthesis path discovered",
+                    detail: `${candidate.formula}: ${synthDiscovery.bestRoute.steps.length} steps, fitness=${synthDiscovery.bestRoute.fitnessScore.toFixed(3)}, feasibility=${synthDiscovery.bestRoute.feasibilityScore.toFixed(3)}, novelty=${synthDiscovery.bestRoute.noveltyScore.toFixed(3)}, engines=[${synthDiscovery.bestRoute.engineContributions.join(",")}]`,
+                    dataSource: "Synthesis Discovery",
+                  });
+                }
+              }
+            } catch (e) { console.error(`[Engine] Phase-10 novel synthesis discovery failed for ${candidate.formula}:`, e); }
+          }
 
           if (updatedTc > 25 && cycleCount % 3 === 0) {
             try {
@@ -1714,6 +1833,13 @@ async function runPhase10_Physics() {
               }
             } catch (e) { console.error(`[Engine] Hydrogen network analysis failed for ${candidate.formula}:`, e); }
 
+            crossEngineHub.recordInsight("pressure", candidate.formula, {
+              optimalPressure: pressureResult.optimalPressure,
+              maxTc: pressureResult.maxTc,
+              retentionFraction: pressureResult.maxTc > 0 ? (candidate.predictedTc ?? 0) / pressureResult.maxTc : 0,
+              stabilizationStrategy: "pressure-scan",
+              hydridePhaseCount: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
+            });
             const updatedMlFeatures = {
               ...existingMlFeatures,
               pressureTcCurve: {
@@ -1793,8 +1919,14 @@ async function runPhase10_Physics() {
             const rawTc = result.eliashberg.predictedTc;
             const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
             const currentTc = candidate.predictedTc ?? 0;
-            let updatedTc = physicsTc > 0 ? Math.round(physicsTc) : currentTc;
-            updatedTc = applyAmbientTcCap(updatedTc, newLambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula);
+            const cappedRePhys = physicsTc > 0
+              ? applyAmbientTcCap(Math.round(physicsTc), newLambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula)
+              : 0;
+            const reconciledRePhys = reconcileTc({
+              gbPredicted: candidate.xgboostScore != null ? currentTc : undefined,
+              physicsTc: cappedRePhys > 0 ? cappedRePhys : undefined,
+            });
+            let updatedTc = reconciledRePhys.reconciledTc > 0 ? reconciledRePhys.reconciledTc : (cappedRePhys > 0 ? cappedRePhys : currentTc);
             await storage.updateSuperconductorCandidate(candidate.id, {
               electronPhononCoupling: newLambda,
               logPhononFrequency: result.coupling.omegaLog,
@@ -2610,6 +2742,13 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       ensembleConfidence = gnnResult.confidence * 0.6 + gbResult.score * 0.3 + 0.1;
     }
 
+    crossEngineHub.recordInsight("ml", formula, {
+      predictedTc: primaryTc,
+      uncertainty: gnnResult?.uncertainty ?? 0.5,
+      featureImportance: {},
+      confidence: ensembleConfidence > 0.6 ? "high" : ensembleConfidence > 0.3 ? "medium" : "low",
+    });
+
     const physicsPred = physicsPredictor.predict(features);
     const preFilter = physicsPredictor.preFilter(physicsPred);
     if (!preFilter.pass) {
@@ -2655,10 +2794,24 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     } catch (e) { console.error(`[Autonomous] xTB phonon check failed for ${formula}:`, e); }
 
     const physicsResult = await runFullPhysicsAnalysis(emit, candidate as any);
+    crossEngineHub.recordInsight("physics", formula, {
+      lambda: physicsResult.coupling.lambda,
+      dosAtFermi: physicsResult.electronicStructure.densityOfStatesAtFermi,
+      omegaLog: physicsResult.coupling.omegaLog,
+      metallicity: physicsResult.electronicStructure.metallicity,
+      correlationStrength: physicsResult.correlation?.ratio ?? 0,
+      instabilityFlags: physicsResult.instabilityProximity?.nearestBoundary ? [physicsResult.instabilityProximity.nearestBoundary] : [],
+    });
     const rawTc = physicsResult.eliashberg.predictedTc;
     const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
-    let finalTc = physicsTc > 0 ? Math.round(physicsTc) : Math.round(gbResult.tcPredicted);
-    finalTc = applyAmbientTcCap(finalTc, physicsResult.coupling.lambda, 0, physicsResult.electronicStructure.metallicity ?? 0.5, formula);
+    const cappedPhysicsTcAuto = physicsTc > 0
+      ? applyAmbientTcCap(Math.round(physicsTc), physicsResult.coupling.lambda, features.pressureGpa ?? 0, physicsResult.electronicStructure.metallicity ?? 0.5, formula)
+      : 0;
+    const reconciledAuto = reconcileTc({
+      gbPredicted: gbResult.tcPredicted > 0 ? Math.round(gbResult.tcPredicted) : undefined,
+      physicsTc: cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : undefined,
+    });
+    let finalTc = reconciledAuto.reconciledTc > 0 ? reconciledAuto.reconciledTc : (cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : Math.round(gbResult.tcPredicted));
 
     try {
       const hullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
@@ -3287,6 +3440,11 @@ async function runAutonomousFastPath() {
           const allTheories = getTheoryDatabase();
           const feedback = generateDiscoveryFeedback(allTheories);
           theoryFeedbackBias = { biasedVariables: feedback.biasedVariables ?? [], biasedElements: feedback.biasedElements ?? [] };
+          crossEngineHub.recordInsight("theory", "global", {
+            discoveredEquations: theories.slice(0, 3).map((t: any) => t.equation?.slice(0, 60) ?? ""),
+            biases: [...(feedback.biasedVariables ?? []), ...(feedback.biasedElements ?? [])],
+            symbolicScore: theories[0]?.theoryScore ?? 0,
+          });
           emit("log", { phase: "engine", event: "Theory discovery cycle", detail: `Symbolic physics: ${theories.length} theories. Top: ${theories[0]?.equation?.slice(0, 80)} (score=${theories[0]?.theoryScore?.toFixed(3)})`, dataSource: "Integrated Subsystems" });
         }
       } catch (e) { console.error("[Engine] Theory discovery cycle failed:", e); }
@@ -3493,6 +3651,30 @@ async function runAutonomousFastPath() {
           }
         }
         rlAgent.recordElementOutcome(els, result.tc, result.passed, rejectCategory);
+
+        if (result.passed && result.tc > 10) {
+          const hubIns = crossEngineHub.getInsightsFor(formula);
+          let crossEngineBonus = 0;
+          if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3) crossEngineBonus += hubIns.topology.topologicalScore * 0.2;
+          if (hubIns?.fermi && hubIns.fermi.nestingScore > 0.3) crossEngineBonus += hubIns.fermi.nestingScore * 0.15;
+          if (hubIns?.pairing && hubIns.pairing.compositePairingStrength > 0.4) crossEngineBonus += hubIns.pairing.compositePairingStrength * 0.15;
+          if (crossEngineBonus > 0.05) {
+            const enrichedTc = Math.round(result.tc * (1 + crossEngineBonus));
+            rlAgent.recordElementOutcome(els, enrichedTc, true);
+          }
+        }
+
+        if (result.passed) {
+          try {
+            const hubIns = crossEngineHub.getInsightsFor(formula);
+            const obsLambda = hubIns?.physics?.lambda ?? (result.physicsPred?.lambda ?? 0.5);
+            const obsStability = 1 - (result.physicsPred?.hullDistance ?? 0.2);
+            bayesianOptimizer.addObservation(formula, result.tc, obsLambda, obsStability);
+            if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3) {
+              incorporateSuccessData(formula, result.tc, { topologicalScore: hubIns.topology.topologicalScore });
+            }
+          } catch (e) { console.error("[Engine] Cross-engine BO feed failed:", e); }
+        }
       } catch (e) { console.error("[Engine] RL element outcome recording failed:", e); }
 
       if (result.tc > batchBestTc) batchBestTc = result.tc;
@@ -3538,11 +3720,17 @@ async function runAutonomousFastPath() {
           const electronic = computeElectronicStructure(formula);
           const topoResult = analyzeTopology(formula, electronic);
           trackTopologyResult(topoResult);
+          crossEngineHub.recordInsight("topology", formula, topoResult);
         } catch (e) { console.error(`[Engine] Topology analysis failed for ${formula}:`, e); }
         try {
           const fsResult = computeFermiSurface(formula);
           assignToCluster(formula, fsResult, result.tc);
+          crossEngineHub.recordInsight("fermi", formula, fsResult);
         } catch (e) { console.error(`[Engine] Fermi surface cluster assignment failed for ${formula}:`, e); }
+        try {
+          const pairResult = computePairingProfile(formula);
+          crossEngineHub.recordInsight("pairing", formula, pairResult);
+        } catch (e) { console.error(`[Engine] Pairing profile failed for ${formula}:`, e); }
       }
       if (isPromising) {
         try {
@@ -3608,6 +3796,13 @@ async function runAutonomousFastPath() {
                 const defectTc = Math.round(result.tc * bestDefect.tcMod);
                 const defectFormulaRaw = bestDefect.defect.mutatedFormula || formula;
                 const defectFormula = normalizeFormula(defectFormulaRaw);
+                crossEngineHub.recordInsight("defect", formula, {
+                  optimalDopants: [bestDefect.defect.element],
+                  bestTcModifier: bestDefect.tcMod,
+                  bestDefectType: bestDefect.defect.type,
+                  variantCount: defects.length,
+                  bestMutatedFormula: defectFormula,
+                });
                 if (!alreadyScreenedFormulas.has(defectFormula) && defectFormula !== formula) {
                   alreadyScreenedFormulas.add(defectFormula);
                   feedbackLoopStats.defectCandidatesAdded++;
@@ -3657,6 +3852,57 @@ async function runAutonomousFastPath() {
               emit("log", { phase: "crystal-growth", event: "Growth challenge identified", detail: `${formula}: quality=${growthResult.qualityScore.toFixed(2)}, grain=${growthResult.grainStructure.grainSize.toFixed(0)}nm` });
             }
           } catch (e) { console.error(`[Engine] Crystal growth simulation failed for ${formula}:`, e); }
+
+          if (result.tc > 15) {
+            try {
+              const hubIns = crossEngineHub.getInsightsFor(formula);
+              const multiIns: MultiEngineInsights = {
+                formula, materialClass: family, predictedTc: result.tc,
+                physics: hubIns?.physics ? {
+                  lambda: hubIns.physics.lambda, omegaLog: hubIns.physics.omegaLog,
+                  dosAtFermi: hubIns.physics.dosAtFermi, metallicity: hubIns.physics.metallicity,
+                  stabilityScore: 1 - (result.physicsPred?.hullDistance ?? 0.3),
+                  correlationStrength: hubIns.physics.correlationStrength,
+                } : undefined,
+                topology: hubIns?.topology ? {
+                  topologicalScore: hubIns.topology.topologicalScore, z2Invariant: hubIns.topology.z2Invariant,
+                  socStrength: hubIns.topology.socStrength, topologicalClass: hubIns.topology.topologicalClass,
+                  majoranaFeasibility: hubIns.topology.majoranaFeasibility, bandInversionProbability: hubIns.topology.bandInversionProbability,
+                } : undefined,
+                fermi: hubIns?.fermi ? {
+                  nestingScore: hubIns.fermi.nestingScore, pocketCount: hubIns.fermi.pocketCount,
+                  electronHoleBalance: hubIns.fermi.electronHoleBalance,
+                  cylindricalCharacter: hubIns.fermi.cylindricalCharacter,
+                  multiBandScore: hubIns.fermi.multiBandScore, sigmaBandPresence: hubIns.fermi.sigmaBandPresence,
+                } : undefined,
+                pairing: hubIns?.pairing ? {
+                  dominantMechanism: hubIns.pairing.dominantMechanism, pairingSymmetry: hubIns.pairing.pairingSymmetry,
+                  compositePairingStrength: hubIns.pairing.compositePairingStrength,
+                  phononStrength: hubIns.pairing.phononStrength,
+                  spinStrength: hubIns.pairing.spinStrength, orbitalStrength: hubIns.pairing.orbitalStrength,
+                } : undefined,
+                defect: hubIns?.defect ? {
+                  variants: [], bestDopant: hubIns.defect.optimalDopants[0] ?? "",
+                  bestTcBoost: hubIns.defect.bestTcModifier, optimalDefectType: hubIns.defect.bestDefectType,
+                } : undefined,
+              };
+              const synthDisc = discoverNovelSynthesisPaths(multiIns, 10, 6);
+              if (synthDisc.bestRoute && synthDisc.bestRoute.fitnessScore > 0.5) {
+                crossEngineHub.recordInsight("synthesis", formula, {
+                  feasibilityScore: synthDisc.bestRoute.feasibilityScore,
+                  complexity: synthDisc.bestRoute.steps.length,
+                  bestMethod: synthDisc.bestRoute.steps[0]?.method ?? "novel",
+                  pathStepCount: synthDisc.bestRoute.steps.length,
+                });
+                emit("log", {
+                  phase: "synthesis-discovery",
+                  event: "Novel synthesis path discovered",
+                  detail: `${formula}: ${synthDisc.bestRoute.steps.length} steps, fitness=${synthDisc.bestRoute.fitnessScore.toFixed(3)}, novelty=${synthDisc.bestRoute.noveltyScore.toFixed(3)}, engines=[${synthDisc.bestRoute.engineContributions.join(",")}]`,
+                  dataSource: "Synthesis Discovery",
+                });
+              }
+            } catch (e) { console.error(`[Engine] Autonomous synthesis discovery failed for ${formula}:`, e); }
+          }
 
           if (result.tc > 25 && cycleCount % 3 === 0) {
             try {
@@ -3808,6 +4054,31 @@ async function runAutonomousFastPath() {
 
     rebalanceWeights();
 
+    try {
+      const hubPatterns = crossEngineHub.getGlobalPatterns();
+      const physGuidance = crossEngineHub.getPhysicsGuidance();
+      const synthGuidance = crossEngineHub.getSynthesisGuidance();
+      const topoGuidance = crossEngineHub.getTopologicalGuidance();
+
+      if (hubPatterns.length > 0) {
+        const highTcConvergence = hubPatterns.find(p => p.name === "multi-engine-convergence");
+        if (highTcConvergence && highTcConvergence.formulaExamples.length > 0) {
+          for (const exFormula of highTcConvergence.formulaExamples.slice(0, 3)) {
+            const els = parseFormulaElements(exFormula);
+            rlAgent.recordElementOutcome(els, highTcConvergence.avgTcBoost, true);
+          }
+        }
+      }
+
+      if (topoGuidance.recommendedElements.length > 0) {
+        rlAgent.recordElementOutcome(topoGuidance.recommendedElements, 30, true);
+      }
+
+      if (synthGuidance.dopingRecommended && synthGuidance.dopantSuggestions.length > 0) {
+        rlAgent.recordElementOutcome(synthGuidance.dopantSuggestions.slice(0, 3), 20, true);
+      }
+    } catch (e) { console.error("[Engine] Cross-engine hub steering failed:", e); }
+
     if (cycleCount % 5 === 0) {
       try {
         const landscapeUpdate = updateLandscape([]);
@@ -3903,11 +4174,18 @@ export async function getAutonomousLoopStats() {
   const reconciledScreened = Math.max(autonomousTotalScreened, allTimePipelineTotal);
   const reconciledPassed = Math.max(autonomousTotalPassed, allTimePipelinePassed);
 
+  let dbBestTc = 0;
+  try {
+    const topCandidates = await storage.getSuperconductorCandidatesByTc(1);
+    if (topCandidates.length > 0) dbBestTc = topCandidates[0].predictedTc ?? 0;
+  } catch {} 
+  const reconciledBestTc = Math.max(autonomousBestTc, dbBestTc);
+
   const rawStats = {
     totalScreened: reconciledScreened,
     totalPassed: reconciledPassed,
     passRate: reconciledScreened > 0 ? reconciledPassed / reconciledScreened : 0,
-    bestTc: autonomousBestTc,
+    bestTc: reconciledBestTc,
     throughputPerHour: (elapsedHours >= (5 / 60) && autonomousTotalScreened > 0) ? Math.round(autonomousTotalScreened / Math.max(elapsedHours, 0.1)) : 0,
     gnnRetrainCount: autonomousGNNRetrainCount,
     activeLearning: alStats,
@@ -3949,6 +4227,8 @@ export async function getAutonomousLoopStats() {
     correlationEngine: getCorrelationEngineStats(),
     crystalGrowth: getCrystalGrowthStats(),
     experimentPlanner: getExperimentPlannerStats(),
+    crossEngineHub: crossEngineHub.getStats(),
+    synthesisDiscovery: getSynthesisDiscoveryStats(),
     pipelineStageMetrics: {
       ...pipelineStageMetrics,
       prototypeSuccessRate: pipelineStageMetrics.prototypeAttempts > 0

@@ -112,6 +112,8 @@ import {
 } from "./physics/synthesis-simulator";
 import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
+import { crossEngineHub } from "./learning/cross-engine-hub";
+import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats } from "./learning/synthesis-discovery";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "./synthesis/crystal-growth-simulator";
 import { generateExperimentPlan, getExperimentPlannerStats, type ExperimentCandidate } from "./experiment-planner";
@@ -1703,6 +1705,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/synthesis-discovery/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getSynthesisDiscoveryStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch synthesis discovery stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
   app.get("/api/synthesis-discovery/:formula", generalLimiter, (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
@@ -1735,6 +1745,38 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getDefectEngineStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch defect engine stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/cross-engine/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(crossEngineHub.getStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch cross-engine stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/cross-engine/patterns", generalLimiter, (_req, res) => {
+    try {
+      res.json({
+        patterns: crossEngineHub.getGlobalPatterns(),
+        physicsGuidance: crossEngineHub.getPhysicsGuidance(),
+        synthesisGuidance: crossEngineHub.getSynthesisGuidance(),
+        topologicalGuidance: crossEngineHub.getTopologicalGuidance(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch cross-engine patterns", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/cross-engine/insights/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const insight = crossEngineHub.getInsightsFor(formula);
+      if (!insight) return res.status(404).json({ error: "No insights found for formula" });
+      res.json(insight);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch cross-engine insights", detail: e.message?.slice(0, 200) });
     }
   });
 

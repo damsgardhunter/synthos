@@ -47,6 +47,8 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Multi-Task GNN Surrogate**: Extended GNN predicting 18 properties simultaneously.
 - **Autonomous Discovery Loop**: Massive generation pipeline with multi-stage filtering and tiered acceptance.
 - **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication.
+- **Cross-Engine Intelligence Hub**: Central data bus (`cross-engine-hub.ts`) collecting outputs from all 9 sub-engines (topology, fermi, pairing, pressure, defect, physics, ML, synthesis, theory) with pattern aggregation and multi-engine convergence detection.
+- **Novel Synthesis Path Discovery**: Evolutionary synthesis optimizer (`synthesis-discovery.ts`) using genetic algorithm with multi-engine fitness function to discover novel multi-step synthesis routes.
 
 ### Physics Filtering Rules
 - **Phonon stability**: xTB screening uses relaxed thresholds (maxImagModes=10, lowestFreq=-1500 cm-1) to avoid premature rejection of unrelaxed structures. Extreme artifacts (< -5000 cm-1) still rejected.
@@ -98,6 +100,9 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Engine catch blocks**: 65+ previously silent catch blocks now log errors across entire engine.ts.
 - **Supercon dataset**: Removed duplicate entries (ScH9, NbC, SrTiO3); 550 entries total.
 - **Auto-promote catch**: Routes validation auto-promote now logs errors on failure.
+- **Tc reconciliation system**: `reconcileTc()` in physics-engine.ts weights multiple prediction methods (DFT weight=4, xTB=3, physics=2, GB=1) and produces single authoritative value. Applied at Phase 10 and autonomous fast path. If methods agree within 25% spread, uses weighted average; otherwise takes highest-fidelity method.
+- **Inverse optimizer cross-pollination**: After inverse campaign processing, element success matrices feed into RL agent via recordElementOutcome, and passing candidates feed into BO/surrogate via addObservation/incorporateSuccessData.
+- **Unified Tc display**: Dashboard shows single "Best Tc (All Methods)" computed as max(DB, DFT Loop, Inverse), with method breakdown. autonomousLoopStats.bestTc reconciled with DB top candidate.
 - **Round 9 comprehensive fixes**:
   - phonon-calculator.ts: Frequency artifact threshold raised 5000→8000 cm⁻¹ and scaling /20→/10, protecting legitimate H-H stretching modes in pressurized hydrides.
   - structure-predictor.ts: totalAtoms=0 guard in computeMiedemaFormationEnergy; 6 new KNOWN_PROTOTYPES (Heusler, Skutterudite, Chevrel, K2NiF4, infinite-layer, Pyrochlore); matchPrototype extended for all 6; PROTOTYPE_CA_RATIOS added for all 6.

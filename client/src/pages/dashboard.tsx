@@ -12,7 +12,7 @@ import {
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
-  Cpu, Shield, Activity,
+  Cpu, Shield, Activity, Network, GitMerge,
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
@@ -401,6 +401,22 @@ export default function Dashboard() {
     insights: { id: string; insightText: string; noveltyScore: number | null; category: string | null; phaseName: string; discoveredAt: string }[];
     total: number;
   }>({ queryKey: ["/api/novel-insights", "recent"], refetchInterval: 30000 });
+  const { data: crossEngineStats } = useQuery<{
+    totalFormulas: number;
+    totalInsightsRecorded: number;
+    engineCoverage: Record<string, number>;
+    multiEngineFormulas: number;
+    activePatterns: number;
+    patternNames: string[];
+  }>({ queryKey: ["/api/cross-engine/stats"], refetchInterval: 20000 });
+  const { data: synthDiscStats } = useQuery<{
+    totalDiscoveries: number;
+    totalRoutes: number;
+    avgFitness: number;
+    bestFitness: number;
+    bestFormula: string;
+    engineUsage: Record<string, number>;
+  }>({ queryKey: ["/api/synthesis-discovery/stats"], refetchInterval: 20000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -523,15 +539,27 @@ export default function Dashboard() {
               const al = engineMemory?.autonomousLoopStats?.activeLearning;
               const invOpt = engineMemory?.autonomousLoopStats?.inverseOptimizer;
               const inverseBestTc = invOpt?.bestTcAcrossAll ?? 0;
+              const loopBestTc = al?.bestTcFromLoop ?? 0;
+              const memoryBestTc = engineMemory?.bestTc ?? 0;
+              const unifiedBestTc = Math.max(memoryBestTc, loopBestTc, inverseBestTc);
+              const bestSource = unifiedBestTc === memoryBestTc ? "Reconciled" : unifiedBestTc === loopBestTc ? "DFT Loop" : "Inverse Optimizer";
               const hasALData = al && (al.totalDFTRuns > 0 || al.modelRetrains > 0);
 
               return (
                 <div className="space-y-3">
-                  <div className={`p-2.5 rounded-md ${inverseBestTc > 200 ? "bg-amber-500/10 border border-amber-500/20" : "bg-muted/50"}`} data-testid="al-inverse-best-tc">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Inverse Optimizer Best Tc</p>
-                    <p className={`text-xl font-mono font-bold ${inverseBestTc > 200 ? "text-amber-600 dark:text-amber-400" : ""}`}>
-                      {inverseBestTc > 0 ? `${Math.round(inverseBestTc)}K` : "--"}
+                  <div className={`p-2.5 rounded-md ${unifiedBestTc > 200 ? "bg-amber-500/10 border border-amber-500/20" : "bg-muted/50"}`} data-testid="al-unified-best-tc">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc (All Methods)</p>
+                    <p className={`text-xl font-mono font-bold ${unifiedBestTc > 200 ? "text-amber-600 dark:text-amber-400" : ""}`}>
+                      {unifiedBestTc > 0 ? `${Math.round(unifiedBestTc)}K` : "--"}
                     </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">Source: {bestSource}</p>
+                    {(inverseBestTc > 0 || loopBestTc > 0) && (
+                      <div className="flex gap-3 mt-1 text-[10px] text-muted-foreground">
+                        {inverseBestTc > 0 && <span>Inverse: {Math.round(inverseBestTc)}K</span>}
+                        {loopBestTc > 0 && <span>DFT Loop: {Math.round(loopBestTc)}K</span>}
+                        {memoryBestTc > 0 && memoryBestTc !== unifiedBestTc && <span>DB: {Math.round(memoryBestTc)}K</span>}
+                      </div>
+                    )}
                   </div>
 
                   {!hasALData ? (
@@ -544,7 +572,7 @@ export default function Dashboard() {
                       : 0;
                     return (
                       <>
-                        <div className="grid grid-cols-3 gap-3">
+                        <div className="grid grid-cols-2 gap-3">
                           <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-dft-runs">
                             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">DFT Runs</p>
                             <p className="text-xl font-mono font-bold">{al!.totalDFTRuns}</p>
@@ -552,10 +580,6 @@ export default function Dashboard() {
                           <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-model-retrains">
                             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Model Retrains</p>
                             <p className="text-xl font-mono font-bold">{al!.modelRetrains}</p>
-                          </div>
-                          <div className="p-2.5 bg-muted/50 rounded-md" data-testid="al-best-tc">
-                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc (Loop)</p>
-                            <p className="text-xl font-mono font-bold">{Math.round(al!.bestTcFromLoop)}K</p>
                           </div>
                         </div>
                         <div className="space-y-1" data-testid="al-uncertainty-trend">
@@ -671,6 +695,125 @@ export default function Dashboard() {
                 </div>
               );
             })()}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card data-testid="cross-engine-hub">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Network className="h-4 w-4 text-primary" />
+              Cross-Engine Intelligence Hub
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(!crossEngineStats || crossEngineStats.totalInsightsRecorded === 0) ? (
+              <p className="text-sm text-muted-foreground italic" data-testid="cross-engine-placeholder">
+                Cross-engine insights will accumulate as the engine runs analysis cycles
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="ce-total-insights">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Insights</p>
+                    <p className="text-lg font-mono font-bold">{crossEngineStats.totalInsightsRecorded}</p>
+                  </div>
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="ce-formulas">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Formulas</p>
+                    <p className="text-lg font-mono font-bold">{crossEngineStats.totalFormulas}</p>
+                  </div>
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="ce-patterns">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Patterns</p>
+                    <p className="text-lg font-mono font-bold">{crossEngineStats.activePatterns}</p>
+                  </div>
+                </div>
+                {crossEngineStats.multiEngineFormulas > 0 && (
+                  <div className="p-2 bg-primary/5 rounded-md" data-testid="ce-multi-engine">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Multi-Engine Convergence</p>
+                    <p className="text-lg font-mono font-bold">{crossEngineStats.multiEngineFormulas} formulas</p>
+                    <p className="text-[10px] text-muted-foreground">analyzed by 3+ engines simultaneously</p>
+                  </div>
+                )}
+                <div className="space-y-1">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Engine Coverage</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {Object.entries(crossEngineStats.engineCoverage || {}).filter(([, count]) => count > 0).map(([engine, count]) => (
+                      <Badge key={engine} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`ce-engine-${engine}`}>
+                        {engine}: {count}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+                {(crossEngineStats.patternNames ?? []).length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Active Patterns</p>
+                    <div className="space-y-0.5">
+                      {crossEngineStats.patternNames.slice(0, 4).map((name, i) => (
+                        <p key={i} className="text-xs text-muted-foreground" data-testid={`ce-pattern-${i}`}>{name}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card data-testid="synthesis-discovery">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <GitMerge className="h-4 w-4 text-primary" />
+              Novel Synthesis Discovery
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) ? (
+              <p className="text-sm text-muted-foreground italic" data-testid="synth-disc-placeholder">
+                Novel synthesis paths will be discovered as candidates are analyzed across engines
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-total-runs">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Discovery Runs</p>
+                    <p className="text-lg font-mono font-bold">{synthDiscStats.totalDiscoveries}</p>
+                  </div>
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-paths-generated">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Routes Found</p>
+                    <p className="text-lg font-mono font-bold">{synthDiscStats.totalRoutes}</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-best-fitness">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Fitness</p>
+                    <p className="text-lg font-mono font-bold">{(synthDiscStats.bestFitness * 100).toFixed(1)}%</p>
+                  </div>
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-avg-fitness">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Fitness</p>
+                    <p className="text-lg font-mono font-bold">{(synthDiscStats.avgFitness * 100).toFixed(1)}%</p>
+                  </div>
+                </div>
+                {synthDiscStats.bestFormula && (
+                  <div className="p-2 bg-primary/5 rounded-md" data-testid="sd-best-formula">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Candidate</p>
+                    <p className="text-sm font-mono font-bold">{synthDiscStats.bestFormula}</p>
+                  </div>
+                )}
+                {synthDiscStats.engineUsage && Object.keys(synthDiscStats.engineUsage).length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Engine Contributions</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(synthDiscStats.engineUsage).filter(([, v]) => v > 0).map(([engine, count]) => (
+                        <Badge key={engine} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`sd-engine-${engine}`}>
+                          {engine}: {count}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
