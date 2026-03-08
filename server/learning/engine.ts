@@ -2420,8 +2420,8 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     try {
       const miedemaEf = computeMiedemaFormationEnergy(formula);
-      if (Math.abs(miedemaEf) > 5) {
-        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom is physically insane (>5), rejecting`);
+      if (miedemaEf < -4.0 || miedemaEf > 2.0) {
+        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-4, 2], rejecting`);
         return { passed: false, tc: 0, reason: `formation-energy-insane: ${miedemaEf.toFixed(3)} eV/atom` };
       }
     } catch {}

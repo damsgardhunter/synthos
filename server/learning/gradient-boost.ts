@@ -107,23 +107,28 @@ function computeCalibration(model: GBModel): CalibrationData {
   };
 }
 
+function sanitize(v: number | undefined | null, fallback: number = 0): number {
+  if (v == null || !Number.isFinite(v)) return fallback;
+  return v;
+}
+
 function featureVectorToArray(f: MLFeatureVector): number[] {
   return [
-    f.electronPhononLambda,
-    f.metallicity,
-    f.logPhononFreq,
-    f.debyeTemperature,
-    f.correlationStrength,
-    f.valenceElectronConcentration,
-    f.avgElectronegativity,
-    f.enSpread,
-    f.hydrogenRatio,
-    f.pettiforNumber,
-    f.avgAtomicRadius,
-    f.avgSommerfeldGamma,
-    f.avgBulkModulus,
-    f.maxAtomicMass,
-    f.numElements,
+    sanitize(f.electronPhononLambda, 0.5),
+    sanitize(f.metallicity, 0.5),
+    sanitize(f.logPhononFreq, 200),
+    sanitize(f.debyeTemperature, 300),
+    sanitize(f.correlationStrength, 0.3),
+    sanitize(f.valenceElectronConcentration, 4),
+    sanitize(f.avgElectronegativity, 2.0),
+    sanitize(f.enSpread, 1.0),
+    sanitize(f.hydrogenRatio),
+    sanitize(f.pettiforNumber, 60),
+    sanitize(f.avgAtomicRadius, 130),
+    sanitize(f.avgSommerfeldGamma, 2.0),
+    sanitize(f.avgBulkModulus, 100),
+    sanitize(f.maxAtomicMass, 50),
+    sanitize(f.numElements, 2),
     f.hasTransitionMetal ? 1 : 0,
     f.hasRareEarth ? 1 : 0,
     f.hasHydrogen ? 1 : 0,
@@ -314,8 +319,11 @@ function trainGradientBoosting(
 function predictWithModel(model: GBModel, x: number[]): number {
   let prediction = model.basePrediction;
   for (const tree of model.trees) {
-    prediction += model.learningRate * predictTree(tree, x);
+    const treeVal = predictTree(tree, x);
+    if (!Number.isFinite(treeVal)) continue;
+    prediction += model.learningRate * treeVal;
   }
+  if (!Number.isFinite(prediction)) return model.basePrediction;
   return Math.max(0, prediction);
 }
 
@@ -408,7 +416,8 @@ export function gbPredict(features: MLFeatureVector): { tcPredicted: number; sco
 
   score = Math.max(0.01, Math.min(0.95, score));
 
-  return { tcPredicted: Math.max(0, Math.round(tcPredicted * 10) / 10), score, reasoning };
+  const safeTc = Number.isFinite(tcPredicted) ? Math.max(0, Math.round(tcPredicted * 10) / 10) : 0;
+  return { tcPredicted: safeTc, score, reasoning };
 }
 
 export function validateModel(): { mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[] } {
@@ -539,7 +548,7 @@ export async function incorporateSuccessData(formula: string, tc: number): Promi
     isSuperconductor: tc > 0,
   });
 
-  if (successExamples.length % 20 === 0) {
+  if (successExamples.length % 10 === 0) {
     await retrainWithAccumulatedData();
   }
 }

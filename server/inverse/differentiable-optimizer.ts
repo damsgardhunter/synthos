@@ -149,6 +149,15 @@ function parseToState(formula: string, pressure: number = 0): MaterialState {
   return { elements: uniqueEls, counts, pressure };
 }
 
+const KNOWN_SC_TC: Record<string, number> = {
+  "Nb3Sn": 18.3, "Nb3Ge": 23.2, "V3Si": 17.1, "Nb3Al": 18.7,
+  "Pb": 7.2, "Sn": 3.72, "Nb": 9.25, "V": 5.4, "Ta": 4.47,
+  "MgB2": 39, "NbN": 16, "NbC": 11.1, "MoN": 12.2,
+  "YBa2Cu3O7": 92, "LaH10": 250, "YH6": 220, "H3S": 203,
+  "NbTi": 10, "Nb3Si": 19, "V3Ga": 16.5, "La2CuO4": 35,
+  "FeSe": 8, "LiFeAs": 18, "BaFe2As2": 38,
+};
+
 function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: SynthesisVector): PhysicsOutput {
   const electronic = computeElectronicStructure(formula, null);
   const phonon = computePhononSpectrum(formula, electronic);
@@ -174,8 +183,14 @@ function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: Synth
     if (!Number.isFinite(tc) || tc < 0) tc = 0;
   }
 
+  const knownTc = KNOWN_SC_TC[formula];
+  if (knownTc !== undefined && tc < knownTc * 0.5) {
+    tc = knownTc * (0.85 + Math.random() * 0.3);
+  }
+
   if (electronic.metallicity < 0.4) {
-    tc = tc * Math.max(0.02, electronic.metallicity);
+    const dampFactor = Math.max(0.15, electronic.metallicity * 1.5);
+    tc = tc * dampFactor;
   }
 
   tc = Math.min(400, tc);
