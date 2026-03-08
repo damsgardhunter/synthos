@@ -52,6 +52,9 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Phonon stability**: xTB screening uses relaxed thresholds (maxImagModes=10, lowestFreq=-1500 cm-1) to avoid premature rejection of unrelaxed structures. Extreme artifacts (< -5000 cm-1) still rejected.
 - **xTB pre-optimization**: Hessian calculations always run on at least crude-optimized structures (inline --opt crude fallback if no cached optimization exists).
 - **Prototype chemistry compatibility**: `isPrototypeChemicallyCompatible()` enforces HexBoride requires B, Perovskite/NaCl/Pyrite require anion elements, A15 requires transition metals, Clathrate requires H.
+- **Volume scaling**: `validateAndFixStructure` uses cbrt-based scaling with bidirectional correction (scale down when volume overshoots after distance fix). Volume ratio bounds: 0.5-2.0.
+- **Radius compatibility**: `checkRadiusCompatibility()` rejects non-H element pairs with covalent radius ratio > 3.0 before structure generation.
+- **Hydride stoichiometry**: Metal-rich hydrides (H/metal < 1.0) rejected as unphysical in QE worker validation.
 - **Formation energy**: Hard stop for Ef > 1.0 eV/atom or Ef < -5.0 eV/atom.
 - **Hull distance**: Hard reject > 0.50 eV/atom.
 - **Chemistry grammar validation**: Pre-filters compositions based on various chemical constraints.

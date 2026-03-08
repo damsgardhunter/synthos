@@ -1,0 +1,247 @@
+Your Scaling Loop Is Oscillating (Major Bug)
+
+Example:
+
+ScTi attempt 1
+vol/atom=5.7 (target=10)
+scaling by 2.07
+
+ScTi attempt 2
+vol/atom=50.2 (target=10)
+scaling by 1.00
+
+What happened:
+
+volume too small
+→ scale 2.07
+
+but scaling uses lattice^3
+→ volume increases 8.8x
+
+So you overshoot massively.
+
+Correct scaling formula
+
+You must scale linearly with cube root.
+
+Replace:
+
+scale = targetVolume / currentVolume
+
+with:
+
+scale = Math.cbrt(targetVolume / currentVolume)
+
+Example:
+
+current = 5.7
+target = 10
+
+ratio = 1.75
+scale = 1.20   (correct)
+
+NOT 2.07
+Task
+
+T026 — Fix Volume Scaling
+
+File:
+
+qe-worker.ts
+
+Replace scaling logic with:
+
+const ratio = targetVolPerAtom / currentVolPerAtom
+const scale = Math.cbrt(ratio)
+
+latticeA *= scale
+
+Impact:
+
+geometry pass rate ↑ dramatically
+2. Your Prototype Volume Expectation Is Wrong
+
+Example:
+
+Volume ratio check FAILED for Layered
+generated=301 Å³
+expected=42 Å³
+ratio=7.07
+
+But ScTi layered structures should not expect 42 Å³.
+
+Your prototype database is probably using per atom volume incorrectly.
+
+Typical values:
+
+Element	atomic volume
+Sc	~25 Å³
+Ti	~17 Å³
+
+So ScTi should be around:
+
+(25 + 17)/2 ≈ 21 Å³ per atom
+
+Your system expected:
+
+10 Å³
+
+That’s too small.
+
+Fix: Compute Expected Volume From Atomic Volumes
+
+Add a table:
+
+const atomicVolume = {
+Sc: 25,
+Ti: 17,
+Nb: 18,
+Sb: 29,
+H: 7,
+N: 12
+}
+
+Then:
+
+expectedVolPerAtom =
+sum(atomicVolume[element] * count) / totalAtoms
+Task
+
+T027 — Atomic Volume Estimator
+
+File:
+
+structure-validator.ts
+
+Add:
+
+function estimateVolumePerAtom(elements, stoich) {
+  let total = 0
+  let atoms = 0
+
+  for (e in stoich) {
+    total += atomicVolume[e] * stoich[e]
+    atoms += stoich[e]
+  }
+
+  return total / atoms
+}
+
+Impact:
+
+volume mismatch errors ↓ drastically
+3. Your xTB Geometry Optimization Is Failing
+
+Example:
+
+Geometry optimization failed
+cd /tmp/dft_calculations/opt_Nd3H2
+
+This usually means one of three things:
+
+bad geometry
+
+wrong xtb flags
+
+xtb not installed in runtime
+
+Given your logs show:
+
+xTB runs sometimes
+
+So the problem is geometry instability.
+
+Example:
+
+Nd3H2
+124 imaginary modes
+freq = -1299 cm⁻¹
+
+That means the structure is completely unstable.
+
+Fix
+
+Reject structures with too large element radius mismatch.
+
+Example:
+
+Nd radius ≈ 2.06 Å
+H radius ≈ 0.31 Å
+
+Difference:
+
+6.6×
+
+That creates impossible lattices.
+
+Task
+
+T028 — Radius Compatibility Filter
+
+Add before structure generation:
+
+function radiusCompatible(elements){
+
+  const radii = elements.map(e => covalentRadius[e])
+
+  const max = Math.max(...radii)
+  const min = Math.min(...radii)
+
+  return max/min < 3
+}
+
+Reject if ratio >3.
+
+Impact:
+
+phonon instability ↓
+xtb failure ↓
+4. Your Hydrogen Hydrides Are Being Generated Incorrectly
+
+Example:
+
+Nd3H2
+
+But rare-earth hydrides usually follow patterns:
+
+formula	common
+LaH2	stable
+LaH3	stable
+LaH10	high pressure
+
+Not:
+
+Nd3H2
+
+That stoichiometry is chemically odd.
+
+Fix
+
+Add stoichiometry templates.
+
+Example:
+
+hydrideTemplates = [
+"MH",
+"MH2",
+"MH3",
+"MH6",
+"MH10"
+]
+Task
+
+T029 — Hydride Stoichiometry Prior
+
+File:
+
+formula-generator.ts
+
+When hydrogen present:
+
+use template MHx
+
+instead of random counts.
+
+Impact:
+
+chemically realistic hydrides

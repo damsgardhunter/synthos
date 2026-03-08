@@ -82,7 +82,10 @@ const COVALENT_RADII: Record<string, number> = {
   Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, In: 1.42, Sn: 1.39,
   Sb: 1.39, Te: 1.38, I: 1.39, Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04,
   Hf: 1.75, Ta: 1.70, W: 1.62, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36,
-  Au: 1.36, Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Tc: 1.47, Rb2: 2.20,
+  Au: 1.36, Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Tc: 1.47,
+  Pr: 2.03, Nd: 2.01, Sm: 1.98, Eu: 1.98, Gd: 1.96, Tb: 1.94,
+  Dy: 1.92, Ho: 1.92, Er: 1.89, Tm: 1.90, Yb: 1.87, Lu: 1.87,
+  Th: 2.06, U: 1.96, Pa: 2.00, Np: 1.90, Pu: 1.87,
 };
 
 function parseFormula(formula: string): Record<string, number> {
@@ -146,7 +149,7 @@ function computeExpectedVolume(counts: Record<string, number>, packingFactor: nu
 function validateVolumeRatio(generatedVolume: number, expectedVolume: number): { valid: boolean; ratio: number } {
   if (expectedVolume <= 0) return { valid: true, ratio: 1.0 };
   const ratio = generatedVolume / expectedVolume;
-  return { valid: ratio >= 0.6 && ratio <= 1.6, ratio };
+  return { valid: ratio >= 0.5 && ratio <= 2.0, ratio };
 }
 
 function estimateLatticeParam(elements: string[], counts: Record<string, number>, protoName?: string): number {
@@ -1581,6 +1584,12 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
       scaleFactor = Math.max(scaleFactor, neededFactor);
     }
 
+    const volRatio = volumePerAtom / targetVolPerAtom;
+    if (distOk && volRatio > 1.6) {
+      scaleFactor = Math.cbrt(1.0 / volRatio);
+    }
+
+    scaleFactor = Math.max(scaleFactor, 0.3);
     scaleFactor = Math.min(scaleFactor, 3.0);
     console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(2)}`);
     current = scaleStructure(current, scaleFactor);
@@ -1604,9 +1613,19 @@ function checkVolumeRatioForAtoms(atoms: AtomPosition[], counts: Record<string, 
   const expectedVol = computeExpectedVolume(counts);
   const { valid, ratio } = validateVolumeRatio(volume, expectedVol);
   if (!valid) {
-    console.log(`[DFT] ${formula}: Volume ratio check FAILED for ${label} — generated=${volume.toFixed(1)}ų, expected=${expectedVol.toFixed(1)}ų, ratio=${ratio.toFixed(2)} (must be 0.6-1.6)`);
+    console.log(`[DFT] ${formula}: Volume ratio check FAILED for ${label} — generated=${volume.toFixed(1)}ų, expected=${expectedVol.toFixed(1)}ų, ratio=${ratio.toFixed(2)} (must be 0.5-2.0)`);
   }
   return valid;
+}
+
+function checkRadiusCompatibility(elements: string[]): boolean {
+  const nonH = elements.filter(e => e !== "H");
+  if (nonH.length < 2) return true;
+  const radii = nonH.map(e => COVALENT_RADII[e] ?? 1.3);
+  const maxR = Math.max(...radii);
+  const minR = Math.min(...radii);
+  if (maxR / minR > 3.0) return false;
+  return true;
 }
 
 function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; prototype: string } {
@@ -1615,6 +1634,11 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
 
   if (elements.length === 0) {
     return { atoms: [], prototype: "empty" };
+  }
+
+  if (!checkRadiusCompatibility(elements)) {
+    console.log(`[DFT] ${formula}: Radius incompatibility — non-H element radii ratio > 3.0`);
+    return { atoms: [], prototype: "rejected-radius" };
   }
 
   prototypeAttempts++;

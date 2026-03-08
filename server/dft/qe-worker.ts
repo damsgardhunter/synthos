@@ -721,6 +721,10 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
     const hPerMetal = nonHAtoms > 0 ? hCount / nonHAtoms : hCount;
     const isKnownSuperhydride = KNOWN_SUPERHYDRIDES.has(formula.replace(/\s+/g, ""));
 
+    if (hCount > 0 && nonHAtoms > 0 && hPerMetal < 1.0 && hasHydrideMetal) {
+      return { valid: false, reason: `Metal-rich hydride (H/metal=${hPerMetal.toFixed(2)}) — unphysical stoichiometry, hydrides should have H/metal >= 1` };
+    }
+
     if (!isKnownSuperhydride && hPerMetal > 6) {
       return { valid: true, reason: `High H/metal ratio ${hPerMetal.toFixed(1)} — tagged as high-pressure candidate (>100 GPa required)`, highPressure: true, estimatedPressureGPa: Math.min(300, 50 + hPerMetal * 15) };
     }
