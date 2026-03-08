@@ -268,10 +268,12 @@ export async function runActiveLearningCycle(
   totalEnrichedSinceLastRetrain += dftSuccessCount;
 
   let retrainResult = { r2Before: 0, maeBefore: 0, r2After: 0, maeAfter: 0 };
-  const shouldRetrain =
+  const hasNewData = totalEnrichedSinceLastRetrain > 0;
+  const shouldRetrain = hasNewData && (
     totalEnrichedSinceLastRetrain >= 15 ||
     avgUncertaintyBefore > 0.3 ||
-    (dftSuccessCount > 0 && convergenceStats.modelRetrains === 0);
+    convergenceStats.modelRetrains === 0
+  );
   if (shouldRetrain) {
     emit("log", {
       phase: "active-learning",
@@ -293,13 +295,9 @@ export async function runActiveLearningCycle(
     emit("log", {
       phase: "active-learning",
       event: "DFT enrichment warning",
-      detail: `All ${selected.length} candidates failed DFT enrichment. Retraining anyway with existing data.`,
+      detail: `All ${selected.length} candidates failed DFT enrichment. Skipping retrain — no new data to incorporate.`,
       dataSource: "Active Learning",
     });
-    retrainResult = await retrainGNNWithEnrichedData(emit);
-    convergenceStats.modelRetrains++;
-    convergenceStats.totalDFTRuns++;
-    totalEnrichedSinceLastRetrain = 0;
   }
 
   let avgUncertaintyAfter = avgUncertaintyBefore;

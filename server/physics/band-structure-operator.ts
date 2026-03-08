@@ -463,13 +463,17 @@ function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsP
 
   for (let b = 0; b < dispersion.nBands; b++) {
     const bandEnergies = dispersion.bands.map(pt => pt.energies[b] ?? 0);
+    const bandMin = Math.min(...bandEnergies);
+    const bandMax = Math.max(...bandEnergies);
+    const bandWidth = Math.max(0.01, bandMax - bandMin);
+    const vhsThreshold = 0.1 * bandWidth;
     for (let i = 1; i < bandEnergies.length - 1; i++) {
       const d2E = bandEnergies[i + 1] - 2 * bandEnergies[i] + bandEnergies[i - 1];
       const isExtremum = (bandEnergies[i] >= bandEnergies[i - 1] && bandEnergies[i] >= bandEnergies[i + 1]) ||
                           (bandEnergies[i] <= bandEnergies[i - 1] && bandEnergies[i] <= bandEnergies[i + 1]);
       const nearFermi = Math.abs(bandEnergies[i] - dispersion.fermiEnergy) < 0.2;
 
-      if (isExtremum && nearFermi && Math.abs(d2E) < 0.5) {
+      if (isExtremum && nearFermi && Math.abs(d2E) < vhsThreshold) {
         vhsPositions.push({
           bandIndex: b,
           kFraction: dispersion.bands[i].kFraction,

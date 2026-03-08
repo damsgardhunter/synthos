@@ -437,14 +437,14 @@ export function scanPressureTcCurve(
     if (denom > 0.001) {
       const f1 = lambdaP < 1.5
         ? Math.pow(1 + (lambdaP / 2.46 / (1 + 3.8 * muStar)), 1 / 3)
-        : Math.sqrt(1 + lambdaP / 2.46);
+        : Math.pow(1 + Math.pow(lambdaP / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
       const exponent = -1.04 * (1 + lambdaP) / denom;
       if (exponent > 50) { Tc = 0; } else {
         Tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
         if (!Number.isFinite(Tc) || Tc < 0) Tc = 0;
       }
       if (denom < 0.05) {
-        Tc *= denom / 0.05;
+        Tc *= Math.pow(denom / 0.05, 0.5);
       }
     }
 

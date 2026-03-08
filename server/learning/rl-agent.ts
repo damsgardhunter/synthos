@@ -524,6 +524,7 @@ export class RLChemicalSpaceAgent {
     const stagnationBoost = Math.min(0.5, state.stagnationCycles * 0.02);
 
     const effectiveEpsilon = Math.min(this.epsilon + stagnationBoost, 0.5);
+    const effectiveTemperature = Math.max(this.temperature + stagnationBoost * 0.5, this.minTemperature);
 
     if (Math.random() < effectiveEpsilon) {
       const famIdx = Math.floor(Math.random() * CHEMICAL_FAMILY_ACTIONS.length);
@@ -543,7 +544,7 @@ export class RLChemicalSpaceAgent {
     const contextBias = this.computeContextBias(stateFeatures);
 
     const famLogits = this.policy.chemicalFamily.map((w, i) => w + (contextBias.family?.[i] ?? 0));
-    const famProbs = softmax(famLogits, this.temperature);
+    const famProbs = softmax(famLogits, effectiveTemperature);
     const chemicalFamily = sampleFromDistribution(famProbs);
 
     const selectedFamily = CHEMICAL_FAMILY_ACTIONS[chemicalFamily];
@@ -557,7 +558,7 @@ export class RLChemicalSpaceAgent {
       if (hostSet.has(i)) bias += 0.4;
       return bias;
     });
-    const elProbs = softmax(elLogits, this.temperature);
+    const elProbs = softmax(elLogits, effectiveTemperature);
     const elementGroup1 = sampleFromDistribution(elProbs);
 
     const pairLogits = this.policy.elementPairBias[elementGroup1].map(
@@ -567,11 +568,11 @@ export class RLChemicalSpaceAgent {
         return bias;
       }
     );
-    const pairProbs = softmax(pairLogits, this.temperature);
+    const pairProbs = softmax(pairLogits, effectiveTemperature);
     const elementGroup2 = sampleFromDistribution(pairProbs);
 
     const stoichLogits = this.policy.stoichTemplate.map((w, i) => w + contextBias.stoich[i]);
-    const stoichProbs = softmax(stoichLogits, this.temperature);
+    const stoichProbs = softmax(stoichLogits, effectiveTemperature);
     const stoichTemplate = sampleFromDistribution(stoichProbs);
 
     const structLogits = this.policy.structureType.map((w, i) => {
@@ -579,11 +580,11 @@ export class RLChemicalSpaceAgent {
       if (structSet.has(i)) bias += 0.3;
       return bias;
     });
-    const structProbs = softmax(structLogits, this.temperature);
+    const structProbs = softmax(structLogits, effectiveTemperature);
     const structureType = sampleFromDistribution(structProbs);
 
     const layerLogits = this.policy.layeringDimension.map((w, i) => w + contextBias.layering[i]);
-    const layerProbs = softmax(layerLogits, this.temperature);
+    const layerProbs = softmax(layerLogits, effectiveTemperature);
     const layeringDimension = sampleFromDistribution(layerProbs);
 
     const hDensLogits = this.policy.hydrogenDensity.map((w, i) => {
@@ -591,15 +592,15 @@ export class RLChemicalSpaceAgent {
       if (chemicalFamily === 0 && i >= 2) bias += 0.4;
       return bias;
     });
-    const hDensProbs = softmax(hDensLogits, this.temperature);
+    const hDensProbs = softmax(hDensLogits, effectiveTemperature);
     const hydrogenDensity = sampleFromDistribution(hDensProbs);
 
     const vecLogits = this.policy.electronCount.map((w, i) => w + contextBias.eCount[i]);
-    const vecProbs = softmax(vecLogits, this.temperature);
+    const vecProbs = softmax(vecLogits, effectiveTemperature);
     const electronCount = sampleFromDistribution(vecProbs);
 
     const orbLogits = this.policy.orbitalConfiguration.map((w, i) => w + contextBias.orbital[i]);
-    const orbProbs = softmax(orbLogits, this.temperature);
+    const orbProbs = softmax(orbLogits, effectiveTemperature);
     const orbitalConfiguration = sampleFromDistribution(orbProbs);
 
     return {

@@ -141,6 +141,18 @@ function getCompositionFractions(formula: string, elementSet: string[]): Record<
   return fractions;
 }
 
+function compositionToX(counts: Record<string, number>, total: number, elements: string[]): number {
+  if (elements.length === 2) {
+    return (counts[elements[0]] || 0) / total;
+  }
+  let x = 0;
+  for (let i = 0; i < elements.length; i++) {
+    const frac = (counts[elements[i]] || 0) / total;
+    x += frac * (i + 1);
+  }
+  return x / elements.length;
+}
+
 function lowerConvexHull2D(points: { x: number; y: number; label: string }[]): { x: number; y: number; label: string }[] {
   if (points.length <= 2) return [...points];
 
@@ -199,30 +211,18 @@ export function computeConvexHull(
   const allPoints: { x: number; y: number; label: string }[] = [];
 
   for (const el of elements) {
-    allPoints.push({ x: elements.indexOf(el) === 0 ? 1.0 : 0.0, y: 0, label: el });
-  }
-  if (elements.length === 2) {
-    allPoints.push({ x: 0.0, y: 0, label: elements[1] });
+    const elCounts: Record<string, number> = { [el]: 1 };
+    allPoints.push({ x: compositionToX(elCounts, 1, elements), y: 0, label: el });
   }
 
   for (const entry of formationEnergies) {
     const entryCounts = parseFormulaCounts(entry.formula);
     const entryTotal = getTotalAtoms(entryCounts);
-    let x: number;
-    if (elements.length === 2) {
-      x = (entryCounts[elements[0]] || 0) / entryTotal;
-    } else {
-      x = (entryCounts[elements[0]] || 0) / entryTotal;
-    }
+    const x = compositionToX(entryCounts, entryTotal, elements);
     allPoints.push({ x, y: entry.energy, label: entry.formula });
   }
 
-  let targetX: number;
-  if (elements.length === 2) {
-    targetX = (targetCounts[elements[0]] || 0) / targetTotal;
-  } else {
-    targetX = (targetCounts[elements[0]] || 0) / targetTotal;
-  }
+  const targetX = compositionToX(targetCounts, targetTotal, elements);
   allPoints.push({ x: targetX, y: targetFormE, label: formula });
 
   const hull = lowerConvexHull2D(allPoints);
@@ -385,7 +385,9 @@ export function computePhaseDiagram(
 
   const hullPoints: { x: number; y: number; label: string }[] = [];
   for (const entry of allEntries) {
-    const x = elementSet.length >= 2 ? (entry.fractions[elementSet[0]] || 0) : 0;
+    const counts = parseFormulaCounts(entry.formula);
+    const total = getTotalAtoms(counts);
+    const x = elementSet.length >= 2 ? compositionToX(counts, total, elementSet) : 0;
     hullPoints.push({ x, y: entry.formationEnergy, label: entry.formula });
   }
 

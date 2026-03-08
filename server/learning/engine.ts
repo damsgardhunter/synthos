@@ -965,10 +965,18 @@ function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): 
 function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined): number {
   const freq = logPhononFreq ?? 200;
   let rawTc = Math.round(lambdaML * 45 + freq * 0.05);
-  if (rawTc > 80 && lambdaML < 1.5) {
-    const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
-    rawTc = Math.round(rawTc * penalty);
-  }
+
+  const sigmoidBlend = 1 / (1 + Math.exp(-0.15 * (rawTc - 80)));
+
+  const lambdaPenaltyBase = 0.15 + 0.15 / (1 + Math.exp(-5 * (lambdaML - 0.75)));
+
+  const lambdaShield = 1 / (1 + Math.exp(-8 * (lambdaML - 1.5)));
+
+  const penaltyStrength = sigmoidBlend * (1 - lambdaShield);
+
+  const dampedTc = rawTc * lambdaPenaltyBase;
+  rawTc = Math.round(rawTc * (1 - penaltyStrength) + dampedTc * penaltyStrength);
+
   return Math.max(0, Math.min(400, rawTc));
 }
 

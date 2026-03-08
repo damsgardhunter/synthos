@@ -756,6 +756,27 @@ export function computePairingProfile(formula: string): PairingProfile {
     wTopo += topoBoost;
     wPhonon -= topoBoost * 0.5;
     wSpin -= topoBoost * 0.5;
+
+    wPhonon = Math.max(0, wPhonon);
+    wSpin = Math.max(0, wSpin);
+    wOrbital = Math.max(0, wOrbital);
+    wExcitonic = Math.max(0, wExcitonic);
+    wCDW = Math.max(0, wCDW);
+    wPolaronic = Math.max(0, wPolaronic);
+    wPlasmon = Math.max(0, wPlasmon);
+    wTopo = Math.max(0, wTopo);
+
+    const weightSum = wPhonon + wSpin + wOrbital + wExcitonic + wCDW + wPolaronic + wPlasmon + wTopo;
+    if (weightSum > 0) {
+      wPhonon /= weightSum;
+      wSpin /= weightSum;
+      wOrbital /= weightSum;
+      wExcitonic /= weightSum;
+      wCDW /= weightSum;
+      wPolaronic /= weightSum;
+      wPlasmon /= weightSum;
+      wTopo /= weightSum;
+    }
   }
 
   const compositePairingStrength =

@@ -181,6 +181,7 @@ export class BayesianOptimizer {
   private bestTcObserved = 0;
   private cachedL: number[][] | null = null;
   private cachedAlpha: number[] | null = null;
+  private cachedYMean: number = 0;
   private maxObservations = 500;
 
   addObservation(formula: string, tc: number, lambda: number = 0, stability: number = 0): void {
@@ -294,11 +295,14 @@ export class BayesianOptimizer {
     }
 
     const L = choleskyDecompose(K);
-    const y = obs.map(o => o.tc);
+    const yRaw = obs.map(o => o.tc);
+    const yMean = yRaw.reduce((s, v) => s + v, 0) / yRaw.length;
+    const y = yRaw.map(v => v - yMean);
     const alpha = choleskySolve(L, y);
 
     this.cachedL = L;
     this.cachedAlpha = alpha;
+    this.cachedYMean = yMean;
     this.cachedGPObs = obs;
     return { L, alpha, obs };
   }
@@ -321,7 +325,7 @@ export class BayesianOptimizer {
       kStar[i] = maternKernel52(features, usedObs[i].features, this.lengthScale, this.signalVariance);
     }
 
-    let mean = 0;
+    let mean = this.cachedYMean;
     for (let i = 0; i < usedObs.length; i++) {
       mean += kStar[i] * alpha[i];
     }

@@ -124,6 +124,7 @@ const discoveryStats = {
   avgFitness: 0,
   bestFitness: 0,
   bestFormula: "",
+  bestKnownTc: 0,
   engineUsage: {} as Record<string, number>,
 };
 
@@ -533,14 +534,16 @@ function computeNoveltyScore(genome: SynthesisGenome, insights: MultiEngineInsig
 
 function computeFitnessScore(
   route: { steps: SynthesisStep[]; feasibilityScore: number; noveltyScore: number },
-  insights: MultiEngineInsights
+  insights: MultiEngineInsights,
+  bestKnownTc: number = 0
 ): number {
   const tcWeight = 0.30;
   const feasWeight = 0.25;
   const novelWeight = 0.20;
   const engineWeight = 0.25;
 
-  const tcNorm = Math.min(1.0, insights.predictedTc / 200);
+  const adaptiveDenom = Math.max(100, bestKnownTc * 0.5);
+  const tcNorm = Math.min(1.0, insights.predictedTc / adaptiveDenom);
   const feasNorm = route.feasibilityScore;
   const novelNorm = route.noveltyScore;
 
@@ -650,7 +653,7 @@ function buildRationale(genome: SynthesisGenome, insights: MultiEngineInsights):
   return rationale;
 }
 
-function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights): NovelSynthesisRoute {
+function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, bestKnownTc: number = 0): NovelSynthesisRoute {
   const steps = genomeToSteps(genome, insights);
   const sv = genomeToSynthesisVector(genome, insights);
   const precursors = selectPrecursors(genome, insights);
@@ -661,7 +664,7 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights): 
   const noveltyScore = computeNoveltyScore(genome, insights);
 
   const routeObj = { steps, feasibilityScore, noveltyScore };
-  const fitnessScore = computeFitnessScore(routeObj, insights);
+  const fitnessScore = computeFitnessScore(routeObj, insights, bestKnownTc);
 
   const engineContributions = buildEngineContributions(insights);
   const rationale = buildRationale(genome, insights);
@@ -691,15 +694,20 @@ export function discoverNovelSynthesisPaths(
 ): SynthesisDiscoveryResult {
   discoveryStats.totalDiscoveries++;
 
+  if (insights.predictedTc > discoveryStats.bestKnownTc) {
+    discoveryStats.bestKnownTc = insights.predictedTc;
+  }
+  const currentBestKnownTc = discoveryStats.bestKnownTc;
+
   let population: NovelSynthesisRoute[] = [];
 
   const basePath = optimizeSynthesisPath(insights.formula, insights.materialClass, insights.predictedTc);
   const baseGenome = randomGenome();
-  population.push(genomeToRoute(baseGenome, insights));
+  population.push(genomeToRoute(baseGenome, insights, currentBestKnownTc));
 
   for (let i = 1; i < populationSize; i++) {
     const genome = randomGenome();
-    population.push(genomeToRoute(genome, insights));
+    population.push(genomeToRoute(genome, insights, currentBestKnownTc));
   }
 
   let bestEverFitness = 0;
@@ -731,7 +739,7 @@ export function discoverNovelSynthesisPaths(
         childGenome = randomGenome();
       }
 
-      newPop.push(genomeToRoute(childGenome, insights));
+      newPop.push(genomeToRoute(childGenome, insights, currentBestKnownTc));
     }
 
     population = newPop;

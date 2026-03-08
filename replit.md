@@ -135,6 +135,19 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - engine.ts: Formula dedup Set (formulasInFlight) prevents duplicate processing in autonomous fast-path; Phase 13 synthesis reasoning marks reasoningFailed=true on error to prevent repeated LLM token waste.
   - gradient-boost.ts: 3 new features — multiBandScore (composite from nesting/DOS/orbital), miedemaFormEnergy (explicit from phase-diagram-engine), nonCentrosymmetric (binary flag from space group); formula parameter threaded through featureVectorToArray.
   - pressure-engine.ts: Birch-Murnaghan eta floor raised 0.3→0.5 for extreme compression; nickelate pressure dome (Gaussian centered at 20 GPa, sigma=15) for La3Ni2O7-type materials.
+- **Round 17 comprehensive audit fixes**:
+  - engine.ts: estimateRawTc cliff at 80K replaced with smooth sigmoid-blended penalty; continuous lambda penalty scaling (no more discrete 0.15/0.25/0.3 tiers); smooth lambda=1.5 boundary via sigmoid shield.
+  - physics-engine.ts: Hydrogen lambda double-counting fixed — H skipped in element loop when hydride boost (hRatio≥4) will apply; prevents inflated lambda for superhydrides.
+  - phase-diagram-engine.ts: N>2 element convex hull fixed — compositionToX uses weighted linear combination of all element fractions instead of collapsing to element[0] only; ternary/quaternary systems get distinct x-coordinates.
+  - topology-engine.ts: Chern-based TSC classification added ("chiral-topological-superconductor" for majorana>0.5 && chern>0.5); weaker mixed-case TSC detection (majorana>0.4 + z2/chern>0.3 + SOC>0.3).
+  - bayesian-optimizer.ts: GP mean subtraction added — yMean computed from observations, subtracted before solving alpha, added back in predictions; far-from-data predictions revert to dataset mean instead of 0K.
+  - active-learning.ts: Retrain skipped when all DFT enrichment fails (dftSuccessCount=0); hasNewData strictly requires totalEnrichedSinceLastRetrain>0.
+  - pressure-engine.ts: Allen-Dynes f1 strong-coupling formula corrected to use ^(3/2) inner exponent matching physics-engine.ts; Tc fade at denom<0.05 changed from linear to sqrt for less aggressive suppression.
+  - pairing-mechanisms.ts: Topological boost weight normalization — all weights clamped ≥0 and re-normalized to sum=1.0 after topo boost adjustment; prevents negative weights for low-wSpin material classes.
+  - fermi-surface-engine.ts: Pocket detection threshold lowered from crossingCount<3 to <2; nesting detection threshold similarly lowered; captures small BZ-corner pockets in pnictides.
+  - rl-agent.ts: Softmax temperature stagnation reset — effectiveTemperature boosted proportionally to stagnation cycles (mirroring epsilon boost); all 9 softmax calls use effectiveTemperature.
+  - synthesis-discovery.ts: GA fitness Tc normalization made adaptive — `predictedTc / max(100, bestKnownTc*0.5)` replaces fixed /200; moderate-Tc ambient SCs not excessively penalized.
+  - band-structure-operator.ts: VHS detection threshold made relative to band width — `|d2E| < 0.1 * bandWidth` instead of fixed 0.5; reduces false positives on dispersive bands.
 - **Round 16 comprehensive fixes**:
   - engine.ts: Crystal diffusion Tc penalty applied (low-lambda/high-Tc guard matching estimateRawTc); ensemble confidence bias +0.1 removed, weights redistributed to GNN 0.6 + GB 0.4.
   - physics-engine.ts: Hc2 uses proper Pauli limit 1.84*Tc*sqrt(1+lambda) instead of 2.0*Tc; CDW suppression unified to >0.5 threshold with gradual onset; ambient Tc cap raised 250→300K.

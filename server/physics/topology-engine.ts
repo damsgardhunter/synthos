@@ -299,7 +299,9 @@ function classifyTopologicalState(
   majorana: number,
   socStrength: number
 ): string {
+  if (majorana > 0.5 && chern > 0.5) return "chiral-topological-superconductor";
   if (majorana > 0.5 && z2 > 0.5) return "topological-superconductor";
+  if (majorana > 0.4 && (z2 > 0.3 || chern > 0.3) && socStrength > 0.3) return "topological-superconductor";
   if (z2 > 0.6 && socStrength > 0.4) return "strong-topological-insulator";
   if (chern > 0.5 && socStrength > 0.3) return "Chern-insulator";
   if (mirror > 0.5 && z2 > 0.3) return "topological-crystalline-insulator";
@@ -426,7 +428,7 @@ let classBreakdown: Record<string, number> = {};
 export function trackTopologyResult(analysis: TopologicalAnalysis) {
   totalAnalyzed++;
   if (analysis.topologicalScore > 0.3) totalTopological++;
-  if (analysis.topologicalClass === "topological-superconductor") totalTSC++;
+  if (analysis.topologicalClass === "topological-superconductor" || analysis.topologicalClass === "chiral-topological-superconductor") totalTSC++;
   classBreakdown[analysis.topologicalClass] = (classBreakdown[analysis.topologicalClass] || 0) + 1;
 }
 

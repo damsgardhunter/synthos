@@ -625,7 +625,7 @@ function detectFermiPockets(
       }
     }
 
-    if (crossingCount < 3) continue;
+    if (crossingCount < 2) continue;
 
     const totalPoints = evaluations.length;
     const volumeFraction = crossingCount / totalPoints;
@@ -779,7 +779,7 @@ function computeFSDimensionality(
       Math.abs(ev.eigenvalues[pocket.bandIndex] - fermiEnergy) < fermiTolerance
     );
 
-    if (crossingPoints.length < 3) continue;
+    if (crossingPoints.length < 2) continue;
 
     const kzValues = crossingPoints.map(ev => ev.k[2]);
     const kxyValues = crossingPoints.map(ev => Math.sqrt(ev.k[0] ** 2 + ev.k[1] ** 2));

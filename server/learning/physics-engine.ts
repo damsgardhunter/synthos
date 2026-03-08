@@ -1380,7 +1380,11 @@ export function computeElectronPhononCoupling(
     let lambdaSum = 0;
     let totalWeight = 0;
 
+    const willApplyHBoost = hCount > 0 && hRatio >= 4 && metal > 0.4;
+
     for (const el of elements) {
+      if (el === 'H' && willApplyHBoost) continue;
+
       const data = getElementData(el);
       if (!data) continue;
 
