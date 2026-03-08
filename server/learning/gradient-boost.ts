@@ -503,19 +503,20 @@ export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
     }
 
     const result = gbPredict(features);
+    const predictedTc = Number.isFinite(result.tcPredicted) ? result.tcPredicted : 0;
 
-    if (result.tcPredicted < minTcThreshold) {
+    if (predictedTc < minTcThreshold) {
       surrogateRejectCount++;
-      return { pass: false, ...result };
+      return { pass: false, predictedTc, score: result.score, reasoning: result.reasoning };
     }
 
     if (result.score < 0.1) {
       surrogateRejectCount++;
-      return { pass: false, ...result };
+      return { pass: false, predictedTc, score: result.score, reasoning: result.reasoning };
     }
 
     surrogatePassCount++;
-    return { pass: true, ...result };
+    return { pass: true, predictedTc, score: result.score, reasoning: result.reasoning };
   } catch {
     surrogatePassCount++;
     return { pass: true, predictedTc: 0, score: 0.5, reasoning: ["Feature extraction failed — passing to physics"] };

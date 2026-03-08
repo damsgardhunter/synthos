@@ -195,13 +195,37 @@ function parseFormula(formula: string): Record<string, number> {
   return counts;
 }
 
-function estimateLatticeConstant(elements: string[]): number {
-  let totalR = 0;
-  for (const el of elements) {
-    totalR += COVALENT_RADII[el] ?? 1.3;
+const ATOMIC_VOLUMES: Record<string, number> = {
+  H: 5, He: 6, Li: 13, Be: 8, B: 7, C: 12, N: 13, O: 14, F: 15,
+  Na: 24, Mg: 14, Al: 17, Si: 12, P: 17, S: 16, Cl: 22,
+  K: 46, Ca: 26, Sc: 25, Ti: 18, V: 14, Cr: 12, Mn: 12,
+  Fe: 12, Co: 11, Ni: 11, Cu: 12, Zn: 14, Ga: 12, Ge: 14,
+  As: 13, Se: 17, Br: 24, Rb: 56, Sr: 34, Y: 33, Zr: 23,
+  Nb: 18, Mo: 16, Ru: 13, Rh: 14, Pd: 15, Ag: 17, Cd: 22,
+  In: 26, Sn: 27, Sb: 29, Te: 34, I: 26, Cs: 71, Ba: 39,
+  La: 37, Ce: 35, Pr: 35, Nd: 34, Hf: 22, Ta: 18, W: 16,
+  Re: 15, Os: 14, Ir: 14, Pt: 15, Au: 17, Tl: 29, Pb: 30,
+  Bi: 35, Th: 32, U: 21,
+};
+
+function estimateLatticeConstant(elements: string[], counts?: Record<string, number>): number {
+  let totalVolume = 0;
+  if (counts) {
+    for (const el of Object.keys(counts)) {
+      const n = Math.round(counts[el] || 1);
+      const vol = ATOMIC_VOLUMES[el] ?? 15;
+      totalVolume += n * vol;
+    }
+  } else {
+    for (const el of elements) {
+      const vol = ATOMIC_VOLUMES[el] ?? 15;
+      totalVolume += vol;
+    }
   }
-  const avgR = totalR / elements.length;
-  return avgR * 2.8 + 0.5;
+  const packingFactor = 0.65;
+  const cellVolume = totalVolume / packingFactor;
+  const a = Math.cbrt(cellVolume);
+  return Math.max(a, 3.5);
 }
 
 function validatePseudopotential(filePath: string): boolean {
@@ -383,6 +407,19 @@ function generateAtomicPositions(
     return positions;
   }
 
+  const hCount = Math.round(counts["H"] || 0);
+  const metalElements = elements.filter(e => e !== "H");
+  const metalCount = metalElements.reduce((s, e) => s + Math.round(counts[e] || 0), 0);
+
+  if (hCount > 0 && metalCount > 0 && hCount / metalCount >= 4) {
+    const hPerMetal = Math.round(hCount / metalCount);
+    const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms);
+    if (cagePositions.length === totalAtoms && cagePositions.length <= 16) {
+      console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms)`);
+      return cagePositions;
+    }
+  }
+
   const cubicSites = [
     [0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5],
     [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.25, 0.75, 0.75],
@@ -396,6 +433,74 @@ function generateAtomicPositions(
     for (let i = 0; i < n && siteIdx < cubicSites.length; i++) {
       const site = cubicSites[siteIdx++];
       positions.push({ element: el, x: site[0], y: site[1], z: site[2] });
+    }
+  }
+
+  return positions;
+}
+
+function generateHydrideCagePositions(
+  metalElements: string[],
+  counts: Record<string, number>,
+  hPerMetal: number,
+  totalAtoms: number,
+): Array<{ element: string; x: number; y: number; z: number }> {
+  const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
+
+  const octahedralH = [
+    { x: 0.5, y: 0.0, z: 0.0 }, { x: 0.0, y: 0.5, z: 0.0 }, { x: 0.0, y: 0.0, z: 0.5 },
+    { x: 0.5, y: 0.5, z: 0.5 }, { x: 0.0, y: 0.5, z: 0.5 }, { x: 0.5, y: 0.0, z: 0.5 },
+  ];
+
+  const cubeVertexH = [
+    { x: 0.25, y: 0.25, z: 0.25 }, { x: 0.75, y: 0.25, z: 0.25 },
+    { x: 0.25, y: 0.75, z: 0.25 }, { x: 0.25, y: 0.25, z: 0.75 },
+    { x: 0.75, y: 0.75, z: 0.25 }, { x: 0.75, y: 0.25, z: 0.75 },
+    { x: 0.25, y: 0.75, z: 0.75 }, { x: 0.75, y: 0.75, z: 0.75 },
+  ];
+
+  const clathrateH10 = [
+    { x: 0.25, y: 0.25, z: 0.0 }, { x: 0.75, y: 0.25, z: 0.0 },
+    { x: 0.25, y: 0.75, z: 0.0 }, { x: 0.75, y: 0.75, z: 0.0 },
+    { x: 0.0, y: 0.25, z: 0.25 }, { x: 0.0, y: 0.75, z: 0.25 },
+    { x: 0.25, y: 0.0, z: 0.25 }, { x: 0.75, y: 0.0, z: 0.25 },
+    { x: 0.5, y: 0.25, z: 0.5 }, { x: 0.5, y: 0.75, z: 0.5 },
+  ];
+
+  const metalCount = metalElements.reduce((s, e) => s + Math.round(counts[e] || 0), 0);
+  if (metalCount === 1) {
+    const metal = metalElements[0];
+    positions.push({ element: metal, x: 0.0, y: 0.0, z: 0.0 });
+
+    let hSites: Array<{ x: number; y: number; z: number }>;
+    if (hPerMetal <= 6) {
+      hSites = octahedralH.slice(0, hPerMetal);
+    } else if (hPerMetal <= 8) {
+      hSites = cubeVertexH.slice(0, hPerMetal);
+    } else if (hPerMetal === 9) {
+      hSites = [...cubeVertexH, { x: 0.5, y: 0.5, z: 0.0 }];
+    } else {
+      hSites = clathrateH10.slice(0, Math.min(hPerMetal, 10));
+    }
+    for (const h of hSites) {
+      positions.push({ element: "H", ...h });
+    }
+  } else {
+    let placed = 0;
+    const metalSites = [
+      { x: 0.0, y: 0.0, z: 0.0 },
+      { x: 0.5, y: 0.5, z: 0.5 },
+    ];
+    for (const metal of metalElements) {
+      const n = Math.round(counts[metal] || 1);
+      for (let i = 0; i < n && placed < metalSites.length; i++) {
+        positions.push({ element: metal, ...metalSites[placed++] });
+      }
+    }
+    const hTotal = Math.round(counts["H"] || 0);
+    const allH = [...octahedralH, ...cubeVertexH];
+    for (let i = 0; i < hTotal && i < allH.length; i++) {
+      positions.push({ element: "H", ...allH[i] });
     }
   }
 
@@ -868,7 +973,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       }
     }
 
-    const latticeA = estimateLatticeConstant(elements);
+    const latticeA = estimateLatticeConstant(elements, counts);
     let positions = generateAtomicPositions(elements, counts, formula);
 
     try {

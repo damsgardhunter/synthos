@@ -2444,9 +2444,10 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     }
 
     const surrogateResult = surrogateScreen(formula, 3);
+    const surrogateTc = Number.isFinite(surrogateResult.predictedTc) ? surrogateResult.predictedTc : 0;
     if (!surrogateResult.pass) {
       pipelineStageMetrics.surrogateRejects++;
-      return { passed: false, tc: surrogateResult.predictedTc, reason: `surrogate-reject: Tc=${surrogateResult.predictedTc}K, ${surrogateResult.reasoning.join("; ")}` };
+      return { passed: false, tc: surrogateTc, reason: `surrogate-reject: Tc=${surrogateTc}K, ${surrogateResult.reasoning.join("; ")}` };
     }
 
     try {
