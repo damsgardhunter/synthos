@@ -1,0 +1,195 @@
+Generators Are Producing Chemically Impossible Materials
+
+Example from your logs:
+
+Ba7NaSr2Li3LaMoH7Se2S3
+
+Count the elements:
+
+Ba Na Sr Li La Mo H Se S
+= 9 elements
+
+Your QE pipeline later rejects these:
+
+Rejected — 8 distinct elements exceeds limit of 5
+
+So your generators are producing things your physics pipeline forbids.
+
+This wastes huge compute.
+
+Root cause
+
+Your generators appear to combine:
+
+alkaline metals
+rare earth metals
+transition metals
+hydrogen
+chalcogens
+pnictides
+
+all at once.
+
+Real superconductors rarely exceed:
+
+2–4 elements
+
+Examples:
+
+Material	Elements
+MgB₂	2
+Nb₃Sn	2
+FeSe	2
+YBCO	4
+LaH₁₀	2
+
+Your engine is generating 9-element monsters.
+
+Fix
+
+Add a chemistry prior filter BEFORE generation.
+
+Example rule:
+
+MAX_ELEMENTS = 4
+
+Better:
+
+binary: 40%
+ternary: 40%
+quaternary: 20%
+2️⃣ Your Generators Are Violating Charge Balance
+
+Example log:
+
+Very low anion:cation ratio (0.3)
+bond valence deviation=1.43
+extreme bond valence mismatch
+
+Example formula:
+
+Ba7NaSr2LaMoH7Se2S3
+
+Let's approximate oxidation states:
+
+Ba +2
+Na +1
+Sr +2
+La +3
+Mo +6 (maybe)
+H -1
+Se -2
+S -2
+
+Total positive:
+
+7*2 + 1 + 2*2 + 3 + 6
+= 14 +1 +4 +3 +6
+= 28
+
+Total negative:
+
+7*(-1) + 2*(-2) + 3*(-2)
+= -7 -4 -6
+= -17
+
+Net charge:
+
++11
+
+That compound cannot exist.
+
+Your DFT pipeline correctly rejects it.
+
+Fix
+
+Add oxidation-state balancing during generation.
+
+Algorithm:
+
+1 choose element set
+2 assign oxidation states
+3 solve stoichiometry
+
+Example:
+
+Ca2+  +  H-
+
+Solve:
+
+CaH2
+
+Instead of random stoichiometry.
+
+3️⃣ Your Structure Generator Is Producing Overlapping Atoms
+
+This error appears repeatedly:
+
+Geometry rejected: Atoms Li(1) and H(5) too close: 0.00 A
+
+Distance:
+
+0.00 Å
+
+That means two atoms were placed in the same coordinates.
+
+Your generator likely does something like:
+
+random fractional positions
+
+without enforcing minimum distance.
+
+Fix
+
+Add distance rejection during generation.
+
+Example rule:
+
+d_ij > 0.8 * (r_i + r_j)
+
+Where:
+
+r_i = covalent radius
+
+Example implementation:
+
+for each atom pair:
+   if dist < minDist:
+       regenerate structure
+4️⃣ Your Search Space Is Way Too Large
+
+Example generated compound:
+
+KBa5Sr2LaMoH5SeS4
+
+Elements:
+
+K Ba Sr La Mo H Se S
+= 8 elements
+
+Search space size:
+
+~10^20 possibilities
+
+Real superconductors cluster in very specific chemistry families.
+
+Instead of random elements, you should bias families.
+
+Example generator families:
+
+hydrides
+borides
+pnictides
+oxides
+intermetallics
+layered chalcogenides
+
+Each family has element templates.
+
+Example hydride generator:
+
+[La,Y,Sc,Ca,Sr,Ba] + H
+
+Example boride generator:
+
+[Mg,Nb,Ta,Mo] + B
