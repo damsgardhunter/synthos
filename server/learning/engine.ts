@@ -1243,7 +1243,7 @@ async function runPhase10_Physics() {
     const toAnalyze = shuffle(stage0).slice(0, 5);
 
     for (const candidate of toAnalyze) {
-      if (!shouldContinue()) return;
+      if (!shouldContinue()) break;
       try {
         const result = await runFullPhysicsAnalysis(emit, candidate);
         totalPhysicsComputed++;
@@ -1749,7 +1749,9 @@ async function runPhase11_StructurePrediction() {
               });
             }
           }
-        } catch {}
+        } catch (hullErr) {
+          console.log(`[Engine] ConvexHull analysis failed for ${cand.formula}: ${hullErr instanceof Error ? hullErr.message.slice(0, 100) : "unknown"}`);
+        }
       }
     }
 

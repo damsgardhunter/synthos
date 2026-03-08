@@ -518,8 +518,8 @@ export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
     surrogatePassCount++;
     return { pass: true, predictedTc, score: result.score, reasoning: result.reasoning };
   } catch {
-    surrogatePassCount++;
-    return { pass: true, predictedTc: 0, score: 0.5, reasoning: ["Feature extraction failed — passing to physics"] };
+    surrogateRejectCount++;
+    return { pass: false, predictedTc: 0, score: 0, reasoning: ["Feature extraction failed — rejecting candidate"] };
   }
 }
 

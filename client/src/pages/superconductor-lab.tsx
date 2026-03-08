@@ -301,7 +301,7 @@ function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate;
                 <div key={s} className={`h-2 w-4 rounded-sm ${s <= (candidate.verificationStage ?? 0) ? "bg-primary" : "bg-muted"}`} />
               ))}
             </div>
-            <span className="font-mono text-[10px]">{candidate.verificationStage}/4</span>
+            <span className="font-mono text-[10px]">{candidate.verificationStage}/5</span>
           </div>
         )}
 

@@ -310,8 +310,11 @@ function generateSCFInput(
 ): string {
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
   const nTypes = elements.length;
-  const ecutwfc = 45;
-  const ecutrho = 360;
+  const ELEMENT_CUTOFFS: Record<string, number> = {
+    O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+  };
+  const ecutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), 45);
+  const ecutrho = ecutwfc * 8;
 
   let atomicSpecies = "";
   for (const el of elements) {
@@ -676,9 +679,15 @@ function validateGeometry(
   };
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
-      const dx = (positions[i].x - positions[j].x) * latticeA;
-      const dy = (positions[i].y - positions[j].y) * latticeA;
-      const dz = (positions[i].z - positions[j].z) * latticeA;
+      let fdx = positions[i].x - positions[j].x;
+      let fdy = positions[i].y - positions[j].y;
+      let fdz = positions[i].z - positions[j].z;
+      fdx -= Math.round(fdx);
+      fdy -= Math.round(fdy);
+      fdz -= Math.round(fdz);
+      const dx = fdx * latticeA;
+      const dy = fdy * latticeA;
+      const dz = fdz * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       const r1 = COVALENT_R[positions[i].element] ?? 1.3;
       const r2 = COVALENT_R[positions[j].element] ?? 1.3;
@@ -830,8 +839,11 @@ function generateSCFInputWithParams(
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
-  const ecutwfc = 45;
-  const ecutrho = 360;
+  const ELEMENT_CUTOFFS2: Record<string, number> = {
+    O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+  };
+  const ecutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), 45);
+  const ecutrho = ecutwfc * 8;
   const smearing = params.smearing || "mv";
   const degauss = params.degauss || 0.02;
 

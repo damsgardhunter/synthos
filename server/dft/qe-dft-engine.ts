@@ -984,8 +984,15 @@ function isPrototypeChemicallyCompatible(protoName: string, elements: string[], 
     if (!hasTMEl) return false;
   }
 
-  if (protoName.includes("Clathrate") || protoName.includes("clathrate")) {
+  if (protoName.includes("Clathrate") || protoName.includes("clathrate") ||
+      /H\d+/.test(protoName) || protoName === "Sodalite-H32" || protoName === "TriCappedPrism-H9") {
     if (!hasElement("H")) return false;
+  }
+
+  if (protoName === "Heusler" || protoName === "ThCr2Si2" || protoName === "CeCu2Si2" ||
+      protoName === "PuCoGa5-115" || protoName === "HfFe6Ge6") {
+    const hasTMEl = elements.some(e => TRANSITION_METALS.has(e));
+    if (!hasTMEl) return false;
   }
 
   return true;
@@ -2438,7 +2445,10 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       const estimatedFreqs: number[] = [];
       for (let i = 0; i < nModes; i++) {
         const fraction = (i + 1) / nModes;
-        estimatedFreqs.push(debyeFreq * fraction * (0.8 + 0.4 * Math.random()));
+        let hash = 0;
+        for (let c = 0; c < formula.length; c++) hash = ((hash << 5) - hash + formula.charCodeAt(c)) | 0;
+        const seed = ((hash * 2654435761 + i * 2246822507) >>> 0) / 4294967296;
+        estimatedFreqs.push(debyeFreq * fraction * (0.8 + 0.4 * seed));
       }
       estimatedFreqs.sort((a, b) => a - b);
 

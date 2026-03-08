@@ -37,6 +37,7 @@ const globalState: GlobalWSState = {
 let listeners: Set<() => void> = new Set();
 let wsInstance: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
 let wsInitialized = false;
 let statusFetched = false;
 
@@ -62,6 +63,7 @@ function connectWS() {
   wsInstance = ws;
 
   ws.onopen = () => {
+    reconnectAttempts = 0;
     updateState({ connected: true });
   };
 
@@ -119,7 +121,9 @@ function connectWS() {
     notifyListeners();
     wsInstance = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connectWS, 3000);
+    reconnectAttempts = Math.min(reconnectAttempts + 1, 5);
+    const backoffMs = Math.min(3000 * Math.pow(2, reconnectAttempts - 1), 30000);
+    reconnectTimer = setTimeout(connectWS, backoffMs);
   };
 
   ws.onerror = () => {

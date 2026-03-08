@@ -19,7 +19,12 @@ const STOICH_TEMPLATES = [
   { name: "ternary-balanced", pattern: "A2BC", nElements: 3 },
   { name: "quaternary", pattern: "ABCD", nElements: 4 },
   { name: "hydride-rich", pattern: "AH3", nElements: 2 },
+  { name: "superhydride-6", pattern: "AH6", nElements: 2 },
+  { name: "superhydride-9", pattern: "AH9", nElements: 2 },
+  { name: "superhydride-10", pattern: "AH10", nElements: 2 },
+  { name: "superhydride-12", pattern: "AH12", nElements: 2 },
   { name: "ternary-hydride", pattern: "ABH4", nElements: 3 },
+  { name: "ternary-superhydride", pattern: "ABH8", nElements: 3 },
   { name: "boride-carbide", pattern: "A2B3C", nElements: 3 },
 ] as const;
 
@@ -132,6 +137,15 @@ const KNOWN_PAIR_PRIORS: ElementPairPrior[] = [
   { el1: "Ir", el2: "H", bias: 0.3, reason: "Iridium hydride candidate" },
   { el1: "Ce", el2: "H", bias: 0.35, reason: "Cerium hydride candidate" },
   { el1: "Th", el2: "H", bias: 0.3, reason: "Thorium hydride candidate" },
+  { el1: "Sc", el2: "H", bias: 0.35, reason: "ScH9 superhydride candidate" },
+  { el1: "Nd", el2: "Ni", bias: 0.4, reason: "Nickelate superconductor family" },
+  { el1: "La", el2: "Ni", bias: 0.4, reason: "La3Ni2O7 nickelate superconductor" },
+  { el1: "Zr", el2: "H", bias: 0.3, reason: "Zirconium hydride candidate" },
+  { el1: "Hf", el2: "H", bias: 0.3, reason: "Hafnium hydride candidate" },
+  { el1: "Li", el2: "H", bias: 0.3, reason: "Lithium hydride high-pressure" },
+  { el1: "Mg", el2: "H", bias: 0.3, reason: "MgH6 superhydride candidate" },
+  { el1: "Sr", el2: "H", bias: 0.3, reason: "Strontium hydride family" },
+  { el1: "Cu", el2: "P", bias: 0.2, reason: "Cu-P bonding candidate" },
   { el1: "V", el2: "Si", bias: 0.25, reason: "V3Si A15 superconductor" },
 ];
 

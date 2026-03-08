@@ -127,6 +127,8 @@ const VALID_ELEMENTS = new Set([
   "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og", "Pm"
 ]);
 
+const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);
+
 export function isValidFormula(formula: string): boolean {
   if (typeof formula !== "string") return false;
   let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
@@ -138,6 +140,10 @@ export function isValidFormula(formula: string): boolean {
     if (!VALID_ELEMENTS.has(el)) {
       return false;
     }
+  }
+  const uniqueElements = [...new Set(elementTokens)];
+  if (uniqueElements.some(el => NOBLE_GASES.has(el))) {
+    return false;
   }
   return true;
 }

@@ -51,17 +51,23 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 ### Physics Filtering Rules
 - **Phonon stability**: xTB screening uses relaxed thresholds (maxImagModes=10, lowestFreq=-1500 cm-1) to avoid premature rejection of unrelaxed structures. Extreme artifacts (< -5000 cm-1) still rejected.
 - **xTB pre-optimization**: Hessian calculations always run on at least crude-optimized structures (inline --opt crude fallback if no cached optimization exists).
-- **Prototype chemistry compatibility**: `isPrototypeChemicallyCompatible()` enforces HexBoride requires B, Perovskite/NaCl/Pyrite require anion elements, A15 requires transition metals, Clathrate requires H.
+- **Prototype chemistry compatibility**: `isPrototypeChemicallyCompatible()` enforces HexBoride requires B, Perovskite/NaCl/Pyrite require anion elements, A15 requires transition metals, Clathrate/H-named prototypes require H, Heusler/ThCr2Si2 require TMs.
+- **PBC-aware distance check**: `validateGeometry` uses minimum-image convention (fractional coordinate wrapping) for correct periodic boundary distance calculations.
+- **Dynamic DFT cutoffs**: ecutwfc adapts per-element (O:70, F:80, N:60 Ry etc.) instead of fixed 45 Ry; ecutrho = 8x ecutwfc.
 - **Volume scaling**: `validateAndFixStructure` uses cbrt-based scaling with bidirectional correction (scale down when volume overshoots after distance fix). Volume ratio bounds: 0.5-2.0.
 - **Radius compatibility**: `checkRadiusCompatibility()` rejects non-H element pairs with covalent radius ratio > 3.0 before structure generation.
 - **Hydride stoichiometry**: Metal-rich hydrides (H/metal < 1.0) rejected as unphysical in QE worker validation.
+- **Noble gas rejection**: `isValidFormula` rejects compositions containing noble gases (He, Ne, Ar, Kr, Xe, Rn).
 - **Formation energy**: Hard stop for Ef > 1.0 eV/atom or Ef < -5.0 eV/atom.
 - **Hull distance**: Hard reject > 0.50 eV/atom.
 - **Chemistry grammar validation**: Pre-filters compositions based on various chemical constraints.
-- **Surrogate pre-filter pipeline**: Screens candidates with GB model before expensive physics evaluation.
+- **Surrogate pre-filter pipeline**: Screens candidates with GB model before expensive physics evaluation; failed feature extraction rejects (not passes).
+- **Deterministic phonon estimates**: Analytical phonon fallback uses formula-hash seeding for reproducible frequencies.
+- **RL agent templates**: STOICH_TEMPLATES includes superhydride patterns (AH6/AH9/AH10/AH12, ABH8); 30+ element pair priors.
+- **WebSocket reconnect**: Exponential backoff (3s→30s max), resets on successful connection.
 
 ## External Dependencies
-- **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).
+- **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.
 - **OQMD API**: For live materials data fetching.
 - **NIST WebBook**: For thermodynamic and spectroscopic data.
