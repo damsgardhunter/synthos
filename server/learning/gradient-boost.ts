@@ -170,8 +170,9 @@ function featureVectorToArray(f: MLFeatureVector): number[] {
     (() => {
       const sym = (f as any).crystalSymmetry;
       if (!sym || typeof sym !== "string") return 0;
+      const normalized = sym.toLowerCase().trim();
       const SG_MAP: Record<string, number> = { cubic: 7, hexagonal: 6, tetragonal: 5, orthorhombic: 4, monoclinic: 3, triclinic: 2, trigonal: 1 };
-      for (const [key, val] of Object.entries(SG_MAP)) { if (sym.toLowerCase().includes(key)) return val; }
+      for (const [key, val] of Object.entries(SG_MAP)) { if (normalized.includes(key)) return val; }
       return 0;
     })(),
   ];
@@ -218,6 +219,7 @@ function findBestSplitForSubset(
     const rightSum = totalSum - leftSum;
 
     if (pairs[i].val === pairs[i + 1].val) continue;
+    if (leftCount === 0 || rightCount === 0) continue;
 
     const improvement = (leftSum * leftSum) / leftCount + (rightSum * rightSum) / rightCount;
 

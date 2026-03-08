@@ -58,7 +58,7 @@ const TOPO_MATERIAL_PATTERNS: { elements: string[]; minCount: number; bonus: num
   { elements: ["Os"], minCount: 1, bonus: 0.12, label: "Osmate SOC system" },
 ];
 
-const LAYERED_INDICATORS = ["P6/mmm", "P4/mmm", "I4/mmm", "R-3m", "Pnma", "P-3m1", "P6_3/mmc"];
+const LAYERED_INDICATORS = ["P6/mmm", "P4/mmm", "I4/mmm", "R-3m", "Pnma", "P-3m1", "P6_3/mmc", "C2/m", "P2_1/c", "Cmcm", "Fmmm", "P-1"];
 
 function parseFormulaElements(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -116,7 +116,7 @@ function estimateZ2Invariant(
   let z2 = 0;
 
   if (socStrength > 0.3 && bandInversionProb > 0.3) {
-    z2 = Math.min(1.0, socStrength * bandInversionProb * 3);
+    z2 = Math.min(1.0, socStrength * bandInversionProb * 2);
   }
 
   const pdMixing = orbitalFractions.p * orbitalFractions.d;
@@ -277,6 +277,19 @@ function estimateMajoranaFeasibility(
   return Math.min(1.0, Math.max(0, feasibility));
 }
 
+function estimateMajoranaWithMetallicity(
+  z2: number,
+  socStrength: number,
+  bandInversionProb: number,
+  diracProb: number,
+  isLayered: boolean,
+  metallicity: number
+): number {
+  const baseFeasibility = estimateMajoranaFeasibility(z2, socStrength, bandInversionProb, diracProb, isLayered);
+  const metallicWeight = Math.min(1.0, metallicity * 1.5);
+  return baseFeasibility * (0.3 + 0.7 * metallicWeight);
+}
+
 function classifyTopologicalState(
   z2: number,
   chern: number,
@@ -308,7 +321,7 @@ export function analyzeTopology(
 
   const isLayered = spaceGroup ? LAYERED_INDICATORS.some(sg =>
     spaceGroup.includes(sg) || sg.includes(spaceGroup)
-  ) : (crystalSystem === "hexagonal" || crystalSystem === "tetragonal");
+  ) : (crystalSystem === "hexagonal" || crystalSystem === "tetragonal" || crystalSystem === "monoclinic");
 
   const bandInversionProbability = estimateBandInversionProbability(
     socStrength, electronic.orbitalFractions, topo
@@ -339,8 +352,9 @@ export function analyzeTopology(
 
   const flatBandIndicator = estimateFlatBandIndicator(electronic, topo);
 
-  const majoranaFeasibility = estimateMajoranaFeasibility(
-    z2Invariant, socStrength, bandInversionProbability, diracNodeProbability, isLayered
+  const majoranaFeasibility = estimateMajoranaWithMetallicity(
+    z2Invariant, socStrength, bandInversionProbability, diracNodeProbability, isLayered,
+    electronic.metallicity ?? 0.5
   );
 
   let patternBonus = 0;

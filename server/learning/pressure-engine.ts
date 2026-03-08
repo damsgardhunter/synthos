@@ -39,6 +39,8 @@ function estimateDefaultBulkModulus(el: string): number {
   if (["B", "C", "Si", "Ge"].includes(el)) return 40;
   if (["N", "O", "F", "Cl", "Br", "I"].includes(el)) return 10;
   if (["P", "S", "Se", "Te"].includes(el)) return 15;
+  const POST_TM_BULK: Record<string, number> = { Al: 76, Ga: 56, In: 42, Sn: 58, Pb: 46, Bi: 31, Tl: 43 };
+  if (POST_TM_BULK[el]) return POST_TM_BULK[el];
   if (isTransitionMetal(el)) return 120;
   if (isRareEarth(el)) return 35;
   if (isActinide(el)) return 50;
@@ -84,9 +86,11 @@ export function relaxStructureAtPressure(
 
   let B0 = 0;
   let totalWeight = 0;
+  const isHydrideComp = elements.includes("H") && (counts["H"] || 0) / totalAtoms > 0.3;
   for (const el of elements) {
     const data = getElementData(el);
     if (!data) continue;
+    if (isHydrideComp && el === "H") continue;
     const frac = (counts[el] || 1) / totalAtoms;
     const elBulk = data.bulkModulus ?? estimateDefaultBulkModulus(el);
     B0 += elBulk * frac;
@@ -391,7 +395,8 @@ export function scanPressureTcCurve(
         lambdaP *= Math.max(0.7, 1 - overPressure * 0.3);
       }
     } else {
-      lambdaP = lambda0 * (1 + P / 500 * 0.3) * hardeningFactor;
+      const dosEnhancement = 1 + P / 500 * 0.3;
+      lambdaP = lambda0 * dosEnhancement / hardeningFactor;
     }
     lambdaP = Math.max(0.05, Math.min(4.0, lambdaP));
 

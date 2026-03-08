@@ -1289,14 +1289,16 @@ async function runPhase10_Physics() {
           continue;
         }
 
-        crossEngineHub.recordInsight("physics", candidate.formula, {
-          lambda: result.coupling.lambda,
-          dosAtFermi: result.electronicStructure.densityOfStatesAtFermi,
-          omegaLog: result.coupling.omegaLog,
-          metallicity: result.electronicStructure.metallicity,
-          correlationStrength: result.correlation?.ratio ?? 0,
-          instabilityFlags: result.instabilityProximity?.nearestBoundary ? [result.instabilityProximity.nearestBoundary] : [],
-        });
+        try {
+          crossEngineHub.recordInsight("physics", candidate.formula, {
+            lambda: result.coupling.lambda,
+            dosAtFermi: result.electronicStructure.densityOfStatesAtFermi,
+            omegaLog: result.coupling.omegaLog,
+            metallicity: result.electronicStructure.metallicity,
+            correlationStrength: result.correlation?.ratio ?? 0,
+            instabilityFlags: result.instabilityProximity?.nearestBoundary ? [result.instabilityProximity.nearestBoundary] : [],
+          });
+        } catch (hubErr) { console.error(`[Engine] CrossEngineHub physics insight failed for ${candidate.formula}:`, hubErr); }
 
         const rawPhysicsTc = result.eliashberg.predictedTc;
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
@@ -1833,13 +1835,15 @@ async function runPhase10_Physics() {
               }
             } catch (e) { console.error(`[Engine] Hydrogen network analysis failed for ${candidate.formula}:`, e); }
 
-            crossEngineHub.recordInsight("pressure", candidate.formula, {
-              optimalPressure: pressureResult.optimalPressure,
-              maxTc: pressureResult.maxTc,
-              retentionFraction: pressureResult.maxTc > 0 ? (candidate.predictedTc ?? 0) / pressureResult.maxTc : 0,
-              stabilizationStrategy: "pressure-scan",
-              hydridePhaseCount: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
-            });
+            try {
+              crossEngineHub.recordInsight("pressure", candidate.formula, {
+                optimalPressure: pressureResult.optimalPressure,
+                maxTc: pressureResult.maxTc,
+                retentionFraction: pressureResult.maxTc > 0 ? (candidate.predictedTc ?? 0) / pressureResult.maxTc : 0,
+                stabilizationStrategy: "pressure-scan",
+                hydridePhaseCount: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
+              });
+            } catch (hubErr) { console.error(`[Engine] CrossEngineHub pressure insight failed for ${candidate.formula}:`, hubErr); }
             const updatedMlFeatures = {
               ...existingMlFeatures,
               pressureTcCurve: {

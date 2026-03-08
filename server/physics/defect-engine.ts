@@ -68,7 +68,7 @@ const NEIGHBOR_MAP: Record<string, string[]> = {
   S: ["O", "Se", "P"],
   Se: ["S", "Te", "Br"],
   Te: ["Se", "Bi", "I"],
-  H: ["Li", "He", "B"],
+  H: ["Li", "Na", "B"],
   Li: ["H", "Na", "Be"],
   Na: ["Li", "K", "Mg"],
   K: ["Na", "Ca", "Rb"],
@@ -189,7 +189,7 @@ export function computeDefectFormationEnergy(
     }
     case DefectType.Dopant: {
       const neighbors = NEIGHBOR_MAP[element] || [];
-      const dopant = neighbors[0] || element;
+      const dopant = neighbors.length > 0 ? neighbors[Math.floor(Math.random() * neighbors.length)] : element;
       const dopantEnergy = getElementEnergy(dopant);
       Ef = Math.abs(elEnergy - dopantEnergy) * 0.5 + hostEnergy * 0.15 + 0.3;
       break;
@@ -203,7 +203,7 @@ export function computeDefectFormationEnergy(
 
 export function estimateDefectDensity(
   formationEnergy: number,
-  temperature: number = 300
+  temperature: number = 1000
 ): number {
   const T = Math.max(1, temperature);
   const exponent = -formationEnergy / (kB * T);
@@ -221,7 +221,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
   for (const el of elements) {
     if ((comp[el] || 0) < 0.01) continue;
     const Ef = computeDefectFormationEnergy(formula, DefectType.Vacancy, el);
-    const density = estimateDefectDensity(Ef, 300);
+    const density = estimateDefectDensity(Ef);
     const vacConc = Math.min(0.10, Math.max(0.005, 0.05 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
     const newComp = { ...comp, [el]: comp[el] * (1 - vacConc) };
 
@@ -241,7 +241,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
   for (const intEl of INTERSTITIAL_ELEMENTS) {
     if (elements.includes(intEl) && comp[intEl] > 1) continue;
     const Ef = computeDefectFormationEnergy(formula, DefectType.Interstitial, intEl);
-    const density = estimateDefectDensity(Ef, 300);
+    const density = estimateDefectDensity(Ef);
     const intConc = Math.min(0.05, Math.max(0.002, 0.02 * Math.exp(-Math.max(0, Ef - 1.5) / 0.5)));
 
     const intComp = { ...comp, [intEl]: (comp[intEl] || 0) + intConc };
@@ -264,7 +264,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
         const elA = elements[i];
         const elB = elements[j];
         const Ef = computeDefectFormationEnergy(formula, DefectType.Antisite, elA);
-        const density = estimateDefectDensity(Ef, 300);
+        const density = estimateDefectDensity(Ef);
 
         const asComp = { ...comp };
         const swapFrac = Math.min(0.08, Math.max(0.005, 0.03 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
@@ -289,10 +289,10 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
   for (const el of elements) {
     const neighbors = NEIGHBOR_MAP[el];
     if (!neighbors || neighbors.length === 0) continue;
-    const dopant = neighbors[0];
+    const dopant = neighbors[Math.floor(Math.random() * neighbors.length)];
     if (elements.includes(dopant)) continue;
     const Ef = computeDefectFormationEnergy(formula, DefectType.Dopant, el);
-    const density = estimateDefectDensity(Ef, 300);
+    const density = estimateDefectDensity(Ef);
 
     const dopFrac = Math.min(0.10, Math.max(0.005, 0.05 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
     const dopComp = { ...comp };

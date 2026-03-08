@@ -19,6 +19,9 @@ const STOICH_TEMPLATES = [
   { name: "ternary-perovskite", pattern: "ABC3", nElements: 3 },
   { name: "ternary-balanced", pattern: "A2BC", nElements: 3 },
   { name: "quaternary", pattern: "ABCD", nElements: 4 },
+  { name: "quaternary-2211", pattern: "A2B2CD", nElements: 4 },
+  { name: "quaternary-HEA", pattern: "A2BCD2", nElements: 4 },
+  { name: "binary-diboride", pattern: "AB2", nElements: 2 },
   { name: "hydride-rich", pattern: "AH3", nElements: 2 },
   { name: "superhydride-6", pattern: "AH6", nElements: 2 },
   { name: "superhydride-9", pattern: "AH9", nElements: 2 },
@@ -866,7 +869,7 @@ export class RLChemicalSpaceAgent {
 
       const stats = this.elementSuccessRates.get(group.name) || { successes: 0, total: 0 };
       stats.total++;
-      if (passed || safeTc > 20) stats.successes++;
+      if (passed || safeTc > 10) stats.successes++;
       this.elementSuccessRates.set(group.name, stats);
     }
 
@@ -941,10 +944,12 @@ export class RLChemicalSpaceAgent {
         if (el3 === el1 || el3 === el2) continue;
         formula = applyTernaryPattern(el1, el2, el3, pattern);
       } else {
-        const g3 = ELEMENT_GROUPS[Math.floor(Math.random() * ELEMENT_GROUPS.length)];
-        const g4 = ELEMENT_GROUPS[Math.floor(Math.random() * ELEMENT_GROUPS.length)];
-        const el3 = g3.elements[Math.floor(Math.random() * g3.elements.length)];
-        const el4 = g4.elements[Math.floor(Math.random() * g4.elements.length)];
+        const thirdGroupIdx = selectThirdGroupByOrbital(orbConfig.orbital, vecTarget.vec);
+        const g3 = ELEMENT_GROUPS[thirdGroupIdx];
+        const fourthGroupIdx = selectThirdGroupByOrbital(orbConfig.orbital, Math.max(1, vecTarget.vec - 2));
+        const g4 = ELEMENT_GROUPS[fourthGroupIdx];
+        const el3 = this.sampleWeightedElement(this.getWeightedElements(g3.elements, group1.elements), g3.elements);
+        const el4 = this.sampleWeightedElement(this.getWeightedElements(g4.elements, group2.elements), g4.elements);
         if (new Set([el1, el2, el3, el4]).size < 4) continue;
         formula = `${el1}${el2}${el3}${el4}`;
       }
@@ -1022,7 +1027,7 @@ export class RLChemicalSpaceAgent {
     const tcNorm = Math.min(1, safeTc / 400);
     let tcScore = tcNorm * 2.0;
     if (safeTc > safeBestBefore) {
-      const improvement = (safeTc - safeBestBefore) / Math.max(1, safeBestBefore);
+      const improvement = Math.min(5.0, (safeTc - safeBestBefore) / Math.max(1, safeBestBefore));
       tcScore += improvement * 3.0;
     }
     if (pipelinePassed) {

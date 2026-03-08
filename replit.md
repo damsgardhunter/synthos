@@ -65,14 +65,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Chemistry grammar validation**: Pre-filters compositions based on various chemical constraints.
 - **Surrogate pre-filter pipeline**: Screens candidates with GB model before expensive physics evaluation; failed feature extraction rejects (not passes).
 - **Deterministic phonon estimates**: Analytical phonon fallback uses formula-hash seeding for reproducible frequencies.
-- **RL agent templates**: STOICH_TEMPLATES includes superhydride patterns (AH6/AH9/AH10/AH12, ABH8); 30+ element pair priors.
+- **RL agent templates**: STOICH_TEMPLATES includes superhydride patterns (AH6/AH9/AH10/AH12, ABH8), quaternary-2211, quaternary-HEA, binary-diboride; quaternary generation uses policy weights (not random); reward improvement clamped to 5.0; success threshold lowered to Tc>10; 30+ element pair priors.
 - **WebSocket reconnect**: Exponential backoff (3s→30s max), resets on successful connection.
 - **Fluorite prototype**: Corrected to A4B8 (Fm-3m symmetry, 8 anion sites).
 - **GB model**: Tc cap raised to 350K; 54 features including bandGap, formationEnergy, stability, crystalSymmetry; score tier for >293K.
 - **QE timeout**: 300s (was 120s) for higher-cutoff calculations.
 - **Hydride phonon Debye**: Scaled by H-ratio (1200 cm⁻¹ for hRatio>0.7, 800 for >0.5).
 - **Hydride cage positions**: Supports up to 12 H atoms per metal (was 10).
-- **Defect engine**: Boltzmann-scaled concentrations for all 4 defect types (vacancy, interstitial, antisite, dopant).
+- **Defect engine**: Boltzmann-scaled concentrations at synthesis temp (1000K default) for all 4 defect types (vacancy, interstitial, antisite, dopant); stochastic dopant selection from full NEIGHBOR_MAP; He removed from H neighbors (replaced with Na).
 - **COHESIVE_ENERGIES_EV**: 60+ elements including all 4d/5d TMs, lanthanides, actinides.
 - **ELEMENT_DATA (QE)**: 77+ elements including Br, Tc, Cd, lanthanides, Th, U, Pa.
 - **RL agent**: Weight clamping floor -0.5 (allows demotion); physics bonus factor 0.08; hydride anionGroups includes nonmetals [8,9]; expanded ELEMENT_GROUPS (Tc, Cd, Hg, Eu, Tb, Ho, Tm).
@@ -92,6 +92,11 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Routes validation**: NaN-safe query param validation on limit/offset/stage/targetTc.
 - **RL agent**: Upper weight clamp 5.0 added (was unbounded); tcBonus uses safeTc.
 - **Allen-Dynes correction**: Strong-coupling (lambda>1.5) now uses f1*f2 factors instead of simplified McMillan.
+- **invertMcMillanLambda**: Simplified redundant unit conversion (thetaD*0.695*1.44*0.65 → thetaD*0.65).
+- **Fermi velocity scaling**: vF = 2e5 * sqrt(bandwidth/2.0) instead of hardcoded 2e5 m/s for flat-band/heavy-fermion correction.
+- **Topology engine**: Z2 multiplier reduced 3→2 to prevent top-heavy distribution; Majorana feasibility weighted by metallicity (distinguishes TI from TSC); layered indicators expanded with C2/m, P2_1/c, Cmcm, Fmmm, P-1; monoclinic added to crystalSystem fallback.
+- **Gradient boost**: Division-by-zero guard in findBestSplitForSubset; crystalSymmetry string normalization (lowercase+trim).
+- **CrossEngineHub resilience**: Physics and pressure hub calls wrapped in try-catch to prevent hub crashes from killing autonomous cycle.
 - **mcMillanHopfieldEta**: Added values for C (6.0), N (5.0), O (3.5) in elemental-data.
 - **Tight-binding**: H added to KNOWN_SK_ELEMENTS; Fermi level uses sorted eigenvalue method.
 - **COVALENT_R alignment**: Worker and engine both default to 1.4 A for unknown elements; Tc, I, Kr added to worker.
@@ -108,7 +113,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - structure-predictor.ts: totalAtoms=0 guard in computeMiedemaFormationEnergy; 6 new KNOWN_PROTOTYPES (Heusler, Skutterudite, Chevrel, K2NiF4, infinite-layer, Pyrochlore); matchPrototype extended for all 6; PROTOTYPE_CA_RATIOS added for all 6.
   - rl-agent.ts: Binary hydride formula fix — 2-element templates now generate `${el1}H${hCount}` instead of duplicating `${el1}${el2}H${hCount}`.
   - elemental-data.ts: Bi mcMillanHopfieldEta=0.15; Ac bulkModulus=12/eta=0.3/gamma=1.0/gruneisen=1.0; sommerfeldGamma filled for B(0.1), C(0.05), N(0.05), Si(0.1).
-  - synthesis-simulator.ts: Upper bound clamping on mutated parameters (temp≤2500K, pressure≤300GPa, coolingRate≤1000, duration≤168h).
+  - synthesis-simulator.ts: Upper bound clamping on mutated parameters (temp≤2500K, pressure≤300GPa, coolingRate≤10000, duration≤168h); non-linear phasePurity^2 degradation; atmosphere compatibility check (oxygen penalizes hydrides).
   - supercon-dataset.ts: Lambda added for V3Si(1.60), NbC(0.98), VN(0.94), TaC(0.86), MoC(1.10), MoN(1.04), ZrN(1.12); pressure+lambda for LaH6(110GPa), SnH4(96GPa), GeH4(220GPa), SiH4(125GPa), PH3(200GPa).
   - inverse-generator.ts: 5 new PROTOTYPE_TC_AFFINITY entries (Skutterudite, Chevrel, Borocarbide, Pyrochlore, InfiniteLayer); FORBIDDEN_ELEMENTS set blocking noble gases (He/Ne/Ar/Kr/Xe/Rn) and radioactive elements (Po/At/Fr/Ra/Pm/Tc).
 - **Round 8 comprehensive fixes**:
@@ -130,7 +135,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - physics-engine.ts: ELEMENT_BANDWIDTH added for H(15), C(12), N(11), O(10), P(8.5), S(9), Se(7.5); isFinite on kappa+anisotropyRatio.
   - topology-engine.ts: ATOMIC_NUMBERS expanded to full 118 elements (was ~70).
   - rl-agent.ts: Bounds checking on all updatePolicy/replayBatch array accesses; Br, I added to nonmetal; new actinide group (Th, U, Np, Pu).
-  - pressure-engine.ts: Removed unused a0est/compressionRatio; element-class bulk modulus defaults (H=1, noble=2, alkali=12, etc.) replacing flat 100.
+  - pressure-engine.ts: Removed unused a0est/compressionRatio; element-class bulk modulus defaults (H=1, noble=2, alkali=12, etc.) replacing flat 100; post-TM bulk moduli (Al=76, Ga=56, In=42, Sn=58, Pb=46, Bi=31, Tl=43); lambda/hardening inversion for non-hydrides (lambda decreases with phonon stiffening); hydride bulk modulus skips H atoms for metal-dominated weighting.
   - qe-worker.ts: ATOMIC_VOLUMES expanded with lanthanides (Pm-Lu), Tc, noble gases, actinides (Pa, Np, Pu).
   - elemental-data.ts: mcMillanHopfieldEta added for Si(1.0), P(1.5), S(2.0), Cl(0.5), Ge(1.2), As(1.8), Se(2.5), Br(0.8), Sb(1.5), Te(2.2), I(1.0).
   - engine.ts: Phase 10 candidates 5→8, hydride scan 3→5, symbolic regression generations 25→40.

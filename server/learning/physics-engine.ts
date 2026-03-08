@@ -605,7 +605,7 @@ export function estimateBandwidthW(el: string): number {
 
 function invertMcMillanLambda(tc: number, thetaD: number, muStar: number): number {
   if (tc <= 0 || thetaD <= 0) return 0;
-  const omegaLogK = thetaD * 0.695 * 1.44 * 0.65;
+  const omegaLogK = thetaD * 0.65;
   let lambdaLow = 0.05;
   let lambdaHigh = 4.0;
   for (let i = 0; i < 50; i++) {
@@ -2102,7 +2102,8 @@ export function computeCriticalFields(
   }
 
   const lambda = Math.max(coupling.lambda, 0.01);
-  const vF = 2e5;
+  const bw = coupling.bandwidth ?? 2.0;
+  const vF = 2e5 * Math.sqrt(Math.max(0.1, bw) / 2.0);
   const kB = 1.381e-23;
   const hbar = 1.055e-34;
   const delta0 = 1.764 * kB * tc * (1 + lambda * 0.3);

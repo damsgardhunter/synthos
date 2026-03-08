@@ -221,7 +221,13 @@ export function simulateSynthesisEffects(
     }
   }
 
-  if (sv.oxygenPressure > 0 && materialClass.toLowerCase().includes("cuprate")) {
+  const mcLower = materialClass.toLowerCase();
+  if (sv.oxygenPressure > 0.1 && mcLower.includes("hydride")) {
+    phasePurity *= Math.max(0.3, 1 - sv.oxygenPressure * 2.0);
+    lambdaMod *= 0.85;
+  }
+
+  if (sv.oxygenPressure > 0 && mcLower.includes("cuprate")) {
     const optimalO2 = 0.21;
     const o2Diff = Math.abs(sv.oxygenPressure - optimalO2);
     phasePurity *= Math.max(0.8, 1 - o2Diff * 0.5);
@@ -234,7 +240,7 @@ export function simulateSynthesisEffects(
     lambdaMod *= 1.0 + currentEffect;
   }
 
-  const effectiveMult = lambdaMod * phasePurity * Math.min(1, omegaMod);
+  const effectiveMult = lambdaMod * (phasePurity * phasePurity) * Math.min(1, omegaMod);
 
   return {
     lambdaModifier: lambdaMod,
@@ -503,7 +509,7 @@ export function mutateSynthesisPath(path: SynthesisPath): SynthesisPath {
     newSteps[idx].duration *= randRange(0.5, 2);
     newSteps[idx].temperature = Math.min(2500, Math.max(200, newSteps[idx].temperature));
     newSteps[idx].pressure = Math.min(300, Math.max(0, newSteps[idx].pressure));
-    newSteps[idx].coolingRate = Math.min(1000, Math.max(0.1, newSteps[idx].coolingRate));
+    newSteps[idx].coolingRate = Math.min(10000, Math.max(0.1, newSteps[idx].coolingRate));
     newSteps[idx].duration = Math.min(168, Math.max(0.01, newSteps[idx].duration));
   } else if (mutType < 0.6 && newSteps.length > 2) {
     const i = Math.floor(Math.random() * (newSteps.length - 1));
