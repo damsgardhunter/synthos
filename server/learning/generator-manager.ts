@@ -166,6 +166,40 @@ export function recordGeneratorOutcome(
   entry.stats.noveltyScore = entry.stats.noveltyScore * (1 - alpha) + novelty * alpha;
 }
 
+export function applyTheoryBias(boosts: Record<string, number>) {
+  initializeGenerators();
+
+  const maxBoost = Math.max(...Object.values(boosts).map(Math.abs), 0.01);
+
+  for (const [name, boost] of Object.entries(boosts)) {
+    const entry = generators.get(name);
+    if (!entry) continue;
+
+    const normalizedBoost = boost / maxBoost;
+    const adjustment = normalizedBoost * 0.15;
+    entry.stats.currentWeight = Math.max(
+      MINIMUM_WEIGHT_FLOOR,
+      entry.stats.currentWeight * (1 + adjustment)
+    );
+  }
+
+  let totalWeight = 0;
+  generators.forEach(entry => { totalWeight += entry.stats.currentWeight; });
+  if (totalWeight > 0) {
+    generators.forEach(entry => {
+      entry.stats.currentWeight = Math.max(
+        MINIMUM_WEIGHT_FLOOR,
+        entry.stats.currentWeight / totalWeight
+      );
+    });
+  }
+
+  const summary = Array.from(generators.entries())
+    .map(([n, e]) => `${n}=${(e.stats.currentWeight * 100).toFixed(1)}%`)
+    .join(", ");
+  console.log(`[Generator] Theory bias applied: ${summary}`);
+}
+
 export function rebalanceWeights() {
   initializeGenerators();
   if (cyclesSinceRebalance < REBALANCE_INTERVAL) return;

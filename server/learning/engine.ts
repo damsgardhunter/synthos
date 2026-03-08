@@ -58,9 +58,11 @@ import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
 import { predictBandDispersion, getBandOperatorMLFeatures, type BandOperatorResult } from "../physics/band-structure-operator";
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
+import { predictKineticStability, formatKineticStabilityNote, type KineticStabilityResult } from "../physics/kinetic-stability";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
-import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, rebalanceWeights } from "./generator-manager";
+import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, rebalanceWeights, applyTheoryBias } from "./generator-manager";
+import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, type TheoryGeneratorBias } from "./theory-guided-generator";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
@@ -221,6 +223,8 @@ let lastTheoryDiscoveryCycle = 0;
 let lastCausalDiscoveryCycle = 0;
 let causalDesignGuidance: { variable: string; direction: string; causalImpactOnTc: number }[] = [];
 let theoryFeedbackBias: { biasedVariables: string[]; biasedElements: string[] } = { biasedVariables: [], biasedElements: [] };
+let lastTheoryBiasCycle = 0;
+let latestTheoryBias: TheoryGeneratorBias | null = null;
 
 let feedbackLoopStats = {
   defectCandidatesAdded: 0,
@@ -819,6 +823,30 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       return false;
     }
 
+    let kineticResult: KineticStabilityResult | null = null;
+    try {
+      if (stabilityResult.verdict === "metastable" || stabilityResult.hullDistance > 0.005) {
+        kineticResult = predictKineticStability(candidateData.formula, stabilityResult.hullDistance);
+
+        if (kineticResult.kineticScore < 0.15 && kineticResult.stabilizationStrategies.length === 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Kinetic stability rejected",
+            detail: `${candidateData.formula}: kineticScore=${kineticResult.kineticScore} too low, lifetime=${kineticResult.lifetimeString}, no stabilization strategies`,
+            dataSource: "Kinetic Stability Engine",
+          });
+          return false;
+        }
+
+        emit("log", {
+          phase: "engine",
+          event: "Kinetic stability assessed",
+          detail: `${candidateData.formula}: kineticScore=${kineticResult.kineticScore}, lifetime=${kineticResult.lifetimeString}, strategies=${kineticResult.stabilizationStrategies.length}, ambientStable=${kineticResult.pressureStabilization.ambientStabilizable}`,
+          dataSource: "Kinetic Stability Engine",
+        });
+      }
+    } catch {}
+
     const existingMlFeatures = (candidateData.mlFeatures as Record<string, any>) ?? {};
     const enrichedMlFeatures = {
       ...existingMlFeatures,
@@ -828,15 +856,28 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         verdict: stabilityResult.verdict,
         kineticBarrier: stabilityResult.kineticBarrier,
       },
+      ...(kineticResult ? {
+        kineticStability: {
+          kineticScore: kineticResult.kineticScore,
+          lifetime: kineticResult.lifetimeString,
+          diffusionBarrier: kineticResult.diffusionBarriers.effectiveBarrier,
+          nucleationBarrier: kineticResult.nucleationBarrier.nucleationBarrier,
+          gbEnergy: kineticResult.grainBoundary.averageGBEnergy,
+          pressureGPa: kineticResult.pressureStabilization.minStabilizationPressure,
+          ambientStabilizable: kineticResult.pressureStabilization.ambientStabilizable,
+          strategies: kineticResult.stabilizationStrategies.map(s => s.strategy),
+        },
+      } : {}),
     };
 
     const existingNotes = candidateData.notes || "";
     const stabilityNote = `[Stability: ${stabilityResult.verdict}, hullDist=${stabilityResult.hullDistance.toFixed(4)} eV/atom, formE=${stabilityResult.formationEnergy.toFixed(4)} eV/atom]`;
+    const kineticNote = kineticResult ? ` ${formatKineticStabilityNote(kineticResult)}` : "";
 
     await storage.insertSuperconductorCandidate({
       ...candidateData,
       mlFeatures: enrichedMlFeatures as any,
-      notes: `${existingNotes} ${stabilityNote}`.trim(),
+      notes: `${existingNotes} ${stabilityNote}${kineticNote}`.trim(),
     });
 
     const candidateTc = candidateData.predictedTc ?? 0;
@@ -2710,8 +2751,18 @@ async function runAutonomousFastPath() {
       "Pnictides", "Chalcogenides", "Cuprates", "Hydrides", "Kagome",
       "Sulfides", "Intermetallics", "Alloys", "Oxides", "Nitrides",
     ];
+    const familyNameMap: Record<string, string> = {
+      hydride: "Hydrides", cuprate: "Cuprates", chalcogenide: "Chalcogenides",
+      "layered-pnictide": "Pnictides", intermetallic: "Intermetallics",
+      "kagome-metal": "Kagome", "oxide-perovskite": "Oxides", boride: "Carbides",
+    };
     const EXPLORATION_PROB = 0.15;
-    if (Math.random() < EXPLORATION_PROB) {
+    if (latestTheoryBias && Object.keys(latestTheoryBias.familyPreferences).length > 0 && Math.random() < 0.5) {
+      const topTheoryFamily = Object.entries(latestTheoryBias.familyPreferences)
+        .sort((a, b) => b[1] - a[1])[0]?.[0];
+      const mapped = topTheoryFamily ? familyNameMap[topTheoryFamily] : null;
+      if (mapped) focusArea = mapped;
+    } else if (Math.random() < EXPLORATION_PROB) {
       const explorationPool = EXPLORATION_FAMILIES.filter(f => f !== focusArea);
       focusArea = explorationPool[Math.floor(Math.random() * explorationPool.length)];
     }
@@ -2867,7 +2918,10 @@ async function runAutonomousFastPath() {
     let motifDiffusionCandidates: string[] = [];
     if (cycleCount % 2 === 0) {
       try {
-        const diffResult = runDiffusionGenerationCycle(15);
+        const theoryElements = (latestTheoryBias && Object.keys(latestTheoryBias.elementBoosts).length >= 3)
+          ? Object.entries(latestTheoryBias.elementBoosts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([el]) => el)
+          : undefined;
+        const diffResult = runDiffusionGenerationCycle(15, theoryElements);
         for (const crystal of diffResult.structures) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
@@ -3000,10 +3054,34 @@ async function runAutonomousFastPath() {
     if (cycleCount % 4 === 0) {
       try {
         const strategies = ["hydride-cage-optimizer", "layered-intercalation", "high-entropy-alloy", "light-element-phonon", "topological-edge", "pressure-stabilized", "electron-phonon-resonance", "charge-transfer-layer"] as const;
-        const st = strategies[cycleCount % strategies.length];
-        const elemPool = theoryFeedbackBias.biasedElements.length > 0
-          ? theoryFeedbackBias.biasedElements.slice(0, 7)
-          : ["La", "Y", "H", "Ca", "B", "Nb", "Ti"];
+        const familyToStrategy: Record<string, typeof strategies[number]> = {
+          hydride: "hydride-cage-optimizer",
+          intermetallic: "high-entropy-alloy",
+          "layered-pnictide": "layered-intercalation",
+          boride: "light-element-phonon",
+          cuprate: "charge-transfer-layer",
+          chalcogenide: "layered-intercalation",
+          "kagome-metal": "topological-edge",
+          "oxide-perovskite": "electron-phonon-resonance",
+        };
+        let st: typeof strategies[number];
+        if (latestTheoryBias && Object.keys(latestTheoryBias.familyPreferences).length > 0 && Math.random() < 0.6) {
+          const topFamily = Object.entries(latestTheoryBias.familyPreferences)
+            .sort((a, b) => b[1] - a[1])[0]?.[0];
+          st = (topFamily && familyToStrategy[topFamily]) ? familyToStrategy[topFamily] : strategies[cycleCount % strategies.length];
+        } else {
+          st = strategies[cycleCount % strategies.length];
+        }
+        let elemPool = ["La", "Y", "H", "Ca", "B", "Nb", "Ti"];
+        if (latestTheoryBias && Object.keys(latestTheoryBias.elementBoosts).length > 0) {
+          const sortedElements = Object.entries(latestTheoryBias.elementBoosts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 7)
+            .map(([el]) => el);
+          if (sortedElements.length >= 3) elemPool = sortedElements;
+        } else if (theoryFeedbackBias.biasedElements.length > 0) {
+          elemPool = theoryFeedbackBias.biasedElements.slice(0, 7);
+        }
         const prog = generateDesignProgram(st, elemPool);
         const execResult = executeDesignProgram(prog);
         if (execResult.formula && isValidFormula(execResult.formula) && !alreadyScreenedFormulas.has(normalizeFormula(execResult.formula))) {
@@ -3040,6 +3118,59 @@ async function runAutonomousFastPath() {
           }));
         }
         emit("log", { phase: "engine", event: "Causal discovery cycle", detail: `Causal graph: ${causalResult.graph.edges.length} edges, ${causalResult.hypotheses.length} hypotheses, ${causalResult.rules.length} rules. Top guidance: ${causalResult.designGuidance[0]?.variable ?? "none"} (${causalResult.designGuidance[0]?.direction ?? ""})`, dataSource: "Integrated Subsystems" });
+      } catch {}
+    }
+
+    if (
+      (cycleCount - lastTheoryBiasCycle >= 10) &&
+      (lastTheoryDiscoveryCycle > lastTheoryBiasCycle || lastCausalDiscoveryCycle > lastTheoryBiasCycle)
+    ) {
+      try {
+        const weightsBefore: Record<string, number> = {};
+        const allocInfo = getGeneratorAllocations();
+        for (const g of allocInfo.generators) {
+          weightsBefore[g.name] = g.weight;
+        }
+
+        const theoryBias = computeTheoryGeneratorBias();
+        latestTheoryBias = theoryBias;
+        lastTheoryBiasCycle = cycleCount;
+
+        if (Object.keys(theoryBias.generatorWeightBoosts).length > 0 && theoryBias.confidence > 0.1) {
+          applyTheoryBias(theoryBias.generatorWeightBoosts);
+
+          const weightsAfter: Record<string, number> = {};
+          const allocInfoAfter = getGeneratorAllocations();
+          for (const g of allocInfoAfter.generators) {
+            weightsAfter[g.name] = g.weight;
+          }
+
+          recordTheoryBiasOutcome(
+            weightsBefore, weightsAfter,
+            allocInfoAfter.totalCandidatesGenerated,
+            autonomousBestTc,
+            autonomousTotalScreened > 0 ? autonomousBestTc * 0.5 : 0,
+            autonomousTotalScreened > 0 ? autonomousTotalPassed / autonomousTotalScreened : 0,
+          );
+
+          const topFam = Object.entries(theoryBias.familyPreferences)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([f, b]) => `${f}=${b.toFixed(2)}`)
+            .join(", ");
+          const topEl = Object.entries(theoryBias.elementBoosts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 4)
+            .map(([e, b]) => `${e}=${b.toFixed(2)}`)
+            .join(", ");
+
+          emit("log", {
+            phase: "engine",
+            event: "Theory-driven generator bias applied",
+            detail: `Confidence=${theoryBias.confidence.toFixed(2)}, theories=${theoryBias.sourceTheories}, causal edges=${theoryBias.sourceCausalEdges}. Top families: ${topFam}. Top elements: ${topEl}. Guidance: ${theoryBias.structuralGuidance[0] ?? "none"}`,
+            dataSource: "Theory-Guided Generator",
+          });
+        }
       } catch {}
     }
 
@@ -3587,6 +3718,7 @@ export async function getAutonomousLoopStats() {
       theoryFeedbackBias,
       lastTheoryDiscoveryCycle,
       lastCausalDiscoveryCycle,
+      theoryGuidedGenerator: getTheoryGuidedGeneratorStats(),
     },
     feedbackLoops: {
       defect: {
