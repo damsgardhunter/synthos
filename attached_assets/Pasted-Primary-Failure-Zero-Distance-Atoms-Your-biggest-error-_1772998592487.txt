@@ -1,0 +1,224 @@
+Primary Failure: Zero-Distance Atoms
+
+Your biggest error:
+
+Geometry rejected: Atoms Li(1) and H(5) too close: 0.00 A
+
+This means:
+
+Two atoms are being placed at identical coordinates.
+
+Your generator is doing something like:
+
+Li: (0.25,0.25,0.25)
+H : (0.25,0.25,0.25)
+
+So the validator correctly rejects the structure.
+
+Root Cause
+
+Your prototype structure generator likely:
+
+randomly assigns atoms to lattice sites
+
+does not check site occupancy conflicts
+
+Fix
+
+Add site occupancy validation before geometry validation.
+
+Example:
+
+function checkDuplicateSites(positions) {
+  const seen = new Set()
+
+  for (const p of positions) {
+    const key = `${p.x.toFixed(4)}_${p.y.toFixed(4)}_${p.z.toFixed(4)}`
+
+    if (seen.has(key)) {
+      return false
+    }
+
+    seen.add(key)
+  }
+
+  return true
+}
+
+Reject if duplicate sites exist.
+
+2️⃣ Volume Collapse
+
+Another recurring issue:
+
+vol/atom=2.4 Å³ (target=14.2)
+
+This means your lattice constant is far too small.
+
+Example:
+
+10 atoms
+lattice = 3Å cube
+
+Volume = 27 Å³
+per atom = 2.7 Å³
+
+Real materials typically:
+
+8–25 Å³ per atom
+Root Cause
+
+Your lattice scaling heuristic is underestimating size.
+
+Fix: Estimate lattice from atomic radii
+
+Use:
+
+a ≈ 2 × avg_atomic_radius × packing_factor
+
+Example implementation:
+
+function estimateLatticeConstant(elements) {
+  const avgRadius = elements.reduce((s,e)=>s + covalentRadius[e],0)/elements.length
+
+  const packingFactor = 2.4
+
+  return avgRadius * packingFactor * 2
+}
+3️⃣ Bond Valence Mismatch
+
+You also see:
+
+bond valence deviation=1.59
+extreme bond valence mismatch
+anion:cation ratio (0.3)
+
+This means the generator is producing chemically impossible compositions.
+
+Example:
+
+Ba5NaSr2LaMoH5Se2S3
+
+This is 11 metals + 5 hydrogens + 5 anions.
+
+Valence balance is impossible.
+
+Root Cause
+
+Your formula generator is not enforcing charge neutrality.
+
+Fix: Add charge balance filter
+
+Example:
+
+function estimateChargeBalance(formula) {
+
+  const oxidation = {
+    H: -1,
+    O: -2,
+    S: -2,
+    Se: -2,
+    Te: -2,
+
+    Li: +1,
+    Na: +1,
+    K: +1,
+
+    Ba: +2,
+    Sr: +2,
+    Ca: +2,
+
+    La: +3,
+    Y: +3,
+
+    Mo: +4,
+    W: +4,
+    V: +3
+  }
+
+  let charge = 0
+
+  for (const el in formula) {
+    charge += formula[el] * (oxidation[el] ?? 0)
+  }
+
+  return Math.abs(charge)
+}
+
+Reject if:
+
+|charge| > 2
+4️⃣ xTB Hessian Failure
+
+Your log:
+
+xTB --hess failed
+fallback also failed
+
+This happens when:
+
+atoms overlap
+
+geometry is unstable
+
+system too metallic
+
+This is not a real problem — it’s a symptom of bad initial geometry.
+
+Fixing generator geometry will fix this automatically.
+
+5️⃣ Imaginary Phonons
+
+Example:
+
+lowest freq = -307 cm⁻¹
+
+Negative phonon frequencies = structural instability.
+
+Your phonon filter is working correctly.
+
+6️⃣ Engine Storage Error
+
+You also have a real bug here:
+
+TypeError: storage.createSuperconductorCandidate is not a function
+
+Meaning:
+
+storage.createSuperconductorCandidate()
+
+does not exist.
+
+Either:
+
+storage.createCandidate()
+
+or
+
+storage.insertSuperconductorCandidate()
+7️⃣ Generator Is Producing Unrealistic Compositions
+
+Example candidates:
+
+KBa6Sr3LaMoH7SeS4
+Ba6NaSr3LaCrH7SeS4
+
+These have:
+
+8–10 metals
+
+random stoichiometry
+
+no structural logic
+
+Real superconductors rarely look like this.
+
+Better forms:
+
+AB
+AB2
+AB3
+A2B3
+A3B4
+ABO3
+AB2X4
