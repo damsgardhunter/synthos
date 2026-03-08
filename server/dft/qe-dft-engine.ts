@@ -350,7 +350,7 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     fractionalPositions: [
       { site: "A", x: 0.333, y: 0.667, z: 0.25 },
       { site: "B", x: 0.333, y: 0.667, z: 0.621 },
-      { site: "B", x: 0.333, y: 0.667, z: -0.121 },
+      { site: "B", x: 0.333, y: 0.667, z: 0.879 },
     ],
     latticeType: "hexagonal",
     aRatio: 1.0,
@@ -702,10 +702,6 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
       { site: "A", x: 0.5, y: 0.5, z: 0.0 },
       { site: "A", x: 0.5, y: 0.0, z: 0.5 },
       { site: "A", x: 0.0, y: 0.5, z: 0.5 },
-      { site: "A", x: 0.25, y: 0.25, z: 0.25 },
-      { site: "A", x: 0.75, y: 0.75, z: 0.25 },
-      { site: "A", x: 0.75, y: 0.25, z: 0.75 },
-      { site: "A", x: 0.25, y: 0.75, z: 0.75 },
       { site: "B", x: 0.625, y: 0.625, z: 0.625 },
       { site: "B", x: 0.375, y: 0.375, z: 0.625 },
       { site: "B", x: 0.375, y: 0.625, z: 0.375 },
@@ -718,7 +714,7 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     latticeType: "cubic",
     aRatio: 1.0,
     cOverA: 1.0,
-    stoichiometryPattern: "A8B8",
+    stoichiometryPattern: "A4B8",
   },
   {
     name: "HfFe6Ge6",
@@ -947,7 +943,18 @@ function selectBestPrototypeByChemistry(counts: Record<string, number>, elements
     } else {
       targetProtoName = "FCC";
     }
-  } else if (nElements >= 4) {
+  } else if (nElements === 4) {
+    const hasPnictide = elements.some(e => ["As", "P", "Sb"].includes(e));
+    const hasOorF = elements.some(e => e === "O" || e === "F");
+    const hasSpacer = elements.some(e => RARE_EARTHS.has(e) || ALKALINE_EARTH.has(e) || ALKALI.has(e));
+    if (hasSpacer && hasTM && hasPnictide && hasOorF) {
+      targetProtoName = "ThCr2Si2";
+    } else if (hasSpacer && hasTM && hasAnion) {
+      targetProtoName = "Perovskite";
+    } else {
+      targetProtoName = "Perovskite";
+    }
+  } else if (nElements >= 5) {
     targetProtoName = "Perovskite";
   }
 
@@ -1433,10 +1440,14 @@ function generateHydrideCageStructure(
   let metalIdx = 0;
   let hPlaced = 0;
 
+  const gridDim = Math.max(1, Math.ceil(Math.cbrt(nCopies)));
   for (let copy = 0; copy < nCopies; copy++) {
-    const offsetX = (copy % 2) * a;
-    const offsetY = (Math.floor(copy / 2) % 2) * a;
-    const offsetZ = Math.floor(copy / 4) * a;
+    const ix = copy % gridDim;
+    const iy = Math.floor(copy / gridDim) % gridDim;
+    const iz = Math.floor(copy / (gridDim * gridDim));
+    const offsetX = ix * a;
+    const offsetY = iy * a;
+    const offsetZ = iz * a;
 
     for (let i = 0; i < metalSiteCount && metalIdx < metalList.length; i++) {
       const pos = cage.metalFrac[i];
@@ -1516,20 +1527,15 @@ function deduplicateSites(atoms: AtomPosition[]): AtomPosition[] {
       const dz = Math.abs(atom.z - existing.z);
       if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
         isDuplicate = true;
-        const angle = result.length * 2.399;
-        const r = 0.4;
-        result.push({
-          element: atom.element,
-          x: atom.x + r * Math.cos(angle),
-          y: atom.y + r * Math.sin(angle),
-          z: atom.z + r * Math.cos(angle + 1.0),
-        });
         break;
       }
     }
     if (!isDuplicate) {
       result.push({ ...atom });
     }
+  }
+  if (result.length < atoms.length) {
+    console.log(`[DFT] deduplicateSites: Dropped ${atoms.length - result.length} duplicate atom(s) (${atoms.length} → ${result.length})`);
   }
   return result;
 }
@@ -1578,18 +1584,24 @@ function computeBoundingVolume(atoms: AtomPosition[]): number {
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
   for (const a of atoms) {
-    if (a.x < minX) minX = a.x;
-    if (a.y < minY) minY = a.y;
-    if (a.z < minZ) minZ = a.z;
-    if (a.x > maxX) maxX = a.x;
-    if (a.y > maxY) maxY = a.y;
-    if (a.z > maxZ) maxZ = a.z;
+    const r = COVALENT_RADII[a.element] ?? 1.4;
+    if (a.x - r < minX) minX = a.x - r;
+    if (a.y - r < minY) minY = a.y - r;
+    if (a.z - r < minZ) minZ = a.z - r;
+    if (a.x + r > maxX) maxX = a.x + r;
+    if (a.y + r > maxY) maxY = a.y + r;
+    if (a.z + r > maxZ) maxZ = a.z + r;
   }
-  const pad = 1.5;
-  const lx = Math.max(maxX - minX, pad);
-  const ly = Math.max(maxY - minY, pad);
-  const lz = Math.max(maxZ - minZ, pad);
-  return lx * ly * lz;
+  const lx = Math.max(maxX - minX, 1.0);
+  const ly = Math.max(maxY - minY, 1.0);
+  const lz = Math.max(maxZ - minZ, 1.0);
+  const boxVol = lx * ly * lz;
+  const aspect = Math.max(lx, ly, lz) / Math.min(lx, ly, lz);
+  if (aspect > 3.0) {
+    const avgSide = Math.cbrt(boxVol);
+    return avgSide * avgSide * avgSide * 0.85;
+  }
+  return boxVol;
 }
 
 function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {

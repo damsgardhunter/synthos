@@ -272,7 +272,7 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     sites: [
       { label: "M", x: 0.333, y: 0.667, z: 0.25, role: "metal" },
       { label: "X", x: 0.333, y: 0.667, z: 0.621, role: "chalcogen-top" },
-      { label: "X", x: 0.333, y: 0.667, z: -0.121, role: "chalcogen-bot" },
+      { label: "X", x: 0.333, y: 0.667, z: 0.879, role: "chalcogen-bot" },
     ],
     stoichiometryRatio: [1, 2],
     coordination: [6, 3],
@@ -382,7 +382,7 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
   {
     name: "Chevrel",
     spaceGroup: "R-3",
-    latticeType: "hexagonal",
+    latticeType: "cubic",
     cOverA: 1.0,
     sites: [
       { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "guest" },
@@ -765,6 +765,42 @@ function sortElementsBySite(elements: string[], counts: Record<string, number>, 
     const sLabels = siteByRatio[ratio];
     const eLabels = elemByRatio[ratio];
     if (!eLabels || sLabels.length !== eLabels.length) return null;
+
+    if (sLabels.length > 1) {
+      const roleMap: Record<string, string> = {};
+      for (const l of sLabels) {
+        const site = template.sites.find(s => s.label === l);
+        roleMap[l] = site?.role || "";
+      }
+      eLabels.sort((a, b) => {
+        const aIsAnion = ANIONS.has(a);
+        const bIsAnion = ANIONS.has(b);
+        if (aIsAnion !== bIsAnion) return aIsAnion ? 1 : -1;
+        const aIsLarge = CATIONS_LARGE.has(a);
+        const bIsLarge = CATIONS_LARGE.has(b);
+        if (aIsLarge !== bIsLarge) return aIsLarge ? -1 : 1;
+        const aIsTM = CATIONS_SMALL_TM.has(a);
+        const bIsTM = CATIONS_SMALL_TM.has(b);
+        if (aIsTM !== bIsTM) return aIsTM ? 1 : -1;
+        const rA = IONIC_RADII[a] || 0.8;
+        const rB = IONIC_RADII[b] || 0.8;
+        return rB - rA;
+      });
+      const anionRoles = ["chalcogen", "anion", "oxide", "pnictide", "halide", "apical-O", "planar-O", "in-plane-O"];
+      const spacerRoles = ["spacer", "large-atom", "guest", "rare-earth"];
+      sLabels.sort((a, b) => {
+        const roleA = roleMap[a] || "";
+        const roleB = roleMap[b] || "";
+        const aIsAnionRole = anionRoles.some(r => roleA.includes(r));
+        const bIsAnionRole = anionRoles.some(r => roleB.includes(r));
+        if (aIsAnionRole !== bIsAnionRole) return aIsAnionRole ? 1 : -1;
+        const aIsSpacer = spacerRoles.some(r => roleA.includes(r));
+        const bIsSpacer = spacerRoles.some(r => roleB.includes(r));
+        if (aIsSpacer !== bIsSpacer) return aIsSpacer ? -1 : 1;
+        return 0;
+      });
+    }
+
     for (let i = 0; i < sLabels.length; i++) {
       if (usedElements.has(eLabels[i])) return null;
       siteMap[sLabels[i]] = eLabels[i];
@@ -850,24 +886,29 @@ export function computeBondValenceSum(formula: string): { bvs: Record<string, nu
   let totalDeviation = 0;
   let nChecked = 0;
 
+  const totalCationCount = cations.reduce((s, e) => s + (counts[e] || 1), 0);
+  const totalAnionCount = anions.reduce((s, e) => s + (counts[e] || 1), 0);
+
   for (const cat of cations) {
     const oxStates = OXIDATION_STATES[cat] || [2];
-    const expectedValence = oxStates[0];
+    const expectedValence = Math.abs(oxStates[0]);
     const rCat = IONIC_RADII[cat] || 0.8;
+    const nCat = counts[cat] || 1;
 
     let sumBV = 0;
     for (const an of anions) {
       const rAn = IONIC_RADII[an] || 1.4;
-      const d0 = rCat + rAn;
-      const bondOrder = Math.exp((d0 - (rCat + rAn) * 0.95) / 0.37);
+      const R0 = rCat + rAn;
+      const avgCoord = Math.min(12, Math.max(2, Math.round(6 * totalAnionCount / totalCationCount)));
+      const estimatedBondDist = R0 * (1.0 + 0.02 * Math.max(0, avgCoord - 6));
+      const bondOrder = Math.exp((R0 - estimatedBondDist) / 0.37);
       const nAnions = counts[an] || 1;
-      const nCations = counts[cat] || 1;
-      const coordContrib = (nAnions / nCations) * bondOrder;
+      const coordContrib = (nAnions / nCat) * bondOrder;
       sumBV += coordContrib;
     }
 
     bvs[cat] = sumBV;
-    const dev = Math.abs(sumBV - Math.abs(expectedValence)) / Math.max(1, Math.abs(expectedValence));
+    const dev = Math.abs(sumBV - expectedValence) / Math.max(1, expectedValence);
     totalDeviation += dev;
     nChecked++;
   }
