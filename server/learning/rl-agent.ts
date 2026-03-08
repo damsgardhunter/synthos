@@ -779,7 +779,7 @@ export class RLChemicalSpaceAgent {
   private clampAllWeights(): void {
     const clampArray = (arr: number[]) => {
       for (let i = 0; i < arr.length; i++) {
-        arr[i] = Math.max(-0.5, arr[i]);
+        arr[i] = Math.max(-0.5, Math.min(5.0, arr[i]));
       }
     };
     clampArray(this.policy.elementGroup);
@@ -848,10 +848,10 @@ export class RLChemicalSpaceAgent {
 
           const currentBias = this.policy.elementPairSpecific.get(pair) ?? 0;
           const lr = this.learningRate * 0.3;
-          if (tc > 50) {
-            const tcBonus = Math.min(0.5, (tc - 50) / 400);
+          if (safeTc > 50) {
+            const tcBonus = Math.min(0.5, (safeTc - 50) / 400);
             this.policy.elementPairSpecific.set(pair, currentBias + lr * tcBonus);
-          } else if (tc < 5 && stats.total > 5) {
+          } else if (safeTc < 5 && stats.total > 5) {
             this.policy.elementPairSpecific.set(pair, Math.max(-0.3, currentBias - lr * 0.1));
           }
 

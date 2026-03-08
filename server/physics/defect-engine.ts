@@ -92,13 +92,16 @@ const NEIGHBOR_MAP: Record<string, string[]> = {
   P: ["N", "As", "Si"],
   Sb: ["Bi", "Sn", "As"],
   Tl: ["Pb", "In", "Hg"],
+  Be: ["B", "Mg", "Li"],
   Hg: ["Au", "Tl", "Cd"],
-  Cd: ["Zn", "Hg", "In"],
+  Cd: ["Zn", "In", "Hg"],
   Tc: ["Mo", "Ru", "Mn"],
-  F: ["O", "Ne", "Cl"],
-  Cl: ["F", "S", "Br"],
-  Br: ["Cl", "Se", "I"],
+  F: ["O", "Cl", "N"],
+  Cl: ["F", "Br", "S"],
+  Br: ["Cl", "I", "Se"],
   I: ["Br", "Te", "At"],
+  Th: ["U", "La", "Hf"],
+  U: ["Th", "Np", "Nd"],
 };
 
 const defectStats = {

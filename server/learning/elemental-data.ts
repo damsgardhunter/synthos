@@ -77,7 +77,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   C: {
     symbol: "C", atomicNumber: 6, atomicMass: 12.011,
     debyeTemperature: 2230, bulkModulus: 442.0, stonerParameter: null, hubbardU: null,
-    mcMillanHopfieldEta: null, miedemaPhiStar: 6.25, miedemaNws13: 1.90, miedemaV23: 2.6,
+    mcMillanHopfieldEta: 6.0, miedemaPhiStar: 6.25, miedemaNws13: 1.90, miedemaV23: 2.6,
     sommerfeldGamma: null, gruneisenParameter: 1.0,
     atomicRadius: 77, pettiforScale: 95, valenceElectrons: 4,
     paulingElectronegativity: 2.55, electronAffinity: 1.263, firstIonizationEnergy: 11.260,
@@ -87,7 +87,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   N: {
     symbol: "N", atomicNumber: 7, atomicMass: 14.007,
     debyeTemperature: null, bulkModulus: null, stonerParameter: null, hubbardU: null,
-    mcMillanHopfieldEta: null, miedemaPhiStar: 6.86, miedemaNws13: 1.92, miedemaV23: 2.2,
+    mcMillanHopfieldEta: 5.0, miedemaPhiStar: 6.86, miedemaNws13: 1.92, miedemaV23: 2.2,
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 75, pettiforScale: 100, valenceElectrons: 5,
     paulingElectronegativity: 3.04, electronAffinity: -0.07, firstIonizationEnergy: 14.534,
@@ -97,7 +97,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   O: {
     symbol: "O", atomicNumber: 8, atomicMass: 15.999,
     debyeTemperature: null, bulkModulus: null, stonerParameter: null, hubbardU: null,
-    mcMillanHopfieldEta: null, miedemaPhiStar: 6.98, miedemaNws13: 1.70, miedemaV23: 2.2,
+    mcMillanHopfieldEta: 3.5, miedemaPhiStar: 6.98, miedemaNws13: 1.70, miedemaV23: 2.2,
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 73, pettiforScale: 101, valenceElectrons: 6,
     paulingElectronegativity: 3.44, electronAffinity: 1.461, firstIonizationEnergy: 13.618,

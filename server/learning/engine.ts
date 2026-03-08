@@ -1376,7 +1376,9 @@ async function runPhase10_Physics() {
               dataSource: "Topology Engine",
             });
           }
-        } catch {}
+        } catch (topoErr) {
+          console.error(`[Engine] Topology analysis failed for ${candidate.formula}:`, topoErr instanceof Error ? topoErr.message.slice(0, 100) : "unknown");
+        }
 
         let pairingProfile: PairingProfile | undefined;
         try {
@@ -1389,7 +1391,9 @@ async function runPhase10_Physics() {
               dataSource: "Pairing Mechanism Simulator",
             });
           }
-        } catch {}
+        } catch (pairErr) {
+          console.error(`[Engine] Pairing profile failed for ${candidate.formula}:`, pairErr instanceof Error ? pairErr.message.slice(0, 100) : "unknown");
+        }
 
         try {
           const reactionResult = analyzeReactionNetwork(candidate.formula);
@@ -1407,7 +1411,9 @@ async function runPhase10_Physics() {
               dataSource: "Reaction Network Engine",
             });
           }
-        } catch {}
+        } catch (rxnErr) {
+          console.error(`[Engine] Reaction network failed for ${candidate.formula}:`, rxnErr instanceof Error ? rxnErr.message.slice(0, 100) : "unknown");
+        }
 
         let genomeResult: MaterialGenome | undefined;
         try {
@@ -1417,7 +1423,9 @@ async function runPhase10_Physics() {
             dominantOrbital: genomeResult.metadata.dominantOrbital,
             genomeDim: genomeResult.vector.length,
           };
-        } catch {}
+        } catch (genErr) {
+          console.error(`[Engine] Genome encoding failed for ${candidate.formula}:`, genErr instanceof Error ? genErr.message.slice(0, 100) : "unknown");
+        }
 
         let fermiSurfaceAnalysis: FermiSurfaceResult | undefined;
         try {
@@ -1444,8 +1452,12 @@ async function runPhase10_Physics() {
               clusterName: clusterResult.clusterName,
               similarity: clusterResult.similarity,
             };
-          } catch {}
-        } catch {}
+          } catch (clErr) {
+            console.error(`[Engine] Fermi cluster assignment failed for ${candidate.formula}:`, clErr instanceof Error ? clErr.message.slice(0, 100) : "unknown");
+          }
+        } catch (fsErr) {
+          console.error(`[Engine] Fermi surface failed for ${candidate.formula}:`, fsErr instanceof Error ? fsErr.message.slice(0, 100) : "unknown");
+        }
 
         let bandSurrogatePrediction: BandSurrogatePrediction | undefined;
         try {
@@ -1462,7 +1474,9 @@ async function runPhase10_Physics() {
               dataSource: "Band Structure Surrogate",
             });
           }
-        } catch {}
+        } catch (bsErr) {
+          console.error(`[Engine] Band surrogate failed for ${candidate.formula}:`, bsErr instanceof Error ? bsErr.message.slice(0, 80) : "unknown");
+        }
 
         let bandOperatorResult: BandOperatorResult | undefined;
         try {
@@ -1479,7 +1493,9 @@ async function runPhase10_Physics() {
               dataSource: "Band Structure Operator",
             });
           }
-        } catch {}
+        } catch (boErr) {
+          console.error(`[Engine] Band operator failed for ${candidate.formula}:`, boErr instanceof Error ? boErr.message.slice(0, 80) : "unknown");
+        }
 
         let qcAnalysis: QuantumCriticalAnalysis | undefined;
         try {
@@ -1502,7 +1518,9 @@ async function runPhase10_Physics() {
               dataSource: "Quantum Criticality Detector",
             });
           }
-        } catch {}
+        } catch (qcErr) {
+          console.error(`[Engine] Quantum criticality failed for ${candidate.formula}:`, qcErr instanceof Error ? qcErr.message.slice(0, 80) : "unknown");
+        }
 
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
@@ -1541,17 +1559,23 @@ async function runPhase10_Physics() {
             result.coupling.omegaLog,
             hullDist
           );
-        } catch {}
+        } catch (tsErr) {
+          console.error(`[Engine] Training sample add failed for ${candidate.formula}:`, tsErr instanceof Error ? tsErr.message.slice(0, 80) : "unknown");
+        }
 
         try {
           buildAndStoreFeatureRecord(candidate.formula, updatedTc);
           recordPrediction(candidate.formula, currentTc, updatedTc);
           updatePhysicsParameters(updatedTc, currentTc, [], candidate.formula);
-        } catch {}
+        } catch (frErr) {
+          console.error(`[Engine] Feature record/prediction update failed for ${candidate.formula}:`, frErr instanceof Error ? frErr.message.slice(0, 80) : "unknown");
+        }
 
         try {
           addMaterialToDataset(candidate.formula, updatedTc, result.coupling.lambda, result.pairingAnalysis?.symmetry ?? "unknown", result.pairingAnalysis?.dominantMechanism ?? "unknown");
-        } catch {}
+        } catch (dsErr) {
+          console.error(`[Engine] Dataset add failed for ${candidate.formula}:`, dsErr instanceof Error ? dsErr.message.slice(0, 80) : "unknown");
+        }
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
       }
@@ -1754,7 +1778,7 @@ async function runPhase11_StructurePrediction() {
             }
           }
         } catch (hullErr) {
-          console.log(`[Engine] ConvexHull analysis failed for ${cand.formula}: ${hullErr instanceof Error ? hullErr.message.slice(0, 100) : "unknown"}`);
+          console.log(`[Engine] ConvexHull analysis failed for ${f}: ${hullErr instanceof Error ? hullErr.message.slice(0, 100) : "unknown"}`);
         }
       }
     }
@@ -4103,7 +4127,9 @@ async function runLearningCycle() {
               dataSource: "Surrogate Model",
             });
           }
-        } catch {}
+        } catch (surrErr) {
+          console.error(`[Engine] Surrogate retrain failed:`, surrErr instanceof Error ? surrErr.message.slice(0, 100) : "unknown");
+        }
 
         try {
           await evolveRules(emit);
@@ -4218,7 +4244,9 @@ async function runLearningCycle() {
                       totalScCandidates++;
                       mutInserted++;
                     }
-                  } catch {}
+                  } catch (mutInsErr) {
+                    console.error(`[Engine] Mutation candidate insert failed:`, mutInsErr instanceof Error ? mutInsErr.message.slice(0, 80) : "unknown");
+                  }
                 }
               }
             }
@@ -4280,7 +4308,9 @@ async function runLearningCycle() {
                       totalScCandidates++;
                       recentNewCandidates++;
                     }
-                  } catch {}
+                  } catch (optInsErr) {
+                    console.error(`[Engine] Optimal region insert failed:`, optInsErr instanceof Error ? optInsErr.message.slice(0, 80) : "unknown");
+                  }
                 }
               }
             }

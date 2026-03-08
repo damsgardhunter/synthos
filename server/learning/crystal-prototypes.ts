@@ -187,6 +187,30 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
+    name: "NaCl-B1",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.0, role: "cation" },
+      { label: "A", x: 0.5, y: 0.0, z: 0.5, role: "cation" },
+      { label: "A", x: 0.0, y: 0.5, z: 0.5, role: "cation" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.0, role: "anion" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.0, role: "anion" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "anion" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTMorRE = elements.some(e => isTransitionMetal(e) || isRareEarth(e) || ["Mg", "Ca", "Sr", "Ba", "Pb"].includes(e));
+      const hasAnion = elements.some(e => ["N", "C", "O", "S", "Se", "Te", "F", "Cl", "Br", "I"].includes(e));
+      return hasTMorRE && hasAnion;
+    },
+  },
+  {
     name: "Perovskite",
     spaceGroup: "Pm-3m",
     latticeType: "cubic",

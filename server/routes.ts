@@ -703,7 +703,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           if (candidate && (candidate.verificationStage ?? 0) < 5) {
             await storage.updateSuperconductorCandidate(candidate.id, { verificationStage: 5, status: "experimentally-tested" });
           }
-        } catch {}
+        } catch (promoteErr) {
+          console.error(`[Routes] Auto-promote failed for ${parsed.data.formula}:`, promoteErr instanceof Error ? promoteErr.message.slice(0, 100) : "unknown");
+        }
       }
       res.json(validation);
     } catch (e) {
@@ -1005,7 +1007,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { targetTc, motifCount, elementsPerSite } = req.body;
       const numTargetTc = Number(targetTc);
-      if (!numTargetTc || !Number.isFinite(numTargetTc) || numTargetTc <= 0) {
+      if (numTargetTc == null || !Number.isFinite(numTargetTc) || numTargetTc <= 0) {
         return res.status(400).json({ error: "targetTc must be a positive number" });
       }
       const numMotifCount = Number(motifCount ?? 4);

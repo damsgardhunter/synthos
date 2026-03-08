@@ -1398,7 +1398,7 @@ function generateHydrideCageStructure(
   const cage = selectHydrideCage(hPerMetal);
 
   const metalRadiiSum = metals.reduce((s, el) => {
-    const r = COVALENT_RADII[el] ?? 1.5;
+    const r = COVALENT_RADII[el] ?? 1.4;
     return s + r;
   }, 0);
   const avgMetalRadius = metalRadiiSum / metals.length;
@@ -1488,8 +1488,8 @@ function generateHydrideCageStructure(
 }
 
 function getMinInteratomicDistance(el1: string, el2: string): number {
-  const r1 = COVALENT_RADII[el1] ?? 1.5;
-  const r2 = COVALENT_RADII[el2] ?? 1.5;
+  const r1 = COVALENT_RADII[el1] ?? 1.4;
+  const r2 = COVALENT_RADII[el2] ?? 1.4;
   const bondLength = r1 + r2;
   const isHydrogenPair = el1 === "H" || el2 === "H";
   const factor = isHydrogenPair ? 0.70 : 0.80;

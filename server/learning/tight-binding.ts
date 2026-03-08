@@ -512,7 +512,7 @@ function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: numbe
 }
 
 const KNOWN_SK_ELEMENTS = new Set([
-  "Li", "Be", "B", "C", "N", "O", "F",
+  "H", "Li", "Be", "B", "C", "N", "O", "F",
   "Na", "Mg", "Al", "Si", "P", "S", "Cl",
   "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
   "Ga", "Ge", "As", "Se", "Br",
@@ -596,13 +596,20 @@ export function computeTightBindingBands(
       const data = getElementData(el);
       if (data) totalElectrons += data.valenceElectrons * (counts[el] || 1);
     }
-    const occupiedBands = Math.floor(totalElectrons / 2);
-    if (occupiedBands > 0 && occupiedBands <= bands[0].length) {
-      let sum = 0;
-      for (const bandAtK of bands) {
-        sum += bandAtK[Math.min(occupiedBands - 1, bandAtK.length - 1)];
+    const occupiedStates = Math.floor(totalElectrons / 2);
+    const allEigenvalues: number[] = [];
+    for (const bandAtK of bands) {
+      for (const e of bandAtK) {
+        if (Number.isFinite(e)) allEigenvalues.push(e);
       }
-      fermiEnergy = sum / bands.length;
+    }
+    allEigenvalues.sort((a, b) => a - b);
+    const targetIdx = Math.min(
+      occupiedStates * bands.length - 1,
+      allEigenvalues.length - 1
+    );
+    if (targetIdx >= 0 && allEigenvalues.length > 0) {
+      fermiEnergy = allEigenvalues[Math.max(0, targetIdx)];
     }
   }
 

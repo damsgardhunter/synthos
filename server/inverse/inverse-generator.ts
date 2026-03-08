@@ -251,7 +251,7 @@ export function generateInverseCandidates(
     }
   }
 
-  if (target.targetTc > 200 && target.maxPressure < 50) {
+  if (target.targetTc > 200 && (target.maxPressure ?? 300) >= 50) {
     const hydrideMetals = target.preferredElements?.filter(el =>
       HIGH_COUPLING_TM.includes(el) || RARE_EARTH.includes(el)
     ) ?? ["La", "Y", "Ca", "Nb"];

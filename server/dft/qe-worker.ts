@@ -686,9 +686,9 @@ function validateGeometry(
     K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
     Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
     Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
-    As: 1.19, Se: 1.20, Br: 1.20, Rb: 2.20,
-    Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
-    Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44,
+    As: 1.19, Se: 1.20, Br: 1.20, Kr: 1.16, Rb: 2.20,
+    Tc: 1.47, Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
+    Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, I: 1.39,
     In: 1.42, Sb: 1.39, Cs: 2.44, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
     Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, U: 1.96, Pa: 2.00,
   };
@@ -704,8 +704,8 @@ function validateGeometry(
       const dy = fdy * latticeA;
       const dz = fdz * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const r1 = COVALENT_R[positions[i].element] ?? 1.3;
-      const r2 = COVALENT_R[positions[j].element] ?? 1.3;
+      const r1 = COVALENT_R[positions[i].element] ?? 1.4;
+      const r2 = COVALENT_R[positions[j].element] ?? 1.4;
       const isHPair = positions[i].element === "H" || positions[j].element === "H";
       const factor = isHPair ? 0.70 : 0.80;
       const minDist = Math.max((r1 + r2) * factor, isHPair ? 0.6 : 0.9);

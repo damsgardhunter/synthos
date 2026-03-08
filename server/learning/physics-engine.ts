@@ -1564,9 +1564,12 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
     const exponent = -1.04 * (1 + lambda) / denominator;
     tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   } else {
-    const f1 = Math.sqrt(1 + (lambda / 2.46));
+    const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+    const f1 = Math.pow(1 + (lambda / lambdaBar), 1/3);
+    const omegaBar = omegaLog * 0.56;
+    const f2 = 1 + (lambda * lambda / (lambda * lambda + lambdaBar * lambdaBar)) * (omegaBar / omegaLog - 1);
     const exponent = -1.04 * (1 + lambda) / denominator;
-    tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+    tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
   }
 
   tc = Number.isFinite(tc) ? Math.max(0, tc) : 0;

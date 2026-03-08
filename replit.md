@@ -86,8 +86,18 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **GB tree minSamples**: Increased from 5 to 8 for better regularization.
 - **Pipeline stage fix**: Failed Stage 4 correctly reports finalStage=4 (was 3); candidate limit 4→8; synthesizability/synthesisNotes now saved.
 - **QE worker**: Hg added to ELEMENT_DATA+ATOMIC_VOLUMES; COVALENT_R expanded (As,Br,Rb,Cs,Hg,Pa); hydride hPerMetal threshold 1.0→0.5.
-- **Crystal prototypes**: Added YBCO-123 (Pmmm orthorhombic) and FeSe-11 (P4/nmm tetragonal).
+- **Crystal prototypes**: Added YBCO-123 (Pmmm orthorhombic), FeSe-11 (P4/nmm tetragonal), and NaCl-B1 (Fm-3m rock-salt for nitrides/carbides).
 - **Routes validation**: NaN-safe query param validation on limit/offset/stage/targetTc.
+- **RL agent**: Upper weight clamp 5.0 added (was unbounded); tcBonus uses safeTc.
+- **Allen-Dynes correction**: Strong-coupling (lambda>1.5) now uses f1*f2 factors instead of simplified McMillan.
+- **mcMillanHopfieldEta**: Added values for C (6.0), N (5.0), O (3.5) in elemental-data.
+- **Tight-binding**: H added to KNOWN_SK_ELEMENTS; Fermi level uses sorted eigenvalue method.
+- **COVALENT_R alignment**: Worker and engine both default to 1.4 A for unknown elements; Tc, I, Kr added to worker.
+- **NEIGHBOR_MAP**: Added Be, Hg, Cd, Tc, F, Cl, Br, I, Th, U to defect-engine.
+- **Inverse generator**: Clathrate hydrides now generated only when maxPressure >= 50 GPa (was < 50).
+- **Engine catch blocks**: 20+ previously silent catch blocks now log errors in Phase 10 and elsewhere.
+- **Supercon dataset**: Removed duplicate entries (ScH9, NbC, SrTiO3); 550 entries total.
+- **Auto-promote catch**: Routes validation auto-promote now logs errors on failure.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
