@@ -2,8 +2,8 @@ import type { ElectronicStructure, TightBindingTopology } from "../learning/phys
 
 export interface TopologicalAnalysis {
   topologicalScore: number;
-  z2Invariant: number;
-  chernIndicator: number;
+  z2Score: number;
+  chernScore: number;
   mirrorSymmetryIndicator: number;
   socStrength: number;
   bandInversionProbability: number;
@@ -26,6 +26,7 @@ const HEAVY_ELEMENT_SOC: Record<string, number> = {
   W: 0.72, Re: 0.70, Os: 0.68, Ir: 0.65, Pt: 0.62, Au: 0.58,
   Ta: 0.55, Hf: 0.50, Lu: 0.48, La: 0.30, Ce: 0.32, Pr: 0.33,
   Nd: 0.34, Sm: 0.36, Gd: 0.38, Dy: 0.40, Er: 0.42, Yb: 0.44,
+  U: 0.45, Th: 0.25, Pu: 0.50, Np: 0.42, Am: 0.48,
   Ba: 0.22, Cs: 0.20, Rb: 0.08, Sr: 0.10,
   Mo: 0.15, Nb: 0.12, Zr: 0.10, Y: 0.09,
   Se: 0.18, As: 0.14, Ge: 0.11, Ga: 0.09,
@@ -53,9 +54,10 @@ const TOPO_MATERIAL_PATTERNS: { elements: string[]; minCount: number; bonus: num
   { elements: ["Nb", "As"], minCount: 2, bonus: 0.20, label: "NbAs-type Weyl" },
   { elements: ["Cu", "Bi", "Se"], minCount: 3, bonus: 0.40, label: "CuxBi2Se3 TSC" },
   { elements: ["Sr", "Ru", "O"], minCount: 3, bonus: 0.30, label: "Sr2RuO4-type TSC" },
-  { elements: ["Fe", "Te", "Se"], minCount: 3, bonus: 0.25, label: "FeTeSe TSC candidate" },
+  { elements: ["Fe", "Te", "Se"], minCount: 3, bonus: 0.30, label: "FeTeSe TSC candidate" },
   { elements: ["Ir"], minCount: 1, bonus: 0.15, label: "Iridate SOC system" },
   { elements: ["Os"], minCount: 1, bonus: 0.12, label: "Osmate SOC system" },
+  { elements: ["U", "Te"], minCount: 2, bonus: 0.35, label: "UTe2-type triplet TSC" },
 ];
 
 const LAYERED_INDICATORS = ["P6/mmm", "P4/mmm", "I4/mmm", "R-3m", "Pnma", "P-3m1", "P6_3/mmc", "C2/m", "P2_1/c", "Cmcm", "Fmmm", "P-1"];
@@ -335,11 +337,11 @@ export function analyzeTopology(
     ["Fe", "Co", "Ni", "Mn", "Cr", "V"].includes(el)
   );
 
-  const z2Invariant = estimateZ2Invariant(
+  const z2Score = estimateZ2Invariant(
     socStrength, bandInversionProbability, electronic.orbitalFractions, isLayered
   );
 
-  const chernIndicator = estimateChernIndicator(
+  const chernScore = estimateChernIndicator(
     socStrength,
     topo?.hasDiracCrossing ?? false,
     topo?.hasBandInversion ?? false,
@@ -347,13 +349,13 @@ export function analyzeTopology(
   );
 
   const mirrorSymmetryIndicator = estimateMirrorSymmetryIndicator(
-    crystalSystem, socStrength, z2Invariant
+    crystalSystem, socStrength, z2Score
   );
 
   const flatBandIndicator = estimateFlatBandIndicator(electronic, topo);
 
   const majoranaFeasibility = estimateMajoranaWithMetallicity(
-    z2Invariant, socStrength, bandInversionProbability, diracNodeProbability, isLayered,
+    z2Score, socStrength, bandInversionProbability, diracNodeProbability, isLayered,
     electronic.metallicity ?? 0.5
   );
 
@@ -374,13 +376,13 @@ export function analyzeTopology(
   if (flatBandIndicator > 0.5) indicators.push("flat band present");
   if (isLayered) indicators.push("layered structure");
   if (magneticElements) indicators.push("magnetic elements");
-  if (z2Invariant > 0.5) indicators.push("Z2 nontrivial");
-  if (chernIndicator > 0.3) indicators.push("nonzero Chern indicator");
+  if (z2Score > 0.5) indicators.push("Z2 nontrivial");
+  if (chernScore > 0.3) indicators.push("nonzero Chern indicator");
   if (majoranaFeasibility > 0.3) indicators.push("Majorana-hosting potential");
 
   const socContribution = socStrength;
   const bandInversionContribution = bandInversionProbability;
-  const symmetryContribution = (z2Invariant * 0.4 + chernIndicator * 0.3 + mirrorSymmetryIndicator * 0.3);
+  const symmetryContribution = (z2Score * 0.4 + chernScore * 0.3 + mirrorSymmetryIndicator * 0.3);
   const flatBandContribution = flatBandIndicator;
 
   let topologicalScore =
@@ -392,13 +394,13 @@ export function analyzeTopology(
   topologicalScore = Math.min(1.0, topologicalScore + patternBonus * 0.3);
 
   const topologicalClass = classifyTopologicalState(
-    z2Invariant, chernIndicator, mirrorSymmetryIndicator, majoranaFeasibility, socStrength
+    z2Score, chernScore, mirrorSymmetryIndicator, majoranaFeasibility, socStrength
   );
 
   return {
     topologicalScore: Math.round(topologicalScore * 1000) / 1000,
-    z2Invariant: Math.round(z2Invariant * 1000) / 1000,
-    chernIndicator: Math.round(chernIndicator * 1000) / 1000,
+    z2Score: Math.round(z2Score * 1000) / 1000,
+    chernScore: Math.round(chernScore * 1000) / 1000,
     mirrorSymmetryIndicator: Math.round(mirrorSymmetryIndicator * 1000) / 1000,
     socStrength: Math.round(socStrength * 1000) / 1000,
     bandInversionProbability: Math.round(bandInversionProbability * 1000) / 1000,

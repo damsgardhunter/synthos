@@ -74,7 +74,7 @@ function computeCalibration(model: GBModel): CalibrationData {
   const n = details.length;
   const mse = sse / n;
   const mae = totalAbsError / n;
-  const r2 = 1 - sse / sst;
+  const r2 = sst < 1e-6 ? 0 : 1 - sse / sst;
   const rmse = Math.sqrt(mse);
 
   const sortedResiduals = [...residuals].sort((a, b) => a - b);
@@ -394,29 +394,63 @@ function trainGradientBoosting(
   maxDepth: number = 4
 ): GBModel {
   const n = X.length;
-  const allIndices = Array.from({ length: n }, (_, i) => i);
 
-  const basePrediction = y.reduce((s, v) => s + v, 0) / n;
-  const predictions = new Array(n).fill(basePrediction);
+  const valSize = Math.max(2, Math.floor(n * 0.15));
+  const shuffledIndices = Array.from({ length: n }, (_, i) => i);
+  for (let i = shuffledIndices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffledIndices[i], shuffledIndices[j]] = [shuffledIndices[j], shuffledIndices[i]];
+  }
+  const valIdxArr = shuffledIndices.slice(0, valSize);
+  const trainIndices = shuffledIndices.slice(valSize);
+
+  const trainX = trainIndices.map(i => X[i]);
+  const trainY = trainIndices.map(i => y[i]);
+  const valX = valIdxArr.map(i => X[i]);
+  const valY = valIdxArr.map(i => y[i]);
+
+  const nTrain = trainX.length;
+  const allTrainIndices = Array.from({ length: nTrain }, (_, i) => i);
+
+  const basePrediction = trainY.reduce((s, v) => s + v, 0) / nTrain;
+  const trainPredictions = new Array(nTrain).fill(basePrediction);
+  const valPredictions = new Array(valX.length).fill(basePrediction);
   const trees: TreeNode[] = [];
 
-  const yVariance = y.reduce((s, yi) => s + (yi - basePrediction) ** 2, 0) / n;
+  const yVariance = trainY.reduce((s, yi) => s + (yi - basePrediction) ** 2, 0) / nTrain;
   const mseThreshold = Math.max(1.0, 0.01 * yVariance);
 
-  for (let iter = 0; iter < nEstimators; iter++) {
-    const residuals = y.map((yi, i) => yi - predictions[i]);
+  let bestValMSE = Infinity;
+  let valIncreaseCount = 0;
+  const MAX_VAL_INCREASE = 3;
 
-    const tree = buildTree(X, residuals, allIndices, 0, maxDepth, 8);
+  for (let iter = 0; iter < nEstimators; iter++) {
+    const residuals = trainY.map((yi, i) => yi - trainPredictions[i]);
+
+    const tree = buildTree(trainX, residuals, allTrainIndices, 0, maxDepth, 8);
     if (typeof tree === "number") break;
 
     trees.push(tree);
 
-    for (let i = 0; i < n; i++) {
-      predictions[i] += learningRate * predictTree(tree, X[i]);
+    for (let i = 0; i < nTrain; i++) {
+      trainPredictions[i] += learningRate * predictTree(tree, trainX[i]);
     }
 
-    const mse = y.reduce((s, yi, i) => s + (yi - predictions[i]) ** 2, 0) / n;
-    if (mse < mseThreshold) break;
+    const trainMSE = trainY.reduce((s, yi, i) => s + (yi - trainPredictions[i]) ** 2, 0) / nTrain;
+    if (trainMSE < mseThreshold) break;
+
+    for (let i = 0; i < valX.length; i++) {
+      valPredictions[i] += learningRate * predictTree(tree, valX[i]);
+    }
+    const valMSE = valY.reduce((s, yi, i) => s + (yi - valPredictions[i]) ** 2, 0) / valY.length;
+
+    if (valMSE < bestValMSE) {
+      bestValMSE = valMSE;
+      valIncreaseCount = 0;
+    } else {
+      valIncreaseCount++;
+      if (valIncreaseCount >= MAX_VAL_INCREASE) break;
+    }
   }
 
   return {
@@ -557,7 +591,7 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
 
   return {
     mse: sse / details.length,
-    r2: 1 - sse / sst,
+    r2: sst < 1e-6 ? 0 : 1 - sse / sst,
     nTrees: model.trees.length,
     details,
   };

@@ -6,8 +6,8 @@ import type { PressureTcPoint, HydrideFormationResult } from "./pressure-engine"
 
 export interface TopologyInsight {
   topologicalScore: number;
-  z2Invariant: number;
-  chernIndicator: number;
+  z2Score: number;
+  chernScore: number;
   socStrength: number;
   bandInversionProbability: number;
   flatBandIndicator: number;
@@ -426,8 +426,8 @@ class CrossEngineHub {
   private extractTopologyInsight(data: any): TopologyInsight {
     return {
       topologicalScore: data.topologicalScore ?? 0,
-      z2Invariant: data.z2Invariant ?? 0,
-      chernIndicator: data.chernIndicator ?? 0,
+      z2Score: data.z2Score ?? 0,
+      chernScore: data.chernScore ?? 0,
       socStrength: data.socStrength ?? 0,
       bandInversionProbability: data.bandInversionProbability ?? 0,
       flatBandIndicator: data.flatBandIndicator ?? 0,

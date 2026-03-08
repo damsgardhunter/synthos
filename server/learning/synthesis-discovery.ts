@@ -32,7 +32,7 @@ export interface MultiEngineInsights {
 
   topology?: {
     topologicalScore: number;
-    z2Invariant: number;
+    z2Score: number;
     socStrength: number;
     topologicalClass: string;
     majoranaFeasibility: number;

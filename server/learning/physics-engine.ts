@@ -57,9 +57,9 @@ function computePhysicsDerivedBonus(formula: string, lambda: number): number {
   return bonus;
 }
 
-const FAMILY_TC_CAPS: Record<string, { ambient: number; highPressure: number }> = {
+export const FAMILY_TC_CAPS: Record<string, { ambient: number; highPressure: number }> = {
   Carbides: { ambient: 45, highPressure: 100 },
-  Nitrides: { ambient: 65, highPressure: 110 },
+  Nitrides: { ambient: 80, highPressure: 110 },
   Borides: { ambient: 55, highPressure: 150 },
   Oxides: { ambient: 40, highPressure: 70 },
 };
@@ -82,7 +82,7 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
     const metalAtomCount = metalEls.reduce((s, e) => s + (cts[e] || 0), 0);
     const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
-    if (hRatio >= 6) pressureThresholdLow = 5;
+    if (hRatio >= 6) pressureThresholdLow = 50;
     materialBonus = computePhysicsDerivedBonus(formula, lambda);
   }
 
@@ -487,7 +487,7 @@ function computeScreenedMuStar(
 
   const E_F_eV = Math.max(1.0, wAvg * 0.5 + N_EF * 0.5);
   const omega_D_eV = Math.max(0.001, debyeTemperature * 8.617e-5);
-  const logRatio = Math.log(Math.max(E_F_eV / omega_D_eV, 1.1));
+  const logRatio = Math.log(Math.max(E_F_eV / omega_D_eV, 1.5));
   const muStarMA = mu_bare / (1 + mu_bare * logRatio);
 
   const muStarBlended = 0.5 * muStarMA + 0.5 * classDefault;
@@ -686,6 +686,10 @@ function estimateDOSatFermi(elements: string[], counts: Record<string, number>):
       const stonerProduct = I * dos;
       if (stonerProduct < 0.95 && stonerProduct > 0) {
         const denom = 1 - stonerProduct * frac;
+        if (denom <= 0) {
+          dos = 0.2;
+          break;
+        }
         if (Math.abs(denom) > 1e-6) {
           dos = dos / denom;
         }
@@ -1404,7 +1408,7 @@ export function computeElectronPhononCoupling(
     if (totalWeight > 0) {
       lambda = lambdaSum;
       if (totalWeight < 0.5) {
-        lambda = Math.max(lambda, N_EF * 0.1 * (1 + phononSpectrum.anharmonicityIndex * 0.5));
+        lambda = Math.max(lambda, N_EF * 0.1);
       } else if (totalWeight < 0.99) {
         const missingFrac = 1 - totalWeight;
         const inferredLambda = lambda / totalWeight;
@@ -1445,7 +1449,7 @@ export function computeElectronPhononCoupling(
         }
       }
     } else {
-      lambda = N_EF * 0.15 * (1 + phononSpectrum.anharmonicityIndex * 0.5);
+      lambda = N_EF * 0.15;
     }
 
     const ns = electronicStructure.nestingScore ?? 0;
@@ -1608,12 +1612,12 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   if (Math.abs(denominator) < 1e-6 || denominator <= 0) {
     tc = 0;
   } else if (lambda < 1.5) {
-    const f1 = Math.pow(1 + (lambda / 2.46 / (1 + 3.8 * muStar)), 1/3);
+    const f1 = Math.pow(1 + Math.pow(lambda / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
     const exponent = -1.04 * (1 + lambda) / denominator;
     tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   } else {
     const lambdaBar = 2.46 * (1 + 3.8 * muStar);
-    const f1 = Math.pow(1 + (lambda / lambdaBar), 1/3);
+    const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3/2), 1/3);
     const omega2Avg = phonon?.logAverageFrequency ? phonon.logAverageFrequency * phonon.logAverageFrequency * 1.2 : omegaLog * omegaLog * 1.2;
     const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / omegaLog : 1.0;
     const f2Base = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
@@ -2987,6 +2991,24 @@ export async function runFullPhysicsAnalysis(
     }
   }
 
+  const candidatePressure = candidate.pressureGpa ?? 0;
+
+  {
+    const hydEls = parseFormulaElements(formula);
+    const hydCts = parseFormulaCounts(formula);
+    const hydHCount = hydCts["H"] || 0;
+    const hydMetalAtoms = hydEls.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+      .reduce((s, e) => s + (hydCts[e] || 0), 0);
+    const hydHRatio = hydMetalAtoms > 0 ? hydHCount / hydMetalAtoms : 0;
+    if (hydHRatio >= 6 && candidatePressure < 50) {
+      const suppressionFactor = Math.max(0.05, candidatePressure / 50);
+      electronicStructure.metallicity = Math.min(electronicStructure.metallicity, suppressionFactor);
+    } else if (hydHRatio >= 4 && candidatePressure < 30) {
+      const suppressionFactor = Math.max(0.1, candidatePressure / 30);
+      electronicStructure.metallicity = Math.min(electronicStructure.metallicity, suppressionFactor);
+    }
+  }
+
   const phononSpectrum = computePhononSpectrum(formula, electronicStructure, mpElasticity, mpSummary);
 
   if (dftData) {
@@ -3008,8 +3030,6 @@ export async function runFullPhysicsAnalysis(
       phononSpectrum.maxPhononFrequency = Math.min(5000, cappedPhMax);
     }
   }
-
-  const candidatePressure = candidate.pressureGpa ?? 0;
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
 
   const earlyPhononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);

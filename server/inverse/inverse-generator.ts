@@ -34,6 +34,7 @@ const PROTOTYPE_TC_AFFINITY: Record<string, { minTc: number; maxTc: number; pref
 const STOICH_PATTERNS = [
   { name: "AB", slots: 2, ratios: [[1,1],[2,1],[3,1],[1,2],[1,3]] },
   { name: "AB2", slots: 2, ratios: [[1,2],[1,3],[1,4],[2,3]] },
+  { name: "AB3", slots: 2, ratios: [[1,3],[1,4],[2,3],[1,5]] },
   { name: "ABH", slots: 3, ratios: [[1,1,4],[1,1,6],[1,1,8],[1,1,10],[1,2,6]] },
   { name: "ABC3", slots: 3, ratios: [[1,1,3],[1,1,2],[2,1,3]] },
   { name: "AB2C2", slots: 3, ratios: [[1,2,2],[1,2,3],[2,2,5]] },
@@ -51,7 +52,7 @@ const COMMON_OXIDATION_STATES: Record<string, number[]> = {
   Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
   Sc: [3], Y: [3], La: [3], Ce: [3, 4], Gd: [3], Nd: [3], Pr: [3, 4], Sm: [3], Eu: [2, 3],
   Ti: [2, 3, 4], Zr: [4], Hf: [4],
-  V: [2, 3, 4, 5], Nb: [3, 5], Ta: [5],
+  V: [2, 3, 4, 5], Nb: [3, 4, 5], Ta: [5],
   Cr: [2, 3, 6], Mo: [4, 6], W: [4, 6],
   Mn: [2, 3, 4, 7], Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2], Zn: [2],
   Ru: [3, 4], Rh: [3], Pd: [2, 4], Ag: [1], Ir: [3, 4], Pt: [2, 4], Au: [1, 3],
@@ -116,8 +117,9 @@ function estimateQuickTc(formula: string, prototype: string, target: TargetPrope
   const hasH = elMap.has("H");
   const hCount = elMap.get("H") || 0;
   let tc = baseTc;
-  if (hasH && hCount >= 6) tc *= 1.3 + hCount * 0.05;
-  if (hasH && hCount >= 10) tc *= 1.2;
+  if (hasH && hCount >= 10) tc *= 1.5;
+  else if (hasH && hCount >= 6) tc *= 1.3;
+  else if (hasH && hCount >= 3) tc *= 1.1;
   const hasTM = HIGH_COUPLING_TM.some(el => elements.includes(el));
   if (hasTM) tc *= 1.15;
   const hasRE = RARE_EARTH.some(el => elements.includes(el));

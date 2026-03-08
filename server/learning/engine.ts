@@ -14,7 +14,7 @@ import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeig
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
@@ -195,7 +195,7 @@ let lastCycleCandidates: LastCycleCandidate[] = [];
 let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
-const MAX_SCREENED_CACHE_SIZE = 10000;
+const MAX_SCREENED_CACHE_SIZE = 50000;
 
 export function getAlreadyScreenedFormulas(): Set<string> {
   return alreadyScreenedFormulas;
@@ -306,12 +306,11 @@ function generateStatusMessage(): string {
   if (state === "stopped") return "Engine offline";
   if (state === "paused") return "Research paused";
 
-  const topFocus = currentStrategyFocusAreas[0]?.area || "";
+  const topFocus = currentStrategyFocusAreas[0]?.area || "promising material";
   const tasks = Array.from(activeTasks);
 
   if (engineTempo === "excited") {
-    if (topFocus) return `Actively pursuing ${topFocus.toLowerCase()} candidates`;
-    return "Energized by recent discoveries";
+    return `Actively pursuing ${topFocus.toLowerCase()} candidates`;
   }
   if (engineTempo === "contemplating") {
     if (cyclesSinceTcImproved > 15) return "Deep analysis mode — reconsidering approach";
@@ -320,8 +319,7 @@ function generateStatusMessage(): string {
   if (tasks.includes("SC Research")) return "Screening superconductor candidates";
   if (tasks.includes("Computational Physics")) return "Running physics verification";
   if (tasks.includes("Data Fetching")) return "Scanning scientific databases for new materials";
-  if (topFocus) return `Exploring ${topFocus.toLowerCase()} chemical space`;
-  return "Scanning chemical space for novel compositions";
+  return `Exploring ${topFocus.toLowerCase()} chemical space`;
 }
 
 function broadcast(type: string, data: any) {
@@ -1019,6 +1017,15 @@ async function reEvaluateTopCandidates() {
       const features = extractFeatures(candidate.formula);
       newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5, candidate.formula);
 
+      const reEvalFamily = classifyFamily(candidate.formula);
+      if (reEvalFamily && FAMILY_TC_CAPS[reEvalFamily]) {
+        const caps = FAMILY_TC_CAPS[reEvalFamily];
+        const pressure = candidate.pressureGpa ?? 0;
+        const pFactor = pressure > 50 ? 1.0 : pressure < 10 ? 0.0 : (pressure - 10) / 40;
+        const familyCap = Math.round(caps.ambient + (caps.highPressure - caps.ambient) * pFactor);
+        newTc = Math.min(newTc, familyCap);
+      }
+
       const currentTc = candidate.predictedTc ?? 0;
       if (newTc === currentTc) continue;
 
@@ -1415,8 +1422,8 @@ async function runPhase10_Physics() {
           crossEngineHub.recordInsight("topology", candidate.formula, topoAnalysis);
           (updatedMlFeatures as any).topology = {
             topologicalScore: topoAnalysis.topologicalScore,
-            z2Invariant: topoAnalysis.z2Invariant,
-            chernIndicator: topoAnalysis.chernIndicator,
+            z2Score: topoAnalysis.z2Score,
+            chernScore: topoAnalysis.chernScore,
             mirrorSymmetryIndicator: topoAnalysis.mirrorSymmetryIndicator,
             socStrength: topoAnalysis.socStrength,
             bandInversionProbability: topoAnalysis.bandInversionProbability,
@@ -1429,7 +1436,7 @@ async function runPhase10_Physics() {
             emit("log", {
               phase: "phase-10",
               event: "Topological candidate detected",
-              detail: `${candidate.formula}: class=${topoAnalysis.topologicalClass}, score=${topoAnalysis.topologicalScore}, SOC=${topoAnalysis.socStrength}, Z2=${topoAnalysis.z2Invariant}, Majorana=${topoAnalysis.majoranaFeasibility}, [${topoAnalysis.indicators.join(", ")}]`,
+              detail: `${candidate.formula}: class=${topoAnalysis.topologicalClass}, score=${topoAnalysis.topologicalScore}, SOC=${topoAnalysis.socStrength}, Z2=${topoAnalysis.z2Score}, Majorana=${topoAnalysis.majoranaFeasibility}, [${topoAnalysis.indicators.join(", ")}]`,
               dataSource: "Topology Engine",
             });
           }
@@ -1731,7 +1738,7 @@ async function runPhase10_Physics() {
                 } : undefined,
                 topology: topoAnalysis ? {
                   topologicalScore: topoAnalysis.topologicalScore,
-                  z2Invariant: topoAnalysis.z2Invariant,
+                  z2Score: topoAnalysis.z2Score,
                   socStrength: topoAnalysis.socStrength,
                   topologicalClass: topoAnalysis.topologicalClass,
                   majoranaFeasibility: topoAnalysis.majoranaFeasibility,
@@ -3884,7 +3891,7 @@ async function runAutonomousFastPath() {
                   correlationStrength: hubIns.physics.correlationStrength,
                 } : undefined,
                 topology: hubIns?.topology ? {
-                  topologicalScore: hubIns.topology.topologicalScore, z2Invariant: hubIns.topology.z2Invariant,
+                  topologicalScore: hubIns.topology.topologicalScore, z2Score: hubIns.topology.z2Score,
                   socStrength: hubIns.topology.socStrength, topologicalClass: hubIns.topology.topologicalClass,
                   majoranaFeasibility: hubIns.topology.majoranaFeasibility, bandInversionProbability: hubIns.topology.bandInversionProbability,
                 } : undefined,

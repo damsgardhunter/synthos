@@ -135,6 +135,19 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - engine.ts: Formula dedup Set (formulasInFlight) prevents duplicate processing in autonomous fast-path; Phase 13 synthesis reasoning marks reasoningFailed=true on error to prevent repeated LLM token waste.
   - gradient-boost.ts: 3 new features — multiBandScore (composite from nesting/DOS/orbital), miedemaFormEnergy (explicit from phase-diagram-engine), nonCentrosymmetric (binary flag from space group); formula parameter threaded through featureVectorToArray.
   - pressure-engine.ts: Birch-Murnaghan eta floor raised 0.3→0.5 for extreme compression; nickelate pressure dome (Gaussian centered at 20 GPa, sigma=15) for La3Ni2O7-type materials.
+- **Round 15 comprehensive fixes**:
+  - physics-engine.ts: Removed anharmonic double-counting (lambda numerator boost removed, only denominator suppression kept); negative DOS guard when Stoner denom <= 0 (sets dos=0.2 baseline, flags material as strongly magnetic); muStar heavy-fermion sensitivity improved (floor ratio 1.1→1.5); superhydride pressure threshold raised 5→50 GPa; metallicity suppressed for high-H compounds at low pressure; Nitrides ambient Tc cap raised 65→80K; FAMILY_TC_CAPS exported for use in engine.ts re-evaluation.
+  - pairing-mechanisms.ts: Allen-Dynes f1 corrected to include inner ^(3/2) exponent per Allen & Dynes 1975; superhydride phonon weight 0.85 (was 0.52) for H ratio > 0.6.
+  - physics-engine.ts: Both f1 instances updated with consistent ^(3/2) inner exponent.
+  - topology-engine.ts: Added actinide SOC values (U=0.45, Th=0.25, Pu=0.50, Np=0.42, Am=0.48); UTe2-type triplet TSC pattern added; z2Invariant→z2Score and chernIndicator→chernScore renamed across 6 files.
+  - graph-neural-net.ts: Tc output scaling 100→300 for high-pressure hydrides; distance heuristic no longer index-dependent (pure radius-based); training targets rescaled to match.
+  - gradient-boost.ts: R² division-by-zero guard (sst<1e-6 → r2=0); holdout validation with 15% split and 3-round early stopping to prevent overfitting.
+  - inverse-generator.ts: AB3 pattern added to STOICH_PATTERNS; Nb oxidation state [4] added; hydride Tc multipliers restructured as exclusive tiers (H>=10→1.5x, H>=6→1.3x, H>=3→1.1x, no stacking).
+  - crystal-prototypes.ts: Ionic radii added for Tc(0.65), updated Re/Os/Ir/Rh to correct values; oxidation states synced with inverse-generator (N+3, V+2, Zr+2/+3); packing factors for BiS2/CaBe2Ge2/1111/infinite-layer raised 0.52→0.58.
+  - elemental-data.ts: Debye temperatures for N(75K), O(91K), P(285K), S(200K), F(54K); Stoner parameters updated for 4d/5d metals (Pd=0.85, Pt=0.70, Rh=0.65, etc.).
+  - phonon-calculator.ts: Acoustic Sum Rule enforced (diagonal blocks adjusted so rows sum to zero); multi-lattice high-symmetry paths (hexagonal Γ-M-K-Γ-A, tetragonal Γ-X-M-Γ-Z, cubic default).
+  - qe-worker.ts: Non-cubic ibrav support (ibrav=4 hexagonal, ibrav=6 tetragonal) with proper celldm(3); atom placement for >16 atoms uses deterministic pseudo-random positions instead of silent truncation.
+  - engine.ts: alreadyScreenedFormulas cache cap raised 10K→50K; empty statusMessage guard with fallback text; reEvaluateTopCandidates now applies FAMILY_TC_CAPS for consistent Tc capping.
 - **Round 14 comprehensive fixes**:
   - pairing-mechanisms.ts: Allen-Dynes f2 exponent now properly applied via Math.pow(f2Base, f2Exponent) instead of being calculated but unused; f2Base floored at 0.5 for stability.
   - engine.ts: computeEliashbergTc denom guard (denom<=0 returns 0, exponent>50 guard); estimateRawTc helper consolidates 5 duplicated raw Tc formulas across Phase 11 generators; includes rawTc>80 && lambda<1.5 penalty.

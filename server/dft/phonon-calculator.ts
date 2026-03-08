@@ -212,6 +212,29 @@ function buildForceConstantMatrix(
     }
   }
 
+  for (let i = 0; i < N; i++) {
+    for (let a = 0; a < 3; a++) {
+      const row = i * 3 + a;
+      for (let b = 0; b < 3; b++) {
+        let offDiagSum = 0;
+        for (let j = 0; j < N; j++) {
+          if (j !== i) {
+            offDiagSum += matrix[row][j * 3 + b];
+          }
+        }
+        matrix[row][i * 3 + b] = -offDiagSum;
+      }
+    }
+  }
+
+  for (let i = 0; i < dim; i++) {
+    for (let j = i + 1; j < dim; j++) {
+      const avg = (matrix[i][j] + matrix[j][i]) / 2;
+      matrix[i][j] = avg;
+      matrix[j][i] = avg;
+    }
+  }
+
   return { matrix, calcCount };
 }
 
@@ -319,7 +342,29 @@ function eigenvaluesToFrequencies(eigenvalues: number[]): number[] {
   });
 }
 
-function getHighSymmetryPath(atomCount: number): { label: string; q: [number, number, number] }[] {
+function getHighSymmetryPath(atomCount: number, crystalSystem: string = "cubic"): { label: string; q: [number, number, number] }[] {
+  const sys = crystalSystem.toLowerCase();
+
+  if (sys === "hexagonal" || sys === "trigonal") {
+    return [
+      { label: "Γ", q: [0, 0, 0] },
+      { label: "M", q: [0.5, 0, 0] },
+      { label: "K", q: [1/3, 1/3, 0] },
+      { label: "Γ", q: [0, 0, 0] },
+      { label: "A", q: [0, 0, 0.5] },
+    ];
+  }
+
+  if (sys === "tetragonal") {
+    return [
+      { label: "Γ", q: [0, 0, 0] },
+      { label: "X", q: [0.5, 0, 0] },
+      { label: "M", q: [0.5, 0.5, 0] },
+      { label: "Γ", q: [0, 0, 0] },
+      { label: "Z", q: [0, 0, 0.5] },
+    ];
+  }
+
   if (atomCount <= 4) {
     return [
       { label: "Γ", q: [0, 0, 0] },
@@ -468,6 +513,7 @@ export function assessDynamicStability(dispersion: PhononDispersionPoint[]): {
 export async function computeFiniteDisplacementPhonons(
   formula: string,
   atoms: AtomPosition[],
+  crystalSystem: string = "cubic",
 ): Promise<FiniteDisplacementPhononResult | null> {
   const cacheKey = formula.replace(/\s+/g, "");
   if (phononResultCache.has(cacheKey)) {
@@ -498,7 +544,7 @@ export async function computeFiniteDisplacementPhonons(
     const gammaEigenvalues = eigenvaluesSymmetric(gammaDynMatrix.realPart);
     const gammaFrequencies = eigenvaluesToFrequencies(gammaEigenvalues);
 
-    const symPath = getHighSymmetryPath(N);
+    const symPath = getHighSymmetryPath(N, crystalSystem);
     const qPoints = interpolateQPoints(symPath, 8);
 
     const dispersion: PhononDispersionPoint[] = [];

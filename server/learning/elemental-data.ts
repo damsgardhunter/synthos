@@ -88,7 +88,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   N: {
     symbol: "N", atomicNumber: 7, atomicMass: 14.007,
-    debyeTemperature: null, bulkModulus: null, stonerParameter: null, hubbardU: null,
+    debyeTemperature: 75, bulkModulus: null, stonerParameter: null, hubbardU: null,
     mcMillanHopfieldEta: 5.0, miedemaPhiStar: 6.86, miedemaNws13: 1.92, miedemaV23: 2.2,
     sommerfeldGamma: 0.05, gruneisenParameter: null,
     atomicRadius: 75, pettiforScale: 100, valenceElectrons: 5,
@@ -98,7 +98,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   O: {
     symbol: "O", atomicNumber: 8, atomicMass: 15.999,
-    debyeTemperature: null, bulkModulus: null, stonerParameter: null, hubbardU: null,
+    debyeTemperature: 91, bulkModulus: null, stonerParameter: null, hubbardU: null,
     mcMillanHopfieldEta: 3.5, miedemaPhiStar: 6.98, miedemaNws13: 1.70, miedemaV23: 2.2,
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 73, pettiforScale: 101, valenceElectrons: 6,
@@ -108,7 +108,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   F: {
     symbol: "F", atomicNumber: 9, atomicMass: 18.998,
-    debyeTemperature: null, bulkModulus: null, stonerParameter: null, hubbardU: null,
+    debyeTemperature: 54, bulkModulus: null, stonerParameter: null, hubbardU: null,
     mcMillanHopfieldEta: null, miedemaPhiStar: 7.30, miedemaNws13: 1.80, miedemaV23: 2.0,
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 72, pettiforScale: 102, valenceElectrons: 7,
@@ -168,7 +168,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   P: {
     symbol: "P", atomicNumber: 15, atomicMass: 30.974,
-    debyeTemperature: null, bulkModulus: 11.0, stonerParameter: null, hubbardU: null,
+    debyeTemperature: 285, bulkModulus: 11.0, stonerParameter: null, hubbardU: null,
     mcMillanHopfieldEta: 1.5, miedemaPhiStar: 5.55, miedemaNws13: 1.65, miedemaV23: 3.5,
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 110, pettiforScale: 91, valenceElectrons: 5,
@@ -178,7 +178,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   S: {
     symbol: "S", atomicNumber: 16, atomicMass: 32.065,
-    debyeTemperature: null, bulkModulus: 7.7, stonerParameter: null, hubbardU: null,
+    debyeTemperature: 200, bulkModulus: 7.7, stonerParameter: null, hubbardU: null,
     mcMillanHopfieldEta: 2.0, miedemaPhiStar: 5.60, miedemaNws13: 1.50, miedemaV23: 3.6,
     sommerfeldGamma: null, gruneisenParameter: null,
     atomicRadius: 104, pettiforScale: 96, valenceElectrons: 6,
@@ -438,7 +438,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Mo: {
     symbol: "Mo", atomicNumber: 42, atomicMass: 95.950,
-    debyeTemperature: 450, bulkModulus: 230.0, stonerParameter: 0.28, hubbardU: 2.5,
+    debyeTemperature: 450, bulkModulus: 230.0, stonerParameter: 0.35, hubbardU: 2.5,
     mcMillanHopfieldEta: 3.0, miedemaPhiStar: 4.65, miedemaNws13: 1.77, miedemaV23: 4.4,
     sommerfeldGamma: 2.0, gruneisenParameter: 1.57,
     atomicRadius: 139, pettiforScale: 50, valenceElectrons: 6,
@@ -458,7 +458,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Ru: {
     symbol: "Ru", atomicNumber: 44, atomicMass: 101.07,
-    debyeTemperature: 600, bulkModulus: 220.0, stonerParameter: 0.30, hubbardU: 3.0,
+    debyeTemperature: 600, bulkModulus: 220.0, stonerParameter: 0.40, hubbardU: 3.0,
     mcMillanHopfieldEta: 2.1, miedemaPhiStar: 5.40, miedemaNws13: 1.83, miedemaV23: 4.1,
     sommerfeldGamma: 3.3, gruneisenParameter: 1.45,
     atomicRadius: 134, pettiforScale: 57, valenceElectrons: 8,
@@ -468,7 +468,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Rh: {
     symbol: "Rh", atomicNumber: 45, atomicMass: 102.91,
-    debyeTemperature: 480, bulkModulus: 275.0, stonerParameter: 0.35, hubbardU: 3.5,
+    debyeTemperature: 480, bulkModulus: 275.0, stonerParameter: 0.65, hubbardU: 3.5,
     mcMillanHopfieldEta: 1.5, miedemaPhiStar: 5.10, miedemaNws13: 1.76, miedemaV23: 4.1,
     sommerfeldGamma: 4.9, gruneisenParameter: 2.2,
     atomicRadius: 134, pettiforScale: 61, valenceElectrons: 9,
@@ -478,7 +478,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Pd: {
     symbol: "Pd", atomicNumber: 46, atomicMass: 106.42,
-    debyeTemperature: 274, bulkModulus: 180.0, stonerParameter: 0.40, hubbardU: 3.5,
+    debyeTemperature: 274, bulkModulus: 180.0, stonerParameter: 0.85, hubbardU: 3.5,
     mcMillanHopfieldEta: 4.5, miedemaPhiStar: 5.45, miedemaNws13: 1.67, miedemaV23: 4.3,
     sommerfeldGamma: 9.42, gruneisenParameter: 2.23,
     atomicRadius: 137, pettiforScale: 62, valenceElectrons: 10,
@@ -758,7 +758,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   W: {
     symbol: "W", atomicNumber: 74, atomicMass: 183.84,
-    debyeTemperature: 400, bulkModulus: 310.0, stonerParameter: 0.25, hubbardU: 2.3,
+    debyeTemperature: 400, bulkModulus: 310.0, stonerParameter: 0.20, hubbardU: 2.3,
     mcMillanHopfieldEta: 2.0, miedemaPhiStar: 4.80, miedemaNws13: 1.81, miedemaV23: 4.5,
     sommerfeldGamma: 1.01, gruneisenParameter: 1.62,
     atomicRadius: 139, pettiforScale: 45, valenceElectrons: 6,
@@ -768,7 +768,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Re: {
     symbol: "Re", atomicNumber: 75, atomicMass: 186.21,
-    debyeTemperature: 430, bulkModulus: 370.0, stonerParameter: 0.28, hubbardU: 2.5,
+    debyeTemperature: 430, bulkModulus: 370.0, stonerParameter: 0.30, hubbardU: 2.5,
     mcMillanHopfieldEta: 2.4, miedemaPhiStar: 5.40, miedemaNws13: 1.86, miedemaV23: 4.3,
     sommerfeldGamma: 2.35, gruneisenParameter: 1.66,
     atomicRadius: 137, pettiforScale: 44, valenceElectrons: 7,
@@ -778,7 +778,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Os: {
     symbol: "Os", atomicNumber: 76, atomicMass: 190.23,
-    debyeTemperature: 500, bulkModulus: 462.0, stonerParameter: 0.26, hubbardU: 2.8,
+    debyeTemperature: 500, bulkModulus: 462.0, stonerParameter: 0.35, hubbardU: 2.8,
     mcMillanHopfieldEta: 1.5, miedemaPhiStar: 5.40, miedemaNws13: 1.85, miedemaV23: 4.3,
     sommerfeldGamma: 2.35, gruneisenParameter: 1.60,
     atomicRadius: 135, pettiforScale: 43, valenceElectrons: 8,
@@ -788,7 +788,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Ir: {
     symbol: "Ir", atomicNumber: 77, atomicMass: 192.22,
-    debyeTemperature: 420, bulkModulus: 320.0, stonerParameter: 0.28, hubbardU: 3.0,
+    debyeTemperature: 420, bulkModulus: 320.0, stonerParameter: 0.50, hubbardU: 3.0,
     mcMillanHopfieldEta: 1.8, miedemaPhiStar: 5.55, miedemaNws13: 1.83, miedemaV23: 4.2,
     sommerfeldGamma: 3.1, gruneisenParameter: 1.74,
     atomicRadius: 136, pettiforScale: 42, valenceElectrons: 9,
@@ -798,7 +798,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   Pt: {
     symbol: "Pt", atomicNumber: 78, atomicMass: 195.08,
-    debyeTemperature: 240, bulkModulus: 230.0, stonerParameter: 0.32, hubbardU: 3.2,
+    debyeTemperature: 240, bulkModulus: 230.0, stonerParameter: 0.70, hubbardU: 3.2,
     mcMillanHopfieldEta: 2.5, miedemaPhiStar: 5.65, miedemaNws13: 1.78, miedemaV23: 4.4,
     sommerfeldGamma: 6.8, gruneisenParameter: 2.54,
     atomicRadius: 139, pettiforScale: 64, valenceElectrons: 10,

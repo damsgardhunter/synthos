@@ -150,7 +150,7 @@ export function computePhononPairing(
     if (lambda > 1.5 && coupling.omegaLog > 0) {
       const omega2Avg = coupling.omega2Avg ?? (coupling.omegaLog * coupling.omegaLog * 1.2);
       const sqrtLambda = Math.sqrt(lambda);
-      const f1 = Math.pow(1 + (lambda / 2.46 / (1 + 3.8 * muStar)), 1/3);
+      const f1 = Math.pow(1 + Math.pow(lambda / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
       const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / coupling.omegaLog : 1.0;
       const f2Base = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
       const f2Exponent = (1 - lambda * lambda) / (1 + lambda * lambda);
@@ -701,8 +701,8 @@ export function computePairingProfile(formula: string): PairingProfile {
   let topoPairingSymmetry = "p-wave";
   try {
     const topoAnalysis = analyzeTopology(formula, electronic);
-    topoStrength = Math.min(1, topoAnalysis.majoranaFeasibility * 0.6 + topoAnalysis.z2Invariant * 0.3 + topoAnalysis.socStrength * 0.1);
-    if (topoAnalysis.topologicalClass === "strong-TI" || topoAnalysis.z2Invariant > 0.7) {
+    topoStrength = Math.min(1, topoAnalysis.majoranaFeasibility * 0.6 + topoAnalysis.z2Score * 0.3 + topoAnalysis.socStrength * 0.1);
+    if (topoAnalysis.topologicalClass === "strong-TI" || topoAnalysis.z2Score > 0.7) {
       topoPairingSymmetry = "p+ip (topological)";
     }
   } catch (_) {
@@ -716,6 +716,11 @@ export function computePairingProfile(formula: string): PairingProfile {
     elements.some(e => ["As", "P", "Se", "S"].includes(e));
   const isHydride = elements.includes("H") &&
     elements.some(e => isTransitionMetal(e) || isRareEarth(e));
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const hCount = counts["H"] || 0;
+  const hRatio = totalAtoms > 0 ? hCount / totalAtoms : 0;
+  const isSuperhydride = isHydride && hRatio > 0.6;
   const isNickelate = elements.includes("Ni") && elements.includes("O") && elements.length >= 3;
   const isCDWMaterial = cdwResult.isCDWCandidate && cdwResult.cdwPairingStrength > 0.4;
   const isBismuthate = elements.includes("Bi") && elements.includes("O") &&
@@ -728,6 +733,8 @@ export function computePairingProfile(formula: string): PairingProfile {
     wPhonon = 0.08; wSpin = 0.38; wOrbital = 0.17; wExcitonic = 0.05; wCDW = 0.14; wPolaronic = 0.06; wPlasmon = 0.06; wTopo = 0.06;
   } else if (isPnictide) {
     wPhonon = 0.11; wSpin = 0.28; wOrbital = 0.23; wExcitonic = 0.05; wCDW = 0.12; wPolaronic = 0.07; wPlasmon = 0.06; wTopo = 0.08;
+  } else if (isSuperhydride) {
+    wPhonon = 0.85; wSpin = 0.02; wOrbital = 0.02; wExcitonic = 0.01; wCDW = 0.02; wPolaronic = 0.04; wPlasmon = 0.02; wTopo = 0.02;
   } else if (isHydride) {
     wPhonon = 0.52; wSpin = 0.07; wOrbital = 0.07; wExcitonic = 0.03; wCDW = 0.05; wPolaronic = 0.14; wPlasmon = 0.07; wTopo = 0.05;
   } else if (isNickelate) {

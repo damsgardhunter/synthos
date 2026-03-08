@@ -682,7 +682,7 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
       } else {
         const ri = nodes[i].atomicRadius / 100;
         const rj = nodes[j].atomicRadius / 100;
-        distance = (ri + rj) * (0.8 + 0.4 * Math.abs(i - j) / Math.max(nodes.length, 1));
+        distance = (ri + rj) * 1.1;
       }
 
       const cutoff = 6.0;
@@ -874,7 +874,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights): GNNPredict
 
   const formationEnergy = out[0] ?? 0;
   const phononStabilityRaw = sigmoid(out[1] ?? 0);
-  const predictedTcRaw = Math.max(0, (out[2] ?? 0) * 100);
+  const predictedTcRaw = Math.max(0, (out[2] ?? 0) * 300);
   const confidenceRaw = sigmoid(out[3] ?? 0);
   const lambdaRaw = Math.max(0, out[4] ?? 0);
 
@@ -985,9 +985,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[]): GNNWeights {
           : buildCrystalGraph(sample.formula, sample.structure);
         const pred = GNNPredict(graph, weights);
 
-        const tcTarget = sample.tc / 100;
+        const tcTarget = sample.tc / 300;
         const feTarget = sample.formationEnergy ?? 0;
-        const tcError = pred.predictedTc / 100 - tcTarget;
+        const tcError = pred.predictedTc / 300 - tcTarget;
         const feError = pred.formationEnergy - feTarget;
 
         const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;

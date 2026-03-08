@@ -409,6 +409,30 @@ function generateMagnetizationLines(
   return lines;
 }
 
+function determineCrystalSystem(elements: string[], counts: Record<string, number>): { ibrav: number; cOverA: number } {
+  const cOverA = estimateCOverA(elements, counts);
+
+  if (Math.abs(cOverA - 1.0) < 0.05) {
+    return { ibrav: 1, cOverA: 1.0 };
+  }
+
+  const hasB = elements.includes("B");
+  const hasMg = elements.includes("Mg");
+  const hasAl = elements.includes("Al");
+  const hasTi = elements.includes("Ti");
+  const hasZr = elements.includes("Zr");
+  const hasHf = elements.includes("Hf");
+
+  const hexagonalIndicators = (hasB && (hasMg || hasAl)) ||
+    ((hasTi || hasZr || hasHf) && elements.length === 2 && cOverA > 1.4 && cOverA < 1.8);
+
+  if (hexagonalIndicators) {
+    return { ibrav: 4, cOverA };
+  }
+
+  return { ibrav: 6, cOverA };
+}
+
 function generateSCFInput(
   formula: string,
   elements: string[],
@@ -445,6 +469,13 @@ function generateSCFInput(
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
+  const { ibrav, cOverA } = determineCrystalSystem(elements, counts);
+  const celldm1 = (latticeA * 1.8897259886).toFixed(6);
+  let celldmLines = `  celldm(1) = ${celldm1},\n`;
+  if (ibrav === 4 || ibrav === 6) {
+    celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
+  }
+
   return `&CONTROL
   calculation = 'scf',
   restart_mode = 'from_scratch',
@@ -457,9 +488,8 @@ function generateSCFInput(
   etot_conv_thr = 1.0d-5,
 /
 &SYSTEM
-  ibrav = 1,
-  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
-  nat = ${totalAtoms},
+  ibrav = ${ibrav},
+${celldmLines}  nat = ${totalAtoms},
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
@@ -480,7 +510,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, estimateCOverA(elements, counts))}
+${autoKPoints(latticeA, cOverA)}
 `;
 }
 
@@ -547,12 +577,43 @@ function generateAtomicPositions(
   ];
 
   let siteIdx = 0;
+  const pendingAtoms: Array<{ element: string; remaining: number }> = [];
   for (const el of elements) {
     const n = Math.round(counts[el] || 1);
+    let placed = 0;
     for (let i = 0; i < n && siteIdx < cubicSites.length; i++) {
       const site = cubicSites[siteIdx++];
       positions.push({ element: el, x: site[0], y: site[1], z: site[2] });
+      placed++;
     }
+    if (placed < n) {
+      pendingAtoms.push({ element: el, remaining: n - placed });
+    }
+  }
+
+  if (pendingAtoms.length > 0) {
+    const usedPositions = new Set(positions.map(p => `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`));
+    const rng = (seed: number) => {
+      let s = seed;
+      return () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    };
+    const rand = rng(totalAtoms * 7919 + elements.length * 104729);
+    for (const { element, remaining } of pendingAtoms) {
+      for (let i = 0; i < remaining; i++) {
+        let x: number, y: number, z: number, key: string;
+        let attempts = 0;
+        do {
+          x = Math.round(rand() * 20) / 20;
+          y = Math.round(rand() * 20) / 20;
+          z = Math.round(rand() * 20) / 20;
+          key = `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`;
+          attempts++;
+        } while (usedPositions.has(key) && attempts < 100);
+        usedPositions.add(key);
+        positions.push({ element, x, y, z });
+      }
+    }
+    console.log(`[QE-Worker] Placed ${positions.length} atoms total (${positions.length - cubicSites.length} at generated positions)`);
   }
 
   return positions;

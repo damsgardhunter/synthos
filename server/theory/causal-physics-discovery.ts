@@ -180,7 +180,7 @@ export function buildCausalDataRecord(formula: string): CausalDataRecord {
     coupling_strength: lambda * DOS_EF,
     layeredness: multiScale?.mesoscopic?.layeredness ?? 0.1,
     dimensionality: multiScale?.mesoscopic?.dimensionality ?? 0.5,
-    topology_z2: features.z2Invariant ?? 0,
+    topology_z2: features.z2Score ?? 0,
     berry_phase: features.berryPhaseProxy ?? 0,
   };
 }
