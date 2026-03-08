@@ -3672,7 +3672,7 @@ export async function getAutonomousLoopStats() {
     totalPassed: reconciledPassed,
     passRate: reconciledScreened > 0 ? reconciledPassed / reconciledScreened : 0,
     bestTc: autonomousBestTc,
-    throughputPerHour: (elapsedHours > 0 && autonomousTotalScreened > 0) ? Math.round(autonomousTotalScreened / elapsedHours) : 0,
+    throughputPerHour: (elapsedHours > 0.01 && autonomousTotalScreened > 0) ? Math.round(autonomousTotalScreened / Math.max(elapsedHours, 0.05)) : 0,
     gnnRetrainCount: autonomousGNNRetrainCount,
     activeLearning: alStats,
     realDFT: {

@@ -1,0 +1,220 @@
+Your structure scaling loop is running twice (bug)
+
+You have duplicate validation messages:
+
+[DFT] WSe2N: Structure validation attempt 1 — minDist=2.760Å ...
+[DFT] WSe2N: Structure validation attempt 1 — minDist=2.760Å ...
+
+This means the validation function is being called twice.
+
+Possible causes:
+
+Likely bug
+generateStructure()
+   -> validateStructure()
+
+preRelax()
+   -> validateStructure()
+
+So validation runs before AND after generation.
+
+But your log still says:
+
+attempt 1
+attempt 1
+
+Meaning the counter resets.
+
+Fix
+
+Create a single validation pipeline:
+
+generateStructure
+      ↓
+validateStructure
+      ↓
+repairStructure (scale lattice)
+      ↓
+validateStructure
+      ↓
+xtbRelax
+
+And track attempt number globally.
+
+Example:
+
+function validateAndRepair(structure) {
+  let attempts = 0
+
+  while (attempts < 3) {
+    const result = validateGeometry(structure)
+
+    if (result.valid) return structure
+
+    structure = repairStructure(structure, result)
+    attempts++
+  }
+
+  throw new Error("Structure unrecoverable")
+}
+2. Your volume per atom threshold is too strict
+
+You reject:
+
+Volume per atom too small: 4.7 A^3 (min 5)
+
+But many real materials are below 5 Å³/atom.
+
+Example real values:
+
+Material	Å³/atom
+Fe	~11
+MgB2	~9
+Diamond	~5.6
+Hydrides under pressure	3–5
+
+So your rule:
+
+volume_per_atom > 5
+
+is incorrect for hydrides.
+
+Correct approach
+
+Use element dependent volume rules.
+
+Example:
+
+if (containsHydrogen(formula)) {
+   minVolume = 3.0
+} else {
+   minVolume = 5.0
+}
+
+Better:
+
+volume_per_atom > 0.5 * sum(covalent_volumes)
+3. Your La–H minimum distance rule is wrong
+
+You reject:
+
+Atoms La(0) and H(5) too close: 1.66 Å (min 2.02)
+
+But real values:
+
+Bond	Distance
+La–H typical	1.9–2.2 Å
+high pressure hydrides	1.6–1.8 Å
+
+So 1.66 Å is physically possible.
+
+Your rule:
+
+min_distance = covalent_radius_sum
+
+is too strict.
+
+Better rule:
+
+min_dist = 0.7 * (r_i + r_j)
+
+Example code:
+
+const minDist = 0.7 * (r1 + r2)
+
+This dramatically improves structure acceptance.
+
+4. xTB is failing completely
+
+Your logs show:
+
+Geometry optimization failed
+Command failed: cd /tmp/dft_calculations/opt_WSe2N...
+
+But your pipeline continues:
+
+Using analytical fallbacks
+
+Meaning xTB is not actually working.
+
+Likely causes:
+
+1️⃣ xtb not installed
+
+Check:
+
+xtb --version
+2️⃣ path incorrect
+
+Your path:
+
+/home/runner/workspace/server/df
+
+Looks truncated.
+
+Probably:
+
+/home/runner/workspace/server/dft/xtb
+3️⃣ xtb input format wrong
+
+xtb requires:
+
+.xyz file
+
+not QE input.
+
+5. Your DFT queue failure rate shows a systemic issue
+
+Queue stats:
+
+completed: 1
+failed: 260
+
+Failure stage:
+
+geometry: 260
+
+Meaning QE never runs.
+
+This is actually good — it means your filters work.
+
+But the filters are overly strict.
+
+6. Your hydrogen ratio filter is blocking real superconductors
+
+Your earlier rule:
+
+Reject if hydrogen ratio > 85%
+
+But famous materials:
+
+Material	H ratio
+LaH10	91%
+YH10	91%
+H3S	75%
+CaH6	86%
+
+So your filter blocks real high-Tc materials.
+
+Better rule:
+
+reject if H_ratio > 95%
+7. Your system throughput number is impossible
+
+Your logs show:
+
+throughputPerHour: 807833
+
+But you only ran 29 xTB jobs.
+
+This number is clearly broken.
+
+Bug likely here:
+
+throughput = cycles / elapsed_time
+
+But elapsed_time is near zero.
+
+Add:
+
+max(elapsed_time, 1)

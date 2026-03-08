@@ -946,7 +946,7 @@ export function validateChemistryGrammar(composition: Record<string, number>): b
     const metalCount = elements
       .filter(el => METALS.has(el))
       .reduce((sum, el) => sum + (composition[el] || 0), 0);
-    if (metalCount > 0 && hCount / metalCount > 6) return false;
+    if (metalCount > 0 && hCount / metalCount > 12) return false;
   }
 
   const maxSingle = Math.max(...counts);

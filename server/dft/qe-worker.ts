@@ -554,7 +554,9 @@ function validateGeometry(
   const totalAtoms = positions.length;
   const volumeAng3 = latticeA ** 3;
   const volumePerAtom = volumeAng3 / totalAtoms;
-  if (volumePerAtom < 5) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min 5)` };
+  const hasHydrogen = positions.some(p => p.element === "H");
+  const minVolPerAtom = hasHydrogen ? 3.5 : 5;
+  if (volumePerAtom < minVolPerAtom) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})` };
 
   const COVALENT_R: Record<string, number> = {
     H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
@@ -563,6 +565,9 @@ function validateGeometry(
     Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
     Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
     Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39, Pb: 1.46, Bi: 1.48,
+    Se: 1.20, Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44,
+    In: 1.42, Sb: 1.39, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
+    Tl: 1.45, Th: 2.06, U: 1.96,
   };
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
@@ -572,7 +577,9 @@ function validateGeometry(
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       const r1 = COVALENT_R[positions[i].element] ?? 1.3;
       const r2 = COVALENT_R[positions[j].element] ?? 1.3;
-      const minDist = Math.max((r1 + r2) * 0.85, 1.0);
+      const isHPair = positions[i].element === "H" || positions[j].element === "H";
+      const factor = isHPair ? 0.70 : 0.80;
+      const minDist = Math.max((r1 + r2) * factor, isHPair ? 0.6 : 0.9);
       if (dist < minDist) {
         return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A (min ${minDist.toFixed(2)})` };
       }
@@ -601,7 +608,7 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
       isTransitionMetal(el) || isRareEarth(el) || ALKALINE_EARTH_SYMBOLS.has(el)
     ));
 
-    if (hRatio > 0.9 && !hasHydrideMetal) {
+    if (hRatio > 0.95 && !hasHydrideMetal) {
       return { valid: false, reason: `Hydrogen ratio ${(hRatio * 100).toFixed(0)}% with no metal host — likely unphysical` };
     }
 

@@ -619,14 +619,17 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
   return { atoms, proto: "generic-cluster" };
 }
 
-const MIN_VOLUME_PER_ATOM = 8.0;
+const MIN_VOLUME_PER_ATOM = 6.0;
+const MIN_VOLUME_PER_ATOM_HYDRIDE = 3.5;
 const MAX_SCALE_ATTEMPTS = 5;
 
 function getMinInteratomicDistance(el1: string, el2: string): number {
   const r1 = COVALENT_RADII[el1] ?? 1.5;
   const r2 = COVALENT_RADII[el2] ?? 1.5;
   const bondLength = r1 + r2;
-  return Math.max(bondLength * 0.85, 1.0);
+  const isHydrogenPair = el1 === "H" || el2 === "H";
+  const factor = isHydrogenPair ? 0.70 : 0.80;
+  return Math.max(bondLength * factor, isHydrogenPair ? 0.6 : 0.9);
 }
 
 function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
@@ -693,6 +696,9 @@ function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {
 function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPosition[] | null {
   if (atoms.length < 2) return atoms;
 
+  const hasHydrogen = atoms.some(a => a.element === "H");
+  const minVol = hasHydrogen ? MIN_VOLUME_PER_ATOM_HYDRIDE : MIN_VOLUME_PER_ATOM;
+
   let current = atoms;
 
   for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
@@ -701,7 +707,7 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     const volumePerAtom = volume / current.length;
 
     const distOk = minRatio >= 0.99;
-    const volOk = volumePerAtom >= MIN_VOLUME_PER_ATOM - 0.1;
+    const volOk = volumePerAtom >= minVol - 0.1;
 
     if (distOk && volOk) return current;
 
@@ -710,7 +716,7 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
       scaleFactor = Math.max(scaleFactor, 1.05 / Math.max(minRatio, 0.01));
     }
     if (!volOk) {
-      const neededFactor = Math.cbrt(MIN_VOLUME_PER_ATOM / Math.max(volumePerAtom, 0.01));
+      const neededFactor = Math.cbrt(minVol / Math.max(volumePerAtom, 0.01));
       scaleFactor = Math.max(scaleFactor, neededFactor);
     }
 
@@ -723,7 +729,7 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   const volume = computeBoundingVolume(current);
   const volumePerAtom = volume / current.length;
 
-  if (minRatio < 0.99 || volumePerAtom < MIN_VOLUME_PER_ATOM - 0.1) {
+  if (minRatio < 0.99 || volumePerAtom < minVol - 0.1) {
     console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
     return null;
   }
@@ -1036,16 +1042,22 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  const { atoms: initialAtoms, prototype } = generateCrystalStructure(formula);
-  if (initialAtoms.length < 2) return null;
-
-  let atoms = initialAtoms;
+  let atoms: AtomPosition[] = [];
+  let prototype = "unknown";
   let isOptimized = false;
 
   const optResult = await runXTBOptimization(formula);
   if (optResult && optResult.converged && optResult.optimizedAtoms.length >= 2) {
     atoms = optResult.optimizedAtoms;
+    prototype = "xTB-optimized";
     isOptimized = true;
+  }
+
+  if (atoms.length < 2) {
+    const generated = generateCrystalStructure(formula);
+    atoms = generated.atoms;
+    prototype = generated.prototype;
+    if (atoms.length < 2) return null;
   }
 
   const xyzPath = path.join(calcDir, "input.xyz");
