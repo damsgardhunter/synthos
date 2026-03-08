@@ -122,6 +122,11 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Surrogate pre-filter pipeline**: `surrogateScreen()` in gradient-boost.ts screens candidates with GB model before expensive physics evaluation. Rejects: metallicity <0.15 (insulator), predicted Tc <3K, GB score <0.1. `incorporateSuccessData()` adds successful candidates to training set. `retrainWithAccumulatedData()` retrains GB model with accumulated success + failure examples every 50 engine cycles. `getSurrogateStats()` reports screen/pass/reject counts and training set sizes.
 - **Discovery score weights**: 0.55 Tc + 0.15 stability + 0.10 novelty + 0.10 synthesis + 0.05 topology + 0.05 uncertainty
 - **Design program templates**: 11-12 instructions per template; mutation pool has 10 insertable instruction types with 40% chance to insert 2 at once
+- **Bayesian optimizer**: `addObservation` sanitizes tc/lambda/stability (NaN/undefined → 0) before storing. `getStats().avgTc` now always returns a valid number.
+- **GNN correlations**: `trackMultiTaskPrediction` computes proper running Pearson correlation (tc_lambda, tc_dos, tc_metallicity) using accumulator sums, not error metrics.
+- **Throughput**: `throughputPerHour` uses session-only `autonomousTotalScreened / elapsedHours` (not all-time DB totals) to avoid inflation after restarts.
+- **Theory discovery**: Dimensional validity is a 10% score bonus, not a hard gate. Theories no longer require exact unit consistency to be accepted.
+- **Crystal growth defaults**: Cooling rates reduced to 5-50 K/s (was 100-500) for realistic grain sizes. Default anneal times increased to 8-16h.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP, formula generation, ML refinement, knowledge base sourcing).

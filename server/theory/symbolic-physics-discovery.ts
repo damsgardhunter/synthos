@@ -938,8 +938,6 @@ export function runSymbolicPhysicsDiscovery(
 
         const dimValid = isDimensionallyValidForTarget(tree, target);
 
-        if (!dimValid) continue;
-
         let constraintViolations = 0;
         for (const row of dataset) {
           const pred = evaluateNode(tree, row as any);
@@ -951,11 +949,13 @@ export function runSymbolicPhysicsDiscovery(
         const novelty = computeNovelty(equation, [...theoryDatabase, ...discovered]);
         const physicsCompliance = fit.physicsScore;
 
+        const dimBonus = dimValid ? 0.10 : 0;
         const theoryScore =
           0.30 * fit.r2 +
           0.15 * simplicity +
           0.15 * avgGenR2 +
-          0.25 * physicsCompliance +
+          0.15 * physicsCompliance +
+          dimBonus +
           0.15 * novelty;
 
         const variables = extractVariables(tree);

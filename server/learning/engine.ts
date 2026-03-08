@@ -3664,14 +3664,15 @@ export async function getAutonomousLoopStats() {
   const allTimePipelineTotal = allTimeStats ? allTimeStats.pipelineStages.reduce((s: number, p: any) => s + (p.count || 0), 0) : 0;
   const allTimePipelinePassed = allTimeStats ? allTimeStats.pipelineStages.reduce((s: number, p: any) => s + (p.passed || 0), 0) : 0;
 
+  const reconciledScreened = Math.max(autonomousTotalScreened, allTimePipelineTotal);
+  const reconciledPassed = Math.max(autonomousTotalPassed, allTimePipelinePassed);
+
   return {
-    totalScreened: Math.max(autonomousTotalScreened, allTimePipelineTotal),
-    totalPassed: Math.max(autonomousTotalPassed, allTimePipelinePassed),
-    passRate: Math.max(autonomousTotalScreened, allTimePipelineTotal) > 0
-      ? Math.max(autonomousTotalPassed, allTimePipelinePassed) / Math.max(autonomousTotalScreened, allTimePipelineTotal)
-      : 0,
+    totalScreened: reconciledScreened,
+    totalPassed: reconciledPassed,
+    passRate: reconciledScreened > 0 ? reconciledPassed / reconciledScreened : 0,
     bestTc: autonomousBestTc,
-    throughputPerHour: elapsedHours > 0 ? Math.round(Math.max(autonomousTotalScreened, allTimePipelineTotal) / elapsedHours) : 0,
+    throughputPerHour: (elapsedHours > 0 && autonomousTotalScreened > 0) ? Math.round(autonomousTotalScreened / elapsedHours) : 0,
     gnnRetrainCount: autonomousGNNRetrainCount,
     activeLearning: alStats,
     realDFT: {

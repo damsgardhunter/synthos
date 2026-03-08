@@ -184,16 +184,20 @@ export class BayesianOptimizer {
   private maxObservations = 500;
 
   addObservation(formula: string, tc: number, lambda: number = 0, stability: number = 0): void {
+    const safeTc = (tc != null && Number.isFinite(tc)) ? tc : 0;
+    const safeLambda = (lambda != null && Number.isFinite(lambda)) ? lambda : 0;
+    const safeStability = (stability != null && Number.isFinite(stability)) ? stability : 0;
+
     const features = compositionToFeatures(formula);
     const allZero = features.every(f => f === 0);
     if (allZero) return;
 
     const existing = this.observations.find(o => o.formula === formula);
     if (existing) {
-      if (tc > existing.tc) {
-        existing.tc = tc;
-        existing.lambda = lambda;
-        existing.stability = stability;
+      if (safeTc > existing.tc) {
+        existing.tc = safeTc;
+        existing.lambda = safeLambda;
+        existing.stability = safeStability;
         existing.timestamp = Date.now();
         this.cachedL = null;
         this.cachedAlpha = null;
@@ -204,14 +208,14 @@ export class BayesianOptimizer {
     this.observations.push({
       formula,
       features,
-      tc,
-      lambda,
-      stability,
+      tc: safeTc,
+      lambda: safeLambda,
+      stability: safeStability,
       timestamp: Date.now(),
     });
 
-    if (tc > this.bestTcObserved) {
-      this.bestTcObserved = tc;
+    if (safeTc > this.bestTcObserved) {
+      this.bestTcObserved = safeTc;
     }
 
     if (this.observations.length > this.maxObservations) {

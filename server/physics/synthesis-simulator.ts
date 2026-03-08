@@ -74,14 +74,14 @@ export const SYNTHESIS_CONSTRAINTS = {
 } as const;
 
 const SYNTHESIS_DEFAULTS: Record<string, Partial<SynthesisVector>> = {
-  hydride: { temperature: 1000, pressure: 100, coolingRate: 500, annealTime: 4, strain: 0.5 },
+  hydride: { temperature: 1000, pressure: 100, coolingRate: 50, annealTime: 8, strain: 0.3 },
   cuprate: { temperature: 950, pressure: 0.1, coolingRate: 2, annealTime: 24, oxygenPressure: 0.21 },
-  "iron-pnictide": { temperature: 1100, pressure: 2, coolingRate: 100, annealTime: 12 },
-  intermetallic: { temperature: 1200, pressure: 0.1, coolingRate: 50, annealTime: 8 },
-  boride: { temperature: 1400, pressure: 5, coolingRate: 200, annealTime: 6 },
-  carbide: { temperature: 1500, pressure: 3, coolingRate: 100, annealTime: 10 },
-  nitride: { temperature: 1300, pressure: 1, coolingRate: 50, annealTime: 8 },
-  default: { temperature: 1000, pressure: 1, coolingRate: 100, annealTime: 8 },
+  "iron-pnictide": { temperature: 1100, pressure: 2, coolingRate: 10, annealTime: 16 },
+  intermetallic: { temperature: 1200, pressure: 0.1, coolingRate: 5, annealTime: 12 },
+  boride: { temperature: 1400, pressure: 5, coolingRate: 20, annealTime: 10 },
+  carbide: { temperature: 1500, pressure: 3, coolingRate: 15, annealTime: 12 },
+  nitride: { temperature: 1300, pressure: 1, coolingRate: 10, annealTime: 12 },
+  default: { temperature: 1000, pressure: 1, coolingRate: 10, annealTime: 12 },
 };
 
 const simulatorStats = {
