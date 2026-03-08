@@ -739,13 +739,14 @@ export class RLChemicalSpaceAgent {
   }
 
   recordElementOutcome(elements: string[], tc: number, passed: boolean): void {
+    const safeTc = (tc != null && Number.isFinite(tc)) ? tc : 0;
     for (const el of elements) {
       const group = ELEMENT_GROUPS.find(g => (g.elements as readonly string[]).includes(el));
       if (!group) continue;
 
       const stats = this.elementSuccessRates.get(group.name) || { successes: 0, total: 0 };
       stats.total++;
-      if (passed || tc > 20) stats.successes++;
+      if (passed || safeTc > 20) stats.successes++;
       this.elementSuccessRates.set(group.name, stats);
     }
 
@@ -755,8 +756,8 @@ export class RLChemicalSpaceAgent {
           const pair = this.makeElementPairKey(elements[i], elements[j]);
           const stats = this.pairSuccessRates.get(pair) || { successes: 0, total: 0, avgTc: 0 };
           stats.total++;
-          if (tc > 20) stats.successes++;
-          stats.avgTc = (stats.avgTc * (stats.total - 1) + tc) / stats.total;
+          if (safeTc > 20) stats.successes++;
+          stats.avgTc = (stats.avgTc * (stats.total - 1) + safeTc) / stats.total;
           this.pairSuccessRates.set(pair, stats);
 
           const currentBias = this.policy.elementPairSpecific.get(pair) ?? 0;
@@ -892,16 +893,18 @@ export class RLChemicalSpaceAgent {
     const W_NOVELTY = 0.10;
     const W_SYNTHESIS = 0.10;
 
-    const tcNorm = Math.min(1, tcPredicted / 400);
+    const safeTc = (tcPredicted != null && Number.isFinite(tcPredicted)) ? tcPredicted : 0;
+    const safeBestBefore = (bestTcBefore != null && Number.isFinite(bestTcBefore)) ? bestTcBefore : 0;
+    const tcNorm = Math.min(1, safeTc / 400);
     let tcScore = tcNorm * 2.0;
-    if (tcPredicted > bestTcBefore) {
-      const improvement = (tcPredicted - bestTcBefore) / Math.max(1, bestTcBefore);
+    if (safeTc > safeBestBefore) {
+      const improvement = (safeTc - safeBestBefore) / Math.max(1, safeBestBefore);
       tcScore += improvement * 3.0;
     }
     if (pipelinePassed) {
       tcScore += 0.5;
     }
-    if (tcPredicted < 5) {
+    if (safeTc < 5) {
       tcScore -= 0.5;
     }
 

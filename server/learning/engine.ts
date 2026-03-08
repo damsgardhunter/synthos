@@ -3660,12 +3660,18 @@ export async function getAutonomousLoopStats() {
   const elapsedHours = (Date.now() - autonomousStartTime) / 3600000;
   const alStats = getActiveLearningStats();
   const xtbStats = getXTBStats();
+  const allTimeStats = await storage.getStats().catch(() => null);
+  const allTimePipelineTotal = allTimeStats ? allTimeStats.pipelineStages.reduce((s: number, p: any) => s + (p.count || 0), 0) : 0;
+  const allTimePipelinePassed = allTimeStats ? allTimeStats.pipelineStages.reduce((s: number, p: any) => s + (p.passed || 0), 0) : 0;
+
   return {
-    totalScreened: autonomousTotalScreened,
-    totalPassed: autonomousTotalPassed,
-    passRate: autonomousTotalScreened > 0 ? autonomousTotalPassed / autonomousTotalScreened : 0,
+    totalScreened: Math.max(autonomousTotalScreened, allTimePipelineTotal),
+    totalPassed: Math.max(autonomousTotalPassed, allTimePipelinePassed),
+    passRate: Math.max(autonomousTotalScreened, allTimePipelineTotal) > 0
+      ? Math.max(autonomousTotalPassed, allTimePipelinePassed) / Math.max(autonomousTotalScreened, allTimePipelineTotal)
+      : 0,
     bestTc: autonomousBestTc,
-    throughputPerHour: elapsedHours > 0 ? Math.round(autonomousTotalScreened / elapsedHours) : 0,
+    throughputPerHour: elapsedHours > 0 ? Math.round(Math.max(autonomousTotalScreened, allTimePipelineTotal) / elapsedHours) : 0,
     gnnRetrainCount: autonomousGNNRetrainCount,
     activeLearning: alStats,
     realDFT: {

@@ -111,7 +111,10 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **Family quotas**: FAMILY_CAPS dict (Hydrides 40%, Intermetallics 25%, Borides/Carbides/Nitrides/Oxides 15% each, Sulfides/Pnictides 10%)
 - **Known compound filter**: ~200 known compounds (hydrides, carbides, cuprates, iron-based, binary) rejected pre-evaluation
 - **Interatomic distance validation**: Element-pair-aware minimum distances based on covalent radii sums × 0.85, floor of 1.0 Å (not a flat constant). Applied in both xTB structure gen and QE geometry checks.
-- **Hydrogen stoichiometry limits**: H/metal ratio capped at 6 and H fraction at 75% for ambient-pressure candidates. Known superhydrides (LaH10, YH6, etc.) exempted. RL templates use AH3/ABH4 (not AH10/ABH6).
+- **Hydrogen stoichiometry limits**: H/metal ratio > 6 or H fraction > 75% → tagged as high-pressure candidates (not rejected). Estimated pressure computed from stoichiometry. Known superhydrides (LaH10, YH6, etc.) exempted from tagging. RL templates use AH3/ABH4 (not AH10/ABH6). QEFullResult carries `highPressure` and `estimatedPressureGPa` fields.
+- **DFT queue stats**: `totalProcessed/totalSucceeded/totalFailed` use `Math.max(sessionCounter, dbCount)` to stay consistent across server restarts.
+- **RL agent Tc guards**: `recordElementOutcome` and `computeReward` sanitize null/undefined/NaN Tc to 0 before use.
+- **Pipeline pass rate**: `getAutonomousLoopStats` reconciles session counters with DB pipeline stage counts using `Math.max` to avoid inconsistency.
 - **MIN_VOLUME_PER_ATOM**: 8.0 ų in xTB structure gen; 5.0 ų in QE geometry check
 - **xTB binary check**: Validates XTB_BIN exists before geometry optimization commands
 - **xTB health check on startup**: `checkXTBHealth()` runs at engine start — tests binary version, H2 geometry optimization, and H2 Hessian calculation. Sets `xtbHealthy` flag gating `isDFTAvailable()`. Logs results as engine event.

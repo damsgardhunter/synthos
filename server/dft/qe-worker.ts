@@ -107,6 +107,8 @@ export interface QEFullResult {
   failureStage?: string;
   prototypeUsed?: string;
   kPoints?: string;
+  highPressure?: boolean;
+  estimatedPressureGPa?: number;
 }
 
 const structureHashCache = new Set<string>();
@@ -579,7 +581,7 @@ function validateGeometry(
   return { valid: true, reason: "OK" };
 }
 
-function validateFormulaForDFT(formula: string, counts: Record<string, number>): { valid: boolean; reason: string } {
+function validateFormulaForDFT(formula: string, counts: Record<string, number>): { valid: boolean; reason: string; highPressure?: boolean; estimatedPressureGPa?: number } {
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
 
@@ -608,11 +610,11 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
     const isKnownSuperhydride = KNOWN_SUPERHYDRIDES.has(formula.replace(/\s+/g, ""));
 
     if (!isKnownSuperhydride && hPerMetal > 6) {
-      return { valid: false, reason: `H/metal ratio ${hPerMetal.toFixed(1)} too high — superhydrides (H/M>6) require >100 GPa, not ambient pressure` };
+      return { valid: true, reason: `High H/metal ratio ${hPerMetal.toFixed(1)} — tagged as high-pressure candidate (>100 GPa required)`, highPressure: true, estimatedPressureGPa: Math.min(300, 50 + hPerMetal * 15) };
     }
 
     if (hRatio > 0.75 && !isKnownSuperhydride) {
-      return { valid: false, reason: `Hydrogen fraction ${(hRatio * 100).toFixed(0)}% too high for ambient pressure — only known superhydrides under extreme pressure have H>75%` };
+      return { valid: true, reason: `Hydrogen fraction ${(hRatio * 100).toFixed(0)}% — tagged as high-pressure superhydride candidate`, highPressure: true, estimatedPressureGPa: Math.min(300, 100 + hRatio * 100) };
     }
   }
 
@@ -832,6 +834,12 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     stageFailureCounts.formula_filter++;
     console.log(`[QE-Worker] ${formula} rejected: ${formulaCheck.reason}`);
     return result;
+  }
+
+  if (formulaCheck.highPressure) {
+    result.highPressure = true;
+    result.estimatedPressureGPa = formulaCheck.estimatedPressureGPa;
+    console.log(`[QE-Worker] ${formula} tagged as high-pressure candidate (~${formulaCheck.estimatedPressureGPa} GPa)`);
   }
 
   const jobDir = path.join(QE_WORK_DIR, `job_${Date.now()}_${formula.replace(/[^a-zA-Z0-9]/g, "")}`);
