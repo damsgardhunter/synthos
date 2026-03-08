@@ -277,6 +277,18 @@ export function passesValenceFilter(formula: string): boolean {
   const totalMetalCount = metalElements.reduce((s, el) => s + counts[el], 0);
   const totalAnionCount = anionElements.reduce((s, el) => s + counts[el], 0);
 
+  const nonHMetals = metalElements.filter(el => el !== "H");
+  if (nonHMetals.length > 3) {
+    const isHEA = nonHMetals.length >= 4 && nonHMetals.every(el => HEA_ELEMENTS.has(el)) && anionElements.filter(el => el !== "H").length <= 1;
+    if (!isHEA) return false;
+  }
+
+  const distinctNonH = elements.filter(el => el !== "H");
+  if (distinctNonH.length > 4) {
+    const isHEA = nonHMetals.length >= 4 && nonHMetals.every(el => HEA_ELEMENTS.has(el)) && anionElements.filter(el => el !== "H").length <= 1;
+    if (!isHEA) return false;
+  }
+
   if (elements.length > 5) {
     const isHEA = metalElements.length >= 4 && metalElements.every(el => HEA_ELEMENTS.has(el)) && anionElements.length <= 1;
     if (!isHEA) return false;
@@ -286,6 +298,9 @@ export function passesValenceFilter(formula: string): boolean {
 
   const alkalineEarthCount = elements.filter(el => ALKALINE_EARTH_METALS.has(el)).length;
   if (alkalineEarthCount > 3) return false;
+
+  const alkaliCount = elements.filter(el => ["Li", "Na", "K", "Rb", "Cs"].includes(el)).length;
+  if (alkaliCount > 2) return false;
 
   let maxChargeSum = 0;
   let minChargeSum = 0;
@@ -306,7 +321,9 @@ export function passesCompositionComplexityFilter(formula: string): boolean {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  if (elements.length > 6 && totalAtoms > 20) return false;
+  if (elements.length > 5 && totalAtoms > 15) return false;
+  if (elements.length > 6) return false;
+  if (totalAtoms > 30) return false;
   return true;
 }
 

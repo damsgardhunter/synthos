@@ -673,9 +673,14 @@ export class RLChemicalSpaceAgent {
     }
 
     const hDensityBias = new Array(HYDROGEN_DENSITIES.length).fill(0);
+    hDensityBias[0] += 0.2;
     if (bestTcNorm > 0.4) {
-      hDensityBias[2] += 0.15;
-      hDensityBias[3] += 0.25;
+      hDensityBias[2] += 0.05;
+      hDensityBias[3] += 0.08;
+    }
+    if (stagnation > 0.3) {
+      hDensityBias[0] += 0.3;
+      hDensityBias[1] += 0.1;
     }
 
     const eCountBias = new Array(ELECTRON_COUNTS.length).fill(0);
@@ -940,6 +945,8 @@ export class RLChemicalSpaceAgent {
 
     const candidates: string[] = [];
     const seen = new Set<string>();
+    let hydrideCount = 0;
+    const maxHydrides = Math.ceil(count * 0.4);
 
     const pairWeightedElements1 = this.getWeightedElements(group1.elements, group2.elements);
     const pairWeightedElements2 = this.getWeightedElements(group2.elements, group1.elements);
@@ -988,10 +995,23 @@ export class RLChemicalSpaceAgent {
       }
 
       if (!seen.has(formula)) {
+        const isHydride = /(?<![a-z])H(?![a-z])/.test(formula);
+        if (isHydride && hydrideCount >= maxHydrides) continue;
         seen.add(formula);
         candidates.push(formula);
+        if (isHydride) hydrideCount++;
       }
     }
+
+    try {
+      const { getAlreadyScreenedFormulas } = require("./engine");
+      const { normalizeFormula } = require("./utils");
+      const screened = getAlreadyScreenedFormulas();
+      const novel = candidates.filter(f => !screened.has(normalizeFormula(f)));
+      if (novel.length > 0) {
+        return novel;
+      }
+    } catch {}
 
     return candidates;
   }

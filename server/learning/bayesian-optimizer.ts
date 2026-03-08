@@ -380,7 +380,18 @@ export class BayesianOptimizer {
 
     const scored: AcquisitionResult[] = [];
 
-    for (const formula of candidatePool) {
+    let filteredPool = candidatePool;
+    try {
+      const { getAlreadyScreenedFormulas } = require("./engine");
+      const { normalizeFormula } = require("./utils");
+      const screened = getAlreadyScreenedFormulas();
+      const novel = candidatePool.filter(f => !screened.has(normalizeFormula(f)));
+      if (novel.length > 0) {
+        filteredPool = novel;
+      }
+    } catch {}
+
+    for (const formula of filteredPool) {
       const { mean, std } = this.predict(formula);
 
       let acqValue: number;

@@ -243,6 +243,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - formula-generator.ts: NLP-generated formulas now filtered through valence and complexity filters.
   - engine.ts: Fixed `storage.createSuperconductorCandidate` → `insertCandidateWithStabilityCheck` at lines 3029 and 3855; fixed `score` → `ensembleScore`, `structure` → `crystalStructure`; added required `status: "theoretical"`.
 
+- **Round 21 Pipeline Fixes (4 issues)**:
+  - qe-dft-engine.ts: `selectBestPrototypeByChemistry` now handles binary hydrides (MH, MH2, MH5 → NaCl/CsCl/AlB2) and ternary H-compounds (→ Perovskite/ThCr2Si2). `buildGenericStructure` now increments prototypeSuccesses counter.
+  - rl-agent.ts: Generates filter candidates against `alreadyScreenedFormulas` to avoid re-generating known formulas. Hydride cap: max 40% per batch. Reduced hydrogen density bias (no-hydrogen +0.2, high-H reduced from +0.25 to +0.08). Stagnation now boosts non-hydride exploration.
+  - bayesian-optimizer.ts: `suggestNextCandidates` pre-filters candidate pool against alreadyScreenedFormulas.
+  - candidate-generator.ts: Max 3 distinct metals (non-H), max 4 distinct non-H elements (unless HEA). Max 2 alkali metals. Tightened complexity filter: >5 elements && >15 atoms → reject; >6 elements → reject; >30 atoms → reject.
+
 - **Round 20 Crystal Structure Fixes (9 tasks)**:
   - qe-dft-engine.ts: `deduplicateSites()` now drops duplicate atoms instead of adding perturbed phantom atoms (preserves stoichiometry). MX2 prototype `z: -0.121` wrapped to `z: 0.879`. Hydride cage offset uses 3D grid indexing (`ceil(cbrt(nCopies))`) instead of 2×2×∞ layout. `computeBoundingVolume` accounts for atomic radii padding and corrects high-aspect-ratio volumes. Laves-C15 fixed to 4A+8B = 1:2 ratio (was 8A+8B = 1:1). `selectBestPrototypeByChemistry` handles 4-element compounds with pnictide detection for ThCr2Si2 matching instead of forcing Perovskite.
   - crystal-prototypes.ts: `computeBondValenceSum` BVS formula fixed — uses proper coordination-adjusted bond distance `R0 * (1 + 0.02 * max(0, avgCoord - 6))` instead of degenerate constant. `sortElementsBySite` resolves ambiguous same-ratio assignments using chemistry-aware ordering (large cations → spacer sites, TM → active sites, anions → anion roles). Chevrel prototype `latticeType` changed from "hexagonal" to "cubic" (rhombohedral approximation). MX2 negative fractional coordinate fixed.

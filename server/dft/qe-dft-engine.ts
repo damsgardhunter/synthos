@@ -933,6 +933,18 @@ function selectBestPrototypeByChemistry(counts: Record<string, number>, elements
     else targetProtoName = "CsCl";
   } else if (nElements === 2 && (hasRE || hasAlkaline) && hasTM) {
     targetProtoName = "Cu2Mg-Laves";
+  } else if (nElements === 2 && roles.includes("H")) {
+    const metalEl = elements.find(e => e !== "H");
+    const hCount = counts["H"] || 0;
+    const metalCount = metalEl ? (counts[metalEl] || 0) : 1;
+    const hRatio = hCount / metalCount;
+    if (hRatio >= 2) targetProtoName = "AlB2";
+    else if (hRatio <= 0.5) targetProtoName = "CsCl";
+    else targetProtoName = "NaCl";
+  } else if (nElements === 3 && roles.includes("H") && (hasTM || hasRE || hasAlkaline || hasAlkali)) {
+    const nonHNonAnion = elements.filter(e => e !== "H" && !ANIONS.has(e));
+    if (nonHNonAnion.length >= 2) targetProtoName = "Perovskite";
+    else targetProtoName = "ThCr2Si2";
   } else if (nElements === 1) {
     const el = elements[0];
     const role = classifyElement(el);
@@ -1830,6 +1842,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (!checkVolumeRatioForAtoms(validated, scaledCounts, proto, formula)) {
     return { atoms: [], prototype: "rejected-volume-ratio" };
   }
+  prototypeSuccesses++;
   return { atoms: validated, prototype: proto };
 }
 
