@@ -135,6 +135,21 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - engine.ts: Formula dedup Set (formulasInFlight) prevents duplicate processing in autonomous fast-path; Phase 13 synthesis reasoning marks reasoningFailed=true on error to prevent repeated LLM token waste.
   - gradient-boost.ts: 3 new features — multiBandScore (composite from nesting/DOS/orbital), miedemaFormEnergy (explicit from phase-diagram-engine), nonCentrosymmetric (binary flag from space group); formula parameter threaded through featureVectorToArray.
   - pressure-engine.ts: Birch-Murnaghan eta floor raised 0.3→0.5 for extreme compression; nickelate pressure dome (Gaussian centered at 20 GPa, sigma=15) for La3Ni2O7-type materials.
+- **Round 14 comprehensive fixes**:
+  - pairing-mechanisms.ts: Allen-Dynes f2 exponent now properly applied via Math.pow(f2Base, f2Exponent) instead of being calculated but unused; f2Base floored at 0.5 for stability.
+  - engine.ts: computeEliashbergTc denom guard (denom<=0 returns 0, exponent>50 guard); estimateRawTc helper consolidates 5 duplicated raw Tc formulas across Phase 11 generators; includes rawTc>80 && lambda<1.5 penalty.
+  - physics-engine.ts: predictTcEliashberg f2 correction uses actual omega2Avg instead of hardcoded omegaLog*0.56; same Math.pow f2 formulation as pairing-mechanisms.
+  - graph-neural-net.ts: MLP2 bias training extended to all 5 outputs (was only indices 0,2); batch sampling shuffles and iterates full dataset in mini-batches instead of only first 32 samples.
+  - supercon-dataset.ts: Lambda values added for 15 elemental superconductors (Zn=0.42, Ti=0.38, Zr=0.41, etc.); Nb Tc corrected 9.3→9.25K; Al Tc corrected 1.2→1.18K; YH10 marked theoretical:true.
+  - fermi-surface-engine.ts: Lattice-specific neighbor lists (BCC 8, FCC 12, hexagonal 12) replace hardcoded simple cubic; complex Hamiltonian with sin(kDotR) imaginary part for non-centrosymmetric materials.
+  - pressure-engine.ts: Hydride B0 includes H contribution at P>=100 GPa; Tc cliff smoothed (denom threshold 0.01→0.001 with linear fade 0-0.05); discrete hydride stoichiometry steps [2,3,4,6,8,10,12]; exponent>50 guard.
+  - crystal-prototypes.ts: Hexagonal coordinate transform fixed to proper basis vectors (cos60/sin60); ionic radii used for perovskite/oxide lattice constant estimation.
+  - inverse-generator.ts: 8 new substitution pairs (Mg↔Al, Li↔Mg, Ca↔Sr, Ba↔Ca, Sc↔Y, Hf↔Zr, Ta↔Nb, Mo↔W); 2 new stoichiometry patterns (A4B3C, AB3C4); intermetallic charge balance skip.
+  - rl-agent.ts: 5 new MOTIF_FAMILY_MAP entries (BiS2-layer, CaBe2Ge2, Chevrel-phase, infinite-layer, Ruddlesden-Popper); partial match fallback scoring in computeFamilyConsistencyScore.
+  - gradient-boost.ts: MSE threshold made scale-aware (max(1.0, 0.01*variance(y))); missing feature imputation uses feature mean instead of 0.
+  - synthesis-simulator.ts: lambdaMod uses sqrt scaling; T-P coupling penalty in feasibility; hydride oxygen range reduced 0-1.0→0-0.1.
+  - elemental-data.ts: pressureDebyeTemp field added (H=1500K for metallic phase); In bulkModulus corrected 41→42; physics-engine uses pressureDebyeTemp for H in H-rich compounds.
+  - qe-worker.ts: Anisotropic k-points for layered materials (c/a>2.0 detected from composition); AFM support with alternating starting_magnetization for cuprates/pnictides.
 - **Round 13 comprehensive fixes**:
   - graph-neural-net.ts: Removed `.slice(0, HIDDEN_DIM)` in attentionMessagePassingLayer and messagePassingLayer that was discarding all aggregated neighbor info; W_update/W_update2/W_update3 changed from HIDDEN_DIM×HIDDEN_DIM to HIDDEN_DIM×(2*HIDDEN_DIM) to process full [node, message] concatenation; edge features now feed into attention mechanism via dot-product contribution.
   - tight-binding.ts: Added `getNeighborVectors(latticeType)` returning lattice-specific nearest-neighbor shells: BCC (8 neighbors at [±0.5,±0.5,±0.5]), FCC (12 neighbors), hexagonal (12 in-plane + out-of-plane), cubic (6 default); `buildHamiltonianAtK` accepts latticeType parameter.

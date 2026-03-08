@@ -1390,7 +1390,7 @@ export function computeElectronPhononCoupling(
         const eta = getMcMillanHopfieldEta(el);
         if (eta !== null && eta > 0) {
           const M = data.atomicMass;
-          const thetaD = data.debyeTemperature || phononSpectrum.debyeTemperature;
+          const thetaD = (el === 'H' && hRatio >= 4 && data.pressureDebyeTemp) ? data.pressureDebyeTemp : (data.debyeTemperature || phononSpectrum.debyeTemperature);
           const denom = M * thetaD * thetaD;
           if (denom <= 0) continue;
           const lambdaEl = (eta * LAMBDA_CONVERSION) / denom;
@@ -1614,10 +1614,13 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   } else {
     const lambdaBar = 2.46 * (1 + 3.8 * muStar);
     const f1 = Math.pow(1 + (lambda / lambdaBar), 1/3);
-    const omegaBar = omegaLog * 0.56;
-    const f2 = 1 + (lambda * lambda / (lambda * lambda + lambdaBar * lambdaBar)) * (omegaBar / omegaLog - 1);
+    const omega2Avg = phonon?.logAverageFrequency ? phonon.logAverageFrequency * phonon.logAverageFrequency * 1.2 : omegaLog * omegaLog * 1.2;
+    const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / omegaLog : 1.0;
+    const f2Base = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
+    const f2Exp = (1 - lambda * lambda) / (1 + lambda * lambda);
+    const f2 = Math.pow(Math.max(0.5, f2Base), f2Exp);
     const exponent = -1.04 * (1 + lambda) / denominator;
-    tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
+    tc = (omegaLogK / 1.2) * f1 * Math.max(1, f2) * Math.exp(exponent);
   }
 
   tc = Number.isFinite(tc) ? Math.max(0, tc) : 0;

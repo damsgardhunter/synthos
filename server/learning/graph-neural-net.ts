@@ -959,58 +959,92 @@ export function trainGNNSurrogate(trainingData: TrainingSample[]): GNNWeights {
   const epochs = 30;
   const batchSize = Math.min(32, trainingData.length);
 
+  const indices = Array.from({ length: trainingData.length }, (_, i) => i);
+
   for (let epoch = 0; epoch < epochs; epoch++) {
     let totalLoss = 0;
+    let totalSamples = 0;
 
-    for (let b = 0; b < Math.min(batchSize, trainingData.length); b++) {
-      const idx = Math.floor(rng() * trainingData.length);
-      const sample = trainingData[idx];
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
 
-      const graph = sample.prototype
-        ? buildPrototypeGraph(sample.formula, sample.prototype)
-        : buildCrystalGraph(sample.formula, sample.structure);
-      const pred = GNNPredict(graph, weights);
+    const numBatches = Math.ceil(trainingData.length / batchSize);
 
-      const tcTarget = sample.tc / 100;
-      const feTarget = sample.formationEnergy ?? 0;
-      const tcError = pred.predictedTc / 100 - tcTarget;
-      const feError = pred.formationEnergy - feTarget;
+    for (let batch = 0; batch < numBatches; batch++) {
+      const batchStart = batch * batchSize;
+      const batchEnd = Math.min(batchStart + batchSize, trainingData.length);
 
-      const loss = tcError * tcError + 0.1 * feError * feError;
-      totalLoss += loss;
+      for (let b = batchStart; b < batchEnd; b++) {
+        const idx = indices[b];
+        const sample = trainingData[idx];
 
-      const tcGrad = 2 * tcError * lr;
-      const feGrad = 2 * feError * 0.1 * lr;
+        const graph = sample.prototype
+          ? buildPrototypeGraph(sample.formula, sample.prototype)
+          : buildCrystalGraph(sample.formula, sample.structure);
+        const pred = GNNPredict(graph, weights);
 
-      for (let i = 0; i < weights.W_mlp2.length; i++) {
-        for (let j = 0; j < weights.W_mlp2[i].length; j++) {
-          const grad = i === 2 ? tcGrad : (i === 0 ? feGrad : 0);
-          weights.W_mlp2[i][j] -= grad * (rng() * 0.5 + 0.5);
+        const tcTarget = sample.tc / 100;
+        const feTarget = sample.formationEnergy ?? 0;
+        const tcError = pred.predictedTc / 100 - tcTarget;
+        const feError = pred.formationEnergy - feTarget;
+
+        const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;
+        const phononPred = pred.phononStability ? 1.0 : 0.0;
+        const phononError = phononPred - phononTarget;
+
+        const confTarget = Math.min(1.0, sample.tc > 0 ? 0.8 : 0.3);
+        const confError = pred.confidence - confTarget;
+
+        const lambdaTarget = sample.tc > 0 ? Math.min(2.0, sample.tc / 50) : 0.1;
+        const lambdaError = pred.lambda - lambdaTarget;
+
+        const loss = tcError * tcError + 0.1 * feError * feError;
+        totalLoss += loss;
+        totalSamples++;
+
+        const tcGrad = 2 * tcError * lr;
+        const feGrad = 2 * feError * 0.1 * lr;
+        const phononGrad = 2 * phononError * 0.05 * lr;
+        const confGrad = 2 * confError * 0.05 * lr;
+        const lambdaGrad = 2 * lambdaError * 0.1 * lr;
+
+        for (let i = 0; i < weights.W_mlp2.length; i++) {
+          let grad = 0;
+          if (i === 0) grad = feGrad;
+          else if (i === 1) grad = phononGrad;
+          else if (i === 2) grad = tcGrad;
+          else if (i === 3) grad = confGrad;
+          else if (i === 4) grad = lambdaGrad;
+
+          for (let j = 0; j < weights.W_mlp2[i].length; j++) {
+            weights.W_mlp2[i][j] -= grad * (rng() * 0.5 + 0.5);
+          }
+          weights.b_mlp2[i] -= grad * 0.5;
         }
-        if (i === 2) weights.b_mlp2[i] -= tcGrad * 0.5;
-        if (i === 0) weights.b_mlp2[i] -= feGrad * 0.5;
-      }
 
-      for (const wMat of [
-        weights.W_message, weights.W_update,
-        weights.W_message2, weights.W_update2,
-        weights.W_message3, weights.W_update3,
-        weights.W_attn_query, weights.W_attn_key,
-        weights.W_attn_query2, weights.W_attn_key2,
-        weights.W_attn_query3, weights.W_attn_key3,
-        weights.W_3body, weights.W_3body_update,
-        weights.W_mlp1,
-      ]) {
-        for (let i = 0; i < wMat.length; i++) {
-          for (let j = 0; j < wMat[i].length; j++) {
-            const combinedGrad = tcGrad * 0.7 + feGrad * 0.3;
-            wMat[i][j] -= combinedGrad * (rng() - 0.5) * 0.01;
+        for (const wMat of [
+          weights.W_message, weights.W_update,
+          weights.W_message2, weights.W_update2,
+          weights.W_message3, weights.W_update3,
+          weights.W_attn_query, weights.W_attn_key,
+          weights.W_attn_query2, weights.W_attn_key2,
+          weights.W_attn_query3, weights.W_attn_key3,
+          weights.W_3body, weights.W_3body_update,
+          weights.W_mlp1,
+        ]) {
+          for (let i = 0; i < wMat.length; i++) {
+            for (let j = 0; j < wMat[i].length; j++) {
+              const combinedGrad = tcGrad * 0.7 + feGrad * 0.3;
+              wMat[i][j] -= combinedGrad * (rng() - 0.5) * 0.01;
+            }
           }
         }
       }
     }
 
-    if (totalLoss / batchSize < 0.01) break;
+    if (totalSamples > 0 && totalLoss / totalSamples < 0.01) break;
   }
 
   weights.trainedAt = Date.now();

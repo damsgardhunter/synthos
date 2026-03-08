@@ -956,11 +956,22 @@ function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): 
   if (lambda < 0.05 || omegaLog <= 0) return 0;
   const omegaLogK = omegaLog * 1.44;
   const denom = lambda - muStar * (1 + 0.62 * lambda);
-  if (Math.abs(denom) < 1e-6) return 0;
+  if (denom <= 1e-6) return 0;
   const exponent = -1.04 * (1 + lambda) / denom;
+  if (exponent > 50) return 0;
   const tc = (omegaLogK / 1.2) * Math.exp(exponent);
   if (!Number.isFinite(tc) || tc < 0) return 0;
   return Math.round(tc);
+}
+
+function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined): number {
+  const freq = logPhononFreq ?? 200;
+  let rawTc = Math.round(lambdaML * 45 + freq * 0.05);
+  if (rawTc > 80 && lambdaML < 1.5) {
+    const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
+    rawTc = Math.round(rawTc * penalty);
+  }
+  return Math.max(0, Math.min(400, rawTc));
 }
 
 async function reEvaluateTopCandidates() {
@@ -2023,11 +2034,7 @@ async function runPhase11_StructurePrediction() {
               const gbResult = gbPredict(features);
               const lambdaML = features.electronPhononLambda ?? 0;
               const metallicityML = features.metallicity ?? 0.5;
-              let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
-              if (rawTc > 80 && lambdaML < 1.5) {
-                const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
-                rawTc = Math.round(rawTc * penalty);
-              }
+              let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
               rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
 
               const id = `sc-struct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2086,7 +2093,7 @@ async function runPhase11_StructurePrediction() {
             const gbResult = gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
-            let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+            let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
             rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
 
             const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2150,7 +2157,7 @@ async function runPhase11_StructurePrediction() {
             const gbResult = gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
-            let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+            let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
             rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, evoFormula);
             const id = `sc-evo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             try {
@@ -2220,11 +2227,7 @@ async function runPhase11_StructurePrediction() {
           const gbResult = gbPredict(features);
           const lambdaML = features.electronPhononLambda ?? 0;
           const metallicityML = features.metallicity ?? 0.5;
-          let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
-          if (rawTc > 80 && lambdaML < 1.5) {
-            const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
-            rawTc = Math.round(rawTc * penalty);
-          }
+          let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
           rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, normalized);
 
           const id = `sc-diff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -4586,7 +4589,7 @@ async function runLearningCycle() {
                 if (gb.tcPredicted >= 10) {
                   const lambdaML = features.electronPhononLambda ?? 0;
                   const metallicityML = features.metallicity ?? 0.5;
-                  let rawTc = Math.round(lambdaML * 45 + (features.logPhononFreq ?? 200) * 0.05);
+                  let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
                   rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, mf);
                   const id = `sc-mut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                   try {

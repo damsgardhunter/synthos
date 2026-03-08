@@ -86,11 +86,20 @@ export function relaxStructureAtPressure(
 
   let B0 = 0;
   let totalWeight = 0;
-  const isHydrideComp = elements.includes("H") && (counts["H"] || 0) / totalAtoms > 0.3;
+  const hRatio = (counts["H"] || 0) / totalAtoms;
+  const isHydrideComp = elements.includes("H") && hRatio > 0.3;
   for (const el of elements) {
     const data = getElementData(el);
     if (!data) continue;
-    if (isHydrideComp && el === "H") continue;
+    if (isHydrideComp && el === "H") {
+      if (pressure >= 100) {
+        const hBulk = 10 + pressure * 0.3;
+        const frac = (counts[el] || 1) / totalAtoms;
+        B0 += hBulk * frac;
+        totalWeight += frac;
+      }
+      continue;
+    }
     const frac = (counts[el] || 1) / totalAtoms;
     const elBulk = data.bulkModulus ?? estimateDefaultBulkModulus(el);
     B0 += elBulk * frac;
@@ -201,7 +210,15 @@ export function predictHydrideFormation(
 
     const Hf = Hf0 + pressureStabilization - H2_DISSOCIATION * 0.01 * (1 - pressure / 300);
 
-    const effectiveH = Math.round(maxH * Math.min(1, Math.max(0.3, pressure / optP)));
+    const hFrac = Math.min(1, Math.max(0.3, pressure / optP));
+    const discreteSteps = [2, 3, 4, 6, 8, 10, 12];
+    const targetH = maxH * hFrac;
+    let effectiveH = discreteSteps[0];
+    for (const step of discreteSteps) {
+      if (step <= maxH && Math.abs(step - targetH) < Math.abs(effectiveH - targetH)) {
+        effectiveH = step;
+      }
+    }
 
     if (effectiveH >= 2 && Hf < 0) {
       const hydrideFormula = `${metal}H${effectiveH}`;
@@ -417,13 +434,18 @@ export function scanPressureTcCurve(
     const omegaLogK = omegaLogP * 1.44;
     const denom = lambdaP - muStar * (1 + 0.62 * lambdaP);
     let Tc = 0;
-    if (denom > 0.01) {
+    if (denom > 0.001) {
       const f1 = lambdaP < 1.5
         ? Math.pow(1 + (lambdaP / 2.46 / (1 + 3.8 * muStar)), 1 / 3)
         : Math.sqrt(1 + lambdaP / 2.46);
       const exponent = -1.04 * (1 + lambdaP) / denom;
-      Tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
-      if (!Number.isFinite(Tc) || Tc < 0) Tc = 0;
+      if (exponent > 50) { Tc = 0; } else {
+        Tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+        if (!Number.isFinite(Tc) || Tc < 0) Tc = 0;
+      }
+      if (denom < 0.05) {
+        Tc *= denom / 0.05;
+      }
     }
 
     const stability = assessHighPressureStability(formula, P);

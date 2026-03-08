@@ -88,15 +88,32 @@ function getCovalentRadius(el: string): number {
   return COVALENT_RADII[el] ?? 1.3;
 }
 
+function isIonicCompound(elements: string[], templateName: string): boolean {
+  const ionicTemplates = new Set([
+    "Perovskite", "Anti-perovskite", "NaCl-B1", "K2NiF4-214",
+    "Infinite-layer", "T-prime", "YBCO-123", "1111-Type", "BiS2-type"
+  ]);
+  if (ionicTemplates.has(templateName)) return true;
+  return elements.some(e => ANIONS.has(e)) && elements.some(e => !ANIONS.has(e));
+}
+
+function getEffectiveRadius(el: string, useIonic: boolean): number {
+  if (useIonic && IONIC_RADII[el] !== undefined) {
+    return IONIC_RADII[el];
+  }
+  return getCovalentRadius(el);
+}
+
 export function estimateLatticeConstant(
   elements: string[],
   counts: Record<string, number>,
   template: PrototypeTemplate
 ): { a: number; c: number } {
+  const useIonic = isIonicCompound(elements, template.name);
   let totalVolume = 0;
   for (const el of elements) {
     const n = Math.round(counts[el] || 1);
-    const r = getCovalentRadius(el);
+    const r = getEffectiveRadius(el, useIonic);
     totalVolume += n * (4.0 / 3.0) * Math.PI * r * r * r;
   }
 
@@ -779,14 +796,16 @@ export function fillPrototype(formula: string): FilledPrototype | null {
   const { a, c } = estimateLatticeConstant(elements, counts, template);
 
   const atoms: { element: string; x: number; y: number; z: number }[] = [];
+  const cos60 = 0.5;
+  const sin60 = Math.sqrt(3) / 2;
   for (const site of template.sites) {
     const element = siteMap[site.label];
     if (!element) continue;
 
     let x: number, y: number, z: number;
     if (template.latticeType === "hexagonal") {
-      x = a * site.x + a * 0.5 * site.y;
-      y = a * (Math.sqrt(3) / 2) * site.y;
+      x = a * (site.x + site.y * cos60);
+      y = a * site.y * sin60;
       z = c * site.z;
     } else {
       x = a * site.x;

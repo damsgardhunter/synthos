@@ -108,8 +108,57 @@ function computeCalibration(model: GBModel): CalibrationData {
   };
 }
 
-function sanitize(v: number | undefined | null, fallback: number = 0): number {
-  if (v == null || !Number.isFinite(v)) return fallback;
+const FEATURE_MEANS: Record<string, number> = {
+  electronPhononLambda: 0.5,
+  metallicity: 0.5,
+  logPhononFreq: 200,
+  debyeTemperature: 300,
+  correlationStrength: 0.3,
+  valenceElectronConcentration: 4,
+  avgElectronegativity: 2.0,
+  enSpread: 1.0,
+  hydrogenRatio: 0.0,
+  pettiforNumber: 60,
+  avgAtomicRadius: 130,
+  avgSommerfeldGamma: 2.0,
+  avgBulkModulus: 100,
+  maxAtomicMass: 50,
+  numElements: 2,
+  cooperPairStrength: 0.5,
+  dimensionalityScore: 0.5,
+  electronDensityEstimate: 0.5,
+  phononCouplingEstimate: 0.5,
+  meissnerPotential: 0.5,
+  dftConfidence: 0.5,
+  orbitalCharacterCode: 0.5,
+  phononSpectralCentroid: 0.5,
+  phononSpectralWidth: 0.5,
+  bondStiffnessVariance: 0.5,
+  chargeTransferMagnitude: 0.5,
+  connectivityIndex: 0.5,
+  nestingScore: 0.3,
+  vanHoveProximity: 0.3,
+  bandFlatness: 0.3,
+  softModeScore: 0.3,
+  motifScore: 0.3,
+  orbitalDFraction: 0.3,
+  mottProximityScore: 0.3,
+  topologicalBandScore: 0.3,
+  dimensionalityScoreV2: 0.3,
+  phononSofteningIndex: 0.3,
+  spinFluctuationStrength: 0.3,
+  fermiSurfaceNestingScore: 0.3,
+  dosAtEF: 1.0,
+  muStarEstimate: 0.13,
+  pressureGpa: 0,
+  optimalPressureGpa: 0,
+  bandGap: 0,
+  formationEnergy: 0,
+  stability: 0.5,
+};
+
+function sanitize(v: number | undefined | null, fallback?: number): number {
+  if (v == null || !Number.isFinite(v)) return fallback ?? 0;
   return v;
 }
 
@@ -157,59 +206,59 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
   }
 
   return [
-    sanitize(f.electronPhononLambda, 0.5),
-    sanitize(f.metallicity, 0.5),
-    sanitize(f.logPhononFreq, 200),
-    sanitize(f.debyeTemperature, 300),
-    sanitize(f.correlationStrength, 0.3),
-    sanitize(f.valenceElectronConcentration, 4),
-    sanitize(f.avgElectronegativity, 2.0),
-    sanitize(f.enSpread, 1.0),
-    sanitize(f.hydrogenRatio),
-    sanitize(f.pettiforNumber, 60),
-    sanitize(f.avgAtomicRadius, 130),
-    sanitize(f.avgSommerfeldGamma, 2.0),
-    sanitize(f.avgBulkModulus, 100),
-    sanitize(f.maxAtomicMass, 50),
-    sanitize(f.numElements, 2),
+    sanitize(f.electronPhononLambda, FEATURE_MEANS.electronPhononLambda),
+    sanitize(f.metallicity, FEATURE_MEANS.metallicity),
+    sanitize(f.logPhononFreq, FEATURE_MEANS.logPhononFreq),
+    sanitize(f.debyeTemperature, FEATURE_MEANS.debyeTemperature),
+    sanitize(f.correlationStrength, FEATURE_MEANS.correlationStrength),
+    sanitize(f.valenceElectronConcentration, FEATURE_MEANS.valenceElectronConcentration),
+    sanitize(f.avgElectronegativity, FEATURE_MEANS.avgElectronegativity),
+    sanitize(f.enSpread, FEATURE_MEANS.enSpread),
+    sanitize(f.hydrogenRatio, FEATURE_MEANS.hydrogenRatio),
+    sanitize(f.pettiforNumber, FEATURE_MEANS.pettiforNumber),
+    sanitize(f.avgAtomicRadius, FEATURE_MEANS.avgAtomicRadius),
+    sanitize(f.avgSommerfeldGamma, FEATURE_MEANS.avgSommerfeldGamma),
+    sanitize(f.avgBulkModulus, FEATURE_MEANS.avgBulkModulus),
+    sanitize(f.maxAtomicMass, FEATURE_MEANS.maxAtomicMass),
+    sanitize(f.numElements, FEATURE_MEANS.numElements),
     f.hasTransitionMetal ? 1 : 0,
     f.hasRareEarth ? 1 : 0,
     f.hasHydrogen ? 1 : 0,
     f.hasChalcogen ? 1 : 0,
     f.hasPnictogen ? 1 : 0,
-    f.cooperPairStrength,
-    f.dimensionalityScore,
+    sanitize(f.cooperPairStrength, FEATURE_MEANS.cooperPairStrength),
+    sanitize(f.dimensionalityScore, FEATURE_MEANS.dimensionalityScore),
     f.anharmonicityFlag ? 1 : 0,
-    f.electronDensityEstimate,
-    f.phononCouplingEstimate,
+    sanitize(f.electronDensityEstimate, FEATURE_MEANS.electronDensityEstimate),
+    sanitize(f.phononCouplingEstimate, FEATURE_MEANS.phononCouplingEstimate),
     f.dWaveSymmetry ? 1 : 0,
-    f.meissnerPotential,
-    f.dftConfidence ?? 0,
-    f.orbitalCharacterCode ?? 0,
-    f.phononSpectralCentroid ?? 0,
-    f.phononSpectralWidth ?? 0,
-    f.bondStiffnessVariance ?? 0,
-    f.chargeTransferMagnitude ?? 0,
-    f.connectivityIndex ?? 0.5,
-    f.nestingScore ?? 0,
-    f.vanHoveProximity ?? 0,
-    f.bandFlatness ?? 0,
-    f.softModeScore ?? 0,
-    f.motifScore ?? 0,
-    f.orbitalDFraction ?? 0,
-    f.mottProximityScore ?? 0,
-    f.topologicalBandScore ?? 0,
-    f.dimensionalityScoreV2 ?? 0,
-    f.phononSofteningIndex ?? 0,
-    f.spinFluctuationStrength ?? 0,
-    f.fermiSurfaceNestingScore ?? 0,
-    f.dosAtEF ?? 0,
-    f.muStarEstimate ?? 0.13,
-    f.pressureGpa ?? 0,
-    f.optimalPressureGpa ?? 0,
-    sanitize((f as any).bandGap, 0),
-    sanitize((f as any).formationEnergy, 0),
-    sanitize((f as any).stability, 0.5),
+    sanitize(f.meissnerPotential, FEATURE_MEANS.meissnerPotential),
+    sanitize(f.dftConfidence, FEATURE_MEANS.dftConfidence),
+    sanitize(f.orbitalCharacterCode, FEATURE_MEANS.orbitalCharacterCode),
+    sanitize(f.phononSpectralCentroid, FEATURE_MEANS.phononSpectralCentroid),
+    sanitize(f.phononSpectralWidth, FEATURE_MEANS.phononSpectralWidth),
+    sanitize(f.bondStiffnessVariance, FEATURE_MEANS.bondStiffnessVariance),
+    sanitize(f.chargeTransferMagnitude, FEATURE_MEANS.chargeTransferMagnitude),
+    sanitize(f.connectivityIndex, FEATURE_MEANS.connectivityIndex),
+    sanitize(f.nestingScore, FEATURE_MEANS.nestingScore),
+    sanitize(f.vanHoveProximity, FEATURE_MEANS.vanHoveProximity),
+    sanitize(f.bandFlatness, FEATURE_MEANS.bandFlatness),
+    sanitize(f.softModeScore, FEATURE_MEANS.softModeScore),
+    sanitize(f.motifScore, FEATURE_MEANS.motifScore),
+    sanitize(f.orbitalDFraction, FEATURE_MEANS.orbitalDFraction),
+    sanitize(f.mottProximityScore, FEATURE_MEANS.mottProximityScore),
+    sanitize(f.topologicalBandScore, FEATURE_MEANS.topologicalBandScore),
+    sanitize(f.dimensionalityScoreV2, FEATURE_MEANS.dimensionalityScoreV2),
+    sanitize(f.phononSofteningIndex, FEATURE_MEANS.phononSofteningIndex),
+    sanitize(f.spinFluctuationStrength, FEATURE_MEANS.spinFluctuationStrength),
+    sanitize(f.fermiSurfaceNestingScore, FEATURE_MEANS.fermiSurfaceNestingScore),
+    sanitize(f.dosAtEF, FEATURE_MEANS.dosAtEF),
+    sanitize(f.muStarEstimate, FEATURE_MEANS.muStarEstimate),
+    sanitize(f.pressureGpa, FEATURE_MEANS.pressureGpa),
+    sanitize(f.optimalPressureGpa, FEATURE_MEANS.optimalPressureGpa),
+    sanitize((f as any).bandGap, FEATURE_MEANS.bandGap),
+    sanitize((f as any).formationEnergy, FEATURE_MEANS.formationEnergy),
+    sanitize((f as any).stability, FEATURE_MEANS.stability),
     (() => {
       const sym = (f as any).crystalSymmetry;
       if (!sym || typeof sym !== "string") return 0;
@@ -351,6 +400,9 @@ function trainGradientBoosting(
   const predictions = new Array(n).fill(basePrediction);
   const trees: TreeNode[] = [];
 
+  const yVariance = y.reduce((s, yi) => s + (yi - basePrediction) ** 2, 0) / n;
+  const mseThreshold = Math.max(1.0, 0.01 * yVariance);
+
   for (let iter = 0; iter < nEstimators; iter++) {
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
@@ -364,7 +416,7 @@ function trainGradientBoosting(
     }
 
     const mse = y.reduce((s, yi, i) => s + (yi - predictions[i]) ** 2, 0) / n;
-    if (mse < 1.0) break;
+    if (mse < mseThreshold) break;
   }
 
   return {

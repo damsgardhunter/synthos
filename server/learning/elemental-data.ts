@@ -21,6 +21,7 @@ export interface ElementalProperties {
   elementalTc: number | null;
   meltingPoint: number | null;
   latticeConstant: number | null;
+  pressureDebyeTemp?: number | null;
 }
 
 export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
@@ -32,7 +33,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     atomicRadius: 25, pettiforScale: 103, valenceElectrons: 1,
     paulingElectronegativity: 2.20, electronAffinity: 0.754, firstIonizationEnergy: 13.598,
     elementalTc: null,
-    meltingPoint: 14, latticeConstant: 3.75
+    meltingPoint: 14, latticeConstant: 3.75,
+    pressureDebyeTemp: 1500
   },
   He: {
     symbol: "He", atomicNumber: 2, atomicMass: 4.003,
@@ -506,7 +508,7 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
   In: {
     symbol: "In", atomicNumber: 49, atomicMass: 114.82,
-    debyeTemperature: 108, bulkModulus: 41.0, stonerParameter: null, hubbardU: null,
+    debyeTemperature: 108, bulkModulus: 42.0, stonerParameter: null, hubbardU: null,
     mcMillanHopfieldEta: 0.70, miedemaPhiStar: 3.90, miedemaNws13: 1.17, miedemaV23: 6.3,
     sommerfeldGamma: 1.69, gruneisenParameter: 2.56,
     atomicRadius: 167, pettiforScale: 82, valenceElectrons: 3,

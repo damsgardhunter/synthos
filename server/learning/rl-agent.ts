@@ -195,6 +195,7 @@ const KNOWN_SC_MOTIFS = new Set([
   "Clathrate-H32", "Kagome-variant", "Laves-C14", "Laves-C15",
   "HfFe6Ge6", "CeCu2Si2", "PuCoGa5-115", "T-prime",
   "pyrite", "wurtzite", "antifluorite",
+  "CaBe2Ge2", "Chevrel-phase",
 ]);
 
 const KNOWN_FAMILIES = new Set([
@@ -240,6 +241,8 @@ const MOTIF_FAMILY_MAP: Record<string, string[]> = {
   "pyrite": ["chalcogenide"],
   "wurtzite": ["chalcogenide"],
   "antifluorite": ["intermetallic"],
+  "CaBe2Ge2": ["layered-pnictide", "intermetallic"],
+  "Chevrel-phase": ["chalcogenide", "intermetallic"],
 };
 
 function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
@@ -252,19 +255,37 @@ function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
   return 0.2;
 }
 
+function findMotifFamilies(motifName: string): string[] | null {
+  const exact = MOTIF_FAMILY_MAP[motifName];
+  if (exact) return exact;
+  const motifLower = motifName.toLowerCase();
+  for (const [key, families] of Object.entries(MOTIF_FAMILY_MAP)) {
+    if (motifLower.includes(key.toLowerCase()) || key.toLowerCase().includes(motifLower)) {
+      return families;
+    }
+  }
+  return null;
+}
+
 function computeFamilyConsistencyScore(context: PhysicsAwareRewardContext): number {
   if (!context.chemicalFamily && !context.motifName) return 0;
   if (context.chemicalFamily && KNOWN_FAMILIES.has(context.chemicalFamily)) {
     if (context.motifName) {
-      const allowedFamilies = MOTIF_FAMILY_MAP[context.motifName];
+      const allowedFamilies = findMotifFamilies(context.motifName);
       if (allowedFamilies && allowedFamilies.includes(context.chemicalFamily)) {
         return 1.0;
       }
       if (allowedFamilies) return 0.2;
+      return 0.4;
     }
     return 0.6;
   }
   if (context.chemicalFamily) return 0.3;
+  if (context.motifName) {
+    const families = findMotifFamilies(context.motifName);
+    if (families) return 0.5;
+    return 0.2;
+  }
   return 0;
 }
 

@@ -40,6 +40,8 @@ const STOICH_PATTERNS = [
   { name: "A2B3C", slots: 3, ratios: [[2,3,1],[3,2,1],[2,3,2]] },
   { name: "A2B2C", slots: 3, ratios: [[2,2,1],[2,2,3],[2,2,5]] },
   { name: "A3BC", slots: 3, ratios: [[3,1,1],[3,1,3],[3,2,1]] },
+  { name: "A4B3C", slots: 3, ratios: [[4,3,1],[4,3,2],[4,3,3]] },
+  { name: "AB3C4", slots: 3, ratios: [[1,3,4],[1,3,3],[2,3,4]] },
   { name: "ABCD", slots: 4, ratios: [[1,1,1,1],[2,1,1,1],[1,2,1,1]] },
   { name: "ABCD2", slots: 4, ratios: [[1,1,1,2],[1,1,1,3],[2,1,1,2]] },
 ];
@@ -68,9 +70,14 @@ function hasPlausibleChargeBalance(formula: string): boolean {
   const entries = Array.from(elMap.entries());
   const allMetallic = entries.every(([el]) => {
     const states = COMMON_OXIDATION_STATES[el];
-    return states ? states.every(s => s >= 0) : true;
+    if (!states) return true;
+    return states.every(s => s >= 0) || states.some(s => s > 0);
   });
-  if (allMetallic) return true;
+  const hasAnion = entries.some(([el]) => {
+    const states = COMMON_OXIDATION_STATES[el];
+    return states ? states.some(s => s < 0) : false;
+  });
+  if (allMetallic && !hasAnion) return true;
 
   function canBalance(idx: number, runningSum: number): boolean {
     if (idx === entries.length) return runningSum === 0;
@@ -393,6 +400,12 @@ export function refineCandidate(
     "B": ["C", "N"], "C": ["B", "N", "Si"],
     "O": ["N", "F", "S"], "Se": ["Te", "S"],
     "As": ["P", "Sb"], "Ca": ["Sr", "Ba"],
+    "Mg": ["Al"], "Al": ["Mg", "Ga"],
+    "Li": ["Mg", "Na"], "Ba": ["Ca", "Sr"],
+    "Sr": ["Ca", "Ba"], "Sc": ["Y", "La"],
+    "Hf": ["Zr", "Ti"], "Zr": ["Hf", "Ti"],
+    "Ta": ["Nb", "V"], "Mo": ["W", "Cr"],
+    "W": ["Mo", "Cr"],
   };
 
   for (let i = 0; i < elements.length; i++) {

@@ -307,15 +307,107 @@ function ensurePseudopotential(element: string): string {
   throw new Error(`No valid pseudopotential for ${element} — need a verified UPF file in ${PP_SOURCE_DIR}/${element}.UPF`);
 }
 
-function autoKPoints(latticeA: number): string {
-  const k = Math.max(1, Math.ceil(30 / latticeA));
-  return `  ${k} ${k} ${k}  0 0 0`;
+function estimateCOverA(elements: string[], counts: Record<string, number>): number {
+  const hasCu = elements.includes("Cu");
+  const hasO = elements.includes("O");
+  const hasFe = elements.includes("Fe");
+  const hasAs = elements.includes("As");
+  const hasP = elements.includes("P");
+  const hasSe = elements.includes("Se");
+  const hasTe = elements.includes("Te");
+  const hasS = elements.includes("S");
+  const hasBi = elements.includes("Bi");
+
+  if (hasCu && hasO) {
+    const oCount = counts["O"] || 0;
+    const cuCount = counts["Cu"] || 0;
+    if (oCount >= 2 && cuCount >= 1) return 3.0;
+  }
+
+  if (hasFe && (hasAs || hasP || hasSe || hasTe || hasS)) {
+    return 2.5;
+  }
+
+  if (hasBi && hasS) return 2.2;
+  if (hasBi && hasSe) return 2.3;
+
+  const layeredElements = ["Bi", "Sb", "Te", "Se", "S"];
+  const layeredCount = elements.filter(el => layeredElements.includes(el)).length;
+  if (layeredCount >= 2) return 2.2;
+
+  return 1.0;
+}
+
+function autoKPoints(latticeA: number, cOverA?: number): string {
+  const kab = Math.max(1, Math.ceil(30 / latticeA));
+  if (cOverA && cOverA > 2.0) {
+    const effectiveC = latticeA * cOverA;
+    const kc = Math.max(1, Math.ceil(30 / effectiveC));
+    return `  ${kab} ${kab} ${kc}  0 0 0`;
+  }
+  return `  ${kab} ${kab} ${kab}  0 0 0`;
 }
 
 const MAGNETIC_ELEMENTS: Record<string, number> = {
   Fe: 2.0, Co: 1.5, Ni: 0.8, Mn: 3.0, Cr: 1.5,
   V: 0.5, Gd: 7.0, Eu: 7.0, Nd: 3.0, Sm: 1.0,
 };
+
+function isAFMCandidate(elements: string[], counts: Record<string, number>): boolean {
+  const hasCu = elements.includes("Cu");
+  const hasO = elements.includes("O");
+  const hasFe = elements.includes("Fe");
+  const hasAs = elements.includes("As");
+  const hasP = elements.includes("P");
+  const hasSe = elements.includes("Se");
+  const hasTe = elements.includes("Te");
+
+  if (hasCu && hasO) {
+    const oCount = counts["O"] || 0;
+    const cuCount = counts["Cu"] || 0;
+    if (oCount >= 2 && cuCount >= 1) return true;
+  }
+
+  if (hasFe && (hasAs || hasP || hasSe || hasTe)) return true;
+
+  if (elements.includes("Mn") && hasO) return true;
+  if (elements.includes("Cr") && hasO) return true;
+
+  return false;
+}
+
+function generateMagnetizationLines(
+  elements: string[],
+  counts: Record<string, number>,
+  useAFM: boolean,
+): string {
+  let lines = "";
+  const magneticIndices: number[] = [];
+
+  for (let idx = 0; idx < elements.length; idx++) {
+    const el = elements[idx];
+    if (el in MAGNETIC_ELEMENTS) {
+      magneticIndices.push(idx);
+    }
+  }
+
+  if (magneticIndices.length === 0) return "";
+
+  for (let idx = 0; idx < elements.length; idx++) {
+    const el = elements[idx];
+    let mag = MAGNETIC_ELEMENTS[el] ?? 0.0;
+
+    if (useAFM && mag !== 0) {
+      const magSubIndex = magneticIndices.indexOf(idx);
+      if (magSubIndex >= 0 && magSubIndex % 2 === 1) {
+        mag = -mag;
+      }
+    }
+
+    lines += `  starting_magnetization(${idx + 1}) = ${mag.toFixed(1)},\n`;
+  }
+  return lines;
+}
 
 function generateSCFInput(
   formula: string,
@@ -333,14 +425,11 @@ function generateSCFInput(
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
   const nspin = hasMagnetic ? 2 : 1;
+  const useAFM = hasMagnetic && isAFMCandidate(elements, counts);
 
   let startingMagLines = "";
   if (hasMagnetic) {
-    for (let idx = 0; idx < elements.length; idx++) {
-      const el = elements[idx];
-      const mag = MAGNETIC_ELEMENTS[el] ?? 0.0;
-      startingMagLines += `  starting_magnetization(${idx + 1}) = ${mag.toFixed(1)},\n`;
-    }
+    startingMagLines = generateMagnetizationLines(elements, counts, useAFM);
   }
 
   let atomicSpecies = "";
@@ -391,7 +480,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA)}
+${autoKPoints(latticeA, estimateCOverA(elements, counts))}
 `;
 }
 
@@ -916,7 +1005,7 @@ function generateSCFInputWithParams(
   smearing = '${smearing}',
   degauss = ${degauss},
   nspin = ${elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1},
-${elements.some(el => el in MAGNETIC_ELEMENTS) ? elements.map((el, idx) => `  starting_magnetization(${idx + 1}) = ${(MAGNETIC_ELEMENTS[el] ?? 0.0).toFixed(1)},`).join('\n') + '\n' : ''}/
+${elements.some(el => el in MAGNETIC_ELEMENTS) ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts)) : ''}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
   conv_thr = 1.0d-6,
@@ -929,7 +1018,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA)}
+${autoKPoints(latticeA, estimateCOverA(elements, counts))}
 `;
 }
 
@@ -1072,7 +1161,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
     }
 
-    result.kPoints = autoKPoints(latticeA).trim();
+    const cOverA = estimateCOverA(elements, counts);
+    result.kPoints = autoKPoints(latticeA, cOverA).trim();
 
     const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number }> = [
       { mixingBeta: 0.3, maxSteps: 100, diag: "david" },

@@ -224,6 +224,53 @@ function evaluateBZGrid(
   return { evaluations, fermiEnergy, nOrbitals };
 }
 
+function getNeighborVectorsFS(latticeType: string): number[][] {
+  switch (latticeType) {
+    case "bcc":
+      return [
+        [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5],
+        [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, -0.5, -0.5],
+      ];
+    case "fcc":
+      return [
+        [0.5, 0.5, 0], [0.5, -0.5, 0], [-0.5, 0.5, 0], [-0.5, -0.5, 0],
+        [0.5, 0, 0.5], [0.5, 0, -0.5], [-0.5, 0, 0.5], [-0.5, 0, -0.5],
+        [0, 0.5, 0.5], [0, 0.5, -0.5], [0, -0.5, 0.5], [0, -0.5, -0.5],
+      ];
+    case "hexagonal":
+      return [
+        [1, 0, 0], [-1, 0, 0],
+        [0.5, Math.sqrt(3) / 2, 0], [-0.5, -Math.sqrt(3) / 2, 0],
+        [-0.5, Math.sqrt(3) / 2, 0], [0.5, -Math.sqrt(3) / 2, 0],
+        [0, 0, 0.5], [0, 0, -0.5],
+        [0.5, Math.sqrt(3) / 6, 0.5], [-0.5, -Math.sqrt(3) / 6, -0.5],
+        [-0.5, Math.sqrt(3) / 6, 0.5], [0.5, -Math.sqrt(3) / 6, -0.5],
+      ];
+    default:
+      return [
+        [1, 0, 0], [-1, 0, 0],
+        [0, 1, 0], [0, -1, 0],
+        [0, 0, 1], [0, 0, -1],
+      ];
+  }
+}
+
+function isCentrosymmetric(elements: string[]): boolean {
+  if (elements.length === 1) return true;
+  if (elements.length === 2) {
+    const el1 = getElementData(elements[0]);
+    const el2 = getElementData(elements[1]);
+    if (el1 && el2) {
+      const enDiff = Math.abs(
+        (el1.paulingElectronegativity ?? 2.0) - (el2.paulingElectronegativity ?? 2.0)
+      );
+      if (enDiff > 1.0) return false;
+    }
+  }
+  if (elements.length >= 3) return false;
+  return true;
+}
+
 function buildHamiltonianAtKForFS(
   k: number[],
   elements: string[],
@@ -249,9 +296,13 @@ function buildHamiltonianAtKForFS(
   if (nOrbitals > 50) nOrbitals = 50;
 
   const H: number[][] = [];
+  const H_im: number[][] = [];
   for (let i = 0; i < nOrbitals; i++) {
     H[i] = new Array(nOrbitals).fill(0);
+    H_im[i] = new Array(nOrbitals).fill(0);
   }
+
+  const centrosymmetric = isCentrosymmetric(elements);
 
   for (const atom of atomList) {
     const data = getElementData(atom.el);
@@ -278,14 +329,12 @@ function buildHamiltonianAtKForFS(
     }
   }
 
+  const latticeType = guessLatticeType(elements);
+
   const kDotR = (dx: number, dy: number, dz: number) =>
     2 * Math.PI * (k[0] * dx + k[1] * dy + k[2] * dz);
 
-  const neighbors = [
-    [1, 0, 0], [-1, 0, 0],
-    [0, 1, 0], [0, -1, 0],
-    [0, 0, 1], [0, 0, -1],
-  ];
+  const neighbors = getNeighborVectorsFS(latticeType);
 
   for (let i = 0; i < atomList.length; i++) {
     for (let j = i + 1; j < atomList.length; j++) {
@@ -317,26 +366,43 @@ function buildHamiltonianAtKForFS(
       const ddDelta = -0.4 * decay * dScale;
 
       for (const [dx, dy, dz] of neighbors) {
-        const phase = Math.cos(kDotR(dx, dy, dz));
+        const theta = kDotR(dx, dy, dz);
+        const phaseRe = Math.cos(theta);
+        const phaseIm = centrosymmetric ? 0 : -Math.sin(theta);
         const oi = a1.orbitalStart;
         const oj = a2.orbitalStart;
 
         if (oi < nOrbitals && oj < nOrbitals) {
-          const v = ssSigma * phase / neighbors.length;
-          H[oi][oj] += v;
-          H[oj][oi] += v;
+          const vRe = ssSigma * phaseRe / neighbors.length;
+          H[oi][oj] += vRe;
+          H[oj][oi] += vRe;
+          if (!centrosymmetric) {
+            const vIm = ssSigma * phaseIm / neighbors.length;
+            H_im[oi][oj] += vIm;
+            H_im[oj][oi] -= vIm;
+          }
         }
 
         for (let p = 0; p < 3; p++) {
           if (oi < nOrbitals && oj + 1 + p < nOrbitals) {
-            const v = spSigma * phase / neighbors.length * 0.577;
-            H[oi][oj + 1 + p] += v;
-            H[oj + 1 + p][oi] += v;
+            const vRe = spSigma * phaseRe / neighbors.length * 0.577;
+            H[oi][oj + 1 + p] += vRe;
+            H[oj + 1 + p][oi] += vRe;
+            if (!centrosymmetric) {
+              const vIm = spSigma * phaseIm / neighbors.length * 0.577;
+              H_im[oi][oj + 1 + p] += vIm;
+              H_im[oj + 1 + p][oi] -= vIm;
+            }
           }
           if (oj < nOrbitals && oi + 1 + p < nOrbitals) {
-            const v = spSigma * phase / neighbors.length * 0.577;
-            H[oj][oi + 1 + p] += v;
-            H[oi + 1 + p][oj] += v;
+            const vRe = spSigma * phaseRe / neighbors.length * 0.577;
+            H[oj][oi + 1 + p] += vRe;
+            H[oi + 1 + p][oj] += vRe;
+            if (!centrosymmetric) {
+              const vIm = spSigma * phaseIm / neighbors.length * 0.577;
+              H_im[oj][oi + 1 + p] -= vIm;
+              H_im[oi + 1 + p][oj] += vIm;
+            }
           }
         }
 
@@ -345,9 +411,15 @@ function buildHamiltonianAtKForFS(
             if (oi + 1 + p1 < nOrbitals && oj + 1 + p2 < nOrbitals) {
               const sigmaW = p1 === p2 ? 1.0 / 3.0 : 0;
               const piW = p1 === p2 ? 2.0 / 3.0 : (p1 !== p2 ? -1.0 / 3.0 : 0);
-              const v = (ppSigma * sigmaW + ppPi * piW) * phase / neighbors.length;
-              H[oi + 1 + p1][oj + 1 + p2] += v;
-              H[oj + 1 + p2][oi + 1 + p1] += v;
+              const hop = ppSigma * sigmaW + ppPi * piW;
+              const vRe = hop * phaseRe / neighbors.length;
+              H[oi + 1 + p1][oj + 1 + p2] += vRe;
+              H[oj + 1 + p2][oi + 1 + p1] += vRe;
+              if (!centrosymmetric) {
+                const vIm = hop * phaseIm / neighbors.length;
+                H_im[oi + 1 + p1][oj + 1 + p2] += vIm;
+                H_im[oj + 1 + p2][oi + 1 + p1] -= vIm;
+              }
             }
           }
         }
@@ -356,14 +428,20 @@ function buildHamiltonianAtKForFS(
           for (let d1 = 0; d1 < 5; d1++) {
             for (let d2 = 0; d2 < 5; d2++) {
               if (oi + 4 + d1 < nOrbitals && oj + 4 + d2 < nOrbitals) {
-                let v = 0;
+                let hop = 0;
                 if (d1 === d2) {
-                  v = (ddSigma * 0.2 + ddPi * 0.5 + ddDelta * 0.3) * phase / neighbors.length;
+                  hop = ddSigma * 0.2 + ddPi * 0.5 + ddDelta * 0.3;
                 } else {
-                  v = (ddPi * 0.3 + ddDelta * 0.1) * phase / neighbors.length * 0.5;
+                  hop = (ddPi * 0.3 + ddDelta * 0.1) * 0.5;
                 }
-                H[oi + 4 + d1][oj + 4 + d2] += v;
-                H[oj + 4 + d2][oi + 4 + d1] += v;
+                const vRe = hop * phaseRe / neighbors.length;
+                H[oi + 4 + d1][oj + 4 + d2] += vRe;
+                H[oj + 4 + d2][oi + 4 + d1] += vRe;
+                if (!centrosymmetric) {
+                  const vIm = hop * phaseIm / neighbors.length;
+                  H_im[oi + 4 + d1][oj + 4 + d2] += vIm;
+                  H_im[oj + 4 + d2][oi + 4 + d1] -= vIm;
+                }
               }
             }
           }
@@ -372,18 +450,28 @@ function buildHamiltonianAtKForFS(
         if (hasDI) {
           for (let d = 0; d < 5; d++) {
             if (oi + 4 + d < nOrbitals && oj < nOrbitals) {
-              const v = sdSigma * phase / neighbors.length * 0.447;
-              H[oi + 4 + d][oj] += v;
-              H[oj][oi + 4 + d] += v;
+              const vRe = sdSigma * phaseRe / neighbors.length * 0.447;
+              H[oi + 4 + d][oj] += vRe;
+              H[oj][oi + 4 + d] += vRe;
+              if (!centrosymmetric) {
+                const vIm = sdSigma * phaseIm / neighbors.length * 0.447;
+                H_im[oi + 4 + d][oj] += vIm;
+                H_im[oj][oi + 4 + d] -= vIm;
+              }
             }
           }
         }
         if (hasDJ) {
           for (let d = 0; d < 5; d++) {
             if (oj + 4 + d < nOrbitals && oi < nOrbitals) {
-              const v = sdSigma * phase / neighbors.length * 0.447;
-              H[oj + 4 + d][oi] += v;
-              H[oi][oj + 4 + d] += v;
+              const vRe = sdSigma * phaseRe / neighbors.length * 0.447;
+              H[oj + 4 + d][oi] += vRe;
+              H[oi][oj + 4 + d] += vRe;
+              if (!centrosymmetric) {
+                const vIm = sdSigma * phaseIm / neighbors.length * 0.447;
+                H_im[oj + 4 + d][oi] += vIm;
+                H_im[oi][oj + 4 + d] -= vIm;
+              }
             }
           }
         }
@@ -391,7 +479,30 @@ function buildHamiltonianAtKForFS(
     }
   }
 
-  const eigenvalues = solveEigenvaluesSymmetricFS(H, nOrbitals);
+  let eigenvalues: number[];
+  if (centrosymmetric) {
+    eigenvalues = solveEigenvaluesSymmetricFS(H, nOrbitals);
+  } else {
+    const H_eff: number[][] = [];
+    for (let i = 0; i < nOrbitals; i++) {
+      H_eff[i] = new Array(nOrbitals).fill(0);
+      for (let j = 0; j < nOrbitals; j++) {
+        H_eff[i][j] = H[i][j];
+      }
+    }
+    for (let i = 0; i < nOrbitals; i++) {
+      for (let j = 0; j < nOrbitals; j++) {
+        if (i !== j) {
+          const re = H[i][j];
+          const im = H_im[i][j];
+          const mag = Math.sqrt(re * re + im * im);
+          const sign = re >= 0 ? 1 : -1;
+          H_eff[i][j] = sign * mag;
+        }
+      }
+    }
+    eigenvalues = solveEigenvaluesSymmetricFS(H_eff, nOrbitals);
+  }
 
   const orbChars: { s: number; p: number; d: number }[] = [];
   for (let band = 0; band < nOrbitals; band++) {

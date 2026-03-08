@@ -115,8 +115,9 @@ export function defaultSynthesisVector(materialClass: string = "default"): Synth
   return { ...base, ...SYNTHESIS_DEFAULTS[classKey] };
 }
 
-export function randomSynthesisVector(): SynthesisVector {
+export function randomSynthesisVector(materialClass: string = "default"): SynthesisVector {
   const C = SYNTHESIS_CONSTRAINTS;
+  const isHydride = materialClass.toLowerCase().includes("hydride");
   return {
     temperature: randRange(C.temperature.min, C.temperature.max),
     pressure: randRange(C.pressure.min, C.pressure.max * 0.5),
@@ -126,7 +127,7 @@ export function randomSynthesisVector(): SynthesisVector {
     magneticField: randRange(0, C.magneticField.max * 0.2),
     thermalCycles: Math.floor(randRange(0, 10)),
     strain: randRange(C.strain.min * 0.3, C.strain.max * 0.5),
-    oxygenPressure: randRange(0, C.oxygenPressure.max),
+    oxygenPressure: isHydride ? randRange(0, 0.1) : randRange(0, C.oxygenPressure.max),
   };
 }
 
@@ -166,7 +167,7 @@ export function simulateSynthesisEffects(
     metastable = true;
     defectDensity *= (1 + sv.coolingRate / 2000);
     grainSize = Math.max(0.1, grainSize * Math.exp(-sv.coolingRate / 3000));
-    lambdaMod *= 1.0 + Math.min(0.15, sv.coolingRate / 20000);
+    lambdaMod *= 1.0 + Math.min(0.15, Math.sqrt(sv.coolingRate / 20000));
   } else if (sv.coolingRate < 10) {
     phasePurity = Math.min(0.99, phasePurity + 0.03);
     grainSize *= (1 + (10 - sv.coolingRate) / 5);
@@ -175,10 +176,10 @@ export function simulateSynthesisEffects(
 
   if (sv.pressure > 50) {
     bondComp = Math.min(0.2, (sv.pressure - 50) / 500);
-    lambdaMod *= 1.0 + bondComp * 0.5;
+    lambdaMod *= 1.0 + Math.sqrt(bondComp * 0.5);
     omegaMod *= 1.0 + bondComp * 0.8;
     if (sv.pressure > 100) {
-      lambdaMod *= 1.0 + Math.min(0.3, (sv.pressure - 100) / 300);
+      lambdaMod *= 1.0 + Math.min(0.3, Math.sqrt((sv.pressure - 100) / 300));
     }
   }
 
@@ -186,18 +187,18 @@ export function simulateSynthesisEffects(
     bandShift = sv.strain * 0.05;
     const strainMag = Math.abs(sv.strain);
     if (strainMag < 5) {
-      lambdaMod *= 1.0 + strainMag * 0.02;
+      lambdaMod *= 1.0 + Math.sqrt(strainMag) * 0.02;
     } else {
-      lambdaMod *= 1.0 - (strainMag - 5) * 0.03;
+      lambdaMod *= 1.0 - Math.sqrt(strainMag - 5) * 0.03;
       phasePurity *= Math.max(0.7, 1 - (strainMag - 5) * 0.05);
     }
     latticeStrain = sv.strain;
   }
 
   if (sv.temperature > 1500) {
-    defectDensity *= Math.exp((sv.temperature - 1500) / 500);
+    defectDensity *= Math.exp(Math.sqrt((sv.temperature - 1500) / 500));
     if (sv.temperature > 2000) {
-      phasePurity *= Math.max(0.6, 1 - (sv.temperature - 2000) / 2000);
+      phasePurity *= Math.max(0.6, 1 - Math.sqrt((sv.temperature - 2000) / 2000));
     }
   }
 
@@ -272,6 +273,12 @@ export function checkSynthesisFeasibility(sv: SynthesisVector): FeasibilityResul
   score += sv.temperature > 1500 ? (sv.temperature - 1500) / 500 : 0;
   score += sv.magneticField > 10 ? (sv.magneticField - 10) / 20 : 0;
   score += sv.currentDensity > 50 ? (sv.currentDensity - 50) / 100 : 0;
+
+  if (sv.temperature > 1000 && sv.pressure > 50) {
+    const tNorm = (sv.temperature - 1000) / 1500;
+    const pNorm = (sv.pressure - 50) / 250;
+    score += Math.exp(tNorm * pNorm * 3) - 1;
+  }
 
   let labFeasible = violations.length === 0 && score < 8;
   let industrialFeasible = violations.length === 0 && score < 3;
@@ -592,7 +599,7 @@ export function optimizeSynthesisForFixedMaterial(
 
   const defaultSv = defaultSynthesisVector(materialClass);
   for (let i = 0; i < populationSize; i++) {
-    const sv = i === 0 ? defaultSv : i < 3 ? mutateSynthesisVector(defaultSv) : randomSynthesisVector();
+    const sv = i === 0 ? defaultSv : i < 3 ? mutateSynthesisVector(defaultSv) : randomSynthesisVector(materialClass);
     const effects = simulateSynthesisEffects(formula, materialClass, sv);
     const tc = evaluateTc(sv);
     const cost = computeSynthesisCost(sv, tc);
