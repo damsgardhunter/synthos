@@ -909,12 +909,8 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     return true;
   } catch (err: any) {
-    try {
-      await storage.insertSuperconductorCandidate(candidateData);
-      return true;
-    } catch {
-      return false;
-    }
+    console.log(`[Engine] insertCandidateWithStabilityCheck failed for ${candidateData.formula}: ${err?.message?.slice(0, 120) ?? "unknown"}`);
+    return false;
   }
 }
 
@@ -4000,18 +3996,24 @@ async function runLearningCycle() {
   });
 
   try {
-    await Promise.allSettled([
+    const batch1 = await Promise.allSettled([
       runPhase4_Materials(),
       runPhase8_Synthesis(),
       runPhase9_Reactions(),
     ]);
+    for (const r of batch1) {
+      if (r.status === "rejected") console.log(`[Engine] Batch-1 phase failed: ${r.reason?.message?.slice(0, 120) ?? "unknown"}`);
+    }
 
     if (state !== "running") return;
 
-    await Promise.allSettled([
+    const batch2 = await Promise.allSettled([
       runPhase3_Bonding(),
       runPhase5_Prediction(),
     ]);
+    for (const r of batch2) {
+      if (r.status === "rejected") console.log(`[Engine] Batch-2 phase failed: ${r.reason?.message?.slice(0, 120) ?? "unknown"}`);
+    }
 
     if (state !== "running") return;
 
@@ -5150,7 +5152,9 @@ export async function startEngine() {
     dataSource: "Internal",
   });
 
-  setTimeout(runLearningCycle, 2000);
+  if (!isRunningCycle) {
+    setTimeout(runLearningCycle, 2000);
+  }
   return getStatus();
 }
 
@@ -5187,7 +5191,9 @@ export function resumeEngine() {
   if (state !== "paused") return getStatus();
   state = "running";
   broadcast("engineState", { state: "running" });
-  setTimeout(runLearningCycle, 2000);
+  if (!isRunningCycle) {
+    setTimeout(runLearningCycle, 2000);
+  }
   return getStatus();
 }
 

@@ -192,8 +192,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/materials", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 200, 1000);
-      const offset = Number(req.query.offset) || 0;
+      const rawLimit = Number(req.query.limit);
+      const rawOffset = Number(req.query.offset);
+      const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 200, 1000);
+      const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
       const mats = await storage.getMaterials(limit, offset);
       const total = await storage.getMaterialCount();
       res.json({ materials: mats, total });
@@ -325,7 +327,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/superconductor-candidates", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 200, 1000);
+      const rawLim = Number(req.query.limit);
+      const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 200, 1000);
       const candidates = await storage.getSuperconductorCandidates(limit);
       const total = await storage.getSuperconductorCount();
       res.json({ candidates, total });
@@ -427,8 +430,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/computational-results", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 200, 1000);
-      const stage = req.query.stage ? Number(req.query.stage) : undefined;
+      const rawCrLim = Number(req.query.limit);
+      const limit = Math.min(Number.isFinite(rawCrLim) && rawCrLim > 0 ? rawCrLim : 200, 1000);
+      const rawStage = req.query.stage != null ? Number(req.query.stage) : undefined;
+      const stage = rawStage !== undefined && Number.isFinite(rawStage) ? rawStage : undefined;
       let results;
       if (stage !== undefined) {
         results = await storage.getComputationalResultsByStage(stage);
@@ -999,13 +1004,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/structure-design/generate", writeLimiter, async (req, res) => {
     try {
       const { targetTc, motifCount, elementsPerSite } = req.body;
-      if (!targetTc) {
-        return res.status(400).json({ error: "targetTc is required" });
+      const numTargetTc = Number(targetTc);
+      if (!numTargetTc || !Number.isFinite(numTargetTc) || numTargetTc <= 0) {
+        return res.status(400).json({ error: "targetTc must be a positive number" });
       }
+      const numMotifCount = Number(motifCount ?? 4);
+      const numElementsPerSite = Number(elementsPerSite ?? 3);
       const results = runStructureFirstDesign(
-        Number(targetTc),
-        Number(motifCount ?? 4),
-        Number(elementsPerSite ?? 3),
+        numTargetTc,
+        Number.isFinite(numMotifCount) && numMotifCount > 0 ? numMotifCount : 4,
+        Number.isFinite(numElementsPerSite) && numElementsPerSite > 0 ? numElementsPerSite : 3,
       );
       res.json(results);
     } catch (e: any) {

@@ -1134,7 +1134,8 @@ export function computeElectronicStructure(
       topologicalBandScore = Math.max(topologicalBandScore, topo.topologyScore);
       topologicalBandScore = Math.min(1.0, topologicalBandScore);
     }
-  } catch {
+  } catch (tbErr) {
+    console.log(`[Physics] computeFullTightBinding failed for ${formula}: ${tbErr instanceof Error ? tbErr.message.slice(0, 80) : "unknown"}`);
   }
 
   return {
@@ -1342,7 +1343,10 @@ export function computeElectronPhononCoupling(
         if (eta !== null && eta > 0) {
           const M = data.atomicMass;
           const thetaD = data.debyeTemperature || phononSpectrum.debyeTemperature;
-          const lambdaEl = (eta * LAMBDA_CONVERSION) / (M * thetaD * thetaD);
+          const denom = M * thetaD * thetaD;
+          if (denom <= 0) continue;
+          const lambdaEl = (eta * LAMBDA_CONVERSION) / denom;
+          if (!Number.isFinite(lambdaEl)) continue;
           lambdaSum += lambdaEl * frac;
           totalWeight += frac;
         }
@@ -2828,7 +2832,7 @@ export function computeAlpha2F(
 
 export function computeOmegaLogFromAlpha2F(alpha2FData: Alpha2FData): number {
   const { frequencies, alpha2F, integratedLambda } = alpha2FData;
-  if (integratedLambda <= 0) return 0;
+  if (integratedLambda <= 0 || integratedLambda < 1e-8) return 0;
 
   const nBins = frequencies.length;
   const binWidth = nBins > 1 ? frequencies[1] - frequencies[0] : 1;

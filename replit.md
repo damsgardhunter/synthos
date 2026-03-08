@@ -81,6 +81,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Multi-fidelity pipeline**: catch block now logs errors with candidate ID.
 - **Validation route**: Auto-promotes candidate to stage 5 on positive experimental result.
 - **STATUS_COLORS**: Expanded with experimentally-tested, dft-verified, failed, rejected.
+- **Engine stability**: Removed blind catch insertion in insertCandidateWithStabilityCheck; isRunningCycle guard on start/resume; Promise.allSettled results logged.
+- **Physics NaN guards**: lambda denom check, isFinite guard, integratedLambda minimum 1e-8; tight-binding catch logged.
+- **GB tree minSamples**: Increased from 5 to 8 for better regularization.
+- **Pipeline stage fix**: Failed Stage 4 correctly reports finalStage=4 (was 3); candidate limit 4→8; synthesizability/synthesisNotes now saved.
+- **QE worker**: Hg added to ELEMENT_DATA+ATOMIC_VOLUMES; COVALENT_R expanded (As,Br,Rb,Cs,Hg,Pa); hydride hPerMetal threshold 1.0→0.5.
+- **Crystal prototypes**: Added YBCO-123 (Pmmm orthorhombic) and FeSe-11 (P4/nmm tetragonal).
+- **Routes validation**: NaN-safe query param validation on limit/offset/stage/targetTc.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

@@ -73,7 +73,9 @@ async function logComputationalResult(
       passed,
       failureReason,
     });
-  } catch {}
+  } catch (logErr) {
+    console.log(`[Pipeline] logComputationalResult failed for ${formula}: ${logErr instanceof Error ? logErr.message.slice(0, 80) : "unknown"}`);
+  }
 }
 
 async function stage0_MLFilter(
@@ -285,7 +287,10 @@ export async function runMultiFidelityPipeline(
     dataSource: "Pipeline",
   });
 
-  for (const candidate of candidates.slice(0, 4)) {
+  if (candidates.length > 8) {
+    console.log(`[Pipeline] Truncating ${candidates.length} candidates to 8 for pipeline screening`);
+  }
+  for (const candidate of candidates.slice(0, 8)) {
     const physicsData: Record<string, any> = { _currentPredictedTc: candidate.predictedTc ?? 0 };
 
     const s0 = await stage0_MLFilter(emit, candidate);
@@ -356,12 +361,12 @@ export async function runMultiFidelityPipeline(
 
     const allPassed = s4.passed;
     const allData = { ...s1.data, ...s2.data, ...s3.data, ...s4.data };
-    await updateCandidatePhysics(candidate.id, physicsData, allPassed ? 4 : 3, allData);
+    await updateCandidatePhysics(candidate.id, physicsData, 4, allData);
 
     results.push({
       candidateId: candidate.id,
       formula: candidate.formula,
-      finalStage: allPassed ? 4 : 3,
+      finalStage: 4,
       passed: allPassed,
       failureReason: s4.reason,
       physicsData,
@@ -459,6 +464,14 @@ async function updateCandidatePhysics(
     if (allData.structure) {
       updates.decompositionEnergy = allData.structure.decompositionEnergy;
       updates.ambientPressureStable = allData.stability?.isStable ?? false;
+    }
+    if (allData.stability) {
+      if (allData.stability.synthesizability != null) {
+        (updates as any).synthesizability = allData.stability.synthesizability;
+      }
+      if (allData.stability.synthesisNotes) {
+        (updates as any).synthesisNotes = allData.stability.synthesisNotes;
+      }
     }
     if (allData.coupling) {
       const mechanism = allData.correlation?.ratio > 0.6

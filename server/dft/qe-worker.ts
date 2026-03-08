@@ -51,6 +51,7 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   W:  { mass: 183.84,  zValence: 14 }, Re: { mass: 186.21,  zValence: 15 },
   Os: { mass: 190.23,  zValence: 16 }, Ir: { mass: 192.22,  zValence: 17 },
   Pt: { mass: 195.08,  zValence: 18 }, Au: { mass: 196.97,  zValence: 11 },
+  Hg: { mass: 200.59,  zValence: 12 },
   Tl: { mass: 204.38,  zValence: 13 }, Pb: { mass: 207.2,   zValence: 4  },
   Bi: { mass: 208.98,  zValence: 5  },
   Br: { mass: 79.904,  zValence: 7  },
@@ -211,7 +212,7 @@ const ATOMIC_VOLUMES: Record<string, number> = {
   Nb: 18, Mo: 16, Ru: 13, Rh: 14, Pd: 15, Ag: 17, Cd: 22,
   In: 26, Sn: 27, Sb: 29, Te: 34, I: 26, Cs: 71, Ba: 39,
   La: 37, Ce: 35, Pr: 35, Nd: 34, Hf: 22, Ta: 18, W: 16,
-  Re: 15, Os: 14, Ir: 14, Pt: 15, Au: 17, Tl: 29, Pb: 30,
+  Re: 15, Os: 14, Ir: 14, Pt: 15, Au: 17, Hg: 23, Tl: 29, Pb: 30,
   Bi: 35, Th: 32, U: 21,
 };
 
@@ -685,10 +686,11 @@ function validateGeometry(
     K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
     Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
     Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
-    Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39, Pb: 1.46, Bi: 1.48,
-    Se: 1.20, Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44,
-    In: 1.42, Sb: 1.39, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
-    Tl: 1.45, Th: 2.06, U: 1.96,
+    As: 1.19, Se: 1.20, Br: 1.20, Rb: 2.20,
+    Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
+    Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44,
+    In: 1.42, Sb: 1.39, Cs: 2.44, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
+    Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, U: 1.96, Pa: 2.00,
   };
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
@@ -743,8 +745,8 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
     const hPerMetal = nonHAtoms > 0 ? hCount / nonHAtoms : hCount;
     const isKnownSuperhydride = KNOWN_SUPERHYDRIDES.has(formula.replace(/\s+/g, ""));
 
-    if (hCount > 0 && nonHAtoms > 0 && hPerMetal < 1.0 && hasHydrideMetal) {
-      return { valid: false, reason: `Metal-rich hydride (H/metal=${hPerMetal.toFixed(2)}) — unphysical stoichiometry, hydrides should have H/metal >= 1` };
+    if (hCount > 0 && nonHAtoms > 0 && hPerMetal < 0.5 && hasHydrideMetal) {
+      return { valid: false, reason: `Metal-rich hydride (H/metal=${hPerMetal.toFixed(2)}) — unphysical stoichiometry, hydrides should have H/metal >= 0.5` };
     }
 
     if (!isKnownSuperhydride && hPerMetal > 6) {

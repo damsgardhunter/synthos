@@ -428,6 +428,56 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
+    name: "YBCO-123",
+    spaceGroup: "Pmmm",
+    latticeType: "orthorhombic",
+    cOverA: 3.0,
+    sites: [
+      { label: "A1", x: 0.5, y: 0.5, z: 0.18, role: "spacer" },
+      { label: "A2", x: 0.5, y: 0.5, z: 0.82, role: "spacer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "chain-TM" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.36, role: "plane-TM" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.64, role: "plane-TM" },
+      { label: "X", x: 0.0, y: 0.5, z: 0.0, role: "chain-O" },
+      { label: "X", x: 0.5, y: 0.0, z: 0.38, role: "plane-O" },
+      { label: "X", x: 0.0, y: 0.5, z: 0.38, role: "plane-O" },
+      { label: "X", x: 0.5, y: 0.0, z: 0.62, role: "plane-O" },
+      { label: "X", x: 0.0, y: 0.5, z: 0.62, role: "plane-O" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.16, role: "apical-O" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.84, role: "apical-O" },
+    ],
+    stoichiometryRatio: [1, 2, 3, 7],
+    coordination: [10, 5, 4, 2],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length < 3 || elements.length > 4) return false;
+      const hasSpacer = elements.some(e => ["Y", "La", "Nd", "Sm", "Gd", "Eu", "Ho", "Er", "Dy", "Yb"].includes(e));
+      const hasAlkalineEarth = elements.some(e => ["Ba", "Sr", "Ca"].includes(e));
+      const hasTM = elements.some(e => ["Cu", "Co", "Ni", "Fe"].includes(e));
+      const hasO = elements.includes("O");
+      return (hasSpacer || hasAlkalineEarth) && hasTM && hasO;
+    },
+  },
+  {
+    name: "FeSe-11",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 1.46,
+    sites: [
+      { label: "A", x: 0.75, y: 0.25, z: 0.0, role: "TM" },
+      { label: "A", x: 0.25, y: 0.75, z: 0.0, role: "TM" },
+      { label: "B", x: 0.25, y: 0.25, z: 0.27, role: "chalcogen" },
+      { label: "B", x: 0.75, y: 0.75, z: 0.73, role: "chalcogen" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [4, 4],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Mn"].includes(e));
+      const hasChalcogen = elements.some(e => ["Se", "Te", "S"].includes(e));
+      return hasTM && hasChalcogen;
+    },
+  },
+  {
     name: "Laves-C15",
     spaceGroup: "Fd-3m",
     latticeType: "cubic",
