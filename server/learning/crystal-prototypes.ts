@@ -684,6 +684,110 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       return hasSpacer && hasTM && hasSp;
     },
   },
+  {
+    name: "Borocarbide-1221",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 3.5,
+    sites: [
+      { label: "R", x: 0.0, y: 0.0, z: 0.0, role: "rare-earth" },
+      { label: "T", x: 0.0, y: 0.5, z: 0.25, role: "TM-1" },
+      { label: "T", x: 0.5, y: 0.0, z: 0.25, role: "TM-2" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.35, role: "boron-1" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.65, role: "boron-2" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.5, role: "carbon" },
+    ],
+    stoichiometryRatio: [1, 2, 2, 1],
+    coordination: [8, 4, 3, 4],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 4) return false;
+      const hasRE = elements.some(e => ["Y", "Lu", "Tm", "Er", "Ho", "Dy", "Sc", "La"].includes(e));
+      const hasTM = elements.some(e => ["Ni", "Pd", "Pt", "Co", "Rh"].includes(e));
+      const hasB = elements.includes("B");
+      const hasC = elements.includes("C");
+      return hasRE && hasTM && hasB && hasC;
+    },
+  },
+  {
+    name: "Half-Heusler-XYZ",
+    spaceGroup: "F-43m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "X", x: 0.0, y: 0.0, z: 0.0, role: "electropositive" },
+      { label: "Y", x: 0.25, y: 0.25, z: 0.25, role: "TM" },
+      { label: "Z", x: 0.5, y: 0.5, z: 0.5, role: "main-group" },
+    ],
+    stoichiometryRatio: [1, 1, 1],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 3) return false;
+      const hasRE = elements.some(e => ["Y", "La", "Lu", "Sc", "Gd", "Nd", "Ce"].includes(e));
+      const hasTM = elements.some(e => ["Pt", "Pd", "Ni", "Au", "Ir", "Rh"].includes(e));
+      const hasSp = elements.some(e => ["Bi", "Sb", "Sn", "Pb", "In", "Te"].includes(e));
+      return hasRE && hasTM && hasSp;
+    },
+  },
+  {
+    name: "Kagome-AV3Sb5",
+    spaceGroup: "P6/mmm",
+    latticeType: "hexagonal",
+    cOverA: 1.7,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "alkali-spacer" },
+      { label: "V", x: 0.5, y: 0.0, z: 0.5, role: "kagome-1" },
+      { label: "V", x: 0.0, y: 0.5, z: 0.5, role: "kagome-2" },
+      { label: "V", x: 0.5, y: 0.5, z: 0.5, role: "kagome-3" },
+      { label: "Sb", x: 0.333, y: 0.667, z: 0.0, role: "pnictogen-1" },
+      { label: "Sb", x: 0.667, y: 0.333, z: 0.0, role: "pnictogen-2" },
+      { label: "Sb", x: 0.0, y: 0.0, z: 0.5, role: "pnictogen-hub" },
+      { label: "Sb", x: 0.333, y: 0.667, z: 0.5, role: "pnictogen-3" },
+      { label: "Sb", x: 0.667, y: 0.333, z: 0.5, role: "pnictogen-4" },
+    ],
+    stoichiometryRatio: [1, 3, 5],
+    coordination: [12, 6, 6],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 3) return false;
+      const hasAlkali = elements.some(e => ["K", "Rb", "Cs", "Na"].includes(e));
+      const hasTM = elements.some(e => ["V", "Ti", "Nb", "Ta", "Cr"].includes(e));
+      const hasPn = elements.some(e => ["Sb", "Sn", "Bi", "As", "Ge"].includes(e));
+      return hasAlkali && hasTM && hasPn;
+    },
+  },
+  {
+    name: "FilledSkutterudite-RT4X12",
+    spaceGroup: "Im-3",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "R", x: 0.0, y: 0.0, z: 0.0, role: "filler-cage" },
+      { label: "T", x: 0.25, y: 0.25, z: 0.25, role: "TM-1" },
+      { label: "T", x: 0.75, y: 0.25, z: 0.25, role: "TM-2" },
+      { label: "T", x: 0.25, y: 0.75, z: 0.25, role: "TM-3" },
+      { label: "T", x: 0.25, y: 0.25, z: 0.75, role: "TM-4" },
+      { label: "X", x: 0.0, y: 0.35, z: 0.15, role: "pnictogen-1" },
+      { label: "X", x: 0.15, y: 0.0, z: 0.35, role: "pnictogen-2" },
+      { label: "X", x: 0.35, y: 0.15, z: 0.0, role: "pnictogen-3" },
+      { label: "X", x: 0.0, y: 0.65, z: 0.85, role: "pnictogen-4" },
+      { label: "X", x: 0.85, y: 0.0, z: 0.65, role: "pnictogen-5" },
+      { label: "X", x: 0.65, y: 0.85, z: 0.0, role: "pnictogen-6" },
+      { label: "X", x: 0.0, y: 0.65, z: 0.15, role: "pnictogen-7" },
+      { label: "X", x: 0.15, y: 0.0, z: 0.65, role: "pnictogen-8" },
+      { label: "X", x: 0.65, y: 0.15, z: 0.0, role: "pnictogen-9" },
+      { label: "X", x: 0.0, y: 0.35, z: 0.85, role: "pnictogen-10" },
+      { label: "X", x: 0.85, y: 0.0, z: 0.35, role: "pnictogen-11" },
+      { label: "X", x: 0.35, y: 0.85, z: 0.0, role: "pnictogen-12" },
+    ],
+    stoichiometryRatio: [1, 4, 12],
+    coordination: [12, 6, 3],
+    chemistryRules: (elements: string[]) => {
+      if (elements.length !== 3) return false;
+      const hasFiller = elements.some(e => ["La", "Ce", "Pr", "Nd", "Sm", "Eu", "Yb", "Ba", "Sr", "Ca"].includes(e));
+      const hasTM = elements.some(e => ["Os", "Ru", "Fe", "Co", "Rh", "Ir"].includes(e));
+      const hasPn = elements.some(e => ["Sb", "As", "P", "Bi"].includes(e));
+      return hasFiller && hasTM && hasPn;
+    },
+  },
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {

@@ -181,7 +181,7 @@ async function stage3_TcPrediction(
 
   let dimensionality = candidate.dimensionality || "3D";
   const criticalFields = computeCriticalFields(
-    eliashberg.predictedTc, couplingData.coupling, dimensionality
+    eliashberg.predictedTc, couplingData.coupling, dimensionality, candidate.formula
   );
 
   const hc2Suspicious = eliashberg.predictedTc > 50 && criticalFields.upperCriticalField < 1;

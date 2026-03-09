@@ -446,7 +446,7 @@ function getMuStarDefaultForClass(matClass: MaterialClass): number {
     case "cuprate": return 0.13;
     case "iron-pnictide": return 0.12;
     case "conventional-metal": return 0.12;
-    case "heavy-fermion": return 0.15;
+    case "heavy-fermion": return 0.18;
     case "light-element": return 0.11;
     case "other": return 0.12;
   }
@@ -495,7 +495,15 @@ function computeScreenedMuStar(
 
   const muStarBlended = 0.5 * muStarMA + 0.5 * classDefault;
 
-  return Number(Math.max(0.08, Math.min(0.20, muStarBlended)).toFixed(4));
+  let muStarMax = 0.20;
+  switch (matClass) {
+    case "heavy-fermion": muStarMax = 0.28; break;
+    case "iron-pnictide": muStarMax = 0.25; break;
+    case "cuprate": muStarMax = 0.22; break;
+    default: muStarMax = 0.20; break;
+  }
+
+  return Number(Math.max(0.08, Math.min(muStarMax, muStarBlended)).toFixed(4));
 }
 
 function getCorrelationPenaltyForClass(matClass: MaterialClass, uOverW: number, correlationStrength: number): number {
@@ -608,7 +616,7 @@ export function estimateBandwidthW(el: string): number {
 
 function invertMcMillanLambda(tc: number, thetaD: number, muStar: number): number {
   if (tc <= 0 || thetaD <= 0) return 0;
-  const omegaLogK = thetaD * 0.65;
+  const omegaLogK = thetaD * 0.60;
   let lambdaLow = 0.05;
   let lambdaHigh = 4.0;
   for (let i = 0; i < 50; i++) {
@@ -1632,20 +1640,15 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denominator) < 1e-6 || denominator <= 0) {
     tc = 0;
-  } else if (lambda < 1.5) {
-    const f1 = Math.pow(1 + Math.pow(lambda / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
-    const exponent = -1.04 * (1 + lambda) / denominator;
-    tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   } else {
     const lambdaBar = 2.46 * (1 + 3.8 * muStar);
     const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3/2), 1/3);
     const omega2Avg = coupling.omega2Avg;
     const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / omegaLog : 1.0;
-    const f2Base = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
-    const f2Exp = (1 - lambda * lambda) / (1 + lambda * lambda);
-    const f2 = Math.pow(Math.max(0.5, f2Base), f2Exp);
+    const Lambda2 = 1.82 * (1 + 6.3 * muStar) * omegaRatio;
+    const f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
     const exponent = -1.04 * (1 + lambda) / denominator;
-    tc = (omegaLogK / 1.2) * f1 * Math.max(1, f2) * Math.exp(exponent);
+    tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
   }
 
   tc = Number.isFinite(tc) ? Math.max(0, tc) : 0;
@@ -1657,15 +1660,19 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
     tc *= shapeFactor;
   }
 
-  const gapRatio = lambda > 1.5 ? 2 * 1.764 * (1 + 12.5 * (lambda / (lambda + 5)) * (lambda / (lambda + 5))) : 2 * 1.764;
+  const strongCouplingCorrection = 1 + 5.3 * Math.pow(lambda / (lambda + 6), 2);
+  const gapRatio = 2 * 1.764 * strongCouplingCorrection;
   const isotropicGap = lambda < 1.0;
-  const strongCouplingCorrection = lambda > 1.5 ? 1 + 5.3 * (lambda / (lambda + 6)) * (lambda / (lambda + 6)) : 1.0;
 
+  const isHighPressureHydride = (alpha2FData && alpha2FData.integratedLambda > 1.5) ||
+    (lambda > 1.5 && coupling.dominantPhononBranch.includes("H vibration"));
   let uncertaintyFrac = 0.15;
-  if (tc > 200 && lambda < 2.0) {
-    uncertaintyFrac = 0.5;
-  } else if (tc > 150 && lambda < 1.5) {
-    uncertaintyFrac = 0.4;
+  if (isHighPressureHydride) {
+    if (tc > 200) uncertaintyFrac = 0.25;
+    else uncertaintyFrac = 0.20;
+  } else {
+    if (tc > 200 && lambda < 2.0) uncertaintyFrac = 0.5;
+    else if (tc > 150 && lambda < 1.5) uncertaintyFrac = 0.4;
   }
 
   const uncertainty = tc * uncertaintyFrac;
@@ -2116,7 +2123,8 @@ export function evaluateCompetingPhases(
 export function computeCriticalFields(
   tc: number,
   coupling: ElectronPhononCoupling,
-  dimensionality: string
+  dimensionality: string,
+  formula?: string
 ): CriticalFieldResult {
   if (tc <= 0) {
     return {
@@ -2131,32 +2139,65 @@ export function computeCriticalFields(
   }
 
   const lambda = Math.max(coupling.lambda, 0.01);
-  const bw = coupling.bandwidth;
-  const vF = 2e5 * Math.sqrt(Math.max(0.1, bw) / 2.0);
+  const bw = Math.max(0.1, coupling.bandwidth);
+  const matClass = formula ? classifyMaterialForLambda(formula) : "conventional-metal";
+  const isHydride = isHydrideForLambda(matClass);
+  const isHeavyFermion = matClass === "heavy-fermion";
+  const isLayered = dimensionality === "2D" || dimensionality === "quasi-2D" || dimensionality === "layered";
+
   const kB = 1.381e-23;
   const hbar = 1.055e-34;
-  const delta0 = 1.764 * kB * tc * (1 + lambda * 0.3);
+  const PHI0 = 2.07e-15;
+  const MU0 = 4 * Math.PI * 1e-7;
+  const eCharge = 1.602e-19;
+  const mElectron = 9.109e-31;
+
+  const vFRaw = Math.sqrt(bw * eCharge / mElectron) / Math.sqrt(1 + lambda);
+  const vF = Math.max(1e4, Math.min(2e6, vFRaw));
+
+  const carbotteRatio = 1.764 * (1 + 5.3 * Math.pow(lambda / (lambda + 6), 2));
+  const delta0 = carbotteRatio * kB * tc;
+
   const xiRaw = (hbar * vF) / (Math.PI * delta0);
   const xiNm = xiRaw * 1e9;
-  const coherenceLength = Math.max(1.0, Math.min(500, Number.isFinite(xiNm) ? xiNm : 100));
+  let xiMin = 1.0, xiMax = 500;
+  if (isHydride) { xiMin = 0.5; xiMax = 20; }
+  else if (isHeavyFermion) { xiMin = 1; xiMax = 20; }
+  else if (isLayered) { xiMin = 0.5; xiMax = 60; }
+  const coherenceLength = Math.max(xiMin, Math.min(xiMax, Number.isFinite(xiNm) ? xiNm : 10));
 
-  const PHI0 = 2.07e-15;
   const xiM = coherenceLength * 1e-9;
   const Hc2Tesla = PHI0 / (2 * Math.PI * xiM * xiM);
   const hc2Raw = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
-  const pauliLimit = 1.84 * tc * Math.sqrt(1 + lambda);
+  const pauliLimit = 1.86 * tc * Math.sqrt(1 + 0.1 * lambda);
   const upperCriticalField = Math.min(hc2Raw, pauliLimit);
 
-  const lambdaL = 50 + 200 * lambda * (1 + coupling.muStar);
-  const londonPenetrationDepth = Math.max(30, Math.min(2000, lambdaL));
+  let classFactor = 1.0;
+  if (isHydride) classFactor = 0.4;
+  else if (isHeavyFermion) classFactor = 3.0;
+  else if (isLayered) classFactor = 1.5;
+  else if (matClass === "cuprate") classFactor = 2.0;
+  const lambdaLRaw = 65 * Math.sqrt((1 + lambda) / Math.max(0.5, bw)) * classFactor;
+  let lambdaLMin = 20, lambdaLMax = 500;
+  if (isHydride) { lambdaLMin = 10; lambdaLMax = 60; }
+  else if (isHeavyFermion) { lambdaLMin = 200; lambdaLMax = 2000; }
+  else if (isLayered) { lambdaLMin = 60; lambdaLMax = 500; }
+  const londonPenetrationDepth = Math.max(lambdaLMin, Math.min(lambdaLMax, Number.isFinite(lambdaLRaw) ? lambdaLRaw : 100));
 
   let anisotropyRatio = 1.0;
-  if (dimensionality === "2D" || dimensionality === "quasi-2D") anisotropyRatio = 8.0 + lambda * 2;
-  else if (dimensionality === "layered") anisotropyRatio = 4.0 + lambda;
+  if (dimensionality === "2D" || dimensionality === "quasi-2D") {
+    anisotropyRatio = Math.max(5, Math.min(200, 20 / Math.max(0.5, bw)));
+  } else if (dimensionality === "layered") {
+    anisotropyRatio = Math.max(2, Math.min(50, 10 / Math.max(0.5, bw)));
+  } else {
+    anisotropyRatio = Math.max(1, Math.min(5, 3 / Math.max(1, bw)));
+  }
   if (!Number.isFinite(anisotropyRatio)) anisotropyRatio = 1.0;
 
-  const Jc = tc * 1e4 * lambda / (1 + anisotropyRatio * 0.1);
-  const criticalCurrentDensity = Math.round(Jc);
+  const lambdaLM = londonPenetrationDepth * 1e-9;
+  const Jc = PHI0 / (2 * Math.SQRT2 * Math.PI * MU0 * lambdaLM * lambdaLM * xiM);
+  const JcPerCm2 = Jc * 1e-4;
+  const criticalCurrentDensity = Math.round(Math.max(0, Number.isFinite(JcPerCm2) ? JcPerCm2 : 0));
 
   const kappaRaw = coherenceLength > 0 ? londonPenetrationDepth / coherenceLength : 1;
   const kappa = Number.isFinite(kappaRaw) ? kappaRaw : 1;
@@ -2164,7 +2205,6 @@ export function computeCriticalFields(
 
   let lowerCriticalField = 0;
   if (kappa > 0 && londonPenetrationDepth > 0) {
-    const lambdaLM = londonPenetrationDepth * 1e-9;
     const Hc1Tesla = (PHI0 / (4 * Math.PI * lambdaLM * lambdaLM)) * Math.log(Math.max(kappa, 1.001));
     lowerCriticalField = Math.max(0, Number.isFinite(Hc1Tesla) ? Hc1Tesla : 0);
   }
@@ -3170,7 +3210,7 @@ export async function runFullPhysicsAnalysis(
     }
   }
 
-  const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality);
+  const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality, formula);
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
   let uncertaintyEstimate = 0.3;
