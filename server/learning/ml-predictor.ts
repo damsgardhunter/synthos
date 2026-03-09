@@ -92,6 +92,7 @@ export interface MLFeatureVector {
   muStarEstimate: number;
   pressureGpa: number;
   optimalPressureGpa: number;
+  _sourceFormula?: string;
 }
 
 const CHALCOGENS = ["O","S","Se","Te"];
@@ -364,6 +365,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     muStarEstimate,
     pressureGpa: candidatePressure,
     optimalPressureGpa,
+    _sourceFormula: formula,
   };
 }
 

@@ -30,6 +30,7 @@ import {
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
 import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats } from "./learning/gradient-boost";
+import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
 import { fetchAllData as fetchMPAllData, isApiAvailable as isMPAvailable } from "./learning/materials-project-client";
@@ -1842,6 +1843,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getEvaluatedDatasetStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch evaluated dataset stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/xgboost/composition-features/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const cf = computeCompositionFeatures(formula);
+      res.json({
+        formula,
+        featureCount: COMPOSITION_FEATURE_NAMES.length,
+        featureNames: COMPOSITION_FEATURE_NAMES,
+        features: cf,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute composition features", detail: e.message?.slice(0, 200) });
     }
   });
 

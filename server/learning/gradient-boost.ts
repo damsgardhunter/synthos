@@ -1,6 +1,7 @@
 import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
+import { computeCompositionFeatures, compositionFeatureVector, COMPOSITION_FEATURE_NAMES } from "./composition-features";
 import { storage } from "../storage";
 
 interface TreeNode {
@@ -195,10 +196,11 @@ function deriveNonCentrosymmetric(f: MLFeatureVector): number {
 }
 
 function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
+  const resolvedFormula = formula || f._sourceFormula;
   let miedemaEnergy = 0;
-  if (formula) {
+  if (resolvedFormula) {
     try {
-      miedemaEnergy = computeMiedemaFormationEnergy(formula);
+      miedemaEnergy = computeMiedemaFormationEnergy(resolvedFormula);
       if (!Number.isFinite(miedemaEnergy)) miedemaEnergy = 0;
     } catch {
       miedemaEnergy = 0;
@@ -212,7 +214,7 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     else if (f.hydrogenRatio >= 4) pressureGpa = 100;
   }
 
-  return [
+  const physicsFeatures = [
     sanitize(f.electronPhononLambda, FEATURE_MEANS.electronPhononLambda),
     sanitize(f.metallicity, FEATURE_MEANS.metallicity),
     sanitize(f.logPhononFreq, FEATURE_MEANS.logPhononFreq),
@@ -278,9 +280,23 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     sanitize(miedemaEnergy, 0),
     deriveNonCentrosymmetric(f),
   ];
+
+  let compFeatures: number[] = [];
+  if (resolvedFormula) {
+    try {
+      const cf = computeCompositionFeatures(resolvedFormula);
+      compFeatures = compositionFeatureVector(cf).map(v => Number.isFinite(v) ? v : 0);
+    } catch {
+      compFeatures = new Array(COMPOSITION_FEATURE_NAMES.length).fill(0);
+    }
+  } else {
+    compFeatures = new Array(COMPOSITION_FEATURE_NAMES.length).fill(0);
+  }
+
+  return [...physicsFeatures, ...compFeatures];
 }
 
-const FEATURE_NAMES = [
+const PHYSICS_FEATURE_NAMES = [
   "lambda", "metallicity", "omegaLog", "debyeTemp", "correlation",
   "VEC", "avgEN", "enSpread", "hRatio", "pettifor",
   "atomicRadius", "sommerfeldGamma", "bulkModulus", "maxMass", "nElements",
@@ -296,6 +312,8 @@ const FEATURE_NAMES = [
   "bandGap", "formationEnergy", "stability", "crystalSymmetry",
   "multiBandScore", "miedemaFormEnergy", "nonCentrosymmetric",
 ];
+
+const FEATURE_NAMES = [...PHYSICS_FEATURE_NAMES, ...COMPOSITION_FEATURE_NAMES];
 
 function findBestSplitForSubset(
   X: number[][],
@@ -521,7 +539,7 @@ export function getTrainedModel(): GBModel {
     return cachedModel;
   }
 
-  cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+  cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
   cachedCalibration = computeCalibration(cachedModel);
   return cachedModel;
 }
@@ -738,7 +756,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   }
 
   invalidateModel();
-  cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+  cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
   cachedCalibration = computeCalibration(cachedModel);
   xgboostRetrainCount++;
   if (cycleCount != null) lastXGBoostRetrainCycle = cycleCount;
@@ -822,6 +840,10 @@ export function getSurrogateStats() {
     successExamples: successExamples.length,
     failureExamples: failureExamples.length,
     lastRetrainCycle,
+    totalFeatures: FEATURE_NAMES.length,
+    physicsFeatures: PHYSICS_FEATURE_NAMES.length,
+    compositionFeatures: COMPOSITION_FEATURE_NAMES.length,
+    hyperparameters: { nEstimators: 300, learningRate: 0.05, maxDepth: 6 },
   };
 }
 
@@ -865,7 +887,7 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   if (X.length < 10) return 0;
 
   invalidateModel();
-  cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+  cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
   cachedCalibration = computeCalibration(cachedModel);
   lastRetrainCycle = Date.now();
 
@@ -918,7 +940,7 @@ export async function incorporateFailureData(): Promise<number> {
     }
 
     if (X.length >= 10) {
-      cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+      cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
       cachedCalibration = computeCalibration(cachedModel);
     }
 

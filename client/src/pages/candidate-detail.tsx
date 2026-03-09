@@ -719,6 +719,13 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
     reactionComplexity: number;
   }>({ queryKey: ["/api/ml-synthesis/score", formula] });
 
+  const { data: compData } = useQuery<{
+    formula: string;
+    featureCount: number;
+    featureNames: string[];
+    features: Record<string, number>;
+  }>({ queryKey: ["/api/xgboost/composition-features", formula] });
+
   if (!data && !mlData) return null;
 
   const typeColors: Record<string, string> = {
@@ -842,6 +849,21 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
             <ul className="text-xs text-muted-foreground space-y-0.5 ml-3 list-disc">
               {data.analysisNotes.map((note, i) => <li key={i}>{note}</li>)}
             </ul>
+          </div>
+        )}
+        {compData && (
+          <div className="space-y-2" data-testid="composition-features-section">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+              XGBoost Composition Features ({compData.featureCount} features)
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5">
+              {Object.entries(compData.features).filter(([, v]) => typeof v === "number" && v !== 0).slice(0, 20).map(([key, value]) => (
+                <div key={key} className="p-1.5 bg-muted/40 rounded border border-border/30" data-testid={`comp-feature-${key}`}>
+                  <span className="text-[9px] text-muted-foreground block truncate">{key.replace(/([A-Z])/g, " $1").trim()}</span>
+                  <span className="text-xs font-mono font-medium">{typeof value === "number" ? (Math.abs(value) > 100 ? value.toFixed(1) : value.toFixed(3)) : value}</span>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </CardContent>
