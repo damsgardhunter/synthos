@@ -775,3 +775,187 @@ export function getDFTBandAnalysisStats(): {
     avgPocketCount: Math.round(avgPocketCount * 100) / 100,
   };
 }
+
+export interface LindhardSusceptibility {
+  qVectors: { q: number[]; chi: number }[];
+  peakQ: number[] | null;
+  peakChi: number;
+  avgChi: number;
+  nestingStrength: number;
+  susceptibilityProfile: number[];
+}
+
+export function computeLindhardNesting(bandResult: DFTBandStructureResult): LindhardSusceptibility {
+  if (bandResult.eigenvalues.length < 5 || bandResult.nBands === 0) {
+    return { qVectors: [], peakQ: null, peakChi: 0, avgChi: 0, nestingStrength: 0, susceptibilityProfile: [] };
+  }
+
+  const fermiWindow = 0.5;
+  const eta = 0.05;
+  const qBinRes = 0.1;
+
+  const nearFermiStates: { kCoords: number[]; energy: number; bandIdx: number }[] = [];
+  for (const kpt of bandResult.eigenvalues) {
+    for (let b = 0; b < kpt.energies.length; b++) {
+      const e = kpt.energies[b];
+      if (e !== undefined && Math.abs(e) < fermiWindow) {
+        nearFermiStates.push({ kCoords: [...kpt.kCoords], energy: e, bandIdx: b });
+      }
+    }
+  }
+
+  if (nearFermiStates.length < 4) {
+    return { qVectors: [], peakQ: null, peakChi: 0, avgChi: 0, nestingStrength: 0, susceptibilityProfile: [] };
+  }
+
+  const maxStates = 200;
+  const sampledStates = nearFermiStates.length > maxStates
+    ? nearFermiStates.filter((_, i) => i % Math.ceil(nearFermiStates.length / maxStates) === 0)
+    : nearFermiStates;
+
+  const chiMap = new Map<string, { q: number[]; chi: number; count: number }>();
+
+  for (let i = 0; i < sampledStates.length; i++) {
+    for (let j = i + 1; j < sampledStates.length; j++) {
+      const si = sampledStates[i];
+      const sj = sampledStates[j];
+      const dE = sj.energy - si.energy;
+
+      const fi = si.energy < 0 ? 1.0 : 0.0;
+      const fj = sj.energy < 0 ? 1.0 : 0.0;
+      const df = fi - fj;
+
+      if (Math.abs(df) < 0.01) continue;
+
+      const chiContrib = df / (dE + eta * Math.sign(dE));
+
+      const q = [
+        sj.kCoords[0] - si.kCoords[0],
+        sj.kCoords[1] - si.kCoords[1],
+        sj.kCoords[2] - si.kCoords[2],
+      ];
+
+      const binKey = q.map(v => (Math.round(v / qBinRes) * qBinRes).toFixed(2)).join(",");
+
+      if (chiMap.has(binKey)) {
+        const entry = chiMap.get(binKey)!;
+        entry.chi += Math.abs(chiContrib);
+        entry.count++;
+      } else {
+        chiMap.set(binKey, { q: q.map(v => Math.round(v / qBinRes) * qBinRes), chi: Math.abs(chiContrib), count: 1 });
+      }
+    }
+  }
+
+  const allQ = Array.from(chiMap.values()).sort((a, b) => b.chi - a.chi);
+  const topQ = allQ.slice(0, 10);
+
+  const peakEntry = topQ[0];
+  const peakChi = peakEntry?.chi ?? 0;
+  const avgChi = allQ.length > 0 ? allQ.reduce((s, e) => s + e.chi, 0) / allQ.length : 0;
+
+  const nestingStrength = peakChi > 0
+    ? Math.min(1.0, (peakChi / (avgChi + 1e-6)) * 0.2 * Math.min(1, allQ.length / 20))
+    : 0;
+
+  const profile = topQ.map(e => e.chi);
+
+  return {
+    qVectors: topQ.map(e => ({ q: e.q, chi: e.chi })),
+    peakQ: peakEntry?.q ?? null,
+    peakChi,
+    avgChi,
+    nestingStrength,
+    susceptibilityProfile: profile,
+  };
+}
+
+export interface BandFeatureScore {
+  tcComponent: number;
+  stabilityComponent: number;
+  nestingComponent: number;
+  topologyComponent: number;
+  compositeScore: number;
+  weights: { tc: number; stability: number; nesting: number; topology: number };
+}
+
+export function computeBandFeatureScore(
+  predictedTc: number,
+  stabilityScore: number,
+  nestingScore: number,
+  topologyScore: number
+): BandFeatureScore {
+  const W_TC = 0.4;
+  const W_STABILITY = 0.2;
+  const W_NESTING = 0.2;
+  const W_TOPOLOGY = 0.2;
+
+  const tcNorm = Math.min(1.0, Math.max(0, predictedTc / 300));
+  const stabNorm = Math.min(1.0, Math.max(0, stabilityScore));
+  const nestNorm = Math.min(1.0, Math.max(0, nestingScore));
+  const topoNorm = Math.min(1.0, Math.max(0, topologyScore));
+
+  const composite = W_TC * tcNorm + W_STABILITY * stabNorm + W_NESTING * nestNorm + W_TOPOLOGY * topoNorm;
+
+  return {
+    tcComponent: Math.round(tcNorm * 1000) / 1000,
+    stabilityComponent: Math.round(stabNorm * 1000) / 1000,
+    nestingComponent: Math.round(nestNorm * 1000) / 1000,
+    topologyComponent: Math.round(topoNorm * 1000) / 1000,
+    compositeScore: Math.round(composite * 1000) / 1000,
+    weights: { tc: W_TC, stability: W_STABILITY, nesting: W_NESTING, topology: W_TOPOLOGY },
+  };
+}
+
+export interface AutomatedTopologyResult {
+  crossingDispersion: CrossingDispersion[];
+  socGaps: { kIndex: number; bandPair: [number, number]; gapMeV: number; atFermi: boolean }[];
+  fermiIsosurface: FermiIsosurface;
+  topologyFromBands: DFTTopologyFromBands;
+  fermiSurface: FermiSurfaceResult;
+  lindhardNesting: LindhardSusceptibility;
+  classification: DFTTopologicalClassification;
+  bandFeatureScore: BandFeatureScore;
+}
+
+export function runAutomatedTopologyPipeline(
+  bandResult: DFTBandStructureResult,
+  socStrength: number,
+  predictedTc: number,
+  stabilityScore: number
+): AutomatedTopologyResult {
+  const crossingDispersion = classifyCrossingDispersion(bandResult);
+  const socGaps = detectSOCGaps(bandResult);
+  const fermiIsosurface = computeFermiIsosurface(bandResult);
+  const topologyFromBands = extractTopologyFromDFT(bandResult);
+  const fermiSurface = buildFermiSurfaceFromDFT(bandResult);
+  const lindhardNesting = computeLindhardNesting(bandResult);
+  const classification = classifyDFTTopology(bandResult, socStrength);
+
+  const effectiveNesting = Math.max(
+    fermiSurface.nestingScore,
+    lindhardNesting.nestingStrength
+  );
+  const effectiveTopo = Math.max(
+    topologyFromBands.topologyScore,
+    classification.confidence
+  );
+
+  const bandFeatureScore = computeBandFeatureScore(
+    predictedTc,
+    stabilityScore,
+    effectiveNesting,
+    effectiveTopo
+  );
+
+  return {
+    crossingDispersion,
+    socGaps,
+    fermiIsosurface,
+    topologyFromBands,
+    fermiSurface,
+    lindhardNesting,
+    classification,
+    bandFeatureScore,
+  };
+}

@@ -60,8 +60,8 @@ import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetwor
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
 import { predictBandDispersion, getBandOperatorMLFeatures, type BandOperatorResult } from "../physics/band-structure-operator";
-import { buildFermiSurfaceFromDFT, extractTopologyFromDFT, enhanceElectronicStructure, recordDFTBandAnalysis, getDFTBandAnalysisStats, classifyDFTTopology, computeFermiIsosurface } from "../dft/dft-band-analysis";
-import type { DFTTopologicalClassification } from "../dft/dft-band-analysis";
+import { buildFermiSurfaceFromDFT, extractTopologyFromDFT, enhanceElectronicStructure, recordDFTBandAnalysis, getDFTBandAnalysisStats, classifyDFTTopology, computeFermiIsosurface, computeLindhardNesting, computeBandFeatureScore, runAutomatedTopologyPipeline } from "../dft/dft-band-analysis";
+import type { DFTTopologicalClassification, BandFeatureScore } from "../dft/dft-band-analysis";
 import type { DFTBandStructureResult } from "../dft/band-structure-calculator";
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { predictKineticStability, formatKineticStabilityNote, type KineticStabilityResult } from "../physics/kinetic-stability";
@@ -1692,8 +1692,42 @@ async function runPhase10_Physics() {
                 const dftBandDataFS = (completedJobFS.outputData as any).bandStructure as DFTBandStructureResult;
                 fermiSurfaceAnalysis = buildFermiSurfaceFromDFT(dftBandDataFS);
                 usedDFTFermi = true;
+
+                const lindhard = computeLindhardNesting(dftBandDataFS);
+                if (lindhard.nestingStrength > fermiSurfaceAnalysis.nestingScore) {
+                  fermiSurfaceAnalysis = {
+                    ...fermiSurfaceAnalysis,
+                    nestingScore: lindhard.nestingStrength,
+                    nestingVectors: lindhard.qVectors.slice(0, 5).map((qv, i) => ({
+                      q: qv.q,
+                      strength: qv.chi / (lindhard.peakChi + 1e-6),
+                      connectedPockets: [0, Math.min(1, fermiSurfaceAnalysis.pocketCount - 1)] as [number, number],
+                    })),
+                  };
+                }
+
+                const stabilityEst = candidate.ensembleScore ?? 0.5;
+                const tcEst = candidate.predictedTc ?? 0;
+                const topoEst = topoAnalysis?.topologicalScore ?? 0;
+                const bfScore = computeBandFeatureScore(tcEst, stabilityEst, fermiSurfaceAnalysis.nestingScore, topoEst);
+
+                (updatedMlFeatures as any).lindhardNesting = {
+                  peakChi: lindhard.peakChi,
+                  nestingStrength: lindhard.nestingStrength,
+                  peakQ: lindhard.peakQ,
+                  nQVectors: lindhard.qVectors.length,
+                };
+
+                (updatedMlFeatures as any).bandFeatureScore = {
+                  composite: bfScore.compositeScore,
+                  tcComponent: bfScore.tcComponent,
+                  stabilityComponent: bfScore.stabilityComponent,
+                  nestingComponent: bfScore.nestingComponent,
+                  topologyComponent: bfScore.topologyComponent,
+                };
+
                 const isoFS = computeFermiIsosurface(dftBandDataFS);
-                console.log(`[Engine] ${candidate.formula}: Fermi surface from DFT E(k)=EF isosurface — ${fermiSurfaceAnalysis.pocketCount} pockets (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)}, iso=${isoFS.totalPoints}pts/${isoFS.sheetCount}sheets, anisotropy=${isoFS.anisotropy.toFixed(1)}`);
+                console.log(`[Engine] ${candidate.formula}: Fermi surface from DFT E(k)=EF isosurface — ${fermiSurfaceAnalysis.pocketCount} pockets (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)} (Lindhard chi=${lindhard.peakChi.toFixed(3)}, strength=${lindhard.nestingStrength.toFixed(3)}), iso=${isoFS.totalPoints}pts/${isoFS.sheetCount}sheets, bandScore=${bfScore.compositeScore.toFixed(3)}`);
               }
             } catch (dftFsErr) {
               console.error(`[Engine] DFT Fermi surface extraction failed for ${candidate.formula}:`, dftFsErr instanceof Error ? dftFsErr.message.slice(0, 100) : "unknown");
@@ -4051,9 +4085,19 @@ async function runAutonomousFastPath() {
         if (result.passed && result.tc > 10) {
           const hubIns = crossEngineHub.getInsightsFor(formula);
           let crossEngineBonus = 0;
-          if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3) crossEngineBonus += hubIns.topology.topologicalScore * 0.2;
-          if (hubIns?.fermi && hubIns.fermi.nestingScore > 0.3) crossEngineBonus += hubIns.fermi.nestingScore * 0.15;
-          if (hubIns?.pairing && hubIns.pairing.compositePairingStrength > 0.4) crossEngineBonus += hubIns.pairing.compositePairingStrength * 0.15;
+          const topoScore = hubIns?.topology?.topologicalScore ?? 0;
+          const nestScore = hubIns?.fermi?.nestingScore ?? 0;
+          const pairingScore = hubIns?.pairing?.compositePairingStrength ?? 0;
+          if (topoScore > 0.3) crossEngineBonus += topoScore * 0.2;
+          if (nestScore > 0.3) crossEngineBonus += nestScore * 0.15;
+          if (pairingScore > 0.4) crossEngineBonus += pairingScore * 0.15;
+
+          const stabilityEst = result.physicsPred?.hullDistance != null ? (1 - result.physicsPred.hullDistance) : 0.5;
+          const bfComposite = computeBandFeatureScore(result.tc, stabilityEst, nestScore, topoScore);
+          if (bfComposite.compositeScore > 0.4) {
+            crossEngineBonus += bfComposite.compositeScore * 0.1;
+          }
+
           if (crossEngineBonus > 0.05) {
             const enrichedTc = Math.round(result.tc * (1 + crossEngineBonus));
             rlAgent.recordElementOutcome(els, enrichedTc, true);

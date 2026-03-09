@@ -19,6 +19,7 @@ import { predictSynthesisFeasibility } from "../synthesis/ml-synthesis-predictor
 import { generateRetrosynthesisRoutes } from "../synthesis/retrosynthesis-engine";
 import { computeReactionFeasibility } from "../synthesis/thermodynamic-feasibility";
 import { findBestPrecursors, computePrecursorAvailabilityScore } from "../synthesis/precursor-database";
+import { predictBandStructure } from "../physics/band-structure-surrogate";
 
 const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Cuprates: -1.2,
@@ -197,6 +198,50 @@ async function stage0b_SynthesisPrescreen(
     reason,
     data: { synthScore, mlPrediction, retroRoutes },
   };
+}
+
+async function stage0c_FastBandScreen(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<{ passed: boolean; reason: string | null; data: any }> {
+  const start = Date.now();
+
+  const bandPred = predictBandStructure(candidate.formula, undefined);
+
+  const isInsulating = bandPred.bandGap > 1.0;
+  const hasMinimalDOS = bandPred.dosPredicted < 0.3;
+  const hasSomePromise = bandPred.flatBandScore > 0.2
+    || bandPred.nestingFromBands > 0.3
+    || bandPred.vhsProximity > 0.3
+    || bandPred.multiBandScore > 0.3
+    || bandPred.bandTopologyClass !== "trivial";
+
+  const passed = !isInsulating && !hasMinimalDOS;
+  let reason: string | null = null;
+  if (isInsulating) {
+    reason = `Band surrogate predicts insulator (gap=${bandPred.bandGap.toFixed(2)}eV) — unlikely superconductor`;
+  } else if (hasMinimalDOS) {
+    reason = `Band surrogate predicts very low DOS at Fermi (${bandPred.dosPredicted.toFixed(2)}) — weak pairing potential`;
+  }
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 0, "fast_band_screen",
+    {
+      bandGap: bandPred.bandGap,
+      flatBandScore: bandPred.flatBandScore,
+      nestingFromBands: bandPred.nestingFromBands,
+      vhsProximity: bandPred.vhsProximity,
+      dosPredicted: bandPred.dosPredicted,
+      multiBandScore: bandPred.multiBandScore,
+      bandTopologyClass: bandPred.bandTopologyClass,
+      fsDimensionality: bandPred.fsDimensionality,
+      confidence: bandPred.confidence,
+      hasPromise: hasSomePromise,
+    },
+    passed, reason, Date.now() - start, bandPred.confidence
+  );
+
+  return { passed, reason, data: { bandPrediction: bandPred, hasSomePromise } };
 }
 
 async function stage1_ElectronicStructure(
@@ -383,7 +428,7 @@ export async function runMultiFidelityPipeline(
   emit("log", {
     phase: "phase-12",
     event: "Multi-fidelity pipeline started",
-    detail: `Screening ${candidates.length} candidates through 6-stage pipeline: ML -> Synthesis Prescreen -> Electronic Structure -> Phonon/E-Ph -> Tc Prediction -> Synthesis`,
+    detail: `Screening ${candidates.length} candidates through 7-stage pipeline: ML -> Synthesis Prescreen -> Fast Band Screen -> Electronic Structure -> Phonon/E-Ph -> Tc Prediction -> Synthesis`,
     dataSource: "Pipeline",
   });
 
@@ -415,6 +460,20 @@ export async function runMultiFidelityPipeline(
         finalStage: 0,
         passed: false,
         failureReason: s0b.reason,
+        physicsData,
+      });
+      continue;
+    }
+
+    const s0c = await stage0c_FastBandScreen(emit, candidate);
+    physicsData.fastBandScreen = s0c.data;
+    if (!s0c.passed) {
+      results.push({
+        candidateId: candidate.id,
+        formula: candidate.formula,
+        finalStage: 0,
+        passed: false,
+        failureReason: s0c.reason,
         physicsData,
       });
       continue;
