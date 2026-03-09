@@ -1,6 +1,7 @@
 import { TargetProperties, CompositionBias, InverseCandidate } from "./target-schema";
 import { defaultSynthesisVector, mutateSynthesisVector, optimizeSynthesisPath } from "../physics/synthesis-simulator";
 import { isValidFormula } from "../learning/utils";
+import { passesElementCountCap } from "../learning/candidate-generator";
 
 const LIGHT_PHONON_ELEMENTS = ["H", "B", "C", "N", "O"];
 const HIGH_COUPLING_TM = ["Nb", "V", "Ti", "Ta", "Mo", "W", "Zr", "Hf"];
@@ -374,10 +375,7 @@ export function generateInverseCandidates(
   return candidates.filter(c => {
     if (!isValidFormula(c.formula)) return false;
     if (!hasPlausibleChargeBalance(c.formula)) return false;
-    const elMap = parseFormulaElements(c.formula);
-    const els = Array.from(elMap.keys());
-    const nonH = els.filter(e => e !== "H");
-    if (nonH.length > 4 || els.length > 5) return false;
+    if (!passesElementCountCap(c.formula)) return false;
     return true;
   }).slice(0, count);
 }
@@ -467,7 +465,7 @@ export function refineCandidate(
     }
   }
 
-  return refined.filter(c => hasPlausibleChargeBalance(c.formula));
+  return refined.filter(c => hasPlausibleChargeBalance(c.formula) && passesElementCountCap(c.formula));
 }
 
 export function createInitialBias(target: TargetProperties): CompositionBias {

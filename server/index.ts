@@ -117,6 +117,11 @@ app.use((req, res, next) => {
         await db.execute(sql`UPDATE superconductor_candidates SET ensemble_score = 0.95 WHERE ensemble_score > 0.95`);
         await db.execute(sql`UPDATE superconductor_candidates SET room_temp_viable = false WHERE room_temp_viable = true AND (predicted_tc < 293 OR pressure_gpa > 50 OR pressure_gpa IS NULL OR meissner_effect = false OR zero_resistance = false)`);
         await db.execute(sql`UPDATE superconductor_candidates SET ambient_pressure_stable = false WHERE ambient_pressure_stable = true AND (pressure_gpa > 1 OR pressure_gpa IS NULL)`);
+
+        const overComplex = await db.execute(sql`DELETE FROM superconductor_candidates WHERE array_length(regexp_split_to_array(formula, '[A-Z]'), 1) - 1 > 5`);
+        const deletedCount = overComplex.rowCount ?? 0;
+        if (deletedCount > 0) log(`Purged ${deletedCount} over-complex candidates (>5 elements) on startup`, "startup");
+
         log("Applied bulk corrections on startup", "startup");
       } catch (err: any) {
         log(`Bulk correction error: ${err.message?.slice(0, 100)}`, "startup");

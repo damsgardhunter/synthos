@@ -6,6 +6,7 @@ import { gbPredict } from "./gradient-boost";
 import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
 import { passesStabilityGate } from "./phase-diagram-engine";
+import { passesElementCountCap } from "./candidate-generator";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
 const openai = new OpenAI({
@@ -241,6 +242,7 @@ export async function runSuperconductorResearch(
       candidate.meissnerEffect === true;
 
     try {
+      if (!passesElementCountCap(formula)) continue;
       const stabilityCheck = passesStabilityGate(formula);
       if (!stabilityCheck.pass) {
         continue;
@@ -542,6 +544,7 @@ Return JSON with 'candidates' array:
       });
 
       try {
+        if (!passesElementCountCap(c.formula)) continue;
         const stabilityCheck = passesStabilityGate(c.formula);
         if (!stabilityCheck.pass) {
           continue;
@@ -820,6 +823,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
         (c.pressureGpa ?? 999) <= 50;
 
       try {
+        if (!passesElementCountCap(c.formula)) continue;
         const stabilityCheck = passesStabilityGate(c.formula);
         if (!stabilityCheck.pass) {
           continue;

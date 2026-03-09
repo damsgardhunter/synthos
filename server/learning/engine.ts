@@ -25,7 +25,7 @@ import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
-import { runMassiveGeneration, passesValenceFilter, type MassiveGenerationStats } from "./candidate-generator";
+import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, type MassiveGenerationStats } from "./candidate-generator";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -849,6 +849,16 @@ function shuffle<T>(arr: T[]): T[] {
 
 async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeof storage.insertSuperconductorCandidate>[0]): Promise<boolean> {
   try {
+    if (!passesElementCountCap(candidateData.formula)) {
+      emit("log", {
+        phase: "engine",
+        event: "Composition cap rejected",
+        detail: `${candidateData.formula}: exceeds element/atom count caps (max 4 non-H elements, 5 total, 20 atoms, 12 per element)`,
+        dataSource: "Composition Filter",
+      });
+      return false;
+    }
+
     const preFilter = passesStabilityPreFilter(candidateData.formula);
     if (!preFilter.pass) {
       emit("log", {
@@ -2999,19 +3009,14 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     };
 
     let autonomousInserted = false;
-    if (tier === 1) {
+    try {
       autonomousInserted = await insertCandidateWithStabilityCheck(candidatePayload);
-    } else {
-      try {
-        await storage.insertSuperconductorCandidate(candidatePayload);
+    } catch (insertErr: any) {
+      const isDuplicate = insertErr?.message?.includes("duplicate") || insertErr?.code === "23505";
+      if (isDuplicate) {
         autonomousInserted = true;
-      } catch (insertErr: any) {
-        const isDuplicate = insertErr?.message?.includes("duplicate") || insertErr?.code === "23505";
-        if (isDuplicate) {
-          autonomousInserted = true;
-        } else {
-          autonomousInserted = false;
-        }
+      } else {
+        autonomousInserted = false;
       }
     }
 
