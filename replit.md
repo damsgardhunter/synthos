@@ -275,6 +275,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - qe-dft-engine.ts: `deduplicateSites()` now drops duplicate atoms instead of adding perturbed phantom atoms (preserves stoichiometry). MX2 prototype `z: -0.121` wrapped to `z: 0.879`. Hydride cage offset uses 3D grid indexing (`ceil(cbrt(nCopies))`) instead of 2×2×∞ layout. `computeBoundingVolume` accounts for atomic radii padding and corrects high-aspect-ratio volumes. Laves-C15 fixed to 4A+8B = 1:2 ratio (was 8A+8B = 1:1). `selectBestPrototypeByChemistry` handles 4-element compounds with pnictide detection for ThCr2Si2 matching instead of forcing Perovskite.
   - crystal-prototypes.ts: `computeBondValenceSum` BVS formula fixed — uses proper coordination-adjusted bond distance `R0 * (1 + 0.02 * max(0, avgCoord - 6))` instead of degenerate constant. `sortElementsBySite` resolves ambiguous same-ratio assignments using chemistry-aware ordering (large cations → spacer sites, TM → active sites, anions → anion roles). Chevrel prototype `latticeType` changed from "hexagonal" to "cubic" (rhombohedral approximation). MX2 negative fractional coordinate fixed.
 
+- **Bug Fix Session**:
+  - deliberative-evaluator.ts: Fixed `parseFormulaElements` misuse — `.keys()` on `string[]` returns numeric indices, replaced with `new Set(parseFormulaElements(...))` at two novelty scoring call sites. Second risk assessment call site switched to `parseFormulaCounts()` (returns `Map<string,number>`) for `.has()`/`.get()` access. Previously `elements.get is not a function` crash.
+  - engine.ts: QC engine field mismatch fixed — `qcAnalysis.primaryQCP` → `qcAnalysis.qcpType`, `qcAnalysis.domeProfile.domeCenter` → `qcAnalysis.dome.domeAmplitude` to match actual `QuantumCriticalAnalysis` interface.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

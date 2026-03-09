@@ -1635,7 +1635,7 @@ async function runPhase10_Physics() {
           });
           (updatedMlFeatures as any).quantumCriticality = {
             score: qcAnalysis.quantumCriticalScore,
-            primaryQCP: qcAnalysis.primaryQCP,
+            primaryQCP: qcAnalysis.qcpType,
             pairingBoost: qcAnalysis.pairingBoostFromQCP,
           };
           if (qcAnalysis.quantumCriticalScore > 0.5) {
@@ -1644,7 +1644,7 @@ async function runPhase10_Physics() {
             emit("log", {
               phase: "phase-10",
               event: "Quantum criticality detected",
-              detail: `${candidate.formula}: QCP=${qcAnalysis.primaryQCP}, score=${qcAnalysis.quantumCriticalScore.toFixed(3)}, dome=${qcAnalysis.domeProfile.domeCenter.toFixed(2)}, boost=${qcAnalysis.pairingBoostFromQCP.toFixed(3)}, channels=[mott=${qcAnalysis.channelScores.mott.toFixed(2)},sdw=${qcAnalysis.channelScores.sdw.toFixed(2)},cdw=${qcAnalysis.channelScores.cdw.toFixed(2)},nematic=${qcAnalysis.channelScores.nematic.toFixed(2)}]`,
+              detail: `${candidate.formula}: QCP=${qcAnalysis.qcpType}, score=${qcAnalysis.quantumCriticalScore.toFixed(3)}, dome=${qcAnalysis.dome.domeAmplitude.toFixed(2)}, boost=${qcAnalysis.pairingBoostFromQCP.toFixed(3)}, channels=[mott=${qcAnalysis.channelScores.mott.toFixed(2)},sdw=${qcAnalysis.channelScores.sdw.toFixed(2)},cdw=${qcAnalysis.channelScores.cdw.toFixed(2)},nematic=${qcAnalysis.channelScores.nematic.toFixed(2)}]`,
               dataSource: "Quantum Criticality Detector",
             });
           }

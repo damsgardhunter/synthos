@@ -5,6 +5,20 @@ import { gbPredict } from "./gradient-boost";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { parseFormulaElements, computeElectronPhononCoupling, computePhononSpectrum, computeElectronicStructure } from "./physics-engine";
+
+function parseFormulaCounts(formula: string): Map<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
+  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const counts = new Map<string, number>();
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseFloat(match[2]) : 1;
+    counts.set(el, (counts.get(el) ?? 0) + num);
+  }
+  return counts;
+}
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { predictStability } from "../physics/stability-predictor";
 import { passesElementCountCap } from "./candidate-generator";
@@ -65,7 +79,7 @@ function runChemistryReasoning(formula: string): DeliberationStage {
   const reasoning: string[] = [];
   let score = 0.5;
 
-  const elements = parseFormulaElements(formula);
+  const elements = parseFormulaCounts(formula);
   const elKeys = Array.from(elements.keys());
   const family = classifyFamily(formula);
 
@@ -267,7 +281,7 @@ async function runComparativeRanking(formula: string, predictedTc: number): Prom
     }
 
     const myFamily = classifyFamily(formula);
-    const myElements = new Set(Array.from(parseFormulaElements(formula).keys()));
+    const myElements = new Set(parseFormulaElements(formula));
     const sameFamily = sorted.filter(c => classifyFamily(c.formula) === myFamily);
 
     if (sameFamily.length === 0) {
@@ -282,7 +296,7 @@ async function runComparativeRanking(formula: string, predictedTc: number): Prom
         reasoning.push(`Exceeds best in ${myFamily} family (${bestInFamily.toFixed(0)}K) by ${((predictedTc / bestInFamily - 1) * 100).toFixed(0)}%`);
       } else {
         const elementOverlaps = sameFamily.map(c => {
-          const cElements = new Set(Array.from(parseFormulaElements(c.formula).keys()));
+          const cElements = new Set(parseFormulaElements(c.formula));
           const intersection = new Set([...myElements].filter(e => cElements.has(e)));
           return intersection.size / Math.max(myElements.size, cElements.size);
         });
@@ -358,7 +372,7 @@ function runRiskAssessment(formula: string, predictedTc: number, mlFeatures?: an
     }
   }
 
-  const elements = parseFormulaElements(formula);
+  const elements = parseFormulaCounts(formula);
   const hasH = elements.has("H");
   const hCount = elements.get("H") ?? 0;
   if (hasH && hCount >= 6) {

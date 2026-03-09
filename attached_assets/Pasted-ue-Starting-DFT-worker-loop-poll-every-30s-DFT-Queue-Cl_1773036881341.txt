@@ -1,0 +1,171 @@
+ue] Starting DFT worker loop (poll every 30s)
+[DFT-Queue] Cleaned up stale running job #467 (LaH9)
+[DFT-Queue] Cleaned 1 stale running job(s)
+6:00:45 AM [express] serving on port 5000
+6:00:46 AM [startup] Applied bulk corrections on startup
+[xTB-Health] Binary found: v6.7.1
+[xTB-Health] Geometry optimization: OK
+[xTB-Health] Hessian calculation: OK
+[xTB-Health] Summary: available=true, opt=true, hess=true, healthy=true
+6:01:54 AM [startup] Learning engine auto-started
+[Engine] Deliberation failed for LiCuO2Co2: elements.get is not a function
+[Engine] Deliberation failed for CuZn2O2Se: elements.get is not a function
+[Engine] Deliberation failed for Cu2TeO: elements.get is not a function
+[Engine] Deliberation failed for MnBSb2: elements.get is not a function
+[Engine] Deliberation failed for NaCa2Y2: elements.get is not a function
+[Engine] Deliberation failed for Re2W: elements.get is not a function
+[Engine] Deliberation failed for CoSbAs2: elements.get is not a function
+[Engine] Deliberation failed for SrY2: elements.get is not a function
+[Engine] Deliberation failed for InGa2Sn: elements.get is not a function
+[Engine] Deliberation failed for Ga2Re: elements.get is not a function
+[Surrogate] Model retrained with 10 new examples (10 successes, 0 failures). Total training size: 522
+[AFLOW API] Non-JSON response from server, backing off
+[DFT] In: Ref energy corrected from -1.1259 Ha (atom) to -1.2185 Ha (bulk-corrected, cohesive=2.52 eV)
+[DFT] Ga: Ref energy corrected from -1.0811 Ha (atom) to -1.1844 Ha (bulk-corrected, cohesive=2.81 eV)
+[DFT] Sn: Ref energy corrected from -2.0111 Ha (atom) to -2.1265 Ha (bulk-corrected, cohesive=3.14 eV)
+[Phonon] InGa2Sn: Starting finite displacement phonon calculation (4 atoms, 25 xTB calculations)
+[Phonon] InGa2Sn: ARTIFACT DETECTED — 198 modes below -2000 cm⁻¹ are xTB numerical explosions (lowest=-23243 cm⁻¹), discarded. 33 physical imaginary modes remain.
+[Phonon] InGa2Sn: Finite displacement complete in 0.8s — 25 calcs, stable=false, freq range [-23243.4, 1677.2] cm⁻¹, ω_log=85.7 cm⁻¹
+[DFT] InGa2Sn: xTB DFT computed (xTB-optimized): gap=0.966eV, metallic=false, E/atom=-1.4106Ha, Ef=0.486eV/atom
+[DFT] InGa2Sn: xTB Hessian found 33 imaginary mode(s), lowest freq=-23243.4 cm-1 (severe: freq < -2000)
+[DFT] InGa2Sn: Finite displacement phonons: stable=false, freq=[-23243.4, 1677.2] cm⁻¹, ω_log=85.7 cm⁻¹
+[Engine] Quantum criticality failed for InGa2Sn: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] CuZn2O2Se: Structure validation attempt 1 — minDist=2.118Å, ratio=1.20, vol/atom=30.0ų (target=14.4) — scaling by 0.78
+[DFT] CuZn2O2Se: Structure validation attempt 2 — minDist=1.659Å, ratio=0.94, vol/atom=19.1ų (target=14.4) — scaling by 1.11
+[DFT] Cu: Ref energy corrected from -3.7480 Ha (atom) to -3.8763 Ha (bulk-corrected, cohesive=3.49 eV)
+[DFT] Zn: Ref energy corrected from -0.5275 Ha (atom) to -0.5771 Ha (bulk-corrected, cohesive=1.35 eV)
+[DFT] Se: Ref energy corrected from -3.1186 Ha (atom) to -3.2090 Ha (bulk-corrected, cohesive=2.46 eV)
+[Phonon] CuZn2O2Se: Starting finite displacement phonon calculation (6 atoms, 37 xTB calculations)
+[Phonon] CuZn2O2Se: ARTIFACT DETECTED — 300 modes below -2000 cm⁻¹ are xTB numerical explosions (lowest=-71699 cm⁻¹), discarded. 50 physical imaginary modes remain.
+[Phonon] CuZn2O2Se: Finite displacement complete in 1.5s — 37 calcs, stable=false, freq range [-71699.2, 253.4] cm⁻¹, ω_log=103.0 cm⁻¹
+[DFT] CuZn2O2Se: xTB DFT computed (xTB-optimized): gap=0.953eV, metallic=false, E/atom=-2.8444Ha, Ef=-4.173eV/atom
+[DFT] CuZn2O2Se: xTB Hessian found 50 imaginary mode(s), lowest freq=-71699.2 cm-1 (severe: freq < -2000)
+[DFT] CuZn2O2Se: Finite displacement phonons: stable=false, freq=[-71699.2, 253.4] cm⁻¹, ω_log=103.0 cm⁻¹
+[Engine] Quantum criticality failed for CuZn2O2Se: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] CoSbAs2: Structure validation attempt 1 — minDist=3.600Å, ratio=1.65, vol/atom=41.9ų (target=10.5) — scaling by 0.63
+[DFT] CoSbAs2: Geometry optimization failed: Command failed: cd /tmp/dft_calculations/opt_CoSbAs2_1773036213851 && /home/runner/workspace/server/
+[DFT] CoSbAs2: Structure validation attempt 1 — minDist=3.600Å, ratio=1.65, vol/atom=41.9ų (target=10.5) — scaling by 0.63
+[DFT] Co: Ref energy corrected from -3.4272 Ha (atom) to -3.5885 Ha (bulk-corrected, cohesive=4.39 eV)
+[DFT] Sb: Ref energy corrected from -2.1642 Ha (atom) to -2.2653 Ha (bulk-corrected, cohesive=2.75 eV)
+[DFT] As: Ref energy corrected from -2.2358 Ha (atom) to -2.3446 Ha (bulk-corrected, cohesive=2.96 eV)
+[DFT] CoSbAs2: Structure validation attempt 1 — minDist=3.600Å, ratio=1.65, vol/atom=41.9ų (target=10.5) — scaling by 0.63
+[Phonon] CoSbAs2: Starting finite displacement phonon calculation (8 atoms, 49 xTB calculations)
+[Phonon] CoSbAs2: Force constant matrix construction failed
+[DFT] CoSbAs2: Structure validation attempt 1 — minDist=3.600Å, ratio=1.65, vol/atom=41.9ų (target=10.5) — scaling by 0.63
+[DFT] CoSbAs2: xTB DFT computed (BiS2-layered): gap=0.199eV, metallic=true, E/atom=-2.6361Ha, Ef=-0.010eV/atom
+[DFT] CoSbAs2: xTB Hessian found 3 imaginary mode(s), lowest freq=-157.6 cm-1 (severe: freq < -2000)
+[Engine] Quantum criticality failed for CoSbAs2: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] NaCa2Y2: Structure validation attempt 1 — minDist=2.066Å, ratio=0.68, vol/atom=95.3ų (target=23.7) — scaling by 1.55
+[DFT] NaCa2Y2: Structure validation attempt 2 — minDist=3.192Å, ratio=1.05, vol/atom=212.0ų (target=23.7) — scaling by 0.48
+[DFT] NaCa2Y2: Structure validation attempt 3 — minDist=1.537Å, ratio=0.51, vol/atom=59.9ų (target=23.7) — scaling by 2.08
+[DFT] NaCa2Y2: Structure validation attempt 4 — minDist=3.192Å, ratio=1.05, vol/atom=212.0ų (target=23.7) — scaling by 0.48
+[DFT] NaCa2Y2: Structure validation attempt 5 — minDist=1.537Å, ratio=0.51, vol/atom=59.9ų (target=23.7) — scaling by 2.08
+[DFT] NaCa2Y2: Volume ratio check FAILED for Kagome-variant — generated=1272.1ų, expected=142.0ų, ratio=8.96 (must be 0.5-2.0)
+[DFT] NaCa2Y2: Structure validation attempt 1 — minDist=2.066Å, ratio=0.68, vol/atom=95.3ų (target=23.7) — scaling by 1.55
+[DFT] NaCa2Y2: Structure validation attempt 2 — minDist=3.192Å, ratio=1.05, vol/atom=212.0ų (target=23.7) — scaling by 0.48
+[DFT] NaCa2Y2: Structure validation attempt 3 — minDist=1.537Å, ratio=0.51, vol/atom=59.9ų (target=23.7) — scaling by 2.08
+[DFT] NaCa2Y2: Structure validation attempt 4 — minDist=3.192Å, ratio=1.05, vol/atom=212.0ų (target=23.7) — scaling by 0.48
+[DFT] NaCa2Y2: Structure validation attempt 5 — minDist=1.537Å, ratio=0.51, vol/atom=59.9ų (target=23.7) — scaling by 2.08
+[DFT] NaCa2Y2: Volume ratio check FAILED for Kagome-variant — generated=1272.1ų, expected=142.0ų, ratio=8.96 (must be 0.5-2.0)
+[DFT] NaCa2Y2: No external API or xTB data. Using analytical fallbacks (coverage=1.00).
+[DFT] Al: Ref energy corrected from -0.9053 Ha (atom) to -1.0299 Ha (bulk-corrected, cohesive=3.39 eV)
+[DFT] B: Ref energy corrected from -0.9524 Ha (atom) to -1.1660 Ha (bulk-corrected, cohesive=5.81 eV)
+[DFT] AlBSb2: Formation energy 1.034 eV/atom is positive (>1.0), discarding — compound less stable than elements
+[Phonon] AlBSb2: Starting finite displacement phonon calculation (4 atoms, 25 xTB calculations)
+[Phonon] AlBSb2: ARTIFACT DETECTED — 165 modes below -2000 cm⁻¹ are xTB numerical explosions (lowest=-99356 cm⁻¹), discarded. 33 physical imaginary modes remain.
+[Phonon] AlBSb2: Finite displacement complete in 0.8s — 25 calcs, stable=false, freq range [-99355.7, 7247.3] cm⁻¹, ω_log=318.5 cm⁻¹
+[DFT] AlBSb2: xTB DFT computed (xTB-optimized): gap=0.613eV, metallic=false, E/atom=-1.6436Ha
+[DFT] AlBSb2: xTB Hessian found 33 imaginary mode(s), lowest freq=-99355.7 cm-1 (severe: freq < -2000)
+[DFT] AlBSb2: Finite displacement phonons: stable=false, freq=[-99355.7, 7247.3] cm⁻¹, ω_log=318.5 cm⁻¹
+[Engine] Quantum criticality failed for AlBSb2: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] Ga2Re: Structure validation attempt 1 — minDist=1.808Å, ratio=0.83, vol/atom=33.6ų (target=10.0) — scaling by 1.27
+[DFT] Ga2Re: Structure validation attempt 2 — minDist=2.293Å, ratio=1.05, vol/atom=50.2ų (target=10.0) — scaling by 0.58
+[DFT] Ga2Re: Structure validation attempt 3 — minDist=1.340Å, ratio=0.61, vol/atom=21.5ų (target=10.0) — scaling by 1.71
+[DFT] Ga2Re: Structure validation attempt 4 — minDist=2.293Å, ratio=1.05, vol/atom=50.2ų (target=10.0) — scaling by 0.58
+[DFT] Ga2Re: Structure validation attempt 5 — minDist=1.340Å, ratio=0.61, vol/atom=21.5ų (target=10.0) — scaling by 1.71
+[DFT] Ga2Re: Volume ratio check FAILED for Cu2Mg-Laves — generated=301.0ų, expected=53.9ų, ratio=5.58 (must be 0.5-2.0)
+[DFT] Ga2Re: Structure validation attempt 1 — minDist=1.808Å, ratio=0.83, vol/atom=33.6ų (target=10.0) — scaling by 1.27
+[DFT] Ga2Re: Structure validation attempt 2 — minDist=2.293Å, ratio=1.05, vol/atom=50.2ų (target=10.0) — scaling by 0.58
+[DFT] Ga2Re: Structure validation attempt 3 — minDist=1.340Å, ratio=0.61, vol/atom=21.5ų (target=10.0) — scaling by 1.71
+[DFT] Ga2Re: Structure validation attempt 4 — minDist=2.293Å, ratio=1.05, vol/atom=50.2ų (target=10.0) — scaling by 0.58
+[DFT] Ga2Re: Structure validation attempt 5 — minDist=1.340Å, ratio=0.61, vol/atom=21.5ų (target=10.0) — scaling by 1.71
+[DFT] Ga2Re: Volume ratio check FAILED for Cu2Mg-Laves — generated=301.0ų, expected=53.9ų, ratio=5.58 (must be 0.5-2.0)
+[DFT] Ga2Re: No external API or xTB data. Using analytical fallbacks (coverage=1.00).
+[Engine] Quantum criticality failed for Ga2Re: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] Re2W: Structure validation attempt 1 — minDist=1.705Å, ratio=0.68, vol/atom=37.5ų (target=10.0) — scaling by 1.54
+[DFT] Re2W: Structure validation attempt 2 — minDist=2.629Å, ratio=1.05, vol/atom=75.6ų (target=10.0) — scaling by 0.51
+[DFT] Re2W: Structure validation attempt 3 — minDist=1.340Å, ratio=0.53, vol/atom=27.0ų (target=10.0) — scaling by 1.96
+[DFT] Re2W: Structure validation attempt 4 — minDist=2.629Å, ratio=1.05, vol/atom=75.6ų (target=10.0) — scaling by 0.51
+[DFT] Re2W: Structure validation attempt 5 — minDist=1.340Å, ratio=0.53, vol/atom=27.0ų (target=10.0) — scaling by 1.96
+[DFT] Re2W: Volume ratio check FAILED for Cu2Mg-Laves — generated=453.7ų, expected=45.2ų, ratio=10.04 (must be 0.5-2.0)
+[DFT] Re2W: Structure validation attempt 1 — minDist=1.705Å, ratio=0.68, vol/atom=37.5ų (target=10.0) — scaling by 1.54
+[DFT] Re2W: Structure validation attempt 2 — minDist=2.629Å, ratio=1.05, vol/atom=75.6ų (target=10.0) — scaling by 0.51
+[DFT] Re2W: Structure validation attempt 3 — minDist=1.340Å, ratio=0.53, vol/atom=27.0ų (target=10.0) — scaling by 1.96
+[DFT] Re2W: Structure validation attempt 4 — minDist=2.629Å, ratio=1.05, vol/atom=75.6ų (target=10.0) — scaling by 0.51
+[DFT] Re2W: Structure validation attempt 5 — minDist=1.340Å, ratio=0.53, vol/atom=27.0ų (target=10.0) — scaling by 1.96
+[DFT] Re2W: Volume ratio check FAILED for Cu2Mg-Laves — generated=453.7ų, expected=45.2ų, ratio=10.04 (must be 0.5-2.0)
+[DFT] Re2W: No external API or xTB data. Using analytical fallbacks (coverage=1.00).
+[Engine] Quantum criticality failed for Re2W: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] TiTe2H: Structure validation attempt 1 — minDist=3.685Å, ratio=1.47, vol/atom=52.9ų (target=11.3) — scaling by 0.60
+[DFT] TiTe2H: Structure validation attempt 2 — minDist=2.201Å, ratio=0.88, vol/atom=24.6ų (target=11.3) — scaling by 1.20
+[DFT] TiTe2H: Structure validation attempt 3 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure validation attempt 4 — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų (target=11.3) — scaling by 1.41
+[DFT] TiTe2H: Structure validation attempt 5 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure REJECTED after 5 fix attempts — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų
+[DFT] TiTe2H: Structure validation attempt 1 — minDist=3.685Å, ratio=1.47, vol/atom=52.9ų (target=11.3) — scaling by 0.60
+[DFT] TiTe2H: Structure validation attempt 2 — minDist=2.201Å, ratio=0.88, vol/atom=24.6ų (target=11.3) — scaling by 1.20
+[DFT] TiTe2H: Structure validation attempt 3 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure validation attempt 4 — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų (target=11.3) — scaling by 1.41
+[DFT] TiTe2H: Structure validation attempt 5 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure REJECTED after 5 fix attempts — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų
+[DFT] TiTe2H: No external API or xTB data. Using analytical fallbacks (coverage=1.00).
+[Engine] Quantum criticality failed for TiTe2H: Cannot read properties of undefined (reading 'domeCenter')
+[DFT] YNbVH2N: Structure validation attempt 1 — minDist=4.380Å, ratio=7.30, vol/atom=15.6ų (target=44.0) — scaling by 1.41
+[DFT] YNbVH2N: Structure validation attempt 2 — minDist=6.187Å, ratio=10.31, vol/atom=36.8ų (target=44.0) — scaling by 1.06
+[DFT] YNbVH2N: Structure validation attempt 3 — minDist=6.565Å, ratio=10.94, vol/atom=42.9ų (target=44.0) — scaling by 1.01
+[DFT] YNbVH2N: Structure validation attempt 4 — minDist=6.621Å, ratio=11.04, vol/atom=43.8ų (target=44.0) — scaling by 1.00
+[DFT] Y: Ref energy corrected from -1.1949 Ha (atom) to -1.3554 Ha (bulk-corrected, cohesive=4.37 eV)
+[DFT] Nb: Ref energy corrected from -1.6573 Ha (atom) to -1.9355 Ha (bulk-corrected, cohesive=7.57 eV)
+[DFT] V: Ref energy corrected from -1.7157 Ha (atom) to -1.9109 Ha (bulk-corrected, cohesive=5.31 eV)
+[DFT] YNbVH2N: Formation energy 105.923 eV/atom is positive (>1.0), discarding — compound less stable than elements
+[Phonon] YNbVH2N: Starting finite displacement phonon calculation (2 atoms, 13 xTB calculations)
+[Phonon] YNbVH2N: Finite displacement complete in 0.3s — 13 calcs, stable=false, freq range [-307.8, 796.2] cm⁻¹, ω_log=657.9 cm⁻¹
+[DFT] YNbVH2N: xTB DFT computed (xTB-optimized): gap=0.000eV, metallic=true, E/atom=-0.3948Ha
+[DFT] YNbVH2N: xTB Hessian found 69 imaginary mode(s), lowest freq=-307.8 cm-1 (severe: freq < -2000)
+[DFT] YNbVH2N: Finite displacement phonons: stable=false, freq=[-307.8, 796.2] cm⁻¹, ω_log=657.9 cm⁻¹
+[DFT] TiTe2H: Structure validation attempt 1 — minDist=3.685Å, ratio=1.47, vol/atom=52.9ų (target=11.3) — scaling by 0.60
+[DFT] TiTe2H: Structure validation attempt 2 — minDist=2.201Å, ratio=0.88, vol/atom=24.6ų (target=11.3) — scaling by 1.20
+[DFT] TiTe2H: Structure validation attempt 3 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure validation attempt 4 — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų (target=11.3) — scaling by 1.41
+[DFT] TiTe2H: Structure validation attempt 5 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure REJECTED after 5 fix attempts — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų
+[DFT] TiTe2H: Structure validation attempt 1 — minDist=3.685Å, ratio=1.47, vol/atom=52.9ų (target=11.3) — scaling by 0.60
+[DFT] TiTe2H: Structure validation attempt 2 — minDist=2.201Å, ratio=0.88, vol/atom=24.6ų (target=11.3) — scaling by 1.20
+[DFT] TiTe2H: Structure validation attempt 3 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure validation attempt 4 — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų (target=11.3) — scaling by 1.41
+[DFT] TiTe2H: Structure validation attempt 5 — minDist=2.635Å, ratio=1.05, vol/atom=31.4ų (target=11.3) — scaling by 0.71
+[DFT] TiTe2H: Structure REJECTED after 5 fix attempts — minDist=1.872Å, ratio=0.75, vol/atom=20.0ų
+[DFT] TiTe2H: No external API or xTB data. Using analytical fallbacks (coverage=1.00).
+[DFT] Li: Ref energy corrected from -0.1801 Ha (atom) to -0.2400 Ha (bulk-corrected, cohesive=1.63 eV)
+[DFT] Ti: Ref energy corrected from -1.3655 Ha (atom) to -1.5437 Ha (bulk-corrected, cohesive=4.85 eV)
+[DFT] Ge: Ref energy corrected from -1.8081 Ha (atom) to -1.9496 Ha (bulk-corrected, cohesive=3.85 eV)
+[DFT] LiTiH2Ge3: Formation energy 6.045 eV/atom is positive (>1.0), discarding — compound less stable than elements
+[DFT] LiTiH2Ge3: Structure validation attempt 1 — minDist=2.331Å, ratio=1.21, vol/atom=26.3ų (target=58.2) — scaling by 1.30
+[DFT] LiTiH2Ge3: Structure validation attempt 2 — minDist=3.038Å, ratio=1.58, vol/atom=35.8ų (target=58.2) — scaling by 1.18
+[DFT] LiTiH2Ge3: Structure validation attempt 3 — minDist=3.571Å, ratio=1.86, vol/atom=44.4ų (target=58.2) — scaling by 1.09
+[DFT] LiTiH2Ge3: Structure validation attempt 4 — minDist=3.908Å, ratio=2.04, vol/atom=50.5ų (target=58.2) — scaling by 1.05
+[DFT] LiTiH2Ge3: Structure validation attempt 5 — minDist=4.098Å, ratio=2.13, vol/atom=54.1ų (target=58.2) — scaling by 1.02
+[Phonon] LiTiH2Ge3: Starting finite displacement phonon calculation (2 atoms, 13 xTB calculations)
+[Phonon] LiTiH2Ge3: WARNING — highest frequency 14225 cm⁻¹ exceeds physical range, likely numerical artifact
+[Phonon] LiTiH2Ge3: ARTIFACT DETECTED — 69 modes below -2000 cm⁻¹ are xTB numerical explosions (lowest=-6004 cm⁻¹), discarded. 0 physical imaginary modes remain.
+[Phonon] LiTiH2Ge3: Finite displacement complete in 0.3s — 13 calcs, stable=true, freq range [-6004.3, 14225.2] cm⁻¹, ω_log=14225.2 cm⁻¹
+[DFT] LiTiH2Ge3: xTB DFT computed (xTB-optimized): gap=0.000eV, metallic=true, E/atom=-1.8900Ha
+[DFT] LiTiH2Ge3: xTB Hessian confirms phonon stability, lowest freq=-6004.3 cm-1
+[DFT] LiTiH2Ge3: Finite displacement phonons: stable=true, freq=[-6004.3, 14225.2] cm⁻¹, ω_log=14225.2 cm⁻¹
+[DFT] In2CSe: Structure validation attempt 1 — minDist=3.553Å, ratio=1.60, vol/atom=40.9ų (target=10.1) — scaling by 0.63
+[DFT] C: Ref energy corrected from -1.7933 Ha (atom) to -2.0641 Ha (bulk-corrected, cohesive=7.37 eV)
+[DFT] In2CSe: Structure validation attempt 1 — minDist=1.230Å, ratio=1.01, vol/atom=31.5ų (target=10.1) — scaling by 0.68
+[DFT] In2CSe: Structure validation attempt 2 — minDist=0.842Å, ratio=0.69, vol/atom=17.2ų (target=10.1) — scaling by 1.52
+[DFT] In2CSe: Structure validation attempt 3 — minDist=1.277Å, ratio=1.05, vol/atom=33.6ų (target=10.1) — scaling by 0.67
+[DFT] In2CSe: Structure validation attempt 4 — minDist=0.855Å, ratio=0.70, vol/atom=17.6ų (target=10.1) — scaling by 1.49
+[DFT] In2CSe: Structure validation attempt 5 — minDist=1.277Å, ratio=1.05, vol/atom=33.6ų (target=10.1) — scaling by 0.67
