@@ -21,6 +21,46 @@ interface GBModel {
 
 let cachedModel: GBModel | null = null;
 
+const XGB_ENSEMBLE_SIZE = 5;
+const BOOTSTRAP_SAMPLE_RATIO = 0.8;
+
+interface GBEnsemble {
+  models: GBModel[];
+  trainedAt: number;
+}
+
+let cachedEnsembleXGB: GBEnsemble | null = null;
+
+function bootstrapSample(X: number[][], y: number[], ratio: number = BOOTSTRAP_SAMPLE_RATIO): { X: number[][]; y: number[] } {
+  const n = X.length;
+  const sampleSize = Math.floor(n * ratio);
+  const sampledX: number[][] = [];
+  const sampledY: number[] = [];
+  for (let i = 0; i < sampleSize; i++) {
+    const idx = Math.floor(Math.random() * n);
+    sampledX.push(X[idx]);
+    sampledY.push(y[idx]);
+  }
+  return { X: sampledX, y: sampledY };
+}
+
+function trainEnsembleXGB(X: number[][], y: number[]): GBEnsemble {
+  const models: GBModel[] = [];
+  for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
+    const { X: bsX, y: bsY } = bootstrapSample(X, y);
+    const model = trainGradientBoosting(bsX, bsY, 300, 0.05, 6);
+    models.push(model);
+  }
+  return { models, trainedAt: Date.now() };
+}
+
+function predictEnsembleXGB(ensemble: GBEnsemble, x: number[]): { mean: number; std: number; predictions: number[] } {
+  const predictions = ensemble.models.map(m => predictWithModel(m, x));
+  const mean = predictions.reduce((s, v) => s + v, 0) / predictions.length;
+  const variance = predictions.reduce((s, v) => s + (v - mean) ** 2, 0) / predictions.length;
+  return { mean: Math.max(0, mean), std: Math.sqrt(variance), predictions };
+}
+
 interface CalibrationData {
   r2: number;
   mae: number;
@@ -510,12 +550,9 @@ function getTreeFeatureImportance(tree: TreeNode | number): Map<number, number> 
   return imp;
 }
 
-export function getTrainedModel(): GBModel {
-  if (cachedModel) return cachedModel;
-
+function prepareTrainingData(): { X: number[][]; y: number[] } {
   const X: number[][] = [];
   const y: number[] = [];
-
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
       const features = extractFeatures(entry.formula);
@@ -527,6 +564,13 @@ export function getTrainedModel(): GBModel {
       continue;
     }
   }
+  return { X, y };
+}
+
+export function getTrainedModel(): GBModel {
+  if (cachedModel) return cachedModel;
+
+  const { X, y } = prepareTrainingData();
 
   if (X.length < 10) {
     cachedModel = {
@@ -541,6 +585,12 @@ export function getTrainedModel(): GBModel {
 
   cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
   cachedCalibration = computeCalibration(cachedModel);
+
+  if (!cachedEnsembleXGB && X.length >= 30) {
+    cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    console.log(`[XGBoost] Trained ${XGB_ENSEMBLE_SIZE}-model bootstrap ensemble (${X.length} samples)`);
+  }
+
   return cachedModel;
 }
 
@@ -590,6 +640,91 @@ export function gbPredict(features: MLFeatureVector, formula?: string): { tcPred
 
   const safeTc = Number.isFinite(tcPredicted) ? Math.min(350, Math.max(0, Math.round(tcPredicted * 10) / 10)) : 0;
   return { tcPredicted: safeTc, score, reasoning };
+}
+
+export interface XGBUncertaintyResult {
+  tcMean: number;
+  tcStd: number;
+  normalizedUncertainty: number;
+  score: number;
+  perModelPredictions: number[];
+  acquisitionScore: number;
+  reasoning: string[];
+}
+
+export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: string): XGBUncertaintyResult {
+  getTrainedModel();
+
+  const resolvedFormula = formula || features._sourceFormula;
+  const x = featureVectorToArray(features, resolvedFormula);
+
+  if (!cachedEnsembleXGB) {
+    const singlePred = predictWithModel(cachedModel!, x);
+    const safeTc = Number.isFinite(singlePred) ? Math.max(0, singlePred) : 0;
+    return {
+      tcMean: safeTc,
+      tcStd: 0,
+      normalizedUncertainty: 0.5,
+      score: safeTc > 100 ? 0.7 : safeTc > 20 ? 0.4 : 0.1,
+      perModelPredictions: [safeTc],
+      acquisitionScore: safeTc / 300 + 0.5,
+      reasoning: ["Single model (no ensemble yet)"],
+    };
+  }
+
+  const result = predictEnsembleXGB(cachedEnsembleXGB, x);
+  const meanTc = result.mean;
+  const stdTc = result.std;
+
+  const normalizedUncertainty = Math.min(1.0, stdTc / Math.max(1, meanTc + 10));
+
+  let score = 0;
+  if (meanTc > 293) score = 0.92;
+  else if (meanTc > 200) score = 0.85;
+  else if (meanTc > 100) score = 0.70;
+  else if (meanTc > 50) score = 0.55;
+  else if (meanTc > 20) score = 0.40;
+  else if (meanTc > 5) score = 0.25;
+  else if (meanTc > 1) score = 0.15;
+  else score = 0.05;
+
+  if (features.electronPhononLambda > 1.5) score += 0.10;
+  else if (features.electronPhononLambda > 0.8) score += 0.05;
+  if (features.metallicity < 0.3) score -= 0.15;
+  else if (features.metallicity < 0.5) score -= 0.05;
+  if (features.correlationStrength > 0.85) score -= 0.10;
+  score = Math.max(0.01, Math.min(0.95, score));
+
+  const normalizedTc = Math.min(1.0, meanTc / 300);
+  const acquisitionScore = normalizedTc + 1.5 * normalizedUncertainty;
+
+  const reasoning: string[] = [];
+  reasoning.push(`Ensemble: ${XGB_ENSEMBLE_SIZE} models, Tc=${meanTc.toFixed(1)}K +/- ${stdTc.toFixed(1)}K`);
+  if (normalizedUncertainty > 0.6) reasoning.push("Very high uncertainty - priority exploration target");
+  else if (normalizedUncertainty > 0.3) reasoning.push("Moderate uncertainty - good exploration candidate");
+  else reasoning.push("Low uncertainty - prediction is confident");
+
+  const safeMean = Number.isFinite(meanTc) ? Math.min(350, Math.max(0, Math.round(meanTc * 10) / 10)) : 0;
+
+  return {
+    tcMean: safeMean,
+    tcStd: Math.round(stdTc * 10) / 10,
+    normalizedUncertainty: Math.round(normalizedUncertainty * 1000) / 1000,
+    score,
+    perModelPredictions: result.predictions.map(p => Math.round(p * 10) / 10),
+    acquisitionScore: Math.round(acquisitionScore * 1000) / 1000,
+    reasoning,
+  };
+}
+
+export function getXGBEnsembleStats() {
+  return {
+    ensembleSize: XGB_ENSEMBLE_SIZE,
+    bootstrapRatio: BOOTSTRAP_SAMPLE_RATIO,
+    trained: cachedEnsembleXGB !== null,
+    trainedAt: cachedEnsembleXGB?.trainedAt ?? null,
+    modelTreeCounts: cachedEnsembleXGB?.models.map(m => m.trees.length) ?? [],
+  };
 }
 
 export function validateModel(): { mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[] } {
@@ -758,6 +893,12 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   invalidateModel();
   cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
   cachedCalibration = computeCalibration(cachedModel);
+
+  if (X.length >= 30) {
+    cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    console.log(`[XGBoost-AL] Rebuilt ${XGB_ENSEMBLE_SIZE}-model bootstrap ensemble (${X.length} samples)`);
+  }
+
   xgboostRetrainCount++;
   if (cycleCount != null) lastXGBoostRetrainCycle = cycleCount;
   lastRetrainCycle = Date.now();
@@ -793,6 +934,7 @@ export function getEvaluatedDatasetStats() {
 export function invalidateModel(): void {
   cachedModel = null;
   cachedCalibration = null;
+  cachedEnsembleXGB = null;
 }
 
 export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
@@ -844,6 +986,7 @@ export function getSurrogateStats() {
     physicsFeatures: PHYSICS_FEATURE_NAMES.length,
     compositionFeatures: COMPOSITION_FEATURE_NAMES.length,
     hyperparameters: { nEstimators: 300, learningRate: 0.05, maxDepth: 6 },
+    ensemble: getXGBEnsembleStats(),
   };
 }
 
@@ -889,6 +1032,9 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   invalidateModel();
   cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
   cachedCalibration = computeCalibration(cachedModel);
+  if (X.length >= 30) {
+    cachedEnsembleXGB = trainEnsembleXGB(X, y);
+  }
   lastRetrainCycle = Date.now();
 
   const totalNew = successExamples.length + failureExamples.length;
@@ -942,6 +1088,9 @@ export async function incorporateFailureData(): Promise<number> {
     if (X.length >= 10) {
       cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
       cachedCalibration = computeCalibration(cachedModel);
+      if (X.length >= 30) {
+        cachedEnsembleXGB = trainEnsembleXGB(X, y);
+      }
     }
 
     console.log(`XGBoost model retrained with ${failureExamples.length} failure examples`);

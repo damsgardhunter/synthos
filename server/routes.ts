@@ -29,7 +29,8 @@ import {
   getDesignRepresentationStats,
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
-import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats } from "./learning/gradient-boost";
+import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats } from "./learning/gradient-boost";
+import { extractFeatures } from "./learning/ml-predictor";
 import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -1858,6 +1859,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute composition features", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/xgboost/uncertainty/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const features = extractFeatures(formula);
+      const result = gbPredictWithUncertainty(features, formula);
+      res.json({ formula, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute XGB uncertainty", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/xgboost/ensemble-stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getXGBEnsembleStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch ensemble stats", detail: e.message?.slice(0, 200) });
     }
   });
 

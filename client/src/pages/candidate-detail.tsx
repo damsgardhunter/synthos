@@ -726,6 +726,17 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
     features: Record<string, number>;
   }>({ queryKey: ["/api/xgboost/composition-features", formula] });
 
+  const { data: xgbUncertaintyData } = useQuery<{
+    formula: string;
+    tcMean: number;
+    tcStd: number;
+    normalizedUncertainty: number;
+    score: number;
+    perModelPredictions: number[];
+    acquisitionScore: number;
+    reasoning: string[];
+  }>({ queryKey: ["/api/xgboost/uncertainty", formula] });
+
   if (!data && !mlData) return null;
 
   const typeColors: Record<string, string> = {
@@ -849,6 +860,46 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
             <ul className="text-xs text-muted-foreground space-y-0.5 ml-3 list-disc">
               {data.analysisNotes.map((note, i) => <li key={i}>{note}</li>)}
             </ul>
+          </div>
+        )}
+        {xgbUncertaintyData && (
+          <div className="space-y-2" data-testid="xgb-ensemble-uncertainty-section">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+              XGBoost Ensemble Uncertainty ({xgbUncertaintyData.perModelPredictions.length} bootstrap models)
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="p-2 bg-blue-50/50 dark:bg-blue-950/20 rounded-md border border-blue-200/50 dark:border-blue-800/30" data-testid="xgb-tc-mean">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Tc Mean</p>
+                <p className="text-lg font-mono font-bold">{xgbUncertaintyData.tcMean.toFixed(1)}K</p>
+              </div>
+              <div className="p-2 bg-blue-50/50 dark:bg-blue-950/20 rounded-md border border-blue-200/50 dark:border-blue-800/30" data-testid="xgb-tc-std">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Tc Std Dev</p>
+                <p className="text-lg font-mono font-bold">+/- {xgbUncertaintyData.tcStd.toFixed(1)}K</p>
+              </div>
+              <div className="p-2 bg-blue-50/50 dark:bg-blue-950/20 rounded-md border border-blue-200/50 dark:border-blue-800/30" data-testid="xgb-uncertainty">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Uncertainty</p>
+                <p className={`text-lg font-mono font-bold ${xgbUncertaintyData.normalizedUncertainty > 0.6 ? "text-red-600 dark:text-red-400" : xgbUncertaintyData.normalizedUncertainty > 0.3 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                  {(xgbUncertaintyData.normalizedUncertainty * 100).toFixed(1)}%
+                </p>
+              </div>
+              <div className="p-2 bg-blue-50/50 dark:bg-blue-950/20 rounded-md border border-blue-200/50 dark:border-blue-800/30" data-testid="xgb-acquisition">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Acquisition</p>
+                <p className="text-lg font-mono font-bold">{xgbUncertaintyData.acquisitionScore.toFixed(3)}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] text-muted-foreground">Per-model Tc:</span>
+              {xgbUncertaintyData.perModelPredictions.map((pred, i) => (
+                <span key={i} className="text-[10px] font-mono px-1.5 py-0.5 bg-muted/60 rounded" data-testid={`xgb-model-pred-${i}`}>
+                  M{i + 1}: {pred.toFixed(1)}K
+                </span>
+              ))}
+            </div>
+            {xgbUncertaintyData.reasoning.length > 0 && (
+              <ul className="text-xs text-muted-foreground space-y-0.5 ml-3 list-disc">
+                {xgbUncertaintyData.reasoning.map((r, i) => <li key={i}>{r}</li>)}
+              </ul>
+            )}
           </div>
         )}
         {compData && (

@@ -5,7 +5,7 @@ import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import { extractFeatures } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats } from "./gradient-boost";
+import { gbPredict, gbPredictWithUncertainty, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats } from "./gradient-boost";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { computeDiscoveryScore } from "./family-filters";
 
@@ -37,6 +37,8 @@ interface RankedCandidate {
   acquisitionScore: number;
   normalizedTc: number;
   uncertainty: number;
+  xgbUncertainty: number;
+  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration";
 }
 
 function computeAdaptiveAlpha(): number {
@@ -51,54 +53,92 @@ export function selectForDFT(
   budget: number = 20
 ): RankedCandidate[] {
   const alpha = computeAdaptiveAlpha();
-  const explorationSlots = Math.ceil(budget * 0.2);
-  const ranked: RankedCandidate[] = [];
-  const highUncertainty: RankedCandidate[] = [];
+
+  const bestTcSlots = Math.min(10, Math.ceil(budget * 0.5));
+  const highUncertaintySlots = Math.min(5, Math.ceil(budget * 0.25));
+  const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots);
+
+  const scored: {
+    candidate: SuperconductorCandidate;
+    normalizedTc: number;
+    gnnUncertainty: number;
+    xgbUncertainty: number;
+    combinedUncertainty: number;
+    acquisitionScore: number;
+  }[] = [];
 
   for (const candidate of candidates) {
     const tc = candidate.predictedTc ?? 0;
     const normalizedTc = Math.min(1.0, Math.max(0, tc / 300));
 
-    let uncertainty = candidate.uncertaintyEstimate ?? 0.5;
-
+    let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
     try {
       const gnnResult = gnnPredictWithUncertainty(candidate.formula);
-      uncertainty = Math.max(uncertainty, gnnResult.uncertainty);
+      gnnUncertainty = Math.max(gnnUncertainty, gnnResult.uncertainty);
     } catch (e: any) { console.error("[ActiveLearning] GNN predict error:", e?.message?.slice(0, 200)); }
 
-    const acquisitionScore = normalizedTc + alpha * uncertainty;
+    let xgbUncertainty = 0.5;
+    try {
+      const features = extractFeatures(candidate.formula);
+      const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
+      xgbUncertainty = xgbResult.normalizedUncertainty;
+    } catch (e: any) { console.error("[ActiveLearning] XGB uncertainty error:", e?.message?.slice(0, 200)); }
 
-    const entry: RankedCandidate = {
-      candidate,
-      acquisitionScore,
-      normalizedTc,
-      uncertainty,
-    };
+    const combinedUncertainty = 0.5 * gnnUncertainty + 0.5 * xgbUncertainty;
+    const acquisitionScore = normalizedTc + alpha * combinedUncertainty;
 
-    if (uncertainty > 0.3) {
-      highUncertainty.push(entry);
-    }
-    ranked.push(entry);
+    scored.push({ candidate, normalizedTc, gnnUncertainty, xgbUncertainty, combinedUncertainty, acquisitionScore });
   }
-
-  ranked.sort((a, b) => b.acquisitionScore - a.acquisitionScore);
-  highUncertainty.sort((a, b) => b.uncertainty - a.uncertainty);
 
   const selected: RankedCandidate[] = [];
   const seenFormulas = new Set<string>();
 
-  for (const r of highUncertainty) {
-    if (selected.length >= explorationSlots) break;
-    if (seenFormulas.has(r.candidate.formula)) continue;
-    seenFormulas.add(r.candidate.formula);
-    selected.push(r);
+  const byTc = [...scored].sort((a, b) => b.normalizedTc - a.normalizedTc);
+  for (const s of byTc) {
+    if (selected.length >= bestTcSlots) break;
+    if (seenFormulas.has(s.candidate.formula)) continue;
+    seenFormulas.add(s.candidate.formula);
+    selected.push({
+      candidate: s.candidate,
+      acquisitionScore: s.acquisitionScore,
+      normalizedTc: s.normalizedTc,
+      uncertainty: s.combinedUncertainty,
+      xgbUncertainty: s.xgbUncertainty,
+      selectionTier: "best-tc",
+    });
   }
 
-  for (const r of ranked) {
+  const byUncertainty = [...scored].sort((a, b) => b.combinedUncertainty - a.combinedUncertainty);
+  for (const s of byUncertainty) {
+    if (selected.length >= bestTcSlots + highUncertaintySlots) break;
+    if (seenFormulas.has(s.candidate.formula)) continue;
+    seenFormulas.add(s.candidate.formula);
+    selected.push({
+      candidate: s.candidate,
+      acquisitionScore: s.acquisitionScore,
+      normalizedTc: s.normalizedTc,
+      uncertainty: s.combinedUncertainty,
+      xgbUncertainty: s.xgbUncertainty,
+      selectionTier: "high-uncertainty",
+    });
+  }
+
+  const remaining = scored.filter(s => !seenFormulas.has(s.candidate.formula));
+  for (let i = remaining.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+  }
+  for (const s of remaining) {
     if (selected.length >= budget) break;
-    if (seenFormulas.has(r.candidate.formula)) continue;
-    seenFormulas.add(r.candidate.formula);
-    selected.push(r);
+    seenFormulas.add(s.candidate.formula);
+    selected.push({
+      candidate: s.candidate,
+      acquisitionScore: s.acquisitionScore,
+      normalizedTc: s.normalizedTc,
+      uncertainty: s.combinedUncertainty,
+      xgbUncertainty: s.xgbUncertainty,
+      selectionTier: "random-exploration",
+    });
   }
 
   return selected;
@@ -289,10 +329,19 @@ export async function runActiveLearningCycle(
     ? selected.reduce((sum, r) => sum + r.uncertainty, 0) / selected.length
     : 0;
 
+  const tierCounts = {
+    bestTc: selected.filter(s => s.selectionTier === "best-tc").length,
+    highUncertainty: selected.filter(s => s.selectionTier === "high-uncertainty").length,
+    randomExploration: selected.filter(s => s.selectionTier === "random-exploration").length,
+  };
+  const avgXgbUnc = selected.length > 0
+    ? selected.reduce((s, r) => s + r.xgbUncertainty, 0) / selected.length
+    : 0;
+
   emit("log", {
     phase: "active-learning",
     event: "DFT candidates selected",
-    detail: `Selected ${selected.length} candidates (avg uncertainty: ${avgUncertaintyBefore.toFixed(3)}, top: ${selected[0]?.candidate.formula ?? 'none'} acq=${selected[0]?.acquisitionScore.toFixed(3) ?? 0})`,
+    detail: `Selected ${selected.length} candidates [${tierCounts.bestTc} best-tc, ${tierCounts.highUncertainty} high-uncertainty, ${tierCounts.randomExploration} random] (avg combined unc: ${avgUncertaintyBefore.toFixed(3)}, avg XGB unc: ${avgXgbUnc.toFixed(3)}, top: ${selected[0]?.candidate.formula ?? 'none'} acq=${selected[0]?.acquisitionScore.toFixed(3) ?? 0})`,
     dataSource: "Active Learning",
   });
 
