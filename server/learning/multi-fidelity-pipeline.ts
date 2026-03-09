@@ -18,8 +18,10 @@ import { classifyFamily } from "./utils";
 import { predictSynthesisFeasibility } from "../synthesis/ml-synthesis-predictor";
 import { generateRetrosynthesisRoutes } from "../synthesis/retrosynthesis-engine";
 import { computeReactionFeasibility } from "../synthesis/thermodynamic-feasibility";
+import { computeEnthalpyStability } from "./enthalpy-stability";
 import { findBestPrecursors, computePrecursorAvailabilityScore } from "../synthesis/precursor-database";
 import { predictBandStructure } from "../physics/band-structure-surrogate";
+import { runEliashbergPipeline } from "../physics/eliashberg-pipeline";
 
 const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Cuprates: -1.2,
@@ -280,8 +282,21 @@ async function stage2_PhononCoupling(
   const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
   const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
 
+  let eliashbergData: any = null;
+  try {
+    eliashbergData = runEliashbergPipeline(
+      candidate.formula,
+      candidate.pressureGpa ?? 0,
+      electronicData.electronic,
+      phonon,
+      coupling
+    );
+  } catch {}
+
+  const effectiveLambda = eliashbergData?.lambda ?? coupling.lambda;
+
   const hasStablePhonons = !phonon.hasImaginaryModes;
-  const hasCoupling = coupling.lambda > 0.5;
+  const hasCoupling = effectiveLambda > 0.5;
 
   const passed = hasCoupling && hasStablePhonons;
   let reason = null;
@@ -289,16 +304,16 @@ async function stage2_PhononCoupling(
   if (!hasStablePhonons) {
     reason = `Dynamically unstable: imaginary phonon modes detected — structure may not be physically realizable`;
   } else if (!hasCoupling) {
-    reason = `Weak e-ph coupling (lambda=${coupling.lambda.toFixed(3)}) - insufficient for significant Tc`;
+    reason = `Weak e-ph coupling (lambda=${effectiveLambda.toFixed(3)}) - insufficient for significant Tc`;
   }
 
   await logComputationalResult(
     candidate.id, candidate.formula, 2, "phonon_coupling",
-    { phonon, coupling, stablePhonons: hasStablePhonons },
+    { phonon, coupling, stablePhonons: hasStablePhonons, eliashbergPipeline: eliashbergData ? { lambda: eliashbergData.lambda, omegaLog: eliashbergData.omegaLog, tier: eliashbergData.tier } : null },
     passed, reason, Date.now() - start, passed ? 0.6 : 0.8
   );
 
-  return { passed, reason, data: { phonon, coupling } };
+  return { passed, reason, data: { phonon, coupling, eliashbergPipeline: eliashbergData } };
 }
 
 async function stage3_TcPrediction(
@@ -309,7 +324,18 @@ async function stage3_TcPrediction(
 ): Promise<{ passed: boolean; reason: string | null; data: any }> {
   const start = Date.now();
 
+  const eliashbergPipeline = couplingData.eliashbergPipeline;
   const eliashberg = predictTcEliashberg(couplingData.coupling);
+
+  if (eliashbergPipeline && eliashbergPipeline.tcBest > 0) {
+    const pipelineTc = eliashbergPipeline.tcBest;
+    const blendedTc = 0.6 * pipelineTc + 0.4 * eliashberg.predictedTc;
+    eliashberg.predictedTc = Number(blendedTc.toFixed(1));
+    eliashberg.gapRatio = eliashbergPipeline.gapRatio;
+    eliashberg.strongCouplingCorrection = eliashbergPipeline.isStrongCoupling ? 1.5 : 1.0;
+    eliashberg.confidenceBand = eliashbergPipeline.confidenceBand;
+  }
+
   const competingPhases = evaluateCompetingPhases(candidate.formula, electronicData.electronic);
 
   const metalScore = electronicData.electronic?.metallicity ?? 0.5;
@@ -350,7 +376,7 @@ async function stage3_TcPrediction(
   return {
     passed,
     reason,
-    data: { eliashberg, competingPhases, criticalFields, dimensionality },
+    data: { eliashberg, competingPhases, criticalFields, dimensionality, eliashbergPipeline },
   };
 }
 
@@ -385,11 +411,27 @@ async function stage4_SynthesisFeasibility(
   const hullDistance = Math.max(0, formationEnergy - familyAvgFormationEnergy);
   const isMetastableByHull = hullDistance > 0.5;
 
+  let enthalpyResult: { isStable: boolean; isMetastable: boolean; enthalpyDifference: number; enthalpy: number } | null = null;
+  const candidatePressure = candidate.pressureGpa ?? 0;
+  if (candidatePressure > 5) {
+    try {
+      const hResult = computeEnthalpyStability(candidate.formula, candidatePressure);
+      enthalpyResult = {
+        isStable: hResult.isStable,
+        isMetastable: hResult.isMetastable,
+        enthalpyDifference: hResult.enthalpyDifference,
+        enthalpy: hResult.enthalpy,
+      };
+    } catch {}
+  }
+
+  const enthalpyUnstable = enthalpyResult !== null && !enthalpyResult.isStable && !enthalpyResult.isMetastable;
+
   const candidateHc2 = candidate.upperCriticalField ?? 0;
   const isRoomTempCandidate = (candidate.predictedTc ?? 0) >= 200;
   const hc2TooLow = isRoomTempCandidate && candidateHc2 < 5;
 
-  let passed = isSynthesizable && isStableOrMetastable && !hc2TooLow && !formationEnergyTooHigh && !formationEnergyDataError;
+  let passed = isSynthesizable && isStableOrMetastable && !hc2TooLow && !formationEnergyTooHigh && !formationEnergyDataError && !enthalpyUnstable;
   let reason = null;
 
   if (formationEnergyDataError) {
@@ -402,20 +444,22 @@ async function stage4_SynthesisFeasibility(
     reason = `Thermodynamically unstable: ${stability.verdict}`;
   } else if (hc2TooLow) {
     reason = `Insufficient magnetic robustness: Hc2=${candidateHc2.toFixed(1)}T too low for room-temperature candidate (Tc=${candidate.predictedTc}K)`;
+  } else if (enthalpyUnstable && enthalpyResult) {
+    reason = `Enthalpy unstable at ${candidatePressure} GPa: H=${enthalpyResult.enthalpy.toFixed(3)} eV, dH=${enthalpyResult.enthalpyDifference.toFixed(3)} eV above decomposition`;
   }
 
   const metastableScorePenalty = (passed && isMetastableByHull) ? 0.80 : 1.0;
 
   await logComputationalResult(
     candidate.id, candidate.formula, 4, "synthesis_feasibility",
-    { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty },
+    { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty, enthalpyResult },
     passed, reason, Date.now() - start, (passed ? 0.45 : 0.7) * metastableScorePenalty
   );
 
   return {
     passed,
     reason,
-    data: { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty },
+    data: { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty, enthalpyResult },
   };
 }
 

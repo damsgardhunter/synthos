@@ -5,7 +5,7 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats } from "./dft/qe-dft-engine";
-import { getDFTQueueStats, startDFTWorkerLoop } from "./dft/dft-job-queue";
+import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
   runPipelineIteration as runNextGenIteration,
@@ -31,7 +31,20 @@ import {
 } from "./inverse/design-representations";
 import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory } from "./learning/gradient-boost";
 import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph } from "./learning/graph-neural-net";
-import { getActiveLearningStats, getActiveLearningCycleHistory } from "./learning/active-learning";
+import { predictPressureCurve, findOptimalPressure, pressureSensitivity, getPressureCurveStats, getPressureExplorationStats } from "./learning/pressure-aware-surrogate";
+import { detectPhaseTransitions, getPhaseTransitionStats } from "./learning/pressure-phase-detector";
+import { computeEnthalpyPressureCurve, findStabilityPressureWindow, getEnthalpyStats } from "./learning/enthalpy-stability";
+import { buildPressureResponseProfile, interpolateAtPressure, getPressurePropertyMapStats } from "./learning/pressure-property-map";
+import { optimizePressureForFormula, getBayesianPressureStats } from "./learning/bayesian-pressure-optimizer";
+import { fastPressureScreen, batchPressureScreen, findBestScreeningPressure, getPressureClusterStats, recordClusterDiscovery, samplePressureFromClusters, assignPressureCluster } from "./learning/pressure-screening";
+let _eliashbergModule: typeof import("./physics/eliashberg-pipeline") | null = null;
+async function getEliashbergModule() {
+  if (!_eliashbergModule) {
+    _eliashbergModule = await import("./physics/eliashberg-pipeline");
+  }
+  return _eliashbergModule;
+}
+import { getActiveLearningStats, getActiveLearningCycleHistory, getPressureCoverageStats } from "./learning/active-learning";
 import { getCalibrationStats as getSurrogateFitnessStats } from "./learning/surrogate-fitness";
 import { getPillarDFTFeedbackStats } from "./inverse/sc-pillars-optimizer";
 import { extractFeatures } from "./learning/ml-predictor";
@@ -129,6 +142,10 @@ import { predictSynthesisFeasibility, getSynthesisPredictorStats } from "./synth
 import { generateRetrosynthesisRoutes, getRetrosynthesisStats } from "./synthesis/retrosynthesis-engine";
 import { computeSynthesisScore } from "./learning/multi-fidelity-pipeline";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
+import {
+  runQuantumEnginePipeline, getQuantumEngineStats,
+  getQuantumEngineDataset, getRecentQuantumEngineResults,
+} from "./dft/quantum-engine-pipeline";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "./synthesis/crystal-growth-simulator";
 import { generateExperimentPlan, getExperimentPlannerStats, type ExperimentCandidate } from "./experiment-planner";
 import {
@@ -2647,6 +2664,292 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ count: dataset.length, records: dataset.slice(0, 20) });
     } catch (e: any) {
       res.status(500).json({ error: "Dataset generation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-curves/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getPressureCurveStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure curve stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-curves/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const curve = predictPressureCurve(formula);
+      const optimal = findOptimalPressure(formula);
+      const sensitivity = pressureSensitivity(formula);
+      res.json({ curve, optimal, sensitivity });
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure curve failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/phase-transitions/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getPhaseTransitionStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Phase transition stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/phase-transitions/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const transitions = detectPhaseTransitions(formula);
+      res.json({ formula, transitions, count: transitions.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Phase transition detection failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-exploration/stats", generalLimiter, (_req, res) => {
+    try {
+      const explorationStats = getPressureExplorationStats();
+      const coverageStats = getPressureCoverageStats();
+      res.json({ exploration: explorationStats, coverage: coverageStats });
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure exploration stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/enthalpy/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getEnthalpyStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Enthalpy stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/enthalpy/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const curve = computeEnthalpyPressureCurve(formula);
+      const stabilityWindow = findStabilityPressureWindow(formula);
+      res.json({ formula, curve, stabilityWindow });
+    } catch (e: any) {
+      res.status(500).json({ error: "Enthalpy computation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-profiles/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getPressurePropertyMapStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure profile stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-profiles/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const profile = buildPressureResponseProfile(formula);
+      res.json(profile);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure profile failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-profiles/:formula/interpolate", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string ?? "0");
+      if (isNaN(pressure) || pressure < 0 || pressure > 400) {
+        return res.status(400).json({ error: "Invalid pressure parameter (0-400 GPa)" });
+      }
+      const result = interpolateAtPressure(formula, pressure);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Interpolation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/bayesian-pressure/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getBayesianPressureStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Bayesian pressure stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/bayesian-pressure/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = optimizePressureForFormula(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Bayesian pressure optimization failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-screening/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getPressureClusterStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure cluster stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-screening/sample", generalLimiter, (req, res) => {
+    try {
+      const count = parseInt(req.query.count as string ?? "10", 10);
+      const pressures = samplePressureFromClusters(Math.min(50, Math.max(1, count)));
+      res.json({ pressures, bias: getPressureClusterStats().explorationBias });
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure sampling failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-screening/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = req.query.pressure ? parseFloat(req.query.pressure as string) : undefined;
+
+      if (pressure !== undefined) {
+        const result = fastPressureScreen(formula, pressure);
+        return res.json(result);
+      }
+
+      const best = findBestScreeningPressure(formula);
+      const cluster = assignPressureCluster(best.bestPressure);
+      res.json({ ...best, cluster: cluster.id, clusterLabel: cluster.label });
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure screening failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/pressure-screening/:formula/sweep", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const results = batchPressureScreen(formula);
+      res.json({ formula, results, count: results.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Pressure sweep failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/eliashberg/stats", generalLimiter, async (_req, res) => {
+    try {
+      const mod = await getEliashbergModule();
+      res.json(mod.getEliashbergPipelineStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Eliashberg stats failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/eliashberg/:formula/alpha2f", generalLimiter, async (req, res) => {
+    try {
+      const mod = await getEliashbergModule();
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const alpha2F = mod.getAlpha2FOnly(formula, pressure);
+      res.json({ formula, pressureGpa: pressure, ...alpha2F });
+    } catch (e: any) {
+      res.status(500).json({ error: "Alpha2F computation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/eliashberg/:formula/dfpt", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const existingJobs = await storage.getDftJobsByFormula(formula);
+      const existing = existingJobs.length > 0 ? existingJobs[0] : null;
+      if (existing && existing.status === "completed" && existing.resultData) {
+        const parsed = typeof existing.resultData === "string" ? JSON.parse(existing.resultData) : existing.resultData;
+        const mod = await getEliashbergModule();
+        const surrogateResult = mod.runEliashbergPipeline(formula, 0);
+        res.json({
+          status: "completed",
+          jobId: existing.id,
+          formula,
+          dftResult: parsed,
+          eliashbergSurrogate: surrogateResult,
+          message: "DFPT result available from previous calculation",
+        });
+        return;
+      }
+      if (existing && (existing.status === "pending" || existing.status === "running" || existing.status === "queued")) {
+        res.json({
+          status: existing.status,
+          jobId: existing.id,
+          formula,
+          message: `DFPT job already ${existing.status}`,
+        });
+        return;
+      }
+      const job = await submitDFTJob(formula, null, 80, "phonon");
+      if (!job) {
+        res.status(400).json({ error: "Could not submit DFPT job", detail: `Formula ${formula} may be blocked or invalid` });
+        return;
+      }
+      res.json({
+        status: "submitted",
+        jobId: job.id,
+        formula,
+        message: "DFPT phonon calculation queued for high-fidelity Eliashberg analysis",
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "DFPT trigger failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/eliashberg/:formula", generalLimiter, async (req, res) => {
+    try {
+      const mod = await getEliashbergModule();
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const result = mod.runEliashbergPipeline(formula, pressure);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Eliashberg pipeline failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/quantum-engine/stats", async (_req, res) => {
+    try {
+      const stats = getQuantumEngineStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch quantum engine stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/quantum-engine/dataset", async (_req, res) => {
+    try {
+      const dataset = getQuantumEngineDataset();
+      res.json({ dataset, total: dataset.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch quantum engine dataset", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/quantum-engine/recent", async (req, res) => {
+    try {
+      const rawLimit = Number(req.query.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 20;
+      const results = getRecentQuantumEngineResults(limit);
+      res.json({ results, total: results.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch recent quantum engine results", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/quantum-engine/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const result = await runQuantumEnginePipeline(formula, pressure);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Quantum engine pipeline failed", detail: e.message?.slice(0, 200) });
     }
   });
 

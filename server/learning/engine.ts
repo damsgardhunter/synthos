@@ -44,6 +44,12 @@ import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./famil
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
+import { predictPressureCurve, findOptimalPressure, getPressureCurveStats } from "./pressure-aware-surrogate";
+import { findStabilityPressureWindow, getEnthalpyStats } from "./enthalpy-stability";
+import { buildPressureResponseProfile, getPressurePropertyMapStats } from "./pressure-property-map";
+import { optimizePressureForFormula, getBayesianPressureStats, addPressureObservation } from "./bayesian-pressure-optimizer";
+import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, samplePressureFromClusters } from "./pressure-screening";
+import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
 import { recordEvaluationResult, getCalibrationStats } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
 import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
@@ -5016,6 +5022,106 @@ async function runLearningCycle() {
               detail: `${calStats.totalEvaluations} evaluations, mean abs error: ${calStats.globalMeanAbsError.toFixed(1)}K, overestimate ratio: ${(calStats.globalOverestimateRatio * 100).toFixed(0)}%, families tracked: ${calStats.familyCalibrations.length}, exploration weight: ${(calStats.explorationWeight * 100).toFixed(1)}%`,
               dataSource: "Surrogate Fitness",
             });
+          }
+
+          try {
+            const topCandidates = await storage.getSuperconductorCandidates(10);
+            let pressureCurvesAnalyzed = 0;
+            let transitionsFound = 0;
+            for (const c of topCandidates.slice(0, 5)) {
+              try {
+                predictPressureCurve(c.formula);
+                const optimal = findOptimalPressure(c.formula);
+                const transitions = detectPhaseTransitions(c.formula);
+                pressureCurvesAnalyzed++;
+                transitionsFound += transitions.length;
+                if (optimal.maxTc > 77 && optimal.optimalPressureGpa > 0) {
+                  emit("log", {
+                    phase: "engine",
+                    event: "Pressure-Tc curve",
+                    detail: `${c.formula}: peak Tc=${optimal.maxTc.toFixed(1)}K at ${optimal.optimalPressureGpa} GPa${transitions.length > 0 ? `, ${transitions.length} phase transition(s)` : ''}`,
+                    dataSource: "Pressure Surrogate",
+                  });
+                }
+              } catch { /* skip */ }
+            }
+            const pcStats = getPressureCurveStats();
+            const ptStats = getPhaseTransitionStats();
+            emit("log", {
+              phase: "engine",
+              event: "Pressure analysis summary",
+              detail: `Curves: ${pcStats.totalCurves} cached (${pressureCurvesAnalyzed} new this cycle), transitions: ${ptStats.totalTransitionsDetected} total (${transitionsFound} this cycle), high-Tc materials: ${pcStats.highTcCount}, pressure-sensitive: ${pcStats.sensitiveCount}`,
+              dataSource: "Pressure Surrogate",
+            });
+
+            let enthalpyStableCount = 0;
+            for (const c of topCandidates.slice(0, 5)) {
+              try {
+                const window = findStabilityPressureWindow(c.formula);
+                if (window && window.maxPressureGpa > window.minPressureGpa) {
+                  enthalpyStableCount++;
+                }
+              } catch { /* skip */ }
+            }
+            const hStats = getEnthalpyStats();
+            emit("log", {
+              phase: "engine",
+              event: "Enthalpy stability summary",
+              detail: `Computed: ${hStats.totalComputed}, stable: ${hStats.stableCount}, metastable: ${hStats.metastableCount}, unstable: ${hStats.unstableCount}, avg stability window: ${hStats.avgStabilityWindow} GPa, stable windows found: ${enthalpyStableCount}/5 top candidates`,
+              dataSource: "Enthalpy H=E+PV",
+            });
+
+            let profilesBuilt = 0;
+            let bayesOptCount = 0;
+            for (const c of topCandidates.slice(0, 5)) {
+              try {
+                const profile = buildPressureResponseProfile(c.formula);
+                profilesBuilt++;
+
+                for (const pt of profile.tcVsPressure) {
+                  const stabPt = profile.stabilityVsPressure.find(s => s.pressure === pt.pressure);
+                  addPressureObservation(c.formula, pt.pressure, pt.tc, stabPt?.stable ?? false, stabPt?.enthalpy ?? 0);
+                }
+
+                const bayesResult = optimizePressureForFormula(c.formula, 3, 15);
+                bayesOptCount++;
+                if (bayesResult.predictedTcAtOptimal > 50) {
+                  emit("log", {
+                    phase: "engine",
+                    event: "Bayesian pressure optimization",
+                    detail: `${c.formula}: optimal P=${bayesResult.optimalPressure} GPa, predicted Tc=${bayesResult.predictedTcAtOptimal}K, stable=${bayesResult.stableAtOptimal}, confidence=${bayesResult.confidence}`,
+                    dataSource: "Bayesian Pressure GP",
+                  });
+                }
+              } catch {}
+            }
+            for (const c of topCandidates.slice(0, 8)) {
+              try {
+                const cPressure = c.pressureGpa ?? 0;
+                const screen = fastPressureScreen(c.formula, cPressure);
+                const isHit = screen.passesPrescreen && (c.predictedTc ?? 0) > 20;
+                recordClusterDiscovery(c.formula, cPressure, c.predictedTc ?? 0, isHit);
+              } catch {}
+            }
+
+            const mapStats = getPressurePropertyMapStats();
+            const bpStats = getBayesianPressureStats();
+            const clusterStats = getPressureClusterStats();
+            emit("log", {
+              phase: "engine",
+              event: "Pressure maps and Bayesian summary",
+              detail: `Profiles: ${mapStats.totalProfiles} (${profilesBuilt} new), avg peak Tc=${mapStats.avgPeakTc}K at ${mapStats.avgPeakPressure} GPa, low-P high-Tc: ${mapStats.lowPressureHighTcCount} | Bayesian: ${bpStats.totalOptimizations} optimized, avg optimal P=${bpStats.avgOptimalPressure} GPa, low-P optimal: ${bpStats.lowPressureOptimalCount}`,
+              dataSource: "Pressure Property Maps + Bayesian GP",
+            });
+
+            emit("log", {
+              phase: "engine",
+              event: "Pressure cluster analysis",
+              detail: `Discoveries: ${clusterStats.totalDiscoveries}, most productive: ${clusterStats.mostProductiveCluster}, clusters: ${clusterStats.clusters.map(c => `${c.id}(w=${c.weight.toFixed(2)},hits=${c.discoveryCount})`).join(', ')}`,
+              dataSource: "Pressure Clusters",
+            });
+          } catch (pressureErr: any) {
+            console.error(`[Pressure Analysis] Error: ${pressureErr?.message?.slice(0, 150)}`);
           }
         } catch (err: any) {
           lastActiveLearningCycle = cycleCount;

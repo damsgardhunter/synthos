@@ -9,6 +9,10 @@ import { gbPredict, gbPredictWithUncertainty, incorporateFailureData, incorporat
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { computeDiscoveryScore } from "./family-filters";
 import { recordEvaluationResult } from "./surrogate-fitness";
+import { generateAdaptivePressureSamples, recordPressureCoverage, findOptimalPressure, predictPressureCurve } from "./pressure-aware-surrogate";
+import { detectPhaseTransitions } from "./pressure-phase-detector";
+import { estimateFamilyPressure } from "./candidate-generator";
+import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResult } from "../dft/quantum-engine-pipeline";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -31,7 +35,7 @@ export interface ActiveLearningCycleRecord {
   uncertaintyReductionPct: number;
   gnnRetrained: boolean;
   gnnVersion: number | null;
-  tierBreakdown: { bestTc: number; highUncertainty: number; randomExploration: number };
+  tierBreakdown: { bestTc: number; highUncertainty: number; randomExploration: number; pressureExploration: number };
   topFormula: string;
   topAcquisitionScore: number;
   bestTcThisCycle: number;
@@ -58,6 +62,29 @@ const RETRAIN_CYCLE_INTERVAL = 20;
 const RETRAIN_DFT_THRESHOLD = 50;
 const recentUncertaintyDrops: number[] = [];
 
+const quantumEnginePipelineStats = {
+  fullPipelineRuns: 0,
+  fallbackRuns: 0,
+  avgLambdaFromPipeline: 0,
+  avgTcFromPipeline: 0,
+  lambdaSum: 0,
+  tcSum: 0,
+  successfulPipelineRuns: 0,
+};
+
+export function getQuantumEnginePipelineStats() {
+  const n = quantumEnginePipelineStats.successfulPipelineRuns || 1;
+  const engineStats = getQuantumEngineStats();
+  return {
+    fullPipelineRuns: quantumEnginePipelineStats.fullPipelineRuns,
+    fallbackRuns: quantumEnginePipelineStats.fallbackRuns,
+    activeLearningAvgLambda: Number((quantumEnginePipelineStats.lambdaSum / n).toFixed(4)),
+    activeLearningAvgTc: Number((quantumEnginePipelineStats.tcSum / n).toFixed(2)),
+    successfulPipelineRuns: quantumEnginePipelineStats.successfulPipelineRuns,
+    ...engineStats,
+  };
+}
+
 export function getActiveLearningStats(): ActiveLearningConvergence {
   return { ...convergenceStats };
 }
@@ -68,7 +95,26 @@ interface RankedCandidate {
   normalizedTc: number;
   uncertainty: number;
   xgbUncertainty: number;
-  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration";
+  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration";
+  targetPressureGpa?: number;
+}
+
+export interface PressureCoverageStats {
+  formulasWithCoverage: number;
+  totalPressurePoints: number;
+  avgPointsPerFormula: number;
+  pressureTransitionsFound: number;
+}
+
+const pressureCoverageStats: PressureCoverageStats = {
+  formulasWithCoverage: 0,
+  totalPressurePoints: 0,
+  avgPointsPerFormula: 0,
+  pressureTransitionsFound: 0,
+};
+
+export function getPressureCoverageStats(): PressureCoverageStats {
+  return { ...pressureCoverageStats };
 }
 
 function computeAdaptiveAlpha(): number {
@@ -84,9 +130,10 @@ export function selectForDFT(
 ): RankedCandidate[] {
   const alpha = computeAdaptiveAlpha();
 
-  const bestTcSlots = Math.min(10, Math.ceil(budget * 0.5));
+  const pressureExplorationSlots = Math.min(3, Math.ceil(budget * 0.15));
+  const bestTcSlots = Math.min(8, Math.ceil(budget * 0.4));
   const highUncertaintySlots = Math.min(5, Math.ceil(budget * 0.25));
-  const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots);
+  const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pressureExplorationSlots);
 
   const scored: {
     candidate: SuperconductorCandidate;
@@ -101,15 +148,17 @@ export function selectForDFT(
     const tc = candidate.predictedTc ?? 0;
     const normalizedTc = Math.min(1.0, Math.max(0, tc / 300));
 
+    const candidatePressure = (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+
     let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
     try {
-      const gnnResult = gnnPredictWithUncertainty(candidate.formula);
+      const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
       gnnUncertainty = Math.max(gnnUncertainty, gnnResult.uncertainty);
     } catch (e: any) { console.error("[ActiveLearning] GNN predict error:", e?.message?.slice(0, 200)); }
 
     let xgbUncertainty = 0.5;
     try {
-      const features = extractFeatures(candidate.formula);
+      const features = extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
       const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
       xgbUncertainty = xgbResult.normalizedUncertainty;
     } catch (e: any) { console.error("[ActiveLearning] XGB uncertainty error:", e?.message?.slice(0, 200)); }
@@ -159,7 +208,7 @@ export function selectForDFT(
     [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
   }
   for (const s of remaining) {
-    if (selected.length >= budget) break;
+    if (selected.length >= budget - pressureExplorationSlots) break;
     seenFormulas.add(s.candidate.formula);
     selected.push({
       candidate: s.candidate,
@@ -171,13 +220,171 @@ export function selectForDFT(
     });
   }
 
+  const topForPressure = selected.slice(0, 5);
+  let pressureAdded = 0;
+  for (const ranked of topForPressure) {
+    if (pressureAdded >= pressureExplorationSlots) break;
+    try {
+      const samples = generateAdaptivePressureSamples(ranked.candidate.formula, 2);
+      for (const sample of samples) {
+        if (pressureAdded >= pressureExplorationSlots || selected.length >= budget) break;
+        selected.push({
+          candidate: ranked.candidate,
+          acquisitionScore: ranked.acquisitionScore + sample.uncertainty * 0.5,
+          normalizedTc: ranked.normalizedTc,
+          uncertainty: sample.uncertainty,
+          xgbUncertainty: sample.uncertainty,
+          selectionTier: "pressure-exploration",
+          targetPressureGpa: sample.pressureGpa,
+        });
+        pressureAdded++;
+      }
+    } catch { /* skip if pressure sampling fails */ }
+  }
+
   return selected;
 }
 
 async function runDFTEnrichmentForCandidate(
   emit: EventEmitter,
-  candidate: SuperconductorCandidate
+  candidate: SuperconductorCandidate,
+  pressureGpa?: number
 ): Promise<boolean> {
+  const evalPressure = pressureGpa ?? (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+
+  let quantumResult: QuantumEngineResult | null = null;
+  let usedQuantumPipeline = false;
+
+  try {
+    quantumResult = await runQuantumEnginePipeline(candidate.formula, evalPressure);
+    usedQuantumPipeline = true;
+    quantumEnginePipelineStats.fullPipelineRuns++;
+
+    const entry = quantumResult.entry;
+    const stepsSummary = quantumResult.steps
+      .map(s => `${s.name}:${s.status}`)
+      .join(", ");
+
+    emit("log", {
+      phase: "active-learning",
+      event: "Quantum engine enrichment",
+      detail: `${candidate.formula} @ ${evalPressure} GPa -- tier=${entry.tier}, lambda=${entry.lambda.toFixed(3)}, omegaLog=${entry.omegaLog.toFixed(1)}, Tc=${entry.tc.toFixed(1)}K, DOS(EF)=${entry.dosAtEF.toFixed(2)}, phonon_stable=${entry.isPhononStable}, confidence=${entry.confidence} [${stepsSummary}]`,
+      dataSource: "Active Learning",
+    });
+
+    if (entry.lambda > 0 && entry.tc > 0) {
+      quantumEnginePipelineStats.successfulPipelineRuns++;
+      quantumEnginePipelineStats.lambdaSum += entry.lambda;
+      quantumEnginePipelineStats.tcSum += entry.tc;
+    }
+
+    const features = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
+    const gb = gbPredict(features, candidate.formula);
+    const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
+    const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
+
+    let confidence: string;
+    if (entry.tier === "full-dft" && entry.confidence === "high") confidence = "high";
+    else if (entry.tier === "full-dft" || entry.tier === "xtb") confidence = "medium";
+    else confidence = "low";
+
+    const quantumComputationalResults = {
+      lambda: entry.lambda,
+      omegaLog: entry.omegaLog,
+      tc: entry.tc,
+      dosAtEF: entry.dosAtEF,
+      phononSpectrum: entry.phononSpectrum,
+      alpha2FSummary: entry.alpha2FSummary,
+      isStrongCoupling: entry.isStrongCoupling,
+      gapRatio: entry.gapRatio,
+      muStar: entry.muStar,
+      omega2: entry.omega2,
+      tcAllenDynes: entry.tcAllenDynes,
+      tcEliashberg: entry.tcEliashberg,
+      isotopeAlpha: entry.isotopeAlpha,
+      tier: entry.tier,
+      pressure: entry.pressure,
+      wallTimeMs: entry.wallTimeMs,
+    };
+
+    const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) || {};
+    const updatedMlFeatures = {
+      ...existingMlFeatures,
+      quantumEngineResult: quantumComputationalResults,
+    };
+
+    const updates: any = {
+      xgboostScore: gb.score,
+      ensembleScore: ensemble,
+      dataConfidence: confidence,
+      electronPhononCoupling: entry.lambda,
+      logPhononFrequency: entry.omegaLog,
+      coulombPseudopotential: entry.muStar,
+      mlFeatures: updatedMlFeatures,
+    };
+
+    if (entry.formationEnergy !== null) {
+      updates.decompositionEnergy = entry.formationEnergy;
+    }
+
+    const reconciledTc = entry.tc > 0
+      ? entry.tc * 0.7 + gb.tcPredicted * 0.3
+      : gb.tcPredicted;
+    if (reconciledTc > 0) {
+      updates.predictedTc = Math.round(reconciledTc * 10) / 10;
+    }
+
+    await storage.updateSuperconductorCandidate(candidate.id, updates);
+
+    const formEnergy = entry.formationEnergy;
+    const isStable = entry.isPhononStable && (formEnergy === null || formEnergy < 0.5);
+    const dftSource = entry.tier === "full-dft" ? "external" as const : "active-learning" as const;
+    incorporateDFTResult(
+      candidate.formula,
+      reconciledTc,
+      formEnergy,
+      isStable,
+      dftSource
+    );
+
+    addDFTTrainingResult({
+      formula: candidate.formula,
+      tc: reconciledTc,
+      formationEnergy: formEnergy,
+      bandGap: entry.bandGap,
+      structure: undefined,
+      prototype: undefined,
+      source: entry.tier === "full-dft" ? "external" : "active-learning",
+    });
+
+    let gnnTcPredicted = 0;
+    let gnnStablePredicted = true;
+    let gnnFePredicted = 0;
+    try {
+      const gnnPred = gnnPredictWithUncertainty(candidate.formula);
+      gnnTcPredicted = gnnPred.tc;
+      gnnStablePredicted = gnnPred.phononStability;
+      gnnFePredicted = gnnPred.formationEnergy;
+    } catch {}
+
+    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * 0.4 + reconciledTc * 0.6 : reconciledTc;
+    const fidelity = entry.tier === "full-dft" ? "dft" as const : "xtb" as const;
+    recordEvaluationResult(
+      candidate.formula,
+      { tc: predictedTc, stable: gnnStablePredicted, formationEnergy: gnnFePredicted },
+      { tc: reconciledTc, stable: isStable, formationEnergy: formEnergy },
+      fidelity
+    );
+
+    return true;
+  } catch (quantumErr) {
+    if (usedQuantumPipeline) {
+      console.log(`[Active Learning] Quantum engine pipeline failed for ${candidate.formula}, falling back to DFT feature resolver: ${quantumErr instanceof Error ? quantumErr.message : String(quantumErr)}`);
+    }
+  }
+
+  quantumEnginePipelineStats.fallbackRuns++;
+
   try {
     const dftData = await resolveDFTFeatures(candidate.formula);
 
@@ -187,7 +394,7 @@ async function runDFTEnrichmentForCandidate(
 
     emit("log", {
       phase: "active-learning",
-      event: "DFT enrichment",
+      event: "DFT enrichment (fallback)",
       detail: `${candidate.formula} -- DFT data (${sourceType}, coverage=${dftData.dftCoverage.toFixed(2)}): ${desc}`,
       dataSource: "Active Learning",
     });
@@ -429,6 +636,7 @@ export async function runActiveLearningCycle(
     bestTc: selected.filter(s => s.selectionTier === "best-tc").length,
     highUncertainty: selected.filter(s => s.selectionTier === "high-uncertainty").length,
     randomExploration: selected.filter(s => s.selectionTier === "random-exploration").length,
+    pressureExploration: selected.filter(s => s.selectionTier === "pressure-exploration").length,
   };
   const avgXgbUnc = selected.length > 0
     ? selected.reduce((s, r) => s + r.xgbUncertainty, 0) / selected.length
@@ -437,22 +645,58 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: "DFT candidates selected",
-    detail: `Selected ${selected.length} candidates [${tierCounts.bestTc} best-tc, ${tierCounts.highUncertainty} high-uncertainty, ${tierCounts.randomExploration} random] (avg combined unc: ${avgUncertaintyBefore.toFixed(3)}, avg XGB unc: ${avgXgbUnc.toFixed(3)}, top: ${selected[0]?.candidate.formula ?? 'none'} acq=${selected[0]?.acquisitionScore.toFixed(3) ?? 0})`,
+    detail: `Selected ${selected.length} candidates [${tierCounts.bestTc} best-tc, ${tierCounts.highUncertainty} high-uncertainty, ${tierCounts.randomExploration} random, ${tierCounts.pressureExploration} pressure-exploration] (avg combined unc: ${avgUncertaintyBefore.toFixed(3)}, avg XGB unc: ${avgXgbUnc.toFixed(3)}, top: ${selected[0]?.candidate.formula ?? 'none'} acq=${selected[0]?.acquisitionScore.toFixed(3) ?? 0})`,
     dataSource: "Active Learning",
   });
 
   let dftSuccessCount = 0;
   let bestTcThisLoop = 0;
 
-  for (const { candidate } of selected) {
-    const enriched = await runDFTEnrichmentForCandidate(emit, candidate);
+  for (const ranked of selected) {
+    const { candidate } = ranked;
+    const candidatePressure = ranked.targetPressureGpa ?? (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure);
     if (enriched) {
       dftSuccessCount++;
       convergenceStats.totalDFTRuns++;
+      recordPressureCoverage(candidate.formula, candidatePressure);
     }
     if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
       bestTcThisLoop = candidate.predictedTc ?? 0;
     }
+  }
+
+  let pressureTransitionsThisCycle = 0;
+  const pressureCandidates = selected.filter(s => s.selectionTier === "pressure-exploration" || (s.candidate.predictedTc ?? 0) > 50);
+  for (const ranked of pressureCandidates.slice(0, 5)) {
+    try {
+      const transitions = detectPhaseTransitions(ranked.candidate.formula);
+      pressureTransitionsThisCycle += transitions.length;
+      if (transitions.length > 0) {
+        emit("log", {
+          phase: "active-learning",
+          event: "Pressure phase transitions detected",
+          detail: `${ranked.candidate.formula}: ${transitions.length} transition(s) — ${transitions.map(t => `${t.type} at ${t.pressureStart}-${t.pressureEnd} GPa (conf=${t.confidence.toFixed(2)})`).join(", ")}`,
+          dataSource: "Active Learning",
+        });
+      }
+    } catch { /* skip */ }
+  }
+  pressureCoverageStats.pressureTransitionsFound += pressureTransitionsThisCycle;
+
+  for (const ranked of selected.slice(0, 3)) {
+    try {
+      predictPressureCurve(ranked.candidate.formula);
+      const optimal = findOptimalPressure(ranked.candidate.formula);
+      if (optimal.optimalPressureGpa > 0 && optimal.maxTc > 50) {
+        emit("log", {
+          phase: "active-learning",
+          event: "Pressure curve analyzed",
+          detail: `${ranked.candidate.formula}: optimal P=${optimal.optimalPressureGpa} GPa, max Tc=${optimal.maxTc.toFixed(1)}K`,
+          dataSource: "Active Learning",
+        });
+      }
+    } catch { /* skip */ }
   }
 
   totalEnrichedSinceLastRetrain += dftSuccessCount;

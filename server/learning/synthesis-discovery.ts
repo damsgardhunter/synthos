@@ -6,6 +6,8 @@ import type { FermiSurfaceResult } from "../physics/fermi-surface-engine";
 import type { PairingProfile } from "../physics/pairing-mechanisms";
 import type { DefectStructure } from "../physics/defect-engine";
 import type { PressureTcPoint, HydrideFormationResult } from "./pressure-engine";
+import { assessHighPressureStability, scanPressureTcCurve } from "./pressure-engine";
+import { samplePressureFromClusters } from "./pressure-screening";
 import type { SynthesisPath, SynthesisStep, SynthesisVector } from "../physics/synthesis-simulator";
 import {
   defaultSynthesisVector,
@@ -86,6 +88,7 @@ export interface SynthesisGenome {
   strainEngineering: number;
   postProcessingType: number;
   topologicalProtection: number;
+  pressureGene: number;
 }
 
 export interface NovelSynthesisRoute {
@@ -102,6 +105,7 @@ export interface NovelSynthesisRoute {
   rationale: string[];
   synthesisVector: SynthesisVector;
   classification: "practical" | "experimental" | "unrealistic";
+  decodedPressureGpa: number;
 }
 
 export interface SynthesisDiscoveryResult {
@@ -568,7 +572,21 @@ function generateId(): string {
   return `synth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function decodePressureGene(gene: number): number {
+  return Math.max(0, Math.min(350, gene * 350));
+}
+
 function randomGenome(): SynthesisGenome {
+  let pressureGene = Math.random();
+  if (Math.random() < 0.3) {
+    try {
+      const clusterPressures = samplePressureFromClusters(1);
+      if (clusterPressures.length > 0) {
+        pressureGene = Math.min(1, Math.max(0, clusterPressures[0] / 350));
+      }
+    } catch {}
+  }
+
   return {
     precursorStrategy: Math.random(),
     reactionSequenceType: Math.random(),
@@ -582,6 +600,7 @@ function randomGenome(): SynthesisGenome {
     strainEngineering: Math.random(),
     postProcessingType: Math.random(),
     topologicalProtection: Math.random(),
+    pressureGene,
   };
 }
 
@@ -592,7 +611,12 @@ function mutateGenome(g: SynthesisGenome, mutationRate: number = 0.2): Synthesis
 
   for (let i = 0; i < numMutations; i++) {
     const key = keys[Math.floor(Math.random() * keys.length)];
-    result[key] = Math.max(0, Math.min(1, result[key] + randRange(-0.3, 0.3)));
+    if (key === "pressureGene") {
+      const step = randRange(-0.03, 0.03);
+      result[key] = Math.max(0, Math.min(1, result[key] + step));
+    } else {
+      result[key] = Math.max(0, Math.min(1, result[key] + randRange(-0.3, 0.3)));
+    }
   }
   return result;
 }
@@ -612,8 +636,9 @@ function genomeToSynthesisVector(genome: SynthesisGenome, insights: MultiEngineI
   const mc = insights.materialClass.toLowerCase();
   const base = defaultSynthesisVector(mc);
 
+  const genomePressureGpa = decodePressureGene(genome.pressureGene);
   let tempScale = 800 + genome.temperatureProfile * 1700;
-  let pressScale = genome.pressureProfile * 300;
+  let pressScale = Math.max(genome.pressureProfile * 300, genomePressureGpa);
   let coolRate = 1 + genome.coolingStrategy * 5000;
   let annealTime = 0.5 + genome.annealingIntensity * 100;
   let thermalCycles = Math.round(genome.thermalCycleCount * 20);
@@ -756,6 +781,8 @@ function selectPrecursors(genome: SynthesisGenome, insights: MultiEngineInsights
 
 function genomeToSteps(genome: SynthesisGenome, insights: MultiEngineInsights): SynthesisStep[] {
   const sv = genomeToSynthesisVector(genome, insights);
+  const genomePressureGpa = decodePressureGene(genome.pressureGene);
+  sv.pressure = Math.max(sv.pressure, genomePressureGpa);
   const atmosphere = selectAtmosphere(genome, insights);
   const mc = insights.materialClass.toLowerCase();
   const steps: SynthesisStep[] = [];
@@ -946,71 +973,78 @@ function computeNoveltyScore(genome: SynthesisGenome, insights: MultiEngineInsig
 function computeFitnessScore(
   route: { steps: SynthesisStep[]; feasibilityScore: number; noveltyScore: number },
   insights: MultiEngineInsights,
-  bestKnownTc: number = 0
+  bestKnownTc: number = 0,
+  genome?: SynthesisGenome
 ): number {
-  let surrogateFitness = 0;
-  let usedSurrogate = false;
-  let surrogateExplorationBonus = 0;
-  try {
-    const sf = computeSurrogateFitness(insights.formula);
-    surrogateFitness = sf.fitness;
-    surrogateExplorationBonus = sf.uncertaintyBreakdown.explorationBonus;
-    usedSurrogate = true;
-  } catch {}
+  const genomePressureGpa = genome ? decodePressureGene(genome.pressureGene) : 0;
 
-  const weights = getCurrentFitnessWeights();
-  const surrogateWeight = usedSurrogate ? 0.40 : 0.0;
-  const remainingWeight = 1.0 - surrogateWeight;
-
-  const tcWeight = 0.30 * remainingWeight;
-  const feasWeight = 0.25 * remainingWeight;
-  const novelWeight = 0.20 * remainingWeight;
-  const engineWeight = 0.25 * remainingWeight;
+  let pressureTc = insights.predictedTc;
+  if (genome && genomePressureGpa > 0) {
+    try {
+      const curve = scanPressureTcCurve(insights.formula, {
+        min: Math.max(0, genomePressureGpa - 10),
+        max: genomePressureGpa + 10,
+        steps: 3,
+      });
+      const atPressure = curve.find(pt => Math.abs(pt.pressure - genomePressureGpa) <= 10);
+      if (atPressure && atPressure.Tc > 0) {
+        pressureTc = atPressure.Tc;
+      }
+    } catch {}
+  }
 
   const adaptiveDenom = Math.max(100, bestKnownTc * 0.5);
-  const tcNorm = Math.min(1.0, insights.predictedTc / adaptiveDenom);
+  const tcNorm = Math.min(1.0, pressureTc / adaptiveDenom);
+
+  let stabilityAtPressure = 0.5;
+  if (genome && genomePressureGpa > 0) {
+    try {
+      const stability = assessHighPressureStability(insights.formula, genomePressureGpa);
+      if (stability.isStable && stability.enthalpyMargin < 0) {
+        stabilityAtPressure = Math.min(1.0, 0.7 + Math.abs(stability.enthalpyMargin) * 0.3);
+      } else if (stability.isStable) {
+        stabilityAtPressure = 0.6;
+      } else {
+        stabilityAtPressure = Math.max(0.1, 0.4 - stability.enthalpyMargin * 0.2);
+      }
+    } catch {}
+  } else {
+    if (insights.physics) {
+      stabilityAtPressure = insights.physics.stabilityScore;
+    }
+  }
+
+  let engineBonus = 0;
+  if (insights.physics) {
+    engineBonus += Math.min(1.0, insights.physics.lambda / 2.0) * 0.05;
+  }
+  if (insights.topology) {
+    engineBonus += insights.topology.topologicalScore * 0.03;
+  }
+  if (insights.pairing) {
+    engineBonus += insights.pairing.compositePairingStrength * 0.02;
+  }
+
   const feasNorm = route.feasibilityScore;
   const novelNorm = route.noveltyScore;
 
-  let engineScore = 0;
-  let engineCount = 0;
+  const pressurePenalty = genomePressureGpa / 500;
 
-  if (insights.physics) {
-    engineScore += Math.min(1.0, insights.physics.lambda / 2.0) * 0.3;
-    engineScore += insights.physics.stabilityScore * 0.2;
-    engineCount++;
-  }
-  if (insights.topology) {
-    engineScore += insights.topology.topologicalScore * 0.15;
-    engineCount++;
-  }
-  if (insights.fermi) {
-    engineScore += insights.fermi.multiBandScore * 0.1;
-    engineScore += insights.fermi.nestingScore * 0.1;
-    engineCount++;
-  }
-  if (insights.pairing) {
-    engineScore += insights.pairing.compositePairingStrength * 0.15;
-    engineCount++;
-  }
-  if (insights.pressure) {
-    const pTcNorm = Math.min(1.0, insights.pressure.maxTc / 200);
-    engineScore += pTcNorm * 0.1;
-    engineCount++;
-  }
-  if (insights.defect) {
-    engineScore += Math.min(1.0, insights.defect.bestTcBoost * 5) * 0.1;
-    engineCount++;
-  }
+  const rawFitness =
+    0.4 * tcNorm +
+    0.3 * stabilityAtPressure +
+    0.2 * feasNorm +
+    0.1 * novelNorm;
 
-  const engineNorm = engineCount > 0 ? Math.min(1.0, engineScore / Math.max(1, Math.sqrt(engineCount))) : 0.5;
-
-  const baseFitness = surrogateWeight * surrogateFitness +
-    tcWeight * tcNorm + feasWeight * feasNorm + novelWeight * novelNorm + engineWeight * engineNorm;
+  let surrogateExplorationBonus = 0;
+  try {
+    const sf = computeSurrogateFitness(insights.formula);
+    surrogateExplorationBonus = sf.uncertaintyBreakdown.explorationBonus * 0.15;
+  } catch {}
 
   const compositionBias = getCompositionBias(insights.formula);
 
-  return Math.max(0, Math.min(1.0, baseFitness + surrogateExplorationBonus + compositionBias));
+  return Math.max(0, Math.min(1.0, rawFitness - pressurePenalty + engineBonus + surrogateExplorationBonus + compositionBias));
 }
 
 let gaAdaptationCalls = 0;
@@ -1107,7 +1141,7 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
   const noveltyScore = computeNoveltyScore(genome, insights);
 
   const routeObj = { steps, feasibilityScore, noveltyScore };
-  const fitnessScore = computeFitnessScore(routeObj, insights, bestKnownTc);
+  const fitnessScore = computeFitnessScore(routeObj, insights, bestKnownTc, genome);
 
   const engineContributions = buildEngineContributions(insights);
   const rationale = buildRationale(genome, insights);
@@ -1126,6 +1160,7 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
     rationale,
     synthesisVector: sv,
     classification: feasResult.classification,
+    decodedPressureGpa: Math.round(decodePressureGene(genome.pressureGene) * 10) / 10,
   };
 }
 
