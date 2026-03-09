@@ -12,6 +12,7 @@ let totalProcessed = 0;
 let totalSucceeded = 0;
 let totalFailed = 0;
 let currentJob: DftJob | null = null;
+let staleJobsCleanedCount = 0;
 let broadcastFn: ((event: string, data: any) => void) | null = null;
 
 export function setDFTBroadcast(fn: (event: string, data: any) => void) {
@@ -197,10 +198,14 @@ async function cleanupStaleJobs() {
         completedAt: new Date(),
         errorMessage: "Stale job from previous server session",
       } as any);
+      staleJobsCleanedCount++;
       console.log(`[DFT-Queue] Cleaned up stale running job #${job.id} (${job.formula})`);
     }
+    const previousStale = await storage.getDftJobsByStatus("failed");
+    const prevStaleCount = previousStale.filter(j => j.errorMessage === "Stale job from previous server session").length;
+    staleJobsCleanedCount = prevStaleCount;
     if (staleRunning.length > 0) {
-      console.log(`[DFT-Queue] Cleaned ${staleRunning.length} stale running job(s)`);
+      console.log(`[DFT-Queue] Cleaned ${staleRunning.length} stale running job(s), ${staleJobsCleanedCount} total stale in DB`);
     }
   } catch (err: any) {
     console.log(`[DFT-Queue] Stale job cleanup error: ${err.message}`);
@@ -253,13 +258,15 @@ export async function getDFTQueueStats() {
 
   const dbSucceeded = dbStats.completed || 0;
   const dbFailed = dbStats.failed || 0;
-  const dbCompleted = dbSucceeded + dbFailed;
+  const adjustedFailed = Math.max(0, dbFailed - staleJobsCleanedCount);
+  const dbCompleted = dbSucceeded + adjustedFailed;
 
   return {
     ...dbStats,
     totalProcessed: dbCompleted,
     totalSucceeded: dbSucceeded,
-    totalFailed: dbFailed,
+    totalFailed: adjustedFailed,
+    staleJobsCleaned: staleJobsCleanedCount,
     isProcessing,
     currentFormula: currentJob?.formula || null,
     qeAvailable: isQEAvailable(),

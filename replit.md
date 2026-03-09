@@ -291,6 +291,15 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - synthesis-simulator.ts: `avgTcImprovement` divides by `totalPathsOptimized` (not `totalSimulations`) to avoid dilution by zero-improvement runs.
   - cross-engine-hub.ts: Stats now include `currentActiveInsights` and `totalHistoryEntries` alongside running `totalInsightsRecorded`.
   - engine.ts: Startup pre-seeds `alreadyScreenedFormulas` with up to 5000 existing DB candidates to reduce duplicate rejection rate in autonomous loop.
+  - **Pipeline pass-rate + DFT reliability session (7 fixes)**:
+    - qe-worker.ts: QE_TIMEOUT_MS doubled 300s→600s for complex hydride calculations.
+    - qe-worker.ts: Multi-metal hydride cage H-placement collision fix — H sites now collision-checked against all occupied metal sites in fractional coordinates (tolerance 0.05); prevents 0.00 Å crashes (e.g. AlLiH8 Li(1)↔H(5) at octahedral (0.5,0.5,0.5) = metal site). Fallback H positions (0.15,0.15,0.15 etc.) when standard sites exhausted.
+    - dft-job-queue.ts: Stale jobs ("Stale job from previous server session") excluded from totalFailed count; `staleJobsCleanedCount` tracks all stale jobs in DB; `staleJobsCleaned` field exposed in stats.
+    - engine.ts: Tier 3 thresholds relaxed — lambda from 0.3→0.15, Tc from 10→5K. Prevents rejecting 42K candidates as "below-tier3-thresholds".
+    - ml-predictor.ts: Physics prefilter lambda cutoff lowered 0.15→0.08 (lambda≈0.1 is physically interesting).
+    - engine.ts: FAMILY_CAPS Hydrides lowered 0.40→0.25; 5 new families added (Pnictides 0.10, Intermetallics 0.12, Kagome 0.08, Alloys 0.10, Cuprates 0.10) to prevent hydride mode collapse.
+    - candidate-generator.ts: Valence filter hydride exception — binary hydrides (alkali/AE/TM + H only) and high-H-ratio compounds (H > 60% atoms) skip strict charge balance check, since high-pressure hydrides violate classical valence rules.
+    - qe-dft-engine.ts + qe-worker.ts: H atomic volume reduced 5.0→3.0 Å³ in both ATOMIC_VOLUMES dictionaries for realistic hydride lattice spacing (was producing 7Å H-H distances).
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

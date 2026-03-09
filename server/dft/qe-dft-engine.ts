@@ -124,7 +124,7 @@ const PROTOTYPE_PACKING: Record<string, number> = {
 };
 
 const ATOMIC_VOLUMES: Record<string, number> = {
-  H: 5.0, He: 4.0, Li: 21.0, Be: 8.0, B: 7.5, C: 12.0, N: 13.0,
+  H: 3.0, He: 4.0, Li: 21.0, Be: 8.0, B: 7.5, C: 12.0, N: 13.0,
   O: 14.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 23.0, Al: 16.6, Si: 20.0,
   P: 17.0, S: 15.5, Cl: 22.0, Ar: 24.0, K: 45.5, Ca: 26.0, Sc: 25.0,
   Ti: 17.6, V: 14.0, Cr: 12.0, Mn: 12.2, Fe: 11.8, Co: 11.0, Ni: 10.9,

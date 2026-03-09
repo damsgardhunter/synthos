@@ -459,7 +459,17 @@ export function passesValenceFilter(formula: string): boolean {
   const alkaliCount = elements.filter(el => ["Li", "Na", "K", "Rb", "Cs"].includes(el)).length;
   if (alkaliCount > 2) return false;
 
-  if (!passesStrictChargeBalance(elements, counts)) return false;
+  const hCount = counts["H"] || 0;
+  const nonHElements = elements.filter(el => el !== "H");
+  const ALKALI_SET = new Set(["Li", "Na", "K", "Rb", "Cs"]);
+  const AE_SET = new Set(["Be", "Mg", "Ca", "Sr", "Ba"]);
+  const isBinaryHydride = hCount > 0 && nonHElements.length === 1
+    && (ALKALI_SET.has(nonHElements[0]) || AE_SET.has(nonHElements[0])
+        || ["La", "Y", "Sc", "Th", "Ce", "Ti", "Zr", "Hf", "V", "Nb", "Ta"].includes(nonHElements[0]));
+  const isHighHydrogenRatio = hCount > 0 && hCount / totalAtoms > 0.6;
+  if (!isBinaryHydride && !isHighHydrogenRatio) {
+    if (!passesStrictChargeBalance(elements, counts)) return false;
+  }
 
   return true;
 }

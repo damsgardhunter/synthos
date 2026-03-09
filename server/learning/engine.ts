@@ -230,13 +230,18 @@ const KNOWN_COMPOUNDS = new Set<string>([
 ]);
 
 const FAMILY_CAPS: Record<string, number> = {
-  Hydrides: 0.40,
-  Carbides: 0.15,
-  Nitrides: 0.12,
+  Hydrides: 0.25,
+  Carbides: 0.12,
+  Nitrides: 0.10,
   Borides: 0.10,
-  Chalcogenides: 0.12,
+  Chalcogenides: 0.10,
   Oxides: 0.10,
   Sulfides: 0.08,
+  Pnictides: 0.10,
+  Intermetallics: 0.12,
+  Kagome: 0.08,
+  Alloys: 0.10,
+  Cuprates: 0.10,
 };
 let lastActiveLearningCycle = 0;
 let recentTcImproved = false;
@@ -2994,7 +2999,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       tier = 2;
       confidenceLevel = "medium";
       verificationStage = 1;
-    } else if (finalTc > 10 && lambda > 0.3) {
+    } else if (finalTc > 5 && lambda > 0.15) {
       tier = 3;
       confidenceLevel = "low";
       verificationStage = 0;

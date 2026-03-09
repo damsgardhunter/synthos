@@ -8,7 +8,7 @@ import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
 const QE_WORK_DIR = "/tmp/qe_calculations";
 const QE_PSEUDO_DIR = "/tmp/qe_pseudo";
-const QE_TIMEOUT_MS = 300_000;
+const QE_TIMEOUT_MS = 600_000;
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const PP_SOURCE_DIR = path.join(PROJECT_ROOT, "server/dft/pseudo");
@@ -203,7 +203,7 @@ function parseFormula(formula: string): Record<string, number> {
 }
 
 const ATOMIC_VOLUMES: Record<string, number> = {
-  H: 5, He: 6, Li: 13, Be: 8, B: 7, C: 12, N: 13, O: 14, F: 15, Ne: 7,
+  H: 3, He: 6, Li: 13, Be: 8, B: 7, C: 12, N: 13, O: 14, F: 15, Ne: 7,
   Na: 24, Mg: 14, Al: 17, Si: 12, P: 17, S: 16, Cl: 22, Ar: 24,
   K: 46, Ca: 26, Sc: 25, Ti: 18, V: 14, Cr: 12, Mn: 12,
   Fe: 12, Co: 11, Ni: 11, Cu: 12, Zn: 14, Ga: 12, Ge: 14,
@@ -683,10 +683,57 @@ function generateHydrideCagePositions(
         positions.push({ element: metal, ...metalSites[placed++] });
       }
     }
+    const occupiedSites = positions.map(p => ({ x: p.x, y: p.y, z: p.z }));
     const hTotal = Math.round(counts["H"] || 0);
     const allH = [...octahedralH, ...cubeVertexH];
-    for (let i = 0; i < hTotal && i < allH.length; i++) {
-      positions.push({ element: "H", ...allH[i] });
+    let hPlaced = 0;
+    for (let i = 0; i < allH.length && hPlaced < hTotal; i++) {
+      const hPos = allH[i];
+      let collides = false;
+      for (const occ of occupiedSites) {
+        let fdx = hPos.x - occ.x;
+        let fdy = hPos.y - occ.y;
+        let fdz = hPos.z - occ.z;
+        fdx -= Math.round(fdx);
+        fdy -= Math.round(fdy);
+        fdz -= Math.round(fdz);
+        if (Math.abs(fdx) < 0.05 && Math.abs(fdy) < 0.05 && Math.abs(fdz) < 0.05) {
+          collides = true;
+          break;
+        }
+      }
+      if (!collides) {
+        positions.push({ element: "H", ...hPos });
+        occupiedSites.push({ x: hPos.x, y: hPos.y, z: hPos.z });
+        hPlaced++;
+      }
+    }
+    if (hPlaced < hTotal) {
+      const fallbackH = [
+        { x: 0.15, y: 0.15, z: 0.15 }, { x: 0.85, y: 0.15, z: 0.15 },
+        { x: 0.15, y: 0.85, z: 0.15 }, { x: 0.15, y: 0.15, z: 0.85 },
+      ];
+      for (const fb of fallbackH) {
+        if (hPlaced >= hTotal) break;
+        let collides = false;
+        for (const occ of occupiedSites) {
+          let fdx = fb.x - occ.x;
+          let fdy = fb.y - occ.y;
+          let fdz = fb.z - occ.z;
+          fdx -= Math.round(fdx);
+          fdy -= Math.round(fdy);
+          fdz -= Math.round(fdz);
+          if (Math.abs(fdx) < 0.05 && Math.abs(fdy) < 0.05 && Math.abs(fdz) < 0.05) {
+            collides = true;
+            break;
+          }
+        }
+        if (!collides) {
+          positions.push({ element: "H", ...fb });
+          occupiedSites.push({ x: fb.x, y: fb.y, z: fb.z });
+          hPlaced++;
+        }
+      }
     }
   }
 

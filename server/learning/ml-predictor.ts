@@ -1114,7 +1114,7 @@ export class PhysicsPredictor {
   }
 
   preFilter(prediction: PhysicsPrediction): { pass: boolean; reason: string } {
-    if (prediction.lambda < 0.15) return { pass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < 0.15` };
+    if (prediction.lambda < 0.08) return { pass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < 0.08` };
     if (prediction.hullDistance > 0.3) return { pass: false, reason: `hull_dist=${prediction.hullDistance.toFixed(3)} > 0.3 eV/atom` };
     if (prediction.dosAtEF < 0.2) return { pass: false, reason: `DOS(EF)=${prediction.dosAtEF.toFixed(2)} < 0.2 states/eV` };
     return { pass: true, reason: "passed" };

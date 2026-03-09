@@ -1,0 +1,200 @@
+Clear computational / pipeline issues
+A. DFT job failures are extremely high
+
+From your log:
+
+totalProcessed: 455
+
+totalSucceeded: 1
+
+totalFailed: 454
+
+Success rate:
+
+1 / 455 ≈ 0.22%
+
+That is abnormally low for a QE pipeline.
+
+Main failure causes seen
+
+TIMEOUT: QE calculation exceeded time limit
+
+Geometry rejected: atoms too close
+
+Stale job from previous server session
+
+These indicate infrastructure problems rather than physics problems.
+
+Likely causes
+
+QE job timeout too small
+
+Job queue restart corruption
+
+Pre-relaxation not running
+
+Geometry generator producing overlapping atoms
+
+2. Geometry generation bug
+
+Repeated error:
+
+Geometry rejected: Atoms Li(1) and H(5) too close: 0.00 Å
+
+Distance 0.00 Å means atoms occupy identical coordinates.
+
+This usually happens if:
+
+atom positions initialized to (0,0,0)
+
+lattice not scaled before atom placement
+
+random placement bug
+
+Fix
+
+Before QE:
+
+if distance(i,j) < 0.8 Å:
+    regenerate_structure()
+
+or enforce:
+
+minDistance = 0.8 * (covalentRadius_i + covalentRadius_j)
+3. Pipeline pass rate = zero
+
+From metrics:
+
+totalPassed: 0
+overallPassRate: 0
+
+Meaning nothing survives the pipeline.
+
+Your rejection breakdown:
+
+Reason	Count
+belowTierRejects	30
+gbTcRejects	29
+surrogateRejects	12
+duplicateRejects	12
+
+This suggests filters are too aggressive.
+
+Example:
+
+VTeH8S Tc = 42 K
+reason = below-tier3-thresholds
+
+Rejecting a 42 K candidate is probably unintended.
+
+Possible threshold bug.
+
+4. Physics prefilter may be misconfigured
+
+Example:
+
+VTeH9S
+reason: physics-prefilter: lambda=0.13 < 0.15
+
+But lambda=0.13 is still physically interesting.
+
+Typical superconductors exist with:
+
+λ ≈ 0.1 – 0.3
+
+Your cutoff may be too strict.
+
+5. Hydride generator is dominating search
+
+Family counts:
+
+Hydrides: 38
+Alloys: 18
+Mixed: 8
+
+But hydrides already dominate the literature.
+
+This reduces search diversity.
+
+Your generator bias confirms it:
+
+topFamilyPreferences
+hydride boost = 0.607
+
+May cause mode collapse.
+
+6. Structure validation scaling loop
+
+Example:
+
+attempt 1 vol/atom=20.7 target=62.4 scaling 1.44
+attempt 2 vol/atom=52.7 scaling 1.06
+attempt 3 vol/atom=61.1 scaling 1.01
+
+This works, but your minDist values are suspiciously large:
+
+minDist = 7.5 Å
+
+That means the lattice might be too expanded.
+
+A hydrogen lattice with 7 Å spacing is unrealistic.
+
+Possible issue:
+
+target volume calculation incorrect
+7. Valence filter might be rejecting too much
+
+Many rejections:
+
+CsH9
+NaH9
+KH9
+LiH9
+RbH9
+reason: valence-filter-failed
+
+But high-pressure hydrides often violate classical valence rules.
+
+So this filter may be invalid for hydrides.
+
+8. Possible duplicated candidate list
+
+Your log contains two full copies of lastCycleCandidates earlier in the output.
+
+This likely means:
+
+logger.printCandidates()
+
+is being called twice.
+
+Minor but inefficient.
+
+9. Feature extraction looks healthy
+
+Good signs:
+
+featureExtractionFails: 0
+xtbSuccessRate: 0.645
+
+These are normal values.
+
+So the front half of your pipeline is fine.
+
+10. Theory / causal modules running but unused
+
+You have:
+
+theoriesDiscovered: 0
+totalEquationsEvaluated: 6000
+
+and
+
+causalRules: 50
+
+But your generator:
+
+cumulativeTcImpact: 0
+
+Meaning their output isn't affecting generation yet.
+
+Not a bug, but unused capability.
