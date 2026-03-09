@@ -1,4 +1,5 @@
 import type { ElectronicStructure, TightBindingTopology } from "../learning/physics-engine";
+import type { DFTTopologicalClassification } from "../dft/dft-band-analysis";
 
 export interface TopologicalAnalysis {
   topologicalScore: number;
@@ -12,6 +13,7 @@ export interface TopologicalAnalysis {
   majoranaFeasibility: number;
   topologicalClass: string;
   indicators: string[];
+  dftClassification?: DFTTopologicalClassification;
   details: {
     socContribution: number;
     bandInversionContribution: number;
@@ -315,7 +317,8 @@ export function analyzeTopology(
   formula: string,
   electronic: ElectronicStructure,
   spaceGroup?: string,
-  crystalSystem?: string
+  crystalSystem?: string,
+  dftClassification?: DFTTopologicalClassification
 ): TopologicalAnalysis {
   const elements = parseFormulaElements(formula);
   const elementNames = Object.keys(elements);
@@ -396,22 +399,45 @@ export function analyzeTopology(
 
   topologicalScore = Math.min(1.0, topologicalScore + patternBonus * 0.3);
 
-  const topologicalClass = classifyTopologicalState(
+  let topologicalClass = classifyTopologicalState(
     z2Score, chernScore, mirrorSymmetryIndicator, majoranaFeasibility, socStrength
   );
 
+  let finalZ2 = z2Score;
+  let finalBandInvProb = bandInversionProbability;
+
+  if (dftClassification && dftClassification.confidence > 0.3) {
+    topologicalClass = dftClassification.topologicalClass;
+
+    if (dftClassification.z2Indicator > 0) {
+      finalZ2 = Math.max(z2Score, dftClassification.z2Indicator);
+    }
+
+    if (dftClassification.bandInversionDepthEv > 0) {
+      finalBandInvProb = Math.min(1.0, 0.6 + dftClassification.bandInversionDepthEv * 2);
+    }
+
+    topologicalScore = Math.min(1.0, topologicalScore * 0.3 + dftClassification.confidence * 0.7);
+
+    for (const ev of dftClassification.evidence) {
+      indicators.push(`[DFT] ${ev}`);
+    }
+    indicators.push(`[DFT] classification: ${dftClassification.classificationChain.join(" -> ")}`);
+  }
+
   return {
     topologicalScore: Math.round(topologicalScore * 1000) / 1000,
-    z2Score: Math.round(z2Score * 1000) / 1000,
+    z2Score: Math.round(finalZ2 * 1000) / 1000,
     chernScore: Math.round(chernScore * 1000) / 1000,
     mirrorSymmetryIndicator: Math.round(mirrorSymmetryIndicator * 1000) / 1000,
     socStrength: Math.round(socStrength * 1000) / 1000,
-    bandInversionProbability: Math.round(bandInversionProbability * 1000) / 1000,
+    bandInversionProbability: Math.round(finalBandInvProb * 1000) / 1000,
     diracNodeProbability: Math.round(diracNodeProbability * 1000) / 1000,
     flatBandIndicator: Math.round(flatBandIndicator * 1000) / 1000,
     majoranaFeasibility: Math.round(majoranaFeasibility * 1000) / 1000,
     topologicalClass,
     indicators,
+    dftClassification,
     details: {
       socContribution: Math.round(socContribution * 1000) / 1000,
       bandInversionContribution: Math.round(bandInversionContribution * 1000) / 1000,

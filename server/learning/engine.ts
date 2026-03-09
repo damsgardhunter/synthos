@@ -60,11 +60,14 @@ import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetwor
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
 import { predictBandDispersion, getBandOperatorMLFeatures, type BandOperatorResult } from "../physics/band-structure-operator";
+import { buildFermiSurfaceFromDFT, extractTopologyFromDFT, enhanceElectronicStructure, recordDFTBandAnalysis, getDFTBandAnalysisStats, classifyDFTTopology, computeFermiIsosurface } from "../dft/dft-band-analysis";
+import type { DFTTopologicalClassification } from "../dft/dft-band-analysis";
+import type { DFTBandStructureResult } from "../dft/band-structure-calculator";
 import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { predictKineticStability, formatKineticStabilityNote, type KineticStabilityResult } from "../physics/kinetic-stability";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
-import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, rebalanceWeights, applyTheoryBias } from "./generator-manager";
+import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias } from "./generator-manager";
 import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, type TheoryGeneratorBias } from "./theory-guided-generator";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
@@ -103,7 +106,7 @@ import {
   getLatestGraph, type CausalRule,
 } from "../theory/causal-physics-discovery";
 import { crossEngineHub } from "./cross-engine-hub";
-import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedbackForGA, getGAEvolutionStats, type MultiEngineInsights } from "./synthesis-discovery";
+import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedbackForGA, getGAEvolutionStats, getStructuralMotifStats, type MultiEngineInsights } from "./synthesis-discovery";
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 
@@ -1125,6 +1128,8 @@ async function reEvaluateTopCandidates() {
 }
 
 const dftEnrichmentTracker = new Map<string, number>();
+const candidateGeneratorSource = new Map<string, string>();
+const MAX_GENERATOR_SOURCE_ENTRIES = 2000;
 
 async function runDFTEnrichment() {
   if (!shouldContinue()) return;
@@ -1247,7 +1252,12 @@ async function runDFTEnrichment() {
           dftSrc === "external" ? "dft" : "xtb"
         );
         incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
-        recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy });
+        recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy }, candidate.materialClass ?? undefined);
+
+        const sourceGen = candidateGeneratorSource.get(candidate.formula);
+        if (sourceGen) {
+          recordDFTOutcome(sourceGen, dftStable && gb.tcPredicted > 5, gb.tcPredicted);
+        }
 
         if (dftData.phononStability) {
           const ps = dftData.phononStability;
@@ -1499,11 +1509,99 @@ async function runPhase10_Physics() {
 
         let topoAnalysis: TopologicalAnalysis | undefined;
         try {
+          const mlFeaturesForDFT = (candidate.mlFeatures as Record<string, any>) ?? {};
+          const hasDFTBands = mlFeaturesForDFT.qeBands === true;
+          let electronicForTopo = result.electronicStructure;
+          let dftTopoClassification: DFTTopologicalClassification | undefined;
+
+          if (hasDFTBands) {
+            try {
+              const dftJobs = await storage.getDftJobsByFormula(candidate.formula);
+              const completedJob = dftJobs.find(j => j.status === "completed" && (j.outputData as any)?.bandStructure?.converged);
+              if (completedJob) {
+                const dftBandData = (completedJob.outputData as any).bandStructure as DFTBandStructureResult;
+                recordDFTBandAnalysis(dftBandData);
+
+                const dftTopo = extractTopologyFromDFT(dftBandData);
+                const dftElecEnhance = enhanceElectronicStructure(dftBandData);
+
+                const socStr = result.electronicStructure.socStrength ?? 0;
+                dftTopoClassification = classifyDFTTopology(dftBandData, socStr);
+
+                const isosurface = computeFermiIsosurface(dftBandData);
+
+                electronicForTopo = {
+                  ...result.electronicStructure,
+                  bandStructureType: dftElecEnhance.bandStructureType,
+                  fermiSurfaceTopology: dftElecEnhance.fermiSurfaceTopology,
+                  densityOfStatesAtFermi: dftElecEnhance.densityOfStatesAtFermi,
+                  metallicity: dftElecEnhance.metallicity,
+                  nestingScore: dftElecEnhance.nestingScore,
+                  vanHoveProximity: dftElecEnhance.vanHoveProximity,
+                  bandFlatness: dftElecEnhance.bandFlatness,
+                  flatBandIndicator: dftElecEnhance.flatBandIndicator,
+                  tightBindingTopology: {
+                    hasFlatBand: dftTopo.hasFlatBand,
+                    hasVHS: dftTopo.hasVHS,
+                    hasDiracCrossing: dftTopo.hasDiracCrossing,
+                    hasBandInversion: dftTopo.hasBandInversion,
+                    topologyScore: dftTopo.topologyScore,
+                    flatBandCount: dftTopo.flatBandCount,
+                    vhsCount: dftTopo.vhsCount,
+                    diracCrossingCount: dftTopo.diracCrossingCount,
+                    dosAtFermi: dftTopo.dosAtFermi,
+                  },
+                };
+
+                (updatedMlFeatures as any).dftBandTopology = {
+                  hasFlatBand: dftTopo.hasFlatBand,
+                  hasVHS: dftTopo.hasVHS,
+                  hasDiracCrossing: dftTopo.hasDiracCrossing,
+                  hasBandInversion: dftTopo.hasBandInversion,
+                  topologyScore: dftTopo.topologyScore,
+                  flatBandCount: dftTopo.flatBandCount,
+                  vhsCount: dftTopo.vhsCount,
+                  dosAtFermi: dftTopo.dosAtFermi,
+                  bandInversionCount: dftTopo.bandInversionCount,
+                  nodalLineIndicator: dftTopo.nodalLineIndicator,
+                  parityChanges: dftTopo.parityChanges,
+                  diracPointCount: dftTopo.diracPointCount,
+                  source: "DFT-bands",
+                };
+
+                (updatedMlFeatures as any).dftTopologicalClassification = {
+                  topologicalClass: dftTopoClassification.topologicalClass,
+                  confidence: dftTopoClassification.confidence,
+                  socGapMeV: dftTopoClassification.socGapMeV,
+                  diracPointCount: dftTopoClassification.diracPointCount,
+                  weylPointCount: dftTopoClassification.weylPointCount,
+                  nodalLineCount: dftTopoClassification.nodalLineCount,
+                  z2Indicator: dftTopoClassification.z2Indicator,
+                  evidence: dftTopoClassification.evidence,
+                  chain: dftTopoClassification.classificationChain,
+                };
+
+                (updatedMlFeatures as any).fermiIsosurface = {
+                  totalPoints: isosurface.totalPoints,
+                  sheetCount: isosurface.sheetCount,
+                  enclosedVolumeFraction: isosurface.enclosedVolumeFraction,
+                  avgVelocity: isosurface.avgVelocity,
+                  anisotropy: isosurface.anisotropy,
+                };
+
+                console.log(`[Engine] ${candidate.formula}: DFT topology classified — class=${dftTopoClassification.topologicalClass} (confidence=${dftTopoClassification.confidence.toFixed(2)}), inversions=${dftTopo.bandInversionCount}, VHS=${dftTopo.vhsCount}, Dirac=${dftTopo.diracPointCount}, Weyl=${dftTopoClassification.weylPointCount}, SOCgap=${dftTopoClassification.socGapMeV.toFixed(0)}meV, isosurface=${isosurface.sheetCount}sheets/${isosurface.totalPoints}pts`);
+              }
+            } catch (dftBandErr) {
+              console.error(`[Engine] DFT band topology extraction failed for ${candidate.formula}:`, dftBandErr instanceof Error ? dftBandErr.message.slice(0, 100) : "unknown");
+            }
+          }
+
           topoAnalysis = analyzeTopology(
             candidate.formula,
-            result.electronicStructure,
+            electronicForTopo,
             candidate.crystalStructure?.split(" ")[0],
-            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1]
+            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
+            dftTopoClassification
           );
           trackTopologyResult(topoAnalysis);
           crossEngineHub.recordInsight("topology", candidate.formula, topoAnalysis);
@@ -1518,13 +1616,14 @@ async function runPhase10_Physics() {
             majoranaFeasibility: topoAnalysis.majoranaFeasibility,
             topologicalClass: topoAnalysis.topologicalClass,
             indicators: topoAnalysis.indicators,
+            dftBandEnhanced: hasDFTBands,
           };
           if (topoAnalysis.topologicalScore > 0.4) {
             emit("log", {
               phase: "phase-10",
               event: "Topological candidate detected",
-              detail: `${candidate.formula}: class=${topoAnalysis.topologicalClass}, score=${topoAnalysis.topologicalScore}, SOC=${topoAnalysis.socStrength}, Z2=${topoAnalysis.z2Score}, Majorana=${topoAnalysis.majoranaFeasibility}, [${topoAnalysis.indicators.join(", ")}]`,
-              dataSource: "Topology Engine",
+              detail: `${candidate.formula}: class=${topoAnalysis.topologicalClass}, score=${topoAnalysis.topologicalScore}, SOC=${topoAnalysis.socStrength}, Z2=${topoAnalysis.z2Score}, Majorana=${topoAnalysis.majoranaFeasibility}${hasDFTBands ? " [DFT-enhanced]" : ""}, [${topoAnalysis.indicators.join(", ")}]`,
+              dataSource: hasDFTBands ? "Topology Engine + DFT Bands" : "Topology Engine",
             });
           }
         } catch (topoErr) {
@@ -1581,7 +1680,30 @@ async function runPhase10_Physics() {
 
         let fermiSurfaceAnalysis: FermiSurfaceResult | undefined;
         try {
-          fermiSurfaceAnalysis = computeFermiSurface(candidate.formula);
+          const mlFeaturesFS = (candidate.mlFeatures as Record<string, any>) ?? {};
+          const hasDFTBandsFS = mlFeaturesFS.qeBands === true;
+          let usedDFTFermi = false;
+
+          if (hasDFTBandsFS) {
+            try {
+              const dftJobsFS = await storage.getDftJobsByFormula(candidate.formula);
+              const completedJobFS = dftJobsFS.find(j => j.status === "completed" && (j.outputData as any)?.bandStructure?.converged);
+              if (completedJobFS) {
+                const dftBandDataFS = (completedJobFS.outputData as any).bandStructure as DFTBandStructureResult;
+                fermiSurfaceAnalysis = buildFermiSurfaceFromDFT(dftBandDataFS);
+                usedDFTFermi = true;
+                const isoFS = computeFermiIsosurface(dftBandDataFS);
+                console.log(`[Engine] ${candidate.formula}: Fermi surface from DFT E(k)=EF isosurface — ${fermiSurfaceAnalysis.pocketCount} pockets (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)}, iso=${isoFS.totalPoints}pts/${isoFS.sheetCount}sheets, anisotropy=${isoFS.anisotropy.toFixed(1)}`);
+              }
+            } catch (dftFsErr) {
+              console.error(`[Engine] DFT Fermi surface extraction failed for ${candidate.formula}:`, dftFsErr instanceof Error ? dftFsErr.message.slice(0, 100) : "unknown");
+            }
+          }
+
+          if (!fermiSurfaceAnalysis) {
+            fermiSurfaceAnalysis = computeFermiSurface(candidate.formula);
+          }
+
           crossEngineHub.recordInsight("fermi", candidate.formula, fermiSurfaceAnalysis);
           (updatedMlFeatures as any).fermiSurface = {
             fermiPocketCount: fermiSurfaceAnalysis.mlFeatures.fermiPocketCount,
@@ -1589,13 +1711,14 @@ async function runPhase10_Physics() {
             fsDimensionality: fermiSurfaceAnalysis.mlFeatures.fsDimensionality,
             sigmaBandPresence: fermiSurfaceAnalysis.mlFeatures.sigmaBandPresence,
             multiBandScore: fermiSurfaceAnalysis.mlFeatures.multiBandScore,
+            source: usedDFTFermi ? "DFT-bands" : "tight-binding",
           };
           if (fermiSurfaceAnalysis.pocketCount > 1 || fermiSurfaceAnalysis.nestingScore > 0.3) {
             emit("log", {
               phase: "phase-10",
               event: "Fermi surface reconstructed",
-              detail: `${candidate.formula}: pockets=${fermiSurfaceAnalysis.pocketCount} (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), e-h balance=${fermiSurfaceAnalysis.electronHoleBalance.toFixed(3)}, nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)}, dim=${fermiSurfaceAnalysis.fsDimensionality}, sigma=${fermiSurfaceAnalysis.sigmaBandPresence.toFixed(3)}, multiBand=${fermiSurfaceAnalysis.multiBandScore.toFixed(3)}`,
-              dataSource: "Fermi Surface Engine",
+              detail: `${candidate.formula}: pockets=${fermiSurfaceAnalysis.pocketCount} (e=${fermiSurfaceAnalysis.electronPocketCount}, h=${fermiSurfaceAnalysis.holePocketCount}), e-h balance=${fermiSurfaceAnalysis.electronHoleBalance.toFixed(3)}, nesting=${fermiSurfaceAnalysis.nestingScore.toFixed(3)}, dim=${fermiSurfaceAnalysis.fsDimensionality}, sigma=${fermiSurfaceAnalysis.sigmaBandPresence.toFixed(3)}, multiBand=${fermiSurfaceAnalysis.multiBandScore.toFixed(3)}${usedDFTFermi ? " [DFT-derived]" : ""}`,
+              dataSource: usedDFTFermi ? "DFT Band Structure -> Fermi Surface" : "Fermi Surface Engine",
             });
           }
           try {
@@ -2363,6 +2486,7 @@ async function runPhase11_StructurePrediction() {
               diffInserted++;
               bayesianOptimizer.addObservation(normalized, rawTc, lambdaML, crystal.noveltyScore);
               recordGeneratorOutcome("motif_diffusion", true, rawTc, crystal.noveltyScore);
+              if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "motif_diffusion");
             } else {
               recordGeneratorOutcome("motif_diffusion", false, rawTc, 0.1);
             }
@@ -2441,6 +2565,7 @@ async function runPhase11_StructurePrediction() {
               cdvaeInserted++;
               bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
               recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
+              if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "structure_diffusion");
               incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] CDVAE crystal insert failed:", e); }
@@ -2517,6 +2642,7 @@ async function runPhase11_StructurePrediction() {
               distInserted++;
               bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
               recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
+              if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "structure_diffusion");
               incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] Distribution diffusion insert failed:", e); }
@@ -3888,14 +4014,20 @@ async function runAutonomousFastPath() {
 
       const isRlCandidate = rlCandidates.includes(formula);
       const isBoCandidate = boTopFormulas.includes(formula);
+      let generatorName = "massive_combinatorial";
       if (isRlCandidate) {
+        generatorName = "rl";
         recordGeneratorOutcome("rl", result.passed, result.tc, result.passed ? 0.6 : 0.1);
       }
       if (isBoCandidate) {
+        generatorName = "bo_exploration";
         recordGeneratorOutcome("bo_exploration", result.passed, result.tc, result.passed ? 0.7 : 0.1);
       }
       if (!isRlCandidate && !isBoCandidate) {
         recordGeneratorOutcome("massive_combinatorial", result.passed, result.tc, result.passed ? 0.5 : 0.1);
+      }
+      if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) {
+        candidateGeneratorSource.set(formula, generatorName);
       }
 
       try {

@@ -2,6 +2,7 @@ import { gnnPredictWithUncertainty, type GNNPredictionWithUncertainty } from "./
 import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty, type XGBUncertaintyResult } from "./gradient-boost";
 import { classifyFamily } from "./utils";
+import { computeCompositionFeatures } from "./composition-features";
 
 export interface EvaluationRecord {
   formula: string;
@@ -60,6 +61,7 @@ export interface FeedbackLoopStats {
   fitnessWeightEvolution: { cycle: number; weights: typeof currentWeights }[];
   explorationWeight: number;
   explorationSchedule: { maxWeight: number; minWeight: number; decayHalfLife: number; currentWeight: number };
+  noveltySearch: { knownCompositions: number; vectorDimensions: number };
 }
 
 const MAX_EVAL_HISTORY = 500;
@@ -115,15 +117,73 @@ function getGlobalCalibrationFactor(): number {
   return 1.0 - Math.min(0.25, meanAbsErr / 300);
 }
 
+const COMP_VECTOR_KEYS = [
+  "enMean", "enStd", "radiusMean", "radiusStd", "massMean", "massStd",
+  "vecMean", "vecStd", "ieMean", "ieStd", "eaMean", "eaStd",
+  "debyeMean", "debyeStd", "bulkModMean", "bulkModStd", "meltMean", "meltStd",
+  "density", "volPerAtom", "stoner", "hopfield", "gruneisen",
+  "ionic", "covalent", "metallic", "dFrac", "fFrac", "pFrac", "sFrac",
+  "entropy", "pettiMean", "pettiStd",
+] as const;
+
+const knownCompositionVectors: { formula: string; vec: number[] }[] = [];
+const MAX_KNOWN_VECTORS = 500;
+
+function compositionToVector(formula: string): number[] | null {
+  try {
+    const feats = computeCompositionFeatures(formula);
+    const vec: number[] = [];
+    for (const key of COMP_VECTOR_KEYS) {
+      const val = (feats as any)[key];
+      vec.push(typeof val === "number" && isFinite(val) ? val : 0);
+    }
+    return vec;
+  } catch {
+    return null;
+  }
+}
+
+function euclideanDistance(a: number[], b: number[]): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const diff = (a[i] || 0) - (b[i] || 0);
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum);
+}
+
+function addToKnownVectors(formula: string): void {
+  if (knownCompositionVectors.some(v => v.formula === formula)) return;
+  const vec = compositionToVector(formula);
+  if (!vec) return;
+  knownCompositionVectors.push({ formula, vec });
+  if (knownCompositionVectors.length > MAX_KNOWN_VECTORS) {
+    knownCompositionVectors.shift();
+  }
+}
+
 function computeNoveltyScore(formula: string): number {
   const family = classifyFamily(formula);
   const familyCount = evaluationHistory.filter(r => r.family === family).length;
 
   let novelty = 1.0;
-  if (familyCount > 20) novelty -= 0.3;
-  else if (familyCount > 10) novelty -= 0.15;
+  if (familyCount > 20) novelty -= 0.2;
+  else if (familyCount > 10) novelty -= 0.1;
 
-  if (seenFormulas.has(formula)) novelty -= 0.5;
+  if (seenFormulas.has(formula)) novelty -= 0.4;
+
+  if (knownCompositionVectors.length >= 3) {
+    const candidateVec = compositionToVector(formula);
+    if (candidateVec) {
+      const distances = knownCompositionVectors.map(kv => euclideanDistance(candidateVec, kv.vec));
+      distances.sort((a, b) => a - b);
+      const kNearest = Math.min(5, distances.length);
+      const avgNearestDist = distances.slice(0, kNearest).reduce((s, d) => s + d, 0) / kNearest;
+      const maxExpectedDist = 200;
+      const distNovelty = Math.min(1.0, avgNearestDist / maxExpectedDist);
+      novelty = 0.3 * novelty + 0.7 * distNovelty;
+    }
+  }
 
   return Math.max(0, Math.min(1, novelty));
 }
@@ -271,6 +331,8 @@ export function recordEvaluationResult(
     evaluationHistory.splice(0, evaluationHistory.length - MAX_EVAL_HISTORY);
   }
 
+  addToKnownVectors(formula);
+
   const acc = getOrCreateFamilyAccumulator(family);
   const absErr = Math.abs(predicted.tc - actual.tc);
   acc.sumAbsErr += absErr;
@@ -370,6 +432,10 @@ export function getCalibrationStats(): FeedbackLoopStats {
       minWeight: EXPLORATION_WEIGHT_MIN,
       decayHalfLife: EXPLORATION_DECAY_HALF_LIFE,
       currentWeight: Math.round(expWeight * 1000) / 1000,
+    },
+    noveltySearch: {
+      knownCompositions: knownCompositionVectors.length,
+      vectorDimensions: COMP_VECTOR_KEYS.length,
     },
   };
 }

@@ -81,6 +81,8 @@ import { computeFermiSurface } from "./physics/fermi-surface-engine";
 import { getAllClusters, getCluster, getClusterGuidance, getClusterStats } from "./physics/fermi-surface-clustering";
 import { predictBandStructure } from "./physics/band-structure-surrogate";
 import { predictBandDispersion, getBandOperatorStats } from "./physics/band-structure-operator";
+import { getBandCalcStats } from "./dft/band-structure-calculator";
+import { getDFTBandAnalysisStats } from "./dft/dft-band-analysis";
 import { predictStability } from "./physics/stability-predictor";
 import { analyzeInterface, generateHeterostructureCandidates } from "./physics/interface-engine";
 import { detectQuantumCriticality } from "./physics/quantum-criticality";
@@ -103,7 +105,7 @@ import {
 import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAnalysis } from "./theory/multi-scale-engine";
 import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
 import { getPerformanceMetrics, recordPrediction } from "./theory/model-performance-tracker";
-import { getGeneratorAllocations } from "./learning/generator-manager";
+import { getGeneratorAllocations, getGeneratorCompetitionStats } from "./learning/generator-manager";
 import { getEmbeddingDataset, getLandscapeStats } from "./landscape/discovery-landscape";
 import { getZoneMap } from "./landscape/zone-detector";
 import { getFullLandscapeGuidance } from "./landscape/landscape-guidance";
@@ -120,7 +122,7 @@ import {
 import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
 import { crossEngineHub } from "./learning/cross-engine-hub";
-import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, getGAEvolutionStats } from "./learning/synthesis-discovery";
+import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, getGAEvolutionStats, getStructuralMotifStats } from "./learning/synthesis-discovery";
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "./synthesis/heuristic-synthesis-generator";
 import { predictSynthesisFeasibility, getSynthesisPredictorStats } from "./synthesis/ml-synthesis-predictor";
@@ -406,6 +408,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(stats);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch DFT queue stats" });
+    }
+  });
+
+  app.get("/api/dft-band-structure/stats", async (_req, res) => {
+    try {
+      res.json(getBandCalcStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch band structure stats" });
+    }
+  });
+
+  app.get("/api/dft-band-analysis/stats", async (_req, res) => {
+    try {
+      res.json(getDFTBandAnalysisStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch band analysis stats" });
     }
   });
 
@@ -1744,6 +1762,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getGAEvolutionStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch GA evolution stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/generator-competition/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getGeneratorCompetitionStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch generator competition stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/structural-motifs/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getStructuralMotifStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch structural motif stats", detail: e.message?.slice(0, 200) });
     }
   });
 

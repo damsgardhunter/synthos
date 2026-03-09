@@ -4,6 +4,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
+import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
 
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
 const QE_WORK_DIR = "/tmp/qe_calculations";
@@ -105,6 +106,7 @@ export interface QEFullResult {
   method: "QE-PW-PBE";
   scf: QESCFResult | null;
   phonon: QEPhononResult | null;
+  bandStructure: DFTBandStructureResult | null;
   wallTimeTotal: number;
   error: string | null;
   retryCount?: number;
@@ -127,6 +129,7 @@ const stageFailureCounts: Record<string, number> = {
   duplicate: 0,
   xtb_prefilter: 0,
   scf: 0,
+  bands: 0,
   phonon: 0,
 };
 
@@ -1166,6 +1169,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     method: "QE-PW-PBE",
     scf: null,
     phonon: null,
+    bandStructure: null,
     wallTimeTotal: 0,
     error: null,
     retryCount: 0,
@@ -1334,6 +1338,43 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       result.failureStage = "scf";
       stageFailureCounts.scf++;
       recordFormulaFailure(formula);
+    }
+
+    if (result.scf?.converged && result.scf.fermiEnergy !== null) {
+      try {
+        const cOverAVal = estimateCOverA(elements, counts);
+        const ELEMENT_CUTOFFS_BANDS: Record<string, number> = {
+          O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+        };
+        const baseEcutwfcBands = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_BANDS[el] ?? 45), 45);
+        const nspinBands = elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1;
+
+        const bandResult = await computeDFTBandStructure(
+          formula,
+          elements,
+          counts,
+          latticeA,
+          positions,
+          result.scf.fermiEnergy,
+          jobDir,
+          cOverAVal,
+          baseEcutwfcBands,
+          nspinBands,
+        );
+
+        result.bandStructure = bandResult;
+        recordBandCalcOutcome(bandResult.converged, bandResult.wallTimeSeconds);
+
+        if (!bandResult.converged && bandResult.error) {
+          stageFailureCounts.bands++;
+          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(0, 200)} (continuing to phonon)`);
+        } else {
+          console.log(`[QE-Worker] Band structure done for ${formula}: ${bandResult.nBands} bands, ${bandResult.bandCrossings.length} crossings, flat=${bandResult.flatBandScore.toFixed(3)}`);
+        }
+      } catch (bandErr: any) {
+        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message} (continuing to phonon)`);
+        stageFailureCounts.bands++;
+      }
     }
 
     if (result.scf?.converged) {

@@ -137,6 +137,7 @@ async function processNextJob(): Promise<boolean> {
           }
 
           const mlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
+          const bandData = dftResult.bandStructure;
           updates.mlFeatures = {
             ...mlFeatures,
             qeDFT: true,
@@ -147,6 +148,19 @@ async function processNextJob(): Promise<boolean> {
             qePhononStable: dftResult.phonon ? !dftResult.phonon.hasImaginary : null,
             qePhononFreqs: dftResult.phonon?.frequencies?.length || 0,
             dftConfidence: 1.0,
+            qeBands: bandData?.converged || false,
+            qeBandCrossings: bandData?.bandCrossings?.length || 0,
+            qeBandInversions: bandData?.bandInversions?.length || 0,
+            qeBandGapPath: bandData?.bandGapAlongPath ?? null,
+            qeMetallicPath: bandData?.isMetallicAlongPath ?? null,
+            qeFlatBandScore: bandData?.flatBandScore ?? 0,
+            qeDiracScore: bandData?.diracCrossingScore ?? 0,
+            qeVHSCount: bandData?.vanHoveSingularities?.length || 0,
+            qeBandWidth: bandData?.bandWidth ?? 0,
+            qeBandInversionCount: bandData?.topologicalIndicators?.bandInversionCount || 0,
+            qeNodalLineIndicator: bandData?.topologicalIndicators?.nodalLineIndicator || 0,
+            qeParityChanges: bandData?.topologicalIndicators?.parityChanges || 0,
+            qeDiracPointCount: bandData?.topologicalIndicators?.diracPointCount || 0,
           };
 
           await storage.updateSuperconductorCandidate(candidate.id, updates);

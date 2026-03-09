@@ -536,6 +536,7 @@ function FeedbackLoopCard() {
     pillarDFTFeedback: { pillar: string; accuracy: number; total: number }[];
     explorationWeight: number;
     explorationSchedule: { maxWeight: number; minWeight: number; decayHalfLife: number; currentWeight: number };
+    noveltySearch: { knownCompositions: number; vectorDimensions: number };
   }>({ queryKey: ["/api/surrogate-fitness/stats"], refetchInterval: 30000 });
 
   if (!data || data.totalEvaluations === 0) return null;
@@ -589,6 +590,12 @@ function FeedbackLoopCard() {
             <p className="text-[9px] text-muted-foreground mt-0.5">
               {data.explorationWeight > 0.15 ? "High exploration: prioritizing uncertain candidates" : data.explorationWeight > 0.05 ? "Moderate exploration" : "Low exploration: exploiting known chemistry"}
             </p>
+          </div>
+        )}
+        {data.noveltySearch && (
+          <div className="flex items-center justify-between text-xs" data-testid="novelty-search-stats">
+            <span className="text-muted-foreground">Novelty Search DB</span>
+            <span className="font-mono">{data.noveltySearch.knownCompositions} compositions ({data.noveltySearch.vectorDimensions}D vectors)</span>
           </div>
         )}
         {data.familyCalibrations.length > 0 && (
@@ -662,6 +669,20 @@ export default function Dashboard() {
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"] });
   const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"] });
   const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"] });
+  const { data: bandCalcStats } = useQuery<{
+    totalCalcs: number;
+    succeeded: number;
+    failed: number;
+    avgWallTimeSeconds: number;
+  }>({ queryKey: ["/api/dft-band-structure/stats"], refetchInterval: 30000 });
+  const { data: bandAnalysisStats } = useQuery<{
+    totalAnalyses: number;
+    withPockets: number;
+    withBandInversions: number;
+    withVHS: number;
+    withDiracCrossings: number;
+    avgPocketCount: number;
+  }>({ queryKey: ["/api/dft-band-analysis/stats"], refetchInterval: 30000 });
   const { data: engineMemory } = useQuery<EngineMemory>({ queryKey: ["/api/engine/memory"], refetchInterval: 15000 });
   const { data: scData } = useQuery<{ candidates: any[]; total: number }>({ queryKey: ["/api/superconductor-candidates"] });
   const { data: novelInsightData } = useQuery<{
@@ -694,7 +715,20 @@ export default function Dashboard() {
     formulaOutcomeCount: number;
     topGoodMotifs: { motif: string; score: number; count: number }[];
     topBadMotifs: { motif: string; penalty: number; count: number }[];
+    eliteArchive: { formula: string; fitness: number; classification: string }[];
+    eliteArchiveSize: number;
+    structuralMotifs: {
+      motifs: { name: string; weight: number; successes: number; failures: number; avgTc: number; successRate: number }[];
+      totalMotifs: number;
+      activeMotifs: number;
+    };
   }>({ queryKey: ["/api/synthesis-discovery/ga-evolution"], refetchInterval: 30000 });
+  const { data: genCompStats } = useQuery<{
+    generators: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[];
+    totalDFTSuccesses: number;
+    totalDFTFailures: number;
+    rebalanceCount: number;
+  }>({ queryKey: ["/api/generator-competition/stats"], refetchInterval: 30000 });
   const { data: synthPlannerStats } = useQuery<{
     totalPlans: number;
     totalRoutes: number;
@@ -822,6 +856,7 @@ export default function Dashboard() {
             <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 12}`} icon={TrendingUp} sub="currently running" />
             <StatCard title="Milestones" value={milestoneData?.total ?? 0} icon={Star} sub="research milestones" history={getHistory("milestones")} />
             <StatCard title="DFT Enriched" value={dftStatus?.dftEnrichedCount ?? 0} icon={Cpu} sub={`${dftStatus?.breakdown?.high ?? 0} high / ${dftStatus?.breakdown?.medium ?? 0} medium confidence`} data-testid="stat-dft-enriched" />
+            <StatCard title="Band Structure" value={bandCalcStats?.totalCalcs ?? 0} icon={Activity} sub={`${bandCalcStats?.succeeded ?? 0} converged${bandAnalysisStats?.totalAnalyses ? ` / ${bandAnalysisStats.withPockets} pockets / ${bandAnalysisStats.withBandInversions} inversions` : bandCalcStats?.failed ? ` / ${bandCalcStats.failed} failed` : ""}`} data-testid="stat-band-structure" />
           </>
         )}
       </div>
@@ -1179,9 +1214,86 @@ export default function Dashboard() {
                           {gaEvoStats.totalAdaptations} stagnation-triggered mutation boosts
                         </p>
                       )}
+                      {gaEvoStats.eliteArchive && gaEvoStats.eliteArchive.length > 0 && (
+                        <div className="space-y-0.5 pt-1 border-t border-border/20">
+                          <p className="text-[9px] text-muted-foreground">Elite Archive (top {gaEvoStats.eliteArchiveSize} across all runs)</p>
+                          <div className="space-y-0.5">
+                            {gaEvoStats.eliteArchive.map((e, i) => (
+                              <div key={i} className="flex items-center justify-between text-[10px]" data-testid={`elite-${i}`}>
+                                <span className="font-mono truncate max-w-[120px]">{e.formula}</span>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono font-medium">{(e.fitness * 100).toFixed(1)}%</span>
+                                  <Badge variant="secondary" className={`text-[8px] border-0 px-1 py-0 ${e.classification === "practical" ? "bg-emerald-100/50 dark:bg-emerald-900/30" : e.classification === "experimental" ? "bg-amber-100/50 dark:bg-amber-900/30" : "bg-red-100/50 dark:bg-red-900/30"}`}>
+                                    {e.classification}
+                                  </Badge>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </>
+              )}
+              {gaEvoStats?.structuralMotifs && gaEvoStats.structuralMotifs.activeMotifs > 0 && (
+                <div className="space-y-1.5 pt-2 border-t border-border/30" data-testid="structural-motif-panel">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Structural Motif Rewards</p>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-muted-foreground">{gaEvoStats.structuralMotifs.activeMotifs}/{gaEvoStats.structuralMotifs.totalMotifs} active</span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {gaEvoStats.structuralMotifs.motifs
+                      .filter(m => m.successes + m.failures > 0)
+                      .slice(0, 8)
+                      .map((m) => (
+                        <div key={m.name} className="flex items-center justify-between text-[10px]" data-testid={`motif-${m.name}`}>
+                          <span className="font-mono truncate max-w-[100px]">{m.name}</span>
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-12 bg-muted rounded-full h-1.5">
+                              <div
+                                className={`h-1.5 rounded-full ${m.weight > 1.3 ? "bg-emerald-500" : m.weight > 0.8 ? "bg-blue-500" : "bg-orange-500"}`}
+                                style={{ width: `${Math.min(100, (m.weight / 3.0) * 100)}%` }}
+                              />
+                            </div>
+                            <span className="font-mono w-8 text-right">{m.weight.toFixed(2)}</span>
+                            <span className="text-muted-foreground w-10 text-right">{m.successes}W/{m.failures}L</span>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {genCompStats && genCompStats.generators.some(g => g.dftSuccesses + g.dftFailures > 0) && (
+                <div className="space-y-1.5 pt-2 border-t border-border/30" data-testid="generator-competition-panel">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Generator Competition (DFT-Verified)</p>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-muted-foreground">{genCompStats.totalDFTSuccesses} DFT wins / {genCompStats.totalDFTFailures} fails</span>
+                    <span className="text-muted-foreground">({genCompStats.rebalanceCount} rebalances)</span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {genCompStats.generators
+                      .filter(g => g.dftSuccesses + g.dftFailures > 0)
+                      .map((g) => (
+                        <div key={g.name} className="flex items-center justify-between text-[10px]" data-testid={`gen-comp-${g.name}`}>
+                          <span className="font-mono truncate max-w-[90px]">{g.name.replace(/_/g, " ")}</span>
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-10 bg-muted rounded-full h-1.5">
+                              <div
+                                className={`h-1.5 rounded-full ${g.discoveryRate > 0.5 ? "bg-emerald-500" : g.discoveryRate > 0.2 ? "bg-blue-500" : "bg-orange-500"}`}
+                                style={{ width: `${Math.min(100, g.discoveryRate * 100)}%` }}
+                              />
+                            </div>
+                            <span className="font-mono w-8 text-right">{(g.discoveryRate * 100).toFixed(0)}%</span>
+                            <span className="font-mono w-12 text-right">{(g.weight * 100).toFixed(1)}%</span>
+                            {g.dftBestTc > 0 && (
+                              <span className="text-emerald-600 dark:text-emerald-400 font-mono w-10 text-right">{g.dftBestTc}K</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
               )}
               {heuristicStats && heuristicStats.totalGenerated > 0 && (
                 <>

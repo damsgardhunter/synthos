@@ -141,6 +141,209 @@ const compositionFeedback: CompositionFeedback = {
   formulaOutcomes: new Map(),
 };
 
+const STRUCTURAL_MOTIFS = [
+  "hydride-cage", "layered-boride", "A15-chain", "perovskite-3D",
+  "clathrate-cage", "CuO2-plane", "FeAs-layer", "kagome-flat",
+  "hexagonal-layer", "NaCl-rocksalt", "ThCr2Si2-pnictide",
+  "MgB2-sigma", "Ruddlesden-Popper", "nickelate-IL", "H-channel",
+  "anti-perovskite", "Chevrel-phase", "Heusler-L21", "pyrochlore",
+  "skutterudite", "BiS2-layer", "infinite-layer", "Laves-MgZn2",
+] as const;
+
+type StructuralMotif = typeof STRUCTURAL_MOTIFS[number];
+
+interface MotifRewardEntry {
+  weight: number;
+  successes: number;
+  failures: number;
+  totalReward: number;
+  avgTc: number;
+  totalTc: number;
+}
+
+const structuralMotifRewards = new Map<string, MotifRewardEntry>();
+
+function initMotifRewards(): void {
+  if (structuralMotifRewards.size > 0) return;
+  for (const motif of STRUCTURAL_MOTIFS) {
+    structuralMotifRewards.set(motif, {
+      weight: 1.0,
+      successes: 0,
+      failures: 0,
+      totalReward: 0,
+      avgTc: 0,
+      totalTc: 0,
+    });
+  }
+}
+
+function classifyStructuralMotif(formula: string, materialClass: string): StructuralMotif[] {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const mc = materialClass.toLowerCase();
+  const motifs: StructuralMotif[] = [];
+
+  const hasH = elements.includes("H");
+  const hCount = counts["H"] || 0;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const hFraction = hCount / totalAtoms;
+
+  if (hasH && hFraction > 0.5) motifs.push("hydride-cage");
+  if (hasH && hFraction > 0.3 && hFraction <= 0.5) motifs.push("H-channel");
+
+  if (elements.includes("B") && elements.some(e => isTransitionMetal(e) || isRareEarth(e))) {
+    motifs.push("layered-boride");
+  }
+
+  if (mc.includes("a15") || (elements.length === 2 && elements.every(e => isTransitionMetal(e)))) {
+    motifs.push("A15-chain");
+  }
+
+  if (mc.includes("perovskite") || (elements.length === 3 && elements.includes("O") && (counts["O"] || 0) === 3)) {
+    motifs.push("perovskite-3D");
+  }
+
+  if (mc.includes("clathrate") || (hasH && hCount >= 6)) {
+    motifs.push("clathrate-cage");
+  }
+
+  if (mc.includes("cuprate") || (elements.includes("Cu") && elements.includes("O"))) {
+    motifs.push("CuO2-plane");
+  }
+
+  if (mc.includes("pnictide") || mc.includes("iron") || (elements.includes("Fe") && (elements.includes("As") || elements.includes("P") || elements.includes("Se")))) {
+    motifs.push("FeAs-layer");
+  }
+
+  if (mc.includes("kagome") || elements.includes("V") && elements.includes("Si")) {
+    motifs.push("kagome-flat");
+  }
+
+  if (mc.includes("hexagonal") || elements.includes("B") && !elements.some(e => isTransitionMetal(e))) {
+    motifs.push("hexagonal-layer");
+  }
+
+  if (mc.includes("nickelate") || (elements.includes("Ni") && elements.includes("O"))) {
+    motifs.push("nickelate-IL");
+  }
+
+  if (mc.includes("heusler") || (elements.length >= 3 && elements.filter(e => isTransitionMetal(e)).length >= 2)) {
+    motifs.push("Heusler-L21");
+  }
+
+  if (elements.includes("Mg") && elements.includes("B")) {
+    motifs.push("MgB2-sigma");
+  }
+
+  if (mc.includes("thcr2si2") || (elements.length >= 3 && (elements.includes("As") || elements.includes("P")) && elements.some(e => isRareEarth(e)))) {
+    motifs.push("ThCr2Si2-pnictide");
+  }
+
+  if (mc.includes("chevrel") || (elements.includes("Mo") && (elements.includes("S") || elements.includes("Se")))) {
+    motifs.push("Chevrel-phase");
+  }
+
+  if (mc.includes("laves") || (elements.length === 2 && elements.every(e => isTransitionMetal(e)) && Math.abs((counts[elements[0]] || 1) / (counts[elements[1]] || 1) - 2) < 0.5)) {
+    motifs.push("Laves-MgZn2");
+  }
+
+  if (motifs.length === 0) {
+    if (elements.length <= 2 && elements.includes("O")) motifs.push("NaCl-rocksalt");
+    else motifs.push("hexagonal-layer");
+  }
+
+  return motifs;
+}
+
+export function rewardStructuralMotif(
+  formula: string,
+  materialClass: string,
+  result: { tc: number; stable: boolean; formationEnergy: number }
+): void {
+  initMotifRewards();
+  const motifs = classifyStructuralMotif(formula, materialClass);
+  const isSuccess = result.tc > 20 && result.stable && result.formationEnergy < 0.5;
+
+  for (const motif of motifs) {
+    const entry = structuralMotifRewards.get(motif);
+    if (!entry) continue;
+
+    if (isSuccess) {
+      const reward = Math.min(1.0, result.tc / 200);
+      entry.successes++;
+      entry.totalReward += reward;
+      entry.weight = Math.min(3.0, entry.weight + reward * 0.15);
+    } else {
+      entry.failures++;
+      entry.weight = Math.max(0.2, entry.weight - 0.05);
+    }
+    entry.totalTc += result.tc;
+    entry.avgTc = entry.totalTc / (entry.successes + entry.failures);
+  }
+}
+
+export function getMotifWeightedMutationBias(formula: string, materialClass: string): Record<string, number> {
+  initMotifRewards();
+  const motifs = classifyStructuralMotif(formula, materialClass);
+  const bias: Record<string, number> = {};
+
+  for (const motif of motifs) {
+    const entry = structuralMotifRewards.get(motif);
+    if (!entry) continue;
+    bias[motif] = entry.weight;
+  }
+
+  return bias;
+}
+
+function getMotifMutationProbability(formula: string, materialClass: string): number {
+  initMotifRewards();
+  const motifs = classifyStructuralMotif(formula, materialClass);
+  if (motifs.length === 0) return 1.0;
+
+  let totalWeight = 0;
+  let count = 0;
+  for (const motif of motifs) {
+    const entry = structuralMotifRewards.get(motif);
+    if (entry) {
+      totalWeight += entry.weight;
+      count++;
+    }
+  }
+
+  const avgWeight = count > 0 ? totalWeight / count : 1.0;
+  return Math.max(0.3, Math.min(2.0, avgWeight));
+}
+
+export function getStructuralMotifStats(): {
+  motifs: { name: string; weight: number; successes: number; failures: number; avgTc: number; successRate: number }[];
+  totalMotifs: number;
+  activeMotifs: number;
+} {
+  initMotifRewards();
+  const motifs: { name: string; weight: number; successes: number; failures: number; avgTc: number; successRate: number }[] = [];
+
+  structuralMotifRewards.forEach((entry, name) => {
+    const total = entry.successes + entry.failures;
+    motifs.push({
+      name,
+      weight: Math.round(entry.weight * 1000) / 1000,
+      successes: entry.successes,
+      failures: entry.failures,
+      avgTc: Math.round(entry.avgTc * 10) / 10,
+      successRate: total > 0 ? Math.round((entry.successes / total) * 1000) / 1000 : 0,
+    });
+  });
+
+  motifs.sort((a, b) => b.weight - a.weight);
+
+  return {
+    motifs,
+    totalMotifs: STRUCTURAL_MOTIFS.length,
+    activeMotifs: motifs.filter(m => m.successes + m.failures > 0).length,
+  };
+}
+
 const adaptiveMutationState = {
   currentRate: 0.20,
   baseRate: 0.20,
@@ -169,7 +372,8 @@ function extractMotifs(formula: string): string[] {
 
 export function recordDFTFeedbackForGA(
   formula: string,
-  result: { tc: number; stable: boolean; formationEnergy: number }
+  result: { tc: number; stable: boolean; formationEnergy: number },
+  materialClass?: string
 ): void {
   compositionFeedback.formulaOutcomes.set(formula, result);
   const motifs = extractMotifs(formula);
@@ -197,6 +401,9 @@ export function recordDFTFeedbackForGA(
       compositionFeedback.badMotifs.set(motif, existing);
     }
   }
+
+  const mc = materialClass || classifyFamily(formula) || "other";
+  rewardStructuralMotif(formula, mc, result);
 }
 
 function getCompositionBias(formula: string): number {
@@ -295,7 +502,41 @@ export function getGAEvolutionStats() {
       .sort((a, b) => b[1].penalty * b[1].count - a[1].penalty * a[1].count)
       .slice(0, 10)
       .map(([motif, data]) => ({ motif, penalty: Math.round(data.penalty * 1000) / 1000, count: data.count })),
+    eliteArchive: getEliteArchive(),
+    eliteArchiveSize: ELITE_ARCHIVE_SIZE,
+    structuralMotifs: getStructuralMotifStats(),
   };
+}
+
+const ELITE_ARCHIVE_SIZE = 5;
+const eliteArchive: NovelSynthesisRoute[] = [];
+
+function updateEliteArchive(route: NovelSynthesisRoute): void {
+  const existingIdx = eliteArchive.findIndex(r => r.formula === route.formula && r.id === route.id);
+  if (existingIdx >= 0) {
+    if (route.fitnessScore > eliteArchive[existingIdx].fitnessScore) {
+      eliteArchive[existingIdx] = route;
+    }
+    return;
+  }
+  if (eliteArchive.length < ELITE_ARCHIVE_SIZE) {
+    eliteArchive.push(route);
+    eliteArchive.sort((a, b) => b.fitnessScore - a.fitnessScore);
+    return;
+  }
+  const worstArchive = eliteArchive[eliteArchive.length - 1];
+  if (route.fitnessScore > worstArchive.fitnessScore) {
+    eliteArchive[eliteArchive.length - 1] = route;
+    eliteArchive.sort((a, b) => b.fitnessScore - a.fitnessScore);
+  }
+}
+
+export function getEliteArchive(): { formula: string; fitness: number; classification: string }[] {
+  return eliteArchive.map(r => ({
+    formula: r.formula,
+    fitness: Math.round(r.fitnessScore * 1000) / 1000,
+    classification: r.classification,
+  }));
 }
 
 function parseFormulaElements(formula: string): string[] {
@@ -903,11 +1144,18 @@ export function discoverNovelSynthesisPaths(
 
   let population: NovelSynthesisRoute[] = [];
 
+  for (const elite of eliteArchive) {
+    if (population.length < Math.min(ELITE_ARCHIVE_SIZE, Math.floor(populationSize * 0.25))) {
+      const mutated = mutateGenome(elite.genome, 0.1);
+      population.push(genomeToRoute(mutated, insights, currentBestKnownTc));
+    }
+  }
+
   const basePath = optimizeSynthesisPath(insights.formula, insights.materialClass, insights.predictedTc);
   const baseGenome = randomGenome();
   population.push(genomeToRoute(baseGenome, insights, currentBestKnownTc));
 
-  for (let i = 1; i < populationSize; i++) {
+  while (population.length < populationSize) {
     const genome = randomGenome();
     population.push(genomeToRoute(genome, insights, currentBestKnownTc));
   }
@@ -928,15 +1176,23 @@ export function discoverNovelSynthesisPaths(
     const preserveCount = Math.max(1, Math.ceil(populationSize * 0.05));
     const newPop: NovelSynthesisRoute[] = population.slice(0, preserveCount);
 
+    const motifBoost = getMotifMutationProbability(insights.formula, insights.materialClass);
+    const adjustedMutRate = Math.max(
+      adaptiveMutationState.minRate,
+      Math.min(adaptiveMutationState.maxRate, mutRate * motifBoost)
+    );
+
     while (newPop.length < populationSize) {
       const { parent1, parent2 } = selectParentsByFitness(population, 0.20, 0.08);
 
       let childGenome: SynthesisGenome;
+      const crossoverProb = motifBoost > 1.2 ? 0.50 : 0.40;
+      const mutationProb = motifBoost > 1.2 ? 0.40 : 0.45;
       const r = Math.random();
-      if (r < 0.4) {
+      if (r < crossoverProb) {
         childGenome = crossoverGenomes(parent1.genome, parent2.genome);
-      } else if (r < 0.4 + 0.45) {
-        childGenome = mutateGenome(parent1.genome, mutRate);
+      } else if (r < crossoverProb + mutationProb) {
+        childGenome = mutateGenome(parent1.genome, adjustedMutRate);
       } else {
         childGenome = randomGenome();
       }
@@ -952,6 +1208,10 @@ export function discoverNovelSynthesisPaths(
   if (population[0].fitnessScore > bestEverFitness) {
     bestEverRoute = population[0];
     bestEverFitness = population[0].fitnessScore;
+  }
+
+  for (const candidate of population.slice(0, 5)) {
+    updateEliteArchive(candidate);
   }
 
   const topRoutes = population

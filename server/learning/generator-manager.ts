@@ -6,6 +6,12 @@ interface GeneratorStats {
   noveltyScore: number;
   currentWeight: number;
   totalTcSum: number;
+  dftSuccesses: number;
+  dftFailures: number;
+  dftBestTc: number;
+  dftAvgTc: number;
+  dftTotalTc: number;
+  discoveryRate: number;
 }
 
 interface GeneratorEntry {
@@ -47,21 +53,31 @@ let rebalanceCount = 0;
 let cyclesSinceRebalance = 0;
 const REBALANCE_INTERVAL = 3;
 
+function defaultStats(weight: number): GeneratorStats {
+  return {
+    candidatesGenerated: 0,
+    candidatesPassed: 0,
+    bestTc: 0,
+    avgTc: 0,
+    noveltyScore: 0,
+    currentWeight: weight,
+    totalTcSum: 0,
+    dftSuccesses: 0,
+    dftFailures: 0,
+    dftBestTc: 0,
+    dftAvgTc: 0,
+    dftTotalTc: 0,
+    discoveryRate: 0,
+  };
+}
+
 function initializeGenerators() {
   if (generators.size > 0) return;
   for (const [name, weight] of Object.entries(DEFAULT_ALLOCATIONS)) {
     generators.set(name, {
       name,
       defaultWeight: weight,
-      stats: {
-        candidatesGenerated: 0,
-        candidatesPassed: 0,
-        bestTc: 0,
-        avgTc: 0,
-        noveltyScore: 0,
-        currentWeight: weight,
-        totalTcSum: 0,
-      },
+      stats: defaultStats(weight),
     });
   }
 }
@@ -72,15 +88,7 @@ export function registerGenerator(name: string, weight: number) {
     generators.set(name, {
       name,
       defaultWeight: weight,
-      stats: {
-        candidatesGenerated: 0,
-        candidatesPassed: 0,
-        bestTc: 0,
-        avgTc: 0,
-        noveltyScore: 0,
-        currentWeight: weight,
-        totalTcSum: 0,
-      },
+      stats: defaultStats(weight),
     });
   }
 }
@@ -166,6 +174,67 @@ export function recordGeneratorOutcome(
   entry.stats.noveltyScore = entry.stats.noveltyScore * (1 - alpha) + novelty * alpha;
 }
 
+export function recordDFTOutcome(
+  name: string,
+  success: boolean,
+  tc: number
+): void {
+  initializeGenerators();
+  const entry = generators.get(name);
+  if (!entry) return;
+
+  if (success) {
+    entry.stats.dftSuccesses++;
+    if (tc > entry.stats.dftBestTc) {
+      entry.stats.dftBestTc = tc;
+    }
+    entry.stats.dftTotalTc += tc;
+  } else {
+    entry.stats.dftFailures++;
+  }
+
+  const totalDft = entry.stats.dftSuccesses + entry.stats.dftFailures;
+  entry.stats.dftAvgTc = totalDft > 0 ? entry.stats.dftTotalTc / totalDft : 0;
+  entry.stats.discoveryRate = totalDft > 0 ? entry.stats.dftSuccesses / totalDft : 0;
+}
+
+export function getGeneratorCompetitionStats(): {
+  generators: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[];
+  totalDFTSuccesses: number;
+  totalDFTFailures: number;
+  rebalanceCount: number;
+} {
+  initializeGenerators();
+  let totalSuccess = 0;
+  let totalFailure = 0;
+  const genList: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[] = [];
+
+  generators.forEach((entry) => {
+    totalSuccess += entry.stats.dftSuccesses;
+    totalFailure += entry.stats.dftFailures;
+    genList.push({
+      name: entry.name,
+      weight: Math.round(entry.stats.currentWeight * 1000) / 1000,
+      discoveryRate: Math.round(entry.stats.discoveryRate * 1000) / 1000,
+      dftSuccesses: entry.stats.dftSuccesses,
+      dftFailures: entry.stats.dftFailures,
+      dftBestTc: Math.round(entry.stats.dftBestTc * 10) / 10,
+      pipelinePassRate: entry.stats.candidatesGenerated > 0
+        ? Math.round((entry.stats.candidatesPassed / entry.stats.candidatesGenerated) * 1000) / 1000
+        : 0,
+    });
+  });
+
+  genList.sort((a, b) => b.discoveryRate - a.discoveryRate);
+
+  return {
+    generators: genList,
+    totalDFTSuccesses: totalSuccess,
+    totalDFTFailures: totalFailure,
+    rebalanceCount,
+  };
+}
+
 export function applyTheoryBias(boosts: Record<string, number>) {
   initializeGenerators();
 
@@ -218,8 +287,13 @@ export function rebalanceWeights() {
     const passRate = s.candidatesPassed / s.candidatesGenerated;
     const tcNorm = Math.min(1, s.bestTc / 200);
     const noveltyNorm = Math.min(1, s.noveltyScore);
+    const dftDiscovery = s.discoveryRate;
+    const dftTcNorm = Math.min(1, s.dftBestTc / 200);
+    const hasDFTData = (s.dftSuccesses + s.dftFailures) > 0;
 
-    yieldScores[name] = passRate * 0.4 + tcNorm * 0.4 + noveltyNorm * 0.2;
+    const pipelineScore = passRate * 0.3 + tcNorm * 0.3 + noveltyNorm * 0.1;
+    const dftScore = hasDFTData ? (dftDiscovery * 0.2 + dftTcNorm * 0.1) : 0;
+    yieldScores[name] = pipelineScore + dftScore;
   });
 
   if (!hasActivity) return;
