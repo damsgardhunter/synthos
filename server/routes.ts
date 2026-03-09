@@ -700,8 +700,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           const loopStats = await getAutonomousLoopStats();
           return {
             autonomousLoopStats: loopStats,
-            lastCycleCandidates: loopStats.lastCycleCandidates ?? [],
-            lastCycleFamilyCounts: loopStats.lastCycleFamilyCounts ?? {},
           };
         })()),
         designRepresentations: getDesignRepresentationStats(),

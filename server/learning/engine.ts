@@ -4377,8 +4377,8 @@ export async function getAutonomousLoopStats() {
         ? Math.round(pipelineStageMetrics.phononRejects / autonomousTotalScreened * 1000) / 1000 : 0,
       xtbSuccessRate: pipelineStageMetrics.xtbAttempts > 0
         ? Math.round(pipelineStageMetrics.xtbSuccesses / pipelineStageMetrics.xtbAttempts * 1000) / 1000 : 0,
-      overallPassRate: autonomousTotalScreened > 0
-        ? Math.round(pipelineStageMetrics.totalPassed / autonomousTotalScreened * 1000) / 1000 : 0,
+      overallPassRate: reconciledScreened > 0
+        ? Math.round(pipelineStageMetrics.totalPassed / reconciledScreened * 1000) / 1000 : 0,
     },
     lastCycleCandidates,
     lastCycleFamilyCounts,
@@ -5495,17 +5495,23 @@ export async function startEngine() {
   } catch (e) { console.error("[Engine] Stats restore from DB failed:", e); }
 
   try {
-    const existingCandidates = await storage.getSuperconductorCandidates(200);
+    const allCandidates = await storage.getSuperconductorCandidates(5000);
+    let preSeeded = 0;
     let featureBackfilled = 0;
-    for (const c of existingCandidates) {
-      if (featureBackfilled >= 100) break;
+    for (const c of allCandidates) {
+      const norm = normalizeFormula(c.formula);
+      if (!alreadyScreenedFormulas.has(norm)) {
+        alreadyScreenedFormulas.add(norm);
+        preSeeded++;
+      }
+      if (featureBackfilled >= 100) continue;
       try {
         buildAndStoreFeatureRecord(c.formula, c.predictedTc ?? null, null, (c.ensembleScore ?? 0.3));
         featureBackfilled++;
       } catch (e) { console.error(`[Engine] Feature backfill failed for ${c.formula}:`, e); }
     }
-    if (featureBackfilled > 0) {
-      emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()})`, dataSource: "Internal" });
+    if (featureBackfilled > 0 || preSeeded > 0) {
+      emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()}). Pre-seeded ${preSeeded} formulas into screened cache (total: ${alreadyScreenedFormulas.size}).`, dataSource: "Internal" });
     }
   } catch (e) { console.error("[Engine] Feature DB backfill outer error:", e); }
 

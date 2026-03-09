@@ -660,8 +660,8 @@ export function getSimulatorStats() {
     totalSimulations: simulatorStats.totalSimulations,
     totalMutations: simulatorStats.totalMutations,
     totalPathsOptimized: simulatorStats.totalPathsOptimized,
-    avgTcImprovement: simulatorStats.totalSimulations > 0
-      ? simulatorStats.totalTcImprovement / totalSims
+    avgTcImprovement: simulatorStats.totalPathsOptimized > 0
+      ? simulatorStats.totalTcImprovement / simulatorStats.totalPathsOptimized
       : 0,
     bestTcImprovement: simulatorStats.bestTcImprovement,
     bestFormula: simulatorStats.bestFormula,

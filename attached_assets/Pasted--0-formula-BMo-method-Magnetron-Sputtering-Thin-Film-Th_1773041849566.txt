@@ -1,0 +1,244 @@
+:0},{"formula":"BMo","method":"Magnetron Sputtering (Thin Film)"
+
+This is not valid JSON.
+
+Likely problems
+
+Missing opening bracket or key
+
+Possibly truncated array element
+
+It probably should be something like:
+
+[{"formula":"BMo","method":"Magnetron Sputtering (Thin Film)","feasibility":0.5,"tc":0}]
+
+or
+
+{"experiments":[{"formula":"BMo","method":"Magnetron Sputtering (Thin Film)"}]}
+
+⚠️ If this is produced by JSON.stringify() then something is concatenating fragments incorrectly.
+
+2. Duplicate Top-Level Fields
+
+These appear twice:
+
+lastCycleCandidates
+lastCycleFamilyCounts
+
+This occurs in two different places.
+
+Why it's a bug
+
+In JSON objects, duplicate keys overwrite previous ones in most parsers.
+
+Example:
+
+{
+ "lastCycleCandidates": [...],
+ ...
+ "lastCycleCandidates": [...]
+}
+
+The first dataset will be silently lost.
+
+Fix
+
+Ensure the generator only writes these fields once.
+
+Common cause in code:
+
+output.lastCycleCandidates = ...
+...
+output.lastCycleCandidates = ...
+
+or merging objects incorrectly:
+
+{...pipelineMetrics, ...cycleMetrics}
+3. Inconsistent Pipeline Metrics
+
+These numbers conflict:
+
+totalPassed: 2
+prototypeSuccesses: 0
+overallPassRate: 0
+
+If 2 candidates passed, pass rate cannot be 0.
+
+Likely bug:
+
+overallPassRate = totalPassed / prototypeSuccesses
+
+instead of
+
+overallPassRate = totalPassed / totalCandidates
+
+or division by a wrong variable.
+
+4. QE-DFT Counters Are Inconsistent
+queued: 1
+running: 1
+completed: 1
+failed: 450
+totalProcessed: 451
+totalSucceeded: 1
+totalFailed: 450
+
+But:
+
+queued + running + completed + failed = 453
+
+Yet:
+
+totalProcessed = 451
+
+So two jobs are double counted or stale.
+
+Given this error message appears:
+
+"error":"Stale job from previous server session"
+
+Likely causes:
+
+Job queue not reset on restart
+
+Persistent state not cleaned
+
+Double counting retries
+
+5. Geometry Validation Bug
+
+Repeated error:
+
+Geometry rejected: Atoms Li(1) and H(5) too close: 0.00 A
+
+A 0.00 Å distance is physically impossible unless:
+
+atom coordinates were identical
+
+geometry generator produced duplicate coordinates
+
+floating point rounding collapsed them
+
+Possible code issue:
+
+pos = lattice_position * 0
+
+or copying coordinates incorrectly.
+
+You should add a pre-validation step:
+
+if distance < 0.5 Å → regenerate structure
+6. Grid Size Mismatch
+
+You report:
+
+parameterRangesExplored count: 74
+synthesisParameterSpace totalGridPoints: 150
+
+But:
+
+synthesisSimulator totalSimulations: 572
+
+This suggests simulations are not mapping cleanly to grid points.
+
+Possible causes:
+
+mutation runs counted as simulations
+
+repeated exploration of same grid point
+
+concurrency race condition
+
+7. Physics Metrics Possibly Mis-Scaled
+
+Example:
+
+bestTcImprovement: 87.68605417893588
+avgTcImprovement: 0.29408920938049327
+
+This difference is extremely large.
+
+Either:
+
+improvement measured in K vs relative fraction
+
+or normalization bug.
+
+Check:
+
+deltaTc = (newTc - oldTc) / oldTc
+
+vs
+
+deltaTc = newTc - oldTc
+8. Feature Correlation Values Look Suspicious
+Cooling Rate correlation: 0.728
+Anneal Time: 0.605
+Thermal Cycles: 0.519
+
+Given only 74 records, correlations this high across many unrelated parameters might indicate:
+
+data leakage
+
+using predicted Tc instead of measured Tc
+
+mixing simulation outputs and training features
+
+9. Possible Memory Growth Issue
+
+You log:
+
+crossEngineHub totalInsightsRecorded: 233
+featureLibrarySize: 71
+
+But:
+
+theoryDiscovery totalRuns: 1
+
+Meaning insight accumulation is occurring without theory discovery updating.
+
+That suggests:
+
+insights.push(...)
+
+without pruning or deduplication.
+
+10. Strange Value Types
+
+Some timestamps are empty objects:
+
+"createdAt": {}
+
+Should be:
+
+"createdAt": 1773040116643
+
+or ISO:
+
+"2026-03-09T18:11:56Z"
+
+This usually happens when:
+
+JSON.stringify(new Date())
+
+was replaced with an object.
+
+11. Candidate Rejection Explosion
+
+You show:
+
+duplicateRejects: 71
+totalRecords: 77
+
+Meaning nearly all candidates are duplicates.
+
+Likely bug in canonicalization:
+
+Example:
+
+Nb3B
+NbB3
+
+may be incorrectly treated as same or reversed.
+
+Ensure formula canonicalization sorts elements but preserves stoichiometry.

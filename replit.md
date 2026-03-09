@@ -281,9 +281,16 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - physics-engine.ts: `computeScreenedMuStar` class-specific clamp — heavy-fermion μ* up to 0.28, iron-pnictide 0.25, cuprate 0.22. Heavy-fermion default raised 0.15→0.18.
   - physics-engine.ts: `invertMcMillanLambda` ωlog/Θ_D ratio changed 0.65→0.60 (better cross-material average).
   - crystal-prototypes.ts: 4 new prototypes — Borocarbide-1221 (I4/mmm, 1:2:2:1, YNi₂B₂C family), Half-Heusler-XYZ (F-43m, 1:1:1, topological SCs), Kagome-AV3Sb5 (P6/mmm, 1:3:5, CDW+SC kagome metals), FilledSkutterudite-RT4X12 (Im-3, 1:4:12, unconventional HF).
-- **Bug Fix Session**:
+- **Bug Fix Sessions**:
   - deliberative-evaluator.ts: Fixed `parseFormulaElements` misuse — `.keys()` on `string[]` returns numeric indices, replaced with `new Set(parseFormulaElements(...))` at two novelty scoring call sites. Second risk assessment call site switched to `parseFormulaCounts()` (returns `Map<string,number>`) for `.has()`/`.get()` access. Previously `elements.get is not a function` crash.
   - engine.ts: QC engine field mismatch fixed — `qcAnalysis.primaryQCP` → `qcAnalysis.qcpType`, `qcAnalysis.domeProfile.domeCenter` → `qcAnalysis.dome.domeAmplitude` to match actual `QuantumCriticalAnalysis` interface.
+  - routes.ts: Removed duplicate `lastCycleCandidates`/`lastCycleFamilyCounts` top-level fields from `/api/engine/memory` — already nested inside `autonomousLoopStats`.
+  - engine.ts: `overallPassRate` now uses `reconciledScreened` (max of in-memory vs DB) as denominator for consistency.
+  - dft-job-queue.ts: DFT counters now use DB as single source of truth (no max(inMemory, db) drift). Timestamps converted to ISO strings; falsy fields coerced to null.
+  - qe-dft-engine.ts: Hydride cage H-placement in main loop now checks pairwise distance ≥ 0.5 Å against all existing atoms (prevents 0.00 Å collisions like AlLiH8).
+  - synthesis-simulator.ts: `avgTcImprovement` divides by `totalPathsOptimized` (not `totalSimulations`) to avoid dilution by zero-improvement runs.
+  - cross-engine-hub.ts: Stats now include `currentActiveInsights` and `totalHistoryEntries` alongside running `totalInsightsRecorded`.
+  - engine.ts: Startup pre-seeds `alreadyScreenedFormulas` with up to 5000 existing DB candidates to reduce duplicate rejection rate in autonomous loop.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

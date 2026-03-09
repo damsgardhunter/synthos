@@ -769,6 +769,8 @@ class CrossEngineHub {
     return {
       totalFormulas: this.insightStore.size,
       totalInsightsRecorded: this.totalInsightsRecorded,
+      currentActiveInsights: this.insightStore.size,
+      totalHistoryEntries: Array.from(this.insightHistory.values()).reduce((s, h) => s + h.length, 0),
       engineCoverage: {
         topology: withTopology,
         fermi: withFermi,

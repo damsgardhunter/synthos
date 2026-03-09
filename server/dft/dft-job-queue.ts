@@ -251,15 +251,15 @@ export async function getDFTQueueStats() {
   const dbStats = await storage.getDftJobStats();
   const recentJobs = await storage.getRecentDftJobs(10);
 
-  const dbCompleted = (dbStats.completed || 0) + (dbStats.failed || 0);
   const dbSucceeded = dbStats.completed || 0;
   const dbFailed = dbStats.failed || 0;
+  const dbCompleted = dbSucceeded + dbFailed;
 
   return {
     ...dbStats,
-    totalProcessed: Math.max(totalProcessed, dbCompleted),
-    totalSucceeded: Math.max(totalSucceeded, dbSucceeded),
-    totalFailed: Math.max(totalFailed, dbFailed),
+    totalProcessed: dbCompleted,
+    totalSucceeded: dbSucceeded,
+    totalFailed: dbFailed,
     isProcessing,
     currentFormula: currentJob?.formula || null,
     qeAvailable: isQEAvailable(),
@@ -272,20 +272,20 @@ export async function getDFTQueueStats() {
         status: j.status,
         jobType: j.jobType,
         priority: j.priority,
-        createdAt: j.createdAt,
-        startedAt: j.startedAt,
-        completedAt: j.completedAt,
+        createdAt: j.createdAt instanceof Date ? j.createdAt.toISOString() : (j.createdAt || null),
+        startedAt: j.startedAt instanceof Date ? j.startedAt.toISOString() : (j.startedAt || null),
+        completedAt: j.completedAt instanceof Date ? j.completedAt.toISOString() : (j.completedAt || null),
         wallTime: out?.wallTimeTotal || null,
         converged: out?.scf?.converged || false,
         totalEnergy: out?.scf?.totalEnergy || null,
-        retryCount: out?.retryCount ?? null,
-        xtbPreRelaxed: out?.xtbPreRelaxed ?? null,
-        ppValidated: out?.ppValidated ?? null,
-        rejectionReason: out?.rejectionReason ?? null,
-        failureStage: out?.failureStage ?? null,
-        prototypeUsed: out?.prototypeUsed ?? null,
-        kPoints: out?.kPoints ?? null,
-        error: j.errorMessage,
+        retryCount: out?.retryCount || null,
+        xtbPreRelaxed: out?.xtbPreRelaxed || null,
+        ppValidated: out?.ppValidated || null,
+        rejectionReason: out?.rejectionReason || null,
+        failureStage: out?.failureStage || null,
+        prototypeUsed: out?.prototypeUsed || null,
+        kPoints: out?.kPoints || null,
+        error: j.errorMessage || null,
       };
     }),
   };

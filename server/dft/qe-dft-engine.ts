@@ -1520,8 +1520,17 @@ function generateHydrideCageStructure(
         y = a * pos.y + offsetY;
         z = a * pos.z + offsetZ;
       }
-      atoms.push({ element: "H", x, y, z });
-      hPlaced++;
+      let tooClose = false;
+      for (const existing of atoms) {
+        const dx = x - existing.x;
+        const dy = y - existing.y;
+        const dz = z - existing.z;
+        if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.5) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        atoms.push({ element: "H", x, y, z });
+        hPlaced++;
+      }
     }
   }
 
