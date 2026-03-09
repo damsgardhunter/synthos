@@ -752,9 +752,11 @@ function selectRoutesForFamily(formula: string, family: string, elements: string
   return routes;
 }
 
-export function computeSynthesisPathway(formula: string): SynthesisPathwayResult {
-  const cached = pathwayCache.get(formula);
-  if (cached) return cached;
+export function computeSynthesisPathway(formula: string, analogyRoutes?: SynthesisRoute[]): SynthesisPathwayResult {
+  if (!analogyRoutes || analogyRoutes.length === 0) {
+    const cached = pathwayCache.get(formula);
+    if (cached) return cached;
+  }
 
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -762,14 +764,19 @@ export function computeSynthesisPathway(formula: string): SynthesisPathwayResult
 
   const routes = selectRoutesForFamily(formula, family, elements, counts);
 
+  if (analogyRoutes && analogyRoutes.length > 0) {
+    routes.push(...analogyRoutes);
+  }
+
   routes.sort((a, b) => b.feasibilityScore - a.feasibilityScore);
 
   const bestRoute = routes.length > 0 ? routes[0] : null;
 
   const bestMethod = bestRoute ? bestRoute.method : "unknown";
   const bestFeasibility = bestRoute ? bestRoute.feasibilityScore : 0;
+  const analogyCount = (analogyRoutes || []).length;
   const summary = bestRoute
-    ? `Best route: ${bestRoute.routeName} (feasibility ${(bestFeasibility * 100).toFixed(1)}%), ${bestRoute.steps.length} steps, max ${bestRoute.maxTemperature} C, ${bestRoute.totalDuration}`
+    ? `Best route: ${bestRoute.routeName} (feasibility ${(bestFeasibility * 100).toFixed(1)}%), ${bestRoute.steps.length} steps, max ${bestRoute.maxTemperature} C, ${bestRoute.totalDuration}${analogyCount > 0 ? ` (+${analogyCount} analogy-transferred)` : ""}`
     : `No viable synthesis route found for ${formula}`;
 
   const result: SynthesisPathwayResult = {
@@ -780,7 +787,9 @@ export function computeSynthesisPathway(formula: string): SynthesisPathwayResult
     summary,
   };
 
-  pathwayCache.set(formula, result);
+  if (!analogyRoutes || analogyRoutes.length === 0) {
+    pathwayCache.set(formula, result);
+  }
 
   totalPathwaysComputed++;
   totalRoutesGenerated += routes.length;

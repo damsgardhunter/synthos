@@ -2658,7 +2658,44 @@ async function runPhase13_SynthesisReasoning() {
         if (hasReasoningFailed) continue;
 
         const routes = await runSynthesisReasoning(emit, candidate);
-        if (routes && routes.length > 0) {
+        const allNewRoutes = routes && routes.length > 0 ? [...routes] : [];
+
+        const hasAnalogyTransfer = Array.isArray(existingPath?.routes)
+          && existingPath.routes.some((r: any) => r.source === "analogy-transfer");
+        if (!hasAnalogyTransfer) {
+          try {
+            const { proposeAnalogousRoutes } = require("../synthesis/synthesis-analogy-engine");
+            const analogyResult = await proposeAnalogousRoutes(candidate.formula);
+            if (analogyResult.routes.length > 0) {
+              const analogyRoutes = analogyResult.routes.slice(0, 3).map((r: any) => ({
+                ...r,
+                source: "analogy-transfer",
+              }));
+              allNewRoutes.push(...analogyRoutes);
+              const analogueDetail = analogyResult.analogues.slice(0, 2)
+                .map((a: any) => `${a.sourceFormula}(${(a.similarity * 100).toFixed(0)}%)`)
+                .join(", ");
+              const rxnDetail = analogyResult.reactionsApplied.slice(0, 2)
+                .map((r: any) => r.reactionType)
+                .join(", ");
+              emit("log", {
+                phase: "phase-13",
+                event: "Synthesis analogy transfer",
+                detail: `${candidate.formula}: ${analogyRoutes.length} routes from analogues [${analogueDetail}]${rxnDetail ? ` + reactions [${rxnDetail}]` : ""}`,
+                dataSource: "Synthesis Analogy Engine",
+              });
+            }
+          } catch (err: any) {
+            emit("log", {
+              phase: "phase-13",
+              event: "Analogy transfer skipped",
+              detail: `${candidate.formula}: ${err.message?.slice(0, 80)}`,
+              dataSource: "Synthesis Analogy Engine",
+            });
+          }
+        }
+
+        if (allNewRoutes.length > 0) {
           const existingRoutes = Array.isArray(existingPath?.routes) ? existingPath.routes : [];
           const taggedExisting = existingRoutes.map((r: any) => ({
             ...r,
@@ -2666,12 +2703,12 @@ async function runPhase13_SynthesisReasoning() {
           }));
           await storage.updateSuperconductorCandidate(candidate.id, {
             synthesisPath: {
-              routes: [...taggedExisting, ...routes],
+              routes: [...taggedExisting, ...allNewRoutes],
               lastUpdated: new Date().toISOString(),
             },
           });
-          proposed += routes.length;
-          totalNovelSynthesisProposed += routes.length;
+          proposed += allNewRoutes.length;
+          totalNovelSynthesisProposed += allNewRoutes.length;
         }
       } catch (err: any) {
         emit("log", {
