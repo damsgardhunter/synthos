@@ -103,7 +103,7 @@ import {
   getLatestGraph, type CausalRule,
 } from "../theory/causal-physics-discovery";
 import { crossEngineHub } from "./cross-engine-hub";
-import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, type MultiEngineInsights } from "./synthesis-discovery";
+import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedbackForGA, getGAEvolutionStats, type MultiEngineInsights } from "./synthesis-discovery";
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 
@@ -1247,6 +1247,7 @@ async function runDFTEnrichment() {
           dftSrc === "external" ? "dft" : "xtb"
         );
         incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
+        recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy });
 
         if (dftData.phononStability) {
           const ps = dftData.phononStability;

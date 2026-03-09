@@ -129,6 +129,175 @@ const discoveryStats = {
   engineUsage: {} as Record<string, number>,
 };
 
+interface CompositionFeedback {
+  goodMotifs: Map<string, { score: number; count: number }>;
+  badMotifs: Map<string, { penalty: number; count: number }>;
+  formulaOutcomes: Map<string, { tc: number; stable: boolean; formationEnergy: number }>;
+}
+
+const compositionFeedback: CompositionFeedback = {
+  goodMotifs: new Map(),
+  badMotifs: new Map(),
+  formulaOutcomes: new Map(),
+};
+
+const adaptiveMutationState = {
+  currentRate: 0.20,
+  baseRate: 0.20,
+  minRate: 0.08,
+  maxRate: 0.50,
+  generationsWithoutImprovement: 0,
+  lastBestFitness: 0,
+  stagnationThreshold: 30,
+  totalAdaptations: 0,
+};
+
+function extractMotifs(formula: string): string[] {
+  const elements = parseFormulaElements(formula);
+  const motifs: string[] = [];
+  for (const el of elements) motifs.push(el);
+  const sorted = [...elements].sort();
+  for (let i = 0; i < sorted.length; i++) {
+    for (let j = i + 1; j < sorted.length; j++) {
+      motifs.push(`${sorted[i]}-${sorted[j]}`);
+    }
+  }
+  const family = classifyFamily(formula);
+  if (family) motifs.push(`family:${family}`);
+  return motifs;
+}
+
+export function recordDFTFeedbackForGA(
+  formula: string,
+  result: { tc: number; stable: boolean; formationEnergy: number }
+): void {
+  compositionFeedback.formulaOutcomes.set(formula, result);
+  const motifs = extractMotifs(formula);
+
+  const isGood = result.tc > 20 && result.stable && result.formationEnergy < 0.5;
+  const isBad = !result.stable || result.formationEnergy > 1.0 || result.tc < 1;
+
+  for (const motif of motifs) {
+    if (isGood) {
+      const existing = compositionFeedback.goodMotifs.get(motif) || { score: 0, count: 0 };
+      const reward = Math.min(1, result.tc / 200) * (result.stable ? 1.0 : 0.3);
+      existing.score = (existing.score * existing.count + reward) / (existing.count + 1);
+      existing.count++;
+      compositionFeedback.goodMotifs.set(motif, existing);
+    }
+    if (isBad) {
+      const existing = compositionFeedback.badMotifs.get(motif) || { penalty: 0, count: 0 };
+      let penalty = 0;
+      if (result.formationEnergy > 1.0) penalty += 0.3;
+      if (result.formationEnergy > 2.0) penalty += 0.2;
+      if (!result.stable) penalty += 0.3;
+      if (result.tc < 1) penalty += 0.2;
+      existing.penalty = (existing.penalty * existing.count + penalty) / (existing.count + 1);
+      existing.count++;
+      compositionFeedback.badMotifs.set(motif, existing);
+    }
+  }
+}
+
+function getCompositionBias(formula: string): number {
+  const motifs = extractMotifs(formula);
+  let bias = 0;
+  let motifCount = 0;
+
+  for (const motif of motifs) {
+    const good = compositionFeedback.goodMotifs.get(motif);
+    if (good && good.count >= 2) {
+      bias += good.score * Math.min(1, good.count / 5);
+      motifCount++;
+    }
+    const bad = compositionFeedback.badMotifs.get(motif);
+    if (bad && bad.count >= 2) {
+      bias -= bad.penalty * Math.min(1, bad.count / 5);
+      motifCount++;
+    }
+  }
+
+  if (motifCount === 0) return 0;
+  return Math.max(-0.3, Math.min(0.3, bias / motifCount));
+}
+
+function adaptMutationRate(currentBestFitness: number): number {
+  if (currentBestFitness > adaptiveMutationState.lastBestFitness + 0.005) {
+    adaptiveMutationState.generationsWithoutImprovement = 0;
+    adaptiveMutationState.lastBestFitness = currentBestFitness;
+    adaptiveMutationState.currentRate = Math.max(
+      adaptiveMutationState.minRate,
+      adaptiveMutationState.currentRate * 0.8
+    );
+  } else {
+    adaptiveMutationState.generationsWithoutImprovement++;
+    if (adaptiveMutationState.generationsWithoutImprovement >= adaptiveMutationState.stagnationThreshold) {
+      adaptiveMutationState.currentRate = Math.min(
+        adaptiveMutationState.maxRate,
+        adaptiveMutationState.currentRate * 1.5
+      );
+      adaptiveMutationState.generationsWithoutImprovement = 0;
+      adaptiveMutationState.totalAdaptations++;
+    }
+  }
+  return adaptiveMutationState.currentRate;
+}
+
+function selectParentsByFitness(
+  population: NovelSynthesisRoute[],
+  eliteRatio: number = 0.2,
+  randomRatio: number = 0.08,
+): { parent1: NovelSynthesisRoute; parent2: NovelSynthesisRoute } {
+  const sorted = [...population].sort((a, b) => b.fitnessScore - a.fitnessScore);
+  const eliteCount = Math.max(2, Math.ceil(sorted.length * eliteRatio));
+  const randomCount = Math.max(1, Math.ceil(sorted.length * randomRatio));
+  const pool: NovelSynthesisRoute[] = sorted.slice(0, eliteCount);
+  const nonElite = sorted.slice(eliteCount);
+  for (let i = 0; i < randomCount && nonElite.length > 0; i++) {
+    const idx = Math.floor(Math.random() * nonElite.length);
+    pool.push(nonElite.splice(idx, 1)[0]);
+  }
+
+  const totalFitness = pool.reduce((s, r) => s + Math.max(0.001, r.fitnessScore), 0);
+  const pick = (): NovelSynthesisRoute => {
+    let r = Math.random() * totalFitness;
+    for (const individual of pool) {
+      r -= Math.max(0.001, individual.fitnessScore);
+      if (r <= 0) return individual;
+    }
+    return pool[pool.length - 1];
+  };
+
+  const p1 = pick();
+  let p2 = pick();
+  let attempts = 0;
+  while (p2 === p1 && attempts < 5 && pool.length > 1) {
+    p2 = pick();
+    attempts++;
+  }
+  return { parent1: p1, parent2: p2 };
+}
+
+export function getGAEvolutionStats() {
+  return {
+    mutationRate: Math.round(adaptiveMutationState.currentRate * 1000) / 1000,
+    generationsWithoutImprovement: adaptiveMutationState.generationsWithoutImprovement,
+    totalAdaptations: adaptiveMutationState.totalAdaptations,
+    stagnationThreshold: adaptiveMutationState.stagnationThreshold,
+    goodMotifCount: compositionFeedback.goodMotifs.size,
+    badMotifCount: compositionFeedback.badMotifs.size,
+    formulaOutcomeCount: compositionFeedback.formulaOutcomes.size,
+    topGoodMotifs: [...compositionFeedback.goodMotifs.entries()]
+      .sort((a, b) => b[1].score * b[1].count - a[1].score * a[1].count)
+      .slice(0, 10)
+      .map(([motif, data]) => ({ motif, score: Math.round(data.score * 1000) / 1000, count: data.count })),
+    topBadMotifs: [...compositionFeedback.badMotifs.entries()]
+      .sort((a, b) => b[1].penalty * b[1].count - a[1].penalty * a[1].count)
+      .slice(0, 10)
+      .map(([motif, data]) => ({ motif, penalty: Math.round(data.penalty * 1000) / 1000, count: data.count })),
+  };
+}
+
 function parseFormulaElements(formula: string): string[] {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
@@ -598,7 +767,9 @@ function computeFitnessScore(
   const baseFitness = surrogateWeight * surrogateFitness +
     tcWeight * tcNorm + feasWeight * feasNorm + novelWeight * novelNorm + engineWeight * engineNorm;
 
-  return Math.min(1.0, baseFitness + surrogateExplorationBonus);
+  const compositionBias = getCompositionBias(insights.formula);
+
+  return Math.max(0, Math.min(1.0, baseFitness + surrogateExplorationBonus + compositionBias));
 }
 
 let gaAdaptationCalls = 0;
@@ -752,20 +923,20 @@ export function discoverNovelSynthesisPaths(
       bestEverRoute = population[0];
     }
 
-    const eliteCount = Math.max(2, Math.ceil(populationSize * eliteRatio));
-    const elite = population.slice(0, eliteCount);
-    const newPop: NovelSynthesisRoute[] = [...elite];
+    const mutRate = adaptMutationRate(population[0].fitnessScore);
+
+    const preserveCount = Math.max(1, Math.ceil(populationSize * 0.05));
+    const newPop: NovelSynthesisRoute[] = population.slice(0, preserveCount);
 
     while (newPop.length < populationSize) {
-      const parent1 = elite[Math.floor(Math.random() * elite.length)];
-      const parent2 = elite[Math.floor(Math.random() * elite.length)];
+      const { parent1, parent2 } = selectParentsByFitness(population, 0.20, 0.08);
 
       let childGenome: SynthesisGenome;
       const r = Math.random();
       if (r < 0.4) {
         childGenome = crossoverGenomes(parent1.genome, parent2.genome);
-      } else if (r < 0.8) {
-        childGenome = mutateGenome(parent1.genome, 0.15 + 0.10 * Math.max(0, 1 - gen / generations));
+      } else if (r < 0.4 + 0.45) {
+        childGenome = mutateGenome(parent1.genome, mutRate);
       } else {
         childGenome = randomGenome();
       }

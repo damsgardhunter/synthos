@@ -120,7 +120,7 @@ import {
 import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
 import { crossEngineHub } from "./learning/cross-engine-hub";
-import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats } from "./learning/synthesis-discovery";
+import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, getGAEvolutionStats } from "./learning/synthesis-discovery";
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "./synthesis/heuristic-synthesis-generator";
 import { predictSynthesisFeasibility, getSynthesisPredictorStats } from "./synthesis/ml-synthesis-predictor";
@@ -1736,6 +1736,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getSynthesisDiscoveryStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch synthesis discovery stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-discovery/ga-evolution", generalLimiter, (_req, res) => {
+    try {
+      res.json(getGAEvolutionStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch GA evolution stats", detail: e.message?.slice(0, 200) });
     }
   });
 

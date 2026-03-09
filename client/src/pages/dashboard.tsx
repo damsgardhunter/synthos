@@ -684,6 +684,17 @@ export default function Dashboard() {
     bestFormula: string;
     engineUsage: Record<string, number>;
   }>({ queryKey: ["/api/synthesis-discovery/stats"], refetchInterval: 20000 });
+  const { data: gaEvoStats } = useQuery<{
+    mutationRate: number;
+    generationsWithoutImprovement: number;
+    totalAdaptations: number;
+    stagnationThreshold: number;
+    goodMotifCount: number;
+    badMotifCount: number;
+    formulaOutcomeCount: number;
+    topGoodMotifs: { motif: string; score: number; count: number }[];
+    topBadMotifs: { motif: string; penalty: number; count: number }[];
+  }>({ queryKey: ["/api/synthesis-discovery/ga-evolution"], refetchInterval: 30000 });
   const { data: synthPlannerStats } = useQuery<{
     totalPlans: number;
     totalRoutes: number;
@@ -1118,6 +1129,56 @@ export default function Dashboard() {
                           </Badge>
                         ))}
                       </div>
+                    </div>
+                  )}
+                  {gaEvoStats && gaEvoStats.formulaOutcomeCount > 0 && (
+                    <div className="space-y-2 pt-1 border-t border-border/30" data-testid="ga-evolution-panel">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">GA Adaptive Evolution</p>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <div className="p-1.5 bg-muted/40 rounded" data-testid="ga-mutation-rate">
+                          <p className="text-[9px] text-muted-foreground">Mutation Rate</p>
+                          <p className={`text-sm font-mono font-bold ${gaEvoStats.mutationRate > 0.35 ? "text-amber-600 dark:text-amber-400" : "text-foreground"}`}>
+                            {(gaEvoStats.mutationRate * 100).toFixed(0)}%
+                          </p>
+                        </div>
+                        <div className="p-1.5 bg-muted/40 rounded" data-testid="ga-good-motifs">
+                          <p className="text-[9px] text-muted-foreground">Good Motifs</p>
+                          <p className="text-sm font-mono font-bold text-emerald-600 dark:text-emerald-400">{gaEvoStats.goodMotifCount}</p>
+                        </div>
+                        <div className="p-1.5 bg-muted/40 rounded" data-testid="ga-bad-motifs">
+                          <p className="text-[9px] text-muted-foreground">Bad Motifs</p>
+                          <p className="text-sm font-mono font-bold text-red-600 dark:text-red-400">{gaEvoStats.badMotifCount}</p>
+                        </div>
+                      </div>
+                      {gaEvoStats.topGoodMotifs.length > 0 && (
+                        <div className="space-y-0.5">
+                          <p className="text-[9px] text-muted-foreground">Top Rewarded Motifs</p>
+                          <div className="flex flex-wrap gap-1">
+                            {gaEvoStats.topGoodMotifs.slice(0, 5).map(m => (
+                              <Badge key={m.motif} variant="secondary" className="text-[9px] font-mono border-0 bg-emerald-100/50 dark:bg-emerald-900/30" data-testid={`ga-good-${m.motif}`}>
+                                {m.motif} +{m.score.toFixed(2)}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {gaEvoStats.topBadMotifs.length > 0 && (
+                        <div className="space-y-0.5">
+                          <p className="text-[9px] text-muted-foreground">Top Penalized Motifs</p>
+                          <div className="flex flex-wrap gap-1">
+                            {gaEvoStats.topBadMotifs.slice(0, 5).map(m => (
+                              <Badge key={m.motif} variant="secondary" className="text-[9px] font-mono border-0 bg-red-100/50 dark:bg-red-900/30" data-testid={`ga-bad-${m.motif}`}>
+                                {m.motif} -{m.penalty.toFixed(2)}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {gaEvoStats.totalAdaptations > 0 && (
+                        <p className="text-[9px] text-muted-foreground" data-testid="ga-adaptations">
+                          {gaEvoStats.totalAdaptations} stagnation-triggered mutation boosts
+                        </p>
+                      )}
                     </div>
                   )}
                 </>
