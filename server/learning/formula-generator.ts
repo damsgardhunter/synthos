@@ -10,6 +10,35 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
+function repairTruncatedJSON(raw: string): { materials: GeneratedFormula[] } | null {
+  try {
+    const materialsMatch = raw.match(/"materials"\s*:\s*\[/);
+    if (!materialsMatch) return null;
+
+    const arrayStart = raw.indexOf("[", materialsMatch.index!);
+    let depth = 0;
+    let lastCompleteObj = -1;
+
+    for (let i = arrayStart; i < raw.length; i++) {
+      if (raw[i] === "{") depth++;
+      if (raw[i] === "}") {
+        depth--;
+        if (depth === 0) lastCompleteObj = i;
+      }
+    }
+
+    if (lastCompleteObj <= arrayStart) return null;
+
+    const repairedArray = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
+    const repaired = `{"materials": ${repairedArray}}`;
+    const parsed = JSON.parse(repaired);
+    if (!Array.isArray(parsed.materials) || parsed.materials.length === 0) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 const TARGET_APPLICATIONS = [
   "high-temperature superconductor",
   "ultra-hard coating material",
@@ -130,7 +159,7 @@ export async function generateNovelFormulas(
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 800,
+      max_completion_tokens: 1600,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -143,8 +172,12 @@ export async function generateNovelFormulas(
     try {
       parsed = JSON.parse(content);
     } catch (parseErr) {
-      emit("log", { phase: "phase-6", event: "Generator JSON parse error", detail: content.slice(0, 200), dataSource: "OpenAI NLP" });
-      return 0;
+      parsed = repairTruncatedJSON(content);
+      if (!parsed) {
+        emit("log", { phase: "phase-6", event: "Generator JSON parse error", detail: content.slice(0, 200), dataSource: "OpenAI NLP" });
+        return 0;
+      }
+      emit("log", { phase: "phase-6", event: "Generator JSON repaired", detail: `Recovered ${parsed.materials?.length ?? 0} materials from truncated response`, dataSource: "OpenAI NLP" });
     }
     const candidates = parsed.materials ?? [];
 
