@@ -88,7 +88,7 @@ const NODE_DIM = 32;
 const HIDDEN_DIM = 48;
 const EDGE_DIM = 24;
 const OUTPUT_DIM = 5;
-export const ENSEMBLE_SIZE = 5;
+export const ENSEMBLE_SIZE = 2;
 const MC_DROPOUT_PASSES = 5;
 const MC_DROPOUT_RATE = 0.1;
 const N_GAUSSIAN_BASIS = 20;
@@ -98,7 +98,7 @@ const GAUSSIAN_WIDTH = 0.5;
 
 let cachedEnsembleModels: GNNWeights[] | null = null;
 let modelTrainedAt = 0;
-const MODEL_STALE_MS = 30 * 60 * 1000;
+const MODEL_STALE_MS = 6 * 60 * 60 * 1000;
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
@@ -1138,7 +1138,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   }
 
   const lr = 0.001;
-  const epochs = 15;
+  const epochs = 8;
   const batchSize = Math.min(32, trainingData.length);
 
   const graphCache = new Map<string, CrystalGraph>();
@@ -1295,6 +1295,7 @@ export function getGNNModel(): GNNWeights {
 export function invalidateGNNModel(): void {
   cachedEnsembleModels = null;
   modelTrainedAt = 0;
+  gnnPredictionCache.clear();
 }
 
 export function setCachedEnsemble(models: GNNWeights[]): void {
@@ -1302,10 +1303,25 @@ export function setCachedEnsemble(models: GNNWeights[]): void {
   modelTrainedAt = Date.now();
 }
 
+const GNN_PRED_CACHE_MAX = 500;
+const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
+
 export function getGNNPrediction(formula: string, structure?: any): GNNPrediction {
   const weights = getGNNModel();
+  const currentTrainedAt = modelTrainedAt;
+  const cacheKey = formula;
+  const cached = gnnPredictionCache.get(cacheKey);
+  if (cached && cached.trainedAt === currentTrainedAt) {
+    return cached.prediction;
+  }
   const graph = buildCrystalGraph(formula, structure);
-  return GNNPredict(graph, weights);
+  const prediction = GNNPredict(graph, weights);
+  if (gnnPredictionCache.size >= GNN_PRED_CACHE_MAX) {
+    const firstKey = gnnPredictionCache.keys().next().value;
+    if (firstKey !== undefined) gnnPredictionCache.delete(firstKey);
+  }
+  gnnPredictionCache.set(cacheKey, { prediction, trainedAt: currentTrainedAt });
+  return prediction;
 }
 
 function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWeights {
@@ -1413,3 +1429,12 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string): 
 export function getPrototypeCoordinations(): Record<string, PrototypeCoordination> {
   return PROTOTYPE_COORDINATIONS;
 }
+
+setImmediate(() => {
+  try {
+    getEnsembleModels();
+    console.log(`[GNN] Pre-warmed ${ENSEMBLE_SIZE}-model ensemble at startup`);
+  } catch (e: any) {
+    console.error(`[GNN] Pre-warm failed: ${e?.message?.slice(0, 200)}`);
+  }
+});

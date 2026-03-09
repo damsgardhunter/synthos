@@ -505,16 +505,22 @@ export async function runMLPrediction(
 
     xgb.score = Math.min(1, xgb.score);
 
-    let gnnResult: GNNPrediction | null = null;
+    scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal, gnn: null as GNNPrediction | null });
+  }
+
+  scored.sort((a, b) => b.xgb.score - a.xgb.score);
+
+  const GNN_INFERENCE_LIMIT = 15;
+  for (let i = 0; i < Math.min(GNN_INFERENCE_LIMIT, scored.length); i++) {
+    const entry = scored[i];
     try {
+      const crystal = crystalData.get(entry.mat.formula);
       const crystalStructure = crystal ? {
         latticeParams: undefined,
         atomicPositions: undefined,
       } : undefined;
-      gnnResult = getGNNPrediction(mat.formula, crystalStructure);
+      entry.gnn = getGNNPrediction(entry.mat.formula, crystalStructure);
     } catch {}
-
-    scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal, gnn: gnnResult });
   }
 
   scored.sort((a, b) => {
