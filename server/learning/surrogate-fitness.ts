@@ -26,6 +26,14 @@ export interface FamilyCalibration {
   stabilityAccuracy: number;
 }
 
+export interface UncertaintyBreakdown {
+  gnnEnsembleVariance: number;
+  xgbEnsembleVariance: number;
+  combined: number;
+  explorationWeight: number;
+  explorationBonus: number;
+}
+
 export interface SurrogateFitnessResult {
   fitness: number;
   components: {
@@ -35,6 +43,7 @@ export interface SurrogateFitnessResult {
     noveltyScore: number;
     uncertaintyBonus: number;
   };
+  uncertaintyBreakdown: UncertaintyBreakdown;
   calibrationFactor: number;
   rawFitness: number;
   gnnPrediction: GNNPredictionWithUncertainty | null;
@@ -49,6 +58,8 @@ export interface FeedbackLoopStats {
   familyCalibrations: FamilyCalibration[];
   recentErrors: { formula: string; predicted: number; actual: number; error: number }[];
   fitnessWeightEvolution: { cycle: number; weights: typeof currentWeights }[];
+  explorationWeight: number;
+  explorationSchedule: { maxWeight: number; minWeight: number; decayHalfLife: number; currentWeight: number };
 }
 
 const MAX_EVAL_HISTORY = 500;
@@ -134,6 +145,30 @@ function computeSynthesisHeuristicScore(formula: string): number {
   return Math.max(0, Math.min(1, score));
 }
 
+const EXPLORATION_WEIGHT_MAX = 0.25;
+const EXPLORATION_WEIGHT_MIN = 0.03;
+const EXPLORATION_DECAY_HALF_LIFE = 100;
+
+function computeExplorationWeight(): number {
+  const nEvals = evaluationHistory.length;
+  if (nEvals < 5) return EXPLORATION_WEIGHT_MAX;
+  const decayed = EXPLORATION_WEIGHT_MAX * Math.pow(0.5, nEvals / EXPLORATION_DECAY_HALF_LIFE);
+  const recent = evaluationHistory.slice(-30);
+  const recentOverestimates = recent.filter(r => r.predictedTc > r.actualTc * 1.2).length / recent.length;
+  const recentMeanAbsErr = recent.reduce((s, r) => s + Math.abs(r.predictedTc - r.actualTc), 0) / recent.length;
+  let boost = 0;
+  if (recentMeanAbsErr > 25) boost += 0.05;
+  if (recentOverestimates > 0.6) boost += 0.04;
+  const uniqueFamilies = new Set(evaluationHistory.map(r => r.family)).size;
+  const familyCoverage = Math.min(1, uniqueFamilies / 8);
+  if (familyCoverage < 0.5) boost += 0.03;
+  return Math.max(EXPLORATION_WEIGHT_MIN, Math.min(EXPLORATION_WEIGHT_MAX, decayed + boost));
+}
+
+export function getExplorationWeight(): number {
+  return computeExplorationWeight();
+}
+
 export function computeSurrogateFitness(formula: string, crystalPrototype?: string): SurrogateFitnessResult {
   const family = classifyFamily(formula);
 
@@ -161,10 +196,13 @@ export function computeSurrogateFitness(formula: string, crystalPrototype?: stri
   const synthesisScore = computeSynthesisHeuristicScore(formula);
   const noveltyScore = computeNoveltyScore(formula);
 
-  const gnnUncertainty = gnnPred?.uncertainty ?? 0.5;
-  const xgbUncertainty = xgbPred?.normalizedUncertainty ?? 0.5;
-  const combinedUncertainty = gnnPred ? (xgbPred ? gnnUncertainty * 0.6 + xgbUncertainty * 0.4 : gnnUncertainty) : xgbUncertainty;
+  const gnnEnsembleVariance = gnnPred?.uncertainty ?? 0.5;
+  const xgbEnsembleVariance = xgbPred?.normalizedUncertainty ?? 0.5;
+  const combinedUncertainty = gnnPred ? (xgbPred ? gnnEnsembleVariance * 0.6 + xgbEnsembleVariance * 0.4 : gnnEnsembleVariance) : xgbEnsembleVariance;
+
+  const explorationWeight = computeExplorationWeight();
   const uncertaintyBonus = Math.min(1.0, combinedUncertainty * 1.5);
+  const explorationBonus = uncertaintyBonus * explorationWeight;
 
   const rawFitness =
     currentWeights.predictedTc * predictedTcNorm +
@@ -182,13 +220,23 @@ export function computeSurrogateFitness(formula: string, crystalPrototype?: stri
     currentWeights.stability * stabilityScore +
     currentWeights.synthesis * synthesisScore +
     currentWeights.novelty * noveltyScore +
-    currentWeights.uncertainty * uncertaintyBonus;
+    currentWeights.uncertainty * uncertaintyBonus +
+    explorationBonus;
 
   seenFormulas.add(formula);
+
+  const uncertaintyBreakdown: UncertaintyBreakdown = {
+    gnnEnsembleVariance,
+    xgbEnsembleVariance,
+    combined: combinedUncertainty,
+    explorationWeight,
+    explorationBonus,
+  };
 
   return {
     fitness: Math.max(0, Math.min(1, fitness)),
     components: { predictedTcNorm, stabilityScore, synthesisScore, noveltyScore, uncertaintyBonus },
+    uncertaintyBreakdown,
     calibrationFactor,
     rawFitness: Math.max(0, Math.min(1, rawFitness)),
     gnnPrediction: gnnPred,
@@ -307,6 +355,8 @@ export function getCalibrationStats(): FeedbackLoopStats {
     error: r.predictedTc - r.actualTc,
   }));
 
+  const expWeight = computeExplorationWeight();
+
   return {
     totalEvaluations: evaluationHistory.length,
     globalMeanAbsError: Math.round(globalAbsErr * 100) / 100,
@@ -314,6 +364,13 @@ export function getCalibrationStats(): FeedbackLoopStats {
     familyCalibrations,
     recentErrors,
     fitnessWeightEvolution: weightHistory.slice(-20),
+    explorationWeight: Math.round(expWeight * 1000) / 1000,
+    explorationSchedule: {
+      maxWeight: EXPLORATION_WEIGHT_MAX,
+      minWeight: EXPLORATION_WEIGHT_MIN,
+      decayHalfLife: EXPLORATION_DECAY_HALF_LIFE,
+      currentWeight: Math.round(expWeight * 1000) / 1000,
+    },
   };
 }
 

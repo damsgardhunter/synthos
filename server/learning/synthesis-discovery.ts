@@ -1,6 +1,6 @@
 import { getElementData, isTransitionMetal, isRareEarth, isActinide } from "./elemental-data";
 import { classifyFamily } from "./utils";
-import { computeSurrogateFitness, getCurrentFitnessWeights } from "./surrogate-fitness";
+import { computeSurrogateFitness, getCurrentFitnessWeights, getExplorationWeight } from "./surrogate-fitness";
 import type { TopologicalAnalysis } from "../physics/topology-engine";
 import type { FermiSurfaceResult } from "../physics/fermi-surface-engine";
 import type { PairingProfile } from "../physics/pairing-mechanisms";
@@ -540,9 +540,11 @@ function computeFitnessScore(
 ): number {
   let surrogateFitness = 0;
   let usedSurrogate = false;
+  let surrogateExplorationBonus = 0;
   try {
     const sf = computeSurrogateFitness(insights.formula);
     surrogateFitness = sf.fitness;
+    surrogateExplorationBonus = sf.uncertaintyBreakdown.explorationBonus;
     usedSurrogate = true;
   } catch {}
 
@@ -593,17 +595,22 @@ function computeFitnessScore(
 
   const engineNorm = engineCount > 0 ? Math.min(1.0, engineScore / Math.max(1, Math.sqrt(engineCount))) : 0.5;
 
-  return surrogateWeight * surrogateFitness +
+  const baseFitness = surrogateWeight * surrogateFitness +
     tcWeight * tcNorm + feasWeight * feasNorm + novelWeight * novelNorm + engineWeight * engineNorm;
+
+  return Math.min(1.0, baseFitness + surrogateExplorationBonus);
 }
 
 let gaAdaptationCalls = 0;
 export function getSynthesisGAAdaptationStats() {
   const weights = getCurrentFitnessWeights();
+  const expWeight = getExplorationWeight();
   return {
     currentSurrogateWeights: weights,
     gaAdaptationCalls,
     surrogateIntegrated: true,
+    explorationWeight: expWeight,
+    explorationDriven: expWeight > 0.05,
   };
 }
 

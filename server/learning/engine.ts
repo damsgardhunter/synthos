@@ -4817,7 +4817,7 @@ async function runLearningCycle() {
             emit("log", {
               phase: "engine",
               event: "Feedback loop calibration",
-              detail: `${calStats.totalEvaluations} evaluations, mean abs error: ${calStats.globalMeanAbsError.toFixed(1)}K, overestimate ratio: ${(calStats.globalOverestimateRatio * 100).toFixed(0)}%, families tracked: ${calStats.familyCalibrations.length}`,
+              detail: `${calStats.totalEvaluations} evaluations, mean abs error: ${calStats.globalMeanAbsError.toFixed(1)}K, overestimate ratio: ${(calStats.globalOverestimateRatio * 100).toFixed(0)}%, families tracked: ${calStats.familyCalibrations.length}, exploration weight: ${(calStats.explorationWeight * 100).toFixed(1)}%`,
               dataSource: "Surrogate Fitness",
             });
           }

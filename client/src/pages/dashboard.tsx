@@ -534,6 +534,8 @@ function FeedbackLoopCard() {
     recentErrors: { formula: string; predicted: number; actual: number; error: number }[];
     fitnessWeightEvolution: { cycle: number; weights: { predictedTc: number; stability: number; synthesis: number; novelty: number; uncertainty: number } }[];
     pillarDFTFeedback: { pillar: string; accuracy: number; total: number }[];
+    explorationWeight: number;
+    explorationSchedule: { maxWeight: number; minWeight: number; decayHalfLife: number; currentWeight: number };
   }>({ queryKey: ["/api/surrogate-fitness/stats"], refetchInterval: 30000 });
 
   if (!data || data.totalEvaluations === 0) return null;
@@ -570,6 +572,25 @@ function FeedbackLoopCard() {
             <p className="text-lg font-mono font-bold">{data.familyCalibrations.length}</p>
           </div>
         </div>
+        {data.explorationWeight != null && (
+          <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="feedback-exploration">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Exploration Weight</p>
+              <span className={`text-xs font-mono font-medium ${data.explorationWeight > 0.15 ? "text-blue-600 dark:text-blue-400" : data.explorationWeight > 0.05 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>
+                {(data.explorationWeight * 100).toFixed(1)}%
+              </span>
+            </div>
+            <div className="mt-1 h-2 bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500/80 rounded-full transition-all"
+                style={{ width: `${Math.min(100, (data.explorationWeight / data.explorationSchedule.maxWeight) * 100)}%` }}
+              />
+            </div>
+            <p className="text-[9px] text-muted-foreground mt-0.5">
+              {data.explorationWeight > 0.15 ? "High exploration: prioritizing uncertain candidates" : data.explorationWeight > 0.05 ? "Moderate exploration" : "Low exploration: exploiting known chemistry"}
+            </p>
+          </div>
+        )}
         {data.familyCalibrations.length > 0 && (
           <div className="space-y-1" data-testid="feedback-family-list">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Per-Family Calibration</p>
