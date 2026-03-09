@@ -27,6 +27,7 @@ import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScr
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, type MassiveGenerationStats } from "./candidate-generator";
 import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
+import { scanMaterialSignals } from "./material-signal-scanner";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -5136,6 +5137,10 @@ async function runLearningCycle() {
       try {
         await checkMilestones(emit, broadcast, cycleCount, cycleInsightsThisCycle);
       } catch (e) { console.error("[Engine] Milestone check failed:", e); }
+
+      try {
+        await scanMaterialSignals(emit, broadcast, cycleCount);
+      } catch (e) { console.error("[Engine] Material signal scan failed:", e); }
 
       try {
         const currentCandidates = await storage.getSuperconductorCandidates(50);

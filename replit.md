@@ -49,6 +49,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication.
 - **Cross-Engine Intelligence Hub**: Central data bus (`cross-engine-hub.ts`) collecting outputs from all 9 sub-engines (topology, fermi, pairing, pressure, defect, physics, ML, synthesis, theory) with pattern aggregation and multi-engine convergence detection.
 - **Novel Synthesis Path Discovery**: Evolutionary synthesis optimizer (`synthesis-discovery.ts`) using genetic algorithm with multi-engine fitness function to discover novel multi-step synthesis routes.
+- **Material Signal Scanner**: End-of-cycle scanner (`material-signal-scanner.ts`) that matches candidates against 9 hard-coded application signals (Next-Gen Energy, Carbon Nanomaterials, Self-Healing, Biocompatible, High-Temp Ceramics, Sustainable/Eco, Metamaterials, Quantum/Topological, Semiconductors). Each match is verified by OpenAI; verified discoveries are routed to milestones + novel predictions + activity log; rejected signals go to activity log with explanation. Cooldown prevents re-verifying rejected pairs for 20 cycles. Max 8 verifications per cycle.
 
 ### Physics Filtering Rules
 - **Phonon stability**: xTB screening uses relaxed thresholds (maxImagModes=10, lowestFreq=-1500 cm-1) to avoid premature rejection of unrelaxed structures. Extreme artifacts (< -5000 cm-1) still rejected.

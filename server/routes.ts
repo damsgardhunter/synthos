@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
+import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats } from "./dft/qe-dft-engine";
 import { getDFTQueueStats, startDFTWorkerLoop } from "./dft/dft-job-queue";
 import {
@@ -548,6 +549,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ milestones: ms, total });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch milestones" });
+    }
+  });
+
+  app.get("/api/material-signals", async (req, res) => {
+    try {
+      const signals = getSignalDefinitions().map(s => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        keywords: s.keywords,
+      }));
+      const milestones = await storage.getMilestones(500);
+      const signalMilestones = milestones.filter(m => m.type?.startsWith("signal-"));
+      res.json({ signals, discoveries: signalMilestones });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch material signals" });
     }
   });
 
