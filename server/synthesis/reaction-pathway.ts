@@ -826,7 +826,7 @@ export function triggerSynthesisPathwayForCandidate(
   predictedTc: number,
   verificationStage: number,
 ): SynthesisPathwayResult | null {
-  if (verificationStage < 4 && predictedTc < 100) {
+  if (verificationStage < 2 && predictedTc < 20) {
     return null;
   }
   return computeSynthesisPathway(formula);

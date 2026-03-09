@@ -49,6 +49,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication.
 - **Cross-Engine Intelligence Hub**: Central data bus (`cross-engine-hub.ts`) collecting outputs from all 9 sub-engines (topology, fermi, pairing, pressure, defect, physics, ML, synthesis, theory) with pattern aggregation and multi-engine convergence detection.
 - **Novel Synthesis Path Discovery**: Evolutionary synthesis optimizer (`synthesis-discovery.ts`) using genetic algorithm with multi-engine fitness function to discover novel multi-step synthesis routes.
+- **Graph-Based Synthesis Planner**: Full synthesis planning system with 4 modules:
+  - `reaction-templates.ts`: 19 typed reaction templates (DAC hydrides, arc melting, solid-state, CVD, PLD, MBE, ball milling, sol-gel, flux growth, SPS, etc.) with `matchTemplates()` scoring.
+  - `precursor-database.ts`: 150+ precursors covering 65+ elements with availability/cost scoring and `findBestPrecursors()`.
+  - `thermodynamic-feasibility.ts`: Reaction feasibility using DFT formation energies or Miedema fallback, Gibbs free energy, kinetic barriers, Arrhenius rates, metastable quench assessment.
+  - `synthesis-planner.ts`: Graph-based route planner with multi-step decomposition, composite scoring (thermo 30% + template 30% + precursor 20% + complexity 20%), `planSynthesisRoutes()` and `planAndTrack()` with stats. Persists to `synthesis_processes` and `chemical_reactions` tables.
+  - Integrated into Phase 13 (synthesis reasoning) for all eligible candidates. Synthesis gate lowered from (stage>=4 AND Tc>=100) to (stage>=2 OR Tc>=20).
+  - API: `/api/synthesis-planner/stats`, `/api/synthesis-planner/routes/:formula`, `/api/synthesis-planner/recent`.
 - **Material Signal Scanner**: End-of-cycle scanner (`material-signal-scanner.ts`) that matches candidates against 9 hard-coded application signals (Next-Gen Energy, Carbon Nanomaterials, Self-Healing, Biocompatible, High-Temp Ceramics, Sustainable/Eco, Metamaterials, Quantum/Topological, Semiconductors). Uses property-based datapoint triggers (band gap, z2Score, chernScore, stability, dimensionality, formation energy, pressure, SOC strength, DOS at Fermi level, etc.) alongside element/formula matching. Each match is verified by OpenAI with datapoint evidence; verified discoveries are routed to milestones + novel predictions + activity log; rejected signals go to activity log with explanation. Cooldown prevents re-verifying rejected pairs for 20 cycles. Max 8 verifications per cycle. Includes transparent conductor sub-trigger (wide band gap + conductive elements).
 
 ### Physics Filtering Rules

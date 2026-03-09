@@ -417,6 +417,12 @@ export default function Dashboard() {
     bestFormula: string;
     engineUsage: Record<string, number>;
   }>({ queryKey: ["/api/synthesis-discovery/stats"], refetchInterval: 20000 });
+  const { data: synthPlannerStats } = useQuery<{
+    totalPlans: number;
+    totalRoutes: number;
+    avgFeasibility: number;
+    methodBreakdown: Record<string, number>;
+  }>({ queryKey: ["/api/synthesis-planner/stats"], refetchInterval: 20000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -766,56 +772,79 @@ export default function Dashboard() {
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <GitMerge className="h-4 w-4 text-primary" />
-              Novel Synthesis Discovery
+              Synthesis Discovery
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) ? (
-              <p className="text-sm text-muted-foreground italic" data-testid="synth-disc-placeholder">
-                Novel synthesis paths will be discovered as candidates are analyzed across engines
-              </p>
-            ) : (
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-total-runs">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Discovery Runs</p>
-                    <p className="text-lg font-mono font-bold">{synthDiscStats.totalDiscoveries}</p>
-                  </div>
-                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-paths-generated">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Routes Found</p>
-                    <p className="text-lg font-mono font-bold">{synthDiscStats.totalRoutes}</p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-best-fitness">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Fitness</p>
-                    <p className="text-lg font-mono font-bold">{(synthDiscStats.bestFitness * 100).toFixed(1)}%</p>
-                  </div>
-                  <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-avg-fitness">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Fitness</p>
-                    <p className="text-lg font-mono font-bold">{(synthDiscStats.avgFitness * 100).toFixed(1)}%</p>
-                  </div>
-                </div>
-                {synthDiscStats.bestFormula && (
-                  <div className="p-2 bg-primary/5 rounded-md" data-testid="sd-best-formula">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Candidate</p>
-                    <p className="text-sm font-mono font-bold">{synthDiscStats.bestFormula}</p>
-                  </div>
-                )}
-                {synthDiscStats.engineUsage && Object.keys(synthDiscStats.engineUsage).length > 0 && (
-                  <div className="space-y-1">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Engine Contributions</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {Object.entries(synthDiscStats.engineUsage).filter(([, v]) => v > 0).map(([engine, count]) => (
-                        <Badge key={engine} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`sd-engine-${engine}`}>
-                          {engine}: {count}
-                        </Badge>
-                      ))}
+            <div className="space-y-3">
+              {synthPlannerStats && synthPlannerStats.totalPlans > 0 && (
+                <>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sp-total-plans">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Plans</p>
+                      <p className="text-lg font-mono font-bold">{synthPlannerStats.totalPlans}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sp-total-routes">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Routes</p>
+                      <p className="text-lg font-mono font-bold">{synthPlannerStats.totalRoutes}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sp-avg-feasibility">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Feasibility</p>
+                      <p className="text-lg font-mono font-bold">{(synthPlannerStats.avgFeasibility * 100).toFixed(1)}%</p>
                     </div>
                   </div>
-                )}
-              </div>
-            )}
+                  {Object.keys(synthPlannerStats.methodBreakdown).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Methods Used</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(synthPlannerStats.methodBreakdown).sort(([, a], [, b]) => (b as number) - (a as number)).map(([method, count]) => (
+                          <Badge key={method} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`sp-method-${method}`}>
+                            {method}: {count as number}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {synthDiscStats && synthDiscStats.totalDiscoveries > 0 && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-total-runs">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Discovery Runs</p>
+                      <p className="text-lg font-mono font-bold">{synthDiscStats.totalDiscoveries}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sd-best-fitness">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Fitness</p>
+                      <p className="text-lg font-mono font-bold">{(synthDiscStats.bestFitness * 100).toFixed(1)}%</p>
+                    </div>
+                  </div>
+                  {synthDiscStats.bestFormula && (
+                    <div className="p-2 bg-primary/5 rounded-md" data-testid="sd-best-formula">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Candidate</p>
+                      <p className="text-sm font-mono font-bold">{synthDiscStats.bestFormula}</p>
+                    </div>
+                  )}
+                  {synthDiscStats.engineUsage && Object.keys(synthDiscStats.engineUsage).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Engine Contributions</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(synthDiscStats.engineUsage).filter(([, v]) => v > 0).map(([engine, count]) => (
+                          <Badge key={engine} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`sd-engine-${engine}`}>
+                            {engine}: {count}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) && (!synthPlannerStats || synthPlannerStats.totalPlans === 0) && (
+                <p className="text-sm text-muted-foreground italic" data-testid="synth-disc-placeholder">
+                  Synthesis routes will be planned as candidates progress through screening
+                </p>
+              )}
+            </div>
           </CardContent>
         </Card>
       </div>

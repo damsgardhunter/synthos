@@ -115,6 +115,7 @@ import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/sy
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
 import { crossEngineHub } from "./learning/cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats } from "./learning/synthesis-discovery";
+import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "./synthesis/crystal-growth-simulator";
 import { generateExperimentPlan, getExperimentPlannerStats, type ExperimentCandidate } from "./experiment-planner";
@@ -1752,6 +1753,37 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute synthesis discovery", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-planner/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getSynthesisPlannerStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch synthesis planner stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-planner/routes/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = planSynthesisRoutes(formula, { maxRoutes: 8 });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to plan synthesis routes", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-planner/recent", generalLimiter, async (_req, res) => {
+    try {
+      const processes = await storage.getSynthesisProcesses(20);
+      const recent = processes
+        .filter((p: any) => p.discoveredAt)
+        .sort((a: any, b: any) => new Date(b.discoveredAt).getTime() - new Date(a.discoveredAt).getTime())
+        .slice(0, 10);
+      res.json(recent);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch recent synthesis routes", detail: e.message?.slice(0, 200) });
     }
   });
 

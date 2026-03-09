@@ -1,0 +1,128 @@
+Use open reaction datasets (free)
+
+Several public datasets contain millions of reactions that can be used to train or derive synthesis rules.
+
+Major free datasets
+Dataset	Size	What it contains
+USPTO Reaction Dataset	~1M reactions	reactions extracted from patents
+Open Reaction Database	curated	reaction conditions + yields
+Rhea Reaction Database	biochemical	less useful for materials but structured
+
+You can use them to train:
+
+reaction feasibility models
+
+reaction template libraries
+
+precursor prediction
+
+2️⃣ Use open materials databases for solid-state synthesis
+
+For crystalline materials, these datasets are even more useful.
+
+Important free sources
+Database	What you get
+Materials Project	crystal structures + formation energies
+Open Quantum Materials Database	DFT computed materials
+AFLOW	large crystal structure datasets
+
+These allow you to infer reaction pathways between materials.
+
+Example:
+
+Y + Hg + H2 → YHgH6
+
+can be inferred if:
+
+E(YHgH6) < E(Y) + E(Hg) + E(H2)
+3️⃣ Reaction template library (very effective)
+
+Instead of using millions of reactions directly, you create templates.
+
+Example templates for materials:
+
+Hydride formation
+Metal + H2 → Metal hydride
+Alloy formation
+A + B → AB
+Oxide synthesis
+Metal + O2 → Metal oxide
+Solid-state diffusion
+A + B + C → ABC
+
+Your generator can check whether a candidate fits one of these templates.
+
+Example:
+
+candidate: MgB3
+
+Possible synthesis:
+
+Mg + 3B → MgB3
+4️⃣ Reaction scoring without expensive data
+
+You can compute a synthesis feasibility score using physics.
+
+Example metrics:
+
+Thermodynamic feasibility
+ΔE = E(products) - E(reactants)
+
+If:
+
+ΔE < 0
+
+reaction is likely feasible.
+
+Precursor availability
+
+Check if precursors exist in databases.
+
+Example:
+
+Y
+Hg
+H2
+
+are all easily available.
+
+Score increases.
+
+Structural similarity
+
+Use structure similarity to known materials.
+
+Libraries like:
+
+pymatgen
+
+matminer
+
+can compute this.
+
+5️⃣ Graph-based synthesis discovery (powerful and free)
+
+Instead of SMILES, represent materials as graphs.
+
+Nodes:
+
+elements
+
+Edges:
+
+bonds / coordination
+
+Then perform reaction graph search.
+
+Example:
+
+Y + Hg + H2
+↓
+YHgH6
+
+Graph algorithms:
+
+A* search
+Monte Carlo Tree Search
+
+These are used in modern synthesis planners.

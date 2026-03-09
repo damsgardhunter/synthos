@@ -103,6 +103,7 @@ import {
 } from "../theory/causal-physics-discovery";
 import { crossEngineHub } from "./cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, type MultiEngineInsights } from "./synthesis-discovery";
+import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -2753,6 +2754,78 @@ async function runPhase13_SynthesisReasoning() {
               detail: `${candidate.formula}: ${err.message?.slice(0, 80)}`,
               dataSource: "Synthesis Analogy Engine",
             });
+          }
+        }
+
+        const hasPlannedRoutes = Array.isArray(existingPath?.routes)
+          && existingPath.routes.some((r: any) => r.source === "synthesis-planner");
+        if (!hasPlannedRoutes) {
+          try {
+            const formationEnergy = typeof candidate.formationEnergy === "number" ? candidate.formationEnergy : undefined;
+            const planResult = planAndTrack(candidate.formula, { formationEnergy: formationEnergy ?? null, maxRoutes: 5 });
+            const plannedRoutes = planResult.routes;
+            if (plannedRoutes.length > 0) {
+              const plannerRoutes = plannedRoutes.slice(0, 3).map((r: any) => ({
+                routeId: r.routeId,
+                routeName: r.routeName,
+                method: r.method,
+                feasibilityScore: r.feasibilityScore,
+                precursors: r.precursors,
+                steps: (r.steps ?? []).map((s: any) => `${s.reactionType}: ${s.reactants?.join("+")} at ${s.temperature ?? 0}K, ${s.pressure ?? 0} GPa`),
+                stepCount: r.steps?.length ?? 0,
+                maxTemperature: r.maxTemperature,
+                maxPressure: r.maxPressure,
+                difficulty: r.difficulty,
+                estimatedYield: r.estimatedYield,
+                totalDuration: r.totalDuration,
+                source: "synthesis-planner",
+              }));
+              allNewRoutes.push(...plannerRoutes);
+              const bestPlanned = plannedRoutes[0];
+              emit("log", {
+                phase: "phase-13",
+                event: "Synthesis route planned",
+                detail: `${candidate.formula}: ${plannedRoutes.length} routes via planner, best=${bestPlanned.routeName} (feasibility=${(bestPlanned.feasibilityScore * 100).toFixed(1)}%, method=${bestPlanned.method})`,
+                dataSource: "Synthesis Planner",
+              });
+              try {
+                await storage.insertSynthesisProcess({
+                  id: `sp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+                  materialId: candidate.id,
+                  materialName: candidate.formula,
+                  formula: candidate.formula,
+                  method: bestPlanned.method,
+                  conditions: { temperature: bestPlanned.maxTemperature, pressure: bestPlanned.maxPressure, atmosphere: bestPlanned.steps[0]?.atmosphere ?? "argon" },
+                  steps: bestPlanned.steps.map((s: any) => `Step ${s.stepNumber}: ${s.reactionType} at ${s.temperature ?? 0}K, ${s.pressure ?? 0} GPa — ${s.notes ?? ""}`),
+                  precursors: bestPlanned.precursors,
+                  equipment: bestPlanned.equipmentList,
+                  difficulty: bestPlanned.difficulty,
+                  timeEstimate: bestPlanned.totalDuration,
+                  safetyNotes: Array.isArray(bestPlanned.safetyNotes) ? bestPlanned.safetyNotes.join("; ") : (bestPlanned.safetyNotes ?? ""),
+                  yieldPercent: Math.round((bestPlanned.feasibilityScore ?? 0.5) * 80),
+                });
+              } catch (_) {}
+              for (const route of plannedRoutes.slice(0, 2)) {
+                try {
+                  const equation = `${route.precursors.join(" + ")} → ${candidate.formula}`;
+                  await storage.insertChemicalReaction({
+                    id: `rxn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+                    name: `${route.method} synthesis of ${candidate.formula}`,
+                    equation,
+                    reactionType: route.method,
+                    reactants: route.precursors.map((p: string) => ({ formula: p, role: "precursor" })),
+                    products: [{ formula: candidate.formula, role: "product" }],
+                    conditions: { temperature: route.maxTemperature, pressure: route.maxPressure },
+                    energetics: {},
+                    mechanism: route.method,
+                    relevanceToSuperconductor: Math.min(1, (candidate.predictedTc ?? 0) / 300),
+                    source: "synthesis-planner",
+                  });
+                } catch (_) {}
+              }
+            }
+          } catch (err: any) {
+            console.error(`[Engine] Synthesis planner failed for ${candidate.formula}:`, err.message?.slice(0, 100));
           }
         }
 

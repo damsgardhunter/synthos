@@ -500,14 +500,25 @@ const CONFIDENCE_COLORS: Record<string, string> = {
 
 function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandidate }) {
   const synthPath = candidate.synthesisPath as { routes?: any[]; lastUpdated?: string } | null;
-  const routes: NovelSynthesisRoute[] = (synthPath?.routes ?? []).filter(
+  const allRoutes = synthPath?.routes ?? [];
+  const physicsRoutes: NovelSynthesisRoute[] = allRoutes.filter(
     (r: any) => r.source === "physics-reasoned" && r.steps
   );
-  const literatureRoutes = (synthPath?.routes ?? []).filter(
-    (r: any) => r.source !== "physics-reasoned"
+  const plannerRoutes = allRoutes.filter(
+    (r: any) => r.source === "synthesis-planner"
+  );
+  const analogyRoutes = allRoutes.filter(
+    (r: any) => r.source === "analogy-transfer"
+  );
+  const literatureRoutes = allRoutes.filter(
+    (r: any) => !["physics-reasoned", "synthesis-planner", "analogy-transfer", "reaction-pathway-engine"].includes(r.source)
+  );
+  const pathwayRoutes = allRoutes.filter(
+    (r: any) => r.source === "reaction-pathway-engine"
   );
 
-  if (routes.length === 0 && literatureRoutes.length === 0) return null;
+  const totalRoutes = allRoutes.length;
+  if (totalRoutes === 0) return null;
 
   return (
     <Card data-testid="novel-synthesis-routes" className="lg:col-span-2">
@@ -515,7 +526,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg flex items-center gap-2">
             <Zap className="h-5 w-5" />
-            Synthesis Routes ({routes.length + literatureRoutes.length})
+            Synthesis Routes ({totalRoutes})
           </CardTitle>
           {synthPath?.lastUpdated && (
             <span className="text-[10px] text-muted-foreground">
@@ -525,33 +536,88 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {routes.length > 0 && (
+        {plannerRoutes.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300 border-0 text-[10px]" data-testid="badge-planner">
+                Planned Routes
+              </Badge>
+              <span className="text-xs text-muted-foreground">{plannerRoutes.length} route(s) from synthesis planner</span>
+            </div>
+            {plannerRoutes.map((route: any, i: number) => (
+              <div key={`planner-${i}`} className="p-3 bg-blue-50/50 dark:bg-blue-950/20 rounded-md space-y-2 border border-blue-200/50 dark:border-blue-800/30" data-testid={`synthesis-planner-${i}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-bold">{route.routeName || route.method || "Planned route"}</p>
+                  {typeof route.feasibilityScore === "number" && (
+                    <Badge variant="outline" className="text-[10px] font-mono shrink-0" data-testid={`planner-feas-${i}`}>
+                      {(route.feasibilityScore * 100).toFixed(1)}% feasible
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                  {route.method && <span>Method: {route.method}</span>}
+                  {route.difficulty && <span>Difficulty: {route.difficulty}</span>}
+                  {route.maxTemperature != null && <span>Max T: {route.maxTemperature}K</span>}
+                  {route.maxPressure != null && <span>Max P: {route.maxPressure} GPa</span>}
+                </div>
+                {route.precursors && Array.isArray(route.precursors) && route.precursors.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {route.precursors.map((p: string, j: number) => (
+                      <Badge key={j} variant="secondary" className="text-[10px] font-mono border-0">{p}</Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {physicsRoutes.length > 0 && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <Badge className="bg-primary/10 text-primary border border-primary/30 text-[10px]" data-testid="badge-physics-reasoned">
                 Physics-Reasoned
               </Badge>
-              <span className="text-xs text-muted-foreground">{routes.length} route(s) derived from first-principles analysis</span>
+              <span className="text-xs text-muted-foreground">{physicsRoutes.length} route(s) derived from first-principles analysis</span>
             </div>
-            {routes.map((route, i) => (
+            {physicsRoutes.map((route, i) => (
               <NovelRouteCard key={`novel-${i}`} route={route} index={i} />
             ))}
           </div>
         )}
-        {literatureRoutes.length > 0 && (
+        {analogyRoutes.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Badge className="bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300 border-0 text-[10px]" data-testid="badge-analogy">
+                Analogy Transfer
+              </Badge>
+              <span className="text-xs text-muted-foreground">{analogyRoutes.length} route(s) from similar materials</span>
+            </div>
+            {analogyRoutes.map((route: any, i: number) => (
+              <div key={`analogy-${i}`} className="p-3 bg-purple-50/30 dark:bg-purple-950/20 rounded-md space-y-1" data-testid={`synthesis-analogy-${i}`}>
+                <p className="text-sm font-bold">{route.method || route.routeName || "Analogy route"}</p>
+                {route.steps && Array.isArray(route.steps) && (
+                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
+                    {route.steps.slice(0, 5).map((s: string, j: number) => <li key={j}>{typeof s === "string" ? s : JSON.stringify(s)}</li>)}
+                  </ol>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {(pathwayRoutes.length > 0 || literatureRoutes.length > 0) && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="text-[10px]" data-testid="badge-literature-based">
-                Literature-Based
+                {pathwayRoutes.length > 0 ? "Pathway / Literature" : "Literature-Based"}
               </Badge>
-              <span className="text-xs text-muted-foreground">{literatureRoutes.length} route(s) from known literature</span>
+              <span className="text-xs text-muted-foreground">{pathwayRoutes.length + literatureRoutes.length} route(s)</span>
             </div>
-            {literatureRoutes.map((route: any, i: number) => (
+            {[...pathwayRoutes, ...literatureRoutes].map((route: any, i: number) => (
               <div key={`lit-${i}`} className="p-3 bg-muted/30 rounded-md space-y-1" data-testid={`synthesis-literature-${i}`}>
-                <p className="text-sm font-bold">{route.method || route.name || "Unknown method"}</p>
+                <p className="text-sm font-bold">{route.method || route.routeName || route.name || "Unknown method"}</p>
                 {route.steps && Array.isArray(route.steps) && (
                   <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
-                    {route.steps.slice(0, 5).map((s: string, j: number) => <li key={j}>{s}</li>)}
+                    {route.steps.slice(0, 5).map((s: string, j: number) => <li key={j}>{typeof s === "string" ? s : JSON.stringify(s)}</li>)}
                   </ol>
                 )}
               </div>
