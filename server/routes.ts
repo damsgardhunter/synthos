@@ -29,7 +29,7 @@ import {
   getDesignRepresentationStats,
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
-import { getCalibrationData, getConfidenceBand } from "./learning/gradient-boost";
+import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats } from "./learning/gradient-boost";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
 import { fetchAllData as fetchMPAllData, isApiAvailable as isMPAvailable } from "./learning/materials-project-client";
@@ -117,6 +117,9 @@ import { crossEngineHub } from "./learning/cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats } from "./learning/synthesis-discovery";
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "./synthesis/heuristic-synthesis-generator";
+import { predictSynthesisFeasibility, getSynthesisPredictorStats } from "./synthesis/ml-synthesis-predictor";
+import { generateRetrosynthesisRoutes, getRetrosynthesisStats } from "./synthesis/retrosynthesis-engine";
+import { computeSynthesisScore } from "./learning/multi-fidelity-pipeline";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "./synthesis/crystal-growth-simulator";
 import { generateExperimentPlan, getExperimentPlannerStats, type ExperimentCandidate } from "./experiment-planner";
@@ -1803,6 +1806,60 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getHeuristicGeneratorStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch heuristic synthesis stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/ml-synthesis/predict/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = predictSynthesisFeasibility(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict synthesis feasibility", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/ml-synthesis/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getSynthesisPredictorStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch ML synthesis stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/ml-synthesis/score/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const score = computeSynthesisScore(formula);
+      res.json({ formula, ...score });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute synthesis score", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/xgboost/evaluated-stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getEvaluatedDatasetStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch evaluated dataset stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/retrosynthesis/routes/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = generateRetrosynthesisRoutes(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate retrosynthesis routes", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/retrosynthesis/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getRetrosynthesisStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch retrosynthesis stats", detail: e.message?.slice(0, 200) });
     }
   });
 

@@ -23,7 +23,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData } from "./gradient-boost";
+import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, type MassiveGenerationStats } from "./candidate-generator";
 import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
@@ -1232,6 +1232,11 @@ async function runDFTEnrichment() {
         if (dftData.bandGap.source !== "analytical") {
           updates.bandGap = dftData.bandGap.value;
         }
+
+        const formEnergy = dftData.formationEnergy?.value ?? null;
+        const dftStable = formEnergy !== null ? formEnergy < 0.5 : true;
+        const dftSrc = (dftData.sources.mp || dftData.sources.aflow) ? "external" as const : "xtb" as const;
+        incorporateDFTResult(candidate.formula, gb.tcPredicted, formEnergy, dftStable, dftSrc);
 
         if (dftData.phononStability) {
           const ps = dftData.phononStability;
@@ -4705,7 +4710,7 @@ async function runLearningCycle() {
         await runDFTEnrichment();
       }
 
-      if (state === "running" && cycleCount % 25 === 0) {
+      if (state === "running" && cycleCount % 20 === 0) {
         try {
           const failedResults = await storage.getFailedComputationalResults(500);
           const newFailures = failedResults.length - failuresSinceLastRetrain;
@@ -4714,13 +4719,19 @@ async function runLearningCycle() {
             if (added > 0) {
               failuresSinceLastRetrain = failedResults.length;
               lastRetrainCycle = cycleCount;
-              emit("log", {
-                phase: "engine",
-                event: `XGBoost model retrained with ${getFailureExampleCount()} failure examples`,
-                detail: `Added ${added} new failure examples from pipeline. Total failure training data: ${getFailureExampleCount()}. Retrain triggered at cycle ${cycleCount}.`,
-                dataSource: "ML Engine",
-              });
             }
+          }
+
+          const xgbResult = await retrainXGBoostFromEvaluated(cycleCount);
+
+          if (xgbResult.retrained) {
+            const evalStats = getEvaluatedDatasetStats();
+            emit("log", {
+              phase: "engine",
+              event: `XGBoost active learning retrain (cycle ${cycleCount})`,
+              detail: `Dataset: ${xgbResult.datasetSize} total samples (${xgbResult.newEntries} from evaluated pool). Evaluated entries: ${evalStats.totalEvaluated} (DFT: ${evalStats.bySource.dft}, xTB: ${evalStats.bySource.xtb}, external: ${evalStats.bySource.external}, AL: ${evalStats.bySource.activeLearning}). Failures: ${getFailureExampleCount()}. Retrain #${evalStats.xgboostRetrainCount}.`,
+              dataSource: "ML Engine",
+            });
           }
         } catch (err: any) {
           emit("log", {

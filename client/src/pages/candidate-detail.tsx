@@ -682,6 +682,173 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
   );
 }
 
+function RetrosynthesisSection({ formula }: { formula: string }) {
+  const { data } = useQuery<{
+    formula: string;
+    family: string;
+    totalRoutes: number;
+    routes: Array<{
+      type: string;
+      precursors: string[];
+      product: string;
+      equation: string;
+      deltaE: number;
+      complexity: number;
+      availability: number;
+      similarity: number;
+      overallScore: number;
+      reasoning: string[];
+    }>;
+    bestRoute: any;
+    analysisNotes: string[];
+  }>({ queryKey: ["/api/retrosynthesis/routes", formula] });
+
+  const { data: mlData } = useQuery<{
+    feasibility: number;
+    confidence: number;
+    features: Record<string, number>;
+    reasoning: string[];
+  }>({ queryKey: ["/api/ml-synthesis/predict", formula] });
+
+  const { data: scoreData } = useQuery<{
+    formula: string;
+    score: number;
+    thermodynamicFeasibility: number;
+    precursorAvailability: number;
+    structuralSimilarity: number;
+    reactionComplexity: number;
+  }>({ queryKey: ["/api/ml-synthesis/score", formula] });
+
+  if (!data && !mlData) return null;
+
+  const typeColors: Record<string, string> = {
+    "direct-elemental": "bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-300",
+    "binary-intermediate": "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
+    "oxide-decomposition": "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300",
+    "precursor-substitution": "bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300",
+  };
+
+  return (
+    <Card data-testid="retrosynthesis-section" className="lg:col-span-2">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-lg flex items-center gap-2">
+          <FlaskConical className="h-5 w-5" />
+          Retrosynthesis & ML Feasibility
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {(mlData || scoreData) && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {mlData && (
+              <>
+                <div className="p-2 bg-violet-50/50 dark:bg-violet-950/20 rounded-md border border-violet-200/50 dark:border-violet-800/30" data-testid="ml-feasibility-score">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">ML Feasibility</p>
+                  <p className="text-lg font-mono font-bold">{(mlData.feasibility * 100).toFixed(1)}%</p>
+                </div>
+                <div className="p-2 bg-violet-50/50 dark:bg-violet-950/20 rounded-md border border-violet-200/50 dark:border-violet-800/30" data-testid="ml-confidence">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">ML Confidence</p>
+                  <p className="text-lg font-mono font-bold">{(mlData.confidence * 100).toFixed(0)}%</p>
+                </div>
+              </>
+            )}
+            {scoreData && (
+              <>
+                <div className="p-2 bg-indigo-50/50 dark:bg-indigo-950/20 rounded-md border border-indigo-200/50 dark:border-indigo-800/30" data-testid="synthesis-score">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Synthesis Score</p>
+                  <p className="text-lg font-mono font-bold">{(scoreData.score * 100).toFixed(1)}%</p>
+                </div>
+                <div className="p-2 bg-indigo-50/50 dark:bg-indigo-950/20 rounded-md border border-indigo-200/50 dark:border-indigo-800/30" data-testid="thermo-feasibility">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Thermo Feasibility</p>
+                  <p className="text-lg font-mono font-bold">{(scoreData.thermodynamicFeasibility * 100).toFixed(0)}%</p>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        {scoreData && (
+          <div className="grid grid-cols-4 gap-1">
+            {[
+              { label: "Thermo", value: scoreData.thermodynamicFeasibility, weight: "40%" },
+              { label: "Precursors", value: scoreData.precursorAvailability, weight: "30%" },
+              { label: "Similarity", value: scoreData.structuralSimilarity, weight: "20%" },
+              { label: "Complexity", value: scoreData.reactionComplexity, weight: "10%" },
+            ].map((item) => (
+              <div key={item.label} className="text-center" data-testid={`score-breakdown-${item.label.toLowerCase()}`}>
+                <div className="h-1.5 bg-muted rounded-full overflow-hidden mb-1">
+                  <div
+                    className="h-full bg-primary rounded-full"
+                    style={{ width: `${(item.value * 100)}%` }}
+                  />
+                </div>
+                <p className="text-[9px] text-muted-foreground">{item.label} ({item.weight})</p>
+                <p className="text-[10px] font-mono font-bold">{(item.value * 100).toFixed(0)}%</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {mlData && mlData.reasoning.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">ML Reasoning</p>
+            <ul className="text-xs text-muted-foreground space-y-0.5 ml-3 list-disc">
+              {mlData.reasoning.slice(0, 5).map((r, i) => <li key={i}>{r}</li>)}
+            </ul>
+          </div>
+        )}
+        {data && data.routes.length > 0 && (
+          <div className="space-y-3">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+              Retrosynthesis Routes ({data.totalRoutes})
+            </p>
+            {data.routes.slice(0, 6).map((route, i) => (
+              <div
+                key={`retro-${i}`}
+                className="p-3 bg-muted/30 rounded-md space-y-2 border border-border/50"
+                data-testid={`retro-route-${i}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-mono font-bold">{route.equation}</p>
+                    <Badge className={`${typeColors[route.type] ?? "bg-muted text-muted-foreground"} border-0 text-[10px] mt-1`}>
+                      {route.type}
+                    </Badge>
+                  </div>
+                  <Badge variant="outline" className="text-[10px] font-mono shrink-0" data-testid={`retro-score-${i}`}>
+                    {(route.overallScore * 100).toFixed(0)}% score
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap gap-3 text-[10px] text-muted-foreground">
+                  <span>dE: {route.deltaE.toFixed(2)} eV</span>
+                  <span>Avail: {(route.availability * 100).toFixed(0)}%</span>
+                  <span>Complexity: {route.complexity.toFixed(2)}</span>
+                  <span>Similarity: {(route.similarity * 100).toFixed(0)}%</span>
+                </div>
+                {route.precursors.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {route.precursors.map((p, j) => (
+                      <Badge key={j} variant="secondary" className="text-[10px] font-mono border-0">{p}</Badge>
+                    ))}
+                  </div>
+                )}
+                {route.reasoning.length > 0 && (
+                  <p className="text-[10px] text-muted-foreground italic">{route.reasoning[0]}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {data && data.analysisNotes.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Analysis Notes</p>
+            <ul className="text-xs text-muted-foreground space-y-0.5 ml-3 list-disc">
+              {data.analysisNotes.map((note, i) => <li key={i}>{note}</li>)}
+            </ul>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function NovelRouteCard({ route, index }: { route: NovelSynthesisRoute; index: number }) {
   const confColor = CONFIDENCE_COLORS[route.synthesisConfidence] ?? CONFIDENCE_COLORS.medium;
   const noveltyPct = Math.round(route.noveltyScore * 100);
@@ -1317,6 +1484,7 @@ export default function CandidateDetail() {
         <CrystalStructuresSection structures={data?.crystalStructures ?? []} />
         <SynthesisSection processes={data?.synthesisProcesses ?? []} />
         {candidate && <NovelSynthesisSection candidate={candidate} />}
+        {formula && <RetrosynthesisSection formula={formula} />}
         <ReactionsSection reactions={data?.chemicalReactions ?? []} />
         <PipelineResultsSection results={data?.computationalResults ?? []} />
       </div>

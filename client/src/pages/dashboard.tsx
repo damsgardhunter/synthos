@@ -429,6 +429,16 @@ export default function Dashboard() {
     ruleHits: Record<string, number>;
     totalRules: number;
   }>({ queryKey: ["/api/heuristic-synthesis/stats"], refetchInterval: 20000 });
+  const { data: mlSynthStats } = useQuery<{
+    trained: boolean;
+    trainingSize: number;
+    featureImportance: Record<string, number>;
+  }>({ queryKey: ["/api/ml-synthesis/stats"], refetchInterval: 30000 });
+  const { data: retroStats } = useQuery<{
+    totalAnalyzed: number;
+    avgRoutesPerTarget: number;
+    topMethods: Record<string, number>;
+  }>({ queryKey: ["/api/retrosynthesis/stats"], refetchInterval: 20000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -871,7 +881,64 @@ export default function Dashboard() {
                   )}
                 </>
               )}
-              {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) && (!synthPlannerStats || synthPlannerStats.totalPlans === 0) && (!heuristicStats || heuristicStats.totalGenerated === 0) && (
+              {mlSynthStats && mlSynthStats.trained && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="ml-synth-trained">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">ML Predictor</p>
+                      <p className="text-lg font-mono font-bold text-violet-500">Trained</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="ml-synth-training-size">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Training Size</p>
+                      <p className="text-lg font-mono font-bold">{mlSynthStats.trainingSize}</p>
+                    </div>
+                  </div>
+                  {Object.keys(mlSynthStats.featureImportance).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Top Features</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(mlSynthStats.featureImportance)
+                          .sort(([, a], [, b]) => b - a)
+                          .slice(0, 6)
+                          .map(([feat, imp]) => (
+                            <Badge key={feat} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`ml-feat-${feat}`}>
+                              {feat}: {(imp * 100).toFixed(0)}%
+                            </Badge>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {retroStats && retroStats.totalAnalyzed > 0 && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="retro-analyzed">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Retrosynthesis Analyzed</p>
+                      <p className="text-lg font-mono font-bold">{retroStats.totalAnalyzed}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="retro-avg-routes">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Routes/Target</p>
+                      <p className="text-lg font-mono font-bold">{retroStats.avgRoutesPerTarget.toFixed(1)}</p>
+                    </div>
+                  </div>
+                  {Object.keys(retroStats.topMethods).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Decomposition Methods</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(retroStats.topMethods)
+                          .sort(([, a], [, b]) => b - a)
+                          .map(([method, count]) => (
+                            <Badge key={method} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`retro-method-${method}`}>
+                              {method}: {count}
+                            </Badge>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) && (!synthPlannerStats || synthPlannerStats.totalPlans === 0) && (!heuristicStats || heuristicStats.totalGenerated === 0) && !mlSynthStats?.trained && (!retroStats || retroStats.totalAnalyzed === 0) && (
                 <p className="text-sm text-muted-foreground italic" data-testid="synth-disc-placeholder">
                   Synthesis routes will be planned as candidates progress through screening
                 </p>

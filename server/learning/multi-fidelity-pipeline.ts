@@ -15,6 +15,10 @@ import {
   evaluateConvexHullStability,
 } from "./structure-predictor";
 import { classifyFamily } from "./utils";
+import { predictSynthesisFeasibility } from "../synthesis/ml-synthesis-predictor";
+import { generateRetrosynthesisRoutes } from "../synthesis/retrosynthesis-engine";
+import { computeReactionFeasibility } from "../synthesis/thermodynamic-feasibility";
+import { findBestPrecursors, computePrecursorAvailabilityScore } from "../synthesis/precursor-database";
 
 const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Cuprates: -1.2,
@@ -97,6 +101,102 @@ async function stage0_MLFilter(
   );
 
   return { passed, reason };
+}
+
+export function computeSynthesisScore(formula: string): {
+  score: number;
+  thermodynamicFeasibility: number;
+  precursorAvailability: number;
+  structuralSimilarity: number;
+  reactionComplexity: number;
+} {
+  const thermoResult = computeReactionFeasibility(formula, null, []);
+  const thermodynamicFeasibility = Math.max(0, Math.min(1, thermoResult.overallFeasibility));
+
+  const formulaElements = Object.keys((() => {
+    const c: Record<string, number> = {};
+    const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+    let m;
+    while ((m = regex.exec(formula)) !== null) {
+      c[m[1]] = (c[m[1]] || 0) + (m[2] ? parseFloat(m[2]) : 1);
+    }
+    return c;
+  })());
+  const precursorSelections = findBestPrecursors(formulaElements, "solid-state");
+  const precursorResult = computePrecursorAvailabilityScore(precursorSelections);
+  const precursorAvailability = Math.max(0, Math.min(1, precursorResult.overallScore));
+
+  const mlResult = predictSynthesisFeasibility(formula);
+  const structuralSimilarity = Math.max(0, Math.min(1, mlResult.feasibility));
+
+  const countMap: Record<string, number> = {};
+  const cRegex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let cm;
+  while ((cm = cRegex.exec(formula)) !== null) {
+    countMap[cm[1]] = (countMap[cm[1]] || 0) + (cm[2] ? parseFloat(cm[2]) : 1);
+  }
+  const nElements = Object.keys(countMap).length;
+  const totalAtoms = Object.values(countMap).reduce((a, b) => a + b, 0);
+  const complexityRaw = 1 - Math.min(1, (nElements - 1) * 0.15 + (totalAtoms - 2) * 0.03);
+  const reactionComplexity = Math.max(0, Math.min(1, complexityRaw));
+
+  const score =
+    0.4 * thermodynamicFeasibility +
+    0.3 * precursorAvailability +
+    0.2 * structuralSimilarity +
+    0.1 * reactionComplexity;
+
+  return {
+    score: Math.max(0, Math.min(1, score)),
+    thermodynamicFeasibility,
+    precursorAvailability,
+    structuralSimilarity,
+    reactionComplexity,
+  };
+}
+
+async function stage0b_SynthesisPrescreen(
+  emit: EventEmitter,
+  candidate: SuperconductorCandidate
+): Promise<{ passed: boolean; reason: string | null; data: any }> {
+  const start = Date.now();
+
+  const synthScore = computeSynthesisScore(candidate.formula);
+  const mlPrediction = predictSynthesisFeasibility(candidate.formula);
+  const retroRoutes = generateRetrosynthesisRoutes(candidate.formula);
+
+  const qualityRoutes = retroRoutes.routes.filter(
+    (r: any) => r.overallScore >= 0.4 && r.type !== "direct-elemental"
+  );
+  const hasQualityRoutes = qualityRoutes.length > 0;
+  const scoreAboveThreshold = synthScore.score > 0.3;
+  const mlAboveMinimum = mlPrediction.feasibility > 0.2;
+
+  const passed = (scoreAboveThreshold && mlAboveMinimum) || hasQualityRoutes;
+  const reason = passed ? null :
+    `No plausible synthesis: score=${synthScore.score.toFixed(2)} (threshold 0.3), ML feasibility=${mlPrediction.feasibility.toFixed(2)} (threshold 0.2), quality retro routes=${qualityRoutes.length}`;
+
+  await logComputationalResult(
+    candidate.id, candidate.formula, 0, "synthesis_prescreen",
+    {
+      synthesisScore: synthScore.score,
+      thermodynamicFeasibility: synthScore.thermodynamicFeasibility,
+      precursorAvailability: synthScore.precursorAvailability,
+      structuralSimilarity: synthScore.structuralSimilarity,
+      reactionComplexity: synthScore.reactionComplexity,
+      mlFeasibility: mlPrediction.feasibility,
+      retroRoutes: retroRoutes.totalRoutes,
+      qualityRoutes: qualityRoutes.length,
+      bestRoute: retroRoutes.bestRoute?.equation ?? null,
+    },
+    passed, reason, Date.now() - start, passed ? 0.6 : 0.85
+  );
+
+  return {
+    passed,
+    reason,
+    data: { synthScore, mlPrediction, retroRoutes },
+  };
 }
 
 async function stage1_ElectronicStructure(
@@ -283,7 +383,7 @@ export async function runMultiFidelityPipeline(
   emit("log", {
     phase: "phase-12",
     event: "Multi-fidelity pipeline started",
-    detail: `Screening ${candidates.length} candidates through 5-stage pipeline: ML -> Electronic Structure -> Phonon/E-Ph -> Tc Prediction -> Synthesis`,
+    detail: `Screening ${candidates.length} candidates through 6-stage pipeline: ML -> Synthesis Prescreen -> Electronic Structure -> Phonon/E-Ph -> Tc Prediction -> Synthesis`,
     dataSource: "Pipeline",
   });
 
@@ -302,6 +402,20 @@ export async function runMultiFidelityPipeline(
         passed: false,
         failureReason: s0.reason,
         physicsData: {},
+      });
+      continue;
+    }
+
+    const s0b = await stage0b_SynthesisPrescreen(emit, candidate);
+    physicsData.synthesisPrescreen = s0b.data;
+    if (!s0b.passed) {
+      results.push({
+        candidateId: candidate.id,
+        formula: candidate.formula,
+        finalStage: 0,
+        passed: false,
+        failureReason: s0b.reason,
+        physicsData,
       });
       continue;
     }

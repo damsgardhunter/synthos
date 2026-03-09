@@ -636,6 +636,142 @@ let surrogatePassCount = 0;
 let surrogateRejectCount = 0;
 let lastRetrainCycle = 0;
 
+export interface EvaluatedEntry {
+  formula: string;
+  tc: number;
+  formationEnergy: number | null;
+  stable: boolean;
+  source: "dft" | "xtb" | "external" | "active-learning";
+  evaluatedAt: number;
+}
+
+const evaluatedDataset: EvaluatedEntry[] = [];
+const evaluatedFormulas = new Set<string>();
+let xgboostRetrainCount = 0;
+let lastXGBoostRetrainCycle = 0;
+let totalDFTFeedback = 0;
+
+const SOURCE_PRIORITY: Record<EvaluatedEntry["source"], number> = {
+  "active-learning": 0,
+  "xtb": 1,
+  "dft": 2,
+  "external": 3,
+};
+
+export function incorporateDFTResult(
+  formula: string,
+  tc: number,
+  formationEnergy: number | null,
+  stable: boolean,
+  source: EvaluatedEntry["source"] = "dft"
+): boolean {
+  totalDFTFeedback++;
+
+  const existing = evaluatedDataset.find(e => e.formula === formula);
+  if (existing) {
+    if (SOURCE_PRIORITY[source] > SOURCE_PRIORITY[existing.source]) {
+      existing.tc = Math.max(0, tc);
+      existing.formationEnergy = formationEnergy;
+      existing.stable = stable;
+      existing.source = source;
+      existing.evaluatedAt = Date.now();
+      return true;
+    }
+    return false;
+  }
+
+  evaluatedFormulas.add(formula);
+  evaluatedDataset.push({
+    formula,
+    tc: Math.max(0, tc),
+    formationEnergy,
+    stable,
+    source,
+    evaluatedAt: Date.now(),
+  });
+
+  return true;
+}
+
+export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<{
+  retrained: boolean;
+  datasetSize: number;
+  newEntries: number;
+}> {
+  const augmentedData = [
+    ...SUPERCON_TRAINING_DATA,
+    ...successExamples,
+    ...failureExamples,
+  ];
+
+  const seen = new Set(augmentedData.map(e => e.formula));
+  let newFromEval = 0;
+  for (const entry of evaluatedDataset) {
+    if (seen.has(entry.formula)) continue;
+    seen.add(entry.formula);
+    augmentedData.push({
+      formula: entry.formula,
+      tc: entry.tc,
+      family: entry.stable ? "DFT-Evaluated" : "DFT-Failed",
+      isSuperconductor: entry.tc > 0 && entry.stable,
+    });
+    newFromEval++;
+  }
+
+  const X: number[][] = [];
+  const y: number[] = [];
+
+  for (const entry of augmentedData) {
+    try {
+      const features = extractFeatures(entry.formula);
+      const fArr = featureVectorToArray(features, entry.formula);
+      if (fArr.some(v => !Number.isFinite(v))) continue;
+      X.push(fArr);
+      y.push(entry.tc);
+    } catch {
+      continue;
+    }
+  }
+
+  if (X.length < 10) {
+    return { retrained: false, datasetSize: X.length, newEntries: newFromEval };
+  }
+
+  invalidateModel();
+  cachedModel = trainGradientBoosting(X, y, 300, 0.1, 4);
+  cachedCalibration = computeCalibration(cachedModel);
+  xgboostRetrainCount++;
+  if (cycleCount != null) lastXGBoostRetrainCycle = cycleCount;
+  lastRetrainCycle = Date.now();
+
+  console.log(`[XGBoost-AL] Retrained with ${X.length} total samples (${newFromEval} from evaluated dataset, ${successExamples.length} successes, ${failureExamples.length} failures)`);
+
+  return { retrained: true, datasetSize: X.length, newEntries: newFromEval };
+}
+
+export function getEvaluatedDatasetStats() {
+  return {
+    totalEvaluated: evaluatedDataset.length,
+    totalDFTFeedback,
+    xgboostRetrainCount,
+    lastXGBoostRetrainCycle,
+    bySource: {
+      dft: evaluatedDataset.filter(e => e.source === "dft").length,
+      xtb: evaluatedDataset.filter(e => e.source === "xtb").length,
+      external: evaluatedDataset.filter(e => e.source === "external").length,
+      activeLearning: evaluatedDataset.filter(e => e.source === "active-learning").length,
+    },
+    stableCount: evaluatedDataset.filter(e => e.stable).length,
+    unstableCount: evaluatedDataset.filter(e => !e.stable).length,
+    avgTc: evaluatedDataset.length > 0
+      ? evaluatedDataset.reduce((s, e) => s + e.tc, 0) / evaluatedDataset.length
+      : 0,
+    datasetGrowthRate: evaluatedDataset.length > 0
+      ? evaluatedDataset.length / Math.max(1, xgboostRetrainCount)
+      : 0,
+  };
+}
+
 export function invalidateModel(): void {
   cachedModel = null;
   cachedCalibration = null;

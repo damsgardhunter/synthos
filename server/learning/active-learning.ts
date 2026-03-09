@@ -5,7 +5,7 @@ import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import { extractFeatures } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, validateModel } from "./gradient-boost";
+import { gbPredict, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats } from "./gradient-boost";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { computeDiscoveryScore } from "./family-filters";
 
@@ -147,9 +147,30 @@ async function runDFTEnrichmentForCandidate(
     }
 
     await storage.updateSuperconductorCandidate(candidate.id, updates);
+
+    const formEnergy = dftData.formationEnergy?.value ?? null;
+    const isStable = formEnergy !== null ? formEnergy < 0.5 : true;
+    const dftSource = hasExternalDFT ? "external" as const : "active-learning" as const;
+    incorporateDFTResult(
+      candidate.formula,
+      gb.tcPredicted,
+      formEnergy,
+      isStable,
+      dftSource
+    );
+
     return true;
   } catch (err) {
     console.log(`[Active Learning] DFT enrichment failed for ${candidate.formula}: ${err instanceof Error ? err.message : String(err)}`);
+
+    incorporateDFTResult(
+      candidate.formula,
+      0,
+      null,
+      false,
+      "active-learning"
+    );
+
     return false;
   }
 }
@@ -207,6 +228,8 @@ async function retrainGNNWithEnrichedData(
 
   await incorporateFailureData();
 
+  const xgbResult = await retrainXGBoostFromEvaluated();
+
   const validationAfter = validateModel();
   const r2After = validationAfter.r2;
   const maeAfter = Math.sqrt(validationAfter.mse);
@@ -220,10 +243,12 @@ async function retrainGNNWithEnrichedData(
     : 1.0;
   const converged = avgRecentDrop < 0.1 && recentUncertaintyDrops.length >= 3;
 
+  const evalStats = getEvaluatedDatasetStats();
+
   emit("log", {
     phase: "active-learning",
-    event: "GNN ensemble retrained",
-    detail: `R² ${r2Before.toFixed(4)} → ${r2After.toFixed(4)}, MAE ${maeBefore.toFixed(2)} → ${maeAfter.toFixed(2)}, samples: ${trainingData.length}, ensemble: ${ENSEMBLE_SIZE} models${converged ? ' [CONVERGED]' : ''}`,
+    event: "GNN + XGBoost retrained",
+    detail: `R² ${r2Before.toFixed(4)} → ${r2After.toFixed(4)}, MAE ${maeBefore.toFixed(2)} → ${maeAfter.toFixed(2)}, GNN samples: ${trainingData.length}, XGBoost: ${xgbResult.datasetSize} samples (${xgbResult.newEntries} from eval dataset), evaluated pool: ${evalStats.totalEvaluated}${converged ? ' [CONVERGED]' : ''}`,
     dataSource: "Active Learning",
   });
 
