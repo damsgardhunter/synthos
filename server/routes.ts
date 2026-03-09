@@ -32,6 +32,8 @@ import {
 import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory } from "./learning/gradient-boost";
 import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph } from "./learning/graph-neural-net";
 import { getActiveLearningStats, getActiveLearningCycleHistory } from "./learning/active-learning";
+import { getCalibrationStats as getSurrogateFitnessStats } from "./learning/surrogate-fitness";
+import { getPillarDFTFeedbackStats } from "./inverse/sc-pillars-optimizer";
 import { extractFeatures } from "./learning/ml-predictor";
 import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
@@ -1933,6 +1935,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch active learning stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/surrogate-fitness/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getSurrogateFitnessStats();
+      const pillarFeedback = getPillarDFTFeedbackStats();
+      res.json({ ...stats, pillarDFTFeedback: pillarFeedback });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch surrogate fitness stats", detail: e.message?.slice(0, 200) });
     }
   });
 

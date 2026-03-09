@@ -525,6 +525,116 @@ function GNNActiveLearningCard() {
   );
 }
 
+function FeedbackLoopCard() {
+  const { data } = useQuery<{
+    totalEvaluations: number;
+    globalMeanAbsError: number;
+    globalOverestimateRatio: number;
+    familyCalibrations: { family: string; sampleCount: number; meanAbsError: number; overestimateRatio: number; calibrationFactor: number; stabilityAccuracy: number }[];
+    recentErrors: { formula: string; predicted: number; actual: number; error: number }[];
+    fitnessWeightEvolution: { cycle: number; weights: { predictedTc: number; stability: number; synthesis: number; novelty: number; uncertainty: number } }[];
+    pillarDFTFeedback: { pillar: string; accuracy: number; total: number }[];
+  }>({ queryKey: ["/api/surrogate-fitness/stats"], refetchInterval: 30000 });
+
+  if (!data || data.totalEvaluations === 0) return null;
+
+  return (
+    <Card data-testid="card-feedback-loop">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <GitMerge className="h-4 w-4 text-primary" />
+            Feedback Loop
+          </CardTitle>
+          <Badge variant="secondary" className="text-xs border-0" data-testid="feedback-eval-count">
+            {data.totalEvaluations} evaluations
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-3 gap-2">
+          <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="feedback-mae">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Mean Abs Error</p>
+            <p className={`text-lg font-mono font-bold ${data.globalMeanAbsError > 30 ? "text-red-600 dark:text-red-400" : data.globalMeanAbsError > 15 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+              {data.globalMeanAbsError.toFixed(1)}K
+            </p>
+          </div>
+          <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="feedback-overestimate">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Overestimate Rate</p>
+            <p className={`text-lg font-mono font-bold ${data.globalOverestimateRatio > 0.5 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+              {(data.globalOverestimateRatio * 100).toFixed(0)}%
+            </p>
+          </div>
+          <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="feedback-families">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Families Tracked</p>
+            <p className="text-lg font-mono font-bold">{data.familyCalibrations.length}</p>
+          </div>
+        </div>
+        {data.familyCalibrations.length > 0 && (
+          <div className="space-y-1" data-testid="feedback-family-list">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Per-Family Calibration</p>
+            <div className="space-y-1">
+              {data.familyCalibrations.slice(0, 6).map(fc => (
+                <div key={fc.family} className="flex items-center justify-between text-xs" data-testid={`feedback-family-${fc.family}`}>
+                  <span className="font-medium truncate max-w-[100px]">{fc.family}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">{fc.sampleCount} samples</span>
+                    <span className={`font-mono ${fc.meanAbsError > 30 ? "text-red-500" : fc.meanAbsError > 15 ? "text-amber-500" : "text-emerald-500"}`}>
+                      {fc.meanAbsError.toFixed(1)}K err
+                    </span>
+                    <span className="font-mono text-muted-foreground">x{fc.calibrationFactor.toFixed(2)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {data.fitnessWeightEvolution.length > 0 && (
+          <div className="space-y-1" data-testid="feedback-weight-evolution">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Current Fitness Weights</p>
+            <div className="flex gap-1 h-4 rounded-full overflow-hidden">
+              {(() => {
+                const latest = data.fitnessWeightEvolution[data.fitnessWeightEvolution.length - 1].weights;
+                return (
+                  <>
+                    <div className="bg-blue-500/80 rounded-l" style={{ width: `${latest.predictedTc * 100}%` }} title={`Tc: ${(latest.predictedTc * 100).toFixed(0)}%`} />
+                    <div className="bg-emerald-500/80" style={{ width: `${latest.stability * 100}%` }} title={`Stability: ${(latest.stability * 100).toFixed(0)}%`} />
+                    <div className="bg-amber-500/80" style={{ width: `${latest.synthesis * 100}%` }} title={`Synthesis: ${(latest.synthesis * 100).toFixed(0)}%`} />
+                    <div className="bg-purple-500/80" style={{ width: `${latest.novelty * 100}%` }} title={`Novelty: ${(latest.novelty * 100).toFixed(0)}%`} />
+                    <div className="bg-pink-500/80 rounded-r" style={{ width: `${latest.uncertainty * 100}%` }} title={`Uncertainty: ${(latest.uncertainty * 100).toFixed(0)}%`} />
+                  </>
+                );
+              })()}
+            </div>
+            <div className="flex gap-2 text-[10px] flex-wrap">
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500/80 inline-block" />Tc</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500/80 inline-block" />Stability</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500/80 inline-block" />Synthesis</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500/80 inline-block" />Novelty</span>
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-500/80 inline-block" />Uncertainty</span>
+            </div>
+          </div>
+        )}
+        {data.pillarDFTFeedback && data.pillarDFTFeedback.length > 0 && (
+          <div className="space-y-1" data-testid="feedback-pillar-accuracy">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pillar DFT Accuracy</p>
+            <div className="grid grid-cols-2 gap-1">
+              {data.pillarDFTFeedback.slice(0, 8).map(pf => (
+                <div key={pf.pillar} className="flex items-center justify-between text-[10px] px-1.5 py-0.5 bg-muted/30 rounded" data-testid={`pillar-accuracy-${pf.pillar}`}>
+                  <span className="truncate max-w-[80px]">{pf.pillar}</span>
+                  <span className={`font-mono ${pf.accuracy > 0.6 ? "text-emerald-500" : pf.accuracy > 0.4 ? "text-amber-500" : "text-red-500"}`}>
+                    {(pf.accuracy * 100).toFixed(0)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Dashboard() {
   const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"] });
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
@@ -1194,6 +1304,7 @@ export default function Dashboard() {
           </Card>
 
           <GNNActiveLearningCard />
+          <FeedbackLoopCard />
 
           <Card data-testid="card-learning-insights">
             <CardHeader className="pb-2">

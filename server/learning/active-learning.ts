@@ -8,6 +8,7 @@ import { extractFeatures } from "./ml-predictor";
 import { gbPredict, gbPredictWithUncertainty, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats } from "./gradient-boost";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { computeDiscoveryScore } from "./family-filters";
+import { recordEvaluationResult } from "./surrogate-fitness";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -238,6 +239,24 @@ async function runDFTEnrichmentForCandidate(
       source: hasExternalDFT ? "external" : "active-learning",
     });
 
+    let gnnTcPredicted = 0;
+    let gnnStablePredicted = true;
+    let gnnFePredicted = 0;
+    try {
+      const gnnPred = gnnPredictWithUncertainty(candidate.formula);
+      gnnTcPredicted = gnnPred.tc;
+      gnnStablePredicted = gnnPred.phononStability;
+      gnnFePredicted = gnnPred.formationEnergy;
+    } catch {}
+
+    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * 0.6 + gb.tcPredicted * 0.4 : gb.tcPredicted;
+    recordEvaluationResult(
+      candidate.formula,
+      { tc: predictedTc, stable: gnnStablePredicted, formationEnergy: gnnFePredicted },
+      { tc: gb.tcPredicted, stable: isStable, formationEnergy: formEnergy },
+      hasExternalDFT ? "dft" : "xtb"
+    );
+
     return true;
   } catch (err) {
     console.log(`[Active Learning] DFT enrichment failed for ${candidate.formula}: ${err instanceof Error ? err.message : String(err)}`);
@@ -248,6 +267,19 @@ async function runDFTEnrichmentForCandidate(
       null,
       false,
       "active-learning"
+    );
+
+    let failGnnTc = 0;
+    try {
+      const gnnPred = gnnPredictWithUncertainty(candidate.formula);
+      failGnnTc = gnnPred.tc;
+    } catch {}
+    const failPredTc = failGnnTc > 0 ? failGnnTc : (candidate.predictedTc ?? 0);
+    recordEvaluationResult(
+      candidate.formula,
+      { tc: failPredTc, stable: true, formationEnergy: 0 },
+      { tc: 0, stable: false, formationEnergy: null },
+      "xtb"
     );
 
     return false;

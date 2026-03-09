@@ -1,5 +1,6 @@
 import { getElementData, isTransitionMetal, isRareEarth, isActinide } from "./elemental-data";
 import { classifyFamily } from "./utils";
+import { computeSurrogateFitness, getCurrentFitnessWeights } from "./surrogate-fitness";
 import type { TopologicalAnalysis } from "../physics/topology-engine";
 import type { FermiSurfaceResult } from "../physics/fermi-surface-engine";
 import type { PairingProfile } from "../physics/pairing-mechanisms";
@@ -537,10 +538,22 @@ function computeFitnessScore(
   insights: MultiEngineInsights,
   bestKnownTc: number = 0
 ): number {
-  const tcWeight = 0.30;
-  const feasWeight = 0.25;
-  const novelWeight = 0.20;
-  const engineWeight = 0.25;
+  let surrogateFitness = 0;
+  let usedSurrogate = false;
+  try {
+    const sf = computeSurrogateFitness(insights.formula);
+    surrogateFitness = sf.fitness;
+    usedSurrogate = true;
+  } catch {}
+
+  const weights = getCurrentFitnessWeights();
+  const surrogateWeight = usedSurrogate ? 0.40 : 0.0;
+  const remainingWeight = 1.0 - surrogateWeight;
+
+  const tcWeight = 0.30 * remainingWeight;
+  const feasWeight = 0.25 * remainingWeight;
+  const novelWeight = 0.20 * remainingWeight;
+  const engineWeight = 0.25 * remainingWeight;
 
   const adaptiveDenom = Math.max(100, bestKnownTc * 0.5);
   const tcNorm = Math.min(1.0, insights.predictedTc / adaptiveDenom);
@@ -580,7 +593,18 @@ function computeFitnessScore(
 
   const engineNorm = engineCount > 0 ? Math.min(1.0, engineScore / Math.max(1, Math.sqrt(engineCount))) : 0.5;
 
-  return tcWeight * tcNorm + feasWeight * feasNorm + novelWeight * novelNorm + engineWeight * engineNorm;
+  return surrogateWeight * surrogateFitness +
+    tcWeight * tcNorm + feasWeight * feasNorm + novelWeight * novelNorm + engineWeight * engineNorm;
+}
+
+let gaAdaptationCalls = 0;
+export function getSynthesisGAAdaptationStats() {
+  const weights = getCurrentFitnessWeights();
+  return {
+    currentSurrogateWeights: weights,
+    gaAdaptationCalls,
+    surrogateIntegrated: true,
+  };
 }
 
 function buildEngineContributions(insights: MultiEngineInsights): string[] {

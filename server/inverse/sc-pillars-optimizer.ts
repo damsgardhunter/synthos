@@ -1064,6 +1064,68 @@ export function updatePillarWeightsFromReward(tcReward: number, evaluation: Pill
   }
 }
 
+const pillarDFTFeedback: { pillar: string; correct: number; total: number }[] = [];
+
+export function incorporateDFTFeedbackIntoPillars(
+  formula: string,
+  predictedTc: number,
+  actualTc: number,
+  actualStable: boolean
+): void {
+  let evaluation: PillarEvaluation | null = null;
+  try {
+    evaluation = evaluatePillars(formula);
+  } catch {
+    return;
+  }
+
+  const predictionError = predictedTc - actualTc;
+  const overestimated = predictionError > 20;
+  const underestimated = predictionError < -20;
+  const accurate = Math.abs(predictionError) <= 20;
+
+  const lr = 0.005;
+  const pillarEntries = Object.entries(evaluation.pillarScores) as [string, number][];
+
+  for (const [pillar, score] of pillarEntries) {
+    const key = pillar as keyof typeof pillarWeights;
+    if (pillarWeights[key] === undefined) continue;
+
+    let existing = pillarDFTFeedback.find(f => f.pillar === pillar);
+    if (!existing) {
+      existing = { pillar, correct: 0, total: 0 };
+      pillarDFTFeedback.push(existing);
+    }
+    existing.total++;
+
+    if (overestimated && score >= 0.6) {
+      pillarWeights[key] = Math.max(0.04, pillarWeights[key] - lr);
+    } else if (accurate && score >= 0.6) {
+      pillarWeights[key] = Math.min(0.5, pillarWeights[key] + lr * 0.5);
+      existing.correct++;
+    } else if (underestimated && score < 0.4) {
+      pillarWeights[key] = Math.min(0.5, pillarWeights[key] + lr * 0.3);
+      existing.correct++;
+    }
+
+    if (!actualStable && score >= 0.5) {
+      pillarWeights[key] = Math.max(0.04, pillarWeights[key] - lr * 0.3);
+    }
+  }
+
+  const totalWeight = Object.values(pillarWeights).reduce((s, w) => s + w, 0);
+  for (const key of Object.keys(pillarWeights) as (keyof typeof pillarWeights)[]) {
+    pillarWeights[key] /= totalWeight;
+  }
+}
+
+export function getPillarDFTFeedbackStats(): { pillar: string; accuracy: number; total: number }[] {
+  return pillarDFTFeedback
+    .filter(f => f.total >= 3)
+    .map(f => ({ pillar: f.pillar, accuracy: f.correct / f.total, total: f.total }))
+    .sort((a, b) => b.total - a.total);
+}
+
 export function runPillarCycle(
   existingFormulas: string[],
   targetTc: number = 200,

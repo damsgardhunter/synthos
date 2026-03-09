@@ -11,7 +11,7 @@ import { getAllLabStats as getSelfImprovingLabStatsForEngine } from "../inverse/
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
-import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats } from "../inverse/sc-pillars-optimizer";
+import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats, incorporateDFTFeedbackIntoPillars, getPillarDFTFeedbackStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS } from "./physics-engine";
@@ -44,6 +44,7 @@ import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./famil
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
+import { recordEvaluationResult, getCalibrationStats } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
 import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
@@ -1237,6 +1238,15 @@ async function runDFTEnrichment() {
         const dftStable = formEnergy !== null ? formEnergy < 0.5 : true;
         const dftSrc = (dftData.sources.mp || dftData.sources.aflow) ? "external" as const : "xtb" as const;
         incorporateDFTResult(candidate.formula, gb.tcPredicted, formEnergy, dftStable, dftSrc);
+
+        const priorTc = candidate.predictedTc ?? 0;
+        recordEvaluationResult(
+          candidate.formula,
+          { tc: priorTc, stable: true, formationEnergy: candidate.formationEnergy ?? 0 },
+          { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy },
+          dftSrc === "external" ? "dft" : "xtb"
+        );
+        incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
 
         if (dftData.phononStability) {
           const ps = dftData.phononStability;
@@ -4801,6 +4811,16 @@ async function runLearningCycle() {
             dataSource: "Active Learning",
           });
           autonomousGNNRetrainCount += alStats.modelRetrains > 0 ? 1 : 0;
+
+          const calStats = getCalibrationStats();
+          if (calStats.totalEvaluations > 0) {
+            emit("log", {
+              phase: "engine",
+              event: "Feedback loop calibration",
+              detail: `${calStats.totalEvaluations} evaluations, mean abs error: ${calStats.globalMeanAbsError.toFixed(1)}K, overestimate ratio: ${(calStats.globalOverestimateRatio * 100).toFixed(0)}%, families tracked: ${calStats.familyCalibrations.length}`,
+              dataSource: "Surrogate Fitness",
+            });
+          }
         } catch (err: any) {
           lastActiveLearningCycle = cycleCount;
           console.log(`[Active Learning] Error at cycle ${cycleCount}: ${err.message?.slice(0, 150)}`);
