@@ -25,7 +25,7 @@ import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
-import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, type MassiveGenerationStats } from "./candidate-generator";
+import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, estimateFamilyPressure, mutatePressure, generatePressureVariants, type MassiveGenerationStats } from "./candidate-generator";
 import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
 import { scanMaterialSignals } from "./material-signal-scanner";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
@@ -2295,7 +2295,7 @@ async function runPhase11_StructurePrediction() {
                   name: variant.formula,
                   formula: variant.formula,
                   predictedTc: rawTc,
-                  pressureGpa: null,
+                  pressureGpa: estimateFamilyPressure(variant.formula),
                   meissnerEffect: false,
                   zeroResistance: false,
                   cooperPairMechanism: `Structural variant from ${variant.parentFormula} via ${variant.variationType}`,
@@ -2354,7 +2354,7 @@ async function runPhase11_StructurePrediction() {
                 name: variant.formula,
                 formula: variant.formula,
                 predictedTc: rawTc,
-                pressureGpa: null,
+                pressureGpa: estimateFamilyPressure(variant.formula),
                 meissnerEffect: false,
                 zeroResistance: false,
                 cooperPairMechanism: `Novel prototype: ${variant.topology}`,
@@ -2417,7 +2417,7 @@ async function runPhase11_StructurePrediction() {
                 name: evoFormula,
                 formula: evoFormula,
                 predictedTc: rawTc,
-                pressureGpa: null,
+                pressureGpa: estimateFamilyPressure(evoFormula),
                 meissnerEffect: false,
                 zeroResistance: false,
                 cooperPairMechanism: "Evolutionary structure search",
@@ -2488,7 +2488,7 @@ async function runPhase11_StructurePrediction() {
               name: normalized,
               formula: normalized,
               predictedTc: rawTc,
-              pressureGpa: null,
+              pressureGpa: estimateFamilyPressure(normalized),
               meissnerEffect: false,
               zeroResistance: false,
               cooperPairMechanism: `Diffusion-generated ${crystal.spaceGroup} (${crystal.crystalSystem})`,
@@ -2567,7 +2567,7 @@ async function runPhase11_StructurePrediction() {
               name: normalized,
               formula: normalized,
               predictedTc: cappedTc,
-              pressureGpa: null,
+              pressureGpa: estimateFamilyPressure(normalized),
               meissnerEffect: false,
               zeroResistance: false,
               cooperPairMechanism: `CDVAE diffusion: ${crystal.motif} (${crystal.spaceGroup})`,
@@ -2644,7 +2644,7 @@ async function runPhase11_StructurePrediction() {
               name: normalized,
               formula: normalized,
               predictedTc: cappedTc,
-              pressureGpa: null,
+              pressureGpa: estimateFamilyPressure(normalized),
               meissnerEffect: false,
               zeroResistance: false,
               cooperPairMechanism: `Distribution diffusion: ${crystal.motif} (${crystal.spaceGroup})`,
@@ -3149,7 +3149,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     let gnnResult: ReturnType<typeof gnnPredictWithUncertainty> | null = null;
     try {
-      gnnResult = gnnPredictWithUncertainty(formula);
+      gnnResult = gnnPredictWithUncertainty(formula, undefined, features.pressureGpa);
     } catch (e) { console.error(`[Autonomous] GNN prediction failed for ${formula}:`, e); }
 
     try {
@@ -3178,6 +3178,8 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: Math.round(primaryTc), reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
     }
 
+    const candidatePressureEst = features.pressureGpa > 0 ? features.pressureGpa : estimateFamilyPressure(formula);
+
     const candidate = {
       formula,
       family,
@@ -3185,7 +3187,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       confidence: "low" as const,
       source: "autonomous-loop",
       ensembleScore: Math.min(0.95, ensembleConfidence),
-      pressureGpa: 0,
+      pressureGpa: candidatePressureEst,
       verificationStage: 0,
     };
 
@@ -3532,7 +3534,24 @@ async function runAutonomousFastPath() {
     const boTopFormulas = boSuggestions.map(s => s.formula);
 
     const remainingMassive = massiveCandidates.filter(f => !boTopFormulas.includes(f));
-    const candidates = [...boTopFormulas, ...remainingMassive];
+
+    const pressureVariantFormulas: string[] = [];
+    const candidatePressureMap = new Map<string, number>();
+    for (const f of [...boTopFormulas, ...remainingMassive]) {
+      const basePressure = estimateFamilyPressure(f);
+      candidatePressureMap.set(f, basePressure);
+      if (basePressure > 0 && Math.random() < 0.3) {
+        const variants = generatePressureVariants(f, basePressure);
+        for (const v of variants) {
+          if (!candidatePressureMap.has(`${v.formula}@${v.pressureGpa}`)) {
+            candidatePressureMap.set(`${v.formula}@${v.pressureGpa}`, v.pressureGpa);
+            pressureVariantFormulas.push(v.formula);
+          }
+        }
+      }
+    }
+
+    const candidates = [...boTopFormulas, ...remainingMassive, ...pressureVariantFormulas.slice(0, 20)];
 
     if (boSuggestions.length > 0) {
       const topBO = boSuggestions[0];
@@ -5046,7 +5065,7 @@ async function runLearningCycle() {
                       name: mf,
                       formula: mf,
                       predictedTc: rawTc,
-                      pressureGpa: null,
+                      pressureGpa: estimateFamilyPressure(mf),
                       meissnerEffect: false,
                       zeroResistance: false,
                       cooperPairMechanism: "Structural mutation",
@@ -5194,7 +5213,9 @@ async function runLearningCycle() {
 
             const features = extractFeatures(normalized);
             const gbResult = gbPredict(features);
-            const gnnResult = gnnPredictWithUncertainty(normalized, pc.prototype);
+            const protoIsHydride = pc.prototype?.toLowerCase().includes("hydride") || pc.prototype?.toLowerCase().includes("clathrate");
+            const protoPressure = protoIsHydride ? 150 : estimateFamilyPressure(normalized);
+            const gnnResult = gnnPredictWithUncertainty(normalized, pc.prototype, protoPressure);
 
             const familyMap: Record<string, string> = {
               "MAX-phase": "MAX-phase",
@@ -5270,7 +5291,7 @@ async function runLearningCycle() {
                 name: `${pc.prototype} ${normalized}`,
                 formula: normalized,
                 predictedTc,
-                pressureGpa: isHydride ? 150 : null,
+                pressureGpa: isHydride ? 150 : estimateFamilyPressure(normalized),
                 meissnerEffect: false,
                 zeroResistance: false,
                 cooperPairMechanism: `${pc.prototype} prototype search`,

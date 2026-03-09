@@ -37,6 +37,7 @@ export interface CrystalGraph {
   adjacency: number[][];
   formula: string;
   prototype?: string;
+  pressureGpa?: number;
 }
 
 interface GNNWeights {
@@ -63,6 +64,7 @@ interface GNNWeights {
   W_3body: number[][];
   W_3body_update: number[][];
   W_attn_pool: number[][];
+  W_pressure: number[];
   W_mlp1: number[][];
   b_mlp1: number[];
   W_mlp2: number[][];
@@ -509,13 +511,13 @@ function assignSiteLabels(formula: string, prototype: string): Record<string, st
   return assignment;
 }
 
-export function buildPrototypeGraph(formula: string, prototype: string): CrystalGraph {
+export function buildPrototypeGraph(formula: string, prototype: string, pressureGpa?: number): CrystalGraph {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const protoInfo = PROTOTYPE_COORDINATIONS[prototype];
 
   if (!protoInfo) {
-    return buildCrystalGraph(formula);
+    return buildCrystalGraph(formula, undefined, pressureGpa);
   }
 
   const siteAssignment = assignSiteLabels(formula, prototype);
@@ -619,7 +621,7 @@ export function buildPrototypeGraph(formula: string, prototype: string): Crystal
   }
 
   const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, formula, prototype });
-  return { nodes, edges, threeBodyFeatures, adjacency, formula, prototype };
+  return { nodes, edges, threeBodyFeatures, adjacency, formula, prototype, pressureGpa };
 }
 
 function computeStressDescriptor(atomicNumber: number, bulkModulus: number, mass: number): number {
@@ -781,7 +783,7 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
   ];
 }
 
-export function buildCrystalGraph(formula: string, structure?: any): CrystalGraph {
+export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number): CrystalGraph {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
 
@@ -874,7 +876,7 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
     }
   }
 
-  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, formula };
+  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, formula, pressureGpa };
   partialGraph.threeBodyFeatures = compute3BodyFeatures(partialGraph);
   return partialGraph;
 }
@@ -1195,6 +1197,11 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     pooled[k] = pooled[k] * 0.5 + attnPool[k] * 0.5;
   }
 
+  const pressureNorm = (graph.pressureGpa ?? 0) / 300;
+  for (let k = 0; k < HIDDEN_DIM; k++) {
+    pooled[k] += pressureNorm * (weights.W_pressure[k] ?? 0);
+  }
+
   const h1 = relu(vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1));
   if (dropoutRng) {
     const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
@@ -1250,6 +1257,7 @@ function initWeights(rng: () => number): GNNWeights {
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 0.2),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.1),
     b_mlp1: initVector(HIDDEN_DIM),
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.1),
@@ -1284,6 +1292,7 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
     W_attn_pool: w.W_attn_pool.map(r => [...r]),
+    W_pressure: [...w.W_pressure],
     W_mlp1: w.W_mlp1.map(r => [...r]),
     b_mlp1: [...w.b_mlp1],
     W_mlp2: w.W_mlp2.map(r => [...r]),
@@ -1299,6 +1308,7 @@ interface TrainingSample {
   formationEnergy?: number;
   structure?: any;
   prototype?: string;
+  pressureGpa?: number;
 }
 
 export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights): GNNWeights {
@@ -1321,8 +1331,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     const key = sample.prototype ? `${sample.formula}::p:${sample.prototype}` : `${sample.formula}::s:${structId}`;
     if (!graphCache.has(key)) {
       graphCache.set(key, sample.prototype
-        ? buildPrototypeGraph(sample.formula, sample.prototype)
-        : buildCrystalGraph(sample.formula, sample.structure));
+        ? buildPrototypeGraph(sample.formula, sample.prototype, sample.pressureGpa)
+        : buildCrystalGraph(sample.formula, sample.structure, sample.pressureGpa));
     }
   }
 
@@ -1421,6 +1431,11 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
               wMat[i][j] -= combinedGrad * (rng() - 0.5) * 0.01;
             }
           }
+        }
+
+        const combinedGradPressure = tcGrad * 0.7 + feGrad * 0.3;
+        for (let i = 0; i < weights.W_pressure.length; i++) {
+          weights.W_pressure[i] -= combinedGradPressure * (rng() - 0.5) * 0.01;
         }
       }
     }
@@ -1628,13 +1643,18 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
   perturbMatrix(perturbed.W_3body);
   perturbMatrix(perturbed.W_3body_update);
   perturbMatrix(perturbed.W_attn_pool);
+  for (let i = 0; i < perturbed.W_pressure.length; i++) {
+    if (rng() < 0.3) {
+      perturbed.W_pressure[i] *= (1 + (rng() - 0.5) * scale);
+    }
+  }
   perturbMatrix(perturbed.W_mlp1);
   perturbMatrix(perturbed.W_mlp2);
 
   return perturbed;
 }
 
-export function gnnPredictWithUncertainty(formula: string, prototype?: string): GNNPredictionWithUncertainty {
+export function gnnPredictWithUncertainty(formula: string, prototype?: string, pressureGpa?: number): GNNPredictionWithUncertainty {
   const ensembleModels = getEnsembleModels();
   const predictions: GNNPrediction[] = [];
   const perModelMeans: { tc: number; fe: number; lambda: number; bg: number }[] = [];
@@ -1646,8 +1666,8 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string): 
     for (let d = 0; d < MC_DROPOUT_PASSES; d++) {
       const dropoutRng = seededRandom(m * 1000 + d * 137 + 7);
       const graph = prototype
-        ? buildPrototypeGraph(formula, prototype)
-        : buildCrystalGraph(formula);
+        ? buildPrototypeGraph(formula, prototype, pressureGpa)
+        : buildCrystalGraph(formula, undefined, pressureGpa);
       const pred = GNNPredict(graph, modelWeights, dropoutRng);
       predictions.push(pred);
       modelPreds.push(pred);

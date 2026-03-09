@@ -752,6 +752,35 @@ export function rapidGBScreen(formulas: string[]): RapidScreenResult[] {
   return results;
 }
 
+export function estimateFamilyPressure(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const hCount = counts["H"] || 0;
+  const hydrogenRatio = totalAtoms > 0 ? hCount / totalAtoms : 0;
+
+  if (hydrogenRatio >= 0.7) return 200;
+  if (hydrogenRatio >= 0.5) return 150;
+  if (hydrogenRatio >= 0.3) return 100;
+  if (hCount > 0 && hydrogenRatio >= 0.15) return 50;
+  return 0;
+}
+
+export function mutatePressure(pressure: number): number {
+  const delta = (Math.random() - 0.5) * 40;
+  return Math.max(0, Math.min(350, Math.round(pressure + delta)));
+}
+
+export function generatePressureVariants(formula: string, basePressure: number): { formula: string; pressureGpa: number }[] {
+  const variants: { formula: string; pressureGpa: number }[] = [];
+  const offsets = basePressure > 0 ? [-50, 0, 50, 100] : [0, 50, 100];
+  for (const offset of offsets) {
+    const p = Math.max(0, Math.min(350, basePressure + offset));
+    variants.push({ formula, pressureGpa: p });
+  }
+  return variants;
+}
+
 export function runMassiveGeneration(
   topCandidates: { formula: string; predictedTc?: number }[],
   focusArea: string

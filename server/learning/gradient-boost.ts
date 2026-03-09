@@ -97,7 +97,7 @@ function computeCalibration(model: GBModel): CalibrationData {
 
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
-      const features = extractFeatures(entry.formula);
+      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
       const x = featureVectorToArray(features, entry.formula);
       if (x.some(v => !Number.isFinite(v))) continue;
       const pred = predictWithModel(model, x);
@@ -555,7 +555,7 @@ function prepareTrainingData(): { X: number[][]; y: number[] } {
   const y: number[] = [];
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
-      const features = extractFeatures(entry.formula);
+      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
       const fArr = featureVectorToArray(features, entry.formula);
       if (fArr.some(v => !Number.isFinite(v))) continue;
       X.push(fArr);
@@ -738,7 +738,7 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
 
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
-      const features = extractFeatures(entry.formula);
+      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
       const x = featureVectorToArray(features, entry.formula);
       if (x.some(v => !Number.isFinite(v))) continue;
       const pred = predictWithModel(model, x);
@@ -974,6 +974,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       tc: entry.tc,
       family: entry.stable ? "DFT-Evaluated" : "DFT-Failed",
       isSuperconductor: entry.tc > 0 && entry.stable,
+      pressureGPa: 0,
     });
     newFromEval++;
   }
@@ -983,7 +984,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   for (const entry of augmentedData) {
     try {
-      const features = extractFeatures(entry.formula);
+      const features = extractFeatures(entry.formula, { pressureGpa: (entry as any).pressureGPa ?? 0 } as any);
       const fArr = featureVectorToArray(features, entry.formula);
       if (fArr.some(v => !Number.isFinite(v))) continue;
       X.push(fArr);
@@ -1120,6 +1121,7 @@ export async function incorporateSuccessData(formula: string, tc: number): Promi
     tc,
     family: "Discovered",
     isSuperconductor: tc > 0,
+    pressureGPa: 0,
   });
 
   if (successExamples.length % 10 === 0) {
@@ -1135,7 +1137,7 @@ export async function retrainWithAccumulatedData(): Promise<number> {
 
   for (const entry of augmentedData) {
     try {
-      const features = extractFeatures(entry.formula);
+      const features = extractFeatures(entry.formula, { pressureGpa: (entry as any).pressureGPa ?? 0 } as any);
       const fArr = featureVectorToArray(features, entry.formula);
       if (fArr.some(v => !Number.isFinite(v))) continue;
       X.push(fArr);
@@ -1179,6 +1181,7 @@ export async function incorporateFailureData(): Promise<number> {
       tc: 0,
       family: "Failed",
       isSuperconductor: false,
+      pressureGPa: 0,
     });
     added++;
   }
@@ -1193,7 +1196,7 @@ export async function incorporateFailureData(): Promise<number> {
 
     for (const entry of augmentedData) {
       try {
-        const features = extractFeatures(entry.formula);
+        const features = extractFeatures(entry.formula, { pressureGpa: (entry as any).pressureGPa ?? 0 } as any);
         const fArr = featureVectorToArray(features, entry.formula);
         if (fArr.some(v => !Number.isFinite(v))) continue;
         X.push(fArr);
