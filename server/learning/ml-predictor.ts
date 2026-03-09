@@ -468,16 +468,22 @@ export async function runMLPrediction(
   const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean; gnn: GNNPrediction | null }[] = [];
 
   let preFilterSkipped = 0;
+  let loopIdx = 0;
   for (const mat of materials.slice(0, 100)) {
-    const preFeatures = extractFeatures(mat.formula);
-    if ((preFeatures.bandGap ?? 0) > 0.5 || (preFeatures.metallicity ?? 0.5) < 0.2) {
-      preFilterSkipped++;
-      continue;
+    if (loopIdx > 0 && loopIdx % 10 === 0) {
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
+    loopIdx++;
 
     const physics = physicsData.get(mat.formula);
     const crystal = crystalData.get(mat.formula);
     const features = extractFeatures(mat.formula, mat, physics, crystal);
+
+    if ((features.bandGap ?? 0) > 0.5 || (features.metallicity ?? 0.5) < 0.2) {
+      preFilterSkipped++;
+      continue;
+    }
+
     const xgb = xgboostPredict(features);
 
     if (physics && physics.verificationStage > 0) {
@@ -591,41 +597,33 @@ export async function runMLPrediction(
             synthesizability: crystal.synthesizability,
           }
         } : {}),
-        xgboostReasoning: c.xgb.reasoning,
+        xgboostReasoning: c.xgb.reasoning.slice(0, 2),
       };
     });
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `You are an advanced neural network layer in a hybrid XGBoost+NN ensemble for superconductor prediction. The XGBoost layer has performed feature-based gradient boosting and ranked candidates. Physics computations (electronic structure, phonon spectrum, electron-phonon coupling lambda, Fermi surface topology, correlation strength U/W) are included. Some candidates may also have VERIFIED physics data from computational analysis (verifiedPhysics) and/or predicted crystal structures (crystalStructure) - weight these heavily as they represent higher-fidelity data.
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 25000);
 
-Your role:
-1. Evaluate using: electron-phonon coupling (lambda), BCS/Eliashberg theory, Cooper pair formation, Meissner effect, competing phases (magnetism, CDW, Mott)
-2. For strongly correlated materials (U/W > 0.6), consider unconventional pairing (spin-fluctuation, d-wave, p-wave)
-3. Assess room-temperature viability (Tc >= 293K AND ambient pressure AND zero resistance)
-4. Identify pairing symmetry (s-wave, d-wave, p-wave, s+/-)
-5. Estimate dimensionality effects on Tc
-6. For each candidate, assign uncertainty and identify what physics is missing
-7. When verifiedPhysics is present, use the verified lambda and Tc as ground truth over estimates
-8. When crystalStructure is present, factor in thermodynamic stability (convexHullDistance < 0.05 = good), dimensionality effects on Tc, and synthesizability
-9. If competing phases suppress SC, lower the score and flag the risk
-10. CRITICAL: upperCriticalField_T (Hc2 in Tesla) is a key indicator. Real superconductors have Hc2 > 0. YBCO ~100-200T, MgB2 ~40T, hydrides ~100T+. If Hc2 is 0 or very low, the material likely does NOT superconduct. Penalize candidates with Hc2=0 severely. High Hc2 (>50T) strongly supports SC viability.
-
-Return JSON with:
-- 'candidates': array with 'formula', 'neuralNetScore' (0-1), 'refinedTc' (Kelvin), 'pressureGpa', 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism' (string), 'pairingSymmetry' (s-wave/d-wave/p-wave/s+-), 'pairingMechanism' (phonon-mediated/spin-fluctuation/charge-fluctuation/unconventional), 'dimensionality' (3D/quasi-2D/2D/1D), 'quantumCoherence' (0-1), 'roomTempViable' (boolean), 'crystalStructure', 'uncertaintyEstimate' (0-1), 'reasoning' (under 150 chars)
-- 'insights': array of 3-5 physics insights (each under 120 chars)`,
-        },
-        {
-          role: "user",
-          content: `XGBoost-ranked superconductor candidates for neural network refinement:\n${JSON.stringify(candidateSummaries, null, 2)}`,
-        },
-      ],
-      response_format: { type: "json_object" },
-      max_completion_tokens: 1200,
-    });
+    let response;
+    try {
+      response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are an NN layer in an XGBoost+NN superconductor ensemble. Evaluate candidates using BCS/Eliashberg theory, electron-phonon coupling (lambda), competing phases, pairing symmetry, and dimensionality effects. Weight verifiedPhysics and crystalStructure data heavily. Penalize Hc2=0 severely; high Hc2 (>50T) strongly supports SC. Room-temp viable = Tc>=293K AND ambient pressure AND zero resistance. Return JSON: {'candidates': [{formula, neuralNetScore (0-1), refinedTc (K), pressureGpa, meissnerEffect (bool), zeroResistance (bool), cooperPairMechanism, pairingSymmetry, pairingMechanism, dimensionality, quantumCoherence (0-1), roomTempViable (bool), crystalStructure, uncertaintyEstimate (0-1), reasoning (<150 chars)}], 'insights': [3-5 strings <120 chars]}`,
+          },
+          {
+            role: "user",
+            content: `XGBoost-ranked candidates:\n${JSON.stringify(candidateSummaries)}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 900,
+      }, { signal: abortController.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const content = response.choices[0]?.message?.content;
     if (!content) return { candidates, insights };
@@ -743,12 +741,77 @@ Return JSON with:
       dataSource: "ML Engine",
     });
   } catch (err: any) {
+    const isTimeout = err.name === "AbortError" || err.message?.includes("aborted");
     emit("log", {
       phase: "phase-7",
-      event: "Neural network error",
-      detail: err.message?.slice(0, 200) || "Unknown",
+      event: isTimeout ? "Neural network timeout" : "Neural network error",
+      detail: isTimeout
+        ? "Neural network timeout -- XGBoost-only results used. OpenAI did not respond within 25 seconds."
+        : (err.message?.slice(0, 200) || "Unknown"),
       dataSource: "ML Engine",
     });
+
+    if (candidates.length === 0 && topCandidates.length > 0) {
+      for (const c of topCandidates) {
+        const gnnPred = c.gnn;
+        let ensembleScore: number;
+        if (gnnPred) {
+          const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
+          ensembleScore = Math.min(0.95, gnnScore * 0.6 + c.xgb.score * 0.3 + (c.hasCrystal ? 0.1 : 0));
+        } else {
+          ensembleScore = Math.min(0.95, c.xgb.score * 0.7 + (c.hasCrystal ? 0.1 : 0));
+        }
+
+        const rawTc = c.xgb.tcEstimate;
+        const featureLambda = c.features.electronPhononLambda ?? 0;
+        const omegaLogK = (c.features.logPhononFreq ?? 300) * 1.44;
+        const muStar = 0.12;
+        let mcMillanMax = 0;
+        const denomMcM = featureLambda - muStar * (1 + 0.62 * featureLambda);
+        if (featureLambda > 0.2 && Math.abs(denomMcM) > 1e-6) {
+          mcMillanMax = (omegaLogK / 1.2) * Math.exp(-1.04 * (1 + featureLambda) / denomMcM);
+          if (mcMillanMax < 0 || !isFinite(mcMillanMax)) mcMillanMax = 0;
+        }
+        const finalTc = Math.max(0, Math.min(rawTc, mcMillanMax > 0 ? Math.max(rawTc * 0.7, mcMillanMax * 1.5) : rawTc));
+
+        candidates.push({
+          formula: c.mat.formula,
+          name: c.mat.name,
+          predictedTc: Math.round(finalTc * 10) / 10,
+          pressureGpa: 0,
+          meissnerEffect: ensembleScore > 0.5,
+          zeroResistance: ensembleScore > 0.5,
+          cooperPairMechanism: c.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated",
+          crystalStructure: c.features.layeredStructure ? "layered" : "3D",
+          quantumCoherence: Math.min(1, ensembleScore * 0.8),
+          stabilityScore: c.features.stabilityScore ?? 0.5,
+          xgboostScore: c.xgb.score,
+          neuralNetScore: 0,
+          ensembleScore,
+          roomTempViable: false,
+          status: "theoretical",
+          notes: `[XGBoost-only fallback: NN unavailable] ${c.xgb.reasoning[0] || ""}`,
+          electronPhononCoupling: c.features.electronPhononLambda,
+          logPhononFrequency: c.features.logPhononFreq,
+          coulombPseudopotential: 0.12,
+          pairingSymmetry: c.features.dWaveSymmetry ? "d-wave" : "s-wave",
+          pairingMechanism: c.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated",
+          correlationStrength: c.features.correlationStrength,
+          dimensionality: c.features.layeredStructure ? "quasi-2D" : "3D",
+          fermiSurfaceTopology: c.features.fermiSurfaceType,
+          uncertaintyEstimate: 0.7,
+          verificationStage: 0,
+          dataConfidence: c.hasPhysics ? "medium" : "low",
+        });
+      }
+
+      emit("log", {
+        phase: "phase-7",
+        event: "XGBoost-only fallback applied",
+        detail: `${candidates.length} candidates scored using XGBoost+GNN only (no NN refinement)`,
+        dataSource: "ML Engine",
+      });
+    }
   }
 
   return { candidates, insights };
