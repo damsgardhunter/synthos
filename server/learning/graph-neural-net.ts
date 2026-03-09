@@ -1138,8 +1138,19 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   }
 
   const lr = 0.001;
-  const epochs = 30;
+  const epochs = 15;
   const batchSize = Math.min(32, trainingData.length);
+
+  const graphCache = new Map<string, CrystalGraph>();
+  for (const sample of trainingData) {
+    const structId = sample.structure ? JSON.stringify(sample.structure).length.toString() : '';
+    const key = sample.prototype ? `${sample.formula}::p:${sample.prototype}` : `${sample.formula}::s:${structId}`;
+    if (!graphCache.has(key)) {
+      graphCache.set(key, sample.prototype
+        ? buildPrototypeGraph(sample.formula, sample.prototype)
+        : buildCrystalGraph(sample.formula, sample.structure));
+    }
+  }
 
   const indices = Array.from({ length: trainingData.length }, (_, i) => i);
 
@@ -1162,9 +1173,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const idx = indices[b];
         const sample = trainingData[idx];
 
-        const graph = sample.prototype
-          ? buildPrototypeGraph(sample.formula, sample.prototype)
-          : buildCrystalGraph(sample.formula, sample.structure);
+        const structId = sample.structure ? JSON.stringify(sample.structure).length.toString() : '';
+        const cacheKey = sample.prototype ? `${sample.formula}::p:${sample.prototype}` : `${sample.formula}::s:${structId}`;
+        const graph = graphCache.get(cacheKey)!;
         const pred = GNNPredict(graph, weights);
 
         const tcTarget = sample.tc / 300;
@@ -1261,6 +1272,18 @@ export function trainEnsemble(trainingData: TrainingSample[]): GNNWeights[] {
     const w = initWeights(rng);
     const trained = trainGNNSurrogate(trainingData, w);
     models.push(trained);
+  }
+  return models;
+}
+
+export async function trainEnsembleAsync(trainingData: TrainingSample[]): Promise<GNNWeights[]> {
+  const models: GNNWeights[] = [];
+  for (let i = 0; i < ENSEMBLE_SIZE; i++) {
+    const rng = seededRandom(42 + i * 7919);
+    const w = initWeights(rng);
+    const trained = trainGNNSurrogate(trainingData, w);
+    models.push(trained);
+    await new Promise(resolve => setImmediate(resolve));
   }
   return models;
 }

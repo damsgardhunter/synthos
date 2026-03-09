@@ -2,7 +2,7 @@ import { storage } from "../storage";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { EventEmitter } from "./engine";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { invalidateGNNModel, trainGNNSurrogate, trainEnsemble, setCachedEnsemble, ENSEMBLE_SIZE } from "./graph-neural-net";
+import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, validateModel } from "./gradient-boost";
@@ -201,9 +201,8 @@ async function retrainGNNWithEnrichedData(
     }
   } catch (e: any) { console.error("[ActiveLearning] enrichment error:", e?.message?.slice(0, 200)); }
 
+  const ensembleModels = await trainEnsembleAsync(trainingData);
   invalidateGNNModel();
-
-  const ensembleModels = trainEnsemble(trainingData);
   setCachedEnsemble(ensembleModels);
 
   await incorporateFailureData();
@@ -292,17 +291,17 @@ export async function runActiveLearningCycle(
   const hasNewData = totalEnrichedSinceLastRetrain > 0;
   const isConverged = recentUncertaintyDrops.length >= 3 &&
     (recentUncertaintyDrops.reduce((s, v) => s + v, 0) / recentUncertaintyDrops.length) < 0.1;
-  const retrainThreshold = isConverged ? 30 : 15;
+  const retrainThreshold = isConverged ? 50 : 25;
   const shouldRetrain = hasNewData && (
     totalEnrichedSinceLastRetrain >= retrainThreshold ||
-    (!isConverged && avgUncertaintyBefore > 0.3) ||
+    (!isConverged && avgUncertaintyBefore > 0.5) ||
     convergenceStats.modelRetrains === 0
   );
   if (shouldRetrain) {
     emit("log", {
       phase: "active-learning",
       event: "GNN retrain triggered",
-      detail: `Trigger: enriched=${totalEnrichedSinceLastRetrain}>=${retrainThreshold} OR uncertainty=${avgUncertaintyBefore.toFixed(3)}>0.3 OR firstRetrain=${convergenceStats.modelRetrains === 0}${isConverged ? ' [model converged, higher threshold]' : ''}`,
+      detail: `Trigger: enriched=${totalEnrichedSinceLastRetrain}>=${retrainThreshold} OR uncertainty=${avgUncertaintyBefore.toFixed(3)}>0.5 OR firstRetrain=${convergenceStats.modelRetrains === 0}${isConverged ? ' [model converged, higher threshold]' : ''}`,
       dataSource: "Active Learning",
     });
     retrainResult = await retrainGNNWithEnrichedData(emit);
@@ -312,7 +311,7 @@ export async function runActiveLearningCycle(
     emit("log", {
       phase: "active-learning",
       event: "GNN retrain deferred",
-      detail: `${totalEnrichedSinceLastRetrain} enriched since last retrain (threshold: 15). Uncertainty: ${avgUncertaintyBefore.toFixed(3)}. Will retrain after more data.`,
+      detail: `${totalEnrichedSinceLastRetrain} enriched since last retrain (threshold: ${retrainThreshold}). Uncertainty: ${avgUncertaintyBefore.toFixed(3)}. Will retrain after more data.`,
       dataSource: "Active Learning",
     });
   } else {
