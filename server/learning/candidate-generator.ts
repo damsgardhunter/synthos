@@ -518,7 +518,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
         newCounts[sub] = newCounts[el];
         delete newCounts[el];
         const formula = canonicalize(countsToFormula(newCounts));
-        if (formula && formula.length > 1) results.add(formula);
+        if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
         if (results.size >= count) break;
       }
 
@@ -539,7 +539,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
             newCounts[sub2] = newCounts[el2];
             delete newCounts[el2];
             const formula = canonicalize(countsToFormula(newCounts));
-            if (formula && formula.length > 1) results.add(formula);
+            if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
             if (results.size >= count) break;
           }
           if (results.size >= count) break;
@@ -555,7 +555,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
         if (variation < 1 || variation > 12 || variation === stoich) continue;
         const newCounts = { ...counts, [el]: variation };
         const formula = canonicalize(countsToFormula(newCounts));
-        if (formula && formula.length > 1) results.add(formula);
+        if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
         if (results.size >= count) break;
       }
       if (results.size >= count) break;
@@ -585,7 +585,7 @@ export function generateCompositionInterpolations(formula1: string, formula2: st
     }
     if (Object.keys(interpolated).length >= 2) {
       const formula = canonicalize(countsToFormula(interpolated));
-      if (formula && formula.length > 1) results.push(formula);
+      if (formula && formula.length > 1 && passesElementCountCap(formula)) results.push(formula);
     }
   }
 
@@ -605,9 +605,11 @@ export function generateRandomDopedVariants(baseFormulas: string[], dopantElemen
 
       for (const dopantCount of [1, 2, 3]) {
         if (totalAtoms + dopantCount > 20) continue;
+        if (elements.length + 1 > 5) continue;
+        if (elements.filter(el => el !== "H").length + (dopant !== "H" ? 1 : 0) > 4) continue;
         const newCounts = { ...counts, [dopant]: dopantCount };
         const formula = canonicalize(countsToFormula(newCounts));
-        if (formula && formula.length > 1) results.add(formula);
+        if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
         if (results.size >= count) break;
       }
       if (results.size >= count) break;
@@ -621,7 +623,7 @@ export function generateRandomDopedVariants(baseFormulas: string[], dopantElemen
           newCounts[el] = stoich - replace;
           newCounts[dopant] = replace;
           const formula = canonicalize(countsToFormula(newCounts));
-          if (formula && formula.length > 1) results.add(formula);
+          if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
           if (results.size >= count) break;
         }
         if (results.size >= count) break;
@@ -661,7 +663,7 @@ export function generateFractionalDopedVariants(baseFormulas: string[], count: n
           newCounts[hostEl] = hostRemain;
           newCounts[dopant] = dopantAmount;
           const formula = canonicalize(countsToFormula(newCounts));
-          if (formula && formula.length > 2) results.add(formula);
+          if (formula && formula.length > 2 && passesElementCountCap(formula)) results.add(formula);
           if (results.size >= count) break;
         }
         if (results.size >= count) break;
@@ -818,7 +820,7 @@ export function runMassiveGeneration(
     }
   }
 
-  const allSeeds = [...baseFormulas, ...seedFormulas];
+  const allSeeds = [...baseFormulas, ...seedFormulas].filter(f => passesElementCountCap(f));
 
   const substitutions = generateElementSubstitutions(allSeeds, 400);
   for (const f of substitutions) allGenerated.add(f);
@@ -891,7 +893,8 @@ export function runMassiveGeneration(
     for (let ei = 0; ei < chosen.length; ei++) {
       formula += chosen[ei] + (stoich[ei] > 1 ? stoich[ei] : "");
     }
-    allGenerated.add(canonicalize(formula));
+    const canonProto = canonicalize(formula);
+    if (passesElementCountCap(canonProto)) allGenerated.add(canonProto);
   }
 
   for (const pair of focusPairs) {
@@ -914,7 +917,8 @@ export function runMassiveGeneration(
       const count = ei < s.length ? s[ei] : 1;
       formula += els[ei] + (count > 1 ? count : "");
     }
-    allGenerated.add(canonicalize(formula));
+    const canonFamily = canonicalize(formula);
+    if (passesElementCountCap(canonFamily)) allGenerated.add(canonFamily);
   }
 
   stats.totalGenerated = allGenerated.size;

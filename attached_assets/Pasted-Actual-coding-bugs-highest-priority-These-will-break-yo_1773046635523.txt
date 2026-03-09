@@ -1,0 +1,281 @@
+Actual coding bugs (highest priority)
+
+These will break your pipeline regardless of the physics.
+
+Undefined variable
+[Active Learning] Error at cycle 107: ENSEMBLE_SIZE is not defined
+
+This is a hard runtime error.
+
+Likely causes:
+
+const ensemble = new Array(ENSEMBLE_SIZE)
+
+but the constant was never declared.
+
+Fix:
+
+const ENSEMBLE_SIZE = 5
+
+or load from config:
+
+const ENSEMBLE_SIZE = config.activeLearning.ensembleSize
+Undefined array access
+[NextGenPipeline] pillar eval error: Cannot read properties of undefined (reading 'some')
+
+This means something like:
+
+pillars.some(p => p.score > 0)
+
+but pillars is undefined.
+
+Guard it:
+
+if (!Array.isArray(pillars)) return false
+
+or:
+
+pillars?.some(...)
+
+This error repeating 15+ times suggests the pillar module never received data.
+
+Worker authentication timeout
+[DFT-Queue] Worker loop error: Authentication timed out
+
+Likely:
+
+API token expired
+
+SSH key expired
+
+cluster auth handshake failing
+
+This can cause silent DFT job loss.
+
+2️⃣ Numerical instability in xTB phonons
+
+Example:
+
+70 imaginary modes
+lowest freq = -340 cm⁻¹
+
+or worse:
+
+198 modes below -2000 cm⁻¹
+lowest = -3985 cm⁻¹
+
+These are not real phonons.
+
+They are finite-difference explosions.
+
+Causes:
+
+xTB geometry not fully optimized
+
+displacement step too large
+
+too few SCF iterations
+
+highly unstable lattice
+
+Your artifact detector is working
+ARTIFACT DETECTED — 198 modes below -2000 cm⁻¹ discarded
+
+That is good pipeline design.
+
+But the follow-up step is inconsistent:
+
+stable=false
+freq range [-3985, -3985]
+
+This should instead return something like:
+
+phonon_status = unreliable
+
+not treat the numbers as real.
+
+3️⃣ Physics problems in generated structures
+
+These are common in generative materials pipelines.
+
+A. Severe lattice overlap
+Ca3FeSe4 minDist=0.653 Å
+
+That means atoms are basically overlapping.
+
+Typical minimum:
+
+> 1.2 Å for H
+> 1.8 Å for metals
+
+Your generator is producing collapsed lattices.
+
+B. Lattice expansion exploding
+
+Example:
+
+vol/atom=25.9 → expand 2.50
+vol/atom=208 → expand 1.23
+generated volume = 3200 Å³
+expected = 155 Å³
+ratio = 14
+
+This is a runaway scaling loop.
+
+Your volume correction logic is unstable.
+
+Instead of multiplicative scaling, clamp:
+
+scale = clamp(target/current, 0.8, 1.3)
+C. Kagome template mismatch
+Volume ratio check FAILED for Kagome
+ratio = 14
+
+Your Kagome generator likely assumes specific atom counts, but you inserted:
+
+Ca3FeSe4
+
+which probably doesn't fit the template.
+
+4️⃣ Geometry optimization failures
+
+Example:
+
+Geometry optimization failed:
+Command failed:
+cd ... && C:
+
+This looks like a Windows command formatting bug.
+
+The command likely became:
+
+cd path && C:
+
+instead of:
+
+cd /d path
+
+On Windows, changing drives requires:
+
+cd /d C:\path
+5️⃣ Incorrect phonon interpretation
+
+Example:
+
+YHgH6
+198 imaginary modes
+but pipeline ACCEPTED Tc=100K
+
+That is very dangerous logic.
+
+Imaginary phonons mean dynamical instability.
+
+Your pipeline should reject unless:
+
+|imaginary| < 20 cm⁻¹
+
+or treat as metastable.
+
+Right now your pipeline accepted a physically unstable structure.
+
+6️⃣ Suspicious chemistry generation
+
+Example:
+
+K3Na3Li2CrH7PdN
+
+Problems:
+
+7 elements
+
+huge compositional complexity
+
+unrealistic stoichiometry
+
+Your DFT worker correctly rejected it:
+
+Too many distinct elements (7)
+
+But the generator should prevent such compositions earlier.
+
+7️⃣ Bond valence filter behavior
+
+Example:
+
+bond valence deviation = 0.74
+coordination mismatch = 0.92
+
+Those are extremely large errors.
+
+This suggests your structure builder is not respecting oxidation states.
+
+Common causes:
+
+random coordination assignment
+
+incorrect ionic radii
+
+hydrogen treated incorrectly
+
+8️⃣ Force constant matrix failure
+
+Example:
+
+MgB3
+Force constant matrix construction failed
+
+Typical causes:
+
+SCF did not converge
+
+forces too noisy
+
+displacement symmetry broken
+
+This is common in xTB phonons, but still worth handling.
+
+9️⃣ Generator exploration imbalance
+structure_diffusion = 32.8%
+rl = 26.9%
+bo = 21.5%
+random = 4.7%
+
+Random exploration is very low.
+
+For discovery systems it should be at least:
+
+10–20%
+
+Otherwise the search collapses into local optima.
+
+🔟 Suspicious formation energy
+
+Example:
+
+YHgH6 formation energy = +34 eV/atom
+
+That is astronomically unstable.
+
+Typical unstable materials are:
+
++0.1 – +0.5 eV/atom
+
++34 eV means the reference energy calculation is wrong.
+
+Possible issues:
+
+wrong element reference
+
+unit conversion bug
+
+Hartree vs eV mismatch
+
+11️⃣ Minor duplication bug
+
+Example repeated lines:
+
+ZrH6Au Structure validation attempt 1
+
+appears twice.
+
+Likely double logging.

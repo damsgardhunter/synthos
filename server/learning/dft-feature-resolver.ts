@@ -451,11 +451,17 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
     if (xtbPhononStability.hasImaginaryModes) {
       console.log(`[DFT] ${formula}: xTB Hessian found ${xtbPhononStability.imaginaryModeCount} imaginary mode(s), lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1 (severe: freq < -2000)`);
     } else {
-      const mildCount = xtbPhononStability.frequencies?.filter(f => f < -50 && f >= -2000).length ?? 0;
-      if (mildCount > 0) {
-        console.log(`[DFT] ${formula}: xTB Hessian: ${mildCount} mild imaginary mode(s) (lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1) — within xTB tolerance, accepted`);
+      const mildModes = xtbPhononStability.frequencies?.filter(f => f < -50 && f >= -2000) ?? [];
+      const artifactModes = xtbPhononStability.frequencies?.filter(f => f < -5000) ?? [];
+      const nonArtifactFreqs = xtbPhononStability.frequencies?.filter(f => f >= -5000) ?? [];
+      const lowestNonArtifact = nonArtifactFreqs.length > 0 ? Math.min(...nonArtifactFreqs) : xtbPhononStability.lowestFrequency;
+      if (artifactModes.length > 0 && mildModes.length === 0) {
+        console.log(`[DFT] ${formula}: xTB Hessian: ${artifactModes.length} artifact mode(s) discarded (freq < -5000 cm-1), lowest non-artifact freq=${lowestNonArtifact.toFixed(1)} cm-1 — accepted`);
+      } else if (mildModes.length > 0) {
+        const lowestMild = Math.min(...mildModes);
+        console.log(`[DFT] ${formula}: xTB Hessian: ${mildModes.length} mild imaginary mode(s) (lowest mild freq=${lowestMild.toFixed(1)} cm-1)${artifactModes.length > 0 ? `, ${artifactModes.length} artifact mode(s) discarded` : ""} — within xTB tolerance, accepted`);
       } else {
-        console.log(`[DFT] ${formula}: xTB Hessian confirms phonon stability, lowest freq=${xtbPhononStability.lowestFrequency.toFixed(1)} cm-1`);
+        console.log(`[DFT] ${formula}: xTB Hessian confirms phonon stability, lowest freq=${lowestNonArtifact.toFixed(1)} cm-1`);
       }
     }
   }

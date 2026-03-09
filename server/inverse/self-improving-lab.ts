@@ -822,15 +822,15 @@ export function runLabIteration(id: string): LabIterationResult | null {
 
       try {
         const pillarTargets: SCPillarTargets = {
-          targetTc: state.targetTc,
-          targetLambda: strategy.parameters.targetLambdaRange[1],
-          targetOmegaLog: 500,
-          targetDOS: 3.0,
-          targetNesting: 0.5,
-          targetMotifMatch: 0.6,
-          targetPairingGlue: 0.5,
-          targetInstability: 0.3,
-          targetHydrogenCage: strategy.parameters.hydrogenDensity === "high" ? 0.6 : 0.3,
+          minLambda: strategy.parameters.targetLambdaRange[1],
+          minOmegaLogK: 500,
+          minDOS: 3.0,
+          minNesting: 0.5,
+          minFlatBand: 0.6,
+          minPairingGlue: 0.5,
+          minInstability: 0.3,
+          minHydrogenCage: strategy.parameters.hydrogenDensity === "high" ? 0.6 : 0.3,
+          preferredMotifs: ["cage", "layered", "kagome"],
         };
         candidate.pillarEval = evaluatePillars(raw.formula, pillarTargets);
       } catch {}

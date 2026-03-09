@@ -1709,23 +1709,28 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
       if (volRatioCheck.valid) return current;
     }
 
+    const damping = 1.0 / (1.0 + attempt * 0.3);
+    const volRatio = volumePerAtom / targetVolPerAtom;
+
     let scaleFactor = 1.0;
     if (!distOk) {
-      scaleFactor = Math.max(scaleFactor, 1.05 / Math.max(minRatio, 0.01));
-    }
-    if (!volOk) {
+      const rawExpansion = 1.05 / Math.max(minRatio, 0.01);
+      if (volRatio > 1.3) {
+        scaleFactor = Math.max(scaleFactor, 1.0 + (rawExpansion - 1.0) * 0.4 * damping);
+      } else {
+        scaleFactor = Math.max(scaleFactor, 1.0 + (rawExpansion - 1.0) * damping);
+      }
+    } else if (!volOk) {
       const neededFactor = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
-      scaleFactor = Math.max(scaleFactor, neededFactor);
+      scaleFactor = Math.max(scaleFactor, 1.0 + (neededFactor - 1.0) * damping);
+    } else if (volRatio > 1.6) {
+      const contractFactor = Math.cbrt(1.0 / volRatio);
+      scaleFactor = 1.0 + (contractFactor - 1.0) * damping;
     }
 
-    const volRatio = volumePerAtom / targetVolPerAtom;
-    if (distOk && volRatio > 1.6) {
-      scaleFactor = Math.cbrt(1.0 / volRatio);
-    }
-
-    scaleFactor = Math.max(scaleFactor, 0.3);
-    scaleFactor = Math.min(scaleFactor, 3.0);
-    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(2)}`);
+    scaleFactor = Math.max(scaleFactor, 0.7);
+    scaleFactor = Math.min(scaleFactor, 1.5);
+    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(2)} (damping=${damping.toFixed(2)})`);
     current = scaleStructure(current, scaleFactor);
   }
 
@@ -2259,17 +2264,20 @@ const MOLECULAR_BOND_LENGTHS: Record<string, number> = {
 };
 
 const COHESIVE_ENERGIES_EV: Record<string, number> = {
-  H: 2.24, He: 0, Li: 1.63, Be: 3.32, B: 5.81, C: 7.37, N: 4.92, O: 2.60, F: 0.84,
-  Na: 1.11, Mg: 1.51, Al: 3.39, Si: 4.63, P: 3.43, S: 2.85, Cl: 1.40,
-  K: 0.93, Ca: 1.84, Sc: 3.90, Ti: 4.85, V: 5.31, Cr: 4.10, Mn: 2.92,
+  H: 2.24, He: 0.0, Li: 1.63, Be: 3.32, B: 5.81, C: 7.37, N: 4.92, O: 2.60, F: 0.84,
+  Ne: 0.02, Na: 1.11, Mg: 1.51, Al: 3.39, Si: 4.63, P: 3.43, S: 2.85, Cl: 1.40,
+  Ar: 0.08, K: 0.93, Ca: 1.84, Sc: 3.90, Ti: 4.85, V: 5.31, Cr: 4.10, Mn: 2.92,
   Fe: 4.28, Co: 4.39, Ni: 4.44, Cu: 3.49, Zn: 1.35, Ga: 2.81, Ge: 3.85,
-  As: 2.96, Se: 2.46, Br: 1.22,
+  As: 2.96, Se: 2.46, Br: 1.22, Kr: 0.12,
   Rb: 0.85, Sr: 1.72, Y: 4.37, Zr: 6.25, Nb: 7.57, Mo: 6.82, Tc: 6.85,
   Ru: 6.74, Rh: 5.75, Pd: 3.89, Ag: 2.95, Cd: 1.16, In: 2.52, Sn: 3.14, Sb: 2.75, Te: 2.02,
-  Cs: 0.80, Ba: 1.90, La: 4.47, Ce: 4.32, Pr: 3.70, Nd: 3.40, Sm: 2.14, Eu: 1.86,
+  I: 1.11, Xe: 0.16,
+  Cs: 0.80, Ba: 1.90, La: 4.47, Ce: 4.32, Pr: 3.70, Nd: 3.40, Pm: 3.20, Sm: 2.14, Eu: 1.86,
   Gd: 4.14, Tb: 4.05, Dy: 3.04, Ho: 3.14, Er: 3.29, Tm: 2.42, Yb: 1.60, Lu: 4.43,
   Hf: 6.44, Ta: 8.10, W: 8.90, Re: 8.03, Os: 8.17, Ir: 6.94, Pt: 5.84, Au: 3.81,
-  Tl: 1.88, Pb: 2.03, Bi: 2.18, Th: 6.20, U: 5.55, Pa: 5.89,
+  Hg: 0.67, Tl: 1.88, Pb: 2.03, Bi: 2.18, Po: 1.50, At: 1.00, Rn: 0.20,
+  Fr: 0.75, Ra: 1.66, Ac: 4.25, Th: 6.20, Pa: 5.89, U: 5.55, Np: 4.73, Pu: 3.60,
+  Am: 2.73, Cm: 3.99,
 };
 
 async function computeElementalEnergy(element: string): Promise<number | null> {
@@ -2328,10 +2336,14 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
     if (energyMatch && output.includes("normal termination")) {
       let energyPerAtom = parseFloat(energyMatch[1]) / divisor;
       if (!isMolecular) {
-        const cohesiveEv = COHESIVE_ENERGIES_EV[element] ?? 3.0;
-        const cohesiveHa = cohesiveEv / 27.2114;
+        const cohesiveEv = COHESIVE_ENERGIES_EV[element];
+        if (cohesiveEv === undefined) {
+          console.log(`[DFT] WARNING: Element ${element} missing from COHESIVE_ENERGIES_EV, using fallback 3.0 eV`);
+        }
+        const cohesiveEvVal = cohesiveEv ?? 3.0;
+        const cohesiveHa = cohesiveEvVal / 27.2114;
         energyPerAtom = energyPerAtom - cohesiveHa;
-        console.log(`[DFT] ${element}: Ref energy corrected from ${(energyPerAtom + cohesiveHa).toFixed(4)} Ha (atom) to ${energyPerAtom.toFixed(4)} Ha (bulk-corrected, cohesive=${cohesiveEv.toFixed(2)} eV)`);
+        console.log(`[DFT] ${element}: Ref energy corrected from ${(energyPerAtom + cohesiveHa).toFixed(4)} Ha (atom) to ${energyPerAtom.toFixed(4)} Ha (bulk-corrected, cohesive=${cohesiveEvVal.toFixed(2)} eV)`);
       }
       elementRefEnergies.set(element, energyPerAtom);
       try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
@@ -2383,7 +2395,12 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
 
   const formationTotal = compoundEnergy - elementalTotal;
   const HA_TO_EV = 27.2114;
-  const efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
+  let efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
+
+  if (efPerAtom > 5.0 || efPerAtom < -10.0) {
+    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom wildly out of range, likely reference energy mismatch — discarding`);
+    return null;
+  }
 
   if (efPerAtom > 1.0) {
     console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom is positive (>1.0), discarding — compound less stable than elements`);
@@ -2391,8 +2408,8 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
   }
 
   if (efPerAtom < -5.0) {
-    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom unrealistically negative (<-5.0), likely reference energy mismatch — discarding`);
-    return null;
+    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom unrealistically negative (<-5.0), clamping to -5.0`);
+    efPerAtom = -5.0;
   }
 
   return efPerAtom;

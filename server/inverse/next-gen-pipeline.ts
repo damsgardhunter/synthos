@@ -277,15 +277,15 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
   state.totalConstraintsPassed += constraintPassed.length;
 
   const pillarTargets: SCPillarTargets = {
-    targetTc: state.goal.targetTc,
-    targetLambda: state.constraintSolution?.requiredLambda?.optimal ?? state.goal.minLambda,
-    targetOmegaLog: state.constraintSolution?.requiredOmegaLog?.optimal ?? 500,
-    targetDOS: state.constraintSolution?.requiredDOS?.optimalDOS ?? 3.0,
-    targetNesting: 0.5,
-    targetMotifMatch: 0.6,
-    targetPairingGlue: 0.5,
-    targetInstability: 0.3,
-    targetHydrogenCage: 0.4,
+    minLambda: state.constraintSolution?.requiredLambda?.optimal ?? state.goal.minLambda,
+    minOmegaLogK: state.constraintSolution?.requiredOmegaLog?.optimal ?? 500,
+    minDOS: state.constraintSolution?.requiredDOS?.optimalDOS ?? 3.0,
+    minNesting: 0.5,
+    minFlatBand: 0.6,
+    minPairingGlue: 0.5,
+    minInstability: 0.3,
+    minHydrogenCage: 0.4,
+    preferredMotifs: ["cage", "layered", "kagome"],
   };
 
   for (const candidate of constraintPassed) {

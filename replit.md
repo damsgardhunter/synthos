@@ -300,6 +300,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - engine.ts: FAMILY_CAPS Hydrides lowered 0.40→0.25; 5 new families added (Pnictides 0.10, Intermetallics 0.12, Kagome 0.08, Alloys 0.10, Cuprates 0.10) to prevent hydride mode collapse.
     - candidate-generator.ts: Valence filter hydride exception — binary hydrides (alkali/AE/TM + H only) and high-H-ratio compounds (H > 60% atoms) skip strict charge balance check, since high-pressure hydrides violate classical valence rules.
     - qe-dft-engine.ts + qe-worker.ts: H atomic volume reduced 5.0→3.0 Å³ in both ATOMIC_VOLUMES dictionaries for realistic hydride lattice spacing (was producing 7Å H-H distances).
+  - **Bug report fix session (6 fixes)**:
+    - next-gen-pipeline.ts + self-improving-lab.ts: Fixed pillar `.some()` crash — pillarTargets was constructed with wrong field names (targetTc/targetLambda) instead of SCPillarTargets interface fields (minLambda/minOmegaLogK/etc.), and `preferredMotifs` was missing entirely. Fixed in both files.
+    - sc-pillars-optimizer.ts: Added defensive guard `(targets.preferredMotifs ?? []).some(...)` to prevent crash if preferredMotifs is undefined.
+    - qe-dft-engine.ts: Fixed volume scaling oscillation — added damping factor (reduces scale magnitude each iteration), changed competing expand/contract to mutually exclusive if/else, tightened clamps from [0.3,3.0] to [0.7,1.5].
+    - generator-manager.ts: Increased random_exploration default 0.05→0.10 (10%) and MINIMUM_WEIGHT_FLOOR 0.02→0.05 (5%) for better discovery diversity.
+    - dft-feature-resolver.ts: Fixed misleading phonon log — artifact modes (< -5000 cm⁻¹) now logged separately from mild modes, prevents reporting -65986 cm⁻¹ as "mild accepted".
+    - candidate-generator.ts: Added passesElementCountCap() early filter across all generator paths — max 5 elements, max 4 non-H — prevents 7-element compounds from wasting DFT compute.
+    - qe-dft-engine.ts: Expanded COHESIVE_ENERGIES_EV with ~20 missing elements (Hg, noble gases, actinides, etc.) and added formation energy sanity clamp [-10, +5] eV/atom.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

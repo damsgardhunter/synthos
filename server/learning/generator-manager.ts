@@ -32,14 +32,14 @@ export interface GeneratorAllocationInfo {
   rebalanceCount: number;
 }
 
-const MINIMUM_WEIGHT_FLOOR = 0.02;
+const MINIMUM_WEIGHT_FLOOR = 0.05;
 
 const DEFAULT_ALLOCATIONS: Record<string, number> = {
-  structure_diffusion: 0.35,
+  structure_diffusion: 0.30,
   rl: 0.25,
   bo_exploration: 0.20,
   motif_diffusion: 0.15,
-  random_exploration: 0.05,
+  random_exploration: 0.10,
 };
 
 const generators: Map<string, GeneratorEntry> = new Map();

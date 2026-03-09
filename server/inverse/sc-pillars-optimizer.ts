@@ -662,7 +662,7 @@ export function evaluatePillars(
   const hydrogenCage = computeHydrogenCageMetrics(formula, elements, counts);
   const fermiSurface = computeFermiSurfaceGeometry(formula, electronic, elements);
 
-  const motifBonus = targets.preferredMotifs.some(pm => motif.match.includes(pm)) ? 0.2 : 0;
+  const motifBonus = (targets.preferredMotifs ?? []).some(pm => motif.match.includes(pm)) ? 0.2 : 0;
 
   const isHydride = hydrogenCage.isHydride;
   const hydrogenCageWeight = isHydride ? pillarWeights.hydrogenCage : 0;
