@@ -116,6 +116,7 @@ import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats
 import { crossEngineHub } from "./learning/cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats } from "./learning/synthesis-discovery";
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
+import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "./synthesis/heuristic-synthesis-generator";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "./synthesis/crystal-growth-simulator";
 import { generateExperimentPlan, getExperimentPlannerStats, type ExperimentCandidate } from "./experiment-planner";
@@ -1784,6 +1785,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(recent);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch recent synthesis routes", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/heuristic-synthesis/routes/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const routes = generateHeuristicRoutes(formula);
+      res.json({ formula, routes, ruleCount: routes.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate heuristic routes", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/heuristic-synthesis/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getHeuristicGeneratorStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch heuristic synthesis stats", detail: e.message?.slice(0, 200) });
     }
   });
 

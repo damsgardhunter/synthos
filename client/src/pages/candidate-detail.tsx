@@ -507,11 +507,14 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
   const plannerRoutes = allRoutes.filter(
     (r: any) => r.source === "synthesis-planner"
   );
+  const heuristicRoutes = allRoutes.filter(
+    (r: any) => r.source === "heuristic-generator"
+  );
   const analogyRoutes = allRoutes.filter(
     (r: any) => r.source === "analogy-transfer"
   );
   const literatureRoutes = allRoutes.filter(
-    (r: any) => !["physics-reasoned", "synthesis-planner", "analogy-transfer", "reaction-pathway-engine"].includes(r.source)
+    (r: any) => !["physics-reasoned", "synthesis-planner", "heuristic-generator", "analogy-transfer", "reaction-pathway-engine"].includes(r.source)
   );
   const pathwayRoutes = allRoutes.filter(
     (r: any) => r.source === "reaction-pathway-engine"
@@ -566,6 +569,56 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
                       <Badge key={j} variant="secondary" className="text-[10px] font-mono border-0">{p}</Badge>
                     ))}
                   </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {heuristicRoutes.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 border-0 text-[10px]" data-testid="badge-heuristic">
+                Rule-Based
+              </Badge>
+              <span className="text-xs text-muted-foreground">{heuristicRoutes.length} route(s) from heuristic rules</span>
+            </div>
+            {heuristicRoutes.map((route: any, i: number) => (
+              <div key={`heuristic-${i}`} className="p-3 bg-emerald-50/50 dark:bg-emerald-950/20 rounded-md space-y-2 border border-emerald-200/50 dark:border-emerald-800/30" data-testid={`synthesis-heuristic-${i}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-bold">{route.routeName || route.method}</p>
+                    {route.equation && (
+                      <p className="text-xs font-mono text-muted-foreground mt-0.5">{route.equation}</p>
+                    )}
+                  </div>
+                  {typeof route.confidence === "number" && (
+                    <Badge variant="outline" className="text-[10px] font-mono shrink-0" data-testid={`heuristic-conf-${i}`}>
+                      {(route.confidence * 100).toFixed(0)}% confidence
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                  {route.rule && <span>Rule: {route.rule}</span>}
+                  {route.difficulty && <span>Difficulty: {route.difficulty}</span>}
+                  {route.temperature != null && <span>{route.temperature}K</span>}
+                  {route.pressure != null && route.pressure > 0 && <span>{route.pressure} GPa</span>}
+                  {route.atmosphere && <span>{route.atmosphere}</span>}
+                </div>
+                {route.precursors && Array.isArray(route.precursors) && route.precursors.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {route.precursors.map((p: string, j: number) => (
+                      <Badge key={j} variant="secondary" className="text-[10px] font-mono border-0">{p}</Badge>
+                    ))}
+                  </div>
+                )}
+                {route.steps && Array.isArray(route.steps) && (
+                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
+                    {route.steps.slice(0, 6).map((s: string, j: number) => <li key={j}>{s}</li>)}
+                    {route.steps.length > 6 && <li className="italic">...and {route.steps.length - 6} more step(s)</li>}
+                  </ol>
+                )}
+                {route.notes && (
+                  <p className="text-[10px] text-muted-foreground italic">{route.notes}</p>
                 )}
               </div>
             ))}

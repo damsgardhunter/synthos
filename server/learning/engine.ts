@@ -104,6 +104,7 @@ import {
 import { crossEngineHub } from "./cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, type MultiEngineInsights } from "./synthesis-discovery";
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
+import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -2826,6 +2827,40 @@ async function runPhase13_SynthesisReasoning() {
             }
           } catch (err: any) {
             console.error(`[Engine] Synthesis planner failed for ${candidate.formula}:`, err.message?.slice(0, 100));
+          }
+        }
+
+        const hasHeuristicRoutes = Array.isArray(existingPath?.routes)
+          && existingPath.routes.some((r: any) => r.source === "heuristic-generator");
+        if (!hasHeuristicRoutes) {
+          try {
+            const heuristicRoutes = generateHeuristicRoutes(candidate.formula, true);
+            if (heuristicRoutes.length > 0) {
+              const hRoutes = heuristicRoutes.slice(0, 3).map((r: any) => ({
+                routeName: `${r.rule}: ${r.method}`,
+                method: r.method,
+                rule: r.rule,
+                precursors: r.precursors,
+                steps: r.steps,
+                equation: r.equation,
+                temperature: r.temperature,
+                pressure: r.pressure,
+                atmosphere: r.atmosphere,
+                difficulty: r.difficulty,
+                confidence: r.confidence,
+                notes: r.notes,
+                source: "heuristic-generator",
+              }));
+              allNewRoutes.push(...hRoutes);
+              emit("log", {
+                phase: "phase-13",
+                event: "Heuristic synthesis routes generated",
+                detail: `${candidate.formula}: ${heuristicRoutes.length} rule-based routes [${heuristicRoutes.map(r => r.rule).join(", ")}]`,
+                dataSource: "Heuristic Synthesis Generator",
+              });
+            }
+          } catch (err: any) {
+            console.error(`[Engine] Heuristic synthesis generator failed for ${candidate.formula}:`, err.message?.slice(0, 100));
           }
         }
 

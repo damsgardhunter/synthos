@@ -423,6 +423,12 @@ export default function Dashboard() {
     avgFeasibility: number;
     methodBreakdown: Record<string, number>;
   }>({ queryKey: ["/api/synthesis-planner/stats"], refetchInterval: 20000 });
+  const { data: heuristicStats } = useQuery<{
+    totalGenerated: number;
+    formulasProcessed: number;
+    ruleHits: Record<string, number>;
+    totalRules: number;
+  }>({ queryKey: ["/api/heuristic-synthesis/stats"], refetchInterval: 20000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -839,7 +845,33 @@ export default function Dashboard() {
                   )}
                 </>
               )}
-              {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) && (!synthPlannerStats || synthPlannerStats.totalPlans === 0) && (
+              {heuristicStats && heuristicStats.totalGenerated > 0 && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="hg-total">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Heuristic Routes</p>
+                      <p className="text-lg font-mono font-bold">{heuristicStats.totalGenerated}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="hg-formulas">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Formulas Processed</p>
+                      <p className="text-lg font-mono font-bold">{heuristicStats.formulasProcessed}</p>
+                    </div>
+                  </div>
+                  {Object.keys(heuristicStats.ruleHits).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Rules Matched</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(heuristicStats.ruleHits).sort(([, a], [, b]) => (b as number) - (a as number)).map(([rule, count]) => (
+                          <Badge key={rule} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`hg-rule-${rule}`}>
+                            {rule}: {count as number}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) && (!synthPlannerStats || synthPlannerStats.totalPlans === 0) && (!heuristicStats || heuristicStats.totalGenerated === 0) && (
                 <p className="text-sm text-muted-foreground italic" data-testid="synth-disc-placeholder">
                   Synthesis routes will be planned as candidates progress through screening
                 </p>
