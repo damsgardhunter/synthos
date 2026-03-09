@@ -23,7 +23,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats } from "./gradient-boost";
+import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, type MassiveGenerationStats } from "./candidate-generator";
 import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
@@ -4726,10 +4726,16 @@ async function runLearningCycle() {
 
           if (xgbResult.retrained) {
             const evalStats = getEvaluatedDatasetStats();
+            const vHistory = getModelVersionHistory();
+            const vLatest = vHistory.latestMetrics;
             emit("log", {
               phase: "engine",
               event: `XGBoost active learning retrain (cycle ${cycleCount})`,
-              detail: `Dataset: ${xgbResult.datasetSize} total samples (${xgbResult.newEntries} from evaluated pool). Evaluated entries: ${evalStats.totalEvaluated} (DFT: ${evalStats.bySource.dft}, xTB: ${evalStats.bySource.xtb}, external: ${evalStats.bySource.external}, AL: ${evalStats.bySource.activeLearning}). Failures: ${getFailureExampleCount()}. Retrain #${evalStats.xgboostRetrainCount}.`,
+              detail: `v${vHistory.currentVersion} | Dataset: ${xgbResult.datasetSize} samples (${xgbResult.newEntries} from eval pool). ` +
+                `R²=${vLatest?.r2?.toFixed(4) ?? '?'} MAE=${vLatest?.mae?.toFixed(2) ?? '?'}K RMSE=${vLatest?.rmse?.toFixed(2) ?? '?'}K ` +
+                `predVar=${vLatest?.predictionVariance?.toFixed(2) ?? '?'}K. ` +
+                `Evaluated: ${evalStats.totalEvaluated} (DFT:${evalStats.bySource.dft} xTB:${evalStats.bySource.xtb} ext:${evalStats.bySource.external} AL:${evalStats.bySource.activeLearning}). ` +
+                `Failures: ${getFailureExampleCount()}. Retrain #${evalStats.xgboostRetrainCount}.`,
               dataSource: "ML Engine",
             });
           }
@@ -4751,7 +4757,9 @@ async function runLearningCycle() {
             emit("log", {
               phase: "engine",
               event: `Surrogate model retrained`,
-              detail: `${sStats.successExamples} success + ${sStats.failureExamples} failure examples. Screen stats: ${sStats.totalScreened} screened, ${sStats.totalPassed} passed (${(sStats.passRate * 100).toFixed(1)}%)`,
+              detail: `v${sStats.modelVersion} | ${sStats.successExamples} success + ${sStats.failureExamples} failure examples. ` +
+                `R²=${sStats.latestMetrics?.r2?.toFixed(4) ?? '?'} MAE=${sStats.latestMetrics?.mae?.toFixed(2) ?? '?'}K. ` +
+                `Screen stats: ${sStats.totalScreened} screened, ${sStats.totalPassed} passed (${(sStats.passRate * 100).toFixed(1)}%)`,
               dataSource: "Surrogate Model",
             });
           }

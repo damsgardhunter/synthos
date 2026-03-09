@@ -588,8 +588,9 @@ export function getTrainedModel(): GBModel {
 
   if (!cachedEnsembleXGB && X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
-    console.log(`[XGBoost] Trained ${XGB_ENSEMBLE_SIZE}-model bootstrap ensemble (${X.length} samples)`);
   }
+
+  logModelVersion("initial-training", X.length);
 
   return cachedModel;
 }
@@ -789,6 +790,112 @@ let surrogatePassCount = 0;
 let surrogateRejectCount = 0;
 let lastRetrainCycle = 0;
 
+let modelVersion = 0;
+const MAX_VERSION_HISTORY = 50;
+
+interface ModelVersionRecord {
+  version: number;
+  trainedAt: number;
+  datasetSize: number;
+  nTrees: number;
+  r2: number;
+  mae: number;
+  rmse: number;
+  ensembleSize: number;
+  ensembleTreeCounts: number[];
+  successExamples: number;
+  failureExamples: number;
+  evaluatedEntries: number;
+  trigger: string;
+  predictionVariance: number;
+}
+
+const versionHistory: ModelVersionRecord[] = [];
+
+function logModelVersion(trigger: string, datasetSize: number): ModelVersionRecord {
+  modelVersion++;
+  const cal = cachedCalibration ?? computeCalibration(cachedModel!);
+  const ensembleStats = getXGBEnsembleStats();
+
+  let predVariance = 0;
+  if (cachedEnsembleXGB) {
+    const testFormulas = ["MgB2", "NbSn3", "YBa2Cu3O7", "LaH10", "FeSe"];
+    const variances: number[] = [];
+    for (const f of testFormulas) {
+      try {
+        const features = extractFeatures(f);
+        const x = featureVectorToArray(features, f);
+        const result = predictEnsembleXGB(cachedEnsembleXGB, x);
+        variances.push(result.std);
+      } catch { /* skip */ }
+    }
+    predVariance = variances.length > 0
+      ? variances.reduce((s, v) => s + v, 0) / variances.length
+      : 0;
+  }
+
+  const record: ModelVersionRecord = {
+    version: modelVersion,
+    trainedAt: Date.now(),
+    datasetSize,
+    nTrees: cachedModel?.trees.length ?? 0,
+    r2: cal.r2,
+    mae: cal.mae,
+    rmse: cal.rmse,
+    ensembleSize: ensembleStats.ensembleSize,
+    ensembleTreeCounts: ensembleStats.modelTreeCounts,
+    successExamples: successExamples.length,
+    failureExamples: failureExamples.length,
+    evaluatedEntries: evaluatedDataset.length,
+    trigger,
+    predictionVariance: Math.round(predVariance * 100) / 100,
+  };
+
+  versionHistory.push(record);
+  if (versionHistory.length > MAX_VERSION_HISTORY) {
+    versionHistory.shift();
+  }
+
+  console.log(
+    `[XGBoost] v${record.version} | R²=${record.r2.toFixed(4)} | MAE=${record.mae.toFixed(2)}K | RMSE=${record.rmse.toFixed(2)}K | ` +
+    `trees=${record.nTrees} | ensemble=[${record.ensembleTreeCounts.join(",")}] | ` +
+    `dataset=${record.datasetSize} (${record.successExamples}S/${record.failureExamples}F/${record.evaluatedEntries}E) | ` +
+    `predVar=${record.predictionVariance.toFixed(2)}K | trigger=${record.trigger}`
+  );
+
+  return record;
+}
+
+function shouldRetrainOnErrorRate(): boolean {
+  if (versionHistory.length < 2) return false;
+  const latest = versionHistory[versionHistory.length - 1];
+  const prev = versionHistory[versionHistory.length - 2];
+  if (latest.mae > prev.mae * 1.15 || latest.r2 < prev.r2 - 0.05) {
+    console.log(
+      `[XGBoost] Error rate degradation detected: R² ${prev.r2.toFixed(4)} -> ${latest.r2.toFixed(4)}, ` +
+      `MAE ${prev.mae.toFixed(2)} -> ${latest.mae.toFixed(2)} — triggering retrain`
+    );
+    return true;
+  }
+  return false;
+}
+
+export function getModelVersionHistory() {
+  return {
+    currentVersion: modelVersion,
+    historyLength: versionHistory.length,
+    history: versionHistory.slice(-20),
+    latestMetrics: versionHistory.length > 0 ? versionHistory[versionHistory.length - 1] : null,
+    performanceTrend: versionHistory.length >= 3
+      ? {
+          r2Trend: versionHistory.slice(-5).map(v => ({ version: v.version, r2: v.r2 })),
+          maeTrend: versionHistory.slice(-5).map(v => ({ version: v.version, mae: v.mae })),
+          datasetGrowth: versionHistory.slice(-5).map(v => ({ version: v.version, size: v.datasetSize })),
+        }
+      : null,
+  };
+}
+
 export interface EvaluatedEntry {
   formula: string;
   tc: number;
@@ -896,14 +1003,23 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
-    console.log(`[XGBoost-AL] Rebuilt ${XGB_ENSEMBLE_SIZE}-model bootstrap ensemble (${X.length} samples)`);
   }
 
   xgboostRetrainCount++;
   if (cycleCount != null) lastXGBoostRetrainCycle = cycleCount;
   lastRetrainCycle = Date.now();
 
-  console.log(`[XGBoost-AL] Retrained with ${X.length} total samples (${newFromEval} from evaluated dataset, ${successExamples.length} successes, ${failureExamples.length} failures)`);
+  const vr = logModelVersion("evaluated-retrain", X.length);
+
+  if (shouldRetrainOnErrorRate()) {
+    invalidateModel();
+    cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
+    cachedCalibration = computeCalibration(cachedModel);
+    if (X.length >= 30) {
+      cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    }
+    logModelVersion("error-rate-correction", X.length);
+  }
 
   return { retrained: true, datasetSize: X.length, newEntries: newFromEval };
 }
@@ -987,6 +1103,8 @@ export function getSurrogateStats() {
     compositionFeatures: COMPOSITION_FEATURE_NAMES.length,
     hyperparameters: { nEstimators: 300, learningRate: 0.05, maxDepth: 6 },
     ensemble: getXGBEnsembleStats(),
+    modelVersion,
+    latestMetrics: versionHistory.length > 0 ? versionHistory[versionHistory.length - 1] : null,
   };
 }
 
@@ -1037,9 +1155,9 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   }
   lastRetrainCycle = Date.now();
 
-  const totalNew = successExamples.length + failureExamples.length;
-  console.log(`[Surrogate] Model retrained with ${totalNew} new examples (${successExamples.length} successes, ${failureExamples.length} failures). Total training size: ${X.length}`);
+  logModelVersion("accumulated-retrain", X.length);
 
+  const totalNew = successExamples.length + failureExamples.length;
   return totalNew;
 }
 
@@ -1091,9 +1209,8 @@ export async function incorporateFailureData(): Promise<number> {
       if (X.length >= 30) {
         cachedEnsembleXGB = trainEnsembleXGB(X, y);
       }
+      logModelVersion("failure-retrain", X.length);
     }
-
-    console.log(`XGBoost model retrained with ${failureExamples.length} failure examples`);
   }
 
   return added;

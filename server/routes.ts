@@ -29,7 +29,7 @@ import {
   getDesignRepresentationStats,
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
-import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats } from "./learning/gradient-boost";
+import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory } from "./learning/gradient-boost";
 import { extractFeatures } from "./learning/ml-predictor";
 import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
@@ -1878,6 +1878,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getXGBEnsembleStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch ensemble stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/xgboost/version-history", generalLimiter, (_req, res) => {
+    try {
+      res.json(getModelVersionHistory());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch version history", detail: e.message?.slice(0, 200) });
     }
   });
 
