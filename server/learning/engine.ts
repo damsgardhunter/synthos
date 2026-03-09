@@ -26,6 +26,7 @@ import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, type MassiveGenerationStats } from "./candidate-generator";
+import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
@@ -931,14 +932,58 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       } : {}),
     };
 
+    let deliberationResult;
+    try {
+      deliberationResult = await deliberateOnCandidate(
+        candidateData.formula,
+        candidateData.predictedTc ?? 0,
+        enrichedMlFeatures
+      );
+
+      emit("log", {
+        phase: "engine",
+        event: "Deliberative evaluation",
+        detail: formatDeliberationSummary(deliberationResult),
+        dataSource: "Deliberative Evaluator",
+      });
+
+      if (deliberationResult.verdict === "reject") {
+        emit("log", {
+          phase: "engine",
+          event: "Deliberation rejected",
+          detail: `${candidateData.formula}: verdict=reject, score=${deliberationResult.deliberationScore.toFixed(3)}. Concerns: ${deliberationResult.selfCritiqueFlags.slice(0, 2).join("; ") || "low multi-stage scores"}`,
+          dataSource: "Deliberative Evaluator",
+        });
+        return false;
+      }
+    } catch (deliberationErr: any) {
+      console.log(`[Engine] Deliberation failed for ${candidateData.formula}: ${deliberationErr?.message?.slice(0, 80) ?? "unknown"}`);
+    }
+
     const existingNotes = candidateData.notes || "";
     const stabilityNote = `[Stability: ${stabilityResult.verdict}, hullDist=${stabilityResult.hullDistance.toFixed(4)} eV/atom, formE=${stabilityResult.formationEnergy.toFixed(4)} eV/atom]`;
     const kineticNote = kineticResult ? ` ${formatKineticStabilityNote(kineticResult)}` : "";
+    const deliberationNote = deliberationResult
+      ? ` [Deliberation: score=${deliberationResult.deliberationScore.toFixed(3)}, verdict=${deliberationResult.verdict}, confidence=${deliberationResult.confidenceLevel.toFixed(2)}, rank=#${deliberationResult.comparativeRank ?? "?"}, novelty=${deliberationResult.estimatedNovelty.toFixed(2)}]`
+      : "";
+
+    const deliberationFeatures = deliberationResult ? {
+      deliberation: {
+        score: deliberationResult.deliberationScore,
+        verdict: deliberationResult.verdict,
+        confidence: deliberationResult.confidenceLevel,
+        rank: deliberationResult.comparativeRank,
+        novelty: deliberationResult.estimatedNovelty,
+        stageScores: Object.fromEntries(deliberationResult.stages.map(s => [s.name, { score: s.score, verdict: s.verdict }])),
+        critiqueFlags: deliberationResult.selfCritiqueFlags.slice(0, 5),
+        reasoning: deliberationResult.reasoningChain.slice(0, 30),
+      },
+    } : {};
 
     await storage.insertSuperconductorCandidate({
       ...candidateData,
-      mlFeatures: enrichedMlFeatures as any,
-      notes: `${existingNotes} ${stabilityNote}${kineticNote}`.trim(),
+      mlFeatures: { ...enrichedMlFeatures, ...deliberationFeatures } as any,
+      notes: `${existingNotes} ${stabilityNote}${kineticNote}${deliberationNote}`.trim(),
     });
 
     const candidateTc = candidateData.predictedTc ?? 0;

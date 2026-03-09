@@ -2,7 +2,7 @@ import { storage } from "../storage";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { EventEmitter } from "./engine";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { invalidateGNNModel, trainGNNSurrogate, trainEnsemble, setCachedEnsemble } from "./graph-neural-net";
+import { invalidateGNNModel, trainGNNSurrogate, trainEnsemble, setCachedEnsemble, ENSEMBLE_SIZE } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, validateModel } from "./gradient-boost";
