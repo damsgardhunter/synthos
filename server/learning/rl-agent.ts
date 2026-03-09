@@ -1015,6 +1015,9 @@ export class RLChemicalSpaceAgent {
         const elKeys = Object.keys(elCounts);
         const nonH = elKeys.filter(e => e !== "H");
         if (nonH.length > 4 || elKeys.length > 5) continue;
+        const maxCount = Math.max(...Object.values(elCounts));
+        const totalAtoms = Object.values(elCounts).reduce((s, n) => s + n, 0);
+        if (maxCount > 12 || totalAtoms > 20) continue;
 
         const isHydride = /(?<![a-z])H(?![a-z])/.test(formula);
         if (isHydride && hydrideCount >= maxHydrides) continue;

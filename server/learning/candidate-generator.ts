@@ -263,7 +263,8 @@ function countsToFormula(counts: Record<string, number>): string {
   elements.sort((a, b) => (ELECTRONEGATIVITY[a] ?? 2.0) - (ELECTRONEGATIVITY[b] ?? 2.0));
   let result = "";
   for (const el of elements) {
-    const c = counts[el];
+    let c = counts[el];
+    if (c > 12) c = 12;
     if (c === 1) result += el;
     else if (Number.isInteger(c)) result += `${el}${c}`;
     else result += `${el}${Math.round(c * 100) / 100}`;
@@ -415,6 +416,10 @@ export function passesElementCountCap(formula: string): boolean {
   const distinctNonH = elements.filter(el => el !== "H");
   if (distinctNonH.length > 4) return false;
   if (elements.length > 5) return false;
+  const maxSingle = Math.max(...Object.values(counts));
+  if (maxSingle > 12) return false;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  if (totalAtoms > 20) return false;
   return true;
 }
 
@@ -430,7 +435,9 @@ export function passesValenceFilter(formula: string): boolean {
   }
 
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  if (totalAtoms < 2 || totalAtoms > 50) return false;
+  if (totalAtoms < 2 || totalAtoms > 20) return false;
+  const maxSingle = Math.max(...Object.values(counts));
+  if (maxSingle > 12) return false;
 
   const metalElements = elements.filter(el => !ANION_ELEMENTS.has(el));
   const anionElements = elements.filter(el => ANION_ELEMENTS.has(el));
@@ -465,6 +472,8 @@ export function passesCompositionComplexityFilter(formula: string): boolean {
   if (distinctNonH.length > 4) return false;
   if (elements.length > 5) return false;
   if (totalAtoms > 20) return false;
+  const maxSingleElement = Math.max(...Object.values(counts));
+  if (maxSingleElement > 12) return false;
   return true;
 }
 
@@ -821,7 +830,7 @@ export function runMassiveGeneration(
   const knownSC = [
     "MgB2", "NbN", "Nb3Sn", "Nb3Ge", "MgCNi3", "YBa2Cu3O7", "LaH10", "NbC", "V3Si", "NbTi",
     "FeSe", "Sr2RuO4", "LaFeAsO", "BaFe2As2", "LiFeAs", "NaFeAs", "FeTe",
-    "La2CuO4", "Bi2Sr2CaCu2O8", "Tl2Ba2CuO6", "HgBa2CuO4", "Bi2Sr2Ca2Cu3O10",
+    "La2CuO4", "Tl2Ba2CuO6", "HgBa2CuO4",
     "Nb3Al", "NbGe2", "MoN", "TaC", "ZrN", "HfN", "TaN", "WC",
     "LaOFeAs", "SmFeAsO", "CeFeAsO", "NdFeAsO", "BaKFe2As2",
     "KV3Sb5", "CsV3Sb5", "RbV3Sb5",
@@ -830,16 +839,15 @@ export function runMassiveGeneration(
     "Ba0.6K0.4BiO3", "SrTiO3",
     "LaRu2P2", "BaNi2As2", "SrPd2Ge2",
     "CeCoIn5", "CeIrIn5", "CeRhIn5", "PuCoGa5",
-    "UPt3", "UBe13", "URu2Si2",
+    "UPt3", "URu2Si2",
     "YNi2B2C", "LuNi2B2C", "ErNi2B2C",
     "NbSe2", "TaSe2", "MoS2", "NbS2", "TaS2",
     "CaH6", "YH6", "YH9", "ThH10", "ScH9", "CeH10",
     "LaH10", "BaH12", "SrH10",
     "PbMo6S8", "InSn", "SnNb3", "AlNb3", "GaN",
-    "K3C60", "Rb3C60", "Cs3C60",
     "CaBeSi", "LaPt2B2C",
-    "Sr2VO3FeAs", "Ca10Pt4As8",
-    "BiS2LaO", "NbSe3", "Li0.9Mo6O17",
+    "Sr2VO3FeAs",
+    "BiS2LaO", "NbSe3",
   ];
   const fractionalSeeds = [...new Set([...topSCFormulas, ...knownSC])];
   const fractionalDoped = generateFractionalDopedVariants(fractionalSeeds, 150);
@@ -853,13 +861,13 @@ export function runMassiveGeneration(
     { name: "CuO2-layered", slots: [["La", "Y", "Bi", "Tl", "Hg", "Ba", "Sr"], ["Cu"], ["O"]], stoichs: [[2,1,4], [1,2,3], [2,2,5]] },
     { name: "Kagome", slots: [["K", "Cs", "Rb", "Ca", "Sr", "Ba"], ["V", "Ti", "Mn", "Cr", "Fe"], ["Sb", "Sn", "Bi"]], stoichs: [[1,3,5]] },
     { name: "NaCl", slots: [["Nb", "V", "Ti", "Ta", "Mo", "Zr", "Hf", "W"], ["N", "C", "O"]], stoichs: [[1,1]] },
-    { name: "Chevrel", slots: [["Cu", "Sn", "Pb", "La", "Ba"], ["Mo"], ["S", "Se"]], stoichs: [[1,6,8]] },
+    { name: "Chevrel", slots: [["Cu", "Sn", "Pb", "La", "Ba"], ["Mo"], ["S", "Se"]], stoichs: [[1,6,8], [1,3,4]] },
     { name: "Heusler", slots: [["Li", "Cu", "Ni", "Co"], ["Mn", "Ti", "V", "Fe"], ["Al", "Ga", "Sn", "Sb", "Si"]], stoichs: [[2,1,1], [1,1,1]] },
     { name: "Borocarbide", slots: [["Y", "Lu", "Tm", "Er", "Ho"], ["Ni", "Pd", "Pt", "Co"], ["B", "C"]], stoichs: [[1,2,2], [1,2,3]] },
     { name: "Clathrate", slots: [["La", "Y", "Ca", "Sr", "Ba", "Th", "Sc"], ["H"]], stoichs: [[1,6], [1,9], [1,10]] },
     { name: "Laves", slots: [["Zr", "Hf", "Sc", "Y", "La", "Ce"], ["V", "Nb", "Fe", "Co", "Ni", "Ru"]], stoichs: [[1,2]] },
     { name: "Pyrite", slots: [["Fe", "Co", "Ni", "Cu", "Ru", "Os"], ["S", "Se", "Te"]], stoichs: [[1,2]] },
-    { name: "Skutterudite", slots: [["Co", "Rh", "Ir", "Fe", "Ni"], ["Sb", "As", "P"]], stoichs: [[1,3], [4,12]] },
+    { name: "Skutterudite", slots: [["Co", "Rh", "Ir", "Fe", "Ni"], ["Sb", "As", "P"]], stoichs: [[1,3]] },
   ];
   for (let i = 0; i < 150; i++) {
     const proto = PROTO_TEMPLATES[Math.floor(Math.random() * PROTO_TEMPLATES.length)];

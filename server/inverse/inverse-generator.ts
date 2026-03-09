@@ -219,8 +219,9 @@ function selectElements(
 function buildFormula(elements: string[], ratios: number[]): string {
   let formula = "";
   for (let i = 0; i < elements.length; i++) {
+    const r = Math.min(ratios[i], 12);
     formula += elements[i];
-    if (ratios[i] > 1) formula += ratios[i];
+    if (r > 1) formula += r;
   }
   return formula;
 }
