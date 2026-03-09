@@ -746,6 +746,10 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
       uncertainty: number;
       phononStability: boolean;
       confidence: number;
+      bandgap?: number;
+      dosProxy?: number;
+      stabilityProbability?: number;
+      latentDistance?: number;
     };
     graphStats: {
       nodes: number;
@@ -754,6 +758,13 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
       elements: string[];
     };
     modelVersion: number;
+    ensembleSize?: number;
+    uncertaintyBreakdown?: {
+      ensemble?: number;
+      mcDropout?: number;
+      latentDistance?: number;
+      perTarget?: { tc?: number; fe?: number; lambda?: number; bandgap?: number };
+    };
   }>({ queryKey: ["/api/gnn/predict", formula] });
 
   if (!data && !mlData) return null;
@@ -923,9 +934,16 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
         )}
         {gnnPredData && (
           <div className="space-y-2" data-testid="gnn-prediction-section">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
-              GNN Crystal Graph Prediction (v{gnnPredData.modelVersion})
-            </p>
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                GNN Crystal Graph Prediction (v{gnnPredData.modelVersion}, {gnnPredData.ensembleSize ?? 4}-model ensemble)
+              </p>
+              {(gnnPredData.prediction.latentDistance ?? 0) > 0.7 && (
+                <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded font-medium" data-testid="gnn-novel-material">
+                  Far from training data
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-tc">
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wider">GNN Tc</p>
@@ -951,10 +969,30 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Formation Energy</p>
                 <p className="text-sm font-mono">{gnnPredData.prediction.formationEnergy.toFixed(3)} eV/atom</p>
               </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-bandgap">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Bandgap</p>
+                <p className="text-sm font-mono">{(gnnPredData.prediction.bandgap ?? 0).toFixed(3)} eV</p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-dos-proxy">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">DOS Proxy</p>
+                <p className="text-sm font-mono">{(gnnPredData.prediction.dosProxy ?? 0).toFixed(3)}</p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-stability-prob">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Stability Prob.</p>
+                <p className="text-sm font-mono">{((gnnPredData.prediction.stabilityProbability ?? 0) * 100).toFixed(1)}%</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-phonon-stability">
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Phonon Stability</p>
                 <p className={`text-sm font-mono ${gnnPredData.prediction.phononStability ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
                   {gnnPredData.prediction.phononStability ? "Stable" : "Unstable"}
+                </p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-latent-dist">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Latent Distance</p>
+                <p className={`text-sm font-mono ${(gnnPredData.prediction.latentDistance ?? 0) > 0.7 ? "text-amber-600 dark:text-amber-400" : ""}`}>
+                  {(gnnPredData.prediction.latentDistance ?? 0).toFixed(3)}
                 </p>
               </div>
               <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-graph-size">
@@ -966,6 +1004,21 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
                 <p className="text-sm font-mono">{gnnPredData.graphStats.elements.join(", ")}</p>
               </div>
             </div>
+            {gnnPredData.uncertaintyBreakdown && (
+              <div className="space-y-1.5" data-testid="gnn-uncertainty-breakdown">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Uncertainty Breakdown</p>
+                <div className="flex gap-1 h-3 rounded-full overflow-hidden bg-muted/30">
+                  <div className="bg-purple-500/70 rounded-l" style={{ width: `${(gnnPredData.uncertaintyBreakdown.ensemble ?? 0) * 100}%` }} title="Ensemble" />
+                  <div className="bg-blue-500/70" style={{ width: `${(gnnPredData.uncertaintyBreakdown.mcDropout ?? 0) * 100}%` }} title="MC Dropout" />
+                  <div className="bg-amber-500/70 rounded-r" style={{ width: `${(gnnPredData.uncertaintyBreakdown.latentDistance ?? 0) * 100}%` }} title="Latent Distance" />
+                </div>
+                <div className="flex gap-3 text-[10px]">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500/70 inline-block" /> Ensemble: {((gnnPredData.uncertaintyBreakdown.ensemble ?? 0) * 100).toFixed(1)}%</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500/70 inline-block" /> MC Dropout: {((gnnPredData.uncertaintyBreakdown.mcDropout ?? 0) * 100).toFixed(1)}%</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500/70 inline-block" /> Latent Dist: {((gnnPredData.uncertaintyBreakdown.latentDistance ?? 0) * 100).toFixed(1)}%</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
         {compData && (

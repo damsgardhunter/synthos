@@ -77,22 +77,43 @@ export interface GNNPrediction {
   predictedTc: number;
   confidence: number;
   lambda: number;
+  bandgap: number;
+  dosProxy: number;
+  stabilityProbability: number;
+  latentEmbedding: number[];
+}
+
+export interface UncertaintyBreakdown {
+  ensemble: number;
+  mcDropout: number;
+  latentDistance: number;
+  perTarget: {
+    tc: number;
+    formationEnergy: number;
+    lambda: number;
+    bandgap: number;
+  };
 }
 
 export interface GNNPredictionWithUncertainty {
   tc: number;
   formationEnergy: number;
   lambda: number;
+  bandgap: number;
+  dosProxy: number;
+  stabilityProbability: number;
   uncertainty: number;
+  uncertaintyBreakdown: UncertaintyBreakdown;
   phononStability: boolean;
   confidence: number;
+  latentDistance: number;
 }
 
 const NODE_DIM = 32;
 const HIDDEN_DIM = 48;
 const EDGE_DIM = 24;
-const OUTPUT_DIM = 5;
-export const ENSEMBLE_SIZE = 2;
+const OUTPUT_DIM = 8;
+export const ENSEMBLE_SIZE = 4;
 const MC_DROPOUT_PASSES = 5;
 const MC_DROPOUT_RATE = 0.1;
 const N_GAUSSIAN_BASIS = 20;
@@ -103,6 +124,39 @@ const GAUSSIAN_WIDTH = 0.5;
 let cachedEnsembleModels: GNNWeights[] | null = null;
 let modelTrainedAt = 0;
 const MODEL_STALE_MS = 6 * 60 * 60 * 1000;
+
+const LATENT_REF_MAX = 200;
+let trainingLatentEmbeddings: number[][] = [];
+
+function computeLatentDistance(embedding: number[]): number {
+  if (trainingLatentEmbeddings.length === 0) return 1.0;
+  const norm = Math.sqrt(embedding.reduce((s, v) => s + v * v, 0)) || 1;
+  let minDist = Infinity;
+  for (const ref of trainingLatentEmbeddings) {
+    const refNorm = Math.sqrt(ref.reduce((s, v) => s + v * v, 0)) || 1;
+    let dotProduct = 0;
+    for (let i = 0; i < Math.min(embedding.length, ref.length); i++) {
+      dotProduct += embedding[i] * ref[i];
+    }
+    const cosineSim = dotProduct / (norm * refNorm);
+    const dist = 1.0 - Math.max(-1, Math.min(1, cosineSim));
+    if (dist < minDist) minDist = dist;
+  }
+  return Math.min(1.0, minDist);
+}
+
+function updateTrainingEmbeddings(trainingData: { formula: string; tc: number }[], weights: GNNWeights): void {
+  trainingLatentEmbeddings = [];
+  const sampleCount = Math.min(LATENT_REF_MAX, trainingData.length);
+  const step = Math.max(1, Math.floor(trainingData.length / sampleCount));
+  for (let i = 0; i < trainingData.length && trainingLatentEmbeddings.length < LATENT_REF_MAX; i += step) {
+    try {
+      const graph = buildCrystalGraph(trainingData[i].formula);
+      const pred = GNNPredict(graph, weights);
+      trainingLatentEmbeddings.push(pred.latentEmbedding);
+    } catch { /* skip invalid formulas */ }
+  }
+}
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
@@ -1146,6 +1200,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
     for (let i = 0; i < h1.length; i++) h1[i] = dropped[i];
   }
+  const latentEmbedding = [...h1];
   const out = vecAdd(matVecMul(weights.W_mlp2, h1), weights.b_mlp2);
 
   const formationEnergy = out[0] ?? 0;
@@ -1153,6 +1208,9 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const predictedTcRaw = Math.max(0, (out[2] ?? 0) * 300);
   const confidenceRaw = sigmoid(out[3] ?? 0);
   const lambdaRaw = Math.max(0, out[4] ?? 0);
+  const bandgapRaw = sigmoid(out[5] ?? 0) * 5.0;
+  const dosProxyRaw = softplus(out[6] ?? 0);
+  const stabilityProbRaw = sigmoid(out[7] ?? 0);
 
   return {
     formationEnergy: Math.round(formationEnergy * 1000) / 1000,
@@ -1160,6 +1218,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     predictedTc: Math.round(Math.max(0, predictedTcRaw) * 10) / 10,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceRaw)) * 100) / 100,
     lambda: Math.round(Math.max(0, lambdaRaw) * 1000) / 1000,
+    bandgap: Math.round(bandgapRaw * 1000) / 1000,
+    dosProxy: Math.round(dosProxyRaw * 1000) / 1000,
+    stabilityProbability: Math.round(stabilityProbRaw * 1000) / 1000,
+    latentEmbedding,
   };
 }
 
@@ -1305,6 +1367,13 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const lambdaTarget = sample.tc > 0 ? Math.min(2.0, sample.tc / 50) : 0.1;
         const lambdaError = pred.lambda - lambdaTarget;
 
+        const bgTarget = (sample as any).bandgap ?? (sample.tc > 0 ? 0 : 1.5);
+        const bgError = pred.bandgap - bgTarget;
+        const dosTarget = sample.tc > 0 ? Math.min(5.0, sample.tc / 30) : 0.3;
+        const dosError = pred.dosProxy - dosTarget;
+        const stabTarget = sample.tc > 0 ? 0.8 : 0.3;
+        const stabError = pred.stabilityProbability - stabTarget;
+
         const loss = tcError * tcError + 0.1 * feError * feError;
         totalLoss += loss;
         totalSamples++;
@@ -1314,6 +1383,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const phononGrad = 2 * phononError * 0.05 * lr;
         const confGrad = 2 * confError * 0.05 * lr;
         const lambdaGrad = 2 * lambdaError * 0.1 * lr;
+        const bgGrad = 2 * bgError * 0.05 * lr;
+        const dosGrad = 2 * dosError * 0.05 * lr;
+        const stabGrad = 2 * stabError * 0.05 * lr;
 
         for (let i = 0; i < weights.W_mlp2.length; i++) {
           let grad = 0;
@@ -1322,6 +1394,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           else if (i === 2) grad = tcGrad;
           else if (i === 3) grad = confGrad;
           else if (i === 4) grad = lambdaGrad;
+          else if (i === 5) grad = bgGrad;
+          else if (i === 6) grad = dosGrad;
+          else if (i === 7) grad = stabGrad;
 
           for (let j = 0; j < weights.W_mlp2[i].length; j++) {
             weights.W_mlp2[i][j] -= grad * (rng() * 0.5 + 0.5);
@@ -1375,6 +1450,7 @@ function getEnsembleModels(): GNNWeights[] {
 
   cachedEnsembleModels = trainEnsemble(trainingData);
   modelTrainedAt = now;
+  updateTrainingEmbeddings(trainingData, cachedEnsembleModels[0]);
   return cachedEnsembleModels;
 }
 
@@ -1411,9 +1487,12 @@ export function invalidateGNNModel(): void {
   gnnPredictionCache.clear();
 }
 
-export function setCachedEnsemble(models: GNNWeights[]): void {
+export function setCachedEnsemble(models: GNNWeights[], trainingData?: { formula: string; tc: number }[]): void {
   cachedEnsembleModels = models;
   modelTrainedAt = Date.now();
+  if (trainingData && models.length > 0) {
+    updateTrainingEmbeddings(trainingData, models[0]);
+  }
 }
 
 export interface GNNVersionRecord {
@@ -1558,9 +1637,11 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
 export function gnnPredictWithUncertainty(formula: string, prototype?: string): GNNPredictionWithUncertainty {
   const ensembleModels = getEnsembleModels();
   const predictions: GNNPrediction[] = [];
+  const perModelMeans: { tc: number; fe: number; lambda: number; bg: number }[] = [];
 
   for (let m = 0; m < ensembleModels.length; m++) {
     const modelWeights = ensembleModels[m];
+    const modelPreds: GNNPrediction[] = [];
 
     for (let d = 0; d < MC_DROPOUT_PASSES; d++) {
       const dropoutRng = seededRandom(m * 1000 + d * 137 + 7);
@@ -1569,38 +1650,68 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string): 
         : buildCrystalGraph(formula);
       const pred = GNNPredict(graph, modelWeights, dropoutRng);
       predictions.push(pred);
+      modelPreds.push(pred);
     }
+
+    perModelMeans.push({
+      tc: modelPreds.reduce((s, p) => s + p.predictedTc, 0) / modelPreds.length,
+      fe: modelPreds.reduce((s, p) => s + p.formationEnergy, 0) / modelPreds.length,
+      lambda: modelPreds.reduce((s, p) => s + p.lambda, 0) / modelPreds.length,
+      bg: modelPreds.reduce((s, p) => s + p.bandgap, 0) / modelPreds.length,
+    });
   }
 
   const tcValues = predictions.map(p => p.predictedTc);
   const feValues = predictions.map(p => p.formationEnergy);
   const lambdaValues = predictions.map(p => p.lambda);
+  const bgValues = predictions.map(p => p.bandgap);
+  const dosValues = predictions.map(p => p.dosProxy);
+  const stabValues = predictions.map(p => p.stabilityProbability);
 
   const meanTc = tcValues.reduce((s, v) => s + v, 0) / tcValues.length;
   const meanFE = feValues.reduce((s, v) => s + v, 0) / feValues.length;
   const meanLambda = lambdaValues.reduce((s, v) => s + v, 0) / lambdaValues.length;
+  const meanBG = bgValues.reduce((s, v) => s + v, 0) / bgValues.length;
+  const meanDOS = dosValues.reduce((s, v) => s + v, 0) / dosValues.length;
+  const meanStab = stabValues.reduce((s, v) => s + v, 0) / stabValues.length;
 
-  const tcVariance = tcValues.reduce((s, v) => s + (v - meanTc) ** 2, 0) / tcValues.length;
-  const feVariance = feValues.reduce((s, v) => s + (v - meanFE) ** 2, 0) / feValues.length;
-  const lambdaVariance = lambdaValues.reduce((s, v) => s + (v - meanLambda) ** 2, 0) / lambdaValues.length;
+  const tcStd = Math.sqrt(tcValues.reduce((s, v) => s + (v - meanTc) ** 2, 0) / tcValues.length);
+  const feStd = Math.sqrt(feValues.reduce((s, v) => s + (v - meanFE) ** 2, 0) / feValues.length);
+  const lambdaStd = Math.sqrt(lambdaValues.reduce((s, v) => s + (v - meanLambda) ** 2, 0) / lambdaValues.length);
+  const bgStd = Math.sqrt(bgValues.reduce((s, v) => s + (v - meanBG) ** 2, 0) / bgValues.length);
 
-  const tcStd = Math.sqrt(tcVariance);
-  const feStd = Math.sqrt(feVariance);
-  const lambdaStd = Math.sqrt(lambdaVariance);
+  const normalizedTcUnc = meanTc > 0 ? tcStd / Math.max(meanTc, 1) : tcStd;
+  const normalizedFeUnc = feStd;
+  const normalizedLambdaUnc = meanLambda > 0 ? lambdaStd / Math.max(meanLambda, 0.1) : lambdaStd;
+  const normalizedBgUnc = bgStd / Math.max(meanBG, 0.1);
 
-  const normalizedTcUncertainty = meanTc > 0 ? tcStd / Math.max(meanTc, 1) : tcStd;
-  const normalizedFeUncertainty = feStd;
-  const normalizedLambdaUncertainty = meanLambda > 0 ? lambdaStd / Math.max(meanLambda, 0.1) : lambdaStd;
+  const ensembleTcVar = perModelMeans.reduce((s, m) => s + (m.tc - meanTc) ** 2, 0) / Math.max(1, perModelMeans.length);
+  const ensembleUncertainty = Math.min(1.0, Math.sqrt(ensembleTcVar) / Math.max(meanTc, 1));
 
-  const epistemicUncertainty = tcValues.length > 0
-    ? Math.sqrt(tcValues.reduce((s, v) => s + (v - meanTc) ** 2, 0) / tcValues.length) / Math.max(meanTc, 1)
-    : 1.0;
+  let mcDropoutUncertainty = 0;
+  for (let m = 0; m < ensembleModels.length; m++) {
+    const modelPreds = predictions.slice(m * MC_DROPOUT_PASSES, (m + 1) * MC_DROPOUT_PASSES);
+    const modelMean = perModelMeans[m].tc;
+    const withinVar = modelPreds.reduce((s, p) => s + (p.predictedTc - modelMean) ** 2, 0) / modelPreds.length;
+    mcDropoutUncertainty += Math.sqrt(withinVar) / Math.max(modelMean, 1);
+  }
+  mcDropoutUncertainty = Math.min(1.0, mcDropoutUncertainty / ensembleModels.length);
+
+  const avgLatent = predictions.reduce((acc, p) => {
+    for (let i = 0; i < p.latentEmbedding.length; i++) {
+      acc[i] = (acc[i] ?? 0) + p.latentEmbedding[i] / predictions.length;
+    }
+    return acc;
+  }, new Array(HIDDEN_DIM).fill(0));
+  const latentDist = computeLatentDistance(avgLatent);
 
   const combinedUncertainty = Math.min(1.0,
-    0.4 * normalizedTcUncertainty +
-    0.2 * normalizedFeUncertainty +
-    0.15 * normalizedLambdaUncertainty +
-    0.25 * epistemicUncertainty
+    0.30 * normalizedTcUnc +
+    0.15 * normalizedFeUnc +
+    0.10 * normalizedLambdaUnc +
+    0.20 * ensembleUncertainty +
+    0.15 * latentDist +
+    0.10 * normalizedBgUnc
   );
 
   const totalPredictions = predictions.length;
@@ -1610,14 +1721,36 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string): 
   const avgConfidence = predictions.reduce((s, p) => s + p.confidence, 0) / totalPredictions;
   const confidenceAdjusted = avgConfidence * (1.0 - combinedUncertainty * 0.5);
 
+  const uncertaintyBreakdown: UncertaintyBreakdown = {
+    ensemble: Math.round(ensembleUncertainty * 1000) / 1000,
+    mcDropout: Math.round(mcDropoutUncertainty * 1000) / 1000,
+    latentDistance: Math.round(latentDist * 1000) / 1000,
+    perTarget: {
+      tc: Math.round(normalizedTcUnc * 1000) / 1000,
+      formationEnergy: Math.round(normalizedFeUnc * 1000) / 1000,
+      lambda: Math.round(normalizedLambdaUnc * 1000) / 1000,
+      bandgap: Math.round(normalizedBgUnc * 1000) / 1000,
+    },
+  };
+
   return {
     tc: Math.round(meanTc * 10) / 10,
     formationEnergy: Math.round(meanFE * 1000) / 1000,
     lambda: Math.round(meanLambda * 1000) / 1000,
+    bandgap: Math.round(meanBG * 1000) / 1000,
+    dosProxy: Math.round(meanDOS * 1000) / 1000,
+    stabilityProbability: Math.round(meanStab * 1000) / 1000,
     uncertainty: Math.round(combinedUncertainty * 1000) / 1000,
+    uncertaintyBreakdown,
     phononStability: phononStable,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceAdjusted)) * 100) / 100,
+    latentDistance: Math.round(latentDist * 1000) / 1000,
   };
+}
+
+export function getUncertaintyDecomposition(formula: string): UncertaintyBreakdown {
+  const pred = gnnPredictWithUncertainty(formula);
+  return pred.uncertaintyBreakdown;
 }
 
 export function getPrototypeCoordinations(): Record<string, PrototypeCoordination> {

@@ -1900,10 +1900,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const maeTrend = history.slice(-10).map(h => ({ version: h.version, mae: h.mae }));
       res.json({
         currentVersion,
+        ensembleSize: latest?.ensembleSize ?? 4,
         latestMetrics: latest ? { r2: latest.r2, mae: latest.mae, rmse: latest.rmse, datasetSize: latest.datasetSize } : null,
         r2Trend,
         maeTrend,
         history: history.slice(-20),
+        uncertaintyMethods: ["ensemble-variance", "mc-dropout", "latent-distance"],
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch GNN version history", detail: e.message?.slice(0, 200) });
@@ -1941,7 +1943,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const graph = buildCrystalGraph(formula);
       res.json({
         formula,
-        prediction,
+        prediction: {
+          tc: prediction.tc,
+          formationEnergy: prediction.formationEnergy,
+          lambda: prediction.lambda,
+          bandgap: prediction.bandgap,
+          dosProxy: prediction.dosProxy,
+          stabilityProbability: prediction.stabilityProbability,
+          uncertainty: prediction.uncertainty,
+          phononStability: prediction.phononStability,
+          confidence: prediction.confidence,
+          latentDistance: prediction.latentDistance,
+        },
+        uncertaintyBreakdown: prediction.uncertaintyBreakdown,
         graphStats: {
           nodes: graph.nodes.length,
           edges: graph.edges.length,
@@ -1949,6 +1963,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           elements: [...new Set(graph.nodes.map(n => n.element))],
         },
         modelVersion: getGNNModelVersion(),
+        ensembleSize: 4,
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to predict with GNN", detail: e.message?.slice(0, 200) });

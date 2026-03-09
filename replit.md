@@ -32,7 +32,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Experimental Validation Planner**: Ranks candidates, generates synthesis instructions, and suggests characterization methods.
 - **Autonomous Hypothesis Engine**: AI for generating, testing, and ranking superconductivity theories.
 - **Discovery Memory System**: Pattern-based learning for high Tc discoveries.
-- **Graph Neural Network Surrogate**: Primary ML predictor for formation energy, phonon stability, Tc, and electron-phonon lambda with uncertainty estimation.
+- **Graph Neural Network Surrogate**: 4-model ensemble with 8-target output (formation energy, phonon stability, Tc, confidence, lambda, bandgap, DOS proxy, stability probability) + latent embedding. Uncertainty decomposed into ensemble variance, MC dropout (5 passes), and latent space distance (cosine distance from 200 reference training embeddings). Retraining triggers: cold-start, data-volume (50+ DFT results), cycle-interval (every 20 cycles), high-uncertainty (>0.5). Architecture: 4 attention message-passing layers + CGCNN conv + 3-body interactions + residual connections + attn/mean/max pooling. NODE_DIM=32, HIDDEN_DIM=48, EDGE_DIM=24, OUTPUT_DIM=8.
 - **Reinforcement Learning Chemical Space Agent**: REINFORCE policy gradient agent learning optimal elements, stoichiometries, and structures.
 - **Bayesian Optimization for Chemical Space Search**: Gaussian Process surrogate with mixed acquisition functions.
 - **Crystal Diffusion Generator**: Generates novel crystal structures by refining random atomic positions.
