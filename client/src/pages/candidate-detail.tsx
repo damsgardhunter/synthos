@@ -737,6 +737,25 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
     reasoning: string[];
   }>({ queryKey: ["/api/xgboost/uncertainty", formula] });
 
+  const { data: gnnPredData } = useQuery<{
+    formula: string;
+    prediction: {
+      tc: number;
+      formationEnergy: number;
+      lambda: number;
+      uncertainty: number;
+      phononStability: boolean;
+      confidence: number;
+    };
+    graphStats: {
+      nodes: number;
+      edges: number;
+      threeBodyFeatures: number;
+      elements: string[];
+    };
+    modelVersion: number;
+  }>({ queryKey: ["/api/gnn/predict", formula] });
+
   if (!data && !mlData) return null;
 
   const typeColors: Record<string, string> = {
@@ -900,6 +919,53 @@ function RetrosynthesisSection({ formula }: { formula: string }) {
                 {xgbUncertaintyData.reasoning.map((r, i) => <li key={i}>{r}</li>)}
               </ul>
             )}
+          </div>
+        )}
+        {gnnPredData && (
+          <div className="space-y-2" data-testid="gnn-prediction-section">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+              GNN Crystal Graph Prediction (v{gnnPredData.modelVersion})
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-tc">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">GNN Tc</p>
+                <p className="text-lg font-mono font-bold">{gnnPredData.prediction.tc.toFixed(1)}K</p>
+              </div>
+              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-uncertainty">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Uncertainty</p>
+                <p className={`text-lg font-mono font-bold ${gnnPredData.prediction.uncertainty > 0.6 ? "text-red-600 dark:text-red-400" : gnnPredData.prediction.uncertainty > 0.3 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                  {(gnnPredData.prediction.uncertainty * 100).toFixed(1)}%
+                </p>
+              </div>
+              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-lambda">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Lambda (e-ph)</p>
+                <p className="text-lg font-mono font-bold">{gnnPredData.prediction.lambda.toFixed(3)}</p>
+              </div>
+              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-confidence">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Confidence</p>
+                <p className="text-lg font-mono font-bold">{(gnnPredData.prediction.confidence * 100).toFixed(0)}%</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-formation-energy">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Formation Energy</p>
+                <p className="text-sm font-mono">{gnnPredData.prediction.formationEnergy.toFixed(3)} eV/atom</p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-phonon-stability">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Phonon Stability</p>
+                <p className={`text-sm font-mono ${gnnPredData.prediction.phononStability ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                  {gnnPredData.prediction.phononStability ? "Stable" : "Unstable"}
+                </p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-graph-size">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Crystal Graph</p>
+                <p className="text-sm font-mono">{gnnPredData.graphStats.nodes}N / {gnnPredData.graphStats.edges}E / {gnnPredData.graphStats.threeBodyFeatures}T</p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-elements">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Elements</p>
+                <p className="text-sm font-mono">{gnnPredData.graphStats.elements.join(", ")}</p>
+              </div>
+            </div>
           </div>
         )}
         {compData && (

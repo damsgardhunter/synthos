@@ -56,6 +56,10 @@ interface GNNWeights {
   W_attn_key3: number[][];
   W_attn_query4: number[][];
   W_attn_key4: number[][];
+  W_conv_gate: number[][];
+  W_conv_value: number[][];
+  b_conv_gate: number[];
+  b_conv_value: number[];
   W_3body: number[][];
   W_3body_update: number[][];
   W_attn_pool: number[][];
@@ -160,6 +164,19 @@ function relu(v: number[]): number[] {
 
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
+}
+
+function softplus(x: number): number {
+  if (x > 20) return x;
+  return Math.log(1 + Math.exp(x));
+}
+
+const COSINE_CUTOFF_RADIUS = 6.0;
+
+function cosineCutoff(distance: number): number {
+  if (distance >= COSINE_CUTOFF_RADIUS) return 0;
+  if (distance <= 0) return 1;
+  return 0.5 * (Math.cos(Math.PI * distance / COSINE_CUTOFF_RADIUS) + 1);
 }
 
 function dotProduct(a: number[], b: number[]): number {
@@ -808,6 +825,86 @@ export function buildCrystalGraph(formula: string, structure?: any): CrystalGrap
   return partialGraph;
 }
 
+export function cgcnnConvolutionLayer(
+  graph: CrystalGraph,
+  W_gate: number[][],
+  W_value: number[][],
+  b_gate: number[],
+  b_value: number[],
+): number[][] {
+  const nNodes = graph.nodes.length;
+  const embeddings = graph.nodes.map(n => {
+    const e = [...n.embedding];
+    while (e.length < HIDDEN_DIM) e.push(0);
+    return e.slice(0, HIDDEN_DIM);
+  });
+
+  const edgeMap = new Map<string, EdgeFeature>();
+  for (const edge of graph.edges) {
+    edgeMap.set(`${edge.source}-${edge.target}`, edge);
+  }
+
+  const newEmbeddings: number[][] = [];
+
+  for (let i = 0; i < nNodes; i++) {
+    const neighbors = graph.adjacency[i];
+    if (!neighbors || neighbors.length === 0) {
+      newEmbeddings.push([...embeddings[i]]);
+      continue;
+    }
+
+    const aggUpdate = initVector(HIDDEN_DIM);
+    let totalWeight = 0;
+
+    for (const j of neighbors) {
+      const edgeFeat = edgeMap.get(`${i}-${j}`) ?? edgeMap.get(`${j}-${i}`);
+      const distance = edgeFeat?.distance ?? 2.5;
+      const cutoffWeight = cosineCutoff(distance);
+      if (cutoffWeight <= 0) continue;
+
+      const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
+      const edgeTrunc = edgeVec.slice(0, HIDDEN_DIM);
+      while (edgeTrunc.length < HIDDEN_DIM) edgeTrunc.push(0);
+
+      const concat: number[] = new Array(HIDDEN_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        concat[k] = (embeddings[i][k] ?? 0) + (embeddings[j][k] ?? 0) + (edgeTrunc[k] ?? 0);
+      }
+
+      const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
+      const valueRaw = vecAdd(matVecMul(W_value, concat), b_value);
+
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        const gateVal = sigmoid(gateRaw[k] ?? 0);
+        const valueVal = softplus(valueRaw[k] ?? 0);
+        aggUpdate[k] += gateVal * valueVal * cutoffWeight;
+      }
+
+      totalWeight += cutoffWeight;
+    }
+
+    if (totalWeight > 0) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        aggUpdate[k] /= totalWeight;
+      }
+    }
+
+    const updated: number[] = new Array(HIDDEN_DIM);
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      updated[k] = (embeddings[i][k] ?? 0) + aggUpdate[k];
+    }
+    newEmbeddings.push(updated);
+  }
+
+  for (let i = 0; i < nNodes; i++) {
+    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
+    while (stored.length < HIDDEN_DIM) stored.push(0);
+    graph.nodes[i].embedding = stored;
+  }
+
+  return newEmbeddings;
+}
+
 export function attentionMessagePassingLayer(
   graph: CrystalGraph,
   W_message: number[][],
@@ -967,6 +1064,13 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
+  cgcnnConvolutionLayer(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value);
+  if (dropoutRng) {
+    for (const node of graph.nodes) {
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+    }
+  }
+
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
   }
@@ -1077,6 +1181,10 @@ function initWeights(rng: () => number): GNNWeights {
     W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_query4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_key4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_conv_gate: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_conv_value: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    b_conv_gate: initVector(HIDDEN_DIM),
+    b_conv_value: initVector(HIDDEN_DIM),
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
@@ -1107,6 +1215,10 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_attn_key3: w.W_attn_key3.map(r => [...r]),
     W_attn_query4: w.W_attn_query4.map(r => [...r]),
     W_attn_key4: w.W_attn_key4.map(r => [...r]),
+    W_conv_gate: w.W_conv_gate.map(r => [...r]),
+    W_conv_value: w.W_conv_value.map(r => [...r]),
+    b_conv_gate: [...w.b_conv_gate],
+    b_conv_value: [...w.b_conv_value],
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
     W_attn_pool: w.W_attn_pool.map(r => [...r]),
@@ -1224,6 +1336,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           weights.W_attn_query, weights.W_attn_key,
           weights.W_attn_query2, weights.W_attn_key2,
           weights.W_attn_query3, weights.W_attn_key3,
+          weights.W_conv_gate, weights.W_conv_value,
           weights.W_3body, weights.W_3body_update,
           weights.W_mlp1,
         ]) {
@@ -1303,6 +1416,85 @@ export function setCachedEnsemble(models: GNNWeights[]): void {
   modelTrainedAt = Date.now();
 }
 
+export interface GNNVersionRecord {
+  version: number;
+  trainedAt: number;
+  datasetSize: number;
+  ensembleSize: number;
+  r2: number;
+  mae: number;
+  rmse: number;
+  trigger: string;
+  dftSamples: number;
+  enrichedSamples: number;
+}
+
+let gnnModelVersion = 0;
+const gnnVersionHistory: GNNVersionRecord[] = [];
+const GNN_VERSION_HISTORY_MAX = 50;
+
+export function logGNNVersion(trigger: string, datasetSize: number, dftSamples = 0, enrichedSamples = 0): GNNVersionRecord {
+  gnnModelVersion++;
+
+  const validationSet = SUPERCON_TRAINING_DATA
+    .filter(e => e.isSuperconductor && e.tc > 0)
+    .slice(0, 50);
+
+  let sumSquaredError = 0;
+  let sumAbsError = 0;
+  let sumActual = 0;
+  let sumActualSq = 0;
+  const n = validationSet.length;
+
+  for (const entry of validationSet) {
+    const pred = getGNNPrediction(entry.formula);
+    const actual = entry.tc;
+    const predicted = pred.predictedTc;
+    const error = predicted - actual;
+    sumSquaredError += error * error;
+    sumAbsError += Math.abs(error);
+    sumActual += actual;
+    sumActualSq += actual * actual;
+  }
+
+  const meanActual = n > 0 ? sumActual / n : 0;
+  const ssRes = sumSquaredError;
+  const ssTot = n > 0 ? sumActualSq - n * meanActual * meanActual : 1;
+  const r2 = ssTot > 0 ? Math.max(-1, 1 - ssRes / ssTot) : 0;
+  const mae = n > 0 ? sumAbsError / n : 0;
+  const rmse = n > 0 ? Math.sqrt(sumSquaredError / n) : 0;
+
+  const record: GNNVersionRecord = {
+    version: gnnModelVersion,
+    trainedAt: Date.now(),
+    datasetSize,
+    ensembleSize: ENSEMBLE_SIZE,
+    r2: Math.round(r2 * 10000) / 10000,
+    mae: Math.round(mae * 100) / 100,
+    rmse: Math.round(rmse * 100) / 100,
+    trigger,
+    dftSamples,
+    enrichedSamples,
+  };
+
+  gnnVersionHistory.push(record);
+  if (gnnVersionHistory.length > GNN_VERSION_HISTORY_MAX) {
+    gnnVersionHistory.shift();
+  }
+
+  console.log(`[GNN] Version ${record.version} logged: R²=${record.r2}, MAE=${record.mae}, RMSE=${record.rmse}, trigger=${trigger}, dataset=${datasetSize}, dft=${dftSamples}, enriched=${enrichedSamples}`);
+
+  return record;
+}
+
+export function getGNNVersionHistory(): GNNVersionRecord[] {
+  return [...gnnVersionHistory];
+}
+
+export function getGNNModelVersion(): number {
+  return gnnModelVersion;
+}
+
 const GNN_PRED_CACHE_MAX = 500;
 const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
 
@@ -1352,6 +1544,8 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
   perturbMatrix(perturbed.W_attn_key3);
   perturbMatrix(perturbed.W_attn_query4);
   perturbMatrix(perturbed.W_attn_key4);
+  perturbMatrix(perturbed.W_conv_gate);
+  perturbMatrix(perturbed.W_conv_value);
   perturbMatrix(perturbed.W_3body);
   perturbMatrix(perturbed.W_3body_update);
   perturbMatrix(perturbed.W_attn_pool);
@@ -1430,10 +1624,110 @@ export function getPrototypeCoordinations(): Record<string, PrototypeCoordinatio
   return PROTOTYPE_COORDINATIONS;
 }
 
+export interface DFTTrainingRecord {
+  formula: string;
+  tc: number;
+  formationEnergy: number | null;
+  bandGap: number | null;
+  structure?: any;
+  prototype?: string;
+  source: "dft" | "external" | "active-learning" | "supercon";
+  addedAt: number;
+}
+
+interface DFTDatasetGrowthEntry {
+  timestamp: number;
+  size: number;
+  source: string;
+}
+
+const MAX_DFT_TRAINING_DATASET = 5000;
+const dftTrainingDataset: DFTTrainingRecord[] = [];
+const datasetGrowthHistory: DFTDatasetGrowthEntry[] = [];
+
+export function addDFTTrainingResult(record: {
+  formula: string;
+  tc: number;
+  formationEnergy?: number | null;
+  bandGap?: number | null;
+  structure?: any;
+  prototype?: string;
+  source: DFTTrainingRecord["source"];
+}): boolean {
+  const existing = dftTrainingDataset.find(r => r.formula === record.formula);
+  if (existing) {
+    if (record.formationEnergy != null) existing.formationEnergy = record.formationEnergy;
+    if (record.bandGap != null) existing.bandGap = record.bandGap;
+    if (record.tc > 0 && existing.tc === 0) existing.tc = record.tc;
+    if (record.structure) existing.structure = record.structure;
+    if (record.prototype) existing.prototype = record.prototype;
+    return false;
+  }
+
+  if (dftTrainingDataset.length >= MAX_DFT_TRAINING_DATASET) {
+    return false;
+  }
+
+  dftTrainingDataset.push({
+    formula: record.formula,
+    tc: record.tc,
+    formationEnergy: record.formationEnergy ?? null,
+    bandGap: record.bandGap ?? null,
+    structure: record.structure,
+    prototype: record.prototype,
+    source: record.source,
+    addedAt: Date.now(),
+  });
+
+  datasetGrowthHistory.push({
+    timestamp: Date.now(),
+    size: dftTrainingDataset.length,
+    source: record.source,
+  });
+
+  if (datasetGrowthHistory.length > 200) {
+    datasetGrowthHistory.splice(0, datasetGrowthHistory.length - 200);
+  }
+
+  return true;
+}
+
+export function getDFTTrainingDataset(): DFTTrainingRecord[] {
+  return [...dftTrainingDataset];
+}
+
+export function getDFTTrainingDatasetStats(): {
+  totalSize: number;
+  bySource: Record<string, number>;
+  growthHistory: DFTDatasetGrowthEntry[];
+  oldestEntry: number | null;
+  newestEntry: number | null;
+} {
+  const bySource: Record<string, number> = {};
+  let oldestEntry: number | null = null;
+  let newestEntry: number | null = null;
+
+  for (const record of dftTrainingDataset) {
+    bySource[record.source] = (bySource[record.source] ?? 0) + 1;
+    if (oldestEntry === null || record.addedAt < oldestEntry) oldestEntry = record.addedAt;
+    if (newestEntry === null || record.addedAt > newestEntry) newestEntry = record.addedAt;
+  }
+
+  return {
+    totalSize: dftTrainingDataset.length,
+    bySource,
+    growthHistory: [...datasetGrowthHistory],
+    oldestEntry,
+    newestEntry,
+  };
+}
+
 setImmediate(() => {
   try {
     getEnsembleModels();
     console.log(`[GNN] Pre-warmed ${ENSEMBLE_SIZE}-model ensemble at startup`);
+    const superconCount = SUPERCON_TRAINING_DATA.filter(e => e.isSuperconductor).length;
+    logGNNVersion("startup", superconCount, 0, 0);
   } catch (e: any) {
     console.error(`[GNN] Pre-warm failed: ${e?.message?.slice(0, 200)}`);
   }

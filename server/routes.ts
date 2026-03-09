@@ -30,6 +30,8 @@ import {
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
 import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory } from "./learning/gradient-boost";
+import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph } from "./learning/graph-neural-net";
+import { getActiveLearningStats, getActiveLearningCycleHistory } from "./learning/active-learning";
 import { extractFeatures } from "./learning/ml-predictor";
 import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
@@ -1886,6 +1888,78 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getModelVersionHistory());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch version history", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/gnn/version-history", generalLimiter, (_req, res) => {
+    try {
+      const history = getGNNVersionHistory();
+      const currentVersion = getGNNModelVersion();
+      const latest = history.length > 0 ? history[history.length - 1] : null;
+      const r2Trend = history.slice(-10).map(h => ({ version: h.version, r2: h.r2 }));
+      const maeTrend = history.slice(-10).map(h => ({ version: h.version, mae: h.mae }));
+      res.json({
+        currentVersion,
+        latestMetrics: latest ? { r2: latest.r2, mae: latest.mae, rmse: latest.rmse, datasetSize: latest.datasetSize } : null,
+        r2Trend,
+        maeTrend,
+        history: history.slice(-20),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch GNN version history", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/gnn/active-learning-stats", generalLimiter, (_req, res) => {
+    try {
+      const convergence = getActiveLearningStats();
+      const cycles = getActiveLearningCycleHistory();
+      const dftStats = getDFTTrainingDatasetStats();
+      const recentCycles = cycles.slice(-20);
+      const avgUncertaintyTrend = recentCycles.map(c => ({
+        cycle: c.cycle,
+        before: c.avgCombinedUncertainty,
+        after: c.uncertaintyAfter,
+        reductionPct: c.uncertaintyReductionPct,
+      }));
+      res.json({
+        convergence,
+        totalCycles: cycles.length,
+        recentCycles,
+        avgUncertaintyTrend,
+        dftDatasetStats: dftStats,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch active learning stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/gnn/predict/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const prediction = gnnPredictWithUncertainty(formula);
+      const graph = buildCrystalGraph(formula);
+      res.json({
+        formula,
+        prediction,
+        graphStats: {
+          nodes: graph.nodes.length,
+          edges: graph.edges.length,
+          threeBodyFeatures: graph.threeBodyFeatures.length,
+          elements: [...new Set(graph.nodes.map(n => n.element))],
+        },
+        modelVersion: getGNNModelVersion(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict with GNN", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/gnn/training-dataset-stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDFTTrainingDatasetStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch DFT training dataset stats", detail: e.message?.slice(0, 200) });
     }
   });
 

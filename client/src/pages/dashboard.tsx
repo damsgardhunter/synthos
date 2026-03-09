@@ -389,6 +389,111 @@ function ResearchMemoryCard() {
   );
 }
 
+function GNNActiveLearningCard() {
+  const { data: gnnVersionData } = useQuery<{
+    currentVersion: number;
+    latestMetrics: { r2: number; mae: number; rmse: number; datasetSize: number } | null;
+    r2Trend: { version: number; r2: number }[];
+    maeTrend: { version: number; mae: number }[];
+    history: any[];
+  }>({ queryKey: ["/api/gnn/version-history"], refetchInterval: 30000 });
+
+  const { data: alStats } = useQuery<{
+    convergence: ActiveLearningStats;
+    totalCycles: number;
+    recentCycles: any[];
+    avgUncertaintyTrend: { cycle: number; before: number; after: number; reductionPct: number }[];
+    dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number }[] };
+  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: 30000 });
+
+  return (
+    <Card data-testid="card-gnn-active-learning">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Network className="h-4 w-4 text-primary" />
+          GNN Active Learning
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          {gnnVersionData?.latestMetrics ? (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-version">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">GNN Version</p>
+                <p className="text-sm font-mono font-bold">v{gnnVersionData.currentVersion}</p>
+              </div>
+              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-r2">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">R-squared</p>
+                <p className="text-sm font-mono font-bold">{gnnVersionData.latestMetrics.r2 != null ? gnnVersionData.latestMetrics.r2.toFixed(4) : "--"}</p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-mae">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">MAE</p>
+                <p className="text-sm font-mono">{gnnVersionData.latestMetrics.mae != null ? `${gnnVersionData.latestMetrics.mae.toFixed(2)}K` : "--"}</p>
+              </div>
+              <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="gnn-dataset-size">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Dataset</p>
+                <p className="text-sm font-mono">{gnnVersionData.latestMetrics.datasetSize}</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground italic" data-testid="gnn-no-data">GNN model initializing...</p>
+          )}
+
+          {alStats && (
+            <div className="space-y-2">
+              <div className="flex gap-4 text-xs">
+                <div data-testid="al-total-dft"><span className="text-muted-foreground">DFT Runs:</span> <span className="font-mono font-medium">{alStats.convergence.totalDFTRuns}</span></div>
+                <div data-testid="al-retrains"><span className="text-muted-foreground">Retrains:</span> <span className="font-mono font-medium">{alStats.convergence.modelRetrains}</span></div>
+                <div data-testid="al-best-tc"><span className="text-muted-foreground">Best Tc:</span> <span className="font-mono font-medium">{(alStats.convergence.bestTcFromLoop ?? 0).toFixed(1)}K</span></div>
+              </div>
+
+              {alStats.dftDatasetStats.totalSize > 0 && (
+                <div className="text-xs" data-testid="al-dft-dataset">
+                  <span className="text-muted-foreground">DFT Training Dataset:</span>{" "}
+                  <span className="font-mono font-medium">{alStats.dftDatasetStats.totalSize} samples</span>
+                  {Object.entries(alStats.dftDatasetStats.bySource).length > 0 && (
+                    <span className="text-muted-foreground ml-1">
+                      ({Object.entries(alStats.dftDatasetStats.bySource).map(([src, count]) => `${count} ${src}`).join(", ")})
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {alStats.totalCycles > 0 && (
+                <div className="text-xs" data-testid="al-cycles">
+                  <span className="text-muted-foreground">Active Learning Cycles:</span>{" "}
+                  <span className="font-mono font-medium">{alStats.totalCycles}</span>
+                  {alStats.avgUncertaintyTrend.length > 0 && (
+                    <span className="text-muted-foreground ml-1">
+                      (latest unc. reduction: {alStats.avgUncertaintyTrend[alStats.avgUncertaintyTrend.length - 1]?.reductionPct.toFixed(1)}%)
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {gnnVersionData?.r2Trend && gnnVersionData.r2Trend.filter(d => d.r2 != null).length > 1 && (
+            <div data-testid="gnn-r2-trend">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">R-squared Trend</p>
+              <ResponsiveContainer width="100%" height={60}>
+                <LineChart data={gnnVersionData.r2Trend}>
+                  <Line type="monotone" dataKey="r2" stroke="hsl(var(--primary))" strokeWidth={1.5} dot={false} />
+                  <Tooltip
+                    contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
+                    formatter={(v: any) => [v != null ? v.toFixed(4) : "--", "R-squared"]}
+                    labelFormatter={(l: any) => `v${l}`}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Dashboard() {
   const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"] });
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
@@ -1056,6 +1161,8 @@ export default function Dashboard() {
               </div>
             </CardContent>
           </Card>
+
+          <GNNActiveLearningCard />
 
           <Card data-testid="card-learning-insights">
             <CardHeader className="pb-2">
