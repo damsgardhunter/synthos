@@ -210,7 +210,7 @@ function cartesianDistance(
 function minAllowedDistance(elA: string, elB: string): number {
   const rA = COVALENT_RADII[elA] ?? 1.4;
   const rB = COVALENT_RADII[elB] ?? 1.4;
-  return 0.7 * (rA + rB);
+  return 0.75 * (rA + rB);
 }
 
 function isPositionValid(

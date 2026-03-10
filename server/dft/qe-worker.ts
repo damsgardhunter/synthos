@@ -805,19 +805,56 @@ function perturbCoord(v: number, sigma: number = 0.03): number {
 function perturbPositions(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   sigma: number = 0.03,
+  latticeA?: number,
 ): Array<{ element: string; x: number; y: number; z: number }> {
-  return positions.map(p => ({
-    element: p.element,
-    x: perturbCoord(p.x, sigma),
-    y: perturbCoord(p.y, sigma),
-    z: perturbCoord(p.z, sigma),
-  }));
+  if (!latticeA || latticeA <= 0) {
+    return positions.map(p => ({
+      element: p.element,
+      x: perturbCoord(p.x, sigma),
+      y: perturbCoord(p.y, sigma),
+      z: perturbCoord(p.z, sigma),
+    }));
+  }
+
+  const result = positions.map(p => ({ ...p }));
+  for (let i = 0; i < result.length; i++) {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const px = perturbCoord(result[i].x, sigma);
+      const py = perturbCoord(result[i].y, sigma);
+      const pz = perturbCoord(result[i].z, sigma);
+
+      let valid = true;
+      for (let j = 0; j < result.length; j++) {
+        if (j === i) continue;
+        const ox = j < i ? result[j].x : positions[j].x;
+        const oy = j < i ? result[j].y : positions[j].y;
+        const oz = j < i ? result[j].z : positions[j].z;
+        let fdx = px - ox; fdx -= Math.round(fdx);
+        let fdy = py - oy; fdy -= Math.round(fdy);
+        let fdz = pz - oz; fdz -= Math.round(fdz);
+        const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+        const dMin = minPairDistance(result[i].element, result[j < i ? j : j].element);
+        if (dist < dMin) { valid = false; break; }
+      }
+      if (valid) {
+        result[i].x = px;
+        result[i].y = py;
+        result[i].z = pz;
+        break;
+      }
+      if (attempt === 9) {
+        // keep original position unperturbed
+      }
+    }
+  }
+  return result;
 }
 
 function generateAtomicPositions(
   elements: string[],
   counts: Record<string, number>,
   formula?: string,
+  latticeA?: number,
 ): Array<{ element: string; x: number; y: number; z: number }> {
   if (formula) {
     try {
@@ -833,7 +870,7 @@ function generateAtomicPositions(
         }
         if (positions.length > 0) {
           console.log(`[QE-Worker] Using ${template.name} prototype for ${formula} (${positions.length} atoms)`);
-          return perturbPositions(positions, 0.025);
+          return perturbPositions(positions, 0.025, latticeA);
         }
       }
     } catch {}
@@ -859,7 +896,7 @@ function generateAtomicPositions(
   if (totalAtoms <= 2 && elements.length === 2) {
     positions.push({ element: elements[0], x: 0, y: 0, z: 0 });
     positions.push({ element: elements[1], x: 0.5, y: 0.5, z: 0.5 });
-    return perturbPositions(positions, 0.02);
+    return perturbPositions(positions, 0.02, latticeA);
   }
 
   if (totalAtoms <= 2 && elements.length === 1) {
@@ -867,7 +904,7 @@ function generateAtomicPositions(
     if (totalAtoms > 1) {
       positions.push({ element: elements[0], x: 0.5, y: 0.5, z: 0.5 });
     }
-    return perturbPositions(positions, 0.02);
+    return perturbPositions(positions, 0.02, latticeA);
   }
 
   const hCount = Math.round(counts["H"] || 0);
@@ -878,8 +915,18 @@ function generateAtomicPositions(
     const hPerMetal = Math.round(hCount / metalCount);
     const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms);
     if (cagePositions.length === totalAtoms && cagePositions.length <= 16) {
-      console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms)`);
-      return perturbPositions(cagePositions, 0.03);
+      if (latticeA && latticeA > 0) {
+        const distValid = validatePositionDistances(cagePositions, latticeA);
+        if (distValid) {
+          console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms, dist-checked)`);
+          return perturbPositions(cagePositions, 0.02, latticeA);
+        } else {
+          console.log(`[QE-Worker] Hydride cage for ${formula} failed distance check, trying lattice-free fallback`);
+        }
+      } else {
+        console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms)`);
+        return perturbPositions(cagePositions, 0.03);
+      }
     }
   }
 
@@ -923,26 +970,56 @@ function generateAtomicPositions(
   }
 
   if (pendingAtoms.length > 0) {
-    const usedPositions = new Set(positions.map(p => `${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}`));
     for (const { element, remaining } of pendingAtoms) {
       for (let i = 0; i < remaining; i++) {
-        let x: number, y: number, z: number, key: string;
-        let attempts = 0;
-        do {
-          x = Math.round(Math.random() * 20) / 20;
-          y = Math.round(Math.random() * 20) / 20;
-          z = Math.round(Math.random() * 20) / 20;
-          key = `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
-          attempts++;
-        } while (usedPositions.has(key) && attempts < 100);
-        usedPositions.add(key);
-        positions.push({ element, x, y, z });
+        let placed = false;
+        for (let attempt = 0; attempt < 200; attempt++) {
+          const x = Math.round(Math.random() * 20) / 20;
+          const y = Math.round(Math.random() * 20) / 20;
+          const z = Math.round(Math.random() * 20) / 20;
+          const candidate = { element, x, y, z };
+          if (latticeA && latticeA > 0) {
+            let valid = true;
+            for (const p of positions) {
+              let fdx = x - p.x; fdx -= Math.round(fdx);
+              let fdy = y - p.y; fdy -= Math.round(fdy);
+              let fdz = z - p.z; fdz -= Math.round(fdz);
+              const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+              const dMin = 0.75 * ((COVALENT_RADIUS[element] ?? 1.4) + (COVALENT_RADIUS[p.element] ?? 1.4));
+              if (dist < dMin) { valid = false; break; }
+            }
+            if (!valid) continue;
+          }
+          positions.push(candidate);
+          placed = true;
+          break;
+        }
+        if (!placed) {
+          positions.push({ element, x: Math.random(), y: Math.random(), z: Math.random() });
+        }
       }
     }
-    console.log(`[QE-Worker] Placed ${positions.length} atoms total (${positions.length - cubicSites.length} at generated positions)`);
+    console.log(`[QE-Worker] Placed ${positions.length} atoms total (${positions.length - cubicSites.length} at generated positions, dist-enforced)`);
   }
 
-  return perturbPositions(positions, 0.03);
+  return perturbPositions(positions, 0.03, latticeA);
+}
+
+function validatePositionDistances(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+): boolean {
+  for (let i = 0; i < positions.length; i++) {
+    for (let j = i + 1; j < positions.length; j++) {
+      let fdx = positions[i].x - positions[j].x; fdx -= Math.round(fdx);
+      let fdy = positions[i].y - positions[j].y; fdy -= Math.round(fdy);
+      let fdz = positions[i].z - positions[j].z; fdz -= Math.round(fdz);
+      const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+      const dMin = 0.75 * ((COVALENT_RADIUS[positions[i].element] ?? 1.4) + (COVALENT_RADIUS[positions[j].element] ?? 1.4));
+      if (dist < dMin) return false;
+    }
+  }
+  return true;
 }
 
 function generateHydrideCagePositions(
@@ -1807,7 +1884,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     }
 
     let latticeA = estimateLatticeConstant(elements, counts);
-    let positions = generateAtomicPositions(elements, counts, formula);
+    let positions = generateAtomicPositions(elements, counts, formula, latticeA);
 
     try {
       const proto = selectPrototype(formula);
