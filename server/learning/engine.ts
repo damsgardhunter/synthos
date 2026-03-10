@@ -137,6 +137,27 @@ function derivePairingSymmetry(mechanism: string | null | undefined, dWaveFlag?:
   return "s-wave";
 }
 
+function classifyPressureViability(optimalPressureGpa: number): { label: string; penalty: number } {
+  if (optimalPressureGpa > 100) return { label: "high_pressure_only", penalty: 0.6 };
+  if (optimalPressureGpa > 50) return { label: "high_pressure_only", penalty: 0.4 };
+  if (optimalPressureGpa > 30) return { label: "moderate_pressure", penalty: 0.15 };
+  if (optimalPressureGpa > 10) return { label: "low_pressure", penalty: 0.05 };
+  return { label: "ambient_possible", penalty: 0 };
+}
+
+function enforcePhysicsPressure(formula: string, llmPressure: number | null | undefined): number {
+  const physPressure = estimateFamilyPressure(formula);
+  const llmP = llmPressure ?? 0;
+  return Math.max(llmP, physPressure);
+}
+
+function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undefined, muStar?: number): number {
+  if (!lambda || lambda <= 0) return 0;
+  const freq = omegaLogCm1 ?? 300;
+  const mu = muStar ?? 0.12;
+  return allenDynesTcRaw(lambda, freq, mu);
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   const cleaned = (formula ?? "").replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const result: Record<string, number> = {};
@@ -1162,10 +1183,26 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       },
     } : {};
 
+    const enforcedPressure = enforcePhysicsPressure(candidateData.formula, candidateData.pressureGpa);
+    const pressureViability = classifyPressureViability(enforcedPressure);
+    const pressureNote = pressureViability.penalty > 0
+      ? ` [Pressure: ${pressureViability.label}, ${enforcedPressure} GPa, viability penalty=${pressureViability.penalty.toFixed(2)}]`
+      : "";
+
+    const adjustedEnsemble = candidateData.ensembleScore != null
+      ? Math.max(0, (candidateData.ensembleScore ?? 0) * (1 - pressureViability.penalty))
+      : undefined;
+
+    const isHighPressureOnly = enforcedPressure > 50;
+
     await storage.insertSuperconductorCandidate({
       ...candidateData,
-      mlFeatures: { ...enrichedMlFeatures, ...deliberationFeatures } as any,
-      notes: `${existingNotes} ${stabilityNote}${kineticNote}${deliberationNote}`.trim(),
+      pressureGpa: enforcedPressure,
+      ensembleScore: adjustedEnsemble,
+      ambientPressureStable: isHighPressureOnly ? false : candidateData.ambientPressureStable,
+      roomTempViable: isHighPressureOnly ? false : candidateData.roomTempViable,
+      mlFeatures: { ...enrichedMlFeatures, ...deliberationFeatures, pressureViability: pressureViability.label } as any,
+      notes: `${existingNotes} ${stabilityNote}${kineticNote}${deliberationNote}${pressureNote}`.trim(),
     });
 
     const candidateTc = candidateData.predictedTc ?? 0;
@@ -2854,13 +2891,11 @@ async function runPhase11_StructurePrediction() {
 
           const features = extractFeatures(normalized);
           const gbResult = gbPredict(features);
-          let rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
-          if (rawTc > 80 && crystal.lambda < 1.5) {
-            const penalty = crystal.lambda < 0.5 ? 0.15 : crystal.lambda < 1.0 ? 0.25 : 0.3;
-            rawTc = Math.round(rawTc * penalty);
-          }
-          rawTc = Math.max(0, Math.min(400, rawTc));
-          const cappedTc = applyAmbientTcCap(rawTc, crystal.lambda, 0, features.metallicity ?? 0.5, normalized);
+          const cdvaeLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
+          const cdvaePhysTc = cdvaeLambda > 0
+            ? Math.round(computePhysicsOnlyTc(cdvaeLambda, features.logPhononFreq))
+            : 0;
+          const cappedTc = applyAmbientTcCap(cdvaePhysTc, cdvaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
 
           const id = `sc-cdvae-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           try {
@@ -2932,13 +2967,11 @@ async function runPhase11_StructurePrediction() {
           if (existing) continue;
           const features = extractFeatures(normalized);
           const gbResult = gbPredict(features);
-          let rawTc = Math.round(Math.max(crystal.predictedTc, gbResult.tcPredicted * 0.5));
-          if (rawTc > 80 && crystal.lambda < 1.5) {
-            const penalty = crystal.lambda < 0.5 ? 0.15 : crystal.lambda < 1.0 ? 0.25 : 0.3;
-            rawTc = Math.round(rawTc * penalty);
-          }
-          rawTc = Math.max(0, Math.min(400, rawTc));
-          const cappedTc = applyAmbientTcCap(rawTc, crystal.lambda, 0, features.metallicity ?? 0.5, normalized);
+          const distLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
+          const distPhysTc = distLambda > 0
+            ? Math.round(computePhysicsOnlyTc(distLambda, features.logPhononFreq))
+            : 0;
+          const cappedTc = applyAmbientTcCap(distPhysTc, distLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
           const id = `sc-distdiff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           try {
             const inserted = await insertCandidateWithStabilityCheck({
@@ -3025,8 +3058,11 @@ async function runPhase11_StructurePrediction() {
           try {
             const features = extractFeatures(normalized);
             const gbResult = gbPredict(features);
-            const rawTc = Math.round(Math.max(vaeResult.bestTc * 0.7, gbResult.tcPredicted));
-            const cappedTc = applyAmbientTcCap(rawTc, gbResult.score, 0, features.metallicity ?? 0.5, normalized);
+            const vaeLambda = features.electronPhononLambda ?? 0;
+            const vaePhysTc = vaeLambda > 0
+              ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq))
+              : 0;
+            const cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
             const inserted = await insertCandidateWithStabilityCheck({
               formula: normalized,
               predictedTc: cappedTc,
@@ -6113,7 +6149,7 @@ async function backfillGBScores() {
   } catch (e) { console.error("[Engine] GB score backfill failed:", e); }
 }
 
-const PHYSICS_VERSION = 14;
+const PHYSICS_VERSION = 15;
 
 async function recalculatePhysics() {
   const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
@@ -6135,34 +6171,16 @@ async function recalculatePhysics() {
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
           const featureLambda = features.electronPhononLambda ?? 0;
-          const omegaLogK = (features.logPhononFreq ?? 300) * 1.4388;
-          const muStar = 0.12;
-          let mcMillanMax = 0;
-          const denom = featureLambda - muStar * (1 + 0.62 * featureLambda);
-          if (featureLambda > 0.2 && Math.abs(denom) > 1e-6 && denom > 0) {
-            const lambdaBar = 2.46 * (1 + 3.8 * muStar);
-            const f1 = Math.pow(1 + Math.pow(featureLambda / lambdaBar, 3 / 2), 1 / 3);
-            const exponent = -1.04 * (1 + featureLambda) / denom;
-            mcMillanMax = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
-            if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
-          }
-
-          const corrStr = features.correlationStrength ?? 0;
           const metalScore = features.metallicity ?? 0.5;
-          const pressure = c.pressureGpa ?? 0;
-          const isAmbient = pressure < 10;
-          const isHighPressure = pressure >= 50;
-          const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressure - 10) / 40;
+          const recalcPressure = enforcePhysicsPressure(c.formula, c.pressureGpa);
 
-          let newTc = c.predictedTc;
-          if (newTc != null && featureLambda > 0 && features.logPhononFreq) {
-            const adTc = estimateRawTc(featureLambda, features.logPhononFreq, features.muStarEstimate);
-            if (adTc > 0) {
-              newTc = Math.round(0.5 * newTc + 0.5 * adTc);
-            }
+          let newTc: number | null = null;
+          if (featureLambda > 0) {
+            const adTc = computePhysicsOnlyTc(featureLambda, features.logPhononFreq, features.muStarEstimate);
+            newTc = adTc > 0 ? Math.round(adTc) : 0;
           }
           if (newTc != null) {
-            newTc = applyAmbientTcCap(newTc, featureLambda, pressure, metalScore, c.formula);
+            newTc = Math.round(applyAmbientTcCap(newTc, featureLambda, recalcPressure, metalScore, c.formula));
           }
 
           const updatedFeatures = { ...features, physicsVersion: PHYSICS_VERSION };
@@ -6170,16 +6188,20 @@ async function recalculatePhysics() {
           const isRoomTemp = (newTc ?? 0) >= 293 &&
             c.zeroResistance === true &&
             c.meissnerEffect === true &&
-            (c.pressureGpa ?? 999) <= 50;
+            recalcPressure <= 50;
+
+          const recalcViability = classifyPressureViability(recalcPressure);
 
           await storage.updateSuperconductorCandidate(c.id, {
             predictedTc: newTc,
-            mlFeatures: updatedFeatures as any,
+            pressureGpa: recalcPressure,
+            mlFeatures: { ...updatedFeatures, pressureViability: recalcViability.label } as any,
             xgboostScore: gb.score,
             neuralNetScore: nnScore,
-            ensembleScore: ensemble,
+            ensembleScore: Math.max(0, ensemble * (1 - recalcViability.penalty)),
             electronPhononCoupling: features.electronPhononLambda ?? null,
             roomTempViable: isRoomTemp,
+            ambientPressureStable: recalcPressure <= 50 ? c.ambientPressureStable : false,
           });
           totalRecalculated++;
         } catch (e) { console.error("[Engine] Physics recalculation update failed:", e); }

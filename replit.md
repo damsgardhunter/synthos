@@ -467,9 +467,21 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - **Chemistry validity filters**:
     - engine.ts: Added `passesChemistryFilter()` with three checks: (1) average valence electrons/atom must be in [1,12], (2) Pauling electronegativity spread must be ≤3.5 (rejects too-ionic compositions), (3) oxidation state balance must be achievable using common oxidation states (COMMON_OXIDATION_STATES table for 70+ elements, backtracking solver). Filter runs in `insertCandidateWithStabilityCheck()` after element count cap, before stability pre-filter.
 
-  - **Pressure stability logic**:
+  - **Pressure stability logic + viability classification**:
     - multi-fidelity-pipeline.ts: `ambientPressureStable` now requires optimalPressure < 50 GPa (was only checking pressureGpa ≤ 1). Both assignment sites (stage evaluation and final updates) enforce this.
     - engine.ts: Pressure scan update paths (both hydride and non-hydride) now set `ambientPressureStable = false` when `optimalPressure > 50 GPa`. Materials requiring >50 GPa are never marked as ambient-pressure-stable.
+    - engine.ts: Added `classifyPressureViability(optimalPressureGpa)` — returns label (ambient_possible/low_pressure/moderate_pressure/high_pressure_only) and penalty (0 to 0.6). Penalty applied to ensemble score at insertion time.
+    - engine.ts: Added `enforcePhysicsPressure(formula, llmPressure)` — uses `estimateFamilyPressure()` as floor so hydrides can never have pressureGpa=0. All candidate insertion paths enforce physics-based pressure.
+    - superconductor-research.ts, ml-predictor.ts: LLM-proposed pressure overridden by `Math.max(llmPressure, estimateFamilyPressure(formula))`. Hydrides with H ratio ≥0.15 always get ≥50 GPa.
+    - engine.ts: `recalculatePhysics()` (PHYSICS_VERSION bumped to 15) now enforces pressure, applies viability penalty, and sets `ambientPressureStable=false` for >50 GPa materials on all existing candidates.
+
+  - **LLM Tc influence removed — physics-only Tc pipeline**:
+    - Tc prediction source is now physics-only across all candidate generation paths. LLM can suggest materials and hypotheses but NEVER compute Tc.
+    - ml-predictor.ts: `nn.refinedTc` (LLM-proposed) replaced with `allenDynesTcRaw(lambda, omegaLog, muStar)` — pure Allen-Dynes physics. LLM Tc logged in notes for transparency but not used.
+    - superconductor-research.ts: Both novel SC and inverse design paths now compute Tc from `allenDynesTcRaw()` instead of using `c.predictedTc` from LLM response. LLM-proposed Tc logged as `[LLM suggested Tc=XK, physics-only Tc=YK]`.
+    - engine.ts: Crystal diffusion (CDVAE, distribution-based) and VAE inverse design paths replaced `Math.max(crystal.predictedTc, gbResult.tcPredicted)` with `computePhysicsOnlyTc(lambda, omegaLog)`.
+    - engine.ts: `recalculatePhysics()` now uses pure Allen-Dynes instead of 50/50 blend with old (potentially LLM-sourced) Tc.
+    - Pipeline enforcement: Generator → structure relaxation → DFT → phonons → electron-phonon coupling → Tc calculation (Allen-Dynes). LLM only suggests materials.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

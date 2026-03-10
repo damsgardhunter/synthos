@@ -7,7 +7,8 @@ import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } fr
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
 import type { CapExtensionEvidence } from "./physics-engine";
 import { passesStabilityGate } from "./phase-diagram-engine";
-import { passesElementCountCap } from "./candidate-generator";
+import { passesElementCountCap, estimateFamilyPressure } from "./candidate-generator";
+import { allenDynesTcRaw } from "./physics-engine";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
 const openai = new OpenAI({
@@ -466,68 +467,17 @@ Return JSON with 'candidates' array:
       const features = extractFeatures(c.formula);
       const gbResult = gbPredict(features);
 
-      let cappedTc = c.predictedTc ?? null;
-      if (cappedTc != null && cappedTc > 0) {
-        const featureLambda = features.electronPhononLambda ?? 0;
-        if (cappedTc > 80 && featureLambda < 1.5) {
-          const penalty = featureLambda < 0.5 ? 0.15 : featureLambda < 1.0 ? 0.25 : 0.3;
-          cappedTc = Math.round(cappedTc * penalty);
-        }
-        const omegaLogK = (features.logPhononFreq ?? 300) * 1.4388;
-        const muStar = 0.12;
-        let mcMillanMax = 0;
-        const denom = featureLambda - muStar * (1 + 0.62 * featureLambda);
-        if (featureLambda > 0.2 && Math.abs(denom) > 1e-6 && denom > 0) {
-          const lambdaBar = 2.46 * (1 + 3.8 * muStar);
-          const f1 = Math.pow(1 + Math.pow(featureLambda / lambdaBar, 3 / 2), 1 / 3);
-          const exponent = -1.04 * (1 + featureLambda) / denom;
-          mcMillanMax = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
-          if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
-        }
-
-        const corrStr = features.correlationStrength ?? 0;
-        const metalScore = features.metallicity ?? 0.5;
-        const pressure = c.pressureGpa ?? 0;
-        const isAmbient = pressure < 10;
-        const isHighPressure = pressure >= 50;
-        const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressure - 10) / 40;
-
-        let tcCap: number;
-        if (metalScore < 0.3) {
-          tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
-        } else if (metalScore < 0.5) {
-          tcCap = Math.min(80, mcMillanMax * 0.3 || 40);
-        } else if (corrStr > 0.85) {
-          tcCap = Math.min(80, mcMillanMax * 0.3 || 30);
-        } else if (corrStr > 0.7) {
-          tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
-        } else if (featureLambda < 0.3) {
-          tcCap = Math.min(50, mcMillanMax > 0 ? mcMillanMax * 2.0 : 30);
-        } else if (featureLambda < 0.5) {
-          tcCap = Math.min(80, mcMillanMax > 0 ? mcMillanMax * 2.0 : 50);
-        } else if (featureLambda < 1.0) {
-          const hpCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 1.8 : 100);
-          const ambientCap = 80;
-          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
-        } else if (featureLambda < 1.5) {
-          const hpCap = mcMillanMax > 0 ? Math.min(250, mcMillanMax * 1.5) : 150;
-          const ambientCap = 120;
-          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
-        } else if (featureLambda < 2.5) {
-          const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.3) : 250;
-          const ambientCap = 160;
-          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
-        } else {
-          const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.2) : 300;
-          const ambientCap = 200;
-          tcCap = ambientCap + (hpCap - ambientCap) * pressureFactor;
-        }
-        tcCap = Math.round(tcCap);
-
-        if (cappedTc > tcCap) {
-          cappedTc = tcCap;
-        }
+      const featureLambda = features.electronPhononLambda ?? 0;
+      const physicsTc = featureLambda > 0
+        ? Math.round(allenDynesTcRaw(featureLambda, features.logPhononFreq ?? 300, 0.12))
+        : 0;
+      const enforcedPressure = estimateFamilyPressure(c.formula);
+      const effectivePressure = Math.max(c.pressureGpa ?? 0, enforcedPressure);
+      let cappedTc: number | null = physicsTc > 0 ? physicsTc : null;
+      if (cappedTc != null) {
+        cappedTc = Math.round(applyAmbientTcCap(cappedTc, featureLambda, effectivePressure, features.metallicity ?? 0.5, c.formula));
       }
+      const llmProposedTc = c.predictedTc ?? null;
 
       const novelNNScore = c.quantumCoherence ?? 0.3;
       const novelXGBScore = gbResult.score;
@@ -536,7 +486,7 @@ Return JSON with 'candidates' array:
       const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
         c.zeroResistance === true &&
         c.meissnerEffect === true &&
-        (c.pressureGpa ?? 999) <= 50;
+        effectivePressure <= 50;
 
       const status = determineStatus({
         ...c,
@@ -560,7 +510,7 @@ Return JSON with 'candidates' array:
           name: c.name || c.formula,
           formula: c.formula,
           predictedTc: cappedTc,
-          pressureGpa: c.pressureGpa ?? null,
+          pressureGpa: effectivePressure,
           meissnerEffect: c.meissnerEffect ?? false,
           zeroResistance: c.zeroResistance ?? false,
           cooperPairMechanism: c.cooperPairMechanism ?? (features.correlationStrength > 0.6
@@ -576,7 +526,7 @@ Return JSON with 'candidates' array:
           ensembleScore: novelEnsembleScore,
           roomTempViable: isActuallyRoomTemp && (c.pressureGpa ?? 999) <= 50,
           status,
-          notes: (cappedTc !== (c.predictedTc ?? null) ? `[LLM proposed Tc=${c.predictedTc}K, capped to ${cappedTc}K] ` : '') + verificationNotes,
+          notes: (llmProposedTc != null ? `[LLM suggested Tc=${llmProposedTc}K, physics-only Tc=${cappedTc}K (Allen-Dynes, lambda=${featureLambda.toFixed(2)})] ` : '') + verificationNotes,
           electronPhononCoupling: features.electronPhononLambda ?? null,
           logPhononFrequency: features.logPhononFreq ?? null,
           coulombPseudopotential: 0.12,
@@ -809,15 +759,19 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
       const gbResult = gbPredict(features);
       const pairingSusc = computePairingSusceptibility(c.formula);
 
-      let cappedTc = c.predictedTc ?? Math.round(pairingSusc.lambda * 50);
       const lambdaML = features.electronPhononLambda ?? 0;
-      const pressureML = c.pressureGpa ?? 0;
+      const effectiveLambda = pairingSusc.lambda > 0 ? pairingSusc.lambda : lambdaML;
+      const invPhysicsTc = effectiveLambda > 0
+        ? Math.round(allenDynesTcRaw(effectiveLambda, features.logPhononFreq ?? 300, 0.12))
+        : 0;
+      const invEnforcedPressure = Math.max(c.pressureGpa ?? 0, estimateFamilyPressure(c.formula));
       const metallicityML = features.metallicity ?? 0.5;
+      let cappedTc = invPhysicsTc > 0 ? invPhysicsTc : 0;
       const invDesEvidence: CapExtensionEvidence = {
-        eliashbergLambda: pairingSusc.lambda > 0 ? pairingSusc.lambda : undefined,
+        eliashbergLambda: effectiveLambda > 0 ? effectiveLambda : undefined,
         eliashbergTc: cappedTc > 0 ? cappedTc : undefined,
       };
-      cappedTc = applyAmbientTcCap(cappedTc, lambdaML, pressureML, metallicityML, c.formula, invDesEvidence);
+      cappedTc = Math.round(applyAmbientTcCap(cappedTc, lambdaML, invEnforcedPressure, metallicityML, c.formula, invDesEvidence));
 
       const inverseDesignScore = Math.min(0.95, pairingSusc.score * 0.6 + gbResult.score * 0.4);
 
@@ -826,7 +780,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
       const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
         c.zeroResistance === true &&
         c.meissnerEffect === true &&
-        (c.pressureGpa ?? 999) <= 50;
+        invEnforcedPressure <= 50;
 
       try {
         if (!passesElementCountCap(c.formula)) continue;
@@ -839,7 +793,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
           name: c.name || c.formula,
           formula: c.formula,
           predictedTc: cappedTc,
-          pressureGpa: c.pressureGpa ?? null,
+          pressureGpa: invEnforcedPressure,
           meissnerEffect: c.meissnerEffect ?? false,
           zeroResistance: c.zeroResistance ?? false,
           cooperPairMechanism: c.cooperPairMechanism ?? "Optimized for pairing susceptibility",
