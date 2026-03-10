@@ -1708,6 +1708,25 @@ function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {
   }));
 }
 
+function hasHardDistanceViolation(atoms: AtomPosition[]): { violated: boolean; pair: string; dist: number } {
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const dx = atoms[i].x - atoms[j].x;
+      const dy = atoms[i].y - atoms[j].y;
+      const dz = atoms[i].z - atoms[j].z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const a = atoms[i].element, b = atoms[j].element;
+      const bothH = a === "H" && b === "H";
+      const oneH = a === "H" || b === "H";
+      const bothMetal = !oneH;
+      if (bothH && dist < 0.74) return { violated: true, pair: "H-H", dist };
+      if (oneH && !bothH && dist < 1.2) return { violated: true, pair: `${a}-${b}`, dist };
+      if (bothMetal && dist < 1.8) return { violated: true, pair: `${a}-${b}`, dist };
+    }
+  }
+  return { violated: false, pair: "", dist: 0 };
+}
+
 function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPosition[] | null {
   if (atoms.length < 2) return atoms;
 
@@ -1727,12 +1746,16 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     const volume = computeBoundingVolume(current);
     const volumePerAtom = volume / nAtoms;
 
-    const distOk = minRatio >= 0.99;
-    const volOk = volumePerAtom >= targetVolPerAtom - 0.1;
+    const distOk = minRatio >= 0.75;
+    const volOk = volumePerAtom >= targetVolPerAtom * 0.5;
     const volNotTooLarge = volumePerAtom <= targetVolPerAtom * 2.0;
 
     if (distOk && volOk && volNotTooLarge) {
-      return current;
+      const hardCheck = hasHardDistanceViolation(current);
+      if (!hardCheck.violated) {
+        return current;
+      }
+      console.log(`[DFT] ${formula}: Hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å — continuing scaling`);
     }
 
     const volScale = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
@@ -1752,12 +1775,18 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     current = scaleStructure(current, scaleFactor);
   }
 
-  const { minDist, minRatio } = computePairwiseDistances(current);
+  const hardCheck = hasHardDistanceViolation(current);
+  if (hardCheck.violated) {
+    console.log(`[DFT] ${formula}: Structure REJECTED — hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å after ${MAX_SCALE_ATTEMPTS} attempts`);
+    return null;
+  }
+
+  const { minRatio } = computePairwiseDistances(current);
   const volume = computeBoundingVolume(current);
   const volumePerAtom = volume / nAtoms;
 
-  if (minRatio < 0.99 || volumePerAtom < minVol - 0.1) {
-    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
+  if (minRatio < 0.75 || volumePerAtom < minVol - 0.1) {
+    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
     return null;
   }
 
