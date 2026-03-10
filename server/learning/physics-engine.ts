@@ -5,6 +5,7 @@ import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { classifyFamily } from "./utils";
 import { computeFullTightBinding } from "./tight-binding";
 import { computeAdvancedConstraints, type AdvancedPhysicsConstraints } from "../physics/advanced-constraints";
+import { computeOODScore } from "./ood-detector";
 
 export interface PhysicsConstraintMode {
   allowBeyondEmpirical: boolean;
@@ -198,7 +199,16 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   baseExpectation += materialBonus;
   baseExpectation = Math.round(baseExpectation * extensionFactor);
 
-  const penaltyStr = mode.empiricalPenaltyStrength;
+  let penaltyStr = mode.empiricalPenaltyStrength;
+  if (formula) {
+    try {
+      const ood = computeOODScore(formula);
+      const BASE_PENALTY = 0.6;
+      const OOD_PENALTY_SCALE = 4.0;
+      penaltyStr = BASE_PENALTY + ood.oodScore * OOD_PENALTY_SCALE;
+      penaltyStr = Math.max(0.3, Math.min(5.0, penaltyStr));
+    } catch {}
+  }
   const result = softCeiling(tc, baseExpectation, penaltyStr);
 
   return Math.round(result);
