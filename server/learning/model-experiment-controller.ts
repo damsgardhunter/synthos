@@ -2,12 +2,15 @@ import OpenAI from "openai";
 import {
   getComprehensiveModelDiagnostics,
   getModelDiagnosticsForLLM,
+  getFailedMaterialsForLLM,
+  getBenchmarkForLLM,
   type ComprehensiveModelDiagnostics,
 } from "./model-diagnostics";
-import { retrainXGBoostFromEvaluated } from "./gradient-boost";
+import { retrainXGBoostFromEvaluated, registerHyperparamResolver } from "./gradient-boost";
 import { trainLambdaRegressor } from "./lambda-regressor";
 import { trainPhononSurrogate } from "../physics/phonon-surrogate";
 import { retrainTBSurrogate } from "../physics/tb-ml-surrogate";
+import { enableBuiltinFeature, selectArchitecture } from "./model-llm-controller";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -21,7 +24,8 @@ export type ExperimentType =
   | "add_features"
   | "adjust_architecture"
   | "recalibrate_uncertainty"
-  | "rebalance_training";
+  | "rebalance_training"
+  | "request_data";
 
 export type ExperimentStatus = "proposed" | "running" | "completed" | "failed";
 
@@ -56,12 +60,35 @@ export interface ModelHyperparamOverrides {
   minSamples?: number;
   ensembleSize?: number;
   dropoutRate?: number;
+  layerCount?: number;
+  regularizationL2?: number;
+  batchSize?: number;
+  epochs?: number;
+  bootstrapRatio?: number;
+}
+
+export interface DataRequest {
+  id: string;
+  timestamp: number;
+  family: string;
+  count: number;
+  method: string;
+  pressureVariants: boolean;
+  pressures: number[];
+  status: "pending" | "in_progress" | "completed" | "failed";
+  requestedBy: string;
+  completedAt?: number;
+  generatedCount?: number;
 }
 
 const MAX_EXPERIMENT_RECORDS = 50;
+const MAX_DATA_REQUESTS = 30;
 let experimentRecords: ExperimentRecord[] = [];
 let experimentIdCounter = 0;
 const hyperparamOverrides: Map<string, ModelHyperparamOverrides> = new Map();
+let pendingDataRequests: DataRequest[] = [];
+
+registerHyperparamResolver(() => hyperparamOverrides.get("xgboost"));
 
 function generateExperimentId(): string {
   experimentIdCounter++;
@@ -133,19 +160,59 @@ export async function proposeModelExperiments(diagnosticsReport?: string): Promi
       messages: [
         {
           role: "system",
-          content: `You are a machine learning model improvement advisor for a superconductor discovery system.
-Given a diagnostics report of multiple ML models, propose 1-3 concrete experiments to improve model performance.
+          content: `You are the MODEL LLM for a superconductor discovery system.
+Your SOLE responsibility is controlling LEARNING: training datasets, features, architectures, and hyperparameters.
+You do NOT control exploration strategy, material families, or search direction — that is handled by a separate Strategy LLM.
+
+Given a diagnostics report of multiple ML models (including failed materials and version benchmarks), propose 1-3 concrete experiments to improve model performance.
 
 Each experiment must be one of these types:
 - retrain_model: Retrain a specific model with current data
-- adjust_hyperparameters: Change nTrees, learningRate, maxDepth, minSamples
+- adjust_hyperparameters: Tune training parameters. Available parameters per model:
+  xgboost: nTrees (10-500), learningRate (0.001-0.3), maxDepth (3-12), minSamples (2-32), ensembleSize (1-10), bootstrapRatio (0.5-1.0)
+  gnn: layerCount (2-8), learningRate (0.0001-0.01), dropoutRate (0.0-0.5), epochs (5-50), ensembleSize (1-8)
+  lambda-regressor: learningRate (0.0001-0.01), layerCount (2-8), dropoutRate (0.0-0.5), regularizationL2 (0.0001-0.1)
+  phonon-surrogate: nTrees (10-200), learningRate (0.01-0.2), maxDepth (3-10)
+  tb-surrogate: nTrees (10-200), learningRate (0.01-0.2), maxDepth (3-10)
+  Example: {"model": "lambda_predictor", "learning_rate": 0.0005, "layers": 5, "dropout": 0.2}
 - expand_dataset: Add more training data from available sources
-- add_features: Enable/disable feature groups
-- adjust_architecture: Change ensemble size, dropout rate
+- add_features: Enable computed features like van_hove_distance, lambda_over_omega, effective_coupling_strength, dos_lambda_product, etc.
+  Use changes like {"enable_features": ["van_hove_distance", "dos_lambda_product"]}
+- adjust_architecture: Select between model architectures based on dataset size:
+  dataset < 100: use xgboost (gradient boosting works better with small data)
+  dataset 100-500: use xgboost with larger ensemble
+  dataset > 500 with graph data: consider gnn or ensemble weighting
+  Use changes like {"primary_model": "xgboost", "ensemble_weights": {"xgboost": 0.7, "gnn": 0.3}}
 - recalibrate_uncertainty: Adjust uncertainty scaling
-- rebalance_training: Adjust sampling ratios
+- rebalance_training: Adjust sampling ratios for different material families
+- request_data: Request generation of new training data for specific families or material types.
+  Use changes like {"family": "boride", "count": 30, "method": "tb_evaluation"} or {"family": "hydride", "pressure_variants": true, "pressures": [0,50,150,300]}
 
 Valid model targets: xgboost, gnn, lambda-regressor, phonon-surrogate, tb-surrogate
+
+YOUR SCOPE (learning decisions only):
+- Training datasets: which data to use, sampling ratios
+- Features: which computed features to enable/disable
+- Architecture: which model to use (XGBoost vs GNN vs ensemble)
+- Hyperparameters: learning rate, layer count, regularization, dropout, etc.
+
+OUT OF SCOPE (handled by Strategy LLM):
+- Material family priorities
+- Pressure range exploration
+- Search direction (explore vs exploit)
+
+The report includes:
+- Feature importance rankings (which features the model uses most/ignores)
+- Error analysis with failure clusters (which families are overpredicted/underpredicted)
+- Data gaps (families with too few training samples)
+- Failed materials data (predicted stable but actually unstable, phonon failures, etc.)
+- Model version benchmarks with scorecards and version comparisons
+
+Use failed materials data to propose targeted classifiers or filters.
+If many materials fail with unstable phonons, propose training a phonon stability classifier.
+Use version benchmarks to assess whether recent changes helped or regressed.
+Use feature importance to identify missing or underused features.
+Use error clusters to propose targeted improvements.
 
 Respond ONLY with a JSON array of experiments:
 [{
@@ -162,7 +229,7 @@ Be specific about what parameters to change and why.`,
         },
         {
           role: "user",
-          content: report,
+          content: report + "\n\n" + getFailedMaterialsForLLM() + "\n\n" + getBenchmarkForLLM(),
         },
       ],
     });
@@ -177,7 +244,7 @@ Be specific about what parameters to change and why.`,
     const validTypes: ExperimentType[] = [
       "retrain_model", "adjust_hyperparameters", "expand_dataset",
       "add_features", "adjust_architecture", "recalibrate_uncertainty",
-      "rebalance_training",
+      "rebalance_training", "request_data",
     ];
     const validModels = ["xgboost", "gnn", "lambda-regressor", "phonon-surrogate", "tb-surrogate"];
 
@@ -229,27 +296,81 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
   try {
     if (experiment.experiment_type === "adjust_hyperparameters") {
       const overrides = hyperparamOverrides.get(experiment.model_target) ?? {};
-      if (experiment.changes.nTrees != null) overrides.nTrees = experiment.changes.nTrees;
-      if (experiment.changes.learningRate != null) overrides.learningRate = experiment.changes.learningRate;
-      if (experiment.changes.maxDepth != null) overrides.maxDepth = experiment.changes.maxDepth;
-      if (experiment.changes.minSamples != null) overrides.minSamples = experiment.changes.minSamples;
-      if (experiment.changes.ensembleSize != null) overrides.ensembleSize = experiment.changes.ensembleSize;
-      if (experiment.changes.dropoutRate != null) overrides.dropoutRate = experiment.changes.dropoutRate;
+      const c = experiment.changes;
+      if (c.nTrees != null) overrides.nTrees = Math.max(10, Math.min(500, c.nTrees));
+      if (c.learningRate != null || c.learning_rate != null) overrides.learningRate = Math.max(0.0001, Math.min(0.3, c.learningRate ?? c.learning_rate));
+      if (c.maxDepth != null) overrides.maxDepth = Math.max(3, Math.min(12, c.maxDepth));
+      if (c.minSamples != null) overrides.minSamples = Math.max(2, Math.min(32, c.minSamples));
+      if (c.ensembleSize != null) overrides.ensembleSize = Math.max(1, Math.min(10, c.ensembleSize));
+      if (c.dropoutRate != null || c.dropout != null) overrides.dropoutRate = Math.max(0, Math.min(0.5, c.dropoutRate ?? c.dropout));
+      if (c.layerCount != null || c.layers != null) overrides.layerCount = Math.max(2, Math.min(8, c.layerCount ?? c.layers));
+      if (c.regularizationL2 != null || c.regularization != null) overrides.regularizationL2 = Math.max(0.0001, Math.min(0.1, c.regularizationL2 ?? c.regularization));
+      if (c.batchSize != null) overrides.batchSize = Math.max(4, Math.min(128, c.batchSize));
+      if (c.epochs != null) overrides.epochs = Math.max(5, Math.min(50, c.epochs));
+      if (c.bootstrapRatio != null) overrides.bootstrapRatio = Math.max(0.5, Math.min(1.0, c.bootstrapRatio));
       hyperparamOverrides.set(experiment.model_target, overrides);
+      console.log(`[Model Experiment Controller] Hyperparams updated for ${experiment.model_target}: ${JSON.stringify(overrides)}`);
+    }
+
+    if (experiment.experiment_type === "request_data") {
+      const request: DataRequest = {
+        id: `dr-${Date.now()}`,
+        timestamp: Date.now(),
+        family: experiment.changes.family ?? "unknown",
+        count: Math.min(experiment.changes.count ?? 20, 50),
+        method: experiment.changes.method ?? "tb_evaluation",
+        pressureVariants: experiment.changes.pressure_variants ?? false,
+        pressures: experiment.changes.pressures ?? [0],
+        status: "pending",
+        requestedBy: id,
+      };
+      pendingDataRequests.push(request);
+      if (pendingDataRequests.length > MAX_DATA_REQUESTS) {
+        pendingDataRequests = pendingDataRequests.slice(-MAX_DATA_REQUESTS);
+      }
+      console.log(`[Model Experiment Controller] Data request queued: ${request.count} ${request.family} structures via ${request.method}`);
+    }
+
+    if (experiment.experiment_type === "add_features") {
+      const featuresToEnable: string[] = experiment.changes.enable_features ?? [];
+      let enabled = 0;
+      for (const featureName of featuresToEnable) {
+        if (enableBuiltinFeature(featureName)) {
+          enabled++;
+        }
+      }
+      console.log(`[Model Experiment Controller] Enabled ${enabled}/${featuresToEnable.length} computed features`);
+    }
+
+    if (experiment.experiment_type === "adjust_architecture") {
+      try {
+        const archResult = await selectArchitecture();
+        record.changes = {
+          ...record.changes,
+          architecture_result: {
+            primaryModel: archResult.primaryModel,
+            modelConfigs: archResult.modelConfigs,
+            switchRecommended: archResult.switchRecommended,
+          },
+        };
+        console.log(`[Model Experiment Controller] Architecture selected: ${archResult.primaryModel} (switch=${archResult.switchRecommended})`);
+      } catch (e) {
+        console.log(`[Model Experiment Controller] Architecture selection failed: ${e instanceof Error ? e.message : "unknown"}`);
+      }
     }
 
     switch (experiment.model_target) {
       case "xgboost":
-        await retrainXGBoostFromEvaluated();
+        if (experiment.experiment_type !== "request_data") await retrainXGBoostFromEvaluated();
         break;
       case "lambda-regressor":
-        trainLambdaRegressor();
+        if (experiment.experiment_type !== "request_data") trainLambdaRegressor();
         break;
       case "phonon-surrogate":
-        trainPhononSurrogate();
+        if (experiment.experiment_type !== "request_data") trainPhononSurrogate();
         break;
       case "tb-surrogate":
-        retrainTBSurrogate();
+        if (experiment.experiment_type !== "request_data") retrainTBSurrogate();
         break;
       case "gnn":
         break;
@@ -344,4 +465,28 @@ export function getExperimentStats(): {
     recentExperiments: experimentRecords.slice(-10).reverse(),
     hyperparamOverrides: overridesObj,
   };
+}
+
+export function getPendingDataRequests(): DataRequest[] {
+  return pendingDataRequests.filter(r => r.status === "pending");
+}
+
+export function getAllDataRequests(): DataRequest[] {
+  return [...pendingDataRequests].reverse();
+}
+
+export function completeDataRequest(id: string, generatedCount: number): void {
+  const request = pendingDataRequests.find(r => r.id === id);
+  if (request) {
+    request.status = "completed";
+    request.completedAt = Date.now();
+    request.generatedCount = generatedCount;
+  }
+}
+
+export function markDataRequestInProgress(id: string): void {
+  const request = pendingDataRequests.find(r => r.id === id);
+  if (request) {
+    request.status = "in_progress";
+  }
 }

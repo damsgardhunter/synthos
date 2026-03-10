@@ -4,6 +4,33 @@ import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { computeCompositionFeatures, compositionFeatureVector, COMPOSITION_FEATURE_NAMES } from "./composition-features";
 import { storage } from "../storage";
 
+interface HyperparamOverrides {
+  nTrees?: number;
+  learningRate?: number;
+  maxDepth?: number;
+  minSamples?: number;
+  ensembleSize?: number;
+  dropoutRate?: number;
+  layerCount?: number;
+  regularizationL2?: number;
+  batchSize?: number;
+  epochs?: number;
+  bootstrapRatio?: number;
+}
+
+let xgboostHyperparamResolver: (() => HyperparamOverrides | undefined) | null = null;
+
+export function registerHyperparamResolver(resolver: () => HyperparamOverrides | undefined): void {
+  xgboostHyperparamResolver = resolver;
+}
+
+function getXGBoostHyperparamOverrides(): HyperparamOverrides {
+  if (xgboostHyperparamResolver) {
+    return xgboostHyperparamResolver() ?? {};
+  }
+  return {};
+}
+
 interface TreeNode {
   featureIndex: number;
   threshold: number;
@@ -733,6 +760,44 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   };
 }
 
+export function getGlobalFeatureImportance(topN: number = 30): { name: string; index: number; importance: number; normalizedImportance: number }[] {
+  const model = getTrainedModel();
+  if (!model || model.trees.length === 0) return [];
+
+  const featureImp = new Map<number, number>();
+  for (const tree of model.trees) {
+    const imp = getTreeFeatureImportance(tree);
+    for (const [k, v] of imp) {
+      featureImp.set(k, (featureImp.get(k) || 0) + v);
+    }
+  }
+
+  if (cachedEnsembleXGB) {
+    for (const ensModel of cachedEnsembleXGB.models) {
+      for (const tree of ensModel.trees) {
+        const imp = getTreeFeatureImportance(tree);
+        for (const [k, v] of imp) {
+          featureImp.set(k, (featureImp.get(k) || 0) + v);
+        }
+      }
+    }
+  }
+
+  const sorted = [...featureImp.entries()].sort((a, b) => b[1] - a[1]);
+  const maxImp = sorted.length > 0 ? sorted[0][1] : 1;
+
+  return sorted.slice(0, topN).map(([idx, count]) => ({
+    name: FEATURE_NAMES[idx] || `feature_${idx}`,
+    index: idx,
+    importance: count,
+    normalizedImportance: Math.round((count / maxImp) * 1000) / 1000,
+  }));
+}
+
+export function getFeatureNames(): string[] {
+  return [...FEATURE_NAMES];
+}
+
 export function getXGBEnsembleStats() {
   return {
     ensembleSize: XGB_ENSEMBLE_SIZE,
@@ -1025,8 +1090,13 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     return { retrained: false, datasetSize: X.length, newEntries: newFromEval };
   }
 
+  const hp = getXGBoostHyperparamOverrides();
+  const hpTrees = hp.nTrees ?? 300;
+  const hpLR = hp.learningRate ?? 0.05;
+  const hpDepth = hp.maxDepth ?? 6;
+
   invalidateModel();
-  cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
+  cachedModel = trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
   cachedCalibration = computeCalibration(cachedModel);
 
   if (X.length >= 30) {
@@ -1041,7 +1111,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   if (shouldRetrainOnErrorRate()) {
     invalidateModel();
-    cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
+    cachedModel = trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
     cachedCalibration = computeCalibration(cachedModel);
     if (X.length >= 30) {
       cachedEnsembleXGB = trainEnsembleXGB(X, y);

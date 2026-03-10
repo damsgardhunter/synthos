@@ -525,6 +525,223 @@ function GNNActiveLearningCard() {
   );
 }
 
+interface BenchmarkCompound {
+  formula: string;
+  name: string;
+  family: string;
+  textbook: {
+    tc: number;
+    lambda: number;
+    omegaLog: number;
+    crystalSystem: string;
+    spaceGroup: string;
+    yearDiscovered: number;
+    pressureGpa: number;
+    pairingMechanism: string;
+    notes: string;
+  };
+  predicted: {
+    xgboostTc: number;
+    xgboostScore: number;
+    gnnTc: number;
+    gnnUncertainty: number;
+    gnnLambda: number;
+    ensembleTc: number;
+    reasoning: string[];
+  };
+  accuracy: {
+    tcErrorK: number;
+    tcErrorPercent: number;
+    lambdaError: number | null;
+    rating: string;
+  };
+  computedAt: number;
+}
+
+function ReferenceBenchmarkCard() {
+  const { data, isLoading } = useQuery<{ results: BenchmarkCompound[]; computedAt: number }>({
+    queryKey: ["/api/reference-benchmark"],
+    refetchInterval: 60000,
+  });
+
+  const ratingColor = (rating: string) => {
+    if (rating === "excellent") return "text-emerald-600 dark:text-emerald-400";
+    if (rating === "good") return "text-blue-600 dark:text-blue-400";
+    if (rating === "fair") return "text-amber-600 dark:text-amber-400";
+    return "text-red-600 dark:text-red-400";
+  };
+
+  const ratingBg = (rating: string) => {
+    if (rating === "excellent") return "bg-emerald-500/10 border-emerald-500/20";
+    if (rating === "good") return "bg-blue-500/10 border-blue-500/20";
+    if (rating === "fair") return "bg-amber-500/10 border-amber-500/20";
+    return "bg-red-500/10 border-red-500/20";
+  };
+
+  const familyBadge = (family: string) => {
+    const colors: Record<string, string> = {
+      Boride: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
+      Cuprate: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+      A15: "bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300",
+    };
+    return colors[family] ?? "bg-muted text-muted-foreground";
+  };
+
+  if (isLoading) {
+    return (
+      <Card data-testid="card-reference-benchmark">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Shield className="h-4 w-4 text-primary" />
+            Reference Benchmark
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            {[1, 2, 3].map(i => <Skeleton key={i} className="h-28" />)}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!data?.results?.length) return null;
+
+  const avgError = data.results.reduce((s, r) => s + r.accuracy.tcErrorPercent, 0) / data.results.length;
+
+  return (
+    <Card data-testid="card-reference-benchmark" className="col-span-full">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Shield className="h-4 w-4 text-primary" />
+            Reference Benchmark: Known Superconductors
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="text-xs border-0 font-mono" data-testid="benchmark-avg-error">
+              Avg Error: {avgError.toFixed(1)}%
+            </Badge>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">
+          Comparing our physics engine predictions against experimentally verified textbook data
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {data.results.map((compound) => (
+            <div
+              key={compound.formula}
+              className={`rounded-lg border p-4 space-y-3 ${ratingBg(compound.accuracy.rating)}`}
+              data-testid={`benchmark-compound-${compound.formula}`}
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="font-bold text-base font-mono" data-testid={`benchmark-formula-${compound.formula}`}>
+                    {compound.formula}
+                  </h3>
+                  <p className="text-xs text-muted-foreground">{compound.name}</p>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  <Badge className={`text-[10px] ${familyBadge(compound.family)}`} data-testid={`benchmark-family-${compound.formula}`}>
+                    {compound.family}
+                  </Badge>
+                  <span className="text-[10px] text-muted-foreground">{compound.textbook.yearDiscovered}</span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Textbook Data</p>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                  <div className="flex justify-between" data-testid={`benchmark-textbook-tc-${compound.formula}`}>
+                    <span className="text-muted-foreground">Tc</span>
+                    <span className="font-mono font-semibold">{compound.textbook.tc} K</span>
+                  </div>
+                  <div className="flex justify-between" data-testid={`benchmark-textbook-lambda-${compound.formula}`}>
+                    <span className="text-muted-foreground">Lambda</span>
+                    <span className="font-mono font-semibold">{compound.textbook.lambda}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Omega_log</span>
+                    <span className="font-mono">{compound.textbook.omegaLog} cm-1</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Structure</span>
+                    <span className="font-mono text-[10px]">{compound.textbook.spaceGroup}</span>
+                  </div>
+                </div>
+                <p className="text-[10px] text-muted-foreground italic">{compound.textbook.pairingMechanism}</p>
+              </div>
+
+              <div className="space-y-1.5 pt-2 border-t border-border/50">
+                <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Our Prediction</p>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                  <div className="flex justify-between" data-testid={`benchmark-pred-ensemble-${compound.formula}`}>
+                    <span className="text-muted-foreground">Ensemble Tc</span>
+                    <span className="font-mono font-semibold">{compound.predicted.ensembleTc} K</span>
+                  </div>
+                  <div className="flex justify-between" data-testid={`benchmark-pred-lambda-${compound.formula}`}>
+                    <span className="text-muted-foreground">GNN Lambda</span>
+                    <span className="font-mono font-semibold">{compound.predicted.gnnLambda}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">XGBoost Tc</span>
+                    <span className="font-mono">{compound.predicted.xgboostTc} K</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">GNN Tc</span>
+                    <span className="font-mono">{compound.predicted.gnnTc} K</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Uncertainty</span>
+                    <span className="font-mono text-muted-foreground">+/-{compound.predicted.gnnUncertainty} K</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Score</span>
+                    <span className="font-mono">{compound.predicted.xgboostScore}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-border/50">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Accuracy</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className={`text-sm font-bold font-mono ${ratingColor(compound.accuracy.rating)}`} data-testid={`benchmark-rating-${compound.formula}`}>
+                        {compound.accuracy.rating.toUpperCase()}
+                      </span>
+                      <span className="text-xs text-muted-foreground font-mono" data-testid={`benchmark-error-${compound.formula}`}>
+                        {compound.accuracy.tcErrorK} K off ({compound.accuracy.tcErrorPercent}%)
+                      </span>
+                    </div>
+                  </div>
+                  {compound.accuracy.lambdaError !== null && (
+                    <div className="text-right">
+                      <p className="text-[10px] text-muted-foreground">Lambda Error</p>
+                      <span className="text-xs font-mono">{compound.accuracy.lambdaError}</span>
+                    </div>
+                  )}
+                </div>
+                {compound.predicted.reasoning.length > 0 && (
+                  <div className="mt-2 space-y-0.5">
+                    {compound.predicted.reasoning.slice(0, 3).map((r, i) => (
+                      <p key={i} className="text-[10px] text-muted-foreground leading-tight">{r}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-3 text-center italic" data-testid="benchmark-notes">
+          Predictions computed at startup using XGBoost + GNN ensemble against experimentally verified values
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function FeedbackLoopCard() {
   const { data } = useQuery<{
     totalEvaluations: number;
@@ -860,6 +1077,8 @@ export default function Dashboard() {
           </>
         )}
       </div>
+
+      <ReferenceBenchmarkCard />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card data-testid="active-learning-stats">

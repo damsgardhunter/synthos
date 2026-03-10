@@ -16,6 +16,17 @@ import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResu
 import { getElementData } from "./elemental-data";
 import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
+import {
+  addBatchFromEvaluation, startNewBatchCycle, recordBatchCycle,
+  getCurrentCycleNumber, getGroundTruthSummary, getGroundTruthForLLM,
+  getGroundTruthDataset, getRecentBatchCycles, getDatapointsByCycle,
+  type BatchCycle, type GroundTruthDatapoint, type ModelPrediction,
+} from "./ground-truth-store";
+import {
+  recordPredictionVsReality, checkRetrainTrigger, acknowledgeRetrain,
+  computeMetrics, computeRecentMetrics, getMetricsForLLM,
+  recordCycleImprovement,
+} from "./prediction-reality-ledger";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -23,6 +34,22 @@ export interface ActiveLearningConvergence {
   avgUncertaintyAfter: number;
   modelRetrains: number;
   bestTcFromLoop: number;
+}
+
+export interface DiscoveryEfficiency {
+  usefulDiscoveries: number;
+  totalEvaluations: number;
+  efficiencyRatio: number;
+  stableCount: number;
+  unstableCount: number;
+  highTcCount: number;
+  failureBreakdown: {
+    unstablePhonons: number;
+    highFormationEnergy: number;
+    nonMetallic: number;
+    lowTc: number;
+    pipelineCrash: number;
+  };
 }
 
 export interface ActiveLearningCycleRecord {
@@ -42,6 +69,7 @@ export interface ActiveLearningCycleRecord {
   topFormula: string;
   topAcquisitionScore: number;
   bestTcThisCycle: number;
+  discoveryEfficiency: DiscoveryEfficiency;
 }
 
 const cycleHistory: ActiveLearningCycleRecord[] = [];
@@ -260,9 +288,9 @@ export function selectForDFT(
   candidates: SuperconductorCandidate[],
   budget: number = 20
 ): RankedCandidate[] {
-  const pressureExplorationSlots = Math.min(3, Math.ceil(budget * 0.15));
-  const bestTcSlots = Math.min(8, Math.ceil(budget * 0.4));
-  const highUncertaintySlots = Math.min(5, Math.ceil(budget * 0.25));
+  const pressureExplorationSlots = Math.min(3, Math.ceil(budget * 0.10));
+  const bestTcSlots = Math.min(8, Math.ceil(budget * 0.35));
+  const highUncertaintySlots = Math.min(7, Math.ceil(budget * 0.35));
   const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pressureExplorationSlots);
 
   seenCompositions.clear();
@@ -313,10 +341,10 @@ export function selectForDFT(
     const noveltyScore = computeNoveltyScore(candidate);
 
     const acquisitionScore =
-      0.4 * normalizedTc +
-      0.3 * combinedUncertainty +
-      0.2 * stabilityProbability +
-      0.1 * noveltyScore;
+      0.55 * normalizedTc +
+      0.35 * combinedUncertainty +
+      0.05 * stabilityProbability +
+      0.05 * noveltyScore;
 
     scored.push({
       candidate,
@@ -535,6 +563,61 @@ async function runDFTEnrichmentForCandidate(
       gnnFePredicted = gnnPred.formationEnergy;
     } catch {}
 
+    const ensemblePredictedTc = gnnTcPredicted > 0
+      ? gnnTcPredicted * 0.4 + gb.tcPredicted * 0.6
+      : gb.tcPredicted;
+
+    const modelPred: ModelPrediction = {
+      predicted_Tc: ensemblePredictedTc,
+      predicted_stable: gnnStablePredicted,
+      predicted_formation_energy: gnnFePredicted || null,
+      xgboost_Tc: gb.tcPredicted,
+      gnn_Tc: gnnTcPredicted,
+      ensemble_score: ensemble,
+    };
+
+    addBatchFromEvaluation(
+      candidate.formula,
+      evalPressure,
+      {
+        tc: reconciledTc,
+        lambda: entry.lambda,
+        omegaLog: entry.omegaLog,
+        dosAtEF: entry.dosAtEF,
+        formationEnergy: formEnergy,
+        bandGap: entry.bandGap,
+        phononStable: entry.isPhononStable,
+        isStrongCoupling: entry.isStrongCoupling,
+        muStar: entry.muStar,
+        tier: entry.tier,
+        confidence: confidence,
+        wallTimeMs: entry.wallTimeMs,
+      },
+      getCurrentCycleNumber(),
+      modelPred
+    );
+
+    recordPredictionVsReality(
+      candidate.formula,
+      evalPressure,
+      {
+        Tc: ensemblePredictedTc,
+        stable: gnnStablePredicted,
+        formation_energy: gnnFePredicted || null,
+        xgboost_Tc: gb.tcPredicted,
+        gnn_Tc: gnnTcPredicted,
+      },
+      {
+        Tc: reconciledTc,
+        stable: isStable,
+        formation_energy: formEnergy,
+        lambda: entry.lambda > 0 ? entry.lambda : null,
+        DOS_EF: entry.dosAtEF > 0 ? entry.dosAtEF : null,
+      },
+      entry.tier,
+      getCurrentCycleNumber()
+    );
+
     const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * 0.4 + reconciledTc * 0.6 : reconciledTc;
     const fidelity = entry.tier === "full-dft" ? "dft" as const : "xtb" as const;
     recordEvaluationResult(
@@ -625,6 +708,57 @@ async function runDFTEnrichmentForCandidate(
     } catch {}
 
     const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * 0.6 + gb.tcPredicted * 0.4 : gb.tcPredicted;
+
+    const fallbackModelPred: ModelPrediction = {
+      predicted_Tc: predictedTc,
+      predicted_stable: gnnStablePredicted,
+      predicted_formation_energy: gnnFePredicted || null,
+      xgboost_Tc: gb.tcPredicted,
+      gnn_Tc: gnnTcPredicted,
+      ensemble_score: ensemble,
+    };
+
+    addBatchFromEvaluation(
+      candidate.formula,
+      evalPressure,
+      {
+        tc: gb.tcPredicted,
+        lambda: 0,
+        omegaLog: 0,
+        dosAtEF: 0,
+        formationEnergy: formEnergy,
+        bandGap: dftData.bandGap?.value ?? null,
+        phononStable: isStable,
+        isStrongCoupling: false,
+        muStar: 0,
+        tier: hasExternalDFT ? "external" : "surrogate",
+        confidence: confidence,
+        wallTimeMs: 0,
+      },
+      getCurrentCycleNumber(),
+      fallbackModelPred
+    );
+
+    recordPredictionVsReality(
+      candidate.formula,
+      evalPressure,
+      {
+        Tc: predictedTc,
+        stable: gnnStablePredicted,
+        formation_energy: gnnFePredicted || null,
+        xgboost_Tc: gb.tcPredicted,
+        gnn_Tc: gnnTcPredicted,
+      },
+      {
+        Tc: gb.tcPredicted,
+        stable: isStable,
+        formation_energy: formEnergy,
+        lambda: null,
+        DOS_EF: null,
+      },
+      hasExternalDFT ? "external" : "surrogate",
+      getCurrentCycleNumber()
+    );
     recordEvaluationResult(
       candidate.formula,
       { tc: predictedTc, stable: gnnStablePredicted, formationEnergy: gnnFePredicted },
@@ -819,6 +953,7 @@ export async function runActiveLearningCycle(
 
   let dftSuccessCount = 0;
   let bestTcThisLoop = 0;
+  let pipelineCrashCount = 0;
 
   for (const ranked of selected) {
     const { candidate } = ranked;
@@ -828,11 +963,55 @@ export async function runActiveLearningCycle(
       dftSuccessCount++;
       convergenceStats.totalDFTRuns++;
       recordPressureCoverage(candidate.formula, candidatePressure);
+    } else {
+      pipelineCrashCount++;
     }
     if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
       bestTcThisLoop = candidate.predictedTc ?? 0;
     }
   }
+
+  const cycleDatapoints = getDatapointsByCycle(getCurrentCycleNumber());
+  const USEFUL_TC_THRESHOLD = 20;
+  let usefulDiscoveries = 0;
+  let stableCount = 0;
+  let unstablePhonons = 0;
+  let highFormationEnergy = 0;
+  let nonMetallic = 0;
+  let lowTcCount = 0;
+
+  for (const dp of cycleDatapoints) {
+    const isUseful = dp.Tc >= USEFUL_TC_THRESHOLD && dp.phonon_stable;
+    if (isUseful) usefulDiscoveries++;
+    if (dp.phonon_stable) stableCount++;
+    if (!dp.phonon_stable) unstablePhonons++;
+    if (dp.formation_energy !== null && dp.formation_energy > 0.5) highFormationEnergy++;
+    if (dp.band_gap !== null && dp.band_gap > 0.5) nonMetallic++;
+    if (dp.Tc < USEFUL_TC_THRESHOLD && dp.phonon_stable) lowTcCount++;
+  }
+
+  const discoveryEff: DiscoveryEfficiency = {
+    usefulDiscoveries,
+    totalEvaluations: selected.length,
+    efficiencyRatio: selected.length > 0 ? usefulDiscoveries / selected.length : 0,
+    stableCount,
+    unstableCount: unstablePhonons,
+    highTcCount: cycleDatapoints.filter(dp => dp.Tc >= 100).length,
+    failureBreakdown: {
+      unstablePhonons,
+      highFormationEnergy,
+      nonMetallic,
+      lowTc: lowTcCount,
+      pipelineCrash: pipelineCrashCount,
+    },
+  };
+
+  emit("log", {
+    phase: "active-learning",
+    event: "Discovery efficiency",
+    detail: `${usefulDiscoveries} useful materials / ${selected.length} evaluations (${(discoveryEff.efficiencyRatio * 100).toFixed(1)}%). Failures: ${unstablePhonons} unstable phonons, ${highFormationEnergy} high formation energy, ${nonMetallic} non-metallic, ${lowTcCount} low Tc, ${pipelineCrashCount} pipeline crashes`,
+    dataSource: "Active Learning",
+  });
 
   let pressureTransitionsThisCycle = 0;
   const pressureCandidates = selected.filter(s => s.selectionTier === "pressure-exploration" || (s.candidate.predictedTc ?? 0) > 50);
@@ -869,49 +1048,52 @@ export async function runActiveLearningCycle(
 
   totalEnrichedSinceLastRetrain += dftSuccessCount;
 
-  let retrainResult = { r2Before: 0, maeBefore: 0, r2After: 0, maeAfter: 0 };
-  const hasNewData = totalEnrichedSinceLastRetrain > 0;
-  const isConverged = recentUncertaintyDrops.length >= 3 &&
-    (recentUncertaintyDrops.reduce((s, v) => s + v, 0) / recentUncertaintyDrops.length) < 0.1;
-  const retrainThreshold = isConverged ? RETRAIN_DFT_THRESHOLD : 25;
-  const cyclesSinceLastRetrain = memory.cycleCount - lastRetrainCycle;
-  const cycleTrigger = cyclesSinceLastRetrain >= RETRAIN_CYCLE_INTERVAL;
-  const dataTrigger = hasNewData && totalEnrichedSinceLastRetrain >= retrainThreshold;
-  const uncertaintyTrigger = hasNewData && !isConverged && avgUncertaintyBefore > 0.5;
-  const coldStartTrigger = convergenceStats.modelRetrains === 0 && hasNewData;
+  const batchCycleNum = startNewBatchCycle();
+  const validationPre = validateModel();
+  const preR2 = validationPre.r2;
+  const preMAE = Math.sqrt(validationPre.mse);
+  const preDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
 
-  const shouldRetrain = dataTrigger || cycleTrigger || uncertaintyTrigger || coldStartTrigger;
-  const retrainReason = coldStartTrigger ? "cold-start"
-    : dataTrigger ? `data-volume (${totalEnrichedSinceLastRetrain}>=${retrainThreshold})`
-    : cycleTrigger ? `cycle-interval (${cyclesSinceLastRetrain}>=${RETRAIN_CYCLE_INTERVAL})`
-    : uncertaintyTrigger ? `high-uncertainty (${avgUncertaintyBefore.toFixed(3)}>0.5)`
-    : "unknown";
+  let retrainResult = { r2Before: 0, maeBefore: 0, r2After: 0, maeAfter: 0 };
+  const sampleTrigger = checkRetrainTrigger();
+  const shouldRetrain = dftSuccessCount > 0 || sampleTrigger.shouldRetrain;
 
   if (shouldRetrain) {
+    const reasons: string[] = [];
+    if (dftSuccessCount > 0) reasons.push(`batch-mandatory (${dftSuccessCount} new datapoints)`);
+    if (sampleTrigger.shouldRetrain) reasons.push(`sample-count threshold (${sampleTrigger.reason})`);
+    const retrainReason = reasons.join(" + ");
     emit("log", {
       phase: "active-learning",
-      event: "GNN retrain triggered",
-      detail: `Trigger: ${retrainReason}, enriched=${totalEnrichedSinceLastRetrain}, cycles since retrain=${cyclesSinceLastRetrain}${isConverged ? ' [model converged]' : ''}`,
+      event: "Batch retrain triggered",
+      detail: `Trigger: ${retrainReason}, total enriched=${totalEnrichedSinceLastRetrain}, ground-truth dataset=${getGroundTruthSummary().totalDatapoints}, ledger=${computeMetrics().count} entries`,
       dataSource: "Active Learning",
     });
     retrainResult = await retrainGNNWithEnrichedData(emit);
     convergenceStats.modelRetrains++;
     totalEnrichedSinceLastRetrain = 0;
     lastRetrainCycle = memory.cycleCount;
-  } else if (dftSuccessCount > 0) {
-    emit("log", {
-      phase: "active-learning",
-      event: "GNN retrain deferred",
-      detail: `${totalEnrichedSinceLastRetrain} enriched since last retrain (threshold: ${retrainThreshold}). Uncertainty: ${avgUncertaintyBefore.toFixed(3)}. Will retrain after more data.`,
-      dataSource: "Active Learning",
-    });
+    if (sampleTrigger.shouldRetrain) acknowledgeRetrain();
   } else {
     emit("log", {
       phase: "active-learning",
-      event: "DFT enrichment warning",
-      detail: `All ${selected.length} candidates failed DFT enrichment. Skipping retrain — no new data to incorporate.`,
+      event: "Batch evaluation warning",
+      detail: `All ${selected.length} candidates failed DFT/TB evaluation in batch cycle ${batchCycleNum}. No new data to incorporate — skipping retrain.`,
       dataSource: "Active Learning",
     });
+  }
+
+  const validationPost = validateModel();
+  const postR2 = validationPost.r2;
+  const postMAE = Math.sqrt(validationPost.mse);
+  const postDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
+
+  if (shouldRetrain) {
+    recordCycleImprovement(
+      batchCycleNum,
+      { r2: postR2, rmse: postMAE },
+      { r2: retrainResult.r2After, rmse: retrainResult.maeAfter }
+    );
   }
 
   let avgUncertaintyAfter = avgUncertaintyBefore;
@@ -958,9 +1140,37 @@ export async function runActiveLearningCycle(
     topFormula: selected[0]?.candidate.formula ?? "",
     topAcquisitionScore: Math.round((selected[0]?.acquisitionScore ?? 0) * 1000) / 1000,
     bestTcThisCycle: Math.round(bestTcThisLoop * 10) / 10,
+    discoveryEfficiency: discoveryEff,
   };
   cycleHistory.push(cycleRecord);
   if (cycleHistory.length > MAX_CYCLE_HISTORY) cycleHistory.shift();
+
+  const batchCycleRecord: BatchCycle = {
+    cycleNumber: batchCycleNum,
+    startedAt: cycleRecord.timestamp - 1000,
+    completedAt: Date.now(),
+    candidatesSubmitted: selected.length,
+    evaluationSuccesses: dftSuccessCount,
+    evaluationFailures: selected.length - dftSuccessCount,
+    newDatapoints: dftSuccessCount,
+    retrainTriggered: shouldRetrain,
+    preRetrainMetrics: { r2: preR2, mae: preMAE, datasetSize: preDatasetSize },
+    postRetrainMetrics: shouldRetrain ? { r2: postR2, mae: postMAE, datasetSize: postDatasetSize } : null,
+    r2Improvement: shouldRetrain ? postR2 - preR2 : 0,
+    maeImprovement: shouldRetrain ? preMAE - postMAE : 0,
+    bestTcThisCycle: bestTcThisLoop,
+    avgUncertaintyBefore,
+    avgUncertaintyAfter,
+  };
+  recordBatchCycle(batchCycleRecord);
+
+  const gtSummary = getGroundTruthSummary();
+  emit("log", {
+    phase: "active-learning",
+    event: `Batch cycle ${batchCycleNum} complete`,
+    detail: `${dftSuccessCount} structures evaluated, ${gtSummary.totalDatapoints} total ground-truth datapoints, R² ${preR2.toFixed(4)} -> ${postR2.toFixed(4)}, MAE ${preMAE.toFixed(2)} -> ${postMAE.toFixed(2)}, dataset size ${preDatasetSize} -> ${postDatasetSize}`,
+    dataSource: "Active Learning",
+  });
 
   for (const { candidate } of selected) {
     try {

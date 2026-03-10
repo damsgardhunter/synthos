@@ -1,0 +1,163 @@
+Add a Topology Detection Pipeline
+
+Think of topology detection as three stages:
+
+structure
+ ↓
+cheap topology indicators
+ ↓
+band structure calculation
+ ↓
+topological invariant analysis
+
+Your pipeline might look like:
+
+candidate generator
+     ↓
+relaxation (xTB)
+     ↓
+topology pre-screen
+     ↓
+DFT band structure
+     ↓
+topological invariant detection
+3️⃣ Step 1: Cheap Topology Pre-Screen (ML Descriptors)
+
+Before expensive calculations, detect materials likely to host topological bands.
+
+Important indicators:
+
+Heavy elements
+
+Strong spin–orbit coupling (SOC).
+
+Examples:
+
+Bi
+Sb
+Te
+W
+Ir
+Pt
+
+SOC strength roughly scales with:
+
+𝑍
+4
+Z
+4
+
+So you can compute:
+
+avg_atomic_number
+
+Example code idea:
+
+def soc_indicator(elements):
+    return sum(Z[e] for e in elements)/len(elements)
+
+Large value → stronger SOC → higher topology probability.
+
+Band inversion likelihood
+
+Topological materials often have s–p or p–d band inversions.
+
+Simple proxy features:
+
+electronegativity difference
+orbital character diversity
+
+If a compound mixes:
+
+heavy p-element + transition metal
+
+that’s promising.
+
+Crystal symmetry
+
+Certain symmetries frequently host topology:
+
+inversion symmetry
+time reversal symmetry
+non-symmorphic symmetry
+
+You can detect this using space group analysis.
+
+Libraries:
+
+spglib
+
+pymatgen
+
+Example:
+
+spacegroup = spglib.get_spacegroup(cell)
+4️⃣ Step 2: Band Structure Calculation
+
+To actually detect topology you need electronic bands.
+
+Your system currently uses xTB mainly for structure optimization. For topology detection you should add band calculations.
+
+Possible engines:
+
+DFT (VASP / Quantum ESPRESSO)
+
+tight-binding models
+
+Wannier calculations
+
+Minimum needed:
+
+E(k) along high symmetry path
+
+Look for:
+
+band crossings
+Dirac cones
+flat bands near Fermi level
+5️⃣ Step 3: Detect Band Inversions
+
+Band inversion is a strong signal of topological phases.
+
+Example pattern:
+
+valence band: p orbital
+conduction band: s orbital
+
+But inverted ordering.
+
+Many tools detect this automatically.
+
+Algorithm idea:
+
+compare orbital character near Fermi level
+
+If ordering flips → potential topology.
+
+6️⃣ Step 4: Compute Topological Invariants
+
+The gold standard is computing invariants like:
+
+Z₂ invariant
+
+Used for topological insulators.
+
+Chern number
+
+Used for quantum anomalous Hall states.
+
+Weyl node detection
+
+For Weyl semimetals.
+
+Libraries that compute these:
+
+Z2Pack
+
+WannierTools
+
+PyTopo
+
+Example concept:
+
+band structure → Wannier Hamiltonian → Z2 invariant

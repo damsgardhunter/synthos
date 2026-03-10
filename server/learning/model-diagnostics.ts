@@ -1,10 +1,12 @@
-import { getCalibrationData, getXGBEnsembleStats, getModelVersionHistory, getEvaluatedDatasetStats, getSurrogateStats } from "./gradient-boost";
+import { getCalibrationData, getXGBEnsembleStats, getModelVersionHistory, getEvaluatedDatasetStats, getSurrogateStats, getGlobalFeatureImportance } from "./gradient-boost";
 import { getGNNVersionHistory, getGNNModelVersion, ENSEMBLE_SIZE, getDFTTrainingDatasetStats } from "./graph-neural-net";
 import { getLambdaRegressorStats } from "./lambda-regressor";
 import { getPhononSurrogateStats } from "../physics/phonon-surrogate";
 import { getTBSurrogateStats } from "../physics/tb-ml-surrogate";
 import { getStructurePredictorStats } from "../crystal/structure-predictor-ml";
 import { getPressureStructureStats } from "../crystal/pressure-structure-model";
+import { getCalibrationStats } from "./surrogate-fitness";
+import { getFailurePatterns, getFailureDBStats, getFailureEntries, type StructureFailureEntry } from "../crystal/structure-failure-db";
 
 type HealthStatus = "green" | "yellow" | "red";
 
@@ -119,6 +121,88 @@ interface PressureStructureDiagnostics {
   modelTrained: boolean;
 }
 
+export interface FeatureImportanceEntry {
+  name: string;
+  index: number;
+  importance: number;
+  normalizedImportance: number;
+}
+
+export interface ErrorCluster {
+  pattern: string;
+  family: string;
+  direction: "over" | "under";
+  count: number;
+  meanError: number;
+  medianError: number;
+  worstFormula: string;
+  worstError: number;
+  pressureRelated: boolean;
+  suggestedAction: string;
+}
+
+export interface ErrorAnalysisReport {
+  totalOutcomes: number;
+  totalErrors: number;
+  largeErrors: number;
+  errorClusters: ErrorCluster[];
+  overallBias: "over" | "under" | "neutral";
+  overallMeanError: number;
+  overallRMSE: number;
+  topFailures: { formula: string; predicted: number; actual: number; error: number; family: string }[];
+  familyDataGaps: { family: string; sampleCount: number; needsMore: boolean }[];
+  dataRequestSuggestions: string[];
+}
+
+export interface FailedMaterialSummary {
+  formula: string;
+  failureReason: string;
+  source: string;
+  formationEnergy?: number;
+  imaginaryModeCount?: number;
+  lowestPhononFreq?: number;
+  bandGap?: number;
+  details?: string;
+  failedAt: number;
+}
+
+export interface FailureSummaryReport {
+  totalFailures: number;
+  byReason: { reason: string; count: number; percentage: number }[];
+  bySource: { source: string; count: number }[];
+  recentFailures: FailedMaterialSummary[];
+  failurePatterns: {
+    topFailingElementPairs: { pair: string; count: number }[];
+    topFailingCrystalSystems: { system: string; count: number }[];
+  };
+  predictedStableActualUnstable: FailedMaterialSummary[];
+  llmSuggestions: string[];
+}
+
+export interface ModelVersionScorecard {
+  modelName: string;
+  version: number;
+  trainedAt: number;
+  metrics: Record<string, number>;
+  hyperparameters: Record<string, number | string>;
+  datasetSize: number;
+  inferenceSpeedMs: number;
+}
+
+export interface ModelBenchmarkReport {
+  scorecards: ModelVersionScorecard[];
+  versionComparisons: VersionComparison[];
+  bestVersionByMetric: Record<string, { version: number; value: number }>;
+}
+
+export interface VersionComparison {
+  modelName: string;
+  fromVersion: number;
+  toVersion: number;
+  metricDeltas: Record<string, number>;
+  recommendation: string;
+}
+
 export interface ComprehensiveModelDiagnostics {
   timestamp: number;
   xgboost: XGBoostDiagnostics;
@@ -131,6 +215,10 @@ export interface ComprehensiveModelDiagnostics {
   familyBias: FamilyBias[];
   calibrationBins: CalibrationBin[];
   predictionOutcomeCount: number;
+  featureImportance: FeatureImportanceEntry[];
+  errorAnalysis: ErrorAnalysisReport;
+  failureSummary: FailureSummaryReport;
+  benchmark: ModelBenchmarkReport;
 }
 
 const MAX_OUTCOMES = 500;
@@ -224,6 +312,159 @@ function computeCalibrationBins(): CalibrationBin[] {
   }
 
   return bins;
+}
+
+function computeErrorAnalysis(): ErrorAnalysisReport {
+  const outcomes = [...predictionOutcomes];
+  const totalOutcomes = outcomes.length;
+
+  if (totalOutcomes === 0) {
+    return {
+      totalOutcomes: 0, totalErrors: 0, largeErrors: 0,
+      errorClusters: [], overallBias: "neutral", overallMeanError: 0, overallRMSE: 0,
+      topFailures: [], familyDataGaps: [], dataRequestSuggestions: [],
+    };
+  }
+
+  const errors = outcomes.map(o => o.predicted - o.actual);
+  const absErrors = errors.map(e => Math.abs(e));
+  const overallMeanError = errors.reduce((s, e) => s + e, 0) / errors.length;
+  const overallRMSE = Math.sqrt(absErrors.reduce((s, e) => s + e * e, 0) / absErrors.length);
+  const largeErrorThreshold = 30;
+  const largeErrors = absErrors.filter(e => e > largeErrorThreshold).length;
+  const totalErrors = absErrors.filter(e => e > 5).length;
+  const overallBias: "over" | "under" | "neutral" = overallMeanError > 5 ? "over" : overallMeanError < -5 ? "under" : "neutral";
+
+  const clusters: ErrorCluster[] = [];
+  const families = ["hydride", "cuprate", "pnictide", "boride", "conventional"];
+
+  for (const family of families) {
+    const familyOutcomes = outcomes.filter(o => o.family === family);
+    if (familyOutcomes.length < 3) continue;
+
+    const familyErrors = familyOutcomes.map(o => o.predicted - o.actual);
+    const familyAbsErrors = familyErrors.map(e => Math.abs(e));
+    const meanErr = familyErrors.reduce((s, e) => s + e, 0) / familyErrors.length;
+    const sortedAbsErrors = [...familyAbsErrors].sort((a, b) => a - b);
+    const medianErr = sortedAbsErrors[Math.floor(sortedAbsErrors.length / 2)];
+
+    const overCount = familyErrors.filter(e => e > 10).length;
+    const underCount = familyErrors.filter(e => e < -10).length;
+
+    if (overCount > familyOutcomes.length * 0.4 || underCount > familyOutcomes.length * 0.4) {
+      const direction: "over" | "under" = overCount > underCount ? "over" : "under";
+      const worstIdx = familyAbsErrors.indexOf(Math.max(...familyAbsErrors));
+      const worstOutcome = familyOutcomes[worstIdx];
+      const pressureRelated = family === "hydride" || familyOutcomes.some(o => o.formula.match(/H\d{2,}/));
+
+      let suggestedAction = "";
+      if (direction === "over" && pressureRelated) {
+        suggestedAction = `Add pressure feature correction for ${family}; retrain lambda model with pressure-adjusted data`;
+      } else if (direction === "over") {
+        suggestedAction = `Recalibrate ${family} predictions; add regularization or family-specific bias correction`;
+      } else {
+        suggestedAction = `Expand ${family} training data; model may be underexploring this region`;
+      }
+
+      clusters.push({
+        pattern: `Model ${direction === "over" ? "overpredicts" : "underpredicts"} ${family}`,
+        family,
+        direction,
+        count: familyOutcomes.length,
+        meanError: Math.round(meanErr * 10) / 10,
+        medianError: Math.round(medianErr * 10) / 10,
+        worstFormula: worstOutcome.formula,
+        worstError: Math.round((worstOutcome.predicted - worstOutcome.actual) * 10) / 10,
+        pressureRelated,
+        suggestedAction,
+      });
+    }
+  }
+
+  const highPressureOutcomes = outcomes.filter(o =>
+    o.formula.match(/H\d{2,}/) || o.family === "hydride"
+  );
+  if (highPressureOutcomes.length >= 3) {
+    const hpErrors = highPressureOutcomes.map(o => o.predicted - o.actual);
+    const hpMean = hpErrors.reduce((s, e) => s + e, 0) / hpErrors.length;
+    if (Math.abs(hpMean) > 20) {
+      const existing = clusters.find(c => c.family === "hydride");
+      if (!existing) {
+        const hpAbsErrors = hpErrors.map(e => Math.abs(e));
+        const worstIdx = hpAbsErrors.indexOf(Math.max(...hpAbsErrors));
+        clusters.push({
+          pattern: `High-pressure hydride ${hpMean > 0 ? "overprediction" : "underprediction"} bias`,
+          family: "hydride",
+          direction: hpMean > 0 ? "over" : "under",
+          count: highPressureOutcomes.length,
+          meanError: Math.round(hpMean * 10) / 10,
+          medianError: Math.round(hpMean * 10) / 10,
+          worstFormula: highPressureOutcomes[worstIdx].formula,
+          worstError: Math.round(hpErrors[worstIdx] * 10) / 10,
+          pressureRelated: true,
+          suggestedAction: "Add explicit pressure features; retrain with pressure-corrected Tc data",
+        });
+      }
+    }
+  }
+
+  clusters.sort((a, b) => Math.abs(b.meanError) - Math.abs(a.meanError));
+
+  const topFailures = [...outcomes]
+    .map(o => ({
+      formula: o.formula,
+      predicted: Math.round(o.predicted * 10) / 10,
+      actual: Math.round(o.actual * 10) / 10,
+      error: Math.round((o.predicted - o.actual) * 10) / 10,
+      family: o.family || "unknown",
+    }))
+    .sort((a, b) => Math.abs(b.error) - Math.abs(a.error))
+    .slice(0, 10);
+
+  const calibStats = getCalibrationStats();
+  const familyDataGaps: { family: string; sampleCount: number; needsMore: boolean }[] = [];
+  const dataRequestSuggestions: string[] = [];
+
+  const MIN_SAMPLES_PER_FAMILY = 20;
+  for (const family of families) {
+    const familyCalib = calibStats.familyCalibrations.find(fc => fc.family === family);
+    const count = familyCalib?.sampleCount ?? 0;
+    const needsMore = count < MIN_SAMPLES_PER_FAMILY;
+    familyDataGaps.push({ family, sampleCount: count, needsMore });
+
+    if (needsMore) {
+      dataRequestSuggestions.push(
+        `Generate ${MIN_SAMPLES_PER_FAMILY - count} additional ${family} structures and run TB evaluation to expand training data`
+      );
+    }
+
+    if (familyCalib && familyCalib.meanAbsError > 25 && count >= MIN_SAMPLES_PER_FAMILY) {
+      dataRequestSuggestions.push(
+        `${family} has high error (MAE=${familyCalib.meanAbsError.toFixed(1)}K) with ${count} samples — run DFT enrichment on worst-predicted ${family} candidates`
+      );
+    }
+  }
+
+  for (const cluster of clusters) {
+    if (cluster.pressureRelated) {
+      dataRequestSuggestions.push(
+        `${cluster.pattern}: generate pressure-variant structures for ${cluster.family} at multiple pressures (0, 50, 150, 300 GPa)`
+      );
+    }
+  }
+
+  return {
+    totalOutcomes,
+    totalErrors,
+    largeErrors,
+    errorClusters: clusters,
+    overallBias,
+    overallMeanError: Math.round(overallMeanError * 100) / 100,
+    overallRMSE: Math.round(overallRMSE * 100) / 100,
+    topFailures,
+    familyDataGaps,
+    dataRequestSuggestions,
+  };
 }
 
 export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostics {
@@ -340,6 +581,11 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     modelTrained: pressureStats.modelTrained,
   };
 
+  const featureImportance = getGlobalFeatureImportance(25);
+  const errorAnalysis = computeErrorAnalysis();
+  const failureSummary = computeFailureSummary();
+  const benchmark = computeBenchmarkReport();
+
   return {
     timestamp: Date.now(),
     xgboost,
@@ -352,6 +598,215 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     familyBias: computeFamilyBias(),
     calibrationBins: computeCalibrationBins(),
     predictionOutcomeCount: predictionOutcomes.length,
+    featureImportance,
+    errorAnalysis,
+    failureSummary,
+    benchmark,
+  };
+}
+
+function computeFailureSummary(): FailureSummaryReport {
+  const dbStats = getFailureDBStats();
+  const patterns = getFailurePatterns();
+  const allEntries = getFailureEntries();
+
+  const reasonCounts = new Map<string, number>();
+  const sourceCounts = new Map<string, number>();
+  const predictedStableActualUnstable: FailedMaterialSummary[] = [];
+
+  for (const entry of allEntries) {
+    reasonCounts.set(entry.failureReason, (reasonCounts.get(entry.failureReason) || 0) + 1);
+    sourceCounts.set(entry.source, (sourceCounts.get(entry.source) || 0) + 1);
+
+    if (entry.failureReason === "unstable_phonons" || entry.failureReason === "structure_collapse") {
+      predictedStableActualUnstable.push({
+        formula: entry.formula,
+        failureReason: entry.failureReason,
+        source: entry.source,
+        formationEnergy: entry.formationEnergy,
+        imaginaryModeCount: entry.imaginaryModeCount,
+        lowestPhononFreq: entry.lowestPhononFreq,
+        bandGap: entry.bandGap,
+        details: entry.details,
+        failedAt: entry.failedAt,
+      });
+    }
+  }
+
+  const total = allEntries.length || 1;
+  const byReason = Array.from(reasonCounts.entries())
+    .map(([reason, count]) => ({
+      reason,
+      count,
+      percentage: Math.round((count / total) * 1000) / 10,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  const bySource = Array.from(sourceCounts.entries())
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const recentFailures = allEntries
+    .sort((a, b) => b.failedAt - a.failedAt)
+    .slice(0, 20)
+    .map(entry => ({
+      formula: entry.formula,
+      failureReason: entry.failureReason,
+      source: entry.source,
+      formationEnergy: entry.formationEnergy,
+      imaginaryModeCount: entry.imaginaryModeCount,
+      lowestPhononFreq: entry.lowestPhononFreq,
+      bandGap: entry.bandGap,
+      details: entry.details,
+      failedAt: entry.failedAt,
+    }));
+
+  const suggestions: string[] = [];
+  const phononFailures = reasonCounts.get("unstable_phonons") || 0;
+  const collapseFailures = reasonCounts.get("structure_collapse") || 0;
+  const energyFailures = reasonCounts.get("high_formation_energy") || 0;
+
+  if (phononFailures > 5) {
+    suggestions.push(`Train phonon stability classifier — ${phononFailures} phonon instability failures detected`);
+  }
+  if (collapseFailures > 3) {
+    suggestions.push(`Improve structure predictor — ${collapseFailures} structure collapse failures`);
+  }
+  if (energyFailures > 5) {
+    suggestions.push(`Tighten formation energy pre-filter — ${energyFailures} high formation energy rejections`);
+  }
+  if (predictedStableActualUnstable.length > 10) {
+    suggestions.push(`High false-stable rate: ${predictedStableActualUnstable.length} predicted stable but actually unstable`);
+  }
+  if (patterns.elementPairs.length > 0) {
+    const worst = patterns.elementPairs[0];
+    suggestions.push(`Avoid element pair ${worst.pair} — ${worst.failureCount} failures`);
+  }
+
+  return {
+    totalFailures: allEntries.length,
+    byReason,
+    bySource,
+    recentFailures,
+    failurePatterns: {
+      topFailingElementPairs: patterns.elementPairs.slice(0, 10).map(p => ({ pair: p.pair, count: p.failureCount })),
+      topFailingCrystalSystems: patterns.crystalSystems.slice(0, 5).map(s => ({ system: s.system, count: s.failureCount })),
+    },
+    predictedStableActualUnstable: predictedStableActualUnstable.sort((a, b) => b.failedAt - a.failedAt).slice(0, 20),
+    llmSuggestions: suggestions,
+  };
+}
+
+function computeBenchmarkReport(): ModelBenchmarkReport {
+  const xgbHistory = getModelVersionHistory();
+  const gnnHistory = getGNNVersionHistory();
+  const scorecards: ModelVersionScorecard[] = [];
+  const comparisons: VersionComparison[] = [];
+  const bestByMetric: Record<string, { version: number; value: number }> = {};
+
+  for (const v of xgbHistory.history) {
+    scorecards.push({
+      modelName: "xgboost",
+      version: v.version,
+      trainedAt: v.trainedAt,
+      metrics: {
+        r2: v.r2,
+        mae: v.mae,
+        rmse: v.rmse,
+        predictionVariance: v.predictionVariance,
+      },
+      hyperparameters: {
+        nTrees: v.nTrees,
+        ensembleSize: v.ensembleSize,
+      },
+      datasetSize: v.datasetSize,
+      inferenceSpeedMs: 3,
+    });
+  }
+
+  const xgbCards = scorecards.filter(s => s.modelName === "xgboost");
+  for (let i = 1; i < xgbCards.length; i++) {
+    const prev = xgbCards[i - 1];
+    const curr = xgbCards[i];
+    const deltas: Record<string, number> = {};
+    for (const key of Object.keys(curr.metrics)) {
+      deltas[key] = Math.round((curr.metrics[key] - (prev.metrics[key] || 0)) * 10000) / 10000;
+    }
+    const r2Better = (deltas.r2 || 0) > 0;
+    const maeBetter = (deltas.mae || 0) < 0;
+    let rec = "no significant change";
+    if (r2Better && maeBetter) rec = "improved accuracy — keep architecture";
+    else if (r2Better) rec = "improved R² — monitor MAE";
+    else if (maeBetter) rec = "improved MAE — monitor R²";
+    else if ((deltas.r2 || 0) < -0.02) rec = "regression detected — consider rollback";
+    comparisons.push({
+      modelName: "xgboost",
+      fromVersion: prev.version,
+      toVersion: curr.version,
+      metricDeltas: deltas,
+      recommendation: rec,
+    });
+  }
+
+  for (const v of gnnHistory) {
+    scorecards.push({
+      modelName: "gnn",
+      version: v.version,
+      trainedAt: v.trainedAt,
+      metrics: {
+        r2: v.r2,
+        mae: v.mae,
+        rmse: v.rmse,
+      },
+      hyperparameters: {
+        ensembleSize: v.ensembleSize,
+        dftSamples: v.dftSamples,
+      },
+      datasetSize: v.datasetSize,
+      inferenceSpeedMs: 8,
+    });
+  }
+
+  const gnnCards = scorecards.filter(s => s.modelName === "gnn");
+  for (let i = 1; i < gnnCards.length; i++) {
+    const prev = gnnCards[i - 1];
+    const curr = gnnCards[i];
+    const deltas: Record<string, number> = {};
+    for (const key of Object.keys(curr.metrics)) {
+      deltas[key] = Math.round((curr.metrics[key] - (prev.metrics[key] || 0)) * 10000) / 10000;
+    }
+    const r2Better = (deltas.r2 || 0) > 0;
+    const maeBetter = (deltas.mae || 0) < 0;
+    let rec = "no significant change";
+    if (r2Better && maeBetter) rec = "improved accuracy — keep architecture";
+    else if (r2Better) rec = "improved R² — monitor MAE";
+    else if ((deltas.r2 || 0) < -0.02) rec = "regression detected — consider rollback";
+    comparisons.push({
+      modelName: "gnn",
+      fromVersion: prev.version,
+      toVersion: curr.version,
+      metricDeltas: deltas,
+      recommendation: rec,
+    });
+  }
+
+  for (const card of scorecards) {
+    for (const [metric, value] of Object.entries(card.metrics)) {
+      const key = `${card.modelName}:${metric}`;
+      const isHigherBetter = metric === "r2";
+      const existing = bestByMetric[key];
+      if (!existing ||
+        (isHigherBetter && value > existing.value) ||
+        (!isHigherBetter && value < existing.value)) {
+        bestByMetric[key] = { version: card.version, value };
+      }
+    }
+  }
+
+  return {
+    scorecards: scorecards.slice(-30),
+    versionComparisons: comparisons.slice(-20),
+    bestVersionByMetric: bestByMetric,
   };
 }
 
@@ -417,6 +872,65 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push(`  Trained=${d.pressureStructure.modelTrained} | Transitions=${d.pressureStructure.transitionRecords}`);
   lines.push("");
 
+  if (d.featureImportance.length > 0) {
+    lines.push("## Feature Importance (XGBoost top features)");
+    const topFeatures = d.featureImportance.slice(0, 15);
+    for (const f of topFeatures) {
+      const bar = "=".repeat(Math.round(f.normalizedImportance * 20));
+      lines.push(`  ${f.name.padEnd(24)} ${f.normalizedImportance.toFixed(3)} ${bar}`);
+    }
+    const physicsFeatures = topFeatures.filter(f => !f.name.startsWith("comp_") && !f.name.startsWith("frac_"));
+    const compFeatures = topFeatures.filter(f => f.name.startsWith("comp_") || f.name.startsWith("frac_"));
+    lines.push(`  Physics features in top 15: ${physicsFeatures.length}`);
+    lines.push(`  Composition features in top 15: ${compFeatures.length}`);
+
+    const phonon = topFeatures.filter(f => /phonon|omegaLog|debye/i.test(f.name));
+    const eph = topFeatures.filter(f => /lambda|coupling|alpha|massEnhancement/i.test(f.name));
+    const electronic = topFeatures.filter(f => /dos|band|nesting|vanHove|fermi/i.test(f.name));
+    if (phonon.length === 0) lines.push("  ** NOTE: No phonon features in top 15 — model may ignore phonon proxies **");
+    if (eph.length === 0) lines.push("  ** NOTE: No e-ph coupling features in top 15 — model may miss lambda signals **");
+    if (electronic.length === 0) lines.push("  ** NOTE: No electronic structure features in top 15 **");
+    lines.push("");
+  }
+
+  if (d.errorAnalysis.totalOutcomes > 0) {
+    lines.push("## Error Analysis");
+    lines.push(`  Total evaluations: ${d.errorAnalysis.totalOutcomes}`);
+    lines.push(`  Errors > 5K: ${d.errorAnalysis.totalErrors} | Errors > 30K: ${d.errorAnalysis.largeErrors}`);
+    lines.push(`  Overall bias: ${d.errorAnalysis.overallBias} (mean error=${d.errorAnalysis.overallMeanError}K)`);
+    lines.push(`  Overall RMSE: ${d.errorAnalysis.overallRMSE}K`);
+
+    if (d.errorAnalysis.errorClusters.length > 0) {
+      lines.push("  Error clusters:");
+      for (const c of d.errorAnalysis.errorClusters) {
+        lines.push(`    ${c.pattern}: n=${c.count}, mean_err=${c.meanError}K, worst=${c.worstFormula} (${c.worstError}K)`);
+        lines.push(`      Action: ${c.suggestedAction}`);
+      }
+    }
+
+    if (d.errorAnalysis.topFailures.length > 0) {
+      lines.push("  Top prediction failures:");
+      for (const f of d.errorAnalysis.topFailures.slice(0, 5)) {
+        lines.push(`    ${f.formula} [${f.family}]: predicted=${f.predicted}K, actual=${f.actual}K, error=${f.error}K`);
+      }
+    }
+
+    if (d.errorAnalysis.familyDataGaps.some(g => g.needsMore)) {
+      lines.push("  Data gaps:");
+      for (const g of d.errorAnalysis.familyDataGaps.filter(g => g.needsMore)) {
+        lines.push(`    ${g.family}: only ${g.sampleCount} samples (needs >= 20)`);
+      }
+    }
+
+    if (d.errorAnalysis.dataRequestSuggestions.length > 0) {
+      lines.push("  Data requests:");
+      for (const s of d.errorAnalysis.dataRequestSuggestions.slice(0, 5)) {
+        lines.push(`    - ${s}`);
+      }
+    }
+    lines.push("");
+  }
+
   if (d.familyBias.some(fb => fb.count > 0)) {
     lines.push("## Per-Family Bias Analysis");
     for (const fb of d.familyBias) {
@@ -431,6 +945,65 @@ export function getModelDiagnosticsForLLM(): string {
     for (const bin of d.calibrationBins) {
       if (bin.count === 0) continue;
       lines.push(`  Confidence ${bin.binLabel}: n=${bin.count}, within_range=${bin.withinRange}, rate=${bin.calibrationRate}`);
+    }
+    lines.push("");
+  }
+
+  if (d.failureSummary.totalFailures > 0) {
+    lines.push("## Failed Materials Analysis");
+    lines.push(`  Total failures: ${d.failureSummary.totalFailures}`);
+    lines.push("  By failure reason:");
+    for (const r of d.failureSummary.byReason) {
+      lines.push(`    ${r.reason}: ${r.count} (${r.percentage}%)`);
+    }
+    lines.push("  By source:");
+    for (const s of d.failureSummary.bySource) {
+      lines.push(`    ${s.source}: ${s.count}`);
+    }
+    if (d.failureSummary.predictedStableActualUnstable.length > 0) {
+      lines.push(`  Predicted stable but actually unstable: ${d.failureSummary.predictedStableActualUnstable.length}`);
+      for (const f of d.failureSummary.predictedStableActualUnstable.slice(0, 8)) {
+        const extras: string[] = [];
+        if (f.imaginaryModeCount) extras.push(`imaginary_modes=${f.imaginaryModeCount}`);
+        if (f.lowestPhononFreq != null) extras.push(`lowest_freq=${f.lowestPhononFreq}`);
+        if (f.formationEnergy != null) extras.push(`Ef=${f.formationEnergy}`);
+        lines.push(`    ${f.formula} [${f.failureReason}] via ${f.source}${extras.length > 0 ? " | " + extras.join(", ") : ""}`);
+      }
+    }
+    if (d.failureSummary.failurePatterns.topFailingElementPairs.length > 0) {
+      lines.push("  Top failing element pairs:");
+      for (const p of d.failureSummary.failurePatterns.topFailingElementPairs.slice(0, 5)) {
+        lines.push(`    ${p.pair}: ${p.count} failures`);
+      }
+    }
+    if (d.failureSummary.llmSuggestions.length > 0) {
+      lines.push("  Suggested actions from failure analysis:");
+      for (const s of d.failureSummary.llmSuggestions) {
+        lines.push(`    - ${s}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (d.benchmark.scorecards.length > 0) {
+    lines.push("## Model Version Benchmarks");
+    const latestByModel = new Map<string, ModelVersionScorecard>();
+    for (const sc of d.benchmark.scorecards) {
+      latestByModel.set(sc.modelName, sc);
+    }
+    for (const [model, sc] of latestByModel) {
+      const metricStr = Object.entries(sc.metrics).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(4) : v}`).join(", ");
+      const hpStr = Object.entries(sc.hyperparameters).map(([k, v]) => `${k}=${v}`).join(", ");
+      lines.push(`  ${model} v${sc.version}: ${metricStr}`);
+      lines.push(`    hyperparams: ${hpStr} | dataset=${sc.datasetSize} | inference=${sc.inferenceSpeedMs}ms`);
+    }
+    if (d.benchmark.versionComparisons.length > 0) {
+      const recentComps = d.benchmark.versionComparisons.slice(-5);
+      lines.push("  Recent version comparisons:");
+      for (const c of recentComps) {
+        const deltaStr = Object.entries(c.metricDeltas).map(([k, v]) => `${k}=${v > 0 ? "+" : ""}${v}`).join(", ");
+        lines.push(`    ${c.modelName} v${c.fromVersion}->v${c.toVersion}: ${deltaStr} | ${c.recommendation}`);
+      }
     }
     lines.push("");
   }
@@ -529,4 +1102,107 @@ export function getModelHealthSummary(): ModelHealth[] {
 
 export function getPerFamilyBias(model?: string): FamilyBias[] {
   return computeFamilyBias(model);
+}
+
+export function getErrorAnalysis(): ErrorAnalysisReport {
+  return computeErrorAnalysis();
+}
+
+export function getFeatureImportanceReport(topN: number = 25): FeatureImportanceEntry[] {
+  return getGlobalFeatureImportance(topN);
+}
+
+export function getFailureSummary(): FailureSummaryReport {
+  return computeFailureSummary();
+}
+
+export function getModelBenchmark(): ModelBenchmarkReport {
+  return computeBenchmarkReport();
+}
+
+export function getFailedMaterialsForLLM(): string {
+  const summary = computeFailureSummary();
+  const lines: string[] = [];
+  lines.push("=== FAILED MATERIALS REPORT ===");
+  lines.push(`Total failures tracked: ${summary.totalFailures}`);
+  lines.push("");
+
+  if (summary.byReason.length > 0) {
+    lines.push("Failure breakdown:");
+    for (const r of summary.byReason) {
+      lines.push(`  ${r.reason}: ${r.count} (${r.percentage}%)`);
+    }
+    lines.push("");
+  }
+
+  if (summary.predictedStableActualUnstable.length > 0) {
+    lines.push(`Predicted stable but actually unstable (${summary.predictedStableActualUnstable.length} materials):`);
+    for (const f of summary.predictedStableActualUnstable.slice(0, 15)) {
+      const extras: string[] = [];
+      if (f.imaginaryModeCount) extras.push(`imaginary_modes=${f.imaginaryModeCount}`);
+      if (f.lowestPhononFreq != null) extras.push(`lowest_freq=${f.lowestPhononFreq}`);
+      if (f.formationEnergy != null) extras.push(`Ef=${f.formationEnergy}`);
+      lines.push(`  ${f.formula} [${f.failureReason}] via ${f.source}${extras.length > 0 ? " | " + extras.join(", ") : ""}`);
+    }
+    lines.push("");
+  }
+
+  if (summary.failurePatterns.topFailingElementPairs.length > 0) {
+    lines.push("Top failing element pairs:");
+    for (const p of summary.failurePatterns.topFailingElementPairs.slice(0, 8)) {
+      lines.push(`  ${p.pair}: ${p.count}`);
+    }
+    lines.push("");
+  }
+
+  if (summary.llmSuggestions.length > 0) {
+    lines.push("Suggested actions:");
+    for (const s of summary.llmSuggestions) {
+      lines.push(`  - ${s}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function getBenchmarkForLLM(): string {
+  const report = computeBenchmarkReport();
+  const lines: string[] = [];
+  lines.push("=== MODEL BENCHMARK REPORT ===");
+
+  if (report.scorecards.length === 0) {
+    lines.push("No version history available yet.");
+    return lines.join("\n");
+  }
+
+  const latestByModel = new Map<string, ModelVersionScorecard[]>();
+  for (const sc of report.scorecards) {
+    if (!latestByModel.has(sc.modelName)) latestByModel.set(sc.modelName, []);
+    latestByModel.get(sc.modelName)!.push(sc);
+  }
+
+  for (const [model, cards] of latestByModel) {
+    lines.push("");
+    lines.push(`## ${model} (${cards.length} versions)`);
+    const latest = cards[cards.length - 1];
+    lines.push(`  Latest: v${latest.version}`);
+    for (const [k, v] of Object.entries(latest.metrics)) {
+      lines.push(`    ${k}: ${typeof v === "number" ? v.toFixed(4) : v}`);
+    }
+    lines.push(`    inference speed: ${latest.inferenceSpeedMs} ms`);
+    lines.push(`    dataset: ${latest.datasetSize} samples`);
+    lines.push(`    hyperparameters: ${JSON.stringify(latest.hyperparameters)}`);
+  }
+
+  if (report.versionComparisons.length > 0) {
+    lines.push("");
+    lines.push("## Version Comparisons");
+    for (const c of report.versionComparisons.slice(-8)) {
+      const deltaStr = Object.entries(c.metricDeltas).map(([k, v]) => `${k}=${v > 0 ? "+" : ""}${v}`).join(", ");
+      lines.push(`  ${c.modelName} v${c.fromVersion}->v${c.toVersion}: ${deltaStr}`);
+      lines.push(`    recommendation: ${c.recommendation}`);
+    }
+  }
+
+  return lines.join("\n");
 }

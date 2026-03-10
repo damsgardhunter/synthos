@@ -2,6 +2,9 @@ import {
   getComprehensiveModelDiagnostics,
   getModelDiagnosticsForLLM,
   getModelHealthSummary,
+  getErrorAnalysis,
+  getFeatureImportanceReport,
+  recordPredictionOutcome,
   type ComprehensiveModelDiagnostics,
 } from "./model-diagnostics";
 import {
@@ -10,9 +13,17 @@ import {
   getExperimentHistory,
   getHyperparamOverrides,
   setHyperparamOverrides,
+  getPendingDataRequests,
   type ExperimentProposal,
   type ExperimentRecord,
 } from "./model-experiment-controller";
+import {
+  runModelLLMCycle,
+  getCurrentArchitecture,
+  getActiveCustomFeatures,
+} from "./model-llm-controller";
+import { getUncertaintyForLLM, getVarianceSummary } from "./uncertainty-tracker";
+import { evaluateRetrainNeed, recordRetrainOutcome, getSchedulerForLLM, getSchedulerStats } from "./retrain-scheduler";
 import type { EventEmitter } from "./engine";
 
 interface MetricTrend {
@@ -355,17 +366,26 @@ export function shouldRunModelImprovement(currentCycle: number): boolean {
   return currentCycle % CYCLE_FREQUENCY === 0;
 }
 
+export function recordCyclePredictionOutcomes(
+  outcomes: { formula: string; predicted: number; actual: number; model?: string }[]
+): void {
+  for (const o of outcomes) {
+    recordPredictionOutcome(o.model || "xgboost", o.formula, o.predicted, o.actual);
+  }
+}
+
 export function getModelDiagnosticsSummaryForStrategy(): string {
   const health = getModelHealthSummary();
   const unhealthy = health.filter(h => h.status !== "green");
 
-  if (unhealthy.length === 0) {
-    return "\n[Model Health: All models green — no issues detected]";
-  }
-
   const lines: string[] = ["\n## ML Model Health Summary"];
-  for (const h of unhealthy) {
-    lines.push(`  ${h.model}: ${h.status.toUpperCase()} — ${h.reasons.join("; ")}`);
+
+  if (unhealthy.length === 0) {
+    lines.push("[All models green — no critical issues]");
+  } else {
+    for (const h of unhealthy) {
+      lines.push(`  ${h.model}: ${h.status.toUpperCase()} — ${h.reasons.join("; ")}`);
+    }
   }
 
   const diagnostics = getComprehensiveModelDiagnostics();
@@ -373,14 +393,42 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
   lines.push(`  GNN: R²=${diagnostics.gnn.latestR2}, MAE=${diagnostics.gnn.latestMAE}K`);
   lines.push(`  Lambda: R²=${diagnostics.lambda.r2}, MAE=${diagnostics.lambda.mae}`);
 
+  const topFeatures = getFeatureImportanceReport(10);
+  if (topFeatures.length > 0) {
+    lines.push("  Top features: " + topFeatures.slice(0, 5).map(f => `${f.name}(${f.normalizedImportance})`).join(", "));
+    const hasPhonon = topFeatures.some(f => /phonon|omegaLog|debye/i.test(f.name));
+    const hasLambda = topFeatures.some(f => /lambda|coupling/i.test(f.name));
+    if (!hasPhonon) lines.push("  ** Model ignores phonon features — consider adding Debye temperature emphasis **");
+    if (!hasLambda) lines.push("  ** Model ignores e-ph coupling — lambda features underused **");
+  }
+
+  const errorAnalysis = getErrorAnalysis();
+  if (errorAnalysis.totalOutcomes > 0) {
+    lines.push(`  Error analysis: ${errorAnalysis.totalErrors} errors > 5K, bias=${errorAnalysis.overallBias}, RMSE=${errorAnalysis.overallRMSE}K`);
+    for (const c of errorAnalysis.errorClusters.slice(0, 3)) {
+      lines.push(`    ${c.pattern} (n=${c.count}, mean_err=${c.meanError}K)`);
+    }
+    for (const g of errorAnalysis.familyDataGaps.filter(g => g.needsMore)) {
+      lines.push(`    Data gap: ${g.family} (${g.sampleCount} samples, needs >= 20)`);
+    }
+  }
+
   if (plateauModels.length > 0) {
     lines.push(`  Plateau detected: ${plateauModels.join(", ")} — consider different experiment types`);
+  }
+
+  const dataRequests = getPendingDataRequests();
+  if (dataRequests.length > 0) {
+    lines.push(`  Pending data requests: ${dataRequests.length}`);
+    for (const dr of dataRequests.slice(0, 3)) {
+      lines.push(`    ${dr.family}: ${dr.count} structures via ${dr.method}`);
+    }
   }
 
   const history = getExperimentHistory();
   const recentCompleted = history.filter(h => h.status === "completed").slice(0, 3);
   if (recentCompleted.length > 0) {
-    lines.push("  Recent experiments:");
+    lines.push("  Recent experiments (Model LLM):");
     for (const exp of recentCompleted) {
       const impStr = Object.entries(exp.improvement)
         .map(([k, v]) => `${k}:${v > 0 ? "+" : ""}${v.toFixed(4)}`)
@@ -389,5 +437,79 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
     }
   }
 
+  const activeFeatures = getActiveCustomFeatures();
+  if (activeFeatures.length > 0) {
+    lines.push(`  Active computed features (Model LLM): ${activeFeatures.map(f => f.name).join(", ")}`);
+  }
+
+  const architecture = getCurrentArchitecture();
+  if (architecture) {
+    lines.push(`  Architecture (Model LLM): ${architecture.primaryModel} (switch=${architecture.switchRecommended})`);
+    for (const mc of architecture.modelConfigs) {
+      lines.push(`    ${mc.model}: weight=${mc.weight}`);
+    }
+  }
+
+  const variance = getVarianceSummary();
+  lines.push(`  Uncertainty: mean_var=${variance.meanVariance.toFixed(4)}, high_unc=${(variance.highUncertaintyFraction * 100).toFixed(1)}%, source=${variance.decomposition.dominantSource}`);
+
+  const scheduler = getSchedulerStats();
+  lines.push(`  Retrain scheduler: ${scheduler.state.totalRetrainsScheduled} retrains, ${scheduler.state.totalRetrainsSkipped} skips, ~${scheduler.state.totalComputeSaved}s saved`);
+
   return lines.join("\n");
+}
+
+export async function runCombinedModelLLMCycle(
+  emit: EventEmitter,
+  currentCycle: number
+): Promise<void> {
+  if (currentCycle % 10 !== 0) return;
+
+  try {
+    const report = await runModelLLMCycle(currentCycle);
+
+    if (report.featureProposals.length > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "Model LLM: features proposed",
+        detail: `Enabled features: ${report.featureProposals.map(p => p.name).join(", ")}`,
+        dataSource: "Model LLM Controller",
+      });
+    }
+
+    if (report.architectureRecommendation) {
+      emit("log", {
+        phase: "engine",
+        event: "Model LLM: architecture assessed",
+        detail: `Recommended: ${report.architectureRecommendation.primaryModel} — ${report.architectureRecommendation.reasoning.slice(0, 100)}`,
+        dataSource: "Model LLM Controller",
+      });
+    }
+
+    if (report.uncertaintyProposals.length > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "Model LLM: uncertainty improvements proposed",
+        detail: report.uncertaintyProposals.map(p => `${p.type} (priority ${p.priority})`).join(", "),
+        dataSource: "Uncertainty Tracker",
+      });
+    }
+
+    if (report.retrainDecision) {
+      const rd = report.retrainDecision;
+      emit("log", {
+        phase: "engine",
+        event: `Retrain scheduler: ${rd.shouldRetrain ? "RETRAIN" : "SKIP"} (${rd.urgency})`,
+        detail: rd.reasoning.slice(0, 120),
+        dataSource: "Retrain Scheduler",
+      });
+    }
+  } catch (e) {
+    emit("log", {
+      phase: "engine",
+      event: "Model LLM cycle error",
+      detail: e instanceof Error ? e.message.slice(0, 150) : "unknown",
+      dataSource: "Model LLM Controller",
+    });
+  }
 }

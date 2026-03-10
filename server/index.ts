@@ -1,9 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
-import { serveStatic } from "./static";
 import { createServer } from "http";
-import { db } from "./db";
-import { sql } from "drizzle-orm";
 
 const app = express();
 const httpServer = createServer(app);
@@ -62,59 +58,94 @@ app.use((req, res, next) => {
 });
 
 (async () => {
-  const t0 = Date.now();
-  const { seedDatabase } = await import("./seed");
-  await seedDatabase();
-  console.log(`[startup] seedDatabase: ${Date.now() - t0}ms`);
-  const { storage } = await import("./storage");
+  const port = parseInt(process.env.PORT || "5000", 10);
 
-  const t1 = Date.now();
-  await registerRoutes(httpServer, app);
-  console.log(`[startup] registerRoutes: ${Date.now() - t1}ms`);
+  let initialized = false;
 
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-
-    console.error("Internal Server Error:", err);
-
-    if (res.headersSent) {
-      return next(err);
-    }
-
-    return res.status(status).json({ message });
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: initialized ? "ready" : "starting", port });
   });
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
-  const t2 = Date.now();
-  if (process.env.NODE_ENV === "production") {
-    serveStatic(app);
-  } else {
-    const { setupVite } = await import("./vite");
-    await setupVite(httpServer, app);
-  }
-  console.log(`[startup] vite/static: ${Date.now() - t2}ms`);
+  app.use((req, res, next) => {
+    if (initialized) return next();
+    if (req.path.startsWith("/api/")) return next();
+    res.status(200).send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MatSci Supercomputer - Starting</title>
+<meta http-equiv="refresh" content="10">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0a;color:#e0e0e0;font-family:'Open Sans',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.container{text-align:center;max-width:480px;padding:2rem}.title{font-size:1.5rem;font-weight:700;margin-bottom:1rem;color:#fff}
+.subtitle{font-size:0.95rem;color:#999;margin-bottom:2rem}
+.spinner{width:48px;height:48px;border:4px solid #333;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1.5rem}
+@keyframes spin{to{transform:rotate(360deg)}}</style></head>
+<body><div class="container"><div class="spinner"></div><div class="title">Initializing MatSci Supercomputer</div>
+<div class="subtitle">Loading ML models, physics engines, and database. This page will refresh automatically.</div></div></body></html>`);
+  });
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || "5000", 10);
   httpServer.listen(
     {
       port,
       host: "0.0.0.0",
       reusePort: true,
     },
-    async () => {
+    () => {
+      log(`port ${port} open (initializing...)`);
+      setTimeout(initializeApp, 100);
+    },
+  );
+
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 50));
+
+  async function initializeApp() {
+    try {
+      await yield_();
+      const t2 = Date.now();
+      if (process.env.NODE_ENV === "production") {
+        const { serveStatic } = await import("./static");
+        serveStatic(app);
+      } else {
+        const { setupVite } = await import("./vite");
+        await setupVite(httpServer, app);
+      }
+      console.log(`[startup] vite/static: ${Date.now() - t2}ms`);
+      initialized = true;
+      log(`frontend ready on port ${port}`);
+
+      await yield_();
+      const t0 = Date.now();
+      const { seedDatabase } = await import("./seed");
+      await yield_();
+      await seedDatabase();
+      console.log(`[startup] seedDatabase: ${Date.now() - t0}ms`);
+      await yield_();
+      const { storage: storageInstance } = await import("./storage");
+
+      await yield_();
+      const t1 = Date.now();
+      const { registerRoutes } = await import("./routes");
+      await yield_();
+      await registerRoutes(httpServer, app);
+      console.log(`[startup] registerRoutes: ${Date.now() - t1}ms`);
+
+      app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+        const status = err.status || err.statusCode || 500;
+        const message = err.message || "Internal Server Error";
+        console.error("Internal Server Error:", err);
+        if (res.headersSent) {
+          return next(err);
+        }
+        return res.status(status).json({ message });
+      });
+
       log(`serving on port ${port}`);
 
       try {
-        const removed = await storage.deduplicateSuperconductorCandidates();
+        const removed = await storageInstance.deduplicateSuperconductorCandidates();
         if (removed > 0) log(`Deduplicated SC candidates: removed ${removed} duplicate rows`, "startup");
       } catch {}
+
+      const { db } = await import("./db");
+      const { sql } = await import("drizzle-orm");
 
       try {
         await db.execute(sql`UPDATE superconductor_candidates SET upper_critical_field = 300 WHERE upper_critical_field > 300`);
@@ -144,11 +175,16 @@ app.use((req, res, next) => {
 
       try {
         const { startEngine } = await import("./learning/engine");
-        await startEngine();
-        log("Learning engine auto-started", "startup");
+        startEngine().then(() => {
+          log("Learning engine auto-started", "startup");
+        }).catch((err: any) => {
+          log(`Engine auto-start failed: ${err.message}`, "startup");
+        });
       } catch (err: any) {
-        log(`Engine auto-start failed: ${err.message}`, "startup");
+        log(`Engine import failed: ${err.message}`, "startup");
       }
-    },
-  );
+    } catch (err: any) {
+      console.error("[startup] Fatal initialization error:", err);
+    }
+  }
 })();

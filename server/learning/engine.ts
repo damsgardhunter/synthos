@@ -117,6 +117,7 @@ import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-p
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 import { recordStructureOutcome } from "../crystal/structure-reward-system";
 import { runModelImprovementCycle, getModelImprovementStats } from "./model-improvement-loop";
+import { recordPredictionOutcome } from "./model-diagnostics";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1268,6 +1269,7 @@ async function runDFTEnrichment() {
           { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy },
           dftSrc === "external" ? "dft" : "xtb"
         );
+        recordPredictionOutcome("xgboost", candidate.formula, priorTc, gb.tcPredicted);
         incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
         recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy }, candidate.materialClass ?? undefined);
 

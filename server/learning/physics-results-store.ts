@@ -80,6 +80,12 @@ export function recordPhysicsResult(result: PhysicsResult): void {
   store.set(result.formula, { ...result });
   touchAccess(result.formula);
   evictIfNeeded();
+
+  const derived = computeDerivedFeatures(result);
+  derivedFeaturesCache.set(result.formula, derived);
+  for (const cb of featureRecalcCallbacks) {
+    try { cb(result.formula, derived); } catch {}
+  }
 }
 
 export function getPhysicsResult(formula: string): PhysicsResult | null {
@@ -131,6 +137,90 @@ export function getPhysicsFeatures(formula: string): PhysicsFeatures | null {
     tier: result.tier,
     hasVerifiedData: true,
   };
+}
+
+export interface DerivedFeatures {
+  bandwidth: number;
+  vanHoveDistance: number;
+  bondStiffness: number;
+  electronPhononCouplingDensity: number;
+  spectralWeight: number;
+  anharmonicRatio: number;
+  couplingEfficiency: number;
+}
+
+export function computeDerivedFeatures(result: PhysicsResult): DerivedFeatures {
+  const bandwidth = result.dosAtEF > 0
+    ? Math.min(10, 1.0 / (result.dosAtEF * 0.1))
+    : 5.0;
+
+  const vanHoveDistance = result.dosAtEF > 2.0
+    ? Math.max(0, 1.0 - (result.dosAtEF - 2.0) / 5.0)
+    : 1.0;
+
+  const bondStiffness = result.omega2 > 0
+    ? result.omega2 * result.omega2 * 0.0001
+    : result.omegaLog > 0 ? result.omegaLog * 0.01 : 0;
+
+  const electronPhononCouplingDensity = result.lambda > 0 && result.dosAtEF > 0
+    ? result.lambda * result.dosAtEF
+    : 0;
+
+  const spectralWeight = result.alpha2FPeak > 0 && result.alpha2FPeakFreq > 0
+    ? result.alpha2FPeak * result.alpha2FPeakFreq * 0.01
+    : 0;
+
+  const anharmonicRatio = result.omega2 > 0 && result.omegaLog > 0
+    ? result.omega2 / result.omegaLog
+    : 1.0;
+
+  const couplingEfficiency = result.lambda > 0 && result.tc > 0 && result.omegaLog > 0
+    ? result.tc / (result.omegaLog * Math.exp(-1.04 * (1 + result.lambda) / (result.lambda - result.muStar * (1 + 0.62 * result.lambda) + 0.001)))
+    : 0;
+
+  return {
+    bandwidth,
+    vanHoveDistance,
+    bondStiffness,
+    electronPhononCouplingDensity,
+    spectralWeight,
+    anharmonicRatio,
+    couplingEfficiency: Number.isFinite(couplingEfficiency) ? Math.min(5, Math.max(0, couplingEfficiency)) : 0,
+  };
+}
+
+const derivedFeaturesCache = new Map<string, DerivedFeatures>();
+
+export function recalculateDerivedFeatures(formula: string): DerivedFeatures | null {
+  const result = store.get(formula);
+  if (!result) return null;
+
+  const derived = computeDerivedFeatures(result);
+  derivedFeaturesCache.set(formula, derived);
+  return derived;
+}
+
+export function recalculateAllDerivedFeatures(): number {
+  let count = 0;
+  for (const [formula, result] of store) {
+    const derived = computeDerivedFeatures(result);
+    derivedFeaturesCache.set(formula, derived);
+    count++;
+  }
+  return count;
+}
+
+export function getDerivedFeatures(formula: string): DerivedFeatures | null {
+  if (derivedFeaturesCache.has(formula)) {
+    return derivedFeaturesCache.get(formula)!;
+  }
+  return recalculateDerivedFeatures(formula);
+}
+
+const featureRecalcCallbacks: ((formula: string, derived: DerivedFeatures) => void)[] = [];
+
+export function onFeatureRecalculation(callback: (formula: string, derived: DerivedFeatures) => void): void {
+  featureRecalcCallbacks.push(callback);
 }
 
 export function getAllPhysicsResults(): PhysicsResult[] {

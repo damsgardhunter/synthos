@@ -1,4 +1,5 @@
 import { gnnPredictWithUncertainty, type GNNPredictionWithUncertainty } from "./graph-neural-net";
+import { recordPredictionVariance } from "./uncertainty-tracker";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty, type XGBUncertaintyResult } from "./gradient-boost";
 import { classifyFamily } from "./utils";
@@ -259,6 +260,18 @@ export function computeSurrogateFitness(formula: string, crystalPrototype?: stri
   const gnnEnsembleVariance = gnnPred?.uncertainty ?? 0.5;
   const xgbEnsembleVariance = xgbPred?.normalizedUncertainty ?? 0.5;
   const combinedUncertainty = gnnPred ? (xgbPred ? gnnEnsembleVariance * 0.6 + xgbEnsembleVariance * 0.4 : gnnEnsembleVariance) : xgbEnsembleVariance;
+
+  const ensembleStd = xgbPred?.tcStd ?? (gnnPred ? Math.sqrt(gnnPred.uncertainty) * predictedTc * 0.1 : 0);
+  recordPredictionVariance({
+    formula,
+    predictedTc,
+    ensembleStd,
+    normalizedUncertainty: combinedUncertainty,
+    confidenceLower: predictedTc - 1.645 * ensembleStd,
+    confidenceUpper: predictedTc + 1.645 * ensembleStd,
+    timestamp: Date.now(),
+    family,
+  });
 
   const explorationWeight = computeExplorationWeight();
   const uncertaintyBonus = Math.min(1.0, combinedUncertainty * 1.5);

@@ -18,6 +18,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **AI**: OpenAI gpt-4o-mini (via Replit AI Integrations)
 - **Real-time**: WebSocket (ws)
 
+### Startup Architecture
+- `server/index.ts` opens port 5000 IMMEDIATELY with only lightweight imports (express, http)
+- All heavy imports (routes, seed, storage, vite, learning modules) are loaded DYNAMICALLY inside `initializeApp()` callback after port opens
+- This allows the workflow manager to see the port within seconds, while full initialization (~3-4 min) runs in background
+- A `/api/health` endpoint is available immediately even during initialization
+- TypeScript compilation of learning modules takes ~85s (registerRoutes), Vite setup takes ~150s
+
 ### Core Features
 - **AI-Driven Learning Engine**: Orchestrates 13 distinct learning phases, including multi-fidelity screening and novel synthesis reasoning.
 - **ML Prediction Engine**: Combines gradient boosting and OpenAI gpt-4o-mini for superconductor scoring.

@@ -27,7 +27,7 @@ import {
 import { gbPredict, getConfidenceBand } from "./gradient-boost";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { getGNNPrediction, type GNNPrediction } from "./graph-neural-net";
-import { getPhysicsFeatures } from "./physics-results-store";
+import { getPhysicsFeatures, getDerivedFeatures } from "./physics-results-store";
 import { predictLambda, recordLambdaValidation } from "./lambda-regressor";
 import { predictTBProperties } from "../physics/tb-ml-surrogate";
 export { getConfidenceBand };
@@ -103,6 +103,13 @@ export interface MLFeatureVector {
   dosAtEF_tb: number;
   bandFlatness_tb: number;
   lambdaProxy_tb: number;
+  derivedBandwidth: number;
+  derivedVanHoveDistance: number;
+  derivedBondStiffness: number;
+  derivedEPCDensity: number;
+  derivedSpectralWeight: number;
+  derivedAnharmonicRatio: number;
+  derivedCouplingEfficiency: number;
   _sourceFormula?: string;
 }
 
@@ -431,6 +438,29 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       } catch {
         return { dosAtEF_tb: 0, bandFlatness_tb: 0, lambdaProxy_tb: 0 };
       }
+    })(),
+    ...(() => {
+      const derived = getDerivedFeatures(formula);
+      if (derived) {
+        return {
+          derivedBandwidth: derived.bandwidth,
+          derivedVanHoveDistance: derived.vanHoveDistance,
+          derivedBondStiffness: derived.bondStiffness,
+          derivedEPCDensity: derived.electronPhononCouplingDensity,
+          derivedSpectralWeight: derived.spectralWeight,
+          derivedAnharmonicRatio: derived.anharmonicRatio,
+          derivedCouplingEfficiency: derived.couplingEfficiency,
+        };
+      }
+      return {
+        derivedBandwidth: 0,
+        derivedVanHoveDistance: 0,
+        derivedBondStiffness: bondStiffnessVariance,
+        derivedEPCDensity: 0,
+        derivedSpectralWeight: 0,
+        derivedAnharmonicRatio: 0,
+        derivedCouplingEfficiency: 0,
+      };
     })(),
     _sourceFormula: formula,
   };

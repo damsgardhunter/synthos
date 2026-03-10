@@ -1469,26 +1469,79 @@ function getEnsembleModels(): GNNWeights[] {
   return cachedEnsembleModels;
 }
 
+let heldOutValidationSet: TrainingSample[] = [];
+
+function splitTrainValidation(data: TrainingSample[], valFraction: number = 0.2, seed: number = 42): {
+  train: TrainingSample[];
+  validation: TrainingSample[];
+} {
+  if (data.length < 10) {
+    return { train: data, validation: [] };
+  }
+
+  const rng = seededRandom(seed);
+  const indices = Array.from({ length: data.length }, (_, i) => i);
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+
+  const valSize = Math.max(2, Math.floor(data.length * valFraction));
+  const valIndices = new Set(indices.slice(0, valSize));
+
+  const train: TrainingSample[] = [];
+  const validation: TrainingSample[] = [];
+  for (let i = 0; i < data.length; i++) {
+    if (valIndices.has(i)) {
+      validation.push(data[i]);
+    } else {
+      train.push(data[i]);
+    }
+  }
+
+  return { train, validation };
+}
+
+export function getHeldOutValidationSet(): TrainingSample[] {
+  return [...heldOutValidationSet];
+}
+
 export function trainEnsemble(trainingData: TrainingSample[]): GNNWeights[] {
+  const { train, validation } = splitTrainValidation(trainingData);
+  heldOutValidationSet = validation;
+
   const models: GNNWeights[] = [];
   for (let i = 0; i < ENSEMBLE_SIZE; i++) {
     const rng = seededRandom(42 + i * 7919);
     const w = initWeights(rng);
-    const trained = trainGNNSurrogate(trainingData, w);
+    const trained = trainGNNSurrogate(train, w);
     models.push(trained);
   }
+
+  if (validation.length > 0) {
+    console.log(`[GNN] Train/validation split: ${train.length} train, ${validation.length} validation (${(validation.length / trainingData.length * 100).toFixed(1)}%)`);
+  }
+
   return models;
 }
 
 export async function trainEnsembleAsync(trainingData: TrainingSample[]): Promise<GNNWeights[]> {
+  const { train, validation } = splitTrainValidation(trainingData);
+  heldOutValidationSet = validation;
+
   const models: GNNWeights[] = [];
   for (let i = 0; i < ENSEMBLE_SIZE; i++) {
     const rng = seededRandom(42 + i * 7919);
     const w = initWeights(rng);
-    const trained = trainGNNSurrogate(trainingData, w);
+    const trained = trainGNNSurrogate(train, w);
     models.push(trained);
     await new Promise(resolve => setImmediate(resolve));
   }
+
+  if (validation.length > 0) {
+    console.log(`[GNN] Train/validation split: ${train.length} train, ${validation.length} validation (${(validation.length / trainingData.length * 100).toFixed(1)}%)`);
+  }
+
   return models;
 }
 
@@ -1530,9 +1583,11 @@ const GNN_VERSION_HISTORY_MAX = 50;
 export function logGNNVersion(trigger: string, datasetSize: number, dftSamples = 0, enrichedSamples = 0): GNNVersionRecord {
   gnnModelVersion++;
 
-  const validationSet = SUPERCON_TRAINING_DATA
-    .filter(e => e.isSuperconductor && e.tc > 0)
-    .slice(0, 50);
+  const validationSet = heldOutValidationSet.length > 0
+    ? heldOutValidationSet
+    : SUPERCON_TRAINING_DATA
+        .filter(e => e.isSuperconductor && e.tc > 0)
+        .slice(0, 50);
 
   let sumSquaredError = 0;
   let sumAbsError = 0;
@@ -1576,7 +1631,8 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
     gnnVersionHistory.shift();
   }
 
-  console.log(`[GNN] Version ${record.version} logged: R²=${record.r2}, MAE=${record.mae}, RMSE=${record.rmse}, trigger=${trigger}, dataset=${datasetSize}, dft=${dftSamples}, enriched=${enrichedSamples}`);
+  const valSource = heldOutValidationSet.length > 0 ? `held-out (${heldOutValidationSet.length})` : "fallback (first 50)";
+  console.log(`[GNN] Version ${record.version} logged: R²=${record.r2}, MAE=${record.mae}, RMSE=${record.rmse}, trigger=${trigger}, dataset=${datasetSize}, dft=${dftSamples}, enriched=${enrichedSamples}, validation=${valSource}`);
 
   return record;
 }

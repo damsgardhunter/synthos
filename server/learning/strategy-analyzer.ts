@@ -133,7 +133,9 @@ export async function analyzeAndEvolveStrategy(
       previousStrategyContext += `\nIf recommending different priorities than above, explicitly explain what changed and why in your summary.`;
     }
 
-    const prompt = `You are a materials science research strategist for an AI superconductor discovery platform.
+    const prompt = `You are the STRATEGY LLM for an AI superconductor discovery platform.
+Your SOLE responsibility is controlling EXPLORATION: which material families to investigate, pressure ranges to target, and search direction.
+You do NOT control model training, hyperparameters, features, or architecture — that is handled by a separate Model LLM.
 
 Current candidate family performance (cycle ${cycleNumber}, scored by Bayesian formula: bayesianTc × log2(count+1) × (0.5 + 0.5 × successRate), normalized to [0,1]. bayesianTc shrinks small-sample maxTc toward the global median using a prior of 5 samples. Families with < 10 candidates get a +0.1 exploration bonus):
 ${signalText}
@@ -145,6 +147,17 @@ Recent novel insights: ${insightSummary || "None yet"}
 Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${f}: ${n} failures`).join(", ") || "No failures yet"}
 ${getModelDiagnosticsSummaryForStrategy()}
 ${previousStrategyContext}
+
+YOUR SCOPE (exploration decisions only):
+- Which material families to prioritize (Hydrides, Cuprates, Borides, Pnictides, etc.)
+- Whether to explore new families or exploit known high-performers
+- Pressure ranges to focus on (ambient vs high-pressure)
+- Search direction: broad exploration vs focused exploitation
+
+OUT OF SCOPE (handled by Model LLM):
+- Model training parameters, hyperparameters, learning rates
+- Feature engineering or model architecture
+- Dataset augmentation or retraining decisions
 
 IMPORTANT SCORING RULES:
 - The familyScore uses Bayesian shrinkage: small-sample families have their Tc pulled toward the global median, preventing single outliers from dominating.

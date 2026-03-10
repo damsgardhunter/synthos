@@ -29,8 +29,8 @@ import {
   getDesignRepresentationStats,
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
-import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory } from "./learning/gradient-boost";
-import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph } from "./learning/graph-neural-net";
+import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount } from "./learning/gradient-boost";
+import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet } from "./learning/graph-neural-net";
 import { predictPressureCurve, findOptimalPressure, pressureSensitivity, getPressureCurveStats, getPressureExplorationStats } from "./learning/pressure-aware-surrogate";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./learning/pressure-phase-detector";
 import { computeEnthalpyPressureCurve, findStabilityPressureWindow, getEnthalpyStats } from "./learning/enthalpy-stability";
@@ -45,7 +45,9 @@ async function getEliashbergModule() {
   return _eliashbergModule;
 }
 import { getActiveLearningStats, getActiveLearningCycleHistory, getPressureCoverageStats } from "./learning/active-learning";
-import { getPhysicsStoreStats } from "./learning/physics-results-store";
+import { getPhysicsStoreStats, recalculateAllDerivedFeatures, getDerivedFeatures, recordPhysicsResult } from "./learning/physics-results-store";
+import { buildUnifiedDataset, getUnifiedDatasetStats, getUnifiedDatasetForLLM, getTrainingSlice, getSnapshotHistory } from "./learning/unified-training-dataset";
+import { generateCycleDiagnostics, getReportHistory, getLatestReport, formatDiagnosticReportText, getDiagnosticsForLLM } from "./learning/cycle-diagnostics";
 import { predictLambda, getLambdaRegressorStats, initLambdaRegressor } from "./learning/lambda-regressor";
 import { predictPhononProperties, getPhononSurrogateStats, initPhononSurrogate } from "./physics/phonon-surrogate";
 import { getCalibrationStats as getSurrogateFitnessStats } from "./learning/surrogate-fitness";
@@ -244,15 +246,41 @@ import {
 import {
   getComprehensiveModelDiagnostics, getModelHealthSummary, getPerFamilyBias,
   getModelDiagnosticsForLLM, recordPredictionOutcome,
+  getErrorAnalysis, getFeatureImportanceReport,
+  getFailureSummary, getModelBenchmark, getFailedMaterialsForLLM, getBenchmarkForLLM,
 } from "./learning/model-diagnostics";
 import {
+  getModelLLMStatus, proposeNewFeatures, selectArchitecture,
+  enableBuiltinFeature, disableCustomFeature, runModelLLMCycle,
+  getAvailableFeatureDefinitions, getCurrentArchitecture,
+} from "./learning/model-llm-controller";
+import {
   proposeModelExperiments, executeExperiment, getExperimentHistory,
-  getActiveExperiments, getExperimentStats,
+  getActiveExperiments, getExperimentStats, getAllDataRequests,
 } from "./learning/model-experiment-controller";
 import {
   getModelImprovementStats, getModelImprovementTrends,
   runModelImprovementCycle,
 } from "./learning/model-improvement-loop";
+import {
+  getUncertaintyStatus, getUncertaintyReport, getFullUncertaintyReport,
+  getHighUncertaintyPredictions, getVarianceByFamily, proposeUncertaintyImprovements,
+} from "./learning/uncertainty-tracker";
+import {
+  evaluateRetrainNeed, getSchedulerStats, getSchedulerForLLM, recordRetrainOutcome,
+} from "./learning/retrain-scheduler";
+import {
+  getGroundTruthDataset, getGroundTruthSummary, getGroundTruthForLLM,
+  getRecentBatchCycles, getBatchCycles, getDatapointsByCycle,
+  getGroundTruthDatasetSlice, getDatapointsByFormula, getDatasetForTraining,
+} from "./learning/ground-truth-store";
+import {
+  computeMetrics as computeLedgerMetrics, computeRecentMetrics as computeRecentLedgerMetrics,
+  computeMetricsByFamily as computeLedgerByFamily, getWorstPredictions, getBestPredictions,
+  getOverpredictions, getUnderpredictions, getLedgerSize, getLedgerSlice,
+  getRetrainTriggerState, setRetrainThreshold, setRetrainEnabled, getMetricsForLLM as getLedgerLLMReport,
+  getCycleImprovementHistory, getImprovementTrend,
+} from "./learning/prediction-reality-ledger";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -3814,6 +3842,783 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(trends);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch model improvement trends", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/feature-importance", generalLimiter, async (req, res) => {
+    try {
+      const topN = parseInt(req.query.topN as string) || 25;
+      const features = getFeatureImportanceReport(topN);
+      res.json(features);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch feature importance", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/error-analysis", generalLimiter, async (_req, res) => {
+    try {
+      const analysis = getErrorAnalysis();
+      res.json(analysis);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch error analysis", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-experiments/data-requests", generalLimiter, async (_req, res) => {
+    try {
+      const requests = getAllDataRequests();
+      res.json(requests);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch data requests", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/failed-materials", generalLimiter, async (_req, res) => {
+    try {
+      const summary = getFailureSummary();
+      res.json(summary);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch failure summary", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/failed-materials/llm-report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getFailedMaterialsForLLM();
+      res.json({ report });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate failure report", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/benchmark", generalLimiter, async (_req, res) => {
+    try {
+      const benchmark = getModelBenchmark();
+      res.json(benchmark);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch benchmark", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/benchmark/llm-report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getBenchmarkForLLM();
+      res.json({ report });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate benchmark report", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-llm/status", generalLimiter, async (_req, res) => {
+    try {
+      const status = getModelLLMStatus();
+      res.json(status);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch Model LLM status", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-llm/architecture", generalLimiter, async (_req, res) => {
+    try {
+      const arch = getCurrentArchitecture();
+      res.json(arch ?? { primaryModel: "xgboost", reasoning: "No architecture assessment yet" });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch architecture", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-llm/architecture/select", engineLimiter, async (_req, res) => {
+    try {
+      const result = await selectArchitecture();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to select architecture", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-llm/features/available", generalLimiter, async (_req, res) => {
+    try {
+      const features = getAvailableFeatureDefinitions();
+      res.json(features);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch available features", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-llm/features/propose", engineLimiter, async (_req, res) => {
+    try {
+      const proposals = await proposeNewFeatures();
+      for (const p of proposals) {
+        enableBuiltinFeature(p.name);
+      }
+      res.json({ proposals, enabledCount: proposals.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to propose features", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-llm/features/enable", generalLimiter, async (req, res) => {
+    try {
+      const { name } = req.body;
+      if (!name) return res.status(400).json({ error: "Feature name required" });
+      const ok = enableBuiltinFeature(name);
+      res.json({ enabled: ok, feature: name });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to enable feature", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-llm/features/disable", generalLimiter, async (req, res) => {
+    try {
+      const { name } = req.body;
+      if (!name) return res.status(400).json({ error: "Feature name required" });
+      const ok = disableCustomFeature(name);
+      res.json({ disabled: ok, feature: name });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to disable feature", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-llm/cycle", engineLimiter, async (req, res) => {
+    try {
+      const cycle = req.body.cycle ?? 0;
+      const report = await runModelLLMCycle(cycle);
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run Model LLM cycle", detail: e.message });
+    }
+  });
+
+  app.get("/api/uncertainty/status", generalLimiter, async (_req, res) => {
+    try {
+      const status = getUncertaintyStatus();
+      res.json(status);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch uncertainty status", detail: e.message });
+    }
+  });
+
+  app.get("/api/uncertainty/report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getUncertaintyReport();
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate uncertainty report", detail: e.message });
+    }
+  });
+
+  app.post("/api/uncertainty/report/full", engineLimiter, async (_req, res) => {
+    try {
+      const report = await getFullUncertaintyReport();
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate full uncertainty report", detail: e.message });
+    }
+  });
+
+  app.get("/api/uncertainty/high-variance", generalLimiter, async (req, res) => {
+    try {
+      const topN = Math.min(50, Math.max(1, parseInt(String(req.query.topN)) || 20));
+      const predictions = getHighUncertaintyPredictions(topN);
+      res.json({ predictions, count: predictions.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch high-variance predictions", detail: e.message });
+    }
+  });
+
+  app.get("/api/uncertainty/by-family", generalLimiter, async (_req, res) => {
+    try {
+      const byFamily = getVarianceByFamily();
+      res.json(byFamily);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch family variance", detail: e.message });
+    }
+  });
+
+  app.post("/api/uncertainty/propose", engineLimiter, async (_req, res) => {
+    try {
+      const proposals = await proposeUncertaintyImprovements();
+      res.json({ proposals, count: proposals.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to propose uncertainty improvements", detail: e.message });
+    }
+  });
+
+  app.get("/api/retrain-scheduler/status", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getSchedulerStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch scheduler status", detail: e.message });
+    }
+  });
+
+  app.post("/api/retrain-scheduler/evaluate", engineLimiter, async (_req, res) => {
+    try {
+      const decision = await evaluateRetrainNeed();
+      res.json(decision);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to evaluate retrain need", detail: e.message });
+    }
+  });
+
+  app.get("/api/retrain-scheduler/summary", generalLimiter, async (_req, res) => {
+    try {
+      const summary = getSchedulerForLLM();
+      res.json({ summary });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch scheduler summary", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/summary", generalLimiter, async (_req, res) => {
+    try {
+      const summary = getGroundTruthSummary();
+      res.json(summary);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch ground-truth summary", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/dataset", generalLimiter, async (req, res) => {
+    try {
+      const offset = Math.max(0, parseInt(String(req.query.offset)) || 0);
+      const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit)) || 50));
+      const data = getGroundTruthDatasetSlice(offset, limit);
+      const total = getGroundTruthDataset().length;
+      res.json({ data, total, offset, limit });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch ground-truth dataset", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/formula/:formula", generalLimiter, async (req, res) => {
+    try {
+      const datapoints = getDatapointsByFormula(req.params.formula);
+      res.json({ formula: req.params.formula, datapoints, count: datapoints.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch formula datapoints", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/cycles", generalLimiter, async (req, res) => {
+    try {
+      const n = Math.min(50, Math.max(1, parseInt(String(req.query.n)) || 10));
+      const cycles = getRecentBatchCycles(n);
+      res.json({ cycles, count: cycles.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch batch cycles", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/cycles/all", generalLimiter, async (_req, res) => {
+    try {
+      const cycles = getBatchCycles();
+      res.json({ cycles, count: cycles.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch all batch cycles", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/cycle/:cycleNumber", generalLimiter, async (req, res) => {
+    try {
+      const cycleNum = parseInt(req.params.cycleNumber);
+      const datapoints = getDatapointsByCycle(cycleNum);
+      res.json({ cycle: cycleNum, datapoints, count: datapoints.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch cycle datapoints", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/training-data", generalLimiter, async (_req, res) => {
+    try {
+      const data = getDatasetForTraining();
+      res.json({ ...data, size: data.formulas.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch training data", detail: e.message });
+    }
+  });
+
+  app.get("/api/ground-truth/llm-report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getGroundTruthForLLM();
+      res.json({ report });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate ground-truth LLM report", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/metrics", generalLimiter, async (_req, res) => {
+    try {
+      const metrics = computeLedgerMetrics();
+      res.json(metrics);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute ledger metrics", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/metrics/recent", generalLimiter, async (req, res) => {
+    try {
+      const window = parseInt(req.query.window as string) || 100;
+      const metrics = computeRecentLedgerMetrics(window);
+      res.json(metrics);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute recent metrics", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/metrics/by-family", generalLimiter, async (_req, res) => {
+    try {
+      const families = computeLedgerByFamily();
+      res.json({ families });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute family metrics", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/entries", generalLimiter, async (req, res) => {
+    try {
+      const offset = parseInt(req.query.offset as string) || 0;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const entries = getLedgerSlice(offset, limit);
+      res.json({ total: getLedgerSize(), offset, limit, entries });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch ledger entries", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/worst", generalLimiter, async (req, res) => {
+    try {
+      const topN = Math.min(parseInt(req.query.n as string) || 20, 100);
+      const worst = getWorstPredictions(topN);
+      res.json({ count: worst.length, entries: worst });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch worst predictions", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/best", generalLimiter, async (req, res) => {
+    try {
+      const topN = Math.min(parseInt(req.query.n as string) || 20, 100);
+      const best = getBestPredictions(topN);
+      res.json({ count: best.length, entries: best });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch best predictions", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/overpredictions", generalLimiter, async (req, res) => {
+    try {
+      const minError = parseFloat(req.query.minError as string) || 30;
+      const over = getOverpredictions(minError);
+      res.json({ count: over.length, entries: over });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch overpredictions", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/underpredictions", generalLimiter, async (req, res) => {
+    try {
+      const minError = parseFloat(req.query.minError as string) || 30;
+      const under = getUnderpredictions(minError);
+      res.json({ count: under.length, entries: under });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch underpredictions", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/llm-report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getLedgerLLMReport();
+      res.json({ report });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate ledger LLM report", detail: e.message });
+    }
+  });
+
+  app.get("/api/retrain-trigger/status", generalLimiter, async (_req, res) => {
+    try {
+      const state = getRetrainTriggerState();
+      res.json(state);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch retrain trigger status", detail: e.message });
+    }
+  });
+
+  app.post("/api/retrain-trigger/configure", engineLimiter, async (req, res) => {
+    try {
+      const { threshold, enabled } = req.body;
+      if (typeof threshold === "number") setRetrainThreshold(threshold);
+      if (typeof enabled === "boolean") setRetrainEnabled(enabled);
+      const state = getRetrainTriggerState();
+      res.json({ updated: true, state });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to configure retrain trigger", detail: e.message });
+    }
+  });
+
+  app.get("/api/discovery-efficiency", generalLimiter, async (_req, res) => {
+    try {
+      const cycles = getActiveLearningCycleHistory();
+      const efficiencyHistory = cycles.map(c => ({
+        cycle: c.cycle,
+        usefulDiscoveries: c.discoveryEfficiency.usefulDiscoveries,
+        totalEvaluations: c.discoveryEfficiency.totalEvaluations,
+        efficiencyRatio: c.discoveryEfficiency.efficiencyRatio,
+        stableCount: c.discoveryEfficiency.stableCount,
+        highTcCount: c.discoveryEfficiency.highTcCount,
+        failureBreakdown: c.discoveryEfficiency.failureBreakdown,
+      }));
+
+      const totalUseful = efficiencyHistory.reduce((s, e) => s + e.usefulDiscoveries, 0);
+      const totalEvals = efficiencyHistory.reduce((s, e) => s + e.totalEvaluations, 0);
+      const totalFailures = {
+        unstablePhonons: efficiencyHistory.reduce((s, e) => s + e.failureBreakdown.unstablePhonons, 0),
+        highFormationEnergy: efficiencyHistory.reduce((s, e) => s + e.failureBreakdown.highFormationEnergy, 0),
+        nonMetallic: efficiencyHistory.reduce((s, e) => s + e.failureBreakdown.nonMetallic, 0),
+        lowTc: efficiencyHistory.reduce((s, e) => s + e.failureBreakdown.lowTc, 0),
+        pipelineCrash: efficiencyHistory.reduce((s, e) => s + e.failureBreakdown.pipelineCrash, 0),
+      };
+
+      const improving = efficiencyHistory.length >= 3;
+      let trend = "insufficient data";
+      if (improving) {
+        const recent = efficiencyHistory.slice(-3);
+        const early = efficiencyHistory.slice(0, Math.min(3, efficiencyHistory.length));
+        const recentAvg = recent.reduce((s, e) => s + e.efficiencyRatio, 0) / recent.length;
+        const earlyAvg = early.reduce((s, e) => s + e.efficiencyRatio, 0) / early.length;
+        trend = recentAvg > earlyAvg ? "improving" : recentAvg < earlyAvg ? "degrading" : "stable";
+      }
+
+      res.json({
+        cumulativeEfficiency: totalEvals > 0 ? totalUseful / totalEvals : 0,
+        totalUseful,
+        totalEvaluations: totalEvals,
+        totalFailures,
+        negativeExamplesInTraining: getFailureExampleCount(),
+        trend,
+        perCycle: efficiencyHistory,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch discovery efficiency", detail: e.message });
+    }
+  });
+
+  app.get("/api/prediction-ledger/cycle-improvement", generalLimiter, async (_req, res) => {
+    try {
+      const history = getCycleImprovementHistory();
+      const trend = getImprovementTrend();
+      res.json({ history, trend });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch cycle improvement history", detail: e.message });
+    }
+  });
+
+  app.get("/api/model/validation-set", generalLimiter, async (_req, res) => {
+    try {
+      const valSet = getHeldOutValidationSet();
+      res.json({
+        size: valSet.length,
+        formulas: valSet.map(v => v.formula),
+        avgTc: valSet.length > 0 ? valSet.reduce((s, v) => s + v.tc, 0) / valSet.length : 0,
+        tcRange: valSet.length > 0 ? {
+          min: Math.min(...valSet.map(v => v.tc)),
+          max: Math.max(...valSet.map(v => v.tc)),
+        } : null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch validation set info", detail: e.message });
+    }
+  });
+
+  const REFERENCE_COMPOUNDS = [
+    {
+      formula: "MgB2",
+      name: "Magnesium Diboride",
+      family: "Boride",
+      textbook: {
+        tc: 39.0,
+        lambda: 0.87,
+        omegaLog: 670,
+        crystalSystem: "hexagonal",
+        spaceGroup: "P6/mmm",
+        yearDiscovered: 2001,
+        pressureGpa: 0,
+        pairingMechanism: "Conventional (phonon-mediated)",
+        notes: "Two-gap s-wave superconductor with sigma and pi bands",
+      },
+    },
+    {
+      formula: "YBa2Cu3O7",
+      name: "YBCO",
+      family: "Cuprate",
+      textbook: {
+        tc: 92.0,
+        lambda: 2.5,
+        omegaLog: 350,
+        crystalSystem: "orthorhombic",
+        spaceGroup: "Pmmm",
+        yearDiscovered: 1987,
+        pressureGpa: 0,
+        pairingMechanism: "Unconventional (d-wave, likely spin-fluctuation mediated)",
+        notes: "High-Tc cuprate, CuO2 planes, d-wave order parameter",
+      },
+    },
+    {
+      formula: "Nb3Sn",
+      name: "Niobium-Tin",
+      family: "A15",
+      textbook: {
+        tc: 18.3,
+        lambda: 1.80,
+        omegaLog: 215,
+        crystalSystem: "cubic",
+        spaceGroup: "Pm-3n",
+        yearDiscovered: 1954,
+        pressureGpa: 0,
+        pairingMechanism: "Conventional (phonon-mediated)",
+        notes: "A15 structure, used in MRI magnets and particle accelerators",
+      },
+    },
+  ];
+
+  interface BenchmarkResult {
+    formula: string;
+    name: string;
+    family: string;
+    textbook: typeof REFERENCE_COMPOUNDS[0]["textbook"];
+    predicted: {
+      xgboostTc: number;
+      xgboostScore: number;
+      gnnTc: number;
+      gnnUncertainty: number;
+      gnnLambda: number;
+      ensembleTc: number;
+      reasoning: string[];
+    };
+    accuracy: {
+      tcErrorK: number;
+      tcErrorPercent: number;
+      lambdaError: number | null;
+      rating: string;
+    };
+    computedAt: number;
+  }
+
+  let benchmarkCache: { results: BenchmarkResult[]; computedAt: number } | null = null;
+
+  function runReferenceBenchmark(): BenchmarkResult[] {
+    const results: BenchmarkResult[] = [];
+
+    for (const ref of REFERENCE_COMPOUNDS) {
+      try {
+        const features = extractFeatures(ref.formula);
+        const xgb = gbPredictWithUncertainty(features, ref.formula);
+        const gnn = gnnPredictWithUncertainty(ref.formula);
+
+        const xgboostTc = xgb.tcPredicted ?? 0;
+        const gnnTc = gnn.meanTc ?? 0;
+        const ensembleTc = (xgboostTc * 0.4 + gnnTc * 0.6);
+
+        const tcError = Math.abs(ensembleTc - ref.textbook.tc);
+        const tcErrorPercent = ref.textbook.tc > 0 ? (tcError / ref.textbook.tc) * 100 : 0;
+
+        let lambdaError: number | null = null;
+        if (ref.textbook.lambda > 0 && gnn.meanLambda > 0) {
+          lambdaError = Math.abs(gnn.meanLambda - ref.textbook.lambda);
+        }
+
+        let rating = "poor";
+        if (tcErrorPercent < 10) rating = "excellent";
+        else if (tcErrorPercent < 25) rating = "good";
+        else if (tcErrorPercent < 50) rating = "fair";
+
+        results.push({
+          formula: ref.formula,
+          name: ref.name,
+          family: ref.family,
+          textbook: ref.textbook,
+          predicted: {
+            xgboostTc: Math.round(xgboostTc * 10) / 10,
+            xgboostScore: Math.round((xgb.score ?? 0) * 1000) / 1000,
+            gnnTc: Math.round(gnnTc * 10) / 10,
+            gnnUncertainty: Math.round((gnn.tcUncertainty ?? 0) * 10) / 10,
+            gnnLambda: Math.round((gnn.meanLambda ?? 0) * 1000) / 1000,
+            ensembleTc: Math.round(ensembleTc * 10) / 10,
+            reasoning: (xgb.reasoning ?? []).slice(0, 5),
+          },
+          accuracy: {
+            tcErrorK: Math.round(tcError * 10) / 10,
+            tcErrorPercent: Math.round(tcErrorPercent * 10) / 10,
+            lambdaError: lambdaError !== null ? Math.round(lambdaError * 1000) / 1000 : null,
+            rating,
+          },
+          computedAt: Date.now(),
+        });
+      } catch (e: any) {
+        results.push({
+          formula: ref.formula,
+          name: ref.name,
+          family: ref.family,
+          textbook: ref.textbook,
+          predicted: {
+            xgboostTc: 0, xgboostScore: 0,
+            gnnTc: 0, gnnUncertainty: 0, gnnLambda: 0,
+            ensembleTc: 0, reasoning: [`Error: ${e.message}`],
+          },
+          accuracy: { tcErrorK: ref.textbook.tc, tcErrorPercent: 100, lambdaError: null, rating: "error" },
+          computedAt: Date.now(),
+        });
+      }
+    }
+
+    benchmarkCache = { results, computedAt: Date.now() };
+    return results;
+  }
+
+  setTimeout(() => {
+    try {
+      console.log("[Benchmark] Running reference compound predictions on startup...");
+      runReferenceBenchmark();
+      console.log("[Benchmark] Reference benchmark complete.");
+    } catch (e: any) {
+      console.error("[Benchmark] Startup benchmark failed:", e.message);
+    }
+  }, 5000);
+
+  app.get("/api/reference-benchmark", generalLimiter, async (_req, res) => {
+    try {
+      if (benchmarkCache && Date.now() - benchmarkCache.computedAt < 300000) {
+        res.json(benchmarkCache);
+        return;
+      }
+      const results = runReferenceBenchmark();
+      res.json({ results, computedAt: Date.now() });
+    } catch (e: any) {
+      res.status(500).json({ error: "Benchmark failed", detail: e.message });
+    }
+  });
+
+  app.post("/api/reference-benchmark/refresh", engineLimiter, async (_req, res) => {
+    try {
+      const results = runReferenceBenchmark();
+      res.json({ results, computedAt: Date.now() });
+    } catch (e: any) {
+      res.status(500).json({ error: "Benchmark refresh failed", detail: e.message });
+    }
+  });
+
+  app.get("/api/feature-recalculation/run", generalLimiter, async (_req, res) => {
+    try {
+      const count = recalculateAllDerivedFeatures();
+      res.json({ recalculated: count, timestamp: Date.now() });
+    } catch (e: any) {
+      res.status(500).json({ error: "Feature recalculation failed", detail: e.message });
+    }
+  });
+
+  app.get("/api/feature-recalculation/derived/:formula", generalLimiter, async (req, res) => {
+    try {
+      const derived = getDerivedFeatures(req.params.formula);
+      if (!derived) {
+        res.json({ formula: req.params.formula, derived: null, message: "No physics results available for this formula" });
+        return;
+      }
+      res.json({ formula: req.params.formula, derived });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get derived features", detail: e.message });
+    }
+  });
+
+  app.get("/api/training-dataset/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getUnifiedDatasetStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get training dataset stats", detail: e.message });
+    }
+  });
+
+  app.get("/api/training-dataset/records", generalLimiter, async (req, res) => {
+    try {
+      const minTc = req.query.minTc ? parseFloat(req.query.minTc as string) : undefined;
+      const maxTc = req.query.maxTc ? parseFloat(req.query.maxTc as string) : undefined;
+      const source = req.query.source as string | undefined;
+      const tier = req.query.tier as string | undefined;
+      const requirePhysics = req.query.requirePhysics === "true";
+      const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+      const offset = parseInt(req.query.offset as string) || 0;
+      const records = getTrainingSlice({ minTc, maxTc, source, tier, requirePhysics });
+      res.json({ total: records.length, offset, limit, records: records.slice(offset, offset + limit) });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get training records", detail: e.message });
+    }
+  });
+
+  app.get("/api/training-dataset/llm-report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getUnifiedDatasetForLLM();
+      res.json({ report });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate LLM report", detail: e.message });
+    }
+  });
+
+  app.get("/api/training-dataset/snapshots", generalLimiter, async (_req, res) => {
+    try {
+      res.json({ snapshots: getSnapshotHistory() });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get snapshots", detail: e.message });
+    }
+  });
+
+  app.get("/api/cycle-diagnostics/current", generalLimiter, async (_req, res) => {
+    try {
+      const report = generateCycleDiagnostics();
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate cycle diagnostics", detail: e.message });
+    }
+  });
+
+  app.get("/api/cycle-diagnostics/history", generalLimiter, async (_req, res) => {
+    try {
+      res.json({ reports: getReportHistory() });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get diagnostics history", detail: e.message });
+    }
+  });
+
+  app.get("/api/cycle-diagnostics/latest", generalLimiter, async (_req, res) => {
+    try {
+      const latest = getLatestReport();
+      if (!latest) {
+        const fresh = generateCycleDiagnostics();
+        res.json(fresh);
+        return;
+      }
+      res.json(latest);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get latest diagnostics", detail: e.message });
+    }
+  });
+
+  app.get("/api/cycle-diagnostics/text", generalLimiter, async (_req, res) => {
+    try {
+      const report = generateCycleDiagnostics();
+      const text = formatDiagnosticReportText(report);
+      res.json({ text });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to format diagnostics text", detail: e.message });
+    }
+  });
+
+  app.get("/api/cycle-diagnostics/llm-report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getDiagnosticsForLLM();
+      res.json({ report });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate LLM diagnostics", detail: e.message });
     }
   });
 
