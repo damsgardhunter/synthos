@@ -1070,6 +1070,57 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/symmetry-indicators/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const crystalSystem = typeof req.query.crystalSystem === "string" ? req.query.crystalSystem : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const result = computeTopologicalInvariants(formula, electronic, spaceGroup, crystalSystem);
+      trackInvariantResult(formula, result);
+      res.json(result.symmetryIndicator);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute symmetry indicators" });
+    }
+  });
+
+  app.get("/api/ml-topology/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const result = computeTopologicalInvariants(formula, electronic, spaceGroup);
+      trackInvariantResult(formula, result);
+      res.json(result.mlTopology);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to predict topology via ML" });
+    }
+  });
+
+  app.get("/api/tsc-score/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const crystalSystem = typeof req.query.crystalSystem === "string" ? req.query.crystalSystem : undefined;
+      const tcParam = typeof req.query.tc === "string" ? parseFloat(req.query.tc) : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const result = computeTopologicalInvariants(formula, electronic, spaceGroup, crystalSystem, tcParam);
+      trackInvariantResult(formula, result);
+      res.json(result.tscScore);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute TSC score" });
+    }
+  });
+
   app.get("/api/fermi-surface/:formula", async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);

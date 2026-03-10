@@ -1706,6 +1706,27 @@ async function runPhase10_Physics() {
               chern: { number: invariants.chernNumber.chernNumber, isQuantized: invariants.chernNumber.isQuantized },
               weylNodes: { count: invariants.weylNodes.nodeCount, isType2: invariants.weylNodes.isType2 },
               surfaceStates: { count: invariants.surfaceStates.surfaceStateCount, diracCones: invariants.surfaceStates.diracConeCount },
+              symmetryIndicator: {
+                spaceGroup: invariants.symmetryIndicator.spaceGroupName,
+                indicator: invariants.symmetryIndicator.symmetryIndicator,
+                topologyFromSymmetry: invariants.symmetryIndicator.topologyFromSymmetry,
+                isObstructedAtomicLimit: invariants.symmetryIndicator.isObstructedAtomicLimit,
+                fragileTopo: invariants.symmetryIndicator.fragileTopo,
+                confidence: invariants.symmetryIndicator.confidence,
+              },
+              mlTopology: {
+                topologyProbability: invariants.mlTopology.topologyProbability,
+                tiProb: invariants.mlTopology.topologicalInsulatorProb,
+                weylProb: invariants.mlTopology.weylSemimetalProb,
+                diracProb: invariants.mlTopology.diracSemimetalProb,
+                confidence: invariants.mlTopology.confidence,
+              },
+              tscScore: {
+                score: invariants.tscScore.tscScore,
+                isTSCCandidate: invariants.tscScore.isTSCCandidate,
+                tscClass: invariants.tscScore.tscClass,
+                interfacePotential: invariants.tscScore.interfacePotential,
+              },
               phase: invariants.topologicalPhase,
               compositeScore: invariants.compositeTopologicalScore,
             };
@@ -1713,7 +1734,7 @@ async function runPhase10_Physics() {
               emit("log", {
                 phase: "phase-10",
                 event: "Topological invariants computed",
-                detail: `${candidate.formula}: phase=${invariants.topologicalPhase}, Z2=(${invariants.z2Invariant.z2Index.join(";")}), C=${invariants.chernNumber.chernNumber}, Weyl=${invariants.weylNodes.nodeCount}, surfaces=${invariants.surfaceStates.surfaceStateCount}, inversion=${invariants.bandInversion.inversionType}`,
+                detail: `${candidate.formula}: phase=${invariants.topologicalPhase}, Z2=(${invariants.z2Invariant.z2Index.join(";")}), C=${invariants.chernNumber.chernNumber}, Weyl=${invariants.weylNodes.nodeCount}, surfaces=${invariants.surfaceStates.surfaceStateCount}, inversion=${invariants.bandInversion.inversionType}, SI=${invariants.symmetryIndicator.topologyFromSymmetry}, MLtopo=${(invariants.mlTopology.topologyProbability * 100).toFixed(0)}%, TSC=${invariants.tscScore.isTSCCandidate ? invariants.tscScore.tscClass : "no"}(${(invariants.tscScore.tscScore * 100).toFixed(0)}%)`,
                 dataSource: "Topological Invariants Engine",
               });
             }

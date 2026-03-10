@@ -16,7 +16,7 @@ import {
   FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
   Cpu, Clock, Loader2, Network, Code2, GitBranch, ArrowLeftRight,
   BookOpen, Sigma, FlaskRound, Search, TrendingUp, ShieldCheck, Lightbulb,
-  GitMerge, ArrowRight, Play, Microscope, Settings2,
+  GitMerge, ArrowRight, Play, Microscope, Settings2, Fingerprint, BrainCircuit, Shield,
 } from "lucide-react";
 import DOSVisualizer from "@/components/dos-visualizer";
 
@@ -4278,6 +4278,223 @@ function TopologicalInvariantsPanel() {
                   )}
                 </CardContent>
               </Card>
+
+              {inv.symmetryIndicator && (
+                <Card data-testid="symmetry-indicator-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Fingerprint className="h-4 w-4 text-indigo-400" />
+                      Symmetry Indicator Method (EBR)
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Space Group</span>
+                      <span data-testid="si-space-group">{inv.symmetryIndicator.spaceGroupName} (#{inv.symmetryIndicator.spaceGroupNumber})</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Symmetry Indicator</span>
+                      <code className="text-indigo-400 font-bold" data-testid="si-indicator">
+                        [{inv.symmetryIndicator.symmetryIndicator?.join(", ")}]
+                      </code>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Topology from Symmetry</span>
+                      <Badge variant={inv.symmetryIndicator.topologyFromSymmetry !== "trivial" ? "default" : "secondary"} data-testid="si-topology">
+                        {inv.symmetryIndicator.topologyFromSymmetry}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Obstructed Atomic Limit</span>
+                      <Badge variant={inv.symmetryIndicator.isObstructedAtomicLimit ? "default" : "secondary"} data-testid="si-oal">
+                        {inv.symmetryIndicator.isObstructedAtomicLimit ? "Yes" : "No"}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Fragile Topology</span>
+                      <Badge variant={inv.symmetryIndicator.fragileTopo ? "destructive" : "secondary"} data-testid="si-fragile">
+                        {inv.symmetryIndicator.fragileTopo ? "Detected" : "No"}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Confidence</span>
+                      <span data-testid="si-confidence">{(inv.symmetryIndicator.confidence * 100).toFixed(1)}%</span>
+                    </div>
+                    {inv.symmetryIndicator.irrepAtTRIM?.length > 0 && (
+                      <div className="mt-2">
+                        <div className="text-xs text-muted-foreground mb-1">Irreps at TRIM Points</div>
+                        <div className="grid grid-cols-4 gap-1">
+                          {inv.symmetryIndicator.irrepAtTRIM.map((t: any, i: number) => (
+                            <div key={i} className="text-center p-1 bg-muted/30 rounded text-xs" data-testid={`trim-irrep-${t.kLabel}`}>
+                              <div className="font-medium">{t.kLabel}</div>
+                              <div className={t.parity < 0 ? "text-indigo-400" : "text-muted-foreground"}>
+                                {t.irreps?.join(", ")}
+                              </div>
+                              <div className="text-[10px]">parity: {t.parity > 0 ? "+1" : "-1"}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {inv.symmetryIndicator.compatibilityRelations?.length > 0 && (
+                      <div className="mt-2">
+                        <div className="text-xs text-muted-foreground mb-1">Compatibility Relations</div>
+                        <div className="space-y-1">
+                          {inv.symmetryIndicator.compatibilityRelations.map((c: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between text-xs p-1 bg-muted/20 rounded" data-testid={`compat-${c.kPoint}`}>
+                              <span>{c.kPoint}</span>
+                              <span>{c.bandsAtK} bands</span>
+                              <Badge variant={c.satisfied ? "default" : "destructive"} className="text-[10px]">
+                                {c.satisfied ? "Satisfied" : "Violated"}
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground mt-1">Method: {inv.symmetryIndicator.method}</div>
+                    {inv.symmetryIndicator.evidence?.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {inv.symmetryIndicator.evidence.map((e: string, i: number) => (
+                          <div key={i} className="text-xs text-muted-foreground" data-testid={`si-evidence-${i}`}>{e}</div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {inv.mlTopology && (
+                <Card data-testid="ml-topology-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <BrainCircuit className="h-4 w-4 text-emerald-400" />
+                      ML Topology Prediction
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex items-center justify-between p-2 bg-muted/20 rounded-lg">
+                      <span className="text-sm font-medium">Nontrivial Topology Probability</span>
+                      <span className="text-lg font-bold text-emerald-400" data-testid="ml-topo-prob">
+                        {(inv.mlTopology.topologyProbability * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="ml-ti-prob">
+                        <div className="text-sm font-bold text-purple-400">{(inv.mlTopology.topologicalInsulatorProb * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">TI</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="ml-weyl-prob">
+                        <div className="text-sm font-bold text-cyan-400">{(inv.mlTopology.weylSemimetalProb * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Weyl SM</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="ml-dirac-prob">
+                        <div className="text-sm font-bold text-yellow-400">{(inv.mlTopology.diracSemimetalProb * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Dirac SM</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="ml-flat-prob">
+                        <div className="text-sm font-bold text-orange-400">{(inv.mlTopology.flatBandCorrelatedProb * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Flat Band</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="ml-trivial-prob">
+                        <div className="text-sm font-bold text-gray-400">{(inv.mlTopology.trivialProb * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Trivial</div>
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Confidence</span>
+                      <span data-testid="ml-topo-confidence">{(inv.mlTopology.confidence * 100).toFixed(1)}%</span>
+                    </div>
+                    {inv.mlTopology.features && (
+                      <div className="mt-2">
+                        <div className="text-xs text-muted-foreground mb-1">Input Features</div>
+                        <div className="grid grid-cols-3 gap-1 text-xs">
+                          <div className="p-1 bg-muted/20 rounded" data-testid="ml-feat-avgz">avg Z: {inv.mlTopology.features.avgAtomicNumber}</div>
+                          <div className="p-1 bg-muted/20 rounded" data-testid="ml-feat-maxz">max Z: {inv.mlTopology.features.maxAtomicNumber}</div>
+                          <div className="p-1 bg-muted/20 rounded" data-testid="ml-feat-soc">SOC: {inv.mlTopology.features.socStrength}</div>
+                          <div className="p-1 bg-muted/20 rounded" data-testid="ml-feat-gap">gap: {inv.mlTopology.features.bandGapEstimate} eV</div>
+                          <div className="p-1 bg-muted/20 rounded" data-testid="ml-feat-dfrac">d-frac: {inv.mlTopology.features.orbitalDFraction}</div>
+                          <div className="p-1 bg-muted/20 rounded" data-testid="ml-feat-pfrac">p-frac: {inv.mlTopology.features.orbitalPFraction}</div>
+                        </div>
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground">Method: {inv.mlTopology.method}</div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {inv.tscScore && (
+                <Card data-testid="tsc-score-card" className={inv.tscScore.isTSCCandidate ? "border-amber-500/50" : ""}>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Shield className="h-4 w-4 text-amber-400" />
+                      TSC Combined Score (Tc + Topology + Interface)
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex items-center justify-between p-2 bg-muted/20 rounded-lg">
+                      <div>
+                        <div className="text-sm font-medium">TSC Score</div>
+                        <div className="text-xs text-muted-foreground">{inv.tscScore.tscClass}</div>
+                      </div>
+                      <span className={`text-2xl font-bold ${inv.tscScore.isTSCCandidate ? "text-amber-400" : "text-muted-foreground"}`} data-testid="tsc-total-score">
+                        {(inv.tscScore.tscScore * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    {inv.tscScore.isTSCCandidate && (
+                      <div className="p-2 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs" data-testid="tsc-candidate-alert">
+                        This material shows potential as a topological superconductor candidate ({inv.tscScore.tscClass}).
+                        Predicted Tc ~ {inv.tscScore.predictedTc}K. Further experimental verification required.
+                      </div>
+                    )}
+                    <div className="grid grid-cols-5 gap-2">
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="tsc-tc-contrib">
+                        <div className="text-sm font-bold">{(inv.tscScore.tcContribution * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Tc</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="tsc-topo-contrib">
+                        <div className="text-sm font-bold text-purple-400">{(inv.tscScore.topologyContribution * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Topology</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="tsc-interface-contrib">
+                        <div className="text-sm font-bold text-blue-400">{(inv.tscScore.interfaceContribution * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Interface</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="tsc-surface-contrib">
+                        <div className="text-sm font-bold text-green-400">{(inv.tscScore.surfaceStateContribution * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Surface</div>
+                      </div>
+                      <div className="text-center p-2 bg-muted/30 rounded" data-testid="tsc-majorana-contrib">
+                        <div className="text-sm font-bold text-pink-400">{(inv.tscScore.majoranaContribution * 100).toFixed(1)}%</div>
+                        <div className="text-[10px] text-muted-foreground">Majorana</div>
+                      </div>
+                    </div>
+                    {inv.tscScore.signals?.length > 0 && (
+                      <div className="mt-2">
+                        <div className="text-xs text-muted-foreground mb-1">Band-Topology Signal Detection</div>
+                        <div className="space-y-1">
+                          {inv.tscScore.signals.map((s: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between text-xs p-1 bg-muted/20 rounded" data-testid={`signal-${s.signal.replace(/\s+/g, '-')}`}>
+                              <span className="font-medium">{s.signal}</span>
+                              <span className="text-muted-foreground">{s.meaning}</span>
+                              <Badge variant={s.detected ? "default" : "secondary"} className="text-[10px]">
+                                {s.detected ? `${(s.strength * 100).toFixed(0)}%` : "Not detected"}
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {inv.tscScore.evidence?.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {inv.tscScore.evidence.map((e: string, i: number) => (
+                          <div key={i} className="text-xs text-muted-foreground" data-testid={`tsc-evidence-${i}`}>{e}</div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
 
               {inv.evidence?.length > 0 && (
                 <Card data-testid="topo-evidence-card">

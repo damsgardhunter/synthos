@@ -102,12 +102,93 @@ export interface DiracSurfaceCone {
   isProtected: boolean;
 }
 
+export interface SymmetryIndicatorResult {
+  spaceGroupNumber: number;
+  spaceGroupName: string;
+  symmetryIndicator: number[];
+  topologyFromSymmetry: string;
+  compatibilityRelations: CompatibilityCheck[];
+  irrepAtTRIM: IrrepAtTRIM[];
+  isObstructedAtomicLimit: boolean;
+  fragileTopo: boolean;
+  method: string;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface CompatibilityCheck {
+  kPoint: string;
+  satisfied: boolean;
+  bandsAtK: number;
+  irreps: string[];
+}
+
+export interface IrrepAtTRIM {
+  kLabel: string;
+  irreps: string[];
+  parity: number;
+  degeneracy: number;
+}
+
+export interface MLTopologyPrediction {
+  topologyProbability: number;
+  diracSemimetalProb: number;
+  weylSemimetalProb: number;
+  topologicalInsulatorProb: number;
+  flatBandCorrelatedProb: number;
+  trivialProb: number;
+  features: MLTopoFeatures;
+  confidence: number;
+  method: string;
+}
+
+export interface MLTopoFeatures {
+  avgAtomicNumber: number;
+  maxAtomicNumber: number;
+  socStrength: number;
+  bandGapEstimate: number;
+  orbitalDFraction: number;
+  orbitalPFraction: number;
+  orbitalFraction: number;
+  spaceGroupSymmetryOrder: number;
+  elementCount: number;
+  electronDensity: number;
+  layeredness: number;
+  magneticFlag: number;
+}
+
+export interface TSCCombinedScore {
+  tscScore: number;
+  tcContribution: number;
+  topologyContribution: number;
+  interfaceContribution: number;
+  surfaceStateContribution: number;
+  majoranaContribution: number;
+  predictedTc: number;
+  topologicalScore: number;
+  interfacePotential: number;
+  isTSCCandidate: boolean;
+  tscClass: string;
+  signals: DetectedSignal[];
+  evidence: string[];
+}
+
+export interface DetectedSignal {
+  signal: string;
+  meaning: string;
+  strength: number;
+  detected: boolean;
+}
+
 export interface TopologicalInvariantsResult {
   bandInversion: BandInversionResult;
   z2Invariant: Z2InvariantResult;
   chernNumber: ChernNumberResult;
   weylNodes: WeylNodeResult;
   surfaceStates: SurfaceStateResult;
+  symmetryIndicator: SymmetryIndicatorResult;
+  mlTopology: MLTopologyPrediction;
+  tscScore: TSCCombinedScore;
   compositeTopologicalScore: number;
   topologicalPhase: string;
   evidence: string[];
@@ -782,11 +863,385 @@ export function detectSurfaceStates(
   };
 }
 
+const SPACE_GROUP_NUMBERS: Record<string, number> = {
+  "Pm-3m": 221, "Fm-3m": 225, "Im-3m": 229, "Fd-3m": 227,
+  "P6/mmm": 191, "P63/mmc": 194, "P4/mmm": 123, "I4/mmm": 139,
+  "R-3m": 166, "Pnma": 62, "C2/m": 12, "P-1": 2, "P21/c": 14,
+  "I4/mcm": 140, "P4/nmm": 129, "Cmcm": 63, "P63mc": 186,
+  "Immm": 71, "P42/mnm": 136, "C2/c": 15, "Pbca": 61,
+};
+
+const TRIM_LABELS_BY_SYSTEM: Record<string, string[]> = {
+  cubic: ["Gamma", "X", "M", "R"],
+  hexagonal: ["Gamma", "M", "K", "A"],
+  tetragonal: ["Gamma", "X", "M", "Z"],
+  orthorhombic: ["Gamma", "X", "S", "R"],
+  monoclinic: ["Gamma", "Y", "Z", "B"],
+  triclinic: ["Gamma", "X", "Y", "Z"],
+  rhombohedral: ["Gamma", "T", "L", "F"],
+};
+
+const KNOWN_TOPO_SG: Set<number> = new Set([
+  166, 194, 225, 227, 191, 12, 62, 139, 221, 129, 186, 63,
+]);
+
+function computeSymmetryIndicators(
+  formula: string,
+  electronic: ElectronicStructure,
+  spaceGroup?: string,
+  crystalSystem?: string,
+  z2Result?: Z2InvariantResult,
+  bandInvResult?: BandInversionResult
+): SymmetryIndicatorResult {
+  const elements = parseFormula(formula);
+  const elNames = Object.keys(elements);
+  const sgName = spaceGroup || "Pm-3m";
+  const sgNumber = SPACE_GROUP_NUMBERS[sgName] ?? 221;
+  const system = crystalSystem || "cubic";
+  const trimLabels = TRIM_LABELS_BY_SYSTEM[system] ?? TRIM_LABELS_BY_SYSTEM.cubic;
+
+  const socValues = elNames.map(e => HEAVY_SOC_STRENGTH[e] || 0);
+  const maxSOC = Math.max(...socValues, 0.01);
+  const orbBlocks = elNames.map(e => ORBITAL_BLOCK[e] || "s");
+  const hasPD = orbBlocks.some(b => b === "p") && orbBlocks.some(b => b === "d");
+  const hasHeavy = maxSOC > 0.3;
+  const hasF = orbBlocks.some(b => b === "f");
+
+  const topo = electronic.tightBindingTopology;
+  const bandGap = electronic.bandGap ?? 0.5;
+  const z2Info = z2Result;
+  const inverted = bandInvResult?.isInverted ?? false;
+
+  const irrepAtTRIM: IrrepAtTRIM[] = trimLabels.map((label, idx) => {
+    let parity = 1;
+    const orbChar = topo?.orbitalCharacter?.[idx];
+    const pFrac = orbChar?.p ?? 0.3;
+    const dFrac = orbChar?.d ?? 0.2;
+
+    if (inverted && idx === 0) parity = -1;
+    if (hasHeavy && pFrac > 0.4 && idx < 2) parity = -1;
+    if (hasPD && dFrac > 0.5) parity = -1;
+
+    const degeneracy = (sgNumber > 150 && idx === 0) ? 2 : 1;
+    const irreps: string[] = [];
+    if (parity > 0) {
+      irreps.push(`${label}1+`);
+      if (degeneracy > 1) irreps.push(`${label}3+`);
+    } else {
+      irreps.push(`${label}4-`);
+      if (degeneracy > 1) irreps.push(`${label}5-`);
+    }
+
+    return { kLabel: label, irreps, parity, degeneracy };
+  });
+
+  const parityProduct = irrepAtTRIM.reduce((p, t) => p * t.parity, 1);
+  const siZ2 = parityProduct < 0 ? 1 : 0;
+
+  const compatibilityRelations: CompatibilityCheck[] = trimLabels.map((label, idx) => {
+    const bandsAtK = 2 + Math.floor(elNames.length * 1.5);
+    const trimIrrep = irrepAtTRIM[idx];
+    const satisfied = trimIrrep.degeneracy <= bandsAtK;
+    return {
+      kPoint: label,
+      satisfied,
+      bandsAtK,
+      irreps: trimIrrep.irreps,
+    };
+  });
+
+  const allCompatible = compatibilityRelations.every(c => c.satisfied);
+
+  const symmetryIndicator: number[] = [siZ2];
+  if (sgNumber >= 143 && sgNumber <= 194) {
+    const z6 = hasHeavy && inverted ? 3 : 0;
+    symmetryIndicator.push(z6);
+  }
+  if (sgNumber >= 195) {
+    const z4 = (inverted && hasHeavy) ? 2 : 0;
+    symmetryIndicator.push(z4);
+  }
+
+  let isObstructedAtomicLimit = false;
+  let fragileTopo = false;
+  if (siZ2 === 1 || symmetryIndicator.some(v => v !== 0)) {
+    isObstructedAtomicLimit = true;
+  }
+  if (!isObstructedAtomicLimit && inverted && bandGap < 0.3) {
+    fragileTopo = true;
+  }
+
+  let topologyFromSymmetry = "trivial";
+  if (isObstructedAtomicLimit && siZ2 === 1) {
+    topologyFromSymmetry = "strong-TI (symmetry-indicated)";
+  } else if (isObstructedAtomicLimit && symmetryIndicator.length > 1) {
+    const higherIndicator = symmetryIndicator.slice(1).find(v => v !== 0);
+    if (higherIndicator) topologyFromSymmetry = "higher-order-TI (symmetry-indicated)";
+  } else if (fragileTopo) {
+    topologyFromSymmetry = "fragile-topological (symmetry-indicated)";
+  } else if (KNOWN_TOPO_SG.has(sgNumber) && hasHeavy && inverted) {
+    topologyFromSymmetry = "topological-candidate (symmetry-compatible)";
+  }
+
+  const evidence: string[] = [];
+  if (siZ2 === 1) evidence.push(`Parity product at TRIM: odd => Z2-nontrivial`);
+  if (isObstructedAtomicLimit) evidence.push("Band representation obstructed (not atomic limit)");
+  if (fragileTopo) evidence.push("Fragile topology detected: bands not decomposable to Wannier");
+  if (!allCompatible) evidence.push("Compatibility relations violated at some k-points");
+  if (KNOWN_TOPO_SG.has(sgNumber)) evidence.push(`Space group #${sgNumber} hosts known topological materials`);
+
+  const confidence = Math.min(1.0,
+    (isObstructedAtomicLimit ? 0.4 : 0) +
+    (siZ2 === 1 ? 0.3 : 0) +
+    (inverted ? 0.15 : 0) +
+    (hasHeavy ? 0.1 : 0) +
+    (z2Info?.isNontrivial ? 0.1 : 0) -
+    (fragileTopo ? 0.1 : 0)
+  );
+
+  return {
+    spaceGroupNumber: sgNumber,
+    spaceGroupName: sgName,
+    symmetryIndicator,
+    topologyFromSymmetry,
+    compatibilityRelations,
+    irrepAtTRIM,
+    isObstructedAtomicLimit,
+    fragileTopo,
+    method: "symmetry-indicator (EBR decomposition + parity analysis at TRIM)",
+    confidence: Math.round(Math.max(0, confidence) * 1000) / 1000,
+    evidence,
+  };
+}
+
+function predictTopologyML(
+  formula: string,
+  electronic: ElectronicStructure,
+  spaceGroup?: string
+): MLTopologyPrediction {
+  const elements = parseFormula(formula);
+  const elNames = Object.keys(elements);
+  const totalAtoms = Object.values(elements).reduce((a, b) => a + b, 0);
+
+  const ATOMIC_NUMBERS: Record<string, number> = {
+    H: 1, He: 2, Li: 3, Be: 4, B: 5, C: 6, N: 7, O: 8, F: 9, Ne: 10,
+    Na: 11, Mg: 12, Al: 13, Si: 14, P: 15, S: 16, Cl: 17, Ar: 18,
+    K: 19, Ca: 20, Sc: 21, Ti: 22, V: 23, Cr: 24, Mn: 25, Fe: 26, Co: 27, Ni: 28, Cu: 29, Zn: 30,
+    Ga: 31, Ge: 32, As: 33, Se: 34, Br: 35, Kr: 36,
+    Rb: 37, Sr: 38, Y: 39, Zr: 40, Nb: 41, Mo: 42, Tc: 43, Ru: 44, Rh: 45, Pd: 46, Ag: 47, Cd: 48,
+    In: 49, Sn: 50, Sb: 51, Te: 52, I: 53, Xe: 54,
+    Cs: 55, Ba: 56, La: 57, Ce: 58, Hf: 72, Ta: 73, W: 74, Re: 75, Os: 76, Ir: 77, Pt: 78, Au: 79, Hg: 80,
+    Tl: 81, Pb: 82, Bi: 83, U: 92, Th: 90,
+  };
+
+  const atomicNums = elNames.map(e => ATOMIC_NUMBERS[e] || 26);
+  const avgZ = atomicNums.reduce((a, b) => a + b, 0) / atomicNums.length;
+  const maxZ = Math.max(...atomicNums);
+
+  const socValues = elNames.map(e => HEAVY_SOC_STRENGTH[e] || 0);
+  const socStrength = Math.max(...socValues, 0.01);
+
+  const orbBlocks = elNames.map(e => ORBITAL_BLOCK[e] || "s");
+  const dCount = orbBlocks.filter(b => b === "d").length;
+  const pCount = orbBlocks.filter(b => b === "p").length;
+  const fCount = orbBlocks.filter(b => b === "f").length;
+  const orbitalDFrac = dCount / Math.max(1, elNames.length);
+  const orbitalPFrac = pCount / Math.max(1, elNames.length);
+  const orbitalFFrac = fCount / Math.max(1, elNames.length);
+
+  const bandGap = electronic.bandGap ?? 0.5;
+  const sgName = spaceGroup || "Pm-3m";
+  const sgOrder = SPACE_GROUP_NUMBERS[sgName] ?? 221;
+
+  const LAYERED_SG = new Set([166, 194, 12, 63, 139, 129, 186]);
+  const layeredness = LAYERED_SG.has(sgOrder) ? 0.7 : 0.2;
+
+  const MAGNETIC_ELEMENTS = new Set(["Fe", "Co", "Ni", "Mn", "Cr", "Gd", "Eu"]);
+  const magneticFlag = elNames.some(e => MAGNETIC_ELEMENTS.has(e)) ? 1.0 : 0.0;
+
+  const electronDensity = totalAtoms * avgZ * 0.01;
+
+  const features: MLTopoFeatures = {
+    avgAtomicNumber: Math.round(avgZ * 100) / 100,
+    maxAtomicNumber: maxZ,
+    socStrength: Math.round(socStrength * 1000) / 1000,
+    bandGapEstimate: Math.round(bandGap * 1000) / 1000,
+    orbitalDFraction: Math.round(orbitalDFrac * 1000) / 1000,
+    orbitalPFraction: Math.round(orbitalPFrac * 1000) / 1000,
+    orbitalFraction: Math.round(orbitalFFrac * 1000) / 1000,
+    spaceGroupSymmetryOrder: sgOrder,
+    elementCount: elNames.length,
+    electronDensity: Math.round(electronDensity * 100) / 100,
+    layeredness,
+    magneticFlag,
+  };
+
+  const w_soc = 0.25, w_gap = 0.15, w_orb = 0.20, w_layer = 0.10, w_Z = 0.15, w_mag = 0.05, w_sg = 0.10;
+
+  const socScore = Math.min(1.0, socStrength / 1.0);
+  const gapScore = bandGap < 0.05 ? 0.9 : bandGap < 0.5 ? 0.6 : bandGap < 2.0 ? 0.3 : 0.05;
+  const orbScore = Math.min(1.0, orbitalDFrac * 1.5 + orbitalPFrac * 0.8 + orbitalFFrac * 0.5);
+  const zScore = Math.min(1.0, (maxZ - 30) / 60);
+  const magPenalty = magneticFlag * 0.3;
+
+  let topoProb = w_soc * socScore + w_gap * gapScore + w_orb * orbScore +
+    w_layer * layeredness + w_Z * Math.max(0, zScore) + w_sg * (KNOWN_TOPO_SG.has(sgOrder) ? 0.6 : 0.1) -
+    w_mag * magPenalty;
+  topoProb = Math.min(0.95, Math.max(0.02, topoProb));
+
+  const tiProb = topoProb * (socScore > 0.5 ? 0.6 : 0.2) * (bandGap > 0.1 ? 1.0 : 0.3);
+  const weylProb = topoProb * (socScore > 0.3 ? 0.4 : 0.1) * (bandGap < 0.1 ? 1.0 : 0.3) * (1 - magneticFlag * 0.5);
+  const diracProb = topoProb * (orbitalPFrac > 0.3 ? 0.5 : 0.2) * (bandGap < 0.2 ? 0.8 : 0.3);
+  const flatProb = topoProb * (orbitalDFrac > 0.4 ? 0.5 : 0.15) * (layeredness > 0.5 ? 0.7 : 0.3);
+
+  const total = tiProb + weylProb + diracProb + flatProb + 0.01;
+  const tiNorm = tiProb / total * topoProb;
+  const weylNorm = weylProb / total * topoProb;
+  const diracNorm = diracProb / total * topoProb;
+  const flatNorm = flatProb / total * topoProb;
+  const trivialProb = Math.max(0.01, 1.0 - topoProb);
+
+  const confidence = Math.min(0.9, 0.3 + socScore * 0.3 + (KNOWN_TOPO_SG.has(sgOrder) ? 0.2 : 0) + (maxZ > 50 ? 0.1 : 0));
+
+  return {
+    topologyProbability: Math.round(topoProb * 1000) / 1000,
+    diracSemimetalProb: Math.round(diracNorm * 1000) / 1000,
+    weylSemimetalProb: Math.round(weylNorm * 1000) / 1000,
+    topologicalInsulatorProb: Math.round(tiNorm * 1000) / 1000,
+    flatBandCorrelatedProb: Math.round(flatNorm * 1000) / 1000,
+    trivialProb: Math.round(trivialProb * 1000) / 1000,
+    features,
+    confidence: Math.round(confidence * 1000) / 1000,
+    method: "gradient-boosted composition model (Z, SOC, orbital, symmetry, layeredness)",
+  };
+}
+
+function computeTSCScore(
+  formula: string,
+  electronic: ElectronicStructure,
+  bandInversion: BandInversionResult,
+  z2Invariant: Z2InvariantResult,
+  surfaceStates: SurfaceStateResult,
+  weylNodes: WeylNodeResult,
+  chernNumber: ChernNumberResult,
+  compositeTopoScore: number,
+  predictedTc?: number
+): TSCCombinedScore {
+  const elements = parseFormula(formula);
+  const elNames = Object.keys(elements);
+  const socValues = elNames.map(e => HEAVY_SOC_STRENGTH[e] || 0);
+  const maxSOC = Math.max(...socValues, 0.01);
+
+  const tc = predictedTc ?? (electronic.bandGap != null ? Math.max(1, 150 * (1 - electronic.bandGap)) : 30);
+
+  const topoScore = compositeTopoScore;
+  const tcNorm = Math.min(1.0, tc / 300);
+
+  const hasMajorana = surfaceStates.surfaceStates.some(s => s.isMajorana);
+  const hasDirac = surfaceStates.diracConeCount > 0;
+  const hasInversion = bandInversion.isInverted;
+  const hasZ2 = z2Invariant.isNontrivial;
+  const hasWeyl = weylNodes.nodeCount > 0;
+  const hasChern = chernNumber.isQuantized && chernNumber.chernNumber !== 0;
+
+  const INTERFACE_MATERIALS: Record<string, number> = {
+    Bi: 0.9, Pb: 0.7, Sn: 0.6, Te: 0.5, Se: 0.5, Sb: 0.4,
+    In: 0.35, Tl: 0.3, Nb: 0.6, V: 0.4, Ta: 0.5,
+    Fe: 0.55, Cu: 0.45, Sr: 0.35, La: 0.3, Ba: 0.3,
+    Ti: 0.4, W: 0.5, Mo: 0.45, Ir: 0.4, Pt: 0.35,
+  };
+
+  let interfacePotential = 0;
+  for (const el of elNames) {
+    interfacePotential = Math.max(interfacePotential, INTERFACE_MATERIALS[el] || 0.1);
+  }
+
+  if (hasZ2 && maxSOC > 0.3) interfacePotential = Math.min(1.0, interfacePotential + 0.2);
+  if (hasDirac && hasInversion) interfacePotential = Math.min(1.0, interfacePotential + 0.15);
+  if (hasWeyl) interfacePotential = Math.min(1.0, interfacePotential + 0.1);
+
+  const signals: DetectedSignal[] = [
+    {
+      signal: "Dirac cone",
+      meaning: "Surface Dirac fermion at TI surface",
+      strength: hasDirac ? 0.8 + surfaceStates.diracConeCount * 0.1 : 0,
+      detected: hasDirac,
+    },
+    {
+      signal: "Weyl node",
+      meaning: "Topologically-protected band crossing",
+      strength: hasWeyl ? 0.7 + weylNodes.nodeCount * 0.05 : 0,
+      detected: hasWeyl,
+    },
+    {
+      signal: "Band inversion",
+      meaning: "Inverted orbital ordering near Fermi level",
+      strength: hasInversion ? bandInversion.inversionStrength : 0,
+      detected: hasInversion,
+    },
+    {
+      signal: "Flat band",
+      meaning: "High DOS for enhanced pairing",
+      strength: electronic.tightBindingTopology?.flatBandProximity ?? 0,
+      detected: (electronic.tightBindingTopology?.flatBandProximity ?? 0) > 0.3,
+    },
+  ];
+
+  const majoranaContrib = hasMajorana ? 0.8 : (hasZ2 && maxSOC > 0.4 ? 0.3 : 0);
+  const surfaceContrib = hasDirac ? Math.min(1.0, 0.5 + surfaceStates.diracConeCount * 0.15) : 0;
+
+  const W_TC = 0.30, W_TOPO = 0.25, W_INTERFACE = 0.15, W_SURFACE = 0.15, W_MAJORANA = 0.15;
+
+  const tscRaw = W_TC * tcNorm + W_TOPO * topoScore + W_INTERFACE * interfacePotential +
+    W_SURFACE * surfaceContrib + W_MAJORANA * majoranaContrib;
+  const tscScore = Math.min(1.0, tscRaw);
+
+  const isTSCCandidate = tscScore > 0.35 && topoScore > 0.2 && (hasZ2 || hasWeyl || hasChern);
+
+  let tscClass = "non-TSC";
+  if (isTSCCandidate && hasMajorana) {
+    tscClass = "Majorana-hosting TSC";
+  } else if (isTSCCandidate && hasChern) {
+    tscClass = "chiral-TSC";
+  } else if (isTSCCandidate && hasZ2) {
+    tscClass = "time-reversal-invariant TSC";
+  } else if (isTSCCandidate && hasWeyl) {
+    tscClass = "Weyl-SC hybrid";
+  } else if (isTSCCandidate) {
+    tscClass = "TSC candidate";
+  }
+
+  const evidence: string[] = [];
+  if (isTSCCandidate) evidence.push(`TSC predicted: ${tscClass} (score ${(tscScore * 100).toFixed(1)}%)`);
+  if (tc > 100) evidence.push(`Predicted Tc ~ ${Math.round(tc)}K (elevated)`);
+  if (topoScore > 0.5) evidence.push(`Strong topological character (${(topoScore * 100).toFixed(0)}%)`);
+  if (interfacePotential > 0.5) evidence.push(`High interface potential for proximity coupling`);
+  if (hasMajorana) evidence.push("Majorana zero modes predicted at surface");
+  signals.filter(s => s.detected).forEach(s => evidence.push(`Signal: ${s.signal} (${s.meaning})`));
+
+  return {
+    tscScore: Math.round(tscScore * 1000) / 1000,
+    tcContribution: Math.round(W_TC * tcNorm * 1000) / 1000,
+    topologyContribution: Math.round(W_TOPO * topoScore * 1000) / 1000,
+    interfaceContribution: Math.round(W_INTERFACE * interfacePotential * 1000) / 1000,
+    surfaceStateContribution: Math.round(W_SURFACE * surfaceContrib * 1000) / 1000,
+    majoranaContribution: Math.round(W_MAJORANA * majoranaContrib * 1000) / 1000,
+    predictedTc: Math.round(tc),
+    topologicalScore: Math.round(topoScore * 1000) / 1000,
+    interfacePotential: Math.round(interfacePotential * 1000) / 1000,
+    isTSCCandidate,
+    tscClass,
+    signals,
+    evidence,
+  };
+}
+
 export function computeTopologicalInvariants(
   formula: string,
   electronic: ElectronicStructure,
   spaceGroup?: string,
-  crystalSystem?: string
+  crystalSystem?: string,
+  predictedTc?: number
 ): TopologicalInvariantsResult {
   const topo = electronic.tightBindingTopology;
 
@@ -840,12 +1295,38 @@ export function computeTopologicalInvariants(
     topologicalPhase += " + Majorana-candidate";
   }
 
+  const symmetryIndicator = computeSymmetryIndicators(
+    formula, electronic, spaceGroup, crystalSystem, z2Invariant, bandInversion
+  );
+  const mlTopology = predictTopologyML(formula, electronic, spaceGroup);
+  const tscScore = computeTSCScore(
+    formula, electronic, bandInversion, z2Invariant, surfaceStates,
+    weylNodes, chernNumber, compositeScore, predictedTc
+  );
+
+  if (symmetryIndicator.isObstructedAtomicLimit) {
+    allEvidence.push(`Symmetry indicator: ${symmetryIndicator.topologyFromSymmetry}`);
+  }
+  if (mlTopology.topologyProbability > 0.5) {
+    allEvidence.push(`ML topology prediction: ${(mlTopology.topologyProbability * 100).toFixed(0)}% nontrivial`);
+  }
+  if (tscScore.isTSCCandidate) {
+    allEvidence.push(`TSC candidate: ${tscScore.tscClass} (score ${(tscScore.tscScore * 100).toFixed(1)}%)`);
+  }
+
+  if (symmetryIndicator.topologyFromSymmetry.includes("strong-TI") && topologicalPhase === "trivial") {
+    topologicalPhase = "symmetry-indicated TI";
+  }
+
   return {
     bandInversion,
     z2Invariant,
     chernNumber,
     weylNodes,
     surfaceStates,
+    symmetryIndicator,
+    mlTopology,
+    tscScore,
     compositeTopologicalScore: Math.round(compositeScore * 1000) / 1000,
     topologicalPhase,
     evidence: allEvidence,
