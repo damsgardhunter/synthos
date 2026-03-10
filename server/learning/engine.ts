@@ -2994,6 +2994,8 @@ async function runPhase11_StructurePrediction() {
             const percResult = checkHydrogenPercolation(
               crystal.atoms as PercolationAtom[],
               crystal.lattice as PercolationLattice,
+              undefined,
+              estimateFamilyPressure(normalized),
             );
             if (!percResult.percolates3D) {
               hPercolationPenalty = 0.5;
@@ -3083,6 +3085,8 @@ async function runPhase11_StructurePrediction() {
             const percResult = checkHydrogenPercolation(
               crystal.atoms as PercolationAtom[],
               crystal.lattice as PercolationLattice,
+              undefined,
+              estimateFamilyPressure(normalized),
             );
             if (!percResult.percolates3D) {
               distHPercPenalty = 0.5;

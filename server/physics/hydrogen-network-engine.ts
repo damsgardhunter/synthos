@@ -90,7 +90,14 @@ export interface HydrogenPercolationResult {
   cutoffAngstrom: number;
 }
 
-const H_PERCOLATION_CUTOFF = 1.5;
+const H_PERCOLATION_CUTOFF_MIN = 1.5;
+const H_PERCOLATION_CUTOFF_MAX = 1.9;
+
+function pressureAdaptedHCutoff(pressureGPa: number): number {
+  if (pressureGPa >= 200) return H_PERCOLATION_CUTOFF_MIN;
+  if (pressureGPa <= 0) return H_PERCOLATION_CUTOFF_MAX;
+  return H_PERCOLATION_CUTOFF_MAX - (H_PERCOLATION_CUTOFF_MAX - H_PERCOLATION_CUTOFF_MIN) * (pressureGPa / 200);
+}
 
 function periodicDistance(
   a: PercolationAtom,
@@ -148,8 +155,17 @@ function unionFind(n: number): { parent: Int32Array; rank: Int32Array; find: (x:
 export function checkHydrogenPercolation(
   atoms: PercolationAtom[],
   lattice: PercolationLattice,
-  cutoff: number = H_PERCOLATION_CUTOFF,
+  cutoffOrPressure?: number,
+  pressureGPa?: number,
 ): HydrogenPercolationResult {
+  let cutoff: number;
+  if (pressureGPa !== undefined) {
+    cutoff = pressureAdaptedHCutoff(pressureGPa);
+  } else if (cutoffOrPressure !== undefined) {
+    cutoff = cutoffOrPressure;
+  } else {
+    cutoff = H_PERCOLATION_CUTOFF_MAX;
+  }
   const hAtoms = atoms.filter(a => a.symbol === "H");
   const hCount = hAtoms.length;
 
@@ -701,7 +717,7 @@ export function analyzeHydrogenNetwork(
   let geometricPercolationUsed = false;
   let percolationDetail: HydrogenPercolationResult | undefined;
   if (isHydride && atomPositions && latticeParams && atomPositions.length > 0) {
-    const percResult = checkHydrogenPercolation(atomPositions, latticeParams, H_PERCOLATION_CUTOFF);
+    const percResult = checkHydrogenPercolation(atomPositions, latticeParams, undefined, estimatedPressure);
     percolates = percResult.percolates3D;
     geometricPercolationUsed = true;
     percolationDetail = percResult;
