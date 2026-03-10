@@ -127,20 +127,20 @@ const PROTOTYPE_PACKING: Record<string, number> = {
 };
 
 const ATOMIC_VOLUMES: Record<string, number> = {
-  H: 3.0, He: 4.0, Li: 21.0, Be: 8.0, B: 7.5, C: 12.0, N: 13.0,
-  O: 14.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 23.0, Al: 16.6, Si: 20.0,
-  P: 17.0, S: 15.5, Cl: 22.0, Ar: 24.0, K: 45.5, Ca: 26.0, Sc: 25.0,
-  Ti: 17.6, V: 14.0, Cr: 12.0, Mn: 12.2, Fe: 11.8, Co: 11.0, Ni: 10.9,
-  Cu: 11.8, Zn: 15.2, Ga: 19.6, Ge: 22.6, As: 21.4, Se: 16.4, Br: 23.5,
-  Kr: 27.0, Rb: 56.0, Sr: 34.0, Y: 33.0, Zr: 23.3, Nb: 18.0, Mo: 15.6,
-  Ru: 13.6, Rh: 13.7, Pd: 14.7, Ag: 17.1, Cd: 21.6, In: 26.2, Sn: 27.3,
-  Sb: 30.3, Te: 33.8, I: 25.7, Cs: 70.0, Ba: 37.0, La: 37.0, Ce: 34.4,
-  Hf: 22.3, Ta: 18.0, W: 15.8, Re: 14.7, Os: 14.0, Ir: 14.2, Pt: 15.1,
-  Au: 17.0, Hg: 23.4, Tl: 28.6, Pb: 30.3, Bi: 35.4, Th: 33.0, U: 20.8,
-  Tc: 14.3,
+  H: 5.0, He: 6.0, Li: 21.0, Be: 8.0, B: 8.0, C: 9.0, N: 10.0,
+  O: 12.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 23.0, Al: 17.0, Si: 20.0,
+  P: 17.0, S: 16.0, Cl: 22.0, Ar: 24.0, K: 46.0, Ca: 26.0, Sc: 25.0,
+  Ti: 16.0, V: 14.0, Cr: 12.0, Mn: 12.0, Fe: 12.0, Co: 11.0, Ni: 11.0,
+  Cu: 12.0, Zn: 15.0, Ga: 20.0, Ge: 23.0, As: 21.0, Se: 17.0, Br: 24.0,
+  Kr: 27.0, Rb: 56.0, Sr: 34.0, Y: 25.0, Zr: 23.0, Nb: 18.0, Mo: 16.0,
+  Ru: 14.0, Rh: 14.0, Pd: 15.0, Ag: 17.0, Cd: 22.0, In: 26.0, Sn: 27.0,
+  Sb: 30.0, Te: 34.0, I: 26.0, Cs: 71.0, Ba: 39.0, La: 37.0, Ce: 35.0,
+  Hf: 22.0, Ta: 18.0, W: 16.0, Re: 15.0, Os: 14.0, Ir: 14.0, Pt: 15.0,
+  Au: 17.0, Hg: 23.0, Tl: 29.0, Pb: 30.0, Bi: 35.0, Th: 33.0, U: 21.0,
+  Tc: 14.0,
 };
 
-function computeExpectedVolume(counts: Record<string, number>, packingFactor: number = 1.0): number {
+function computeExpectedVolume(counts: Record<string, number>, packingFactor: number = 1.3): number {
   let totalVolume = 0;
   for (const [el, count] of Object.entries(counts)) {
     const vol = ATOMIC_VOLUMES[el] ?? 15.0;
@@ -161,7 +161,7 @@ function estimateLatticeParam(elements: string[], counts: Record<string, number>
 
   const totalAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
   const hasH = counts["H"] !== undefined && counts["H"] > 0;
-  const minVolPerAtom = hasH ? 5.0 : 8.0;
+  const minVolPerAtom = hasH ? 8.0 : 10.0;
   const minTotalVolume = totalAtoms * minVolPerAtom;
   if (expectedVolume < minTotalVolume) {
     expectedVolume = minTotalVolume;
@@ -1288,7 +1288,7 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
 }
 
 const MIN_VOLUME_PER_ATOM = 10.0;
-const MIN_VOLUME_PER_ATOM_HYDRIDE = 5.0;
+const MIN_VOLUME_PER_ATOM_HYDRIDE = 8.0;
 const MAX_SCALE_ATTEMPTS = 5;
 
 interface HydrideCageMotif {

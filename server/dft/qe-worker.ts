@@ -335,19 +335,19 @@ function parseFormula(formula: string): Record<string, number> {
 }
 
 const ATOMIC_VOLUMES: Record<string, number> = {
-  H: 3, He: 6, Li: 13, Be: 8, B: 7, C: 12, N: 13, O: 14, F: 15, Ne: 7,
-  Na: 24, Mg: 14, Al: 17, Si: 12, P: 17, S: 16, Cl: 22, Ar: 24,
-  K: 46, Ca: 26, Sc: 25, Ti: 18, V: 14, Cr: 12, Mn: 12,
-  Fe: 12, Co: 11, Ni: 11, Cu: 12, Zn: 14, Ga: 12, Ge: 14,
-  As: 13, Se: 17, Br: 24, Kr: 28, Rb: 56, Sr: 34, Y: 33, Zr: 23,
-  Nb: 18, Mo: 16, Tc: 14, Ru: 13, Rh: 14, Pd: 15, Ag: 17, Cd: 22,
-  In: 26, Sn: 27, Sb: 29, Te: 34, I: 26, Xe: 36,
+  H: 5, He: 6, Li: 21, Be: 8, B: 8, C: 9, N: 10, O: 12, F: 11, Ne: 13,
+  Na: 24, Mg: 23, Al: 17, Si: 20, P: 17, S: 16, Cl: 22, Ar: 24,
+  K: 46, Ca: 26, Sc: 25, Ti: 16, V: 14, Cr: 12, Mn: 12,
+  Fe: 12, Co: 11, Ni: 11, Cu: 12, Zn: 15, Ga: 20, Ge: 23,
+  As: 21, Se: 17, Br: 24, Kr: 27, Rb: 56, Sr: 34, Y: 25, Zr: 23,
+  Nb: 18, Mo: 16, Tc: 14, Ru: 14, Rh: 14, Pd: 15, Ag: 17, Cd: 22,
+  In: 26, Sn: 27, Sb: 30, Te: 34, I: 26, Xe: 36,
   Cs: 71, Ba: 39, La: 37, Ce: 35, Pr: 35, Nd: 34,
   Pm: 33, Sm: 33, Eu: 36, Gd: 33, Tb: 32, Dy: 32,
   Ho: 32, Er: 31, Tm: 31, Yb: 35, Lu: 30,
   Hf: 22, Ta: 18, W: 16, Re: 15, Os: 14, Ir: 14, Pt: 15, Au: 17,
   Hg: 23, Tl: 29, Pb: 30, Bi: 35, Po: 34,
-  Th: 32, Pa: 25, U: 21, Np: 20, Pu: 20,
+  Th: 33, Pa: 25, U: 21, Np: 20, Pu: 20,
 };
 
 function estimateLatticeConstant(elements: string[], counts?: Record<string, number>): number {
