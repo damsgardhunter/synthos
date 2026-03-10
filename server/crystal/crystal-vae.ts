@@ -7,9 +7,14 @@ const HIDDEN_DIM = 64;
 const NUM_EPOCHS = 300;
 const LEARNING_RATE = 0.002;
 const MOMENTUM = 0.9;
-const FREE_BITS = 0.5;
+const FREE_BITS = 0.1;
 const BETA_CYCLES = 4;
 const BETA_MAX = 0.8;
+const WARMUP_EPOCHS = 60;
+const KL_MIN_TARGET = 2.0;
+const KL_PULL_STRENGTH = 0.05;
+const ENCODER_CATCHUP_INTERVAL = 25;
+const ENCODER_CATCHUP_STEPS = 5;
 
 const CRYSTAL_SYSTEMS = ["cubic", "tetragonal", "orthorhombic", "hexagonal", "rhombohedral", "monoclinic", "triclinic"] as const;
 const TOP_SPACEGROUPS = [225, 229, 227, 221, 223, 191, 194, 139, 129, 123, 99, 141, 62, 47, 166, 216, 217, 230, 12, 15] as const;
@@ -333,18 +338,128 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
 
   trainingHistory = [];
 
-  const epsilonCache: number[][] = [];
   const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+
+  function computeBeta(epoch: number): number {
+    if (epoch < WARMUP_EPOCHS) {
+      return BETA_MAX * 0.1 * (epoch / WARMUP_EPOCHS);
+    }
+    const postWarmup = epoch - WARMUP_EPOCHS;
+    const cycleLen = Math.floor((NUM_EPOCHS - WARMUP_EPOCHS) / BETA_CYCLES);
+    if (cycleLen <= 0) return BETA_MAX;
+    const cyclePos = postWarmup % cycleLen;
+    const rampFrac = cyclePos / (cycleLen * 0.5);
+    return Math.min(BETA_MAX, rampFrac * BETA_MAX);
+  }
+
+  function trainOneSample(
+    idx: number, beta: number, lr: number,
+    updateDecoders: boolean
+  ): { reconLoss: number; rawKL: number; activeDims: number } {
+    const input = encodedInputs[idx];
+
+    const encResult = forwardMLP(encoderMLP, input);
+    const muLogSigma = encResult.output;
+    const mu = muLogSigma.slice(0, LATENT_DIM);
+    const logSigma = muLogSigma.slice(LATENT_DIM);
+
+    const epsilon = Array.from({ length: LATENT_DIM }, () => gaussianRandom());
+    const z = mu.map((m, i) => m + Math.exp(logSigma[i]) * epsilon[i]);
+
+    const latResult = forwardMLP(decoderLattice, z);
+    const csResult = forwardMLP(decoderCS, z);
+    const sgResult = forwardMLP(decoderSG, z);
+    const protoResult = forwardMLP(decoderProto, z);
+    const atomResult = forwardMLP(decoderAtom, z);
+    const compResult = forwardMLP(decoderComp, z);
+
+    const latticeLoss = mseLoss(latResult.output, latticeTargets[idx]);
+    const csLoss = crossEntropyLoss(csResult.output, csTargets[idx]);
+    const sgLoss = crossEntropyLoss(sgResult.output, sgTargets[idx]);
+    const protoLoss = crossEntropyLoss(protoResult.output, protoTargets[idx]);
+    const atomLoss = mseLoss(atomResult.output, [atomCountTargets[idx]]);
+    const compLoss = mseLoss(compResult.output, compositionTargets[idx]);
+
+    const reconLoss = latticeLoss * 2.0 + csLoss * 0.5 + sgLoss * 0.3 + protoLoss * 0.3 + atomLoss * 0.5 + compLoss * 1.0;
+    const rawKL = klDivergence(mu, logSigma);
+
+    const zGrad = new Array(LATENT_DIM).fill(0);
+
+    const decoderLr = updateDecoders ? lr : 0;
+
+    const latticeGrad = latticeTargets[idx].map((t, i) => 2.0 * (latResult.output[i] - t) / 6 * 2.0);
+    const latZGrad = backpropMLP(decoderLattice, decLatMom, z, latResult.hidden, latticeGrad, decoderLr);
+    for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += latZGrad[i];
+
+    const csProbs = softmax(csResult.output);
+    const csGrad = csProbs.map((p, i) => (i === csTargets[idx] ? p - 1 : p) * 0.5);
+    const csZGrad = backpropMLP(decoderCS, decCSMom, z, csResult.hidden, csGrad, decoderLr);
+    for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += csZGrad[i];
+
+    const sgProbs = softmax(sgResult.output);
+    const sgGrad = sgProbs.map((p, i) => (i === sgTargets[idx] ? p - 1 : p) * 0.3);
+    const sgZGrad = backpropMLP(decoderSG, decSGMom, z, sgResult.hidden, sgGrad, decoderLr);
+    for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += sgZGrad[i];
+
+    const protoProbs = softmax(protoResult.output);
+    const protoGrad = protoProbs.map((p, i) => (i === protoTargets[idx] ? p - 1 : p) * 0.3);
+    const protoZGrad = backpropMLP(decoderProto, decProtoMom, z, protoResult.hidden, protoGrad, decoderLr);
+    for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += protoZGrad[i];
+
+    const atomGrad = [2.0 * (atomResult.output[0] - atomCountTargets[idx]) * 0.5];
+    const atomZGrad = backpropMLP(decoderAtom, decAtomMom, z, atomResult.hidden, atomGrad, decoderLr);
+    for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += atomZGrad[i];
+
+    const compGrad = compositionTargets[idx].map((t, i) => 2.0 * (compResult.output[i] - t) / TOP_ELEMENTS.length * 1.0);
+    const compZGrad = backpropMLP(decoderComp, decCompMom, z, compResult.hidden, compGrad, decoderLr);
+    for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += compZGrad[i];
+
+    const klPerDim = klDivergencePerDim(mu, logSigma);
+    let activeDims = 0;
+
+    const muGrad = mu.map((m, i) => {
+      const reconThruReparam = zGrad[i];
+      const dimKL = klPerDim[i];
+      if (dimKL >= FREE_BITS) activeDims++;
+      const softGate = dimKL < FREE_BITS
+        ? FREE_BITS > 0 ? 0.1 * (dimKL / FREE_BITS) : 0.1
+        : 1.0;
+      const klGrad = softGate * beta * m;
+      return reconThruReparam + klGrad;
+    });
+    const logSigmaGrad = logSigma.map((ls, i) => {
+      const sigma = Math.exp(ls);
+      const reconThruReparam = zGrad[i] * epsilon[i] * sigma;
+      const dimKL = klPerDim[i];
+      const softGate = dimKL < FREE_BITS
+        ? FREE_BITS > 0 ? 0.1 * (dimKL / FREE_BITS) : 0.1
+        : 1.0;
+      const klGrad = softGate * beta * (Math.exp(2 * ls) - 1);
+      return reconThruReparam + klGrad;
+    });
+
+    if (rawKL < KL_MIN_TARGET && beta > 0) {
+      for (let i = 0; i < LATENT_DIM; i++) {
+        const sigma = Math.exp(logSigma[i]);
+        muGrad[i] -= KL_PULL_STRENGTH * mu[i];
+        logSigmaGrad[i] -= KL_PULL_STRENGTH * (1 - sigma);
+      }
+    }
+
+    const encOutGrad = [...muGrad, ...logSigmaGrad];
+    backpropMLP(encoderMLP, encMom, input, encResult.hidden, encOutGrad, lr);
+
+    return { reconLoss, rawKL, activeDims };
+  }
 
   for (let epoch = 0; epoch < NUM_EPOCHS; epoch++) {
     if (epoch % 20 === 0) await yield_();
-    const cycleLen = Math.floor(NUM_EPOCHS / BETA_CYCLES);
-    const cyclePos = epoch % cycleLen;
-    const beta = Math.min(BETA_MAX, (cyclePos / (cycleLen * 0.5)) * BETA_MAX);
+    const beta = computeBeta(epoch);
 
     let totalLoss = 0;
     let totalRecon = 0;
     let totalKL = 0;
+    let totalActiveDims = 0;
     const lr = LEARNING_RATE * Math.max(0.05, 1.0 - epoch / (NUM_EPOCHS * 1.5));
 
     const indices = Array.from({ length: encodedInputs.length }, (_, i) => i);
@@ -353,88 +468,20 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
       [indices[j], indices[k]] = [indices[k], indices[j]];
     }
 
+    const isEncoderCatchup = epoch > WARMUP_EPOCHS &&
+      epoch % ENCODER_CATCHUP_INTERVAL < ENCODER_CATCHUP_STEPS;
+
     for (const idx of indices) {
-      const input = encodedInputs[idx];
-
-      const encResult = forwardMLP(encoderMLP, input);
-      const muLogSigma = encResult.output;
-      const mu = muLogSigma.slice(0, LATENT_DIM);
-      const logSigma = muLogSigma.slice(LATENT_DIM);
-
-      const epsilon = Array.from({ length: LATENT_DIM }, () => gaussianRandom());
-      const z = mu.map((m, i) => m + Math.exp(logSigma[i]) * epsilon[i]);
-
-      const latResult = forwardMLP(decoderLattice, z);
-      const csResult = forwardMLP(decoderCS, z);
-      const sgResult = forwardMLP(decoderSG, z);
-      const protoResult = forwardMLP(decoderProto, z);
-      const atomResult = forwardMLP(decoderAtom, z);
-      const compResult = forwardMLP(decoderComp, z);
-
-      const latticeLoss = mseLoss(latResult.output, latticeTargets[idx]);
-      const csLoss = crossEntropyLoss(csResult.output, csTargets[idx]);
-      const sgLoss = crossEntropyLoss(sgResult.output, sgTargets[idx]);
-      const protoLoss = crossEntropyLoss(protoResult.output, protoTargets[idx]);
-      const atomLoss = mseLoss(atomResult.output, [atomCountTargets[idx]]);
-      const compLoss = mseLoss(compResult.output, compositionTargets[idx]);
-
-      const reconLoss = latticeLoss * 2.0 + csLoss * 0.5 + sgLoss * 0.3 + protoLoss * 0.3 + atomLoss * 0.5 + compLoss * 1.0;
-      const kl = klWithFreeBits(mu, logSigma);
-      const rawKL = klDivergence(mu, logSigma);
-      const loss = reconLoss + beta * kl;
-
-      totalLoss += loss;
-      totalRecon += reconLoss;
-      totalKL += rawKL;
-
-      const zGrad = new Array(LATENT_DIM).fill(0);
-
-      const latticeGrad = latticeTargets[idx].map((t, i) => 2.0 * (latResult.output[i] - t) / 6 * 2.0);
-      const latZGrad = backpropMLP(decoderLattice, decLatMom, z, latResult.hidden, latticeGrad, lr);
-      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += latZGrad[i];
-
-      const csProbs = softmax(csResult.output);
-      const csGrad = csProbs.map((p, i) => (i === csTargets[idx] ? p - 1 : p) * 0.5);
-      const csZGrad = backpropMLP(decoderCS, decCSMom, z, csResult.hidden, csGrad, lr);
-      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += csZGrad[i];
-
-      const sgProbs = softmax(sgResult.output);
-      const sgGrad = sgProbs.map((p, i) => (i === sgTargets[idx] ? p - 1 : p) * 0.3);
-      const sgZGrad = backpropMLP(decoderSG, decSGMom, z, sgResult.hidden, sgGrad, lr);
-      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += sgZGrad[i];
-
-      const protoProbs = softmax(protoResult.output);
-      const protoGrad = protoProbs.map((p, i) => (i === protoTargets[idx] ? p - 1 : p) * 0.3);
-      const protoZGrad = backpropMLP(decoderProto, decProtoMom, z, protoResult.hidden, protoGrad, lr);
-      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += protoZGrad[i];
-
-      const atomGrad = [2.0 * (atomResult.output[0] - atomCountTargets[idx]) * 0.5];
-      const atomZGrad = backpropMLP(decoderAtom, decAtomMom, z, atomResult.hidden, atomGrad, lr);
-      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += atomZGrad[i];
-
-      const compGrad = compositionTargets[idx].map((t, i) => 2.0 * (compResult.output[i] - t) / TOP_ELEMENTS.length * 1.0);
-      const compZGrad = backpropMLP(decoderComp, decCompMom, z, compResult.hidden, compGrad, lr);
-      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += compZGrad[i];
-
-      const klPerDim = klDivergencePerDim(mu, logSigma);
-      const muGrad = mu.map((m, i) => {
-        const reconThruReparam = zGrad[i];
-        const klGrad = klPerDim[i] >= FREE_BITS ? beta * m : 0;
-        return reconThruReparam + klGrad;
-      });
-      const logSigmaGrad = logSigma.map((ls, i) => {
-        const sigma = Math.exp(ls);
-        const reconThruReparam = zGrad[i] * epsilon[i] * sigma;
-        const klGrad = klPerDim[i] >= FREE_BITS ? beta * (Math.exp(2 * ls) - 1) : 0;
-        return reconThruReparam + klGrad;
-      });
-
-      const encOutGrad = [...muGrad, ...logSigmaGrad];
-      backpropMLP(encoderMLP, encMom, input, encResult.hidden, encOutGrad, lr);
+      const result = trainOneSample(idx, beta, lr, !isEncoderCatchup);
+      totalRecon += result.reconLoss;
+      totalKL += result.rawKL;
+      totalActiveDims += result.activeDims;
+      totalLoss += result.reconLoss + beta * result.rawKL;
     }
 
     const n = encodedInputs.length;
     if (epoch % 10 === 0 || epoch === NUM_EPOCHS - 1) {
+      const avgActiveDims = Math.round(totalActiveDims / n);
       trainingHistory.push({
         epoch,
         totalLoss: totalLoss / n,
@@ -442,6 +489,9 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
         klLoss: totalKL / n,
         beta,
       });
+      if (epoch % 50 === 0) {
+        console.log(`[Crystal-VAE] epoch=${epoch} beta=${beta.toFixed(3)} reconLoss=${(totalRecon/n).toFixed(4)} KL=${(totalKL/n).toFixed(4)} activeDims=${avgActiveDims}/${LATENT_DIM}${isEncoderCatchup ? " [encoder-catchup]" : ""}`);
+      }
     }
   }
 
@@ -465,7 +515,8 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
   }
 
   trained = true;
-  console.log(`Crystal VAE trained on ${encodedInputs.length} entries, final loss: ${trainingHistory[trainingHistory.length - 1]?.totalLoss.toFixed(4)}`);
+  const finalStats = trainingHistory[trainingHistory.length - 1];
+  console.log(`Crystal VAE trained on ${encodedInputs.length} entries, final loss: ${finalStats?.totalLoss.toFixed(4)}, KL: ${finalStats?.klLoss.toFixed(4)}, beta: ${finalStats?.beta.toFixed(3)}`);
 }
 
 function decodeLatentVector(z: number[]): {
@@ -730,6 +781,24 @@ export function getCrystalVAEStats() {
     ? noveltyScores.reduce((s, v) => s + v, 0) / noveltyScores.length
     : 0;
 
+  let activeDimsEstimate = 0;
+  if (model && encodedTrainingData.length > 0) {
+    const sampleSize = Math.min(20, encodedTrainingData.length);
+    const muVars = new Array(LATENT_DIM).fill(0);
+    const muMeans = new Array(LATENT_DIM).fill(0);
+    for (let s = 0; s < sampleSize; s++) {
+      const idx = Math.floor(Math.random() * encodedTrainingData.length);
+      const z = encodedTrainingData[idx].z;
+      for (let d = 0; d < LATENT_DIM; d++) muMeans[d] += z[d] / sampleSize;
+    }
+    for (let s = 0; s < sampleSize; s++) {
+      const idx = Math.floor(Math.random() * encodedTrainingData.length);
+      const z = encodedTrainingData[idx].z;
+      for (let d = 0; d < LATENT_DIM; d++) muVars[d] += (z[d] - muMeans[d]) ** 2 / sampleSize;
+    }
+    activeDimsEstimate = muVars.filter(v => v > 0.01).length;
+  }
+
   return {
     trained,
     datasetSize: encodedTrainingData.length,
@@ -740,6 +809,8 @@ export function getCrystalVAEStats() {
     finalLoss: trainingHistory.length > 0 ? trainingHistory[trainingHistory.length - 1].totalLoss : null,
     finalReconLoss: trainingHistory.length > 0 ? trainingHistory[trainingHistory.length - 1].reconLoss : null,
     finalKLLoss: trainingHistory.length > 0 ? trainingHistory[trainingHistory.length - 1].klLoss : null,
+    activeDims: activeDimsEstimate,
+    posteriorCollapseDetected: trainingHistory.length > 0 && trainingHistory[trainingHistory.length - 1].klLoss < 0.1,
     prototypesLearned: model?.prototypes.length ?? 0,
     encodedFormulas: encodedTrainingData.map(d => d.formula),
   };

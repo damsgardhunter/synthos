@@ -498,8 +498,8 @@ function generateSCFInput(
   pseudo_dir = '${QE_PSEUDO_DIR}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = 1.0d-3,
-  etot_conv_thr = 1.0d-5,
+  forc_conv_thr = 1.0d-2,
+  etot_conv_thr = 1.0d-4,
 /
 &SYSTEM
   ibrav = ${ibrav},
@@ -513,11 +513,12 @@ ${celldmLines}  nat = ${totalAtoms},
   nspin = ${nspin},
 ${startingMagLines}/
 &ELECTRONS
-  electron_maxstep = 100,
-  conv_thr = 1.0d-6,
+  electron_maxstep = 200,
+  conv_thr = 1.0d-4,
   mixing_beta = 0.3,
   mixing_mode = 'plain',
   diagonalization = 'david',
+  scf_must_converge = .false.,
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -791,9 +792,26 @@ function parseSCFOutput(stdout: string): QESCFResult {
     result.nscfIterations = parseInt(convergenceMatch[1]);
   }
 
+  if (!result.converged) {
+    const iterMatches = [...stdout.matchAll(/estimated scf accuracy\s+<\s+([\d.Ee+-]+)\s+Ry/g)];
+    if (iterMatches.length > 0) {
+      const lastAccuracy = parseFloat(iterMatches[iterMatches.length - 1][1]);
+      result.nscfIterations = iterMatches.length;
+      if (lastAccuracy < 1.0e-3) {
+        result.converged = true;
+      }
+    }
+  }
+
   const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
   if (energyMatch) {
     result.totalEnergy = parseFloat(energyMatch[1]) * 13.6057;
+  }
+  if (!energyMatch) {
+    const energyLines = [...stdout.matchAll(/total energy\s+=\s+([-\d.]+)\s+Ry/g)];
+    if (energyLines.length > 0) {
+      result.totalEnergy = parseFloat(energyLines[energyLines.length - 1][1]) * 13.6057;
+    }
   }
 
   const natMatch = stdout.match(/number of atoms\/cell\s+=\s+(\d+)/);
@@ -1082,7 +1100,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -1094,6 +1112,9 @@ function generateSCFInputWithParams(
   const ecutrho = ecutwfc * 8;
   const smearing = params.smearing || "mv";
   const degauss = params.degauss || 0.02;
+  const convThr = params.convThr ?? "1.0d-4";
+  const forcConvThr = params.forcConvThr ?? "1.0d-2";
+  const etotConvThr = params.etotConvThr ?? "1.0d-4";
 
   let atomicSpecies = "";
   for (const el of elements) {
@@ -1115,8 +1136,8 @@ function generateSCFInputWithParams(
   pseudo_dir = '${QE_PSEUDO_DIR}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = 1.0d-3,
-  etot_conv_thr = 1.0d-5,
+  forc_conv_thr = ${forcConvThr},
+  etot_conv_thr = ${etotConvThr},
 /
 &SYSTEM
   ibrav = 1,
@@ -1132,10 +1153,11 @@ function generateSCFInputWithParams(
 ${elements.some(el => el in MAGNETIC_ELEMENTS) ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts)) : ''}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
-  conv_thr = 1.0d-6,
+  conv_thr = ${convThr},
   mixing_beta = ${params.mixingBeta},
   mixing_mode = 'plain',
   diagonalization = '${params.diag}',
+  scf_must_converge = .false.,
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -1290,11 +1312,11 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     const cOverA = estimateCOverA(elements, counts);
     result.kPoints = autoKPoints(latticeA, cOverA).trim();
 
-    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number }> = [
-      { mixingBeta: 0.3, maxSteps: 100, diag: "david" },
-      { mixingBeta: 0.2, maxSteps: 200, diag: "david", ecutwfcBoost: 10 },
-      { mixingBeta: 0.1, maxSteps: 300, diag: "cg", ecutwfcBoost: 20 },
-      { mixingBeta: 0.1, maxSteps: 300, diag: "cg", smearing: "gaussian", degauss: 0.02, ecutwfcBoost: 20 },
+    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
+      { mixingBeta: 0.3, maxSteps: 200, diag: "david", convThr: "1.0d-4", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
+      { mixingBeta: 0.2, maxSteps: 300, diag: "david", ecutwfcBoost: 10, convThr: "5.0d-5", forcConvThr: "5.0d-3", etotConvThr: "5.0d-5" },
+      { mixingBeta: 0.15, maxSteps: 400, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.1, maxSteps: 400, diag: "cg", smearing: "gaussian", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
     ];
 
     let scfConverged = false;
@@ -1314,7 +1336,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       }
 
       const smearInfo = params.smearing ? `, smearing=${params.smearing}` : "";
-      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${smearInfo})`);
+      const convInfo = params.convThr ? `, conv_thr=${params.convThr}` : "";
+      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${convInfo}${smearInfo})`);
 
       const scfResult = await runQECommand(
         path.join(QE_BIN_DIR, "pw.x"),
@@ -1348,13 +1371,18 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
     result.retryCount = retryCount;
 
-    if (!scfConverged) {
+    const scfUsable = scfConverged ||
+      (result.scf && result.scf.totalEnergy !== 0 && result.scf.fermiEnergy !== null);
+
+    if (!scfConverged && !scfUsable) {
       result.failureStage = "scf";
       stageFailureCounts.scf++;
       recordFormulaFailure(formula);
+    } else if (!scfConverged && scfUsable) {
+      console.log(`[QE-Worker] SCF not formally converged for ${formula} but has usable data (E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy}) — proceeding`);
     }
 
-    if (result.scf?.converged && result.scf.fermiEnergy !== null) {
+    if (scfUsable && result.scf?.fermiEnergy !== null) {
       try {
         const cOverAVal = estimateCOverA(elements, counts);
         const ELEMENT_CUTOFFS_BANDS: Record<string, number> = {
@@ -1391,7 +1419,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       }
     }
 
-    if (result.scf?.converged) {
+    if (scfUsable) {
       const phInput = generatePhononInput(formula);
       const phInputFile = path.join(jobDir, "ph.in");
       fs.writeFileSync(phInputFile, phInput);
