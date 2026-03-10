@@ -67,7 +67,7 @@ import { computePairingProfile, type PairingProfile } from "../physics/pairing-m
 import { encodeGenome, genomeDiversity, type MaterialGenome } from "../physics/materials-genome";
 import { computeFermiSurface, type FermiSurfaceResult } from "../physics/fermi-surface-engine";
 import { assignToCluster, getClusterGuidance } from "../physics/fermi-surface-clustering";
-import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, type HydrogenNetworkAnalysis } from "../physics/hydrogen-network-engine";
+import { analyzeHydrogenNetwork, trackHydrogenNetworkResult, checkHydrogenPercolation, type HydrogenNetworkAnalysis, type PercolationAtom, type PercolationLattice } from "../physics/hydrogen-network-engine";
 import { analyzeReactionNetwork } from "../physics/reaction-network-engine";
 import { predictBandStructure, getBandSurrogateMLFeatures, type BandSurrogatePrediction } from "../physics/band-structure-surrogate";
 import { predictBandDispersion, getBandOperatorMLFeatures, type BandOperatorResult } from "../physics/band-structure-operator";
@@ -2463,7 +2463,26 @@ async function runPhase10_Physics() {
 
             let hydrogenNetworkData: Record<string, any> = {};
             try {
-              const hNetwork = analyzeHydrogenNetwork(candidate.formula);
+              let atomPositions: PercolationAtom[] | undefined;
+              let latticeParams: PercolationLattice | undefined;
+              try {
+                const crystalStructs = await storage.getCrystalStructuresByFormula(candidate.formula);
+                if (crystalStructs.length > 0) {
+                  const cs = crystalStructs[0];
+                  if (cs.atomicPositions && Array.isArray(cs.atomicPositions)) {
+                    atomPositions = (cs.atomicPositions as any[]).filter(
+                      (a: any) => a && typeof a.symbol === "string" && typeof a.x === "number" && typeof a.y === "number" && typeof a.z === "number"
+                    ) as PercolationAtom[];
+                  }
+                  if (cs.latticeParams && typeof cs.latticeParams === "object") {
+                    const lp = cs.latticeParams as any;
+                    if (typeof lp.a === "number" && typeof lp.b === "number" && typeof lp.c === "number") {
+                      latticeParams = { a: lp.a, b: lp.b, c: lp.c, alpha: lp.alpha, beta: lp.beta, gamma: lp.gamma };
+                    }
+                  }
+                }
+              } catch {}
+              const hNetwork = analyzeHydrogenNetwork(candidate.formula, atomPositions, latticeParams);
               trackHydrogenNetworkResult(hNetwork);
               hydrogenNetworkData = {
                 hydrogenNetworkDim: hNetwork.hydrogenNetworkDim,
@@ -2474,12 +2493,14 @@ async function runPhase10_Physics() {
                 networkClass: hNetwork.networkClass,
                 compositeSCScore: hNetwork.compositeSCScore,
                 bondingType: hNetwork.bondingType,
+                percolates: hNetwork.percolates,
+                geometricPercolationUsed: hNetwork.geometricPercolationUsed,
               };
               if (hNetwork.compositeSCScore > 0.4) {
                 emit("log", {
                   phase: "phase-10",
                   event: "Hydrogen network analysis",
-                  detail: `${candidate.formula}: class=${hNetwork.networkClass}, dim=${hNetwork.hydrogenNetworkDim}, cage=${hNetwork.hydrogenCageScore.toFixed(3)}, coord=${hNetwork.Hcoordination}, phonon=${hNetwork.hydrogenPhononCouplingScore.toFixed(3)}, composite=${hNetwork.compositeSCScore.toFixed(3)}`,
+                  detail: `${candidate.formula}: class=${hNetwork.networkClass}, dim=${hNetwork.hydrogenNetworkDim}, cage=${hNetwork.hydrogenCageScore.toFixed(3)}, coord=${hNetwork.Hcoordination}, phonon=${hNetwork.hydrogenPhononCouplingScore.toFixed(3)}, composite=${hNetwork.compositeSCScore.toFixed(3)}, percolates=${hNetwork.percolates}${hNetwork.geometricPercolationUsed ? " (geometric)" : ""}`,
                   dataSource: "Hydrogen Network Engine",
                 });
               }
@@ -2965,6 +2986,21 @@ async function runPhase11_StructurePrediction() {
             : 0;
           const cappedTc = applyAmbientTcCap(cdvaePhysTc, cdvaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
 
+          let hPercolationPenalty = 1.0;
+          let hPercNote = "";
+          const hCountCheck = (normalized.match(/H(\d+)/)?.[1] ?? "0");
+          const isHydrideCandidate = parseInt(hCountCheck) >= 4;
+          if (isHydrideCandidate && crystal.atoms && crystal.atoms.length > 0 && crystal.lattice) {
+            const percResult = checkHydrogenPercolation(
+              crystal.atoms as PercolationAtom[],
+              crystal.lattice as PercolationLattice,
+            );
+            if (!percResult.percolates3D) {
+              hPercolationPenalty = 0.5;
+              hPercNote = ` [H-percolation FAIL: ${percResult.clusterCount} clusters, largest=${percResult.largestClusterSize}/${percResult.hAtomCount}]`;
+            }
+          }
+
           const id = `sc-cdvae-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           try {
             const inserted = await insertCandidateWithStabilityCheck({
@@ -2978,15 +3014,15 @@ async function runPhase11_StructurePrediction() {
               cooperPairMechanism: `CDVAE diffusion: ${crystal.motif} (${crystal.spaceGroup})`,
               crystalStructure: `${crystal.spaceGroup} (${crystal.crystalSystem}) ${crystal.atoms.length} atoms`,
               quantumCoherence: crystal.noveltyScore,
-              stabilityScore: crystal.stabilityScore,
+              stabilityScore: crystal.stabilityScore * hPercolationPenalty,
               synthesisPath: null,
               mlFeatures: features as any,
               xgboostScore: gbResult.score,
               neuralNetScore: crystal.noveltyScore,
-              ensembleScore: Math.min(0.9, (gbResult.score + crystal.stabilityScore) / 2),
+              ensembleScore: Math.min(0.9, (gbResult.score + crystal.stabilityScore) / 2) * hPercolationPenalty,
               roomTempViable: false,
               status: "theoretical",
-              notes: `[CDVAE crystal diffusion: motif=${crystal.motif}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lattice=a${crystal.lattice.a.toFixed(1)}b${crystal.lattice.b.toFixed(1)}c${crystal.lattice.c.toFixed(1)}, lambda=${crystal.lambda}, novelty=${crystal.noveltyScore}]`,
+              notes: `[CDVAE crystal diffusion: motif=${crystal.motif}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lattice=a${crystal.lattice.a.toFixed(1)}b${crystal.lattice.b.toFixed(1)}c${crystal.lattice.c.toFixed(1)}, lambda=${crystal.lambda}, novelty=${crystal.noveltyScore}]${hPercNote}`,
               electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
               logPhononFrequency: features.logPhononFreq ?? null,
               coulombPseudopotential: 0.12,
@@ -3039,6 +3075,21 @@ async function runPhase11_StructurePrediction() {
             ? Math.round(computePhysicsOnlyTc(distLambda, features.logPhononFreq))
             : 0;
           const cappedTc = applyAmbientTcCap(distPhysTc, distLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+
+          let distHPercPenalty = 1.0;
+          let distHPercNote = "";
+          const distHCount = parseInt(normalized.match(/H(\d+)/)?.[1] ?? "0");
+          if (distHCount >= 4 && crystal.atoms && crystal.atoms.length > 0 && crystal.lattice) {
+            const percResult = checkHydrogenPercolation(
+              crystal.atoms as PercolationAtom[],
+              crystal.lattice as PercolationLattice,
+            );
+            if (!percResult.percolates3D) {
+              distHPercPenalty = 0.5;
+              distHPercNote = ` [H-percolation FAIL: ${percResult.clusterCount} clusters, largest=${percResult.largestClusterSize}/${percResult.hAtomCount}]`;
+            }
+          }
+
           const id = `sc-distdiff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           try {
             const inserted = await insertCandidateWithStabilityCheck({
@@ -3052,15 +3103,15 @@ async function runPhase11_StructurePrediction() {
               cooperPairMechanism: `Distribution diffusion: ${crystal.motif} (${crystal.spaceGroup})`,
               crystalStructure: `${crystal.spaceGroup} (${crystal.crystalSystem}) ${crystal.atoms.length} atoms`,
               quantumCoherence: crystal.noveltyScore,
-              stabilityScore: crystal.stabilityScore,
+              stabilityScore: crystal.stabilityScore * distHPercPenalty,
               synthesisPath: null,
               mlFeatures: features as any,
               xgboostScore: gbResult.score,
               neuralNetScore: crystal.noveltyScore,
-              ensembleScore: Math.min(0.9, (gbResult.score + crystal.stabilityScore) / 2),
+              ensembleScore: Math.min(0.9, (gbResult.score + crystal.stabilityScore) / 2) * distHPercPenalty,
               roomTempViable: false,
               status: "theoretical",
-              notes: `[Distribution-based crystal diffusion: system=${crystal.crystalSystem}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lambda=${crystal.lambda}]`,
+              notes: `[Distribution-based crystal diffusion: system=${crystal.crystalSystem}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lambda=${crystal.lambda}]${distHPercNote}`,
               electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
               logPhononFrequency: features.logPhononFreq ?? null,
               coulombPseudopotential: 0.12,

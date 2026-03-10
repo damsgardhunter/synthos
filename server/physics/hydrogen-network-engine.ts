@@ -58,9 +58,178 @@ export interface HydrogenNetworkAnalysis {
   };
 
   percolates: boolean;
+  geometricPercolationUsed: boolean;
+  percolationDetail?: HydrogenPercolationResult;
   compositeSCScore: number;
   networkClass: string;
   insights: string[];
+}
+
+export interface PercolationAtom {
+  symbol: string;
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface PercolationLattice {
+  a: number;
+  b: number;
+  c: number;
+  alpha?: number;
+  beta?: number;
+  gamma?: number;
+}
+
+export interface HydrogenPercolationResult {
+  hAtomCount: number;
+  clusterCount: number;
+  largestClusterSize: number;
+  largestClusterFraction: number;
+  percolates3D: boolean;
+  cutoffAngstrom: number;
+}
+
+const H_PERCOLATION_CUTOFF = 1.5;
+
+function periodicDistance(
+  a: PercolationAtom,
+  b: PercolationAtom,
+  lat: PercolationLattice,
+): number {
+  const alpha = ((lat.alpha ?? 90) * Math.PI) / 180;
+  const beta = ((lat.beta ?? 90) * Math.PI) / 180;
+  const gamma = ((lat.gamma ?? 90) * Math.PI) / 180;
+
+  let dx = a.x - b.x;
+  let dy = a.y - b.y;
+  let dz = a.z - b.z;
+  dx -= Math.round(dx);
+  dy -= Math.round(dy);
+  dz -= Math.round(dz);
+
+  const cosAlpha = Math.cos(alpha);
+  const cosBeta = Math.cos(beta);
+  const cosGamma = Math.cos(gamma);
+  const sinGamma = Math.sin(gamma);
+
+  const cx = lat.a * dx + lat.b * cosGamma * dy + lat.c * cosBeta * dz;
+  const cy = lat.b * sinGamma * dy + lat.c * ((cosAlpha - cosBeta * cosGamma) / sinGamma) * dz;
+  const term = 1 - cosAlpha * cosAlpha - cosBeta * cosBeta - cosGamma * cosGamma + 2 * cosAlpha * cosBeta * cosGamma;
+  const cz = lat.c * Math.sqrt(Math.max(0, term)) / sinGamma * dz;
+
+  return Math.sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+function unionFind(n: number): { parent: Int32Array; rank: Int32Array; find: (x: number) => number; union: (x: number, y: number) => void } {
+  const parent = new Int32Array(n);
+  const rank = new Int32Array(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+
+  function find(x: number): number {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  }
+
+  function union(a: number, b: number): void {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) return;
+    if (rank[ra] < rank[rb]) { parent[ra] = rb; }
+    else if (rank[ra] > rank[rb]) { parent[rb] = ra; }
+    else { parent[rb] = ra; rank[ra]++; }
+  }
+
+  return { parent, rank, find, union };
+}
+
+export function checkHydrogenPercolation(
+  atoms: PercolationAtom[],
+  lattice: PercolationLattice,
+  cutoff: number = H_PERCOLATION_CUTOFF,
+): HydrogenPercolationResult {
+  const hAtoms = atoms.filter(a => a.symbol === "H");
+  const hCount = hAtoms.length;
+
+  if (hCount === 0) {
+    return { hAtomCount: 0, clusterCount: 0, largestClusterSize: 0, largestClusterFraction: 0, percolates3D: false, cutoffAngstrom: cutoff };
+  }
+  if (hCount === 1) {
+    return { hAtomCount: 1, clusterCount: 1, largestClusterSize: 1, largestClusterFraction: 1, percolates3D: false, cutoffAngstrom: cutoff };
+  }
+
+  const uf = unionFind(hCount);
+
+  const spansAxis = [false, false, false];
+
+  for (let i = 0; i < hCount; i++) {
+    for (let j = i + 1; j < hCount; j++) {
+      const dist = periodicDistance(hAtoms[i], hAtoms[j], lattice);
+      if (dist <= cutoff) {
+        uf.union(i, j);
+
+        let dx = hAtoms[i].x - hAtoms[j].x;
+        let dy = hAtoms[i].y - hAtoms[j].y;
+        let dz = hAtoms[i].z - hAtoms[j].z;
+        if (Math.abs(dx - Math.round(dx)) > 0.01 && Math.abs(Math.round(dx)) >= 1) spansAxis[0] = true;
+        if (Math.abs(dy - Math.round(dy)) > 0.01 && Math.abs(Math.round(dy)) >= 1) spansAxis[1] = true;
+        if (Math.abs(dz - Math.round(dz)) > 0.01 && Math.abs(Math.round(dz)) >= 1) spansAxis[2] = true;
+      }
+    }
+  }
+
+  const clusterSizes: Record<number, number> = {};
+  const clusterSpans: Record<number, [boolean, boolean, boolean]> = {};
+  for (let i = 0; i < hCount; i++) {
+    const root = uf.find(i);
+    clusterSizes[root] = (clusterSizes[root] || 0) + 1;
+    if (!clusterSpans[root]) clusterSpans[root] = [false, false, false];
+  }
+
+  for (let i = 0; i < hCount; i++) {
+    for (let j = i + 1; j < hCount; j++) {
+      if (uf.find(i) !== uf.find(j)) continue;
+      const dist = periodicDistance(hAtoms[i], hAtoms[j], lattice);
+      if (dist <= cutoff) {
+        const root = uf.find(i);
+        let dx = hAtoms[i].x - hAtoms[j].x;
+        let dy = hAtoms[i].y - hAtoms[j].y;
+        let dz = hAtoms[i].z - hAtoms[j].z;
+        if (Math.abs(Math.round(dx)) >= 1) clusterSpans[root][0] = true;
+        if (Math.abs(Math.round(dy)) >= 1) clusterSpans[root][1] = true;
+        if (Math.abs(Math.round(dz)) >= 1) clusterSpans[root][2] = true;
+      }
+    }
+  }
+
+  const roots = Object.keys(clusterSizes).map(Number);
+  const clusterCount = roots.length;
+  const largestClusterSize = Math.max(...Object.values(clusterSizes));
+  const largestClusterFraction = largestClusterSize / hCount;
+
+  let percolates3D = false;
+  for (const root of roots) {
+    const spans = clusterSpans[root];
+    if (spans && spans[0] && spans[1] && spans[2]) {
+      percolates3D = true;
+      break;
+    }
+  }
+
+  if (!percolates3D && largestClusterFraction >= 0.9 && hCount >= 4) {
+    percolates3D = true;
+  }
+
+  return {
+    hAtomCount: hCount,
+    clusterCount,
+    largestClusterSize,
+    largestClusterFraction: Number(largestClusterFraction.toFixed(4)),
+    percolates3D,
+    cutoffAngstrom: cutoff,
+  };
 }
 
 const SODALITE_CAGE_ELEMENTS = ["La", "Y", "Ce", "Th", "Ac", "Ca", "Sr", "Ba"];
@@ -471,13 +640,22 @@ function generateInsights(analysis: Omit<HydrogenNetworkAnalysis, "insights">): 
   }
 
   if (analysis.isHydride && !analysis.percolates) {
-    insights.push(`Non-percolating hydrogen network (coordination×H-fraction=${(analysis.Hcoordination * analysis.hydrogenFraction).toFixed(2)} < 2.0) - SC score reduced by 50%`);
+    if (analysis.geometricPercolationUsed && analysis.percolationDetail) {
+      const pd = analysis.percolationDetail;
+      insights.push(`Non-percolating H network (geometric: ${pd.clusterCount} clusters, largest=${pd.largestClusterSize}/${pd.hAtomCount} H atoms, cutoff=${pd.cutoffAngstrom} A) - isolated H clusters, SC score reduced by 50%`);
+    } else {
+      insights.push(`Non-percolating hydrogen network (coordination×H-fraction=${(analysis.Hcoordination * analysis.hydrogenFraction).toFixed(2)} < 2.0) - SC score reduced by 50%`);
+    }
   }
 
   return insights;
 }
 
-export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis {
+export function analyzeHydrogenNetwork(
+  formula: string,
+  atomPositions?: PercolationAtom[],
+  latticeParams?: PercolationLattice,
+): HydrogenNetworkAnalysis {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
@@ -519,8 +697,23 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     networkPercolation = Math.min(0.6, hRatio * 0.15);
   }
 
-  const percolationMetric = coordination * hFraction;
-  const percolates = isHydride ? percolationMetric > 2.0 : false;
+  let percolates = false;
+  let geometricPercolationUsed = false;
+  let percolationDetail: HydrogenPercolationResult | undefined;
+  if (isHydride && atomPositions && latticeParams && atomPositions.length > 0) {
+    const percResult = checkHydrogenPercolation(atomPositions, latticeParams, H_PERCOLATION_CUTOFF);
+    percolates = percResult.percolates3D;
+    geometricPercolationUsed = true;
+    percolationDetail = percResult;
+    if (percolates) {
+      networkPercolation = Math.max(networkPercolation, percResult.largestClusterFraction);
+    } else {
+      networkPercolation = Math.min(networkPercolation, percResult.largestClusterFraction * 0.5);
+    }
+  } else {
+    const percolationMetric = coordination * hFraction;
+    percolates = isHydride ? percolationMetric > 2.0 : false;
+  }
 
   let anharmonicCorrectionValue = 1.0;
   try {
@@ -570,6 +763,8 @@ export function analyzeHydrogenNetwork(formula: string): HydrogenNetworkAnalysis
     hydrogenDensity,
     networkPercolation: Number(networkPercolation.toFixed(4)),
     percolates,
+    geometricPercolationUsed,
+    percolationDetail,
     phononContribution: {
       hydrogenPhononFreq: Number(hydrogenPhononFreq.toFixed(2)),
       hydrogenPhononLambda: Number(hydrogenPhononLambda.toFixed(4)),
