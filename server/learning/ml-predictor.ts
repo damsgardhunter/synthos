@@ -27,6 +27,8 @@ import {
 import { gbPredict, getConfidenceBand } from "./gradient-boost";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { getGNNPrediction, type GNNPrediction } from "./graph-neural-net";
+import { getPhysicsFeatures } from "./physics-results-store";
+import { predictLambda, recordLambdaValidation } from "./lambda-regressor";
 export { getConfidenceBand };
 
 const openai = new OpenAI({
@@ -92,6 +94,11 @@ export interface MLFeatureVector {
   muStarEstimate: number;
   pressureGpa: number;
   optimalPressureGpa: number;
+  lambdaProxy: number;
+  alphaCouplingStrength: number;
+  phononHardness: number;
+  massEnhancement: number;
+  couplingAsymmetry: number;
   _sourceFormula?: string;
 }
 
@@ -157,8 +164,15 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
   const correlation = assessCorrelationStrength(formula);
 
-  const useLambda = physics?.verifiedLambda ?? coupling.lambda;
+  const candidatePressureForLambda = (mat as any)?.pressureGpa ?? 0;
+  const lambdaPrediction = predictLambda(formula, candidatePressureForLambda);
+  const useLambda = physics?.verifiedLambda ?? lambdaPrediction.lambda;
+  const lambdaTier = physics?.verifiedLambda ? "verified" : lambdaPrediction.tier;
   const useCorrelation = physics?.correlationStrength ?? correlation.ratio;
+
+  if (lambdaPrediction.tier === "ml-regression" && physics?.verifiedLambda) {
+    recordLambdaValidation(formula, lambdaPrediction.lambda, physics.verifiedLambda);
+  }
 
   const phononCouplingEstimate = Math.min(1.0, useLambda / 3.0);
 
@@ -289,9 +303,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   const fermiSurfaceNestingScore = electronic.nestingScore ?? 0;
 
-  const dosAtEF = electronic.densityOfStatesAtFermi;
+  let dosAtEF = electronic.densityOfStatesAtFermi;
 
-  const muStarEstimate = coupling.muStar;
+  let muStarEstimate = coupling.muStar;
 
   let candidatePressure = (mat as any)?.pressureGpa ?? 0;
 
@@ -306,6 +320,38 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     const pressureResult = simulatePressureEffects(formula, electronic, phonon, coupling);
     optimalPressureGpa = pressureResult.optimalPressure;
   } catch {}
+
+  let finalLambda = useLambda;
+  let finalLogPhononFreq = coupling.omegaLog;
+  let hasStablePhonons = !phonon.hasImaginaryModes;
+  let lambdaProxy = 0;
+  let alphaCouplingStrength = 0;
+  let phononHardnessVal = 0;
+  let massEnhancementVal = 1 + useLambda;
+  let couplingAsymmetryVal = 1.0;
+
+  const physicsStore = getPhysicsFeatures(formula);
+  if (physicsStore) {
+    finalLambda = physicsStore.verifiedLambda;
+    finalLogPhononFreq = physicsStore.verifiedOmegaLog;
+    dosAtEF = 0.3 * dosAtEF + 0.7 * physicsStore.verifiedDosEF;
+    hasStablePhonons = physicsStore.verifiedPhononStable;
+    muStarEstimate = physicsStore.verifiedMuStar;
+
+    lambdaProxy = physicsStore.lambdaProxy;
+    alphaCouplingStrength = physicsStore.alphaCouplingStrength;
+    phononHardnessVal = physicsStore.phononHardness;
+    massEnhancementVal = physicsStore.massEnhancement;
+    couplingAsymmetryVal = physicsStore.couplingAsymmetry;
+  } else {
+    const avgMass = getAverageMass(counts);
+    const avgEta = getCompositionWeightedProperty(counts, "mcMillanHopfieldEta") ?? 0;
+    const omega2 = coupling.omega2Avg > 0 ? coupling.omega2Avg : (phonon.maxPhononFrequency * 0.7);
+    if (dosAtEF > 0 && avgMass > 0 && omega2 > 0) {
+      lambdaProxy = (dosAtEF * avgEta) / (avgMass * omega2 * 0.001);
+    }
+    phononHardnessVal = coupling.omega2Avg > 0 ? coupling.omegaLog / coupling.omega2Avg : 0;
+  }
 
   return {
     avgElectronegativity: avgEN,
@@ -330,8 +376,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     fermiSurfaceType: electronic.fermiSurfaceTopology,
     dimensionalityScore,
     anharmonicityFlag: phonon.anharmonicityIndex > 0.4,
-    electronPhononLambda: useLambda,
-    logPhononFreq: coupling.omegaLog,
+    electronPhononLambda: finalLambda,
+    logPhononFreq: finalLogPhononFreq,
     upperCriticalField: useHc2,
     metallicity: useMetallicity,
     avgAtomicRadius,
@@ -365,6 +411,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     muStarEstimate,
     pressureGpa: candidatePressure,
     optimalPressureGpa,
+    lambdaProxy,
+    alphaCouplingStrength,
+    phononHardness: phononHardnessVal,
+    massEnhancement: massEnhancementVal,
+    couplingAsymmetry: couplingAsymmetryVal,
     _sourceFormula: formula,
   };
 }

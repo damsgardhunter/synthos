@@ -45,6 +45,9 @@ async function getEliashbergModule() {
   return _eliashbergModule;
 }
 import { getActiveLearningStats, getActiveLearningCycleHistory, getPressureCoverageStats } from "./learning/active-learning";
+import { getPhysicsStoreStats } from "./learning/physics-results-store";
+import { predictLambda, getLambdaRegressorStats, initLambdaRegressor } from "./learning/lambda-regressor";
+import { predictPhononProperties, getPhononSurrogateStats, initPhononSurrogate } from "./physics/phonon-surrogate";
 import { getCalibrationStats as getSurrogateFitnessStats } from "./learning/surrogate-fitness";
 import { getPillarDFTFeedbackStats } from "./inverse/sc-pillars-optimizer";
 import { extractFeatures } from "./learning/ml-predictor";
@@ -156,6 +159,10 @@ import {
   getActiveHypotheses, getAllHypotheses, testHypothesisById,
   getHypothesisStats, runHypothesisCycle,
 } from "./theory/hypothesis-engine";
+import {
+  runRelaxation, computePhonons, computeEph, computeTc,
+  getPhysicsApiStats,
+} from "./physics/physics-api";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -2942,6 +2949,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/physics-results/stats", async (_req, res) => {
+    try {
+      const stats = getPhysicsStoreStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch physics results stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
   app.get("/api/quantum-engine/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
@@ -2950,6 +2966,104 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Quantum engine pipeline failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/lambda-regressor/stats", async (_req, res) => {
+    try {
+      const stats = getLambdaRegressorStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch lambda regressor stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/lambda-regressor/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const prediction = predictLambda(formula, pressure);
+      res.json(prediction);
+    } catch (e: any) {
+      res.status(500).json({ error: "Lambda prediction failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  try {
+    initLambdaRegressor();
+  } catch {}
+
+  try {
+    initPhononSurrogate();
+  } catch {}
+
+  app.get("/api/phonon-surrogate/stats", async (_req, res) => {
+    try {
+      const stats = getPhononSurrogateStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch phonon surrogate stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/phonon-surrogate/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const prediction = predictPhononProperties(formula, pressure);
+      res.json(prediction);
+    } catch (e: any) {
+      res.status(500).json({ error: "Phonon surrogate prediction failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-api/stats", async (_req, res) => {
+    try {
+      res.json(getPhysicsApiStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch physics API stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-api/relaxation/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = await runRelaxation(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Relaxation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-api/phonons/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = await computePhonons(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Phonon computation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-api/eph/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const result = await computeEph(formula, pressure);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Electron-phonon coupling computation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/physics-api/tc/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = parseFloat(req.query.pressure as string) || 0;
+      const result = await computeTc(formula, pressure);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Tc computation failed", detail: e.message?.slice(0, 200) });
     }
   });
 

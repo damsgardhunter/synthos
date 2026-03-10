@@ -193,6 +193,11 @@ const FEATURE_MEANS: Record<string, number> = {
   muStarEstimate: 0.13,
   pressureGpa: 0,
   optimalPressureGpa: 0,
+  lambdaProxy: 0,
+  alphaCouplingStrength: 0,
+  phononHardness: 0.5,
+  massEnhancement: 1.5,
+  couplingAsymmetry: 1.0,
   bandGap: 0,
   formationEnergy: 0,
   stability: 0.5,
@@ -305,6 +310,11 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     sanitize(f.muStarEstimate, FEATURE_MEANS.muStarEstimate),
     pressureGpa,
     sanitize(f.optimalPressureGpa, FEATURE_MEANS.optimalPressureGpa),
+    sanitize(f.lambdaProxy, FEATURE_MEANS.lambdaProxy),
+    sanitize(f.alphaCouplingStrength, FEATURE_MEANS.alphaCouplingStrength),
+    sanitize(f.phononHardness, FEATURE_MEANS.phononHardness),
+    sanitize(f.massEnhancement, FEATURE_MEANS.massEnhancement),
+    sanitize(f.couplingAsymmetry, FEATURE_MEANS.couplingAsymmetry),
     sanitize((f as any).bandGap, FEATURE_MEANS.bandGap),
     sanitize((f as any).formationEnergy, FEATURE_MEANS.formationEnergy),
     sanitize((f as any).stability, FEATURE_MEANS.stability),
@@ -349,6 +359,7 @@ const PHYSICS_FEATURE_NAMES = [
   "motifScore", "orbitalDFrac", "mottProx", "topoScore", "dimScoreV2",
   "phononSoftening", "spinFluc", "fsNesting", "dosEF", "muStar",
   "pressureGpa", "optimalPressure",
+  "lambdaProxy", "alphaCouplingStrength", "phononHardness", "massEnhancement", "couplingAsymmetry",
   "bandGap", "formationEnergy", "stability", "crystalSymmetry",
   "multiBandScore", "miedemaFormEnergy", "nonCentrosymmetric",
 ];
@@ -903,6 +914,9 @@ export interface EvaluatedEntry {
   stable: boolean;
   source: "dft" | "xtb" | "external" | "active-learning";
   evaluatedAt: number;
+  lambda?: number;
+  omegaLog?: number;
+  dosAtEF?: number;
 }
 
 const evaluatedDataset: EvaluatedEntry[] = [];
@@ -923,7 +937,10 @@ export function incorporateDFTResult(
   tc: number,
   formationEnergy: number | null,
   stable: boolean,
-  source: EvaluatedEntry["source"] = "dft"
+  source: EvaluatedEntry["source"] = "dft",
+  lambda?: number,
+  omegaLog?: number,
+  dosAtEF?: number
 ): boolean {
   totalDFTFeedback++;
 
@@ -935,6 +952,9 @@ export function incorporateDFTResult(
       existing.stable = stable;
       existing.source = source;
       existing.evaluatedAt = Date.now();
+      if (lambda != null) existing.lambda = lambda;
+      if (omegaLog != null) existing.omegaLog = omegaLog;
+      if (dosAtEF != null) existing.dosAtEF = dosAtEF;
       return true;
     }
     return false;
@@ -948,6 +968,9 @@ export function incorporateDFTResult(
     stable,
     source,
     evaluatedAt: Date.now(),
+    lambda,
+    omegaLog,
+    dosAtEF,
   });
 
   return true;

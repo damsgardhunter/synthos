@@ -2,6 +2,8 @@ import { runFullDFT, isQEAvailable, type QEFullResult } from "./qe-worker";
 import { runXTBEnrichment } from "./qe-dft-engine";
 import { runEliashbergPipeline, type EliashbergPipelineResult } from "../physics/eliashberg-pipeline";
 import { computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } from "../learning/physics-engine";
+import { recordPhysicsResult } from "../learning/physics-results-store";
+import { predictLambda, recordLambdaValidation } from "../learning/lambda-regressor";
 
 export interface QuantumEngineDatasetEntry {
   material: string;
@@ -363,6 +365,40 @@ export async function runQuantumEnginePipeline(
     datasetStore.splice(0, Math.floor(MAX_DATASET_SIZE * 0.1));
   }
   datasetStore.push(entry);
+
+  try {
+    recordPhysicsResult({
+      formula,
+      pressure: pressureGpa,
+      lambda,
+      omegaLog,
+      tc,
+      dosAtEF: fermiDos,
+      phononStable,
+      muStar: eliashbergResult?.muStar ?? 0.10,
+      omega2: eliashbergResult?.omega2 ?? 0,
+      gapRatio: eliashbergResult?.gapRatio ?? 3.53,
+      isStrongCoupling: eliashbergResult?.isStrongCoupling ?? false,
+      isotopeAlpha: eliashbergResult?.isotopeEffect.alpha ?? 0.5,
+      formationEnergy,
+      bandGap,
+      isMetallic,
+      tier,
+      alpha2FPeak: alpha2FSummary.peakHeight,
+      alpha2FPeakFreq: alpha2FSummary.peakFrequency,
+      modeResolvedLambda: alpha2FSummary.lambdaByRange,
+      timestamp: Date.now(),
+    });
+  } catch {}
+
+  if (lambda > 0) {
+    try {
+      const mlPred = predictLambda(formula, pressureGpa);
+      if (mlPred.tier === "ml-regression") {
+        recordLambdaValidation(formula, mlPred.lambda, lambda);
+      }
+    } catch {}
+  }
 
   pipelineStats.totalRuns++;
   if (tier === "full-dft") pipelineStats.fullDftRuns++;

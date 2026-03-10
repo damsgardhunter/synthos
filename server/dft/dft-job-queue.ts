@@ -4,14 +4,42 @@ import type { QEFullResult } from "./qe-worker";
 import type { DftJob } from "@shared/schema";
 
 const POLL_INTERVAL_MS = 30_000;
-const MAX_CONCURRENT = 1;
+const MAX_CONCURRENT = 3;
 
-let isProcessing = false;
+type PipelineStage = "candidate_queue" | "dft_workers" | "phonon_workers" | "epc_workers";
+
+interface StageMetrics {
+  currentDepth: number;
+  totalProcessed: number;
+  totalSucceeded: number;
+  totalFailed: number;
+  avgProcessingTimeMs: number;
+  lastProcessedAt: number | null;
+}
+
+const stageMetrics: Record<PipelineStage, StageMetrics> = {
+  candidate_queue: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
+  dft_workers: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
+  phonon_workers: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
+  epc_workers: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
+};
+
+function updateStageMetrics(stage: PipelineStage, success: boolean, processingTimeMs: number) {
+  const m = stageMetrics[stage];
+  m.totalProcessed++;
+  if (success) m.totalSucceeded++;
+  else m.totalFailed++;
+  m.lastProcessedAt = Date.now();
+  const prev = m.avgProcessingTimeMs;
+  m.avgProcessingTimeMs = prev === 0 ? processingTimeMs : prev * 0.8 + processingTimeMs * 0.2;
+}
+
+let activeWorkers = 0;
 let workerLoopTimer: ReturnType<typeof setTimeout> | null = null;
 let totalProcessed = 0;
 let totalSucceeded = 0;
 let totalFailed = 0;
-let currentJob: DftJob | null = null;
+const activeJobs = new Map<number, DftJob>();
 let staleJobsCleanedCount = 0;
 let broadcastFn: ((event: string, data: any) => void) | null = null;
 
@@ -59,6 +87,8 @@ export async function submitDFTJob(
     inputData: { formula, candidateId, requestedAt: new Date().toISOString() },
   });
 
+  stageMetrics.candidate_queue.currentDepth++;
+
   console.log(`[DFT-Queue] Queued job #${job.id} for ${formula} (priority=${priority}, type=${jobType})`);
 
   if (broadcastFn) {
@@ -69,14 +99,25 @@ export async function submitDFTJob(
 }
 
 async function processNextJob(): Promise<boolean> {
-  if (isProcessing) return false;
+  if (activeWorkers >= MAX_CONCURRENT) return false;
 
   const queued = await storage.getQueuedDftJobs(1);
   if (queued.length === 0) return false;
 
   const job = queued[0];
-  isProcessing = true;
-  currentJob = job;
+  activeWorkers++;
+  activeJobs.set(job.id, job);
+
+  if (stageMetrics.candidate_queue.currentDepth > 0) {
+    stageMetrics.candidate_queue.currentDepth--;
+  }
+  stageMetrics.candidate_queue.totalProcessed++;
+  stageMetrics.candidate_queue.totalSucceeded++;
+  stageMetrics.candidate_queue.lastProcessedAt = Date.now();
+
+  stageMetrics.dft_workers.currentDepth++;
+
+  const jobStartTime = Date.now();
 
   try {
     await storage.updateDftJob(job.id, {
@@ -84,7 +125,7 @@ async function processNextJob(): Promise<boolean> {
       startedAt: new Date(),
     } as any);
 
-    console.log(`[DFT-Queue] Processing job #${job.id}: ${job.formula} (type=${job.jobType})`);
+    console.log(`[DFT-Queue] Processing job #${job.id}: ${job.formula} (type=${job.jobType}, workers=${activeWorkers}/${MAX_CONCURRENT})`);
 
     if (broadcastFn) {
       broadcastFn("dftJobStarted", { jobId: job.id, formula: job.formula });
@@ -100,13 +141,29 @@ async function processNextJob(): Promise<boolean> {
         method: "QE-PW-PBE",
         scf: null,
         phonon: null,
+        bandStructure: null,
         wallTimeTotal: 0,
         error: "Quantum ESPRESSO binaries not available",
       };
     }
 
-    const success = dftResult.scf?.converged || false;
-    const status = success ? "completed" : "failed";
+    const scfSuccess = dftResult.scf?.converged || false;
+    const status = scfSuccess ? "completed" : "failed";
+    const dftElapsed = Date.now() - jobStartTime;
+
+    stageMetrics.dft_workers.currentDepth--;
+    updateStageMetrics("dft_workers", scfSuccess, dftElapsed);
+
+    if (scfSuccess && dftResult.phonon) {
+      const phononSuccess = dftResult.phonon.converged;
+      stageMetrics.phonon_workers.currentDepth++;
+      updateStageMetrics("phonon_workers", phononSuccess, dftResult.phonon.wallTimeSeconds * 1000);
+      stageMetrics.phonon_workers.currentDepth--;
+
+      stageMetrics.epc_workers.currentDepth++;
+      updateStageMetrics("epc_workers", phononSuccess && !dftResult.phonon.hasImaginary, 0);
+      stageMetrics.epc_workers.currentDepth--;
+    }
 
     await storage.updateDftJob(job.id, {
       status,
@@ -116,7 +173,7 @@ async function processNextJob(): Promise<boolean> {
     } as any);
 
     totalProcessed++;
-    if (success) {
+    if (scfSuccess) {
       totalSucceeded++;
 
       try {
@@ -182,12 +239,15 @@ async function processNextJob(): Promise<boolean> {
         formula: job.formula,
         status,
         wallTime: dftResult.wallTimeTotal,
-        converged: success,
+        converged: scfSuccess,
       });
     }
 
     return true;
   } catch (err: any) {
+    stageMetrics.dft_workers.currentDepth = Math.max(0, stageMetrics.dft_workers.currentDepth - 1);
+    updateStageMetrics("dft_workers", false, Date.now() - jobStartTime);
+
     await storage.updateDftJob(job.id, {
       status: "failed",
       completedAt: new Date(),
@@ -198,8 +258,8 @@ async function processNextJob(): Promise<boolean> {
     console.log(`[DFT-Queue] Job #${job.id} error: ${err.message}`);
     return false;
   } finally {
-    isProcessing = false;
-    currentJob = null;
+    activeWorkers--;
+    activeJobs.delete(job.id);
   }
 }
 
@@ -237,12 +297,18 @@ export function startDFTWorkerLoop() {
 
   cleanupStaleJobs().catch(() => {});
 
-  console.log("[DFT-Queue] Starting DFT worker loop (poll every 30s)");
+  console.log(`[DFT-Queue] Starting DFT worker loop (poll every 30s, max ${MAX_CONCURRENT} concurrent)`);
 
   async function loop() {
     try {
-      const processed = await processNextJob();
-      if (processed) {
+      const launched: Promise<boolean>[] = [];
+      const slotsAvailable = MAX_CONCURRENT - activeWorkers;
+      for (let i = 0; i < slotsAvailable; i++) {
+        launched.push(processNextJob());
+      }
+      const results = await Promise.all(launched);
+      const anyProcessed = results.some(r => r);
+      if (anyProcessed) {
         const moreQueued = await storage.getQueuedDftJobs(1);
         if (moreQueued.length > 0) {
           workerLoopTimer = setTimeout(loop, 2000);
@@ -266,6 +332,10 @@ export function stopDFTWorkerLoop() {
   }
 }
 
+export function getStageMetrics(): Record<PipelineStage, StageMetrics> {
+  return JSON.parse(JSON.stringify(stageMetrics));
+}
+
 export async function getDFTQueueStats() {
   const dbStats = await storage.getDftJobStats();
   const recentJobs = await storage.getRecentDftJobs(10);
@@ -275,16 +345,22 @@ export async function getDFTQueueStats() {
   const adjustedFailed = Math.max(0, dbFailed - staleJobsCleanedCount);
   const dbCompleted = dbSucceeded + adjustedFailed;
 
+  const currentActiveFormulas = Array.from(activeJobs.values()).map(j => j.formula);
+
   return {
     ...dbStats,
     totalProcessed: dbCompleted,
     totalSucceeded: dbSucceeded,
     totalFailed: adjustedFailed,
     staleJobsCleaned: staleJobsCleanedCount,
-    isProcessing,
-    currentFormula: currentJob?.formula || null,
+    isProcessing: activeWorkers > 0,
+    activeWorkers,
+    maxConcurrent: MAX_CONCURRENT,
+    currentFormula: currentActiveFormulas[0] || null,
+    activeFormulas: currentActiveFormulas,
     qeAvailable: isQEAvailable(),
     stageFailures: getStageFailureCounts(),
+    pipelineStages: stageMetrics,
     recentJobs: recentJobs.map(j => {
       const out = j.outputData as any;
       return {

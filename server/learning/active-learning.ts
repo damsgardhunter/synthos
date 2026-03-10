@@ -13,6 +13,7 @@ import { generateAdaptivePressureSamples, recordPressureCoverage, findOptimalPre
 import { detectPhaseTransitions } from "./pressure-phase-detector";
 import { estimateFamilyPressure } from "./candidate-generator";
 import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResult } from "../dft/quantum-engine-pipeline";
+import { getElementData } from "./elemental-data";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -124,16 +125,140 @@ function computeAdaptiveAlpha(): number {
   return Math.max(minAlpha, baseAlpha - decayRate * convergenceStats.modelRetrains);
 }
 
+function parseFormulaElements(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
+  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseFloat(match[2]) : 1;
+    counts[el] = (counts[el] || 0) + num;
+  }
+  return counts;
+}
+
+const seenCompositions: Map<string, number[]> = new Map();
+
+function computeCompositionVector(formula: string): number[] {
+  const counts = parseFormulaElements(formula);
+  const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const vec: number[] = [];
+  for (const el of Object.keys(counts).sort()) {
+    vec.push((counts[el] || 0) / total);
+  }
+  return vec;
+}
+
+function computeCompositionDistance(formula: string): number {
+  const vec = computeCompositionVector(formula);
+  if (seenCompositions.size === 0) return 1.0;
+
+  let minDist = Infinity;
+  seenCompositions.forEach((refVec) => {
+    const maxLen = Math.max(vec.length, refVec.length);
+    let sumSq = 0;
+    for (let i = 0; i < maxLen; i++) {
+      const diff = (vec[i] ?? 0) - (refVec[i] ?? 0);
+      sumSq += diff * diff;
+    }
+    minDist = Math.min(minDist, Math.sqrt(sumSq));
+  });
+  return Math.min(1.0, minDist);
+}
+
+function computeElementRarity(formula: string): number {
+  const counts = parseFormulaElements(formula);
+  const elements = Object.keys(counts);
+  if (elements.length === 0) return 0;
+
+  const commonElements = new Set([
+    "Fe", "Cu", "Ni", "Co", "Ti", "Al", "Mg", "Zn", "Mn", "Cr",
+    "O", "N", "C", "H", "S", "Si", "B", "P", "Se", "Te",
+    "La", "Y", "Ba", "Sr", "Ca", "Nb", "V", "Mo", "W", "Pb",
+  ]);
+
+  let raritySum = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const isCommon = commonElements.has(el);
+    const atomicNumber = data?.atomicNumber ?? 50;
+    let elRarity = isCommon ? 0.1 : 0.5;
+    if (atomicNumber > 56 && atomicNumber <= 71) elRarity += 0.2;
+    if (atomicNumber > 88) elRarity += 0.3;
+    raritySum += Math.min(1.0, elRarity);
+  }
+  return Math.min(1.0, raritySum / elements.length);
+}
+
+function computeStructuralUniqueness(candidate: SuperconductorCandidate): number {
+  const counts = parseFormulaElements(candidate.formula);
+  const elements = Object.keys(counts);
+  const nElements = elements.length;
+
+  let uniqueness = 0;
+  if (nElements >= 4) uniqueness += 0.3;
+  else if (nElements >= 3) uniqueness += 0.15;
+
+  const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const fractions = Object.values(counts).map(c => c / total);
+  const entropy = -fractions.reduce((s, f) => s + (f > 0 ? f * Math.log2(f) : 0), 0);
+  const maxEntropy = Math.log2(Math.max(nElements, 1)) || 1;
+  uniqueness += 0.4 * (entropy / maxEntropy);
+
+  const hasUnusualRatio = fractions.some(f => f > 0.7) || fractions.some(f => f < 0.05 && f > 0);
+  if (hasUnusualRatio) uniqueness += 0.15;
+
+  const family = (candidate as any).family ?? "";
+  if (typeof family === "string" && family.length > 0) {
+    const uncommonFamilies = ["skutterudite", "chevrel", "clathrate", "max-phase", "heusler"];
+    if (uncommonFamilies.some(f => family.toLowerCase().includes(f))) {
+      uniqueness += 0.15;
+    }
+  }
+
+  return Math.min(1.0, uniqueness);
+}
+
+function computeNoveltyScore(candidate: SuperconductorCandidate): number {
+  const compositionDist = computeCompositionDistance(candidate.formula);
+  const elementRarity = computeElementRarity(candidate.formula);
+  const structuralUniqueness = computeStructuralUniqueness(candidate);
+  return 0.4 * compositionDist + 0.3 * elementRarity + 0.3 * structuralUniqueness;
+}
+
+function computeStabilityProbability(candidate: SuperconductorCandidate, candidatePressure: number): number {
+  let stabilityProb = 0.5;
+
+  try {
+    const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
+    if (gnnResult.stabilityProbability != null && Number.isFinite(gnnResult.stabilityProbability)) {
+      stabilityProb = gnnResult.stabilityProbability;
+    }
+  } catch {}
+
+  const candidateStability = (candidate as any).stability ?? (candidate as any).stabilityScore;
+  if (candidateStability != null && Number.isFinite(candidateStability)) {
+    stabilityProb = 0.6 * stabilityProb + 0.4 * Math.min(1.0, Math.max(0, candidateStability));
+  }
+
+  return Math.min(1.0, Math.max(0, stabilityProb));
+}
+
 export function selectForDFT(
   candidates: SuperconductorCandidate[],
   budget: number = 20
 ): RankedCandidate[] {
-  const alpha = computeAdaptiveAlpha();
-
   const pressureExplorationSlots = Math.min(3, Math.ceil(budget * 0.15));
   const bestTcSlots = Math.min(8, Math.ceil(budget * 0.4));
   const highUncertaintySlots = Math.min(5, Math.ceil(budget * 0.25));
   const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pressureExplorationSlots);
+
+  seenCompositions.clear();
+  for (const c of candidates) {
+    seenCompositions.set(c.formula, computeCompositionVector(c.formula));
+  }
 
   const scored: {
     candidate: SuperconductorCandidate;
@@ -141,6 +266,8 @@ export function selectForDFT(
     gnnUncertainty: number;
     xgbUncertainty: number;
     combinedUncertainty: number;
+    stabilityProbability: number;
+    noveltyScore: number;
     acquisitionScore: number;
   }[] = [];
 
@@ -164,15 +291,33 @@ export function selectForDFT(
     } catch (e: any) { console.error("[ActiveLearning] XGB uncertainty error:", e?.message?.slice(0, 200)); }
 
     const combinedUncertainty = 0.5 * gnnUncertainty + 0.5 * xgbUncertainty;
-    const acquisitionScore = normalizedTc + alpha * combinedUncertainty;
 
-    scored.push({ candidate, normalizedTc, gnnUncertainty, xgbUncertainty, combinedUncertainty, acquisitionScore });
+    const stabilityProbability = computeStabilityProbability(candidate, candidatePressure);
+
+    const noveltyScore = computeNoveltyScore(candidate);
+
+    const acquisitionScore =
+      0.4 * normalizedTc +
+      0.3 * combinedUncertainty +
+      0.2 * stabilityProbability +
+      0.1 * noveltyScore;
+
+    scored.push({
+      candidate,
+      normalizedTc,
+      gnnUncertainty,
+      xgbUncertainty,
+      combinedUncertainty,
+      stabilityProbability,
+      noveltyScore,
+      acquisitionScore,
+    });
   }
 
   const selected: RankedCandidate[] = [];
   const seenFormulas = new Set<string>();
 
-  const byTc = [...scored].sort((a, b) => b.normalizedTc - a.normalizedTc);
+  const byTc = [...scored].sort((a, b) => b.acquisitionScore - a.acquisitionScore || b.normalizedTc - a.normalizedTc);
   for (const s of byTc) {
     if (selected.length >= bestTcSlots) break;
     if (seenFormulas.has(s.candidate.formula)) continue;
@@ -187,7 +332,7 @@ export function selectForDFT(
     });
   }
 
-  const byUncertainty = [...scored].sort((a, b) => b.combinedUncertainty - a.combinedUncertainty);
+  const byUncertainty = [...scored].sort((a, b) => b.acquisitionScore - a.acquisitionScore || b.combinedUncertainty - a.combinedUncertainty);
   for (const s of byUncertainty) {
     if (selected.length >= bestTcSlots + highUncertaintySlots) break;
     if (seenFormulas.has(s.candidate.formula)) continue;
@@ -344,7 +489,10 @@ async function runDFTEnrichmentForCandidate(
       reconciledTc,
       formEnergy,
       isStable,
-      dftSource
+      dftSource,
+      entry.lambda > 0 ? entry.lambda : undefined,
+      entry.omegaLog > 0 ? entry.omegaLog : undefined,
+      entry.dosAtEF > 0 ? entry.dosAtEF : undefined
     );
 
     addDFTTrainingResult({
@@ -355,6 +503,10 @@ async function runDFTEnrichmentForCandidate(
       structure: undefined,
       prototype: undefined,
       source: entry.tier === "full-dft" ? "external" : "active-learning",
+      lambda: entry.lambda > 0 ? entry.lambda : undefined,
+      omegaLog: entry.omegaLog > 0 ? entry.omegaLog : undefined,
+      dosAtEF: entry.dosAtEF > 0 ? entry.dosAtEF : undefined,
+      phononStable: entry.isPhononStable,
     });
 
     let gnnTcPredicted = 0;

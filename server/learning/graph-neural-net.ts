@@ -1786,6 +1786,10 @@ export interface DFTTrainingRecord {
   prototype?: string;
   source: "dft" | "external" | "active-learning" | "supercon";
   addedAt: number;
+  lambda?: number;
+  omegaLog?: number;
+  dosAtEF?: number;
+  phononStable?: boolean;
 }
 
 interface DFTDatasetGrowthEntry {
@@ -1806,6 +1810,10 @@ export function addDFTTrainingResult(record: {
   structure?: any;
   prototype?: string;
   source: DFTTrainingRecord["source"];
+  lambda?: number;
+  omegaLog?: number;
+  dosAtEF?: number;
+  phononStable?: boolean;
 }): boolean {
   const existing = dftTrainingDataset.find(r => r.formula === record.formula);
   if (existing) {
@@ -1814,6 +1822,10 @@ export function addDFTTrainingResult(record: {
     if (record.tc > 0 && existing.tc === 0) existing.tc = record.tc;
     if (record.structure) existing.structure = record.structure;
     if (record.prototype) existing.prototype = record.prototype;
+    if (record.lambda != null) existing.lambda = record.lambda;
+    if (record.omegaLog != null) existing.omegaLog = record.omegaLog;
+    if (record.dosAtEF != null) existing.dosAtEF = record.dosAtEF;
+    if (record.phononStable != null) existing.phononStable = record.phononStable;
     return false;
   }
 
@@ -1830,6 +1842,10 @@ export function addDFTTrainingResult(record: {
     prototype: record.prototype,
     source: record.source,
     addedAt: Date.now(),
+    lambda: record.lambda,
+    omegaLog: record.omegaLog,
+    dosAtEF: record.dosAtEF,
+    phononStable: record.phononStable,
   });
 
   datasetGrowthHistory.push({

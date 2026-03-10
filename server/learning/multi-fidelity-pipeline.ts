@@ -22,6 +22,8 @@ import { computeEnthalpyStability } from "./enthalpy-stability";
 import { findBestPrecursors, computePrecursorAvailabilityScore } from "../synthesis/precursor-database";
 import { predictBandStructure } from "../physics/band-structure-surrogate";
 import { runEliashbergPipeline } from "../physics/eliashberg-pipeline";
+import { predictLambda } from "./lambda-regressor";
+import { predictPhononProperties } from "../physics/phonon-surrogate";
 
 const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Cuprates: -1.2,
@@ -278,6 +280,30 @@ async function stage2_PhononCoupling(
   electronicData: any
 ): Promise<{ passed: boolean; reason: string | null; data: any }> {
   const start = Date.now();
+
+  const phononSurrogate = predictPhononProperties(candidate.formula, candidate.pressureGpa ?? 0);
+  if (phononSurrogate.confidence > 0.4 && !phononSurrogate.phononStability && phononSurrogate.stabilityProbability < 0.3) {
+    await logComputationalResult(
+      candidate.id, candidate.formula, 2, "phonon_coupling",
+      { phononSurrogatePrescreen: { ...phononSurrogate } },
+      false, `Phonon surrogate pre-filter: unstable (stability=${phononSurrogate.stabilityProbability.toFixed(3)})`, Date.now() - start, 0.65
+    );
+    const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
+    const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
+    return { passed: false, reason: `Phonon surrogate pre-filter: dynamically unstable (stability=${phononSurrogate.stabilityProbability.toFixed(3)})`, data: { phonon, coupling, eliashbergPipeline: null, phononSurrogate } };
+  }
+
+  const mlLambda = predictLambda(candidate.formula, candidate.pressureGpa ?? 0);
+  if (mlLambda.tier === "ml-regression" && mlLambda.confidence > 0.5 && mlLambda.lambda < 0.25) {
+    await logComputationalResult(
+      candidate.id, candidate.formula, 2, "phonon_coupling",
+      { mlLambdaPrescreen: { lambda: mlLambda.lambda, confidence: mlLambda.confidence, tier: mlLambda.tier }, phononSurrogate },
+      false, `ML lambda pre-filter: lambda=${mlLambda.lambda.toFixed(3)} too low (threshold 0.25)`, Date.now() - start, 0.7
+    );
+    const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
+    const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
+    return { passed: false, reason: `ML lambda pre-filter: lambda=${mlLambda.lambda.toFixed(3)} too low`, data: { phonon, coupling, eliashbergPipeline: null, mlLambda, phononSurrogate } };
+  }
 
   const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
   const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
