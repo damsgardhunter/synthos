@@ -1176,6 +1176,11 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     logModelVersion("error-rate-correction", X.length);
   }
 
+  try {
+    const { updateOODModel } = require("./ood-detector");
+    updateOODModel();
+  } catch {}
+
   return { retrained: true, datasetSize: X.length, newEntries: newFromEval };
 }
 

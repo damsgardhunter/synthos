@@ -16,6 +16,7 @@ import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResu
 import { getElementData } from "./elemental-data";
 import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
+import { computeOODScore } from "./ood-detector";
 import {
   addBatchFromEvaluation, startNewBatchCycle, recordBatchCycle,
   getCurrentCycleNumber, getGroundTruthSummary, getGroundTruthForLLM,
@@ -307,6 +308,7 @@ export function selectForDFT(
     stabilityProbability: number;
     noveltyScore: number;
     acquisitionScore: number;
+    oodScore: number;
   }[] = [];
 
   for (const candidate of candidates) {
@@ -334,15 +336,26 @@ export function selectForDFT(
       embeddingUncertainty = estimateStructureUncertainty(emb);
     } catch {}
 
-    const combinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
+    let baseCombinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
+
+    let oodScoreVal = 0;
+    try {
+      const ood = computeOODScore(candidate.formula);
+      oodScoreVal = ood.oodScore;
+      if (ood.isOOD) {
+        baseCombinedUncertainty = Math.min(1.0, baseCombinedUncertainty * (1 + ood.oodScore));
+      }
+    } catch {}
+
+    const combinedUncertainty = baseCombinedUncertainty;
 
     const stabilityProbability = computeStabilityProbability(candidate, candidatePressure);
 
     const noveltyScore = computeNoveltyScore(candidate);
 
     const acquisitionScore =
-      0.55 * normalizedTc +
-      0.35 * combinedUncertainty +
+      0.50 * normalizedTc +
+      0.40 * combinedUncertainty +
       0.05 * stabilityProbability +
       0.05 * noveltyScore;
 
@@ -355,6 +368,7 @@ export function selectForDFT(
       stabilityProbability,
       noveltyScore,
       acquisitionScore,
+      oodScore: oodScoreVal,
     });
   }
 

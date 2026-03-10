@@ -406,6 +406,67 @@ export function getCalibrationState(): CalibrationState {
   };
 }
 
+export interface IntervalValidationResult {
+  expectedCoverage: number;
+  observedCoverage: number;
+  nSamples: number;
+  isMiscalibrated: boolean;
+  recommendation: string;
+  perLevel: { level: number; expected: number; observed: number; covered: number; total: number }[];
+}
+
+export function validateIntervalsCoverage(): IntervalValidationResult {
+  const entries = getLedgerSlice(0, getLedgerSize());
+  const coverageLevels = [0.90, 0.95, 0.99];
+  const perLevel: IntervalValidationResult["perLevel"] = [];
+
+  for (const level of coverageLevels) {
+    let covered = 0;
+    let total = 0;
+    for (const entry of entries) {
+      const predTc = entry.model_prediction?.Tc;
+      const actualTc = entry.ground_truth?.Tc;
+      if (!Number.isFinite(predTc) || !Number.isFinite(actualTc)) continue;
+      let sigma = 1;
+      try {
+        const features = extractFeatures(entry.formula);
+        const xgb = gbPredictWithUncertainty(features, entry.formula);
+        sigma = Math.max(xgb.totalStd, 1);
+      } catch { sigma = Math.max(Math.abs(entry.error?.tc_abs_error ?? 10), 1); }
+      const ci = getConformalInterval(predTc, sigma, level);
+      if (actualTc >= ci.lower && actualTc <= ci.upper) covered++;
+      total++;
+    }
+    const obs = total > 0 ? covered / total : level;
+    perLevel.push({ level, expected: level, observed: Math.round(obs * 10000) / 10000, covered, total });
+  }
+
+  const primary = perLevel.find(p => p.level === 0.95) ?? perLevel[0];
+  const nSamples = primary?.total ?? 0;
+  const observedCov = primary?.observed ?? 0.95;
+  const isMisc = nSamples >= 10 && observedCov < 0.90;
+
+  let recommendation = "Intervals appear well-calibrated";
+  if (nSamples < 10) {
+    recommendation = "Insufficient data for reliable interval validation (need at least 10 samples)";
+  } else if (observedCov < 0.80) {
+    recommendation = "Intervals are significantly too narrow — force recalibration with more data";
+  } else if (observedCov < 0.90) {
+    recommendation = "Intervals are moderately too narrow — recalibration recommended";
+  } else if (observedCov > 0.99) {
+    recommendation = "Intervals are overly conservative — could tighten for efficiency";
+  }
+
+  return {
+    expectedCoverage: 0.95,
+    observedCoverage: observedCov,
+    nSamples,
+    isMiscalibrated: isMisc,
+    recommendation,
+    perLevel,
+  };
+}
+
 export function getCalibrationSummaryForLLM(): string {
   const state = getCalibrationState();
   const lines = [

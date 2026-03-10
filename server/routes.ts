@@ -269,7 +269,11 @@ import {
 import {
   getCalibrationState, recalibrateFromLedger, getConformalInterval,
   getFamilyConformalQuantiles, getECE, getCalibrationSummaryForLLM,
+  validateIntervalsCoverage,
 } from "./learning/conformal-calibrator";
+import {
+  computeOODScore, getOODStats, updateOODModel,
+} from "./learning/ood-detector";
 import {
   evaluateRetrainNeed, getSchedulerStats, getSchedulerForLLM, recordRetrainOutcome,
 } from "./learning/retrain-scheduler";
@@ -4113,6 +4117,78 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ ...ece, perFamily: families });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to get ECE", detail: e.message });
+    }
+  });
+
+  app.get("/api/calibration/validate-intervals", generalLimiter, async (_req, res) => {
+    try {
+      const result = validateIntervalsCoverage();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to validate intervals", detail: e.message });
+    }
+  });
+
+  app.get("/api/ood/score/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 2 || formula.length > 100) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const result = computeOODScore(formula);
+      res.json({ formula, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute OOD score", detail: e.message });
+    }
+  });
+
+  app.get("/api/ood/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getOODStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get OOD stats", detail: e.message });
+    }
+  });
+
+  app.post("/api/ood/update", engineLimiter, async (_req, res) => {
+    try {
+      updateOODModel();
+      const stats = getOODStats();
+      res.json({ status: "updated", ...stats });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to update OOD model", detail: e.message });
+    }
+  });
+
+  app.get("/api/uncertainty-quality/history", generalLimiter, async (_req, res) => {
+    try {
+      const { getCycleImprovementHistory } = await import("./learning/prediction-reality-ledger");
+      const history = getCycleImprovementHistory();
+      const summary = history.map(h => ({
+        cycle: h.cycle,
+        timestamp: h.timestamp,
+        rmse: h.rmse,
+        mae: h.mae,
+        r2: h.r2,
+        gnn_rmse: h.gnn_rmse,
+        xgb_rmse: h.xgb_rmse,
+        ciCoverage90: h.ciCoverage90 ?? null,
+        ciCoverage95: h.ciCoverage95 ?? null,
+        ciCoverage99: h.ciCoverage99 ?? null,
+        count: h.count,
+      }));
+      const latest = summary.length > 0 ? summary[summary.length - 1] : null;
+      const ciGoalMet = latest && latest.ciCoverage95 !== null ? Math.abs(latest.ciCoverage95 - 0.95) < 0.05 : null;
+      res.json({
+        totalCycles: summary.length,
+        latestRMSE: latest?.rmse ?? null,
+        latestCICoverage95: latest?.ciCoverage95 ?? null,
+        ciGoalMet,
+        history: summary,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get uncertainty quality history", detail: e.message });
     }
   });
 

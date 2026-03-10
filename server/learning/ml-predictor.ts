@@ -31,6 +31,7 @@ import { getPhysicsFeatures, getDerivedFeatures } from "./physics-results-store"
 import { predictLambda, recordLambdaValidation } from "./lambda-regressor";
 import { predictTBProperties } from "../physics/tb-ml-surrogate";
 import { getConformalInterval, getCalibrationState, getECE, type ConformalInterval } from "./conformal-calibrator";
+import { computeOODScore } from "./ood-detector";
 export { getConfidenceBand };
 
 export interface UnifiedCIResult {
@@ -70,6 +71,11 @@ export interface UnifiedCIResult {
   ece: number;
   calibrationDatasetSize: number;
   conformalMethod: "conformal" | "fallback";
+  oodScore: number;
+  oodSigmaPenalty: number;
+  isOOD: boolean;
+  oodCategory: string;
+  mahalanobisDistance: number;
 }
 
 export function computeUnifiedCI(formula: string): UnifiedCIResult {
@@ -101,8 +107,8 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
     tcCombined = 0;
   }
 
-  const varCombined = 1 / wTotal;
-  const stdCombined = Math.sqrt(varCombined);
+  const varCombinedRaw = 1 / wTotal;
+  const stdCombinedRaw = Math.sqrt(varCombinedRaw);
 
   const epistemicGnn = gnnTcValid ? safe(gnnResult.epistemicUncertainty) * safe(gnnResult.totalStd) : 0;
   const epistemicXgb = safe(xgbResult.epistemicStd);
@@ -115,6 +121,11 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
   const aleatoricCombined = Math.sqrt(
     ((wGnn * aleatoricGnn) ** 2 + (wXgb * aleatoricXgb) ** 2) / (wTotal ** 2)
   );
+
+  const gnnLatentDist = gnnTcValid ? safe(gnnResult.latentDistance) : undefined;
+  const ood = computeOODScore(formula, gnnLatentDist);
+  const sigmaOOD = ood.oodSigmaPenalty * stdCombinedRaw;
+  const stdCombined = Math.sqrt(stdCombinedRaw ** 2 + sigmaOOD ** 2);
 
   const tcCI95Lower = Math.max(0, tcCombined - 1.96 * stdCombined);
   const tcCI95Upper = tcCombined + 1.96 * stdCombined;
@@ -137,7 +148,9 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
   const eceMetrics = getECE();
 
   let calibrationNote = "Predictions are model estimates with quantified uncertainty";
-  if (conformal.method === "conformal") {
+  if (ood.isOOD) {
+    calibrationNote = `OOD detected (${ood.oodCategory}, score=${ood.oodScore}): uncertainty inflated by OOD penalty`;
+  } else if (conformal.method === "conformal") {
     calibrationNote = `Conformal calibration active (T=${calState.temperatureScale}, Q95=${conformal.quantile}, ECE=${eceMetrics.after.toFixed(4)}, n=${calState.calibrationDatasetSize})`;
   } else if (stdCombined > 50) {
     calibrationNote = "High uncertainty: prediction interval is wide, treat as exploratory";
@@ -186,6 +199,11 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
     ece: eceMetrics.after,
     calibrationDatasetSize: calState.calibrationDatasetSize,
     conformalMethod: conformal.method,
+    oodScore: ood.oodScore,
+    oodSigmaPenalty: ood.oodSigmaPenalty,
+    isOOD: ood.isOOD,
+    oodCategory: ood.oodCategory,
+    mahalanobisDistance: ood.mahalanobisDistance,
   };
 }
 

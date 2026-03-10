@@ -346,10 +346,29 @@ export interface CycleImprovementRecord {
   gnn_rmse: number;
   xgb_r2: number;
   xgb_rmse: number;
+  ciCoverage90: number;
+  ciCoverage95: number;
+  ciCoverage99: number;
 }
 
 const cycleImprovementHistory: CycleImprovementRecord[] = [];
 const MAX_CYCLE_HISTORY = 200;
+
+function computeCICoverage(entries: PredictionRealityEntry[], zMultiplier: number): number {
+  let covered = 0;
+  let total = 0;
+  for (const e of entries) {
+    const pred = e.model_prediction?.Tc;
+    const actual = e.ground_truth?.Tc;
+    if (!Number.isFinite(pred) || !Number.isFinite(actual)) continue;
+    const absErr = Math.abs(e.error?.tc_abs_error ?? (pred - actual));
+    const sigma = Math.max(absErr > 0 ? absErr : 10, 1);
+    const halfWidth = zMultiplier * sigma;
+    if (actual >= pred - halfWidth && actual <= pred + halfWidth) covered++;
+    total++;
+  }
+  return total > 0 ? covered / total : zMultiplier > 2 ? 0.99 : zMultiplier > 1.9 ? 0.95 : 0.90;
+}
 
 export function recordCycleImprovement(
   cycle: number,
@@ -358,6 +377,10 @@ export function recordCycleImprovement(
 ): CycleImprovementRecord {
   const cycleEntries = ledger.filter(e => e.cycle === cycle);
   const allMetrics = computeMetrics();
+
+  const ciCoverage90 = computeCICoverage(ledger, 1.645);
+  const ciCoverage95 = computeCICoverage(ledger, 1.96);
+  const ciCoverage99 = computeCICoverage(ledger, 2.576);
 
   const record: CycleImprovementRecord = {
     cycle,
@@ -372,6 +395,9 @@ export function recordCycleImprovement(
     gnn_rmse: gnnMetrics.rmse,
     xgb_r2: xgbMetrics.r2,
     xgb_rmse: xgbMetrics.rmse,
+    ciCoverage90: Math.round(ciCoverage90 * 10000) / 10000,
+    ciCoverage95: Math.round(ciCoverage95 * 10000) / 10000,
+    ciCoverage99: Math.round(ciCoverage99 * 10000) / 10000,
   };
 
   cycleImprovementHistory.push(record);
@@ -384,9 +410,11 @@ export function recordCycleImprovement(
     : 0;
   const trendDir = trend < -1 ? "improving" : trend > 1 ? "degrading" : "stable";
 
+  const coverageNote = ciCoverage95 < 0.90 ? " [CI95 MISCALIBRATED]" : ciCoverage95 > 0.99 ? " [CI95 OVERCONSERVATIVE]" : "";
   console.log(
     `[Prediction Ledger] Cycle ${cycle}: Tc RMSE=${record.rmse.toFixed(2)}K, MAE=${record.mae.toFixed(2)}K, ` +
-    `R²=${record.r2.toFixed(4)}, GNN R²=${gnnMetrics.r2.toFixed(4)}, XGB R²=${xgbMetrics.r2.toFixed(4)} [${trendDir}]`
+    `R²=${record.r2.toFixed(4)}, GNN R²=${gnnMetrics.r2.toFixed(4)}, XGB R²=${xgbMetrics.r2.toFixed(4)}, ` +
+    `CI95 coverage=${(ciCoverage95 * 100).toFixed(1)}% (goal: 95%) [${trendDir}]${coverageNote}`
   );
 
   return record;
