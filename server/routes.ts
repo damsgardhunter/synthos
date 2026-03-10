@@ -5,7 +5,7 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
-import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons, detectAnharmonicVibrations, runMDSampling, computeDebyeTemp } from "./learning/doping-engine";
+import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons, detectAnharmonicVibrations, runMDSampling, computeDebyeTemp, computeDynamicLatticeScore } from "./learning/doping-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
@@ -5448,6 +5448,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, result });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to run MD sampling", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/dynamic-lattice-score/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = computeDynamicLatticeScore(formula);
+      if (!result) {
+        res.json({ formula, result: null, message: "Dynamic lattice score unavailable for this formula" });
+        return;
+      }
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute dynamic lattice score", detail: e.message });
     }
   });
 

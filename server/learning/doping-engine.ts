@@ -1,4 +1,4 @@
-import { parseFormulaElements, computeElectronicStructure, computePhononSpectrum } from "./physics-engine";
+import { parseFormulaElements, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } from "./physics-engine";
 import { normalizeFormula, isValidFormula } from "./utils";
 import { getElementData, getStonerParameter } from "./elemental-data";
 import { runXTBOptimization, runXTBPhononCheck, runXTBAnharmonicProbe, runXTBMDSampling, type PhononStability, type AnharmonicProbeResult, type MDSamplingRawResult } from "../dft/qe-dft-engine";
@@ -615,6 +615,202 @@ export function computeDebyeTemp(formula: string, phononAnalysis?: HessianPhonon
     electronPhononCouplingHint,
     scRelevance: Math.round(scRelevance * 1000) / 1000,
   };
+}
+
+export interface DynamicLatticeScore {
+  formula: string;
+  overallScore: number;
+  components: {
+    softModeFraction: number;
+    imaginaryModeFlag: number;
+    phononVariance: number;
+    anharmonicityContribution: number;
+    lightElementBonus: number;
+    layeredStructureBonus: number;
+    cageLatticeBonus: number;
+    looselyBondedBonus: number;
+  };
+  electronPhononFeatures: {
+    dosAtFermi: number;
+    metallicity: number;
+    lambda: number;
+    omegaLog: number;
+    nestingScore: number;
+    correlationStrength: number;
+    vanHoveProximity: number;
+    combinedElectronPhononScore: number;
+  };
+  dynamicEffectsProfile: {
+    hasLightElements: boolean;
+    lightElements: string[];
+    isLayered: boolean;
+    isCageLike: boolean;
+    hasLooselyBonded: boolean;
+    looselyBondedAtoms: string[];
+    dynamicEffectStrength: "weak" | "moderate" | "strong" | "very-strong";
+  };
+  mlFeatures: {
+    softPhononCount: number;
+    avgPhononFrequency: number;
+    phononVariance: number;
+    instabilityFlag: boolean;
+    debyeTemperature: number;
+    anharmonicityIndex: number;
+    dynamicLatticeScore: number;
+  };
+  tcRelevance: string;
+  source: string;
+}
+
+const LIGHT_ELEMENTS = ["H", "He", "Li", "Be", "B", "C", "N", "O", "F"];
+const CAGE_FORMERS = ["B", "C", "Si", "Ge", "Al", "Ga", "Sn"];
+const CAGE_GUESTS = ["La", "Ce", "Ba", "Sr", "Ca", "Y", "K", "Na", "Rb", "Cs"];
+const LOOSELY_BONDED_INDICATORS = ["K", "Rb", "Cs", "Ba", "Sr", "Ca", "Na", "Tl", "Pb", "Bi", "In"];
+
+export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore | null {
+  try {
+    const elements = parseFormulaElements(formula);
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = getTotalAtoms(counts);
+
+    const electronic = computeElectronicStructure(formula);
+    const phonon = computePhononSpectrum(formula, electronic);
+    if (!phonon) return null;
+    const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
+
+    const softModeFraction = phonon.softModeScore;
+    const imaginaryModeFlag = phonon.hasImaginaryModes ? 1.0 : 0.0;
+
+    const maxFreq = phonon.maxPhononFrequency;
+    const logFreq = phonon.logAverageFrequency;
+    const freqRange = maxFreq - logFreq;
+    const phononVariance = maxFreq > 0 ? Math.min(1.0, (freqRange / maxFreq) * 1.5) : 0;
+
+    const anharmonicityContribution = Math.min(1.0, phonon.anharmonicityIndex * 2.0);
+
+    const lightEls = elements.filter(e => LIGHT_ELEMENTS.includes(e));
+    const lightFraction = lightEls.reduce((s, e) => s + (counts[e] ?? 0), 0) / totalAtoms;
+    const lightElementBonus = Math.min(1.0, lightFraction * 2.0);
+
+    const layeredIndicators = ["Cu", "Fe", "Ni", "Co", "Mn"].filter(e => elements.includes(e));
+    const hasOxygen = elements.includes("O");
+    const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
+    const hasPnictogen = elements.some(e => ["As", "P", "Sb"].includes(e));
+    const isLayered = (layeredIndicators.length > 0 && (hasOxygen || hasChalcogen || hasPnictogen))
+      || elements.length >= 3 && (hasChalcogen || (hasOxygen && elements.length >= 4));
+    const layeredStructureBonus = isLayered ? 0.6 : 0;
+
+    const cageFormersPresent = elements.filter(e => CAGE_FORMERS.includes(e));
+    const cageGuestsPresent = elements.filter(e => CAGE_GUESTS.includes(e));
+    const isCageLike = cageFormersPresent.length > 0 && cageGuestsPresent.length > 0
+      && elements.length >= 2;
+    const cageLatticeBonus = isCageLike ? 0.5 : 0;
+
+    const looselyBonded = elements.filter(e => {
+      const data = getElementData(e);
+      if (!data) return false;
+      const en = data.paulingElectronegativity ?? 2.0;
+      const mass = data.atomicMass ?? 40;
+      return (en < 1.2 && mass > 30) || LOOSELY_BONDED_INDICATORS.includes(e);
+    });
+    const looselyBondedFraction = looselyBonded.reduce((s, e) => s + (counts[e] ?? 0), 0) / totalAtoms;
+    const looselyBondedBonus = Math.min(0.8, looselyBondedFraction * 1.5);
+
+    const overallScore =
+      softModeFraction * 1.5 +
+      imaginaryModeFlag * 0.8 +
+      phononVariance * 1.2 +
+      anharmonicityContribution * 1.0 +
+      lightElementBonus * 0.7 +
+      layeredStructureBonus * 0.6 +
+      cageLatticeBonus * 0.5 +
+      looselyBondedBonus * 0.4;
+
+    const dosAtFermi = electronic.densityOfStatesAtFermi;
+    const metallicity = electronic.metallicity;
+    const lambda = coupling.lambda;
+    const omegaLog = coupling.omegaLog;
+    const nestingScore = electronic.nestingScore;
+    const correlationStrength = electronic.correlationStrength;
+    const vanHoveProximity = electronic.vanHoveProximity;
+
+    const combinedElectronPhononScore =
+      (dosAtFermi > 0 ? Math.min(1, dosAtFermi / 5.0) : 0) * 0.20 +
+      metallicity * 0.15 +
+      Math.min(1, lambda / 2.5) * 0.25 +
+      nestingScore * 0.15 +
+      (correlationStrength > 0.3 && correlationStrength < 0.8 ? 0.15 : correlationStrength * 0.05) +
+      vanHoveProximity * 0.10;
+
+    const softPhononCount = Math.round(softModeFraction * totalAtoms * 3);
+    const avgPhononFrequency = logFreq * CM1_TO_THZ;
+    const debyeT = phonon.debyeTemperature;
+
+    let dynamicEffectStrength: "weak" | "moderate" | "strong" | "very-strong";
+    if (overallScore < 1.0) dynamicEffectStrength = "weak";
+    else if (overallScore < 2.5) dynamicEffectStrength = "moderate";
+    else if (overallScore < 4.0) dynamicEffectStrength = "strong";
+    else dynamicEffectStrength = "very-strong";
+
+    let tcRelevance: string;
+    if (overallScore >= 4.0) {
+      tcRelevance = "Very strong dynamic lattice effects -- high phonon coupling potential, candidate warrants detailed Eliashberg analysis";
+    } else if (overallScore >= 2.5) {
+      tcRelevance = "Strong dynamic effects detected -- enhanced electron-phonon coupling likely, favorable for conventional SC";
+    } else if (overallScore >= 1.0) {
+      tcRelevance = "Moderate dynamic effects -- some phonon softening present, standard BCS regime expected";
+    } else {
+      tcRelevance = "Weak dynamic effects -- stiff lattice with limited phonon-mediated coupling potential";
+    }
+
+    return {
+      formula,
+      overallScore: Math.round(overallScore * 1000) / 1000,
+      components: {
+        softModeFraction: Math.round(softModeFraction * 1000) / 1000,
+        imaginaryModeFlag,
+        phononVariance: Math.round(phononVariance * 1000) / 1000,
+        anharmonicityContribution: Math.round(anharmonicityContribution * 1000) / 1000,
+        lightElementBonus: Math.round(lightElementBonus * 1000) / 1000,
+        layeredStructureBonus: Math.round(layeredStructureBonus * 1000) / 1000,
+        cageLatticeBonus: Math.round(cageLatticeBonus * 1000) / 1000,
+        looselyBondedBonus: Math.round(looselyBondedBonus * 1000) / 1000,
+      },
+      electronPhononFeatures: {
+        dosAtFermi: Math.round(dosAtFermi * 1000) / 1000,
+        metallicity: Math.round(metallicity * 1000) / 1000,
+        lambda: Math.round(lambda * 1000) / 1000,
+        omegaLog: Math.round(omegaLog * 100) / 100,
+        nestingScore: Math.round(nestingScore * 1000) / 1000,
+        correlationStrength: Math.round(correlationStrength * 1000) / 1000,
+        vanHoveProximity: Math.round(vanHoveProximity * 1000) / 1000,
+        combinedElectronPhononScore: Math.round(combinedElectronPhononScore * 1000) / 1000,
+      },
+      dynamicEffectsProfile: {
+        hasLightElements: lightEls.length > 0,
+        lightElements: lightEls,
+        isLayered,
+        isCageLike,
+        hasLooselyBonded: looselyBonded.length > 0,
+        looselyBondedAtoms: looselyBonded,
+        dynamicEffectStrength,
+      },
+      mlFeatures: {
+        softPhononCount,
+        avgPhononFrequency: Math.round(avgPhononFrequency * 1000) / 1000,
+        phononVariance: Math.round(phononVariance * 1000) / 1000,
+        instabilityFlag: phonon.hasImaginaryModes,
+        debyeTemperature: debyeT,
+        anharmonicityIndex: Math.round(phonon.anharmonicityIndex * 1000) / 1000,
+        dynamicLatticeScore: Math.round(overallScore * 1000) / 1000,
+      },
+      tcRelevance,
+      source: "physics-engine-composite",
+    };
+  } catch (e: any) {
+    console.error(`[DynamicLatticeScore] Error for ${formula}:`, e.message);
+    return null;
+  }
 }
 
 export interface DopingResult {

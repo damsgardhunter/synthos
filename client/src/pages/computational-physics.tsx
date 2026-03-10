@@ -4555,6 +4555,7 @@ function DopingEnginePanel() {
   const [phononRunning, setPhononRunning] = useState(false);
   const [anharmonicRunning, setAnharmonicRunning] = useState(false);
   const [mdRunning, setMdRunning] = useState(false);
+  const [latticeScoreRunning, setLatticeScoreRunning] = useState(false);
 
   const anharmonicMutation = useMutation({
     mutationFn: async () => {
@@ -4574,6 +4575,16 @@ function DopingEnginePanel() {
     },
     onMutate: () => setMdRunning(true),
     onSettled: () => setMdRunning(false),
+  });
+
+  const latticeScoreMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/doping/dynamic-lattice-score/${encodeURIComponent(formula)}`);
+      if (!res.ok) throw new Error("Dynamic lattice score failed");
+      return res.json();
+    },
+    onMutate: () => setLatticeScoreRunning(true),
+    onSettled: () => setLatticeScoreRunning(false),
   });
 
   const debyeQuery = useQuery<{
@@ -4850,6 +4861,16 @@ function DopingEnginePanel() {
             >
               <Thermometer className="h-3 w-3 mr-1" />
               {mdRunning ? "Running MD..." : "MD Sampling"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => latticeScoreMutation.mutate()}
+              disabled={!formula || latticeScoreRunning}
+              data-testid="button-dynamic-lattice-score"
+            >
+              <Zap className="h-3 w-3 mr-1" />
+              {latticeScoreRunning ? "Scoring..." : "Lattice Score"}
             </Button>
           </div>
 
@@ -5324,6 +5345,171 @@ function DopingEnginePanel() {
                     <span>{m.totalTimePs.toFixed(3)} ps total</span>
                     <span>dt={m.timeStepFs} fs</span>
                     <span>Source: {m.source}</span>
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+
+      {latticeScoreMutation.data?.overallScore !== undefined && (
+        <Card data-testid="dynamic-lattice-score-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Zap className="h-4 w-4 text-yellow-400" />
+              Dynamic Lattice Score
+              <span className="text-xs text-muted-foreground ml-auto font-normal">
+                {latticeScoreMutation.data.formula}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const ls = latticeScoreMutation.data;
+              const strengthColor = ls.dynamicEffectsProfile.dynamicEffectStrength === "very-strong" ? "text-red-400" :
+                ls.dynamicEffectsProfile.dynamicEffectStrength === "strong" ? "text-orange-400" :
+                ls.dynamicEffectsProfile.dynamicEffectStrength === "moderate" ? "text-cyan-400" : "text-blue-400";
+              const scorePercent = Math.min(100, (ls.overallScore / 6) * 100);
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-muted-foreground">Overall Dynamic Score</span>
+                        <span className="font-mono font-bold text-lg" data-testid="lattice-overall-score">{ls.overallScore.toFixed(3)}</span>
+                      </div>
+                      <div className="w-full bg-muted/40 rounded-full h-2">
+                        <div className="bg-gradient-to-r from-blue-500 via-cyan-500 to-yellow-500 h-2 rounded-full transition-all" style={{ width: `${scorePercent}%` }} />
+                      </div>
+                    </div>
+                    <div className={`font-mono font-bold text-sm ${strengthColor}`} data-testid="lattice-strength">
+                      {ls.dynamicEffectsProfile.dynamicEffectStrength}
+                    </div>
+                  </div>
+
+                  <div className="text-[10px] font-medium text-muted-foreground mb-1">Score Components</div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                    {[
+                      { label: "Soft Mode", value: ls.components.softModeFraction, weight: "x1.5" },
+                      { label: "Imaginary", value: ls.components.imaginaryModeFlag, weight: "x0.8" },
+                      { label: "Phonon Var", value: ls.components.phononVariance, weight: "x1.2" },
+                      { label: "Anharmonic", value: ls.components.anharmonicityContribution, weight: "x1.0" },
+                      { label: "Light Elem", value: ls.components.lightElementBonus, weight: "x0.7" },
+                      { label: "Layered", value: ls.components.layeredStructureBonus, weight: "x0.6" },
+                      { label: "Cage", value: ls.components.cageLatticeBonus, weight: "x0.5" },
+                      { label: "Loose Bond", value: ls.components.looselyBondedBonus, weight: "x0.4" },
+                    ].map((c, i) => (
+                      <div key={i} className="bg-muted/30 rounded p-2 text-center">
+                        <div className="text-muted-foreground">{c.label} <span className="text-[9px]">({c.weight})</span></div>
+                        <div className="font-mono font-bold text-sm">{c.value.toFixed(3)}</div>
+                        <div className="w-full bg-muted/40 rounded-full h-0.5 mt-1">
+                          <div className="bg-yellow-500 h-0.5 rounded-full" style={{ width: `${Math.min(100, c.value * 100)}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="text-[10px] font-medium text-muted-foreground mb-1 mt-2">Electron-Phonon Features</div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">DOS(Ef)</div>
+                      <div className="font-mono font-bold text-sm" data-testid="lattice-dos">{ls.electronPhononFeatures.dosAtFermi.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Lambda</div>
+                      <div className="font-mono font-bold text-sm" data-testid="lattice-lambda">{ls.electronPhononFeatures.lambda.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Metallicity</div>
+                      <div className="font-mono font-bold text-sm">{ls.electronPhononFeatures.metallicity.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Combined e-ph</div>
+                      <div className="font-mono font-bold text-sm" data-testid="lattice-combined-eph">{ls.electronPhononFeatures.combinedElectronPhononScore.toFixed(3)}</div>
+                      <div className="w-full bg-muted/40 rounded-full h-1 mt-1">
+                        <div className="bg-green-500 h-1 rounded-full" style={{ width: `${ls.electronPhononFeatures.combinedElectronPhononScore * 100}%` }} />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-[11px]">
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Omega_log</div>
+                      <div className="font-mono font-bold text-sm">{ls.electronPhononFeatures.omegaLog.toFixed(2)} cm-1</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Nesting</div>
+                      <div className="font-mono font-bold text-sm">{ls.electronPhononFeatures.nestingScore.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">VH Proximity</div>
+                      <div className="font-mono font-bold text-sm">{ls.electronPhononFeatures.vanHoveProximity.toFixed(3)}</div>
+                    </div>
+                  </div>
+
+                  <div className="text-[10px] font-medium text-muted-foreground mb-1 mt-2">Dynamic Effects Profile</div>
+                  <div className="flex flex-wrap gap-2 text-[10px]">
+                    {ls.dynamicEffectsProfile.hasLightElements && (
+                      <Badge variant="outline" className="text-green-400">
+                        Light: {ls.dynamicEffectsProfile.lightElements.join(", ")}
+                      </Badge>
+                    )}
+                    {ls.dynamicEffectsProfile.isLayered && (
+                      <Badge variant="outline" className="text-blue-400">Layered</Badge>
+                    )}
+                    {ls.dynamicEffectsProfile.isCageLike && (
+                      <Badge variant="outline" className="text-purple-400">Cage-like</Badge>
+                    )}
+                    {ls.dynamicEffectsProfile.hasLooselyBonded && (
+                      <Badge variant="outline" className="text-amber-400">
+                        Loosely bonded: {ls.dynamicEffectsProfile.looselyBondedAtoms.join(", ")}
+                      </Badge>
+                    )}
+                    {!ls.dynamicEffectsProfile.hasLightElements && !ls.dynamicEffectsProfile.isLayered && !ls.dynamicEffectsProfile.isCageLike && !ls.dynamicEffectsProfile.hasLooselyBonded && (
+                      <Badge variant="outline" className="text-gray-400">No special dynamic motifs</Badge>
+                    )}
+                  </div>
+
+                  <div className="text-[10px] font-medium text-muted-foreground mb-1 mt-2">ML Pipeline Features</div>
+                  <div className="grid grid-cols-3 md:grid-cols-4 gap-2 text-[10px]">
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">Soft Modes</div>
+                      <div className="font-mono font-bold">{ls.mlFeatures.softPhononCount}</div>
+                    </div>
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">Avg Freq</div>
+                      <div className="font-mono font-bold">{ls.mlFeatures.avgPhononFrequency.toFixed(2)} THz</div>
+                    </div>
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">Variance</div>
+                      <div className="font-mono font-bold">{ls.mlFeatures.phononVariance.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">Instability</div>
+                      <div className={`font-mono font-bold ${ls.mlFeatures.instabilityFlag ? "text-red-400" : "text-green-400"}`}>
+                        {ls.mlFeatures.instabilityFlag ? "YES" : "NO"}
+                      </div>
+                    </div>
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">Debye T</div>
+                      <div className="font-mono font-bold">{ls.mlFeatures.debyeTemperature} K</div>
+                    </div>
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">Anharm Idx</div>
+                      <div className="font-mono font-bold">{ls.mlFeatures.anharmonicityIndex.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/20 rounded p-1.5 text-center">
+                      <div className="text-muted-foreground">DLS</div>
+                      <div className="font-mono font-bold">{ls.mlFeatures.dynamicLatticeScore.toFixed(3)}</div>
+                    </div>
+                  </div>
+
+                  <div className="text-[10px] p-2 bg-yellow-500/5 rounded border border-yellow-500/20 text-yellow-300" data-testid="lattice-tc-relevance">
+                    {ls.tcRelevance}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Source: {ls.source}
                   </div>
                 </div>
               );

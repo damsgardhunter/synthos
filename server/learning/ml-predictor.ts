@@ -326,6 +326,14 @@ export interface MLFeatureVector {
   dopantAtomicNumber: number;
   dopantFraction: number;
   dopantValenceDiff: number;
+  dynamicLatticeScore: number;
+  softPhononCount: number;
+  phononVarianceScore: number;
+  instabilityFlag: number;
+  lightElementFraction: number;
+  cageLatticeFlag: number;
+  looselyBondedFraction: number;
+  combinedElectronPhononScore: number;
   _sourceFormula?: string;
 }
 
@@ -699,6 +707,32 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     dopantAtomicNumber: (mat as any)?.dopantAtomicNumber ?? 0,
     dopantFraction: (mat as any)?.dopantFraction ?? 0,
     dopantValenceDiff: (mat as any)?.dopantValenceDiff ?? 0,
+    dynamicLatticeScore: (() => {
+      const smf = phonon.softModeScore;
+      const imf = phonon.hasImaginaryModes ? 1.0 : 0.0;
+      const pv = phonon.maxPhononFrequency > 0 ? Math.min(1.0, ((phonon.maxPhononFrequency - phonon.logAverageFrequency) / phonon.maxPhononFrequency) * 1.5) : 0;
+      const anh = Math.min(1.0, phonon.anharmonicityIndex * 2.0);
+      const lightEls = elements.filter((e: string) => ["H","He","Li","Be","B","C","N","O","F"].includes(e));
+      const lightFrac = lightEls.reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms;
+      const leb = Math.min(1.0, lightFrac * 2.0);
+      return smf * 1.5 + imf * 0.8 + pv * 1.2 + anh * 1.0 + leb * 0.7;
+    })(),
+    softPhononCount: Math.round(phonon.softModeScore * totalAtoms * 3),
+    phononVarianceScore: phonon.maxPhononFrequency > 0 ? Math.min(1.0, ((phonon.maxPhononFrequency - phonon.logAverageFrequency) / phonon.maxPhononFrequency) * 1.5) : 0,
+    instabilityFlag: phonon.hasImaginaryModes ? 1 : 0,
+    lightElementFraction: elements.filter((e: string) => ["H","He","Li","Be","B","C","N","O","F"].includes(e)).reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms,
+    cageLatticeFlag: (elements.some((e: string) => ["B","C","Si","Ge","Al","Ga","Sn"].includes(e)) && elements.some((e: string) => ["La","Ce","Ba","Sr","Ca","Y","K","Na","Rb","Cs"].includes(e))) ? 1 : 0,
+    looselyBondedFraction: elements.filter((e: string) => {
+      const d = getElementData(e);
+      return d && ((d.paulingElectronegativity ?? 2.0) < 1.2 && (d.atomicMass ?? 40) > 30);
+    }).reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms,
+    combinedElectronPhononScore: (() => {
+      const dosNorm = electronic.densityOfStatesAtFermi > 0 ? Math.min(1, electronic.densityOfStatesAtFermi / 5.0) : 0;
+      const lam = Math.min(1, useLambda / 2.5);
+      const corr = useCorrelation;
+      const corrBonus = (corr > 0.3 && corr < 0.8) ? 0.15 : corr * 0.05;
+      return dosNorm * 0.20 + electronic.metallicity * 0.15 + lam * 0.25 + electronic.nestingScore * 0.15 + corrBonus + electronic.vanHoveProximity * 0.10;
+    })(),
     _sourceFormula: formula,
   };
 }
