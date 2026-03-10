@@ -21,6 +21,7 @@ import { computeOODScore } from "./ood-detector";
 import { generateDisorderedStructure, suggestDisorders, type DisorderedStructure } from "../crystal/disorder-generator";
 import { computeConfigurationalEntropy, estimateDOSDisorderSignal } from "../crystal/disorder-metrics";
 import type { DisorderContext } from "./ml-predictor";
+import { generateDopedVariants, type DopingSpec } from "./doping-engine";
 import {
   addBatchFromEvaluation, startNewBatchCycle, recordBatchCycle,
   getCurrentCycleNumber, getGroundTruthSummary, getGroundTruthForLLM,
@@ -1241,6 +1242,58 @@ export async function runActiveLearningCycle(
     });
   }
 
+  const DOPING_FRACTIONS = [0.02, 0.05, 0.10, 0.15, 0.20];
+  const dopingTopN = Math.min(5, selected.length);
+  let dopingVariantsEvaluated = 0;
+  let dopingBestTc = 0;
+  let dopingBestFormula = "";
+
+  for (const ranked of selected.slice(0, dopingTopN)) {
+    const { candidate } = ranked;
+    try {
+      const baseCounts = parseFormulaCountsLocal(candidate.formula);
+      const baseElements = Object.keys(baseCounts);
+      if (baseElements.length < 2 || baseElements.length > 5) continue;
+
+      const dopedVariants = generateDopedVariantsForAL(candidate.formula, 6);
+
+      for (const variant of dopedVariants) {
+        try {
+          dopingVariantsEvaluated++;
+          const dopantData = variant.dopant ? getElementData(variant.dopant) : null;
+          const matOverrides: Record<string, number> = {
+            dopingCarrierDensity: variant.carrierDensity > 0 ? Math.log10(variant.carrierDensity) : 0,
+            dopingLatticeStrain: variant.relaxation?.latticeStrain ?? 0,
+            dopingBondVariance: variant.relaxation?.bondVariance ?? 0,
+            dopantAtomicNumber: dopantData?.atomicNumber ?? 0,
+            dopantFraction: variant.fraction,
+            dopantValenceDiff: variant.valenceChange,
+          };
+          const features = extractFeatures(variant.resultFormula, matOverrides as any);
+          const prediction = gbPredictWithUncertainty(features, variant.resultFormula);
+          const tc = prediction.tcMean ?? 0;
+
+          if (tc > dopingBestTc) {
+            dopingBestTc = tc;
+            dopingBestFormula = `${variant.resultFormula} (${variant.type}: ${variant.dopant ?? variant.site}-${(variant.fraction * 100).toFixed(0)}%)`;
+          }
+        } catch { /* skip variant */ }
+      }
+    } catch { /* skip candidate */ }
+  }
+
+  if (dopingVariantsEvaluated > 0) {
+    emit("log", {
+      phase: "active-learning",
+      event: "Doping variant exploration",
+      detail: `Evaluated ${dopingVariantsEvaluated} doped variants across ${dopingTopN} base materials. ` +
+        (dopingBestTc > 0
+          ? `Best doped candidate: ${dopingBestFormula} (predicted Tc=${dopingBestTc.toFixed(1)}K)`
+          : "No significant Tc found in doped variants"),
+      dataSource: "Active Learning + Doping Engine",
+    });
+  }
+
   const cycleDatapoints = getDatapointsByCycle(getCurrentCycleNumber());
   const USEFUL_TC_THRESHOLD = 20;
   let usefulDiscoveries = 0;
@@ -1504,4 +1557,27 @@ export async function runActiveLearningCycle(
   });
 
   return convergenceStats;
+}
+
+function parseFormulaCountsLocal(formula: string): Record<string, number> {
+  if (typeof formula !== "string") formula = String(formula ?? "");
+  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseFloat(match[2]) : 1;
+    counts[el] = (counts[el] || 0) + num;
+  }
+  return counts;
+}
+
+function generateDopedVariantsForAL(formula: string, maxVariants: number): DopingSpec[] {
+  try {
+    const result = generateDopedVariants(formula, maxVariants);
+    return result.variants;
+  } catch {
+    return [];
+  }
 }

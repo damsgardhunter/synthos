@@ -5,7 +5,7 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
-import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch } from "./learning/doping-engine";
+import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop } from "./learning/doping-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
@@ -5453,6 +5453,29 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to relax doped variants", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/sc-signals/:base/:doped", generalLimiter, async (req, res) => {
+    try {
+      const base = decodeURIComponent(req.params.base);
+      const doped = decodeURIComponent(req.params.doped);
+      const signals = detectSCSignals(base, doped);
+      res.json({ base, doped, signals });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to detect SC signals", detail: e.message });
+    }
+  });
+
+  app.post("/api/doping/search/:formula", writeLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const fractions = req.body?.fractions ?? [0.02, 0.05, 0.10, 0.15, 0.20];
+      const maxDopants = Math.min(4, Number(req.body?.maxDopants) || 2);
+      const result = runDopingSearchLoop(formula, fractions, maxDopants);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run doping search", detail: e.message });
     }
   });
 

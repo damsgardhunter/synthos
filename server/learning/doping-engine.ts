@@ -1,7 +1,9 @@
-import { parseFormulaElements } from "./physics-engine";
+import { parseFormulaElements, computeElectronicStructure, computePhononSpectrum } from "./physics-engine";
 import { normalizeFormula, isValidFormula } from "./utils";
-import { getElementData } from "./elemental-data";
+import { getElementData, getStonerParameter } from "./elemental-data";
 import { runXTBOptimization } from "../dft/qe-dft-engine";
+import { extractFeatures } from "./ml-predictor";
+import { gbPredictWithUncertainty } from "./gradient-boost";
 
 export type DopingCharacter = "electron" | "hole" | "isovalent" | "vacancy-hole" | "interstitial-electron";
 
@@ -267,7 +269,13 @@ const INTERSTITIAL_DOPANTS: Record<string, string[]> = {
 
 const VACANCY_TARGETS = ["O", "F", "S", "Se", "Te", "N", "Cl"];
 
-const DOPING_FRACTIONS = [0.05, 0.10, 0.15, 0.20];
+const DOPING_FRACTIONS = [0.02, 0.05, 0.10, 0.15, 0.20];
+
+const SEARCH_LIMITS = {
+  maxDopantsPerMaterial: 2,
+  maxDopingFraction: 0.20,
+  maxSupercellAtoms: 27,
+};
 
 function classifyLayeredOrCage(formula: string): string {
   const elements = parseFormulaElements(formula);
@@ -530,7 +538,7 @@ function generateInterstitialVariants(
       if (!isValidFormula(resultFormula)) continue;
 
       const totalNew = getTotalAtoms(reduced);
-      if (totalNew > 20) continue;
+      if (totalNew > SEARCH_LIMITS.maxSupercellAtoms) continue;
 
       const supercellVolume = cellVolume * supercellMult;
       const carrierDensity = computeCarrierDensity(valenceChange, nInsert, supercellVolume);
@@ -860,4 +868,263 @@ export function getDopingRecommendations(formula: string): {
   }
 
   return { substitutional: sub, vacancy: vac, interstitial: int.slice(0, 3) };
+}
+
+export interface SCSignal {
+  dosAtEF: number;
+  dosIncrease: number;
+  magnetismSuppressed: boolean;
+  stonerCriterion: number;
+  structuralTransition: string | null;
+  phononSoftening: number;
+  overallSCIndicator: number;
+}
+
+export function detectSCSignals(baseFormula: string, dopedFormula: string): SCSignal {
+  const baseElectronic = computeElectronicStructure(baseFormula);
+  const dopedElectronic = computeElectronicStructure(dopedFormula);
+
+  const baseDOS = baseElectronic?.densityOfStatesAtFermi ?? 0;
+  const dopedDOS = dopedElectronic?.densityOfStatesAtFermi ?? 0;
+  const dosIncrease = baseDOS > 0 ? (dopedDOS - baseDOS) / baseDOS : 0;
+
+  const baseElements = parseFormulaElements(baseFormula);
+  const dopedElements = parseFormulaElements(dopedFormula);
+
+  let baseStonerMax = 0;
+  for (const el of baseElements) {
+    const I = getStonerParameter(el) ?? 0;
+    baseStonerMax = Math.max(baseStonerMax, I * baseDOS);
+  }
+  let dopedStonerMax = 0;
+  for (const el of dopedElements) {
+    const I = getStonerParameter(el) ?? 0;
+    dopedStonerMax = Math.max(dopedStonerMax, I * dopedDOS);
+  }
+
+  const magnetismSuppressed = baseStonerMax > 0.8 && dopedStonerMax < 0.9;
+
+  const basePhonon = computePhononSpectrum(baseFormula, baseElectronic);
+  const dopedPhonon = computePhononSpectrum(dopedFormula, dopedElectronic);
+  const baseLogFreq = basePhonon.logAverageFrequency;
+  const dopedLogFreq = dopedPhonon.logAverageFrequency;
+  const phononSoftening = baseLogFreq > 0 ? (baseLogFreq - dopedLogFreq) / baseLogFreq : 0;
+
+  let structuralTransition: string | null = null;
+  const baseCrystal = guessCrystalSystem(baseFormula);
+  const dopedCrystal = guessCrystalSystem(dopedFormula);
+  if (baseCrystal !== dopedCrystal && baseCrystal && dopedCrystal) {
+    structuralTransition = `${baseCrystal} -> ${dopedCrystal}`;
+  }
+
+  let indicator = 0;
+  if (dosIncrease > 0.05) indicator += 0.25 * Math.min(dosIncrease, 1.0);
+  if (magnetismSuppressed) indicator += 0.25;
+  if (phononSoftening > 0.05) indicator += 0.2 * Math.min(phononSoftening, 1.0);
+  if (structuralTransition) indicator += 0.15;
+  if (dopedDOS > 2.0) indicator += 0.15;
+
+  return {
+    dosAtEF: dopedDOS,
+    dosIncrease,
+    magnetismSuppressed,
+    stonerCriterion: dopedStonerMax,
+    structuralTransition,
+    phononSoftening,
+    overallSCIndicator: Math.min(1, indicator),
+  };
+}
+
+function guessCrystalSystem(formula: string): string {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+
+  if (elements.includes("Cu") && elements.includes("O") && (elements.includes("La") || elements.includes("Y") || elements.includes("Ba"))) {
+    return totalAtoms > 10 ? "orthorhombic" : "tetragonal";
+  }
+  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se"))) {
+    return "tetragonal";
+  }
+  if (elements.length === 2) return "cubic";
+  if (elements.length === 3) return "tetragonal";
+  return "orthorhombic";
+}
+
+export interface DopingSearchResult {
+  baseFormula: string;
+  dopant: string;
+  site: string;
+  type: "substitutional" | "vacancy" | "interstitial";
+  levels: Array<{
+    fraction: number;
+    resultFormula: string;
+    predictedTc: number;
+    tcUncertainty: number;
+    carrierDensity: number;
+    dopingCharacter: DopingCharacter;
+    scSignals: SCSignal;
+  }>;
+  bestFraction: number;
+  bestTc: number;
+  tcTrend: "increasing" | "decreasing" | "peaked" | "flat";
+}
+
+export function runDopingSearchLoop(
+  formula: string,
+  fractions: number[] = [0.02, 0.05, 0.10, 0.15, 0.20],
+  maxDopants: number = SEARCH_LIMITS.maxDopantsPerMaterial
+): { results: DopingSearchResult[]; bestOverall: { formula: string; tc: number; fraction: number; dopant: string } | null; wallTimeMs: number } {
+  const start = Date.now();
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const results: DopingSearchResult[] = [];
+
+  const clampedFracs = fractions.filter(f => f > 0 && f <= SEARCH_LIMITS.maxDopingFraction);
+
+  let globalBestTc = 0;
+  let globalBest: { formula: string; tc: number; fraction: number; dopant: string } | null = null;
+
+  const dopantSitePairs: Array<{ dopant: string; site: string; type: "substitutional" | "vacancy" | "interstitial" }> = [];
+
+  for (const site of elements) {
+    const dopants = SC_DOPANT_MAP[site];
+    if (!dopants) continue;
+    const siteData = getElementData(site);
+    if (!siteData) continue;
+
+    for (const dopant of dopants) {
+      if (elements.includes(dopant)) continue;
+      const dopantData = getElementData(dopant);
+      if (!dopantData) continue;
+      const radiusDiff = siteData.atomicRadius > 0 && dopantData.atomicRadius > 0
+        ? Math.abs(siteData.atomicRadius - dopantData.atomicRadius) / siteData.atomicRadius
+        : 0.5;
+      if (radiusDiff <= 0.3) {
+        dopantSitePairs.push({ dopant, site, type: "substitutional" });
+      }
+    }
+  }
+
+  for (const site of elements) {
+    if (VACANCY_TARGETS.includes(site) && counts[site] >= 1) {
+      dopantSitePairs.push({ dopant: "", site, type: "vacancy" });
+    }
+  }
+
+  const sortedPairs = dopantSitePairs
+    .map(p => ({ ...p, priority: p.type === "vacancy" ? 5 : getDopantPriority(p.site, p.dopant, elements) }))
+    .filter(p => p.priority >= 0)
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, maxDopants * 3);
+
+  for (const pair of sortedPairs) {
+    if (results.length >= maxDopants * 2) break;
+
+    const levels: DopingSearchResult["levels"] = [];
+    const supercellMult = getSupercellMultiplier(getTotalAtoms(counts));
+    const cellVolume = estimateUnitCellVolume(counts);
+
+    for (const fraction of clampedFracs) {
+      const supercellCounts: Record<string, number> = {};
+      for (const [el, n] of Object.entries(counts)) {
+        supercellCounts[el] = n * supercellMult;
+      }
+
+      let nChanged = 0;
+      if (pair.type === "substitutional") {
+        const sitesInSupercell = supercellCounts[pair.site];
+        nChanged = Math.max(1, Math.round(sitesInSupercell * fraction));
+        if (nChanged >= sitesInSupercell) continue;
+        supercellCounts[pair.site] -= nChanged;
+        supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
+      } else {
+        const sitesInSupercell = supercellCounts[pair.site];
+        nChanged = Math.max(1, Math.round(sitesInSupercell * fraction));
+        if (nChanged >= sitesInSupercell) continue;
+        supercellCounts[pair.site] -= nChanged;
+      }
+
+      const gcd = findGCD(Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v)));
+      const reduced: Record<string, number> = {};
+      for (const [el, n] of Object.entries(supercellCounts)) {
+        if (n > 0) reduced[el] = n / gcd;
+      }
+
+      const resultFormula = normalizeFormula(countsToFormula(reduced));
+      if (!isValidFormula(resultFormula)) continue;
+      if (getTotalAtoms(reduced) > SEARCH_LIMITS.maxSupercellAtoms) continue;
+
+      const { character, valenceChange } = pair.type === "vacancy"
+        ? classifyDopingCharacter(pair.site, "", "vacancy")
+        : classifyDopingCharacter(pair.site, pair.dopant, "substitutional");
+
+      const supercellVolume = cellVolume * supercellMult;
+      const carrierDensity = computeCarrierDensity(valenceChange, nChanged, supercellVolume);
+
+      try {
+        const features = extractFeatures(resultFormula);
+        const prediction = gbPredictWithUncertainty(features, resultFormula);
+        const tc = prediction.tcMean ?? 0;
+        const unc = prediction.totalStd ?? 0;
+
+        const scSignals = detectSCSignals(formula, resultFormula);
+
+        levels.push({
+          fraction,
+          resultFormula,
+          predictedTc: tc,
+          tcUncertainty: unc,
+          carrierDensity,
+          dopingCharacter: character,
+          scSignals,
+        });
+
+        if (tc > globalBestTc) {
+          globalBestTc = tc;
+          globalBest = { formula: resultFormula, tc, fraction, dopant: pair.dopant || `${pair.site}-vacancy` };
+        }
+      } catch { /* skip on prediction failure */ }
+    }
+
+    if (levels.length > 0) {
+      const tcs = levels.map(l => l.predictedTc);
+      const bestIdx = tcs.indexOf(Math.max(...tcs));
+      let trend: DopingSearchResult["tcTrend"] = "flat";
+      if (tcs.length >= 3) {
+        const first = tcs[0];
+        const last = tcs[tcs.length - 1];
+        const peak = Math.max(...tcs);
+        const peakIdx = tcs.indexOf(peak);
+        if (peakIdx > 0 && peakIdx < tcs.length - 1 && peak > first * 1.05 && peak > last * 1.05) {
+          trend = "peaked";
+        } else if (last > first * 1.1) {
+          trend = "increasing";
+        } else if (last < first * 0.9) {
+          trend = "decreasing";
+        }
+      }
+
+      results.push({
+        baseFormula: formula,
+        dopant: pair.dopant || `${pair.site}-vacancy`,
+        site: pair.site,
+        type: pair.type,
+        levels,
+        bestFraction: levels[bestIdx].fraction,
+        bestTc: levels[bestIdx].predictedTc,
+        tcTrend: trend,
+      });
+    }
+  }
+
+  results.sort((a, b) => b.bestTc - a.bestTc);
+
+  stats.totalBaseMaterials++;
+
+  return {
+    results,
+    bestOverall: globalBest,
+    wallTimeMs: Date.now() - start,
+  };
 }

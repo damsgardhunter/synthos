@@ -4551,6 +4551,24 @@ function TopologicalInvariantsPanel() {
 function DopingEnginePanel() {
   const [formula, setFormula] = useState("La2CuO4");
   const [relaxing, setRelaxing] = useState(false);
+  const [searchRunning, setSearchRunning] = useState(false);
+
+  const searchMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/doping/search/${encodeURIComponent(formula)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fractions: [0.02, 0.05, 0.10, 0.15, 0.20], maxDopants: 2 }),
+      });
+      if (!res.ok) throw new Error("Search failed");
+      return res.json();
+    },
+    onMutate: () => setSearchRunning(true),
+    onSettled: () => {
+      setSearchRunning(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/doping-engine/stats"] });
+    },
+  });
 
   const statsQuery = useQuery<{
     totalBaseMaterials: number;
@@ -4745,6 +4763,15 @@ function DopingEnginePanel() {
             >
               {relaxing ? "Relaxing..." : "Generate + Relax"}
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => searchMutation.mutate()}
+              disabled={!formula || searchRunning}
+              data-testid="button-doping-search"
+            >
+              {searchRunning ? "Searching..." : "Search Loop"}
+            </Button>
           </div>
 
           {dopingQuery.isLoading && <Skeleton className="h-32 w-full" />}
@@ -4896,6 +4923,65 @@ function DopingEnginePanel() {
                   </div>
                 )) : <div className="text-xs text-muted-foreground">No interstitial recommendations</div>}
               </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {searchMutation.data && (
+        <Card data-testid="doping-search-results-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-cyan-400" />
+              Doping Search Results
+              {searchMutation.data.bestOverall && (
+                <span className="text-xs text-muted-foreground ml-auto">
+                  Best: {searchMutation.data.bestOverall.formula} ({searchMutation.data.bestOverall.tc.toFixed(1)}K at {(searchMutation.data.bestOverall.fraction * 100).toFixed(0)}%)
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-xs text-muted-foreground mb-2">
+              {searchMutation.data.results.length} dopant-site pairs tested, {searchMutation.data.wallTimeMs}ms
+            </div>
+            <div className="space-y-3 max-h-[400px] overflow-y-auto">
+              {searchMutation.data.results.slice(0, 8).map((r: any, i: number) => (
+                <div key={i} className="border border-border/50 rounded p-3 bg-muted/10" data-testid={`search-result-${i}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className={typeColors[r.type] ?? "text-gray-400"}>{r.type}</Badge>
+                      <span className="font-mono text-sm font-bold">{r.dopant}</span>
+                      <span className="text-xs text-muted-foreground">at {r.site}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className={
+                        r.tcTrend === "peaked" ? "text-green-400" :
+                        r.tcTrend === "increasing" ? "text-blue-400" :
+                        r.tcTrend === "decreasing" ? "text-amber-400" : "text-gray-400"
+                      }>
+                        {r.tcTrend}
+                      </Badge>
+                      <span className="text-xs font-mono">best: {r.bestTc.toFixed(1)}K at {(r.bestFraction * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1 text-[10px]">
+                    {r.levels.map((l: any, j: number) => (
+                      <div key={j} className={`rounded p-1.5 text-center ${l.predictedTc === r.bestTc ? "bg-green-500/15 border border-green-500/30" : "bg-muted/30"}`}>
+                        <div className="text-muted-foreground">{(l.fraction * 100).toFixed(0)}%</div>
+                        <div className="font-mono font-bold">{l.predictedTc.toFixed(1)}K</div>
+                        <div className="text-muted-foreground">{l.scSignals.overallSCIndicator.toFixed(2)} SC</div>
+                      </div>
+                    ))}
+                  </div>
+                  {r.levels.some((l: any) => l.scSignals.magnetismSuppressed) && (
+                    <div className="mt-1.5 text-[10px] text-violet-400">Magnetism suppression detected at some doping levels</div>
+                  )}
+                  {r.levels.some((l: any) => l.scSignals.structuralTransition) && (
+                    <div className="mt-0.5 text-[10px] text-amber-400">Structural transition detected</div>
+                  )}
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>

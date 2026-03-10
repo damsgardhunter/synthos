@@ -323,6 +323,9 @@ export interface MLFeatureVector {
   dopingCarrierDensity: number;
   dopingLatticeStrain: number;
   dopingBondVariance: number;
+  dopantAtomicNumber: number;
+  dopantFraction: number;
+  dopantValenceDiff: number;
   _sourceFormula?: string;
 }
 
@@ -693,6 +696,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     dopingCarrierDensity: (mat as any)?.dopingCarrierDensity ?? 0,
     dopingLatticeStrain: (mat as any)?.dopingLatticeStrain ?? 0,
     dopingBondVariance: (mat as any)?.dopingBondVariance ?? 0,
+    dopantAtomicNumber: (mat as any)?.dopantAtomicNumber ?? 0,
+    dopantFraction: (mat as any)?.dopantFraction ?? 0,
+    dopantValenceDiff: (mat as any)?.dopantValenceDiff ?? 0,
     _sourceFormula: formula,
   };
 }
