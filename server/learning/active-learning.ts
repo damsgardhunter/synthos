@@ -66,7 +66,7 @@ export interface ActiveLearningCycleRecord {
   uncertaintyReductionPct: number;
   gnnRetrained: boolean;
   gnnVersion: number | null;
-  tierBreakdown: { bestTc: number; highUncertainty: number; randomExploration: number; pressureExploration: number };
+  tierBreakdown: { bestTc: number; highUncertainty: number; randomExploration: number; pressureExploration: number; pureCuriosity: number };
   topFormula: string;
   topAcquisitionScore: number;
   bestTcThisCycle: number;
@@ -127,8 +127,12 @@ interface RankedCandidate {
   normalizedTc: number;
   uncertainty: number;
   xgbUncertainty: number;
-  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration";
+  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration" | "pure-curiosity";
   targetPressureGpa?: number;
+  eiScore?: number;
+  ucbScore?: number;
+  curiosityScore?: number;
+  structuralDistance?: number;
 }
 
 export interface PressureCoverageStats {
@@ -252,6 +256,117 @@ function computeStructuralUniqueness(candidate: SuperconductorCandidate): number
   return Math.min(1.0, uniqueness);
 }
 
+let trainingSetVectors: { formula: string; vec: number[] }[] | null = null;
+
+function getTrainingSetVectors(): { formula: string; vec: number[] }[] {
+  if (trainingSetVectors) return trainingSetVectors;
+  const PERIODIC_ELEMENTS = [
+    "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+    "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+    "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+    "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+    "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Th","U"
+  ];
+  const elIndex = new Map<string, number>();
+  PERIODIC_ELEMENTS.forEach((el, i) => elIndex.set(el, i));
+  const dim = PERIODIC_ELEMENTS.length;
+
+  trainingSetVectors = SUPERCON_TRAINING_DATA.map(entry => {
+    const counts = parseFormulaElements(entry.formula);
+    const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+    const vec = new Array(dim).fill(0);
+    for (const [el, n] of Object.entries(counts)) {
+      const idx = elIndex.get(el);
+      if (idx !== undefined) vec[idx] = n / total;
+    }
+    return { formula: entry.formula, vec };
+  });
+  return trainingSetVectors;
+}
+
+function computeFixedDimVector(formula: string): number[] {
+  const PERIODIC_ELEMENTS = [
+    "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+    "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+    "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+    "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+    "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Th","U"
+  ];
+  const elIndex = new Map<string, number>();
+  PERIODIC_ELEMENTS.forEach((el, i) => elIndex.set(el, i));
+  const dim = PERIODIC_ELEMENTS.length;
+  const counts = parseFormulaElements(formula);
+  const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const vec = new Array(dim).fill(0);
+  for (const [el, n] of Object.entries(counts)) {
+    const idx = elIndex.get(el);
+    if (idx !== undefined) vec[idx] = n / total;
+  }
+  return vec;
+}
+
+function computeStructuralDistanceFromTrainingSet(formula: string): number {
+  const refVecs = getTrainingSetVectors();
+  const candidateVec = computeFixedDimVector(formula);
+
+  let minDist = Infinity;
+  for (const ref of refVecs) {
+    let sumSq = 0;
+    for (let i = 0; i < candidateVec.length; i++) {
+      const diff = candidateVec[i] - ref.vec[i];
+      sumSq += diff * diff;
+    }
+    minDist = Math.min(minDist, Math.sqrt(sumSq));
+  }
+  return Math.min(1.0, minDist / 0.8);
+}
+
+function computeExpectedImprovement(
+  predictedTc: number,
+  sigma: number,
+  bestTcSoFar: number
+): number {
+  if (sigma <= 1e-8) return predictedTc > bestTcSoFar ? (predictedTc - bestTcSoFar) / 300 : 0;
+
+  const z = (predictedTc - bestTcSoFar) / sigma;
+  const phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+  const PHI = 0.5 * (1 + erf(z / Math.SQRT2));
+
+  const ei = sigma * (z * PHI + phi);
+  return Math.min(1.0, ei / 300);
+}
+
+function erf(x: number): number {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const t = 1.0 / (1.0 + p * Math.abs(x));
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+
+function computeUCB(
+  predictedTc: number,
+  sigma: number,
+  kappa: number = 2.0
+): number {
+  return Math.min(1.0, (predictedTc + kappa * sigma) / 300);
+}
+
+function computeCuriosityScore(
+  structuralDistance: number,
+  uncertainty: number,
+  oodScore: number,
+  noveltyScore: number
+): number {
+  return Math.min(1.0,
+    0.35 * structuralDistance +
+    0.30 * uncertainty +
+    0.20 * oodScore +
+    0.15 * noveltyScore
+  );
+}
+
 function computeNoveltyScore(candidate: SuperconductorCandidate): number {
   const compositionDist = computeCompositionDistance(candidate.formula);
   const elementRarity = computeElementRarity(candidate.formula);
@@ -289,25 +404,38 @@ export function selectForDFT(
   candidates: SuperconductorCandidate[],
   budget: number = 20
 ): RankedCandidate[] {
-  const pressureExplorationSlots = Math.min(3, Math.ceil(budget * 0.10));
-  const bestTcSlots = Math.min(8, Math.ceil(budget * 0.35));
-  const highUncertaintySlots = Math.min(7, Math.ceil(budget * 0.35));
-  const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pressureExplorationSlots);
+  const pureCuriositySlots = Math.max(1, Math.ceil(budget * 0.20));
+  const pressureExplorationSlots = Math.min(2, Math.ceil(budget * 0.10));
+  const bestTcSlots = Math.min(6, Math.ceil(budget * 0.25));
+  const highUncertaintySlots = Math.min(6, Math.ceil(budget * 0.25));
+  const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pureCuriositySlots - pressureExplorationSlots);
 
   seenCompositions.clear();
   for (const c of candidates) {
     seenCompositions.set(c.formula, computeCompositionVector(c.formula));
   }
 
+  const bestTcSoFar = convergenceStats.bestTcFromLoop > 0
+    ? convergenceStats.bestTcFromLoop
+    : Math.max(...candidates.map(c => c.predictedTc ?? 0), 39);
+
+  const kappa = computeAdaptiveAlpha();
+
   const scored: {
     candidate: SuperconductorCandidate;
     normalizedTc: number;
+    predictedTcRaw: number;
+    sigmaRaw: number;
     gnnUncertainty: number;
     xgbUncertainty: number;
     combinedUncertainty: number;
     stabilityProbability: number;
     noveltyScore: number;
     acquisitionScore: number;
+    eiScore: number;
+    ucbScore: number;
+    curiosityScore: number;
+    structuralDistance: number;
     oodScore: number;
   }[] = [];
 
@@ -318,16 +446,22 @@ export function selectForDFT(
     const candidatePressure = (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
 
     let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
+    let gnnSigmaK = tc * 0.3;
     try {
       const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
       gnnUncertainty = Math.max(gnnUncertainty, gnnResult.uncertainty);
+      if (gnnResult.uncertaintyBreakdown) {
+        gnnSigmaK = gnnResult.uncertaintyBreakdown.totalSigma ?? tc * gnnUncertainty;
+      }
     } catch (e: any) { console.error("[ActiveLearning] GNN predict error:", e?.message?.slice(0, 200)); }
 
     let xgbUncertainty = 0.5;
+    let xgbSigmaK = tc * 0.3;
     try {
       const features = extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
       const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
       xgbUncertainty = xgbResult.normalizedUncertainty;
+      xgbSigmaK = xgbResult.totalStd ?? xgbResult.tcStd ?? tc * xgbUncertainty;
     } catch (e: any) { console.error("[ActiveLearning] XGB uncertainty error:", e?.message?.slice(0, 200)); }
 
     let embeddingUncertainty = 0.5;
@@ -335,6 +469,11 @@ export function selectForDFT(
       const emb = computeStructureEmbedding(candidate.formula);
       embeddingUncertainty = estimateStructureUncertainty(emb);
     } catch {}
+
+    const sigmaRaw = Math.sqrt(
+      0.5 * gnnSigmaK * gnnSigmaK +
+      0.5 * xgbSigmaK * xgbSigmaK
+    );
 
     let baseCombinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
 
@@ -353,21 +492,42 @@ export function selectForDFT(
 
     const noveltyScore = computeNoveltyScore(candidate);
 
+    const structuralDistance = computeStructuralDistanceFromTrainingSet(candidate.formula);
+
+    const eiScore = computeExpectedImprovement(tc, sigmaRaw, bestTcSoFar);
+
+    const ucbScore = computeUCB(tc, sigmaRaw, kappa);
+
+    const curiosityScore = computeCuriosityScore(
+      structuralDistance,
+      combinedUncertainty,
+      oodScoreVal,
+      noveltyScore
+    );
+
     const acquisitionScore =
-      0.50 * normalizedTc +
-      0.40 * combinedUncertainty +
-      0.05 * stabilityProbability +
-      0.05 * noveltyScore;
+      0.30 * eiScore +
+      0.25 * ucbScore +
+      0.20 * combinedUncertainty +
+      0.10 * curiosityScore +
+      0.10 * normalizedTc +
+      0.05 * stabilityProbability;
 
     scored.push({
       candidate,
       normalizedTc,
+      predictedTcRaw: tc,
+      sigmaRaw,
       gnnUncertainty,
       xgbUncertainty,
       combinedUncertainty,
       stabilityProbability,
       noveltyScore,
       acquisitionScore,
+      eiScore,
+      ucbScore,
+      curiosityScore,
+      structuralDistance,
       oodScore: oodScoreVal,
     });
   }
@@ -375,8 +535,8 @@ export function selectForDFT(
   const selected: RankedCandidate[] = [];
   const seenFormulas = new Set<string>();
 
-  const byTc = [...scored].sort((a, b) => b.acquisitionScore - a.acquisitionScore || b.normalizedTc - a.normalizedTc);
-  for (const s of byTc) {
+  const byEI = [...scored].sort((a, b) => b.eiScore - a.eiScore || b.ucbScore - a.ucbScore);
+  for (const s of byEI) {
     if (selected.length >= bestTcSlots) break;
     if (seenFormulas.has(s.candidate.formula)) continue;
     seenFormulas.add(s.candidate.formula);
@@ -387,11 +547,14 @@ export function selectForDFT(
       uncertainty: s.combinedUncertainty,
       xgbUncertainty: s.xgbUncertainty,
       selectionTier: "best-tc",
+      eiScore: s.eiScore,
+      ucbScore: s.ucbScore,
+      structuralDistance: s.structuralDistance,
     });
   }
 
-  const byUncertainty = [...scored].sort((a, b) => b.acquisitionScore - a.acquisitionScore || b.combinedUncertainty - a.combinedUncertainty);
-  for (const s of byUncertainty) {
+  const byUCB = [...scored].sort((a, b) => b.ucbScore - a.ucbScore || b.combinedUncertainty - a.combinedUncertainty);
+  for (const s of byUCB) {
     if (selected.length >= bestTcSlots + highUncertaintySlots) break;
     if (seenFormulas.has(s.candidate.formula)) continue;
     seenFormulas.add(s.candidate.formula);
@@ -402,6 +565,28 @@ export function selectForDFT(
       uncertainty: s.combinedUncertainty,
       xgbUncertainty: s.xgbUncertainty,
       selectionTier: "high-uncertainty",
+      eiScore: s.eiScore,
+      ucbScore: s.ucbScore,
+      structuralDistance: s.structuralDistance,
+    });
+  }
+
+  const byCuriosity = [...scored].sort((a, b) => b.curiosityScore - a.curiosityScore || b.structuralDistance - a.structuralDistance);
+  for (const s of byCuriosity) {
+    if (selected.filter(r => r.selectionTier === "pure-curiosity").length >= pureCuriositySlots) break;
+    if (seenFormulas.has(s.candidate.formula)) continue;
+    seenFormulas.add(s.candidate.formula);
+    selected.push({
+      candidate: s.candidate,
+      acquisitionScore: s.acquisitionScore,
+      normalizedTc: s.normalizedTc,
+      uncertainty: s.combinedUncertainty,
+      xgbUncertainty: s.xgbUncertainty,
+      selectionTier: "pure-curiosity",
+      eiScore: s.eiScore,
+      ucbScore: s.ucbScore,
+      curiosityScore: s.curiosityScore,
+      structuralDistance: s.structuralDistance,
     });
   }
 
@@ -420,6 +605,9 @@ export function selectForDFT(
       uncertainty: s.combinedUncertainty,
       xgbUncertainty: s.xgbUncertainty,
       selectionTier: "random-exploration",
+      eiScore: s.eiScore,
+      ucbScore: s.ucbScore,
+      structuralDistance: s.structuralDistance,
     });
   }
 
@@ -442,7 +630,7 @@ export function selectForDFT(
         });
         pressureAdded++;
       }
-    } catch { /* skip if pressure sampling fails */ }
+    } catch {}
   }
 
   return selected;
@@ -951,6 +1139,7 @@ export async function runActiveLearningCycle(
   const tierCounts = {
     bestTc: selected.filter(s => s.selectionTier === "best-tc").length,
     highUncertainty: selected.filter(s => s.selectionTier === "high-uncertainty").length,
+    pureCuriosity: selected.filter(s => s.selectionTier === "pure-curiosity").length,
     randomExploration: selected.filter(s => s.selectionTier === "random-exploration").length,
     pressureExploration: selected.filter(s => s.selectionTier === "pressure-exploration").length,
   };
@@ -961,7 +1150,7 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: "DFT candidates selected",
-    detail: `Selected ${selected.length} candidates [${tierCounts.bestTc} best-tc, ${tierCounts.highUncertainty} high-uncertainty, ${tierCounts.randomExploration} random, ${tierCounts.pressureExploration} pressure-exploration] (avg combined unc: ${avgUncertaintyBefore.toFixed(3)}, avg XGB unc: ${avgXgbUnc.toFixed(3)}, top: ${selected[0]?.candidate.formula ?? 'none'} acq=${selected[0]?.acquisitionScore.toFixed(3) ?? 0})`,
+    detail: `Selected ${selected.length} candidates [${tierCounts.bestTc} EI-best, ${tierCounts.highUncertainty} UCB-uncertain, ${tierCounts.pureCuriosity} curiosity, ${tierCounts.randomExploration} random, ${tierCounts.pressureExploration} pressure] (avg unc: ${avgUncertaintyBefore.toFixed(3)}, kappa=${computeAdaptiveAlpha().toFixed(2)}, top: ${selected[0]?.candidate.formula ?? 'none'} EI=${selected[0]?.eiScore?.toFixed(3) ?? 0} UCB=${selected[0]?.ucbScore?.toFixed(3) ?? 0})`,
     dataSource: "Active Learning",
   });
 

@@ -1179,6 +1179,78 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
+        <Card data-testid="acquisition-functions">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Compass className="h-4 w-4 text-primary" />
+              Acquisition Functions
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const cycles = alStats?.recentCycles ?? [];
+              const latest = cycles.length > 0 ? cycles[cycles.length - 1] : null;
+              if (!latest || !latest.tierBreakdown) {
+                return (
+                  <p className="text-sm text-muted-foreground italic" data-testid="acquisition-placeholder">
+                    EI/UCB acquisition data will appear after the first active learning cycle
+                  </p>
+                );
+              }
+              const tb = latest.tierBreakdown;
+              const total = latest.candidatesSelected || 1;
+              const tierData = [
+                { label: "EI-Best Tc", count: tb.bestTc ?? 0, color: "bg-blue-500" },
+                { label: "UCB-Uncertain", count: tb.highUncertainty ?? 0, color: "bg-purple-500" },
+                { label: "Pure Curiosity", count: tb.pureCuriosity ?? 0, color: "bg-cyan-500" },
+                { label: "Pressure Expl.", count: tb.pressureExploration ?? 0, color: "bg-amber-500" },
+                { label: "Random", count: tb.randomExploration ?? 0, color: "bg-gray-400" },
+              ];
+              const avgEI = cycles.length > 0
+                ? cycles.reduce((s: number, c: any) => s + (c.topAcquisitionScore ?? 0), 0) / cycles.length
+                : 0;
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="acq-top-score">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Top Acquisition</p>
+                      <p className="text-xl font-mono font-bold">{(latest.topAcquisitionScore ?? 0).toFixed(3)}</p>
+                    </div>
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="acq-avg-score">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Top (Recent)</p>
+                      <p className="text-xl font-mono font-bold">{avgEI.toFixed(3)}</p>
+                    </div>
+                  </div>
+                  <div data-testid="acq-tier-breakdown">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Tier Breakdown (Cycle {latest.cycle})</p>
+                    <div className="flex h-3 rounded-full overflow-hidden mb-2">
+                      {tierData.filter(t => t.count > 0).map((t, i) => (
+                        <div key={i} className={`${t.color} transition-all`} style={{ width: `${(t.count / total) * 100}%` }} title={`${t.label}: ${t.count}`} />
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
+                      {tierData.map((t, i) => (
+                        <div key={i} className="flex items-center gap-1.5 text-[10px]">
+                          <div className={`w-2 h-2 rounded-full ${t.color}`} />
+                          <span className="text-muted-foreground">{t.label}:</span>
+                          <span className="font-mono font-medium">{t.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {latest.bestTcThisCycle > 0 && (
+                    <div className="p-2.5 bg-muted/50 rounded-md" data-testid="acq-best-tc-cycle">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Best Tc This Cycle</p>
+                      <p className="text-lg font-mono font-bold">{Math.round(latest.bestTcThisCycle)}K</p>
+                      <p className="text-[10px] text-muted-foreground">{latest.topFormula}</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+
         <Card data-testid="hull-stability-summary">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
