@@ -4550,6 +4550,7 @@ function TopologicalInvariantsPanel() {
 
 function DopingEnginePanel() {
   const [formula, setFormula] = useState("La2CuO4");
+  const [relaxing, setRelaxing] = useState(false);
 
   const statsQuery = useQuery<{
     totalBaseMaterials: number;
@@ -4558,6 +4559,10 @@ function DopingEnginePanel() {
     vacancyCount: number;
     interstitialCount: number;
     validVariants: number;
+    electronDopedCount: number;
+    holeDopedCount: number;
+    relaxationsCompleted: number;
+    avgLatticeStrain: number;
     recentResults: Array<{ base: string; variants: number; timestamp: number }>;
   }>({
     queryKey: ["/api/doping-engine/stats"],
@@ -4575,6 +4580,19 @@ function DopingEnginePanel() {
       resultFormula: string;
       supercellSize: number;
       rationale: string;
+      dopingCharacter: string;
+      valenceChange: number;
+      carrierDensity: number;
+      relaxation?: {
+        converged: boolean;
+        latticeStrain: number;
+        bondVariance: number;
+        meanDisplacement: number;
+        maxDisplacement: number;
+        volumeChange: number;
+        energyPerAtom: number;
+        wallTimeMs: number;
+      };
     }>;
     totalGenerated: number;
     validGenerated: number;
@@ -4587,13 +4605,27 @@ function DopingEnginePanel() {
   const recsQuery = useQuery<{
     formula: string;
     recommendations: {
-      substitutional: Array<{ dopant: string; site: string; rationale: string }>;
-      vacancy: Array<{ site: string; rationale: string }>;
-      interstitial: Array<{ dopant: string; rationale: string }>;
+      substitutional: Array<{ dopant: string; site: string; rationale: string; dopingType: string; valenceChange: number }>;
+      vacancy: Array<{ site: string; rationale: string; dopingType: string; valenceChange: number }>;
+      interstitial: Array<{ dopant: string; rationale: string; dopingType: string; valenceChange: number }>;
     };
   }>({
     queryKey: ["/api/doping/recommendations", formula],
     enabled: formula.length > 0,
+  });
+
+  const relaxMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/doping/relax/${encodeURIComponent(formula)}`, { method: "POST" });
+      if (!res.ok) throw new Error("Relaxation failed");
+      return res.json();
+    },
+    onMutate: () => setRelaxing(true),
+    onSettled: () => {
+      setRelaxing(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/doping", formula] });
+      queryClient.invalidateQueries({ queryKey: ["/api/doping-engine/stats"] });
+    },
   });
 
   const stats = statsQuery.data;
@@ -4612,6 +4644,14 @@ function DopingEnginePanel() {
     interstitial: "bg-emerald-500/10 border-emerald-500/30",
   };
 
+  const charColors: Record<string, string> = {
+    electron: "text-sky-400",
+    hole: "text-rose-400",
+    isovalent: "text-gray-400",
+    "vacancy-hole": "text-rose-400",
+    "interstitial-electron": "text-sky-400",
+  };
+
   return (
     <div className="space-y-4" data-testid="doping-engine-panel">
       <Card data-testid="doping-engine-stats-card">
@@ -4623,26 +4663,46 @@ function DopingEnginePanel() {
         </CardHeader>
         <CardContent>
           {stats ? (
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              <div className="bg-muted/30 rounded p-2 text-center">
-                <div className="text-xs text-muted-foreground">Base Materials</div>
-                <div className="text-lg font-mono" data-testid="stat-base-materials">{stats.totalBaseMaterials}</div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <div className="bg-muted/30 rounded p-2 text-center">
+                  <div className="text-xs text-muted-foreground">Base Materials</div>
+                  <div className="text-lg font-mono" data-testid="stat-base-materials">{stats.totalBaseMaterials}</div>
+                </div>
+                <div className="bg-muted/30 rounded p-2 text-center">
+                  <div className="text-xs text-muted-foreground">Total Variants</div>
+                  <div className="text-lg font-mono" data-testid="stat-total-variants">{stats.totalVariantsGenerated}</div>
+                </div>
+                <div className="bg-blue-500/10 rounded p-2 text-center">
+                  <div className="text-xs text-blue-400">Substitutional</div>
+                  <div className="text-lg font-mono text-blue-300" data-testid="stat-substitutional">{stats.substitutionalCount}</div>
+                </div>
+                <div className="bg-amber-500/10 rounded p-2 text-center">
+                  <div className="text-xs text-amber-400">Vacancy</div>
+                  <div className="text-lg font-mono text-amber-300" data-testid="stat-vacancy">{stats.vacancyCount}</div>
+                </div>
+                <div className="bg-emerald-500/10 rounded p-2 text-center">
+                  <div className="text-xs text-emerald-400">Interstitial</div>
+                  <div className="text-lg font-mono text-emerald-300" data-testid="stat-interstitial">{stats.interstitialCount}</div>
+                </div>
               </div>
-              <div className="bg-muted/30 rounded p-2 text-center">
-                <div className="text-xs text-muted-foreground">Total Variants</div>
-                <div className="text-lg font-mono" data-testid="stat-total-variants">{stats.totalVariantsGenerated}</div>
-              </div>
-              <div className="bg-blue-500/10 rounded p-2 text-center">
-                <div className="text-xs text-blue-400">Substitutional</div>
-                <div className="text-lg font-mono text-blue-300" data-testid="stat-substitutional">{stats.substitutionalCount}</div>
-              </div>
-              <div className="bg-amber-500/10 rounded p-2 text-center">
-                <div className="text-xs text-amber-400">Vacancy</div>
-                <div className="text-lg font-mono text-amber-300" data-testid="stat-vacancy">{stats.vacancyCount}</div>
-              </div>
-              <div className="bg-emerald-500/10 rounded p-2 text-center">
-                <div className="text-xs text-emerald-400">Interstitial</div>
-                <div className="text-lg font-mono text-emerald-300" data-testid="stat-interstitial">{stats.interstitialCount}</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="bg-sky-500/10 rounded p-2 text-center">
+                  <div className="text-xs text-sky-400">Electron-Doped</div>
+                  <div className="text-lg font-mono text-sky-300" data-testid="stat-electron-doped">{stats.electronDopedCount}</div>
+                </div>
+                <div className="bg-rose-500/10 rounded p-2 text-center">
+                  <div className="text-xs text-rose-400">Hole-Doped</div>
+                  <div className="text-lg font-mono text-rose-300" data-testid="stat-hole-doped">{stats.holeDopedCount}</div>
+                </div>
+                <div className="bg-violet-500/10 rounded p-2 text-center">
+                  <div className="text-xs text-violet-400">xTB Relaxations</div>
+                  <div className="text-lg font-mono text-violet-300" data-testid="stat-relaxations">{stats.relaxationsCompleted}</div>
+                </div>
+                <div className="bg-muted/30 rounded p-2 text-center">
+                  <div className="text-xs text-muted-foreground">Avg Strain</div>
+                  <div className="text-lg font-mono" data-testid="stat-avg-strain">{stats.avgLatticeStrain.toFixed(4)}</div>
+                </div>
               </div>
             </div>
           ) : (
@@ -4676,6 +4736,15 @@ function DopingEnginePanel() {
             >
               Generate
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => relaxMutation.mutate()}
+              disabled={!formula || relaxing}
+              data-testid="button-relax-doped"
+            >
+              {relaxing ? "Relaxing..." : "Generate + Relax"}
+            </Button>
           </div>
 
           {dopingQuery.isLoading && <Skeleton className="h-32 w-full" />}
@@ -4689,12 +4758,16 @@ function DopingEnginePanel() {
               </div>
 
               {data.variants.length > 0 ? (
-                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                <div className="space-y-2 max-h-[500px] overflow-y-auto">
                   {data.variants.map((v, i) => (
                     <div key={i} className={`border rounded p-3 ${typeBg[v.type] ?? "bg-muted/20"}`} data-testid={`doping-variant-${i}`}>
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2">
                           <Badge variant="outline" className={typeColors[v.type]}>{v.type}</Badge>
+                          <Badge variant="outline" className={charColors[v.dopingCharacter] ?? "text-gray-400"}>
+                            {v.dopingCharacter === "electron" || v.dopingCharacter === "interstitial-electron" ? "e-doping" :
+                             v.dopingCharacter === "hole" || v.dopingCharacter === "vacancy-hole" ? "h-doping" : "isovalent"}
+                          </Badge>
                           <code className="text-sm font-bold">{v.resultFormula}</code>
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -4704,6 +4777,58 @@ function DopingEnginePanel() {
                         </div>
                       </div>
                       <p className="text-xs text-muted-foreground">{v.rationale}</p>
+
+                      <div className="flex items-center gap-3 mt-1.5 text-xs">
+                        {v.valenceChange !== 0 && (
+                          <span className={charColors[v.dopingCharacter] ?? ""}>
+                            dq={v.valenceChange > 0 ? "+" : ""}{v.valenceChange}
+                          </span>
+                        )}
+                        {v.carrierDensity > 0 && (
+                          <span className="text-muted-foreground">
+                            n={v.carrierDensity.toExponential(1)} cm<sup>-3</sup>
+                          </span>
+                        )}
+                      </div>
+
+                      {v.relaxation && (
+                        <div className="mt-2 p-2 bg-background/50 rounded border border-border/50 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                          <div>
+                            <span className="text-muted-foreground">Strain: </span>
+                            <span className="font-mono">{v.relaxation.latticeStrain.toFixed(4)}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Bond Var: </span>
+                            <span className="font-mono">{v.relaxation.bondVariance.toFixed(3)} A</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Mean Disp: </span>
+                            <span className="font-mono">{v.relaxation.meanDisplacement.toFixed(3)} A</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Vol Change: </span>
+                            <span className="font-mono">{v.relaxation.volumeChange.toFixed(2)}%</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Max Disp: </span>
+                            <span className="font-mono">{v.relaxation.maxDisplacement.toFixed(3)} A</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">E/atom: </span>
+                            <span className="font-mono">{v.relaxation.energyPerAtom.toFixed(3)} eV</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Time: </span>
+                            <span className="font-mono">{(v.relaxation.wallTimeMs / 1000).toFixed(1)}s</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Converged: </span>
+                            <span className={v.relaxation.converged ? "text-green-400" : "text-red-400"}>
+                              {v.relaxation.converged ? "Yes" : "No"}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -4726,28 +4851,47 @@ function DopingEnginePanel() {
           <CardContent>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div className="space-y-2">
-                <div className="text-xs font-medium text-blue-400">Substitutional</div>
+                <div className="text-xs font-medium text-blue-400">Substitutional (Electron / Hole)</div>
                 {recs.substitutional.length > 0 ? recs.substitutional.map((r, i) => (
                   <div key={i} className="text-xs p-2 bg-blue-500/5 rounded border border-blue-500/20" data-testid={`rec-sub-${i}`}>
-                    <span className="font-mono font-bold">{r.dopant}</span> at <span className="font-mono">{r.site}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold">{r.dopant}</span>
+                      <span>at</span>
+                      <span className="font-mono">{r.site}</span>
+                      <Badge variant="outline" className={`text-[10px] px-1 py-0 ${r.dopingType === "electron" ? "text-sky-400" : r.dopingType === "hole" ? "text-rose-400" : "text-gray-400"}`}>
+                        {r.dopingType} dq={r.valenceChange > 0 ? "+" : ""}{r.valenceChange}
+                      </Badge>
+                    </div>
                     <p className="text-muted-foreground mt-0.5">{r.rationale}</p>
                   </div>
                 )) : <div className="text-xs text-muted-foreground">No substitutional recommendations</div>}
               </div>
               <div className="space-y-2">
-                <div className="text-xs font-medium text-amber-400">Vacancy</div>
+                <div className="text-xs font-medium text-amber-400">Vacancy (Carrier Generation)</div>
                 {recs.vacancy.length > 0 ? recs.vacancy.map((r, i) => (
                   <div key={i} className="text-xs p-2 bg-amber-500/5 rounded border border-amber-500/20" data-testid={`rec-vac-${i}`}>
-                    <span className="font-mono font-bold">{r.site}</span> vacancy
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold">{r.site}</span>
+                      <span>vacancy</span>
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 text-rose-400">
+                        dq={r.valenceChange}
+                      </Badge>
+                    </div>
                     <p className="text-muted-foreground mt-0.5">{r.rationale}</p>
                   </div>
                 )) : <div className="text-xs text-muted-foreground">No vacancy recommendations</div>}
               </div>
               <div className="space-y-2">
-                <div className="text-xs font-medium text-emerald-400">Interstitial</div>
+                <div className="text-xs font-medium text-emerald-400">Interstitial (Electron Donors)</div>
                 {recs.interstitial.length > 0 ? recs.interstitial.map((r, i) => (
                   <div key={i} className="text-xs p-2 bg-emerald-500/5 rounded border border-emerald-500/20" data-testid={`rec-int-${i}`}>
-                    <span className="font-mono font-bold">{r.dopant}</span> intercalation
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold">{r.dopant}</span>
+                      <span>intercalation</span>
+                      <Badge variant="outline" className="text-[10px] px-1 py-0 text-sky-400">
+                        +{r.valenceChange}e
+                      </Badge>
+                    </div>
                     <p className="text-muted-foreground mt-0.5">{r.rationale}</p>
                   </div>
                 )) : <div className="text-xs text-muted-foreground">No interstitial recommendations</div>}

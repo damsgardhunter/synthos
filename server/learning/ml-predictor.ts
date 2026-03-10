@@ -320,6 +320,9 @@ export interface MLFeatureVector {
   disorderSiteMixingEntropy: number;
   disorderConfigEntropy: number;
   disorderDosSignal: number;
+  dopingCarrierDensity: number;
+  dopingLatticeStrain: number;
+  dopingBondVariance: number;
   _sourceFormula?: string;
 }
 
@@ -687,6 +690,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     disorderSiteMixingEntropy: disorderCtx?.siteMixingEntropy ?? 0,
     disorderConfigEntropy: disorderCtx?.configurationalEntropy ?? 0,
     disorderDosSignal: disorderCtx?.dosDisorderSignal ?? 0,
+    dopingCarrierDensity: (mat as any)?.dopingCarrierDensity ?? 0,
+    dopingLatticeStrain: (mat as any)?.dopingLatticeStrain ?? 0,
+    dopingBondVariance: (mat as any)?.dopingBondVariance ?? 0,
     _sourceFormula: formula,
   };
 }

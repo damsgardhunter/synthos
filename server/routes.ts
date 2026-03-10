@@ -5,7 +5,7 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
-import { generateDopedVariants, getDopingEngineStats, getDopingRecommendations, runDopingBatch } from "./learning/doping-engine";
+import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch } from "./learning/doping-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
@@ -5441,6 +5441,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to run doping batch", detail: e.message });
+    }
+  });
+
+  app.post("/api/doping/relax/:formula", writeLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const maxRelaxations = Math.min(6, Number(req.query.maxRelax) || 4);
+      const maxVariants = Math.min(20, Number(req.query.max) || 12);
+      const result = await generateDopedVariantsWithRelaxation(formula, maxVariants, maxRelaxations);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to relax doped variants", detail: e.message });
     }
   });
 

@@ -4162,7 +4162,7 @@ async function runAutonomousFastPath() {
           emit("log", {
             phase: "engine",
             event: "Doping engine variants",
-            detail: `${dopingResult.stats.basesProcessed} bases → ${dopingCandidates.length} doped variants (sub=${dopingResult.stats.substitutional}, vac=${dopingResult.stats.vacancy}, int=${dopingResult.stats.interstitial}). Top: ${dopingCandidates.slice(0, 3).join(", ")}`,
+            detail: `${dopingResult.stats.basesProcessed} bases → ${dopingCandidates.length} doped variants (sub=${dopingResult.stats.substitutional}, vac=${dopingResult.stats.vacancy}, int=${dopingResult.stats.interstitial}, e-doped=${dopingResult.stats.electronDoped}, h-doped=${dopingResult.stats.holeDoped}). Top: ${dopingCandidates.slice(0, 3).join(", ")}`,
             dataSource: "Doping Engine",
           });
         }
