@@ -224,9 +224,9 @@ function detectMotif(formula: string, elements: string[], counts: Record<string,
 }
 
 function scorePillar(value: number, target: number, softness: number = 0.5): number {
-  if (value >= target) return Math.min(1.0, 0.8 + 0.2 * (value / target));
+  if (value >= target) return Math.min(1.0, 0.85 + 0.15 * Math.min(value / target, 2.0));
   const ratio = value / Math.max(target, 0.001);
-  return Math.pow(ratio, softness);
+  return Math.pow(ratio, 1.0 + softness);
 }
 
 function computePairingGlue(
@@ -748,6 +748,11 @@ export function evaluatePillars(
 
   if (!constraint.isValid && constraint.totalPenalty > 1.0) {
     compositeFitness *= 0.5;
+  }
+
+  if (tcPredicted > 0 && tcPredicted < 50) {
+    const tcScaling = Math.pow(tcPredicted / 50, 0.6);
+    compositeFitness *= Math.max(0.3, tcScaling);
   }
 
   fitnessSum += compositeFitness;

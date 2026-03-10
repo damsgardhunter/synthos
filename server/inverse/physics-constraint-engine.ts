@@ -358,24 +358,9 @@ function checkElectronCount(counts: Record<string, number>): {
   const violations: string[] = [];
   let score = 1.0;
 
-  if (valencePerAtom < 1.0) {
-    score -= 0.4;
+  if (valencePerAtom < 0.5) {
+    score -= 0.3;
     violations.push(`Very low valence electron density: ${valencePerAtom.toFixed(2)} e/atom`);
-  }
-
-  if (totalValence % 1 !== 0) {
-    score -= 0.1;
-    violations.push("Fractional total valence electron count");
-  }
-
-  const hasTransitionMetal = elements.some(el => {
-    const an = ELEMENTAL_DATA[el]?.atomicNumber ?? 0;
-    return (an >= 21 && an <= 30) || (an >= 39 && an <= 48) || (an >= 72 && an <= 80);
-  });
-
-  if (!hasTransitionMetal && valencePerAtom < 2.0) {
-    score -= 0.2;
-    violations.push("No transition metals and low valence density - poor for SC");
   }
 
   return { score: Math.max(0, score), violations };
@@ -386,7 +371,7 @@ let constraintWeights: Record<string, number> = {
   radius_incompatibility: 0.6,
   coordination_violation: 0.5,
   bond_instability: 0.7,
-  electron_count: 0.4,
+  electron_count: 0.15,
   noble_gas: 1.0,
   stoichiometry_excess: 0.8,
 };

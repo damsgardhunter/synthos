@@ -218,6 +218,53 @@ function getColumn(dataset: CausalDataRecord[], varName: string): number[] {
   });
 }
 
+const FORBIDDEN_EDGES = new Set([
+  "atomic_mass_avg->doping",
+  "doping->atomic_mass_avg",
+  "atomic_mass_avg->pressure",
+  "pressure->atomic_mass_avg",
+  "atomic_mass_avg->strain",
+  "strain->atomic_mass_avg",
+  "atomic_mass_avg->defect_density",
+  "defect_density->atomic_mass_avg",
+  "atomic_mass_avg->temperature",
+  "temperature->atomic_mass_avg",
+  "coordination_number->doping",
+  "doping->coordination_number",
+  "coordination_number->pressure",
+  "pressure->coordination_number",
+  "electronegativity_spread->doping",
+  "doping->electronegativity_spread",
+  "electronegativity_spread->pressure",
+  "pressure->electronegativity_spread",
+  "layeredness->doping",
+  "doping->layeredness",
+  "hydrogen_density->doping",
+  "doping->hydrogen_density",
+  "doping->phonon_freq",
+  "phonon_freq->doping",
+  "Tc->lambda",
+  "Tc->DOS_EF",
+  "Tc->phonon_freq",
+  "Tc->pressure",
+  "Tc->doping",
+  "Tc->atomic_mass_avg",
+]);
+
+function isEdgeForbidden(source: string, target: string): boolean {
+  return FORBIDDEN_EDGES.has(`${source}->${target}`);
+}
+
+function isOntologyAllowed(source: string, target: string): boolean {
+  const srcNode = PHYSICS_ONTOLOGY.find(o => o.variable === source);
+  const tgtNode = PHYSICS_ONTOLOGY.find(o => o.variable === target);
+  if (!srcNode || !tgtNode) return true;
+  if (srcNode.children.includes(target)) return true;
+  if (tgtNode.children.includes(source)) return false;
+  if (srcNode.level <= tgtNode.level) return true;
+  return false;
+}
+
 export function discoverCausalGraph(dataset: CausalDataRecord[], significanceThreshold: number = 0.15): CausalGraph {
   const variables = CAUSAL_VARIABLES.map(v => v.name);
   const edges: CausalEdge[] = [];
@@ -271,6 +318,9 @@ export function discoverCausalGraph(dataset: CausalDataRecord[], significanceThr
         source = vj; target = vi; direction = "forward";
       }
 
+      if (isEdgeForbidden(source, target)) continue;
+      if (!isOntologyAllowed(source, target)) continue;
+
       const mechanism = inferMechanism(source, target);
 
       edges.push({
@@ -291,7 +341,7 @@ export function discoverCausalGraph(dataset: CausalDataRecord[], significanceThr
     nodes: variables.filter(v => edges.some(e => e.source === v || e.target === v)),
     edges: edges.slice(0, 50),
     discoveredAt: Date.now(),
-    method: "PC-algorithm-inspired with physics ontology",
+    method: "PC-algorithm with physics ontology and forbidden-edge priors",
     datasetSize: dataset.length,
   };
 }
