@@ -91,6 +91,7 @@ interface HighSymmetryPath {
   labels: string[];
   coords: [number, number, number][];
   nPointsBetween: number;
+  breaks?: number[];
 }
 
 const CRYSTAL_SYSTEM_PATHS: Record<string, HighSymmetryPath> = {
@@ -183,8 +184,41 @@ function guessCrystalSystem(
   return "cubic_sc";
 }
 
+function detectPathBreaks(path: HighSymmetryPath): number[] {
+  const breaks: number[] = [];
+  const BREAK_THRESHOLD = 0.15;
+
+  for (let i = 0; i < path.coords.length - 1; i++) {
+    const [x1, y1, z1] = path.coords[i];
+    const [x2, y2, z2] = path.coords[i + 1];
+
+    let minDist = Infinity;
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let oz = -1; oz <= 1; oz++) {
+          const dx = (x2 + ox) - x1;
+          const dy = (y2 + oy) - y1;
+          const dz = (z2 + oz) - z1;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (d < minDist) minDist = d;
+        }
+      }
+    }
+
+    if (minDist > BREAK_THRESHOLD && i > 0) {
+      breaks.push(i);
+    }
+  }
+
+  return breaks;
+}
+
 function getKPath(crystalSystem: string): HighSymmetryPath {
-  return CRYSTAL_SYSTEM_PATHS[crystalSystem] || CRYSTAL_SYSTEM_PATHS["cubic_sc"];
+  const path = CRYSTAL_SYSTEM_PATHS[crystalSystem] || CRYSTAL_SYSTEM_PATHS["cubic_sc"];
+  if (!path.breaks) {
+    path.breaks = detectPathBreaks(path);
+  }
+  return path;
 }
 
 function crystalSystemToIbrav(system: string): number {
@@ -477,11 +511,22 @@ function parseBandsOutput(
       const segIdx = Math.floor(kIdx / (kPath.nPointsBetween || 15));
       const label = segIdx < kPath.labels.length ? kPath.labels[segIdx] : "";
 
+      let kDist = 0;
+      if (eigenvalues.length > 0) {
+        const prev = eigenvalues[eigenvalues.length - 1];
+        const dk = Math.sqrt(
+          (kCoords[0] - prev.kCoords[0]) ** 2 +
+          (kCoords[1] - prev.kCoords[1]) ** 2 +
+          (kCoords[2] - prev.kCoords[2]) ** 2,
+        );
+        kDist = prev.kDistance + (dk < 0.3 ? dk : 0.05);
+      }
+
       eigenvalues.push({
         kIndex: kIdx,
         kCoords,
         kLabel: label,
-        kDistance: kIdx,
+        kDistance: kDist,
         energies: energies.map(e => e - fermiEnergy),
       });
       nKPoints++;
@@ -535,7 +580,12 @@ function parseBandsDatFile(
         (kCoords[1] - prevCoords[1]) ** 2 +
         (kCoords[2] - prevCoords[2]) ** 2,
       );
-      cumDistance += dk;
+      const PATH_BREAK_THRESHOLD = 0.3;
+      if (dk < PATH_BREAK_THRESHOLD) {
+        cumDistance += dk;
+      } else {
+        cumDistance += 0.05;
+      }
     }
     prevCoords = kCoords;
 
@@ -570,6 +620,18 @@ function parseBandsDatFile(
   }
 
   return { eigenvalues, nBands, nKPoints };
+}
+
+export function isPathBreak(eigenvalues: BandEigenvalue[], ki: number): boolean {
+  if (ki < 1 || ki >= eigenvalues.length) return false;
+  const prev = eigenvalues[ki - 1];
+  const curr = eigenvalues[ki];
+  const dk = Math.sqrt(
+    (curr.kCoords[0] - prev.kCoords[0]) ** 2 +
+    (curr.kCoords[1] - prev.kCoords[1]) ** 2 +
+    (curr.kCoords[2] - prev.kCoords[2]) ** 2,
+  );
+  return dk > 0.25;
 }
 
 function dominantOrbital(w: OrbitalWeight): "s" | "p" | "d" | "f" {
@@ -677,6 +739,7 @@ function analyzeBands(
 
   for (let b = 0; b < nBands; b++) {
     for (let ki = 0; ki < eigenvalues.length - 1; ki++) {
+      if (isPathBreak(eigenvalues, ki + 1)) continue;
       const e1 = eigenvalues[ki].energies[b];
       const e2 = eigenvalues[ki + 1].energies[b];
       if (e1 === undefined || e2 === undefined) continue;
@@ -719,7 +782,7 @@ function analyzeBands(
       const eUpper = eigenvalues[ki].energies[b + 1];
       if (eLower === undefined || eUpper === undefined) continue;
 
-      if (ki > 0 && ki < eigenvalues.length - 1) {
+      if (ki > 0 && ki < eigenvalues.length - 1 && !isPathBreak(eigenvalues, ki) && !isPathBreak(eigenvalues, ki + 1)) {
         const eLowerPrev = eigenvalues[ki - 1].energies[b];
         const eUpperPrev = eigenvalues[ki - 1].energies[b + 1];
         const eLowerNext = eigenvalues[ki + 1].energies[b];
@@ -775,6 +838,7 @@ function analyzeBands(
 
   for (let b = 0; b < nBands; b++) {
     for (let ki = 1; ki < eigenvalues.length - 1; ki++) {
+      if (isPathBreak(eigenvalues, ki) || isPathBreak(eigenvalues, ki + 1)) continue;
       const ePrev = eigenvalues[ki - 1].energies[b];
       const eCurr = eigenvalues[ki].energies[b];
       const eNext = eigenvalues[ki + 1].energies[b];
@@ -819,15 +883,24 @@ function analyzeBands(
 
   let flatBandScore = 0;
   for (let b = 0; b < nBands; b++) {
-    const bandEnergies = eigenvalues.map(kpt => kpt.energies[b]).filter(e => e !== undefined) as number[];
-    if (bandEnergies.length < 3) continue;
-
-    const bMin = Math.min(...bandEnergies);
-    const bMax = Math.max(...bandEnergies);
-    const bRange = bMax - bMin;
-
-    if (bRange < 0.1 && Math.abs((bMin + bMax) / 2) < 2.0) {
-      flatBandScore = Math.max(flatBandScore, 1.0 - bRange / 0.1);
+    let segStart = 0;
+    for (let ki = 0; ki <= eigenvalues.length; ki++) {
+      if (ki === eigenvalues.length || isPathBreak(eigenvalues, ki)) {
+        const segEnergies: number[] = [];
+        for (let si = segStart; si < ki; si++) {
+          const e = eigenvalues[si].energies[b];
+          if (e !== undefined) segEnergies.push(e);
+        }
+        if (segEnergies.length >= 3) {
+          const bMin = Math.min(...segEnergies);
+          const bMax = Math.max(...segEnergies);
+          const bRange = bMax - bMin;
+          if (bRange < 0.1 && Math.abs((bMin + bMax) / 2) < 2.0) {
+            flatBandScore = Math.max(flatBandScore, 1.0 - bRange / 0.1);
+          }
+        }
+        segStart = ki;
+      }
     }
   }
 
@@ -841,6 +914,7 @@ function analyzeBands(
   let parityChanges = 0;
   for (let b = 0; b < nBands; b++) {
     for (let ki = 1; ki < eigenvalues.length; ki++) {
+      if (isPathBreak(eigenvalues, ki)) continue;
       const ePrev = eigenvalues[ki - 1].energies[b];
       const eCurr = eigenvalues[ki].energies[b];
       if (ePrev !== undefined && eCurr !== undefined) {

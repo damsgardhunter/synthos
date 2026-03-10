@@ -1,4 +1,4 @@
-import type { DFTBandStructureResult, BandEigenvalue, BandCrossing, BandInversion, VanHoveSingularity, EffectiveMass } from "./band-structure-calculator";
+import { isPathBreak, type DFTBandStructureResult, type BandEigenvalue, type BandCrossing, type BandInversion, type VanHoveSingularity, type EffectiveMass } from "./band-structure-calculator";
 import type { FermiSurfaceResult, FermiPocket, NestingVector, FermiSurfaceMLFeatures } from "../physics/fermi-surface-engine";
 
 export interface DFTFermiPocket {
@@ -206,6 +206,7 @@ export function computeFermiIsosurface(bandResult: DFTBandStructureResult): Ferm
 
   for (let b = 0; b < bandResult.nBands; b++) {
     for (let ki = 0; ki < bandResult.eigenvalues.length - 1; ki++) {
+      if (isPathBreak(bandResult.eigenvalues, ki + 1)) continue;
       const e0 = bandResult.eigenvalues[ki].energies[b];
       const e1 = bandResult.eigenvalues[ki + 1].energies[b];
       if (e0 === undefined || e1 === undefined) continue;
