@@ -1,6 +1,22 @@
 import { getElementData } from "../learning/elemental-data";
+import { execSync } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
+import { computeDisorderMetrics, recordMetricsAnalysis, extractMLFeatures, type DisorderMetrics } from "./disorder-metrics";
 
-export type DisorderType = "vacancy" | "substitution" | "interstitial" | "site-mixing";
+const PROJECT_ROOT = path.resolve(process.cwd());
+const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
+const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
+const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
+const WORK_DIR = path.join(PROJECT_ROOT, "server/dft/disorder-work");
+
+function isXtbAvailable(): boolean {
+  try {
+    return fs.existsSync(XTB_BIN);
+  } catch { return false; }
+}
+
+export type DisorderType = "vacancy" | "substitution" | "interstitial" | "site-mixing" | "amorphous";
 
 export interface DisorderSpec {
   type: DisorderType;
@@ -34,6 +50,9 @@ export interface DisorderedStructure {
   tcModifierEstimate: number;
   notes: string;
   generatedAt: number;
+  metrics?: DisorderMetrics;
+  mlFeatures?: Record<string, number>;
+  amorphousMethod?: "randomize" | "xtb-md" | null;
 }
 
 export interface DisorderGeneratorStats {
@@ -401,6 +420,217 @@ function introduceSiteMixing(
   return { modified, mixed: mixSet.size };
 }
 
+function introduceAmorphousRandomize(
+  atoms: DisorderedAtom[],
+  fraction: number,
+  lattice: { a: number; b: number; c: number },
+  rng: () => number,
+  temperature: number = 3000
+): { modified: DisorderedAtom[]; displaced: number } {
+  const displacementScale = Math.min(0.8, (temperature / 5000) * 1.0);
+  const displaceN = Math.max(1, Math.round(atoms.length * fraction));
+  const shuffled = atoms.map((_, i) => i).sort(() => rng() - 0.5);
+  const displaceSet = new Set(shuffled.slice(0, displaceN));
+
+  const modified = atoms.map((a, i) => {
+    if (displaceSet.has(i)) {
+      const dx = (rng() - 0.5) * 2 * displacementScale;
+      const dy = (rng() - 0.5) * 2 * displacementScale;
+      const dz = (rng() - 0.5) * 2 * displacementScale;
+      return {
+        ...a,
+        x: Math.max(0, Math.min(lattice.a, a.x + dx)),
+        y: Math.max(0, Math.min(lattice.b, a.y + dy)),
+        z: Math.max(0, Math.min(lattice.c, a.z + dz)),
+        isDefect: true,
+        defectType: "amorphous" as DisorderType,
+      };
+    }
+    return a;
+  });
+
+  return { modified, displaced: displaceSet.size };
+}
+
+function writeXYZFile(
+  atoms: Array<{ element: string; x: number; y: number; z: number }>,
+  filePath: string,
+  comment: string = ""
+): void {
+  const lines = [`${atoms.length}`, comment];
+  for (const a of atoms) {
+    lines.push(`${a.element}  ${a.x.toFixed(6)}  ${a.y.toFixed(6)}  ${a.z.toFixed(6)}`);
+  }
+  fs.writeFileSync(filePath, lines.join("\n") + "\n");
+}
+
+function parseXTBOptimizedXYZ(filePath: string): Array<{ element: string; x: number; y: number; z: number }> | null {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, "utf-8");
+    const lines = content.trim().split("\n");
+    if (lines.length < 3) return null;
+    const nAtoms = parseInt(lines[0].trim());
+    const atoms: Array<{ element: string; x: number; y: number; z: number }> = [];
+    for (let i = 2; i < 2 + nAtoms && i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length >= 4) {
+        atoms.push({
+          element: parts[0],
+          x: parseFloat(parts[1]),
+          y: parseFloat(parts[2]),
+          z: parseFloat(parts[3]),
+        });
+      }
+    }
+    return atoms.length > 0 ? atoms : null;
+  } catch { return null; }
+}
+
+function introduceAmorphousXtbMD(
+  atoms: DisorderedAtom[],
+  fraction: number,
+  lattice: { a: number; b: number; c: number },
+  baseFormula: string,
+  rng: () => number
+): { modified: DisorderedAtom[]; displaced: number; method: "xtb-md" | "randomize" } {
+  if (!isXtbAvailable() || atoms.length > 80 || atoms.length < 2) {
+    const result = introduceAmorphousRandomize(atoms, fraction, lattice, rng);
+    return { ...result, method: "randomize" };
+  }
+
+  try {
+    fs.mkdirSync(WORK_DIR, { recursive: true });
+    const calcId = `amorphous_${baseFormula}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, "_");
+    const calcDir = path.join(WORK_DIR, calcId);
+    fs.mkdirSync(calcDir, { recursive: true });
+
+    const xyzPath = path.join(calcDir, "structure.xyz");
+    writeXYZFile(atoms, xyzPath, `${baseFormula} amorphous melt-quench`);
+
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      XTBHOME: XTB_HOME,
+      XTBPATH: XTB_PARAM,
+      OMP_NUM_THREADS: "1",
+      OMP_STACKSIZE: "512M",
+    };
+
+    const mdInput = [
+      "$md",
+      "   temp=3000.0",
+      "   time=0.5",
+      "   dump=10.0",
+      "   step=1.0",
+      "   hmass=1",
+      "   shake=0",
+      "$end",
+    ].join("\n");
+    fs.writeFileSync(path.join(calcDir, "md_heat.inp"), mdInput);
+
+    const heatCmd = `cd ${calcDir} && ${XTB_BIN} structure.xyz --gfn 2 --md --input md_heat.inp 2>&1`;
+    const heatOutput = execSync(heatCmd, {
+      timeout: 60000,
+      env,
+      maxBuffer: 10 * 1024 * 1024,
+    }).toString();
+
+    const heatedPath = path.join(calcDir, "xtb.trj");
+    let heatedAtoms: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+    if (fs.existsSync(heatedPath)) {
+      const trjContent = fs.readFileSync(heatedPath, "utf-8");
+      const frames = trjContent.split(/(?=\s*\d+\s*\n)/);
+      const lastFrame = frames[frames.length - 1];
+      if (lastFrame) {
+        const tmpPath = path.join(calcDir, "last_frame.xyz");
+        fs.writeFileSync(tmpPath, lastFrame.trim());
+        heatedAtoms = parseXTBOptimizedXYZ(tmpPath);
+      }
+    }
+
+    if (!heatedAtoms) {
+      const rstPath = path.join(calcDir, "xtbrestart");
+      if (fs.existsSync(rstPath)) {
+        heatedAtoms = parseXTBOptimizedXYZ(path.join(calcDir, "xtbopt.xyz"));
+      }
+    }
+
+    if (heatedAtoms && heatedAtoms.length === atoms.length) {
+      const quenchInput = [
+        "$md",
+        "   temp=10.0",
+        "   time=0.2",
+        "   dump=10.0",
+        "   step=0.5",
+        "   hmass=1",
+        "   shake=0",
+        "$end",
+      ].join("\n");
+      fs.writeFileSync(path.join(calcDir, "md_quench.inp"), quenchInput);
+
+      const quenchXyz = path.join(calcDir, "quench.xyz");
+      writeXYZFile(heatedAtoms, quenchXyz, "quench from melt");
+
+      const quenchCmd = `cd ${calcDir} && ${XTB_BIN} quench.xyz --gfn 2 --md --input md_quench.inp 2>&1`;
+      try {
+        execSync(quenchCmd, { timeout: 45000, env, maxBuffer: 10 * 1024 * 1024 });
+      } catch {}
+
+      let finalAtoms: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+      const optPath = path.join(calcDir, "xtbopt.xyz");
+      if (fs.existsSync(optPath)) {
+        finalAtoms = parseXTBOptimizedXYZ(optPath);
+      }
+      if (!finalAtoms) {
+        const trjPath2 = path.join(calcDir, "xtb.trj");
+        if (fs.existsSync(trjPath2)) {
+          const trj2 = fs.readFileSync(trjPath2, "utf-8");
+          const frames2 = trj2.split(/(?=\s*\d+\s*\n)/);
+          const last2 = frames2[frames2.length - 1];
+          if (last2) {
+            const tmpPath2 = path.join(calcDir, "last_quench.xyz");
+            fs.writeFileSync(tmpPath2, last2.trim());
+            finalAtoms = parseXTBOptimizedXYZ(tmpPath2);
+          }
+        }
+      }
+
+      if (finalAtoms && finalAtoms.length === atoms.length) {
+        let displaced = 0;
+        const modified: DisorderedAtom[] = atoms.map((orig, i) => {
+          const fin = finalAtoms![i];
+          const dx = fin.x - orig.x;
+          const dy = fin.y - orig.y;
+          const dz = fin.z - orig.z;
+          const disp = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (disp > 0.1) {
+            displaced++;
+            return {
+              ...orig,
+              x: fin.x,
+              y: fin.y,
+              z: fin.z,
+              isDefect: true,
+              defectType: "amorphous" as DisorderType,
+            };
+          }
+          return orig;
+        });
+
+        try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+        return { modified, displaced, method: "xtb-md" };
+      }
+    }
+
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+  } catch (e: any) {
+    console.log(`[DisorderGenerator] xTB MD failed for ${baseFormula}: ${e?.message?.slice(0, 200)}`);
+  }
+
+  const result = introduceAmorphousRandomize(atoms, fraction, lattice, rng);
+  return { ...result, method: "randomize" };
+}
+
 function estimateFormationEnergy(
   disorderType: DisorderType,
   element: string,
@@ -423,6 +653,9 @@ function estimateFormationEnergy(
       break;
     case "site-mixing":
       Ef = 0.8 + fraction * 2.5;
+      break;
+    case "amorphous":
+      Ef = 1.5 + fraction * 4.0;
       break;
     default:
       Ef = 2.0;
@@ -479,6 +712,10 @@ function estimateTcModifier(
     case "site-mixing":
       modifier = 1.0 - fraction * 0.8;
       break;
+
+    case "amorphous":
+      modifier = fraction <= 0.3 ? 1.0 - fraction * 0.5 : 0.85 - (fraction - 0.3) * 1.5;
+      break;
   }
 
   return Math.max(0.3, Math.min(1.5, modifier));
@@ -510,6 +747,10 @@ function generateNotes(
     case "site-mixing":
       return `${pctStr}% ${element} site-mixing in ${baseFormula}: ${direction} Tc by ${Math.abs((tcMod - 1) * 100).toFixed(0)}%. ` +
         `Random alloy disorder broadens band structure and acts as pair-breaking scatterer in anisotropic SCs.`;
+
+    case "amorphous":
+      return `${pctStr}% amorphous disorder in ${baseFormula}: ${direction} Tc by ${Math.abs((tcMod - 1) * 100).toFixed(0)}%. ` +
+        `Melt-quench amorphization destroys long-range order. Some amorphous metals (e.g., MoRu, ZrRh) retain superconductivity with modified Tc.`;
   }
 }
 
@@ -523,7 +764,7 @@ function chooseSuperCellSize(formula: string): [number, number, number] {
 
 const stats: DisorderGeneratorStats = {
   totalGenerated: 0,
-  byType: { vacancy: 0, substitution: 0, interstitial: 0, "site-mixing": 0 },
+  byType: { vacancy: 0, substitution: 0, interstitial: 0, "site-mixing": 0, amorphous: 0 },
   avgDefectFraction: 0,
   avgTcModifier: 0,
   bestTcModifier: 0,
@@ -587,6 +828,7 @@ export function generateDisorderedStructure(
 
   let resultAtoms: DisorderedAtom[];
   let defectCount: number;
+  let amorphousMethod: "randomize" | "xtb-md" | null = null;
 
   const comp = parseFormula(baseFormula);
   const elementsInFormula = Object.keys(comp);
@@ -639,6 +881,16 @@ export function generateDisorderedStructure(
       break;
     }
 
+    case "amorphous": {
+      const { modified, displaced, method } = introduceAmorphousXtbMD(
+        pristineAtoms, disorder.fraction, lattice, baseFormula, rng
+      );
+      resultAtoms = modified;
+      defectCount = displaced;
+      amorphousMethod = method;
+      break;
+    }
+
     default:
       resultAtoms = pristineAtoms;
       defectCount = 0;
@@ -648,6 +900,10 @@ export function generateDisorderedStructure(
   const tcModifier = estimateTcModifier(disorder.type, disorder.element, disorder.fraction, baseFormula);
   const defectFraction = defectCount / Math.max(1, pristineAtoms.length);
   const notes = generateNotes(disorder.type, disorder.element, disorder.fraction, tcModifier, baseFormula);
+
+  const metrics = computeDisorderMetrics(resultAtoms);
+  const mlFeatures = extractMLFeatures(metrics);
+  recordMetricsAnalysis(baseFormula, metrics, resultAtoms.length);
 
   const result: DisorderedStructure = {
     base: baseFormula,
@@ -664,6 +920,9 @@ export function generateDisorderedStructure(
     tcModifierEstimate: tcModifier,
     notes,
     generatedAt: Date.now(),
+    metrics,
+    mlFeatures,
+    amorphousMethod: amorphousMethod || null,
   };
 
   updateStats(result);
@@ -723,6 +982,12 @@ export function generateAllDisorderVariants(
     }));
   }
 
+  results.push(generateDisorderedStructure(baseFormula, {
+    type: "amorphous",
+    element: elements[0],
+    fraction: 0.5,
+  }));
+
   return results;
 }
 
@@ -769,6 +1034,8 @@ export function suggestDisorders(baseFormula: string): DisorderSpec[] {
   if (!suggestions.some(s => s.type === "site-mixing")) {
     suggestions.push({ type: "site-mixing", element: elements[0], fraction: 0.05 });
   }
+
+  suggestions.push({ type: "amorphous", element: elements[0], fraction: 0.5 });
 
   return suggestions;
 }

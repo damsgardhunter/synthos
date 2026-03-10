@@ -1196,11 +1196,22 @@ function DisorderGeneratorCard() {
     }>;
   }>({ queryKey: ["/api/disorder-generator/stats"], refetchInterval: 30000 });
 
+  const { data: metricsStats } = useQuery<{
+    totalAnalyzed: number;
+    avgDisorderScore: number;
+    maxDisorderScore: number;
+    byClass: Record<string, number>;
+    avgBondVariance: number;
+    avgCoordinationVariance: number;
+    avgLocalStrain: number;
+  }>({ queryKey: ["/api/disorder-metrics/stats"], refetchInterval: 30000 });
+
   const typeColors: Record<string, string> = {
     vacancy: "text-red-400",
     substitution: "text-blue-400",
     interstitial: "text-green-400",
     "site-mixing": "text-purple-400",
+    amorphous: "text-amber-400",
   };
 
   const typeLabels: Record<string, string> = {
@@ -1208,6 +1219,7 @@ function DisorderGeneratorCard() {
     substitution: "Sub",
     interstitial: "Int",
     "site-mixing": "Mix",
+    amorphous: "Amor",
   };
 
   return (
@@ -1247,8 +1259,8 @@ function DisorderGeneratorCard() {
               </div>
             </div>
 
-            <div className="grid grid-cols-4 gap-1">
-              {(["vacancy", "substitution", "interstitial", "site-mixing"] as const).map(t => (
+            <div className="grid grid-cols-5 gap-1">
+              {(["vacancy", "substitution", "interstitial", "site-mixing", "amorphous"] as const).map(t => (
                 <div key={t} className="bg-muted/30 rounded p-1 text-center">
                   <div className="text-[9px] text-muted-foreground">{typeLabels[t]}</div>
                   <div className={`text-xs font-bold ${typeColors[t]}`} data-testid={`text-disorder-count-${t}`}>
@@ -1306,6 +1318,38 @@ function DisorderGeneratorCard() {
                         <span className="text-muted-foreground">{g.element} {(g.fraction * 100).toFixed(0)}%</span>
                         <span className="text-muted-foreground">{g.defectCount} defects</span>
                       </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {metricsStats && metricsStats.totalAnalyzed > 0 && (
+              <div className="space-y-2 border-t border-border/40 pt-2 mt-2">
+                <div className="text-[10px] text-muted-foreground font-medium">Disorder Metrics</div>
+                <div className="grid grid-cols-4 gap-1">
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[9px] text-muted-foreground">Avg Score</div>
+                    <div className="text-xs font-bold text-cyan-400" data-testid="text-disorder-avg-score">{metricsStats.avgDisorderScore.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[9px] text-muted-foreground">Max Score</div>
+                    <div className="text-xs font-bold text-orange-400" data-testid="text-disorder-max-score">{metricsStats.maxDisorderScore.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[9px] text-muted-foreground">Bond Var</div>
+                    <div className="text-xs font-bold text-blue-400" data-testid="text-disorder-bond-var">{metricsStats.avgBondVariance.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[9px] text-muted-foreground">Coord Var</div>
+                    <div className="text-xs font-bold text-green-400" data-testid="text-disorder-coord-var">{metricsStats.avgCoordinationVariance.toFixed(3)}</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-5 gap-1">
+                  {(["perfect", "mild", "moderate", "strong", "amorphous"] as const).map(cls => (
+                    <div key={cls} className="bg-muted/30 rounded p-1 text-center">
+                      <div className="text-[8px] text-muted-foreground capitalize">{cls}</div>
+                      <div className="text-[10px] font-bold" data-testid={`text-disorder-class-${cls}`}>{metricsStats.byClass[cls] || 0}</div>
                     </div>
                   ))}
                 </div>

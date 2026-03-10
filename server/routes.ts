@@ -152,6 +152,9 @@ import {
   generateDisorderedStructure, generateAllDisorderVariants, suggestDisorders,
   getDisorderGeneratorStats, type DisorderSpec, type DisorderType,
 } from "./crystal/disorder-generator";
+import {
+  computeDisorderMetrics, getDisorderMetricsStats, extractMLFeatures,
+} from "./crystal/disorder-metrics";
 import { crossEngineHub } from "./learning/cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, getGAEvolutionStats, getStructuralMotifStats } from "./learning/synthesis-discovery";
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
@@ -2542,13 +2545,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!base || !disorder || !disorder.type || !disorder.element) {
         return res.status(400).json({ error: "Missing required fields: base, disorder.type, disorder.element" });
       }
-      const validTypes: DisorderType[] = ["vacancy", "substitution", "interstitial", "site-mixing"];
+      const validTypes: DisorderType[] = ["vacancy", "substitution", "interstitial", "site-mixing", "amorphous"];
       if (!validTypes.includes(disorder.type)) {
         return res.status(400).json({ error: `Invalid disorder type. Must be one of: ${validTypes.join(", ")}` });
       }
       const fraction = disorder.fraction ?? 0.05;
-      if (fraction < 0.001 || fraction > 0.30) {
-        return res.status(400).json({ error: "Fraction must be between 0.001 and 0.30" });
+      const maxFraction = disorder.type === "amorphous" ? 1.0 : 0.30;
+      if (fraction < 0.001 || fraction > maxFraction) {
+        return res.status(400).json({ error: `Fraction must be between 0.001 and ${maxFraction}` });
       }
       const spec: DisorderSpec = {
         type: disorder.type,
@@ -2582,6 +2586,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           formationEnergy: r.formationEnergyEstimate,
           tcModifier: r.tcModifierEstimate,
           notes: r.notes,
+          disorderScore: r.metrics?.disorderScore ?? null,
+          disorderClass: r.metrics?.disorderClass ?? null,
+          amorphousMethod: r.amorphousMethod ?? null,
         })),
         bestVariant: results.length > 0 ?
           results.reduce((best, r) => r.tcModifierEstimate > best.tcModifierEstimate ? r : best) : null,
@@ -2598,6 +2605,58 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, suggestions });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to suggest disorders", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/disorder-metrics/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDisorderMetricsStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch disorder metrics stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/disorder-metrics/analyze", writeLimiter, (req, res) => {
+    try {
+      const { atoms, bondCutoffFactor } = req.body;
+      if (!atoms || !Array.isArray(atoms) || atoms.length === 0) {
+        return res.status(400).json({ error: "Missing required field: atoms (array of {element, x, y, z})" });
+      }
+      if (atoms.length > 500) {
+        return res.status(400).json({ error: "Too many atoms (max 500)" });
+      }
+      const metrics = computeDisorderMetrics(atoms, bondCutoffFactor);
+      const mlFeatures = extractMLFeatures(metrics);
+      res.json({
+        metrics: {
+          disorderScore: metrics.disorderScore,
+          disorderClass: metrics.disorderClass,
+          bondMean: metrics.bondMean,
+          bondVariance: metrics.bondVariance,
+          bondStdDev: metrics.bondStdDev,
+          bondMin: metrics.bondMin,
+          bondMax: metrics.bondMax,
+          totalBonds: metrics.totalBonds,
+          coordinationMean: metrics.coordinationMean,
+          coordinationVariance: metrics.coordinationVariance,
+          coordinationMin: metrics.coordinationMin,
+          coordinationMax: metrics.coordinationMax,
+          idealCoordination: metrics.idealCoordination,
+          coordinationDeficit: metrics.coordinationDeficit,
+          localStrainMean: metrics.localStrainMean,
+          localStrainMax: metrics.localStrainMax,
+          defectNeighborStrain: metrics.defectNeighborStrain,
+          vacancyFraction: metrics.vacancyFraction,
+          substitutionFraction: metrics.substitutionFraction,
+          interstitialFraction: metrics.interstitialFraction,
+          siteMixingFraction: metrics.siteMixingFraction,
+          amorphousFraction: metrics.amorphousFraction,
+        },
+        mlFeatures,
+        totalAtoms: atoms.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to analyze disorder metrics", detail: e.message?.slice(0, 200) });
     }
   });
 
