@@ -1,5 +1,7 @@
 import type { ElectronicStructure, PhononSpectrum, ElectronPhononCoupling, NestingFunctionData, DynamicSpinSusceptibility } from "../learning/physics-engine";
+import { computePhononDispersion, type PhononDispersionData } from "../learning/physics-engine";
 import { predictDOS, detectVanHoveSingularities, type VanHoveSingularity } from "./dos-surrogate";
+import { encodeGenome, type MaterialGenome } from "./materials-genome";
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   const cleaned = formula
@@ -203,6 +205,7 @@ export interface AdvancedPhysicsConstraints {
     anisotropy: number;
     dimensionClass: string;
     penalty: number;
+    gnnDerived: boolean;
   };
   phononSoftMode: {
     score: number;
@@ -210,6 +213,10 @@ export interface AdvancedPhysicsConstraints {
     isStable: boolean;
     enhancementFactor: number;
     penalty: number;
+    kPointResolved: boolean;
+    softModeKPoints?: string[];
+    dominantSoftKPoint?: string;
+    kPointCouplingBoost?: number;
   };
   chargeTransferEnergy: {
     score: number;
@@ -254,10 +261,10 @@ export function computeAdvancedConstraints(
     electronic, spinSusceptibility, elements, counts
   );
   const electronicDimensionality = computeElectronicDimensionalityConstraint(
-    electronic, dimensionality, elements, counts, totalAtoms
+    electronic, dimensionality, elements, counts, totalAtoms, formula
   );
   const phononSoftMode = computePhononSoftModeConstraint(
-    phonon, electronic, coupling
+    formula, phonon, electronic, coupling
   );
   const chargeTransferEnergy = computeChargeTransferConstraint(
     electronic, elements, counts, totalAtoms
@@ -575,34 +582,76 @@ function computeQuantumCriticalConstraint(
   };
 }
 
+function deriveGNNAnisotropy(
+  formula: string,
+  electronic: ElectronicStructure,
+): { anisotropy: number; gnnDerived: boolean } {
+  try {
+    const genome = encodeGenome(formula);
+    const dimSeg = genome.segments.dimensionality;
+    const topoSeg = genome.segments.topology;
+    const structSeg = genome.segments.structure;
+
+    const dimScore = dimSeg[0] ?? 0;
+    const is2D = dimSeg[3] ?? 0;
+    const isCylindrical = dimSeg[5] ?? 0;
+
+    const flatBandIndicator = topoSeg.length > 4 ? topoSeg[4] : 0;
+    const layeredMotif = structSeg.length > 2 ? structSeg[1] : 0;
+
+    let gnnAniso = 1.0 + dimScore * 12.0;
+
+    if (is2D > 0.5) gnnAniso += 4.0;
+    if (isCylindrical > 0.5) gnnAniso += 3.0;
+
+    if (layeredMotif > 0.5) gnnAniso += layeredMotif * 3.0;
+
+    if (flatBandIndicator > 0.4) gnnAniso *= 1.0 + flatBandIndicator * 0.3;
+
+    const corr = electronic.correlationStrength;
+    if (corr > 0.5) gnnAniso *= 1.0 + (corr - 0.5) * 0.6;
+
+    gnnAniso = Math.max(1.0, Math.min(25.0, gnnAniso));
+
+    return { anisotropy: gnnAniso, gnnDerived: true };
+  } catch {
+    return { anisotropy: 1.5, gnnDerived: false };
+  }
+}
+
 function computeElectronicDimensionalityConstraint(
   electronic: ElectronicStructure,
   dimensionality: string,
   elements: string[],
   counts: Record<string, number>,
-  totalAtoms: number
+  totalAtoms: number,
+  formula: string
 ): AdvancedPhysicsConstraints["electronicDimensionality"] {
-  const fsTopology = electronic.fermiSurfaceTopology;
   const nestingScore = electronic.nestingScore;
   const corr = electronic.correlationStrength;
 
-  let anisotropy = 1.0;
-  if (dimensionality === "quasi-2D" || dimensionality === "2D" || dimensionality === "layered") {
-    anisotropy = 8.0;
-    if (fsTopology.includes("cylindrical")) anisotropy = 12.0;
-    if (corr > 0.6) anisotropy *= 1.3;
-  } else if (dimensionality === "3D-HEA") {
-    anisotropy = 1.2;
-  } else {
-    anisotropy = 1.5;
-    if (fsTopology.includes("2D")) anisotropy = 6.0;
-    else if (fsTopology.includes("layered") || fsTopology.includes("nesting")) anisotropy = 4.0;
-  }
+  const gnnResult = deriveGNNAnisotropy(formula, electronic);
+  let anisotropy = gnnResult.anisotropy;
+  const gnnDerived = gnnResult.gnnDerived;
 
-  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
-  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
-  if (isCuprate) anisotropy = Math.max(anisotropy, 15);
-  else if (isPnictide) anisotropy = Math.max(anisotropy, 8);
+  if (!gnnDerived) {
+    const fsTopology = electronic.fermiSurfaceTopology;
+    if (dimensionality === "quasi-2D" || dimensionality === "2D" || dimensionality === "layered") {
+      anisotropy = 8.0;
+      if (fsTopology.includes("cylindrical")) anisotropy = 12.0;
+      if (corr > 0.6) anisotropy *= 1.3;
+    } else if (dimensionality === "3D-HEA") {
+      anisotropy = 1.2;
+    } else {
+      anisotropy = 1.5;
+      if (fsTopology.includes("2D")) anisotropy = 6.0;
+      else if (fsTopology.includes("layered") || fsTopology.includes("nesting")) anisotropy = 4.0;
+    }
+    const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+    const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+    if (isCuprate) anisotropy = Math.max(anisotropy, 15);
+    else if (isPnictide) anisotropy = Math.max(anisotropy, 8);
+  }
 
   let dimensionClass = "3D-isotropic";
   if (anisotropy > 10) dimensionClass = "strongly-2D";
@@ -621,6 +670,8 @@ function computeElectronicDimensionalityConstraint(
 
   if (corr > 0.5 && anisotropy > 3) score += 0.15;
 
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
+  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
   if (isCuprate || isPnictide) score += 0.15;
 
   const hasH = elements.includes("H");
@@ -642,22 +693,131 @@ function computeElectronicDimensionalityConstraint(
     anisotropy: Number(anisotropy.toFixed(2)),
     dimensionClass,
     penalty: Number(penalty.toFixed(3)),
+    gnnDerived,
   };
 }
 
+const HIGH_SYMMETRY_COUPLING_BOOST: Record<string, number> = {
+  "X-M": 1.35,
+  "M-Γ": 1.25,
+  "Γ-X": 1.10,
+};
+
+function analyzeKPointSoftModes(
+  formula: string,
+  electronic: ElectronicStructure,
+  phonon: PhononSpectrum
+): {
+  kPointResolved: boolean;
+  softModeKPoints: string[];
+  dominantSoftKPoint: string | undefined;
+  kPointCouplingBoost: number;
+  dispersionSoftFreq: number;
+} {
+  try {
+    const dispersion = computePhononDispersion(formula, electronic, phonon);
+
+    const segmentSoftness: Record<string, number> = {};
+    const qPath = dispersion.qPath;
+    const nQPoints = 20;
+
+    for (const br of dispersion.branches) {
+      const freqs = br.frequencies;
+      const nPerSeg = Math.floor(nQPoints / Math.max(1, qPath.length - 1));
+
+      for (let segIdx = 0; segIdx < qPath.length - 1; segIdx++) {
+        const segLabel = `${qPath[segIdx]}-${qPath[segIdx + 1]}`;
+        const segStart = segIdx * nPerSeg;
+        const segEnd = Math.min(freqs.length, (segIdx + 1) * nPerSeg);
+
+        let minAbsFreq = Infinity;
+        let hasSoftInSeg = false;
+        for (let qi = segStart; qi < segEnd; qi++) {
+          const f = Math.abs(freqs[qi] ?? 0);
+          if (f < minAbsFreq) minAbsFreq = f;
+          if (freqs[qi] < 0 || f < phonon.logAverageFrequency * 0.15) {
+            hasSoftInSeg = true;
+          }
+        }
+
+        if (hasSoftInSeg) {
+          const softness = minAbsFreq > 0 ? 1.0 / minAbsFreq : 10.0;
+          segmentSoftness[segLabel] = Math.max(segmentSoftness[segLabel] ?? 0, softness);
+        }
+      }
+    }
+
+    const softKPoints = Object.keys(segmentSoftness);
+    if (softKPoints.length === 0) {
+      return {
+        kPointResolved: true,
+        softModeKPoints: [],
+        dominantSoftKPoint: undefined,
+        kPointCouplingBoost: 1.0,
+        dispersionSoftFreq: phonon.logAverageFrequency * 0.3,
+      };
+    }
+
+    let dominantKPoint = softKPoints[0];
+    let maxSoftness = 0;
+    for (const kp of softKPoints) {
+      if (segmentSoftness[kp] > maxSoftness) {
+        maxSoftness = segmentSoftness[kp];
+        dominantKPoint = kp;
+      }
+    }
+
+    let couplingBoost = 1.0;
+    for (const kp of softKPoints) {
+      const segBoost = HIGH_SYMMETRY_COUPLING_BOOST[kp] ?? 1.0;
+      const softnessWeight = segmentSoftness[kp] / (maxSoftness + 1e-6);
+      couplingBoost = Math.max(couplingBoost, segBoost * (0.7 + 0.3 * softnessWeight));
+    }
+
+    let dispSoftFreq = Infinity;
+    for (const br of dispersion.branches) {
+      for (const f of br.frequencies) {
+        const af = Math.abs(f);
+        if (af > 0 && af < dispSoftFreq) dispSoftFreq = af;
+      }
+    }
+    if (!isFinite(dispSoftFreq)) dispSoftFreq = phonon.logAverageFrequency * 0.3;
+
+    return {
+      kPointResolved: true,
+      softModeKPoints: softKPoints,
+      dominantSoftKPoint: dominantKPoint,
+      kPointCouplingBoost: Number(couplingBoost.toFixed(3)),
+      dispersionSoftFreq: Number(dispSoftFreq.toFixed(1)),
+    };
+  } catch {
+    return {
+      kPointResolved: false,
+      softModeKPoints: [],
+      dominantSoftKPoint: undefined,
+      kPointCouplingBoost: 1.0,
+      dispersionSoftFreq: phonon.logAverageFrequency * 0.3,
+    };
+  }
+}
+
 function computePhononSoftModeConstraint(
+  formula: string,
   phonon: PhononSpectrum,
   electronic: ElectronicStructure,
   coupling: ElectronPhononCoupling
 ): AdvancedPhysicsConstraints["phononSoftMode"] {
   const sms = phonon.softModeScore;
   const logAvg = phonon.logAverageFrequency;
-  const maxFreq = phonon.maxPhononFrequency;
   const hasImaginary = phonon.hasImaginaryModes;
   const anharmonicity = phonon.anharmonicityIndex;
 
-  const minFreqEstimate = logAvg * 0.3;
-  const isStable = !hasImaginary && minFreqEstimate > 0;
+  const kpAnalysis = analyzeKPointSoftModes(formula, electronic, phonon);
+  const softModeFrequency = kpAnalysis.kPointResolved
+    ? kpAnalysis.dispersionSoftFreq
+    : logAvg * 0.3;
+
+  const isStable = !hasImaginary && softModeFrequency > 0;
 
   let score = 0;
 
@@ -677,11 +837,19 @@ function computePhononSoftModeConstraint(
   const lambda = coupling.lambda;
   if (lambda > 1.0 && sms > 0.3) score += 0.1;
 
+  if (kpAnalysis.kPointResolved && kpAnalysis.softModeKPoints.length > 0) {
+    const kpBonus = Math.min(0.15, (kpAnalysis.kPointCouplingBoost - 1.0) * 0.5);
+    score += kpBonus;
+  }
+
   score = Math.max(0, Math.min(1.0, score));
 
   let enhancementFactor = 1.0;
   if (sms > 0.5 && isStable) {
     enhancementFactor = 1.0 + (sms - 0.5) * 0.4;
+  }
+  if (kpAnalysis.kPointResolved) {
+    enhancementFactor *= kpAnalysis.kPointCouplingBoost;
   }
 
   let penalty = 0;
@@ -693,10 +861,14 @@ function computePhononSoftModeConstraint(
 
   return {
     score: Number(score.toFixed(3)),
-    softModeFrequency: Number(minFreqEstimate.toFixed(1)),
+    softModeFrequency: Number(softModeFrequency.toFixed(1)),
     isStable,
     enhancementFactor: Number(enhancementFactor.toFixed(3)),
     penalty: Number(penalty.toFixed(3)),
+    kPointResolved: kpAnalysis.kPointResolved,
+    softModeKPoints: kpAnalysis.softModeKPoints.length > 0 ? kpAnalysis.softModeKPoints : undefined,
+    dominantSoftKPoint: kpAnalysis.dominantSoftKPoint,
+    kPointCouplingBoost: kpAnalysis.kPointCouplingBoost > 1.0 ? kpAnalysis.kPointCouplingBoost : undefined,
   };
 }
 
