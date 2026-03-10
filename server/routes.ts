@@ -163,6 +163,20 @@ import {
   runRelaxation, computePhonons, computeEph, computeTc,
   getPhysicsApiStats,
 } from "./physics/physics-api";
+import {
+  getDatasetStats as getCrystalDatasetStats,
+  getEntryByFormula as getCrystalDatasetEntry,
+  getEntriesByPrototype as getCrystalDatasetByPrototype,
+  getEntriesBySystem as getCrystalDatasetBySystem,
+  getTrainingData as getCrystalTrainingData,
+  fetchMPStructures,
+  fetchOQMDStructures,
+} from "./crystal/crystal-structure-dataset";
+import {
+  predictStructure as mlPredictStructure,
+  getStructurePredictorStats as getStructureMLStats,
+  initStructurePredictorML,
+} from "./crystal/structure-predictor-ml";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -2997,6 +3011,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     initPhononSurrogate();
   } catch {}
 
+  try {
+    initStructurePredictorML();
+  } catch {}
+
   app.get("/api/phonon-surrogate/stats", async (_req, res) => {
     try {
       const stats = getPhononSurrogateStats();
@@ -3064,6 +3082,65 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Tc computation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/crystal-dataset/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getCrystalDatasetStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch crystal dataset stats" });
+    }
+  });
+
+  app.get("/api/crystal-dataset/entry/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const entry = getCrystalDatasetEntry(formula);
+      if (!entry) return res.status(404).json({ error: "Entry not found" });
+      res.json(entry);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch crystal dataset entry" });
+    }
+  });
+
+  app.get("/api/crystal-dataset/prototype/:prototype", generalLimiter, async (req, res) => {
+    try {
+      const prototype = decodeURIComponent(req.params.prototype);
+      const entries = getCrystalDatasetByPrototype(prototype);
+      res.json({ entries, count: entries.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch entries by prototype" });
+    }
+  });
+
+  app.get("/api/crystal-dataset/system/:system", generalLimiter, async (req, res) => {
+    try {
+      const system = decodeURIComponent(req.params.system);
+      const entries = getCrystalDatasetBySystem(system);
+      res.json({ entries, count: entries.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch entries by crystal system" });
+    }
+  });
+
+  app.get("/api/structure-ml/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const prediction = mlPredictStructure(formula);
+      res.json(prediction);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to predict structure" });
+    }
+  });
+
+  app.get("/api/structure-ml/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getStructureMLStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch structure ML stats" });
     }
   });
 
