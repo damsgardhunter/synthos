@@ -209,42 +209,56 @@ export interface TcMethodEstimates {
   physicsTc?: number;
   xTbTc?: number;
   dftTc?: number;
+  dftSigma?: number;
+  physicsSigma?: number;
+  xTbSigma?: number;
+  gbSigma?: number;
 }
 
-export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: number; confidence: string; methods: TcMethodEstimates } {
-  const weights: { method: string; tc: number; weight: number }[] = [];
-  if (estimates.dftTc != null && estimates.dftTc > 0)
-    weights.push({ method: "dft", tc: estimates.dftTc, weight: 4.0 });
-  if (estimates.xTbTc != null && estimates.xTbTc > 0)
-    weights.push({ method: "xtb", tc: estimates.xTbTc, weight: 3.0 });
-  if (estimates.physicsTc != null && estimates.physicsTc > 0)
-    weights.push({ method: "physics", tc: estimates.physicsTc, weight: 2.0 });
-  if (estimates.gbPredicted != null && estimates.gbPredicted > 0)
-    weights.push({ method: "gb", tc: estimates.gbPredicted, weight: 1.0 });
+const DEFAULT_SIGMAS: Record<string, number> = {
+  dft: 0.15,
+  xtb: 0.20,
+  physics: 0.25,
+  gb: 0.40,
+};
 
-  if (weights.length === 0) return { reconciledTc: 0, confidence: "none", methods: estimates };
-  if (weights.length === 1) {
-    const only = weights[0];
-    const conf = only.method === "dft" ? "high" : only.method === "xtb" ? "medium" : "low";
+export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: number; confidence: string; methods: TcMethodEstimates } {
+  const entries: { method: string; tc: number; sigma: number }[] = [];
+  if (estimates.dftTc != null && estimates.dftTc > 0)
+    entries.push({ method: "dft", tc: estimates.dftTc, sigma: estimates.dftSigma ?? DEFAULT_SIGMAS.dft });
+  if (estimates.xTbTc != null && estimates.xTbTc > 0)
+    entries.push({ method: "xtb", tc: estimates.xTbTc, sigma: estimates.xTbSigma ?? DEFAULT_SIGMAS.xtb });
+  if (estimates.physicsTc != null && estimates.physicsTc > 0)
+    entries.push({ method: "physics", tc: estimates.physicsTc, sigma: estimates.physicsSigma ?? DEFAULT_SIGMAS.physics });
+  if (estimates.gbPredicted != null && estimates.gbPredicted > 0)
+    entries.push({ method: "gb", tc: estimates.gbPredicted, sigma: estimates.gbSigma ?? DEFAULT_SIGMAS.gb });
+
+  if (entries.length === 0) return { reconciledTc: 0, confidence: "none", methods: estimates };
+  if (entries.length === 1) {
+    const only = entries[0];
+    const conf = only.sigma <= 0.15 ? "high" : only.sigma <= 0.25 ? "medium" : "low";
     return { reconciledTc: Math.round(only.tc), confidence: conf, methods: estimates };
   }
 
-  weights.sort((a, b) => b.weight - a.weight);
-  const best = weights[0];
-  const tcs = weights.map(w => w.tc);
+  const clampedSigma = (s: number) => Math.max(0.05, Math.min(0.95, s));
+  const invVar = entries.map(e => ({ ...e, w: 1 / (clampedSigma(e.sigma) ** 2) }));
+
+  const tcs = entries.map(e => e.tc);
   const maxTc = Math.max(...tcs);
   const minTc = Math.min(...tcs);
   const spread = maxTc > 0 ? (maxTc - minTc) / maxTc : 0;
 
   let reconciledTc: number;
-  if (spread <= 0.25) {
-    const totalWeight = weights.reduce((s, w) => s + w.weight, 0);
-    reconciledTc = weights.reduce((s, w) => s + w.tc * w.weight, 0) / totalWeight;
+  if (spread <= 0.35) {
+    const totalW = invVar.reduce((s, e) => s + e.w, 0);
+    reconciledTc = invVar.reduce((s, e) => s + e.tc * e.w, 0) / totalW;
   } else {
-    reconciledTc = best.tc;
+    invVar.sort((a, b) => b.w - a.w);
+    reconciledTc = invVar[0].tc;
   }
 
-  const conf = best.method === "dft" ? "high" : best.method === "xtb" ? "medium" : "low";
+  const bestEntry = invVar.reduce((a, b) => a.w > b.w ? a : b);
+  const conf = bestEntry.sigma <= 0.15 ? "high" : bestEntry.sigma <= 0.25 ? "medium" : "low";
   return { reconciledTc: Math.round(reconciledTc), confidence: conf, methods: estimates };
 }
 

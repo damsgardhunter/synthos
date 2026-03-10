@@ -386,6 +386,22 @@ let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 50000;
+const formulasInFlight = new Set<string>();
+
+export function isFormulaInFlight(formula: string): boolean {
+  return formulasInFlight.has(normalizeFormula(formula));
+}
+
+export function markFormulaInFlight(formula: string): boolean {
+  const normF = normalizeFormula(formula);
+  if (formulasInFlight.has(normF)) return false;
+  formulasInFlight.add(normF);
+  return true;
+}
+
+export function releaseFormulaInFlight(formula: string): void {
+  formulasInFlight.delete(normalizeFormula(formula));
+}
 
 export function getAlreadyScreenedFormulas(): Set<string> {
   return alreadyScreenedFormulas;
@@ -1705,6 +1721,7 @@ async function runPhase10_Physics() {
         const reconciled = reconcileTc({
           gbPredicted: candidate.xgboostScore != null ? currentTc : undefined,
           physicsTc: cappedPhysicsTc > 0 ? cappedPhysicsTc : undefined,
+          physicsSigma: result.uncertaintyEstimate,
           xTbTc: xTbTcFromPrior,
           dftTc: dftTcFromPrior,
         });
@@ -2605,6 +2622,7 @@ async function runPhase10_Physics() {
             const reconciledRePhys = reconcileTc({
               gbPredicted: candidate.xgboostScore != null ? currentTc : undefined,
               physicsTc: cappedRePhys > 0 ? cappedRePhys : undefined,
+              physicsSigma: result.uncertaintyEstimate,
             });
             let updatedTc = reconciledRePhys.reconciledTc > 0 ? reconciledRePhys.reconciledTc : (cappedRePhys > 0 ? cappedRePhys : currentTc);
             await storage.updateSuperconductorCandidate(candidate.id, {
@@ -2645,6 +2663,7 @@ async function runPhase11_StructurePrediction() {
     const needsPrediction: string[] = [];
     for (const formula of uniqueFormulas) {
       if (needsPrediction.length >= 5) break;
+      if (isFormulaInFlight(formula)) continue;
       const existing = await storage.getCrystalStructuresByFormula(formula);
       if (existing.length === 0) {
         needsPrediction.push(formula);
@@ -2663,6 +2682,7 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue()) {
       for (const f of uniqueFormulas.slice(0, 5)) {
         if (!shouldContinue()) break;
+        if (isFormulaInFlight(f)) continue;
         try {
           const hullResult = await runConvexHullAnalysis(emit, f);
           const matchingCandidates = candidates.filter(c => c.formula === f);
@@ -2693,6 +2713,7 @@ async function runPhase11_StructurePrediction() {
           for (const variant of variants) {
             if (!isValidFormula(variant.formula)) continue;
             variant.formula = normalizeFormula(variant.formula);
+            if (isFormulaInFlight(variant.formula)) continue;
             const existingSC = await storage.getSuperconductorByFormula(variant.formula);
             if (!existingSC) {
               const features = extractFeatures(variant.formula);
@@ -2752,6 +2773,7 @@ async function runPhase11_StructurePrediction() {
 
         for (const variant of novelVariants) {
           if (!isValidFormula(variant.formula)) continue;
+          if (isFormulaInFlight(normalizeFormula(variant.formula))) continue;
           const existingSC = await storage.getSuperconductorByFormula(variant.formula);
           if (!existingSC) {
             const features = extractFeatures(variant.formula);
@@ -3689,6 +3711,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     const reconciledAuto = reconcileTc({
       gbPredicted: gbResult.tcPredicted > 0 ? Math.round(gbResult.tcPredicted) : undefined,
       physicsTc: cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : undefined,
+      physicsSigma: physicsResult.uncertaintyEstimate,
     });
     let finalTc = reconciledAuto.reconciledTc > 0 ? reconciledAuto.reconciledTc : (cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : Math.round(gbResult.tcPredicted));
 
@@ -4623,7 +4646,6 @@ async function runAutonomousFastPath() {
     const failedFormulas: { formula: string; tc: number }[] = [];
     const thisCycleCandidates: LastCycleCandidate[] = [];
     const thisCycleFamilyCounts: Record<string, number> = {};
-    const formulasInFlight = new Set<string>();
 
     const activeRules = getMinedRules();
     let filteredCandidates = novelCandidates;
@@ -4673,13 +4695,16 @@ async function runAutonomousFastPath() {
 
     for (const formula of filteredCandidates) {
       if (!shouldContinue()) break;
-      const normF = normalizeFormula(formula);
-      if (formulasInFlight.has(normF)) continue;
-      formulasInFlight.add(normF);
+      if (!markFormulaInFlight(formula)) continue;
       autonomousTotalScreened++;
       batchCount++;
 
-      const result = await runAutonomousDiscoveryCycle(formula);
+      let result: { passed: boolean; tc: number; reason: string; physicsPred?: any };
+      try {
+        result = await runAutonomousDiscoveryCycle(formula);
+      } finally {
+        releaseFormulaInFlight(formula);
+      }
 
       const candFamily = classifyFamily(formula);
       thisCycleCandidates.push({
