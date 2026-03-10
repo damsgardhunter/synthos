@@ -497,6 +497,12 @@ export function getLatticeGeneratorStats() {
     successRate: stats.totalAttempts > 0
       ? Math.round((stats.successful / stats.totalAttempts) * 10000) / 10000
       : 0,
+    evoPopulationSize: evoPopulation.length,
+    evoGenerations: evoGeneration,
+    evoTotalOffspring: evoStats.totalOffspring,
+    evoMutations: evoStats.mutations,
+    evoCrossovers: evoStats.crossovers,
+    evoImprovements: evoStats.improvements,
   };
 }
 
@@ -507,5 +513,275 @@ export function resetLatticeGeneratorStats(): void {
     failedPlacement: 0,
     failedVolume: 0,
     byBravais: {},
+  };
+}
+
+interface EvoIndividual {
+  structure: GeneratedStructure;
+  fitness: number;
+  generation: number;
+}
+
+const MAX_POPULATION = 50;
+const TOURNAMENT_SIZE = 3;
+let evoPopulation: EvoIndividual[] = [];
+let evoGeneration = 0;
+let evoStats = { totalOffspring: 0, mutations: 0, crossovers: 0, improvements: 0 };
+
+function computeStructureFitness(s: GeneratedStructure): number {
+  let fitness = 0.3;
+
+  const vpa = s.volumePerAtom;
+  if (vpa >= 8 && vpa <= 25) fitness += 0.2;
+  else if (vpa >= 5 && vpa <= 40) fitness += 0.1;
+
+  if (s.bravaisType === "cubic" || s.bravaisType === "hexagonal" || s.bravaisType === "tetragonal") {
+    fitness += 0.1;
+  }
+
+  const uniqueElements = new Set(s.atoms.map(a => a.element)).size;
+  if (uniqueElements >= 2 && uniqueElements <= 4) fitness += 0.1;
+
+  let minDist = Infinity;
+  for (let i = 0; i < s.atoms.length; i++) {
+    for (let j = i + 1; j < s.atoms.length; j++) {
+      const d = cartesianDistance(s.atoms[i], s.atoms[j], s.lattice);
+      if (d < minDist) minDist = d;
+    }
+  }
+  const avgCovRad = s.atoms.reduce((sum, a) => sum + (COVALENT_RADII[a.element] ?? 1.4), 0) / s.atoms.length;
+  const idealMinDist = 1.6 * avgCovRad;
+  if (minDist > 0 && minDist < 20) {
+    const distRatio = minDist / idealMinDist;
+    if (distRatio >= 0.8 && distRatio <= 1.5) fitness += 0.2;
+    else if (distRatio >= 0.6 && distRatio <= 2.0) fitness += 0.1;
+  }
+
+  fitness += s.noveltyScore * 0.1;
+
+  return Math.min(1.0, fitness);
+}
+
+function mutateLattice(lp: LatticeParams, intensity: number = 0.1): LatticeParams {
+  const perturb = (v: number, scale: number) => v * (1 + (Math.random() * 2 - 1) * scale);
+  return clampLattice({
+    a: perturb(lp.a, intensity),
+    b: perturb(lp.b, intensity),
+    c: perturb(lp.c, intensity),
+    alpha: lp.alpha + (Math.random() * 2 - 1) * intensity * 15,
+    beta: lp.beta + (Math.random() * 2 - 1) * intensity * 15,
+    gamma: lp.gamma + (Math.random() * 2 - 1) * intensity * 15,
+  });
+}
+
+function mutatePositions(atoms: AtomPosition[], intensity: number = 0.05): AtomPosition[] {
+  return atoms.map(a => ({
+    element: a.element,
+    fx: ((a.fx + (Math.random() * 2 - 1) * intensity) % 1 + 1) % 1,
+    fy: ((a.fy + (Math.random() * 2 - 1) * intensity) % 1 + 1) % 1,
+    fz: ((a.fz + (Math.random() * 2 - 1) * intensity) % 1 + 1) % 1,
+  }));
+}
+
+function mutateStructure(parent: GeneratedStructure): GeneratedStructure | null {
+  const mutType = Math.random();
+  let newLattice: LatticeParams;
+  let newAtoms: AtomPosition[];
+
+  if (mutType < 0.4) {
+    newLattice = mutateLattice(parent.lattice, 0.08 + Math.random() * 0.12);
+    newAtoms = parent.atoms.map(a => ({ ...a }));
+  } else if (mutType < 0.7) {
+    newLattice = { ...parent.lattice };
+    newAtoms = mutatePositions(parent.atoms, 0.03 + Math.random() * 0.07);
+  } else if (mutType < 0.9) {
+    newLattice = mutateLattice(parent.lattice, 0.05);
+    newAtoms = mutatePositions(parent.atoms, 0.04);
+  } else {
+    if (newAtoms = parent.atoms.map(a => ({ ...a })), newAtoms.length >= 2) {
+      const i = Math.floor(Math.random() * newAtoms.length);
+      let j = Math.floor(Math.random() * newAtoms.length);
+      while (j === i && newAtoms.length > 1) j = Math.floor(Math.random() * newAtoms.length);
+      if (newAtoms[i].element !== newAtoms[j].element) {
+        [newAtoms[i].element, newAtoms[j].element] = [newAtoms[j].element, newAtoms[i].element];
+      }
+    }
+    newLattice = { ...parent.lattice };
+  }
+
+  for (let i = 0; i < newAtoms.length; i++) {
+    for (let j = i + 1; j < newAtoms.length; j++) {
+      const d = cartesianDistance(newAtoms[i], newAtoms[j], newLattice);
+      const dMin = minAllowedDistance(newAtoms[i].element, newAtoms[j].element);
+      if (d < dMin) return null;
+    }
+  }
+
+  const vol = computeCellVolume(newLattice);
+  const vpa = vol / newAtoms.length;
+  const hasH = newAtoms.some(a => a.element === "H");
+  if (vpa < (hasH ? 2.5 : 5.0) || vpa > 80) return null;
+
+  return {
+    ...parent,
+    lattice: newLattice,
+    atoms: newAtoms,
+    volumePerAtom: vpa,
+    generationMethod: "evo_mutation",
+    noveltyScore: parent.noveltyScore * 0.9 + Math.random() * 0.1,
+  };
+}
+
+function crossoverStructures(parentA: GeneratedStructure, parentB: GeneratedStructure): GeneratedStructure | null {
+  if (parentA.formula !== parentB.formula) return null;
+  if (parentA.atoms.length !== parentB.atoms.length) return null;
+
+  const alpha = 0.3 + Math.random() * 0.4;
+  const newLattice = clampLattice({
+    a: parentA.lattice.a * alpha + parentB.lattice.a * (1 - alpha),
+    b: parentA.lattice.b * alpha + parentB.lattice.b * (1 - alpha),
+    c: parentA.lattice.c * alpha + parentB.lattice.c * (1 - alpha),
+    alpha: parentA.lattice.alpha * alpha + parentB.lattice.alpha * (1 - alpha),
+    beta: parentA.lattice.beta * alpha + parentB.lattice.beta * (1 - alpha),
+    gamma: parentA.lattice.gamma * alpha + parentB.lattice.gamma * (1 - alpha),
+  });
+
+  const newAtoms: AtomPosition[] = parentA.atoms.map((a, i) => {
+    const b = parentB.atoms[i];
+    return {
+      element: a.element,
+      fx: ((a.fx * alpha + b.fx * (1 - alpha)) % 1 + 1) % 1,
+      fy: ((a.fy * alpha + b.fy * (1 - alpha)) % 1 + 1) % 1,
+      fz: ((a.fz * alpha + b.fz * (1 - alpha)) % 1 + 1) % 1,
+    };
+  });
+
+  for (let i = 0; i < newAtoms.length; i++) {
+    for (let j = i + 1; j < newAtoms.length; j++) {
+      const d = cartesianDistance(newAtoms[i], newAtoms[j], newLattice);
+      const dMin = minAllowedDistance(newAtoms[i].element, newAtoms[j].element);
+      if (d < dMin) return null;
+    }
+  }
+
+  const vol = computeCellVolume(newLattice);
+  const vpa = vol / newAtoms.length;
+  if (vpa < 2.5 || vpa > 80) return null;
+
+  return {
+    formula: parentA.formula,
+    lattice: newLattice,
+    atoms: newAtoms,
+    bravaisType: parentA.bravaisType,
+    volumePerAtom: vpa,
+    generationMethod: "evo_crossover",
+    noveltyScore: (parentA.noveltyScore + parentB.noveltyScore) / 2,
+    confidence: (parentA.confidence + parentB.confidence) / 2,
+  };
+}
+
+function tournamentSelect(): EvoIndividual {
+  let best: EvoIndividual | null = null;
+  for (let i = 0; i < TOURNAMENT_SIZE; i++) {
+    const idx = Math.floor(Math.random() * evoPopulation.length);
+    if (!best || evoPopulation[idx].fitness > best.fitness) {
+      best = evoPopulation[idx];
+    }
+  }
+  return best!;
+}
+
+export function seedEvoPopulation(structures: GeneratedStructure[]): void {
+  for (const s of structures) {
+    const fitness = computeStructureFitness(s);
+    evoPopulation.push({ structure: s, fitness, generation: evoGeneration });
+  }
+  evoPopulation.sort((a, b) => b.fitness - a.fitness);
+  if (evoPopulation.length > MAX_POPULATION) {
+    evoPopulation.length = MAX_POPULATION;
+  }
+}
+
+export function addToEvoPopulation(structure: GeneratedStructure, externalFitness?: number): void {
+  const fitness = externalFitness ?? computeStructureFitness(structure);
+  evoPopulation.push({ structure, fitness, generation: evoGeneration });
+  evoPopulation.sort((a, b) => b.fitness - a.fitness);
+  if (evoPopulation.length > MAX_POPULATION) {
+    evoPopulation.length = MAX_POPULATION;
+  }
+}
+
+export function runEvolutionaryGeneration(count: number = 10): GeneratedStructure[] {
+  if (evoPopulation.length < 3) {
+    return [];
+  }
+
+  evoGeneration++;
+  const offspring: GeneratedStructure[] = [];
+  const maxAttempts = count * 5;
+
+  for (let attempt = 0; attempt < maxAttempts && offspring.length < count; attempt++) {
+    let child: GeneratedStructure | null = null;
+
+    if (Math.random() < 0.6 || evoPopulation.length < 4) {
+      const parent = tournamentSelect();
+      child = mutateStructure(parent.structure);
+      if (child) evoStats.mutations++;
+    } else {
+      const parentA = tournamentSelect();
+      let parentB = tournamentSelect();
+      let tries = 0;
+      while (parentB === parentA && tries < 5) {
+        parentB = tournamentSelect();
+        tries++;
+      }
+      child = crossoverStructures(parentA.structure, parentB.structure);
+      if (child) evoStats.crossovers++;
+    }
+
+    if (child) {
+      evoStats.totalOffspring++;
+      const fitness = computeStructureFitness(child);
+      offspring.push(child);
+
+      if (evoPopulation.length < MAX_POPULATION || fitness > evoPopulation[evoPopulation.length - 1].fitness) {
+        evoPopulation.push({ structure: child, fitness, generation: evoGeneration });
+        evoPopulation.sort((a, b) => b.fitness - a.fitness);
+        if (evoPopulation.length > MAX_POPULATION) {
+          evoPopulation.length = MAX_POPULATION;
+        }
+        evoStats.improvements++;
+      }
+    }
+  }
+
+  return offspring;
+}
+
+export function getEvoPopulationSummary(): {
+  size: number;
+  generation: number;
+  bestFitness: number;
+  avgFitness: number;
+  formulaDiversity: number;
+  bravaisDist: Record<string, number>;
+} {
+  if (evoPopulation.length === 0) {
+    return { size: 0, generation: evoGeneration, bestFitness: 0, avgFitness: 0, formulaDiversity: 0, bravaisDist: {} };
+  }
+  const formulas = new Set(evoPopulation.map(i => i.structure.formula));
+  const bravaisDist: Record<string, number> = {};
+  let totalFitness = 0;
+  for (const ind of evoPopulation) {
+    totalFitness += ind.fitness;
+    bravaisDist[ind.structure.bravaisType] = (bravaisDist[ind.structure.bravaisType] || 0) + 1;
+  }
+  return {
+    size: evoPopulation.length,
+    generation: evoGeneration,
+    bestFitness: evoPopulation[0].fitness,
+    avgFitness: totalFitness / evoPopulation.length,
+    formulaDiversity: formulas.size,
+    bravaisDist,
   };
 }

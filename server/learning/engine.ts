@@ -44,7 +44,7 @@ import { bayesianOptimizer } from "./bayesian-optimizer";
 import { rlAgent } from "./rl-agent";
 import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./family-filters";
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
-import { generatePrototypeFreeStructures, getLatticeGeneratorStats, type GeneratedStructure } from "../crystal/lattice-generator";
+import { generatePrototypeFreeStructures, getLatticeGeneratorStats, seedEvoPopulation, addToEvoPopulation, runEvolutionaryGeneration, getEvoPopulationSummary, type GeneratedStructure } from "../crystal/lattice-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
 import { predictPressureCurve, findOptimalPressure, getPressureCurveStats } from "./pressure-aware-surrogate";
@@ -5880,11 +5880,48 @@ async function runLearningCycle() {
             }
           }
 
+          seedEvoPopulation(lfStructures);
+
+          const evoOffspring = runEvolutionaryGeneration(15);
+          let evoInserted = 0;
+          let evoBest = 0;
+          for (const evoStruct of evoOffspring) {
+            try {
+              const normalized = normalizeFormula(evoStruct.formula);
+              if (existingFormulas.has(normalized)) continue;
+              const features = extractFeatures(evoStruct.formula);
+              if (!features) continue;
+              const gb = gbPredict(features);
+              if (gb.tcPredicted < 5) continue;
+
+              const cappedTc = Math.round(gb.tcPredicted);
+              const inserted = await insertCandidateWithStabilityCheck({
+                formula: normalized,
+                predictedTc: cappedTc,
+                dataConfidence: "low",
+                ensembleScore: Math.min(0.9, gb.score),
+                verificationStage: 0,
+                crystalStructure: evoStruct.bravaisType,
+                notes: `[evo-${evoStruct.generationMethod}: ${evoStruct.bravaisType}, ${evoStruct.atoms.length} atoms, vol/atom=${evoStruct.volumePerAtom.toFixed(1)} A^3]`,
+              }, "structure_diffusion");
+              if (inserted) {
+                evoInserted++;
+                totalScCandidates++;
+                existingFormulas.add(normalized);
+                if (cappedTc > evoBest) evoBest = cappedTc;
+                addToEvoPopulation(evoStruct, gb.score);
+              }
+            } catch (evoErr: any) {
+              console.error(`[Engine] Evo insert failed:`, evoErr?.message?.slice(0, 80) ?? "unknown");
+            }
+          }
+
           const lfStats = getLatticeGeneratorStats();
+          const evoSummary = getEvoPopulationSummary();
           emit("log", {
             phase: "engine",
             event: "Lattice-free generation complete",
-            detail: `Generated ${lfStructures.length} prototype-free structures, ${lfInserted} inserted (best ${lfBest}K). Stats: ${lfStats.successful}/${lfStats.totalAttempts} success rate, by Bravais: ${Object.entries(lfStats.byBravais).map(([k, v]) => `${k}:${v.success}/${v.attempts}`).join(", ")}`,
+            detail: `Random: ${lfStructures.length} generated, ${lfInserted} inserted (best ${lfBest}K). Evo: gen ${evoSummary.generation}, pop ${evoSummary.size}, ${evoOffspring.length} offspring, ${evoInserted} inserted (best ${evoBest}K). Fitness: best=${evoSummary.bestFitness.toFixed(3)}, avg=${evoSummary.avgFitness.toFixed(3)}, diversity=${evoSummary.formulaDiversity}`,
             dataSource: "Lattice Generator",
           });
         } catch (lfOuterErr: any) {

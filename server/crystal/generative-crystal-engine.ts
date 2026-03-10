@@ -10,6 +10,7 @@ import { getTrainingData } from "./crystal-structure-dataset";
 import { computeCompositionFeatures } from "../learning/composition-features";
 import {
   generatePrototypeFreeStructure, getLatticeGeneratorStats,
+  seedEvoPopulation, runEvolutionaryGeneration,
   type GeneratedStructure,
 } from "./lattice-generator";
 
@@ -277,15 +278,34 @@ function generateLatticeFree(count: number, elements?: string[]): GeneratedCandi
   const results: GeneratedCandidate[] = [];
   const formulaPool = buildFormulaPool(elements);
 
-  for (let i = 0; i < count * 3 && results.length < count; i++) {
+  const randomCount = Math.max(1, Math.ceil(count * 0.6));
+  const evoCount = count - randomCount;
+
+  const randomStructures: GeneratedStructure[] = [];
+  for (let i = 0; i < randomCount * 3 && results.length < randomCount; i++) {
     const formula = formulaPool[i % formulaPool.length];
     const structure = generatePrototypeFreeStructure(formula);
     if (structure) {
+      randomStructures.push(structure);
       const candidate = latticeFreeToCandiate(structure);
       trackCandidate(candidate, "lattice_free");
       if (candidate.valid) results.push(candidate);
     }
   }
+
+  if (randomStructures.length > 0) {
+    seedEvoPopulation(randomStructures);
+  }
+
+  if (evoCount > 0) {
+    const evoOffspring = runEvolutionaryGeneration(evoCount);
+    for (const evoStruct of evoOffspring) {
+      const candidate = latticeFreeToCandiate(evoStruct);
+      trackCandidate(candidate, "lattice_free_evo");
+      if (candidate.valid && results.length < count) results.push(candidate);
+    }
+  }
+
   return results;
 }
 
