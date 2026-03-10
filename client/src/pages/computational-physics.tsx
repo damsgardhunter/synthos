@@ -4553,6 +4553,44 @@ function DopingEnginePanel() {
   const [relaxing, setRelaxing] = useState(false);
   const [searchRunning, setSearchRunning] = useState(false);
   const [phononRunning, setPhononRunning] = useState(false);
+  const [anharmonicRunning, setAnharmonicRunning] = useState(false);
+  const [mdRunning, setMdRunning] = useState(false);
+
+  const anharmonicMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/doping/anharmonic/${encodeURIComponent(formula)}`);
+      if (!res.ok) throw new Error("Anharmonic analysis failed");
+      return res.json();
+    },
+    onMutate: () => setAnharmonicRunning(true),
+    onSettled: () => setAnharmonicRunning(false),
+  });
+
+  const mdMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/doping/md-sampling/${encodeURIComponent(formula)}?temperature=300`);
+      if (!res.ok) throw new Error("MD sampling failed");
+      return res.json();
+    },
+    onMutate: () => setMdRunning(true),
+    onSettled: () => setMdRunning(false),
+  });
+
+  const debyeQuery = useQuery<{
+    formula: string;
+    result: {
+      debyeTemperature: number;
+      fromPhononAvg: boolean;
+      avgFrequency_THz: number;
+      avgFrequency_cm1: number;
+      classification: string;
+      electronPhononCouplingHint: string;
+      scRelevance: number;
+    } | null;
+  }>({
+    queryKey: ["/api/doping/debye-temperature", formula],
+    enabled: formula.length > 0,
+  });
 
   const phononMutation = useMutation({
     mutationFn: async () => {
@@ -4792,6 +4830,26 @@ function DopingEnginePanel() {
             >
               <Waves className="h-3 w-3 mr-1" />
               {phononRunning ? "Computing..." : "Hessian Phonons"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => anharmonicMutation.mutate()}
+              disabled={!formula || anharmonicRunning}
+              data-testid="button-anharmonic"
+            >
+              <Activity className="h-3 w-3 mr-1" />
+              {anharmonicRunning ? "Probing..." : "Anharmonic"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => mdMutation.mutate()}
+              disabled={!formula || mdRunning}
+              data-testid="button-md-sampling"
+            >
+              <Thermometer className="h-3 w-3 mr-1" />
+              {mdRunning ? "Running MD..." : "MD Sampling"}
             </Button>
           </div>
 
@@ -5046,6 +5104,226 @@ function DopingEnginePanel() {
 
                   <div className="text-[10px] text-muted-foreground">
                     {a.frequencies_THz.length} modes analyzed ({a.frequencies_cm1.length} cm-1 values from Hessian)
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+
+      {debyeQuery.data?.result && (
+        <Card data-testid="debye-temperature-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Thermometer className="h-4 w-4 text-amber-400" />
+              Debye Temperature
+              <span className="text-xs text-muted-foreground ml-auto font-normal">
+                {debyeQuery.data.formula}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const d = debyeQuery.data!.result!;
+              const classColor = d.classification === "very-low" || d.classification === "low" ? "text-green-400" :
+                d.classification === "moderate" ? "text-cyan-400" : "text-orange-400";
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Debye Temp</div>
+                      <div className="font-mono font-bold text-lg" data-testid="debye-temp-value">{d.debyeTemperature} K</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Classification</div>
+                      <div className={`font-mono font-bold text-sm ${classColor}`} data-testid="debye-classification">{d.classification}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Avg Freq</div>
+                      <div className="font-mono font-bold text-sm" data-testid="debye-avg-freq">{d.avgFrequency_THz} THz</div>
+                      <div className="text-muted-foreground">{d.avgFrequency_cm1} cm-1</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">SC Relevance</div>
+                      <div className="font-mono font-bold text-sm" data-testid="debye-sc-relevance">{d.scRelevance}</div>
+                      <div className="w-full bg-muted/40 rounded-full h-1 mt-1">
+                        <div className="bg-amber-500 h-1 rounded-full" style={{ width: `${d.scRelevance * 100}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-[10px] p-2 bg-amber-500/5 rounded border border-amber-500/20 text-amber-300" data-testid="debye-coupling-hint">
+                    {d.electronPhononCouplingHint}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Source: {d.fromPhononAvg ? "Hessian phonon average" : "Physics engine estimate"}
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+
+      {anharmonicMutation.data?.analysis && (
+        <Card data-testid="anharmonic-analysis-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Activity className="h-4 w-4 text-orange-400" />
+              Anharmonic Vibration Analysis
+              <span className="text-xs text-muted-foreground ml-auto font-normal">
+                {anharmonicMutation.data.formula}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const a = anharmonicMutation.data.analysis;
+              const curveColor = a.energyCurveType === "strongly-anharmonic" ? "text-red-400" :
+                a.energyCurveType === "weakly-anharmonic" ? "text-amber-400" : "text-green-400";
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Anharmonicity</div>
+                      <div className="font-mono font-bold text-lg" data-testid="anharm-score">{a.anharmonicityScore.toFixed(3)}</div>
+                      <div className="w-full bg-muted/40 rounded-full h-1 mt-1">
+                        <div className="bg-orange-500 h-1 rounded-full" style={{ width: `${Math.min(100, a.anharmonicityScore * 100)}%` }} />
+                      </div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Curve Type</div>
+                      <div className={`font-mono font-bold text-sm ${curveColor}`} data-testid="anharm-curve-type">{a.energyCurveType}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Cubic Term</div>
+                      <div className="font-mono font-bold text-sm" data-testid="anharm-cubic">{a.cubicContribution.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Quartic Term</div>
+                      <div className="font-mono font-bold text-sm" data-testid="anharm-quartic">{a.quarticContribution.toFixed(3)}</div>
+                    </div>
+                  </div>
+
+                  <div className="p-2 bg-muted/20 rounded border border-border/50">
+                    <div className="text-[10px] text-muted-foreground mb-1">Energy vs Displacement (eV)</div>
+                    <div className="flex items-end gap-0.5 h-16">
+                      {a.energies.map((e: number, i: number) => {
+                        const maxE = Math.max(...a.energies.map(Math.abs));
+                        const height = maxE > 0 ? Math.abs(e) / maxE * 100 : 0;
+                        return (
+                          <div key={i} className="flex-1 flex flex-col items-center">
+                            <div
+                              className={`w-full rounded-t ${e >= 0 ? "bg-orange-500/60" : "bg-blue-500/60"}`}
+                              style={{ height: `${Math.max(2, height)}%` }}
+                              title={`d=${a.displacements[i].toFixed(2)} A, E=${e.toFixed(6)} eV`}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex justify-between text-[8px] text-muted-foreground mt-0.5">
+                      <span>{a.displacements[0].toFixed(2)} A</span>
+                      <span>0</span>
+                      <span>{a.displacements[a.displacements.length - 1].toFixed(2)} A</span>
+                    </div>
+                  </div>
+
+                  <div className="text-[10px] p-2 bg-orange-500/5 rounded border border-orange-500/20 text-orange-300" data-testid="anharm-relevance">
+                    {a.scRelevance}
+                  </div>
+                  <div className="flex gap-3 text-[10px] text-muted-foreground">
+                    <span>Residual RMS: {a.residualRMS.toFixed(6)}</span>
+                    <span>Source: {a.source}</span>
+                    <span>{a.displacements.length} displacement points</span>
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+
+      {mdMutation.data?.result && (
+        <Card data-testid="md-sampling-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Thermometer className="h-4 w-4 text-red-400" />
+              Molecular Dynamics Sampling
+              <span className="text-xs text-muted-foreground ml-auto font-normal">
+                {mdMutation.data.formula} at {mdMutation.data.result.temperature}K
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const m = mdMutation.data.result;
+              const fluctColor = m.fluctuationClassification === "extreme" ? "text-red-400" :
+                m.fluctuationClassification === "large" ? "text-amber-400" :
+                m.fluctuationClassification === "moderate" ? "text-cyan-400" : "text-blue-400";
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">MSD</div>
+                      <div className="font-mono font-bold text-sm" data-testid="md-msd">{m.meanSquareDisplacement.toFixed(4)} A2</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">RMS Fluctuation</div>
+                      <div className="font-mono font-bold text-sm" data-testid="md-rms">{m.rmsFluctuation.toFixed(4)} A</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Classification</div>
+                      <div className={`font-mono font-bold text-sm ${fluctColor}`} data-testid="md-classification">{m.fluctuationClassification}</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Max Displacement</div>
+                      <div className="font-mono font-bold text-sm" data-testid="md-max-disp">{m.maxDisplacement.toFixed(4)} A</div>
+                    </div>
+                  </div>
+
+                  {Object.keys(m.msdPerElement).length > 0 && (
+                    <div className="p-2 bg-muted/20 rounded border border-border/50">
+                      <div className="text-[10px] text-muted-foreground mb-1">MSD per Element (A2)</div>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(m.msdPerElement).map(([el, msd]: [string, any]) => (
+                          <div key={el} className="px-2 py-1 bg-muted/30 rounded text-[10px]">
+                            <span className="font-mono font-bold">{el}</span>
+                            <span className="text-muted-foreground ml-1">{typeof msd === "number" ? msd.toFixed(4) : msd}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {m.velocityAutocorrelation.length > 0 && (
+                    <div className="p-2 bg-muted/20 rounded border border-border/50">
+                      <div className="text-[10px] text-muted-foreground mb-1">Velocity Autocorrelation (first 30 points)</div>
+                      <div className="flex items-end gap-0.5 h-12">
+                        {m.velocityAutocorrelation.slice(0, 30).map((v: number, i: number) => (
+                          <div key={i} className="flex-1">
+                            <div
+                              className={`w-full rounded-t ${v >= 0 ? "bg-red-500/50" : "bg-blue-500/50"}`}
+                              style={{ height: `${Math.max(1, Math.abs(v) * 100)}%` }}
+                              title={`t=${i}, C(t)=${v.toFixed(3)}`}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <div className="text-[8px] text-muted-foreground mt-0.5">
+                        VAC decay time: {m.vacDecayTime.toFixed(2)} ps
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="text-[10px] p-2 bg-red-500/5 rounded border border-red-500/20 text-red-300" data-testid="md-relevance">
+                    {m.scRelevance}
+                  </div>
+                  <div className="flex gap-3 text-[10px] text-muted-foreground">
+                    <span>{m.totalSteps} steps</span>
+                    <span>{m.totalTimePs.toFixed(3)} ps total</span>
+                    <span>dt={m.timeStepFs} fs</span>
+                    <span>Source: {m.source}</span>
                   </div>
                 </div>
               );

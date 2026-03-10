@@ -5,7 +5,7 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
-import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons } from "./learning/doping-engine";
+import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons, detectAnharmonicVibrations, runMDSampling, computeDebyeTemp } from "./learning/doping-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
@@ -5419,6 +5419,49 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, analysis });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to analyze Hessian phonons", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/anharmonic/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const analysis = await detectAnharmonicVibrations(formula);
+      if (!analysis) {
+        res.json({ formula, analysis: null, message: "Anharmonic analysis unavailable for this formula" });
+        return;
+      }
+      res.json({ formula, analysis });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to detect anharmonic vibrations", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/md-sampling/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const temp = Math.min(3000, Math.max(10, Number(req.query.temperature) || 300));
+      const result = await runMDSampling(formula, temp);
+      if (!result) {
+        res.json({ formula, result: null, message: "MD sampling unavailable for this formula" });
+        return;
+      }
+      res.json({ formula, result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run MD sampling", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/debye-temperature/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = computeDebyeTemp(formula);
+      if (!result) {
+        res.json({ formula, result: null, message: "Debye temperature unavailable for this formula" });
+        return;
+      }
+      res.json({ formula, result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute Debye temperature", detail: e.message });
     }
   });
 

@@ -3136,3 +3136,205 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
 export function isXTBHealthy(): boolean {
   return xtbHealthy;
 }
+
+export interface AnharmonicProbeResult {
+  displacements: number[];
+  energies: number[];
+  forces: number[];
+  source: "xtb-displacement" | "physics-engine-estimate";
+}
+
+export interface MDSamplingRawResult {
+  positions: number[][][];
+  velocities: number[][][];
+  temperature: number;
+  totalSteps: number;
+  timeStepFs: number;
+}
+
+export async function runXTBAnharmonicProbe(formula: string): Promise<AnharmonicProbeResult | null> {
+  if (!isDFTAvailable()) return null;
+
+  const { atoms } = generateCrystalStructure(formula);
+  if (atoms.length < 2 || atoms.length > 20) return null;
+
+  const validated = validateAndFixStructure(atoms, formula);
+  if (!validated) return null;
+
+  const calcDir = path.join(WORK_DIR, `anharm_${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`);
+  fs.mkdirSync(calcDir, { recursive: true });
+
+  const env: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    XTBHOME: XTB_HOME,
+    XTBPATH: XTB_PARAM,
+    OMP_NUM_THREADS: "1",
+    OMP_STACKSIZE: "512M",
+  };
+
+  const displacementScales = [-0.10, -0.08, -0.05, -0.03, -0.01, 0.0, 0.01, 0.03, 0.05, 0.08, 0.10];
+  const energies: number[] = [];
+  const forces: number[] = [];
+
+  try {
+    const targetAtom = 0;
+    const dispDir = 0;
+
+    for (const scale of displacementScales) {
+      const displaced = validated.map((a, idx) => {
+        if (idx !== targetAtom) return { ...a };
+        const coords = [a.x, a.y, a.z];
+        coords[dispDir] += scale;
+        return { element: a.element, x: coords[0], y: coords[1], z: coords[2] };
+      });
+
+      const stepDir = path.join(calcDir, `disp_${scale.toFixed(3).replace("-", "m")}`);
+      fs.mkdirSync(stepDir, { recursive: true });
+      writeXYZ(displaced, path.join(stepDir, "input.xyz"), `${formula} displacement=${scale}`);
+
+      try {
+        const output = execSync(
+          `${XTB_BIN} input.xyz --gfn 2 --sp 2>&1`,
+          { cwd: stepDir, timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
+        ).toString();
+
+        const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+        const gradMatch = output.match(/GRADIENT NORM\s+([-\d.]+)/);
+
+        const energy = energyMatch ? parseFloat(energyMatch[1]) : 0;
+        const grad = gradMatch ? parseFloat(gradMatch[1]) : 0;
+
+        energies.push(energy);
+        forces.push(-grad * (scale >= 0 ? 1 : -1));
+      } catch {
+        energies.push(0);
+        forces.push(0);
+      }
+    }
+
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+
+    if (energies.every(e => e === 0)) return null;
+
+    const refE = energies[5] || energies.find(e => e !== 0) || 0;
+    const relativeEnergies = energies.map(e => (e - refE) * 27.211);
+
+    return {
+      displacements: displacementScales,
+      energies: relativeEnergies,
+      forces,
+      source: "xtb-displacement",
+    };
+  } catch {
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+    return null;
+  }
+}
+
+export async function runXTBMDSampling(formula: string, temperatureK: number = 300): Promise<MDSamplingRawResult | null> {
+  if (!isDFTAvailable()) return null;
+
+  const { atoms } = generateCrystalStructure(formula);
+  if (atoms.length < 2 || atoms.length > 15) return null;
+
+  const validated = validateAndFixStructure(atoms, formula);
+  if (!validated) return null;
+
+  const calcDir = path.join(WORK_DIR, `md_${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`);
+  fs.mkdirSync(calcDir, { recursive: true });
+
+  const env: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    XTBHOME: XTB_HOME,
+    XTBPATH: XTB_PARAM,
+    OMP_NUM_THREADS: "1",
+    OMP_STACKSIZE: "512M",
+  };
+
+  writeXYZ(validated, path.join(calcDir, "input.xyz"), `${formula} MD sampling T=${temperatureK}K`);
+
+  const totalSteps = 200;
+  const timeStepFs = 1.0;
+  const dumpFreq = 10;
+
+  const mdInput = [
+    `$md`,
+    `   temp=${temperatureK}`,
+    `   time=${(totalSteps * timeStepFs * 0.001).toFixed(2)}`,
+    `   dump=${(dumpFreq * timeStepFs * 0.001).toFixed(4)}`,
+    `   step=${timeStepFs.toFixed(1)}`,
+    `   hmass=1`,
+    `   shake=0`,
+    `   nvt=true`,
+    `$end`,
+  ].join("\n");
+
+  fs.writeFileSync(path.join(calcDir, "md.inp"), mdInput);
+
+  try {
+    execSync(
+      `${XTB_BIN} input.xyz --gfn 2 --md --input md.inp 2>&1`,
+      { cwd: calcDir, timeout: 45000, env, maxBuffer: 20 * 1024 * 1024 }
+    );
+
+    const trajPath = path.join(calcDir, "xtb.trj");
+    if (!fs.existsSync(trajPath)) {
+      try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+      return null;
+    }
+
+    const trajContent = fs.readFileSync(trajPath, "utf-8");
+    const frames = trajContent.split(/(?=\s*\d+\n)/g).filter(f => f.trim().length > 0);
+
+    const positions: number[][][] = [];
+    const velocities: number[][][] = [];
+
+    for (const frame of frames) {
+      const lines = frame.trim().split("\n");
+      if (lines.length < 3) continue;
+      const nAtoms = parseInt(lines[0].trim());
+      if (isNaN(nAtoms) || nAtoms < 2) continue;
+
+      const framePos: number[][] = [];
+      for (let i = 2; i < Math.min(lines.length, 2 + nAtoms); i++) {
+        const parts = lines[i].trim().split(/\s+/);
+        if (parts.length >= 4) {
+          framePos.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
+        }
+      }
+      if (framePos.length === nAtoms) {
+        positions.push(framePos);
+      }
+    }
+
+    if (positions.length >= 2) {
+      for (let f = 1; f < positions.length; f++) {
+        const frameVel: number[][] = [];
+        const dt = dumpFreq * timeStepFs;
+        for (let a = 0; a < positions[f].length; a++) {
+          frameVel.push([
+            (positions[f][a][0] - positions[f - 1][a][0]) / dt,
+            (positions[f][a][1] - positions[f - 1][a][1]) / dt,
+            (positions[f][a][2] - positions[f - 1][a][2]) / dt,
+          ]);
+        }
+        velocities.push(frameVel);
+      }
+    }
+
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+
+    if (positions.length < 2) return null;
+
+    return {
+      positions,
+      velocities,
+      temperature: temperatureK,
+      totalSteps,
+      timeStepFs,
+    };
+  } catch {
+    try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+    return null;
+  }
+}

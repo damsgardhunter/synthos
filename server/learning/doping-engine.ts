@@ -1,7 +1,7 @@
 import { parseFormulaElements, computeElectronicStructure, computePhononSpectrum } from "./physics-engine";
 import { normalizeFormula, isValidFormula } from "./utils";
 import { getElementData, getStonerParameter } from "./elemental-data";
-import { runXTBOptimization, runXTBPhononCheck, type PhononStability } from "../dft/qe-dft-engine";
+import { runXTBOptimization, runXTBPhononCheck, runXTBAnharmonicProbe, runXTBMDSampling, type PhononStability, type AnharmonicProbeResult, type MDSamplingRawResult } from "../dft/qe-dft-engine";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 
@@ -58,7 +58,50 @@ export interface HessianPhononAnalysis {
   };
 }
 
+export interface AnharmonicAnalysis {
+  displacements: number[];
+  energies: number[];
+  forces: number[];
+  quadraticFitCoeffs: [number, number, number];
+  residualRMS: number;
+  anharmonicityScore: number;
+  isAnharmonic: boolean;
+  cubicContribution: number;
+  quarticContribution: number;
+  energyCurveType: "harmonic" | "weakly-anharmonic" | "strongly-anharmonic";
+  scRelevance: string;
+  source: "xtb-displacement" | "physics-engine-estimate";
+}
+
+export interface MDSamplingResult {
+  temperature: number;
+  totalSteps: number;
+  timeStepFs: number;
+  totalTimePs: number;
+  meanSquareDisplacement: number;
+  msdPerElement: Record<string, number>;
+  velocityAutocorrelation: number[];
+  vacDecayTime: number;
+  rmsFluctuation: number;
+  maxDisplacement: number;
+  fluctuationClassification: "rigid" | "moderate" | "large" | "extreme";
+  phononDensityProxy: number;
+  scRelevance: string;
+  source: "xtb-md" | "physics-engine-estimate";
+}
+
+export interface DebyeTemperatureResult {
+  debyeTemperature: number;
+  fromPhononAvg: boolean;
+  avgFrequency_THz: number;
+  avgFrequency_cm1: number;
+  classification: "very-low" | "low" | "moderate" | "high" | "very-high";
+  electronPhononCouplingHint: string;
+  scRelevance: number;
+}
+
 const CM1_TO_THZ = 0.02998;
+const THZ_TO_KELVIN = 47.9924;
 const SOFT_PHONON_THRESHOLD_THZ = 1.0;
 const MODERATE_PHONON_THRESHOLD_THZ = 5.0;
 
@@ -188,6 +231,389 @@ export function processPhononStability(stability: PhononStability): HessianPhono
       overallPhononSCScore: Math.round(overallPhononSCScore * 1000) / 1000,
       interpretation,
     },
+  };
+}
+
+export async function detectAnharmonicVibrations(formula: string): Promise<AnharmonicAnalysis | null> {
+  let xtbResult: AnharmonicProbeResult | null = null;
+  try {
+    xtbResult = await runXTBAnharmonicProbe(formula);
+  } catch (e) {
+    console.log(`[Doping] xTB anharmonic probe failed for ${formula}, using physics-engine fallback`);
+  }
+
+  if (xtbResult && xtbResult.displacements.length >= 3) {
+    return processAnharmonicResult(xtbResult);
+  }
+
+  try {
+    const electronic = computeElectronicStructure(formula);
+    const phonon = computePhononSpectrum(formula, electronic);
+    if (!phonon) return null;
+
+    const elements = parseFormulaElements(formula);
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = getTotalAtoms(counts);
+    const avgMass = elements.reduce((s, el) => {
+      const d = getElementData(el);
+      return s + (d?.atomicMass ?? 40) * (counts[el] ?? 1);
+    }, 0) / Math.max(1, totalAtoms);
+
+    const displacements = [-0.10, -0.08, -0.05, -0.03, -0.01, 0.0, 0.01, 0.03, 0.05, 0.08, 0.10];
+    const k_eff = phonon.maxPhononFrequency * 0.01;
+    const anharmonicIndex = phonon.anharmonicityIndex;
+
+    const energies = displacements.map(d => {
+      const harmonic = 0.5 * k_eff * d * d;
+      const cubic = anharmonicIndex * 0.3 * k_eff * d * d * d;
+      const quartic = anharmonicIndex * 0.15 * k_eff * d * d * d * d;
+      return harmonic + cubic + quartic;
+    });
+
+    const forces = displacements.map(d => {
+      const linear = -k_eff * d;
+      const cubicF = -3 * anharmonicIndex * 0.3 * k_eff * d * d;
+      const quarticF = -4 * anharmonicIndex * 0.15 * k_eff * d * d * d;
+      return linear + cubicF + quarticF;
+    });
+
+    const syntheticResult: AnharmonicProbeResult = {
+      displacements,
+      energies,
+      forces,
+      source: "physics-engine-estimate",
+    };
+    return processAnharmonicResult(syntheticResult);
+  } catch {
+    return null;
+  }
+}
+
+function processAnharmonicResult(raw: AnharmonicProbeResult): AnharmonicAnalysis {
+  const { displacements, energies, forces } = raw;
+  const n = displacements.length;
+
+  let sumX2 = 0, sumX4 = 0, sumX2Y = 0, sumY = 0;
+  for (let i = 0; i < n; i++) {
+    const x2 = displacements[i] * displacements[i];
+    sumX2 += x2;
+    sumX4 += x2 * x2;
+    sumY += energies[i];
+    sumX2Y += x2 * energies[i];
+  }
+  const a2 = n > 0 ? (n * sumX2Y - sumX2 * sumY) / Math.max(1e-15, n * sumX4 - sumX2 * sumX2) : 0;
+  const a0 = (sumY - a2 * sumX2) / Math.max(1, n);
+  const quadraticFitCoeffs: [number, number, number] = [a0, 0, a2];
+
+  let residualSumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const predicted = a0 + a2 * displacements[i] * displacements[i];
+    const diff = energies[i] - predicted;
+    residualSumSq += diff * diff;
+  }
+  const residualRMS = Math.sqrt(residualSumSq / Math.max(1, n));
+
+  const maxE = Math.max(...energies.map(Math.abs));
+  const anharmonicityScore = maxE > 0 ? Math.min(1.0, residualRMS / (maxE * 0.1 + 1e-10)) : 0;
+
+  let cubicContribution = 0;
+  let quarticContribution = 0;
+  if (n >= 5) {
+    for (let i = 0; i < n; i++) {
+      const x = displacements[i];
+      const eActual = energies[i];
+      const eQuad = a0 + a2 * x * x;
+      const residual = eActual - eQuad;
+      cubicContribution += Math.abs(residual * x) / (Math.abs(x * x * x) + 1e-10);
+      quarticContribution += Math.abs(residual) / (x * x * x * x + 1e-10);
+    }
+    cubicContribution = Math.min(1.0, cubicContribution / n * 0.5);
+    quarticContribution = Math.min(1.0, quarticContribution / n * 0.01);
+  }
+
+  const isAnharmonic = anharmonicityScore > 0.15;
+  let energyCurveType: "harmonic" | "weakly-anharmonic" | "strongly-anharmonic";
+  if (anharmonicityScore < 0.1) energyCurveType = "harmonic";
+  else if (anharmonicityScore < 0.4) energyCurveType = "weakly-anharmonic";
+  else energyCurveType = "strongly-anharmonic";
+
+  let scRelevance: string;
+  if (energyCurveType === "strongly-anharmonic") {
+    scRelevance = "Strong anharmonicity detected -- potential for unconventional phonon-mediated SC or lattice instability-driven pairing";
+  } else if (energyCurveType === "weakly-anharmonic") {
+    scRelevance = "Weak anharmonicity -- modest deviation from harmonic behavior, possible phonon renormalization effects";
+  } else {
+    scRelevance = "Harmonic vibrations -- conventional phonon spectrum expected, standard BCS coupling";
+  }
+
+  return {
+    displacements,
+    energies: energies.map(e => Math.round(e * 1e8) / 1e8),
+    forces: forces.map(f => Math.round(f * 1e8) / 1e8),
+    quadraticFitCoeffs: quadraticFitCoeffs.map(c => Math.round(c * 1e8) / 1e8) as [number, number, number],
+    residualRMS: Math.round(residualRMS * 1e8) / 1e8,
+    anharmonicityScore: Math.round(anharmonicityScore * 1000) / 1000,
+    isAnharmonic,
+    cubicContribution: Math.round(cubicContribution * 1000) / 1000,
+    quarticContribution: Math.round(quarticContribution * 1000) / 1000,
+    energyCurveType,
+    scRelevance,
+    source: (raw as any).source ?? "xtb-displacement",
+  };
+}
+
+export async function runMDSampling(formula: string, temperatureK: number = 300): Promise<MDSamplingResult | null> {
+  let xtbResult: MDSamplingRawResult | null = null;
+  try {
+    xtbResult = await runXTBMDSampling(formula, temperatureK);
+  } catch (e) {
+    console.log(`[Doping] xTB MD sampling failed for ${formula}, using physics-engine fallback`);
+  }
+
+  if (xtbResult && xtbResult.positions.length > 0) {
+    return processMDResult(xtbResult, formula);
+  }
+
+  try {
+    const electronic = computeElectronicStructure(formula);
+    const phonon = computePhononSpectrum(formula, electronic);
+    if (!phonon) return null;
+
+    const elements = parseFormulaElements(formula);
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = getTotalAtoms(counts);
+
+    const kB = 8.617e-5;
+    const thermalEnergy = kB * temperatureK;
+    const avgFreq_THz = phonon.logAverageFrequency * CM1_TO_THZ;
+    const debyeT = phonon.debyeTemperature;
+    const thetaRatio = debyeT > 0 ? temperatureK / debyeT : 1.0;
+
+    const baseMSD = thermalEnergy / (Math.max(0.01, avgFreq_THz) * 0.5) * 0.01;
+    const msd = baseMSD * (1 + thetaRatio * 0.5);
+
+    const msdPerElement: Record<string, number> = {};
+    for (const el of elements) {
+      const data = getElementData(el);
+      const mass = data?.atomicMass ?? 40;
+      msdPerElement[el] = msd * (40 / mass);
+    }
+
+    const totalSteps = 500;
+    const timeStepFs = 1.0;
+    const vacLength = 50;
+    const vac: number[] = [];
+    const vacDecayRate = avgFreq_THz * 0.2;
+    for (let i = 0; i < vacLength; i++) {
+      vac.push(Math.exp(-i * vacDecayRate * 0.02) * Math.cos(2 * Math.PI * avgFreq_THz * 0.001 * i));
+    }
+
+    const vacDecayTime = vacDecayRate > 0 ? 1.0 / (vacDecayRate * 0.02) : 50;
+    const rmsFluctuation = Math.sqrt(msd);
+    const maxDisplacement = rmsFluctuation * 2.5;
+
+    let fluctuationClassification: "rigid" | "moderate" | "large" | "extreme";
+    if (rmsFluctuation < 0.05) fluctuationClassification = "rigid";
+    else if (rmsFluctuation < 0.15) fluctuationClassification = "moderate";
+    else if (rmsFluctuation < 0.35) fluctuationClassification = "large";
+    else fluctuationClassification = "extreme";
+
+    const phononDensityProxy = totalAtoms * avgFreq_THz * (phonon.softModeScore + 0.1);
+
+    let scRelevance: string;
+    if (fluctuationClassification === "large" || fluctuationClassification === "extreme") {
+      scRelevance = "Large thermal fluctuations -- strong lattice dynamics may enhance or suppress SC depending on pairing mechanism";
+    } else if (fluctuationClassification === "moderate") {
+      scRelevance = "Moderate fluctuations -- typical for materials with conventional phonon-mediated SC";
+    } else {
+      scRelevance = "Rigid lattice -- weak atomic motion suggests low electron-phonon coupling";
+    }
+
+    return {
+      temperature: temperatureK,
+      totalSteps,
+      timeStepFs,
+      totalTimePs: totalSteps * timeStepFs * 0.001,
+      meanSquareDisplacement: Math.round(msd * 1e6) / 1e6,
+      msdPerElement,
+      velocityAutocorrelation: vac.map(v => Math.round(v * 1000) / 1000),
+      vacDecayTime: Math.round(vacDecayTime * 100) / 100,
+      rmsFluctuation: Math.round(rmsFluctuation * 1e4) / 1e4,
+      maxDisplacement: Math.round(maxDisplacement * 1e4) / 1e4,
+      fluctuationClassification,
+      phononDensityProxy: Math.round(phononDensityProxy * 100) / 100,
+      scRelevance,
+      source: "physics-engine-estimate",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function processMDResult(raw: MDSamplingRawResult, formula: string): MDSamplingResult {
+  const { positions, velocities, temperature, totalSteps, timeStepFs } = raw;
+  const nFrames = positions.length;
+  const nAtoms = nFrames > 0 ? positions[0].length : 0;
+
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const elementList: string[] = [];
+  for (const el of elements) {
+    for (let i = 0; i < (counts[el] ?? 1); i++) elementList.push(el);
+  }
+
+  const refPos = positions[0] ?? [];
+  let totalMSD = 0;
+  const msdByElement: Record<string, { sum: number; count: number }> = {};
+
+  for (let f = 1; f < nFrames; f++) {
+    for (let a = 0; a < nAtoms; a++) {
+      const dx = positions[f][a][0] - refPos[a][0];
+      const dy = positions[f][a][1] - refPos[a][1];
+      const dz = positions[f][a][2] - refPos[a][2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      totalMSD += d2;
+      const elName = elementList[a % elementList.length] ?? "X";
+      if (!msdByElement[elName]) msdByElement[elName] = { sum: 0, count: 0 };
+      msdByElement[elName].sum += d2;
+      msdByElement[elName].count += 1;
+    }
+  }
+  const meanMSD = nAtoms > 0 && nFrames > 1 ? totalMSD / (nAtoms * (nFrames - 1)) : 0;
+  const msdPerElement: Record<string, number> = {};
+  for (const [el, data] of Object.entries(msdByElement)) {
+    msdPerElement[el] = data.count > 0 ? data.sum / data.count : 0;
+  }
+
+  const vacLength = Math.min(50, nFrames - 1);
+  const vac: number[] = [];
+  if (velocities && velocities.length > 0 && nAtoms > 0) {
+    for (let tau = 0; tau < vacLength; tau++) {
+      let corr = 0;
+      let norm = 0;
+      for (let f = 0; f < nFrames - tau; f++) {
+        for (let a = 0; a < nAtoms; a++) {
+          const v0 = velocities[f]?.[a] ?? [0, 0, 0];
+          const vt = velocities[f + tau]?.[a] ?? [0, 0, 0];
+          corr += v0[0] * vt[0] + v0[1] * vt[1] + v0[2] * vt[2];
+          if (tau === 0) norm += v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2];
+        }
+      }
+      if (tau === 0 && norm > 0) {
+        vac.push(1.0);
+      } else {
+        vac.push(norm > 0 ? corr / (norm * (nFrames - tau)) * (nFrames) : 0);
+      }
+    }
+  }
+
+  let vacDecayTime = vacLength * timeStepFs * 0.001;
+  for (let i = 0; i < vac.length; i++) {
+    if (vac[i] < 0.37) {
+      vacDecayTime = i * timeStepFs * 0.001;
+      break;
+    }
+  }
+
+  const rmsFluctuation = Math.sqrt(meanMSD);
+  let maxDisp = 0;
+  for (let f = 1; f < nFrames; f++) {
+    for (let a = 0; a < nAtoms; a++) {
+      const dx = positions[f][a][0] - refPos[a][0];
+      const dy = positions[f][a][1] - refPos[a][1];
+      const dz = positions[f][a][2] - refPos[a][2];
+      maxDisp = Math.max(maxDisp, Math.sqrt(dx * dx + dy * dy + dz * dz));
+    }
+  }
+
+  let fluctuationClassification: "rigid" | "moderate" | "large" | "extreme";
+  if (rmsFluctuation < 0.05) fluctuationClassification = "rigid";
+  else if (rmsFluctuation < 0.15) fluctuationClassification = "moderate";
+  else if (rmsFluctuation < 0.35) fluctuationClassification = "large";
+  else fluctuationClassification = "extreme";
+
+  const phononDensityProxy = nAtoms * rmsFluctuation * 10;
+
+  let scRelevance: string;
+  if (fluctuationClassification === "large" || fluctuationClassification === "extreme") {
+    scRelevance = "Large thermal fluctuations -- strong lattice dynamics may enhance or suppress SC depending on pairing mechanism";
+  } else if (fluctuationClassification === "moderate") {
+    scRelevance = "Moderate fluctuations -- typical for materials with conventional phonon-mediated SC";
+  } else {
+    scRelevance = "Rigid lattice -- weak atomic motion suggests low electron-phonon coupling";
+  }
+
+  return {
+    temperature,
+    totalSteps,
+    timeStepFs,
+    totalTimePs: Math.round(totalSteps * timeStepFs * 0.001 * 1000) / 1000,
+    meanSquareDisplacement: Math.round(meanMSD * 1e6) / 1e6,
+    msdPerElement,
+    velocityAutocorrelation: vac.map(v => Math.round(v * 1000) / 1000),
+    vacDecayTime: Math.round(vacDecayTime * 100) / 100,
+    rmsFluctuation: Math.round(rmsFluctuation * 1e4) / 1e4,
+    maxDisplacement: Math.round(maxDisp * 1e4) / 1e4,
+    fluctuationClassification,
+    phononDensityProxy: Math.round(phononDensityProxy * 100) / 100,
+    scRelevance,
+    source: "xtb-md",
+  };
+}
+
+export function computeDebyeTemp(formula: string, phononAnalysis?: HessianPhononAnalysis | null): DebyeTemperatureResult | null {
+  let avgFreq_THz: number;
+  let avgFreq_cm1: number;
+  let fromPhonon = false;
+
+  if (phononAnalysis && phononAnalysis.avgFrequency_THz > 0) {
+    avgFreq_THz = phononAnalysis.avgFrequency_THz;
+    avgFreq_cm1 = phononAnalysis.avgFrequency_cm1;
+    fromPhonon = true;
+  } else {
+    try {
+      const electronic = computeElectronicStructure(formula);
+      const phonon = computePhononSpectrum(formula, electronic);
+      if (!phonon) return null;
+      avgFreq_cm1 = phonon.logAverageFrequency;
+      avgFreq_THz = avgFreq_cm1 * CM1_TO_THZ;
+    } catch {
+      return null;
+    }
+  }
+
+  const debyeTemperature = Math.round(avgFreq_THz * THZ_TO_KELVIN);
+
+  let classification: "very-low" | "low" | "moderate" | "high" | "very-high";
+  if (debyeTemperature < 100) classification = "very-low";
+  else if (debyeTemperature < 300) classification = "low";
+  else if (debyeTemperature < 600) classification = "moderate";
+  else if (debyeTemperature < 1200) classification = "high";
+  else classification = "very-high";
+
+  let electronPhononCouplingHint: string;
+  if (classification === "very-low" || classification === "low") {
+    electronPhononCouplingHint = "Low Debye temperature implies soft lattice -- stronger electron-phonon coupling expected (higher lambda)";
+  } else if (classification === "moderate") {
+    electronPhononCouplingHint = "Moderate Debye temperature -- balanced phonon spectrum for conventional BCS pairing";
+  } else {
+    electronPhononCouplingHint = "High Debye temperature implies stiff lattice -- weaker conventional coupling but higher phonon frequencies";
+  }
+
+  let scRelevance: number;
+  if (debyeTemperature < 200) scRelevance = 0.8;
+  else if (debyeTemperature < 400) scRelevance = 0.6;
+  else if (debyeTemperature < 800) scRelevance = 0.4;
+  else scRelevance = 0.2;
+
+  return {
+    debyeTemperature,
+    fromPhononAvg: fromPhonon,
+    avgFrequency_THz: Math.round(avgFreq_THz * 1000) / 1000,
+    avgFrequency_cm1: Math.round(avgFreq_cm1 * 100) / 100,
+    classification,
+    electronPhononCouplingHint,
+    scRelevance: Math.round(scRelevance * 1000) / 1000,
   };
 }
 
