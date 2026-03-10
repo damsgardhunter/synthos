@@ -1328,22 +1328,27 @@ function softValidateGeometry(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
   _isRelaxed: boolean,
+  pressureGPa: number = 0,
 ): { valid: boolean; reason: string; warnings: string[] } {
   const warnings: string[] = [];
   if (positions.length === 0) return { valid: false, reason: "No atomic positions", warnings };
   if (positions.length > 16) return { valid: false, reason: `Too many atoms (${positions.length}), max 16 for available resources`, warnings };
 
-  if (latticeA < 2.5) return { valid: false, reason: `Lattice constant too small: ${latticeA.toFixed(2)} A (min 2.5)`, warnings };
+  const isHighPressure = pressureGPa > 50;
+  const minLattice = isHighPressure ? 2.0 : 2.5;
+  if (latticeA < minLattice) return { valid: false, reason: `Lattice constant too small: ${latticeA.toFixed(2)} A (min ${minLattice})`, warnings };
   if (latticeA > 50) return { valid: false, reason: `Lattice constant too large: ${latticeA.toFixed(2)} A (max 50)`, warnings };
 
   const totalAtoms = positions.length;
   const volumeAng3 = latticeA ** 3;
   const volumePerAtom = volumeAng3 / totalAtoms;
   const hasHydrogen = positions.some(p => p.element === "H");
-  const minVolPerAtom = hasHydrogen ? 2.5 : 5.0;
+  const minVolPerAtom = isHighPressure ? (hasHydrogen ? 1.5 : 3.0) : (hasHydrogen ? 2.5 : 5.0);
   if (volumePerAtom < minVolPerAtom) {
-    return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})`, warnings };
+    return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom}${isHighPressure ? " @HP" : ""})`, warnings };
   }
+
+  const pressureDistScale = isHighPressure ? computePressureScale(pressureGPa) : 1.0;
 
   let closestDist = Infinity;
   let closestPair = "";
@@ -1359,11 +1364,11 @@ function softValidateGeometry(
       const dy = fdy * latticeA;
       const dz = fdz * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const dMin = minPairDistance(positions[i].element, positions[j].element);
+      const dMin = minPairDistance(positions[i].element, positions[j].element) * pressureDistScale;
       if (dist < dMin) {
         return {
           valid: false,
-          reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(3)} A < d_min ${dMin.toFixed(3)} A [0.7*(${COVALENT_RADIUS[positions[i].element] ?? 1.4}+${COVALENT_RADIUS[positions[j].element] ?? 1.4})]`,
+          reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(3)} A < d_min ${dMin.toFixed(3)} A${isHighPressure ? ` (pressure-scaled @${pressureGPa}GPa)` : ` [0.7*(${COVALENT_RADIUS[positions[i].element] ?? 1.4}+${COVALENT_RADIUS[positions[j].element] ?? 1.4})]`}`,
           warnings,
         };
       }
@@ -1374,9 +1379,9 @@ function softValidateGeometry(
     }
   }
 
-  const closestDMin = closestPair ? minPairDistance(closestPair.split("-")[0], closestPair.split("-")[1]) : 1.0;
+  const closestDMin = closestPair ? minPairDistance(closestPair.split("-")[0], closestPair.split("-")[1]) * pressureDistScale : 1.0;
   if (closestDist < closestDMin * 1.1) {
-    warnings.push(`Tight packing: ${closestPair} at ${closestDist.toFixed(2)} A (d_min=${closestDMin.toFixed(2)}) — vc-relax will handle`);
+    warnings.push(`Tight packing: ${closestPair} at ${closestDist.toFixed(2)} A (d_min=${closestDMin.toFixed(2)}${isHighPressure ? " @HP" : ""}) — vc-relax will handle`);
   }
 
   return { valid: true, reason: "OK", warnings };
@@ -1402,7 +1407,13 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   }
 
   const ALKALINE_EARTH_SYMBOLS = new Set(["Ca", "Sr", "Ba", "Mg"]);
-  const KNOWN_SUPERHYDRIDES = new Set(["LaH10", "YH6", "YH9", "CeH9", "CeH10", "ThH10", "CaH6", "ScH9", "BaH12", "LaBeH8"]);
+  const KNOWN_SUPERHYDRIDE_PRESSURES: Record<string, number> = {
+    LaH10: 150, LaH9: 120, LaH11: 200,
+    YH6: 160, YH9: 200,
+    CeH9: 150, CeH10: 170,
+    ThH10: 175, CaH6: 200,
+    ScH9: 130, BaH12: 150, LaBeH8: 100,
+  };
   const hCount = counts["H"] || 0;
   if (hCount > 0 && totalAtoms > 2) {
     const hRatio = hCount / totalAtoms;
@@ -1416,17 +1427,22 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
 
     const nonHAtoms = totalAtoms - hCount;
     const hPerMetal = nonHAtoms > 0 ? hCount / nonHAtoms : hCount;
-    const isKnownSuperhydride = KNOWN_SUPERHYDRIDES.has(formula.replace(/\s+/g, ""));
+    const cleanFormula = formula.replace(/\s+/g, "");
+    const knownPressure = KNOWN_SUPERHYDRIDE_PRESSURES[cleanFormula];
 
     if (hCount > 0 && nonHAtoms > 0 && hPerMetal < 0.5 && hasHydrideMetal) {
       return { valid: false, reason: `Metal-rich hydride (H/metal=${hPerMetal.toFixed(2)}) — unphysical stoichiometry, hydrides should have H/metal >= 0.5` };
     }
 
-    if (!isKnownSuperhydride && hPerMetal > 6) {
+    if (knownPressure) {
+      return { valid: true, reason: `Known superhydride ${cleanFormula} — requires ~${knownPressure} GPa`, highPressure: true, estimatedPressureGPa: knownPressure };
+    }
+
+    if (hPerMetal > 6) {
       return { valid: true, reason: `High H/metal ratio ${hPerMetal.toFixed(1)} — tagged as high-pressure candidate (>100 GPa required)`, highPressure: true, estimatedPressureGPa: Math.min(300, 50 + hPerMetal * 15) };
     }
 
-    if (hRatio > 0.75 && !isKnownSuperhydride) {
+    if (hRatio > 0.75) {
       return { valid: true, reason: `Hydrogen fraction ${(hRatio * 100).toFixed(0)}% — tagged as high-pressure superhydride candidate`, highPressure: true, estimatedPressureGPa: Math.min(300, 100 + hRatio * 100) };
     }
   }
@@ -1604,6 +1620,7 @@ function generateVCRelaxInput(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
+  pressureGPa: number = 0,
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -1675,8 +1692,8 @@ ${magLines}/
 /
 &CELL
   cell_dynamics = 'bfgs',
-  press = 0.0,
-  press_conv_thr = 0.5,
+  press = ${(pressureGPa * 10.0).toFixed(1)},
+  press_conv_thr = ${pressureGPa > 50 ? 1.0 : 0.5},
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -1884,6 +1901,16 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     }
 
     let latticeA = estimateLatticeConstant(elements, counts);
+    result.ppValidated = true;
+    const workerPressure = result.estimatedPressureGPa ?? 0;
+
+    if (workerPressure > 0) {
+      const pressureScale = computePressureScale(workerPressure);
+      const originalLattice = latticeA;
+      latticeA = latticeA * pressureScale;
+      console.log(`[QE-Worker] Compressed lattice for ${formula} under ${workerPressure} GPa: ${originalLattice.toFixed(3)} -> ${latticeA.toFixed(3)} A (scale=${pressureScale.toFixed(3)})`);
+    }
+
     let positions = generateAtomicPositions(elements, counts, formula, latticeA);
 
     try {
@@ -1891,17 +1918,13 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       if (proto) result.prototypeUsed = proto.template.name;
     } catch {}
 
-    result.ppValidated = true;
-
-    const workerPressure = result.estimatedPressureGPa ?? 0;
-
     const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
     result.xtbPreRelaxed = !!relaxed;
     if (relaxed) {
       positions = relaxed;
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
 
-      const geomCheck = softValidateGeometry(positions, latticeA, true);
+      const geomCheck = softValidateGeometry(positions, latticeA, true, workerPressure);
       if (!geomCheck.valid) {
         result.error = `Geometry rejected (post-xTB): ${geomCheck.reason}`;
         result.failureStage = "geometry";
@@ -1941,8 +1964,8 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
     result.vcRelaxed = false;
     try {
-      console.log(`[QE-Worker] Starting vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms)`);
-      const vcRelaxInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions);
+      console.log(`[QE-Worker] Starting vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa (${(workerPressure * 10).toFixed(0)} kbar)` : ""})`);
+      const vcRelaxInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
       const vcRelaxFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcRelaxFile, vcRelaxInput);
 
