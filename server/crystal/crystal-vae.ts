@@ -5,8 +5,8 @@ import { buildGraphFromStructure, getGraphFeatureVector } from "./crystal-graph-
 const LATENT_DIM = 32;
 const HIDDEN_DIM = 64;
 const NUM_EPOCHS = 300;
-const LEARNING_RATE = 0.002;
-const MOMENTUM = 0.9;
+const LEARNING_RATE = 0.001;
+const MOMENTUM = 0.85;
 const FREE_BITS = 0.1;
 const BETA_CYCLES = 4;
 const BETA_MAX = 0.8;
@@ -15,6 +15,9 @@ const KL_MIN_TARGET = 2.0;
 const KL_PULL_STRENGTH = 0.05;
 const ENCODER_CATCHUP_INTERVAL = 25;
 const ENCODER_CATCHUP_STEPS = 5;
+const LOG_SIGMA_CLAMP = 5.0;
+const MU_CLAMP = 15.0;
+const GRAD_CLIP_NORM = 5.0;
 
 const CRYSTAL_SYSTEMS = ["cubic", "tetragonal", "orthorhombic", "hexagonal", "rhombohedral", "monoclinic", "triclinic"] as const;
 const TOP_SPACEGROUPS = [225, 229, 227, 221, 223, 191, 194, 139, 129, 123, 99, 141, 62, 47, 166, 216, 217, 230, 12, 15] as const;
@@ -77,6 +80,13 @@ let totalGenerations = 0;
 let noveltyScores: number[] = [];
 let encodedTrainingData: { formula: string; z: number[] }[] = [];
 let trained = false;
+let savedInputMeans: number[] = [];
+let savedInputStds: number[] = [];
+
+function normalizeForInference(raw: number[]): number[] {
+  if (savedInputMeans.length === 0 || savedInputStds.length === 0) return raw;
+  return raw.map((v, j) => clampVal((v - (savedInputMeans[j] || 0)) / (savedInputStds[j] || 1), -5, 5));
+}
 
 function initWeights(rows: number, cols: number, scale: number = 0.1): number[][] {
   const w: number[][] = [];
@@ -115,6 +125,57 @@ function createMomentum(mlp: MLPWeights): MLPMomentum {
 function relu(x: number): number { return Math.max(0, x); }
 function reluDeriv(x: number): number { return x > 0 ? 1 : 0; }
 
+function safeExp(x: number): number {
+  if (x > 80) return Math.exp(80);
+  if (x < -80) return 0;
+  return Math.exp(x);
+}
+
+function clampVal(x: number, lo: number, hi: number): number {
+  if (!isFinite(x)) return 0;
+  return Math.max(lo, Math.min(hi, x));
+}
+
+function clipGradVector(grad: number[], maxNorm: number): number[] {
+  let norm = 0;
+  for (let i = 0; i < grad.length; i++) norm += grad[i] * grad[i];
+  norm = Math.sqrt(norm);
+  if (norm > maxNorm) {
+    const scale = maxNorm / norm;
+    return grad.map(g => g * scale);
+  }
+  return grad;
+}
+
+function hasNaN(arr: number[]): boolean {
+  for (let i = 0; i < arr.length; i++) {
+    if (!isFinite(arr[i])) return true;
+  }
+  return false;
+}
+
+function normalizeInputs(inputs: number[][]): { normalized: number[][]; means: number[]; stds: number[] } {
+  if (inputs.length === 0) return { normalized: [], means: [], stds: [] };
+  const dim = inputs[0].length;
+  const means = new Array(dim).fill(0);
+  const stds = new Array(dim).fill(0);
+
+  for (const inp of inputs) {
+    for (let j = 0; j < dim; j++) means[j] += inp[j];
+  }
+  for (let j = 0; j < dim; j++) means[j] /= inputs.length;
+
+  for (const inp of inputs) {
+    for (let j = 0; j < dim; j++) stds[j] += (inp[j] - means[j]) ** 2;
+  }
+  for (let j = 0; j < dim; j++) stds[j] = Math.sqrt(stds[j] / inputs.length + 1e-8);
+
+  const normalized = inputs.map(inp =>
+    inp.map((v, j) => clampVal((v - means[j]) / stds[j], -5, 5))
+  );
+  return { normalized, means, stds };
+}
+
 function forwardMLP(mlp: MLPWeights, input: number[]): { hidden: number[]; output: number[] } {
   const hidden: number[] = [];
   for (let j = 0; j < mlp.b1.length; j++) {
@@ -122,7 +183,7 @@ function forwardMLP(mlp: MLPWeights, input: number[]): { hidden: number[]; outpu
     for (let i = 0; i < input.length; i++) {
       s += input[i] * mlp.w1[i][j];
     }
-    hidden.push(relu(s));
+    hidden.push(relu(isFinite(s) ? s : 0));
   }
   const output: number[] = [];
   for (let j = 0; j < mlp.b2.length; j++) {
@@ -130,7 +191,7 @@ function forwardMLP(mlp: MLPWeights, input: number[]): { hidden: number[]; outpu
     for (let i = 0; i < hidden.length; i++) {
       s += hidden[i] * mlp.w2[i][j];
     }
-    output.push(s);
+    output.push(isFinite(s) ? s : 0);
   }
   return { hidden, output };
 }
@@ -174,7 +235,8 @@ function encodeEntry(entry: CrystalStructureEntry): number[] {
 function reparameterize(mu: number[], logSigma: number[]): number[] {
   return mu.map((m, i) => {
     const eps = gaussianRandom();
-    return m + Math.exp(logSigma[i]) * eps;
+    const ls = clampVal(logSigma[i], -LOG_SIGMA_CLAMP, LOG_SIGMA_CLAMP);
+    return clampVal(m, -MU_CLAMP, MU_CLAMP) + safeExp(ls) * eps;
   });
 }
 
@@ -188,16 +250,20 @@ function gaussianRandom(): number {
 function klDivergence(mu: number[], logSigma: number[]): number {
   let kl = 0;
   for (let i = 0; i < mu.length; i++) {
-    const sigma2 = Math.exp(2 * logSigma[i]);
-    kl += sigma2 + mu[i] * mu[i] - 1 - 2 * logSigma[i];
+    const ls = clampVal(logSigma[i], -LOG_SIGMA_CLAMP, LOG_SIGMA_CLAMP);
+    const m = clampVal(mu[i], -MU_CLAMP, MU_CLAMP);
+    const sigma2 = safeExp(2 * ls);
+    kl += sigma2 + m * m - 1 - 2 * ls;
   }
-  return 0.5 * kl;
+  return Math.max(0, 0.5 * kl);
 }
 
 function klDivergencePerDim(mu: number[], logSigma: number[]): number[] {
   return mu.map((m, i) => {
-    const sigma2 = Math.exp(2 * logSigma[i]);
-    return 0.5 * (sigma2 + m * m - 1 - 2 * logSigma[i]);
+    const ls = clampVal(logSigma[i], -LOG_SIGMA_CLAMP, LOG_SIGMA_CLAMP);
+    const mc = clampVal(m, -MU_CLAMP, MU_CLAMP);
+    const sigma2 = safeExp(2 * ls);
+    return Math.max(0, 0.5 * (sigma2 + mc * mc - 1 - 2 * ls));
   });
 }
 
@@ -231,10 +297,13 @@ function backpropMLP(
   input: number[], hidden: number[], outputGrad: number[],
   lr: number
 ): number[] {
+  const clippedGrad = clipGradVector(outputGrad, GRAD_CLIP_NORM);
+  if (hasNaN(clippedGrad)) return new Array(input.length).fill(0);
+
   const hiddenGrad: number[] = new Array(hidden.length).fill(0);
 
   for (let j = 0; j < mlp.b2.length; j++) {
-    const grad = outputGrad[j];
+    const grad = clippedGrad[j];
     mom.db2[j] = MOMENTUM * mom.db2[j] + lr * grad;
     mlp.b2[j] -= mom.db2[j];
     for (let i = 0; i < hidden.length; i++) {
@@ -319,6 +388,14 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
 
   if (encodedInputs.length < 10) return;
 
+  const { normalized: normalizedInputs, means: inputMeans, stds: inputStds } = normalizeInputs(encodedInputs);
+  for (let i = 0; i < encodedInputs.length; i++) {
+    encodedInputs[i] = normalizedInputs[i];
+  }
+  savedInputMeans = inputMeans;
+  savedInputStds = inputStds;
+  console.log(`[Crystal-VAE] Input normalization applied: ${encodedInputs.length} samples, ${encodedInputs[0].length} features`);
+
   const inputDim = encodedInputs[0].length;
   const encoderMLP = createMLP(inputDim, HIDDEN_DIM, LATENT_DIM * 2);
   const decoderLattice = createMLP(LATENT_DIM, HIDDEN_DIM, 6);
@@ -355,16 +432,20 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
   function trainOneSample(
     idx: number, beta: number, lr: number,
     updateDecoders: boolean
-  ): { reconLoss: number; rawKL: number; activeDims: number } {
+  ): { reconLoss: number; rawKL: number; activeDims: number; skipped: boolean } {
     const input = encodedInputs[idx];
 
     const encResult = forwardMLP(encoderMLP, input);
+    if (hasNaN(encResult.output)) {
+      return { reconLoss: 0, rawKL: 0, activeDims: 0, skipped: true };
+    }
+
     const muLogSigma = encResult.output;
-    const mu = muLogSigma.slice(0, LATENT_DIM);
-    const logSigma = muLogSigma.slice(LATENT_DIM);
+    const mu = muLogSigma.slice(0, LATENT_DIM).map(m => clampVal(m, -MU_CLAMP, MU_CLAMP));
+    const logSigma = muLogSigma.slice(LATENT_DIM).map(ls => clampVal(ls, -LOG_SIGMA_CLAMP, LOG_SIGMA_CLAMP));
 
     const epsilon = Array.from({ length: LATENT_DIM }, () => gaussianRandom());
-    const z = mu.map((m, i) => m + Math.exp(logSigma[i]) * epsilon[i]);
+    const z = mu.map((m, i) => clampVal(m + safeExp(logSigma[i]) * epsilon[i], -20, 20));
 
     const latResult = forwardMLP(decoderLattice, z);
     const csResult = forwardMLP(decoderCS, z);
@@ -372,6 +453,10 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
     const protoResult = forwardMLP(decoderProto, z);
     const atomResult = forwardMLP(decoderAtom, z);
     const compResult = forwardMLP(decoderComp, z);
+
+    if (hasNaN(latResult.output) || hasNaN(csResult.output) || hasNaN(compResult.output)) {
+      return { reconLoss: 0, rawKL: 0, activeDims: 0, skipped: true };
+    }
 
     const latticeLoss = mseLoss(latResult.output, latticeTargets[idx]);
     const csLoss = crossEntropyLoss(csResult.output, csTargets[idx]);
@@ -383,11 +468,15 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
     const reconLoss = latticeLoss * 2.0 + csLoss * 0.5 + sgLoss * 0.3 + protoLoss * 0.3 + atomLoss * 0.5 + compLoss * 1.0;
     const rawKL = klDivergence(mu, logSigma);
 
+    if (!isFinite(reconLoss) || !isFinite(rawKL)) {
+      return { reconLoss: 0, rawKL: 0, activeDims: 0, skipped: true };
+    }
+
     const zGrad = new Array(LATENT_DIM).fill(0);
 
     const decoderLr = updateDecoders ? lr : 0;
 
-    const latticeGrad = latticeTargets[idx].map((t, i) => 2.0 * (latResult.output[i] - t) / 6 * 2.0);
+    const latticeGrad = latticeTargets[idx].map((t, i) => clampVal(2.0 * (latResult.output[i] - t) / 6 * 2.0, -10, 10));
     const latZGrad = backpropMLP(decoderLattice, decLatMom, z, latResult.hidden, latticeGrad, decoderLr);
     for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += latZGrad[i];
 
@@ -406,19 +495,21 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
     const protoZGrad = backpropMLP(decoderProto, decProtoMom, z, protoResult.hidden, protoGrad, decoderLr);
     for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += protoZGrad[i];
 
-    const atomGrad = [2.0 * (atomResult.output[0] - atomCountTargets[idx]) * 0.5];
+    const atomGrad = [clampVal(2.0 * (atomResult.output[0] - atomCountTargets[idx]) * 0.5, -10, 10)];
     const atomZGrad = backpropMLP(decoderAtom, decAtomMom, z, atomResult.hidden, atomGrad, decoderLr);
     for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += atomZGrad[i];
 
-    const compGrad = compositionTargets[idx].map((t, i) => 2.0 * (compResult.output[i] - t) / TOP_ELEMENTS.length * 1.0);
+    const compGrad = compositionTargets[idx].map((t, i) => clampVal(2.0 * (compResult.output[i] - t) / TOP_ELEMENTS.length * 1.0, -10, 10));
     const compZGrad = backpropMLP(decoderComp, decCompMom, z, compResult.hidden, compGrad, decoderLr);
     for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += compZGrad[i];
+
+    const clippedZGrad = clipGradVector(zGrad, GRAD_CLIP_NORM);
 
     const klPerDim = klDivergencePerDim(mu, logSigma);
     let activeDims = 0;
 
     const muGrad = mu.map((m, i) => {
-      const reconThruReparam = zGrad[i];
+      const reconThruReparam = clippedZGrad[i];
       const dimKL = klPerDim[i];
       if (dimKL >= FREE_BITS) activeDims++;
       const softGate = dimKL < FREE_BITS
@@ -428,28 +519,28 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
       return reconThruReparam + klGrad;
     });
     const logSigmaGrad = logSigma.map((ls, i) => {
-      const sigma = Math.exp(ls);
-      const reconThruReparam = zGrad[i] * epsilon[i] * sigma;
+      const sigma = safeExp(ls);
+      const reconThruReparam = clippedZGrad[i] * epsilon[i] * sigma;
       const dimKL = klPerDim[i];
       const softGate = dimKL < FREE_BITS
         ? FREE_BITS > 0 ? 0.1 * (dimKL / FREE_BITS) : 0.1
         : 1.0;
-      const klGrad = softGate * beta * (Math.exp(2 * ls) - 1);
-      return reconThruReparam + klGrad;
+      const klGrad = softGate * beta * (safeExp(2 * ls) - 1);
+      return clampVal(reconThruReparam + klGrad, -10, 10);
     });
 
     if (rawKL < KL_MIN_TARGET && beta > 0) {
       for (let i = 0; i < LATENT_DIM; i++) {
-        const sigma = Math.exp(logSigma[i]);
+        const sigma = safeExp(logSigma[i]);
         muGrad[i] -= KL_PULL_STRENGTH * mu[i];
         logSigmaGrad[i] -= KL_PULL_STRENGTH * (1 - sigma);
       }
     }
 
-    const encOutGrad = [...muGrad, ...logSigmaGrad];
+    const encOutGrad = clipGradVector([...muGrad, ...logSigmaGrad], GRAD_CLIP_NORM * 2);
     backpropMLP(encoderMLP, encMom, input, encResult.hidden, encOutGrad, lr);
 
-    return { reconLoss, rawKL, activeDims };
+    return { reconLoss, rawKL, activeDims, skipped: false };
   }
 
   for (let epoch = 0; epoch < NUM_EPOCHS; epoch++) {
@@ -471,15 +562,21 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
     const isEncoderCatchup = epoch > WARMUP_EPOCHS &&
       epoch % ENCODER_CATCHUP_INTERVAL < ENCODER_CATCHUP_STEPS;
 
+    let skippedCount = 0;
     for (const idx of indices) {
       const result = trainOneSample(idx, beta, lr, !isEncoderCatchup);
+      if (result.skipped) {
+        skippedCount++;
+        continue;
+      }
       totalRecon += result.reconLoss;
       totalKL += result.rawKL;
       totalActiveDims += result.activeDims;
       totalLoss += result.reconLoss + beta * result.rawKL;
     }
 
-    const n = encodedInputs.length;
+    const nValid = encodedInputs.length - skippedCount;
+    const n = Math.max(1, nValid);
     if (epoch % 10 === 0 || epoch === NUM_EPOCHS - 1) {
       const avgActiveDims = Math.round(totalActiveDims / n);
       trainingHistory.push({
@@ -490,8 +587,14 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
         beta,
       });
       if (epoch % 50 === 0) {
-        console.log(`[Crystal-VAE] epoch=${epoch} beta=${beta.toFixed(3)} reconLoss=${(totalRecon/n).toFixed(4)} KL=${(totalKL/n).toFixed(4)} activeDims=${avgActiveDims}/${LATENT_DIM}${isEncoderCatchup ? " [encoder-catchup]" : ""}`);
+        const skipInfo = skippedCount > 0 ? ` skipped=${skippedCount}` : "";
+        console.log(`[Crystal-VAE] epoch=${epoch} beta=${beta.toFixed(3)} reconLoss=${(totalRecon/n).toFixed(4)} KL=${(totalKL/n).toFixed(4)} activeDims=${avgActiveDims}/${LATENT_DIM}${isEncoderCatchup ? " [encoder-catchup]" : ""}${skipInfo}`);
       }
+    }
+
+    if (skippedCount > encodedInputs.length * 0.5 && epoch > 10) {
+      console.log(`[Crystal-VAE] WARNING: >50% samples skipped at epoch ${epoch} (${skippedCount}/${encodedInputs.length}), halting training early`);
+      break;
     }
   }
 
@@ -758,12 +861,13 @@ export function encodeFormula(formula: string): { mu: number[]; logSigma: number
   if (!entry) return null;
 
   try {
-    const input = encodeEntry(entry);
-    if (input.some(v => !Number.isFinite(v))) return null;
+    const rawInput = encodeEntry(entry);
+    if (rawInput.some(v => !Number.isFinite(v))) return null;
+    const input = normalizeForInference(rawInput);
 
     const encResult = forwardMLP(model.encoder, input);
-    const mu = encResult.output.slice(0, LATENT_DIM);
-    const logSigma = encResult.output.slice(LATENT_DIM);
+    const mu = encResult.output.slice(0, LATENT_DIM).map(m => clampVal(m, -MU_CLAMP, MU_CLAMP));
+    const logSigma = encResult.output.slice(LATENT_DIM).map(ls => clampVal(ls, -LOG_SIGMA_CLAMP, LOG_SIGMA_CLAMP));
     const z = reparameterize(mu, logSigma);
 
     return {
