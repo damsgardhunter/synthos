@@ -1026,6 +1026,149 @@ function DistortionDetectorCard() {
   );
 }
 
+function HeterostructureGeneratorCard() {
+  const { data: heteroStats, isLoading } = useQuery<{
+    totalGenerated: number;
+    idealMismatchCount: number;
+    workableMismatchCount: number;
+    unlikelyMismatchCount: number;
+    avgMismatch: number;
+    avgInterfaceScore: number;
+    substrateUsage: Record<string, number>;
+    topCandidates: Array<{
+      layer1: string;
+      layer2: string;
+      mismatch: number;
+      mismatchQuality: string;
+      interfaceScore: number;
+      scEnhancement: number;
+    }>;
+    recentGenerations: Array<{
+      layer1: string;
+      layer2: string;
+      orientation: string;
+      mismatch: number;
+      quality: string;
+      atoms: number;
+    }>;
+  }>({ queryKey: ["/api/heterostructure/stats"], refetchInterval: 30000 });
+
+  const qualityColors: Record<string, string> = {
+    ideal: "text-green-400",
+    workable: "text-yellow-400",
+    unlikely: "text-red-400",
+  };
+
+  return (
+    <Card data-testid="card-heterostructure-generator">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Layers className="h-4 w-4 text-teal-400" />
+          Heterostructure Generator
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            <div className="h-4 bg-muted animate-pulse rounded w-3/4" />
+            <div className="h-4 bg-muted animate-pulse rounded w-1/2" />
+          </div>
+        ) : !heteroStats || heteroStats.totalGenerated === 0 ? (
+          <p className="text-xs text-muted-foreground">No bilayer structures generated yet. Pairs SC candidates with substrate materials for interface-enhanced superconductivity.</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-lg font-bold" data-testid="text-hetero-total">{heteroStats.totalGenerated}</div>
+                <div className="text-[10px] text-muted-foreground">Generated</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-green-400" data-testid="text-hetero-ideal">{heteroStats.idealMismatchCount}</div>
+                <div className="text-[10px] text-muted-foreground">Ideal Match</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-teal-400" data-testid="text-hetero-score">{heteroStats.avgInterfaceScore.toFixed(2)}</div>
+                <div className="text-[10px] text-muted-foreground">Avg Score</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-1">
+              <div className="bg-muted/30 rounded p-1 text-center">
+                <div className="text-[9px] text-muted-foreground">Ideal (&lt;3%)</div>
+                <div className="text-xs font-bold text-green-400">{heteroStats.idealMismatchCount}</div>
+              </div>
+              <div className="bg-muted/30 rounded p-1 text-center">
+                <div className="text-[9px] text-muted-foreground">Workable (3-7%)</div>
+                <div className="text-xs font-bold text-yellow-400">{heteroStats.workableMismatchCount}</div>
+              </div>
+              <div className="bg-muted/30 rounded p-1 text-center">
+                <div className="text-[9px] text-muted-foreground">Unlikely (&gt;7%)</div>
+                <div className="text-xs font-bold text-red-400">{heteroStats.unlikelyMismatchCount}</div>
+              </div>
+            </div>
+
+            {Object.keys(heteroStats.substrateUsage).length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Top Substrates</div>
+                <div className="flex gap-1 flex-wrap">
+                  {Object.entries(heteroStats.substrateUsage)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 5)
+                    .map(([sub, count]) => (
+                      <span key={sub} className="text-[9px] px-1.5 py-0.5 rounded bg-teal-500/10 text-teal-300" data-testid={`badge-substrate-${sub}`}>
+                        {sub}: {count}
+                      </span>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {heteroStats.topCandidates.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Top Bilayer Candidates</div>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {heteroStats.topCandidates.slice(0, 5).map((c, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-hetero-top-${i}`}>
+                      <span className="font-mono font-medium">{c.layer1}/{c.layer2}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={qualityColors[c.mismatchQuality] || "text-muted-foreground"}>
+                          {(c.mismatch * 100).toFixed(1)}%
+                        </span>
+                        <span className="text-teal-400 text-[9px]">score:{c.interfaceScore.toFixed(2)}</span>
+                        <span className="text-purple-400 text-[9px]">SC:{c.scEnhancement.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {heteroStats.recentGenerations.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Recent Generations</div>
+                <div className="space-y-1 max-h-24 overflow-y-auto">
+                  {heteroStats.recentGenerations.slice(0, 4).map((g, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-hetero-recent-${i}`}>
+                      <span className="font-mono font-medium">{g.layer1}/{g.layer2}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={qualityColors[g.quality] || "text-muted-foreground"}>
+                          {g.quality}
+                        </span>
+                        <span className="text-muted-foreground">{g.orientation}</span>
+                        <span className="text-muted-foreground">{g.atoms} atoms</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function EnergyLandscapeCard() {
   const { data: landscapeStats, isLoading } = useQuery<{
     totalExplored: number;
@@ -2412,6 +2555,7 @@ export default function Dashboard() {
 
           <GNNActiveLearningCard />
           <PhysicsUQCard />
+          <HeterostructureGeneratorCard />
           <DistortionDetectorCard />
           <EnergyLandscapeCard />
           <DistortionClassifierCard />

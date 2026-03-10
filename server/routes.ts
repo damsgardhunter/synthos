@@ -103,6 +103,10 @@ import { getBandCalcStats } from "./dft/band-structure-calculator";
 import { getDFTBandAnalysisStats } from "./dft/dft-band-analysis";
 import { predictStability } from "./physics/stability-predictor";
 import { analyzeInterface, generateHeterostructureCandidates } from "./physics/interface-engine";
+import {
+  generateHeterostructure, generateBilayerCandidates, findBestSubstrates,
+  getHeterostructureStats, getSubstrateDatabase,
+} from "./crystal/heterostructure-generator";
 import { detectQuantumCriticality } from "./physics/quantum-criticality";
 import { discoveryMemory } from "./learning/discovery-memory";
 import { computeFeatureVector, buildAndStoreFeatureRecord, getFeatureDataset, getDatasetSize, getFeatureRecord } from "./theory/physics-feature-db";
@@ -1489,6 +1493,64 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ candidates, count: candidates.length });
     } catch (e: any) {
       res.status(500).json({ error: "Heterostructure generation failed", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/heterostructure/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getHeterostructureStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch heterostructure stats" });
+    }
+  });
+
+  app.get("/api/heterostructure/substrates", generalLimiter, async (_req, res) => {
+    try {
+      const substrates = getSubstrateDatabase();
+      res.json({ substrates, count: substrates.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch substrates" });
+    }
+  });
+
+  app.get("/api/heterostructure/best-substrates/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const topN = parseInt(req.query.topN as string) || 5;
+      const results = findBestSubstrates(formula, topN);
+      res.json({ formula, matches: results });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to find best substrates" });
+    }
+  });
+
+  app.post("/api/heterostructure/generate", generalLimiter, async (req, res) => {
+    try {
+      const { film, substrate } = req.body;
+      if (!film || !substrate) {
+        return res.status(400).json({ error: "Both film and substrate formulas required" });
+      }
+      const result = generateHeterostructure(film, substrate);
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to generate heterostructure" });
+    }
+  });
+
+  app.post("/api/heterostructure/batch-generate", generalLimiter, async (req, res) => {
+    try {
+      const { films, maxPerFilm } = req.body;
+      if (!films || !Array.isArray(films) || films.length === 0) {
+        return res.status(400).json({ error: "Array of film formulas required" });
+      }
+      const results = generateBilayerCandidates(films, maxPerFilm || 5);
+      res.json({ results, count: results.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to batch generate heterostructures" });
     }
   });
 
