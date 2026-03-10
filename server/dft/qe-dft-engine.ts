@@ -2605,17 +2605,8 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
 
     const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
     if (energyMatch && output.includes("normal termination")) {
-      let energyPerAtom = parseFloat(energyMatch[1]) / divisor;
-      if (!isMolecular) {
-        const cohesiveEv = COHESIVE_ENERGIES_EV[element];
-        if (cohesiveEv === undefined) {
-          console.log(`[DFT] WARNING: Element ${element} missing from COHESIVE_ENERGIES_EV, using fallback 3.0 eV`);
-        }
-        const cohesiveEvVal = cohesiveEv ?? 3.0;
-        const cohesiveHa = cohesiveEvVal / 27.2114;
-        energyPerAtom = energyPerAtom - cohesiveHa;
-        console.log(`[DFT] ${element}: Ref energy corrected from ${(energyPerAtom + cohesiveHa).toFixed(4)} Ha (atom) to ${energyPerAtom.toFixed(4)} Ha (bulk-corrected, cohesive=${cohesiveEvVal.toFixed(2)} eV)`);
-      }
+      const energyPerAtom = parseFloat(energyMatch[1]) / divisor;
+      console.log(`[DFT] ${element}: xTB ref energy = ${energyPerAtom.toFixed(4)} Ha/atom (${isMolecular ? "from dimer" : "isolated atom"}, no cohesive correction — consistent with xTB compound energies)`);
       elementRefEnergies.set(element, energyPerAtom);
       try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
       return energyPerAtom;
