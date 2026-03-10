@@ -345,10 +345,10 @@ function parseFormula(formula: string): Record<string, number> {
 }
 
 const ATOMIC_VOLUMES: Record<string, number> = {
-  H: 5, He: 6, Li: 21, Be: 8, B: 8, C: 9, N: 10, O: 12, F: 11, Ne: 13,
-  Na: 24, Mg: 23, Al: 17, Si: 20, P: 17, S: 16, Cl: 22, Ar: 24,
+  H: 5, He: 6, Li: 20, Be: 8, B: 8, C: 9, N: 10, O: 12, F: 11, Ne: 13,
+  Na: 24, Mg: 14, Al: 17, Si: 20, P: 17, S: 16, Cl: 22, Ar: 24,
   K: 46, Ca: 26, Sc: 25, Ti: 16, V: 14, Cr: 12, Mn: 12,
-  Fe: 12, Co: 11, Ni: 11, Cu: 12, Zn: 15, Ga: 20, Ge: 23,
+  Fe: 11, Co: 11, Ni: 11, Cu: 12, Zn: 15, Ga: 20, Ge: 23,
   As: 21, Se: 17, Br: 24, Kr: 27, Rb: 56, Sr: 34, Y: 25, Zr: 23,
   Nb: 18, Mo: 16, Tc: 14, Ru: 14, Rh: 14, Pd: 15, Ag: 17, Cd: 22,
   In: 26, Sn: 27, Sb: 30, Te: 34, I: 26, Xe: 36,

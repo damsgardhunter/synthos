@@ -137,10 +137,10 @@ const PROTOTYPE_PACKING: Record<string, number> = {
 };
 
 const ATOMIC_VOLUMES: Record<string, number> = {
-  H: 5.0, He: 6.0, Li: 21.0, Be: 8.0, B: 8.0, C: 9.0, N: 10.0,
-  O: 12.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 23.0, Al: 17.0, Si: 20.0,
+  H: 5.0, He: 6.0, Li: 20.0, Be: 8.0, B: 8.0, C: 9.0, N: 10.0,
+  O: 12.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 14.0, Al: 17.0, Si: 20.0,
   P: 17.0, S: 16.0, Cl: 22.0, Ar: 24.0, K: 46.0, Ca: 26.0, Sc: 25.0,
-  Ti: 16.0, V: 14.0, Cr: 12.0, Mn: 12.0, Fe: 12.0, Co: 11.0, Ni: 11.0,
+  Ti: 16.0, V: 14.0, Cr: 12.0, Mn: 12.0, Fe: 11.0, Co: 11.0, Ni: 11.0,
   Cu: 12.0, Zn: 15.0, Ga: 20.0, Ge: 23.0, As: 21.0, Se: 17.0, Br: 24.0,
   Kr: 27.0, Rb: 56.0, Sr: 34.0, Y: 25.0, Zr: 23.0, Nb: 18.0, Mo: 16.0,
   Ru: 14.0, Rh: 14.0, Pd: 15.0, Ag: 17.0, Cd: 22.0, In: 26.0, Sn: 27.0,
@@ -1702,15 +1702,16 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   const minVol = hasHydrogen ? MIN_VOLUME_PER_ATOM_HYDRIDE : MIN_VOLUME_PER_ATOM;
 
   const counts = parseFormula(formula);
+  const totalFormulaAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
   const expectedVolume = computeExpectedVolume(counts);
-  const targetVolPerAtom = Math.max(minVol, expectedVolume / Math.max(atoms.length, 1));
+  const targetVolPerAtom = Math.max(minVol, expectedVolume / Math.max(totalFormulaAtoms, 1));
 
   let current = atoms;
 
   for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
     const { minDist, minRatio } = computePairwiseDistances(current);
     const volume = computeBoundingVolume(current);
-    const volumePerAtom = volume / current.length;
+    const volumePerAtom = volume / Math.max(totalFormulaAtoms, current.length);
 
     const distOk = minRatio >= 0.99;
     const volOk = volumePerAtom >= targetVolPerAtom - 0.1;
@@ -1747,7 +1748,7 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
 
   const { minDist, minRatio } = computePairwiseDistances(current);
   const volume = computeBoundingVolume(current);
-  const volumePerAtom = volume / current.length;
+  const volumePerAtom = volume / Math.max(totalFormulaAtoms, current.length);
 
   if (minRatio < 0.99 || volumePerAtom < minVol - 0.1) {
     console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
