@@ -1,0 +1,135 @@
+The Core Idea of Prototype-Free Generation
+
+Instead of:
+
+composition → prototype → structure
+
+Use:
+
+composition → lattice generator → atom placement optimizer
+
+Three main steps:
+
+1️⃣ generate a lattice
+2️⃣ distribute atoms inside the cell
+3️⃣ enforce physical constraints
+
+3️⃣ Step 1: Generate a Crystal Lattice
+
+A crystal lattice requires:
+
+a, b, c
+α, β, γ
+
+To avoid unphysical cells, sample within reasonable bounds.
+
+Example lattice generator
+import random
+
+def generate_lattice():
+
+    a = random.uniform(3, 10)
+    b = random.uniform(3, 10)
+    c = random.uniform(3, 10)
+
+    alpha = random.uniform(60, 120)
+    beta  = random.uniform(60, 120)
+    gamma = random.uniform(60, 120)
+
+    return (a,b,c,alpha,beta,gamma)
+
+But purely random lattices often fail.
+
+Better approach:
+
+Use Bravais lattice sampling.
+
+Possible lattice types:
+
+cubic
+tetragonal
+orthorhombic
+hexagonal
+monoclinic
+triclinic
+
+Example:
+
+lattice_type = random.choice([
+"cubic","tetragonal","hexagonal","orthorhombic"
+])
+
+Then generate lattice parameters consistent with that symmetry.
+
+4️⃣ Step 2: Atom Placement Algorithm
+
+Now distribute atoms in fractional coordinates.
+
+Example:
+
+0 ≤ x,y,z ≤ 1
+
+Naive placement:
+
+atoms = []
+
+for element in composition:
+
+    atoms.append([
+        element,
+        random.random(),
+        random.random(),
+        random.random()
+    ])
+
+But this leads to atoms overlapping.
+
+So you must enforce minimum distances.
+
+5️⃣ Minimum Distance Physics Filter
+
+Use covalent radii.
+
+Distance rule:
+
+d_min = 0.7 × (rA + rB)
+
+Example implementation:
+
+def valid_distance(atomA, atomB):
+
+    rA = covalent_radius[atomA.element]
+    rB = covalent_radius[atomB.element]
+
+    dmin = 0.7 * (rA + rB)
+
+    return distance(atomA, atomB) > dmin
+
+When placing atoms:
+
+try placement
+if distance invalid → retry
+
+This prevents impossible geometries.
+
+6️⃣ Step 3: Volume Estimation
+
+Random cells often have wrong density.
+
+Estimate unit cell volume using atomic volumes.
+
+Approximate rule:
+
+V ≈ Σ atomic_volume × packing_factor
+
+Typical packing factor:
+
+1.2 – 1.5
+
+Example:
+
+volume = sum(atomic_volume[e] for e in elements) * 1.3
+
+Then scale lattice accordingly.
+
+This keeps density realistic.

@@ -483,6 +483,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - engine.ts: `recalculatePhysics()` now uses pure Allen-Dynes instead of 50/50 blend with old (potentially LLM-sourced) Tc.
     - Pipeline enforcement: Generator → structure relaxation → DFT → phonons → electron-phonon coupling → Tc calculation (Allen-Dynes). LLM only suggests materials.
 
+  - **DFT pipeline reordered — geometry filtering after xTB relaxation**:
+    - qe-worker.ts: Pipeline now follows: generate → xTB pre-relax → soft geometry check (only on relaxed structures) → duplicate check → xTB stability → vc-relax → SCF → bands → phonons → e-ph coupling.
+    - Raw generator structures are NEVER validated for geometry. If xTB pre-relaxation fails, raw positions proceed directly to vc-relax (DFT will handle them or fail at SCF).
+    - `softValidateGeometry()` replaces old strict `validateGeometry()`. Uses reduced distance thresholds (~55% covalent radii for relaxed, ~40% for unrelaxed) — only rejects truly overlapping atoms. Borderline structures proceed to DFT where vc-relax fixes them.
+    - Volume-per-atom limits relaxed: H-containing → 2.5 A^3 (was 5.0), non-H → 5.0 A^3 (was 10.0). Lattice range widened: 2.5-50 A (was 3-40).
+    - Duplicate hash cache replaced: `Set<string>` (never cleared) → `Map<string, timestamp>` with formula-scoped keys, 2000-entry cap, and 30-minute TTL with LRU eviction. Different formulas can now have similar structures without false duplicate rejections.
+    - `recordFormulaFailure()` no longer called on geometry rejection — geometry is a soft gate, not a permanent block.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

@@ -130,7 +130,29 @@ export interface QEFullResult {
   estimatedPressureGPa?: number;
 }
 
-const structureHashCache = new Set<string>();
+const HASH_CACHE_MAX = 2000;
+const HASH_CACHE_TTL_MS = 30 * 60 * 1000;
+const structureHashMap = new Map<string, number>();
+
+function isStructureDuplicate(hash: string, formula: string): boolean {
+  const key = `${formula}::${hash}`;
+  const now = Date.now();
+  if (structureHashMap.size > HASH_CACHE_MAX) {
+    const cutoff = now - HASH_CACHE_TTL_MS;
+    for (const [k, ts] of structureHashMap) {
+      if (ts < cutoff) structureHashMap.delete(k);
+    }
+    if (structureHashMap.size > HASH_CACHE_MAX) {
+      const oldest = [...structureHashMap.entries()].sort((a, b) => a[1] - b[1]);
+      for (let i = 0; i < oldest.length - HASH_CACHE_MAX / 2; i++) {
+        structureHashMap.delete(oldest[i][0]);
+      }
+    }
+  }
+  if (structureHashMap.has(key)) return true;
+  structureHashMap.set(key, now);
+  return false;
+}
 
 const stageFailureCounts: Record<string, number> = {
   formula_filter: 0,
@@ -1050,69 +1072,54 @@ function parsePhononOutput(stdout: string): QEPhononResult {
   return result;
 }
 
-function validateGeometry(
+function softValidateGeometry(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
-): { valid: boolean; reason: string } {
-  if (positions.length === 0) return { valid: false, reason: "No atomic positions" };
-  if (positions.length > 16) return { valid: false, reason: `Too many atoms (${positions.length}), max 16 for available resources` };
+  isRelaxed: boolean,
+): { valid: boolean; reason: string; warnings: string[] } {
+  const warnings: string[] = [];
+  if (positions.length === 0) return { valid: false, reason: "No atomic positions", warnings };
+  if (positions.length > 16) return { valid: false, reason: `Too many atoms (${positions.length}), max 16 for available resources`, warnings };
 
-  if (latticeA < 3) return { valid: false, reason: `Lattice constant too small: ${latticeA.toFixed(2)} A (min 3)` };
-  if (latticeA > 40) return { valid: false, reason: `Lattice constant too large: ${latticeA.toFixed(2)} A (max 40)` };
+  if (latticeA < 2.5) return { valid: false, reason: `Lattice constant too small: ${latticeA.toFixed(2)} A (min 2.5)`, warnings };
+  if (latticeA > 50) return { valid: false, reason: `Lattice constant too large: ${latticeA.toFixed(2)} A (max 50)`, warnings };
 
   const totalAtoms = positions.length;
   const volumeAng3 = latticeA ** 3;
   const volumePerAtom = volumeAng3 / totalAtoms;
   const hasHydrogen = positions.some(p => p.element === "H");
-  const minVolPerAtom = hasHydrogen ? 5.0 : 10.0;
-  if (volumePerAtom < minVolPerAtom) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})` };
-
-  const PAIR_MIN_DIST_AMBIENT: Record<string, number> = {
-    "H-H": 0.74,
-    "La-H": 1.55, "Ce-H": 1.55, "Y-H": 1.50, "Sc-H": 1.45,
-    "Ca-H": 1.50, "Sr-H": 1.55, "Ba-H": 1.60, "Mg-H": 1.40,
-    "Ti-H": 1.45, "Zr-H": 1.50, "Hf-H": 1.50, "Nb-H": 1.45,
-    "Th-H": 1.55, "Li-H": 1.30, "Na-H": 1.40, "K-H": 1.55,
-    "La-La": 3.00, "Ce-Ce": 2.90, "Y-Y": 2.80, "Ba-Ba": 3.20,
-    "Sr-Sr": 3.00, "Ca-Ca": 2.80,
-    "La-O": 2.10, "Y-O": 2.00, "Ba-O": 2.30, "Sr-O": 2.20, "Ca-O": 2.10,
-    "Cu-O": 1.80, "Fe-O": 1.75, "Ni-O": 1.80, "Co-O": 1.80,
-    "Cu-Cu": 2.30, "Fe-Fe": 2.20, "Ni-Ni": 2.20,
-  };
-
-  const isHighPressure = hasHydrogen && volumePerAtom < 8.0;
-  const pressureFactor = isHighPressure ? 0.80 : 1.0;
-
-  function getPairMinDist(el1: string, el2: string): number {
-    const key1 = `${el1}-${el2}`;
-    const key2 = `${el2}-${el1}`;
-    let baseDist: number | undefined;
-    if (PAIR_MIN_DIST_AMBIENT[key1] !== undefined) baseDist = PAIR_MIN_DIST_AMBIENT[key1];
-    else if (PAIR_MIN_DIST_AMBIENT[key2] !== undefined) baseDist = PAIR_MIN_DIST_AMBIENT[key2];
-
-    if (baseDist !== undefined) return baseDist * pressureFactor;
-
-    const COVALENT_R: Record<string, number> = {
-      H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
-      Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
-      K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
-      Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
-      Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
-      As: 1.19, Se: 1.20, Br: 1.20, Kr: 1.16, Rb: 2.20,
-      Tc: 1.47, Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
-      Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, I: 1.39,
-      In: 1.42, Sb: 1.39, Cs: 2.44, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
-      Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, U: 1.96, Pa: 2.00,
-    };
-    const r1 = COVALENT_R[el1] ?? 1.4;
-    const r2 = COVALENT_R[el2] ?? 1.4;
-    const isHPair = el1 === "H" || el2 === "H";
-    const bothH = el1 === "H" && el2 === "H";
-    if (bothH) return 0.60 * pressureFactor;
-    if (isHPair) return Math.max(0.7, (r1 + r2) * 0.45) * pressureFactor;
-    return Math.max(1.3, (r1 + r2) * 0.65) * pressureFactor;
+  const minVolPerAtom = hasHydrogen ? 2.5 : 5.0;
+  if (volumePerAtom < minVolPerAtom) {
+    return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})`, warnings };
   }
 
+  const softFactor = isRelaxed ? 0.55 : 0.40;
+
+  const COVALENT_R: Record<string, number> = {
+    H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
+    Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
+    K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
+    Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
+    Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
+    As: 1.19, Se: 1.20, Br: 1.20, Kr: 1.16, Rb: 2.20,
+    Tc: 1.47, Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
+    Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, I: 1.39,
+    In: 1.42, Sb: 1.39, Cs: 2.44, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
+    Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, U: 1.96, Pa: 2.00,
+  };
+
+  function getSoftMinDist(el1: string, el2: string): number {
+    const r1 = COVALENT_R[el1] ?? 1.4;
+    const r2 = COVALENT_R[el2] ?? 1.4;
+    const bothH = el1 === "H" && el2 === "H";
+    const isHPair = el1 === "H" || el2 === "H";
+    if (bothH) return 0.40;
+    if (isHPair) return Math.max(0.45, (r1 + r2) * softFactor);
+    return Math.max(0.8, (r1 + r2) * softFactor);
+  }
+
+  let closestDist = Infinity;
+  let closestPair = "";
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
       let fdx = positions[i].x - positions[j].x;
@@ -1125,13 +1132,34 @@ function validateGeometry(
       const dy = fdy * latticeA;
       const dz = fdz * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const minDist = getPairMinDist(positions[i].element, positions[j].element);
+      const minDist = getSoftMinDist(positions[i].element, positions[j].element);
       if (dist < minDist) {
-        return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A (min ${minDist.toFixed(2)})` };
+        return {
+          valid: false,
+          reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) overlapping: ${dist.toFixed(2)} A (soft min ${minDist.toFixed(2)})`,
+          warnings,
+        };
+      }
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestPair = `${positions[i].element}-${positions[j].element}`;
       }
     }
   }
-  return { valid: true, reason: "OK" };
+
+  if (closestDist < 1.2 && !hasHydrogen) {
+    warnings.push(`Tight packing: ${closestPair} at ${closestDist.toFixed(2)} A — vc-relax will attempt to fix`);
+  }
+
+  return { valid: true, reason: "OK", warnings };
+}
+
+function validateGeometry(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+): { valid: boolean; reason: string } {
+  const soft = softValidateGeometry(positions, latticeA, false);
+  return { valid: soft.valid, reason: soft.reason };
 }
 
 function validateFormulaForDFT(formula: string, counts: Record<string, number>): { valid: boolean; reason: string; highPressure?: boolean; estimatedPressureGPa?: number } {
@@ -1644,46 +1672,24 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     if (relaxed) {
       positions = relaxed;
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
-    }
 
-    const geomCheck = validateGeometry(positions, latticeA);
-    if (!geomCheck.valid) {
-      if (!relaxed) {
-        const retryRelaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
-        if (retryRelaxed) {
-          const retryGeom = validateGeometry(retryRelaxed, latticeA);
-          if (retryGeom.valid) {
-            positions = retryRelaxed;
-            result.xtbPreRelaxed = true;
-            console.log(`[QE-Worker] xTB rescue relaxation fixed geometry for ${formula}`);
-          } else {
-            result.error = `Geometry rejected after xTB rescue: ${retryGeom.reason}`;
-            result.failureStage = "geometry";
-            stageFailureCounts.geometry++;
-            console.log(`[QE-Worker] ${formula} geometry invalid even after xTB: ${retryGeom.reason}`);
-            recordFormulaFailure(formula);
-            return result;
-          }
-        } else {
-          result.error = `Geometry rejected: ${geomCheck.reason}`;
-          result.failureStage = "geometry";
-          stageFailureCounts.geometry++;
-          console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
-          recordFormulaFailure(formula);
-          return result;
-        }
-      } else {
-        result.error = `Geometry rejected: ${geomCheck.reason}`;
+      const geomCheck = softValidateGeometry(positions, latticeA, true);
+      if (!geomCheck.valid) {
+        result.error = `Geometry rejected (post-xTB): ${geomCheck.reason}`;
         result.failureStage = "geometry";
         stageFailureCounts.geometry++;
-        console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
-        recordFormulaFailure(formula);
+        console.log(`[QE-Worker] ${formula} geometry invalid after xTB relaxation: ${geomCheck.reason}`);
         return result;
       }
+      if (geomCheck.warnings.length > 0) {
+        console.log(`[QE-Worker] ${formula} geometry warnings (proceeding): ${geomCheck.warnings.join("; ")}`);
+      }
+    } else {
+      console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
     }
 
     const hash = computeStructureHash(positions, latticeA);
-    if (structureHashCache.has(hash)) {
+    if (isStructureDuplicate(hash, formula)) {
       result.error = `Duplicate structure (hash=${hash.slice(0, 8)})`;
       result.failureStage = "duplicate";
       result.rejectionReason = "Duplicate structure already computed";
@@ -1691,7 +1697,6 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       console.log(`[QE-Worker] ${formula} skipped: duplicate structure`);
       return result;
     }
-    structureHashCache.add(hash);
 
     const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
     if (stabilityCheck && !stabilityCheck.stable) {
