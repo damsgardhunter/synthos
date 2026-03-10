@@ -1560,6 +1560,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="causal-discovery" data-testid="tab-causal-discovery">Causal Discovery</TabsTrigger>
           <TabsTrigger value="dos-surrogate" data-testid="tab-dos-surrogate">DOS Surrogate</TabsTrigger>
           <TabsTrigger value="topo-invariants" data-testid="tab-topo-invariants">Topo Invariants</TabsTrigger>
+          <TabsTrigger value="doping-engine" data-testid="tab-doping-engine">Doping Engine</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -2115,6 +2116,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="topo-invariants" className="space-y-4" data-testid="topo-invariants-content">
           <TopologicalInvariantsPanel />
+        </TabsContent>
+
+        <TabsContent value="doping-engine" className="space-y-4" data-testid="doping-engine-content">
+          <DopingEnginePanel />
         </TabsContent>
       </Tabs>
     </div>
@@ -4539,6 +4544,240 @@ function TopologicalInvariantsPanel() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function DopingEnginePanel() {
+  const [formula, setFormula] = useState("La2CuO4");
+
+  const statsQuery = useQuery<{
+    totalBaseMaterials: number;
+    totalVariantsGenerated: number;
+    substitutionalCount: number;
+    vacancyCount: number;
+    interstitialCount: number;
+    validVariants: number;
+    recentResults: Array<{ base: string; variants: number; timestamp: number }>;
+  }>({
+    queryKey: ["/api/doping-engine/stats"],
+    refetchInterval: 15000,
+  });
+
+  const dopingQuery = useQuery<{
+    baseFormula: string;
+    variants: Array<{
+      type: string;
+      base: string;
+      dopant?: string;
+      site?: string;
+      fraction: number;
+      resultFormula: string;
+      supercellSize: number;
+      rationale: string;
+    }>;
+    totalGenerated: number;
+    validGenerated: number;
+    wallTimeMs: number;
+  }>({
+    queryKey: ["/api/doping", formula],
+    enabled: formula.length > 0,
+  });
+
+  const recsQuery = useQuery<{
+    formula: string;
+    recommendations: {
+      substitutional: Array<{ dopant: string; site: string; rationale: string }>;
+      vacancy: Array<{ site: string; rationale: string }>;
+      interstitial: Array<{ dopant: string; rationale: string }>;
+    };
+  }>({
+    queryKey: ["/api/doping/recommendations", formula],
+    enabled: formula.length > 0,
+  });
+
+  const stats = statsQuery.data;
+  const data = dopingQuery.data;
+  const recs = recsQuery.data?.recommendations;
+
+  const typeColors: Record<string, string> = {
+    substitutional: "text-blue-400",
+    vacancy: "text-amber-400",
+    interstitial: "text-emerald-400",
+  };
+
+  const typeBg: Record<string, string> = {
+    substitutional: "bg-blue-500/10 border-blue-500/30",
+    vacancy: "bg-amber-500/10 border-amber-500/30",
+    interstitial: "bg-emerald-500/10 border-emerald-500/30",
+  };
+
+  return (
+    <div className="space-y-4" data-testid="doping-engine-panel">
+      <Card data-testid="doping-engine-stats-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <FlaskConical className="h-4 w-4 text-purple-400" />
+            Doping Engine Stats
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {stats ? (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="bg-muted/30 rounded p-2 text-center">
+                <div className="text-xs text-muted-foreground">Base Materials</div>
+                <div className="text-lg font-mono" data-testid="stat-base-materials">{stats.totalBaseMaterials}</div>
+              </div>
+              <div className="bg-muted/30 rounded p-2 text-center">
+                <div className="text-xs text-muted-foreground">Total Variants</div>
+                <div className="text-lg font-mono" data-testid="stat-total-variants">{stats.totalVariantsGenerated}</div>
+              </div>
+              <div className="bg-blue-500/10 rounded p-2 text-center">
+                <div className="text-xs text-blue-400">Substitutional</div>
+                <div className="text-lg font-mono text-blue-300" data-testid="stat-substitutional">{stats.substitutionalCount}</div>
+              </div>
+              <div className="bg-amber-500/10 rounded p-2 text-center">
+                <div className="text-xs text-amber-400">Vacancy</div>
+                <div className="text-lg font-mono text-amber-300" data-testid="stat-vacancy">{stats.vacancyCount}</div>
+              </div>
+              <div className="bg-emerald-500/10 rounded p-2 text-center">
+                <div className="text-xs text-emerald-400">Interstitial</div>
+                <div className="text-lg font-mono text-emerald-300" data-testid="stat-interstitial">{stats.interstitialCount}</div>
+              </div>
+            </div>
+          ) : (
+            <Skeleton className="h-16 w-full" />
+          )}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="doping-lookup-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Search className="h-4 w-4 text-cyan-400" />
+            Generate Doped Variants
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={formula}
+              onChange={e => setFormula(e.target.value)}
+              placeholder="Enter formula (e.g. La2CuO4)"
+              className="flex-1 bg-muted/50 border border-border rounded px-3 py-1.5 text-sm font-mono"
+              data-testid="input-doping-formula"
+            />
+            <Button
+              size="sm"
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/doping", formula] })}
+              disabled={!formula}
+              data-testid="button-generate-doped"
+            >
+              Generate
+            </Button>
+          </div>
+
+          {dopingQuery.isLoading && <Skeleton className="h-32 w-full" />}
+
+          {data && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <span>Base: <code className="text-foreground">{data.baseFormula}</code></span>
+                <span>{data.validGenerated} variants</span>
+                <span>{data.wallTimeMs}ms</span>
+              </div>
+
+              {data.variants.length > 0 ? (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {data.variants.map((v, i) => (
+                    <div key={i} className={`border rounded p-3 ${typeBg[v.type] ?? "bg-muted/20"}`} data-testid={`doping-variant-${i}`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className={typeColors[v.type]}>{v.type}</Badge>
+                          <code className="text-sm font-bold">{v.resultFormula}</code>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          {v.dopant && <span>{v.dopant} at {v.site}</span>}
+                          <span>{(v.fraction * 100).toFixed(0)}%</span>
+                          {v.supercellSize > 1 && <span>{v.supercellSize}x cell</span>}
+                        </div>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{v.rationale}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground text-center py-4">No doping variants generated for this formula</div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {recs && (
+        <Card data-testid="doping-recommendations-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Lightbulb className="h-4 w-4 text-yellow-400" />
+              Doping Recommendations for {formula}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-blue-400">Substitutional</div>
+                {recs.substitutional.length > 0 ? recs.substitutional.map((r, i) => (
+                  <div key={i} className="text-xs p-2 bg-blue-500/5 rounded border border-blue-500/20" data-testid={`rec-sub-${i}`}>
+                    <span className="font-mono font-bold">{r.dopant}</span> at <span className="font-mono">{r.site}</span>
+                    <p className="text-muted-foreground mt-0.5">{r.rationale}</p>
+                  </div>
+                )) : <div className="text-xs text-muted-foreground">No substitutional recommendations</div>}
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-amber-400">Vacancy</div>
+                {recs.vacancy.length > 0 ? recs.vacancy.map((r, i) => (
+                  <div key={i} className="text-xs p-2 bg-amber-500/5 rounded border border-amber-500/20" data-testid={`rec-vac-${i}`}>
+                    <span className="font-mono font-bold">{r.site}</span> vacancy
+                    <p className="text-muted-foreground mt-0.5">{r.rationale}</p>
+                  </div>
+                )) : <div className="text-xs text-muted-foreground">No vacancy recommendations</div>}
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-emerald-400">Interstitial</div>
+                {recs.interstitial.length > 0 ? recs.interstitial.map((r, i) => (
+                  <div key={i} className="text-xs p-2 bg-emerald-500/5 rounded border border-emerald-500/20" data-testid={`rec-int-${i}`}>
+                    <span className="font-mono font-bold">{r.dopant}</span> intercalation
+                    <p className="text-muted-foreground mt-0.5">{r.rationale}</p>
+                  </div>
+                )) : <div className="text-xs text-muted-foreground">No interstitial recommendations</div>}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {stats && stats.recentResults.length > 0 && (
+        <Card data-testid="doping-recent-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Clock className="h-4 w-4 text-gray-400" />
+              Recent Doping Results
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-1 max-h-[200px] overflow-y-auto">
+              {stats.recentResults.slice(-20).reverse().map((r, i) => (
+                <div key={i} className="flex items-center justify-between text-xs p-1.5 bg-muted/20 rounded" data-testid={`recent-doping-${i}`}>
+                  <code>{r.base}</code>
+                  <span>{r.variants} variant{r.variants !== 1 ? "s" : ""}</span>
+                  <span className="text-muted-foreground">{new Date(r.timestamp).toLocaleTimeString()}</span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

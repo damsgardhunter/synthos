@@ -5,6 +5,7 @@ import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValida
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
+import { generateDopedVariants, getDopingEngineStats, getDopingRecommendations, runDopingBatch } from "./learning/doping-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
@@ -5394,6 +5395,52 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getVolumeDNNStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to get volume DNN stats", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/recommendations/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const recommendations = getDopingRecommendations(formula);
+      res.json({ formula, recommendations });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get doping recommendations", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const maxVariants = Math.min(20, Number(req.query.max) || 12);
+      const result = generateDopedVariants(formula, maxVariants);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate doped variants", detail: e.message });
+    }
+  });
+
+  app.get("/api/doping-engine/stats", generalLimiter, async (_req, res) => {
+    try {
+      res.json(getDopingEngineStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get doping engine stats", detail: e.message });
+    }
+  });
+
+  app.post("/api/doping/batch", writeLimiter, async (req, res) => {
+    try {
+      const { formulas, maxPerBase, maxTotal } = req.body;
+      if (!Array.isArray(formulas) || formulas.length === 0) {
+        return res.status(400).json({ error: "formulas array required" });
+      }
+      const result = runDopingBatch(
+        formulas.slice(0, 50),
+        Math.min(12, maxPerBase || 8),
+        Math.min(100, maxTotal || 50)
+      );
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run doping batch", detail: e.message });
     }
   });
 

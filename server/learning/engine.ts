@@ -35,6 +35,7 @@ import { runConvexHullAnalysis, passesStabilityGate, computeMiedemaFormationEner
 import type { StabilityGateResult } from "./phase-diagram-engine";
 import { invalidateGNNModel, trainGNNSurrogate } from "./graph-neural-net";
 import { runStructuralMutations } from "./structural-mutator";
+import { runDopingBatch, getDopingEngineStats, type DopingSpec } from "./doping-engine";
 import { evolveRules, screenWithPatterns, getMinedRules } from "./pattern-miner";
 import { findOptimalRegion, getPhaseExplorationSeedFormulas } from "./phase-explorer";
 import { runFamilyAwareGeneration } from "./family-generators";
@@ -4141,8 +4142,38 @@ async function runAutonomousFastPath() {
       }
     }
     const allEngineCandidates = [...dedupedPhysicsClean, ...inverseDesignCandidates, ...structDiffusionCandidates, ...motifDiffusionCandidates, ...cdvaeCandidates, ...integratedCandidates];
+
+    let dopingCandidates: string[] = [];
+    let dopingSpecs: DopingSpec[] = [];
+    try {
+      const topForDoping = allEngineCandidates
+        .filter(f => isValidFormula(f))
+        .slice(0, 20);
+
+      if (topForDoping.length > 0) {
+        const dopingResult = runDopingBatch(topForDoping, 6, 30, alreadyScreenedFormulas);
+        dopingCandidates = dopingResult.dopedFormulas.filter(f => !alreadyScreenedFormulas.has(f));
+        dopingSpecs = dopingResult.specs;
+        for (const f of dopingCandidates) {
+          alreadyScreenedFormulas.add(f);
+        }
+
+        if (dopingCandidates.length > 0) {
+          emit("log", {
+            phase: "engine",
+            event: "Doping engine variants",
+            detail: `${dopingResult.stats.basesProcessed} bases → ${dopingCandidates.length} doped variants (sub=${dopingResult.stats.substitutional}, vac=${dopingResult.stats.vacancy}, int=${dopingResult.stats.interstitial}). Top: ${dopingCandidates.slice(0, 3).join(", ")}`,
+            dataSource: "Doping Engine",
+          });
+        }
+      }
+    } catch (err: any) {
+      emit("log", { phase: "engine", event: "Doping engine error", detail: err.message?.slice(0, 200), dataSource: "Doping Engine" });
+    }
+
+    const allWithDoping = [...allEngineCandidates, ...dopingCandidates];
     const seenInBatch = new Set<string>();
-    const novelCandidates = allEngineCandidates.filter(f => {
+    const novelCandidates = allWithDoping.filter(f => {
       if (seenInBatch.has(f)) return false;
       seenInBatch.add(f);
       return true;
@@ -4159,7 +4190,7 @@ async function runAutonomousFastPath() {
     emit("log", {
       phase: "engine",
       event: `Massive generation: ${genStats.totalGenerated} generated, ${genStats.uniqueAfterDedup} unique, ${genStats.passedPreScreen} passed pre-screen, ${novelCandidates.length} novel`,
-      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}, motifDiffusion=${motifDiffusionCandidates.length}, cdvae=${cdvaeCandidates.length}, integrated=${integratedCandidates.length}. Feeding ${novelCandidates.length} novel formulas through pipeline.`,
+      detail: `Valence filter: ${genStats.passedValenceFilter}, compatibility filter: ${genStats.passedCompatibilityFilter}. Focus: ${focusArea}. Screened cache: ${alreadyScreenedFormulas.size}. Engines: inverse=${inverseDesignCandidates.length}, structDiffusion=${structDiffusionCandidates.length}, motifDiffusion=${motifDiffusionCandidates.length}, cdvae=${cdvaeCandidates.length}, integrated=${integratedCandidates.length}, doping=${dopingCandidates.length}. Feeding ${novelCandidates.length} novel formulas through pipeline.`,
       dataSource: "Candidate Generator",
     });
 
