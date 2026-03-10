@@ -983,6 +983,9 @@ export function runCrystalDiffusionCycle(
 }
 
 const SCORE_DECAY = 0.95;
+const CURIOSITY_PLATEAU_WINDOW = 20;
+const CURIOSITY_BOOST_FACTOR = 2.5;
+const CURIOSITY_IMPROVEMENT_THRESHOLD = 0.02;
 const distributionDiffusionStats = {
   totalGenerated: 0,
   totalValid: 0,
@@ -995,7 +998,59 @@ const distributionDiffusionStats = {
   recentResults: [] as { formula: string; tc: number; sg: string; system: string }[],
   avgStructureScore: 0,
   learnedSystemWeights: {} as Record<string, number>,
+  curiosityBoostActive: false,
+  curiosityBoostRound: 0,
 };
+
+function computeCuriosityWeights(
+  allDists: CrystalSystemDistribution[],
+  learnedWeights: Record<string, number>,
+  systemBreakdown: Record<string, { count: number; avgTc: number; bestTc: number }>,
+  recentResults: { formula: string; tc: number; sg: string; system: string }[],
+): Record<string, number> {
+  const curiosityWeights: Record<string, number> = {};
+
+  const recentWindow = recentResults.slice(-CURIOSITY_PLATEAU_WINDOW);
+  const olderWindow = recentResults.slice(-CURIOSITY_PLATEAU_WINDOW * 2, -CURIOSITY_PLATEAU_WINDOW);
+
+  let plateauDetected = false;
+  if (recentWindow.length >= CURIOSITY_PLATEAU_WINDOW && olderWindow.length >= CURIOSITY_PLATEAU_WINDOW / 2) {
+    const recentBest = Math.max(...recentWindow.map(r => r.tc));
+    const olderBest = Math.max(...olderWindow.map(r => r.tc));
+    const recentAvg = recentWindow.reduce((s, r) => s + r.tc, 0) / recentWindow.length;
+    const olderAvg = olderWindow.reduce((s, r) => s + r.tc, 0) / olderWindow.length;
+
+    const bestImprovement = olderBest > 0 ? (recentBest - olderBest) / olderBest : 0;
+    const avgImprovement = olderAvg > 0 ? (recentAvg - olderAvg) / olderAvg : 0;
+
+    if (bestImprovement < CURIOSITY_IMPROVEMENT_THRESHOLD && avgImprovement < CURIOSITY_IMPROVEMENT_THRESHOLD) {
+      plateauDetected = true;
+    }
+  }
+
+  distributionDiffusionStats.curiosityBoostActive = plateauDetected;
+  if (plateauDetected) distributionDiffusionStats.curiosityBoostRound++;
+
+  const totalSamples = Object.values(systemBreakdown).reduce((s, sb) => s + sb.count, 0) || 1;
+
+  for (const dist of allDists) {
+    const sys = dist.system;
+    const samples = systemBreakdown[sys]?.count ?? 0;
+    const sampleFraction = samples / totalSamples;
+    const baseWeight = learnedWeights[sys] ?? 1.0;
+
+    if (plateauDetected) {
+      const inverseFrequency = 1 / (sampleFraction + 0.01);
+      const maxInverse = 1 / (0.01);
+      const normalizedInverse = inverseFrequency / maxInverse;
+      curiosityWeights[sys] = baseWeight * (1 + CURIOSITY_BOOST_FACTOR * normalizedInverse);
+    } else {
+      curiosityWeights[sys] = baseWeight;
+    }
+  }
+
+  return curiosityWeights;
+}
 
 function scoreBasedDenoising(
   sites: WyckoffSite[],
@@ -1090,12 +1145,18 @@ export function runDistributionBasedDiffusion(
       let sysDist: CrystalSystemDistribution;
       const lw = distributionDiffusionStats.learnedSystemWeights;
       const hasLearned = Object.keys(lw).length > 0;
+      const curiosityW = computeCuriosityWeights(
+        allDists, lw, distributionDiffusionStats.systemBreakdown, distributionDiffusionStats.recentResults
+      );
+      if (distributionDiffusionStats.curiosityBoostActive && attempt === 0) {
+        console.log(`[Crystal-Diffusion] Curiosity boost active (round ${distributionDiffusionStats.curiosityBoostRound}): boosting under-sampled systems`);
+      }
       if (Math.random() < DIST_EPSILON) {
         sysDist = allDists[Math.floor(Math.random() * allDists.length)];
       } else if (hasLearned && Math.random() < 0.7) {
         const weights = allDists.map(d => {
           if ((systemTrialCounts[d.system] || 0) >= maxPerSystem) return 0;
-          return Math.max(DIST_MIN_FLOOR, lw[d.system] ?? 1.0);
+          return Math.max(DIST_MIN_FLOOR, curiosityW[d.system] ?? lw[d.system] ?? 1.0);
         });
         const totalWeight = weights.reduce((s, w) => s + w, 0);
         if (totalWeight <= 0) {

@@ -5,6 +5,7 @@ import * as crypto from "crypto";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
 import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
+import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
 import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
 
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
@@ -1087,6 +1088,110 @@ function repairStructureGeometry(
   return { positions: curPositions, latticeA: curLattice, repaired };
 }
 
+function inferCrystalSystem(latticeA: number): string {
+  return "cubic";
+}
+
+function snapToWyckoffSites(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+): { positions: Array<{ element: string; x: number; y: number; z: number }>; snapped: boolean; snapCount: number } {
+  const allDists = getAllDistributions();
+  const system = inferCrystalSystem(latticeA);
+  const dist = allDists.find(d => d.system === system) || allDists[0];
+  const wyckoffSites = dist.commonWyckoff;
+
+  if (wyckoffSites.length === 0) {
+    return { positions, snapped: false, snapCount: 0 };
+  }
+
+  const SNAP_THRESHOLD = 0.12;
+  const snappedPositions = positions.map(p => ({ ...p }));
+  let snapCount = 0;
+
+  for (let i = 0; i < snappedPositions.length; i++) {
+    const pos = snappedPositions[i];
+    const pref = getElementSitePreference(pos.element);
+    let bestDist = Infinity;
+    let bestSite: { typicalX: number; typicalY: number; typicalZ: number } | null = null;
+
+    for (const site of wyckoffSites) {
+      if (pref && !pref.preferredWyckoff.includes(site.letter)) continue;
+
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let oz = -1; oz <= 1; oz++) {
+            const sx = site.typicalX + ox;
+            const sy = site.typicalY + oy;
+            const sz = site.typicalZ + oz;
+            const dx = pos.x - sx;
+            const dy = pos.y - sy;
+            const dz = pos.z - sz;
+            const dist2 = dx * dx + dy * dy + dz * dz;
+            if (dist2 < bestDist) {
+              bestDist = dist2;
+              bestSite = { typicalX: site.typicalX, typicalY: site.typicalY, typicalZ: site.typicalZ };
+            }
+          }
+        }
+      }
+    }
+
+    if (!bestSite) {
+      for (const site of wyckoffSites) {
+        for (let ox = -1; ox <= 1; ox++) {
+          for (let oy = -1; oy <= 1; oy++) {
+            for (let oz = -1; oz <= 1; oz++) {
+              const sx = site.typicalX + ox;
+              const sy = site.typicalY + oy;
+              const sz = site.typicalZ + oz;
+              const dx = pos.x - sx;
+              const dy = pos.y - sy;
+              const dz = pos.z - sz;
+              const dist2 = dx * dx + dy * dy + dz * dz;
+              if (dist2 < bestDist) {
+                bestDist = dist2;
+                bestSite = { typicalX: site.typicalX, typicalY: site.typicalY, typicalZ: site.typicalZ };
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const snapDist = Math.sqrt(bestDist);
+    if (bestSite && snapDist < SNAP_THRESHOLD && snapDist > 0.001) {
+      const blend = 0.7;
+      pos.x = pos.x * (1 - blend) + bestSite.typicalX * blend;
+      pos.y = pos.y * (1 - blend) + bestSite.typicalY * blend;
+      pos.z = pos.z * (1 - blend) + bestSite.typicalZ * blend;
+
+      pos.x -= Math.floor(pos.x);
+      pos.y -= Math.floor(pos.y);
+      pos.z -= Math.floor(pos.z);
+      snapCount++;
+    }
+  }
+
+  return { positions: snappedPositions, snapped: snapCount > 0, snapCount };
+}
+
+function hasHighSymmetry(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+): boolean {
+  if (positions.length <= 2) return true;
+
+  let highSymCount = 0;
+  const highSymCoords = [0, 0.25, 0.5, 0.75, 1/3, 2/3];
+  for (const pos of positions) {
+    const isHighSym = [pos.x, pos.y, pos.z].every(c => {
+      return highSymCoords.some(h => Math.abs(c - h) < 0.05 || Math.abs(c - (1 - h)) < 0.05);
+    });
+    if (isHighSym) highSymCount++;
+  }
+  return highSymCount / positions.length >= 0.3;
+}
+
 function generateHydrideCagePositions(
   metalElements: string[],
   counts: Record<string, number>,
@@ -2019,6 +2124,20 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       positions = initRepair.positions;
       latticeA = initRepair.latticeA;
       console.log(`[QE-Worker] Repaired initial geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
+    }
+
+    if (!hasHighSymmetry(positions) && positions.length >= 3) {
+      const snapResult = snapToWyckoffSites(positions, latticeA);
+      if (snapResult.snapped) {
+        positions = snapResult.positions;
+        console.log(`[QE-Worker] Wyckoff-snapped ${snapResult.snapCount}/${positions.length} atoms for ${formula} (helps DFT convergence)`);
+
+        const postSnapRepair = repairStructureGeometry(positions, latticeA, workerPressure);
+        if (postSnapRepair.repaired) {
+          positions = postSnapRepair.positions;
+          latticeA = postSnapRepair.latticeA;
+        }
+      }
     }
 
     const preXtbFingerprint = computeStructureFingerprint(positions, latticeA);
