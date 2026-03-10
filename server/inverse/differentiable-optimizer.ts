@@ -174,12 +174,14 @@ function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: Synth
     omegaLog *= effects.omegaLogModifier;
   }
 
-  const omegaLogK = omegaLog * 1.44;
+  const omegaLogK = omegaLog * 1.4388;
   const denom = lambda - coupling.muStar * (1 + 0.62 * lambda);
   let tc = 0;
-  if (Math.abs(denom) > 1e-6 && lambda > 0.2) {
+  if (Math.abs(denom) > 1e-6 && denom > 0 && lambda > 0.2) {
+    const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
+    const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
     const exponent = -1.04 * (1 + lambda) / denom;
-    tc = (omegaLogK / 1.2) * Math.exp(exponent);
+    tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
     if (!Number.isFinite(tc) || tc < 0) tc = 0;
   }
 
@@ -225,7 +227,7 @@ function computeAnalyticMcMillanGradients(
   omegaLog: number,
   muStar: number
 ): { dTc_dLambda: number; dTc_dOmegaLog: number; dTc_dMuStar: number } {
-  const omegaLogK = omegaLog * 1.44;
+  const omegaLogK = omegaLog * 1.4388;
   if (lambda < 0.2 || omegaLogK < 1) {
     return { dTc_dLambda: 0, dTc_dOmegaLog: 0, dTc_dMuStar: 0 };
   }
@@ -235,9 +237,12 @@ function computeAnalyticMcMillanGradients(
     return { dTc_dLambda: 0, dTc_dOmegaLog: 0, dTc_dMuStar: 0 };
   }
 
+  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+
   const exponentArg = -1.04 * (1 + lambda) / denomLambda;
   const prefactor = omegaLogK / 1.2;
-  const tc = prefactor * Math.exp(exponentArg);
+  const tc = prefactor * f1 * Math.exp(exponentArg);
   if (!Number.isFinite(tc) || tc <= 0) {
     return { dTc_dLambda: 0, dTc_dOmegaLog: 0, dTc_dMuStar: 0 };
   }
@@ -248,7 +253,9 @@ function computeAnalyticMcMillanGradients(
   const dDenom_dLambda = 1 - 0.62 * muStar;
   const dNumerator_dLambda = -1.04;
   const dExponent_dLambda = (dNumerator_dLambda * denomLambda - numerator * dDenom_dLambda) / (denomLambda * denomLambda);
-  const dTc_dLambda = tc * dExponent_dLambda;
+  const df1_dLambda = (1 / 3) * Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), -2 / 3) *
+    (3 / 2) * Math.pow(lambda / lambdaBar, 1 / 2) * (1 / lambdaBar);
+  const dTc_dLambda = tc * dExponent_dLambda + prefactor * df1_dLambda * Math.exp(exponentArg);
 
   const dDenom_dMuStar = -(1 + 0.62 * lambda);
   const dExponent_dMuStar = (-numerator * dDenom_dMuStar) / (denomLambda * denomLambda);

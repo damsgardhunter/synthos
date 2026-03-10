@@ -990,12 +990,14 @@ function evaluateCandidate(formula: string): { tc: number; lambda: number; gbTc:
     const phonon = computePhononSpectrum(formula, electronic);
     const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
 
-    const omegaLogK = coupling.omegaLog * 1.44;
+    const omegaLogK = coupling.omegaLog * 1.4388;
     const denom = coupling.lambda - coupling.muStar * (1 + 0.62 * coupling.lambda);
     let tc = 0;
-    if (Math.abs(denom) > 1e-6 && coupling.lambda > 0.2) {
+    if (Math.abs(denom) > 1e-6 && denom > 0 && coupling.lambda > 0.2) {
+      const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
+      const f1 = Math.pow(1 + Math.pow(coupling.lambda / lambdaBar, 3 / 2), 1 / 3);
       const exponent = -1.04 * (1 + coupling.lambda) / denom;
-      tc = (omegaLogK / 1.2) * Math.exp(exponent);
+      tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
       if (!Number.isFinite(tc) || tc < 0) tc = 0;
     }
     if (electronic.metallicity < 0.4) {

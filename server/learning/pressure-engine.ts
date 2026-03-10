@@ -438,13 +438,12 @@ export function scanPressureTcCurve(
     }
     omegaLogP = Math.max(30, Math.min(2000, omegaLogP));
 
-    const omegaLogK = omegaLogP * 1.44;
+    const omegaLogK = omegaLogP * 1.4388;
     const denom = lambdaP - muStar * (1 + 0.62 * lambdaP);
     let Tc = 0;
     if (denom > 0.001) {
-      const f1 = lambdaP < 1.5
-        ? Math.pow(1 + (lambdaP / 2.46 / (1 + 3.8 * muStar)), 1 / 3)
-        : Math.pow(1 + Math.pow(lambdaP / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
+      const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+      const f1 = Math.pow(1 + Math.pow(lambdaP / lambdaBar, 3 / 2), 1 / 3);
       const exponent = -1.04 * (1 + lambdaP) / denom;
       if (exponent > 50) { Tc = 0; } else {
         Tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);

@@ -400,7 +400,9 @@ export function simulateIntervention(
     const muEff = muStar * (1 + 0.62 * lam);
     const denom = lam - muEff;
     if (denom > 0.05) {
-      tcNew = (omega * 1.44 / 1.2) * Math.exp(-1.04 * (1 + lam) / denom);
+      const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+      const f1 = Math.pow(1 + Math.pow(lam / lambdaBar, 3 / 2), 1 / 3);
+      tcNew = (omega * 1.4388 / 1.2) * f1 * Math.exp(-1.04 * (1 + lam) / denom);
       tcNew = Math.max(0, Math.min(400, tcNew));
     }
   }
@@ -824,7 +826,9 @@ export function generateCausalDataset(count: number = 60): CausalDataRecord[] {
         const muEff = muStar * (1 + 0.62 * lam);
         const denom = lam - muEff;
         if (denom > 0.05) {
-          rec.Tc = (omega * 1.44 / 1.2) * Math.exp(-1.04 * (1 + lam) / denom);
+          const lambdaBar2 = 2.46 * (1 + 3.8 * (muStar as number));
+          const f1r = Math.pow(1 + Math.pow(lam / lambdaBar2, 3 / 2), 1 / 3);
+          rec.Tc = (omega * 1.4388 / 1.2) * f1r * Math.exp(-1.04 * (1 + lam) / denom);
           rec.Tc = Math.max(0, Math.min(300, rec.Tc as number)) + (Math.random() - 0.5) * 2;
         }
       }
@@ -844,7 +848,9 @@ export function generateCausalDataset(count: number = 60): CausalDataRecord[] {
     const denom = lambda - muEff;
     let Tc = 0;
     if (denom > 0.05) {
-      Tc = (omega * 1.44 / 1.2) * Math.exp(-1.04 * (1 + lambda) / denom);
+      const lambdaBarS = 2.46 * (1 + 3.8 * muStar);
+      const f1s = Math.pow(1 + Math.pow(lambda / lambdaBarS, 3 / 2), 1 / 3);
+      Tc = (omega * 1.4388 / 1.2) * f1s * Math.exp(-1.04 * (1 + lambda) / denom);
       Tc = Math.max(0, Math.min(300, Tc));
     }
     Tc += (Math.random() - 0.5) * 5;

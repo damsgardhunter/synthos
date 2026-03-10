@@ -618,13 +618,15 @@ function invertMcMillanLambda(tc: number, thetaD: number, muStar: number): numbe
   if (tc <= 0 || thetaD <= 0) return 0;
   const omegaLogK = thetaD * 0.60;
   let lambdaLow = 0.05;
-  let lambdaHigh = 4.0;
-  for (let i = 0; i < 50; i++) {
+  let lambdaHigh = 6.0;
+  for (let i = 0; i < 80; i++) {
     const lambdaMid = (lambdaLow + lambdaHigh) / 2;
     const denom = lambdaMid - muStar * (1 + 0.62 * lambdaMid);
     if (denom <= 0) { lambdaLow = lambdaMid; continue; }
+    const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+    const f1 = Math.pow(1 + Math.pow(lambdaMid / lambdaBar, 3 / 2), 1 / 3);
     const exponent = -1.04 * (1 + lambdaMid) / denom;
-    const tcCalc = (omegaLogK / 1.2) * Math.exp(exponent);
+    const tcCalc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
     if (tcCalc < tc) lambdaLow = lambdaMid;
     else lambdaHigh = lambdaMid;
   }
@@ -1576,9 +1578,9 @@ export function computeElectronPhononCoupling(
 
   const omegaLogRange = getOmegaLogRangeForClass(matClass);
   let clampedOmegaLog = omega_log;
-  const omegaLogK = omega_log * 1.44;
-  if (omegaLogK < omegaLogRange[0]) clampedOmegaLog = omegaLogRange[0] / 1.44;
-  if (omegaLogK > omegaLogRange[1]) clampedOmegaLog = omegaLogRange[1] / 1.44;
+  const omegaLogK = omega_log * 1.4388;
+  if (omegaLogK < omegaLogRange[0]) clampedOmegaLog = omegaLogRange[0] / 1.4388;
+  if (omegaLogK > omegaLogRange[1]) clampedOmegaLog = omegaLogRange[1] / 1.4388;
 
   const formulaCounts = formula ? parseFormulaCounts(formula) : {};
   const formulaElements = formula ? parseFormulaElements(formula) : [];
@@ -1634,7 +1636,7 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
 
   const lambda = effectiveLambda;
   const omegaLog = effectiveOmegaLog;
-  const omegaLogK = omegaLog * 1.44;
+  const omegaLogK = omegaLog * 1.4388;
 
   let tc: number;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
@@ -1723,7 +1725,7 @@ export interface TcWithUncertainty {
 }
 
 function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number): number {
-  const omegaLogK = omegaLog * 1.44;
+  const omegaLogK = omegaLog * 1.4388;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denominator) < 1e-6 || denominator <= 0) return 0;
 

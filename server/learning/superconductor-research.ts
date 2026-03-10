@@ -469,13 +469,15 @@ Return JSON with 'candidates' array:
           const penalty = featureLambda < 0.5 ? 0.15 : featureLambda < 1.0 ? 0.25 : 0.3;
           cappedTc = Math.round(cappedTc * penalty);
         }
-        const omegaLogK = (features.logPhononFreq ?? 300) * 1.44;
+        const omegaLogK = (features.logPhononFreq ?? 300) * 1.4388;
         const muStar = 0.12;
         let mcMillanMax = 0;
         const denom = featureLambda - muStar * (1 + 0.62 * featureLambda);
-        if (featureLambda > 0.2 && Math.abs(denom) > 1e-6) {
+        if (featureLambda > 0.2 && Math.abs(denom) > 1e-6 && denom > 0) {
+          const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+          const f1 = Math.pow(1 + Math.pow(featureLambda / lambdaBar, 3 / 2), 1 / 3);
           const exponent = -1.04 * (1 + featureLambda) / denom;
-          mcMillanMax = (omegaLogK / 1.2) * Math.exp(exponent);
+          mcMillanMax = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
           if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
         }
 

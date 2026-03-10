@@ -1098,7 +1098,9 @@ export function generateSyntheticDataset(count: number = 50): PhysicsDiscoveryRe
         const muEff = rec.mu_star * (1 + 0.62 * rec.lambda);
         const denom = rec.lambda - muEff;
         if (denom > 0.05) {
-          rec.Tc = (rec.omega_log * 1.44 / 1.2) * Math.exp(-1.04 * (1 + rec.lambda) / denom);
+          const lambdaBarR = 2.46 * (1 + 3.8 * rec.mu_star);
+          const f1r = Math.pow(1 + Math.pow(rec.lambda / lambdaBarR, 3 / 2), 1 / 3);
+          rec.Tc = (rec.omega_log * 1.4388 / 1.2) * f1r * Math.exp(-1.04 * (1 + rec.lambda) / denom);
           rec.Tc = Math.max(0, Math.min(300, rec.Tc)) + (Math.random() - 0.5) * 2;
         }
       }
@@ -1117,7 +1119,9 @@ export function generateSyntheticDataset(count: number = 50): PhysicsDiscoveryRe
     const denom = lambda - muEff;
     let Tc = 0;
     if (denom > 0.05) {
-      Tc = (omega_log * 1.44 / 1.2) * Math.exp(-1.04 * (1 + lambda) / denom);
+      const lambdaBarS = 2.46 * (1 + 3.8 * mu_star);
+      const f1s = Math.pow(1 + Math.pow(lambda / lambdaBarS, 3 / 2), 1 / 3);
+      Tc = (omega_log * 1.4388 / 1.2) * f1s * Math.exp(-1.04 * (1 + lambda) / denom);
       Tc = Math.max(0, Math.min(300, Tc));
     }
     Tc += (Math.random() - 0.5) * 5;

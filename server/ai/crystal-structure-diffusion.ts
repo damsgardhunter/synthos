@@ -763,11 +763,20 @@ export function runCrystalDiffusionCycle(
 
         if (coupling.lambda > 0.2) {
           lambda = coupling.lambda;
-          const omegaLogK = coupling.omegaLog * 1.44;
+          const omegaLogK = coupling.omegaLog * 1.4388;
           const denom = lambda - coupling.muStar * (1 + 0.62 * lambda);
-          if (Math.abs(denom) > 1e-6) {
+          if (Math.abs(denom) > 1e-6 && denom > 0) {
+            const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
+            const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+            let f2 = 1.0;
+            if (coupling.omega2Avg > 0 && coupling.omegaLog > 0) {
+              const omegaRatio = Math.sqrt(coupling.omega2Avg) / coupling.omegaLog;
+              const Lambda2 = 1.82 * (1 + 6.3 * coupling.muStar) * omegaRatio;
+              f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+              f2 = Math.max(0.8, f2);
+            }
             const exponent = -1.04 * (1 + lambda) / denom;
-            const mcmillanTc = (omegaLogK / 1.2) * Math.exp(exponent);
+            const mcmillanTc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
             if (Number.isFinite(mcmillanTc) && mcmillanTc > 0) {
               predictedTc = Math.max(predictedTc, mcmillanTc);
             }
@@ -1018,11 +1027,20 @@ export function runDistributionBasedDiffusion(
 
         if (coupling.lambda > 0.2) {
           lambda = coupling.lambda;
-          const omegaLogK = coupling.omegaLog * 1.44;
+          const omegaLogK = coupling.omegaLog * 1.4388;
           const denom = lambda - coupling.muStar * (1 + 0.62 * lambda);
-          if (Math.abs(denom) > 1e-6) {
+          if (Math.abs(denom) > 1e-6 && denom > 0) {
+            const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
+            const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+            let f2 = 1.0;
+            if (coupling.omega2Avg > 0 && coupling.omegaLog > 0) {
+              const omegaRatio = Math.sqrt(coupling.omega2Avg) / coupling.omegaLog;
+              const Lambda2 = 1.82 * (1 + 6.3 * coupling.muStar) * omegaRatio;
+              f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+              f2 = Math.max(0.8, f2);
+            }
             const exponent = -1.04 * (1 + lambda) / denom;
-            const mcmillanTc = (omegaLogK / 1.2) * Math.exp(exponent);
+            const mcmillanTc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
             if (Number.isFinite(mcmillanTc) && mcmillanTc > 0) {
               predictedTc = Math.max(predictedTc, mcmillanTc);
             }

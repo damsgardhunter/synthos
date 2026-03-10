@@ -321,7 +321,7 @@ function computeAllenDynesTc(
   omega2: number,
   muStar: number
 ): AllenDynesResult {
-  const omegaLogK = omegaLog * 1.44;
+  const omegaLogK = omegaLog * 1.4388;
 
   let regime: "weak" | "intermediate" | "strong" | "very-strong" = "weak";
   if (lambda > 2.5) regime = "very-strong";
@@ -496,7 +496,7 @@ function computeIsotopeEffect(
   }
 
   const massRatio = 2.0;
-  const isotopeTcShift = alpha * Math.log(massRatio) * alpha2FSpec.omegaLog * 1.44 / 1.2;
+  const isotopeTcShift = alpha * Math.log(massRatio) * alpha2FSpec.omegaLog * 1.4388 / 1.2;
 
   return {
     alpha: Number(Math.max(0, Math.min(0.5, alpha)).toFixed(4)),
@@ -560,7 +560,7 @@ export function runEliashbergPipeline(
   const gapSolution = solveEliashbergGapEquation(
     alpha2FSpec,
     muStar,
-    allenDynes.tc > 0 ? allenDynes.tc : coupling.omegaLog * 1.44 / 10
+    allenDynes.tc > 0 ? allenDynes.tc : coupling.omegaLog * 1.4388 / 10
   );
 
   const tcBest = Math.max(allenDynes.tc, gapSolution.tc);

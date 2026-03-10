@@ -649,7 +649,7 @@ export function evaluatePillars(
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
 
   const lambda = coupling.lambda;
-  const omegaLogK = coupling.omegaLog * 1.44;
+  const omegaLogK = coupling.omegaLog * 1.4388;
   const dos = electronic.densityOfStatesAtFermi;
   const nestingScore = electronic.nestingScore ?? 0;
   const flatBandScore = electronic.flatBandIndicator ?? 0;

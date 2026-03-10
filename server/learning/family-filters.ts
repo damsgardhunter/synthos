@@ -198,8 +198,10 @@ function applyHydrideFilter(formula: string, features: MLFeatureVector): FamilyF
   if (lambda > 0 && features.logPhononFreq > 0) {
     const denom = lambda - muStar * (1 + 0.62 * lambda);
     if (denom > 0) {
+      const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+      const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
       const exponent = -1.04 * (1 + lambda) / denom;
-      const tcMcMillan = (features.logPhononFreq / 1.2) * Math.exp(exponent);
+      const tcMcMillan = (features.logPhononFreq / 1.2) * f1 * Math.exp(exponent);
       score += 0.10;
       reasons.push(`McMillan Tc estimate (mu*=0.10) ~ ${tcMcMillan.toFixed(1)} K`);
     }

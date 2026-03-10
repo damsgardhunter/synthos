@@ -96,12 +96,8 @@ interface SweepPoint {
 function mcMillanTc(lambda: number, omegaLogK: number, muStar: number): number {
   const denom = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denom) < 1e-6 || denom <= 0) return 0;
-  let f1: number;
-  if (lambda < 1.5) {
-    f1 = Math.pow(1 + lambda / (2.46 * (1 + 3.8 * muStar)), 1 / 3);
-  } else {
-    f1 = Math.sqrt(1 + lambda / 2.46);
-  }
+  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
   const exponent = -1.04 * (1 + lambda) / denom;
   const tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   return Number.isFinite(tc) && tc > 0 ? tc : 0;
@@ -756,7 +752,7 @@ export function evaluateFormulaAgainstConstraints(
     const electronic = computeElectronicStructure(formula, null);
     const phonon = computePhononSpectrum(formula, electronic);
     const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
-    const omegaLogK = coupling.omegaLog * 1.44;
+    const omegaLogK = coupling.omegaLog * 1.4388;
 
     const satisfiesLambda = coupling.lambda >= solution.requiredLambda.min * 0.8 &&
       coupling.lambda <= solution.requiredLambda.max * 1.2;

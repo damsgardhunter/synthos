@@ -296,13 +296,12 @@ export function searchPressurePathways(
       const electronic = computeElectronicStructure(strategy.formula, null);
       const phonon = computePhononSpectrum(strategy.formula, electronic);
       const coupling = computeElectronPhononCoupling(electronic, phonon, strategy.formula, 0);
-      const omegaLogK = coupling.omegaLog * 1.44;
+      const omegaLogK = coupling.omegaLog * 1.4388;
       const denom = coupling.lambda - coupling.muStar * (1 + 0.62 * coupling.lambda);
 
       if (Math.abs(denom) > 1e-6 && denom > 0 && coupling.lambda > 0.2) {
-        const f1 = coupling.lambda < 1.5
-          ? Math.pow(1 + coupling.lambda / (2.46 * (1 + 3.8 * coupling.muStar)), 1 / 3)
-          : Math.sqrt(1 + coupling.lambda / 2.46);
+        const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
+        const f1 = Math.pow(1 + Math.pow(coupling.lambda / lambdaBar, 3 / 2), 1 / 3);
         const physicsTc = (omegaLogK / 1.2) * f1 * Math.exp(-1.04 * (1 + coupling.lambda) / denom);
 
         if (Number.isFinite(physicsTc) && physicsTc > 0) {

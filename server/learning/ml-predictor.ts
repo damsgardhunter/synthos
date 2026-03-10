@@ -1036,13 +1036,15 @@ export async function runMLPrediction(
       const featureLambda = xgb.features.electronPhononLambda ?? 0;
       const featureMetal = xgb.features.metallicity ?? 0.5;
       const featureCorr = xgb.features.correlationStrength ?? 0;
-      const omegaLogK = (xgb.features.logPhononFreq ?? 300) * 1.44;
+      const omegaLogK = (xgb.features.logPhononFreq ?? 300) * 1.4388;
       const muStar = 0.12;
       let mcMillanMax = 0;
       const denomMcM = featureLambda - muStar * (1 + 0.62 * featureLambda);
-      if (featureLambda > 0.2 && Math.abs(denomMcM) > 1e-6) {
+      if (featureLambda > 0.2 && Math.abs(denomMcM) > 1e-6 && denomMcM > 0) {
+        const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+        const f1 = Math.pow(1 + Math.pow(featureLambda / lambdaBar, 3 / 2), 1 / 3);
         const exponent = -1.04 * (1 + featureLambda) / denomMcM;
-        mcMillanMax = (omegaLogK / 1.2) * Math.exp(exponent);
+        mcMillanMax = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
         if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
       }
 
@@ -1140,12 +1142,14 @@ export async function runMLPrediction(
 
         const rawTc = c.xgb.tcEstimate;
         const featureLambda = c.features.electronPhononLambda ?? 0;
-        const omegaLogK = (c.features.logPhononFreq ?? 300) * 1.44;
+        const omegaLogK = (c.features.logPhononFreq ?? 300) * 1.4388;
         const muStar = 0.12;
         let mcMillanMax = 0;
         const denomMcM = featureLambda - muStar * (1 + 0.62 * featureLambda);
-        if (featureLambda > 0.2 && Math.abs(denomMcM) > 1e-6) {
-          mcMillanMax = (omegaLogK / 1.2) * Math.exp(-1.04 * (1 + featureLambda) / denomMcM);
+        if (featureLambda > 0.2 && Math.abs(denomMcM) > 1e-6 && denomMcM > 0) {
+          const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+          const f1 = Math.pow(1 + Math.pow(featureLambda / lambdaBar, 3 / 2), 1 / 3);
+          mcMillanMax = (omegaLogK / 1.2) * f1 * Math.exp(-1.04 * (1 + featureLambda) / denomMcM);
           if (mcMillanMax < 0 || !isFinite(mcMillanMax)) mcMillanMax = 0;
         }
         const finalTc = Math.max(0, Math.min(rawTc, mcMillanMax > 0 ? Math.max(rawTc * 0.7, mcMillanMax * 1.5) : rawTc));

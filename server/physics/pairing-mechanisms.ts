@@ -136,26 +136,42 @@ export function computePhononPairing(
   coupling: ElectronPhononCoupling,
 ): PhononPairingResult {
   const lambda = coupling.lambda;
-  const omegaLogK = coupling.omegaLog * 1.44;
+  const omegaLogK = coupling.omegaLog * 1.4388;
   const muStar = coupling.muStar;
 
   let tcAllenDynes = 0;
   const allenDynesDenom = lambda - muStar * (1 + 0.62 * lambda);
   if (allenDynesDenom > 1e-6) {
-    const prefactor = omegaLogK / 1.2;
+    const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+    const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+
+    let f2 = 1.0;
+    if (coupling.omegaLog > 0) {
+      const omega2Avg = coupling.omega2Avg;
+      if (omega2Avg > 0) {
+        const sqrtOmega2 = Math.sqrt(omega2Avg);
+        const omegaRatio = sqrtOmega2 / coupling.omegaLog;
+        const Lambda2 = 1.82 * (1 + 6.3 * muStar) * omegaRatio;
+        f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+        f2 = Math.max(0.8, f2);
+      }
+    }
+
     const exponent = -1.04 * (1 + lambda) / allenDynesDenom;
-    tcAllenDynes = prefactor * Math.exp(exponent);
+    tcAllenDynes = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
     if (!Number.isFinite(tcAllenDynes)) tcAllenDynes = 0;
 
-    if (lambda > 1.5 && coupling.omegaLog > 0) {
-      const omega2Avg = coupling.omega2Avg;
-      const sqrtLambda = Math.sqrt(lambda);
-      const f1 = Math.pow(1 + Math.pow(lambda / (2.46 * (1 + 3.8 * muStar)), 3/2), 1/3);
-      const omegaRatio = omega2Avg > 0 ? Math.sqrt(omega2Avg) / coupling.omegaLog : 1.0;
-      const f2Base = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + 1.6 * (1 + muStar));
-      const f2Exponent = (1 - lambda * lambda) / (1 + lambda * lambda);
-      const f2 = Math.pow(Math.max(0.5, f2Base), f2Exponent);
-      tcAllenDynes *= f1 * Math.max(1, f2);
+    const elements = formula.match(/[A-Z][a-z]*/g) || [];
+    const isHydride = elements.includes("H") && lambda > 1.5;
+    if (isHydride) {
+      const lambdaEff = lambda - muStar * (1 + lambda);
+      if (lambdaEff > 0) {
+        const tcSisso = 0.182 * omegaLogK * Math.pow(lambdaEff, 0.572) *
+          Math.pow(1 + 6.5 * muStar * Math.log(lambda), -0.278);
+        if (Number.isFinite(tcSisso) && tcSisso > tcAllenDynes) {
+          tcAllenDynes = tcSisso;
+        }
+      }
     }
 
     tcAllenDynes = Math.max(0, Math.min(400, tcAllenDynes));

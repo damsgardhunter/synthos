@@ -1080,12 +1080,14 @@ let explorationModeSavedConstraints: { allowBeyondEmpirical: boolean; empiricalP
 
 function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): number {
   if (lambda < 0.05 || omegaLog <= 0) return 0;
-  const omegaLogK = omegaLog * 1.44;
+  const omegaLogK = omegaLog * 1.4388;
   const denom = lambda - muStar * (1 + 0.62 * lambda);
   if (denom <= 1e-6) return 0;
+  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
   const exponent = -1.04 * (1 + lambda) / denom;
   if (exponent > 50) return 0;
-  const tc = (omegaLogK / 1.2) * Math.exp(exponent);
+  const tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   if (!Number.isFinite(tc) || tc < 0) return 0;
   return Math.round(tc);
 }
@@ -6008,13 +6010,15 @@ async function recalculatePhysics() {
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
           const featureLambda = features.electronPhononLambda ?? 0;
-          const omegaLogK = (features.logPhononFreq ?? 300) * 1.44;
+          const omegaLogK = (features.logPhononFreq ?? 300) * 1.4388;
           const muStar = 0.12;
           let mcMillanMax = 0;
           const denom = featureLambda - muStar * (1 + 0.62 * featureLambda);
-          if (featureLambda > 0.2 && Math.abs(denom) > 1e-6) {
+          if (featureLambda > 0.2 && Math.abs(denom) > 1e-6 && denom > 0) {
+            const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+            const f1 = Math.pow(1 + Math.pow(featureLambda / lambdaBar, 3 / 2), 1 / 3);
             const exponent = -1.04 * (1 + featureLambda) / denom;
-            mcMillanMax = (omegaLogK / 1.2) * Math.exp(exponent);
+            mcMillanMax = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
             if (!Number.isFinite(mcMillanMax) || mcMillanMax < 0) mcMillanMax = 0;
           }
 
