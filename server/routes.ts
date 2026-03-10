@@ -148,6 +148,10 @@ import {
 } from "./physics/synthesis-simulator";
 import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
+import {
+  generateDisorderedStructure, generateAllDisorderVariants, suggestDisorders,
+  getDisorderGeneratorStats, type DisorderSpec, type DisorderType,
+} from "./crystal/disorder-generator";
 import { crossEngineHub } from "./learning/cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, getGAEvolutionStats, getStructuralMotifStats } from "./learning/synthesis-discovery";
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
@@ -2521,6 +2525,79 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, defectVariants: withAdjustments });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to generate defect variants", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/disorder-generator/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDisorderGeneratorStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch disorder generator stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/disorder-generator/generate", writeLimiter, (req, res) => {
+    try {
+      const { base, disorder, supercellSize } = req.body;
+      if (!base || !disorder || !disorder.type || !disorder.element) {
+        return res.status(400).json({ error: "Missing required fields: base, disorder.type, disorder.element" });
+      }
+      const validTypes: DisorderType[] = ["vacancy", "substitution", "interstitial", "site-mixing"];
+      if (!validTypes.includes(disorder.type)) {
+        return res.status(400).json({ error: `Invalid disorder type. Must be one of: ${validTypes.join(", ")}` });
+      }
+      const fraction = disorder.fraction ?? 0.05;
+      if (fraction < 0.001 || fraction > 0.30) {
+        return res.status(400).json({ error: "Fraction must be between 0.001 and 0.30" });
+      }
+      const spec: DisorderSpec = {
+        type: disorder.type,
+        element: disorder.element,
+        fraction,
+        substituent: disorder.substituent,
+      };
+      const result = generateDisorderedStructure(base, spec, supercellSize);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate disordered structure", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/disorder-generator/batch", writeLimiter, (req, res) => {
+    try {
+      const { base, fractions } = req.body;
+      if (!base) return res.status(400).json({ error: "Missing required field: base" });
+      const results = generateAllDisorderVariants(base, fractions);
+      res.json({
+        base,
+        totalVariants: results.length,
+        variants: results.map(r => ({
+          type: r.disorder.type,
+          element: r.disorder.element,
+          substituent: r.disorder.substituent,
+          fraction: r.disorder.fraction,
+          totalAtoms: r.totalAtoms,
+          defectCount: r.defectCount,
+          defectFraction: r.defectFraction,
+          formationEnergy: r.formationEnergyEstimate,
+          tcModifier: r.tcModifierEstimate,
+          notes: r.notes,
+        })),
+        bestVariant: results.length > 0 ?
+          results.reduce((best, r) => r.tcModifierEstimate > best.tcModifierEstimate ? r : best) : null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate batch disorder variants", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/disorder-generator/suggest/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const suggestions = suggestDisorders(formula);
+      res.json({ formula, suggestions });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to suggest disorders", detail: e.message?.slice(0, 200) });
     }
   });
 

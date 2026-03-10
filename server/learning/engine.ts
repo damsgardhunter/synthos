@@ -93,6 +93,7 @@ import {
 } from "../physics/synthesis-simulator";
 import { recordSynthesisResult, getSynthesisLearningStats } from "../synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "../physics/defect-engine";
+import { generateAllDisorderVariants, suggestDisorders } from "../crystal/disorder-generator";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "../physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "../synthesis/crystal-growth-simulator";
 import { getExperimentPlannerStats, generateExperimentPlan, type ExperimentCandidate } from "../experiment-planner";
@@ -1972,6 +1973,28 @@ async function runPhase10_Physics() {
               }
             }
           } catch (e) { console.error(`[Engine] Phase-10 defect analysis failed for ${candidate.formula}:`, e); }
+
+          try {
+            const suggestions = suggestDisorders(candidate.formula);
+            if (suggestions.length > 0) {
+              const topSuggestions = suggestions.slice(0, 3);
+              for (const spec of topSuggestions) {
+                const disordered = generateAllDisorderVariants(candidate.formula, [spec.fraction]);
+                const bestDisorder = disordered.reduce((best, d) =>
+                  d.tcModifierEstimate > (best?.tcModifierEstimate ?? 0) ? d : best, disordered[0]);
+                if (bestDisorder && bestDisorder.tcModifierEstimate > 1.05) {
+                  crossEngineHub.recordInsight("defect", candidate.formula, {
+                    disorderType: bestDisorder.disorder.type,
+                    disorderElement: bestDisorder.disorder.element,
+                    disorderFraction: bestDisorder.disorder.fraction,
+                    tcModifier: bestDisorder.tcModifierEstimate,
+                    defectCount: bestDisorder.defectCount,
+                    totalAtoms: bestDisorder.totalAtoms,
+                  });
+                }
+              }
+            }
+          } catch (e) { console.error(`[Engine] Phase-10 disorder generation failed for ${candidate.formula}:`, e); }
 
           try {
             const corrEffects = estimateCorrelationEffects(candidate.formula, {

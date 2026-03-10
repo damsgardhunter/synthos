@@ -12,7 +12,7 @@ import {
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
-  Cpu, Shield, Activity, Network, GitMerge, GitBranch, Layers, Mountain,
+  Cpu, Shield, Activity, Network, GitMerge, GitBranch, Layers, Mountain, Shuffle,
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line, AreaChart, Area } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
@@ -1156,6 +1156,155 @@ function HeterostructureGeneratorCard() {
                         </span>
                         <span className="text-muted-foreground">{g.orientation}</span>
                         <span className="text-muted-foreground">{g.atoms} atoms</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DisorderGeneratorCard() {
+  const { data: disorderStats, isLoading } = useQuery<{
+    totalGenerated: number;
+    byType: Record<string, number>;
+    avgDefectFraction: number;
+    avgTcModifier: number;
+    bestTcModifier: number;
+    bestFormula: string;
+    bestDisorderType: string;
+    recentGenerations: Array<{
+      base: string;
+      type: string;
+      element: string;
+      fraction: number;
+      defectCount: number;
+      tcModifier: number;
+    }>;
+    topCandidates: Array<{
+      base: string;
+      type: string;
+      element: string;
+      fraction: number;
+      tcModifier: number;
+      formationEnergy: number;
+    }>;
+  }>({ queryKey: ["/api/disorder-generator/stats"], refetchInterval: 30000 });
+
+  const typeColors: Record<string, string> = {
+    vacancy: "text-red-400",
+    substitution: "text-blue-400",
+    interstitial: "text-green-400",
+    "site-mixing": "text-purple-400",
+  };
+
+  const typeLabels: Record<string, string> = {
+    vacancy: "Vac",
+    substitution: "Sub",
+    interstitial: "Int",
+    "site-mixing": "Mix",
+  };
+
+  return (
+    <Card data-testid="card-disorder-generator">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Shuffle className="h-4 w-4 text-orange-400" />
+          Disorder Generator
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            <div className="h-4 bg-muted animate-pulse rounded w-3/4" />
+            <div className="h-4 bg-muted animate-pulse rounded w-1/2" />
+          </div>
+        ) : !disorderStats || disorderStats.totalGenerated === 0 ? (
+          <p className="text-xs text-muted-foreground">No disordered structures generated yet. Creates vacancy, substitution, interstitial, and site-mixing defect variants from base structures.</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-lg font-bold" data-testid="text-disorder-total">{disorderStats.totalGenerated}</div>
+                <div className="text-[10px] text-muted-foreground">Generated</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-orange-400" data-testid="text-disorder-best-tc">
+                  {disorderStats.bestTcModifier > 0 ? `${((disorderStats.bestTcModifier - 1) * 100).toFixed(0)}%` : "0%"}
+                </div>
+                <div className="text-[10px] text-muted-foreground">Best Tc Boost</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-yellow-400" data-testid="text-disorder-avg-frac">
+                  {(disorderStats.avgDefectFraction * 100).toFixed(1)}%
+                </div>
+                <div className="text-[10px] text-muted-foreground">Avg Defect %</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-1">
+              {(["vacancy", "substitution", "interstitial", "site-mixing"] as const).map(t => (
+                <div key={t} className="bg-muted/30 rounded p-1 text-center">
+                  <div className="text-[9px] text-muted-foreground">{typeLabels[t]}</div>
+                  <div className={`text-xs font-bold ${typeColors[t]}`} data-testid={`text-disorder-count-${t}`}>
+                    {disorderStats.byType[t] || 0}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {disorderStats.bestFormula && (
+              <div className="bg-muted/30 rounded p-2">
+                <div className="text-[10px] text-muted-foreground font-medium">Best Candidate</div>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-xs font-mono font-medium" data-testid="text-disorder-best-formula">{disorderStats.bestFormula}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[10px] ${typeColors[disorderStats.bestDisorderType] || "text-muted-foreground"}`}>
+                      {disorderStats.bestDisorderType}
+                    </span>
+                    <span className="text-orange-400 text-[10px]">
+                      +{((disorderStats.bestTcModifier - 1) * 100).toFixed(0)}% Tc
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {disorderStats.topCandidates.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Top Variants</div>
+                <div className="space-y-1 max-h-28 overflow-y-auto">
+                  {disorderStats.topCandidates.slice(0, 5).map((c, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-disorder-top-${i}`}>
+                      <span className="font-mono font-medium">{c.base}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={typeColors[c.type] || "text-muted-foreground"}>{typeLabels[c.type] || c.type}</span>
+                        <span className="text-muted-foreground">{c.element}</span>
+                        <span className="text-muted-foreground">{(c.fraction * 100).toFixed(0)}%</span>
+                        <span className="text-orange-400">Tc:{c.tcModifier.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {disorderStats.recentGenerations.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Recent</div>
+                <div className="space-y-1 max-h-20 overflow-y-auto">
+                  {disorderStats.recentGenerations.slice(0, 4).map((g, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-disorder-recent-${i}`}>
+                      <span className="font-mono font-medium">{g.base}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={typeColors[g.type] || "text-muted-foreground"}>{typeLabels[g.type] || g.type}</span>
+                        <span className="text-muted-foreground">{g.element} {(g.fraction * 100).toFixed(0)}%</span>
+                        <span className="text-muted-foreground">{g.defectCount} defects</span>
                       </div>
                     </div>
                   ))}
@@ -2693,6 +2842,7 @@ export default function Dashboard() {
           <GNNActiveLearningCard />
           <PhysicsUQCard />
           <HeterostructureGeneratorCard />
+          <DisorderGeneratorCard />
           <InterfaceRelaxationCard />
           <DistortionDetectorCard />
           <EnergyLandscapeCard />
