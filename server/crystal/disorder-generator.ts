@@ -3,6 +3,7 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { computeDisorderMetrics, recordMetricsAnalysis, extractMLFeatures, type DisorderMetrics } from "./disorder-metrics";
+import { checkValenceSumRule } from "../physics/advanced-constraints";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -86,6 +87,7 @@ export interface DisorderedStructure {
   metrics?: DisorderMetrics;
   mlFeatures?: Record<string, number>;
   amorphousMethod?: "randomize" | "xtb-md" | null;
+  valenceRejected?: boolean;
 }
 
 export interface DisorderGeneratorStats {
@@ -931,10 +933,26 @@ export function generateDisorderedStructure(
       defectCount = 0;
   }
 
+  const effectiveCounts: Record<string, number> = {};
+  for (const a of resultAtoms) {
+    effectiveCounts[a.element] = (effectiveCounts[a.element] || 0) + 1;
+  }
+  const effectiveFormula = Object.entries(effectiveCounts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([el, n]) => n === 1 ? el : `${el}${n}`)
+    .join("");
+  const valenceCheck = checkValenceSumRule(effectiveFormula);
+  if (!valenceCheck.pass) {
+    console.log(`[DisorderGen] Valence-sum gate rejected disordered ${baseFormula}→${effectiveFormula}: ${valenceCheck.detail}`);
+  }
+
   const formationEnergy = estimateFormationEnergy(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction);
   const tcModifier = estimateTcModifier(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction, baseFormula);
   const defectFraction = defectCount / Math.max(1, pristineAtoms.length);
-  const notes = generateNotes(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction, tcModifier, baseFormula);
+  let notes = generateNotes(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction, tcModifier, baseFormula);
+  if (!valenceCheck.pass) {
+    notes += ` VALENCE-SUM-REJECTED: ${valenceCheck.detail}`;
+  }
 
   const metrics = computeDisorderMetrics(resultAtoms);
   const mlFeatures = extractMLFeatures(metrics);
@@ -958,6 +976,7 @@ export function generateDisorderedStructure(
     metrics,
     mlFeatures,
     amorphousMethod: amorphousMethod || null,
+    valenceRejected: !valenceCheck.pass,
   };
 
   updateStats(result);
@@ -1042,7 +1061,11 @@ export function generateAllDisorderVariants(
     typesUsed.add("amorphous");
   }
 
-  return results;
+  const valenceFiltered = results.filter(r => !r.valenceRejected);
+  if (valenceFiltered.length < results.length) {
+    console.log(`[DisorderGen] Valence-sum gate filtered ${results.length - valenceFiltered.length}/${results.length} disordered variants of ${baseFormula}`);
+  }
+  return valenceFiltered;
 }
 
 export function suggestDisorders(baseFormula: string): DisorderSpec[] {

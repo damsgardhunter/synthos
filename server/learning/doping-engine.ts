@@ -4,6 +4,7 @@ import { getElementData, getStonerParameter } from "./elemental-data";
 import { runXTBOptimization, runXTBPhononCheck, runXTBAnharmonicProbe, runXTBMDSampling, type PhononStability, type AnharmonicProbeResult, type MDSamplingRawResult } from "../dft/qe-dft-engine";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty } from "./gradient-boost";
+import { checkValenceSumRule } from "../physics/advanced-constraints";
 
 export type DopingCharacter = "electron" | "hole" | "isovalent" | "vacancy-hole" | "interstitial-electron";
 
@@ -1441,11 +1442,20 @@ export function generateDopedVariants(
 
   const seen = new Set<string>();
   seen.add(normalizeFormula(formula));
+  let valenceRejected = 0;
   const unique = allVariants.filter(v => {
     if (seen.has(v.resultFormula)) return false;
     seen.add(v.resultFormula);
+    const valenceCheck = checkValenceSumRule(v.resultFormula);
+    if (!valenceCheck.pass) {
+      valenceRejected++;
+      return false;
+    }
     return true;
   });
+  if (valenceRejected > 0) {
+    console.log(`[Doping] Valence-sum gate rejected ${valenceRejected} variants from ${formula}`);
+  }
 
   stats.totalBaseMaterials++;
   stats.totalVariantsGenerated += unique.length;

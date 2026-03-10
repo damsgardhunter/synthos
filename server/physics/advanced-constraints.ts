@@ -1,4 +1,170 @@
 import type { ElectronicStructure, PhononSpectrum, ElectronPhononCoupling, NestingFunctionData, DynamicSpinSusceptibility } from "../learning/physics-engine";
+import { predictDOS, detectVanHoveSingularities, type VanHoveSingularity } from "./dos-surrogate";
+
+function parseFormulaCounts(formula: string): Record<string, number> {
+  const cleaned = formula
+    .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
+    .replace(/\s+/g, "");
+  const counts: Record<string, number> = {};
+  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let match;
+  while ((match = regex.exec(cleaned)) !== null) {
+    const el = match[1];
+    const num = match[2] ? parseFloat(match[2]) : 1;
+    if (num > 0) counts[el] = (counts[el] || 0) + num;
+  }
+  return counts;
+}
+
+const VALENCE_OXIDATION_STATES: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  Sc: [3], Y: [3], La: [3],
+  Ti: [2, 3, 4], Zr: [4], Hf: [4],
+  V: [2, 3, 4, 5], Nb: [3, 5], Ta: [5],
+  Cr: [2, 3, 6], Mo: [4, 6], W: [4, 6],
+  Mn: [2, 3, 4, 7], Re: [4, 7],
+  Fe: [2, 3], Ru: [3, 4], Os: [4],
+  Co: [2, 3], Rh: [3], Ir: [3, 4],
+  Ni: [2, 3], Pd: [2, 4], Pt: [2, 4],
+  Cu: [1, 2], Ag: [1], Au: [1, 3],
+  Zn: [2], Cd: [2],
+  B: [3], Al: [3], Ga: [3], In: [3], Tl: [1, 3],
+  C: [4, -4], Si: [4, -4], Ge: [4], Sn: [2, 4], Pb: [2, 4],
+  N: [-3, 3, 5], P: [-3, 3, 5], As: [-3, 3, 5], Sb: [3, 5], Bi: [3, 5],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4, 6], Te: [-2, 4, 6],
+  F: [-1], Cl: [-1, 1, 3, 5, 7], Br: [-1, 1, 3, 5], I: [-1, 1, 3, 5, 7],
+  Ce: [3, 4], Pr: [3, 4], Nd: [3], Sm: [2, 3], Eu: [2, 3], Gd: [3],
+  Tb: [3, 4], Dy: [3], Ho: [3], Er: [3], Tm: [3], Yb: [2, 3], Lu: [3],
+  Th: [4], U: [3, 4, 5, 6],
+};
+
+export interface ValenceSumResult {
+  pass: boolean;
+  imbalance: number;
+  bestAssignment: Record<string, number>;
+  detail: string;
+}
+
+export function checkValenceSumRule(formula: string): ValenceSumResult {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  if (elements.length === 0) {
+    return { pass: true, imbalance: 0, bestAssignment: {}, detail: "empty formula" };
+  }
+
+  const metalloids = new Set(["B", "Si", "Ge", "As", "Sb", "Te"]);
+  const isMetalOrMetalloid = (el: string): boolean => {
+    if (el === "H") return true;
+    if (metalloids.has(el)) return true;
+    const d = getElementDataSafe(el);
+    if (!d) return false;
+    if (d.group >= 3 && d.group <= 12) return true;
+    if (d.group === 1 || d.group === 2) return true;
+    if (d.group === 13 && !["B"].includes(el)) return true;
+    return false;
+  };
+
+  const hasHighENAnion = elements.some(el => {
+    if (el === "H") return false;
+    const af = ELECTRON_AFFINITIES[el];
+    return af !== undefined && af > 100;
+  });
+
+  if (elements.every(isMetalOrMetalloid) && !hasHighENAnion) {
+    const assignment: Record<string, number> = {};
+    elements.forEach(el => assignment[el] = 0);
+    return { pass: true, imbalance: 0, bestAssignment: assignment, detail: "all-metallic, no ionic bonding expected" };
+  }
+
+  const oxStates = elements.map(el => VALENCE_OXIDATION_STATES[el] || [0]);
+  let bestImbalance = Infinity;
+  let bestAssignment: Record<string, number> = {};
+
+  function search(idx: number, assignment: Record<string, number>, currentSum: number) {
+    if (idx === elements.length) {
+      const imb = Math.abs(currentSum);
+      if (imb < bestImbalance) {
+        bestImbalance = imb;
+        bestAssignment = { ...assignment };
+      }
+      return;
+    }
+    const el = elements[idx];
+    const count = counts[el];
+    for (const ox of oxStates[idx]) {
+      assignment[el] = ox;
+      search(idx + 1, assignment, currentSum + ox * count);
+    }
+  }
+
+  search(0, {}, 0);
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const normalizedImbalance = totalAtoms > 0 ? bestImbalance / totalAtoms : bestImbalance;
+
+  const pass = normalizedImbalance <= 0.5;
+
+  const assignStr = Object.entries(bestAssignment)
+    .map(([el, ox]) => `${el}(${ox > 0 ? "+" : ""}${ox})`)
+    .join(", ");
+  const detail = pass
+    ? `Valence-sum OK: imbalance=${normalizedImbalance.toFixed(3)}/atom [${assignStr}]`
+    : `Valence-sum REJECTED: imbalance=${normalizedImbalance.toFixed(3)}/atom > 0.5 [${assignStr}]`;
+
+  return { pass, imbalance: normalizedImbalance, bestAssignment, detail };
+}
+
+export interface LifshitzStabilityResult {
+  hasLifshitzSpike: boolean;
+  spikeStrength: number;
+  dynamicallyUnstable: boolean;
+  stabilityPenalty: number;
+  detail: string;
+}
+
+export function assessLifshitzStability(
+  formula: string,
+  phonon: PhononSpectrum | null,
+): LifshitzStabilityResult {
+  let dosResult;
+  try {
+    dosResult = predictDOS(formula);
+  } catch {
+    return { hasLifshitzSpike: false, spikeStrength: 0, dynamicallyUnstable: false, stabilityPenalty: 0, detail: "DOS prediction failed" };
+  }
+
+  const vhsSingularities = dosResult.vanHoveSingularities;
+  const fermiIdx = dosResult.orbitalDOS.fermiIndex;
+  const nearFermiSpikes = vhsSingularities.filter(s => {
+    const dist = Math.abs(s.binIndex - fermiIdx);
+    return dist <= 4 && s.strength > 0.3;
+  });
+
+  const hasLifshitzSpike = nearFermiSpikes.length > 0;
+  const spikeStrength = nearFermiSpikes.length > 0
+    ? Math.max(...nearFermiSpikes.map(s => s.strength))
+    : 0;
+
+  let dynamicallyUnstable = false;
+  if (phonon) {
+    dynamicallyUnstable = phonon.hasImaginaryModes || phonon.softModePresent;
+  }
+
+  let stabilityPenalty = 0;
+  if (hasLifshitzSpike && dynamicallyUnstable) {
+    stabilityPenalty = Math.min(0.5, 0.15 + spikeStrength * 0.35);
+  } else if (hasLifshitzSpike && spikeStrength > 0.7) {
+    stabilityPenalty = Math.min(0.2, spikeStrength * 0.15);
+  }
+
+  const spikeTypes = nearFermiSpikes.map(s => `${s.type}@${s.energyEv.toFixed(2)}eV(str=${s.strength.toFixed(2)})`).join(", ");
+  const detail = hasLifshitzSpike
+    ? `Lifshitz spikes: [${spikeTypes}], dynamically_unstable=${dynamicallyUnstable}, penalty=${stabilityPenalty.toFixed(3)}`
+    : "No Lifshitz-proximate DOS spikes detected";
+
+  return { hasLifshitzSpike, spikeStrength, dynamicallyUnstable, stabilityPenalty, detail };
+}
 
 export interface AdvancedPhysicsConstraints {
   fermiSurfaceNesting: {
@@ -82,7 +248,7 @@ export function computeAdvancedConstraints(
     electronic, elements, counts, totalAtoms
   );
   const lifshitzProximity = computeLifshitzProximityConstraint(
-    electronic, elements, counts, totalAtoms
+    electronic, elements, counts, totalAtoms, formula, phonon
   );
   const quantumCriticalFluctuation = computeQuantumCriticalConstraint(
     electronic, spinSusceptibility, elements, counts
@@ -282,7 +448,9 @@ function computeLifshitzProximityConstraint(
   electronic: ElectronicStructure,
   elements: string[],
   counts: Record<string, number>,
-  totalAtoms: number
+  totalAtoms: number,
+  formula?: string,
+  phonon?: PhononSpectrum | null
 ): AdvancedPhysicsConstraints["lifshitzProximity"] {
   const N_EF = electronic.densityOfStatesAtFermi;
   const vanHoveProx = electronic.vanHoveProximity;
@@ -295,10 +463,21 @@ function computeLifshitzProximityConstraint(
   else bandEdgeDistance = 0.5 + (0.4 - vanHoveProx);
   bandEdgeDistance = Math.max(0.01, Math.min(2.0, bandEdgeDistance));
 
-  const dosSpike = N_EF > 3.0 && vanHoveProx > 0.5;
+  let dosSpike = N_EF > 3.0 && vanHoveProx > 0.5;
 
   const pocketTransition = (metallicity > 0.3 && metallicity < 0.7 && N_EF > 2.0)
     || vanHoveProx > 0.6;
+
+  let lifshitzStabilityPenalty = 0;
+  if (formula) {
+    try {
+      const stabilityResult = assessLifshitzStability(formula, phonon ?? null);
+      if (stabilityResult.hasLifshitzSpike) {
+        dosSpike = true;
+        lifshitzStabilityPenalty = stabilityResult.stabilityPenalty;
+      }
+    } catch {}
+  }
 
   let score = 0;
 
@@ -324,7 +503,9 @@ function computeLifshitzProximityConstraint(
 
   score = Math.max(0, Math.min(1.0, score));
 
-  const penalty = bandEdgeDistance > 0.5 ? Math.min(0.15, (bandEdgeDistance - 0.5) * 0.15) : 0;
+  let penalty = bandEdgeDistance > 0.5 ? Math.min(0.15, (bandEdgeDistance - 0.5) * 0.15) : 0;
+  penalty += lifshitzStabilityPenalty;
+  penalty = Math.min(0.6, penalty);
 
   return {
     score: Number(score.toFixed(3)),
