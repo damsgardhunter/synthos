@@ -6,6 +6,7 @@ import { fillPrototype, computeBondValenceSum, checkIonicRadiusCompatibility } f
 import { computeFiniteDisplacementPhonons } from "./phonon-calculator";
 import type { FiniteDisplacementPhononResult } from "./phonon-calculator";
 import { analyzeDistortion, recordDistortionAnalysis, type DistortionAnalysis } from "../crystal/distortion-detector";
+import { relaxStructureAtPressure } from "../learning/pressure-engine";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -2048,10 +2049,37 @@ function parseOptimizationOutput(output: string): { energyChange: number; gradie
   return { energyChange, gradientNorm, iterations, converged };
 }
 
-export async function runXTBOptimization(formula: string): Promise<OptimizationResult | null> {
+function applyPressureScaling(atoms: AtomPosition[], formula: string, pressureGpa: number): AtomPosition[] {
+  if (pressureGpa <= 0) return atoms;
+  try {
+    const bm = relaxStructureAtPressure(formula, pressureGpa);
+    const eta = bm.compressedVolume > 0 && bm.bulkModulus > 0
+      ? Math.pow(bm.compressedVolume / (bm.compressedLattice.a * bm.compressedLattice.b * bm.compressedLattice.c / Math.pow(Math.pow(bm.compressedVolume, 1/3) / bm.compressedLattice.a, 3) || 1), 1/3)
+      : 1.0;
+    const cubicEta = (() => {
+      const B0p = 4.0;
+      const pOverB = pressureGpa / Math.max(10, bm.bulkModulus);
+      const inner = 1 + B0p * pOverB;
+      if (inner > 0) return Math.pow(Math.pow(inner, -1 / B0p), 1 / 3);
+      return Math.pow(0.5, 1 / 3);
+    })();
+    const scale = Math.max(0.8, Math.min(1.0, cubicEta));
+    return atoms.map(a => ({
+      element: a.element,
+      x: a.x * scale,
+      y: a.y * scale,
+      z: a.z * scale,
+    }));
+  } catch {
+    return atoms;
+  }
+}
+
+export async function runXTBOptimization(formula: string, pressureGpa: number = 0): Promise<OptimizationResult | null> {
   if (!isDFTAvailable()) return null;
 
-  const cacheKey = formula.replace(/\s+/g, "");
+  const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
+  const cacheKey = formula.replace(/\s+/g, "") + pressureTag;
   if (optimizedStructureCache.has(cacheKey)) {
     return optimizedStructureCache.get(cacheKey)!;
   }
@@ -2066,11 +2094,16 @@ export async function runXTBOptimization(formula: string): Promise<OptimizationR
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  const { atoms, prototype } = generateCrystalStructure(formula);
+  let { atoms, prototype } = generateCrystalStructure(formula);
   if (atoms.length < 2) return null;
 
+  if (pressureGpa > 0) {
+    atoms = applyPressureScaling(atoms, formula, pressureGpa);
+    console.log(`[DFT] ${formula}: Pressure-scaled geometry at ${pressureGpa} GPa for xTB optimization`);
+  }
+
   const xyzPath = path.join(calcDir, "input.xyz");
-  writeXYZ(atoms, xyzPath, `${formula} [${prototype}] optimization`);
+  writeXYZ(atoms, xyzPath, `${formula} [${prototype}] optimization${pressureGpa > 0 ? ` @ ${pressureGpa} GPa` : ""}`);
 
   try {
     const env: Record<string, string> = {
@@ -2112,6 +2145,20 @@ export async function runXTBOptimization(formula: string): Promise<OptimizationR
     const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
     if (energyMatch) {
       optimizedEnergy = parseFloat(energyMatch[1]);
+    }
+
+    if (pressureGpa > 0 && optimizedAtoms.length > 0) {
+      const xExt = optimizedAtoms.map(a => a.x);
+      const yExt = optimizedAtoms.map(a => a.y);
+      const zExt = optimizedAtoms.map(a => a.z);
+      const vol_A3 = Math.max(1, (Math.max(...xExt) - Math.min(...xExt) + 2.0) *
+        (Math.max(...yExt) - Math.min(...yExt) + 2.0) *
+        (Math.max(...zExt) - Math.min(...zExt) + 2.0));
+      const eV_per_GPa_A3 = 0.006242;
+      const pvCorrection = pressureGpa * vol_A3 * eV_per_GPa_A3;
+      const pvHartree = pvCorrection / 27.2114;
+      optimizedEnergy += pvHartree;
+      console.log(`[DFT] ${formula}: PV correction at ${pressureGpa} GPa: +${pvHartree.toFixed(6)} Eh (V~${vol_A3.toFixed(1)} A^3)`);
     }
 
     const result: OptimizationResult = {
@@ -2360,8 +2407,9 @@ export function getLandscapeStats(): {
   };
 }
 
-export async function runDFTCalculation(formula: string): Promise<DFTResult> {
-  const cacheKey = formula.replace(/\s+/g, "");
+export async function runDFTCalculation(formula: string, pressureGpa: number = 0): Promise<DFTResult> {
+  const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
+  const cacheKey = formula.replace(/\s+/g, "") + pressureTag;
   if (xtbResultCache.has(cacheKey)) {
     return xtbResultCache.get(cacheKey)!;
   }
@@ -2375,7 +2423,7 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   let prototype = "unknown";
   let isOptimized = false;
 
-  const optResult = await runXTBOptimization(formula);
+  const optResult = await runXTBOptimization(formula, pressureGpa);
   if (optResult && optResult.converged && optResult.optimizedAtoms.length >= 2) {
     atoms = optResult.optimizedAtoms;
     prototype = "xTB-optimized";
@@ -2383,9 +2431,12 @@ export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   }
 
   if (atoms.length < 2) {
-    const generated = generateCrystalStructure(formula);
+    let generated = generateCrystalStructure(formula);
     atoms = generated.atoms;
     prototype = generated.prototype;
+    if (pressureGpa > 0 && atoms.length >= 2) {
+      atoms = applyPressureScaling(atoms, formula, pressureGpa);
+    }
     if (atoms.length < 2) return null;
   }
 
@@ -2891,11 +2942,11 @@ export async function runFiniteDisplacementPhonons(formula: string): Promise<Fin
   return computeFiniteDisplacementPhonons(formula, validatedAtoms);
 }
 
-export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeatures | null> {
+export async function runXTBEnrichment(formula: string, pressureGpa: number = 0): Promise<XTBEnrichedFeatures | null> {
   if (!isDFTAvailable()) return null;
 
   totalXTBRuns++;
-  const dftResult = await runDFTCalculation(formula);
+  const dftResult = await runDFTCalculation(formula, pressureGpa);
 
   if (!dftResult.converged || dftResult.totalEnergy === 0) {
     return null;
@@ -2925,8 +2976,10 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
     phononResult = await runXTBPhononCheck(formula);
   }
 
+  const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
+  const enrichCacheKey = formula.replace(/\s+/g, "") + pressureTag;
   if (phononResult) {
-    const optRes = optimizedStructureCache.get(cacheKey);
+    const optRes = optimizedStructureCache.get(enrichCacheKey);
     if (optRes?.distortion) {
       const updatedDistortion = analyzeDistortion(
         formula,

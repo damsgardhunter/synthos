@@ -341,7 +341,7 @@ function resolve<T>(
   return { value: fallback, source: fallbackSource };
 }
 
-export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFeatures> {
+export async function resolveDFTFeatures(formula: string, pressureGpa: number = 0): Promise<DFTResolvedFeatures> {
   const raw = await fetchAllDFTSources(formula);
 
   const analytical = computeAnalyticalFallbacks(formula);
@@ -356,7 +356,7 @@ export async function resolveDFTFeatures(formula: string): Promise<DFTResolvedFe
       console.log(`[DFT] ${formula}: Pre-filter rejected (score=${preFilter.score.toFixed(2)}): ${preFilter.reasons.join("; ")}`);
     } else {
       try {
-        xtbData = await runXTBEnrichment(formula);
+        xtbData = await runXTBEnrichment(formula, pressureGpa);
         if (xtbData) {
           console.log(`[DFT] ${formula}: xTB DFT computed (${xtbData.prototype}): gap=${xtbData.bandGap.toFixed(3)}eV, metallic=${xtbData.isMetallic}, E/atom=${xtbData.totalEnergyPerAtom.toFixed(4)}Ha${xtbData.formationEnergyPerAtom != null ? `, Ef=${xtbData.formationEnergyPerAtom.toFixed(3)}eV/atom` : ""}`);
         }

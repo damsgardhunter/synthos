@@ -17,6 +17,15 @@ const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 
+function computePressureScale(pressureGpa: number): number {
+  if (pressureGpa <= 0) return 1.0;
+  const B0 = 100;
+  const B0p = 4.0;
+  const inner = 1 + B0p * (pressureGpa / B0);
+  const eta = inner > 0 ? Math.pow(inner, -1 / B0p) : 0.5;
+  return Math.max(0.8, Math.min(1.0, Math.pow(eta, 1 / 3)));
+}
+
 const failedFormulaTracker = new Map<string, { count: number; lastAttempt: number }>();
 const MAX_FORMULA_FAILURES = 3;
 const FAILURE_COOLDOWN_MS = 3600_000;
@@ -153,11 +162,13 @@ function runXTBStabilityCheck(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
   workDir: string,
+  pressureGpa: number = 0,
 ): { stable: boolean; ePerAtom: number } | null {
   try {
-    let xyz = `${positions.length}\nstability check\n`;
+    const scale = pressureGpa > 0 ? computePressureScale(pressureGpa) : 1.0;
+    let xyz = `${positions.length}\nstability check${pressureGpa > 0 ? ` @ ${pressureGpa} GPa` : ""}\n`;
     for (const p of positions) {
-      xyz += `${p.element}  ${(p.x * latticeA).toFixed(6)}  ${(p.y * latticeA).toFixed(6)}  ${(p.z * latticeA).toFixed(6)}\n`;
+      xyz += `${p.element}  ${(p.x * latticeA * scale).toFixed(6)}  ${(p.y * latticeA * scale).toFixed(6)}  ${(p.z * latticeA * scale).toFixed(6)}\n`;
     }
     const xyzFile = path.join(workDir, "stability.xyz");
     fs.writeFileSync(xyzFile, xyz);
@@ -990,15 +1001,17 @@ function tryXTBPreRelaxation(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
   workDir: string,
+  pressureGpa: number = 0,
 ): Array<{ element: string; x: number; y: number; z: number }> | null {
   try {
     if (!fs.existsSync(XTB_BIN)) return null;
 
+    const scale = pressureGpa > 0 ? computePressureScale(pressureGpa) : 1.0;
     const xyzPath = path.join(workDir, "pre_relax.xyz");
     const nAtoms = positions.length;
-    let xyzContent = `${nAtoms}\npre-relaxation\n`;
+    let xyzContent = `${nAtoms}\npre-relaxation${pressureGpa > 0 ? ` @ ${pressureGpa} GPa` : ""}\n`;
     for (const pos of positions) {
-      xyzContent += `${pos.element}  ${(pos.x * latticeA).toFixed(6)}  ${(pos.y * latticeA).toFixed(6)}  ${(pos.z * latticeA).toFixed(6)}\n`;
+      xyzContent += `${pos.element}  ${(pos.x * latticeA * scale).toFixed(6)}  ${(pos.y * latticeA * scale).toFixed(6)}  ${(pos.z * latticeA * scale).toFixed(6)}\n`;
     }
     fs.writeFileSync(xyzPath, xyzContent);
 
@@ -1256,17 +1269,18 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
     result.ppValidated = true;
 
-    const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir);
+    const workerPressure = result.estimatedPressureGPa ?? 0;
+    const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
     if (stabilityCheck && !stabilityCheck.stable) {
       result.error = `xTB stability pre-filter: E/atom = ${stabilityCheck.ePerAtom.toFixed(3)} eV (must be < -1.0 eV/atom)`;
       result.failureStage = "xtb_prefilter";
       result.rejectionReason = `Unstable: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV`;
       stageFailureCounts.xtb_prefilter++;
-      console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV (threshold: < -1.0 eV/atom)`);
+      console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV (threshold: < -1.0 eV/atom)${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
       return result;
     }
 
-    const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir);
+    const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
     result.xtbPreRelaxed = !!relaxed;
     if (relaxed) {
       positions = relaxed;

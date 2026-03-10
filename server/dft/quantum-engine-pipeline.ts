@@ -212,7 +212,7 @@ export async function runQuantumEnginePipeline(
   if (!scfConverged) {
     const xtbStart = Date.now();
     try {
-      const xtbResult = await runXTBEnrichment(formula);
+      const xtbResult = await runXTBEnrichment(formula, pressureGpa);
       const xtbTime = Date.now() - xtbStart;
 
       if (xtbResult) {

@@ -843,7 +843,7 @@ async function runDFTEnrichmentForCandidate(
   quantumEnginePipelineStats.fallbackRuns++;
 
   try {
-    const dftData = await resolveDFTFeatures(candidate.formula);
+    const dftData = await resolveDFTFeatures(candidate.formula, evalPressure);
 
     const desc = describeDFTSources(dftData);
     const hasExternalData = dftData.sources.mp || dftData.sources.aflow;
