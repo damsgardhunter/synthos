@@ -430,6 +430,7 @@ export async function getDFTQueueStats() {
         totalEnergy: out?.scf?.totalEnergy || null,
         retryCount: out?.retryCount || null,
         xtbPreRelaxed: out?.xtbPreRelaxed || null,
+        vcRelaxed: out?.vcRelaxed || null,
         ppValidated: out?.ppValidated || null,
         rejectionReason: out?.rejectionReason || null,
         failureStage: out?.failureStage || null,

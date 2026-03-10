@@ -120,6 +120,7 @@ export interface QEFullResult {
   error: string | null;
   retryCount?: number;
   xtbPreRelaxed?: boolean;
+  vcRelaxed?: boolean;
   ppValidated?: boolean;
   rejectionReason?: string;
   failureStage?: string;
@@ -1333,6 +1334,199 @@ ${autoKPoints(latticeA, estimateCOverA(elements, counts))}
 `;
 }
 
+function generateVCRelaxInput(
+  formula: string,
+  elements: string[],
+  counts: Record<string, number>,
+  latticeA: number,
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+): string {
+  const totalAtoms = positions.length;
+  const nTypes = elements.length;
+  const ELEMENT_CUTOFFS_VCR: Record<string, number> = {
+    H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+    Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
+  };
+  const hasHydrogen = elements.includes("H");
+  const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_VCR[el] ?? 45), hasHydrogen ? 80 : 45);
+  const ecutwfc = Math.max(rawEcutwfc, hasHydrogen ? 100 : 60);
+  const ecutrho = ecutwfc * 8;
+
+  const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
+  const nspin = hasMagnetic ? 2 : 1;
+  let magLines = "";
+  if (hasMagnetic) {
+    magLines = generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts));
+  }
+
+  let atomicSpecies = "";
+  for (const el of elements) {
+    const data = ELEMENT_DATA[el];
+    const mass = data?.mass ?? 50;
+    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${el}.UPF\n`;
+  }
+
+  let atomicPositions = "";
+  for (const pos of positions) {
+    atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+  }
+
+  const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+  const cOverA = estimateCOverA(elements, counts);
+
+  return `&CONTROL
+  calculation = 'vc-relax',
+  restart_mode = 'from_scratch',
+  prefix = '${prefix}',
+  outdir = './tmp',
+  pseudo_dir = '${QE_PSEUDO_DIR}',
+  tprnfor = .true.,
+  tstress = .true.,
+  forc_conv_thr = 1.0d-3,
+  etot_conv_thr = 1.0d-5,
+  nstep = 100,
+/
+&SYSTEM
+  ibrav = 1,
+  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
+  nat = ${totalAtoms},
+  ntyp = ${nTypes},
+  ecutwfc = ${ecutwfc},
+  ecutrho = ${ecutrho},
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.02,
+  nspin = ${nspin},
+${magLines}/
+&ELECTRONS
+  electron_maxstep = 200,
+  conv_thr = 1.0d-8,
+  mixing_beta = 0.3,
+  mixing_mode = 'plain',
+  diagonalization = 'david',
+  scf_must_converge = .false.,
+/
+&IONS
+  ion_dynamics = 'bfgs',
+/
+&CELL
+  cell_dynamics = 'bfgs',
+  press = 0.0,
+  press_conv_thr = 0.5,
+/
+ATOMIC_SPECIES
+${atomicSpecies}
+ATOMIC_POSITIONS {crystal}
+${atomicPositions}
+K_POINTS {automatic}
+${autoKPoints(latticeA, cOverA)}
+`;
+}
+
+interface VCRelaxResult {
+  converged: boolean;
+  finalPositions: Array<{ element: string; x: number; y: number; z: number }> | null;
+  finalLatticeBohr: number | null;
+  finalLatticeAng: number | null;
+  finalCellVectors: number[][] | null;
+  totalEnergy: number;
+  wallTimeSeconds: number;
+  error: string | null;
+}
+
+function parseVCRelaxOutput(stdout: string): VCRelaxResult {
+  const result: VCRelaxResult = {
+    converged: false,
+    finalPositions: null,
+    finalLatticeBohr: null,
+    finalLatticeAng: null,
+    finalCellVectors: null,
+    totalEnergy: 0,
+    wallTimeSeconds: 0,
+    error: null,
+  };
+
+  if (stdout.includes("bfgs converged")) {
+    result.converged = true;
+  }
+  if (stdout.includes("Final enthalpy")) {
+    result.converged = true;
+  }
+
+  const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
+  if (energyMatch) {
+    result.totalEnergy = parseFloat(energyMatch[1]) * 13.6057;
+  }
+
+  const wallMatch = stdout.match(/WALL\s*:\s*(\d+)m?\s*([\d.]+)s/i) || stdout.match(/PWSCF\s*:\s*(?:(\d+)h)?(\d+)m\s*([\d.]+)s/i);
+  if (wallMatch) {
+    if (wallMatch[3]) {
+      result.wallTimeSeconds = (parseInt(wallMatch[1] || "0") * 3600) + (parseInt(wallMatch[2]) * 60) + parseFloat(wallMatch[3]);
+    } else {
+      result.wallTimeSeconds = (parseInt(wallMatch[1] || "0") * 60) + parseFloat(wallMatch[2]);
+    }
+  }
+
+  const cellLines = stdout.match(/CELL_PARAMETERS\s*\(([^)]*)\)\s*\n([\s\S]*?)(?=\n\s*\n|\nATOMIC)/);
+  if (cellLines) {
+    const unit = cellLines[1].toLowerCase();
+    const vectors: number[][] = [];
+    const lines = cellLines[2].trim().split("\n");
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/).map(Number);
+      if (parts.length >= 3 && parts.every(v => !isNaN(v))) {
+        vectors.push(parts.slice(0, 3));
+      }
+    }
+    if (vectors.length === 3) {
+      result.finalCellVectors = vectors;
+      const a1 = Math.sqrt(vectors[0][0]**2 + vectors[0][1]**2 + vectors[0][2]**2);
+      if (unit.includes("bohr")) {
+        result.finalLatticeBohr = a1;
+        result.finalLatticeAng = a1 * 0.529177;
+      } else if (unit.includes("angstrom")) {
+        result.finalLatticeAng = a1;
+        result.finalLatticeBohr = a1 / 0.529177;
+      } else {
+        const celldmMatch = stdout.match(/celldm\(1\)\s*=\s*([\d.]+)/);
+        if (celldmMatch) {
+          const celldm1 = parseFloat(celldmMatch[1]);
+          result.finalLatticeBohr = a1 * celldm1;
+          result.finalLatticeAng = result.finalLatticeBohr * 0.529177;
+        } else {
+          result.finalLatticeBohr = a1;
+          result.finalLatticeAng = a1 * 0.529177;
+        }
+      }
+    }
+  }
+
+  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL|\n\s*Writing)/g)];
+  if (posBlocks.length > 0) {
+    const lastBlock = posBlocks[posBlocks.length - 1];
+    const coordType = lastBlock[1].toLowerCase();
+    const lines = lastBlock[2].trim().split("\n");
+    const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length >= 4) {
+        const el = parts[0];
+        const x = parseFloat(parts[1]);
+        const y = parseFloat(parts[2]);
+        const z = parseFloat(parts[3]);
+        if (!isNaN(x) && !isNaN(y) && !isNaN(z) && el.match(/^[A-Z][a-z]?$/)) {
+          positions.push({ element: el, x, y, z });
+        }
+      }
+    }
+    if (positions.length > 0) {
+      result.finalPositions = positions;
+    }
+  }
+
+  return result;
+}
+
 function runQECommand(binary: string, inputFile: string, workDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     const proc = spawn(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
@@ -1425,7 +1619,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       }
     }
 
-    const latticeA = estimateLatticeConstant(elements, counts);
+    let latticeA = estimateLatticeConstant(elements, counts);
     let positions = generateAtomicPositions(elements, counts, formula);
 
     try {
@@ -1503,6 +1697,46 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
     const cOverA = estimateCOverA(elements, counts);
     result.kPoints = autoKPoints(latticeA, cOverA).trim();
+
+    result.vcRelaxed = false;
+    try {
+      console.log(`[QE-Worker] Starting vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms)`);
+      const vcRelaxInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions);
+      const vcRelaxFile = path.join(jobDir, "vc_relax.in");
+      fs.writeFileSync(vcRelaxFile, vcRelaxInput);
+
+      const vcResult = await runQECommand(
+        path.join(QE_BIN_DIR, "pw.x"),
+        vcRelaxFile,
+        jobDir,
+      );
+
+      fs.writeFileSync(path.join(jobDir, "vc_relax.out"), vcResult.stdout);
+      const vcParsed = parseVCRelaxOutput(vcResult.stdout);
+
+      if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
+        positions = vcParsed.finalPositions;
+        result.vcRelaxed = true;
+        if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
+          latticeA = vcParsed.finalLatticeAng;
+          console.log(`[QE-Worker] vc-relax updated lattice for ${formula}: ${latticeA.toFixed(3)} A`);
+        }
+        console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "converged" : "partial"} for ${formula}: ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s`);
+      } else {
+        console.log(`[QE-Worker] vc-relax produced no usable positions for ${formula} (exit=${vcResult.exitCode}), proceeding with original geometry`);
+      }
+
+      try {
+        fs.rmSync(path.join(jobDir, "tmp"), { recursive: true, force: true });
+        fs.mkdirSync(path.join(jobDir, "tmp"), { recursive: true });
+      } catch {}
+    } catch (vcErr: any) {
+      console.log(`[QE-Worker] vc-relax failed for ${formula}: ${(vcErr.message || "").slice(0, 200)}, proceeding with original geometry`);
+      try {
+        fs.rmSync(path.join(jobDir, "tmp"), { recursive: true, force: true });
+        fs.mkdirSync(path.join(jobDir, "tmp"), { recursive: true });
+      } catch {}
+    }
 
     const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
       { mixingBeta: 0.3, maxSteps: 300, diag: "david", convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
