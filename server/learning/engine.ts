@@ -14,7 +14,8 @@ import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeig
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats, incorporateDFTFeedbackIntoPillars, getPillarDFTFeedbackStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor } from "./physics-engine";
+import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
@@ -1153,14 +1154,22 @@ async function reEvaluateTopCandidates() {
       if (newTc <= 0) continue;
 
       const features = extractFeatures(candidate.formula);
-      newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5, candidate.formula);
+      const capEvidence: CapExtensionEvidence = {
+        eliashbergLambda: lambda > 0 ? lambda : undefined,
+        eliashbergTc: newTc > 0 ? newTc : undefined,
+        gnnEnsembleStd: (candidate.uncertaintyEstimate != null && candidate.uncertaintyEstimate > 0)
+          ? candidate.uncertaintyEstimate * (candidate.predictedTc ?? 50)
+          : undefined,
+      };
+      newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5, candidate.formula, capEvidence);
 
       const reEvalFamily = classifyFamily(candidate.formula);
       if (reEvalFamily && FAMILY_TC_CAPS[reEvalFamily]) {
         const caps = FAMILY_TC_CAPS[reEvalFamily];
         const pressure = candidate.pressureGpa ?? 0;
         const pFactor = pressure > 50 ? 1.0 : pressure < 10 ? 0.0 : (pressure - 10) / 40;
-        const familyCap = Math.round(caps.ambient + (caps.highPressure - caps.ambient) * pFactor);
+        const extensionFactor = computeCapExtensionFactor(capEvidence);
+        const familyCap = Math.round((caps.ambient + (caps.highPressure - caps.ambient) * pFactor) * extensionFactor);
         newTc = Math.min(newTc, familyCap);
       }
 

@@ -5,6 +5,7 @@ import { extractFeatures, runMLPrediction } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
+import type { CapExtensionEvidence } from "./physics-engine";
 import { passesStabilityGate } from "./phase-diagram-engine";
 import { passesElementCountCap } from "./candidate-generator";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
@@ -195,14 +196,21 @@ export async function runSuperconductorResearch(
     }
     existingPrototypeMap.set(protoHash, formula);
 
+    const capEvidence: CapExtensionEvidence = {
+      eliashbergLambda: lambdaML > 0 ? lambdaML : undefined,
+      eliashbergTc: candidate.predictedTc != null && candidate.predictedTc > 0 ? candidate.predictedTc : undefined,
+      gnnEnsembleStd: (candidate.uncertaintyEstimate != null && candidate.uncertaintyEstimate > 0)
+        ? candidate.uncertaintyEstimate * (candidate.predictedTc ?? 50)
+        : undefined,
+    };
     if (candidate.predictedTc != null) {
-      candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula);
+      candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula, capEvidence);
       if (candidate.predictedTc > 80 && lambdaML < 1.5) {
         const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
         candidate.predictedTc = Math.round(candidate.predictedTc * penalty);
       }
     }
-    const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML, formula);
+    const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML, formula, capEvidence);
 
     const existing = await storage.getSuperconductorByFormula(formula);
     if (existing) {
@@ -813,7 +821,11 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
         const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
         cappedTc = Math.round(cappedTc * penalty);
       }
-      cappedTc = applyAmbientTcCap(cappedTc, lambdaML, pressureML, metallicityML, c.formula);
+      const invDesEvidence: CapExtensionEvidence = {
+        eliashbergLambda: pairingSusc.lambda > 0 ? pairingSusc.lambda : undefined,
+        eliashbergTc: cappedTc > 0 ? cappedTc : undefined,
+      };
+      cappedTc = applyAmbientTcCap(cappedTc, lambdaML, pressureML, metallicityML, c.formula, invDesEvidence);
 
       const inverseDesignScore = Math.min(0.95, pairingSusc.score * 0.6 + gbResult.score * 0.4);
 

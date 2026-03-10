@@ -64,7 +64,50 @@ export const FAMILY_TC_CAPS: Record<string, { ambient: number; highPressure: num
   Oxides: { ambient: 40, highPressure: 70 },
 };
 
-export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number, formula?: string): number {
+export interface CapExtensionEvidence {
+  gnnEnsembleStd?: number;
+  eliashbergLambda?: number;
+  eliashbergTc?: number;
+}
+
+export function computeCapExtensionFactor(evidence?: CapExtensionEvidence): number {
+  if (!evidence) return 1.0;
+
+  const { gnnEnsembleStd, eliashbergLambda, eliashbergTc } = evidence;
+
+  let confidenceScore = 0;
+  let evidenceCount = 0;
+
+  if (gnnEnsembleStd != null && Number.isFinite(gnnEnsembleStd) && gnnEnsembleStd > 0) {
+    const normalizedStd = gnnEnsembleStd / Math.max(1, eliashbergTc ?? 50);
+    const gnnConfidence = normalizedStd < 0.05 ? 1.0
+      : normalizedStd < 0.10 ? 0.7
+      : normalizedStd < 0.20 ? 0.3
+      : 0.0;
+    confidenceScore += gnnConfidence;
+    evidenceCount++;
+  }
+
+  if (eliashbergLambda != null && Number.isFinite(eliashbergLambda)) {
+    const couplingConfidence = eliashbergLambda >= 2.0 ? 1.0
+      : eliashbergLambda >= 1.5 ? 0.7
+      : eliashbergLambda >= 1.0 ? 0.4
+      : 0.0;
+    confidenceScore += couplingConfidence;
+    evidenceCount++;
+  }
+
+  if (evidenceCount === 0) return 1.0;
+
+  const avgConfidence = confidenceScore / evidenceCount;
+
+  if (avgConfidence < 0.4) return 1.0;
+
+  const maxExtension = 0.15;
+  return 1.0 + maxExtension * ((avgConfidence - 0.4) / 0.6);
+}
+
+export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number, formula?: string, evidence?: CapExtensionEvidence): number {
   if (tc <= 0) return tc;
   const mode = activeConstraintMode;
 
@@ -90,9 +133,12 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   const isHighPressure = pressureGpa >= 50;
   const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / (50 - pressureThresholdLow);
 
+  const extensionFactor = computeCapExtensionFactor(evidence);
+
   if (familyName && FAMILY_TC_CAPS[familyName]) {
     const familyCaps = FAMILY_TC_CAPS[familyName];
-    const familyCap = Math.round(familyCaps.ambient + (familyCaps.highPressure - familyCaps.ambient) * pressureFactor);
+    const baseFamilyCap = familyCaps.ambient + (familyCaps.highPressure - familyCaps.ambient) * pressureFactor;
+    const familyCap = Math.round(baseFamilyCap * extensionFactor);
     tc = Math.min(tc, familyCap);
   }
 
@@ -115,6 +161,7 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     } else {
       tcCap = Math.round(200 + (350 - 200) * pressureFactor);
     }
+    tcCap = Math.round(tcCap * extensionFactor);
     if (pressureGpa < 10) {
       tcCap += materialBonus;
       tcCap = Math.min(tcCap, 300);
@@ -150,7 +197,7 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   }
 
   baseExpectation += materialBonus;
-  baseExpectation = Math.round(baseExpectation);
+  baseExpectation = Math.round(baseExpectation * extensionFactor);
 
   const penaltyStr = mode.empiricalPenaltyStrength;
   const result = softCeiling(tc, baseExpectation, penaltyStr);
