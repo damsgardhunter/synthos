@@ -419,11 +419,12 @@ function estimateCOverA(elements: string[], counts: Record<string, number>): num
   return 1.0;
 }
 
-function autoKPoints(latticeA: number, cOverA?: number): string {
-  const kab = Math.max(1, Math.ceil(30 / latticeA));
+function autoKPoints(latticeA: number, cOverA?: number, minK: number = 12): string {
+  const densityFactor = 60;
+  const kab = Math.max(minK, Math.ceil(densityFactor / latticeA));
   if (cOverA && cOverA > 2.0) {
     const effectiveC = latticeA * cOverA;
-    const kc = Math.max(1, Math.ceil(30 / effectiveC));
+    const kc = Math.max(Math.max(1, Math.ceil(minK / cOverA)), Math.ceil(densityFactor / effectiveC));
     return `  ${kab} ${kab} ${kc}  0 0 0`;
   }
   return `  ${kab} ${kab} ${kab}  0 0 0`;
@@ -523,9 +524,12 @@ function generateSCFInput(
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
   const nTypes = elements.length;
   const ELEMENT_CUTOFFS: Record<string, number> = {
-    O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+    H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+    Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
   };
-  const ecutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), 45);
+  const hasHydrogen = elements.includes("H");
+  const baseEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), hasHydrogen ? 80 : 45);
+  const ecutwfc = Math.max(baseEcutwfc, hasHydrogen ? 100 : 60);
   const ecutrho = ecutwfc * 8;
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
@@ -1229,9 +1233,12 @@ function generateSCFInputWithParams(
   const totalAtoms = positions.length;
   const nTypes = elements.length;
   const ELEMENT_CUTOFFS2: Record<string, number> = {
-    O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+    H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+    Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
   };
-  const baseEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), 45);
+  const hasHydrogen2 = elements.includes("H");
+  const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), hasHydrogen2 ? 80 : 45);
+  const baseEcutwfc = Math.max(rawEcutwfc, hasHydrogen2 ? 100 : 60);
   const ecutwfc = baseEcutwfc + (params.ecutwfcBoost ?? 0);
   const ecutrho = ecutwfc * 8;
   const smearing = params.smearing || "mv";
@@ -1467,7 +1474,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       { mixingBeta: 0.3, maxSteps: 200, diag: "david", convThr: "1.0d-4", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
       { mixingBeta: 0.2, maxSteps: 300, diag: "david", ecutwfcBoost: 10, convThr: "5.0d-5", forcConvThr: "5.0d-3", etotConvThr: "5.0d-5" },
       { mixingBeta: 0.15, maxSteps: 400, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      { mixingBeta: 0.1, maxSteps: 400, diag: "cg", smearing: "gaussian", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.1, maxSteps: 400, diag: "cg", smearing: "mp", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
     ];
 
     let scfConverged = false;
@@ -1537,9 +1544,12 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       try {
         const cOverAVal = estimateCOverA(elements, counts);
         const ELEMENT_CUTOFFS_BANDS: Record<string, number> = {
-          O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+          H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+          Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
         };
-        const baseEcutwfcBands = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_BANDS[el] ?? 45), 45);
+        const hasHydrogenBands = elements.includes("H");
+        const rawEcutwfcBands = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_BANDS[el] ?? 45), hasHydrogenBands ? 80 : 45);
+        const baseEcutwfcBands = Math.max(rawEcutwfcBands, hasHydrogenBands ? 100 : 60);
         const nspinBands = elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1;
 
         const bandResult = await computeDFTBandStructure(
