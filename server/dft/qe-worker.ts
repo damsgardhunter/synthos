@@ -1324,7 +1324,7 @@ function parsePhononOutput(stdout: string): QEPhononResult {
   if (result.frequencies.length > 0) {
     result.lowestFrequency = Math.min(...result.frequencies);
     result.highestFrequency = Math.max(...result.frequencies);
-    result.imaginaryCount = result.frequencies.filter(f => f < -5).length;
+    result.imaginaryCount = result.frequencies.filter(f => f < -20).length;
     result.hasImaginary = result.imaginaryCount > 0;
   }
 

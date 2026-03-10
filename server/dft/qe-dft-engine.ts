@@ -2861,7 +2861,7 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
     if (zpeMatch) zpe = parseFloat(zpeMatch[1]);
 
     const ARTIFACT_THRESHOLD = -5000;
-    const PHYSICAL_IMAG_THRESHOLD = -5;
+    const PHYSICAL_IMAG_THRESHOLD = -20;
     const lowestFreq = frequencies.length > 0 ? Math.min(...frequencies) : 0;
     const physicalImagModes = frequencies.filter(f => f < PHYSICAL_IMAG_THRESHOLD && f >= ARTIFACT_THRESHOLD);
     const artifactModes = frequencies.filter(f => f < ARTIFACT_THRESHOLD);

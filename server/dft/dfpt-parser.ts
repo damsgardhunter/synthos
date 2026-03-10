@@ -173,7 +173,7 @@ export function parseMatdynDOS(dosContent: string): DFPTPhononDOS {
       if (Number.isFinite(freq) && Number.isFinite(density)) {
         frequencies.push(freq);
         dos.push(Math.max(0, density));
-        if (freq < -10) hasImaginary = true;
+        if (freq < -20) hasImaginary = true;
       }
     }
   }

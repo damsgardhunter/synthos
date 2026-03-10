@@ -482,7 +482,7 @@ export function assessDynamicStability(dispersion: PhononDispersionPoint[]): {
   let worstPhysicalFreq = 0;
   let worstQ: string | null = null;
 
-  const ACOUSTIC_THRESHOLD = -50;
+  const ACOUSTIC_THRESHOLD = -20;
   const ARTIFACT_THRESHOLD = -2000;
   const PHYSICAL_INSTABILITY_THRESHOLD = -100;
   const POSITIVE_ARTIFACT_THRESHOLD = MAX_PHYSICAL_FREQ_CM1;
