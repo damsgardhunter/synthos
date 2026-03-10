@@ -3148,9 +3148,10 @@ export interface PhononDOSData {
   frequencies: number[];
   dos: number[];
   totalStates: number;
+  partialDOS?: Record<string, number[]>;
 }
 
-export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhononFreq: number): PhononDOSData {
+export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhononFreq: number, formula?: string): PhononDOSData {
   const extendedMax = maxPhononFreq * 1.2;
   const nBins = maxPhononFreq > 1500 ? 150 : 100;
   if (!maxPhononFreq || maxPhononFreq <= 0) {
@@ -3177,7 +3178,56 @@ export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhon
     }
   }
 
-  return { frequencies, dos, totalStates };
+  let partialDOS: Record<string, number[]> | undefined;
+  if (formula) {
+    const elements = parseFormulaElements(formula);
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = getTotalAtoms(counts);
+
+    if (elements.length > 1) {
+      const masses: Record<string, number> = {};
+      for (const el of elements) {
+        const data = getElementData(el);
+        masses[el] = data?.atomicMass ?? 50;
+      }
+
+      const invMasses: Record<string, number> = {};
+      for (const el of elements) {
+        invMasses[el] = 1.0 / masses[el];
+      }
+
+      partialDOS = {};
+      for (const el of elements) {
+        partialDOS[el] = new Array(nBins).fill(0);
+      }
+
+      for (let i = 0; i < nBins; i++) {
+        if (dos[i] <= 0) continue;
+        const omega = frequencies[i];
+
+        let totalWeight = 0;
+        const elWeights: Record<string, number> = {};
+
+        for (const el of elements) {
+          const frac = (counts[el] || 1) / totalAtoms;
+          const charFreq = maxPhononFreq * Math.sqrt(invMasses[el] / Math.max(...Object.values(invMasses)));
+          const freqMatch = Math.exp(-0.5 * Math.pow((omega - charFreq) / (charFreq * 0.4 + 50), 2));
+          const lowFreqBase = frac * Math.pow(masses[el] / Math.max(...Object.values(masses)), 0.3);
+          const weight = frac * invMasses[el] * freqMatch + lowFreqBase * 0.2;
+          elWeights[el] = weight;
+          totalWeight += weight;
+        }
+
+        if (totalWeight > 0) {
+          for (const el of elements) {
+            partialDOS[el][i] = dos[i] * (elWeights[el] / totalWeight);
+          }
+        }
+      }
+    }
+  }
+
+  return { frequencies, dos, totalStates, partialDOS };
 }
 
 export interface Alpha2FData {
@@ -3394,7 +3444,7 @@ export async function runFullPhysicsAnalysis(
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
 
   const earlyPhononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);
-  const phononDOS = computePhononDOS(earlyPhononDispersion, phononSpectrum.maxPhononFrequency);
+  const phononDOS = computePhononDOS(earlyPhononDispersion, phononSpectrum.maxPhononFrequency, formula);
   emit("log", {
     phase: "phase-10",
     event: "Phonon DOS computed",

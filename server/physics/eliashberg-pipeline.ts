@@ -239,6 +239,9 @@ function buildAlpha2FSpectralFunction(
   const midOptCutoff = maxFreq * 0.6;
   const hModeCutoff = maxFreq * 0.75;
 
+  const H_PARTIAL_DOS_THRESHOLD = 0.70;
+  const hasPartialH = phononDOS.partialDOS && phononDOS.partialDOS["H"];
+
   for (let i = 0; i < nBins; i++) {
     const omega = frequencies[i];
     const g = phononDOS.dos[i];
@@ -247,8 +250,15 @@ function buildAlpha2FSpectralFunction(
       continue;
     }
 
+    let hFraction = 0;
+    if (hasPartialH && g > 0) {
+      hFraction = phononDOS.partialDOS!["H"][i] / g;
+    }
+
     let modeWeight = 1.0;
-    if (omega > hModeCutoff && hRatio >= 4) {
+    if (hFraction >= H_PARTIAL_DOS_THRESHOLD && hRatio >= 4) {
+      modeWeight = hModeBoost;
+    } else if (!hasPartialH && omega > hModeCutoff && hRatio >= 4) {
       modeWeight = hModeBoost;
     }
 
@@ -261,11 +271,15 @@ function buildAlpha2FSpectralFunction(
     logWeightedSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
     omega2WeightedSum += alpha2F[i] * omega * binWidth;
 
+    const isHydrogenMode = hasPartialH
+      ? hFraction >= H_PARTIAL_DOS_THRESHOLD
+      : (omega > hModeCutoff && hRatio >= 4);
+
     if (omega <= acousticCutoff) acousticLambda += lambdaContrib;
     else if (omega <= lowOptCutoff) lowOpticalLambda += lambdaContrib;
     else if (omega <= midOptCutoff) midOpticalLambda += lambdaContrib;
-    else if (omega <= hModeCutoff) highOpticalLambda += lambdaContrib;
-    else hydrogenLambda += lambdaContrib;
+    else if (isHydrogenMode) hydrogenLambda += lambdaContrib;
+    else highOpticalLambda += lambdaContrib;
   }
 
   if (integratedLambda > 0 && coupling.lambda > 0) {
@@ -594,7 +608,7 @@ export function runEliashbergPipeline(
   const coupling = couplingOverride ?? computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
 
   const phononDispersion = computePhononDispersion(formula, electronic, phonon);
-  const phononDOS = computePhononDOS(phononDispersion, phonon.maxPhononFrequency);
+  const phononDOS = computePhononDOS(phononDispersion, phonon.maxPhononFrequency, formula);
 
   const alpha2FSpec = buildAlpha2FSpectralFunction(
     phononDOS, formula, electronic, coupling, pressureGpa, phonon.maxPhononFrequency
@@ -796,6 +810,6 @@ export function getAlpha2FOnly(
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
   const phononDispersion = computePhononDispersion(formula, electronic, phonon);
-  const phononDOS = computePhononDOS(phononDispersion, phonon.maxPhononFrequency);
+  const phononDOS = computePhononDOS(phononDispersion, phonon.maxPhononFrequency, formula);
   return buildAlpha2FSpectralFunction(phononDOS, formula, electronic, coupling, pressureGpa, phonon.maxPhononFrequency);
 }
