@@ -175,6 +175,17 @@ function getKPath(crystalSystem: string): HighSymmetryPath {
   return CRYSTAL_SYSTEM_PATHS[crystalSystem] || CRYSTAL_SYSTEM_PATHS["cubic_sc"];
 }
 
+function crystalSystemToIbrav(system: string): number {
+  if (system === "cubic_sc") return 1;
+  if (system === "cubic_fcc") return 2;
+  if (system === "cubic_bcc") return 3;
+  if (system === "hexagonal") return 4;
+  if (system === "tetragonal") return 6;
+  if (system === "orthorhombic") return 8;
+  if (system === "monoclinic") return 12;
+  return 1;
+}
+
 function generateBandsInput(
   formula: string,
   elements: string[],
@@ -184,6 +195,8 @@ function generateBandsInput(
   kPath: HighSymmetryPath,
   ecutwfc: number,
   nspin: number,
+  crystalSystem: string = "cubic_sc",
+  cOverA: number = 1.0,
 ): string {
   const ELEMENT_DATA: Record<string, number> = {
     H: 1.008, He: 4.003, Li: 6.941, Be: 9.012, B: 10.811, C: 12.011,
@@ -218,23 +231,20 @@ function generateBandsInput(
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
-  const totalKPoints = (kPath.labels.length - 1) * kPath.nPointsBetween + 1;
-  let kPointBlock = "";
-  for (let seg = 0; seg < kPath.labels.length - 1; seg++) {
-    const [x1, y1, z1] = kPath.coords[seg];
-    const [x2, y2, z2] = kPath.coords[seg + 1];
-    const nPts = seg === kPath.labels.length - 2 ? kPath.nPointsBetween + 1 : kPath.nPointsBetween;
-    for (let i = 0; i < nPts; i++) {
-      const t = i / kPath.nPointsBetween;
-      const kx = x1 + (x2 - x1) * t;
-      const ky = y1 + (y2 - y1) * t;
-      const kz = z1 + (z2 - z1) * t;
-      const weight = 1.0;
-      kPointBlock += `  ${kx.toFixed(8)}  ${ky.toFixed(8)}  ${kz.toFixed(8)}  ${weight.toFixed(1)}\n`;
+  const ibrav = crystalSystemToIbrav(crystalSystem);
+  const celldm1 = (latticeA * 1.8897259886).toFixed(6);
+  let celldmLines = `  celldm(1) = ${celldm1},\n`;
+  if ((ibrav === 4 || ibrav === 6) && cOverA > 0 && Math.abs(cOverA - 1.0) > 0.01) {
+    celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
+  }
+  if (ibrav === 8 || ibrav === 12) {
+    const bOverA = 1.1;
+    celldmLines += `  celldm(2) = ${bOverA.toFixed(6)},\n`;
+    celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
+    if (ibrav === 12) {
+      celldmLines += `  celldm(4) = ${Math.cos(100 * Math.PI / 180).toFixed(6)},\n`;
     }
   }
-
-  const kLines = kPointBlock.trim().split("\n");
 
   return `&CONTROL
   calculation = 'bands',
@@ -245,9 +255,8 @@ function generateBandsInput(
   verbosity = 'high',
 /
 &SYSTEM
-  ibrav = 1,
-  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
-  nat = ${totalAtoms},
+  ibrav = ${ibrav},
+${celldmLines}  nat = ${totalAtoms},
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
@@ -734,7 +743,7 @@ export async function computeDFTBandStructure(
   };
 
   try {
-    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin);
+    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA);
     const bandsInputFile = path.join(jobDir, "bands.in");
     fs.writeFileSync(bandsInputFile, bandsInput);
 
