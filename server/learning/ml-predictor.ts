@@ -393,15 +393,15 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const sg = mat?.spacegroup ?? "";
   const layeredStructure = sg.includes("P4") || sg.includes("Pmmm") || sg.includes("I4") || sg.includes("R-3m") || sg.includes("P63/mmc") || sg.includes("P6/mmm") || sg.includes("C2/m") || sg.includes("Cmcm");
 
-  let cooperPairStrength = (hasTransitionMetal ? 0.3 : 0) + (hasHydrogen ? 0.25 : 0) +
-    (dWaveSymmetry ? 0.2 : 0) + (layeredStructure ? 0.15 : 0) + (enSpread > 1.5 ? 0.1 : 0);
+  let cooperPairStrengthBase = (hasTransitionMetal ? 0.15 : 0) + (hasHydrogen ? 0.1 : 0) +
+    (dWaveSymmetry ? 0.1 : 0) + (layeredStructure ? 0.05 : 0) + (enSpread > 1.5 ? 0.05 : 0);
 
   const corrForCooper = physics?.correlationStrength ?? 0;
   if (corrForCooper >= 0.5 && corrForCooper <= 0.8) {
-    if (dWaveSymmetry) cooperPairStrength += 0.15;
-    else if (layeredStructure) cooperPairStrength += 0.1;
+    if (dWaveSymmetry) cooperPairStrengthBase += 0.1;
+    else if (layeredStructure) cooperPairStrengthBase += 0.05;
   }
-  cooperPairStrength = Math.min(1, Math.max(0, cooperPairStrength));
+  cooperPairStrengthBase = Math.min(0.5, Math.max(0, cooperPairStrengthBase));
 
   const electronic = computeElectronicStructure(formula, mat?.spacegroup);
   const phonon = computePhononSpectrum(formula, electronic);
@@ -419,6 +419,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   }
 
   const phononCouplingEstimate = Math.min(1.0, useLambda / 3.0);
+
+  const lambdaContribution = useLambda / (1 + useLambda);
+  const cooperPairStrength = Math.min(1, cooperPairStrengthBase * 0.3 + lambdaContribution * 0.7);
 
   let electronDensityEstimate: number;
   if (electronic.metallicity > 0.5) {

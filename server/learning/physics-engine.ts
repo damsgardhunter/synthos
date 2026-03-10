@@ -1388,18 +1388,42 @@ export function computePhononSpectrum(
   anharmonicityIndex = Math.max(0.0, Math.min(1.0, anharmonicityIndex));
 
   let softModeScore = 0;
-  const minPhononFreq = logAvgFreq * 0.3;
-  softModeScore = Math.max(0, Math.min(1.0, 1 - (minPhononFreq / Math.max(1, logAvgFreq))));
+
+  const massRatioForSoft = (() => {
+    const masses = elements.map(el => getElementData(el)?.atomicMass ?? 30);
+    if (masses.length < 2) return 1.0;
+    return Math.max(...masses) / Math.max(Math.min(...masses), 1);
+  })();
+
+  const minPhononFreq = (() => {
+    if (massRatioForSoft > 5) {
+      return logAvgFreq * Math.max(0.05, 0.15 / Math.sqrt(massRatioForSoft));
+    } else if (massRatioForSoft > 2) {
+      return logAvgFreq * (0.3 - (massRatioForSoft - 2) * 0.05);
+    } else {
+      return logAvgFreq * 0.5;
+    }
+  })();
+
+  const debyeRatio = debyeTemperature > 100 ? logAvgFreq / (debyeTemperature * 0.695) : 0.5;
+  const freqSpread = 1.0 - Math.min(1.0, minPhononFreq / Math.max(1, logAvgFreq));
+  const stiffnessConsistency = debyeRatio > 0.8 ? 0.0 : (1.0 - debyeRatio) * 0.3;
+  softModeScore = freqSpread * 0.6 + stiffnessConsistency * 0.4;
 
   if (electronicStructure.correlationStrength > 0.6 && electronicStructure.densityOfStatesAtFermi > 3.0) {
-    softModeScore = Math.max(softModeScore, 0.6);
+    softModeScore = Math.max(softModeScore, 0.5 + electronicStructure.correlationStrength * 0.15);
   }
   if (elements.some(e => ["Ba", "Sr", "Ca", "Pb"].includes(e)) && elements.includes("O") && elements.length >= 3) {
-    softModeScore = Math.max(softModeScore, 0.55);
+    softModeScore = Math.max(softModeScore, 0.45);
   }
-  if (anharmonicityIndex > 0.5) {
-    softModeScore = Math.min(1.0, softModeScore + anharmonicityIndex * 0.2);
+  if (anharmonicityIndex > 0.3) {
+    softModeScore = Math.min(1.0, softModeScore + (anharmonicityIndex - 0.3) * 0.25);
   }
+
+  if (debyeTemperature > 800 && massRatioForSoft < 2) {
+    softModeScore *= 0.6;
+  }
+
   softModeScore = Math.max(0, Math.min(1.0, softModeScore));
   const softModePresent = softModeScore > 0.4;
 
