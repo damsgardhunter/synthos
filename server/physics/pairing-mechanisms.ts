@@ -10,7 +10,7 @@ import {
   type PhononSpectrum,
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
-import { analyzeTopology } from "./topology-engine";
+import { analyzeTopology, type TopologicalAnalysis } from "./topology-engine";
 import {
   getElementData,
   getHubbardU,
@@ -111,11 +111,13 @@ export interface PairingProfile {
   polaronic: PolaronicPairingResult;
   plasmon: PlasmonPairingResult;
   compositePairingStrength: number;
-  mechanismWeights: { phonon: number; spin: number; orbital: number; excitonic: number; cdw: number; polaronic: number; plasmon: number };
+  mechanismWeights: { phonon: number; spin: number; orbital: number; excitonic: number; cdw: number; polaronic: number; plasmon: number; topological?: number };
   dominantMechanism: string;
   secondaryMechanism: string;
   pairingSymmetry: string;
   estimatedTcFromPairing: number;
+  topologicalBoostApplied?: boolean;
+  tripletOddParityWeight?: number;
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -701,7 +703,7 @@ export function computePlasmonPairing(
   };
 }
 
-export function computePairingProfile(formula: string): PairingProfile {
+export function computePairingProfile(formula: string, externalTopo?: TopologicalAnalysis): PairingProfile {
   const electronic = computeElectronicStructure(formula, null);
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
@@ -715,9 +717,17 @@ export function computePairingProfile(formula: string): PairingProfile {
 
   let topoStrength = 0;
   let topoPairingSymmetry = "p-wave";
+  let hasNontrivialZ2 = false;
+  let hasWeylNodes = false;
+  let topoAnalysisUsed: TopologicalAnalysis | null = null;
   try {
-    const topoAnalysis = analyzeTopology(formula, electronic);
+    const topoAnalysis = externalTopo ?? analyzeTopology(formula, electronic);
+    topoAnalysisUsed = topoAnalysis;
     topoStrength = Math.min(1, topoAnalysis.majoranaFeasibility * 0.6 + topoAnalysis.z2Score * 0.3 + topoAnalysis.socStrength * 0.1);
+    hasNontrivialZ2 = topoAnalysis.z2Score > 0.5;
+    hasWeylNodes = topoAnalysis.diracNodeProbability > 0.4 ||
+      topoAnalysis.topologicalClass === "Weyl-semimetal" ||
+      topoAnalysis.indicators.some(ind => ind.toLowerCase().includes("weyl") || ind.toLowerCase().includes("dirac"));
     if (topoAnalysis.topologicalClass === "strong-TI" || topoAnalysis.z2Score > 0.7) {
       topoPairingSymmetry = "p+ip (topological)";
     }
@@ -767,7 +777,55 @@ export function computePairingProfile(formula: string): PairingProfile {
     wPhonon = 0.18; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.09; wPolaronic = 0.09; wPlasmon = 0.28; wTopo = 0.08;
   }
 
-  if (topoStrength > 0.5) {
+  let topologicalBoostApplied = false;
+  let tripletOddParityWeight = 0;
+
+  if (hasNontrivialZ2 || hasWeylNodes) {
+    topologicalBoostApplied = true;
+
+    const z2Strength = topoAnalysisUsed ? topoAnalysisUsed.z2Score : 0;
+    const weylStrength = topoAnalysisUsed ? topoAnalysisUsed.diracNodeProbability : 0;
+    const topoSignal = Math.max(z2Strength, weylStrength);
+
+    const tripletBoost = Math.min(0.20, topoSignal * 0.25);
+    wSpin += tripletBoost * 0.6;
+    wTopo += tripletBoost * 0.4;
+
+    wPhonon -= tripletBoost * 0.4;
+    wOrbital -= tripletBoost * 0.2;
+    wCDW -= tripletBoost * 0.15;
+    wPolaronic -= tripletBoost * 0.15;
+    wPlasmon -= tripletBoost * 0.10;
+
+    wPhonon = Math.max(0, wPhonon);
+    wSpin = Math.max(0, wSpin);
+    wOrbital = Math.max(0, wOrbital);
+    wExcitonic = Math.max(0, wExcitonic);
+    wCDW = Math.max(0, wCDW);
+    wPolaronic = Math.max(0, wPolaronic);
+    wPlasmon = Math.max(0, wPlasmon);
+    wTopo = Math.max(0, wTopo);
+
+    const weightSum = wPhonon + wSpin + wOrbital + wExcitonic + wCDW + wPolaronic + wPlasmon + wTopo;
+    if (weightSum > 0) {
+      wPhonon /= weightSum;
+      wSpin /= weightSum;
+      wOrbital /= weightSum;
+      wExcitonic /= weightSum;
+      wCDW /= weightSum;
+      wPolaronic /= weightSum;
+      wPlasmon /= weightSum;
+      wTopo /= weightSum;
+    }
+
+    tripletOddParityWeight = wSpin + wTopo;
+
+    if (hasNontrivialZ2 && z2Strength > 0.6) {
+      topoPairingSymmetry = "p+ip (topological)";
+    } else if (hasWeylNodes && weylStrength > 0.5) {
+      topoPairingSymmetry = "odd-parity (Weyl-node driven)";
+    }
+  } else if (topoStrength > 0.5) {
     const topoBoost = Math.min(0.08, topoStrength * 0.1);
     wTopo += topoBoost;
     wPhonon -= topoBoost * 0.5;
@@ -826,12 +884,16 @@ export function computePairingProfile(formula: string): PairingProfile {
       pairingSymmetry = "anisotropic s-wave";
     }
   } else if (dominant === "spin-fluctuation") {
-    pairingSymmetry = spinResult.pairingSymmetry;
-    if (pairingSymmetry === "s-wave") {
-      pairingSymmetry = "d-wave";
+    if (topologicalBoostApplied) {
+      pairingSymmetry = "triplet (topology-driven)";
+    } else {
+      pairingSymmetry = spinResult.pairingSymmetry;
+      if (pairingSymmetry === "s-wave") {
+        pairingSymmetry = "d-wave";
+      }
     }
   } else if (dominant === "orbital-fluctuation") {
-    pairingSymmetry = "s+/-";
+    pairingSymmetry = topologicalBoostApplied ? "odd-parity s+/-" : "s+/-";
   } else if (dominant === "topological") {
     pairingSymmetry = topoPairingSymmetry;
   } else if (dominant === "cdw-mediated" && cdwResult.cdwPairingStrength > 0.5) {
@@ -894,6 +956,8 @@ export function computePairingProfile(formula: string): PairingProfile {
     secondaryMechanism: mechanisms[1]?.name ?? "none",
     pairingSymmetry,
     estimatedTcFromPairing: Number(estimatedTcFromPairing.toFixed(2)),
+    topologicalBoostApplied,
+    tripletOddParityWeight: topologicalBoostApplied ? Number(tripletOddParityWeight.toFixed(3)) : undefined,
   };
 }
 

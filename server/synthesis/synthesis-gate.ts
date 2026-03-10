@@ -203,7 +203,14 @@ function recordRejection(formula: string, score: number, reasons: string[]) {
   }
 }
 
-export function evaluateSynthesisGate(formula: string): SynthesisGateResult {
+export interface KineticInput {
+  kineticScore: number;
+  metastableLifetime300K: number;
+  lifetimeString: string;
+  stabilizationStrategies: Array<{ name: string }>;
+}
+
+export function evaluateSynthesisGate(formula: string, kineticInput?: KineticInput | null): SynthesisGateResult {
   stats.totalEvaluated++;
 
   const mlResult = predictSynthesisFeasibility(formula);
@@ -222,16 +229,27 @@ export function evaluateSynthesisGate(formula: string): SynthesisGateResult {
     ? Math.max(0, 0.1 * (1 - Math.min(1, graphPathCost / 2.0)))
     : 0;
 
+  let kineticPenalty = 0;
+  if (kineticInput) {
+    if (kineticInput.kineticScore < 0.3) {
+      kineticPenalty = (0.3 - kineticInput.kineticScore) * 0.5;
+      if (kineticInput.stabilizationStrategies.length > 0) {
+        kineticPenalty *= 0.6;
+      }
+    }
+  }
+
   const compositeScore = Math.round(
-    Math.min(1.0,
+    Math.min(1.0, Math.max(0,
       mlResult.feasibility * 0.35 +
       (1 - chemDist.totalDistance) * 0.25 +
       chemDist.precursorAvailability * 0.15 +
       (chemDist.isOnePot ? 0.10 : 0) +
       (chemDist.toxicElements.length === 0 ? 0.05 : 0) -
       (chemDist.toxicityPenalty * 0.05) +
-      graphBonus
-    ) * 10000
+      graphBonus -
+      kineticPenalty
+    )) * 10000
   ) / 10000;
 
   const rejectionReasons: string[] = [];
@@ -254,6 +272,10 @@ export function evaluateSynthesisGate(formula: string): SynthesisGateResult {
 
   if (chemDist.precursorAvailability < 0.2) {
     rejectionReasons.push(`Precursors unavailable: avail=${chemDist.precursorAvailability.toFixed(3)}`);
+  }
+
+  if (kineticInput && kineticInput.kineticScore < 0.15 && kineticInput.stabilizationStrategies.length === 0) {
+    rejectionReasons.push(`Kinetically unstable: score=${kineticInput.kineticScore}, lifetime=${kineticInput.lifetimeString}, no stabilization routes`);
   }
 
   const pass = compositeScore >= HARD_GATE_THRESHOLD && rejectionReasons.length === 0;

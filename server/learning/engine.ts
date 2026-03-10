@@ -1157,7 +1157,12 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     let synthesisGateResult;
     try {
-      synthesisGateResult = evaluateSynthesisGate(candidateData.formula);
+      synthesisGateResult = evaluateSynthesisGate(candidateData.formula, kineticResult ? {
+        kineticScore: kineticResult.kineticScore,
+        metastableLifetime300K: kineticResult.metastableLifetime300K,
+        lifetimeString: kineticResult.lifetimeString,
+        stabilizationStrategies: kineticResult.stabilizationStrategies,
+      } : null);
       if (!synthesisGateResult.pass) {
         emit("log", {
           phase: "engine",
@@ -2005,7 +2010,7 @@ async function runPhase10_Physics() {
 
         let pairingProfile: PairingProfile | undefined;
         try {
-          pairingProfile = computePairingProfile(candidate.formula);
+          pairingProfile = computePairingProfile(candidate.formula, topoAnalysis);
           crossEngineHub.recordInsight("pairing", candidate.formula, pairingProfile);
           if (pairingProfile.compositePairingStrength > 0.4) {
             emit("log", {
@@ -4843,16 +4848,16 @@ async function runAutonomousFastPath() {
           const topoResult = analyzeTopology(formula, electronic);
           trackTopologyResult(topoResult);
           crossEngineHub.recordInsight("topology", formula, topoResult);
+          try {
+            const pairResult = computePairingProfile(formula, topoResult);
+            crossEngineHub.recordInsight("pairing", formula, pairResult);
+          } catch (e) { console.error(`[Engine] Pairing profile failed for ${formula}:`, e); }
         } catch (e) { console.error(`[Engine] Topology analysis failed for ${formula}:`, e); }
         try {
           const fsResult = computeFermiSurface(formula);
           assignToCluster(formula, fsResult, result.tc);
           crossEngineHub.recordInsight("fermi", formula, fsResult);
         } catch (e) { console.error(`[Engine] Fermi surface cluster assignment failed for ${formula}:`, e); }
-        try {
-          const pairResult = computePairingProfile(formula);
-          crossEngineHub.recordInsight("pairing", formula, pairResult);
-        } catch (e) { console.error(`[Engine] Pairing profile failed for ${formula}:`, e); }
       }
       if (isPromising) {
         try {
