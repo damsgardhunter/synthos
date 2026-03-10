@@ -488,7 +488,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - Raw generator structures are NEVER validated for geometry. If xTB pre-relaxation fails, raw positions proceed directly to vc-relax (DFT will handle them or fail at SCF).
     - `softValidateGeometry()` replaces old strict `validateGeometry()`. Uses reduced distance thresholds (~55% covalent radii for relaxed, ~40% for unrelaxed) — only rejects truly overlapping atoms. Borderline structures proceed to DFT where vc-relax fixes them.
     - Volume-per-atom limits relaxed: H-containing → 2.5 A^3 (was 5.0), non-H → 5.0 A^3 (was 10.0). Lattice range widened: 2.5-50 A (was 3-40).
-    - Duplicate hash cache replaced: `Set<string>` (never cleared) → `Map<string, timestamp>` with formula-scoped keys, 2000-entry cap, and 30-minute TTL with LRU eviction. Different formulas can now have similar structures without false duplicate rejections.
+    - Duplicate detection replaced: simple coordinate hash → structural fingerprint using 3 complementary methods:
+      1. **Radial Distribution Function (RDF)**: 20-bin histogram of all pairwise interatomic distances (periodic-boundary-aware). Captures distance distribution — different crystal structures of same composition have different RDF profiles.
+      2. **Coulomb matrix eigenvalues**: Sorted eigenvalues of the Coulomb matrix (Z_i*Z_j/r_ij). Rotationally and translationally invariant — captures the electrostatic environment. Uses Jacobi eigenvalue algorithm.
+      3. **Coordination number profile**: Sorted list of neighbor counts within 40% lattice constant cutoff. Captures local bonding topology.
+    - Fingerprint components: composition + lattice (1 decimal) + atom count + RDF bins + CM eigenvalues + coordination profile → MD5 hash.
+    - Cache uses `Map<string, timestamp>` with `formula::fingerprint` keys, 2000-entry cap, 30-minute TTL, LRU eviction. Different formulas (e.g. LaH10 Fm-3m vs LaH10 P4/nmm) now correctly distinguished.
     - `recordFormulaFailure()` no longer called on geometry rejection — geometry is a soft gate, not a permanent block.
 
 ## External Dependencies

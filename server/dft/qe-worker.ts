@@ -169,16 +169,157 @@ export function getStageFailureCounts(): Record<string, number> {
   return { ...stageFailureCounts };
 }
 
-function computeStructureHash(
+const ATOMIC_NUMBER: Record<string, number> = {
+  H: 1, He: 2, Li: 3, Be: 4, B: 5, C: 6, N: 7, O: 8, F: 9, Ne: 10,
+  Na: 11, Mg: 12, Al: 13, Si: 14, P: 15, S: 16, Cl: 17, Ar: 18,
+  K: 19, Ca: 20, Sc: 21, Ti: 22, V: 23, Cr: 24, Mn: 25, Fe: 26, Co: 27, Ni: 28, Cu: 29, Zn: 30,
+  Ga: 31, Ge: 32, As: 33, Se: 34, Br: 35, Kr: 36, Rb: 37, Sr: 38, Y: 39, Zr: 40,
+  Nb: 41, Mo: 42, Tc: 43, Ru: 44, Rh: 45, Pd: 46, Ag: 47, Cd: 48, In: 49, Sn: 50,
+  Sb: 51, Te: 52, I: 53, Xe: 54, Cs: 55, Ba: 56, La: 57, Ce: 58, Hf: 72, Ta: 73,
+  W: 74, Re: 75, Os: 76, Ir: 77, Pt: 78, Au: 79, Hg: 80, Tl: 81, Pb: 82, Bi: 83, Th: 90, U: 92, Pa: 91,
+};
+
+function computeStructureFingerprint(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
 ): string {
-  const sorted = [...positions]
-    .sort((a, b) => a.element.localeCompare(b.element) || a.x - b.x || a.y - b.y || a.z - b.z)
-    .map(p => `${p.element}:${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}`)
-    .join("|");
-  const key = `${latticeA.toFixed(2)}|${sorted}`;
-  return crypto.createHash("md5").update(key).digest("hex");
+  const n = positions.length;
+  if (n === 0) return "empty";
+
+  const composition = [...positions]
+    .map(p => p.element)
+    .sort()
+    .join(",");
+
+  const RDF_BINS = 20;
+  const RDF_MAX = latticeA * 0.75;
+  const binWidth = RDF_MAX / RDF_BINS;
+  const rdfHist = new Float64Array(RDF_BINS);
+
+  const pairDistances: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let fdx = positions[i].x - positions[j].x;
+      let fdy = positions[i].y - positions[j].y;
+      let fdz = positions[i].z - positions[j].z;
+      fdx -= Math.round(fdx);
+      fdy -= Math.round(fdy);
+      fdz -= Math.round(fdz);
+      const dx = fdx * latticeA;
+      const dy = fdy * latticeA;
+      const dz = fdz * latticeA;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      pairDistances.push(dist);
+
+      const bin = Math.floor(dist / binWidth);
+      if (bin >= 0 && bin < RDF_BINS) {
+        rdfHist[bin]++;
+      }
+    }
+  }
+
+  const rdfTotal = rdfHist.reduce((s, v) => s + v, 0) || 1;
+  const rdfFingerprint = Array.from(rdfHist)
+    .map(v => (v / rdfTotal).toFixed(3))
+    .join(",");
+
+  const coulombEigenvalues: number[] = [];
+  if (n <= 16) {
+    const cm = Array.from({ length: n }, () => new Float64Array(n));
+    let pairIdx = 0;
+    for (let i = 0; i < n; i++) {
+      const zi = ATOMIC_NUMBER[positions[i].element] ?? 10;
+      cm[i][i] = 0.5 * Math.pow(zi, 2.4);
+      for (let j = i + 1; j < n; j++) {
+        const zj = ATOMIC_NUMBER[positions[j].element] ?? 10;
+        const dist = pairDistances[pairIdx++] ?? 1.0;
+        const val = dist > 0.01 ? (zi * zj) / dist : 0;
+        cm[i][j] = val;
+        cm[j][i] = val;
+      }
+    }
+
+    const eigenvalues = approximateEigenvalues(cm, n);
+    eigenvalues.sort((a, b) => b - a);
+    coulombEigenvalues.push(...eigenvalues);
+  }
+
+  const cmFingerprint = coulombEigenvalues
+    .map(v => v.toFixed(1))
+    .join(",");
+
+  const coordCounts: number[] = new Array(n).fill(0);
+  const coordCutoff = latticeA * 0.4;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let fdx = positions[i].x - positions[j].x;
+      let fdy = positions[i].y - positions[j].y;
+      let fdz = positions[i].z - positions[j].z;
+      fdx -= Math.round(fdx);
+      fdy -= Math.round(fdy);
+      fdz -= Math.round(fdz);
+      const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+      if (dist < coordCutoff) {
+        coordCounts[i]++;
+        coordCounts[j]++;
+      }
+    }
+  }
+  const coordProfile = coordCounts.sort((a, b) => a - b).join(",");
+
+  const fingerprintStr = [
+    `comp=${composition}`,
+    `lat=${latticeA.toFixed(1)}`,
+    `n=${n}`,
+    `rdf=${rdfFingerprint}`,
+    `cm=${cmFingerprint}`,
+    `coord=${coordProfile}`,
+  ].join("|");
+
+  return crypto.createHash("md5").update(fingerprintStr).digest("hex");
+}
+
+function approximateEigenvalues(matrix: Float64Array[], n: number): number[] {
+  const eigenvalues: number[] = [];
+  const a = matrix.map(row => new Float64Array(row));
+
+  for (let iter = 0; iter < n * 5; iter++) {
+    let maxVal = 0;
+    let p = 0, q = 1;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (Math.abs(a[i][j]) > maxVal) {
+          maxVal = Math.abs(a[i][j]);
+          p = i;
+          q = j;
+        }
+      }
+    }
+    if (maxVal < 1e-6) break;
+
+    const theta = 0.5 * Math.atan2(2 * a[p][q], a[p][p] - a[q][q]);
+    const c = Math.cos(theta);
+    const s = Math.sin(theta);
+
+    for (let i = 0; i < n; i++) {
+      if (i === p || i === q) continue;
+      const aip = a[i][p];
+      const aiq = a[i][q];
+      a[i][p] = a[p][i] = c * aip + s * aiq;
+      a[i][q] = a[q][i] = -s * aip + c * aiq;
+    }
+    const app = a[p][p];
+    const aqq = a[q][q];
+    const apq = a[p][q];
+    a[p][p] = c * c * app + 2 * s * c * apq + s * s * aqq;
+    a[q][q] = s * s * app - 2 * s * c * apq + c * c * aqq;
+    a[p][q] = a[q][p] = 0;
+  }
+
+  for (let i = 0; i < n; i++) {
+    eigenvalues.push(a[i][i]);
+  }
+  return eigenvalues;
 }
 
 function runXTBStabilityCheck(
@@ -1688,13 +1829,13 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
     }
 
-    const hash = computeStructureHash(positions, latticeA);
-    if (isStructureDuplicate(hash, formula)) {
-      result.error = `Duplicate structure (hash=${hash.slice(0, 8)})`;
+    const fingerprint = computeStructureFingerprint(positions, latticeA);
+    if (isStructureDuplicate(fingerprint, formula)) {
+      result.error = `Duplicate structure (fingerprint=${fingerprint.slice(0, 8)})`;
       result.failureStage = "duplicate";
-      result.rejectionReason = "Duplicate structure already computed";
+      result.rejectionReason = "Duplicate structure fingerprint already computed";
       stageFailureCounts.duplicate++;
-      console.log(`[QE-Worker] ${formula} skipped: duplicate structure`);
+      console.log(`[QE-Worker] ${formula} skipped: duplicate structure (fingerprint=${fingerprint.slice(0, 12)})`);
       return result;
     }
 
