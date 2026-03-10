@@ -18,6 +18,7 @@ import {
   BookOpen, Sigma, FlaskRound, Search, TrendingUp, ShieldCheck, Lightbulb,
   GitMerge, ArrowRight, Play, Microscope, Settings2,
 } from "lucide-react";
+import DOSVisualizer from "@/components/dos-visualizer";
 
 interface CalibrationResponse {
   r2: number;
@@ -1557,6 +1558,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="design-repr" data-testid="tab-design-repr">Representations</TabsTrigger>
           <TabsTrigger value="theory-discovery" data-testid="tab-theory-discovery">Theory Discovery</TabsTrigger>
           <TabsTrigger value="causal-discovery" data-testid="tab-causal-discovery">Causal Discovery</TabsTrigger>
+          <TabsTrigger value="dos-surrogate" data-testid="tab-dos-surrogate">DOS Surrogate</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -2104,6 +2106,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="causal-discovery" className="space-y-4" data-testid="causal-discovery-content">
           <CausalDiscoveryPanel />
+        </TabsContent>
+
+        <TabsContent value="dos-surrogate" className="space-y-4" data-testid="dos-surrogate-content">
+          <DOSVisualizer />
         </TabsContent>
       </Tabs>
     </div>

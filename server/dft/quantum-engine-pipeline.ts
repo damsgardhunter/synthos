@@ -7,6 +7,7 @@ import { predictLambda, recordLambdaValidation } from "../learning/lambda-regres
 import { recordStructureFailure } from "../crystal/structure-failure-db";
 import { recordRelaxation } from "../crystal/relaxation-tracker";
 import { getEntryByFormula } from "../crystal/crystal-structure-dataset";
+import { dosPrefilter, predictDOS, type DOSSurrogateResult } from "../physics/dos-surrogate";
 
 export interface QuantumEngineDatasetEntry {
   material: string;
@@ -38,6 +39,14 @@ export interface QuantumEngineDatasetEntry {
   tier: "full-dft" | "xtb" | "surrogate";
   wallTimeMs: number;
   timestamp: number;
+  dosPrefilter?: {
+    pass: boolean;
+    vhsScore: number;
+    scFavorability: number;
+    flatBandIndicator: number;
+    nestingScore: number;
+    vhsCount: number;
+  };
 }
 
 export interface QuantumEngineResult {
@@ -73,6 +82,9 @@ const pipelineStats = {
   bestTcMaterial: "",
   strongCouplingCount: 0,
   highTcCount: 0,
+  dosPrefilterRuns: 0,
+  dosPrefilterPassed: 0,
+  dosPrefilterRejected: 0,
 };
 
 export async function runQuantumEnginePipeline(
@@ -94,6 +106,32 @@ export async function runQuantumEnginePipeline(
   let phononFreqs: number[] = [];
 
   let tier: "full-dft" | "xtb" | "surrogate" = "surrogate";
+
+  let dosFilterResult: ReturnType<typeof dosPrefilter> | null = null;
+  let dosAnalysis: DOSSurrogateResult | null = null;
+  try {
+    const dosStart = Date.now();
+    dosAnalysis = predictDOS(formula);
+    dosFilterResult = dosPrefilter(formula);
+
+    steps.push({
+      name: "4.0 DOS Surrogate Pre-filter",
+      status: dosFilterResult.pass ? "success" : "failed",
+      wallTimeMs: Date.now() - dosStart,
+      detail: `DOS(EF)=${dosFilterResult.dosAtFermi.toFixed(3)}, VHS=${dosFilterResult.vhsCount}, scFav=${dosFilterResult.scFavorability.toFixed(3)}, flat=${dosFilterResult.flatBandIndicator.toFixed(3)} — ${dosFilterResult.reason}`,
+    });
+
+    if (!dosFilterResult.pass) {
+      console.log(`[DOS-Prefilter] ${formula} rejected: ${dosFilterResult.reason}`);
+    }
+  } catch (e: any) {
+    steps.push({
+      name: "4.0 DOS Surrogate Pre-filter",
+      status: "skipped",
+      wallTimeMs: 0,
+      detail: `DOS pre-filter error: ${e.message?.slice(0, 200) ?? "unknown"}`,
+    });
+  }
 
   const qeAvailable = isQEAvailable();
 
@@ -362,6 +400,14 @@ export async function runQuantumEnginePipeline(
     tier,
     wallTimeMs: totalWallTime,
     timestamp: Date.now(),
+    dosPrefilter: dosFilterResult && dosAnalysis ? {
+      pass: dosFilterResult.pass,
+      vhsScore: dosAnalysis.vhsScore,
+      scFavorability: dosAnalysis.scFavorability,
+      flatBandIndicator: dosAnalysis.flatBandIndicator,
+      nestingScore: dosAnalysis.nestingScore,
+      vhsCount: dosAnalysis.vanHoveSingularities.length,
+    } : undefined,
   };
 
   if (datasetStore.length >= MAX_DATASET_SIZE) {
@@ -440,6 +486,11 @@ export async function runQuantumEnginePipeline(
   if (tier === "full-dft") pipelineStats.fullDftRuns++;
   else if (tier === "xtb") pipelineStats.xtbRuns++;
   else pipelineStats.surrogateRuns++;
+  if (dosFilterResult) {
+    pipelineStats.dosPrefilterRuns++;
+    if (dosFilterResult.pass) pipelineStats.dosPrefilterPassed++;
+    else pipelineStats.dosPrefilterRejected++;
+  }
 
   if (tc > 0) {
     pipelineStats.successCount++;
@@ -499,6 +550,14 @@ export function getQuantumEngineStats() {
     highTcCount: pipelineStats.highTcCount,
     datasetSize: datasetStore.length,
     datasetMaxSize: MAX_DATASET_SIZE,
+    dosPrefilter: {
+      runs: pipelineStats.dosPrefilterRuns,
+      passed: pipelineStats.dosPrefilterPassed,
+      rejected: pipelineStats.dosPrefilterRejected,
+      passRate: pipelineStats.dosPrefilterRuns > 0
+        ? Number((pipelineStats.dosPrefilterPassed / pipelineStats.dosPrefilterRuns * 100).toFixed(1))
+        : 0,
+    },
   };
 }
 

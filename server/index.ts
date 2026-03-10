@@ -173,16 +173,18 @@ app.use((req, res, next) => {
         }
       } catch {}
 
-      try {
-        const { startEngine } = await import("./learning/engine");
-        startEngine().then(() => {
-          log("Learning engine auto-started", "startup");
-        }).catch((err: any) => {
-          log(`Engine auto-start failed: ${err.message}`, "startup");
-        });
-      } catch (err: any) {
-        log(`Engine import failed: ${err.message}`, "startup");
-      }
+      setTimeout(async () => {
+        try {
+          const { startEngine } = await import("./learning/engine");
+          startEngine().then(() => {
+            log("Learning engine auto-started", "startup");
+          }).catch((err: any) => {
+            log(`Engine auto-start failed: ${err.message}`, "startup");
+          });
+        } catch (err: any) {
+          log(`Engine import failed: ${err.message}`, "startup");
+        }
+      }, 5000);
     } catch (err: any) {
       console.error("[startup] Fatal initialization error:", err);
     }

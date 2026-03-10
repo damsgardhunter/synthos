@@ -30,7 +30,7 @@ import {
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
 import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount } from "./learning/gradient-boost";
-import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet } from "./learning/graph-neural-net";
+import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet, getGNNPrediction } from "./learning/graph-neural-net";
 import { predictPressureCurve, findOptimalPressure, pressureSensitivity, getPressureCurveStats, getPressureExplorationStats } from "./learning/pressure-aware-surrogate";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./learning/pressure-phase-detector";
 import { computeEnthalpyPressureCurve, findStabilityPressureWindow, getEnthalpyStats } from "./learning/enthalpy-stability";
@@ -145,6 +145,7 @@ import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synth
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "./synthesis/heuristic-synthesis-generator";
 import { predictSynthesisFeasibility, getSynthesisPredictorStats } from "./synthesis/ml-synthesis-predictor";
 import { generateRetrosynthesisRoutes, getRetrosynthesisStats } from "./synthesis/retrosynthesis-engine";
+import { predictDOS, dosPrefilter, getDOSSurrogateStats, detectVanHoveSingularities, physicsHeuristicDOS, type DOSSurrogateResult } from "./physics/dos-surrogate";
 import { computeSynthesisScore } from "./learning/multi-fidelity-pipeline";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "./physics/correlation-engine";
 import {
@@ -2182,6 +2183,115 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/dos-surrogate/predict/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const useGNN = req.query.useGNN === "true";
+
+      let latent: number[] | undefined;
+      let gnnTc: number | null = null;
+
+      if (useGNN) {
+        try {
+          const singlePred = getGNNPrediction(formula);
+          const embLatent = singlePred?.latentEmbedding;
+          const hasValidLatent = embLatent && embLatent.length > 0 && embLatent.some(v => v !== 0 && isFinite(v));
+          if (hasValidLatent) latent = embLatent;
+          gnnTc = singlePred?.predictedTc ?? null;
+        } catch {}
+      }
+
+      const dosResult = predictDOS(formula, latent);
+
+      const safe = (v: number) => isFinite(v) ? Math.round(v * 10000) / 10000 : 0;
+
+      res.json({
+        formula,
+        orbitalDOS: {
+          energyGrid: dosResult.orbitalDOS.energyGrid,
+          totalDOS: dosResult.orbitalDOS.totalDOS.map(safe),
+          s: dosResult.orbitalDOS.orbitalDOS.s.map(safe),
+          p: dosResult.orbitalDOS.orbitalDOS.p.map(safe),
+          d: dosResult.orbitalDOS.orbitalDOS.d.map(safe),
+          f: dosResult.orbitalDOS.orbitalDOS.f.map(safe),
+          dosAtFermi: safe(dosResult.orbitalDOS.dosAtFermi),
+          orbitalDOSAtFermi: {
+            s: safe(dosResult.orbitalDOS.orbitalDOSAtFermi.s),
+            p: safe(dosResult.orbitalDOS.orbitalDOSAtFermi.p),
+            d: safe(dosResult.orbitalDOS.orbitalDOSAtFermi.d),
+            f: safe(dosResult.orbitalDOS.orbitalDOSAtFermi.f),
+          },
+        },
+        vanHoveSingularities: dosResult.vanHoveSingularities,
+        scores: {
+          vhsScore: safe(dosResult.vhsScore),
+          scFavorability: safe(dosResult.scFavorability),
+          flatBandIndicator: safe(dosResult.flatBandIndicator),
+          nestingScore: safe(dosResult.nestingScore),
+          orbitalMixingAtFermi: safe(dosResult.orbitalMixingAtFermi),
+        },
+        isMetallic: dosResult.isMetallic,
+        predictionTier: dosResult.predictionTier,
+        wallTimeMs: dosResult.wallTimeMs,
+        gnnTcPrediction: gnnTc,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict DOS", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/dos-surrogate/prefilter/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = dosPrefilter(formula);
+      res.json({ formula, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to run DOS pre-filter", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/dos-surrogate/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDOSSurrogateStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get DOS surrogate stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.post("/api/dos-surrogate/batch", writeLimiter, (req, res) => {
+    try {
+      const formulas: string[] = req.body?.formulas ?? [];
+      if (!Array.isArray(formulas) || formulas.length === 0) {
+        return res.status(400).json({ error: "Provide formulas array" });
+      }
+
+      const results = formulas.slice(0, 50).map(formula => {
+        const dos = predictDOS(formula);
+        return {
+          formula,
+          dosAtFermi: dos.orbitalDOS.dosAtFermi,
+          vhsScore: dos.vhsScore,
+          scFavorability: dos.scFavorability,
+          flatBandIndicator: dos.flatBandIndicator,
+          nestingScore: dos.nestingScore,
+          isMetallic: dos.isMetallic,
+          vhsCount: dos.vanHoveSingularities.length,
+          topVHS: dos.vanHoveSingularities.slice(0, 3).map(v => ({
+            energyEv: v.energyEv,
+            type: v.type,
+            dominantOrbital: v.dominantOrbital,
+            strength: v.strength,
+          })),
+          wallTimeMs: dos.wallTimeMs,
+        };
+      });
+
+      res.json({ results, count: results.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to batch predict DOS", detail: e.message?.slice(0, 200) });
+    }
+  });
+
   app.get("/api/retrosynthesis/routes/:formula", generalLimiter, (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
@@ -3279,14 +3389,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
-      initDiffusionModel();
+      await initDiffusionModel();
     } catch (e) {
       console.error("[CrystalDiffusion] Init failed:", e);
     }
     try {
-      initCrystalVAE();
+      await initCrystalVAE();
     } catch (e) {
       console.error("[CrystalVAE] Init failed:", e);
     }

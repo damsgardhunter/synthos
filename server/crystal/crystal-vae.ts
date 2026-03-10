@@ -4,9 +4,12 @@ import { buildGraphFromStructure, getGraphFeatureVector } from "./crystal-graph-
 
 const LATENT_DIM = 32;
 const HIDDEN_DIM = 64;
-const NUM_EPOCHS = 200;
-const LEARNING_RATE = 0.005;
+const NUM_EPOCHS = 300;
+const LEARNING_RATE = 0.002;
 const MOMENTUM = 0.9;
+const FREE_BITS = 0.5;
+const BETA_CYCLES = 4;
+const BETA_MAX = 0.8;
 
 const CRYSTAL_SYSTEMS = ["cubic", "tetragonal", "orthorhombic", "hexagonal", "rhombohedral", "monoclinic", "triclinic"] as const;
 const TOP_SPACEGROUPS = [225, 229, 227, 221, 223, 191, 194, 139, 129, 123, 99, 141, 62, 47, 166, 216, 217, 230, 12, 15] as const;
@@ -186,6 +189,22 @@ function klDivergence(mu: number[], logSigma: number[]): number {
   return 0.5 * kl;
 }
 
+function klDivergencePerDim(mu: number[], logSigma: number[]): number[] {
+  return mu.map((m, i) => {
+    const sigma2 = Math.exp(2 * logSigma[i]);
+    return 0.5 * (sigma2 + m * m - 1 - 2 * logSigma[i]);
+  });
+}
+
+function klWithFreeBits(mu: number[], logSigma: number[]): number {
+  const perDim = klDivergencePerDim(mu, logSigma);
+  let total = 0;
+  for (const kld of perDim) {
+    total += Math.max(FREE_BITS, kld);
+  }
+  return total;
+}
+
 function mseLoss(predicted: number[], target: number[]): number {
   let sum = 0;
   const len = Math.min(predicted.length, target.length);
@@ -237,7 +256,7 @@ function backpropMLP(
   return inputGrad;
 }
 
-function trainVAE(dataset: CrystalStructureEntry[]): void {
+async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
   if (dataset.length < 10) return;
 
   const encodedInputs: number[][] = [];
@@ -314,12 +333,19 @@ function trainVAE(dataset: CrystalStructureEntry[]): void {
 
   trainingHistory = [];
 
+  const epsilonCache: number[][] = [];
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+
   for (let epoch = 0; epoch < NUM_EPOCHS; epoch++) {
-    const beta = Math.min(1.0, 0.01 + (epoch / NUM_EPOCHS) * 0.99);
+    if (epoch % 20 === 0) await yield_();
+    const cycleLen = Math.floor(NUM_EPOCHS / BETA_CYCLES);
+    const cyclePos = epoch % cycleLen;
+    const beta = Math.min(BETA_MAX, (cyclePos / (cycleLen * 0.5)) * BETA_MAX);
+
     let totalLoss = 0;
     let totalRecon = 0;
     let totalKL = 0;
-    const lr = LEARNING_RATE * Math.max(0.1, 1.0 - epoch / (NUM_EPOCHS * 1.2));
+    const lr = LEARNING_RATE * Math.max(0.05, 1.0 - epoch / (NUM_EPOCHS * 1.5));
 
     const indices = Array.from({ length: encodedInputs.length }, (_, i) => i);
     for (let j = indices.length - 1; j > 0; j--) {
@@ -335,7 +361,8 @@ function trainVAE(dataset: CrystalStructureEntry[]): void {
       const mu = muLogSigma.slice(0, LATENT_DIM);
       const logSigma = muLogSigma.slice(LATENT_DIM);
 
-      const z = reparameterize(mu, logSigma);
+      const epsilon = Array.from({ length: LATENT_DIM }, () => gaussianRandom());
+      const z = mu.map((m, i) => m + Math.exp(logSigma[i]) * epsilon[i]);
 
       const latResult = forwardMLP(decoderLattice, z);
       const csResult = forwardMLP(decoderCS, z);
@@ -352,36 +379,56 @@ function trainVAE(dataset: CrystalStructureEntry[]): void {
       const compLoss = mseLoss(compResult.output, compositionTargets[idx]);
 
       const reconLoss = latticeLoss * 2.0 + csLoss * 0.5 + sgLoss * 0.3 + protoLoss * 0.3 + atomLoss * 0.5 + compLoss * 1.0;
-      const kl = klDivergence(mu, logSigma);
+      const kl = klWithFreeBits(mu, logSigma);
+      const rawKL = klDivergence(mu, logSigma);
       const loss = reconLoss + beta * kl;
 
       totalLoss += loss;
       totalRecon += reconLoss;
-      totalKL += kl;
+      totalKL += rawKL;
+
+      const zGrad = new Array(LATENT_DIM).fill(0);
 
       const latticeGrad = latticeTargets[idx].map((t, i) => 2.0 * (latResult.output[i] - t) / 6 * 2.0);
-      backpropMLP(decoderLattice, decLatMom, z, latResult.hidden, latticeGrad, lr);
+      const latZGrad = backpropMLP(decoderLattice, decLatMom, z, latResult.hidden, latticeGrad, lr);
+      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += latZGrad[i];
 
       const csProbs = softmax(csResult.output);
       const csGrad = csProbs.map((p, i) => (i === csTargets[idx] ? p - 1 : p) * 0.5);
-      backpropMLP(decoderCS, decCSMom, z, csResult.hidden, csGrad, lr);
+      const csZGrad = backpropMLP(decoderCS, decCSMom, z, csResult.hidden, csGrad, lr);
+      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += csZGrad[i];
 
       const sgProbs = softmax(sgResult.output);
       const sgGrad = sgProbs.map((p, i) => (i === sgTargets[idx] ? p - 1 : p) * 0.3);
-      backpropMLP(decoderSG, decSGMom, z, sgResult.hidden, sgGrad, lr);
+      const sgZGrad = backpropMLP(decoderSG, decSGMom, z, sgResult.hidden, sgGrad, lr);
+      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += sgZGrad[i];
 
       const protoProbs = softmax(protoResult.output);
       const protoGrad = protoProbs.map((p, i) => (i === protoTargets[idx] ? p - 1 : p) * 0.3);
-      backpropMLP(decoderProto, decProtoMom, z, protoResult.hidden, protoGrad, lr);
+      const protoZGrad = backpropMLP(decoderProto, decProtoMom, z, protoResult.hidden, protoGrad, lr);
+      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += protoZGrad[i];
 
       const atomGrad = [2.0 * (atomResult.output[0] - atomCountTargets[idx]) * 0.5];
-      backpropMLP(decoderAtom, decAtomMom, z, atomResult.hidden, atomGrad, lr);
+      const atomZGrad = backpropMLP(decoderAtom, decAtomMom, z, atomResult.hidden, atomGrad, lr);
+      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += atomZGrad[i];
 
       const compGrad = compositionTargets[idx].map((t, i) => 2.0 * (compResult.output[i] - t) / TOP_ELEMENTS.length * 1.0);
-      backpropMLP(decoderComp, decCompMom, z, compResult.hidden, compGrad, lr);
+      const compZGrad = backpropMLP(decoderComp, decCompMom, z, compResult.hidden, compGrad, lr);
+      for (let i = 0; i < LATENT_DIM; i++) zGrad[i] += compZGrad[i];
 
-      const muGrad = mu.map(m => beta * m);
-      const logSigmaGrad = logSigma.map(ls => beta * (Math.exp(2 * ls) - 1));
+      const klPerDim = klDivergencePerDim(mu, logSigma);
+      const muGrad = mu.map((m, i) => {
+        const reconThruReparam = zGrad[i];
+        const klGrad = klPerDim[i] >= FREE_BITS ? beta * m : 0;
+        return reconThruReparam + klGrad;
+      });
+      const logSigmaGrad = logSigma.map((ls, i) => {
+        const sigma = Math.exp(ls);
+        const reconThruReparam = zGrad[i] * epsilon[i] * sigma;
+        const klGrad = klPerDim[i] >= FREE_BITS ? beta * (Math.exp(2 * ls) - 1) : 0;
+        return reconThruReparam + klGrad;
+      });
+
       const encOutGrad = [...muGrad, ...logSigmaGrad];
       backpropMLP(encoderMLP, encMom, input, encResult.hidden, encOutGrad, lr);
     }
@@ -698,11 +745,11 @@ export function getCrystalVAEStats() {
   };
 }
 
-export function initCrystalVAE(): void {
+export async function initCrystalVAE(): Promise<void> {
   try {
     const dataset = getTrainingData();
     if (dataset.length >= 10) {
-      trainVAE(dataset);
+      await trainVAE(dataset);
     }
   } catch (err) {
     console.error("Failed to initialize Crystal VAE:", err);

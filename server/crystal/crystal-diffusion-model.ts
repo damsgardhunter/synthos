@@ -441,7 +441,7 @@ function isValidGeneration(props: ReturnType<typeof featureVectorToProperties>):
   return true;
 }
 
-export function initDiffusionModel(): void {
+export async function initDiffusionModel(): Promise<void> {
   console.log("[CrystalDiffusion] Initializing DDPM model...");
 
   initSchedule();
@@ -461,6 +461,7 @@ export function initDiffusionModel(): void {
   trainingLossHistory = [];
   let lr = LEARNING_RATE;
 
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
   for (let epoch = 0; epoch < TRAIN_EPOCHS; epoch++) {
     const loss = trainStep(scoreNetwork, trainingFeatures, lr);
     trainingLossHistory.push(loss);
@@ -468,6 +469,8 @@ export function initDiffusionModel(): void {
     if (epoch > 0 && epoch % 100 === 0) {
       lr *= 0.9;
     }
+
+    if (epoch % 50 === 0) await yield_();
 
     if (epoch % 100 === 0) {
       console.log(`[CrystalDiffusion] Epoch ${epoch}/${TRAIN_EPOCHS}, loss=${loss.toFixed(6)}, lr=${lr.toFixed(6)}`);

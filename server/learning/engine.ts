@@ -5770,6 +5770,7 @@ export function initWebSocket(server: Server) {
 }
 
 async function backfillGBScores() {
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
   try {
     let totalUpdated = 0;
     let totalFailed = 0;
@@ -5778,7 +5779,9 @@ async function backfillGBScores() {
       batch = await storage.getUnscoredCandidates(200);
       if (batch.length === 0) break;
 
-      for (const c of batch) {
+      for (let i = 0; i < batch.length; i++) {
+        if (i % 10 === 0) await yield_();
+        const c = batch[i];
         try {
           const features = extractFeatures(c.formula);
           const gb = gbPredict(features);
@@ -5817,6 +5820,7 @@ async function backfillGBScores() {
 const PHYSICS_VERSION = 14;
 
 async function recalculatePhysics() {
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
   try {
     let totalRecalculated = 0;
     const batchSize = 200;
@@ -5825,7 +5829,9 @@ async function recalculatePhysics() {
       const needsRecalc = await storage.getCandidatesNeedingPhysicsRecalc(PHYSICS_VERSION, batchSize);
       if (needsRecalc.length === 0) break;
 
-      for (const c of needsRecalc) {
+      for (let i = 0; i < needsRecalc.length; i++) {
+        if (i % 10 === 0) await yield_();
+        const c = needsRecalc[i];
         try {
           const features = extractFeatures(c.formula);
           const gb = gbPredict(features);
