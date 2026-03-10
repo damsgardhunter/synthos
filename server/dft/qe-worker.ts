@@ -152,9 +152,9 @@ function computeStructureHash(
 ): string {
   const sorted = [...positions]
     .sort((a, b) => a.element.localeCompare(b.element) || a.x - b.x || a.y - b.y || a.z - b.z)
-    .map(p => `${p.element}:${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`)
+    .map(p => `${p.element}:${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}`)
     .join("|");
-  const key = `${latticeA.toFixed(3)}|${sorted}`;
+  const key = `${latticeA.toFixed(2)}|${sorted}`;
   return crypto.createHash("md5").update(key).digest("hex");
 }
 
@@ -249,7 +249,8 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
   const packingFactor = 0.65;
   const cellVolume = totalVolume / packingFactor;
   const a = Math.cbrt(cellVolume);
-  return Math.max(a, 3.5);
+  const perturbation = 0.92 + Math.random() * 0.16;
+  return Math.max(a * perturbation, 3.5);
 }
 
 function validatePseudopotential(filePath: string): boolean {
@@ -529,6 +530,27 @@ ${autoKPoints(latticeA, cOverA)}
 `;
 }
 
+function perturbCoord(v: number, sigma: number = 0.03): number {
+  const u1 = Math.random() || 1e-10;
+  const u2 = Math.random();
+  const noise = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * sigma;
+  let result = v + noise;
+  result = result - Math.floor(result);
+  return result;
+}
+
+function perturbPositions(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  sigma: number = 0.03,
+): Array<{ element: string; x: number; y: number; z: number }> {
+  return positions.map(p => ({
+    element: p.element,
+    x: perturbCoord(p.x, sigma),
+    y: perturbCoord(p.y, sigma),
+    z: perturbCoord(p.z, sigma),
+  }));
+}
+
 function generateAtomicPositions(
   elements: string[],
   counts: Record<string, number>,
@@ -548,7 +570,7 @@ function generateAtomicPositions(
         }
         if (positions.length > 0) {
           console.log(`[QE-Worker] Using ${template.name} prototype for ${formula} (${positions.length} atoms)`);
-          return positions;
+          return perturbPositions(positions, 0.025);
         }
       }
     } catch {}
@@ -560,7 +582,7 @@ function generateAtomicPositions(
   if (totalAtoms <= 2 && elements.length === 2) {
     positions.push({ element: elements[0], x: 0, y: 0, z: 0 });
     positions.push({ element: elements[1], x: 0.5, y: 0.5, z: 0.5 });
-    return positions;
+    return perturbPositions(positions, 0.02);
   }
 
   if (totalAtoms <= 2 && elements.length === 1) {
@@ -568,7 +590,7 @@ function generateAtomicPositions(
     if (totalAtoms > 1) {
       positions.push({ element: elements[0], x: 0.5, y: 0.5, z: 0.5 });
     }
-    return positions;
+    return perturbPositions(positions, 0.02);
   }
 
   const hCount = Math.round(counts["H"] || 0);
@@ -580,16 +602,33 @@ function generateAtomicPositions(
     const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms);
     if (cagePositions.length === totalAtoms && cagePositions.length <= 16) {
       console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms)`);
-      return cagePositions;
+      return perturbPositions(cagePositions, 0.03);
     }
   }
 
-  const cubicSites = [
-    [0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5],
-    [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.25, 0.75, 0.75],
-    [0.75, 0.25, 0.75], [0.75, 0.75, 0.75], [0.25, 0.25, 0.75], [0.75, 0.25, 0.25],
-    [0.25, 0.75, 0.25], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25], [0.25, 0.25, 0.0],
+  const cubicSitesSets = [
+    [
+      [0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5],
+      [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.25, 0.75, 0.75],
+      [0.75, 0.25, 0.75], [0.75, 0.75, 0.75], [0.25, 0.25, 0.75], [0.75, 0.25, 0.25],
+      [0.25, 0.75, 0.25], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25], [0.25, 0.25, 0.0],
+    ],
+    [
+      [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5],
+      [0.5, 0.5, 0.5], [0.25, 0.25, 0.0], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25],
+      [0.75, 0.75, 0.5], [0.75, 0.5, 0.75], [0.5, 0.75, 0.75], [0.75, 0.25, 0.5],
+      [0.25, 0.75, 0.5], [0.5, 0.25, 0.75], [0.5, 0.75, 0.25], [0.75, 0.5, 0.25],
+    ],
+    [
+      [0.0, 0.0, 0.0], [0.333, 0.333, 0.0], [0.667, 0.667, 0.0],
+      [0.0, 0.0, 0.5], [0.333, 0.333, 0.5], [0.667, 0.667, 0.5],
+      [0.167, 0.167, 0.25], [0.5, 0.5, 0.25], [0.833, 0.833, 0.25],
+      [0.167, 0.167, 0.75], [0.5, 0.5, 0.75], [0.833, 0.833, 0.75],
+      [0.25, 0.0, 0.125], [0.0, 0.25, 0.375], [0.75, 0.5, 0.125], [0.5, 0.75, 0.375],
+    ],
   ];
+
+  const cubicSites = cubicSitesSets[Math.floor(Math.random() * cubicSitesSets.length)];
 
   let siteIdx = 0;
   const pendingAtoms: Array<{ element: string; remaining: number }> = [];
@@ -607,21 +646,16 @@ function generateAtomicPositions(
   }
 
   if (pendingAtoms.length > 0) {
-    const usedPositions = new Set(positions.map(p => `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`));
-    const rng = (seed: number) => {
-      let s = seed;
-      return () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
-    };
-    const rand = rng(totalAtoms * 7919 + elements.length * 104729);
+    const usedPositions = new Set(positions.map(p => `${p.x.toFixed(3)},${p.y.toFixed(3)},${p.z.toFixed(3)}`));
     for (const { element, remaining } of pendingAtoms) {
       for (let i = 0; i < remaining; i++) {
         let x: number, y: number, z: number, key: string;
         let attempts = 0;
         do {
-          x = Math.round(rand() * 20) / 20;
-          y = Math.round(rand() * 20) / 20;
-          z = Math.round(rand() * 20) / 20;
-          key = `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`;
+          x = Math.round(Math.random() * 20) / 20;
+          y = Math.round(Math.random() * 20) / 20;
+          z = Math.round(Math.random() * 20) / 20;
+          key = `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
           attempts++;
         } while (usedPositions.has(key) && attempts < 100);
         usedPositions.add(key);
@@ -631,7 +665,7 @@ function generateAtomicPositions(
     console.log(`[QE-Worker] Placed ${positions.length} atoms total (${positions.length - cubicSites.length} at generated positions)`);
   }
 
-  return positions;
+  return perturbPositions(positions, 0.03);
 }
 
 function generateHydrideCagePositions(
@@ -928,18 +962,46 @@ function validateGeometry(
   const minVolPerAtom = hasHydrogen ? 5.0 : 10.0;
   if (volumePerAtom < minVolPerAtom) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})` };
 
-  const COVALENT_R: Record<string, number> = {
-    H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
-    Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
-    K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
-    Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
-    Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
-    As: 1.19, Se: 1.20, Br: 1.20, Kr: 1.16, Rb: 2.20,
-    Tc: 1.47, Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
-    Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, I: 1.39,
-    In: 1.42, Sb: 1.39, Cs: 2.44, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
-    Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, U: 1.96, Pa: 2.00,
+  const PAIR_MIN_DIST: Record<string, number> = {
+    "H-H": 0.74,
+    "La-H": 1.80, "Ce-H": 1.80, "Y-H": 1.75, "Sc-H": 1.65,
+    "Ca-H": 1.70, "Sr-H": 1.80, "Ba-H": 1.90, "Mg-H": 1.55,
+    "Ti-H": 1.60, "Zr-H": 1.70, "Hf-H": 1.70, "Nb-H": 1.65,
+    "Th-H": 1.85, "Li-H": 1.40, "Na-H": 1.55, "K-H": 1.80,
+    "La-La": 3.20, "Ce-Ce": 3.10, "Y-Y": 3.00, "Ba-Ba": 3.50,
+    "Sr-Sr": 3.20, "Ca-Ca": 3.00,
+    "La-O": 2.20, "Y-O": 2.10, "Ba-O": 2.40, "Sr-O": 2.30, "Ca-O": 2.20,
+    "Cu-O": 1.85, "Fe-O": 1.80, "Ni-O": 1.85, "Co-O": 1.85,
+    "Cu-Cu": 2.40, "Fe-Fe": 2.30, "Ni-Ni": 2.30,
   };
+
+  function getPairMinDist(el1: string, el2: string): number {
+    const key1 = `${el1}-${el2}`;
+    const key2 = `${el2}-${el1}`;
+    if (PAIR_MIN_DIST[key1] !== undefined) return PAIR_MIN_DIST[key1];
+    if (PAIR_MIN_DIST[key2] !== undefined) return PAIR_MIN_DIST[key2];
+
+    const COVALENT_R: Record<string, number> = {
+      H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
+      Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07, S: 1.05, Cl: 1.02,
+      K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53, Cr: 1.39, Mn: 1.39,
+      Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20,
+      Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, La: 2.07, Ce: 2.04, Sr: 1.95, Ba: 2.15,
+      As: 1.19, Se: 1.20, Br: 1.20, Kr: 1.16, Rb: 2.20,
+      Tc: 1.47, Ta: 1.70, W: 1.62, Te: 1.38, Sn: 1.39,
+      Ru: 1.46, Rh: 1.42, Pd: 1.39, Ag: 1.45, Cd: 1.44, I: 1.39,
+      In: 1.42, Sb: 1.39, Cs: 2.44, Hf: 1.75, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
+      Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, U: 1.96, Pa: 2.00,
+    };
+    const r1 = COVALENT_R[el1] ?? 1.4;
+    const r2 = COVALENT_R[el2] ?? 1.4;
+    const isHPair = el1 === "H" || el2 === "H";
+    const bothH = el1 === "H" && el2 === "H";
+    if (bothH) return 0.74;
+    if (isHPair) return Math.max(0.9, (r1 + r2) * 0.55);
+    return Math.max(1.5, (r1 + r2) * 0.72);
+  }
+
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
       let fdx = positions[i].x - positions[j].x;
@@ -952,11 +1014,7 @@ function validateGeometry(
       const dy = fdy * latticeA;
       const dz = fdz * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const r1 = COVALENT_R[positions[i].element] ?? 1.4;
-      const r2 = COVALENT_R[positions[j].element] ?? 1.4;
-      const isHPair = positions[i].element === "H" || positions[j].element === "H";
-      const factor = isHPair ? 0.70 : 0.80;
-      const minDist = Math.max((r1 + r2) * factor, isHPair ? 0.6 : 0.9);
+      const minDist = getPairMinDist(positions[i].element, positions[j].element);
       if (dist < minDist) {
         return { valid: false, reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(2)} A (min ${minDist.toFixed(2)})` };
       }
