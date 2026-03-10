@@ -26,6 +26,9 @@ const REGEX_FAMILIES: Record<string, RegExp> = {
   "Layered-chalcogenide": /(?:Nb|Ta|Mo|W|Ti|Zr|Hf|V|Re)(?:Se|S|Te)2|(?:Li|Na|K|Ca|Sr|Cu)(?:Nb|Ta|Mo|W|Ti)(?:Se|S|Te)2/i,
   "Layered-pnictide": /(?:La|Ce|Pr|Nd|Sm|Gd|Y)(?:Fe|Co|Ni|Mn|Cr)(?:As|P|Sb)(?:O|F)|(?:Ba|Sr|Ca)(?:Fe|Co|Ni)2(?:As|P)2/i,
   "Intercalated-layered": /(?:Li|Na|K|Ca|Rb|Cs|Cu|Ag|NH4|TMA).*(?:Se|S|Te)2|(?:Li|Na|K|Rb|Cs)C(?:6|8|12)/i,
+  "Nickelates": /(?:La|Nd|Pr|Sm|Gd|Y)NiO|(?:La|Nd|Pr).*Ni.*O|nickelate/i,
+  "Borocarbides": /(?:Y|Lu|Er|Ho|Dy|Tm|Sc)Ni2B2C|(?:La|Ce|Pr|Nd)Ni2B2C|borocarbide/i,
+  "Clathrates": /(?:Ba|Sr|K|Na|Eu).*(?:Si|Ge|Sn).*(?:46|clathrate)|clathrate/i,
 };
 
 export function classifyFamily(formula: string): string {
@@ -38,6 +41,8 @@ export function classifyFamily(formula: string): string {
   const has = (el: string) => (counts[el] ?? 0) > 0;
   const hasMetal = elements.some(el => METALS.has(el));
 
+  if (has("Ni") && has("O") && elements.some(el => ["La","Nd","Pr","Sm","Gd","Y"].includes(el))) return "Nickelates";
+  if (has("B") && has("C") && has("Ni") && hasMetal) return "Borocarbides";
   if (has("H") && hasMetal && !has("O") && !has("S") && !has("Se") && elements.length <= 3) return "Hydrides";
   if (has("S") && hasMetal && !has("O") && !has("Se") && !has("Te")) return "Sulfides";
   if (has("B") && hasMetal && !has("O") && !has("N")) return "Borides";

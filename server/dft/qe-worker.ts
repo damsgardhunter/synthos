@@ -1067,24 +1067,30 @@ function validateGeometry(
   const minVolPerAtom = hasHydrogen ? 5.0 : 10.0;
   if (volumePerAtom < minVolPerAtom) return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom})` };
 
-  const PAIR_MIN_DIST: Record<string, number> = {
+  const PAIR_MIN_DIST_AMBIENT: Record<string, number> = {
     "H-H": 0.74,
-    "La-H": 1.80, "Ce-H": 1.80, "Y-H": 1.75, "Sc-H": 1.65,
-    "Ca-H": 1.70, "Sr-H": 1.80, "Ba-H": 1.90, "Mg-H": 1.55,
-    "Ti-H": 1.60, "Zr-H": 1.70, "Hf-H": 1.70, "Nb-H": 1.65,
-    "Th-H": 1.85, "Li-H": 1.40, "Na-H": 1.55, "K-H": 1.80,
-    "La-La": 3.20, "Ce-Ce": 3.10, "Y-Y": 3.00, "Ba-Ba": 3.50,
-    "Sr-Sr": 3.20, "Ca-Ca": 3.00,
-    "La-O": 2.20, "Y-O": 2.10, "Ba-O": 2.40, "Sr-O": 2.30, "Ca-O": 2.20,
-    "Cu-O": 1.85, "Fe-O": 1.80, "Ni-O": 1.85, "Co-O": 1.85,
-    "Cu-Cu": 2.40, "Fe-Fe": 2.30, "Ni-Ni": 2.30,
+    "La-H": 1.55, "Ce-H": 1.55, "Y-H": 1.50, "Sc-H": 1.45,
+    "Ca-H": 1.50, "Sr-H": 1.55, "Ba-H": 1.60, "Mg-H": 1.40,
+    "Ti-H": 1.45, "Zr-H": 1.50, "Hf-H": 1.50, "Nb-H": 1.45,
+    "Th-H": 1.55, "Li-H": 1.30, "Na-H": 1.40, "K-H": 1.55,
+    "La-La": 3.00, "Ce-Ce": 2.90, "Y-Y": 2.80, "Ba-Ba": 3.20,
+    "Sr-Sr": 3.00, "Ca-Ca": 2.80,
+    "La-O": 2.10, "Y-O": 2.00, "Ba-O": 2.30, "Sr-O": 2.20, "Ca-O": 2.10,
+    "Cu-O": 1.80, "Fe-O": 1.75, "Ni-O": 1.80, "Co-O": 1.80,
+    "Cu-Cu": 2.30, "Fe-Fe": 2.20, "Ni-Ni": 2.20,
   };
+
+  const isHighPressure = hasHydrogen && volumePerAtom < 8.0;
+  const pressureFactor = isHighPressure ? 0.80 : 1.0;
 
   function getPairMinDist(el1: string, el2: string): number {
     const key1 = `${el1}-${el2}`;
     const key2 = `${el2}-${el1}`;
-    if (PAIR_MIN_DIST[key1] !== undefined) return PAIR_MIN_DIST[key1];
-    if (PAIR_MIN_DIST[key2] !== undefined) return PAIR_MIN_DIST[key2];
+    let baseDist: number | undefined;
+    if (PAIR_MIN_DIST_AMBIENT[key1] !== undefined) baseDist = PAIR_MIN_DIST_AMBIENT[key1];
+    else if (PAIR_MIN_DIST_AMBIENT[key2] !== undefined) baseDist = PAIR_MIN_DIST_AMBIENT[key2];
+
+    if (baseDist !== undefined) return baseDist * pressureFactor;
 
     const COVALENT_R: Record<string, number> = {
       H: 0.31, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71, O: 0.66, F: 0.57,
@@ -1102,9 +1108,9 @@ function validateGeometry(
     const r2 = COVALENT_R[el2] ?? 1.4;
     const isHPair = el1 === "H" || el2 === "H";
     const bothH = el1 === "H" && el2 === "H";
-    if (bothH) return 0.74;
-    if (isHPair) return Math.max(0.9, (r1 + r2) * 0.55);
-    return Math.max(1.5, (r1 + r2) * 0.72);
+    if (bothH) return 0.60 * pressureFactor;
+    if (isHPair) return Math.max(0.7, (r1 + r2) * 0.45) * pressureFactor;
+    return Math.max(1.3, (r1 + r2) * 0.65) * pressureFactor;
   }
 
   for (let i = 0; i < positions.length; i++) {
@@ -1216,26 +1222,28 @@ function tryXTBPreRelaxation(
     const lines = optContent.trim().split("\n");
     if (lines.length < 3) return null;
 
+    const effectiveLattice = latticeA * scale;
     const relaxed: Array<{ element: string; x: number; y: number; z: number }> = [];
     for (let i = 2; i < lines.length; i++) {
       const parts = lines[i].trim().split(/\s+/);
       if (parts.length >= 4) {
         relaxed.push({
           element: parts[0],
-          x: parseFloat(parts[1]) / latticeA,
-          y: parseFloat(parts[2]) / latticeA,
-          z: parseFloat(parts[3]) / latticeA,
+          x: parseFloat(parts[1]) / effectiveLattice,
+          y: parseFloat(parts[2]) / effectiveLattice,
+          z: parseFloat(parts[3]) / effectiveLattice,
         });
       }
     }
 
     if (relaxed.length === positions.length) {
-      console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${positions.length} atoms`);
+      console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${positions.length} atoms (scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A)`);
       return relaxed;
     }
+    console.log(`[QE-Worker] xTB pre-relaxation atom count mismatch: got ${relaxed.length}, expected ${positions.length}`);
     return null;
   } catch (err: any) {
-    console.log(`[QE-Worker] xTB pre-relaxation failed: ${err.message?.slice(0, 100)}`);
+    console.log(`[QE-Worker] xTB pre-relaxation failed for ${positions.length} atoms: ${err.message?.slice(0, 150)}`);
     return null;
   }
 }

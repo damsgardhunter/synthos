@@ -252,18 +252,21 @@ const KNOWN_COMPOUNDS = new Set<string>([
 ]);
 
 const FAMILY_CAPS: Record<string, number> = {
-  Hydrides: 0.25,
+  Hydrides: 0.15,
   Carbides: 0.12,
-  Nitrides: 0.10,
-  Borides: 0.10,
-  Chalcogenides: 0.10,
-  Oxides: 0.10,
-  Sulfides: 0.08,
-  Pnictides: 0.10,
+  Nitrides: 0.12,
+  Borides: 0.12,
+  Chalcogenides: 0.12,
+  Oxides: 0.12,
+  Sulfides: 0.10,
+  Pnictides: 0.12,
   Intermetallics: 0.12,
-  Kagome: 0.08,
-  Alloys: 0.10,
-  Cuprates: 0.10,
+  Kagome: 0.10,
+  Alloys: 0.12,
+  Cuprates: 0.12,
+  Nickelates: 0.10,
+  Borocarbides: 0.08,
+  Clathrates: 0.08,
 };
 let lastActiveLearningCycle = 0;
 let recentTcImproved = false;
