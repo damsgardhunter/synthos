@@ -192,12 +192,10 @@ function computeStructureFingerprint(
     .sort()
     .join(",");
 
-  const RDF_BINS = 20;
-  const RDF_MAX = latticeA * 0.75;
-  const binWidth = RDF_MAX / RDF_BINS;
-  const rdfHist = new Float64Array(RDF_BINS);
+  const labeledDistances: string[] = [];
+  const coordCounts: number[] = new Array(n).fill(0);
+  const coordCutoff = latticeA * 0.4;
 
-  const pairDistances: number[] = [];
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       let fdx = positions[i].x - positions[j].x;
@@ -210,70 +208,25 @@ function computeStructureFingerprint(
       const dy = fdy * latticeA;
       const dz = fdz * latticeA;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      pairDistances.push(dist);
 
-      const bin = Math.floor(dist / binWidth);
-      if (bin >= 0 && bin < RDF_BINS) {
-        rdfHist[bin]++;
-      }
-    }
-  }
+      const [elA, elB] = [positions[i].element, positions[j].element].sort();
+      labeledDistances.push(`${elA}-${elB}:${(Math.round(dist * 20) / 20).toFixed(2)}`);
 
-  const rdfTotal = rdfHist.reduce((s, v) => s + v, 0) || 1;
-  const rdfFingerprint = Array.from(rdfHist)
-    .map(v => (v / rdfTotal).toFixed(3))
-    .join(",");
-
-  const coulombEigenvalues: number[] = [];
-  if (n <= 16) {
-    const cm = Array.from({ length: n }, () => new Float64Array(n));
-    let pairIdx = 0;
-    for (let i = 0; i < n; i++) {
-      const zi = ATOMIC_NUMBER[positions[i].element] ?? 10;
-      cm[i][i] = 0.5 * Math.pow(zi, 2.4);
-      for (let j = i + 1; j < n; j++) {
-        const zj = ATOMIC_NUMBER[positions[j].element] ?? 10;
-        const dist = pairDistances[pairIdx++] ?? 1.0;
-        const val = dist > 0.01 ? (zi * zj) / dist : 0;
-        cm[i][j] = val;
-        cm[j][i] = val;
-      }
-    }
-
-    const eigenvalues = approximateEigenvalues(cm, n);
-    eigenvalues.sort((a, b) => b - a);
-    coulombEigenvalues.push(...eigenvalues);
-  }
-
-  const cmFingerprint = coulombEigenvalues
-    .map(v => v.toFixed(1))
-    .join(",");
-
-  const coordCounts: number[] = new Array(n).fill(0);
-  const coordCutoff = latticeA * 0.4;
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      let fdx = positions[i].x - positions[j].x;
-      let fdy = positions[i].y - positions[j].y;
-      let fdz = positions[i].z - positions[j].z;
-      fdx -= Math.round(fdx);
-      fdy -= Math.round(fdy);
-      fdz -= Math.round(fdz);
-      const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
       if (dist < coordCutoff) {
         coordCounts[i]++;
         coordCounts[j]++;
       }
     }
   }
+
+  labeledDistances.sort();
   const coordProfile = coordCounts.sort((a, b) => a - b).join(",");
 
   const fingerprintStr = [
     `comp=${composition}`,
-    `lat=${latticeA.toFixed(1)}`,
+    `lat=${(Math.round(latticeA * 20) / 20).toFixed(2)}`,
     `n=${n}`,
-    `rdf=${rdfFingerprint}`,
-    `cm=${cmFingerprint}`,
+    `dists=${labeledDistances.join(";")}`,
     `coord=${coordProfile}`,
   ].join("|");
 
@@ -1466,11 +1419,15 @@ function tryXTBPreRelaxation(
     if (!fs.existsSync(XTB_BIN)) return null;
 
     const scale = pressureGpa > 0 ? computePressureScale(pressureGpa) : 1.0;
+    const effectiveLattice = latticeA * scale;
     const xyzPath = path.join(workDir, "pre_relax.xyz");
     const nAtoms = positions.length;
     let xyzContent = `${nAtoms}\npre-relaxation${pressureGpa > 0 ? ` @ ${pressureGpa} GPa` : ""}\n`;
     for (const pos of positions) {
-      xyzContent += `${pos.element}  ${(pos.x * latticeA * scale).toFixed(6)}  ${(pos.y * latticeA * scale).toFixed(6)}  ${(pos.z * latticeA * scale).toFixed(6)}\n`;
+      const cx = pos.x * effectiveLattice;
+      const cy = pos.y * effectiveLattice;
+      const cz = pos.z * effectiveLattice;
+      xyzContent += `${pos.element}  ${cx.toFixed(6)}  ${cy.toFixed(6)}  ${cz.toFixed(6)}\n`;
     }
     fs.writeFileSync(xyzPath, xyzContent);
 
@@ -1494,26 +1451,71 @@ function tryXTBPreRelaxation(
     const lines = optContent.trim().split("\n");
     if (lines.length < 3) return null;
 
-    const effectiveLattice = latticeA * scale;
     const relaxed: Array<{ element: string; x: number; y: number; z: number }> = [];
     for (let i = 2; i < lines.length; i++) {
       const parts = lines[i].trim().split(/\s+/);
       if (parts.length >= 4) {
-        relaxed.push({
-          element: parts[0],
-          x: parseFloat(parts[1]) / effectiveLattice,
-          y: parseFloat(parts[2]) / effectiveLattice,
-          z: parseFloat(parts[3]) / effectiveLattice,
-        });
+        let fx = parseFloat(parts[1]) / effectiveLattice;
+        let fy = parseFloat(parts[2]) / effectiveLattice;
+        let fz = parseFloat(parts[3]) / effectiveLattice;
+        fx = fx - Math.floor(fx);
+        fy = fy - Math.floor(fy);
+        fz = fz - Math.floor(fz);
+        relaxed.push({ element: parts[0], x: fx, y: fy, z: fz });
       }
     }
 
-    if (relaxed.length === positions.length) {
-      console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${positions.length} atoms (scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A)`);
-      return relaxed;
+    if (relaxed.length !== positions.length) {
+      console.log(`[QE-Worker] xTB pre-relaxation atom count mismatch: got ${relaxed.length}, expected ${positions.length}`);
+      return null;
     }
-    console.log(`[QE-Worker] xTB pre-relaxation atom count mismatch: got ${relaxed.length}, expected ${positions.length}`);
-    return null;
+
+    const MAX_FRAC_DISPLACEMENT = 0.35;
+    let maxDisp = 0;
+    let maxDispAtom = -1;
+    for (let i = 0; i < relaxed.length; i++) {
+      let dx = relaxed[i].x - positions[i].x;
+      let dy = relaxed[i].y - positions[i].y;
+      let dz = relaxed[i].z - positions[i].z;
+      dx -= Math.round(dx);
+      dy -= Math.round(dy);
+      dz -= Math.round(dz);
+      const disp = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (disp > maxDisp) {
+        maxDisp = disp;
+        maxDispAtom = i;
+      }
+    }
+    if (maxDisp > MAX_FRAC_DISPLACEMENT) {
+      console.log(`[QE-Worker] xTB pre-relax rejected: atom ${maxDispAtom} (${relaxed[maxDispAtom]?.element}) displaced ${maxDisp.toFixed(3)} frac units (max ${MAX_FRAC_DISPLACEMENT}) — molecular optimizer likely collapsed structure`);
+      return null;
+    }
+
+    let minDist = Infinity;
+    let minPair = "";
+    for (let i = 0; i < relaxed.length; i++) {
+      for (let j = i + 1; j < relaxed.length; j++) {
+        let fdx = relaxed[i].x - relaxed[j].x;
+        let fdy = relaxed[i].y - relaxed[j].y;
+        let fdz = relaxed[i].z - relaxed[j].z;
+        fdx -= Math.round(fdx);
+        fdy -= Math.round(fdy);
+        fdz -= Math.round(fdz);
+        const dist = Math.sqrt((fdx * effectiveLattice) ** 2 + (fdy * effectiveLattice) ** 2 + (fdz * effectiveLattice) ** 2);
+        if (dist < minDist) {
+          minDist = dist;
+          minPair = `${relaxed[i].element}-${relaxed[j].element}`;
+        }
+      }
+    }
+    const ABS_MIN_DIST = 0.5;
+    if (minDist < ABS_MIN_DIST) {
+      console.log(`[QE-Worker] xTB pre-relax rejected: ${minPair} distance ${minDist.toFixed(3)} A < ${ABS_MIN_DIST} A absolute minimum — molecular optimizer collapsed atoms`);
+      return null;
+    }
+
+    console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${nAtoms} atoms (scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A, maxDisp=${maxDisp.toFixed(3)} frac, minDist=${minDist.toFixed(3)} A [${minPair}])`);
+    return relaxed;
   } catch (err: any) {
     console.log(`[QE-Worker] xTB pre-relaxation failed for ${positions.length} atoms: ${err.message?.slice(0, 150)}`);
     return null;
@@ -1918,6 +1920,16 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       if (proto) result.prototypeUsed = proto.template.name;
     } catch {}
 
+    const preXtbFingerprint = computeStructureFingerprint(positions, latticeA);
+    if (isStructureDuplicate(preXtbFingerprint, formula)) {
+      result.error = `Duplicate structure (fingerprint=${preXtbFingerprint.slice(0, 8)})`;
+      result.failureStage = "duplicate";
+      result.rejectionReason = "Duplicate structure fingerprint already computed";
+      stageFailureCounts.duplicate++;
+      console.log(`[QE-Worker] ${formula} skipped: duplicate structure before xTB (fingerprint=${preXtbFingerprint.slice(0, 12)})`);
+      return result;
+    }
+
     const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
     result.xtbPreRelaxed = !!relaxed;
     if (relaxed) {
@@ -1937,16 +1949,6 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       }
     } else {
       console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
-    }
-
-    const fingerprint = computeStructureFingerprint(positions, latticeA);
-    if (isStructureDuplicate(fingerprint, formula)) {
-      result.error = `Duplicate structure (fingerprint=${fingerprint.slice(0, 8)})`;
-      result.failureStage = "duplicate";
-      result.rejectionReason = "Duplicate structure fingerprint already computed";
-      stageFailureCounts.duplicate++;
-      console.log(`[QE-Worker] ${formula} skipped: duplicate structure (fingerprint=${fingerprint.slice(0, 12)})`);
-      return result;
     }
 
     const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
