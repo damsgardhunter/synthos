@@ -277,6 +277,33 @@ function validatePseudopotential(filePath: string): boolean {
   }
 }
 
+const SEMICORE_REQUIRED: Set<string> = new Set([
+  "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+  "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag",
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
+  "Ba", "Sr", "Ca", "K", "Na",
+  "Th", "U", "Pu",
+]);
+
+function validateSemicorePP(element: string, ppPath: string): boolean {
+  if (!SEMICORE_REQUIRED.has(element)) return true;
+  try {
+    const fd = fs.openSync(ppPath, "r");
+    const buf = Buffer.alloc(2048);
+    fs.readSync(fd, buf, 0, 2048, 0);
+    fs.closeSync(fd);
+    const header = buf.toString("utf-8").toLowerCase();
+    if (header.includes("rrkjus") && !header.includes("spn") && !header.includes("spfn") && !header.includes("spdn")) {
+      console.log(`[QE-Worker] WARNING: PP for ${element} appears to lack semicore states (rrkjus without sp*). Re-downloading semicore version.`);
+      return false;
+    }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 function cleanupPseudoDir(): void {
   if (!fs.existsSync(QE_PSEUDO_DIR)) return;
   const entries = fs.readdirSync(QE_PSEUDO_DIR);
@@ -352,17 +379,18 @@ function ensurePseudopotential(element: string): string {
   }
 
   const ppFile = path.join(QE_PSEUDO_DIR, `${element}.UPF`);
-  if (fs.existsSync(ppFile) && validatePseudopotential(ppFile)) {
+  if (fs.existsSync(ppFile) && validatePseudopotential(ppFile) && validateSemicorePP(element, ppFile)) {
     return ppFile;
   }
 
   if (fs.existsSync(ppFile)) {
-    console.log(`[QE-Worker] Invalid PP for ${element} (${fs.statSync(ppFile).size} bytes), removing`);
+    const reason = !validatePseudopotential(ppFile) ? "invalid" : "missing semicore states";
+    console.log(`[QE-Worker] PP for ${element} rejected (${reason}, ${fs.statSync(ppFile).size} bytes), removing`);
     try { fs.unlinkSync(ppFile); } catch {}
   }
 
   const sourceFile = path.join(PP_SOURCE_DIR, `${element}.UPF`);
-  if (fs.existsSync(sourceFile) && validatePseudopotential(sourceFile)) {
+  if (fs.existsSync(sourceFile) && validatePseudopotential(sourceFile) && validateSemicorePP(element, sourceFile)) {
     fs.copyFileSync(sourceFile, ppFile);
     console.log(`[QE-Worker] Copied valid PP for ${element} from repo (${fs.statSync(ppFile).size} bytes)`);
     return ppFile;
@@ -585,7 +613,7 @@ ${celldmLines}  nat = ${totalAtoms},
 ${startingMagLines}/
 &ELECTRONS
   electron_maxstep = 200,
-  conv_thr = 1.0d-4,
+  conv_thr = 1.0d-10,
   mixing_beta = 0.3,
   mixing_mode = 'plain',
   diagonalization = 'david',
@@ -859,18 +887,24 @@ function generateHydrideCagePositions(
   return positions;
 }
 
-function generatePhononInput(formula: string): string {
+function autoPhononQGrid(elements: string[]): [number, number, number] {
+  const hasHydrogen = elements.includes("H");
+  if (hasHydrogen) return [6, 6, 6];
+  return [4, 4, 4];
+}
+
+function generatePhononInput(formula: string, elements: string[] = []): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
-  return `Phonon calculation at Gamma
+  const [nq1, nq2, nq3] = autoPhononQGrid(elements);
+  return `Phonon dispersions on ${nq1}x${nq2}x${nq3} grid
 &INPUTPH
   prefix = '${prefix}',
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
-  tr2_ph = 1.0d-12,
-  ldisp = .false.,
-  nq1 = 1, nq2 = 1, nq3 = 1,
+  tr2_ph = 1.0d-14,
+  ldisp = .true.,
+  nq1 = ${nq1}, nq2 = ${nq2}, nq3 = ${nq3},
 /
-0.0 0.0 0.0
 `;
 }
 
@@ -1471,10 +1505,10 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     result.kPoints = autoKPoints(latticeA, cOverA).trim();
 
     const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
-      { mixingBeta: 0.3, maxSteps: 200, diag: "david", convThr: "1.0d-4", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
-      { mixingBeta: 0.2, maxSteps: 300, diag: "david", ecutwfcBoost: 10, convThr: "5.0d-5", forcConvThr: "5.0d-3", etotConvThr: "5.0d-5" },
-      { mixingBeta: 0.15, maxSteps: 400, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      { mixingBeta: 0.1, maxSteps: 400, diag: "cg", smearing: "mp", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.3, maxSteps: 300, diag: "david", convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
+      { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
+      { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
     ];
 
     let scfConverged = false;
@@ -1581,7 +1615,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     }
 
     if (scfUsable) {
-      const phInput = generatePhononInput(formula);
+      const phInput = generatePhononInput(formula, elements);
       const phInputFile = path.join(jobDir, "ph.in");
       fs.writeFileSync(phInputFile, phInput);
 
