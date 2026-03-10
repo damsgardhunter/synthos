@@ -9,7 +9,10 @@ const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 const WORK_DIR = "/tmp/dft_calculations";
 const DISPLACEMENT_DELTA = 0.01;
+const DISPLACEMENT_DELTA_BOHR = DISPLACEMENT_DELTA / 0.529177210903;
 const PHONON_TIMEOUT_MS = 90_000;
+const MAX_PHYSICAL_FREQ_CM1 = 5000;
+const MAX_FC_ENTRY = 50.0;
 
 interface AtomPosition {
   element: string;
@@ -199,7 +202,11 @@ function buildForceConstantMatrix(
 
       const colIdx = atomIdx * 3 + dir;
       for (let j = 0; j < dim; j++) {
-        matrix[j][colIdx] = -(plusForces[j] - minusForces[j]) / (2 * DISPLACEMENT_DELTA);
+        let fc = -(plusForces[j] - minusForces[j]) / (2 * DISPLACEMENT_DELTA_BOHR);
+        if (Math.abs(fc) > MAX_FC_ENTRY) {
+          fc = Math.sign(fc) * MAX_FC_ENTRY;
+        }
+        matrix[j][colIdx] = fc;
       }
     }
   }
@@ -327,18 +334,18 @@ function eigenvaluesSymmetric(matrix: number[][]): number[] {
 }
 
 function eigenvaluesToFrequencies(eigenvalues: number[]): number[] {
-  const HA_PER_BOHR2_TO_EV_PER_ANG2 = 27.2114 / (0.529177 * 0.529177);
-  const AMU_TO_EV_S2_PER_ANG2 = 1.03642698e-4;
-  const EV_TO_CM1 = 8065.54;
-
+  const CONV = 521.471;
   return eigenvalues.map(ev => {
-    const scaledEv = ev * HA_PER_BOHR2_TO_EV_PER_ANG2 / AMU_TO_EV_S2_PER_ANG2;
-    if (scaledEv < 0) {
-      const freq = -Math.sqrt(Math.abs(scaledEv));
-      return freq * Math.sqrt(1.0) * 521.471;
+    let freq: number;
+    if (ev < 0) {
+      freq = -Math.sqrt(Math.abs(ev)) * CONV;
+    } else {
+      freq = Math.sqrt(ev) * CONV;
     }
-    const freq = Math.sqrt(scaledEv);
-    return freq * Math.sqrt(1.0) * 521.471;
+    if (Math.abs(freq) > MAX_PHYSICAL_FREQ_CM1) {
+      freq = Math.sign(freq) * MAX_PHYSICAL_FREQ_CM1;
+    }
+    return freq;
   });
 }
 
@@ -410,7 +417,8 @@ function interpolateQPoints(
 export function computePhononDOS(frequencies: number[]): { dos: PhononDOSBin[]; omegaLog: number | null; lambdaContribution: number | null } {
   if (frequencies.length === 0) return { dos: [], omegaLog: null, lambdaContribution: null };
 
-  const allFreqs = frequencies.filter(f => Number.isFinite(f));
+  const allFreqs = frequencies.filter(f => Number.isFinite(f) && Math.abs(f) <= MAX_PHYSICAL_FREQ_CM1);
+  if (allFreqs.length === 0) return { dos: [], omegaLog: null, lambdaContribution: null };
   const minFreq = Math.min(...allFreqs);
   const maxFreq = Math.max(...allFreqs);
 
@@ -477,9 +485,13 @@ export function assessDynamicStability(dispersion: PhononDispersionPoint[]): {
   const ACOUSTIC_THRESHOLD = -50;
   const ARTIFACT_THRESHOLD = -2000;
   const PHYSICAL_INSTABILITY_THRESHOLD = -100;
+  const POSITIVE_ARTIFACT_THRESHOLD = MAX_PHYSICAL_FREQ_CM1;
 
   for (const point of dispersion) {
     for (const freq of point.frequencies) {
+      if (freq >= POSITIVE_ARTIFACT_THRESHOLD) {
+        artifactCount++;
+      }
       if (freq < ACOUSTIC_THRESHOLD) {
         imaginaryCount++;
         if (freq < worstFreq) {
@@ -592,8 +604,8 @@ export async function computeFiniteDisplacementPhonons(
     const lowestFreq = allDispersionFreqs.length > 0 ? Math.min(...allDispersionFreqs) : 0;
     const rawHighestFreq = allDispersionFreqs.length > 0 ? Math.max(...allDispersionFreqs) : 0;
     const highestFreq = rawHighestFreq;
-    if (rawHighestFreq > 8000) {
-      console.log(`[Phonon] ${formula}: WARNING — highest frequency ${rawHighestFreq.toFixed(0)} cm⁻¹ exceeds physical range, likely numerical artifact`);
+    if (rawHighestFreq >= MAX_PHYSICAL_FREQ_CM1) {
+      console.log(`[Phonon] ${formula}: ARTIFACT CLAMPED — highest raw frequency ${rawHighestFreq.toFixed(0)} cm⁻¹ exceeds ${MAX_PHYSICAL_FREQ_CM1} cm⁻¹ physical limit, clamped to ±${MAX_PHYSICAL_FREQ_CM1}`);
     }
 
     const wallTime = (Date.now() - startTime) / 1000;
