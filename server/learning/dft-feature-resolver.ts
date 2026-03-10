@@ -176,7 +176,7 @@ function computeAnalyticalFallbacks(formula: string): {
     if (hopfieldEta && hopfieldEta > 0) {
       const omega2 = (debyeTemp * 0.695) ** 2;
       lambda = (dosAtFermi * hopfieldEta) / (avgMass * omega2) * 1e4;
-      lambda = Math.min(Math.max(lambda, 0.1), 3.0);
+      lambda = Math.min(Math.max(lambda, 0.1), 5.0);
     }
   }
 

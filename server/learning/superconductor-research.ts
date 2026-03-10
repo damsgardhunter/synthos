@@ -205,10 +205,6 @@ export async function runSuperconductorResearch(
     };
     if (candidate.predictedTc != null) {
       candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula, capEvidence);
-      if (candidate.predictedTc > 80 && lambdaML < 1.5) {
-        const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
-        candidate.predictedTc = Math.round(candidate.predictedTc * penalty);
-      }
     }
     const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML, formula, capEvidence);
 
@@ -817,10 +813,6 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
       const lambdaML = features.electronPhononLambda ?? 0;
       const pressureML = c.pressureGpa ?? 0;
       const metallicityML = features.metallicity ?? 0.5;
-      if (cappedTc > 80 && lambdaML < 1.5) {
-        const penalty = lambdaML < 0.5 ? 0.15 : lambdaML < 1.0 ? 0.25 : 0.3;
-        cappedTc = Math.round(cappedTc * penalty);
-      }
       const invDesEvidence: CapExtensionEvidence = {
         eliashbergLambda: pairingSusc.lambda > 0 ? pairingSusc.lambda : undefined,
         eliashbergTc: cappedTc > 0 ? cappedTc : undefined,

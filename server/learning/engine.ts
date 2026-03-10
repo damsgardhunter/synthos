@@ -14,7 +14,7 @@ import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeig
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats, incorporateDFTFeedbackIntoPillars, getPillarDFTFeedbackStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor, allenDynesTcRaw } from "./physics-engine";
 import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
@@ -1105,22 +1105,13 @@ function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): 
   return Math.round(tc);
 }
 
-function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined): number {
+function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined, muStar?: number): number {
   const freq = logPhononFreq ?? 200;
-  let rawTc = Math.round(lambdaML * 45 + freq * 0.05);
+  const mu = muStar ?? 0.1;
+  const lambda = Math.max(0.001, lambdaML);
 
-  const sigmoidBlend = 1 / (1 + Math.exp(-0.15 * (rawTc - 80)));
-
-  const lambdaPenaltyBase = 0.15 + 0.15 / (1 + Math.exp(-5 * (lambdaML - 0.75)));
-
-  const lambdaShield = 1 / (1 + Math.exp(-8 * (lambdaML - 1.5)));
-
-  const penaltyStrength = sigmoidBlend * (1 - lambdaShield);
-
-  const dampedTc = rawTc * lambdaPenaltyBase;
-  rawTc = Math.round(rawTc * (1 - penaltyStrength) + dampedTc * penaltyStrength);
-
-  return Math.max(0, Math.min(400, rawTc));
+  const tc = allenDynesTcRaw(lambda, freq, mu);
+  return Math.max(0, Math.round(tc));
 }
 
 async function reEvaluateTopCandidates() {
@@ -6050,51 +6041,12 @@ async function recalculatePhysics() {
           const isHighPressure = pressure >= 50;
           const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressure - 10) / 40;
 
-          const recalcFamily = classifyFamily(c.formula);
-          const RECALC_FAMILY_CAPS: Record<string, { ambient: number; hp: number }> = {
-            Carbides: { ambient: 45, hp: 80 },
-            Nitrides: { ambient: 50, hp: 90 },
-            Borides: { ambient: 55, hp: 120 },
-            Oxides: { ambient: 40, hp: 70 },
-          };
-
-          let tcCap: number;
-          if (metalScore < 0.3) {
-            tcCap = Math.min(20, mcMillanMax * 0.1 || 10);
-          } else if (metalScore < 0.5) {
-            tcCap = Math.min(80, mcMillanMax * 0.3 || 40);
-          } else if (corrStr > 0.85) {
-            tcCap = Math.min(80, mcMillanMax * 0.3 || 30);
-          } else if (corrStr > 0.7) {
-            tcCap = Math.min(200, mcMillanMax * 0.5 || 80);
-          } else if (featureLambda < 0.3) {
-            tcCap = Math.min(50, mcMillanMax > 0 ? mcMillanMax * 2.0 : 30);
-          } else if (featureLambda < 0.5) {
-            tcCap = Math.min(80, mcMillanMax > 0 ? mcMillanMax * 2.0 : 50);
-          } else if (featureLambda < 1.0) {
-            const hpCap = Math.min(150, mcMillanMax > 0 ? mcMillanMax * 1.8 : 100);
-            tcCap = 80 + (hpCap - 80) * pressureFactor;
-          } else if (featureLambda < 1.5) {
-            const hpCap = mcMillanMax > 0 ? Math.min(250, mcMillanMax * 1.5) : 150;
-            tcCap = 120 + (hpCap - 120) * pressureFactor;
-          } else if (featureLambda < 2.5) {
-            const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.3) : 250;
-            tcCap = 160 + (hpCap - 160) * pressureFactor;
-          } else {
-            const hpCap = mcMillanMax > 0 ? Math.min(350, mcMillanMax * 1.2) : 300;
-            tcCap = 200 + (hpCap - 200) * pressureFactor;
-          }
-          tcCap = Math.round(tcCap);
-
-          if (RECALC_FAMILY_CAPS[recalcFamily]) {
-            const fc = RECALC_FAMILY_CAPS[recalcFamily];
-            const familyCap = Math.round(fc.ambient + (fc.hp - fc.ambient) * pressureFactor);
-            tcCap = Math.min(tcCap, familyCap);
-          }
-
           let newTc = c.predictedTc;
-          if (newTc != null && newTc > tcCap) {
-            newTc = tcCap;
+          if (newTc != null && featureLambda > 0 && features.logPhononFreq) {
+            const adTc = estimateRawTc(featureLambda, features.logPhononFreq, features.muStarEstimate);
+            if (adTc > 0) {
+              newTc = Math.round(0.5 * newTc + 0.5 * adTc);
+            }
           }
           if (newTc != null) {
             newTc = applyAmbientTcCap(newTc, featureLambda, pressure, metalScore, c.formula);

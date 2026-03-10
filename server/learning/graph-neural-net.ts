@@ -1418,7 +1418,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const confTarget = Math.min(1.0, sample.tc > 0 ? 0.8 : 0.3);
         const confError = pred.confidence - confTarget;
 
-        const lambdaTarget = sample.tc > 0 ? Math.min(2.0, sample.tc / 50) : 0.1;
+        const lambdaTarget = sample.tc > 0 ? Math.min(4.0, sample.tc / 50) : 0.1;
         const lambdaError = pred.lambda - lambdaTarget;
 
         const bgTarget = (sample as any).bandgap ?? (sample.tc > 0 ? 0 : 1.5);

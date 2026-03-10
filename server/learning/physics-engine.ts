@@ -58,10 +58,10 @@ function computePhysicsDerivedBonus(formula: string, lambda: number): number {
 }
 
 export const FAMILY_TC_CAPS: Record<string, { ambient: number; highPressure: number }> = {
-  Carbides: { ambient: 45, highPressure: 100 },
-  Nitrides: { ambient: 80, highPressure: 110 },
-  Borides: { ambient: 55, highPressure: 150 },
-  Oxides: { ambient: 40, highPressure: 70 },
+  Carbides: { ambient: 120, highPressure: 250 },
+  Nitrides: { ambient: 120, highPressure: 250 },
+  Borides: { ambient: 120, highPressure: 300 },
+  Oxides: { ambient: 170, highPressure: 250 },
 };
 
 export interface CapExtensionEvidence {
@@ -145,54 +145,53 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   if (!mode.allowBeyondEmpirical) {
     let tcCap: number;
     if (metallicity < 0.3) {
-      tcCap = 20;
+      tcCap = 30;
     } else if (metallicity < 0.5) {
-      tcCap = 80;
+      tcCap = 100;
     } else if (lambda < 0.3) {
-      tcCap = 50;
-    } else if (lambda < 0.5) {
       tcCap = 80;
+    } else if (lambda < 0.5) {
+      tcCap = 120;
     } else if (lambda < 1.0) {
-      tcCap = Math.round(80 + (150 - 80) * pressureFactor);
+      tcCap = Math.round(150 + (250 - 150) * pressureFactor);
     } else if (lambda < 1.5) {
-      tcCap = Math.round(120 + (250 - 120) * pressureFactor);
-    } else if (lambda < 2.5) {
-      tcCap = Math.round(160 + (350 - 160) * pressureFactor);
-    } else {
       tcCap = Math.round(200 + (350 - 200) * pressureFactor);
+    } else if (lambda < 2.5) {
+      tcCap = Math.round(250 + (400 - 250) * pressureFactor);
+    } else {
+      tcCap = Math.round(300 + (500 - 300) * pressureFactor);
     }
     tcCap = Math.round(tcCap * extensionFactor);
     if (pressureGpa < 10) {
       tcCap += materialBonus;
-      tcCap = Math.min(tcCap, 300);
     }
     return Math.min(tc, tcCap);
   }
 
   let baseExpectation: number;
   if (metallicity < 0.3) {
-    baseExpectation = 20 + metallicity * 100;
+    baseExpectation = 30 + metallicity * 150;
   } else if (metallicity < 0.5) {
-    baseExpectation = 50 + (metallicity - 0.3) * 200;
+    baseExpectation = 80 + (metallicity - 0.3) * 300;
   } else if (lambda < 0.3) {
-    baseExpectation = 30 + lambda * 100;
+    baseExpectation = 60 + lambda * 200;
   } else if (lambda < 0.5) {
-    baseExpectation = 50 + (lambda - 0.3) * 200;
+    baseExpectation = 100 + (lambda - 0.3) * 300;
   } else if (lambda < 1.0) {
-    const ambientBase = 60;
-    const hpBase = 150;
-    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
-  } else if (lambda < 1.5) {
-    const ambientBase = 100;
+    const ambientBase = 150;
     const hpBase = 250;
     baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
+  } else if (lambda < 1.5) {
+    const ambientBase = 200;
+    const hpBase = 350;
+    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   } else if (lambda < 2.5) {
-    const ambientBase = 150;
-    const hpBase = 400;
+    const ambientBase = 300;
+    const hpBase = 500;
     baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   } else {
-    const ambientBase = 200;
-    const hpBase = 500;
+    const ambientBase = 350;
+    const hpBase = 600;
     baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
   }
 
@@ -597,15 +596,15 @@ function getCorrelationPenaltyForClass(matClass: MaterialClass, uOverW: number, 
 
 function getLambdaCapForClass(matClass: MaterialClass): number {
   switch (matClass) {
-    case "conventional-metal": return 1.5;
-    case "cuprate": return 1.2;
-    case "iron-pnictide": return 1.5;
-    case "heavy-fermion": return 0.8;
-    case "hydride-low-p": return 2.0;
-    case "hydride-high-p": return 3.0;
-    case "superhydride": return 3.5;
-    case "light-element": return 1.8;
-    case "other": return 1.5;
+    case "conventional-metal": return 2.5;
+    case "cuprate": return 2.5;
+    case "iron-pnictide": return 2.5;
+    case "heavy-fermion": return 1.5;
+    case "hydride-low-p": return 3.5;
+    case "hydride-high-p": return 5.0;
+    case "superhydride": return 5.0;
+    case "light-element": return 3.0;
+    case "other": return 2.5;
   }
 }
 
@@ -1606,23 +1605,9 @@ export function computeElectronPhononCoupling(
     lambda = Math.min(classLambdaCap, lambda);
   }
 
-  if (formula) {
-    const cts = parseFormulaCounts(formula);
-    const els = Object.keys(cts);
-    const totalAt = Object.values(cts).reduce((s, n) => s + n, 0);
-    const hFrac = (cts["H"] || 0) / Math.max(1, totalAt);
-    if (hFrac < 0.1 && !isHydrideForLambda(matClass)) {
-      const lowHCap = 1.3;
-      if (lambda > lowHCap) {
-        lambda = lowHCap + (lambda - lowHCap) * 0.1;
-        lambda = Math.min(lambda, 1.5);
-      }
-    }
-  }
-
-  if (lambda > 2.0 && matClass !== "superhydride" && matClass !== "hydride-high-p") {
-    const instabilityDamp = 1.0 - (lambda - 2.0) * 0.15;
-    lambda *= Math.max(0.5, instabilityDamp);
+  if (lambda > 4.0 && matClass !== "superhydride" && matClass !== "hydride-high-p") {
+    const instabilityDamp = 1.0 - (lambda - 4.0) * 0.1;
+    lambda *= Math.max(0.7, instabilityDamp);
   }
 
   const lambdaUncorrected = lambda;
@@ -1795,7 +1780,7 @@ export interface TcWithUncertainty {
   analyticStd: number;
 }
 
-function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number): number {
+export function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number): number {
   const omegaLogK = omegaLog * 1.4388;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denominator) < 1e-6 || denominator <= 0) return 0;
