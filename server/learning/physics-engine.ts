@@ -1634,9 +1634,8 @@ export function computeElectronPhononCoupling(
 
   const omegaLogRange = getOmegaLogRangeForClass(matClass);
   let clampedOmegaLog = omega_log;
-  const omegaLogK = omega_log * 1.4388;
-  if (omegaLogK < omegaLogRange[0]) clampedOmegaLog = omegaLogRange[0] / 1.4388;
-  if (omegaLogK > omegaLogRange[1]) clampedOmegaLog = omegaLogRange[1] / 1.4388;
+  if (omega_log < omegaLogRange[0]) clampedOmegaLog = omegaLogRange[0];
+  if (omega_log > omegaLogRange[1]) clampedOmegaLog = omegaLogRange[1];
 
   const formulaCounts = formula ? parseFormulaCounts(formula) : {};
   const formulaElements = formula ? parseFormulaElements(formula) : [];
