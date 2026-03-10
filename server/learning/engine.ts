@@ -856,15 +856,15 @@ async function runPhase7_Superconductor() {
                   if (!features) continue;
                   const gb = gbPredict(features);
                   if (gb.tcPredicted >= 10) {
-                    await insertCandidateWithStabilityCheck({
+                    const gdInserted = await insertCandidateWithStabilityCheck({
                       formula: normalizeFormula(r.finalFormula),
                       predictedTc: Math.round(gb.tcPredicted),
                       dataConfidence: "low",
                       ensembleScore: Math.min(0.9, gb.score),
                       verificationStage: 0,
                       notes: `[gradient-descent: ${r.totalSteps} steps, ${r.initialFormula}->${r.finalFormula}, improvement=${r.improvementRatio}]`,
-                    });
-                    totalScCandidates++;
+                    }, "bo_exploration");
+                    if (gdInserted) totalScCandidates++;
                   }
                 } catch (gdErr: any) {
                   console.log(`[Engine] Gradient descent candidate insert failed: ${gdErr?.message?.slice(0, 100) ?? "unknown"}`);
@@ -2853,15 +2853,12 @@ async function runPhase11_StructurePrediction() {
               uncertaintyEstimate: crystal.prototypeMatch ? 0.55 : 0.7,
               verificationStage: 0,
               dataConfidence: "low",
-            });
+            }, "motif_diffusion");
             if (inserted) {
               totalScCandidates++;
               diffInserted++;
               bayesianOptimizer.addObservation(normalized, rawTc, lambdaML, crystal.noveltyScore);
-              recordGeneratorOutcome("motif_diffusion", true, rawTc, crystal.noveltyScore);
               if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "motif_diffusion");
-            } else {
-              recordGeneratorOutcome("motif_diffusion", false, rawTc, 0.1);
             }
           } catch (e) { console.error("[Engine] Motif diffusion candidate insert failed:", e); }
         }
@@ -2930,12 +2927,11 @@ async function runPhase11_StructurePrediction() {
               uncertaintyEstimate: 0.6,
               verificationStage: 0,
               dataConfidence: "low",
-            });
+            }, "structure_diffusion");
             if (inserted) {
               totalScCandidates++;
               cdvaeInserted++;
               bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
-              recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
               if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "structure_diffusion");
               incorporateSuccessData(normalized, cappedTc);
             }
@@ -3005,12 +3001,11 @@ async function runPhase11_StructurePrediction() {
               uncertaintyEstimate: 0.6,
               verificationStage: 0,
               dataConfidence: "low",
-            });
+            }, "structure_diffusion");
             if (inserted) {
               totalScCandidates++;
               distInserted++;
               bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
-              recordGeneratorOutcome("structure_diffusion", true, cappedTc, crystal.noveltyScore);
               if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "structure_diffusion");
               incorporateSuccessData(normalized, cappedTc);
             }
@@ -3072,11 +3067,10 @@ async function runPhase11_StructurePrediction() {
               notes: `[VAE inverse design: target=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}]`,
               cooperPairMechanism: "VAE latent-space gradient descent",
               status: "theoretical",
-            });
+            }, "inverse_design");
             if (inserted) {
               totalScCandidates++;
               vaeInserted++;
-              recordGeneratorOutcome("inverse_design", true, cappedTc, 0.6);
               incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] VAE inverse design insert failed:", e); }
@@ -3114,13 +3108,10 @@ async function runPhase11_StructurePrediction() {
                 ensembleScore: Math.min(0.9, gbResult.score),
                 verificationStage: 0,
                 notes: `[structure-first: motif-designed, target=200K]`,
-              });
+              }, "structure_diffusion");
               if (inserted) {
                 totalScCandidates++;
                 structInserted++;
-                recordGeneratorOutcome("structure_diffusion", true, Math.round(gbResult.tcPredicted), 0.5);
-              } else {
-                recordGeneratorOutcome("structure_diffusion", false, Math.round(gbResult.tcPredicted), 0.1);
               }
             }
           } catch (e) { console.error("[Engine] Structure-first design insert failed:", e); }
@@ -3753,7 +3744,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
                 crystalStructure: "pressure-stabilized",
                 status: "theoretical",
                 notes: `Ambient variant of ${formula} (${pathway.retentionPercent}% Tc retention from ${candidatePressure}GPa). Strategy: ${pathway.strategies[0]?.type}`,
-              });
+              }, "random_exploration");
             } catch (e) { console.error(`[Autonomous] Pressure pathway candidate insert failed for ${formula}:`, e); }
           }
           emit("log", {
@@ -4645,7 +4636,7 @@ async function runAutonomousFastPath() {
                       crystalStructure: "defect-engineered",
                       status: "theoretical",
                       notes: `Defect: ${bestDefect.defect.type} at ${bestDefect.defect.element}, Tc boost ${bestDefect.tcMod.toFixed(3)}x from ${formula}`,
-                    });
+                    }, "random_exploration");
                   } catch (e) { console.error(`[Engine] Defect candidate insert failed for ${defectFormula}:`, e); }
                 }
                 emit("log", { phase: "defect-engine", event: "Defect enhancement found", detail: `${formula}: ${bestDefect.defect.type} defect at ${bestDefect.defect.element} -> Tc modifier ${bestDefect.tcMod.toFixed(3)}, defect variant ${defectFormula} (est. ${defectTc}K) added to pool` });
@@ -5559,7 +5550,7 @@ async function runLearningCycle() {
                       uncertaintyEstimate: 0.6,
                       verificationStage: 0,
                       dataConfidence: "low",
-                    });
+                    }, "massive_combinatorial");
                     if (inserted) {
                       totalScCandidates++;
                       mutInserted++;
@@ -5623,7 +5614,7 @@ async function runLearningCycle() {
                       ensembleScore: Math.min(0.9, gb.score),
                       verificationStage: 0,
                       notes: `[phase-explorer: optimal from ${chosenSet.join("-")} scan, family=${classifyFamily(sf)}]`,
-                    });
+                    }, "massive_combinatorial");
                     if (inserted) {
                       totalScCandidates++;
                       recentNewCandidates++;
@@ -5796,7 +5787,7 @@ async function runLearningCycle() {
                 verificationStage: 0,
                 dataConfidence: "low",
                 discoveryScore,
-              });
+              }, "structure_diffusion");
               bayesianOptimizer.addObservation(normalized, predictedTc, gnnResult.lambda || lambdaML, discoveryScore);
 
               if (inserted) {

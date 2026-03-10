@@ -6,6 +6,8 @@ import { recordStructureFailure } from "../crystal/structure-failure-db";
 
 const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
+const MIN_QUEUE_SIZE = 50;
+const REFILL_BATCH_SIZE = 100;
 
 type PipelineStage = "candidate_queue" | "dft_workers" | "phonon_workers" | "epc_workers";
 
@@ -313,6 +315,71 @@ async function cleanupStaleJobs() {
   }
 }
 
+async function refillQueueIfLow(): Promise<number> {
+  try {
+    const queued = await storage.getQueuedDftJobs(MIN_QUEUE_SIZE + 1);
+    const queueSize = queued.length;
+    stageMetrics.candidate_queue.currentDepth = queueSize;
+
+    if (queueSize >= MIN_QUEUE_SIZE) return 0;
+
+    const candidates = await storage.getSuperconductorCandidates(REFILL_BATCH_SIZE * 3);
+    const eligible = candidates
+      .filter(c => {
+        const mlFeatures = (c.mlFeatures as Record<string, any>) ?? {};
+        if (mlFeatures.qeDFT) return false;
+        if ((c.ensembleScore ?? 0) <= 0) return false;
+        return true;
+      })
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+
+    const queuedFormulas = new Set(queued.map(j => j.formula));
+    let submitted = 0;
+    for (const candidate of eligible) {
+      if (submitted >= REFILL_BATCH_SIZE) break;
+      if (queuedFormulas.has(candidate.formula)) continue;
+      if (isFormulaBlocked(candidate.formula)) continue;
+
+      try {
+        const existing = await storage.getDftJobsByFormula(candidate.formula);
+        const hasActive = existing.some(j => j.status === "queued" || j.status === "running");
+        if (hasActive) continue;
+
+        const oneDayAgo = new Date(Date.now() - 24 * 3600_000);
+        const recentFailed = existing.filter(j => {
+          if (j.status !== "failed") return false;
+          if (!j.completedAt || new Date(j.completedAt) < oneDayAgo) return false;
+          const out = j.outputData as any;
+          if (out?.ppValidated === false || out?.ppValidated === null || out?.ppValidated === undefined) return false;
+          return true;
+        });
+        if (recentFailed.length >= 3) continue;
+
+        const priority = Math.round((candidate.ensembleScore ?? 0) * 100);
+        await storage.insertDftJob({
+          formula: candidate.formula,
+          candidateId: candidate.id,
+          status: "queued",
+          jobType: "scf",
+          priority,
+          inputData: { formula: candidate.formula, candidateId: candidate.id, requestedAt: new Date().toISOString(), source: "queue_refill" },
+        });
+        queuedFormulas.add(candidate.formula);
+        submitted++;
+        stageMetrics.candidate_queue.currentDepth++;
+      } catch {}
+    }
+
+    if (submitted > 0) {
+      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (queue was ${queueSize}/${MIN_QUEUE_SIZE})`);
+    }
+    return submitted;
+  } catch (err: any) {
+    console.log(`[DFT-Queue] Queue refill error: ${err.message}`);
+    return 0;
+  }
+}
+
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 let lastLoopRun = 0;
 let loopRunning = false;
@@ -334,6 +401,8 @@ export function startDFTWorkerLoop() {
     loopRunning = true;
     lastLoopRun = Date.now();
     try {
+      await refillQueueIfLow();
+
       const launched: Promise<boolean>[] = [];
       const slotsAvailable = MAX_CONCURRENT - activeWorkers;
       for (let i = 0; i < slotsAvailable; i++) {
