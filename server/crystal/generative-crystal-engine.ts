@@ -8,8 +8,12 @@ import {
 } from "./crystal-diffusion-model";
 import { getTrainingData } from "./crystal-structure-dataset";
 import { computeCompositionFeatures } from "../learning/composition-features";
+import {
+  generatePrototypeFreeStructure, getLatticeGeneratorStats,
+  type GeneratedStructure,
+} from "./lattice-generator";
 
-export type GenerationStrategy = "vae" | "diffusion" | "interpolation" | "hybrid";
+export type GenerationStrategy = "vae" | "diffusion" | "interpolation" | "hybrid" | "lattice_free";
 
 export interface GeneratedCandidate {
   formula: string;
@@ -248,6 +252,78 @@ function generateRandomLatent(count: number, targetSystem?: string): GeneratedCa
   return generateVAE(count, targetSystem);
 }
 
+function latticeFreeToCandiate(structure: GeneratedStructure): GeneratedCandidate {
+  const validation = validateCandidate(structure.formula, structure.lattice);
+  return {
+    formula: structure.formula,
+    lattice: structure.lattice,
+    crystalSystem: structure.bravaisType,
+    spacegroup: null,
+    spacegroupSymbol: null,
+    predictedPrototype: null,
+    noveltyScore: structure.noveltyScore,
+    generationMethod: structure.generationMethod,
+    confidence: structure.confidence,
+    valid: validation.valid,
+    validationDetails: {
+      chemicallyValid: validation.chemicallyValid,
+      geometricallyValid: validation.geometricallyValid,
+      stabilityPrescreen: validation.stabilityPrescreen,
+    },
+  };
+}
+
+function generateLatticeFree(count: number, elements?: string[]): GeneratedCandidate[] {
+  const results: GeneratedCandidate[] = [];
+  const formulaPool = buildFormulaPool(elements);
+
+  for (let i = 0; i < count * 3 && results.length < count; i++) {
+    const formula = formulaPool[i % formulaPool.length];
+    const structure = generatePrototypeFreeStructure(formula);
+    if (structure) {
+      const candidate = latticeFreeToCandiate(structure);
+      trackCandidate(candidate, "lattice_free");
+      if (candidate.valid) results.push(candidate);
+    }
+  }
+  return results;
+}
+
+function buildFormulaPool(elements?: string[]): string[] {
+  const pool: string[] = [];
+
+  if (elements && elements.length >= 2) {
+    for (let i = 0; i < elements.length; i++) {
+      for (let j = i + 1; j < elements.length; j++) {
+        const stoichs = [[1, 1], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3]];
+        for (const [a, b] of stoichs) {
+          pool.push(`${elements[i]}${a > 1 ? a : ""}${elements[j]}${b > 1 ? b : ""}`);
+        }
+      }
+    }
+  }
+
+  const sc_elements = ["Nb", "Ti", "V", "Zr", "Mo", "Ta", "W", "La", "Y", "Ca", "Sr", "Ba"];
+  const anions = ["H", "N", "B", "C", "O", "S", "Se", "P", "As"];
+  for (let i = 0; i < 30; i++) {
+    const m1 = sc_elements[Math.floor(Math.random() * sc_elements.length)];
+    const m2 = sc_elements[Math.floor(Math.random() * sc_elements.length)];
+    const an = anions[Math.floor(Math.random() * anions.length)];
+    if (m1 === m2) continue;
+    const n1 = Math.floor(Math.random() * 3) + 1;
+    const n2 = Math.floor(Math.random() * 3) + 1;
+    const n3 = Math.floor(Math.random() * 6) + 1;
+    pool.push(`${m1}${n1 > 1 ? n1 : ""}${m2}${n2 > 1 ? n2 : ""}${an}${n3 > 1 ? n3 : ""}`);
+  }
+
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+
+  return pool;
+}
+
 export function generateCandidates(
   count: number = 10,
   strategy: GenerationStrategy = "hybrid",
@@ -267,15 +343,20 @@ export function generateCandidates(
     case "interpolation":
       return generateInterpolation(clampedCount);
 
+    case "lattice_free":
+      return generateLatticeFree(clampedCount, elements);
+
     case "hybrid": {
-      const diffusionCount = Math.max(1, Math.round(clampedCount * 0.4));
-      const vaeCount = Math.max(1, Math.round(clampedCount * 0.3));
-      const interpCount = Math.max(1, Math.round(clampedCount * 0.2));
-      const randomCount = Math.max(1, clampedCount - diffusionCount - vaeCount - interpCount);
+      const diffusionCount = Math.max(1, Math.round(clampedCount * 0.30));
+      const vaeCount = Math.max(1, Math.round(clampedCount * 0.25));
+      const lattFreeCount = Math.max(1, Math.round(clampedCount * 0.20));
+      const interpCount = Math.max(1, Math.round(clampedCount * 0.15));
+      const randomCount = Math.max(1, clampedCount - diffusionCount - vaeCount - lattFreeCount - interpCount);
 
       const results: GeneratedCandidate[] = [];
       results.push(...generateDiffusion(diffusionCount, targetSystem, elements));
       results.push(...generateVAE(vaeCount, targetSystem));
+      results.push(...generateLatticeFree(lattFreeCount, elements));
       results.push(...generateInterpolation(interpCount));
       results.push(...generateRandomLatent(randomCount, targetSystem));
 
@@ -302,9 +383,11 @@ export function isGenerativeReady(): boolean {
 export function getGenerativeEngineStats(): GenerativeEngineStats {
   let vaeStats: ReturnType<typeof getCrystalVAEStats> | null = null;
   let diffusionStats: ReturnType<typeof getDiffusionModelStats> | null = null;
+  let latticeStats: ReturnType<typeof getLatticeGeneratorStats> | null = null;
 
   try { vaeStats = getCrystalVAEStats(); } catch {}
   try { diffusionStats = getDiffusionModelStats(); } catch {}
+  try { latticeStats = getLatticeGeneratorStats(); } catch {}
 
   return {
     totalGenerated,
@@ -315,5 +398,6 @@ export function getGenerativeEngineStats(): GenerativeEngineStats {
     bestCandidates: bestCandidates.slice(0, 10),
     vaeStats,
     diffusionStats,
+    latticeStats,
   };
 }

@@ -44,6 +44,7 @@ import { bayesianOptimizer } from "./bayesian-optimizer";
 import { rlAgent } from "./rl-agent";
 import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./family-filters";
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
+import { generatePrototypeFreeStructures, getLatticeGeneratorStats, type GeneratedStructure } from "../crystal/lattice-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
 import { predictPressureCurve, findOptimalPressure, getPressureCurveStats } from "./pressure-aware-surrogate";
@@ -5819,6 +5820,79 @@ async function runLearningCycle() {
             event: "Prototype search error",
             detail: err.message?.slice(0, 150) || "unknown",
             dataSource: "Prototype Generator",
+          });
+        }
+      }
+
+      if (state === "running" && cycleCount >= 12 && cycleCount % 25 === 12) {
+        try {
+          const existingCandidates = await storage.getSuperconductorCandidates(500);
+          const existingFormulas = new Set(existingCandidates.map(c => c.formula));
+
+          const scElements = ["Nb", "Ti", "V", "Zr", "Mo", "Ta", "W", "La", "Y", "Ca", "Sr", "Ba",
+            "Fe", "Cu", "Ni", "Co", "Mn", "Sc", "Hf", "Re"];
+          const anions = ["H", "N", "B", "C", "O", "S", "Se", "P", "As", "Te"];
+          const lfFormulas: string[] = [];
+          for (let fi = 0; fi < 60; fi++) {
+            const m1 = scElements[Math.floor(Math.random() * scElements.length)];
+            const m2 = scElements[Math.floor(Math.random() * scElements.length)];
+            const an = anions[Math.floor(Math.random() * anions.length)];
+            if (m1 === m2) continue;
+            const n1 = Math.floor(Math.random() * 3) + 1;
+            const n2 = Math.floor(Math.random() * 3) + 1;
+            const n3 = Math.floor(Math.random() * 6) + 1;
+            const f = `${m1}${n1 > 1 ? n1 : ""}${m2}${n2 > 1 ? n2 : ""}${an}${n3 > 1 ? n3 : ""}`;
+            const nf = normalizeFormula(f);
+            if (!existingFormulas.has(nf) && isValidFormula(f)) lfFormulas.push(f);
+          }
+
+          const lfStructures = generatePrototypeFreeStructures(lfFormulas, 30);
+          let lfInserted = 0;
+          let lfBest = 0;
+
+          for (const struct of lfStructures) {
+            try {
+              const normalized = normalizeFormula(struct.formula);
+              if (existingFormulas.has(normalized)) continue;
+              const features = extractFeatures(struct.formula);
+              if (!features) continue;
+              const gb = gbPredict(features);
+              if (gb.tcPredicted < 5) continue;
+
+              const cappedTc = Math.round(gb.tcPredicted);
+              const inserted = await insertCandidateWithStabilityCheck({
+                formula: normalized,
+                predictedTc: cappedTc,
+                dataConfidence: "low",
+                ensembleScore: Math.min(0.9, gb.score),
+                verificationStage: 0,
+                crystalStructure: struct.bravaisType,
+                notes: `[lattice-free: ${struct.bravaisType}, ${struct.atoms.length} atoms, vol/atom=${struct.volumePerAtom.toFixed(1)} A^3]`,
+              }, "structure_diffusion");
+              if (inserted) {
+                lfInserted++;
+                totalScCandidates++;
+                existingFormulas.add(normalized);
+                if (cappedTc > lfBest) lfBest = cappedTc;
+              }
+            } catch (lfErr: any) {
+              console.error(`[Engine] Lattice-free insert failed:`, lfErr?.message?.slice(0, 80) ?? "unknown");
+            }
+          }
+
+          const lfStats = getLatticeGeneratorStats();
+          emit("log", {
+            phase: "engine",
+            event: "Lattice-free generation complete",
+            detail: `Generated ${lfStructures.length} prototype-free structures, ${lfInserted} inserted (best ${lfBest}K). Stats: ${lfStats.successful}/${lfStats.totalAttempts} success rate, by Bravais: ${Object.entries(lfStats.byBravais).map(([k, v]) => `${k}:${v.success}/${v.attempts}`).join(", ")}`,
+            dataSource: "Lattice Generator",
+          });
+        } catch (lfOuterErr: any) {
+          emit("log", {
+            phase: "engine",
+            event: "Lattice-free generation error",
+            detail: lfOuterErr?.message?.slice(0, 150) || "unknown",
+            dataSource: "Lattice Generator",
           });
         }
       }

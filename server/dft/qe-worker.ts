@@ -4,6 +4,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
+import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
 
 const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
@@ -834,6 +835,20 @@ function generateAtomicPositions(
           console.log(`[QE-Worker] Using ${template.name} prototype for ${formula} (${positions.length} atoms)`);
           return perturbPositions(positions, 0.025);
         }
+      }
+    } catch {}
+
+    try {
+      const lfStruct = generatePrototypeFreeStructure(formula);
+      if (lfStruct && lfStruct.atoms.length > 0) {
+        const positions = lfStruct.atoms.map(a => ({
+          element: a.element,
+          x: a.fx,
+          y: a.fy,
+          z: a.fz,
+        }));
+        console.log(`[QE-Worker] Using lattice-free generation for ${formula} (${positions.length} atoms, ${lfStruct.bravaisType})`);
+        return positions;
       }
     } catch {}
   }
