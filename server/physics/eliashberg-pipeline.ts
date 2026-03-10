@@ -116,14 +116,15 @@ function parseFormulaCounts(formula: string): Record<string, number> {
 
 function computeScreenedMuStar(
   formula: string,
-  pressureGpa: number
+  pressureGpa: number,
+  dosAtFermi?: number,
 ): number {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   const family = classifyFamily(formula);
 
-  let muStar = 0.10;
+  let muBare = 0.10;
 
   const hCount = counts["H"] || 0;
   const metalAtoms = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
@@ -131,27 +132,47 @@ function computeScreenedMuStar(
   const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
 
   if (hRatio >= 6) {
-    muStar = 0.13;
-    if (pressureGpa > 100) muStar = 0.10 + 0.03 * Math.exp(-pressureGpa / 500);
+    muBare = 0.13;
+    if (pressureGpa > 100) muBare = 0.10 + 0.03 * Math.exp(-pressureGpa / 500);
   } else if (family === "cuprate") {
-    muStar = 0.12;
+    muBare = 0.12;
   } else if (family === "pnictide") {
-    muStar = 0.11;
+    muBare = 0.11;
   } else if (family === "heavy-fermion") {
-    muStar = 0.15;
+    muBare = 0.15;
   } else {
     let avgZ = 0;
     for (const el of elements) {
       const data = getElementData(el);
       if (data) avgZ += data.atomicNumber * ((counts[el] || 1) / totalAtoms);
     }
-    if (avgZ > 40) muStar = 0.12;
-    else if (avgZ < 15) muStar = 0.08;
+    if (avgZ > 40) muBare = 0.12;
+    else if (avgZ < 15) muBare = 0.08;
   }
+
+  const N_EF = Math.max(0.1, dosAtFermi ?? 1.5);
+  const k_TF_sq = 4 * Math.PI * N_EF;
+  const screeningFactor = k_TF_sq / (k_TF_sq + 1.0);
+  muBare *= screeningFactor;
+
+  let avgIonization = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const frac = (counts[el] || 1) / totalAtoms;
+    avgIonization += (data?.firstIonizationEnergy ?? 700) * frac;
+  }
+  const estimatedBandwidth = Math.max(1.0, avgIonization * 0.005);
+  const E_F_eV = Math.max(1.0, estimatedBandwidth * 0.5 + N_EF * 0.5);
+  const debyeEstimate = 300 + pressureGpa * 2;
+  const omega_D_eV = Math.max(0.001, debyeEstimate * 8.617e-5);
+  const logRatio = Math.log(Math.max(E_F_eV / omega_D_eV, 1.5));
+  const muStarMA = muBare / (1 + muBare * logRatio);
+
+  let muStar = muStarMA;
 
   if (pressureGpa > 50) {
     const pressureReduction = Math.min(0.03, pressureGpa * 0.0001);
-    muStar = Math.max(0.06, muStar - pressureReduction);
+    muStar = Math.max(0.05, muStar - pressureReduction);
   }
 
   return Number(Math.max(0.05, Math.min(0.20, muStar)).toFixed(4));
@@ -344,6 +365,9 @@ function computeAllenDynesTc(
   }
 
   const exponent = -1.04 * (1 + lambda) / denominator;
+  if (exponent < -50) {
+    return { tc: 0, f1: Number(f1.toFixed(4)), f2: Number(f2.toFixed(4)), lambdaBar: Number(lambdaBar.toFixed(4)), omegaLogK: Number(omegaLogK.toFixed(2)), muStar, regime };
+  }
   let tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
 
   tc = Number.isFinite(tc) ? Math.max(0, Math.min(500, tc)) : 0;
@@ -548,7 +572,7 @@ export function runEliashbergPipeline(
     phononDOS, formula, electronic, coupling, pressureGpa
   );
 
-  const muStar = computeScreenedMuStar(formula, pressureGpa);
+  const muStar = computeScreenedMuStar(formula, pressureGpa, electronic.densityOfStatesAtFermi);
 
   const allenDynes = computeAllenDynesTc(
     alpha2FSpec.integratedLambda,
@@ -676,7 +700,7 @@ export function runEliashbergFromAlpha2FFile(
     convergenceCheck: { converged: true, lambdaVariation: 0, highFreqTail: 0 },
   };
 
-  const muStar = computeScreenedMuStar(formula, pressureGpa);
+  const muStar = computeScreenedMuStar(formula, pressureGpa, electronic.densityOfStatesAtFermi);
   const allenDynes = computeAllenDynesTc(integratedLambda, omegaLog, omega2, muStar);
   const gapSolution = solveEliashbergGapEquation(alpha2FSpec, muStar, allenDynes.tc > 0 ? allenDynes.tc : 10);
   const tcBest = Math.max(allenDynes.tc, gapSolution.tc);

@@ -99,6 +99,7 @@ function mcMillanTc(lambda: number, omegaLogK: number, muStar: number): number {
   const lambdaBar = 2.46 * (1 + 3.8 * muStar);
   const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
   const exponent = -1.04 * (1 + lambda) / denom;
+  if (exponent < -50) return 0;
   const tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   return Number.isFinite(tc) && tc > 0 ? tc : 0;
 }

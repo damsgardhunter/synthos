@@ -565,7 +565,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     optimalPressureGpa = pressureResult.optimalPressure;
   } catch {}
 
-  let finalLambda = useLambda;
+  let finalLambda = Math.max(0.001, useLambda);
   let finalLogPhononFreq = coupling.omegaLog;
   let hasStablePhonons = !phonon.hasImaginaryModes;
   let lambdaProxy = 0;

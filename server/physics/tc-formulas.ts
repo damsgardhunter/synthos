@@ -45,6 +45,7 @@ export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
   }
 
   const exponent = -1.04 * (1 + lambda) / denominator;
+  if (exponent < -50) return { tc: 0, f1: Number(f1.toFixed(4)), f2: Number(f2.toFixed(4)), regime, method: "allen-dynes" as const };
   let tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
 
   if (!Number.isFinite(tc) || tc < 0) tc = 0;
@@ -118,6 +119,7 @@ export function allenDynesTcFromKelvin(
   }
 
   const exponent = -1.04 * (1 + lambda) / denominator;
+  if (exponent < -50) return 0;
   let tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
 
   if (!Number.isFinite(tc) || tc < 0) tc = 0;

@@ -174,9 +174,18 @@ export function computeDerivedFeatures(result: PhysicsResult): DerivedFeatures {
     ? result.omega2 / result.omegaLog
     : 1.0;
 
-  const couplingEfficiency = result.lambda > 0 && result.tc > 0 && result.omegaLog > 0
-    ? result.tc / (result.omegaLog * Math.exp(-1.04 * (1 + result.lambda) / (result.lambda - result.muStar * (1 + 0.62 * result.lambda) + 0.001)))
-    : 0;
+  let couplingEfficiency = 0;
+  if (result.lambda > 0.01 && result.tc > 0 && result.omegaLog > 0) {
+    const adDenom = result.lambda - result.muStar * (1 + 0.62 * result.lambda);
+    if (adDenom > 0.01) {
+      const expArg = -1.04 * (1 + result.lambda) / adDenom;
+      if (expArg > -50 && expArg < 50) {
+        const adVal = result.omegaLog * Math.exp(expArg);
+        couplingEfficiency = adVal > 1e-6 ? result.tc / adVal : 0;
+      }
+    }
+  }
+  if (!Number.isFinite(couplingEfficiency)) couplingEfficiency = 0;
 
   return {
     bandwidth,
