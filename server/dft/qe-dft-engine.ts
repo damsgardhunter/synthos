@@ -118,6 +118,41 @@ function parseFormula(formula: string): Record<string, number> {
   return counts;
 }
 
+const BULK_MODULI_GPA: Record<string, number> = {
+  H: 1.0, He: 0.5, Li: 11, Be: 130, B: 320, C: 443, N: 2.0, O: 2.0, F: 1.5,
+  Na: 6.3, Mg: 45, Al: 76, Si: 100, P: 11, S: 7.7, Cl: 1.1,
+  K: 3.1, Ca: 17, Sc: 57, Ti: 110, V: 162, Cr: 160, Mn: 120, Fe: 170,
+  Co: 180, Ni: 180, Cu: 140, Zn: 70, Ga: 56, Ge: 75, As: 22, Se: 8.3,
+  Rb: 2.5, Sr: 12, Y: 41, Zr: 94, Nb: 170, Mo: 230, Ru: 220, Rh: 275,
+  Pd: 180, Ag: 100, Cd: 42, In: 41, Sn: 58, Sb: 42, Te: 65, I: 7.7,
+  Cs: 1.6, Ba: 9.6, La: 28, Ce: 22, Hf: 110, Ta: 200, W: 310, Re: 370,
+  Os: 462, Ir: 320, Pt: 230, Au: 180, Hg: 25, Tl: 43, Pb: 46, Bi: 31,
+  Th: 54, U: 100, Pr: 29, Nd: 32, Sm: 38, Eu: 8.3, Gd: 38, Tb: 39,
+  Dy: 41, Ho: 40, Er: 44, Tm: 45, Yb: 13, Lu: 48,
+  Pa: 93, Np: 118, Pu: 54, Tc: 297,
+};
+
+const B_PRIME_DEFAULT = 4.0;
+
+export function getCompressedRadius(symbol: string, pressureGPa: number): number {
+  const r0 = COVALENT_RADII[symbol] ?? 1.4;
+  if (pressureGPa <= 0) return r0;
+
+  if (symbol === "H") {
+    const pNorm = pressureGPa / 500;
+    const compressionFactor = 1.0 / (1.0 + 1.8 * pNorm + 0.6 * pNorm * pNorm);
+    const rMin = 0.18;
+    return Math.max(rMin, r0 * compressionFactor);
+  }
+
+  const B0 = BULK_MODULI_GPA[symbol] ?? 100;
+  const Bp = B_PRIME_DEFAULT;
+  const volumeRatio = Math.pow(1 + Bp * pressureGPa / B0, -1 / Bp);
+  const radiusRatio = Math.cbrt(Math.max(0.3, volumeRatio));
+  const rMin = r0 * 0.5;
+  return Math.max(rMin, r0 * radiusRatio);
+}
+
 function getAvgRadius(el: string): number {
   return COVALENT_RADII[el] || (getElementData(el)?.atomicRadius ?? 150) / 100;
 }
@@ -1633,18 +1668,25 @@ function deduplicateSites(atoms: AtomPosition[]): AtomPosition[] {
   return result;
 }
 
-function getMinInteratomicDistance(el1: string, el2: string): number {
-  const r1 = COVALENT_RADII[el1] ?? 1.4;
-  const r2 = COVALENT_RADII[el2] ?? 1.4;
+function getMinInteratomicDistance(el1: string, el2: string, pressureGPa: number = 0): number {
+  const r1 = getCompressedRadius(el1, pressureGPa);
+  const r2 = getCompressedRadius(el2, pressureGPa);
   const bondLength = r1 + r2;
   const bothH = el1 === "H" && el2 === "H";
   const oneH = el1 === "H" || el2 === "H";
-  if (bothH) return Math.max(bondLength * 0.70, 0.74);
-  if (oneH) return Math.max(bondLength * 0.70, 1.3);
-  return Math.max(bondLength * 0.80, 0.9);
+  if (bothH) {
+    const ambientFloor = pressureGPa > 50 ? 0.74 * getCompressedRadius("H", pressureGPa) / 0.31 : 0.74;
+    return Math.max(bondLength * 0.70, ambientFloor);
+  }
+  if (oneH) {
+    const ambientFloor = pressureGPa > 50 ? 1.3 * Math.cbrt(Math.max(0.4, 1.0 / (1 + pressureGPa / 200))) : 1.3;
+    return Math.max(bondLength * 0.70, ambientFloor);
+  }
+  const metalFloor = pressureGPa > 50 ? 0.9 * Math.cbrt(Math.max(0.5, 1.0 / (1 + pressureGPa / 300))) : 0.9;
+  return Math.max(bondLength * 0.80, metalFloor);
 }
 
-function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
+function computePairwiseDistances(atoms: AtomPosition[], pressureGPa: number = 0): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
   let minDist = Infinity;
   let minRatio = Infinity;
   let pairI = -1;
@@ -1662,7 +1704,7 @@ function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; min
         pairI = i;
         pairJ = j;
       }
-      const minAllowed = getMinInteratomicDistance(atoms[i].element, atoms[j].element);
+      const minAllowed = getMinInteratomicDistance(atoms[i].element, atoms[j].element, pressureGPa);
       const ratio = dist / minAllowed;
       if (ratio < minRatio) {
         minRatio = ratio;
@@ -1709,7 +1751,12 @@ function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {
   }));
 }
 
-function hasHardDistanceViolation(atoms: AtomPosition[]): { violated: boolean; pair: string; dist: number } {
+function hasHardDistanceViolation(atoms: AtomPosition[], pressureGPa: number = 0): { violated: boolean; pair: string; dist: number } {
+  const hR = getCompressedRadius("H", pressureGPa);
+  const hhFloor = pressureGPa > 50 ? Math.max(2 * hR * 0.85, 0.45) : 0.74;
+  const hmFloor = pressureGPa > 50 ? Math.max(1.2 * Math.cbrt(Math.max(0.4, 1.0 / (1 + pressureGPa / 200))), 0.7) : 1.2;
+  const mmFloor = pressureGPa > 50 ? Math.max(1.8 * Math.cbrt(Math.max(0.5, 1.0 / (1 + pressureGPa / 300))), 1.0) : 1.8;
+
   for (let i = 0; i < atoms.length; i++) {
     for (let j = i + 1; j < atoms.length; j++) {
       const dx = atoms[i].x - atoms[j].x;
@@ -1720,30 +1767,31 @@ function hasHardDistanceViolation(atoms: AtomPosition[]): { violated: boolean; p
       const bothH = a === "H" && b === "H";
       const oneH = a === "H" || b === "H";
       const bothMetal = !oneH;
-      if (bothH && dist < 0.74) return { violated: true, pair: "H-H", dist };
-      if (oneH && !bothH && dist < 1.2) return { violated: true, pair: `${a}-${b}`, dist };
-      if (bothMetal && dist < 1.8) return { violated: true, pair: `${a}-${b}`, dist };
+      if (bothH && dist < hhFloor) return { violated: true, pair: "H-H", dist };
+      if (oneH && !bothH && dist < hmFloor) return { violated: true, pair: `${a}-${b}`, dist };
+      if (bothMetal && dist < mmFloor) return { violated: true, pair: `${a}-${b}`, dist };
     }
   }
   return { violated: false, pair: "", dist: 0 };
 }
 
-function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPosition[] | null {
+function validateAndFixStructure(atoms: AtomPosition[], formula: string, pressureGPa: number = 0): AtomPosition[] | null {
   if (atoms.length < 2) return atoms;
 
   const hasHydrogen = atoms.some(a => a.element === "H");
   const minVol = hasHydrogen ? MIN_VOLUME_PER_ATOM_HYDRIDE : MIN_VOLUME_PER_ATOM;
+  const pressureVolShrink = pressureGPa > 50 ? Math.cbrt(Math.max(0.4, 1.0 / (1 + pressureGPa / 200))) : 1.0;
 
   const counts = parseFormula(formula);
   const totalFormulaAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
   const expectedVolume = computeExpectedVolume(counts);
-  const targetVolPerAtom = Math.max(minVol, expectedVolume / Math.max(totalFormulaAtoms, 1));
+  const targetVolPerAtom = Math.max(minVol * pressureVolShrink, (expectedVolume / Math.max(totalFormulaAtoms, 1)) * pressureVolShrink);
 
   let current = atoms;
   const nAtoms = Math.max(totalFormulaAtoms, atoms.length);
 
   for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
-    const { minDist, minRatio } = computePairwiseDistances(current);
+    const { minDist, minRatio } = computePairwiseDistances(current, pressureGPa);
     const volume = computeBoundingVolume(current);
     const volumePerAtom = volume / nAtoms;
 
@@ -1752,11 +1800,11 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     const volNotTooLarge = volumePerAtom <= targetVolPerAtom * 2.0;
 
     if (distOk && volOk && volNotTooLarge) {
-      const hardCheck = hasHardDistanceViolation(current);
+      const hardCheck = hasHardDistanceViolation(current, pressureGPa);
       if (!hardCheck.violated) {
         return current;
       }
-      console.log(`[DFT] ${formula}: Hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å — continuing scaling`);
+      console.log(`[DFT] ${formula}: Hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å @ ${pressureGPa} GPa — continuing scaling`);
     }
 
     const volScale = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
@@ -1772,22 +1820,22 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
     scaleFactor = Math.max(scaleFactor, 0.5);
     scaleFactor = Math.min(scaleFactor, 2.0);
 
-    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(3)}`);
+    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) @ ${pressureGPa} GPa — scaling by ${scaleFactor.toFixed(3)}`);
     current = scaleStructure(current, scaleFactor);
   }
 
-  const hardCheck = hasHardDistanceViolation(current);
+  const hardCheck = hasHardDistanceViolation(current, pressureGPa);
   if (hardCheck.violated) {
-    console.log(`[DFT] ${formula}: Structure REJECTED — hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å after ${MAX_SCALE_ATTEMPTS} attempts`);
+    console.log(`[DFT] ${formula}: Structure REJECTED — hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å @ ${pressureGPa} GPa after ${MAX_SCALE_ATTEMPTS} attempts`);
     return null;
   }
 
-  const { minRatio } = computePairwiseDistances(current);
+  const { minRatio } = computePairwiseDistances(current, pressureGPa);
   const volume = computeBoundingVolume(current);
   const volumePerAtom = volume / nAtoms;
 
-  if (minRatio < 0.75 || volumePerAtom < minVol - 0.1) {
-    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
+  if (minRatio < 0.75 || volumePerAtom < minVol * pressureVolShrink - 0.1) {
+    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų @ ${pressureGPa} GPa`);
     return null;
   }
 
@@ -1815,7 +1863,7 @@ function checkRadiusCompatibility(elements: string[]): boolean {
   return true;
 }
 
-function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; prototype: string } {
+function generateCrystalStructure(formula: string, pressureGPa: number = 0): { atoms: AtomPosition[]; prototype: string } {
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
 
@@ -1862,7 +1910,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
       z: a.z,
     }));
     const deduped = deduplicateSites(atomPositions);
-    const validated = validateAndFixStructure(deduped, formula);
+    const validated = validateAndFixStructure(deduped, formula, pressureGPa);
     if (!validated) return { atoms: [], prototype: "rejected-overlap" };
     if (!checkVolumeRatioForAtoms(validated, counts, chemProto.templateName, formula)) {
       return { atoms: [], prototype: "rejected-volume-ratio" };
@@ -1878,7 +1926,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
     const hydrideCage = generateHydrideCageStructure(formula, counts);
     if (hydrideCage && hydrideCage.atoms.length >= 2) {
       const dedupedHydride = deduplicateSites(hydrideCage.atoms);
-      const validated = validateAndFixStructure(dedupedHydride, formula);
+      const validated = validateAndFixStructure(dedupedHydride, formula, pressureGPa);
       if (validated) {
         prototypeSuccesses++;
         return { atoms: validated, prototype: hydrideCage.prototype };
@@ -1890,7 +1938,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (protoMatch) {
     const atoms = deduplicateSites(buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts));
     if (atoms.length >= 2) {
-      const validated = validateAndFixStructure(atoms, formula);
+      const validated = validateAndFixStructure(atoms, formula, pressureGPa);
       if (!validated) return { atoms: [], prototype: "rejected-overlap" };
       if (!checkVolumeRatioForAtoms(validated, counts, protoMatch.proto.name, formula)) {
         return { atoms: [], prototype: "rejected-volume-ratio" };
@@ -1918,7 +1966,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (scaledMatch) {
     const atoms = deduplicateSites(buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts));
     if (atoms.length >= 2) {
-      const validated = validateAndFixStructure(atoms, formula);
+      const validated = validateAndFixStructure(atoms, formula, pressureGPa);
       if (!validated) return { atoms: [], prototype: "rejected-overlap" };
       if (!checkVolumeRatioForAtoms(validated, scaledCounts, scaledMatch.proto.name + "-scaled", formula)) {
         return { atoms: [], prototype: "rejected-volume-ratio" };
@@ -1933,7 +1981,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   if (chemMatch) {
     const atoms = deduplicateSites(buildStructureFromPrototype(chemMatch.proto, chemMatch.siteMap, elements, scaledCounts));
     if (atoms.length >= 2) {
-      const validated = validateAndFixStructure(atoms, formula);
+      const validated = validateAndFixStructure(atoms, formula, pressureGPa);
       if (validated) {
         if (checkVolumeRatioForAtoms(validated, scaledCounts, chemMatch.proto.name + "-chem", formula)) {
           prototypeSuccesses++;
@@ -1946,7 +1994,7 @@ function generateCrystalStructure(formula: string): { atoms: AtomPosition[]; pro
   }
 
   const { atoms, proto } = buildGenericStructure(scaledCounts);
-  const validated = validateAndFixStructure(atoms, formula);
+  const validated = validateAndFixStructure(atoms, formula, pressureGPa);
   if (!validated) return { atoms: [], prototype: "rejected-overlap" };
   if (!checkVolumeRatioForAtoms(validated, scaledCounts, proto, formula)) {
     return { atoms: [], prototype: "rejected-volume-ratio" };
@@ -2140,7 +2188,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  let { atoms, prototype } = generateCrystalStructure(formula);
+  let { atoms, prototype } = generateCrystalStructure(formula, pressureGpa);
   if (atoms.length < 2) return null;
 
   if (pressureGpa > 0) {
@@ -2478,7 +2526,7 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
   }
 
   if (atoms.length < 2) {
-    let generated = generateCrystalStructure(formula);
+    let generated = generateCrystalStructure(formula, pressureGpa);
     atoms = generated.atoms;
     prototype = generated.prototype;
     if (pressureGpa > 0 && atoms.length >= 2) {
