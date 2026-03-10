@@ -12,7 +12,7 @@ import {
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
-  Cpu, Shield, Activity, Network, GitMerge,
+  Cpu, Shield, Activity, Network, GitMerge, GitBranch,
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line, AreaChart, Area } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
@@ -855,6 +855,135 @@ function PhysicsUQCard() {
             </p>
           )}
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DistortionDetectorCard() {
+  const { data: distStats, isLoading } = useQuery<{
+    totalAnalyzed: number;
+    levelCounts: Record<string, number>;
+    avgOverallScore: number;
+    avgMeanDisplacement: number;
+    avgStrainMagnitude: number;
+    avgVolumeChangePct: number;
+    symmetryBrokenCount: number;
+    symmetryBrokenRate: number;
+    jahnTellerCount: number;
+    peierlsCount: number;
+    cdwCount: number;
+    changeTypeCounts: Record<string, number>;
+    recentDistortions: Array<{
+      formula: string;
+      level: string;
+      score: number;
+      meanDisp: number;
+      strain: number;
+      volChange: number;
+      symmetryBroken: boolean;
+    }>;
+  }>({ queryKey: ["/api/distortion/stats"] });
+
+  const levelColors: Record<string, string> = {
+    none: "text-muted-foreground",
+    small: "text-green-400",
+    moderate: "text-yellow-400",
+    large: "text-orange-400",
+    severe: "text-red-400",
+  };
+
+  const mechanismCounts = distStats ? {
+    ...(distStats.jahnTellerCount > 0 ? { "Jahn-Teller": distStats.jahnTellerCount } : {}),
+    ...(distStats.peierlsCount > 0 ? { "Peierls": distStats.peierlsCount } : {}),
+    ...(distStats.cdwCount > 0 ? { "CDW": distStats.cdwCount } : {}),
+  } : {};
+
+  return (
+    <Card data-testid="card-distortion-detector">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <GitBranch className="h-4 w-4 text-purple-400" />
+          Distortion Detector
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            <div className="h-4 bg-muted animate-pulse rounded w-3/4" />
+            <div className="h-4 bg-muted animate-pulse rounded w-1/2" />
+          </div>
+        ) : !distStats || distStats.totalAnalyzed === 0 ? (
+          <p className="text-xs text-muted-foreground">No distortion analyses recorded yet. Data populates after xTB relaxations.</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-lg font-bold" data-testid="text-distortion-total">{distStats.totalAnalyzed}</div>
+                <div className="text-[10px] text-muted-foreground">Analyzed</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-purple-400" data-testid="text-distortion-avg-score">{distStats.avgOverallScore.toFixed(2)}</div>
+                <div className="text-[10px] text-muted-foreground">Avg Score</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-amber-400" data-testid="text-distortion-sym-broken">{distStats.symmetryBrokenCount}</div>
+                <div className="text-[10px] text-muted-foreground">Sym Broken</div>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-[10px] text-muted-foreground font-medium">Level Distribution</div>
+              <div className="flex gap-1 flex-wrap">
+                {Object.entries(distStats.levelCounts).filter(([, c]) => c > 0).map(([level, count]) => (
+                  <span key={level} className={`text-[10px] px-1.5 py-0.5 rounded bg-muted ${levelColors[level] || "text-muted-foreground"}`} data-testid={`badge-distortion-level-${level}`}>
+                    {level}: {count}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {Object.keys(mechanismCounts).length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Mechanisms Detected</div>
+                <div className="flex gap-1 flex-wrap">
+                  {Object.entries(mechanismCounts).map(([mech, count]) => (
+                    <span key={mech} className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300" data-testid={`badge-mechanism-${mech}`}>
+                      {mech}: {count}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {distStats.recentDistortions.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Recent Analyses</div>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {distStats.recentDistortions.slice(0, 5).map((a, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-distortion-${i}`}>
+                      <span className="font-mono font-medium">{a.formula}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={levelColors[a.level] || ""}>{a.level}</span>
+                        <span className="text-muted-foreground">
+                          {a.strain.toFixed(3)} strain
+                        </span>
+                        {a.meanDisp > 0 && (
+                          <span className="text-muted-foreground">
+                            {a.meanDisp.toFixed(3)}A
+                          </span>
+                        )}
+                        {a.symmetryBroken && (
+                          <span className="text-red-400 text-[9px]">sym broken</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -2057,6 +2186,7 @@ export default function Dashboard() {
 
           <GNNActiveLearningCard />
           <PhysicsUQCard />
+          <DistortionDetectorCard />
           <FeedbackLoopCard />
 
           <Card data-testid="card-learning-insights">

@@ -5,6 +5,7 @@ import { getElementData } from "../learning/elemental-data";
 import { fillPrototype, computeBondValenceSum, checkIonicRadiusCompatibility } from "../learning/crystal-prototypes";
 import { computeFiniteDisplacementPhonons } from "./phonon-calculator";
 import type { FiniteDisplacementPhononResult } from "./phonon-calculator";
+import { analyzeDistortion, recordDistortionAnalysis, type DistortionAnalysis } from "../crystal/distortion-detector";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -21,6 +22,7 @@ export interface OptimizationResult {
   gradientNorm: number;
   iterations: number;
   wallTimeSeconds: number;
+  distortion?: DistortionAnalysis;
 }
 
 export interface DFTResult {
@@ -2121,6 +2123,44 @@ export async function runXTBOptimization(formula: string): Promise<OptimizationR
       iterations: optInfo.iterations,
       wallTimeSeconds: (Date.now() - startTime) / 1000,
     };
+
+    if (atoms.length >= 2 && optimizedAtoms.length >= 2) {
+      try {
+        const initialPositions = atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z }));
+        const relaxedPositions = optimizedAtoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z }));
+        const xExtent = (arr: AtomPosition[]) => {
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+          for (const a of arr) {
+            if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+            if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+            if (a.z < minZ) minZ = a.z; if (a.z > maxZ) maxZ = a.z;
+          }
+          return {
+            a: Math.max(2.5, maxX - minX + 2.0),
+            b: Math.max(2.5, maxY - minY + 2.0),
+            c: Math.max(2.5, maxZ - minZ + 2.0),
+            alpha: 90, beta: 90, gamma: 90,
+          };
+        };
+        const beforeLattice = xExtent(atoms);
+        const afterLattice = xExtent(optimizedAtoms);
+        const distortion = analyzeDistortion(
+          formula,
+          beforeLattice,
+          afterLattice,
+          initialPositions,
+          relaxedPositions,
+          prototype === "Perovskite" ? "Pm-3m" : prototype === "A15" ? "Pm-3m" :
+            prototype === "NaCl" ? "Fm-3m" : prototype === "AlB2" ? "P6/mmm" :
+            prototype === "ThCr2Si2" ? "I4/mmm" : undefined,
+        );
+        result.distortion = distortion;
+        recordDistortionAnalysis(distortion);
+        if (distortion.overallLevel !== "none") {
+          console.log(`[DFT] ${formula}: Distortion detected (${distortion.overallLevel}, score=${distortion.overallScore}, meanDisp=${distortion.atomicDistortion?.meanDisplacement?.toFixed(4) ?? "N/A"}A, strain=${distortion.latticeDistortion.strainMagnitude.toFixed(5)}, vol=${distortion.latticeDistortion.volumeChangePct.toFixed(2)}%)${distortion.symmetryReduction?.symmetryBroken ? ` [symmetry broken: ${distortion.symmetryReduction.systemBefore}->${distortion.symmetryReduction.systemAfter}]` : ""}`);
+        }
+      } catch {}
+    }
 
     if (result.converged && optimizedAtoms.length >= 2) {
       optimizedStructureCache.set(cacheKey, result);

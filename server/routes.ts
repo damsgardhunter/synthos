@@ -228,6 +228,9 @@ import {
   predictVolume, getVolumeDNNStats, initVolumeDNN,
 } from "./crystal/volume-predictor-dnn";
 import {
+  getDistortionStats, getDistortionForFormula,
+} from "./crystal/distortion-detector";
+import {
   computeTBProperties, computeBandStructure, computeDOS,
   computeFermiProperties, detectFlatBands, computeElectronPhononProxies,
   getTBEngineStats,
@@ -3697,6 +3700,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, ...prediction });
     } catch (e) {
       res.status(500).json({ error: "Failed to predict relaxation magnitude" });
+    }
+  });
+
+  app.get("/api/distortion/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getDistortionStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch distortion stats" });
+    }
+  });
+
+  app.get("/api/distortion/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = getDistortionForFormula(formula);
+      if (!result) {
+        return res.status(404).json({ error: "No distortion data for formula" });
+      }
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch distortion data" });
     }
   });
 

@@ -6,6 +6,7 @@ import { recordPhysicsResult } from "../learning/physics-results-store";
 import { predictLambda, recordLambdaValidation } from "../learning/lambda-regressor";
 import { recordStructureFailure } from "../crystal/structure-failure-db";
 import { recordRelaxation } from "../crystal/relaxation-tracker";
+import { analyzeDistortion, recordDistortionAnalysis } from "../crystal/distortion-detector";
 import { getEntryByFormula } from "../crystal/crystal-structure-dataset";
 import { dosPrefilter, predictDOS, type DOSSurrogateResult } from "../physics/dos-surrogate";
 
@@ -478,6 +479,25 @@ export async function runQuantumEnginePipeline(
         crystalSystem: crystalEntry.crystalSystem,
         prototype: crystalEntry.prototype,
       });
+
+      try {
+        const sgMap: Record<string, string> = {
+          Perovskite: "Pm-3m", A15: "Pm-3m", NaCl: "Fm-3m", AlB2: "P6/mmm",
+          ThCr2Si2: "I4/mmm", Spinel: "Fd-3m", Heusler: "Fm-3m", Laves: "Fd-3m",
+          MAX: "P63/mmc", Fluorite: "Fm-3m",
+        };
+        const sgBefore = sgMap[crystalEntry.prototype] || undefined;
+        const beforePos = crystalEntry.atomicPositions?.map(p => ({ element: p.element, x: p.x, y: p.y, z: p.z }));
+        const distortionResult = analyzeDistortion(
+          formula,
+          beforeLattice,
+          afterLattice,
+          beforePos,
+          undefined,
+          sgBefore,
+        );
+        recordDistortionAnalysis(distortionResult);
+      } catch {}
     }
   } catch {}
 
