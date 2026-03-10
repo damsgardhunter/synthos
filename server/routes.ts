@@ -52,7 +52,7 @@ import { predictLambda, getLambdaRegressorStats, initLambdaRegressor } from "./l
 import { predictPhononProperties, getPhononSurrogateStats, initPhononSurrogate } from "./physics/phonon-surrogate";
 import { getCalibrationStats as getSurrogateFitnessStats } from "./learning/surrogate-fitness";
 import { getPillarDFTFeedbackStats } from "./inverse/sc-pillars-optimizer";
-import { extractFeatures } from "./learning/ml-predictor";
+import { extractFeatures, computeUnifiedCI } from "./learning/ml-predictor";
 import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
 import rateLimit from "express-rate-limit";
@@ -266,6 +266,10 @@ import {
   getUncertaintyStatus, getUncertaintyReport, getFullUncertaintyReport,
   getHighUncertaintyPredictions, getVarianceByFamily, proposeUncertaintyImprovements,
 } from "./learning/uncertainty-tracker";
+import {
+  getCalibrationState, recalibrateFromLedger, getConformalInterval,
+  getFamilyConformalQuantiles, getECE, getCalibrationSummaryForLLM,
+} from "./learning/conformal-calibrator";
 import {
   evaluateRetrainNeed, getSchedulerStats, getSchedulerForLLM, recordRetrainOutcome,
 } from "./learning/retrain-scheduler";
@@ -4035,12 +4039,80 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/unified-ci/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 2 || formula.length > 100) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const result = computeUnifiedCI(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute unified CI", detail: e.message });
+    }
+  });
+
   app.post("/api/uncertainty/propose", engineLimiter, async (_req, res) => {
     try {
       const proposals = await proposeUncertaintyImprovements();
       res.json({ proposals, count: proposals.length });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to propose uncertainty improvements", detail: e.message });
+    }
+  });
+
+  app.get("/api/calibration/status", generalLimiter, async (_req, res) => {
+    try {
+      const state = getCalibrationState();
+      res.json(state);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get calibration status", detail: e.message });
+    }
+  });
+
+  app.post("/api/calibration/recalibrate", engineLimiter, async (_req, res) => {
+    try {
+      const state = recalibrateFromLedger();
+      res.json({ status: "recalibrated", ...state });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to recalibrate", detail: e.message });
+    }
+  });
+
+  app.get("/api/calibration/conformal-interval/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 2 || formula.length > 100) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const ci = computeUnifiedCI(formula);
+      const conformalResult = {
+        formula,
+        rawCI95: ci.tcCI95,
+        calibratedCI95: ci.calibratedCI95,
+        conformalQuantile: ci.conformalQuantile,
+        temperatureScale: ci.temperatureScale,
+        ece: ci.ece,
+        conformalMethod: ci.conformalMethod,
+        calibrationDatasetSize: ci.calibrationDatasetSize,
+        tcMean: ci.tcMean,
+        tcTotalStd: ci.tcTotalStd,
+        epistemicStd: ci.tcEpistemicStd,
+        aleatoricStd: ci.tcAleatoricStd,
+      };
+      res.json(conformalResult);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute conformal interval", detail: e.message });
+    }
+  });
+
+  app.get("/api/calibration/ece", generalLimiter, async (_req, res) => {
+    try {
+      const ece = getECE();
+      const families = getFamilyConformalQuantiles();
+      res.json({ ...ece, perFamily: families });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get ECE", detail: e.message });
     }
   });
 

@@ -24,13 +24,170 @@ import {
   hasDOrFElectrons,
   getStonerParameter,
 } from "./elemental-data";
-import { gbPredict, getConfidenceBand } from "./gradient-boost";
+import { gbPredict, getConfidenceBand, gbPredictWithUncertainty, type XGBUncertaintyResult } from "./gradient-boost";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
-import { getGNNPrediction, type GNNPrediction } from "./graph-neural-net";
+import { getGNNPrediction, gnnPredictWithUncertainty, type GNNPrediction, type GNNPredictionWithUncertainty } from "./graph-neural-net";
 import { getPhysicsFeatures, getDerivedFeatures } from "./physics-results-store";
 import { predictLambda, recordLambdaValidation } from "./lambda-regressor";
 import { predictTBProperties } from "../physics/tb-ml-surrogate";
+import { getConformalInterval, getCalibrationState, getECE, type ConformalInterval } from "./conformal-calibrator";
 export { getConfidenceBand };
+
+export interface UnifiedCIResult {
+  formula: string;
+  tcMean: number;
+  tcCI95: [number, number];
+  tcTotalStd: number;
+  tcEpistemicStd: number;
+  tcAleatoricStd: number;
+  lambdaMean: number;
+  lambdaCI95: [number, number];
+  gnn: {
+    tcMean: number;
+    tcCI95: [number, number];
+    totalStd: number;
+    epistemicUncertainty: number;
+    aleatoricUncertainty: number;
+    lambda: number;
+    lambdaCI95: [number, number];
+    confidence: number;
+    weight: number;
+  };
+  xgb: {
+    tcMean: number;
+    tcCI95: [number, number];
+    totalStd: number;
+    epistemicStd: number;
+    aleatoricStd: number;
+    perModelPredictions: number[];
+    weight: number;
+  };
+  modelCount: number;
+  calibrationNote: string;
+  calibratedCI95: [number, number];
+  conformalQuantile: number;
+  temperatureScale: number;
+  ece: number;
+  calibrationDatasetSize: number;
+  conformalMethod: "conformal" | "fallback";
+}
+
+export function computeUnifiedCI(formula: string): UnifiedCIResult {
+  const gnnResult = gnnPredictWithUncertainty(formula);
+
+  const features = extractFeatures(formula);
+  const xgbResult = gbPredictWithUncertainty(features, formula);
+
+  const safe = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
+
+  const gnnTcValid = Number.isFinite(gnnResult.tc) && Number.isFinite(gnnResult.totalStd) && gnnResult.totalStd > 0;
+  const xgbTcValid = Number.isFinite(xgbResult.tcMean) && Number.isFinite(xgbResult.totalStd) && xgbResult.totalStd > 0;
+
+  const gnnVar = gnnTcValid ? gnnResult.totalStd ** 2 : 1e6;
+  const xgbVar = xgbTcValid ? xgbResult.totalStd ** 2 : 1e6;
+
+  const wGnn = 1 / gnnVar;
+  const wXgb = 1 / xgbVar;
+  const wTotal = wGnn + wXgb;
+
+  let tcCombined: number;
+  if (gnnTcValid && xgbTcValid) {
+    tcCombined = (wGnn * gnnResult.tc + wXgb * xgbResult.tcMean) / wTotal;
+  } else if (xgbTcValid) {
+    tcCombined = xgbResult.tcMean;
+  } else if (gnnTcValid) {
+    tcCombined = gnnResult.tc;
+  } else {
+    tcCombined = 0;
+  }
+
+  const varCombined = 1 / wTotal;
+  const stdCombined = Math.sqrt(varCombined);
+
+  const epistemicGnn = gnnTcValid ? safe(gnnResult.epistemicUncertainty) * safe(gnnResult.totalStd) : 0;
+  const epistemicXgb = safe(xgbResult.epistemicStd);
+  const epistemicCombined = Math.sqrt(
+    ((wGnn * epistemicGnn) ** 2 + (wXgb * epistemicXgb) ** 2) / (wTotal ** 2)
+  );
+
+  const aleatoricGnn = gnnTcValid ? safe(gnnResult.aleatoricUncertainty) * safe(gnnResult.totalStd) : 0;
+  const aleatoricXgb = safe(xgbResult.aleatoricStd);
+  const aleatoricCombined = Math.sqrt(
+    ((wGnn * aleatoricGnn) ** 2 + (wXgb * aleatoricXgb) ** 2) / (wTotal ** 2)
+  );
+
+  const tcCI95Lower = Math.max(0, tcCombined - 1.96 * stdCombined);
+  const tcCI95Upper = tcCombined + 1.96 * stdCombined;
+
+  const gnnLambdaValid = Number.isFinite(gnnResult.lambda) && Number.isFinite(gnnResult.lambdaCI95?.[0]) && Number.isFinite(gnnResult.lambdaCI95?.[1]);
+  const lambdaGnn = gnnLambdaValid ? gnnResult.lambda : 0;
+  const lambdaXgb = features.electronPhononLambda ?? 0.5;
+  const lambdaGnnVar = gnnLambdaValid ? (gnnResult.lambdaCI95[1] - gnnResult.lambdaCI95[0]) / (2 * 1.96) : 10;
+  const lambdaGnnStd = Math.max(lambdaGnnVar, 0.01);
+  const lambdaXgbStd = 0.15;
+
+  const wLGnn = 1 / (lambdaGnnStd ** 2);
+  const wLXgb = 1 / (lambdaXgbStd ** 2);
+  const wLTotal = wLGnn + wLXgb;
+  const lambdaCombined = (wLGnn * lambdaGnn + wLXgb * lambdaXgb) / wLTotal;
+  const lambdaStdCombined = Math.sqrt(1 / wLTotal);
+
+  const conformal = getConformalInterval(tcCombined, stdCombined, 0.95);
+  const calState = getCalibrationState();
+  const eceMetrics = getECE();
+
+  let calibrationNote = "Predictions are model estimates with quantified uncertainty";
+  if (conformal.method === "conformal") {
+    calibrationNote = `Conformal calibration active (T=${calState.temperatureScale}, Q95=${conformal.quantile}, ECE=${eceMetrics.after.toFixed(4)}, n=${calState.calibrationDatasetSize})`;
+  } else if (stdCombined > 50) {
+    calibrationNote = "High uncertainty: prediction interval is wide, treat as exploratory";
+  } else if (stdCombined > 20) {
+    calibrationNote = "Moderate uncertainty: additional validation recommended";
+  } else if (stdCombined < 5) {
+    calibrationNote = "Low uncertainty: models show strong agreement on this composition";
+  }
+
+  const r = (v: number) => Number.isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
+
+  return {
+    formula,
+    tcMean: r(tcCombined),
+    tcCI95: [r(tcCI95Lower), r(tcCI95Upper)],
+    tcTotalStd: r(stdCombined),
+    tcEpistemicStd: r(epistemicCombined),
+    tcAleatoricStd: r(aleatoricCombined),
+    lambdaMean: r(lambdaCombined),
+    lambdaCI95: [r(Math.max(0, lambdaCombined - 1.96 * lambdaStdCombined)), r(lambdaCombined + 1.96 * lambdaStdCombined)],
+    gnn: {
+      tcMean: gnnResult.tc,
+      tcCI95: gnnResult.tcCI95,
+      totalStd: gnnResult.totalStd,
+      epistemicUncertainty: gnnResult.epistemicUncertainty,
+      aleatoricUncertainty: gnnResult.aleatoricUncertainty,
+      lambda: gnnResult.lambda,
+      lambdaCI95: gnnResult.lambdaCI95,
+      confidence: gnnResult.confidence,
+      weight: r(wGnn / wTotal),
+    },
+    xgb: {
+      tcMean: xgbResult.tcMean,
+      tcCI95: xgbResult.tcCI95,
+      totalStd: xgbResult.totalStd,
+      epistemicStd: xgbResult.epistemicStd,
+      aleatoricStd: xgbResult.aleatoricStd,
+      perModelPredictions: xgbResult.perModelPredictions,
+      weight: r(wXgb / wTotal),
+    },
+    modelCount: 10,
+    calibrationNote,
+    calibratedCI95: [conformal.lower, conformal.upper],
+    conformalQuantile: conformal.quantile,
+    temperatureScale: calState.temperatureScale,
+    ece: eceMetrics.after,
+    calibrationDatasetSize: calState.calibrationDatasetSize,
+    conformalMethod: conformal.method,
+  };
+}
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,

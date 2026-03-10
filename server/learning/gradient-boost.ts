@@ -57,6 +57,7 @@ interface GBEnsemble {
 }
 
 let cachedEnsembleXGB: GBEnsemble | null = null;
+let cachedVarianceEnsembleXGB: GBEnsemble | null = null;
 
 function bootstrapSample(X: number[][], y: number[], ratio: number = BOOTSTRAP_SAMPLE_RATIO): { X: number[][]; y: number[] } {
   const n = X.length;
@@ -71,11 +72,35 @@ function bootstrapSample(X: number[][], y: number[], ratio: number = BOOTSTRAP_S
   return { X: sampledX, y: sampledY };
 }
 
+const ENSEMBLE_MAX_DEPTHS = [5, 6, 7, 6, 5];
+const ENSEMBLE_LEARNING_RATES = [0.04, 0.05, 0.06, 0.05, 0.04];
+
 function trainEnsembleXGB(X: number[][], y: number[]): GBEnsemble {
   const models: GBModel[] = [];
   for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
     const { X: bsX, y: bsY } = bootstrapSample(X, y);
-    const model = trainGradientBoosting(bsX, bsY, 300, 0.05, 6);
+    const depth = ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
+    const lr = ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
+    const model = trainGradientBoosting(bsX, bsY, 300, lr, depth);
+    models.push(model);
+  }
+  return { models, trainedAt: Date.now() };
+}
+
+function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble: GBEnsemble): GBEnsemble {
+  const squaredResiduals: number[] = [];
+  for (let i = 0; i < X.length; i++) {
+    const meanPred = predictEnsembleXGB(meanEnsemble, X[i]).mean;
+    const residual = y[i] - meanPred;
+    squaredResiduals.push(residual * residual);
+  }
+
+  const models: GBModel[] = [];
+  for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
+    const { X: bsX, y: bsY } = bootstrapSample(X, squaredResiduals);
+    const depth = ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
+    const lr = ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
+    const model = trainGradientBoosting(bsX, bsY, 200, lr, depth);
     models.push(model);
   }
   return { models, trainedAt: Date.now() };
@@ -630,6 +655,7 @@ export function getTrainedModel(): GBModel {
 
   if (!cachedEnsembleXGB && X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
   }
 
   logModelVersion("initial-training", X.length);
@@ -688,6 +714,10 @@ export function gbPredict(features: MLFeatureVector, formula?: string): { tcPred
 export interface XGBUncertaintyResult {
   tcMean: number;
   tcStd: number;
+  tcCI95: [number, number];
+  epistemicStd: number;
+  aleatoricStd: number;
+  totalStd: number;
   normalizedUncertainty: number;
   score: number;
   perModelPredictions: number[];
@@ -707,6 +737,10 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
     return {
       tcMean: safeTc,
       tcStd: 0,
+      tcCI95: [Math.max(0, safeTc), safeTc],
+      epistemicStd: 0,
+      aleatoricStd: 0,
+      totalStd: 0,
       normalizedUncertainty: 0.5,
       score: safeTc > 100 ? 0.7 : safeTc > 20 ? 0.4 : 0.1,
       perModelPredictions: [safeTc],
@@ -717,9 +751,24 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
 
   const result = predictEnsembleXGB(cachedEnsembleXGB, x);
   const meanTc = result.mean;
-  const stdTc = result.std;
 
-  const normalizedUncertainty = Math.min(1.0, stdTc / Math.max(1, meanTc + 10));
+  const epistemicVar = result.predictions.reduce((s, v) => s + (v - meanTc) ** 2, 0) / result.predictions.length;
+  const epistemicStd = Math.sqrt(epistemicVar);
+
+  let aleatoricVar = 0;
+  if (cachedVarianceEnsembleXGB) {
+    const varResult = predictEnsembleXGB(cachedVarianceEnsembleXGB, x);
+    aleatoricVar = Math.max(0, varResult.mean);
+  }
+  const aleatoricStd = Math.sqrt(aleatoricVar);
+
+  const totalVar = epistemicVar + aleatoricVar;
+  const totalStd = Math.sqrt(totalVar);
+
+  const ci95Lower = Math.max(0, meanTc - 1.96 * totalStd);
+  const ci95Upper = meanTc + 1.96 * totalStd;
+
+  const normalizedUncertainty = Math.min(1.0, totalStd / Math.max(1, meanTc + 10));
 
   let score = 0;
   if (meanTc > 293) score = 0.92;
@@ -742,7 +791,9 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   const acquisitionScore = normalizedTc + 1.5 * normalizedUncertainty;
 
   const reasoning: string[] = [];
-  reasoning.push(`Ensemble: ${XGB_ENSEMBLE_SIZE} models, Tc=${meanTc.toFixed(1)}K +/- ${stdTc.toFixed(1)}K`);
+  reasoning.push(`Ensemble: ${XGB_ENSEMBLE_SIZE} models, Tc=${meanTc.toFixed(1)}K ± ${totalStd.toFixed(1)}K`);
+  reasoning.push(`Epistemic σ=${epistemicStd.toFixed(2)}K, Aleatoric σ=${aleatoricStd.toFixed(2)}K`);
+  reasoning.push(`95% CI: [${ci95Lower.toFixed(1)}K, ${ci95Upper.toFixed(1)}K]`);
   if (normalizedUncertainty > 0.6) reasoning.push("Very high uncertainty - priority exploration target");
   else if (normalizedUncertainty > 0.3) reasoning.push("Moderate uncertainty - good exploration candidate");
   else reasoning.push("Low uncertainty - prediction is confident");
@@ -751,7 +802,11 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
 
   return {
     tcMean: safeMean,
-    tcStd: Math.round(stdTc * 10) / 10,
+    tcStd: Math.round(totalStd * 10) / 10,
+    tcCI95: [Math.round(ci95Lower * 10) / 10, Math.round(ci95Upper * 10) / 10],
+    epistemicStd: Math.round(epistemicStd * 100) / 100,
+    aleatoricStd: Math.round(aleatoricStd * 100) / 100,
+    totalStd: Math.round(totalStd * 100) / 100,
     normalizedUncertainty: Math.round(normalizedUncertainty * 1000) / 1000,
     score,
     perModelPredictions: result.predictions.map(p => Math.round(p * 10) / 10),
@@ -1101,6 +1156,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
   }
 
   xgboostRetrainCount++;
@@ -1115,6 +1171,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     cachedCalibration = computeCalibration(cachedModel);
     if (X.length >= 30) {
       cachedEnsembleXGB = trainEnsembleXGB(X, y);
+      cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
     }
     logModelVersion("error-rate-correction", X.length);
   }
@@ -1149,6 +1206,7 @@ export function invalidateModel(): void {
   cachedModel = null;
   cachedCalibration = null;
   cachedEnsembleXGB = null;
+  cachedVarianceEnsembleXGB = null;
 }
 
 export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
@@ -1251,6 +1309,7 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   cachedCalibration = computeCalibration(cachedModel);
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
   }
   lastRetrainCycle = Date.now();
 
@@ -1308,6 +1367,7 @@ export async function incorporateFailureData(): Promise<number> {
       cachedCalibration = computeCalibration(cachedModel);
       if (X.length >= 30) {
         cachedEnsembleXGB = trainEnsembleXGB(X, y);
+        cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
       }
       logModelVersion("failure-retrain", X.length);
     }

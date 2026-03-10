@@ -131,6 +131,11 @@ export function recordPredictionVsReality(
 
   samplesSinceLastRetrain++;
 
+  try {
+    const { notifyNewLedgerEntry } = require("./conformal-calibrator");
+    notifyNewLedgerEntry();
+  } catch {}
+
   return entry;
 }
 
