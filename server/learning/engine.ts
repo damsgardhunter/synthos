@@ -168,6 +168,29 @@ const VALID_ELEMENTS_SET = new Set([
   "Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am",
 ]);
 
+function computeEdgeOfInstabilityScore(result: any): number {
+  const vanHove = result.electronicStructure?.vanHoveProximity ?? 0;
+  const phononSoftening = result.phononSpectrum?.phononSofteningIndex ?? 0;
+  const nesting = result.electronicStructure?.fermiSurfaceNestingScore ?? result.electronicStructure?.nestingScore ?? 0;
+  const spinFluc = result.electronicStructure?.spinFluctuationStrength ?? 0;
+  const dosEf = result.electronicStructure?.densityOfStatesAtFermi ?? 0;
+  const minPhonon = result.phononSpectrum?.minFrequency ?? 0;
+
+  if (minPhonon < -30 || dosEf > 10) return 0.1;
+
+  let count = 0;
+  if (vanHove > 0.7) count++;
+  if (phononSoftening > 0.6) count++;
+  if (nesting > 0.6) count++;
+  if (spinFluc > 0.5) count++;
+
+  const weighted = vanHove * 0.3 + nesting * 0.25 + phononSoftening * 0.25 + spinFluc * 0.2;
+
+  if (count >= 1 && count <= 3) return Math.min(0.95, 0.5 + weighted * 0.5);
+  if (count === 0) return Math.max(0.2, 0.3 + weighted * 0.3);
+  return 0.3;
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   const cleaned = (formula ?? "").replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const result: Record<string, number> = {};
@@ -1671,9 +1694,23 @@ async function runPhase10_Physics() {
         const newNotes = existingNotes.replace(/\[Instability:.*?\]/g, "").replace(/\[Pairing:.*?\]/g, "").trim();
         const updatedNotes = `${pairingNote} ${instabilityNote} ${newNotes}`.trim();
 
-        const boundaryBoost = instProx.overallProximity > 0.5 ? instProx.overallProximity * 0.05 : 0;
+        let edgeOfInstabilityCount = 0;
+        if ((result.electronicStructure.vanHoveProximity ?? 0) > 0.7) edgeOfInstabilityCount++;
+        if ((result.phononSpectrum.phononSofteningIndex ?? 0) > 0.6) edgeOfInstabilityCount++;
+        if ((result.electronicStructure.fermiSurfaceNestingScore ?? result.electronicStructure.nestingScore ?? 0) > 0.6) edgeOfInstabilityCount++;
+        if ((result.electronicStructure.spinFluctuationStrength ?? 0) > 0.5) edgeOfInstabilityCount++;
+
+        const dosAtFermi = result.electronicStructure.densityOfStatesAtFermi ?? 0;
+        const minPhononFreq = result.phononSpectrum.minFrequency ?? 0;
+        const isExtremeInstability = minPhononFreq < -30 || dosAtFermi > 10;
+
+        let edgeBoost = 0;
+        if (!isExtremeInstability && edgeOfInstabilityCount >= 1 && edgeOfInstabilityCount <= 3) {
+          edgeBoost = edgeOfInstabilityCount * 0.04 + instProx.overallProximity * 0.06;
+        }
+
         const currentEnsemble = candidate.ensembleScore ?? 0;
-        const boostedEnsemble = Math.min(0.98, currentEnsemble + boundaryBoost);
+        const boostedEnsemble = Math.min(0.98, currentEnsemble + edgeBoost);
 
         const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
         const updatedMlFeatures = {
@@ -2305,7 +2342,7 @@ async function runPhase10_Physics() {
                   omegaLog: hubInsights.physics.omegaLog,
                   dosAtFermi: hubInsights.physics.dosAtFermi,
                   metallicity: hubInsights.physics.metallicity,
-                  stabilityScore: 1 - (result.instabilityProximity?.overallProximity ?? 0.5),
+                  stabilityScore: computeEdgeOfInstabilityScore(result),
                   correlationStrength: hubInsights.physics.correlationStrength,
                 } : undefined,
                 topology: topoAnalysis ? {

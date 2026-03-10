@@ -7,6 +7,7 @@ import { computeFiniteDisplacementPhonons } from "./phonon-calculator";
 import type { FiniteDisplacementPhononResult } from "./phonon-calculator";
 import { analyzeDistortion, recordDistortionAnalysis, type DistortionAnalysis } from "../crystal/distortion-detector";
 import { relaxStructureAtPressure } from "../learning/pressure-engine";
+import { normalizeFormula } from "../learning/utils";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -2120,6 +2121,7 @@ function applyPressureScaling(atoms: AtomPosition[], formula: string, pressureGp
 }
 
 export async function runXTBOptimization(formula: string, pressureGpa: number = 0): Promise<OptimizationResult | null> {
+  formula = normalizeFormula(formula);
   if (!isDFTAvailable()) return null;
 
   const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
@@ -2452,6 +2454,7 @@ export function getLandscapeStats(): {
 }
 
 export async function runDFTCalculation(formula: string, pressureGpa: number = 0): Promise<DFTResult> {
+  formula = normalizeFormula(formula);
   const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
   const cacheKey = formula.replace(/\s+/g, "") + pressureTag;
   if (xtbResultCache.has(cacheKey)) {
