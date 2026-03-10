@@ -183,7 +183,8 @@ function buildAlpha2FSpectralFunction(
   formula: string,
   electronic: ElectronicStructure,
   coupling: ElectronPhononCoupling,
-  pressureGpa: number
+  pressureGpa: number,
+  phononMaxFreq?: number
 ): Alpha2FSpectralFunction {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -217,7 +218,8 @@ function buildAlpha2FSpectralFunction(
   const frequencies = [...phononDOS.frequencies];
   const alpha2F = new Array(nBins).fill(0);
   const cumulativeLambda = new Array(nBins).fill(0);
-  const maxFreq = frequencies.length > 0 ? Math.max(...frequencies.filter(f => f > 0)) : 500;
+  const dosMaxFreq = frequencies.length > 0 ? Math.max(...frequencies.filter(f => f > 0)) : 500;
+  const maxFreq = phononMaxFreq && phononMaxFreq > dosMaxFreq ? phononMaxFreq * 1.2 : dosMaxFreq;
 
   const couplingPrefactor = avgEta * N_EF * 1.2;
   const binWidth = nBins > 1 ? frequencies[1] - frequencies[0] : 1;
@@ -492,6 +494,32 @@ function solveEliashbergGapEquation(
   };
 }
 
+function sweepMuStarGapEquation(
+  alpha2FSpec: Alpha2FSpectralFunction,
+  centralMuStar: number,
+  trialTc: number,
+): { tcRange: number[]; maxVariation: number; sensitivityFlag: boolean } {
+  const muStarValues = [
+    Math.max(0.05, centralMuStar - 0.025),
+    centralMuStar,
+    Math.max(0.05, centralMuStar + 0.025),
+  ];
+
+  const tcRange: number[] = [];
+  for (const mu of muStarValues) {
+    const sol = solveEliashbergGapEquation(alpha2FSpec, mu, trialTc, 30);
+    tcRange.push(sol.tc);
+  }
+
+  const maxTc = Math.max(...tcRange);
+  const minTc = Math.min(...tcRange);
+  const meanTc = tcRange.reduce((a, b) => a + b, 0) / tcRange.length;
+  const maxVariation = meanTc > 0 ? (maxTc - minTc) / meanTc : 0;
+  const sensitivityFlag = maxVariation > 0.20;
+
+  return { tcRange, maxVariation, sensitivityFlag };
+}
+
 function computeIsotopeEffect(
   formula: string,
   alpha2FSpec: Alpha2FSpectralFunction,
@@ -569,7 +597,7 @@ export function runEliashbergPipeline(
   const phononDOS = computePhononDOS(phononDispersion, phonon.maxPhononFrequency);
 
   const alpha2FSpec = buildAlpha2FSpectralFunction(
-    phononDOS, formula, electronic, coupling, pressureGpa
+    phononDOS, formula, electronic, coupling, pressureGpa, phonon.maxPhononFrequency
   );
 
   const muStar = computeScreenedMuStar(formula, pressureGpa, electronic.densityOfStatesAtFermi);
@@ -581,11 +609,14 @@ export function runEliashbergPipeline(
     muStar
   );
 
+  const gapTrialTc = allenDynes.tc > 0 ? allenDynes.tc : coupling.omegaLog * 1.4388 / 10;
   const gapSolution = solveEliashbergGapEquation(
     alpha2FSpec,
     muStar,
-    allenDynes.tc > 0 ? allenDynes.tc : coupling.omegaLog * 1.4388 / 10
+    gapTrialTc
   );
+
+  const muStarSweep = sweepMuStarGapEquation(alpha2FSpec, muStar, gapTrialTc);
 
   const tcBest = Math.max(allenDynes.tc, gapSolution.tc);
 
@@ -596,6 +627,11 @@ export function runEliashbergPipeline(
     confidence = "high";
   } else if (!alpha2FSpec.convergenceCheck.converged && !gapSolution.converged) {
     confidence = "low";
+  }
+
+  if (muStarSweep.sensitivityFlag) {
+    if (confidence === "high") confidence = "medium";
+    else if (confidence === "medium") confidence = "low";
   }
 
   const uncertaintyFrac = confidence === "high" ? 0.15 : confidence === "medium" ? 0.25 : 0.40;
@@ -761,5 +797,5 @@ export function getAlpha2FOnly(
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
   const phononDispersion = computePhononDispersion(formula, electronic, phonon);
   const phononDOS = computePhononDOS(phononDispersion, phonon.maxPhononFrequency);
-  return buildAlpha2FSpectralFunction(phononDOS, formula, electronic, coupling, pressureGpa);
+  return buildAlpha2FSpectralFunction(phononDOS, formula, electronic, coupling, pressureGpa, phonon.maxPhononFrequency);
 }

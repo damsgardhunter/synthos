@@ -3151,11 +3151,12 @@ export interface PhononDOSData {
 }
 
 export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhononFreq: number): PhononDOSData {
-  const nBins = 100;
+  const extendedMax = maxPhononFreq * 1.2;
+  const nBins = maxPhononFreq > 1500 ? 150 : 100;
   if (!maxPhononFreq || maxPhononFreq <= 0) {
     return { frequencies: new Array(nBins).fill(0).map((_, i) => (i + 0.5)), dos: new Array(nBins).fill(0), totalStates: 0 };
   }
-  const binWidth = maxPhononFreq / nBins;
+  const binWidth = extendedMax / nBins;
   const dos = new Array(nBins).fill(0);
   const frequencies = new Array(nBins).fill(0).map((_, i) => (i + 0.5) * binWidth);
 
@@ -3163,7 +3164,7 @@ export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhon
   for (const branch of phononDispersion.branches) {
     for (const freq of branch.frequencies) {
       const absFreq = Math.abs(freq);
-      if (absFreq <= 0 || absFreq > maxPhononFreq) continue;
+      if (absFreq <= 0 || absFreq > extendedMax) continue;
       const bin = Math.min(nBins - 1, Math.floor(absFreq / binWidth));
       dos[bin] += 1;
       totalStates++;
