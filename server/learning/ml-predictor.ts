@@ -1039,8 +1039,11 @@ export async function runMLPrediction(
 
       const featureLambda = xgb.features.electronPhononLambda ?? 0;
       const llmRefinedTc = nn.refinedTc ?? xgb.xgb.tcEstimate;
+      const hCountML = (xgb.features as any).hCount ?? 0;
+      const totalAtomsML = (xgb.features as any).totalAtoms ?? 1;
+      const isHydrideML = hCountML >= 4 && hCountML / totalAtomsML >= 0.5;
       const allenDynesTc = featureLambda > 0
-        ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, 0.12)
+        ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, 0.12, undefined, isHydrideML)
         : 0;
       const finalTc = Math.round(allenDynesTc > 0 ? allenDynesTc : 0);
       const mlEnforcedPressure = estimateFamilyPressure(xgb.mat.formula);
@@ -1106,8 +1109,11 @@ export async function runMLPrediction(
         }
 
         const featureLambda = c.features.electronPhononLambda ?? 0;
+        const hCountFB = (c.features as any).hCount ?? 0;
+        const totalAtomsFB = (c.features as any).totalAtoms ?? 1;
+        const isHydrideFB = hCountFB >= 4 && hCountFB / totalAtomsFB >= 0.5;
         const physOnlyTc = featureLambda > 0
-          ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, 0.12)
+          ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, 0.12, undefined, isHydrideFB)
           : 0;
         const finalTc = Math.round(Math.max(0, physOnlyTc));
         const fbPressure = estimateFamilyPressure(c.mat.formula);

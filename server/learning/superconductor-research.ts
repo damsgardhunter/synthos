@@ -468,8 +468,11 @@ Return JSON with 'candidates' array:
       const gbResult = gbPredict(features);
 
       const featureLambda = features.electronPhononLambda ?? 0;
+      const srHCount = (features as any).hCount ?? 0;
+      const srTotalAtoms = (features as any).totalAtoms ?? 1;
+      const srIsHydride = srHCount >= 4 && srHCount / srTotalAtoms >= 0.5;
       const physicsTc = featureLambda > 0
-        ? Math.round(allenDynesTcRaw(featureLambda, features.logPhononFreq ?? 300, 0.12))
+        ? Math.round(allenDynesTcRaw(featureLambda, features.logPhononFreq ?? 300, 0.12, undefined, srIsHydride))
         : 0;
       const enforcedPressure = estimateFamilyPressure(c.formula);
       const effectivePressure = Math.max(c.pressureGpa ?? 0, enforcedPressure);
@@ -761,8 +764,11 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
 
       const lambdaML = features.electronPhononLambda ?? 0;
       const effectiveLambda = pairingSusc.lambda > 0 ? pairingSusc.lambda : lambdaML;
+      const invHCount = (features as any).hCount ?? 0;
+      const invTotalAtoms = (features as any).totalAtoms ?? 1;
+      const invIsHydride = invHCount >= 4 && invHCount / invTotalAtoms >= 0.5;
       const invPhysicsTc = effectiveLambda > 0
-        ? Math.round(allenDynesTcRaw(effectiveLambda, features.logPhononFreq ?? 300, 0.12))
+        ? Math.round(allenDynesTcRaw(effectiveLambda, features.logPhononFreq ?? 300, 0.12, undefined, invIsHydride))
         : 0;
       const invEnforcedPressure = Math.max(c.pressureGpa ?? 0, estimateFamilyPressure(c.formula));
       const metallicityML = features.metallicity ?? 0.5;

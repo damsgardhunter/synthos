@@ -9,12 +9,14 @@ export interface AllenDynesTcInput {
   isHydride?: boolean;
 }
 
+export type TcMethod = "allen-dynes" | "sisso-hydride" | "xie-strong-coupling";
+
 export interface AllenDynesTcResult {
   tc: number;
   f1: number;
   f2: number;
   regime: "weak" | "intermediate" | "strong" | "very-strong";
-  method: "allen-dynes" | "sisso-hydride";
+  method: TcMethod;
 }
 
 export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
@@ -41,7 +43,7 @@ export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
     const omegaRatio = sqrtOmega2 / omegaLog;
     const Lambda2 = 1.82 * (1 + 6.3 * muStar) * omegaRatio;
     f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
-    f2 = Math.max(0.8, f2);
+    f2 = Math.max(0.7, Math.min(1.5, f2));
   }
 
   const exponent = -1.04 * (1 + lambda) / denominator;
@@ -50,13 +52,15 @@ export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
 
   if (!Number.isFinite(tc) || tc < 0) tc = 0;
 
-  let method: "allen-dynes" | "sisso-hydride" = "allen-dynes";
+  let method: TcMethod = "allen-dynes";
 
   if (isHydride && lambda > 1.5 && omegaLogK > 0) {
     const tcSisso = sissoHydrideTc(lambda, omegaLogK, muStar);
-    if (tcSisso > tc) {
-      tc = tcSisso;
-      method = "sisso-hydride";
+    const tcXie = xieStrongCouplingTc(lambda, omegaLogK, muStar, omega2Avg ? Math.sqrt(omega2Avg) * CM1_TO_KELVIN : undefined);
+    const bestAlt = tcXie > tcSisso ? { tc: tcXie, m: "xie-strong-coupling" as TcMethod } : { tc: tcSisso, m: "sisso-hydride" as TcMethod };
+    if (bestAlt.tc > tc) {
+      tc = bestAlt.tc;
+      method = bestAlt.m;
     }
   }
 
@@ -75,7 +79,39 @@ function sissoHydrideTc(lambda: number, omegaLogK: number, muStar: number): numb
   const lambdaEff = lambda - muStar * (1 + lambda);
   if (lambdaEff <= 0) return 0;
   const tc = 0.182 * omegaLogK * Math.pow(lambdaEff, 0.572) *
-    Math.pow(1 + 6.5 * muStar * Math.log(lambda), -0.278);
+    Math.pow(1 + 6.5 * muStar * Math.log(Math.max(1.01, lambda)), -0.278);
+  return Number.isFinite(tc) ? Math.max(0, tc) : 0;
+}
+
+function xieStrongCouplingTc(lambda: number, omegaLogK: number, muStar: number, omega2K?: number): number {
+  if (lambda <= 1.0 || omegaLogK <= 0) return 0;
+
+  const muStarEff = muStar * (1 + 0.5 * muStar);
+  const lambdaNet = lambda - muStarEff * (1 + lambda);
+  if (lambdaNet <= 0) return 0;
+
+  const A = 0.12 * (1 + 5.2 / (lambda + 2.6));
+  const B = 1.04 * (1 + 0.38 * muStar);
+  const C = lambda * (1 - 0.14 * muStar) - muStar * (1 + 0.62 * lambda);
+  if (C <= 0) return 0;
+
+  const prefactor = omegaLogK * A;
+  const exponent = -B * (1 + lambda) / C;
+  if (exponent < -50) return 0;
+
+  let tc = prefactor * Math.exp(exponent);
+
+  if (omega2K && omega2K > 0) {
+    const ratio = omega2K / omegaLogK;
+    const spectralCorr = 1 + 0.0241 * Math.pow(ratio - 1, 2) * lambda;
+    tc *= Math.min(1.3, Math.max(0.9, spectralCorr));
+  }
+
+  if (lambda > 2.5) {
+    const saturationDamping = 1 - 0.04 * Math.pow(lambda - 2.5, 1.2);
+    tc *= Math.max(0.6, saturationDamping);
+  }
+
   return Number.isFinite(tc) ? Math.max(0, tc) : 0;
 }
 

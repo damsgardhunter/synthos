@@ -1794,7 +1794,7 @@ export interface TcWithUncertainty {
   analyticStd: number;
 }
 
-export function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number): number {
+export function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number, isHydride?: boolean): number {
   const omegaLogK = omegaLog * 1.4388;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denominator) < 1e-6 || denominator <= 0) return 0;
@@ -1804,12 +1804,59 @@ export function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number
 
   const omegaRatio = omega2Avg && omega2Avg > 0 ? Math.sqrt(omega2Avg) / omegaLog : 1.0;
   const Lambda2 = 1.82 * (1 + 6.3 * muStar) * omegaRatio;
-  const f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+  let f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+  f2 = Math.max(0.7, Math.min(1.5, f2));
 
   const exponent = -1.04 * (1 + lambda) / denominator;
-  const tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
+  if (exponent < -50) return 0;
+  let tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
+
+  if (isHydride && lambda > 1.5 && omegaLogK > 0) {
+    const tcTier2 = hydrideStrongCouplingTc(lambda, omegaLogK, muStar, omega2Avg ? Math.sqrt(omega2Avg) * 1.4388 : undefined);
+    if (tcTier2 > tc) tc = tcTier2;
+  }
 
   return Number.isFinite(tc) ? Math.max(0, tc) : 0;
+}
+
+function hydrideStrongCouplingTc(lambda: number, omegaLogK: number, muStar: number, omega2K?: number): number {
+  const lambdaEff = lambda - muStar * (1 + lambda);
+  if (lambdaEff <= 0) return 0;
+
+  const tcSisso = 0.182 * omegaLogK * Math.pow(lambdaEff, 0.572) *
+    Math.pow(1 + 6.5 * muStar * Math.log(Math.max(1.01, lambda)), -0.278);
+
+  if (lambda <= 1.0 || omegaLogK <= 0) {
+    return Number.isFinite(tcSisso) ? Math.max(0, tcSisso) : 0;
+  }
+
+  const muStarEff = muStar * (1 + 0.5 * muStar);
+  const C = lambda * (1 - 0.14 * muStar) - muStarEff * (1 + 0.62 * lambda);
+  if (C <= 0) return Number.isFinite(tcSisso) ? Math.max(0, tcSisso) : 0;
+
+  const A = 0.12 * (1 + 5.2 / (lambda + 2.6));
+  const B = 1.04 * (1 + 0.38 * muStar);
+  const xieExp = -B * (1 + lambda) / C;
+  if (xieExp < -50) return Number.isFinite(tcSisso) ? Math.max(0, tcSisso) : 0;
+
+  let tcXie = omegaLogK * A * Math.exp(xieExp);
+
+  if (omega2K && omega2K > 0) {
+    const ratio = omega2K / omegaLogK;
+    const spectralCorr = 1 + 0.0241 * Math.pow(ratio - 1, 2) * lambda;
+    tcXie *= Math.min(1.3, Math.max(0.9, spectralCorr));
+  }
+
+  if (lambda > 2.5) {
+    const saturationDamping = 1 - 0.04 * Math.pow(lambda - 2.5, 1.2);
+    tcXie *= Math.max(0.6, saturationDamping);
+  }
+
+  const best = Math.max(
+    Number.isFinite(tcSisso) ? tcSisso : 0,
+    Number.isFinite(tcXie) ? tcXie : 0
+  );
+  return Math.max(0, best);
 }
 
 export function computeTcWithUncertainty(input: TcUncertaintyInput): TcWithUncertainty {

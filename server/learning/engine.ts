@@ -153,11 +153,20 @@ function enforcePhysicsPressure(formula: string, llmPressure: number | null | un
   return Math.max(llmP, physPressure);
 }
 
-function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undefined, muStar?: number): number {
+function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undefined, muStar?: number, formula?: string): number {
   if (!lambda || lambda <= 0) return 0;
   const freq = omegaLogCm1 ?? 300;
   const mu = muStar ?? 0.12;
-  return allenDynesTcRaw(lambda, freq, mu);
+  const isHydride = formula ? detectHydrideForTc(formula) : false;
+  return allenDynesTcRaw(lambda, freq, mu, undefined, isHydride);
+}
+
+function detectHydrideForTc(formula: string): boolean {
+  const counts = parseFormulaCounts(formula);
+  const hCount = counts["H"] || 0;
+  if (hCount < 4) return false;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  return hCount / totalAtoms >= 0.5;
 }
 
 const VALID_ELEMENTS_SET = new Set([
@@ -1323,12 +1332,13 @@ function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): 
   return Math.round(tc);
 }
 
-function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined, muStar?: number): number {
+function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined, muStar?: number, formula?: string): number {
   const freq = logPhononFreq ?? 200;
   const mu = muStar ?? 0.1;
   const lambda = Math.max(0.001, lambdaML);
+  const isHydride = formula ? detectHydrideForTc(formula) : false;
 
-  const tc = allenDynesTcRaw(lambda, freq, mu);
+  const tc = allenDynesTcRaw(lambda, freq, mu, undefined, isHydride);
   return Math.max(0, Math.round(tc));
 }
 
@@ -2720,7 +2730,7 @@ async function runPhase11_StructurePrediction() {
               const gbResult = gbPredict(features);
               const lambdaML = features.electronPhononLambda ?? 0;
               const metallicityML = features.metallicity ?? 0.5;
-              let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
+              let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
               rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
 
               const id = `sc-struct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2780,7 +2790,7 @@ async function runPhase11_StructurePrediction() {
             const gbResult = gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
-            let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
+            let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
             rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
 
             const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2861,7 +2871,7 @@ async function runPhase11_StructurePrediction() {
             const gbResult = gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
-            let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
+            let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, evoFormula);
             rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, evoFormula);
             const id = `sc-evo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             try {
@@ -2931,7 +2941,7 @@ async function runPhase11_StructurePrediction() {
           const gbResult = gbPredict(features);
           const lambdaML = features.electronPhononLambda ?? 0;
           const metallicityML = features.metallicity ?? 0.5;
-          let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
+          let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, normalized);
           rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, normalized);
 
           const id = `sc-diff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -3004,7 +3014,7 @@ async function runPhase11_StructurePrediction() {
           const gbResult = gbPredict(features);
           const cdvaeLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
           const cdvaePhysTc = cdvaeLambda > 0
-            ? Math.round(computePhysicsOnlyTc(cdvaeLambda, features.logPhononFreq))
+            ? Math.round(computePhysicsOnlyTc(cdvaeLambda, features.logPhononFreq, undefined, normalized))
             : 0;
           const cappedTc = applyAmbientTcCap(cdvaePhysTc, cdvaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
 
@@ -3096,7 +3106,7 @@ async function runPhase11_StructurePrediction() {
           const gbResult = gbPredict(features);
           const distLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
           const distPhysTc = distLambda > 0
-            ? Math.round(computePhysicsOnlyTc(distLambda, features.logPhononFreq))
+            ? Math.round(computePhysicsOnlyTc(distLambda, features.logPhononFreq, undefined, normalized))
             : 0;
           const cappedTc = applyAmbientTcCap(distPhysTc, distLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
 
@@ -3203,7 +3213,7 @@ async function runPhase11_StructurePrediction() {
             const gbResult = gbPredict(features);
             const vaeLambda = features.electronPhononLambda ?? 0;
             const vaePhysTc = vaeLambda > 0
-              ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq))
+              ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq, undefined, normalized))
               : 0;
             const cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
             const inserted = await insertCandidateWithStabilityCheck({
@@ -5810,7 +5820,7 @@ async function runLearningCycle() {
                 if (gb.tcPredicted >= 10) {
                   const lambdaML = features.electronPhononLambda ?? 0;
                   const metallicityML = features.metallicity ?? 0.5;
-                  let rawTc = estimateRawTc(lambdaML, features.logPhononFreq);
+                  let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, mf);
                   rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, mf);
                   const id = `sc-mut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                   try {
@@ -6572,7 +6582,7 @@ async function recalculatePhysics() {
 
           let newTc: number | null = null;
           if (featureLambda > 0) {
-            const adTc = computePhysicsOnlyTc(featureLambda, features.logPhononFreq, features.muStarEstimate);
+            const adTc = computePhysicsOnlyTc(featureLambda, features.logPhononFreq, features.muStarEstimate, c.formula);
             newTc = adTc > 0 ? Math.round(adTc) : 0;
           }
           if (newTc != null) {
