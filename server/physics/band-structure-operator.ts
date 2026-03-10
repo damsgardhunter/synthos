@@ -36,7 +36,7 @@ export interface BandDispersion {
 }
 
 export interface DerivedQuantities {
-  effectiveMasses: { bandIndex: number; value: number; direction: string }[];
+  effectiveMasses: { bandIndex: number; value: number; direction: string; massComponents?: [number, number, number] }[];
   fermiVelocities: { bandIndex: number; velocity: number; kLabel: string }[];
   bandCurvatures: { bandIndex: number; curvature: number; kLabel: string }[];
   vhsPositions: { bandIndex: number; kFraction: number; energy: number; type: string }[];

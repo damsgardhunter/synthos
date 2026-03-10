@@ -474,12 +474,31 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult): DFTFerm
     const bRange = bMax - bMin;
     const cylindrical = bRange < 0.3 ? 0.8 : bRange < 1.0 ? 0.5 : 0.2;
 
-    const dFrac = bandEnergies.filter(e => Math.abs(e.energy) < 2.0).length / bandEnergies.length;
-    const orbChar = { s: 0.15, p: 0.25, d: Math.min(0.6, dFrac) };
-    const orbSum = orbChar.s + orbChar.p + orbChar.d;
-    orbChar.s /= orbSum;
-    orbChar.p /= orbSum;
-    orbChar.d /= orbSum;
+    let orbChar = { s: 0.15, p: 0.25, d: 0.6 };
+
+    const fermiKpts = bandResult.eigenvalues.filter(kpt =>
+      kpt.weights?.[b] && Math.abs(kpt.energies[b]) < 1.0
+    );
+    if (fermiKpts.length > 0) {
+      let sSum = 0, pSum = 0, dSum = 0;
+      for (const kpt of fermiKpts) {
+        const w = kpt.weights![b];
+        sSum += w.s;
+        pSum += w.p;
+        dSum += w.d + w.f;
+      }
+      const wTotal = sSum + pSum + dSum;
+      if (wTotal > 0.01) {
+        orbChar = { s: sSum / wTotal, p: pSum / wTotal, d: dSum / wTotal };
+      }
+    } else {
+      const dFrac = bandEnergies.filter(e => Math.abs(e.energy) < 2.0).length / bandEnergies.length;
+      orbChar = { s: 0.15, p: 0.25, d: Math.min(0.6, dFrac) };
+      const orbSum = orbChar.s + orbChar.p + orbChar.d;
+      orbChar.s /= orbSum;
+      orbChar.p /= orbSum;
+      orbChar.d /= orbSum;
+    }
 
     pockets.push({
       index: pocketIdx++,

@@ -10,12 +10,20 @@ export interface KPointOnPath {
   coords: [number, number, number];
 }
 
+export interface OrbitalWeight {
+  s: number;
+  p: number;
+  d: number;
+  f: number;
+}
+
 export interface BandEigenvalue {
   kIndex: number;
   kCoords: [number, number, number];
   kLabel: string;
   kDistance: number;
   energies: number[];
+  weights?: OrbitalWeight[];
 }
 
 export interface BandCrossing {
@@ -31,6 +39,9 @@ export interface BandInversion {
   bandPair: [number, number];
   energyGap: number;
   orbitalSwap: boolean;
+  lowerOrbital?: OrbitalWeight;
+  upperOrbital?: OrbitalWeight;
+  inversionType?: "s-p" | "p-d" | "d-f" | "p-s" | "d-p" | "f-d" | "unknown";
 }
 
 export interface VanHoveSingularity {
@@ -46,6 +57,7 @@ export interface EffectiveMass {
   kLabel: string;
   direction: string;
   mass: number;
+  massComponents?: [number, number, number];
 }
 
 export interface DFTBandStructureResult {
@@ -293,6 +305,92 @@ function generateBandsPostInput(formula: string): string {
 `;
 }
 
+function generateProjwfcInput(formula: string): string {
+  const cleanPrefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+  return `&PROJWFC
+  prefix = '${cleanPrefix}',
+  outdir = './tmp',
+  filpdos = 'pdos',
+  lsym = .true.,
+  lwrite_overlaps = .false.,
+/
+`;
+}
+
+function parseProjwfcOutput(
+  jobDir: string,
+  nKPoints: number,
+  nBands: number,
+): OrbitalWeight[][] | null {
+  const weights: OrbitalWeight[][] = [];
+
+  for (let ki = 0; ki < nKPoints; ki++) {
+    const bandWeights: OrbitalWeight[] = [];
+    for (let b = 0; b < nBands; b++) {
+      bandWeights.push({ s: 0, p: 0, d: 0, f: 0 });
+    }
+    weights.push(bandWeights);
+  }
+
+  const pdosFiles = fs.readdirSync(jobDir).filter(f => f.startsWith("pdos") && f.includes("atm"));
+  if (pdosFiles.length === 0) return null;
+
+  for (const pdosFile of pdosFiles) {
+    const lMatch = pdosFile.match(/wfc#\d+\((\w+)\)/i) || pdosFile.match(/\((\w+)\)/);
+    let orbType: "s" | "p" | "d" | "f" = "s";
+    if (lMatch) {
+      const label = lMatch[1].toLowerCase();
+      if (label === "s" || label.startsWith("s")) orbType = "s";
+      else if (label === "p" || label.startsWith("p")) orbType = "p";
+      else if (label === "d" || label.startsWith("d")) orbType = "d";
+      else if (label === "f" || label.startsWith("f")) orbType = "f";
+    }
+
+    try {
+      const content = fs.readFileSync(path.join(jobDir, pdosFile), "utf-8");
+      const lines = content.trim().split("\n").filter(l => !l.startsWith("#") && l.trim());
+
+      let kIdx = 0;
+      for (const line of lines) {
+        const nums = line.trim().split(/\s+/).map(Number).filter(n => !isNaN(n));
+        if (nums.length < 2) continue;
+
+        const bandIdx = Math.floor(kIdx / nKPoints);
+        const kPt = kIdx % nKPoints;
+
+        if (kPt < nKPoints && bandIdx < nBands) {
+          const projVal = nums[1] ?? 0;
+          weights[kPt][bandIdx][orbType] += projVal;
+        }
+        kIdx++;
+      }
+    } catch {}
+  }
+
+  let hasData = false;
+  for (const kw of weights) {
+    for (const bw of kw) {
+      const total = bw.s + bw.p + bw.d + bw.f;
+      if (total > 0.01) {
+        hasData = true;
+        bw.s /= total;
+        bw.p /= total;
+        bw.d /= total;
+        bw.f /= total;
+      }
+    }
+  }
+
+  return hasData ? weights : null;
+}
+
+function mergeOrbitalWeights(eigenvalues: BandEigenvalue[], orbWeights: OrbitalWeight[][] | null): void {
+  if (!orbWeights) return;
+  for (let ki = 0; ki < eigenvalues.length && ki < orbWeights.length; ki++) {
+    eigenvalues[ki].weights = orbWeights[ki];
+  }
+}
+
 function runQEBands(binary: string, inputFile: string, workDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     const proc = spawn(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
@@ -474,6 +572,63 @@ function parseBandsDatFile(
   return { eigenvalues, nBands, nKPoints };
 }
 
+function dominantOrbital(w: OrbitalWeight): "s" | "p" | "d" | "f" {
+  const entries: ["s" | "p" | "d" | "f", number][] = [["s", w.s], ["p", w.p], ["d", w.d], ["f", w.f]];
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries[0][0];
+}
+
+function classifyInversionType(lower: "s" | "p" | "d" | "f", upper: "s" | "p" | "d" | "f"): BandInversion["inversionType"] {
+  const key = `${lower}-${upper}`;
+  const valid: BandInversion["inversionType"][] = ["s-p", "p-d", "d-f", "p-s", "d-p", "f-d"];
+  return (valid.includes(key as any) ? key : "unknown") as BandInversion["inversionType"];
+}
+
+function estimateAnisotropicMass(
+  eigenvalues: BandEigenvalue[],
+  bandIndex: number,
+  kIndex: number,
+  dkSq: number,
+): [number, number, number] {
+  const ki = kIndex;
+  if (ki < 1 || ki >= eigenvalues.length - 1) return [1.0, 1.0, 1.0];
+
+  const kPrev = eigenvalues[ki - 1].kCoords;
+  const kCurr = eigenvalues[ki].kCoords;
+  const kNext = eigenvalues[ki + 1].kCoords;
+
+  const ePrev = eigenvalues[ki - 1].energies[bandIndex];
+  const eCurr = eigenvalues[ki].energies[bandIndex];
+  const eNext = eigenvalues[ki + 1].energies[bandIndex];
+
+  if (ePrev === undefined || eCurr === undefined || eNext === undefined) return [1.0, 1.0, 1.0];
+
+  const d2E = ePrev + eNext - 2 * eCurr;
+  if (Math.abs(d2E) < 1e-6) return [1.0, 1.0, 1.0];
+
+  const pathMass = 1.0 / (d2E / dkSq);
+
+  const dkVec = [
+    kNext[0] - kPrev[0],
+    kNext[1] - kPrev[1],
+    kNext[2] - kPrev[2],
+  ];
+  const dkMag = Math.sqrt(dkVec[0] ** 2 + dkVec[1] ** 2 + dkVec[2] ** 2) || 1e-6;
+
+  const dirFrac = [
+    Math.abs(dkVec[0] / dkMag),
+    Math.abs(dkVec[1] / dkMag),
+    Math.abs(dkVec[2] / dkMag),
+  ];
+
+  const mx = dirFrac[0] > 0.3 ? pathMass : pathMass * (1.0 + 0.5 * (1.0 - dirFrac[0]));
+  const my = dirFrac[1] > 0.3 ? pathMass : pathMass * (1.0 + 0.5 * (1.0 - dirFrac[1]));
+  const mz = dirFrac[2] > 0.3 ? pathMass : pathMass * (1.0 + 0.5 * (1.0 - dirFrac[2]));
+
+  const clamp = (v: number) => Math.sign(v) * Math.max(0.01, Math.min(50, Math.abs(v)));
+  return [clamp(mx), clamp(my), clamp(mz)];
+}
+
 function analyzeBands(
   eigenvalues: BandEigenvalue[],
   nBands: number,
@@ -577,12 +732,40 @@ function analyzeBands(
           const gapNext = eUpperNext - eLowerNext;
 
           if (gapPrev > 0 && gapHere < 0.05 && gapNext > 0) {
+            const kpt = eigenvalues[ki];
+            const lowerW = kpt.weights?.[b];
+            const upperW = kpt.weights?.[b + 1];
+
+            let orbSwap = gapHere < 0;
+            let invType: BandInversion["inversionType"] = "unknown";
+
+            if (lowerW && upperW) {
+              const lowerDom = dominantOrbital(lowerW);
+              const upperDom = dominantOrbital(upperW);
+              const prevKpt = eigenvalues[ki - 1];
+              const prevLowerW = prevKpt.weights?.[b];
+              const prevUpperW = prevKpt.weights?.[b + 1];
+
+              if (prevLowerW && prevUpperW) {
+                const prevLowerDom = dominantOrbital(prevLowerW);
+                const prevUpperDom = dominantOrbital(prevUpperW);
+                if (prevLowerDom !== lowerDom || prevUpperDom !== upperDom) {
+                  orbSwap = true;
+                }
+              }
+
+              invType = classifyInversionType(lowerDom, upperDom);
+            }
+
             bandInversions.push({
-              kLabel: eigenvalues[ki].kLabel || `k${ki}`,
+              kLabel: kpt.kLabel || `k${ki}`,
               kIndex: ki,
               bandPair: [b, b + 1],
               energyGap: gapHere,
-              orbitalSwap: gapHere < 0,
+              orbitalSwap: orbSwap,
+              lowerOrbital: lowerW,
+              upperOrbital: upperW,
+              inversionType: invType,
             });
           }
         }
@@ -621,11 +804,13 @@ function analyzeBands(
       if (Math.abs(eCurr) < 1.0 && Math.abs(d2E) > 0.001) {
         const mEff = 1.0 / (d2E / dkSq);
         if (Math.abs(mEff) < 50 && Math.abs(mEff) > 0.01) {
+          const massComps = estimateAnisotropicMass(eigenvalues, b, ki, dkSq);
           effectiveMasses.push({
             bandIndex: b,
             kLabel: eigenvalues[ki].kLabel || `k${ki}`,
             direction: "path",
             mass: mEff,
+            massComponents: massComps,
           });
         }
       }
@@ -785,6 +970,35 @@ export async function computeDFTBandStructure(
     result.nBands = parsed.nBands;
     result.nKPoints = parsed.nKPoints;
     result.converged = parsed.converged;
+
+    if (parsed.eigenvalues.length > 0 && parsed.nBands > 0) {
+      try {
+        const projwfcBin = path.join(QE_BIN_DIR, "projwfc.x");
+        if (fs.existsSync(projwfcBin)) {
+          const projInput = generateProjwfcInput(formula);
+          const projInputFile = path.join(jobDir, "projwfc.in");
+          fs.writeFileSync(projInputFile, projInput);
+
+          console.log(`[BandCalc] Running projwfc.x for orbital weights on ${formula}`);
+          const projResult = await runQEBands(projwfcBin, projInputFile, jobDir);
+
+          if (projResult.exitCode === 0) {
+            const orbWeights = parseProjwfcOutput(jobDir, parsed.nKPoints, parsed.nBands);
+            if (orbWeights) {
+              mergeOrbitalWeights(parsed.eigenvalues, orbWeights);
+              const orbCount = parsed.eigenvalues.filter(kp => kp.weights && kp.weights.some(w => w.s + w.p + w.d + w.f > 0.01)).length;
+              console.log(`[BandCalc] Orbital weights merged for ${formula}: ${orbCount}/${parsed.nKPoints} k-points with data`);
+            } else {
+              console.log(`[BandCalc] projwfc.x completed but no orbital weights parsed for ${formula}`);
+            }
+          } else {
+            console.log(`[BandCalc] projwfc.x failed for ${formula} (non-critical, continuing without orbital weights)`);
+          }
+        }
+      } catch (projErr: any) {
+        console.log(`[BandCalc] projwfc.x error for ${formula}: ${projErr.message} (continuing without orbital weights)`);
+      }
+    }
 
     if (parsed.eigenvalues.length > 0) {
       const analysis = analyzeBands(parsed.eigenvalues, parsed.nBands, fermiEnergy);
