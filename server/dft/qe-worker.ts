@@ -382,22 +382,29 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
 
   const hCount = effectiveCounts["H"] || 0;
   const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
+  const metalCount = totalAtoms - hCount;
+  const hMetalRatio = metalCount > 0 ? hCount / metalCount : 0;
   const hasMetals = elements.some(e => e !== "H" && (
     isTransitionMetal(e) || isRareEarth(e) || ["Ca", "Sr", "Ba", "Mg", "Na", "K", "Al"].includes(e)
   ));
 
-  let packingFactor: number;
-  if (hFraction > 0.7 && hasMetals) {
-    packingFactor = 0.72;
-  } else if (hasMetals && totalAtoms <= 4) {
-    packingFactor = 0.74;
-  } else if (hasMetals) {
-    packingFactor = 0.68;
+  let cellVolume: number;
+
+  if (hFraction > 0.5 && hasMetals && metalCount > 0) {
+    const volPerAtom = 25 + 2.5 * hMetalRatio;
+    cellVolume = totalAtoms * volPerAtom;
   } else {
-    packingFactor = 0.60;
+    let packingFactor: number;
+    if (hasMetals && totalAtoms <= 4) {
+      packingFactor = 0.74;
+    } else if (hasMetals) {
+      packingFactor = 0.68;
+    } else {
+      packingFactor = 0.60;
+    }
+    cellVolume = totalVolume / packingFactor;
   }
 
-  const cellVolume = totalVolume / packingFactor;
   const a = Math.cbrt(cellVolume);
   const perturbation = 0.97 + Math.random() * 0.06;
   return Math.max(a * perturbation, 3.0);

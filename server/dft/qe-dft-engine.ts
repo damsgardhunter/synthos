@@ -151,6 +151,17 @@ const ATOMIC_VOLUMES: Record<string, number> = {
 };
 
 function computeExpectedVolume(counts: Record<string, number>, packingFactor: number = 1.3): number {
+  const totalAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
+  const hCount = Math.round(counts["H"] || 0);
+  const metalCount = totalAtoms - hCount;
+  const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
+  const hMetalRatio = metalCount > 0 ? hCount / metalCount : 0;
+
+  if (hFraction > 0.5 && metalCount > 0) {
+    const volPerAtom = 25 + 2.5 * hMetalRatio;
+    return totalAtoms * volPerAtom;
+  }
+
   let totalVolume = 0;
   for (const [el, count] of Object.entries(counts)) {
     const vol = ATOMIC_VOLUMES[el] ?? 15.0;

@@ -484,10 +484,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - engine.ts: `recalculatePhysics()` now uses pure Allen-Dynes instead of 50/50 blend with old (potentially LLM-sourced) Tc.
     - Pipeline enforcement: Generator → structure relaxation → DFT → phonons → electron-phonon coupling → Tc calculation (Allen-Dynes). LLM only suggests materials.
 
-  - **Volume target model unified**:
-    - qe-dft-engine.ts: `validateAndFixStructure` fixed critical inconsistency — `targetVolPerAtom` and `volumePerAtom` now both divide by `totalFormulaAtoms` (from `parseFormula`) instead of `atoms.length`. When hydride cage generation partially fails (e.g., only 2 metal atoms placed for a 12-atom formula), dividing by `atoms.length=2` inflated targets 6× (54 vs 9 Å³/atom for similar hydrides). Now both metrics use the same denominator consistently.
-    - qe-dft-engine.ts + qe-worker.ts: ATOMIC_VOLUMES updated — Mg: 23→14 (compound volume, not bulk hcp), Fe: 12→11, Li: 21→20. Aligned with user-specified compound-environment values.
-    - Volume model: V_cell = Σ(n_i × V_atomic_i) × 1.3 (packing factor). Consistent across `computeExpectedVolume`, `estimateLatticeParam`, `validateAndFixStructure`, and `checkVolumeRatioForAtoms`.
+  - **Volume target model unified + hydride cage volume model**:
+    - qe-dft-engine.ts: `validateAndFixStructure` fixed critical inconsistency — `targetVolPerAtom` and `volumePerAtom` now both divide by `totalFormulaAtoms` (from `parseFormula`) instead of `atoms.length`.
+    - qe-dft-engine.ts + qe-worker.ts: ATOMIC_VOLUMES updated — Mg: 23→14, Fe: 12→11, Li: 21→20.
+    - **Hydride cage volume model**: For H-dominant compounds (H fraction > 0.5), `computeExpectedVolume` now uses `V_per_atom = 25 + 2.5 × (H/metal ratio)` instead of atomic volume sum. This correctly models cage expansion — H in interstitial cages occupies much more space than its 5 ų atomic volume. Same formula in `estimateLatticeConstant` (qe-worker.ts). Non-hydrides still use `Σ(n_i × V_atomic_i) × 1.3`. Example: La₃H₁₂ target was 14.8 → now 35 ų/atom (matching literature 28-40 for uncompressed lanthanide hydrides).
 
   - **DFT pipeline reordered — geometry filtering after xTB relaxation**:
     - qe-worker.ts: Pipeline now follows: generate → xTB pre-relax → soft geometry check (only on relaxed structures) → duplicate check → xTB stability → vc-relax → SCF → bands → phonons → e-ph coupling.
