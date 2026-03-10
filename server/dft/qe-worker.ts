@@ -318,6 +318,15 @@ function runXTBStabilityCheck(
   }
 }
 
+const VALID_ELEMENTS = new Set([
+  "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+  "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+  "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+  "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Po","At","Rn",
+  "Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am",
+]);
+
 function parseFormula(formula: string): Record<string, number> {
   const cleaned = formula
     .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
@@ -328,6 +337,7 @@ function parseFormula(formula: string): Record<string, number> {
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
+    if (!VALID_ELEMENTS.has(el)) continue;
     const num = match[2] ? parseFloat(match[2]) : 1;
     if (num > 0) counts[el] = (counts[el] || 0) + num;
   }
@@ -1113,36 +1123,49 @@ function generateHydrideCagePositions(
   function wrapFrac(v: number): number { return v - Math.floor(v); }
 
   const metalCount = metalElements.reduce((s, e) => s + Math.round(counts[e] || 0), 0);
+
+  function selectHSites(r: number, n: number): Array<{ x: number; y: number; z: number }> {
+    if (n <= 6) return octahedralSites(r).slice(0, n);
+    if (n <= 8) return cubeVertexSites(r).slice(0, n);
+    if (n === 9) return [...cubeVertexSites(r), { x: r, y: r, z: 0 }];
+    if (n <= 10) return clathrateSites(r).slice(0, n);
+    const extraR = r * 1.1;
+    return [...clathrateSites(r), { x: 0, y: extraR, z: 1 - extraR }, { x: extraR, y: 0, z: 1 - extraR }].slice(0, n);
+  }
+
+  function placeHAroundCenter(cx: number, cy: number, cz: number, nH: number): void {
+    const sites = selectHSites(cageRadius, nH);
+    for (const s of sites) {
+      const hx = wrapFrac(cx + s.x);
+      const hy = wrapFrac(cy + s.y);
+      const hz = wrapFrac(cz + s.z);
+      let tooClose = false;
+      for (const p of positions) {
+        let fdx = hx - p.x; fdx -= Math.round(fdx);
+        let fdy = hy - p.y; fdy -= Math.round(fdy);
+        let fdz = hz - p.z; fdz -= Math.round(fdz);
+        const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+        const dMin = p.element === "H" ? 1.0 : 0.75 * ((COVALENT_RADIUS["H"] ?? 0.31) + (COVALENT_RADIUS[p.element] ?? 1.4));
+        if (dist < dMin) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        positions.push({ element: "H", x: hx, y: hy, z: hz });
+      }
+    }
+  }
+
   if (metalCount === 1) {
     const metal = metalElements[0];
     positions.push({ element: metal, x: 0.0, y: 0.0, z: 0.0 });
-
-    let hSites: Array<{ x: number; y: number; z: number }>;
-    if (hPerMetal <= 6) {
-      hSites = octahedralSites(cageRadius).slice(0, hPerMetal);
-    } else if (hPerMetal <= 8) {
-      hSites = cubeVertexSites(cageRadius).slice(0, hPerMetal);
-    } else if (hPerMetal === 9) {
-      hSites = [...cubeVertexSites(cageRadius), { x: cageRadius, y: cageRadius, z: 0 }];
-    } else if (hPerMetal <= 10) {
-      hSites = clathrateSites(cageRadius).slice(0, hPerMetal);
-    } else {
-      const extraR = cageRadius * 1.1;
-      const extraH = [
-        { x: 0, y: extraR, z: 1 - extraR },
-        { x: extraR, y: 0, z: 1 - extraR },
-      ];
-      hSites = [...clathrateSites(cageRadius), ...extraH.slice(0, Math.min(hPerMetal - 10, 2))];
-    }
-    for (const h of hSites) {
-      positions.push({ element: "H", x: wrapFrac(h.x), y: wrapFrac(h.y), z: wrapFrac(h.z) });
-    }
+    placeHAroundCenter(0.0, 0.0, 0.0, hPerMetal);
   } else {
-    let placed = 0;
     const metalSites = [
       { x: 0.0, y: 0.0, z: 0.0 },
       { x: 0.5, y: 0.5, z: 0.5 },
+      { x: 0.5, y: 0.0, z: 0.0 },
+      { x: 0.0, y: 0.5, z: 0.0 },
     ];
+    let placed = 0;
     for (const metal of metalElements) {
       const n = Math.round(counts[metal] || 1);
       for (let i = 0; i < n && placed < metalSites.length; i++) {
@@ -1150,48 +1173,10 @@ function generateHydrideCagePositions(
       }
     }
     const hTotal = Math.round(counts["H"] || 0);
-    const allH = [...octahedralSites(cageRadius), ...cubeVertexSites(cageRadius)];
-    let hPlaced = 0;
-    for (let i = 0; i < allH.length && hPlaced < hTotal; i++) {
-      const hPos = allH[i];
-      let tooClose = false;
-      for (const p of positions) {
-        let fdx = hPos.x - p.x; fdx -= Math.round(fdx);
-        let fdy = hPos.y - p.y; fdy -= Math.round(fdy);
-        let fdz = hPos.z - p.z; fdz -= Math.round(fdz);
-        const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
-        const dMin = 0.75 * ((COVALENT_RADIUS["H"] ?? 0.31) + (COVALENT_RADIUS[p.element] ?? 1.4));
-        if (dist < dMin) { tooClose = true; break; }
-      }
-      if (!tooClose) {
-        positions.push({ element: "H", x: wrapFrac(hPos.x), y: wrapFrac(hPos.y), z: wrapFrac(hPos.z) });
-        hPlaced++;
-      }
-    }
-    if (hPlaced < hTotal) {
-      const fallbackR = cageRadius * 0.9;
-      const fallbackH = [
-        { x: fallbackR, y: fallbackR, z: fallbackR },
-        { x: 1 - fallbackR, y: fallbackR, z: fallbackR },
-        { x: fallbackR, y: 1 - fallbackR, z: fallbackR },
-        { x: fallbackR, y: fallbackR, z: 1 - fallbackR },
-      ];
-      for (const fb of fallbackH) {
-        if (hPlaced >= hTotal) break;
-        let tooClose = false;
-        for (const p of positions) {
-          let fdx = fb.x - p.x; fdx -= Math.round(fdx);
-          let fdy = fb.y - p.y; fdy -= Math.round(fdy);
-          let fdz = fb.z - p.z; fdz -= Math.round(fdz);
-          const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
-          const dMin = 0.75 * ((COVALENT_RADIUS["H"] ?? 0.31) + (COVALENT_RADIUS[p.element] ?? 1.4));
-          if (dist < dMin) { tooClose = true; break; }
-        }
-        if (!tooClose) {
-          positions.push({ element: "H", x: wrapFrac(fb.x), y: wrapFrac(fb.y), z: wrapFrac(fb.z) });
-          hPlaced++;
-        }
-      }
+    const hPerCenter = Math.ceil(hTotal / Math.min(placed, metalSites.length));
+    for (let m = 0; m < placed; m++) {
+      const center = metalSites[m];
+      placeHAroundCenter(center.x, center.y, center.z, hPerCenter);
     }
   }
 

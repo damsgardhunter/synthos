@@ -91,6 +91,15 @@ const COVALENT_RADII: Record<string, number> = {
   Th: 2.06, U: 1.96, Pa: 2.00, Np: 1.90, Pu: 1.87,
 };
 
+const VALID_ELEMENTS = new Set([
+  "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+  "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+  "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+  "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Po","At","Rn",
+  "Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am",
+]);
+
 function parseFormula(formula: string): Record<string, number> {
   const cleaned = formula
     .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
@@ -101,6 +110,7 @@ function parseFormula(formula: string): Record<string, number> {
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
+    if (!VALID_ELEMENTS.has(el)) continue;
     const num = match[2] ? parseFloat(match[2]) : 1;
     if (num > 0) counts[el] = (counts[el] || 0) + num;
   }
@@ -2218,7 +2228,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
     return result;
   } catch (err: any) {
     const isTimeout = err.killed || (err.message && err.message.includes("TIMEOUT"));
-    console.log(`[DFT] ${formula}: Geometry optimization ${isTimeout ? "timed out" : "failed"}: ${err.message?.slice(0, 100) || String(err)}`);
+    console.log(`[DFT] ${formula}: Geometry optimization ${isTimeout ? "timed out" : "failed"}: ${err.message?.slice(0, 500) || String(err).slice(0, 500)}`);
     return null;
   } finally {
     try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}

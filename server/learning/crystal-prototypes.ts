@@ -1088,7 +1088,8 @@ export function checkCoordinationMismatch(formula: string): { mismatch: number; 
   if (anionCationRatio > 6) {
     details.push(`Very high anion:cation ratio (${anionCationRatio.toFixed(1)})`);
   }
-  if (anionCationRatio < 0.5) {
+  const hFraction = (counts["H"] || 0) / Math.max(1, Object.values(counts).reduce((s, v) => s + v, 0));
+  if (anionCationRatio < 0.5 && hFraction < 0.5) {
     details.push(`Very low anion:cation ratio (${anionCationRatio.toFixed(1)})`);
   }
   if (rRatio < 0.15) {

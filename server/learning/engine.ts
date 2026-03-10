@@ -159,6 +159,15 @@ function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undef
   return allenDynesTcRaw(lambda, freq, mu);
 }
 
+const VALID_ELEMENTS_SET = new Set([
+  "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+  "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+  "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+  "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Po","At","Rn",
+  "Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am",
+]);
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   const cleaned = (formula ?? "").replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const result: Record<string, number> = {};
@@ -166,6 +175,7 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   let m: RegExpExecArray | null;
   while ((m = re.exec(cleaned)) !== null) {
     const el = m[1];
+    if (!VALID_ELEMENTS_SET.has(el)) continue;
     const n = m[2] ? parseFloat(m[2]) : 1;
     result[el] = (result[el] || 0) + n;
   }
