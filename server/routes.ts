@@ -61,6 +61,7 @@ import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./l
 import { sanitizeForbiddenWords } from "./learning/utils";
 import { runDiffusionGenerationCycle, getDiffusionStats as getDiffusionGeneratorStats } from "./ai/crystal-generator";
 import { analyzeTopology, getTopologyStats } from "./physics/topology-engine";
+import { computeTopologicalInvariants, getInvariantStats, trackInvariantResult } from "./physics/topological-invariants";
 import { computeElectronicStructure, computePhysicsTcUQ } from "./learning/physics-engine";
 import {
   createCampaign, getCampaign, getAllActiveCampaigns, pauseCampaign,
@@ -1009,6 +1010,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(analysis);
     } catch (e) {
       res.status(500).json({ error: "Failed to analyze topology" });
+    }
+  });
+
+  app.get("/api/topological-invariants/stats", async (_req, res) => {
+    try {
+      res.json(getInvariantStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch invariant stats" });
+    }
+  });
+
+  app.get("/api/topological-invariants/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const crystalSystem = typeof req.query.crystalSystem === "string" ? req.query.crystalSystem : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const result = computeTopologicalInvariants(formula, electronic, spaceGroup, crystalSystem);
+      trackInvariantResult(formula, result);
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute topological invariants" });
+    }
+  });
+
+  app.get("/api/band-inversion/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const result = computeTopologicalInvariants(formula, electronic, spaceGroup);
+      trackInvariantResult(formula, result);
+      res.json(result.bandInversion);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to detect band inversions" });
+    }
+  });
+
+  app.get("/api/surface-states/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const spaceGroup = typeof req.query.spaceGroup === "string" ? req.query.spaceGroup : undefined;
+      const electronic = computeElectronicStructure(formula, spaceGroup || null);
+      const result = computeTopologicalInvariants(formula, electronic, spaceGroup);
+      trackInvariantResult(formula, result);
+      res.json(result.surfaceStates);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to detect surface states" });
     }
   });
 

@@ -1559,6 +1559,7 @@ export default function ComputationalPhysics() {
           <TabsTrigger value="theory-discovery" data-testid="tab-theory-discovery">Theory Discovery</TabsTrigger>
           <TabsTrigger value="causal-discovery" data-testid="tab-causal-discovery">Causal Discovery</TabsTrigger>
           <TabsTrigger value="dos-surrogate" data-testid="tab-dos-surrogate">DOS Surrogate</TabsTrigger>
+          <TabsTrigger value="topo-invariants" data-testid="tab-topo-invariants">Topo Invariants</TabsTrigger>
         </TabsList>
 
         <TabsContent value="pipeline" className="space-y-4">
@@ -2110,6 +2111,10 @@ export default function ComputationalPhysics() {
 
         <TabsContent value="dos-surrogate" className="space-y-4" data-testid="dos-surrogate-content">
           <DOSVisualizer />
+        </TabsContent>
+
+        <TabsContent value="topo-invariants" className="space-y-4" data-testid="topo-invariants-content">
+          <TopologicalInvariantsPanel />
         </TabsContent>
       </Tabs>
     </div>
@@ -3897,6 +3902,421 @@ function CausalDiscoveryPanel() {
                 })()
               ) : (
                 <p className="text-sm text-muted-foreground text-center py-8">Run causal discovery to see pressure regime comparison data.</p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function TopologicalInvariantsPanel() {
+  const [formula, setFormula] = useState("Bi2Se3");
+  const [queryFormula, setQueryFormula] = useState("");
+
+  const statsQuery = useQuery<any>({ queryKey: ["/api/topological-invariants/stats"] });
+
+  const invariantsQuery = useQuery<any>({
+    queryKey: ["/api/topological-invariants", queryFormula],
+    enabled: queryFormula.length > 0,
+  });
+
+  const handleAnalyze = () => {
+    if (formula.trim().length > 0) {
+      setQueryFormula(formula.trim());
+    }
+  };
+
+  const stats = statsQuery.data;
+  const inv = invariantsQuery.data;
+
+  const phaseColors: Record<string, string> = {
+    "strong-topological-insulator": "text-purple-400",
+    "quantum-anomalous-Hall": "text-pink-400",
+    "type-I-Weyl-semimetal": "text-cyan-400",
+    "type-II-Weyl-semimetal": "text-teal-400",
+    "weak-topological-insulator": "text-blue-400",
+    "band-inverted (candidate)": "text-yellow-400",
+    "trivial": "text-gray-400",
+  };
+
+  return (
+    <div className="space-y-4" data-testid="topo-invariants-panel">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2">
+            <ShieldCheck className="h-5 w-5 text-purple-400" />
+            Topological Invariants Engine
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div className="text-center p-3 bg-muted/30 rounded-lg" data-testid="invariant-total-computations">
+              <div className="text-2xl font-bold">{stats?.totalComputations ?? 0}</div>
+              <div className="text-xs text-muted-foreground">Total Computations</div>
+            </div>
+            <div className="text-center p-3 bg-muted/30 rounded-lg" data-testid="invariant-total-nontrivial">
+              <div className="text-2xl font-bold text-purple-400">{stats?.totalNontrivial ?? 0}</div>
+              <div className="text-xs text-muted-foreground">Nontrivial Phases</div>
+            </div>
+            <div className="text-center p-3 bg-muted/30 rounded-lg" data-testid="invariant-nontrivial-rate">
+              <div className="text-2xl font-bold">{((stats?.nontrivialRate ?? 0) * 100).toFixed(1)}%</div>
+              <div className="text-xs text-muted-foreground">Nontrivial Rate</div>
+            </div>
+            <div className="text-center p-3 bg-muted/30 rounded-lg" data-testid="invariant-phase-count">
+              <div className="text-2xl font-bold">{Object.keys(stats?.phaseBreakdown ?? {}).length}</div>
+              <div className="text-xs text-muted-foreground">Distinct Phases</div>
+            </div>
+          </div>
+
+          {stats?.phaseBreakdown && Object.keys(stats.phaseBreakdown).length > 0 && (
+            <div className="mb-4" data-testid="invariant-phase-breakdown">
+              <div className="text-sm font-medium mb-2">Phase Classification Breakdown</div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(stats.phaseBreakdown).map(([phase, count]) => (
+                  <Badge key={phase} variant="outline" className={phaseColors[phase] ?? "text-gray-300"} data-testid={`phase-badge-${phase}`}>
+                    {phase}: {count as number}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 mb-4">
+            <input
+              type="text"
+              value={formula}
+              onChange={(e) => setFormula(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
+              placeholder="Enter formula (e.g. Bi2Se3, TaAs)"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border rounded-md text-sm"
+              data-testid="input-topo-formula"
+            />
+            <Button
+              onClick={handleAnalyze}
+              disabled={invariantsQuery.isLoading || formula.trim().length === 0}
+              size="sm"
+              data-testid="button-analyze-topo"
+            >
+              {invariantsQuery.isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              Analyze
+            </Button>
+          </div>
+
+          {inv && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-3 bg-muted/20 rounded-lg border" data-testid="topo-phase-result">
+                <div>
+                  <div className="text-sm font-medium">Topological Phase</div>
+                  <div className={`text-lg font-bold ${phaseColors[inv.topologicalPhase] ?? "text-gray-300"}`}>
+                    {inv.topologicalPhase}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-sm text-muted-foreground">Composite Score</div>
+                  <div className="text-lg font-bold">{(inv.compositeTopologicalScore * 100).toFixed(1)}%</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Card data-testid="band-inversion-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <ArrowLeftRight className="h-4 w-4 text-yellow-400" />
+                      Band Inversion Detection
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Inverted</span>
+                      <Badge variant={inv.bandInversion.isInverted ? "default" : "secondary"} data-testid="band-inversion-status">
+                        {inv.bandInversion.isInverted ? "Yes" : "No"}
+                      </Badge>
+                    </div>
+                    {inv.bandInversion.isInverted && (
+                      <>
+                        <div className="flex justify-between text-sm">
+                          <span>Type</span>
+                          <span className="text-yellow-400" data-testid="band-inversion-type">{inv.bandInversion.inversionType}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span>Strength</span>
+                          <span data-testid="band-inversion-strength">{(inv.bandInversion.inversionStrength * 100).toFixed(0)}%</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span>SOC Gap</span>
+                          <span data-testid="band-inversion-gap">{inv.bandInversion.inversionGapMeV.toFixed(0)} meV</span>
+                        </div>
+                      </>
+                    )}
+                    {inv.bandInversion.inversionPoints?.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <div className="text-xs text-muted-foreground">Inversion Points</div>
+                        {inv.bandInversion.inversionPoints.map((pt: any, i: number) => (
+                          <div key={i} className="flex items-center gap-2 text-xs" data-testid={`inversion-point-${i}`}>
+                            <Badge variant="outline" className="text-xs">{pt.kLabel}</Badge>
+                            <span>{pt.valenceOrbitalBefore} &rarr; {pt.valenceOrbitalAfter}</span>
+                            <span className="ml-auto">{pt.inversionDepthEv.toFixed(3)} eV</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {inv.bandInversion.orbitalCharacterAtHighSymmetry?.length > 0 && (
+                      <div className="mt-2">
+                        <div className="text-xs text-muted-foreground mb-1">Orbital Character at High-Symmetry Points</div>
+                        <div className="grid grid-cols-3 gap-1">
+                          {inv.bandInversion.orbitalCharacterAtHighSymmetry.slice(0, 6).map((ok: any, i: number) => (
+                            <div key={i} className="text-center p-1 bg-muted/30 rounded text-xs" data-testid={`orbital-k-${ok.kLabel}`}>
+                              <div className="font-medium">{ok.kLabel}</div>
+                              <div className="text-yellow-300">V: {ok.dominantValence}</div>
+                              <div className="text-cyan-300">C: {ok.dominantConduction}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card data-testid="z2-invariant-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Sigma className="h-4 w-4 text-purple-400" />
+                      Z2 Topological Invariant
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Z2 Index</span>
+                      <code className="text-purple-400 font-bold" data-testid="z2-index">
+                        ({inv.z2Invariant.z2Index?.join(";")})
+                      </code>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Nontrivial</span>
+                      <Badge variant={inv.z2Invariant.isNontrivial ? "default" : "secondary"} data-testid="z2-nontrivial">
+                        {inv.z2Invariant.isNontrivial ? "Yes" : "No"}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Strong Index</span>
+                      <span data-testid="z2-strong">{inv.z2Invariant.strongIndex}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Parity Product</span>
+                      <span data-testid="z2-parity">{inv.z2Invariant.parityProduct > 0 ? "+1" : "-1"}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Wilson Loop Windings</span>
+                      <span data-testid="z2-wilson">{inv.z2Invariant.wilsonLoopWindings}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Confidence</span>
+                      <span data-testid="z2-confidence">{(inv.z2Invariant.confidence * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Method: {inv.z2Invariant.method}</div>
+                    {inv.z2Invariant.evidence?.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {inv.z2Invariant.evidence.map((e: string, i: number) => (
+                          <div key={i} className="text-xs text-muted-foreground" data-testid={`z2-evidence-${i}`}>{e}</div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card data-testid="chern-number-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <Target className="h-4 w-4 text-pink-400" />
+                      Chern Number
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Chern Number C</span>
+                      <span className="text-pink-400 font-bold text-lg" data-testid="chern-number">{inv.chernNumber.chernNumber}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Berry Phase</span>
+                      <span data-testid="berry-phase">{inv.chernNumber.berryPhase?.toFixed(4)} rad</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Quantized</span>
+                      <Badge variant={inv.chernNumber.isQuantized ? "default" : "secondary"} data-testid="chern-quantized">
+                        {inv.chernNumber.isQuantized ? "Yes" : "No"}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span>Confidence</span>
+                      <span data-testid="chern-confidence">{(inv.chernNumber.confidence * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Method: {inv.chernNumber.method}</div>
+                    {inv.chernNumber.evidence?.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {inv.chernNumber.evidence.map((e: string, i: number) => (
+                          <div key={i} className="text-xs text-muted-foreground" data-testid={`chern-evidence-${i}`}>{e}</div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card data-testid="weyl-nodes-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <GitMerge className="h-4 w-4 text-cyan-400" />
+                      Weyl Node Detection
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Node Count</span>
+                      <span className="text-cyan-400 font-bold" data-testid="weyl-count">{inv.weylNodes.nodeCount}</span>
+                    </div>
+                    {inv.weylNodes.nodeCount > 0 && (
+                      <>
+                        <div className="flex justify-between text-sm">
+                          <span>Type</span>
+                          <Badge variant={inv.weylNodes.isType2 ? "destructive" : "default"} data-testid="weyl-type">
+                            {inv.weylNodes.isType2 ? "Type-II" : "Type-I"}
+                          </Badge>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span>Total Chirality</span>
+                          <span data-testid="weyl-chirality">{inv.weylNodes.totalChirality}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span>k-Separation</span>
+                          <span data-testid="weyl-separation">{inv.weylNodes.separationK?.toFixed(4)} 1/A</span>
+                        </div>
+                        {inv.weylNodes.nodes?.slice(0, 4).map((node: any, i: number) => (
+                          <div key={i} className="text-xs p-2 bg-muted/20 rounded flex justify-between" data-testid={`weyl-node-${i}`}>
+                            <span>k=({node.kPosition?.map((k: number) => k.toFixed(3)).join(", ")})</span>
+                            <span>chi={node.chirality > 0 ? "+" : ""}{node.chirality}, {node.nodeType}</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    {inv.weylNodes.evidence?.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {inv.weylNodes.evidence.map((e: string, i: number) => (
+                          <div key={i} className="text-xs text-muted-foreground" data-testid={`weyl-evidence-${i}`}>{e}</div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card data-testid="surface-states-card">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Layers className="h-4 w-4 text-green-400" />
+                    Surface State Detection (Slab Calculation)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+                    <div className="text-center p-2 bg-muted/30 rounded" data-testid="surface-state-count">
+                      <div className="text-lg font-bold text-green-400">{inv.surfaceStates.surfaceStateCount}</div>
+                      <div className="text-xs text-muted-foreground">Surface States</div>
+                    </div>
+                    <div className="text-center p-2 bg-muted/30 rounded" data-testid="dirac-cone-count">
+                      <div className="text-lg font-bold text-purple-400">{inv.surfaceStates.diracConeCount}</div>
+                      <div className="text-xs text-muted-foreground">Dirac Cones</div>
+                    </div>
+                    <div className="text-center p-2 bg-muted/30 rounded" data-testid="surface-gap">
+                      <div className="text-lg font-bold">{inv.surfaceStates.surfaceGapMeV?.toFixed(0)}</div>
+                      <div className="text-xs text-muted-foreground">Surface Gap (meV)</div>
+                    </div>
+                    <div className="text-center p-2 bg-muted/30 rounded" data-testid="surface-dos">
+                      <div className="text-lg font-bold">{inv.surfaceStates.surfaceDOSAtFermi?.toFixed(3)}</div>
+                      <div className="text-xs text-muted-foreground">Surface DOS(Ef)</div>
+                    </div>
+                    <div className="text-center p-2 bg-muted/30 rounded" data-testid="slab-thickness">
+                      <div className="text-lg font-bold">{inv.surfaceStates.slabThickness}</div>
+                      <div className="text-xs text-muted-foreground">Slab Layers</div>
+                    </div>
+                  </div>
+
+                  {inv.surfaceStates.diracCones?.length > 0 && (
+                    <div className="mb-3">
+                      <div className="text-sm font-medium mb-1">Dirac Surface Cones</div>
+                      <div className="space-y-1">
+                        {inv.surfaceStates.diracCones.map((dc: any, i: number) => (
+                          <div key={i} className="flex items-center justify-between text-xs p-2 bg-muted/20 rounded" data-testid={`dirac-cone-${i}`}>
+                            <span>k = {dc.kPosition?.toFixed(3)}, E = {dc.energy?.toFixed(3)} eV</span>
+                            <span>v = {dc.velocity?.toFixed(2)} eV*A</span>
+                            <Badge variant={dc.isProtected ? "default" : "secondary"} className="text-xs">
+                              {dc.isProtected ? "Protected" : "Unprotected"}
+                            </Badge>
+                            <span>gap = {dc.gapMeV?.toFixed(1)} meV</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {inv.surfaceStates.surfaceStates?.filter((s: any) => s.isMajorana).length > 0 && (
+                    <div className="p-3 bg-purple-500/10 border border-purple-500/30 rounded-lg mb-3" data-testid="majorana-alert">
+                      <div className="text-sm font-medium text-purple-400">Possible Majorana Zero Mode Detected</div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        Surface state at zero energy with zero spin polarization — consistent with Majorana fermion signature in topological superconductor surface
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="text-xs text-muted-foreground">Method: {inv.surfaceStates.method}</div>
+                  {inv.surfaceStates.evidence?.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {inv.surfaceStates.evidence.map((e: string, i: number) => (
+                        <div key={i} className="text-xs text-muted-foreground" data-testid={`surface-evidence-${i}`}>{e}</div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {inv.evidence?.length > 0 && (
+                <Card data-testid="topo-evidence-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <ClipboardList className="h-4 w-4" />
+                      Composite Evidence
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-1">
+                      {inv.evidence.map((e: string, i: number) => (
+                        <div key={i} className="flex items-start gap-2 text-sm" data-testid={`composite-evidence-${i}`}>
+                          <CheckCircle2 className="h-4 w-4 text-green-400 mt-0.5 flex-shrink-0" />
+                          <span>{e}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {stats?.recentComputations?.length > 0 && (
+                <Card data-testid="recent-computations-card">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm">Recent Invariant Computations</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-1">
+                      {stats.recentComputations.map((rc: any, i: number) => (
+                        <div key={i} className="flex items-center justify-between text-xs p-2 bg-muted/20 rounded" data-testid={`recent-computation-${i}`}>
+                          <code>{rc.formula}</code>
+                          <Badge variant="outline" className={phaseColors[rc.phase] ?? "text-gray-300"}>{rc.phase}</Badge>
+                          <span>{(rc.score * 100).toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
               )}
             </div>
           )}

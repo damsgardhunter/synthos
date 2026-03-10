@@ -58,6 +58,7 @@ import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBase
 import { multiTaskPredict, trackMultiTaskPrediction, getMultiTaskStats } from "./multi-task-gnn";
 import { runLatentSpaceInverseDesign, trainVAE, getVAEStats, encodeToLatent } from "../physics/materials-vae";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
+import { computeTopologicalInvariants, trackInvariantResult } from "../physics/topological-invariants";
 import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
 import { encodeGenome, genomeDiversity, type MaterialGenome } from "../physics/materials-genome";
 import { computeFermiSurface, type FermiSurfaceResult } from "../physics/fermi-surface-engine";
@@ -1685,6 +1686,39 @@ async function runPhase10_Physics() {
               detail: `${candidate.formula}: class=${topoAnalysis.topologicalClass}, score=${topoAnalysis.topologicalScore}, SOC=${topoAnalysis.socStrength}, Z2=${topoAnalysis.z2Score}, Majorana=${topoAnalysis.majoranaFeasibility}${hasDFTBands ? " [DFT-enhanced]" : ""}, [${topoAnalysis.indicators.join(", ")}]`,
               dataSource: hasDFTBands ? "Topology Engine + DFT Bands" : "Topology Engine",
             });
+          }
+
+          try {
+            const invariants = computeTopologicalInvariants(
+              candidate.formula, electronicForTopo,
+              candidate.crystalStructure?.split(" ")[0],
+              candidate.crystalStructure?.match(/\((\w+)\)/)?.[1]
+            );
+            trackInvariantResult(candidate.formula, invariants);
+            (updatedMlFeatures as any).topologicalInvariants = {
+              bandInversion: {
+                isInverted: invariants.bandInversion.isInverted,
+                inversionType: invariants.bandInversion.inversionType,
+                inversionStrength: invariants.bandInversion.inversionStrength,
+                inversionGapMeV: invariants.bandInversion.inversionGapMeV,
+              },
+              z2: { index: invariants.z2Invariant.z2Index, isNontrivial: invariants.z2Invariant.isNontrivial },
+              chern: { number: invariants.chernNumber.chernNumber, isQuantized: invariants.chernNumber.isQuantized },
+              weylNodes: { count: invariants.weylNodes.nodeCount, isType2: invariants.weylNodes.isType2 },
+              surfaceStates: { count: invariants.surfaceStates.surfaceStateCount, diracCones: invariants.surfaceStates.diracConeCount },
+              phase: invariants.topologicalPhase,
+              compositeScore: invariants.compositeTopologicalScore,
+            };
+            if (invariants.compositeTopologicalScore > 0.3) {
+              emit("log", {
+                phase: "phase-10",
+                event: "Topological invariants computed",
+                detail: `${candidate.formula}: phase=${invariants.topologicalPhase}, Z2=(${invariants.z2Invariant.z2Index.join(";")}), C=${invariants.chernNumber.chernNumber}, Weyl=${invariants.weylNodes.nodeCount}, surfaces=${invariants.surfaceStates.surfaceStateCount}, inversion=${invariants.bandInversion.inversionType}`,
+                dataSource: "Topological Invariants Engine",
+              });
+            }
+          } catch (invErr) {
+            // invariant computation is optional
           }
         } catch (topoErr) {
           console.error(`[Engine] Topology analysis failed for ${candidate.formula}:`, topoErr instanceof Error ? topoErr.message.slice(0, 100) : "unknown");
