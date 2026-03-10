@@ -968,6 +968,16 @@ export default function Dashboard() {
     avgRoutesPerTarget: number;
     topMethods: Record<string, number>;
   }>({ queryKey: ["/api/retrosynthesis/stats"], refetchInterval: 20000 });
+  const { data: synthesisGateStats } = useQuery<{
+    totalEvaluated: number;
+    totalRejected: number;
+    totalPassed: number;
+    rejectionRate: number;
+    rejectionsByReason: Record<string, number>;
+    classificationCounts: Record<string, number>;
+    avgCompositeScore: number;
+    recentRejections: Array<{ formula: string; score: number; reasons: string[]; at: number }>;
+  }>({ queryKey: ["/api/synthesis-gate/stats"], refetchInterval: 15000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -1596,6 +1606,83 @@ export default function Dashboard() {
                     </div>
                   )}
                 </>
+              )}
+              {synthesisGateStats && synthesisGateStats.totalEvaluated > 0 && (
+                <div className="space-y-2 pt-2 border-t border-border/30" data-testid="synthesis-gate-panel">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Synthesis-First Gate (Hard Filter)</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sg-evaluated">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Evaluated</p>
+                      <p className="text-lg font-mono font-bold">{synthesisGateStats.totalEvaluated}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sg-passed">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Passed</p>
+                      <p className="text-lg font-mono font-bold text-emerald-600 dark:text-emerald-400">{synthesisGateStats.totalPassed}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sg-rejected">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Rejected</p>
+                      <p className="text-lg font-mono font-bold text-red-600 dark:text-red-400">{synthesisGateStats.totalRejected}</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sg-rejection-rate">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Rejection Rate</p>
+                      <p className={`text-lg font-mono font-bold ${synthesisGateStats.rejectionRate > 0.5 ? "text-amber-600 dark:text-amber-400" : "text-foreground"}`}>
+                        {(synthesisGateStats.rejectionRate * 100).toFixed(1)}%
+                      </p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="sg-avg-score">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Composite</p>
+                      <p className="text-lg font-mono font-bold">{(synthesisGateStats.avgCompositeScore * 100).toFixed(1)}%</p>
+                    </div>
+                  </div>
+                  {Object.keys(synthesisGateStats.classificationCounts).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Route Classifications</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(synthesisGateStats.classificationCounts)
+                          .sort(([, a], [, b]) => b - a)
+                          .map(([cls, count]) => (
+                            <Badge key={cls} variant="secondary" className={`text-[10px] font-mono border-0 ${cls === "one-pot" || cls === "trivial" ? "bg-emerald-100/50 dark:bg-emerald-900/30" : cls === "impractical" ? "bg-red-100/50 dark:bg-red-900/30" : ""}`} data-testid={`sg-class-${cls}`}>
+                              {cls}: {count}
+                            </Badge>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  {Object.keys(synthesisGateStats.rejectionsByReason).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Rejection Reasons</p>
+                      <div className="space-y-0.5">
+                        {Object.entries(synthesisGateStats.rejectionsByReason)
+                          .sort(([, a], [, b]) => b - a)
+                          .slice(0, 5)
+                          .map(([reason, count]) => (
+                            <div key={reason} className="flex items-center justify-between text-[10px]" data-testid={`sg-reason-${reason.slice(0, 20)}`}>
+                              <span className="text-muted-foreground truncate max-w-[180px]">{reason.split(":")[0]}</span>
+                              <span className="font-mono font-medium">{count}</span>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  {synthesisGateStats.recentRejections.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Recent Rejections</p>
+                      <div className="space-y-0.5">
+                        {synthesisGateStats.recentRejections.slice(-5).reverse().map((r, i) => (
+                          <div key={i} className="flex items-center justify-between text-[10px]" data-testid={`sg-recent-${i}`}>
+                            <span className="font-mono truncate max-w-[100px]">{r.formula}</span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-red-500">{(r.score * 100).toFixed(0)}%</span>
+                              <span className="text-muted-foreground truncate max-w-[80px]">{r.reasons[0]?.split(":")[0] || ""}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
               {(!synthDiscStats || synthDiscStats.totalDiscoveries === 0) && (!synthPlannerStats || synthPlannerStats.totalPlans === 0) && (!heuristicStats || heuristicStats.totalGenerated === 0) && !mlSynthStats?.trained && (!retroStats || retroStats.totalAnalyzed === 0) && (
                 <p className="text-sm text-muted-foreground italic" data-testid="synth-disc-placeholder">

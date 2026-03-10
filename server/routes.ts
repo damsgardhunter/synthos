@@ -144,6 +144,7 @@ import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, getGAEvolution
 import { planSynthesisRoutes, getSynthesisPlannerStats } from "./synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "./synthesis/heuristic-synthesis-generator";
 import { predictSynthesisFeasibility, getSynthesisPredictorStats } from "./synthesis/ml-synthesis-predictor";
+import { evaluateSynthesisGate, getSynthesisGateStats } from "./synthesis/synthesis-gate";
 import { generateRetrosynthesisRoutes, getRetrosynthesisStats } from "./synthesis/retrosynthesis-engine";
 import { predictDOS, dosPrefilter, getDOSSurrogateStats, detectVanHoveSingularities, physicsHeuristicDOS, type DOSSurrogateResult } from "./physics/dos-surrogate";
 import { computeSynthesisScore } from "./learning/multi-fidelity-pipeline";
@@ -2033,6 +2034,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ formula, ...score });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute synthesis score", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-gate/evaluate/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = evaluateSynthesisGate(formula);
+      res.json({ formula, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to evaluate synthesis gate", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-gate/stats", generalLimiter, (_req, res) => {
+    try {
+      res.json(getSynthesisGateStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch synthesis gate stats", detail: e.message?.slice(0, 200) });
     }
   });
 

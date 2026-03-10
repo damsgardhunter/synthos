@@ -117,6 +117,7 @@ import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-p
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 import { recordStructureOutcome } from "../crystal/structure-reward-system";
 import { runModelImprovementCycle, getModelImprovementStats } from "./model-improvement-loop";
+import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
 import { recordPredictionOutcome } from "./model-diagnostics";
 
 export type EventEmitter = (type: string, data: any) => void;
@@ -930,6 +931,30 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       console.log(`[Engine] Kinetic stability check failed: ${kineticErr?.message?.slice(0, 80) ?? "unknown"}`);
     }
 
+    let synthesisGateResult;
+    try {
+      synthesisGateResult = evaluateSynthesisGate(candidateData.formula);
+      if (!synthesisGateResult.pass) {
+        emit("log", {
+          phase: "engine",
+          event: "Synthesis gate rejected",
+          detail: `${candidateData.formula}: compositeScore=${synthesisGateResult.compositeScore.toFixed(3)}, mlFeas=${synthesisGateResult.mlFeasibility.toFixed(3)}, chemDist=${synthesisGateResult.chemicalDistance.totalDistance.toFixed(3)}, class=${synthesisGateResult.classification}. ${synthesisGateResult.rejectionReasons.join("; ")}`,
+          dataSource: "Synthesis Gate",
+        });
+        return false;
+      }
+      if (synthesisGateResult.deprioritize) {
+        emit("log", {
+          phase: "engine",
+          event: "Synthesis gate deprioritized",
+          detail: `${candidateData.formula}: compositeScore=${synthesisGateResult.compositeScore.toFixed(3)}, class=${synthesisGateResult.classification} — low synthesis feasibility, will be deprioritized`,
+          dataSource: "Synthesis Gate",
+        });
+      }
+    } catch (synthGateErr: any) {
+      console.log(`[Engine] Synthesis gate check failed: ${synthGateErr?.message?.slice(0, 80) ?? "unknown"}`);
+    }
+
     const existingMlFeatures = (candidateData.mlFeatures as Record<string, any>) ?? {};
     const enrichedMlFeatures = {
       ...existingMlFeatures,
@@ -949,6 +974,19 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           pressureGPa: kineticResult.pressureStabilization.minStabilizationPressure,
           ambientStabilizable: kineticResult.pressureStabilization.ambientStabilizable,
           strategies: kineticResult.stabilizationStrategies.map(s => s.strategy),
+        },
+      } : {}),
+      ...(synthesisGateResult ? {
+        synthesisGate: {
+          compositeScore: synthesisGateResult.compositeScore,
+          mlFeasibility: synthesisGateResult.mlFeasibility,
+          chemicalDistance: synthesisGateResult.chemicalDistance.totalDistance,
+          stepEstimate: synthesisGateResult.chemicalDistance.stepEstimate,
+          precursorAvailability: synthesisGateResult.chemicalDistance.precursorAvailability,
+          toxicElements: synthesisGateResult.chemicalDistance.toxicElements,
+          classification: synthesisGateResult.classification,
+          isOnePot: synthesisGateResult.chemicalDistance.isOnePot,
+          deprioritized: synthesisGateResult.deprioritize,
         },
       } : {}),
     };

@@ -8,6 +8,7 @@ import type { DefectStructure } from "../physics/defect-engine";
 import type { PressureTcPoint, HydrideFormationResult } from "./pressure-engine";
 import { assessHighPressureStability, scanPressureTcCurve } from "./pressure-engine";
 import { samplePressureFromClusters } from "./pressure-screening";
+import { evaluateSynthesisGate, HARD_GATE_THRESHOLD } from "../synthesis/synthesis-gate";
 import type { SynthesisPath, SynthesisStep, SynthesisVector } from "../physics/synthesis-simulator";
 import {
   defaultSynthesisVector,
@@ -1137,7 +1138,20 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
   const totalDuration = steps.reduce((s, step) => s + step.duration, 0);
 
   const feasResult = checkSynthesisFeasibility(sv);
-  const feasibilityScore = Math.max(0, 1 - feasResult.feasibilityScore / 10);
+  let feasibilityScore = Math.max(0, 1 - feasResult.feasibilityScore / 10);
+
+  try {
+    const gateResult = evaluateSynthesisGate(insights.formula);
+    feasibilityScore = feasibilityScore * 0.4 + gateResult.compositeScore * 0.6;
+    if (gateResult.chemicalDistance.toxicElements.length > 0) {
+      feasibilityScore *= (1 - gateResult.chemicalDistance.toxicityPenalty * 0.3);
+    }
+    if (gateResult.chemicalDistance.isOnePot) {
+      feasibilityScore = Math.min(1, feasibilityScore + 0.05);
+    }
+  } catch {}
+
+  feasibilityScore = Math.max(0, Math.min(1, feasibilityScore));
   const noveltyScore = computeNoveltyScore(genome, insights);
 
   const routeObj = { steps, feasibilityScore, noveltyScore };
@@ -1251,7 +1265,8 @@ export function discoverNovelSynthesisPaths(
 
   const topRoutes = population
     .slice(0, 5)
-    .filter(r => r.classification !== "unrealistic" || r.fitnessScore > 0.5);
+    .filter(r => r.classification !== "unrealistic" || r.fitnessScore > 0.5)
+    .filter(r => r.feasibilityScore >= HARD_GATE_THRESHOLD);
 
   if (topRoutes.length === 0 && population.length > 0) {
     topRoutes.push(population[0]);
