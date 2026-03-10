@@ -428,7 +428,8 @@ async function stage4_SynthesisFeasibility(
   const stability = await evaluateConvexHullStability(structure.decompositionEnergy, candidate.formula);
   const isSynthesizable = structure.synthesizability > 0.55;
   const isStableOrMetastable = stability.isStable || stability.isMetastable;
-  const ambientPressureStable = (candidate.pressureGpa ?? 0) <= 1 && (stability.isStable || stability.isMetastable);
+  const optP = candidate.optimalPressureGpa ?? candidate.pressureGpa ?? 0;
+  const ambientPressureStable = optP <= 1 && optP < 50 && (stability.isStable || stability.isMetastable);
 
   const formationEnergy = stability.formationEnergy ?? 0;
   const formationEnergyTooHigh = formationEnergy > 2.0;
@@ -753,7 +754,8 @@ async function updateCandidatePhysics(
     }
     if (allData.structure) {
       updates.decompositionEnergy = allData.structure.decompositionEnergy;
-      updates.ambientPressureStable = allData.stability?.isStable ?? false;
+      const effP = (updates as any).optimalPressureGpa ?? (updates as any).pressureGpa ?? 0;
+      updates.ambientPressureStable = effP < 50 && (allData.stability?.isStable ?? false);
     }
     if (allData.stability) {
       if (allData.stability.synthesizability != null) {

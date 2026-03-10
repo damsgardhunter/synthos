@@ -459,6 +459,18 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - model-experiment-controller.ts: LLM-driven model improvement via gpt-4o-mini. 7 experiment types (retrain_model, adjust_hyperparameters, expand_dataset, add_features, adjust_architecture, recalibrate_uncertainty, rebalance_training). Hyperparameter override system persists nTrees/learningRate/maxDepth/etc. Tracks last 50 ExperimentRecords with before/after metrics snapshots. APIs: `/api/model-experiments/propose|history|stats`.
     - model-improvement-loop.ts: Parallel loop to materials discovery, runs every 5 engine cycles. Collects diagnostics → checks health → proposes LLM experiments → executes top priority → tracks improvement deltas. Safety: max 1 experiment/cycle, 3-cycle cooldown per model, rollback if >10% regression, plateau detection (<1% improvement over 5 experiments). Wired into engine.ts (after Phase 12) and strategy-analyzer.ts (model diagnostics in LLM prompt). APIs: `/api/model-improvement/stats|trigger|trends`.
 
+  - **Pairing symmetry coupled to mechanism**:
+    - pairing-mechanisms.ts: `computePairingProfile()` symmetry assignment rewritten — dominant mechanism now deterministically selects symmetry: spin-fluctuation→d-wave (or s± for orbital), topological→p-wave, phonon→s-wave, excitonic→d-wave, CDW→CDW-modulated s-wave, polaronic→polaronic/BEC s-wave. Previously allowed spin-fluctuation→s-wave.
+    - engine.ts: Added `derivePairingSymmetry(mechanism, dWaveFlag)` helper. All 8+ candidate insertion sites that used `features.dWaveSymmetry ? "d-wave" : "s-wave"` now use `derivePairingSymmetry()` to couple symmetry to the assigned pairing mechanism.
+    - ml-predictor.ts, superconductor-research.ts: Pairing symmetry assignment similarly coupled to mechanism — spin-fluctuation materials now correctly get d-wave symmetry.
+
+  - **Chemistry validity filters**:
+    - engine.ts: Added `passesChemistryFilter()` with three checks: (1) average valence electrons/atom must be in [1,12], (2) Pauling electronegativity spread must be ≤3.5 (rejects too-ionic compositions), (3) oxidation state balance must be achievable using common oxidation states (COMMON_OXIDATION_STATES table for 70+ elements, backtracking solver). Filter runs in `insertCandidateWithStabilityCheck()` after element count cap, before stability pre-filter.
+
+  - **Pressure stability logic**:
+    - multi-fidelity-pipeline.ts: `ambientPressureStable` now requires optimalPressure < 50 GPa (was only checking pressureGpa ≤ 1). Both assignment sites (stage evaluation and final updates) enforce this.
+    - engine.ts: Pressure scan update paths (both hydride and non-hydride) now set `ambientPressureStable = false` when `optimalPressure > 50 GPa`. Materials requiring >50 GPa are never marked as ambient-pressure-stable.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

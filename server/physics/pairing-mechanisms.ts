@@ -817,23 +817,31 @@ export function computePairingProfile(formula: string): PairingProfile {
   ];
   mechanisms.sort((a, b) => b.strength - a.strength);
 
+  const dominant = mechanisms[0].name;
   let pairingSymmetry = "s-wave";
-  if (spinResult.spinPairingStrength > phononResult.phononPairingStrength) {
-    pairingSymmetry = spinResult.pairingSymmetry;
-  } else if (phononResult.phononPairingStrength > 0.3) {
+
+  if (dominant === "phonon-mediated" || dominant === "phonon") {
     pairingSymmetry = "s-wave";
     if (phononResult.modeResolved.hasSoftModeInstability) {
       pairingSymmetry = "anisotropic s-wave";
     }
-  }
-  if (mechanisms[0].name === "cdw-mediated" && cdwResult.cdwPairingStrength > 0.5) {
-    pairingSymmetry = "CDW-modulated s-wave";
-  }
-  if (mechanisms[0].name === "polaronic" && polaronicResult.polaronicPairingStrength > 0.5) {
-    pairingSymmetry = polaronicResult.bcsBecCrossover > 0.5 ? "BEC-like s-wave" : "polaronic s-wave";
-  }
-  if (mechanisms[0].name === "topological" && topoStrength > 0.5) {
+  } else if (dominant === "spin-fluctuation") {
+    pairingSymmetry = spinResult.pairingSymmetry;
+    if (pairingSymmetry === "s-wave") {
+      pairingSymmetry = "d-wave";
+    }
+  } else if (dominant === "orbital-fluctuation") {
+    pairingSymmetry = "s+/-";
+  } else if (dominant === "topological") {
     pairingSymmetry = topoPairingSymmetry;
+  } else if (dominant === "cdw-mediated" && cdwResult.cdwPairingStrength > 0.5) {
+    pairingSymmetry = "CDW-modulated s-wave";
+  } else if (dominant === "polaronic" && polaronicResult.polaronicPairingStrength > 0.5) {
+    pairingSymmetry = polaronicResult.bcsBecCrossover > 0.5 ? "BEC-like s-wave" : "polaronic s-wave";
+  } else if (dominant === "excitonic") {
+    pairingSymmetry = "d-wave";
+  } else if (dominant === "plasmon-mediated") {
+    pairingSymmetry = "s-wave";
   }
 
   let estimatedTcFromPairing = phononResult.tcAllenDynes;

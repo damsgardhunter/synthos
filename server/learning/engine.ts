@@ -122,9 +122,105 @@ import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedb
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 import { recordStructureOutcome } from "../crystal/structure-reward-system";
+import { ELEMENTAL_DATA } from "./elemental-data";
 import { runModelImprovementCycle, getModelImprovementStats } from "./model-improvement-loop";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
 import { recordPredictionOutcome } from "./model-diagnostics";
+
+function derivePairingSymmetry(mechanism: string | null | undefined, dWaveFlag?: boolean): string {
+  const mech = (mechanism ?? "").toLowerCase();
+  if (mech.includes("spin") || mech.includes("excitonic")) return "d-wave";
+  if (mech.includes("topolog")) return "p-wave";
+  if (mech.includes("orbital")) return "s+/-";
+  if (mech.includes("phonon") || mech.includes("bcs")) return "s-wave";
+  if (dWaveFlag) return "d-wave";
+  return "s-wave";
+}
+
+function parseFormulaCounts(formula: string): Record<string, number> {
+  const cleaned = (formula ?? "").replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const result: Record<string, number> = {};
+  const re = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cleaned)) !== null) {
+    const el = m[1];
+    const n = m[2] ? parseFloat(m[2]) : 1;
+    result[el] = (result[el] || 0) + n;
+  }
+  return result;
+}
+
+const COMMON_OXIDATION_STATES: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  B: [3], Al: [3], Ga: [3], In: [3], Tl: [1, 3],
+  C: [-4, 4], Si: [4, -4], Ge: [4], Sn: [2, 4], Pb: [2, 4],
+  N: [-3, 3, 5], P: [-3, 3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5], Bi: [3, 5],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4, 6], Te: [-2, 4, 6],
+  F: [-1], Cl: [-1, 1, 3, 5, 7], Br: [-1, 1, 3, 5], I: [-1, 1, 3, 5, 7],
+  Ti: [2, 3, 4], V: [2, 3, 4, 5], Cr: [2, 3, 6], Mn: [2, 3, 4, 7],
+  Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2, 3], Zn: [2],
+  Zr: [4], Nb: [3, 5], Mo: [4, 6], Tc: [4, 7], Ru: [3, 4], Rh: [3], Pd: [2, 4],
+  Ag: [1], Cd: [2], Hf: [4], Ta: [5], W: [4, 6], Re: [4, 7],
+  Os: [4, 8], Ir: [3, 4], Pt: [2, 4], Au: [1, 3], Hg: [1, 2],
+  Sc: [3], Y: [3], La: [3], Ce: [3, 4], Pr: [3], Nd: [3], Sm: [3],
+  Eu: [2, 3], Gd: [3], Tb: [3], Dy: [3], Ho: [3], Er: [3], Tm: [3], Yb: [2, 3], Lu: [3],
+  Ac: [3], Th: [4], U: [3, 4, 5, 6],
+};
+
+function passesChemistryFilter(formula: string): { pass: boolean; reason: string } {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  if (elements.length < 2) return { pass: true, reason: "" };
+
+  const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
+  const avgValence = elements.reduce((sum, el) => {
+    const data = ELEMENTAL_DATA[el];
+    return sum + (data?.valenceElectrons ?? 4) * (counts[el] / totalAtoms);
+  }, 0);
+  if (avgValence < 1 || avgValence > 12) {
+    return { pass: false, reason: `avg valence electrons/atom ${avgValence.toFixed(1)} outside [1,12]` };
+  }
+
+  const ens = elements
+    .map(el => ELEMENTAL_DATA[el]?.paulingElectronegativity ?? null)
+    .filter((v): v is number => v !== null);
+  if (ens.length >= 2) {
+    const spread = Math.max(...ens) - Math.min(...ens);
+    if (spread > 3.5) {
+      return { pass: false, reason: `electronegativity spread ${spread.toFixed(2)} > 3.5 (too ionic)` };
+    }
+  }
+
+  const canBalance = checkOxidationBalance(counts);
+  if (!canBalance) {
+    return { pass: false, reason: "no valid oxidation state balance found" };
+  }
+
+  return { pass: true, reason: "" };
+}
+
+function checkOxidationBalance(counts: Record<string, number>): boolean {
+  const elements = Object.keys(counts);
+  if (elements.length < 2) return true;
+
+  const statesPerElement = elements.map(el => {
+    const ox = COMMON_OXIDATION_STATES[el];
+    if (!ox || ox.length === 0) return [0, 2, 3, -2];
+    return ox;
+  });
+
+  function tryBalance(idx: number, runningSum: number): boolean {
+    if (idx === elements.length) return Math.abs(runningSum) < 0.01;
+    const count = counts[elements[idx]];
+    for (const ox of statesPerElement[idx]) {
+      if (tryBalance(idx + 1, runningSum + ox * count)) return true;
+    }
+    return false;
+  }
+
+  return tryBalance(0, 0);
+}
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -887,6 +983,18 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         event: "Composition cap rejected",
         detail: `${candidateData.formula}: exceeds element/atom count caps (max 4 non-H elements, 5 total, 20 atoms, 12 per element)`,
         dataSource: "Composition Filter",
+      });
+      if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
+      return false;
+    }
+
+    const chemFilter = passesChemistryFilter(candidateData.formula);
+    if (!chemFilter.pass) {
+      emit("log", {
+        phase: "engine",
+        event: "Chemistry filter rejected",
+        detail: `${candidateData.formula}: ${chemFilter.reason}`,
+        dataSource: "Chemistry Validity Filter",
       });
       if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
       return false;
@@ -2289,9 +2397,11 @@ async function runPhase10_Physics() {
               },
               ...(Object.keys(hydrogenNetworkData).length > 0 ? { hydrogenNetwork: hydrogenNetworkData } : {}),
             };
-            await storage.updateSuperconductorCandidate(candidate.id, {
-              mlFeatures: updatedMlFeatures as any,
-            });
+            const hydrideUpdates: any = { mlFeatures: updatedMlFeatures as any };
+            if (pressureResult.optimalPressure > 50) {
+              hydrideUpdates.ambientPressureStable = false;
+            }
+            await storage.updateSuperconductorCandidate(candidate.id, hydrideUpdates);
           } catch (err: any) {
             emit("log", { phase: "phase-10", event: "Pressure scan error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Pressure Engine" });
           }
@@ -2322,6 +2432,9 @@ async function runPhase10_Physics() {
               },
             };
             const updates: any = { mlFeatures: updatedMlFeatures as any };
+            if (pressureResult.optimalPressure > 50) {
+              updates.ambientPressureStable = false;
+            }
             if (pressureTc > ambientTc && pressureResult.optimalPressure <= 50 && pressureResult.optimalPressure > 0) {
               updates.pressureGpa = pressureResult.optimalPressure;
               updates.optimalPressureGpa = pressureResult.optimalPressure;
@@ -2485,7 +2598,7 @@ async function runPhase11_StructurePrediction() {
                   electronPhononCoupling: features.electronPhononLambda ?? null,
                   logPhononFrequency: features.logPhononFreq ?? null,
                   coulombPseudopotential: 0.12,
-                  pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                  pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                   pairingMechanism: "phonon-mediated",
                   correlationStrength: features.correlationStrength ?? null,
                   dimensionality: variant.dimensionality,
@@ -2544,7 +2657,7 @@ async function runPhase11_StructurePrediction() {
                 electronPhononCoupling: features.electronPhononLambda ?? null,
                 logPhononFrequency: features.logPhononFreq ?? null,
                 coulombPseudopotential: 0.12,
-                pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
                 dimensionality: variant.dimensionality,
@@ -2624,7 +2737,7 @@ async function runPhase11_StructurePrediction() {
                 electronPhononCoupling: lambdaML || null,
                 logPhononFrequency: features.logPhononFreq ?? null,
                 coulombPseudopotential: 0.12,
-                pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
                 dimensionality: "3D",
@@ -2695,7 +2808,7 @@ async function runPhase11_StructurePrediction() {
               electronPhononCoupling: features.electronPhononLambda ?? null,
               logPhononFrequency: features.logPhononFreq ?? null,
               coulombPseudopotential: 0.12,
-              pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+              pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
               pairingMechanism: "phonon-mediated",
               correlationStrength: features.correlationStrength ?? null,
               dimensionality: "3D",
@@ -2774,7 +2887,7 @@ async function runPhase11_StructurePrediction() {
               electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
               logPhononFrequency: features.logPhononFreq ?? null,
               coulombPseudopotential: 0.12,
-              pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+              pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
               pairingMechanism: "phonon-mediated",
               correlationStrength: features.correlationStrength ?? null,
               dimensionality: "3D",
@@ -2851,7 +2964,7 @@ async function runPhase11_StructurePrediction() {
               electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
               logPhononFrequency: features.logPhononFreq ?? null,
               coulombPseudopotential: 0.12,
-              pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+              pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
               pairingMechanism: "phonon-mediated",
               correlationStrength: features.correlationStrength ?? null,
               dimensionality: "3D",
@@ -5402,7 +5515,7 @@ async function runLearningCycle() {
                       electronPhononCoupling: lambdaML || null,
                       logPhononFrequency: features.logPhononFreq ?? null,
                       coulombPseudopotential: 0.12,
-                      pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                      pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                       pairingMechanism: "phonon-mediated",
                       correlationStrength: features.correlationStrength ?? null,
                       dimensionality: "3D",
@@ -5638,7 +5751,7 @@ async function runLearningCycle() {
                 electronPhononCoupling: gnnResult.lambda || lambdaML || null,
                 logPhononFrequency: features.logPhononFreq ?? null,
                 coulombPseudopotential: isHydride ? 0.10 : 0.12,
-                pairingSymmetry: features.dWaveSymmetry ? "d-wave" : "s-wave",
+                pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
                 dimensionality: pc.dimensionality === "3D" ? "3D" : "2D",
