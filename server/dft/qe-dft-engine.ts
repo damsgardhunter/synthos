@@ -1652,27 +1652,11 @@ function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; min
 
 function computeBoundingVolume(atoms: AtomPosition[]): number {
   if (atoms.length < 2) return 0;
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  let totalVol = 0;
   for (const a of atoms) {
-    const r = COVALENT_RADII[a.element] ?? 1.4;
-    if (a.x - r < minX) minX = a.x - r;
-    if (a.y - r < minY) minY = a.y - r;
-    if (a.z - r < minZ) minZ = a.z - r;
-    if (a.x + r > maxX) maxX = a.x + r;
-    if (a.y + r > maxY) maxY = a.y + r;
-    if (a.z + r > maxZ) maxZ = a.z + r;
+    totalVol += ATOMIC_VOLUMES[a.element] ?? 15.0;
   }
-  const lx = Math.max(maxX - minX, 1.0);
-  const ly = Math.max(maxY - minY, 1.0);
-  const lz = Math.max(maxZ - minZ, 1.0);
-  const boxVol = lx * ly * lz;
-  const aspect = Math.max(lx, ly, lz) / Math.min(lx, ly, lz);
-  if (aspect > 3.0) {
-    const avgSide = Math.cbrt(boxVol);
-    return avgSide * avgSide * avgSide * 0.85;
-  }
-  return boxVol;
+  return totalVol;
 }
 
 function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {

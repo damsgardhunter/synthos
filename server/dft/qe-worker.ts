@@ -888,7 +888,7 @@ function generateAtomicPositions(
 
   if (hCount > 0 && metalCount > 0 && hCount / metalCount >= 4) {
     const hPerMetal = Math.round(hCount / metalCount);
-    const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms);
+    const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms, latticeA ?? 5.0);
     if (cagePositions.length === totalAtoms && cagePositions.length <= 16) {
       if (latticeA && latticeA > 0) {
         const distValid = validatePositionDistances(cagePositions, latticeA);
@@ -1075,28 +1075,42 @@ function generateHydrideCagePositions(
   counts: Record<string, number>,
   hPerMetal: number,
   totalAtoms: number,
+  latticeA: number = 5.0,
 ): Array<{ element: string; x: number; y: number; z: number }> {
   const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
 
-  const octahedralH = [
-    { x: 0.5, y: 0.0, z: 0.0 }, { x: 0.0, y: 0.5, z: 0.0 }, { x: 0.0, y: 0.0, z: 0.5 },
-    { x: 0.5, y: 0.5, z: 0.5 }, { x: 0.0, y: 0.5, z: 0.5 }, { x: 0.5, y: 0.0, z: 0.5 },
-  ];
+  const TARGET_MH_DIST = 1.9;
+  const cageRadius = TARGET_MH_DIST / latticeA;
 
-  const cubeVertexH = [
-    { x: 0.25, y: 0.25, z: 0.25 }, { x: 0.75, y: 0.25, z: 0.25 },
-    { x: 0.25, y: 0.75, z: 0.25 }, { x: 0.25, y: 0.25, z: 0.75 },
-    { x: 0.75, y: 0.75, z: 0.25 }, { x: 0.75, y: 0.25, z: 0.75 },
-    { x: 0.25, y: 0.75, z: 0.75 }, { x: 0.75, y: 0.75, z: 0.75 },
-  ];
+  function octahedralSites(r: number): Array<{ x: number; y: number; z: number }> {
+    return [
+      { x: r, y: 0, z: 0 }, { x: 0, y: r, z: 0 }, { x: 0, y: 0, z: r },
+      { x: 1 - r, y: 0, z: 0 }, { x: 0, y: 1 - r, z: 0 }, { x: 0, y: 0, z: 1 - r },
+    ];
+  }
 
-  const clathrateH10 = [
-    { x: 0.25, y: 0.25, z: 0.0 }, { x: 0.75, y: 0.25, z: 0.0 },
-    { x: 0.25, y: 0.75, z: 0.0 }, { x: 0.75, y: 0.75, z: 0.0 },
-    { x: 0.0, y: 0.25, z: 0.25 }, { x: 0.0, y: 0.75, z: 0.25 },
-    { x: 0.25, y: 0.0, z: 0.25 }, { x: 0.75, y: 0.0, z: 0.25 },
-    { x: 0.5, y: 0.25, z: 0.5 }, { x: 0.5, y: 0.75, z: 0.5 },
-  ];
+  function cubeVertexSites(r: number): Array<{ x: number; y: number; z: number }> {
+    const d = r / Math.sqrt(3);
+    return [
+      { x: d, y: d, z: d }, { x: 1 - d, y: d, z: d },
+      { x: d, y: 1 - d, z: d }, { x: d, y: d, z: 1 - d },
+      { x: 1 - d, y: 1 - d, z: d }, { x: 1 - d, y: d, z: 1 - d },
+      { x: d, y: 1 - d, z: 1 - d }, { x: 1 - d, y: 1 - d, z: 1 - d },
+    ];
+  }
+
+  function clathrateSites(r: number): Array<{ x: number; y: number; z: number }> {
+    const d = r / Math.sqrt(2);
+    return [
+      { x: d, y: d, z: 0 }, { x: 1 - d, y: d, z: 0 },
+      { x: d, y: 1 - d, z: 0 }, { x: 1 - d, y: 1 - d, z: 0 },
+      { x: 0, y: d, z: d }, { x: 0, y: 1 - d, z: d },
+      { x: d, y: 0, z: d }, { x: 1 - d, y: 0, z: d },
+      { x: 0.5, y: d, z: 0.5 }, { x: 0.5, y: 1 - d, z: 0.5 },
+    ];
+  }
+
+  function wrapFrac(v: number): number { return v - Math.floor(v); }
 
   const metalCount = metalElements.reduce((s, e) => s + Math.round(counts[e] || 0), 0);
   if (metalCount === 1) {
@@ -1105,22 +1119,23 @@ function generateHydrideCagePositions(
 
     let hSites: Array<{ x: number; y: number; z: number }>;
     if (hPerMetal <= 6) {
-      hSites = octahedralH.slice(0, hPerMetal);
+      hSites = octahedralSites(cageRadius).slice(0, hPerMetal);
     } else if (hPerMetal <= 8) {
-      hSites = cubeVertexH.slice(0, hPerMetal);
+      hSites = cubeVertexSites(cageRadius).slice(0, hPerMetal);
     } else if (hPerMetal === 9) {
-      hSites = [...cubeVertexH, { x: 0.5, y: 0.5, z: 0.0 }];
+      hSites = [...cubeVertexSites(cageRadius), { x: cageRadius, y: cageRadius, z: 0 }];
     } else if (hPerMetal <= 10) {
-      hSites = clathrateH10.slice(0, hPerMetal);
+      hSites = clathrateSites(cageRadius).slice(0, hPerMetal);
     } else {
+      const extraR = cageRadius * 1.1;
       const extraH = [
-        { x: 0.0, y: 0.5, z: 0.75 },
-        { x: 0.5, y: 0.0, z: 0.75 },
+        { x: 0, y: extraR, z: 1 - extraR },
+        { x: extraR, y: 0, z: 1 - extraR },
       ];
-      hSites = [...clathrateH10, ...extraH.slice(0, Math.min(hPerMetal - 10, 2))];
+      hSites = [...clathrateSites(cageRadius), ...extraH.slice(0, Math.min(hPerMetal - 10, 2))];
     }
     for (const h of hSites) {
-      positions.push({ element: "H", ...h });
+      positions.push({ element: "H", x: wrapFrac(h.x), y: wrapFrac(h.y), z: wrapFrac(h.z) });
     }
   } else {
     let placed = 0;
@@ -1134,54 +1149,46 @@ function generateHydrideCagePositions(
         positions.push({ element: metal, ...metalSites[placed++] });
       }
     }
-    const occupiedSites = positions.map(p => ({ x: p.x, y: p.y, z: p.z }));
     const hTotal = Math.round(counts["H"] || 0);
-    const allH = [...octahedralH, ...cubeVertexH];
+    const allH = [...octahedralSites(cageRadius), ...cubeVertexSites(cageRadius)];
     let hPlaced = 0;
     for (let i = 0; i < allH.length && hPlaced < hTotal; i++) {
       const hPos = allH[i];
-      let collides = false;
-      for (const occ of occupiedSites) {
-        let fdx = hPos.x - occ.x;
-        let fdy = hPos.y - occ.y;
-        let fdz = hPos.z - occ.z;
-        fdx -= Math.round(fdx);
-        fdy -= Math.round(fdy);
-        fdz -= Math.round(fdz);
-        if (Math.abs(fdx) < 0.05 && Math.abs(fdy) < 0.05 && Math.abs(fdz) < 0.05) {
-          collides = true;
-          break;
-        }
+      let tooClose = false;
+      for (const p of positions) {
+        let fdx = hPos.x - p.x; fdx -= Math.round(fdx);
+        let fdy = hPos.y - p.y; fdy -= Math.round(fdy);
+        let fdz = hPos.z - p.z; fdz -= Math.round(fdz);
+        const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+        const dMin = 0.75 * ((COVALENT_RADIUS["H"] ?? 0.31) + (COVALENT_RADIUS[p.element] ?? 1.4));
+        if (dist < dMin) { tooClose = true; break; }
       }
-      if (!collides) {
-        positions.push({ element: "H", ...hPos });
-        occupiedSites.push({ x: hPos.x, y: hPos.y, z: hPos.z });
+      if (!tooClose) {
+        positions.push({ element: "H", x: wrapFrac(hPos.x), y: wrapFrac(hPos.y), z: wrapFrac(hPos.z) });
         hPlaced++;
       }
     }
     if (hPlaced < hTotal) {
+      const fallbackR = cageRadius * 0.9;
       const fallbackH = [
-        { x: 0.15, y: 0.15, z: 0.15 }, { x: 0.85, y: 0.15, z: 0.15 },
-        { x: 0.15, y: 0.85, z: 0.15 }, { x: 0.15, y: 0.15, z: 0.85 },
+        { x: fallbackR, y: fallbackR, z: fallbackR },
+        { x: 1 - fallbackR, y: fallbackR, z: fallbackR },
+        { x: fallbackR, y: 1 - fallbackR, z: fallbackR },
+        { x: fallbackR, y: fallbackR, z: 1 - fallbackR },
       ];
       for (const fb of fallbackH) {
         if (hPlaced >= hTotal) break;
-        let collides = false;
-        for (const occ of occupiedSites) {
-          let fdx = fb.x - occ.x;
-          let fdy = fb.y - occ.y;
-          let fdz = fb.z - occ.z;
-          fdx -= Math.round(fdx);
-          fdy -= Math.round(fdy);
-          fdz -= Math.round(fdz);
-          if (Math.abs(fdx) < 0.05 && Math.abs(fdy) < 0.05 && Math.abs(fdz) < 0.05) {
-            collides = true;
-            break;
-          }
+        let tooClose = false;
+        for (const p of positions) {
+          let fdx = fb.x - p.x; fdx -= Math.round(fdx);
+          let fdy = fb.y - p.y; fdy -= Math.round(fdy);
+          let fdz = fb.z - p.z; fdz -= Math.round(fdz);
+          const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+          const dMin = 0.75 * ((COVALENT_RADIUS["H"] ?? 0.31) + (COVALENT_RADIUS[p.element] ?? 1.4));
+          if (dist < dMin) { tooClose = true; break; }
         }
-        if (!collides) {
-          positions.push({ element: "H", ...fb });
-          occupiedSites.push({ x: fb.x, y: fb.y, z: fb.z });
+        if (!tooClose) {
+          positions.push({ element: "H", x: wrapFrac(fb.x), y: wrapFrac(fb.y), z: wrapFrac(fb.z) });
           hPlaced++;
         }
       }
