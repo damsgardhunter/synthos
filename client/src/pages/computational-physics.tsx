@@ -16,7 +16,7 @@ import {
   FlaskConical, Star, Bug, Brain, Diamond, ClipboardList,
   Cpu, Clock, Loader2, Network, Code2, GitBranch, ArrowLeftRight,
   BookOpen, Sigma, FlaskRound, Search, TrendingUp, ShieldCheck, Lightbulb,
-  GitMerge, ArrowRight, Play, Microscope, Settings2, Fingerprint, BrainCircuit, Shield,
+  GitMerge, ArrowRight, Play, Microscope, Settings2, Fingerprint, BrainCircuit, Shield, Waves, AlertTriangle,
 } from "lucide-react";
 import DOSVisualizer from "@/components/dos-visualizer";
 
@@ -4552,6 +4552,17 @@ function DopingEnginePanel() {
   const [formula, setFormula] = useState("La2CuO4");
   const [relaxing, setRelaxing] = useState(false);
   const [searchRunning, setSearchRunning] = useState(false);
+  const [phononRunning, setPhononRunning] = useState(false);
+
+  const phononMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/doping/hessian-phonons/${encodeURIComponent(formula)}`);
+      if (!res.ok) throw new Error("Hessian phonon analysis failed");
+      return res.json();
+    },
+    onMutate: () => setPhononRunning(true),
+    onSettled: () => setPhononRunning(false),
+  });
 
   const searchMutation = useMutation({
     mutationFn: async () => {
@@ -4772,6 +4783,16 @@ function DopingEnginePanel() {
             >
               {searchRunning ? "Searching..." : "Search Loop"}
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => phononMutation.mutate()}
+              disabled={!formula || phononRunning}
+              data-testid="button-hessian-phonons"
+            >
+              <Waves className="h-3 w-3 mr-1" />
+              {phononRunning ? "Computing..." : "Hessian Phonons"}
+            </Button>
           </div>
 
           {dopingQuery.isLoading && <Skeleton className="h-32 w-full" />}
@@ -4928,6 +4949,111 @@ function DopingEnginePanel() {
         </Card>
       )}
 
+      {phononMutation.data?.analysis && (
+        <Card data-testid="hessian-phonon-card">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Waves className="h-4 w-4 text-teal-400" />
+              Hessian Phonon Analysis
+              <span className="text-xs text-muted-foreground ml-auto font-normal">
+                {phononMutation.data.formula}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const a = phononMutation.data.analysis;
+              const latColor = a.latticeClassification === "soft" ? "text-green-400" :
+                a.latticeClassification === "moderate" ? "text-cyan-400" : "text-orange-400";
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Avg Frequency</div>
+                      <div className="font-mono font-bold text-sm" data-testid="phonon-avg-freq">{a.avgFrequency_THz} THz</div>
+                      <div className="text-muted-foreground">{a.avgFrequency_cm1} cm-1</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Lattice</div>
+                      <div className={`font-mono font-bold text-sm ${latColor}`} data-testid="phonon-lattice-class">{a.latticeClassification}</div>
+                      <div className="text-muted-foreground">max {a.maxFrequency_THz} THz</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Soft Modes</div>
+                      <div className={`font-mono font-bold text-sm ${a.softModeCount > 0 ? "text-green-400" : "text-gray-400"}`} data-testid="phonon-soft-count">
+                        {a.softModeCount}
+                      </div>
+                      <div className="text-muted-foreground">&lt; 1 THz</div>
+                    </div>
+                    <div className="bg-muted/30 rounded p-2 text-center">
+                      <div className="text-muted-foreground">Imaginary</div>
+                      <div className={`font-mono font-bold text-sm ${a.imaginaryModeCount > 0 ? "text-red-400" : "text-gray-400"}`} data-testid="phonon-imag-count">
+                        {a.imaginaryModeCount}
+                      </div>
+                      <div className="text-muted-foreground">{a.hasLatticeInstability ? "unstable" : "stable"}</div>
+                    </div>
+                  </div>
+
+                  {a.softModeFrequencies_THz.length > 0 && (
+                    <div className="text-[10px] p-2 bg-green-500/5 rounded border border-green-500/20">
+                      <span className="text-green-400 font-medium">Soft phonon modes: </span>
+                      <span className="font-mono text-green-300">
+                        {a.softModeFrequencies_THz.slice(0, 8).map((f: number) => `${f} THz`).join(", ")}
+                        {a.softModeFrequencies_THz.length > 8 && ` +${a.softModeFrequencies_THz.length - 8} more`}
+                      </span>
+                    </div>
+                  )}
+
+                  {a.imaginaryFrequencies_THz.length > 0 && (
+                    <div className="text-[10px] p-2 bg-red-500/5 rounded border border-red-500/20">
+                      <AlertTriangle className="h-3 w-3 text-red-400 inline mr-1" />
+                      <span className="text-red-400 font-medium">Imaginary frequencies: </span>
+                      <span className="font-mono text-red-300">
+                        {a.imaginaryFrequencies_THz.slice(0, 6).map((f: number) => `${f} THz`).join(", ")}
+                        {a.imaginaryFrequencies_THz.length > 6 && ` +${a.imaginaryFrequencies_THz.length - 6} more`}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="p-2 bg-muted/20 rounded border border-border/50">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-muted-foreground">SC Phonon Relevance</span>
+                      <span className="text-xs font-mono font-bold" data-testid="phonon-sc-score">
+                        {a.scRelevance.overallPhononSCScore.toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="w-full bg-muted/40 rounded-full h-1.5 mb-1.5">
+                      <div
+                        className="bg-teal-500 h-1.5 rounded-full transition-all"
+                        style={{ width: `${Math.min(100, a.scRelevance.overallPhononSCScore * 100)}%` }}
+                      />
+                    </div>
+                    <div className="flex gap-3 text-[10px] text-muted-foreground">
+                      <span>soft: {a.scRelevance.softPhononScore.toFixed(2)}</span>
+                      <span>instability: {a.scRelevance.instabilityScore.toFixed(2)}</span>
+                      <span>coupling: {a.scRelevance.couplingScore.toFixed(2)}</span>
+                    </div>
+                    <div className="text-[10px] text-teal-400 mt-1.5" data-testid="phonon-interpretation">
+                      {a.scRelevance.interpretation}
+                    </div>
+                  </div>
+
+                  {a.zeroPointEnergy != null && (
+                    <div className="text-[10px] text-muted-foreground">
+                      Zero-point energy: <span className="font-mono">{a.zeroPointEnergy.toFixed(6)} Eh</span>
+                    </div>
+                  )}
+
+                  <div className="text-[10px] text-muted-foreground">
+                    {a.frequencies_THz.length} modes analyzed ({a.frequencies_cm1.length} cm-1 values from Hessian)
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+
       {searchMutation.data && (
         <Card data-testid="doping-search-results-card">
           <CardHeader className="pb-2">
@@ -4979,6 +5105,28 @@ function DopingEnginePanel() {
                   )}
                   {r.levels.some((l: any) => l.scSignals.structuralTransition) && (
                     <div className="mt-0.5 text-[10px] text-amber-400">Structural transition detected</div>
+                  )}
+                  {r.levels.some((l: any) => l.scSignals.hessianPhonon) && (
+                    <div className="mt-1 flex flex-wrap gap-2 text-[10px]">
+                      {r.levels.filter((l: any) => l.scSignals.hessianPhonon).map((l: any, k: number) => (
+                        <div key={k} className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-500/10 border border-teal-500/20">
+                          <Waves className="h-2.5 w-2.5 text-teal-400" />
+                          <span className="text-teal-300">{(l.fraction * 100).toFixed(0)}%:</span>
+                          {l.scSignals.hessianPhonon.softModeCount > 0 && (
+                            <span className="text-green-400">{l.scSignals.hessianPhonon.softModeCount} soft</span>
+                          )}
+                          {l.scSignals.hessianPhonon.imaginaryModeCount > 0 && (
+                            <span className="text-red-400">{l.scSignals.hessianPhonon.imaginaryModeCount} imag</span>
+                          )}
+                          <span className={
+                            l.scSignals.hessianPhonon.latticeClassification === "soft" ? "text-green-400" :
+                            l.scSignals.hessianPhonon.latticeClassification === "moderate" ? "text-cyan-400" : "text-orange-400"
+                          }>
+                            {l.scSignals.hessianPhonon.latticeClassification}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               ))}

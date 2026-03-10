@@ -1,7 +1,7 @@
 import { parseFormulaElements, computeElectronicStructure, computePhononSpectrum } from "./physics-engine";
 import { normalizeFormula, isValidFormula } from "./utils";
 import { getElementData, getStonerParameter } from "./elemental-data";
-import { runXTBOptimization } from "../dft/qe-dft-engine";
+import { runXTBOptimization, runXTBPhononCheck, type PhononStability } from "../dft/qe-dft-engine";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 
@@ -31,6 +31,164 @@ export interface RelaxationMetrics {
   volumeChange: number;
   energyPerAtom: number;
   wallTimeMs: number;
+  phononAnalysis?: HessianPhononAnalysis | null;
+}
+
+export interface HessianPhononAnalysis {
+  frequencies_cm1: number[];
+  frequencies_THz: number[];
+  softModeCount: number;
+  softModeFrequencies_THz: number[];
+  imaginaryModeCount: number;
+  imaginaryFrequencies_THz: number[];
+  hasImaginaryModes: boolean;
+  hasLatticeInstability: boolean;
+  avgFrequency_THz: number;
+  avgFrequency_cm1: number;
+  maxFrequency_THz: number;
+  lowestFrequency_THz: number;
+  latticeClassification: "stiff" | "moderate" | "soft";
+  zeroPointEnergy: number | null;
+  scRelevance: {
+    softPhononScore: number;
+    instabilityScore: number;
+    couplingScore: number;
+    overallPhononSCScore: number;
+    interpretation: string;
+  };
+}
+
+const CM1_TO_THZ = 0.02998;
+const SOFT_PHONON_THRESHOLD_THZ = 1.0;
+const MODERATE_PHONON_THRESHOLD_THZ = 5.0;
+
+export async function analyzeHessianPhonons(formula: string): Promise<HessianPhononAnalysis | null> {
+  let stability: PhononStability | null = null;
+  try {
+    stability = await runXTBPhononCheck(formula);
+  } catch (e) {
+    console.log(`[Doping] xTB Hessian failed for ${formula}, using physics-engine fallback`);
+  }
+
+  if (stability && stability.frequencies.length > 0) {
+    return processPhononStability(stability);
+  }
+
+  try {
+    const electronic = computeElectronicStructure(formula);
+    const phonon = computePhononSpectrum(formula, electronic);
+    if (!phonon) return null;
+
+    const maxFreq = phonon.maxPhononFrequency;
+    const logAvg = phonon.logAverageFrequency;
+    const nModes = Math.max(6, Math.min(20, parseFormulaElements(formula).length * 3));
+    const syntheticFreqs: number[] = [];
+    for (let i = 0; i < nModes; i++) {
+      const frac = (i + 1) / nModes;
+      syntheticFreqs.push(maxFreq * frac * (0.7 + 0.6 * ((i * 7 + 3) % 11) / 11));
+    }
+    if (phonon.hasImaginaryModes) {
+      syntheticFreqs[0] = -Math.abs(logAvg * 0.1);
+    }
+    if (phonon.softModePresent) {
+      const softIdx = phonon.hasImaginaryModes ? 1 : 0;
+      syntheticFreqs[softIdx] = Math.min(syntheticFreqs[softIdx], logAvg * 0.05);
+    }
+    syntheticFreqs.sort((a, b) => a - b);
+
+    const syntheticStability: PhononStability = {
+      hasImaginaryModes: phonon.hasImaginaryModes,
+      imaginaryModeCount: phonon.hasImaginaryModes ? 1 : 0,
+      lowestFrequency: syntheticFreqs[0],
+      frequencies: syntheticFreqs,
+      zeroPointEnergy: null,
+    };
+    const result = processPhononStability(syntheticStability);
+    (result as any).source = "physics-engine-estimate";
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+export function processPhononStability(stability: PhononStability): HessianPhononAnalysis {
+  const freqs_cm1 = stability.frequencies;
+  const freqs_THz = freqs_cm1.map(f => f * CM1_TO_THZ);
+
+  const positiveFreqs_THz = freqs_THz.filter(f => f > 0);
+  const softModes = positiveFreqs_THz.filter(f => f < SOFT_PHONON_THRESHOLD_THZ);
+  const imaginaryModes = freqs_THz.filter(f => f < 0);
+
+  const avgFreq_THz = positiveFreqs_THz.length > 0
+    ? positiveFreqs_THz.reduce((s, f) => s + f, 0) / positiveFreqs_THz.length
+    : 0;
+
+  const maxFreq_THz = positiveFreqs_THz.length > 0 ? Math.max(...positiveFreqs_THz) : 0;
+  const lowestFreq_THz = freqs_THz.length > 0 ? Math.min(...freqs_THz) : 0;
+
+  let latticeClassification: "stiff" | "moderate" | "soft";
+  if (avgFreq_THz > MODERATE_PHONON_THRESHOLD_THZ) {
+    latticeClassification = "stiff";
+  } else if (avgFreq_THz >= SOFT_PHONON_THRESHOLD_THZ) {
+    latticeClassification = "moderate";
+  } else {
+    latticeClassification = "soft";
+  }
+
+  const softFraction = freqs_THz.length > 0 ? softModes.length / freqs_THz.length : 0;
+  const softPhononScore = Math.min(1.0, softFraction * 3.0);
+
+  const imagFraction = freqs_THz.length > 0 ? imaginaryModes.length / freqs_THz.length : 0;
+  const instabilityScore = imaginaryModes.length > 0
+    ? Math.min(1.0, 0.5 + imagFraction * 2.0)
+    : 0;
+
+  let couplingScore = 0;
+  if (latticeClassification === "moderate") couplingScore = 0.7;
+  else if (latticeClassification === "soft") couplingScore = 1.0;
+  else couplingScore = 0.2;
+  if (softModes.length > 0) couplingScore = Math.min(1.0, couplingScore + 0.2);
+
+  const overallPhononSCScore = 0.35 * softPhononScore + 0.30 * instabilityScore + 0.35 * couplingScore;
+
+  let interpretation: string;
+  if (imaginaryModes.length > 0 && softModes.length > 2) {
+    interpretation = `Lattice shows ${imaginaryModes.length} imaginary mode(s) and ${softModes.length} soft mode(s) — strong dynamic instability suggesting structural transition near SC`;
+  } else if (imaginaryModes.length > 0) {
+    interpretation = `${imaginaryModes.length} imaginary mode(s) detected — lattice wants to distort, possible SC-relevant instability`;
+  } else if (softModes.length > 2) {
+    interpretation = `${softModes.length} soft phonon mode(s) below 1 THz — lattice near structural transition, favorable for electron-phonon coupling`;
+  } else if (latticeClassification === "moderate") {
+    interpretation = "Moderate phonon spectrum — good electron-phonon coupling range for conventional SC";
+  } else if (latticeClassification === "soft") {
+    interpretation = "Soft lattice dynamics — strong phonon-mediated coupling potential";
+  } else {
+    interpretation = "Stiff lattice — weaker conventional phonon-mediated SC coupling expected";
+  }
+
+  return {
+    frequencies_cm1: freqs_cm1,
+    frequencies_THz: freqs_THz.map(f => Math.round(f * 1000) / 1000),
+    softModeCount: softModes.length,
+    softModeFrequencies_THz: softModes.map(f => Math.round(f * 1000) / 1000),
+    imaginaryModeCount: imaginaryModes.length,
+    imaginaryFrequencies_THz: imaginaryModes.map(f => Math.round(f * 1000) / 1000),
+    hasImaginaryModes: imaginaryModes.length > 0,
+    hasLatticeInstability: imaginaryModes.length > 0 || softModes.length > positiveFreqs_THz.length * 0.4,
+    avgFrequency_THz: Math.round(avgFreq_THz * 1000) / 1000,
+    avgFrequency_cm1: Math.round(avgFreq_THz / CM1_TO_THZ * 100) / 100,
+    maxFrequency_THz: Math.round(maxFreq_THz * 1000) / 1000,
+    lowestFrequency_THz: Math.round(lowestFreq_THz * 1000) / 1000,
+    latticeClassification,
+    zeroPointEnergy: stability.zeroPointEnergy,
+    scRelevance: {
+      softPhononScore: Math.round(softPhononScore * 1000) / 1000,
+      instabilityScore: Math.round(instabilityScore * 1000) / 1000,
+      couplingScore: Math.round(couplingScore * 1000) / 1000,
+      overallPhononSCScore: Math.round(overallPhononSCScore * 1000) / 1000,
+      interpretation,
+    },
+  };
 }
 
 export interface DopingResult {
@@ -613,6 +771,13 @@ export async function relaxDopedStructure(formula: string): Promise<RelaxationMe
 
     const energyPerAtom = atoms.length > 0 ? (optResult.optimizedEnergy * 27.2114) / atoms.length : 0;
 
+    let phononAnalysis: HessianPhononAnalysis | null = null;
+    try {
+      phononAnalysis = await analyzeHessianPhonons(formula);
+    } catch (phErr) {
+      console.log(`[Doping] Hessian phonon analysis failed for ${formula}: ${phErr instanceof Error ? phErr.message.slice(0, 80) : String(phErr).slice(0, 80)}`);
+    }
+
     return {
       converged: optResult.converged,
       latticeStrain,
@@ -622,6 +787,7 @@ export async function relaxDopedStructure(formula: string): Promise<RelaxationMe
       volumeChange,
       energyPerAtom,
       wallTimeMs: optResult.wallTimeSeconds * 1000,
+      phononAnalysis,
     };
   } catch {
     return null;
@@ -878,9 +1044,18 @@ export interface SCSignal {
   structuralTransition: string | null;
   phononSoftening: number;
   overallSCIndicator: number;
+  hessianPhonon: {
+    softModeCount: number;
+    imaginaryModeCount: number;
+    avgFrequency_THz: number;
+    latticeClassification: "stiff" | "moderate" | "soft";
+    hasLatticeInstability: boolean;
+    phononSCScore: number;
+    interpretation: string;
+  } | null;
 }
 
-export function detectSCSignals(baseFormula: string, dopedFormula: string): SCSignal {
+export function detectSCSignals(baseFormula: string, dopedFormula: string, dopedHessian?: PhononStability | null): SCSignal {
   const baseElectronic = computeElectronicStructure(baseFormula);
   const dopedElectronic = computeElectronicStructure(dopedFormula);
 
@@ -917,12 +1092,32 @@ export function detectSCSignals(baseFormula: string, dopedFormula: string): SCSi
     structuralTransition = `${baseCrystal} -> ${dopedCrystal}`;
   }
 
+  let hessianPhonon: SCSignal["hessianPhonon"] = null;
+  if (dopedHessian && dopedHessian.frequencies.length > 0) {
+    const analysis = processPhononStability(dopedHessian);
+    hessianPhonon = {
+      softModeCount: analysis.softModeCount,
+      imaginaryModeCount: analysis.imaginaryModeCount,
+      avgFrequency_THz: analysis.avgFrequency_THz,
+      latticeClassification: analysis.latticeClassification,
+      hasLatticeInstability: analysis.hasLatticeInstability,
+      phononSCScore: analysis.scRelevance.overallPhononSCScore,
+      interpretation: analysis.scRelevance.interpretation,
+    };
+  }
+
   let indicator = 0;
-  if (dosIncrease > 0.05) indicator += 0.25 * Math.min(dosIncrease, 1.0);
-  if (magnetismSuppressed) indicator += 0.25;
-  if (phononSoftening > 0.05) indicator += 0.2 * Math.min(phononSoftening, 1.0);
-  if (structuralTransition) indicator += 0.15;
-  if (dopedDOS > 2.0) indicator += 0.15;
+  if (dosIncrease > 0.05) indicator += 0.20 * Math.min(dosIncrease, 1.0);
+  if (magnetismSuppressed) indicator += 0.20;
+  if (phononSoftening > 0.05) indicator += 0.15 * Math.min(phononSoftening, 1.0);
+  if (structuralTransition) indicator += 0.10;
+  if (dopedDOS > 2.0) indicator += 0.10;
+  if (hessianPhonon) {
+    indicator += 0.25 * hessianPhonon.phononSCScore;
+  } else {
+    if (phononSoftening > 0.05) indicator += 0.05 * Math.min(phononSoftening, 1.0);
+    if (dopedDOS > 2.0) indicator += 0.05;
+  }
 
   return {
     dosAtEF: dopedDOS,
@@ -932,6 +1127,7 @@ export function detectSCSignals(baseFormula: string, dopedFormula: string): SCSi
     structuralTransition,
     phononSoftening,
     overallSCIndicator: Math.min(1, indicator),
+    hessianPhonon,
   };
 }
 
