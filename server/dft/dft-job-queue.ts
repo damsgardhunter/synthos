@@ -282,25 +282,40 @@ async function processNextJob(): Promise<boolean> {
 async function cleanupStaleJobs() {
   try {
     const staleRunning = await storage.getDftJobsByStatus("running");
+    let requeued = 0;
+    let failed = 0;
     for (const job of staleRunning) {
-      await storage.updateDftJob(job.id, {
-        status: "failed",
-        completedAt: new Date(),
-        errorMessage: "Stale job from previous server session",
-      } as any);
-      staleJobsCleanedCount++;
-      console.log(`[DFT-Queue] Cleaned up stale running job #${job.id} (${job.formula})`);
+      const attempts = (job as any).retryCount ?? 0;
+      if (attempts < 2) {
+        await storage.updateDftJob(job.id, {
+          status: "queued",
+          startedAt: null,
+          completedAt: null,
+          errorMessage: null,
+        } as any);
+        requeued++;
+        console.log(`[DFT-Queue] Re-queued stale job #${job.id} (${job.formula}) for retry`);
+      } else {
+        await storage.updateDftJob(job.id, {
+          status: "failed",
+          completedAt: new Date(),
+          errorMessage: "Stale job from previous server session (max retries reached)",
+        } as any);
+        staleJobsCleanedCount++;
+        failed++;
+      }
     }
-    const previousStale = await storage.getDftJobsByStatus("failed");
-    const prevStaleCount = previousStale.filter(j => j.errorMessage === "Stale job from previous server session").length;
-    staleJobsCleanedCount = prevStaleCount;
     if (staleRunning.length > 0) {
-      console.log(`[DFT-Queue] Cleaned ${staleRunning.length} stale running job(s), ${staleJobsCleanedCount} total stale in DB`);
+      console.log(`[DFT-Queue] Stale job cleanup: ${requeued} re-queued, ${failed} failed (${staleRunning.length} total stale)`);
     }
   } catch (err: any) {
     console.log(`[DFT-Queue] Stale job cleanup error: ${err.message}`);
   }
 }
+
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let lastLoopRun = 0;
+let loopRunning = false;
 
 export function startDFTWorkerLoop() {
   if (workerLoopTimer) return;
@@ -316,6 +331,8 @@ export function startDFTWorkerLoop() {
   console.log(`[DFT-Queue] Starting DFT worker loop (poll every 30s, max ${MAX_CONCURRENT} concurrent)`);
 
   async function loop() {
+    loopRunning = true;
+    lastLoopRun = Date.now();
     try {
       const launched: Promise<boolean>[] = [];
       const slotsAvailable = MAX_CONCURRENT - activeWorkers;
@@ -328,16 +345,32 @@ export function startDFTWorkerLoop() {
         const moreQueued = await storage.getQueuedDftJobs(1);
         if (moreQueued.length > 0) {
           workerLoopTimer = setTimeout(loop, 2000);
+          loopRunning = false;
           return;
         }
       }
     } catch (err: any) {
       console.log(`[DFT-Queue] Worker loop error: ${err.message}`);
     }
+    loopRunning = false;
     workerLoopTimer = setTimeout(loop, POLL_INTERVAL_MS);
   }
 
   workerLoopTimer = setTimeout(loop, 5000);
+
+  if (!watchdogTimer) {
+    watchdogTimer = setInterval(() => {
+      const elapsed = Date.now() - lastLoopRun;
+      if (!loopRunning && elapsed > POLL_INTERVAL_MS * 3 && lastLoopRun > 0) {
+        console.log(`[DFT-Queue] WATCHDOG: Worker loop appears dead (last run ${Math.round(elapsed/1000)}s ago), restarting`);
+        if (workerLoopTimer) {
+          clearTimeout(workerLoopTimer);
+          workerLoopTimer = null;
+        }
+        workerLoopTimer = setTimeout(loop, 1000);
+      }
+    }, POLL_INTERVAL_MS * 2);
+  }
 }
 
 export function stopDFTWorkerLoop() {
@@ -345,6 +378,10 @@ export function stopDFTWorkerLoop() {
     clearTimeout(workerLoopTimer);
     workerLoopTimer = null;
     console.log("[DFT-Queue] DFT worker loop stopped");
+  }
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
   }
 }
 

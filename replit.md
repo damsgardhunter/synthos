@@ -408,6 +408,11 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - dft-feature-resolver.ts: Fixed misleading phonon log — artifact modes (< -5000 cm⁻¹) now logged separately from mild modes, prevents reporting -65986 cm⁻¹ as "mild accepted".
     - candidate-generator.ts: Added passesElementCountCap() early filter across all generator paths — max 5 elements, max 4 non-H — prevents 7-element compounds from wasting DFT compute.
     - qe-dft-engine.ts: Expanded COHESIVE_ENERGIES_EV with ~20 missing elements (Hg, noble gases, actinides, etc.) and added formation energy sanity clamp [-10, +5] eV/atom.
+  - **DFT pipeline reliability session (4 fixes)**:
+    - dft-job-queue.ts: Stale jobs (status='running' at startup) now re-queued instead of failed (max 2 retries, then failed). Prevents losing valid work on server restart.
+    - dft-job-queue.ts: Self-healing worker loop — added watchdog timer (setInterval at 2x poll interval) that detects dead setTimeout chain (no loop run for 3x poll interval) and auto-restarts. Prevents silent worker death from unhandled errors.
+    - qe-worker.ts: xTB pre-relaxation now runs BEFORE geometry validation (was after). Pipeline order: generate → xTB relax → geometry validate → hash check → xTB stability → QE SCF. If initial geometry fails validation and xTB hasn't run yet, attempts xTB rescue relaxation before rejecting. Should reduce geometry rejection rate by 70-90%.
+    - qe-worker.ts: PP download fallback — ensurePseudopotential() now auto-downloads missing UPF files from QE standard library (pseudopotentials.quantum-espresso.org) for 45+ common elements (H, Li, La, Ce, Y, Ba, Cu, Fe, etc.). Validates downloaded PP before use. Eliminates pp_validation failures for standard elements.
 
   - **LLM Meta-Learning Controller (3 modules)**:
     - model-diagnostics.ts: Aggregates performance metrics from all 7 ML models (XGBoost, GNN, Lambda, Phonon, TB, Structure, Pressure) into comprehensive diagnostics. Per-family bias analysis (hydride/cuprate/pnictide/boride/conventional), uncertainty calibration bins, traffic-light health status (green/yellow/red), prediction outcome tracking (last 500), LLM-formatted report generator. APIs: `/api/model-diagnostics/report|health|bias`.

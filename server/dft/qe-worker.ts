@@ -297,6 +297,55 @@ function cleanupPseudoDir(): void {
 
 cleanupPseudoDir();
 
+const PP_DOWNLOAD_URLS: Record<string, string> = {
+  H: "https://pseudopotentials.quantum-espresso.org/upf_files/H.pbe-kjpaw_psl.1.0.0.UPF",
+  Li: "https://pseudopotentials.quantum-espresso.org/upf_files/Li.pbe-s-kjpaw_psl.1.0.0.UPF",
+  Be: "https://pseudopotentials.quantum-espresso.org/upf_files/Be.pbe-n-kjpaw_psl.1.0.0.UPF",
+  B: "https://pseudopotentials.quantum-espresso.org/upf_files/B.pbe-n-kjpaw_psl.1.0.0.UPF",
+  C: "https://pseudopotentials.quantum-espresso.org/upf_files/C.pbe-n-kjpaw_psl.1.0.0.UPF",
+  N: "https://pseudopotentials.quantum-espresso.org/upf_files/N.pbe-n-kjpaw_psl.1.0.0.UPF",
+  O: "https://pseudopotentials.quantum-espresso.org/upf_files/O.pbe-n-kjpaw_psl.1.0.0.UPF",
+  F: "https://pseudopotentials.quantum-espresso.org/upf_files/F.pbe-n-kjpaw_psl.1.0.0.UPF",
+  Na: "https://pseudopotentials.quantum-espresso.org/upf_files/Na.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Mg: "https://pseudopotentials.quantum-espresso.org/upf_files/Mg.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Al: "https://pseudopotentials.quantum-espresso.org/upf_files/Al.pbe-n-kjpaw_psl.1.0.0.UPF",
+  Si: "https://pseudopotentials.quantum-espresso.org/upf_files/Si.pbe-n-kjpaw_psl.1.0.0.UPF",
+  P: "https://pseudopotentials.quantum-espresso.org/upf_files/P.pbe-n-kjpaw_psl.1.0.0.UPF",
+  S: "https://pseudopotentials.quantum-espresso.org/upf_files/S.pbe-n-kjpaw_psl.1.0.0.UPF",
+  K: "https://pseudopotentials.quantum-espresso.org/upf_files/K.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ca: "https://pseudopotentials.quantum-espresso.org/upf_files/Ca.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Sc: "https://pseudopotentials.quantum-espresso.org/upf_files/Sc.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ti: "https://pseudopotentials.quantum-espresso.org/upf_files/Ti.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  V: "https://pseudopotentials.quantum-espresso.org/upf_files/V.pbe-spnl-kjpaw_psl.1.0.0.UPF",
+  Cr: "https://pseudopotentials.quantum-espresso.org/upf_files/Cr.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Mn: "https://pseudopotentials.quantum-espresso.org/upf_files/Mn.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Fe: "https://pseudopotentials.quantum-espresso.org/upf_files/Fe.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Co: "https://pseudopotentials.quantum-espresso.org/upf_files/Co.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ni: "https://pseudopotentials.quantum-espresso.org/upf_files/Ni.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Cu: "https://pseudopotentials.quantum-espresso.org/upf_files/Cu.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Zn: "https://pseudopotentials.quantum-espresso.org/upf_files/Zn.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Ga: "https://pseudopotentials.quantum-espresso.org/upf_files/Ga.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Ge: "https://pseudopotentials.quantum-espresso.org/upf_files/Ge.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  As: "https://pseudopotentials.quantum-espresso.org/upf_files/As.pbe-n-kjpaw_psl.1.0.0.UPF",
+  Se: "https://pseudopotentials.quantum-espresso.org/upf_files/Se.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Sr: "https://pseudopotentials.quantum-espresso.org/upf_files/Sr.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Y: "https://pseudopotentials.quantum-espresso.org/upf_files/Y.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Zr: "https://pseudopotentials.quantum-espresso.org/upf_files/Zr.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Nb: "https://pseudopotentials.quantum-espresso.org/upf_files/Nb.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Mo: "https://pseudopotentials.quantum-espresso.org/upf_files/Mo.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  La: "https://pseudopotentials.quantum-espresso.org/upf_files/La.pbe-spfn-kjpaw_psl.1.0.0.UPF",
+  Ce: "https://pseudopotentials.quantum-espresso.org/upf_files/Ce.pbe-spdn-kjpaw_psl.1.0.0.UPF",
+  Ba: "https://pseudopotentials.quantum-espresso.org/upf_files/Ba.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Hf: "https://pseudopotentials.quantum-espresso.org/upf_files/Hf.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ta: "https://pseudopotentials.quantum-espresso.org/upf_files/Ta.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  W: "https://pseudopotentials.quantum-espresso.org/upf_files/W.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Th: "https://pseudopotentials.quantum-espresso.org/upf_files/Th.pbe-spfn-kjpaw_psl.1.0.0.UPF",
+  Pb: "https://pseudopotentials.quantum-espresso.org/upf_files/Pb.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Bi: "https://pseudopotentials.quantum-espresso.org/upf_files/Bi.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Sn: "https://pseudopotentials.quantum-espresso.org/upf_files/Sn.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Te: "https://pseudopotentials.quantum-espresso.org/upf_files/Te.pbe-dn-kjpaw_psl.1.0.0.UPF",
+};
+
 function ensurePseudopotential(element: string): string {
   if (!fs.existsSync(QE_PSEUDO_DIR)) {
     fs.mkdirSync(QE_PSEUDO_DIR, { recursive: true });
@@ -317,6 +366,23 @@ function ensurePseudopotential(element: string): string {
     fs.copyFileSync(sourceFile, ppFile);
     console.log(`[QE-Worker] Copied valid PP for ${element} from repo (${fs.statSync(ppFile).size} bytes)`);
     return ppFile;
+  }
+
+  const url = PP_DOWNLOAD_URLS[element];
+  if (url) {
+    try {
+      console.log(`[QE-Worker] Downloading PP for ${element} from QE library...`);
+      execSync(`curl -sL -o "${ppFile}" "${url}"`, { timeout: 30000 });
+      if (fs.existsSync(ppFile) && validatePseudopotential(ppFile)) {
+        console.log(`[QE-Worker] Downloaded valid PP for ${element} (${fs.statSync(ppFile).size} bytes)`);
+        return ppFile;
+      } else {
+        try { fs.unlinkSync(ppFile); } catch {}
+        console.log(`[QE-Worker] Downloaded PP for ${element} failed validation`);
+      }
+    } catch (dlErr: any) {
+      console.log(`[QE-Worker] PP download failed for ${element}: ${dlErr.message?.slice(0, 100)}`);
+    }
   }
 
   throw new Error(`No valid pseudopotential for ${element} — need a verified UPF file in ${PP_SOURCE_DIR}/${element}.UPF`);
@@ -1326,14 +1392,51 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       if (proto) result.prototypeUsed = proto.template.name;
     } catch {}
 
+    result.ppValidated = true;
+
+    const workerPressure = result.estimatedPressureGPa ?? 0;
+
+    const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
+    result.xtbPreRelaxed = !!relaxed;
+    if (relaxed) {
+      positions = relaxed;
+      console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
+    }
+
     const geomCheck = validateGeometry(positions, latticeA);
     if (!geomCheck.valid) {
-      result.error = `Geometry rejected: ${geomCheck.reason}`;
-      result.failureStage = "geometry";
-      stageFailureCounts.geometry++;
-      console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
-      recordFormulaFailure(formula);
-      return result;
+      if (!relaxed) {
+        const retryRelaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
+        if (retryRelaxed) {
+          const retryGeom = validateGeometry(retryRelaxed, latticeA);
+          if (retryGeom.valid) {
+            positions = retryRelaxed;
+            result.xtbPreRelaxed = true;
+            console.log(`[QE-Worker] xTB rescue relaxation fixed geometry for ${formula}`);
+          } else {
+            result.error = `Geometry rejected after xTB rescue: ${retryGeom.reason}`;
+            result.failureStage = "geometry";
+            stageFailureCounts.geometry++;
+            console.log(`[QE-Worker] ${formula} geometry invalid even after xTB: ${retryGeom.reason}`);
+            recordFormulaFailure(formula);
+            return result;
+          }
+        } else {
+          result.error = `Geometry rejected: ${geomCheck.reason}`;
+          result.failureStage = "geometry";
+          stageFailureCounts.geometry++;
+          console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
+          recordFormulaFailure(formula);
+          return result;
+        }
+      } else {
+        result.error = `Geometry rejected: ${geomCheck.reason}`;
+        result.failureStage = "geometry";
+        stageFailureCounts.geometry++;
+        console.log(`[QE-Worker] ${formula} geometry invalid: ${geomCheck.reason}`);
+        recordFormulaFailure(formula);
+        return result;
+      }
     }
 
     const hash = computeStructureHash(positions, latticeA);
@@ -1347,9 +1450,6 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     }
     structureHashCache.add(hash);
 
-    result.ppValidated = true;
-
-    const workerPressure = result.estimatedPressureGPa ?? 0;
     const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
     if (stabilityCheck && !stabilityCheck.stable) {
       result.error = `xTB stability pre-filter: E/atom = ${stabilityCheck.ePerAtom.toFixed(3)} eV (must be < -1.0 eV/atom)`;
@@ -1358,13 +1458,6 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       stageFailureCounts.xtb_prefilter++;
       console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV (threshold: < -1.0 eV/atom)${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
       return result;
-    }
-
-    const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
-    result.xtbPreRelaxed = !!relaxed;
-    if (relaxed) {
-      positions = relaxed;
-      console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
     }
 
     const cOverA = estimateCOverA(elements, counts);
