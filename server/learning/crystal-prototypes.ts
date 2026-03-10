@@ -1099,6 +1099,91 @@ export function checkCoordinationMismatch(formula: string): { mismatch: number; 
   return { mismatch, plausible: mismatch < 0.6 && details.length === 0, details };
 }
 
+export interface PrototypeEnumResult {
+  formula: string;
+  prototype: string;
+  spaceGroup: string;
+  crystalSystem: string;
+  latticeParam: number;
+  cOverA: number;
+  siteMap: Record<string, string>;
+  compatibilityScore: number;
+}
+
+export function enumeratePrototypesForFormula(formula: string): PrototypeEnumResult[] {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  if (elements.length === 0) return [];
+
+  const results: PrototypeEnumResult[] = [];
+
+  for (const template of PROTOTYPE_TEMPLATES) {
+    if (!template.chemistryRules(elements)) continue;
+    const siteMap = sortElementsBySite(elements, counts, template);
+    if (!siteMap) continue;
+
+    const { a, c } = estimateLatticeConstant(elements, counts, template);
+    let compatScore = 0.5;
+
+    const useIonic = isIonicCompound(elements, template.name);
+    let minDist = Infinity;
+    const atoms: { x: number; y: number; z: number }[] = [];
+    const cos60 = 0.5;
+    const sin60 = Math.sqrt(3) / 2;
+    for (const site of template.sites) {
+      let x: number, y: number, z: number;
+      if (template.latticeType === "hexagonal") {
+        x = a * (site.x + site.y * cos60);
+        y = a * site.y * sin60;
+        z = c * site.z;
+      } else {
+        x = a * site.x;
+        y = a * site.y;
+        z = (template.latticeType === "tetragonal" ? c : a) * site.z;
+      }
+      atoms.push({ x, y, z });
+    }
+    for (let i = 0; i < atoms.length; i++) {
+      for (let j = i + 1; j < atoms.length; j++) {
+        const dx = atoms[i].x - atoms[j].x;
+        const dy = atoms[i].y - atoms[j].y;
+        const dz = atoms[i].z - atoms[j].z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > 0.01 && d < minDist) minDist = d;
+      }
+    }
+    if (minDist > 1.0 && minDist < 10.0) compatScore += 0.2;
+    else if (minDist <= 0.5) compatScore -= 0.3;
+
+    const knownPacking = PACKING_FACTORS[template.name];
+    if (knownPacking) compatScore += 0.1;
+
+    const totalAtoms = elements.reduce((s, e) => s + Math.round(counts[e] || 1), 0);
+    const vol = template.latticeType === "cubic" ? a * a * a
+      : template.latticeType === "hexagonal" ? a * a * c * Math.sqrt(3) / 2
+      : a * a * c;
+    const volPerAtom = vol / Math.max(1, totalAtoms);
+    if (volPerAtom >= 8 && volPerAtom <= 40) compatScore += 0.15;
+    else if (volPerAtom < 5 || volPerAtom > 60) compatScore -= 0.2;
+
+    compatScore = Math.max(0, Math.min(1, compatScore));
+
+    results.push({
+      formula,
+      prototype: template.name,
+      spaceGroup: template.spaceGroup,
+      crystalSystem: template.latticeType,
+      latticeParam: Number(a.toFixed(3)),
+      cOverA: template.cOverA,
+      siteMap,
+      compatibilityScore: Number(compatScore.toFixed(3)),
+    });
+  }
+
+  results.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+  return results;
+}
+
 export function estimatePhononStability(formula: string): PreFilterResult {
   const reasons: string[] = [];
   let score = 1.0;

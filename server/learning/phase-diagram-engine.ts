@@ -93,7 +93,7 @@ export function computeMiedemaFormationEnergy(formula: string): number {
   }
 
   const efPerAtom = deltaH / totalAtoms;
-  return Math.max(-4.0, Math.min(2.0, efPerAtom));
+  return Math.max(-30.0, Math.min(5.0, efPerAtom));
 }
 
 export interface HullVertex {

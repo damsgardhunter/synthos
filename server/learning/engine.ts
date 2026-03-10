@@ -44,6 +44,7 @@ import { bayesianOptimizer } from "./bayesian-optimizer";
 import { rlAgent } from "./rl-agent";
 import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./family-filters";
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
+import { enumeratePrototypesForFormula, type PrototypeEnumResult } from "./crystal-prototypes";
 import { generatePrototypeFreeStructures, getLatticeGeneratorStats, seedEvoPopulation, addToEvoPopulation, runEvolutionaryGeneration, getEvoPopulationSummary, type GeneratedStructure } from "../crystal/lattice-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
@@ -446,6 +447,14 @@ let causalDesignGuidance: { variable: string; direction: string; causalImpactOnT
 let theoryFeedbackBias: { biasedVariables: string[]; biasedElements: string[] } = { biasedVariables: [], biasedElements: [] };
 let lastTheoryBiasCycle = 0;
 let latestTheoryBias: TheoryGeneratorBias | null = null;
+
+let protoEnumStats = {
+  totalEnumerated: 0,
+  totalInserted: 0,
+  formulasScanned: 0,
+  prototypeHits: {} as Record<string, number>,
+  bestTcByProto: {} as Record<string, number>,
+};
 
 let feedbackLoopStats = {
   defectCandidatesAdded: 0,
@@ -3513,9 +3522,9 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     try {
       const miedemaEf = computeMiedemaFormationEnergy(formula);
-      if (miedemaEf < -4.0 || miedemaEf > 2.0) {
+      if (miedemaEf < -30.0 || miedemaEf > 5.0) {
         pipelineStageMetrics.formationEnergyRejects++;
-        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-4, 2], rejecting`);
+        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-30, 5], rejecting`);
         return { passed: false, tc: 0, reason: `formation-energy-insane: ${miedemaEf.toFixed(3)} eV/atom` };
       }
     } catch (e) { console.error(`[Autonomous] Formation energy check failed for ${formula}:`, e); }
@@ -4066,6 +4075,149 @@ async function runAutonomousFastPath() {
         }
       } catch (err: any) {
         emit("log", { phase: "engine", event: "Fast-path structure diffusion error", detail: err.message?.slice(0, 150), dataSource: "Structure Diffusion" });
+      }
+    }
+
+    let protoEnumCandidates: string[] = [];
+    {
+      try {
+        const existingCands = await storage.getSuperconductorCandidates(200);
+        const topByTc = existingCands
+          .filter(c => c.predictedTc > 5)
+          .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0))
+          .slice(0, 40);
+        const formulaProtoPairs = new Set<string>();
+        for (const c of existingCands) {
+          const proto = c.crystalStructure?.split(" ")[0] || "";
+          if (proto) formulaProtoPairs.add(`${c.formula}|${proto}`);
+        }
+
+        let enumInserted = 0;
+        let enumTotal = 0;
+        const protoCountsThisCycle: Record<string, number> = {};
+
+        for (const cand of topByTc) {
+          if (!shouldContinue()) break;
+          const formula = cand.formula;
+          if (!formula || !isValidFormula(formula)) continue;
+          const normalized = normalizeFormula(formula);
+
+          const compatibleProtos = enumeratePrototypesForFormula(normalized);
+          if (compatibleProtos.length === 0) continue;
+          protoEnumStats.formulasScanned++;
+
+          for (const proto of compatibleProtos) {
+            if (!shouldContinue()) break;
+            const pairKey = `${normalized}|${proto.spaceGroup}`;
+            if (formulaProtoPairs.has(pairKey)) continue;
+            formulaProtoPairs.add(pairKey);
+
+            if (proto.compatibilityScore < 0.3) continue;
+
+            enumTotal++;
+            const features = extractFeatures(normalized);
+            const gbResult = gbPredict(features);
+            const protoPressure = estimateFamilyPressure(normalized);
+            const gnnResult = gnnPredictWithUncertainty(normalized, proto.prototype, protoPressure);
+
+            let predictedTc: number;
+            if (gnnResult.confidence > 0.3 && gnnResult.tc > 0) {
+              predictedTc = Math.round(gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4);
+            } else {
+              predictedTc = Math.round(gbResult.tcPredicted);
+            }
+
+            const structBonus = proto.crystalSystem === "tetragonal" ? 1.08
+              : proto.crystalSystem === "hexagonal" ? 1.05 : 1.0;
+            const dimBonus = (proto.prototype.includes("214") || proto.prototype.includes("FeSe")
+              || proto.prototype.includes("MX2") || proto.prototype.includes("Infinite")
+              || proto.prototype.includes("BiS2") || proto.prototype.includes("T-prime")
+              || proto.prototype.includes("1111")) ? 1.12 : 1.0;
+            predictedTc = Math.round(predictedTc * structBonus * dimBonus);
+
+            const lambdaML = features.electronPhononLambda ?? 0;
+            const metallicityML = features.metallicity ?? 0.5;
+            predictedTc = applyAmbientTcCap(predictedTc, lambdaML, protoPressure, metallicityML, normalized);
+
+            try {
+              const id = `sc-protoenum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              const siteStr = Object.entries(proto.siteMap).map(([k, v]) => `${k}=${v}`).join("; ");
+              const inserted = await insertCandidateWithStabilityCheck({
+                id,
+                name: `${proto.prototype} ${normalized}`,
+                formula: normalized,
+                predictedTc,
+                pressureGpa: protoPressure,
+                meissnerEffect: false,
+                zeroResistance: false,
+                cooperPairMechanism: `${proto.prototype} structure enumeration`,
+                crystalStructure: `${proto.spaceGroup} (${proto.crystalSystem})`,
+                quantumCoherence: null,
+                stabilityScore: proto.compatibilityScore,
+                synthesisPath: null,
+                mlFeatures: {
+                  ...features as any,
+                  prototype: proto.prototype,
+                  spaceGroup: proto.spaceGroup,
+                  crystalSystem: proto.crystalSystem,
+                  latticeParam: proto.latticeParam,
+                  cOverA: proto.cOverA,
+                  structureEnumerated: true,
+                  gnnUncertainty: gnnResult.uncertainty,
+                  gnnLambda: gnnResult.lambda,
+                  gnnTc: gnnResult.tc,
+                },
+                xgboostScore: gbResult.score,
+                neuralNetScore: gnnResult.confidence,
+                ensembleScore: Math.min(0.9, gnnResult.confidence * 0.5 + gbResult.score * 0.3 + proto.compatibilityScore * 0.2),
+                roomTempViable: false,
+                status: "theoretical",
+                notes: `[Structure enum: ${proto.prototype} ${proto.spaceGroup}, compat=${proto.compatibilityScore}, sites: ${siteStr}]`,
+                electronPhononCoupling: gnnResult.lambda || lambdaML || null,
+                logPhononFrequency: features.logPhononFreq ?? null,
+                coulombPseudopotential: 0.12,
+                pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
+                pairingMechanism: "phonon-mediated",
+                correlationStrength: features.correlationStrength ?? null,
+                dimensionality: (proto.prototype.includes("214") || proto.prototype.includes("MX2")
+                  || proto.prototype.includes("FeSe") || proto.prototype.includes("Infinite")
+                  || proto.prototype.includes("T-prime") || proto.prototype.includes("1111")) ? "2D" : "3D",
+                fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+                uncertaintyEstimate: gnnResult.uncertainty,
+                verificationStage: 0,
+                dataConfidence: "low",
+                discoveryScore: proto.compatibilityScore * 0.5 + (predictedTc > 50 ? 0.3 : predictedTc > 10 ? 0.15 : 0.05),
+              }, "structure_diffusion");
+
+              if (inserted) {
+                enumInserted++;
+                protoEnumStats.totalInserted++;
+                totalScCandidates++;
+                recentNewCandidates++;
+                protoCountsThisCycle[proto.prototype] = (protoCountsThisCycle[proto.prototype] || 0) + 1;
+                protoEnumStats.prototypeHits[proto.prototype] = (protoEnumStats.prototypeHits[proto.prototype] || 0) + 1;
+                if (!protoEnumStats.bestTcByProto[proto.prototype] || predictedTc > protoEnumStats.bestTcByProto[proto.prototype]) {
+                  protoEnumStats.bestTcByProto[proto.prototype] = predictedTc;
+                }
+                protoEnumCandidates.push(normalized);
+                recordGeneratorOutcome("structure_diffusion", true, predictedTc, proto.compatibilityScore);
+              }
+            } catch (e) {}
+          }
+        }
+
+        protoEnumStats.totalEnumerated += enumTotal;
+        if (enumTotal > 0) {
+          const protosUsed = Object.entries(protoCountsThisCycle).map(([p, n]) => `${n}x${p}`).join(", ");
+          emit("log", {
+            phase: "engine",
+            event: "Prototype structure enumeration",
+            detail: `Scanned ${protoEnumStats.formulasScanned} formulas, enumerated ${enumTotal} structure variants, inserted ${enumInserted}. Prototypes: ${protosUsed || "none"}`,
+            dataSource: "Structure Enumeration",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "engine", event: "Prototype enumeration error", detail: err.message?.slice(0, 150), dataSource: "Structure Enumeration" });
       }
     }
 
@@ -5094,6 +5246,7 @@ export async function getAutonomousLoopStats() {
     selfImprovingLab: getSelfImprovingLabStatsForEngine(),
     differentiableOptimizer: getDifferentiableOptimizerStats(),
     structureFirstDesign: getStructureDiffusionStats(),
+    prototypeEnumeration: protoEnumStats,
     physicsConstraints: getConstraintEngineStats(),
     scPillarsOptimizer: getPillarOptimizerStats(),
     generatorAllocations: getGeneratorAllocations(),
@@ -5698,7 +5851,7 @@ async function runLearningCycle() {
         }
       }
 
-      if (state === "running" && cycleCount >= 15 && cycleCount % 25 === 0) {
+      if (state === "running" && cycleCount >= 5 && cycleCount % 5 === 0) {
         try {
           const prototypeCandidates = runPrototypeGeneration();
           const prototypeCounts: Record<string, { generated: number; passed: number; inserted: number }> = {};

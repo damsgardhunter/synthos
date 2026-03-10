@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
+import { enumeratePrototypesForFormula } from "./learning/crystal-prototypes";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
 import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons, detectAnharmonicVibrations, runMDSampling, computeDebyeTemp, computeDynamicLatticeScore } from "./learning/doping-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
@@ -3738,6 +3739,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(entry);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch crystal dataset entry" });
+    }
+  });
+
+  app.get("/api/prototype-enum/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const results = enumeratePrototypesForFormula(formula);
+      res.json({ formula, prototypes: results, count: results.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to enumerate prototypes" });
     }
   });
 

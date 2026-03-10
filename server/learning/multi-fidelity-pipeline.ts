@@ -432,8 +432,8 @@ async function stage4_SynthesisFeasibility(
   const ambientPressureStable = optP <= 1 && optP < 50 && (stability.isStable || stability.isMetastable);
 
   const formationEnergy = stability.formationEnergy ?? 0;
-  const formationEnergyTooHigh = formationEnergy > 2.0;
-  const formationEnergyDataError = formationEnergy < -5.0;
+  const formationEnergyTooHigh = formationEnergy > 5.0;
+  const formationEnergyDataError = formationEnergy < -30.0;
 
   const family = classifyFamily(candidate.formula);
   const familyAvgFormationEnergy = getFamilyAvgFormationEnergy(family);

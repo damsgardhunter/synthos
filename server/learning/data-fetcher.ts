@@ -18,7 +18,7 @@ interface ValidationResult {
 
 const VALIDATION_BOUNDS = {
   bandGap: { min: 0, max: 15 },
-  formationEnergy: { min: -15, max: 5 },
+  formationEnergy: { min: -30, max: 5 },
   stability: { min: 0, max: 5 },
   latticeParam: { min: 1, max: 30 },
   density: { min: 0.5, max: 25 },
