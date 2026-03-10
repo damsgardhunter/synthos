@@ -258,7 +258,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate> {
-    const [s] = await db.insert(superconductorCandidates).values(sc)
+    const sanitized: Record<string, any> = {};
+    for (const [key, val] of Object.entries(sc)) {
+      if (typeof val === "number" && !Number.isFinite(val)) {
+        sanitized[key] = key === "predictedTc" || key === "ensembleScore" ? 0 : null;
+      } else {
+        sanitized[key] = val;
+      }
+    }
+    const [s] = await db.insert(superconductorCandidates).values(sanitized as InsertSuperconductorCandidate)
       .onConflictDoUpdate({
         target: superconductorCandidates.formula,
         set: {
@@ -275,7 +283,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void> {
-    await db.update(superconductorCandidates).set(updates).where(eq(superconductorCandidates.id, id));
+    const sanitized: Record<string, any> = {};
+    for (const [key, val] of Object.entries(updates)) {
+      if (typeof val === "number" && !Number.isFinite(val)) {
+        sanitized[key] = null;
+      } else {
+        sanitized[key] = val;
+      }
+    }
+    await db.update(superconductorCandidates).set(sanitized).where(eq(superconductorCandidates.id, id));
   }
 
   async getSuperconductorCount(): Promise<number> {

@@ -168,6 +168,20 @@ const VALID_ELEMENTS_SET = new Set([
   "Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am",
 ]);
 
+function sanitizeNumericFields(obj: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    if (typeof val === "number") {
+      result[key] = Number.isFinite(val) ? val : 0;
+    } else if (val != null && typeof val === "object" && !Array.isArray(val)) {
+      result[key] = sanitizeNumericFields(val);
+    } else {
+      result[key] = val;
+    }
+  }
+  return result;
+}
+
 function computeEdgeOfInstabilityScore(result: any): number {
   const vanHove = result.electronicStructure?.vanHoveProximity ?? 0;
   const phononSoftening = result.phononSpectrum?.phononSofteningIndex ?? 0;
@@ -1552,7 +1566,7 @@ async function runDFTEnrichment() {
           }
         }
 
-        await storage.updateSuperconductorCandidate(candidate.id, updates);
+        await storage.updateSuperconductorCandidate(candidate.id, sanitizeNumericFields(updates));
         enriched++;
         totalDFTEnriched++;
       } catch (err: any) {

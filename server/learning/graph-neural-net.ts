@@ -1246,14 +1246,16 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const lambdaVarRaw = softplus(logVarOut[4] ?? 0);
   const bgVar = softplus(logVarOut[5] ?? 0);
 
-  const formationEnergy = out[0] ?? 0;
-  const phononStabilityRaw = sigmoid(out[1] ?? 0);
-  const predictedTcRaw = Math.max(0, (out[2] ?? 0) * 300);
-  const confidenceRaw = sigmoid(out[3] ?? 0);
-  const lambdaRaw = Math.max(0, out[4] ?? 0);
-  const bandgapRaw = sigmoid(out[5] ?? 0) * 5.0;
-  const dosProxyRaw = softplus(out[6] ?? 0);
-  const stabilityProbRaw = sigmoid(out[7] ?? 0);
+  const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
+  const formationEnergy = sf(out[0] ?? 0);
+  const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
+  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
+  const confidenceRaw = sigmoid(sf(out[3] ?? 0));
+  const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
+  const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
+  const dosProxyRaw = softplus(sf(out[6] ?? 0));
+  const stabilityProbRaw = sigmoid(sf(out[7] ?? 0));
+  const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   return {
     formationEnergy: Math.round(formationEnergy * 1000) / 1000,
@@ -1264,11 +1266,11 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     bandgap: Math.round(bandgapRaw * 1000) / 1000,
     dosProxy: Math.round(dosProxyRaw * 1000) / 1000,
     stabilityProbability: Math.round(stabilityProbRaw * 1000) / 1000,
-    latentEmbedding,
-    predictedTcVar: Math.round(Math.max(0.01, tcVar) * 1000) / 1000,
-    lambdaVar: Math.round(Math.max(0.001, lambdaVarRaw) * 1000) / 1000,
-    formationEnergyVar: Math.round(Math.max(0.001, feVar) * 1000) / 1000,
-    bandgapVar: Math.round(Math.max(0.001, bgVar) * 1000) / 1000,
+    latentEmbedding: safeLatent,
+    predictedTcVar: Math.round(Math.max(0.01, sf(tcVar, 1)) * 1000) / 1000,
+    lambdaVar: Math.round(Math.max(0.001, sf(lambdaVarRaw, 0.01)) * 1000) / 1000,
+    formationEnergyVar: Math.round(Math.max(0.001, sf(feVar, 0.01)) * 1000) / 1000,
+    bandgapVar: Math.round(Math.max(0.001, sf(bgVar, 0.01)) * 1000) / 1000,
   };
 }
 
@@ -1437,17 +1439,18 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         totalLoss += loss;
         totalSamples++;
 
-        const tcGrad = 2 * tcError * lr;
-        const feGrad = 2 * feError * 0.1 * lr;
-        const phononGrad = 2 * phononError * 0.05 * lr;
-        const confGrad = 2 * confError * 0.05 * lr;
-        const lambdaGrad = 2 * lambdaError * 0.1 * lr;
-        const bgGrad = 2 * bgError * 0.05 * lr;
-        const dosGrad = 2 * dosError * 0.05 * lr;
-        const stabGrad = 2 * stabError * 0.05 * lr;
+        const clipGrad = (g: number) => { const v = Number.isFinite(g) ? g : 0; return Math.max(-1, Math.min(1, v)); };
+        const tcGrad = clipGrad(2 * tcError * lr);
+        const feGrad = clipGrad(2 * feError * 0.1 * lr);
+        const phononGrad = clipGrad(2 * phononError * 0.05 * lr);
+        const confGrad = clipGrad(2 * confError * 0.05 * lr);
+        const lambdaGrad = clipGrad(2 * lambdaError * 0.1 * lr);
+        const bgGrad = clipGrad(2 * bgError * 0.05 * lr);
+        const dosGrad = clipGrad(2 * dosError * 0.05 * lr);
+        const stabGrad = clipGrad(2 * stabError * 0.05 * lr);
 
-        const tcVarGrad = 0.1 * lr * (-(tcError * tcError * 300 * 300) / (tcSigma2 * tcSigma2) + 1.0 / tcSigma2);
-        const lambdaVarGrad = 0.05 * lr * (-(lambdaError * lambdaError) / (lambdaSigma2 * lambdaSigma2) + 1.0 / lambdaSigma2);
+        const tcVarGrad = clipGrad(0.1 * lr * (-(tcError * tcError * 300 * 300) / (tcSigma2 * tcSigma2) + 1.0 / tcSigma2));
+        const lambdaVarGrad = clipGrad(0.05 * lr * (-(lambdaError * lambdaError) / (lambdaSigma2 * lambdaSigma2) + 1.0 / lambdaSigma2));
 
         for (let i = 0; i < weights.W_mlp2.length; i++) {
           let grad = 0;
@@ -1506,6 +1509,20 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     }
 
     if (totalSamples > 0 && totalLoss / totalSamples < 0.01) break;
+  }
+
+  const scrubMatrix = (m: number[][]) => { for (let i = 0; i < m.length; i++) for (let j = 0; j < m[i].length; j++) if (!Number.isFinite(m[i][j])) m[i][j] = 0; };
+  const scrubVector = (v: number[]) => { for (let i = 0; i < v.length; i++) if (!Number.isFinite(v[i])) v[i] = 0; };
+  for (const wMat of [
+    weights.W_message, weights.W_update, weights.W_message2, weights.W_update2,
+    weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
+    weights.W_attn_query, weights.W_attn_key, weights.W_attn_query2, weights.W_attn_key2,
+    weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
+    weights.W_conv_gate, weights.W_conv_value, weights.W_3body, weights.W_3body_update,
+    weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
+  ]) { scrubMatrix(wMat); }
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.W_pressure]) {
+    scrubVector(bVec);
   }
 
   weights.trainedAt = Date.now();
@@ -1915,23 +1932,24 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
     },
   };
 
+  const s = (v: number, fb = 0) => Number.isFinite(v) ? v : fb;
   return {
-    tc: Math.round(meanTc * 10) / 10,
-    formationEnergy: Math.round(meanFE * 1000) / 1000,
-    lambda: Math.round(meanLambda * 1000) / 1000,
-    bandgap: Math.round(meanBG * 1000) / 1000,
-    dosProxy: Math.round(meanDOS * 1000) / 1000,
-    stabilityProbability: Math.round(meanStab * 1000) / 1000,
-    uncertainty: Math.round(combinedUncertainty * 1000) / 1000,
+    tc: Math.round(s(meanTc) * 10) / 10,
+    formationEnergy: Math.round(s(meanFE) * 1000) / 1000,
+    lambda: Math.round(s(meanLambda) * 1000) / 1000,
+    bandgap: Math.round(s(meanBG) * 1000) / 1000,
+    dosProxy: Math.round(s(meanDOS) * 1000) / 1000,
+    stabilityProbability: Math.round(s(meanStab) * 1000) / 1000,
+    uncertainty: Math.round(s(combinedUncertainty, 0.5) * 1000) / 1000,
     uncertaintyBreakdown,
     phononStability: phononStable,
-    confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceAdjusted)) * 100) / 100,
-    latentDistance: Math.round(latentDist * 1000) / 1000,
-    tcCI95: [Math.round(tcCI95Lower * 10) / 10, Math.round(tcCI95Upper * 10) / 10],
-    lambdaCI95: [Math.round(lambdaCI95Lower * 1000) / 1000, Math.round(lambdaCI95Upper * 1000) / 1000],
-    epistemicUncertainty: Math.round(Math.sqrt(epistemicTcVar) * 100) / 100,
-    aleatoricUncertainty: Math.round(Math.sqrt(aleatoricTcVar) * 100) / 100,
-    totalStd: Math.round(totalTcStd * 100) / 100,
+    confidence: Math.round(Math.max(0.05, Math.min(0.95, s(confidenceAdjusted, 0.5))) * 100) / 100,
+    latentDistance: Math.round(s(latentDist) * 1000) / 1000,
+    tcCI95: [Math.round(s(tcCI95Lower) * 10) / 10, Math.round(s(tcCI95Upper) * 10) / 10],
+    lambdaCI95: [Math.round(s(lambdaCI95Lower) * 1000) / 1000, Math.round(s(lambdaCI95Upper) * 1000) / 1000],
+    epistemicUncertainty: Math.round(s(Math.sqrt(epistemicTcVar)) * 100) / 100,
+    aleatoricUncertainty: Math.round(s(Math.sqrt(aleatoricTcVar)) * 100) / 100,
+    totalStd: Math.round(s(totalTcStd) * 100) / 100,
   };
 }
 

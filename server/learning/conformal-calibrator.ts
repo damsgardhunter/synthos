@@ -207,7 +207,7 @@ function fitTemperatureScale(entries: CalibrationEntry[]): number {
   for (let t = 0.1; t <= 10.0; t += 0.1) {
     let nll = 0;
     for (const e of entries) {
-      const sigma = e.predictedSigma * t;
+      const sigma = Math.max(1e-8, e.predictedSigma * t);
       const z = (e.predictedTc - e.actualTc) / sigma;
       nll += 0.5 * z * z + Math.log(sigma);
     }
