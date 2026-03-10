@@ -115,6 +115,8 @@ import { crossEngineHub } from "./cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedbackForGA, getGAEvolutionStats, getStructuralMotifStats, type MultiEngineInsights } from "./synthesis-discovery";
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
+import { recordStructureOutcome } from "../crystal/structure-reward-system";
+import { runModelImprovementCycle, getModelImprovementStats } from "./model-improvement-loop";
 
 export type EventEmitter = (type: string, data: any) => void;
 
@@ -1008,6 +1010,15 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
     if (candidateTc > 0) {
       incorporateSuccessData(candidateData.formula, candidateTc).catch(() => {});
     }
+
+    try {
+      const lambda = candidateData.electronPhononCoupling ?? 0;
+      const mlFeats = candidateData.mlFeatures as Record<string, any> | undefined;
+      const prototype = mlFeats?.prototype ?? mlFeats?.predictedPrototype ?? null;
+      const system = mlFeats?.crystalSystem ?? candidateData.crystalStructure ?? null;
+      const sg = mlFeats?.spacegroupSymbol ?? null;
+      recordStructureOutcome(candidateData.formula, prototype, system, sg, lambda, candidateTc, true);
+    } catch {}
 
     return true;
   } catch (err: any) {
@@ -2393,6 +2404,23 @@ async function runPhase11_StructurePrediction() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-11", event: "Novel prototype generation error", detail: err.message?.slice(0, 150), dataSource: "Novel Prototype Generator" });
+      }
+    }
+
+    if (shouldContinue() && cycleCount % 10 === 0) {
+      try {
+        const { runStructureLearningCycle } = await import("../crystal/structure-learning-loop");
+        const loopResult = await runStructureLearningCycle(8);
+        if (loopResult.candidatesPassed > 0 || loopResult.modelsRetrained) {
+          emit("log", {
+            phase: "phase-11",
+            event: "Structure learning loop cycle",
+            detail: `Cycle #${loopResult.cycleId}: generated=${loopResult.candidatesGenerated}, screened=${loopResult.candidatesScreened}, passed=${loopResult.candidatesPassed}, failed=${loopResult.candidatesFailed}${loopResult.modelsRetrained ? `, retrained=[${loopResult.retrainedModels.join(",")}]` : ""}${loopResult.bestCandidate ? `, best=${loopResult.bestCandidate.formula} Tc=${loopResult.bestCandidate.predictedTc.toFixed(1)}K` : ""}`,
+            dataSource: "Structure Learning Loop",
+          });
+        }
+      } catch (err: any) {
+        emit("log", { phase: "phase-11", event: "Structure learning loop error", detail: err.message?.slice(0, 150), dataSource: "Structure Learning Loop" });
       }
     }
 
@@ -5578,6 +5606,10 @@ async function runLearningCycle() {
           }
         }
       } catch (e) { console.error("[Engine] Strategy analysis failed:", e); }
+
+      try {
+        await runModelImprovementCycle(emit, cycleCount);
+      } catch (e) { console.error("[Engine] Model improvement cycle failed:", e); }
 
       try {
         await captureConvergenceSnapshot(emit, cycleCount, currentStrategyHint || undefined);

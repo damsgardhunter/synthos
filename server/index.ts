@@ -62,11 +62,15 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  const t0 = Date.now();
   const { seedDatabase } = await import("./seed");
   await seedDatabase();
+  console.log(`[startup] seedDatabase: ${Date.now() - t0}ms`);
   const { storage } = await import("./storage");
 
+  const t1 = Date.now();
   await registerRoutes(httpServer, app);
+  console.log(`[startup] registerRoutes: ${Date.now() - t1}ms`);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
@@ -84,12 +88,14 @@ app.use((req, res, next) => {
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
+  const t2 = Date.now();
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
   }
+  console.log(`[startup] vite/static: ${Date.now() - t2}ms`);
 
   // ALWAYS serve the app on the port specified in the environment variable PORT
   // Other ports are firewalled. Default to 5000 if not specified.

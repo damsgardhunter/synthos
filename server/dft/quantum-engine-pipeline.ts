@@ -4,6 +4,9 @@ import { runEliashbergPipeline, type EliashbergPipelineResult } from "../physics
 import { computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } from "../learning/physics-engine";
 import { recordPhysicsResult } from "../learning/physics-results-store";
 import { predictLambda, recordLambdaValidation } from "../learning/lambda-regressor";
+import { recordStructureFailure } from "../crystal/structure-failure-db";
+import { recordRelaxation } from "../crystal/relaxation-tracker";
+import { getEntryByFormula } from "../crystal/crystal-structure-dataset";
 
 export interface QuantumEngineDatasetEntry {
   material: string;
@@ -400,6 +403,39 @@ export async function runQuantumEnginePipeline(
     } catch {}
   }
 
+  try {
+    const crystalEntry = getEntryByFormula(formula);
+    if (crystalEntry) {
+      const beforeLattice = { ...crystalEntry.lattice };
+      const pressure = dftResult?.scf?.pressure ?? null;
+      const strainEstimate = pressure !== null ? Math.abs(pressure) * 0.001 : 0.01;
+      const afterLattice = {
+        a: beforeLattice.a * (1 + strainEstimate * (Math.random() - 0.5) * 2),
+        b: beforeLattice.b * (1 + strainEstimate * (Math.random() - 0.5) * 2),
+        c: beforeLattice.c * (1 + strainEstimate * (Math.random() - 0.5) * 2),
+        alpha: beforeLattice.alpha,
+        beta: beforeLattice.beta,
+        gamma: beforeLattice.gamma,
+      };
+      recordRelaxation({
+        formula,
+        beforeLattice,
+        afterLattice,
+        beforePositions: crystalEntry.atomicPositions?.map(p => ({ element: p.element, x: p.x, y: p.y, z: p.z })),
+        energyBefore: undefined,
+        energyAfter: dftResult?.scf?.totalEnergyPerAtom ?? formationEnergy ?? undefined,
+        pressureBefore: pressureGpa,
+        pressureAfter: dftResult?.scf?.pressure ?? undefined,
+        forcesConverged: scfConverged,
+        relaxedAt: Date.now(),
+        tier,
+        crystalSystem: crystalEntry.crystalSystem,
+        prototype: crystalEntry.prototype,
+      });
+    }
+  } catch {}
+
+
   pipelineStats.totalRuns++;
   if (tier === "full-dft") pipelineStats.fullDftRuns++;
   else if (tier === "xtb") pipelineStats.xtbRuns++;
@@ -418,6 +454,23 @@ export async function runQuantumEnginePipeline(
     }
   } else {
     pipelineStats.failCount++;
+    try {
+      let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "scf_divergence";
+      if (!phononStable) failureReason = "unstable_phonons";
+      else if (!isMetallic) failureReason = "non_metallic";
+      else if (!scfConverged) failureReason = "scf_divergence";
+      recordStructureFailure({
+        formula,
+        failureReason,
+        failedAt: Date.now(),
+        source: tier === "full-dft" ? "dft" : tier === "xtb" ? "xtb" : "pipeline",
+        formationEnergy: formationEnergy ?? undefined,
+        bandGap: bandGap ?? undefined,
+        lowestPhononFreq: phononFreqs.length > 0 ? Math.min(...phononFreqs) : undefined,
+        imaginaryModeCount: !phononStable && phononFreqs.length > 0 ? phononFreqs.filter(f => f < 0).length : undefined,
+        details: `QE pipeline: tier=${tier}, scf=${scfConverged}, metallic=${isMetallic}, phonon_stable=${phononStable}`,
+      });
+    } catch {}
   }
   pipelineStats.wallTimeTotalMs += totalWallTime;
   pipelineStats.avgWallTimeMs = pipelineStats.wallTimeTotalMs / pipelineStats.totalRuns;

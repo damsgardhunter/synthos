@@ -14,6 +14,8 @@ import { detectPhaseTransitions } from "./pressure-phase-detector";
 import { estimateFamilyPressure } from "./candidate-generator";
 import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResult } from "../dft/quantum-engine-pipeline";
 import { getElementData } from "./elemental-data";
+import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
+import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -225,7 +227,15 @@ function computeNoveltyScore(candidate: SuperconductorCandidate): number {
   const compositionDist = computeCompositionDistance(candidate.formula);
   const elementRarity = computeElementRarity(candidate.formula);
   const structuralUniqueness = computeStructuralUniqueness(candidate);
-  return 0.4 * compositionDist + 0.3 * elementRarity + 0.3 * structuralUniqueness;
+  const baseNovelty = 0.4 * compositionDist + 0.3 * elementRarity + 0.3 * structuralUniqueness;
+
+  let fingerprintNovelty = 0.5;
+  try {
+    const noveltyResult = scoreFormulaNovelty(candidate.formula);
+    fingerprintNovelty = noveltyResult.noveltyScore;
+  } catch {}
+
+  return 0.6 * baseNovelty + 0.4 * fingerprintNovelty;
 }
 
 function computeStabilityProbability(candidate: SuperconductorCandidate, candidatePressure: number): number {
@@ -290,7 +300,13 @@ export function selectForDFT(
       xgbUncertainty = xgbResult.normalizedUncertainty;
     } catch (e: any) { console.error("[ActiveLearning] XGB uncertainty error:", e?.message?.slice(0, 200)); }
 
-    const combinedUncertainty = 0.5 * gnnUncertainty + 0.5 * xgbUncertainty;
+    let embeddingUncertainty = 0.5;
+    try {
+      const emb = computeStructureEmbedding(candidate.formula);
+      embeddingUncertainty = estimateStructureUncertainty(emb);
+    } catch {}
+
+    const combinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
 
     const stabilityProbability = computeStabilityProbability(candidate, candidatePressure);
 

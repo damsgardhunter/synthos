@@ -177,6 +177,82 @@ import {
   getStructurePredictorStats as getStructureMLStats,
   initStructurePredictorML,
 } from "./crystal/structure-predictor-ml";
+import {
+  initCrystalVAE, getCrystalVAEStats, generateNovelCrystal,
+  interpolateCrystals, encodeFormula,
+} from "./crystal/crystal-vae";
+import {
+  initDiffusionModel,
+  sampleStructures as diffusionSampleStructures,
+  getDiffusionModelStats,
+} from "./crystal/crystal-diffusion-model";
+import {
+  generateCandidates as generativeCrystalGenerate,
+  getGenerativeEngineStats,
+  type GenerationStrategy,
+} from "./crystal/generative-crystal-engine";
+import {
+  generateHybridCandidates,
+  getHybridGeneratorStats,
+} from "./crystal/hybrid-structure-generator";
+import {
+  getFailureDBStats, getFailurePatterns, getFailureFeatureVector,
+  shouldAvoidStructure, recordStructureFailure,
+  type FailureReason, type FailureSource,
+} from "./crystal/structure-failure-db";
+import {
+  runStructureLearningCycle,
+  getStructureLearningStats,
+} from "./crystal/structure-learning-loop";
+import {
+  predictStabilityScreen,
+  getStabilityPredictorStats,
+  trainStabilityPredictor,
+} from "./crystal/stability-predictor";
+import {
+  scoreFormulaNovelty,
+  getNoveltyStats,
+  getNoveltyRanking,
+  initFingerprintDB,
+} from "./crystal/structure-novelty-detector";
+import {
+  getRelaxationStats, getRelaxationPatterns,
+  getRelaxationEntry, predictRelaxationMagnitude,
+} from "./crystal/relaxation-tracker";
+import {
+  computeTBProperties, computeBandStructure, computeDOS,
+  computeFermiProperties, detectFlatBands, computeElectronPhononProxies,
+  getTBEngineStats,
+} from "./physics/tight-binding-engine";
+import {
+  computeStructureEmbedding, clusterStructures as clusterStructureEmbeddings,
+  getEmbeddingStats, getClusters as getEmbeddingClusters,
+  getClusterAssignment, computeClusterNovelty, estimateStructureUncertainty,
+  initStructureEmbedding,
+} from "./crystal/structure-embedding";
+import {
+  predictStructureAtPressure, getPressurePhaseMap,
+  learnPressureTransition, getPressureStructureStats,
+  initPressureStructureModel,
+} from "./crystal/pressure-structure-model";
+import {
+  getRewardSystemStats, getBestMotifs, getStructureReward,
+} from "./crystal/structure-reward-system";
+import {
+  predictTBProperties as predictTBSurrogate, getTBSurrogateStats, retrainTBSurrogate,
+} from "./physics/tb-ml-surrogate";
+import {
+  getComprehensiveModelDiagnostics, getModelHealthSummary, getPerFamilyBias,
+  getModelDiagnosticsForLLM, recordPredictionOutcome,
+} from "./learning/model-diagnostics";
+import {
+  proposeModelExperiments, executeExperiment, getExperimentHistory,
+  getActiveExperiments, getExperimentStats,
+} from "./learning/model-experiment-controller";
+import {
+  getModelImprovementStats, getModelImprovementTrends,
+  runModelImprovementCycle,
+} from "./learning/model-improvement-loop";
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -3141,6 +3217,603 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(stats);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch structure ML stats" });
+    }
+  });
+
+  app.get("/api/crystal-diffusion-model/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getDiffusionModelStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch diffusion model stats" });
+    }
+  });
+
+  app.get("/api/crystal-diffusion-model/sample", generalLimiter, async (req, res) => {
+    try {
+      const count = Math.min(Math.max(1, Number(req.query.count) || 5), 50);
+      const system = req.query.system ? String(req.query.system) : undefined;
+      const elementsStr = req.query.elements ? String(req.query.elements) : undefined;
+      const elements = elementsStr ? elementsStr.split(",").map(e => e.trim()).filter(Boolean) : undefined;
+      const conditions = (system || elements) ? { crystalSystem: system, elements } : undefined;
+      const samples = diffusionSampleStructures(count, conditions);
+      res.json({ samples, count: samples.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to sample diffusion structures" });
+    }
+  });
+
+  setTimeout(() => {
+    try {
+      initDiffusionModel();
+    } catch (e) {
+      console.error("[CrystalDiffusion] Init failed:", e);
+    }
+    try {
+      initCrystalVAE();
+    } catch (e) {
+      console.error("[CrystalVAE] Init failed:", e);
+    }
+  }, 5000);
+
+  app.get("/api/crystal-vae/stats", generalLimiter, async (_req, res) => {
+    try {
+      res.json(getCrystalVAEStats());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch crystal VAE stats" });
+    }
+  });
+
+  app.get("/api/crystal-vae/generate", generalLimiter, async (req, res) => {
+    try {
+      const count = Math.min(Math.max(1, Number(req.query.count) || 1), 50);
+      const targetSystem = req.query.targetSystem as string | undefined;
+      const results = [];
+      for (let i = 0; i < count; i++) {
+        const crystal = generateNovelCrystal(targetSystem);
+        if (crystal) results.push(crystal);
+      }
+      res.json({ generated: results, count: results.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to generate crystals" });
+    }
+  });
+
+  app.get("/api/crystal-vae/interpolate", generalLimiter, async (req, res) => {
+    try {
+      const formula1 = req.query.formula1 as string;
+      const formula2 = req.query.formula2 as string;
+      const alpha = Number(req.query.alpha) || 0.5;
+      if (!formula1 || !formula2) {
+        return res.status(400).json({ error: "formula1 and formula2 are required" });
+      }
+      const result = interpolateCrystals(formula1, formula2, alpha);
+      if (!result) {
+        return res.status(404).json({ error: "Could not interpolate - formulas may not be in training set" });
+      }
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to interpolate crystals" });
+    }
+  });
+
+  app.get("/api/crystal-vae/encode/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = encodeFormula(formula);
+      if (!result) {
+        return res.status(404).json({ error: "Formula not found in training set or VAE not trained" });
+      }
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to encode formula" });
+    }
+  });
+
+  app.get("/api/generative-crystals/generate", generalLimiter, async (req, res) => {
+    try {
+      const count = Math.min(Math.max(1, Number(req.query.count) || 10), 100);
+      const strategy = (req.query.strategy as GenerationStrategy) || "hybrid";
+      const targetSystem = req.query.targetSystem ? String(req.query.targetSystem) : undefined;
+      const elementsStr = req.query.elements ? String(req.query.elements) : undefined;
+      const elements = elementsStr ? elementsStr.split(",").map(e => e.trim()).filter(Boolean) : undefined;
+      const candidates = generativeCrystalGenerate(count, strategy, { targetSystem, elements });
+      res.json({ candidates, count: candidates.length, strategy });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to generate crystal candidates" });
+    }
+  });
+
+  app.get("/api/generative-crystals/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getGenerativeEngineStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch generative engine stats" });
+    }
+  });
+
+  app.get("/api/structure-failures/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getFailureDBStats();
+      const patterns = getFailurePatterns();
+      res.json({ ...stats, patterns });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch structure failure stats" });
+    }
+  });
+
+  app.get("/api/structure-failures/check/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const system = req.query.system ? String(req.query.system) : undefined;
+      const avoid = shouldAvoidStructure(formula, undefined, system);
+      const featureVector = getFailureFeatureVector(formula);
+      res.json({ formula, shouldAvoid: avoid, featureVector });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to check structure" });
+    }
+  });
+
+  app.post("/api/structure-failures/record", writeLimiter, async (req, res) => {
+    try {
+      const { formula, failureReason, source, lattice, crystalSystem, spacegroup,
+              formationEnergy, imaginaryModeCount, lowestPhononFreq, bandGap,
+              stage, details } = req.body;
+      if (!formula || !failureReason || !source) {
+        return res.status(400).json({ error: "Missing required fields: formula, failureReason, source" });
+      }
+      const validReasons: FailureReason[] = [
+        "unstable_phonons", "structure_collapse", "high_formation_energy",
+        "non_metallic", "scf_divergence", "geometry_rejected",
+      ];
+      const validSources: FailureSource[] = ["dft", "xtb", "pipeline", "phonon_surrogate"];
+      if (!validReasons.includes(failureReason)) {
+        return res.status(400).json({ error: `Invalid failureReason. Valid: ${validReasons.join(", ")}` });
+      }
+      if (!validSources.includes(source)) {
+        return res.status(400).json({ error: `Invalid source. Valid: ${validSources.join(", ")}` });
+      }
+      recordStructureFailure({
+        formula,
+        failureReason,
+        source,
+        failedAt: Date.now(),
+        lattice,
+        crystalSystem,
+        spacegroup,
+        formationEnergy,
+        imaginaryModeCount,
+        lowestPhononFreq,
+        bandGap,
+        stage,
+        details,
+      });
+      res.json({ success: true });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to record structure failure" });
+    }
+  });
+
+  app.get("/api/hybrid-generator/generate", generalLimiter, async (req, res) => {
+    try {
+      const count = Math.min(Math.max(1, Number(req.query.count) || 10), 100);
+      const mutationRate = req.query.mutationRate ? Number(req.query.mutationRate) : undefined;
+      const mlWeight = req.query.mlWeight ? Number(req.query.mlWeight) : undefined;
+      const targetPressure = req.query.targetPressure ? Number(req.query.targetPressure) : undefined;
+      const targetSystem = req.query.targetSystem ? String(req.query.targetSystem) : undefined;
+      const candidates = await generateHybridCandidates(count, {
+        mutationRate,
+        mlWeight,
+        targetPressure,
+        targetSystem,
+      });
+      res.json({ candidates, count: candidates.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to generate hybrid candidates" });
+    }
+  });
+
+  app.get("/api/hybrid-generator/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getHybridGeneratorStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch hybrid generator stats" });
+    }
+  });
+
+  app.get("/api/structure-learning/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getStructureLearningStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch structure learning stats" });
+    }
+  });
+
+  app.post("/api/structure-learning/trigger", writeLimiter, async (req, res) => {
+    try {
+      const batchSize = Math.min(Math.max(1, Number(req.body.batchSize) || 10), 50);
+      const targetPressure = req.body.targetPressure ? Number(req.body.targetPressure) : undefined;
+      const targetSystem = req.body.targetSystem ? String(req.body.targetSystem) : undefined;
+      const result = await runStructureLearningCycle(batchSize, targetPressure, targetSystem);
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to trigger structure learning cycle" });
+    }
+  });
+
+  setTimeout(() => initFingerprintDB(), 3000);
+
+  app.get("/api/structure-novelty/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getNoveltyStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch novelty stats" });
+    }
+  });
+
+  app.get("/api/structure-novelty/score/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = req.params.formula;
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const result = scoreFormulaNovelty(formula);
+      res.json({ formula, ...result });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute novelty score" });
+    }
+  });
+
+  app.get("/api/relaxation/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getRelaxationStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch relaxation stats" });
+    }
+  });
+
+  app.get("/api/relaxation/patterns", generalLimiter, async (_req, res) => {
+    try {
+      const patterns = getRelaxationPatterns();
+      res.json(patterns);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch relaxation patterns" });
+    }
+  });
+
+  app.get("/api/relaxation/entry/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = req.params.formula;
+      const entries = getRelaxationEntry(formula);
+      res.json({ formula, entries, count: entries.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch relaxation entry" });
+    }
+  });
+
+  app.get("/api/relaxation/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = req.params.formula;
+      const a = Number(req.query.a) || 4.0;
+      const b = Number(req.query.b) || a;
+      const c = Number(req.query.c) || a;
+      const alpha = Number(req.query.alpha) || 90;
+      const beta = Number(req.query.beta) || 90;
+      const gamma = Number(req.query.gamma) || 90;
+      const prediction = predictRelaxationMagnitude(formula, { a, b, c, alpha, beta, gamma });
+      res.json({ formula, ...prediction });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to predict relaxation magnitude" });
+    }
+  });
+
+  app.get("/api/stability-predictor/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const prediction = predictStabilityScreen(formula);
+      res.json({ formula, ...prediction });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to predict stability" });
+    }
+  });
+
+  app.get("/api/stability-predictor/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getStabilityPredictorStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch stability predictor stats" });
+    }
+  });
+
+  app.get("/api/structure-rewards/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getRewardSystemStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch structure reward stats" });
+    }
+  });
+
+  app.get("/api/structure-rewards/best", generalLimiter, async (req, res) => {
+    try {
+      const n = Math.min(Math.max(1, Number(req.query.n) || 10), 100);
+      const best = getBestMotifs(n);
+      res.json({ motifs: best, count: best.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch best motifs" });
+    }
+  });
+
+  app.get("/api/structure-rewards/motif/:prototype", generalLimiter, async (req, res) => {
+    try {
+      const prototype = decodeURIComponent(req.params.prototype);
+      const system = req.query.system as string | undefined;
+      const spacegroup = req.query.spacegroup as string | undefined;
+      const reward = getStructureReward(prototype, system, spacegroup ?? null);
+      if (!reward) {
+        return res.status(404).json({ error: "Motif not found" });
+      }
+      res.json(reward);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch motif reward" });
+    }
+  });
+
+  app.get("/api/pressure-structure/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const pressure = Number(req.query.pressure) || 0;
+      const prediction = predictStructureAtPressure(formula, pressure);
+      res.json({ formula, pressureGPa: pressure, ...prediction });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to predict pressure structure" });
+    }
+  });
+
+  app.get("/api/pressure-structure/phase-map/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const phaseMap = getPressurePhaseMap(formula);
+      res.json({ formula, phases: phaseMap, totalSteps: phaseMap.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute pressure phase map" });
+    }
+  });
+
+  app.get("/api/pressure-structure/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getPressureStructureStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch pressure structure stats" });
+    }
+  });
+
+  app.get("/api/structure-embedding/embed/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const embedding = computeStructureEmbedding(formula);
+      const clusterIdx = getClusterAssignment(embedding);
+      const novelty = computeClusterNovelty(embedding);
+      const uncertainty = estimateStructureUncertainty(embedding);
+      res.json({ formula, embedding, cluster: clusterIdx, novelty, uncertainty });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to compute structure embedding" });
+    }
+  });
+
+  app.get("/api/structure-embedding/clusters", generalLimiter, async (_req, res) => {
+    try {
+      const clusters = getEmbeddingClusters();
+      if (!clusters) {
+        return res.json({ clusters: [], k: 0, inertia: 0 });
+      }
+      res.json(clusters);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch structure clusters" });
+    }
+  });
+
+  app.get("/api/structure-embedding/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getEmbeddingStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch embedding stats" });
+    }
+  });
+
+  app.get("/api/tight-binding/properties/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const pressure = Number(req.query.pressure) || 0;
+      const props = computeTBProperties(formula, pressure);
+      res.json(props);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute TB properties", detail: e.message });
+    }
+  });
+
+  app.get("/api/tight-binding/bands/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const nPoints = Math.min(Number(req.query.nPoints) || 30, 100);
+      const bands = computeBandStructure(formula, nPoints);
+      res.json(bands);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute band structure", detail: e.message });
+    }
+  });
+
+  app.get("/api/tight-binding/dos/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const nKpoints = Math.min(Number(req.query.nKpoints) || 12, 20);
+      const nBins = Math.min(Number(req.query.nBins) || 200, 500);
+      const dos = computeDOS(formula, nKpoints, nBins);
+      res.json(dos);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute DOS", detail: e.message });
+    }
+  });
+
+  app.get("/api/tight-binding/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getTBEngineStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch TB engine stats" });
+    }
+  });
+
+  app.get("/api/tb-surrogate/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const prediction = predictTBSurrogate(formula);
+      res.json(prediction);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict TB properties", detail: e.message });
+    }
+  });
+
+  app.get("/api/tb-surrogate/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getTBSurrogateStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch TB surrogate stats" });
+    }
+  });
+
+  app.post("/api/tb-surrogate/retrain", writeLimiter, async (_req, res) => {
+    try {
+      const result = retrainTBSurrogate();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to retrain TB surrogate", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/report", generalLimiter, async (_req, res) => {
+    try {
+      const report = getComprehensiveModelDiagnostics();
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch model diagnostics", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/health", generalLimiter, async (_req, res) => {
+    try {
+      const health = getModelHealthSummary();
+      res.json(health);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch model health", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-diagnostics/bias", generalLimiter, async (req, res) => {
+    try {
+      const model = req.query.model as string | undefined;
+      const bias = getPerFamilyBias(model);
+      res.json(bias);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch bias analysis", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-experiments/propose", engineLimiter, async (_req, res) => {
+    try {
+      const report = getModelDiagnosticsForLLM();
+      const proposals = await proposeModelExperiments(report);
+      if (proposals.length > 0) {
+        const topProposal = proposals.sort((a, b) => a.priority - b.priority)[0];
+        const result = await executeExperiment(topProposal);
+        res.json({ proposals, executed: result });
+      } else {
+        res.json({ proposals: [], executed: null, message: "No experiments proposed by LLM" });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to propose model experiments", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-experiments/history", generalLimiter, async (_req, res) => {
+    try {
+      const history = getExperimentHistory();
+      res.json(history);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch experiment history", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-experiments/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getExperimentStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch experiment stats", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-improvement/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getModelImprovementStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch model improvement stats", detail: e.message });
+    }
+  });
+
+  app.post("/api/model-improvement/trigger", engineLimiter, async (req, res) => {
+    try {
+      const cycle = Number(req.body?.cycle) || 0;
+      const dummyEmit: import("./learning/engine").EventEmitter = (type, data) => {
+        console.log(`[Model Improvement Trigger] ${type}: ${JSON.stringify(data).slice(0, 200)}`);
+      };
+      const result = await runModelImprovementCycle(dummyEmit, cycle);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to trigger model improvement", detail: e.message });
+    }
+  });
+
+  app.get("/api/model-improvement/trends", generalLimiter, async (_req, res) => {
+    try {
+      const trends = getModelImprovementTrends();
+      res.json(trends);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch model improvement trends", detail: e.message });
     }
   });
 

@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { classifyFamily, sanitizeForbiddenWords } from "./utils";
+import { getModelDiagnosticsSummaryForStrategy } from "./model-improvement-loop";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -142,6 +143,7 @@ Under-explored families: ${underExplored.join(", ") || "None"}
 Recent novel insights: ${insightSummary || "None yet"}
 
 Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${f}: ${n} failures`).join(", ") || "No failures yet"}
+${getModelDiagnosticsSummaryForStrategy()}
 ${previousStrategyContext}
 
 IMPORTANT SCORING RULES:

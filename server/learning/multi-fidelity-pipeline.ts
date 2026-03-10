@@ -24,6 +24,8 @@ import { predictBandStructure } from "../physics/band-structure-surrogate";
 import { runEliashbergPipeline } from "../physics/eliashberg-pipeline";
 import { predictLambda } from "./lambda-regressor";
 import { predictPhononProperties } from "../physics/phonon-surrogate";
+import { predictTBProperties } from "../physics/tb-ml-surrogate";
+import { recordStructureFailure } from "../crystal/structure-failure-db";
 
 const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Cuprates: -1.2,
@@ -549,6 +551,22 @@ export async function runMultiFidelityPipeline(
       continue;
     }
 
+    try {
+      const tbSurr = predictTBProperties(candidate.formula);
+      physicsData.tbSurrogate = tbSurr;
+      if (tbSurr.lambdaProxy < 0.1 && tbSurr.dosAtEF < 0.01 && tbSurr.confidence > 0.4) {
+        results.push({
+          candidateId: candidate.id,
+          formula: candidate.formula,
+          finalStage: 0,
+          passed: false,
+          failureReason: `TB surrogate filter: lambdaProxy=${tbSurr.lambdaProxy.toFixed(3)} (<0.1), dosAtEF=${tbSurr.dosAtEF.toFixed(3)} (<0.01)`,
+          physicsData,
+        });
+        continue;
+      }
+    } catch {}
+
     const s1 = await stage1_ElectronicStructure(emit, candidate);
     physicsData.electronic = s1.data.electronic;
     physicsData.correlation = s1.data.correlation;
@@ -614,6 +632,35 @@ export async function runMultiFidelityPipeline(
       failureReason: s4.reason,
       physicsData,
     });
+  }
+
+  for (const result of results) {
+    if (!result.passed && result.failureReason) {
+      try {
+        let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "geometry_rejected";
+        if (result.failureReason.includes("imaginary phonon") || result.failureReason.includes("Dynamically unstable") || result.failureReason.includes("phonon")) {
+          failureReason = "unstable_phonons";
+        } else if (result.failureReason.includes("Non-metallic") || result.failureReason.includes("insulator") || result.failureReason.includes("non-metallic")) {
+          failureReason = "non_metallic";
+        } else if (result.failureReason.includes("Formation energy") || result.failureReason.includes("formation energy") || result.failureReason.includes("unstable")) {
+          failureReason = "high_formation_energy";
+        } else if (result.failureReason.includes("Hc2") || result.failureReason.includes("structure")) {
+          failureReason = "structure_collapse";
+        }
+        recordStructureFailure({
+          formula: result.formula,
+          failureReason,
+          failedAt: Date.now(),
+          source: "pipeline",
+          stage: result.finalStage,
+          details: result.failureReason,
+          bandGap: result.physicsData?.electronic?.bandGap,
+          formationEnergy: result.physicsData?.stability?.formationEnergy,
+          lowestPhononFreq: result.physicsData?.phonon?.lowestFrequency,
+          imaginaryModeCount: result.physicsData?.phonon?.imaginaryModeCount,
+        });
+      } catch {}
+    }
   }
 
   const passedCount = results.filter(r => r.passed).length;

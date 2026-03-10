@@ -2,6 +2,7 @@ import { storage } from "../storage";
 import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts } from "./qe-worker";
 import type { QEFullResult } from "./qe-worker";
 import type { DftJob } from "@shared/schema";
+import { recordStructureFailure } from "../crystal/structure-failure-db";
 
 const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
@@ -231,6 +232,21 @@ async function processNextJob(): Promise<boolean> {
     } else {
       totalFailed++;
       console.log(`[DFT-Queue] Job #${job.id} failed: ${job.formula} — ${dftResult.error || "SCF did not converge"}`);
+      try {
+        const hasPhonon = dftResult.phonon && dftResult.phonon.hasImaginary;
+        let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "scf_divergence";
+        if (hasPhonon) failureReason = "unstable_phonons";
+        else if (dftResult.error?.includes("geometry")) failureReason = "geometry_rejected";
+        recordStructureFailure({
+          formula: job.formula,
+          failureReason,
+          failedAt: Date.now(),
+          source: "dft",
+          details: dftResult.error || dftResult.scf?.error || "SCF did not converge",
+          lowestPhononFreq: dftResult.phonon?.lowestFrequency,
+          imaginaryModeCount: dftResult.phonon?.imaginaryCount,
+        });
+      } catch {}
     }
 
     if (broadcastFn) {

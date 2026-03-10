@@ -29,6 +29,7 @@ import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { getGNNPrediction, type GNNPrediction } from "./graph-neural-net";
 import { getPhysicsFeatures } from "./physics-results-store";
 import { predictLambda, recordLambdaValidation } from "./lambda-regressor";
+import { predictTBProperties } from "../physics/tb-ml-surrogate";
 export { getConfidenceBand };
 
 const openai = new OpenAI({
@@ -99,6 +100,9 @@ export interface MLFeatureVector {
   phononHardness: number;
   massEnhancement: number;
   couplingAsymmetry: number;
+  dosAtEF_tb: number;
+  bandFlatness_tb: number;
+  lambdaProxy_tb: number;
   _sourceFormula?: string;
 }
 
@@ -416,6 +420,18 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     phononHardness: phononHardnessVal,
     massEnhancement: massEnhancementVal,
     couplingAsymmetry: couplingAsymmetryVal,
+    ...(() => {
+      try {
+        const tbSurr = predictTBProperties(formula);
+        return {
+          dosAtEF_tb: tbSurr.dosAtEF,
+          bandFlatness_tb: tbSurr.bandFlatness,
+          lambdaProxy_tb: tbSurr.lambdaProxy,
+        };
+      } catch {
+        return { dosAtEF_tb: 0, bandFlatness_tb: 0, lambdaProxy_tb: 0 };
+      }
+    })(),
     _sourceFormula: formula,
   };
 }

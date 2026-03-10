@@ -1108,3 +1108,46 @@ export function getCrystalDiffusionStats() {
     distributionBased: distributionDiffusionStats,
   };
 }
+
+let _trainedDiffusionModule: typeof import("../crystal/crystal-diffusion-model") | null = null;
+
+async function getTrainedDiffusionModule() {
+  if (!_trainedDiffusionModule) {
+    try {
+      _trainedDiffusionModule = await import("../crystal/crystal-diffusion-model");
+    } catch {
+      return null;
+    }
+  }
+  return _trainedDiffusionModule;
+}
+
+export async function runTrainedDiffusionCycle(count: number = 5): Promise<DiffusedCrystal[]> {
+  const mod = await getTrainedDiffusionModule();
+  if (!mod) return [];
+
+  const stats = mod.getDiffusionModelStats();
+  if (!stats.trained) return [];
+
+  const generated = mod.runTrainedDiffusionCycle(count);
+  const results: DiffusedCrystal[] = [];
+
+  for (const g of generated) {
+    results.push({
+      formula: g.formula,
+      atoms: [],
+      lattice: g.lattice,
+      spaceGroup: "P1",
+      crystalSystem: g.crystalSystem,
+      motif: "ddpm-generated",
+      predictedTc: 0,
+      stabilityScore: g.confidence,
+      noveltyScore: g.noveltyScore,
+      diffusionSteps: 50,
+      lambda: 0,
+      latentNorm: 0,
+    });
+  }
+
+  return results;
+}

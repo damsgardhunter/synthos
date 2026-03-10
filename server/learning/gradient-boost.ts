@@ -329,6 +329,9 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     deriveMultiBandScore(f),
     sanitize(miedemaEnergy, 0),
     deriveNonCentrosymmetric(f),
+    sanitize((f as any).dosAtEF_tb, 0),
+    sanitize((f as any).bandFlatness_tb, 0),
+    sanitize((f as any).lambdaProxy_tb, 0),
   ];
 
   let compFeatures: number[] = [];
@@ -362,6 +365,7 @@ const PHYSICS_FEATURE_NAMES = [
   "lambdaProxy", "alphaCouplingStrength", "phononHardness", "massEnhancement", "couplingAsymmetry",
   "bandGap", "formationEnergy", "stability", "crystalSymmetry",
   "multiBandScore", "miedemaFormEnergy", "nonCentrosymmetric",
+  "dosAtEF_tb", "bandFlatness_tb", "lambdaProxy_tb",
 ];
 
 const FEATURE_NAMES = [...PHYSICS_FEATURE_NAMES, ...COMPOSITION_FEATURE_NAMES];
