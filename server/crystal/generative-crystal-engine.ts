@@ -8,6 +8,7 @@ import {
 } from "./crystal-diffusion-model";
 import { getTrainingData } from "./crystal-structure-dataset";
 import { computeCompositionFeatures } from "../learning/composition-features";
+import { normalizeFormula } from "../learning/utils";
 import {
   generatePrototypeFreeStructure, getLatticeGeneratorStats,
   seedEvoPopulation, runEvolutionaryGeneration,
@@ -145,9 +146,10 @@ function validateCandidate(formula: string, lattice: { a: number; b: number; c: 
 }
 
 function vaeToCandidate(crystal: GeneratedCrystal): GeneratedCandidate {
-  const validation = validateCandidate(crystal.formula, crystal.lattice);
+  const formula = normalizeFormula(crystal.formula);
+  const validation = validateCandidate(formula, crystal.lattice);
   return {
-    formula: crystal.formula,
+    formula,
     lattice: crystal.lattice,
     crystalSystem: crystal.crystalSystem,
     spacegroup: crystal.spacegroup,
@@ -166,9 +168,10 @@ function vaeToCandidate(crystal: GeneratedCrystal): GeneratedCandidate {
 }
 
 function diffusionToCandidate(structure: GeneratedCrystalStructure): GeneratedCandidate {
-  const validation = validateCandidate(structure.formula, structure.lattice);
+  const formula = normalizeFormula(structure.formula);
+  const validation = validateCandidate(formula, structure.lattice);
   return {
-    formula: structure.formula,
+    formula,
     lattice: structure.lattice,
     crystalSystem: structure.crystalSystem,
     spacegroup: null,
@@ -254,9 +257,10 @@ function generateRandomLatent(count: number, targetSystem?: string): GeneratedCa
 }
 
 function latticeFreeToCandiate(structure: GeneratedStructure): GeneratedCandidate {
-  const validation = validateCandidate(structure.formula, structure.lattice);
+  const formula = normalizeFormula(structure.formula);
+  const validation = validateCandidate(formula, structure.lattice);
   return {
-    formula: structure.formula,
+    formula,
     lattice: structure.lattice,
     crystalSystem: structure.bravaisType,
     spacegroup: null,

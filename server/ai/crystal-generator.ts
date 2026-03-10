@@ -1,4 +1,5 @@
 import { generateBrokenSymmetryVariants, applyBrokenSymmetry, getSymmetrySubgroupStats } from "../crystal/symmetry-subgroups";
+import { normalizeFormula, isValidFormula } from "../learning/utils";
 
 interface AtomPosition {
   symbol: string;
@@ -1063,7 +1064,10 @@ export function generateCrystals(
 
       if (!validateChemistryGrammar(composition)) continue;
 
-      const formula = buildFormula(composition);
+      const rawFormula = buildFormula(composition);
+      const formula = normalizeFormula(rawFormula);
+      if (!formula || formula.length < 2) continue;
+      if (!isValidFormula(formula)) continue;
 
       if (seenFormulas.has(formula)) continue;
       seenFormulas.add(formula);
