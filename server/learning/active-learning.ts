@@ -15,6 +15,7 @@ import { estimateFamilyPressure } from "./candidate-generator";
 import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResult } from "../dft/quantum-engine-pipeline";
 import { getElementData } from "./elemental-data";
 import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
+import { runInterfaceDiscoveryForActiveLearning, getInterfaceRelaxationStats } from "../crystal/interface-relaxation";
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
 import { computeOODScore } from "./ood-detector";
 import {
@@ -1247,6 +1248,37 @@ export async function runActiveLearningCycle(
         });
       }
     } catch { /* skip */ }
+  }
+
+  const topFilmsForInterface = selected
+    .filter(s => s.selectionTier === "best-tc" || (s.candidate.predictedTc ?? 0) > 30)
+    .slice(0, 5)
+    .map(s => s.candidate.formula);
+
+  if (topFilmsForInterface.length > 0) {
+    try {
+      const interfaceResults = await runInterfaceDiscoveryForActiveLearning(topFilmsForInterface, 3);
+      if (interfaceResults.length > 0) {
+        const bestInterface = interfaceResults[0];
+        const sigCT = interfaceResults.filter(r => r.chargeTransfer.isSignificant).length;
+        const optStrain = interfaceResults.filter(r => r.strain.isOptimalRange).length;
+        emit("log", {
+          phase: "active-learning",
+          event: "Interface discovery",
+          detail: `Relaxed ${interfaceResults.length} interfaces from ${topFilmsForInterface.length} films. ` +
+            `Best: ${bestInterface.film}/${bestInterface.substrate} ` +
+            `(score=${bestInterface.compositeScore.toFixed(3)}, ` +
+            `charge=${bestInterface.chargeTransfer.chargePerAtom.toFixed(4)} e/atom, ` +
+            `strain=${bestInterface.strain.strainPercent.toFixed(2)}%, ` +
+            `phonon=${bestInterface.phononCoupling.couplingProxy.toFixed(3)}, ` +
+            `xtb=${bestInterface.xtbConverged ? "converged" : "fallback"}). ` +
+            `${sigCT} significant charge transfer, ${optStrain} optimal strain range.`,
+          dataSource: "Active Learning",
+        });
+      }
+    } catch (e: any) {
+      console.error("[ActiveLearning] Interface discovery error:", e?.message?.slice(0, 200));
+    }
   }
 
   totalEnrichedSinceLastRetrain += dftSuccessCount;

@@ -1169,6 +1169,143 @@ function HeterostructureGeneratorCard() {
   );
 }
 
+function InterfaceRelaxationCard() {
+  const { data: relaxStats, isLoading } = useQuery<{
+    totalRelaxations: number;
+    xtbSuccesses: number;
+    xtbFailures: number;
+    avgCompositeScore: number;
+    avgChargeTransfer: number;
+    avgStrain: number;
+    significantChargeTransferCount: number;
+    optimalStrainCount: number;
+    topInterfaces: Array<{
+      film: string;
+      substrate: string;
+      compositeScore: number;
+      chargePerAtom: number;
+      strainPct: number;
+      phononCoupling: number;
+    }>;
+    recentRelaxations: Array<{
+      film: string;
+      substrate: string;
+      compositeScore: number;
+      xtbConverged: boolean;
+      wallTimeMs: number;
+    }>;
+    activeLearningSelections: number;
+  }>({ queryKey: ["/api/interface-relaxation/stats"], refetchInterval: 30000 });
+
+  return (
+    <Card data-testid="card-interface-relaxation">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Activity className="h-4 w-4 text-cyan-400" />
+          Interface Physics
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            <div className="h-4 bg-muted animate-pulse rounded w-3/4" />
+            <div className="h-4 bg-muted animate-pulse rounded w-1/2" />
+          </div>
+        ) : !relaxStats || relaxStats.totalRelaxations === 0 ? (
+          <p className="text-xs text-muted-foreground">No interface relaxations yet. Runs xTB optimization on bilayer structures to detect charge transfer, strain effects, and phonon coupling at interfaces.</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-lg font-bold" data-testid="text-relax-total">{relaxStats.totalRelaxations}</div>
+                <div className="text-[10px] text-muted-foreground">Relaxed</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-green-400" data-testid="text-relax-xtb">{relaxStats.xtbSuccesses}</div>
+                <div className="text-[10px] text-muted-foreground">xTB OK</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-cyan-400" data-testid="text-relax-score">{relaxStats.avgCompositeScore.toFixed(3)}</div>
+                <div className="text-[10px] text-muted-foreground">Avg Score</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-muted/30 rounded p-1.5">
+                <div className="text-[9px] text-muted-foreground">Charge Transfer</div>
+                <div className="text-xs">
+                  <span className="font-bold">{relaxStats.significantChargeTransferCount}</span>
+                  <span className="text-muted-foreground"> significant ({'>'}0.05 e/atom)</span>
+                </div>
+                <div className="text-[9px] text-muted-foreground">avg: {relaxStats.avgChargeTransfer.toFixed(4)} e/atom</div>
+              </div>
+              <div className="bg-muted/30 rounded p-1.5">
+                <div className="text-[9px] text-muted-foreground">Strain</div>
+                <div className="text-xs">
+                  <span className="font-bold text-green-400">{relaxStats.optimalStrainCount}</span>
+                  <span className="text-muted-foreground"> optimal (1-4%)</span>
+                </div>
+                <div className="text-[9px] text-muted-foreground">avg: {relaxStats.avgStrain.toFixed(2)}%</div>
+              </div>
+            </div>
+
+            {relaxStats.activeLearningSelections > 0 && (
+              <div className="bg-cyan-500/10 rounded p-1.5 text-center">
+                <span className="text-[10px] text-cyan-300">{relaxStats.activeLearningSelections} interfaces selected for active learning</span>
+              </div>
+            )}
+
+            {relaxStats.topInterfaces.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Top Interface Candidates</div>
+                <div className="space-y-1 max-h-36 overflow-y-auto">
+                  {relaxStats.topInterfaces.slice(0, 5).map((t, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-interface-top-${i}`}>
+                      <span className="font-mono font-medium">{t.film}/{t.substrate}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={t.compositeScore > 0.5 ? "text-green-400" : t.compositeScore > 0.3 ? "text-yellow-400" : "text-red-400"}>
+                          {t.compositeScore.toFixed(3)}
+                        </span>
+                        <span className="text-cyan-400 text-[9px]">{t.chargePerAtom.toFixed(3)}e</span>
+                        <span className={t.strainPct >= 1 && t.strainPct <= 4 ? "text-green-400 text-[9px]" : "text-muted-foreground text-[9px]"}>
+                          {t.strainPct.toFixed(1)}%
+                        </span>
+                        <span className="text-purple-400 text-[9px]">ph:{t.phononCoupling.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {relaxStats.recentRelaxations.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Recent Relaxations</div>
+                <div className="space-y-1 max-h-24 overflow-y-auto">
+                  {relaxStats.recentRelaxations.slice(0, 4).map((r, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-relax-recent-${i}`}>
+                      <span className="font-mono font-medium">{r.film}/{r.substrate}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={r.compositeScore > 0.4 ? "text-green-400" : "text-muted-foreground"}>
+                          {r.compositeScore.toFixed(3)}
+                        </span>
+                        <span className={r.xtbConverged ? "text-green-400" : "text-yellow-400"}>
+                          {r.xtbConverged ? "xTB" : "est."}
+                        </span>
+                        <span className="text-muted-foreground">{(r.wallTimeMs / 1000).toFixed(1)}s</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function EnergyLandscapeCard() {
   const { data: landscapeStats, isLoading } = useQuery<{
     totalExplored: number;
@@ -2556,6 +2693,7 @@ export default function Dashboard() {
           <GNNActiveLearningCard />
           <PhysicsUQCard />
           <HeterostructureGeneratorCard />
+          <InterfaceRelaxationCard />
           <DistortionDetectorCard />
           <EnergyLandscapeCard />
           <DistortionClassifierCard />

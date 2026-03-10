@@ -107,6 +107,10 @@ import {
   generateHeterostructure, generateBilayerCandidates, findBestSubstrates,
   getHeterostructureStats, getSubstrateDatabase,
 } from "./crystal/heterostructure-generator";
+import {
+  relaxInterface, getInterfaceRelaxationStats,
+  scoreInterfaceCandidatesForActiveLearning, runInterfaceDiscoveryForActiveLearning,
+} from "./crystal/interface-relaxation";
 import { detectQuantumCriticality } from "./physics/quantum-criticality";
 import { discoveryMemory } from "./learning/discovery-memory";
 import { computeFeatureVector, buildAndStoreFeatureRecord, getFeatureDataset, getDatasetSize, getFeatureRecord } from "./theory/physics-feature-db";
@@ -1551,6 +1555,54 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ results, count: results.length });
     } catch (e) {
       res.status(500).json({ error: "Failed to batch generate heterostructures" });
+    }
+  });
+
+  app.get("/api/interface-relaxation/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getInterfaceRelaxationStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch interface relaxation stats" });
+    }
+  });
+
+  app.post("/api/interface-relaxation/relax", generalLimiter, async (req, res) => {
+    try {
+      const { film, substrate } = req.body;
+      if (!film || !substrate) {
+        return res.status(400).json({ error: "Both film and substrate formulas required" });
+      }
+      const result = await relaxInterface(film, substrate);
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Interface relaxation failed" });
+    }
+  });
+
+  app.post("/api/interface-relaxation/score-candidates", generalLimiter, async (req, res) => {
+    try {
+      const { films, topN } = req.body;
+      if (!films || !Array.isArray(films) || films.length === 0) {
+        return res.status(400).json({ error: "Array of film formulas required" });
+      }
+      const candidates = scoreInterfaceCandidatesForActiveLearning(films, topN || 10);
+      res.json({ candidates, count: candidates.length });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to score interface candidates" });
+    }
+  });
+
+  app.post("/api/interface-relaxation/discover", generalLimiter, async (req, res) => {
+    try {
+      const { films, budget } = req.body;
+      if (!films || !Array.isArray(films) || films.length === 0) {
+        return res.status(400).json({ error: "Array of film formulas required" });
+      }
+      const results = await runInterfaceDiscoveryForActiveLearning(films, budget || 3);
+      res.json({ results, count: results.length });
+    } catch (e) {
+      res.status(500).json({ error: "Interface discovery failed" });
     }
   });
 
