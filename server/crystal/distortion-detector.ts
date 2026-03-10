@@ -850,6 +850,240 @@ function guessSGFromPrototype(proto?: string): string | undefined {
   return map[proto];
 }
 
+export interface DistortionClassifierFeatures {
+  meanDisplacement: number;
+  maxDisplacement: number;
+  bondVariance: number;
+  distortedBondFraction: number;
+  octahedralAngleVariance: number;
+  volumeChangePct: number;
+  strainMagnitude: number;
+  spaceGroupChanged: boolean;
+  coordinationDistorted: boolean;
+  phononUnstable: boolean;
+}
+
+export interface DistortionClassifierResult {
+  distortionProbability: number;
+  prediction: "distorted" | "non-distorted";
+  confidence: number;
+  featureImportance: Record<string, number>;
+  features: DistortionClassifierFeatures;
+}
+
+interface ClassifierWeights {
+  meanDisplacement: number;
+  maxDisplacement: number;
+  bondVariance: number;
+  distortedBondFraction: number;
+  octahedralAngleVariance: number;
+  volumeChangePct: number;
+  strainMagnitude: number;
+  spaceGroupChanged: number;
+  coordinationDistorted: number;
+  phononUnstable: number;
+  bias: number;
+}
+
+const DEFAULT_WEIGHTS: ClassifierWeights = {
+  meanDisplacement: 3.5,
+  maxDisplacement: 1.2,
+  bondVariance: 8.0,
+  distortedBondFraction: 2.5,
+  octahedralAngleVariance: 0.04,
+  volumeChangePct: 0.15,
+  strainMagnitude: 12.0,
+  spaceGroupChanged: 1.8,
+  coordinationDistorted: 1.5,
+  phononUnstable: 2.0,
+  bias: -2.0,
+};
+
+let trainedWeights: ClassifierWeights = { ...DEFAULT_WEIGHTS };
+let classifierTrained = false;
+let classifierTrainCount = 0;
+let classifierAccuracy = 0;
+let classifierLastTrainedAt = 0;
+const CLASSIFIER_RETRAIN_THRESHOLD = 20;
+
+function sigmoid(x: number): number {
+  return 1.0 / (1.0 + Math.exp(-Math.max(-20, Math.min(20, x))));
+}
+
+function extractFeatures(analysis: DistortionAnalysis): DistortionClassifierFeatures {
+  return {
+    meanDisplacement: analysis.atomicDistortion?.meanDisplacement ?? 0,
+    maxDisplacement: analysis.atomicDistortion?.maxDisplacement ?? 0,
+    bondVariance: analysis.bondLengthDistortion?.bondLengthVariance ?? 0,
+    distortedBondFraction: analysis.bondLengthDistortion?.distortedBondFraction ?? 0,
+    octahedralAngleVariance: analysis.octahedralDistortion?.avgBondAngleVariance ?? 0,
+    volumeChangePct: Math.abs(analysis.latticeDistortion.volumeChangePct),
+    strainMagnitude: analysis.latticeDistortion.strainMagnitude,
+    spaceGroupChanged: analysis.symmetryReduction?.symmetryBroken ?? false,
+    coordinationDistorted: (analysis.octahedralDistortion?.distortedSiteFraction ?? 0) > 0.3,
+    phononUnstable: analysis.phononInstability?.hasImaginaryModes ?? false,
+  };
+}
+
+function predictDistortion(features: DistortionClassifierFeatures, weights: ClassifierWeights): number {
+  const z =
+    features.meanDisplacement * weights.meanDisplacement +
+    features.maxDisplacement * weights.maxDisplacement +
+    features.bondVariance * weights.bondVariance +
+    features.distortedBondFraction * weights.distortedBondFraction +
+    features.octahedralAngleVariance * weights.octahedralAngleVariance +
+    features.volumeChangePct * weights.volumeChangePct +
+    features.strainMagnitude * weights.strainMagnitude +
+    (features.spaceGroupChanged ? 1 : 0) * weights.spaceGroupChanged +
+    (features.coordinationDistorted ? 1 : 0) * weights.coordinationDistorted +
+    (features.phononUnstable ? 1 : 0) * weights.phononUnstable +
+    weights.bias;
+  return sigmoid(z);
+}
+
+function computeFeatureImportance(features: DistortionClassifierFeatures, weights: ClassifierWeights): Record<string, number> {
+  const contributions: Record<string, number> = {
+    meanDisplacement: features.meanDisplacement * weights.meanDisplacement,
+    maxDisplacement: features.maxDisplacement * weights.maxDisplacement,
+    bondVariance: features.bondVariance * weights.bondVariance,
+    distortedBondFraction: features.distortedBondFraction * weights.distortedBondFraction,
+    octahedralAngleVariance: features.octahedralAngleVariance * weights.octahedralAngleVariance,
+    volumeChangePct: features.volumeChangePct * weights.volumeChangePct,
+    strainMagnitude: features.strainMagnitude * weights.strainMagnitude,
+    spaceGroupChanged: (features.spaceGroupChanged ? 1 : 0) * weights.spaceGroupChanged,
+    coordinationDistorted: (features.coordinationDistorted ? 1 : 0) * weights.coordinationDistorted,
+    phononUnstable: (features.phononUnstable ? 1 : 0) * weights.phononUnstable,
+  };
+  const total = Object.values(contributions).reduce((s, v) => s + Math.abs(v), 0) || 1;
+  const importance: Record<string, number> = {};
+  for (const [k, v] of Object.entries(contributions)) {
+    importance[k] = Math.round((Math.abs(v) / total) * 10000) / 10000;
+  }
+  return importance;
+}
+
+function trainClassifier(history: DistortionAnalysis[]): void {
+  if (history.length < CLASSIFIER_RETRAIN_THRESHOLD) return;
+
+  const samples = history.map(a => ({
+    features: extractFeatures(a),
+    label: a.overallLevel !== "none" ? 1 : 0,
+  }));
+
+  const posCount = samples.filter(s => s.label === 1).length;
+  const negCount = samples.length - posCount;
+  if (posCount < 3 || negCount < 3) return;
+
+  const lr = 0.01;
+  const epochs = 50;
+  const w = { ...trainedWeights };
+
+  for (let epoch = 0; epoch < epochs; epoch++) {
+    for (const sample of samples) {
+      const f = sample.features;
+      const p = predictDistortion(f, w);
+      const error = p - sample.label;
+
+      w.meanDisplacement -= lr * error * f.meanDisplacement;
+      w.maxDisplacement -= lr * error * f.maxDisplacement;
+      w.bondVariance -= lr * error * f.bondVariance;
+      w.distortedBondFraction -= lr * error * f.distortedBondFraction;
+      w.octahedralAngleVariance -= lr * error * f.octahedralAngleVariance;
+      w.volumeChangePct -= lr * error * f.volumeChangePct;
+      w.strainMagnitude -= lr * error * f.strainMagnitude;
+      w.spaceGroupChanged -= lr * error * (f.spaceGroupChanged ? 1 : 0);
+      w.coordinationDistorted -= lr * error * (f.coordinationDistorted ? 1 : 0);
+      w.phononUnstable -= lr * error * (f.phononUnstable ? 1 : 0);
+      w.bias -= lr * error;
+    }
+  }
+
+  let correct = 0;
+  for (const sample of samples) {
+    const p = predictDistortion(sample.features, w);
+    const pred = p >= 0.5 ? 1 : 0;
+    if (pred === sample.label) correct++;
+  }
+
+  trainedWeights = w;
+  classifierTrained = true;
+  classifierTrainCount = samples.length;
+  classifierAccuracy = Math.round((correct / samples.length) * 10000) / 10000;
+  classifierLastTrainedAt = Date.now();
+  console.log(`[DistortionML] Classifier retrained on ${samples.length} samples, accuracy=${classifierAccuracy}, pos=${posCount}, neg=${negCount}`);
+}
+
+export function classifyDistortion(analysis: DistortionAnalysis): DistortionClassifierResult {
+  const features = extractFeatures(analysis);
+  const prob = predictDistortion(features, trainedWeights);
+  const prediction = prob >= 0.5 ? "distorted" : "non-distorted";
+  const confidence = Math.abs(prob - 0.5) * 2;
+  const featureImportance = computeFeatureImportance(features, trainedWeights);
+  return {
+    distortionProbability: Math.round(prob * 10000) / 10000,
+    prediction,
+    confidence: Math.round(confidence * 10000) / 10000,
+    featureImportance,
+    features,
+  };
+}
+
+export function classifyFormulaDistortion(formula: string): DistortionClassifierResult | null {
+  for (let i = distortionHistory.length - 1; i >= 0; i--) {
+    if (distortionHistory[i].formula === formula) {
+      return classifyDistortion(distortionHistory[i]);
+    }
+  }
+  return null;
+}
+
+export function getClassifierStats(): {
+  trained: boolean;
+  trainCount: number;
+  accuracy: number;
+  lastTrainedAt: number;
+  weights: Record<string, number>;
+  recentPredictions: Array<{
+    formula: string;
+    prediction: string;
+    probability: number;
+    confidence: number;
+    topFeature: string;
+  }>;
+} {
+  const recentPredictions: Array<{
+    formula: string;
+    prediction: string;
+    probability: number;
+    confidence: number;
+    topFeature: string;
+  }> = [];
+
+  const recentSlice = distortionHistory.slice(-15).reverse();
+  for (const a of recentSlice) {
+    const result = classifyDistortion(a);
+    const entries = Object.entries(result.featureImportance);
+    entries.sort((a, b) => b[1] - a[1]);
+    recentPredictions.push({
+      formula: a.formula,
+      prediction: result.prediction,
+      probability: result.distortionProbability,
+      confidence: result.confidence,
+      topFeature: entries[0]?.[0] ?? "unknown",
+    });
+  }
+
+  const { bias, ...displayWeights } = trainedWeights;
+  return {
+    trained: classifierTrained,
+    trainCount: classifierTrainCount,
+    accuracy: classifierAccuracy,
+    lastTrainedAt: classifierLastTrainedAt,
+    weights: displayWeights as unknown as Record<string, number>,
+    recentPredictions,
+  };
+}
+
 const MAX_HISTORY = 2000;
 const distortionHistory: DistortionAnalysis[] = [];
 
@@ -857,6 +1091,10 @@ export function recordDistortionAnalysis(analysis: DistortionAnalysis): void {
   distortionHistory.push(analysis);
   if (distortionHistory.length > MAX_HISTORY) {
     distortionHistory.splice(0, Math.floor(MAX_HISTORY * 0.1));
+  }
+  if (distortionHistory.length >= CLASSIFIER_RETRAIN_THRESHOLD &&
+      distortionHistory.length % CLASSIFIER_RETRAIN_THRESHOLD === 0) {
+    trainClassifier(distortionHistory);
   }
 }
 

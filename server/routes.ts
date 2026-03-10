@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
-import { isDFTAvailable, getDFTMethodInfo, getXTBStats } from "./dft/qe-dft-engine";
+import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
 import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
@@ -229,6 +229,7 @@ import {
 } from "./crystal/volume-predictor-dnn";
 import {
   getDistortionStats, getDistortionForFormula,
+  classifyFormulaDistortion, getClassifierStats,
 } from "./crystal/distortion-detector";
 import {
   computeTBProperties, computeBandStructure, computeDOS,
@@ -3722,6 +3723,53 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch distortion data" });
+    }
+  });
+
+  app.get("/api/distortion/classify/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = classifyFormulaDistortion(formula);
+      if (!result) {
+        return res.status(404).json({ error: "No distortion data for formula to classify" });
+      }
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to classify distortion" });
+    }
+  });
+
+  app.get("/api/distortion/classifier/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getClassifierStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch classifier stats" });
+    }
+  });
+
+  app.get("/api/energy-landscape/stats", generalLimiter, async (_req, res) => {
+    try {
+      const stats = getEnergyLandscapeStats();
+      res.json(stats);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch energy landscape stats" });
+    }
+  });
+
+  app.post("/api/energy-landscape/explore/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length === 0) {
+        return res.status(400).json({ error: "Formula is required" });
+      }
+      const result = await runLandscapeExploration(formula);
+      if (!result) {
+        return res.status(404).json({ error: "Could not run landscape exploration (DFT unavailable or optimization failed)" });
+      }
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to run landscape exploration" });
     }
   });
 

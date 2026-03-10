@@ -12,7 +12,7 @@ import {
   Zap, BookOpen, Microscope, BarChart3, FileText,
   Compass, RefreshCw, Star, ChevronDown, ChevronUp,
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
-  Cpu, Shield, Activity, Network, GitMerge, GitBranch,
+  Cpu, Shield, Activity, Network, GitMerge, GitBranch, Layers, Mountain,
 } from "lucide-react";
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line, AreaChart, Area } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
@@ -1013,6 +1013,195 @@ function DistortionDetectorCard() {
                         {a.symmetryBroken && (
                           <span className="text-amber-400 text-[9px]">sym</span>
                         )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function EnergyLandscapeCard() {
+  const { data: landscapeStats, isLoading } = useQuery<{
+    totalExplored: number;
+    multipleMinima: number;
+    multiMinimaRate: number;
+    avgUniqueMinima: number;
+    avgEnergySpread: number;
+    recent: Array<{
+      formula: string;
+      uniqueMinima: number;
+      multipleMinima: boolean;
+      energySpread: number;
+      distortionModes: boolean;
+    }>;
+  }>({ queryKey: ["/api/energy-landscape/stats"], refetchInterval: 30000 });
+
+  return (
+    <Card data-testid="card-energy-landscape">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Mountain className="h-4 w-4 text-emerald-400" />
+          Energy Landscape Explorer
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            <div className="h-4 bg-muted animate-pulse rounded w-3/4" />
+            <div className="h-4 bg-muted animate-pulse rounded w-1/2" />
+          </div>
+        ) : !landscapeStats || landscapeStats.totalExplored === 0 ? (
+          <p className="text-xs text-muted-foreground">No landscape explorations yet. Runs perturbation-reoptimization to detect multiple energy minima.</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-lg font-bold" data-testid="text-landscape-total">{landscapeStats.totalExplored}</div>
+                <div className="text-[10px] text-muted-foreground">Explored</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-emerald-400" data-testid="text-landscape-multi">{landscapeStats.multipleMinima}</div>
+                <div className="text-[10px] text-muted-foreground">Multi-Minima</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-amber-400" data-testid="text-landscape-rate">{(landscapeStats.multiMinimaRate * 100).toFixed(0)}%</div>
+                <div className="text-[10px] text-muted-foreground">Multi Rate</div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-muted/30 rounded p-1.5 text-center">
+                <div className="text-[9px] text-muted-foreground font-medium">Avg Unique Minima</div>
+                <div className="text-xs font-bold text-emerald-400">{landscapeStats.avgUniqueMinima.toFixed(1)}</div>
+              </div>
+              <div className="bg-muted/30 rounded p-1.5 text-center">
+                <div className="text-[9px] text-muted-foreground font-medium">Avg Energy Spread</div>
+                <div className="text-xs font-bold text-blue-400">{landscapeStats.avgEnergySpread.toFixed(5)} Eh</div>
+              </div>
+            </div>
+
+            {landscapeStats.recent.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Recent Explorations</div>
+                <div className="space-y-1 max-h-28 overflow-y-auto">
+                  {landscapeStats.recent.slice(0, 5).map((r, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-landscape-${i}`}>
+                      <span className="font-mono font-medium">{r.formula}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={r.multipleMinima ? "text-emerald-400" : "text-muted-foreground"}>
+                          {r.uniqueMinima} minim{r.uniqueMinima !== 1 ? "a" : "um"}
+                        </span>
+                        <span className="text-muted-foreground">{r.energySpread.toFixed(4)} Eh</span>
+                        {r.distortionModes && (
+                          <span className="text-amber-400 text-[9px]">distortion modes</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DistortionClassifierCard() {
+  const { data: classifierStats, isLoading } = useQuery<{
+    trained: boolean;
+    trainCount: number;
+    accuracy: number;
+    lastTrainedAt: number;
+    weights: Record<string, number>;
+    recentPredictions: Array<{
+      formula: string;
+      prediction: string;
+      probability: number;
+      confidence: number;
+      topFeature: string;
+    }>;
+  }>({ queryKey: ["/api/distortion/classifier/stats"], refetchInterval: 30000 });
+
+  const predColors: Record<string, string> = {
+    "distorted": "text-red-400",
+    "non-distorted": "text-green-400",
+  };
+
+  return (
+    <Card data-testid="card-distortion-classifier">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Layers className="h-4 w-4 text-indigo-400" />
+          ML Distortion Classifier
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            <div className="h-4 bg-muted animate-pulse rounded w-3/4" />
+            <div className="h-4 bg-muted animate-pulse rounded w-1/2" />
+          </div>
+        ) : !classifierStats ? (
+          <p className="text-xs text-muted-foreground">ML classifier loading...</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-lg font-bold" data-testid="text-classifier-samples">{classifierStats.trainCount}</div>
+                <div className="text-[10px] text-muted-foreground">Train Samples</div>
+              </div>
+              <div>
+                <div className="text-lg font-bold text-indigo-400" data-testid="text-classifier-accuracy">
+                  {classifierStats.trained ? `${(classifierStats.accuracy * 100).toFixed(0)}%` : "--"}
+                </div>
+                <div className="text-[10px] text-muted-foreground">Accuracy</div>
+              </div>
+              <div>
+                <div className={`text-lg font-bold ${classifierStats.trained ? "text-green-400" : "text-muted-foreground"}`} data-testid="text-classifier-status">
+                  {classifierStats.trained ? "Trained" : "Pending"}
+                </div>
+                <div className="text-[10px] text-muted-foreground">Status</div>
+              </div>
+            </div>
+
+            {classifierStats.trained && Object.keys(classifierStats.weights).length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Top Feature Weights</div>
+                <div className="flex gap-1 flex-wrap">
+                  {Object.entries(classifierStats.weights)
+                    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+                    .slice(0, 5)
+                    .map(([name, weight]) => (
+                      <span key={name} className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300" data-testid={`badge-weight-${name}`}>
+                        {name}: {weight.toFixed(2)}
+                      </span>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {classifierStats.recentPredictions.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-muted-foreground font-medium">Recent Predictions</div>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {classifierStats.recentPredictions.slice(0, 6).map((p, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-classifier-${i}`}>
+                      <span className="font-mono font-medium">{p.formula}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={predColors[p.prediction] || "text-muted-foreground"}>
+                          {p.prediction}
+                        </span>
+                        <span className="text-muted-foreground">{(p.probability * 100).toFixed(0)}%</span>
+                        <span className="text-[9px] text-muted-foreground">conf:{(p.confidence * 100).toFixed(0)}%</span>
+                        <span className="text-[9px] text-indigo-300">top:{p.topFeature}</span>
                       </div>
                     </div>
                   ))}
@@ -2224,6 +2413,8 @@ export default function Dashboard() {
           <GNNActiveLearningCard />
           <PhysicsUQCard />
           <DistortionDetectorCard />
+          <EnergyLandscapeCard />
+          <DistortionClassifierCard />
           <FeedbackLoopCard />
 
           <Card data-testid="card-learning-insights">

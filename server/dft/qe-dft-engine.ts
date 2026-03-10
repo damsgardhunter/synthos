@@ -2180,6 +2180,186 @@ export async function runXTBOptimization(formula: string): Promise<OptimizationR
   }
 }
 
+export interface LandscapeMinimum {
+  perturbationIndex: number;
+  perturbationScale: number;
+  energy: number;
+  energyDiffFromRef: number;
+  converged: boolean;
+  rmsDisplacementFromRef: number;
+  isDifferentMinimum: boolean;
+}
+
+export interface EnergyLandscapeResult {
+  formula: string;
+  referenceEnergy: number;
+  perturbationsRun: number;
+  uniqueMinima: number;
+  minima: LandscapeMinimum[];
+  multipleMinima: boolean;
+  energySpread: number;
+  lowestEnergyDiff: number;
+  distortionModesExist: boolean;
+  wallTimeSeconds: number;
+}
+
+const landscapeCache = new Map<string, EnergyLandscapeResult>();
+const LANDSCAPE_PERTURBATION_COUNT = 5;
+const LANDSCAPE_ENERGY_THRESHOLD = 0.005;
+const LANDSCAPE_DISP_THRESHOLD = 0.15;
+
+export async function runLandscapeExploration(formula: string): Promise<EnergyLandscapeResult | null> {
+  const cacheKey = formula.replace(/\s+/g, "");
+  if (landscapeCache.has(cacheKey)) return landscapeCache.get(cacheKey)!;
+
+  if (!isDFTAvailable() || !fs.existsSync(XTB_BIN)) return null;
+
+  const startTime = Date.now();
+
+  const refResult = await runXTBOptimization(formula);
+  if (!refResult || !refResult.converged || refResult.optimizedAtoms.length < 2) return null;
+
+  const refAtoms = refResult.optimizedAtoms;
+  const refEnergy = refResult.optimizedEnergy;
+
+  const minima: LandscapeMinimum[] = [];
+  const perturbationScales = [0.05, 0.10, 0.15, 0.20, 0.30];
+
+  for (let pi = 0; pi < Math.min(LANDSCAPE_PERTURBATION_COUNT, perturbationScales.length); pi++) {
+    const scale = perturbationScales[pi];
+    const calcId = `landscape_${cacheKey}_p${pi}_${Date.now()}`;
+    const calcDir = path.join(WORK_DIR, calcId);
+    fs.mkdirSync(calcDir, { recursive: true });
+
+    try {
+      const perturbedAtoms: AtomPosition[] = refAtoms.map(a => ({
+        element: a.element,
+        x: a.x + (Math.random() - 0.5) * 2 * scale,
+        y: a.y + (Math.random() - 0.5) * 2 * scale,
+        z: a.z + (Math.random() - 0.5) * 2 * scale,
+      }));
+
+      const xyzPath = path.join(calcDir, "input.xyz");
+      writeXYZ(perturbedAtoms, xyzPath, `${formula} perturbation ${pi} scale=${scale}`);
+
+      const env: Record<string, string> = {
+        ...process.env as Record<string, string>,
+        XTBHOME: XTB_HOME,
+        XTBPATH: XTB_PARAM,
+        OMP_NUM_THREADS: "1",
+        OMP_STACKSIZE: "512M",
+      };
+
+      const cmd = `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`;
+      const output = execSync(cmd, { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }).toString();
+
+      const optInfo = parseOptimizationOutput(output);
+      let optEnergy = 0;
+      const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+      if (energyMatch) optEnergy = parseFloat(energyMatch[1]);
+
+      const optXyzPath = path.join(calcDir, "xtbopt.xyz");
+      let optimizedAtoms = parseOptimizedXYZ(optXyzPath);
+      if (optimizedAtoms.length === 0) optimizedAtoms = perturbedAtoms;
+
+      let rmsDisp = 0;
+      const nAtoms = Math.min(refAtoms.length, optimizedAtoms.length);
+      if (nAtoms > 0) {
+        let sumSq = 0;
+        for (let i = 0; i < nAtoms; i++) {
+          const dx = optimizedAtoms[i].x - refAtoms[i].x;
+          const dy = optimizedAtoms[i].y - refAtoms[i].y;
+          const dz = optimizedAtoms[i].z - refAtoms[i].z;
+          sumSq += dx * dx + dy * dy + dz * dz;
+        }
+        rmsDisp = Math.sqrt(sumSq / nAtoms);
+      }
+
+      const energyDiff = Math.abs(optEnergy - refEnergy);
+      const isDifferent = energyDiff > LANDSCAPE_ENERGY_THRESHOLD && rmsDisp > LANDSCAPE_DISP_THRESHOLD;
+
+      minima.push({
+        perturbationIndex: pi,
+        perturbationScale: scale,
+        energy: optEnergy,
+        energyDiffFromRef: optEnergy - refEnergy,
+        converged: optInfo.converged,
+        rmsDisplacementFromRef: Math.round(rmsDisp * 10000) / 10000,
+        isDifferentMinimum: isDifferent,
+      });
+    } catch {
+    } finally {
+      try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+    }
+  }
+
+  const uniqueMinima = minima.filter(m => m.isDifferentMinimum).length + 1;
+  const energies = minima.map(m => m.energy).filter(e => e !== 0);
+  const energySpread = energies.length > 0 ? Math.max(...energies) - Math.min(...energies) : 0;
+  const convergedMinima = minima.filter(m => m.converged);
+  const lowestDiff = convergedMinima.length > 0
+    ? Math.min(...convergedMinima.map(m => Math.abs(m.energyDiffFromRef)))
+    : 0;
+
+  const result: EnergyLandscapeResult = {
+    formula,
+    referenceEnergy: refEnergy,
+    perturbationsRun: minima.length,
+    uniqueMinima,
+    minima,
+    multipleMinima: uniqueMinima > 1,
+    energySpread: Math.round(energySpread * 100000) / 100000,
+    lowestEnergyDiff: Math.round(lowestDiff * 100000) / 100000,
+    distortionModesExist: uniqueMinima > 1 || energySpread > 0.01,
+    wallTimeSeconds: (Date.now() - startTime) / 1000,
+  };
+
+  landscapeCache.set(cacheKey, result);
+  if (landscapeCache.size > 500) {
+    const oldest = landscapeCache.keys().next().value;
+    if (oldest) landscapeCache.delete(oldest);
+  }
+
+  if (result.distortionModesExist) {
+    console.log(`[DFT] ${formula}: Energy landscape exploration found ${uniqueMinima} unique minima (spread=${result.energySpread.toFixed(5)} Eh, ${minima.length} perturbations)`);
+  }
+
+  return result;
+}
+
+export function getLandscapeStats(): {
+  totalExplored: number;
+  multipleMinima: number;
+  multiMinimaRate: number;
+  avgUniqueMinima: number;
+  avgEnergySpread: number;
+  recent: Array<{ formula: string; uniqueMinima: number; multipleMinima: boolean; energySpread: number; distortionModes: boolean }>;
+} {
+  const entries = Array.from(landscapeCache.values());
+  const n = entries.length;
+  if (n === 0) {
+    return { totalExplored: 0, multipleMinima: 0, multiMinimaRate: 0, avgUniqueMinima: 0, avgEnergySpread: 0, recent: [] };
+  }
+  const multiCount = entries.filter(e => e.multipleMinima).length;
+  const avgMinima = entries.reduce((s, e) => s + e.uniqueMinima, 0) / n;
+  const avgSpread = entries.reduce((s, e) => s + e.energySpread, 0) / n;
+  const recent = entries.slice(-10).reverse().map(e => ({
+    formula: e.formula,
+    uniqueMinima: e.uniqueMinima,
+    multipleMinima: e.multipleMinima,
+    energySpread: e.energySpread,
+    distortionModes: e.distortionModesExist,
+  }));
+  return {
+    totalExplored: n,
+    multipleMinima: multiCount,
+    multiMinimaRate: Math.round((multiCount / n) * 1000) / 1000,
+    avgUniqueMinima: Math.round(avgMinima * 100) / 100,
+    avgEnergySpread: Math.round(avgSpread * 100000) / 100000,
+    recent,
+  };
+}
+
 export async function runDFTCalculation(formula: string): Promise<DFTResult> {
   const cacheKey = formula.replace(/\s+/g, "");
   if (xtbResultCache.has(cacheKey)) {
