@@ -1735,22 +1735,18 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
       return current;
     }
 
-    const distScale = distOk ? 1.0 : 1.02 / Math.max(minRatio, 0.01);
     const volScale = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
 
     let scaleFactor: number;
-    if (!distOk && volScale < 1.0) {
-      scaleFactor = distScale;
-    } else if (!distOk) {
+    if (!distOk) {
+      const distScale = 1.02 / Math.max(minRatio, 0.01);
       scaleFactor = Math.max(distScale, volScale);
     } else {
       scaleFactor = volScale;
     }
 
-    const damping = 1.0 / (1.0 + attempt * 0.5);
-    scaleFactor = 1.0 + (scaleFactor - 1.0) * damping;
-    scaleFactor = Math.max(scaleFactor, 0.8);
-    scaleFactor = Math.min(scaleFactor, 1.3);
+    scaleFactor = Math.max(scaleFactor, 0.5);
+    scaleFactor = Math.min(scaleFactor, 2.0);
 
     console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(3)}`);
     current = scaleStructure(current, scaleFactor);
