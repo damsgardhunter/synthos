@@ -1285,50 +1285,27 @@ export function computePhononSpectrum(
   const hBondType = hasH ? classifyHydrogenBonding(formula, hRatio >= 4 ? 150 : 0) : "none";
   const isHydrogenRich = hBondType === "metallic-network" || hBondType === "cage-clathrate";
 
-  const thetaDAvg = getCompositionWeightedProperty(counts, "debyeTemperature");
   const avgMass = getAverageMass(counts);
-  const isHEAPhonon = detectHighEntropyAlloy(formula);
-  let debyeTemperature: number;
-  if (isHEAPhonon && !isHydrogenRich) {
-    let logSum = 0;
-    let totalFrac = 0;
-    for (const el of elements) {
-      const data = getElementData(el);
-      if (data && data.debyeTemperature && data.debyeTemperature > 0) {
-        const frac = (counts[el] || 1) / totalAtoms;
-        logSum += frac * Math.log(data.debyeTemperature);
-        totalFrac += frac;
-      }
-    }
-    debyeTemperature = totalFrac > 0 ? Math.exp(logSum / totalFrac) : 300;
-  } else if (thetaDAvg !== null && thetaDAvg > 0) {
-    debyeTemperature = thetaDAvg;
-    if (isHydrogenRich) {
-      const hFraction = hCount / totalAtoms;
-      debyeTemperature = thetaDAvg * (1 - hFraction) + 2000 * hFraction;
-    }
-  } else {
-    debyeTemperature = 300 * Math.sqrt(30 / Math.max(avgMass, 1));
-    if (isHydrogenRich) debyeTemperature = Math.max(debyeTemperature, 1500);
-  }
-  debyeTemperature = Math.max(50, Math.round(debyeTemperature));
-
-  const THETA_D_TO_CM1 = 0.695;
-  const omegaD_cm1 = debyeTemperature * THETA_D_TO_CM1;
 
   let maxPhononFreq: number;
   if (hasH && isHydrogenRich) {
-    maxPhononFreq = Math.max(omegaD_cm1, 3000 + hRatio * 50);
+    maxPhononFreq = 3000 + hRatio * 50;
   } else if (hasH) {
-    maxPhononFreq = Math.max(omegaD_cm1, 1200 + hRatio * 150);
+    maxPhononFreq = 1200 + hRatio * 150;
   } else if (elements.length === 1) {
-    maxPhononFreq = omegaD_cm1 * 1.2;
+    const elData = getElementData(elements[0]);
+    const elTheta = elData?.debyeTemperature ?? 300;
+    maxPhononFreq = elTheta * 0.695 * 1.2;
   } else {
     const lightestMass = getLightestMass(elements);
     const massRatio = Math.sqrt(avgMass / Math.max(lightestMass, 1));
-    maxPhononFreq = omegaD_cm1 * Math.min(2.5, massRatio * 1.1);
+    const thetaDAvg = getCompositionWeightedProperty(counts, "debyeTemperature");
+    const baseOmega = thetaDAvg != null && thetaDAvg > 0 ? thetaDAvg * 0.695 : 300 * Math.sqrt(30 / Math.max(avgMass, 1)) * 0.695;
+    maxPhononFreq = baseOmega * Math.min(2.5, massRatio * 1.1);
   }
   maxPhononFreq = Math.max(50, Math.min(5000, Math.round(maxPhononFreq)));
+
+  const debyeTemperature = Math.max(50, Math.round(1.4388 * maxPhononFreq));
 
   let logAvgFreqRatio: number;
   if (isHydrogenRich) {
@@ -1584,6 +1561,13 @@ export function computeElectronPhononCoupling(
       lambda *= noFormulaCorrPenalty;
     }
     if (metal < 0.4) lambda *= metal;
+  }
+
+  if (N_EF < 0.1) {
+    lambda = 0;
+  } else {
+    const dosRef = 2.0;
+    lambda = lambda * (N_EF / dosRef);
   }
 
   lambda = Math.max(0.05, lambda);
@@ -3288,22 +3272,29 @@ export async function runFullPhysicsAnalysis(
   const phononSpectrum = computePhononSpectrum(formula, electronicStructure, mpElasticity, mpSummary);
 
   if (dftData) {
-    if (dftData.debyeTemp.source !== "analytical" && dftData.debyeTemp.value > 0) {
-      const analytical = phononSpectrum.debyeTemperature;
-      phononSpectrum.debyeTemperature = dftData.debyeTemp.value;
-      if (Math.abs(analytical - dftData.debyeTemp.value) > 20) {
-        emit("log", {
-          phase: "phase-10",
-          event: "DFT override",
-          detail: `Using DFT-computed Debye temp ${dftData.debyeTemp.value}K for ${formula} (vs analytical ${analytical}K)`,
-          dataSource: "DFT Resolver",
-        });
-      }
-    }
     if (dftData.phononFreqMax.value != null && dftData.phononFreqMax.source !== "analytical") {
       let cappedPhMax = dftData.phononFreqMax.value;
       if (cappedPhMax > 5000) cappedPhMax = cappedPhMax / 20;
       phononSpectrum.maxPhononFrequency = Math.min(5000, cappedPhMax);
+      phononSpectrum.debyeTemperature = Math.max(50, Math.round(1.4388 * phononSpectrum.maxPhononFrequency));
+      emit("log", {
+        phase: "phase-10",
+        event: "DFT override",
+        detail: `Using DFT phonon max ${phononSpectrum.maxPhononFrequency} cm⁻¹ for ${formula}, derived θ_D=${phononSpectrum.debyeTemperature}K`,
+        dataSource: "DFT Resolver",
+      });
+    } else if (dftData.debyeTemp.source !== "analytical" && dftData.debyeTemp.value > 0) {
+      const analytical = phononSpectrum.debyeTemperature;
+      phononSpectrum.debyeTemperature = dftData.debyeTemp.value;
+      phononSpectrum.maxPhononFrequency = Math.max(50, Math.round(dftData.debyeTemp.value / 1.4388));
+      if (Math.abs(analytical - dftData.debyeTemp.value) > 20) {
+        emit("log", {
+          phase: "phase-10",
+          event: "DFT override",
+          detail: `Using DFT Debye temp ${dftData.debyeTemp.value}K for ${formula} (vs analytical ${analytical}K), derived ω_max=${phononSpectrum.maxPhononFrequency} cm⁻¹`,
+          dataSource: "DFT Resolver",
+        });
+      }
     }
   }
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
