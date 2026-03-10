@@ -1,6 +1,7 @@
 import { findBestPrecursors, computePrecursorAvailabilityScore, type PrecursorSelection } from "./precursor-database";
 import { predictSynthesisFeasibility } from "./ml-synthesis-predictor";
 import { classifyFamily } from "../learning/utils";
+import { buildReactionNetwork } from "./reaction-network";
 
 export interface ChemicalDistanceResult {
   totalDistance: number;
@@ -19,6 +20,7 @@ export interface SynthesisGateResult {
   compositeScore: number;
   mlFeasibility: number;
   chemicalDistance: ChemicalDistanceResult;
+  graphPathCost: number | null;
   rejectionReasons: string[];
   classification: "trivial" | "one-pot" | "multi-step" | "complex" | "impractical";
   deprioritize: boolean;
@@ -207,14 +209,28 @@ export function evaluateSynthesisGate(formula: string): SynthesisGateResult {
   const mlResult = predictSynthesisFeasibility(formula);
   const chemDist = computeChemicalDistance(formula);
 
+  let graphPathCost: number | null = null;
+  try {
+    const network = buildReactionNetwork(formula);
+    if (network.bestRoute) {
+      graphPathCost = network.graphPathCost;
+    }
+  } catch (_) {
+  }
+
+  const graphBonus = graphPathCost !== null
+    ? Math.max(0, 0.1 * (1 - Math.min(1, graphPathCost / 2.0)))
+    : 0;
+
   const compositeScore = Math.round(
     Math.min(1.0,
-      mlResult.feasibility * 0.40 +
-      (1 - chemDist.totalDistance) * 0.30 +
+      mlResult.feasibility * 0.35 +
+      (1 - chemDist.totalDistance) * 0.25 +
       chemDist.precursorAvailability * 0.15 +
-      (chemDist.isOnePot ? 0.15 : 0) +
+      (chemDist.isOnePot ? 0.10 : 0) +
       (chemDist.toxicElements.length === 0 ? 0.05 : 0) -
-      (chemDist.toxicityPenalty * 0.05)
+      (chemDist.toxicityPenalty * 0.05) +
+      graphBonus
     ) * 10000
   ) / 10000;
 
@@ -263,6 +279,7 @@ export function evaluateSynthesisGate(formula: string): SynthesisGateResult {
     compositeScore,
     mlFeasibility: mlResult.feasibility,
     chemicalDistance: chemDist,
+    graphPathCost,
     rejectionReasons,
     classification,
     deprioritize,

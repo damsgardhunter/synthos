@@ -1,3 +1,5 @@
+import { generateBrokenSymmetryVariants, applyBrokenSymmetry, getSymmetrySubgroupStats } from "../crystal/symmetry-subgroups";
+
 interface AtomPosition {
   symbol: string;
   x: number;
@@ -1173,12 +1175,99 @@ export function runDiffusionGenerationCycle(count: number = 30, targetElements?:
   };
 }
 
+export function generateBrokenSymmetryCrystals(
+  count: number = 10,
+  targetElements?: string[]
+): GeneratedCrystal[] {
+  const baseCrystals = generateCrystals(Math.ceil(count / 2), targetElements);
+  const results: GeneratedCrystal[] = [];
+
+  for (const base of baseCrystals) {
+    if (results.length >= count) break;
+
+    const lattice = {
+      ...base.lattice,
+      alpha: base.lattice.alpha,
+      beta: base.lattice.beta,
+      gamma: base.lattice.gamma,
+    };
+
+    const variants = generateBrokenSymmetryVariants(
+      base.spaceGroup,
+      lattice,
+      base.atoms.length,
+      0.5 + Math.random() * 1.0
+    );
+
+    for (const variant of variants) {
+      if (results.length >= count) break;
+
+      try {
+        const { atoms: newAtoms, lattice: newLattice } = applyBrokenSymmetry(
+          base.atoms,
+          lattice,
+          variant
+        );
+
+        const newLatticeParams: LatticeParams = {
+          a: newLattice.a,
+          b: newLattice.b,
+          c: newLattice.c,
+          alpha: newLattice.alpha,
+          beta: newLattice.beta,
+          gamma: newLattice.gamma,
+        };
+
+        if (!isPhysicallyValid(newAtoms, newLatticeParams)) continue;
+
+        const coordNumbers = computeCoordinationNumbers(newAtoms);
+        const minBond = computeMinBondLength(newAtoms);
+        const density = computeDensity(newAtoms, newLatticeParams);
+        const formula = base.formula;
+        const novelty = computeNoveltyScore(formula, "broken-symmetry") + 0.15;
+        const symScore = computeFinalSymmetryScore(newAtoms, newLatticeParams, variant.childSpaceGroup);
+
+        results.push({
+          atoms: newAtoms,
+          lattice: newLatticeParams,
+          spaceGroup: variant.childSpaceGroup,
+          crystalSystem: getCrystalSystem(variant.childSpaceGroup),
+          formula,
+          prototypeMatch: `broken-${base.spaceGroup}→${variant.childSpaceGroup}`,
+          prototypeMatchScore: Math.max(0.3, 1 - variant.distortionAmplitude * 2),
+          noveltyScore: Math.min(1, novelty),
+          symmetryScore: Math.round(symScore * 1000) / 1000,
+          densityGcm3: Math.round(density * 100) / 100,
+          minBondLength: Math.round(minBond * 1000) / 1000,
+          coordNumbers,
+          source: "diffusion",
+        });
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return results;
+}
+
+function getCrystalSystem(spaceGroup: string): string {
+  if (spaceGroup.includes("m-3m") || spaceGroup.includes("Fm") || spaceGroup.includes("Im") || spaceGroup.includes("Pm-3")) return "cubic";
+  if (spaceGroup.includes("6/mmm") || spaceGroup.includes("P6")) return "hexagonal";
+  if (spaceGroup.includes("4/mmm") || spaceGroup.includes("P4") || spaceGroup.includes("I4")) return "tetragonal";
+  if (spaceGroup.includes("R-3")) return "trigonal";
+  if (spaceGroup.includes("Pnma") || spaceGroup.includes("Cmcm")) return "orthorhombic";
+  return "triclinic";
+}
+
 export function getDiffusionStats() {
+  const symStats = getSymmetrySubgroupStats();
   return {
     totalGenerated,
     totalValid,
     totalNovel,
     novelRate: totalValid > 0 ? Math.round(totalNovel / totalValid * 1000) / 1000 : 0,
     validRate: totalGenerated > 0 ? Math.round(totalValid / totalGenerated * 1000) / 1000 : 0,
+    symmetrySubgroups: symStats,
   };
 }

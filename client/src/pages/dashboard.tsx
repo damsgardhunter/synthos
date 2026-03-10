@@ -742,6 +742,124 @@ function ReferenceBenchmarkCard() {
   );
 }
 
+function PhysicsUQCard() {
+  const [formula, setFormula] = useState("MgB2");
+  const [queryFormula, setQueryFormula] = useState("MgB2");
+  const { data: uqData, isLoading } = useQuery<{
+    formula: string;
+    mean: number;
+    std: number;
+    ci95: [number, number];
+    dominant_uncertainty_source: string;
+    errorPropagation: {
+      lambdaContribution: number;
+      omegaLogContribution: number;
+      muStarContribution: number;
+    };
+    partials: {
+      dTc_dLambda: number;
+      dTc_dOmegaLog: number;
+      dTc_dMuStar: number;
+    };
+    mcSamples: number;
+    mcMean: number;
+    mcStd: number;
+    analyticMean: number;
+    analyticStd: number;
+  }>({
+    queryKey: ["/api/physics/tc-uq", queryFormula],
+    queryFn: () => fetch(`/api/physics/tc-uq/${encodeURIComponent(queryFormula)}`).then(r => r.json()),
+  });
+
+  const contribs = uqData?.errorPropagation;
+  const barData = contribs ? [
+    { name: "\u03BB", value: Math.round(contribs.lambdaContribution * 100), fill: "hsl(var(--primary))" },
+    { name: "\u03C9_log", value: Math.round(contribs.omegaLogContribution * 100), fill: "hsl(var(--chart-2))" },
+    { name: "\u03BC*", value: Math.round(contribs.muStarContribution * 100), fill: "hsl(var(--chart-3))" },
+  ] : [];
+
+  return (
+    <Card data-testid="card-physics-uq">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Shield className="h-4 w-4 text-primary" />
+          Physics Tc Uncertainty
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <input
+              className="flex-1 rounded-md border border-input bg-background px-3 text-sm min-h-9"
+              value={formula}
+              onChange={(e) => setFormula(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && formula.trim()) setQueryFormula(formula.trim()); }}
+              placeholder="Enter formula..."
+              data-testid="input-physics-uq-formula"
+            />
+          </div>
+
+          {isLoading ? (
+            <Skeleton className="h-24" />
+          ) : uqData ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="p-2 bg-muted/50 rounded-md" data-testid="physics-uq-mean">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Tc Mean</p>
+                  <p className="text-sm font-mono font-bold">{uqData.mean}K</p>
+                </div>
+                <div className="p-2 bg-muted/50 rounded-md" data-testid="physics-uq-std">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Std Dev</p>
+                  <p className="text-sm font-mono font-bold">{uqData.std}K</p>
+                </div>
+                <div className="p-2 bg-muted/50 rounded-md" data-testid="physics-uq-ci95">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">95% CI</p>
+                  <p className="text-sm font-mono font-bold">[{uqData.ci95[0]}, {uqData.ci95[1]}]</p>
+                </div>
+              </div>
+
+              <div data-testid="physics-uq-dominant">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Dominant Uncertainty Source</p>
+                <Badge variant="secondary" className="text-xs border-0">
+                  {uqData.dominant_uncertainty_source === "lambda" ? "\u03BB (coupling)" :
+                   uqData.dominant_uncertainty_source === "omega_log" ? "\u03C9_log (phonon)" : "\u03BC* (Coulomb)"}
+                </Badge>
+              </div>
+
+              <div data-testid="physics-uq-contributions">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Error Contributions</p>
+                <div className="space-y-1">
+                  {barData.map((item) => (
+                    <div key={item.name} className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground w-10 font-mono">{item.name}</span>
+                      <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-primary"
+                          style={{ width: `${Math.max(3, item.value)}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] font-mono text-muted-foreground w-8 text-right">{item.value}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3 text-xs" data-testid="physics-uq-methods">
+                <div><span className="text-muted-foreground">Analytic:</span> <span className="font-mono">{uqData.analyticMean}K \u00B1 {uqData.analyticStd}K</span></div>
+                <div><span className="text-muted-foreground">MC ({uqData.mcSamples}):</span> <span className="font-mono">{uqData.mcMean}K \u00B1 {uqData.mcStd}K</span></div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground italic" data-testid="physics-uq-placeholder">
+              Enter a formula to compute physics-based Tc uncertainty
+            </p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function FeedbackLoopCard() {
   const { data } = useQuery<{
     totalEvaluations: number;
@@ -978,6 +1096,21 @@ export default function Dashboard() {
     avgCompositeScore: number;
     recentRejections: Array<{ formula: string; score: number; reasons: string[]; at: number }>;
   }>({ queryKey: ["/api/synthesis-gate/stats"], refetchInterval: 15000 });
+  const { data: reactionNetworkStats } = useQuery<{
+    totalNetworksBuilt: number;
+    totalNodesCreated: number;
+    totalEdgesCreated: number;
+    avgPathCost: number;
+    methodBreakdown: Record<string, number>;
+    familyBreakdown: Record<string, number>;
+  }>({ queryKey: ["/api/synthesis/reaction-network/stats"], refetchInterval: 20000 });
+  const { data: alStats } = useQuery<{
+    convergence: ActiveLearningStats;
+    totalCycles: number;
+    recentCycles: any[];
+    avgUncertaintyTrend: { cycle: number; before: number; after: number; reductionPct: number }[];
+    dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number; source: string }[] };
+  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: 30000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -1679,6 +1812,53 @@ export default function Dashboard() {
                   )}
                 </>
               )}
+              {reactionNetworkStats && reactionNetworkStats.totalNetworksBuilt > 0 && (
+                <div className="space-y-2 pt-2 border-t border-border/30" data-testid="reaction-network-panel">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Reaction Network Graph</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="rn-networks">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Networks</p>
+                      <p className="text-lg font-mono font-bold">{reactionNetworkStats.totalNetworksBuilt}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="rn-nodes">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Nodes</p>
+                      <p className="text-lg font-mono font-bold">{reactionNetworkStats.totalNodesCreated}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="rn-edges">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Edges</p>
+                      <p className="text-lg font-mono font-bold">{reactionNetworkStats.totalEdgesCreated}</p>
+                    </div>
+                  </div>
+                  <div className="p-2 bg-muted/50 rounded-md" data-testid="rn-avg-cost">
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Path Cost (Dijkstra)</p>
+                    <p className="text-lg font-mono font-bold">{reactionNetworkStats.avgPathCost.toFixed(3)}</p>
+                  </div>
+                  {Object.keys(reactionNetworkStats.methodBreakdown).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Methods</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(reactionNetworkStats.methodBreakdown).sort(([, a], [, b]) => b - a).map(([method, count]) => (
+                          <Badge key={method} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`rn-method-${method}`}>
+                            {method}: {count}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {Object.keys(reactionNetworkStats.familyBreakdown).length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Families Analyzed</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(reactionNetworkStats.familyBreakdown).sort(([, a], [, b]) => b - a).map(([fam, count]) => (
+                          <Badge key={fam} variant="secondary" className="text-[10px] font-mono border-0" data-testid={`rn-family-${fam}`}>
+                            {fam}: {count}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {synthesisGateStats && synthesisGateStats.totalEvaluated > 0 && (
                 <div className="space-y-2 pt-2 border-t border-border/30" data-testid="synthesis-gate-panel">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Synthesis-First Gate (Hard Filter)</p>
@@ -1876,6 +2056,7 @@ export default function Dashboard() {
           </Card>
 
           <GNNActiveLearningCard />
+          <PhysicsUQCard />
           <FeedbackLoopCard />
 
           <Card data-testid="card-learning-insights">

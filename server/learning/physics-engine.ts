@@ -1690,6 +1690,155 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   };
 }
 
+export interface TcUncertaintyInput {
+  lambda: number;
+  lambdaStd: number;
+  omegaLog: number;
+  omegaLogStd: number;
+  muStar: number;
+  muStarStd: number;
+  omega2Avg?: number;
+}
+
+export interface TcWithUncertainty {
+  mean: number;
+  std: number;
+  ci95: [number, number];
+  dominant_uncertainty_source: "lambda" | "omega_log" | "mu_star";
+  partials: {
+    dTc_dLambda: number;
+    dTc_dOmegaLog: number;
+    dTc_dMuStar: number;
+  };
+  errorPropagation: {
+    lambdaContribution: number;
+    omegaLogContribution: number;
+    muStarContribution: number;
+  };
+  mcSamples: number;
+  mcMean: number;
+  mcStd: number;
+  analyticMean: number;
+  analyticStd: number;
+}
+
+function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number): number {
+  const omegaLogK = omegaLog * 1.44;
+  const denominator = lambda - muStar * (1 + 0.62 * lambda);
+  if (Math.abs(denominator) < 1e-6 || denominator <= 0) return 0;
+
+  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+
+  const omegaRatio = omega2Avg && omega2Avg > 0 ? Math.sqrt(omega2Avg) / omegaLog : 1.0;
+  const Lambda2 = 1.82 * (1 + 6.3 * muStar) * omegaRatio;
+  const f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+
+  const exponent = -1.04 * (1 + lambda) / denominator;
+  const tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
+
+  return Number.isFinite(tc) ? Math.max(0, tc) : 0;
+}
+
+export function computeTcWithUncertainty(input: TcUncertaintyInput): TcWithUncertainty {
+  const { lambda, lambdaStd, omegaLog, omegaLogStd, muStar, muStarStd, omega2Avg } = input;
+
+  const tc0 = allenDynesTcRaw(lambda, omegaLog, muStar, omega2Avg);
+
+  const h = 1e-4;
+  const dTc_dLambda = (allenDynesTcRaw(lambda + h, omegaLog, muStar, omega2Avg) - allenDynesTcRaw(lambda - h, omegaLog, muStar, omega2Avg)) / (2 * h);
+  const dTc_dOmegaLog = (allenDynesTcRaw(lambda, omegaLog + h, muStar, omega2Avg) - allenDynesTcRaw(lambda, omegaLog - h, muStar, omega2Avg)) / (2 * h);
+  const dTc_dMuStar = (allenDynesTcRaw(lambda, omegaLog, muStar + h, omega2Avg) - allenDynesTcRaw(lambda, omegaLog, muStar - h, omega2Avg)) / (2 * h);
+
+  const lambdaContrib = (dTc_dLambda * lambdaStd) ** 2;
+  const omegaLogContrib = (dTc_dOmegaLog * omegaLogStd) ** 2;
+  const muStarContrib = (dTc_dMuStar * muStarStd) ** 2;
+  const totalVar = lambdaContrib + omegaLogContrib + muStarContrib;
+  const analyticStd = Math.sqrt(totalVar);
+
+  const N_MC = 500;
+  const mcSamples: number[] = [];
+  for (let i = 0; i < N_MC; i++) {
+    const lSample = lambda + lambdaStd * boxMullerNormal();
+    const oSample = omegaLog + omegaLogStd * boxMullerNormal();
+    const mSample = muStar + muStarStd * boxMullerNormal();
+    const tcSample = allenDynesTcRaw(
+      Math.max(0.01, lSample),
+      Math.max(1, oSample),
+      Math.max(0.01, Math.min(0.3, mSample)),
+      omega2Avg,
+    );
+    if (Number.isFinite(tcSample)) mcSamples.push(tcSample);
+  }
+
+  const mcMean = mcSamples.length > 0 ? mcSamples.reduce((s, v) => s + v, 0) / mcSamples.length : tc0;
+  const mcStd = mcSamples.length > 1
+    ? Math.sqrt(mcSamples.reduce((s, v) => s + (v - mcMean) ** 2, 0) / (mcSamples.length - 1))
+    : analyticStd;
+
+  const combinedMean = 0.5 * tc0 + 0.5 * mcMean;
+  const combinedStd = Math.sqrt(0.5 * analyticStd ** 2 + 0.5 * mcStd ** 2);
+
+  const maxContrib = Math.max(lambdaContrib, omegaLogContrib, muStarContrib);
+  let dominant: "lambda" | "omega_log" | "mu_star" = "lambda";
+  if (maxContrib === omegaLogContrib) dominant = "omega_log";
+  else if (maxContrib === muStarContrib) dominant = "mu_star";
+
+  const totalContrib = lambdaContrib + omegaLogContrib + muStarContrib || 1;
+
+  return {
+    mean: Math.round(combinedMean * 10) / 10,
+    std: Math.round(combinedStd * 100) / 100,
+    ci95: [
+      Math.max(0, Math.round((combinedMean - 1.96 * combinedStd) * 10) / 10),
+      Math.round((combinedMean + 1.96 * combinedStd) * 10) / 10,
+    ],
+    dominant_uncertainty_source: dominant,
+    partials: {
+      dTc_dLambda: Math.round(dTc_dLambda * 1000) / 1000,
+      dTc_dOmegaLog: Math.round(dTc_dOmegaLog * 1000) / 1000,
+      dTc_dMuStar: Math.round(dTc_dMuStar * 1000) / 1000,
+    },
+    errorPropagation: {
+      lambdaContribution: Math.round((lambdaContrib / totalContrib) * 1000) / 1000,
+      omegaLogContribution: Math.round((omegaLogContrib / totalContrib) * 1000) / 1000,
+      muStarContribution: Math.round((muStarContrib / totalContrib) * 1000) / 1000,
+    },
+    mcSamples: mcSamples.length,
+    mcMean: Math.round(mcMean * 10) / 10,
+    mcStd: Math.round(mcStd * 100) / 100,
+    analyticMean: Math.round(tc0 * 10) / 10,
+    analyticStd: Math.round(analyticStd * 100) / 100,
+  };
+}
+
+function boxMullerNormal(): number {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+export function computePhysicsTcUQ(formula: string, pressureGpa: number = 0): TcWithUncertainty {
+  const electronic = computeElectronicStructure(formula);
+  const phonon = computePhononSpectrum(formula, electronic);
+  const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
+
+  const lambdaStd = coupling.lambda * 0.15;
+  const omegaLogStd = coupling.omegaLog * 0.10;
+  const muStarStd = 0.02;
+
+  return computeTcWithUncertainty({
+    lambda: coupling.lambda,
+    lambdaStd,
+    omegaLog: coupling.omegaLog,
+    omegaLogStd,
+    muStar: coupling.muStar,
+    muStarStd,
+    omega2Avg: coupling.omega2Avg,
+  });
+}
+
 export interface PairingMechanismResult {
   mechanism: string;
   tcEstimate: number;

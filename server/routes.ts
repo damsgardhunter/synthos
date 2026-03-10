@@ -61,7 +61,7 @@ import { fetchAflowData, crossValidateWithMP, crossValidateWithAflow } from "./l
 import { sanitizeForbiddenWords } from "./learning/utils";
 import { runDiffusionGenerationCycle, getDiffusionStats as getDiffusionGeneratorStats } from "./ai/crystal-generator";
 import { analyzeTopology, getTopologyStats } from "./physics/topology-engine";
-import { computeElectronicStructure } from "./learning/physics-engine";
+import { computeElectronicStructure, computePhysicsTcUQ } from "./learning/physics-engine";
 import {
   createCampaign, getCampaign, getAllActiveCampaigns, pauseCampaign,
   removeCampaign, getCampaignStats, getInverseDesignStats,
@@ -131,6 +131,7 @@ import { solveConstraints, evaluateFormulaAgainstConstraints } from "./inverse/c
 import { searchPressurePathways, getPathwayStats, getAmbientCandidatesFromPathways } from "./inverse/pressure-pathway";
 import { solveConstraintGraph, getFeasibleRegions } from "./inverse/constraint-graph-solver";
 import { computeSynthesisPathway, getSynthesisPathwayStats } from "./synthesis/reaction-pathway";
+import { buildReactionNetwork, getReactionNetworkStats } from "./synthesis/reaction-network";
 import { getParameterSpace } from "./synthesis/synthesis-variables";
 import { getSynthesisOptimizerStats } from "./synthesis/synthesis-condition-optimizer";
 import {
@@ -223,6 +224,9 @@ import {
   getRelaxationStats, getRelaxationPatterns,
   getRelaxationEntry, predictRelaxationMagnitude,
 } from "./crystal/relaxation-tracker";
+import {
+  predictVolume, getVolumeDNNStats, initVolumeDNN,
+} from "./crystal/volume-predictor-dnn";
 import {
   computeTBProperties, computeBandStructure, computeDOS,
   computeFermiProperties, detectFlatBands, computeElectronPhononProxies,
@@ -1748,6 +1752,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute synthesis pathway", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis/reaction-network/stats", generalLimiter, (_req, res) => {
+    try {
+      const stats = getReactionNetworkStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch reaction network stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis/reaction-network/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const result = buildReactionNetwork(formula);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to build reaction network", detail: e.message?.slice(0, 200) });
     }
   });
 
@@ -4185,6 +4208,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/physics/tc-uq/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 2 || formula.length > 100) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const pressureGpa = Number(req.query.pressure) || 0;
+      const result = computePhysicsTcUQ(formula, pressureGpa);
+      res.json({ formula, pressureGpa, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to compute physics Tc UQ", detail: e.message });
+    }
+  });
+
   app.post("/api/uncertainty/propose", engineLimiter, async (_req, res) => {
     try {
       const proposals = await proposeUncertaintyImprovements();
@@ -4896,6 +4933,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ report });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to generate LLM diagnostics", detail: e.message });
+    }
+  });
+
+  try { initVolumeDNN(); } catch {}
+
+  app.get("/api/volume/predict/:formula", generalLimiter, async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const pressure = Number(req.query.pressure) || 0;
+      const result = predictVolume(formula, pressure);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to predict volume", detail: e.message });
+    }
+  });
+
+  app.get("/api/volume/stats", generalLimiter, async (_req, res) => {
+    try {
+      res.json(getVolumeDNNStats());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get volume DNN stats", detail: e.message });
     }
   });
 

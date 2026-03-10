@@ -2,6 +2,7 @@ import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
 import { extractFeatures } from "./ml-predictor";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { storage } from "../storage";
+import { computeSymmetryEmbedding, computeSymmetryFeatureVector } from "../crystal/symmetry-subgroups";
 
 export interface NodeFeature {
   element: string;
@@ -544,9 +545,14 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
     const valence = data?.valenceElectrons ?? 2;
     const mass = data?.atomicMass ?? 50;
 
+    const protoSymFeatures = getSymmetryAwareFeatures(undefined);
+
     for (let i = 0; i < Math.min(count, 12); i++) {
-      const embedding = buildEnhancedEmbedding(el, data, atomicNumber);
-      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding });
+      const baseEmbedding = buildEnhancedEmbedding(el, data, atomicNumber);
+      const embedding = baseEmbedding.slice(0, NODE_DIM - protoSymFeatures.length);
+      embedding.push(...protoSymFeatures);
+      while (embedding.length < NODE_DIM) embedding.push(0);
+      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding: embedding.slice(0, NODE_DIM) });
     }
   }
 
@@ -795,6 +801,12 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
   ];
 }
 
+function getSymmetryAwareFeatures(spaceGroupName?: string, fracPosition?: [number, number, number]): number[] {
+  if (!spaceGroupName) return [0, 0, 0, 0, 0, 0];
+  const embedding = computeSymmetryEmbedding(spaceGroupName, fracPosition);
+  return computeSymmetryFeatureVector(embedding);
+}
+
 export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number): CrystalGraph {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -810,9 +822,15 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
     const valence = data?.valenceElectrons ?? 2;
     const mass = data?.atomicMass ?? 50;
 
+    const spaceGroupName = structure?.spaceGroup ?? structure?.spacegroupSymbol;
+    const symFeatures = getSymmetryAwareFeatures(spaceGroupName);
+
     for (let i = 0; i < Math.min(count, 12); i++) {
-      const embedding = buildEnhancedEmbedding(el, data, atomicNumber);
-      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding });
+      const baseEmbedding = buildEnhancedEmbedding(el, data, atomicNumber);
+      const embedding = baseEmbedding.slice(0, NODE_DIM - symFeatures.length);
+      embedding.push(...symFeatures);
+      while (embedding.length < NODE_DIM) embedding.push(0);
+      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding: embedding.slice(0, NODE_DIM) });
     }
   }
 

@@ -11,6 +11,7 @@ import {
   parseFormulaElements,
   classifyHydrogenBonding,
 } from "./physics-engine";
+import { predictEquilibriumLatticeConstant, isVolumeDNNTrained } from "../crystal/volume-predictor-dnn";
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
@@ -113,15 +114,20 @@ export function relaxStructureAtPressure(
   const B0p = 4.0 + (elements.length - 1) * 0.3;
 
   let V0_a = 0;
-  for (const el of elements) {
-    const data = getElementData(el);
-    if (data && data.latticeConstant) {
-      V0_a += data.latticeConstant * (counts[el] || 1);
-    } else if (data) {
-      V0_a += data.atomicRadius * 2.5 * (counts[el] || 1);
-    }
+  if (isVolumeDNNTrained()) {
+    V0_a = predictEquilibriumLatticeConstant(formula, pressure);
   }
-  V0_a = Math.max(3.0, V0_a / totalAtoms);
+  if (V0_a <= 0) {
+    for (const el of elements) {
+      const data = getElementData(el);
+      if (data && data.latticeConstant) {
+        V0_a += data.latticeConstant * (counts[el] || 1);
+      } else if (data) {
+        V0_a += data.atomicRadius * 2.5 * (counts[el] || 1);
+      }
+    }
+    V0_a = Math.max(3.0, V0_a / totalAtoms);
+  }
 
   const a0 = latticeParams?.a ?? V0_a;
   const b0 = latticeParams?.b ?? V0_a * 1.0;

@@ -10,6 +10,8 @@ import {
   computeDimensionalityScore,
   detectStructuralMotifs,
   simulatePressureEffects,
+  computePhysicsTcUQ,
+  type TcWithUncertainty,
 } from "./physics-engine";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import {
@@ -76,6 +78,16 @@ export interface UnifiedCIResult {
   isOOD: boolean;
   oodCategory: string;
   mahalanobisDistance: number;
+  physicsUQ?: {
+    tcMean: number;
+    tcStd: number;
+    tcCI95: [number, number];
+    dominantUncertaintySource: string;
+    lambdaContribution: number;
+    omegaLogContribution: number;
+    muStarContribution: number;
+    mcSamples: number;
+  };
 }
 
 export function computeUnifiedCI(formula: string): UnifiedCIResult {
@@ -204,6 +216,23 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
     isOOD: ood.isOOD,
     oodCategory: ood.oodCategory,
     mahalanobisDistance: ood.mahalanobisDistance,
+    physicsUQ: (() => {
+      try {
+        const puq = computePhysicsTcUQ(formula);
+        return {
+          tcMean: puq.mean,
+          tcStd: puq.std,
+          tcCI95: puq.ci95,
+          dominantUncertaintySource: puq.dominant_uncertainty_source,
+          lambdaContribution: puq.errorPropagation.lambdaContribution,
+          omegaLogContribution: puq.errorPropagation.omegaLogContribution,
+          muStarContribution: puq.errorPropagation.muStarContribution,
+          mcSamples: puq.mcSamples,
+        };
+      } catch {
+        return undefined;
+      }
+    })(),
   };
 }
 
