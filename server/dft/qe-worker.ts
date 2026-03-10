@@ -352,23 +352,45 @@ const ATOMIC_VOLUMES: Record<string, number> = {
 
 function estimateLatticeConstant(elements: string[], counts?: Record<string, number>): number {
   let totalVolume = 0;
+  let totalAtoms = 0;
+  const effectiveCounts: Record<string, number> = {};
+
   if (counts) {
     for (const el of Object.keys(counts)) {
       const n = Math.round(counts[el] || 1);
-      const vol = ATOMIC_VOLUMES[el] ?? 15;
-      totalVolume += n * vol;
+      effectiveCounts[el] = n;
+      totalVolume += n * (ATOMIC_VOLUMES[el] ?? 15);
+      totalAtoms += n;
     }
   } else {
     for (const el of elements) {
-      const vol = ATOMIC_VOLUMES[el] ?? 15;
-      totalVolume += vol;
+      effectiveCounts[el] = (effectiveCounts[el] || 0) + 1;
+      totalVolume += ATOMIC_VOLUMES[el] ?? 15;
+      totalAtoms++;
     }
   }
-  const packingFactor = 0.65;
+
+  const hCount = effectiveCounts["H"] || 0;
+  const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
+  const hasMetals = elements.some(e => e !== "H" && (
+    isTransitionMetal(e) || isRareEarth(e) || ["Ca", "Sr", "Ba", "Mg", "Na", "K", "Al"].includes(e)
+  ));
+
+  let packingFactor: number;
+  if (hFraction > 0.7 && hasMetals) {
+    packingFactor = 0.72;
+  } else if (hasMetals && totalAtoms <= 4) {
+    packingFactor = 0.74;
+  } else if (hasMetals) {
+    packingFactor = 0.68;
+  } else {
+    packingFactor = 0.60;
+  }
+
   const cellVolume = totalVolume / packingFactor;
   const a = Math.cbrt(cellVolume);
-  const perturbation = 0.92 + Math.random() * 0.16;
-  return Math.max(a * perturbation, 3.5);
+  const perturbation = 0.97 + Math.random() * 0.06;
+  return Math.max(a * perturbation, 3.0);
 }
 
 function validatePseudopotential(filePath: string): boolean {
@@ -973,6 +995,79 @@ function validatePositionDistances(
     }
   }
   return true;
+}
+
+function repairStructureGeometry(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+  pressureGPa: number = 0,
+): { positions: Array<{ element: string; x: number; y: number; z: number }>; latticeA: number; repaired: boolean } {
+  const MAX_REPAIR_ROUNDS = 8;
+  const MAX_RESCALES = 3;
+  let rescaleCount = 0;
+  let repaired = false;
+  const pressureScale = pressureGPa > 50 ? computePressureScale(pressureGPa) : 1.0;
+  let curPositions = positions.map(p => ({ ...p }));
+  let curLattice = latticeA;
+
+  for (let round = 0; round < MAX_REPAIR_ROUNDS; round++) {
+    let violations = 0;
+    let worstRatio = 1.0;
+
+    for (let i = 0; i < curPositions.length; i++) {
+      for (let j = i + 1; j < curPositions.length; j++) {
+        let fdx = curPositions[i].x - curPositions[j].x;
+        let fdy = curPositions[i].y - curPositions[j].y;
+        let fdz = curPositions[i].z - curPositions[j].z;
+        fdx -= Math.round(fdx);
+        fdy -= Math.round(fdy);
+        fdz -= Math.round(fdz);
+        const dist = Math.sqrt((fdx * curLattice) ** 2 + (fdy * curLattice) ** 2 + (fdz * curLattice) ** 2);
+        const dMin = 0.7 * ((COVALENT_RADIUS[curPositions[i].element] ?? 1.4) + (COVALENT_RADIUS[curPositions[j].element] ?? 1.4)) * pressureScale;
+
+        if (dist < dMin && dist > 0.01) {
+          violations++;
+          const ratio = dist / dMin;
+          if (ratio < worstRatio) worstRatio = ratio;
+
+          const pushFactor = (dMin / dist - 1.0) * 0.6;
+          const pushX = fdx * pushFactor;
+          const pushY = fdy * pushFactor;
+          const pushZ = fdz * pushFactor;
+
+          curPositions[i].x += pushX * 0.5;
+          curPositions[i].y += pushY * 0.5;
+          curPositions[i].z += pushZ * 0.5;
+          curPositions[j].x -= pushX * 0.5;
+          curPositions[j].y -= pushY * 0.5;
+          curPositions[j].z -= pushZ * 0.5;
+
+          curPositions[i].x -= Math.floor(curPositions[i].x);
+          curPositions[i].y -= Math.floor(curPositions[i].y);
+          curPositions[i].z -= Math.floor(curPositions[i].z);
+          curPositions[j].x -= Math.floor(curPositions[j].x);
+          curPositions[j].y -= Math.floor(curPositions[j].y);
+          curPositions[j].z -= Math.floor(curPositions[j].z);
+        }
+      }
+    }
+
+    if (violations === 0) {
+      if (round > 0) repaired = true;
+      break;
+    }
+
+    if (worstRatio < 0.7 && rescaleCount < MAX_RESCALES) {
+      const scaleFactor = 1.0 + (1.0 - worstRatio) * 0.3;
+      curLattice *= scaleFactor;
+      rescaleCount++;
+      repaired = true;
+    }
+
+    if (round > 0) repaired = true;
+  }
+
+  return { positions: curPositions, latticeA: curLattice, repaired };
 }
 
 function generateHydrideCagePositions(
@@ -1920,6 +2015,13 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       if (proto) result.prototypeUsed = proto.template.name;
     } catch {}
 
+    const initRepair = repairStructureGeometry(positions, latticeA, workerPressure);
+    if (initRepair.repaired) {
+      positions = initRepair.positions;
+      latticeA = initRepair.latticeA;
+      console.log(`[QE-Worker] Repaired initial geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
+    }
+
     const preXtbFingerprint = computeStructureFingerprint(positions, latticeA);
     if (isStructureDuplicate(preXtbFingerprint, formula)) {
       result.error = `Duplicate structure (fingerprint=${preXtbFingerprint.slice(0, 8)})`;
@@ -1936,16 +2038,31 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       positions = relaxed;
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
 
-      const geomCheck = softValidateGeometry(positions, latticeA, true, workerPressure);
-      if (!geomCheck.valid) {
-        result.error = `Geometry rejected (post-xTB): ${geomCheck.reason}`;
-        result.failureStage = "geometry";
-        stageFailureCounts.geometry++;
-        console.log(`[QE-Worker] ${formula} geometry invalid after xTB relaxation: ${geomCheck.reason}`);
-        return result;
+      const postXtbGeom = softValidateGeometry(positions, latticeA, true, workerPressure);
+      if (!postXtbGeom.valid) {
+        const xtbRepair = repairStructureGeometry(positions, latticeA, workerPressure);
+        if (xtbRepair.repaired) {
+          positions = xtbRepair.positions;
+          latticeA = xtbRepair.latticeA;
+          console.log(`[QE-Worker] Repaired post-xTB geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
+          const recheck = softValidateGeometry(positions, latticeA, true, workerPressure);
+          if (!recheck.valid) {
+            result.error = `Geometry rejected (post-xTB repair failed): ${recheck.reason}`;
+            result.failureStage = "geometry";
+            stageFailureCounts.geometry++;
+            console.log(`[QE-Worker] ${formula} geometry still invalid after repair: ${recheck.reason}`);
+            return result;
+          }
+        } else {
+          result.error = `Geometry rejected (post-xTB): ${postXtbGeom.reason}`;
+          result.failureStage = "geometry";
+          stageFailureCounts.geometry++;
+          console.log(`[QE-Worker] ${formula} geometry invalid after xTB relaxation: ${postXtbGeom.reason}`);
+          return result;
+        }
       }
-      if (geomCheck.warnings.length > 0) {
-        console.log(`[QE-Worker] ${formula} geometry warnings (proceeding): ${geomCheck.warnings.join("; ")}`);
+      if (postXtbGeom.valid && postXtbGeom.warnings.length > 0) {
+        console.log(`[QE-Worker] ${formula} geometry warnings (proceeding): ${postXtbGeom.warnings.join("; ")}`);
       }
     } else {
       console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
