@@ -5,6 +5,7 @@ import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { classifyFamily } from "./utils";
 import { computeFullTightBinding } from "./tight-binding";
 import { computeAdvancedConstraints, type AdvancedPhysicsConstraints } from "../physics/advanced-constraints";
+import { validateOmegaLog } from "../physics/tc-formulas";
 import { computeOODScore } from "./ood-detector";
 
 export interface PhysicsConstraintMode {
@@ -1696,11 +1697,25 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   let effectiveOmegaLog = coupling.omegaLog;
   const { muStar } = coupling;
 
+  let spectralOmegaLog: number | null = null;
   if (alpha2FData && alpha2FData.integratedLambda > 0) {
     effectiveLambda = alpha2FData.integratedLambda;
     const omegaLogFromAlpha2F = computeOmegaLogFromAlpha2F(alpha2FData);
     if (omegaLogFromAlpha2F > 0) {
+      spectralOmegaLog = omegaLogFromAlpha2F;
       effectiveOmegaLog = omegaLogFromAlpha2F;
+    }
+  }
+
+  if (phonon) {
+    const validation = validateOmegaLog(
+      effectiveOmegaLog,
+      spectralOmegaLog,
+      phonon.debyeTemperature,
+      phonon.maxPhononFrequency
+    );
+    if (validation.corrected) {
+      effectiveOmegaLog = validation.validatedOmegaLog;
     }
   }
 
