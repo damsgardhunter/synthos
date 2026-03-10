@@ -2126,7 +2126,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       console.log(`[QE-Worker] Repaired initial geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
     }
 
-    if (!hasHighSymmetry(positions) && positions.length >= 3) {
+    if (positions.length >= 2) {
       const snapResult = snapToWyckoffSites(positions, latticeA);
       if (snapResult.snapped) {
         positions = snapResult.positions;

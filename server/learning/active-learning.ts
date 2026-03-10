@@ -18,6 +18,7 @@ import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
 import { runInterfaceDiscoveryForActiveLearning, getInterfaceRelaxationStats } from "../crystal/interface-relaxation";
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
 import { computeOODScore } from "./ood-detector";
+import { isValidFormula } from "./utils";
 import { generateDisorderedStructure, suggestDisorders, type DisorderedStructure } from "../crystal/disorder-generator";
 import { computeConfigurationalEntropy, estimateDOSDisorderSignal } from "../crystal/disorder-metrics";
 import type { DisorderContext } from "./ml-predictor";
@@ -409,6 +410,8 @@ export function selectForDFT(
   candidates: SuperconductorCandidate[],
   budget: number = 20
 ): RankedCandidate[] {
+  candidates = candidates.filter(c => isValidFormula(c.formula));
+
   const pureCuriositySlots = Math.max(1, Math.ceil(budget * 0.20));
   const pressureExplorationSlots = Math.min(2, Math.ceil(budget * 0.10));
   const bestTcSlots = Math.min(6, Math.ceil(budget * 0.25));
@@ -1122,7 +1125,8 @@ export async function runActiveLearningCycle(
 
   const eligibleCandidates = allCandidates.filter(c =>
     c.dataConfidence !== "high" &&
-    (c.predictedTc ?? 0) > 5
+    (c.predictedTc ?? 0) > 5 &&
+    isValidFormula(c.formula)
   );
 
   if (eligibleCandidates.length === 0) {

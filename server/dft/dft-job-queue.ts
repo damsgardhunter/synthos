@@ -3,6 +3,7 @@ import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts } fr
 import type { QEFullResult } from "./qe-worker";
 import type { DftJob } from "@shared/schema";
 import { recordStructureFailure } from "../crystal/structure-failure-db";
+import { isValidFormula } from "../learning/utils";
 
 const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
@@ -56,6 +57,10 @@ export async function submitDFTJob(
   priority: number = 50,
   jobType: string = "scf",
 ): Promise<DftJob | null> {
+  if (!isValidFormula(formula)) {
+    console.log(`[DFT-Queue] Formula ${formula} rejected: invalid or contains noble gas`);
+    return null;
+  }
   if (isFormulaBlocked(formula)) {
     console.log(`[DFT-Queue] Formula ${formula} blocked due to repeated failures, skipping`);
     return null;
