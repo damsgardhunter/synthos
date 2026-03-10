@@ -1625,9 +1625,11 @@ function getMinInteratomicDistance(el1: string, el2: string): number {
   const r1 = COVALENT_RADII[el1] ?? 1.4;
   const r2 = COVALENT_RADII[el2] ?? 1.4;
   const bondLength = r1 + r2;
-  const isHydrogenPair = el1 === "H" || el2 === "H";
-  const factor = isHydrogenPair ? 0.70 : 0.80;
-  return Math.max(bondLength * factor, isHydrogenPair ? 0.6 : 0.9);
+  const bothH = el1 === "H" && el2 === "H";
+  const oneH = el1 === "H" || el2 === "H";
+  if (bothH) return Math.max(bondLength * 0.70, 0.74);
+  if (oneH) return Math.max(bondLength * 0.70, 1.3);
+  return Math.max(bondLength * 0.80, 0.9);
 }
 
 function computePairwiseDistances(atoms: AtomPosition[]): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
@@ -1707,48 +1709,45 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string): AtomPo
   const targetVolPerAtom = Math.max(minVol, expectedVolume / Math.max(totalFormulaAtoms, 1));
 
   let current = atoms;
+  const nAtoms = Math.max(totalFormulaAtoms, atoms.length);
 
   for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
     const { minDist, minRatio } = computePairwiseDistances(current);
     const volume = computeBoundingVolume(current);
-    const volumePerAtom = volume / Math.max(totalFormulaAtoms, current.length);
+    const volumePerAtom = volume / nAtoms;
 
     const distOk = minRatio >= 0.99;
     const volOk = volumePerAtom >= targetVolPerAtom - 0.1;
+    const volNotTooLarge = volumePerAtom <= targetVolPerAtom * 2.0;
 
-    if (distOk && volOk) {
-      const volRatioCheck = validateVolumeRatio(volume, expectedVolume);
-      if (volRatioCheck.valid) return current;
+    if (distOk && volOk && volNotTooLarge) {
+      return current;
     }
 
-    const damping = 1.0 / (1.0 + attempt * 0.3);
-    const volRatio = volumePerAtom / targetVolPerAtom;
+    const distScale = distOk ? 1.0 : 1.02 / Math.max(minRatio, 0.01);
+    const volScale = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
 
-    let scaleFactor = 1.0;
-    if (!distOk) {
-      const rawExpansion = 1.05 / Math.max(minRatio, 0.01);
-      if (volRatio > 1.3) {
-        scaleFactor = Math.max(scaleFactor, 1.0 + (rawExpansion - 1.0) * 0.4 * damping);
-      } else {
-        scaleFactor = Math.max(scaleFactor, 1.0 + (rawExpansion - 1.0) * damping);
-      }
-    } else if (!volOk) {
-      const neededFactor = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
-      scaleFactor = Math.max(scaleFactor, 1.0 + (neededFactor - 1.0) * damping);
-    } else if (volRatio > 1.6) {
-      const contractFactor = Math.cbrt(1.0 / volRatio);
-      scaleFactor = 1.0 + (contractFactor - 1.0) * damping;
+    let scaleFactor: number;
+    if (!distOk && volScale < 1.0) {
+      scaleFactor = distScale;
+    } else if (!distOk) {
+      scaleFactor = Math.max(distScale, volScale);
+    } else {
+      scaleFactor = volScale;
     }
 
-    scaleFactor = Math.max(scaleFactor, 0.7);
-    scaleFactor = Math.min(scaleFactor, 1.5);
-    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(2)} (damping=${damping.toFixed(2)})`);
+    const damping = 1.0 / (1.0 + attempt * 0.5);
+    scaleFactor = 1.0 + (scaleFactor - 1.0) * damping;
+    scaleFactor = Math.max(scaleFactor, 0.8);
+    scaleFactor = Math.min(scaleFactor, 1.3);
+
+    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) — scaling by ${scaleFactor.toFixed(3)}`);
     current = scaleStructure(current, scaleFactor);
   }
 
   const { minDist, minRatio } = computePairwiseDistances(current);
   const volume = computeBoundingVolume(current);
-  const volumePerAtom = volume / Math.max(totalFormulaAtoms, current.length);
+  const volumePerAtom = volume / nAtoms;
 
   if (minRatio < 0.99 || volumePerAtom < minVol - 0.1) {
     console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų`);
