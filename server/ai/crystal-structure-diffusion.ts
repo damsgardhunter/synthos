@@ -42,6 +42,7 @@ export interface DiffusedCrystal {
   diffusionSteps: number;
   lambda: number;
   latentNorm: number;
+  source: "diffusion" | "template";
 }
 
 const ELEMENT_EMBEDDINGS: Record<string, number[]> = {
@@ -623,6 +624,108 @@ function passesValidityFilter(
   return true;
 }
 
+function assessStructuralPhysicality(
+  atoms: CrystalAtom[],
+  lattice: { a: number; b: number; c: number }
+): number {
+  if (atoms.length === 0) return 1.0;
+
+  let bondDistVariance = 0;
+  let shortContactCount = 0;
+  let isolatedAtomCount = 0;
+  let clusteringPenalty = 0;
+  const nAtoms = atoms.length;
+  const distances: number[] = [];
+
+  for (let i = 0; i < nAtoms; i++) {
+    let neighbors = 0;
+    let nearestDist = Infinity;
+    for (let j = 0; j < nAtoms; j++) {
+      if (i === j) continue;
+      const dx = (atoms[j].fx - atoms[i].fx) * lattice.a;
+      const dy = (atoms[j].fy - atoms[i].fy) * lattice.b;
+      const dz = (atoms[j].fz - atoms[i].fz) * lattice.c;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      distances.push(d);
+      if (d < nearestDist) nearestDist = d;
+      const ri = COVALENT_RADII[atoms[i].element] ?? 1.4;
+      const rj = COVALENT_RADII[atoms[j].element] ?? 1.4;
+      if (d < (ri + rj) * 1.5) neighbors++;
+      if (d < (ri + rj) * 0.6) shortContactCount++;
+    }
+    if (neighbors === 0) isolatedAtomCount++;
+  }
+
+  if (distances.length > 0) {
+    const meanDist = distances.reduce((s, d) => s + d, 0) / distances.length;
+    bondDistVariance = distances.reduce((s, d) => s + (d - meanDist) ** 2, 0) / distances.length;
+    bondDistVariance = Math.sqrt(bondDistVariance) / Math.max(meanDist, 0.1);
+  }
+
+  const centroidX = atoms.reduce((s, a) => s + a.fx, 0) / nAtoms;
+  const centroidY = atoms.reduce((s, a) => s + a.fy, 0) / nAtoms;
+  const centroidZ = atoms.reduce((s, a) => s + a.fz, 0) / nAtoms;
+  const spatialSpread = atoms.reduce((s, a) => {
+    return s + (a.fx - centroidX) ** 2 + (a.fy - centroidY) ** 2 + (a.fz - centroidZ) ** 2;
+  }, 0) / nAtoms;
+  if (spatialSpread < 0.01) clusteringPenalty = 0.4;
+  else if (spatialSpread < 0.03) clusteringPenalty = 0.2;
+
+  let score = 0;
+  score += Math.min(0.3, (shortContactCount / Math.max(nAtoms, 1)) * 0.6);
+  score += Math.min(0.25, (isolatedAtomCount / Math.max(nAtoms, 1)) * 0.5);
+  score += Math.min(0.25, bondDistVariance > 1.5 ? 0.25 : bondDistVariance > 0.8 ? 0.12 : 0);
+  score += clusteringPenalty;
+
+  return Math.min(1.0, Math.max(0, score));
+}
+
+const NOVELTY_THRESHOLD_FOR_FALLBACK = 0.35;
+
+function generateTemplateBasedCrystal(
+  composition: Record<string, number>,
+  formula: string,
+  motif: StructuralMotif,
+): { atoms: CrystalAtom[]; lattice: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number }; spaceGroup: string; crystalSystem: string } | null {
+  try {
+    const sysDist = sampleCrystalSystem(true);
+    const { sg, symbol: sgSymbol } = sampleSpaceGroup(sysDist);
+    const lattice = sampleLatticeParams(sysDist);
+    const fullLattice = {
+      ...lattice,
+      alpha: CRYSTAL_SYSTEMS[sysDist.system]?.alpha ?? 90,
+      beta: CRYSTAL_SYSTEMS[sysDist.system]?.beta ?? 90,
+      gamma: CRYSTAL_SYSTEMS[sysDist.system]?.gamma ?? 90,
+    };
+
+    let wyckoffSites = sampleWyckoffPositions(sysDist, composition);
+    wyckoffSites = scoreBasedDenoising(wyckoffSites, lattice, 20, 0.5);
+
+    const atoms: CrystalAtom[] = wyckoffSites.map(s => ({
+      element: s.element,
+      fx: s.x,
+      fy: s.y,
+      fz: s.z,
+      occupancy: s.occupancy,
+    }));
+
+    if (atoms.length === 0) return null;
+
+    const vol = lattice.a * lattice.b * lattice.c;
+    const volPerAtom = vol / atoms.length;
+    if (volPerAtom < 5 || volPerAtom > 50) return null;
+
+    return {
+      atoms,
+      lattice: fullLattice,
+      spaceGroup: `${sgSymbol} (#${sg})`,
+      crystalSystem: sysDist.system,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function computeStructureScore(crystal: DiffusedCrystal): number {
   let score = 0;
 
@@ -673,8 +776,12 @@ const diffusionStats = {
   bestFormula: "",
   bestMotif: "",
   avgTc: 0,
+  templateFallbacks: 0,
+  diffusionSourced: 0,
+  templateSourced: 0,
+  avgPhysicalityScore: 0,
   motifBreakdown: {} as Record<string, { count: number; avgTc: number; bestTc: number }>,
-  recentResults: [] as { formula: string; tc: number; motif: string; steps: number }[],
+  recentResults: [] as { formula: string; tc: number; motif: string; steps: number; source: string }[],
 };
 
 export function runCrystalDiffusionCycle(
@@ -740,10 +847,31 @@ export function runCrystalDiffusionCycle(
       const compCondition = encodeComposition(composition);
       atoms = runDenoising(atoms, lattice, diffusionSteps, motif, compCondition);
 
-      if (!passesValidityFilter(atoms, lattice, composition)) {
-        diffusionStats.totalGenerated++;
-        continue;
+      let crystalSource: "diffusion" | "template" = "diffusion";
+      let finalAtoms = atoms;
+      let finalLattice: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number } = { ...lattice };
+      let finalSpaceGroup = motif.spaceGroup;
+      let finalCrystalSystem = motif.crystalSystem;
+
+      const physicalityDeficit = assessStructuralPhysicality(atoms, lattice);
+
+      const diffusionInvalid = !passesValidityFilter(atoms, finalLattice, composition);
+      if (physicalityDeficit >= NOVELTY_THRESHOLD_FOR_FALLBACK || diffusionInvalid) {
+        diffusionStats.templateFallbacks++;
+        const templateResult = generateTemplateBasedCrystal(composition, formula, motif);
+        if (!templateResult) {
+          diffusionStats.totalGenerated++;
+          continue;
+        }
+        finalAtoms = templateResult.atoms;
+        finalLattice = templateResult.lattice;
+        finalSpaceGroup = templateResult.spaceGroup;
+        finalCrystalSystem = templateResult.crystalSystem;
+        crystalSource = "template";
       }
+
+      const finalPhysicality = assessStructuralPhysicality(finalAtoms, finalLattice);
+      const noveltyScore = Math.round(finalPhysicality * 1000) / 1000;
 
       let predictedTc = 0;
       let lambda = 0;
@@ -795,17 +923,18 @@ export function runCrystalDiffusionCycle(
 
       const crystal: DiffusedCrystal = {
         formula,
-        atoms,
-        lattice: { ...lattice },
-        spaceGroup: motif.spaceGroup,
-        crystalSystem: motif.crystalSystem,
+        atoms: finalAtoms,
+        lattice: finalLattice,
+        spaceGroup: finalSpaceGroup,
+        crystalSystem: finalCrystalSystem,
         motif: motif.name,
         predictedTc: Math.round(predictedTc * 10) / 10,
         stabilityScore: Math.round(stabilityScore * 1000) / 1000,
-        noveltyScore: Math.round((0.5 + Math.random() * 0.3) * 1000) / 1000,
+        noveltyScore,
         diffusionSteps,
         lambda: Math.round(lambda * 1000) / 1000,
         latentNorm: Math.round(latentNorm * 100) / 100,
+        source: crystalSource,
       };
 
       const structScore = computeStructureScore(crystal);
@@ -814,6 +943,12 @@ export function runCrystalDiffusionCycle(
       results.push(crystal);
       diffusionStats.totalGenerated++;
       diffusionStats.totalValid++;
+      if (crystalSource === "template") diffusionStats.templateSourced++;
+      else diffusionStats.diffusionSourced++;
+
+      const runningPhysicality = diffusionStats.avgPhysicalityScore;
+      const validCount = diffusionStats.totalValid;
+      diffusionStats.avgPhysicalityScore = (runningPhysicality * (validCount - 1) + noveltyScore) / validCount;
 
       if (predictedTc > 20) diffusionStats.totalHighTc++;
       if (predictedTc > diffusionStats.bestTc) {
@@ -832,7 +967,7 @@ export function runCrystalDiffusionCycle(
       if (predictedTc > mb.bestTc) mb.bestTc = predictedTc;
 
       diffusionStats.recentResults.push({
-        formula, tc: predictedTc, motif: motif.name, steps: diffusionSteps,
+        formula, tc: predictedTc, motif: motif.name, steps: diffusionSteps, source: crystalSource,
       });
       if (diffusionStats.recentResults.length > 50) diffusionStats.recentResults.shift();
 
@@ -1057,6 +1192,8 @@ export function runDistributionBasedDiffusion(
         latent.structure.reduce((s, v) => s + v * v, 0)
       );
 
+      const distPhysicality = assessStructuralPhysicality(atoms, lattice);
+
       const crystal: DiffusedCrystal = {
         formula,
         atoms,
@@ -1066,10 +1203,11 @@ export function runDistributionBasedDiffusion(
         motif: motif.name,
         predictedTc: Math.round(predictedTc * 10) / 10,
         stabilityScore: Math.round(stabilityScore * 1000) / 1000,
-        noveltyScore: Math.round((0.5 + Math.random() * 0.3) * 1000) / 1000,
+        noveltyScore: Math.round(distPhysicality * 1000) / 1000,
         diffusionSteps: steps,
         lambda: Math.round(lambda * 1000) / 1000,
         latentNorm: Math.round(latentNorm * 100) / 100,
+        source: "template",
       };
 
       results.push(crystal);
@@ -1164,6 +1302,7 @@ export async function runTrainedDiffusionCycle(count: number = 5): Promise<Diffu
       diffusionSteps: 50,
       lambda: 0,
       latentNorm: 0,
+      source: "diffusion",
     });
   }
 
