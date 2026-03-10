@@ -94,6 +94,8 @@ import {
 import { recordSynthesisResult, getSynthesisLearningStats } from "../synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "../physics/defect-engine";
 import { generateAllDisorderVariants, suggestDisorders } from "../crystal/disorder-generator";
+import { computeConfigurationalEntropy, estimateDOSDisorderSignal } from "../crystal/disorder-metrics";
+import type { DisorderContext } from "./ml-predictor";
 import { estimateCorrelationEffects, getCorrelationEngineStats } from "../physics/correlation-engine";
 import { simulateCrystalGrowth, getCrystalGrowthStats } from "../synthesis/crystal-growth-simulator";
 import { getExperimentPlannerStats, generateExperimentPlan, type ExperimentCandidate } from "../experiment-planner";
@@ -1983,6 +1985,23 @@ async function runPhase10_Physics() {
                 const bestDisorder = disordered.reduce((best, d) =>
                   d.tcModifierEstimate > (best?.tcModifierEstimate ?? 0) ? d : best, disordered[0]);
                 if (bestDisorder && bestDisorder.tcModifierEstimate > 1.05) {
+                  let disorderAwareTc = updatedTc * bestDisorder.tcModifierEstimate;
+                  if (bestDisorder.metrics) {
+                    try {
+                      const dCtx: DisorderContext = {
+                        vacancyFraction: bestDisorder.metrics.vacancyFraction,
+                        bondVariance: bestDisorder.metrics.bondVariance,
+                        latticeStrain: bestDisorder.metrics.localStrainMean,
+                        siteMixingEntropy: bestDisorder.metrics.siteMixingFraction > 0
+                          ? -bestDisorder.metrics.siteMixingFraction * Math.log(bestDisorder.metrics.siteMixingFraction) : 0,
+                        configurationalEntropy: bestDisorder.metrics.configurationalEntropy,
+                        dosDisorderSignal: bestDisorder.metrics.dosDisorderSignal,
+                      };
+                      const disorderFeatures = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, dCtx);
+                      const disorderPred = gbPredict(disorderFeatures);
+                      disorderAwareTc = Math.max(disorderAwareTc, disorderPred.tcPredicted);
+                    } catch { /* use modifier-based estimate */ }
+                  }
                   crossEngineHub.recordInsight("defect", candidate.formula, {
                     disorderType: bestDisorder.disorder.type,
                     disorderElement: bestDisorder.disorder.element,
@@ -1990,6 +2009,9 @@ async function runPhase10_Physics() {
                     tcModifier: bestDisorder.tcModifierEstimate,
                     defectCount: bestDisorder.defectCount,
                     totalAtoms: bestDisorder.totalAtoms,
+                    disorderAwareTc,
+                    configEntropy: bestDisorder.metrics?.configurationalEntropy ?? 0,
+                    dosSignal: bestDisorder.metrics?.dosDisorderSignal ?? 0,
                   });
                 }
               }

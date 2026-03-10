@@ -18,6 +18,39 @@ function isXtbAvailable(): boolean {
 
 export type DisorderType = "vacancy" | "substitution" | "interstitial" | "site-mixing" | "amorphous";
 
+export interface DisorderSearchLimits {
+  maxVacancyFraction: number;
+  maxSubstitutionFraction: number;
+  maxInterstitialFraction: number;
+  maxSiteMixingFraction: number;
+  maxAmorphousFraction: number;
+  maxDisorderTypes: number;
+}
+
+export const DEFAULT_SEARCH_LIMITS: DisorderSearchLimits = {
+  maxVacancyFraction: 0.10,
+  maxSubstitutionFraction: 0.20,
+  maxInterstitialFraction: 0.10,
+  maxSiteMixingFraction: 0.15,
+  maxAmorphousFraction: 1.0,
+  maxDisorderTypes: 2,
+};
+
+function clampFraction(fraction: number, type: DisorderType, limits: DisorderSearchLimits): number {
+  switch (type) {
+    case "vacancy": return Math.min(fraction, limits.maxVacancyFraction);
+    case "substitution": return Math.min(fraction, limits.maxSubstitutionFraction);
+    case "interstitial": return Math.min(fraction, limits.maxInterstitialFraction);
+    case "site-mixing": return Math.min(fraction, limits.maxSiteMixingFraction);
+    case "amorphous": return Math.min(fraction, limits.maxAmorphousFraction);
+    default: return fraction;
+  }
+}
+
+export function getSearchLimits(): DisorderSearchLimits {
+  return { ...DEFAULT_SEARCH_LIMITS };
+}
+
 export interface DisorderSpec {
   type: DisorderType;
   element: string;
@@ -820,10 +853,12 @@ export function generateDisorderedStructure(
   disorder: DisorderSpec,
   supercellSize?: [number, number, number]
 ): DisorderedStructure {
+  const clampedFraction = clampFraction(disorder.fraction, disorder.type, DEFAULT_SEARCH_LIMITS);
+  const clampedDisorder = { ...disorder, fraction: clampedFraction };
   const size = supercellSize || chooseSuperCellSize(baseFormula);
   const { atoms: pristineAtoms, lattice } = buildSupercell(baseFormula, size);
   const seed = baseFormula.split("").reduce((s, c) => s + c.charCodeAt(0), 0) +
-    disorder.element.charCodeAt(0) + Math.round(disorder.fraction * 1000);
+    clampedDisorder.element.charCodeAt(0) + Math.round(clampedDisorder.fraction * 1000);
   const rng = seededRandom(seed);
 
   let resultAtoms: DisorderedAtom[];
@@ -833,15 +868,15 @@ export function generateDisorderedStructure(
   const comp = parseFormula(baseFormula);
   const elementsInFormula = Object.keys(comp);
 
-  switch (disorder.type) {
+  switch (clampedDisorder.type) {
     case "vacancy": {
-      if (!pristineAtoms.some(a => a.element === disorder.element)) {
-        const closest = elementsInFormula[0] || disorder.element;
-        const { modified, removed } = introduceVacancy(pristineAtoms, closest, disorder.fraction, rng);
+      if (!pristineAtoms.some(a => a.element === clampedDisorder.element)) {
+        const closest = elementsInFormula[0] || clampedDisorder.element;
+        const { modified, removed } = introduceVacancy(pristineAtoms, closest, clampedDisorder.fraction, rng);
         resultAtoms = modified;
         defectCount = removed;
       } else {
-        const { modified, removed } = introduceVacancy(pristineAtoms, disorder.element, disorder.fraction, rng);
+        const { modified, removed } = introduceVacancy(pristineAtoms, clampedDisorder.element, clampedDisorder.fraction, rng);
         resultAtoms = modified;
         defectCount = removed;
       }
@@ -849,12 +884,12 @@ export function generateDisorderedStructure(
     }
 
     case "substitution": {
-      const sub = disorder.substituent ||
-        (SUBSTITUTION_MAP[disorder.element] || [])[0] || "X";
-      const targetEl = pristineAtoms.some(a => a.element === disorder.element)
-        ? disorder.element : elementsInFormula[0];
+      const sub = clampedDisorder.substituent ||
+        (SUBSTITUTION_MAP[clampedDisorder.element] || [])[0] || "X";
+      const targetEl = pristineAtoms.some(a => a.element === clampedDisorder.element)
+        ? clampedDisorder.element : elementsInFormula[0];
       const { modified, substituted } = introduceSubstitution(
-        pristineAtoms, targetEl, sub, disorder.fraction, rng
+        pristineAtoms, targetEl, sub, clampedDisorder.fraction, rng
       );
       resultAtoms = modified;
       defectCount = substituted;
@@ -863,7 +898,7 @@ export function generateDisorderedStructure(
 
     case "interstitial": {
       const { modified, added } = introduceInterstitial(
-        pristineAtoms, disorder.element, disorder.fraction, lattice, rng
+        pristineAtoms, clampedDisorder.element, clampedDisorder.fraction, lattice, rng
       );
       resultAtoms = modified;
       defectCount = added;
@@ -871,10 +906,10 @@ export function generateDisorderedStructure(
     }
 
     case "site-mixing": {
-      const targetEl = pristineAtoms.some(a => a.element === disorder.element)
-        ? disorder.element : elementsInFormula[0];
+      const targetEl = pristineAtoms.some(a => a.element === clampedDisorder.element)
+        ? clampedDisorder.element : elementsInFormula[0];
       const { modified, mixed } = introduceSiteMixing(
-        pristineAtoms, targetEl, disorder.fraction, rng
+        pristineAtoms, targetEl, clampedDisorder.fraction, rng
       );
       resultAtoms = modified;
       defectCount = mixed;
@@ -883,7 +918,7 @@ export function generateDisorderedStructure(
 
     case "amorphous": {
       const { modified, displaced, method } = introduceAmorphousXtbMD(
-        pristineAtoms, disorder.fraction, lattice, baseFormula, rng
+        pristineAtoms, clampedDisorder.fraction, lattice, baseFormula, rng
       );
       resultAtoms = modified;
       defectCount = displaced;
@@ -896,10 +931,10 @@ export function generateDisorderedStructure(
       defectCount = 0;
   }
 
-  const formationEnergy = estimateFormationEnergy(disorder.type, disorder.element, disorder.fraction);
-  const tcModifier = estimateTcModifier(disorder.type, disorder.element, disorder.fraction, baseFormula);
+  const formationEnergy = estimateFormationEnergy(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction);
+  const tcModifier = estimateTcModifier(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction, baseFormula);
   const defectFraction = defectCount / Math.max(1, pristineAtoms.length);
-  const notes = generateNotes(disorder.type, disorder.element, disorder.fraction, tcModifier, baseFormula);
+  const notes = generateNotes(clampedDisorder.type, clampedDisorder.element, clampedDisorder.fraction, tcModifier, baseFormula);
 
   const metrics = computeDisorderMetrics(resultAtoms);
   const mlFeatures = extractMLFeatures(metrics);
@@ -907,7 +942,7 @@ export function generateDisorderedStructure(
 
   const result: DisorderedStructure = {
     base: baseFormula,
-    disorder,
+    disorder: clampedDisorder,
     atoms: resultAtoms,
     supercellSize: size,
     latticeA: lattice.a,
@@ -931,62 +966,81 @@ export function generateDisorderedStructure(
 
 export function generateAllDisorderVariants(
   baseFormula: string,
-  fractions?: number[]
+  fractions?: number[],
+  limits?: Partial<DisorderSearchLimits>
 ): DisorderedStructure[] {
+  const searchLimits = { ...DEFAULT_SEARCH_LIMITS, ...limits };
   const comp = parseFormula(baseFormula);
   const elements = Object.keys(comp);
   const frac = fractions || [0.02, 0.05, 0.10];
   const results: DisorderedStructure[] = [];
+  const typesUsed = new Set<DisorderType>();
 
   for (const el of elements) {
+    if (typesUsed.size >= searchLimits.maxDisorderTypes && !typesUsed.has("vacancy")) continue;
     for (const f of frac) {
+      if (f > searchLimits.maxVacancyFraction) continue;
       results.push(generateDisorderedStructure(baseFormula, {
         type: "vacancy",
         element: el,
         fraction: f,
       }));
+      typesUsed.add("vacancy");
     }
   }
 
   for (const el of elements) {
+    if (typesUsed.size >= searchLimits.maxDisorderTypes && !typesUsed.has("substitution")) break;
     const subs = SUBSTITUTION_MAP[el];
     if (!subs || subs.length === 0) continue;
     for (const sub of subs.slice(0, 2)) {
       for (const f of frac.slice(0, 2)) {
+        if (f > searchLimits.maxSubstitutionFraction) continue;
         results.push(generateDisorderedStructure(baseFormula, {
           type: "substitution",
           element: el,
           fraction: f,
           substituent: sub,
         }));
+        typesUsed.add("substitution");
       }
     }
   }
 
-  for (const intEl of INTERSTITIAL_CANDIDATES.slice(0, 3)) {
-    if (elements.includes(intEl)) continue;
-    for (const f of frac.slice(0, 2)) {
-      results.push(generateDisorderedStructure(baseFormula, {
-        type: "interstitial",
-        element: intEl,
-        fraction: f,
-      }));
+  if (typesUsed.size < searchLimits.maxDisorderTypes || typesUsed.has("interstitial")) {
+    for (const intEl of INTERSTITIAL_CANDIDATES.slice(0, 3)) {
+      if (elements.includes(intEl)) continue;
+      for (const f of frac.slice(0, 2)) {
+        if (f > searchLimits.maxInterstitialFraction) continue;
+        results.push(generateDisorderedStructure(baseFormula, {
+          type: "interstitial",
+          element: intEl,
+          fraction: f,
+        }));
+        typesUsed.add("interstitial");
+      }
     }
   }
 
-  for (const el of elements) {
-    results.push(generateDisorderedStructure(baseFormula, {
-      type: "site-mixing",
-      element: el,
-      fraction: 0.05,
-    }));
+  if (typesUsed.size < searchLimits.maxDisorderTypes || typesUsed.has("site-mixing")) {
+    for (const el of elements) {
+      results.push(generateDisorderedStructure(baseFormula, {
+        type: "site-mixing",
+        element: el,
+        fraction: Math.min(0.05, searchLimits.maxSiteMixingFraction),
+      }));
+      typesUsed.add("site-mixing");
+    }
   }
 
-  results.push(generateDisorderedStructure(baseFormula, {
-    type: "amorphous",
-    element: elements[0],
-    fraction: 0.5,
-  }));
+  if (typesUsed.size < searchLimits.maxDisorderTypes || typesUsed.has("amorphous")) {
+    results.push(generateDisorderedStructure(baseFormula, {
+      type: "amorphous",
+      element: elements[0],
+      fraction: Math.min(0.5, searchLimits.maxAmorphousFraction),
+    }));
+    typesUsed.add("amorphous");
+  }
 
   return results;
 }

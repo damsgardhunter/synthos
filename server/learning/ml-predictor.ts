@@ -314,6 +314,12 @@ export interface MLFeatureVector {
   derivedSpectralWeight: number;
   derivedAnharmonicRatio: number;
   derivedCouplingEfficiency: number;
+  disorderVacancyFraction: number;
+  disorderBondVariance: number;
+  disorderLatticeStrain: number;
+  disorderSiteMixingEntropy: number;
+  disorderConfigEntropy: number;
+  disorderDosSignal: number;
   _sourceFormula?: string;
 }
 
@@ -341,7 +347,16 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
-export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext, dftData?: DFTResolvedFeatures): MLFeatureVector {
+export interface DisorderContext {
+  vacancyFraction?: number;
+  bondVariance?: number;
+  latticeStrain?: number;
+  siteMixingEntropy?: number;
+  configurationalEntropy?: number;
+  dosDisorderSignal?: number;
+}
+
+export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext, dftData?: DFTResolvedFeatures, disorderCtx?: DisorderContext): MLFeatureVector {
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -666,6 +681,12 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
         derivedCouplingEfficiency: 0,
       };
     })(),
+    disorderVacancyFraction: disorderCtx?.vacancyFraction ?? 0,
+    disorderBondVariance: disorderCtx?.bondVariance ?? 0,
+    disorderLatticeStrain: disorderCtx?.latticeStrain ?? 0,
+    disorderSiteMixingEntropy: disorderCtx?.siteMixingEntropy ?? 0,
+    disorderConfigEntropy: disorderCtx?.configurationalEntropy ?? 0,
+    disorderDosSignal: disorderCtx?.dosDisorderSignal ?? 0,
     _sourceFormula: formula,
   };
 }

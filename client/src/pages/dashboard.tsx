@@ -1204,7 +1204,18 @@ function DisorderGeneratorCard() {
     avgBondVariance: number;
     avgCoordinationVariance: number;
     avgLocalStrain: number;
+    avgConfigEntropy: number;
+    avgDosDisorderSignal: number;
   }>({ queryKey: ["/api/disorder-metrics/stats"], refetchInterval: 30000 });
+
+  const { data: searchLimits } = useQuery<{
+    maxVacancyFraction: number;
+    maxSubstitutionFraction: number;
+    maxInterstitialFraction: number;
+    maxSiteMixingFraction: number;
+    maxAmorphousFraction: number;
+    maxDisorderTypes: number;
+  }>({ queryKey: ["/api/disorder-generator/search-limits"], refetchInterval: 60000 });
 
   const typeColors: Record<string, string> = {
     vacancy: "text-red-400",
@@ -1327,7 +1338,7 @@ function DisorderGeneratorCard() {
             {metricsStats && metricsStats.totalAnalyzed > 0 && (
               <div className="space-y-2 border-t border-border/40 pt-2 mt-2">
                 <div className="text-[10px] text-muted-foreground font-medium">Disorder Metrics</div>
-                <div className="grid grid-cols-4 gap-1">
+                <div className="grid grid-cols-3 gap-1">
                   <div className="bg-muted/30 rounded p-1 text-center">
                     <div className="text-[9px] text-muted-foreground">Avg Score</div>
                     <div className="text-xs font-bold text-cyan-400" data-testid="text-disorder-avg-score">{metricsStats.avgDisorderScore.toFixed(3)}</div>
@@ -1340,9 +1351,19 @@ function DisorderGeneratorCard() {
                     <div className="text-[9px] text-muted-foreground">Bond Var</div>
                     <div className="text-xs font-bold text-blue-400" data-testid="text-disorder-bond-var">{metricsStats.avgBondVariance.toFixed(3)}</div>
                   </div>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
                   <div className="bg-muted/30 rounded p-1 text-center">
                     <div className="text-[9px] text-muted-foreground">Coord Var</div>
                     <div className="text-xs font-bold text-green-400" data-testid="text-disorder-coord-var">{metricsStats.avgCoordinationVariance.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[9px] text-muted-foreground">Config Entropy</div>
+                    <div className="text-xs font-bold text-purple-400" data-testid="text-disorder-config-entropy">{metricsStats.avgConfigEntropy.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[9px] text-muted-foreground">DOS Signal</div>
+                    <div className="text-xs font-bold text-yellow-400" data-testid="text-disorder-dos-signal">{metricsStats.avgDosDisorderSignal.toFixed(3)}</div>
                   </div>
                 </div>
                 <div className="grid grid-cols-5 gap-1">
@@ -1352,6 +1373,26 @@ function DisorderGeneratorCard() {
                       <div className="text-[10px] font-bold" data-testid={`text-disorder-class-${cls}`}>{metricsStats.byClass[cls] || 0}</div>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {searchLimits && (
+              <div className="space-y-1 border-t border-border/40 pt-2 mt-2">
+                <div className="text-[10px] text-muted-foreground font-medium">Search Limits</div>
+                <div className="grid grid-cols-3 gap-1">
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[8px] text-muted-foreground">Vacancy</div>
+                    <div className="text-[10px] font-bold text-red-400" data-testid="text-limit-vacancy">{(searchLimits.maxVacancyFraction * 100).toFixed(0)}%</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[8px] text-muted-foreground">Substitution</div>
+                    <div className="text-[10px] font-bold text-blue-400" data-testid="text-limit-substitution">{(searchLimits.maxSubstitutionFraction * 100).toFixed(0)}%</div>
+                  </div>
+                  <div className="bg-muted/30 rounded p-1 text-center">
+                    <div className="text-[8px] text-muted-foreground">Max Types</div>
+                    <div className="text-[10px] font-bold text-white" data-testid="text-limit-types">{searchLimits.maxDisorderTypes}</div>
+                  </div>
                 </div>
               </div>
             )}

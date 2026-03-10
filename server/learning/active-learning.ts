@@ -18,6 +18,9 @@ import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
 import { runInterfaceDiscoveryForActiveLearning, getInterfaceRelaxationStats } from "../crystal/interface-relaxation";
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
 import { computeOODScore } from "./ood-detector";
+import { generateDisorderedStructure, suggestDisorders, type DisorderedStructure } from "../crystal/disorder-generator";
+import { computeConfigurationalEntropy, estimateDOSDisorderSignal } from "../crystal/disorder-metrics";
+import type { DisorderContext } from "./ml-predictor";
 import {
   addBatchFromEvaluation, startNewBatchCycle, recordBatchCycle,
   getCurrentCycleNumber, getGroundTruthSummary, getGroundTruthForLLM,
@@ -1173,6 +1176,69 @@ export async function runActiveLearningCycle(
     if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
       bestTcThisLoop = candidate.predictedTc ?? 0;
     }
+  }
+
+  const DISORDER_FRACTIONS = [0.02, 0.05, 0.10];
+  const disorderTopN = Math.min(5, selected.length);
+  let disorderVariantsEvaluated = 0;
+  let disorderBestBoost = 0;
+  let disorderBestFormula = "";
+
+  for (const ranked of selected.slice(0, disorderTopN)) {
+    const { candidate } = ranked;
+    try {
+      const suggestions = suggestDisorders(candidate.formula);
+      const topSuggestions = suggestions.slice(0, 3);
+      let bestVariantTc = candidate.predictedTc ?? 0;
+
+      for (const spec of topSuggestions) {
+        for (const frac of DISORDER_FRACTIONS) {
+          try {
+            const variant = generateDisorderedStructure(candidate.formula, {
+              ...spec,
+              fraction: frac,
+            });
+            disorderVariantsEvaluated++;
+
+            if (variant.metrics) {
+              const disorderCtx: DisorderContext = {
+                vacancyFraction: variant.metrics.vacancyFraction,
+                bondVariance: variant.metrics.bondVariance,
+                latticeStrain: variant.metrics.localStrainMean,
+                siteMixingEntropy: variant.metrics.siteMixingFraction > 0 ? -variant.metrics.siteMixingFraction * Math.log(variant.metrics.siteMixingFraction) : 0,
+                configurationalEntropy: variant.metrics.configurationalEntropy,
+                dosDisorderSignal: variant.metrics.dosDisorderSignal,
+              };
+
+              const features = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, disorderCtx);
+              const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
+              const variantTc = (xgbResult as any).tcPredicted ?? (candidate.predictedTc ?? 0) * variant.tcModifierEstimate;
+
+              if (variantTc > bestVariantTc) {
+                bestVariantTc = variantTc;
+                const boost = bestVariantTc / Math.max(1, candidate.predictedTc ?? 1);
+                if (boost > disorderBestBoost) {
+                  disorderBestBoost = boost;
+                  disorderBestFormula = `${candidate.formula}+${spec.type}(${spec.element},${(frac * 100).toFixed(0)}%)`;
+                }
+              }
+            }
+          } catch { /* skip individual variant */ }
+        }
+      }
+    } catch { /* skip candidate */ }
+  }
+
+  if (disorderVariantsEvaluated > 0) {
+    emit("log", {
+      phase: "active-learning",
+      event: "Disorder variant exploration",
+      detail: `Evaluated ${disorderVariantsEvaluated} disorder variants for ${disorderTopN} candidates. ` +
+        (disorderBestBoost > 1.0
+          ? `Best boost: ${disorderBestFormula} (${((disorderBestBoost - 1) * 100).toFixed(1)}% Tc increase)`
+          : "No significant Tc improvement found from disorder"),
+      dataSource: "Active Learning",
+    });
   }
 
   const cycleDatapoints = getDatapointsByCycle(getCurrentCycleNumber());

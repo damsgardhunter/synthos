@@ -49,6 +49,8 @@ export interface DisorderMetrics {
   interstitialFraction: number;
   siteMixingFraction: number;
   amorphousFraction: number;
+  configurationalEntropy: number;
+  dosDisorderSignal: number;
 }
 
 export interface DisorderMetricsStats {
@@ -59,6 +61,8 @@ export interface DisorderMetricsStats {
   avgBondVariance: number;
   avgCoordinationVariance: number;
   avgLocalStrain: number;
+  avgConfigEntropy: number;
+  avgDosDisorderSignal: number;
   recentAnalyses: Array<{
     formula: string;
     disorderScore: number;
@@ -216,6 +220,30 @@ function mean(values: number[]): number {
   return values.reduce((s, v) => s + v, 0) / values.length;
 }
 
+export function computeConfigurationalEntropy(fractions: number[]): number {
+  let entropy = 0;
+  for (const x of fractions) {
+    if (x > 0 && x <= 1) {
+      entropy -= x * Math.log(x);
+    }
+  }
+  return entropy;
+}
+
+export function estimateDOSDisorderSignal(
+  metrics: { disorderScore: number; bondVariance: number; coordinationVariance: number; localStrainMean: number; vacancyFraction: number; substitutionFraction: number },
+  baseMetallicity: number = 0.5
+): number {
+  const vacancyDOS = metrics.vacancyFraction * 2.5;
+  const subDOS = metrics.substitutionFraction * 1.8;
+  const strainDOS = metrics.localStrainMean * 1.2;
+  const bondDisorderDOS = Math.min(0.5, metrics.bondVariance * 3.0);
+  const coordDisorderDOS = Math.min(0.4, metrics.coordinationVariance * 0.15);
+  const disorderEnhancement = vacancyDOS + subDOS + strainDOS + bondDisorderDOS + coordDisorderDOS;
+  const baseDOS = baseMetallicity * 2.0;
+  return Math.min(5.0, baseDOS + disorderEnhancement);
+}
+
 export function computeDisorderMetrics(
   atoms: Array<{ element: string; x: number; y: number; z: number; isDefect?: boolean; defectType?: string }>,
   bondCutoffFactor: number = 1.3
@@ -252,6 +280,22 @@ export function computeDisorderMetrics(
   const amorphFraction = atoms.filter(a => a.defectType === "amorphous").length / Math.max(totalAtoms, 1);
 
   const defectFraction = atoms.filter(a => a.isDefect).length / Math.max(totalAtoms, 1);
+
+  const elementCounts: Record<string, number> = {};
+  for (const atom of atoms) {
+    elementCounts[atom.element] = (elementCounts[atom.element] || 0) + 1;
+  }
+  const fractions = Object.values(elementCounts).map(c => c / totalAtoms);
+  const configurationalEntropy = computeConfigurationalEntropy(fractions);
+
+  const dosDisorderSignal = estimateDOSDisorderSignal({
+    disorderScore: 0,
+    bondVariance: bondVar,
+    coordinationVariance: coordVar,
+    localStrainMean: mean(strains),
+    vacancyFraction,
+    substitutionFraction: subFraction,
+  });
 
   const normalizedBondVar = Math.min(1.0, bondVar / Math.max(bondMean * bondMean * 0.1, 0.01));
   const normalizedCoordVar = Math.min(1.0, coordVar / Math.max(idealCoord * idealCoord * 0.2, 0.5));
@@ -297,6 +341,8 @@ export function computeDisorderMetrics(
     interstitialFraction: intFraction,
     siteMixingFraction: mixFraction,
     amorphousFraction: amorphFraction,
+    configurationalEntropy,
+    dosDisorderSignal,
   };
 }
 
@@ -308,6 +354,8 @@ const metricsStats: DisorderMetricsStats = {
   avgBondVariance: 0,
   avgCoordinationVariance: 0,
   avgLocalStrain: 0,
+  avgConfigEntropy: 0,
+  avgDosDisorderSignal: 0,
   recentAnalyses: [],
   topDisordered: [],
 };
@@ -316,6 +364,8 @@ let totalScoreSum = 0;
 let totalBondVarSum = 0;
 let totalCoordVarSum = 0;
 let totalStrainSum = 0;
+let totalEntropySum = 0;
+let totalDosSignalSum = 0;
 
 export function recordMetricsAnalysis(formula: string, metrics: DisorderMetrics, totalAtoms: number): void {
   metricsStats.totalAnalyzed++;
@@ -323,11 +373,15 @@ export function recordMetricsAnalysis(formula: string, metrics: DisorderMetrics,
   totalBondVarSum += metrics.bondVariance;
   totalCoordVarSum += metrics.coordinationVariance;
   totalStrainSum += metrics.localStrainMean;
+  totalEntropySum += metrics.configurationalEntropy;
+  totalDosSignalSum += metrics.dosDisorderSignal;
 
   metricsStats.avgDisorderScore = totalScoreSum / metricsStats.totalAnalyzed;
   metricsStats.avgBondVariance = totalBondVarSum / metricsStats.totalAnalyzed;
   metricsStats.avgCoordinationVariance = totalCoordVarSum / metricsStats.totalAnalyzed;
   metricsStats.avgLocalStrain = totalStrainSum / metricsStats.totalAnalyzed;
+  metricsStats.avgConfigEntropy = totalEntropySum / metricsStats.totalAnalyzed;
+  metricsStats.avgDosDisorderSignal = totalDosSignalSum / metricsStats.totalAnalyzed;
 
   if (metrics.disorderScore > metricsStats.maxDisorderScore) {
     metricsStats.maxDisorderScore = metrics.disorderScore;
@@ -380,5 +434,7 @@ export function extractMLFeatures(metrics: DisorderMetrics): Record<string, numb
     interstitial_fraction: metrics.interstitialFraction,
     site_mixing_fraction: metrics.siteMixingFraction,
     amorphous_fraction: metrics.amorphousFraction,
+    configurational_entropy: metrics.configurationalEntropy,
+    dos_disorder_signal: metrics.dosDisorderSignal,
   };
 }

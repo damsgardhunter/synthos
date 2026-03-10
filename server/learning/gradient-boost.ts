@@ -384,6 +384,12 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     sanitize((f as any).dosAtEF_tb, 0),
     sanitize((f as any).bandFlatness_tb, 0),
     sanitize((f as any).lambdaProxy_tb, 0),
+    sanitize((f as any).disorderVacancyFraction, 0),
+    sanitize((f as any).disorderBondVariance, 0),
+    sanitize((f as any).disorderLatticeStrain, 0),
+    sanitize((f as any).disorderSiteMixingEntropy, 0),
+    sanitize((f as any).disorderConfigEntropy, 0),
+    sanitize((f as any).disorderDosSignal, 0),
   ];
 
   let compFeatures: number[] = [];
@@ -418,6 +424,8 @@ const PHYSICS_FEATURE_NAMES = [
   "bandGap", "formationEnergy", "stability", "crystalSymmetry",
   "multiBandScore", "miedemaFormEnergy", "nonCentrosymmetric",
   "dosAtEF_tb", "bandFlatness_tb", "lambdaProxy_tb",
+  "disorderVacancyFrac", "disorderBondVar", "disorderLatticeStrain",
+  "disorderSiteMixEntropy", "disorderConfigEntropy", "disorderDosSignal",
 ];
 
 const FEATURE_NAMES = [...PHYSICS_FEATURE_NAMES, ...COMPOSITION_FEATURE_NAMES];

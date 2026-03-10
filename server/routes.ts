@@ -150,7 +150,7 @@ import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/sy
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
 import {
   generateDisorderedStructure, generateAllDisorderVariants, suggestDisorders,
-  getDisorderGeneratorStats, type DisorderSpec, type DisorderType,
+  getDisorderGeneratorStats, getSearchLimits, type DisorderSpec, type DisorderType,
 } from "./crystal/disorder-generator";
 import {
   computeDisorderMetrics, getDisorderMetricsStats, extractMLFeatures,
@@ -2536,6 +2536,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getDisorderGeneratorStats());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch disorder generator stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/disorder-generator/search-limits", generalLimiter, (_req, res) => {
+    try {
+      res.json(getSearchLimits());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch search limits", detail: e.message?.slice(0, 200) });
     }
   });
 
