@@ -874,6 +874,9 @@ function DistortionDetectorCard() {
     peierlsCount: number;
     cdwCount: number;
     changeTypeCounts: Record<string, number>;
+    bondStats: { analyzedCount: number; avgBondVariance: number; avgDistortedFraction: number };
+    octahedralStats: { analyzedCount: number; avgAngleVariance: number; distortedSiteRate: number; octDistLevels: Record<string, number> };
+    phononStats: { analyzedCount: number; imaginaryCount: number; severityDistribution: Record<string, number> };
     recentDistortions: Array<{
       formula: string;
       level: string;
@@ -882,6 +885,9 @@ function DistortionDetectorCard() {
       strain: number;
       volChange: number;
       symmetryBroken: boolean;
+      bondVariance: number | null;
+      octAngleVar: number | null;
+      phononUnstable: boolean;
     }>;
   }>({ queryKey: ["/api/distortion/stats"] });
 
@@ -956,25 +962,56 @@ function DistortionDetectorCard() {
               </div>
             )}
 
+            <div className="grid grid-cols-3 gap-2">
+              {distStats.bondStats.analyzedCount > 0 && (
+                <div className="bg-muted/30 rounded p-1.5 text-center" data-testid="panel-bond-distortion">
+                  <div className="text-[9px] text-muted-foreground font-medium">Bond Length</div>
+                  <div className="text-xs font-bold text-blue-400">{distStats.bondStats.avgBondVariance.toFixed(4)}</div>
+                  <div className="text-[9px] text-muted-foreground">avg variance (A^2)</div>
+                  <div className="text-[9px] text-muted-foreground">{(distStats.bondStats.avgDistortedFraction * 100).toFixed(0)}% distorted</div>
+                </div>
+              )}
+              {distStats.octahedralStats.analyzedCount > 0 && (
+                <div className="bg-muted/30 rounded p-1.5 text-center" data-testid="panel-octahedral-distortion">
+                  <div className="text-[9px] text-muted-foreground font-medium">Octahedral</div>
+                  <div className="text-xs font-bold text-cyan-400">{distStats.octahedralStats.avgAngleVariance.toFixed(1)}</div>
+                  <div className="text-[9px] text-muted-foreground">avg angle var (deg^2)</div>
+                  <div className="text-[9px] text-muted-foreground">{(distStats.octahedralStats.distortedSiteRate * 100).toFixed(0)}% sites dist.</div>
+                </div>
+              )}
+              {distStats.phononStats.analyzedCount > 0 && (
+                <div className="bg-muted/30 rounded p-1.5 text-center" data-testid="panel-phonon-instability">
+                  <div className="text-[9px] text-muted-foreground font-medium">Phonon</div>
+                  <div className="text-xs font-bold text-red-400">{distStats.phononStats.imaginaryCount}</div>
+                  <div className="text-[9px] text-muted-foreground">with imag. modes</div>
+                  <div className="text-[9px] text-muted-foreground">of {distStats.phononStats.analyzedCount} checked</div>
+                </div>
+              )}
+            </div>
+
             {distStats.recentDistortions.length > 0 && (
               <div className="space-y-1">
                 <div className="text-[10px] text-muted-foreground font-medium">Recent Analyses</div>
-                <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {distStats.recentDistortions.slice(0, 5).map((a, i) => (
+                <div className="space-y-1 max-h-36 overflow-y-auto">
+                  {distStats.recentDistortions.slice(0, 6).map((a, i) => (
                     <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-distortion-${i}`}>
                       <span className="font-mono font-medium">{a.formula}</span>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         <span className={levelColors[a.level] || ""}>{a.level}</span>
                         <span className="text-muted-foreground">
-                          {a.strain.toFixed(3)} strain
+                          {a.strain.toFixed(3)}
                         </span>
-                        {a.meanDisp > 0 && (
-                          <span className="text-muted-foreground">
-                            {a.meanDisp.toFixed(3)}A
-                          </span>
+                        {a.bondVariance !== null && a.bondVariance > 0.005 && (
+                          <span className="text-blue-400 text-[9px]">BL:{a.bondVariance.toFixed(3)}</span>
+                        )}
+                        {a.octAngleVar !== null && a.octAngleVar > 10 && (
+                          <span className="text-cyan-400 text-[9px]">Oct:{a.octAngleVar.toFixed(0)}</span>
+                        )}
+                        {a.phononUnstable && (
+                          <span className="text-red-400 text-[9px]">imag</span>
                         )}
                         {a.symmetryBroken && (
-                          <span className="text-red-400 text-[9px]">sym broken</span>
+                          <span className="text-amber-400 text-[9px]">sym</span>
                         )}
                       </div>
                     </div>

@@ -2745,6 +2745,30 @@ export async function runXTBEnrichment(formula: string): Promise<XTBEnrichedFeat
     phononResult = await runXTBPhononCheck(formula);
   }
 
+  if (phononResult) {
+    const optRes = optimizedStructureCache.get(cacheKey);
+    if (optRes?.distortion) {
+      const updatedDistortion = analyzeDistortion(
+        formula,
+        { a: 1, b: 1, c: 1, alpha: 90, beta: 90, gamma: 90 },
+        { a: 1, b: 1, c: 1, alpha: 90, beta: 90, gamma: 90 },
+        undefined,
+        optRes.optimizedAtoms,
+        undefined,
+        undefined,
+        phononResult.frequencies,
+        phononResult.hasImaginaryModes,
+        phononResult.imaginaryModeCount,
+        phononResult.lowestFrequency,
+      );
+      optRes.distortion.phononInstability = updatedDistortion.phononInstability;
+      if (updatedDistortion.phononInstability?.hasImaginaryModes) {
+        optRes.distortion.overallScore = Math.min(1.0, optRes.distortion.overallScore + 0.05);
+        optRes.distortion.scRelevance += ` Phonon instability: ${phononResult.imaginaryModeCount} imaginary mode(s), lowest freq=${phononResult.lowestFrequency.toFixed(1)} cm-1 — structure wants to distort.`;
+      }
+    }
+  }
+
   return {
     bandGap: dftResult.homoLumoGap,
     isMetallic: dftResult.isMetallic,
