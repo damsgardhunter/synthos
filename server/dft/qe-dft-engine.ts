@@ -2533,13 +2533,28 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
 
 const elementRefEnergies = new Map<string, number | null>();
 
-const MOLECULAR_ELEMENTS = new Set(["H", "N", "O", "F", "Cl"]);
+const MOLECULAR_ELEMENTS = new Set(["H", "N", "O", "F", "Cl", "Br", "I"]);
 const MOLECULAR_BOND_LENGTHS: Record<string, number> = {
   H: 0.74,
   N: 1.10,
   O: 1.21,
   F: 1.42,
   Cl: 1.99,
+  Br: 2.28,
+  I: 2.66,
+};
+
+const BULK_NN_DISTANCES: Record<string, number> = {
+  Li: 3.04, Be: 2.22, Na: 3.72, Mg: 3.20, Al: 2.86, Si: 2.35,
+  K: 4.54, Ca: 3.95, Sc: 3.25, Ti: 2.90, V: 2.62, Cr: 2.50,
+  Mn: 2.73, Fe: 2.48, Co: 2.50, Ni: 2.49, Cu: 2.56, Zn: 2.66,
+  Ga: 2.44, Ge: 2.45, Rb: 4.95, Sr: 4.30, Y: 3.55, Zr: 3.18,
+  Nb: 2.86, Mo: 2.73, Tc: 2.71, Ru: 2.65, Rh: 2.69, Pd: 2.75,
+  Ag: 2.89, Cd: 2.98, In: 3.25, Sn: 3.02, Sb: 2.91, Te: 2.86,
+  Cs: 5.24, Ba: 4.35, La: 3.75, Ce: 3.65, Pr: 3.64, Nd: 3.63,
+  Hf: 3.13, Ta: 2.86, W: 2.74, Re: 2.74, Os: 2.68, Ir: 2.71,
+  Pt: 2.77, Au: 2.88, Hg: 3.01, Tl: 3.46, Pb: 3.50, Bi: 3.07,
+  Th: 3.60, U: 3.47, Pa: 3.21,
 };
 
 const COHESIVE_ENERGIES_EV: Record<string, number> = {
@@ -2568,8 +2583,11 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
   fs.mkdirSync(calcDir, { recursive: true });
 
   const isMolecular = MOLECULAR_ELEMENTS.has(element);
+  const nnDist = BULK_NN_DISTANCES[element];
+  const useCluster = !isMolecular && nnDist !== undefined;
   let atoms: AtomPosition[];
   let divisor: number;
+  let refLabel: string;
 
   if (isMolecular) {
     const bondLength = MOLECULAR_BOND_LENGTHS[element] ?? 1.5;
@@ -2578,13 +2596,25 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
       { element, x: bondLength, y: 0, z: 0 },
     ];
     divisor = 2;
+    refLabel = "dimer";
+  } else if (useCluster) {
+    const d = nnDist;
+    atoms = [
+      { element, x: 0, y: 0, z: 0 },
+      { element, x: d, y: 0, z: 0 },
+      { element, x: d / 2, y: d * Math.sqrt(3) / 2, z: 0 },
+      { element, x: d / 2, y: d * Math.sqrt(3) / 6, z: d * Math.sqrt(6) / 3 },
+    ];
+    divisor = 4;
+    refLabel = `4-atom cluster (NN=${d.toFixed(2)}Å)`;
   } else {
     atoms = [{ element, x: 0, y: 0, z: 0 }];
     divisor = 1;
+    refLabel = "isolated atom (fallback)";
   }
 
   const xyzPath = path.join(calcDir, `${element}.xyz`);
-  writeXYZ(atoms, xyzPath, `${element} ${isMolecular ? "dimer" : "atom"} reference`);
+  writeXYZ(atoms, xyzPath, `${element} ${refLabel} reference`);
 
   try {
     const env = {
@@ -2595,29 +2625,40 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
       OMP_STACKSIZE: "512M",
     };
 
-    const UNPAIRED_ELECTRONS: Record<string, number> = {
-      H: 1, He: 0, Li: 1, Be: 0, B: 1, C: 2, N: 3, O: 2, F: 1, Ne: 0,
-      Na: 1, Mg: 0, Al: 1, Si: 2, P: 3, S: 2, Cl: 1, Ar: 0,
-      K: 1, Ca: 0, Sc: 1, Ti: 2, V: 3, Cr: 6, Mn: 5, Fe: 4, Co: 3, Ni: 2, Cu: 1, Zn: 0,
-      Ga: 1, Ge: 2, As: 3, Se: 2, Br: 1, Kr: 0,
-      Rb: 1, Sr: 0, Y: 1, Zr: 2, Nb: 5, Mo: 6, Pd: 0, Sn: 2, Te: 2,
-      Cs: 1, Ba: 0, La: 1, Ce: 2, W: 4, Pt: 2, Pb: 2, Bi: 3,
-      Ta: 3, Hf: 2,
-    };
-    const uhf = isMolecular ? 0 : (UNPAIRED_ELECTRONS[element] ?? 0);
-    const uhfFlag = uhf > 0 ? `--uhf ${uhf}` : "";
     const output = execSync(
-      `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp ${uhfFlag} 2>&1`,
+      `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp 2>&1`,
       { timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
     ).toString();
 
     const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
     if (energyMatch && output.includes("normal termination")) {
       const energyPerAtom = parseFloat(energyMatch[1]) / divisor;
-      console.log(`[DFT] ${element}: xTB ref energy = ${energyPerAtom.toFixed(4)} Ha/atom (${isMolecular ? "from dimer" : "isolated atom"}, no cohesive correction — consistent with xTB compound energies)`);
+      console.log(`[DFT] ${element}: xTB ref energy = ${energyPerAtom.toFixed(4)} Ha/atom (${refLabel})`);
       elementRefEnergies.set(element, energyPerAtom);
       try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
       return energyPerAtom;
+    }
+
+    if (useCluster) {
+      console.log(`[DFT] ${element}: Cluster reference failed, falling back to dimer`);
+      const dimerAtoms: AtomPosition[] = [
+        { element, x: 0, y: 0, z: 0 },
+        { element, x: nnDist, y: 0, z: 0 },
+      ];
+      const dimerPath = path.join(calcDir, `${element}_dimer.xyz`);
+      writeXYZ(dimerAtoms, dimerPath, `${element} dimer fallback`);
+      const dimerOut = execSync(
+        `cd ${calcDir} && ${XTB_BIN} ${dimerPath} --gfn 2 --sp 2>&1`,
+        { timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
+      ).toString();
+      const dimerMatch = dimerOut.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+      if (dimerMatch && dimerOut.includes("normal termination")) {
+        const energyPerAtom = parseFloat(dimerMatch[1]) / 2;
+        console.log(`[DFT] ${element}: xTB ref energy = ${energyPerAtom.toFixed(4)} Ha/atom (dimer fallback, NN=${nnDist.toFixed(2)}Å)`);
+        elementRefEnergies.set(element, energyPerAtom);
+        try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
+        return energyPerAtom;
+      }
     }
   } catch {}
 
