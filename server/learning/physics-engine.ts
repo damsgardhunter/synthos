@@ -1307,33 +1307,29 @@ export function computePhononSpectrum(
 
   const debyeTemperature = Math.max(50, Math.round(1.4388 * maxPhononFreq));
 
-  let logAvgFreqRatio: number;
+  let logAvgFreq: number;
+  const massBasedOmegaLog = 1200 / Math.sqrt(Math.max(avgMass, 1));
+  const debyeBasedOmegaLog = debyeTemperature * 0.69 / 1.4388;
   if (isHydrogenRich) {
-    logAvgFreqRatio = 0.30 + 0.05 * Math.min(hRatio / 10, 1);
+    const hFrac = hCount / totalAtoms;
+    const metalMass = elements.filter(e => e !== "H")
+      .reduce((s, e) => s + (getElementData(e)?.atomicMass ?? 50) * ((counts[e] || 1) / totalAtoms), 0);
+    const effectiveMass = hFrac * 1.008 + (1 - hFrac) * Math.max(metalMass / Math.max(1 - hFrac, 0.01), 10);
+    logAvgFreq = 1200 / Math.sqrt(effectiveMass);
+    logAvgFreq = Math.max(logAvgFreq, 300);
   } else if (hasH) {
-    logAvgFreqRatio = 0.25 + hRatio * 0.02;
+    logAvgFreq = 0.6 * massBasedOmegaLog + 0.4 * debyeBasedOmegaLog;
   } else if (elements.length === 1) {
-    logAvgFreqRatio = 0.65;
+    logAvgFreq = debyeBasedOmegaLog > 10 ? debyeBasedOmegaLog : massBasedOmegaLog;
   } else {
+    logAvgFreq = 0.5 * massBasedOmegaLog + 0.5 * debyeBasedOmegaLog;
     const massRange = (() => {
       const masses = elements.map(el => getElementData(el)?.atomicMass ?? 30);
       return Math.max(...masses) / Math.max(Math.min(...masses), 1);
     })();
-    let fHash = 0;
-    for (let ci = 0; ci < formula.length; ci++) fHash = ((fHash << 5) - fHash + formula.charCodeAt(ci)) | 0;
-    const pseudoRand = ((fHash * 2654435761) >>> 0) / 4294967296;
-    if (avgMass > 100) {
-      logAvgFreqRatio = 0.25 + pseudoRand * 0.1;
-    } else if (avgMass > 60) {
-      logAvgFreqRatio = 0.35 + pseudoRand * 0.1;
-    } else if (avgMass > 30) {
-      logAvgFreqRatio = 0.40 + pseudoRand * 0.1;
-    } else {
-      logAvgFreqRatio = 0.50 + pseudoRand * 0.1;
-    }
-    if (massRange > 3) logAvgFreqRatio *= 0.85;
+    if (massRange > 3) logAvgFreq *= 0.85;
   }
-  const logAvgFreq = Math.max(20, Math.round(maxPhononFreq * logAvgFreqRatio));
+  logAvgFreq = Math.max(20, Math.min(maxPhononFreq * 0.7, Math.round(logAvgFreq)));
 
   let hasImaginaryModes = false;
   if (mpSummary && mpSummary.energyAboveHull > 0.1) {
@@ -1567,14 +1563,25 @@ export function computeElectronPhononCoupling(
     lambda = 0;
   } else {
     const dosRef = 2.0;
-    lambda = lambda * (N_EF / dosRef);
+    const bwElements = formula ? parseFormulaElements(formula) : [];
+    const bwCounts = formula ? parseFormulaCounts(formula) : {};
+    const bwTotalAtoms = getTotalAtoms(bwCounts);
+    let bwEst = 0;
+    for (const el of bwElements) {
+      const frac = (bwCounts[el] || 1) / bwTotalAtoms;
+      bwEst += estimateBandwidthW(el) * frac;
+    }
+    bwEst = Math.max(1.0, bwEst);
+    const bwNorm = bwEst / 6.0;
+    lambda = lambda * (N_EF / dosRef) / Math.max(bwNorm, 0.3);
   }
 
-  lambda = Math.max(0.05, lambda);
+  lambda = Math.max(0.05, Math.min(2.5, lambda));
 
-  if (phononSpectrum.softModeScore > 0.7 && lambda > 2.5) {
+  if (phononSpectrum.softModeScore > 0.7 && lambda > 2.0) {
     const guard = 1.0 - (phononSpectrum.softModeScore - 0.7) * 0.5;
     lambda *= Math.max(0.8, guard);
+    lambda = Math.min(2.5, lambda);
   }
 
   const matClass = formula ? classifyMaterialForLambda(formula, pressureGpa) : "other";
