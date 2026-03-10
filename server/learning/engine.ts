@@ -658,7 +658,7 @@ async function runPhase7_Superconductor() {
                 notes: `Inverse design campaign ${campaign.id}, target Tc=${campaign.target.targetTc}K`,
                 electronPhononCoupling: features.electronPhononLambda,
                 crystalStructure: ic.prototype ?? null,
-              });
+              }, "inverse_design");
 
               inverseResults.push({
                 formula: ic.formula,
@@ -792,7 +792,7 @@ async function runPhase7_Superconductor() {
                 ensembleScore: Math.min(0.9, gb.score),
                 verificationStage: 0,
                 notes: `[5-pillar: fitness=${eval5?.compositeFitness.toFixed(2) ?? "?"}, pillars=${eval5?.satisfiedPillars ?? "?"}/5, motif=${eval5?.motifMatch ?? "?"}, weak=${eval5?.weakestPillar ?? "?"}]`,
-              });
+              }, "bo_exploration");
               if (inserted) {
                 totalScCandidates++;
                 pillarInserted++;
@@ -879,7 +879,7 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeof storage.insertSuperconductorCandidate>[0]): Promise<boolean> {
+async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeof storage.insertSuperconductorCandidate>[0], generatorSource?: string): Promise<boolean> {
   try {
     if (!passesElementCountCap(candidateData.formula)) {
       emit("log", {
@@ -888,6 +888,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         detail: `${candidateData.formula}: exceeds element/atom count caps (max 4 non-H elements, 5 total, 20 atoms, 12 per element)`,
         dataSource: "Composition Filter",
       });
+      if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
       return false;
     }
 
@@ -899,6 +900,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         detail: `Fast stability screen rejected ${candidateData.formula}: ${preFilter.reason}`,
         dataSource: "Stability Predictor (GNN)",
       });
+      if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
       return false;
     }
 
@@ -911,6 +913,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         detail: `Stability gate rejected ${candidateData.formula}: ${stabilityResult.reason}`,
         dataSource: "Stability Gate",
       });
+      if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
       return false;
     }
 
@@ -926,6 +929,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
             detail: `${candidateData.formula}: kineticScore=${kineticResult.kineticScore} too low, lifetime=${kineticResult.lifetimeString}, no stabilization strategies`,
             dataSource: "Kinetic Stability Engine",
           });
+          if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
           return false;
         }
 
@@ -950,6 +954,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           detail: `${candidateData.formula}: compositeScore=${synthesisGateResult.compositeScore.toFixed(3)}, mlFeas=${synthesisGateResult.mlFeasibility.toFixed(3)}, chemDist=${synthesisGateResult.chemicalDistance.totalDistance.toFixed(3)}, class=${synthesisGateResult.classification}. ${synthesisGateResult.rejectionReasons.join("; ")}`,
           dataSource: "Synthesis Gate",
         });
+        if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
         return false;
       }
       if (synthesisGateResult.deprioritize) {
@@ -1022,6 +1027,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           detail: `${candidateData.formula}: verdict=reject, score=${deliberationResult.deliberationScore.toFixed(3)}. Concerns: ${deliberationResult.selfCritiqueFlags.slice(0, 2).join("; ") || "low multi-stage scores"}`,
           dataSource: "Deliberative Evaluator",
         });
+        if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
         return false;
       }
     } catch (deliberationErr: any) {
@@ -1055,6 +1061,9 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
     });
 
     const candidateTc = candidateData.predictedTc ?? 0;
+    if (generatorSource) {
+      recordGeneratorOutcome(generatorSource, true, candidateTc, 0.5);
+    }
     if (candidateTc > 0) {
       incorporateSuccessData(candidateData.formula, candidateTc).catch(() => {});
     }
@@ -2493,7 +2502,7 @@ async function runPhase11_StructurePrediction() {
                   uncertaintyEstimate: 0.6,
                   verificationStage: 0,
                   dataConfidence: "low",
-                });
+                }, "structure_diffusion");
                 if (inserted) totalScCandidates++;
               } catch (e) { console.error("[Engine] Structural variant insert failed:", e); }
             }
@@ -2552,7 +2561,7 @@ async function runPhase11_StructurePrediction() {
                 uncertaintyEstimate: 0.7,
                 verificationStage: 0,
                 dataConfidence: "low",
-              });
+              }, "motif_diffusion");
               if (inserted) totalScCandidates++;
             } catch (e) { console.error("[Engine] Mutation variant insert failed:", e); }
           }
@@ -2632,7 +2641,7 @@ async function runPhase11_StructurePrediction() {
                 uncertaintyEstimate: 0.6,
                 verificationStage: 0,
                 dataConfidence: "low",
-              });
+              }, "bo_exploration");
               if (inserted) {
                 totalScCandidates++;
                 evoInserted++;
@@ -3536,7 +3545,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     let autonomousInserted = false;
     try {
-      autonomousInserted = await insertCandidateWithStabilityCheck(candidatePayload);
+      autonomousInserted = await insertCandidateWithStabilityCheck(candidatePayload, "rl");
     } catch (insertErr: any) {
       const isDuplicate = insertErr?.message?.includes("duplicate") || insertErr?.code === "23505";
       if (isDuplicate) {

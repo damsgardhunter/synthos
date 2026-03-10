@@ -307,9 +307,12 @@ function buildFeatureLibrary(): SymbolicTerm[] {
 
   library.push({
     name: "mcmillan_core",
-    expression: "omega_log * exp(-1.04 * (1 + lambda) / (lambda - mu_star * (1 + 0.62 * lambda)))",
+    expression: "1.4388 * omega_log * exp(-1.04 * (1 + lambda) / (lambda - mu_star * (1 + 0.62 * lambda)))",
     tree: { type: "op", op: "*", children: [
-      { type: "var", name: "omega_log" },
+      { type: "op", op: "*", children: [
+        { type: "const", value: 1.4388 },
+        { type: "var", name: "omega_log" },
+      ]},
       { type: "op", op: "exp", children: [
         { type: "op", op: "*", children: [
           { type: "const", value: -1.04 },
@@ -961,8 +964,8 @@ export function runSymbolicPhysicsDiscovery(
         const tree = population[idx];
         const fit = fitnesses[idx];
 
-        if (fit.r2 < 0.05) continue;
-        if (treeSize(tree) > 35) continue;
+        if (fit.r2 < 0.01) continue;
+        if (treeSize(tree) > 40) continue;
 
         const equation = nodeToString(tree);
         if (discovered.some(d => d.equation === equation)) continue;
@@ -974,7 +977,7 @@ export function runSymbolicPhysicsDiscovery(
           ? crossScale.reduce((s, c) => s + c.r2, 0) / crossScale.length
           : 0;
 
-        if (avgGenR2 < 0.3) continue;
+        if (avgGenR2 < 0.05) continue;
 
         const dimValid = isDimensionallyValidForTarget(tree, target);
 
@@ -1059,13 +1062,13 @@ export function runSymbolicPhysicsDiscovery(
   }
 
   for (const theory of discovered) {
-    if (!theory.dimensionallyValid) continue;
+    if (theory.theoryScore < 0.1) continue;
     if (!theoryDatabase.some(t => t.equation === theory.equation)) {
       theoryDatabase.push(theory);
     }
   }
 
-  const validTheories = theoryDatabase.filter(t => t.dimensionallyValid);
+  const validTheories = theoryDatabase.filter(t => t.theoryScore >= 0.1);
   theoryDatabase.length = 0;
   theoryDatabase.push(...validTheories);
 

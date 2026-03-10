@@ -546,7 +546,7 @@ function generateMechanismHypotheses(graph: CausalGraph, dataset: CausalDataReco
       pathsToTc.push([...path, "Tc"]);
       return;
     }
-    if (path.length > 5 || visited.has(current)) return;
+    if (path.length > 6 || visited.has(current)) return;
     visited.add(current);
     const outEdges = graph.edges.filter(e => e.source === current);
     for (const edge of outEdges) {
@@ -559,8 +559,9 @@ function generateMechanismHypotheses(graph: CausalGraph, dataset: CausalDataReco
     findPaths(root, [], new Set());
   }
 
-  for (const path of pathsToTc.slice(0, 15)) {
-    if (path.length < 3) continue;
+  pathsToTc.sort((a, b) => b.length - a.length);
+  for (const path of pathsToTc.slice(0, 25)) {
+    if (path.length < 2) continue;
 
     const edges = [];
     let avgStrength = 0;
