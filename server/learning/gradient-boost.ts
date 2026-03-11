@@ -457,17 +457,91 @@ function deriveNonCentrosymmetric(f: MLFeatureVector): number {
   return 0;
 }
 
-function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
-  const resolvedFormula = formula || f._sourceFormula;
-  let miedemaEnergy = 0;
-  if (resolvedFormula) {
-    try {
-      miedemaEnergy = computeMiedemaFormationEnergy(resolvedFormula);
-      if (!Number.isFinite(miedemaEnergy)) miedemaEnergy = 0;
-    } catch {
-      miedemaEnergy = 0;
+const miedemaCache = new Map<string, number>();
+
+function getCachedMiedemaEnergy(formula: string): number {
+  const cached = miedemaCache.get(formula);
+  if (cached !== undefined) return cached;
+  try {
+    const e = computeMiedemaFormationEnergy(formula);
+    const val = Number.isFinite(e) ? e : 0;
+    if (miedemaCache.size > 10000) {
+      const firstKey = miedemaCache.keys().next().value;
+      if (firstKey !== undefined) miedemaCache.delete(firstKey);
+    }
+    miedemaCache.set(formula, val);
+    return val;
+  } catch {
+    miedemaCache.set(formula, 0);
+    return 0;
+  }
+}
+
+let crystalSymTargetEncoding: Map<string, number> | null = null;
+
+function getCrystalSymTargetEncoded(sym: string): number | null {
+  if (!crystalSymTargetEncoding) {
+    crystalSymTargetEncoding = new Map();
+    const symTcSums = new Map<string, { sum: number; count: number }>();
+    let globalSum = 0;
+    let globalCount = 0;
+    for (const entry of SUPERCON_TRAINING_DATA) {
+      try {
+        const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+        const entrySym = (features as any).crystalSymmetry;
+        if (!entrySym || typeof entrySym !== "string") continue;
+        const normalized = entrySym.toLowerCase().trim();
+        const SG_MAP: Record<string, string> = {
+          cubic: "cubic", hexagonal: "hexagonal", trigonal: "trigonal",
+          tetragonal: "tetragonal", orthorhombic: "orthorhombic",
+          monoclinic: "monoclinic", triclinic: "triclinic", rhombohedral: "trigonal",
+        };
+        let category: string | null = null;
+        if (SG_MAP[normalized]) {
+          category = SG_MAP[normalized];
+        } else {
+          for (const [key, val] of Object.entries(SG_MAP)) {
+            if (normalized.includes(key)) { category = val; break; }
+          }
+        }
+        if (!category) continue;
+        const existing = symTcSums.get(category) || { sum: 0, count: 0 };
+        existing.sum += entry.tc;
+        existing.count++;
+        symTcSums.set(category, existing);
+        globalSum += entry.tc;
+        globalCount++;
+      } catch { continue; }
+    }
+    const globalMean = globalCount > 0 ? globalSum / globalCount : 20;
+    const SMOOTHING = 10;
+    for (const [cat, data] of Array.from(symTcSums.entries())) {
+      const smoothed = (data.sum + SMOOTHING * globalMean) / (data.count + SMOOTHING);
+      crystalSymTargetEncoding.set(cat, smoothed);
+    }
+    console.log(`[GradientBoost] Crystal symmetry target encoding: ${Array.from(crystalSymTargetEncoding.entries()).map(([k, v]) => `${k}=${v.toFixed(1)}K`).join(", ")}`);
+  }
+  const normalized = sym.toLowerCase().trim();
+  const SG_LOOKUP: Record<string, string> = {
+    cubic: "cubic", hexagonal: "hexagonal", trigonal: "trigonal",
+    tetragonal: "tetragonal", orthorhombic: "orthorhombic",
+    monoclinic: "monoclinic", triclinic: "triclinic", rhombohedral: "trigonal",
+  };
+  let category: string | null = null;
+  if (SG_LOOKUP[normalized]) {
+    category = SG_LOOKUP[normalized];
+  } else {
+    for (const [key, val] of Object.entries(SG_LOOKUP)) {
+      if (normalized.includes(key)) { category = val; break; }
     }
   }
+  if (!category) return null;
+  return crystalSymTargetEncoding.get(category) ?? null;
+}
+
+function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
+  const resolvedFormula = formula || f._sourceFormula;
+  const miedemaEnergy = resolvedFormula ? getCachedMiedemaEnergy(resolvedFormula) : 0;
 
   let pressureGpa = sanitize(f.pressureGpa, FEATURE_MEANS.pressureGpa);
   if (pressureGpa === 0 && f.hasHydrogen && f.hydrogenRatio > 0.3) {
@@ -540,10 +614,8 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     (() => {
       const sym = (f as any).crystalSymmetry;
       if (!sym || typeof sym !== "string") return 0;
-      const normalized = sym.toLowerCase().trim();
-      const SG_MAP: Record<string, number> = { cubic: 7, hexagonal: 6, trigonal: 1, tetragonal: 5, orthorhombic: 4, monoclinic: 3, triclinic: 2, rhombohedral: 1 };
-      if (SG_MAP[normalized] !== undefined) return SG_MAP[normalized];
-      for (const [key, val] of Object.entries(SG_MAP)) { if (normalized.includes(key)) return val; }
+      const targetEncoded = getCrystalSymTargetEncoded(sym);
+      if (targetEncoded !== null) return targetEncoded;
       return 0;
     })(),
     deriveMultiBandScore(f),
@@ -598,6 +670,21 @@ const PHYSICS_FEATURE_NAMES = [
 
 const FEATURE_NAMES = [...PHYSICS_FEATURE_NAMES, ...COMPOSITION_FEATURE_NAMES];
 
+const splitSortBuf = {
+  sortIdx: new Int32Array(0),
+  vals: new Float64Array(0),
+  res: new Float64Array(0),
+};
+
+function ensureSplitBuffers(n: number): void {
+  if (splitSortBuf.sortIdx.length < n) {
+    const cap = Math.max(n, 1024);
+    splitSortBuf.sortIdx = new Int32Array(cap);
+    splitSortBuf.vals = new Float64Array(cap);
+    splitSortBuf.res = new Float64Array(cap);
+  }
+}
+
 function findBestSplitForSubset(
   X: number[][],
   residuals: number[],
@@ -605,26 +692,48 @@ function findBestSplitForSubset(
   featureIndex: number,
   minSamples: number = 2
 ): { threshold: number; improvement: number; leftIndices: number[]; rightIndices: number[] } {
-  const pairs = indices.map(i => ({ idx: i, val: X[i][featureIndex], res: residuals[i] }));
-  pairs.sort((a, b) => a.val - b.val);
-  const n = pairs.length;
+  const n = indices.length;
+  ensureSplitBuffers(n);
+  const { sortIdx, vals, res } = splitSortBuf;
 
-  const totalSum = pairs.reduce((s, p) => s + p.res, 0);
+  let totalSum = 0;
+  for (let i = 0; i < n; i++) {
+    const idx = indices[i];
+    sortIdx[i] = idx;
+    vals[i] = X[idx][featureIndex];
+    res[i] = residuals[idx];
+    totalSum += residuals[idx];
+  }
+
+  for (let i = 1; i < n; i++) {
+    const keyVal = vals[i];
+    const keyRes = res[i];
+    const keyIdx = sortIdx[i];
+    let j = i - 1;
+    while (j >= 0 && vals[j] > keyVal) {
+      vals[j + 1] = vals[j];
+      res[j + 1] = res[j];
+      sortIdx[j + 1] = sortIdx[j];
+      j--;
+    }
+    vals[j + 1] = keyVal;
+    res[j + 1] = keyRes;
+    sortIdx[j + 1] = keyIdx;
+  }
+
   const totalMeanSq = (totalSum * totalSum) / n;
-
   let bestImprovement = -Infinity;
   let bestThreshold = 0;
   let bestSplitPos = 0;
-
   let leftSum = 0;
 
   for (let i = 0; i < n - 1; i++) {
-    leftSum += pairs[i].res;
+    leftSum += res[i];
     const leftCount = i + 1;
     const rightCount = n - leftCount;
     const rightSum = totalSum - leftSum;
 
-    if (pairs[i].val === pairs[i + 1].val) continue;
+    if (vals[i] === vals[i + 1]) continue;
     if (leftCount < minSamples || rightCount < minSamples) continue;
 
     const splitScore = (leftSum * leftSum) / leftCount + (rightSum * rightSum) / rightCount;
@@ -632,16 +741,21 @@ function findBestSplitForSubset(
 
     if (improvement > bestImprovement) {
       bestImprovement = improvement;
-      bestThreshold = (pairs[i].val + pairs[i + 1].val) / 2;
+      bestThreshold = (vals[i] + vals[i + 1]) / 2;
       bestSplitPos = i + 1;
     }
   }
 
+  const leftIndices: number[] = new Array(bestSplitPos);
+  const rightIndices: number[] = new Array(n - bestSplitPos);
+  for (let i = 0; i < bestSplitPos; i++) leftIndices[i] = sortIdx[i];
+  for (let i = bestSplitPos; i < n; i++) rightIndices[i - bestSplitPos] = sortIdx[i];
+
   return {
     threshold: bestThreshold,
     improvement: bestImprovement,
-    leftIndices: pairs.slice(0, bestSplitPos).map(p => p.idx),
-    rightIndices: pairs.slice(bestSplitPos).map(p => p.idx),
+    leftIndices,
+    rightIndices,
   };
 }
 
@@ -1452,6 +1566,8 @@ export function invalidateModel(): void {
   cachedEnsembleXGB = null;
   cachedVarianceEnsembleXGB = null;
   cachedTrainingSnapshot = null;
+  crystalSymTargetEncoding = null;
+  miedemaCache.clear();
 }
 
 export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
