@@ -207,6 +207,7 @@ function ruleSolidState(formula: string, fb: FormulaBreakdown): HeuristicRoute |
 
   const hasAs = fb.elements.includes("As");
   const hasP = fb.elements.includes("P");
+  const hasLi = fb.elements.includes("Li");
   const hasChalcogen = fb.hasS || fb.hasSe || fb.hasTe;
   let noteText = isCuprate
     ? "Cuprate synthesis requires careful oxygen annealing for optimal Tc."
@@ -215,8 +216,20 @@ function ruleSolidState(formula: string, fb: FormulaBreakdown): HeuristicRoute |
   if (hasAs || hasP) {
     const toxicEl = hasAs ? "As" : "P";
     const hazard = hasAs ? "highly toxic (lethal vapor)" : "pyrophoric";
-    noteText += ` SAFETY: ${toxicEl} is ${hazard} — use double-sealed quartz ampoules with alumina inner crucible. Handle only in fume hood with appropriate PPE.`;
-    steps.splice(2, 0, `Seal precursors in double-walled quartz ampoule (inner alumina crucible) under vacuum to contain volatile ${toxicEl}`);
+    const crucible = hasLi ? "Nb or Ta inner crucible (Li attacks quartz)" : "alumina inner crucible";
+    noteText += ` SAFETY: ${toxicEl} is ${hazard} — use double-sealed quartz ampoules with ${crucible}. Handle only in specialized fume hood with appropriate PPE.`;
+    if (hasAs) {
+      noteText += " If ampoule breaks, toxic As fumes are released — evacuate area immediately. Dispose all residue as toxic arsenic waste.";
+    } else {
+      noteText += " Use only RED phosphorus (never white P). If ampoule cracks, P₄ vapor may ignite on air contact.";
+    }
+    steps.splice(2, 0, `Seal precursors in double-walled quartz ampoule (${crucible}) under vacuum to contain volatile ${toxicEl}`);
+  } else if (hasLi && temperature > 700) {
+    noteText += " Li attacks SiO₂ above ~700K — use Nb or Ta inner crucible inside quartz tube to prevent lithium silicate formation and sample contamination.";
+    const sinterIdx = steps.findIndex(s => s.includes("Sinter"));
+    if (sinterIdx >= 0) {
+      steps[sinterIdx] = steps[sinterIdx].replace("sealed tube under Ar", "sealed tube with Nb/Ta crucible under Ar");
+    }
   }
 
   if (hasChalcogen && !fb.hasO) {
@@ -321,7 +334,7 @@ function ruleSolGel(formula: string, fb: FormulaBreakdown): HeuristicRoute | nul
     method: "sol-gel",
     precursors,
     product: formula,
-    equation: formatEquation(precursors, [formula, "organics"]),
+    equation: formatEquation(precursors, [formula, "CO₂", "H₂O"]),
     steps: [
       `Dissolve ${precursors.join(", ")} in 2-methoxyethanol`,
       "Add citric acid (1:1 molar ratio to total metals) as chelating agent",
@@ -410,6 +423,12 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
   const maxMp = maxMeltingPoint(fb.metals);
   const preReactionTemp = chalcogen === "S" ? 400 : chalcogen === "Se" ? 500 : 600;
   const temperature = Math.min(maxMp, 1200);
+  const hasLi = fb.elements.includes("Li");
+  const crucible = hasLi ? "Nb or Ta crucible" : "quartz ampoule";
+  let noteText = `Sealed-tube synthesis for ${chalcogen}-containing compound. Two-step process: low-temperature pre-reaction at ${preReactionTemp}K prevents violent exotherm from ${chalcogen} vapor pressure, followed by high-temperature sintering.`;
+  if (hasLi) {
+    noteText += ` Li attacks SiO₂ above ~700K — use Nb or Ta inner crucible to prevent quartz degradation.`;
+  }
 
   return {
     rule: "chalcogenide-synthesis",
@@ -419,7 +438,7 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
     equation: formatEquation(precursors, [formula]),
     steps: [
       `Weigh stoichiometric amounts of ${precursors.join(", ")} (all >99.9%)`,
-      "Load into quartz ampoule in Ar glovebox",
+      `Load into ${hasLi ? "Nb/Ta crucible inside " : ""}quartz ampoule in Ar glovebox`,
       `Seal ampoule under vacuum (10⁻³ mbar)`,
       `Pre-react at ${preReactionTemp}K for 12h (ramp at 0.3K/min) to safely incorporate ${chalcogen} and avoid vapor pressure burst`,
       "Cool to room temperature, re-grind and re-seal if needed",
@@ -433,7 +452,7 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
     atmosphere: "vacuum (sealed tube)",
     difficulty: "moderate",
     confidence: 0.75,
-    notes: `Sealed-tube synthesis for ${chalcogen}-containing compound. Two-step process: low-temperature pre-reaction at ${preReactionTemp}K prevents violent exotherm from ${chalcogen} vapor pressure, followed by high-temperature sintering.`,
+    notes: noteText,
   };
 }
 
@@ -444,8 +463,38 @@ function rulePnictide(formula: string, fb: FormulaBreakdown): HeuristicRoute | n
   if (fb.metals.length === 0 || fb.hasH) return null;
 
   const pnictogen = hasAs ? "As" : "P";
-  const precursors = [...fb.metals, pnictogen];
+  const precursors = [...fb.metals, hasP ? `${pnictogen} (red phosphorus — never use white P)` : pnictogen];
   const temperature = hasAs ? 1100 : 1000;
+  const hasLi = fb.elements.includes("Li");
+  const crucibleMaterial = hasLi
+    ? "Nb or Ta crucible (Li attacks quartz above ~700K)"
+    : "alumina crucible";
+
+  const steps: string[] = [
+    `Weigh ${fb.metals.join(", ")} and ${hasP ? "red phosphorus" : "As"} in stoichiometric ratio (handle ${pnictogen} in specialized fume hood with full PPE)`,
+    `Load into ${crucibleMaterial}, place inside inner quartz tube`,
+    `Evacuate inner tube and seal; place inside outer quartz tube and evacuate+seal (double-sealed ampoule for containment)`,
+    `Ramp at 0.5K/min to ${temperature}K — slow ramp critical to prevent ${pnictogen} sublimation and ampoule rupture`,
+    `Hold at ${temperature}K for 48h`,
+    "Slow-cool at 1K/min to 700K, then furnace-cool",
+    "Open ampoule in fume hood — if ampoule is cracked or discolored, treat as hazardous waste",
+    "Grind, re-pelletize, re-anneal for improved phase purity",
+  ];
+
+  let safetyNote: string;
+  if (hasAs) {
+    safetyNote = "SAFETY: Arsenide synthesis requires double-sealed quartz ampoules. As sublimes at ~887K and forms lethal As₂O₃ vapor. "
+      + "If ampoule breaks during reaction, toxic As fumes are released — evacuate immediately and ventilate area. "
+      + "All handling (loading, opening, grinding) must be performed in a specialized fume hood rated for toxic vapors. "
+      + "Dispose of broken ampoules, grinding residue, and wash solutions as toxic arsenic waste.";
+  } else {
+    safetyNote = "SAFETY: Use only RED phosphorus (never white P, which is pyrophoric and spontaneously ignites in air). "
+      + "Double-sealed quartz ampoules required — P vapor pressure can rupture single-walled tubes above 700K. "
+      + "If ampoule cracks, P₄ vapor may ignite on contact with air. Open only in fume hood.";
+  }
+  if (hasLi) {
+    safetyNote += " Li attacks SiO₂ at high temperature — use Nb or Ta inner crucible to prevent quartz degradation and Li silicate contamination.";
+  }
 
   return {
     rule: "pnictide-synthesis",
@@ -453,23 +502,13 @@ function rulePnictide(formula: string, fb: FormulaBreakdown): HeuristicRoute | n
     precursors,
     product: formula,
     equation: formatEquation(precursors, [formula]),
-    steps: [
-      `Weigh ${precursors.join(", ")} in stoichiometric ratio (handle ${pnictogen} in fume hood with full PPE)`,
-      `Load into alumina crucible, place inside inner quartz tube`,
-      `Evacuate inner tube and seal; place inside outer quartz tube and evacuate+seal (double-sealed ampoule for safety)`,
-      `Ramp at 0.5K/min to ${temperature}K (${pnictogen} is volatile and ${hasAs ? "highly toxic — lethal As₂O₃ vapor" : "pyrophoric"})`,
-      `Hold at ${temperature}K for 48h`,
-      "Slow-cool at 1K/min to 700K, then furnace-cool",
-      "Grind, re-pelletize, re-anneal for improved phase purity",
-    ],
+    steps,
     temperature,
     pressure: 0,
     atmosphere: "vacuum (double-sealed tube)",
     difficulty: hasAs ? "hard" : "moderate",
     confidence: 0.7,
-    notes: hasAs
-      ? "SAFETY: Arsenide synthesis requires double-sealed quartz ampoules. As sublimes at ~887K and forms lethal As₂O₃ vapor. Work only in fume hood with appropriate PPE. Dispose of broken ampoules as toxic waste."
-      : "SAFETY: Phosphide synthesis requires double-sealed quartz ampoules. P vapor is pyrophoric and can ignite spontaneously. Use alumina inner crucible to prevent P-quartz reaction.",
+    notes: safetyNote,
   };
 }
 
