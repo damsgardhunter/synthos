@@ -19,6 +19,7 @@ import { runInterfaceDiscoveryForActiveLearning, getInterfaceRelaxationStats } f
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
 import { computeOODScore } from "./ood-detector";
 import { isValidFormula } from "./utils";
+import { parseFormulaCounts } from "./physics-engine";
 import { generateDisorderedStructure, suggestDisorders, type DisorderedStructure } from "../crystal/disorder-generator";
 import { computeConfigurationalEntropy, estimateDOSDisorderSignal } from "../crystal/disorder-metrics";
 import type { DisorderContext } from "./ml-predictor";
@@ -167,43 +168,33 @@ function computeAdaptiveAlpha(): number {
 }
 
 function parseFormulaElements(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return parseFormulaCounts(formula);
 }
 
-const seenCompositions: Map<string, number[]> = new Map();
+const seenCompositions: Map<string, Record<string, number>> = new Map();
 
-function computeCompositionVector(formula: string): number[] {
-  const counts = parseFormulaElements(formula);
+function computeCompositionFractions(formula: string): Record<string, number> {
+  const counts = parseFormulaCounts(formula);
   const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
-  const vec: number[] = [];
-  for (const el of Object.keys(counts).sort()) {
-    vec.push((counts[el] || 0) / total);
+  const fracs: Record<string, number> = {};
+  for (const el of Object.keys(counts)) {
+    fracs[el] = counts[el] / total;
   }
-  return vec;
+  return fracs;
 }
 
 function computeCompositionDistance(formula: string): number {
-  const vec = computeCompositionVector(formula);
+  const fracsA = computeCompositionFractions(formula);
   if (seenCompositions.size === 0) return 1.0;
 
   let minDist = Infinity;
-  seenCompositions.forEach((refVec) => {
-    const maxLen = Math.max(vec.length, refVec.length);
+  seenCompositions.forEach((fracsB) => {
+    const allKeys = new Set([...Object.keys(fracsA), ...Object.keys(fracsB)]);
     let sumSq = 0;
-    for (let i = 0; i < maxLen; i++) {
-      const diff = (vec[i] ?? 0) - (refVec[i] ?? 0);
+    allKeys.forEach(el => {
+      const diff = (fracsA[el] || 0) - (fracsB[el] || 0);
       sumSq += diff * diff;
-    }
+    });
     minDist = Math.min(minDist, Math.sqrt(sumSq));
   });
   return Math.min(1.0, minDist);
@@ -420,7 +411,7 @@ export function selectForDFT(
 
   seenCompositions.clear();
   for (const c of candidates) {
-    seenCompositions.set(c.formula, computeCompositionVector(c.formula));
+    seenCompositions.set(c.formula, computeCompositionFractions(c.formula));
   }
 
   const bestTcSoFar = convergenceStats.bestTcFromLoop > 0
@@ -1564,17 +1555,7 @@ export async function runActiveLearningCycle(
 }
 
 function parseFormulaCountsLocal(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return parseFormulaCounts(formula);
 }
 
 function generateDopedVariantsForAL(formula: string, maxVariants: number): DopingSpec[] {
