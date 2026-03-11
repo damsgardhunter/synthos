@@ -286,16 +286,20 @@ function buildHamiltonianAtK(
     }
   }
 
-  if (nOrbitals > 50) {
-    nOrbitals = Math.min(nOrbitals, 50);
+  const MAX_TB_ORBITALS = 128;
+  if (nOrbitals > MAX_TB_ORBITALS) {
+    nOrbitals = Math.min(nOrbitals, MAX_TB_ORBITALS);
     atomList.length = 0;
     let currentOrb = 0;
     for (const el of elements) {
+      const count = Math.round(counts[el] || 1);
       const hasDOrbs = isTransitionMetal(el) || isRareEarth(el) || isActinide(el);
       const orbsPerAtom = hasDOrbs ? 9 : 4;
-      if (currentOrb + orbsPerAtom <= 50) {
-        atomList.push({ el, orbitalStart: currentOrb });
-        currentOrb += orbsPerAtom;
+      for (let i = 0; i < count; i++) {
+        if (currentOrb + orbsPerAtom <= MAX_TB_ORBITALS) {
+          atomList.push({ el, orbitalStart: currentOrb });
+          currentOrb += orbsPerAtom;
+        }
       }
     }
     nOrbitals = currentOrb;
@@ -344,26 +348,32 @@ function buildHamiltonianAtK(
 
       for (const [dx, dy, dz] of neighbors) {
         const phase = Math.cos(kDotR(dx, dy, dz));
+        const rMag = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-10;
+        const l = dx / rMag;
+        const m = dy / rMag;
+        const n = dz / rMag;
+        const dc = [l, m, n];
 
         const hasDI = isTransitionMetal(a1.el) || isRareEarth(a1.el) || isActinide(a1.el);
         const hasDJ = isTransitionMetal(a2.el) || isRareEarth(a2.el) || isActinide(a2.el);
         const oi = a1.orbitalStart;
         const oj = a2.orbitalStart;
+        const nf = 1 / neighbors.length;
 
         if (oi < nOrbitals && oj < nOrbitals) {
-          const v = sk.ssSigma * phase / neighbors.length;
+          const v = sk.ssSigma * phase * nf;
           H[oi][oj] += v;
           H[oj][oi] += v;
         }
 
         for (let p = 0; p < 3; p++) {
           if (oi < nOrbitals && oj + 1 + p < nOrbitals) {
-            const v = sk.spSigma * phase / neighbors.length * 0.577;
+            const v = sk.spSigma * dc[p] * phase * nf;
             H[oi][oj + 1 + p] += v;
             H[oj + 1 + p][oi] += v;
           }
           if (oj < nOrbitals && oi + 1 + p < nOrbitals) {
-            const v = sk.spSigma * phase / neighbors.length * 0.577;
+            const v = -sk.spSigma * dc[p] * phase * nf;
             H[oj][oi + 1 + p] += v;
             H[oi + 1 + p][oj] += v;
           }
@@ -372,14 +382,16 @@ function buildHamiltonianAtK(
         for (let p1 = 0; p1 < 3; p1++) {
           for (let p2 = 0; p2 < 3; p2++) {
             if (oi + 1 + p1 < nOrbitals && oj + 1 + p2 < nOrbitals) {
-              const sigmaW = p1 === p2 ? 1.0 / 3.0 : 0;
-              const piW = p1 === p2 ? 2.0 / 3.0 : (p1 !== p2 ? -1.0 / 3.0 : 0);
-              const v = (sk.ppSigma * sigmaW + sk.ppPi * piW) * phase / neighbors.length;
+              const sigmaW = dc[p1] * dc[p2];
+              const piW = (p1 === p2 ? 1 : 0) - dc[p1] * dc[p2];
+              const v = (sk.ppSigma * sigmaW + sk.ppPi * piW) * phase * nf;
               H[oi + 1 + p1][oj + 1 + p2] += v;
               H[oj + 1 + p2][oi + 1 + p1] += v;
             }
           }
         }
+
+        const l2 = l * l, m2 = m * m, n2 = n * n;
 
         if (hasDI && hasDJ) {
           for (let d1 = 0; d1 < 5; d1++) {
@@ -387,9 +399,10 @@ function buildHamiltonianAtK(
               if (oi + 4 + d1 < nOrbitals && oj + 4 + d2 < nOrbitals) {
                 let v = 0;
                 if (d1 === d2) {
-                  v = (sk.ddSigma * 0.2 + sk.ddPi * 0.5 + sk.ddDelta * 0.3) * phase / neighbors.length;
+                  const diag = d1 < 3 ? [l2, m2, n2][d1] : (d1 === 3 ? l * m : (l2 + m2) * 0.5);
+                  v = (sk.ddSigma * diag * diag + sk.ddPi * diag * (1 - diag) + sk.ddDelta * (1 - diag) * (1 - diag)) * phase * nf;
                 } else {
-                  v = (sk.ddPi * 0.3 + sk.ddDelta * 0.1) * phase / neighbors.length * 0.5;
+                  v = (sk.ddPi * 0.3 + sk.ddDelta * 0.1) * phase * nf * 0.5;
                 }
                 H[oi + 4 + d1][oj + 4 + d2] += v;
                 H[oj + 4 + d2][oi + 4 + d1] += v;
@@ -401,7 +414,8 @@ function buildHamiltonianAtK(
         if (hasDI) {
           for (let d = 0; d < 5; d++) {
             if (oi + 4 + d < nOrbitals && oj < nOrbitals) {
-              const v = sk.sdSigma * phase / neighbors.length * 0.447;
+              const sdWeight = d < 3 ? dc[d] * dc[d] : (d === 3 ? l * m : Math.sqrt(3) * 0.5 * (l2 - m * m));
+              const v = sk.sdSigma * Math.sqrt(Math.abs(sdWeight)) * Math.sign(sdWeight || 1) * phase * nf;
               H[oi + 4 + d][oj] += v;
               H[oj][oi + 4 + d] += v;
             }
@@ -410,7 +424,8 @@ function buildHamiltonianAtK(
         if (hasDJ) {
           for (let d = 0; d < 5; d++) {
             if (oj + 4 + d < nOrbitals && oi < nOrbitals) {
-              const v = sk.sdSigma * phase / neighbors.length * 0.447;
+              const sdWeight = d < 3 ? dc[d] * dc[d] : (d === 3 ? l * m : Math.sqrt(3) * 0.5 * (l * l - m * m));
+              const v = sk.sdSigma * Math.sqrt(Math.abs(sdWeight)) * Math.sign(sdWeight || 1) * phase * nf;
               H[oj + 4 + d][oi] += v;
               H[oi][oj + 4 + d] += v;
             }
