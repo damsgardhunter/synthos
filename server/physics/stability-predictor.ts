@@ -1,5 +1,6 @@
 import { ELEMENTAL_DATA, getElementData } from "../learning/elemental-data";
 import { computeMiedemaFormationEnergy } from "../learning/phase-diagram-engine";
+import { classifyFamily } from "../learning/utils";
 
 export interface StabilityPrediction {
   formula: string;
@@ -524,6 +525,38 @@ function computeSizeRatioScore(formula: string): number {
   return 0.3;
 }
 
+const FAMILY_STABILITY_BIAS: Record<string, { synthBias: number; decompBias: number; confBias: number }> = {
+  "Cuprates":             { synthBias: 0.10, decompBias: -0.08, confBias: 0.10 },
+  "Pnictides":            { synthBias: 0.08, decompBias: -0.06, confBias: 0.08 },
+  "Intermetallics":       { synthBias: 0.12, decompBias: -0.10, confBias: 0.12 },
+  "Chalcogenides":        { synthBias: 0.06, decompBias: -0.05, confBias: 0.06 },
+  "Layered-chalcogenide": { synthBias: 0.07, decompBias: -0.05, confBias: 0.07 },
+  "Layered-pnictide":     { synthBias: 0.08, decompBias: -0.06, confBias: 0.08 },
+  "Nickelates":           { synthBias: 0.06, decompBias: -0.04, confBias: 0.06 },
+  "Borocarbides":         { synthBias: 0.08, decompBias: -0.06, confBias: 0.08 },
+  "Heavy Fermions":       { synthBias: 0.04, decompBias: -0.02, confBias: 0.04 },
+  "Borides":              { synthBias: 0.09, decompBias: -0.07, confBias: 0.09 },
+  "Carbides":             { synthBias: 0.07, decompBias: -0.05, confBias: 0.07 },
+  "Nitrides":             { synthBias: 0.06, decompBias: -0.04, confBias: 0.06 },
+  "Oxides":               { synthBias: 0.05, decompBias: -0.03, confBias: 0.05 },
+  "Alloys":               { synthBias: 0.10, decompBias: -0.08, confBias: 0.10 },
+  "Clathrates":           { synthBias: 0.05, decompBias: -0.03, confBias: 0.05 },
+  "Kagome":               { synthBias: 0.04, decompBias: -0.02, confBias: 0.04 },
+  "Silicides":            { synthBias: 0.06, decompBias: -0.04, confBias: 0.06 },
+  "Hydrides":             { synthBias: -0.05, decompBias: 0.10, confBias: -0.05 },
+  "Sulfides":             { synthBias: 0.05, decompBias: -0.03, confBias: 0.05 },
+  "Other":                { synthBias: 0.00, decompBias: 0.00, confBias: 0.00 },
+  "Mixed-mechanism":      { synthBias: 0.03, decompBias: -0.02, confBias: 0.03 },
+  "Intercalated-layered": { synthBias: 0.04, decompBias: -0.02, confBias: 0.04 },
+  "Phosphides":           { synthBias: 0.05, decompBias: -0.03, confBias: 0.05 },
+};
+
+function computeFamilyContext(formula: string): { family: string; synthBias: number; decompBias: number; confBias: number } {
+  const family = classifyFamily(formula);
+  const bias = FAMILY_STABILITY_BIAS[family] ?? { synthBias: 0, decompBias: 0, confBias: 0 };
+  return { family, ...bias };
+}
+
 export function predictStability(formula: string): StabilityPrediction {
   const graph = buildCompositionGraph(formula);
   const weights = getWeights();
@@ -573,6 +606,8 @@ export function predictStability(formula: string): StabilityPrediction {
   const minVol = isHydride ? MIN_VOL_HYDRIDE : MIN_VOL_OTHER;
   const volumeGhostFlag = volumePerAtom < minVol;
 
+  const familyCtx = computeFamilyContext(formula);
+
   let synthesizability = rawSynthesizability * 0.25
     + elementCompat * 0.20
     + protoMatch * 0.15
@@ -580,6 +615,8 @@ export function predictStability(formula: string): StabilityPrediction {
     + (1 - valenceMismatch) * 0.10
     + (miedemaEnergy < 0 ? 0.8 : miedemaEnergy < 0.1 ? 0.5 : 0.2) * 0.10
     + (1 - rawDecompRisk) * 0.05;
+
+  synthesizability += familyCtx.synthBias;
 
   if (toleranceFactor !== null) {
     const tDeviation = Math.abs(toleranceFactor - 1.0);
@@ -605,6 +642,8 @@ export function predictStability(formula: string): StabilityPrediction {
     + valenceMismatch * 0.2
     + (1 - elementCompat) * 0.2;
 
+  decompositionRisk += familyCtx.decompBias;
+
   if (volumeGhostFlag) {
     decompositionRisk = Math.min(1.0, decompositionRisk + 0.2);
   }
@@ -625,6 +664,8 @@ export function predictStability(formula: string): StabilityPrediction {
   let confidence = Math.min(0.95, Math.max(0.3,
     rawConfidence * 0.3 + elementCompat * 0.3 + protoMatch * 0.2 + (elements.length <= 4 ? 0.2 : 0.1)
   ));
+
+  confidence += familyCtx.confBias;
 
   if (volumeGhostFlag) {
     const volumeRatio = volumePerAtom / minVol;
