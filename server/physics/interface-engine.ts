@@ -340,11 +340,23 @@ function computeInterfacePhonons(layerA: string, layerB: string, pressureGpa: nu
   else if (acousticMismatchScore > 0.5) dominantPhononMode = "interface-acoustic";
   else dominantPhononMode = "bulk-like";
 
-  const phononScore = Math.min(1.0,
+  const lighterMass = Math.min(massA, massB);
+  const heavierMass = Math.max(massA, massB);
+  const effectiveMassDamping = lighterMass < 20
+    ? 1.0
+    : lighterMass < 60
+      ? 1.0 - (lighterMass - 20) * 0.008
+      : lighterMass < 120
+        ? 0.68 - (lighterMass - 60) * 0.005
+        : 0.38;
+  const massRatioPenalty = heavierMass > 150 ? Math.max(0.5, 1.0 - (heavierMass - 150) * 0.002) : 1.0;
+
+  const rawPhononScore = Math.min(1.0,
     acousticMismatchScore * 0.35 +
     softModeCouplingScore * 0.35 +
     (interfacePhononEnhancement > 1.3 ? 0.2 : interfacePhononEnhancement > 1.1 ? 0.1 : 0)
   );
+  const phononScore = rawPhononScore * effectiveMassDamping * massRatioPenalty;
 
   return {
     acousticMismatchRatio: Number(acousticMismatchRatio.toFixed(4)),
