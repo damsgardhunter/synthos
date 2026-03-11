@@ -1184,20 +1184,52 @@ export async function runMLPrediction(
 
       const featureLambda = xgb.features.electronPhononLambda ?? 0;
       const llmRefinedTc = nn.refinedTc ?? xgb.xgb.tcEstimate;
-      const hCountML = (xgb.features as any).hCount ?? 0;
-      const totalAtomsML = (xgb.features as any).totalAtoms ?? 1;
-      const isHydrideML = hCountML >= 4 && hCountML / totalAtomsML >= 0.5;
-      const allenDynesTc = featureLambda > 0
-        ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, 0.12, undefined, isHydrideML)
-        : 0;
-      const finalTc = Math.round(allenDynesTc > 0 ? allenDynesTc : 0);
-      const mlEnforcedPressure = estimateFamilyPressure(xgb.mat.formula);
+      const corrStrength = xgb.features.correlationStrength;
+      const isStronglyCorrelated = corrStrength > 0.6;
+
+      const effectiveMuStar = xgb.features.muStarEstimate;
+
+      const isHydrideML = xgb.features.hasHydrogen && xgb.features.hydrogenRatio >= 0.5;
+      let finalTc: number;
+      let tcMethod: string;
+      if (isStronglyCorrelated) {
+        const corrSuppression = Math.max(0.1, 1.0 - (corrStrength - 0.6) * 1.5);
+        const rawAD = featureLambda > 0
+          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML)
+          : 0;
+        finalTc = Math.round(Math.max(0, rawAD * corrSuppression));
+        tcMethod = `Allen-Dynes*corr_supp(${corrSuppression.toFixed(2)})`;
+      } else {
+        const allenDynesTc = featureLambda > 0
+          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML)
+          : 0;
+        finalTc = Math.round(allenDynesTc > 0 ? allenDynesTc : 0);
+        tcMethod = "Allen-Dynes";
+      }
+
+      const heuristicPressure = estimateFamilyPressure(xgb.mat.formula);
+      const featurePressure = xgb.features.pressureGpa;
+      const llmPressure = nn.pressureGpa ?? null;
+      let resolvedPressure: number;
+      if (llmPressure != null && llmPressure === 0 && heuristicPressure > 50) {
+        resolvedPressure = featurePressure > 0 ? featurePressure : Math.round(heuristicPressure * 0.3);
+      } else if (llmPressure != null && heuristicPressure > 0) {
+        resolvedPressure = Math.round(llmPressure * 0.6 + heuristicPressure * 0.4);
+      } else {
+        resolvedPressure = llmPressure ?? featurePressure ?? heuristicPressure;
+      }
+
+      const pairingMech = nn.pairingMechanism ?? (isStronglyCorrelated ? "spin-fluctuation" : "phonon-mediated");
+      const uncertaintyBase = nn.uncertaintyEstimate ?? 0.5;
+      const adjustedUncertainty = isStronglyCorrelated
+        ? Math.min(1.0, uncertaintyBase + (corrStrength - 0.6) * 0.5)
+        : uncertaintyBase;
 
       candidates.push({
         name: xgb.mat.name,
         formula: xgb.mat.formula,
         predictedTc: finalTc,
-        pressureGpa: Math.max(nn.pressureGpa ?? 0, mlEnforcedPressure),
+        pressureGpa: resolvedPressure,
         meissnerEffect: nn.meissnerEffect ?? false,
         zeroResistance: nn.zeroResistance ?? false,
         cooperPairMechanism: nn.cooperPairMechanism ?? "unknown",
@@ -1210,16 +1242,16 @@ export async function runMLPrediction(
         ensembleScore,
         roomTempViable: nn.roomTempViable ?? false,
         status: ensembleScore > 0.7 ? "promising" : "theoretical",
-        notes: (llmRefinedTc !== finalTc ? `[LLM suggested Tc=${llmRefinedTc}K, physics-only Tc=${finalTc}K (Allen-Dynes, lambda=${featureLambda.toFixed(2)})] ` : '') + (nn.reasoning ?? xgb.xgb.reasoning[0]),
+        notes: (llmRefinedTc !== finalTc ? `[LLM Tc=${llmRefinedTc}K, ${tcMethod} Tc=${finalTc}K (lambda=${featureLambda.toFixed(2)}, mu*=${effectiveMuStar.toFixed(3)})] ` : '') + (isStronglyCorrelated ? `[correlated: Allen-Dynes unreliable] ` : '') + (nn.reasoning ?? xgb.xgb.reasoning[0]),
         electronPhononCoupling: xgb.features.electronPhononLambda,
         logPhononFrequency: xgb.features.logPhononFreq,
-        coulombPseudopotential: 0.12,
-        pairingMechanism: nn.pairingMechanism ?? (xgb.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated"),
-        pairingSymmetry: nn.pairingSymmetry ?? ((() => { const m = nn.pairingMechanism ?? (xgb.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated"); if (m.includes("spin")) return "d-wave"; if (m.includes("topolog")) return "p-wave"; return xgb.features.dWaveSymmetry ? "d-wave" : "s-wave"; })()),
-        correlationStrength: xgb.features.correlationStrength,
+        coulombPseudopotential: effectiveMuStar,
+        pairingMechanism: pairingMech,
+        pairingSymmetry: nn.pairingSymmetry ?? ((() => { if (pairingMech.includes("spin")) return "d-wave"; if (pairingMech.includes("topolog")) return "p-wave"; return xgb.features.dWaveSymmetry ? "d-wave" : "s-wave"; })()),
+        correlationStrength: corrStrength,
         dimensionality: nn.dimensionality ?? (xgb.features.layeredStructure ? "quasi-2D" : "3D"),
         fermiSurfaceTopology: xgb.features.fermiSurfaceType,
-        uncertaintyEstimate: nn.uncertaintyEstimate ?? 0.5,
+        uncertaintyEstimate: adjustedUncertainty,
         verificationStage: 0,
         dataConfidence: xgb.hasPhysics ? "high" : (xgb.hasCrystal ? "medium" : "low"),
       });
@@ -1244,24 +1276,31 @@ export async function runMLPrediction(
 
     if (candidates.length === 0 && topCandidates.length > 0) {
       for (const c of topCandidates) {
-        const gnnPred = c.gnn;
-        let ensembleScore: number;
-        if (gnnPred) {
-          const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
-          ensembleScore = Math.min(0.95, gnnScore * 0.6 + c.xgb.score * 0.3 + (c.hasCrystal ? 0.1 : 0));
-        } else {
-          ensembleScore = Math.min(0.95, c.xgb.score * 0.7 + (c.hasCrystal ? 0.1 : 0));
-        }
+        const ensembleScore = computeEnsembleScore(c);
 
         const featureLambda = c.features.electronPhononLambda ?? 0;
-        const hCountFB = (c.features as any).hCount ?? 0;
-        const totalAtomsFB = (c.features as any).totalAtoms ?? 1;
-        const isHydrideFB = hCountFB >= 4 && hCountFB / totalAtomsFB >= 0.5;
-        const physOnlyTc = featureLambda > 0
-          ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, 0.12, undefined, isHydrideFB)
-          : 0;
-        const finalTc = Math.round(Math.max(0, physOnlyTc));
-        const fbPressure = estimateFamilyPressure(c.mat.formula);
+        const corrStrengthFB = c.features.correlationStrength;
+        const isCorrelatedFB = corrStrengthFB > 0.6;
+        const effectiveMuStarFB = c.features.muStarEstimate;
+        const isHydrideFB = c.features.hasHydrogen && c.features.hydrogenRatio >= 0.5;
+
+        let finalTc: number;
+        if (isCorrelatedFB) {
+          const suppression = Math.max(0.1, 1.0 - (corrStrengthFB - 0.6) * 1.5);
+          const rawAD = featureLambda > 0
+            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB)
+            : 0;
+          finalTc = Math.round(Math.max(0, rawAD * suppression));
+        } else {
+          const physOnlyTc = featureLambda > 0
+            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB)
+            : 0;
+          finalTc = Math.round(Math.max(0, physOnlyTc));
+        }
+
+        const heuristicPressureFB = estimateFamilyPressure(c.mat.formula);
+        const fbPressure = c.features.pressureGpa > 0 ? c.features.pressureGpa : heuristicPressureFB;
+        const pairingMechFB = isCorrelatedFB ? "spin-fluctuation" : "phonon-mediated";
 
         candidates.push({
           formula: c.mat.formula,
@@ -1270,7 +1309,7 @@ export async function runMLPrediction(
           pressureGpa: fbPressure,
           meissnerEffect: ensembleScore > 0.5,
           zeroResistance: ensembleScore > 0.5,
-          cooperPairMechanism: c.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated",
+          cooperPairMechanism: pairingMechFB,
           crystalStructure: c.features.layeredStructure ? "layered" : "3D",
           quantumCoherence: Math.min(1, ensembleScore * 0.8),
           stabilityScore: c.features.stabilityScore ?? 0.5,
@@ -1279,16 +1318,16 @@ export async function runMLPrediction(
           ensembleScore,
           roomTempViable: false,
           status: "theoretical",
-          notes: `[XGBoost-only fallback: NN unavailable] ${c.xgb.reasoning[0] || ""}`,
+          notes: `[XGBoost-only fallback: NN unavailable]${isCorrelatedFB ? ' [correlated: Allen-Dynes unreliable]' : ''} ${c.xgb.reasoning[0] || ""}`,
           electronPhononCoupling: c.features.electronPhononLambda,
           logPhononFrequency: c.features.logPhononFreq,
-          coulombPseudopotential: 0.12,
-          pairingMechanism: c.features.correlationStrength > 0.6 ? "spin-fluctuation" : "phonon-mediated",
-          pairingSymmetry: c.features.correlationStrength > 0.6 ? "d-wave" : (c.features.dWaveSymmetry ? "d-wave" : "s-wave"),
-          correlationStrength: c.features.correlationStrength,
+          coulombPseudopotential: effectiveMuStarFB,
+          pairingMechanism: pairingMechFB,
+          pairingSymmetry: pairingMechFB.includes("spin") ? "d-wave" : (c.features.dWaveSymmetry ? "d-wave" : "s-wave"),
+          correlationStrength: corrStrengthFB,
           dimensionality: c.features.layeredStructure ? "quasi-2D" : "3D",
           fermiSurfaceTopology: c.features.fermiSurfaceType,
-          uncertaintyEstimate: 0.7,
+          uncertaintyEstimate: isCorrelatedFB ? Math.min(1.0, 0.7 + (corrStrengthFB - 0.6) * 0.5) : 0.7,
           verificationStage: 0,
           dataConfidence: c.hasPhysics ? "medium" : "low",
         });
