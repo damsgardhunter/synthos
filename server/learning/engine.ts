@@ -1714,6 +1714,7 @@ async function reEvaluateTopCandidates() {
 }
 
 const dftEnrichmentTracker = new Map<string, number>();
+let dftEnrichmentLastRetrainCount = 0;
 const candidateGeneratorSource = new Map<string, string>();
 const MAX_GENERATOR_SOURCE_ENTRIES = 2000;
 
@@ -5964,6 +5965,17 @@ async function runLearningCycle() {
             detail: `DFT runs: ${alStats.totalDFTRuns}, retrains: ${alStats.modelRetrains}, uncertainty: ${alStats.avgUncertaintyBefore.toFixed(3)} → ${alStats.avgUncertaintyAfter.toFixed(3)}, best Tc: ${alStats.bestTcFromLoop.toFixed(1)}K`,
             dataSource: "Active Learning",
           });
+          if (alStats.modelRetrains > dftEnrichmentLastRetrainCount) {
+            const clearedEntries = dftEnrichmentTracker.size;
+            dftEnrichmentTracker.clear();
+            dftEnrichmentLastRetrainCount = alStats.modelRetrains;
+            emit("log", {
+              phase: "engine",
+              event: "DFT enrichment tracker reset",
+              detail: `Model retrained (count=${alStats.modelRetrains}), cleared ${clearedEntries} stale enrichment entries`,
+              dataSource: "Learning Feedback",
+            });
+          }
           autonomousGNNRetrainCount += alStats.modelRetrains > 0 ? 1 : 0;
 
           const calStats = getCalibrationStats();
