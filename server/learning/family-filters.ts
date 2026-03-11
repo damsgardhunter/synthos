@@ -804,6 +804,68 @@ export interface DiscoveryScoreInput {
   uncertaintyEstimate?: number | null;
 }
 
+const ALL_ELEMENTS_LIST = [
+  "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+  "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
+  "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr",
+  "Nb", "Mo", "Ru", "Rh", "Pd", "Ag", "In", "Sn", "Sb", "Te",
+  "I", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd",
+  "Tb", "Dy", "Ho", "Er", "Yb", "Hf", "Ta", "W", "Re", "Os",
+  "Ir", "Pt", "Au", "Tl", "Pb", "Bi",
+];
+const ELEMENT_TO_BIT: Record<string, number> = {};
+ALL_ELEMENTS_LIST.forEach((el, i) => { ELEMENT_TO_BIT[el] = i; });
+
+function elementSetToBitmask(elements: string[]): [number, number, number] {
+  let lo = 0, mid = 0, hi = 0;
+  for (const el of elements) {
+    const bit = ELEMENT_TO_BIT[el];
+    if (bit === undefined) continue;
+    if (bit < 26) lo |= (1 << bit);
+    else if (bit < 52) mid |= (1 << (bit - 26));
+    else hi |= (1 << (bit - 52));
+  }
+  return [lo, mid, hi];
+}
+
+function bitmaskPopcount(n: number): number {
+  n = n - ((n >> 1) & 0x55555555);
+  n = (n & 0x33333333) + ((n >> 2) & 0x33333333);
+  return (((n + (n >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+}
+
+function bitmaskJaccard(a: [number, number, number], b: [number, number, number]): number {
+  const intersect = bitmaskPopcount(a[0] & b[0]) + bitmaskPopcount(a[1] & b[1]) + bitmaskPopcount(a[2] & b[2]);
+  const union = bitmaskPopcount(a[0] | b[0]) + bitmaskPopcount(a[1] | b[1]) + bitmaskPopcount(a[2] | b[2]);
+  return union > 0 ? intersect / union : 0;
+}
+
+function bitmaskDiffElements(a: [number, number, number], b: [number, number, number]): string[] {
+  const diff: string[] = [];
+  const d0 = a[0] & ~b[0], d1 = a[1] & ~b[1], d2 = a[2] & ~b[2];
+  for (let i = 0; i < 26; i++) if (d0 & (1 << i)) diff.push(ALL_ELEMENTS_LIST[i]);
+  for (let i = 0; i < 26; i++) if (d1 & (1 << i)) diff.push(ALL_ELEMENTS_LIST[i + 26]);
+  for (let i = 0; i < 24; i++) if (d2 & (1 << i)) diff.push(ALL_ELEMENTS_LIST[i + 52]);
+  return diff;
+}
+
+let existingFormulasBitmaskCache: Map<string, [number, number, number]> | null = null;
+
+function getExistingBitmask(formula: string): [number, number, number] {
+  if (!existingFormulasBitmaskCache) existingFormulasBitmaskCache = new Map();
+  let cached = existingFormulasBitmaskCache.get(formula);
+  if (!cached) {
+    cached = elementSetToBitmask(parseFormulaElements(formula));
+    existingFormulasBitmaskCache.set(formula, cached);
+    if (existingFormulasBitmaskCache.size > 5000) {
+      const firstKey = existingFormulasBitmaskCache.keys().next().value;
+      if (firstKey) existingFormulasBitmaskCache.delete(firstKey);
+    }
+  }
+  return cached;
+}
+
 export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   discoveryScore: number;
   normalizedTc: number;
@@ -813,7 +875,10 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   topologyContribution: number;
   uncertaintyBonus: number;
 } {
-  const normalizedTc = Math.min(1.0, Math.max(0, (candidate.predictedTc || 0) / 300));
+  const tc = candidate.predictedTc || 0;
+  const normalizedTc = tc <= 300
+    ? Math.min(1.0, Math.max(0, tc / 300)) * 0.8
+    : Math.min(1.0, 0.8 + 0.2 * Math.min(1.0, (tc - 300) / 200));
 
   const hullDistKnown = candidate.hullDistance != null;
   const hullDist = candidate.hullDistance ?? 0.10;
@@ -839,6 +904,17 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
     noveltyScore += 0.1;
   }
 
+  let commonFraction = 0;
+  for (const el of elements) {
+    const availability = COMMON_ELEMENTS[el] ?? 0.15;
+    commonFraction += availability * ((counts[el] || 1) / totalAtoms);
+  }
+  if (commonFraction > 0.85) {
+    noveltyScore -= 0.10;
+  } else if (commonFraction > 0.70) {
+    noveltyScore -= 0.05;
+  }
+
   if (candidate.prototype) {
     const exploredPrototypes = ["Perovskite", "A15", "ThCr2Si2"];
     const isExplored = exploredPrototypes.some(p =>
@@ -850,17 +926,18 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   }
 
   if (candidate.existingFormulas && candidate.existingFormulas.length > 0) {
+    const candidateBits = elementSetToBitmask(elements);
     let maxWeightedDistance = 0;
+
     for (const existing of candidate.existingFormulas) {
-      const existingElements = parseFormulaElements(existing);
-      const allElements = Array.from(new Set(elements.concat(existingElements)));
-      const commonElements = elements.filter(e => existingElements.includes(e));
-      const jaccard = allElements.length > 0 ? commonElements.length / allElements.length : 0;
+      const existingBits = getExistingBitmask(existing);
+      const jaccard = bitmaskJaccard(candidateBits, existingBits);
       const baseDistance = 1.0 - jaccard;
 
+      const uniqueToCandidate = bitmaskDiffElements(candidateBits, existingBits);
+      const uniqueToExisting = bitmaskDiffElements(existingBits, candidateBits);
+
       let chemicalDistance = 0;
-      const uniqueToCandidate = elements.filter(e => !existingElements.includes(e));
-      const uniqueToExisting = existingElements.filter(e => !elements.includes(e));
       if (uniqueToCandidate.length > 0 && uniqueToExisting.length > 0) {
         let totalDiff = 0;
         let pairCount = 0;
