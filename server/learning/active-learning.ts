@@ -555,8 +555,6 @@ export function selectForDFT(
   const pressureExplorationSlots = Math.min(2, Math.ceil(budget * 0.10));
   const bestTcSlots = Math.min(6, Math.ceil(budget * 0.25));
   const highUncertaintySlots = Math.min(6, Math.ceil(budget * 0.25));
-  const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pureCuriositySlots - pressureExplorationSlots);
-
   ensureSeenCompositionsFromTraining();
 
   const bestTcSoFar = convergenceStats.bestTcFromLoop > 0
@@ -567,6 +565,13 @@ export function selectForDFT(
   const tcScale = Math.max(maxPredictedTc, bestTcSoFar, 50);
 
   const kappa = computeAdaptiveAlpha();
+
+  const pressureCache = new Map<string, number>();
+  for (const c of candidates) {
+    if (!pressureCache.has(c.formula)) {
+      pressureCache.set(c.formula, c.pressureGpa ?? estimateFamilyPressure(c.formula));
+    }
+  }
 
   const scored: {
     candidate: SuperconductorCandidate;
@@ -589,7 +594,7 @@ export function selectForDFT(
   for (const candidate of candidates) {
     const tc = candidate.predictedTc ?? 0;
     const normalizedTc = Math.min(1.0, Math.max(0, tc / tcScale));
-    const candidatePressure = candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const candidatePressure = pressureCache.get(candidate.formula)!;
     const defaultSigmaK = tc * 0.3;
 
     let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
@@ -713,6 +718,14 @@ export function selectForDFT(
     }
     addFromTier(remaining, "random-exploration", nonPressureBudget - selected.length);
   }
+
+  for (const s of selected) {
+    const f = s.candidate.formula;
+    if (!seenCompositions.has(f)) {
+      seenCompositions.set(f, computeCompositionFractions(f));
+    }
+  }
+  rebuildSeenSample();
 
   const topForPressure = selected.slice(0, 5);
   let pressureAdded = 0;
