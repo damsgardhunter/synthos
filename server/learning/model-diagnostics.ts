@@ -266,7 +266,9 @@ function computeFamilyBias(modelFilter?: string): FamilyBias[] {
     const errors = outcomes.map(o => o.predicted - o.actual);
     const meanError = errors.reduce((s, e) => s + e, 0) / errors.length;
     const meanAbsError = errors.reduce((s, e) => s + Math.abs(e), 0) / errors.length;
-    const bias: "over" | "under" | "neutral" = meanError > 2 ? "over" : meanError < -2 ? "under" : "neutral";
+    const avgActual = outcomes.reduce((s, o) => s + Math.abs(o.actual), 0) / outcomes.length;
+    const biasThreshold = Math.max(2, avgActual * 0.15);
+    const bias: "over" | "under" | "neutral" = meanError > biasThreshold ? "over" : meanError < -biasThreshold ? "under" : "neutral";
     result.push({
       family,
       count: outcomes.length,
@@ -355,11 +357,17 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
       const direction: "over" | "under" = overCount > underCount ? "over" : "under";
       const worstIdx = familyAbsErrors.indexOf(Math.max(...familyAbsErrors));
       const worstOutcome = familyOutcomes[worstIdx];
-      const pressureRelated = family === "hydride" || familyOutcomes.some(o => o.formula.match(/H\d{2,}/));
+      const hasHighHContent = familyOutcomes.some(o => o.formula.match(/H\d{2,}/));
+      const isHydride = family === "hydride" || family === "Hydrides";
+      const pressureRelated = hasHighHContent;
 
       let suggestedAction = "";
-      if (direction === "over" && pressureRelated) {
+      if (isHydride && direction === "over" && hasHighHContent) {
         suggestedAction = `Add pressure feature correction for ${family}; retrain lambda model with pressure-adjusted data`;
+      } else if (isHydride && direction === "over") {
+        suggestedAction = `Check anharmonicity and H zero-point motion corrections for ${family}; these can suppress Tc independently of pressure`;
+      } else if (isHydride && direction === "under") {
+        suggestedAction = `Review H zero-point energy and quantum nuclear effects for ${family}; anharmonic phonon softening may enhance coupling`;
       } else if (direction === "over") {
         suggestedAction = `Recalibrate ${family} predictions; add regularization or family-specific bias correction`;
       } else {
@@ -381,28 +389,54 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
     }
   }
 
-  const highPressureOutcomes = outcomes.filter(o =>
-    o.formula.match(/H\d{2,}/) || o.family === "hydride"
+  const highHContentOutcomes = outcomes.filter(o => o.formula.match(/H\d{2,}/));
+  const lowHHydrideOutcomes = outcomes.filter(o =>
+    (o.family === "hydride" || o.family === "Hydrides") && !o.formula.match(/H\d{2,}/)
   );
-  if (highPressureOutcomes.length >= 3) {
-    const hpErrors = highPressureOutcomes.map(o => o.predicted - o.actual);
+
+  if (highHContentOutcomes.length >= 3) {
+    const hpErrors = highHContentOutcomes.map(o => o.predicted - o.actual);
     const hpMean = hpErrors.reduce((s, e) => s + e, 0) / hpErrors.length;
     if (Math.abs(hpMean) > 20) {
-      const existing = clusters.find(c => c.family === "hydride");
+      const existing = clusters.find(c => c.pattern.includes("High-H-content"));
       if (!existing) {
         const hpAbsErrors = hpErrors.map(e => Math.abs(e));
         const worstIdx = hpAbsErrors.indexOf(Math.max(...hpAbsErrors));
         clusters.push({
-          pattern: `High-pressure hydride ${hpMean > 0 ? "overprediction" : "underprediction"} bias`,
+          pattern: `High-H-content hydride ${hpMean > 0 ? "overprediction" : "underprediction"} bias`,
           family: "hydride",
           direction: hpMean > 0 ? "over" : "under",
-          count: highPressureOutcomes.length,
+          count: highHContentOutcomes.length,
           meanError: Math.round(hpMean * 10) / 10,
           medianError: Math.round(hpMean * 10) / 10,
-          worstFormula: highPressureOutcomes[worstIdx].formula,
+          worstFormula: highHContentOutcomes[worstIdx].formula,
           worstError: Math.round(hpErrors[worstIdx] * 10) / 10,
           pressureRelated: true,
           suggestedAction: "Add explicit pressure features; retrain with pressure-corrected Tc data",
+        });
+      }
+    }
+  }
+
+  if (lowHHydrideOutcomes.length >= 3) {
+    const lhErrors = lowHHydrideOutcomes.map(o => o.predicted - o.actual);
+    const lhMean = lhErrors.reduce((s, e) => s + e, 0) / lhErrors.length;
+    if (Math.abs(lhMean) > 10) {
+      const existing = clusters.find(c => c.pattern.includes("Low-H hydride"));
+      if (!existing) {
+        const lhAbsErrors = lhErrors.map(e => Math.abs(e));
+        const worstIdx = lhAbsErrors.indexOf(Math.max(...lhAbsErrors));
+        clusters.push({
+          pattern: `Low-H hydride ${lhMean > 0 ? "overprediction" : "underprediction"} bias`,
+          family: "hydride",
+          direction: lhMean > 0 ? "over" : "under",
+          count: lowHHydrideOutcomes.length,
+          meanError: Math.round(lhMean * 10) / 10,
+          medianError: Math.round(lhMean * 10) / 10,
+          worstFormula: lowHHydrideOutcomes[worstIdx].formula,
+          worstError: Math.round(lhErrors[worstIdx] * 10) / 10,
+          pressureRelated: false,
+          suggestedAction: "Review anharmonicity corrections and H zero-point motion effects; these dominate over pressure for low-H-content compounds",
         });
       }
     }

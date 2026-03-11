@@ -43,8 +43,17 @@ export function classifyFamily(formula: string): string {
 
   if (has("Ni") && has("O") && elements.some(el => ["La","Nd","Pr","Sm","Gd","Y"].includes(el))) return "Nickelates";
   if (has("B") && has("C") && has("Ni") && hasMetal) return "Borocarbides";
+
+  const PNICTIDE_TM = ["Fe","Co","Ni","Mn","Cr"];
+  const PNICTIDE_ANION = ["As","P","Sb"];
+  const PNICTIDE_SPACER = ["Li","Na","K","Ba","Sr","Ca","La","Ce","Pr","Nd","Sm","Gd","Y"];
+  const hasPnictideTM = PNICTIDE_TM.some(el => has(el));
+  const hasPnictideAnion = PNICTIDE_ANION.some(el => has(el));
+  const hasSpacer = PNICTIDE_SPACER.some(el => has(el));
+  if (hasPnictideTM && hasPnictideAnion && (hasSpacer || elements.length >= 3)) return "Pnictides";
+
   if (has("H") && hasMetal && !has("O") && !has("S") && !has("Se") && elements.length <= 3) return "Hydrides";
-  if (has("S") && hasMetal && !has("O") && !has("Se") && !has("Te")) return "Sulfides";
+  if (has("S") && hasMetal && !has("O") && !has("Se") && !has("Te") && elements.length >= 3) return "Sulfides";
   if (has("B") && hasMetal && !has("O") && !has("N")) return "Borides";
   if (has("C") && hasMetal && !has("O") && !has("H") && !has("Se") && !has("Te") && !has("As")) return "Carbides";
   if (has("N") && hasMetal && !has("O") && !has("H") && !has("Se") && !has("Te") && !has("As")) return "Nitrides";
