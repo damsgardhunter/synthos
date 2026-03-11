@@ -39,9 +39,11 @@ export interface EnthalpyStats {
   totalComputed: number;
   stableCount: number;
   metastableCount: number;
+  narrowStableCount: number;
   unstableCount: number;
   avgStabilityWindow: number;
-  recentResults: { formula: string; stableRange: string; minH: number }[];
+  windowDistribution: { elite: number; broad: number; moderate: number; narrow: number; none: number };
+  recentResults: { formula: string; stableRange: string; minH_eVPerAtom: number; windowGPa: number }[];
 }
 
 const EV_PER_GPA_A3 = 0.00624150913;
@@ -318,43 +320,95 @@ export function computeEnthalpyAtPressure(formula: string, pressureGpa: number):
 }
 
 export function getEnthalpyStats(): EnthalpyStats {
-  const curves = Array.from(enthalpyCache.values());
-
+  let totalComputed = 0;
   let stableCount = 0;
   let metastableCount = 0;
+  let narrowStableCount = 0;
   let unstableCount = 0;
   let totalWindow = 0;
+  const dist = { elite: 0, broad: 0, moderate: 0, narrow: 0, none: 0 };
 
-  for (const curve of curves) {
+  const topByWindow: { formula: string; stableRange: string; minH_eVPerAtom: number; windowGPa: number; computedAt: number }[] = [];
+
+  enthalpyCache.forEach((curve) => {
+    totalComputed++;
     if (curve.stableRange) {
       const width = curve.stableRange.end - curve.stableRange.start;
-      if (width > 50) {
-        stableCount++;
-      } else if (width > 0) {
-        metastableCount++;
-      }
       totalWindow += width;
-    } else {
-      unstableCount++;
-    }
-  }
 
-  const recentResults = curves.slice(-10).map(c => ({
-    formula: c.formula,
-    stableRange: c.stableRange ? `${c.stableRange.start}-${c.stableRange.end} GPa` : "none",
-    minH: c.minEnthalpy,
-  }));
+      if (width >= 100) {
+        dist.elite++;
+        stableCount++;
+      } else if (width >= 50) {
+        dist.broad++;
+        stableCount++;
+      } else if (width >= 20) {
+        dist.moderate++;
+        narrowStableCount++;
+      } else if (width > 0) {
+        dist.narrow++;
+        narrowStableCount++;
+      } else {
+        dist.none++;
+        unstableCount++;
+      }
+
+      topByWindow.push({
+        formula: curve.formula,
+        stableRange: `${curve.stableRange.start}-${curve.stableRange.end} GPa`,
+        minH_eVPerAtom: curve.minEnthalpy,
+        windowGPa: width,
+        computedAt: curve.computedAt,
+      });
+    } else {
+      dist.none++;
+      unstableCount++;
+
+      topByWindow.push({
+        formula: curve.formula,
+        stableRange: "none",
+        minH_eVPerAtom: curve.minEnthalpy,
+        windowGPa: 0,
+        computedAt: curve.computedAt,
+      });
+    }
+  });
+
+  topByWindow.sort((a, b) => {
+    if (b.windowGPa !== a.windowGPa) return b.windowGPa - a.windowGPa;
+    return a.minH_eVPerAtom - b.minH_eVPerAtom;
+  });
+
+  metastableCount = narrowStableCount;
 
   return {
-    totalComputed: curves.length,
+    totalComputed,
     stableCount,
     metastableCount,
+    narrowStableCount,
     unstableCount,
-    avgStabilityWindow: curves.length > 0 ? Math.round(totalWindow / curves.length) : 0,
-    recentResults,
+    avgStabilityWindow: totalComputed > 0 ? Math.round(totalWindow / totalComputed) : 0,
+    windowDistribution: dist,
+    recentResults: topByWindow.slice(0, 10),
   };
 }
 
-export function clearEnthalpyCache(): void {
-  enthalpyCache.clear();
+const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
+
+export function clearEnthalpyCache(fullClear: boolean = false): void {
+  if (fullClear) {
+    enthalpyCache.clear();
+    return;
+  }
+
+  const now = Date.now();
+  const keysToRemove: string[] = [];
+  enthalpyCache.forEach((curve, key) => {
+    if (now - curve.computedAt > CACHE_STALE_MS) {
+      keysToRemove.push(key);
+    }
+  });
+  for (const key of keysToRemove) {
+    enthalpyCache.delete(key);
+  }
 }
