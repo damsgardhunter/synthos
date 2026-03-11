@@ -38,11 +38,54 @@ interface TreeNode {
   right: TreeNode | number;
 }
 
+interface FlatTreeNode {
+  featureIndex: number;
+  threshold: number;
+  leftChild: number;
+  rightChild: number;
+}
+
+interface FlatTree {
+  nodes: FlatTreeNode[];
+  leafValues: number[];
+}
+
+function flattenTree(tree: TreeNode | number): FlatTree {
+  const nodes: FlatTreeNode[] = [];
+  const leafValues: number[] = [];
+
+  function visit(node: TreeNode | number): number {
+    if (typeof node === "number") {
+      const leafIdx = -(leafValues.length + 1);
+      leafValues.push(node);
+      return leafIdx;
+    }
+    const idx = nodes.length;
+    nodes.push({ featureIndex: node.featureIndex, threshold: node.threshold, leftChild: 0, rightChild: 0 });
+    nodes[idx].leftChild = visit(node.left);
+    nodes[idx].rightChild = visit(node.right);
+    return idx;
+  }
+  visit(tree);
+  return { nodes, leafValues };
+}
+
+function predictFlat(flat: FlatTree, x: number[]): number {
+  let idx = 0;
+  while (idx >= 0) {
+    const node = flat.nodes[idx];
+    idx = x[node.featureIndex] <= node.threshold ? node.leftChild : node.rightChild;
+  }
+  return flat.leafValues[-(idx + 1)];
+}
+
 interface GBModel {
   trees: TreeNode[];
+  flatTrees: FlatTree[];
   learningRate: number;
   basePrediction: number;
   featureNames: string[];
+  featureMask?: number[];
   trainedAt: number;
 }
 
@@ -54,6 +97,7 @@ const BOOTSTRAP_SAMPLE_RATIO = 0.8;
 interface GBEnsemble {
   models: GBModel[];
   trainedAt: number;
+  isLogVariance?: boolean;
 }
 
 let cachedEnsembleXGB: GBEnsemble | null = null;
@@ -86,35 +130,40 @@ function bootstrapSample(X: number[][], y: number[], ratio: number = BOOTSTRAP_S
 const ENSEMBLE_MAX_DEPTHS = [5, 6, 7, 6, 5];
 const ENSEMBLE_LEARNING_RATES = [0.04, 0.05, 0.06, 0.05, 0.04];
 
+const FEATURE_SUBSAMPLE_RATIO = 0.7;
+
 function trainEnsembleXGB(X: number[][], y: number[]): GBEnsemble {
+  const overrides = getXGBoostHyperparamOverrides();
   const models: GBModel[] = [];
   for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
     const { X: bsX, y: bsY } = bootstrapSample(X, y);
-    const depth = ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
-    const lr = ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const model = trainGradientBoosting(bsX, bsY, 300, lr, depth);
+    const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
+    const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
+    const model = trainGradientBoosting(bsX, bsY, 300, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
   }
   return { models, trainedAt: Date.now() };
 }
 
 function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble: GBEnsemble): GBEnsemble {
-  const squaredResiduals: number[] = [];
+  const LOG_EPSILON = 1e-6;
+  const logSquaredResiduals: number[] = [];
   for (let i = 0; i < X.length; i++) {
     const meanPred = predictEnsembleXGB(meanEnsemble, X[i]).mean;
     const residual = y[i] - meanPred;
-    squaredResiduals.push(residual * residual);
+    logSquaredResiduals.push(Math.log(residual * residual + LOG_EPSILON));
   }
 
+  const overrides = getXGBoostHyperparamOverrides();
   const models: GBModel[] = [];
   for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
-    const { X: bsX, y: bsY } = bootstrapSample(X, squaredResiduals);
-    const depth = ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
-    const lr = ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const model = trainGradientBoosting(bsX, bsY, 200, lr, depth);
+    const { X: bsX, y: bsY } = bootstrapSample(X, logSquaredResiduals);
+    const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
+    const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
+    const model = trainGradientBoosting(bsX, bsY, 200, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
   }
-  return { models, trainedAt: Date.now() };
+  return { models, trainedAt: Date.now(), isLogVariance: true };
 }
 
 function predictEnsembleXGB(ensemble: GBEnsemble, x: number[]): { mean: number; std: number; predictions: number[] } {
@@ -212,7 +261,7 @@ function computeCalibration(model: GBModel): CalibrationData {
   };
 }
 
-const FEATURE_MEANS: Record<string, number> = {
+const STATIC_FEATURE_MEANS: Record<string, number> = {
   electronPhononLambda: 0.5,
   metallicity: 0.5,
   logPhononFreq: 200,
@@ -265,6 +314,76 @@ const FEATURE_MEANS: Record<string, number> = {
   formationEnergy: 0,
   stability: 0.5,
 };
+
+let computedFeatureMeans: Record<string, number> | null = null;
+let featureMeansComputedAt = 0;
+const FEATURE_MEANS_RECOMPUTE_INTERVAL_MS = 3600_000;
+
+function getFeatureMeans(): Record<string, number> {
+  const now = Date.now();
+  if (computedFeatureMeans && now - featureMeansComputedAt < FEATURE_MEANS_RECOMPUTE_INTERVAL_MS) {
+    return computedFeatureMeans;
+  }
+  try {
+    const sums: Record<string, number> = {};
+    const counts: Record<string, number> = {};
+    for (const key of Object.keys(STATIC_FEATURE_MEANS)) {
+      sums[key] = 0;
+      counts[key] = 0;
+    }
+    let processed = 0;
+    for (const entry of SUPERCON_TRAINING_DATA) {
+      try {
+        const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+        const fAny = features as any;
+        for (const key of Object.keys(STATIC_FEATURE_MEANS)) {
+          const v = fAny[key];
+          if (v != null && Number.isFinite(v)) {
+            sums[key] += v;
+            counts[key]++;
+          }
+        }
+        processed++;
+      } catch {
+        continue;
+      }
+    }
+    if (processed < 10) {
+      computedFeatureMeans = { ...STATIC_FEATURE_MEANS };
+    } else {
+      computedFeatureMeans = { ...STATIC_FEATURE_MEANS };
+      for (const key of Object.keys(STATIC_FEATURE_MEANS)) {
+        if (counts[key] > 10) {
+          computedFeatureMeans[key] = sums[key] / counts[key];
+        }
+      }
+    }
+    featureMeansComputedAt = now;
+    console.log(`[GradientBoost] Recomputed feature means from ${processed} training entries`);
+    return computedFeatureMeans;
+  } catch {
+    return STATIC_FEATURE_MEANS;
+  }
+}
+
+const FEATURE_MEANS = new Proxy(STATIC_FEATURE_MEANS, {
+  get(_target, prop: string) {
+    const means = getFeatureMeans();
+    return means[prop];
+  },
+  has(_target, prop: string) {
+    return prop in STATIC_FEATURE_MEANS;
+  },
+  ownKeys(_target) {
+    return Object.keys(STATIC_FEATURE_MEANS);
+  },
+  getOwnPropertyDescriptor(_target, prop: string) {
+    if (prop in STATIC_FEATURE_MEANS) {
+      return { configurable: true, enumerable: true, value: getFeatureMeans()[prop] };
+    }
+    return undefined;
+  }
+});
 
 function sanitize(v: number | undefined | null, fallback?: number): number {
   if (v == null || !Number.isFinite(v)) return fallback ?? 0;
@@ -542,9 +661,24 @@ function trainGradientBoosting(
   y: number[],
   nEstimators: number = 200,
   learningRate: number = 0.1,
-  maxDepth: number = 4
+  maxDepth: number = 4,
+  featureSubsampleRatio: number = 1.0
 ): GBModel {
   const n = X.length;
+  const nFeatures = X[0]?.length ?? 0;
+
+  let featureMask: number[] | undefined;
+  let projX = X;
+  if (featureSubsampleRatio < 1.0 && nFeatures > 5) {
+    const keepCount = Math.max(5, Math.floor(nFeatures * featureSubsampleRatio));
+    const allFeatureIdx = Array.from({ length: nFeatures }, (_, i) => i);
+    for (let i = allFeatureIdx.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [allFeatureIdx[i], allFeatureIdx[j]] = [allFeatureIdx[j], allFeatureIdx[i]];
+    }
+    featureMask = allFeatureIdx.slice(0, keepCount).sort((a, b) => a - b);
+    projX = X.map(row => featureMask!.map(fi => row[fi]));
+  }
 
   const valSize = Math.max(2, Math.floor(n * 0.15));
   const shuffledIndices = Array.from({ length: n }, (_, i) => i);
@@ -555,9 +689,9 @@ function trainGradientBoosting(
   const valIdxArr = shuffledIndices.slice(0, valSize);
   const trainIndices = shuffledIndices.slice(valSize);
 
-  const trainX = trainIndices.map(i => X[i]);
+  const trainX = trainIndices.map(i => projX[i]);
   const trainY = trainIndices.map(i => y[i]);
-  const valX = valIdxArr.map(i => X[i]);
+  const valX = valIdxArr.map(i => projX[i]);
   const valY = valIdxArr.map(i => y[i]);
 
   const nTrain = trainX.length;
@@ -615,19 +749,31 @@ function trainGradientBoosting(
 
   return {
     trees,
+    flatTrees: trees.map(t => flattenTree(t)),
     learningRate,
     basePrediction,
     featureNames: FEATURE_NAMES,
+    featureMask,
     trainedAt: Date.now(),
   };
 }
 
 function predictWithModel(model: GBModel, x: number[]): number {
+  const px = model.featureMask ? model.featureMask.map(fi => x[fi]) : x;
   let prediction = model.basePrediction;
-  for (const tree of model.trees) {
-    const treeVal = predictTree(tree, x);
-    if (!Number.isFinite(treeVal)) continue;
-    prediction += model.learningRate * treeVal;
+  if (model.flatTrees && model.flatTrees.length > 0) {
+    for (const flat of model.flatTrees) {
+      if (flat.nodes.length === 0) continue;
+      const treeVal = predictFlat(flat, px);
+      if (!Number.isFinite(treeVal)) continue;
+      prediction += model.learningRate * treeVal;
+    }
+  } else {
+    for (const tree of model.trees) {
+      const treeVal = predictTree(tree, px);
+      if (!Number.isFinite(treeVal)) continue;
+      prediction += model.learningRate * treeVal;
+    }
   }
   if (!Number.isFinite(prediction)) return model.basePrediction;
   return Math.max(0, prediction);
@@ -670,6 +816,7 @@ export function getTrainedModel(): GBModel {
   if (X.length < 10) {
     cachedModel = {
       trees: [],
+      flatTrees: [],
       learningRate: 0.1,
       basePrediction: 20,
       featureNames: FEATURE_NAMES,
@@ -786,7 +933,11 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   let aleatoricVar = 0;
   if (cachedVarianceEnsembleXGB) {
     const varResult = predictEnsembleXGB(cachedVarianceEnsembleXGB, x);
-    aleatoricVar = Math.max(0, varResult.mean);
+    if (cachedVarianceEnsembleXGB.isLogVariance) {
+      aleatoricVar = Math.max(0, Math.exp(varResult.mean));
+    } else {
+      aleatoricVar = Math.max(0, varResult.mean);
+    }
   }
   const aleatoricStd = Math.sqrt(aleatoricVar);
 
