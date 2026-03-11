@@ -6,15 +6,33 @@ import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { parseFormulaElements, computeElectronPhononCoupling, computePhononSpectrum, computeElectronicStructure } from "./physics-engine";
 
+function expandParentheses(formula: string): string {
+  let result = formula;
+  let safety = 20;
+  while (/[(\[]/.test(result) && safety-- > 0) {
+    result = result.replace(/[(\[]([^()\[\]]+)[)\]](\d*\.?\d*)/g, (_m, inner, mult) => {
+      const factor = mult ? parseFloat(mult) : 1;
+      return inner.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_: string, el: string, n: string) => {
+        const count = n ? parseFloat(n) : 1;
+        const newCount = count * factor;
+        return newCount === 1 ? el : `${el}${newCount}`;
+      });
+    });
+  }
+  return result;
+}
+
 function parseFormulaCounts(formula: string): Map<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const counts = new Map<string, number>();
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
+    if (isNaN(num)) continue;
     counts.set(el, (counts.get(el) ?? 0) + num);
   }
   return counts;
@@ -227,8 +245,8 @@ function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any)
   } catch {}
 
   if (gnnTc > 0 && gbTc > 0 && predictedTc > 0) {
-    const modelSpread = Math.abs(gnnTc - gbTc) / Math.max(gnnTc, gbTc, 1);
-    const physicsSpread = Math.abs(predictedTc - (gnnTc + gbTc) / 2) / Math.max(predictedTc, 1);
+    const modelSpread = Math.abs(gnnTc - gbTc) / Math.max(gnnTc, gbTc);
+    const physicsSpread = Math.abs(predictedTc - (gnnTc + gbTc) / 2) / predictedTc;
     if (modelSpread < 0.3 && physicsSpread < 0.5) {
       score += 0.1;
       reasoning.push(`Model consensus: GNN/GB/Physics Tc estimates within ${(modelSpread * 100).toFixed(0)}% — high confidence`);
@@ -254,29 +272,53 @@ async function runComparativeRanking(formula: string, predictedTc: number): Prom
   let novelty = 0.5;
 
   try {
+    const globalStats = await storage.getGlobalTcStats();
     const existing = await storage.getSuperconductorCandidates(50);
     const sorted = existing
       .filter(c => (c.predictedTc ?? 0) > 0)
       .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
 
-    if (sorted.length > 0) {
+    const totalCount = globalStats.count > 0 ? globalStats.count : sorted.length;
+    const medianTc = globalStats.count > 0 ? globalStats.median : 0;
+    const p75Tc = globalStats.count > 0 ? globalStats.p75 : 0;
+    const p25Tc = globalStats.count > 0 ? globalStats.p25 : 0;
+
+    if (totalCount > 0 && medianTc > 0) {
+      if (predictedTc >= p75Tc) {
+        const betterInTop50 = sorted.filter(c => (c.predictedTc ?? 0) > predictedTc).length;
+        rank = betterInTop50 + 1;
+        const percentile = predictedTc >= sorted[0]?.predictedTc ? 99 : Math.min(99, 75 + 24 * (predictedTc - p75Tc) / Math.max(sorted[0]?.predictedTc - p75Tc, 1));
+        reasoning.push(`Would rank #${rank} of top-50 (est. ${percentile.toFixed(0)}th percentile of ${totalCount} total, global median=${medianTc.toFixed(0)}K)`);
+        if (percentile >= 90) {
+          score += 0.3;
+          reasoning.push("Top 10% — elite candidate");
+        } else {
+          score += 0.15;
+          reasoning.push("Top 30% — competitive candidate");
+        }
+      } else if (predictedTc >= medianTc) {
+        score += 0.05;
+        reasoning.push(`Above global median (${medianTc.toFixed(0)}K) but below 75th percentile (${p75Tc.toFixed(0)}K) — not exceptional`);
+      } else if (predictedTc >= p25Tc) {
+        reasoning.push(`Between 25th (${p25Tc.toFixed(0)}K) and 50th percentile (${medianTc.toFixed(0)}K) of ${totalCount} candidates — below median`);
+        score -= 0.05;
+      } else {
+        score -= 0.1;
+        reasoning.push(`Below 25th percentile (${p25Tc.toFixed(0)}K) of ${totalCount} candidates — many existing candidates outperform`);
+      }
+    } else if (sorted.length > 0) {
       const betterCount = sorted.filter(c => (c.predictedTc ?? 0) > predictedTc).length;
       rank = betterCount + 1;
       const percentile = 1 - betterCount / sorted.length;
-      reasoning.push(`Would rank #${rank} of ${sorted.length} candidates (${(percentile * 100).toFixed(0)}th percentile)`);
-
+      reasoning.push(`Would rank #${rank} of ${sorted.length} candidates (${(percentile * 100).toFixed(0)}th percentile — limited sample)`);
       if (percentile >= 0.9) {
         score += 0.3;
-        reasoning.push("Top 10% — elite candidate");
       } else if (percentile >= 0.7) {
         score += 0.15;
-        reasoning.push("Top 30% — competitive candidate");
       } else if (percentile >= 0.5) {
         score += 0.05;
-        reasoning.push("Median range — not exceptional");
       } else {
         score -= 0.1;
-        reasoning.push("Below median — many existing candidates outperform");
       }
     }
 

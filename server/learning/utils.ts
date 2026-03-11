@@ -72,15 +72,33 @@ export function safeFixed(val: number, digits: number = 2): number {
   return Number(val.toFixed(digits));
 }
 
+function expandParentheses(formula: string): string {
+  let result = formula;
+  let safety = 20;
+  while (/[(\[]/.test(result) && safety-- > 0) {
+    result = result.replace(/[(\[]([^()\[\]]+)[)\]](\d*\.?\d*)/g, (_m, inner, mult) => {
+      const factor = mult ? parseFloat(mult) : 1;
+      return inner.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_: string, el: string, n: string) => {
+        const count = n ? parseFloat(n) : 1;
+        const newCount = count * factor;
+        return newCount === 1 ? el : `${el}${newCount}`;
+      });
+    });
+  }
+  return result;
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const counts: Record<string, number> = {};
-  const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const count = match[2] ? parseFloat(match[2]) : 1;
+    if (isNaN(count)) continue;
     counts[el] = (counts[el] || 0) + count;
   }
   return counts;

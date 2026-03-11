@@ -58,6 +58,7 @@ export interface IStorage {
   bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   getSuperconductorCount(): Promise<number>;
+  getGlobalTcStats(): Promise<{ count: number; median: number; p25: number; p75: number }>;
   getSuperconductorsByStage(stage: number, limit?: number): Promise<SuperconductorCandidate[]>;
 
   getCrystalStructures(limit?: number): Promise<CrystalStructure[]>;
@@ -338,6 +339,27 @@ export class DatabaseStorage implements IStorage {
   async getSuperconductorCount(): Promise<number> {
     const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
     return Number(count);
+  }
+
+  async getGlobalTcStats(): Promise<{ count: number; median: number; p25: number; p75: number }> {
+    const rows = await db.select({ tc: superconductorCandidates.predictedTc })
+      .from(superconductorCandidates)
+      .where(sql`${superconductorCandidates.predictedTc} > 0`)
+      .orderBy(superconductorCandidates.predictedTc);
+    const vals = rows.map(r => Number(r.tc)).filter(v => v > 0);
+    if (vals.length === 0) return { count: 0, median: 0, p25: 0, p75: 0 };
+    const quantile = (arr: number[], q: number) => {
+      const pos = (arr.length - 1) * q;
+      const lo = Math.floor(pos);
+      const hi = Math.ceil(pos);
+      return lo === hi ? arr[lo] : arr[lo] * (hi - pos) + arr[hi] * (pos - lo);
+    };
+    return {
+      count: vals.length,
+      median: quantile(vals, 0.5),
+      p25: quantile(vals, 0.25),
+      p75: quantile(vals, 0.75),
+    };
   }
 
   async getSuperconductorsByStage(stage: number, limit = 100): Promise<SuperconductorCandidate[]> {
