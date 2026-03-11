@@ -248,7 +248,7 @@ export interface CrossValidationResult {
 }
 
 export function crossValidateWithMP(
-  candidate: { predictedTc?: number | null; stabilityScore?: number | null; electronPhononCoupling?: number | null },
+  candidate: { predictedTc?: number | null; stabilityScore?: number | null; electronPhononCoupling?: number | null; mlFeatures?: any },
   mpSummary: { formationEnergyPerAtom: number; energyAboveHull: number; bandGap: number; isMetallic: boolean; density: number } | null,
   mpElasticity: { bulkModulus: number; shearModulus: number; poissonRatio: number } | null,
 ): CrossValidationResult[] {
@@ -292,13 +292,35 @@ export function crossValidateWithMP(
     }
 
     if (mpSummary.bandGap != null) {
+      const mlFeats = candidate.mlFeatures as Record<string, any> | undefined;
+      const predictedBg = mlFeats?.bandgap ?? mlFeats?.bandGap ?? null;
+      const candidateExpectsMetal = predictedBg != null ? predictedBg < 0.1
+        : (candidate.predictedTc ?? 0) > 0;
+
+      let bgDeviation: number | null = null;
+      let bgAgreement: CrossValidationResult["agreement"];
+
+      if (predictedBg != null) {
+        const denom = Math.max(Math.abs(mpSummary.bandGap), Math.abs(predictedBg), 0.01);
+        bgDeviation = Math.abs(predictedBg - mpSummary.bandGap) / denom * 100;
+        bgAgreement = bgDeviation > 50 ? "major-discrepancy"
+          : bgDeviation > 20 ? "minor-discrepancy"
+          : "match";
+      } else if (candidateExpectsMetal) {
+        bgAgreement = mpSummary.bandGap < 0.1 ? "match"
+          : mpSummary.bandGap > 0.5 ? "major-discrepancy"
+          : "minor-discrepancy";
+      } else {
+        bgAgreement = "no-comparison";
+      }
+
       results.push({
         source: "Materials Project",
         property: "Band Gap",
-        predictedValue: null,
+        predictedValue: predictedBg,
         externalValue: mpSummary.bandGap,
-        deviationPercent: null,
-        agreement: mpSummary.isMetallic ? "match" : (mpSummary.bandGap > 0.5 ? "major-discrepancy" : "match"),
+        deviationPercent: bgDeviation,
+        agreement: bgAgreement,
         unit: "eV",
       });
     }
@@ -322,7 +344,7 @@ export function crossValidateWithMP(
 }
 
 export function crossValidateWithAflow(
-  candidate: { predictedTc?: number | null; stabilityScore?: number | null },
+  candidate: { predictedTc?: number | null; stabilityScore?: number | null; mlFeatures?: any },
   aflowData: AflowResult,
 ): CrossValidationResult[] {
   const results: CrossValidationResult[] = [];
@@ -335,14 +357,17 @@ export function crossValidateWithAflow(
     let deviation: number | null = null;
     let agreement: CrossValidationResult["agreement"] = "no-comparison";
     if (stability != null) {
-      const mappedExternal = entry.enthalpy_formation_atom < 0 ? Math.min(1, Math.abs(entry.enthalpy_formation_atom) / 2) : 0;
+      const hForm = entry.enthalpy_formation_atom;
+      const mappedExternal = hForm <= -2.0 ? 1.0
+        : hForm >= 0.5 ? 0
+        : Math.max(0, Math.min(1, (0.5 - hForm) / 2.5));
       const denominator = Math.max(Math.abs(mappedExternal), Math.abs(stability), 0.001);
       deviation = Math.abs(stability - mappedExternal) / denominator * 100;
       agreement = deviation > 30 ? "major-discrepancy" : deviation > 10 ? "minor-discrepancy" : "match";
     }
     results.push({
       source: "AFLOW",
-      property: "Formation Enthalpy",
+      property: "Formation Enthalpy (stability proxy)",
       predictedValue: stability,
       externalValue: entry.enthalpy_formation_atom,
       deviationPercent: deviation,
@@ -352,13 +377,35 @@ export function crossValidateWithAflow(
   }
 
   if (entry.bandgap != null) {
+    const mlFeats = candidate.mlFeatures as Record<string, any> | undefined;
+    const predictedBandgap = mlFeats?.bandgap ?? mlFeats?.bandGap ?? null;
+    const candidatePredictsMetal = predictedBandgap != null ? predictedBandgap < 0.1
+      : (candidate.predictedTc ?? 0) > 0;
+
+    let bandgapDeviation: number | null = null;
+    let bandgapAgreement: CrossValidationResult["agreement"];
+
+    if (predictedBandgap != null) {
+      const denominator = Math.max(Math.abs(entry.bandgap), Math.abs(predictedBandgap), 0.01);
+      bandgapDeviation = Math.abs(predictedBandgap - entry.bandgap) / denominator * 100;
+      bandgapAgreement = bandgapDeviation > 50 ? "major-discrepancy"
+        : bandgapDeviation > 20 ? "minor-discrepancy"
+        : "match";
+    } else if (candidatePredictsMetal) {
+      bandgapAgreement = entry.bandgap < 0.1 ? "match"
+        : entry.bandgap > 0.5 ? "major-discrepancy"
+        : "minor-discrepancy";
+    } else {
+      bandgapAgreement = "no-comparison";
+    }
+
     results.push({
       source: "AFLOW",
       property: "Band Gap",
-      predictedValue: null,
+      predictedValue: predictedBandgap,
       externalValue: entry.bandgap,
-      deviationPercent: null,
-      agreement: entry.bandgap < 0.1 ? "match" : (entry.bandgap > 0.5 ? "major-discrepancy" : "minor-discrepancy"),
+      deviationPercent: bandgapDeviation,
+      agreement: bandgapAgreement,
       unit: "eV",
     });
   }
