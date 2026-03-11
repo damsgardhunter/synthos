@@ -247,10 +247,24 @@ export interface CrossValidationResult {
   unit: string;
 }
 
+export interface MPSummary {
+  formationEnergyPerAtom: number | null;
+  energyAboveHull: number | null;
+  bandGap: number | null;
+  isMetallic: boolean;
+  density: number | null;
+}
+
+export interface MPElasticity {
+  bulkModulus: number | null;
+  shearModulus: number | null;
+  poissonRatio: number | null;
+}
+
 export function crossValidateWithMP(
   candidate: { predictedTc?: number | null; stabilityScore?: number | null; electronPhononCoupling?: number | null; mlFeatures?: any },
-  mpSummary: { formationEnergyPerAtom: number; energyAboveHull: number; bandGap: number; isMetallic: boolean; density: number } | null,
-  mpElasticity: { bulkModulus: number; shearModulus: number; poissonRatio: number } | null,
+  mpSummary: MPSummary | null,
+  mpElasticity: MPElasticity | null,
 ): CrossValidationResult[] {
   const results: CrossValidationResult[] = [];
   if (!mpSummary && !mpElasticity) return results;
@@ -327,12 +341,23 @@ export function crossValidateWithMP(
   }
 
   if (mpElasticity) {
-    if (mpElasticity.bulkModulus > 0) {
+    if (mpElasticity.bulkModulus != null) {
       results.push({
         source: "Materials Project",
         property: "Bulk Modulus",
         predictedValue: null,
         externalValue: mpElasticity.bulkModulus,
+        deviationPercent: null,
+        agreement: "no-comparison",
+        unit: "GPa",
+      });
+    }
+    if (mpElasticity.shearModulus != null) {
+      results.push({
+        source: "Materials Project",
+        property: "Shear Modulus",
+        predictedValue: null,
+        externalValue: mpElasticity.shearModulus,
         deviationPercent: null,
         agreement: "no-comparison",
         unit: "GPa",
