@@ -107,6 +107,7 @@ const NEIGHBOR_MAP: Record<string, string[]> = {
 
 function estimateMiedemaSurfaceEnergy(elements: string[]): number {
   let totalSurfaceEnergy = 0;
+  const enValues: number[] = [];
   for (const el of elements) {
     const data = ELEMENTAL_DATA[el];
     const meltingPoint = data?.meltingPoint || 1500;
@@ -114,8 +115,23 @@ function estimateMiedemaSurfaceEnergy(elements: string[]): number {
     const surfaceAreaPerMole = 4.0e8 * (atomicRadius / 100) ** 2;
     const surfaceEnergy = 0.0005 * meltingPoint * surfaceAreaPerMole / 6.022e23;
     totalSurfaceEnergy += surfaceEnergy;
+    if (data?.paulingElectronegativity != null) {
+      enValues.push(data.paulingElectronegativity);
+    }
   }
-  return totalSurfaceEnergy / Math.max(1, elements.length);
+  let baseSurface = totalSurfaceEnergy / Math.max(1, elements.length);
+
+  if (enValues.length >= 2) {
+    const enMax = Math.max(...enValues);
+    const enMin = Math.min(...enValues);
+    const enSpread = enMax - enMin;
+    if (enSpread > 0.5) {
+      const ionicityFactor = 1.0 + 0.4 * Math.pow(enSpread - 0.5, 1.5);
+      baseSurface *= ionicityFactor;
+    }
+  }
+
+  return baseSurface;
 }
 
 function estimateGrainBoundaryConcentration(grainSizeNm: number): number {
@@ -226,9 +242,29 @@ export function computeDefectFormationEnergy(
     case DefectType.Vacancy:
       Ef = elEnergy * coordFactor * 0.6 + hostEnergy * 0.1;
       break;
-    case DefectType.Interstitial:
-      Ef = elEnergy * 0.3 + hostEnergy * coordFactor * 0.4;
+    case DefectType.Interstitial: {
+      const intData = ELEMENTAL_DATA[element];
+      const intRadius = intData?.atomicRadius || 100;
+      const hostElements = elements.filter(e => e !== element);
+      let avgHostRadius = 150;
+      if (hostElements.length > 0) {
+        avgHostRadius = hostElements.reduce((sum, e) => {
+          const d = ELEMENTAL_DATA[e];
+          return sum + (d?.atomicRadius || 150);
+        }, 0) / hostElements.length;
+      }
+      const voidRadius = avgHostRadius * 0.41;
+      const radiusMismatch = intRadius / Math.max(1, voidRadius);
+      let strainPenalty = 0;
+      if (radiusMismatch > 1.0) {
+        strainPenalty = 2.0 * Math.pow(radiusMismatch - 1.0, 2);
+        if (radiusMismatch > 1.5) {
+          strainPenalty += 3.0 * (radiusMismatch - 1.5);
+        }
+      }
+      Ef = elEnergy * 0.3 + hostEnergy * coordFactor * 0.4 + strainPenalty;
       break;
+    }
     case DefectType.Antisite: {
       const otherEl = elements.find(e => e !== element) || element;
       const otherEnergy = getElementEnergy(otherEl);
