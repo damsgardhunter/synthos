@@ -229,46 +229,53 @@ function elementSubstitutionDistance(elA: string, elB: string): number {
 
 const MIN_SUBSTITUTION_DISTANCE = 1.0;
 
+const ANION_CAPABLE = new Set(["H", "B", "C", "N", "O", "F", "S", "Se", "Te", "Cl", "Br", "I", "P", "As", "Sb", "Si", "Ge", "Sn"]);
+
+function chargeBalanceSetBased(elements: string[], counts: Record<string, number>, tolerance: number): boolean {
+  let reachable = new Set<number>([0]);
+  for (const el of elements) {
+    const c = counts[el] ?? 1;
+    const states = CHARGE_BALANCE_OX_STATES[el];
+    if (!states) continue;
+    const next = new Set<number>();
+    const prevArr = Array.from(reachable);
+    for (const prev of prevArr) {
+      for (const ox of states) {
+        next.add(prev + ox * c);
+      }
+    }
+    reachable = next;
+    if (reachable.size > 50000) {
+      const arr = Array.from(reachable);
+      let minVal = Infinity, maxVal = -Infinity;
+      for (const v of arr) {
+        if (v < minVal) minVal = v;
+        if (v > maxVal) maxVal = v;
+      }
+      return minVal <= tolerance && maxVal >= -tolerance;
+    }
+  }
+  const finalArr = Array.from(reachable);
+  for (const v of finalArr) {
+    if (Math.abs(v) <= tolerance) return true;
+  }
+  return false;
+}
+
 function canBeChargeNeutral(counts: Record<string, number>): boolean {
   const elements = Object.keys(counts);
   if (elements.length <= 1) return true;
 
   const allMetallic = elements.every(el => {
     const states = CHARGE_BALANCE_OX_STATES[el];
-    return !states || states.every(s => s >= 0);
+    if (!states || states.every(s => s >= 0)) {
+      return !ANION_CAPABLE.has(el);
+    }
+    return false;
   });
   if (allMetallic) return true;
 
-  if (elements.length <= 5) {
-    let bestImbalance = Infinity;
-    const enumerate = (idx: number, charge: number): void => {
-      if (bestImbalance === 0) return;
-      if (idx === elements.length) {
-        bestImbalance = Math.min(bestImbalance, Math.abs(charge));
-        return;
-      }
-      const el = elements[idx];
-      const c = counts[el] ?? 1;
-      const states = CHARGE_BALANCE_OX_STATES[el];
-      if (!states) { enumerate(idx + 1, charge); return; }
-      for (const ox of states) {
-        enumerate(idx + 1, charge + ox * c);
-      }
-    };
-    enumerate(0, 0);
-    return bestImbalance === 0;
-  }
-
-  let maxCharge = 0;
-  let minCharge = 0;
-  for (const el of elements) {
-    const c = counts[el] ?? 1;
-    const states = CHARGE_BALANCE_OX_STATES[el];
-    if (!states) continue;
-    maxCharge += Math.max(...states) * c;
-    minCharge += Math.min(...states) * c;
-  }
-  return minCharge <= 0 && maxCharge >= 0;
+  return chargeBalanceSetBased(elements, counts, 0);
 }
 
 function passesStericCheck(counts: Record<string, number>): boolean {
@@ -345,25 +352,54 @@ function countsToFormula(counts: Record<string, number>): string {
   return result;
 }
 
-function reduceStoichiometry(counts: Record<string, number>): Record<string, number> {
+function rationalizeToIntegers(counts: Record<string, number>): Record<string, number> {
   const vals = Object.values(counts).filter(v => v > 0);
   if (vals.length === 0) return counts;
+  if (vals.every(v => Math.abs(v - Math.round(v)) < 0.01)) {
+    const rounded: Record<string, number> = {};
+    for (const [el, n] of Object.entries(counts)) {
+      rounded[el] = Math.round(n);
+    }
+    return rounded;
+  }
+  for (const mult of [2, 3, 4, 5, 6, 8, 10]) {
+    const scaled = vals.map(v => v * mult);
+    if (scaled.every(s => Math.abs(s - Math.round(s)) < 0.05 && Math.round(s) > 0 && Math.round(s) <= 20)) {
+      const result: Record<string, number> = {};
+      for (const [el, n] of Object.entries(counts)) {
+        result[el] = Math.round(n * mult);
+      }
+      return result;
+    }
+  }
+  return counts;
+}
+
+function gcdInt(a: number, b: number): number {
+  a = Math.round(Math.abs(a));
+  b = Math.round(Math.abs(b));
+  while (b > 0) { const t = b; b = a % b; a = t; }
+  return a;
+}
+
+function reduceStoichiometry(counts: Record<string, number>): Record<string, number> {
+  const rationalized = rationalizeToIntegers(counts);
+  const vals = Object.values(rationalized).filter(v => v > 0);
+  if (vals.length === 0) return rationalized;
   const allInts = vals.every(v => Number.isInteger(v) && v >= 1);
-  if (!allInts) return counts;
+  if (!allInts) return rationalized;
   let g = vals[0];
   for (let i = 1; i < vals.length; i++) {
-    let a = g, b = vals[i];
-    while (b > 0) { const t = b; b = a % b; a = t; }
-    g = a;
+    g = gcdInt(g, vals[i]);
   }
   if (g > 1) {
     const reduced: Record<string, number> = {};
-    for (const [el, n] of Object.entries(counts)) {
+    for (const [el, n] of Object.entries(rationalized)) {
       reduced[el] = n / g;
     }
     return reduced;
   }
-  return counts;
+  return rationalized;
 }
 
 function canonicalize(formula: string): string {
@@ -398,47 +434,13 @@ function passesStrictChargeBalance(elements: string[], counts: Record<string, nu
 
   const allMetallic = elements.every(el => {
     const states = CHARGE_BALANCE_OX_STATES[el];
-    if (!states) return true;
-    return states.every(s => s >= 0);
+    if (!states) return !ANION_CAPABLE.has(el);
+    return states.every(s => s >= 0) && !ANION_CAPABLE.has(el);
   });
-  const hasAnion = elements.some(el => {
-    const states = CHARGE_BALANCE_OX_STATES[el];
-    return states ? states.some(s => s < 0) : false;
-  });
+  const hasAnion = elements.some(el => ANION_CAPABLE.has(el));
   if (allMetallic && !hasAnion) return true;
 
-  if (elements.length <= 5) {
-    let bestImbalance = Infinity;
-    const enumerate = (idx: number, charge: number): void => {
-      if (bestImbalance === 0) return;
-      if (idx === elements.length) {
-        bestImbalance = Math.min(bestImbalance, Math.abs(charge));
-        return;
-      }
-      const el = elements[idx];
-      const c = counts[el] ?? 1;
-      const states = CHARGE_BALANCE_OX_STATES[el];
-      if (!states) { enumerate(idx + 1, charge); return; }
-      for (const ox of states) {
-        enumerate(idx + 1, charge + ox * c);
-      }
-    };
-    enumerate(0, 0);
-    return bestImbalance <= 1;
-  }
-
-  let maxCharge = 0;
-  let minCharge = 0;
-  for (const el of elements) {
-    const c = counts[el] ?? 1;
-    const states = CHARGE_BALANCE_OX_STATES[el];
-    if (!states) continue;
-    const maxOx = Math.max(...states);
-    const minOx = Math.min(...states);
-    maxCharge += maxOx * c;
-    minCharge += minOx * c;
-  }
-  return minCharge <= 0 && maxCharge >= 0;
+  return chargeBalanceSetBased(elements, counts, 1);
 }
 
 const FAMILY_TEMPLATES = [
