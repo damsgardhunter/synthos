@@ -670,7 +670,16 @@ export function selectForDFT(
 
   const selected: RankedCandidate[] = [];
   const seenFormulas = new Set<string>();
+  const selectedFracs: Record<string, number>[] = [];
   const nonPressureBudget = budget - pressureExplorationSlots;
+  const MIN_DIVERSITY_DIST = 0.08;
+
+  function diversityCheck(fracs: Record<string, number>): boolean {
+    for (const sf of selectedFracs) {
+      if (fracDistance(fracs, sf) < MIN_DIVERSITY_DIST) return false;
+    }
+    return true;
+  }
 
   function addFromTier(
     sortedList: typeof scored,
@@ -681,7 +690,10 @@ export function selectForDFT(
     for (const s of sortedList) {
       if (added >= maxForTier || selected.length >= nonPressureBudget) break;
       if (seenFormulas.has(s.candidate.formula)) continue;
+      const fracs = computeCompositionFractions(s.candidate.formula);
+      if (selectedFracs.length > 0 && !diversityCheck(fracs)) continue;
       seenFormulas.add(s.candidate.formula);
+      selectedFracs.push(fracs);
       selected.push({
         candidate: s.candidate,
         acquisitionScore: s.acquisitionScore,

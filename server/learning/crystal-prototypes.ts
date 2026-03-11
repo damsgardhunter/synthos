@@ -788,6 +788,283 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       return hasFiller && hasTM && hasPn;
     },
   },
+  {
+    name: "A15-W3O",
+    spaceGroup: "Pm-3n",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "corner" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "body-center" },
+      { label: "B", x: 0.25, y: 0.0, z: 0.5, role: "chain" },
+      { label: "B", x: 0.75, y: 0.0, z: 0.5, role: "chain" },
+      { label: "B", x: 0.5, y: 0.25, z: 0.0, role: "chain" },
+      { label: "B", x: 0.5, y: 0.75, z: 0.0, role: "chain" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.25, role: "chain" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.75, role: "chain" },
+    ],
+    stoichiometryRatio: [1, 3],
+    coordination: [12, 14],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Nb", "V", "Ti", "Zr", "Mo", "Ta"].includes(e));
+    },
+  },
+  {
+    name: "Fluorite-C1",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation" },
+      { label: "B", x: 0.25, y: 0.25, z: 0.25, role: "anion" },
+      { label: "B", x: 0.75, y: 0.75, z: 0.75, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [8, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasLarge = elements.some(e => ["Zr", "Hf", "Ce", "Th", "U", "Pb", "Ca"].includes(e));
+      const hasAnion = elements.some(e => ["O", "F", "Cl", "H"].includes(e));
+      return hasLarge && hasAnion;
+    },
+  },
+  {
+    name: "Cu3Au-L1_2",
+    spaceGroup: "Pm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "corner" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.0, role: "face-center" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.5, role: "face-center" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.5, role: "face-center" },
+    ],
+    stoichiometryRatio: [1, 3],
+    coordination: [12, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Au", "Pt", "Pd", "Ni", "Al", "Sn", "In"].includes(e));
+    },
+  },
+  {
+    name: "ZincBlende-B3",
+    spaceGroup: "F-43m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "fcc-site" },
+      { label: "B", x: 0.25, y: 0.25, z: 0.25, role: "tetrahedral-site" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Zn", "Cd", "Hg", "Al", "Ga", "In", "Si", "Ge"].includes(e));
+    },
+  },
+  {
+    name: "C14-Laves",
+    spaceGroup: "P6_3/mmc",
+    latticeType: "hexagonal",
+    cOverA: 1.63,
+    sites: [
+      { label: "A", x: 0.333, y: 0.667, z: 0.063, role: "large-atom" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.0, role: "small-atom-1" },
+      { label: "B", x: 0.833, y: 0.667, z: 0.25, role: "small-atom-2" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [16, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => isTransitionMetal(e) || isRareEarth(e) || ["Mg"].includes(e));
+    },
+  },
+  {
+    name: "NiAs-B8_1",
+    spaceGroup: "P6_3/mmc",
+    latticeType: "hexagonal",
+    cOverA: 1.39,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal-octahedral" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.25, role: "pnictogen-trigonal" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Ni", "Fe", "Co", "Mn", "Cr", "Ti", "V"].includes(e));
+      const hasPn = elements.some(e => ["As", "Sb", "Bi", "Sn", "Te"].includes(e));
+      return hasTM && hasPn;
+    },
+  },
+  {
+    name: "Wurtzite-B4",
+    spaceGroup: "P6_3mc",
+    latticeType: "hexagonal",
+    cOverA: 1.6,
+    sites: [
+      { label: "A", x: 0.333, y: 0.667, z: 0.0, role: "cation" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.375, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Zn", "Cd", "Al", "Ga", "In", "N", "O"].includes(e));
+    },
+  },
+  {
+    name: "CdI2-C6",
+    spaceGroup: "P-3m1",
+    latticeType: "hexagonal",
+    cOverA: 1.5,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.25, role: "anion-top" },
+      { label: "B", x: 0.667, y: 0.333, z: 0.75, role: "anion-bot" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Ti", "Zr", "V", "Fe", "Co", "Ni", "Mg"].includes(e)) && elements.some(e => ["Cl", "Br", "I", "S", "Se", "Te"].includes(e));
+    },
+  },
+  {
+    name: "Rutile-C4",
+    spaceGroup: "P4_2/mnm",
+    latticeType: "tetragonal",
+    cOverA: 0.64,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "cation" },
+      { label: "B", x: 0.3, y: 0.3, z: 0.0, role: "anion" },
+      { label: "B", x: 0.7, y: 0.7, z: 0.0, role: "anion" },
+      { label: "B", x: 0.8, y: 0.2, z: 0.5, role: "anion" },
+      { label: "B", x: 0.2, y: 0.8, z: 0.5, role: "anion" },
+    ],
+    stoichiometryRatio: [2, 4],
+    coordination: [6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Ti", "Sn", "Pb", "Mn", "Cr", "Ru", "Ir", "Ge"].includes(e)) && elements.includes("O");
+    },
+  },
+  {
+    name: "CuAl2-C16",
+    spaceGroup: "I4/mcm",
+    latticeType: "tetragonal",
+    cOverA: 0.8,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.25, role: "minor-metal" },
+      { label: "B", x: 0.16, y: 0.66, z: 0.0, role: "major-metal" },
+    ],
+    stoichiometryRatio: [4, 8],
+    coordination: [8, 11],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => isTransitionMetal(e)) && elements.some(e => ["Al", "Ga", "In", "Sn", "Si"].includes(e));
+    },
+  },
+  {
+    name: "ZrBe2-type",
+    spaceGroup: "P6/mmm",
+    latticeType: "hexagonal",
+    cOverA: 0.85,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "spacer" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.5, role: "honeycomb" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [12, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Zr", "Hf", "Ti", "Sc", "Y", "La"].includes(e)) && elements.includes("Be");
+    },
+  },
+  {
+    name: "MoC-type",
+    spaceGroup: "P-6m2",
+    latticeType: "hexagonal",
+    cOverA: 0.95,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.5, role: "interstitial" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Mo", "W", "Nb", "Ta"].includes(e)) && elements.some(e => ["C", "N"].includes(e));
+    },
+  },
+  {
+    name: "FeB-B27",
+    spaceGroup: "Pnma",
+    latticeType: "orthorhombic",
+    cOverA: 1.3,
+    sites: [
+      { label: "A", x: 0.18, y: 0.25, z: 0.12, role: "metal" },
+      { label: "B", x: 0.03, y: 0.25, z: 0.62, role: "boron" },
+    ],
+    stoichiometryRatio: [4, 4],
+    coordination: [7, 7],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Fe", "Co", "Ni", "Mn", "Cr", "Mo", "W"].includes(e)) && elements.includes("B");
+    },
+  },
+  {
+    name: "CrB-Bf",
+    spaceGroup: "Cmcm",
+    latticeType: "orthorhombic",
+    cOverA: 1.1,
+    sites: [
+      { label: "A", x: 0.0, y: 0.14, z: 0.25, role: "metal" },
+      { label: "B", x: 0.0, y: 0.44, z: 0.25, role: "boron" },
+    ],
+    stoichiometryRatio: [4, 4],
+    coordination: [7, 7],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Cr", "Mo", "W", "V", "Nb", "Ta", "Ni"].includes(e)) && elements.includes("B");
+    },
+  },
+  {
+    name: "Th3P4-D7_3",
+    spaceGroup: "I-43d",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.062, y: 0.062, z: 0.062, role: "cation" },
+      { label: "B", x: 0.25, y: 0.0, z: 0.0, role: "anion" },
+    ],
+    stoichiometryRatio: [12, 16],
+    coordination: [8, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => isRareEarth(e) || ["Th", "U"].includes(e)) && elements.some(e => ["P", "As", "Sb", "Bi", "S", "Se", "Te"].includes(e));
+    },
+  },
+  {
+    name: "AuCu-L1_0",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 0.9,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "corner" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "body-center" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [12, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Pt", "Pd", "Au", "Cu", "Fe", "Co", "Ni", "Mn", "Ti", "Al"].includes(e));
+    },
+  },
+  {
+    name: "CoSn
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {
