@@ -35,11 +35,39 @@ export interface BandDispersion {
   fermiEnergy: number;
 }
 
+export type MassTensor3x3 = [
+  [number, number, number],
+  [number, number, number],
+  [number, number, number],
+];
+
+export interface EffectiveMassEntry {
+  bandIndex: number;
+  value: number;
+  direction: string;
+  massComponents?: [number, number, number];
+  massTensor?: MassTensor3x3;
+  harmonicMeanMass?: number;
+  anisotropyRatio?: number;
+}
+
+export interface VHSPositionEntry {
+  bandIndex: number;
+  kFraction: number;
+  energy: number;
+  type: string;
+  confirmed?: boolean;
+  refinedEnergy?: number;
+  refinedKFraction?: number;
+  vhsClass?: "M0" | "M1" | "M2" | "flat";
+  localCurvatures?: [number, number];
+}
+
 export interface DerivedQuantities {
-  effectiveMasses: { bandIndex: number; value: number; direction: string; massComponents?: [number, number, number] }[];
+  effectiveMasses: EffectiveMassEntry[];
   fermiVelocities: { bandIndex: number; velocity: number; kLabel: string }[];
   bandCurvatures: { bandIndex: number; curvature: number; kLabel: string }[];
-  vhsPositions: { bandIndex: number; kFraction: number; energy: number; type: string }[];
+  vhsPositions: VHSPositionEntry[];
   nestingVectors: { q: [number, number, number]; strength: number; bandPair: [number, number] }[];
   topologicalInvariants: {
     berryPhaseProxy: number;
@@ -387,9 +415,13 @@ function computeCalibrationShifts(
   return shifts;
 }
 
-function computeEffectiveMasses(dispersion: BandDispersion): DerivedQuantities["effectiveMasses"] {
+function computeEffectiveMasses(
+  dispersion: BandDispersion,
+  latticeSystem: string,
+): DerivedQuantities["effectiveMasses"] {
   const masses: DerivedQuantities["effectiveMasses"] = [];
   const hbar2Over2m = 7.62;
+  const isCubic = latticeSystem === "cubic";
 
   for (let b = 0; b < dispersion.nBands; b++) {
     const bandEnergies = dispersion.bands.map(pt => pt.energies[b] ?? 0);
@@ -407,16 +439,91 @@ function computeEffectiveMasses(dispersion: BandDispersion): DerivedQuantities["
       const dE = bandEnergies[iPlus] - 2 * bandEnergies[crossIdx] + bandEnergies[iMinus];
       const dk = 1.0 / dispersion.nKPoints;
       const curvature = dE / (dk * dk);
-      const mStar = curvature !== 0 ? hbar2Over2m / Math.abs(curvature) : 1.0;
+      const mPath = curvature !== 0 ? hbar2Over2m / Math.abs(curvature) : 1.0;
+
+      const kCoord = dispersion.bands[crossIdx]?.kIndex !== undefined
+        ? dispersion.kPoints.find(kp => kp.index === crossIdx)?.coordinates
+        : undefined;
+
+      let massComponents: [number, number, number];
+      let massTensor: MassTensor3x3;
+      let harmonicMeanMass: number;
+      let anisotropyRatio: number;
+
+      if (isCubic) {
+        const clampedM = Math.min(100, Math.max(0.01, mPath));
+        massComponents = [clampedM, clampedM, clampedM];
+        massTensor = [
+          [clampedM, 0, 0],
+          [0, clampedM, 0],
+          [0, 0, clampedM],
+        ];
+        harmonicMeanMass = clampedM;
+        anisotropyRatio = 1.0;
+      } else {
+        const dirWeight = estimateDirectionalWeights(kCoord, latticeSystem);
+        const mx = Math.min(100, Math.max(0.01, mPath * dirWeight[0]));
+        const my = Math.min(100, Math.max(0.01, mPath * dirWeight[1]));
+        const mz = Math.min(100, Math.max(0.01, mPath * dirWeight[2]));
+
+        massComponents = [
+          Number(mx.toFixed(4)),
+          Number(my.toFixed(4)),
+          Number(mz.toFixed(4)),
+        ];
+
+        massTensor = [
+          [mx, 0, 0],
+          [0, my, 0],
+          [0, 0, mz],
+        ];
+
+        const invSum = 1 / mx + 1 / my + 1 / mz;
+        harmonicMeanMass = invSum > 0 ? 3.0 / invSum : mPath;
+        const maxM = Math.max(mx, my, mz);
+        const minM = Math.min(mx, my, mz);
+        anisotropyRatio = minM > 0 ? maxM / minM : 1.0;
+      }
+
       masses.push({
         bandIndex: b,
-        value: Number(Math.min(100, Math.max(0.01, mStar)).toFixed(4)),
+        value: Number(Math.min(100, Math.max(0.01, harmonicMeanMass)).toFixed(4)),
         direction: dispersion.bands[crossIdx]?.kLabel ?? "unknown",
+        massComponents,
+        massTensor,
+        harmonicMeanMass: Number(harmonicMeanMass.toFixed(4)),
+        anisotropyRatio: Number(anisotropyRatio.toFixed(4)),
       });
     }
   }
 
   return masses;
+}
+
+function estimateDirectionalWeights(
+  kCoord: [number, number, number] | undefined,
+  latticeSystem: string,
+): [number, number, number] {
+  if (latticeSystem === "tetragonal") {
+    return [1.0, 1.0, 3.5];
+  }
+  if (latticeSystem === "hexagonal") {
+    return [1.0, 1.0, 5.0];
+  }
+
+  if (kCoord) {
+    const [kx, ky, kz] = kCoord;
+    const norm = Math.sqrt(kx * kx + ky * ky + kz * kz) || 1;
+    const zFrac = Math.abs(kz) / norm;
+    const xyFrac = 1 - zFrac;
+    return [
+      Math.max(0.5, 1 + xyFrac * 0.5),
+      Math.max(0.5, 1 + xyFrac * 0.5),
+      Math.max(0.5, 1 + zFrac * 2.0),
+    ];
+  }
+
+  return [1.0, 1.0, 2.0];
 }
 
 function computeFermiVelocities(dispersion: BandDispersion): DerivedQuantities["fermiVelocities"] {
@@ -466,6 +573,106 @@ function computeBandCurvatures(dispersion: BandDispersion): DerivedQuantities["b
   return curvatures;
 }
 
+function refineVHSByQuadraticInterpolation(
+  bandEnergies: number[],
+  candidateIdx: number,
+  dispersionBands: BandDispersionPoint[],
+  fermiEnergy: number,
+): {
+  refinedEnergy: number;
+  refinedKFraction: number;
+  confirmed: boolean;
+  vhsClass: "M0" | "M1" | "M2" | "flat";
+  localCurvatures: [number, number];
+} {
+  const N_REFINE = 4;
+  const iLow = Math.max(0, candidateIdx - N_REFINE);
+  const iHigh = Math.min(bandEnergies.length - 1, candidateIdx + N_REFINE);
+  const localE: number[] = [];
+  const localK: number[] = [];
+
+  for (let j = iLow; j <= iHigh; j++) {
+    localE.push(bandEnergies[j]);
+    localK.push(dispersionBands[j]?.kFraction ?? j / bandEnergies.length);
+  }
+
+  const centerLocal = candidateIdx - iLow;
+  const n = localE.length;
+
+  let sumK = 0, sumK2 = 0, sumK3 = 0, sumK4 = 0;
+  let sumE = 0, sumKE = 0, sumK2E = 0;
+  for (let j = 0; j < n; j++) {
+    const k = localK[j];
+    const e = localE[j];
+    sumK += k; sumK2 += k * k; sumK3 += k * k * k; sumK4 += k * k * k * k;
+    sumE += e; sumKE += k * e; sumK2E += k * k * e;
+  }
+
+  const det = n * (sumK2 * sumK4 - sumK3 * sumK3) -
+              sumK * (sumK * sumK4 - sumK3 * sumK2) +
+              sumK2 * (sumK * sumK3 - sumK2 * sumK2);
+
+  let refinedK = localK[centerLocal] ?? dispersionBands[candidateIdx]?.kFraction ?? 0;
+  let refinedE = localE[centerLocal] ?? bandEnergies[candidateIdx];
+  let curvA = 0;
+
+  if (Math.abs(det) > 1e-20) {
+    const a0 = (sumE * (sumK2 * sumK4 - sumK3 * sumK3) -
+                sumKE * (sumK * sumK4 - sumK3 * sumK2) +
+                sumK2E * (sumK * sumK3 - sumK2 * sumK2)) / det;
+    const a1 = (n * (sumKE * sumK4 - sumK2E * sumK3) -
+                sumK * (sumE * sumK4 - sumK2E * sumK2) +
+                sumK2 * (sumE * sumK3 - sumKE * sumK2)) / det;
+    const a2 = (n * (sumK2 * sumK2E - sumK3 * sumKE) -
+                sumK * (sumK * sumK2E - sumK3 * sumE) +
+                sumK2 * (sumK * sumKE - sumK2 * sumE)) / det;
+
+    curvA = a2;
+    if (Math.abs(a2) > 1e-12) {
+      const kVertex = -a1 / (2 * a2);
+      if (kVertex >= localK[0] && kVertex <= localK[n - 1]) {
+        refinedK = kVertex;
+        refinedE = a0 + a1 * kVertex + a2 * kVertex * kVertex;
+      }
+    }
+  }
+
+  const leftCurv = centerLocal >= 2
+    ? localE[centerLocal - 2] - 2 * localE[centerLocal - 1] + localE[centerLocal]
+    : 0;
+  const rightCurv = centerLocal + 2 < n
+    ? localE[centerLocal + 2] - 2 * localE[centerLocal + 1] + localE[centerLocal]
+    : 0;
+
+  let vhsClass: "M0" | "M1" | "M2" | "flat";
+  const absCurv = Math.abs(curvA);
+  const localCurvatures: [number, number] = [
+    Number(leftCurv.toFixed(6)),
+    Number(rightCurv.toFixed(6)),
+  ];
+
+  if (absCurv < 1e-6 && Math.abs(leftCurv) < 1e-4 && Math.abs(rightCurv) < 1e-4) {
+    vhsClass = "flat";
+  } else if (leftCurv > 0 && rightCurv > 0) {
+    vhsClass = "M0";
+  } else if (leftCurv < 0 && rightCurv < 0) {
+    vhsClass = "M2";
+  } else {
+    vhsClass = "M1";
+  }
+
+  const nearFermi = Math.abs(refinedE - fermiEnergy) < 0.25;
+  const confirmed = nearFermi && (absCurv < 5.0 || vhsClass === "flat" || vhsClass === "M1");
+
+  return {
+    refinedEnergy: Number(refinedE.toFixed(6)),
+    refinedKFraction: Number(refinedK.toFixed(6)),
+    confirmed,
+    vhsClass,
+    localCurvatures,
+  };
+}
+
 function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsPositions"] {
   const vhsPositions: DerivedQuantities["vhsPositions"] = [];
 
@@ -482,11 +689,22 @@ function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsP
       const nearFermi = Math.abs(bandEnergies[i] - dispersion.fermiEnergy) < 0.2;
 
       if (isExtremum && nearFermi && Math.abs(d2E) < vhsThreshold) {
+        const rawType = d2E > 0 ? "saddle-point-min" : d2E < 0 ? "saddle-point-max" : "flat";
+
+        const refined = refineVHSByQuadraticInterpolation(
+          bandEnergies, i, dispersion.bands, dispersion.fermiEnergy
+        );
+
         vhsPositions.push({
           bandIndex: b,
           kFraction: dispersion.bands[i].kFraction,
           energy: Number(bandEnergies[i].toFixed(4)),
-          type: d2E > 0 ? "saddle-point-min" : d2E < 0 ? "saddle-point-max" : "flat",
+          type: rawType,
+          confirmed: refined.confirmed,
+          refinedEnergy: refined.refinedEnergy,
+          refinedKFraction: refined.refinedKFraction,
+          vhsClass: refined.vhsClass,
+          localCurvatures: refined.localCurvatures,
         });
       }
     }
@@ -748,7 +966,7 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
     fermiEnergy,
   };
 
-  const effectiveMasses = computeEffectiveMasses(dispersion);
+  const effectiveMasses = computeEffectiveMasses(dispersion, latticeSystem);
   const fermiVelocities = computeFermiVelocities(dispersion);
   const bandCurvatures = computeBandCurvatures(dispersion);
   const vhsPositions = detectVHSPositions(dispersion);
@@ -791,13 +1009,21 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
 }
 
 export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<string, number> {
-  const avgMass = result.derivedQuantities.effectiveMasses.length > 0
-    ? result.derivedQuantities.effectiveMasses.reduce((s, m) => s + m.value, 0) / result.derivedQuantities.effectiveMasses.length
-    : 1.0;
+  const masses = result.derivedQuantities.effectiveMasses;
+  let avgMass = 1.0;
+  let avgAnisotropy = 1.0;
+  if (masses.length > 0) {
+    const invSum = masses.reduce((s, m) => s + 1 / Math.max(0.01, m.value), 0);
+    avgMass = invSum > 0 ? masses.length / invSum : 1.0;
+    avgAnisotropy = masses.reduce((s, m) => s + (m.anisotropyRatio ?? 1.0), 0) / masses.length;
+  }
+
   const avgVF = result.derivedQuantities.fermiVelocities.length > 0
     ? result.derivedQuantities.fermiVelocities.reduce((s, v) => s + v.velocity, 0) / result.derivedQuantities.fermiVelocities.length
     : 0;
-  const vhsCount = result.derivedQuantities.vhsPositions.length;
+  const vhsAll = result.derivedQuantities.vhsPositions;
+  const vhsCount = vhsAll.length;
+  const vhsConfirmedCount = vhsAll.filter(v => v.confirmed).length;
   const nestingStrengthMax = result.derivedQuantities.nestingVectors.length > 0
     ? Math.max(...result.derivedQuantities.nestingVectors.map(n => n.strength))
     : 0;
@@ -806,8 +1032,10 @@ export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<st
     nBands: result.dispersion.nBands,
     fermiEnergy: result.dispersion.fermiEnergy,
     avgEffectiveMass: Number(avgMass.toFixed(4)),
+    avgMassAnisotropy: Number(avgAnisotropy.toFixed(4)),
     avgFermiVelocity: Number(avgVF.toFixed(2)),
     vhsCount,
+    vhsConfirmedCount,
     nestingStrengthMax: Number(nestingStrengthMax.toFixed(4)),
     berryPhaseProxy: result.derivedQuantities.topologicalInvariants.berryPhaseProxy,
     bandInversionCount: result.derivedQuantities.topologicalInvariants.bandInversionCount,
