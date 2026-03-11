@@ -283,7 +283,24 @@ export interface KineticInput {
   stabilizationStrategies: Array<{ name: string }>;
 }
 
-export function evaluateSynthesisGate(formula: string, kineticInput?: KineticInput | null): SynthesisGateResult {
+export interface NoveltyInput {
+  uncertaintyEstimate: number;
+  gnnUncertainty?: number;
+}
+
+function computeNoveltyBonus(input?: NoveltyInput | null): number {
+  if (!input) return 0;
+  const unc = Math.max(input.uncertaintyEstimate, input.gnnUncertainty ?? 0);
+  if (unc < 0.4) return 0;
+  if (unc >= 0.85) return 0.12;
+  return Math.round((unc - 0.4) * 0.2667 * 10000) / 10000;
+}
+
+export function evaluateSynthesisGate(
+  formula: string,
+  kineticInput?: KineticInput | null,
+  noveltyInput?: NoveltyInput | null,
+): SynthesisGateResult {
   stats.totalEvaluated++;
 
   const mlResult = predictSynthesisFeasibility(formula);
@@ -312,6 +329,8 @@ export function evaluateSynthesisGate(formula: string, kineticInput?: KineticInp
     }
   }
 
+  const noveltyBonus = computeNoveltyBonus(noveltyInput);
+
   const compositeScore = Math.round(
     Math.min(1.0, Math.max(0,
       mlResult.feasibility * 0.35 +
@@ -321,9 +340,13 @@ export function evaluateSynthesisGate(formula: string, kineticInput?: KineticInp
       (chemDist.toxicElements.length === 0 ? 0.05 : 0) -
       (chemDist.toxicityPenalty * 0.05) +
       graphBonus -
-      kineticPenalty
+      kineticPenalty +
+      noveltyBonus
     )) * 10000
   ) / 10000;
+
+  const chemDistThreshold = 0.8 + noveltyBonus * 0.5;
+  const stepThreshold = 8 + (noveltyBonus > 0.05 ? 2 : 0);
 
   const rejectionReasons: string[] = [];
 
@@ -331,11 +354,11 @@ export function evaluateSynthesisGate(formula: string, kineticInput?: KineticInp
     rejectionReasons.push(`ML feasibility too low: ${mlResult.feasibility.toFixed(3)}`);
   }
 
-  if (chemDist.totalDistance > 0.8) {
-    rejectionReasons.push(`Chemical distance too high: ${chemDist.totalDistance.toFixed(3)}`);
+  if (chemDist.totalDistance > chemDistThreshold) {
+    rejectionReasons.push(`Chemical distance too high: ${chemDist.totalDistance.toFixed(3)} > ${chemDistThreshold.toFixed(2)}`);
   }
 
-  if (chemDist.stepEstimate >= 8) {
+  if (chemDist.stepEstimate >= stepThreshold) {
     rejectionReasons.push(`Too many synthesis steps: ${chemDist.stepEstimate}`);
   }
 

@@ -1326,12 +1326,19 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     let synthesisGateResult;
     try {
-      synthesisGateResult = evaluateSynthesisGate(candidateData.formula, kineticResult ? {
-        kineticScore: kineticResult.kineticScore,
-        metastableLifetime300K: kineticResult.metastableLifetime300K,
-        lifetimeString: kineticResult.lifetimeString,
-        stabilizationStrategies: kineticResult.stabilizationStrategies,
-      } : null);
+      synthesisGateResult = evaluateSynthesisGate(
+        candidateData.formula,
+        kineticResult ? {
+          kineticScore: kineticResult.kineticScore,
+          metastableLifetime300K: kineticResult.metastableLifetime300K,
+          lifetimeString: kineticResult.lifetimeString,
+          stabilizationStrategies: kineticResult.stabilizationStrategies,
+        } : null,
+        {
+          uncertaintyEstimate: candidateData.uncertaintyEstimate ?? 0.5,
+          gnnUncertainty: (candidateData as any).gnnUncertainty ?? undefined,
+        },
+      );
       if (!synthesisGateResult.pass) {
         emit("log", {
           phase: "engine",
