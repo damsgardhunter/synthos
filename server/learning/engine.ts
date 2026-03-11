@@ -855,8 +855,26 @@ function generateStatusMessage(): string {
 }
 
 const MAX_WS_BUFFERED = 64 * 1024;
+const wsThrottleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const WS_THROTTLE_TYPES = new Set(["statusMessage", "cycleEnd", "convergenceUpdate"]);
 
 function broadcast(type: string, data: any) {
+  if (!wss) return;
+
+  if (WS_THROTTLE_TYPES.has(type) && cycleIntervalMs <= 10000) {
+    const existing = wsThrottleTimers.get(type);
+    if (existing) clearTimeout(existing);
+    wsThrottleTimers.set(type, setTimeout(() => {
+      wsThrottleTimers.delete(type);
+      broadcastImmediate(type, data);
+    }, 500));
+    return;
+  }
+
+  broadcastImmediate(type, data);
+}
+
+function broadcastImmediate(type: string, data: any) {
   if (!wss) return;
   const msg = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
   wss.clients.forEach((client) => {
@@ -7907,7 +7925,7 @@ async function backfillGBScores() {
       if (batch.length === 0) break;
 
       for (let i = 0; i < batch.length; i++) {
-        if (i % 10 === 0) await yield_();
+        if (i % 50 === 0) await yield_();
         const c = batch[i];
         try {
           const features = getCachedFeatures(c.formula);
@@ -7957,7 +7975,7 @@ async function recalculatePhysics() {
       if (needsRecalc.length === 0) break;
 
       for (let i = 0; i < needsRecalc.length; i++) {
-        if (i % 10 === 0) await yield_();
+        if (i % 50 === 0) await yield_();
         const c = needsRecalc[i];
         try {
           const features = getCachedFeatures(c.formula);
@@ -7978,12 +7996,25 @@ async function recalculatePhysics() {
             newTc = Math.round(applyAmbientTcCap(newTc, featureLambda, recalcPressure, metalScore, c.formula));
           }
 
-          const updatedFeatures = { ...features, physicsVersion: PHYSICS_VERSION };
-
           const isRoomTemp = (newTc ?? 0) >= 293 &&
             c.zeroResistance === true &&
             c.meissnerEffect === true &&
             recalcPressure <= 50;
+
+          const isNearMiss = !isRoomTemp && (newTc ?? 0) >= 200 && recalcPressure <= 100;
+          const nearMissFeatures = isNearMiss ? {
+            nearMiss: true,
+            nearMissTcGap: 293 - (newTc ?? 0),
+            nearMissPressureGap: Math.max(0, recalcPressure - 50),
+            nearMissReason: [
+              (newTc ?? 0) < 293 ? `Tc=${(newTc ?? 0)}K (<293K)` : null,
+              recalcPressure > 50 ? `P=${recalcPressure}GPa (>50GPa)` : null,
+              !c.zeroResistance ? "no zero-resistance data" : null,
+              !c.meissnerEffect ? "no Meissner data" : null,
+            ].filter(Boolean).join("; "),
+          } : {};
+
+          const updatedFeatures = { ...features, physicsVersion: PHYSICS_VERSION, ...nearMissFeatures };
 
           const recalcViability = classifyPressureViability(recalcPressure);
           const recalcPenalty = explorationModeActive ? 0 : recalcViability.penalty;
