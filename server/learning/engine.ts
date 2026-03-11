@@ -563,6 +563,11 @@ let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 50000;
+
+const familyDeferredQueue: Map<string, string[]> = new Map();
+const DEFERRED_QUEUE_MAX_PER_FAMILY = 50;
+const DEFERRED_QUEUE_MAX_AGE_CYCLES = 10;
+let deferredQueueLastPruneCycle = 0;
 const rejectedFormulas = new Map<string, { reason: string; tc: number; lambda?: number; timestamp: number }>();
 const MAX_REJECTED_CACHE_SIZE = 100000;
 function pruneRejectedCache(): void {
@@ -3934,61 +3939,74 @@ async function runPhase11_StructurePrediction() {
         if (topFormulas.length >= 50) {
           trainVAE(topFormulas, 10);
         }
-        const vaeResult = runLatentSpaceInverseDesign(
-          elasticTcTarget(autonomousBestTc),
-          topFormulas.length > 0 ? topFormulas[0] : undefined,
-          30,
-          0.02,
-          2,
-        );
+        const vaeSeeds = topFormulas.length >= 3
+          ? [topFormulas[0], topFormulas[Math.floor(topFormulas.length / 2)], topFormulas[Math.min(topFormulas.length - 1, 9)]]
+          : topFormulas.length > 0 ? [topFormulas[0]] : [undefined as string | undefined];
         let vaeInserted = 0;
         let vaeGateFiltered = 0;
         let vaeConvergenceSkipped = 0;
-        for (const formula of vaeResult.decodedFormulas) {
-          if (!isValidFormula(formula)) continue;
-          const normalized = normalizeFormula(formula);
-          const existing = await storage.getSuperconductorByFormula(normalized);
-          if (existing) continue;
+        let vaeBestOverall: { bestTc: number; bestFormula: string; optimizationSteps: number; converged: boolean } | null = null;
+        for (const vaeSeed of vaeSeeds) {
           try {
-            if (!vaeResult.converged) {
-              vaeConvergenceSkipped++;
-              continue;
+            const vaeResult = runLatentSpaceInverseDesign(
+              elasticTcTarget(autonomousBestTc),
+              vaeSeed,
+              30,
+              0.02,
+              2,
+            );
+            if (!vaeBestOverall || vaeResult.bestTc > vaeBestOverall.bestTc) {
+              vaeBestOverall = { bestTc: vaeResult.bestTc, bestFormula: vaeResult.bestFormula, optimizationSteps: vaeResult.optimizationSteps, converged: vaeResult.converged };
             }
-            const synthGate = evaluateSynthesisGate(normalized);
-            if (!synthGate.pass) {
-              vaeGateFiltered++;
-              continue;
+            for (const formula of vaeResult.decodedFormulas) {
+              if (!isValidFormula(formula)) continue;
+              const normalized = normalizeFormula(formula);
+              const existing = await storage.getSuperconductorByFormula(normalized);
+              if (existing) continue;
+              try {
+                if (!vaeResult.converged) {
+                  vaeConvergenceSkipped++;
+                  continue;
+                }
+                const synthGate = evaluateSynthesisGate(normalized);
+                if (!synthGate.pass) {
+                  vaeGateFiltered++;
+                  continue;
+                }
+                const features = getCachedFeatures(normalized);
+                const gbResult = gbPredict(features);
+                const vaeLambda = features.electronPhononLambda ?? 0;
+                const vaePhysTc = vaeLambda > 0
+                  ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq, undefined, normalized))
+                  : 0;
+                let cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+                cappedTc = Math.round(cappedTc * getHydrideUnverifiedPenalty(normalized));
+                const synthWeightedScore = Math.min(0.9, gbResult.score * 0.6 + synthGate.compositeScore * 0.4);
+                const inserted = await insertCandidateWithStabilityCheck({
+                  formula: normalized,
+                  predictedTc: cappedTc,
+                  dataConfidence: "low",
+                  ensembleScore: synthWeightedScore,
+                  verificationStage: 0,
+                  notes: `[VAE inverse design: seed=${vaeSeed ?? "random"}, target=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, synthScore=${synthGate.compositeScore.toFixed(3)}]`,
+                  cooperPairMechanism: "VAE latent-space gradient descent",
+                  status: "theoretical",
+                }, "inverse_design");
+                if (inserted) {
+                  totalScCandidates++;
+                  vaeInserted++;
+                }
+              } catch (e) { console.error("[Engine] VAE inverse design insert failed:", e); }
             }
-            const features = getCachedFeatures(normalized);
-            const gbResult = gbPredict(features);
-            const vaeLambda = features.electronPhononLambda ?? 0;
-            const vaePhysTc = vaeLambda > 0
-              ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq, undefined, normalized))
-              : 0;
-            let cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
-            cappedTc = Math.round(cappedTc * getHydrideUnverifiedPenalty(normalized));
-            const synthWeightedScore = Math.min(0.9, gbResult.score * 0.6 + synthGate.compositeScore * 0.4);
-            const inserted = await insertCandidateWithStabilityCheck({
-              formula: normalized,
-              predictedTc: cappedTc,
-              dataConfidence: "low",
-              ensembleScore: synthWeightedScore,
-              verificationStage: 0,
-              notes: `[VAE inverse design: target=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, synthScore=${synthGate.compositeScore.toFixed(3)}]`,
-              cooperPairMechanism: "VAE latent-space gradient descent",
-              status: "theoretical",
-            }, "inverse_design");
-            if (inserted) {
-              totalScCandidates++;
-              vaeInserted++;
-            }
-          } catch (e) { console.error("[Engine] VAE inverse design insert failed:", e); }
+          } catch (seedErr: any) {
+            console.error(`[Engine] VAE seed ${vaeSeed} failed in phase-11: ${seedErr?.message?.slice(0, 80)}`);
+          }
         }
         const vStats = getVAEStats();
         emit("log", {
           phase: "phase-11",
           event: "VAE latent-space inverse design",
-          detail: `Best: ${vaeResult.bestFormula} Tc=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, decoded=${vaeResult.decodedFormulas.length}, convergenceSkipped=${vaeConvergenceSkipped}, synthGateFiltered=${vaeGateFiltered}, inserted=${vaeInserted}. VAE convergence rate: ${(vStats.convergenceRate * 100).toFixed(0)}%`,
+          detail: `Best: ${vaeBestOverall?.bestFormula ?? "none"} Tc=${vaeBestOverall?.bestTc ?? 0}K, steps=${vaeBestOverall?.optimizationSteps ?? 0}, converged=${vaeBestOverall?.converged ?? false}, seeds=${vaeSeeds.length}, convergenceSkipped=${vaeConvergenceSkipped}, synthGateFiltered=${vaeGateFiltered}, inserted=${vaeInserted}. VAE convergence rate: ${(vStats.convergenceRate * 100).toFixed(0)}%`,
           dataSource: "Crystal VAE",
         });
       } catch (err: any) {
@@ -5221,6 +5239,7 @@ async function runAutonomousFastPath() {
     }
 
     let cdvaeCandidates: string[] = [];
+    const cdvaeScoredCandidates: { formula: string; score: number }[] = [];
     if (cycleCount % 4 === 0) {
       try {
         const cdvaeTargetTc = elasticTcTarget(autonomousBestTc);
@@ -5231,6 +5250,8 @@ async function runAutonomousFastPath() {
           if (alreadyScreenedFormulas.has(normalized)) continue;
           alreadyScreenedFormulas.add(normalized);
           cdvaeCandidates.push(normalized);
+          const seedScore = (crystal.predictedTc / 300) * 0.6 + crystal.noveltyScore * 0.4;
+          cdvaeScoredCandidates.push({ formula: normalized, score: seedScore });
           recordGeneratorOutcome("structure_diffusion", true, crystal.predictedTc, crystal.noveltyScore);
         }
         if (cdvaeResult.length > 0) {
@@ -5256,6 +5277,8 @@ async function runAutonomousFastPath() {
           if (alreadyScreenedFormulas.has(normalized)) continue;
           alreadyScreenedFormulas.add(normalized);
           cdvaeCandidates.push(normalized);
+          const seedScore = (crystal.predictedTc / 300) * 0.6 + crystal.noveltyScore * 0.4;
+          cdvaeScoredCandidates.push({ formula: normalized, score: seedScore });
           recordGeneratorOutcome("structure_diffusion", true, crystal.predictedTc, crystal.noveltyScore);
         }
         if (distResult.length > 0) {
@@ -5273,23 +5296,45 @@ async function runAutonomousFastPath() {
 
     if (cycleCount % 15 === 0) {
       try {
-        const vaeResult = runLatentSpaceInverseDesign(
-          elasticTcTarget(autonomousBestTc),
-          cdvaeCandidates.length > 0 ? cdvaeCandidates[0] : undefined,
-          20, 0.02, 2,
-        );
-        for (const formula of vaeResult.decodedFormulas) {
-          if (!isValidFormula(formula)) continue;
-          const normalized = normalizeFormula(formula);
-          if (alreadyScreenedFormulas.has(normalized)) continue;
-          alreadyScreenedFormulas.add(normalized);
-          cdvaeCandidates.push(normalized);
+        let vaeBestSeed: string | undefined;
+        if (cdvaeScoredCandidates.length > 0) {
+          cdvaeScoredCandidates.sort((a, b) => b.score - a.score);
+          vaeBestSeed = cdvaeScoredCandidates[0].formula;
         }
-        if (vaeResult.decodedFormulas.length > 0) {
+
+        const vaeSeeds = cdvaeScoredCandidates.length >= 3
+          ? cdvaeScoredCandidates.slice(0, 3).map(c => c.formula)
+          : vaeBestSeed ? [vaeBestSeed] : [];
+
+        let allVaeDecoded: string[] = [];
+        let vaeBestResult: { bestFormula: string; bestTc: number; optimizationSteps: number; converged: boolean } | null = null;
+        for (const seed of vaeSeeds.length > 0 ? vaeSeeds : [undefined]) {
+          try {
+            const vaeResult = runLatentSpaceInverseDesign(
+              elasticTcTarget(autonomousBestTc),
+              seed,
+              20, 0.02, 2,
+            );
+            for (const formula of vaeResult.decodedFormulas) {
+              if (!isValidFormula(formula)) continue;
+              const normalized = normalizeFormula(formula);
+              if (alreadyScreenedFormulas.has(normalized)) continue;
+              alreadyScreenedFormulas.add(normalized);
+              cdvaeCandidates.push(normalized);
+              allVaeDecoded.push(normalized);
+            }
+            if (!vaeBestResult || vaeResult.bestTc > vaeBestResult.bestTc) {
+              vaeBestResult = { bestFormula: vaeResult.bestFormula, bestTc: vaeResult.bestTc, optimizationSteps: vaeResult.optimizationSteps, converged: vaeResult.converged };
+            }
+          } catch (seedErr: any) {
+            console.error(`[Engine] VAE seed ${seed} failed: ${seedErr?.message?.slice(0, 80)}`);
+          }
+        }
+        if (vaeBestResult && allVaeDecoded.length > 0) {
           emit("log", {
             phase: "engine",
             event: "Fast-path VAE inverse design",
-            detail: `VAE: best=${vaeResult.bestFormula} Tc=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, decoded=${vaeResult.decodedFormulas.length}, converged=${vaeResult.converged}`,
+            detail: `VAE: best=${vaeBestResult.bestFormula} Tc=${vaeBestResult.bestTc}K, steps=${vaeBestResult.optimizationSteps}, decoded=${allVaeDecoded.length} from ${vaeSeeds.length || 1} seeds, converged=${vaeBestResult.converged}`,
             dataSource: "Crystal VAE",
           });
         }
@@ -5612,20 +5657,63 @@ async function runAutonomousFastPath() {
     const allFamTcs = Object.values(familyBestTc).flat();
     const globalAvgTc = allFamTcs.length > 0 ? allFamTcs.reduce((s, v) => s + v, 0) / allFamTcs.length : 0;
     const quotaBalanced: string[] = [];
+    let quotaDeferred = 0;
     for (const formula of filteredCandidates) {
       const fam = classifyFamily(formula);
       const cap = getDynamicFamilyCap(fam, globalAvgTc);
       const currentCount = familyQuotaCounts[fam] || 0;
       const maxAllowed = Math.max(3, Math.ceil(totalBatchSize * cap));
       if (currentCount >= maxAllowed) {
+        let dq = familyDeferredQueue.get(fam);
+        if (!dq) {
+          dq = [];
+          familyDeferredQueue.set(fam, dq);
+        }
+        if (dq.length < DEFERRED_QUEUE_MAX_PER_FAMILY) {
+          dq.push(formula);
+          quotaDeferred++;
+        }
         continue;
       }
       familyQuotaCounts[fam] = currentCount + 1;
       quotaBalanced.push(formula);
     }
+
+    let deferredRecovered = 0;
+    const underQuotaFamilies = new Set<string>();
+    for (const [fam, dq] of familyDeferredQueue.entries()) {
+      if (dq.length === 0) continue;
+      const currentCount = familyQuotaCounts[fam] || 0;
+      const cap = getDynamicFamilyCap(fam, globalAvgTc);
+      const maxAllowed = Math.max(3, Math.ceil(totalBatchSize * cap));
+      const slotsAvailable = maxAllowed - currentCount;
+      if (slotsAvailable > 0) {
+        underQuotaFamilies.add(fam);
+        const recovered = dq.splice(0, slotsAvailable);
+        for (const f of recovered) {
+          if (!alreadyScreenedFormulas.has(f)) {
+            quotaBalanced.push(f);
+            familyQuotaCounts[fam] = (familyQuotaCounts[fam] || 0) + 1;
+            deferredRecovered++;
+          }
+        }
+      }
+    }
+
+    if (cycleCount - deferredQueueLastPruneCycle >= DEFERRED_QUEUE_MAX_AGE_CYCLES) {
+      for (const [fam, dq] of familyDeferredQueue.entries()) {
+        if (dq.length > 0) dq.length = 0;
+      }
+      deferredQueueLastPruneCycle = cycleCount;
+    }
+
     const quotaSkipped = filteredCandidates.length - quotaBalanced.length;
-    if (quotaSkipped > 0) {
-      console.log(`[Autonomous] Family quota: skipped ${quotaSkipped} excess candidates (caps: ${Object.entries(familyQuotaCounts).map(([k,v]) => `${k}=${v}`).join(", ")})`);
+    if (quotaSkipped > 0 || quotaDeferred > 0 || deferredRecovered > 0) {
+      const dqSizes = Array.from(familyDeferredQueue.entries())
+        .filter(([, dq]) => dq.length > 0)
+        .map(([f, dq]) => `${f}=${dq.length}`)
+        .join(", ");
+      console.log(`[Autonomous] Family quota: skipped ${quotaSkipped}, deferred ${quotaDeferred}, recovered ${deferredRecovered} from deferred queue (caps: ${Object.entries(familyQuotaCounts).map(([k,v]) => `${k}=${v}`).join(", ")}${dqSizes ? `. DQ: ${dqSizes}` : ""})`);
     }
     filteredCandidates = quotaBalanced;
 
