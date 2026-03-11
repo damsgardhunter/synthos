@@ -202,6 +202,7 @@ interface RankedCandidate {
   ucbScore?: number;
   curiosityScore?: number;
   structuralDistance?: number;
+  cachedFeatures?: ReturnType<typeof extractFeatures>;
 }
 
 export interface PressureCoverageStats {
@@ -568,9 +569,12 @@ export function selectForDFT(
   const kappa = computeAdaptiveAlpha();
 
   const pressureCache = new Map<string, number>();
+  const baseFeatureCache = new Map<string, ReturnType<typeof extractFeatures>>();
   for (const c of candidates) {
     if (!pressureCache.has(c.formula)) {
-      pressureCache.set(c.formula, c.pressureGpa ?? estimateFamilyPressure(c.formula));
+      const p = c.pressureGpa ?? estimateFamilyPressure(c.formula);
+      pressureCache.set(c.formula, p);
+      baseFeatureCache.set(c.formula, extractFeatures(c.formula, { pressureGpa: p } as any));
     }
   }
 
@@ -615,7 +619,8 @@ export function selectForDFT(
     } catch {}
 
     try {
-      const features = extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
+      const cachedFeatures = baseFeatureCache.get(candidate.formula);
+      const features = cachedFeatures ?? extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
       const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
       xgbUncertainty = xgbResult.normalizedUncertainty;
       xgbSigmaK = xgbResult.totalStd ?? xgbResult.tcStd ?? tc * xgbUncertainty;
@@ -706,6 +711,7 @@ export function selectForDFT(
         ucbScore: s.ucbScore,
         curiosityScore: tier === "pure-curiosity" ? s.curiosityScore : undefined,
         structuralDistance: s.structuralDistance,
+        cachedFeatures: baseFeatureCache.get(s.candidate.formula),
       });
       added++;
     }
@@ -779,7 +785,8 @@ export function selectForDFT(
 async function runDFTEnrichmentForCandidate(
   emit: EventEmitter,
   candidate: SuperconductorCandidate,
-  pressureGpa?: number
+  pressureGpa?: number,
+  cachedFeatures?: ReturnType<typeof extractFeatures>
 ): Promise<boolean> {
   const evalPressure = pressureGpa ?? candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
 
@@ -810,7 +817,7 @@ async function runDFTEnrichmentForCandidate(
       recordPipelineResult(entry.lambda, entry.tc);
     }
 
-    const features = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
+    const features = cachedFeatures ?? extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
     const gb = gbPredict(features, candidate.formula);
     const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
     const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
@@ -869,12 +876,11 @@ async function runDFTEnrichmentForCandidate(
       updates.predictedTc = Math.round(reconciledTc * 10) / 10;
     }
 
-    await storage.updateSuperconductorCandidate(candidate.id, updates);
-
     const formEnergy = entry.formationEnergy;
     const isStable = entry.isPhononStable && (formEnergy === null || formEnergy < 0.1);
     const isMetastable = !isStable && entry.isPhononStable && formEnergy !== null && formEnergy < 0.25;
     const dftSource = entry.tier === "full-dft" ? "external" as const : "active-learning" as const;
+
     incorporateDFTResult(
       candidate.formula,
       reconciledTc,
@@ -900,6 +906,12 @@ async function runDFTEnrichmentForCandidate(
       phononStable: entry.isPhononStable,
     });
     invalidateTrainingVectorCache();
+
+    try {
+      await storage.updateSuperconductorCandidate(candidate.id, updates);
+    } catch (dbErr) {
+      console.error(`[ActiveLearning] DB write failed for ${candidate.formula}:`, dbErr instanceof Error ? dbErr.message : dbErr);
+    }
 
     let gnnTcPredicted = 0;
     let gnnStablePredicted = true;
@@ -1025,11 +1037,10 @@ async function runDFTEnrichmentForCandidate(
       updates.bandGap = dftData.bandGap.value;
     }
 
-    await storage.updateSuperconductorCandidate(candidate.id, updates);
-
     const formEnergy = dftData.formationEnergy?.value ?? null;
     const isStable = formEnergy !== null ? formEnergy < 0.1 : false;
     const dftSource = hasExternalDFT ? "external" as const : "active-learning" as const;
+
     incorporateDFTResult(
       candidate.formula,
       gb.tcPredicted,
@@ -1048,6 +1059,12 @@ async function runDFTEnrichmentForCandidate(
       source: hasExternalDFT ? "external" : "active-learning",
     });
     invalidateTrainingVectorCache();
+
+    try {
+      await storage.updateSuperconductorCandidate(candidate.id, updates);
+    } catch (dbErr) {
+      console.error(`[ActiveLearning] DB write failed for ${candidate.formula}:`, dbErr instanceof Error ? dbErr.message : dbErr);
+    }
 
     let gnnTcPredicted = 0;
     let gnnStablePredicted = true;
@@ -1319,7 +1336,7 @@ export async function runActiveLearningCycle(
     if (enrichedFormulaPressures.has(fpKey)) continue;
     enrichedFormulaPressures.add(fpKey);
     if (isPressureTier) session.pressureTierDftRuns++;
-    const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure);
+    const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure, ranked.cachedFeatures);
     if (enriched) {
       dftSuccessCount++;
       convergenceStats.totalDFTRuns++;
