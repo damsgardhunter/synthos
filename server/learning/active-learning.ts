@@ -436,16 +436,17 @@ function computeStructuralDistanceFromTrainingSet(formula: string): number {
 function computeExpectedImprovement(
   predictedTc: number,
   sigma: number,
-  bestTcSoFar: number
+  bestTcSoFar: number,
+  tcScale: number
 ): number {
-  if (sigma <= 1e-8) return predictedTc > bestTcSoFar ? (predictedTc - bestTcSoFar) / 300 : 0;
+  if (sigma <= 1e-8) return predictedTc > bestTcSoFar ? (predictedTc - bestTcSoFar) / tcScale : 0;
 
   const z = (predictedTc - bestTcSoFar) / sigma;
   const phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
   const PHI = 0.5 * (1 + erf(z / Math.SQRT2));
 
   const ei = sigma * (z * PHI + phi);
-  return Math.min(1.0, ei / 300);
+  return Math.min(1.0, ei / tcScale);
 }
 
 function erf(x: number): number {
@@ -460,9 +461,10 @@ function erf(x: number): number {
 function computeUCB(
   predictedTc: number,
   sigma: number,
-  kappa: number = 2.0
+  kappa: number = 2.0,
+  tcScale: number = 300
 ): number {
-  return Math.min(1.0, (predictedTc + kappa * sigma) / 300);
+  return Math.min(1.0, (predictedTc + kappa * sigma) / tcScale);
 }
 
 function computeCuriosityScore(
@@ -497,18 +499,23 @@ function computeNoveltyScore(candidate: SuperconductorCandidate): number {
 }
 
 function computeStabilityProbability(candidate: SuperconductorCandidate, candidatePressure: number): number {
-  let stabilityProb = 0.5;
+  let stabilityProb = 0.2;
+  let gnnSucceeded = false;
 
   try {
     const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
     if (gnnResult.stabilityProbability != null && Number.isFinite(gnnResult.stabilityProbability)) {
       stabilityProb = gnnResult.stabilityProbability;
+      gnnSucceeded = true;
     }
   } catch {}
 
   const candidateStability = (candidate as any).stability ?? (candidate as any).stabilityScore;
   if (candidateStability != null && Number.isFinite(candidateStability)) {
-    stabilityProb = 0.6 * stabilityProb + 0.4 * Math.min(1.0, Math.max(0, candidateStability));
+    const clampedStab = Math.min(1.0, Math.max(0, candidateStability));
+    stabilityProb = gnnSucceeded
+      ? 0.6 * stabilityProb + 0.4 * clampedStab
+      : 0.3 * stabilityProb + 0.7 * clampedStab;
   }
 
   return Math.min(1.0, Math.max(0, stabilityProb));
@@ -536,6 +543,9 @@ export function selectForDFT(
     ? convergenceStats.bestTcFromLoop
     : Math.max(...candidates.map(c => c.predictedTc ?? 0), 39);
 
+  const maxPredictedTc = Math.max(...candidates.map(c => c.predictedTc ?? 0), 0);
+  const tcScale = Math.max(maxPredictedTc, bestTcSoFar, 50);
+
   const kappa = computeAdaptiveAlpha();
 
   const scored: {
@@ -558,7 +568,7 @@ export function selectForDFT(
 
   for (const candidate of candidates) {
     const tc = candidate.predictedTc ?? 0;
-    const normalizedTc = Math.min(1.0, Math.max(0, tc / 300));
+    const normalizedTc = Math.min(1.0, Math.max(0, tc / tcScale));
 
     const candidatePressure = (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
 
@@ -611,9 +621,9 @@ export function selectForDFT(
 
     const structuralDistance = computeStructuralDistanceFromTrainingSet(candidate.formula);
 
-    const eiScore = computeExpectedImprovement(tc, sigmaRaw, bestTcSoFar);
+    const eiScore = computeExpectedImprovement(tc, sigmaRaw, bestTcSoFar, tcScale);
 
-    const ucbScore = computeUCB(tc, sigmaRaw, kappa);
+    const ucbScore = computeUCB(tc, sigmaRaw, kappa, tcScale);
 
     const curiosityScore = computeCuriosityScore(
       structuralDistance,
