@@ -535,11 +535,27 @@ export function computeZ2Invariant(
     evidence.push("Wilson loop winding: nontrivial (estimated from SOC + inversion)");
   }
 
+  const TRIM_PLANE_MAP: Record<string, number> = {
+    X: 0, M: 0,
+    Y: 1, A: 1,
+    Z: 2, R: 2,
+    Gamma: -1,
+  };
+
   const weakIndices = [0, 0, 0];
-  if (bandInversion.inversionPoints.length > 1) {
-    for (let i = 0; i < Math.min(3, bandInversion.inversionPoints.length); i++) {
-      if (bandInversion.inversionPoints[i].inversionDepthEv > 0.1) {
-        weakIndices[i % 3] = 1;
+  if (bandInversion.inversionPoints.length > 0) {
+    const planeParityFlips = [0, 0, 0];
+    for (const pt of bandInversion.inversionPoints) {
+      if (pt.inversionDepthEv > 0.1) {
+        const plane = TRIM_PLANE_MAP[pt.kLabel] ?? -1;
+        if (plane >= 0 && plane < 3) {
+          planeParityFlips[plane]++;
+        }
+      }
+    }
+    for (let axis = 0; axis < 3; axis++) {
+      if (planeParityFlips[axis] % 2 === 1) {
+        weakIndices[axis] = 1;
       }
     }
   }
@@ -872,17 +888,53 @@ export function detectSurfaceStates(
   }
 
   const hasSCPotential = electronic.metallicity > 0.5 || (electronic.dosAtFermi ?? 0) > 0.5;
+
+  const elementNames = Object.keys(elements);
+  const TSC_DOPANTS = new Set(["Cu", "Sr", "Nb", "Pd", "Pt", "In", "Sn", "Tl"]);
+  const TI_HOSTS = new Set(["Bi", "Sb", "Te", "Se"]);
+  const hasTIDopedSC = elementNames.some(el => TSC_DOPANTS.has(el)) && elementNames.some(el => TI_HOSTS.has(el));
+  const hasIntrinsicTSC = z2Result.isNontrivial && hasSCPotential && electronic.metallicity > 0.3;
+
+  const majoranaCandidateReason: string[] = [];
+
   if (z2Result.isNontrivial && hasSCPotential && socStrength > 0.3) {
+    majoranaCandidateReason.push("Z2=1 TI with superconducting bulk (proximity-induced TSC)");
+  }
+
+  if (hasTIDopedSC && socStrength > 0.2) {
+    const dopant = elementNames.find(el => TSC_DOPANTS.has(el)) ?? "";
+    const host = elementNames.filter(el => TI_HOSTS.has(el)).join("");
+    majoranaCandidateReason.push(`Doped TI system (${dopant}-doped ${host}): candidate for odd-parity SC`);
+  }
+
+  if (hasIntrinsicTSC && bandInversion.inversionStrength > 0.5) {
+    majoranaCandidateReason.push("Intrinsic topological SC candidate: strong inversion + metallic + SC potential");
+  }
+
+  if (weylResult.nodeCount > 0 && hasSCPotential && socStrength > 0.3) {
+    majoranaCandidateReason.push("Weyl semimetal + SC: Majorana arc states at surface");
+  }
+
+  if (majoranaCandidateReason.length > 0) {
     const majoranaState: SurfaceState = {
       kIndex: Math.round(nKSurface / 2),
       energy: 0,
       penetrationDepth: 1.0 / (socStrength + 0.1),
       spinPolarization: 0,
-      localizationRatio: 0.9,
+      localizationRatio: Math.min(0.95, 0.7 + socStrength * 0.2 + (hasTIDopedSC ? 0.1 : 0)),
       isMajorana: true,
     };
     surfaceStates.push(majoranaState);
-    evidence.push("Possible Majorana zero mode at surface (topological SC + surface state overlap)");
+    for (const reason of majoranaCandidateReason) {
+      evidence.push(`Majorana candidate: ${reason}`);
+    }
+  }
+
+  for (let si = 0; si < surfaceStates.length; si++) {
+    if (surfaceStates[si].isMajorana) continue;
+    if (Math.abs(surfaceStates[si].energy) < 0.005 && majoranaCandidateReason.length > 0) {
+      surfaceStates[si] = { ...surfaceStates[si], isMajorana: true };
+    }
   }
 
   const surfaceDOS = surfaceStates.filter(s => Math.abs(s.energy) < 0.05).length / Math.max(1, nKSurface);
