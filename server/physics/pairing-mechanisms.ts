@@ -37,6 +37,7 @@ export interface PhononPairingResult {
   tcAllenDynes: number;
   modeResolved: ModeResolvedCoupling;
   phononPairingStrength: number;
+  pairingSuppressed?: boolean;
 }
 
 export interface SpinPairingResult {
@@ -142,6 +143,7 @@ export function computePhononPairing(
   const muStar = coupling.muStar;
 
   let tcAllenDynes = 0;
+  let pairingSuppressed = false;
   const allenDynesDenom = lambda - muStar * (1 + 0.62 * lambda);
   if (allenDynesDenom > 1e-6) {
     const lambdaBar = 2.46 * (1 + 3.8 * muStar);
@@ -173,6 +175,9 @@ export function computePhononPairing(
         if (Number.isFinite(tcSisso) && tcSisso > tcAllenDynes) {
           tcAllenDynes = tcSisso;
         }
+      } else {
+        pairingSuppressed = true;
+        console.warn(`[PairingMech] μ*-suppressed hydride pairing: λ=${lambda.toFixed(3)}, μ*=${muStar.toFixed(3)}, λ_eff=${lambdaEff.toFixed(3)} for ${formula}`);
       }
     }
 
@@ -245,10 +250,26 @@ export function computePhononPairing(
       hasSoftModeInstability: softModeLambda > lambda * 0.3,
     };
   } catch {
+    const elems = formula.match(/[A-Z][a-z]*/g) || [];
+    const hasH = elems.includes("H");
+    const HEAVY_METALS = ["Pb", "Hg", "Tl", "Bi", "U", "Th", "La", "Ce", "Pr", "Nd"];
+    const hasHeavy = elems.some(e => HEAVY_METALS.includes(e));
+
+    let acRatio = 0.4, opRatio = 0.45, hfRatio = 0.15;
+    if (hasH) {
+      hfRatio = 0.6;
+      opRatio = 0.25;
+      acRatio = 0.15;
+    } else if (hasHeavy) {
+      acRatio = 0.55;
+      opRatio = 0.35;
+      hfRatio = 0.10;
+    }
+
     modeResolved = {
-      acousticLambda: lambda * 0.4,
-      opticalLambda: lambda * 0.45,
-      highFreqLambda: lambda * 0.15,
+      acousticLambda: lambda * acRatio,
+      opticalLambda: lambda * opRatio,
+      highFreqLambda: lambda * hfRatio,
       softModeLambda: 0,
       dominantBranch: coupling.dominantPhononBranch,
       branchContributions: [],
@@ -265,6 +286,7 @@ export function computePhononPairing(
     tcAllenDynes: Number(tcAllenDynes.toFixed(2)),
     modeResolved,
     phononPairingStrength: Number(phononPairingStrength.toFixed(4)),
+    ...(pairingSuppressed ? { pairingSuppressed: true } : {}),
   };
 }
 
