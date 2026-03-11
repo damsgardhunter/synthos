@@ -1,6 +1,11 @@
 import { storage } from "../storage";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { EventEmitter } from "./engine";
+
+interface CandidateExt extends SuperconductorCandidate {
+  family?: string;
+  stability?: number;
+}
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE, addDFTTrainingResult, getDFTTrainingDataset, logGNNVersion, getGNNModelVersion } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
@@ -244,6 +249,18 @@ function parseFormulaElements(formula: string): Record<string, number> {
 const seenCompositions: Map<string, Record<string, number>> = new Map();
 const MAX_DISTANCE_SAMPLE = 500;
 let seenSample: Record<string, number>[] = [];
+let seenCompositionsInitialized = false;
+
+function ensureSeenCompositionsFromTraining(): void {
+  if (seenCompositionsInitialized) return;
+  for (const entry of SUPERCON_TRAINING_DATA) {
+    if (!seenCompositions.has(entry.formula)) {
+      seenCompositions.set(entry.formula, computeFractionsFromCounts(parseFormulaCounts(entry.formula)));
+    }
+  }
+  seenCompositionsInitialized = true;
+  rebuildSeenSample();
+}
 
 function rebuildSeenSample(): void {
   const allFracs = Array.from(seenCompositions.values());
@@ -353,7 +370,7 @@ function computeElementRarityFromCounts(counts: Record<string, number>): number 
   return Math.min(1.0, 0.5 * baseRarity + 0.5 * dosExplorationSum);
 }
 
-function computeStructuralUniquenessFromCounts(counts: Record<string, number>, candidate: SuperconductorCandidate): number {
+function computeStructuralUniquenessFromCounts(counts: Record<string, number>, candidate: CandidateExt): number {
   const elements = Object.keys(counts);
   const nElements = elements.length;
 
@@ -364,13 +381,13 @@ function computeStructuralUniquenessFromCounts(counts: Record<string, number>, c
   const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
   const fractions = Object.values(counts).map(c => c / total);
   const entropy = -fractions.reduce((s, f) => s + (f > 0 ? f * Math.log2(f) : 0), 0);
-  const maxEntropy = Math.log2(Math.max(nElements, 1)) || 1;
+  const maxEntropy = Math.log2(Math.max(nElements, 2));
   uniqueness += 0.4 * (entropy / maxEntropy);
 
   const hasUnusualRatio = fractions.some(f => f > 0.7) || fractions.some(f => f < 0.05 && f > 0);
   if (hasUnusualRatio) uniqueness += 0.15;
 
-  const family = (candidate as any).family ?? "";
+  const family = candidate.family ?? "";
   if (typeof family === "string" && family.length > 0) {
     const uncommonFamilies = ["skutterudite", "chevrel", "clathrate", "max-phase", "heusler"];
     if (uncommonFamilies.some(f => family.toLowerCase().includes(f))) {
@@ -393,6 +410,13 @@ const ELEM_INDEX = new Map<string, number>();
 PERIODIC_ELEMENTS.forEach((el, i) => ELEM_INDEX.set(el, i));
 
 let trainingSetVectors: { formula: string; vec: Float64Array }[] | null = null;
+
+const trainingDataMaxTc = Math.max(...SUPERCON_TRAINING_DATA.map(e => e.tc), 39);
+
+export function invalidateTrainingVectorCache(): void {
+  trainingSetVectors = null;
+  seenCompositionsInitialized = false;
+}
 
 function formulaToFixedVec(formula: string): Float64Array {
   const counts = parseFormulaCounts(formula);
@@ -481,7 +505,7 @@ function computeCuriosityScore(
   );
 }
 
-function computeNoveltyScore(candidate: SuperconductorCandidate): number {
+function computeNoveltyScore(candidate: CandidateExt): number {
   const counts = parseFormulaCounts(candidate.formula);
   const fracs = computeFractionsFromCounts(counts);
   const compositionDist = computeCompositionDistanceFromFracs(fracs);
@@ -498,7 +522,7 @@ function computeNoveltyScore(candidate: SuperconductorCandidate): number {
   return 0.6 * baseNovelty + 0.4 * fingerprintNovelty;
 }
 
-function computeStabilityProbability(candidate: SuperconductorCandidate, candidatePressure: number): number {
+function computeStabilityProbability(candidate: CandidateExt, candidatePressure: number): number {
   let stabilityProb = 0.2;
   let gnnSucceeded = false;
 
@@ -510,7 +534,7 @@ function computeStabilityProbability(candidate: SuperconductorCandidate, candida
     }
   } catch {}
 
-  const candidateStability = (candidate as any).stability ?? (candidate as any).stabilityScore;
+  const candidateStability = candidate.stability ?? candidate.stabilityScore;
   if (candidateStability != null && Number.isFinite(candidateStability)) {
     const clampedStab = Math.min(1.0, Math.max(0, candidateStability));
     stabilityProb = gnnSucceeded
@@ -533,15 +557,11 @@ export function selectForDFT(
   const highUncertaintySlots = Math.min(6, Math.ceil(budget * 0.25));
   const randomSlots = Math.max(1, budget - bestTcSlots - highUncertaintySlots - pureCuriositySlots - pressureExplorationSlots);
 
-  seenCompositions.clear();
-  for (const c of candidates) {
-    seenCompositions.set(c.formula, computeCompositionFractions(c.formula));
-  }
-  rebuildSeenSample();
+  ensureSeenCompositionsFromTraining();
 
   const bestTcSoFar = convergenceStats.bestTcFromLoop > 0
     ? convergenceStats.bestTcFromLoop
-    : Math.max(...candidates.map(c => c.predictedTc ?? 0), 39);
+    : trainingDataMaxTc;
 
   const maxPredictedTc = Math.max(...candidates.map(c => c.predictedTc ?? 0), 0);
   const tcScale = Math.max(maxPredictedTc, bestTcSoFar, 50);
@@ -570,7 +590,7 @@ export function selectForDFT(
     const tc = candidate.predictedTc ?? 0;
     const normalizedTc = Math.min(1.0, Math.max(0, tc / tcScale));
 
-    const candidatePressure = (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const candidatePressure = candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
 
     let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
     let gnnSigmaK = tc * 0.3;
@@ -768,7 +788,7 @@ async function runDFTEnrichmentForCandidate(
   candidate: SuperconductorCandidate,
   pressureGpa?: number
 ): Promise<boolean> {
-  const evalPressure = pressureGpa ?? (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+  const evalPressure = pressureGpa ?? candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
 
   let quantumResult: QuantumEngineResult | null = null;
   let usedQuantumPipeline = false;
@@ -879,6 +899,7 @@ async function runDFTEnrichmentForCandidate(
       dosAtEF: entry.dosAtEF > 0 ? entry.dosAtEF : undefined,
       phononStable: entry.isPhononStable,
     });
+    invalidateTrainingVectorCache();
 
     let gnnTcPredicted = 0;
     let gnnStablePredicted = true;
@@ -1023,6 +1044,7 @@ async function runDFTEnrichmentForCandidate(
       prototype: undefined,
       source: hasExternalDFT ? "external" : "active-learning",
     });
+    invalidateTrainingVectorCache();
 
     let gnnTcPredicted = 0;
     let gnnStablePredicted = true;
@@ -1287,7 +1309,7 @@ export async function runActiveLearningCycle(
   for (const ranked of selected) {
     const { candidate } = ranked;
     const isPressureTier = ranked.selectionTier === "pressure-exploration";
-    const candidatePressure = ranked.targetPressureGpa ?? (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const candidatePressure = ranked.targetPressureGpa ?? candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
     if (isPressureTier) session.pressureTierDftRuns++;
     const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure);
     if (enriched) {
