@@ -113,6 +113,22 @@ export interface GNNPrediction {
   bandgapVar: number;
 }
 
+interface AttnLayerCache {
+  inputEmbs: number[][];
+  preActs: number[][];
+  attnWts: number[][];
+  neighborLists: number[][];
+}
+
+interface CGCNNLayerCache {
+  inputEmbs: number[][];
+  gateRaws: number[][][];
+  valueRaws: number[][][];
+  concats: number[][][];
+  cutoffWts: number[][];
+  totalWeights: number[];
+}
+
 interface GNNForwardCache {
   pooled: number[];
   z1: number[];
@@ -122,6 +138,12 @@ interface GNNForwardCache {
   nodeEmbeddings: number[][];
   nodeMultiplicities: number[];
   totalMultiplicity: number;
+  attnCaches: AttnLayerCache[];
+  cgcnnCache?: CGCNNLayerCache;
+  inputProjInputs: number[][];
+  inputProjPreActs: number[][];
+  maxPoolArgmax: number[];
+  attnPoolWeights: number[];
 }
 
 export interface UncertaintyBreakdown {
@@ -1566,6 +1588,328 @@ function attentionPooling(graph: CrystalGraph, W_pool: number[][]): number[] {
   return pooled;
 }
 
+function attnMessagePassCached(
+  graph: CrystalGraph,
+  W_message: number[][], W_update: number[][],
+  W_query: number[][], W_key: number[][],
+  useLeakyMsg: boolean = false,
+): { embeddings: number[][]; cache: AttnLayerCache } {
+  const nNodes = graph.nodes.length;
+  const inputEmbs = graph.nodes.map(n => [...n.embedding]);
+  const preActs: number[][] = [];
+  const attnWts: number[][] = [];
+  const neighborLists: number[][] = [];
+  const newEmbeddings: number[][] = [];
+
+  for (let i = 0; i < nNodes; i++) {
+    const neighbors = graph.adjacency[i];
+    neighborLists.push([...neighbors]);
+    if (neighbors.length === 0) {
+      newEmbeddings.push([...inputEmbs[i]]);
+      preActs.push([...inputEmbs[i]]);
+      attnWts.push([]);
+      continue;
+    }
+
+    const query = layerNorm(matVecMul(W_query, inputEmbs[i]));
+    const attentionScores: number[] = [];
+    const messages: number[][] = [];
+
+    for (const j of neighbors) {
+      const key = layerNorm(matVecMul(W_key, inputEmbs[j]));
+      let score = dotProduct(query, key);
+      const edge = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
+      if (edge) {
+        const edgeFeats = edge.features;
+        for (let ef = 0; ef < edgeFeats.length && ef < HIDDEN_DIM; ef++) {
+          score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
+        }
+      }
+      attentionScores.push(score);
+      messages.push(matVecMul(W_message, inputEmbs[j]));
+    }
+
+    const aw = softmax(attentionScores);
+    attnWts.push(aw);
+
+    const aggMessage = initVector(HIDDEN_DIM);
+    for (let n = 0; n < neighbors.length; n++) {
+      const w = aw[n];
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        aggMessage[k] += (messages[n][k] ?? 0) * w;
+      }
+    }
+
+    const combined = [...inputEmbs[i], ...aggMessage];
+    const pre = matVecMul(W_update, combined);
+    preActs.push([...pre]);
+    if (useLeakyMsg) {
+      newEmbeddings.push(pre.map(v => v >= 0 ? v : 0.01 * v));
+    } else {
+      newEmbeddings.push(pre.map(v => v >= 0 ? v : 0));
+    }
+  }
+
+  for (let i = 0; i < nNodes; i++) {
+    graph.nodes[i].embedding = newEmbeddings[i];
+  }
+
+  return { embeddings: newEmbeddings, cache: { inputEmbs, preActs, attnWts, neighborLists } };
+}
+
+function cgcnnConvCached(
+  graph: CrystalGraph,
+  W_gate: number[][], W_value: number[][],
+  b_gate: number[], b_value: number[],
+): { embeddings: number[][]; cache: CGCNNLayerCache } {
+  const nNodes = graph.nodes.length;
+  const inputEmbs = graph.nodes.map(n => [...n.embedding]);
+  const gateRaws: number[][][] = [];
+  const valueRaws: number[][][] = [];
+  const concats: number[][][] = [];
+  const cutoffWts: number[][] = [];
+  const totalWeights: number[] = [];
+  const newEmbeddings: number[][] = [];
+
+  for (let i = 0; i < nNodes; i++) {
+    const neighbors = graph.adjacency[i];
+    const nodeGates: number[][] = [];
+    const nodeValues: number[][] = [];
+    const nodeConcats: number[][] = [];
+    const nodeCutoffs: number[] = [];
+
+    if (!neighbors || neighbors.length === 0) {
+      newEmbeddings.push([...inputEmbs[i]]);
+      gateRaws.push(nodeGates);
+      valueRaws.push(nodeValues);
+      concats.push(nodeConcats);
+      cutoffWts.push(nodeCutoffs);
+      totalWeights.push(0);
+      continue;
+    }
+
+    const aggUpdate = initVector(HIDDEN_DIM);
+    let totalWeight = 0;
+
+    for (const j of neighbors) {
+      const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
+      const distance = edgeFeat?.distance ?? 2.5;
+      const cw = cosineCutoff(distance);
+      nodeCutoffs.push(cw);
+      if (cw <= 0) {
+        nodeGates.push([]);
+        nodeValues.push([]);
+        nodeConcats.push([]);
+        continue;
+      }
+
+      const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
+      const concat: number[] = new Array(CGCNN_CONCAT_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) concat[k] = inputEmbs[i][k] ?? 0;
+      for (let k = 0; k < HIDDEN_DIM; k++) concat[HIDDEN_DIM + k] = inputEmbs[j][k] ?? 0;
+      for (let k = 0; k < EDGE_DIM; k++) concat[HIDDEN_DIM * 2 + k] = edgeVec[k] ?? 0;
+
+      const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
+      const valueRaw = vecAdd(matVecMul(W_value, concat), b_value);
+
+      nodeGates.push(gateRaw);
+      nodeValues.push(valueRaw);
+      nodeConcats.push(concat);
+
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        aggUpdate[k] += sigmoid(gateRaw[k] ?? 0) * softplus(valueRaw[k] ?? 0) * cw;
+      }
+      totalWeight += cw;
+    }
+
+    gateRaws.push(nodeGates);
+    valueRaws.push(nodeValues);
+    concats.push(nodeConcats);
+    cutoffWts.push(nodeCutoffs);
+    totalWeights.push(totalWeight);
+
+    if (totalWeight > 0) {
+      for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
+    }
+
+    const updated: number[] = new Array(HIDDEN_DIM);
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      updated[k] = (inputEmbs[i][k] ?? 0) + aggUpdate[k];
+    }
+    newEmbeddings.push(updated);
+  }
+
+  for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
+
+  return {
+    embeddings: newEmbeddings,
+    cache: { inputEmbs, gateRaws, valueRaws, concats, cutoffWts, totalWeights },
+  };
+}
+
+function attnLayerBackward(
+  cache: AttnLayerCache,
+  dLdOutput: number[][],
+  graph: CrystalGraph,
+  W_update: number[][], W_message: number[][],
+  useLeaky: boolean,
+): {
+  dW_update: number[][]; dW_message: number[][]; dLdInput: number[][];
+} {
+  const nNodes = dLdOutput.length;
+  const updateCols = W_update[0]?.length ?? 0;
+  const msgCols = W_message[0]?.length ?? 0;
+  const dW_update = W_update.map(r => new Array(r.length).fill(0));
+  const dW_message = W_message.map(r => new Array(r.length).fill(0));
+  const dLdInput: number[][] = Array.from({ length: nNodes }, () => new Array(HIDDEN_DIM).fill(0));
+
+  for (let i = 0; i < nNodes; i++) {
+    const neighbors = cache.neighborLists[i];
+    if (!neighbors || neighbors.length === 0) {
+      for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdOutput[i][k];
+      continue;
+    }
+
+    const pre = cache.preActs[i];
+    const dPre = new Array(HIDDEN_DIM);
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      const mask = useLeaky ? (pre[k] >= 0 ? 1.0 : 0.01) : (pre[k] >= 0 ? 1.0 : 0.0);
+      dPre[k] = dLdOutput[i][k] * mask;
+    }
+
+    const emb_i = cache.inputEmbs[i];
+    const aggMsg = initVector(HIDDEN_DIM);
+    for (let n = 0; n < neighbors.length; n++) {
+      const j = neighbors[n];
+      const msg = matVecMul(W_message, cache.inputEmbs[j]);
+      const w = cache.attnWts[i][n] ?? 0;
+      for (let k = 0; k < HIDDEN_DIM; k++) aggMsg[k] += msg[k] * w;
+    }
+    const combined = [...emb_i, ...aggMsg];
+
+    for (let r = 0; r < HIDDEN_DIM; r++) {
+      const dP = dPre[r];
+      if (Math.abs(dP) < 1e-12) continue;
+      for (let c = 0; c < updateCols; c++) {
+        dW_update[r][c] += dP * (combined[c] ?? 0);
+      }
+    }
+
+    const dCombined = new Array(updateCols).fill(0);
+    for (let c = 0; c < updateCols; c++) {
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        dCombined[c] += dPre[r] * (W_update[r][c] ?? 0);
+      }
+    }
+
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      dLdInput[i][k] += dCombined[k];
+    }
+    const dAggMsg = new Array(HIDDEN_DIM);
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      dAggMsg[k] = dCombined[HIDDEN_DIM + k] ?? 0;
+    }
+
+    for (let n = 0; n < neighbors.length; n++) {
+      const j = neighbors[n];
+      const w = cache.attnWts[i][n] ?? 0;
+      if (Math.abs(w) < 1e-12) continue;
+      const dMsg = new Array(HIDDEN_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) dMsg[k] = dAggMsg[k] * w;
+
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        if (Math.abs(dMsg[r]) < 1e-12) continue;
+        for (let c = 0; c < msgCols; c++) {
+          dW_message[r][c] += dMsg[r] * (cache.inputEmbs[j][c] ?? 0);
+        }
+      }
+
+      for (let c = 0; c < msgCols; c++) {
+        let sum = 0;
+        for (let r = 0; r < HIDDEN_DIM; r++) sum += dMsg[r] * (W_message[r][c] ?? 0);
+        dLdInput[j][c] += sum;
+      }
+    }
+  }
+
+  return { dW_update, dW_message, dLdInput };
+}
+
+function cgcnnLayerBackward(
+  cache: CGCNNLayerCache,
+  dLdOutput: number[][],
+  graph: CrystalGraph,
+  W_gate: number[][], W_value: number[][],
+): {
+  dW_gate: number[][]; dW_value: number[][];
+  db_gate: number[]; db_value: number[];
+  dLdInput: number[][];
+} {
+  const nNodes = dLdOutput.length;
+  const dW_gate = W_gate.map(r => new Array(r.length).fill(0));
+  const dW_value = W_value.map(r => new Array(r.length).fill(0));
+  const db_gate = new Array(HIDDEN_DIM).fill(0);
+  const db_value = new Array(HIDDEN_DIM).fill(0);
+  const dLdInput: number[][] = Array.from({ length: nNodes }, () => new Array(HIDDEN_DIM).fill(0));
+
+  for (let i = 0; i < nNodes; i++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      dLdInput[i][k] += dLdOutput[i][k];
+    }
+
+    const totalW = cache.totalWeights[i];
+    if (totalW <= 0) continue;
+
+    const neighbors = graph.adjacency[i];
+    if (!neighbors || neighbors.length === 0) continue;
+
+    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
+      const cw = cache.cutoffWts[i][nIdx] ?? 0;
+      if (cw <= 0) continue;
+      const gateRaw = cache.gateRaws[i][nIdx];
+      const valueRaw = cache.valueRaws[i][nIdx];
+      const concat = cache.concats[i][nIdx];
+      if (!gateRaw || !valueRaw || !concat) continue;
+
+      const j = neighbors[nIdx];
+
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        const gateVal = sigmoid(gateRaw[k] ?? 0);
+        const valVal = softplus(valueRaw[k] ?? 0);
+        const dAgg = dLdOutput[i][k] / totalW;
+
+        const dGateVal = dAgg * valVal * cw;
+        const dValVal = dAgg * gateVal * cw;
+
+        const dGateRaw = dGateVal * gateVal * (1 - gateVal);
+        const dValRaw = dValVal * sigmoid(valueRaw[k] ?? 0);
+
+        db_gate[k] += dGateRaw;
+        db_value[k] += dValRaw;
+
+        for (let c = 0; c < CGCNN_CONCAT_DIM; c++) {
+          dW_gate[k][c] += dGateRaw * (concat[c] ?? 0);
+          dW_value[k][c] += dValRaw * (concat[c] ?? 0);
+        }
+
+        const dConcat_k_gate = dGateRaw;
+        const dConcat_k_val = dValRaw;
+        for (let c = 0; c < HIDDEN_DIM; c++) {
+          const contrib = dConcat_k_gate * (W_gate[k][c] ?? 0) + dConcat_k_val * (W_value[k][c] ?? 0);
+          dLdInput[i][c] += contrib;
+        }
+        for (let c = 0; c < HIDDEN_DIM; c++) {
+          const contrib = dConcat_k_gate * (W_gate[k][HIDDEN_DIM + c] ?? 0)
+            + dConcat_k_val * (W_value[k][HIDDEN_DIM + c] ?? 0);
+          dLdInput[j][c] += contrib;
+        }
+      }
+    }
+  }
+
+  return { dW_gate, dW_value, db_gate, db_value, dLdInput };
+}
+
 export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?: () => number): GNNPrediction {
   for (let i = 0; i < graph.nodes.length; i++) {
     const raw = graph.nodes[i].embedding;
@@ -1723,71 +2067,99 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 }
 
 function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred: GNNPrediction; cache: GNNForwardCache } {
-  for (let i = 0; i < graph.nodes.length; i++) {
+  const nNodes = graph.nodes.length;
+  const inputProjInputs: number[][] = [];
+  const inputProjPreActs: number[][] = [];
+  for (let i = 0; i < nNodes; i++) {
     const raw = graph.nodes[i].embedding;
     const input = raw.length >= NODE_DIM ? raw.slice(0, NODE_DIM) : [...raw, ...new Array(NODE_DIM - raw.length).fill(0)];
-    const projected = fusedMatVecAddLeakyRelu(weights.W_input_proj, input, weights.b_input_proj);
-    graph.nodes[i].embedding = projected;
+    inputProjInputs.push([...input]);
+    const pre = vecAdd(matVecMul(weights.W_input_proj, input), weights.b_input_proj);
+    inputProjPreActs.push([...pre]);
+    graph.nodes[i].embedding = pre.map(v => v >= 0 ? v : 0.01 * v);
   }
 
   const saveResidual = (nodes: CrystalGraph["nodes"]) =>
     nodes.map(n => [...n.embedding]);
 
   const gates = weights.residual_gates;
+  const attnCaches: AttnLayerCache[] = [];
 
   const residual0 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
-  cgcnnConvolutionLayer(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value);
+  const { cache: ac0 } = attnMessagePassCached(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
+  attnCaches.push(ac0);
+
+  const { cache: cgcnnC } = cgcnnConvCached(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value);
+
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
   }
   const g0 = sigmoid(gates[0] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
+  for (let i = 0; i < nNodes; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
       graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * g0;
     }
   }
 
   const residual1 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2);
+  const { cache: ac1 } = attnMessagePassCached(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2);
+  attnCaches.push(ac1);
   const g1 = sigmoid(gates[1] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
+  for (let i = 0; i < nNodes; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
       graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual1[i][k] ?? 0) * g1;
     }
   }
 
   const residual2 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+  const { cache: ac2 } = attnMessagePassCached(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+  attnCaches.push(ac2);
   const g2 = sigmoid(gates[2] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
+  for (let i = 0; i < nNodes; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
       graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
     }
   }
 
   const residual3 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+  const { cache: ac3 } = attnMessagePassCached(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+  attnCaches.push(ac3);
   const g3 = sigmoid(gates[3] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
+  for (let i = 0; i < nNodes; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
       graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
     }
   }
 
-  const nNodes = graph.nodes.length;
   const meanPool = initVector(HIDDEN_DIM);
   const maxPool = new Array(HIDDEN_DIM).fill(-Infinity);
+  const maxPoolArgmax = new Array(HIDDEN_DIM).fill(0);
   let totalMultiplicity = 0;
   for (const node of graph.nodes) totalMultiplicity += (node.multiplicity ?? 1);
-  for (const node of graph.nodes) {
+  for (let ni = 0; ni < nNodes; ni++) {
+    const node = graph.nodes[ni];
     const w = (node.multiplicity ?? 1) / totalMultiplicity;
     for (let k = 0; k < HIDDEN_DIM; k++) {
       meanPool[k] += (node.embedding[k] ?? 0) * w;
-      maxPool[k] = Math.max(maxPool[k], node.embedding[k] ?? 0);
+      if ((node.embedding[k] ?? 0) > maxPool[k]) {
+        maxPool[k] = node.embedding[k] ?? 0;
+        maxPoolArgmax[k] = ni;
+      }
     }
   }
-  const attnPool = attentionPooling(graph, weights.W_attn_pool);
+
+  const scores: number[] = [];
+  for (const node of graph.nodes) {
+    const attnVec = matVecMul(weights.W_attn_pool, node.embedding);
+    scores.push(attnVec.reduce((s, v) => s + v, 0) + Math.log(node.multiplicity ?? 1));
+  }
+  const attnPoolWeights = softmax(scores);
+  const attnPool = initVector(HIDDEN_DIM);
+  for (let n = 0; n < nNodes; n++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      attnPool[k] += (graph.nodes[n].embedding[k] ?? 0) * attnPoolWeights[n];
+    }
+  }
 
   const pooled = new Array(HIDDEN_DIM * 2);
   for (let k = 0; k < HIDDEN_DIM; k++) {
@@ -1849,6 +2221,12 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     nodeEmbeddings,
     nodeMultiplicities,
     totalMultiplicity,
+    attnCaches,
+    cgcnnCache: cgcnnC,
+    inputProjInputs,
+    inputProjPreActs,
+    maxPoolArgmax,
+    attnPoolWeights,
   };
 
   return { pred, cache };
@@ -2013,6 +2391,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
 
       const pooledLen = HIDDEN_DIM * 2;
       const batchSize_actual = batchEnd - batchStart;
+      const clipGrad = (g: number) => { const v = Number.isFinite(g) ? g : 0; return Math.max(-1, Math.min(1, v)); };
+
       const gradW2 = weights.W_mlp2.map(r => new Array(r.length).fill(0));
       const gradB2 = new Array(weights.b_mlp2.length).fill(0);
       const gradW2v = weights.W_mlp2_var.map(r => new Array(r.length).fill(0));
@@ -2020,7 +2400,19 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       const gradW1 = weights.W_mlp1.map(r => new Array(r.length).fill(0));
       const gradB1 = new Array(weights.b_mlp1.length).fill(0);
       const gradPressure = new Array(weights.W_pressure.length).fill(0);
-      const avgDLdPooled = new Array(pooledLen).fill(0);
+
+      const zeroMat = (m: number[][]) => m.map(r => new Array(r.length).fill(0));
+      const graphGrads = {
+        dW_msg: [zeroMat(weights.W_message), zeroMat(weights.W_message2), zeroMat(weights.W_message3), zeroMat(weights.W_message4)],
+        dW_upd: [zeroMat(weights.W_update), zeroMat(weights.W_update2), zeroMat(weights.W_update3), zeroMat(weights.W_update4)],
+        dW_conv_gate: zeroMat(weights.W_conv_gate),
+        dW_conv_value: zeroMat(weights.W_conv_value),
+        db_conv_gate: new Array(HIDDEN_DIM).fill(0),
+        db_conv_value: new Array(HIDDEN_DIM).fill(0),
+        dW_input_proj: zeroMat(weights.W_input_proj),
+        db_input_proj: new Array(HIDDEN_DIM).fill(0),
+        dGates: new Array(4).fill(0),
+      };
 
       for (let b = batchStart; b < batchEnd; b++) {
         const idx = indices[b];
@@ -2033,6 +2425,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           graph.nodes[ni].embedding = [...orig[ni]];
         }
         const { pred, cache } = GNNPredictForTraining(graph, weights);
+        const nN = graph.nodes.length;
 
         const tcTarget = sample.tc / 300;
         const feTarget = sample.formationEnergy ?? 0;
@@ -2065,8 +2458,6 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const loss = tcError * tcError + 0.1 * feError * feError + 0.1 * heteroLossTc + 0.05 * heteroLossLambda;
         totalLoss += loss;
         totalSamples++;
-
-        const clipGrad = (g: number) => { const v = Number.isFinite(g) ? g : 0; return Math.max(-1, Math.min(1, v)); };
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = clipGrad(2 * feError * 0.1);
@@ -2132,10 +2523,132 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           }
           dLdPooled[j] = clipGrad(dLdPooled[j]);
         }
-        for (let k = 0; k < pooledLen; k++) avgDLdPooled[k] += dLdPooled[k];
 
         for (let k = 0; k < HIDDEN_DIM; k++) {
           gradPressure[k] += clipGrad(dLdPooled[k] * ((graph.pressureGpa ?? 0) / 300));
+        }
+
+        const dLdNodeEmb: number[][] = Array.from({ length: nN }, () => new Array(HIDDEN_DIM).fill(0));
+        for (let ni = 0; ni < nN; ni++) {
+          const mult = (cache.nodeMultiplicities[ni] ?? 1) / cache.totalMultiplicity;
+          for (let k = 0; k < HIDDEN_DIM; k++) {
+            dLdNodeEmb[ni][k] += dLdPooled[k] * 0.5 * mult;
+          }
+        }
+        for (let k = 0; k < HIDDEN_DIM; k++) {
+          const maxIdx = cache.maxPoolArgmax[k] ?? 0;
+          dLdNodeEmb[maxIdx][k] += dLdPooled[HIDDEN_DIM + k];
+        }
+        for (let ni = 0; ni < nN; ni++) {
+          const aw = cache.attnPoolWeights[ni] ?? 0;
+          for (let k = 0; k < HIDDEN_DIM; k++) {
+            dLdNodeEmb[ni][k] += dLdPooled[k] * 0.5 * aw;
+          }
+        }
+
+        const gateVals = weights.residual_gates.map(g => sigmoid(g));
+
+        const layerWeights: { W_msg: number[][]; W_upd: number[][]; useLeaky: boolean; gateIdx: number }[] = [
+          { W_msg: weights.W_message4, W_upd: weights.W_update4, useLeaky: false, gateIdx: 3 },
+          { W_msg: weights.W_message3, W_upd: weights.W_update3, useLeaky: false, gateIdx: 2 },
+          { W_msg: weights.W_message2, W_upd: weights.W_update2, useLeaky: false, gateIdx: 1 },
+        ];
+        const layerCacheIndices = [3, 2, 1];
+
+        let dLdCur = dLdNodeEmb;
+        for (let li = 0; li < layerWeights.length; li++) {
+          const lw = layerWeights[li];
+          const ci = layerCacheIndices[li];
+          const ac = cache.attnCaches[ci];
+          const gi = lw.gateIdx;
+          const gv = gateVals[gi];
+
+          const dLdLayerIn: number[][] = Array.from({ length: nN }, () => new Array(HIDDEN_DIM).fill(0));
+          for (let ni = 0; ni < nN; ni++) {
+            for (let k = 0; k < HIDDEN_DIM; k++) {
+              dLdLayerIn[ni][k] = dLdCur[ni][k] * gv;
+            }
+          }
+
+          const { dW_update, dW_message, dLdInput } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky);
+
+          const gradIdx = 3 - li;
+          const addMat = (dst: number[][], src: number[][]) => {
+            for (let r = 0; r < dst.length; r++)
+              for (let c = 0; c < dst[r].length; c++)
+                dst[r][c] += clipGrad(src[r][c]);
+          };
+          addMat(graphGrads.dW_msg[gradIdx], dW_message);
+          addMat(graphGrads.dW_upd[gradIdx], dW_update);
+
+          for (let ni = 0; ni < nN; ni++) {
+            for (let k = 0; k < HIDDEN_DIM; k++) {
+              dLdLayerIn[ni][k] += clipGrad(dLdInput[ni][k]);
+            }
+          }
+
+          let dEmbSum = 0;
+          for (let ni = 0; ni < nN; ni++)
+            for (let k = 0; k < HIDDEN_DIM; k++)
+              dEmbSum += dLdCur[ni][k] * (ac.inputEmbs[ni]?.[k] ?? 0);
+          graphGrads.dGates[gi] += clipGrad(dEmbSum * gv * (1 - gv));
+
+          dLdCur = dLdLayerIn;
+        }
+
+        const ac0 = cache.attnCaches[0];
+        if (cache.cgcnnCache) {
+          const { dW_gate, dW_value, db_gate, db_value, dLdInput: dLdCgcnnIn } =
+            cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_conv_gate, weights.W_conv_value);
+          const addMat = (dst: number[][], src: number[][]) => {
+            for (let r = 0; r < dst.length; r++)
+              for (let c = 0; c < dst[r].length; c++)
+                dst[r][c] += clipGrad(src[r][c]);
+          };
+          addMat(graphGrads.dW_conv_gate, dW_gate);
+          addMat(graphGrads.dW_conv_value, dW_value);
+          for (let k = 0; k < HIDDEN_DIM; k++) {
+            graphGrads.db_conv_gate[k] += clipGrad(db_gate[k]);
+            graphGrads.db_conv_value[k] += clipGrad(db_value[k]);
+          }
+          dLdCur = dLdCgcnnIn;
+        }
+
+        {
+          const { dW_update, dW_message, dLdInput } = attnLayerBackward(ac0, dLdCur, graph, weights.W_update, weights.W_message, true);
+          const addMat = (dst: number[][], src: number[][]) => {
+            for (let r = 0; r < dst.length; r++)
+              for (let c = 0; c < dst[r].length; c++)
+                dst[r][c] += clipGrad(src[r][c]);
+          };
+          addMat(graphGrads.dW_msg[0], dW_message);
+          addMat(graphGrads.dW_upd[0], dW_update);
+
+          const g0v = gateVals[0];
+          const dLdPreProj: number[][] = Array.from({ length: nN }, () => new Array(HIDDEN_DIM).fill(0));
+          for (let ni = 0; ni < nN; ni++) {
+            for (let k = 0; k < HIDDEN_DIM; k++) {
+              dLdPreProj[ni][k] = clipGrad(dLdInput[ni][k]) + dLdCur[ni][k] * g0v;
+            }
+          }
+
+          let dEmbSum0 = 0;
+          for (let ni = 0; ni < nN; ni++)
+            for (let k = 0; k < HIDDEN_DIM; k++)
+              dEmbSum0 += dLdCur[ni][k] * (ac0.inputEmbs[ni]?.[k] ?? 0);
+          graphGrads.dGates[0] += clipGrad(dEmbSum0 * g0v * (1 - g0v));
+
+          for (let ni = 0; ni < nN; ni++) {
+            const pre = cache.inputProjPreActs[ni];
+            const inp = cache.inputProjInputs[ni];
+            for (let k = 0; k < HIDDEN_DIM; k++) {
+              const dAct = dLdPreProj[ni][k] * (pre[k] >= 0 ? 1.0 : 0.01);
+              graphGrads.db_input_proj[k] += clipGrad(dAct);
+              for (let c = 0; c < NODE_DIM; c++) {
+                graphGrads.dW_input_proj[k][c] += clipGrad(dAct * (inp[c] ?? 0));
+              }
+            }
+          }
         }
       }
 
@@ -2162,38 +2675,31 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         weights.W_pressure[k] -= lr * gradPressure[k] * invN;
       }
 
-      for (let k = 0; k < pooledLen; k++) avgDLdPooled[k] *= invN;
-      const pooledGradNorm = Math.sqrt(avgDLdPooled.reduce((s, v) => s + v * v, 0));
-      const graphLR = lr * Math.min(1.0, pooledGradNorm) * 0.1;
-
-      for (const wMat of [
-        weights.W_message, weights.W_update,
-        weights.W_message2, weights.W_update2,
-        weights.W_message3, weights.W_update3,
-        weights.W_message4, weights.W_update4,
-        weights.W_attn_query, weights.W_attn_key,
-        weights.W_attn_query2, weights.W_attn_key2,
-        weights.W_attn_query3, weights.W_attn_key3,
-        weights.W_attn_query4, weights.W_attn_key4,
-        weights.W_conv_gate, weights.W_conv_value,
-        weights.W_3body, weights.W_3body_update,
-        weights.W_input_proj,
-      ]) {
-        const rows = wMat.length;
-        const cols = wMat[0]?.length ?? 0;
-        const perturbation = new Array(cols);
-        for (let j = 0; j < cols; j++) perturbation[j] = rng() > 0.5 ? 1 : -1;
-        for (let i = 0; i < rows; i++) {
-          const directionSign = avgDLdPooled[i % pooledLen] >= 0 ? 1 : -1;
-          for (let j = 0; j < cols; j++) {
-            wMat[i][j] -= graphLR * directionSign * perturbation[j] * 0.01;
-          }
-        }
+      const graphLR = lr * 0.1;
+      const applyGraphGrad = (wMat: number[][], grad: number[][]) => {
+        for (let i = 0; i < wMat.length; i++)
+          for (let j = 0; j < wMat[i].length; j++)
+            wMat[i][j] -= graphLR * grad[i][j] * invN;
+      };
+      const wMsgMats = [weights.W_message, weights.W_message2, weights.W_message3, weights.W_message4];
+      const wUpdMats = [weights.W_update, weights.W_update2, weights.W_update3, weights.W_update4];
+      for (let li = 0; li < 4; li++) {
+        applyGraphGrad(wMsgMats[li], graphGrads.dW_msg[li]);
+        applyGraphGrad(wUpdMats[li], graphGrads.dW_upd[li]);
+      }
+      applyGraphGrad(weights.W_conv_gate, graphGrads.dW_conv_gate);
+      applyGraphGrad(weights.W_conv_value, graphGrads.dW_conv_value);
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        weights.b_conv_gate[k] -= graphLR * graphGrads.db_conv_gate[k] * invN;
+        weights.b_conv_value[k] -= graphLR * graphGrads.db_conv_value[k] * invN;
+      }
+      applyGraphGrad(weights.W_input_proj, graphGrads.dW_input_proj);
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        weights.b_input_proj[k] -= graphLR * graphGrads.db_input_proj[k] * invN;
       }
 
       for (let g = 0; g < weights.residual_gates.length; g++) {
-        const gateGrad = avgDLdPooled[g % HIDDEN_DIM] * 0.01;
-        weights.residual_gates[g] -= lr * gateGrad;
+        weights.residual_gates[g] -= lr * graphGrads.dGates[g] * invN;
         weights.residual_gates[g] = Math.max(-3, Math.min(3, weights.residual_gates[g]));
       }
     }
@@ -2380,11 +2886,22 @@ const GNN_VERSION_HISTORY_MAX = 50;
 export function logGNNVersion(trigger: string, datasetSize: number, dftSamples = 0, enrichedSamples = 0): GNNVersionRecord {
   gnnModelVersion++;
 
-  const validationSet = heldOutValidationSet.length > 0
-    ? heldOutValidationSet
-    : SUPERCON_TRAINING_DATA
-        .filter(e => e.isSuperconductor && e.tc > 0)
-        .slice(0, 50);
+  let validationSet: TrainingSample[];
+  if (heldOutValidationSet.length > 0) {
+    validationSet = heldOutValidationSet;
+  } else {
+    const allSC = SUPERCON_TRAINING_DATA.filter(e => e.isSuperconductor && e.tc > 0);
+    const fallbackRng = seededRandom(12345);
+    const shuffled = [...allSC];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(fallbackRng() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    validationSet = shuffled.slice(-50).map(e => ({
+      formula: e.formula,
+      tc: e.tc,
+    }));
+  }
 
   let sumSquaredError = 0;
   let sumAbsError = 0;
@@ -2428,7 +2945,7 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
     gnnVersionHistory.shift();
   }
 
-  const valSource = heldOutValidationSet.length > 0 ? `held-out (${heldOutValidationSet.length})` : "fallback (first 50)";
+  const valSource = heldOutValidationSet.length > 0 ? `held-out (${heldOutValidationSet.length})` : "fallback (tail-50 shuffled)";
   console.log(`[GNN] Version ${record.version} logged: R²=${record.r2}, MAE=${record.mae}, RMSE=${record.rmse}, trigger=${trigger}, dataset=${datasetSize}, dft=${dftSamples}, enriched=${enrichedSamples}, validation=${valSource}`);
 
   return record;
