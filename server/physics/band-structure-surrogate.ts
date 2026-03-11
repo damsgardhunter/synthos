@@ -504,8 +504,19 @@ export function predictBandStructure(formula: string, prototype?: string): BandS
   const topoLogits = vecAdd(matVecMul(weights.W_head_topoClass, hidden2), weights.b_head_topoClass);
 
   let bandGap = Math.max(0, rawBandGap);
-  if (calib.metallicityHint > 0.7) bandGap = 0;
-  else if (calib.metallicityHint > 0.4) bandGap *= 0.2;
+  const dosProxy = Math.max(0, rawDos);
+  const highDOS = dosProxy > 2.0;
+
+  if (calib.metallicityHint > 0.7) {
+    if (highDOS) {
+      bandGap *= 0.05;
+    } else {
+      const correlationPenalty = Math.max(0.05, 1.0 - calib.metallicityHint);
+      bandGap *= correlationPenalty;
+    }
+  } else if (calib.metallicityHint > 0.4) {
+    bandGap *= 0.2 + (1.0 - calib.metallicityHint) * 0.3;
+  }
   bandGap = Number(Math.min(10, bandGap).toFixed(4));
 
   const isMetal = calib.metallicityHint > 0.5 || bandGap < 0.1;

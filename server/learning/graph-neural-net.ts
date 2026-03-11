@@ -745,8 +745,9 @@ function threeBodyInteractionLayer(
   for (let i = 0; i < nNodes; i++) {
     const neighborCount = graph.threeBodyFeatures.filter(tb => tb.center === i).length;
     if (neighborCount > 0) {
+      const normFactor = Math.sqrt(neighborCount);
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        threeBodyAgg[i][k] /= Math.max(neighborCount, 1);
+        threeBodyAgg[i][k] /= normFactor;
       }
     }
 
