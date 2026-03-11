@@ -47,6 +47,8 @@ interface RawDFTSources {
   mpPhonon: MPPhononData | null;
   aflowEntry: AflowEntry | null;
   aflowDFT: AflowDFTData | null;
+  partial: boolean;
+  discrepancies: string[];
 }
 
 function normalizeFormula(formula: string): string {
@@ -224,7 +226,9 @@ function computeAnalyticalFallbacks(formula: string): {
 
   const omegaLog = 0.5 * debyeTemp;
 
-  const averagePhononFreq = estimateAveragePhononFreq(debyeTemp, avgMass);
+  const hFrac = (counts["H"] || 0) / totalAtoms;
+  const isHydride = hFrac > 0.4;
+  const averagePhononFreq = estimateAveragePhononFreq(debyeTemp, avgMass, isHydride);
 
   let lambda: number | null = null;
   if (isMetallic && dosPerAtom != null && dosPerAtom > 0) {
@@ -351,11 +355,13 @@ function estimateDOSAtFermi(elements: string[], counts: Record<string, number>, 
   return Math.min(5.0, baseDOS * tmBoost);
 }
 
-function estimateAveragePhononFreq(debyeTemp: number, avgMass: number): number {
+function estimateAveragePhononFreq(debyeTemp: number, avgMass: number, isHydride: boolean = false): number {
   const kB = 8.617e-5;
   const omegaD_meV = kB * debyeTemp * 1000;
-  const avgFreq = omegaD_meV * 0.7 / Math.sqrt(avgMass / 50);
-  return Math.max(1, Math.min(200, avgFreq));
+  const refMass = 50;
+  const avgFreq = omegaD_meV * 0.7 * Math.sqrt(refMass / Math.max(1, avgMass));
+  const upperCap = isHydride ? 500 : 200;
+  return Math.max(1, Math.min(upperCap, avgFreq));
 }
 
 function estimateLatticeType(elements: string[], counts: Record<string, number>, totalCount: number): "fcc" | "bcc" | "hcp" | "layered" | "cage" | "other" {
@@ -438,15 +444,40 @@ async function fetchAllDFTSources(formula: string): Promise<RawDFTSources> {
   const mpAvailable = isApiAvailable();
   const normalizedFormula = normalizeFormula(formula);
 
+  let mpFailed = false;
   const [mpSummary, mpElasticity, mpElectronic, mpThermo, mpPhonon, aflowResult, aflowDFT] = await Promise.all([
-    mpAvailable ? fetchSummary(normalizedFormula).catch(() => null) : Promise.resolve(null),
+    mpAvailable ? fetchSummary(normalizedFormula).catch(() => { mpFailed = true; return null; }) : Promise.resolve(null),
     mpAvailable ? fetchElasticity(normalizedFormula).catch(() => null) : Promise.resolve(null),
-    mpAvailable ? fetchElectronicStructure(normalizedFormula).catch(() => null) : Promise.resolve(null),
+    mpAvailable ? fetchElectronicStructure(normalizedFormula).catch(() => { mpFailed = true; return null; }) : Promise.resolve(null),
     mpAvailable ? fetchThermo(normalizedFormula).catch(() => null) : Promise.resolve(null),
     mpAvailable ? fetchPhonon(normalizedFormula).catch(() => null) : Promise.resolve(null),
     fetchAflowData(normalizedFormula).catch(() => ({ entries: [], queryFormula: normalizedFormula, source: "AFLOW" as const })),
     fetchAflowDFTData(normalizedFormula).catch(() => null),
   ]);
+
+  const partial = mpAvailable && mpFailed && (mpSummary == null && mpElectronic == null);
+
+  const aflowEntry = aflowResult.entries[0] ?? null;
+  const discrepancies: string[] = [];
+
+  const mpGap = mpSummary?.bandGap ?? mpElectronic?.bandGap ?? null;
+  const aflowGap = aflowEntry?.bandgap ?? null;
+  if (mpGap != null && aflowGap != null && Math.abs(mpGap - aflowGap) > 0.5) {
+    discrepancies.push(`bandGap: MP=${mpGap.toFixed(2)}eV vs AFLOW=${aflowGap.toFixed(2)}eV (Δ=${Math.abs(mpGap - aflowGap).toFixed(2)}eV)`);
+  }
+
+  const mpFormE = mpSummary?.formationEnergyPerAtom ?? mpThermo?.formationEnergyPerAtom ?? null;
+  const aflowFormE = aflowEntry?.enthalpy_formation_atom ?? null;
+  if (mpFormE != null && aflowFormE != null && Math.abs(mpFormE - aflowFormE) > 0.3) {
+    discrepancies.push(`formationEnergy: MP=${mpFormE.toFixed(3)}eV vs AFLOW=${aflowFormE.toFixed(3)}eV (Δ=${Math.abs(mpFormE - aflowFormE).toFixed(3)}eV)`);
+  }
+
+  if (discrepancies.length > 0) {
+    console.log(`[DFT] ${normalizedFormula}: Source discrepancies detected: ${discrepancies.join("; ")}`);
+  }
+  if (partial) {
+    console.log(`[DFT] ${normalizedFormula}: MP API partially failed — results flagged as partial`);
+  }
 
   return {
     mpSummary,
@@ -454,8 +485,10 @@ async function fetchAllDFTSources(formula: string): Promise<RawDFTSources> {
     mpElectronic,
     mpThermo,
     mpPhonon,
-    aflowEntry: aflowResult.entries[0] ?? null,
+    aflowEntry,
     aflowDFT,
+    partial,
+    discrepancies,
   };
 }
 
@@ -495,19 +528,38 @@ export async function resolveDFTFeatures(formula: string, pressureGpa: number = 
     }
   }
 
-  const bandGap = resolve(
-    raw.mpSummary?.bandGap ?? raw.mpElectronic?.bandGap,
-    raw.aflowEntry?.bandgap,
-    xtbData ? xtbData.bandGap : analytical.bandGap,
-    xtbData ? "dft-xtb" : "analytical",
-  );
+  const mpBandGap = raw.mpSummary?.bandGap ?? raw.mpElectronic?.bandGap ?? null;
+  const aflowBandGap = raw.aflowEntry?.bandgap ?? null;
+  const hasBandGapDiscrepancy = raw.discrepancies.some(d => d.startsWith("bandGap:"));
 
-  const isMetallic = resolve(
-    raw.mpSummary?.isMetallic ?? raw.mpElectronic?.isMetal,
-    raw.aflowEntry?.Egap_type === "metal" ? true : undefined,
-    xtbData ? xtbData.isMetallic : analytical.isMetallic,
-    xtbData ? "dft-xtb" : "analytical",
-  );
+  let bandGap: DFTResolvedFeature<number>;
+  if (hasBandGapDiscrepancy && mpBandGap != null && aflowBandGap != null) {
+    if (xtbData) {
+      bandGap = { value: xtbData.bandGap, source: "dft-xtb" };
+    } else {
+      const avg = (mpBandGap + aflowBandGap) / 2;
+      bandGap = { value: avg, source: "dft-mp" };
+    }
+  } else {
+    bandGap = resolve(
+      mpBandGap,
+      aflowBandGap,
+      xtbData ? xtbData.bandGap : analytical.bandGap,
+      xtbData ? "dft-xtb" : "analytical",
+    );
+  }
+
+  let isMetallic: DFTResolvedFeature<boolean>;
+  if (hasBandGapDiscrepancy && xtbData) {
+    isMetallic = { value: xtbData.isMetallic, source: "dft-xtb" };
+  } else {
+    isMetallic = resolve(
+      raw.mpSummary?.isMetallic ?? raw.mpElectronic?.isMetal,
+      raw.aflowEntry?.Egap_type === "metal" ? true : undefined,
+      xtbData ? xtbData.isMetallic : analytical.isMetallic,
+      xtbData ? "dft-xtb" : "analytical",
+    );
+  }
 
   const dosAtFermi = resolve<number | null>(
     raw.mpElectronic?.dosAtFermi,
@@ -568,7 +620,13 @@ export async function resolveDFTFeatures(formula: string, pressureGpa: number = 
   const externalCoverage = allResolved.length > 0 ? dftCount / allResolved.length : 0;
 
   const hasXTB = xtbData != null;
-  const dftCoverage = externalCoverage > 0 ? externalCoverage : (hasXTB ? 0.75 : Math.max(0.5, analytical.estimatorCoverage));
+  let dftCoverage = externalCoverage > 0 ? externalCoverage : (hasXTB ? 0.75 : Math.max(0.5, analytical.estimatorCoverage));
+  if (raw.partial) {
+    dftCoverage = Math.min(dftCoverage, 0.6);
+  }
+  if (raw.discrepancies.length > 0) {
+    dftCoverage = Math.max(0.3, dftCoverage - 0.1 * raw.discrepancies.length);
+  }
 
   if (!hasExternalData && !hasXTB) {
     console.log(`[DFT] ${formula}: No external API or xTB data. Using analytical fallbacks (coverage=${dftCoverage.toFixed(2)}).`);
