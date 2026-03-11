@@ -3246,6 +3246,7 @@ async function runPhase11_StructurePrediction() {
 
     if (shouldContinue() && cycleCount % 3 === 0) {
       try {
+        const structInFlightMarked: string[] = [];
         const topCandidates = candidates
           .filter(c => (c.ensembleScore ?? 0) > 0.3)
           .map(c => ({ formula: c.formula, predictedTc: c.predictedTc ?? 0, ensembleScore: c.ensembleScore ?? 0 }));
@@ -3257,6 +3258,8 @@ async function runPhase11_StructurePrediction() {
             if (!isValidFormula(variant.formula)) continue;
             variant.formula = normalizeFormula(variant.formula);
             if (isFormulaInFlight(variant.formula)) continue;
+            markFormulaInFlight(variant.formula);
+            structInFlightMarked.push(variant.formula);
             const existingSC = await storage.getSuperconductorByFormula(variant.formula);
             if (!existingSC) {
               const features = extractFeatures(variant.formula);
@@ -3318,16 +3321,23 @@ async function runPhase11_StructurePrediction() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-11", event: "Generative structure error", detail: err.message?.slice(0, 150), dataSource: "Structure Generator" });
+      } finally {
+        for (const f of structInFlightMarked) releaseFormulaInFlight(f);
       }
     }
 
     if (shouldContinue() && cycleCount % 10 === 0) {
+      const novelInFlightMarked: string[] = [];
       try {
         const novelVariants = await runNovelPrototypeGeneration(emit);
 
         for (const variant of novelVariants) {
           if (!isValidFormula(variant.formula)) continue;
-          if (isFormulaInFlight(normalizeFormula(variant.formula))) continue;
+          const novelNormalized = normalizeFormula(variant.formula);
+          if (isFormulaInFlight(novelNormalized)) continue;
+          markFormulaInFlight(novelNormalized);
+          novelInFlightMarked.push(novelNormalized);
+          variant.formula = novelNormalized;
           const existingSC = await storage.getSuperconductorByFormula(variant.formula);
           if (!existingSC) {
             const features = extractFeatures(variant.formula);
@@ -3377,6 +3387,8 @@ async function runPhase11_StructurePrediction() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-11", event: "Novel prototype generation error", detail: err.message?.slice(0, 150), dataSource: "Novel Prototype Generator" });
+      } finally {
+        for (const f of novelInFlightMarked) releaseFormulaInFlight(f);
       }
     }
 
@@ -3544,6 +3556,7 @@ async function runPhase11_StructurePrediction() {
     }
 
     if (shouldContinue() && cycleCount % 8 === 0) {
+      const cdvaeInFlightMarked: string[] = [];
       try {
         const targetTcForDiffusion = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
         const cdvaeCrystals = runCrystalDiffusionCycle(15, targetTcForDiffusion, 25, alreadyScreenedFormulas);
@@ -3551,6 +3564,9 @@ async function runPhase11_StructurePrediction() {
         for (const crystal of cdvaeCrystals) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
+          if (isFormulaInFlight(normalized)) continue;
+          markFormulaInFlight(normalized);
+          cdvaeInFlightMarked.push(normalized);
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
 
@@ -3564,8 +3580,8 @@ async function runPhase11_StructurePrediction() {
 
           let hPercolationPenalty = 1.0;
           let hPercNote = "";
-          const hCountCheck = (normalized.match(/H(\d+)/)?.[1] ?? "0");
-          const isHydrideCandidate = parseInt(hCountCheck) >= 4;
+          const cdvaeHCounts = parseFormulaCounts(normalized);
+          const isHydrideCandidate = (cdvaeHCounts["H"] ?? 0) >= 4;
           if (isHydrideCandidate && crystal.atoms && crystal.atoms.length > 0 && crystal.lattice) {
             const percResult = checkHydrogenPercolation(
               crystal.atoms as PercolationAtom[],
@@ -3585,7 +3601,7 @@ async function runPhase11_StructurePrediction() {
               id,
               name: normalized,
               formula: normalized,
-              predictedTc: cappedTc,
+              predictedTc: Math.round(cappedTc * hPercolationPenalty * 10) / 10,
               pressureGpa: estimateFamilyPressure(normalized),
               meissnerEffect: false,
               zeroResistance: false,
@@ -3633,10 +3649,13 @@ async function runPhase11_StructurePrediction() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-11", event: "CDVAE diffusion error", detail: err.message?.slice(0, 150), dataSource: "CDVAE Diffusion" });
+      } finally {
+        for (const f of cdvaeInFlightMarked) releaseFormulaInFlight(f);
       }
     }
 
     if (shouldContinue() && cycleCount % 10 === 0) {
+      const distInFlightMarked: string[] = [];
       try {
         const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
         const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25, alreadyScreenedFormulas);
@@ -3644,6 +3663,9 @@ async function runPhase11_StructurePrediction() {
         for (const crystal of distCrystals) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
+          if (isFormulaInFlight(normalized)) continue;
+          markFormulaInFlight(normalized);
+          distInFlightMarked.push(normalized);
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
           const features = extractFeatures(normalized);
@@ -3656,7 +3678,8 @@ async function runPhase11_StructurePrediction() {
 
           let distHPercPenalty = 1.0;
           let distHPercNote = "";
-          const distHCount = parseInt(normalized.match(/H(\d+)/)?.[1] ?? "0");
+          const distHCounts = parseFormulaCounts(normalized);
+          const distHCount = distHCounts["H"] ?? 0;
           if (distHCount >= 4 && crystal.atoms && crystal.atoms.length > 0 && crystal.lattice) {
             const percResult = checkHydrogenPercolation(
               crystal.atoms as PercolationAtom[],
@@ -3676,7 +3699,7 @@ async function runPhase11_StructurePrediction() {
               id,
               name: normalized,
               formula: normalized,
-              predictedTc: cappedTc,
+              predictedTc: Math.round(cappedTc * distHPercPenalty * 10) / 10,
               pressureGpa: estimateFamilyPressure(normalized),
               meissnerEffect: false,
               zeroResistance: false,
@@ -3724,6 +3747,8 @@ async function runPhase11_StructurePrediction() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-11", event: "Distribution diffusion error", detail: err.message?.slice(0, 150), dataSource: "Distribution Diffusion" });
+      } finally {
+        for (const f of distInFlightMarked) releaseFormulaInFlight(f);
       }
     }
 
