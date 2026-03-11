@@ -83,6 +83,7 @@ interface GNNWeights {
   W_3body: number[][];
   W_3body_update: number[][];
   W_attn_pool: number[][];
+  residual_gates: number[];
   W_pressure: number[];
   W_mlp1: number[][];
   b_mlp1: number[];
@@ -1055,7 +1056,7 @@ function threeBodyInteractionLayer(
     }
 
     const combined = [...embeddings[i], ...threeBodyAgg[i]];
-    const updated = relu(matVecMul(W_3body_update, combined));
+    const updated = leakyRelu(matVecMul(W_3body_update, combined));
     newEmbeddings.push(updated);
   }
 
@@ -1466,7 +1467,7 @@ export function messagePassingLayer(
     }
 
     const combined = [...embeddings[i], ...aggMessage];
-    const updated = relu(matVecMul(W_update, combined));
+    const updated = leakyRelu(matVecMul(W_update, combined));
     newEmbeddings.push(updated);
   }
 
@@ -1503,12 +1504,14 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   for (let i = 0; i < graph.nodes.length; i++) {
     const raw = graph.nodes[i].embedding;
     const input = raw.length >= NODE_DIM ? raw.slice(0, NODE_DIM) : [...raw, ...new Array(NODE_DIM - raw.length).fill(0)];
-    const projected = relu(vecAdd(matVecMul(weights.W_input_proj, input), weights.b_input_proj));
+    const projected = leakyRelu(vecAdd(matVecMul(weights.W_input_proj, input), weights.b_input_proj));
     graph.nodes[i].embedding = projected;
   }
 
   const saveResidual = (nodes: CrystalGraph["nodes"]) =>
     nodes.map(n => [...n.embedding]);
+
+  const gates = weights.residual_gates;
 
   const residual0 = saveResidual(graph.nodes);
 
@@ -1530,9 +1533,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
   }
 
+  const g0 = sigmoid(gates[0] ?? 0);
   for (let i = 0; i < graph.nodes.length; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * 0.3;
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * g0;
     }
   }
 
@@ -1544,9 +1548,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
+  const g1 = sigmoid(gates[1] ?? 0);
   for (let i = 0; i < graph.nodes.length; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual1[i][k] ?? 0) * 0.3;
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual1[i][k] ?? 0) * g1;
     }
   }
 
@@ -1558,9 +1563,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
+  const g2 = sigmoid(gates[2] ?? 0);
   for (let i = 0; i < graph.nodes.length; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * 0.3;
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
     }
   }
 
@@ -1572,9 +1578,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
+  const g3 = sigmoid(gates[3] ?? 0);
   for (let i = 0; i < graph.nodes.length; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * 0.3;
+      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
     }
   }
 
@@ -1595,9 +1602,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
   const attnPool = attentionPooling(graph, weights.W_attn_pool);
 
-  const pooled = [...meanPool, ...maxPool.map(v => v === -Infinity ? 0 : v)];
+  const pooled = new Array(HIDDEN_DIM * 2);
   for (let k = 0; k < HIDDEN_DIM; k++) {
-    pooled[k] = pooled[k] * 0.5 + attnPool[k] * 0.5;
+    pooled[k] = (meanPool[k] + attnPool[k]) * 0.5;
+    pooled[HIDDEN_DIM + k] = (maxPool[k] === -Infinity ? 0 : maxPool[k]);
   }
 
   const pressureNorm = (graph.pressureGpa ?? 0) / 300;
@@ -1605,7 +1613,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     pooled[k] += pressureNorm * (weights.W_pressure[k] ?? 0);
   }
 
-  const h1 = relu(vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1));
+  const h1 = leakyRelu(vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1));
   if (dropoutRng) {
     const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
     for (let i = 0; i < h1.length; i++) h1[i] = dropped[i];
@@ -1615,7 +1623,8 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
   const logVarOut = vecAdd(matVecMul(weights.W_mlp2_var, h1), weights.b_mlp2_var);
   const feVar = softplus(logVarOut[0] ?? 0);
-  const tcVar = softplus(logVarOut[2] ?? 0) * 300 * 300;
+  const tcLogVar = logVarOut[2] ?? 0;
+  const tcVar = softplus(tcLogVar) * 30 * 30;
   const lambdaVarRaw = softplus(logVarOut[4] ?? 0);
   const bgVar = softplus(logVarOut[5] ?? 0);
 
@@ -1674,6 +1683,7 @@ function initWeights(rng: () => number): GNNWeights {
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM) * 1.5),
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    residual_gates: [0.5, 0.5, 0.5, 0.5],
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
     b_mlp1: initVector(HIDDEN_DIM),
@@ -1710,6 +1720,7 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     b_conv_value: [...w.b_conv_value],
     W_input_proj: w.W_input_proj.map(r => [...r]),
     b_input_proj: [...w.b_input_proj],
+    residual_gates: [...w.residual_gates],
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
     W_attn_pool: w.W_attn_pool.map(r => [...r]),
@@ -1898,7 +1909,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
   ]) { scrubMatrix(wMat); }
-  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure]) {
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure, weights.residual_gates]) {
     scrubVector(bVec);
   }
 
@@ -2179,6 +2190,10 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
     if (rng() < 0.3) {
       perturbed.W_pressure[i] *= (1 + (rng() - 0.5) * scale);
     }
+  }
+  for (let i = 0; i < perturbed.residual_gates.length; i++) {
+    perturbed.residual_gates[i] = Math.max(0.1, Math.min(0.9,
+      perturbed.residual_gates[i] + (rng() - 0.5) * scale * 0.2));
   }
   perturbMatrix(perturbed.W_mlp1);
   perturbMatrix(perturbed.W_mlp2);
