@@ -352,11 +352,22 @@ export function computeSpinPairing(
   else if (isPnictide) spinPairingStrength = Math.max(spinPairingStrength, 0.70);
   else if (isHeavyFermion) spinPairingStrength = Math.max(spinPairingStrength, 0.50);
 
+  const hCount = counts["H"] || 0;
+  const hFraction = hCount / totalAtoms;
+  const isSuperhydride = hFraction > 0.7;
+
   let pairingSymmetry = "s-wave";
-  if (isCuprate) pairingSymmetry = "d-wave (dx2-y2)";
-  else if (isPnictide) pairingSymmetry = "s+/-";
-  else if (isHeavyFermion) pairingSymmetry = "d-wave";
-  else if (spinPairingStrength > 0.5 && nestingScore > 0.5) pairingSymmetry = "d-wave";
+  if (isSuperhydride && spinPairingStrength < 0.7) {
+    pairingSymmetry = "s-wave";
+  } else if (isCuprate) {
+    pairingSymmetry = "d-wave (dx2-y2)";
+  } else if (isPnictide) {
+    pairingSymmetry = "s+/-";
+  } else if (isHeavyFermion) {
+    pairingSymmetry = "d-wave";
+  } else if (spinPairingStrength > 0.5 && nestingScore > 0.5) {
+    pairingSymmetry = "d-wave";
+  }
 
   return {
     chiQ: Number(chiQ.toFixed(4)),
@@ -374,6 +385,7 @@ export function computeSpinPairing(
 export function computeOrbitalPairing(
   formula: string,
   electronic: ElectronicStructure,
+  tbOverride?: { bands: { tbConfidence: number; nOrbitals: number }; topology: { flatBands: any[] } } | null,
 ): OrbitalPairingResult {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -410,18 +422,26 @@ export function computeOrbitalPairing(
     }
   }
 
-  const orbitalDegeneracy = Math.min(5, partiallyFilledCount * (dFraction > 0.3 ? 3 : 1));
+  const orbitalDegeneracy = Math.min(5, activeOrbitals.length / Math.max(1, elements.length) + (fFraction > 0.1 ? 1.5 : 0));
 
   let interOrbitalHopping = 0;
-  try {
-    const tb = computeFullTightBinding(formula, null);
-    if (tb.bands.tbConfidence > 0.3) {
-      const nOrb = tb.bands.nOrbitals;
-      const flatBands = tb.topology.flatBands.length;
+  if (tbOverride) {
+    if (tbOverride.bands.tbConfidence > 0.3) {
+      const nOrb = tbOverride.bands.nOrbitals;
+      const flatBands = tbOverride.topology.flatBands.length;
       interOrbitalHopping = Math.min(1.0, (nOrb / 10) * 0.3 + flatBands * 0.1);
     }
-  } catch (err) {
-    console.error(`[OrbitalPairing] tight-binding computation failed for ${formula}:`, err);
+  } else {
+    try {
+      const tb = computeFullTightBinding(formula, null);
+      if (tb.bands.tbConfidence > 0.3) {
+        const nOrb = tb.bands.nOrbitals;
+        const flatBands = tb.topology.flatBands.length;
+        interOrbitalHopping = Math.min(1.0, (nOrb / 10) * 0.3 + flatBands * 0.1);
+      }
+    } catch (err) {
+      console.error(`[OrbitalPairing] tight-binding computation failed for ${formula}:`, err);
+    }
   }
 
   if (interOrbitalHopping === 0 && dFraction > 0.3) {
