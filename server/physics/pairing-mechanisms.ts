@@ -312,18 +312,22 @@ export function computeSpinPairing(
     };
   }
 
-  let maxUoverW = 0;
+  let weightedUoverW = 0;
+  let totalCorrelatedFrac = 0;
   for (const el of elements) {
     const U = getHubbardU(el);
     if (U === null) continue;
     const W = Math.max(0.5, estimateBandwidthW(el));
     const frac = (counts[el] || 1) / totalAtoms;
     const ratio = (U / W) * Math.sqrt(frac);
-    if (ratio > maxUoverW) maxUoverW = ratio;
+    weightedUoverW += ratio * frac;
+    totalCorrelatedFrac += frac;
   }
-  const correlationFactor = Math.max(0.05, Math.min(2.0, maxUoverW || correlation * 0.5));
+  const avgUoverW = totalCorrelatedFrac > 0 ? weightedUoverW / totalCorrelatedFrac : 0;
+  const correlationFactor = Math.max(0.05, Math.min(2.0, avgUoverW || correlation * 0.5));
 
-  const chiQ = dosEF * nestingFloor * Math.max(1, spin.stonerEnhancement * 0.5);
+  const clampedStoner = Math.min(20.0, spin.stonerEnhancement);
+  const chiQ = dosEF * nestingFloor * Math.max(1, clampedStoner * 0.5);
 
   const nestingAmplification = nestingScore > 0.5 ? 1.0 + (nestingScore - 0.5) * 2.0 : 1.0;
 
@@ -334,7 +338,7 @@ export function computeSpinPairing(
     (spin.isNearQCP ? 0.3 : 0) +
     (nestingScore > 0.7 ? 0.15 : 0) +
     (correlation > 0.5 ? 0.1 : 0) +
-    (spin.stonerEnhancement > 5 ? 0.1 : 0)
+    (clampedStoner > 5 ? 0.1 : 0)
   );
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
@@ -356,7 +360,7 @@ export function computeSpinPairing(
 
   return {
     chiQ: Number(chiQ.toFixed(4)),
-    stonerEnhancement: spin.stonerEnhancement,
+    stonerEnhancement: clampedStoner,
     spinFluctuationEnergy: spin.spinFluctuationEnergy,
     isNearQCP: spin.isNearQCP,
     correlationFactor: Number(correlationFactor.toFixed(4)),
