@@ -61,15 +61,15 @@ const FINGERPRINT_KEYS: (keyof PatternFingerprint)[] = [
 
 function fingerprintToVector(fp: PatternFingerprint): number[] {
   return [
-    fp.dosLevel,
-    fp.flatBandScore,
-    fp.vhsProximity,
-    fp.nestingScore,
-    fp.couplingStrength,
+    Math.min(1, fp.dosLevel / 5),
+    Math.min(1, Math.max(0, fp.flatBandScore)),
+    Math.min(1, Math.max(0, fp.vhsProximity)),
+    Math.min(1, Math.max(0, fp.nestingScore)),
+    Math.min(1, fp.couplingStrength / 3),
     Math.min(1, fp.hydrogenDensity / 12),
     fp.dimensionality / 3,
-    fp.correlationStrength,
-    fp.metallicity,
+    Math.min(1, Math.max(0, fp.correlationStrength)),
+    Math.min(1, Math.max(0, fp.metallicity)),
     Math.min(1, fp.pressureGpa / 300),
   ];
 }
@@ -317,8 +317,28 @@ export class DiscoveryMemory {
     const hDensities = topRecords.map(r => r.fingerprint.hydrogenDensity);
     const avgHDensity = hDensities.reduce((s, v) => s + v, 0) / hDensities.length;
     if (avgHDensity > 3) {
-      preferredStoichiometries.push({ pattern: "AH3", weight: 0.4 });
-      preferredStoichiometries.push({ pattern: "ABH4", weight: 0.3 });
+      const hydrideRecords = topRecords.filter(r => r.fingerprint.hydrogenDensity > 3);
+      const metalFreq = new Map<string, number>();
+      for (const r of hydrideRecords) {
+        const els = parseFormulaElements(r.formula).filter(e => e !== "H");
+        for (const el of els) {
+          metalFreq.set(el, (metalFreq.get(el) || 0) + 1);
+        }
+      }
+      const topMetals = Array.from(metalFreq.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([el]) => el);
+
+      if (topMetals.length >= 1) {
+        preferredStoichiometries.push({ pattern: `${topMetals[0]}H3`, weight: 0.4 });
+        preferredStoichiometries.push({ pattern: `${topMetals[0]}H6`, weight: 0.3 });
+        preferredStoichiometries.push({ pattern: `${topMetals[0]}H10`, weight: 0.2 });
+      }
+      if (topMetals.length >= 2) {
+        preferredStoichiometries.push({ pattern: `${topMetals[0]}${topMetals[1]}H4`, weight: 0.3 });
+        preferredStoichiometries.push({ pattern: `${topMetals[0]}${topMetals[1]}H8`, weight: 0.2 });
+      }
     }
 
     const dims = topRecords.map(r => r.fingerprint.dimensionality);
@@ -436,11 +456,11 @@ export class DiscoveryMemory {
     }
 
     if (bestCluster && bestSim >= CLUSTER_SIMILARITY_THRESHOLD) {
+      const n = bestCluster.members.length;
       bestCluster.members.push(record);
-      bestCluster.avgTc = bestCluster.members.reduce((s, m) => s + m.tc, 0) / bestCluster.members.length;
-      bestCluster.centroid = averageVectors(
-        bestCluster.members.map(m => fingerprintToVector(m.fingerprint))
-      );
+      bestCluster.avgTc = (bestCluster.avgTc * n + record.tc) / (n + 1);
+      const newN = n + 1;
+      bestCluster.centroid = bestCluster.centroid.map((c, i) => (c * n + vec[i]) / newN);
       this.updateClusterMetadata(bestCluster);
     } else {
       const newCluster: PatternCluster = {
