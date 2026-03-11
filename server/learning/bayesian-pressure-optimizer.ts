@@ -39,11 +39,25 @@ export interface BayesianPressureStats {
 }
 
 const observationStore = new Map<string, PressureObservation[]>();
+const observationAccessOrder: string[] = [];
 const resultCache = new Map<string, BayesianPressureResult>();
 const MAX_OBSERVATIONS_PER_FORMULA = 100;
+const MAX_FORMULAS = 5000;
 const MAX_RESULTS_CACHE = 300;
 const PRESSURE_SEARCH_MIN = 0;
 const PRESSURE_SEARCH_MAX = 350;
+
+interface GPCache {
+  L: number[][];
+  alpha: number[];
+  yMean: number;
+  obsCount: number;
+  lengthScale: number;
+  signalVar: number;
+  noiseVar: number;
+}
+
+const gpCacheStore = new Map<string, GPCache>();
 
 function matern52Kernel1D(x1: number, x2: number, lengthScale: number, signalVar: number): number {
   const r = Math.abs(x1 - x2) / lengthScale;
@@ -53,9 +67,9 @@ function matern52Kernel1D(x1: number, x2: number, lengthScale: number, signalVar
 
 function cholDecomp(K: number[][]): number[][] {
   const n = K.length;
-  let jitter = 1e-6;
+  let jitter = 1e-8;
 
-  for (let attempt = 0; attempt <= 3; attempt++) {
+  for (let attempt = 0; attempt <= 4; attempt++) {
     if (attempt > 0) {
       for (let i = 0; i < n; i++) K[i][i] += jitter;
       jitter *= 10;
@@ -83,7 +97,7 @@ function cholDecomp(K: number[][]): number[][] {
   }
 
   const L = Array.from({ length: n }, () => new Array(n).fill(0));
-  for (let i = 0; i < n; i++) L[i][i] = Math.sqrt(Math.max(K[i][i], 1e-6));
+  for (let i = 0; i < n; i++) L[i][i] = Math.sqrt(Math.max(K[i][i], 1e-8));
   return L;
 }
 
@@ -159,16 +173,36 @@ function optimizeLengthScale(obs: PressureObservation[], signalVar: number, nois
   return bestLS;
 }
 
+function erf(x: number): number {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const t = 1.0 / (1.0 + p * Math.abs(x));
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+
 function normCDF(x: number): number {
-  const t = 1 / (1 + 0.2316419 * Math.abs(x));
-  const d = 0.3989422804014327;
-  const p = d * Math.exp(-x * x / 2) * t *
-    (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  return x > 0 ? 1 - p : p;
+  return 0.5 * (1 + erf(x / Math.SQRT2));
 }
 
 function normPDF(x: number): number {
   return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+function touchLRU(formula: string): void {
+  const idx = observationAccessOrder.indexOf(formula);
+  if (idx !== -1) observationAccessOrder.splice(idx, 1);
+  observationAccessOrder.push(formula);
+}
+
+function evictLRU(): void {
+  while (observationStore.size > MAX_FORMULAS && observationAccessOrder.length > 0) {
+    const oldest = observationAccessOrder.shift()!;
+    observationStore.delete(oldest);
+    gpCacheStore.delete(oldest);
+    resultCache.delete(oldest);
+  }
 }
 
 export function addPressureObservation(
@@ -190,16 +224,22 @@ export function addPressureObservation(
       existing.stable = stable;
       existing.enthalpy = enthalpy;
       existing.timestamp = Date.now();
+      gpCacheStore.delete(formula);
     }
+    touchLRU(formula);
     return;
   }
 
   obs.push({ formula, pressureGpa, tc, stable, enthalpy, timestamp: Date.now() });
+  gpCacheStore.delete(formula);
 
   if (obs.length > MAX_OBSERVATIONS_PER_FORMULA) {
     obs.sort((a, b) => b.tc - a.tc);
     obs.length = MAX_OBSERVATIONS_PER_FORMULA;
   }
+
+  touchLRU(formula);
+  evictLRU();
 }
 
 function seedFromSurrogate(formula: string): void {
@@ -222,20 +262,26 @@ function seedFromSurrogate(formula: string): void {
   } catch {}
 }
 
-function gpPredict(
+function buildGPFactors(
   obs: PressureObservation[],
-  targetPressure: number,
-  lengthScale: number = 30,
-  signalVar: number = 1.0,
-  noiseVar: number = 0.05
-): PressureGPPrediction {
-  const n = obs.length;
-  if (n === 0) {
-    return { mean: 0, std: Math.sqrt(signalVar), pressureGpa: targetPressure };
+  lengthScale: number,
+  signalVar: number,
+  noiseVar: number,
+  cacheKey?: string
+): { L: number[][]; alpha: number[]; yMean: number } {
+  if (cacheKey) {
+    const cached = gpCacheStore.get(cacheKey);
+    if (cached && cached.obsCount === obs.length &&
+        cached.lengthScale === lengthScale &&
+        cached.signalVar === signalVar &&
+        cached.noiseVar === noiseVar) {
+      return { L: cached.L, alpha: cached.alpha, yMean: cached.yMean };
+    }
   }
 
+  const n = obs.length;
   const yRaw = obs.map(o => o.tc);
-  const yMean = yRaw.reduce((s, v) => s + v, 0) / yRaw.length;
+  const yMean = yRaw.reduce((s, v) => s + v, 0) / n;
   const y = yRaw.map(v => v - yMean);
 
   const K: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
@@ -250,6 +296,28 @@ function gpPredict(
 
   const L = cholDecomp(K);
   const alpha = cholSolve(L, y);
+
+  if (cacheKey) {
+    gpCacheStore.set(cacheKey, { L, alpha, yMean, obsCount: n, lengthScale, signalVar, noiseVar });
+  }
+
+  return { L, alpha, yMean };
+}
+
+function gpPredict(
+  obs: PressureObservation[],
+  targetPressure: number,
+  lengthScale: number = 30,
+  signalVar: number = 1.0,
+  noiseVar: number = 0.05,
+  cacheKey?: string
+): PressureGPPrediction {
+  const n = obs.length;
+  if (n === 0) {
+    return { mean: 0, std: Math.sqrt(signalVar), pressureGpa: targetPressure };
+  }
+
+  const { L, alpha, yMean } = buildGPFactors(obs, lengthScale, signalVar, noiseVar, cacheKey);
 
   const kStar = new Array(n);
   for (let i = 0; i < n; i++) {
@@ -301,9 +369,10 @@ function expectedImprovement(
   targetPressure: number,
   bestTc: number,
   lengthScale: number,
-  xi: number = 0.5
+  xi: number = 0.5,
+  cacheKey?: string
 ): number {
-  const pred = gpPredict(obs, targetPressure, lengthScale);
+  const pred = gpPredict(obs, targetPressure, lengthScale, 1.0, 0.05, cacheKey);
   if (pred.std < 1e-8) return 0;
   const improvement = pred.mean - bestTc - xi;
   const z = improvement / pred.std;
@@ -375,7 +444,7 @@ export function optimizePressureForFormula(
 
       const pressurePenalty = candidateP / 500;
 
-      const ei = expectedImprovement(normalizedObs, candidateP, normalizedBestTc, ls, 0.01) - pressurePenalty * 0.1;
+      const ei = expectedImprovement(normalizedObs, candidateP, normalizedBestTc, ls, 0.01, `${formula}:norm`) - pressurePenalty * 0.1;
 
       acquisitionHistory.push({ pressure: candidateP, acquisition: ei });
 
@@ -402,6 +471,7 @@ export function optimizePressureForFormula(
       }
 
       ls = optimizeLengthScale(normalizedObs, normalizedSignalVar, noiseVar);
+      gpCacheStore.delete(`${formula}:norm`);
 
       addPressureObservation(formula, bestCandidate, interp.tc, interp.enthalpyStable, interp.enthalpy);
     } catch {}
@@ -413,7 +483,7 @@ export function optimizePressureForFormula(
 
   const scanStep = 5;
   for (let p = searchMin; p <= searchMax; p += scanStep) {
-    const pred = gpPredict(obs, p, finalLS);
+    const pred = gpPredict(obs, p, finalLS, 1.0, 0.05, `${formula}:final`);
     const stabProb = estimateStabilityProbability(obs, p);
     const penalizedTc = pred.mean * stabProb - (p / 500) * pred.mean;
     if (penalizedTc > optimalTc) {
@@ -422,7 +492,7 @@ export function optimizePressureForFormula(
     }
   }
 
-  const optPred = gpPredict(obs, optimalPressure, finalLS);
+  const optPred = gpPredict(obs, optimalPressure, finalLS, 1.0, 0.05, `${formula}:final`);
   const relStd = optPred.mean > 0 ? optPred.std / optPred.mean : 1;
   const confidence = Math.max(0, Math.min(1, 1 - relStd));
 
@@ -443,6 +513,9 @@ export function optimizePressureForFormula(
     observationsUsed: obs.length,
     method: "bayesian-ei-pressure-penalized",
   };
+
+  gpCacheStore.delete(`${formula}:norm`);
+  gpCacheStore.delete(`${formula}:final`);
 
   if (resultCache.size >= MAX_RESULTS_CACHE) {
     const firstKey = resultCache.keys().next().value;
@@ -502,4 +575,5 @@ export function getObservationCount(formula: string): number {
 
 export function clearBayesianPressureCache(): void {
   resultCache.clear();
+  gpCacheStore.clear();
 }
