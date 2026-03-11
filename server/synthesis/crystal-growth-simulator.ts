@@ -274,7 +274,8 @@ function estimateDeltaG(formula: string, materialClass: string, temperature: num
 export function simulateCrystalGrowth(
   formula: string,
   materialClass: string,
-  synthesisVector: Partial<SynthesisVector>
+  synthesisVector: Partial<SynthesisVector>,
+  targetApplication: "research" | "wire" | "thin-film" | "bulk" = "research"
 ): CrystalGrowthResult {
   growthStats.totalSimulations++;
 
@@ -320,15 +321,53 @@ export function simulateCrystalGrowth(
     notes.push(`Applied strain of ${sv.strain.toFixed(1)}% increased boundary density`);
   }
 
+  if (growthRate > 500) {
+    grainStructure.phaseHomogeneity *= 0.9;
+    notes.push("Very fast growth rate (>500) reduces phase homogeneity due to anti-site defects");
+  } else if (growthRate > 200) {
+    grainStructure.phaseHomogeneity *= 0.95;
+    notes.push("Fast growth rate may introduce point defects and stacking faults");
+  } else if (growthRate > 100) {
+    notes.push("Fast growth rate may introduce minor defects");
+  }
+
   const criticalCurrentImpact = assessCriticalCurrentImpact(grainStructure.grainSize, grainStructure.boundaryDensity, materialClass);
 
-  let qualityScore = 0;
-  qualityScore += grainStructure.phaseHomogeneity * 0.3;
-  qualityScore += Math.min(1, grainStructure.grainSize / 1000) * 0.25;
-  qualityScore += (grainStructure.grainOrientation === "single-crystal" ? 1 :
+  const orientationScore = grainStructure.grainOrientation === "single-crystal" ? 1 :
     grainStructure.grainOrientation === "epitaxial" ? 0.8 :
-    grainStructure.grainOrientation === "textured" ? 0.5 : 0.2) * 0.25;
-  qualityScore += nucleationProbability * 0.2;
+    grainStructure.grainOrientation === "textured" ? 0.5 : 0.2;
+
+  const grainSizeScore = Math.min(1, grainStructure.grainSize / 1000);
+  const invertedGrainSizeScore = Math.min(1, 100 / Math.max(1, grainStructure.grainSize));
+
+  let qualityScore = 0;
+  if (targetApplication === "wire") {
+    qualityScore += grainStructure.phaseHomogeneity * 0.25;
+    qualityScore += invertedGrainSizeScore * 0.30;
+    qualityScore += (grainStructure.grainOrientation === "textured" ? 1 :
+      grainStructure.grainOrientation === "epitaxial" ? 0.8 :
+      grainStructure.grainOrientation === "random" ? 0.4 :
+      grainStructure.grainOrientation === "single-crystal" ? 0.3 : 0.2) * 0.25;
+    qualityScore += nucleationProbability * 0.20;
+  } else if (targetApplication === "thin-film") {
+    qualityScore += grainStructure.phaseHomogeneity * 0.35;
+    qualityScore += (grainStructure.grainOrientation === "epitaxial" ? 1 :
+      grainStructure.grainOrientation === "single-crystal" ? 0.9 :
+      grainStructure.grainOrientation === "textured" ? 0.6 : 0.2) * 0.35;
+    qualityScore += grainSizeScore * 0.15;
+    qualityScore += nucleationProbability * 0.15;
+  } else if (targetApplication === "bulk") {
+    qualityScore += grainStructure.phaseHomogeneity * 0.35;
+    qualityScore += grainSizeScore * 0.20;
+    qualityScore += orientationScore * 0.20;
+    qualityScore += nucleationProbability * 0.15;
+    qualityScore += Math.min(1, criticalCurrentImpact.jcEstimate / 1e7) * 0.10;
+  } else {
+    qualityScore += grainStructure.phaseHomogeneity * 0.30;
+    qualityScore += grainSizeScore * 0.25;
+    qualityScore += orientationScore * 0.25;
+    qualityScore += nucleationProbability * 0.20;
+  }
   qualityScore = Math.min(1, qualityScore);
 
   if (qualityScore >= 0.8) growthStats.qualityDistribution.excellent++;
@@ -344,7 +383,6 @@ export function simulateCrystalGrowth(
   }
 
   if (nucleationProbability > 0.9) notes.push("High nucleation probability indicates easy crystal formation");
-  if (growthRate > 100) notes.push("Fast growth rate may introduce defects");
   if (growthRate < 1) notes.push("Slow growth rate favors high crystal quality");
 
   return {
