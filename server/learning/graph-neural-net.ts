@@ -12,6 +12,7 @@ export interface NodeFeature {
   valenceElectrons: number;
   mass: number;
   embedding: number[];
+  multiplicity: number;
 }
 
 export interface EdgeFeature {
@@ -591,6 +592,48 @@ const PROTOTYPE_COORDINATIONS: Record<string, PrototypeCoordination> = {
   },
 };
 
+function gcd(a: number, b: number): number {
+  a = Math.round(a); b = Math.round(b);
+  while (b) { const t = b; b = a % b; a = t; }
+  return Math.abs(a);
+}
+
+function normalizeFormulaCounts(counts: Record<string, number>): { normalized: Record<string, number>; multiplicities: Record<string, number> } {
+  const elements = Object.keys(counts);
+  const rounded = elements.map(el => Math.max(1, Math.round(counts[el])));
+  let g = rounded[0];
+  for (let i = 1; i < rounded.length; i++) g = gcd(g, rounded[i]);
+  if (g < 1) g = 1;
+
+  const normalized: Record<string, number> = {};
+  const multiplicities: Record<string, number> = {};
+  const MAX_NODES_PER_ELEMENT = 8;
+  for (let i = 0; i < elements.length; i++) {
+    const reduced = rounded[i] / g;
+    const nodeCount = Math.min(reduced, MAX_NODES_PER_ELEMENT);
+    const mult = rounded[i] / (g * nodeCount);
+    normalized[elements[i]] = nodeCount;
+    multiplicities[elements[i]] = mult;
+  }
+  return { normalized, multiplicities };
+}
+
+const SITE_TYPICAL_RADII: Record<string, Record<string, number>> = {
+  "Perovskite": { "A": 160, "B": 60, "O": 73 },
+  "Spinel": { "A": 65, "B": 65, "O": 73 },
+  "Heusler": { "A": 140, "B": 125, "C": 110 },
+  "Laves": { "A": 160, "B": 130 },
+  "MAX": { "M": 140, "A": 125, "X": 70 },
+};
+
+const SITE_TYPICAL_COORD: Record<string, Record<string, number>> = {
+  "Perovskite": { "A": 12, "B": 6, "O": 4 },
+  "Spinel": { "A": 4, "B": 6, "O": 4 },
+  "Heusler": { "A": 8, "B": 8, "C": 8 },
+  "Laves": { "A": 16, "B": 12 },
+  "MAX": { "M": 9, "A": 6, "X": 6 },
+};
+
 function assignSiteLabels(formula: string, prototype: string): Record<string, string> {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -600,10 +643,82 @@ function assignSiteLabels(formula: string, prototype: string): Record<string, st
   const siteLabels = protoInfo.siteLabels;
   const assignment: Record<string, string> = {};
 
+  if (elements.length <= 1 || siteLabels.length <= 1) {
+    for (let i = 0; i < elements.length; i++) {
+      assignment[elements[i]] = siteLabels[Math.min(i, siteLabels.length - 1)];
+    }
+    return assignment;
+  }
+
+  const typicalRadii = SITE_TYPICAL_RADII[prototype];
+  const typicalCoord = SITE_TYPICAL_COORD[prototype];
+
+  if (typicalRadii && elements.length <= siteLabels.length) {
+    const nEl = elements.length;
+    const nSites = siteLabels.length;
+    let bestAssignment: Record<string, string> = {};
+    let bestScore = -Infinity;
+
+    const permute = (remaining: string[], usedSites: Set<string>, current: Record<string, string>) => {
+      if (remaining.length === 0) {
+        let score = 0;
+        for (const [el, site] of Object.entries(current)) {
+          const data = getElementData(el);
+          const elRadius = data?.atomicRadius ?? 130;
+          const siteRadius = typicalRadii[site];
+          if (siteRadius) {
+            score -= Math.abs(elRadius - siteRadius) / 100;
+          }
+          const elEN = data?.paulingElectronegativity ?? 1.5;
+          const siteCoord = typicalCoord?.[site];
+          if (siteCoord) {
+            const elValence = data?.valenceElectrons ?? 2;
+            score -= Math.abs(elValence - siteCoord / 2) * 0.1;
+          }
+          if (protoInfo.coordinations[site]) {
+            score += 0.5;
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestAssignment = { ...current };
+        }
+        return;
+      }
+
+      const el = remaining[0];
+      const rest = remaining.slice(1);
+      for (const site of siteLabels) {
+        if (usedSites.has(site)) continue;
+        current[el] = site;
+        usedSites.add(site);
+        permute(rest, usedSites, current);
+        usedSites.delete(site);
+        delete current[el];
+      }
+
+      if (nEl < nSites) {
+        for (const site of siteLabels) {
+          if (!usedSites.has(site)) continue;
+          current[el] = site;
+          permute(rest, usedSites, current);
+          delete current[el];
+        }
+      }
+    };
+
+    if (nEl <= 5) {
+      permute(elements, new Set(), {});
+      if (Object.keys(bestAssignment).length > 0) return bestAssignment;
+    }
+  }
+
   const sorted = [...elements].sort((a, b) => {
     const dA = getElementData(a);
     const dB = getElementData(b);
-    return (dA?.paulingElectronegativity ?? 1.5) - (dB?.paulingElectronegativity ?? 1.5);
+    const radiusA = dA?.atomicRadius ?? 130;
+    const radiusB = dB?.atomicRadius ?? 130;
+    return radiusB - radiusA;
   });
 
   for (let i = 0; i < sorted.length && i < siteLabels.length; i++) {
@@ -617,8 +732,8 @@ function assignSiteLabels(formula: string, prototype: string): Record<string, st
 }
 
 export function buildPrototypeGraph(formula: string, prototype: string, pressureGpa?: number): CrystalGraph {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
+  const rawCounts = parseFormulaCounts(formula);
+  const elements = Object.keys(rawCounts);
   const protoInfo = PROTOTYPE_COORDINATIONS[prototype];
 
   if (!protoInfo) {
@@ -626,10 +741,12 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
   }
 
   const siteAssignment = assignSiteLabels(formula, prototype);
+  const { normalized, multiplicities } = normalizeFormulaCounts(rawCounts);
   const nodes: NodeFeature[] = [];
 
   for (const el of elements) {
-    const count = Math.round(counts[el]);
+    const count = normalized[el];
+    const mult = multiplicities[el];
     const data = getElementData(el);
     const atomicNumber = data?.atomicNumber ?? 30;
     const en = data?.paulingElectronegativity ?? 1.5;
@@ -639,12 +756,12 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
     const protoSymFeatures = getSymmetryAwareFeatures(undefined);
 
-    for (let i = 0; i < Math.min(count, 12); i++) {
+    for (let i = 0; i < count; i++) {
       const baseEmbedding = buildEnhancedEmbedding(el, data, atomicNumber);
       const embedding = baseEmbedding.slice(0, NODE_DIM - protoSymFeatures.length);
       embedding.push(...protoSymFeatures);
       while (embedding.length < NODE_DIM) embedding.push(0);
-      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding: embedding.slice(0, NODE_DIM) });
+      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding: embedding.slice(0, NODE_DIM), multiplicity: mult });
     }
   }
 
@@ -653,17 +770,19 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
       element: "X", atomicNumber: 1, electronegativity: 1.5,
       atomicRadius: 100, valenceElectrons: 1, mass: 10,
       embedding: initVector(NODE_DIM, 0.1),
+      multiplicity: 1,
     });
   }
 
   const edges: EdgeFeature[] = [];
+  const adjacencySets: Set<number>[] = nodes.map(() => new Set<number>());
   const adjacency: number[][] = nodes.map(() => []);
   const lp = protoInfo.latticeParams;
 
   let nodeOffset = 0;
   const elementRanges: Record<string, { start: number; end: number }> = {};
   for (const el of elements) {
-    const count = Math.min(Math.round(counts[el]), 12);
+    const count = normalized[el];
     elementRanges[el] = { start: nodeOffset, end: nodeOffset + count };
     nodeOffset += count;
   }
@@ -687,7 +806,7 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
           for (let j = nRange.start; j < nRange.end; j++) {
             if (i === j) continue;
-            if (adjacency[i].includes(j)) continue;
+            if (adjacencySets[i].has(j)) continue;
 
             const ri = nodes[i].atomicRadius / 100;
             const rj = nodes[j].atomicRadius / 100;
@@ -710,6 +829,8 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
             edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
             edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+            adjacencySets[i].add(j);
+            adjacencySets[j].add(i);
             adjacency[i].push(j);
             adjacency[j].push(i);
           }
@@ -901,13 +1022,15 @@ function getSymmetryAwareFeatures(spaceGroupName?: string, fracPosition?: [numbe
 }
 
 export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number): CrystalGraph {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
+  const rawCounts = parseFormulaCounts(formula);
+  const elements = Object.keys(rawCounts);
+  const { normalized, multiplicities } = normalizeFormulaCounts(rawCounts);
 
   const nodes: NodeFeature[] = [];
 
   for (const el of elements) {
-    const count = Math.round(counts[el]);
+    const count = normalized[el];
+    const mult = multiplicities[el];
     const data = getElementData(el);
     const atomicNumber = data?.atomicNumber ?? 30;
     const en = data?.paulingElectronegativity ?? 1.5;
@@ -918,12 +1041,12 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
     const spaceGroupName = structure?.spaceGroup ?? structure?.spacegroupSymbol;
     const symFeatures = getSymmetryAwareFeatures(spaceGroupName);
 
-    for (let i = 0; i < Math.min(count, 12); i++) {
+    for (let i = 0; i < count; i++) {
       const baseEmbedding = buildEnhancedEmbedding(el, data, atomicNumber);
       const embedding = baseEmbedding.slice(0, NODE_DIM - symFeatures.length);
       embedding.push(...symFeatures);
       while (embedding.length < NODE_DIM) embedding.push(0);
-      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding: embedding.slice(0, NODE_DIM) });
+      nodes.push({ element: el, atomicNumber, electronegativity: en, atomicRadius: radius, valenceElectrons: valence, mass, embedding: embedding.slice(0, NODE_DIM), multiplicity: mult });
     }
   }
 
@@ -932,6 +1055,7 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
       element: "X", atomicNumber: 1, electronegativity: 1.5,
       atomicRadius: 100, valenceElectrons: 1, mass: 10,
       embedding: initVector(NODE_DIM, 0.1),
+      multiplicity: 1,
     });
   }
 
@@ -1214,7 +1338,8 @@ function attentionPooling(graph: CrystalGraph, W_pool: number[][]): number[] {
     const e = [...node.embedding];
     while (e.length < HIDDEN_DIM) e.push(0);
     const attnVec = matVecMul(W_pool, e.slice(0, HIDDEN_DIM));
-    scores.push(attnVec.reduce((s, v) => s + v, 0));
+    const rawScore = attnVec.reduce((s, v) => s + v, 0);
+    scores.push(rawScore + Math.log(node.multiplicity ?? 1));
   }
 
   const attnWeights = softmax(scores);
@@ -1308,9 +1433,13 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const meanPool = initVector(HIDDEN_DIM);
   const maxPool = new Array(HIDDEN_DIM).fill(-Infinity);
 
+  let totalMultiplicity = 0;
+  for (const node of graph.nodes) totalMultiplicity += (node.multiplicity ?? 1);
+
   for (const node of graph.nodes) {
+    const w = (node.multiplicity ?? 1) / totalMultiplicity;
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      meanPool[k] += (node.embedding[k] ?? 0) / nNodes;
+      meanPool[k] += (node.embedding[k] ?? 0) * w;
       maxPool[k] = Math.max(maxPool[k], node.embedding[k] ?? 0);
     }
   }
