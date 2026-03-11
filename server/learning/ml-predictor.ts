@@ -1356,7 +1356,7 @@ export async function runMLPrediction(
           xgboostScore: c.xgb.score,
           neuralNetScore: null,
           ensembleScore,
-          roomTempViable: false,
+          roomTempViable: finalTc >= 293 && fbPressure < 50 && !isCorrelatedFB,
           status: "theoretical",
           notes: `[XGBoost-only fallback: NN skipped]${isCorrelatedFB ? ' [correlated: Allen-Dynes unreliable]' : ''} ${c.xgb.reasoning[0] || ""}`,
           electronPhononCoupling: c.features.electronPhononLambda,
@@ -1572,12 +1572,25 @@ export class PhysicsPredictor {
 
   private transferPriorLambda(features: MLFeatureVector): { value: number; uncertainty: number } {
     const lambda = features.electronPhononLambda;
-    const eta = features.avgSommerfeldGamma > 0
-      ? 0.3 + features.avgSommerfeldGamma * 0.05
-      : features.hasTransitionMetal ? 0.7 : 0.4;
+    let eta: number;
+    let uncertainty = 0.5;
+    const gamma = features.avgSommerfeldGamma;
+    const dos = features.dosAtEF;
+    if (gamma > 0 && dos > 0.1) {
+      const gamma0 = dos * 2.359;
+      const lambdaFromGamma = gamma0 > 0 ? (gamma / gamma0) - 1 : 0;
+      eta = Math.max(0.05, lambdaFromGamma);
+      uncertainty = 0.35;
+    } else if (dos > 0.1 && gamma > 0) {
+      eta = 0.3 + gamma * 0.05;
+      uncertainty = 0.55;
+    } else {
+      eta = features.hasTransitionMetal ? 0.7 : 0.4;
+      uncertainty = 0.6;
+    }
     const massWeight = features.maxAtomicMass > 0 ? Math.sqrt(50 / features.maxAtomicMass) : 1.0;
     const priorLambda = Math.max(0.05, Math.min(3.5, lambda > 0.1 ? lambda : eta * massWeight));
-    return { value: priorLambda, uncertainty: 0.5 };
+    return { value: priorLambda, uncertainty };
   }
 
   private transferPriorDOS(features: MLFeatureVector): { value: number; uncertainty: number } {
@@ -1610,16 +1623,18 @@ export class PhysicsPredictor {
 
   private transferPriorHull(features: MLFeatureVector): { value: number; uncertainty: number } {
     const formEnergy = features.formationEnergy;
+    const nEl = features.numElements;
     if (formEnergy !== null && formEnergy !== undefined) {
       const hull = formEnergy > 0 ? formEnergy * 0.5 : Math.abs(formEnergy) * 0.05;
-      return { value: Math.max(0, Math.min(1.0, hull)), uncertainty: 0.3 };
+      const uncertainty = nEl > 3 ? 0.7 : 0.3;
+      return { value: Math.max(0, Math.min(1.0, hull)), uncertainty };
     }
     const enSpread = features.enSpread;
-    const nEl = features.numElements;
     let priorHull = 0.1 + nEl * 0.02;
     if (enSpread > 2.0) priorHull += 0.05;
-    if (features.hasTransitionMetal && features.numElements <= 3) priorHull -= 0.03;
-    return { value: Math.max(0, Math.min(1.0, priorHull)), uncertainty: 0.5 };
+    if (features.hasTransitionMetal && nEl <= 3) priorHull -= 0.03;
+    const uncertainty = nEl > 3 ? 0.7 : 0.5;
+    return { value: Math.max(0, Math.min(1.0, priorHull)), uncertainty };
   }
 
   predict(features: MLFeatureVector): PhysicsPrediction {
