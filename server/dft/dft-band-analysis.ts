@@ -3,7 +3,7 @@ import type { FermiSurfaceResult, FermiPocket, NestingVector, FermiSurfaceMLFeat
 
 export interface DFTFermiPocket {
   index: number;
-  type: "electron" | "hole";
+  type: "path-electron" | "path-hole";
   bandIndex: number;
   crossingCount: number;
   kRangeMin: number;
@@ -270,7 +270,23 @@ export function computeFermiIsosurface(bandResult: DFTBandStructureResult): Ferm
   };
 }
 
-export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStrength: number): DFTTopologicalClassification {
+const CENTROSYMMETRIC_SG = new Set([
+  "p-1","p2/m","p21/m","c2/m","pmmm","pnma","cmcm","cmmm","fmmm","immm",
+  "p4/m","p42/m","p4/mmm","p4/nmm","p42/mnm","i4/m","i4/mmm","i41/amd",
+  "p-3","r-3","p-3m1","p-31m","r-3m","p6/m","p6/mmm","p63/mmc",
+  "pm-3","pn-3","fm-3","im-3","pm-3m","pn-3m","pm-3n","fm-3m","fm-3c",
+  "fd-3m","im-3m","ia-3","ia-3d","pa-3",
+  "p121/c1","p21/c","c2/c","pbca","pbcn","p42/nmc","r-3c","i41/a",
+  "cmce","cmca","fddd","p-1","i4/mcm","p63/m",
+]);
+
+function isCentrosymmetric(spaceGroup: string | undefined): boolean | null {
+  if (!spaceGroup) return null;
+  const sg = spaceGroup.toLowerCase().replace(/\s+/g, "");
+  return CENTROSYMMETRIC_SG.has(sg);
+}
+
+export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStrength: number, spaceGroup?: string): DFTTopologicalClassification {
   const chain: string[] = ["structure", "band-structure", "detect-crossings"];
   const evidence: string[] = [];
 
@@ -323,12 +339,22 @@ export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStren
   } else if (linearCrossings.length > 0 && linearCrossings.some(c => Math.abs(c.energy) < 0.2)) {
     const nearFermiLinear = linearCrossings.filter(c => Math.abs(c.energy) < 0.2);
 
-    if (weylPointCount > 0 && socStrength > 0.1) {
+    const centroSym = isCentrosymmetric(spaceGroup);
+    const canBeWeyl = centroSym === false;
+    const centroUnknown = centroSym === null;
+
+    if (weylPointCount > 0 && socStrength > 0.1 && canBeWeyl) {
       topologicalClass = "Weyl-semimetal";
       confidence = Math.min(0.9, 0.4 + weylPointCount * 0.15 + socStrength * 0.3);
       evidence.push(`${weylPointCount} Weyl-like crossing(s) with linear dispersion`);
+      evidence.push(`Non-centrosymmetric space group (${spaceGroup}) allows Weyl nodes`);
       if (socStrength > 0.3) evidence.push("Strong SOC lifts degeneracy");
-      chain.push("linear-crossing+SOC->Weyl");
+      chain.push("linear-crossing+SOC+broken-inversion->Weyl");
+    } else if (weylPointCount > 0 && socStrength > 0.1 && centroUnknown) {
+      topologicalClass = "Dirac-semimetal";
+      confidence = Math.min(0.75, 0.3 + weylPointCount * 0.12 + socStrength * 0.2);
+      evidence.push(`${weylPointCount} linear crossing(s) with SOC — classified as Dirac (space group unknown, cannot confirm broken inversion symmetry for Weyl)`);
+      chain.push("linear-crossing+SOC+unknown-SG->Dirac-conservative");
     } else {
       topologicalClass = "Dirac-semimetal";
       confidence = Math.min(0.85, 0.35 + nearFermiLinear.length * 0.12);
@@ -415,17 +441,32 @@ function computeZ2FromBands(bandResult: DFTBandStructureResult, topo: DFTTopolog
 function computeChiralWinding(crossings: CrossingDispersion[], bandResult: DFTBandStructureResult): number {
   if (crossings.length < 2) return 0;
 
-  let winding = 0;
   const sorted = [...crossings].sort((a, b) => a.kIndex - b.kIndex);
+  let signedSlopeSum = 0;
+  let slopeCount = 0;
 
-  for (let i = 1; i < sorted.length; i++) {
-    const slopeChange = sorted[i].velocity - sorted[i - 1].velocity;
-    if (slopeChange !== 0) {
-      winding += Math.sign(slopeChange);
+  for (const c of sorted) {
+    const bIdx = c.bandIndex;
+    const kIdx = c.kIndex;
+    const lo = Math.max(0, kIdx - 1);
+    const hi = Math.min(bandResult.eigenvalues.length - 1, kIdx + 1);
+    const eLo = bandResult.eigenvalues[lo]?.energies[bIdx];
+    const eHi = bandResult.eigenvalues[hi]?.energies[bIdx];
+    const kLo = bandResult.eigenvalues[lo]?.kDistance;
+    const kHi = bandResult.eigenvalues[hi]?.kDistance;
+
+    if (eLo !== undefined && eHi !== undefined && kLo !== undefined && kHi !== undefined) {
+      const dk = kHi - kLo;
+      if (Math.abs(dk) > 1e-8) {
+        const signedSlope = (eHi - eLo) / dk;
+        signedSlopeSum += Math.sign(signedSlope);
+        slopeCount++;
+      }
     }
   }
 
-  return Math.abs(winding) / Math.max(1, crossings.length);
+  if (slopeCount < 2) return 0;
+  return Math.abs(signedSlopeSum) / slopeCount;
 }
 
 export function extractFermiPockets(bandResult: DFTBandStructureResult): DFTFermiPocket[] {
@@ -454,7 +495,7 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult): DFTFerm
 
     if (crossings.length < 1) continue;
 
-    const type: "electron" | "hole" = aboveCount > belowCount ? "electron" : "hole";
+    const type: "path-electron" | "path-hole" = aboveCount > belowCount ? "path-electron" : "path-hole";
 
     const crossingFracs = bandEnergies.filter(e => Math.abs(e.energy) < 0.3);
     const volume = crossingFracs.length / bandEnergies.length;
@@ -597,8 +638,8 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
   const pockets = extractFermiPockets(bandResult);
   const nesting = computeDFTNesting(pockets, bandResult);
 
-  const electronPockets = pockets.filter(p => p.type === "electron");
-  const holePockets = pockets.filter(p => p.type === "hole");
+  const electronPockets = pockets.filter(p => p.type === "path-electron");
+  const holePockets = pockets.filter(p => p.type === "path-hole");
 
   const totalElectronVol = electronPockets.reduce((s, p) => s + p.volume, 0);
   const totalHoleVol = holePockets.reduce((s, p) => s + p.volume, 0);
@@ -624,10 +665,10 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
 
   const fermiPockets: FermiPocket[] = pockets.map(p => ({
     index: p.index,
-    type: p.type,
+    type: (p.type === "path-electron" ? "electron" : "hole") as "electron" | "hole",
     volume: p.volume,
     cylindricalCharacter: p.cylindricalCharacter,
-    orbitalCharacter: p.orbitalCharacter,
+    orbitalCharacter: { ...p.orbitalCharacter, f: 0 },
     bandIndex: p.bandIndex,
     avgVelocity: p.avgVelocity,
   }));
