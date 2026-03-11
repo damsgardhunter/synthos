@@ -93,7 +93,7 @@ function stageVerdict(score: number): "strong" | "moderate" | "weak" | "reject" 
   return "reject";
 }
 
-function runChemistryReasoning(formula: string): DeliberationStage {
+function runChemistryReasoning(formula: string, predictedTc?: number, mlFeatures?: any): DeliberationStage {
   const reasoning: string[] = [];
   let score = 0.5;
 
@@ -158,8 +158,20 @@ function runChemistryReasoning(formula: string): DeliberationStage {
   const totalAtoms = Array.from(elements.values()).reduce((s, n) => s + n, 0);
 
   if (hasH && hCount / totalAtoms > 0.5) {
-    score += 0.05;
-    reasoning.push(`Hydrogen-rich (${(hCount / totalAtoms * 100).toFixed(0)}% H) — favorable for phonon-mediated SC`);
+    const candidatePressure = mlFeatures?.kineticStability?.pressureGPa ?? mlFeatures?.pressureGPa ?? 0;
+    const isAmbientClaim = candidatePressure < 10;
+    const tc = predictedTc ?? 0;
+
+    if (isAmbientClaim && tc > 100) {
+      score -= 0.3;
+      reasoning.push(`Hydrogen-rich (${(hCount / totalAtoms * 100).toFixed(0)}% H) at ~${candidatePressure.toFixed(0)} GPa: high-Tc hydrides require >100 GPa for stabilization — ${tc}K at ambient is thermodynamically impossible`);
+    } else if (isAmbientClaim && tc > 30) {
+      score -= 0.15;
+      reasoning.push(`Hydrogen-rich (${(hCount / totalAtoms * 100).toFixed(0)}% H) at low pressure — Tc=${tc}K without high pressure is physically suspect`);
+    } else {
+      score += 0.05;
+      reasoning.push(`Hydrogen-rich (${(hCount / totalAtoms * 100).toFixed(0)}% H) — favorable for phonon-mediated SC`);
+    }
   }
 
   return {
@@ -186,16 +198,27 @@ function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any)
     dosAtFermi = Math.max(dosAtFermi, features.densityOfStatesAtFermi ?? 0);
   } catch {}
 
+  const elements = parseFormulaCounts(formula);
+  const totalAtoms = Math.max(1, Array.from(elements.values()).reduce((s, n) => s + n, 0));
+
   try {
     const electronic = computeElectronicStructure(formula);
     dosAtFermi = Math.max(dosAtFermi, electronic.densityOfStatesAtFermi);
     bandGap = electronic.bandGap;
+    if (bandGap > 0.1) {
+      score -= 0.5;
+      reasoning.push(`Insulating: bandGap=${bandGap.toFixed(2)}eV — no Fermi surface, superconductivity is impossible`);
+      return {
+        name: "Physics Merit",
+        score: Math.max(0, score),
+        weight: STAGE_WEIGHTS.physicsMerit,
+        reasoning,
+        verdict: "reject",
+      };
+    }
     if (electronic.metallicity > 0.7) {
       score += 0.1;
       reasoning.push(`Metallic character: ${(electronic.metallicity * 100).toFixed(0)}% — essential for SC`);
-    } else if (bandGap > 0.5) {
-      score -= 0.2;
-      reasoning.push(`Non-metallic: bandGap=${bandGap.toFixed(2)}eV — unfavorable for SC`);
     }
   } catch {}
 
@@ -212,12 +235,15 @@ function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any)
     reasoning.push(`Weak coupling: lambda=${lambda.toFixed(2)} (<0.5 — limited SC potential)`);
   }
 
-  if (dosAtFermi > 5.0) {
+  const dosPerAtom = dosAtFermi / totalAtoms;
+  if (dosPerAtom > 2.0) {
     score += 0.15;
-    reasoning.push(`High DOS at Fermi level: ${dosAtFermi.toFixed(1)} — strong N(Ef)`);
-  } else if (dosAtFermi > 2.0) {
+    reasoning.push(`High DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom (raw=${dosAtFermi.toFixed(1)}, ${totalAtoms} atoms) — strong N(Ef)`);
+  } else if (dosPerAtom > 0.8) {
     score += 0.05;
-    reasoning.push(`Moderate DOS at Fermi: ${dosAtFermi.toFixed(1)}`);
+    reasoning.push(`Moderate DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom (raw=${dosAtFermi.toFixed(1)}, ${totalAtoms} atoms)`);
+  } else if (dosAtFermi > 0) {
+    reasoning.push(`Low DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom — limited pairing potential`);
   }
 
   const tcNorm = Math.min(1.0, predictedTc / 300);
@@ -522,7 +548,7 @@ export async function deliberateOnCandidate(
 ): Promise<DeliberationResult> {
   const startTime = Date.now();
 
-  const chemistryStage = runChemistryReasoning(formula);
+  const chemistryStage = runChemistryReasoning(formula, predictedTc, mlFeatures);
   const physicsStage = runPhysicsMerit(formula, predictedTc, mlFeatures);
   const riskStage = runRiskAssessment(formula, predictedTc, mlFeatures);
 
