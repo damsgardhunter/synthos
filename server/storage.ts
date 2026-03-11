@@ -82,6 +82,7 @@ export interface IStorage {
   getNovelInsightsOnly(limit?: number): Promise<NovelInsight[]>;
   insertNovelInsight(ni: InsertNovelInsight): Promise<NovelInsight>;
   getNovelInsightCount(): Promise<number>;
+  appendFormulasToInsight(insightId: string, formulas: string[]): Promise<void>;
 
   insertResearchStrategy(strategy: InsertResearchStrategy): Promise<ResearchStrategy>;
   getLatestStrategy(): Promise<ResearchStrategy | undefined>;
@@ -464,6 +465,21 @@ export class DatabaseStorage implements IStorage {
   async getNovelInsightCount(): Promise<number> {
     const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(novelInsights);
     return Number(count);
+  }
+
+  async appendFormulasToInsight(insightId: string, formulas: string[]): Promise<void> {
+    if (formulas.length === 0) return;
+    try {
+      const existing = await db.select({ relatedFormulas: novelInsights.relatedFormulas })
+        .from(novelInsights).where(eq(novelInsights.id, insightId)).limit(1);
+      if (existing.length === 0) return;
+      const current = existing[0].relatedFormulas ?? [];
+      const merged = [...new Set([...current, ...formulas])];
+      if (merged.length === current.length) return;
+      await db.update(novelInsights)
+        .set({ relatedFormulas: merged })
+        .where(eq(novelInsights.id, insightId));
+    } catch {}
   }
 
   async insertResearchStrategy(strategy: InsertResearchStrategy): Promise<ResearchStrategy> {

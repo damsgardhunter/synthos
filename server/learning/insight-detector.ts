@@ -439,6 +439,36 @@ export async function computeInsightEmbedding(text: string): Promise<Float32Arra
   }
 }
 
+async function computeInsightEmbeddingsBatch(texts: string[]): Promise<(Float32Array | null)[]> {
+  if (texts.length === 0) return [];
+  if (texts.length === 1) {
+    const single = await computeInsightEmbedding(texts[0]);
+    return [single];
+  }
+  try {
+    const BATCH_SIZE = 50;
+    const results: (Float32Array | null)[] = new Array(texts.length).fill(null);
+    for (let start = 0; start < texts.length; start += BATCH_SIZE) {
+      const batch = texts.slice(start, start + BATCH_SIZE);
+      const response = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: batch,
+      });
+      for (let i = 0; i < response.data.length; i++) {
+        const vec = response.data[i]?.embedding;
+        if (vec) results[start + i] = new Float32Array(vec);
+      }
+    }
+    return results;
+  } catch {
+    const results: (Float32Array | null)[] = [];
+    for (const text of texts) {
+      results.push(await computeInsightEmbedding(text));
+    }
+    return results;
+  }
+}
+
 function addToEmbeddingCache(text: string, embedding: Float32Array): void {
   const key = embeddingCacheKey(text);
   if (embeddingCacheMap.has(key)) return;
@@ -516,8 +546,14 @@ export async function evaluateInsightNovelty(
     const text = insights[i];
     const lower = text.toLowerCase();
 
-    if (existingTexts.some(e => e === lower || levenshteinSimilarity(e, lower) > 0.70)) {
+    const levenMatch = existingInsights.find(e =>
+      e.insightText.toLowerCase() === lower || levenshteinSimilarity(e.insightText.toLowerCase(), lower) > 0.70
+    );
+    if (levenMatch) {
       exactDuplicates.add(i);
+      if (relatedFormulas && relatedFormulas.length > 0) {
+        storage.appendFormulasToInsight(levenMatch.id, relatedFormulas).catch(() => {});
+      }
       continue;
     }
 
@@ -613,9 +649,13 @@ export async function evaluateInsightNovelty(
 
   if (potentiallyNovel.length === 0) return { novel: 0, total: insights.length };
 
+  const batchTexts = potentiallyNovel.map(c => c.text);
+  const batchEmbeddings = await computeInsightEmbeddingsBatch(batchTexts);
+
   const afterEmbeddingFilter: { index: number; text: string; embedding: Float32Array | null }[] = [];
-  for (const candidate of potentiallyNovel) {
-    const embedding = await computeInsightEmbedding(candidate.text);
+  for (let ci = 0; ci < potentiallyNovel.length; ci++) {
+    const candidate = potentiallyNovel[ci];
+    const embedding = batchEmbeddings[ci];
     if (embedding) {
       const { isDuplicate, bestSimilarity, matchText } = isSemanticDuplicate(embedding, candidate.text);
       if (isDuplicate) {
