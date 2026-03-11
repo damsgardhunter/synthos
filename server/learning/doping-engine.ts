@@ -795,7 +795,15 @@ export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore
 
     const lightEls = elements.filter(e => LIGHT_ELEMENTS.includes(e));
     const lightFraction = lightEls.reduce((s, e) => s + (counts[e] ?? 0), 0) / totalAtoms;
-    const lightElementBonus = Math.min(1.0, lightFraction * 2.0);
+    const hFraction = (counts["H"] ?? 0) / totalAtoms;
+    let lightElementBonus: number;
+    if (hFraction > 0.3) {
+      const hBonus = Math.min(1.0, 0.4 + hFraction * 0.8);
+      const otherLightFrac = lightFraction - hFraction;
+      lightElementBonus = Math.min(1.5, hBonus + otherLightFrac * 1.5);
+    } else {
+      lightElementBonus = Math.min(1.0, lightFraction * 2.0);
+    }
 
     const layeredIndicators = ["Cu", "Fe", "Ni", "Co", "Mn"].filter(e => elements.includes(e));
     const hasOxygen = elements.includes("O");
@@ -827,9 +835,14 @@ export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore
       return (en < 1.2 && mass > 30) || LOOSELY_BONDED_INDICATORS.includes(e);
     });
     const looselyBondedFraction = looselyBonded.reduce((s, e) => s + (counts[e] ?? 0), 0) / totalAtoms;
-    const looselyBondedBonus = Math.min(0.8, looselyBondedFraction * 1.5);
+    let looselyBondedBonus = Math.min(0.8, looselyBondedFraction * 1.5);
 
-    const overallScore =
+    let cageRattlerSynergy = 0;
+    if (isCageLike && looselyBonded.length > 0) {
+      cageRattlerSynergy = Math.min(0.5, looselyBondedFraction * 2.0);
+    }
+
+    const rawScore =
       softModeFraction * 1.5 +
       imaginaryModeFlag * 0.8 +
       phononVariance * 1.2 +
@@ -837,7 +850,10 @@ export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore
       lightElementBonus * 0.7 +
       layeredStructureBonus * 0.6 +
       cageLatticeBonus * 0.5 +
-      looselyBondedBonus * 0.4;
+      looselyBondedBonus * 0.4 +
+      cageRattlerSynergy * 0.8;
+
+    const overallScore = 1.0 / (1.0 + Math.exp(-1.2 * (rawScore - 3.0)));
 
     const dosAtFermi = electronic.densityOfStatesAtFermi;
     const metallicity = electronic.metallicity;
@@ -847,12 +863,22 @@ export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore
     const correlationStrength = electronic.correlationStrength;
     const vanHoveProximity = electronic.vanHoveProximity;
 
+    const isMottInsulator = correlationStrength > 0.8 && metallicity < 0.3;
+    let correlationComponent: number;
+    if (isMottInsulator) {
+      correlationComponent = -0.05;
+    } else if (correlationStrength > 0.3 && correlationStrength < 0.8) {
+      correlationComponent = 0.15;
+    } else {
+      correlationComponent = correlationStrength * 0.05;
+    }
+
     const combinedElectronPhononScore =
       (dosAtFermi > 0 ? Math.min(1, dosAtFermi / 5.0) : 0) * 0.20 +
       metallicity * 0.15 +
       Math.min(1, lambda / 2.5) * 0.25 +
       nestingScore * 0.15 +
-      (correlationStrength > 0.3 && correlationStrength < 0.8 ? 0.15 : correlationStrength * 0.05) +
+      correlationComponent +
       vanHoveProximity * 0.10;
 
     const softPhononCount = Math.round(softModeFraction * totalAtoms * 3);
@@ -860,17 +886,19 @@ export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore
     const debyeT = phonon.debyeTemperature;
 
     let dynamicEffectStrength: "weak" | "moderate" | "strong" | "very-strong";
-    if (overallScore < 1.0) dynamicEffectStrength = "weak";
-    else if (overallScore < 2.5) dynamicEffectStrength = "moderate";
-    else if (overallScore < 4.0) dynamicEffectStrength = "strong";
+    if (overallScore < 0.25) dynamicEffectStrength = "weak";
+    else if (overallScore < 0.50) dynamicEffectStrength = "moderate";
+    else if (overallScore < 0.75) dynamicEffectStrength = "strong";
     else dynamicEffectStrength = "very-strong";
 
     let tcRelevance: string;
-    if (overallScore >= 4.0) {
+    if (isMottInsulator) {
+      tcRelevance = "High correlation with low metallicity -- likely Mott insulator, phonon-mediated SC suppressed";
+    } else if (overallScore >= 0.75) {
       tcRelevance = "Very strong dynamic lattice effects -- high phonon coupling potential, candidate warrants detailed Eliashberg analysis";
-    } else if (overallScore >= 2.5) {
+    } else if (overallScore >= 0.50) {
       tcRelevance = "Strong dynamic effects detected -- enhanced electron-phonon coupling likely, favorable for conventional SC";
-    } else if (overallScore >= 1.0) {
+    } else if (overallScore >= 0.25) {
       tcRelevance = "Moderate dynamic effects -- some phonon softening present, standard BCS regime expected";
     } else {
       tcRelevance = "Weak dynamic effects -- stiff lattice with limited phonon-mediated coupling potential";

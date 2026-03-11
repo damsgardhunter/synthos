@@ -725,8 +725,12 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       const anh = Math.min(1.0, phonon.anharmonicityIndex * 2.0);
       const lightEls = elements.filter((e: string) => ["H","He","Li","Be","B","C","N","O","F"].includes(e));
       const lightFrac = lightEls.reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms;
-      const leb = Math.min(1.0, lightFrac * 2.0);
-      return smf * 1.5 + imf * 0.8 + pv * 1.2 + anh * 1.0 + leb * 0.7;
+      const hFrac = (counts["H"] ?? 0) / totalAtoms;
+      const leb = hFrac > 0.3
+        ? Math.min(1.5, Math.min(1.0, 0.4 + hFrac * 0.8) + (lightFrac - hFrac) * 1.5)
+        : Math.min(1.0, lightFrac * 2.0);
+      const raw = smf * 1.5 + imf * 0.8 + pv * 1.2 + anh * 1.0 + leb * 0.7;
+      return 1.0 / (1.0 + Math.exp(-1.2 * (raw - 3.0)));
     })(),
     softPhononCount: Math.round(phonon.softModeScore * totalAtoms * 3),
     phononVarianceScore: phonon.maxPhononFrequency > 0 ? Math.min(1.0, ((phonon.maxPhononFrequency - phonon.logAverageFrequency) / phonon.maxPhononFrequency) * 1.5) : 0,
