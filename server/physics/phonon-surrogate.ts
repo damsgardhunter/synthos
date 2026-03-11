@@ -44,7 +44,7 @@ export interface PhononSurrogatePrediction {
   phononStability: boolean;
   stabilityProbability: number;
   confidence: number;
-  tier: "phonon-surrogate";
+  tier: "phonon-surrogate" | "physics-engine-fallback";
 }
 
 const FEATURE_NAMES = [
@@ -68,9 +68,15 @@ const FEATURE_NAMES = [
 ];
 
 let surrogateModels: PhononSurrogateModels | null = null;
+let surrogateDisabled = false;
 let lastTrainSize = 0;
+let lastKnownResultCount = 0;
 let totalPredictions = 0;
-let tierBreakdown = { hits: 0, misses: 0 };
+let tierBreakdown = { hits: 0, misses: 0, fallbacks: 0 };
+
+export function notifyNewPhysicsResult(): void {
+  lastKnownResultCount++;
+}
 
 function parseFormula(formula: string): string[] {
   const matches = formula.match(/[A-Z][a-z]?/g);
@@ -211,7 +217,7 @@ function buildTree(
   depth: number,
   maxDepth: number
 ): TreeNode | number {
-  if (depth >= maxDepth || indices.length < 4) {
+  if (depth >= maxDepth || indices.length < 10) {
     const sum = indices.reduce((s, i) => s + residuals[i], 0);
     return sum / indices.length;
   }
@@ -271,9 +277,9 @@ function trainGBM(
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
     const tree = buildTree(X, residuals, allIndices, 0, maxDepth);
-    if (typeof tree === "number" && Math.abs(tree) < 1e-6) break;
+    if (typeof tree === "number") break;
 
-    trees.push(typeof tree === "number" ? { featureIndex: 0, threshold: 0, left: tree, right: tree } : tree);
+    trees.push(tree);
 
     for (let i = 0; i < n; i++) {
       predictions[i] += learningRate * predictTree(tree, X[i]);
@@ -302,11 +308,51 @@ interface TrainingRow {
   phononStable: number;
 }
 
+const FAMILY_DEFAULTS: Record<string, { omegaLog: number; debyeTemp: number; maxFreq: number }> = {
+  superhydride: { omegaLog: 1200, debyeTemp: 2200, maxFreq: 3500 },
+  hydride:      { omegaLog: 800,  debyeTemp: 1500, maxFreq: 2000 },
+  cuprate:      { omegaLog: 250,  debyeTemp: 400,  maxFreq: 600 },
+  pnictide:     { omegaLog: 200,  debyeTemp: 300,  maxFreq: 450 },
+  boride:       { omegaLog: 500,  debyeTemp: 900,  maxFreq: 1200 },
+  default:      { omegaLog: 200,  debyeTemp: 300,  maxFreq: 500 },
+};
+
+function classifyPhononFamily(formula: string): string {
+  const el = parseFormula(formula);
+  const counts = parseFormulaCounts(formula);
+  const total = Object.values(counts).reduce((s, n) => s + n, 0);
+  const hCount = counts["H"] || 0;
+  const hRatio = hCount / Math.max(1, total - hCount);
+  if (hRatio >= 6) return "superhydride";
+  if (hCount > 0 && hRatio >= 1) return "hydride";
+  if (el.includes("Cu") && el.includes("O")) return "cuprate";
+  if (el.some(e => ["As", "P", "Sb"].includes(e)) && el.includes("Fe")) return "pnictide";
+  if (el.includes("B") && !el.includes("O")) return "boride";
+  return "default";
+}
+
+function familyImputeOmegaLog(formula: string, raw: number): number {
+  if (raw > 0) return raw;
+  return (FAMILY_DEFAULTS[classifyPhononFamily(formula)] || FAMILY_DEFAULTS.default).omegaLog;
+}
+
+function familyImputeDebye(formula: string, raw: number): number {
+  if (raw > 50) return raw;
+  return (FAMILY_DEFAULTS[classifyPhononFamily(formula)] || FAMILY_DEFAULTS.default).debyeTemp;
+}
+
+function familyImputeMaxFreq(formula: string, raw: number): number {
+  if (raw > 0) return raw;
+  return (FAMILY_DEFAULTS[classifyPhononFamily(formula)] || FAMILY_DEFAULTS.default).maxFreq;
+}
+
 function buildTrainingData(): TrainingRow[] {
   const rows: TrainingRow[] = [];
   const seen = new Set<string>();
 
   const physicsResults = getAllPhysicsResults();
+  lastKnownResultCount = physicsResults.length;
+
   for (const result of physicsResults) {
     if (result.omegaLog <= 0 && result.tc <= 0) continue;
     if (seen.has(result.formula)) continue;
@@ -319,9 +365,9 @@ function buildTrainingData(): TrainingRow[] {
 
       rows.push({
         features: vec,
-        omegaLog: result.omegaLog > 0 ? result.omegaLog : 100,
-        debyeTemp: feats.debyeTemp > 0 ? feats.debyeTemp : 300,
-        maxPhononFreq: result.omega2 > 0 ? result.omega2 * 1.5 : 500,
+        omegaLog: familyImputeOmegaLog(result.formula, result.omegaLog),
+        debyeTemp: familyImputeDebye(result.formula, feats.debyeTemp),
+        maxPhononFreq: familyImputeMaxFreq(result.formula, result.omega2 > 0 ? result.omega2 * 1.5 : 0),
         phononStable: result.phononStable ? 1 : 0,
       });
     } catch {
@@ -344,9 +390,9 @@ function buildTrainingData(): TrainingRow[] {
 
       rows.push({
         features: vec,
-        omegaLog: phonon.logAverageFrequency > 0 ? phonon.logAverageFrequency : 100,
-        debyeTemp: phonon.debyeTemperature > 0 ? phonon.debyeTemperature : 300,
-        maxPhononFreq: phonon.maxPhononFrequency > 0 ? phonon.maxPhononFrequency : 500,
+        omegaLog: familyImputeOmegaLog(entry.formula, phonon.logAverageFrequency),
+        debyeTemp: familyImputeDebye(entry.formula, phonon.debyeTemperature),
+        maxPhononFreq: familyImputeMaxFreq(entry.formula, phonon.maxPhononFrequency),
         phononStable: phonon.hasImaginaryModes ? 0 : 1,
       });
     } catch {
@@ -391,6 +437,18 @@ export function trainPhononSurrogate(): void {
   const maxFreqModel = trainGBM(X, yMaxFreq, 120, 0.08, 4);
   const stabilityModel = trainGBM(X, yStability, 100, 0.05, 3);
 
+  const omegaLogMAE = computeMAE(omegaLogModel, X, yOmegaLog);
+  const meanOmegaLog = yOmegaLog.reduce((s, v) => s + v, 0) / yOmegaLog.length;
+  const omegaLogRelError = meanOmegaLog > 0 ? omegaLogMAE / meanOmegaLog : 1;
+
+  if (omegaLogRelError > 0.20) {
+    surrogateDisabled = true;
+    surrogateModels = null;
+    lastTrainSize = rows.length;
+    return;
+  }
+
+  surrogateDisabled = false;
   surrogateModels = {
     omegaLog: omegaLogModel,
     debyeTemp: debyeTempModel,
@@ -399,7 +457,7 @@ export function trainPhononSurrogate(): void {
     trainedAt: Date.now(),
     datasetSize: rows.length,
     metrics: {
-      omegaLogMAE: computeMAE(omegaLogModel, X, yOmegaLog),
+      omegaLogMAE,
       debyeTempMAE: computeMAE(debyeTempModel, X, yDebyeTemp),
       maxFreqMAE: computeMAE(maxFreqModel, X, yMaxFreq),
       stabilityAccuracy: computeAccuracy(stabilityModel, X, yStability),
@@ -411,9 +469,8 @@ export function trainPhononSurrogate(): void {
 
 function shouldRetrain(): boolean {
   if (!surrogateModels) return true;
-  const currentSize = getAllPhysicsResults().length;
-  if (currentSize - lastTrainSize >= 15) return true;
-  if (Date.now() - surrogateModels.trainedAt > 30 * 60 * 1000 && currentSize > lastTrainSize) return true;
+  if (lastKnownResultCount - lastTrainSize >= 15) return true;
+  if (Date.now() - surrogateModels.trainedAt > 30 * 60 * 1000 && lastKnownResultCount > lastTrainSize) return true;
   return false;
 }
 
@@ -454,7 +511,7 @@ export function predictPhononProperties(formula: string, pressure: number = 0): 
     } catch {}
   }
 
-  tierBreakdown.misses++;
+  tierBreakdown.fallbacks++;
   try {
     const electronic = computeElectronicStructure(formula);
     const phonon = computePhononSpectrum(formula, electronic);
@@ -466,17 +523,17 @@ export function predictPhononProperties(formula: string, pressure: number = 0): 
       phononStability: !phonon.hasImaginaryModes,
       stabilityProbability: phonon.hasImaginaryModes ? 0.2 : 0.8,
       confidence: 0.3,
-      tier: "phonon-surrogate",
+      tier: "physics-engine-fallback",
     };
   } catch {
     return {
-      omegaLog: 100,
-      debyeTemp: 300,
-      maxPhononFreq: 500,
+      omegaLog: familyImputeOmegaLog(formula, 0),
+      debyeTemp: familyImputeDebye(formula, 0),
+      maxPhononFreq: familyImputeMaxFreq(formula, 0),
       phononStability: true,
       stabilityProbability: 0.5,
       confidence: 0.1,
-      tier: "phonon-surrogate",
+      tier: "physics-engine-fallback",
     };
   }
 }
@@ -484,6 +541,7 @@ export function predictPhononProperties(formula: string, pressure: number = 0): 
 export function getPhononSurrogateStats() {
   return {
     modelTrained: surrogateModels !== null,
+    surrogateDisabled,
     datasetSize: surrogateModels?.datasetSize ?? 0,
     trainedAt: surrogateModels?.trainedAt ?? 0,
     metrics: surrogateModels?.metrics ?? { omegaLogMAE: 0, debyeTempMAE: 0, maxFreqMAE: 0, stabilityAccuracy: 0 },
