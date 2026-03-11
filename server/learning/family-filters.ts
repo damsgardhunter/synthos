@@ -335,13 +335,13 @@ function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFi
   let pass = true;
 
   const KAGOME_METALS = ["V", "Ti", "Cr", "Mn", "Fe", "Co", "Ni"];
-  const PNICTOGEN_ELEMENTS = ["Sb", "Bi", "Sn", "Ge", "As"];
+  const SUBLATTICE_ELEMENTS = ["Sb", "Bi", "Sn", "Ge", "As", "P", "S", "Se", "Te"];
 
   const kagomeMetalCount = elements
     .filter(e => KAGOME_METALS.includes(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
-  const pnictogenCount = elements
-    .filter(e => PNICTOGEN_ELEMENTS.includes(e))
+  const sublatticeCount = elements
+    .filter(e => SUBLATTICE_ELEMENTS.includes(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
 
   if (kagomeMetalCount >= 3) {
@@ -352,11 +352,11 @@ function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFi
     reasons.push(`Kagome metal count = ${kagomeMetalCount} < 3 (insufficient frustrated lattice sites)`);
   }
 
-  if (pnictogenCount >= 4) {
+  if (sublatticeCount >= 4) {
     score += 0.20;
-    reasons.push(`Pnictogen/metalloid count = ${pnictogenCount} >= 4 (adequate sublattice)`);
+    reasons.push(`Sublattice element count = ${sublatticeCount} >= 4 (adequate pnictogen/chalcogen/metalloid sublattice)`);
   } else {
-    reasons.push(`Pnictogen/metalloid count = ${pnictogenCount} < 4 (sparse sublattice)`);
+    reasons.push(`Sublattice element count = ${sublatticeCount} < 4 (sparse sublattice)`);
   }
 
   if (features.dosAtEF > 2.0) {
@@ -410,9 +410,23 @@ function applyMixedMechanismFilter(formula: string, features: MLFeatureVector): 
     .filter(e => MAGNETIC_TM.includes(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
 
-  if (magneticCount >= 1) {
+  const ALL_TM = ["Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
+    "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"];
+  const cationCount = elements
+    .filter(e => ALL_TM.includes(e) || (getElementData(e)?.paulingElectronegativity ?? 3) < 2.0)
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const magneticSiteFraction = cationCount > 0 ? magneticCount / cationCount : 0;
+
+  if (magneticCount >= 1 && magneticSiteFraction <= 0.25) {
     score += 0.25;
-    reasons.push(`Magnetic TM count = ${magneticCount} >= 1 (Fe/Ni/Co/Cu present for spin fluctuations)`);
+    reasons.push(`Magnetic cation-site fraction = ${(magneticSiteFraction * 100).toFixed(0)}% <= 25% (near QCP, spin fluctuations active)`);
+  } else if (magneticCount >= 1 && magneticSiteFraction <= 0.50) {
+    score += 0.10;
+    reasons.push(`Magnetic cation-site fraction = ${(magneticSiteFraction * 100).toFixed(0)}% in 25-50% (moderate magnetism, reduced bonus)`);
+  } else if (magneticCount >= 1) {
+    score -= 0.10;
+    reasons.push(`Magnetic cation-site fraction = ${(magneticSiteFraction * 100).toFixed(0)}% > 50% (possible static magnetism risk, penalized)`);
   } else {
     pass = false;
     reasons.push(`No magnetic transition metals (Fe/Ni/Co/Cu) detected`);
@@ -553,8 +567,18 @@ function applyLayeredPnictideFilter(formula: string, features: MLFeatureVector):
   }
 
   if (spacerCount >= 1) {
-    score += 0.15;
-    reasons.push(`Spacer/charge reservoir layer present (count=${spacerCount})`);
+    const activeLayerCount = tmCount + pnCount;
+    const layerRatio = activeLayerCount / spacerCount;
+    if (layerRatio >= 1.0 && layerRatio <= 4.0) {
+      score += 0.15;
+      reasons.push(`Spacer layer present with valid ratio (TM+Pn)/Spacer = ${layerRatio.toFixed(1)} in [1.0, 4.0] (1111/122-type)`);
+    } else if (layerRatio > 4.0) {
+      score += 0.05;
+      reasons.push(`Spacer present but (TM+Pn)/Spacer = ${layerRatio.toFixed(1)} > 4.0 (spacer-deficient, reduced bonus)`);
+    } else {
+      score -= 0.10;
+      reasons.push(`Spacer-dominated: (TM+Pn)/Spacer = ${layerRatio.toFixed(1)} < 1.0 (likely spacer with TM impurities, not layered pnictide)`);
+    }
   } else {
     reasons.push(`No spacer layer detected`);
   }
