@@ -1168,14 +1168,13 @@ function deterministicHash(s: string): number {
 }
 const heldOutFormulas = new Set(
   SUPERCON_TRAINING_DATA
-    .filter(e => e.isSuperconductor)
     .filter(e => (deterministicHash(e.formula) % 100) < (VALIDATION_FRACTION * 100))
     .map(e => e.formula)
 );
 
 function validateOnHeldOut(): { r2: number; mse: number } {
   const heldOut = SUPERCON_TRAINING_DATA.filter(
-    e => e.isSuperconductor && heldOutFormulas.has(e.formula)
+    e => heldOutFormulas.has(e.formula)
   );
   if (heldOut.length < 5) return validateModel();
 
@@ -1206,7 +1205,7 @@ async function retrainGNNWithEnrichedData(
   const maeBefore = Math.sqrt(validationBefore.mse);
 
   const trainingData = SUPERCON_TRAINING_DATA
-    .filter(e => e.isSuperconductor && !heldOutFormulas.has(e.formula))
+    .filter(e => !heldOutFormulas.has(e.formula))
     .map(e => ({
       formula: e.formula,
       tc: e.tc,
@@ -1260,7 +1259,7 @@ async function retrainGNNWithEnrichedData(
     }
   } catch (e: any) { console.error("[ActiveLearning] enrichment error:", e?.message?.slice(0, 200)); }
 
-  const superconCount = SUPERCON_TRAINING_DATA.filter(e => e.isSuperconductor).length;
+  const superconCount = SUPERCON_TRAINING_DATA.filter(e => !heldOutFormulas.has(e.formula)).length;
   const enrichedCount = trainingData.length - superconCount;
   const dftDatasetForVersion = getDFTTrainingDataset();
   const dftCount = dftDatasetForVersion.length;
@@ -1385,7 +1384,7 @@ export async function runActiveLearningCycle(
   }
 
   const DISORDER_FRACTIONS = [0.02, 0.05, 0.10];
-  const disorderTopN = Math.min(5, selected.length);
+  const disorderTopN = Math.min(3, selected.length);
   let disorderVariantsEvaluated = 0;
   let disorderBestBoost = 0;
   let disorderBestFormula = "";
@@ -1394,8 +1393,9 @@ export async function runActiveLearningCycle(
     const { candidate } = ranked;
     try {
       const suggestions = suggestDisorders(candidate.formula);
-      const topSuggestions = suggestions.slice(0, 3);
+      const topSuggestions = suggestions.slice(0, 2);
       let bestVariantTc = candidate.predictedTc ?? 0;
+      const baseFeatures = ranked.cachedFeatures ?? extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
 
       for (const spec of topSuggestions) {
         for (const frac of DISORDER_FRACTIONS) {
@@ -1417,8 +1417,8 @@ export async function runActiveLearningCycle(
               };
 
               const features = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, disorderCtx);
-              const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
-              const variantTc = (xgbResult as any).tcPredicted ?? (candidate.predictedTc ?? 0) * variant.tcModifierEstimate;
+              const gb = gbPredict(features, candidate.formula);
+              const variantTc = gb.tcPredicted > 0 ? gb.tcPredicted : (candidate.predictedTc ?? 0) * variant.tcModifierEstimate;
 
               if (variantTc > bestVariantTc) {
                 bestVariantTc = variantTc;
@@ -1439,7 +1439,7 @@ export async function runActiveLearningCycle(
     emit("log", {
       phase: "active-learning",
       event: "Disorder variant exploration",
-      detail: `Evaluated ${disorderVariantsEvaluated} disorder variants for ${disorderTopN} candidates. ` +
+      detail: `Evaluated ${disorderVariantsEvaluated} disorder variants for top ${disorderTopN} candidates. ` +
         (disorderBestBoost > 1.0
           ? `Best boost: ${disorderBestFormula} (${((disorderBestBoost - 1) * 100).toFixed(1)}% Tc increase)`
           : "No significant Tc improvement found from disorder"),
