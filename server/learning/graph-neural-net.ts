@@ -37,9 +37,24 @@ export interface CrystalGraph {
   edges: EdgeFeature[];
   threeBodyFeatures: ThreeBodyFeature[];
   adjacency: number[][];
+  edgeIndex: (EdgeFeature | null)[];
   formula: string;
   prototype?: string;
   pressureGpa?: number;
+}
+
+function buildEdgeIndex(nodes: NodeFeature[], edges: EdgeFeature[]): (EdgeFeature | null)[] {
+  const n = nodes.length;
+  const idx: (EdgeFeature | null)[] = new Array(n * n).fill(null);
+  for (const edge of edges) {
+    const k = edge.source * n + edge.target;
+    if (!idx[k]) idx[k] = edge;
+  }
+  return idx;
+}
+
+function getEdgeFromIndex(index: (EdgeFeature | null)[], n: number, i: number, j: number): EdgeFeature | null {
+  return index[i * n + j] ?? index[j * n + i];
 }
 
 interface GNNWeights {
@@ -919,17 +934,26 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
-      const j = (i + 1) % nodes.length;
-      const edgeFeats = buildDefaultEdgeFeatures();
-      edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
-      edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
-      adjacency[i].push(j);
-      adjacency[j].push(i);
+      for (let j = i + 1; j < nodes.length; j++) {
+        const ri = nodes[i].atomicRadius / 100;
+        const rj = nodes[j].atomicRadius / 100;
+        const distance = (ri + rj) * 1.1;
+        const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
+        const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
+        const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
+        const ionicCharacter = Math.min(1.0, enDiff / 2.5);
+        const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+        edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+        edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+        adjacency[i].push(j);
+        adjacency[j].push(i);
+      }
     }
   }
 
-  const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, formula, prototype });
-  return { nodes, edges, threeBodyFeatures, adjacency, formula, prototype, pressureGpa };
+  const edgeIndex = buildEdgeIndex(nodes, edges);
+  const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, prototype });
+  return { nodes, edges, threeBodyFeatures, adjacency, edgeIndex, formula, prototype, pressureGpa };
 }
 
 function computeStressDescriptor(atomicNumber: number, bulkModulus: number, mass: number): number {
@@ -959,14 +983,10 @@ function canonicalEdgeKey(a: number, b: number): number {
 
 function compute3BodyFeatures(graph: CrystalGraph): ThreeBodyFeature[] {
   const features: ThreeBodyFeature[] = [];
-  const edgeMap = new Map<number, number>();
+  const nNodes = graph.nodes.length;
+  const ei = graph.edgeIndex;
 
-  for (const edge of graph.edges) {
-    const key = canonicalEdgeKey(edge.source, edge.target);
-    if (!edgeMap.has(key)) edgeMap.set(key, edge.distance);
-  }
-
-  for (let center = 0; center < graph.nodes.length; center++) {
+  for (let center = 0; center < nNodes; center++) {
     const neighbors = graph.adjacency[center];
     if (neighbors.length < 2) continue;
 
@@ -974,9 +994,12 @@ function compute3BodyFeatures(graph: CrystalGraph): ThreeBodyFeature[] {
       for (let b = a + 1; b < neighbors.length; b++) {
         const n1 = neighbors[a];
         const n2 = neighbors[b];
-        const d1 = edgeMap.get(canonicalEdgeKey(center, n1)) ?? 2.5;
-        const d2 = edgeMap.get(canonicalEdgeKey(center, n2)) ?? 2.5;
-        const d12 = edgeMap.get(canonicalEdgeKey(n1, n2)) ?? Math.sqrt(d1 * d1 + d2 * d2);
+        const e1 = getEdgeFromIndex(ei, nNodes, center, n1);
+        const e2 = getEdgeFromIndex(ei, nNodes, center, n2);
+        const e12 = getEdgeFromIndex(ei, nNodes, n1, n2);
+        const d1 = e1?.distance ?? 2.5;
+        const d2 = e2?.distance ?? 2.5;
+        const d12 = e12?.distance ?? Math.sqrt(d1 * d1 + d2 * d2);
 
         let cosAngle = (d1 * d1 + d2 * d2 - d12 * d12) / (2 * d1 * d2);
         cosAngle = Math.max(-1, Math.min(1, cosAngle));
@@ -995,11 +1018,7 @@ function threeBodyInteractionLayer(
   W_3body_update: number[][],
 ): number[][] {
   const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => {
-    const e = [...n.embedding];
-    while (e.length < HIDDEN_DIM) e.push(0);
-    return e.slice(0, HIDDEN_DIM);
-  });
+  const embeddings = graph.nodes.map(n => n.embedding);
 
   const threeBodyAgg: number[][] = embeddings.map(() => initVector(HIDDEN_DIM));
 
@@ -1041,9 +1060,7 @@ function threeBodyInteractionLayer(
   }
 
   for (let i = 0; i < nNodes; i++) {
-    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
-    while (stored.length < HIDDEN_DIM) stored.push(0);
-    graph.nodes[i].embedding = stored;
+    graph.nodes[i].embedding = newEmbeddings[i];
   }
 
   return newEmbeddings;
@@ -1261,16 +1278,26 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
 
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
-      const j = (i + 1) % nodes.length;
-      const edgeFeats = buildDefaultEdgeFeatures();
-      edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
-      edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
-      adjacency[i].push(j);
-      adjacency[j].push(i);
+      for (let j = i + 1; j < nodes.length; j++) {
+        const ri = nodes[i].atomicRadius / 100;
+        const rj = nodes[j].atomicRadius / 100;
+        const pScale = pressureDistanceScale(pressureGpa ?? 0);
+        const distance = (ri + rj) * 1.1 * pScale;
+        const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
+        const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
+        const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
+        const ionicCharacter = Math.min(1.0, enDiff / 2.5);
+        const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+        edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+        edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+        adjacency[i].push(j);
+        adjacency[j].push(i);
+      }
     }
   }
 
-  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, formula, pressureGpa };
+  const edgeIndex = buildEdgeIndex(nodes, edges);
+  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, pressureGpa };
   partialGraph.threeBodyFeatures = compute3BodyFeatures(partialGraph);
   return partialGraph;
 }
@@ -1283,17 +1310,7 @@ export function cgcnnConvolutionLayer(
   b_value: number[],
 ): number[][] {
   const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => {
-    const e = [...n.embedding];
-    while (e.length < HIDDEN_DIM) e.push(0);
-    return e.slice(0, HIDDEN_DIM);
-  });
-
-  const edgeMap = new Map<number, EdgeFeature>();
-  for (const edge of graph.edges) {
-    const key = canonicalEdgeKey(edge.source, edge.target);
-    if (!edgeMap.has(key)) edgeMap.set(key, edge);
-  }
+  const embeddings = graph.nodes.map(n => n.embedding);
 
   const newEmbeddings: number[][] = [];
 
@@ -1308,7 +1325,7 @@ export function cgcnnConvolutionLayer(
     let totalWeight = 0;
 
     for (const j of neighbors) {
-      const edgeFeat = edgeMap.get(canonicalEdgeKey(i, j));
+      const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
       const distance = edgeFeat?.distance ?? 2.5;
       const cutoffWeight = cosineCutoff(distance);
       if (cutoffWeight <= 0) continue;
@@ -1352,9 +1369,7 @@ export function cgcnnConvolutionLayer(
   }
 
   for (let i = 0; i < nNodes; i++) {
-    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
-    while (stored.length < HIDDEN_DIM) stored.push(0);
-    graph.nodes[i].embedding = stored;
+    graph.nodes[i].embedding = newEmbeddings[i];
   }
 
   return newEmbeddings;
@@ -1369,47 +1384,37 @@ export function attentionMessagePassingLayer(
   useLeakyMsg: boolean = false,
 ): number[][] {
   const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => [...n.embedding]);
-
-  const padded = embeddings.map(e => {
-    while (e.length < HIDDEN_DIM) e.push(0);
-    return e.slice(0, HIDDEN_DIM);
-  });
+  const embeddings = graph.nodes.map(n => n.embedding);
 
   const newEmbeddings: number[][] = [];
   const updateActivation = useLeakyMsg ? leakyRelu : relu;
 
-  const edgeFeatMap = new Map<number, number[]>();
-  for (const edge of graph.edges) {
-    const ek = canonicalEdgeKey(edge.source, edge.target);
-    if (!edgeFeatMap.has(ek)) edgeFeatMap.set(ek, edge.features);
-  }
-
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
     if (neighbors.length === 0) {
-      newEmbeddings.push([...padded[i]]);
+      newEmbeddings.push([...embeddings[i]]);
       continue;
     }
 
-    const query = layerNorm(matVecMul(W_query, padded[i]));
+    const query = layerNorm(matVecMul(W_query, embeddings[i]));
 
     const attentionScores: number[] = [];
     const messages: number[][] = [];
 
     for (const j of neighbors) {
-      const key = layerNorm(matVecMul(W_key, padded[j]));
+      const key = layerNorm(matVecMul(W_key, embeddings[j]));
       let score = dotProduct(query, key);
 
-      const edgeFeats = edgeFeatMap.get(canonicalEdgeKey(i, j));
-      if (edgeFeats) {
+      const edge = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
+      if (edge) {
+        const edgeFeats = edge.features;
         for (let ef = 0; ef < edgeFeats.length && ef < HIDDEN_DIM; ef++) {
           score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
         }
       }
 
       attentionScores.push(score);
-      messages.push(matVecMul(W_message, padded[j]));
+      messages.push(matVecMul(W_message, embeddings[j]));
     }
 
     const attentionWeights = softmax(attentionScores);
@@ -1422,15 +1427,13 @@ export function attentionMessagePassingLayer(
       }
     }
 
-    const combined = [...padded[i], ...aggMessage];
+    const combined = [...embeddings[i], ...aggMessage];
     const updated = updateActivation(matVecMul(W_update, combined));
     newEmbeddings.push(updated);
   }
 
   for (let i = 0; i < nNodes; i++) {
-    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
-    while (stored.length < HIDDEN_DIM) stored.push(0);
-    graph.nodes[i].embedding = stored;
+    graph.nodes[i].embedding = newEmbeddings[i];
   }
 
   return newEmbeddings;
@@ -1442,40 +1445,33 @@ export function messagePassingLayer(
   W_update: number[][]
 ): number[][] {
   const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => [...n.embedding]);
-
-  const padded = embeddings.map(e => {
-    while (e.length < HIDDEN_DIM) e.push(0);
-    return e.slice(0, HIDDEN_DIM);
-  });
+  const embeddings = graph.nodes.map(n => n.embedding);
 
   const newEmbeddings: number[][] = [];
 
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
     if (!neighbors || neighbors.length === 0) {
-      newEmbeddings.push([...padded[i]]);
+      newEmbeddings.push([...embeddings[i]]);
       continue;
     }
 
     const aggMessage = initVector(HIDDEN_DIM);
     const nCount = Math.max(1, neighbors.length);
     for (const j of neighbors) {
-      const msg = matVecMul(W_message, padded[j]);
+      const msg = matVecMul(W_message, embeddings[j]);
       for (let k = 0; k < HIDDEN_DIM; k++) {
         aggMessage[k] += msg[k] / nCount;
       }
     }
 
-    const combined = [...padded[i], ...aggMessage];
+    const combined = [...embeddings[i], ...aggMessage];
     const updated = relu(matVecMul(W_update, combined));
     newEmbeddings.push(updated);
   }
 
   for (let i = 0; i < nNodes; i++) {
-    const stored = newEmbeddings[i].slice(0, HIDDEN_DIM);
-    while (stored.length < HIDDEN_DIM) stored.push(0);
-    graph.nodes[i].embedding = stored;
+    graph.nodes[i].embedding = newEmbeddings[i];
   }
 
   return newEmbeddings;
@@ -1487,9 +1483,7 @@ function attentionPooling(graph: CrystalGraph, W_pool: number[][]): number[] {
 
   const scores: number[] = [];
   for (const node of graph.nodes) {
-    const e = [...node.embedding];
-    while (e.length < HIDDEN_DIM) e.push(0);
-    const attnVec = matVecMul(W_pool, e.slice(0, HIDDEN_DIM));
+    const attnVec = matVecMul(W_pool, node.embedding);
     const rawScore = attnVec.reduce((s, v) => s + v, 0);
     scores.push(rawScore + Math.log(node.multiplicity ?? 1));
   }
@@ -1514,11 +1508,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   }
 
   const saveResidual = (nodes: CrystalGraph["nodes"]) =>
-    nodes.map(n => {
-      const e = [...n.embedding];
-      while (e.length < HIDDEN_DIM) e.push(0);
-      return e.slice(0, HIDDEN_DIM);
-    });
+    nodes.map(n => [...n.embedding]);
 
   const residual0 = saveResidual(graph.nodes);
 
