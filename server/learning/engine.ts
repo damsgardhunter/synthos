@@ -2042,6 +2042,15 @@ async function runDFTEnrichment() {
   } catch (e) { console.error("[Engine] DFT enrichment outer error:", e); }
 }
 
+function extractCrystalInfo(crystalStructure: string | null | undefined): { lattice?: string; prototype?: string } {
+  if (!crystalStructure || typeof crystalStructure !== "string") return {};
+  const trimmed = crystalStructure.trim();
+  const lattice = trimmed.split(/[\s(]+/)[0] || undefined;
+  const protoMatch = trimmed.match(/\(([^)]+)\)/) ?? trimmed.match(/[\s,;]+(\w{2,})\s*$/);
+  const prototype = protoMatch?.[1]?.trim() || undefined;
+  return { lattice, prototype };
+}
+
 async function runPhase10_Physics() {
   if (!shouldContinue()) return;
   activeTasks.add("Computational Physics");
@@ -2330,11 +2339,12 @@ async function runPhase10_Physics() {
             }
           }
 
+          const crystalInfo = extractCrystalInfo(candidate.crystalStructure);
           topoAnalysis = analyzeTopology(
             candidate.formula,
             electronicForTopo,
-            candidate.crystalStructure?.split(" ")[0],
-            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
+            crystalInfo.lattice,
+            crystalInfo.prototype,
             dftTopoClassification
           );
           recordEngineSuccess("topology");
@@ -2365,8 +2375,8 @@ async function runPhase10_Physics() {
           try {
             const invariants = computeTopologicalInvariants(
               candidate.formula, electronicForTopo,
-              candidate.crystalStructure?.split(" ")[0],
-              candidate.crystalStructure?.match(/\((\w+)\)/)?.[1]
+              crystalInfo.lattice,
+              crystalInfo.prototype
             );
             trackInvariantResult(candidate.formula, invariants);
             (updatedMlFeatures as any).topologicalInvariants = {
@@ -2545,6 +2555,9 @@ async function runPhase10_Physics() {
             fermiSurfaceAnalysis = computeFermiSurface(candidate.formula);
           }
 
+          if (!fermiSurfaceAnalysis || !fermiSurfaceAnalysis.mlFeatures) {
+            throw new Error(`Fermi surface computation returned invalid result for ${candidate.formula}`);
+          }
           crossEngineHub.recordInsight("fermi", candidate.formula, fermiSurfaceAnalysis);
           (updatedMlFeatures as any).fermiSurface = {
             fermiPocketCount: fermiSurfaceAnalysis.mlFeatures.fermiPocketCount,
@@ -2580,7 +2593,7 @@ async function runPhase10_Physics() {
         try {
           bandSurrogatePrediction = predictBandStructure(
             candidate.formula,
-            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
+            crystalInfo.prototype,
           );
           (updatedMlFeatures as any).bandSurrogate = getBandSurrogateMLFeatures(bandSurrogatePrediction);
           if (bandSurrogatePrediction.flatBandScore > 0.5 || bandSurrogatePrediction.vhsProximity > 0.4 || bandSurrogatePrediction.nestingFromBands > 0.4) {
@@ -2599,7 +2612,7 @@ async function runPhase10_Physics() {
         try {
           bandOperatorResult = predictBandDispersion(
             candidate.formula,
-            candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
+            crystalInfo.prototype,
           );
           (updatedMlFeatures as any).bandOperator = getBandOperatorMLFeatures(bandOperatorResult);
           if (bandOperatorResult.derivedQuantities.vhsPositions.length > 0 || bandOperatorResult.derivedQuantities.topologicalInvariants.bandInversionCount > 0) {
@@ -7203,11 +7216,12 @@ export async function startEngine() {
       if (topoSeeded < 80) {
         try {
           const electronic = computeElectronicStructure(c.formula);
+          const cInfo = extractCrystalInfo(c.crystalStructure);
           const topoResult = analyzeTopology(
             c.formula,
             electronic,
-            c.crystalStructure?.split(" ")[0],
-            c.crystalStructure?.match(/\((\w+)\)/)?.[1]
+            cInfo.lattice,
+            cInfo.prototype
           );
           trackTopologyResult(topoResult);
           topoSeeded++;
