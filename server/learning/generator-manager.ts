@@ -12,6 +12,8 @@ interface GeneratorStats {
   dftAvgTc: number;
   dftTotalTc: number;
   discoveryRate: number;
+  verifiedPassed: number;
+  verifiedTotal: number;
 }
 
 interface GeneratorEntry {
@@ -70,6 +72,8 @@ function defaultStats(weight: number): GeneratorStats {
     dftAvgTc: 0,
     dftTotalTc: 0,
     discoveryRate: 0,
+    verifiedPassed: 0,
+    verifiedTotal: 0,
   };
 }
 
@@ -176,6 +180,20 @@ export function recordGeneratorOutcome(
   entry.stats.noveltyScore = entry.stats.noveltyScore * (1 - alpha) + novelty * alpha;
 }
 
+export function recordVerificationOutcome(
+  name: string,
+  passed: boolean,
+): void {
+  initializeGenerators();
+  const entry = generators.get(name);
+  if (!entry) return;
+
+  entry.stats.verifiedTotal++;
+  if (passed) {
+    entry.stats.verifiedPassed++;
+  }
+}
+
 export function recordDFTOutcome(
   name: string,
   success: boolean,
@@ -201,7 +219,7 @@ export function recordDFTOutcome(
 }
 
 export function getGeneratorCompetitionStats(): {
-  generators: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[];
+  generators: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number; verifiedYield: number; verifiedTotal: number }[];
   totalDFTSuccesses: number;
   totalDFTFailures: number;
   rebalanceCount: number;
@@ -209,7 +227,7 @@ export function getGeneratorCompetitionStats(): {
   initializeGenerators();
   let totalSuccess = 0;
   let totalFailure = 0;
-  const genList: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[] = [];
+  const genList: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number; verifiedYield: number; verifiedTotal: number }[] = [];
 
   generators.forEach((entry) => {
     totalSuccess += entry.stats.dftSuccesses;
@@ -224,6 +242,10 @@ export function getGeneratorCompetitionStats(): {
       pipelinePassRate: entry.stats.candidatesGenerated > 0
         ? Math.round((entry.stats.candidatesPassed / entry.stats.candidatesGenerated) * 1000) / 1000
         : 0,
+      verifiedYield: entry.stats.verifiedTotal > 0
+        ? Math.round((entry.stats.verifiedPassed / entry.stats.verifiedTotal) * 1000) / 1000
+        : 0,
+      verifiedTotal: entry.stats.verifiedTotal,
     });
   });
 
@@ -287,13 +309,17 @@ export function rebalanceWeights() {
     hasActivity = true;
 
     const passRate = s.candidatesPassed / s.candidatesGenerated;
+    const verifiedYield = s.verifiedTotal > 0 ? s.verifiedPassed / s.verifiedTotal : 0;
+    const hasVerifiedData = s.verifiedTotal >= 5;
     const tcNorm = Math.min(1, s.bestTc / 200);
     const noveltyNorm = Math.min(1, s.noveltyScore);
     const dftDiscovery = s.discoveryRate;
     const dftTcNorm = Math.min(1, s.dftBestTc / 200);
     const hasDFTData = (s.dftSuccesses + s.dftFailures) > 0;
 
-    const pipelineScore = passRate * 0.3 + tcNorm * 0.3 + noveltyNorm * 0.1;
+    const pipelineScore = hasVerifiedData
+      ? verifiedYield * 0.4 + tcNorm * 0.2 + noveltyNorm * 0.1
+      : passRate * 0.3 + tcNorm * 0.3 + noveltyNorm * 0.1;
     const dftScore = hasDFTData ? (dftDiscovery * 0.2 + dftTcNorm * 0.1) : 0;
     yieldScores[name] = pipelineScore + dftScore;
   });

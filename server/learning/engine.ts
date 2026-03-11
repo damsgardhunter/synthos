@@ -78,7 +78,7 @@ import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { predictKineticStability, formatKineticStabilityNote, type KineticStabilityResult } from "../physics/kinetic-stability";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
-import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias } from "./generator-manager";
+import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, recordVerificationOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias } from "./generator-manager";
 import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, type TheoryGeneratorBias } from "./theory-guided-generator";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
@@ -124,6 +124,7 @@ import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedb
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
 import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesis/heuristic-synthesis-generator";
 import { recordStructureOutcome } from "../crystal/structure-reward-system";
+import { runStructureLearningCycle } from "../crystal/structure-learning-loop";
 import { ELEMENTAL_DATA } from "./elemental-data";
 import { runModelImprovementCycle, getModelImprovementStats } from "./model-improvement-loop";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
@@ -3482,7 +3483,6 @@ async function runPhase11_StructurePrediction() {
 
     if (shouldContinue() && cycleCount % 10 === 0) {
       try {
-        const { runStructureLearningCycle } = await import("../crystal/structure-learning-loop");
         const loopResult = await runStructureLearningCycle(8);
         if (loopResult.candidatesPassed > 0 || loopResult.modelsRetrained) {
           emit("log", {
@@ -3628,7 +3628,6 @@ async function runPhase11_StructurePrediction() {
             if (inserted) {
               totalScCandidates++;
               diffInserted++;
-              bayesianOptimizer.addObservation(normalized, rawTc, lambdaML, crystal.noveltyScore);
               trackGeneratorSource(normalized, "motif_diffusion");
             }
           } catch (e) { console.error("[Engine] Motif diffusion candidate insert failed:", e); }
@@ -3725,9 +3724,7 @@ async function runPhase11_StructurePrediction() {
             if (inserted) {
               totalScCandidates++;
               cdvaeInserted++;
-              bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
               trackGeneratorSource(normalized, "structure_diffusion");
-              incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] CDVAE crystal insert failed:", e); }
         }
@@ -3750,7 +3747,7 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue() && cycleCount % 10 === 0) {
       const distInFlightMarked: string[] = [];
       try {
-        const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
+        const distTarget = Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200);
         const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25, alreadyScreenedFormulas);
         let distInserted = 0;
         for (const crystal of distCrystals) {
@@ -3825,9 +3822,7 @@ async function runPhase11_StructurePrediction() {
             if (inserted) {
               totalScCandidates++;
               distInserted++;
-              bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
               trackGeneratorSource(normalized, "structure_diffusion");
-              incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] Distribution diffusion insert failed:", e); }
         }
@@ -3850,50 +3845,61 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue() && cycleCount % 12 === 0) {
       try {
         const topFormulas: string[] = [];
-        const allCandidates = await storage.getSuperconductors(10, 0);
+        const allCandidates = await storage.getSuperconductorCandidatesByTc(200);
         for (const c of allCandidates) {
           if (c.predictedTc && c.predictedTc > 30 && c.formula) {
             topFormulas.push(c.formula);
           }
         }
-        if (topFormulas.length >= 3) {
+        if (topFormulas.length >= 50) {
           trainVAE(topFormulas, 10);
         }
         const vaeResult = runLatentSpaceInverseDesign(
-          autonomousBestTc > 100 ? autonomousBestTc * 1.3 : 200,
+          Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200),
           topFormulas.length > 0 ? topFormulas[0] : undefined,
           30,
           0.02,
           2,
         );
         let vaeInserted = 0;
+        let vaeGateFiltered = 0;
+        let vaeConvergenceSkipped = 0;
         for (const formula of vaeResult.decodedFormulas) {
           if (!isValidFormula(formula)) continue;
           const normalized = normalizeFormula(formula);
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
           try {
-            const features = extractFeatures(normalized);
+            if (!vaeResult.converged) {
+              vaeConvergenceSkipped++;
+              continue;
+            }
+            const synthGate = evaluateSynthesisGate(normalized);
+            if (!synthGate.pass) {
+              vaeGateFiltered++;
+              continue;
+            }
+            const features = getCachedFeatures(normalized);
             const gbResult = gbPredict(features);
             const vaeLambda = features.electronPhononLambda ?? 0;
             const vaePhysTc = vaeLambda > 0
               ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq, undefined, normalized))
               : 0;
             const cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+            const synthWeightedScore = Math.min(0.9, gbResult.score * 0.6 + synthGate.compositeScore * 0.4);
             const inserted = await insertCandidateWithStabilityCheck({
               formula: normalized,
               predictedTc: cappedTc,
               dataConfidence: "low",
-              ensembleScore: Math.min(0.9, gbResult.score),
+              ensembleScore: synthWeightedScore,
               verificationStage: 0,
-              notes: `[VAE inverse design: target=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}]`,
+              notes: `[VAE inverse design: target=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, synthScore=${synthGate.compositeScore.toFixed(3)}]`,
               cooperPairMechanism: "VAE latent-space gradient descent",
               status: "theoretical",
             }, "inverse_design");
             if (inserted) {
               totalScCandidates++;
               vaeInserted++;
-              incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] VAE inverse design insert failed:", e); }
         }
@@ -3901,7 +3907,7 @@ async function runPhase11_StructurePrediction() {
         emit("log", {
           phase: "phase-11",
           event: "VAE latent-space inverse design",
-          detail: `Best: ${vaeResult.bestFormula} Tc=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, decoded=${vaeResult.decodedFormulas.length}, inserted=${vaeInserted}. VAE convergence rate: ${(vStats.convergenceRate * 100).toFixed(0)}%`,
+          detail: `Best: ${vaeResult.bestFormula} Tc=${vaeResult.bestTc}K, steps=${vaeResult.optimizationSteps}, converged=${vaeResult.converged}, decoded=${vaeResult.decodedFormulas.length}, convergenceSkipped=${vaeConvergenceSkipped}, synthGateFiltered=${vaeGateFiltered}, inserted=${vaeInserted}. VAE convergence rate: ${(vStats.convergenceRate * 100).toFixed(0)}%`,
           dataSource: "Crystal VAE",
         });
       } catch (err: any) {
@@ -3920,7 +3926,7 @@ async function runPhase11_StructurePrediction() {
           if (existing) continue;
 
           try {
-            const features = extractFeatures(normalized);
+            const features = getCachedFeatures(normalized);
             const gbResult = gbPredict(features);
             if (gbResult.tcPredicted >= 10) {
               const inserted = await insertCandidateWithStabilityCheck({
@@ -3970,8 +3976,13 @@ async function runPhase12_MultiFidelity() {
 
     const stage0 = await storage.getSuperconductorsByStage(0, 50);
     const stage1 = await storage.getSuperconductorsByStage(1, 50);
-    const eligible = [...stage0, ...stage1].filter(c => (c.ensembleScore ?? 0) > 0.25);
-    const unscreened = shuffle(eligible).slice(0, 8);
+    const seenIds = new Set<string>();
+    const deduped = [...stage0, ...stage1].filter(c => {
+      if (seenIds.has(c.id)) return false;
+      seenIds.add(c.id);
+      return (c.ensembleScore ?? 0) > 0.25;
+    });
+    const unscreened = shuffle(deduped).slice(0, 8);
 
     if (unscreened.length > 0) {
       const results = await runMultiFidelityPipeline(emit, unscreened);
@@ -4023,6 +4034,207 @@ async function runPhase12_MultiFidelity() {
   }
 }
 
+async function processSynthesisCandidate(candidate: any, emit: any): Promise<{
+  newRoutes: any[];
+  pendingSynthProcesses: any[];
+  pendingReactions: any[];
+  candidateUpdate: { id: string; synthesisPath: any } | null;
+  failedUpdate: { id: string; synthesisPath: any } | null;
+}> {
+  const result = {
+    newRoutes: [] as any[],
+    pendingSynthProcesses: [] as any[],
+    pendingReactions: [] as any[],
+    candidateUpdate: null as { id: string; synthesisPath: any } | null,
+    failedUpdate: null as { id: string; synthesisPath: any } | null,
+  };
+
+  const existingPath = candidate.synthesisPath as any;
+  const hasPhysicsReasoned = Array.isArray(existingPath?.routes)
+    && existingPath.routes.some((r: any) => r.source === "physics-reasoned");
+  if (hasPhysicsReasoned) return result;
+  const hasReasoningFailed = existingPath?.reasoningFailed === true;
+  if (hasReasoningFailed) return result;
+
+  try {
+    const routes = await runSynthesisReasoning(emit, candidate);
+    const allNewRoutes = routes && routes.length > 0 ? [...routes] : [];
+
+    const hasAnalogyTransfer = Array.isArray(existingPath?.routes)
+      && existingPath.routes.some((r: any) => r.source === "analogy-transfer");
+    if (!hasAnalogyTransfer) {
+      try {
+        const { proposeAnalogousRoutes } = await import("../synthesis/synthesis-analogy-engine");
+        const analogyResult = await proposeAnalogousRoutes(candidate.formula);
+        const highConfAnalogues = analogyResult.analogues.filter((a: any) => a.similarity >= 0.7);
+        const highConfRoutes = analogyResult.routes.filter((r: any) => {
+          const matchedAnalogue = highConfAnalogues.find((a: any) => a.sourceFormula === r.sourceFormula);
+          return matchedAnalogue || (r.confidence !== undefined && r.confidence >= 0.7);
+        });
+        if (highConfRoutes.length > 0) {
+          const analogyRoutes = highConfRoutes.slice(0, 3).map((r: any) => ({
+            ...r,
+            source: "analogy-transfer",
+          }));
+          allNewRoutes.push(...analogyRoutes);
+          const analogueDetail = highConfAnalogues.slice(0, 2)
+            .map((a: any) => `${a.sourceFormula}(${(a.similarity * 100).toFixed(0)}%)`)
+            .join(", ");
+          const rxnDetail = analogyResult.reactionsApplied.slice(0, 2)
+            .map((r: any) => r.reactionType)
+            .join(", ");
+          emit("log", {
+            phase: "phase-13",
+            event: "Synthesis analogy transfer",
+            detail: `${candidate.formula}: ${analogyRoutes.length} routes from analogues [${analogueDetail}]${rxnDetail ? ` + reactions [${rxnDetail}]` : ""}`,
+            dataSource: "Synthesis Analogy Engine",
+          });
+        }
+      } catch (err: any) {
+        emit("log", {
+          phase: "phase-13",
+          event: "Analogy transfer skipped",
+          detail: `${candidate.formula}: ${err.message?.slice(0, 80)}`,
+          dataSource: "Synthesis Analogy Engine",
+        });
+      }
+    }
+
+    const hasPlannedRoutes = Array.isArray(existingPath?.routes)
+      && existingPath.routes.some((r: any) => r.source === "synthesis-planner");
+    if (!hasPlannedRoutes) {
+      try {
+        const formationEnergy = typeof candidate.formationEnergy === "number" ? candidate.formationEnergy : undefined;
+        const planResult = planAndTrack(candidate.formula, { formationEnergy: formationEnergy ?? null, maxRoutes: 5 });
+        const plannedRoutes = planResult.routes;
+        if (plannedRoutes.length > 0) {
+          const plannerRoutes = plannedRoutes.slice(0, 3).map((r: any) => ({
+            routeId: r.routeId,
+            routeName: r.routeName,
+            method: r.method,
+            feasibilityScore: r.feasibilityScore,
+            precursors: r.precursors,
+            steps: (r.steps ?? []).map((s: any) => `${s.reactionType}: ${s.reactants?.join("+")} at ${s.temperature ?? 0}K, ${s.pressure ?? 0} GPa`),
+            stepCount: r.steps?.length ?? 0,
+            maxTemperature: r.maxTemperature,
+            maxPressure: r.maxPressure,
+            difficulty: r.difficulty,
+            estimatedYield: r.estimatedYield,
+            totalDuration: r.totalDuration,
+            source: "synthesis-planner",
+          }));
+          allNewRoutes.push(...plannerRoutes);
+          const bestPlanned = plannedRoutes[0];
+          emit("log", {
+            phase: "phase-13",
+            event: "Synthesis route planned",
+            detail: `${candidate.formula}: ${plannedRoutes.length} routes via planner, best=${bestPlanned.routeName} (feasibility=${(bestPlanned.feasibilityScore * 100).toFixed(1)}%, method=${bestPlanned.method})`,
+            dataSource: "Synthesis Planner",
+          });
+          const ts = Date.now().toString(36);
+          result.pendingSynthProcesses.push({
+            id: `sp-${ts}-${Math.random().toString(36).slice(2, 6)}`,
+            materialId: candidate.id,
+            materialName: candidate.formula,
+            formula: candidate.formula,
+            method: bestPlanned.method,
+            conditions: { temperature: bestPlanned.maxTemperature, pressure: bestPlanned.maxPressure, atmosphere: bestPlanned.steps[0]?.atmosphere ?? "argon" },
+            steps: bestPlanned.steps.map((s: any) => `Step ${s.stepNumber}: ${s.reactionType} at ${s.temperature ?? 0}K, ${s.pressure ?? 0} GPa — ${s.notes ?? ""}`),
+            precursors: bestPlanned.precursors,
+            equipment: bestPlanned.equipmentList,
+            difficulty: bestPlanned.difficulty,
+            timeEstimate: bestPlanned.totalDuration,
+            safetyNotes: Array.isArray(bestPlanned.safetyNotes) ? bestPlanned.safetyNotes.join("; ") : (bestPlanned.safetyNotes ?? ""),
+            yieldPercent: Math.round((bestPlanned.feasibilityScore ?? 0.5) * 80),
+          });
+          for (const route of plannedRoutes.slice(0, 2)) {
+            const equation = `${route.precursors.join(" + ")} → ${candidate.formula}`;
+            result.pendingReactions.push({
+              id: `rxn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+              name: `${route.method} synthesis of ${candidate.formula}`,
+              equation,
+              reactionType: route.method,
+              reactants: route.precursors.map((p: string) => ({ formula: p, role: "precursor" })),
+              products: [{ formula: candidate.formula, role: "product" }],
+              conditions: { temperature: route.maxTemperature, pressure: route.maxPressure },
+              energetics: {},
+              mechanism: route.method,
+              relevanceToSuperconductor: Math.min(1, (candidate.predictedTc ?? 0) / 300),
+              source: "synthesis-planner",
+            });
+          }
+        }
+      } catch (err: any) {
+        console.error(`[Engine] Synthesis planner failed for ${candidate.formula}:`, err.message?.slice(0, 100));
+      }
+    }
+
+    const hasHeuristicRoutes = Array.isArray(existingPath?.routes)
+      && existingPath.routes.some((r: any) => r.source === "heuristic-generator");
+    if (!hasHeuristicRoutes) {
+      try {
+        const heuristicRoutes = generateHeuristicRoutes(candidate.formula, true);
+        if (heuristicRoutes.length > 0) {
+          const hRoutes = heuristicRoutes.slice(0, 3).map((r: any) => ({
+            routeName: `${r.rule}: ${r.method}`,
+            method: r.method,
+            rule: r.rule,
+            precursors: r.precursors,
+            steps: r.steps,
+            equation: r.equation,
+            temperature: r.temperature,
+            pressure: r.pressure,
+            atmosphere: r.atmosphere,
+            difficulty: r.difficulty,
+            confidence: r.confidence,
+            notes: r.notes,
+            source: "heuristic-generator",
+          }));
+          allNewRoutes.push(...hRoutes);
+          emit("log", {
+            phase: "phase-13",
+            event: "Heuristic synthesis routes generated",
+            detail: `${candidate.formula}: ${heuristicRoutes.length} rule-based routes [${heuristicRoutes.map(r => r.rule).join(", ")}]`,
+            dataSource: "Heuristic Synthesis Generator",
+          });
+        }
+      } catch (err: any) {
+        console.error(`[Engine] Heuristic synthesis generator failed for ${candidate.formula}:`, err.message?.slice(0, 100));
+      }
+    }
+
+    if (allNewRoutes.length > 0) {
+      const existingRoutes = Array.isArray(existingPath?.routes) ? existingPath.routes : [];
+      const taggedExisting = existingRoutes.map((r: any) => ({
+        ...r,
+        source: r.source || "literature-based",
+      }));
+      result.candidateUpdate = {
+        id: candidate.id,
+        synthesisPath: {
+          routes: [...taggedExisting, ...allNewRoutes],
+          lastUpdated: new Date().toISOString(),
+        },
+      };
+    }
+    result.newRoutes = allNewRoutes;
+  } catch (err: any) {
+    emit("log", {
+      phase: "phase-13",
+      event: "Synthesis reasoning candidate error",
+      detail: `${candidate.formula}: ${err.message?.slice(0, 100)}`,
+      dataSource: "Synthesis Reasoning",
+    });
+    const failPath = candidate.synthesisPath as any;
+    result.failedUpdate = {
+      id: candidate.id,
+      synthesisPath: { ...(failPath || {}), reasoningFailed: true },
+    };
+  }
+
+  return result;
+}
+
 async function runPhase13_SynthesisReasoning() {
   if (!shouldContinue()) return;
   activeTasks.add("Novel Synthesis Reasoning");
@@ -4036,190 +4248,38 @@ async function runPhase13_SynthesisReasoning() {
 
     if (toProcess.length === 0) return;
 
+    const settled = await Promise.allSettled(
+      toProcess.map(candidate => processSynthesisCandidate(candidate, emit))
+    );
+
     let proposed = 0;
-    for (const candidate of toProcess) {
-      if (!shouldContinue()) return;
+    const allSynthProcesses: any[] = [];
+    const allReactions: any[] = [];
+    const allCandidateUpdates: { id: string; synthesisPath: any }[] = [];
+
+    for (const outcome of settled) {
+      if (outcome.status === "rejected") continue;
+      const r = outcome.value;
+      proposed += r.newRoutes.length;
+      totalNovelSynthesisProposed += r.newRoutes.length;
+      allSynthProcesses.push(...r.pendingSynthProcesses);
+      allReactions.push(...r.pendingReactions);
+      if (r.candidateUpdate) allCandidateUpdates.push(r.candidateUpdate);
+      if (r.failedUpdate) allCandidateUpdates.push(r.failedUpdate);
+    }
+
+    for (const update of allCandidateUpdates) {
       try {
-        const existingPath = candidate.synthesisPath as any;
-        const hasPhysicsReasoned = Array.isArray(existingPath?.routes)
-          && existingPath.routes.some((r: any) => r.source === "physics-reasoned");
-        if (hasPhysicsReasoned) continue;
-        const hasReasoningFailed = existingPath?.reasoningFailed === true;
-        if (hasReasoningFailed) continue;
-
-        const routes = await runSynthesisReasoning(emit, candidate);
-        const allNewRoutes = routes && routes.length > 0 ? [...routes] : [];
-
-        const hasAnalogyTransfer = Array.isArray(existingPath?.routes)
-          && existingPath.routes.some((r: any) => r.source === "analogy-transfer");
-        if (!hasAnalogyTransfer) {
-          try {
-            const { proposeAnalogousRoutes } = require("../synthesis/synthesis-analogy-engine");
-            const analogyResult = await proposeAnalogousRoutes(candidate.formula);
-            if (analogyResult.routes.length > 0) {
-              const analogyRoutes = analogyResult.routes.slice(0, 3).map((r: any) => ({
-                ...r,
-                source: "analogy-transfer",
-              }));
-              allNewRoutes.push(...analogyRoutes);
-              const analogueDetail = analogyResult.analogues.slice(0, 2)
-                .map((a: any) => `${a.sourceFormula}(${(a.similarity * 100).toFixed(0)}%)`)
-                .join(", ");
-              const rxnDetail = analogyResult.reactionsApplied.slice(0, 2)
-                .map((r: any) => r.reactionType)
-                .join(", ");
-              emit("log", {
-                phase: "phase-13",
-                event: "Synthesis analogy transfer",
-                detail: `${candidate.formula}: ${analogyRoutes.length} routes from analogues [${analogueDetail}]${rxnDetail ? ` + reactions [${rxnDetail}]` : ""}`,
-                dataSource: "Synthesis Analogy Engine",
-              });
-            }
-          } catch (err: any) {
-            emit("log", {
-              phase: "phase-13",
-              event: "Analogy transfer skipped",
-              detail: `${candidate.formula}: ${err.message?.slice(0, 80)}`,
-              dataSource: "Synthesis Analogy Engine",
-            });
-          }
-        }
-
-        const hasPlannedRoutes = Array.isArray(existingPath?.routes)
-          && existingPath.routes.some((r: any) => r.source === "synthesis-planner");
-        if (!hasPlannedRoutes) {
-          try {
-            const formationEnergy = typeof candidate.formationEnergy === "number" ? candidate.formationEnergy : undefined;
-            const planResult = planAndTrack(candidate.formula, { formationEnergy: formationEnergy ?? null, maxRoutes: 5 });
-            const plannedRoutes = planResult.routes;
-            if (plannedRoutes.length > 0) {
-              const plannerRoutes = plannedRoutes.slice(0, 3).map((r: any) => ({
-                routeId: r.routeId,
-                routeName: r.routeName,
-                method: r.method,
-                feasibilityScore: r.feasibilityScore,
-                precursors: r.precursors,
-                steps: (r.steps ?? []).map((s: any) => `${s.reactionType}: ${s.reactants?.join("+")} at ${s.temperature ?? 0}K, ${s.pressure ?? 0} GPa`),
-                stepCount: r.steps?.length ?? 0,
-                maxTemperature: r.maxTemperature,
-                maxPressure: r.maxPressure,
-                difficulty: r.difficulty,
-                estimatedYield: r.estimatedYield,
-                totalDuration: r.totalDuration,
-                source: "synthesis-planner",
-              }));
-              allNewRoutes.push(...plannerRoutes);
-              const bestPlanned = plannedRoutes[0];
-              emit("log", {
-                phase: "phase-13",
-                event: "Synthesis route planned",
-                detail: `${candidate.formula}: ${plannedRoutes.length} routes via planner, best=${bestPlanned.routeName} (feasibility=${(bestPlanned.feasibilityScore * 100).toFixed(1)}%, method=${bestPlanned.method})`,
-                dataSource: "Synthesis Planner",
-              });
-              try {
-                await storage.insertSynthesisProcess({
-                  id: `sp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-                  materialId: candidate.id,
-                  materialName: candidate.formula,
-                  formula: candidate.formula,
-                  method: bestPlanned.method,
-                  conditions: { temperature: bestPlanned.maxTemperature, pressure: bestPlanned.maxPressure, atmosphere: bestPlanned.steps[0]?.atmosphere ?? "argon" },
-                  steps: bestPlanned.steps.map((s: any) => `Step ${s.stepNumber}: ${s.reactionType} at ${s.temperature ?? 0}K, ${s.pressure ?? 0} GPa — ${s.notes ?? ""}`),
-                  precursors: bestPlanned.precursors,
-                  equipment: bestPlanned.equipmentList,
-                  difficulty: bestPlanned.difficulty,
-                  timeEstimate: bestPlanned.totalDuration,
-                  safetyNotes: Array.isArray(bestPlanned.safetyNotes) ? bestPlanned.safetyNotes.join("; ") : (bestPlanned.safetyNotes ?? ""),
-                  yieldPercent: Math.round((bestPlanned.feasibilityScore ?? 0.5) * 80),
-                });
-              } catch (_) {}
-              for (const route of plannedRoutes.slice(0, 2)) {
-                try {
-                  const equation = `${route.precursors.join(" + ")} → ${candidate.formula}`;
-                  await storage.insertChemicalReaction({
-                    id: `rxn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-                    name: `${route.method} synthesis of ${candidate.formula}`,
-                    equation,
-                    reactionType: route.method,
-                    reactants: route.precursors.map((p: string) => ({ formula: p, role: "precursor" })),
-                    products: [{ formula: candidate.formula, role: "product" }],
-                    conditions: { temperature: route.maxTemperature, pressure: route.maxPressure },
-                    energetics: {},
-                    mechanism: route.method,
-                    relevanceToSuperconductor: Math.min(1, (candidate.predictedTc ?? 0) / 300),
-                    source: "synthesis-planner",
-                  });
-                } catch (_) {}
-              }
-            }
-          } catch (err: any) {
-            console.error(`[Engine] Synthesis planner failed for ${candidate.formula}:`, err.message?.slice(0, 100));
-          }
-        }
-
-        const hasHeuristicRoutes = Array.isArray(existingPath?.routes)
-          && existingPath.routes.some((r: any) => r.source === "heuristic-generator");
-        if (!hasHeuristicRoutes) {
-          try {
-            const heuristicRoutes = generateHeuristicRoutes(candidate.formula, true);
-            if (heuristicRoutes.length > 0) {
-              const hRoutes = heuristicRoutes.slice(0, 3).map((r: any) => ({
-                routeName: `${r.rule}: ${r.method}`,
-                method: r.method,
-                rule: r.rule,
-                precursors: r.precursors,
-                steps: r.steps,
-                equation: r.equation,
-                temperature: r.temperature,
-                pressure: r.pressure,
-                atmosphere: r.atmosphere,
-                difficulty: r.difficulty,
-                confidence: r.confidence,
-                notes: r.notes,
-                source: "heuristic-generator",
-              }));
-              allNewRoutes.push(...hRoutes);
-              emit("log", {
-                phase: "phase-13",
-                event: "Heuristic synthesis routes generated",
-                detail: `${candidate.formula}: ${heuristicRoutes.length} rule-based routes [${heuristicRoutes.map(r => r.rule).join(", ")}]`,
-                dataSource: "Heuristic Synthesis Generator",
-              });
-            }
-          } catch (err: any) {
-            console.error(`[Engine] Heuristic synthesis generator failed for ${candidate.formula}:`, err.message?.slice(0, 100));
-          }
-        }
-
-        if (allNewRoutes.length > 0) {
-          const existingRoutes = Array.isArray(existingPath?.routes) ? existingPath.routes : [];
-          const taggedExisting = existingRoutes.map((r: any) => ({
-            ...r,
-            source: r.source || "literature-based",
-          }));
-          await storage.updateSuperconductorCandidate(candidate.id, {
-            synthesisPath: {
-              routes: [...taggedExisting, ...allNewRoutes],
-              lastUpdated: new Date().toISOString(),
-            },
-          });
-          proposed += allNewRoutes.length;
-          totalNovelSynthesisProposed += allNewRoutes.length;
-        }
-      } catch (err: any) {
-        emit("log", {
-          phase: "phase-13",
-          event: "Synthesis reasoning candidate error",
-          detail: `${candidate.formula}: ${err.message?.slice(0, 100)}`,
-          dataSource: "Synthesis Reasoning",
+        await storage.updateSuperconductorCandidate(update.id, {
+          synthesisPath: update.synthesisPath,
         });
-        try {
-          const failPath = candidate.synthesisPath as any;
-          await storage.updateSuperconductorCandidate(candidate.id, {
-            synthesisPath: { ...(failPath || {}), reasoningFailed: true },
-          });
-        } catch (_) {}
-      }
+      } catch (_) {}
+    }
+    for (const sp of allSynthProcesses) {
+      try { await storage.insertSynthesisProcess(sp); } catch (_) {}
+    }
+    for (const rxn of allReactions) {
+      try { await storage.insertChemicalReaction(rxn); } catch (_) {}
     }
 
     if (proposed > 0) {
@@ -4273,10 +4333,10 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     try {
       const miedemaEf = estimateFormationEnergy(formula);
-      if (miedemaEf < -30.0 || miedemaEf > 5.0) {
+      if (miedemaEf < -5.0 || miedemaEf > 0.5) {
         pipelineStageMetrics.formationEnergyRejects++;
-        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-30, 5], rejecting`);
-        return { passed: false, tc: 0, reason: `formation-energy-insane: ${miedemaEf.toFixed(3)} eV/atom` };
+        console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside synthesizable range [-5, 0.5], rejecting`);
+        return { passed: false, tc: 0, reason: `formation-energy-unstable: ${miedemaEf.toFixed(3)} eV/atom` };
       }
     } catch (e) { console.error(`[Autonomous] Formation energy check failed for ${formula}:`, e); }
 
@@ -4286,7 +4346,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     }
 
     const family = classifyFamily(formula);
-    const features = extractFeatures(formula);
+    const features = getCachedFeatures(formula);
     if (!features) {
       pipelineStageMetrics.featureExtractionFails++;
       return { passed: false, tc: 0, reason: "feature-extraction-failed" };
@@ -4574,11 +4634,24 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
                 name: pathway.bestAmbientFormula,
                 formula: pathway.bestAmbientFormula,
                 predictedTc: pathway.bestAmbientTc,
+                pressureGpa: 0,
                 ensembleScore: Math.min(1, pathway.bestAmbientTc / 293 * 0.6),
                 crystalStructure: "pressure-stabilized",
                 status: "theoretical",
-                notes: `Ambient variant of ${formula} (${pathway.retentionPercent}% Tc retention from ${candidatePressure}GPa). Strategy: ${pathway.strategies[0]?.type}`,
-              }, "random_exploration");
+                notes: `[Pressure-to-ambient] Parent: ${formula} (Tc=${finalTc}K @ ${candidatePressure}GPa), retention=${pathway.retentionPercent}%, strategy=${pathway.strategies[0]?.type}, feasibility=${pathway.feasibility}`,
+                mlFeatures: {
+                  pressurePathway: {
+                    parentFormula: formula,
+                    parentTc: finalTc,
+                    parentPressureGpa: candidatePressure,
+                    retentionPercent: pathway.retentionPercent,
+                    strategy: pathway.strategies[0]?.type,
+                    feasibility: pathway.feasibility,
+                  },
+                } as any,
+                cooperPairMechanism: `Pressure-to-ambient pathway from ${formula}`,
+              }, "pressure_pathway");
+              trackGeneratorSource(pathway.bestAmbientFormula, "pressure_pathway");
             } catch (e) { console.error(`[Autonomous] Pressure pathway candidate insert failed for ${formula}:`, e); }
           }
           emit("log", {
@@ -5040,7 +5113,7 @@ async function runAutonomousFastPath() {
 
     if (cycleCount % 6 === 0) {
       try {
-        const distTarget = autonomousBestTc > 100 ? autonomousBestTc * 1.4 : 200;
+        const distTarget = Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200);
         const distResult = runDistributionBasedDiffusion(8, distTarget, 20, alreadyScreenedFormulas);
         for (const crystal of distResult) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -5066,7 +5139,7 @@ async function runAutonomousFastPath() {
     if (cycleCount % 15 === 0) {
       try {
         const vaeResult = runLatentSpaceInverseDesign(
-          autonomousBestTc > 100 ? autonomousBestTc * 1.3 : 200,
+          Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200),
           cdvaeCandidates.length > 0 ? cdvaeCandidates[0] : undefined,
           20, 0.02, 2,
         );
@@ -5424,6 +5497,8 @@ async function runAutonomousFastPath() {
       if (!isRlCandidate && !isBoCandidate) {
         recordGeneratorOutcome("massive_combinatorial", result.passed, result.tc, result.passed ? 0.5 : 0.1);
       }
+      const origSource = candidateGeneratorSource.get(formula) ?? generatorName;
+      recordVerificationOutcome(origSource, result.passed);
       trackGeneratorSource(formula, generatorName);
 
       try {
@@ -6786,7 +6861,6 @@ async function runLearningCycle() {
                 dataConfidence: "low",
                 discoveryScore,
               }, "structure_diffusion");
-              bayesianOptimizer.addObservation(normalized, predictedTc, gnnResult.lambda || lambdaML, discoveryScore);
 
               if (inserted) {
                 prototypeCounts[pc.prototype].passed++;
@@ -7214,7 +7288,7 @@ async function backfillGBScores() {
         if (i % 10 === 0) await yield_();
         const c = batch[i];
         try {
-          const features = extractFeatures(c.formula);
+          const features = getCachedFeatures(c.formula);
           const gb = gbPredict(features);
           const nnScore = c.quantumCoherence ?? 0.3;
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
@@ -7264,7 +7338,7 @@ async function recalculatePhysics() {
         if (i % 10 === 0) await yield_();
         const c = needsRecalc[i];
         try {
-          const features = extractFeatures(c.formula);
+          const features = getCachedFeatures(c.formula);
           const gb = gbPredict(features);
           const nnScore = c.neuralNetScore ?? c.quantumCoherence ?? 0.3;
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
@@ -7397,6 +7471,8 @@ export async function startEngine() {
     let boSeeded = 0;
     for (const c of topForBO) {
       try {
+        const vs = (c as any).verificationStage ?? 0;
+        if (vs < 1) continue;
         const tc = c.predictedTc ?? 0;
         const lambda = c.electronPhononCoupling ?? 0.5;
         const score = c.ensembleScore ?? 0.3;
