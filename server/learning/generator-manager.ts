@@ -129,23 +129,34 @@ export function allocateBudget(totalSlots: number): GeneratorBudget {
 
   const weights: Record<string, number> = {};
   const allocations: Record<string, number> = {};
+  const entries = Array.from(generators.entries());
 
   generators.forEach((entry, name) => {
     weights[name] = entry.stats.currentWeight;
   });
 
-  let allocated = 0;
-  const entries = Array.from(generators.entries());
+  const numGenerators = entries.length;
+  const guaranteed = numGenerators;
+  const distributable = Math.max(0, totalSlots - guaranteed);
 
-  for (let i = 0; i < entries.length; i++) {
-    const [name, entry] = entries[i];
-    if (i === entries.length - 1) {
-      allocations[name] = Math.max(1, totalSlots - allocated);
-    } else {
-      const slots = Math.max(1, Math.round(totalSlots * entry.stats.currentWeight));
-      allocations[name] = slots;
-      allocated += slots;
-    }
+  const idealSlots: { name: string; ideal: number; floor: number; remainder: number }[] = [];
+  for (const [name, entry] of entries) {
+    const ideal = 1 + distributable * entry.stats.currentWeight;
+    const floor = Math.floor(ideal);
+    idealSlots.push({ name, ideal, floor, remainder: ideal - floor });
+  }
+
+  let allocated = idealSlots.reduce((s, e) => s + e.floor, 0);
+  idealSlots.sort((a, b) => b.remainder - a.remainder);
+
+  for (const entry of idealSlots) {
+    if (allocated >= totalSlots) break;
+    entry.floor++;
+    allocated++;
+  }
+
+  for (const entry of idealSlots) {
+    allocations[entry.name] = entry.floor;
   }
 
   cyclesSinceRebalance++;
@@ -270,21 +281,35 @@ export function applyTheoryBias(boosts: Record<string, number>) {
 
     const normalizedBoost = boost / maxBoost;
     const adjustment = normalizedBoost * 0.15;
-    entry.stats.currentWeight = Math.max(
-      MINIMUM_WEIGHT_FLOOR,
-      entry.stats.currentWeight * (1 + adjustment)
-    );
+    entry.stats.currentWeight = entry.stats.currentWeight * (1 + adjustment);
   }
 
-  let totalWeight = 0;
-  generators.forEach(entry => { totalWeight += entry.stats.currentWeight; });
-  if (totalWeight > 0) {
+  generators.forEach(entry => {
+    entry.stats.currentWeight = Math.max(MINIMUM_WEIGHT_FLOOR, entry.stats.currentWeight);
+  });
+
+  const numGenerators = generators.size;
+  const totalFloor = MINIMUM_WEIGHT_FLOOR * numGenerators;
+  let aboveFloorSum = 0;
+  generators.forEach(entry => {
+    if (entry.stats.currentWeight > MINIMUM_WEIGHT_FLOOR) {
+      aboveFloorSum += entry.stats.currentWeight;
+    }
+  });
+
+  const remainingWeight = 1.0 - totalFloor;
+  if (aboveFloorSum > 0 && remainingWeight > 0) {
     generators.forEach(entry => {
-      entry.stats.currentWeight = Math.max(
-        MINIMUM_WEIGHT_FLOOR,
-        entry.stats.currentWeight / totalWeight
-      );
+      if (entry.stats.currentWeight > MINIMUM_WEIGHT_FLOOR) {
+        entry.stats.currentWeight = MINIMUM_WEIGHT_FLOOR +
+          remainingWeight * (entry.stats.currentWeight / aboveFloorSum);
+      } else {
+        entry.stats.currentWeight = MINIMUM_WEIGHT_FLOOR;
+      }
     });
+  } else {
+    const equalWeight = 1.0 / numGenerators;
+    generators.forEach(entry => { entry.stats.currentWeight = equalWeight; });
   }
 
   const summary = Array.from(generators.entries())
@@ -295,9 +320,9 @@ export function applyTheoryBias(boosts: Record<string, number>) {
 
 export function resetToDefaultWeights(): void {
   initializeGenerators();
-  for (const [name, entry] of generators.entries()) {
+  generators.forEach((entry) => {
     entry.stats.currentWeight = entry.defaultWeight;
-  }
+  });
   const summary = Array.from(generators.entries())
     .map(([n, e]) => `${n}=${(e.stats.currentWeight * 100).toFixed(1)}%`)
     .join(", ");
