@@ -193,7 +193,7 @@ function sanitizeNumericFields(obj: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const [key, val] of Object.entries(obj)) {
     if (typeof val === "number") {
-      result[key] = Number.isFinite(val) ? val : 0;
+      result[key] = Number.isFinite(val) ? val : null;
     } else if (val != null && typeof val === "object" && !Array.isArray(val)) {
       result[key] = sanitizeNumericFields(val);
     } else {
@@ -307,8 +307,8 @@ function passesChemistryFilter(formula: string): { pass: boolean; reason: string
     .filter((v): v is number => v !== null);
   if (ens.length >= 2) {
     const spread = Math.max(...ens) - Math.min(...ens);
-    if (spread > 3.5) {
-      return { pass: false, reason: `electronegativity spread ${spread.toFixed(2)} > 3.5 (too ionic)` };
+    if (spread > 2.8) {
+      return { pass: false, reason: `electronegativity spread ${spread.toFixed(2)} > 2.8 (too ionic)` };
     }
   }
 
