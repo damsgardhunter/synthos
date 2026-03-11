@@ -108,17 +108,45 @@ function runChemistryReasoning(formula: string, predictedTc?: number, mlFeatures
   const CHARGE_RESERVOIR = new Set(["La", "Y", "Ca", "Sr", "Sc", "Ce", "Nd", "Ba", "K"]);
   const SC_ACTIVE_MAIN = new Set(["Pb", "Bi", "Sn", "In", "Al", "Ga", "Tl", "Mg"]);
 
-  const hasActiveTM = elKeys.some(e => SC_ACTIVE_TM.has(e));
+  const CUPRATE_CONTEXT_TM: Record<string, string> = { "Cu": "Cu2+ in layered cuprate", "Ni": "Ni1+/Ni2+ in nickelate" };
+  const PNICTIDE_CONTEXT_TM: Record<string, string> = { "Fe": "Fe2+ in iron-pnictide", "Ni": "Ni in pnictide", "Co": "Co-doped pnictide" };
+  const PALLADATE_CONTEXT: Record<string, string> = { "Pd": "Pd in palladate/hydride" };
+
+  let tmActivity = 0;
+  const activeTMDetails: string[] = [];
+  for (const el of elKeys) {
+    if (!SC_ACTIVE_TM.has(el)) continue;
+    if (family === "Cuprate" && CUPRATE_CONTEXT_TM[el]) {
+      tmActivity += 1.5;
+      activeTMDetails.push(`${el} (${CUPRATE_CONTEXT_TM[el]} — enhanced activity)`);
+    } else if (family === "Pnictide" && PNICTIDE_CONTEXT_TM[el]) {
+      tmActivity += 1.5;
+      activeTMDetails.push(`${el} (${PNICTIDE_CONTEXT_TM[el]} — enhanced activity)`);
+    } else if (PALLADATE_CONTEXT[el]) {
+      tmActivity += 1.2;
+      activeTMDetails.push(`${el} (${PALLADATE_CONTEXT[el]})`);
+    } else if (family === "Intermetallic" && (el === "Cu" || el === "Fe")) {
+      tmActivity += 0.5;
+      activeTMDetails.push(`${el} (simple alloy context — reduced SC activity)`);
+    } else {
+      tmActivity += 1.0;
+      activeTMDetails.push(el);
+    }
+  }
+
+  const hasActiveTM = tmActivity > 0;
   const hasLightPhonon = elKeys.some(e => LIGHT_PHONON.has(e));
   const hasReservoir = elKeys.some(e => CHARGE_RESERVOIR.has(e));
   const hasActiveMain = elKeys.some(e => SC_ACTIVE_MAIN.has(e));
 
   if (hasActiveTM && hasLightPhonon) {
-    score += 0.2;
-    reasoning.push("Strong: active SC transition metal + light phonon element present");
+    const tmBonus = Math.min(0.25, 0.15 + tmActivity * 0.02);
+    score += tmBonus;
+    reasoning.push(`Strong: active TM [${activeTMDetails.join(", ")}] + light phonon element`);
   } else if (hasActiveTM) {
-    score += 0.1;
-    reasoning.push("Has SC-active transition metal");
+    const tmBonus = Math.min(0.15, 0.05 + tmActivity * 0.02);
+    score += tmBonus;
+    reasoning.push(`Has SC-active TM [${activeTMDetails.join(", ")}]`);
   } else if (hasLightPhonon) {
     score += 0.05;
     reasoning.push("Has light phonon element but no active TM");
@@ -462,6 +490,56 @@ function runSelfCritique(formula: string, predictedTc: number, previousStages: D
   const flags: string[] = [];
   let score = 0.5;
 
+  const elements = parseFormulaCounts(formula);
+  const elKeys = Array.from(elements.keys());
+
+  const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);
+  const HIGHLY_RADIOACTIVE = new Set(["Tc", "Pm", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Pa", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr"]);
+  const INCOMPATIBLE_PAIRS: [string, string, string][] = [
+    ["F", "Na", "Fully ionic NaF — no metallic character possible"],
+    ["F", "K", "Fully ionic KF — no conduction electrons"],
+    ["F", "Cs", "Fully ionic CsF — insulator"],
+    ["Cl", "Na", "Fully ionic NaCl — prototypical insulator"],
+  ];
+
+  const nobleGasElements = elKeys.filter(e => NOBLE_GASES.has(e));
+  if (nobleGasElements.length > 0) {
+    score -= 0.5;
+    flags.push(`Contains noble gas (${nobleGasElements.join(", ")}) — closed-shell, chemically inert, cannot participate in Cooper pairing`);
+    return {
+      name: "Self-Critique",
+      score: Math.max(0, score),
+      weight: STAGE_WEIGHTS.selfCritique,
+      reasoning: [...reasoning, ...flags.map(f => `FLAG: ${f}`)],
+      verdict: "reject",
+    };
+  }
+
+  const radioactiveElements = elKeys.filter(e => HIGHLY_RADIOACTIVE.has(e));
+  if (radioactiveElements.length > 0) {
+    score -= 0.25;
+    flags.push(`Contains highly radioactive element (${radioactiveElements.join(", ")}) — impractical for experimental validation, lattice damage from decay`);
+    reasoning.push(`CAUTION: Radioactive elements present — synthesis and measurement are extremely challenging`);
+  }
+
+  for (const [el1, el2, reason] of INCOMPATIBLE_PAIRS) {
+    if (elKeys.includes(el1) && elKeys.includes(el2) && elKeys.length === 2) {
+      score -= 0.3;
+      flags.push(`Incompatible binary: ${el1}-${el2} — ${reason}`);
+      reasoning.push(`CAUTION: ${el1}-${el2} binary is a known insulator`);
+    }
+  }
+
+  const strongHalides = ["F", "Cl"].filter(e => elKeys.includes(e));
+  if (strongHalides.length > 0) {
+    const halideFraction = strongHalides.reduce((s, e) => s + (elements.get(e) ?? 0), 0) /
+      Math.max(1, Array.from(elements.values()).reduce((s, n) => s + n, 0));
+    if (halideFraction > 0.4) {
+      score -= 0.15;
+      flags.push(`High halide content (${(halideFraction * 100).toFixed(0)}% F/Cl) — strongly electronegative, likely ionic insulator`);
+    }
+  }
+
   const family = classifyFamily(formula);
   const knownFamily = KNOWN_HIGH_TC_FAMILIES[family];
 
@@ -548,12 +626,16 @@ export async function deliberateOnCandidate(
 ): Promise<DeliberationResult> {
   const startTime = Date.now();
 
-  const chemistryStage = runChemistryReasoning(formula, predictedTc, mlFeatures);
-  const physicsStage = runPhysicsMerit(formula, predictedTc, mlFeatures);
-  const riskStage = runRiskAssessment(formula, predictedTc, mlFeatures);
+  const [comparativeStage, syncStages] = await Promise.all([
+    runComparativeRanking(formula, predictedTc),
+    Promise.resolve({
+      chemistry: runChemistryReasoning(formula, predictedTc, mlFeatures),
+      physics: runPhysicsMerit(formula, predictedTc, mlFeatures),
+      risk: runRiskAssessment(formula, predictedTc, mlFeatures),
+    }),
+  ]);
 
-  const comparativeStage = await runComparativeRanking(formula, predictedTc);
-
+  const { chemistry: chemistryStage, physics: physicsStage, risk: riskStage } = syncStages;
   const priorStages = [chemistryStage, physicsStage, comparativeStage, riskStage];
   const selfCritiqueStage = runSelfCritique(formula, predictedTc, priorStages);
 
@@ -569,11 +651,14 @@ export async function deliberateOnCandidate(
   const totalWeight = allStages.reduce((sum, s) => sum + s.weight, 0);
   const deliberationScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
 
-  const rejectStages = allStages.filter(s => s.verdict === "reject").length;
+  const rejectStages = allStages.filter(s => s.verdict === "reject");
+  const rejectCount = rejectStages.length;
   const strongStages = allStages.filter(s => s.verdict === "strong").length;
+  const CRITICAL_STAGES = new Set(["Chemistry Reasoning", "Physics Merit", "Self-Critique"]);
+  const hasCriticalReject = rejectStages.some(s => CRITICAL_STAGES.has(s.name));
 
   let verdict: "accept" | "borderline" | "reject";
-  if (rejectStages >= 2 || deliberationScore < 0.25) {
+  if (hasCriticalReject || rejectCount >= 2 || deliberationScore < 0.25) {
     verdict = "reject";
   } else if (deliberationScore >= 0.50 || strongStages >= 3) {
     verdict = "accept";
@@ -615,5 +700,9 @@ export function formatDeliberationSummary(result: DeliberationResult): string {
   const stagesSummary = result.stages
     .map(s => `${s.name}=${s.score.toFixed(2)}(${s.verdict})`)
     .join(", ");
-  return `[Deliberation] ${result.formula}: score=${result.deliberationScore.toFixed(3)}, verdict=${result.verdict}, confidence=${result.confidenceLevel.toFixed(2)}, rank=#${result.comparativeRank ?? "?"}, novelty=${result.estimatedNovelty.toFixed(2)} | ${stagesSummary}`;
+  const noveltyLabel = result.estimatedNovelty >= 0.8 ? "HIGH" : result.estimatedNovelty >= 0.5 ? "MODERATE" : "LOW";
+  const noveltyNote = result.estimatedNovelty >= 0.7 && result.verdict !== "reject"
+    ? ` [HIGH-NOVELTY: worth investigating despite ${result.verdict} verdict]`
+    : "";
+  return `[Deliberation] ${result.formula}: score=${result.deliberationScore.toFixed(3)}, verdict=${result.verdict}, confidence=${result.confidenceLevel.toFixed(2)}, rank=#${result.comparativeRank ?? "?"}, novelty=${result.estimatedNovelty.toFixed(2)}(${noveltyLabel})${noveltyNote} | ${stagesSummary}`;
 }
