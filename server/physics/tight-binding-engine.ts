@@ -1006,9 +1006,25 @@ export function computeTBProperties(formula: string, pressure: number = 0, custo
   if (pressure > 0) {
     const avgBulk = getCompositionWeightedProperty(counts, "bulkModulus") ?? 100;
     const compressionRatio = Math.cbrt(1.0 / (1.0 + pressure / (avgBulk * 3)));
-    dosAtEF *= (1.0 + 0.3 * pressure / 100);
-    lambdaProxy *= (1.0 + 0.5 * pressure / 100) * Math.pow(1.0 / compressionRatio, 2);
-    hopfieldEta *= (1.0 + 0.2 * pressure / 100);
+
+    const hFrac = (counts["H"] || 0) / (Object.values(counts).reduce((s, n) => s + n, 0) || 1);
+    const isHydrideRich = hFrac > 0.5;
+    const hasVanHove = flatBandResult.vanHoveProximity > 0.3;
+
+    if (isHydrideRich) {
+      const vhBoost = hasVanHove ? 0.3 : 0.15;
+      dosAtEF *= (1.0 + vhBoost * pressure / 100);
+      lambdaProxy *= (1.0 + 0.5 * pressure / 100) * Math.pow(1.0 / compressionRatio, 2);
+      hopfieldEta *= (1.0 + 0.2 * pressure / 100);
+    } else {
+      const bandBroadening = 1.0 / (1.0 + 0.15 * pressure / 100);
+      dosAtEF *= bandBroadening;
+      if (hasVanHove && pressure > 20) {
+        dosAtEF *= (1.0 + 0.1 * flatBandResult.vanHoveProximity * pressure / 100);
+      }
+      lambdaProxy *= Math.pow(1.0 / compressionRatio, 2);
+      hopfieldEta *= bandBroadening;
+    }
   }
 
   const computeTimeMs = Date.now() - start;
