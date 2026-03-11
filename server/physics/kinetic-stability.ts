@@ -379,21 +379,35 @@ function computePressureStabilization(formula: string, eAboveHull: number): Pres
   const hasH = elements.includes("H");
   const hFraction = hasH ? (counts["H"] || 0) / totalAtoms : 0;
 
-  const minPressureGPa = eAboveHull > 0
-    ? eAboveHull * avgBulkModulus * 0.5 + (hasH ? hFraction * 50 : 0)
-    : 0;
+  const Bprime = 4.0;
+  const V0perAtom = Math.pow(avgMass / 5.0, 1.0 / 3.0) * 2.5;
+  const deltaVfrac = hasH ? 0.05 + hFraction * 0.15 : 0.03;
+  const deltaV = V0perAtom * deltaVfrac;
+
+  let minPressureGPa: number;
+  if (eAboveHull > 0) {
+    const eAboveHullGPaA3 = eAboveHull * 160.218;
+    const pMurnaghan = (avgBulkModulus / Bprime) *
+      (Math.pow(1 + eAboveHullGPaA3 / (avgBulkModulus * deltaV), Bprime) - 1);
+    const hCorrection = hasH ? hFraction * 30 : 0;
+    minPressureGPa = Math.min(500, pMurnaghan + hCorrection);
+  } else {
+    minPressureGPa = 0;
+  }
 
   const diffusionBarrierEv = avgMp * kB * 18 * (hasH ? 0.7 : 1.0);
   const kineticTrappingEnergy = diffusionBarrierEv - eAboveHull;
 
   const decompressionPrefactor = avgBulkModulus * 0.001;
-  const trappingFactor = Math.max(0, kineticTrappingEnergy) / Math.max(eAboveHull, 0.01);
+  const trappingFactor = Math.min(100, Math.max(0, kineticTrappingEnergy) / Math.max(eAboveHull, 0.01));
   const hMobilityPenalty = hasH ? Math.exp(-hFraction * 2.5) : 1.0;
 
-  const criticalDecompRate = decompressionPrefactor
+  const criticalDecompRate = Math.min(1000,
+    decompressionPrefactor
     * Math.pow(trappingFactor, 1.5)
     * hMobilityPenalty
-    * (1 + 0.1 * elements.length);
+    * (1 + 0.1 * elements.length)
+  );
 
   const MIN_VIABLE_DECOMP_RATE = 0.5;
 
