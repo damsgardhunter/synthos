@@ -1522,12 +1522,18 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     const enforcedPressure = enforcePhysicsPressure(candidateData.formula, candidateData.pressureGpa);
     const pressureViability = classifyPressureViability(enforcedPressure);
-    const pressureNote = pressureViability.penalty > 0
-      ? ` [Pressure: ${pressureViability.label}, ${enforcedPressure} GPa, viability penalty=${pressureViability.penalty.toFixed(2)}]`
-      : "";
+
+    const isPressureExplorationContext = explorationModeActive || (enforcedPressure > 50 && (candidateData as any)._pressureExplorationTier === true);
+    const effectivePressurePenalty = isPressureExplorationContext ? 0 : pressureViability.penalty;
+
+    const pressureNote = effectivePressurePenalty > 0
+      ? ` [Pressure: ${pressureViability.label}, ${enforcedPressure} GPa, viability penalty=${effectivePressurePenalty.toFixed(2)}]`
+      : isPressureExplorationContext && pressureViability.penalty > 0
+        ? ` [Pressure: ${pressureViability.label}, ${enforcedPressure} GPa, penalty waived (exploration)]`
+        : "";
 
     const adjustedEnsemble = candidateData.ensembleScore != null
-      ? Math.max(0, (candidateData.ensembleScore ?? 0) * (1 - pressureViability.penalty))
+      ? Math.max(0, (candidateData.ensembleScore ?? 0) * (1 - effectivePressurePenalty))
       : undefined;
 
     const isHighPressureOnly = enforcedPressure > 50;
@@ -5943,7 +5949,7 @@ async function runLearningCycle() {
       if (shouldRunAL) {
         try {
           console.log(`[Active Learning] Triggered at cycle ${cycleCount} (last AL cycle: ${lastActiveLearningCycle})`);
-          const alStats = await runActiveLearningCycle(emit, { cycleCount });
+          const alStats = await runActiveLearningCycle(emit, { cycleCount, explorationMode: explorationModeActive });
           lastActiveLearningCycle = cycleCount;
           emit("log", {
             phase: "engine",
@@ -6878,6 +6884,7 @@ async function recalculatePhysics() {
             recalcPressure <= 50;
 
           const recalcViability = classifyPressureViability(recalcPressure);
+          const recalcPenalty = explorationModeActive ? 0 : recalcViability.penalty;
 
           await storage.updateSuperconductorCandidate(c.id, {
             predictedTc: newTc,
@@ -6885,7 +6892,7 @@ async function recalculatePhysics() {
             mlFeatures: { ...updatedFeatures, pressureViability: recalcViability.label } as any,
             xgboostScore: gb.score,
             neuralNetScore: nnScore,
-            ensembleScore: Math.max(0, ensemble * (1 - recalcViability.penalty)),
+            ensembleScore: Math.max(0, ensemble * (1 - recalcPenalty)),
             electronPhononCoupling: features.electronPhononLambda ?? null,
             roomTempViable: isRoomTemp,
             ambientPressureStable: recalcPressure <= 50 ? c.ambientPressureStable : false,

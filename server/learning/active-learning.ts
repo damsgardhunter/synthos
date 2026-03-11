@@ -554,14 +554,17 @@ function computeStabilityProbability(candidate: CandidateExt, candidatePressure:
 
 export function selectForDFT(
   candidates: SuperconductorCandidate[],
-  budget: number = 20
+  budget: number = 20,
+  options?: { explorationMode?: boolean }
 ): RankedCandidate[] {
   candidates = candidates.filter(c => isValidFormula(c.formula));
 
-  const pureCuriositySlots = Math.max(1, Math.ceil(budget * 0.20));
-  const pressureExplorationSlots = Math.min(2, Math.ceil(budget * 0.10));
-  const bestTcSlots = Math.min(6, Math.ceil(budget * 0.25));
-  const highUncertaintySlots = Math.min(6, Math.ceil(budget * 0.25));
+  const explore = options?.explorationMode ?? false;
+
+  const pureCuriositySlots = Math.max(1, Math.ceil(budget * (explore ? 0.30 : 0.20)));
+  const pressureExplorationSlots = Math.min(explore ? 4 : 2, Math.ceil(budget * (explore ? 0.15 : 0.10)));
+  const bestTcSlots = Math.min(6, Math.ceil(budget * (explore ? 0.15 : 0.25)));
+  const highUncertaintySlots = Math.min(6, Math.ceil(budget * (explore ? 0.30 : 0.25)));
   ensureSeenCompositionsFromTraining();
 
   const bestTcSoFar = convergenceStats.bestTcFromLoop > 0
@@ -1314,7 +1317,7 @@ async function retrainGNNWithEnrichedData(
 
 export async function runActiveLearningCycle(
   emit: EventEmitter,
-  memory: { cycleCount: number }
+  memory: { cycleCount: number; explorationMode?: boolean }
 ): Promise<ActiveLearningConvergence> {
   emit("log", {
     phase: "active-learning",
@@ -1341,7 +1344,7 @@ export async function runActiveLearningCycle(
     return convergenceStats;
   }
 
-  const selected = selectForDFT(eligibleCandidates, 20);
+  const selected = selectForDFT(eligibleCandidates, 20, { explorationMode: memory.explorationMode });
 
   const avgUncertaintyBefore = selected.length > 0
     ? selected.reduce((sum, r) => sum + r.uncertainty, 0) / selected.length
