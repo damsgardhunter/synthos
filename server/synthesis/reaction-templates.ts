@@ -483,7 +483,8 @@ const REACTION_TEMPLATES: ReactionTemplate[] = [
     precursorStrategy: "mixed",
     applicableFamilies: ["oxide", "pnictide", "chalcogenide", "intermetallic"],
     notes: "Reduces reaction time from days to minutes. Can prevent volatile loss due to rapid heating.",
-  }
+  },
+  
 ];
 
 function computeFamilyMatchScore(template: ReactionTemplate, family: string): number {

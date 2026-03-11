@@ -283,6 +283,34 @@ function genomeVectorToFormula(genomeVec: number[]): string {
     chosenElements[chosenElements.length - 1] = "Nb";
   }
 
+  const ANION_SET = new Set(["O", "S", "Se", "Te", "N", "F", "Cl", "Br"]);
+  const CATION_SET_FN = (el: string) => isTransitionMetal(el) || isRareEarth(el) ||
+    ["Ba", "Sr", "Ca", "Mg", "Al", "Ga", "In", "Sn", "Pb", "Ge", "Si", "Sb", "Bi"].includes(el);
+
+  const anionCount = chosenElements.filter(e => ANION_SET.has(e)).length;
+  const cationCount = chosenElements.filter(e => CATION_SET_FN(e)).length;
+
+  if (cationCount > 0 && anionCount === 0 && !chosenElements.includes("H")) {
+    const anionRanked = elementScores
+      .filter(e => ANION_SET.has(e.el) && !chosenElements.includes(e.el));
+    const bestAnion = anionRanked.length > 0 ? anionRanked[0].el : "O";
+
+    let worstIdx = chosenElements.length - 1;
+    let worstScore = Infinity;
+    for (let i = 0; i < chosenElements.length; i++) {
+      const el = chosenElements[i];
+      if (!CATION_SET_FN(el) && el !== "H") {
+        const sc = elementScores.find(e => e.el === el)?.score ?? 0;
+        if (sc < worstScore) { worstScore = sc; worstIdx = i; }
+      }
+    }
+    if (CATION_SET_FN(chosenElements[worstIdx])) {
+      const nonCationIdx = chosenElements.findIndex(e => !CATION_SET_FN(e) && e !== "H");
+      if (nonCationIdx >= 0) worstIdx = nonCationIdx;
+    }
+    chosenElements[worstIdx] = bestAnion;
+  }
+
   const counts: Record<string, number> = {};
   let remaining = totalAtoms;
 
