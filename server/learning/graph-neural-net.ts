@@ -2962,15 +2962,17 @@ export function getGNNModelVersion(): number {
 const GNN_PRED_CACHE_MAX = 500;
 const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
 
-export function getGNNPrediction(formula: string, structure?: any): GNNPrediction {
+export function getGNNPrediction(formula: string, structure?: any, prototype?: string): GNNPrediction {
   const weights = getGNNModel();
   const currentTrainedAt = modelTrainedAt;
-  const cacheKey = formula;
+  const cacheKey = graphCacheKey(formula, prototype, structure);
   const cached = gnnPredictionCache.get(cacheKey);
   if (cached && cached.trainedAt === currentTrainedAt) {
     return cached.prediction;
   }
-  const graph = buildCrystalGraph(formula, structure);
+  const graph = prototype
+    ? buildPrototypeGraph(formula, prototype)
+    : buildCrystalGraph(formula, structure);
   const prediction = GNNPredict(graph, weights);
   if (gnnPredictionCache.size >= GNN_PRED_CACHE_MAX) {
     const firstKey = gnnPredictionCache.keys().next().value;
