@@ -407,6 +407,26 @@ let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
 let isRunningCycle = false;
+const materialMetadataCache = {
+  materialCount: -1,
+  scCandidateCount: -1,
+  lastSyncMs: 0,
+};
+const METADATA_CACHE_TTL_MS = 30000;
+
+async function syncMaterialMetadataCache(): Promise<void> {
+  const now = Date.now();
+  if (now - materialMetadataCache.lastSyncMs < METADATA_CACHE_TTL_MS) return;
+  try {
+    const [matCount, scCount] = await Promise.all([
+      storage.getMaterialCount(),
+      storage.getSuperconductorCount(),
+    ]);
+    materialMetadataCache.materialCount = matCount;
+    materialMetadataCache.scCandidateCount = scCount;
+    materialMetadataCache.lastSyncMs = now;
+  } catch {}
+}
 let phase7Offset = 0;
 let currentStrategyHint: string | null = null;
 let currentStrategyFocusAreas: { area: string; priority: number }[] = [];
@@ -812,17 +832,20 @@ async function runPhase3_Bonding() {
   broadcast("taskStart", { task: "Bonding Analysis" });
   try {
     const mats = await storage.getMaterials(200, 0);
-    if (mats.length === 0) return;
+    if (mats.length === 0 || !shouldContinue()) return;
 
     await updatePhaseStatus(3, "active", 0, 0);
     if (!shouldContinue()) return;
     const insights = await analyzeBondingPatterns(emit, mats);
+    if (!shouldContinue()) return;
     allInsights.push(...insights);
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(3, insights);
+    if (!shouldContinue()) return;
     const formulas = mats.slice(0, 5).map(m => m.formula);
     await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas);
+    if (!shouldContinue()) return;
     const phase3 = await storage.getLearningPhaseById(3);
     const totalBondingInsights = (phase3?.insights ?? []).length;
     const progress = computeProgress(3, totalBondingInsights);
@@ -839,17 +862,20 @@ async function runPhase4_Materials() {
   broadcast("taskStart", { task: "Data Fetching" });
   try {
     await updatePhaseStatus(4, "active", 0, 0);
+    if (!shouldContinue()) return;
 
     const [oqmdCount, elementCount, knownCount] = await Promise.all([
       fetchOQMDMaterials(emit, 10, getNextOQMDOffset()),
       fetchElementFocusedMaterials(emit),
       fetchKnownMaterials(emit),
     ]);
+    if (!shouldContinue()) return;
 
     const total = oqmdCount + elementCount + knownCount;
     totalMaterialsFetched += total;
 
-    const matCount = await storage.getMaterialCount();
+    const matCount = materialMetadataCache.materialCount >= 0 ? materialMetadataCache.materialCount + total : await storage.getMaterialCount();
+    materialMetadataCache.materialCount = matCount;
     const progress = computeProgress(4, matCount);
     await updatePhaseStatus(4, "active", progress, matCount);
   } finally {
@@ -878,7 +904,7 @@ async function runPhase5_Prediction() {
     const phase5 = await storage.getLearningPhaseById(5);
     const totalPredInsights = (phase5?.insights ?? []).length;
     const crCount5 = await storage.getComputationalResultCount();
-    const scCount5 = await storage.getSuperconductorCount();
+    const scCount5 = materialMetadataCache.scCandidateCount >= 0 ? materialMetadataCache.scCandidateCount : await storage.getSuperconductorCount();
     const predictionWork = totalPredInsights + crCount5 + scCount5;
     const progress5 = computeProgress(5, predictionWork);
     await updatePhaseStatus(5, "active", progress5, predictionWork);
@@ -920,15 +946,17 @@ async function runPhase7_Superconductor() {
     await updatePhaseStatus(7, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const matTotal = await storage.getMaterialCount();
+    const matTotal = materialMetadataCache.materialCount >= 0 ? materialMetadataCache.materialCount : await storage.getMaterialCount();
     if (matTotal > 0) {
       phase7Offset = phase7Offset % matTotal;
     }
+    if (!shouldContinue()) return;
     const result = await runSuperconductorResearch(emit, allInsights.slice(-15), phase7Offset, {
       strategyFocusAreas: currentStrategyFocusAreas.length > 0 ? currentStrategyFocusAreas : undefined,
       familyCounts: Object.keys(currentFamilyCounts).length > 0 ? currentFamilyCounts : undefined,
       stagnationInfo: lastBestTcSeen > 0 ? { cyclesSinceImproved: cyclesSinceTcImproved, currentBestTc: lastBestTcSeen } : undefined,
     });
+    if (!shouldContinue()) return;
     phase7Offset += 200;
     totalScCandidates += result.generated;
     if (result.duplicatesSkipped > 0) {
@@ -938,7 +966,9 @@ async function runPhase7_Superconductor() {
     totalInsightsGenerated += result.insights.length;
 
     await addInsightsToPhase(7, result.insights);
+    if (!shouldContinue()) return;
     await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research");
+    if (!shouldContinue()) return;
 
     if (cycleCount % 5 === 0 && shouldContinue()) {
       try {
@@ -5579,6 +5609,7 @@ async function runLearningCycle() {
   recentNewCandidates = 0;
   recentTcImproved = false;
   recentLogCache.clear();
+  await syncMaterialMetadataCache();
   broadcast("cycleStart", { cycle: cycleCount });
 
   let cycleStartDetail = "";
