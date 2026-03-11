@@ -195,16 +195,33 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-function initMatrix(rows: number, cols: number, rng: () => number, scale = 0.1): number[][] {
+function initMatrix(rows: number, cols: number, rng: () => number, scale?: number): number[][] {
+  const heScale = scale ?? Math.sqrt(2.0 / cols);
   const m: number[][] = [];
   for (let i = 0; i < rows; i++) {
     const row: number[] = [];
     for (let j = 0; j < cols; j++) {
-      row.push((rng() - 0.5) * 2 * scale);
+      row.push((rng() - 0.5) * 2 * heScale);
     }
     m.push(row);
   }
   return m;
+}
+
+function layerNorm(vec: number[], eps: number = 1e-5): number[] {
+  const n = vec.length;
+  if (n === 0) return vec;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += vec[i];
+  mean /= n;
+  let variance = 0;
+  for (let i = 0; i < n; i++) {
+    const d = vec[i] - mean;
+    variance += d * d;
+  }
+  variance /= n;
+  const std = Math.sqrt(variance + eps);
+  return vec.map(v => (v - mean) / std);
 }
 
 function initVector(size: number, val = 0): number[] {
@@ -1021,13 +1038,13 @@ export function attentionMessagePassingLayer(
       continue;
     }
 
-    const query = matVecMul(W_query, padded[i]);
+    const query = layerNorm(matVecMul(W_query, padded[i]));
 
     const attentionScores: number[] = [];
     const messages: number[][] = [];
 
     for (const j of neighbors) {
-      const key = matVecMul(W_key, padded[j]);
+      const key = layerNorm(matVecMul(W_key, padded[j]));
       let score = dotProduct(query, key) / scaleFactor;
 
       const edgeFeats = edgeMap.get(`${i}-${j}`) ?? edgeMap.get(`${j}-${i}`);
@@ -1276,33 +1293,33 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
 function initWeights(rng: () => number): GNNWeights {
   return {
-    W_message: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
-    W_message2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update2: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
-    W_message3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update3: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
-    W_message4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.15),
-    W_update4: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.15),
-    W_attn_query: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_key: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_query2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_key2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_query3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_query4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_key4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_conv_gate: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_conv_value: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
+    W_message: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
+    W_message2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_update2: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
+    W_message3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_update3: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
+    W_message4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_update4: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
+    W_attn_query: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_key: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_query2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_key2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_query3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_query4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_attn_key4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
+    W_conv_gate: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_conv_value: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
     b_conv_gate: initVector(HIDDEN_DIM),
     b_conv_value: initVector(HIDDEN_DIM),
-    W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0.1),
-    W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 0.2),
-    W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng, 0.1),
+    W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
+    W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
     b_mlp1: initVector(HIDDEN_DIM),
-    W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.1),
+    W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng),
     b_mlp2: initVector(OUTPUT_DIM),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
     b_mlp2_var: initVector(OUTPUT_DIM, -2.0),

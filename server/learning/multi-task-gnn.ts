@@ -43,12 +43,13 @@ interface MultiTaskWeights {
 const HIDDEN = 28;
 const HEADS = 6;
 
-function initMatrix(rows: number, cols: number, scale: number = 0.1): number[][] {
+function initMatrix(rows: number, cols: number, scale?: number): number[][] {
+  const heScale = scale ?? Math.sqrt(2.0 / cols);
   const m: number[][] = [];
   for (let i = 0; i < rows; i++) {
     const row: number[] = [];
     for (let j = 0; j < cols; j++) {
-      row.push((Math.random() - 0.5) * 2 * scale);
+      row.push((Math.random() - 0.5) * 2 * heScale);
     }
     m.push(row);
   }
@@ -87,17 +88,17 @@ function getMultiTaskWeights(): MultiTaskWeights {
   if (multiTaskWeights) return multiTaskWeights;
 
   multiTaskWeights = {
-    W_band: initMatrix(HEADS, HIDDEN, 0.12),
+    W_band: initMatrix(HEADS, HIDDEN),
     b_band: initVector(HEADS),
-    W_dos: initMatrix(HEADS, HIDDEN, 0.12),
+    W_dos: initMatrix(HEADS, HIDDEN),
     b_dos: initVector(HEADS),
-    W_elastic: initMatrix(HEADS, HIDDEN, 0.12),
+    W_elastic: initMatrix(HEADS, HIDDEN),
     b_elastic: initVector(HEADS),
-    W_magnetic: initMatrix(HEADS, HIDDEN, 0.12),
+    W_magnetic: initMatrix(HEADS, HIDDEN),
     b_magnetic: initVector(HEADS),
-    W_phonon_detail: initMatrix(HEADS, HIDDEN, 0.12),
+    W_phonon_detail: initMatrix(HEADS, HIDDEN),
     b_phonon_detail: initVector(HEADS),
-    W_topology: initMatrix(HEADS, HIDDEN, 0.12),
+    W_topology: initMatrix(HEADS, HIDDEN),
     b_topology: initVector(HEADS),
   };
 
