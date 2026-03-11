@@ -370,6 +370,35 @@ function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFi
     reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} <= 1.0 (insufficient DOS for Kagome superconductivity)`);
   }
 
+  const totalAtoms = getTotalAtoms(counts);
+  let totalValence = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const d = getElementData(el);
+    if (d) {
+      totalValence += (d.valenceElectrons ?? 0) * n;
+    }
+  }
+  const vecPerSite = totalAtoms > 0 ? totalValence / totalAtoms : 0;
+  const kagomeFilling5_12 = 5 / 12;
+  const kagomeFilling3_4 = 3 / 4;
+  const fracFilling = vecPerSite > 0 ? (vecPerSite % 1) : 0;
+  const dist5_12 = Math.abs(fracFilling - kagomeFilling5_12);
+  const dist3_4 = Math.abs(fracFilling - kagomeFilling3_4);
+  const minFillingDist = Math.min(dist5_12, dist3_4);
+  if (minFillingDist < 0.05) {
+    score += 0.15;
+    const matchType = dist5_12 < dist3_4 ? "5/12" : "3/4";
+    reasons.push(`VEC filling ${fracFilling.toFixed(3)} near Kagome ${matchType} VHS (dist=${minFillingDist.toFixed(3)}): symmetry-match bonus`);
+  } else if (minFillingDist < 0.10) {
+    score += 0.05;
+    reasons.push(`VEC filling ${fracFilling.toFixed(3)} moderately near Kagome VHS (dist=${minFillingDist.toFixed(3)})`);
+  }
+
+  if (features.bandFlatness > 0.5) {
+    score += 0.10;
+    reasons.push(`Flat band indicator = ${features.bandFlatness.toFixed(2)} > 0.5 (Kagome flat band character)`);
+  }
+
   const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
   if (is2DLike) {
     score += 0.15;
@@ -386,7 +415,10 @@ function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFi
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.5 (weak electron-phonon coupling)`);
   }
 
-  if (features.metallicity < 0.3) {
+  if (features.metallicity < 0.1 && features.mottProximityScore > 0.5) {
+    score -= 0.05;
+    reasons.push(`Near-Mott insulator (metallicity=${features.metallicity.toFixed(2)}, Mott proximity=${features.mottProximityScore.toFixed(2)}): may superconduct upon doping`);
+  } else if (features.metallicity < 0.3) {
     score -= 0.20;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for Kagome metal (heavy score penalty)`);
   } else if (features.metallicity < 0.4) {
@@ -457,7 +489,10 @@ function applyMixedMechanismFilter(formula: string, features: MLFeatureVector): 
     reasons.push(`Limited 2D character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
 
-  if (features.metallicity < 0.2) {
+  if (features.metallicity < 0.1 && features.mottProximityScore > 0.5) {
+    score -= 0.05;
+    reasons.push(`Near-Mott insulator (metallicity=${features.metallicity.toFixed(2)}, Mott proximity=${features.mottProximityScore.toFixed(2)}): may superconduct upon doping`);
+  } else if (features.metallicity < 0.2) {
     score -= 0.20;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for mixed-mechanism superconductor (heavy score penalty)`);
   } else if (features.metallicity < 0.3) {
@@ -499,9 +534,14 @@ function applyLayeredChalcogenideFilter(formula: string, features: MLFeatureVect
   }
 
   const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
+  const isPerfectly2D = features.dimensionalityScore >= 0.95 && features.layeredStructure;
   if (is2DLike) {
     score += 0.25;
     reasons.push(`2D/layered character detected (dimensionality=${features.dimensionalityScore.toFixed(2)}, layered=${features.layeredStructure})`);
+    if (isPerfectly2D) {
+      score += 0.05;
+      reasons.push(`Perfectly layered (2H-polytype regime): strong CDW/SC competition expected — Tc may be suppressed by CDW ordering`);
+    }
   } else {
     reasons.push(`Limited 2D character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
@@ -514,6 +554,10 @@ function applyLayeredChalcogenideFilter(formula: string, features: MLFeatureVect
     reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} <= 1.0 (insufficient density of states)`);
   }
 
+  if (features.nestingScore > 0.7 && isPerfectly2D) {
+    reasons.push(`High nesting (${features.nestingScore.toFixed(2)}) in perfectly layered system: CDW instability likely competes with SC — observed Tc may be lower than predicted`);
+  }
+
   if (features.electronPhononLambda >= 0.4) {
     score += 0.20;
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} >= 0.4 (adequate electron-phonon coupling for layered chalcogenide)`);
@@ -522,7 +566,10 @@ function applyLayeredChalcogenideFilter(formula: string, features: MLFeatureVect
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.4 (weak electron-phonon coupling)`);
   }
 
-  if (features.metallicity < 0.2) {
+  if (features.metallicity < 0.1 && features.mottProximityScore > 0.5) {
+    score -= 0.05;
+    reasons.push(`Near-Mott insulator (metallicity=${features.metallicity.toFixed(2)}, Mott proximity=${features.mottProximityScore.toFixed(2)}): may superconduct upon doping`);
+  } else if (features.metallicity < 0.2) {
     score -= 0.20;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for metallic chalcogenide (heavy score penalty)`);
   } else if (features.metallicity < 0.3) {
@@ -594,6 +641,14 @@ function applyLayeredPnictideFilter(formula: string, features: MLFeatureVector):
     reasons.push(`DOS(EF) = ${features.dosAtEF.toFixed(2)} <= 0.8 (insufficient DOS for pnictide SC)`);
   }
 
+  if (features.fermiSurfaceNestingScore > 0.7) {
+    score += 0.15;
+    reasons.push(`FS nesting score = ${features.fermiSurfaceNestingScore.toFixed(2)} > 0.7 (strong (pi,pi) nesting — definitive pnictide pairing signature)`);
+  } else if (features.fermiSurfaceNestingScore > 0.4) {
+    score += 0.05;
+    reasons.push(`FS nesting score = ${features.fermiSurfaceNestingScore.toFixed(2)} > 0.4 (moderate nesting)`);
+  }
+
   const is2DLike = features.dimensionalityScore >= 0.6 || features.layeredStructure;
   if (is2DLike) {
     score += 0.20;
@@ -603,7 +658,10 @@ function applyLayeredPnictideFilter(formula: string, features: MLFeatureVector):
     reasons.push(`No layered character detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
 
-  if (features.metallicity < 0.2) {
+  if (features.metallicity < 0.1 && features.mottProximityScore > 0.5) {
+    score -= 0.05;
+    reasons.push(`Near-Mott insulator (metallicity=${features.metallicity.toFixed(2)}, Mott proximity=${features.mottProximityScore.toFixed(2)}): parent may superconduct upon doping`);
+  } else if (features.metallicity < 0.2) {
     score -= 0.20;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for pnictide superconductor (heavy score penalty)`);
   } else if (features.metallicity < 0.3) {
@@ -674,7 +732,10 @@ function applyIntercalatedLayeredFilter(formula: string, features: MLFeatureVect
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.3 (insufficient electron-phonon coupling)`);
   }
 
-  if (features.metallicity < 0.2) {
+  if (features.metallicity < 0.1 && features.mottProximityScore > 0.5) {
+    score -= 0.05;
+    reasons.push(`Near-Mott insulator (metallicity=${features.metallicity.toFixed(2)}, Mott proximity=${features.mottProximityScore.toFixed(2)}): may superconduct upon doping/intercalation`);
+  } else if (features.metallicity < 0.2) {
     score -= 0.20;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for intercalated superconductor (heavy score penalty)`);
   } else if (features.metallicity < 0.3) {
