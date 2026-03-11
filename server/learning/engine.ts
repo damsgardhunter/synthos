@@ -652,13 +652,17 @@ function generateStatusMessage(): string {
   return `Exploring ${topFocus.toLowerCase()} chemical space`;
 }
 
+const MAX_WS_BUFFERED = 64 * 1024;
+
 function broadcast(type: string, data: any) {
   if (!wss) return;
   const msg = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(msg);
-    }
+    try {
+      if (client.readyState === WebSocket.OPEN && client.bufferedAmount < MAX_WS_BUFFERED) {
+        client.send(msg);
+      }
+    } catch {}
   });
 }
 
@@ -761,13 +765,38 @@ async function updatePhaseStatus(phaseId: number, status: string, progress: numb
   }
 }
 
+function insightNoveltyScore(s: string): number {
+  let score = 0;
+  const novelMatch = s.match(/\[NOVEL (\d+)%\]/);
+  if (novelMatch) score += parseInt(novelMatch[1], 10) / 100;
+  if (/\d+(\.\d+)?\s*K/i.test(s)) score += 0.3;
+  if (/Tc|lambda|λ|superconducti/i.test(s)) score += 0.2;
+  if (/GPa|pressure/i.test(s)) score += 0.1;
+  return score;
+}
+
 async function addInsightsToPhase(phaseId: number, newInsights: string[]) {
   if (newInsights.length === 0) return;
   try {
     const phase = await storage.getLearningPhaseById(phaseId);
     if (!phase) return;
     const existing = phase.insights ?? [];
-    const combined = [...existing, ...newInsights.map(s => sanitizeForbiddenWords(s))].slice(-20);
+    const sanitized = newInsights.map(s => sanitizeForbiddenWords(s));
+    const all = [...existing, ...sanitized];
+    let combined: string[];
+    if (all.length > 20) {
+      const scored = all.map(s => ({ s, score: insightNoveltyScore(s) }));
+      scored.sort((a, b) => b.score - a.score);
+      const kept = scored.slice(0, 15).map(x => x.s);
+      const recent = all.slice(-5);
+      const keptSet = new Set(kept);
+      for (const r of recent) {
+        if (!keptSet.has(r)) { kept.push(r); keptSet.add(r); }
+      }
+      combined = kept.slice(0, 20);
+    } else {
+      combined = all;
+    }
     await storage.upsertLearningPhase({
       ...phase,
       insights: combined,
