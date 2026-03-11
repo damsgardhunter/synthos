@@ -131,6 +131,7 @@ const NODE_DIM = 32;
 const HIDDEN_DIM = 48;
 const EDGE_DIM = 24;
 const OUTPUT_DIM = 16;
+const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
 const MC_DROPOUT_RATE = 0.1;
@@ -1313,12 +1314,16 @@ export function cgcnnConvolutionLayer(
       if (cutoffWeight <= 0) continue;
 
       const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
-      const edgeTrunc = edgeVec.slice(0, HIDDEN_DIM);
-      while (edgeTrunc.length < HIDDEN_DIM) edgeTrunc.push(0);
 
-      const concat: number[] = new Array(HIDDEN_DIM);
+      const concat: number[] = new Array(CGCNN_CONCAT_DIM);
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        concat[k] = (embeddings[i][k] ?? 0) + (embeddings[j][k] ?? 0) + (edgeTrunc[k] ?? 0);
+        concat[k] = embeddings[i][k] ?? 0;
+      }
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        concat[HIDDEN_DIM + k] = embeddings[j][k] ?? 0;
+      }
+      for (let k = 0; k < EDGE_DIM; k++) {
+        concat[HIDDEN_DIM * 2 + k] = edgeVec[k] ?? 0;
       }
 
       const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
@@ -1372,7 +1377,6 @@ export function attentionMessagePassingLayer(
   });
 
   const newEmbeddings: number[][] = [];
-  const scaleFactor = Math.sqrt(HIDDEN_DIM);
   const updateActivation = useLeakyMsg ? leakyRelu : relu;
 
   const edgeFeatMap = new Map<number, number[]>();
@@ -1395,7 +1399,7 @@ export function attentionMessagePassingLayer(
 
     for (const j of neighbors) {
       const key = layerNorm(matVecMul(W_key, padded[j]));
-      let score = dotProduct(query, key) / scaleFactor;
+      let score = dotProduct(query, key);
 
       const edgeFeats = edgeFeatMap.get(canonicalEdgeKey(i, j));
       if (edgeFeats) {
@@ -1671,8 +1675,8 @@ function initWeights(rng: () => number): GNNWeights {
     W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
     W_attn_query4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
     W_attn_key4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
-    W_conv_gate: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
-    W_conv_value: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_conv_gate: initMatrix(HIDDEN_DIM, CGCNN_CONCAT_DIM, rng),
+    W_conv_value: initMatrix(HIDDEN_DIM, CGCNN_CONCAT_DIM, rng),
     b_conv_gate: initVector(HIDDEN_DIM),
     b_conv_value: initVector(HIDDEN_DIM),
     W_input_proj: initMatrix(HIDDEN_DIM, NODE_DIM, rng, Math.sqrt(2.0 / NODE_DIM)),
@@ -1714,6 +1718,8 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_conv_value: w.W_conv_value.map(r => [...r]),
     b_conv_gate: [...w.b_conv_gate],
     b_conv_value: [...w.b_conv_value],
+    W_input_proj: w.W_input_proj.map(r => [...r]),
+    b_input_proj: [...w.b_input_proj],
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
     W_attn_pool: w.W_attn_pool.map(r => [...r]),
@@ -1899,10 +1905,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
     weights.W_attn_query, weights.W_attn_key, weights.W_attn_query2, weights.W_attn_key2,
     weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
-    weights.W_conv_gate, weights.W_conv_value, weights.W_3body, weights.W_3body_update,
+    weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
   ]) { scrubMatrix(wMat); }
-  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.W_pressure]) {
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure]) {
     scrubVector(bVec);
   }
 
@@ -2175,6 +2181,7 @@ function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWei
   perturbMatrix(perturbed.W_attn_key4);
   perturbMatrix(perturbed.W_conv_gate);
   perturbMatrix(perturbed.W_conv_value);
+  perturbMatrix(perturbed.W_input_proj);
   perturbMatrix(perturbed.W_3body);
   perturbMatrix(perturbed.W_3body_update);
   perturbMatrix(perturbed.W_attn_pool);
