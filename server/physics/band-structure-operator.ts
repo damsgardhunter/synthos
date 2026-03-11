@@ -62,6 +62,7 @@ export interface VHSPositionEntry {
   refinedKFraction?: number;
   vhsClass?: "M0" | "M1" | "M2" | "flat";
   localCurvatures?: [number, number];
+  vhs3DConfidence?: number;
 }
 
 export interface DerivedQuantities {
@@ -675,6 +676,7 @@ function refineVHSByQuadraticInterpolation(
   confirmed: boolean;
   vhsClass: "M0" | "M1" | "M2" | "flat";
   localCurvatures: [number, number];
+  vhs3DConfidence: number;
 } {
   const N_REFINE = 4;
   const iLow = Math.max(0, candidateIdx - N_REFINE);
@@ -753,7 +755,33 @@ function refineVHSByQuadraticInterpolation(
   }
 
   const nearFermi = Math.abs(refinedE - fermiEnergy) < 0.25;
-  const confirmed = nearFermi && (absCurv < 5.0 || vhsClass === "flat" || vhsClass === "M1");
+
+  let vhs3DConfidence = 0;
+  if (nearFermi) {
+    if (vhsClass === "M1") {
+      vhs3DConfidence = 0.7;
+      if (leftCurv * rightCurv < 0) {
+        vhs3DConfidence += 0.15;
+      }
+    } else if (vhsClass === "flat") {
+      vhs3DConfidence = 0.5;
+    } else if (vhsClass === "M0" || vhsClass === "M2") {
+      vhs3DConfidence = 0.25;
+    }
+
+    const curvRatio = Math.abs(leftCurv) > 1e-8 && Math.abs(rightCurv) > 1e-8
+      ? Math.min(Math.abs(leftCurv), Math.abs(rightCurv)) / Math.max(Math.abs(leftCurv), Math.abs(rightCurv))
+      : 0;
+    if (curvRatio > 0.3 && curvRatio < 0.95) {
+      vhs3DConfidence += 0.10;
+    }
+
+    const eFermiDist = Math.abs(refinedE - fermiEnergy);
+    if (eFermiDist < 0.05) vhs3DConfidence += 0.05;
+  }
+  vhs3DConfidence = Math.min(0.95, vhs3DConfidence);
+
+  const confirmed = nearFermi && vhs3DConfidence >= 0.5;
 
   return {
     refinedEnergy: Number(refinedE.toFixed(6)),
@@ -761,6 +789,7 @@ function refineVHSByQuadraticInterpolation(
     confirmed,
     vhsClass,
     localCurvatures,
+    vhs3DConfidence: Number(vhs3DConfidence.toFixed(4)),
   };
 }
 
@@ -796,6 +825,7 @@ function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsP
           refinedKFraction: refined.refinedKFraction,
           vhsClass: refined.vhsClass,
           localCurvatures: refined.localCurvatures,
+          vhs3DConfidence: refined.vhs3DConfidence,
         });
       }
     }
@@ -803,6 +833,17 @@ function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsP
 
   return vhsPositions;
 }
+
+function nestingBinKey(q: [number, number, number], binWidth: number): string {
+  return q.map(v => Math.round(v / binWidth) * binWidth).join(",");
+}
+
+function nestingBinCenter(q: [number, number, number], binWidth: number): [number, number, number] {
+  return q.map(v => Number((Math.round(v / binWidth) * binWidth).toFixed(4))) as [number, number, number];
+}
+
+const MAX_FERMI_CROSSINGS = 200;
+const NESTING_BIN_WIDTH = 0.04;
 
 function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["nestingVectors"] {
   const nesting: DerivedQuantities["nestingVectors"] = [];
@@ -814,44 +855,66 @@ function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["n
     for (let i = 0; i < dispersion.bands.length; i++) {
       const e = dispersion.bands[i].energies[b] ?? 0;
       if (Math.abs(e - dispersion.fermiEnergy) < fermiTol) {
-        const kp = dispersion.kPoints.find(k => k.index === i);
-        if (kp) {
-          let vel = 0;
-          if (i > 0) {
-            const ePrev = dispersion.bands[i - 1]?.energies[b] ?? e;
-            const dk = 1.0 / Math.max(1, dispersion.nKPoints);
-            vel = Math.abs(e - ePrev) / dk;
-          }
-          fermiCrossings.push({ bandIndex: b, kIndex: i, kCoord: kp.coordinates, velocity: vel });
+        let vel = 0;
+        if (i > 0) {
+          const ePrev = dispersion.bands[i - 1]?.energies[b] ?? e;
+          const dk = 1.0 / Math.max(1, dispersion.nKPoints);
+          vel = Math.abs(e - ePrev) / dk;
         }
+        const kIdx = i;
+        const kp = dispersion.kPoints.find(k => k.index === kIdx);
+        const coord: [number, number, number] = kp
+          ? kp.coordinates
+          : [i / Math.max(1, dispersion.nKPoints), 0, 0];
+        fermiCrossings.push({ bandIndex: b, kIndex: kIdx, kCoord: coord, velocity: vel });
       }
     }
+  }
+
+  if (fermiCrossings.length > MAX_FERMI_CROSSINGS) {
+    const stride = Math.ceil(fermiCrossings.length / MAX_FERMI_CROSSINGS);
+    const downsampled: typeof fermiCrossings = [];
+    for (let i = 0; i < fermiCrossings.length; i += stride) {
+      downsampled.push(fermiCrossings[i]);
+    }
+    fermiCrossings.length = 0;
+    fermiCrossings.push(...downsampled);
   }
 
   const totalFermiPoints = fermiCrossings.length;
   if (totalFermiPoints < 2) return nesting;
 
   const qMap = new Map<string, {
-    q: [number, number, number];
+    qCenter: [number, number, number];
     count: number;
     bands: [number, number];
     parallelPairs: number;
+    qSum: [number, number, number];
   }>();
 
   for (let i = 0; i < fermiCrossings.length; i++) {
     for (let j = i + 1; j < fermiCrossings.length; j++) {
       if (fermiCrossings[i].bandIndex === fermiCrossings[j].bandIndex) continue;
-      const q: [number, number, number] = [
-        Number((fermiCrossings[j].kCoord[0] - fermiCrossings[i].kCoord[0]).toFixed(2)),
-        Number((fermiCrossings[j].kCoord[1] - fermiCrossings[i].kCoord[1]).toFixed(2)),
-        Number((fermiCrossings[j].kCoord[2] - fermiCrossings[i].kCoord[2]).toFixed(2)),
+      const rawQ: [number, number, number] = [
+        fermiCrossings[j].kCoord[0] - fermiCrossings[i].kCoord[0],
+        fermiCrossings[j].kCoord[1] - fermiCrossings[i].kCoord[1],
+        fermiCrossings[j].kCoord[2] - fermiCrossings[i].kCoord[2],
       ];
-      const key = q.join(",");
+      const key = nestingBinKey(rawQ, NESTING_BIN_WIDTH);
       if (!qMap.has(key)) {
-        qMap.set(key, { q, count: 0, bands: [fermiCrossings[i].bandIndex, fermiCrossings[j].bandIndex], parallelPairs: 0 });
+        qMap.set(key, {
+          qCenter: nestingBinCenter(rawQ, NESTING_BIN_WIDTH),
+          count: 0,
+          bands: [fermiCrossings[i].bandIndex, fermiCrossings[j].bandIndex],
+          parallelPairs: 0,
+          qSum: [0, 0, 0],
+        });
       }
       const entry = qMap.get(key)!;
       entry.count++;
+      entry.qSum[0] += rawQ[0];
+      entry.qSum[1] += rawQ[1];
+      entry.qSum[2] += rawQ[2];
 
       const vi = fermiCrossings[i].velocity;
       const vj = fermiCrossings[j].velocity;
@@ -876,8 +939,16 @@ function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["n
       continue;
     }
 
+    const avgQ: [number, number, number] = entry.count > 0
+      ? [
+          Number((entry.qSum[0] / entry.count).toFixed(4)),
+          Number((entry.qSum[1] / entry.count).toFixed(4)),
+          Number((entry.qSum[2] / entry.count).toFixed(4)),
+        ]
+      : entry.qCenter;
+
     nesting.push({
-      q: entry.q,
+      q: avgQ,
       strength: Number((entry.count / maxCount).toFixed(4)),
       bandPair: entry.bands,
       parallelFraction: Number(parallelFraction.toFixed(4)),
@@ -980,6 +1051,77 @@ function estimateEigenvalueProxyConfidence(inversions: number, nBands: number): 
   return Math.min(0.35, 0.20 + inversions * 0.03);
 }
 
+function getElementOrbitalProfile(el: string): { s: number; p: number; d: number; f: number } {
+  const data = getElementData(el);
+  const Z = data?.atomicNumber ?? 1;
+  const valence = data?.valenceElectrons ?? 1;
+
+  if (Z === 1) return { s: 0.95, p: 0.05, d: 0, f: 0 };
+  if (Z === 2) return { s: 0.90, p: 0.10, d: 0, f: 0 };
+
+  if (Z >= 57 && Z <= 71) {
+    const fOcc = Math.min(1.0, (Z - 57) / 14);
+    return { s: 0.05, p: 0.05, d: 0.15 + 0.1 * (1 - fOcc), f: 0.65 + 0.1 * fOcc };
+  }
+  if (Z >= 89 && Z <= 103) {
+    const fOcc = Math.min(1.0, (Z - 89) / 14);
+    return { s: 0.05, p: 0.05, d: 0.15 + 0.1 * (1 - fOcc), f: 0.65 + 0.1 * fOcc };
+  }
+
+  if (isTransitionMetal(el)) {
+    let dFill: number;
+    if (Z >= 21 && Z <= 30) {
+      dFill = (Z - 20) / 10;
+    } else if (Z >= 39 && Z <= 48) {
+      dFill = (Z - 38) / 10;
+    } else if (Z >= 72 && Z <= 80) {
+      dFill = (Z - 71) / 10;
+    } else {
+      dFill = 0.5;
+    }
+
+    const earlyTM = dFill < 0.4;
+    const lateTM = dFill > 0.7;
+
+    if (earlyTM) {
+      return { s: 0.15, p: 0.10, d: 0.70, f: 0.05 };
+    } else if (lateTM) {
+      const cu_like = dFill > 0.9;
+      return {
+        s: cu_like ? 0.20 : 0.12,
+        p: cu_like ? 0.08 : 0.10,
+        d: cu_like ? 0.68 : 0.73,
+        f: 0.05,
+      };
+    } else {
+      return { s: 0.08, p: 0.07, d: 0.80, f: 0.05 };
+    }
+  }
+
+  if (Z >= 13 && Z <= 18) {
+    return { s: 0.20, p: 0.70, d: 0.10, f: 0 };
+  }
+  if (Z >= 31 && Z <= 36) {
+    return { s: 0.15, p: 0.65, d: 0.20, f: 0 };
+  }
+  if (Z >= 49 && Z <= 54) {
+    return { s: 0.15, p: 0.60, d: 0.25, f: 0 };
+  }
+  if (Z >= 81 && Z <= 86) {
+    return { s: 0.15, p: 0.55, d: 0.25, f: 0.05 };
+  }
+
+  if (valence >= 3) {
+    return { s: 0.25, p: 0.65, d: 0.10, f: 0 };
+  }
+
+  if (valence <= 1) {
+    return { s: 0.75, p: 0.15, d: 0.10, f: 0 };
+  }
+
+  return { s: 0.45, p: 0.35, d: 0.15, f: 0.05 };
+}
+
 function computeOrbitalDOS(
   dispersion: BandDispersion,
   formula: string,
@@ -995,30 +1137,11 @@ function computeOrbitalDOS(
 
   for (const el of elements) {
     const frac = (counts[el] || 1) / totalAtoms;
-    const data = getElementData(el);
-    const valence = data?.valenceElectrons ?? 1;
-
-    if (isRareEarth(el) || isActinide(el)) {
-      sWeight += 0.05 * frac;
-      pWeight += 0.05 * frac;
-      dWeight += 0.2 * frac;
-      fWeight += 0.7 * frac;
-    } else if (isTransitionMetal(el)) {
-      sWeight += 0.1 * frac;
-      pWeight += 0.1 * frac;
-      dWeight += 0.75 * frac;
-      fWeight += 0.05 * frac;
-    } else if (valence >= 3) {
-      sWeight += 0.25 * frac;
-      pWeight += 0.65 * frac;
-      dWeight += 0.1 * frac;
-      fWeight += 0.0 * frac;
-    } else {
-      sWeight += 0.7 * frac;
-      pWeight += 0.2 * frac;
-      dWeight += 0.1 * frac;
-      fWeight += 0.0 * frac;
-    }
+    const profile = getElementOrbitalProfile(el);
+    sWeight += profile.s * frac;
+    pWeight += profile.p * frac;
+    dWeight += profile.d * frac;
+    fWeight += profile.f * frac;
   }
 
   let totalDOSAtFermi = 0;
@@ -1051,26 +1174,11 @@ function computeOrbitalDOS(
       let bandS = 0, bandP = 0, bandD = 0, bandF = 0;
       for (const el of elements) {
         const frac = (counts[el] || 1) / totalAtoms;
-        const data = getElementData(el);
-        const valence = data?.valenceElectrons ?? 1;
-
-        let elS: number, elP: number, elD: number, elF: number;
-        if (isRareEarth(el) || isActinide(el)) {
-          elS = 0.05; elP = 0.05; elD = 0.2; elF = 0.7;
-        } else if (isTransitionMetal(el)) {
-          elS = 0.1; elP = 0.1; elD = 0.75; elF = 0.05;
-        } else if (el === "H") {
-          elS = 0.95; elP = 0.05; elD = 0; elF = 0;
-        } else if (valence >= 3) {
-          elS = 0.25; elP = 0.65; elD = 0.1; elF = 0;
-        } else {
-          elS = 0.7; elP = 0.2; elD = 0.1; elF = 0;
-        }
-
-        bandS += elS * frac;
-        bandP += elP * frac;
-        bandD += elD * frac;
-        bandF += elF * frac;
+        const profile = getElementOrbitalProfile(el);
+        bandS += profile.s * frac;
+        bandP += profile.p * frac;
+        bandD += profile.d * frac;
+        bandF += profile.f * frac;
       }
 
       fermiS += bandS * fermiWeight;
@@ -1124,6 +1232,50 @@ function computeOverallConfidence(
   if (nBands >= 4) conf += 0.05;
   if (nBands >= 8) conf += 0.05;
   return Number(Math.min(0.95, Math.max(0.1, conf)).toFixed(3));
+}
+
+function computeFermiEnergyByDOS(
+  bands: BandDispersionPoint[],
+  targetOccupied: number,
+  nBands: number,
+): number {
+  if (bands.length === 0) return 0;
+
+  const allEnergies = bands.flatMap(b => b.energies);
+  const eMin = Math.min(...allEnergies);
+  const eMax = Math.max(...allEnergies);
+  if (eMin === eMax) return eMin;
+
+  const BROADENING = 0.05;
+  const nKPoints = bands.length;
+
+  function integratedDOS(eFermi: number): number {
+    let occupied = 0;
+    for (let b = 0; b < nBands; b++) {
+      for (let k = 0; k < nKPoints; k++) {
+        const e = bands[k].energies[b] ?? 0;
+        const x = (eFermi - e) / BROADENING;
+        const fermiOcc = x > 20 ? 1.0 : x < -20 ? 0.0 : 1.0 / (1.0 + Math.exp(-x));
+        occupied += fermiOcc / nKPoints;
+      }
+    }
+    return occupied;
+  }
+
+  let eLo = eMin - 1.0;
+  let eHi = eMax + 1.0;
+  for (let iter = 0; iter < 60; iter++) {
+    const eMid = (eLo + eHi) / 2;
+    const n = integratedDOS(eMid);
+    if (n < targetOccupied) {
+      eLo = eMid;
+    } else {
+      eHi = eMid;
+    }
+    if (eHi - eLo < 1e-6) break;
+  }
+
+  return Number(((eLo + eHi) / 2).toFixed(4));
 }
 
 export function predictBandDispersion(formula: string, prototype?: string): BandOperatorResult {
@@ -1201,7 +1353,6 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
     });
   }
 
-  const allEnergies = bands.flatMap(b => b.energies).sort((a, b) => a - b);
   let totalElectrons = 0;
   for (const el of elements) {
     const data = getElementData(el);
@@ -1209,13 +1360,9 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
       totalElectrons += data.atomicNumber * (counts[el] || 1);
     }
   }
-  const fermiIndex = Math.min(
-    Math.max(0, Math.floor(totalElectrons / 2) - 1),
-    allEnergies.length - 1,
-  );
-  const fermiEnergy = allEnergies.length > 0
-    ? Number(allEnergies[fermiIndex].toFixed(4))
-    : 0;
+  const targetOccupied = totalElectrons / 2;
+
+  const fermiEnergy = computeFermiEnergyByDOS(bands, targetOccupied, nBands);
 
   const dispersion: BandDispersion = {
     path: pathDef.labels.join("-"),
@@ -1299,6 +1446,9 @@ export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<st
     avgFermiVelocity: Number(avgVF.toFixed(2)),
     vhsCount,
     vhsConfirmedCount,
+    vhsAvg3DConfidence: vhsAll.length > 0
+      ? Number((vhsAll.reduce((s, v) => s + (v.vhs3DConfidence ?? 0), 0) / vhsAll.length).toFixed(4))
+      : 0,
     nestingStrengthMax: Number(nestingStrengthMax.toFixed(4)),
     berryPhaseProxy: result.derivedQuantities.topologicalInvariants.berryPhaseProxy,
     bandInversionCount: result.derivedQuantities.topologicalInvariants.bandInversionCount,
