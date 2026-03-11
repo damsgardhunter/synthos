@@ -52,7 +52,7 @@ export function generateBoride(): FamilyGenerationResult {
 
 export function generateHydride(): FamilyGenerationResult {
   const M = ["La", "Y", "Ca", "Sc", "Th"];
-  const hCounts = [6, 9, 10, 12];
+  const hCounts = [3, 4, 6, 9, 10, 12, 15];
   const formulas: string[] = [];
 
   for (const m of M) {
@@ -89,7 +89,7 @@ export function generateIntercalatedNitride(): FamilyGenerationResult {
 export function generateKagomeMetal(): FamilyGenerationResult {
   const A = ["K", "Rb", "Cs", "Ca", "Sr", "Ba"];
   const V_SITE = ["V", "Ti", "Cr", "Mn", "Fe", "Co", "Ni"];
-  const X = ["Sb", "Bi", "Sn", "Ge", "As"];
+  const X = ["Sb", "Bi", "Sn", "Ge", "As", "S"];
   const formulas: string[] = [];
 
   for (const a of A) {
@@ -266,8 +266,8 @@ export function generateIntercalatedLayered(): FamilyGenerationResult {
   return { formulas, family: "Intercalated-layered" };
 }
 
-export function runFamilyAwareGeneration(): FamilyGenerationResult[] {
-  return [
+export function runFamilyAwareGeneration(knownCompounds?: Set<string>): FamilyGenerationResult[] {
+  const rawResults = [
     generateMAXPhase(),
     generateBoride(),
     generateHydride(),
@@ -278,4 +278,20 @@ export function runFamilyAwareGeneration(): FamilyGenerationResult[] {
     generateLayeredPnictide(),
     generateIntercalatedLayered(),
   ];
+
+  const globalSeen = new Set<string>();
+  const deduped: FamilyGenerationResult[] = [];
+
+  for (const result of rawResults) {
+    const unique: string[] = [];
+    for (const f of result.formulas) {
+      if (globalSeen.has(f)) continue;
+      if (knownCompounds && knownCompounds.has(f)) continue;
+      globalSeen.add(f);
+      unique.push(f);
+    }
+    deduped.push({ formulas: unique, family: result.family });
+  }
+
+  return deduped;
 }
