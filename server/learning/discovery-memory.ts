@@ -17,6 +17,7 @@ export interface PatternFingerprint {
   metallicity: number;
   pressureGpa: number;
   family: string;
+  tc: number;
 }
 
 export interface DiscoveryRecord {
@@ -205,6 +206,7 @@ export function buildFingerprint(
     metallicity: physicsContext?.metallicity ?? 0.7,
     pressureGpa: physicsContext?.pressureGpa ?? 0,
     family,
+    tc,
   };
 }
 
@@ -341,24 +343,40 @@ export class DiscoveryMemory {
 
   computeMemoryRewardBonus(features: PatternFingerprint): MemoryRewardBonus {
     if (this.records.length === 0) {
-      return { bonus: 0, nearestPattern: "none", similarity: 0 };
+      return { bonus: 0.1, nearestPattern: "none", similarity: 0 };
     }
 
     const matches = this.queryPatternSimilarity(features, 3);
     if (matches.length === 0) {
-      return { bonus: 0, nearestPattern: "none", similarity: 0 };
+      return { bonus: 0.1, nearestPattern: "none", similarity: 0 };
     }
 
     const best = matches[0];
-    const tcWeight = Math.min(1, best.record.tc / 200);
-    const simWeight = best.similarity;
+    const sim = best.similarity;
 
-    const bonus = simWeight * tcWeight * 0.3;
+    const REDUNDANCY_THRESHOLD = 0.85;
+    const NOVELTY_THRESHOLD = 0.4;
+
+    let bonus: number;
+    if (sim > REDUNDANCY_THRESHOLD) {
+      const penaltyStrength = (sim - REDUNDANCY_THRESHOLD) / (1 - REDUNDANCY_THRESHOLD);
+      bonus = -0.15 * penaltyStrength;
+    } else if (sim < NOVELTY_THRESHOLD) {
+      const noveltyStrength = (NOVELTY_THRESHOLD - sim) / NOVELTY_THRESHOLD;
+      bonus = 0.1 * noveltyStrength;
+    } else {
+      bonus = 0;
+    }
+
+    const tcImprovement = features.tc > best.record.tc ? (features.tc - best.record.tc) / Math.max(1, best.record.tc) : 0;
+    if (tcImprovement > 0.1 && sim > NOVELTY_THRESHOLD) {
+      bonus += Math.min(0.1, tcImprovement * 0.05);
+    }
 
     return {
       bonus: Math.round(bonus * 1000) / 1000,
       nearestPattern: best.record.formula,
-      similarity: Math.round(best.similarity * 1000) / 1000,
+      similarity: Math.round(sim * 1000) / 1000,
     };
   }
 
