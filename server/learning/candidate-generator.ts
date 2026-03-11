@@ -4,7 +4,7 @@ import { gbPredict } from "./gradient-boost";
 import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
 import { parseFormulaCounts as parseFormulaCountsNested } from "./physics-engine";
 
-const MAX_FORMULAS = 2000;
+const MAX_FORMULAS = 500;
 
 const ELECTRONEGATIVITY: Record<string, number> = {
   H: 2.20, Li: 0.98, Be: 1.57, B: 2.04, C: 2.55, N: 3.04, O: 3.44, F: 3.98,
@@ -800,41 +800,46 @@ export function generateFractionalDopedVariants(baseFormulas: string[], count: n
 }
 
 export function generateCompositionSweep(elements: string[], maxAtoms: number = 8): string[] {
+  const seen = new Set<string>();
   const results: string[] = [];
   const n = elements.length;
   if (n < 2 || n > 5) return results;
 
   const maxPerElement = Math.min(maxAtoms, 6);
 
-  function enumerate(idx: number, current: number[]): boolean {
+  function enumerate(idx: number, current: number[], partialSum: number, nonZeroCount: number): boolean {
     if (results.length >= MAX_FORMULAS) return true;
 
     if (idx === n) {
-      const total = current.reduce((s, v) => s + v, 0);
-      if (total < 2 || total > maxAtoms) return false;
-      const zeroCount = current.filter(v => v === 0).length;
-      if (zeroCount > n - 2) return false;
+      if (partialSum < 2 || nonZeroCount < 2) return false;
 
       const counts: Record<string, number> = {};
       for (let i = 0; i < n; i++) {
         if (current[i] > 0) counts[elements[i]] = current[i];
       }
-      if (Object.keys(counts).length < 2) return false;
 
       const formula = canonicalize(countsToFormula(counts));
-      if (formula && formula.length > 1) results.push(formula);
+      if (formula && formula.length > 1 && !seen.has(formula)) {
+        seen.add(formula);
+        results.push(formula);
+      }
       return results.length >= MAX_FORMULAS;
     }
 
+    const remaining = n - idx - 1;
     for (let v = 0; v <= maxPerElement; v++) {
+      const newSum = partialSum + v;
+      if (newSum > maxAtoms) break;
+      const newNonZero = nonZeroCount + (v > 0 ? 1 : 0);
+      if (v === 0 && remaining < (2 - newNonZero)) continue;
       current.push(v);
-      if (enumerate(idx + 1, current)) return true;
+      if (enumerate(idx + 1, current, newSum, newNonZero)) return true;
       current.pop();
     }
     return false;
   }
 
-  enumerate(0, []);
+  enumerate(0, [], 0, 0);
   return results;
 }
 
@@ -955,24 +960,30 @@ export function runMassiveGeneration(
   ];
 
   const focusPairs = focusElements[focusArea] || focusElements["Carbides"];
-  const biasedSubset = scBiasedSeeds.sort(() => Math.random() - 0.5).slice(0, 4);
-  const unconvSubset = unconventionalSeeds.sort(() => Math.random() - 0.5).slice(0, 8);
+  const biasedSubset = fisherYatesShuffle(scBiasedSeeds).slice(0, 4);
+  const unconvSubset = fisherYatesShuffle(unconventionalSeeds).slice(0, 8);
   const combinedPairs = [...focusPairs, ...biasedSubset, ...unconvSubset];
-  const seedFormulas: string[] = [];
+  const seedSet = new Set<string>();
   for (const pair of combinedPairs) {
     const stoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3], [2, 3], [3, 2]];
     for (const s of stoichs) {
+      let raw: string;
       if (pair.length === 2) {
-        seedFormulas.push(`${pair[0]}${s[0]}${pair[1]}${s[1]}`);
+        raw = `${pair[0]}${s[0]}${pair[1]}${s[1]}`;
       } else if (pair.length === 3) {
-        seedFormulas.push(`${pair[0]}${s[0]}${pair[1]}${s[1]}${pair[2]}${Math.max(1, s[1])}`);
+        raw = `${pair[0]}${s[0]}${pair[1]}${s[1]}${pair[2]}${Math.max(1, s[1])}`;
       } else if (pair.length === 4) {
-        seedFormulas.push(`${pair[0]}${s[0]}${pair[1]}${Math.max(1, s[0])}${pair[2]}${s[1]}${pair[3]}${Math.max(1, s[1] + s[0])}`);
+        raw = `${pair[0]}${s[0]}${pair[1]}${Math.max(1, s[0])}${pair[2]}${s[1]}${pair[3]}${Math.max(1, s[1] + s[0])}`;
+      } else {
+        continue;
       }
+      const canonical = canonicalize(raw);
+      if (canonical && canonical.length > 1) seedSet.add(canonical);
     }
   }
 
-  const allSeeds = [...baseFormulas, ...seedFormulas].filter(f => passesElementCountCap(f));
+  for (const bf of baseFormulas) seedSet.add(bf);
+  const allSeeds = Array.from(seedSet).filter(f => passesElementCountCap(f));
 
   const substitutions = generateElementSubstitutions(allSeeds, 400);
   for (const f of substitutions) allGenerated.add(f);
