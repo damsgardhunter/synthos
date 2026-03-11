@@ -1718,6 +1718,27 @@ let dftEnrichmentLastRetrainCount = 0;
 const candidateGeneratorSource = new Map<string, string>();
 const MAX_GENERATOR_SOURCE_ENTRIES = 2000;
 
+function pruneGeneratorSourceMap(): void {
+  if (candidateGeneratorSource.size <= MAX_GENERATOR_SOURCE_ENTRIES) return;
+  const excess = candidateGeneratorSource.size - Math.floor(MAX_GENERATOR_SOURCE_ENTRIES * 0.75);
+  const iter = candidateGeneratorSource.keys();
+  for (let i = 0; i < excess; i++) {
+    const key = iter.next();
+    if (key.done) break;
+    candidateGeneratorSource.delete(key.value);
+  }
+}
+
+function trackGeneratorSource(formula: string, source: string): void {
+  if (candidateGeneratorSource.has(formula)) {
+    candidateGeneratorSource.delete(formula);
+  }
+  candidateGeneratorSource.set(formula, source);
+  if (candidateGeneratorSource.size > MAX_GENERATOR_SOURCE_ENTRIES) {
+    pruneGeneratorSourceMap();
+  }
+}
+
 async function runDFTEnrichment() {
   if (!shouldContinue()) return;
   try {
@@ -3275,7 +3296,7 @@ async function runPhase11_StructurePrediction() {
               totalScCandidates++;
               diffInserted++;
               bayesianOptimizer.addObservation(normalized, rawTc, lambdaML, crystal.noveltyScore);
-              if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "motif_diffusion");
+              trackGeneratorSource(normalized, "motif_diffusion");
             }
           } catch (e) { console.error("[Engine] Motif diffusion candidate insert failed:", e); }
         }
@@ -3366,7 +3387,7 @@ async function runPhase11_StructurePrediction() {
               totalScCandidates++;
               cdvaeInserted++;
               bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
-              if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "structure_diffusion");
+              trackGeneratorSource(normalized, "structure_diffusion");
               incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] CDVAE crystal insert failed:", e); }
@@ -3457,7 +3478,7 @@ async function runPhase11_StructurePrediction() {
               totalScCandidates++;
               distInserted++;
               bayesianOptimizer.addObservation(normalized, cappedTc, crystal.lambda, crystal.noveltyScore);
-              if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) candidateGeneratorSource.set(normalized, "structure_diffusion");
+              trackGeneratorSource(normalized, "structure_diffusion");
               incorporateSuccessData(normalized, cappedTc);
             }
           } catch (e) { console.error("[Engine] Distribution diffusion insert failed:", e); }
@@ -5043,9 +5064,7 @@ async function runAutonomousFastPath() {
       if (!isRlCandidate && !isBoCandidate) {
         recordGeneratorOutcome("massive_combinatorial", result.passed, result.tc, result.passed ? 0.5 : 0.1);
       }
-      if (candidateGeneratorSource.size < MAX_GENERATOR_SOURCE_ENTRIES) {
-        candidateGeneratorSource.set(formula, generatorName);
-      }
+      trackGeneratorSource(formula, generatorName);
 
       try {
         const els = parseFormulaElements(formula);
