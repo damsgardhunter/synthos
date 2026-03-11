@@ -537,12 +537,14 @@ export function generateExplorationStrategy(): ExplorationStrategy {
         const elementsB = extractElements(pB.formula);
         const combinedElements = Array.from(new Set([...elementsA, ...elementsB])).slice(0, 6);
 
+        const resolvedFormulas = interpolated.nearestFormulas.map(n => n.formula);
+
         interpolationCandidates.push({
           formulaA: pA.formula,
           formulaB: pB.formula,
-          interpolatedVector: interpolated.slice(0, 10),
+          interpolatedVector: interpolated.vector.slice(0, 10),
           estimatedTc: Math.round(estimatedTc * 10) / 10,
-          suggestedElements: combinedElements,
+          suggestedElements: combinedElements.length > 0 ? combinedElements : resolvedFormulas.slice(0, 3),
         });
       } catch {}
     }

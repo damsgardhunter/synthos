@@ -62,6 +62,7 @@ export interface GenomeInverseCandidate {
     estimatedMetallicity: number;
     estimatedDimensionality: number;
   };
+  noveltyTier?: "golden" | "near" | "far";
 }
 
 const GENOME_DIM = 256;
@@ -675,6 +676,10 @@ export function genomeDiversity(formulas: string[]): number {
   return pairs > 0 ? totalDistance / pairs : 0;
 }
 
+const NOVELTY_TRIVIAL = 0.01;
+const NOVELTY_GOLDEN_MIN = 0.15;
+const NOVELTY_GOLDEN_MAX = 0.4;
+
 export function genomeGuidedInverseDesign(
   targetFormula: string,
   candidatePool: string[],
@@ -689,6 +694,10 @@ export function genomeGuidedInverseDesign(
       const genome = encodeGenome(formula);
       const distance = euclideanDistance(targetGenome.vector, genome.vector);
 
+      if (distance < NOVELTY_TRIVIAL) continue;
+
+      const inGolden = distance >= NOVELTY_GOLDEN_MIN && distance <= NOVELTY_GOLDEN_MAX;
+
       results.push({
         formula,
         genomeDistance: Number(distance.toFixed(4)),
@@ -697,28 +706,64 @@ export function genomeGuidedInverseDesign(
           estimatedMetallicity: genome.metadata.metallicity,
           estimatedDimensionality: genome.metadata.dimensionalityScore,
         },
+        noveltyTier: inGolden ? "golden" : distance < NOVELTY_GOLDEN_MIN ? "near" : "far",
       });
     } catch {}
   }
 
-  results.sort((a, b) => a.genomeDistance - b.genomeDistance);
+  results.sort((a, b) => {
+    const tierOrder = { golden: 0, near: 1, far: 2 };
+    const ta = tierOrder[a.noveltyTier ?? "far"];
+    const tb = tierOrder[b.noveltyTier ?? "far"];
+    if (ta !== tb) return ta - tb;
+    return a.genomeDistance - b.genomeDistance;
+  });
   return results.slice(0, topK);
+}
+
+export interface InterpolatedGenome {
+  vector: number[];
+  alpha: number;
+  sourceA: string;
+  sourceB: string;
+  nearestFormulas: { formula: string; distance: number }[];
 }
 
 export function interpolateGenomes(
   formulaA: string,
   formulaB: string,
   alpha: number = 0.5,
-): number[] {
+  resolveTopK: number = 5,
+): InterpolatedGenome {
   const genA = encodeGenome(formulaA);
   const genB = encodeGenome(formulaB);
-  const result: number[] = [];
+  const vector: number[] = [];
   for (let i = 0; i < GENOME_DIM; i++) {
-    result.push(
+    vector.push(
       Number(((1 - alpha) * (genA.vector[i] ?? 0) + alpha * (genB.vector[i] ?? 0)).toFixed(6))
     );
   }
-  return result;
+
+  const nearest = decodeGenomeToFormulas(vector, resolveTopK, new Set([formulaA, formulaB]));
+
+  return { vector, alpha, sourceA: formulaA, sourceB: formulaB, nearestFormulas: nearest };
+}
+
+function decodeGenomeToFormulas(
+  targetVector: number[],
+  topK: number,
+  exclude: Set<string>,
+): { formula: string; distance: number }[] {
+  const candidates: { formula: string; distance: number }[] = [];
+
+  genomeCache.forEach((genome, key) => {
+    if (exclude.has(genome.formula)) return;
+    const dist = euclideanDistance(targetVector, genome.vector);
+    candidates.push({ formula: genome.formula, distance: Number(dist.toFixed(4)) });
+  });
+
+  candidates.sort((a, b) => a.distance - b.distance);
+  return candidates.slice(0, topK);
 }
 
 export function getGenomeCacheStats() {
