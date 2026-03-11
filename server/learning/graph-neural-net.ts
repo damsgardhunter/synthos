@@ -355,6 +355,8 @@ function softmax(values: number[]): number[] {
 
 const _gaussianBuffer = new Float64Array(N_GAUSSIAN_BASIS);
 const _invTwoSigmaSq = 1 / (2 * GAUSSIAN_WIDTH * GAUSSIAN_WIDTH);
+const EDGE_FEAT_DIM = N_GAUSSIAN_BASIS + 4;
+const _edgeFeatBuffer = new Float64Array(EDGE_FEAT_DIM);
 
 function gaussianDistanceExpansion(distance: number): number[] {
   for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
@@ -362,6 +364,22 @@ function gaussianDistanceExpansion(distance: number): number[] {
     _gaussianBuffer[i] = Math.exp(-(diff * diff) * _invTwoSigmaSq);
   }
   return Array.from(_gaussianBuffer);
+}
+
+function buildEdgeFeatures(distance: number, bondOrder: number, enDiff: number, ionicCharacter: number, radiusSum: number): number[] {
+  for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
+    const diff = distance - (GAUSSIAN_START + i * GAUSSIAN_STEP);
+    _edgeFeatBuffer[i] = Math.exp(-(diff * diff) * _invTwoSigmaSq);
+  }
+  _edgeFeatBuffer[N_GAUSSIAN_BASIS] = bondOrder / 2.0;
+  _edgeFeatBuffer[N_GAUSSIAN_BASIS + 1] = enDiff / 3.0;
+  _edgeFeatBuffer[N_GAUSSIAN_BASIS + 2] = ionicCharacter;
+  _edgeFeatBuffer[N_GAUSSIAN_BASIS + 3] = radiusSum;
+  return Array.from(_edgeFeatBuffer);
+}
+
+function buildDefaultEdgeFeatures(): number[] {
+  return buildEdgeFeatures(2.5, 1.0, 0.9, 0.3, 0.5);
 }
 
 function applyDropout(vec: number[], rate: number, rng: () => number): number[] {
@@ -617,6 +635,22 @@ const PROTOTYPE_COORDINATIONS: Record<string, PrototypeCoordination> = {
     },
     latticeParams: { a: 5.65, b: 5.65, c: 5.65 },
   },
+  "Rock-salt": {
+    siteLabels: ["A", "B"],
+    coordinations: {
+      "A": { neighbors: ["B"], count: 6 },
+      "B": { neighbors: ["A"], count: 6 },
+    },
+    latticeParams: { a: 5.64, b: 5.64, c: 5.64 },
+  },
+  "Fluorite": {
+    siteLabels: ["A", "X"],
+    coordinations: {
+      "A": { neighbors: ["X"], count: 8 },
+      "X": { neighbors: ["A"], count: 4 },
+    },
+    latticeParams: { a: 5.46, b: 5.46, c: 5.46 },
+  },
 };
 
 function gcd(a: number, b: number): number {
@@ -651,6 +685,8 @@ const SITE_TYPICAL_RADII: Record<string, Record<string, number>> = {
   "Heusler": { "A": 140, "B": 125, "C": 110 },
   "Laves": { "A": 160, "B": 130 },
   "MAX": { "M": 140, "A": 125, "X": 70 },
+  "Rock-salt": { "A": 130, "B": 100 },
+  "Fluorite": { "A": 110, "X": 130 },
 };
 
 const SITE_TYPICAL_COORD: Record<string, Record<string, number>> = {
@@ -659,6 +695,8 @@ const SITE_TYPICAL_COORD: Record<string, Record<string, number>> = {
   "Heusler": { "A": 8, "B": 8, "C": 8 },
   "Laves": { "A": 16, "B": 12 },
   "MAX": { "M": 9, "A": 6, "X": 6 },
+  "Rock-salt": { "A": 6, "B": 6 },
+  "Fluorite": { "A": 8, "X": 4 },
 };
 
 function assignSiteLabels(formula: string, prototype: string): Record<string, string> {
@@ -842,18 +880,10 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
             const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
             const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
-            const massRatio = Math.min(nodes[i].mass, nodes[j].mass) / Math.max(nodes[i].mass, nodes[j].mass, 1);
             const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
             const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
-            const gaussianBasis = gaussianDistanceExpansion(distance);
-            const edgeFeats = [
-              ...gaussianBasis,
-              bondOrder / 2.0,
-              enDiff / 3.0,
-              ionicCharacter,
-              radiusSum,
-            ];
+            const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
 
             edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
             edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -870,8 +900,7 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
       const j = (i + 1) % nodes.length;
-      const defaultGaussian = gaussianDistanceExpansion(2.5);
-      const edgeFeats = [...defaultGaussian, 0.5, 0.3, 0.3, 0.5];
+      const edgeFeats = buildDefaultEdgeFeatures();
       edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       adjacency[i].push(j);
@@ -1118,18 +1147,10 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
         const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
         const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
 
-        const massRatio = Math.min(nodes[i].mass, nodes[j].mass) / Math.max(nodes[i].mass, nodes[j].mass, 1);
         const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
         const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
-        const gaussianBasis = gaussianDistanceExpansion(distance);
-        const edgeFeats = [
-          ...gaussianBasis,
-          bondOrder / 2.0,
-          enDiff / 3.0,
-          ionicCharacter,
-          radiusSum,
-        ];
+        const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
 
         edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
         edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -1143,8 +1164,7 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
   if (edges.length === 0 && nodes.length > 1) {
     for (let i = 0; i < nodes.length; i++) {
       const j = (i + 1) % nodes.length;
-      const defaultGaussian = gaussianDistanceExpansion(2.5);
-      const edgeFeats = [...defaultGaussian, 0.5, 0.3, 0.3, 0.5];
+      const edgeFeats = buildDefaultEdgeFeatures();
       edges.push({ source: i, target: j, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       edges.push({ source: j, target: i, distance: 2.5, bondOrderEstimate: 1.0, features: edgeFeats });
       adjacency[i].push(j);
