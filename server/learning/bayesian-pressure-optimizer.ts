@@ -52,19 +52,37 @@ function rbfKernel1D(x1: number, x2: number, lengthScale: number, signalVar: num
 
 function cholDecomp(K: number[][]): number[][] {
   const n = K.length;
-  const L = Array.from({ length: n }, () => new Array(n).fill(0));
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j <= i; j++) {
-      let sum = 0;
-      for (let k = 0; k < j; k++) sum += L[i][k] * L[j][k];
-      if (i === j) {
-        const diag = K[i][i] - sum;
-        L[i][j] = diag > 1e-10 ? Math.sqrt(diag) : 1e-4;
-      } else {
-        L[i][j] = L[j][j] > 1e-10 ? (K[i][j] - sum) / L[j][j] : 0;
-      }
+  let jitter = 1e-6;
+
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    if (attempt > 0) {
+      for (let i = 0; i < n; i++) K[i][i] += jitter;
+      jitter *= 10;
     }
+
+    const L = Array.from({ length: n }, () => new Array(n).fill(0));
+    let failed = false;
+
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let sum = 0;
+        for (let k = 0; k < j; k++) sum += L[i][k] * L[j][k];
+        if (i === j) {
+          const diag = K[i][i] - sum;
+          if (diag <= 0) { failed = true; break; }
+          L[i][j] = Math.sqrt(diag);
+        } else {
+          L[i][j] = L[j][j] > 1e-15 ? (K[i][j] - sum) / L[j][j] : 0;
+        }
+      }
+      if (failed) break;
+    }
+
+    if (!failed) return L;
   }
+
+  const L = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++) L[i][i] = Math.sqrt(Math.max(K[i][i], 1e-6));
   return L;
 }
 

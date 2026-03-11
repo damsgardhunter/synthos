@@ -1,8 +1,32 @@
+function expandParentheses(formula: string): string {
+  let s = formula;
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < 20) {
+    changed = false;
+    iterations++;
+    s = s.replace(/\(([^()]+)\)(\d*\.?\d*)/g, (_match, inner: string, mult: string) => {
+      changed = true;
+      const m = mult ? parseFloat(mult) : 1;
+      if (m === 1) return inner;
+      return inner.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_: string, el: string, cnt: string) => {
+        const n = cnt ? parseFloat(cnt) : 1;
+        return `${el}${(n * m).toFixed(4).replace(/\.?0+$/, "")}`;
+      });
+    });
+  }
+  return s;
+}
+
 function parseFormula(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
+  const cleaned = expandParentheses(
+    (typeof formula === "string" ? formula : String(formula ?? ""))
+      .replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
+  );
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
-  while ((match = regex.exec(formula)) !== null) {
+  while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const count = match[2] ? parseFloat(match[2]) : 1;
     counts[el] = (counts[el] || 0) + count;
@@ -83,53 +107,88 @@ function compositionToFeatures(formula: string): number[] {
   const hasH = parsed["H"] !== undefined;
   features[structBase + 3] = hasH ? parsed["H"]! / totalAtoms : 0;
 
-  const tmCount = elements.filter(el =>
-    ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn",
-     "Y","Zr","Nb","Mo","Ru","Rh","Pd","Ag",
-     "Hf","Ta","W","Re","Os","Ir","Pt","Au"].includes(el)
-  ).length;
-  features[structBase + 4] = tmCount / Math.max(1, nElements);
+  const TM_3D = new Set(["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn"]);
+  const TM_4D = new Set(["Y","Zr","Nb","Mo","Ru","Rh","Pd","Ag"]);
+  const TM_5D = new Set(["Hf","Ta","W","Re","Os","Ir","Pt","Au"]);
+  let tmWeight = 0;
+  for (const el of elements) {
+    if (TM_3D.has(el)) tmWeight += 1.0;
+    else if (TM_4D.has(el)) tmWeight += 0.7;
+    else if (TM_5D.has(el)) tmWeight += 0.4;
+  }
+  features[structBase + 4] = tmWeight / Math.max(1, nElements);
 
   return features;
 }
 
-function rbfKernel(x1: number[], x2: number[], lengthScale: number, signalVariance: number): number {
+function maternKernel52ARD(
+  x1: number[], x2: number[],
+  lengthScales: number[], signalVariance: number
+): number {
   let sqDist = 0;
   for (let i = 0; i < x1.length; i++) {
-    const d = x1[i] - x2[i];
+    const d = (x1[i] - x2[i]) / lengthScales[Math.min(i, lengthScales.length - 1)];
     sqDist += d * d;
   }
-  return signalVariance * Math.exp(-0.5 * sqDist / (lengthScale * lengthScale));
-}
-
-function maternKernel52(x1: number[], x2: number[], lengthScale: number, signalVariance: number): number {
-  let sqDist = 0;
-  for (let i = 0; i < x1.length; i++) {
-    const d = x1[i] - x2[i];
-    sqDist += d * d;
-  }
-  const r = Math.sqrt(sqDist) / lengthScale;
+  const r = Math.sqrt(sqDist);
   const sqrt5r = Math.sqrt(5) * r;
   return signalVariance * (1 + sqrt5r + (5 / 3) * r * r) * Math.exp(-sqrt5r);
 }
 
+const N_LS_GROUPS = 3;
+const LS_GROUP_ELEMENT = 0;
+const LS_GROUP_UNKNOWN = 1;
+const LS_GROUP_STRUCT = 2;
+
+function buildLengthScaleArray(groupLS: number[]): number[] {
+  const ls = new Array(FEATURE_DIM);
+  for (let i = 0; i < ELEMENT_DIM; i++) ls[i] = groupLS[LS_GROUP_ELEMENT];
+  ls[ELEMENT_DIM] = groupLS[LS_GROUP_UNKNOWN];
+  for (let i = ELEMENT_DIM + UNKNOWN_EL_DIM; i < FEATURE_DIM; i++) ls[i] = groupLS[LS_GROUP_STRUCT];
+  return ls;
+}
+
+const CHOLESKY_JITTER = 1e-6;
+const CHOLESKY_MAX_RETRIES = 3;
+
 function choleskyDecompose(K: number[][]): number[][] {
   const n = K.length;
-  const L = Array.from({ length: n }, () => new Array(n).fill(0));
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j <= i; j++) {
-      let sum = 0;
-      for (let k = 0; k < j; k++) {
-        sum += L[i][k] * L[j][k];
-      }
-      if (i === j) {
-        const diag = K[i][i] - sum;
-        L[i][j] = diag > 1e-10 ? Math.sqrt(diag) : 1e-4;
-      } else {
-        L[i][j] = L[j][j] > 1e-10 ? (K[i][j] - sum) / L[j][j] : 0;
-      }
+  let jitter = CHOLESKY_JITTER;
+
+  for (let attempt = 0; attempt <= CHOLESKY_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      for (let i = 0; i < n; i++) K[i][i] += jitter;
+      jitter *= 10;
     }
+
+    const L = Array.from({ length: n }, () => new Array(n).fill(0));
+    let failed = false;
+
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let sum = 0;
+        for (let k = 0; k < j; k++) {
+          sum += L[i][k] * L[j][k];
+        }
+        if (i === j) {
+          const diag = K[i][i] - sum;
+          if (diag <= 0) {
+            failed = true;
+            break;
+          }
+          L[i][j] = Math.sqrt(diag);
+        } else {
+          L[i][j] = L[j][j] > 1e-15 ? (K[i][j] - sum) / L[j][j] : 0;
+        }
+      }
+      if (failed) break;
+    }
+
+    if (!failed) return L;
   }
+
+  const L = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++) L[i][i] = Math.sqrt(Math.max(K[i][i], 1e-6));
   return L;
 }
 
@@ -175,7 +234,8 @@ function standardNormalPDF(x: number): number {
 
 export class BayesianOptimizer {
   private observations: Observation[] = [];
-  private lengthScale = 0.5;
+  private groupLengthScales = [0.5, 1.0, 0.3];
+  private lengthScales: number[] = buildLengthScaleArray([0.5, 1.0, 0.3]);
   private signalVariance = 1.0;
   private noiseVariance = 0.1;
   private bestTcObserved = 0;
@@ -183,13 +243,27 @@ export class BayesianOptimizer {
   private cachedAlpha: number[] | null = null;
   private cachedYMean: number = 0;
   private maxObservations = 500;
+  private featureCache = new Map<string, number[]>();
+
+  private getFeatures(formula: string): number[] {
+    let cached = this.featureCache.get(formula);
+    if (!cached) {
+      cached = compositionToFeatures(formula);
+      this.featureCache.set(formula, cached);
+      if (this.featureCache.size > 2000) {
+        const first = this.featureCache.keys().next().value;
+        if (first !== undefined) this.featureCache.delete(first);
+      }
+    }
+    return cached;
+  }
 
   addObservation(formula: string, tc: number, lambda: number = 0, stability: number = 0): void {
     const safeTc = (tc != null && Number.isFinite(tc)) ? tc : 0;
     const safeLambda = (lambda != null && Number.isFinite(lambda)) ? lambda : 0;
     const safeStability = (stability != null && Number.isFinite(stability)) ? stability : 0;
 
-    const features = compositionToFeatures(formula);
+    const features = this.getFeatures(formula);
     const allZero = features.every(f => f === 0);
     if (allZero) return;
 
@@ -243,19 +317,28 @@ export class BayesianOptimizer {
     const avgStd = predictions.reduce((s, p) => s + p.std, 0) / predictions.length;
     const avgMean = predictions.reduce((s, p) => s + Math.abs(p.mean), 0) / predictions.length;
     const relUncertainty = avgMean > 0 ? avgStd / avgMean : avgStd;
-    if (relUncertainty > 0.8) {
-      this.lengthScale = Math.min(2.0, this.lengthScale * 1.15);
-    } else if (relUncertainty < 0.2) {
-      this.lengthScale = Math.max(0.15, this.lengthScale * 0.9);
+
+    const factor = relUncertainty > 0.8 ? 1.15
+      : relUncertainty < 0.2 ? 0.9
+      : 1.0;
+
+    if (factor !== 1.0) {
+      const clampMin = [0.15, 0.3, 0.1];
+      const clampMax = [2.0, 3.0, 1.5];
+      for (let g = 0; g < N_LS_GROUPS; g++) {
+        this.groupLengthScales[g] = Math.max(clampMin[g], Math.min(clampMax[g], this.groupLengthScales[g] * factor));
+      }
+      this.lengthScales = buildLengthScaleArray(this.groupLengthScales);
     }
+
     this.cachedL = null;
     this.cachedAlpha = null;
     this.cachedGPObs = null;
   }
 
-  private cachedGPObs: BayesianObservation[] | null = null;
+  private cachedGPObs: Observation[] | null = null;
 
-  private buildGP(): { L: number[][]; alpha: number[]; obs: BayesianObservation[] } {
+  private buildGP(): { L: number[][]; alpha: number[]; obs: Observation[] } {
     if (this.cachedL && this.cachedAlpha && this.cachedGPObs) {
       return { L: this.cachedL, alpha: this.cachedAlpha, obs: this.cachedGPObs };
     }
@@ -287,7 +370,7 @@ export class BayesianOptimizer {
     const K: number[][] = Array.from({ length: obs.length }, () => new Array(obs.length).fill(0));
     for (let i = 0; i < obs.length; i++) {
       for (let j = i; j < obs.length; j++) {
-        const k = maternKernel52(obs[i].features, obs[j].features, this.lengthScale, this.signalVariance);
+        const k = maternKernel52ARD(obs[i].features, obs[j].features, this.lengthScales, this.signalVariance);
         K[i][j] = k;
         K[j][i] = k;
       }
@@ -308,7 +391,7 @@ export class BayesianOptimizer {
   }
 
   predict(formula: string): GPPrediction {
-    const features = compositionToFeatures(formula);
+    const features = this.getFeatures(formula);
     return this.predictFromFeatures(features);
   }
 
@@ -322,7 +405,7 @@ export class BayesianOptimizer {
 
     const kStar: number[] = new Array(usedObs.length);
     for (let i = 0; i < usedObs.length; i++) {
-      kStar[i] = maternKernel52(features, usedObs[i].features, this.lengthScale, this.signalVariance);
+      kStar[i] = maternKernel52ARD(features, usedObs[i].features, this.lengthScales, this.signalVariance);
     }
 
     let mean = this.cachedYMean;
