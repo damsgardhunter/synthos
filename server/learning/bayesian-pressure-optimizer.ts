@@ -2,6 +2,7 @@ import { predictPressureCurve, type PressureCurve } from "./pressure-aware-surro
 import { computeEnthalpyStability } from "./enthalpy-stability";
 import { buildPressureResponseProfile, interpolateAtPressure } from "./pressure-property-map";
 import { estimateFamilyPressure } from "./candidate-generator";
+import { parseFormulaCounts } from "./physics-engine";
 
 interface PressureObservation {
   formula: string;
@@ -22,11 +23,13 @@ export interface BayesianPressureResult {
   formula: string;
   optimalPressure: number;
   predictedTcAtOptimal: number;
+  unpenalizedTcAtOptimal: number;
   stableAtOptimal: boolean;
   confidence: number;
   acquisitionHistory: { pressure: number; acquisition: number }[];
   observationsUsed: number;
   method: string;
+  timestamp: number;
 }
 
 export interface BayesianPressureStats {
@@ -45,7 +48,7 @@ const MAX_OBSERVATIONS_PER_FORMULA = 100;
 const MAX_FORMULAS = 5000;
 const MAX_RESULTS_CACHE = 300;
 const PRESSURE_SEARCH_MIN = 0;
-const PRESSURE_SEARCH_MAX = 350;
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
 interface GPCache {
   L: number[][];
@@ -58,6 +61,25 @@ interface GPCache {
 }
 
 const gpCacheStore = new Map<string, GPCache>();
+
+function dynamicPressureMax(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const hCount = counts["H"] || 0;
+  const hydrogenRatio = totalAtoms > 0 ? hCount / totalAtoms : 0;
+
+  if (hydrogenRatio >= 0.7) return 500;
+  if (hydrogenRatio >= 0.5) return 450;
+  if (hydrogenRatio >= 0.3) return 400;
+  if (hCount > 0) return 350;
+
+  const organicElements = ["C", "N", "O", "S"];
+  const organicCount = organicElements.reduce((s, e) => s + (counts[e] || 0), 0);
+  if (organicCount / totalAtoms > 0.5) return 200;
+
+  return 350;
+}
 
 function matern52Kernel1D(x1: number, x2: number, lengthScale: number, signalVar: number): number {
   const r = Math.abs(x1 - x2) / lengthScale;
@@ -401,7 +423,7 @@ export function optimizePressureForFormula(
   familyPressureHint?: number
 ): BayesianPressureResult {
   const cached = resultCache.get(formula);
-  if (cached && Date.now() - cached.acquisitionHistory.length * 1000 < 10 * 60 * 1000) {
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
     return cached;
   }
 
@@ -413,23 +435,26 @@ export function optimizePressureForFormula(
       formula,
       optimalPressure: 0,
       predictedTcAtOptimal: 0,
+      unpenalizedTcAtOptimal: 0,
       stableAtOptimal: false,
       confidence: 0,
       acquisitionHistory: [],
       observationsUsed: 0,
       method: "no-data",
+      timestamp: Date.now(),
     };
   }
 
   const hint = familyPressureHint ?? 0;
+  const pressureMax = dynamicPressureMax(formula);
   let searchMin = PRESSURE_SEARCH_MIN;
-  let searchMax = PRESSURE_SEARCH_MAX;
+  let searchMax = pressureMax;
   if (hint > 50) {
     searchMin = Math.max(0, hint - 80);
-    searchMax = Math.min(PRESSURE_SEARCH_MAX, hint + 100);
+    searchMax = Math.min(pressureMax, hint + 100);
   } else if (hint > 0) {
     searchMin = 0;
-    searchMax = Math.min(PRESSURE_SEARCH_MAX, hint + 60);
+    searchMax = Math.min(pressureMax, hint + 60);
   }
 
   let bestTc = Math.max(...obs.map(o => o.tc));
@@ -494,6 +519,8 @@ export function optimizePressureForFormula(
   const finalLS = optimizeLengthScale(obs, 1.0, 0.05);
   let optimalPressure = 0;
   let gpOptimalTc = 0;
+  let peakUnpenalizedTc = 0;
+  let peakUnpenalizedPressure = 0;
 
   const scanStep = 5;
   for (let p = searchMin; p <= searchMax; p += scanStep) {
@@ -505,6 +532,10 @@ export function optimizePressureForFormula(
     if (penalizedTc > gpOptimalTc) {
       gpOptimalTc = penalizedTc;
       optimalPressure = p;
+    }
+    if (pred.mean > peakUnpenalizedTc) {
+      peakUnpenalizedTc = pred.mean;
+      peakUnpenalizedPressure = p;
     }
   }
 
@@ -523,11 +554,13 @@ export function optimizePressureForFormula(
     formula,
     optimalPressure: Math.round(optimalPressure),
     predictedTcAtOptimal: Math.round(gpPredictedTc * 10) / 10,
+    unpenalizedTcAtOptimal: Math.round(Math.max(0, peakUnpenalizedTc) * 10) / 10,
     stableAtOptimal,
     confidence: Math.round(confidence * 1000) / 1000,
     acquisitionHistory: acquisitionHistory.slice(-20),
     observationsUsed: obs.length,
     method: "bayesian-ei-pressure-penalized",
+    timestamp: Date.now(),
   };
 
   gpCacheStore.delete(`${formula}:norm`);
