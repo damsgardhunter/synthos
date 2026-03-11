@@ -605,6 +605,29 @@ function estimateCOverA(elements: string[], counts: Record<string, number>): num
   return 1.0;
 }
 
+function estimateBOverA(elements: string[], counts: Record<string, number>): number {
+  const hasCu = elements.includes("Cu");
+  const hasO = elements.includes("O");
+  const hasBa = elements.includes("Ba");
+  const hasY = elements.includes("Y");
+
+  if (hasCu && hasO && hasBa && hasY) return 1.01;
+
+  if (hasCu && hasO) {
+    const oCount = counts["O"] || 0;
+    const cuCount = counts["Cu"] || 0;
+    if (oCount >= 2 && cuCount >= 1) return 1.02;
+  }
+
+  const hasFe = elements.includes("Fe");
+  const hasAs = elements.includes("As");
+  const hasP = elements.includes("P");
+  const hasSe = elements.includes("Se");
+  if (hasFe && (hasAs || hasP || hasSe)) return 1.0;
+
+  return 1.0;
+}
+
 function autoKPoints(latticeA: number, cOverA?: number, minK: number = 12): string {
   const densityFactor = 60;
   const kab = Math.max(minK, Math.ceil(densityFactor / latticeA));
@@ -730,8 +753,10 @@ function generateSCFInput(
   let atomicSpecies = "";
   for (const el of elements) {
     const data = ELEMENT_DATA[el];
-    const mass = data?.mass ?? 50;
-    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${el}.UPF\n`;
+    if (!data?.mass) {
+      throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
+    }
+    atomicSpecies += `  ${el}  ${data.mass.toFixed(3)}  ${el}.UPF\n`;
   }
 
   let atomicPositions = "";
@@ -1766,8 +1791,10 @@ function generateSCFInputWithParams(
   let atomicSpecies = "";
   for (const el of elements) {
     const data = ELEMENT_DATA[el];
-    const mass = data?.mass ?? 50;
-    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${el}.UPF\n`;
+    if (!data?.mass) {
+      throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
+    }
+    atomicSpecies += `  ${el}  ${data.mass.toFixed(3)}  ${el}.UPF\n`;
   }
 
   let atomicPositions = "";
@@ -1844,8 +1871,10 @@ function generateVCRelaxInput(
   let atomicSpecies = "";
   for (const el of elements) {
     const data = ELEMENT_DATA[el];
-    const mass = data?.mass ?? 50;
-    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${el}.UPF\n`;
+    if (!data?.mass) {
+      throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
+    }
+    atomicSpecies += `  ${el}  ${data.mass.toFixed(3)}  ${el}.UPF\n`;
   }
 
   let atomicPositions = "";
@@ -2321,6 +2350,9 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
         const baseEcutwfcBands = Math.max(rawEcutwfcBands, hasHydrogenBands ? 100 : 60);
         const nspinBands = elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1;
 
+        const bOverAVal = estimateBOverA(elements, counts);
+        const latticeBVal = latticeA * bOverAVal;
+
         const bandResult = await computeDFTBandStructure(
           formula,
           elements,
@@ -2332,6 +2364,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
           cOverAVal,
           baseEcutwfcBands,
           nspinBands,
+          latticeBVal,
         );
 
         result.bandStructure = bandResult;

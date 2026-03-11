@@ -3004,7 +3004,11 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
           Pd: 106.42, Sn: 118.71, Te: 127.60, La: 138.91, Ce: 140.12, Hf: 178.49,
           Ta: 180.95, W: 183.84, Pt: 195.08, Pb: 207.2, Bi: 208.98, Ba: 137.33, Sr: 87.62,
         };
-        return s + (masses[el] ?? 50) * (counts[el] ?? 1);
+        const elMass = masses[el];
+        if (elMass === undefined) {
+          throw new Error(`Unknown element "${el}" — no atomic mass data. Cannot compute Debye temperature.`);
+        }
+        return s + elMass * (counts[el] ?? 1);
       }, 0) / Object.values(counts).reduce((s, n) => s + n, 0);
 
       const hasHydrogen = !!counts["H"];

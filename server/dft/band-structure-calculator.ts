@@ -243,6 +243,7 @@ function generateBandsInput(
   nspin: number,
   crystalSystem: string = "cubic_sc",
   cOverA: number = 1.0,
+  latticeB: number = latticeA,
 ): string {
   const ELEMENT_DATA: Record<string, number> = {
     H: 1.008, He: 4.003, Li: 6.941, Be: 9.012, B: 10.811, C: 12.011,
@@ -268,7 +269,10 @@ function generateBandsInput(
 
   let atomicSpecies = "";
   for (const el of elements) {
-    const mass = ELEMENT_DATA[el] ?? 50;
+    const mass = ELEMENT_DATA[el];
+    if (mass === undefined) {
+      throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
+    }
     atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${el}.UPF\n`;
   }
 
@@ -284,7 +288,7 @@ function generateBandsInput(
     celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
   }
   if (ibrav === 8 || ibrav === 12) {
-    const bOverA = 1.1;
+    const bOverA = latticeB / latticeA;
     celldmLines += `  celldm(2) = ${bOverA.toFixed(6)},\n`;
     celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
     if (ibrav === 12) {
@@ -389,8 +393,8 @@ function parseProjwfcOutput(
         const nums = line.trim().split(/\s+/).map(Number).filter(n => !isNaN(n));
         if (nums.length < 2) continue;
 
-        const bandIdx = Math.floor(kIdx / nKPoints);
-        const kPt = kIdx % nKPoints;
+        const kPt = Math.floor(kIdx / nBands);
+        const bandIdx = kIdx % nBands;
 
         if (kPt < nKPoints && bandIdx < nBands) {
           const projVal = nums[1] ?? 0;
@@ -966,6 +970,7 @@ export async function computeDFTBandStructure(
   cOverA: number = 1.0,
   ecutwfc: number = 45,
   nspin: number = 1,
+  latticeB: number = latticeA,
 ): Promise<DFTBandStructureResult> {
   const startTime = Date.now();
   const crystalSystem = guessCrystalSystem(elements, counts, cOverA);
@@ -1002,7 +1007,7 @@ export async function computeDFTBandStructure(
   };
 
   try {
-    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA);
+    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA, latticeB);
     const bandsInputFile = path.join(jobDir, "bands.in");
     fs.writeFileSync(bandsInputFile, bandsInput);
 
