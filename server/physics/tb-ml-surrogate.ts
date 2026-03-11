@@ -237,6 +237,33 @@ function trainAllModels(X: number[][], Y: Map<string, number[]>): TBSurrogateMod
 }
 
 let initDeferred = false;
+let initInProgress = false;
+
+function trainImmediate(maxSamples?: number): void {
+  if (initInProgress) return;
+  initInProgress = true;
+  try {
+    const { X, Y } = generateTrainingData();
+    const limit = maxSamples ?? X.length;
+    if (X.length > limit) {
+      const step = Math.ceil(X.length / limit);
+      const Xsub = X.filter((_, i) => i % step === 0);
+      const Ysub = new Map<string, number[]>();
+      for (const name of TARGET_NAMES) {
+        const full = Y.get(name)!;
+        Ysub.set(name, full.filter((_, i) => i % step === 0));
+      }
+      surrogateModels = trainAllModels(Xsub, Ysub);
+    } else {
+      surrogateModels = trainAllModels(X, Y);
+    }
+    console.log(`[TB-ML Surrogate] Immediate init: ${surrogateModels.datasetSize} samples (limit=${limit})`);
+  } catch (e) {
+    console.log(`[TB-ML Surrogate] Immediate init failed: ${e instanceof Error ? e.message : "unknown"}`);
+  } finally {
+    initInProgress = false;
+  }
+}
 
 function deferInit(): void {
   if (initDeferred) return;
@@ -244,9 +271,8 @@ function deferInit(): void {
   setTimeout(() => {
     try {
       if (!surrogateModels) {
-        const { X, Y } = generateTrainingData();
-        surrogateModels = trainAllModels(X, Y);
-        console.log(`[TB-ML Surrogate] Deferred init complete: ${surrogateModels.datasetSize} samples`);
+        trainImmediate();
+        console.log(`[TB-ML Surrogate] Deferred init complete: ${surrogateModels?.datasetSize ?? 0} samples`);
       }
     } catch (e) {
       console.log(`[TB-ML Surrogate] Deferred init failed: ${e instanceof Error ? e.message : "unknown"}`);
@@ -256,8 +282,8 @@ function deferInit(): void {
 
 function ensureModels(): TBSurrogateModels | null {
   if (surrogateModels) return surrogateModels;
-  deferInit();
-  return null;
+  trainImmediate(25);
+  return surrogateModels;
 }
 
 export function predictTBProperties(formula: string): TBSurrogateTarget & { confidence: number; source: "surrogate" } {
@@ -300,15 +326,78 @@ export function recordNewTBComputation(): void {
   newComputationCount++;
 }
 
+function incrementalTrainGBM(existing: GBMModel, X: number[][], y: number[], additionalTrees: number = 20): GBMModel {
+  const n = X.length;
+  const predictions = new Array(n);
+  for (let i = 0; i < n; i++) {
+    predictions[i] = predictGBM(existing, X[i]);
+  }
+
+  const allIndices = Array.from({ length: n }, (_, i) => i);
+  const newTrees: TreeNode[] = [];
+
+  for (let iter = 0; iter < additionalTrees; iter++) {
+    const residuals = y.map((yi, i) => yi - predictions[i]);
+    const tree = buildTree(X, residuals, allIndices, 0, 3);
+    if (typeof tree === "number") break;
+    newTrees.push(tree);
+    for (let i = 0; i < n; i++) {
+      predictions[i] += existing.learningRate * predictTree(tree, X[i]);
+    }
+  }
+
+  return {
+    trees: [...existing.trees, ...newTrees],
+    learningRate: existing.learningRate,
+    basePrediction: existing.basePrediction,
+  };
+}
+
 export function retrainTBSurrogate(): { retrained: boolean; datasetSize: number; reason: string } {
   if (newComputationCount < RETRAIN_THRESHOLD && surrogateModels) {
     return { retrained: false, datasetSize: surrogateModels.datasetSize, reason: `Only ${newComputationCount} new computations (need ${RETRAIN_THRESHOLD})` };
   }
 
   const { X, Y } = generateTrainingData();
-  surrogateModels = trainAllModels(X, Y);
+  const prevCount = newComputationCount;
   newComputationCount = 0;
-  return { retrained: true, datasetSize: X.length, reason: "Retrained successfully" };
+
+  if (surrogateModels && X.length > 0) {
+    const existingModels = surrogateModels.models;
+    const updatedModels = new Map<string, GBMModel>();
+    const additionalTrees = Math.min(20, Math.max(5, Math.floor(prevCount / 5)));
+
+    for (const targetName of TARGET_NAMES) {
+      const y = Y.get(targetName)!;
+      const existing = existingModels.get(targetName);
+      if (!existing || existing.trees.length === 0 || y.length < 5) {
+        updatedModels.set(targetName, trainGBM(X, y, 40, 0.08, 3));
+      } else {
+        const maxTrees = 120;
+        if (existing.trees.length + additionalTrees > maxTrees) {
+          updatedModels.set(targetName, trainGBM(X, y, 40, 0.08, 3));
+        } else {
+          updatedModels.set(targetName, incrementalTrainGBM(existing, X, y, additionalTrees));
+        }
+      }
+    }
+
+    surrogateStats.trainings++;
+    surrogateStats.lastTrainedAt = Date.now();
+    surrogateStats.datasetSize = X.length;
+
+    surrogateModels = {
+      models: updatedModels,
+      trainedAt: Date.now(),
+      datasetSize: X.length,
+      featureDim: X.length > 0 ? X[0].length : 0,
+    };
+
+    return { retrained: true, datasetSize: X.length, reason: `Incremental retrain: +${additionalTrees} trees per target` };
+  }
+
+  surrogateModels = trainAllModels(X, Y);
+  return { retrained: true, datasetSize: X.length, reason: "Full retrain (no prior models)" };
 }
 
 export function getTBSurrogateStats() {
