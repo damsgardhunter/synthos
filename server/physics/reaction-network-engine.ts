@@ -275,12 +275,21 @@ function estimateReactionBarrier(
 
   let pressureBarrierBoost = 0;
   if (pressureGpa > 0) {
-    pressureBarrierBoost = 0.1 * Math.log(1 + pressureGpa / 50);
+    if (pressureGpa <= 150) {
+      pressureBarrierBoost = 0.1 * Math.log(1 + pressureGpa / 50);
+    } else {
+      const logBase = 0.1 * Math.log(1 + 150 / 50);
+      const excessP = pressureGpa - 150;
+      pressureBarrierBoost = logBase + 0.002 * excessP + 3e-6 * excessP * excessP;
+    }
 
     const hCount = counts["H"] || 0;
     const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
-    if (hCount / totalAtoms > 0.5 && pressureGpa > 100) {
-      pressureBarrierBoost += 0.15 * Math.min(1.0, (pressureGpa - 100) / 200);
+    const hFrac = hCount / totalAtoms;
+    if (hFrac > 0.5 && pressureGpa > 100) {
+      const cagePressure = pressureGpa - 100;
+      const cageBoost = 0.15 * Math.pow(cagePressure / 100, 1.5) * Math.min(2.0, hFrac);
+      pressureBarrierBoost += Math.min(1.5, cageBoost);
     }
   }
 
@@ -327,14 +336,14 @@ function computeDecompositionProbability(barrier: number, temperatureK: number =
   return { probability: Math.round(prob * 10000) / 10000, lifetimeLog10s: Math.round(lifetimeLog10s * 100) / 100 };
 }
 
-export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0): ReactionNetworkResult {
+export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0, temperatureK: number = 300): ReactionNetworkResult {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
   const formationEnergyRaw = computeMiedemaFormationEnergy(formula);
 
   const pvCorrection = estimatePVCorrection(elements, counts, pressureGpa);
-  const entropyCorrection = estimateEntropyCorrection(elements, counts);
+  const entropyCorrection = estimateEntropyCorrection(elements, counts, temperatureK);
   const formationEnergy = formationEnergyRaw + pvCorrection + entropyCorrection;
 
   const nodes: ReactionNode[] = [];
@@ -364,7 +373,7 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
       const binCounts = parseFormulaCounts(bin);
       const rawEnergy = computeMiedemaFormationEnergy(bin);
       const binPV = estimatePVCorrection(binEls, binCounts, pressureGpa);
-      const binEntropy = estimateEntropyCorrection(binEls, binCounts);
+      const binEntropy = estimateEntropyCorrection(binEls, binCounts, temperatureK);
       const energy = rawEnergy + binPV + binEntropy;
       competingFormulas.push({ formula: bin, energy });
       nodes.push({
@@ -382,7 +391,7 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
       const ternCounts = parseFormulaCounts(tern);
       const rawEnergy = computeMiedemaFormationEnergy(tern);
       const ternPV = estimatePVCorrection(ternEls, ternCounts, pressureGpa);
-      const ternEntropy = estimateEntropyCorrection(ternEls, ternCounts);
+      const ternEntropy = estimateEntropyCorrection(ternEls, ternCounts, temperatureK);
       const energy = rawEnergy + ternPV + ternEntropy;
       competingFormulas.push({ formula: tern, energy });
       nodes.push({

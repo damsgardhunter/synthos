@@ -1497,7 +1497,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(400).json({ error: "Invalid formula" });
       }
       const pressureGpa = parseFloat(req.query.pressure as string) || 0;
-      const result = analyzeReactionNetwork(formula, Math.max(0, Math.min(pressureGpa, 500)));
+      const temperatureK = parseFloat(req.query.temperature as string) || 300;
+      const result = analyzeReactionNetwork(formula, Math.max(0, Math.min(pressureGpa, 500)), Math.max(1, Math.min(temperatureK, 5000)));
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Reaction network analysis failed", detail: e.message?.slice(0, 200) });
