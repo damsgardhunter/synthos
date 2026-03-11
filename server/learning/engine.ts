@@ -2040,6 +2040,7 @@ async function runPhase10_Physics() {
         const existingMlF = (candidate.mlFeatures as Record<string, any>) ?? {};
         const xTbTcFromPrior = (existingMlF.xTbTc as number) ?? undefined;
         const dftTcFromPrior = (existingMlF.dftTc as number) ?? undefined;
+        const physicsExplicitlyZero = physicsTc === 0 && Number.isFinite(rawPhysicsTc);
         const reconciled = reconcileTc({
           gbPredicted: candidate.xgboostScore != null ? currentTc : undefined,
           physicsTc: cappedPhysicsTc > 0 ? cappedPhysicsTc : undefined,
@@ -2047,14 +2048,25 @@ async function runPhase10_Physics() {
           xTbTc: xTbTcFromPrior,
           dftTc: dftTcFromPrior,
         });
-        let updatedTc = reconciled.reconciledTc > 0 ? reconciled.reconciledTc : (cappedPhysicsTc > 0 ? cappedPhysicsTc : currentTc);
+        let updatedTc: number;
+        if (reconciled.reconciledTc > 0) {
+          updatedTc = reconciled.reconciledTc;
+        } else if (physicsExplicitlyZero) {
+          updatedTc = 0;
+        } else if (cappedPhysicsTc > 0) {
+          updatedTc = cappedPhysicsTc;
+        } else {
+          updatedTc = currentTc;
+        }
 
         const instProx = result.instabilityProximity;
         const existingNotes = candidate.notes || "";
-        const instabilityNote = `[Instability: ${instProx.nearestBoundary}=${instProx.overallProximity.toFixed(2)}, QCP=${instProx.magneticQCP.toFixed(2)}, CDW=${instProx.cdwInstability.toFixed(2)}, MIT=${instProx.metalInsulatorTransition.toFixed(2)}]`;
-        const pairingNote = `[Pairing: ${result.pairingAnalysis.dominant.mechanism} (Tc=${result.pairingAnalysis.dominant.tcEstimate.toFixed(0)}K, conf=${result.pairingAnalysis.dominant.confidence.toFixed(2)})]`;
-        const newNotes = existingNotes.replace(/\[Instability:.*?\]/g, "").replace(/\[Pairing:.*?\]/g, "").trim();
-        const updatedNotes = `${pairingNote} ${instabilityNote} ${newNotes}`.trim();
+        const cleanNotes = existingNotes
+          .replace(/\[Instability:.*?\]/g, "")
+          .replace(/\[Pairing:.*?\]/g, "")
+          .replace(/\[EdgeBoost:.*?\]/g, "")
+          .trim();
+        const updatedNotes = cleanNotes.length > 500 ? cleanNotes.slice(0, 500) : cleanNotes;
 
         let edgeOfInstabilityCount = 0;
         if ((result.electronicStructure.vanHoveProximity ?? 0) > 0.7) edgeOfInstabilityCount++;
@@ -2081,6 +2093,35 @@ async function runPhase10_Physics() {
         const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
         const updatedMlFeatures = {
           ...existingMlFeatures,
+          instabilityAnalysis: {
+            nearestBoundary: instProx.nearestBoundary,
+            overallProximity: instProx.overallProximity,
+            magneticQCP: instProx.magneticQCP,
+            cdwInstability: instProx.cdwInstability,
+            metalInsulatorTransition: instProx.metalInsulatorTransition,
+            edgeOfInstabilityCount,
+            edgeBoost,
+            isExtremeInstability,
+            timestamp: Date.now(),
+          },
+          pairingAnalysis: {
+            mechanism: result.pairingAnalysis.dominant.mechanism,
+            tcEstimate: result.pairingAnalysis.dominant.tcEstimate,
+            confidence: result.pairingAnalysis.dominant.confidence,
+            description: result.pairingAnalysis.dominant.description,
+            timestamp: Date.now(),
+          },
+          reconciliation: {
+            reconciledTc: reconciled.reconciledTc,
+            confidence: reconciled.confidence,
+            physicsExplicitlyZero,
+            inputMethods: {
+              gbPredicted: candidate.xgboostScore != null ? currentTc : undefined,
+              physicsTc: cappedPhysicsTc > 0 ? cappedPhysicsTc : undefined,
+              xTbTc: xTbTcFromPrior,
+              dftTc: dftTcFromPrior,
+            },
+          },
           phononDispersion: {
             qPath: result.phononDispersion.qPath,
             branchCount: result.phononDispersion.branches.length,
@@ -2952,7 +2993,17 @@ async function runPhase10_Physics() {
               physicsTc: cappedRePhys > 0 ? cappedRePhys : undefined,
               physicsSigma: result.uncertaintyEstimate,
             });
-            let updatedTc = reconciledRePhys.reconciledTc > 0 ? reconciledRePhys.reconciledTc : (cappedRePhys > 0 ? cappedRePhys : currentTc);
+            const rePhysExplicitlyZero = physicsTc === 0 && Number.isFinite(rawTc);
+            let updatedTc: number;
+            if (reconciledRePhys.reconciledTc > 0) {
+              updatedTc = reconciledRePhys.reconciledTc;
+            } else if (rePhysExplicitlyZero) {
+              updatedTc = 0;
+            } else if (cappedRePhys > 0) {
+              updatedTc = cappedRePhys;
+            } else {
+              updatedTc = currentTc;
+            }
             await storage.updateSuperconductorCandidate(candidate.id, {
               electronPhononCoupling: newLambda,
               logPhononFrequency: result.coupling.omegaLog,
@@ -4041,7 +4092,17 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       physicsTc: cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : undefined,
       physicsSigma: physicsResult.uncertaintyEstimate,
     });
-    let finalTc = reconciledAuto.reconciledTc > 0 ? reconciledAuto.reconciledTc : (cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : Math.round(gbResult.tcPredicted));
+    const autoPhysExplicitlyZero = physicsTc === 0 && Number.isFinite(rawTc);
+    let finalTc: number;
+    if (reconciledAuto.reconciledTc > 0) {
+      finalTc = reconciledAuto.reconciledTc;
+    } else if (autoPhysExplicitlyZero) {
+      finalTc = 0;
+    } else if (cappedPhysicsTcAuto > 0) {
+      finalTc = cappedPhysicsTcAuto;
+    } else {
+      finalTc = Math.round(gbResult.tcPredicted);
+    }
 
     try {
       const hullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
