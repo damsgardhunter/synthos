@@ -956,7 +956,44 @@ function detectFermiPockets(
     const totalPoints = evaluations.length;
     const volumeFraction = crossingCount / totalPoints;
 
-    const type: "electron" | "hole" = aboveCount > belowCount ? "electron" : "hole";
+    let curvatureSum = 0;
+    let curvatureSamples = 0;
+
+    for (let i = 1; i < evaluations.length - 1; i++) {
+      if (
+        b < evaluations[i].eigenvalues.length &&
+        b < evaluations[i - 1].eigenvalues.length &&
+        b < evaluations[i + 1].eigenvalues.length
+      ) {
+        const ePrev = evaluations[i - 1].eigenvalues[b];
+        const eCur = evaluations[i].eigenvalues[b];
+        const eNext = evaluations[i + 1].eigenvalues[b];
+        const kPrev = evaluations[i - 1].k;
+        const kCur = evaluations[i].k;
+        const kNext = evaluations[i + 1].k;
+
+        const dkBack = Math.sqrt(
+          (kCur[0] - kPrev[0]) ** 2 + (kCur[1] - kPrev[1]) ** 2 + (kCur[2] - kPrev[2]) ** 2
+        );
+        const dkFwd = Math.sqrt(
+          (kNext[0] - kCur[0]) ** 2 + (kNext[1] - kCur[1]) ** 2 + (kNext[2] - kCur[2]) ** 2
+        );
+
+        if (dkBack > 0.001 && dkFwd > 0.001 && Math.abs(eCur - fermiEnergy) < fermiTolerance) {
+          const d2Edk2 = ((eNext - eCur) / dkFwd - (eCur - ePrev) / dkBack) / ((dkFwd + dkBack) * 0.5);
+          curvatureSum += d2Edk2;
+          curvatureSamples++;
+        }
+      }
+    }
+
+    let type: "electron" | "hole";
+    if (curvatureSamples > 0) {
+      const avgCurvature = curvatureSum / curvatureSamples;
+      type = avgCurvature > 0 ? "electron" : "hole";
+    } else {
+      type = aboveCount > belowCount ? "electron" : "hole";
+    }
 
     for (let i = 1; i < evaluations.length; i++) {
       if (b < evaluations[i].eigenvalues.length && b < evaluations[i - 1].eigenvalues.length) {
