@@ -174,32 +174,64 @@ function estimateFilling(
   return { filling, integerDistance };
 }
 
+function computeWeightedUoverW(
+  elements: string[],
+  counts: Record<string, number>,
+  totalAtoms: number,
+): number {
+  let maxUoverW = 0;
+  let weightedSum = 0;
+  let weightTotal = 0;
+  let correlatedCount = 0;
+
+  for (const el of elements) {
+    const U = getHubbardU(el);
+    if (U === null || U < 2.0) continue;
+    const W = Math.max(0.5, estimateBandwidthW(el));
+    const frac = (counts[el] || 1) / totalAtoms;
+    const ratio = (U / W) * Math.sqrt(frac);
+
+    if (ratio > maxUoverW) maxUoverW = ratio;
+    weightedSum += ratio * frac;
+    weightTotal += frac;
+    correlatedCount++;
+  }
+
+  if (correlatedCount <= 1) return maxUoverW;
+
+  const weightedAvg = weightTotal > 0 ? weightedSum / weightTotal : 0;
+  return 0.6 * maxUoverW + 0.4 * weightedAvg;
+}
+
 function computeMottChannel(
   elements: string[],
   counts: Record<string, number>,
   electronic: ElectronicStructure,
 ): number {
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  let maxUoverW = 0;
+  const maxUoverW = computeWeightedUoverW(elements, counts, totalAtoms);
+
+  let bestIntegerDistance = 1.0;
   let bestFillingPenalty = 1.0;
+  let bestDopingBoost = 0;
 
   for (const el of elements) {
     const U = getHubbardU(el);
     if (U === null) continue;
-    const W = Math.max(0.5, estimateBandwidthW(el));
-    const frac = (counts[el] || 1) / totalAtoms;
-    const ratio = (U / W) * Math.sqrt(frac);
+    const { integerDistance } = estimateFilling(elements, counts, el);
 
-    if (ratio > maxUoverW) {
-      maxUoverW = ratio;
-
-      const { filling, integerDistance } = estimateFilling(elements, counts, el);
-      if (integerDistance > 0.15) {
-        bestFillingPenalty = Math.max(0.2, 1.0 - (integerDistance - 0.15) * 4.0);
-      } else {
-        bestFillingPenalty = 1.0;
-      }
+    if (integerDistance < bestIntegerDistance) {
+      bestIntegerDistance = integerDistance;
     }
+  }
+
+  if (bestIntegerDistance > 0.15) {
+    bestFillingPenalty = Math.max(0.2, 1.0 - (bestIntegerDistance - 0.15) * 4.0);
+  }
+
+  if (bestIntegerDistance >= 0.05 && bestIntegerDistance <= 0.35) {
+    bestDopingBoost = 1.0 - Math.abs(bestIntegerDistance - 0.18) / 0.18;
+    bestDopingBoost = Math.max(0, Math.min(1.0, bestDopingBoost));
   }
 
   const mottProx = electronic.mottProximityScore ?? 0;
@@ -216,7 +248,14 @@ function computeMottChannel(
     mottScore = maxUoverW * 0.3;
   }
 
-  mottScore *= bestFillingPenalty;
+  if (bestIntegerDistance < 0.05) {
+    mottScore *= 1.0;
+  } else {
+    mottScore *= bestFillingPenalty;
+    if (bestDopingBoost > 0 && maxUoverW > 0.6) {
+      mottScore = Math.min(1.0, mottScore + bestDopingBoost * 0.25);
+    }
+  }
 
   mottScore = Math.max(mottScore, mottProx * 0.8 * bestFillingPenalty);
 

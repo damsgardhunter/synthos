@@ -740,6 +740,9 @@ function getElementalLambda(el: string): number | null {
 
 function estimateHubbardUoverW(elements: string[], counts: Record<string, number>): number {
   let maxUoverW = 0;
+  let weightedSum = 0;
+  let weightTotal = 0;
+  let correlatedCount = 0;
   const totalAtoms = getTotalAtoms(counts);
 
   for (const el of elements) {
@@ -758,9 +761,18 @@ function estimateHubbardUoverW(elements: string[], counts: Record<string, number
 
     const ratio = (U / W) * Math.sqrt(elFraction);
     if (ratio > maxUoverW) maxUoverW = ratio;
+
+    if (U >= 2.0) {
+      weightedSum += ratio * elFraction;
+      weightTotal += elFraction;
+      correlatedCount++;
+    }
   }
 
-  return maxUoverW;
+  if (correlatedCount <= 1) return maxUoverW;
+
+  const weightedAvg = weightTotal > 0 ? weightedSum / weightTotal : 0;
+  return 0.6 * maxUoverW + 0.4 * weightedAvg;
 }
 
 function estimateDOSatFermi(elements: string[], counts: Record<string, number>): number {
