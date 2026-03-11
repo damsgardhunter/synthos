@@ -1692,12 +1692,14 @@ async function reEvaluateTopCandidates() {
     }
 
     let updated = 0;
+    const topFormulas = [...new Set(topByTc.map(c => c.formula))];
+    const topCrystalMap = await storage.getCrystalStructuresByFormulas(topFormulas);
     for (const candidate of topByTc) {
       const lambda = candidate.electronPhononCoupling ?? 0;
       const omegaLog = candidate.logPhononFrequency ?? 0;
       const muStar = candidate.coulombPseudopotential ?? 0.12;
 
-      const crystals = await storage.getCrystalStructuresByFormula(candidate.formula);
+      const crystals = topCrystalMap.get(candidate.formula) ?? [];
       const hasCrystal = crystals.some(c => c.synthesizability != null && c.synthesizability > 0.7);
 
       const candidatePressure = candidate.pressureGpa ?? 0;
@@ -1768,6 +1770,8 @@ async function reEvaluateTopCandidates() {
 
 const dftEnrichmentTracker = new Map<string, number>();
 let dftEnrichmentLastRetrainCount = 0;
+const stagnationReanalyzedIds = new Map<string, number>();
+const STAGNATION_REANALYSIS_COOLDOWN_CYCLES = 10;
 const candidateGeneratorSource = new Map<string, string>();
 const MAX_GENERATOR_SOURCE_ENTRIES = 2000;
 
@@ -1789,6 +1793,14 @@ function trackGeneratorSource(formula: string, source: string): void {
   candidateGeneratorSource.set(formula, source);
   if (candidateGeneratorSource.size > MAX_GENERATOR_SOURCE_ENTRIES) {
     pruneGeneratorSourceMap();
+  }
+}
+
+function pruneStagnationMap(currentCycle: number): void {
+  for (const [id, cycle] of stagnationReanalyzedIds) {
+    if (currentCycle - cycle > STAGNATION_REANALYSIS_COOLDOWN_CYCLES * 2) {
+      stagnationReanalyzedIds.delete(id);
+    }
   }
 }
 
@@ -2952,6 +2964,7 @@ async function runPhase10_Physics() {
             return (b.predictedTc ?? 0) - (a.predictedTc ?? 0);
           })
           .slice(0, 5);
+        const hydrideCrystalMap = await storage.getCrystalStructuresByFormulas(hydrideToScan.map(c => c.formula));
         for (const candidate of hydrideToScan) {
           if (!shouldContinue()) break;
           try {
@@ -2963,7 +2976,7 @@ async function runPhase10_Physics() {
               let atomPositions: PercolationAtom[] | undefined;
               let latticeParams: PercolationLattice | undefined;
               try {
-                const crystalStructs = await storage.getCrystalStructuresByFormula(candidate.formula);
+                const crystalStructs = hydrideCrystalMap.get(candidate.formula) ?? [];
                 if (crystalStructs.length > 0) {
                   const cs = crystalStructs[0];
                   if (cs.atomicPositions && Array.isArray(cs.atomicPositions)) {
@@ -3077,10 +3090,19 @@ async function runPhase10_Physics() {
             if (pressureTc > ambientTc && pressureResult.optimalPressure <= 50 && pressureResult.optimalPressure > 0) {
               updates.pressureGpa = pressureResult.optimalPressure;
               updates.optimalPressureGpa = pressureResult.optimalPressure;
+              const pressureViability = classifyPressureViability(pressureResult.optimalPressure);
+              updatedMlFeatures.pressureClassification = {
+                label: pressureViability.label,
+                penalty: pressureViability.penalty,
+                optimalPressure: pressureResult.optimalPressure,
+                ambientTc: ambientTc,
+                pressureTc: pressureTc,
+                requiresHighPressureVerification: pressureResult.optimalPressure > 10,
+              };
               emit("log", {
                 phase: "phase-10",
                 event: "Pressure-enhanced Tc",
-                detail: `${candidate.formula}: Tc ${ambientTc}K -> ${pressureTc.toFixed(1)}K at ${pressureResult.optimalPressure.toFixed(1)} GPa (moderate pressure, non-hydride)`,
+                detail: `${candidate.formula}: Tc ${ambientTc}K -> ${pressureTc.toFixed(1)}K at ${pressureResult.optimalPressure.toFixed(1)} GPa (${pressureViability.label}, non-hydride)`,
                 dataSource: "Pressure Engine",
               });
             }
@@ -3092,16 +3114,22 @@ async function runPhase10_Physics() {
       } catch (e) { console.error("[Engine] Pressure scan outer error:", e); }
     }
 
-    if (cyclesSinceTcImproved > 3 && shouldContinue()) {
+    if (cyclesSinceTcImproved > 7 && shouldContinue()) {
       const stage4 = await storage.getSuperconductorsByStage(4, 20);
       const highLambda = stage4
-        .filter(c => (c.electronPhononCoupling ?? 0) > 2.0)
+        .filter(c => {
+          if ((c.electronPhononCoupling ?? 0) <= 2.0) return false;
+          const lastAnalyzedCycle = stagnationReanalyzedIds.get(c.id);
+          if (lastAnalyzedCycle !== undefined && (cycleCount - lastAnalyzedCycle) < STAGNATION_REANALYSIS_COOLDOWN_CYCLES) return false;
+          return true;
+        })
         .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
-      const toReanalyze = shuffle(highLambda).slice(0, 2);
+      const toReanalyze = highLambda.slice(0, 2);
       for (const candidate of toReanalyze) {
         if (!shouldContinue()) break;
         try {
           const result = await runFullPhysicsAnalysis(emit, candidate);
+          stagnationReanalyzedIds.set(candidate.id, cycleCount);
           totalPhysicsComputed++;
           const newLambda = result.coupling.lambda ?? 0;
           const oldLambda = candidate.electronPhononCoupling ?? 0;
@@ -3163,11 +3191,12 @@ async function runPhase11_StructurePrediction() {
       .map(c => c.formula)
       .filter((f, i, arr) => arr.indexOf(f) === i));
 
+    const candidateFormulas = uniqueFormulas.filter(f => !isFormulaInFlight(f)).slice(0, 20);
+    const crystalMap = await storage.getCrystalStructuresByFormulas(candidateFormulas);
     const needsPrediction: string[] = [];
-    for (const formula of uniqueFormulas) {
+    for (const formula of candidateFormulas) {
       if (needsPrediction.length >= 5) break;
-      if (isFormulaInFlight(formula)) continue;
-      const existing = await storage.getCrystalStructuresByFormula(formula);
+      const existing = crystalMap.get(formula) ?? [];
       if (existing.length === 0) {
         needsPrediction.push(formula);
       }
@@ -5951,6 +5980,7 @@ async function runLearningCycle() {
   isRunningCycle = true;
 
   cycleCount++;
+  pruneStagnationMap(cycleCount);
   lastCycleAt = new Date().toISOString();
   cycleInsightsThisCycle = 0;
   recentNewCandidates = 0;

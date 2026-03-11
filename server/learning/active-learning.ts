@@ -1397,7 +1397,20 @@ export async function runActiveLearningCycle(
   for (const ranked of selected) {
     const { candidate } = ranked;
     const isPressureTier = ranked.selectionTier === "pressure-exploration";
-    const candidatePressure = ranked.targetPressureGpa ?? candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const mlf = (candidate.mlFeatures as Record<string, any>) ?? {};
+    const pressureClass = mlf.pressureClassification;
+    const candidatePressure = ranked.targetPressureGpa
+      ?? (pressureClass?.requiresHighPressureVerification ? pressureClass.optimalPressure : null)
+      ?? candidate.pressureGpa
+      ?? estimateFamilyPressure(candidate.formula);
+    if (pressureClass?.requiresHighPressureVerification && !isPressureTier && candidatePressure > 10) {
+      emit("log", {
+        phase: "active-learning",
+        event: "High-pressure verification redirect",
+        detail: `${candidate.formula}: verifying at ${candidatePressure.toFixed(1)} GPa (${pressureClass.label}) instead of ambient`,
+        dataSource: "Active Learning",
+      });
+    }
     const fpKey = `${candidate.formula}@${candidatePressure}`;
     if (enrichedFormulaPressures.has(fpKey)) continue;
     enrichedFormulaPressures.add(fpKey);

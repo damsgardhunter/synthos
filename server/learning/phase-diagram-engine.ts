@@ -720,10 +720,34 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
   };
 }
 
+const convexHullCache = new Map<string, { result: ConvexHullResult; timestamp: number }>();
+const HULL_CACHE_TTL_MS = 30 * 60 * 1000;
+const MAX_HULL_CACHE_SIZE = 200;
+
+function getChemicalSystem(formula: string): string {
+  const elements = formula.match(/[A-Z][a-z]*/g) ?? [];
+  return [...new Set(elements)].sort().join("-");
+}
+
+export function invalidateHullCache(formula: string): void {
+  convexHullCache.delete(formula);
+}
+
 export async function runConvexHullAnalysis(
   emit: EventEmitter,
   formula: string
 ): Promise<ConvexHullResult> {
+  const cached = convexHullCache.get(formula);
+  if (cached && (Date.now() - cached.timestamp) < HULL_CACHE_TTL_MS) {
+    emit("log", {
+      phase: "phase-11",
+      event: "Convex hull cache hit",
+      detail: `${formula}: using cached result (age=${((Date.now() - cached.timestamp) / 1000).toFixed(0)}s)`,
+      dataSource: "Phase Diagram Engine",
+    });
+    return cached.result;
+  }
+
   const hullResult = await getCompetingPhases(formula);
   const metastability = assessMetastability(formula, hullResult.energyAboveHull);
 
@@ -737,6 +761,16 @@ export async function runConvexHullAnalysis(
     detail: `${formula}: eAboveHull=${hullResult.energyAboveHull.toFixed(4)} eV/atom, onHull=${hullResult.isOnHull}, decomposition=${decompStr}, metastable=${metastability.isMetastable}, barrier=${metastability.kineticBarrier.toFixed(3)} eV, lifetime=${metastability.estimatedLifetime}`,
     dataSource: "Phase Diagram Engine",
   });
+
+  if (convexHullCache.size >= MAX_HULL_CACHE_SIZE) {
+    let oldestKey = "";
+    let oldestTime = Infinity;
+    for (const [k, v] of convexHullCache) {
+      if (v.timestamp < oldestTime) { oldestTime = v.timestamp; oldestKey = k; }
+    }
+    if (oldestKey) convexHullCache.delete(oldestKey);
+  }
+  convexHullCache.set(formula, { result: hullResult, timestamp: Date.now() });
 
   return hullResult;
 }

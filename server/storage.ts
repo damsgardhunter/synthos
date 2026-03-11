@@ -19,7 +19,7 @@ import type {
   InverseDesignCampaign, InsertInverseDesignCampaign,
   DftJob, InsertDftJob
 } from "@shared/schema";
-import { eq, desc, asc, sql, ilike, isNull } from "drizzle-orm";
+import { eq, desc, asc, sql, ilike, isNull, inArray } from "drizzle-orm";
 
 
 export interface IStorage {
@@ -63,6 +63,7 @@ export interface IStorage {
   insertCrystalStructure(cs: InsertCrystalStructure): Promise<CrystalStructure>;
   getCrystalStructureCount(): Promise<number>;
   getCrystalStructuresByFormula(formula: string): Promise<CrystalStructure[]>;
+  getCrystalStructuresByFormulas(formulas: string[]): Promise<Map<string, CrystalStructure[]>>;
 
   getComputationalResults(limit?: number): Promise<ComputationalResult[]>;
   insertComputationalResult(cr: InsertComputationalResult): Promise<ComputationalResult>;
@@ -322,6 +323,19 @@ export class DatabaseStorage implements IStorage {
 
   async getCrystalStructuresByFormula(formula: string): Promise<CrystalStructure[]> {
     return db.select().from(crystalStructures).where(eq(crystalStructures.formula, formula));
+  }
+
+  async getCrystalStructuresByFormulas(formulas: string[]): Promise<Map<string, CrystalStructure[]>> {
+    const result = new Map<string, CrystalStructure[]>();
+    if (formulas.length === 0) return result;
+    for (const f of formulas) result.set(f, []);
+    const rows = await db.select().from(crystalStructures).where(inArray(crystalStructures.formula, formulas));
+    for (const row of rows) {
+      const arr = result.get(row.formula) ?? [];
+      arr.push(row);
+      result.set(row.formula, arr);
+    }
+    return result;
   }
 
   async getSuperconductorsByFormula(formula: string): Promise<SuperconductorCandidate[]> {
