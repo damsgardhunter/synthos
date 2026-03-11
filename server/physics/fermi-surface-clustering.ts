@@ -170,6 +170,61 @@ function topElements(members: FSClusterMember[], n: number): string[] {
 const assignedFormulas = new Set<string>();
 const novelClusterCentroids: Map<string, { centroid: number[]; count: number }> = new Map();
 
+interface CachedClusterStats {
+  avgTc: number;
+  bestTc: number;
+  commonElements: string[];
+  avgFeatureVector: number[];
+  memberCount: number;
+}
+const clusterStatsCache: Map<string, CachedClusterStats> = new Map();
+const clusterStatsDirty: Set<string> = new Set();
+
+function recomputeClusterStats(clusterId: string): CachedClusterStats {
+  const members = clusterMembers.get(clusterId) || novelClusterMembers.get(clusterId) || [];
+  const tcs = members.map(m => m.tc).filter(t => t > 0);
+  const arch = ARCHETYPES.find(a => a.id === clusterId);
+  const stored = novelClusterCentroids.get(clusterId);
+
+  let avgFV: number[];
+  if (members.length > 0) {
+    avgFV = stored ? stored.centroid : avgVector(members.map(m => m.featureVector));
+  } else {
+    avgFV = arch ? arch.centroid : new Array(9).fill(0);
+  }
+
+  const stats: CachedClusterStats = {
+    avgTc: tcs.length > 0 ? tcs.reduce((a, b) => a + b, 0) / tcs.length : 0,
+    bestTc: tcs.length > 0 ? Math.max(...tcs) : 0,
+    commonElements: topElements(members, 5),
+    avgFeatureVector: avgFV,
+    memberCount: members.length,
+  };
+  clusterStatsCache.set(clusterId, stats);
+  clusterStatsDirty.delete(clusterId);
+  return stats;
+}
+
+function getClusterStatsCached(clusterId: string): CachedClusterStats {
+  if (clusterStatsDirty.has(clusterId) || !clusterStatsCache.has(clusterId)) {
+    return recomputeClusterStats(clusterId);
+  }
+  return clusterStatsCache.get(clusterId)!;
+}
+
+function markClusterDirty(clusterId: string): void {
+  clusterStatsDirty.add(clusterId);
+}
+
+const ARCHETYPE_TARGET_MEMBERS: Record<string, number> = {
+  cuprate_cylinder: 20,
+  pnictide_eh_pockets: 20,
+  kagome_flat: 15,
+  hydride_multiband: 20,
+  heavy_fermion: 15,
+  conventional_3d: 10,
+};
+
 function makeCacheKey(formula: string, pressureGpa: number): string {
   const pBin = Math.round(pressureGpa);
   return pBin > 0 ? `${formula}_${pBin}` : formula;
@@ -239,6 +294,7 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
       arr.push(member);
       clusterMembers.set(assignedId, arr);
     }
+    markClusterDirty(assignedId);
   }
 
   const assignment: ClusterAssignment = {
@@ -257,37 +313,37 @@ export function getCluster(clusterId: string): FSCluster | null {
   const arch = ARCHETYPES.find(a => a.id === clusterId);
   if (arch) {
     const members = clusterMembers.get(clusterId) || [];
-    const tcs = members.map(m => m.tc).filter(t => t > 0);
+    const stats = getClusterStatsCached(clusterId);
     return {
       id: arch.id,
       name: arch.name,
       description: arch.description,
       centroid: arch.centroid,
       members,
-      memberCount: members.length,
-      avgTc: tcs.length > 0 ? tcs.reduce((a, b) => a + b, 0) / tcs.length : 0,
-      bestTc: tcs.length > 0 ? Math.max(...tcs) : 0,
-      commonElements: topElements(members, 5),
-      avgFeatureVector: members.length > 0 ? avgVector(members.map(m => m.featureVector)) : arch.centroid,
+      memberCount: stats.memberCount,
+      avgTc: stats.avgTc,
+      bestTc: stats.bestTc,
+      commonElements: stats.commonElements,
+      avgFeatureVector: stats.avgFeatureVector,
     };
   }
 
   const novelMembers = novelClusterMembers.get(clusterId);
   if (novelMembers) {
-    const tcs = novelMembers.map(m => m.tc).filter(t => t > 0);
+    const stats = getClusterStatsCached(clusterId);
     const stored = novelClusterCentroids.get(clusterId);
-    const centroid = stored ? stored.centroid : avgVector(novelMembers.map(m => m.featureVector));
+    const centroid = stored ? stored.centroid : stats.avgFeatureVector;
     return {
       id: clusterId,
       name: `Novel Cluster ${clusterId.replace("novel_", "")}`,
       description: "Automatically discovered cluster not matching known archetypes",
       centroid,
       members: novelMembers,
-      memberCount: novelMembers.length,
-      avgTc: tcs.length > 0 ? tcs.reduce((a, b) => a + b, 0) / tcs.length : 0,
-      bestTc: tcs.length > 0 ? Math.max(...tcs) : 0,
-      commonElements: topElements(novelMembers, 5),
-      avgFeatureVector: centroid,
+      memberCount: stats.memberCount,
+      avgTc: stats.avgTc,
+      bestTc: stats.bestTc,
+      commonElements: stats.commonElements,
+      avgFeatureVector: stats.avgFeatureVector,
     };
   }
 
@@ -334,14 +390,23 @@ export function getClusterGuidance(): ClusterGuidance {
     }));
 
   const underExplored = clusters
-    .filter(c => c.memberCount < Math.max(3, avgMembers * 0.5))
-    .sort((a, b) => a.memberCount - b.memberCount)
+    .map(c => {
+      const isArchetype = ARCHETYPES.some(a => a.id === c.id);
+      const target = isArchetype
+        ? (ARCHETYPE_TARGET_MEMBERS[c.id] || 15)
+        : Math.max(3, avgMembers * 0.3);
+      const deficit = Math.max(0, target - c.memberCount) / target;
+      const priorityWeight = isArchetype ? 2.0 : 1.0;
+      return { cluster: c, score: deficit * priorityWeight };
+    })
+    .filter(entry => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
     .slice(0, 3)
-    .map(c => ({
-      clusterId: c.id,
-      name: c.name,
-      memberCount: c.memberCount,
-      avgTc: Number(c.avgTc.toFixed(2)),
+    .map(entry => ({
+      clusterId: entry.cluster.id,
+      name: entry.cluster.name,
+      memberCount: entry.cluster.memberCount,
+      avgTc: Number(entry.cluster.avgTc.toFixed(2)),
     }));
 
   const suggestions: string[] = [];
