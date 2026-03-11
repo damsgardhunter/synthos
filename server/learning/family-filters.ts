@@ -802,8 +802,9 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
 } {
   const normalizedTc = Math.min(1.0, Math.max(0, (candidate.predictedTc || 0) / 300));
 
-  const hullDist = candidate.hullDistance ?? 0.05;
-  const stabilityScore = Math.min(1.0, Math.max(0, 1.0 - hullDist / 0.1));
+  const hullDistKnown = candidate.hullDistance != null;
+  const hullDist = candidate.hullDistance ?? 0.10;
+  const stabilityScore = Math.min(1.0, Math.max(0, hullDistKnown ? (1.0 - hullDist / 0.15) : (0.3 - hullDist / 0.5)));
 
   const synthesisFeasibility = Math.min(1.0, Math.max(0, candidate.synthesisScore ?? 0.5));
 
@@ -836,18 +837,43 @@ export function computeDiscoveryScore(candidate: DiscoveryScoreInput): {
   }
 
   if (candidate.existingFormulas && candidate.existingFormulas.length > 0) {
-    let minDistance = 1.0;
+    let maxWeightedDistance = 0;
     for (const existing of candidate.existingFormulas) {
       const existingElements = parseFormulaElements(existing);
       const allElements = Array.from(new Set(elements.concat(existingElements)));
       const commonElements = elements.filter(e => existingElements.includes(e));
       const jaccard = allElements.length > 0 ? commonElements.length / allElements.length : 0;
-      const distance = 1.0 - jaccard;
-      if (distance < minDistance) {
-        minDistance = distance;
+      const baseDistance = 1.0 - jaccard;
+
+      let chemicalDistance = 0;
+      const uniqueToCandidate = elements.filter(e => !existingElements.includes(e));
+      const uniqueToExisting = existingElements.filter(e => !elements.includes(e));
+      if (uniqueToCandidate.length > 0 && uniqueToExisting.length > 0) {
+        let totalDiff = 0;
+        let pairCount = 0;
+        for (const nc of uniqueToCandidate) {
+          const dC = getElementData(nc);
+          for (const ne of uniqueToExisting) {
+            const dE = getElementData(ne);
+            if (dC && dE) {
+              const enDiff = Math.abs((dC.paulingElectronegativity ?? 2) - (dE.paulingElectronegativity ?? 2));
+              const rC = (dC.atomicRadius ?? 150) / 100;
+              const rE = (dE.atomicRadius ?? 150) / 100;
+              const rDiff = Math.abs(rC - rE) / Math.max(rC, rE);
+              totalDiff += enDiff * 0.6 + rDiff * 0.4;
+              pairCount++;
+            }
+          }
+        }
+        chemicalDistance = pairCount > 0 ? Math.min(1.0, totalDiff / pairCount) : 0;
+      }
+
+      const weightedDist = baseDistance * Math.min(1.5, 0.5 + chemicalDistance);
+      if (weightedDist > maxWeightedDistance) {
+        maxWeightedDistance = weightedDist;
       }
     }
-    noveltyScore += minDistance * 0.1;
+    noveltyScore += maxWeightedDistance * 0.15;
   }
 
   noveltyScore = Math.min(1.0, Math.max(0, noveltyScore));
