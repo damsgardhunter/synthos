@@ -102,6 +102,18 @@ interface GBEnsemble {
 
 let cachedEnsembleXGB: GBEnsemble | null = null;
 let cachedVarianceEnsembleXGB: GBEnsemble | null = null;
+let cachedGlobalFeatureImportance: { name: string; index: number; importance: number; normalizedImportance: number }[] | null = null;
+
+let curiosityProvider: (() => number) | null = null;
+
+export function setCuriosityProvider(provider: () => number): void {
+  curiosityProvider = provider;
+}
+
+function getCuriosityMultiplier(): number {
+  if (curiosityProvider) return curiosityProvider();
+  return 1.5;
+}
 
 function bootstrapSample(X: number[][], y: number[], ratio: number = BOOTSTRAP_SAMPLE_RATIO): { X: number[][]; y: number[] } {
   const n = X.length;
@@ -1005,6 +1017,8 @@ export function getTrainedModel(): GBModel {
   if (!cachedEnsembleXGB && X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
     cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    cachedGlobalFeatureImportance = null;
+    buildFeatureImportanceCache();
   }
 
   logModelVersion("initial-training", X.length);
@@ -1137,7 +1151,7 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
       normalizedUncertainty: coldStartUncertainty,
       score: safeTc > 100 ? 0.7 : safeTc > 20 ? 0.4 : 0.1,
       perModelPredictions: [safeTc],
-      acquisitionScore: safeTc / 300 + 1.5 * coldStartUncertainty,
+      acquisitionScore: safeTc / 300 + getCuriosityMultiplier() * coldStartUncertainty,
       reasoning: [`Single model (${nSamples} samples, no ensemble yet — high uncertainty)`],
     };
   }
@@ -1191,7 +1205,8 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   score = Math.max(0.01, Math.min(0.95, score));
 
   const normalizedTc = Math.min(1.0, meanTc / 300);
-  const acquisitionScore = normalizedTc + 1.5 * normalizedUncertainty;
+  const curiosity = getCuriosityMultiplier();
+  const acquisitionScore = normalizedTc + curiosity * normalizedUncertainty;
 
   const reasoning: string[] = [];
   reasoning.push(`Ensemble: ${XGB_ENSEMBLE_SIZE} models, Tc=${meanTc.toFixed(1)}K ± ${totalStd.toFixed(1)}K`);
@@ -1219,9 +1234,12 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   };
 }
 
-export function getGlobalFeatureImportance(topN: number = 30): { name: string; index: number; importance: number; normalizedImportance: number }[] {
-  const model = getTrainedModel();
-  if (!model || model.trees.length === 0) return [];
+function buildFeatureImportanceCache(): void {
+  const model = cachedModel;
+  if (!model || model.trees.length === 0) {
+    cachedGlobalFeatureImportance = [];
+    return;
+  }
 
   const featureImp = new Map<number, number>();
   for (const tree of model.trees) {
@@ -1245,12 +1263,19 @@ export function getGlobalFeatureImportance(topN: number = 30): { name: string; i
   const sorted = [...featureImp.entries()].sort((a, b) => b[1] - a[1]);
   const maxImp = sorted.length > 0 ? sorted[0][1] : 1;
 
-  return sorted.slice(0, topN).map(([idx, count]) => ({
+  cachedGlobalFeatureImportance = sorted.map(([idx, count]) => ({
     name: FEATURE_NAMES[idx] || `feature_${idx}`,
     index: idx,
     importance: count,
     normalizedImportance: Math.round((count / maxImp) * 1000) / 1000,
   }));
+}
+
+export function getGlobalFeatureImportance(topN: number = 30): { name: string; index: number; importance: number; normalizedImportance: number }[] {
+  if (!cachedGlobalFeatureImportance) {
+    buildFeatureImportanceCache();
+  }
+  return (cachedGlobalFeatureImportance || []).slice(0, topN);
 }
 
 export function getFeatureNames(): string[] {
@@ -1561,6 +1586,8 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
     cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    cachedGlobalFeatureImportance = null;
+    buildFeatureImportanceCache();
   }
 
   xgboostRetrainCount++;
@@ -1576,6 +1603,8 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     if (X.length >= 30) {
       cachedEnsembleXGB = trainEnsembleXGB(X, y);
       cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+      cachedGlobalFeatureImportance = null;
+      buildFeatureImportanceCache();
     }
     logModelVersion("error-rate-correction", X.length);
   }
@@ -1617,6 +1646,7 @@ export function invalidateModel(): void {
   cachedEnsembleXGB = null;
   cachedVarianceEnsembleXGB = null;
   cachedTrainingSnapshot = null;
+  cachedGlobalFeatureImportance = null;
   crystalSymTargetEncoding = null;
   miedemaCache.clear();
 }
@@ -1722,6 +1752,8 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
     cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    cachedGlobalFeatureImportance = null;
+    buildFeatureImportanceCache();
   }
   lastRetrainCycle = Date.now();
 
@@ -1780,6 +1812,8 @@ export async function incorporateFailureData(): Promise<number> {
       if (X.length >= 30) {
         cachedEnsembleXGB = trainEnsembleXGB(X, y);
         cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        cachedGlobalFeatureImportance = null;
+        buildFeatureImportanceCache();
       }
       logModelVersion("failure-retrain", X.length);
     }
