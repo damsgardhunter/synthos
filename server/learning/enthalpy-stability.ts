@@ -2,6 +2,8 @@ import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { relaxStructureAtPressure } from "./pressure-engine";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
+import { normalizeFormula } from "./utils";
+import { getElementData } from "./elemental-data";
 
 export interface EnthalpyPoint {
   pressureGpa: number;
@@ -43,6 +45,7 @@ export interface EnthalpyStats {
 }
 
 const EV_PER_GPA_A3 = 0.00624150913;
+const STABILITY_THRESHOLD = 0.025;
 const METASTABLE_THRESHOLD = 0.15;
 const PRESSURE_STEPS = [0, 10, 20, 30, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350];
 
@@ -66,6 +69,20 @@ function getTotalAtoms(counts: Record<string, number>): number {
   return Object.values(counts).reduce((s, n) => s + n, 0);
 }
 
+function estimateElementalVolume(el: string): number {
+  const data = getElementData(el);
+  if (!data) return 10;
+  const rPm = data.atomicRadius || 150;
+  const rA = rPm / 100;
+  return (4 / 3) * Math.PI * Math.pow(rA, 3);
+}
+
+function murnaghanVolume(V0: number, B0: number, pressureGpa: number, Bp: number = 4.0): number {
+  if (B0 <= 0 || pressureGpa <= 0) return V0;
+  const ratio = 1 + (Bp * pressureGpa) / B0;
+  return V0 * Math.pow(ratio, -1 / Bp);
+}
+
 function estimateDecompositionEnthalpy(formula: string, pressureGpa: number): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -82,7 +99,11 @@ function estimateDecompositionEnthalpy(formula: string, pressureGpa: number): nu
       const pv = pressureGpa * elVolume * EV_PER_GPA_A3;
       decompH += frac * pv;
     } catch {
-      decompH += frac * pressureGpa * 10 * EV_PER_GPA_A3;
+      const data = getElementData(el);
+      const V0 = estimateElementalVolume(el);
+      const B0 = data?.bulkModulus ?? 50;
+      const compressedV = murnaghanVolume(V0, B0, pressureGpa);
+      decompH += frac * pressureGpa * compressedV * EV_PER_GPA_A3;
     }
   }
 
@@ -115,7 +136,7 @@ export function computeEnthalpy(formula: string, pressureGpa: number): EnthalpyP
   const enthalpy = totalEnergy + pv;
 
   const decompH = estimateDecompositionEnthalpy(formula, pressureGpa);
-  const isStable = enthalpy < decompH + METASTABLE_THRESHOLD;
+  const isStable = enthalpy <= decompH + STABILITY_THRESHOLD;
 
   return {
     pressureGpa,
@@ -139,7 +160,7 @@ export function computeEnthalpyStability(formula: string, pressureGpa: number): 
   const decompositionEnthalpy = elementalEnergy + decompH;
 
   const diff = point.enthalpy - decompositionEnthalpy;
-  const isStable = diff <= 0.005;
+  const isStable = diff <= STABILITY_THRESHOLD;
   const isMetastable = !isStable && diff <= METASTABLE_THRESHOLD;
   const stabilityMargin = -diff;
 
@@ -156,7 +177,8 @@ export function computeEnthalpyStability(formula: string, pressureGpa: number): 
 }
 
 export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
-  const cached = enthalpyCache.get(formula);
+  const cacheKey = normalizeFormula(formula);
+  const cached = enthalpyCache.get(cacheKey);
   if (cached && Date.now() - cached.computedAt < 30 * 60 * 1000) {
     return cached;
   }
@@ -194,7 +216,7 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
   }
 
   const curve: EnthalpyCurve = {
-    formula,
+    formula: cacheKey,
     points,
     minEnthalpy: minEnthalpy === Infinity ? 0 : Math.round(minEnthalpy * 10000) / 10000,
     minEnthalpyPressure,
@@ -206,7 +228,7 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
     const firstKey = enthalpyCache.keys().next().value;
     if (firstKey !== undefined) enthalpyCache.delete(firstKey);
   }
-  enthalpyCache.set(formula, curve);
+  enthalpyCache.set(cacheKey, curve);
 
   return curve;
 }
