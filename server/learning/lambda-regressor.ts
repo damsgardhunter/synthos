@@ -85,6 +85,13 @@ let tierBreakdown = { "verified-dfpt": 0, "ml-regression": 0, "physics-engine": 
 let retrainCount = 0;
 let lastRetrainTime = 0;
 let predictionErrors: { predicted: number; actual: number; formula: string }[] = [];
+let isTraining = false;
+
+function computeENSpread(formula: string): number {
+  const elements = parseFormula(formula);
+  const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
+  return enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
+}
 
 function parseFormula(formula: string): string[] {
   const matches = formula.match(/[A-Z][a-z]?/g);
@@ -569,8 +576,9 @@ export function predictLambda(formula: string, pressure: number = 0): LambdaPred
     };
   }
 
-  if (shouldRetrain()) {
-    try { trainLambdaRegressor(); } catch {}
+  if (shouldRetrain() && !isTraining) {
+    isTraining = true;
+    try { trainLambdaRegressor(); } catch {} finally { isTraining = false; }
   }
 
   if (lambdaEnsemble && lambdaEnsemble.models.length > 0) {
@@ -585,13 +593,16 @@ export function predictLambda(formula: string, pressure: number = 0): LambdaPred
         const std = Math.sqrt(variance);
 
         const lambda = Math.max(0, Math.min(4.5, mean));
-        const normalizedUncertainty = lambda > 0 ? std / lambda : 1;
-        const confidence = Math.max(0.1, Math.min(0.9, 1 - normalizedUncertainty));
+        const mae = lambdaEnsemble.metrics?.mae ?? 0.2;
+        const calibratedStd = Math.max(std, mae * 0.5);
+        const confidence = Math.max(0.1, Math.min(0.9,
+          1 - (calibratedStd / Math.max(mae * 3, 0.6))
+        ));
 
         tierBreakdown["ml-regression"]++;
         return {
           lambda,
-          uncertainty: std,
+          uncertainty: calibratedStd,
           tier: "ml-regression",
           confidence,
           features,
@@ -606,16 +617,23 @@ export function predictLambda(formula: string, pressure: number = 0): LambdaPred
     const phonon = computePhononSpectrum(formula, electronic);
     const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
 
+    const enSpread = computeENSpread(formula);
+    const baseMultiplier = 0.3;
+    const ionicPenalty = enSpread > 1.0 ? Math.min(0.25, (enSpread - 1.0) * 0.15) : 0;
+    const metallicityBonus = electronic.metallicity > 0.7 ? -0.05 : 0;
+    const uncertaintyMultiplier = Math.min(0.55, baseMultiplier + ionicPenalty + metallicityBonus);
+
     tierBreakdown["physics-engine"]++;
     return {
       lambda: coupling.lambda,
-      uncertainty: coupling.lambda * 0.3,
+      uncertainty: coupling.lambda * uncertaintyMultiplier,
       tier: "physics-engine",
-      confidence: 0.4,
+      confidence: Math.max(0.15, 0.5 - ionicPenalty * 2),
       features: {
         dosAtEF: electronic.densityOfStatesAtFermi,
         metallicity: electronic.metallicity,
         debyeTemp: phonon.debyeTemperature,
+        enSpread,
       },
     };
   } catch {
