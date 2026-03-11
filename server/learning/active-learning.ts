@@ -1141,14 +1141,6 @@ async function runDFTEnrichmentForCandidate(
   } catch (err) {
     console.log(`[Active Learning] DFT enrichment failed for ${candidate.formula}: ${err instanceof Error ? err.message : String(err)}`);
 
-    incorporateDFTResult(
-      candidate.formula,
-      0,
-      null,
-      false,
-      "active-learning"
-    );
-
     let failGnnTc = 0;
     try {
       const gnnPred = gnnPredictWithUncertainty(candidate.formula);
@@ -1166,15 +1158,55 @@ async function runDFTEnrichmentForCandidate(
   }
 }
 
+const VALIDATION_FRACTION = 0.15;
+function deterministicHash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+const heldOutFormulas = new Set(
+  SUPERCON_TRAINING_DATA
+    .filter(e => e.isSuperconductor)
+    .filter(e => (deterministicHash(e.formula) % 100) < (VALIDATION_FRACTION * 100))
+    .map(e => e.formula)
+);
+
+function validateOnHeldOut(): { r2: number; mse: number } {
+  const heldOut = SUPERCON_TRAINING_DATA.filter(
+    e => e.isSuperconductor && heldOutFormulas.has(e.formula)
+  );
+  if (heldOut.length < 5) return validateModel();
+
+  let sse = 0;
+  let sst = 0;
+  let count = 0;
+  const allTc = heldOut.map(e => e.tc);
+  const meanTc = allTc.reduce((s, v) => s + v, 0) / allTc.length;
+
+  for (const entry of heldOut) {
+    try {
+      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+      const result = gbPredictWithUncertainty(features, entry.formula);
+      sse += (entry.tc - result.tcPredicted) ** 2;
+      sst += (entry.tc - meanTc) ** 2;
+      count++;
+    } catch { continue; }
+  }
+  if (count < 5) return validateModel();
+  return { mse: sse / count, r2: sst < 1e-6 ? 0 : 1 - sse / sst };
+}
+
 async function retrainGNNWithEnrichedData(
   emit: EventEmitter
 ): Promise<{ r2Before: number; maeBefore: number; r2After: number; maeAfter: number }> {
-  const validationBefore = validateModel();
+  const validationBefore = validateOnHeldOut();
   const r2Before = validationBefore.r2;
   const maeBefore = Math.sqrt(validationBefore.mse);
 
   const trainingData = SUPERCON_TRAINING_DATA
-    .filter(e => e.isSuperconductor)
+    .filter(e => e.isSuperconductor && !heldOutFormulas.has(e.formula))
     .map(e => ({
       formula: e.formula,
       tc: e.tc,
@@ -1213,15 +1245,12 @@ async function retrainGNNWithEnrichedData(
         const hasDFTValidation = hasDFTBandGap || hasDFTFormationEnergy;
         if (!hasDFTValidation) continue;
 
-        const dftFeatures = extractFeatures(c.formula, undefined, undefined, undefined, undefined);
-        const gb = gbPredict(dftFeatures);
-        const dftCorrectedTc = gb.tcPredicted;
-
-        if (dftCorrectedTc > 0) {
+        const storedTc = c.predictedTc ?? 0;
+        if (storedTc > 0) {
           seenFormulas.add(c.formula);
           trainingData.push({
             formula: c.formula,
-            tc: dftCorrectedTc,
+            tc: storedTc,
             formationEnergy: c.decompositionEnergy ?? undefined,
             structure: undefined,
             prototype: undefined,
@@ -1246,7 +1275,7 @@ async function retrainGNNWithEnrichedData(
 
   const xgbResult = await retrainXGBoostFromEvaluated();
 
-  const validationAfter = validateModel();
+  const validationAfter = validateOnHeldOut();
   const r2After = validationAfter.r2;
   const maeAfter = Math.sqrt(validationAfter.mse);
 
