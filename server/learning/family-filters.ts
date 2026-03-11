@@ -40,7 +40,7 @@ function applyMAXPhaseFilter(formula: string, features: MLFeatureVector): Family
   let score = 0;
   let pass = true;
 
-  const M_ELEMENTS = ["Ti", "V", "Cr", "Nb", "Mo", "Zr", "Hf", "Ta", "W", "Sc"];
+  const M_ELEMENTS = ["Ti", "V", "Cr", "Nb", "Mo", "Zr", "Hf", "Ta", "W", "Sc", "Y"];
   const A_ELEMENTS = ["Al", "Si", "Ga", "Ge", "Sn", "In", "Tl", "Pb", "S", "As", "P"];
 
   const metalLayers = elements.filter(e => M_ELEMENTS.includes(e)).reduce((s, e) => s + (counts[e] || 0), 0);
@@ -85,12 +85,15 @@ function applyMAXPhaseFilter(formula: string, features: MLFeatureVector): Family
     reasons.push(`Anisotropy score ${anisotropy.toFixed(1)} <= 3 (no anisotropy bonus)`);
   }
 
-  if (features.metallicity < 0.4) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for MAX phase`);
+  if (features.metallicity < 0.3) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for MAX phase (heavy score penalty)`);
+  } else if (features.metallicity < 0.4) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for MAX phase (score penalized)`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -144,12 +147,24 @@ function applyBorideFilter(formula: string, features: MLFeatureVector): FamilyFi
     reasons.push("Some metals have electronegativity >= boron (2.04): less favorable charge transfer");
   }
 
-  if (features.metallicity < 0.3) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for metallic boride`);
+  const is2DBoronSheet = features.dimensionalityScore >= 0.6 || features.layeredStructure;
+  if (is2DBoronSheet) {
+    score += 0.15;
+    reasons.push(`2D boron sheet character detected (dimensionality=${features.dimensionalityScore.toFixed(2)}, layered=${features.layeredStructure})`);
+  } else if (bCoordination >= 3) {
+    score -= 0.10;
+    reasons.push(`Low anisotropy (dimensionality=${features.dimensionalityScore.toFixed(2)}): boron network may be 3D cluster, not superconducting sheet`);
   }
 
-  score = Math.min(1.0, score);
+  if (features.metallicity < 0.2) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for metallic boride (heavy score penalty)`);
+  } else if (features.metallicity < 0.3) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for metallic boride (score penalized)`);
+  }
+
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -233,12 +248,15 @@ function applyHydrideFilter(formula: string, features: MLFeatureVector): FamilyF
     }
   }
 
-  if (features.metallicity < 0.5) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for metallic hydride`);
+  if (features.metallicity < 0.35) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for metallic hydride (heavy score penalty)`);
+  } else if (features.metallicity < 0.5) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for metallic hydride (score penalized)`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -294,15 +312,18 @@ function applyNitrideFilter(formula: string, features: MLFeatureVector): FamilyF
     reasons.push(`No 2D Fermi surface detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
 
-  if (features.metallicity < 0.3) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for intercalated nitride`);
+  if (features.metallicity < 0.2) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for intercalated nitride (heavy score penalty)`);
+  } else if (features.metallicity < 0.3) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for intercalated nitride (score penalized)`);
   } else {
     score += 0.10;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -365,12 +386,15 @@ function applyKagomeFilter(formula: string, features: MLFeatureVector): FamilyFi
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.5 (weak electron-phonon coupling)`);
   }
 
-  if (features.metallicity < 0.4) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for Kagome metal`);
+  if (features.metallicity < 0.3) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for Kagome metal (heavy score penalty)`);
+  } else if (features.metallicity < 0.4) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for Kagome metal (score penalized)`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -419,15 +443,18 @@ function applyMixedMechanismFilter(formula: string, features: MLFeatureVector): 
     reasons.push(`Limited 2D character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
 
-  if (features.metallicity < 0.3) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for mixed-mechanism superconductor`);
+  if (features.metallicity < 0.2) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for mixed-mechanism superconductor (heavy score penalty)`);
+  } else if (features.metallicity < 0.3) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for mixed-mechanism superconductor (score penalized)`);
   } else {
     score += 0.10;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -481,15 +508,18 @@ function applyLayeredChalcogenideFilter(formula: string, features: MLFeatureVect
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.4 (weak electron-phonon coupling)`);
   }
 
-  if (features.metallicity < 0.3) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for metallic chalcogenide`);
+  if (features.metallicity < 0.2) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for metallic chalcogenide (heavy score penalty)`);
+  } else if (features.metallicity < 0.3) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for metallic chalcogenide (score penalized)`);
   } else {
     score += 0.10;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -549,15 +579,18 @@ function applyLayeredPnictideFilter(formula: string, features: MLFeatureVector):
     reasons.push(`No layered character detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
 
-  if (features.metallicity < 0.3) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for pnictide superconductor`);
+  if (features.metallicity < 0.2) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for pnictide superconductor (heavy score penalty)`);
+  } else if (features.metallicity < 0.3) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for pnictide superconductor (score penalized)`);
   } else {
     score += 0.10;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
@@ -617,15 +650,18 @@ function applyIntercalatedLayeredFilter(formula: string, features: MLFeatureVect
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.3 (insufficient electron-phonon coupling)`);
   }
 
-  if (features.metallicity < 0.3) {
-    pass = false;
-    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} too low for intercalated superconductor`);
+  if (features.metallicity < 0.2) {
+    score -= 0.20;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} very low for intercalated superconductor (heavy score penalty)`);
+  } else if (features.metallicity < 0.3) {
+    score -= 0.10;
+    reasons.push(`Metallicity ${features.metallicity.toFixed(2)} marginal for intercalated superconductor (score penalized)`);
   } else {
     score += 0.10;
     reasons.push(`Metallicity ${features.metallicity.toFixed(2)} adequate`);
   }
 
-  score = Math.min(1.0, score);
+  score = Math.max(0, Math.min(1.0, score));
   return { pass, score, reasons };
 }
 
