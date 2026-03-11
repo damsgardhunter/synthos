@@ -387,6 +387,7 @@ interface EngineStatus {
   totalStructuralVariants: number;
   tempo: EngineTempo;
   statusMessage: string;
+  engineHealth?: Record<string, { consecutive: number; total: number; degraded: boolean }>;
 }
 
 let wss: WebSocketServer | null = null;
@@ -628,6 +629,58 @@ type ThoughtCategory = "strategy" | "discovery" | "stagnation" | "milestone";
 
 function broadcastThought(text: string, category: ThoughtCategory) {
   broadcast("thought", { text, category });
+}
+
+const engineFailureCounts = new Map<string, { consecutive: number; total: number; lastFailure: number }>();
+const ENGINE_FAILURE_THRESHOLD = 10;
+
+function recordEngineSuccess(engineName: string): void {
+  const entry = engineFailureCounts.get(engineName);
+  if (entry) {
+    entry.consecutive = 0;
+  }
+}
+
+function recordEngineFailure(engineName: string, error: unknown): boolean {
+  const entry = engineFailureCounts.get(engineName) ?? { consecutive: 0, total: 0, lastFailure: 0 };
+  entry.consecutive++;
+  entry.total++;
+  entry.lastFailure = Date.now();
+  engineFailureCounts.set(engineName, entry);
+
+  if (entry.consecutive >= ENGINE_FAILURE_THRESHOLD) {
+    console.warn(`[Engine] ${engineName} has failed ${entry.consecutive} consecutive times (${entry.total} total). Engine degraded.`);
+    broadcast("log", {
+      phase: "engine-health",
+      event: "Engine degraded",
+      detail: `${engineName} has failed ${entry.consecutive} consecutive times. Last error: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`,
+      dataSource: "Engine Health Monitor",
+    });
+    return true;
+  }
+  return false;
+}
+
+function isEngineDegraded(engineName: string): boolean {
+  const entry = engineFailureCounts.get(engineName);
+  if (!entry) return false;
+  if (entry.consecutive >= ENGINE_FAILURE_THRESHOLD) {
+    const timeSinceLastFailure = Date.now() - entry.lastFailure;
+    if (timeSinceLastFailure > 5 * 60 * 1000) {
+      entry.consecutive = 0;
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function getEngineHealthStats(): Record<string, { consecutive: number; total: number; degraded: boolean }> {
+  const stats: Record<string, { consecutive: number; total: number; degraded: boolean }> = {};
+  for (const [name, entry] of engineFailureCounts) {
+    stats[name] = { consecutive: entry.consecutive, total: entry.total, degraded: isEngineDegraded(name) };
+  }
+  return stats;
 }
 
 function updateTempo() {
@@ -2005,6 +2058,7 @@ async function runPhase10_Physics() {
       try {
         const result = await runFullPhysicsAnalysis(emit, candidate);
         totalPhysicsComputed++;
+        recordEngineSuccess("physics");
 
         if (result.electronicStructure.metallicity < 0.1 && result.electronicStructure.bandGap > 0.3) {
           emit("log", {
@@ -2193,7 +2247,11 @@ async function runPhase10_Physics() {
           if (hasDFTBands) {
             try {
               const dftJobs = await storage.getDftJobsByFormula(candidate.formula);
-              const completedJob = dftJobs.find(j => j.status === "completed" && (j.outputData as any)?.bandStructure?.converged);
+              const completedJob = dftJobs.find(j => {
+                if (j.status !== "completed") return false;
+                const bs = (j.outputData as any)?.bandStructure;
+                return bs?.converged && bs.nKPoints >= 10 && bs.kPath && bs.eigenvalues?.length > 0;
+              });
               if (completedJob) {
                 const dftBandData = (completedJob.outputData as any).bandStructure as DFTBandStructureResult;
                 recordDFTBandAnalysis(dftBandData);
@@ -2279,6 +2337,7 @@ async function runPhase10_Physics() {
             candidate.crystalStructure?.match(/\((\w+)\)/)?.[1],
             dftTopoClassification
           );
+          recordEngineSuccess("topology");
           trackTopologyResult(topoAnalysis);
           crossEngineHub.recordInsight("topology", candidate.formula, topoAnalysis);
           (updatedMlFeatures as any).topology = {
@@ -2358,55 +2417,68 @@ async function runPhase10_Physics() {
           }
         } catch (topoErr) {
           console.error(`[Engine] Topology analysis failed for ${candidate.formula}:`, topoErr instanceof Error ? topoErr.message.slice(0, 100) : "unknown");
+          recordEngineFailure("topology", topoErr);
         }
 
         let pairingProfile: PairingProfile | undefined;
-        try {
-          pairingProfile = computePairingProfile(candidate.formula, topoAnalysis);
-          crossEngineHub.recordInsight("pairing", candidate.formula, pairingProfile);
-          if (pairingProfile.compositePairingStrength > 0.4) {
-            emit("log", {
-              phase: "phase-10",
-              event: "Pairing mechanism analysis",
-              detail: `${candidate.formula}: dominant=${pairingProfile.dominantMechanism}, secondary=${pairingProfile.secondaryMechanism}, symmetry=${pairingProfile.pairingSymmetry}, composite=${pairingProfile.compositePairingStrength.toFixed(3)}, phonon=${pairingProfile.phonon.phononPairingStrength.toFixed(3)}, spin=${pairingProfile.spin.spinPairingStrength.toFixed(3)}, orbital=${pairingProfile.orbital.orbitalPairingStrength.toFixed(3)}`,
-              dataSource: "Pairing Mechanism Simulator",
-            });
+        if (!isEngineDegraded("pairing")) {
+          try {
+            pairingProfile = computePairingProfile(candidate.formula, topoAnalysis);
+            recordEngineSuccess("pairing");
+            crossEngineHub.recordInsight("pairing", candidate.formula, pairingProfile);
+            if (pairingProfile.compositePairingStrength > 0.4) {
+              emit("log", {
+                phase: "phase-10",
+                event: "Pairing mechanism analysis",
+                detail: `${candidate.formula}: dominant=${pairingProfile.dominantMechanism}, secondary=${pairingProfile.secondaryMechanism}, symmetry=${pairingProfile.pairingSymmetry}, composite=${pairingProfile.compositePairingStrength.toFixed(3)}, phonon=${pairingProfile.phonon.phononPairingStrength.toFixed(3)}, spin=${pairingProfile.spin.spinPairingStrength.toFixed(3)}, orbital=${pairingProfile.orbital.orbitalPairingStrength.toFixed(3)}`,
+                dataSource: "Pairing Mechanism Simulator",
+              });
+            }
+          } catch (pairErr) {
+            console.error(`[Engine] Pairing profile failed for ${candidate.formula}:`, pairErr instanceof Error ? pairErr.message.slice(0, 100) : "unknown");
+            recordEngineFailure("pairing", pairErr);
           }
-        } catch (pairErr) {
-          console.error(`[Engine] Pairing profile failed for ${candidate.formula}:`, pairErr instanceof Error ? pairErr.message.slice(0, 100) : "unknown");
         }
 
-        try {
-          const reactionResult = analyzeReactionNetwork(candidate.formula, candidate.pressureGpa ?? 0);
-          (updatedMlFeatures as any).reactionNetwork = {
-            reactionStabilityScore: reactionResult.reactionStabilityScore,
-            metastableLifetime: reactionResult.metastableLifetime,
-            metastableLifetimeLog10s: reactionResult.metastableLifetimeLog10s,
-            decompositionComplexity: reactionResult.decompositionComplexity,
-            pathwayCount: reactionResult.reactionGraph?.edges?.length ?? 0,
-          };
-          if (reactionResult.reactionStabilityScore < 0.3) {
-            emit("log", {
-              phase: "phase-10",
-              event: "Reaction stability warning",
-              detail: `${candidate.formula}: stabilityScore=${reactionResult.reactionStabilityScore.toFixed(3)}, lifetime=${reactionResult.metastableLifetime}, complexity=${reactionResult.decompositionComplexity.toFixed(3)}, verdict=${reactionResult.stabilityVerdict}`,
-              dataSource: "Reaction Network Engine",
-            });
+        if (!isEngineDegraded("reaction_network")) {
+          try {
+            const reactionResult = analyzeReactionNetwork(candidate.formula, candidate.pressureGpa ?? 0);
+            recordEngineSuccess("reaction_network");
+            (updatedMlFeatures as any).reactionNetwork = {
+              reactionStabilityScore: reactionResult.reactionStabilityScore,
+              metastableLifetime: reactionResult.metastableLifetime,
+              metastableLifetimeLog10s: reactionResult.metastableLifetimeLog10s,
+              decompositionComplexity: reactionResult.decompositionComplexity,
+              pathwayCount: reactionResult.reactionGraph?.edges?.length ?? 0,
+            };
+            if (reactionResult.reactionStabilityScore < 0.3) {
+              emit("log", {
+                phase: "phase-10",
+                event: "Reaction stability warning",
+                detail: `${candidate.formula}: stabilityScore=${reactionResult.reactionStabilityScore.toFixed(3)}, lifetime=${reactionResult.metastableLifetime}, complexity=${reactionResult.decompositionComplexity.toFixed(3)}, verdict=${reactionResult.stabilityVerdict}`,
+                dataSource: "Reaction Network Engine",
+              });
+            }
+          } catch (rxnErr) {
+            console.error(`[Engine] Reaction network failed for ${candidate.formula}:`, rxnErr instanceof Error ? rxnErr.message.slice(0, 100) : "unknown");
+            recordEngineFailure("reaction_network", rxnErr);
           }
-        } catch (rxnErr) {
-          console.error(`[Engine] Reaction network failed for ${candidate.formula}:`, rxnErr instanceof Error ? rxnErr.message.slice(0, 100) : "unknown");
         }
 
         let genomeResult: MaterialGenome | undefined;
-        try {
-          genomeResult = encodeGenome(candidate.formula);
-          (updatedMlFeatures as any).genome = {
-            family: genomeResult.metadata.family,
-            dominantOrbital: genomeResult.metadata.dominantOrbital,
-            genomeDim: genomeResult.vector.length,
-          };
-        } catch (genErr) {
-          console.error(`[Engine] Genome encoding failed for ${candidate.formula}:`, genErr instanceof Error ? genErr.message.slice(0, 100) : "unknown");
+        if (!isEngineDegraded("genome_encoder")) {
+          try {
+            genomeResult = encodeGenome(candidate.formula);
+            recordEngineSuccess("genome_encoder");
+            (updatedMlFeatures as any).genome = {
+              family: genomeResult.metadata.family,
+              dominantOrbital: genomeResult.metadata.dominantOrbital,
+              genomeDim: genomeResult.vector.length,
+            };
+          } catch (genErr) {
+            console.error(`[Engine] Genome encoding failed for ${candidate.formula}:`, genErr instanceof Error ? genErr.message.slice(0, 100) : "unknown");
+            recordEngineFailure("genome_encoder", genErr);
+          }
         }
 
         let fermiSurfaceAnalysis: FermiSurfaceResult | undefined;
@@ -2418,7 +2490,11 @@ async function runPhase10_Physics() {
           if (hasDFTBandsFS) {
             try {
               const dftJobsFS = await storage.getDftJobsByFormula(candidate.formula);
-              const completedJobFS = dftJobsFS.find(j => j.status === "completed" && (j.outputData as any)?.bandStructure?.converged);
+              const completedJobFS = dftJobsFS.find(j => {
+                if (j.status !== "completed") return false;
+                const bs = (j.outputData as any)?.bandStructure;
+                return bs?.converged && bs.nKPoints >= 10 && bs.kPath && bs.eigenvalues?.length > 0;
+              });
               if (completedJobFS) {
                 const dftBandDataFS = (completedJobFS.outputData as any).bandStructure as DFTBandStructureResult;
                 fermiSurfaceAnalysis = buildFermiSurfaceFromDFT(dftBandDataFS);
@@ -2821,6 +2897,7 @@ async function runPhase10_Physics() {
         }
       } catch (err: any) {
         emit("log", { phase: "phase-10", event: "Physics analysis error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Physics Engine" });
+        recordEngineFailure("physics", err);
       }
     }
 
@@ -7367,5 +7444,6 @@ export function getStatus(): EngineStatus {
     totalStructuralVariants: getStructuralVariantCount(),
     tempo: engineTempo,
     statusMessage: currentStatusMessage,
+    engineHealth: getEngineHealthStats(),
   };
 }
