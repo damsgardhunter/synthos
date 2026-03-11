@@ -1131,18 +1131,39 @@ export function computeSynthesisScore(
     pressurePenalty = 0.1;
   }
 
+  let clathrateInstabilityPenalty = 0;
+  let effectiveAtmosphereComplexity = defaults.atmosphereComplexity;
   if (family === "Hydride") {
     const hCount = counts["H"] || 0;
     const metalAtoms = elements.filter(e => e !== "H").reduce((s, e) => s + (counts[e] || 0), 0);
     const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
     if (hRatio >= 10) {
-      pressurePenalty = Math.min(0.5, pressurePenalty + 0.15);
+      clathrateInstabilityPenalty = 0.15;
+      effectiveAtmosphereComplexity = Math.min(1.0, effectiveAtmosphereComplexity + 0.25);
     } else if (hRatio >= 6) {
-      pressurePenalty = Math.min(0.45, pressurePenalty + 0.1);
+      clathrateInstabilityPenalty = 0.08;
+      effectiveAtmosphereComplexity = Math.min(1.0, effectiveAtmosphereComplexity + 0.15);
+    } else if (hRatio >= 3) {
+      clathrateInstabilityPenalty = 0.03;
+      effectiveAtmosphereComplexity = Math.min(1.0, effectiveAtmosphereComplexity + 0.05);
     }
   }
+  phaseCompetitionPenalty = Math.min(0.5, phaseCompetitionPenalty + clathrateInstabilityPenalty);
 
-  const atmospherePenalty = defaults.atmosphereComplexity * 0.25;
+  const TOXIC_ELEMENTS: Record<string, number> = {
+    Be: 0.30, Tl: 0.25, Cd: 0.20, Hg: 0.25, Pb: 0.10, As: 0.10, Os: 0.15,
+  };
+  let toxicityPenalty = 0;
+  for (const el of elements) {
+    const tox = TOXIC_ELEMENTS[el];
+    if (tox) {
+      const frac = (counts[el] || 1) / totalAtoms;
+      toxicityPenalty += tox * frac;
+    }
+  }
+  toxicityPenalty = Math.min(0.20, toxicityPenalty);
+
+  const atmospherePenalty = effectiveAtmosphereComplexity * 0.25;
 
   const total = Math.min(1.0, Math.max(0,
     defaults.baseScore * 0.3 +
@@ -1150,7 +1171,8 @@ export function computeSynthesisScore(
     temperatureFactor * 0.2 -
     phaseCompetitionPenalty -
     pressurePenalty -
-    atmospherePenalty
+    atmospherePenalty -
+    toxicityPenalty
   ));
 
   return {
