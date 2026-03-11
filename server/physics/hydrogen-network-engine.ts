@@ -424,9 +424,19 @@ function estimateHHDistances(
       maxHH = 2.00;
     }
 
-    if (hasHeavyMetal) {
-      meanHH *= 0.95;
-      minHH *= 0.93;
+    const avgMetalRadius = metalElements.reduce((s, e) => {
+      const d = getElementData(e);
+      return s + (d ? d.atomicRadius : 150);
+    }, 0) / Math.max(1, metalElements.length);
+
+    const radiusScale = avgMetalRadius / 170;
+    if (radiusScale < 1.0) {
+      meanHH *= (0.92 + 0.08 * radiusScale);
+      minHH *= (0.90 + 0.10 * radiusScale);
+    } else {
+      meanHH *= (1.0 + 0.05 * (radiusScale - 1.0));
+      minHH *= (1.0 + 0.03 * (radiusScale - 1.0));
+      maxHH *= (1.0 + 0.08 * (radiusScale - 1.0));
     }
   } else if (bondingType === "interstitial") {
     meanHH = 2.10;
@@ -463,6 +473,7 @@ function classifyCageTopology(
   hRatio: number,
   metalElements: string[],
   bondingType: HydrogenBondingType,
+  percolationConfidence: number = 1.0,
 ): CageTopology {
   const hasSodaliteFormer = metalElements.some(e => SODALITE_CAGE_ELEMENTS.includes(e));
   const hasClathFormer = metalElements.some(e => CLATHRATE_CAGE_ELEMENTS.includes(e));
@@ -515,7 +526,17 @@ function classifyCageTopology(
   }
 
   const template = CAGE_TEMPLATES[bestTemplate];
-  const completeness = Math.min(1.0, hCount / template.vertices);
+  let completeness = Math.min(1.0, hCount / template.vertices);
+
+  if (percolationConfidence < 0.5 && completeness > 0.5) {
+    const penalty = 0.5 + 0.5 * (percolationConfidence / 0.5);
+    completeness *= penalty;
+  }
+
+  if (percolationConfidence < 0.3) {
+    sodaliteChar *= (0.3 + percolationConfidence);
+    clathrateChar *= (0.3 + percolationConfidence);
+  }
 
   const metalRadiiSum = metalElements.reduce((s, e) => {
     const d = getElementData(e);
@@ -804,7 +825,19 @@ export function analyzeHydrogenNetwork(
 
   const hhDist = estimateHHDistances(hCount, metalElements, metalAtomCount, hRatio, bondingType);
 
-  const cageTopology = classifyCageTopology(hCount, hRatio, metalElements, bondingType);
+  let percolates = false;
+  let geometricPercolationUsed = false;
+  let percolationDetail: HydrogenPercolationResult | undefined;
+  let percConfidence = 1.0;
+  if (isHydride && atomPositions && latticeParams && atomPositions.length > 0) {
+    const percResult = checkHydrogenPercolation(atomPositions, latticeParams, undefined, estimatedPressure);
+    percolates = percResult.percolates3D || percResult.percolationConfidence >= 0.5;
+    geometricPercolationUsed = true;
+    percolationDetail = percResult;
+    percConfidence = percResult.percolationConfidence;
+  }
+
+  const cageTopology = classifyCageTopology(hCount, hRatio, metalElements, bondingType, percConfidence);
 
   const networkDim = computeNetworkDimensionality(hRatio, bondingType, hhDist);
 
@@ -827,20 +860,13 @@ export function analyzeHydrogenNetwork(
     networkPercolation = Math.min(0.6, hRatio * 0.15);
   }
 
-  let percolates = false;
-  let geometricPercolationUsed = false;
-  let percolationDetail: HydrogenPercolationResult | undefined;
-  if (isHydride && atomPositions && latticeParams && atomPositions.length > 0) {
-    const percResult = checkHydrogenPercolation(atomPositions, latticeParams, undefined, estimatedPressure);
-    percolates = percResult.percolates3D || percResult.percolationConfidence >= 0.5;
-    geometricPercolationUsed = true;
-    percolationDetail = percResult;
-    if (percResult.percolates3D) {
-      networkPercolation = Math.max(networkPercolation, percResult.largestClusterFraction);
+  if (geometricPercolationUsed && percolationDetail) {
+    if (percolationDetail.percolates3D) {
+      networkPercolation = Math.max(networkPercolation, percolationDetail.largestClusterFraction);
     } else {
-      networkPercolation = percResult.percolationConfidence * percResult.largestClusterFraction;
+      networkPercolation = percConfidence * percolationDetail.largestClusterFraction;
     }
-  } else {
+  } else if (!geometricPercolationUsed) {
     const percolationMetric = coordination * hFraction;
     percolates = isHydride ? percolationMetric > 2.0 : false;
   }
