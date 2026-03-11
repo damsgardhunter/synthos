@@ -73,6 +73,7 @@ interface GNNDiagnostics {
   latestRMSE: number;
   predictionCount: number;
   modelStalenessMs: number;
+  stale: boolean;
 }
 
 interface LambdaDiagnostics {
@@ -258,6 +259,7 @@ export function recordPredictionOutcome(model: string, formula: string, predicte
     outcomeBuffer[outcomeHead] = entry;
     outcomeHead = (outcomeHead + 1) % MAX_OUTCOMES;
   }
+  diagnosticCache = null;
 }
 
 function computeFamilyBias(modelFilter?: string): FamilyBias[] {
@@ -412,10 +414,10 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
         family,
         direction,
         count: familyOutcomes.length,
-        meanError: Math.round(meanErr * 10) / 10,
-        medianError: Math.round(medianErr * 10) / 10,
+        meanError: Math.round(meanErr * 100) / 100,
+        medianError: Math.round(medianErr * 100) / 100,
         worstFormula: worstOutcome.formula,
-        worstError: Math.round((worstOutcome.predicted - worstOutcome.actual) * 10) / 10,
+        worstError: Math.round((worstOutcome.predicted - worstOutcome.actual) * 100) / 100,
         pressureRelated,
         suggestedAction,
       });
@@ -442,10 +444,10 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
           family: "hydride",
           direction: hpMean > 0 ? "over" : "under",
           count: highHContentOutcomes.length,
-          meanError: Math.round(hpMean * 10) / 10,
-          medianError: Math.round(hpMedian * 10) / 10,
+          meanError: Math.round(hpMean * 100) / 100,
+          medianError: Math.round(hpMedian * 100) / 100,
           worstFormula: highHContentOutcomes[worstIdx].formula,
-          worstError: Math.round(hpErrors[worstIdx] * 10) / 10,
+          worstError: Math.round(hpErrors[worstIdx] * 100) / 100,
           pressureRelated: true,
           suggestedAction: "Add explicit pressure features; retrain with pressure-corrected Tc data",
         });
@@ -468,10 +470,10 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
           family: "hydride",
           direction: lhMean > 0 ? "over" : "under",
           count: lowHHydrideOutcomes.length,
-          meanError: Math.round(lhMean * 10) / 10,
-          medianError: Math.round(lhMedian * 10) / 10,
+          meanError: Math.round(lhMean * 100) / 100,
+          medianError: Math.round(lhMedian * 100) / 100,
           worstFormula: lowHHydrideOutcomes[worstIdx].formula,
-          worstError: Math.round(lhErrors[worstIdx] * 10) / 10,
+          worstError: Math.round(lhErrors[worstIdx] * 100) / 100,
           pressureRelated: false,
           suggestedAction: "Review anharmonicity corrections and H zero-point motion effects; these dominate over pressure for low-H-content compounds",
         });
@@ -484,9 +486,9 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
   const topFailures = [...outcomes]
     .map(o => ({
       formula: o.formula,
-      predicted: Math.round(o.predicted * 10) / 10,
-      actual: Math.round(o.actual * 10) / 10,
-      error: Math.round((o.predicted - o.actual) * 10) / 10,
+      predicted: Math.round(o.predicted * 100) / 100,
+      actual: Math.round(o.actual * 100) / 100,
+      error: Math.round((o.predicted - o.actual) * 100) / 100,
       family: o.family || "unknown",
     }))
     .sort((a, b) => Math.abs(b.error) - Math.abs(a.error))
@@ -509,10 +511,18 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
       );
     }
 
-    if (familyCalib && familyCalib.meanAbsError > 25 && count >= MIN_SAMPLES_PER_FAMILY) {
-      dataRequestSuggestions.push(
-        `${family} has high error (MAE=${familyCalib.meanAbsError.toFixed(1)}K) with ${count} samples — run DFT enrichment on worst-predicted ${family} candidates`
-      );
+    if (familyCalib && count >= MIN_SAMPLES_PER_FAMILY) {
+      const familyOutcomesForAvg = outcomes.filter(o => o.family === family);
+      const avgActualTc = familyOutcomesForAvg.length > 0
+        ? familyOutcomesForAvg.reduce((s, o) => s + Math.abs(o.actual), 0) / familyOutcomesForAvg.length
+        : 50;
+      const rmaeThreshold = Math.max(10, avgActualTc * 0.3);
+      if (familyCalib.meanAbsError > rmaeThreshold) {
+        const rmaePercent = avgActualTc > 0 ? Math.round((familyCalib.meanAbsError / avgActualTc) * 100) : 0;
+        dataRequestSuggestions.push(
+          `${family} has high relative error (MAE=${familyCalib.meanAbsError.toFixed(1)}K, ${rmaePercent}% of avg Tc=${avgActualTc.toFixed(0)}K) with ${count} samples — run DFT enrichment on worst-predicted ${family} candidates`
+        );
+      }
     }
   }
 
@@ -522,6 +532,14 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
         `${cluster.pattern}: generate pressure-variant structures for ${cluster.family} at multiple pressures (0, 50, 150, 300 GPa)`
       );
     }
+  }
+
+  const gnnHistoryForStaleness = getGNNVersionHistory();
+  const latestGNNForStaleness = gnnHistoryForStaleness.length > 0 ? gnnHistoryForStaleness[gnnHistoryForStaleness.length - 1] : null;
+  if (latestGNNForStaleness && (Date.now() - latestGNNForStaleness.trainedAt) > 24 * 3600_000) {
+    dataRequestSuggestions.push(
+      `GNN ensemble is stale (${Math.round((Date.now() - latestGNNForStaleness.trainedAt) / 3600_000)}h since last train) — trigger GNN retrain with latest DFT data`
+    );
   }
 
   const crossModelInsights: CrossModelInsight[] = [];
@@ -574,7 +592,18 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
   };
 }
 
+const DIAGNOSTIC_CACHE_TTL_MS = 60_000;
+let diagnosticCache: { result: ComprehensiveModelDiagnostics; timestamp: number } | null = null;
+
+export function invalidateDiagnosticCache(): void {
+  diagnosticCache = null;
+}
+
 export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostics {
+  if (diagnosticCache && (Date.now() - diagnosticCache.timestamp) < DIAGNOSTIC_CACHE_TTL_MS) {
+    return diagnosticCache.result;
+  }
+
   const calibration = getCalibrationData();
   const ensembleStats = getXGBEnsembleStats();
   const versionHistory = getModelVersionHistory();
@@ -588,8 +617,8 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
   let meanResidualSign = 0;
 
   if (calibration.predictedVsActual && calibration.predictedVsActual.length > 0) {
-    const fpCount = calibration.predictedVsActual.filter(p => p.predicted > 10 && p.actual < 5).length;
-    const fnCount = calibration.predictedVsActual.filter(p => p.predicted < 5 && p.actual > 10).length;
+    const fpCount = calibration.predictedVsActual.filter(p => p.predicted > 77 && p.actual < 20).length;
+    const fnCount = calibration.predictedVsActual.filter(p => p.predicted < 20 && p.actual > 77).length;
     const total = calibration.predictedVsActual.length;
     falsePositiveRate = total > 0 ? Math.round((fpCount / total) * 10000) / 10000 : 0;
     falseNegativeRate = total > 0 ? Math.round((fnCount / total) * 10000) / 10000 : 0;
@@ -626,6 +655,10 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
   const latestGNN = gnnHistory.length > 0 ? gnnHistory[gnnHistory.length - 1] : null;
   const dftDatasetStats = getDFTTrainingDatasetStats();
 
+  const GNN_STALENESS_THRESHOLD_MS = 24 * 3600_000;
+  const gnnStalenessMs = latestGNN ? Date.now() - latestGNN.trainedAt : 0;
+  const gnnIsStale = gnnStalenessMs > GNN_STALENESS_THRESHOLD_MS;
+
   const gnn: GNNDiagnostics = {
     ensembleSize: ENSEMBLE_SIZE,
     modelVersion: getGNNModelVersion(),
@@ -635,7 +668,8 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     latestMAE: latestGNN?.mae ?? 0,
     latestRMSE: latestGNN?.rmse ?? 0,
     predictionCount: dftDatasetStats.totalSize,
-    modelStalenessMs: latestGNN ? Date.now() - latestGNN.trainedAt : 0,
+    modelStalenessMs: gnnStalenessMs,
+    stale: gnnIsStale,
   };
 
   const lambdaStats = getLambdaRegressorStats();
@@ -697,7 +731,7 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
   const failureSummary = computeFailureSummary();
   const benchmark = computeBenchmarkReport();
 
-  return {
+  const result: ComprehensiveModelDiagnostics = {
     timestamp: Date.now(),
     xgboost,
     gnn,
@@ -714,6 +748,9 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     failureSummary,
     benchmark,
   };
+
+  diagnosticCache = { result, timestamp: Date.now() };
+  return result;
 }
 
 function computeFailureSummary(): FailureSummaryReport {
@@ -933,8 +970,8 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push(`  Trees=${d.xgboost.nTrees} | Features=${d.xgboost.featureCount} | Dataset=${d.xgboost.nSamples}`);
   lines.push(`  Ensemble: ${d.xgboost.ensembleSize} models, tree counts=[${d.xgboost.ensembleTreeCounts.join(",")}]`);
   lines.push(`  Prediction variance=${d.xgboost.predictionVariance}K`);
-  lines.push(`  False positive rate (pred>10K,actual<5K)=${d.xgboost.falsePositiveRate}`);
-  lines.push(`  False negative rate (pred<5K,actual>10K)=${d.xgboost.falseNegativeRate}`);
+  lines.push(`  False positive rate (pred>77K,actual<20K)=${d.xgboost.falsePositiveRate}`);
+  lines.push(`  False negative rate (pred<20K,actual>77K)=${d.xgboost.falseNegativeRate}`);
   lines.push(`  Prediction bias (impact-weighted sign)=${d.xgboost.meanResidualSign} (>0 = net overprediction, <0 = net underprediction)`);
   lines.push(`  Residual p90=${d.xgboost.absResidualPercentiles.p90}K, p95=${d.xgboost.absResidualPercentiles.p95}K`);
   if (d.xgboost.r2 < 0.5) lines.push("  ** WARNING: Low R² — model may be underfitting **");
@@ -944,8 +981,8 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push("## GNN Ensemble");
   lines.push(`  Version=${d.gnn.modelVersion} | Ensemble=${d.gnn.ensembleSize} models`);
   lines.push(`  R²=${d.gnn.latestR2} | MAE=${d.gnn.latestMAE}K | RMSE=${d.gnn.latestRMSE}K`);
-  lines.push(`  Dataset=${d.gnn.datasetSize} | Staleness=${Math.round(d.gnn.modelStalenessMs / 60000)}min`);
-  if (d.gnn.modelStalenessMs > 6 * 60 * 60 * 1000) lines.push("  ** WARNING: Model is stale (>6h) **");
+  lines.push(`  Dataset=${d.gnn.datasetSize} | Staleness=${Math.round(d.gnn.modelStalenessMs / 60000)}min | Stale=${d.gnn.stale}`);
+  if (d.gnn.stale) lines.push("  ** WARNING: Model is stale (>24h) — retrain recommended **");
   lines.push("");
 
   lines.push("## Lambda Regressor");
@@ -1154,8 +1191,8 @@ export function getModelHealthSummary(): ModelHealth[] {
     let status: HealthStatus = "green";
     if (d.gnn.latestR2 < 0.2) { status = "red"; reasons.push(`Very low R²=${d.gnn.latestR2}`); }
     else if (d.gnn.latestR2 < 0.5) { status = "yellow"; reasons.push(`Low R²=${d.gnn.latestR2}`); }
-    if (d.gnn.modelStalenessMs > 12 * 60 * 60 * 1000) { status = "red"; reasons.push("Model stale (>12h)"); }
-    else if (d.gnn.modelStalenessMs > 6 * 60 * 60 * 1000) { if (status === "green") status = "yellow"; reasons.push("Model stale (>6h)"); }
+    if (d.gnn.stale) { status = "red"; reasons.push("Model stale (>24h) — trigger retrain"); }
+    else if (d.gnn.modelStalenessMs > 12 * 3600_000) { if (status === "green") status = "yellow"; reasons.push("Model aging (>12h)"); }
     if (d.gnn.modelVersion === 0) { status = "red"; reasons.push("No model trained"); }
     if (reasons.length === 0) reasons.push("All metrics within acceptable range");
     health.push({ model: "gnn", status, reasons });
