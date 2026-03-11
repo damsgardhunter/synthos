@@ -12,6 +12,7 @@ import {
   simulatePressureEffects,
   computePhysicsTcUQ,
   allenDynesTcRaw,
+  classifyHydrogenBonding,
   type TcWithUncertainty,
 } from "./physics-engine";
 import { estimateFamilyPressure } from "./candidate-generator";
@@ -342,6 +343,8 @@ export interface MLFeatureVector {
   cageLatticeFlag: number;
   looselyBondedFraction: number;
   combinedElectronPhononScore: number;
+  maxAtomicNumber: number;
+  feasibilityScore: number;
   _sourceFormula?: string;
 }
 
@@ -429,7 +432,13 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const phononCouplingEstimate = Math.min(1.0, useLambda / 3.0);
 
   const lambdaContribution = useLambda / (1 + useLambda);
-  const cooperPairStrength = Math.min(1, cooperPairStrengthBase * 0.3 + lambdaContribution * 0.7);
+  let cooperPairStrength = Math.min(1, cooperPairStrengthBase * 0.3 + lambdaContribution * 0.7);
+
+  const effPressure = (mat as any)?.pressureGpa ?? candidatePressureForLambda;
+  if (hasHydrogen && hydrogenRatio >= 4 && effPressure > 50) {
+    const pressureBoost = Math.min(0.15, (effPressure - 50) / 1000);
+    cooperPairStrength = Math.min(1, cooperPairStrength + pressureBoost);
+  }
 
   let electronDensityEstimate: number;
   if (electronic.metallicity > 0.5) {
@@ -551,7 +560,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     if (stonerI !== null && stonerI > 0) {
       const frac = totalAtoms > 0 ? (counts[el] || 1) / totalAtoms : 0;
       const stonerProduct = stonerI * electronic.densityOfStatesAtFermi;
-      spinFluctuationStrength = Math.max(spinFluctuationStrength, stonerProduct * frac);
+      spinFluctuationStrength += stonerProduct * frac;
     }
   }
   spinFluctuationStrength = Math.min(1.0, spinFluctuationStrength);
@@ -565,7 +574,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   let candidatePressure = (mat as any)?.pressureGpa ?? 0;
 
   if (candidatePressure === 0 && hasHydrogen && hydrogenRatio > 0.3) {
-    if (hydrogenRatio >= 8) candidatePressure = 200;
+    const hBondType = classifyHydrogenBonding(formula, 0);
+    const isClathrate = hBondType === "cage-clathrate";
+    if (isClathrate) {
+      candidatePressure = hydrogenRatio >= 9 ? 250 : 200;
+    } else if (hydrogenRatio >= 8) candidatePressure = 200;
     else if (hydrogenRatio >= 6) candidatePressure = 150;
     else if (hydrogenRatio >= 4) candidatePressure = 100;
   }
@@ -574,6 +587,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   try {
     const pressureResult = simulatePressureEffects(formula, electronic, phonon, coupling);
     optimalPressureGpa = pressureResult.optimalPressure;
+    if (optimalPressureGpa > candidatePressure) {
+      candidatePressure = optimalPressureGpa;
+    }
   } catch {}
 
   let finalLambda = Math.max(0.001, useLambda);
@@ -603,7 +619,10 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     const avgEta = getCompositionWeightedProperty(counts, "mcMillanHopfieldEta") ?? 0;
     const omega2 = coupling.omega2Avg > 0 ? coupling.omega2Avg : (phonon.maxPhononFrequency * 0.7);
     if (dosAtEF > 0 && avgMass > 0 && omega2 > 0) {
-      lambdaProxy = (dosAtEF * avgEta) / (avgMass * omega2 * 0.001);
+      const omega2_meV2 = omega2 * 0.124 * 0.124;
+      const mass_eV = avgMass * 931.494e6;
+      lambdaProxy = (dosAtEF * avgEta) / (mass_eV * omega2_meV2 * 1e-6);
+      lambdaProxy = Math.min(5.0, lambdaProxy);
     }
     phononHardnessVal = coupling.omega2Avg > 0 ? coupling.omegaLog / coupling.omega2Avg : 0;
   }
@@ -737,6 +756,18 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     instabilityFlag: phonon.hasImaginaryModes ? 1 : 0,
     lightElementFraction: elements.filter((e: string) => ["H","He","Li","Be","B","C","N","O","F"].includes(e)).reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms,
     cageLatticeFlag: (elements.some((e: string) => ["B","C","Si","Ge","Al","Ga","Sn"].includes(e)) && elements.some((e: string) => ["La","Ce","Ba","Sr","Ca","Y","K","Na","Rb","Cs"].includes(e))) ? 1 : 0,
+    maxAtomicNumber: Math.max(...elements.map(e => getElementData(e)?.atomicNumber ?? 0)),
+    feasibilityScore: (() => {
+      const TOXIC_ELEMENTS: Record<string, number> = { Be: 0.3, Tl: 0.25, Cd: 0.3, Hg: 0.35, Pb: 0.2, As: 0.25, Os: 0.15, Cr: 0.1 };
+      const SCARCE_ELEMENTS: Record<string, number> = { Re: 0.25, Ir: 0.3, Os: 0.3, Rh: 0.2, Ru: 0.15, Pd: 0.15, Pt: 0.2, Au: 0.1, Te: 0.15, In: 0.1 };
+      let penalty = 0;
+      for (const el of elements) {
+        const frac = totalAtoms > 0 ? (counts[el] || 1) / totalAtoms : 0;
+        if (TOXIC_ELEMENTS[el]) penalty += TOXIC_ELEMENTS[el] * frac;
+        if (SCARCE_ELEMENTS[el]) penalty += SCARCE_ELEMENTS[el] * frac;
+      }
+      return Math.max(0, 1 - penalty);
+    })(),
     looselyBondedFraction: elements.filter((e: string) => {
       const d = getElementData(e);
       return d && ((d.paulingElectronegativity ?? 2.0) < 1.2 && (d.atomicMass ?? 40) > 30);
