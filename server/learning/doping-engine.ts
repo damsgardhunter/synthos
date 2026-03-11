@@ -2226,13 +2226,70 @@ export function runDopingSearchLoop(
     }
   }
 
-  const sortedPairs = dopantSitePairs
-    .map(p => ({ ...p, priority: p.type === "vacancy" ? 5 : getDopantPriority(p.site, p.dopant, elements) }))
-    .filter(p => p.priority >= 0)
-    .sort((a, b) => b.priority - a.priority)
-    .slice(0, maxDopants * 3);
+  const structureType = classifyLayeredOrCage(formula);
+  const intPool = INTERSTITIAL_DOPANTS[structureType] || INTERSTITIAL_DOPANTS.general;
+  for (const dopant of intPool) {
+    if (!elements.includes(dopant)) {
+      dopantSitePairs.push({ dopant, site: "", type: "interstitial" });
+    }
+  }
 
-  for (const pair of sortedPairs) {
+  const scoredPairs = dopantSitePairs
+    .map(p => ({
+      ...p,
+      priority: p.type === "vacancy" ? 5
+        : p.type === "interstitial" ? 4
+        : getDopantPriority(p.site, p.dopant, elements),
+    }))
+    .filter(p => p.priority >= 0);
+
+  const totalSlots = maxDopants * 3;
+  const subByType = scoredPairs.filter(p => p.type === "substitutional").sort((a, b) => b.priority - a.priority);
+  const vacByType = scoredPairs.filter(p => p.type === "vacancy").sort((a, b) => b.priority - a.priority);
+  const intByType = scoredPairs.filter(p => p.type === "interstitial").sort((a, b) => b.priority - a.priority);
+
+  const perTypeSlots = Math.floor(totalSlots / 3);
+  const sortedPairs: typeof scoredPairs = [];
+
+  sortedPairs.push(...subByType.slice(0, perTypeSlots));
+  sortedPairs.push(...vacByType.slice(0, perTypeSlots));
+  sortedPairs.push(...intByType.slice(0, perTypeSlots));
+
+  const usedKeys = new Set(sortedPairs.map(p => `${p.type}:${p.site}:${p.dopant}`));
+  const remaining = scoredPairs
+    .filter(p => !usedKeys.has(`${p.type}:${p.site}:${p.dopant}`))
+    .sort((a, b) => b.priority - a.priority);
+  const extraSlots = totalSlots - sortedPairs.length;
+  if (extraSlots > 0) {
+    sortedPairs.push(...remaining.slice(0, extraSlots));
+  }
+
+  const typeQueues: Record<string, typeof scoredPairs> = {
+    substitutional: sortedPairs.filter(p => p.type === "substitutional"),
+    vacancy: sortedPairs.filter(p => p.type === "vacancy"),
+    interstitial: sortedPairs.filter(p => p.type === "interstitial"),
+  };
+  const typeOrder = ["substitutional", "vacancy", "interstitial"] as const;
+  const typeIdx = { substitutional: 0, vacancy: 0, interstitial: 0 };
+  const roundRobinPairs: typeof scoredPairs = [];
+  let filled = 0;
+  while (filled < sortedPairs.length) {
+    let added = false;
+    for (const t of typeOrder) {
+      if (typeIdx[t] < typeQueues[t].length) {
+        roundRobinPairs.push(typeQueues[t][typeIdx[t]++]);
+        filled++;
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+
+  const packingFraction = estimatePackingFractionLocal(counts);
+  const voidFraction = 1 - packingFraction;
+  const maxInterstitialFrac = packingFraction > 0.68 ? 0.02 : packingFraction > 0.60 ? 0.05 : 0.10;
+
+  for (const pair of roundRobinPairs) {
     if (results.length >= maxDopants * 2) break;
 
     const levels: DopingSearchResult["levels"] = [];
@@ -2258,7 +2315,7 @@ export function runDopingSearchLoop(
         if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
         supercellCounts[pair.site] -= nChanged;
         supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
-      } else {
+      } else if (pair.type === "vacancy") {
         const sitesInSupercell = supercellCounts[pair.site];
         nChanged = Math.round(sitesInSupercell * fraction);
         if (nChanged < 1) continue;
@@ -2266,6 +2323,13 @@ export function runDopingSearchLoop(
         const actualFraction = nChanged / sitesInSupercell;
         if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
         supercellCounts[pair.site] -= nChanged;
+      } else {
+        if (fraction > maxInterstitialFrac) continue;
+        const supercellTotal = totalAtoms * supercellMult;
+        const maxInsertByVolume = Math.max(1, Math.floor(supercellTotal * voidFraction * 0.3));
+        nChanged = Math.max(1, Math.round(supercellTotal * fraction));
+        if (nChanged > maxInsertByVolume) continue;
+        supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
       }
 
       const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
@@ -2276,6 +2340,8 @@ export function runDopingSearchLoop(
 
       const { character, valenceChange } = pair.type === "vacancy"
         ? classifyDopingCharacter(pair.site, "", "vacancy")
+        : pair.type === "interstitial"
+        ? classifyDopingCharacter("", pair.dopant, "interstitial")
         : classifyDopingCharacter(pair.site, pair.dopant, "substitutional");
 
       const reducedTotalAtoms = getTotalAtoms(reduced);
@@ -2356,13 +2422,20 @@ export function runDopingSearchLoop(
             if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
             supercellCounts[pair.site] -= nChanged;
             supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
-          } else {
+          } else if (pair.type === "vacancy") {
             const sitesInSupercell = supercellCounts[pair.site];
             nChanged = Math.round(sitesInSupercell * fraction);
             if (nChanged < 1 || nChanged >= sitesInSupercell) continue;
             const actualFraction = nChanged / sitesInSupercell;
             if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
             supercellCounts[pair.site] -= nChanged;
+          } else {
+            if (fraction > maxInterstitialFrac) continue;
+            const supercellTotal = totalAtoms * supercellMult;
+            const maxInsertByVolume = Math.max(1, Math.floor(supercellTotal * voidFraction * 0.3));
+            nChanged = Math.max(1, Math.round(supercellTotal * fraction));
+            if (nChanged > maxInsertByVolume) continue;
+            supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
           }
 
           const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
@@ -2372,6 +2445,8 @@ export function runDopingSearchLoop(
 
           const { character, valenceChange } = pair.type === "vacancy"
             ? classifyDopingCharacter(pair.site, "", "vacancy")
+            : pair.type === "interstitial"
+            ? classifyDopingCharacter("", pair.dopant, "interstitial")
             : classifyDopingCharacter(pair.site, pair.dopant, "substitutional");
 
           const reducedTotalAtoms = getTotalAtoms(reduced);
