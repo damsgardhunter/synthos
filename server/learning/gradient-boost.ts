@@ -1306,7 +1306,13 @@ export function getXGBEnsembleStats() {
   };
 }
 
+let cachedValidation: { mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[]; forVersion: number } | null = null;
+
 export function validateModel(): { mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[] } {
+  if (cachedValidation && cachedValidation.forVersion === modelVersion && modelVersion > 0) {
+    return { mse: cachedValidation.mse, r2: cachedValidation.r2, nTrees: cachedValidation.nTrees, details: cachedValidation.details };
+  }
+
   const model = getTrainedModel();
   const details: { formula: string; actual: number; predicted: number }[] = [];
   let sse = 0;
@@ -1328,12 +1334,15 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
     }
   }
 
-  return {
+  const result = {
     mse: sse / details.length,
     r2: sst < 1e-6 ? 0 : 1 - sse / sst,
     nTrees: model.trees.length,
     details,
   };
+
+  cachedValidation = { ...result, forVersion: modelVersion };
+  return result;
 }
 
 export function getCalibrationData(): Omit<CalibrationData, 'residuals'> & { residualCount: number } {
@@ -1402,7 +1411,22 @@ function logModelVersion(trigger: string, datasetSize: number): ModelVersionReco
 
   let predVariance = 0;
   if (cachedEnsembleXGB) {
-    const testFormulas = ["MgB2", "NbSn3", "YBa2Cu3O7", "LaH10", "FeSe"];
+    const benchmarks = ["MgB2", "NbSn3", "YBa2Cu3O7", "LaH10", "FeSe"];
+
+    const frontierFormulas: string[] = [];
+    const evalKeys = [...evaluatedDataset.keys()];
+    if (evalKeys.length > 0) {
+      const shuffled = evalKeys.slice();
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      for (const f of shuffled.slice(0, 5)) {
+        if (!benchmarks.includes(f)) frontierFormulas.push(f);
+      }
+    }
+
+    const testFormulas = [...benchmarks, ...frontierFormulas];
     const variances: number[] = [];
     for (const f of testFormulas) {
       try {
@@ -1672,6 +1696,7 @@ export function invalidateModel(): void {
   cachedVarianceEnsembleXGB = null;
   cachedTrainingSnapshot = null;
   cachedGlobalFeatureImportance = null;
+  cachedValidation = null;
   crystalSymTargetEncoding = null;
   miedemaCache.clear();
 }
