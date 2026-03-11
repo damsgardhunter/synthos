@@ -490,7 +490,7 @@ export function getAlreadyScreenedFormulas(): Set<string> {
   return alreadyScreenedFormulas;
 }
 
-const KNOWN_COMPOUNDS = new Set<string>([
+const KNOWN_COMPOUNDS_RAW = [
   "MgB2", "NbTi", "Nb3Sn", "Nb3Ge", "Nb3Al", "NbN", "NbC", "V3Si", "V3Ga",
   "YBa2Cu3O7", "Bi2Sr2CaCu2O8", "Bi2Sr2Ca2Cu3O10", "Tl2Ba2CaCu2O8",
   "HgBa2CaCu2O6", "HgBa2Ca2Cu3O8", "La2CuO4", "LaFeAsO", "BaFe2As2",
@@ -514,9 +514,10 @@ const KNOWN_COMPOUNDS = new Set<string>([
   "ZrTe5", "HfTe5", "WTe2", "MoTe2", "MoS2", "WS2", "NbSe2", "TaSe2",
   "Fe2O3", "TiO2", "SrTiO3", "BaTiO3", "LaAlO3", "LaNiO3",
   "PbMo6S8", "Pb", "Nb", "V", "Ta", "Hg", "Sn", "In", "Al", "Ti",
-]);
+];
+const KNOWN_COMPOUNDS = new Set<string>(KNOWN_COMPOUNDS_RAW.map(f => normalizeFormula(f)));
 
-const FAMILY_CAPS: Record<string, number> = {
+const BASE_FAMILY_CAPS: Record<string, number> = {
   Hydrides: 0.15,
   Carbides: 0.12,
   Nitrides: 0.12,
@@ -533,6 +534,25 @@ const FAMILY_CAPS: Record<string, number> = {
   Borocarbides: 0.08,
   Clathrates: 0.08,
 };
+const familyBestTc: Record<string, number[]> = {};
+
+function getDynamicFamilyCap(family: string, globalAvgTc: number): number {
+  const baseCap = BASE_FAMILY_CAPS[family] ?? 0.10;
+  const tcs = familyBestTc[family];
+  if (!tcs || tcs.length < 3 || globalAvgTc <= 0) return baseCap;
+  const famAvg = tcs.slice(-10).reduce((s, v) => s + v, 0) / Math.min(10, tcs.length);
+  const ratio = famAvg / globalAvgTc;
+  if (ratio > 2.0) return Math.min(0.30, baseCap * 2.0);
+  if (ratio > 1.5) return Math.min(0.25, baseCap * 1.5);
+  if (ratio > 1.2) return Math.min(0.20, baseCap * 1.2);
+  return baseCap;
+}
+
+function recordFamilyTc(family: string, tc: number): void {
+  if (!familyBestTc[family]) familyBestTc[family] = [];
+  familyBestTc[family].push(tc);
+  if (familyBestTc[family].length > 50) familyBestTc[family] = familyBestTc[family].slice(-50);
+}
 let lastActiveLearningCycle = 0;
 let recentTcImproved = false;
 let recentNewCandidates = 0;
@@ -4639,7 +4659,15 @@ async function runAutonomousFastPath() {
           weightsBefore[g.name] = g.weight;
         }
 
+        const totalPipelineAttempts = pipelineStageMetrics.chemistryRejects + pipelineStageMetrics.stabilityPrefilterRejects + pipelineStageMetrics.surrogateRejects + pipelineStageMetrics.gbTcRejects + pipelineStageMetrics.prototypeAttempts;
+        const chemRejectRate = totalPipelineAttempts > 0 ? pipelineStageMetrics.chemistryRejects / totalPipelineAttempts : 0;
+        if (chemRejectRate > 0.5 && totalPipelineAttempts > 50) {
+          console.log(`[Engine] High chemistry reject rate: ${(chemRejectRate * 100).toFixed(1)}% — feeding back into theory bias`);
+        }
         const theoryBias = computeTheoryGeneratorBias();
+        if (chemRejectRate > 0.5 && theoryBias.confidence > 0) {
+          theoryBias.confidence = Math.max(0.05, theoryBias.confidence * (1 - chemRejectRate * 0.5));
+        }
         latestTheoryBias = theoryBias;
         lastTheoryBiasCycle = cycleCount;
 
@@ -4765,20 +4793,18 @@ async function runAutonomousFastPath() {
 
     const familyQuotaCounts: Record<string, number> = {};
     const totalBatchSize = filteredCandidates.length;
+    const allFamTcs = Object.values(familyBestTc).flat();
+    const globalAvgTc = allFamTcs.length > 0 ? allFamTcs.reduce((s, v) => s + v, 0) / allFamTcs.length : 0;
     const quotaBalanced: string[] = [];
     for (const formula of filteredCandidates) {
       const fam = classifyFamily(formula);
-      const cap = FAMILY_CAPS[fam];
-      if (cap !== undefined) {
-        const currentCount = familyQuotaCounts[fam] || 0;
-        const maxAllowed = Math.max(3, Math.ceil(totalBatchSize * cap));
-        if (currentCount >= maxAllowed) {
-          continue;
-        }
-        familyQuotaCounts[fam] = currentCount + 1;
-      } else {
-        familyQuotaCounts[fam] = (familyQuotaCounts[fam] || 0) + 1;
+      const cap = getDynamicFamilyCap(fam, globalAvgTc);
+      const currentCount = familyQuotaCounts[fam] || 0;
+      const maxAllowed = Math.max(3, Math.ceil(totalBatchSize * cap));
+      if (currentCount >= maxAllowed) {
+        continue;
       }
+      familyQuotaCounts[fam] = currentCount + 1;
       quotaBalanced.push(formula);
     }
     const quotaSkipped = filteredCandidates.length - quotaBalanced.length;
@@ -4809,6 +4835,7 @@ async function runAutonomousFastPath() {
       }
 
       const candFamily = classifyFamily(formula);
+      if (result.tc > 0) recordFamilyTc(candFamily, result.tc);
       thisCycleCandidates.push({
         formula,
         tc: result.tc,
