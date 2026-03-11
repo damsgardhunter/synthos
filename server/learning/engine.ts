@@ -2025,7 +2025,7 @@ async function runPhase10_Physics() {
         }
 
         try {
-          const reactionResult = analyzeReactionNetwork(candidate.formula);
+          const reactionResult = analyzeReactionNetwork(candidate.formula, candidate.pressureGpa ?? 0);
           (updatedMlFeatures as any).reactionNetwork = {
             reactionStabilityScore: reactionResult.reactionStabilityScore,
             metastableLifetime: reactionResult.metastableLifetime,

@@ -7,23 +7,46 @@ import {
 } from "../learning/phase-diagram-engine";
 import { ELEMENTAL_DATA, getElementData } from "../learning/elemental-data";
 
-function parseFormulaElements(formula: string): string[] {
+function normalizeFormulaString(formula: string): string {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const matches = cleaned.match(/[A-Z][a-z]*/g);
+  const subscriptMap: Record<string, string> = {
+    "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+    "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
+  };
+  const superscriptMap: Record<string, string> = {
+    "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4",
+    "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+  };
+  let cleaned = formula;
+  for (const [sub, digit] of Object.entries(subscriptMap)) {
+    cleaned = cleaned.split(sub).join(digit);
+  }
+  for (const [sup, digit] of Object.entries(superscriptMap)) {
+    cleaned = cleaned.split(sup).join(digit);
+  }
+  cleaned = cleaned.replace(/[^\x20-\x7E]/g, "");
+  return cleaned.trim();
+}
+
+function parseFormulaElements(formula: string): string[] {
+  const cleaned = normalizeFormulaString(formula);
+  const matches = cleaned.match(/[A-Z][a-z]?/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const cleaned = normalizeFormulaString(formula);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+    if (isNaN(num) || num <= 0) {
+      counts[el] = (counts[el] || 0) + 1;
+    } else {
+      counts[el] = (counts[el] || 0) + num;
+    }
   }
   return counts;
 }
@@ -102,10 +125,56 @@ function generateTernaryFormulas(elements: string[]): string[] {
   return ternaries;
 }
 
+function estimatePVCorrection(
+  elements: string[],
+  counts: Record<string, number>,
+  pressureGpa: number
+): number {
+  if (pressureGpa <= 0) return 0;
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  let avgVolume = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const r = data ? data.atomicRadius : 1.5;
+    const atomicVolume = (4 / 3) * Math.PI * Math.pow(r, 3);
+    avgVolume += atomicVolume * ((counts[el] || 1) / totalAtoms);
+  }
+
+  const compressionFactor = 1.0 / (1.0 + pressureGpa * 0.005);
+  const effectiveVolume = avgVolume * compressionFactor;
+
+  const pvTerm = pressureGpa * effectiveVolume * 1e-4;
+
+  return pvTerm;
+}
+
+function estimateEntropyCorrection(
+  elements: string[],
+  counts: Record<string, number>,
+  temperatureK: number = 300
+): number {
+  const nElements = elements.length;
+  if (nElements <= 1) return 0;
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  let mixingEntropy = 0;
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    if (frac > 0) {
+      mixingEntropy -= frac * Math.log(frac);
+    }
+  }
+
+  const kB = 8.617e-5;
+  return -temperatureK * kB * mixingEntropy;
+}
+
 function estimateReactionBarrier(
   deltaE: number,
   elements: string[],
-  counts: Record<string, number>
+  counts: Record<string, number>,
+  pressureGpa: number = 0
 ): number {
   let avgMeltingPoint = 0;
   let count = 0;
@@ -128,7 +197,18 @@ function estimateReactionBarrier(
 
   const complexityBonus = structuralComplexity * 0.4;
 
-  return Math.round((kineticBase + thermalFactor + complexityBonus) * 1000) / 1000;
+  let pressureBarrierBoost = 0;
+  if (pressureGpa > 0) {
+    pressureBarrierBoost = 0.1 * Math.log(1 + pressureGpa / 50);
+
+    const hCount = counts["H"] || 0;
+    const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+    if (hCount / totalAtoms > 0.5 && pressureGpa > 100) {
+      pressureBarrierBoost += 0.15 * Math.min(1.0, (pressureGpa - 100) / 200);
+    }
+  }
+
+  return Math.round((kineticBase + thermalFactor + complexityBonus + pressureBarrierBoost) * 1000) / 1000;
 }
 
 function classifyDecompositionMechanism(
@@ -170,11 +250,15 @@ function computeDecompositionProbability(barrier: number, temperatureK: number =
   return Math.round(prob * 10000) / 10000;
 }
 
-export function analyzeReactionNetwork(formula: string): ReactionNetworkResult {
+export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0): ReactionNetworkResult {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
-  const formationEnergy = computeMiedemaFormationEnergy(formula);
+  const formationEnergyRaw = computeMiedemaFormationEnergy(formula);
+
+  const pvCorrection = estimatePVCorrection(elements, counts, pressureGpa);
+  const entropyCorrection = estimateEntropyCorrection(elements, counts);
+  const formationEnergy = formationEnergyRaw + pvCorrection + entropyCorrection;
 
   const nodes: ReactionNode[] = [];
   const edges: ReactionEdge[] = [];
@@ -200,7 +284,11 @@ export function analyzeReactionNetwork(formula: string): ReactionNetworkResult {
   for (const bin of binaries) {
     const binEls = parseFormulaElements(bin);
     if (binEls.every(e => elements.includes(e))) {
-      const energy = computeMiedemaFormationEnergy(bin);
+      const binCounts = parseFormulaCounts(bin);
+      const rawEnergy = computeMiedemaFormationEnergy(bin);
+      const binPV = estimatePVCorrection(binEls, binCounts, pressureGpa);
+      const binEntropy = estimateEntropyCorrection(binEls, binCounts);
+      const energy = rawEnergy + binPV + binEntropy;
       competingFormulas.push({ formula: bin, energy });
       nodes.push({
         formula: bin,
@@ -214,7 +302,11 @@ export function analyzeReactionNetwork(formula: string): ReactionNetworkResult {
   for (const tern of ternaries) {
     const ternEls = parseFormulaElements(tern);
     if (ternEls.every(e => elements.includes(e))) {
-      const energy = computeMiedemaFormationEnergy(tern);
+      const ternCounts = parseFormulaCounts(tern);
+      const rawEnergy = computeMiedemaFormationEnergy(tern);
+      const ternPV = estimatePVCorrection(ternEls, ternCounts, pressureGpa);
+      const ternEntropy = estimateEntropyCorrection(ternEls, ternCounts);
+      const energy = rawEnergy + ternPV + ternEntropy;
       competingFormulas.push({ formula: tern, energy });
       nodes.push({
         formula: tern,
@@ -233,7 +325,7 @@ export function analyzeReactionNetwork(formula: string): ReactionNetworkResult {
 
   if (elements.length >= 2) {
     const elementalEnergy = 0 - formationEnergy;
-    const barrier = estimateReactionBarrier(elementalEnergy, elements, counts);
+    const barrier = estimateReactionBarrier(elementalEnergy, elements, counts, pressureGpa);
     const prob = computeDecompositionProbability(barrier);
     pathways.push({
       products: [...elements],
@@ -267,7 +359,7 @@ export function analyzeReactionNetwork(formula: string): ReactionNetworkResult {
 
     let productTotalEnergy = comp.energy;
     const reactionEnergy = productTotalEnergy - formationEnergy;
-    const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts);
+    const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa);
     const prob = computeDecompositionProbability(barrier);
     const mechanism = classifyDecompositionMechanism(elements, products);
 
@@ -303,7 +395,7 @@ export function analyzeReactionNetwork(formula: string): ReactionNetworkResult {
         const productEnergy = compA.energy + compB.energy;
         const reactionEnergy = productEnergy - formationEnergy;
         if (reactionEnergy < 0) {
-          const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts);
+          const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa);
           const prob = computeDecompositionProbability(barrier);
           const mechanism = classifyDecompositionMechanism(elements, products);
           pathways.push({
