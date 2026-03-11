@@ -1132,11 +1132,43 @@ function estimateUnitCellVolume(counts: Record<string, number>): number {
   return volumePerAtom * totalAtoms;
 }
 
+const MAX_CARRIER_DENSITY = 5e22;
+
 function computeCarrierDensity(valenceChange: number, nDopedAtoms: number, cellVolumeNm3: number): number {
-  if (cellVolumeNm3 <= 0) return 0;
+  if (cellVolumeNm3 <= 0.001) return 0;
   const totalChargeChange = Math.abs(valenceChange) * nDopedAtoms;
   const volumeCm3 = cellVolumeNm3 * 1e-21;
-  return totalChargeChange / volumeCm3;
+  const raw = totalChargeChange / volumeCm3;
+  return Math.min(raw, MAX_CARRIER_DENSITY);
+}
+
+function estimatePackingFractionLocal(counts: Record<string, number>): number {
+  let totalAtomVol = 0;
+  let totalRadius = 0;
+  let totalCount = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const data = getElementData(el);
+    if (!data) continue;
+    const r = data.atomicRadius || 150;
+    totalAtomVol += (4 / 3) * Math.PI * Math.pow(r, 3) * n;
+    totalRadius += r * n;
+    totalCount += n;
+  }
+  if (totalCount === 0) return 0.5;
+  const avgR = totalRadius / totalCount;
+  const volPerAtom = (2 * avgR) ** 3;
+  const cellVol = totalCount * volPerAtom;
+  if (cellVol <= 0) return 0.5;
+  return Math.max(0.1, Math.min(0.85, totalAtomVol / cellVol));
+}
+
+function hasHighVHSProximity(formula: string): boolean {
+  try {
+    const electronic = computeElectronicStructure(formula);
+    return (electronic?.vanHoveProximity ?? 0) > 0.6;
+  } catch {
+    return false;
+  }
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -1293,16 +1325,23 @@ function getDopantPriority(site: string, dopant: string, elements: string[]): nu
   return basePriority;
 }
 
+const VHS_FINE_FRACTIONS = [0.01, 0.03];
+
 function generateSubstitutionalVariants(
   formula: string,
   counts: Record<string, number>,
-  maxVariants: number = 8
+  maxVariants: number = 8,
+  highVHS: boolean = false
 ): DopingSpec[] {
   const variants: DopingSpec[] = [];
   const elements = Object.keys(counts);
   const totalAtoms = getTotalAtoms(counts);
   const supercellMult = getSupercellMultiplier(totalAtoms);
   const cellVolume = estimateUnitCellVolume(counts);
+
+  const baseFractions = highVHS
+    ? [...VHS_FINE_FRACTIONS, ...DOPING_FRACTIONS]
+    : DOPING_FRACTIONS;
 
   for (const site of elements) {
     const siteCount = counts[site];
@@ -1336,11 +1375,11 @@ function generateSubstitutionalVariants(
 
       let fractions: number[];
       if (isHighStrain) {
-        fractions = DOPING_FRACTIONS.filter(f => f <= 0.05);
+        fractions = baseFractions.filter(f => f <= 0.05);
       } else if (radiusDiff < 0.10) {
-        fractions = DOPING_FRACTIONS;
+        fractions = baseFractions;
       } else {
-        fractions = DOPING_FRACTIONS.filter(f => f <= 0.10);
+        fractions = baseFractions.filter(f => f <= 0.10);
       }
 
       for (const fraction of fractions) {
@@ -1475,6 +1514,13 @@ function generateInterstitialVariants(
   const structureType = classifyLayeredOrCage(formula);
   const cellVolume = estimateUnitCellVolume(counts);
 
+  const packingFraction = estimatePackingFractionLocal(counts);
+  const isHighDensity = packingFraction > 0.68;
+
+  if (isHighDensity && structureType === "general") {
+    return variants;
+  }
+
   const dopantPool = INTERSTITIAL_DOPANTS[structureType] || INTERSTITIAL_DOPANTS.general;
   const availableDopants = dopantPool.filter(d => !elements.includes(d));
 
@@ -1483,7 +1529,14 @@ function generateInterstitialVariants(
 
     const { character, valenceChange } = classifyDopingCharacter("", dopant, "interstitial");
 
-    const fracs = [0.05, 0.10];
+    let fracs: number[];
+    if (isHighDensity) {
+      fracs = [0.02];
+    } else if (packingFraction > 0.60) {
+      fracs = [0.03, 0.05];
+    } else {
+      fracs = [0.05, 0.10];
+    }
     for (const fraction of fracs) {
       if (variants.length >= maxVariants) break;
 
@@ -1515,7 +1568,7 @@ function generateInterstitialVariants(
         fraction,
         resultFormula: normalizeFormula(resultFormula),
         supercellSize: supercellMult,
-        rationale: `${dopant} interstitial insertion (${(fraction * 100).toFixed(0)}%): ${nInsert} atoms into ${structureType} structure — electron-doping (delta_q=+${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3)`,
+        rationale: `${dopant} interstitial insertion (${(fraction * 100).toFixed(0)}%): ${nInsert} atoms into ${structureType} structure (APF=${packingFraction.toFixed(2)}) — electron-doping (delta_q=+${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3)`,
         dopingCharacter: character,
         valenceChange,
         carrierDensity,
@@ -1646,11 +1699,13 @@ export function generateDopedVariants(
     return { baseFormula: formula, variants: [], totalGenerated: 0, validGenerated: 0, wallTimeMs: Date.now() - start };
   }
 
+  const highVHS = hasHighVHSProximity(formula);
+
   const subMax = Math.ceil(maxTotal * 0.5);
   const vacMax = Math.ceil(maxTotal * 0.25);
   const intMax = maxTotal - subMax - vacMax;
 
-  const substitutional = generateSubstitutionalVariants(formula, counts, subMax);
+  const substitutional = generateSubstitutionalVariants(formula, counts, subMax, highVHS);
   const vacancy = generateVacancyVariants(formula, counts, vacMax);
   const interstitial = generateInterstitialVariants(formula, counts, intMax);
 
