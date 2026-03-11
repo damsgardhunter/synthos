@@ -91,25 +91,82 @@ function guessLatticeType(elements: string[]): string {
   return "cubic";
 }
 
-function generateBZGrid(latticeType: string, gridSize: number): number[][] {
-  const grid: number[][] = [];
+function getSymmetryOps(latticeType: string): number[][][] {
+  const identity = [[1,0,0],[0,1,0],[0,0,1]];
+  const mx = [[-1,0,0],[0,1,0],[0,0,1]];
+  const my = [[1,0,0],[0,-1,0],[0,0,1]];
+  const mz = [[1,0,0],[0,1,0],[0,0,-1]];
+  const mxy = [[0,1,0],[1,0,0],[0,0,1]];
+
+  switch (latticeType) {
+    case "cubic":
+      return [identity, mx, my, mz, mxy,
+        [[-1,0,0],[0,-1,0],[0,0,1]],
+        [[-1,0,0],[0,1,0],[0,0,-1]],
+        [[1,0,0],[0,-1,0],[0,0,-1]],
+        [[0,0,1],[0,1,0],[1,0,0]],
+        [[0,1,0],[0,0,1],[1,0,0]],
+      ];
+    case "fcc":
+    case "bcc":
+      return [identity, mx, my, mz, mxy,
+        [[-1,0,0],[0,-1,0],[0,0,1]],
+        [[-1,0,0],[0,1,0],[0,0,-1]],
+        [[1,0,0],[0,-1,0],[0,0,-1]],
+      ];
+    case "hexagonal":
+      return [identity, mx, my, mz,
+        [[-1,0,0],[0,-1,0],[0,0,1]],
+        [[-1,0,0],[0,1,0],[0,0,-1]],
+      ];
+    default:
+      return [identity, mx, my, mz];
+  }
+}
+
+function applySymOp(op: number[][], k: number[]): number[] {
+  return [
+    op[0][0]*k[0] + op[0][1]*k[1] + op[0][2]*k[2],
+    op[1][0]*k[0] + op[1][1]*k[1] + op[1][2]*k[2],
+    op[2][0]*k[0] + op[2][1]*k[1] + op[2][2]*k[2],
+  ];
+}
+
+function isInIBZ(kx: number, ky: number, kz: number, latticeType: string): boolean {
+  switch (latticeType) {
+    case "cubic":
+      return kx >= 0 && ky >= 0 && kz >= 0 && ky <= kx;
+    case "fcc":
+      return kx >= 0 && ky >= 0 && kz >= 0 && ky <= kx;
+    case "bcc":
+      return kx >= 0 && ky >= 0 && kz >= 0 && ky <= kx;
+    case "hexagonal":
+      return kx >= 0 && ky >= 0 && kz >= 0;
+    default:
+      return kx >= 0 && ky >= 0 && kz >= 0;
+  }
+}
+
+function generateBZGrid(latticeType: string, gridSize: number, caRatio: number = 1.633): number[][] {
+  const ibzPoints: number[][] = [];
   const step = 1.0 / gridSize;
 
   switch (latticeType) {
     case "hexagonal": {
       const hexA = 2.0 / Math.sqrt(3.0);
+      const kzMax = 0.5 / caRatio;
       for (let i = 0; i <= gridSize; i++) {
         for (let j = 0; j <= gridSize; j++) {
           for (let k = 0; k <= gridSize; k++) {
             const kx = -0.5 + i * step;
             const ky = -0.5 + j * step;
             const kz = -0.5 + k * step;
-            if (Math.abs(kz) <= 0.5) {
+            if (Math.abs(kz) <= kzMax) {
               const absY = Math.abs(ky);
               const absX = Math.abs(kx);
               const inHex = absY <= (0.5 * hexA) && (absY + absX * Math.sqrt(3.0)) <= hexA * Math.sqrt(3.0) * 0.5;
-              if (inHex) {
-                grid.push([kx, ky, kz]);
+              if (inHex && isInIBZ(kx, ky, kz, latticeType)) {
+                ibzPoints.push([kx, ky, kz]);
               }
             }
           }
@@ -126,7 +183,9 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
             const kz = -0.5 + k * step;
             const truncOct = Math.abs(kx) + Math.abs(ky) + Math.abs(kz);
             if (truncOct <= 0.75 && Math.abs(kx) <= 0.5 && Math.abs(ky) <= 0.5 && Math.abs(kz) <= 0.5) {
-              grid.push([kx, ky, kz]);
+              if (isInIBZ(kx, ky, kz, latticeType)) {
+                ibzPoints.push([kx, ky, kz]);
+              }
             }
           }
         }
@@ -146,7 +205,9 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
               Math.abs(kx) + Math.abs(kz),
             );
             if (maxPairSum <= 0.75 && Math.abs(kx) <= 0.5 && Math.abs(ky) <= 0.5 && Math.abs(kz) <= 0.5) {
-              grid.push([kx, ky, kz]);
+              if (isInIBZ(kx, ky, kz, latticeType)) {
+                ibzPoints.push([kx, ky, kz]);
+              }
             }
           }
         }
@@ -158,11 +219,12 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
       for (let i = 0; i <= gridSize; i++) {
         for (let j = 0; j <= gridSize; j++) {
           for (let k = 0; k <= gridSize; k++) {
-            grid.push([
-              -0.5 + i * step,
-              -0.5 + j * step,
-              -0.5 + k * step,
-            ]);
+            const kx = -0.5 + i * step;
+            const ky = -0.5 + j * step;
+            const kz = -0.5 + k * step;
+            if (isInIBZ(kx, ky, kz, latticeType)) {
+              ibzPoints.push([kx, ky, kz]);
+            }
           }
         }
       }
@@ -170,7 +232,21 @@ function generateBZGrid(latticeType: string, gridSize: number): number[][] {
     }
   }
 
-  return grid;
+  const symOps = getSymmetryOps(latticeType);
+  const fullGrid: number[][] = [];
+  const seen = new Set<string>();
+  for (const kIbz of ibzPoints) {
+    for (const op of symOps) {
+      const kFull = applySymOp(op, kIbz);
+      const key = kFull.map(v => v.toFixed(6)).join(",");
+      if (!seen.has(key)) {
+        seen.add(key);
+        fullGrid.push(kFull);
+      }
+    }
+  }
+
+  return fullGrid;
 }
 
 interface BZEvaluation {
@@ -1027,7 +1103,23 @@ export function computeFermiSurface(formula: string): FermiSurfaceResult {
   const latticeType = guessLatticeType(elements);
 
   const gridSize = 8;
-  const gridPoints = generateBZGrid(latticeType, gridSize);
+  let caRatio = 1.633;
+  if (latticeType === "hexagonal") {
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+    const hCount = counts["H"] || 0;
+    const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
+    if (hFraction > 0.5) {
+      caRatio = 1.2 + 0.3 * (1 - hFraction);
+    } else if (elements.some(e => ["Ti", "Zr", "Hf"].includes(e))) {
+      caRatio = 1.58;
+    } else if (elements.some(e => ["Co", "Zn"].includes(e))) {
+      caRatio = 1.62;
+    } else if (elements.some(e => ["Mg", "Be"].includes(e))) {
+      caRatio = 1.623;
+    }
+  }
+  const gridPoints = generateBZGrid(latticeType, gridSize, caRatio);
 
   const { evaluations, fermiEnergy, nOrbitals } = evaluateBZGrid(formula, gridPoints);
 
