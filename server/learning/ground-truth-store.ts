@@ -85,7 +85,21 @@ export function addGroundTruthDatapoint(dp: GroundTruthDatapoint): void {
 
   datapoints.push(dp);
   if (datapoints.length > MAX_DATAPOINTS) {
-    datapoints.splice(0, datapoints.length - MAX_DATAPOINTS);
+    const excess = datapoints.length - MAX_DATAPOINTS;
+    const prunable: number[] = [];
+    const protectedSources = new Set(["external", "full-dft"]);
+    for (let i = 0; i < datapoints.length && prunable.length < excess; i++) {
+      if (!protectedSources.has(datapoints[i].source)) {
+        prunable.push(i);
+      }
+    }
+    if (prunable.length >= excess) {
+      for (let k = prunable.length - 1; k >= 0; k--) {
+        datapoints.splice(prunable[k], 1);
+      }
+    } else {
+      datapoints.splice(0, excess);
+    }
   }
 }
 
@@ -276,9 +290,11 @@ export function getDatasetForTraining(): {
   formulas: string[];
   targets: number[];
   features: Record<string, (number | null)[]>;
+  isSuperconductor: boolean[];
 } {
   const formulas: string[] = [];
   const targets: number[] = [];
+  const isSuperconductor: boolean[] = [];
   const features: Record<string, (number | null)[]> = {
     formation_energy: [],
     DOS_EF: [],
@@ -290,9 +306,10 @@ export function getDatasetForTraining(): {
   };
 
   for (const dp of datapoints) {
-    if (dp.Tc <= 0) continue;
+    if (dp.Tc < 0) continue;
     formulas.push(dp.formula);
-    targets.push(dp.Tc);
+    targets.push(Math.max(0, dp.Tc));
+    isSuperconductor.push(dp.Tc > 0);
     features.formation_energy.push(dp.formation_energy);
     features.DOS_EF.push(dp.DOS_EF);
     features.lambda.push(dp.lambda);
@@ -302,5 +319,5 @@ export function getDatasetForTraining(): {
     features.mu_star.push(dp.mu_star);
   }
 
-  return { formulas, targets, features };
+  return { formulas, targets, features, isSuperconductor };
 }
