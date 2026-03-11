@@ -1,0 +1,219 @@
+
+      const tolerance = computeGoldschmidtTolerance(formula);
+      const synth = estimateSynthesizability(eAboveHull, formE, elements, formula);
+
+      const result: StructurePrediction = {
+        spaceGroup: sg,
+        crystalSystem: cs,
+        latticeParams: {
+          a: lattice.a,
+          b: lattice.b,
+          c: lattice.c,
+          alpha: angles.alpha,
+          beta: angles.beta,
+          gamma: angles.gamma,
+        },
+        prototype: proto,
+        dimensionality: dim,
+        isStable,
+        isMetastable,
+        decompositionEnergy: eAboveHull,
+        convexHullDistance: eAboveHull,
+        synthesizability: synth.score,
+        synthesisNotes: synth.notes,
+      };
+
+      const id = `cs-${Date.now()}-${formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8)}`;
+      await storage.insertCrystalStructure({
+        id,
+        formula,
+        spaceGroup: result.spaceGroup,
+        crystalSystem: result.crystalSystem,
+        latticeParams: result.latticeParams,
+        atomicPositions: null,
+        prototype: result.prototype,
+        dimensionality: result.dimensionality,
+        isStable: result.isStable,
+        isMetastable: result.isMetastable,
+        decompositionEnergy: result.decompositionEnergy,
+        convexHullDistance: result.convexHullDistance,
+        synthesizability: result.synthesizability,
+        synthesisNotes: result.synthesisNotes,
+        source: "Materials Project + Structure Predictor",
+      });
+
+      const toleranceInfo = tolerance ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
+      emit("log", {
+        phase: "phase-11",
+        event: "Crystal structure predicted (MP data)",
+        detail: `${formula}: ${sg} (${cs}), hull=${eAboveHull.toFixed(3)} eV/atom, dHf=${formE.toFixed(3)} eV/atom${toleranceInfo}`,
+        dataSource: "Materials Project",
+      });
+
+      return result;
+    }
+  } catch {
+  }
+
+  try {
+    const miedemaFormE = computeMiedemaFormationEnergy(formula);
+    const miedemaDecomp = estimateDecompositionEnergy(formula);
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are a computational crystallographer predicting crystal structures for materials.
+Given a chemical formula${protoMatch ? ` (likely ${protoMatch.prototype}-type structure)` : ""}, predict:
+1. Most likely space group and crystal system
+2. Approximate lattice parameters (in Angstroms and degrees)
+3. Structure prototype it most resembles from ICSD
+4. Dimensionality (3D bulk, quasi-2D layered, 2D, 1D chain)
+
+The Miedema model estimates formation energy = ${miedemaFormE.toFixed(3)} eV/atom and decomposition energy = ${miedemaDecomp.toFixed(3)} eV/atom for this compound.
+
+Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC, alpha, beta, gamma, prototype, dimensionality`,
+        },
+        {
+          role: "user",
+          content: `Predict crystal structure for: ${formula}`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      max_completion_tokens: 600,
+    });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content);
+
+    const toNum = (v: unknown, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const isStable = miedemaDecomp <= 0.005;
+    const isMetastable = !isStable && miedemaDecomp <= 0.15;
+    const tolerance = computeGoldschmidtTolerance(formula);
+    const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements, formula);
+
+    const result: StructurePrediction = {
+      spaceGroup: (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1",
+      crystalSystem: (typeof parsed.crystalSystem === "string" && parsed.crystalSystem) || protoMatch?.crystalSystem || "triclinic",
+      latticeParams: {
+        a: toNum(parsed.latticeA, 4.0),
+        b: toNum(parsed.latticeB, 4.0),
+        c: toNum(parsed.latticeC, 4.0),
+        alpha: toNum(parsed.alpha, 90),
+        beta: toNum(parsed.beta, 90),
+        gamma: toNum(parsed.gamma, 90),
+      },
+      prototype: (typeof parsed.prototype === "string" && parsed.prototype) || protoMatch?.prototype || "unknown",
+      dimensionality: (typeof parsed.dimensionality === "string" && parsed.dimensionality) || protoMatch?.dimensionality || "3D",
+      isStable,
+      isMetastable,
+      decompositionEnergy: miedemaDecomp,
+      convexHullDistance: miedemaDecomp,
+      synthesizability: synth.score,
+      synthesisNotes: synth.notes,
+    };
+
+    const id = `cs-${Date.now()}-${formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8)}`;
+    await storage.insertCrystalStructure({
+      id,
+      formula,
+      spaceGroup: result.spaceGroup,
+      crystalSystem: result.crystalSystem,
+      latticeParams: result.latticeParams,
+      atomicPositions: null,
+      prototype: result.prototype,
+      dimensionality: result.dimensionality,
+      isStable: result.isStable,
+      isMetastable: result.isMetastable,
+      decompositionEnergy: result.decompositionEnergy,
+      convexHullDistance: result.convexHullDistance,
+      synthesizability: result.synthesizability,
+      synthesisNotes: result.synthesisNotes,
+      source: "Miedema + Structure Predictor",
+    });
+
+    const toleranceInfo2 = tolerance ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
+    emit("log", {
+      phase: "phase-11",
+      event: "Crystal structure predicted (Miedema)",
+      detail: `${formula}: ${result.spaceGroup} (${result.crystalSystem}), Miedema dHf=${miedemaFormE.toFixed(3)} eV/atom, decomp=${miedemaDecomp.toFixed(3)} eV/atom${toleranceInfo2}`,
+      dataSource: "Miedema model",
+    });
+
+    return result;
+  } catch (err: any) {
+    emit("log", {
+      phase: "phase-11",
+      event: "Structure prediction error",
+      detail: `${formula}: ${err.message?.slice(0, 150)}`,
+      dataSource: "Structure Predictor",
+    });
+    return null;
+  }
+}
+
+export function assessDimensionality(structure: StructurePrediction): {
+  dim: string;
+  scImplication: string;
+} {
+  const dim = structure.dimensionality;
+  let scImplication = "";
+
+  switch (dim) {
+    case "3D":
+      scImplication = "Isotropic superconductivity expected; conventional BCS more likely; moderate Hc2";
+      break;
+    case "quasi-2D":
+      scImplication = "Anisotropic superconductivity; layered structure may support higher Tc via 2D confinement; high upper critical field possible along c-axis";
+      break;
+    case "2D":
+      scImplication = "Strongly 2D character; potential for enhanced fluctuations; Berezinskii-Kosterlitz-Thouless transition; very high anisotropy";
+      break;
+    case "1D":
+      scImplication = "Quasi-1D superconductivity prone to fluctuations; Peierls instability competition; unlikely for high Tc";
+      break;
+    default:
+      scImplication = "Dimensionality unclear; standard analysis applies";
+  }
+
+  return { dim, scImplication };
+}
+
+export async function runStructurePredictionBatch(
+  emit: EventEmitter,
+  formulas: string[]
+): Promise<number> {
+  let predicted = 0;
+
+  for (const formula of formulas.slice(0, 3)) {
+    const result = await predictCrystalStructure(emit, formula);
+    if (result) predicted++;
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  return predicted;
+}
+
+const CHEMICAL_SUBSTITUTION_MAP: Record<string, string[]> = {
+  "La": ["Y", "Ce", "Pr", "Nd", "Gd"],
+  "Y": ["La", "Sc", "Lu", "Ho"],
+  "Ba": ["Sr", "Ca", "Mg"],
+  "Sr": ["Ba", "Ca"],
+  "Cu": ["Ni", "Co", "Fe", "Zn"],
+  "Fe": ["Co", "Mn", "Ni", "Ru"],
+  "Ti": ["Zr", "Hf", "V"],
+  "Nb": ["Ta", "V", "Mo"],
+  "As": ["P", "Sb"],
+  "Se": ["S", "Te"],
+  "O": ["S", "Se", "F"],
+  "H": ["Li", "Na"],
+  "B": ["C", "N", "Al"],
+  "N": ["P", "C", "B"],
+};

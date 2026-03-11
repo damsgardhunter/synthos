@@ -5762,6 +5762,14 @@ async function runAutonomousFastPath() {
     let batchCount = 0;
     const RL_UPDATE_INTERVAL = 25;
 
+    interface EnrichmentTask {
+      formula: string;
+      tc: number;
+      physicsPred?: any;
+    }
+    const enrichmentQueue: EnrichmentTask[] = [];
+    let batchRlStateSnapshot = { ...rlState };
+
     for (const formula of filteredCandidates) {
       if (!shouldContinue()) break;
       if (!markFormulaInFlight(formula)) continue;
@@ -5883,11 +5891,21 @@ async function runAutonomousFastPath() {
           batchPassCount / batchSize,
           batchNovelCount / batchSize * 0.5
         );
-        rlAgent.updatePolicy(rlState, rlAction, interimReward);
+        rlAgent.updatePolicy(batchRlStateSnapshot, rlAction, interimReward);
         batchBestTc = 0;
         batchPassCount = 0;
         batchNovelCount = 0;
         batchRewardAccum = 0;
+        batchRlStateSnapshot = {
+          bestTc: autonomousBestTc,
+          avgRecentTc: autonomousBestTc,
+          recentRewardTrend: interimReward,
+          familyDiversity: rlState.familyDiversity,
+          stagnationCycles: rlState.stagnationCycles,
+          explorationBudgetUsed: autonomousTotalScreened / Math.max(1, autonomousTotalScreened + 1000),
+          elementSuccessEntropy: rlState.elementSuccessEntropy,
+          cycleNumber: cycleCount,
+        };
       }
 
       try {
@@ -5906,21 +5924,7 @@ async function runAutonomousFastPath() {
       const isPromising = result.passed || result.tc >= 5;
 
       if (result.passed) {
-        try {
-          const electronic = computeElectronicStructure(formula);
-          const topoResult = analyzeTopology(formula, electronic);
-          trackTopologyResult(topoResult);
-          crossEngineHub.recordInsight("topology", formula, topoResult);
-          try {
-            const pairResult = computePairingProfile(formula, topoResult);
-            crossEngineHub.recordInsight("pairing", formula, pairResult);
-          } catch (e) { console.error(`[Engine] Pairing profile failed for ${formula}:`, e); }
-        } catch (e) { console.error(`[Engine] Topology analysis failed for ${formula}:`, e); }
-        try {
-          const fsResult = computeFermiSurface(formula);
-          assignToCluster(formula, fsResult, result.tc);
-          crossEngineHub.recordInsight("fermi", formula, fsResult);
-        } catch (e) { console.error(`[Engine] Fermi surface cluster assignment failed for ${formula}:`, e); }
+        enrichmentQueue.push({ formula, tc: result.tc, physicsPred: result.physicsPred });
       }
       if (isPromising) {
         try {
@@ -5971,8 +5975,14 @@ async function runAutonomousFastPath() {
             const defects = generateDefectVariants(formula);
             if (defects.length > 0 && result.physicsPred) {
               const hubInsDefect = crossEngineHub.getInsightsFor(formula);
-              const autoDefectNesting = hubInsDefect?.fermi?.nestingScore ?? 0;
-              const autoDefectVHS = hubInsDefect?.fermi?.vanHoveDistance ?? 1.0;
+              let autoDefectNesting = hubInsDefect?.fermi?.nestingScore ?? 0;
+              let autoDefectVHS = hubInsDefect?.fermi?.vanHoveDistance ?? 1.0;
+              if (autoDefectNesting === 0 && result.physicsPred) {
+                try {
+                  const quickFS = computeFermiSurface(formula);
+                  autoDefectNesting = quickFS.nestingScore ?? 0;
+                } catch {}
+              }
               const bestDefect = defects.reduce((best, d) => {
                 const adj = adjustElectronicStructure(
                   result.physicsPred!.dosAtEF ?? 1.0,
@@ -6154,6 +6164,33 @@ async function runAutonomousFastPath() {
     const queueFlushed = await flushCandidateWriteQueue();
     if (queueFlushed > 0) {
       console.log(`[Engine] Write queue flushed: ${queueFlushed} candidates bulk-inserted`);
+    }
+
+    if (enrichmentQueue.length > 0) {
+      const enrichStart = Date.now();
+      let enriched = 0;
+      for (const task of enrichmentQueue) {
+        try {
+          const electronic = computeElectronicStructure(task.formula);
+          const topoResult = analyzeTopology(task.formula, electronic);
+          trackTopologyResult(topoResult);
+          crossEngineHub.recordInsight("topology", task.formula, topoResult);
+          try {
+            const pairResult = computePairingProfile(task.formula, topoResult);
+            crossEngineHub.recordInsight("pairing", task.formula, pairResult);
+          } catch {}
+        } catch (e) { console.error(`[Enrichment] Topology/pairing failed for ${task.formula}:`, e); }
+        try {
+          const fsResult = computeFermiSurface(task.formula);
+          assignToCluster(task.formula, fsResult, task.tc);
+          crossEngineHub.recordInsight("fermi", task.formula, fsResult);
+        } catch (e) { console.error(`[Enrichment] Fermi surface failed for ${task.formula}:`, e); }
+        enriched++;
+      }
+      const enrichMs = Date.now() - enrichStart;
+      if (enriched > 0) {
+        console.log(`[Engine] Background enrichment: ${enriched} candidates enriched (topology/Fermi/pairing) in ${enrichMs}ms`);
+      }
     }
 
     lastCycleCandidates = thisCycleCandidates;
