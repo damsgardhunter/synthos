@@ -16,6 +16,7 @@ export interface PredictionVarianceEntry {
   confidenceUpper: number;
   timestamp: number;
   family?: string;
+  referenceTc?: number | null;
 }
 
 export interface CalibrationPoint {
@@ -65,26 +66,42 @@ export interface UncertaintyReport {
 }
 
 const MAX_VARIANCE_HISTORY = 2000;
-const varianceHistory: PredictionVarianceEntry[] = [];
+const varianceBuffer: PredictionVarianceEntry[] = new Array(MAX_VARIANCE_HISTORY);
+let vbHead = 0;
+let vbSize = 0;
+
+function vbPush(entry: PredictionVarianceEntry): void {
+  varianceBuffer[vbHead] = entry;
+  vbHead = (vbHead + 1) % MAX_VARIANCE_HISTORY;
+  if (vbSize < MAX_VARIANCE_HISTORY) vbSize++;
+}
+
+function vbRecent(n: number): PredictionVarianceEntry[] {
+  const count = Math.min(n, vbSize);
+  const result: PredictionVarianceEntry[] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const idx = (vbHead - count + i + MAX_VARIANCE_HISTORY) % MAX_VARIANCE_HISTORY;
+    result[i] = varianceBuffer[idx];
+  }
+  return result;
+}
+
 const calibrationHistory: CalibrationCurve[] = [];
 let lastProposalTime = 0;
 const PROPOSAL_INTERVAL_MS = 15 * 60 * 1000;
 
 export function recordPredictionVariance(entry: PredictionVarianceEntry): void {
-  varianceHistory.push(entry);
-  if (varianceHistory.length > MAX_VARIANCE_HISTORY) {
-    varianceHistory.splice(0, varianceHistory.length - MAX_VARIANCE_HISTORY);
-  }
+  vbPush(entry);
 }
 
 export function recordBatchVariance(entries: PredictionVarianceEntry[]): void {
   for (const e of entries) {
-    recordPredictionVariance(e);
+    vbPush(e);
   }
 }
 
 export function computeCalibrationCurve(): CalibrationCurve {
-  const recent = varianceHistory.slice(-500);
+  const recent = vbRecent(500);
   const nBins = 10;
   const bins: { predicted: number[]; actual: number[] }[] = Array.from({ length: nBins }, () => ({ predicted: [], actual: [] }));
 
@@ -92,9 +109,17 @@ export function computeCalibrationCurve(): CalibrationCurve {
     const conf = 1 - Math.min(1, entry.normalizedUncertainty);
     const binIdx = Math.min(nBins - 1, Math.floor(conf * nBins));
     bins[binIdx].predicted.push(conf);
-    bins[binIdx].actual.push(
-      entry.ensembleStd < Math.abs(entry.predictedTc * 0.15) ? 1 : 0
-    );
+
+    let actual: number;
+    if (entry.referenceTc != null && Number.isFinite(entry.referenceTc)) {
+      const error = Math.abs(entry.predictedTc - entry.referenceTc);
+      const threshold = Math.max(Math.abs(entry.referenceTc * 0.15), 5);
+      actual = error < threshold ? 1 : 0;
+    } else {
+      const ciHalfWidth = 1.645 * entry.ensembleStd;
+      actual = ciHalfWidth > 0 && entry.normalizedUncertainty < 0.5 ? 1 : 0;
+    }
+    bins[binIdx].actual.push(actual);
   }
 
   const points: CalibrationPoint[] = [];
@@ -147,7 +172,7 @@ export function getVarianceSummary(): {
   highUncertaintyFraction: number;
   decomposition: UncertaintyDecomposition;
 } {
-  const recent = varianceHistory.slice(-200);
+  const recent = vbRecent(200);
   if (recent.length === 0) {
     return {
       meanVariance: 0,
@@ -163,11 +188,16 @@ export function getVarianceSummary(): {
   const maxVar = Math.max(...variances);
 
   const highUncThreshold = 0.3;
-  const highUnc = recent.filter(e => e.normalizedUncertainty > highUncThreshold);
+  let highUncCount = 0;
+  for (const e of recent) {
+    if (e.normalizedUncertainty > highUncThreshold) highUncCount++;
+  }
 
+  const MIN_FAMILY_SIZE = 5;
   const familyGroups: Record<string, number[]> = {};
   for (const e of recent) {
     const fam = e.family || "unknown";
+    if (fam === "other" || fam === "unknown") continue;
     if (!familyGroups[fam]) familyGroups[fam] = [];
     familyGroups[fam].push(e.ensembleStd ** 2);
   }
@@ -175,7 +205,7 @@ export function getVarianceSummary(): {
   let withinGroupVar = 0;
   let totalWeights = 0;
   for (const fam of Object.values(familyGroups)) {
-    if (fam.length < 2) continue;
+    if (fam.length < MIN_FAMILY_SIZE) continue;
     const famMean = fam.reduce((a, b) => a + b, 0) / fam.length;
     const famVar = fam.reduce((a, b) => a + (b - famMean) ** 2, 0) / fam.length;
     withinGroupVar += famVar * fam.length;
@@ -184,33 +214,30 @@ export function getVarianceSummary(): {
 
   const aleatoric = totalWeights > 0 ? withinGroupVar / totalWeights : meanVar * 0.5;
   const epistemic = Math.max(0, meanVar - aleatoric);
-  const total = aleatoric + epistemic;
+  const total = Math.max(aleatoric + epistemic, 1e-12);
 
   let dominantSource: "aleatoric" | "epistemic" | "balanced" = "balanced";
-  if (total > 0) {
-    if (aleatoric / total > 0.65) dominantSource = "aleatoric";
-    else if (epistemic / total > 0.65) dominantSource = "epistemic";
-  }
+  if (aleatoric / total > 0.65) dominantSource = "aleatoric";
+  else if (epistemic / total > 0.65) dominantSource = "epistemic";
 
   return {
     meanVariance: meanVar,
     maxVariance: maxVar,
-    highUncertaintyCount: highUnc.length,
-    highUncertaintyFraction: highUnc.length / recent.length,
+    highUncertaintyCount: highUncCount,
+    highUncertaintyFraction: highUncCount / recent.length,
     decomposition: { aleatoric, epistemic, total, dominantSource },
   };
 }
 
 export function getHighUncertaintyPredictions(topN: number = 20): PredictionVarianceEntry[] {
-  return varianceHistory
-    .slice(-500)
+  return vbRecent(500)
     .sort((a, b) => b.normalizedUncertainty - a.normalizedUncertainty)
     .slice(0, topN);
 }
 
 export function getVarianceByFamily(): Record<string, { count: number; meanStd: number; meanNormalized: number }> {
   const groups: Record<string, PredictionVarianceEntry[]> = {};
-  for (const e of varianceHistory.slice(-500)) {
+  for (const e of vbRecent(500)) {
     const fam = e.family || "unknown";
     if (!groups[fam]) groups[fam] = [];
     groups[fam].push(e);
@@ -360,7 +387,7 @@ export function getUncertaintyForLLM(): string {
 
   const lines: string[] = [
     "=== Uncertainty Tracking ===",
-    `Predictions tracked: ${varianceHistory.length}`,
+    `Predictions tracked: ${vbSize}`,
     `Mean variance: ${variance.meanVariance.toFixed(4)}`,
     `High uncertainty fraction: ${(variance.highUncertaintyFraction * 100).toFixed(1)}%`,
     `Decomposition: aleatoric=${variance.decomposition.aleatoric.toFixed(4)}, epistemic=${variance.decomposition.epistemic.toFixed(4)} (${variance.decomposition.dominantSource})`,
@@ -392,7 +419,7 @@ export function getUncertaintyStatus(): {
   highUncertaintyPredictions: PredictionVarianceEntry[];
 } {
   return {
-    totalTracked: varianceHistory.length,
+    totalTracked: vbSize,
     varianceSummary: getVarianceSummary(),
     latestCalibration: calibrationHistory.length > 0 ? calibrationHistory[calibrationHistory.length - 1] : null,
     byFamily: getVarianceByFamily(),
