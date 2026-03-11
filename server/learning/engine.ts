@@ -2628,7 +2628,8 @@ async function runPhase10_Physics() {
           };
           if (qcAnalysis.quantumCriticalScore > 0.5) {
             const qcBoost = 1 + qcAnalysis.pairingBoostFromQCP * 0.15;
-            updatedTc = Math.min(400, updatedTc * qcBoost);
+            const eliashbergCeiling = cappedPhysicsTc > 0 ? cappedPhysicsTc * 1.15 : updatedTc * 1.25;
+            updatedTc = Math.min(eliashbergCeiling, updatedTc * qcBoost);
             emit("log", {
               phase: "phase-10",
               event: "Quantum criticality detected",
@@ -2740,8 +2741,8 @@ async function runPhase10_Physics() {
                         vacancyFraction: bestDisorder.metrics.vacancyFraction,
                         bondVariance: bestDisorder.metrics.bondVariance,
                         latticeStrain: bestDisorder.metrics.localStrainMean,
-                        siteMixingEntropy: bestDisorder.metrics.siteMixingFraction > 0
-                          ? -bestDisorder.metrics.siteMixingFraction * Math.log(bestDisorder.metrics.siteMixingFraction) : 0,
+                        siteMixingEntropy: bestDisorder.metrics.siteMixingFraction > 0 && bestDisorder.metrics.siteMixingFraction < 1
+                          ? -(bestDisorder.metrics.siteMixingFraction * Math.log(bestDisorder.metrics.siteMixingFraction) + (1 - bestDisorder.metrics.siteMixingFraction) * Math.log(1 - bestDisorder.metrics.siteMixingFraction)) : 0,
                         configurationalEntropy: bestDisorder.metrics.configurationalEntropy,
                         dosDisorderSignal: bestDisorder.metrics.dosDisorderSignal,
                       };
