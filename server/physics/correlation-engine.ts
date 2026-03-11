@@ -1,6 +1,7 @@
 import {
   parseFormulaElements,
   parseFormulaCounts,
+  estimateBandwidthW,
 } from "../learning/physics-engine";
 import {
   getHubbardU,
@@ -257,6 +258,29 @@ export function adjustPairingWeights(
   };
 }
 
+function estimateElementWeightedBandwidth(elements: string[], formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+
+  let wAvg = 0;
+  for (const el of elements) {
+    const frac = (counts[el] || 1) / totalAtoms;
+    wAvg += estimateBandwidthW(el) * frac;
+  }
+  return Math.max(0.5, wAvg);
+}
+
+function estimateBandwidthFromSurrogate(formula: string): number | null {
+  try {
+    const { predictBandStructure } = require("./band-structure-surrogate");
+    const surr = predictBandStructure(formula);
+    if (surr && surr.bandwidthMin > 0) {
+      return surr.bandwidthMin;
+    }
+  } catch {}
+  return null;
+}
+
 export function estimateCorrelationEffects(
   formula: string,
   mlFeatures: {
@@ -264,6 +288,9 @@ export function estimateCorrelationEffects(
     dosAtEF?: number;
     flatBandScore?: number;
     nestingScore?: number;
+    effectiveMass?: number;
+    pressureGpa?: number;
+    bandwidthOverride?: number;
   },
 ): CorrelationAnalysis {
   const elements = parseFormulaElements(formula);
@@ -273,7 +300,32 @@ export function estimateCorrelationEffects(
     return sum + (u ?? 0);
   }, 0) / Math.max(1, elements.length);
 
-  const UoverW = mlFeatures.UoverW ?? Math.min(2.0, avgU / 3.0);
+  let UoverW: number;
+  if (mlFeatures.UoverW != null) {
+    UoverW = mlFeatures.UoverW;
+  } else {
+    let bandwidth = mlFeatures.bandwidthOverride ?? null;
+
+    if (bandwidth == null) {
+      const surrogateW = estimateBandwidthFromSurrogate(formula);
+      if (surrogateW != null && surrogateW > 0.01) {
+        bandwidth = surrogateW;
+      }
+    }
+
+    if (bandwidth == null) {
+      bandwidth = estimateElementWeightedBandwidth(elements, formula);
+    }
+
+    const pressure = mlFeatures.pressureGpa ?? 0;
+    if (pressure > 50) {
+      const pressureWidening = 1.0 + (pressure - 50) / 100;
+      bandwidth *= pressureWidening;
+    }
+
+    UoverW = Math.min(2.0, avgU / Math.max(0.5, bandwidth));
+  }
+
   const dosAtEF = mlFeatures.dosAtEF ?? 1.5;
   const flatBandScore = mlFeatures.flatBandScore ?? 0.3;
   const nestingScore = mlFeatures.nestingScore ?? 0.2;
@@ -286,6 +338,21 @@ export function estimateCorrelationEffects(
   const pairingWeights = adjustPairingWeights(correlationScore, regimeResult.regime, primaryClass);
 
   let tcModifier = pairingWeights.effectiveLambdaModifier;
+
+  const effectiveMass = mlFeatures.effectiveMass ?? null;
+  if (materialPatterns.includes("heavy-fermion-Kondo-lattice") && effectiveMass != null) {
+    if (effectiveMass > 200) {
+      tcModifier *= 0.3;
+    } else if (effectiveMass > 100) {
+      tcModifier *= 0.5;
+    } else if (effectiveMass > 50) {
+      tcModifier *= 0.65;
+    }
+  } else if (effectiveMass != null && effectiveMass > 50) {
+    const massPenalty = Math.max(0.5, 1.0 - (effectiveMass - 50) / 200);
+    tcModifier *= massPenalty;
+  }
+
   if (materialPatterns.includes("cuprate-Mott-proximity")) {
     tcModifier *= 1.2;
   }
