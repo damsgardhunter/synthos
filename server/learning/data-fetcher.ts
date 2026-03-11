@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { fetchSummary, isApiAvailable } from "./materials-project-client";
+import { normalizeFormula } from "./utils";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -9,6 +10,12 @@ const openai = new OpenAI({
 });
 
 type DataSourceTag = "dft-computed" | "experimental" | "llm-estimated";
+
+function generateMaterialId(formula: string, source: string): string {
+  const normalized = normalizeFormula(formula).replace(/[^a-zA-Z0-9]/g, "").slice(0, 30);
+  const prefix = source === "OQMD" ? "oqmd" : source === "Materials Science DB" ? "matdb" : "kb";
+  return `${prefix}-${normalized}`;
+}
 
 interface ValidationResult {
   valid: boolean;
@@ -347,7 +354,7 @@ Return JSON with 'materials' array containing exactly 5 materials. Only real com
         continue;
       }
 
-      const id = mat.id || `matdb-${mat.formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20)}-${Math.random().toString(36).slice(2, 6)}`;
+      const id = generateMaterialId(corrected.formula || mat.formula, "Materials Science DB");
       try {
         const props = corrected.properties || {};
         props.dataSource = dataSource;
@@ -368,7 +375,13 @@ Return JSON with 'materials' array containing exactly 5 materials. Only real com
           properties: props,
         });
         indexed++;
-      } catch (e) {
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (msg.includes("duplicate") || msg.includes("unique")) {
+          emit("log", { phase: "phase-4", event: "Duplicate skipped", detail: `${mat.formula} (${id}) already exists`, dataSource: "Materials Science DB" });
+        } else {
+          console.warn(`[MatDB] Failed to insert ${mat.formula} (${id}): ${msg.slice(0, 150)}`);
+        }
       }
     }
 
@@ -497,11 +510,11 @@ For each material provide:
   - For energy materials: 'capacity' (mAh/g), 'voltage' (V), 'efficiency' (%)
   - Always include: 'structure' (crystal system), 'discoveredYear' (integer or null), 'application' (primary use), 'category' ("${topic.category}")
 
-Return JSON with 'materials' array containing 5-8 materials. Only include materials with well-established, published properties from reputable sources. Do not fabricate property values.`,
+Return JSON with 'materials' array containing exactly 5 materials. Only include materials with well-established, published properties from reputable sources. Do not fabricate property values.`,
         },
         {
           role: "user",
-          content: `List 5-8 real, existing ${topic.category}-level materials in the category: ${topic.topic}. Examples to consider: ${topic.examples}. Provide accurate properties from published scientific literature.`,
+          content: `List 5 real, existing ${topic.category}-level materials in the category: ${topic.topic}. Examples to consider: ${topic.examples}. Provide accurate properties from published scientific literature.`,
         },
       ],
       response_format: { type: "json_object" },
@@ -541,7 +554,7 @@ Return JSON with 'materials' array containing 5-8 materials. Only include materi
         continue;
       }
 
-      const id = mat.id || `kb-${mat.formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20)}-${Math.random().toString(36).slice(2, 6)}`;
+      const id = generateMaterialId(corrected.formula || mat.formula, "Materials Science KB");
       try {
         const props = corrected.properties || {};
         props.dataSource = dataSource;
@@ -562,7 +575,13 @@ Return JSON with 'materials' array containing 5-8 materials. Only include materi
           properties: props,
         });
         indexed++;
-      } catch (e) {
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (msg.includes("duplicate") || msg.includes("unique")) {
+          emit("log", { phase: "phase-4", event: "Duplicate skipped", detail: `${mat.formula} (${id}) already exists`, dataSource: "Materials Science KB" });
+        } else {
+          console.warn(`[KB] Failed to insert ${mat.formula} (${id}): ${msg.slice(0, 150)}`);
+        }
       }
     }
 
