@@ -1,8 +1,10 @@
+import { createHash } from "crypto";
 import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
 import { extractFeatures } from "./ml-predictor";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { storage } from "../storage";
 import { computeSymmetryEmbedding, computeSymmetryFeatureVector } from "../crystal/symmetry-subgroups";
+import { predictLambda } from "./lambda-regressor";
 
 export interface NodeFeature {
   element: string;
@@ -1939,6 +1941,18 @@ interface TrainingSample {
   structure?: any;
   prototype?: string;
   pressureGpa?: number;
+  lambda?: number;
+}
+
+function structureHash(structure: any): string {
+  if (!structure) return '';
+  const json = typeof structure === 'string' ? structure : JSON.stringify(structure);
+  return createHash('md5').update(json).digest('hex').slice(0, 12);
+}
+
+function graphCacheKey(formula: string, prototype?: string, structure?: any): string {
+  if (prototype) return `${formula}::p:${prototype}`;
+  return `${formula}::s:${structureHash(structure)}`;
 }
 
 export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights): GNNWeights {
@@ -1957,15 +1971,26 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
 
   const graphCache = new Map<string, CrystalGraph>();
   const origEmbeddings = new Map<string, number[][]>();
-  for (const sample of trainingData) {
-    const structId = sample.structure ? JSON.stringify(sample.structure).length.toString() : '';
-    const key = sample.prototype ? `${sample.formula}::p:${sample.prototype}` : `${sample.formula}::s:${structId}`;
+  const lambdaTargets = new Map<number, number>();
+  for (let si = 0; si < trainingData.length; si++) {
+    const sample = trainingData[si];
+    const key = graphCacheKey(sample.formula, sample.prototype, sample.structure);
     if (!graphCache.has(key)) {
       const g = sample.prototype
         ? buildPrototypeGraph(sample.formula, sample.prototype, sample.pressureGpa)
         : buildCrystalGraph(sample.formula, sample.structure, sample.pressureGpa);
       graphCache.set(key, g);
       origEmbeddings.set(key, g.nodes.map(n => [...n.embedding]));
+    }
+    if (sample.lambda != null && sample.lambda > 0) {
+      lambdaTargets.set(si, Math.min(4.0, sample.lambda));
+    } else {
+      try {
+        const lp = predictLambda(sample.formula, sample.pressureGpa ?? 0);
+        if (lp && lp.lambda > 0 && lp.confidence >= 0.5) {
+          lambdaTargets.set(si, Math.min(4.0, lp.lambda));
+        }
+      } catch {}
     }
   }
 
@@ -2001,8 +2026,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const idx = indices[b];
         const sample = trainingData[idx];
 
-        const structId = sample.structure ? JSON.stringify(sample.structure).length.toString() : '';
-        const cacheKey = sample.prototype ? `${sample.formula}::p:${sample.prototype}` : `${sample.formula}::s:${structId}`;
+        const cacheKey = graphCacheKey(sample.formula, sample.prototype, sample.structure);
         const graph = graphCache.get(cacheKey)!;
         const orig = origEmbeddings.get(cacheKey)!;
         for (let ni = 0; ni < graph.nodes.length; ni++) {
@@ -2022,7 +2046,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const confTarget = Math.min(1.0, sample.tc > 0 ? 0.8 : 0.3);
         const confError = pred.confidence - confTarget;
 
-        const lambdaTarget = sample.tc > 0 ? Math.min(4.0, sample.tc / 50) : 0.1;
+        const lambdaTarget = lambdaTargets.has(idx) ? lambdaTargets.get(idx)!
+          : (sample.tc > 0 ? Math.min(4.0, sample.tc / 50) : 0.1);
         const lambdaError = pred.lambda - lambdaTarget;
 
         const bgTarget = (sample as any).bandgap ?? (sample.tc > 0 ? 0 : 1.5);
