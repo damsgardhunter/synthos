@@ -1345,6 +1345,8 @@ function computeFSDimensionality(
   const fermiTolerance = 0.15;
   let totalCylindrical = 0;
   let totalWeight = 0;
+  let totalKzVar = 0;
+  let totalKxyVar = 0;
 
   for (const pocket of pockets) {
     const crossingPoints = evaluations.filter(ev =>
@@ -1364,36 +1366,15 @@ function computeFSDimensionality(
 
     totalCylindrical += (1 - kzDispersion) * pocket.volume;
     totalWeight += pocket.volume;
+    totalKzVar += kzSpread * pocket.volume;
+    totalKxyVar += kxySpread * pocket.volume;
   }
 
   if (totalWeight < 0.001) return 3;
 
-  let totalKzVar = 0;
-  let totalKxyVar = 0;
-  let varWeight = 0;
-
-  for (const pocket of pockets) {
-    const crossingPoints = evaluations.filter(ev =>
-      pocket.bandIndex < ev.eigenvalues.length &&
-      Math.abs(ev.eigenvalues[pocket.bandIndex] - fermiEnergy) < fermiTolerance
-    );
-
-    if (crossingPoints.length < 2) continue;
-
-    const kzValues = crossingPoints.map(ev => ev.k[2]);
-    const kxyValues = crossingPoints.map(ev => Math.sqrt(ev.k[0] ** 2 + ev.k[1] ** 2));
-
-    const kzSpread = Math.max(...kzValues) - Math.min(...kzValues);
-    const kxySpread = Math.max(...kxyValues) - Math.min(...kxyValues);
-
-    totalKzVar += kzSpread * pocket.volume;
-    totalKxyVar += kxySpread * pocket.volume;
-    varWeight += pocket.volume;
-  }
-
-  if (varWeight > 0.001) {
-    const avgKzVar = totalKzVar / varWeight;
-    const avgKxyVar = totalKxyVar / varWeight;
+  if (totalWeight > 0.001) {
+    const avgKzVar = totalKzVar / totalWeight;
+    const avgKxyVar = totalKxyVar / totalWeight;
 
     if (avgKzVar > 3 * avgKxyVar) {
       return 1.0 + avgKxyVar / (avgKzVar + 1e-6);
@@ -1437,21 +1418,27 @@ function computeSigmaBandPresence(
 }
 
 function computeMultiBandScore(pockets: FermiPocket[]): number {
-  if (pockets.length <= 1) return 0;
+  const MIN_POCKET_VOLUME = 0.005;
+  const significantPockets = pockets.filter(p => p.volume >= MIN_POCKET_VOLUME);
 
-  const electronPockets = pockets.filter(p => p.type === "electron");
-  const holePockets = pockets.filter(p => p.type === "hole");
+  if (significantPockets.length <= 1) return 0;
+
+  const electronPockets = significantPockets.filter(p => p.type === "electron");
+  const holePockets = significantPockets.filter(p => p.type === "hole");
 
   let score = 0;
 
-  score += Math.min(0.4, pockets.length * 0.1);
+  const volumeWeightedCount = significantPockets.reduce(
+    (sum, p) => sum + Math.min(1.0, p.volume / 0.01), 0
+  );
+  score += Math.min(0.4, volumeWeightedCount * 0.1);
 
   if (electronPockets.length > 0 && holePockets.length > 0) {
     score += 0.3;
   }
 
   const orbitalTypes = new Set<string>();
-  for (const pocket of pockets) {
+  for (const pocket of significantPockets) {
     if (pocket.orbitalCharacter.f > 0.4) orbitalTypes.add("f");
     else if (pocket.orbitalCharacter.d > 0.5) orbitalTypes.add("d");
     else if (pocket.orbitalCharacter.p > 0.5) orbitalTypes.add("p");
