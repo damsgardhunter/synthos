@@ -49,6 +49,7 @@ export interface EffectiveMassEntry {
   massTensor?: MassTensor3x3;
   harmonicMeanMass?: number;
   anisotropyRatio?: number;
+  isFlatBand?: boolean;
 }
 
 export interface VHSPositionEntry {
@@ -307,9 +308,14 @@ function initVector(size: number, val = 0): number[] {
 function matVecMul(mat: number[][], vec: number[]): number[] {
   const result: number[] = [];
   for (let i = 0; i < mat.length; i++) {
-    let sum = 0;
     const row = mat[i];
-    for (let j = 0; j < row.length && j < vec.length; j++) {
+    if (row.length !== vec.length) {
+      throw new Error(
+        `matVecMul dimension mismatch: row ${i} has ${row.length} cols but vec has ${vec.length} elements`
+      );
+    }
+    let sum = 0;
+    for (let j = 0; j < row.length; j++) {
       sum += (row[j] ?? 0) * (vec[j] ?? 0);
     }
     result.push(sum);
@@ -460,6 +466,22 @@ function computeCalibrationShifts(
   return shifts;
 }
 
+function computeLocalBandwidth(
+  bandEnergies: number[],
+  centerIdx: number,
+  halfWindow: number,
+): number {
+  const iLow = Math.max(0, centerIdx - halfWindow);
+  const iHigh = Math.min(bandEnergies.length - 1, centerIdx + halfWindow);
+  let eMin = Infinity;
+  let eMax = -Infinity;
+  for (let i = iLow; i <= iHigh; i++) {
+    if (bandEnergies[i] < eMin) eMin = bandEnergies[i];
+    if (bandEnergies[i] > eMax) eMax = bandEnergies[i];
+  }
+  return eMax - eMin;
+}
+
 function computeEffectiveMasses(
   dispersion: BandDispersion,
   latticeSystem: string,
@@ -484,7 +506,27 @@ function computeEffectiveMasses(
       const dE = bandEnergies[iPlus] - 2 * bandEnergies[crossIdx] + bandEnergies[iMinus];
       const dk = 1.0 / dispersion.nKPoints;
       const curvature = dE / (dk * dk);
-      const mPath = curvature !== 0 ? hbar2Over2m / Math.abs(curvature) : 1.0;
+
+      const CURVATURE_FLAT_THRESHOLD = 1e-4;
+      const absCurv = Math.abs(curvature);
+      let mPath: number;
+      let isFlatBand = false;
+
+      if (absCurv < CURVATURE_FLAT_THRESHOLD) {
+        isFlatBand = true;
+        const localBW = computeLocalBandwidth(bandEnergies, crossIdx, 5);
+        if (localBW < 0.005) {
+          mPath = 500;
+        } else if (localBW < 0.02) {
+          mPath = 200;
+        } else if (localBW < 0.05) {
+          mPath = 100;
+        } else {
+          mPath = 50;
+        }
+      } else {
+        mPath = hbar2Over2m / absCurv;
+      }
 
       const kCoord = dispersion.bands[crossIdx]?.kIndex !== undefined
         ? dispersion.kPoints.find(kp => kp.index === crossIdx)?.coordinates
@@ -495,8 +537,11 @@ function computeEffectiveMasses(
       let harmonicMeanMass: number;
       let anisotropyRatio: number;
 
+      const MASS_MIN = 0.01;
+      const MASS_MAX = 500;
+
       if (isCubic) {
-        const clampedM = Math.min(100, Math.max(0.01, mPath));
+        const clampedM = Math.min(MASS_MAX, Math.max(MASS_MIN, mPath));
         massComponents = [clampedM, clampedM, clampedM];
         massTensor = [
           [clampedM, 0, 0],
@@ -507,9 +552,9 @@ function computeEffectiveMasses(
         anisotropyRatio = 1.0;
       } else {
         const dirWeight = estimateDirectionalWeights(kCoord, latticeSystem);
-        const mx = Math.min(100, Math.max(0.01, mPath * dirWeight[0]));
-        const my = Math.min(100, Math.max(0.01, mPath * dirWeight[1]));
-        const mz = Math.min(100, Math.max(0.01, mPath * dirWeight[2]));
+        const mx = Math.min(MASS_MAX, Math.max(MASS_MIN, mPath * dirWeight[0]));
+        const my = Math.min(MASS_MAX, Math.max(MASS_MIN, mPath * dirWeight[1]));
+        const mz = Math.min(MASS_MAX, Math.max(MASS_MIN, mPath * dirWeight[2]));
 
         massComponents = [
           Number(mx.toFixed(4)),
@@ -532,12 +577,13 @@ function computeEffectiveMasses(
 
       masses.push({
         bandIndex: b,
-        value: Number(Math.min(100, Math.max(0.01, harmonicMeanMass)).toFixed(4)),
+        value: Number(Math.min(MASS_MAX, Math.max(MASS_MIN, harmonicMeanMass)).toFixed(4)),
         direction: dispersion.bands[crossIdx]?.kLabel ?? "unknown",
         massComponents,
         massTensor,
         harmonicMeanMass: Number(harmonicMeanMass.toFixed(4)),
         anisotropyRatio: Number(anisotropyRatio.toFixed(4)),
+        isFlatBand,
       });
     }
   }
@@ -1106,15 +1152,30 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
     const segPoints = interpolateKPath(startCoord, endCoord, kPointsPerSegment);
 
     for (let i = 0; i < segPoints.length; i++) {
-      const isEndpoint = i === 0;
-      const label = isEndpoint ? pathDef.labels[seg] : "";
-      if (isEndpoint) {
-        kPoints.push({
-          label: pathDef.labels[seg],
-          coordinates: segPoints[i],
-          index: globalIdx,
-        });
+      if (seg > 0 && i === 0) {
+        continue;
       }
+
+      const isSegStart = i === 0;
+      const isSegEnd = i === segPoints.length - 1;
+      const label = isSegStart
+        ? pathDef.labels[seg]
+        : isSegEnd
+          ? pathDef.labels[seg + 1]
+          : "";
+
+      if (isSegStart || isSegEnd) {
+        const hsLabel = isSegStart ? pathDef.labels[seg] : pathDef.labels[seg + 1];
+        const alreadyAdded = kPoints.some(kp => kp.label === hsLabel);
+        if (!alreadyAdded) {
+          kPoints.push({
+            label: hsLabel,
+            coordinates: segPoints[i],
+            index: globalIdx,
+          });
+        }
+      }
+
       allKCoords.push({
         coord: segPoints[i],
         label: label || `k${globalIdx}`,
@@ -1123,11 +1184,6 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
       globalIdx++;
     }
   }
-  kPoints.push({
-    label: pathDef.labels[pathDef.labels.length - 1],
-    coordinates: pathDef.coords[pathDef.coords.length - 1] as [number, number, number],
-    index: globalIdx - 1,
-  });
 
   const graphFeatures = computeGraphFeatureVector(formula, prototype);
   const weights = getOperatorWeights();
@@ -1216,10 +1272,12 @@ export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<st
   const masses = result.derivedQuantities.effectiveMasses;
   let avgMass = 1.0;
   let avgAnisotropy = 1.0;
+  let flatBandCount = 0;
   if (masses.length > 0) {
     const invSum = masses.reduce((s, m) => s + 1 / Math.max(0.01, m.value), 0);
     avgMass = invSum > 0 ? masses.length / invSum : 1.0;
     avgAnisotropy = masses.reduce((s, m) => s + (m.anisotropyRatio ?? 1.0), 0) / masses.length;
+    flatBandCount = masses.filter(m => m.isFlatBand).length;
   }
 
   const avgVF = result.derivedQuantities.fermiVelocities.length > 0
@@ -1237,6 +1295,7 @@ export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<st
     fermiEnergy: result.dispersion.fermiEnergy,
     avgEffectiveMass: Number(avgMass.toFixed(4)),
     avgMassAnisotropy: Number(avgAnisotropy.toFixed(4)),
+    flatBandCrossingCount: flatBandCount,
     avgFermiVelocity: Number(avgVF.toFixed(2)),
     vhsCount,
     vhsConfirmedCount,
