@@ -411,9 +411,15 @@ export function mutateSynthesisVector(sv: SynthesisVector): SynthesisVector {
       case "temperature":
         mutated.temperature += randRange(-200, 200);
         break;
-      case "pressure":
-        mutated.pressure *= randRange(0.7, 1.4);
+      case "pressure": {
+        const logP = Math.log(Math.max(0.1, mutated.pressure));
+        const sigma = 0.3;
+        const u1 = Math.random();
+        const u2 = Math.random();
+        const z = Math.sqrt(-2 * Math.log(Math.max(1e-10, u1))) * Math.cos(2 * Math.PI * u2);
+        mutated.pressure = Math.exp(logP + sigma * z);
         break;
+      }
       case "coolingRate":
         mutated.coolingRate *= randRange(0.5, 2.0);
         break;
