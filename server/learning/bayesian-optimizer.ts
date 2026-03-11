@@ -48,7 +48,7 @@ interface AcquisitionResult {
   acquisitionValue: number;
   predictedMean: number;
   predictedStd: number;
-  source: "ucb" | "ei" | "thompson";
+  source: "ucb" | "ei" | "thompson" | "mixed";
 }
 
 interface GPPrediction {
@@ -580,7 +580,7 @@ export class BayesianOptimizer {
     if (this.observations.length === 0) return 0;
     const features = this.getFeatures(formula);
     const logPred = this.predictLogSpace(features);
-    const u1 = Math.max(1e-15, Math.random());
+    const u1 = 1 - Math.random();
     const u2 = Math.random();
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
     const logSample = logPred.mean + logPred.std * z;
@@ -594,9 +594,35 @@ export class BayesianOptimizer {
     method: "ucb" | "ei" | "thompson" | "mixed" = "mixed"
   ): AcquisitionResult[] {
     if (this.observations.length < 5) {
-      return candidatePool.slice(0, nSuggestions).map(f => ({
-        formula: f,
-        acquisitionValue: Math.random(),
+      const VEC_MAP: Record<string, number> = {
+        H:1,Li:1,Be:2,B:3,C:4,N:5,O:6,F:7,Na:1,Mg:2,Al:3,Si:4,P:5,S:6,Cl:7,
+        K:1,Ca:2,Sc:3,Ti:4,V:5,Cr:6,Mn:7,Fe:8,Co:9,Ni:10,Cu:11,Zn:12,
+        Ga:3,Ge:4,As:5,Se:6,Br:7,Rb:1,Sr:2,Y:3,Zr:4,Nb:5,Mo:6,Ru:8,Rh:9,Pd:10,Ag:11,
+        In:3,Sn:4,Sb:5,Te:6,Cs:1,Ba:2,La:3,Hf:4,Ta:5,W:6,Re:7,Os:8,Ir:9,Pt:10,Au:11,
+        Tl:3,Pb:4,Bi:5,
+      };
+      const ranked = candidatePool.map(f => {
+        const parsed = parseFormula(f);
+        const entries = Object.entries(parsed);
+        const totalAtoms = entries.reduce((s, [, c]) => s + c, 0);
+        if (totalAtoms === 0) return { formula: f, score: -1 };
+        const vec = entries.reduce((s, [el, c]) => s + (VEC_MAP[el] ?? 4) * c, 0) / totalAtoms;
+        const hasTM = entries.some(([el]) =>
+          ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn",
+           "Y","Zr","Nb","Mo","Ru","Rh","Pd","Ag",
+           "Hf","Ta","W","Re","Os","Ir","Pt","Au"].includes(el));
+        const features = this.getFeatures(f);
+        const allZero = features.every(v => v === 0);
+        if (allZero) return { formula: f, score: -1 };
+        const vecPenalty = Math.abs(vec - 4.7);
+        const tmBonus = hasTM ? 1.0 : 0;
+        const nElBonus = entries.length >= 2 && entries.length <= 5 ? 0.5 : 0;
+        return { formula: f, score: tmBonus + nElBonus - vecPenalty * 0.3 + Math.random() * 0.2 };
+      });
+      ranked.sort((a, b) => b.score - a.score);
+      return ranked.slice(0, nSuggestions).map(r => ({
+        formula: r.formula,
+        acquisitionValue: Math.max(0, r.score),
         predictedMean: 0,
         predictedStd: 1,
         source: "ucb" as const,
@@ -622,14 +648,14 @@ export class BayesianOptimizer {
       const { mean, std } = this.predict(formula);
 
       let acqValue: number;
-      let source: "ucb" | "ei" | "thompson";
+      let source: "ucb" | "ei" | "thompson" | "mixed";
 
       if (method === "mixed") {
         const ucb = (mean + 2.0 * std) / tcRange;
         const ei = this.acquisitionEI(formula) / tcRange;
         const ts = this.thompsonSample(formula) / tcRange;
         acqValue = ucb * 0.4 + ei * 0.3 + ts * 0.3;
-        source = ucb >= ei && ucb >= ts ? "ucb" : ei >= ts ? "ei" : "thompson";
+        source = "mixed";
       } else if (method === "ucb") {
         acqValue = this.acquisitionUCB(formula) / tcRange;
         source = "ucb";
