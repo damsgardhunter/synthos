@@ -70,8 +70,10 @@ export const SYNTHESIS_CONSTRAINTS = {
   magneticField: { min: 0, max: 45 },
   thermalCycles: { min: 0, max: 100 },
   strain: { min: -5, max: 10 },
-  oxygenPressure: { min: 0, max: 1 },
+  oxygenPressure: { min: 0, max: 200 },
 } as const;
+
+const METASTABLE_QUENCH_THRESHOLD = 1000;
 
 const SYNTHESIS_DEFAULTS: Record<string, Partial<SynthesisVector>> = {
   hydride: { temperature: 1000, pressure: 100, coolingRate: 50, annealTime: 8, strain: 0.3 },
@@ -224,15 +226,27 @@ export function simulateSynthesisEffects(
 
   const mcLower = materialClass.toLowerCase();
   if (sv.oxygenPressure > 0.1 && mcLower.includes("hydride")) {
-    phasePurity *= Math.max(0.3, 1 - sv.oxygenPressure * 2.0);
+    const o2Penalty = Math.min(sv.oxygenPressure, 10) * 0.2;
+    phasePurity *= Math.max(0.3, 1 - o2Penalty);
     lambdaMod *= 0.85;
   }
 
   if (sv.oxygenPressure > 0 && mcLower.includes("cuprate")) {
-    const optimalO2 = 0.21;
-    const o2Diff = Math.abs(sv.oxygenPressure - optimalO2);
-    phasePurity *= Math.max(0.8, 1 - o2Diff * 0.5);
-    lambdaMod *= 1.0 + (sv.oxygenPressure > 0.1 ? 0.05 : 0);
+    const optimalO2 = sv.oxygenPressure > 10 ? 50 : 0.21;
+    const o2Diff = Math.abs(sv.oxygenPressure - optimalO2) / Math.max(optimalO2, 1);
+    phasePurity *= Math.max(0.7, 1 - o2Diff * 0.3);
+    if (sv.oxygenPressure >= 10 && sv.oxygenPressure <= 150) {
+      lambdaMod *= 1.0 + Math.min(0.12, Math.log(sv.oxygenPressure / 10) * 0.03);
+      phasePurity = Math.min(0.99, phasePurity + Math.min(0.04, (sv.oxygenPressure - 10) / 1000));
+    } else if (sv.oxygenPressure > 0.1) {
+      lambdaMod *= 1.0 + 0.05;
+    }
+  }
+
+  if (metastable && sv.coolingRate < METASTABLE_QUENCH_THRESHOLD) {
+    const quenchDeficit = (METASTABLE_QUENCH_THRESHOLD - sv.coolingRate) / METASTABLE_QUENCH_THRESHOLD;
+    phasePurity *= Math.max(0.3, 1 - quenchDeficit * 0.6);
+    lambdaMod *= Math.max(0.5, 1 - quenchDeficit * 0.3);
   }
 
   if (sv.currentDensity > 0) {
@@ -264,7 +278,7 @@ export function simulateSynthesisEffects(
   };
 }
 
-export function checkSynthesisFeasibility(sv: SynthesisVector): FeasibilityResult {
+export function checkSynthesisFeasibility(sv: SynthesisVector, materialClass: string = ""): FeasibilityResult {
   const violations: string[] = [];
   let score = 0;
   const C = SYNTHESIS_CONSTRAINTS;
@@ -273,6 +287,13 @@ export function checkSynthesisFeasibility(sv: SynthesisVector): FeasibilityResul
   if (sv.pressure > C.pressure.max) violations.push(`Pressure ${sv.pressure} GPa exceeds ${C.pressure.max} GPa`);
   if (sv.coolingRate > C.coolingRate.max) violations.push(`Cooling rate ${sv.coolingRate} K/s exceeds ${C.coolingRate.max} K/s`);
   if (sv.currentDensity > C.currentDensity.max) violations.push(`Current density ${sv.currentDensity} A/cm2 exceeds ${C.currentDensity.max} A/cm2`);
+  if (sv.oxygenPressure > C.oxygenPressure.max) violations.push(`Oxygen pressure ${sv.oxygenPressure} bar exceeds ${C.oxygenPressure.max} bar`);
+
+  const isMetastableCandidate = sv.pressure > 50 || sv.coolingRate > 500 ||
+    materialClass.toLowerCase().includes("hydride");
+  if (isMetastableCandidate && sv.coolingRate < METASTABLE_QUENCH_THRESHOLD) {
+    violations.push(`Metastable phase requires quench rate >= ${METASTABLE_QUENCH_THRESHOLD} K/s, got ${sv.coolingRate.toFixed(1)} K/s — material will relax to non-superconducting phase`);
+  }
 
   score += sv.pressure / 100;
   score += sv.coolingRate / 1000;
@@ -501,7 +522,7 @@ export function optimizeSynthesisPath(
     thermalCycles: 1,
     strain: 0,
     oxygenPressure: steps.some(s => s.atmosphere === "oxygen") ? 0.21 : 0,
-  });
+  }, materialClass);
 
   return {
     steps,
