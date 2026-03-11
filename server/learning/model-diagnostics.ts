@@ -431,9 +431,11 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
     const hpErrors = highHContentOutcomes.map(o => o.predicted - o.actual);
     const hpMean = hpErrors.reduce((s, e) => s + e, 0) / hpErrors.length;
     if (Math.abs(hpMean) > 20) {
-      const existing = clusters.find(c => c.pattern.includes("High-H-content"));
-      if (!existing) {
+      const duplicateSpecific = clusters.find(c => c.pattern.includes("High-H-content") && c.pressureRelated);
+      if (!duplicateSpecific) {
         const hpAbsErrors = hpErrors.map(e => Math.abs(e));
+        const sortedHp = [...hpErrors].sort((a, b) => a - b);
+        const hpMedian = sortedHp[Math.floor(sortedHp.length / 2)];
         const worstIdx = hpAbsErrors.indexOf(Math.max(...hpAbsErrors));
         clusters.push({
           pattern: `High-H-content hydride ${hpMean > 0 ? "overprediction" : "underprediction"} bias`,
@@ -441,7 +443,7 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
           direction: hpMean > 0 ? "over" : "under",
           count: highHContentOutcomes.length,
           meanError: Math.round(hpMean * 10) / 10,
-          medianError: Math.round(hpMean * 10) / 10,
+          medianError: Math.round(hpMedian * 10) / 10,
           worstFormula: highHContentOutcomes[worstIdx].formula,
           worstError: Math.round(hpErrors[worstIdx] * 10) / 10,
           pressureRelated: true,
@@ -455,9 +457,11 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
     const lhErrors = lowHHydrideOutcomes.map(o => o.predicted - o.actual);
     const lhMean = lhErrors.reduce((s, e) => s + e, 0) / lhErrors.length;
     if (Math.abs(lhMean) > 10) {
-      const existing = clusters.find(c => c.pattern.includes("Low-H hydride"));
-      if (!existing) {
+      const duplicateSpecific = clusters.find(c => c.pattern.includes("Low-H hydride") && !c.pressureRelated);
+      if (!duplicateSpecific) {
         const lhAbsErrors = lhErrors.map(e => Math.abs(e));
+        const sortedLh = [...lhErrors].sort((a, b) => a - b);
+        const lhMedian = sortedLh[Math.floor(sortedLh.length / 2)];
         const worstIdx = lhAbsErrors.indexOf(Math.max(...lhAbsErrors));
         clusters.push({
           pattern: `Low-H hydride ${lhMean > 0 ? "overprediction" : "underprediction"} bias`,
@@ -465,7 +469,7 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
           direction: lhMean > 0 ? "over" : "under",
           count: lowHHydrideOutcomes.length,
           meanError: Math.round(lhMean * 10) / 10,
-          medianError: Math.round(lhMean * 10) / 10,
+          medianError: Math.round(lhMedian * 10) / 10,
           worstFormula: lowHHydrideOutcomes[worstIdx].formula,
           worstError: Math.round(lhErrors[worstIdx] * 10) / 10,
           pressureRelated: false,
@@ -590,8 +594,12 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     falsePositiveRate = total > 0 ? Math.round((fpCount / total) * 10000) / 10000 : 0;
     falseNegativeRate = total > 0 ? Math.round((fnCount / total) * 10000) / 10000 : 0;
 
-    const signs = calibration.predictedVsActual.map(p => p.residual > 0 ? 1 : p.residual < 0 ? -1 : 0);
-    meanResidualSign = signs.length > 0 ? Math.round((signs.reduce((s: number, v: number) => s + v, 0 as number) / signs.length) * 1000) / 1000 : 0;
+    const residuals = calibration.predictedVsActual.map(p => p.residual);
+    const totalMagnitude = residuals.reduce((s, r) => s + Math.abs(r), 0);
+    if (totalMagnitude > 0) {
+      const signedSum = residuals.reduce((s, r) => s + r, 0);
+      meanResidualSign = Math.round((signedSum / totalMagnitude) * 1000) / 1000;
+    }
   }
 
   const xgboost: XGBoostDiagnostics = {
@@ -927,7 +935,7 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push(`  Prediction variance=${d.xgboost.predictionVariance}K`);
   lines.push(`  False positive rate (pred>10K,actual<5K)=${d.xgboost.falsePositiveRate}`);
   lines.push(`  False negative rate (pred<5K,actual>10K)=${d.xgboost.falseNegativeRate}`);
-  lines.push(`  Prediction bias (mean residual sign)=${d.xgboost.meanResidualSign}`);
+  lines.push(`  Prediction bias (impact-weighted sign)=${d.xgboost.meanResidualSign} (>0 = net overprediction, <0 = net underprediction)`);
   lines.push(`  Residual p90=${d.xgboost.absResidualPercentiles.p90}K, p95=${d.xgboost.absResidualPercentiles.p95}K`);
   if (d.xgboost.r2 < 0.5) lines.push("  ** WARNING: Low R² — model may be underfitting **");
   if (d.xgboost.rmse > 30) lines.push("  ** WARNING: High RMSE — large prediction errors **");
