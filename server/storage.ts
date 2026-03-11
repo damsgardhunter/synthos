@@ -192,7 +192,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async insertNovelPrediction(pred: InsertNovelPrediction): Promise<NovelPrediction> {
-    const [p] = await db.insert(novelPredictions).values(pred).onConflictDoNothing().returning();
+    const [p] = await db.insert(novelPredictions).values(pred)
+      .onConflictDoNothing({ target: novelPredictions.formula })
+      .returning();
     return p;
   }
 

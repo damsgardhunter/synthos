@@ -13,27 +13,63 @@ const openai = new OpenAI({
 function repairTruncatedJSON(raw: string): { materials: GeneratedFormula[] } | null {
   try {
     const materialsMatch = raw.match(/"materials"\s*:\s*\[/);
-    if (!materialsMatch) return null;
+    if (materialsMatch) {
+      const arrayStart = raw.indexOf("[", materialsMatch.index!);
+      let depth = 0;
+      let lastCompleteObj = -1;
 
-    const arrayStart = raw.indexOf("[", materialsMatch.index!);
-    let depth = 0;
-    let lastCompleteObj = -1;
+      for (let i = arrayStart; i < raw.length; i++) {
+        if (raw[i] === "{") depth++;
+        if (raw[i] === "}") {
+          depth--;
+          if (depth === 0) lastCompleteObj = i;
+        }
+      }
 
-    for (let i = arrayStart; i < raw.length; i++) {
-      if (raw[i] === "{") depth++;
-      if (raw[i] === "}") {
-        depth--;
-        if (depth === 0) lastCompleteObj = i;
+      if (lastCompleteObj > arrayStart) {
+        const repairedArray = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
+        const repaired = `{"materials": ${repairedArray}}`;
+        const parsed = JSON.parse(repaired);
+        if (Array.isArray(parsed.materials) && parsed.materials.length > 0) return parsed;
       }
     }
 
-    if (lastCompleteObj <= arrayStart) return null;
+    const arrayMatch = raw.match(/\[\s*\{/);
+    if (arrayMatch) {
+      const arrayStart = raw.indexOf("[", arrayMatch.index!);
+      let depth = 0;
+      let lastCompleteObj = -1;
+      for (let i = arrayStart; i < raw.length; i++) {
+        if (raw[i] === "{") depth++;
+        if (raw[i] === "}") {
+          depth--;
+          if (depth === 0) lastCompleteObj = i;
+        }
+      }
+      if (lastCompleteObj > arrayStart) {
+        const repairedArray = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
+        const parsed = JSON.parse(`{"materials": ${repairedArray}}`);
+        if (Array.isArray(parsed.materials) && parsed.materials.length > 0) return parsed;
+      }
+    }
 
-    const repairedArray = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
-    const repaired = `{"materials": ${repairedArray}}`;
-    const parsed = JSON.parse(repaired);
-    if (!Array.isArray(parsed.materials) || parsed.materials.length === 0) return null;
-    return parsed;
+    const objectMatch = raw.match(/\{\s*"(?:name|formula)"/);
+    if (objectMatch) {
+      const objStart = raw.indexOf("{", objectMatch.index!);
+      let depth = 0;
+      let lastComplete = -1;
+      for (let i = objStart; i < raw.length; i++) {
+        if (raw[i] === "{") depth++;
+        if (raw[i] === "}") { depth--; if (depth === 0) { lastComplete = i; break; } }
+      }
+      if (lastComplete > objStart) {
+        const singleObj = raw.substring(objStart, lastComplete + 1);
+        const parsed = JSON.parse(singleObj);
+        if (parsed.formula) return { materials: [parsed] };
+      }
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -56,10 +92,22 @@ const TARGET_APPLICATIONS = [
 ];
 
 let applicationIndex = 0;
-const recentlyGenerated: string[] = [];
+let recentlyGenerated: string[] = [];
+let recentlyGeneratedLoaded = false;
 let inverseDesignMode = false;
 let boundaryHuntingMode = false;
 let chemicalSpaceExpansionMode = false;
+
+async function loadRecentlyGenerated(): Promise<void> {
+  if (recentlyGeneratedLoaded) return;
+  try {
+    const recent = await storage.getTopPredictionFormulas(50);
+    recentlyGenerated = recent;
+    recentlyGeneratedLoaded = true;
+  } catch {
+    recentlyGeneratedLoaded = true;
+  }
+}
 
 export function setInverseDesignMode(enabled: boolean): void {
   inverseDesignMode = enabled;
@@ -105,6 +153,7 @@ export async function generateNovelFormulas(
   targetApp?: string,
   strategyHint?: string
 ): Promise<number> {
+  await loadRecentlyGenerated();
   const application = targetApp || getNextTargetApplication();
   let generated = 0;
 
@@ -139,7 +188,10 @@ export async function generateNovelFormulas(
   let exclusionContext = "";
   try {
     const topFormulas = await storage.getTopPredictionFormulas(20);
-    const allExclusions = [...new Set([...topFormulas, ...recentlyGenerated])];
+    const exclusionSet = new Set<string>();
+    for (const f of topFormulas) exclusionSet.add(f);
+    for (const f of recentlyGenerated) exclusionSet.add(f);
+    const allExclusions = Array.from(exclusionSet);
     if (allExclusions.length > 0) {
       exclusionContext = `\n\nDo NOT generate any of these already-known compositions: ${allExclusions.slice(0, 25).join(", ")}. Generate genuinely novel compositions not yet explored.`;
     }
@@ -172,7 +224,7 @@ export async function generateNovelFormulas(
     try {
       parsed = JSON.parse(content);
     } catch (parseErr) {
-      parsed = repairTruncatedJSON(content);
+      parsed = repairTruncatedJSON(content)!;
       if (!parsed) {
         emit("log", { phase: "phase-6", event: "Generator JSON parse error", detail: content.slice(0, 200), dataSource: "OpenAI NLP" });
         return 0;
@@ -180,6 +232,9 @@ export async function generateNovelFormulas(
       emit("log", { phase: "phase-6", event: "Generator JSON repaired", detail: `Recovered ${parsed.materials?.length ?? 0} materials from truncated response`, dataSource: "OpenAI NLP" });
     }
     const candidates = parsed.materials ?? [];
+
+    const processingSet = new Set<string>();
+    for (const f of recentlyGenerated) processingSet.add(f);
 
     for (const candidate of candidates) {
       if (!candidate.formula || !candidate.name) continue;
@@ -190,10 +245,11 @@ export async function generateNovelFormulas(
         continue;
       }
 
-      if (recentlyGenerated.includes(candidate.formula)) {
+      if (processingSet.has(candidate.formula)) {
         trackDuplicatesSkipped(1);
         continue;
       }
+      processingSet.add(candidate.formula);
 
       const existing = await storage.getNovelPredictionByFormula(candidate.formula);
       if (existing) {
@@ -212,7 +268,7 @@ export async function generateNovelFormulas(
 
       const id = `novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       try {
-        await storage.insertNovelPrediction({
+        const inserted = await storage.insertNovelPrediction({
           id,
           name: candidate.name,
           formula: candidate.formula,
@@ -222,10 +278,16 @@ export async function generateNovelFormulas(
           status: "predicted",
           notes: candidate.notes || "Generated by MatSci-∞ AI engine",
         });
+
+        if (!inserted) {
+          trackDuplicatesSkipped(1);
+          continue;
+        }
+
         generated++;
 
         recentlyGenerated.push(candidate.formula);
-        if (recentlyGenerated.length > 50) recentlyGenerated.shift();
+        if (recentlyGenerated.length > 100) recentlyGenerated.splice(0, recentlyGenerated.length - 100);
 
         emit("prediction", {
           id,
@@ -235,7 +297,11 @@ export async function generateNovelFormulas(
           targetApplication: application,
         });
       } catch (e: any) {
-        emit("log", { phase: "phase-6", event: "Prediction insert failed", detail: `${candidate.formula}: ${e.message?.slice(0, 100) || "unknown"}`, dataSource: "OpenAI NLP" });
+        if (e.message?.includes("unique") || e.message?.includes("duplicate") || e.code === "23505") {
+          trackDuplicatesSkipped(1);
+        } else {
+          emit("log", { phase: "phase-6", event: "Prediction insert failed", detail: `${candidate.formula}: ${e.message?.slice(0, 100) || "unknown"}`, dataSource: "OpenAI NLP" });
+        }
       }
     }
 

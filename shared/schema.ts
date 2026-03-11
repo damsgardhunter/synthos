@@ -48,7 +48,7 @@ export const learningPhases = pgTable("learning_phases", {
 export const novelPredictions = pgTable("novel_predictions", {
   id: varchar("id").primaryKey(),
   name: text("name").notNull(),
-  formula: text("formula").notNull(),
+  formula: text("formula").notNull().unique(),
   predictedProperties: jsonb("predicted_properties").notNull(),
   confidence: real("confidence").notNull(),
   targetApplication: text("target_application").notNull(),
