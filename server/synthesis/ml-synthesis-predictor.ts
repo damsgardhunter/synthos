@@ -144,11 +144,11 @@ function extractSynthesisFeatures(formula: string): number[] {
         if (phiA == null || phiB == null || nwsA == null || nwsB == null || vA == null || vB == null) continue;
         const deltaPhi = phiA - phiB;
         const deltaNws = nwsA - nwsB;
-        const nwsAvg = (nwsA + nwsB) / 2;
+        const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
         const fAB = 2 * fractions[elements[i]] * fractions[elements[j]];
         const vAvg = (vA * fractions[elements[i]] + vB * fractions[elements[j]]) / (fractions[elements[i]] + fractions[elements[j]]);
-        const interfaceEnergy = -14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws;
-        miedemaFormationEnergy += fAB * vAvg * interfaceEnergy / (nwsAvg * nwsAvg);
+        const interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+        miedemaFormationEnergy += fAB * vAvg * interfaceEnergy;
       }
     }
     miedemaFormationEnergy /= totalAtoms;
@@ -300,6 +300,20 @@ const KNOWN_UNFEASIBLE: SynthesisTrainingEntry[] = [
   { formula: "BaK3Na2Li", feasible: 0.1 },
   { formula: "TlHg4Bi3", feasible: 0.1 },
   { formula: "CdHg3Tl2", feasible: 0.1 },
+  { formula: "He10O", feasible: 0.0 },
+  { formula: "Fe100C100", feasible: 0.0 },
+  { formula: "Ne3Si", feasible: 0.0 },
+  { formula: "ArO2", feasible: 0.0 },
+  { formula: "He2Fe", feasible: 0.0 },
+  { formula: "Kr3Nb", feasible: 0.0 },
+  { formula: "Cs20F50", feasible: 0.0 },
+  { formula: "Ba50O100", feasible: 0.0 },
+  { formula: "Na100Cl100", feasible: 0.05 },
+  { formula: "Au20Cu80O200", feasible: 0.0 },
+  { formula: "Pt10Ir10Os10Ru10", feasible: 0.15 },
+  { formula: "Li50H200", feasible: 0.0 },
+  { formula: "Ag7F15", feasible: 0.0 },
+  { formula: "HeNeArKr", feasible: 0.0 },
 ];
 
 const MARGINAL_COMPOUNDS: SynthesisTrainingEntry[] = [
@@ -386,7 +400,7 @@ function buildSynthesisTree(
 
   for (let fi = 0; fi < nFeatures; fi++) {
     const split = findBestSplit(X, residuals, indices, fi);
-    if (split.improvement > bestImprovement && split.leftIndices.length >= 2 && split.rightIndices.length >= 2) {
+    if (split.improvement > bestImprovement && split.leftIndices.length >= 1 && split.rightIndices.length >= 1) {
       bestImprovement = split.improvement;
       bestFeature = fi;
       bestThreshold = split.threshold;
@@ -431,7 +445,7 @@ function trainSynthesisGB(
 
   for (let iter = 0; iter < nEstimators; iter++) {
     const residuals = y.map((yi, i) => yi - predictions[i]);
-    const tree = buildSynthesisTree(X, residuals, allIndices, 0, maxDepth, 4);
+    const tree = buildSynthesisTree(X, residuals, allIndices, 0, maxDepth, 2);
     if (typeof tree === "number") break;
     trees.push(tree);
     for (let i = 0; i < n; i++) {
