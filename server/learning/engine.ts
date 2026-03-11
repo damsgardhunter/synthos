@@ -7173,14 +7173,19 @@ async function runLearningCycle() {
           let protoInserted = 0;
           let bestDiscoveryScore = 0;
 
-          const existingCandidates = await storage.getSuperconductorCandidates(500);
-          const existingFormulas = new Set(existingCandidates.map(c => c.formula));
-          const existingFormulaList = existingCandidates.map(c => c.formula);
-
-          const deduped = prototypeCandidates.filter(pc => {
-            const normalized = normalizeFormula(pc.formula);
-            return !existingFormulas.has(normalized) && isValidFormula(pc.formula);
-          });
+          const dedupChecks = await Promise.allSettled(
+            prototypeCandidates.map(async (pc) => {
+              const normalized = normalizeFormula(pc.formula);
+              if (!isValidFormula(pc.formula)) return null;
+              if (alreadyScreenedFormulas.has(normalized)) return null;
+              const existing = await storage.getSuperconductorByFormula(normalized);
+              return existing ? null : pc;
+            })
+          );
+          const deduped = dedupChecks
+            .filter((r): r is PromiseFulfilledResult<typeof prototypeCandidates[0]> =>
+              r.status === "fulfilled" && r.value != null)
+            .map(r => r.value);
 
           protoGenerated = deduped.length;
 
@@ -7200,8 +7205,9 @@ async function runLearningCycle() {
 
             const features = getCachedFeatures(normalized);
             const gbResult = gbPredict(features);
-            const protoIsHydride = pc.prototype?.toLowerCase().includes("hydride") || pc.prototype?.toLowerCase().includes("clathrate");
-            const protoPressure = protoIsHydride ? 150 : estimateFamilyPressure(normalized);
+            const protoIsClathrate = pc.prototype?.toLowerCase().includes("clathrate");
+            const baseFamilyPressure = estimateFamilyPressure(normalized);
+            const protoPressure = protoIsClathrate ? Math.max(150, baseFamilyPressure) : baseFamilyPressure;
             const gnnResult = gnnPredictWithUncertainty(normalized, pc.prototype, protoPressure);
 
             const familyMap: Record<string, string> = {
@@ -7231,7 +7237,7 @@ async function runLearningCycle() {
               hullDistance: null,
               synthesisScore: null,
               prototype: pc.prototype,
-              existingFormulas: existingFormulaList.slice(0, 100),
+              existingFormulas: Array.from(alreadyScreenedFormulas).slice(0, 100),
               topologicalScore: protoTopoScore,
               uncertaintyEstimate: gnnResult?.uncertainty ?? 0.5,
             });
@@ -7272,7 +7278,7 @@ async function runLearningCycle() {
 
             try {
               const id = `sc-proto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-              const siteStr = Object.entries(pc.siteAssignment).map(([k, v]) => `${k}=${v.join(",")}`).join("; ");
+              const siteStr = Object.entries(pc.siteAssignment).map(([k, v]) => `${k}=${(Array.isArray(v) ? v : [v]).join(",")}`).join("; ");
               const inserted = await insertCandidateWithStabilityCheck({
                 id,
                 name: `${pc.prototype} ${normalized}`,
@@ -7359,9 +7365,6 @@ async function runLearningCycle() {
 
       if (state === "running" && cycleCount >= 12 && cycleCount % 25 === 12) {
         try {
-          const existingCandidates = await storage.getSuperconductorCandidates(500);
-          const existingFormulas = new Set(existingCandidates.map(c => c.formula));
-
           const scElements = ["Nb", "Ti", "V", "Zr", "Mo", "Ta", "W", "La", "Y", "Ca", "Sr", "Ba",
             "Fe", "Cu", "Ni", "Co", "Mn", "Sc", "Hf", "Re"];
           const anions = ["H", "N", "B", "C", "O", "S", "Se", "P", "As", "Te"];
@@ -7376,7 +7379,7 @@ async function runLearningCycle() {
             const n3 = Math.floor(Math.random() * 6) + 1;
             const f = `${m1}${n1 > 1 ? n1 : ""}${m2}${n2 > 1 ? n2 : ""}${an}${n3 > 1 ? n3 : ""}`;
             const nf = normalizeFormula(f);
-            if (!existingFormulas.has(nf) && isValidFormula(f)) lfFormulas.push(f);
+            if (!alreadyScreenedFormulas.has(nf) && isValidFormula(f)) lfFormulas.push(f);
           }
 
           const lfStructures = generatePrototypeFreeStructures(lfFormulas, 30);
@@ -7386,7 +7389,8 @@ async function runLearningCycle() {
           for (const struct of lfStructures) {
             try {
               const normalized = normalizeFormula(struct.formula);
-              if (existingFormulas.has(normalized)) continue;
+              const existsInDb = await storage.getSuperconductorByFormula(normalized);
+              if (existsInDb) continue;
               const features = getCachedFeatures(struct.formula);
               if (!features) continue;
               const gb = gbPredict(features);
@@ -7405,7 +7409,7 @@ async function runLearningCycle() {
               if (inserted) {
                 lfInserted++;
                 totalScCandidates++;
-                existingFormulas.add(normalized);
+                alreadyScreenedFormulas.add(normalized);
                 if (cappedTc > lfBest) lfBest = cappedTc;
               }
             } catch (lfErr: any) {
@@ -7421,7 +7425,8 @@ async function runLearningCycle() {
           for (const evoStruct of evoOffspring) {
             try {
               const normalized = normalizeFormula(evoStruct.formula);
-              if (existingFormulas.has(normalized)) continue;
+              const evoExists = await storage.getSuperconductorByFormula(normalized);
+              if (evoExists || alreadyScreenedFormulas.has(normalized)) continue;
               const features = getCachedFeatures(evoStruct.formula);
               if (!features) continue;
               const gb = gbPredict(features);
@@ -7440,7 +7445,7 @@ async function runLearningCycle() {
               if (inserted) {
                 evoInserted++;
                 totalScCandidates++;
-                existingFormulas.add(normalized);
+                alreadyScreenedFormulas.add(normalized);
                 if (cappedTc > evoBest) evoBest = cappedTc;
                 addToEvoPopulation(evoStruct, gb.score);
               }
