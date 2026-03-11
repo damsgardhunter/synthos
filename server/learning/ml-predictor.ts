@@ -1418,13 +1418,20 @@ interface PhysicsGBModel {
   trainedAt: number;
 }
 
+const SIMPLE_TREE_MAX_DEPTH = 10;
+
+function simpleLeafValue(residuals: number[], indices: number[]): number {
+  if (indices.length === 0) return 0;
+  return indices.reduce((s, i) => s + residuals[i], 0) / indices.length;
+}
+
 function buildSimpleTree(
   X: number[][], residuals: number[], indices: number[],
   depth: number, maxDepth: number, minSamples: number
 ): SimpleTree | number {
-  if (depth >= maxDepth || indices.length < minSamples) {
-    const sum = indices.reduce((s, i) => s + residuals[i], 0);
-    return sum / indices.length;
+  const clampedMax = Math.min(maxDepth, SIMPLE_TREE_MAX_DEPTH);
+  if (depth >= clampedMax || indices.length < minSamples) {
+    return simpleLeafValue(residuals, indices);
   }
   const nFeatures = X[0].length;
   let bestFeature = -1, bestImprovement = -Infinity, bestThreshold = 0;
@@ -1449,13 +1456,13 @@ function buildSimpleTree(
     }
   }
   if (bestFeature === -1) {
-    return indices.reduce((s, i) => s + residuals[i], 0) / indices.length;
+    return simpleLeafValue(residuals, indices);
   }
   return {
     featureIndex: bestFeature,
     threshold: bestThreshold,
-    left: buildSimpleTree(X, residuals, bestLeft, depth + 1, maxDepth, minSamples),
-    right: buildSimpleTree(X, residuals, bestRight, depth + 1, maxDepth, minSamples),
+    left: buildSimpleTree(X, residuals, bestLeft, depth + 1, clampedMax, minSamples),
+    right: buildSimpleTree(X, residuals, bestRight, depth + 1, clampedMax, minSamples),
   };
 }
 
@@ -1470,6 +1477,8 @@ function trainPhysicsGB(X: number[][], y: number[], nTrees = 100, lr = 0.1, maxD
   const n = X.length;
   const allIdx = Array.from({ length: n }, (_, i) => i);
   const basePred = y.reduce((s, v) => s + v, 0) / n;
+  const yVariance = y.reduce((s, v) => s + (v - basePred) ** 2, 0) / n;
+  const mseThreshold = Math.max(1e-8, yVariance * 0.005);
   const preds = new Array(n).fill(basePred);
   const trees: SimpleTree[] = [];
   for (let iter = 0; iter < nTrees; iter++) {
@@ -1479,7 +1488,7 @@ function trainPhysicsGB(X: number[][], y: number[], nTrees = 100, lr = 0.1, maxD
     trees.push(tree);
     for (let i = 0; i < n; i++) preds[i] += lr * predictSimpleTree(tree, X[i]);
     const mse = y.reduce((s, yi, i) => s + (yi - preds[i]) ** 2, 0) / n;
-    if (mse < 0.01) break;
+    if (mse < mseThreshold) break;
   }
   return { trees, basePrediction: basePred, learningRate: lr, trainedAt: Date.now() };
 }
@@ -1491,19 +1500,22 @@ function predictPhysicsGB(model: PhysicsGBModel, x: number[]): number {
 }
 
 function computeTreeEnsembleUncertainty(model: PhysicsGBModel, x: number[]): number {
-  if (model.trees.length < 4) return 1.0;
-  const blockSize = Math.max(1, Math.floor(model.trees.length / 4));
+  const nTrees = model.trees.length;
+  if (nTrees < 4) return 1.0;
+  const nBlocks = Math.min(6, nTrees);
   const blockPreds: number[] = [];
-  for (let b = 0; b < 4; b++) {
+  for (let b = 0; b < nBlocks; b++) {
     let pred = model.basePrediction;
-    const start = b * blockSize;
-    const end = Math.min(start + blockSize, model.trees.length);
-    for (let i = start; i < end; i++) pred += model.learningRate * predictSimpleTree(model.trees[i], x);
+    for (let i = 0; i < nTrees; i++) {
+      if (i % nBlocks === b) continue;
+      pred += model.learningRate * predictSimpleTree(model.trees[i], x);
+    }
     blockPreds.push(pred);
   }
   const mean = blockPreds.reduce((s, v) => s + v, 0) / blockPreds.length;
   const variance = blockPreds.reduce((s, v) => s + (v - mean) ** 2, 0) / blockPreds.length;
-  return Math.sqrt(variance);
+  const jackknifeFactor = (nBlocks - 1) / nBlocks;
+  return Math.sqrt(variance * jackknifeFactor);
 }
 
 function physicsFeatureVector(f: MLFeatureVector): number[] {
@@ -1520,7 +1532,7 @@ function physicsFeatureVector(f: MLFeatureVector): number[] {
     f.avgAtomicRadius,
     f.avgBulkModulus,
     f.maxAtomicMass,
-    f.numElements,
+    Math.log(f.numElements + 1),
     f.hasTransitionMetal ? 1 : 0,
     f.hasRareEarth ? 1 : 0,
     f.hasHydrogen ? 1 : 0,
@@ -1690,11 +1702,36 @@ export class PhysicsPredictor {
     };
   }
 
-  preFilter(prediction: PhysicsPrediction): { pass: boolean; reason: string } {
-    if (prediction.lambda < 0.08) return { pass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < 0.08` };
-    if (prediction.hullDistance > 0.3) return { pass: false, reason: `hull_dist=${prediction.hullDistance.toFixed(3)} > 0.3 eV/atom` };
-    if (prediction.dosAtEF < 0.2) return { pass: false, reason: `DOS(EF)=${prediction.dosAtEF.toFixed(2)} < 0.2 states/eV` };
-    return { pass: true, reason: "passed" };
+  preFilter(prediction: PhysicsPrediction): { pass: boolean; marginalPass: boolean; reason: string } {
+    const lambdaThresh = 0.08;
+    const hullThresh = 0.3;
+    const dosThresh = 0.2;
+    const marginFrac = 0.05;
+
+    if (prediction.lambda < lambdaThresh * (1 - marginFrac)) {
+      return { pass: false, marginalPass: false, reason: `lambda=${prediction.lambda.toFixed(2)} < ${(lambdaThresh * (1 - marginFrac)).toFixed(3)}` };
+    }
+    if (prediction.hullDistance > hullThresh * (1 + marginFrac)) {
+      return { pass: false, marginalPass: false, reason: `hull_dist=${prediction.hullDistance.toFixed(3)} > ${(hullThresh * (1 + marginFrac)).toFixed(3)} eV/atom` };
+    }
+    if (prediction.dosAtEF < dosThresh * (1 - marginFrac)) {
+      return { pass: false, marginalPass: false, reason: `DOS(EF)=${prediction.dosAtEF.toFixed(2)} < ${(dosThresh * (1 - marginFrac)).toFixed(3)} states/eV` };
+    }
+
+    const marginalLambda = prediction.lambda >= lambdaThresh * (1 - marginFrac) && prediction.lambda < lambdaThresh;
+    const marginalHull = prediction.hullDistance <= hullThresh * (1 + marginFrac) && prediction.hullDistance > hullThresh;
+    const marginalDos = prediction.dosAtEF >= dosThresh * (1 - marginFrac) && prediction.dosAtEF < dosThresh;
+    const isMarginal = marginalLambda || marginalHull || marginalDos;
+
+    if (isMarginal) {
+      const reasons: string[] = [];
+      if (marginalLambda) reasons.push(`lambda=${prediction.lambda.toFixed(3)} marginal`);
+      if (marginalHull) reasons.push(`hull=${prediction.hullDistance.toFixed(3)} marginal`);
+      if (marginalDos) reasons.push(`DOS=${prediction.dosAtEF.toFixed(3)} marginal`);
+      return { pass: true, marginalPass: true, reason: `marginal: ${reasons.join(", ")}` };
+    }
+
+    return { pass: true, marginalPass: false, reason: "passed" };
   }
 
   getTrainingSize(): number { return this.trainingSamples.length; }

@@ -4537,6 +4537,10 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: Math.round(primaryTc), reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
     }
 
+    if (preFilter.marginalPass) {
+      ensembleConfidence = Math.max(0, ensembleConfidence - 0.1);
+    }
+
     const candidatePressureEst = features.pressureGpa > 0 ? features.pressureGpa : estimateFamilyPressure(formula);
 
     const candidate = {
