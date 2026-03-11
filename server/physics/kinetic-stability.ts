@@ -495,14 +495,28 @@ function identifyStabilizationStrategies(
     }
   }
 
-  if (eAboveHull > 0.01 && pressure.estimatedBulkModulus > 50) {
-    strategies.push({
-      strategy: "Epitaxial strain stabilization",
-      mechanism: "Grow thin film on lattice-matched substrate to impose biaxial strain that raises decomposition barrier",
-      expectedLifetimeImprovement: "10x–1000x depending on strain coherence",
-      difficulty: eAboveHull < 0.1 ? "moderate" : "hard",
-      applicability: Math.min(1.0, pressure.estimatedBulkModulus / 200),
-    });
+  if (eAboveHull > 0.01) {
+    const radii: number[] = [];
+    for (const el of elements) {
+      const d = getElementData(el);
+      if (d?.atomicRadius) radii.push(d.atomicRadius);
+    }
+    let internalMismatch = 0;
+    if (radii.length >= 2) {
+      const minR = Math.min(...radii);
+      const maxR = Math.max(...radii);
+      internalMismatch = (maxR - minR) / Math.max(maxR, 1);
+    }
+    const epitaxialApplicability = Math.min(1.0, Math.max(0, (1.0 - internalMismatch) * 0.8));
+    if (epitaxialApplicability > 0.1) {
+      strategies.push({
+        strategy: "Epitaxial strain stabilization",
+        mechanism: "Grow thin film on lattice-matched substrate to impose biaxial strain that raises decomposition barrier",
+        expectedLifetimeImprovement: "10x–1000x depending on strain coherence",
+        difficulty: eAboveHull < 0.1 ? "moderate" : "hard",
+        applicability: epitaxialApplicability,
+      });
+    }
   }
 
   if (eAboveHull > 0.05) {
@@ -591,9 +605,13 @@ export function predictKineticStability(formula: string, eAboveHull: number): Ki
   const rate300K = attemptFreq * Math.exp(-correctedBarrier / (kB * 300));
   const lifetime300K = 1 / Math.max(rate300K, 1e-100);
 
-  const uncertaintyFactor = 3.0;
-  const confidenceLow = lifetime300K / uncertaintyFactor;
-  const confidenceHigh = lifetime300K * uncertaintyFactor;
+  const barrierUncertainty = 0.1;
+  const rateLow = attemptFreq * Math.exp(-(correctedBarrier + barrierUncertainty) / (kB * 300));
+  const rateHigh = attemptFreq * Math.exp(-(correctedBarrier - barrierUncertainty) / (kB * 300));
+  const lifetimeFromHigh = 1 / Math.max(rateLow, 1e-100);
+  const lifetimeFromLow = 1 / Math.max(rateHigh, 1e-100);
+  const confidenceHigh = lifetimeFromHigh;
+  const confidenceLow = Math.max(lifetimeFromLow, lifetime300K * 1e-4);
 
   const strategies = identifyStabilizationStrategies(
     formula, eAboveHull, gb, diffusion, nucleation, pressure,
