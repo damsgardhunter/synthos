@@ -157,6 +157,15 @@ export interface UncertaintyBreakdown {
     lambda: number;
     bandgap: number;
   };
+  weightProfile?: {
+    mode: 'high-tc' | 'standard';
+    tc: number;
+    ensemble: number;
+    latent: number;
+    formationEnergy: number;
+    lambda: number;
+    bandgap: number;
+  };
 }
 
 export interface GNNPredictionWithUncertainty {
@@ -2986,55 +2995,7 @@ export function getGNNPrediction(formula: string, structure?: any, prototype?: s
   return prediction;
 }
 
-function perturbWeights(w: GNNWeights, rng: () => number, scale: number): GNNWeights {
-  const perturbed = cloneWeights(w);
-  const perturbMatrix = (mat: number[][]) => {
-    for (let i = 0; i < mat.length; i++) {
-      for (let j = 0; j < mat[i].length; j++) {
-        if (rng() < 0.3) {
-          mat[i][j] *= (1 + (rng() - 0.5) * scale);
-        }
-      }
-    }
-  };
 
-  perturbMatrix(perturbed.W_message);
-  perturbMatrix(perturbed.W_update);
-  perturbMatrix(perturbed.W_message2);
-  perturbMatrix(perturbed.W_update2);
-  perturbMatrix(perturbed.W_message3);
-  perturbMatrix(perturbed.W_update3);
-  perturbMatrix(perturbed.W_message4);
-  perturbMatrix(perturbed.W_update4);
-  perturbMatrix(perturbed.W_attn_query);
-  perturbMatrix(perturbed.W_attn_key);
-  perturbMatrix(perturbed.W_attn_query2);
-  perturbMatrix(perturbed.W_attn_key2);
-  perturbMatrix(perturbed.W_attn_query3);
-  perturbMatrix(perturbed.W_attn_key3);
-  perturbMatrix(perturbed.W_attn_query4);
-  perturbMatrix(perturbed.W_attn_key4);
-  perturbMatrix(perturbed.W_conv_gate);
-  perturbMatrix(perturbed.W_conv_value);
-  perturbMatrix(perturbed.W_input_proj);
-  perturbMatrix(perturbed.W_3body);
-  perturbMatrix(perturbed.W_3body_update);
-  perturbMatrix(perturbed.W_attn_pool);
-  for (let i = 0; i < perturbed.W_pressure.length; i++) {
-    if (rng() < 0.3) {
-      perturbed.W_pressure[i] *= (1 + (rng() - 0.5) * scale);
-    }
-  }
-  for (let i = 0; i < perturbed.residual_gates.length; i++) {
-    perturbed.residual_gates[i] = Math.max(0.1, Math.min(0.9,
-      perturbed.residual_gates[i] + (rng() - 0.5) * scale * 0.2));
-  }
-  perturbMatrix(perturbed.W_mlp1);
-  perturbMatrix(perturbed.W_mlp2);
-  perturbMatrix(perturbed.W_mlp2_var);
-
-  return perturbed;
-}
 
 export function gnnPredictWithUncertainty(formula: string, prototype?: string, pressureGpa?: number): GNNPredictionWithUncertainty {
   const ensembleModels = getEnsembleModels();
@@ -3131,13 +3092,21 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
   }, new Array(HIDDEN_DIM).fill(0));
   const latentDist = computeLatentDistance(avgLatent);
 
+  const isHighTcCandidate = meanTc > 77;
+  const wTc      = isHighTcCandidate ? 0.35 : 0.25;
+  const wEnsemble = isHighTcCandidate ? 0.25 : 0.20;
+  const wLatent  = 0.15;
+  const wFE      = isHighTcCandidate ? 0.05 : 0.15;
+  const wLambda  = isHighTcCandidate ? 0.15 : 0.10;
+  const wBG      = isHighTcCandidate ? 0.05 : 0.15;
+
   const combinedUncertainty = Math.min(1.0,
-    0.30 * normalizedTcUnc +
-    0.15 * normalizedFeUnc +
-    0.10 * normalizedLambdaUnc +
-    0.20 * ensembleUncertainty +
-    0.15 * latentDist +
-    0.10 * normalizedBgUnc
+    wTc * normalizedTcUnc +
+    wFE * normalizedFeUnc +
+    wLambda * normalizedLambdaUnc +
+    wEnsemble * ensembleUncertainty +
+    wLatent * latentDist +
+    wBG * normalizedBgUnc
   );
 
   const totalPredictions = predictions.length;
@@ -3157,6 +3126,15 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
       formationEnergy: Math.round(normalizedFeUnc * 1000) / 1000,
       lambda: Math.round(normalizedLambdaUnc * 1000) / 1000,
       bandgap: Math.round(normalizedBgUnc * 1000) / 1000,
+    },
+    weightProfile: {
+      mode: isHighTcCandidate ? 'high-tc' : 'standard',
+      tc: wTc,
+      ensemble: wEnsemble,
+      latent: wLatent,
+      formationEnergy: wFE,
+      lambda: wLambda,
+      bandgap: wBG,
     },
   };
 
