@@ -2918,18 +2918,17 @@ async function runPhase10_Physics() {
     if (shouldContinue()) {
       try {
         const allCandidates = await storage.getSuperconductorCandidates(50);
+        const NONMETAL_SET = new Set(["H","He","B","C","N","O","F","Ne","Si","P","S","Cl","Ar","Ge","As","Se","Br","Kr","Te","I","Xe"]);
         const hydrideCandidates = allCandidates.filter(c => {
-          const els = parseFormulaElements(c.formula);
-          const cts: Record<string, number> = {};
-          const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-          let m;
-          while ((m = regex.exec(c.formula)) !== null) {
-            cts[m[1]] = (cts[m[1]] || 0) + (m[2] ? parseFloat(m[2]) : 1);
-          }
-          const hCount = cts["H"] || 0;
-          const nonmetals = ["H","He","B","C","N","O","F","Ne","Si","P","S","Cl","Ar","Ge","As","Se","Br","Kr","Te","I","Xe"];
-          const metalAtoms = els.filter(e => !nonmetals.includes(e)).reduce((s, e) => s + (cts[e] || 0), 0);
-          return hCount > 0 && metalAtoms > 0 && hCount / metalAtoms >= 2;
+          try {
+            const cts = parseFormulaCounts(c.formula);
+            const hCount = cts["H"] || 0;
+            if (hCount <= 0) return false;
+            const metalAtoms = Object.entries(cts)
+              .filter(([el]) => !NONMETAL_SET.has(el))
+              .reduce((s, [, count]) => s + count, 0);
+            return metalAtoms > 0 && hCount / metalAtoms >= 2;
+          } catch { return false; }
         });
         const hydrideToScan = shuffle(hydrideCandidates).slice(0, 5);
         for (const candidate of hydrideToScan) {
@@ -2947,9 +2946,19 @@ async function runPhase10_Physics() {
                 if (crystalStructs.length > 0) {
                   const cs = crystalStructs[0];
                   if (cs.atomicPositions && Array.isArray(cs.atomicPositions)) {
-                    atomPositions = (cs.atomicPositions as any[]).filter(
-                      (a: any) => a && typeof a.symbol === "string" && typeof a.x === "number" && typeof a.y === "number" && typeof a.z === "number"
-                    ) as PercolationAtom[];
+                    const raw = cs.atomicPositions as any[];
+                    const parsed: PercolationAtom[] = [];
+                    for (const a of raw) {
+                      if (!a || typeof a !== "object") continue;
+                      const sym = a.symbol ?? a.element ?? a.species;
+                      const px = a.x ?? a.pos?.[0] ?? a.coords?.[0] ?? a.position?.[0];
+                      const py = a.y ?? a.pos?.[1] ?? a.coords?.[1] ?? a.position?.[1];
+                      const pz = a.z ?? a.pos?.[2] ?? a.coords?.[2] ?? a.position?.[2];
+                      if (typeof sym === "string" && typeof px === "number" && typeof py === "number" && typeof pz === "number") {
+                        parsed.push({ symbol: sym, x: px, y: py, z: pz });
+                      }
+                    }
+                    if (parsed.length > 0) atomPositions = parsed;
                   }
                   if (cs.latticeParams && typeof cs.latticeParams === "object") {
                     const lp = cs.latticeParams as any;
@@ -2960,20 +2969,22 @@ async function runPhase10_Physics() {
                 }
               } catch {}
               const hNetwork = analyzeHydrogenNetwork(candidate.formula, atomPositions, latticeParams);
-              trackHydrogenNetworkResult(hNetwork);
-              hydrogenNetworkData = {
-                hydrogenNetworkDim: hNetwork.hydrogenNetworkDim,
-                hydrogenCageScore: hNetwork.hydrogenCageScore,
-                Hcoordination: hNetwork.Hcoordination,
-                hydrogenConnectivity: hNetwork.hydrogenConnectivity,
-                hydrogenPhononCouplingScore: hNetwork.hydrogenPhononCouplingScore,
-                networkClass: hNetwork.networkClass,
-                compositeSCScore: hNetwork.compositeSCScore,
-                bondingType: hNetwork.bondingType,
-                percolates: hNetwork.percolates,
-                geometricPercolationUsed: hNetwork.geometricPercolationUsed,
-              };
-              if (hNetwork.compositeSCScore > 0.4) {
+              if (hNetwork && typeof hNetwork.hydrogenNetworkDim === "number") {
+                trackHydrogenNetworkResult(hNetwork);
+                hydrogenNetworkData = {
+                  hydrogenNetworkDim: hNetwork.hydrogenNetworkDim,
+                  hydrogenCageScore: hNetwork.hydrogenCageScore,
+                  Hcoordination: hNetwork.Hcoordination,
+                  hydrogenConnectivity: hNetwork.hydrogenConnectivity,
+                  hydrogenPhononCouplingScore: hNetwork.hydrogenPhononCouplingScore,
+                  networkClass: hNetwork.networkClass,
+                  compositeSCScore: hNetwork.compositeSCScore,
+                  bondingType: hNetwork.bondingType,
+                  percolates: hNetwork.percolates,
+                  geometricPercolationUsed: hNetwork.geometricPercolationUsed,
+                };
+              }
+              if (hNetwork?.compositeSCScore > 0.4) {
                 emit("log", {
                   phase: "phase-10",
                   event: "Hydrogen network analysis",
@@ -3140,13 +3151,24 @@ async function runPhase11_StructurePrediction() {
       }
     }
 
+    for (const f of needsPrediction) {
+      markFormulaInFlight(f);
+    }
+
     if (needsPrediction.length === 0) {
       emit("log", { phase: "phase-11", event: "All top candidates have crystal structures", detail: `Checked ${uniqueFormulas.length} unique formulas, all already predicted`, dataSource: "Structure Predictor" });
     }
 
-    const predicted = needsPrediction.length > 0
-      ? await runStructurePredictionBatch(emit, needsPrediction)
-      : 0;
+    let predicted = 0;
+    try {
+      predicted = needsPrediction.length > 0
+        ? await runStructurePredictionBatch(emit, needsPrediction)
+        : 0;
+    } finally {
+      for (const f of needsPrediction) {
+        releaseFormulaInFlight(f);
+      }
+    }
     totalStructuresPredicted += predicted;
 
     if (shouldContinue()) {
