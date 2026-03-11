@@ -6948,10 +6948,9 @@ async function runLearningCycle() {
 
             let profilesBuilt = 0;
             let bayesOptCount = 0;
-            for (const c of topCandidates.slice(0, 5)) {
-              try {
+            const pressureResults = await Promise.allSettled(
+              topCandidates.slice(0, 5).map(async (c) => {
                 const profile = buildPressureResponseProfile(c.formula);
-                profilesBuilt++;
 
                 for (const pt of profile.tcVsPressure) {
                   const stabPt = profile.stabilityVsPressure.find(s => s.pressure === pt.pressure);
@@ -6960,16 +6959,22 @@ async function runLearningCycle() {
 
                 const familyP = estimateFamilyPressure(c.formula);
                 const bayesResult = optimizePressureForFormula(c.formula, 3, 15, familyP);
+                return { formula: c.formula, bayesResult };
+              })
+            );
+            for (const r of pressureResults) {
+              if (r.status === "fulfilled") {
+                profilesBuilt++;
                 bayesOptCount++;
-                if (bayesResult.predictedTcAtOptimal > 50) {
+                if (r.value.bayesResult.predictedTcAtOptimal > 50) {
                   emit("log", {
                     phase: "engine",
                     event: "Bayesian pressure optimization",
-                    detail: `${c.formula}: optimal P=${bayesResult.optimalPressure} GPa, predicted Tc=${bayesResult.predictedTcAtOptimal}K, stable=${bayesResult.stableAtOptimal}, confidence=${bayesResult.confidence}`,
+                    detail: `${r.value.formula}: optimal P=${r.value.bayesResult.optimalPressure} GPa, predicted Tc=${r.value.bayesResult.predictedTcAtOptimal}K, stable=${r.value.bayesResult.stableAtOptimal}, confidence=${r.value.bayesResult.confidence}`,
                     dataSource: "Bayesian Pressure GP",
                   });
                 }
-              } catch {}
+              }
             }
             for (const c of topCandidates.slice(0, 8)) {
               try {
@@ -7073,7 +7078,7 @@ async function runLearningCycle() {
                       uncertaintyEstimate: 0.6,
                       verificationStage: 0,
                       dataConfidence: "low",
-                    }, "massive_combinatorial");
+                    }, "structural_mutator");
                     if (inserted) {
                       totalScCandidates++;
                       mutInserted++;
