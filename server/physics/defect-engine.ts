@@ -473,13 +473,20 @@ export function adjustElectronicStructure(
   lambda: number,
   defectDensity: number,
   defectType: DefectType,
-  formula?: string
+  formula?: string,
+  nestingScore?: number,
+  vhsProximity?: number,
 ): ElectronicAdjustment {
   let dosModifier = 1.0;
   let lambdaModifier = 1.0;
   let scatteringRate = 0;
   const logDensity = Math.log10(Math.max(1, defectDensity));
   const normalizedDensity = Math.min(1, (logDensity - 14) / 8);
+
+  const nesting = nestingScore ?? 0;
+  const vhsDist = vhsProximity ?? 1.0;
+  const vhsNear = vhsDist < 0.3;
+  const nestingStrong = nesting > 0.4;
 
   switch (defectType) {
     case DefectType.Vacancy:
@@ -498,9 +505,15 @@ export function adjustElectronicStructure(
       scatteringRate = normalizedDensity * 0.3;
       break;
     case DefectType.Dopant:
-      dosModifier = 1.0 + normalizedDensity * 0.20;
-      lambdaModifier = 1.0 + normalizedDensity * 0.08;
-      scatteringRate = normalizedDensity * 0.05;
+      if (vhsNear) {
+        dosModifier = 1.0 + normalizedDensity * 0.30;
+        lambdaModifier = 1.0 + normalizedDensity * 0.15;
+        scatteringRate = normalizedDensity * 0.03;
+      } else {
+        dosModifier = 1.0 + normalizedDensity * 0.10;
+        lambdaModifier = 1.0 - normalizedDensity * 0.05;
+        scatteringRate = normalizedDensity * 0.12;
+      }
       break;
     case DefectType.MolecularH2:
       dosModifier = 1.0 - normalizedDensity * 0.35;
@@ -527,6 +540,19 @@ export function adjustElectronicStructure(
     const agPairBreaking = normalizedDensity * 1.5;
     scatteringRate = Math.max(scatteringRate, agPairBreaking);
     lambdaModifier = Math.min(lambdaModifier, 1.0 - normalizedDensity * 0.4);
+  }
+
+  if (!vhsNear && !nestingStrong && defectType !== DefectType.MolecularH2) {
+    const agScatteringSuppression = normalizedDensity * 0.15;
+    scatteringRate += agScatteringSuppression;
+    if (dosModifier > 1.0) {
+      dosModifier = 1.0 + (dosModifier - 1.0) * 0.5;
+    }
+  }
+
+  if (nestingStrong && (defectType === DefectType.Vacancy || defectType === DefectType.Antisite)) {
+    scatteringRate += normalizedDensity * nesting * 0.3;
+    lambdaModifier = Math.min(lambdaModifier, 1.0 - normalizedDensity * nesting * 0.2);
   }
 
   const adjustedDos = dosAtEF * dosModifier;
@@ -564,7 +590,13 @@ export function adjustElectronicStructure(
       ? "Grain boundaries in d-wave SCs host Andreev bound states that can locally enhance pairing"
       : "Grain boundaries act as Josephson weak links and pair-breaking scatterers in s-wave SCs";
   } else {
-    notes = "Dopants tune carrier concentration and can enhance pairing via optimized Fermi surface";
+    notes = vhsNear
+      ? "Dopant shifts Fermi level toward Van Hove singularity, enhancing DOS and pairing"
+      : "Dopants introduce scattering (Abrikosov-Gor'kov); Tc boost requires VHS proximity or favorable nesting";
+  }
+
+  if (!vhsNear && !nestingStrong && tcMod > 1.0) {
+    notes += ". Warning: no VHS proximity or nesting support — defect Tc boost may be overestimated";
   }
 
   return {

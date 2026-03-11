@@ -2893,13 +2893,17 @@ async function runPhase10_Physics() {
           try {
             const defects = generateDefectVariants(candidate.formula);
             if (defects.length > 0) {
+              const defectNesting = result.electronicStructure.fermiSurfaceNestingScore ?? result.electronicStructure.nestingScore ?? 0;
+              const defectVHS = result.electronicStructure.vanHoveProximity != null ? (1.0 - result.electronicStructure.vanHoveProximity) : 1.0;
               const bestDefect = defects.reduce((best: any, d: any) => {
                 const adj = adjustElectronicStructure(
                   result.electronicStructure.densityOfStatesAtFermi ?? 1.0,
                   result.coupling.lambda ?? 0.5,
                   d.defectDensity,
                   d.type,
-                  candidate.formula
+                  candidate.formula,
+                  defectNesting,
+                  defectVHS,
                 );
                 return adj.tcModifier > (best?.tcMod ?? 0) ? { defect: d, tcMod: adj.tcModifier } : best;
               }, null as { defect: any; tcMod: number } | null);
@@ -5943,10 +5947,8 @@ async function runAutonomousFastPath() {
           recordSynthesisResult(formula, family, sv, result.tc, 1 - (result.physicsPred?.hullDistance ?? 0.1));
 
           if (synthResult.overallFeasibility > 0.6) {
-            const feasBonus = synthResult.overallFeasibility * 0.05;
-            result.tc = Math.min(400, Math.round(result.tc * (1 + feasBonus)));
             feedbackLoopStats.synthesisFeasibilityBonuses++;
-            feedbackLoopStats.synthesisTotalFeasibilityBoost += feasBonus;
+            feedbackLoopStats.synthesisTotalFeasibilityBoost += synthResult.overallFeasibility * 0.05;
           }
 
           if (result.tc > 30 && cycleCount % 10 === 0) {
@@ -5968,13 +5970,18 @@ async function runAutonomousFastPath() {
           try {
             const defects = generateDefectVariants(formula);
             if (defects.length > 0 && result.physicsPred) {
+              const hubInsDefect = crossEngineHub.getInsightsFor(formula);
+              const autoDefectNesting = hubInsDefect?.fermi?.nestingScore ?? 0;
+              const autoDefectVHS = hubInsDefect?.fermi?.vanHoveDistance ?? 1.0;
               const bestDefect = defects.reduce((best, d) => {
                 const adj = adjustElectronicStructure(
                   result.physicsPred!.dosAtEF ?? 1.0,
                   result.physicsPred!.lambda ?? 0.5,
                   d.defectDensity,
                   d.type,
-                  formula
+                  formula,
+                  autoDefectNesting,
+                  autoDefectVHS,
                 );
                 return adj.tcModifier > (best?.tcMod ?? 0) ? { defect: d, tcMod: adj.tcModifier } : best;
               }, null as { defect: any; tcMod: number } | null);
@@ -6110,9 +6117,7 @@ async function runAutonomousFastPath() {
               feedbackLoopStats.experimentPlansGenerated++;
               if (plan.ranking.experimentScore > 0.6) {
                 feedbackLoopStats.experimentDFTPrioritized++;
-                const expBonus = (plan.ranking.experimentScore - 0.6) * 0.08;
-                result.tc = Math.min(400, Math.round(result.tc * (1 + expBonus)));
-                emit("log", { phase: "experiment-planner", event: "Experiment plan generated", detail: `${formula}: score=${plan.ranking.experimentScore.toFixed(3)}, Tc boosted by ${(expBonus * 100).toFixed(1)}%, timeline=${plan.timeline}, risk=${plan.riskAssessment}. ${plan.characterization.length} characterization methods suggested.` });
+                emit("log", { phase: "experiment-planner", event: "Experiment plan generated", detail: `${formula}: score=${plan.ranking.experimentScore.toFixed(3)}, timeline=${plan.timeline}, risk=${plan.riskAssessment}. ${plan.characterization.length} characterization methods suggested.` });
               }
             } catch (e) { console.error(`[Engine] Experiment plan generation failed for ${formula}:`, e); }
           }
