@@ -229,47 +229,94 @@ export function checkHydrogenPercolation(
 
   const uf = unionFind(hCount);
 
-  const spansAxis = [false, false, false];
+  const clusterSpans: Map<number, [boolean, boolean, boolean]> = new Map();
+
+  const maxLatticeParam = Math.max(lattice.a, lattice.b, lattice.c);
+  const fractionalCutoff = cutoff / Math.max(maxLatticeParam, 1);
+  const nCells = Math.max(1, Math.floor(1.0 / fractionalCutoff));
+  const cellSize = 1.0 / nCells;
+
+  const cellMap = new Map<string, number[]>();
+  const cellKey = (cx: number, cy: number, cz: number) => `${cx},${cy},${cz}`;
 
   for (let i = 0; i < hCount; i++) {
-    for (let j = i + 1; j < hCount; j++) {
-      const dist = periodicDistance(hAtoms[i], hAtoms[j], lattice);
-      if (dist <= cutoff) {
-        uf.union(i, j);
+    let fx = hAtoms[i].x % 1.0; if (fx < 0) fx += 1.0;
+    let fy = hAtoms[i].y % 1.0; if (fy < 0) fy += 1.0;
+    let fz = hAtoms[i].z % 1.0; if (fz < 0) fz += 1.0;
 
-        let dx = hAtoms[i].x - hAtoms[j].x;
-        let dy = hAtoms[i].y - hAtoms[j].y;
-        let dz = hAtoms[i].z - hAtoms[j].z;
-        if (Math.abs(dx - Math.round(dx)) > 0.01 && Math.abs(Math.round(dx)) >= 1) spansAxis[0] = true;
-        if (Math.abs(dy - Math.round(dy)) > 0.01 && Math.abs(Math.round(dy)) >= 1) spansAxis[1] = true;
-        if (Math.abs(dz - Math.round(dz)) > 0.01 && Math.abs(Math.round(dz)) >= 1) spansAxis[2] = true;
+    const cx = Math.min(nCells - 1, Math.floor(fx / cellSize));
+    const cy = Math.min(nCells - 1, Math.floor(fy / cellSize));
+    const cz = Math.min(nCells - 1, Math.floor(fz / cellSize));
+    const key = cellKey(cx, cy, cz);
+    const bucket = cellMap.get(key);
+    if (bucket) bucket.push(i);
+    else cellMap.set(key, [i]);
+  }
+
+  const markSpan = (root: number, axis: number) => {
+    let spans = clusterSpans.get(root);
+    if (!spans) { spans = [false, false, false]; clusterSpans.set(root, spans); }
+    spans[axis] = true;
+  };
+
+  for (let cx = 0; cx < nCells; cx++) {
+    for (let cy = 0; cy < nCells; cy++) {
+      for (let cz = 0; cz < nCells; cz++) {
+        const bucket = cellMap.get(cellKey(cx, cy, cz));
+        if (!bucket) continue;
+
+        for (let dcx = -1; dcx <= 1; dcx++) {
+          for (let dcy = -1; dcy <= 1; dcy++) {
+            for (let dcz = -1; dcz <= 1; dcz++) {
+              const nx = ((cx + dcx) % nCells + nCells) % nCells;
+              const ny = ((cy + dcy) % nCells + nCells) % nCells;
+              const nz = ((cz + dcz) % nCells + nCells) % nCells;
+              const neighborBucket = cellMap.get(cellKey(nx, ny, nz));
+              if (!neighborBucket) continue;
+
+              const isSelf = (dcx === 0 && dcy === 0 && dcz === 0);
+
+              for (const i of bucket) {
+                for (const j of neighborBucket) {
+                  if (isSelf && j <= i) continue;
+                  if (!isSelf && j < i) continue;
+
+                  const dist = periodicDistance(hAtoms[i], hAtoms[j], lattice);
+                  if (dist <= cutoff) {
+                    uf.union(i, j);
+
+                    const dx = hAtoms[i].x - hAtoms[j].x;
+                    const dy = hAtoms[i].y - hAtoms[j].y;
+                    const dz = hAtoms[i].z - hAtoms[j].z;
+                    const root = uf.find(i);
+                    if (Math.abs(Math.round(dx)) >= 1) markSpan(root, 0);
+                    if (Math.abs(Math.round(dy)) >= 1) markSpan(root, 1);
+                    if (Math.abs(Math.round(dz)) >= 1) markSpan(root, 2);
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
 
   const clusterSizes: Record<number, number> = {};
-  const clusterSpans: Record<number, [boolean, boolean, boolean]> = {};
+  const finalSpans: Record<number, [boolean, boolean, boolean]> = {};
   for (let i = 0; i < hCount; i++) {
     const root = uf.find(i);
     clusterSizes[root] = (clusterSizes[root] || 0) + 1;
-    if (!clusterSpans[root]) clusterSpans[root] = [false, false, false];
+    if (!finalSpans[root]) finalSpans[root] = [false, false, false];
   }
 
-  for (let i = 0; i < hCount; i++) {
-    for (let j = i + 1; j < hCount; j++) {
-      if (uf.find(i) !== uf.find(j)) continue;
-      const dist = periodicDistance(hAtoms[i], hAtoms[j], lattice);
-      if (dist <= cutoff) {
-        const root = uf.find(i);
-        let dx = hAtoms[i].x - hAtoms[j].x;
-        let dy = hAtoms[i].y - hAtoms[j].y;
-        let dz = hAtoms[i].z - hAtoms[j].z;
-        if (Math.abs(Math.round(dx)) >= 1) clusterSpans[root][0] = true;
-        if (Math.abs(Math.round(dy)) >= 1) clusterSpans[root][1] = true;
-        if (Math.abs(Math.round(dz)) >= 1) clusterSpans[root][2] = true;
-      }
-    }
-  }
+  clusterSpans.forEach((spans, oldRoot) => {
+    const root = uf.find(oldRoot);
+    if (!finalSpans[root]) finalSpans[root] = [false, false, false];
+    if (spans[0]) finalSpans[root][0] = true;
+    if (spans[1]) finalSpans[root][1] = true;
+    if (spans[2]) finalSpans[root][2] = true;
+  });
 
   const roots = Object.keys(clusterSizes).map(Number);
   const clusterCount = roots.length;
@@ -278,7 +325,7 @@ export function checkHydrogenPercolation(
 
   let percolates3D = false;
   for (const root of roots) {
-    const spans = clusterSpans[root];
+    const spans = finalSpans[root];
     if (spans && spans[0] && spans[1] && spans[2]) {
       percolates3D = true;
       break;
