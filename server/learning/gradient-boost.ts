@@ -500,7 +500,8 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
       const sym = (f as any).crystalSymmetry;
       if (!sym || typeof sym !== "string") return 0;
       const normalized = sym.toLowerCase().trim();
-      const SG_MAP: Record<string, number> = { cubic: 7, hexagonal: 6, tetragonal: 5, orthorhombic: 4, monoclinic: 3, triclinic: 2, trigonal: 1 };
+      const SG_MAP: Record<string, number> = { cubic: 7, hexagonal: 6, trigonal: 1, tetragonal: 5, orthorhombic: 4, monoclinic: 3, triclinic: 2, rhombohedral: 1 };
+      if (SG_MAP[normalized] !== undefined) return SG_MAP[normalized];
       for (const [key, val] of Object.entries(SG_MAP)) { if (normalized.includes(key)) return val; }
       return 0;
     })(),
@@ -560,13 +561,15 @@ function findBestSplitForSubset(
   X: number[][],
   residuals: number[],
   indices: number[],
-  featureIndex: number
+  featureIndex: number,
+  minSamples: number = 2
 ): { threshold: number; improvement: number; leftIndices: number[]; rightIndices: number[] } {
   const pairs = indices.map(i => ({ idx: i, val: X[i][featureIndex], res: residuals[i] }));
   pairs.sort((a, b) => a.val - b.val);
   const n = pairs.length;
 
   const totalSum = pairs.reduce((s, p) => s + p.res, 0);
+  const totalMeanSq = (totalSum * totalSum) / n;
 
   let bestImprovement = -Infinity;
   let bestThreshold = 0;
@@ -581,9 +584,10 @@ function findBestSplitForSubset(
     const rightSum = totalSum - leftSum;
 
     if (pairs[i].val === pairs[i + 1].val) continue;
-    if (leftCount === 0 || rightCount === 0) continue;
+    if (leftCount < minSamples || rightCount < minSamples) continue;
 
-    const improvement = (leftSum * leftSum) / leftCount + (rightSum * rightSum) / rightCount;
+    const splitScore = (leftSum * leftSum) / leftCount + (rightSum * rightSum) / rightCount;
+    const improvement = splitScore - totalMeanSq;
 
     if (improvement > bestImprovement) {
       bestImprovement = improvement;
@@ -621,8 +625,8 @@ function buildTree(
   let bestRightIdx: number[] = [];
 
   for (let fi = 0; fi < nFeatures; fi++) {
-    const split = findBestSplitForSubset(X, residuals, indices, fi);
-    if (split.improvement > bestImprovement && split.leftIndices.length >= 2 && split.rightIndices.length >= 2) {
+    const split = findBestSplitForSubset(X, residuals, indices, fi, minSamples);
+    if (split.improvement > 0 && split.improvement > bestImprovement && split.leftIndices.length >= minSamples && split.rightIndices.length >= minSamples) {
       bestImprovement = split.improvement;
       bestFeature = fi;
       bestThreshold = split.threshold;
