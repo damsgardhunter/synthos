@@ -2214,6 +2214,7 @@ async function runPhase10_Physics() {
           qcAnalysis = detectQuantumCriticality(candidate.formula, {
             electronic: result.electronicStructure,
             coupling: result.coupling,
+            pressureGpa: candidate.pressureGpa ?? 0,
           });
           (updatedMlFeatures as any).quantumCriticality = {
             score: qcAnalysis.quantumCriticalScore,
@@ -3770,6 +3771,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       autonomousQC = detectQuantumCriticality(formula, {
         electronic: physicsResult.electronicStructure,
         coupling: physicsResult.coupling,
+        pressureGpa: (candidate as any)?.pressureGpa ?? 0,
       });
       if (autonomousQC.quantumCriticalScore > 0.5 && autonomousQC.pairingBoostFromQCP > 0.1) {
         const qcTcBoost = 1 + autonomousQC.pairingBoostFromQCP * 0.15;

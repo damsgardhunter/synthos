@@ -69,15 +69,75 @@ export interface QuantumCriticalAnalysis {
   summary: string;
 }
 
+function expandParentheses(formula: string): string {
+  let result = formula.replace(/\[/g, "(").replace(/\]/g, ")");
+  const parenRegex = /\(([^()]+)\)(\d*\.?\d*)/;
+  let iterations = 0;
+  while (result.includes("(") && iterations < 20) {
+    const prev = result;
+    result = result.replace(parenRegex, (_, group: string, mult: string) => {
+      const m = mult ? parseFloat(mult) : 1;
+      if (isNaN(m) || m <= 0) return group;
+      if (m === 1) return group;
+      return group.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_x: string, el: string, num: string) => {
+        const n = num ? parseFloat(num) : 1;
+        const newN = (isNaN(n) || n <= 0 ? 1 : n) * m;
+        return newN === 1 ? el : `${el}${newN}`;
+      });
+    });
+    if (result === prev) break;
+    iterations++;
+  }
+  return result.replace(/[()]/g, "");
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => String("⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let m;
   while ((m = regex.exec(cleaned)) !== null) {
-    counts[m[1]] = (counts[m[1]] || 0) + (m[2] ? parseFloat(m[2]) : 1);
+    const val = m[2] ? parseFloat(m[2]) : 1;
+    counts[m[1]] = (counts[m[1]] || 0) + (isNaN(val) || val <= 0 ? 1 : val);
   }
   return counts;
+}
+
+function guardedStonerEnhancement(rawStoner: number): number {
+  const STONER_DENOM_FLOOR = 0.05;
+  const STONER_MAX = 20;
+  if (!Number.isFinite(rawStoner) || rawStoner < 0) return 1.0;
+  return Math.min(STONER_MAX, rawStoner);
+}
+
+function estimateStructuralTransitionPressure(
+  elements: string[],
+  counts: Record<string, number>,
+): number {
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const hCount = counts["H"] || 0;
+  const hRatio = hCount / totalAtoms;
+
+  if (hRatio < 0.3) return -1;
+
+  let avgBulk = 0;
+  let metalFrac = 0;
+  for (const el of elements) {
+    if (el === "H") continue;
+    const data = getElementData(el);
+    const frac = (counts[el] || 1) / totalAtoms;
+    avgBulk += (data?.bulkModulus ?? 50) * frac;
+    metalFrac += frac;
+  }
+  avgBulk /= Math.max(metalFrac, 0.01);
+
+  const baseTransitionP = avgBulk * 0.8 + hRatio * 100;
+
+  if (hRatio > 0.8) return baseTransitionP * 1.2;
+  if (hRatio > 0.6) return baseTransitionP;
+  return baseTransitionP * 0.7;
 }
 
 function estimateFilling(
@@ -389,6 +449,8 @@ function computeDomeProfile(
   qcpType: QCPType,
   channelScores: QCPChannelScores,
   electronic: ElectronicStructure,
+  pressureGpa?: number,
+  structuralTransitionPressure?: number,
 ): DomeProfile {
   const primaryScore = channelScores[
     qcpType === "Mott" ? "mott" :
@@ -416,6 +478,20 @@ function computeDomeProfile(
 
     if (controlParameter > 0.9) {
       tcEnhancementFactor *= 0.7;
+    }
+  }
+
+  if (pressureGpa !== undefined && pressureGpa > 0 &&
+      structuralTransitionPressure !== undefined && structuralTransitionPressure > 0) {
+    const pRatio = pressureGpa / structuralTransitionPressure;
+    const pDistance = Math.abs(pRatio - 1.0);
+
+    if (pDistance < 0.10) {
+      const proximityBoost = (0.10 - pDistance) / 0.10;
+      tcEnhancementFactor *= (1.0 + proximityBoost * 2.0);
+    } else if (pDistance < 0.20) {
+      const proximityBoost = (0.20 - pDistance) / 0.20;
+      tcEnhancementFactor *= (1.0 + proximityBoost * 0.8);
     }
   }
 
@@ -529,6 +605,7 @@ export interface PhysicsDataInput {
   electronic?: ElectronicStructure;
   phonon?: PhononSpectrum;
   coupling?: ElectronPhononCoupling;
+  pressureGpa?: number;
 }
 
 export function detectQuantumCriticality(
@@ -541,6 +618,7 @@ export function detectQuantumCriticality(
   const electronic = physicsData?.electronic ?? computeElectronicStructure(formula, null);
   const phonon = physicsData?.phonon ?? computePhononSpectrum(formula, electronic);
   const coupling = physicsData?.coupling ?? computeElectronPhononCoupling(electronic, phonon, formula, 0);
+  const pressureGpa = physicsData?.pressureGpa;
 
   let lindhard: LindhardSusceptibility | undefined;
   try {
@@ -573,10 +651,14 @@ export function detectQuantumCriticality(
   const secondMax = allScores.sort((a, b) => b - a)[1] ?? 0;
   const quantumCriticalScore = Number(Math.min(1.0, maxScore * 0.7 + secondMax * 0.3).toFixed(4));
 
-  const dome = computeDomeProfile(qcpType, channelScores, electronic);
+  const structTransP = estimateStructuralTransitionPressure(elements, counts);
+  const dome = computeDomeProfile(
+    qcpType, channelScores, electronic,
+    pressureGpa, structTransP > 0 ? structTransP : undefined,
+  );
 
   const spin = computeDynamicSpinSusceptibility(formula, electronic);
-  const stonerEnhancement = spin.stonerEnhancement;
+  const stonerEnhancement = guardedStonerEnhancement(spin.stonerEnhancement);
   const mottProximity = electronic.mottProximityScore ?? 0;
   const nestingScore = electronic.nestingScore ?? 0;
   const vanHoveProximity = electronic.vanHoveProximity ?? 0;

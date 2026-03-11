@@ -388,9 +388,11 @@ export interface CriticalFieldResult {
 
 export function parseFormulaElements(formula: string): string[] {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => String("⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)));
+  cleaned = cleaned.replace(/[()[\]]/g, "");
   const matches = cleaned.match(/[A-Z][a-z]*/g);
-  return matches ? [...new Set(matches)] : [];
+  return matches ? Array.from(new Set(matches)) : [];
 }
 
 function expandParentheses(formula: string): string {
@@ -2841,20 +2843,22 @@ export function computeDynamicSpinSusceptibility(
   }
 
   const stonerProduct = stonerMax * N_EF;
+  const STONER_DENOM_FLOOR = 0.05;
+  const STONER_CAP = 20;
   const stonerEnhancement = stonerProduct < 1.0
-    ? 1 / Math.max(0.01, 1 - stonerProduct)
-    : 1 / 0.01;
+    ? 1 / Math.max(STONER_DENOM_FLOOR, 1 - stonerProduct)
+    : 1 / STONER_DENOM_FLOOR;
 
-  const chiStaticPeak = N_EF * Math.min(stonerEnhancement, 100);
+  const chiStaticPeak = N_EF * Math.min(stonerEnhancement, STONER_CAP);
 
   const omega_sf = stonerProduct < 1.0
-    ? 50 * Math.max(0.01, 1 - stonerProduct)
+    ? 50 * Math.max(STONER_DENOM_FLOOR, 1 - stonerProduct)
     : 0.5;
 
   const chiDynamicPeak = chiStaticPeak * 0.8;
 
   const xiSpin = stonerProduct < 1.0
-    ? 1 / Math.sqrt(Math.max(0.01, 1 - stonerProduct))
+    ? 1 / Math.sqrt(Math.max(STONER_DENOM_FLOOR, 1 - stonerProduct))
     : 10;
   const correlationLength = Math.min(50, xiSpin);
 
@@ -2865,7 +2869,7 @@ export function computeDynamicSpinSusceptibility(
     chiDynamicPeak: Number(chiDynamicPeak.toFixed(3)),
     spinFluctuationEnergy: Number(omega_sf.toFixed(3)),
     correlationLength: Number(correlationLength.toFixed(3)),
-    stonerEnhancement: Number(Math.min(stonerEnhancement, 100).toFixed(3)),
+    stonerEnhancement: Number(Math.min(stonerEnhancement, STONER_CAP).toFixed(3)),
     isNearQCP,
   };
 }
