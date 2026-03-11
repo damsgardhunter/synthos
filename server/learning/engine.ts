@@ -306,14 +306,31 @@ function checkOxidationBalance(counts: Record<string, number>): boolean {
   const elements = Object.keys(counts);
   if (elements.length < 2) return true;
 
+  const CHARGE_SLACK = 0.5;
+
   const statesPerElement = elements.map(el => {
     const ox = COMMON_OXIDATION_STATES[el];
     if (!ox || ox.length === 0) return [0, 2, 3, -2];
     return ox;
   });
 
+  const minRemaining = new Float64Array(elements.length + 1);
+  const maxRemaining = new Float64Array(elements.length + 1);
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const count = counts[elements[i]];
+    const states = statesPerElement[i];
+    const minOx = Math.min(...states);
+    const maxOx = Math.max(...states);
+    minRemaining[i] = minRemaining[i + 1] + minOx * count;
+    maxRemaining[i] = maxRemaining[i + 1] + maxOx * count;
+  }
+
   function tryBalance(idx: number, runningSum: number): boolean {
-    if (idx === elements.length) return Math.abs(runningSum) < 0.01;
+    if (idx === elements.length) return Math.abs(runningSum) <= CHARGE_SLACK;
+    const bestCase = runningSum + minRemaining[idx];
+    const worstCase = runningSum + maxRemaining[idx];
+    if (bestCase > CHARGE_SLACK && worstCase > CHARGE_SLACK) return false;
+    if (bestCase < -CHARGE_SLACK && worstCase < -CHARGE_SLACK) return false;
     const count = counts[elements[idx]];
     for (const ox of statesPerElement[idx]) {
       if (tryBalance(idx + 1, runningSum + ox * count)) return true;
