@@ -164,6 +164,7 @@ export function simulateSynthesisEffects(
   let bondComp = 0;
   let bandShift = 0;
   let phasePurity = 0.95;
+  const mcLower = materialClass.toLowerCase();
 
   if (sv.coolingRate > 500) {
     metastable = true;
@@ -185,14 +186,45 @@ export function simulateSynthesisEffects(
     }
   }
 
-  if (Math.abs(sv.strain) > 2) {
-    bandShift = sv.strain * 0.05;
+  if (Math.abs(sv.strain) > 0.5) {
     const strainMag = Math.abs(sv.strain);
-    if (strainMag < 5) {
-      lambdaMod *= 1.0 + Math.sqrt(strainMag) * 0.02;
+    const isCompressive = sv.strain < 0;
+    const isHydride = mcLower.includes("hydride");
+
+    if (isCompressive) {
+      bandShift = sv.strain * 0.03;
+      if (isHydride) {
+        if (strainMag < 4) {
+          lambdaMod *= 1.0 + strainMag * 0.03;
+          omegaMod *= 1.0 + strainMag * 0.02;
+        } else {
+          lambdaMod *= 1.0 + 4 * 0.03 - (strainMag - 4) * 0.05;
+          phasePurity *= Math.max(0.6, 1 - (strainMag - 4) * 0.08);
+        }
+      } else {
+        if (strainMag < 3) {
+          lambdaMod *= 1.0 + strainMag * 0.015;
+        } else {
+          lambdaMod *= 1.0 + 3 * 0.015 - (strainMag - 3) * 0.02;
+          phasePurity *= Math.max(0.7, 1 - (strainMag - 3) * 0.06);
+        }
+      }
     } else {
-      lambdaMod *= 1.0 - Math.sqrt(strainMag - 5) * 0.03;
-      phasePurity *= Math.max(0.7, 1 - (strainMag - 5) * 0.05);
+      bandShift = sv.strain * 0.06;
+      if (isHydride) {
+        lambdaMod *= Math.max(0.6, 1.0 - strainMag * 0.06);
+        omegaMod *= Math.max(0.7, 1.0 - strainMag * 0.04);
+        if (strainMag > 3) {
+          phasePurity *= Math.max(0.5, 1 - (strainMag - 3) * 0.1);
+        }
+      } else {
+        if (strainMag < 5) {
+          lambdaMod *= 1.0 - strainMag * 0.01;
+        } else {
+          lambdaMod *= 1.0 - 5 * 0.01 - Math.sqrt(strainMag - 5) * 0.03;
+          phasePurity *= Math.max(0.7, 1 - (strainMag - 5) * 0.05);
+        }
+      }
     }
     latticeStrain = sv.strain;
   }
@@ -212,19 +244,36 @@ export function simulateSynthesisEffects(
   }
 
   if (sv.thermalCycles > 1) {
-    const cycleBenefit = Math.min(0.1, sv.thermalCycles * 0.005);
-    lambdaMod *= 1.0 + cycleBenefit;
-    defectDensity *= Math.max(0.5, 1 - sv.thermalCycles * 0.01);
+    const nCycles = sv.thermalCycles;
+
+    defectDensity *= (1 + nCycles * 0.02);
+    grainSize *= Math.max(0.2, 1 - Math.min(0.6, nCycles * 0.008));
+
+    const defectPhononBroadening = Math.min(0.15, nCycles * 0.002);
+    omegaMod *= (1 - defectPhononBroadening);
+
+    const isPnictide = mcLower.includes("pnictide") || mcLower.includes("iron");
+    if (isPnictide) {
+      const disorderCoupling = Math.min(0.12, nCycles * 0.004);
+      lambdaMod *= 1.0 + disorderCoupling;
+    } else {
+      const cycleBenefit = Math.min(0.05, nCycles * 0.002);
+      const cyclePenalty = Math.min(0.08, nCycles * nCycles * 1e-4);
+      lambdaMod *= 1.0 + cycleBenefit - cyclePenalty;
+    }
+
+    if (nCycles > 20) {
+      phasePurity *= Math.max(0.7, 1 - (nCycles - 20) * 0.005);
+    }
   }
 
   if (sv.magneticField > 0) {
     const magFactor = Math.min(0.05, sv.magneticField / 200);
-    if (materialClass.toLowerCase().includes("pnictide")) {
+    if (mcLower.includes("pnictide")) {
       lambdaMod *= 1.0 + magFactor;
     }
   }
 
-  const mcLower = materialClass.toLowerCase();
   if (sv.oxygenPressure > 0.1 && mcLower.includes("hydride")) {
     const o2Penalty = Math.min(sv.oxygenPressure, 10) * 0.2;
     phasePurity *= Math.max(0.3, 1 - o2Penalty);
