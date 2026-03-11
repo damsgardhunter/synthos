@@ -7,6 +7,7 @@ import { getStructurePredictorStats } from "../crystal/structure-predictor-ml";
 import { getPressureStructureStats } from "../crystal/pressure-structure-model";
 import { getCalibrationStats } from "./surrogate-fitness";
 import { getFailurePatterns, getFailureDBStats, getFailureEntries, type StructureFailureEntry } from "../crystal/structure-failure-db";
+import { classifyFamily } from "./utils";
 
 type HealthStatus = "green" | "yellow" | "red";
 
@@ -222,31 +223,31 @@ export interface ComprehensiveModelDiagnostics {
 }
 
 const MAX_OUTCOMES = 500;
-let predictionOutcomes: PredictionOutcome[] = [];
+const outcomeBuffer: PredictionOutcome[] = new Array(MAX_OUTCOMES);
+let outcomeHead = 0;
+let outcomeCount = 0;
 
-function classifyFamily(formula: string): string {
-  if (/H\d/.test(formula) || formula.includes("H")) {
-    const hMatch = formula.match(/H(\d+)/);
-    if (hMatch && parseInt(hMatch[1]) >= 4) return "hydride";
-  }
-  if (formula.includes("Cu") && formula.includes("O") && /Ba|Sr|La|Y|Ca|Bi|Tl|Hg/.test(formula)) return "cuprate";
-  if (/Fe|Co|Ni/.test(formula) && /As|Se|Te|P|S/.test(formula)) return "pnictide";
-  if (formula.includes("B") && /Mg|Nb|Ti|Zr|Hf|Ta|W|Mo|V|Cr/.test(formula)) return "boride";
-  return "conventional";
+function getOutcomes(): PredictionOutcome[] {
+  if (outcomeCount < MAX_OUTCOMES) return outcomeBuffer.slice(0, outcomeCount);
+  return [...outcomeBuffer.slice(outcomeHead), ...outcomeBuffer.slice(0, outcomeHead)];
 }
 
 export function recordPredictionOutcome(model: string, formula: string, predicted: number, actual: number): void {
   const family = classifyFamily(formula);
-  predictionOutcomes.push({
+  const entry: PredictionOutcome = {
     model,
     formula,
     predicted,
     actual,
     timestamp: Date.now(),
     family,
-  });
-  if (predictionOutcomes.length > MAX_OUTCOMES) {
-    predictionOutcomes = predictionOutcomes.slice(-MAX_OUTCOMES);
+  };
+  if (outcomeCount < MAX_OUTCOMES) {
+    outcomeBuffer[outcomeCount] = entry;
+    outcomeCount++;
+  } else {
+    outcomeBuffer[outcomeHead] = entry;
+    outcomeHead = (outcomeHead + 1) % MAX_OUTCOMES;
   }
 }
 
@@ -255,7 +256,7 @@ function computeFamilyBias(modelFilter?: string): FamilyBias[] {
   const result: FamilyBias[] = [];
 
   for (const family of families) {
-    const outcomes = predictionOutcomes.filter(
+    const outcomes = getOutcomes().filter(
       o => o.family === family && (modelFilter ? o.model === modelFilter : true)
     );
     if (outcomes.length === 0) {
@@ -287,17 +288,16 @@ function computeCalibrationBins(): CalibrationBin[] {
     const upper = binEdges[i + 1];
     const binLabel = `${lower.toFixed(1)}-${upper.toFixed(1)}`;
 
-    const inBin = predictionOutcomes.filter(o => {
-      const absDiff = Math.abs(o.predicted - o.actual);
-      const maxVal = Math.max(Math.abs(o.predicted), Math.abs(o.actual), 1);
-      const normalizedError = absDiff / maxVal;
-      const confidence = Math.max(0, 1 - normalizedError);
-      return confidence >= lower && confidence < upper;
+    const allOutcomes = getOutcomes();
+    const inBin = allOutcomes.filter(o => {
+      const relError = Math.abs(o.predicted - o.actual) / Math.max(Math.abs(o.actual), 1);
+      return relError >= (1 - upper) && relError < (1 - lower);
     });
 
     const withinRange = inBin.filter(o => {
+      const binMidpoint = (lower + upper) / 2;
+      const tolerance = Math.max(5, Math.abs(o.actual) * (1 - binMidpoint));
       const absDiff = Math.abs(o.predicted - o.actual);
-      const tolerance = Math.max(5, Math.abs(o.actual) * 0.3);
       return absDiff <= tolerance;
     }).length;
 
@@ -315,7 +315,7 @@ function computeCalibrationBins(): CalibrationBin[] {
 }
 
 function computeErrorAnalysis(): ErrorAnalysisReport {
-  const outcomes = [...predictionOutcomes];
+  const outcomes = getOutcomes();
   const totalOutcomes = outcomes.length;
 
   if (totalOutcomes === 0) {
@@ -597,7 +597,7 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     pressureStructure,
     familyBias: computeFamilyBias(),
     calibrationBins: computeCalibrationBins(),
-    predictionOutcomeCount: predictionOutcomes.length,
+    predictionOutcomeCount: outcomeCount,
     featureImportance,
     errorAnalysis,
     failureSummary,
