@@ -3303,9 +3303,11 @@ export function computeOmegaLogFromAlpha2F(alpha2FData: Alpha2FData): number {
   const binWidth = nBins > 1 ? frequencies[1] - frequencies[0] : 1;
   let logSum = 0;
 
+  const LOW_FREQ_CUTOFF_MEV = 1.5;
+  const LOW_FREQ_CUTOFF_CM1 = LOW_FREQ_CUTOFF_MEV / 0.1240;
   for (let i = 0; i < nBins; i++) {
     const omega = frequencies[i];
-    if (omega <= 0 || alpha2F[i] <= 0) continue;
+    if (omega <= LOW_FREQ_CUTOFF_CM1 || alpha2F[i] <= 0) continue;
     logSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
   }
 

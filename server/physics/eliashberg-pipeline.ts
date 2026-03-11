@@ -268,7 +268,10 @@ function buildAlpha2FSpectralFunction(
     integratedLambda += lambdaContrib;
     cumulativeLambda[i] = integratedLambda;
 
-    logWeightedSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
+    const omegaMeV = omega * 0.1240;
+    if (omegaMeV >= 1.5) {
+      logWeightedSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
+    }
     omega2WeightedSum += alpha2F[i] * omega * binWidth;
 
     const isHydrogenMode = hasPartialH
@@ -636,6 +639,24 @@ export function runEliashbergPipeline(
 
   const isotopeEffect = computeIsotopeEffect(formula, alpha2FSpec, alpha2FSpec.integratedLambda);
 
+  const counts = parseFormulaCounts(formula);
+  const hCountPipe = counts["H"] || 0;
+  const pipeElements = parseFormulaElements(formula);
+  const metalAtomsPipe = pipeElements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hRatioPipe = metalAtomsPipe > 0 ? hCountPipe / metalAtomsPipe : 0;
+  const isHighPressureHydride = hRatioPipe >= 4 && pressureGpa >= 100;
+
+  let surrogateAnharmonicPenalty = 1.0;
+  if (isHighPressureHydride) {
+    const anharmonicityEst = Math.min(0.5, 0.05 + pressureGpa * 0.001 + hRatioPipe * 0.02);
+    surrogateAnharmonicPenalty = 1.0 - anharmonicityEst;
+  }
+
+  const lambdaUncorrectedPenalized = Number(
+    (coupling.lambdaUncorrected * surrogateAnharmonicPenalty).toFixed(4)
+  );
+
   let confidence: "low" | "medium" | "high" = "medium";
   if (alpha2FSpec.convergenceCheck.converged && gapSolution.converged) {
     confidence = "high";
@@ -646,6 +667,10 @@ export function runEliashbergPipeline(
   if (muStarSweep.sensitivityFlag) {
     if (confidence === "high") confidence = "medium";
     else if (confidence === "medium") confidence = "low";
+  }
+
+  if (isHighPressureHydride) {
+    if (confidence === "high") confidence = "medium";
   }
 
   const uncertaintyFrac = confidence === "high" ? 0.15 : confidence === "medium" ? 0.25 : 0.40;
@@ -660,7 +685,7 @@ export function runEliashbergPipeline(
     tier: "surrogate",
     alpha2F: alpha2FSpec,
     lambda: alpha2FSpec.integratedLambda,
-    lambdaUncorrected: coupling.lambdaUncorrected,
+    lambdaUncorrected: lambdaUncorrectedPenalized,
     omegaLog: alpha2FSpec.omegaLog,
     omega2: alpha2FSpec.omega2,
     muStar,
@@ -725,7 +750,10 @@ export function runEliashbergFromAlpha2FFile(
     const lambdaContrib = 2 * a2f / omega * binWidth;
     integratedLambda += lambdaContrib;
     cumulativeLambda[i] = integratedLambda;
-    logWeightedSum += (a2f / omega) * Math.log(omega) * binWidth;
+    const omegaMeVFile = omega * 0.1240;
+    if (omegaMeVFile >= 1.5) {
+      logWeightedSum += (a2f / omega) * Math.log(omega) * binWidth;
+    }
     omega2WeightedSum += a2f * omega * binWidth;
   }
 
