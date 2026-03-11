@@ -591,10 +591,10 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
 
   for (const base of baseFormulas) {
     const counts = parseFormulaCounts(base);
-    const elements = Object.keys(counts);
+    const elements = fisherYatesShuffle(Object.keys(counts));
 
     for (const el of elements) {
-      const similar = SIMILAR_ELEMENTS[el] || [];
+      const similar = fisherYatesShuffle(SIMILAR_ELEMENTS[el] || []);
       for (const sub of similar) {
         if (elements.includes(sub)) continue;
         if (elementSubstitutionDistance(el, sub) < MIN_SUBSTITUTION_DISTANCE) continue;
@@ -611,9 +611,9 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
       for (const sub of similar) {
         if (elements.includes(sub)) continue;
         if (elementSubstitutionDistance(el, sub) < MIN_SUBSTITUTION_DISTANCE) continue;
-        for (const el2 of elements) {
-          if (el2 === el) continue;
-          const similar2 = SIMILAR_ELEMENTS[el2] || [];
+        const innerElements = fisherYatesShuffle(elements.filter(e => e !== el));
+        for (const el2 of innerElements) {
+          const similar2 = fisherYatesShuffle(SIMILAR_ELEMENTS[el2] || []);
           for (const sub2 of similar2) {
             if (sub2 === sub || elements.includes(sub2)) continue;
             if (elementSubstitutionDistance(el2, sub2) < MIN_SUBSTITUTION_DISTANCE) continue;
@@ -633,7 +633,8 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
       if (results.size >= count) break;
     }
 
-    for (const el of elements) {
+    const stoichElements = fisherYatesShuffle(elements);
+    for (const el of stoichElements) {
       const stoich = counts[el];
       for (const variation of [stoich + 1, stoich - 1, stoich * 2, Math.max(1, Math.round(stoich / 2))]) {
         if (variation < 1 || variation > 12 || variation === stoich) continue;
@@ -655,10 +656,16 @@ export function generateCompositionInterpolations(formula1: string, formula2: st
   const counts1 = parseFormulaCounts(formula1);
   const counts2 = parseFormulaCounts(formula2);
   const allElements = Array.from(new Set([...Object.keys(counts1), ...Object.keys(counts2)]));
+  const seen = new Set<string>();
   const results: string[] = [];
 
-  for (let i = 1; i < steps; i++) {
-    const frac = i / steps;
+  const maxRange = Math.max(
+    ...allElements.map(el => Math.abs((counts1[el] || 0) - (counts2[el] || 0)))
+  );
+  const effectiveSteps = Math.max(steps, maxRange + 1);
+
+  for (let i = 1; i < effectiveSteps; i++) {
+    const frac = i / effectiveSteps;
     const interpolated: Record<string, number> = {};
     for (const el of allElements) {
       const v1 = counts1[el] || 0;
@@ -669,7 +676,10 @@ export function generateCompositionInterpolations(formula1: string, formula2: st
     }
     if (Object.keys(interpolated).length >= 2) {
       const formula = canonicalize(countsToFormula(interpolated));
-      if (formula && formula.length > 1 && passesElementCountCap(formula)) results.push(formula);
+      if (formula && formula.length > 1 && !seen.has(formula) && passesElementCountCap(formula)) {
+        seen.add(formula);
+        results.push(formula);
+      }
     }
   }
 
@@ -684,13 +694,12 @@ export function generateRandomDopedVariants(baseFormulas: string[], dopantElemen
     const elements = Object.keys(counts);
     const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
 
-    for (const dopant of dopantElements) {
+    const shuffledDopants = fisherYatesShuffle(dopantElements);
+    for (const dopant of shuffledDopants) {
       if (elements.includes(dopant)) continue;
 
       for (const dopantCount of [1, 2, 3]) {
         if (totalAtoms + dopantCount > 20) continue;
-        if (elements.length + 1 > 5) continue;
-        if (elements.filter(el => el !== "H").length + (dopant !== "H" ? 1 : 0) > 4) continue;
         const newCounts = { ...counts, [dopant]: dopantCount };
         const formula = canonicalize(countsToFormula(newCounts));
         if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
@@ -698,7 +707,8 @@ export function generateRandomDopedVariants(baseFormulas: string[], dopantElemen
       }
       if (results.size >= count) break;
 
-      for (const el of elements) {
+      const shuffledElements = fisherYatesShuffle(elements);
+      for (const el of shuffledElements) {
         const stoich = counts[el];
         if (stoich <= 1) continue;
         for (const replace of [1, Math.floor(stoich / 2)]) {
