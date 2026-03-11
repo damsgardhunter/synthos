@@ -495,25 +495,31 @@ function solveEliashbergGapEquation(
   const lambda = alpha2FSpec.integratedLambda;
   const omegaLog = alpha2FSpec.omegaLog;
 
+  const { frequencies: a2fFreqs, alpha2F: a2fVals } = alpha2FSpec;
+  const binWidthCm = a2fFreqs.length > 1 ? a2fFreqs[1] - a2fFreqs[0] : 1;
+  const binWidthMeV = binWidthCm * 0.1240;
+
+  const freqsMeV: number[] = [];
+  const validA2F: number[] = [];
+  for (let k = 0; k < a2fFreqs.length; k++) {
+    const omegaMeV = a2fFreqs[k] * 0.1240;
+    if (omegaMeV > 0 && a2fVals[k] > 0) {
+      freqsMeV.push(omegaMeV);
+      validA2F.push(a2fVals[k]);
+    }
+  }
+
   const lambdaMatrix: number[][] = [];
   for (let n = 0; n < nMatsubara; n++) {
     lambdaMatrix[n] = [];
     for (let m = 0; m < nMatsubara; m++) {
       const omegaDiff = Math.abs(omegaN[n] - omegaN[m]);
-      const omegaSum = omegaN[n] + omegaN[m];
 
       let lambdaNM = 0;
-      const { frequencies, alpha2F } = alpha2FSpec;
-      const binWidth = frequencies.length > 1 ? frequencies[1] - frequencies[0] : 1;
-
-      for (let k = 0; k < frequencies.length; k++) {
-        const omega = frequencies[k];
-        if (omega <= 0 || alpha2F[k] <= 0) continue;
-        const omegaCm = omega;
-        const omegaMeV = omegaCm * 0.1240;
-        if (omegaMeV <= 0) continue;
-        lambdaNM += 2 * alpha2F[k] * omegaMeV /
-          (omegaMeV * omegaMeV + omegaDiff * omegaDiff) * binWidth * 0.1240;
+      for (let k = 0; k < freqsMeV.length; k++) {
+        const wMeV = freqsMeV[k];
+        lambdaNM += 2 * validA2F[k] * wMeV /
+          (wMeV * wMeV + omegaDiff * omegaDiff) * binWidthMeV;
       }
 
       lambdaMatrix[n][m] = lambdaNM;
