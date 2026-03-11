@@ -1247,17 +1247,84 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
+interface CompositionCost {
+  reject: boolean;
+  penalty: number;
+  reason: string;
+}
+
+function assessCompositionComplexity(formula: string): CompositionCost {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const distinctNonH = elements.filter(el => el !== "H");
+  const maxSingle = Math.max(...Object.values(counts), 0);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+
+  if (distinctNonH.length > 7) {
+    return { reject: true, penalty: 1, reason: `${distinctNonH.length} non-H elements exceeds hard cap of 7` };
+  }
+  if (elements.length > 8) {
+    return { reject: true, penalty: 1, reason: `${elements.length} total elements exceeds hard cap of 8` };
+  }
+  if (maxSingle > 24) {
+    return { reject: true, penalty: 1, reason: `max stoichiometry ${maxSingle} exceeds hard cap of 24` };
+  }
+  if (totalAtoms > 40) {
+    return { reject: true, penalty: 1, reason: `${totalAtoms} total atoms exceeds hard cap of 40` };
+  }
+
+  let penalty = 0;
+  const notes: string[] = [];
+
+  if (distinctNonH.length > 4) {
+    penalty += (distinctNonH.length - 4) * 0.10;
+    notes.push(`${distinctNonH.length} non-H elements (>4)`);
+  }
+  if (elements.length > 5) {
+    penalty += (elements.length - 5) * 0.08;
+    notes.push(`${elements.length} total elements (>5)`);
+  }
+  if (totalAtoms > 20) {
+    penalty += Math.min(0.3, (totalAtoms - 20) * 0.015);
+    notes.push(`${totalAtoms} atoms (>20, ~${Math.round(totalAtoms / 20)}x DFT cost)`);
+  }
+  if (maxSingle > 12) {
+    penalty += (maxSingle - 12) * 0.02;
+    notes.push(`max stoich ${maxSingle} (>12)`);
+  }
+
+  penalty = Math.min(0.6, penalty);
+
+  if (penalty > 0) {
+    return { reject: false, penalty, reason: `large composition: ${notes.join(", ")}` };
+  }
+  return { reject: false, penalty: 0, reason: "" };
+}
+
 async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeof storage.insertSuperconductorCandidate>[0], generatorSource?: string): Promise<boolean> {
   try {
-    if (!passesElementCountCap(candidateData.formula)) {
+    const compCost = assessCompositionComplexity(candidateData.formula);
+    if (compCost.reject) {
       emit("log", {
         phase: "engine",
         event: "Composition cap rejected",
-        detail: `${candidateData.formula}: exceeds element/atom count caps (max 4 non-H elements, 5 total, 20 atoms, 12 per element)`,
+        detail: `${candidateData.formula}: ${compCost.reason}`,
         dataSource: "Composition Filter",
       });
       if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
       return false;
+    }
+    if (compCost.penalty > 0) {
+      const currentScore = candidateData.ensembleScore ?? 0.5;
+      candidateData.ensembleScore = Math.round(Math.max(0.01, currentScore * (1 - compCost.penalty)) * 10000) / 10000;
+      const existing = (candidateData.mlFeatures as Record<string, any>) ?? {};
+      candidateData.mlFeatures = { ...existing, compositionCostPenalty: compCost.penalty, compositionNote: compCost.reason };
+      emit("log", {
+        phase: "engine",
+        event: "Composition cost penalty",
+        detail: `${candidateData.formula}: ${compCost.reason}, ensembleScore ${currentScore.toFixed(3)} -> ${candidateData.ensembleScore}`,
+        dataSource: "Composition Filter",
+      });
     }
 
     const chemFilter = passesChemistryFilter(candidateData.formula);
@@ -1321,7 +1388,14 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         });
       }
     } catch (kineticErr: any) {
-      console.log(`[Engine] Kinetic stability check failed: ${kineticErr?.message?.slice(0, 80) ?? "unknown"}`);
+      const errMsg = kineticErr?.message?.slice(0, 120) ?? "unknown";
+      emit("log", {
+        phase: "engine",
+        event: "Kinetic stability error",
+        detail: `${candidateData.formula}: kinetic check failed (${errMsg}), marking dataConfidence=low`,
+        dataSource: "Kinetic Stability Engine",
+      });
+      candidateData.dataConfidence = "low";
     }
 
     let synthesisGateResult;
