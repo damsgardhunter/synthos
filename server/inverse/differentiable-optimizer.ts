@@ -600,7 +600,14 @@ export function runDifferentiableOptimization(
       bestState = { ...state, counts: { ...state.counts }, synthesisVector: state.synthesisVector ? { ...state.synthesisVector } : undefined };
       stagnationCount = 0;
     } else {
-      stagnationCount++;
+      const annealTemp = Math.max(0.01, 1.0 - step / maxSteps);
+      const tcDelta = physics.tc - bestTc;
+      const acceptProb = Math.exp(tcDelta / (annealTemp * Math.max(1, target.targetTc * 0.1)));
+      if (Math.random() < acceptProb) {
+        stagnationCount = Math.max(0, stagnationCount - 1);
+      } else {
+        stagnationCount++;
+      }
     }
 
     if (Math.abs(physics.tc - target.targetTc) / target.targetTc < 0.05) {
@@ -608,6 +615,22 @@ export function runDifferentiableOptimization(
     }
 
     if (stagnationCount >= 4) {
+      const annealTemp = Math.max(0.01, 1.0 - step / maxSteps);
+
+      if (annealTemp > 0.3 && Math.random() < annealTemp * 0.5) {
+        const allEls = Object.keys(state.counts).filter(e => (state.counts[e] || 0) > 0);
+        if (allEls.length > 0) {
+          const randomEl = allEls[Math.floor(Math.random() * allEls.length)];
+          const subs = getSubstitutionGroup(randomEl);
+          if (subs.length > 0) {
+            const replacement = subs[Math.floor(Math.random() * subs.length)];
+            state = substituteElement(state, randomEl, replacement);
+            stagnationCount = 0;
+            continue;
+          }
+        }
+      }
+
       const weakest = [...elementGrad.entries()]
         .filter(([el]) => (state.counts[el] || 0) > 0)
         .sort((a, b) => a[1] - b[1])[0];

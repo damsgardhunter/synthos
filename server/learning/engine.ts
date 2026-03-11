@@ -901,20 +901,30 @@ async function runPhase7_Superconductor() {
 
           try {
             const ls = campaign.learningState;
+            const verifiedInverseResults = inverseResults.filter(r => {
+              if (!r.passedPipeline || r.tc <= 3) return false;
+              const existing = allCandidates.find(c => c.formula === r.formula);
+              if (!existing) return false;
+              const vs = (existing as any).verificationStage ?? 0;
+              const hasPhysicsTc = (existing as any).physicsTc != null && (existing as any).physicsTc > 0;
+              return vs >= 1 || hasPhysicsTc;
+            });
+
             if (ls.elementSuccessMatrix && ls.elementSuccessMatrix.size > 0) {
               for (const [el, stats] of ls.elementSuccessMatrix) {
-                if (stats.count >= 2 && stats.totalReward > 0) {
+                if (stats.count >= 3 && stats.totalReward > 0) {
                   const avgReward = stats.totalReward / stats.count;
                   const syntheticTc = avgReward * campaign.target.targetTc;
-                  rlAgent.recordElementOutcome([el], syntheticTc, syntheticTc > 20);
+                  const elVerified = verifiedInverseResults.some(r => r.formula.includes(el));
+                  if (elVerified) {
+                    rlAgent.recordElementOutcome([el], syntheticTc, syntheticTc > 20);
+                  }
                 }
               }
             }
-            for (const r of inverseResults) {
-              if (r.tc > 3 && r.passedPipeline) {
-                bayesianOptimizer.addObservation(r.formula, r.tc, r.lambda, r.passedPipeline ? 1 : 0);
-                incorporateSuccessData(r.formula, r.tc).catch(() => {});
-              }
+            for (const r of verifiedInverseResults) {
+              bayesianOptimizer.addObservation(r.formula, r.tc, r.lambda, 1);
+              incorporateSuccessData(r.formula, r.tc).catch(() => {});
             }
           } catch (crossPollErr) {
             console.error(`[Engine] Inverse->RL/BO cross-pollination failed:`, crossPollErr instanceof Error ? crossPollErr.message.slice(0, 100) : "unknown");
