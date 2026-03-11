@@ -68,12 +68,15 @@ export interface DerivedQuantities {
   fermiVelocities: { bandIndex: number; velocity: number; kLabel: string }[];
   bandCurvatures: { bandIndex: number; curvature: number; kLabel: string }[];
   vhsPositions: VHSPositionEntry[];
-  nestingVectors: { q: [number, number, number]; strength: number; bandPair: [number, number] }[];
+  nestingVectors: { q: [number, number, number]; strength: number; bandPair: [number, number]; parallelFraction: number }[];
   topologicalInvariants: {
     berryPhaseProxy: number;
     bandInversionCount: number;
     topologicalClass: string;
     z2Index: number;
+    proxyConfidence: number;
+    proxySource: "eigenvalue-inversion" | "wilson-loop" | "symmetry-indicator";
+    wilsonLoopAvailable: boolean;
   };
 }
 
@@ -716,7 +719,8 @@ function detectVHSPositions(dispersion: BandDispersion): DerivedQuantities["vhsP
 function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["nestingVectors"] {
   const nesting: DerivedQuantities["nestingVectors"] = [];
   const fermiTol = 0.3;
-  const fermiCrossings: { bandIndex: number; kIndex: number; kCoord: [number, number, number] }[] = [];
+  const MIN_PARALLEL_FRACTION = 0.15;
+  const fermiCrossings: { bandIndex: number; kIndex: number; kCoord: [number, number, number]; velocity: number }[] = [];
 
   for (let b = 0; b < dispersion.nBands; b++) {
     for (let i = 0; i < dispersion.bands.length; i++) {
@@ -724,13 +728,27 @@ function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["n
       if (Math.abs(e - dispersion.fermiEnergy) < fermiTol) {
         const kp = dispersion.kPoints.find(k => k.index === i);
         if (kp) {
-          fermiCrossings.push({ bandIndex: b, kIndex: i, kCoord: kp.coordinates });
+          let vel = 0;
+          if (i > 0) {
+            const ePrev = dispersion.bands[i - 1]?.energies[b] ?? e;
+            const dk = 1.0 / Math.max(1, dispersion.nKPoints);
+            vel = Math.abs(e - ePrev) / dk;
+          }
+          fermiCrossings.push({ bandIndex: b, kIndex: i, kCoord: kp.coordinates, velocity: vel });
         }
       }
     }
   }
 
-  const qMap = new Map<string, { q: [number, number, number]; count: number; bands: [number, number] }>();
+  const totalFermiPoints = fermiCrossings.length;
+  if (totalFermiPoints < 2) return nesting;
+
+  const qMap = new Map<string, {
+    q: [number, number, number];
+    count: number;
+    bands: [number, number];
+    parallelPairs: number;
+  }>();
 
   for (let i = 0; i < fermiCrossings.length; i++) {
     for (let j = i + 1; j < fermiCrossings.length; j++) {
@@ -742,21 +760,42 @@ function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["n
       ];
       const key = q.join(",");
       if (!qMap.has(key)) {
-        qMap.set(key, { q, count: 0, bands: [fermiCrossings[i].bandIndex, fermiCrossings[j].bandIndex] });
+        qMap.set(key, { q, count: 0, bands: [fermiCrossings[i].bandIndex, fermiCrossings[j].bandIndex], parallelPairs: 0 });
       }
-      qMap.get(key)!.count++;
+      const entry = qMap.get(key)!;
+      entry.count++;
+
+      const vi = fermiCrossings[i].velocity;
+      const vj = fermiCrossings[j].velocity;
+      if (vi > 0 && vj > 0) {
+        const velRatio = Math.min(vi, vj) / Math.max(vi, vj);
+        if (velRatio > 0.5) {
+          entry.parallelPairs++;
+        }
+      }
     }
   }
 
-  const sorted = Array.from(qMap.values()).sort((a, b) => b.count - a.count).slice(0, 5);
+  const sorted = Array.from(qMap.values()).sort((a, b) => b.count - a.count).slice(0, 10);
   const maxCount = sorted[0]?.count ?? 1;
 
   for (const entry of sorted) {
+    const parallelFraction = totalFermiPoints > 0
+      ? entry.parallelPairs / (totalFermiPoints / 2)
+      : 0;
+
+    if (parallelFraction < MIN_PARALLEL_FRACTION && entry.count < maxCount * 0.5) {
+      continue;
+    }
+
     nesting.push({
       q: entry.q,
       strength: Number((entry.count / maxCount).toFixed(4)),
       bandPair: entry.bands,
+      parallelFraction: Number(parallelFraction.toFixed(4)),
     });
+
+    if (nesting.length >= 5) break;
   }
 
   return nesting;
@@ -765,6 +804,7 @@ function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["n
 function computeTopologicalInvariants(
   dispersion: BandDispersion,
   surrogateData: BandSurrogatePrediction,
+  formula: string,
 ): DerivedQuantities["topologicalInvariants"] {
   let bandInversionCount = 0;
   for (let b = 0; b < dispersion.nBands - 1; b++) {
@@ -791,12 +831,65 @@ function computeTopologicalInvariants(
 
   const z2Index = bandInversionCount % 2;
 
+  let proxyConfidence = 0;
+  let proxySource: "eigenvalue-inversion" | "wilson-loop" | "symmetry-indicator" = "eigenvalue-inversion";
+  let wilsonLoopAvailable = false;
+
+  try {
+    const { computeTopologicalInvariants: computeFullTopo } = require("./topological-invariants");
+    const { computeElectronicStructure } = require("../learning/physics-engine");
+    const electronic = computeElectronicStructure(formula, null);
+    const fullTopo = computeFullTopo(formula, electronic);
+
+    if (fullTopo && fullTopo.z2Invariant) {
+      wilsonLoopAvailable = fullTopo.z2Invariant.wilsonLoopWindings > 0;
+
+      if (wilsonLoopAvailable) {
+        proxySource = "wilson-loop";
+        berryPhaseProxy = fullTopo.chernNumber?.berryPhase ?? berryPhaseProxy;
+        proxyConfidence = Math.min(1.0,
+          fullTopo.z2Invariant.confidence * 0.5 +
+          fullTopo.chernNumber.confidence * 0.3 +
+          (fullTopo.bandInversion.isInverted ? 0.2 : 0)
+        );
+        topologicalClass = fullTopo.topologicalPhase !== "trivial"
+          ? fullTopo.topologicalPhase
+          : topologicalClass;
+      } else if (fullTopo.symmetryIndicator?.compatibilityCheckPassed) {
+        proxySource = "symmetry-indicator";
+        proxyConfidence = Math.min(0.6,
+          fullTopo.symmetryIndicator.confidence * 0.4 +
+          (fullTopo.bandInversion.isInverted ? 0.2 : 0)
+        );
+      } else {
+        proxyConfidence = estimateEigenvalueProxyConfidence(bandInversionCount, dispersion.nBands);
+      }
+    } else {
+      proxyConfidence = estimateEigenvalueProxyConfidence(bandInversionCount, dispersion.nBands);
+    }
+  } catch {
+    proxyConfidence = estimateEigenvalueProxyConfidence(bandInversionCount, dispersion.nBands);
+  }
+
   return {
     berryPhaseProxy: Number(berryPhaseProxy.toFixed(4)),
     bandInversionCount,
     topologicalClass,
     z2Index,
+    proxyConfidence: Number(proxyConfidence.toFixed(4)),
+    proxySource,
+    wilsonLoopAvailable,
   };
+}
+
+function estimateEigenvalueProxyConfidence(inversions: number, nBands: number): number {
+  if (inversions === 0) return 0.1;
+
+  const inversionRate = inversions / Math.max(1, nBands);
+  if (inversionRate > 0.5) return 0.15;
+  if (inversions === 1) return 0.25;
+  if (inversions === 2) return 0.30;
+  return Math.min(0.35, 0.20 + inversions * 0.03);
 }
 
 function computeOrbitalDOS(
@@ -971,7 +1064,7 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
   const bandCurvatures = computeBandCurvatures(dispersion);
   const vhsPositions = detectVHSPositions(dispersion);
   const nestingVectors = computeNestingVectors(dispersion);
-  const topologicalInvariants = computeTopologicalInvariants(dispersion, surrogateData);
+  const topologicalInvariants = computeTopologicalInvariants(dispersion, surrogateData, formula);
 
   const derivedQuantities: DerivedQuantities = {
     effectiveMasses,
