@@ -5,6 +5,7 @@ import { runXTBOptimization, runXTBPhononCheck, runXTBAnharmonicProbe, runXTBMDS
 import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 import { checkValenceSumRule } from "../physics/advanced-constraints";
+import { passesElementCountCap } from "./candidate-generator";
 
 export type DopingCharacter = "electron" | "hole" | "isovalent" | "vacancy-hole" | "interstitial-electron";
 
@@ -1443,9 +1444,14 @@ export function generateDopedVariants(
   const seen = new Set<string>();
   seen.add(normalizeFormula(formula));
   let valenceRejected = 0;
+  let capRejected = 0;
   const unique = allVariants.filter(v => {
     if (seen.has(v.resultFormula)) return false;
     seen.add(v.resultFormula);
+    if (!passesElementCountCap(v.resultFormula)) {
+      capRejected++;
+      return false;
+    }
     const valenceCheck = checkValenceSumRule(v.resultFormula);
     if (!valenceCheck.pass) {
       valenceRejected++;
