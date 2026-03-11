@@ -952,12 +952,17 @@ function computeSpinOrbitCoupling(atomicNumber: number): number {
   return Math.min(1.0, 0.80 + 0.02 * (atomicNumber - 80));
 }
 
+function canonicalEdgeKey(a: number, b: number): number {
+  return a < b ? a * 65536 + b : b * 65536 + a;
+}
+
 function compute3BodyFeatures(graph: CrystalGraph): ThreeBodyFeature[] {
   const features: ThreeBodyFeature[] = [];
-  const edgeMap = new Map<string, number>();
+  const edgeMap = new Map<number, number>();
 
   for (const edge of graph.edges) {
-    edgeMap.set(`${edge.source}-${edge.target}`, edge.distance);
+    const key = canonicalEdgeKey(edge.source, edge.target);
+    if (!edgeMap.has(key)) edgeMap.set(key, edge.distance);
   }
 
   for (let center = 0; center < graph.nodes.length; center++) {
@@ -968,9 +973,9 @@ function compute3BodyFeatures(graph: CrystalGraph): ThreeBodyFeature[] {
       for (let b = a + 1; b < neighbors.length; b++) {
         const n1 = neighbors[a];
         const n2 = neighbors[b];
-        const d1 = edgeMap.get(`${center}-${n1}`) ?? edgeMap.get(`${n1}-${center}`) ?? 2.5;
-        const d2 = edgeMap.get(`${center}-${n2}`) ?? edgeMap.get(`${n2}-${center}`) ?? 2.5;
-        const d12 = edgeMap.get(`${n1}-${n2}`) ?? edgeMap.get(`${n2}-${n1}`) ?? Math.sqrt(d1 * d1 + d2 * d2);
+        const d1 = edgeMap.get(canonicalEdgeKey(center, n1)) ?? 2.5;
+        const d2 = edgeMap.get(canonicalEdgeKey(center, n2)) ?? 2.5;
+        const d12 = edgeMap.get(canonicalEdgeKey(n1, n2)) ?? Math.sqrt(d1 * d1 + d2 * d2);
 
         let cosAngle = (d1 * d1 + d2 * d2 - d12 * d12) / (2 * d1 * d2);
         cosAngle = Math.max(-1, Math.min(1, cosAngle));
@@ -1146,42 +1151,109 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
 
   const latticeParams = structure?.latticeParams;
   const hasPositions = structure?.atomicPositions && Array.isArray(structure.atomicPositions);
+  const cutoff = 6.0;
 
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      let distance: number;
-      if (hasPositions && structure.atomicPositions[i] && structure.atomicPositions[j]) {
-        const pi = structure.atomicPositions[i];
-        const pj = structure.atomicPositions[j];
-        const a = latticeParams?.a ?? 5;
-        const b = latticeParams?.b ?? 5;
-        const c = latticeParams?.c ?? 5;
-        const dx = (pi.x - pj.x) * a;
-        const dy = (pi.y - pj.y) * b;
-        const dz = (pi.z - pj.z) * c;
-        distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      } else {
-        const ri = nodes[i].atomicRadius / 100;
-        const rj = nodes[j].atomicRadius / 100;
-        const pScale = pressureDistanceScale(pressureGpa ?? 0);
-        distance = (ri + rj) * 1.1 * pScale;
+  const useVoxelGrid = hasPositions && nodes.length > 32;
+
+  if (useVoxelGrid) {
+    const a = latticeParams?.a ?? 5;
+    const b = latticeParams?.b ?? 5;
+    const c = latticeParams?.c ?? 5;
+    const voxelSize = cutoff;
+    const nxBins = Math.max(1, Math.ceil(a / voxelSize));
+    const nyBins = Math.max(1, Math.ceil(b / voxelSize));
+    const nzBins = Math.max(1, Math.ceil(c / voxelSize));
+    const voxelGrid = new Map<number, number[]>();
+
+    for (let idx = 0; idx < nodes.length; idx++) {
+      const pos = structure.atomicPositions[idx];
+      if (!pos) continue;
+      const vx = Math.min(nxBins - 1, Math.max(0, Math.floor(pos.x * nxBins)));
+      const vy = Math.min(nyBins - 1, Math.max(0, Math.floor(pos.y * nyBins)));
+      const vz = Math.min(nzBins - 1, Math.max(0, Math.floor(pos.z * nzBins)));
+      const vKey = vx * nyBins * nzBins + vy * nzBins + vz;
+      const bucket = voxelGrid.get(vKey);
+      if (bucket) bucket.push(idx); else voxelGrid.set(vKey, [idx]);
+    }
+
+    for (let i = 0; i < nodes.length; i++) {
+      const pi = structure.atomicPositions[i];
+      if (!pi) continue;
+      const vx = Math.min(nxBins - 1, Math.max(0, Math.floor(pi.x * nxBins)));
+      const vy = Math.min(nyBins - 1, Math.max(0, Math.floor(pi.y * nyBins)));
+      const vz = Math.min(nzBins - 1, Math.max(0, Math.floor(pi.z * nzBins)));
+
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const nx = ((vx + dx) % nxBins + nxBins) % nxBins;
+            const ny = ((vy + dy) % nyBins + nyBins) % nyBins;
+            const nz = ((vz + dz) % nzBins + nzBins) % nzBins;
+            const nKey = nx * nyBins * nzBins + ny * nzBins + nz;
+            const bucket = voxelGrid.get(nKey);
+            if (!bucket) continue;
+
+            for (const j of bucket) {
+              if (j <= i) continue;
+              const pj = structure.atomicPositions[j];
+              if (!pj) continue;
+              const ddx = (pi.x - pj.x) * a;
+              const ddy = (pi.y - pj.y) * b;
+              const ddz = (pi.z - pj.z) * c;
+              const distance = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+              if (distance >= cutoff) continue;
+
+              const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
+              const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
+              const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
+              const ionicCharacter = Math.min(1.0, enDiff / 2.5);
+              const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+
+              edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+              edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+              adjacency[i].push(j);
+              adjacency[j].push(i);
+            }
+          }
+        }
       }
+    }
+  } else {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        let distance: number;
+        if (hasPositions && structure.atomicPositions[i] && structure.atomicPositions[j]) {
+          const pi = structure.atomicPositions[i];
+          const pj = structure.atomicPositions[j];
+          const a = latticeParams?.a ?? 5;
+          const b = latticeParams?.b ?? 5;
+          const c = latticeParams?.c ?? 5;
+          const dx = (pi.x - pj.x) * a;
+          const dy = (pi.y - pj.y) * b;
+          const dz = (pi.z - pj.z) * c;
+          distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        } else {
+          const ri = nodes[i].atomicRadius / 100;
+          const rj = nodes[j].atomicRadius / 100;
+          const pScale = pressureDistanceScale(pressureGpa ?? 0);
+          distance = (ri + rj) * 1.1 * pScale;
+        }
 
-      const cutoff = 6.0;
-      if (distance < cutoff || nodes.length <= 8) {
-        const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-        const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
+        if (distance < cutoff || nodes.length <= 8) {
+          const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
+          const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
 
-        const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
-        const ionicCharacter = Math.min(1.0, enDiff / 2.5);
+          const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
+          const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
-        const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+          const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
 
-        edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
-        edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+          edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+          edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
 
-        adjacency[i].push(j);
-        adjacency[j].push(i);
+          adjacency[i].push(j);
+          adjacency[j].push(i);
+        }
       }
     }
   }
@@ -1216,9 +1288,10 @@ export function cgcnnConvolutionLayer(
     return e.slice(0, HIDDEN_DIM);
   });
 
-  const edgeMap = new Map<string, EdgeFeature>();
+  const edgeMap = new Map<number, EdgeFeature>();
   for (const edge of graph.edges) {
-    edgeMap.set(`${edge.source}-${edge.target}`, edge);
+    const key = canonicalEdgeKey(edge.source, edge.target);
+    if (!edgeMap.has(key)) edgeMap.set(key, edge);
   }
 
   const newEmbeddings: number[][] = [];
@@ -1234,7 +1307,7 @@ export function cgcnnConvolutionLayer(
     let totalWeight = 0;
 
     for (const j of neighbors) {
-      const edgeFeat = edgeMap.get(`${i}-${j}`) ?? edgeMap.get(`${j}-${i}`);
+      const edgeFeat = edgeMap.get(canonicalEdgeKey(i, j));
       const distance = edgeFeat?.distance ?? 2.5;
       const cutoffWeight = cosineCutoff(distance);
       if (cutoffWeight <= 0) continue;
@@ -1302,9 +1375,10 @@ export function attentionMessagePassingLayer(
   const scaleFactor = Math.sqrt(HIDDEN_DIM);
   const updateActivation = useLeakyMsg ? leakyRelu : relu;
 
-  const edgeMap = new Map<string, number[]>();
+  const edgeFeatMap = new Map<number, number[]>();
   for (const edge of graph.edges) {
-    edgeMap.set(`${edge.source}-${edge.target}`, edge.features);
+    const ek = canonicalEdgeKey(edge.source, edge.target);
+    if (!edgeFeatMap.has(ek)) edgeFeatMap.set(ek, edge.features);
   }
 
   for (let i = 0; i < nNodes; i++) {
@@ -1323,7 +1397,7 @@ export function attentionMessagePassingLayer(
       const key = layerNorm(matVecMul(W_key, padded[j]));
       let score = dotProduct(query, key) / scaleFactor;
 
-      const edgeFeats = edgeMap.get(`${i}-${j}`) ?? edgeMap.get(`${j}-${i}`);
+      const edgeFeats = edgeFeatMap.get(canonicalEdgeKey(i, j));
       if (edgeFeats) {
         for (let ef = 0; ef < edgeFeats.length && ef < HIDDEN_DIM; ef++) {
           score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
