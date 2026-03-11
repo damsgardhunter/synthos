@@ -1055,25 +1055,49 @@ export function computeSynthesisScore(
   }
   precursorAvailability = Math.min(1.0, Math.max(0, precursorAvailability));
 
-  const meltingPoints: number[] = [];
+  const VOLATILE_BOILING_K: Record<string, number> = {
+    S: 718, P: 554, Se: 958, As: 887, Br: 332, I: 457, Zn: 1180, Cd: 1040, Hg: 630,
+  };
+
+  const weightedMeltingPoints: { mp: number; frac: number }[] = [];
   for (const el of elements) {
     const data = getElementData(el);
-    if (data?.meltingPoint) meltingPoints.push(data.meltingPoint);
+    if (data?.meltingPoint) {
+      const frac = (counts[el] || 1) / totalAtoms;
+      weightedMeltingPoints.push({ mp: data.meltingPoint, frac });
+    }
   }
-  const avgMeltingPoint = meltingPoints.length > 0
-    ? meltingPoints.reduce((a, b) => a + b, 0) / meltingPoints.length
+  const avgMeltingPoint = weightedMeltingPoints.length > 0
+    ? weightedMeltingPoints.reduce((s, e) => s + e.mp * e.frac, 0) /
+      weightedMeltingPoints.reduce((s, e) => s + e.frac, 0)
     : 1500;
-
   const requiredTempK = defaults.typicalTempC + 273;
   let temperatureFactor = 1.0;
-  if (requiredTempK > avgMeltingPoint * 0.9) {
-    temperatureFactor = 0.4;
-  } else if (requiredTempK > avgMeltingPoint * 0.7) {
+  const tammannRatio = requiredTempK / avgMeltingPoint;
+  if (tammannRatio < 0.4) {
+    temperatureFactor = 0.5;
+  } else if (tammannRatio < 0.5) {
     temperatureFactor = 0.7;
-  } else if (requiredTempK > 2000) {
-    temperatureFactor = 0.6;
-  } else if (requiredTempK > 1500) {
-    temperatureFactor = 0.8;
+  } else if (tammannRatio >= 0.5 && tammannRatio <= 0.8) {
+    temperatureFactor = 1.0;
+  } else if (tammannRatio <= 0.95) {
+    temperatureFactor = 0.85;
+  } else {
+    temperatureFactor = 0.65;
+  }
+
+  if (requiredTempK > 2200) {
+    temperatureFactor *= 0.85;
+  } else if (requiredTempK > 1800) {
+    temperatureFactor *= 0.92;
+  }
+
+  for (const el of elements) {
+    const bp = VOLATILE_BOILING_K[el];
+    if (bp && requiredTempK > bp * 0.9) {
+      const volatileFrac = (counts[el] || 1) / totalAtoms;
+      temperatureFactor *= Math.max(0.3, 1.0 - volatileFrac * 0.8);
+    }
   }
 
   let phaseCompetitionPenalty = 0;
@@ -1118,13 +1142,15 @@ export function computeSynthesisScore(
     }
   }
 
+  const atmospherePenalty = defaults.atmosphereComplexity * 0.25;
+
   const total = Math.min(1.0, Math.max(0,
     defaults.baseScore * 0.3 +
     precursorAvailability * 0.25 +
     temperatureFactor * 0.2 -
     phaseCompetitionPenalty -
-    pressurePenalty +
-    (1 - defaults.atmosphereComplexity) * 0.1
+    pressurePenalty -
+    atmospherePenalty
   ));
 
   return {
