@@ -299,9 +299,17 @@ export async function computePhonons(formula: string): Promise<PhononResult> {
   }
 }
 
-export async function computeEph(formula: string, pressureGpa: number = 0): Promise<EphResult> {
-  apiStats.ephCalls++;
-  const startTime = Date.now();
+interface EnrichedPhysicsData {
+  tier: PhysicsTier;
+  electronic: ElectronicStructure;
+  phonon: PhononSpectrum;
+  coupling: ElectronPhononCoupling;
+}
+
+async function getEnrichedPhysicsData(
+  formula: string,
+  pressureGpa: number
+): Promise<EnrichedPhysicsData> {
   const topTier = determineTier();
 
   let tier: PhysicsTier = "surrogate";
@@ -347,10 +355,19 @@ export async function computeEph(formula: string, pressureGpa: number = 0): Prom
     } catch {}
   }
 
+  const electronic = electronicOverride ?? computeElectronicStructure(formula);
+  const phonon = phononOverride ?? computePhononSpectrum(formula, electronic);
+  const coupling = couplingOverride ?? computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
+
+  return { tier, electronic, phonon, coupling };
+}
+
+export async function computeEph(formula: string, pressureGpa: number = 0): Promise<EphResult> {
+  apiStats.ephCalls++;
+  const startTime = Date.now();
+
   try {
-    const elec = electronicOverride ?? computeElectronicStructure(formula);
-    const phonon = phononOverride ?? computePhononSpectrum(formula, elec);
-    const coupling = couplingOverride ?? computeElectronPhononCoupling(elec, phonon, formula, pressureGpa);
+    const { tier, coupling } = await getEnrichedPhysicsData(formula, pressureGpa);
 
     apiStats.tierBreakdown[tier]++;
     return {
@@ -389,58 +406,15 @@ export async function computeEph(formula: string, pressureGpa: number = 0): Prom
 export async function computeTc(formula: string, pressureGpa: number = 0): Promise<TcResult> {
   apiStats.tcCalls++;
   const startTime = Date.now();
-  const topTier = determineTier();
-
-  let tier: PhysicsTier = "surrogate";
-  let electronicOverride: ElectronicStructure | undefined;
-  let phononOverride: PhononSpectrum | undefined;
-  let couplingOverride: ElectronPhononCoupling | undefined;
-
-  if (topTier === "full-dft") {
-    try {
-      const dft = await runFullDFT(formula);
-      if (dft.scf?.converged) {
-        tier = "full-dft";
-        electronicOverride = computeElectronicStructure(formula);
-        if (dft.scf.fermiEnergy !== null) {
-          electronicOverride.densityOfStatesAtFermi = estimateDosAtFermi(
-            formula, dft.scf.isMetallic, electronicOverride.densityOfStatesAtFermi
-          );
-        }
-        if (dft.scf.bandGap !== null) {
-          (electronicOverride as any).bandGap = dft.scf.bandGap;
-        }
-        electronicOverride.metallicity = dft.scf.isMetallic ? 0.95 : 0.3;
-        if (dft.phonon && dft.phonon.frequencies.length > 0) {
-          phononOverride = computePhononSpectrum(formula, electronicOverride);
-          (phononOverride as any).frequencies = dft.phonon.frequencies;
-          phononOverride.hasImaginaryModes = dft.phonon.hasImaginary;
-          phononOverride.debyeTemperature = dft.phonon.highestFrequency * 1.44;
-          couplingOverride = computeElectronPhononCoupling(electronicOverride, phononOverride, formula, pressureGpa);
-        }
-      }
-    } catch {}
-  }
-
-  if (tier === "surrogate" && (topTier === "full-dft" || topTier === "xtb")) {
-    try {
-      const xtb = await runXTBEnrichment(formula);
-      if (xtb && xtb.converged) {
-        tier = "xtb";
-        electronicOverride = computeElectronicStructure(formula);
-        electronicOverride.metallicity = xtb.isMetallic ? 0.9 : 0.3;
-        (electronicOverride as any).bandGap = xtb.bandGap;
-      }
-    } catch {}
-  }
 
   try {
+    const { tier, electronic, phonon, coupling } = await getEnrichedPhysicsData(formula, pressureGpa);
     const eliashberg = runEliashbergPipeline(
       formula,
       pressureGpa,
-      electronicOverride,
-      phononOverride,
-      couplingOverride
+      electronic,
+      phonon,
+      coupling
     );
 
     apiStats.tierBreakdown[tier]++;
