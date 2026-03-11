@@ -214,20 +214,29 @@ function getDeterministicDopant(hostEl: string, neighbors: string[], existingEle
   return bestDopant;
 }
 
-function getCoordinationFactor(el: string): number {
+function getCoordinationFactor(el: string, pressureGpa: number = 0): number {
   const data = ELEMENTAL_DATA[el];
   if (!data) return 1.0;
   const ve = data.valenceElectrons;
-  if (ve <= 2) return 0.8;
-  if (ve <= 4) return 1.0;
-  if (ve <= 6) return 1.1;
-  return 1.2;
+  let baseFactor: number;
+  if (ve <= 2) baseFactor = 0.8;
+  else if (ve <= 4) baseFactor = 1.0;
+  else if (ve <= 6) baseFactor = 1.1;
+  else baseFactor = 1.2;
+
+  if (pressureGpa > 10) {
+    const pressureBoost = 1.0 + Math.log10(1 + pressureGpa / 50) * 0.3;
+    baseFactor *= pressureBoost;
+  }
+
+  return baseFactor;
 }
 
 export function computeDefectFormationEnergy(
   formula: string,
   defectType: DefectType,
-  element: string
+  element: string,
+  pressureGpa: number = 0
 ): number {
   const comp = parseFormula(formula);
   const elements = Object.keys(comp);
@@ -237,7 +246,7 @@ export function computeDefectFormationEnergy(
   }, 0) / Math.max(1, elements.length);
 
   const elEnergy = getElementEnergy(element);
-  const coordFactor = getCoordinationFactor(element);
+  const coordFactor = getCoordinationFactor(element, pressureGpa);
 
   let Ef: number;
   switch (defectType) {
@@ -310,7 +319,7 @@ export function estimateDefectDensity(
   return Math.max(1e6, Math.min(1e22, density));
 }
 
-export function generateDefectVariants(formula: string): DefectStructure[] {
+export function generateDefectVariants(formula: string, pressureGpa: number = 0): DefectStructure[] {
   const comp = parseFormula(formula);
   const elements = Object.keys(comp);
   const variants: DefectStructure[] = [];
@@ -319,7 +328,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
 
   for (const el of elements) {
     if ((comp[el] || 0) < 0.01) continue;
-    const Ef = computeDefectFormationEnergy(formula, DefectType.Vacancy, el);
+    const Ef = computeDefectFormationEnergy(formula, DefectType.Vacancy, el, pressureGpa);
     const density = estimateDefectDensity(Ef);
     const vacConc = Math.min(0.10, Math.max(0.005, 0.05 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
     const newComp = { ...comp, [el]: comp[el] * (1 - vacConc) };
@@ -339,7 +348,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
 
   for (const intEl of INTERSTITIAL_ELEMENTS) {
     if (elements.includes(intEl) && comp[intEl] > 1) continue;
-    const Ef = computeDefectFormationEnergy(formula, DefectType.Interstitial, intEl);
+    const Ef = computeDefectFormationEnergy(formula, DefectType.Interstitial, intEl, pressureGpa);
     const density = estimateDefectDensity(Ef);
     const intConc = Math.min(0.05, Math.max(0.002, 0.02 * Math.exp(-Math.max(0, Ef - 1.5) / 0.5)));
 
@@ -362,7 +371,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
       for (let j = i + 1; j < elements.length; j++) {
         const elA = elements[i];
         const elB = elements[j];
-        const Ef = computeDefectFormationEnergy(formula, DefectType.Antisite, elA);
+        const Ef = computeDefectFormationEnergy(formula, DefectType.Antisite, elA, pressureGpa);
         const density = estimateDefectDensity(Ef);
 
         const asComp = { ...comp };
@@ -390,7 +399,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
     if (!neighbors || neighbors.length === 0) continue;
     const dopant = getDeterministicDopant(el, neighbors, elements);
     if (!dopant) continue;
-    const Ef = computeDefectFormationEnergy(formula, DefectType.Dopant, el);
+    const Ef = computeDefectFormationEnergy(formula, DefectType.Dopant, el, pressureGpa);
     const density = estimateDefectDensity(Ef);
 
     const dopFrac = Math.min(0.10, Math.max(0.005, 0.05 * Math.exp(-Math.max(0, Ef - 1.0) / 0.5)));
@@ -414,7 +423,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
   const totalAtoms = Object.values(comp).reduce((s, n) => s + n, 0);
   const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
   if (hFraction > 0.5 && hCount >= 4) {
-    const h2Ef = computeDefectFormationEnergy(formula, DefectType.MolecularH2, "H");
+    const h2Ef = computeDefectFormationEnergy(formula, DefectType.MolecularH2, "H", pressureGpa);
     const h2Density = estimateDefectDensity(h2Ef);
     const h2Conc = Math.min(0.08, Math.max(0.005, 0.04 * Math.exp(-Math.max(0, h2Ef - 0.5) / 0.4)));
 
@@ -434,7 +443,7 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
 
   const grainSizeNm = 100;
   const gbConc = estimateGrainBoundaryConcentration(grainSizeNm);
-  const gbEf = computeDefectFormationEnergy(formula, DefectType.GrainBoundary, elements[0]);
+  const gbEf = computeDefectFormationEnergy(formula, DefectType.GrainBoundary, elements[0], pressureGpa);
   const gbDensity = estimateDefectDensity(gbEf);
   variants.push({
     type: DefectType.GrainBoundary,
