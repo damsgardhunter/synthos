@@ -8,6 +8,7 @@ export interface SynthesisVector {
   thermalCycles: number;
   strain: number;
   oxygenPressure: number;
+  synthesisMethod?: "solid-state" | "melt-textured" | "vapor-deposition" | "sputtering" | "bridgman" | "czochralski" | "flux-growth" | "arc-melting" | "high-pressure" | "sol-gel";
 }
 
 export interface MaterialVector {
@@ -145,6 +146,7 @@ export function clampSynthesisVector(v: SynthesisVector): SynthesisVector {
     thermalCycles: clamp(Math.round(v.thermalCycles), C.thermalCycles.min, C.thermalCycles.max),
     strain: clamp(v.strain, C.strain.min, C.strain.max),
     oxygenPressure: clamp(v.oxygenPressure, C.oxygenPressure.min, C.oxygenPressure.max),
+    synthesisMethod: v.synthesisMethod,
   };
 }
 
@@ -463,6 +465,7 @@ export function crossoverSynthesisVectors(a: SynthesisVector, b: SynthesisVector
     thermalCycles: Math.round(blend(a.thermalCycles, b.thermalCycles)),
     strain: blend(a.strain, b.strain),
     oxygenPressure: blend(a.oxygenPressure, b.oxygenPressure),
+    synthesisMethod: Math.random() < 0.5 ? a.synthesisMethod : b.synthesisMethod,
   });
 }
 

@@ -60,7 +60,9 @@ export function predictGrainStructure(
   formula: string,
   synthesisTemp: number,
   coolingRate: number,
-  pressure: number
+  pressure: number,
+  synthesisMethod?: string,
+  materialClass?: string
 ): GrainStructure {
   let grainSize = 100;
 
@@ -84,16 +86,31 @@ export function predictGrainStructure(
     grainSize *= Math.max(0.3, 1 - pressure / 500);
   }
 
+  const method = synthesisMethod ?? "";
+  const SINGLE_CRYSTAL_METHODS = new Set(["bridgman", "czochralski", "flux-growth"]);
+  const TEXTURED_METHODS = new Set(["melt-textured", "vapor-deposition", "sputtering"]);
+
   let orientation: GrainStructure["grainOrientation"] = "random";
-  if (coolingRate < 1 && synthesisTemp > 800) {
+  if (SINGLE_CRYSTAL_METHODS.has(method)) {
     orientation = "single-crystal";
-  } else if (coolingRate < 10 && synthesisTemp > 600) {
-    orientation = "epitaxial";
-  } else if (coolingRate < 100) {
-    orientation = "textured";
+    grainSize = Math.max(grainSize, 10000);
+  } else if (TEXTURED_METHODS.has(method)) {
+    orientation = coolingRate < 10 ? "epitaxial" : "textured";
+    grainSize *= 1.5;
+  } else if (method === "arc-melting") {
+    orientation = coolingRate < 50 ? "textured" : "random";
+  } else {
+    if (coolingRate < 1 && synthesisTemp > 800) {
+      orientation = "epitaxial";
+    } else if (coolingRate < 10 && synthesisTemp > 600) {
+      orientation = "textured";
+    }
   }
 
-  const boundaryDensity = grainSize > 0 ? 1e14 / (grainSize * grainSize) : 1e14;
+  const boundaryDensity = grainSize > 0 ? 1e7 / grainSize : 1e14;
+
+  const mc = (materialClass ?? "").toLowerCase();
+  const isHydride = mc.includes("hydride") || /H\d/.test(formula) || formula.includes("H3") || formula.includes("H10");
 
   let phaseHomogeneity = 0.85;
   if (coolingRate < 50) {
@@ -105,6 +122,20 @@ export function predictGrainStructure(
   if (pressure > 5 && pressure < 100) {
     phaseHomogeneity += 0.02;
   }
+
+  if (isHydride) {
+    const hMatch = formula.match(/H(\d+)/);
+    const hCount = hMatch ? parseInt(hMatch[1]) : 1;
+    const minPressureForStability = hCount > 6 ? 100 : hCount > 3 ? 50 : 10;
+    if (pressure < minPressureForStability) {
+      const pressureDeficit = (minPressureForStability - pressure) / minPressureForStability;
+      phaseHomogeneity *= Math.max(0.4, 1 - pressureDeficit * 0.5);
+    }
+    if (pressure < 5 && hCount > 3) {
+      phaseHomogeneity *= 0.5;
+    }
+  }
+
   phaseHomogeneity = Math.min(0.99, phaseHomogeneity);
 
   grainSize = Math.max(0.5, grainSize);
@@ -257,6 +288,7 @@ export function simulateCrystalGrowth(
     thermalCycles: synthesisVector.thermalCycles ?? 1,
     strain: synthesisVector.strain ?? 0,
     oxygenPressure: synthesisVector.oxygenPressure ?? 0,
+    synthesisMethod: synthesisVector.synthesisMethod,
   };
 
   const notes: string[] = [];
@@ -268,7 +300,7 @@ export function simulateCrystalGrowth(
   const supersaturation = estimateSupersaturation(sv.temperature, sv.pressure);
   const growthRate = estimateGrowthRate(diffusionRate, supersaturation, sv.temperature, materialClass);
 
-  const grainStructure = predictGrainStructure(formula, sv.temperature, sv.coolingRate, sv.pressure);
+  const grainStructure = predictGrainStructure(formula, sv.temperature, sv.coolingRate, sv.pressure, sv.synthesisMethod, materialClass);
 
   if (sv.annealTime > 4) {
     const annealBenefit = Math.min(2.0, sv.annealTime / 12);
