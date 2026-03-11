@@ -396,25 +396,64 @@ function deriveMultiBandScore(f: MLFeatureVector): number {
   return Math.min(1, score);
 }
 
+const NON_CENTROSYMMETRIC_SG_NUMBERS = new Set([
+  1,
+  3, 4, 5, 6, 7, 8, 9,
+  16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46,
+  75, 76, 77, 78, 79, 80, 81, 82, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
+  143, 144, 145, 146, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161,
+  168, 169, 170, 171, 172, 173, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190,
+  195, 196, 197, 198, 199, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220,
+]);
+
+const NON_CENTRO_HM_SYMBOLS = new Set([
+  "P1", "P2", "P21", "C2", "Pm", "Pc", "Cm", "Cc",
+  "P222", "P2221", "P21212", "P212121", "C2221", "C222", "F222", "I222", "I212121",
+  "Pmm2", "Pmc21", "Pcc2", "Pma2", "Pca21", "Pnc2", "Pmn21", "Pba2", "Pna21", "Pnn2",
+  "Cmm2", "Cmc21", "Ccc2", "Amm2", "Aem2", "Ama2", "Aea2",
+  "Fmm2", "Fdd2", "Imm2", "Iba2", "Ima2",
+  "P4", "P41", "P42", "P43", "I4", "I41",
+  "P-4", "I-4",
+  "P422", "P4212", "P4122", "P41212", "P4222", "P42212", "P4322", "P43212", "I422", "I4122",
+  "P4mm", "P4bm", "P42cm", "P42nm", "P4cc", "P4nc", "P42mc", "P42bc",
+  "I4mm", "I4cm", "I41md", "I41cd",
+  "P-42m", "P-42c", "P-421m", "P-421c", "P-4m2", "P-4c2", "P-4b2", "P-4n2",
+  "I-4m2", "I-4c2", "I-42m", "I-42d",
+  "P3", "P31", "P32", "R3",
+  "P312", "P321", "P3112", "P3121", "P3212", "P3221", "R32",
+  "P3m1", "P31m", "P3c1", "P31c", "R3m", "R3c",
+  "P6", "P61", "P65", "P62", "P64", "P63",
+  "P622", "P6122", "P6522", "P6222", "P6422", "P6322",
+  "P6mm", "P6cc", "P63cm", "P63mc",
+  "P-6m2", "P-6c2", "P-62m", "P-62c",
+  "P23", "F23", "I23", "P213", "I213",
+  "P432", "P4232", "F432", "F4132", "I432", "P4332", "P4132", "I4132",
+  "P-43m", "F-43m", "I-43m", "P-43n", "F-43c", "I-43d",
+]);
+
 function deriveNonCentrosymmetric(f: MLFeatureVector): number {
   const sym = (f as any).crystalSymmetry;
   if (!sym || typeof sym !== "string") return 0;
   const sg = sym.trim();
-  const NON_CENTRO_GROUPS = [
-    "P4mm", "P4bm", "P42cm", "P42nm", "P4cc", "P4nc",
-    "I4mm", "I4cm", "I41md", "I41cd",
-    "P6mm", "P6cc", "P63mc", "P63cm",
-    "R3m", "R3c",
-    "P21", "P1", "Pca21", "Pna21", "Pmc21", "Pmn21",
-    "Fdd2", "Aba2", "Ima2", "Cmc21",
-    "F-43m", "I-4m2", "I-42d", "P-4m2", "P-42m",
-    "P213", "I213",
-  ];
-  for (const g of NON_CENTRO_GROUPS) {
-    if (sg.includes(g)) return 1;
+
+  const sgNumMatch = sg.match(/^(\d+)$/);
+  if (sgNumMatch) {
+    return NON_CENTROSYMMETRIC_SG_NUMBERS.has(parseInt(sgNumMatch[1], 10)) ? 1 : 0;
   }
+
+  const sgNumPrefix = sg.match(/^(\d+)\s/);
+  if (sgNumPrefix) {
+    return NON_CENTROSYMMETRIC_SG_NUMBERS.has(parseInt(sgNumPrefix[1], 10)) ? 1 : 0;
+  }
+
+  if (NON_CENTRO_HM_SYMBOLS.has(sg)) return 1;
+
+  const sgClean = sg.replace(/\s+/g, "");
+  if (NON_CENTRO_HM_SYMBOLS.has(sgClean)) return 1;
+
   const normalized = sg.toLowerCase();
   if (normalized.includes("non-centrosymmetric") || normalized.includes("noncentro")) return 1;
+  if (normalized.includes("polar") || normalized.includes("chiral")) return 1;
   return 0;
 }
 
@@ -432,9 +471,11 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
 
   let pressureGpa = sanitize(f.pressureGpa, FEATURE_MEANS.pressureGpa);
   if (pressureGpa === 0 && f.hasHydrogen && f.hydrogenRatio > 0.3) {
-    if (f.hydrogenRatio >= 8) pressureGpa = 200;
-    else if (f.hydrogenRatio >= 6) pressureGpa = 150;
-    else if (f.hydrogenRatio >= 4) pressureGpa = 100;
+    const maxMass = sanitize(f.maxAtomicMass, 50);
+    const massScale = maxMass >= 130 ? 0.75 : maxMass >= 80 ? 0.85 : maxMass >= 40 ? 1.0 : 1.15;
+    if (f.hydrogenRatio >= 8) pressureGpa = Math.round(200 * massScale);
+    else if (f.hydrogenRatio >= 6) pressureGpa = Math.round(150 * massScale);
+    else if (f.hydrogenRatio >= 4) pressureGpa = Math.round(100 * massScale);
   }
 
   const physicsFeatures = [
