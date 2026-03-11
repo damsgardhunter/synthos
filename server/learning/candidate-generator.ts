@@ -1052,7 +1052,7 @@ export function runMassiveGeneration(
   for (const f of doped) allGenerated.add(f);
 
   const topSCFormulas = sorted.slice(0, 10).map(c => c.formula);
-  const knownSC = [
+  const knownSCRaw = [
     "MgB2", "NbN", "Nb3Sn", "Nb3Ge", "MgCNi3", "YBa2Cu3O7", "LaH10", "NbC", "V3Si", "NbTi",
     "FeSe", "Sr2RuO4", "LaFeAsO", "BaFe2As2", "LiFeAs", "NaFeAs", "FeTe",
     "La2CuO4", "Tl2Ba2CuO6", "HgBa2CuO4",
@@ -1074,7 +1074,9 @@ export function runMassiveGeneration(
     "Sr2VO3FeAs",
     "BiS2LaO", "NbSe3",
   ];
-  const fractionalSeeds = [...new Set([...topSCFormulas, ...knownSC])];
+  const knownSC = knownSCRaw.map(f => canonicalize(f)).filter(f => f.length > 1);
+  const fractionalSeedSet = new Set<string>([...topSCFormulas, ...knownSC]);
+  const fractionalSeeds = Array.from(fractionalSeedSet);
   const fractionalDoped = generateFractionalDopedVariants(fractionalSeeds, 150);
   for (const f of fractionalDoped) allGenerated.add(f);
 
@@ -1094,8 +1096,20 @@ export function runMassiveGeneration(
     { name: "Pyrite", slots: [["Fe", "Co", "Ni", "Cu", "Ru", "Os"], ["S", "Se", "Te"]], stoichs: [[1,2]] },
     { name: "Skutterudite", slots: [["Co", "Rh", "Ir", "Fe", "Ni"], ["Sb", "As", "P"]], stoichs: [[1,3]] },
   ];
+  const protoWeights = PROTO_TEMPLATES.map(p => {
+    const diversity = p.slots.reduce((prod, s) => prod * s.length, 1) * p.stoichs.length;
+    return 1.0 / Math.sqrt(diversity);
+  });
+  const protoWeightSum = protoWeights.reduce((s, w) => s + w, 0);
+  const protoCDF = protoWeights.map((_, i) =>
+    protoWeights.slice(0, i + 1).reduce((s, w) => s + w, 0) / protoWeightSum
+  );
+
   for (let i = 0; i < 150; i++) {
-    const proto = PROTO_TEMPLATES[Math.floor(Math.random() * PROTO_TEMPLATES.length)];
+    const r = Math.random();
+    let protoIdx = protoCDF.findIndex(c => r <= c);
+    if (protoIdx < 0) protoIdx = PROTO_TEMPLATES.length - 1;
+    const proto = PROTO_TEMPLATES[protoIdx];
     const chosen: string[] = [];
     for (const slotGroup of proto.slots) {
       chosen.push(slotGroup[Math.floor(Math.random() * slotGroup.length)]);
@@ -1137,15 +1151,7 @@ export function runMassiveGeneration(
 
   stats.totalGenerated = allGenerated.size;
 
-  const dedupedMap = new Map<string, string>();
-  const allGeneratedArr = Array.from(allGenerated);
-  for (const f of allGeneratedArr) {
-    const canonical = canonicalize(f);
-    if (!dedupedMap.has(canonical)) {
-      dedupedMap.set(canonical, f);
-    }
-  }
-  const uniqueFormulas = Array.from(dedupedMap.keys());
+  const uniqueFormulas = Array.from(allGenerated);
   stats.uniqueAfterDedup = uniqueFormulas.length;
 
   const valenceFiltered: string[] = [];
