@@ -90,13 +90,58 @@ export interface HydrogenPercolationResult {
   cutoffAngstrom: number;
 }
 
-const H_PERCOLATION_CUTOFF_MIN = 1.5;
-const H_PERCOLATION_CUTOFF_MAX = 1.9;
+const H_PERCOLATION_CUTOFF_AMBIENT = 1.9;
+const H_PERCOLATION_CUTOFF_100GPA = 1.5;
+const H_PERCOLATION_CUTOFF_200GPA = 1.25;
 
-function pressureAdaptedHCutoff(pressureGPa: number): number {
-  if (pressureGPa >= 200) return H_PERCOLATION_CUTOFF_MIN;
-  if (pressureGPa <= 0) return H_PERCOLATION_CUTOFF_MAX;
-  return H_PERCOLATION_CUTOFF_MAX - (H_PERCOLATION_CUTOFF_MAX - H_PERCOLATION_CUTOFF_MIN) * (pressureGPa / 200);
+function pressureAdaptedHCutoff(pressureGPa: number, hydrogenFraction: number = 0.5): number {
+  let baseCutoff: number;
+  if (pressureGPa <= 0) {
+    baseCutoff = H_PERCOLATION_CUTOFF_AMBIENT;
+  } else if (pressureGPa <= 100) {
+    const t = pressureGPa / 100;
+    baseCutoff = H_PERCOLATION_CUTOFF_AMBIENT + (H_PERCOLATION_CUTOFF_100GPA - H_PERCOLATION_CUTOFF_AMBIENT) * t;
+  } else if (pressureGPa <= 200) {
+    const t = (pressureGPa - 100) / 100;
+    baseCutoff = H_PERCOLATION_CUTOFF_100GPA + (H_PERCOLATION_CUTOFF_200GPA - H_PERCOLATION_CUTOFF_100GPA) * t;
+  } else {
+    baseCutoff = H_PERCOLATION_CUTOFF_200GPA - 0.001 * (pressureGPa - 200);
+    baseCutoff = Math.max(1.1, baseCutoff);
+  }
+
+  if (hydrogenFraction > 0.6) {
+    const densityBonus = Math.min(0.15, (hydrogenFraction - 0.6) * 0.375);
+    baseCutoff += densityBonus;
+  }
+
+  return baseCutoff;
+}
+
+function toFractional(atom: PercolationAtom, lat: PercolationLattice): PercolationAtom {
+  if (Math.abs(atom.x) <= 1.01 && Math.abs(atom.y) <= 1.01 && Math.abs(atom.z) <= 1.01) {
+    return atom;
+  }
+
+  const alpha = ((lat.alpha ?? 90) * Math.PI) / 180;
+  const beta = ((lat.beta ?? 90) * Math.PI) / 180;
+  const gamma = ((lat.gamma ?? 90) * Math.PI) / 180;
+
+  const cosAlpha = Math.cos(alpha);
+  const cosBeta = Math.cos(beta);
+  const cosGamma = Math.cos(gamma);
+  const sinGamma = Math.sin(gamma);
+  const term = Math.sqrt(Math.max(0, 1 - cosAlpha * cosAlpha - cosBeta * cosBeta - cosGamma * cosGamma + 2 * cosAlpha * cosBeta * cosGamma));
+  const vol = lat.a * lat.b * lat.c * term;
+
+  if (vol < 1e-10) return atom;
+
+  const fx = atom.x / lat.a - (cosGamma / sinGamma) * atom.y / lat.a
+    + (cosAlpha * cosGamma - cosBeta) / (sinGamma * term) * atom.z / lat.a;
+  const fy = atom.y / (lat.b * sinGamma)
+    - (cosAlpha - cosBeta * cosGamma) / (sinGamma * term) * atom.z / lat.b;
+  const fz = atom.z * sinGamma / (lat.c * term);
+
+  return { symbol: atom.symbol, x: fx, y: fy, z: fz };
 }
 
 function periodicDistance(
@@ -158,15 +203,21 @@ export function checkHydrogenPercolation(
   cutoffOrPressure?: number,
   pressureGPa?: number,
 ): HydrogenPercolationResult {
+  const fracAtoms = atoms.map(a => toFractional(a, lattice));
+
+  const hFraction = atoms.length > 0
+    ? atoms.filter(a => a.symbol === "H").length / atoms.length
+    : 0;
+
   let cutoff: number;
   if (pressureGPa !== undefined) {
-    cutoff = pressureAdaptedHCutoff(pressureGPa);
+    cutoff = pressureAdaptedHCutoff(pressureGPa, hFraction);
   } else if (cutoffOrPressure !== undefined) {
     cutoff = cutoffOrPressure;
   } else {
-    cutoff = H_PERCOLATION_CUTOFF_MAX;
+    cutoff = H_PERCOLATION_CUTOFF_AMBIENT;
   }
-  const hAtoms = atoms.filter(a => a.symbol === "H");
+  const hAtoms = fracAtoms.filter(a => a.symbol === "H");
   const hCount = hAtoms.length;
 
   if (hCount === 0) {
