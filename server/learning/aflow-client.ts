@@ -19,15 +19,15 @@ export interface AflowEntry {
   spaceGroupNumber: number;
   spaceGroupSymbol: string;
   latticeSystemRelax: string;
-  Bvoigt: number | null;
-  Gvoigt: number | null;
+  Bvoigt: number | null;       // GPa — bulk modulus (Voigt average)
+  Gvoigt: number | null;       // GPa — shear modulus (Voigt average)
   ael_poisson_ratio: number | null;
-  enthalpy_formation_atom: number | null;
-  bandgap: number | null;
+  enthalpy_formation_atom: number | null;  // eV/atom
+  bandgap: number | null;      // eV
   spinPolarization: number | null;
   Egap_type: string | null;
-  volumeAtom: number | null;
-  densityAtom: number | null;
+  volumeAtom: number | null;   // Å³/atom
+  densityAtom: number | null;  // g/cm³
 }
 
 export interface AflowResult {
@@ -119,21 +119,24 @@ async function aflowFetch(query: string): Promise<any[] | null> {
 export async function fetchAflowData(formula: string): Promise<AflowResult> {
   const normalized = normalizeFormulaForAflow(formula);
 
-  const query = `compound(${normalized}),paging(1),$auid,$compound,$sg,$sg2,$lattice_system_relax,$Bvoigt,$Gvoigt,$ael_poisson_ratio,$enthalpy_formation_atom,$Egap,$spin_polarization,$Egap_type,$volume_atom,$density`;
+  const query = `compound(${normalized}),paging(1),$auid,$compound,$spacegroup_relax,$sg2,$lattice_system_relax,$ael_bulk_modulus_voigt,$ael_shear_modulus_voigt,$ael_poisson_ratio,$enthalpy_formation_atom,$Egap,$spin_polarization,$Egap_type,$volume_atom,$density`;
 
   const entries: AflowEntry[] = [];
 
   const rawEntries = await aflowFetch(query);
   if (rawEntries && rawEntries.length > 0) {
     for (const entry of rawEntries.slice(0, 5)) {
+      const bVoigt = entry.ael_bulk_modulus_voigt ?? entry.Bvoigt ?? null;
+      const gVoigt = entry.ael_shear_modulus_voigt ?? entry.Gvoigt ?? null;
+      const sgNumber = entry.spacegroup_relax ?? entry.sg ?? null;
       entries.push({
         auid: entry.auid ?? "",
         compound: entry.compound ?? normalized,
-        spaceGroupNumber: entry.sg ? Number(entry.sg) : 0,
+        spaceGroupNumber: sgNumber ? Number(sgNumber) : 0,
         spaceGroupSymbol: entry.sg2 ?? "",
         latticeSystemRelax: entry.lattice_system_relax ?? "",
-        Bvoigt: entry.Bvoigt != null ? Number(entry.Bvoigt) : null,
-        Gvoigt: entry.Gvoigt != null ? Number(entry.Gvoigt) : null,
+        Bvoigt: bVoigt != null ? Number(bVoigt) : null,
+        Gvoigt: gVoigt != null ? Number(gVoigt) : null,
         ael_poisson_ratio: entry.ael_poisson_ratio != null ? Number(entry.ael_poisson_ratio) : null,
         enthalpy_formation_atom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
         bandgap: entry.Egap != null ? Number(entry.Egap) : null,
@@ -258,7 +261,9 @@ export function crossValidateWithMP(
       let deviation: number | null = null;
       let agreement: CrossValidationResult["agreement"] = "no-comparison";
       if (stability != null) {
-        const mappedExternal = mpSummary.energyAboveHull <= 0 ? 1.0 : Math.max(0, 1 - mpSummary.energyAboveHull * 5);
+        const mappedExternal = mpSummary.energyAboveHull <= 0 ? 1.0
+          : mpSummary.energyAboveHull >= 0.2 ? 0
+          : Math.max(0, 1 - mpSummary.energyAboveHull * 5);
         const denominator = Math.max(Math.abs(mappedExternal), Math.abs(stability), 0.001);
         deviation = Math.abs(stability - mappedExternal) / denominator * 100;
         agreement = deviation > 30 ? "major-discrepancy" : deviation > 10 ? "minor-discrepancy" : "match";
