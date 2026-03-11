@@ -541,6 +541,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
         chargeTransferMagnitude += Math.abs(en_i - en_j) * Math.sqrt(frac_i * frac_j);
       }
     }
+    if (dimensionalityScore > 0.7) {
+      chargeTransferMagnitude *= 1.0 + (dimensionalityScore - 0.7) * 1.5;
+    }
   }
 
   let connectivityIndex = 0.5;
@@ -550,9 +553,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   else if (elements.length >= 4) connectivityIndex = 0.6;
   if (hasHydrogen && hydrogenRatio >= 6) connectivityIndex = Math.max(connectivityIndex, 0.7);
 
-  const phononSofteningIndex = phonon.softModePresent
-    ? Math.min(1.0, (phonon.softModeScore ?? 0.5) + phonon.anharmonicityIndex * 0.3)
-    : phonon.anharmonicityIndex * 0.5;
+  const rawSoftModeSignal = phonon.softModeScore ?? (phonon.softModePresent ? 0.5 : 0);
+  const phononSofteningIndex = Math.min(1.0,
+    phonon.anharmonicityIndex * (1 - rawSoftModeSignal * 0.5) +
+    (phonon.softModePresent ? 0.1 : 0)
+  );
 
   let spinFluctuationStrength = 0;
   for (const el of elements) {
@@ -570,6 +575,22 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   let dosAtEF = electronic.densityOfStatesAtFermi;
 
   let muStarEstimate = coupling.muStar;
+  if (muStarEstimate >= 0.10 && muStarEstimate <= 0.13) {
+    if (hasHydrogen && hydrogenRatio >= 4) {
+      muStarEstimate = 0.10;
+    } else if (hasCu && hasO && elements.length >= 3) {
+      muStarEstimate = 0.13;
+    } else if (elements.some(e => {
+      const z = getElementData(e)?.atomicNumber ?? 0;
+      return z >= 72 && z <= 80;
+    }) && hasO) {
+      muStarEstimate = 0.15;
+    } else if (hasRareEarth) {
+      muStarEstimate = 0.12;
+    } else if (elements.length >= 4 && enSpread > 1.5) {
+      muStarEstimate = 0.14;
+    }
+  }
 
   let candidatePressure = (mat as any)?.pressureGpa ?? 0;
 
