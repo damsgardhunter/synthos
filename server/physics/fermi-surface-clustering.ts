@@ -79,6 +79,12 @@ const ARCHETYPES: FSClusterArchetype[] = [
     centroid: [0.6, 0.6, 0.6, 0.8, 0.2, 0.3, 1.0, 0.85, 0.8],
   },
   {
+    id: "heavy_fermion",
+    name: "Heavy Fermion",
+    description: "Multiple small pockets, extremely high effective mass, f-electron hybridization",
+    centroid: [0.5, 0.3, 0.4, 0.7, 0.15, 0.40, 0.833, 0.10, 0.90],
+  },
+  {
     id: "conventional_3d",
     name: "Conventional 3D",
     description: "3D, low nesting, few pockets",
