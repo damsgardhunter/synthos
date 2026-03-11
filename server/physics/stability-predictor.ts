@@ -13,10 +13,15 @@ export interface StabilityPrediction {
     toleranceFactor: number | null;
     pettiforDistance: number;
     miedemaEnergy: number;
+    miedemaRaw: number;
+    hydrideCorrection: number;
     elementCompatibility: number;
     prototypeMatch: number;
     valenceMismatch: number;
     sizeRatioScore: number;
+    volumePerAtom: number;
+    packingFraction: number;
+    volumeGhostFlag: boolean;
   };
 }
 
@@ -63,18 +68,96 @@ const NODE_DIM = 14;
 const HIDDEN_DIM = 20;
 const EDGE_DIM = 8;
 
+function expandParentheses(formula: string): string {
+  let result = formula.replace(/\[/g, "(").replace(/\]/g, ")");
+  const parenRegex = /\(([^()]+)\)(\d*\.?\d*)/;
+  let iterations = 0;
+  while (result.includes("(") && iterations < 20) {
+    const prev = result;
+    result = result.replace(parenRegex, (_, group: string, mult: string) => {
+      const m = mult ? parseFloat(mult) : 1;
+      if (isNaN(m) || m <= 0) return group;
+      if (m === 1) return group;
+      return group.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_x: string, el: string, num: string) => {
+        const n = num ? parseFloat(num) : 1;
+        const newN = (isNaN(n) || n <= 0 ? 1 : n) * m;
+        return newN === 1 ? el : `${el}${newN}`;
+      });
+    });
+    if (result === prev) break;
+    iterations++;
+  }
+  return result.replace(/[()]/g, "");
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+    counts[el] = (counts[el] || 0) + (isNaN(num) || num <= 0 ? 1 : num);
   }
   return counts;
+}
+
+function computeVolumePerAtom(formula: string): { volumePerAtom: number; packingFraction: number } {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+
+  let totalVolume = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const radiusPm = data?.atomicRadius ?? 130;
+    const radiusA = radiusPm / 100;
+    const atomVolA3 = (4 / 3) * Math.PI * Math.pow(radiusA, 3);
+    totalVolume += atomVolA3 * (counts[el] || 1);
+  }
+
+  const volumePerAtom = totalVolume / totalAtoms;
+
+  const idealPackingFCC = 0.74;
+  const packingFraction = Math.min(1.0, idealPackingFCC * (1 + 0.05 * (elements.length - 1)));
+
+  return { volumePerAtom, packingFraction };
+}
+
+function applyHydrideCorrection(formula: string, rawMiedema: number): { corrected: number; correction: number } {
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const hFraction = (counts["H"] || 0) / totalAtoms;
+
+  if (hFraction <= 0.5) {
+    return { corrected: rawMiedema, correction: 0 };
+  }
+
+  const elements = Object.keys(counts).filter(e => e !== "H");
+  let avgHydrideAffinity = 0;
+  let totalFrac = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const en = data?.paulingElectronegativity ?? 1.5;
+    const frac = (counts[el] || 1) / totalAtoms;
+    const affinity = en < 1.5 ? -0.3 : en < 2.0 ? -0.1 : 0.2;
+    avgHydrideAffinity += affinity * frac;
+    totalFrac += frac;
+  }
+  avgHydrideAffinity /= Math.max(totalFrac, 0.01);
+
+  const destabilizationPenalty = Math.pow(hFraction - 0.5, 1.5) * 2.0;
+
+  const pvPenalty = hFraction > 0.7 ? (hFraction - 0.7) * 1.5 : 0;
+
+  const correction = destabilizationPenalty + pvPenalty - avgHydrideAffinity * 0.5;
+
+  const corrected = rawMiedema + correction;
+
+  return { corrected, correction };
 }
 
 function seededRandom(seed: number): () => number {
@@ -467,18 +550,28 @@ export function predictStability(formula: string): StabilityPrediction {
   const rawDecompRisk = sigmoid(output[2] ?? 0);
   const rawConfidence = sigmoid(output[3] ?? 0.5);
 
-  const miedemaEnergy = computeMiedemaFormationEnergy(formula);
+  const miedemaRaw = computeMiedemaFormationEnergy(formula);
+  const { corrected: miedemaEnergy, correction: hydrideCorrection } = applyHydrideCorrection(formula, miedemaRaw);
   const toleranceFactor = computeGoldschmidtTolerance(formula);
   const pettiforDist = computePettiforProximity(formula);
   const elementCompat = computeElementCompatibility(formula);
   const protoMatch = computePrototypeMatch(formula);
   const valenceMismatch = computeValenceMismatch(formula);
   const sizeRatio = computeSizeRatioScore(formula);
+  const { volumePerAtom, packingFraction } = computeVolumePerAtom(formula);
 
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
   const enValues = elements.map(el => getElementData(el)?.paulingElectronegativity ?? 1.5);
   const enSpread = elements.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
+
+  const hFraction = (counts["H"] || 0) / totalAtoms;
+  const isHydride = elements.includes("H") && hFraction > 0.3;
+  const MIN_VOL_HYDRIDE = 5.0;
+  const MIN_VOL_OTHER = 8.0;
+  const minVol = isHydride ? MIN_VOL_HYDRIDE : MIN_VOL_OTHER;
+  const volumeGhostFlag = volumePerAtom < minVol;
 
   let synthesizability = rawSynthesizability * 0.25
     + elementCompat * 0.20
@@ -496,6 +589,11 @@ export function predictStability(formula: string): StabilityPrediction {
 
   if (pettiforDist > 0.8) synthesizability *= 0.85;
 
+  if (volumeGhostFlag) {
+    const volumeRatio = volumePerAtom / minVol;
+    synthesizability *= Math.max(0.1, volumeRatio);
+  }
+
   synthesizability = Math.max(0, Math.min(1, synthesizability));
 
   let formationEnergy = miedemaEnergy * 0.7 + rawFormationEnergy * 0.3;
@@ -506,10 +604,17 @@ export function predictStability(formula: string): StabilityPrediction {
     + (formationEnergy > 0 ? 0.6 : formationEnergy > -0.1 ? 0.4 : 0.2) * 0.3
     + valenceMismatch * 0.2
     + (1 - elementCompat) * 0.2;
+
+  if (volumeGhostFlag) {
+    decompositionRisk = Math.min(1.0, decompositionRisk + 0.2);
+  }
+
   decompositionRisk = Math.max(0, Math.min(1, decompositionRisk));
 
   let stabilityClass: "stable" | "metastable" | "unstable";
-  if (synthesizability > 0.6 && decompositionRisk < 0.4 && formationEnergy < 0.1) {
+  if (volumeGhostFlag) {
+    stabilityClass = "unstable";
+  } else if (synthesizability > 0.6 && decompositionRisk < 0.4 && formationEnergy < 0.1) {
     stabilityClass = "stable";
   } else if (synthesizability > 0.35 && decompositionRisk < 0.65) {
     stabilityClass = "metastable";
@@ -517,9 +622,21 @@ export function predictStability(formula: string): StabilityPrediction {
     stabilityClass = "unstable";
   }
 
-  const confidence = Math.min(0.95, Math.max(0.3,
+  let confidence = Math.min(0.95, Math.max(0.3,
     rawConfidence * 0.3 + elementCompat * 0.3 + protoMatch * 0.2 + (elements.length <= 4 ? 0.2 : 0.1)
   ));
+
+  if (volumeGhostFlag) {
+    const volumeRatio = volumePerAtom / minVol;
+    confidence *= Math.max(0.2, volumeRatio);
+  }
+
+  if (packingFraction > protoMatch) {
+    const overpackPenalty = (packingFraction - protoMatch) * 0.5;
+    confidence *= Math.max(0.3, 1 - overpackPenalty);
+  }
+
+  confidence = Math.max(0.05, Math.min(0.95, confidence));
 
   return {
     formula,
@@ -533,10 +650,15 @@ export function predictStability(formula: string): StabilityPrediction {
       toleranceFactor: toleranceFactor !== null ? Math.round(toleranceFactor * 1000) / 1000 : null,
       pettiforDistance: Math.round(pettiforDist * 1000) / 1000,
       miedemaEnergy: Math.round(miedemaEnergy * 10000) / 10000,
+      miedemaRaw: Math.round(miedemaRaw * 10000) / 10000,
+      hydrideCorrection: Math.round(hydrideCorrection * 10000) / 10000,
       elementCompatibility: Math.round(elementCompat * 1000) / 1000,
       prototypeMatch: Math.round(protoMatch * 1000) / 1000,
       valenceMismatch: Math.round(valenceMismatch * 1000) / 1000,
       sizeRatioScore: Math.round(sizeRatio * 1000) / 1000,
+      volumePerAtom: Math.round(volumePerAtom * 100) / 100,
+      packingFraction: Math.round(packingFraction * 1000) / 1000,
+      volumeGhostFlag,
     },
   };
 }
