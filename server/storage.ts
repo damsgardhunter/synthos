@@ -73,6 +73,7 @@ export interface IStorage {
   getComputationalResultsByStage(stage: number): Promise<ComputationalResult[]>;
   getFailedComputationalResults(limit?: number): Promise<ComputationalResult[]>;
 
+  getSuperconductorCandidatesByFormulas(formulas: string[]): Promise<SuperconductorCandidate[]>;
   getSuperconductorsByFormula(formula: string): Promise<SuperconductorCandidate[]>;
   getComputationalResultsByFormula(formula: string): Promise<ComputationalResult[]>;
   getSynthesisProcessesByFormula(formula: string): Promise<SynthesisProcess[]>;
@@ -401,6 +402,11 @@ export class DatabaseStorage implements IStorage {
       result.set(row.formula, arr);
     }
     return result;
+  }
+
+  async getSuperconductorCandidatesByFormulas(formulas: string[]): Promise<SuperconductorCandidate[]> {
+    if (formulas.length === 0) return [];
+    return db.select().from(superconductorCandidates).where(inArray(superconductorCandidates.formula, formulas));
   }
 
   async getSuperconductorsByFormula(formula: string): Promise<SuperconductorCandidate[]> {

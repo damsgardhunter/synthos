@@ -850,10 +850,38 @@ function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate:
 interface PhysicsContext {
   verifiedLambda: number | null;
   verifiedTc: number | null;
+  tcSource: "predicted" | "physics_verified" | "dft_verified";
   competingPhases: any[];
   upperCriticalField: number | null;
   correlationStrength: number | null;
   verificationStage: number;
+}
+
+const featureCache = new Map<string, { features: MLFeatureVector; timestamp: number }>();
+const FEATURE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function getCachedFeatures(normKey: string): MLFeatureVector | null {
+  const entry = featureCache.get(normKey);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > FEATURE_CACHE_TTL_MS) {
+    featureCache.delete(normKey);
+    return null;
+  }
+  return entry.features;
+}
+
+function setCachedFeatures(normKey: string, features: MLFeatureVector): void {
+  if (featureCache.size > 500) {
+    const cutoff = Date.now() - FEATURE_CACHE_TTL_MS;
+    for (const [k, v] of featureCache) {
+      if (v.timestamp < cutoff) featureCache.delete(k);
+    }
+    if (featureCache.size > 500) {
+      const oldest = [...featureCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+      for (let i = 0; i < oldest.length - 400; i++) featureCache.delete(oldest[i][0]);
+    }
+  }
+  featureCache.set(normKey, { features, timestamp: Date.now() });
 }
 
 interface CrystalContext {
@@ -897,36 +925,53 @@ export async function runMLPrediction(
 
   let physicsData = context?.physicsData ?? new Map<string, PhysicsContext>();
   let crystalData = context?.crystalData ?? new Map<string, CrystalContext>();
+  const batchFormulas = materials.slice(0, 100).map(m => m.formula);
+  const batchNormalized = batchFormulas.map(f => normalizeFormula(f));
+  const uniqueFormulas = [...new Set([...batchFormulas, ...batchNormalized])];
   try {
     if (!context?.physicsData) {
-      const existingSC = await storage.getSuperconductorCandidates(50);
+      const existingSC = await storage.getSuperconductorCandidatesByFormulas(uniqueFormulas);
       for (const sc of existingSC) {
         if (sc.electronPhononCoupling != null || (sc.verificationStage != null && sc.verificationStage > 0)) {
+          const stage = sc.verificationStage ?? 0;
+          const tcSource: PhysicsContext["tcSource"] = stage >= 3 ? "dft_verified" : stage >= 1 ? "physics_verified" : "predicted";
           physicsData.set(normalizeFormula(sc.formula), {
             verifiedLambda: sc.electronPhononCoupling,
             verifiedTc: sc.predictedTc,
+            tcSource,
             competingPhases: (sc.competingPhases as any[]) ?? [],
             upperCriticalField: sc.upperCriticalField,
             correlationStrength: sc.correlationStrength,
-            verificationStage: sc.verificationStage ?? 0,
+            verificationStage: stage,
           });
         }
       }
     }
     if (!context?.crystalData) {
-      const structures = await storage.getCrystalStructures(100);
-      for (const cs of structures) {
-        crystalData.set(normalizeFormula(cs.formula), {
-          spaceGroup: cs.spaceGroup,
-          crystalSystem: cs.crystalSystem,
-          dimensionality: cs.dimensionality,
-          isStable: cs.isStable ?? false,
-          convexHullDistance: cs.convexHullDistance,
-          synthesizability: cs.synthesizability,
-        });
+      const structMap = await storage.getCrystalStructuresByFormulas(uniqueFormulas);
+      for (const [formula, structs] of structMap) {
+        if (structs.length > 0) {
+          const cs = structs[0];
+          crystalData.set(normalizeFormula(formula), {
+            spaceGroup: cs.spaceGroup,
+            crystalSystem: cs.crystalSystem,
+            dimensionality: cs.dimensionality,
+            isStable: cs.isStable ?? false,
+            convexHullDistance: cs.convexHullDistance,
+            synthesizability: cs.synthesizability,
+          });
+        }
       }
     }
-  } catch {}
+  } catch (storageErr) {
+    console.error("[ML] Failed to fetch physics/crystal context from storage:", storageErr instanceof Error ? storageErr.message : storageErr);
+    emit("log", {
+      phase: "phase-7",
+      event: "Context fetch error",
+      detail: `Storage query failed: ${storageErr instanceof Error ? storageErr.message : "unknown error"} — proceeding with ${physicsData.size} physics, ${crystalData.size} crystal entries`,
+      dataSource: "ML Engine",
+    });
+  }
 
   const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean; gnn: GNNPrediction | null }[] = [];
 
@@ -941,7 +986,11 @@ export async function runMLPrediction(
     const normKey = normalizeFormula(mat.formula);
     const physics = physicsData.get(normKey);
     const crystal = crystalData.get(normKey);
-    const features = extractFeatures(mat.formula, mat, physics, crystal);
+    let features = getCachedFeatures(normKey);
+    if (!features) {
+      features = extractFeatures(mat.formula, mat, physics, crystal);
+      setCachedFeatures(normKey, features);
+    }
 
     if ((features.bandGap ?? 0) > 0.5 || (features.metallicity ?? 0.5) < 0.2) {
       preFilterSkipped++;
@@ -951,8 +1000,9 @@ export async function runMLPrediction(
     const xgb = xgboostPredict(features);
 
     if (physics && physics.verificationStage > 0) {
-      xgb.score = Math.min(1, xgb.score + 0.05);
-      xgb.reasoning.push("Physics-verified: computational analysis confirms candidate viability");
+      const verifyBonus = physics.tcSource === "dft_verified" ? 0.08 : physics.tcSource === "physics_verified" ? 0.05 : 0.02;
+      xgb.score = Math.min(1, xgb.score + verifyBonus);
+      xgb.reasoning.push(`${physics.tcSource === "dft_verified" ? "DFT" : "Physics"}-verified (stage ${physics.verificationStage}): Tc=${physics.verifiedTc?.toFixed(0) ?? '?'}K`);
     }
     if (crystal?.isStable) {
       xgb.score = Math.min(1, xgb.score + 0.04);
