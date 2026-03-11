@@ -815,21 +815,36 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   };
 }
 
-function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate: number; reasoning: string[] } {
+function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate: number; tcStd: number; tcCI95: [number, number]; reasoning: string[] } {
   const gb = gbPredict(features);
+  const unc = gbPredictWithUncertainty(features);
 
   const safeHc2 = features.upperCriticalField != null && Number.isFinite(features.upperCriticalField) ? features.upperCriticalField : null;
   if (safeHc2 != null) {
     if (safeHc2 > 50) {
       gb.score = Math.min(0.95, gb.score + 0.05);
       gb.reasoning.push(`High Hc2 (${safeHc2.toFixed(1)}T): robust Type-II superconductor`);
+    } else if (safeHc2 > 0 && safeHc2 <= 0.5) {
+      gb.reasoning.push(`Low Hc2 (${safeHc2.toFixed(2)}T): possible Type-I superconductor — Hc2 not penalized`);
     } else if (safeHc2 === 0) {
-      gb.score = Math.max(0.01, gb.score - 0.10);
-      gb.reasoning.push("Hc2=0T: no upper critical field detected");
+      const isLikelyTypeI = features.numElements <= 2 && !features.hasRareEarth && !features.layeredStructure;
+      if (isLikelyTypeI) {
+        gb.score = Math.max(0.01, gb.score - 0.03);
+        gb.reasoning.push("Hc2=0T: likely Type-I (elemental/binary, low-field) — mild penalty");
+      } else {
+        gb.score = Math.max(0.01, gb.score - 0.06);
+        gb.reasoning.push("Hc2=0T: upper critical field absent or computation did not converge");
+      }
     }
   }
 
-  return { score: gb.score, tcEstimate: Math.round(gb.tcPredicted), reasoning: gb.reasoning };
+  return {
+    score: gb.score,
+    tcEstimate: Math.round(gb.tcPredicted),
+    tcStd: unc.totalStd,
+    tcCI95: unc.tcCI95,
+    reasoning: gb.reasoning,
+  };
 }
 
 interface PhysicsContext {
@@ -887,7 +902,7 @@ export async function runMLPrediction(
       const existingSC = await storage.getSuperconductorCandidates(50);
       for (const sc of existingSC) {
         if (sc.electronPhononCoupling != null || (sc.verificationStage != null && sc.verificationStage > 0)) {
-          physicsData.set(sc.formula, {
+          physicsData.set(normalizeFormula(sc.formula), {
             verifiedLambda: sc.electronPhononCoupling,
             verifiedTc: sc.predictedTc,
             competingPhases: (sc.competingPhases as any[]) ?? [],
@@ -901,7 +916,7 @@ export async function runMLPrediction(
     if (!context?.crystalData) {
       const structures = await storage.getCrystalStructures(100);
       for (const cs of structures) {
-        crystalData.set(cs.formula, {
+        crystalData.set(normalizeFormula(cs.formula), {
           spaceGroup: cs.spaceGroup,
           crystalSystem: cs.crystalSystem,
           dimensionality: cs.dimensionality,
@@ -923,8 +938,9 @@ export async function runMLPrediction(
     }
     const mat = matSlice[loopIdx];
 
-    const physics = physicsData.get(mat.formula);
-    const crystal = crystalData.get(mat.formula);
+    const normKey = normalizeFormula(mat.formula);
+    const physics = physicsData.get(normKey);
+    const crystal = crystalData.get(normKey);
     const features = extractFeatures(mat.formula, mat, physics, crystal);
 
     if ((features.bandGap ?? 0) > 0.5 || (features.metallicity ?? 0.5) < 0.2) {
@@ -965,7 +981,7 @@ export async function runMLPrediction(
     }
     const entry = scored[i];
     try {
-      const crystal = crystalData.get(entry.mat.formula);
+      const crystal = crystalData.get(normalizeFormula(entry.mat.formula));
       const crystalStructure = crystal ? {
         latticeParams: undefined,
         atomicPositions: undefined,
@@ -994,7 +1010,7 @@ export async function runMLPrediction(
   emit("log", {
     phase: "phase-7",
     event: "XGBoost screening complete",
-    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc raw: ${topCandidates[0].xgb.tcEstimate}K)${preFilterSkipped > 0 ? `, ${preFilterSkipped} non-metallic filtered` : ""}${enrichmentDetail}`,
+    detail: `Top candidate: ${topCandidates[0].mat.formula} (score: ${(topCandidates[0].xgb.score*100).toFixed(0)}%, Tc: ${topCandidates[0].xgb.tcEstimate}K +/-${topCandidates[0].xgb.tcStd.toFixed(1)}K)${preFilterSkipped > 0 ? `, ${preFilterSkipped} non-metallic filtered` : ""}${enrichmentDetail}`,
     dataSource: "ML Engine",
   });
 
@@ -1011,13 +1027,15 @@ export async function runMLPrediction(
 
   try {
     const candidateSummaries = topCandidates.map(c => {
-      const physics = physicsData!.get(c.mat.formula);
-      const crystal = crystalData!.get(c.mat.formula);
+      const physics = physicsData!.get(normalizeFormula(c.mat.formula));
+      const crystal = crystalData!.get(normalizeFormula(c.mat.formula));
       return {
         formula: c.mat.formula,
         name: c.mat.name,
         xgboostScore: c.xgb.score,
         tcEstimate: c.xgb.tcEstimate,
+        tcStd: Math.round(c.xgb.tcStd * 10) / 10,
+        tcCI95: [Math.round(c.xgb.tcCI95[0] * 10) / 10, Math.round(c.xgb.tcCI95[1] * 10) / 10],
         features: {
           cooperPairStrength: c.features.cooperPairStrength,
           phononCoupling: c.features.phononCouplingEstimate,
