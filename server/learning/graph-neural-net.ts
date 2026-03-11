@@ -280,24 +280,19 @@ function initVector(size: number, val = 0): number[] {
 }
 
 function matVecMul(mat: number[][], vec: number[]): number[] {
-  const rows = mat.length;
-  const out = acquireBuffer(rows);
-  for (let i = 0; i < rows; i++) {
-    const row = mat[i];
-    if (row.length !== vec.length) {
-      releaseBuffer(out);
-      throw new Error(
-        `matVecMul shape mismatch: row ${i} has ${row.length} cols but vec has ${vec.length} elements`
-      );
-    }
-    let sum = 0;
-    for (let j = 0; j < vec.length; j++) {
-      sum += row[j] * vec[j];
-    }
-    out[i] = sum;
+  const { flat, rows, cols } = getFlatMat(mat);
+  if (cols !== vec.length) {
+    throw new Error(
+      `matVecMul shape mismatch: mat has ${cols} cols but vec has ${vec.length} elements`
+    );
   }
-  const result = toArray(out);
-  releaseBuffer(out);
+  const result = new Array(rows);
+  for (let i = 0; i < rows; i++) {
+    const offset = i * cols;
+    let sum = 0;
+    for (let j = 0; j < cols; j++) sum += flat[offset + j] * vec[j];
+    result[i] = sum;
+  }
   return result;
 }
 
@@ -325,6 +320,52 @@ function leakyRelu(v: number[], alpha: number = 0.01): number[] {
   for (let i = 0; i < n; i++) out[i] = v[i] >= 0 ? v[i] : alpha * v[i];
   const result = toArray(out);
   releaseBuffer(out);
+  return result;
+}
+
+const _flatMatCache = new WeakMap<number[][], { flat: Float32Array; rows: number; cols: number }>();
+
+function getFlatMat(mat: number[][]): { flat: Float32Array; rows: number; cols: number } {
+  let cached = _flatMatCache.get(mat);
+  if (cached) return cached;
+  const rows = mat.length;
+  const cols = rows > 0 ? mat[0].length : 0;
+  const flat = new Float32Array(rows * cols);
+  for (let i = 0; i < rows; i++) {
+    const row = mat[i];
+    const offset = i * cols;
+    for (let j = 0; j < cols; j++) flat[offset + j] = row[j];
+  }
+  cached = { flat, rows, cols };
+  _flatMatCache.set(mat, cached);
+  return cached;
+}
+
+function invalidateFlatCache(mat: number[][]): void {
+  _flatMatCache.delete(mat);
+}
+
+function fusedMatVecLeakyRelu(mat: number[][], vec: number[], alpha: number = 0.01): number[] {
+  const { flat, rows, cols } = getFlatMat(mat);
+  const result = new Array(rows);
+  for (let i = 0; i < rows; i++) {
+    const offset = i * cols;
+    let sum = 0;
+    for (let j = 0; j < cols; j++) sum += flat[offset + j] * vec[j];
+    result[i] = sum >= 0 ? sum : alpha * sum;
+  }
+  return result;
+}
+
+function fusedMatVecAddLeakyRelu(mat: number[][], vec: number[], bias: number[], alpha: number = 0.01): number[] {
+  const { flat, rows, cols } = getFlatMat(mat);
+  const result = new Array(rows);
+  for (let i = 0; i < rows; i++) {
+    const offset = i * cols;
+    let sum = bias[i] ?? 0;
+    for (let j = 0; j < cols; j++) sum += flat[offset + j] * vec[j];
+    result[i] = sum >= 0 ? sum : alpha * sum;
+  }
   return result;
 }
 
@@ -1056,7 +1097,7 @@ function threeBodyInteractionLayer(
     }
 
     const combined = [...embeddings[i], ...threeBodyAgg[i]];
-    const updated = leakyRelu(matVecMul(W_3body_update, combined));
+    const updated = fusedMatVecLeakyRelu(W_3body_update, combined);
     newEmbeddings.push(updated);
   }
 
@@ -1388,7 +1429,19 @@ export function attentionMessagePassingLayer(
   const embeddings = graph.nodes.map(n => n.embedding);
 
   const newEmbeddings: number[][] = [];
-  const updateActivation = useLeakyMsg ? leakyRelu : relu;
+  const fusedUpdate = useLeakyMsg
+    ? (mat: number[][], vec: number[]) => fusedMatVecLeakyRelu(mat, vec)
+    : (mat: number[][], vec: number[]) => {
+        const rows = mat.length;
+        const result = new Array(rows);
+        for (let i = 0; i < rows; i++) {
+          const row = mat[i];
+          let sum = 0;
+          for (let j = 0; j < vec.length; j++) sum += row[j] * vec[j];
+          result[i] = sum > 0 ? sum : 0;
+        }
+        return result;
+      };
 
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
@@ -1429,7 +1482,7 @@ export function attentionMessagePassingLayer(
     }
 
     const combined = [...embeddings[i], ...aggMessage];
-    const updated = updateActivation(matVecMul(W_update, combined));
+    const updated = fusedUpdate(W_update, combined);
     newEmbeddings.push(updated);
   }
 
@@ -1467,7 +1520,7 @@ export function messagePassingLayer(
     }
 
     const combined = [...embeddings[i], ...aggMessage];
-    const updated = leakyRelu(matVecMul(W_update, combined));
+    const updated = fusedMatVecLeakyRelu(W_update, combined);
     newEmbeddings.push(updated);
   }
 
@@ -1504,7 +1557,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   for (let i = 0; i < graph.nodes.length; i++) {
     const raw = graph.nodes[i].embedding;
     const input = raw.length >= NODE_DIM ? raw.slice(0, NODE_DIM) : [...raw, ...new Array(NODE_DIM - raw.length).fill(0)];
-    const projected = leakyRelu(vecAdd(matVecMul(weights.W_input_proj, input), weights.b_input_proj));
+    const projected = fusedMatVecAddLeakyRelu(weights.W_input_proj, input, weights.b_input_proj);
     graph.nodes[i].embedding = projected;
   }
 
@@ -1613,7 +1666,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     pooled[k] += pressureNorm * (weights.W_pressure[k] ?? 0);
   }
 
-  const h1 = leakyRelu(vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1));
+  const h1 = fusedMatVecAddLeakyRelu(weights.W_mlp1, pooled, weights.b_mlp1);
   if (dropoutRng) {
     const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
     for (let i = 0; i < h1.length; i++) h1[i] = dropped[i];
@@ -1912,6 +1965,15 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure, weights.residual_gates]) {
     scrubVector(bVec);
   }
+
+  for (const wMat of [
+    weights.W_message, weights.W_update, weights.W_message2, weights.W_update2,
+    weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
+    weights.W_attn_query, weights.W_attn_key, weights.W_attn_query2, weights.W_attn_key2,
+    weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
+    weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
+    weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
+  ]) { invalidateFlatCache(wMat); }
 
   weights.trainedAt = Date.now();
   weights.nSamples = trainingData.length;
