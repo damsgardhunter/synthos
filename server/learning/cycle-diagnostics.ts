@@ -219,8 +219,18 @@ export function getLatestReport(): CycleDiagnosticReport | null {
 export function formatDiagnosticReportText(report: CycleDiagnosticReport): string {
   const lines: string[] = [
     `=== Cycle ${report.cycleNumber} Diagnostics ===`,
-    ``,
-    `dataset size: ${report.datasetSize.toLocaleString()}`,
+  ];
+
+  if (report.alerts.length > 0) {
+    lines.push(``);
+    lines.push(`ALERTS:`);
+    for (const alert of report.alerts) {
+      lines.push(`  * ${alert}`);
+    }
+  }
+
+  lines.push(``);
+  lines.push(`dataset size: ${report.datasetSize.toLocaleString()}`,
     `new samples: ${report.newSamplesThisCycle}`,
     `physics coverage: ${report.withPhysicsResults}/${report.datasetSize}`,
     `derived features: ${report.withDerivedFeatures}/${report.datasetSize}`,
@@ -232,7 +242,7 @@ export function formatDiagnosticReportText(report: CycleDiagnosticReport): strin
     `  bias: ${report.tcModel.bias > 0 ? "+" : ""}${report.tcModel.bias.toFixed(1)} K`,
     `  calibration: ${report.tcModel.calibrationStatus}`,
     `  samples: ${report.tcModel.sampleCount}`,
-  ];
+  );
 
   const families = Object.entries(report.tcModel.familyBias);
   if (families.length > 0) {
@@ -272,18 +282,21 @@ export function formatDiagnosticReportText(report: CycleDiagnosticReport): strin
     lines.push(`  degrading: ${report.trend.degradingModels.join(", ")}`);
   }
 
-  if (report.alerts.length > 0) {
-    lines.push(``);
-    lines.push(`ALERTS:`);
-    for (const alert of report.alerts) {
-      lines.push(`  * ${alert}`);
-    }
-  }
-
   return lines.join("\n");
 }
 
-export function getDiagnosticsForLLM(): string {
-  const report = generateCycleDiagnostics();
-  return formatDiagnosticReportText(report);
+const DIAGNOSTICS_CACHE_TTL = 30000;
+let lastDiagnosticsText = "";
+let lastDiagnosticsTime = 0;
+
+export function getDiagnosticsForLLM(forceRefresh = false): string {
+  const now = Date.now();
+  if (!forceRefresh && lastDiagnosticsText && now - lastDiagnosticsTime < DIAGNOSTICS_CACHE_TTL) {
+    return lastDiagnosticsText;
+  }
+  const latest = getLatestReport();
+  const report = (forceRefresh || !latest) ? generateCycleDiagnostics() : latest;
+  lastDiagnosticsText = formatDiagnosticReportText(report);
+  lastDiagnosticsTime = now;
+  return lastDiagnosticsText;
 }
