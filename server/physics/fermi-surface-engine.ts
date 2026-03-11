@@ -1093,36 +1093,71 @@ function computeLindhardSusceptibility(
   const qVectors: { q: number[]; chi0: number }[] = [];
 
   if (nestingVectors.length > 0) {
+    const HASH_CELL = 0.1;
+    const hashMap = new Map<string, number[]>();
+
+    for (let j = 0; j < fermiPoints.length; j++) {
+      const fp = fermiPoints[j];
+      const cx = Math.floor(fp.k[0] / HASH_CELL);
+      const cy = Math.floor(fp.k[1] / HASH_CELL);
+      const cz = Math.floor(fp.k[2] / HASH_CELL);
+      const key = `${cx},${cy},${cz}`;
+      const bucket = hashMap.get(key);
+      if (bucket) bucket.push(j);
+      else hashMap.set(key, [j]);
+    }
+
+    const nFermi = fermiPoints.length;
+    const bzVolNorm = nFermi > 0 ? 1.0 / nFermi : 1.0;
+
     for (const nv of nestingVectors) {
       let chi0_q = 0;
       let pairCount = 0;
 
-      for (let i = 0; i < Math.min(fermiPoints.length, 60); i++) {
-        for (let j = 0; j < Math.min(fermiPoints.length, 60); j++) {
-          if (i === j) continue;
-          if (fermiPoints[i].pocketIndex === fermiPoints[j].pocketIndex) continue;
+      for (let i = 0; i < fermiPoints.length; i++) {
+        const fp_i = fermiPoints[i];
+        const targetX = fp_i.k[0] + nv.q[0];
+        const targetY = fp_i.k[1] + nv.q[1];
+        const targetZ = fp_i.k[2] + nv.q[2];
 
-          const dq = [
-            fermiPoints[j].k[0] - fermiPoints[i].k[0] - nv.q[0],
-            fermiPoints[j].k[1] - fermiPoints[i].k[1] - nv.q[1],
-            fermiPoints[j].k[2] - fermiPoints[i].k[2] - nv.q[2],
-          ];
-          const dqMag = Math.sqrt(dq[0] * dq[0] + dq[1] * dq[1] + dq[2] * dq[2]);
+        const tcx = Math.floor(targetX / HASH_CELL);
+        const tcy = Math.floor(targetY / HASH_CELL);
+        const tcz = Math.floor(targetZ / HASH_CELL);
 
-          if (dqMag < 0.1) {
-            const eDiff = fermiPoints[j].energy - fermiPoints[i].energy;
-            const denominator = Math.abs(eDiff) + kBT;
-            const fDiff = 1 / (1 + Math.exp(fermiPoints[i].energy / kBT))
-                        - 1 / (1 + Math.exp(fermiPoints[j].energy / kBT));
-            chi0_q += Math.abs(fDiff) / denominator;
-            pairCount++;
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+              const neighborKey = `${tcx + dx},${tcy + dy},${tcz + dz}`;
+              const bucket = hashMap.get(neighborKey);
+              if (!bucket) continue;
+
+              for (const j of bucket) {
+                if (i === j) continue;
+                const fp_j = fermiPoints[j];
+                if (fp_i.pocketIndex === fp_j.pocketIndex) continue;
+
+                const dqx = fp_j.k[0] - targetX;
+                const dqy = fp_j.k[1] - targetY;
+                const dqz = fp_j.k[2] - targetZ;
+                const dqMag = Math.sqrt(dqx * dqx + dqy * dqy + dqz * dqz);
+
+                if (dqMag < HASH_CELL) {
+                  const eDiff = fp_j.energy - fp_i.energy;
+                  const denominator = Math.abs(eDiff) + kBT;
+                  const fI = 1 / (1 + Math.exp((fp_i.energy - fermiEnergy) / kBT));
+                  const fJ = 1 / (1 + Math.exp((fp_j.energy - fermiEnergy) / kBT));
+                  const fDiff = fI - fJ;
+                  chi0_q += Math.abs(fDiff) / denominator;
+                  pairCount++;
+                }
+              }
+            }
           }
         }
       }
 
       if (pairCount > 0) {
-        chi0_q /= pairCount;
-        chi0_q *= pairCount;
+        chi0_q *= bzVolNorm;
       }
 
       qVectors.push({ q: nv.q, chi0: chi0_q });
