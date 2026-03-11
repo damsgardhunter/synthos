@@ -215,8 +215,31 @@ function computeEdgeOfInstabilityScore(result: any): number {
   return 0.3;
 }
 
+function expandParentheses(formula: string): string {
+  let result = formula.replace(/\[/g, "(").replace(/\]/g, ")");
+  const parenRegex = /\(([^()]+)\)(\d*\.?\d*)/;
+  let iterations = 0;
+  while (result.includes("(") && iterations < 20) {
+    const prev = result;
+    result = result.replace(parenRegex, (_, group: string, mult: string) => {
+      const m = mult ? parseFloat(mult) : 1;
+      if (isNaN(m) || m <= 0) return group;
+      if (m === 1) return group;
+      return group.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_x: string, el: string, num: string) => {
+        const n = num ? parseFloat(num) : 1;
+        const newN = (isNaN(n) || n <= 0 ? 1 : n) * m;
+        return newN === 1 ? el : `${el}${newN}`;
+      });
+    });
+    if (result === prev) break;
+    iterations++;
+  }
+  return result.replace(/[()]/g, "");
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
-  const cleaned = (formula ?? "").replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = (formula ?? "").replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const result: Record<string, number> = {};
   const re = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let m: RegExpExecArray | null;
@@ -224,7 +247,7 @@ function parseFormulaCounts(formula: string): Record<string, number> {
     const el = m[1];
     if (!VALID_ELEMENTS_SET.has(el)) continue;
     const n = m[2] ? parseFloat(m[2]) : 1;
-    result[el] = (result[el] || 0) + n;
+    result[el] = (result[el] || 0) + (isNaN(n) || n <= 0 ? 1 : n);
   }
   return result;
 }

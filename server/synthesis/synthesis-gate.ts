@@ -87,6 +87,28 @@ const stats: SynthesisGateStats = {
 
 let scoreSum = 0;
 
+function expandParentheses(formula: string): string {
+  let result = formula.replace(/\[/g, "(").replace(/\]/g, ")");
+  const parenRegex = /\(([^()]+)\)(\d*\.?\d*)/;
+  let iterations = 0;
+  while (result.includes("(") && iterations < 20) {
+    const prev = result;
+    result = result.replace(parenRegex, (_, group: string, mult: string) => {
+      const m = mult ? parseFloat(mult) : 1;
+      if (isNaN(m) || m <= 0) return group;
+      if (m === 1) return group;
+      return group.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_m: string, el: string, num: string) => {
+        const n = num ? parseFloat(num) : 1;
+        const newN = (isNaN(n) || n <= 0 ? 1 : n) * m;
+        return newN === 1 ? el : `${el}${newN}`;
+      });
+    });
+    if (result === prev) break;
+    iterations++;
+  }
+  return result.replace(/[()]/g, "");
+}
+
 function normalizeFormulaString(formula: string): string {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const subscriptMap: Record<string, string> = {
@@ -105,7 +127,8 @@ function normalizeFormulaString(formula: string): string {
     cleaned = cleaned.split(sup).join(digit);
   }
   cleaned = cleaned.replace(/[^\x20-\x7E]/g, "");
-  return cleaned.trim();
+  cleaned = expandParentheses(cleaned.trim());
+  return cleaned;
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
