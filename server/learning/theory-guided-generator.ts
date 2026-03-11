@@ -94,6 +94,36 @@ let totalBiasApplications = 0;
 let cumulativeTcImpact = 0;
 let biasEffectivenessScores: Map<string, number> = new Map();
 
+interface SafetyResetState {
+  preBiasPassRate: number;
+  preBiasBestTc: number;
+  preBiasAvgTc: number;
+  biasAppliedCycle: number;
+  evaluationWindow: number;
+  postBiasPassRates: number[];
+  postBiasBestTcs: number[];
+  resetTriggered: boolean;
+  resetCount: number;
+  discardedTheoryTimestamps: number[];
+}
+
+const safetyReset: SafetyResetState = {
+  preBiasPassRate: 0,
+  preBiasBestTc: 0,
+  preBiasAvgTc: 0,
+  biasAppliedCycle: 0,
+  evaluationWindow: 3,
+  postBiasPassRates: [],
+  postBiasBestTcs: [],
+  resetTriggered: false,
+  resetCount: 0,
+  discardedTheoryTimestamps: [],
+};
+
+const EFFICIENCY_DROP_THRESHOLD = 0.4;
+const TC_DROP_THRESHOLD = 0.25;
+const MIN_EVAL_SAMPLES = 3;
+
 export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
   const theories = getTheoryDatabase();
   const graph = getLatestGraph();
@@ -297,6 +327,105 @@ export function recordTheoryBiasOutcome(
       }
     }
   }
+}
+
+export function recordPreBiasBaseline(passRate: number, bestTc: number, avgTc: number, cycle: number): void {
+  safetyReset.preBiasPassRate = passRate;
+  safetyReset.preBiasBestTc = bestTc;
+  safetyReset.preBiasAvgTc = avgTc;
+  safetyReset.biasAppliedCycle = cycle;
+  safetyReset.postBiasPassRates = [];
+  safetyReset.postBiasBestTcs = [];
+  safetyReset.resetTriggered = false;
+}
+
+export function recordPostBiasPerformance(passRate: number, bestTc: number): void {
+  safetyReset.postBiasPassRates.push(passRate);
+  safetyReset.postBiasBestTcs.push(bestTc);
+  if (safetyReset.postBiasPassRates.length > 10) {
+    safetyReset.postBiasPassRates.shift();
+    safetyReset.postBiasBestTcs.shift();
+  }
+}
+
+export function evaluateTheoryBiasSafety(): { shouldReset: boolean; reason: string; degradation: number } {
+  if (!currentBias || safetyReset.resetTriggered) {
+    return { shouldReset: false, reason: "no_active_bias", degradation: 0 };
+  }
+  if (safetyReset.postBiasPassRates.length < MIN_EVAL_SAMPLES) {
+    return { shouldReset: false, reason: "insufficient_data", degradation: 0 };
+  }
+
+  const avgPostPassRate = safetyReset.postBiasPassRates.reduce((a, b) => a + b, 0) / safetyReset.postBiasPassRates.length;
+  const avgPostBestTc = safetyReset.postBiasBestTcs.reduce((a, b) => a + b, 0) / safetyReset.postBiasBestTcs.length;
+
+  const baselinePassRate = Math.max(safetyReset.preBiasPassRate, 0.001);
+  const baselineBestTc = Math.max(safetyReset.preBiasBestTc, 1);
+
+  const passRateDrop = (baselinePassRate - avgPostPassRate) / baselinePassRate;
+  const tcDrop = (baselineBestTc - avgPostBestTc) / baselineBestTc;
+
+  const passRateDegraded = passRateDrop > EFFICIENCY_DROP_THRESHOLD;
+  const tcDegraded = tcDrop > TC_DROP_THRESHOLD;
+  const degradation = Math.max(passRateDrop, tcDrop);
+
+  if (passRateDegraded || tcDegraded) {
+    const reasons: string[] = [];
+    if (passRateDegraded) reasons.push(`pass_rate_drop=${(passRateDrop * 100).toFixed(1)}%`);
+    if (tcDegraded) reasons.push(`tc_drop=${(tcDrop * 100).toFixed(1)}%`);
+    return { shouldReset: true, reason: reasons.join(", "), degradation };
+  }
+
+  return { shouldReset: false, reason: "performance_stable", degradation };
+}
+
+export function resetTheoryBias(): { resetBias: TheoryGeneratorBias | null; reason: string } {
+  const discardedBias = currentBias;
+  if (discardedBias) {
+    safetyReset.discardedTheoryTimestamps.push(discardedBias.timestamp);
+    if (safetyReset.discardedTheoryTimestamps.length > 20) {
+      safetyReset.discardedTheoryTimestamps.shift();
+    }
+  }
+
+  currentBias = null;
+  safetyReset.resetTriggered = true;
+  safetyReset.resetCount++;
+  safetyReset.postBiasPassRates = [];
+  safetyReset.postBiasBestTcs = [];
+
+  biasEffectivenessScores.clear();
+
+  console.log(`[TheoryBias] Safety reset #${safetyReset.resetCount}: discarded theory bias, reverting to baseline generator weights`);
+  return { resetBias: discardedBias, reason: `safety_reset_#${safetyReset.resetCount}` };
+}
+
+export function getTheoryBiasSafetyStats(): {
+  resetCount: number;
+  currentlyActive: boolean;
+  preBiasPassRate: number;
+  postBiasAvgPassRate: number;
+  preBiasBestTc: number;
+  postBiasAvgBestTc: number;
+  evalSamples: number;
+  discardedCount: number;
+} {
+  const avgPost = safetyReset.postBiasPassRates.length > 0
+    ? safetyReset.postBiasPassRates.reduce((a, b) => a + b, 0) / safetyReset.postBiasPassRates.length
+    : 0;
+  const avgPostTc = safetyReset.postBiasBestTcs.length > 0
+    ? safetyReset.postBiasBestTcs.reduce((a, b) => a + b, 0) / safetyReset.postBiasBestTcs.length
+    : 0;
+  return {
+    resetCount: safetyReset.resetCount,
+    currentlyActive: currentBias !== null,
+    preBiasPassRate: safetyReset.preBiasPassRate,
+    postBiasAvgPassRate: avgPost,
+    preBiasBestTc: safetyReset.preBiasBestTc,
+    postBiasAvgBestTc: avgPostTc,
+    evalSamples: safetyReset.postBiasPassRates.length,
+    discardedCount: safetyReset.discardedTheoryTimestamps.length,
+  };
 }
 
 export function getTheoryGeneratorBias(): TheoryGeneratorBias | null {

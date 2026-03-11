@@ -293,6 +293,17 @@ export function applyTheoryBias(boosts: Record<string, number>) {
   console.log(`[Generator] Theory bias applied: ${summary}`);
 }
 
+export function resetToDefaultWeights(): void {
+  initializeGenerators();
+  for (const [name, entry] of generators.entries()) {
+    entry.stats.currentWeight = entry.defaultWeight;
+  }
+  const summary = Array.from(generators.entries())
+    .map(([n, e]) => `${n}=${(e.stats.currentWeight * 100).toFixed(1)}%`)
+    .join(", ");
+  console.log(`[Generator] Reset to default weights: ${summary}`);
+}
+
 export function rebalanceWeights() {
   initializeGenerators();
   if (cyclesSinceRebalance < REBALANCE_INTERVAL) return;

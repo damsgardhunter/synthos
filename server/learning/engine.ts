@@ -78,8 +78,8 @@ import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { predictKineticStability, formatKineticStabilityNote, type KineticStabilityResult } from "../physics/kinetic-stability";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
-import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, recordVerificationOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias } from "./generator-manager";
-import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, type TheoryGeneratorBias } from "./theory-guided-generator";
+import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, recordVerificationOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias, resetToDefaultWeights } from "./generator-manager";
+import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, recordPreBiasBaseline, recordPostBiasPerformance, evaluateTheoryBiasSafety, resetTheoryBias, getTheoryBiasSafetyStats, type TheoryGeneratorBias } from "./theory-guided-generator";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
@@ -5419,6 +5419,24 @@ async function runAutonomousFastPath() {
       } catch (e) { console.error("[Engine] Causal discovery cycle failed:", e); }
     }
 
+    {
+      const currentPassRate = autonomousTotalScreened > 0 ? autonomousTotalPassed / autonomousTotalScreened : 0;
+      recordPostBiasPerformance(currentPassRate, autonomousBestTc);
+
+      const safetyCheck = evaluateTheoryBiasSafety();
+      if (safetyCheck.shouldReset) {
+        const { resetBias } = resetTheoryBias();
+        resetToDefaultWeights();
+        latestTheoryBias = null;
+        emit("log", {
+          phase: "engine",
+          event: "Theory bias SAFETY RESET triggered",
+          detail: `Reason: ${safetyCheck.reason}. Degradation: ${(safetyCheck.degradation * 100).toFixed(1)}%. Generator weights reverted to baseline. Discarded bias had ${resetBias?.sourceTheories ?? 0} theories, ${resetBias?.sourceCausalEdges ?? 0} causal edges.`,
+          dataSource: "Theory-Guided Generator",
+        });
+      }
+    }
+
     if (
       (cycleCount - lastTheoryBiasCycle >= 10) &&
       (lastTheoryDiscoveryCycle > lastTheoryBiasCycle || lastCausalDiscoveryCycle > lastTheoryBiasCycle)
@@ -5443,6 +5461,9 @@ async function runAutonomousFastPath() {
         lastTheoryBiasCycle = cycleCount;
 
         if (Object.keys(theoryBias.generatorWeightBoosts).length > 0 && theoryBias.confidence > 0.1) {
+          const currentPassRate = autonomousTotalScreened > 0 ? autonomousTotalPassed / autonomousTotalScreened : 0;
+          recordPreBiasBaseline(currentPassRate, autonomousBestTc, currentPassRate * autonomousBestTc, cycleCount);
+
           applyTheoryBias(theoryBias.generatorWeightBoosts);
 
           const weightsAfter: Record<string, number> = {};
@@ -5470,10 +5491,11 @@ async function runAutonomousFastPath() {
             .map(([e, b]) => `${e}=${b.toFixed(2)}`)
             .join(", ");
 
+          const safetyStats = getTheoryBiasSafetyStats();
           emit("log", {
             phase: "engine",
             event: "Theory-driven generator bias applied",
-            detail: `Confidence=${theoryBias.confidence.toFixed(2)}, theories=${theoryBias.sourceTheories}, causal edges=${theoryBias.sourceCausalEdges}. Top families: ${topFam}. Top elements: ${topEl}. Guidance: ${theoryBias.structuralGuidance[0] ?? "none"}`,
+            detail: `Confidence=${theoryBias.confidence.toFixed(2)}, theories=${theoryBias.sourceTheories}, causal edges=${theoryBias.sourceCausalEdges}. Top families: ${topFam}. Top elements: ${topEl}. Guidance: ${theoryBias.structuralGuidance[0] ?? "none"}. Safety: resets=${safetyStats.resetCount}, discarded=${safetyStats.discardedCount}`,
             dataSource: "Theory-Guided Generator",
           });
         }
@@ -5488,7 +5510,30 @@ async function runAutonomousFastPath() {
         dedupedPhysicsClean.push(f);
       }
     }
-    const allEngineCandidates = [...dedupedPhysicsClean, ...inverseDesignCandidates, ...structDiffusionCandidates, ...motifDiffusionCandidates, ...cdvaeCandidates, ...integratedCandidates];
+    const SOURCE_QUOTA_MIN = 0.20;
+    const highQualityCandidates = [...inverseDesignCandidates, ...structDiffusionCandidates, ...motifDiffusionCandidates, ...cdvaeCandidates, ...integratedCandidates];
+    const massiveCombCandidates = dedupedPhysicsClean;
+    const totalPreMerge = highQualityCandidates.length + massiveCombCandidates.length;
+    let allEngineCandidates: string[];
+
+    if (totalPreMerge > 0 && highQualityCandidates.length > 0) {
+      const hqRatio = highQualityCandidates.length / totalPreMerge;
+      if (hqRatio < SOURCE_QUOTA_MIN) {
+        const targetHQSlots = Math.ceil(totalPreMerge * SOURCE_QUOTA_MIN);
+        const hqExpanded = [...highQualityCandidates];
+        const massiveAllowed = totalPreMerge - targetHQSlots;
+        const trimmedMassive = massiveCombCandidates.slice(0, Math.max(0, massiveAllowed));
+        allEngineCandidates = [...hqExpanded, ...trimmedMassive];
+        const trimmed = massiveCombCandidates.length - trimmedMassive.length;
+        if (trimmed > 0) {
+          console.log(`[Engine] Source quota enforcement: trimmed ${trimmed} massive-gen candidates to ensure ${(SOURCE_QUOTA_MIN * 100).toFixed(0)}% high-quality ratio (inverse=${inverseDesignCandidates.length}, struct=${structDiffusionCandidates.length}, motif=${motifDiffusionCandidates.length}, cdvae=${cdvaeCandidates.length}, integrated=${integratedCandidates.length})`);
+        }
+      } else {
+        allEngineCandidates = [...highQualityCandidates, ...massiveCombCandidates];
+      }
+    } else {
+      allEngineCandidates = [...highQualityCandidates, ...massiveCombCandidates];
+    }
 
     let dopingCandidates: string[] = [];
     let dopingSpecs: DopingSpec[] = [];
