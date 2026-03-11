@@ -77,6 +77,31 @@ const PAIRING_DIM = 24;
 const genomeCache = new Map<string, MaterialGenome>();
 const MAX_CACHE = 500;
 
+const runningSum = new Float64Array(256);
+const runningSumSq = new Float64Array(256);
+let runningCount = 0;
+const ZSCORE_WARMUP = 50;
+
+function updateRunningStats(raw: number[]): void {
+  runningCount++;
+  for (let i = 0; i < raw.length && i < 256; i++) {
+    runningSum[i] += raw[i];
+    runningSumSq[i] += raw[i] * raw[i];
+  }
+}
+
+function applyZScore(raw: number[]): number[] {
+  if (runningCount < ZSCORE_WARMUP) return raw;
+  const result = new Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    const mean = runningSum[i] / runningCount;
+    const variance = runningSumSq[i] / runningCount - mean * mean;
+    const std = Math.sqrt(Math.max(variance, 1e-8));
+    result[i] = Number(Math.max(-3, Math.min(3, (raw[i] - mean) / std)).toFixed(6));
+  }
+  return result;
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
@@ -120,6 +145,10 @@ function fourierEncode(value: number, nFreqs: number): number[] {
     result.push(Math.cos(value * i * Math.PI));
   }
   return result;
+}
+
+function rbfEncode(value: number, centers: number[], gamma: number = 10): number[] {
+  return centers.map(c => Math.exp(-gamma * (value - c) * (value - c)));
 }
 
 function encodeStructureSegment(
@@ -457,7 +486,7 @@ function encodePairingSegment(formula: string): number[] {
       pf.excitonPairingStrength,
       pf.dominantPairingType / 5,
       pf.compositePairing,
-      ...fourierEncode(pf.compositePairing, 3),
+      ...rbfEncode(pf.compositePairing, [0.2, 0.4, 0.6, 0.8, 0.95]),
       ...hashEncode(pf.dominantPairingType / 5, 5),
       ...hashEncode(pf.phononPairingStrength, 3),
     ];
@@ -508,9 +537,12 @@ export function encodeGenome(formula: string): MaterialGenome {
     ...pairingVec,
   ];
 
-  const vector = padOrTruncate(rawVector, GENOME_DIM).map(v =>
+  const clamped = padOrTruncate(rawVector, GENOME_DIM).map(v =>
     Number((Math.max(-1, Math.min(1, v))).toFixed(6))
   );
+
+  updateRunningStats(clamped);
+  const vector = applyZScore(clamped);
 
   const of = electronic.orbitalFractions;
   let dominantOrbital = "s";
