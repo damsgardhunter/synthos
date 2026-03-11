@@ -1362,6 +1362,26 @@ export async function runActiveLearningCycle(
     dataSource: "Active Learning",
   });
 
+  const selectedFormulasSet = new Set(selected.map(s => s.candidate.formula));
+  const heldOutPoolForUnc = allCandidates.filter(c =>
+    !selectedFormulasSet.has(c.formula) &&
+    (c.predictedTc ?? 0) > 5 &&
+    isValidFormula(c.formula)
+  );
+  let heldOutUncBefore = avgUncertaintyBefore;
+  if (heldOutPoolForUnc.length >= 10) {
+    let totalBefore = 0;
+    const sampleN = Math.min(50, heldOutPoolForUnc.length);
+    const stepN = heldOutPoolForUnc.length / sampleN;
+    for (let i = 0; i < sampleN; i++) {
+      const c = heldOutPoolForUnc[Math.floor(i * stepN)];
+      try {
+        totalBefore += gnnPredictWithUncertainty(c.formula).uncertainty;
+      } catch { totalBefore += 0.5; }
+    }
+    heldOutUncBefore = totalBefore / sampleN;
+  }
+
   let dftSuccessCount = 0;
   let bestTcThisLoop = 0;
   let pipelineCrashCount = 0;
@@ -1693,21 +1713,23 @@ export async function runActiveLearningCycle(
     );
   }
 
-  let avgUncertaintyAfter = avgUncertaintyBefore;
-  if (selected.length > 0) {
+  let avgUncertaintyAfter = heldOutUncBefore;
+  if (heldOutPoolForUnc.length >= 10) {
     let totalUncertaintyAfter = 0;
-    for (const { candidate } of selected) {
+    const sampleSize = Math.min(50, heldOutPoolForUnc.length);
+    const step = heldOutPoolForUnc.length / sampleSize;
+    for (let i = 0; i < sampleSize; i++) {
+      const c = heldOutPoolForUnc[Math.floor(i * step)];
       try {
-        const gnnResult = gnnPredictWithUncertainty(candidate.formula);
-        totalUncertaintyAfter += gnnResult.uncertainty;
+        totalUncertaintyAfter += gnnPredictWithUncertainty(c.formula).uncertainty;
       } catch {
         totalUncertaintyAfter += 0.5;
       }
     }
-    avgUncertaintyAfter = totalUncertaintyAfter / selected.length;
+    avgUncertaintyAfter = totalUncertaintyAfter / sampleSize;
   }
 
-  convergenceStats.avgUncertaintyBefore = avgUncertaintyBefore;
+  convergenceStats.avgUncertaintyBefore = heldOutUncBefore;
   convergenceStats.avgUncertaintyAfter = avgUncertaintyAfter;
   if (bestTcThisLoop > convergenceStats.bestTcFromLoop) {
     convergenceStats.bestTcFromLoop = bestTcThisLoop;
