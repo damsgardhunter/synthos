@@ -1081,6 +1081,8 @@ export async function runMLPrediction(
     });
   }
 
+  await new Promise<void>(resolve => setImmediate(resolve));
+
   try {
     const candidateSummaries = topCandidates.map(c => {
       const physics = physicsData!.get(normalizeFormula(c.mat.formula));
@@ -1142,7 +1144,7 @@ export async function runMLPrediction(
         messages: [
           {
             role: "system",
-            content: `You are an NN layer in an XGBoost+NN superconductor ensemble. Evaluate candidates using BCS/Eliashberg theory, electron-phonon coupling (lambda), competing phases, pairing symmetry, and dimensionality effects. Weight verifiedPhysics and crystalStructure data heavily. Penalize Hc2=0 severely; high Hc2 (>50T) strongly supports SC. Room-temp viable = Tc>=293K AND ambient pressure AND zero resistance. Return JSON: {'candidates': [{formula, neuralNetScore (0-1), refinedTc (K), pressureGpa, meissnerEffect (bool), zeroResistance (bool), cooperPairMechanism, pairingSymmetry, pairingMechanism, dimensionality, quantumCoherence (0-1), roomTempViable (bool), crystalStructure, uncertaintyEstimate (0-1), reasoning (<150 chars)}], 'insights': [3-5 strings <120 chars]}`,
+            content: `You are an NN layer in an XGBoost+NN superconductor ensemble. Evaluate candidates using BCS/Eliashberg theory, electron-phonon coupling (lambda), competing phases, pairing symmetry, and dimensionality effects. Weight verifiedPhysics and crystalStructure data heavily. Penalize Hc2=0 severely; high Hc2 (>50T) strongly supports SC. Room-temp viable = Tc>=293K AND ambient pressure AND zero resistance. CRITICAL: Return ONLY valid JSON, no extra text. Keep each reasoning under 80 chars. Return: {"candidates": [{"formula": str, "neuralNetScore": 0-1, "refinedTc": K, "pressureGpa": number, "meissnerEffect": bool, "zeroResistance": bool, "cooperPairMechanism": str, "pairingSymmetry": str, "pairingMechanism": str, "dimensionality": str, "quantumCoherence": 0-1, "roomTempViable": bool, "crystalStructure": str, "uncertaintyEstimate": 0-1, "reasoning": "<80 chars"}], "insights": ["<100 chars", ...3-5 items]}`,
           },
           {
             role: "user",
@@ -1150,7 +1152,7 @@ export async function runMLPrediction(
           },
         ],
         response_format: { type: "json_object" },
-        max_completion_tokens: 900,
+        max_completion_tokens: 1500,
       }, { signal: abortController.signal });
     } finally {
       clearTimeout(timeoutId);
@@ -1163,8 +1165,27 @@ export async function runMLPrediction(
     try {
       parsed = JSON.parse(content);
     } catch {
-      emit("log", { phase: "phase-7", event: "NN parse error", detail: content.slice(0, 200), dataSource: "ML Engine" });
-      return { candidates, insights };
+      let repaired = content.trim();
+      if (!repaired.endsWith("}")) {
+        const lastBrace = repaired.lastIndexOf("}");
+        if (lastBrace > 0) {
+          repaired = repaired.slice(0, lastBrace + 1);
+          const openBraces = (repaired.match(/\{/g) || []).length;
+          const closeBraces = (repaired.match(/\}/g) || []).length;
+          for (let b = 0; b < openBraces - closeBraces; b++) repaired += "}";
+          const openBrackets = (repaired.match(/\[/g) || []).length;
+          const closeBrackets = (repaired.match(/\]/g) || []).length;
+          for (let b = 0; b < openBrackets - closeBrackets; b++) repaired += "]";
+          if (!repaired.endsWith("}")) repaired += "}";
+        }
+      }
+      try {
+        parsed = JSON.parse(repaired);
+        emit("log", { phase: "phase-7", event: "NN JSON repaired", detail: `Truncated response recovered (${content.length} chars)`, dataSource: "ML Engine" });
+      } catch {
+        emit("log", { phase: "phase-7", event: "NN parse error", detail: `Unrecoverable JSON (${content.length} chars): ${content.slice(0, 150)}`, dataSource: "ML Engine" });
+        return { candidates, insights };
+      }
     }
 
     const nnCandidates = parsed.candidates ?? [];
@@ -1211,12 +1232,22 @@ export async function runMLPrediction(
       const featurePressure = xgb.features.pressureGpa;
       const llmPressure = nn.pressureGpa ?? null;
       let resolvedPressure: number;
+      let pressureSource: string;
       if (llmPressure != null && llmPressure === 0 && heuristicPressure > 50) {
         resolvedPressure = featurePressure > 0 ? featurePressure : Math.round(heuristicPressure * 0.3);
+        pressureSource = `LLM=ambient, heuristic=${heuristicPressure}GPa, resolved=${resolvedPressure}GPa (LLM-favored)`;
       } else if (llmPressure != null && heuristicPressure > 0) {
         resolvedPressure = Math.round(llmPressure * 0.6 + heuristicPressure * 0.4);
+        pressureSource = `blend: LLM=${llmPressure}GPa(60%) + heuristic=${heuristicPressure}GPa(40%)`;
+      } else if (llmPressure != null) {
+        resolvedPressure = llmPressure;
+        pressureSource = `LLM=${llmPressure}GPa`;
+      } else if (featurePressure > 0) {
+        resolvedPressure = featurePressure;
+        pressureSource = `features=${featurePressure}GPa`;
       } else {
-        resolvedPressure = llmPressure ?? featurePressure ?? heuristicPressure;
+        resolvedPressure = heuristicPressure;
+        pressureSource = `heuristic=${heuristicPressure}GPa`;
       }
 
       const pairingMech = nn.pairingMechanism ?? (isStronglyCorrelated ? "spin-fluctuation" : "phonon-mediated");
@@ -1242,7 +1273,7 @@ export async function runMLPrediction(
         ensembleScore,
         roomTempViable: nn.roomTempViable ?? false,
         status: ensembleScore > 0.7 ? "promising" : "theoretical",
-        notes: (llmRefinedTc !== finalTc ? `[LLM Tc=${llmRefinedTc}K, ${tcMethod} Tc=${finalTc}K (lambda=${featureLambda.toFixed(2)}, mu*=${effectiveMuStar.toFixed(3)})] ` : '') + (isStronglyCorrelated ? `[correlated: Allen-Dynes unreliable] ` : '') + (nn.reasoning ?? xgb.xgb.reasoning[0]),
+        notes: (llmRefinedTc !== finalTc ? `[LLM Tc=${llmRefinedTc}K, ${tcMethod} Tc=${finalTc}K (lambda=${featureLambda.toFixed(2)}, mu*=${effectiveMuStar.toFixed(3)})] ` : '') + (isStronglyCorrelated ? `[correlated: Allen-Dynes unreliable] ` : '') + `[P: ${pressureSource}] ` + (nn.reasoning ?? xgb.xgb.reasoning[0]),
         electronPhononCoupling: xgb.features.electronPhononLambda,
         logPhononFrequency: xgb.features.logPhononFreq,
         coulombPseudopotential: effectiveMuStar,
@@ -1260,9 +1291,18 @@ export async function runMLPrediction(
     emit("log", {
       phase: "phase-7",
       event: "Ensemble prediction complete",
-      detail: `${candidates.length} candidates scored, ${candidates.filter(c => c.roomTempViable).length} room-temp viable${candidates.length > 0 ? `, top: ${candidates[0].formula} Tc=${candidates[0].predictedTc}K (capped)` : ''}`,
+      detail: `${candidates.length} candidates scored, ${candidates.filter(c => c.roomTempViable).length} room-temp viable${candidates.length > 0 ? `, top: ${candidates[0].formula} Tc=${candidates[0].predictedTc}K` : ''}`,
       dataSource: "ML Engine",
     });
+
+    if (nnInsights.length > 0) {
+      emit("log", {
+        phase: "phase-7",
+        event: "NN ensemble insights",
+        detail: nnInsights.slice(0, 5).join(" | "),
+        dataSource: "ML Engine",
+      });
+    }
   } catch (err: any) {
     const isTimeout = err.name === "AbortError" || err.message?.includes("aborted");
     emit("log", {
