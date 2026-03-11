@@ -718,119 +718,201 @@ function buildHamiltonianAtKForFS(
   }
 
   let eigenvalues: number[];
-  if (centrosymmetric) {
-    eigenvalues = solveEigenvaluesSymmetricFS(H, nOrbitals);
-  } else {
-    const H_eff: number[][] = [];
-    for (let i = 0; i < nOrbitals; i++) {
-      H_eff[i] = new Array(nOrbitals).fill(0);
-      for (let j = 0; j < nOrbitals; j++) {
-        H_eff[i][j] = H[i][j];
-      }
-    }
-    for (let i = 0; i < nOrbitals; i++) {
-      for (let j = 0; j < nOrbitals; j++) {
-        if (i !== j) {
-          const re = H[i][j];
-          const im = H_im[i][j];
-          const mag = Math.sqrt(re * re + im * im);
-          const sign = re >= 0 ? 1 : -1;
-          H_eff[i][j] = sign * mag;
-        }
-      }
-    }
-    eigenvalues = solveEigenvaluesSymmetricFS(H_eff, nOrbitals);
-  }
-
   const orbChars: { s: number; p: number; d: number; f: number }[] = [];
-  for (let band = 0; band < nOrbitals; band++) {
-    let sWeight = 0, pWeight = 0, dWeight = 0, fWeight = 0;
-    for (const atom of atomList) {
-      const hasDOrbs = isTransitionMetal(atom.el) || atom.hasFOrbs;
-      const o = atom.orbitalStart;
-      sWeight += o < nOrbitals ? 1.0 / nOrbitals : 0;
-      for (let p = 0; p < 3; p++) {
-        pWeight += (o + 1 + p < nOrbitals) ? 1.0 / nOrbitals : 0;
-      }
-      if (hasDOrbs) {
-        for (let d = 0; d < 5; d++) {
-          dWeight += (o + 4 + d < nOrbitals) ? 1.0 / nOrbitals : 0;
+
+  if (centrosymmetric) {
+    const result = solveEigenSystemFS(H, nOrbitals);
+    eigenvalues = result.eigenvalues;
+
+    for (let bandIdx = 0; bandIdx < nOrbitals; bandIdx++) {
+      const evec = result.eigenvectors[bandIdx];
+      let sW = 0, pW = 0, dW = 0, fW = 0;
+      for (const atom of atomList) {
+        const o = atom.orbitalStart;
+        const hasDOrbs = isTransitionMetal(atom.el) || atom.hasFOrbs;
+        if (o < nOrbitals) sW += evec[o] * evec[o];
+        for (let pi = 0; pi < 3; pi++) {
+          if (o + 1 + pi < nOrbitals) pW += evec[o + 1 + pi] * evec[o + 1 + pi];
+        }
+        if (hasDOrbs) {
+          for (let d = 0; d < 5; d++) {
+            if (o + 4 + d < nOrbitals) dW += evec[o + 4 + d] * evec[o + 4 + d];
+          }
+        }
+        if (atom.hasFOrbs) {
+          for (let f = 0; f < 7; f++) {
+            if (o + 9 + f < nOrbitals) fW += evec[o + 9 + f] * evec[o + 9 + f];
+          }
         }
       }
-      if (atom.hasFOrbs) {
-        for (let f = 0; f < 7; f++) {
-          fWeight += (o + 9 + f < nOrbitals) ? 1.0 / nOrbitals : 0;
-        }
+      const total = sW + pW + dW + fW || 1;
+      orbChars.push({ s: sW / total, p: pW / total, d: dW / total, f: fW / total });
+    }
+  } else {
+    const n2 = 2 * nOrbitals;
+    const H2N: number[][] = new Array(n2);
+    for (let i = 0; i < n2; i++) {
+      H2N[i] = new Array(n2).fill(0);
+    }
+    for (let i = 0; i < nOrbitals; i++) {
+      for (let j = 0; j < nOrbitals; j++) {
+        H2N[i][j] = H[i][j];
+        H2N[nOrbitals + i][nOrbitals + j] = H[i][j];
+        H2N[i][nOrbitals + j] = -H_im[i][j];
+        H2N[nOrbitals + i][j] = H_im[i][j];
       }
     }
-    const total = sWeight + pWeight + dWeight + fWeight || 1;
-    orbChars.push({ s: sWeight / total, p: pWeight / total, d: dWeight / total, f: fWeight / total });
+
+    const result2N = solveEigenSystemFS(H2N, n2);
+
+    eigenvalues = [];
+    for (let i = 0; i < n2; i += 2) {
+      eigenvalues.push(result2N.eigenvalues[i]);
+    }
+
+    for (let bandIdx = 0; bandIdx < nOrbitals; bandIdx++) {
+      const evec = result2N.eigenvectors[bandIdx * 2];
+      let sW = 0, pW = 0, dW = 0, fW = 0;
+      for (const atom of atomList) {
+        const o = atom.orbitalStart;
+        const hasDOrbs = isTransitionMetal(atom.el) || atom.hasFOrbs;
+        if (o < nOrbitals) {
+          sW += evec[o] * evec[o] + evec[o + nOrbitals] * evec[o + nOrbitals];
+        }
+        for (let pi = 0; pi < 3; pi++) {
+          const idx = o + 1 + pi;
+          if (idx < nOrbitals) {
+            pW += evec[idx] * evec[idx] + evec[idx + nOrbitals] * evec[idx + nOrbitals];
+          }
+        }
+        if (hasDOrbs) {
+          for (let d = 0; d < 5; d++) {
+            const idx = o + 4 + d;
+            if (idx < nOrbitals) {
+              dW += evec[idx] * evec[idx] + evec[idx + nOrbitals] * evec[idx + nOrbitals];
+            }
+          }
+        }
+        if (atom.hasFOrbs) {
+          for (let f = 0; f < 7; f++) {
+            const idx = o + 9 + f;
+            if (idx < nOrbitals) {
+              fW += evec[idx] * evec[idx] + evec[idx + nOrbitals] * evec[idx + nOrbitals];
+            }
+          }
+        }
+      }
+      const total = sW + pW + dW + fW || 1;
+      orbChars.push({ s: sW / total, p: pW / total, d: dW / total, f: fW / total });
+    }
   }
 
   return { eigenvalues, orbChars };
 }
 
-function solveEigenvaluesSymmetricFS(H: number[][], n: number): number[] {
-  if (n <= 0) return [];
-  if (n === 1) return [H[0][0]];
+function solveEigenSystemFS(
+  H: number[][],
+  n: number,
+): { eigenvalues: number[]; eigenvectors: number[][] } {
+  if (n <= 0) return { eigenvalues: [], eigenvectors: [] };
+  if (n === 1) return { eigenvalues: [H[0][0]], eigenvectors: [[1]] };
 
-  const tridiag = new Array(n).fill(0);
-  const offTridiag = new Array(n).fill(0);
-
+  const M = new Float64Array(n * n);
+  const V = new Float64Array(n * n);
   for (let i = 0; i < n; i++) {
-    tridiag[i] = H[i][i];
-  }
-  for (let i = 0; i < n - 1; i++) {
-    let sumSq = 0;
-    for (let j = i + 1; j < n; j++) {
-      sumSq += H[j][i] * H[j][i];
+    V[i * n + i] = 1;
+    for (let j = 0; j < n; j++) {
+      M[i * n + j] = H[i][j];
     }
-    offTridiag[i] = Math.sqrt(sumSq);
   }
 
-  return solveTridiagonalFS(tridiag, offTridiag, n).sort((a, b) => a - b);
-}
-
-function solveTridiagonalFS(diag: number[], offDiag: number[], n: number): number[] {
-  if (n <= 0) return [];
-  if (n === 1) return [diag[0]];
-
-  let minVal = diag[0] - Math.abs(offDiag[0] || 0);
-  let maxVal = diag[0] + Math.abs(offDiag[0] || 0);
-  for (let i = 1; i < n; i++) {
-    const lower = diag[i] - Math.abs(offDiag[i] || 0) - Math.abs(offDiag[i - 1] || 0);
-    const upper = diag[i] + Math.abs(offDiag[i] || 0) + Math.abs(offDiag[i - 1] || 0);
-    if (lower < minVal) minVal = lower;
-    if (upper > maxVal) maxVal = upper;
-  }
-
-  const eigenvalues: number[] = [];
-  const margin = (maxVal - minVal) * 0.01;
-  minVal -= margin;
-  maxVal += margin;
-
-  function countBelow(x: number): number {
-    let count = 0;
-    let d = 1.0;
+  for (let sweep = 0; sweep < 30; sweep++) {
+    let offNorm = 0;
     for (let i = 0; i < n; i++) {
-      d = (diag[i] - x) - (i > 0 && d !== 0 ? (offDiag[i - 1] * offDiag[i - 1]) / d : 0);
-      if (d < 0) count++;
+      for (let j = i + 1; j < n; j++) {
+        offNorm += M[i * n + j] * M[i * n + j];
+      }
     }
-    return count;
+    if (offNorm < 1e-20) break;
+
+    for (let p = 0; p < n - 1; p++) {
+      for (let q = p + 1; q < n; q++) {
+        const apq = M[p * n + q];
+        if (Math.abs(apq) < 1e-15) continue;
+
+        const app = M[p * n + p];
+        const aqq = M[q * n + q];
+        const diff = aqq - app;
+        let t: number;
+        if (Math.abs(apq) < 1e-30 * Math.abs(diff)) {
+          t = apq / diff;
+        } else {
+          const phi = diff / (2 * apq);
+          t = 1 / (Math.abs(phi) + Math.sqrt(phi * phi + 1));
+          if (phi < 0) t = -t;
+        }
+
+        const c = 1 / Math.sqrt(t * t + 1);
+        const s = t * c;
+        const tau = s / (1 + c);
+
+        M[p * n + q] = 0;
+        M[q * n + p] = 0;
+        M[p * n + p] -= t * apq;
+        M[q * n + q] += t * apq;
+
+        for (let i = 0; i < p; i++) {
+          const g = M[i * n + p];
+          const h = M[i * n + q];
+          M[i * n + p] = g - s * (h + g * tau);
+          M[i * n + q] = h + s * (g - h * tau);
+          M[p * n + i] = M[i * n + p];
+          M[q * n + i] = M[i * n + q];
+        }
+        for (let i = p + 1; i < q; i++) {
+          const g = M[p * n + i];
+          const h = M[i * n + q];
+          M[p * n + i] = g - s * (h + g * tau);
+          M[i * n + q] = h + s * (g - h * tau);
+          M[i * n + p] = M[p * n + i];
+          M[q * n + i] = M[i * n + q];
+        }
+        for (let i = q + 1; i < n; i++) {
+          const g = M[p * n + i];
+          const h = M[q * n + i];
+          M[p * n + i] = g - s * (h + g * tau);
+          M[q * n + i] = h + s * (g - h * tau);
+          M[i * n + p] = M[p * n + i];
+          M[i * n + q] = M[q * n + i];
+        }
+
+        for (let i = 0; i < n; i++) {
+          const g = V[i * n + p];
+          const h = V[i * n + q];
+          V[i * n + p] = g - s * (h + g * tau);
+          V[i * n + q] = h + s * (g - h * tau);
+        }
+      }
+    }
   }
 
-  for (let eigenIdx = 0; eigenIdx < n; eigenIdx++) {
-    let lo = minVal;
-    let hi = maxVal;
-    for (let iter = 0; iter < 60; iter++) {
-      const mid = (lo + hi) / 2;
-      if (countBelow(mid) <= eigenIdx) lo = mid;
-      else hi = mid;
+  const evals = new Array(n);
+  for (let i = 0; i < n; i++) evals[i] = M[i * n + i];
+
+  const indices = Array.from({ length: n }, (_, i) => i);
+  indices.sort((a, b) => evals[a] - evals[b]);
+
+  const sortedEvals = indices.map(i => evals[i]);
+  const eigenvectors: number[][] = new Array(n);
+  for (let bandIdx = 0; bandIdx < n; bandIdx++) {
+    eigenvectors[bandIdx] = new Array(n);
+    const col = indices[bandIdx];
+    for (let comp = 0; comp < n; comp++) {
+      eigenvectors[bandIdx][comp] = V[comp * n + col];
     }
-    eigenvalues.push((lo + hi) / 2);
   }
 
-  return eigenvalues;
+  return { eigenvalues: sortedEvals, eigenvectors };
 }
 
 function detectFermiPockets(
