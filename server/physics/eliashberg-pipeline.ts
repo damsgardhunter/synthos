@@ -880,6 +880,51 @@ export function runEliashbergFromAlpha2FFile(
 
   const maxFreq = Math.max(...parsedAlpha2F.frequencies.filter(f => f > 0));
 
+  const acousticCutoffDfpt = maxFreq * 0.15;
+  const lowOptCutoffDfpt = maxFreq * 0.35;
+  const midOptCutoffDfpt = maxFreq * 0.6;
+  const hModeCutoffDfpt = maxFreq * 0.75;
+
+  let acousticLambdaDfpt = 0;
+  let lowOpticalLambdaDfpt = 0;
+  let midOpticalLambdaDfpt = 0;
+  let highOpticalLambdaDfpt = 0;
+  let hydrogenLambdaDfpt = 0;
+
+  const countsDfpt = parseFormulaCounts(formula);
+  const hCountDfpt = countsDfpt["H"] || 0;
+  const elementsDfpt = parseFormulaElements(formula);
+  const metalAtomsDfpt = elementsDfpt.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+    .reduce((s, e) => s + (countsDfpt[e] || 0), 0);
+  const hRatioDfpt = metalAtomsDfpt > 0 ? hCountDfpt / metalAtomsDfpt : 0;
+
+  for (let i = 0; i < nBins; i++) {
+    const omega = parsedAlpha2F.frequencies[i];
+    const a2f = parsedAlpha2F.values[i];
+    if (omega <= 0 || a2f <= 0) continue;
+    const lc = 2 * a2f / omega * binWidth;
+    const isHMode = omega > hModeCutoffDfpt && hRatioDfpt >= 4;
+    if (omega <= acousticCutoffDfpt) acousticLambdaDfpt += lc;
+    else if (omega <= lowOptCutoffDfpt) lowOpticalLambdaDfpt += lc;
+    else if (omega <= midOptCutoffDfpt) midOpticalLambdaDfpt += lc;
+    else if (isHMode) hydrogenLambdaDfpt += lc;
+    else highOpticalLambdaDfpt += lc;
+  }
+
+  const dfptRangeValues = [
+    { range: "acoustic (<15% max freq)", val: acousticLambdaDfpt },
+    { range: "low optical (15-35%)", val: lowOpticalLambdaDfpt },
+    { range: "mid optical (35-60%)", val: midOpticalLambdaDfpt },
+    { range: "high optical (60-75%)", val: highOpticalLambdaDfpt },
+    { range: "hydrogen modes (>75%)", val: hydrogenLambdaDfpt },
+  ];
+  dfptRangeValues.sort((a, b) => b.val - a.val);
+
+  const lastQuarterDfpt = Math.floor(nBins * 0.75);
+  const tailLambdaDfpt = (cumulativeLambda[nBins - 1] || 0) - (cumulativeLambda[lastQuarterDfpt] || 0);
+  const lambdaVariationDfpt = integratedLambda > 0 ? Math.abs(tailLambdaDfpt) / integratedLambda : 0;
+  const dfptSpecConverged = lambdaVariationDfpt < 0.15;
+
   const alpha2FSpec: Alpha2FSpectralFunction = {
     frequencies: parsedAlpha2F.frequencies,
     alpha2F: parsedAlpha2F.values,
@@ -888,23 +933,64 @@ export function runEliashbergFromAlpha2FFile(
     omegaLog: Number(omegaLog.toFixed(2)),
     omega2: Number(omega2.toFixed(2)),
     lambdaByRange: {
-      acoustic: 0, lowOptical: 0, midOptical: 0, highOptical: 0, hydrogenModes: 0,
-      dominantRange: "from DFPT data",
+      acoustic: Number(acousticLambdaDfpt.toFixed(4)),
+      lowOptical: Number(lowOpticalLambdaDfpt.toFixed(4)),
+      midOptical: Number(midOpticalLambdaDfpt.toFixed(4)),
+      highOptical: Number(highOpticalLambdaDfpt.toFixed(4)),
+      hydrogenModes: Number(hydrogenLambdaDfpt.toFixed(4)),
+      dominantRange: dfptRangeValues[0].range,
     },
     nBins,
     maxFrequency: maxFreq,
-    convergenceCheck: { converged: true, lambdaVariation: 0, highFreqTail: 0 },
+    convergenceCheck: {
+      converged: dfptSpecConverged,
+      lambdaVariation: Number(lambdaVariationDfpt.toFixed(4)),
+      highFreqTail: Number(tailLambdaDfpt.toFixed(6)),
+    },
   };
 
   const muStar = computeScreenedMuStar(formula, pressureGpa, electronic.densityOfStatesAtFermi);
   const allenDynes = computeAllenDynesTc(integratedLambda, omegaLog, omega2, muStar);
-  const gapSolution = solveEliashbergGapEquation(alpha2FSpec, muStar, allenDynes.tc > 0 ? allenDynes.tc : 10);
+
+  let gapTrialTcDfpt: number;
+  if (allenDynes.tc > 0) {
+    gapTrialTcDfpt = allenDynes.tc;
+  } else if (omegaLog > 0) {
+    gapTrialTcDfpt = omegaLog * 1.4388 / 20;
+  } else {
+    const debyeEst = 300 + pressureGpa * 2;
+    gapTrialTcDfpt = debyeEst / 20;
+  }
+  gapTrialTcDfpt = Math.max(1, gapTrialTcDfpt);
+
+  const gapSolution = solveEliashbergGapEquation(alpha2FSpec, muStar, gapTrialTcDfpt);
   const tcBest = Math.max(allenDynes.tc, gapSolution.tc);
   const isotopeEffect = computeIsotopeEffect(formula, alpha2FSpec, integratedLambda);
 
+  const dfptWarnings: string[] = [];
+  let dfptConfidence: "low" | "medium" | "high" = "high";
+
+  if (!gapSolution.converged) {
+    dfptConfidence = "medium";
+    dfptWarnings.push(
+      `Eliashberg gap equation did not converge after ${gapSolution.iterations} iterations. ` +
+      `Gap-derived Tc may be unreliable.`
+    );
+  }
+
+  if (!dfptSpecConverged) {
+    if (dfptConfidence === "high") dfptConfidence = "medium";
+    else dfptConfidence = "low";
+    dfptWarnings.push(
+      `High-frequency tail carries ${(lambdaVariationDfpt * 100).toFixed(1)}% of total lambda. ` +
+      `This may indicate an unconverged k-mesh or q-mesh in the DFPT calculation.`
+    );
+  }
+
+  const dfptUncFrac = dfptConfidence === "high" ? 0.10 : dfptConfidence === "medium" ? 0.20 : 0.35;
   const confidenceBand: [number, number] = [
-    Math.max(0, Math.round(tcBest * 0.9)),
-    Math.round(tcBest * 1.1),
+    Math.max(0, Math.round(tcBest * (1 - dfptUncFrac))),
+    Math.round(tcBest * (1 + dfptUncFrac)),
   ];
 
   pipelineStats.totalRuns++;
@@ -934,9 +1020,9 @@ export function runEliashbergFromAlpha2FFile(
     electronPhonon: coupling,
     phononSpectrum: phonon,
     electronic,
-    confidence: "high",
+    confidence: dfptConfidence,
     confidenceBand,
-    warnings: [],
+    warnings: dfptWarnings,
     wallTimeMs: Date.now() - startTime,
   };
 }
