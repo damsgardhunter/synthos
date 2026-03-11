@@ -437,6 +437,10 @@ function computeVHSScore(singularities: VanHoveSingularity[], dos: OrbitalDOS): 
 }
 
 function computeFlatBandIndicator(dos: OrbitalDOS): number {
+  const MIN_DOS_AT_FERMI_FOR_FLAT_BAND = 0.1;
+
+  if (dos.dosAtFermi < MIN_DOS_AT_FERMI_FOR_FLAT_BAND) return 0;
+
   const fermiIdx = dos.fermiIndex;
   const windowBins = 3;
   const start = Math.max(0, fermiIdx - windowBins);
@@ -450,11 +454,23 @@ function computeFlatBandIndicator(dos: OrbitalDOS): number {
   }
 
   const avgNearFermi = count > 0 ? sumDOS / count : 0;
+
+  if (avgNearFermi < MIN_DOS_AT_FERMI_FOR_FLAT_BAND) return 0;
+
   const totalAvg = dos.totalDOS.reduce((s, v) => s + v, 0) / dos.totalDOS.length;
 
   if (totalAvg < 1e-8) return 0;
 
-  return Math.min(1.0, (avgNearFermi / totalAvg - 1) * 0.5);
+  const ratio = avgNearFermi / totalAvg;
+  if (ratio <= 1.0) return 0;
+
+  const stdDev = Math.sqrt(
+    dos.totalDOS.reduce((s, v) => s + (v - totalAvg) * (v - totalAvg), 0) / dos.totalDOS.length
+  );
+  const coeffOfVariation = totalAvg > 1e-8 ? stdDev / totalAvg : 0;
+  const narrowPeakBonus = coeffOfVariation > 0.5 ? Math.min(0.3, (coeffOfVariation - 0.5) * 0.3) : 0;
+
+  return Math.min(1.0, (ratio - 1) * 0.5 + narrowPeakBonus);
 }
 
 function computeNestingScore(dos: OrbitalDOS): number {
@@ -493,11 +509,17 @@ function computeNestingScore(dos: OrbitalDOS): number {
 }
 
 function computeOrbitalMixing(dos: OrbitalDOS): number {
-  const fermiIdx = dos.fermiIndex;
   const total = dos.dosAtFermi;
   if (total < 1e-8) return 0;
 
-  const fractions = ORBITAL_CHANNELS.map(orb => dos.orbitalDOSAtFermi[orb] / total);
+  const fracs: Record<OrbitalChannel, number> = {
+    s: dos.orbitalDOSAtFermi.s / total,
+    p: dos.orbitalDOSAtFermi.p / total,
+    d: dos.orbitalDOSAtFermi.d / total,
+    f: dos.orbitalDOSAtFermi.f / total,
+  };
+
+  const fractions = ORBITAL_CHANNELS.map(orb => fracs[orb]);
   const nonZero = fractions.filter(f => f > 0.05);
 
   if (nonZero.length <= 1) return 0;
@@ -510,7 +532,29 @@ function computeOrbitalMixing(dos: OrbitalDOS): number {
   }
 
   const maxEntropy = Math.log(ORBITAL_CHANNELS.length);
-  return Math.min(1.0, entropy / maxEntropy);
+  let mixing = entropy / maxEntropy;
+
+  const SP_HYBRIDIZATION_THRESHOLD = 0.30;
+  const SD_HYBRIDIZATION_THRESHOLD = 0.30;
+
+  const spHybridized = fracs.s >= SP_HYBRIDIZATION_THRESHOLD && fracs.p >= SP_HYBRIDIZATION_THRESHOLD;
+  const sdHybridized = fracs.s >= SD_HYBRIDIZATION_THRESHOLD && fracs.d >= SD_HYBRIDIZATION_THRESHOLD;
+  const pdHybridized = fracs.p >= SP_HYBRIDIZATION_THRESHOLD && fracs.d >= SD_HYBRIDIZATION_THRESHOLD;
+
+  if (spHybridized) {
+    const overlap = Math.min(fracs.s, fracs.p);
+    mixing += 0.25 * (overlap / 0.5);
+  }
+  if (sdHybridized) {
+    const overlap = Math.min(fracs.s, fracs.d);
+    mixing += 0.20 * (overlap / 0.5);
+  }
+  if (pdHybridized) {
+    const overlap = Math.min(fracs.p, fracs.d);
+    mixing += 0.15 * (overlap / 0.5);
+  }
+
+  return Math.min(1.0, mixing);
 }
 
 export function predictDOS(formula: string, latentEmbedding?: number[]): DOSSurrogateResult {
@@ -536,11 +580,11 @@ export function predictDOS(formula: string, latentEmbedding?: number[]): DOSSurr
   const isMetallic = orbitalDOS.dosAtFermi > 0.1;
 
   const scFavorability = Math.min(1.0,
-    0.30 * vhsScore +
+    0.25 * vhsScore +
     0.25 * (isMetallic ? Math.min(1.0, orbitalDOS.dosAtFermi) : 0) +
-    0.20 * flatBandIndicator +
-    0.15 * nestingScore +
-    0.10 * orbitalMixingAtFermi
+    0.18 * flatBandIndicator +
+    0.12 * nestingScore +
+    0.20 * orbitalMixingAtFermi
   );
 
   return {
