@@ -6236,32 +6236,58 @@ async function runAutonomousFastPath() {
     }
 
     if (feedbackLoopStats.defectCandidatesAdded > 0) {
-      rlReward += 0.05 * Math.min(3, feedbackLoopStats.defectCandidatesAdded);
+      const avgDefectBoost = feedbackLoopStats.defectTotalTcBoost / feedbackLoopStats.defectCandidatesAdded;
+      const defectTcScale = Math.min(1, avgDefectBoost / 0.3);
+      rlReward += 0.05 * Math.min(3, feedbackLoopStats.defectCandidatesAdded) * defectTcScale;
     }
     if (feedbackLoopStats.correlationBoostsApplied > 0) {
-      rlReward += 0.03 * Math.min(5, feedbackLoopStats.correlationBoostsApplied);
+      const avgCorrBoost = feedbackLoopStats.correlationTotalTcBoost / feedbackLoopStats.correlationBoostsApplied;
+      const corrTcScale = Math.min(1, avgCorrBoost / 0.2);
+      rlReward += 0.03 * Math.min(5, feedbackLoopStats.correlationBoostsApplied) * corrTcScale;
     }
     if (feedbackLoopStats.synthesisFeasibilityBonuses > 0) {
-      rlReward += 0.02 * Math.min(5, feedbackLoopStats.synthesisFeasibilityBonuses);
+      const synthScale = Math.min(1, bestTcThisBatch / 100);
+      rlReward += 0.02 * Math.min(5, feedbackLoopStats.synthesisFeasibilityBonuses) * synthScale;
     }
     if (feedbackLoopStats.growthQualityBonuses > 0) {
-      rlReward += 0.02 * Math.min(5, feedbackLoopStats.growthQualityBonuses);
+      const growthScale = Math.min(1, bestTcThisBatch / 100);
+      rlReward += 0.02 * Math.min(5, feedbackLoopStats.growthQualityBonuses) * growthScale;
     }
     if (feedbackLoopStats.experimentDFTPrioritized > 0) {
-      rlReward += 0.03 * Math.min(3, feedbackLoopStats.experimentDFTPrioritized);
+      const expScale = Math.min(1, bestTcThisBatch / 100);
+      rlReward += 0.03 * Math.min(3, feedbackLoopStats.experimentDFTPrioritized) * expScale;
     }
     if (feedbackLoopStats.pressurePathwayBoosts > 0) {
-      rlReward += 0.04 * Math.min(3, feedbackLoopStats.pressurePathwayBoosts);
+      const pathwayTcScale = Math.min(1, feedbackLoopStats.pressurePathwayBestAmbientTc / 100);
+      rlReward += 0.04 * Math.min(3, feedbackLoopStats.pressurePathwayBoosts) * pathwayTcScale;
     }
 
     rlAgent.updatePolicy(rlState, rlAction, rlReward);
+
+    const SR_PHYSICAL_KEYS = [
+      "electron_phonon_lambda", "phonon_log_frequency", "DOS_EF", "debye_temp",
+      "nesting_score", "bandwidth", "mott_proximity", "correlation_strength",
+      "spin_fluctuation", "charge_transfer", "van_hove_distance", "band_flatness",
+      "pairing_strength", "anharmonicity", "hydrogen_density", "cdw_proximity",
+      "quantum_critical_score",
+    ] as const;
 
     if (cycleCount % 10 === 0 && getDatasetSize() >= 20) {
       try {
         const dataset = getFeatureDataset();
         const srData = dataset
           .filter(r => r.tc > 0 && Number.isFinite(r.tc))
-          .map(r => ({ ...(r.featureVector as Record<string, number>), tc: r.tc }));
+          .map(r => {
+            const fv = r.featureVector as Record<string, number>;
+            const physicsOnly: Record<string, number> = {};
+            for (const key of SR_PHYSICAL_KEYS) {
+              if (fv[key] != null && Number.isFinite(fv[key])) {
+                physicsOnly[key] = fv[key];
+              }
+            }
+            physicsOnly.tc = r.tc!;
+            return physicsOnly;
+          });
         if (srData.length >= 15) {
           const theories = runSymbolicRegression(srData, "tc", { populationSize: 100, generations: 40 });
           if (theories.length > 0) {
