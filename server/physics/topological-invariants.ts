@@ -217,6 +217,26 @@ const HEAVY_SOC_STRENGTH: Record<string, number> = {
 
 const ANGULAR_MOMENTUM: Record<string, number> = { s: 0, p: 1, d: 2, f: 3 };
 
+const RARE_EARTH_MAGNETIC = new Set([
+  "Ce", "Pr", "Nd", "Sm", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
+  "U", "Np", "Pu",
+]);
+
+function estimateBandGapEv(electronic: ElectronicStructure): number {
+  if (electronic.metallicity > 0.8) return 0;
+  if (electronic.metallicity > 0.5) return 0.05;
+  if (electronic.densityOfStatesAtFermi > 2) return 0.02;
+  return Math.max(0.1, (1.0 - electronic.metallicity) * 2.0);
+}
+
+function socVsGapInversionDepth(socEv: number, bandGapEv: number): number {
+  if (bandGapEv <= 0) return socEv * 0.5 + 0.05;
+  const ratio = socEv / Math.max(0.01, bandGapEv);
+  if (ratio < 0.5) return 0;
+  const depth = socEv * (1.0 - Math.exp(-2.0 * (ratio - 0.5)));
+  return Math.max(0, depth);
+}
+
 function parseFormula(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -354,10 +374,12 @@ export function detectBandInversions(
         const lPrevV = ANGULAR_MOMENTUM[prevDomV] ?? 0;
 
         if ((lPrevV >= lC && lV < lConduction) || (prevDomV !== domV && prevDomC !== domC)) {
+          const gapEv = estimateBandGapEv(electronic);
+          const depth = socVsGapInversionDepth(socMax, gapEv);
           inversionPts.push({
             kIndex: i,
             kLabel,
-            inversionDepthEv: socMax * 0.5 + 0.05,
+            inversionDepthEv: depth,
             valenceOrbitalBefore: prevDomV,
             valenceOrbitalAfter: domV,
             conductionOrbitalBefore: prevDomC,
@@ -372,10 +394,12 @@ export function detectBandInversions(
     isInverted = true;
     inversionStrength = Math.min(1.0, 0.5 + socMax * 0.4 + (topo.bandInversionCount ?? 1) * 0.1);
     if (inversionPts.length === 0) {
+      const gapEv = estimateBandGapEv(electronic);
+      const fallbackDepth = socVsGapInversionDepth(socMax * 0.6, gapEv);
       inversionPts.push({
         kIndex: 3,
         kLabel: "Z",
-        inversionDepthEv: socMax * 0.3 + 0.02,
+        inversionDepthEv: fallbackDepth > 0 ? fallbackDepth : socMax * 0.1,
         valenceOrbitalBefore: domConduction,
         valenceOrbitalAfter: domValence,
         conductionOrbitalBefore: domValence,
@@ -397,6 +421,21 @@ export function detectBandInversions(
     inversionType = inversionType === "none" ? "p-d inversion (Weyl-class)" : inversionType;
     isInverted = true;
     inversionStrength = Math.max(inversionStrength, Math.min(1.0, socMax * 0.6 + 0.15));
+  }
+
+  const hasRareEarthMagnetic = elementNames.some(el => RARE_EARTH_MAGNETIC.has(el));
+  if (hasRareEarthMagnetic && isInverted && socMax > 0.2) {
+    const magneticRE = elementNames.filter(el => RARE_EARTH_MAGNETIC.has(el));
+    const maxFSoc = Math.max(...magneticRE.map(el => HEAVY_SOC_STRENGTH[el] ?? 0));
+    const gapEv = estimateBandGapEv(electronic);
+
+    if (hasChalcogenide && gapEv > 0.05) {
+      inversionType = "f-p inversion (Axion insulator candidate)";
+      inversionStrength = Math.max(inversionStrength, Math.min(1.0, maxFSoc * 0.7 + 0.25));
+    } else if (hasTMetal && maxFSoc > 0.3) {
+      inversionType = "f-d inversion (Higher-order TI candidate)";
+      inversionStrength = Math.max(inversionStrength, Math.min(1.0, maxFSoc * 0.5 + socMax * 0.3 + 0.1));
+    }
   }
 
   if (inversionPts.length > 0 && !isInverted) {
