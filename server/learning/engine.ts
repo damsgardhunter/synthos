@@ -7210,6 +7210,8 @@ async function runLearningCycle() {
             const protoPressure = protoIsClathrate ? Math.max(150, baseFamilyPressure) : baseFamilyPressure;
             const gnnResult = gnnPredictWithUncertainty(normalized, pc.prototype, protoPressure);
 
+            if (!gnnResult) continue;
+
             const familyMap: Record<string, string> = {
               "MAX-phase": "MAX-phase",
               "AlB2-type": "Boride",
@@ -7223,14 +7225,6 @@ async function runLearningCycle() {
               if (!filterResult.pass) continue;
             }
 
-            let protoTopoScore = 0;
-            try {
-              const protoElectronic = computeElectronicStructure(normalized, null);
-              const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
-              protoTopoScore = protoTopo.topologicalScore;
-              trackTopologyResult(protoTopo);
-            } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
-
             const discoveryDetails = computeDiscoveryScore({
               predictedTc: gbResult.tcPredicted,
               formula: normalized,
@@ -7238,8 +7232,8 @@ async function runLearningCycle() {
               synthesisScore: null,
               prototype: pc.prototype,
               existingFormulas: Array.from(alreadyScreenedFormulas).slice(0, 100),
-              topologicalScore: protoTopoScore,
-              uncertaintyEstimate: gnnResult?.uncertainty ?? 0.5,
+              topologicalScore: 0,
+              uncertaintyEstimate: gnnResult.uncertainty ?? 0.5,
             });
 
             if (!prototypeCounts[pc.prototype]) {
@@ -7265,16 +7259,26 @@ async function runLearningCycle() {
             if (!shouldContinue()) break;
             const { pc, normalized, features, gbResult, gnnResult, discoveryScore, discoveryDetails } = entry;
 
+            let protoTopoScore = 0;
+            try {
+              const protoElectronic = computeElectronicStructure(normalized, null);
+              const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
+              protoTopoScore = protoTopo.topologicalScore;
+              trackTopologyResult(protoTopo);
+            } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
+
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
-            const isHydride = pc.prototype === "Clathrate" || pc.prototype === "Sodalite";
+            const isHydride = pc.prototype?.toLowerCase().includes("clathrate") || pc.prototype?.toLowerCase().includes("sodalite") || pc.prototype?.toLowerCase().includes("hydride");
+            const protoFamilyPressure = estimateFamilyPressure(normalized);
+            const insertPressure = isHydride ? Math.max(150, protoFamilyPressure) : protoFamilyPressure;
             let predictedTc: number;
             if (gnnResult.confidence > 0.3 && gnnResult.tc > 0) {
               predictedTc = Math.round(gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4);
             } else {
               predictedTc = Math.round(gbResult.tcPredicted);
             }
-            predictedTc = applyAmbientTcCap(predictedTc, lambdaML, isHydride ? 150 : 0, metallicityML, normalized);
+            predictedTc = applyAmbientTcCap(predictedTc, lambdaML, insertPressure, metallicityML, normalized);
 
             try {
               const id = `sc-proto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -7284,7 +7288,7 @@ async function runLearningCycle() {
                 name: `${pc.prototype} ${normalized}`,
                 formula: normalized,
                 predictedTc,
-                pressureGpa: isHydride ? 150 : estimateFamilyPressure(normalized),
+                pressureGpa: insertPressure,
                 meissnerEffect: false,
                 zeroResistance: false,
                 cooperPairMechanism: `${pc.prototype} prototype search`,
