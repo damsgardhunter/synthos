@@ -472,7 +472,7 @@ export function runLatentSpaceInverseDesign(
 
         if (fPlus && isValidFormula(fPlus)) {
           const evalPlus = evaluateFormulaTc(fPlus);
-          gradients[d] = (evaluation.tc - evalPlus.tc) / delta;
+          gradients[d] = (evalPlus.tc - evaluation.tc) / delta;
         }
       }
 
@@ -481,7 +481,7 @@ export function runLatentSpaceInverseDesign(
       const scaledLr = learningRate * (1 + step * 0.01);
 
       for (let d = 0; d < LATENT_DIM; d++) {
-        m[d] = beta1 * m[d] + (1 - beta1) * (-gradients[d]);
+        m[d] = beta1 * m[d] + (1 - beta1) * gradients[d];
         v[d] = beta2 * v[d] + (1 - beta2) * gradients[d] * gradients[d];
 
         const mHat = m[d] / (1 - Math.pow(beta1, t));
