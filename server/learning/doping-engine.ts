@@ -801,9 +801,17 @@ export function computeDynamicLatticeScore(formula: string): DynamicLatticeScore
     const hasOxygen = elements.includes("O");
     const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
     const hasPnictogen = elements.some(e => ["As", "P", "Sb"].includes(e));
-    const isLayered = (layeredIndicators.length > 0 && (hasOxygen || hasChalcogen || hasPnictogen))
+
+    const fermiTopology = electronic.fermiSurfaceTopology || "";
+    const topologyIs2D = fermiTopology.includes("2D") || fermiTopology.includes("cylindrical") || fermiTopology.includes("nesting");
+    const chemistryIsLayered = (layeredIndicators.length > 0 && (hasOxygen || hasChalcogen || hasPnictogen))
       || elements.length >= 3 && (hasChalcogen || (hasOxygen && elements.length >= 4));
-    const layeredStructureBonus = isLayered ? 0.6 : 0;
+    const isLayered = topologyIs2D
+      ? chemistryIsLayered
+      : chemistryIsLayered && layeredIndicators.length >= 2;
+    let layeredStructureBonus = 0;
+    if (isLayered && topologyIs2D) layeredStructureBonus = 0.6;
+    else if (isLayered) layeredStructureBonus = 0.3;
 
     const cageFormersPresent = elements.filter(e => CAGE_FORMERS.includes(e));
     const cageGuestsPresent = elements.filter(e => CAGE_GUESTS.includes(e));
@@ -958,32 +966,42 @@ let totalStrainSum = 0;
 
 const MAX_RECENT = 100;
 
-const COMMON_OXIDATION_STATES: Record<string, number> = {
-  H: 1, Li: 1, Na: 1, K: 1, Rb: 1, Cs: 1,
-  Be: 2, Mg: 2, Ca: 2, Sr: 2, Ba: 2,
-  Sc: 3, Y: 3, La: 3, Ce: 3, Pr: 3, Nd: 3, Gd: 3,
-  Ti: 4, Zr: 4, Hf: 4,
-  V: 5, Nb: 5, Ta: 5,
-  Cr: 3, Mo: 6, W: 6,
-  Mn: 2, Fe: 3, Co: 3, Ni: 2, Cu: 2, Zn: 2,
-  Ru: 4, Rh: 3, Pd: 2, Ir: 4, Pt: 4,
-  Al: 3, Ga: 3, In: 3, Tl: 1,
-  B: 3, C: 4, Si: 4, Ge: 4, Sn: 4, Pb: 2,
-  N: -3, P: -3, As: -3, Sb: -3, Bi: 3,
-  O: -2, S: -2, Se: -2, Te: -2,
-  F: -1, Cl: -1, Br: -1, I: -1,
-  Re: 7, Os: 4,
+const MULTI_OXIDATION_STATES: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  Sc: [3], Y: [3], La: [3], Ce: [3, 4], Pr: [3, 4], Nd: [3], Gd: [3],
+  Ti: [3, 4], Zr: [4], Hf: [4],
+  V: [3, 4, 5], Nb: [3, 5], Ta: [5],
+  Cr: [2, 3, 6], Mo: [4, 6], W: [4, 6],
+  Mn: [2, 3, 4, 7], Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2, 3], Zn: [2],
+  Ru: [3, 4], Rh: [3], Pd: [2, 4], Ir: [3, 4], Pt: [2, 4],
+  Al: [3], Ga: [3], In: [3], Tl: [1, 3],
+  B: [3], C: [4, -4], Si: [4], Ge: [2, 4], Sn: [2, 4], Pb: [2, 4],
+  N: [-3], P: [-3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5], Bi: [3, 5],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4, 6], Te: [-2, 4, 6],
+  F: [-1], Cl: [-1, 1, 5, 7], Br: [-1, 1, 5], I: [-1, 1, 5, 7],
+  Re: [4, 7], Os: [4, 8], Hg: [1, 2], Ag: [1], Au: [1, 3],
 };
 
-const ELECTRON_DOPING_PAIRS: Array<{ from: string; to: string }> = [
+const COMMON_OXIDATION_STATES: Record<string, number> = {};
+for (const [el, states] of Object.entries(MULTI_OXIDATION_STATES)) {
+  COMMON_OXIDATION_STATES[el] = states[0];
+}
+
+const MAGNETIC_IMPURITY_ELEMENTS = new Set(["Fe", "Co", "Ni", "Mn", "Cr"]);
+const UNCONVENTIONAL_SC_HOSTS = new Set(["Cu", "Fe", "As", "La", "Y", "Ba", "Sr", "Bi", "Tl", "Hg", "Nd", "Gd", "Ce"]);
+
+interface DopingPair { from: string; to: string; magneticImpurity?: boolean }
+
+const ELECTRON_DOPING_PAIRS: DopingPair[] = [
   { from: "O", to: "F" },
-  { from: "Fe", to: "Co" },
+  { from: "Fe", to: "Co", magneticImpurity: true },
   { from: "Ti", to: "Nb" },
   { from: "Ti", to: "V" },
   { from: "Cu", to: "Zn" },
   { from: "Ni", to: "Cu" },
-  { from: "Mn", to: "Fe" },
-  { from: "Cr", to: "Mn" },
+  { from: "Mn", to: "Fe", magneticImpurity: true },
+  { from: "Cr", to: "Mn", magneticImpurity: true },
   { from: "N", to: "O" },
   { from: "S", to: "Cl" },
   { from: "Se", to: "Br" },
@@ -998,7 +1016,7 @@ const ELECTRON_DOPING_PAIRS: Array<{ from: string; to: string }> = [
   { from: "Sr", to: "Y" },
 ];
 
-const HOLE_DOPING_PAIRS: Array<{ from: string; to: string }> = [
+const HOLE_DOPING_PAIRS: DopingPair[] = [
   { from: "La", to: "Sr" },
   { from: "Ba", to: "K" },
   { from: "Y", to: "Ca" },
@@ -1006,10 +1024,10 @@ const HOLE_DOPING_PAIRS: Array<{ from: string; to: string }> = [
   { from: "Ce", to: "La" },
   { from: "Sr", to: "K" },
   { from: "Ca", to: "Na" },
-  { from: "Fe", to: "Mn" },
+  { from: "Fe", to: "Mn", magneticImpurity: true },
   { from: "Nb", to: "Ti" },
-  { from: "Co", to: "Fe" },
-  { from: "Cu", to: "Ni" },
+  { from: "Co", to: "Fe", magneticImpurity: true },
+  { from: "Cu", to: "Ni", magneticImpurity: true },
   { from: "Bi", to: "Pb" },
   { from: "Pb", to: "Tl" },
   { from: "Sn", to: "In" },
@@ -1021,8 +1039,36 @@ const HOLE_DOPING_PAIRS: Array<{ from: string; to: string }> = [
   { from: "V", to: "Ti" },
 ];
 
+function hasMagneticImpurityPenalty(site: string, dopant: string, hostElements: string[]): boolean {
+  if (!MAGNETIC_IMPURITY_ELEMENTS.has(dopant)) return false;
+  const hostHasUnconventional = hostElements.some(e => UNCONVENTIONAL_SC_HOSTS.has(e));
+  if (!hostHasUnconventional) return false;
+  for (const pair of [...ELECTRON_DOPING_PAIRS, ...HOLE_DOPING_PAIRS]) {
+    if (pair.from === site && pair.to === dopant && pair.magneticImpurity) return true;
+  }
+  return MAGNETIC_IMPURITY_ELEMENTS.has(dopant) && hostHasUnconventional;
+}
+
 function getOxidationState(el: string): number {
   return COMMON_OXIDATION_STATES[el] ?? 0;
+}
+
+function getNearestOxidationDelta(siteEl: string, dopantEl: string): number {
+  const siteStates = MULTI_OXIDATION_STATES[siteEl] ?? [getOxidationState(siteEl)];
+  const dopantStates = MULTI_OXIDATION_STATES[dopantEl] ?? [getOxidationState(dopantEl)];
+
+  let minAbsDelta = Infinity;
+  let bestDelta = 0;
+  for (const sOx of siteStates) {
+    for (const dOx of dopantStates) {
+      const d = dOx - sOx;
+      if (Math.abs(d) < minAbsDelta) {
+        minAbsDelta = Math.abs(d);
+        bestDelta = d;
+      }
+    }
+  }
+  return bestDelta;
 }
 
 function classifyDopingCharacter(site: string, dopant: string, type: "substitutional" | "vacancy" | "interstitial"): { character: DopingCharacter; valenceChange: number } {
@@ -1035,9 +1081,7 @@ function classifyDopingCharacter(site: string, dopant: string, type: "substituti
     return { character: "interstitial-electron", valenceChange: dopantOx };
   }
 
-  const siteOx = getOxidationState(site);
-  const dopantOx = getOxidationState(dopant);
-  const delta = dopantOx - siteOx;
+  const delta = getNearestOxidationDelta(site, dopant);
 
   if (delta > 0) return { character: "electron", valenceChange: delta };
   if (delta < 0) return { character: "hole", valenceChange: delta };
@@ -1193,20 +1237,30 @@ function getSupercellMultiplier(totalAtoms: number): number {
 function getDopantPriority(site: string, dopant: string, elements: string[]): number {
   if (elements.includes(dopant)) return -1;
 
+  let basePriority = 3;
   for (const pair of ELECTRON_DOPING_PAIRS) {
-    if (pair.from === site && pair.to === dopant) return 10;
+    if (pair.from === site && pair.to === dopant) { basePriority = 10; break; }
   }
-  for (const pair of HOLE_DOPING_PAIRS) {
-    if (pair.from === site && pair.to === dopant) return 10;
+  if (basePriority < 10) {
+    for (const pair of HOLE_DOPING_PAIRS) {
+      if (pair.from === site && pair.to === dopant) { basePriority = 10; break; }
+    }
   }
 
-  const siteOx = getOxidationState(site);
-  const dopantOx = getOxidationState(dopant);
-  const delta = Math.abs(dopantOx - siteOx);
-  if (delta === 1) return 8;
-  if (delta === 0) return 5;
-  if (delta === 2) return 6;
-  return 3;
+  if (basePriority < 10) {
+    const siteOx = getOxidationState(site);
+    const dopantOx = getOxidationState(dopant);
+    const delta = Math.abs(dopantOx - siteOx);
+    if (delta === 1) basePriority = 8;
+    else if (delta === 0) basePriority = 5;
+    else if (delta === 2) basePriority = 6;
+  }
+
+  if (hasMagneticImpurityPenalty(site, dopant, elements)) {
+    basePriority = Math.max(1, basePriority - 4);
+  }
+
+  return basePriority;
 }
 
 function generateSubstitutionalVariants(
