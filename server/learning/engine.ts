@@ -586,6 +586,15 @@ function getHydrideUnverifiedPenalty(formula: string): number {
   if (hFraction > 0.5) return 0.6;
   return 0.75;
 }
+const TC_CEILING = 300;
+const TC_FLOOR_TARGET = 150;
+function elasticTcTarget(bestTc: number): number {
+  if (bestTc <= 0) return TC_FLOOR_TARGET;
+  const gap = TC_CEILING - bestTc;
+  if (gap <= 0) return TC_CEILING;
+  const stretch = gap * 0.3;
+  return Math.round(Math.min(TC_CEILING, bestTc + stretch));
+}
 const formulasInFlight = new Map<string, number>();
 const IN_FLIGHT_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -1303,7 +1312,7 @@ async function runPhase7_Superconductor() {
       try {
         const topExisting = await storage.getSuperconductorCandidatesByTc(10);
         const existingFormulas = topExisting.map(c => c.formula);
-        const targetTc = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
+        const targetTc = elasticTcTarget(autonomousBestTc);
         const pillarResult = runPillarCycle(existingFormulas, targetTc);
         let pillarInserted = 0;
 
@@ -3679,7 +3688,7 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue() && cycleCount % 8 === 0) {
       const cdvaeInFlightMarked: string[] = [];
       try {
-        const targetTcForDiffusion = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
+        const targetTcForDiffusion = elasticTcTarget(autonomousBestTc);
         const cdvaeCrystals = runCrystalDiffusionCycle(15, targetTcForDiffusion, 25, alreadyScreenedFormulas);
         let cdvaeInserted = 0;
         for (const crystal of cdvaeCrystals) {
@@ -3778,7 +3787,7 @@ async function runPhase11_StructurePrediction() {
     if (shouldContinue() && cycleCount % 10 === 0) {
       const distInFlightMarked: string[] = [];
       try {
-        const distTarget = Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200);
+        const distTarget = elasticTcTarget(autonomousBestTc);
         const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25, alreadyScreenedFormulas);
         let distInserted = 0;
         for (const crystal of distCrystals) {
@@ -3886,7 +3895,7 @@ async function runPhase11_StructurePrediction() {
           trainVAE(topFormulas, 10);
         }
         const vaeResult = runLatentSpaceInverseDesign(
-          Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200),
+          elasticTcTarget(autonomousBestTc),
           topFormulas.length > 0 ? topFormulas[0] : undefined,
           30,
           0.02,
@@ -5012,18 +5021,23 @@ async function runAutonomousFastPath() {
           if (compatibleProtos.length === 0) continue;
           protoEnumStats.formulasScanned++;
 
-          for (const proto of compatibleProtos) {
-            if (!shouldContinue()) break;
+          const eligibleProtos = compatibleProtos.filter(proto => {
             const pairKey = `${normalized}|${proto.spaceGroup}`;
-            if (formulaProtoPairs.has(pairKey)) continue;
+            if (formulaProtoPairs.has(pairKey)) return false;
             formulaProtoPairs.add(pairKey);
+            return proto.compatibilityScore >= 0.3;
+          });
+          if (eligibleProtos.length === 0) continue;
 
-            if (proto.compatibilityScore < 0.3) continue;
+          const features = getCachedFeatures(normalized);
+          const gbResult = gbPredict(features);
+          const protoPressure = estimateFamilyPressure(normalized);
+          const lambdaML = features.electronPhononLambda ?? 0;
+          const metallicityML = features.metallicity ?? 0.5;
+          const protoHPenalty = getHydrideUnverifiedPenalty(normalized);
 
+          const protoPayloads = eligibleProtos.map(proto => {
             enumTotal++;
-            const features = getCachedFeatures(normalized);
-            const gbResult = gbPredict(features);
-            const protoPressure = estimateFamilyPressure(normalized);
             const gnnResult = gnnPredictWithUncertainty(normalized, proto.prototype, protoPressure);
 
             let predictedTc: number;
@@ -5040,77 +5054,84 @@ async function runAutonomousFastPath() {
               || proto.prototype.includes("BiS2") || proto.prototype.includes("T-prime")
               || proto.prototype.includes("1111")) ? 1.12 : 1.0;
             predictedTc = Math.round(predictedTc * structBonus * dimBonus);
-
-            const lambdaML = features.electronPhononLambda ?? 0;
-            const metallicityML = features.metallicity ?? 0.5;
             predictedTc = applyAmbientTcCap(predictedTc, lambdaML, protoPressure, metallicityML, normalized);
-            const protoHPenalty = getHydrideUnverifiedPenalty(normalized);
             predictedTc = Math.round(predictedTc * protoHPenalty);
 
-            try {
-              const id = `sc-protoenum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-              const siteStr = Object.entries(proto.siteMap).map(([k, v]) => `${k}=${v}`).join("; ");
-              const inserted = await insertCandidateWithStabilityCheck({
-                id,
-                name: `${proto.prototype} ${normalized}`,
-                formula: normalized,
-                predictedTc,
-                pressureGpa: protoPressure,
-                meissnerEffect: false,
-                zeroResistance: false,
-                cooperPairMechanism: `${proto.prototype} structure enumeration`,
-                crystalStructure: `${proto.spaceGroup} (${proto.crystalSystem})`,
-                quantumCoherence: null,
-                stabilityScore: proto.compatibilityScore,
-                synthesisPath: null,
-                mlFeatures: {
-                  ...features as any,
-                  prototype: proto.prototype,
-                  spaceGroup: proto.spaceGroup,
-                  crystalSystem: proto.crystalSystem,
-                  latticeParam: proto.latticeParam,
-                  cOverA: proto.cOverA,
-                  structureEnumerated: true,
-                  gnnUncertainty: gnnResult.uncertainty,
-                  gnnLambda: gnnResult.lambda,
-                  gnnTc: gnnResult.tc,
-                },
-                xgboostScore: gbResult.score,
-                neuralNetScore: gnnResult.confidence,
-                ensembleScore: Math.min(0.9, gnnResult.confidence * 0.5 + gbResult.score * 0.3 + proto.compatibilityScore * 0.2),
-                roomTempViable: false,
-                status: "theoretical",
-                notes: `[Structure enum: ${proto.prototype} ${proto.spaceGroup}, compat=${proto.compatibilityScore}, sites: ${siteStr}]`,
-                electronPhononCoupling: gnnResult.lambda || lambdaML || null,
-                logPhononFrequency: features.logPhononFreq ?? null,
-                coulombPseudopotential: estimateMuStar(normalized),
-                pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
-                pairingMechanism: "phonon-mediated",
-                correlationStrength: features.correlationStrength ?? null,
-                dimensionality: (proto.prototype.includes("214") || proto.prototype.includes("MX2")
-                  || proto.prototype.includes("FeSe") || proto.prototype.includes("Infinite")
-                  || proto.prototype.includes("T-prime") || proto.prototype.includes("1111")) ? "2D" : "3D",
-                fermiSurfaceTopology: features.fermiSurfaceType ?? null,
-                uncertaintyEstimate: gnnResult.uncertainty,
-                verificationStage: 0,
-                dataConfidence: "low",
-                discoveryScore: proto.compatibilityScore * 0.5 + (predictedTc > 50 ? 0.3 : predictedTc > 10 ? 0.15 : 0.05),
-              }, "structure_diffusion");
+            const siteStr = Object.entries(proto.siteMap).map(([k, v]) => `${k}=${v}`).join("; ");
+            return { proto, gnnResult, predictedTc, siteStr };
+          });
 
-              if (inserted) {
-                enumInserted++;
-                protoEnumStats.totalInserted++;
-                totalScCandidates++;
-                recentNewCandidates++;
-                protoCountsThisCycle[proto.prototype] = (protoCountsThisCycle[proto.prototype] || 0) + 1;
-                protoEnumStats.prototypeHits[proto.prototype] = (protoEnumStats.prototypeHits[proto.prototype] || 0) + 1;
-                if (!protoEnumStats.bestTcByProto[proto.prototype] || predictedTc > protoEnumStats.bestTcByProto[proto.prototype]) {
-                  protoEnumStats.bestTcByProto[proto.prototype] = predictedTc;
-                }
-                protoEnumCandidates.push(normalized);
-                recordGeneratorOutcome("structure_diffusion", true, predictedTc, proto.compatibilityScore);
+          const insertResults = await Promise.allSettled(protoPayloads.map(({ proto, gnnResult, predictedTc, siteStr }) => {
+            const id = `sc-protoenum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            return insertCandidateWithStabilityCheck({
+              id,
+              name: `${proto.prototype} ${normalized}`,
+              formula: normalized,
+              predictedTc,
+              pressureGpa: protoPressure,
+              meissnerEffect: false,
+              zeroResistance: false,
+              cooperPairMechanism: `${proto.prototype} structure enumeration`,
+              crystalStructure: `${proto.spaceGroup} (${proto.crystalSystem})`,
+              quantumCoherence: null,
+              stabilityScore: proto.compatibilityScore,
+              synthesisPath: null,
+              mlFeatures: {
+                ...features as any,
+                prototype: proto.prototype,
+                spaceGroup: proto.spaceGroup,
+                crystalSystem: proto.crystalSystem,
+                latticeParam: proto.latticeParam,
+                cOverA: proto.cOverA,
+                structureEnumerated: true,
+                gnnUncertainty: gnnResult.uncertainty,
+                gnnLambda: gnnResult.lambda,
+                gnnTc: gnnResult.tc,
+              },
+              xgboostScore: gbResult.score,
+              neuralNetScore: gnnResult.confidence,
+              ensembleScore: Math.min(0.9, (() => {
+                let raw = gnnResult.confidence * 0.5 + gbResult.score * 0.3 + proto.compatibilityScore * 0.2;
+                const div = Math.abs(gnnResult.tc - gbResult.tcPredicted);
+                if (div > 50) raw = Math.max(0.05, raw - Math.min(0.5, (div - 50) / 200));
+                return raw;
+              })()),
+              roomTempViable: false,
+              status: "theoretical",
+              notes: `[Structure enum: ${proto.prototype} ${proto.spaceGroup}, compat=${proto.compatibilityScore}, sites: ${siteStr}]`,
+              electronPhononCoupling: gnnResult.lambda || lambdaML || null,
+              logPhononFrequency: features.logPhononFreq ?? null,
+              coulombPseudopotential: estimateMuStar(normalized),
+              pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
+              pairingMechanism: "phonon-mediated",
+              correlationStrength: features.correlationStrength ?? null,
+              dimensionality: (proto.prototype.includes("214") || proto.prototype.includes("MX2")
+                || proto.prototype.includes("FeSe") || proto.prototype.includes("Infinite")
+                || proto.prototype.includes("T-prime") || proto.prototype.includes("1111")) ? "2D" : "3D",
+              fermiSurfaceTopology: features.fermiSurfaceType ?? null,
+              uncertaintyEstimate: gnnResult.uncertainty,
+              verificationStage: 0,
+              dataConfidence: "low",
+              discoveryScore: proto.compatibilityScore * 0.5 + (predictedTc > 50 ? 0.3 : predictedTc > 10 ? 0.15 : 0.05),
+            }, "structure_diffusion");
+          }));
+
+          for (let i = 0; i < insertResults.length; i++) {
+            const r = insertResults[i];
+            if (r.status === "fulfilled" && r.value) {
+              const { proto, predictedTc } = protoPayloads[i];
+              enumInserted++;
+              protoEnumStats.totalInserted++;
+              totalScCandidates++;
+              recentNewCandidates++;
+              protoCountsThisCycle[proto.prototype] = (protoCountsThisCycle[proto.prototype] || 0) + 1;
+              protoEnumStats.prototypeHits[proto.prototype] = (protoEnumStats.prototypeHits[proto.prototype] || 0) + 1;
+              if (!protoEnumStats.bestTcByProto[proto.prototype] || predictedTc > protoEnumStats.bestTcByProto[proto.prototype]) {
+                protoEnumStats.bestTcByProto[proto.prototype] = predictedTc;
               }
-            } catch (e) {}
+              protoEnumCandidates.push(normalized);
+              recordGeneratorOutcome("structure_diffusion", true, predictedTc, proto.compatibilityScore);
+            }
           }
         }
 
@@ -5160,7 +5181,7 @@ async function runAutonomousFastPath() {
     let cdvaeCandidates: string[] = [];
     if (cycleCount % 4 === 0) {
       try {
-        const cdvaeTargetTc = autonomousBestTc > 100 ? autonomousBestTc * 1.5 : 200;
+        const cdvaeTargetTc = elasticTcTarget(autonomousBestTc);
         const cdvaeResult = runCrystalDiffusionCycle(10, cdvaeTargetTc, 20, alreadyScreenedFormulas);
         for (const crystal of cdvaeResult) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -5185,7 +5206,7 @@ async function runAutonomousFastPath() {
 
     if (cycleCount % 6 === 0) {
       try {
-        const distTarget = Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200);
+        const distTarget = elasticTcTarget(autonomousBestTc);
         const distResult = runDistributionBasedDiffusion(8, distTarget, 20, alreadyScreenedFormulas);
         for (const crystal of distResult) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -5211,7 +5232,7 @@ async function runAutonomousFastPath() {
     if (cycleCount % 15 === 0) {
       try {
         const vaeResult = runLatentSpaceInverseDesign(
-          Math.min(300, autonomousBestTc > 100 ? autonomousBestTc * 1.2 : 200),
+          elasticTcTarget(autonomousBestTc),
           cdvaeCandidates.length > 0 ? cdvaeCandidates[0] : undefined,
           20, 0.02, 2,
         );
