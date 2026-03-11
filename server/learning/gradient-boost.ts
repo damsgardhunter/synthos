@@ -1012,6 +1012,55 @@ export function getTrainedModel(): GBModel {
   return cachedModel;
 }
 
+const APPLICATION_TC_TARGETS: Record<string, { target: number; range: [number, number]; label: string }> = {
+  "high-temperature superconductor": { target: 293, range: [200, 350], label: "room-temperature" },
+  "clathrate hydride superconductor": { target: 293, range: [200, 350], label: "room-temperature hydride" },
+  "topological insulator": { target: 30, range: [5, 77], label: "cryogenic topological" },
+  "heavy fermion superconductor": { target: 20, range: [2, 77], label: "heavy fermion" },
+  "kagome lattice metal": { target: 77, range: [20, 150], label: "LN₂-range kagome" },
+  "spin-orbit coupled material": { target: 50, range: [10, 120], label: "SOC material" },
+  "ultra-hard coating material": { target: 40, range: [10, 100], label: "hard coating SC" },
+  "MXene-based compound": { target: 77, range: [20, 150], label: "MXene SC" },
+};
+
+let activeApplication: string | null = null;
+
+export function setActiveApplication(app: string | null): void {
+  activeApplication = app;
+}
+
+function applicationAwareScore(tc: number, application?: string | null): number {
+  const app = application || activeApplication;
+  if (!app || !APPLICATION_TC_TARGETS[app]) {
+    if (tc > 293) return 0.92;
+    if (tc > 200) return 0.85;
+    if (tc > 100) return 0.70;
+    if (tc > 50) return 0.55;
+    if (tc > 20) return 0.40;
+    if (tc > 5) return 0.25;
+    if (tc > 1) return 0.15;
+    return 0.05;
+  }
+
+  const { target, range } = APPLICATION_TC_TARGETS[app];
+  const [lo, hi] = range;
+
+  if (tc >= lo && tc <= hi) {
+    const distFromTarget = Math.abs(tc - target);
+    const maxDist = Math.max(target - lo, hi - target);
+    const proximity = 1.0 - distFromTarget / maxDist;
+    return 0.70 + 0.25 * proximity;
+  }
+
+  if (tc > hi) {
+    const overshoot = (tc - hi) / hi;
+    return Math.max(0.50, 0.70 - overshoot * 0.3);
+  }
+
+  const undershoot = (lo - tc) / lo;
+  return Math.max(0.05, 0.40 - undershoot * 0.5);
+}
+
 export function gbPredict(features: MLFeatureVector, formula?: string): { tcPredicted: number; score: number; reasoning: string[] } {
   const model = getTrainedModel();
   const x = featureVectorToArray(features, formula);
@@ -1035,15 +1084,7 @@ export function gbPredict(features: MLFeatureVector, formula?: string): { tcPred
     reasoning.push(`${name}=${val.toFixed(4)} (key predictor)`);
   }
 
-  let score = 0;
-  if (tcPredicted > 293) score = 0.92;
-  else if (tcPredicted > 200) score = 0.85;
-  else if (tcPredicted > 100) score = 0.70;
-  else if (tcPredicted > 50) score = 0.55;
-  else if (tcPredicted > 20) score = 0.40;
-  else if (tcPredicted > 5) score = 0.25;
-  else if (tcPredicted > 1) score = 0.15;
-  else score = 0.05;
+  let score = applicationAwareScore(tcPredicted);
 
   const lambda = features.electronPhononLambda;
   if (lambda > 1.5) score += 0.10;
@@ -1108,12 +1149,26 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   const epistemicVar = epistemicStd * epistemicStd;
 
   let aleatoricVar = 0;
+  let aleatoricNote = "";
   if (cachedVarianceEnsembleXGB) {
     const varResult = predictEnsembleXGB(cachedVarianceEnsembleXGB, x);
     if (cachedVarianceEnsembleXGB.isLogVariance) {
       aleatoricVar = Math.max(0, Math.exp(varResult.mean));
     } else {
       aleatoricVar = Math.max(0, varResult.mean);
+    }
+
+    const aleatoricStdRaw = Math.sqrt(aleatoricVar);
+    const expectedMinStd = meanTc > 50 ? meanTc * 0.05 : 2.5;
+    if (aleatoricStdRaw < expectedMinStd && meanTc > 20) {
+      aleatoricVar = expectedMinStd * expectedMinStd;
+      aleatoricNote = `Aleatoric floor applied (${expectedMinStd.toFixed(1)}K, ~5% of Tc)`;
+    }
+
+    const maxReasonableVar = meanTc > 10 ? (meanTc * 2) * (meanTc * 2) : 400;
+    if (aleatoricVar > maxReasonableVar) {
+      aleatoricVar = maxReasonableVar;
+      aleatoricNote = `Aleatoric capped at ${Math.sqrt(maxReasonableVar).toFixed(1)}K (variance model outlier)`;
     }
   }
   const aleatoricStd = Math.sqrt(aleatoricVar);
@@ -1126,15 +1181,7 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
 
   const normalizedUncertainty = Math.min(1.0, totalStd / Math.max(1, meanTc + 10));
 
-  let score = 0;
-  if (meanTc > 293) score = 0.92;
-  else if (meanTc > 200) score = 0.85;
-  else if (meanTc > 100) score = 0.70;
-  else if (meanTc > 50) score = 0.55;
-  else if (meanTc > 20) score = 0.40;
-  else if (meanTc > 5) score = 0.25;
-  else if (meanTc > 1) score = 0.15;
-  else score = 0.05;
+  let score = applicationAwareScore(meanTc);
 
   if (features.electronPhononLambda > 1.5) score += 0.10;
   else if (features.electronPhononLambda > 0.8) score += 0.05;
@@ -1149,6 +1196,7 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   const reasoning: string[] = [];
   reasoning.push(`Ensemble: ${XGB_ENSEMBLE_SIZE} models, Tc=${meanTc.toFixed(1)}K ± ${totalStd.toFixed(1)}K`);
   reasoning.push(`Epistemic σ=${epistemicStd.toFixed(2)}K, Aleatoric σ=${aleatoricStd.toFixed(2)}K`);
+  if (aleatoricNote) reasoning.push(aleatoricNote);
   reasoning.push(`95% CI: [${ci95Lower.toFixed(1)}K, ${ci95Upper.toFixed(1)}K]`);
   if (normalizedUncertainty > 0.6) reasoning.push("Very high uncertainty - priority exploration target");
   else if (normalizedUncertainty > 0.3) reasoning.push("Moderate uncertainty - good exploration candidate");

@@ -4,6 +4,7 @@ import type { EventEmitter } from "./engine";
 import { trackDuplicatesSkipped } from "./strategy-analyzer";
 import { normalizeFormula } from "./utils";
 import { passesValenceFilter, passesCompositionComplexityFilter } from "./candidate-generator";
+import { setActiveApplication } from "./gradient-boost";
 import { rlAgent } from "./rl-agent";
 
 const openai = new OpenAI({
@@ -210,6 +211,7 @@ export async function generateNovelFormulas(
 ): Promise<number> {
   await loadRecentlyGenerated();
   const application = targetApp || getNextTargetApplication();
+  setActiveApplication(application);
   let generated = 0;
 
   emit("log", {
