@@ -1568,6 +1568,7 @@ export interface EvaluatedEntry {
   stable: boolean;
   source: "dft" | "xtb" | "external" | "active-learning";
   evaluatedAt: number;
+  pressureGPa: number;
   lambda?: number;
   omegaLog?: number;
   dosAtEF?: number;
@@ -1593,7 +1594,8 @@ export function incorporateDFTResult(
   source: EvaluatedEntry["source"] = "dft",
   lambda?: number,
   omegaLog?: number,
-  dosAtEF?: number
+  dosAtEF?: number,
+  pressureGPa: number = 0
 ): boolean {
   totalDFTFeedback++;
 
@@ -1605,6 +1607,7 @@ export function incorporateDFTResult(
       existing.stable = stable;
       existing.source = source;
       existing.evaluatedAt = Date.now();
+      existing.pressureGPa = pressureGPa;
       if (lambda != null) existing.lambda = lambda;
       if (omegaLog != null) existing.omegaLog = omegaLog;
       if (dosAtEF != null) existing.dosAtEF = dosAtEF;
@@ -1620,6 +1623,7 @@ export function incorporateDFTResult(
     stable,
     source,
     evaluatedAt: Date.now(),
+    pressureGPa,
     lambda,
     omegaLog,
     dosAtEF,
@@ -1650,10 +1654,10 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       tc: entry.tc,
       family: entry.stable ? "DFT-Evaluated" : "DFT-Failed",
       isSuperconductor: entry.tc > 0 && entry.stable,
-      pressureGPa: 0,
+      pressureGPa: entry.pressureGPa,
     };
     SUPERCON_TRAINING_DATA.push(newEntry);
-    trainingPool.add(entry.formula, entry.tc, 0);
+    trainingPool.add(entry.formula, entry.tc, entry.pressureGPa);
     newFromEval++;
   }
 
@@ -1758,13 +1762,28 @@ export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
   try {
     const features = extractFeatures(formula);
 
-    if (features.metallicity < 0.15) {
+    if (features.metallicity < 0.05) {
       surrogateRejectCount++;
-      return { pass: false, predictedTc: 0, score: 0, reasoning: ["Insulator: metallicity too low"] };
+      return { pass: false, predictedTc: 0, score: 0, reasoning: ["Deep insulator: metallicity < 0.05, not dopable"] };
     }
 
     const result = gbPredict(features, formula);
     const predictedTc = Number.isFinite(result.tcPredicted) ? result.tcPredicted : 0;
+
+    if (features.metallicity < 0.15) {
+      const dopingPenalty = 0.5;
+      const adjustedScore = result.score * dopingPenalty;
+      const dopingReasoning = [
+        ...result.reasoning,
+        `Low metallicity (${features.metallicity.toFixed(3)}): parent phase is insulating — potential doping candidate, score penalized 50%`,
+      ];
+      if (adjustedScore < 0.1 || predictedTc < minTcThreshold) {
+        surrogateRejectCount++;
+        return { pass: false, predictedTc, score: adjustedScore, reasoning: dopingReasoning };
+      }
+      surrogatePassCount++;
+      return { pass: true, predictedTc, score: adjustedScore, reasoning: dopingReasoning };
+    }
 
     if (predictedTc < minTcThreshold) {
       surrogateRejectCount++;

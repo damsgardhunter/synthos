@@ -2109,7 +2109,7 @@ async function runDFTEnrichment() {
         const formEnergy = dftData.formationEnergy?.value ?? null;
         const dftStable = formEnergy !== null ? formEnergy < 0.5 : true;
         const dftSrc = (dftData.sources.mp || dftData.sources.aflow) ? "external" as const : "xtb" as const;
-        incorporateDFTResult(candidate.formula, gb.tcPredicted, formEnergy, dftStable, dftSrc);
+        incorporateDFTResult(candidate.formula, gb.tcPredicted, formEnergy, dftStable, dftSrc, undefined, undefined, undefined, candidate.pressureGpa ?? 0);
 
         const priorTc = candidate.predictedTc ?? 0;
         recordEvaluationResult(

@@ -899,7 +899,8 @@ async function runDFTEnrichmentForCandidate(
       dftSource,
       entry.lambda > 0 ? entry.lambda : undefined,
       entry.omegaLog > 0 ? entry.omegaLog : undefined,
-      entry.dosAtEF > 0 ? entry.dosAtEF : undefined
+      entry.dosAtEF > 0 ? entry.dosAtEF : undefined,
+      candidate.pressureGpa ?? 0
     );
 
     addDFTTrainingResult({
@@ -1056,7 +1057,11 @@ async function runDFTEnrichmentForCandidate(
       gb.tcPredicted,
       formEnergy,
       isStable,
-      dftSource
+      dftSource,
+      undefined,
+      undefined,
+      undefined,
+      candidate.pressureGpa ?? 0
     );
 
     addDFTTrainingResult({
