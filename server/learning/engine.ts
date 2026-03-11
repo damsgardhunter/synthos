@@ -5622,7 +5622,7 @@ async function runAutonomousFastPath() {
 
       if (topForDoping.length > 0) {
         const dopingResult = runDopingBatch(topForDoping, 6, 30, alreadyScreenedFormulas);
-        dopingCandidates = dopingResult.dopedFormulas.filter(f => !alreadyScreenedFormulas.has(f));
+        dopingCandidates = dopingResult.dopedFormulas.filter(f => !alreadyScreenedFormulas.has(normalizeFormula(f)));
         dopingSpecs = dopingResult.specs;
         for (const f of dopingCandidates) {
           alreadyScreenedFormulas.add(f);
@@ -5786,7 +5786,11 @@ async function runAutonomousFastPath() {
       });
       thisCycleFamilyCounts[candFamily] = (thisCycleFamilyCounts[candFamily] || 0) + 1;
 
-      bayesianOptimizer.addObservation(formula, result.tc, result.physicsPred?.lambda ?? 0, result.passed ? 1 : 0);
+      const surrogateOnlyReasons = ["invalid-elements", "stability-prefilter", "surrogate-reject", "formation-energy", "low-gb-tc"];
+      const isSurrogateOnly = surrogateOnlyReasons.some(r => result.reason.startsWith(r));
+      if (!isSurrogateOnly && result.physicsPred) {
+        bayesianOptimizer.addObservation(formula, result.tc, result.physicsPred.lambda ?? 0, result.passed ? 1 : 0);
+      }
 
       const isRlCandidate = rlCandidates.includes(formula);
       const isBoCandidate = boTopFormulas.includes(formula);
@@ -5822,8 +5826,8 @@ async function runAutonomousFastPath() {
             rejectCategory = "tc_too_low";
           }
         }
-        rlAgent.recordElementOutcome(els, result.tc, result.passed, rejectCategory);
 
+        let effectiveTcForRL = result.tc;
         if (result.passed && result.tc > 10) {
           const hubIns = crossEngineHub.getInsightsFor(formula);
           let crossEngineBonus = 0;
@@ -5841,10 +5845,10 @@ async function runAutonomousFastPath() {
           }
 
           if (crossEngineBonus > 0.05) {
-            const enrichedTc = Math.round(result.tc * (1 + crossEngineBonus));
-            rlAgent.recordElementOutcome(els, enrichedTc, true);
+            effectiveTcForRL = Math.round(result.tc * (1 + crossEngineBonus));
           }
         }
+        rlAgent.recordElementOutcome(els, effectiveTcForRL, result.passed, rejectCategory);
 
         if (result.passed) {
           try {
@@ -5861,7 +5865,7 @@ async function runAutonomousFastPath() {
 
       if (result.tc > batchBestTc) batchBestTc = result.tc;
       if (result.passed) batchPassCount++;
-      if (!alreadyScreenedFormulas.has(formula)) batchNovelCount++;
+      if (!alreadyScreenedFormulas.has(normalizeFormula(formula))) batchNovelCount++;
       batchRewardAccum += (result.tc > 0 ? Math.min(1, result.tc / 400) * 0.5 : 0)
         + (result.passed ? 0.3 : 0)
         + (result.tc > autonomousBestTc ? 0.5 : 0);
@@ -5985,8 +5989,9 @@ async function runAutonomousFastPath() {
                   variantCount: defects.length,
                   bestMutatedFormula: defectFormula,
                 });
-                if (!alreadyScreenedFormulas.has(defectFormula) && defectFormula !== formula) {
-                  alreadyScreenedFormulas.add(defectFormula);
+                const normDefectFormula = normalizeFormula(defectFormula);
+                if (!alreadyScreenedFormulas.has(normDefectFormula) && normDefectFormula !== normalizeFormula(formula)) {
+                  alreadyScreenedFormulas.add(normDefectFormula);
                   feedbackLoopStats.defectCandidatesAdded++;
                   feedbackLoopStats.defectTotalTcBoost += bestDefect.tcMod - 1;
                   try {
@@ -6096,7 +6101,7 @@ async function runAutonomousFastPath() {
                 predictedTc: result.tc,
                 stability: 1 - (result.physicsPred?.hullDistance ?? 0.1),
                 synthesisFeasibility: synthResult?.overallFeasibility ?? 0.5,
-                novelty: alreadyScreenedFormulas.has(formula) ? 0.3 : 0.8,
+                novelty: alreadyScreenedFormulas.has(normalizeFormula(formula)) ? 0.3 : 0.8,
                 uncertainty: result.physicsPred?.lambdaUncertainty ?? 0.5,
                 materialClass: family,
                 crystalStructure: "predicted",
