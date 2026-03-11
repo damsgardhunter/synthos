@@ -2927,10 +2927,31 @@ async function runPhase10_Physics() {
             const metalAtoms = Object.entries(cts)
               .filter(([el]) => !NONMETAL_SET.has(el))
               .reduce((s, [, count]) => s + count, 0);
-            return metalAtoms > 0 && hCount / metalAtoms >= 2;
+            if (metalAtoms <= 0 || hCount / metalAtoms < 2) return false;
+            const mlF = (c.mlFeatures as Record<string, any>) ?? {};
+            const metallicity = mlF.metallicity ?? 0.3;
+            if (metallicity < 0.15) return false;
+            const totalAtoms = Object.values(cts).reduce((s, n) => s + n, 0);
+            const hFraction = hCount / totalAtoms;
+            if (hFraction < 0.3) return false;
+            return true;
           } catch { return false; }
         });
-        const hydrideToScan = shuffle(hydrideCandidates).slice(0, 5);
+        const recentPressureErrors = new Set<string>();
+        const hydrideToScan = hydrideCandidates
+          .filter(c => {
+            const mlF = (c.mlFeatures as Record<string, any>) ?? {};
+            if (mlF.pressureTcCurve && (c.predictedTc ?? 0) < 20) return false;
+            if (recentPressureErrors.has(c.formula)) return false;
+            return true;
+          })
+          .sort((a, b) => {
+            const aHasPressure = (a.mlFeatures as Record<string, any>)?.pressureTcCurve ? 1 : 0;
+            const bHasPressure = (b.mlFeatures as Record<string, any>)?.pressureTcCurve ? 1 : 0;
+            if (aHasPressure !== bHasPressure) return aHasPressure - bHasPressure;
+            return (b.predictedTc ?? 0) - (a.predictedTc ?? 0);
+          })
+          .slice(0, 5);
         for (const candidate of hydrideToScan) {
           if (!shouldContinue()) break;
           try {
@@ -3021,6 +3042,7 @@ async function runPhase10_Physics() {
             await storage.updateSuperconductorCandidate(candidate.id, hydrideUpdates);
           } catch (err: any) {
             emit("log", { phase: "phase-10", event: "Pressure scan error", detail: `${candidate.formula}: ${err.message?.slice(0, 150)}`, dataSource: "Pressure Engine" });
+            recentPressureErrors.add(candidate.formula);
           }
         }
 
@@ -3214,6 +3236,7 @@ async function runPhase11_StructurePrediction() {
               const metallicityML = features.metallicity ?? 0.5;
               let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
               rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
+              const structUncertainty = Math.max(0.5, 0.3 + variant.structuralNovelty * 0.4);
 
               const id = `sc-struct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
               try {
@@ -3230,13 +3253,23 @@ async function runPhase11_StructurePrediction() {
                   quantumCoherence: variant.structuralNovelty,
                   stabilityScore: features.cooperPairStrength,
                   synthesisPath: null,
-                  mlFeatures: features as any,
+                  mlFeatures: {
+                    ...features as any,
+                    structuralVariant: {
+                      parentFormula: variant.parentFormula,
+                      variationType: variant.variationType,
+                      spaceGroup: variant.spaceGroup,
+                      structuralNovelty: variant.structuralNovelty,
+                      tcSource: "formula_estimate_unverified",
+                      needsPhysicsVerification: true,
+                    },
+                  },
                   xgboostScore: gbResult.score,
                   neuralNetScore: variant.structuralNovelty,
                   ensembleScore: Math.min(0.9, (gbResult.score + variant.structuralNovelty) / 2),
                   roomTempViable: false,
                   status: "theoretical",
-                  notes: `[Structural variant: ${variant.variationType}, topology=${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)}] ${variant.description}`,
+                  notes: `Structural variant: ${variant.variationType}, topology=${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)}. Tc is formula-based estimate pending physics verification. ${variant.description}`,
                   electronPhononCoupling: features.electronPhononLambda ?? null,
                   logPhononFrequency: features.logPhononFreq ?? null,
                   coulombPseudopotential: 0.12,
@@ -3245,7 +3278,7 @@ async function runPhase11_StructurePrediction() {
                   correlationStrength: features.correlationStrength ?? null,
                   dimensionality: variant.dimensionality,
                   fermiSurfaceTopology: features.fermiSurfaceType ?? null,
-                  uncertaintyEstimate: 0.6,
+                  uncertaintyEstimate: structUncertainty,
                   verificationStage: 0,
                   dataConfidence: "low",
                 }, "structure_diffusion");
