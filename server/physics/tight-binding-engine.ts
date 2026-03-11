@@ -872,12 +872,49 @@ function birchMurnaghanVolume(pressure: number, V0: number, B0: number, B0p: num
   return V0 * eta;
 }
 
-function scaleHoppingForPressure(t0: number, r0: number, pressure: number, bulkModulus: number): number {
+const SOFT_ELEMENTS = new Set(["H", "Li", "Na", "K", "Rb", "Cs", "Ca", "Sr", "Ba"]);
+
+function estimateB0Prime(elements: string[]): number {
+  if (elements.length === 0) return 4.0;
+  let totalWeight = 0;
+  let weightedB0p = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const bulk = data?.bulkModulus ?? 50;
+    let b0p: number;
+    if (SOFT_ELEMENTS.has(el)) {
+      b0p = el === "H" ? 3.4 : 3.6;
+    } else if (isTransitionMetal(el)) {
+      b0p = bulk > 200 ? 4.2 : 4.0;
+    } else {
+      b0p = 4.0;
+    }
+    const w = 1.0 / Math.max(1, bulk);
+    totalWeight += w;
+    weightedB0p += b0p * w;
+  }
+  return totalWeight > 0 ? weightedB0p / totalWeight : 4.0;
+}
+
+function getHoppingExponent(el1: string, el2: string): number {
+  const hasD1 = isTransitionMetal(el1) || isRareEarth(el1) || isActinide(el1);
+  const hasD2 = isTransitionMetal(el2) || isRareEarth(el2) || isActinide(el2);
+  if (hasD1 && hasD2) return 2.0;
+  const isLight1 = (getElementData(el1)?.atomicNumber ?? 20) <= 10;
+  const isLight2 = (getElementData(el2)?.atomicNumber ?? 20) <= 10;
+  if (isLight1 && isLight2) return 2.8;
+  if (isLight1 || isLight2) return 2.4;
+  if (!hasD1 && !hasD2) return 2.5;
+  return 2.2;
+}
+
+function scaleHoppingForPressure(t0: number, r0: number, pressure: number, bulkModulus: number, elements?: string[], el1?: string, el2?: string): number {
   if (pressure <= 0) return t0;
   const V0 = r0 * r0 * r0;
-  const V = birchMurnaghanVolume(pressure, V0, bulkModulus, 4.0);
+  const b0p = elements ? estimateB0Prime(elements) : 4.0;
+  const V = birchMurnaghanVolume(pressure, V0, bulkModulus, b0p);
   const rRatio = Math.cbrt(V0 / V);
-  const n = 2.0;
+  const n = (el1 && el2) ? getHoppingExponent(el1, el2) : 2.0;
   return t0 * Math.pow(rRatio, n);
 }
 
@@ -935,6 +972,25 @@ export function computeTBProperties(formula: string, pressure: number = 0, custo
         skPairCache.delete(key);
       }
     });
+
+    for (let i = 0; i < elements.length; i++) {
+      for (let j = i; j < elements.length; j++) {
+        const e1 = elements[i], e2 = elements[j];
+        const base = computeHarrisonSK(e1, e2);
+        const scale = scaleHoppingForPressure(1.0, base.r0, pressure, avgBulk, elements, e1, e2);
+        if (Math.abs(scale - 1.0) > 0.001) {
+          const key = e1 < e2 ? `${e1}-${e2}` : `${e2}-${e1}`;
+          skPairCache.set(key, {
+            sss: base.sss * scale, sps: base.sps * scale,
+            pps: base.pps * scale, ppp: base.ppp * scale,
+            sds: base.sds * scale, pds: base.pds * scale,
+            pdp: base.pdp * scale, dds: base.dds * scale,
+            ddp: base.ddp * scale, ddd: base.ddd * scale,
+            r0: base.r0 / Math.cbrt(scale),
+          });
+        }
+      }
+    }
   }
 
   const bandResult = computeBandStructure(formula, 20, customLatticeVectors);
