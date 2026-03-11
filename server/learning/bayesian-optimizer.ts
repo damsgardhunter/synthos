@@ -241,6 +241,14 @@ function standardNormalPDF(x: number): number {
   return INV_SQRT_2PI * Math.exp(-0.5 * x * x);
 }
 
+function tcToLog(tc: number): number {
+  return Math.log(Math.max(tc, 0) + 1);
+}
+
+function logToTc(logTc: number): number {
+  return Math.max(0, Math.exp(logTc) - 1);
+}
+
 export class BayesianOptimizer {
   private observations: Observation[] = [];
   private groupLengthScales = [0.5, 1.0, 0.3];
@@ -248,6 +256,7 @@ export class BayesianOptimizer {
   private signalVariance = 1.0;
   private noiseVariance = 0.1;
   private bestTcObserved = 0;
+  private bestLogTcObserved = 0;
   private cachedL: number[][] | null = null;
   private cachedAlpha: number[] | null = null;
   private cachedYMean: number = 0;
@@ -301,6 +310,7 @@ export class BayesianOptimizer {
 
     if (safeTc > this.bestTcObserved) {
       this.bestTcObserved = safeTc;
+      this.bestLogTcObserved = tcToLog(safeTc);
     }
 
     if (this.observations.length > this.maxObservations) {
@@ -313,9 +323,13 @@ export class BayesianOptimizer {
       const diverseKeep = this.diversityPrune(bottomSlice, targetFromBottom);
       this.observations = [...topSlice, ...diverseKeep];
 
-      this.bestTcObserved = this.observations.length > 0
-        ? Math.max(...this.observations.map(o => o.tc))
-        : 0;
+      if (this.observations.length > 0) {
+        this.bestTcObserved = Math.max(...this.observations.map(o => o.tc));
+        this.bestLogTcObserved = tcToLog(this.bestTcObserved);
+      } else {
+        this.bestTcObserved = 0;
+        this.bestLogTcObserved = 0;
+      }
     }
 
     this.cachedL = null;
@@ -399,7 +413,7 @@ export class BayesianOptimizer {
 
     const L = choleskyDecompose(K);
 
-    const yRaw = obs.map(o => o.tc);
+    const yRaw = obs.map(o => tcToLog(o.tc));
     const yMean = yRaw.reduce((s, v) => s + v, 0) / n;
     const y = yRaw.map(v => v - yMean);
     const alpha = choleskySolve(L, y);
@@ -489,7 +503,7 @@ export class BayesianOptimizer {
     }
 
     const L = choleskyDecompose(K);
-    const yRaw = obs.map(o => o.tc);
+    const yRaw = obs.map(o => tcToLog(o.tc));
     const yMean = yRaw.reduce((s, v) => s + v, 0) / yRaw.length;
     const y = yRaw.map(v => v - yMean);
     const alpha = choleskySolve(L, y);
@@ -506,12 +520,7 @@ export class BayesianOptimizer {
     return this.predictFromFeatures(features);
   }
 
-  private predictFromFeatures(features: number[]): GPPrediction {
-    const n = this.observations.length;
-    if (n === 0) {
-      return { mean: 0, std: Math.sqrt(this.signalVariance) };
-    }
-
+  private predictLogSpace(features: number[]): GPPrediction {
     const { L, alpha, obs: usedObs } = this.buildGP();
     const yMean = this.cachedYMean;
 
@@ -533,7 +542,20 @@ export class BayesianOptimizer {
     const MIN_VARIANCE = 1e-6;
     variance = Math.max(variance, MIN_VARIANCE);
 
-    return { mean: Math.max(0, mean), std: Math.sqrt(variance) };
+    return { mean, std: Math.sqrt(variance) };
+  }
+
+  private predictFromFeatures(features: number[]): GPPrediction {
+    const n = this.observations.length;
+    if (n === 0) {
+      return { mean: 0, std: Math.sqrt(this.signalVariance) };
+    }
+
+    const logPred = this.predictLogSpace(features);
+    const tcMean = logToTc(logPred.mean);
+    const tcStd = tcMean * (Math.exp(logPred.std) - 1);
+
+    return { mean: tcMean, std: Math.max(tcStd, 1e-3) };
   }
 
   acquisitionUCB(formula: string, beta: number = 2.0): number {
@@ -542,21 +564,28 @@ export class BayesianOptimizer {
   }
 
   acquisitionEI(formula: string, xi: number = 0.01): number {
-    const { mean, std } = this.predict(formula);
-    if (std < 1e-3) return 0;
-    const improvement = mean - this.bestTcObserved - xi;
-    const z = improvement / std;
-    const result = improvement * standardNormalCDF(z) + std * standardNormalPDF(z);
-    return Number.isFinite(result) ? Math.max(0, result) : 0;
+    if (this.observations.length === 0) return 0;
+    const features = this.getFeatures(formula);
+    const logPred = this.predictLogSpace(features);
+    if (logPred.std < 1e-3) return 0;
+    const logXi = xi > 0 ? Math.log(1 + xi) : 0;
+    const improvement = logPred.mean - this.bestLogTcObserved - logXi;
+    const z = improvement / logPred.std;
+    const eiLog = improvement * standardNormalCDF(z) + logPred.std * standardNormalPDF(z);
+    if (!Number.isFinite(eiLog) || eiLog <= 0) return 0;
+    return logToTc(this.bestLogTcObserved + eiLog) - this.bestTcObserved;
   }
 
   thompsonSample(formula: string): number {
-    const { mean, std } = this.predict(formula);
+    if (this.observations.length === 0) return 0;
+    const features = this.getFeatures(formula);
+    const logPred = this.predictLogSpace(features);
     const u1 = Math.max(1e-15, Math.random());
     const u2 = Math.random();
     const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    const sample = mean + std * z;
-    return Number.isFinite(sample) ? sample : mean;
+    const logSample = logPred.mean + logPred.std * z;
+    const sample = logToTc(logSample);
+    return Number.isFinite(sample) ? sample : logToTc(logPred.mean);
   }
 
   suggestNextCandidates(
@@ -587,6 +616,8 @@ export class BayesianOptimizer {
       }
     } catch {}
 
+    const tcRange = Math.max(this.bestTcObserved, 1);
+
     for (const formula of filteredPool) {
       const { mean, std } = this.predict(formula);
 
@@ -594,19 +625,19 @@ export class BayesianOptimizer {
       let source: "ucb" | "ei" | "thompson";
 
       if (method === "mixed") {
-        const ucb = mean + 2.0 * std;
-        const ei = this.acquisitionEI(formula);
-        const ts = this.thompsonSample(formula);
+        const ucb = (mean + 2.0 * std) / tcRange;
+        const ei = this.acquisitionEI(formula) / tcRange;
+        const ts = this.thompsonSample(formula) / tcRange;
         acqValue = ucb * 0.4 + ei * 0.3 + ts * 0.3;
         source = ucb >= ei && ucb >= ts ? "ucb" : ei >= ts ? "ei" : "thompson";
       } else if (method === "ucb") {
-        acqValue = this.acquisitionUCB(formula);
+        acqValue = this.acquisitionUCB(formula) / tcRange;
         source = "ucb";
       } else if (method === "ei") {
-        acqValue = this.acquisitionEI(formula);
+        acqValue = this.acquisitionEI(formula) / tcRange;
         source = "ei";
       } else {
-        acqValue = this.thompsonSample(formula);
+        acqValue = this.thompsonSample(formula) / tcRange;
         source = "thompson";
       }
 
