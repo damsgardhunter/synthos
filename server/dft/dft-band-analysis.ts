@@ -652,6 +652,7 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
   let fsDim = 3.0;
   if (avgCylindrical > 0.7) fsDim = 2.0;
   else if (avgCylindrical > 0.5) fsDim = 2.5;
+  const pathDimensionality = fsDim;
 
   let sigmaBand = 0;
   for (const pocket of pockets) {
@@ -676,7 +677,7 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
   const mlFeatures: FermiSurfaceMLFeatures = {
     fermiPocketCount: pockets.length,
     electronHoleBalance: ehBalance,
-    fsDimensionality: fsDim,
+    fsDimensionality: pathDimensionality,
     sigmaBandPresence: sigmaBand,
     multiBandScore: multiBand,
   };
@@ -694,7 +695,7 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
     cylindricalCharacter: avgCylindrical,
     nestingVectors: nesting.vectors,
     nestingScore: nesting.nestingScore,
-    fsDimensionality: fsDim,
+    fsDimensionality: pathDimensionality,
     sigmaBandPresence: sigmaBand,
     multiBandScore: multiBand,
     mlFeatures,
@@ -728,7 +729,7 @@ export function extractTopologyFromDFT(bandResult: DFTBandStructureResult): DFTT
   if (hasDiracCrossing) topologyScore += 0.25 * bandResult.diracCrossingScore;
   if (hasFlatBand) topologyScore += 0.15 * bandResult.flatBandScore;
   if (topologicalIndicators.nodalLineIndicator > 0) topologyScore += 0.15 * topologicalIndicators.nodalLineIndicator;
-  if (topologicalIndicators.parityChanges > 5) topologyScore += 0.15 * Math.min(1.0, topologicalIndicators.parityChanges / 20);
+  if (topologicalIndicators.parityChanges > 0) topologyScore += 0.15 * Math.min(1.0, topologicalIndicators.parityChanges / 8);
   topologyScore = Math.min(1.0, topologyScore);
 
   return {
