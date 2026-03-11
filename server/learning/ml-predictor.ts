@@ -880,15 +880,13 @@ export async function runMLPrediction(
     dataSource: "ML Engine",
   });
 
-  let physicsData = context?.physicsData;
-  let crystalData = context?.crystalData;
-  if (!physicsData || !crystalData) {
-    physicsData = physicsData ?? new Map();
-    crystalData = crystalData ?? new Map();
-    try {
+  let physicsData = context?.physicsData ?? new Map<string, PhysicsContext>();
+  let crystalData = context?.crystalData ?? new Map<string, CrystalContext>();
+  try {
+    if (!context?.physicsData) {
       const existingSC = await storage.getSuperconductorCandidates(50);
       for (const sc of existingSC) {
-        if (sc.electronPhononCoupling != null || sc.verificationStage != null && sc.verificationStage > 0) {
+        if (sc.electronPhononCoupling != null || (sc.verificationStage != null && sc.verificationStage > 0)) {
           physicsData.set(sc.formula, {
             verifiedLambda: sc.electronPhononCoupling,
             verifiedTc: sc.predictedTc,
@@ -899,6 +897,8 @@ export async function runMLPrediction(
           });
         }
       }
+    }
+    if (!context?.crystalData) {
       const structures = await storage.getCrystalStructures(100);
       for (const cs of structures) {
         crystalData.set(cs.formula, {
@@ -910,18 +910,18 @@ export async function runMLPrediction(
           synthesizability: cs.synthesizability,
         });
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
   const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean; gnn: GNNPrediction | null }[] = [];
 
   let preFilterSkipped = 0;
-  let loopIdx = 0;
-  for (const mat of materials.slice(0, 100)) {
+  const matSlice = materials.slice(0, 100);
+  for (let loopIdx = 0; loopIdx < matSlice.length; loopIdx++) {
     if (loopIdx > 0 && loopIdx % 10 === 0) {
       await new Promise<void>(resolve => setImmediate(resolve));
     }
-    loopIdx++;
+    const mat = matSlice[loopIdx];
 
     const physics = physicsData.get(mat.formula);
     const crystal = crystalData.get(mat.formula);
@@ -960,6 +960,9 @@ export async function runMLPrediction(
 
   const GNN_INFERENCE_LIMIT = 15;
   for (let i = 0; i < Math.min(GNN_INFERENCE_LIMIT, scored.length); i++) {
+    if (i > 0 && i % 5 === 0) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
     const entry = scored[i];
     try {
       const crystal = crystalData.get(entry.mat.formula);
