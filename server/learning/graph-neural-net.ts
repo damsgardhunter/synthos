@@ -505,6 +505,23 @@ function computeValenceShellEncoding(atomicNumber: number, valenceElectrons: num
   return shellFill * 0.5 + blockFeature * 0.5;
 }
 
+function pressureAwareBondOrder(enDiff: number, atomicNumberI: number, atomicNumberJ: number, pressureGpa: number): number {
+  let bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
+
+  if (pressureGpa > 100) {
+    const isLightI = atomicNumberI <= 10;
+    const isLightJ = atomicNumberJ <= 10;
+    if (isLightI && isLightJ) {
+      const pressureFactor = Math.min((pressureGpa - 100) / 200, 1.0);
+      bondOrder += pressureFactor * 1.5;
+    } else if (isLightI || isLightJ) {
+      const pressureFactor = Math.min((pressureGpa - 100) / 300, 1.0);
+      bondOrder += pressureFactor * 0.8;
+    }
+  }
+  return bondOrder;
+}
+
 function pressureDistanceScale(pressureGpa: number): number {
   if (pressureGpa <= 0) return 1.0;
   const B0 = 150;
@@ -881,7 +898,7 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
             const distance = (ri + rj) * 0.9 * pScale;
 
             const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-            const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
+            const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
             const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
             const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
@@ -1153,7 +1170,7 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
       const cutoff = 6.0;
       if (distance < cutoff || nodes.length <= 8) {
         const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-        const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
+        const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
 
         const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
         const ionicCharacter = Math.min(1.0, enDiff / 2.5);
