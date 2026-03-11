@@ -153,6 +153,94 @@ function enforcePhysicsPressure(formula: string, llmPressure: number | null | un
   return Math.max(llmP, physPressure);
 }
 
+function estimateMuStar(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
+  const hFrac = (counts["H"] ?? 0) / totalAtoms;
+  const hasO = elements.includes("O");
+  const hasCu = elements.includes("Cu");
+  const TRANSITION_METALS = new Set(["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg"]);
+  const RARE_EARTHS = new Set(["La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu"]);
+  const hasTM = elements.some(e => TRANSITION_METALS.has(e));
+  const hasRE = elements.some(e => RARE_EARTHS.has(e));
+  const hasBoron = elements.includes("B");
+  const hasSe = elements.includes("Se") || elements.includes("Te") || elements.includes("S");
+
+  if (hFrac >= 0.5) return 0.10;
+  if (hFrac >= 0.3) return 0.11;
+
+  if (hasCu && hasO && elements.length >= 3) return 0.13;
+  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"))) return 0.12;
+
+  if (hasBoron && hasTM && !hasO) return 0.10;
+
+  if (hasTM && hasO) return 0.14;
+  if (hasTM && hasSe) return 0.13;
+  if (hasRE && hasO) return 0.14;
+
+  if (hasTM && !hasO && !hasSe) return 0.12;
+
+  if (elements.every(e => !TRANSITION_METALS.has(e) && !RARE_EARTHS.has(e))) return 0.11;
+
+  return 0.12;
+}
+
+function inferDimensionalityFromStructure(
+  lattice: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number },
+  atoms: { element: string; x: number; y: number; z: number }[],
+  spaceGroup?: string,
+): "1D" | "2D" | "3D" | "quasi-2D" {
+  if (!lattice || !atoms || atoms.length === 0) return "3D";
+
+  const { a, b, c } = lattice;
+  const ratioCA = c / Math.max(a, 0.01);
+  const ratioBA = b / Math.max(a, 0.01);
+
+  const sg = (spaceGroup ?? "").toLowerCase();
+  const layeredSGs = ["p4/nmm", "p4/mmm", "i4/mmm", "p63/mmc", "p6/mmm", "r-3m", "c2/m", "cmcm", "pmmm", "p-3m1"];
+  const isLayeredSG = layeredSGs.some(l => sg.includes(l));
+
+  if (atoms.length >= 3) {
+    const zCoords = atoms.map(at => at.z);
+    const uniqueZ = new Set(zCoords.map(z => Math.round(z * 20) / 20));
+    const zLayers = uniqueZ.size;
+    const zRange = Math.max(...zCoords) - Math.min(...zCoords);
+
+    if (zLayers <= 2 && zRange < 0.35) return "2D";
+
+    if (ratioCA > 2.5 && zLayers <= 4) return "quasi-2D";
+    if (isLayeredSG && ratioCA > 1.8) return "quasi-2D";
+  }
+
+  if (ratioCA > 3.5 || ratioCA < 0.28) return "quasi-2D";
+
+  if (ratioCA > 4.0 && ratioBA < 1.3) return "2D";
+
+  if (isLayeredSG && ratioCA > 2.0) return "quasi-2D";
+
+  return "3D";
+}
+
+const generativeFeatureCache = new Map<string, ReturnType<typeof extractFeatures>>();
+const MAX_GEN_FEATURE_CACHE = 500;
+
+function getCachedFeatures(formula: string): ReturnType<typeof extractFeatures> {
+  const cached = generativeFeatureCache.get(formula);
+  if (cached) return cached;
+  const features = extractFeatures(formula);
+  if (generativeFeatureCache.size >= MAX_GEN_FEATURE_CACHE) {
+    const firstKey = generativeFeatureCache.keys().next().value;
+    if (firstKey) generativeFeatureCache.delete(firstKey);
+  }
+  generativeFeatureCache.set(formula, features);
+  return features;
+}
+
+function clearGenerativeFeatureCache(): void {
+  generativeFeatureCache.clear();
+}
+
 function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undefined, muStar?: number, formula?: string): number {
   if (!lambda || lambda <= 0) return 0;
   const freq = omegaLogCm1 ?? 300;
@@ -3262,7 +3350,7 @@ async function runPhase11_StructurePrediction() {
             structInFlightMarked.push(variant.formula);
             const existingSC = await storage.getSuperconductorByFormula(variant.formula);
             if (!existingSC) {
-              const features = extractFeatures(variant.formula);
+              const features = getCachedFeatures(variant.formula);
               const gbResult = gbPredict(features);
               const lambdaML = features.electronPhononLambda ?? 0;
               const metallicityML = features.metallicity ?? 0.5;
@@ -3304,7 +3392,7 @@ async function runPhase11_StructurePrediction() {
                   notes: `Structural variant: ${variant.variationType}, topology=${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)}. Tc is formula-based estimate pending physics verification. ${variant.description}`,
                   electronPhononCoupling: features.electronPhononLambda ?? null,
                   logPhononFrequency: features.logPhononFreq ?? null,
-                  coulombPseudopotential: 0.12,
+                  coulombPseudopotential: estimateMuStar(variant.formula),
                   pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                   pairingMechanism: "phonon-mediated",
                   correlationStrength: features.correlationStrength ?? null,
@@ -3340,7 +3428,7 @@ async function runPhase11_StructurePrediction() {
           variant.formula = novelNormalized;
           const existingSC = await storage.getSuperconductorByFormula(variant.formula);
           if (!existingSC) {
-            const features = extractFeatures(variant.formula);
+            const features = getCachedFeatures(variant.formula);
             const gbResult = gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
@@ -3371,7 +3459,7 @@ async function runPhase11_StructurePrediction() {
                 notes: `[Novel prototype: ${variant.topology}, novelty=${variant.structuralNovelty.toFixed(2)}] ${variant.description}`,
                 electronPhononCoupling: features.electronPhononLambda ?? null,
                 logPhononFrequency: features.logPhononFreq ?? null,
-                coulombPseudopotential: 0.12,
+                coulombPseudopotential: estimateMuStar(variant.formula),
                 pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
@@ -3423,7 +3511,7 @@ async function runPhase11_StructurePrediction() {
           if (!isValidFormula(evoFormula)) continue;
           const existingSC = await storage.getSuperconductorByFormula(evoFormula);
           if (!existingSC) {
-            const features = extractFeatures(evoFormula);
+            const features = getCachedFeatures(evoFormula);
             const gbResult = gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
@@ -3453,7 +3541,7 @@ async function runPhase11_StructurePrediction() {
                 notes: `[Evolutionary structure search: mutated from top candidates]`,
                 electronPhononCoupling: lambdaML || null,
                 logPhononFrequency: features.logPhononFreq ?? null,
-                coulombPseudopotential: 0.12,
+                coulombPseudopotential: estimateMuStar(evoFormula),
                 pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
@@ -3493,12 +3581,15 @@ async function runPhase11_StructurePrediction() {
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
 
-          const features = extractFeatures(normalized);
+          const features = getCachedFeatures(normalized);
           const gbResult = gbPredict(features);
           const lambdaML = features.electronPhononLambda ?? 0;
           const metallicityML = features.metallicity ?? 0.5;
           let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, normalized);
           rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, normalized);
+          const motifDiffDim = (crystal as any).atoms?.length > 0 && (crystal as any).lattice
+            ? inferDimensionalityFromStructure((crystal as any).lattice, (crystal as any).atoms, crystal.spaceGroup)
+            : "3D";
 
           const id = `sc-diff-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           try {
@@ -3524,11 +3615,11 @@ async function runPhase11_StructurePrediction() {
               notes: `[Crystal diffusion: ${crystal.prototypeMatch || "novel"}, SG=${crystal.spaceGroup}, density=${crystal.densityGcm3} g/cm3, novelty=${crystal.noveltyScore.toFixed(2)}]`,
               electronPhononCoupling: features.electronPhononLambda ?? null,
               logPhononFrequency: features.logPhononFreq ?? null,
-              coulombPseudopotential: 0.12,
+              coulombPseudopotential: estimateMuStar(normalized),
               pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
               pairingMechanism: "phonon-mediated",
               correlationStrength: features.correlationStrength ?? null,
-              dimensionality: "3D",
+              dimensionality: motifDiffDim,
               fermiSurfaceTopology: features.fermiSurfaceType ?? null,
               uncertaintyEstimate: crystal.prototypeMatch ? 0.55 : 0.7,
               verificationStage: 0,
@@ -3570,13 +3661,15 @@ async function runPhase11_StructurePrediction() {
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
 
-          const features = extractFeatures(normalized);
+          const features = getCachedFeatures(normalized);
           const gbResult = gbPredict(features);
+          const cdvaeMuStar = estimateMuStar(normalized);
           const cdvaeLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
           const cdvaePhysTc = cdvaeLambda > 0
             ? Math.round(computePhysicsOnlyTc(cdvaeLambda, features.logPhononFreq, undefined, normalized))
             : 0;
           const cappedTc = applyAmbientTcCap(cdvaePhysTc, cdvaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+          const cdvaeDim = inferDimensionalityFromStructure(crystal.lattice, crystal.atoms as any, crystal.spaceGroup);
 
           let hPercolationPenalty = 1.0;
           let hPercNote = "";
@@ -3619,11 +3712,11 @@ async function runPhase11_StructurePrediction() {
               notes: `[CDVAE crystal diffusion: motif=${crystal.motif}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lattice=a${crystal.lattice.a.toFixed(1)}b${crystal.lattice.b.toFixed(1)}c${crystal.lattice.c.toFixed(1)}, lambda=${crystal.lambda}, novelty=${crystal.noveltyScore}]${hPercNote}`,
               electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
               logPhononFrequency: features.logPhononFreq ?? null,
-              coulombPseudopotential: 0.12,
+              coulombPseudopotential: cdvaeMuStar,
               pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
               pairingMechanism: "phonon-mediated",
               correlationStrength: features.correlationStrength ?? null,
-              dimensionality: "3D",
+              dimensionality: cdvaeDim,
               fermiSurfaceTopology: features.fermiSurfaceType ?? null,
               uncertaintyEstimate: 0.6,
               verificationStage: 0,
@@ -3668,13 +3761,15 @@ async function runPhase11_StructurePrediction() {
           distInFlightMarked.push(normalized);
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
-          const features = extractFeatures(normalized);
+          const features = getCachedFeatures(normalized);
           const gbResult = gbPredict(features);
+          const distMuStar = estimateMuStar(normalized);
           const distLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
           const distPhysTc = distLambda > 0
             ? Math.round(computePhysicsOnlyTc(distLambda, features.logPhononFreq, undefined, normalized))
             : 0;
           const cappedTc = applyAmbientTcCap(distPhysTc, distLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+          const distDim = inferDimensionalityFromStructure(crystal.lattice, crystal.atoms as any, crystal.spaceGroup);
 
           let distHPercPenalty = 1.0;
           let distHPercNote = "";
@@ -3717,11 +3812,11 @@ async function runPhase11_StructurePrediction() {
               notes: `[Distribution-based crystal diffusion: system=${crystal.crystalSystem}, SG=${crystal.spaceGroup}, atoms=${crystal.atoms.length}, lambda=${crystal.lambda}]${distHPercNote}`,
               electronPhononCoupling: crystal.lambda > 0 ? crystal.lambda : null,
               logPhononFrequency: features.logPhononFreq ?? null,
-              coulombPseudopotential: 0.12,
+              coulombPseudopotential: distMuStar,
               pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
               pairingMechanism: "phonon-mediated",
               correlationStrength: features.correlationStrength ?? null,
-              dimensionality: "3D",
+              dimensionality: distDim,
               fermiSurfaceTopology: features.fermiSurfaceType ?? null,
               uncertaintyEstimate: 0.6,
               verificationStage: 0,
@@ -4783,7 +4878,7 @@ async function runAutonomousFastPath() {
             if (proto.compatibilityScore < 0.3) continue;
 
             enumTotal++;
-            const features = extractFeatures(normalized);
+            const features = getCachedFeatures(normalized);
             const gbResult = gbPredict(features);
             const protoPressure = estimateFamilyPressure(normalized);
             const gnnResult = gnnPredictWithUncertainty(normalized, proto.prototype, protoPressure);
@@ -4843,7 +4938,7 @@ async function runAutonomousFastPath() {
                 notes: `[Structure enum: ${proto.prototype} ${proto.spaceGroup}, compat=${proto.compatibilityScore}, sites: ${siteStr}]`,
                 electronPhononCoupling: gnnResult.lambda || lambdaML || null,
                 logPhononFrequency: features.logPhononFreq ?? null,
-                coulombPseudopotential: 0.12,
+                coulombPseudopotential: estimateMuStar(normalized),
                 pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
@@ -6413,7 +6508,7 @@ async function runLearningCycle() {
               if (!isValidFormula(mf)) continue;
               const existing = await storage.getSuperconductorByFormula(mf);
               if (!existing) {
-                const features = extractFeatures(mf);
+                const features = getCachedFeatures(mf);
                 const gb = gbPredict(features);
                 if (gb.tcPredicted >= 10) {
                   const lambdaML = features.electronPhononLambda ?? 0;
@@ -6444,7 +6539,7 @@ async function runLearningCycle() {
                       notes: "[structural-mutation]",
                       electronPhononCoupling: lambdaML || null,
                       logPhononFrequency: features.logPhononFreq ?? null,
-                      coulombPseudopotential: 0.12,
+                      coulombPseudopotential: estimateMuStar(mf),
                       pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                       pairingMechanism: "phonon-mediated",
                       correlationStrength: features.correlationStrength ?? null,
@@ -6506,7 +6601,7 @@ async function runLearningCycle() {
               if (!isValidFormula(sf)) continue;
               const existing = await storage.getSuperconductorByFormula(sf);
               if (!existing) {
-                const features = extractFeatures(sf);
+                const features = getCachedFeatures(sf);
                 const gb = gbPredict(features);
                 if (gb.tcPredicted >= 10) {
                   try {
@@ -6573,7 +6668,7 @@ async function runLearningCycle() {
             if (!shouldContinue()) break;
             const normalized = normalizeFormula(pc.formula);
 
-            const features = extractFeatures(normalized);
+            const features = getCachedFeatures(normalized);
             const gbResult = gbPredict(features);
             const protoIsHydride = pc.prototype?.toLowerCase().includes("hydride") || pc.prototype?.toLowerCase().includes("clathrate");
             const protoPressure = protoIsHydride ? 150 : estimateFamilyPressure(normalized);
@@ -6756,7 +6851,7 @@ async function runLearningCycle() {
             try {
               const normalized = normalizeFormula(struct.formula);
               if (existingFormulas.has(normalized)) continue;
-              const features = extractFeatures(struct.formula);
+              const features = getCachedFeatures(struct.formula);
               if (!features) continue;
               const gb = gbPredict(features);
               if (gb.tcPredicted < 5) continue;
@@ -6791,7 +6886,7 @@ async function runLearningCycle() {
             try {
               const normalized = normalizeFormula(evoStruct.formula);
               if (existingFormulas.has(normalized)) continue;
-              const features = extractFeatures(evoStruct.formula);
+              const features = getCachedFeatures(evoStruct.formula);
               if (!features) continue;
               const gb = gbPredict(features);
               if (gb.tcPredicted < 5) continue;
