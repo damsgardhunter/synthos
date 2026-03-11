@@ -283,6 +283,7 @@ function buildAlpha2FSpectralFunction(
   const binWidth = nBins > 1 ? frequencies[1] - frequencies[0] : 1;
 
   let integratedLambda = 0;
+  let lambdaForLog = 0;
   let logWeightedSum = 0;
   let omega2WeightedSum = 0;
 
@@ -346,6 +347,7 @@ function buildAlpha2FSpectralFunction(
 
     const omegaMeV = omega * 0.1240;
     if (omegaMeV >= 2.0) {
+      lambdaForLog += lambdaContrib;
       logWeightedSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
       omega2WeightedSum += alpha2F[i] * omega * binWidth;
     }
@@ -372,20 +374,23 @@ function buildAlpha2FSpectralFunction(
     midOpticalLambda *= scaleFactor;
     highOpticalLambda *= scaleFactor;
     hydrogenLambda *= scaleFactor;
+    lambdaForLog *= scaleFactor;
     logWeightedSum *= scaleFactor;
     omega2WeightedSum *= scaleFactor;
     integratedLambda = coupling.lambda;
   }
 
+  const lambdaDenomLog = lambdaForLog > 1e-8 ? lambdaForLog : integratedLambda;
+
   let omegaLog = 0;
-  if (integratedLambda > 1e-8) {
-    omegaLog = Math.exp((2 / integratedLambda) * logWeightedSum);
+  if (lambdaDenomLog > 1e-8) {
+    omegaLog = Math.exp((2 / lambdaDenomLog) * logWeightedSum);
     if (!Number.isFinite(omegaLog)) omegaLog = 0;
   }
 
   let omega2 = 0;
-  if (integratedLambda > 1e-8 && omega2WeightedSum > 0) {
-    omega2 = Math.sqrt((2 / integratedLambda) * omega2WeightedSum);
+  if (lambdaDenomLog > 1e-8 && omega2WeightedSum > 0) {
+    omega2 = Math.sqrt((2 / lambdaDenomLog) * omega2WeightedSum);
     if (!Number.isFinite(omega2)) omega2 = 0;
   }
 
@@ -675,8 +680,8 @@ function computeIsotopeEffect(
 }
 
 const pipelineCache = new Map<string, { result: EliashbergPipelineResult; timestamp: number }>();
-const PIPELINE_CACHE_TTL = 20 * 60 * 1000;
-const PIPELINE_CACHE_MAX = 200;
+const PIPELINE_CACHE_TTL = 30 * 60 * 1000;
+const PIPELINE_CACHE_MAX = 500;
 
 let pipelineStats = {
   totalRuns: 0,
@@ -698,7 +703,7 @@ export function runEliashbergPipeline(
   couplingOverride?: ElectronPhononCoupling
 ): EliashbergPipelineResult {
   const startTime = Date.now();
-  const cacheKey = `${formula}_${pressureGpa.toFixed(1)}`;
+  const cacheKey = `${formula}_${Math.round(pressureGpa)}`;
 
   const cached = pipelineCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp) < PIPELINE_CACHE_TTL) {
@@ -846,6 +851,7 @@ export function runEliashbergFromAlpha2FFile(
   const binWidth = nBins > 1 ? parsedAlpha2F.frequencies[1] - parsedAlpha2F.frequencies[0] : 1;
 
   let integratedLambda = 0;
+  let lambdaForLogDfpt = 0;
   let logWeightedSum = 0;
   let omega2WeightedSum = 0;
   const cumulativeLambda = new Array(nBins).fill(0);
@@ -862,13 +868,15 @@ export function runEliashbergFromAlpha2FFile(
     cumulativeLambda[i] = integratedLambda;
     const omegaMeVFile = omega * 0.1240;
     if (omegaMeVFile >= 2.0) {
+      lambdaForLogDfpt += lambdaContrib;
       logWeightedSum += (a2f / omega) * Math.log(omega) * binWidth;
       omega2WeightedSum += a2f * omega * binWidth;
     }
   }
 
-  const omegaLog = integratedLambda > 1e-8 ? Math.exp((2 / integratedLambda) * logWeightedSum) : 0;
-  const omega2 = integratedLambda > 1e-8 ? Math.sqrt((2 / integratedLambda) * omega2WeightedSum) : 0;
+  const lambdaDenomDfpt = lambdaForLogDfpt > 1e-8 ? lambdaForLogDfpt : integratedLambda;
+  const omegaLog = lambdaDenomDfpt > 1e-8 ? Math.exp((2 / lambdaDenomDfpt) * logWeightedSum) : 0;
+  const omega2 = lambdaDenomDfpt > 1e-8 ? Math.sqrt((2 / lambdaDenomDfpt) * omega2WeightedSum) : 0;
 
   const maxFreq = Math.max(...parsedAlpha2F.frequencies.filter(f => f > 0));
 
