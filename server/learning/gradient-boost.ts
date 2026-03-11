@@ -972,40 +972,98 @@ function getTreeFeatureImportance(tree: TreeNode | number): Map<number, number> 
   return imp;
 }
 
-interface TrainingSnapshot {
-  X: number[][];
-  y: number[];
-  formulas: string[];
-  computedAt: number;
-  dataSize: number;
-}
+class TrainingPool {
+  private featureCache = new Map<string, { x: number[]; tc: number }>();
+  private X: number[][] = [];
+  private y: number[] = [];
+  private formulas: string[] = [];
+  private dirty = true;
 
-let cachedTrainingSnapshot: TrainingSnapshot | null = null;
-
-function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
-  if (cachedTrainingSnapshot && cachedTrainingSnapshot.dataSize === SUPERCON_TRAINING_DATA.length) {
-    return cachedTrainingSnapshot;
-  }
-
-  const X: number[][] = [];
-  const y: number[] = [];
-  const formulas: string[] = [];
-  for (const entry of SUPERCON_TRAINING_DATA) {
+  add(formula: string, tc: number, pressureGPa: number = 0): boolean {
+    const key = `${formula}|${tc}`;
+    if (this.featureCache.has(key)) return false;
     try {
-      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
-      const fArr = featureVectorToArray(features, entry.formula);
-      if (fArr.some(v => !Number.isFinite(v))) continue;
-      X.push(fArr);
-      y.push(entry.tc);
-      formulas.push(entry.formula);
+      const features = extractFeatures(formula, { pressureGpa: pressureGPa } as any);
+      const fArr = featureVectorToArray(features, formula);
+      if (fArr.some(v => !Number.isFinite(v))) return false;
+      this.featureCache.set(key, { x: fArr, tc });
+      this.dirty = true;
+      return true;
     } catch {
-      continue;
+      return false;
     }
   }
 
-  cachedTrainingSnapshot = { X, y, formulas, computedAt: Date.now(), dataSize: SUPERCON_TRAINING_DATA.length };
-  console.log(`[GradientBoost] Cached training snapshot: ${X.length} samples from ${SUPERCON_TRAINING_DATA.length} entries`);
-  return { X, y, formulas };
+  addBatch(entries: { formula: string; tc: number; pressureGPa?: number }[]): number {
+    let added = 0;
+    for (const e of entries) {
+      if (this.add(e.formula, e.tc, e.pressureGPa ?? 0)) added++;
+    }
+    return added;
+  }
+
+  getTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
+    if (!this.dirty) return { X: this.X, y: this.y, formulas: this.formulas };
+
+    this.X = [];
+    this.y = [];
+    this.formulas = [];
+    for (const [key, cached] of this.featureCache) {
+      this.X.push(cached.x);
+      this.y.push(cached.tc);
+      this.formulas.push(key.split("|")[0]);
+    }
+    this.dirty = false;
+    return { X: this.X, y: this.y, formulas: this.formulas };
+  }
+
+  get size(): number {
+    return this.featureCache.size;
+  }
+
+  has(formula: string, tc: number): boolean {
+    return this.featureCache.has(`${formula}|${tc}`);
+  }
+
+  hasFormula(formula: string): boolean {
+    for (const key of this.featureCache.keys()) {
+      if (key.startsWith(formula + "|")) return true;
+    }
+    return false;
+  }
+
+  clear(): void {
+    this.featureCache.clear();
+    this.X = [];
+    this.y = [];
+    this.formulas = [];
+    this.dirty = true;
+  }
+}
+
+const trainingPool = new TrainingPool();
+let poolInitialized = false;
+
+let cachedTrainingSnapshot: { dataSize: number } | null = null;
+
+function ensurePoolInitialized(): void {
+  if (poolInitialized && cachedTrainingSnapshot?.dataSize === SUPERCON_TRAINING_DATA.length) return;
+
+  const startSize = trainingPool.size;
+  trainingPool.addBatch(
+    SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }))
+  );
+  const added = trainingPool.size - startSize;
+  if (added > 0 || !poolInitialized) {
+    console.log(`[TrainingPool] Synced: ${trainingPool.size} cached vectors (${added} new from ${SUPERCON_TRAINING_DATA.length} entries)`);
+  }
+  cachedTrainingSnapshot = { dataSize: SUPERCON_TRAINING_DATA.length };
+  poolInitialized = true;
+}
+
+function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
+  ensurePoolInitialized();
+  return trainingPool.getTrainingData();
 }
 
 export function getTrainedModel(): GBModel {
@@ -1575,17 +1633,18 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   datasetSize: number;
   newEntries: number;
 }> {
-  const augmentedData = [
-    ...SUPERCON_TRAINING_DATA,
-    ...successExamples,
-    ...failureExamples,
-  ];
+  ensurePoolInitialized();
 
-  const seen = new Set(augmentedData.map(e => e.formula));
+  trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+  trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+
+  const existingFormulas = new Set<string>();
+  for (const e of SUPERCON_TRAINING_DATA) existingFormulas.add(e.formula);
+
   let newFromEval = 0;
   for (const [formula, entry] of evaluatedDataset) {
-    if (seen.has(formula)) continue;
-    seen.add(formula);
+    if (existingFormulas.has(formula)) continue;
+    existingFormulas.add(formula);
     const newEntry: SuperconEntry = {
       formula: entry.formula,
       tc: entry.tc,
@@ -1593,8 +1652,8 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       isSuperconductor: entry.tc > 0 && entry.stable,
       pressureGPa: 0,
     };
-    augmentedData.push(newEntry);
     SUPERCON_TRAINING_DATA.push(newEntry);
+    trainingPool.add(entry.formula, entry.tc, 0);
     newFromEval++;
   }
 
@@ -1602,20 +1661,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     cachedTrainingSnapshot = null;
   }
 
-  const X: number[][] = [];
-  const y: number[] = [];
-
-  for (const entry of augmentedData) {
-    try {
-      const features = extractFeatures(entry.formula, { pressureGpa: (entry as any).pressureGPa ?? 0 } as any);
-      const fArr = featureVectorToArray(features, entry.formula);
-      if (fArr.some(v => !Number.isFinite(v))) continue;
-      X.push(fArr);
-      y.push(entry.tc);
-    } catch {
-      continue;
-    }
-  }
+  const { X, y } = trainingPool.getTrainingData();
 
   if (X.length < 10) {
     return { retrained: false, datasetSize: X.length, newEntries: newFromEval };
@@ -1697,6 +1743,7 @@ export function invalidateModel(): void {
   cachedTrainingSnapshot = null;
   cachedGlobalFeatureImportance = null;
   cachedValidation = null;
+  poolInitialized = false;
   crystalSymTargetEncoding = null;
   miedemaCache.clear();
 }
@@ -1777,22 +1824,12 @@ export async function incorporateSuccessData(formula: string, tc: number): Promi
 }
 
 export async function retrainWithAccumulatedData(): Promise<number> {
-  const augmentedData = [...SUPERCON_TRAINING_DATA, ...successExamples, ...failureExamples];
+  ensurePoolInitialized();
 
-  const X: number[][] = [];
-  const y: number[] = [];
+  trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+  trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
-  for (const entry of augmentedData) {
-    try {
-      const features = extractFeatures(entry.formula, { pressureGpa: (entry as any).pressureGPa ?? 0 } as any);
-      const fArr = featureVectorToArray(features, entry.formula);
-      if (fArr.some(v => !Number.isFinite(v))) continue;
-      X.push(fArr);
-      y.push(entry.tc);
-    } catch {
-      continue;
-    }
-  }
+  const { X, y } = trainingPool.getTrainingData();
 
   if (X.length < 10) return 0;
 
@@ -1817,9 +1854,9 @@ export async function incorporateFailureData(): Promise<number> {
   const failedResults = await storage.getFailedComputationalResults(500);
   if (failedResults.length === 0) return 0;
 
-  const seenFormulas = new Set<string>(
-    [...SUPERCON_TRAINING_DATA, ...failureExamples].map(e => e.formula)
-  );
+  const seenFormulas = new Set<string>();
+  for (const e of SUPERCON_TRAINING_DATA) seenFormulas.add(e.formula);
+  for (const e of failureExamples) seenFormulas.add(e.formula);
 
   let added = 0;
   for (const result of failedResults) {
@@ -1833,28 +1870,17 @@ export async function incorporateFailureData(): Promise<number> {
       isSuperconductor: false,
       pressureGPa: 0,
     });
+    trainingPool.add(formula, 0, 0);
     added++;
   }
 
   if (added > 0) {
     invalidateModel();
+    ensurePoolInitialized();
 
-    const augmentedData = [...SUPERCON_TRAINING_DATA, ...failureExamples];
+    trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
-    const X: number[][] = [];
-    const y: number[] = [];
-
-    for (const entry of augmentedData) {
-      try {
-        const features = extractFeatures(entry.formula, { pressureGpa: (entry as any).pressureGPa ?? 0 } as any);
-        const fArr = featureVectorToArray(features, entry.formula);
-        if (fArr.some(v => !Number.isFinite(v))) continue;
-        X.push(fArr);
-        y.push(entry.tc);
-      } catch {
-        continue;
-      }
-    }
+    const { X, y } = trainingPool.getTrainingData();
 
     if (X.length >= 10) {
       cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
