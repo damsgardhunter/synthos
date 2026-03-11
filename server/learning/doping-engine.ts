@@ -6,6 +6,8 @@ import { extractFeatures } from "./ml-predictor";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 import { checkValenceSumRule } from "../physics/advanced-constraints";
 import { passesElementCountCap } from "./candidate-generator";
+import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
+import { getEntryByFormula } from "../crystal/crystal-structure-dataset";
 
 export type DopingCharacter = "electron" | "hole" | "isovalent" | "vacancy-hole" | "interstitial-electron";
 
@@ -2038,9 +2040,9 @@ export function detectSCSignals(baseFormula: string, dopedFormula: string, doped
   const baseElectronic = computeElectronicStructure(baseFormula);
   const dopedElectronic = computeElectronicStructure(dopedFormula);
 
-  const baseDOS = baseElectronic?.densityOfStatesAtFermi ?? 0;
-  const dopedDOS = dopedElectronic?.densityOfStatesAtFermi ?? 0;
-  const dosIncrease = baseDOS > 0 ? (dopedDOS - baseDOS) / baseDOS : 0;
+  const baseDOS = Math.max(0, baseElectronic?.densityOfStatesAtFermi ?? 0);
+  const dopedDOS = Math.max(0, dopedElectronic?.densityOfStatesAtFermi ?? 0);
+  const dosIncrease = (dopedDOS - baseDOS) / (baseDOS + 0.1);
 
   const baseElements = parseFormulaElements(baseFormula);
   const dopedElements = parseFormulaElements(dopedFormula);
@@ -2122,18 +2124,44 @@ export function detectSCSignals(baseFormula: string, dopedFormula: string, doped
 }
 
 function guessCrystalSystem(formula: string): string {
+  const normalizedFormula = normalizeFormula(formula);
+  const superconMatch = SUPERCON_TRAINING_DATA.find(e => normalizeFormula(e.formula) === normalizedFormula);
+  if (superconMatch?.crystalSystem) return superconMatch.crystalSystem;
+
+  const crystalEntry = getEntryByFormula(formula) || getEntryByFormula(normalizedFormula);
+  if (crystalEntry?.crystalSystem && crystalEntry.crystalSystem !== "unknown") return crystalEntry.crystalSystem;
+
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
 
-  if (elements.includes("Cu") && elements.includes("O") && (elements.includes("La") || elements.includes("Y") || elements.includes("Ba"))) {
-    return totalAtoms > 10 ? "orthorhombic" : "tetragonal";
+  const ratios = Object.values(counts).map(n => n / totalAtoms);
+  const allEqual = ratios.every(r => Math.abs(r - ratios[0]) < 0.05);
+
+  if (elements.length === 1) return "cubic";
+
+  if (elements.length === 2) {
+    if (allEqual) return "cubic";
+    const ratio = Math.max(...Object.values(counts)) / Math.min(...Object.values(counts));
+    if (ratio <= 1.5) return "cubic";
+    if (ratio <= 3) return "tetragonal";
+    return "hexagonal";
   }
-  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se"))) {
+
+  const hasOxygen = elements.includes("O");
+  const oxygenFrac = hasOxygen ? (counts["O"] || 0) / totalAtoms : 0;
+
+  if (hasOxygen && oxygenFrac > 0.5) {
+    if (elements.length >= 4) return "orthorhombic";
     return "tetragonal";
   }
-  if (elements.length === 2) return "cubic";
-  if (elements.length === 3) return "tetragonal";
+
+  if (elements.length === 3) {
+    if (totalAtoms <= 5) return "tetragonal";
+    return "orthorhombic";
+  }
+
+  if (elements.length >= 5) return "monoclinic";
   return "orthorhombic";
 }
 
@@ -2282,7 +2310,7 @@ export function runDopingSearchLoop(
 
     if (levels.length > 0) {
       const tcs = levels.map(l => l.predictedTc);
-      const bestIdx = tcs.indexOf(Math.max(...tcs));
+      let bestIdx = tcs.indexOf(Math.max(...tcs));
       let trend: DopingSearchResult["tcTrend"] = "flat";
       if (tcs.length >= 3) {
         const first = tcs[0];
@@ -2295,6 +2323,113 @@ export function runDopingSearchLoop(
           trend = "increasing";
         } else if (last < first * 0.9) {
           trend = "decreasing";
+        }
+      }
+
+      if (trend === "peaked") {
+        const peakFraction = levels[bestIdx].fraction;
+        const zoomStep = 0.02;
+        const zoomFracs: number[] = [];
+        for (let d = -3; d <= 3; d++) {
+          if (d === 0) continue;
+          const zf = peakFraction + d * zoomStep;
+          if (zf > 0 && zf <= SEARCH_LIMITS.maxDopingFraction) {
+            const alreadyExists = levels.some(l => Math.abs(l.fraction - zf) < 0.005);
+            if (!alreadyExists) zoomFracs.push(zf);
+          }
+        }
+
+        for (const fraction of zoomFracs) {
+          const siteCount = counts[pair.site] || 0;
+          const supercellMult = getSupercellMultiplier(totalAtoms, siteCount > 0 ? fraction / (siteCount / totalAtoms) : fraction);
+          const supercellCounts: Record<string, number> = {};
+          for (const [el, n] of Object.entries(counts)) {
+            supercellCounts[el] = n * supercellMult;
+          }
+
+          let nChanged = 0;
+          if (pair.type === "substitutional") {
+            const sitesInSupercell = supercellCounts[pair.site];
+            nChanged = Math.round(sitesInSupercell * fraction);
+            if (nChanged < 1 || nChanged >= sitesInSupercell) continue;
+            const actualFraction = nChanged / sitesInSupercell;
+            if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
+            supercellCounts[pair.site] -= nChanged;
+            supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
+          } else {
+            const sitesInSupercell = supercellCounts[pair.site];
+            nChanged = Math.round(sitesInSupercell * fraction);
+            if (nChanged < 1 || nChanged >= sitesInSupercell) continue;
+            const actualFraction = nChanged / sitesInSupercell;
+            if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
+            supercellCounts[pair.site] -= nChanged;
+          }
+
+          const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
+          const resultFormula = normalizeFormula(countsToFormula(reduced));
+          if (!isValidFormula(resultFormula)) continue;
+          if (getTotalAtoms(reduced) > SEARCH_LIMITS.maxSupercellAtoms) continue;
+
+          const { character, valenceChange } = pair.type === "vacancy"
+            ? classifyDopingCharacter(pair.site, "", "vacancy")
+            : classifyDopingCharacter(pair.site, pair.dopant, "substitutional");
+
+          const reducedTotalAtoms = getTotalAtoms(reduced);
+          const carrierDensityPerFU = reducedTotalAtoms > 0
+            ? Math.abs(valenceChange) * (nChanged / supercellMult) / (cellVolume * 1e-21)
+            : computeCarrierDensity(valenceChange, nChanged, cellVolume * supercellMult);
+
+          try {
+            const features = extractFeatures(resultFormula);
+            const prediction = gbPredictWithUncertainty(features, resultFormula);
+            const tc = prediction.tcMean ?? 0;
+            const unc = prediction.totalStd ?? 0;
+            const scSignals = detectSCSignals(formula, resultFormula);
+
+            levels.push({
+              fraction,
+              resultFormula,
+              predictedTc: tc,
+              tcUncertainty: unc,
+              carrierDensity: carrierDensityPerFU,
+              dopingCharacter: character,
+              scSignals,
+            });
+
+            if (tc > globalBestTc) {
+              globalBestTc = tc;
+              globalBest = { formula: resultFormula, tc, fraction, dopant: pair.dopant || `${pair.site}-vacancy` };
+            }
+          } catch { /* skip */ }
+        }
+
+        const seenFormulas = new Set<string>();
+        const dedupedLevels = levels.filter(l => {
+          if (seenFormulas.has(l.resultFormula)) return false;
+          seenFormulas.add(l.resultFormula);
+          return true;
+        });
+        levels.length = 0;
+        levels.push(...dedupedLevels);
+        levels.sort((a, b) => a.fraction - b.fraction);
+
+        const updatedTcs = levels.map(l => l.predictedTc);
+        bestIdx = updatedTcs.indexOf(Math.max(...updatedTcs));
+
+        if (updatedTcs.length >= 3) {
+          const zFirst = updatedTcs[0];
+          const zLast = updatedTcs[updatedTcs.length - 1];
+          const zPeak = Math.max(...updatedTcs);
+          const zPeakIdx = updatedTcs.indexOf(zPeak);
+          if (zPeakIdx > 0 && zPeakIdx < updatedTcs.length - 1 && zPeak > zFirst * 1.05 && zPeak > zLast * 1.05) {
+            trend = "peaked";
+          } else if (zLast > zFirst * 1.1) {
+            trend = "increasing";
+          } else if (zLast < zFirst * 0.9) {
+            trend = "decreasing";
+          } else {
+            trend = "flat";
+          }
         }
       }
 
