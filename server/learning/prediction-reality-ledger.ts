@@ -23,6 +23,7 @@ export interface PredictionRealityEntry {
     stability_correct: boolean;
     fe_error: number | null;
   };
+  predicted_sigma: number | null;
   source: string;
   cycle: number;
   timestamp: number;
@@ -106,6 +107,34 @@ export function recordPredictionVsReality(
     feError = prediction.formation_energy - reality.formation_energy;
   }
 
+  let predicted_sigma: number | null = null;
+  try {
+    const { gnnPredictWithUncertainty } = require("./graph-neural-net");
+    const { gbPredictWithUncertainty } = require("./gradient-boost");
+    const { extractFeatures } = require("./ml-predictor");
+    let gnnSigma = 0, xgbSigma = 0;
+    try {
+      const gnnRes = gnnPredictWithUncertainty(formula);
+      if (Number.isFinite(gnnRes.totalStd) && gnnRes.totalStd > 0) gnnSigma = gnnRes.totalStd;
+    } catch {}
+    try {
+      const feats = extractFeatures(formula);
+      const xgbRes = gbPredictWithUncertainty(feats, formula);
+      if (Number.isFinite(xgbRes.totalStd) && xgbRes.totalStd > 0) xgbSigma = xgbRes.totalStd;
+    } catch {}
+    if (gnnSigma > 0 && xgbSigma > 0) {
+      predicted_sigma = Math.sqrt(1 / (1 / (gnnSigma ** 2) + 1 / (xgbSigma ** 2)));
+    } else if (xgbSigma > 0) {
+      predicted_sigma = xgbSigma;
+    } else if (gnnSigma > 0) {
+      predicted_sigma = gnnSigma;
+    } else {
+      predicted_sigma = Math.max(10, Math.abs(prediction.Tc) * 0.3);
+    }
+  } catch {
+    predicted_sigma = Math.max(10, Math.abs(prediction.Tc) * 0.3);
+  }
+
   const entry: PredictionRealityEntry = {
     formula,
     pressure,
@@ -119,6 +148,7 @@ export function recordPredictionVsReality(
       stability_correct: prediction.stable === reality.stable,
       fe_error: feError,
     },
+    predicted_sigma,
     source,
     cycle,
     timestamp: Date.now(),
@@ -361,8 +391,12 @@ function computeCICoverage(entries: PredictionRealityEntry[], zMultiplier: numbe
     const pred = e.model_prediction?.Tc;
     const actual = e.ground_truth?.Tc;
     if (!Number.isFinite(pred) || !Number.isFinite(actual)) continue;
-    const absErr = Math.abs(e.error?.tc_abs_error ?? (pred - actual));
-    const sigma = Math.max(absErr > 0 ? absErr : 10, 1);
+    let sigma: number;
+    if (e.predicted_sigma != null && Number.isFinite(e.predicted_sigma) && e.predicted_sigma > 0) {
+      sigma = e.predicted_sigma;
+    } else {
+      sigma = Math.max(Math.abs(e.error?.tc_abs_error ?? 10), 1);
+    }
     const halfWidth = zMultiplier * sigma;
     if (actual >= pred - halfWidth && actual <= pred + halfWidth) covered++;
     total++;

@@ -133,11 +133,12 @@ function normalQuantile(p: number): number {
 }
 
 function getPredictedSigmaForEntry(entry: PredictionRealityEntry): number {
+  if (entry.predicted_sigma != null && Number.isFinite(entry.predicted_sigma) && entry.predicted_sigma > 0) {
+    return entry.predicted_sigma;
+  }
+
   try {
     const formula = entry.formula;
-
-    const gnnTcPred = entry.model_prediction.gnn_Tc;
-    const xgbTcPred = entry.model_prediction.xgboost_Tc;
 
     let gnnSigma = 0;
     let xgbSigma = 0;
@@ -437,12 +438,12 @@ export function validateIntervalsCoverage(): IntervalValidationResult {
       const predTc = entry.model_prediction?.Tc;
       const actualTc = entry.ground_truth?.Tc;
       if (!Number.isFinite(predTc) || !Number.isFinite(actualTc)) continue;
-      let sigma = 1;
-      try {
-        const features = extractFeatures(entry.formula);
-        const xgb = gbPredictWithUncertainty(features, entry.formula);
-        sigma = Math.max(xgb.totalStd, 1);
-      } catch { sigma = Math.max(Math.abs(entry.error?.tc_abs_error ?? 10), 1); }
+      let sigma: number;
+      if (entry.predicted_sigma != null && Number.isFinite(entry.predicted_sigma) && entry.predicted_sigma > 0) {
+        sigma = entry.predicted_sigma;
+      } else {
+        sigma = Math.max(Math.abs(entry.error?.tc_abs_error ?? 10), 1);
+      }
       const ci = getConformalInterval(predTc, sigma, level);
       if (actualTc >= ci.lower && actualTc <= ci.upper) covered++;
       total++;
