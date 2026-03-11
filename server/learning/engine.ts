@@ -78,7 +78,7 @@ import { passesStabilityPreFilter } from "../physics/stability-predictor";
 import { predictKineticStability, formatKineticStabilityNote, type KineticStabilityResult } from "../physics/kinetic-stability";
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
-import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, recordVerificationOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias, resetToDefaultWeights } from "./generator-manager";
+import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, recordVerificationOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias, resetToDefaultWeights, setEngineTempo } from "./generator-manager";
 import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, recordPreBiasBaseline, recordPostBiasPerformance, evaluateTheoryBiasSafety, resetTheoryBias, getTheoryBiasSafetyStats, validateBiasedVariables, type TheoryGeneratorBias } from "./theory-guided-generator";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
@@ -826,6 +826,7 @@ function updateTempo() {
     cycleIntervalMs = 15000;
   }
   if (prevTempo !== engineTempo) {
+    setEngineTempo(engineTempo);
     broadcast("tempoChange", { tempo: engineTempo, intervalMs: cycleIntervalMs });
     if (cycleIntervalMs < prevInterval && cycleTimer && state === "running") {
       clearTimeout(cycleTimer);

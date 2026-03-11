@@ -1,3 +1,10 @@
+type EngineTempo = "excited" | "exploring" | "contemplating";
+let currentTempo: EngineTempo = "exploring";
+
+export function setEngineTempo(tempo: EngineTempo): void {
+  currentTempo = tempo;
+}
+
 interface GeneratorStats {
   candidatesGenerated: number;
   candidatesPassed: number;
@@ -55,7 +62,14 @@ const DEFAULT_ALLOCATIONS: Record<string, number> = {
 const generators: Map<string, GeneratorEntry> = new Map();
 let rebalanceCount = 0;
 let cyclesSinceRebalance = 0;
-const REBALANCE_INTERVAL = 3;
+
+function getRebalanceInterval(): number {
+  switch (currentTempo) {
+    case "excited": return 2;
+    case "exploring": return 3;
+    case "contemplating": return 5;
+  }
+}
 
 function defaultStats(weight: number): GeneratorStats {
   return {
@@ -332,7 +346,7 @@ export function resetToDefaultWeights(): void {
 
 export function rebalanceWeights() {
   initializeGenerators();
-  if (cyclesSinceRebalance < REBALANCE_INTERVAL) return;
+  if (cyclesSinceRebalance < getRebalanceInterval()) return;
 
   const GRACE_PERIOD_CYCLES = 5;
   const yieldScores: Record<string, number> = {};
@@ -356,10 +370,14 @@ export function rebalanceWeights() {
     const dftTcNorm = Math.min(1, s.dftBestTc / 300);
     const hasDFTData = (s.dftSuccesses + s.dftFailures) > 0;
 
-    const pipelineScore = hasVerifiedData
-      ? verifiedYield * 0.4 + tcNorm * 0.2 + noveltyNorm * 0.1
-      : passRate * 0.3 + tcNorm * 0.3 + noveltyNorm * 0.1;
-    const dftScore = hasDFTData ? (dftDiscovery * 0.2 + dftTcNorm * 0.1) : 0;
+    const pipelineScore = hasDFTData
+      ? (hasVerifiedData
+        ? verifiedYield * 0.15 + tcNorm * 0.1 + noveltyNorm * 0.05
+        : passRate * 0.15 + tcNorm * 0.1 + noveltyNorm * 0.05)
+      : (hasVerifiedData
+        ? verifiedYield * 0.4 + tcNorm * 0.2 + noveltyNorm * 0.1
+        : passRate * 0.3 + tcNorm * 0.3 + noveltyNorm * 0.1);
+    const dftScore = hasDFTData ? (dftDiscovery * 0.45 + dftTcNorm * 0.25) : 0;
     const score = pipelineScore + dftScore;
     yieldScores[name] = score;
     activeScores.push(score);
