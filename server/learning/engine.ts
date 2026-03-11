@@ -85,7 +85,7 @@ import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
 import { getZoneBonus, getLandscapeRLBias } from "../landscape/landscape-guidance";
 import { getZoneMap } from "../landscape/zone-detector";
-import { updateZoneHistory, getIntelligenceGeneratorBias, getLandscapeIntelligenceStats } from "../landscape/landscape-intelligence";
+import { updateZoneHistory, getIntelligenceGeneratorBias, getLandscapeIntelligenceStats, getFrontierDiscoveryBonus } from "../landscape/landscape-intelligence";
 import { getConstraintGuidanceForGenerator } from "../inverse/constraint-solver";
 import { getConstraintGraphGuidance } from "../inverse/constraint-graph-solver";
 import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pathway";
@@ -1801,6 +1801,9 @@ let explorationModeActive = false;
 let explorationModeSavedConstraints: { allowBeyondEmpirical: boolean; empiricalPenaltyStrength: number } | null = null;
 let currentMutationLevel = 1;
 let peakMutationLevel = 1;
+let throughputBaseline = 0;
+let throughputBaselineCycles = 0;
+let throughputWatchdogTriggered = false;
 
 function lambdaBarForFamily(muStar: number, family?: string): number {
   const base = 1 + 3.8 * muStar;
@@ -5863,6 +5866,20 @@ async function runAutonomousFastPath() {
             effectiveTcForRL = Math.round(result.tc * (1 + crossEngineBonus));
           }
         }
+
+        try {
+          const frontierResult = getFrontierDiscoveryBonus(formula, candFamily);
+          if (frontierResult.bonus > 0 && result.tc > 0) {
+            effectiveTcForRL = Math.round(effectiveTcForRL * (1 + frontierResult.bonus));
+            emit("log", {
+              phase: "engine",
+              event: "Frontier discovery bonus",
+              detail: `${formula}: frontier region ${frontierResult.matchedRegionId}, score=${frontierResult.frontierScore}, RL bonus=${(frontierResult.bonus * 100).toFixed(0)}%. Effective Tc for RL: ${effectiveTcForRL}K`,
+              dataSource: "Landscape Intelligence",
+            });
+          }
+        } catch (_e) {}
+
         rlAgent.recordElementOutcome(els, effectiveTcForRL, result.passed, rejectCategory);
 
         if (result.passed) {
@@ -7429,6 +7446,51 @@ async function runLearningCycle() {
       }
 
       if (state === "running" && cycleCount >= 10) {
+        const elapsedHrs = (Date.now() - autonomousStartTime) / 3600000;
+        if (elapsedHrs >= 0.25 && autonomousTotalScreened > 0) {
+          const currentThroughput = Math.round(autonomousTotalScreened / elapsedHrs);
+
+          if (throughputBaseline === 0 && cycleCount >= 20) {
+            throughputBaseline = currentThroughput;
+            throughputBaselineCycles = cycleCount;
+          }
+
+          if (throughputBaseline > 0 && currentThroughput < throughputBaseline * 0.5 && engineTempo === "excited") {
+            if (!throughputWatchdogTriggered) {
+              throughputWatchdogTriggered = true;
+
+              if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE * 0.8) {
+                const pruneCount = Math.floor(alreadyScreenedFormulas.size * 0.3);
+                const iter = alreadyScreenedFormulas.values();
+                for (let i = 0; i < pruneCount; i++) {
+                  const v = iter.next().value;
+                  if (v !== undefined) alreadyScreenedFormulas.delete(v);
+                }
+              }
+
+              if (dftEnrichmentTracker.size > 5000) {
+                const entries = Array.from(dftEnrichmentTracker.entries());
+                entries.sort((a, b) => a[1] - b[1]);
+                const removeCt = Math.floor(entries.length * 0.4);
+                for (let i = 0; i < removeCt; i++) {
+                  dftEnrichmentTracker.delete(entries[i][0]);
+                }
+              }
+
+              recentLogCache.clear();
+
+              emit("log", {
+                phase: "engine",
+                event: "Throughput watchdog triggered",
+                detail: `Current throughput ${currentThroughput}/hr is below 50% of baseline ${throughputBaseline}/hr during "excited" tempo. Pruned screened cache to ${alreadyScreenedFormulas.size}, DFT tracker to ${dftEnrichmentTracker.size}. Cleared log cache.`,
+                dataSource: "Performance Watchdog",
+              });
+            }
+          } else {
+            throughputWatchdogTriggered = false;
+          }
+        }
+
         await runAutonomousFastPath();
       }
     } else {

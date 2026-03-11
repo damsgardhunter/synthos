@@ -644,6 +644,33 @@ export function updateZoneHistory(cycle: number): void {
   lastIntelligenceCycle = cycle;
 }
 
+export function getFrontierDiscoveryBonus(formula: string, family: string): { bonus: number; frontierScore: number; matchedRegionId: string | null } {
+  const frontier = analyzeFrontier();
+  if (frontier.frontierRegions.length === 0) {
+    return { bonus: 0, frontierScore: 0, matchedRegionId: null };
+  }
+
+  const formulaElements = new Set(extractElements(formula));
+  let bestScore = 0;
+  let bestRegionId: string | null = null;
+
+  for (const region of frontier.frontierRegions.slice(0, 10)) {
+    const elementOverlap = region.suggestedElements.filter(el => formulaElements.has(el)).length;
+    const elementRatio = elementOverlap / Math.max(1, Math.min(formulaElements.size, region.suggestedElements.length));
+    const familyMatch = region.suggestedFamilies.includes(family) ? 1 : 0;
+    const regionScore = (elementRatio * 0.6 + familyMatch * 0.4) * region.explorationScore;
+
+    if (regionScore > bestScore) {
+      bestScore = regionScore;
+      bestRegionId = region.id;
+    }
+  }
+
+  const bonus = bestScore > 0.3 ? Math.min(0.25, bestScore * 0.4) : 0;
+
+  return { bonus, frontierScore: Math.round(bestScore * 1000) / 1000, matchedRegionId: bestRegionId };
+}
+
 export function getLandscapeIntelligenceStats(): {
   lastCycle: number;
   zoneHistoryLength: number;
