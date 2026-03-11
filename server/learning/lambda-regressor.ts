@@ -124,17 +124,17 @@ function extractLambdaFeatures(formula: string, pressure: number = 0): Record<st
 
   let orbitalDFraction = 0;
   let dElectrons = 0;
-  let totalElectrons = 0;
+  let totalValenceElectrons = 0;
   for (const el of elements) {
     const data = getElementData(el);
     if (data) {
       const frac = (counts[el] || 1) / totalAtoms;
       const dEl = data.electronConfiguration?.match(/\dd(\d+)/);
       if (dEl) dElectrons += parseInt(dEl[1]) * frac;
-      totalElectrons += data.atomicNumber * frac;
+      totalValenceElectrons += data.valenceElectrons * frac;
     }
   }
-  orbitalDFraction = totalElectrons > 0 ? Math.min(1, dElectrons / Math.max(1, totalElectrons * 0.5)) : 0;
+  orbitalDFraction = totalValenceElectrons > 0 ? Math.min(1, dElectrons / totalValenceElectrons) : 0;
 
   return {
     dosAtEF: electronic.densityOfStatesAtFermi,

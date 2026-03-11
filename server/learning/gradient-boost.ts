@@ -567,7 +567,7 @@ function trainGradientBoosting(
   for (let iter = 0; iter < nEstimators; iter++) {
     const residuals = trainY.map((yi, i) => yi - trainPredictions[i]);
 
-    const tree = buildTree(trainX, residuals, allTrainIndices, 0, maxDepth, 8);
+    const tree = buildTree(trainX, residuals, allTrainIndices, 0, maxDepth, 12);
     if (typeof tree === "number") break;
 
     trees.push(tree);
