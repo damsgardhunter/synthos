@@ -91,6 +91,15 @@ export interface OrbitalDOS {
   p: number;
   d: number;
   f: number;
+  fermiWeighted?: {
+    s: number;
+    p: number;
+    d: number;
+    f: number;
+    dominantOrbital: string;
+    dominantFraction: number;
+    hydrogenSCharacter: number;
+  };
 }
 
 export interface BandOperatorResult {
@@ -104,11 +113,25 @@ export interface BandOperatorResult {
 }
 
 const HIGH_SYMMETRY_PATHS: Record<string, { labels: string[]; coords: [number, number, number][] }> = {
-  cubic: {
+  cubic_sc: {
     labels: ["G", "X", "M", "G", "R", "X"],
     coords: [
       [0, 0, 0], [0.5, 0, 0], [0.5, 0.5, 0],
       [0, 0, 0], [0.5, 0.5, 0.5], [0.5, 0, 0],
+    ],
+  },
+  cubic_fcc: {
+    labels: ["G", "X", "W", "K", "G", "L"],
+    coords: [
+      [0, 0, 0], [0.5, 0.5, 0], [0.5, 0.75, 0.25],
+      [0.375, 0.75, 0.375], [0, 0, 0], [0.5, 0.5, 0.5],
+    ],
+  },
+  cubic_bcc: {
+    labels: ["G", "H", "N", "G", "P", "H"],
+    coords: [
+      [0, 0, 0], [0.5, -0.5, 0.5], [0, 0, 0.5],
+      [0, 0, 0], [0.25, 0.25, 0.25], [0.5, -0.5, 0.5],
     ],
   },
   hexagonal: {
@@ -206,11 +229,30 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
-function guessLatticeSystem(elements: string[]): string {
+function guessLatticeSystem(elements: string[], counts: Record<string, number>): string {
   if (elements.includes("B") && elements.some(e => isTransitionMetal(e) || isRareEarth(e))) return "hexagonal";
   if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3) return "tetragonal";
   if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se"))) return "tetragonal";
-  return "cubic";
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const hCount = counts["H"] || 0;
+  const hFrac = hCount / totalAtoms;
+
+  if (hFrac > 0.6) return "cubic_fcc";
+
+  const hasBCC = elements.some(e =>
+    ["Nb", "V", "Ta", "Cr", "Mo", "W", "Fe", "Na", "K", "Rb", "Cs", "Ba"].includes(e)
+  );
+  if (hasBCC && elements.length <= 2 && !elements.includes("O")) return "cubic_bcc";
+
+  const hasFCC = elements.some(e =>
+    ["Al", "Cu", "Ag", "Au", "Pt", "Pd", "Ni", "Pb", "Ca", "Sr", "La", "Y", "Ce"].includes(e)
+  );
+  if (hasFCC && elements.length <= 3) return "cubic_fcc";
+
+  if (totalAtoms <= 2) return "cubic_bcc";
+  if (totalAtoms <= 4) return "cubic_fcc";
+  return "cubic_sc";
 }
 
 function interpolateKPath(
@@ -424,7 +466,7 @@ function computeEffectiveMasses(
 ): DerivedQuantities["effectiveMasses"] {
   const masses: DerivedQuantities["effectiveMasses"] = [];
   const hbar2Over2m = 7.62;
-  const isCubic = latticeSystem === "cubic";
+  const isCubic = latticeSystem.startsWith("cubic");
 
   for (let b = 0; b < dispersion.nBands; b++) {
     const bandEnergies = dispersion.bands.map(pt => pt.energies[b] ?? 0);
@@ -947,11 +989,80 @@ function computeOrbitalDOS(
   const norm = sWeight + pWeight + dWeight + fWeight || 1;
   const scale = totalDOSAtFermi / (dispersion.nKPoints * dispersion.nBands || 1);
 
+  let fermiS = 0, fermiP = 0, fermiD = 0, fermiF = 0;
+  let fermiTotalWeight = 0;
+  let hydrogenSChar = 0;
+
+  const fermiWindow = 0.10;
+  for (let b = 0; b < dispersion.nBands; b++) {
+    for (const pt of dispersion.bands) {
+      const e = pt.energies[b] ?? 0;
+      const dist = Math.abs(e - dispersion.fermiEnergy);
+      if (dist > fermiWindow) continue;
+
+      const fermiWeight = 1.0 / (dist + 0.005);
+
+      let bandS = 0, bandP = 0, bandD = 0, bandF = 0;
+      for (const el of elements) {
+        const frac = (counts[el] || 1) / totalAtoms;
+        const data = getElementData(el);
+        const valence = data?.valenceElectrons ?? 1;
+
+        let elS: number, elP: number, elD: number, elF: number;
+        if (isRareEarth(el) || isActinide(el)) {
+          elS = 0.05; elP = 0.05; elD = 0.2; elF = 0.7;
+        } else if (isTransitionMetal(el)) {
+          elS = 0.1; elP = 0.1; elD = 0.75; elF = 0.05;
+        } else if (el === "H") {
+          elS = 0.95; elP = 0.05; elD = 0; elF = 0;
+        } else if (valence >= 3) {
+          elS = 0.25; elP = 0.65; elD = 0.1; elF = 0;
+        } else {
+          elS = 0.7; elP = 0.2; elD = 0.1; elF = 0;
+        }
+
+        bandS += elS * frac;
+        bandP += elP * frac;
+        bandD += elD * frac;
+        bandF += elF * frac;
+      }
+
+      fermiS += bandS * fermiWeight;
+      fermiP += bandP * fermiWeight;
+      fermiD += bandD * fermiWeight;
+      fermiF += bandF * fermiWeight;
+      fermiTotalWeight += fermiWeight;
+
+      const hFrac = (counts["H"] || 0) / totalAtoms;
+      hydrogenSChar += hFrac * 0.95 * fermiWeight;
+    }
+  }
+
+  const fwNorm = fermiTotalWeight || 1;
+  const fwS = fermiS / fwNorm;
+  const fwP = fermiP / fwNorm;
+  const fwD = fermiD / fwNorm;
+  const fwF = fermiF / fwNorm;
+  const hSChar = hydrogenSChar / fwNorm;
+
+  const orbFracs = { s: fwS, p: fwP, d: fwD, f: fwF };
+  const dominantOrbital = (Object.entries(orbFracs) as [string, number][])
+    .sort((a, b) => b[1] - a[1])[0];
+
   return {
     s: Number((sWeight / norm * scale).toFixed(6)),
     p: Number((pWeight / norm * scale).toFixed(6)),
     d: Number((dWeight / norm * scale).toFixed(6)),
     f: Number((fWeight / norm * scale).toFixed(6)),
+    fermiWeighted: {
+      s: Number(fwS.toFixed(6)),
+      p: Number(fwP.toFixed(6)),
+      d: Number(fwD.toFixed(6)),
+      f: Number(fwF.toFixed(6)),
+      dominantOrbital: dominantOrbital[0],
+      dominantFraction: Number(dominantOrbital[1].toFixed(6)),
+      hydrogenSCharacter: Number(hSChar.toFixed(6)),
+    },
   };
 }
 
@@ -975,8 +1086,8 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
 
-  const latticeSystem = guessLatticeSystem(elements);
-  const pathDef = HIGH_SYMMETRY_PATHS[latticeSystem] ?? HIGH_SYMMETRY_PATHS.cubic;
+  const latticeSystem = guessLatticeSystem(elements, counts);
+  const pathDef = HIGH_SYMMETRY_PATHS[latticeSystem] ?? HIGH_SYMMETRY_PATHS.cubic_sc;
 
   const nSegments = pathDef.labels.length - 1;
   const kPointsPerSegment = 10;
@@ -1136,6 +1247,12 @@ export function getBandOperatorMLFeatures(result: BandOperatorResult): Record<st
     orbitalDOS_p: result.orbitalDOS.p,
     orbitalDOS_d: result.orbitalDOS.d,
     orbitalDOS_f: result.orbitalDOS.f,
+    fermiOrbital_s: result.orbitalDOS.fermiWeighted?.s ?? result.orbitalDOS.s,
+    fermiOrbital_p: result.orbitalDOS.fermiWeighted?.p ?? result.orbitalDOS.p,
+    fermiOrbital_d: result.orbitalDOS.fermiWeighted?.d ?? result.orbitalDOS.d,
+    fermiOrbital_f: result.orbitalDOS.fermiWeighted?.f ?? result.orbitalDOS.f,
+    hydrogenSCharacterAtFermi: result.orbitalDOS.fermiWeighted?.hydrogenSCharacter ?? 0,
+    topoProxyConfidence: result.derivedQuantities.topologicalInvariants.proxyConfidence,
     confidence: result.confidence,
   };
 }
