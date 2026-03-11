@@ -2752,7 +2752,9 @@ function getEnsembleModels(): GNNWeights[] {
 
   cachedEnsembleModels = trainEnsemble(trainingData);
   modelTrainedAt = now;
-  updateTrainingEmbeddings(trainingData, cachedEnsembleModels[0]);
+  const allTraining = [...trainingData, ...dftTrainingDataset.map(r => ({ formula: r.formula, tc: r.tc }))];
+  updateTrainingEmbeddings(allTraining, cachedEnsembleModels[0]);
+  latentEmbeddingDatasetSize = dftTrainingDataset.length;
   return cachedEnsembleModels;
 }
 
@@ -2862,7 +2864,9 @@ export function setCachedEnsemble(models: GNNWeights[], trainingData?: { formula
   cachedEnsembleModels = models;
   modelTrainedAt = Date.now();
   if (trainingData && models.length > 0) {
-    updateTrainingEmbeddings(trainingData, models[0]);
+    const allData = [...trainingData, ...dftTrainingDataset.map(r => ({ formula: r.formula, tc: r.tc }))];
+    updateTrainingEmbeddings(allData, models[0]);
+    latentEmbeddingDatasetSize = dftTrainingDataset.length;
   }
 }
 
@@ -3083,34 +3087,35 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
   const normalizedLambdaUnc = meanLambda > 0 ? lambdaStd / Math.max(meanLambda, 0.1) : lambdaStd;
   const normalizedBgUnc = bgStd / Math.max(meanBG, 0.1);
 
-  const epistemicTcVar = perModelMeans.reduce((s, m) => s + (m.tc - meanTc) ** 2, 0) / Math.max(1, perModelMeans.length);
-  const epistemicLambdaVar = perModelMeans.reduce((s, m) => s + (m.lambda - meanLambda) ** 2, 0) / Math.max(1, perModelMeans.length);
+  const allMeans: number[] = [];
+  const allLambdaMeans: number[] = [];
+  for (let m = 0; m < ensembleModels.length; m++) {
+    const modelPreds = predictions.slice(m * MC_DROPOUT_PASSES, (m + 1) * MC_DROPOUT_PASSES);
+    for (const p of modelPreds) {
+      allMeans.push(p.predictedTc);
+      allLambdaMeans.push(p.lambda);
+    }
+  }
+  const epistemicTcVar = allMeans.reduce((s, v) => s + (v - meanTc) ** 2, 0) / Math.max(1, allMeans.length);
+  const epistemicLambdaVar = allLambdaMeans.reduce((s, v) => s + (v - meanLambda) ** 2, 0) / Math.max(1, allLambdaMeans.length);
   const ensembleUncertainty = Math.min(1.0, Math.sqrt(epistemicTcVar) / Math.max(meanTc, 1));
 
   const aleatoricTcVar = predictions.reduce((s, p) => s + p.predictedTcVar, 0) / predictions.length;
   const aleatoricLambdaVar = predictions.reduce((s, p) => s + p.lambdaVar, 0) / predictions.length;
   const aleatoricUncNorm = Math.min(1.0, Math.sqrt(aleatoricTcVar) / Math.max(meanTc, 1));
 
-  let mcTcVar = 0;
-  let mcLambdaVar = 0;
   let mcDropoutUncertainty = 0;
   for (let m = 0; m < ensembleModels.length; m++) {
     const modelPreds = predictions.slice(m * MC_DROPOUT_PASSES, (m + 1) * MC_DROPOUT_PASSES);
     const modelMeanTc = perModelMeans[m].tc;
-    const modelMeanLambda = perModelMeans[m].lambda;
     const withinTcVar = modelPreds.reduce((s, p) => s + (p.predictedTc - modelMeanTc) ** 2, 0) / modelPreds.length;
-    const withinLambdaVar = modelPreds.reduce((s, p) => s + (p.lambda - modelMeanLambda) ** 2, 0) / modelPreds.length;
-    mcTcVar += withinTcVar;
-    mcLambdaVar += withinLambdaVar;
     mcDropoutUncertainty += Math.sqrt(withinTcVar) / Math.max(modelMeanTc, 1);
   }
-  mcTcVar /= ensembleModels.length;
-  mcLambdaVar /= ensembleModels.length;
   mcDropoutUncertainty = Math.min(1.0, mcDropoutUncertainty / ensembleModels.length);
 
-  const totalTcVar = epistemicTcVar + aleatoricTcVar + mcTcVar;
+  const totalTcVar = epistemicTcVar + aleatoricTcVar;
   const totalTcStd = Math.sqrt(totalTcVar);
-  const totalLambdaVar = epistemicLambdaVar + aleatoricLambdaVar + mcLambdaVar;
+  const totalLambdaVar = epistemicLambdaVar + aleatoricLambdaVar;
   const totalLambdaStd = Math.sqrt(totalLambdaVar);
 
   const tcCI95Lower = Math.max(0, meanTc - 1.96 * totalTcStd);
@@ -3208,7 +3213,9 @@ interface DFTDatasetGrowthEntry {
 
 const MAX_DFT_TRAINING_DATASET = 5000;
 const dftTrainingDataset: DFTTrainingRecord[] = [];
+const dftFormulaIndex = new Map<string, number>();
 const datasetGrowthHistory: DFTDatasetGrowthEntry[] = [];
+let latentEmbeddingDatasetSize = 0;
 
 export function addDFTTrainingResult(record: {
   formula: string;
@@ -3223,8 +3230,9 @@ export function addDFTTrainingResult(record: {
   dosAtEF?: number;
   phononStable?: boolean;
 }): boolean {
-  const existing = dftTrainingDataset.find(r => r.formula === record.formula);
-  if (existing) {
+  const existingIdx = dftFormulaIndex.get(record.formula);
+  if (existingIdx !== undefined) {
+    const existing = dftTrainingDataset[existingIdx];
     if (record.formationEnergy != null) existing.formationEnergy = record.formationEnergy;
     if (record.bandGap != null) existing.bandGap = record.bandGap;
     if (record.tc > 0 && existing.tc === 0) existing.tc = record.tc;
@@ -3241,6 +3249,7 @@ export function addDFTTrainingResult(record: {
     return false;
   }
 
+  const newIdx = dftTrainingDataset.length;
   dftTrainingDataset.push({
     formula: record.formula,
     tc: record.tc,
@@ -3255,6 +3264,7 @@ export function addDFTTrainingResult(record: {
     dosAtEF: record.dosAtEF,
     phononStable: record.phononStable,
   });
+  dftFormulaIndex.set(record.formula, newIdx);
 
   datasetGrowthHistory.push({
     timestamp: Date.now(),
@@ -3266,7 +3276,31 @@ export function addDFTTrainingResult(record: {
     datasetGrowthHistory.splice(0, datasetGrowthHistory.length - 200);
   }
 
+  if (latentEmbeddingDatasetSize > 0 &&
+      dftTrainingDataset.length > latentEmbeddingDatasetSize * 1.05) {
+    scheduleLatentRefresh();
+  }
+
   return true;
+}
+
+let latentRefreshPending = false;
+function scheduleLatentRefresh(): void {
+  if (latentRefreshPending) return;
+  latentRefreshPending = true;
+  setImmediate(() => {
+    try {
+      if (cachedEnsembleModels && cachedEnsembleModels.length > 0) {
+        const allData = [
+          ...SUPERCON_TRAINING_DATA.filter(e => e.isSuperconductor).map(e => ({ formula: e.formula, tc: e.tc })),
+          ...dftTrainingDataset.map(r => ({ formula: r.formula, tc: r.tc })),
+        ];
+        updateTrainingEmbeddings(allData, cachedEnsembleModels[0]);
+        latentEmbeddingDatasetSize = dftTrainingDataset.length;
+      }
+    } catch {}
+    latentRefreshPending = false;
+  });
 }
 
 export function getDFTTrainingDataset(): DFTTrainingRecord[] {
