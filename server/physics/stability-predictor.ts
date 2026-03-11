@@ -554,12 +554,10 @@ function computeSizeRatioScore(formula: string): number {
   const maxR = Math.max(...radii);
   const ratio = minR / maxR;
 
-  if (ratio > 0.85) return 0.95;
-  if (ratio > 0.7) return 0.9;
-  if (ratio > 0.55) return 0.8;
-  if (ratio > 0.4) return 0.65;
-  if (ratio > 0.25) return 0.5;
-  return 0.3;
+  const midpoint = 0.55;
+  const steepness = 8.0;
+  const score = 0.3 + 0.65 / (1 + Math.exp(-steepness * (ratio - midpoint)));
+  return Math.round(Math.min(0.95, Math.max(0.3, score)) * 1000) / 1000;
 }
 
 const FAMILY_STABILITY_BIAS: Record<string, { synthBias: number; decompBias: number; confBias: number }> = {
@@ -665,7 +663,9 @@ export function predictStability(formula: string, pressureGpa: number = 0): Stab
 
   if (volumeGhostFlag) {
     const volumeRatio = volumePerAtom / minVol;
-    synthesizability *= Math.max(0.1, volumeRatio);
+    const ghostSeverity = 1 - volumeRatio;
+    synthesizability *= Math.max(0.05, volumeRatio * volumeRatio);
+    synthesizability -= ghostSeverity * 0.15;
   }
 
   synthesizability = Math.max(0, Math.min(1, synthesizability));
