@@ -158,6 +158,23 @@ function generateTernaryFormulas(elements: string[]): string[] {
   return ternaries;
 }
 
+function murnaghanVolume(P: number, B0: number, Bp: number): number {
+  if (B0 <= 0 || P <= 0) return 1.0;
+  return Math.pow(1 + Bp * P / B0, -1 / Bp);
+}
+
+function pressureCorrectedRadius(el: string, r0: number, pressureGpa: number): number {
+  if (pressureGpa <= 100) return r0;
+  if (el === "H") {
+    const excessP = pressureGpa - 100;
+    const collapseScale = 1.0 / (1.0 + excessP * 0.003 + Math.pow(excessP / 300, 2) * 0.5);
+    return r0 * Math.max(0.35, collapseScale);
+  }
+  const excessP = pressureGpa - 100;
+  const scale = 1.0 / (1.0 + excessP * 0.001);
+  return r0 * Math.max(0.55, scale);
+}
+
 function estimatePVCorrection(
   elements: string[],
   counts: Record<string, number>,
@@ -166,15 +183,21 @@ function estimatePVCorrection(
   if (pressureGpa <= 0) return 0;
 
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+
+  let avgB0 = 0;
   let avgVolume = 0;
   for (const el of elements) {
     const data = getElementData(el);
-    const r = data ? data.atomicRadius : 1.5;
+    const frac = (counts[el] || 1) / totalAtoms;
+    const r0 = data ? data.atomicRadius : 1.5;
+    const r = pressureCorrectedRadius(el, r0, pressureGpa);
     const atomicVolume = (4 / 3) * Math.PI * Math.pow(r, 3);
-    avgVolume += atomicVolume * ((counts[el] || 1) / totalAtoms);
+    avgVolume += atomicVolume * frac;
+    avgB0 += (data?.bulkModulus ?? 50) * frac;
   }
 
-  const compressionFactor = 1.0 / (1.0 + pressureGpa * 0.005);
+  const Bp = 4.0;
+  const compressionFactor = murnaghanVolume(pressureGpa, Math.max(10, avgB0), Bp);
   const effectiveVolume = avgVolume * compressionFactor;
 
   const pvTerm = pressureGpa * effectiveVolume * 1e-4;

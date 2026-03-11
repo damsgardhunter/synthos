@@ -167,7 +167,19 @@ function estimateBulkModulus(formula: string): number {
   return totalWeight > 0 ? Math.max(10, B0 / totalWeight) : 50;
 }
 
-function estimateReferenceVolume(formula: string): number {
+function pressureCorrectedRadius(el: string, r0: number, pressureGpa: number): number {
+  if (pressureGpa <= 100) return r0;
+  if (el === "H") {
+    const excessP = pressureGpa - 100;
+    const collapseScale = 1.0 / (1.0 + excessP * 0.003 + Math.pow(excessP / 300, 2) * 0.5);
+    return r0 * Math.max(0.35, collapseScale);
+  }
+  const excessP = pressureGpa - 100;
+  const scale = 1.0 / (1.0 + excessP * 0.001);
+  return r0 * Math.max(0.55, scale);
+}
+
+function estimateReferenceVolume(formula: string, pressureGpa: number = 0): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -178,7 +190,8 @@ function estimateReferenceVolume(formula: string): number {
     if (data && data.latticeConstant) {
       V0 += Math.pow(data.latticeConstant, 3) * (counts[el] || 1);
     } else if (data) {
-      V0 += Math.pow(data.atomicRadius * 2.5, 3) * (counts[el] || 1);
+      const r = pressureCorrectedRadius(el, data.atomicRadius, pressureGpa);
+      V0 += Math.pow(r * 2.5, 3) * (counts[el] || 1);
     } else {
       V0 += 30 * (counts[el] || 1);
     }
@@ -194,9 +207,10 @@ export function fastVolumeAtPressure(formula: string, pressureGpa: number): {
   bulkModulus: number;
 } {
   const B0 = estimateBulkModulus(formula);
-  const V0 = estimateReferenceVolume(formula);
+  const V0 = estimateReferenceVolume(formula, pressureGpa);
 
-  const ratio = Math.max(0.5, 1 - pressureGpa / B0);
+  const Bp = 4.0;
+  const ratio = Math.max(0.3, Math.pow(1 + Bp * pressureGpa / Math.max(10, B0), -1 / Bp));
   const volume = V0 * ratio;
 
   return {
