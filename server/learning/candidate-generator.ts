@@ -340,7 +340,7 @@ function parseFormulaCounts(formula: string): Record<string, number> {
 
 function countsToFormula(counts: Record<string, number>): string {
   const elements = Object.keys(counts).filter(el => counts[el] > 0);
-  elements.sort((a, b) => (ELECTRONEGATIVITY[a] ?? 2.0) - (ELECTRONEGATIVITY[b] ?? 2.0));
+  elements.sort((a, b) => a.localeCompare(b));
   let result = "";
   for (const el of elements) {
     let c = counts[el];
@@ -452,6 +452,15 @@ const FAMILY_TEMPLATES = [
   { name: "intermetallic", metals: ["Nb", "V", "Ti", "Zr", "Mo", "W", "Ta", "Re"], anions: [], maxElements: 3 },
 ];
 
+function fisherYatesShuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+  return a;
+}
+
 function pickFromFamily(familyIdx: number): string[] {
   const fam = FAMILY_TEMPLATES[familyIdx];
   const nElements = 2 + Math.floor(Math.random() * Math.min(2, fam.maxElements - 1));
@@ -462,7 +471,7 @@ function pickFromFamily(familyIdx: number): string[] {
   }
 
   const nMetals = Math.max(1, nElements - (fam.anions.length > 0 ? 1 : 0) - chosen.length);
-  const shuffledMetals = [...fam.metals].sort(() => Math.random() - 0.5);
+  const shuffledMetals = fisherYatesShuffle(fam.metals);
   for (let i = 0; i < nMetals && chosen.length < nElements; i++) {
     if (!chosen.includes(shuffledMetals[i])) chosen.push(shuffledMetals[i]);
   }
