@@ -273,7 +273,7 @@ export function computeDefectFormationEnergy(
     }
     case DefectType.Dopant: {
       const neighbors = NEIGHBOR_MAP[element] || [];
-      const dopant = neighbors.length > 0 ? (getDeterministicDopant(element, neighbors, []) || neighbors[0]) : element;
+      const dopant = neighbors.length > 0 ? (getDeterministicDopant(element, neighbors, elements) || neighbors[0]) : element;
       const dopantEnergy = getElementEnergy(dopant);
       Ef = Math.abs(elEnergy - dopantEnergy) * 0.5 + hostEnergy * 0.15 + 0.3;
       break;
