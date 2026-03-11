@@ -1665,7 +1665,7 @@ export async function runActiveLearningCycle(
   totalEnrichedSinceLastRetrain += dftSuccessCount;
 
   const batchCycleNum = startNewBatchCycle();
-  const validationPre = validateModel();
+  const validationPre = validateOnHeldOut();
   const preR2 = validationPre.r2;
   const preMAE = Math.sqrt(validationPre.mse);
   const preDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
@@ -1700,7 +1700,7 @@ export async function runActiveLearningCycle(
     });
   }
 
-  const validationPost = validateModel();
+  const validationPost = validateOnHeldOut();
   const postR2 = validationPost.r2;
   const postMAE = Math.sqrt(validationPost.mse);
   const postDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
@@ -1792,23 +1792,27 @@ export async function runActiveLearningCycle(
     dataSource: "Active Learning",
   });
 
+  const discoveryUpdates: Array<{ id: number; discoveryScore: number }> = [];
   for (const { candidate } of selected) {
     try {
-      const existingCandidate = await storage.getSuperconductorByFormula(candidate.formula);
-      if (existingCandidate) {
-        const hullDist = (existingCandidate.mlFeatures as any)?.stabilityGate?.hullDistance ?? 0.05;
-        const discoveryResult = computeDiscoveryScore({
-          predictedTc: existingCandidate.predictedTc ?? 0,
-          formula: existingCandidate.formula,
-          hullDistance: hullDist,
-          synthesisScore: existingCandidate.stabilityScore ?? 0.5,
-          uncertaintyEstimate: (existingCandidate.mlFeatures as any)?.uncertaintyEstimate ?? 0.5,
-        });
-        await storage.updateSuperconductorCandidate(existingCandidate.id, {
-          discoveryScore: discoveryResult.discoveryScore,
-        });
-      }
-    } catch (e: any) { console.error("[ActiveLearning] discovery score error:", e?.message?.slice(0, 200)); }
+      const hullDist = (candidate.mlFeatures as any)?.stabilityGate?.hullDistance ?? 0.05;
+      const discoveryResult = computeDiscoveryScore({
+        predictedTc: candidate.predictedTc ?? 0,
+        formula: candidate.formula,
+        hullDistance: hullDist,
+        synthesisScore: candidate.stabilityScore ?? 0.5,
+        uncertaintyEstimate: (candidate.mlFeatures as any)?.uncertaintyEstimate ?? 0.5,
+      });
+      discoveryUpdates.push({ id: candidate.id, discoveryScore: discoveryResult.discoveryScore });
+    } catch { /* skip */ }
+  }
+  if (discoveryUpdates.length > 0) {
+    Promise.all(
+      discoveryUpdates.map(u =>
+        storage.updateSuperconductorCandidate(u.id, { discoveryScore: u.discoveryScore })
+          .catch((e: any) => console.error(`[ActiveLearning] discovery score DB write failed for id=${u.id}:`, e?.message?.slice(0, 100)))
+      )
+    ).catch(() => {});
   }
 
   const uncertaintyReduction = avgUncertaintyBefore > 0
