@@ -19,7 +19,7 @@ import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity, matchPrototype } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
-import { evaluateInsightNovelty, requiresQuantitativeContent } from "./insight-detector";
+import { evaluateInsightNovelty, requiresQuantitativeContent, type InsightTempo } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
@@ -1045,7 +1045,7 @@ async function runPhase3_Bonding() {
     await addInsightsToPhase(3, insights);
     if (!shouldContinue()) return;
     const formulas = mats.slice(0, 5).map(m => m.formula);
-    await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas);
+    await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas, engineTempo as InsightTempo);
     if (!shouldContinue()) return;
     const phase3 = await storage.getLearningPhaseById(3);
     const totalBondingInsights = (phase3?.insights ?? []).length;
@@ -1101,7 +1101,7 @@ async function runPhase5_Prediction() {
 
     await addInsightsToPhase(5, insights);
     const predFormulas = mats.slice(0, 5).map(m => m.formula);
-    await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas);
+    await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas, engineTempo as InsightTempo);
     const phase5 = await storage.getLearningPhaseById(5);
     const totalPredInsights = (phase5?.insights ?? []).length;
     const crCount5 = await storage.getComputationalResultCount();
@@ -1168,7 +1168,7 @@ async function runPhase7_Superconductor() {
 
     await addInsightsToPhase(7, result.insights);
     if (!shouldContinue()) return;
-    await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research");
+    await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research", undefined, engineTempo as InsightTempo);
     if (!shouldContinue()) return;
 
     if (cycleCount % 5 === 0 && shouldContinue()) {

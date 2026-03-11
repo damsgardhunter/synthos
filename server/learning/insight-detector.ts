@@ -519,12 +519,15 @@ function isSemanticDuplicate(embedding: Float32Array, candidateText: string): { 
   return { isDuplicate: bestSimilarity > SEMANTIC_DUP_THRESHOLD, bestSimilarity, matchText };
 }
 
+export type InsightTempo = "excited" | "exploring" | "contemplating";
+
 export async function evaluateInsightNovelty(
   emit: EventEmitter,
   insights: string[],
   phaseId: number,
   phaseName: string,
-  relatedFormulas?: string[]
+  relatedFormulas?: string[],
+  tempo?: InsightTempo
 ): Promise<{ novel: number; total: number }> {
   if (insights.length === 0) return { novel: 0, total: 0 };
 
@@ -754,7 +757,8 @@ Return JSON with 'evaluations' array, each with:
       const entry = afterEmbeddingFilter[ev.index];
       if (!entry) continue;
 
-      const isNovel = ev.isNovel === true && (ev.noveltyScore ?? 0) >= 0.4;
+      const noveltyThreshold = tempo === "contemplating" ? 0.30 : tempo === "excited" ? 0.45 : 0.40;
+      const isNovel = ev.isNovel === true && (ev.noveltyScore ?? 0) >= noveltyThreshold;
 
       if (entry.embedding) {
         addToEmbeddingCache(entry.text, entry.embedding);
