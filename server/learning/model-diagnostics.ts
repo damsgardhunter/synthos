@@ -95,7 +95,7 @@ interface PhononSurrogateDiagnostics {
   maxFreqMAE: number;
   stabilityAccuracy: number;
   totalPredictions: number;
-  hitRate: number;
+  hitRate: number | null;
 }
 
 interface TBSurrogateDiagnostics {
@@ -693,9 +693,9 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
     maxFreqMAE: phononStats.metrics.maxFreqMAE,
     stabilityAccuracy: phononStats.metrics.stabilityAccuracy,
     totalPredictions: phononStats.totalPredictions,
-    hitRate: phononStats.totalPredictions > 0
-      ? Math.round((phononStats.tierBreakdown.hits / Math.max(1, phononStats.tierBreakdown.hits + phononStats.tierBreakdown.misses)) * 1000) / 1000
-      : 0,
+    hitRate: (phononStats.tierBreakdown.hits + phononStats.tierBreakdown.misses) > 0
+      ? Math.round((phononStats.tierBreakdown.hits / (phononStats.tierBreakdown.hits + phononStats.tierBreakdown.misses)) * 1000) / 1000
+      : null,
   };
 
   const tbStats = getTBSurrogateStats();
@@ -852,7 +852,8 @@ function computeBenchmarkReport(): ModelBenchmarkReport {
   const comparisons: VersionComparison[] = [];
   const bestByMetric: Record<string, { version: number; value: number }> = {};
 
-  for (const v of xgbHistory.history) {
+  const sortedXgbHistory = [...xgbHistory.history].sort((a, b) => a.version - b.version);
+  for (const v of sortedXgbHistory) {
     scorecards.push({
       modelName: "xgboost",
       version: v.version,
@@ -896,7 +897,8 @@ function computeBenchmarkReport(): ModelBenchmarkReport {
     });
   }
 
-  for (const v of gnnHistory) {
+  const sortedGnnHistory = [...gnnHistory].sort((a, b) => a.version - b.version);
+  for (const v of sortedGnnHistory) {
     scorecards.push({
       modelName: "gnn",
       version: v.version,
@@ -938,10 +940,11 @@ function computeBenchmarkReport(): ModelBenchmarkReport {
     });
   }
 
+  const HIGHER_BETTER_METRICS = new Set(["r2", "accuracy", "hitRate", "stabilityAccuracy", "f1_score"]);
   for (const card of scorecards) {
     for (const [metric, value] of Object.entries(card.metrics)) {
       const key = `${card.modelName}:${metric}`;
-      const isHigherBetter = metric === "r2";
+      const isHigherBetter = HIGHER_BETTER_METRICS.has(metric);
       const existing = bestByMetric[key];
       if (!existing ||
         (isHigherBetter && value > existing.value) ||
@@ -999,7 +1002,7 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push(`  Dataset=${d.phononSurrogate.datasetSize} | Predictions=${d.phononSurrogate.totalPredictions}`);
   lines.push(`  omegaLog MAE=${d.phononSurrogate.omegaLogMAE} | debyeTemp MAE=${d.phononSurrogate.debyeTempMAE}`);
   lines.push(`  maxFreq MAE=${d.phononSurrogate.maxFreqMAE} | Stability accuracy=${d.phononSurrogate.stabilityAccuracy}`);
-  lines.push(`  Hit rate=${d.phononSurrogate.hitRate}`);
+  lines.push(`  Hit rate=${d.phononSurrogate.hitRate !== null ? d.phononSurrogate.hitRate : "N/A (no evaluated predictions)"}`);
   lines.push("");
 
   lines.push("## TB Surrogate");
