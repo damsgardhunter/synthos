@@ -198,6 +198,7 @@ export interface ModelVersionScorecard {
   hyperparameters: Record<string, number | string>;
   datasetSize: number;
   inferenceSpeedMs: number;
+  computeEnvironment: string;
 }
 
 export interface ModelBenchmarkReport {
@@ -766,7 +767,7 @@ function computeFailureSummary(): FailureSummaryReport {
     reasonCounts.set(entry.failureReason, (reasonCounts.get(entry.failureReason) || 0) + 1);
     sourceCounts.set(entry.source, (sourceCounts.get(entry.source) || 0) + 1);
 
-    if (entry.failureReason === "unstable_phonons" || entry.failureReason === "structure_collapse") {
+    if (entry.failureReason === "unstable_phonons" || entry.failureReason === "structure_collapse" || entry.failureReason === "high_formation_energy") {
       predictedStableActualUnstable.push({
         formula: entry.formula,
         failureReason: entry.failureReason,
@@ -814,17 +815,23 @@ function computeFailureSummary(): FailureSummaryReport {
   const collapseFailures = reasonCounts.get("structure_collapse") || 0;
   const energyFailures = reasonCounts.get("high_formation_energy") || 0;
 
-  if (phononFailures > 5) {
-    suggestions.push(`Train phonon stability classifier — ${phononFailures} phonon instability failures detected`);
+  const totalForRate = allEntries.length;
+  const phononRate = totalForRate > 0 ? phononFailures / totalForRate : 0;
+  const collapseRate = totalForRate > 0 ? collapseFailures / totalForRate : 0;
+  const energyRate = totalForRate > 0 ? energyFailures / totalForRate : 0;
+  const falseStableRate = totalForRate > 0 ? predictedStableActualUnstable.length / totalForRate : 0;
+
+  if (phononRate > 0.05 && phononFailures >= 3) {
+    suggestions.push(`Train phonon stability classifier — ${phononFailures}/${totalForRate} (${(phononRate * 100).toFixed(1)}%) phonon instability failures`);
   }
-  if (collapseFailures > 3) {
-    suggestions.push(`Improve structure predictor — ${collapseFailures} structure collapse failures`);
+  if (collapseRate > 0.03 && collapseFailures >= 2) {
+    suggestions.push(`Improve structure predictor — ${collapseFailures}/${totalForRate} (${(collapseRate * 100).toFixed(1)}%) structure collapse failures`);
   }
-  if (energyFailures > 5) {
-    suggestions.push(`Tighten formation energy pre-filter — ${energyFailures} high formation energy rejections`);
+  if (energyRate > 0.05 && energyFailures >= 3) {
+    suggestions.push(`Tighten formation energy pre-filter — ${energyFailures}/${totalForRate} (${(energyRate * 100).toFixed(1)}%) high formation energy rejections`);
   }
-  if (predictedStableActualUnstable.length > 10) {
-    suggestions.push(`High false-stable rate: ${predictedStableActualUnstable.length} predicted stable but actually unstable`);
+  if (falseStableRate > 0.08 && predictedStableActualUnstable.length >= 5) {
+    suggestions.push(`High false-stable rate: ${predictedStableActualUnstable.length}/${totalForRate} (${(falseStableRate * 100).toFixed(1)}%) predicted stable but actually unstable`);
   }
   if (patterns.elementPairs.length > 0) {
     const worst = patterns.elementPairs[0];
@@ -870,6 +877,7 @@ function computeBenchmarkReport(): ModelBenchmarkReport {
       },
       datasetSize: v.datasetSize,
       inferenceSpeedMs: 3,
+      computeEnvironment: "cpu",
     });
   }
 
@@ -914,6 +922,7 @@ function computeBenchmarkReport(): ModelBenchmarkReport {
       },
       datasetSize: v.datasetSize,
       inferenceSpeedMs: 8,
+      computeEnvironment: "cpu",
     });
   }
 
@@ -1153,7 +1162,7 @@ export function getModelDiagnosticsForLLM(): string {
       const metricStr = Object.entries(sc.metrics).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(4) : v}`).join(", ");
       const hpStr = Object.entries(sc.hyperparameters).map(([k, v]) => `${k}=${v}`).join(", ");
       lines.push(`  ${model} v${sc.version}: ${metricStr}`);
-      lines.push(`    hyperparams: ${hpStr} | dataset=${sc.datasetSize} | inference=${sc.inferenceSpeedMs}ms`);
+      lines.push(`    hyperparams: ${hpStr} | dataset=${sc.datasetSize} | inference=${sc.inferenceSpeedMs}ms (${sc.computeEnvironment})`);
     }
     if (d.benchmark.versionComparisons.length > 0) {
       const recentComps = d.benchmark.versionComparisons.slice(-5);
@@ -1347,7 +1356,7 @@ export function getBenchmarkForLLM(): string {
     for (const [k, v] of Object.entries(latest.metrics)) {
       lines.push(`    ${k}: ${typeof v === "number" ? v.toFixed(4) : v}`);
     }
-    lines.push(`    inference speed: ${latest.inferenceSpeedMs} ms`);
+    lines.push(`    inference speed: ${latest.inferenceSpeedMs} ms (${latest.computeEnvironment})`);
     lines.push(`    dataset: ${latest.datasetSize} samples`);
     lines.push(`    hyperparameters: ${JSON.stringify(latest.hyperparameters)}`);
   }
