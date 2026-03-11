@@ -463,8 +463,26 @@ export async function runMDSampling(formula: string, temperatureK: number = 300)
     const vacLength = 50;
     const vac: number[] = [];
     const vacDecayRate = avgFreq_THz * 0.2;
-    for (let i = 0; i < vacLength; i++) {
-      vac.push(Math.exp(-i * vacDecayRate * 0.02) * Math.cos(2 * Math.PI * avgFreq_THz * 0.001 * i));
+
+    const LIGHT_ELEMENTS = new Set(["H", "He", "Li", "Be", "B", "C", "N", "O", "F"]);
+    const lightFraction = elements.reduce((s, el) => s + (LIGHT_ELEMENTS.has(el) ? (counts[el] ?? 1) : 0), 0) / Math.max(1, totalAtoms);
+    const hasLightModes = lightFraction > 0.15;
+
+    if (hasLightModes) {
+      const maxFreq_THz = phonon.maxPhononFrequency * CM1_TO_THZ;
+      const opticalFreq = Math.max(avgFreq_THz * 2.5, maxFreq_THz * 0.7);
+      const opticalDecayRate = vacDecayRate * 0.6;
+      const acousticWeight = 1.0 - lightFraction * 0.6;
+      const opticalWeight = lightFraction * 0.6;
+      for (let i = 0; i < vacLength; i++) {
+        const acoustic = Math.exp(-i * vacDecayRate * 0.02) * Math.cos(2 * Math.PI * avgFreq_THz * 0.001 * i);
+        const optical = Math.exp(-i * opticalDecayRate * 0.02) * Math.cos(2 * Math.PI * opticalFreq * 0.001 * i);
+        vac.push(acousticWeight * acoustic + opticalWeight * optical);
+      }
+    } else {
+      for (let i = 0; i < vacLength; i++) {
+        vac.push(Math.exp(-i * vacDecayRate * 0.02) * Math.cos(2 * Math.PI * avgFreq_THz * 0.001 * i));
+      }
     }
 
     const vacDecayTime = vacDecayRate > 0 ? 1.0 / (vacDecayRate * 0.02) : 50;
@@ -560,22 +578,28 @@ function processMDResult(raw: MDSamplingRawResult, formula: string): MDSamplingR
   const vacLength = Math.min(50, nFrames - 1);
   const vac: number[] = [];
   if (velocities && velocities.length > 0 && nAtoms > 0) {
+    let zeroLagNorm = 0;
+    for (let f = 0; f < nFrames; f++) {
+      for (let a = 0; a < nAtoms; a++) {
+        const v = velocities[f]?.[a] ?? [0, 0, 0];
+        zeroLagNorm += v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+      }
+    }
+    const avgNorm = nFrames > 0 ? zeroLagNorm / nFrames : 1;
+
     for (let tau = 0; tau < vacLength; tau++) {
+      const nPairs = nFrames - tau;
       let corr = 0;
-      let norm = 0;
-      for (let f = 0; f < nFrames - tau; f++) {
+      for (let f = 0; f < nPairs; f++) {
         for (let a = 0; a < nAtoms; a++) {
           const v0 = velocities[f]?.[a] ?? [0, 0, 0];
           const vt = velocities[f + tau]?.[a] ?? [0, 0, 0];
           corr += v0[0] * vt[0] + v0[1] * vt[1] + v0[2] * vt[2];
-          if (tau === 0) norm += v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2];
         }
       }
-      if (tau === 0 && norm > 0) {
-        vac.push(1.0);
-      } else {
-        vac.push(norm > 0 ? corr / (norm * (nFrames - tau)) * (nFrames) : 0);
-      }
+      const avgCorr = nPairs > 0 ? corr / nPairs : 0;
+      const normalized = avgNorm > 1e-30 ? Math.max(-1, Math.min(1, avgCorr / avgNorm)) : 0;
+      vac.push(normalized);
     }
   }
 
