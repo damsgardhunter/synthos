@@ -6433,20 +6433,36 @@ async function runAutonomousFastPath() {
   }
 }
 
-function sanitizeStatsNumeric(obj: any): any {
-  if (obj === null || obj === undefined) return 0;
+const NULLABLE_STAT_KEYS = new Set([
+  "lambda", "omegaLog", "muStar", "debyeTemp", "nestingScore",
+  "vhsProximity", "bandgap", "dosAtFermi", "formationEnergy",
+  "hullDistance", "kineticScore", "phonon_freq", "spin_fluct",
+  "anharmonicity", "pairingStrength", "topologicalScore",
+  "gnnUncertainty", "aleatoricStd", "epistemicStd",
+  "bestAmbientTc", "bestAmbientFormula", "qeDFT",
+]);
+
+function sanitizeStatsNumeric(obj: any, key?: string): any {
+  if (obj === null || obj === undefined) {
+    if (key && NULLABLE_STAT_KEYS.has(key)) return null;
+    return 0;
+  }
   if (typeof obj === "number") return Number.isFinite(obj) ? obj : 0;
   if (typeof obj === "string") return obj;
   if (typeof obj === "boolean") return obj;
-  if (Array.isArray(obj)) return obj.map(sanitizeStatsNumeric);
+  if (Array.isArray(obj)) return obj.map((item) => sanitizeStatsNumeric(item));
   if (typeof obj === "object") {
     const result: any = {};
-    for (const key of Object.keys(obj)) {
-      const val = obj[key];
+    for (const k of Object.keys(obj)) {
+      const val = obj[k];
       if (val === null || val === undefined) {
-        result[key] = 0;
+        if (NULLABLE_STAT_KEYS.has(k)) {
+          result[k] = null;
+        } else {
+          result[k] = 0;
+        }
       } else {
-        result[key] = sanitizeStatsNumeric(val);
+        result[k] = sanitizeStatsNumeric(val, k);
       }
     }
     return result;
