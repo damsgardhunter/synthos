@@ -53,42 +53,46 @@ export interface ClusterGuidance {
   suggestions: string[];
 }
 
+function weightedCentroid(raw: number[]): number[] {
+  return raw.map((v, i) => v * FS_FEATURE_WEIGHTS[i]);
+}
+
 const ARCHETYPES: FSClusterArchetype[] = [
   {
     id: "cuprate_cylinder",
     name: "Cuprate Cylindrical",
     description: "High cylindrical character, 2D, strong nesting",
-    centroid: [0.3, 0.2, 0.4, 0.6, 0.85, 0.75, 0.667, 0.2, 0.5],
+    centroid: weightedCentroid([0.3, 0.2, 0.4, 0.6, 0.85, 0.75, 0.667, 0.2, 0.5]),
   },
   {
     id: "pnictide_eh_pockets",
     name: "Pnictide Electron-Hole",
     description: "Balanced electron-hole pockets, moderate nesting",
-    centroid: [0.4, 0.4, 0.4, 0.9, 0.4, 0.55, 0.833, 0.3, 0.7],
+    centroid: weightedCentroid([0.4, 0.4, 0.4, 0.9, 0.4, 0.55, 0.833, 0.3, 0.7]),
   },
   {
     id: "kagome_flat",
     name: "Kagome Flat Band",
     description: "High multiBandScore, 2D flat bands",
-    centroid: [0.3, 0.2, 0.4, 0.5, 0.6, 0.4, 0.667, 0.3, 0.85],
+    centroid: weightedCentroid([0.3, 0.2, 0.4, 0.5, 0.6, 0.4, 0.667, 0.3, 0.85]),
   },
   {
     id: "hydride_multiband",
     name: "Hydride Multiband",
     description: "High pocket count, 3D, high sigma band presence",
-    centroid: [0.6, 0.6, 0.6, 0.8, 0.2, 0.3, 1.0, 0.85, 0.8],
+    centroid: weightedCentroid([0.6, 0.6, 0.6, 0.8, 0.2, 0.3, 1.0, 0.85, 0.8]),
   },
   {
     id: "heavy_fermion",
     name: "Heavy Fermion",
     description: "Multiple small pockets, extremely high effective mass, f-electron hybridization",
-    centroid: [0.5, 0.3, 0.4, 0.7, 0.15, 0.40, 0.833, 0.10, 0.90],
+    centroid: weightedCentroid([0.5, 0.3, 0.4, 0.7, 0.15, 0.40, 0.833, 0.10, 0.90]),
   },
   {
     id: "conventional_3d",
     name: "Conventional 3D",
     description: "3D, low nesting, few pockets",
-    centroid: [0.2, 0.2, 0.2, 0.7, 0.15, 0.15, 1.0, 0.4, 0.25],
+    centroid: weightedCentroid([0.2, 0.2, 0.2, 0.7, 0.15, 0.15, 1.0, 0.4, 0.25]),
   },
 ];
 
@@ -97,8 +101,20 @@ const novelClusterMembers: Map<string, FSClusterMember[]> = new Map();
 const assignmentCache: Map<string, ClusterAssignment> = new Map();
 let novelClusterCount = 0;
 
+const FS_FEATURE_WEIGHTS = [
+  1.0,
+  1.0,
+  1.0,
+  1.2,
+  1.3,
+  1.8,
+  1.0,
+  1.2,
+  1.8,
+];
+
 function fsResultToVector(fs: FermiSurfaceResult): number[] {
-  return [
+  const raw = [
     Math.min(fs.pocketCount / 10, 1.0),
     Math.min(fs.electronPocketCount / 5, 1.0),
     Math.min(fs.holePocketCount / 5, 1.0),
@@ -109,6 +125,7 @@ function fsResultToVector(fs: FermiSurfaceResult): number[] {
     fs.sigmaBandPresence,
     fs.multiBandScore,
   ];
+  return raw.map((v, i) => v * FS_FEATURE_WEIGHTS[i]);
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -183,7 +200,7 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
       }
     }
 
-    if (bestNovelSim > 0.75 && bestNovelId) {
+    if (bestNovelSim > 0.85 && bestNovelId) {
       assignedId = bestNovelId;
       assignedName = `Novel Cluster ${bestNovelId.replace("novel_", "")}`;
       bestSim = bestNovelSim;
