@@ -126,6 +126,8 @@ let lastRetrainCycle = 0;
 const RETRAIN_CYCLE_INTERVAL = 20;
 const RETRAIN_DFT_THRESHOLD = 50;
 const recentUncertaintyDrops: number[] = [];
+const DISCOVERY_WINDOW = 5;
+const recentBestTcs: number[] = [];
 
 const EMA_ALPHA = 0.05;
 const RUNNING_SUM_RESET_THRESHOLD = 10000;
@@ -1198,7 +1200,8 @@ function validateOnHeldOut(): { r2: number; mse: number } {
 }
 
 async function retrainGNNWithEnrichedData(
-  emit: EventEmitter
+  emit: EventEmitter,
+  enrichedSnapshot?: SuperconductorCandidate[]
 ): Promise<{ r2Before: number; maeBefore: number; r2After: number; maeAfter: number }> {
   const validationBefore = validateOnHeldOut();
   const r2Before = validationBefore.r2;
@@ -1233,7 +1236,7 @@ async function retrainGNNWithEnrichedData(
   }
 
   try {
-    const enrichedCandidates = await storage.getSuperconductorCandidates(100);
+    const enrichedCandidates = enrichedSnapshot ?? await storage.getSuperconductorCandidates(100);
     for (const c of enrichedCandidates) {
       if (c.dataConfidence === "high" || c.dataConfidence === "medium") {
         if (seenFormulas.has(c.formula)) continue;
@@ -1282,10 +1285,17 @@ async function retrainGNNWithEnrichedData(
   recentUncertaintyDrops.push(uncertaintyDrop);
   if (recentUncertaintyDrops.length > 3) recentUncertaintyDrops.shift();
 
-  const avgRecentDrop = recentUncertaintyDrops.length >= 3
-    ? recentUncertaintyDrops.reduce((s, v) => s + v, 0) / recentUncertaintyDrops.length
-    : 1.0;
-  const converged = avgRecentDrop < 0.1 && recentUncertaintyDrops.length >= 3;
+  recentBestTcs.push(convergenceStats.bestTcFromLoop);
+  if (recentBestTcs.length > DISCOVERY_WINDOW) recentBestTcs.shift();
+
+  let converged = false;
+  if (recentBestTcs.length >= DISCOVERY_WINDOW) {
+    const oldestTc = recentBestTcs[0];
+    const newestTc = recentBestTcs[recentBestTcs.length - 1];
+    const tcImprovement = newestTc - oldestTc;
+    const relativeImprovement = oldestTc > 0 ? tcImprovement / oldestTc : tcImprovement;
+    converged = relativeImprovement < 0.01 && session.stagnationCycles >= DISCOVERY_WINDOW;
+  }
 
   const evalStats = getEvaluatedDatasetStats();
 
@@ -1377,6 +1387,16 @@ export async function runActiveLearningCycle(
       }
     } else {
       pipelineCrashCount++;
+      const attemptsSoFar = dftSuccessCount + pipelineCrashCount;
+      if (attemptsSoFar >= 4 && pipelineCrashCount / attemptsSoFar > 0.5) {
+        emit("log", {
+          phase: "active-learning",
+          event: "Pipeline cooldown triggered",
+          detail: `High failure rate: ${pipelineCrashCount}/${attemptsSoFar} evaluations crashed (${(pipelineCrashCount / attemptsSoFar * 100).toFixed(0)}%). Halting remaining ${selected.length - attemptsSoFar} evaluations to conserve resources.`,
+          dataSource: "Active Learning",
+        });
+        break;
+      }
     }
     if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
       bestTcThisLoop = candidate.predictedTc ?? 0;
@@ -1628,7 +1648,8 @@ export async function runActiveLearningCycle(
       detail: `Trigger: ${retrainReason}, total enriched=${totalEnrichedSinceLastRetrain}, ground-truth dataset=${getGroundTruthSummary().totalDatapoints}, ledger=${computeMetrics().count} entries`,
       dataSource: "Active Learning",
     });
-    retrainResult = await retrainGNNWithEnrichedData(emit);
+    const preRetrainSnapshot = await storage.getSuperconductorCandidates(100);
+    retrainResult = await retrainGNNWithEnrichedData(emit, preRetrainSnapshot);
     convergenceStats.modelRetrains++;
     totalEnrichedSinceLastRetrain = 0;
     lastRetrainCycle = memory.cycleCount;
