@@ -8,16 +8,39 @@ function parseFormulaElements(formula: string): string[] {
   return matches ? Array.from(new Set(matches)) : [];
 }
 
+function expandParentheses(formula: string): string {
+  let result = formula.replace(/\[/g, "(").replace(/\]/g, ")");
+  const parenRegex = /\(([^()]+)\)(\d*\.?\d*)/;
+  let iterations = 0;
+  while (result.includes("(") && iterations < 20) {
+    const prev = result;
+    result = result.replace(parenRegex, (_, group: string, mult: string) => {
+      const m = mult ? parseFloat(mult) : 1;
+      if (isNaN(m) || m <= 0) return group;
+      if (m === 1) return group;
+      return group.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_x: string, el: string, num: string) => {
+        const n = num ? parseFloat(num) : 1;
+        const newN = (isNaN(n) || n <= 0 ? 1 : n) * m;
+        return newN === 1 ? el : `${el}${newN}`;
+      });
+    });
+    if (result === prev) break;
+    iterations++;
+  }
+  return result.replace(/[()]/g, "");
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+    counts[el] = (counts[el] || 0) + (isNaN(num) || num <= 0 ? 1 : num);
   }
   return counts;
 }
@@ -88,36 +111,57 @@ function computeGrainBoundaryEnergy(formula: string): GrainBoundaryAnalysis {
 
   let avgSurfaceEnergy = 0;
   let avgBulkModulus = 0;
+  let avgShearModulus = 0;
   let totalWeight = 0;
+  const isHydride = elements.includes("H") && ((counts["H"] || 0) / totalAtoms) > 0.3;
+
   for (const el of elements) {
     const data = getElementData(el);
     const frac = (counts[el] || 1) / totalAtoms;
     const mp = data?.meltingPoint ?? 1000;
     const bulk = data?.bulkModulus ?? 50;
+    const shear = bulk * 0.4;
     const surfE = mp * 0.0012 + bulk * 0.005;
     avgSurfaceEnergy += surfE * frac;
     avgBulkModulus += bulk * frac;
+    avgShearModulus += shear * frac;
     totalWeight += frac;
   }
   avgSurfaceEnergy /= Math.max(totalWeight, 0.01);
   avgBulkModulus /= Math.max(totalWeight, 0.01);
+  avgShearModulus /= Math.max(totalWeight, 0.01);
 
   const nElements = elements.length;
   const complexityFactor = 1 + 0.15 * Math.log(Math.max(nElements, 1));
-  const averageGBEnergy = avgSurfaceEnergy * 0.35 * complexityFactor;
+
+  const shearContribution = avgShearModulus * 0.008;
+  const averageGBEnergy = (avgSurfaceEnergy * 0.35 + shearContribution) * complexityFactor;
 
   const formE = computeMiedemaFormationEnergy(formula);
-  const gbDecompositionFactor = formE > 0
-    ? Math.min(1.0, averageGBEnergy / Math.max(formE * 5, 0.1))
-    : Math.min(0.3, averageGBEnergy / (Math.abs(formE) * 10 + 1));
+
+  let gbDecompositionFactor: number;
+  if (formE > 0) {
+    gbDecompositionFactor = Math.min(1.0, averageGBEnergy / Math.max(formE * 5, 0.1));
+  } else {
+    gbDecompositionFactor = Math.min(0.3, averageGBEnergy / (Math.abs(formE) * 10 + 1));
+  }
+
+  if (isHydride) {
+    const shearStressFactor = Math.min(0.3, avgShearModulus * 0.003);
+    gbDecompositionFactor = Math.min(1.0, gbDecompositionFactor + shearStressFactor);
+  }
 
   let grainSizeEffect: string;
   if (averageGBEnergy < 0.3) {
     grainSizeEffect = "Low GB energy — grain boundaries unlikely to accelerate decomposition";
   } else if (averageGBEnergy < 0.8) {
-    grainSizeEffect = "Moderate GB energy — nanostructuring may accelerate decomposition at grain boundaries";
+    grainSizeEffect = isHydride
+      ? "Moderate GB energy — H diffusion along grain boundaries may initiate decomposition"
+      : "Moderate GB energy — nanostructuring may accelerate decomposition at grain boundaries";
   } else {
-    grainSizeEffect = "High GB energy — grain boundaries are likely decomposition nucleation sites";
+    grainSizeEffect = isHydride
+      ? "High GB energy — grain boundaries are primary H desorption pathways and decomposition nucleation sites"
+      : "High GB energy — grain boundaries are likely decomposition nucleation sites";
   }
 
   return {
@@ -133,6 +177,7 @@ function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
   const totalAtoms = getTotalAtoms(counts);
 
   const attemptFreq = 1e13;
+  const isHydride = elements.includes("H") && ((counts["H"] || 0) / totalAtoms) > 0.3;
   const elementBarriers: { element: string; barrier: number; diffusionRate300K: number }[] = [];
 
   for (const el of elements) {
@@ -142,13 +187,23 @@ function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
     const mp = data?.meltingPoint ?? 1000;
     const bulk = data?.bulkModulus ?? 50;
 
-    const barrierBase = mp * kB * 18;
+    let barrierBase = mp * kB * 18;
     const massCorrection = 0.02 * Math.sqrt(mass / 50);
     const sizeCorrection = 0.01 * (radius / 130);
     const stiffnessCorrection = 0.005 * Math.sqrt(bulk / 100);
+
+    if (el === "H") {
+      const tunnelingReduction = 0.3;
+      barrierBase *= (1 - tunnelingReduction);
+    }
+
     const barrier = barrierBase + massCorrection + sizeCorrection + stiffnessCorrection;
 
-    const rate = attemptFreq * Math.exp(-barrier / (kB * 300));
+    let effectiveAttemptFreq = attemptFreq;
+    if (el === "H") {
+      effectiveAttemptFreq *= 3;
+    }
+    const rate = effectiveAttemptFreq * Math.exp(-barrier / (kB * 300));
 
     elementBarriers.push({
       element: el,
@@ -159,26 +214,28 @@ function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
 
   elementBarriers.sort((a, b) => a.barrier - b.barrier);
 
-  const rateControlling = elementBarriers[elementBarriers.length - 1] || elementBarriers[0];
-  const fastest = elementBarriers[0];
+  const fastestDiffuser = elementBarriers[0];
 
-  const fractions = elements.map(el => (counts[el] || 1) / totalAtoms);
-  let effectiveBarrier = 0;
-  for (let i = 0; i < elements.length; i++) {
-    const eb = elementBarriers.find(e => e.element === elements[i]);
-    if (eb) effectiveBarrier += eb.barrier * fractions[i];
-  }
+  const minBarrier = fastestDiffuser.barrier;
 
-  const nElements = elements.length;
-  if (nElements > 2) {
-    effectiveBarrier *= (1 + 0.05 * (nElements - 2));
+  let effectiveBarrier: number;
+  if (isHydride && fastestDiffuser.element === "H") {
+    const hFrac = (counts["H"] || 0) / totalAtoms;
+    effectiveBarrier = minBarrier * (0.7 + 0.3 * (1 - hFrac));
+  } else {
+    effectiveBarrier = minBarrier;
+    const nElements = elements.length;
+    if (nElements > 2) {
+      const latticeTrappingBonus = 0.03 * (nElements - 2);
+      effectiveBarrier += latticeTrappingBonus;
+    }
   }
 
   const effectiveRate = attemptFreq * Math.exp(-effectiveBarrier / (kB * 300));
 
   return {
     elementBarriers,
-    rateControllingElement: rateControlling?.element ?? elements[0],
+    rateControllingElement: fastestDiffuser.element,
     effectiveBarrier: Math.round(effectiveBarrier * 10000) / 10000,
     effectiveDiffusionRate300K: effectiveRate,
   };
