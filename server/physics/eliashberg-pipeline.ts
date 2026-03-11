@@ -455,7 +455,7 @@ function computeAllenDynesTc(
   }
 
   const lambdaBar = 2.46 * (1 + 3.8 * muStar);
-  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 2), 1 / 3);
+  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
 
   let f2 = 1.0;
   if (omega2 > 0 && omegaLog > 0) {

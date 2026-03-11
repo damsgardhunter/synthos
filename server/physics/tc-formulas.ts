@@ -7,6 +7,7 @@ export interface AllenDynesTcInput {
   muStar: number;
   omega2Avg?: number;
   isHydride?: boolean;
+  family?: string;
 }
 
 export type TcMethod = "allen-dynes" | "sisso-hydride" | "xie-strong-coupling";
@@ -19,8 +20,18 @@ export interface AllenDynesTcResult {
   method: TcMethod;
 }
 
+function lambdaBarPrefactor(family?: string): number {
+  switch (family) {
+    case "Hydride": return 2.89;
+    case "Cuprate": return 1.85;
+    case "Heavy-Fermion": return 1.60;
+    case "Iron-Based": return 2.10;
+    default: return 2.46;
+  }
+}
+
 export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
-  const { lambda, omegaLog, muStar, omega2Avg, isHydride } = input;
+  const { lambda, omegaLog, muStar, omega2Avg, isHydride, family } = input;
 
   const omegaLogK = omegaLog * CM1_TO_KELVIN;
 
@@ -34,7 +45,7 @@ export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
     return { tc: 0, f1: 1, f2: 1, regime, method: "allen-dynes" };
   }
 
-  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+  const lambdaBar = lambdaBarPrefactor(family) * (1 + 3.8 * muStar);
   const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
 
   let f2 = 1.0;

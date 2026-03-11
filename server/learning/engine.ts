@@ -1573,15 +1573,31 @@ let lastBestPairingSusc = 0;
 let explorationModeActive = false;
 let explorationModeSavedConstraints: { allowBeyondEmpirical: boolean; empiricalPenaltyStrength: number } | null = null;
 
-function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number): number {
+function lambdaBarForFamily(muStar: number, family?: string): number {
+  const base = 1 + 3.8 * muStar;
+  switch (family) {
+    case "Hydride":
+      return 2.89 * base;
+    case "Cuprate":
+      return 1.85 * base;
+    case "Heavy-Fermion":
+      return 1.60 * base;
+    case "Iron-Based":
+      return 2.10 * base;
+    default:
+      return 2.46 * base;
+  }
+}
+
+function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number, family?: string): number {
   if (lambda < 0.05 || omegaLog <= 0) return 0;
   const omegaLogK = omegaLog * 1.4388;
   const denom = lambda - muStar * (1 + 0.62 * lambda);
-  if (denom <= 1e-6) return 0;
-  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
-  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+  if (Math.abs(denom) < 1e-6 || denom <= 0) return 0;
+  const lBar = lambdaBarForFamily(muStar, family);
+  const f1 = Math.pow(1 + Math.pow(lambda / lBar, 3 / 2), 1 / 3);
   const exponent = -1.04 * (1 + lambda) / denom;
-  if (exponent > 50) return 0;
+  if (exponent < -50) return 0;
   const tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
   if (!Number.isFinite(tc) || tc < 0) return 0;
   return Math.round(tc);
@@ -1636,7 +1652,8 @@ async function reEvaluateTopCandidates() {
 
       reEvalApplied.set(candidate.id, { lambda, omegaLog, muStar, hasCrystal });
 
-      let newTc = computeEliashbergTc(lambda, omegaLog, muStar);
+      const reEvalFamily = classifyFamily(candidate.formula);
+      let newTc = computeEliashbergTc(lambda, omegaLog, muStar, reEvalFamily ?? undefined);
       if (newTc <= 0) continue;
 
       const features = extractFeatures(candidate.formula);
@@ -1648,8 +1665,6 @@ async function reEvaluateTopCandidates() {
           : undefined,
       };
       newTc = applyAmbientTcCap(newTc, lambda, candidate.pressureGpa ?? 0, features.metallicity ?? 0.5, candidate.formula, capEvidence);
-
-      const reEvalFamily = classifyFamily(candidate.formula);
       if (reEvalFamily && FAMILY_TC_CAPS[reEvalFamily]) {
         const caps = FAMILY_TC_CAPS[reEvalFamily];
         const pressure = candidate.pressureGpa ?? 0;
