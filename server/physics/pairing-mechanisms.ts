@@ -448,13 +448,28 @@ export function computeOrbitalPairing(
     interOrbitalHopping = dFraction * 0.5;
   }
 
+  const STRONG_FIELD_LIGANDS = ["C", "N", "F"];
+  const WEAK_FIELD_LIGANDS = ["O", "S", "Se", "Te", "Cl", "Br", "I"];
+  const hasStrongFieldLigand = elements.some(e => STRONG_FIELD_LIGANDS.includes(e));
+  const hasWeakFieldLigand = elements.some(e => WEAK_FIELD_LIGANDS.includes(e));
+
   let hundsCoupling = 0;
   for (const el of elements) {
     if (isTransitionMetal(el)) {
       const data = getElementData(el);
       if (data && data.valenceElectrons >= 4 && data.valenceElectrons <= 7) {
         const frac = (counts[el] || 1) / totalAtoms;
-        hundsCoupling = Math.max(hundsCoupling, 0.3 + frac * 0.5);
+        let hundsBase = 0.3 + frac * 0.5;
+
+        const ve = data.valenceElectrons;
+        const isLowSpinCandidate = (ve === 5 || ve === 6 || ve === 7) && hasStrongFieldLigand && !hasWeakFieldLigand;
+        if (isLowSpinCandidate) {
+          hundsBase *= 0.2;
+        } else if (hasStrongFieldLigand && hasWeakFieldLigand) {
+          hundsBase *= 0.6;
+        }
+
+        hundsCoupling = Math.max(hundsCoupling, hundsBase);
       }
     }
   }
@@ -663,12 +678,20 @@ export function computePolaronicPairing(
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   let latticeDistortion = 0;
+  const IONIC_POLARON_ELEMENTS: Record<string, number> = {
+    O: 0.7, F: 0.65, N: 0.5, Cl: 0.45, Li: 0.55, S: 0.35, Se: 0.25,
+  };
   for (const el of elements) {
     const data = getElementData(el);
     if (data) {
       const frac = (counts[el] || 1) / totalAtoms;
-      if (data.atomicMass > 80) {
+      const ionicScore = IONIC_POLARON_ELEMENTS[el];
+      if (ionicScore !== undefined) {
+        latticeDistortion += frac * ionicScore;
+      } else if (data.atomicMass < 30 && (data.paulingElectronegativity ?? 0) > 2.5) {
         latticeDistortion += frac * 0.4;
+      } else if (data.atomicMass > 80) {
+        latticeDistortion += frac * 0.05;
       }
     }
   }
