@@ -93,11 +93,11 @@ function computeMiedemaFormationEnergy(formula: string): number {
 
       const deltaPhi = phiA - phiB;
       const deltaNws = nwsA - nwsB;
-      const nwsAvg = (nwsA + nwsB) / 2;
+      const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
       const fAB = 2 * fractions[elements[i]] * fractions[elements[j]];
       const vAvg = (vA * fractions[elements[i]] + vB * fractions[elements[j]]) / (fractions[elements[i]] + fractions[elements[j]]);
-      const interfaceEnergy = -14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws;
-      deltaH += fAB * vAvg * interfaceEnergy / (nwsAvg * nwsAvg);
+      const interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+      deltaH += fAB * vAvg * interfaceEnergy;
     }
   }
 

@@ -107,11 +107,11 @@ function computeMiedemaFormationEnergy(formula: string): number {
 
       const deltaPhi = phiA - phiB;
       const deltaNws = nwsA - nwsB;
-      const nwsAvg = (nwsA + nwsB) / 2;
+      const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
       const fAB = 2 * fractions[elements[i]] * fractions[elements[j]];
       const vAvg = (vA * fractions[elements[i]] + vB * fractions[elements[j]]) / (fractions[elements[i]] + fractions[elements[j]]);
-      const interfaceEnergy = -14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws;
-      deltaH += fAB * vAvg * interfaceEnergy / (nwsAvg * nwsAvg);
+      const interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+      deltaH += fAB * vAvg * interfaceEnergy;
     }
   }
 
@@ -281,12 +281,16 @@ function buildReactionGraph(formula: string, elements: string[], counts: Record<
     const interEls = inter.elements;
 
     for (const pn of precursorNodes) {
-      const pnEl = pn.species.replace(/\d+/g, "").replace(/[^A-Za-z]/g, "");
-      const pnElements = pnEl.match(/[A-Z][a-z]?/g) || [pnEl];
+      const pnCounts = parseFormulaCounts(pn.species);
+      const pnElements = Object.keys(pnCounts);
       const relevant = pnElements.some(e => interEls.includes(e));
       if (!relevant) continue;
 
-      const interTemp = Math.round(baseTemp * 0.7);
+      const SPINEL_INTERMEDIATES = new Set(["MgAl2O4", "FeCr2O4", "NiFe2O4", "CoFe2O4", "ZnFe2O4", "MnFe2O4"]);
+      const isHighTempIntermediate = SPINEL_INTERMEDIATES.has(inter.formula) || inter.formula.includes("2O4");
+      const interTemp = isHighTempIntermediate
+        ? Math.round(Math.min(baseTemp * 1.1, baseTemp + 200))
+        : Math.round(baseTemp * 0.7);
       const gibbs = computeMiedemaFormationEnergy(inter.formula) * 0.3;
       const activation = computeActivationEnergy(interEls, interTemp);
       const weight = computeEdgeWeight(gibbs, activation, pn.availability, interTemp, 0);

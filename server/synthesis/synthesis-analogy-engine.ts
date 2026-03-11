@@ -245,9 +245,9 @@ function computeAdaptedThermodynamics(
       if (phiA == null || phiB == null || nwsA == null || nwsB == null || vA == null || vB == null) continue;
       const fAB = 2 * (fractions[elements[i]] || 0) * (fractions[elements[j]] || 0);
       const vAvg = (vA + vB) / 2;
-      const nwsAvg = (nwsA + nwsB) / 2;
-      const interfaceEnergy = -14.1 * (phiA - phiB) ** 2 + 9.4 * (nwsA - nwsB) ** 2;
-      deltaH += fAB * vAvg * interfaceEnergy / (nwsAvg * nwsAvg);
+      const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
+      const interfaceEnergy = (-14.1 * (phiA - phiB) ** 2 + 9.4 * (nwsA - nwsB) ** 2) / nwsAvgInv;
+      deltaH += fAB * vAvg * interfaceEnergy;
     }
   }
   const gibbsFreeEnergy = deltaH / Math.max(1, totalAtoms);
