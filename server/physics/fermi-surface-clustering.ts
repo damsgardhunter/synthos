@@ -168,10 +168,17 @@ function topElements(members: FSClusterMember[], n: number): string[] {
 }
 
 const assignedFormulas = new Set<string>();
+const novelClusterCentroids: Map<string, { centroid: number[]; count: number }> = new Map();
 
-export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, tc: number = 0): ClusterAssignment {
+function makeCacheKey(formula: string, pressureGpa: number): string {
+  const pBin = Math.round(pressureGpa);
+  return pBin > 0 ? `${formula}_${pBin}` : formula;
+}
+
+export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, tc: number = 0, pressureGpa: number = 0): ClusterAssignment {
   const vec = fsResultToVector(fsResult);
-  const alreadyAssigned = assignedFormulas.has(formula);
+  const cacheKey = makeCacheKey(formula, pressureGpa);
+  const alreadyAssigned = assignedFormulas.has(cacheKey);
   let bestId = "conventional_3d";
   let bestSim = -1;
 
@@ -190,10 +197,8 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
   if (bestSim < NOVEL_THRESHOLD) {
     let bestNovelSim = -1;
     let bestNovelId = "";
-    const novelEntries = Array.from(novelClusterMembers.entries());
-    for (const [nid, members] of novelEntries) {
-      const centroid = avgVector(members.map((m: FSClusterMember) => m.featureVector));
-      const sim = cosineSimilarity(vec, centroid);
+    for (const [nid, stored] of Array.from(novelClusterCentroids.entries())) {
+      const sim = cosineSimilarity(vec, stored.centroid);
       if (sim > bestNovelSim) {
         bestNovelSim = sim;
         bestNovelId = nid;
@@ -209,6 +214,7 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
       assignedId = `novel_${novelClusterCount}`;
       assignedName = `Novel Cluster ${novelClusterCount}`;
       novelClusterMembers.set(assignedId, []);
+      novelClusterCentroids.set(assignedId, { centroid: [...vec], count: 0 });
       bestSim = 1.0;
     }
   }
@@ -216,11 +222,18 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
   const member: FSClusterMember = { formula, tc, featureVector: vec, similarity: bestSim };
 
   if (!alreadyAssigned) {
-    assignedFormulas.add(formula);
+    assignedFormulas.add(cacheKey);
     if (assignedId.startsWith("novel_")) {
       const arr = novelClusterMembers.get(assignedId) || [];
       arr.push(member);
       novelClusterMembers.set(assignedId, arr);
+
+      const stored = novelClusterCentroids.get(assignedId);
+      if (stored) {
+        const n = stored.count;
+        const updated = stored.centroid.map((c, i) => (c * n + vec[i]) / (n + 1));
+        novelClusterCentroids.set(assignedId, { centroid: updated, count: n + 1 });
+      }
     } else {
       const arr = clusterMembers.get(assignedId) || [];
       arr.push(member);
@@ -236,7 +249,7 @@ export function assignToCluster(formula: string, fsResult: FermiSurfaceResult, t
     featureVector: vec,
   };
 
-  assignmentCache.set(formula, assignment);
+  assignmentCache.set(cacheKey, assignment);
   return assignment;
 }
 
@@ -262,17 +275,19 @@ export function getCluster(clusterId: string): FSCluster | null {
   const novelMembers = novelClusterMembers.get(clusterId);
   if (novelMembers) {
     const tcs = novelMembers.map(m => m.tc).filter(t => t > 0);
+    const stored = novelClusterCentroids.get(clusterId);
+    const centroid = stored ? stored.centroid : avgVector(novelMembers.map(m => m.featureVector));
     return {
       id: clusterId,
       name: `Novel Cluster ${clusterId.replace("novel_", "")}`,
       description: "Automatically discovered cluster not matching known archetypes",
-      centroid: avgVector(novelMembers.map(m => m.featureVector)),
+      centroid,
       members: novelMembers,
       memberCount: novelMembers.length,
       avgTc: tcs.length > 0 ? tcs.reduce((a, b) => a + b, 0) / tcs.length : 0,
       bestTc: tcs.length > 0 ? Math.max(...tcs) : 0,
       commonElements: topElements(novelMembers, 5),
-      avgFeatureVector: avgVector(novelMembers.map(m => m.featureVector)),
+      avgFeatureVector: centroid,
     };
   }
 
@@ -295,8 +310,9 @@ export function getAllClusters(): FSCluster[] {
   return clusters;
 }
 
-export function getClusterAssignment(formula: string): ClusterAssignment | null {
-  return assignmentCache.get(formula) || null;
+export function getClusterAssignment(formula: string, pressureGpa: number = 0): ClusterAssignment | null {
+  const key = makeCacheKey(formula, pressureGpa);
+  return assignmentCache.get(key) || assignmentCache.get(formula) || null;
 }
 
 export function getClusterGuidance(): ClusterGuidance {
