@@ -301,17 +301,22 @@ export function physicsHeuristicDOS(formula: string): OrbitalDOS {
 export function detectVanHoveSingularities(dos: OrbitalDOS): VanHoveSingularity[] {
   const singularities: VanHoveSingularity[] = [];
   const totalDOS = dos.totalDOS;
+  const nBins = totalDOS.length;
 
   const smoothed = totalDOS.map((v, i) => {
-    if (i === 0 || i === totalDOS.length - 1) return v;
+    if (i === 0 || i === nBins - 1) return v;
     return (totalDOS[i - 1] + 2 * v + totalDOS[i + 1]) / 4;
   });
 
   const dosMax = Math.max(...smoothed, 1e-6);
-  const dosMedian = [...smoothed].sort((a, b) => a - b)[Math.floor(smoothed.length / 2)];
+  const dosMedian = [...smoothed].sort((a, b) => a - b)[Math.floor(nBins / 2)];
   const threshold = Math.max(dosMedian * 1.5, dosMax * 0.3);
 
-  for (let i = 2; i < smoothed.length - 2; i++) {
+  const SALIENCY_WINDOW = Math.max(3, Math.floor(nBins * 0.08));
+  const SALIENCY_D2_THRESHOLD = 0.12;
+  const SALIENCY_PROMINENCE_THRESHOLD = 0.25;
+
+  for (let i = 2; i < nBins - 2; i++) {
     const val = smoothed[i];
     if (val < threshold) continue;
 
@@ -327,6 +332,33 @@ export function detectVanHoveSingularities(dos: OrbitalDOS): VanHoveSingularity[
     const isOnset = d1Left > dosMax * 0.1 && Math.abs(d1Right) < dosMax * 0.03;
 
     if (!isPeak && !isSaddle && !isLogDiv && !isOnset) continue;
+
+    let localSum = 0;
+    let localCount = 0;
+    const wStart = Math.max(0, i - SALIENCY_WINDOW);
+    const wEnd = Math.min(nBins - 1, i + SALIENCY_WINDOW);
+    for (let j = wStart; j <= wEnd; j++) {
+      if (j === i) continue;
+      localSum += smoothed[j];
+      localCount++;
+    }
+    const localAvg = localCount > 0 ? localSum / localCount : val;
+
+    const prominence = localAvg > 1e-8 ? (val - localAvg) / localAvg : 0;
+    if (prominence < SALIENCY_PROMINENCE_THRESHOLD) continue;
+
+    const d2Magnitude = Math.abs(d2);
+    const d2Relative = localAvg > 1e-8 ? d2Magnitude / localAvg : 0;
+    if (d2Relative < SALIENCY_D2_THRESHOLD) continue;
+
+    if (i >= 2 && i < nBins - 2) {
+      const d2Left = smoothed[i - 2] - 2 * smoothed[i - 1] + smoothed[i];
+      const d2Right = smoothed[i] - 2 * smoothed[i + 1] + smoothed[i + 2];
+      const curvatureConsistent = (isPeak || isLogDiv)
+        ? (d2 < 0 && (d2Left <= 0 || d2Right <= 0))
+        : true;
+      if (!curvatureConsistent && Math.abs(d2) < dosMax * 0.25) continue;
+    }
 
     let type: VanHoveSingularity["type"];
     if (isPeak) type = "M2-peak";
@@ -346,7 +378,8 @@ export function detectVanHoveSingularities(dos: OrbitalDOS): VanHoveSingularity[
 
     const distToFermi = Math.abs(i - dos.fermiIndex);
     const proximityWeight = Math.exp(-distToFermi * distToFermi / (DOS_BINS * 0.1));
-    const strength = (val / dosMax) * proximityWeight;
+    const saliencyBoost = Math.min(1.0, prominence / 1.5);
+    const strength = (val / dosMax) * proximityWeight * (0.5 + 0.5 * saliencyBoost);
 
     singularities.push({
       energyEv: dos.energyGrid[i],
