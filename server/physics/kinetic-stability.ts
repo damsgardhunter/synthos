@@ -65,6 +65,7 @@ export interface GrainBoundaryAnalysis {
 export interface DiffusionBarrierAnalysis {
   elementBarriers: { element: string; barrier: number; diffusionRate300K: number }[];
   rateControllingElement: string;
+  slowestDiffuser: string;
   effectiveBarrier: number;
   effectiveDiffusionRate300K: number;
 }
@@ -168,7 +169,8 @@ function computeGrainBoundaryEnergy(formula: string): GrainBoundaryAnalysis {
   }
 
   if (isHydride) {
-    const shearStressFactor = Math.min(0.3, avgShearModulus * 0.003);
+    const clampedShear = Math.min(avgShearModulus, 80);
+    const shearStressFactor = Math.min(0.25, clampedShear * 0.003);
     gbDecompositionFactor = Math.min(1.0, gbDecompositionFactor + shearStressFactor);
   }
 
@@ -192,7 +194,7 @@ function computeGrainBoundaryEnergy(formula: string): GrainBoundaryAnalysis {
   };
 }
 
-function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
+function computeDiffusionBarriers(formula: string, pressureGpa: number = 0): DiffusionBarrierAnalysis {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
@@ -214,7 +216,9 @@ function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
     const stiffnessCorrection = 0.005 * Math.sqrt(bulk / 100);
 
     if (el === "H") {
-      const tunnelingReduction = 0.3;
+      const baseTunneling = 0.3;
+      const pressureBoost = Math.min(0.35, pressureGpa * 0.002);
+      const tunnelingReduction = Math.min(0.65, baseTunneling + pressureBoost);
       barrierBase *= (1 - tunnelingReduction);
     }
 
@@ -236,13 +240,18 @@ function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
   elementBarriers.sort((a, b) => a.barrier - b.barrier);
 
   const fastestDiffuser = elementBarriers[0];
+  const slowestDiffuser = elementBarriers[elementBarriers.length - 1];
 
   const minBarrier = fastestDiffuser.barrier;
+  const maxBarrier = slowestDiffuser.barrier;
 
   let effectiveBarrier: number;
   if (isHydride && fastestDiffuser.element === "H") {
     const hFrac = (counts["H"] || 0) / totalAtoms;
-    effectiveBarrier = minBarrier * (0.7 + 0.3 * (1 - hFrac));
+    const hBarrier = minBarrier * (0.7 + 0.3 * (1 - hFrac));
+    const desorptionWeight = 0.6;
+    const rearrangementWeight = 0.4;
+    effectiveBarrier = hBarrier * desorptionWeight + maxBarrier * rearrangementWeight;
   } else {
     effectiveBarrier = minBarrier;
     const nElements = elements.length;
@@ -257,6 +266,7 @@ function computeDiffusionBarriers(formula: string): DiffusionBarrierAnalysis {
   return {
     elementBarriers,
     rateControllingElement: fastestDiffuser.element,
+    slowestDiffuser: slowestDiffuser.element,
     effectiveBarrier: Math.round(effectiveBarrier * 10000) / 10000,
     effectiveDiffusionRate300K: effectiveRate,
   };
