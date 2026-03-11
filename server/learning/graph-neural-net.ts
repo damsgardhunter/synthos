@@ -248,6 +248,10 @@ function relu(v: number[]): number[] {
   return v.map(x => Math.max(0, x));
 }
 
+function leakyRelu(v: number[], alpha: number = 0.01): number[] {
+  return v.map(x => x >= 0 ? x : alpha * x);
+}
+
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
@@ -1015,6 +1019,7 @@ export function attentionMessagePassingLayer(
   W_update: number[][],
   W_query: number[][],
   W_key: number[][],
+  useLeakyMsg: boolean = false,
 ): number[][] {
   const nNodes = graph.nodes.length;
   const embeddings = graph.nodes.map(n => [...n.embedding]);
@@ -1026,6 +1031,7 @@ export function attentionMessagePassingLayer(
 
   const newEmbeddings: number[][] = [];
   const scaleFactor = Math.sqrt(HIDDEN_DIM);
+  const updateActivation = useLeakyMsg ? leakyRelu : relu;
 
   const edgeMap = new Map<string, number[]>();
   for (const edge of graph.edges) {
@@ -1070,7 +1076,7 @@ export function attentionMessagePassingLayer(
     }
 
     const combined = [...padded[i], ...aggMessage];
-    const updated = relu(matVecMul(W_update, combined));
+    const updated = updateActivation(matVecMul(W_update, combined));
     newEmbeddings.push(updated);
   }
 
@@ -1161,7 +1167,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
   const residual0 = saveResidual(graph.nodes);
 
-  attentionMessagePassingLayer(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key);
+  attentionMessagePassingLayer(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);

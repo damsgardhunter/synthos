@@ -1590,7 +1590,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
         return res.status(400).json({ error: "Invalid formula" });
       }
-      const prediction = predictStability(formula);
+      const pressureGpa = parseFloat(req.query.pressure as string) || 0;
+      const prediction = predictStability(formula, Math.max(0, Math.min(pressureGpa, 500)));
       res.json(prediction);
     } catch (e: any) {
       res.status(500).json({ error: "Stability prediction failed", detail: e.message?.slice(0, 200) });

@@ -128,7 +128,7 @@ function computeVolumePerAtom(formula: string): { volumePerAtom: number; packing
   return { volumePerAtom, packingFraction };
 }
 
-function applyHydrideCorrection(formula: string, rawMiedema: number): { corrected: number; correction: number } {
+function applyHydrideCorrection(formula: string, rawMiedema: number, pressureGpa: number = 0): { corrected: number; correction: number } {
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
   const hFraction = (counts["H"] || 0) / totalAtoms;
@@ -152,9 +152,22 @@ function applyHydrideCorrection(formula: string, rawMiedema: number): { correcte
 
   const destabilizationPenalty = Math.pow(hFraction - 0.5, 1.5) * 2.0;
 
-  const pvPenalty = hFraction > 0.7 ? (hFraction - 0.7) * 1.5 : 0;
+  let pvTerm = 0;
+  if (hFraction > 0.7) {
+    const hExcess = hFraction - 0.7;
+    if (pressureGpa > 150) {
+      const clathrateFactor = Math.min(1.0, (pressureGpa - 150) / 200);
+      const stabilization = hExcess * 2.5 * clathrateFactor;
+      pvTerm = -stabilization;
+    } else if (pressureGpa > 50) {
+      const partialStab = Math.min(0.3, (pressureGpa - 50) / 200 * hExcess);
+      pvTerm = hExcess * 1.5 * (1 - pressureGpa / 150) - partialStab;
+    } else {
+      pvTerm = hExcess * 1.5;
+    }
+  }
 
-  const correction = destabilizationPenalty + pvPenalty - avgHydrideAffinity * 0.5;
+  const correction = destabilizationPenalty + pvTerm - avgHydrideAffinity * 0.5;
 
   const corrected = rawMiedema + correction;
 
@@ -199,6 +212,10 @@ function vecAdd(a: number[], b: number[]): number[] {
 
 function relu(v: number[]): number[] {
   return v.map(x => Math.max(0, x));
+}
+
+function leakyRelu(v: number[], alpha: number = 0.01): number[] {
+  return v.map(x => x >= 0 ? x : alpha * x);
 }
 
 function sigmoid(x: number): number {
@@ -322,9 +339,11 @@ function messagePassingLayer(
   edges: CompositionEdge[],
   W_msg: number[][],
   W_upd: number[][],
+  useLeakyMsg: boolean = false,
 ): number[][] {
   const nNodes = nodeEmbeddings.length;
   const newEmbeddings: number[][] = [];
+  const msgActivation = useLeakyMsg ? leakyRelu : relu;
 
   for (let i = 0; i < nNodes; i++) {
     const incomingEdges = edges.filter(e => e.target === i);
@@ -334,7 +353,7 @@ function messagePassingLayer(
       const sourceEmbed = nodeEmbeddings[edge.source];
       const msgInput = [...sourceEmbed, ...edge.features];
       while (msgInput.length < W_msg[0].length) msgInput.push(0);
-      const msg = relu(matVecMul(W_msg, msgInput.slice(0, W_msg[0].length)));
+      const msg = msgActivation(matVecMul(W_msg, msgInput.slice(0, W_msg[0].length)));
       aggregated = vecAdd(aggregated, msg);
     }
 
@@ -557,7 +576,7 @@ function computeFamilyContext(formula: string): { family: string; synthBias: num
   return { family, ...bias };
 }
 
-export function predictStability(formula: string): StabilityPrediction {
+export function predictStability(formula: string, pressureGpa: number = 0): StabilityPrediction {
   const graph = buildCompositionGraph(formula);
   const weights = getWeights();
 
@@ -567,7 +586,7 @@ export function predictStability(formula: string): StabilityPrediction {
     return e.slice(0, NODE_DIM);
   });
 
-  embeddings = messagePassingLayer(embeddings, graph.edges, weights.W_msg1, weights.W_upd1);
+  embeddings = messagePassingLayer(embeddings, graph.edges, weights.W_msg1, weights.W_upd1, true);
   embeddings = messagePassingLayer(embeddings, graph.edges, weights.W_msg2, weights.W_upd2);
   embeddings = messagePassingLayer(embeddings, graph.edges, weights.W_msg3, weights.W_upd3);
 
@@ -584,7 +603,7 @@ export function predictStability(formula: string): StabilityPrediction {
   const rawConfidence = sigmoid(output[3] ?? 0.5);
 
   const miedemaRaw = computeMiedemaFormationEnergy(formula);
-  const { corrected: miedemaEnergy, correction: hydrideCorrection } = applyHydrideCorrection(formula, miedemaRaw);
+  const { corrected: miedemaEnergy, correction: hydrideCorrection } = applyHydrideCorrection(formula, miedemaRaw, pressureGpa);
   const toleranceFactor = computeGoldschmidtTolerance(formula);
   const pettiforDist = computePettiforProximity(formula);
   const elementCompat = computeElementCompatibility(formula);
