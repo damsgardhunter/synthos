@@ -254,6 +254,8 @@ function injectPreDryingStep(steps: ReactionStep[], precursors: string[]): React
   return [dryStep, ...steps.map(s => ({ ...s, stepNumber: s.stepNumber + 1 }))];
 }
 
+const MIEDEMA_NONMETALS = new Set(["H", "He", "C", "N", "O", "F", "Ne", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "I", "Xe", "Te", "As"]);
+
 function computeMiedemaFormationEnergy(formula: string): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -286,7 +288,14 @@ function computeMiedemaFormationEnergy(formula: string): number {
       const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
       const fAB = 2 * fractions[elements[i]] * fractions[elements[j]];
       const vAvg = (vA * fractions[elements[i]] + vB * fractions[elements[j]]) / (fractions[elements[i]] + fractions[elements[j]]);
-      const interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+      let interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+
+      const aIsNonmetal = MIEDEMA_NONMETALS.has(elements[i]);
+      const bIsNonmetal = MIEDEMA_NONMETALS.has(elements[j]);
+      if (aIsNonmetal !== bIsNonmetal) {
+        interfaceEnergy -= (0.73 * deltaPhi * deltaPhi) / nwsAvgInv;
+      }
+
       deltaH += fAB * vAvg * interfaceEnergy;
     }
   }

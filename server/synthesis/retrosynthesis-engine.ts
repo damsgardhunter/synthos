@@ -90,8 +90,7 @@ function parseFormulaElements(formula: string): string[] {
   return Object.keys(parseFormulaCounts(formula));
 }
 
-function computeMiedemaFormationEnergy(formula: string): number {
-  const counts = parseFormulaCounts(formula);
+function computeMiedemaFromCounts(counts: Record<string, number>): number {
   const elements = Object.keys(counts);
   if (elements.length < 2) return 0;
 
@@ -122,12 +121,24 @@ function computeMiedemaFormationEnergy(formula: string): number {
       const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
       const fAB = 2 * fractions[elements[i]] * fractions[elements[j]];
       const vAvg = (vA * fractions[elements[i]] + vB * fractions[elements[j]]) / (fractions[elements[i]] + fractions[elements[j]]);
-      const interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+      let interfaceEnergy = (-14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws) / nwsAvgInv;
+
+      const aIsNonmetal = NONMETALS.has(elements[i]);
+      const bIsNonmetal = NONMETALS.has(elements[j]);
+      if (aIsNonmetal !== bIsNonmetal) {
+        const ionicityFactor = 0.73 * deltaPhi * deltaPhi;
+        interfaceEnergy -= ionicityFactor / nwsAvgInv;
+      }
+
       deltaH += fAB * vAvg * interfaceEnergy;
     }
   }
 
   return deltaH / totalAtoms;
+}
+
+function computeMiedemaFormationEnergy(formula: string): number {
+  return computeMiedemaFromCounts(parseFormulaCounts(formula));
 }
 
 function computeComplexityScore(nPrecursors: number, nSteps: number): number {

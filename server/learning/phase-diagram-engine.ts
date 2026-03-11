@@ -28,6 +28,8 @@ function getTotalAtoms(counts: Record<string, number>): number {
   return total > 0 ? total : 1;
 }
 
+const MIEDEMA_NONMETALS = new Set(["H", "He", "C", "N", "O", "F", "Ne", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "I", "Xe", "Te", "As"]);
+
 export function computeMiedemaFormationEnergy(formula: string): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -85,7 +87,14 @@ export function computeMiedemaFormationEnergy(formula: string): number {
       const R_P = (isTransitionA !== isTransitionB) ? 0.5 : 0;
 
       const vAvg = (vA * fractions[elA] + vB * fractions[elB]) / (fractions[elA] + fractions[elB]);
-      const interfaceEnergy = (-P * deltaPhi * deltaPhi + Q * deltaNws * deltaNws - R_P) / nwsAvgInv;
+      let interfaceEnergy = (-P * deltaPhi * deltaPhi + Q * deltaNws * deltaNws - R_P) / nwsAvgInv;
+
+      const aIsNonmetal = MIEDEMA_NONMETALS.has(elA);
+      const bIsNonmetal = MIEDEMA_NONMETALS.has(elB);
+      if (aIsNonmetal !== bIsNonmetal) {
+        interfaceEnergy -= (0.73 * deltaPhi * deltaPhi) / nwsAvgInv;
+      }
+
       const contribution = fAB * vAvg * interfaceEnergy;
 
       deltaH += contribution;
