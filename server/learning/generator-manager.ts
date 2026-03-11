@@ -187,7 +187,8 @@ export function recordGeneratorOutcome(
       ? entry.stats.totalTcSum / entry.stats.candidatesGenerated
       : 0;
 
-  const alpha = 0.1;
+  const batchCount = entry.stats.candidatesGenerated;
+  const alpha = batchCount < 20 ? 0.2 : batchCount < 100 ? 0.05 : 0.02;
   entry.stats.noveltyScore = entry.stats.noveltyScore * (1 - alpha) + novelty * alpha;
 }
 
@@ -333,13 +334,15 @@ export function rebalanceWeights() {
   initializeGenerators();
   if (cyclesSinceRebalance < REBALANCE_INTERVAL) return;
 
+  const GRACE_PERIOD_CYCLES = 5;
   const yieldScores: Record<string, number> = {};
   let hasActivity = false;
+  const activeScores: number[] = [];
 
   generators.forEach((entry, name) => {
     const s = entry.stats;
     if (s.candidatesGenerated === 0) {
-      yieldScores[name] = 0;
+      yieldScores[name] = -1;
       return;
     }
     hasActivity = true;
@@ -347,27 +350,43 @@ export function rebalanceWeights() {
     const passRate = s.candidatesPassed / s.candidatesGenerated;
     const verifiedYield = s.verifiedTotal > 0 ? s.verifiedPassed / s.verifiedTotal : 0;
     const hasVerifiedData = s.verifiedTotal >= 5;
-    const tcNorm = Math.min(1, s.bestTc / 200);
+    const tcNorm = Math.min(1, s.bestTc / 300);
     const noveltyNorm = Math.min(1, s.noveltyScore);
     const dftDiscovery = s.discoveryRate;
-    const dftTcNorm = Math.min(1, s.dftBestTc / 200);
+    const dftTcNorm = Math.min(1, s.dftBestTc / 300);
     const hasDFTData = (s.dftSuccesses + s.dftFailures) > 0;
 
     const pipelineScore = hasVerifiedData
       ? verifiedYield * 0.4 + tcNorm * 0.2 + noveltyNorm * 0.1
       : passRate * 0.3 + tcNorm * 0.3 + noveltyNorm * 0.1;
     const dftScore = hasDFTData ? (dftDiscovery * 0.2 + dftTcNorm * 0.1) : 0;
-    yieldScores[name] = pipelineScore + dftScore;
+    const score = pipelineScore + dftScore;
+    yieldScores[name] = score;
+    activeScores.push(score);
   });
 
   if (!hasActivity) return;
+
+  const medianScore = activeScores.length > 0
+    ? activeScores.sort((a, b) => a - b)[Math.floor(activeScores.length / 2)]
+    : 0;
+
+  generators.forEach((entry, name) => {
+    if (yieldScores[name] < 0) {
+      if (rebalanceCount < GRACE_PERIOD_CYCLES) {
+        yieldScores[name] = medianScore;
+      } else {
+        yieldScores[name] = medianScore * 0.5;
+      }
+    }
+  });
 
   const names = Array.from(generators.keys());
   const scores = names.map(n => yieldScores[n]);
   const maxScore = Math.max(...scores, 1e-8);
   const normalizedScores = scores.map(s => s / maxScore);
 
-  const temperature = 2.0;
+  const temperature = Math.max(0.5, 2.0 - rebalanceCount * 0.1);
   const expScores = normalizedScores.map(s => Math.exp(s / temperature));
   const expSum = expScores.reduce((a, b) => a + b, 0);
   const softmaxWeights = expScores.map(e => e / expSum);
