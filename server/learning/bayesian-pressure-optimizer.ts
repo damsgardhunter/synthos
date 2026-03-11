@@ -382,6 +382,18 @@ function expectedImprovement(
   return ei * stabProb;
 }
 
+function quasiRandomCandidates(min: number, max: number, count: number, seed: number): number[] {
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const alpha = 1 / phi;
+  const candidates: number[] = [];
+  const seedOffset = (seed * 0.618033988749895) % 1;
+  for (let i = 0; i < count; i++) {
+    const u = ((i + 1) * alpha + seedOffset) % 1;
+    candidates.push(min + (max - min) * u);
+  }
+  return candidates;
+}
+
 export function optimizePressureForFormula(
   formula: string,
   nIterations: number = 5,
@@ -438,13 +450,15 @@ export function optimizePressureForFormula(
     let bestCandidate = 0;
     let bestEI = -Infinity;
 
-    for (let c = 0; c < nCandidatesPerIter; c++) {
-      const candidateP = searchMin +
-        (searchMax - searchMin) * (c / (nCandidatesPerIter - 1));
+    const candidates = quasiRandomCandidates(searchMin, searchMax, nCandidatesPerIter, iter);
 
-      const pressurePenalty = candidateP / 500;
+    for (let c = 0; c < candidates.length; c++) {
+      const candidateP = candidates[c];
 
-      const ei = expectedImprovement(normalizedObs, candidateP, normalizedBestTc, ls, 0.01, `${formula}:norm`) - pressurePenalty * 0.1;
+      const rawEI = expectedImprovement(normalizedObs, candidateP, normalizedBestTc, ls, 0.01, `${formula}:norm`);
+      const pressureFrac = candidateP / 500;
+      const scaledPenalty = pressureFrac * 0.1 * Math.max(0.01, rawEI);
+      const ei = rawEI - scaledPenalty;
 
       acquisitionHistory.push({ pressure: candidateP, acquisition: ei });
 
@@ -479,15 +493,17 @@ export function optimizePressureForFormula(
 
   const finalLS = optimizeLengthScale(obs, 1.0, 0.05);
   let optimalPressure = 0;
-  let optimalTc = 0;
+  let gpOptimalTc = 0;
 
   const scanStep = 5;
   for (let p = searchMin; p <= searchMax; p += scanStep) {
     const pred = gpPredict(obs, p, finalLS, 1.0, 0.05, `${formula}:final`);
     const stabProb = estimateStabilityProbability(obs, p);
-    const penalizedTc = pred.mean * stabProb - (p / 500) * pred.mean;
-    if (penalizedTc > optimalTc) {
-      optimalTc = penalizedTc;
+    const pressureFrac = p / 500;
+    const scaledPressurePenalty = pressureFrac * Math.max(1, pred.mean);
+    const penalizedTc = pred.mean * stabProb - scaledPressurePenalty * 0.1;
+    if (penalizedTc > gpOptimalTc) {
+      gpOptimalTc = penalizedTc;
       optimalPressure = p;
     }
   }
@@ -495,18 +511,18 @@ export function optimizePressureForFormula(
   const optPred = gpPredict(obs, optimalPressure, finalLS, 1.0, 0.05, `${formula}:final`);
   const relStd = optPred.mean > 0 ? optPred.std / optPred.mean : 1;
   const confidence = Math.max(0, Math.min(1, 1 - relStd));
+  const gpPredictedTc = Math.max(0, optPred.mean);
 
   let stableAtOptimal = false;
   try {
     const interp = interpolateAtPressure(formula, optimalPressure);
     stableAtOptimal = interp.enthalpyStable;
-    optimalTc = interp.tc;
   } catch {}
 
   const result: BayesianPressureResult = {
     formula,
     optimalPressure: Math.round(optimalPressure),
-    predictedTcAtOptimal: Math.round(optimalTc * 10) / 10,
+    predictedTcAtOptimal: Math.round(gpPredictedTc * 10) / 10,
     stableAtOptimal,
     confidence: Math.round(confidence * 1000) / 1000,
     acquisitionHistory: acquisitionHistory.slice(-20),
