@@ -185,7 +185,15 @@ function computeScreenedMuStar(
     const frac = (counts[el] || 1) / totalAtoms;
     avgIonization += (data?.firstIonizationEnergy ?? 700) * frac;
   }
-  const estimatedBandwidth = Math.max(1.0, avgIonization * 0.005);
+  const ambientBandwidth = Math.max(1.0, avgIonization * 0.005);
+  let pressureWidening = 1.0;
+  if (pressureGpa > 10) {
+    pressureWidening = 1.0 + (pressureGpa - 10) * 0.003;
+    if (pressureGpa > 100) {
+      pressureWidening += (pressureGpa - 100) * 0.002;
+    }
+  }
+  const estimatedBandwidth = ambientBandwidth * pressureWidening;
   const E_F_eV = Math.max(1.0, estimatedBandwidth * 0.5 + N_EF * 0.5);
   const debyeEstimate = 300 + pressureGpa * 2;
   const omega_D_eV = Math.max(0.001, debyeEstimate * 8.617e-5);
@@ -336,10 +344,10 @@ function buildAlpha2FSpectralFunction(
     cumulativeLambda[i] = integratedLambda;
 
     const omegaMeV = omega * 0.1240;
-    if (omegaMeV >= 1.5) {
+    if (omegaMeV >= 2.0) {
       logWeightedSum += (alpha2F[i] / omega) * Math.log(omega) * binWidth;
+      omega2WeightedSum += alpha2F[i] * omega * binWidth;
     }
-    omega2WeightedSum += alpha2F[i] * omega * binWidth;
 
     const isHydrogenMode = (hasPartialH || i >= originalNBins)
       ? hFraction >= H_PARTIAL_DOS_THRESHOLD
@@ -715,11 +723,16 @@ export function runEliashbergPipeline(
   const isHighPressureHydride = hRatioPipe >= 4 && pressureGpa >= 100;
 
   let surrogateAnharmonicPenalty = 1.0;
+  let surrogateAnharmonicUncertainty = 0.0;
   if (isHighPressureHydride) {
     const anharmonicityEst = Math.min(0.5, 0.05 + pressureGpa * 0.001 + hRatioPipe * 0.02);
     surrogateAnharmonicPenalty = 1.0 - anharmonicityEst;
+    surrogateAnharmonicUncertainty = 0.15;
   }
 
+  const lambdaPenalized = Number(
+    (alpha2FSpec.integratedLambda * surrogateAnharmonicPenalty).toFixed(4)
+  );
   const lambdaUncorrectedPenalized = Number(
     (coupling.lambdaUncorrected * surrogateAnharmonicPenalty).toFixed(4)
   );
@@ -740,7 +753,8 @@ export function runEliashbergPipeline(
     if (confidence === "high") confidence = "medium";
   }
 
-  const uncertaintyFrac = confidence === "high" ? 0.15 : confidence === "medium" ? 0.25 : 0.40;
+  const baseUncertaintyFrac = confidence === "high" ? 0.15 : confidence === "medium" ? 0.25 : 0.40;
+  const uncertaintyFrac = Math.min(0.50, baseUncertaintyFrac + surrogateAnharmonicUncertainty);
   const confidenceBand: [number, number] = [
     Math.max(0, Math.round(tcBest * (1 - uncertaintyFrac))),
     Math.round(tcBest * (1 + uncertaintyFrac)),
@@ -751,7 +765,7 @@ export function runEliashbergPipeline(
     pressureGpa,
     tier: "surrogate",
     alpha2F: alpha2FSpec,
-    lambda: alpha2FSpec.integratedLambda,
+    lambda: lambdaPenalized,
     lambdaUncorrected: lambdaUncorrectedPenalized,
     omegaLog: alpha2FSpec.omegaLog,
     omega2: alpha2FSpec.omega2,
@@ -818,10 +832,10 @@ export function runEliashbergFromAlpha2FFile(
     integratedLambda += lambdaContrib;
     cumulativeLambda[i] = integratedLambda;
     const omegaMeVFile = omega * 0.1240;
-    if (omegaMeVFile >= 1.5) {
+    if (omegaMeVFile >= 2.0) {
       logWeightedSum += (a2f / omega) * Math.log(omega) * binWidth;
+      omega2WeightedSum += a2f * omega * binWidth;
     }
-    omega2WeightedSum += a2f * omega * binWidth;
   }
 
   const omegaLog = integratedLambda > 1e-8 ? Math.exp((2 / integratedLambda) * logWeightedSum) : 0;
