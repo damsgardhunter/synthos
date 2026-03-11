@@ -60,6 +60,14 @@ const TOPO_MATERIAL_PATTERNS: { elements: string[]; minCount: number; bonus: num
   { elements: ["Ir"], minCount: 1, bonus: 0.15, label: "Iridate SOC system" },
   { elements: ["Os"], minCount: 1, bonus: 0.12, label: "Osmate SOC system" },
   { elements: ["U", "Te"], minCount: 2, bonus: 0.35, label: "UTe2-type triplet TSC" },
+  { elements: ["Co", "Sn", "S"], minCount: 3, bonus: 0.30, label: "Co3Sn2S2-type Kagome QAH" },
+  { elements: ["Fe", "Sn"], minCount: 2, bonus: 0.25, label: "Fe3Sn2-type Kagome magnet" },
+  { elements: ["Mn", "Sn"], minCount: 2, bonus: 0.20, label: "Mn3Sn-type Kagome Weyl" },
+  { elements: ["Co", "Sn"], minCount: 2, bonus: 0.20, label: "CoSn-type Kagome flat-band" },
+  { elements: ["Fe", "Ge"], minCount: 2, bonus: 0.20, label: "FeGe-type Kagome" },
+  { elements: ["V", "Sb"], minCount: 2, bonus: 0.25, label: "CsV3Sb5-type Kagome SC" },
+  { elements: ["Nb", "P"], minCount: 2, bonus: 0.20, label: "NbP-type Weyl" },
+  { elements: ["Mo", "Te"], minCount: 2, bonus: 0.20, label: "MoTe2-type Weyl" },
 ];
 
 const LAYERED_INDICATORS = ["P6/mmm", "P4/mmm", "I4/mmm", "R-3m", "Pnma", "P-3m1", "P6_3/mmc", "C2/m", "P2_1/c", "Cmcm", "Fmmm", "P-1"];
@@ -299,11 +307,17 @@ function classifyTopologicalState(
   chern: number,
   mirror: number,
   majorana: number,
-  socStrength: number
+  socStrength: number,
+  isKagome: boolean = false,
+  hasMagnetic: boolean = false,
+  flatBand: number = 0
 ): string {
   if (majorana > 0.5 && chern > 0.5) return "chiral-topological-superconductor";
   if (majorana > 0.5 && z2 > 0.5) return "topological-superconductor";
   if (majorana > 0.4 && (z2 > 0.3 || chern > 0.3) && socStrength > 0.3) return "topological-superconductor";
+  if (isKagome && hasMagnetic && chern > 0.2) return "Kagome-QAH";
+  if (isKagome && flatBand > 0.4 && hasMagnetic) return "Kagome-magnetic-flat-band";
+  if (isKagome && flatBand > 0.4) return "Kagome-flat-band";
   if (z2 > 0.6 && socStrength > 0.4) return "strong-topological-insulator";
   if (chern > 0.5 && socStrength > 0.3) return "Chern-insulator";
   if (mirror > 0.5 && z2 > 0.3) return "topological-crystalline-insulator";
@@ -340,7 +354,15 @@ export function analyzeTopology(
   );
 
   const magneticElements = elementNames.some(el =>
-    ["Fe", "Co", "Ni", "Mn", "Cr", "V"].includes(el)
+    ["Fe", "Co", "Ni", "Mn", "Cr", "V", "Gd", "Dy", "Er", "Nd"].includes(el)
+  );
+
+  const KAGOME_FAMILIES: string[][] = [
+    ["Co", "Sn", "S"], ["Fe", "Sn"], ["Mn", "Sn"], ["Co", "Sn"],
+    ["Fe", "Ge"], ["V", "Sb"], ["Mn", "Ge"], ["Ni", "Sn"],
+  ];
+  const isKagome = KAGOME_FAMILIES.some(fam =>
+    fam.every(el => elementNames.includes(el))
   );
 
   const z2Score = estimateZ2Invariant(
@@ -376,6 +398,7 @@ export function analyzeTopology(
     }
   }
 
+  if (isKagome) indicators.push("Kagome lattice family");
   if (socStrength > 0.5) indicators.push("strong SOC");
   if (bandInversionProbability > 0.4) indicators.push("band inversion likely");
   if (diracNodeProbability > 0.3) indicators.push("Dirac nodes probable");
@@ -400,7 +423,8 @@ export function analyzeTopology(
   topologicalScore = Math.min(1.0, topologicalScore + patternBonus * 0.3);
 
   let topologicalClass = classifyTopologicalState(
-    z2Score, chernScore, mirrorSymmetryIndicator, majoranaFeasibility, socStrength
+    z2Score, chernScore, mirrorSymmetryIndicator, majoranaFeasibility, socStrength,
+    isKagome, magneticElements, flatBandIndicator
   );
 
   let finalZ2 = z2Score;
