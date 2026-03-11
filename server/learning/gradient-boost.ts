@@ -139,7 +139,8 @@ function trainEnsembleXGB(X: number[][], y: number[]): GBEnsemble {
     const { X: bsX, y: bsY } = bootstrapSample(X, y);
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const model = trainGradientBoosting(bsX, bsY, 300, lr, depth, FEATURE_SUBSAMPLE_RATIO);
+    const nTrees = overrides.nTrees ?? 300;
+    const model = trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
   }
   return { models, trainedAt: Date.now() };
@@ -160,7 +161,8 @@ function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble: GBEn
     const { X: bsX, y: bsY } = bootstrapSample(X, logSquaredResiduals);
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const model = trainGradientBoosting(bsX, bsY, 200, lr, depth, FEATURE_SUBSAMPLE_RATIO);
+    const nTrees = overrides.nTrees ?? 200;
+    const model = trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
   }
   return { models, trainedAt: Date.now(), isLogVariance: true };
@@ -199,27 +201,21 @@ function computePercentile(sorted: number[], p: number): number {
 }
 
 function computeCalibration(model: GBModel): CalibrationData {
+  const { X, y, formulas } = prepareTrainingData();
   const details: { formula: string; actual: number; predicted: number; residual: number }[] = [];
   const residuals: number[] = [];
   const actualTcs: number[] = [];
   let sse = 0;
   let totalAbsError = 0;
 
-  for (const entry of SUPERCON_TRAINING_DATA) {
-    try {
-      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
-      const x = featureVectorToArray(features, entry.formula);
-      if (x.some(v => !Number.isFinite(v))) continue;
-      const pred = predictWithModel(model, x);
-      const residual = entry.tc - pred;
-      residuals.push(residual);
-      actualTcs.push(entry.tc);
-      details.push({ formula: entry.formula, actual: entry.tc, predicted: Math.round(pred * 10) / 10, residual: Math.round(residual * 10) / 10 });
-      sse += residual ** 2;
-      totalAbsError += Math.abs(residual);
-    } catch {
-      continue;
-    }
+  for (let i = 0; i < X.length; i++) {
+    const pred = predictWithModel(model, X[i]);
+    const residual = y[i] - pred;
+    residuals.push(residual);
+    actualTcs.push(y[i]);
+    details.push({ formula: formulas[i], actual: y[i], predicted: Math.round(pred * 10) / 10, residual: Math.round(residual * 10) / 10 });
+    sse += residual ** 2;
+    totalAbsError += Math.abs(residual);
   }
 
   const n = details.length;
@@ -791,9 +787,24 @@ function getTreeFeatureImportance(tree: TreeNode | number): Map<number, number> 
   return imp;
 }
 
-function prepareTrainingData(): { X: number[][]; y: number[] } {
+interface TrainingSnapshot {
+  X: number[][];
+  y: number[];
+  formulas: string[];
+  computedAt: number;
+  dataSize: number;
+}
+
+let cachedTrainingSnapshot: TrainingSnapshot | null = null;
+
+function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
+  if (cachedTrainingSnapshot && cachedTrainingSnapshot.dataSize === SUPERCON_TRAINING_DATA.length) {
+    return cachedTrainingSnapshot;
+  }
+
   const X: number[][] = [];
   const y: number[] = [];
+  const formulas: string[] = [];
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
       const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
@@ -801,11 +812,15 @@ function prepareTrainingData(): { X: number[][]; y: number[] } {
       if (fArr.some(v => !Number.isFinite(v))) continue;
       X.push(fArr);
       y.push(entry.tc);
+      formulas.push(entry.formula);
     } catch {
       continue;
     }
   }
-  return { X, y };
+
+  cachedTrainingSnapshot = { X, y, formulas, computedAt: Date.now(), dataSize: SUPERCON_TRAINING_DATA.length };
+  console.log(`[GradientBoost] Cached training snapshot: ${X.length} samples from ${SUPERCON_TRAINING_DATA.length} entries`);
+  return { X, y, formulas };
 }
 
 export function getTrainedModel(): GBModel {
@@ -1391,6 +1406,7 @@ export function invalidateModel(): void {
   cachedCalibration = null;
   cachedEnsembleXGB = null;
   cachedVarianceEnsembleXGB = null;
+  cachedTrainingSnapshot = null;
 }
 
 export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
