@@ -342,16 +342,26 @@ function processAnharmonicResult(raw: AnharmonicProbeResult): AnharmonicAnalysis
   const { displacements, energies, forces } = raw;
   const n = displacements.length;
 
-  let sumX2 = 0, sumX4 = 0, sumX2Y = 0, sumY = 0;
+  const dMax = Math.max(...displacements.map(Math.abs));
+  const scale = dMax > 1e-12 ? dMax : 1.0;
+  const normD = displacements.map(d => d / scale);
+
+  let sumU2 = 0, sumU4 = 0, sumU2Y = 0, sumY = 0;
   for (let i = 0; i < n; i++) {
-    const x2 = displacements[i] * displacements[i];
-    sumX2 += x2;
-    sumX4 += x2 * x2;
+    const u2 = normD[i] * normD[i];
+    sumU2 += u2;
+    sumU4 += u2 * u2;
+    sumU2Y += u2 * energies[i];
     sumY += energies[i];
-    sumX2Y += x2 * energies[i];
   }
-  const a2 = n > 0 ? (n * sumX2Y - sumX2 * sumY) / Math.max(1e-15, n * sumX4 - sumX2 * sumX2) : 0;
-  const a0 = (sumY - a2 * sumX2) / Math.max(1, n);
+  const denom = n * sumU4 - sumU2 * sumU2;
+  const a2_norm = (n > 0 && Math.abs(denom) > 1e-30)
+    ? (n * sumU2Y - sumU2 * sumY) / denom
+    : 0;
+  const a0_norm = (sumY - a2_norm * sumU2) / Math.max(1, n);
+
+  const a2 = a2_norm / (scale * scale);
+  const a0 = a0_norm;
   const quadraticFitCoeffs: [number, number, number] = [a0, 0, a2];
 
   let residualSumSq = 0;
@@ -369,12 +379,12 @@ function processAnharmonicResult(raw: AnharmonicProbeResult): AnharmonicAnalysis
   let quarticContribution = 0;
   if (n >= 5) {
     for (let i = 0; i < n; i++) {
-      const x = displacements[i];
+      const u = normD[i];
       const eActual = energies[i];
-      const eQuad = a0 + a2 * x * x;
+      const eQuad = a0_norm + a2_norm * u * u;
       const residual = eActual - eQuad;
-      cubicContribution += Math.abs(residual * x) / (Math.abs(x * x * x) + 1e-10);
-      quarticContribution += Math.abs(residual) / (x * x * x * x + 1e-10);
+      cubicContribution += Math.abs(residual * u) / (Math.abs(u * u * u) + 1e-10);
+      quarticContribution += Math.abs(residual) / (u * u * u * u + 1e-10);
     }
     cubicContribution = Math.min(1.0, cubicContribution / n * 0.5);
     quarticContribution = Math.min(1.0, quarticContribution / n * 0.01);
@@ -461,10 +471,23 @@ export async function runMDSampling(formula: string, temperatureK: number = 300)
     const rmsFluctuation = Math.sqrt(msd);
     const maxDisplacement = rmsFluctuation * 2.5;
 
+    let avgBondLength = 0;
+    let bondCount = 0;
+    for (let i = 0; i < elements.length; i++) {
+      for (let j = i; j < elements.length; j++) {
+        const r1 = getElementData(elements[i])?.atomicRadius ?? 100;
+        const r2 = getElementData(elements[j])?.atomicRadius ?? 100;
+        avgBondLength += (r1 + r2) / 100;
+        bondCount++;
+      }
+    }
+    avgBondLength = bondCount > 0 ? avgBondLength / bondCount : 2.0;
+    const normalizedRMS = avgBondLength > 0.1 ? rmsFluctuation / avgBondLength : rmsFluctuation;
+
     let fluctuationClassification: "rigid" | "moderate" | "large" | "extreme";
-    if (rmsFluctuation < 0.05) fluctuationClassification = "rigid";
-    else if (rmsFluctuation < 0.15) fluctuationClassification = "moderate";
-    else if (rmsFluctuation < 0.35) fluctuationClassification = "large";
+    if (normalizedRMS < 0.025) fluctuationClassification = "rigid";
+    else if (normalizedRMS < 0.075) fluctuationClassification = "moderate";
+    else if (normalizedRMS < 0.175) fluctuationClassification = "large";
     else fluctuationClassification = "extreme";
 
     const phononDensityProxy = totalAtoms * avgFreq_THz * (phonon.softModeScore + 0.1);
@@ -575,10 +598,23 @@ function processMDResult(raw: MDSamplingRawResult, formula: string): MDSamplingR
     }
   }
 
+  let avgBondLength = 0;
+  let bondCount = 0;
+  for (let i = 0; i < elements.length; i++) {
+    for (let j = i; j < elements.length; j++) {
+      const r1 = getElementData(elements[i])?.atomicRadius ?? 100;
+      const r2 = getElementData(elements[j])?.atomicRadius ?? 100;
+      avgBondLength += (r1 + r2) / 100;
+      bondCount++;
+    }
+  }
+  avgBondLength = bondCount > 0 ? avgBondLength / bondCount : 2.0;
+  const normalizedRMS = avgBondLength > 0.1 ? rmsFluctuation / avgBondLength : rmsFluctuation;
+
   let fluctuationClassification: "rigid" | "moderate" | "large" | "extreme";
-  if (rmsFluctuation < 0.05) fluctuationClassification = "rigid";
-  else if (rmsFluctuation < 0.15) fluctuationClassification = "moderate";
-  else if (rmsFluctuation < 0.35) fluctuationClassification = "large";
+  if (normalizedRMS < 0.025) fluctuationClassification = "rigid";
+  else if (normalizedRMS < 0.075) fluctuationClassification = "moderate";
+  else if (normalizedRMS < 0.175) fluctuationClassification = "large";
   else fluctuationClassification = "extreme";
 
   const phononDensityProxy = nAtoms * rmsFluctuation * 10;
@@ -649,11 +685,7 @@ export function computeDebyeTemp(formula: string, phononAnalysis?: HessianPhonon
     electronPhononCouplingHint = "High Debye temperature implies stiff lattice -- weaker conventional coupling but higher phonon frequencies";
   }
 
-  let scRelevance: number;
-  if (debyeTemperature < 200) scRelevance = 0.8;
-  else if (debyeTemperature < 400) scRelevance = 0.6;
-  else if (debyeTemperature < 800) scRelevance = 0.4;
-  else scRelevance = 0.2;
+  const scRelevance = 0.2 + 0.6 / (1 + Math.exp(0.008 * (debyeTemperature - 400)));
 
   return {
     debyeTemperature,
