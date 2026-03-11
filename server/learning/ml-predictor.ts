@@ -149,7 +149,12 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
   const lambdaXgb = features.electronPhononLambda ?? 0.5;
   const lambdaGnnVar = gnnLambdaValid ? (gnnResult.lambdaCI95[1] - gnnResult.lambdaCI95[0]) / (2 * 1.96) : 10;
   const lambdaGnnStd = Math.max(lambdaGnnVar, 0.01);
-  const lambdaXgbStd = 0.15;
+  const enSpreadVal = features.enSpread ?? 0;
+  const lambdaXgbStd = enSpreadVal > 2.0
+    ? 0.15 + (enSpreadVal - 2.0) * 0.08
+    : enSpreadVal > 1.0
+      ? 0.15 + (enSpreadVal - 1.0) * 0.03
+      : 0.15;
 
   const wLGnn = 1 / (lambdaGnnStd ** 2);
   const wLXgb = 1 / (lambdaXgbStd ** 2);
@@ -175,14 +180,15 @@ export function computeUnifiedCI(formula: string): UnifiedCIResult {
   }
 
   const r = (v: number) => Number.isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
+  const rTc = (v: number) => Number.isFinite(v) ? Math.round(v * 10) / 10 : 0;
 
   return {
     formula,
-    tcMean: r(tcCombined),
-    tcCI95: [r(tcCI95Lower), r(tcCI95Upper)],
-    tcTotalStd: r(stdCombined),
-    tcEpistemicStd: r(epistemicCombined),
-    tcAleatoricStd: r(aleatoricCombined),
+    tcMean: rTc(tcCombined),
+    tcCI95: [rTc(tcCI95Lower), rTc(tcCI95Upper)],
+    tcTotalStd: rTc(stdCombined),
+    tcEpistemicStd: rTc(epistemicCombined),
+    tcAleatoricStd: rTc(aleatoricCombined),
     lambdaMean: r(lambdaCombined),
     lambdaCI95: [r(Math.max(0, lambdaCombined - 1.96 * lambdaStdCombined)), r(lambdaCombined + 1.96 * lambdaStdCombined)],
     gnn: {
