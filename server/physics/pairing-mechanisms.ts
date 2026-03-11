@@ -1099,6 +1099,7 @@ export function computePairingFeatureVector(formula: string): {
     "cdw-mediated": 5.0,
     "polaronic": 6.0,
     "plasmon-mediated": 7.0,
+    "topological": 8.0,
   };
 
   return {
