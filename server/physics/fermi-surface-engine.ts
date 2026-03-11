@@ -1461,7 +1461,6 @@ export function computeFermiSurface(formula: string, pressureGpa: number = 0): F
   const elements = parseFormulaElements(formula);
   const latticeType = guessLatticeType(elements);
 
-  const gridSize = 8;
   let caRatio = 1.633;
   if (latticeType === "hexagonal") {
     const counts = parseFormulaCounts(formula);
@@ -1482,9 +1481,37 @@ export function computeFermiSurface(formula: string, pressureGpa: number = 0): F
       caRatio *= (1 + 0.1 * (1 - compressionFactor));
     }
   }
-  const gridPoints = generateBZGrid(latticeType, gridSize, caRatio);
 
-  const { evaluations, fermiEnergy, nOrbitals } = evaluateBZGrid(formula, gridPoints, pressureGpa);
+  const SCREENING_GRID = 12;
+  const FINE_GRID = 24;
+
+  const screenGridPoints = generateBZGrid(latticeType, SCREENING_GRID, caRatio);
+  const screenResult = evaluateBZGrid(formula, screenGridPoints, pressureGpa);
+  const screenPockets = detectFermiPockets(screenResult.evaluations, screenResult.fermiEnergy, screenResult.nOrbitals);
+
+  const significantScreenPockets = screenPockets.filter(p => p.volume >= 0.005);
+  const hasTMOrRE = elements.some(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e));
+  const hasMultiplePockets = significantScreenPockets.length >= 2;
+  const hasEHBalance = significantScreenPockets.some(p => p.type === "electron") &&
+                       significantScreenPockets.some(p => p.type === "hole");
+
+  const needsFineGrid = hasMultiplePockets || (hasTMOrRE && hasEHBalance) || pressureGpa > 50;
+
+  let evaluations: BZEvaluation[];
+  let fermiEnergy: number;
+  let nOrbitals: number;
+
+  if (needsFineGrid) {
+    const fineGridPoints = generateBZGrid(latticeType, FINE_GRID, caRatio);
+    const fineResult = evaluateBZGrid(formula, fineGridPoints, pressureGpa);
+    evaluations = fineResult.evaluations;
+    fermiEnergy = fineResult.fermiEnergy;
+    nOrbitals = fineResult.nOrbitals;
+  } else {
+    evaluations = screenResult.evaluations;
+    fermiEnergy = screenResult.fermiEnergy;
+    nOrbitals = screenResult.nOrbitals;
+  }
 
   const pockets = detectFermiPockets(evaluations, fermiEnergy, nOrbitals);
 
