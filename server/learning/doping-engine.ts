@@ -116,7 +116,7 @@ export async function analyzeHessianPhonons(formula: string): Promise<HessianPho
   }
 
   if (stability && stability.frequencies.length > 0) {
-    return processPhononStability(stability);
+    return processPhononStability(stability, formula);
   }
 
   try {
@@ -142,7 +142,8 @@ export async function analyzeHessianPhonons(formula: string): Promise<HessianPho
       syntheticFreqs.push(opticalFloor + opticalRange * frac * clustering * (0.85 + 0.3 * ((i * 11 + 7) % 9) / 9));
     }
     if (phonon.hasImaginaryModes) {
-      syntheticFreqs[0] = -Math.abs(logAvg * 0.1);
+      const instabilitySeverity = 0.1 + 0.4 * phonon.anharmonicityIndex + 0.3 * phonon.softModeScore;
+      syntheticFreqs[0] = -Math.abs(logAvg * instabilitySeverity);
     }
     if (phonon.softModePresent) {
       const softIdx = phonon.hasImaginaryModes ? 1 : 0;
@@ -157,7 +158,7 @@ export async function analyzeHessianPhonons(formula: string): Promise<HessianPho
       frequencies: syntheticFreqs,
       zeroPointEnergy: null,
     };
-    const result = processPhononStability(syntheticStability);
+    const result = processPhononStability(syntheticStability, formula);
     (result as any).source = "physics-engine-estimate";
     return result;
   } catch {
@@ -165,7 +166,7 @@ export async function analyzeHessianPhonons(formula: string): Promise<HessianPho
   }
 }
 
-export function processPhononStability(stability: PhononStability): HessianPhononAnalysis {
+export function processPhononStability(stability: PhononStability, formula?: string): HessianPhononAnalysis {
   const freqs_cm1 = stability.frequencies;
   const freqs_THz = freqs_cm1.map(f => f * CM1_TO_THZ);
 
@@ -197,11 +198,34 @@ export function processPhononStability(stability: PhononStability): HessianPhono
     ? Math.min(1.0, 0.5 + imagFraction * 2.0)
     : 0;
 
+  let isHydride = false;
+  if (formula) {
+    const els = parseFormulaElements(formula);
+    if (els.includes("H")) {
+      const counts: Record<string, number> = {};
+      const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+      let m;
+      const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+      while ((m = regex.exec(cleaned)) !== null) {
+        const el = m[1];
+        const n = m[2] ? parseFloat(m[2]) : 1;
+        counts[el] = (counts[el] || 0) + n;
+      }
+      const total = Object.values(counts).reduce((s, n) => s + n, 0);
+      isHydride = (counts["H"] || 0) / total > 0.4;
+    }
+  }
+
   let couplingScore = 0;
   if (latticeClassification === "moderate") couplingScore = 0.7;
-  else if (latticeClassification === "soft") couplingScore = 1.0;
+  else if (latticeClassification === "soft") couplingScore = 0.85;
   else couplingScore = 0.2;
-  if (softModes.length > 0) couplingScore = Math.min(1.0, couplingScore + 0.2);
+  if (softModes.length > 0) couplingScore = Math.min(1.0, couplingScore + 0.15);
+
+  if (isHydride && maxFreq_THz > 30) {
+    const highFreqBonus = Math.min(0.3, (maxFreq_THz - 30) / 100);
+    couplingScore = Math.min(1.0, couplingScore + highFreqBonus);
+  }
 
   const overallPhononSCScore = 0.35 * softPhononScore + 0.30 * instabilityScore + 0.35 * couplingScore;
 
@@ -212,10 +236,12 @@ export function processPhononStability(stability: PhononStability): HessianPhono
     interpretation = `${imaginaryModes.length} imaginary mode(s) detected — lattice wants to distort, possible SC-relevant instability`;
   } else if (softModes.length > 2) {
     interpretation = `${softModes.length} soft phonon mode(s) below 1 THz — lattice near structural transition, favorable for electron-phonon coupling`;
+  } else if (isHydride && maxFreq_THz > 30) {
+    interpretation = `High-frequency H vibrations (${maxFreq_THz.toFixed(1)} THz) — strong phonon pre-factor for Allen-Dynes Tc`;
   } else if (latticeClassification === "moderate") {
     interpretation = "Moderate phonon spectrum — good electron-phonon coupling range for conventional SC";
   } else if (latticeClassification === "soft") {
-    interpretation = "Soft lattice dynamics — strong phonon-mediated coupling potential";
+    interpretation = "Soft lattice dynamics — phonon-mediated coupling potential, but reduced phonon pre-factor";
   } else {
     interpretation = "Stiff lattice — weaker conventional phonon-mediated SC coupling expected";
   }
@@ -229,10 +255,10 @@ export function processPhononStability(stability: PhononStability): HessianPhono
     imaginaryFrequencies_THz: imaginaryModes.map(f => Math.round(f * 1000) / 1000),
     hasImaginaryModes: imaginaryModes.length > 0,
     hasLatticeInstability: imaginaryModes.length > 0 || softModes.length > positiveFreqs_THz.length * 0.4,
-    avgFrequency_THz: Math.round(avgFreq_THz * 1000) / 1000,
-    avgFrequency_cm1: Math.round(avgFreq_THz / CM1_TO_THZ * 100) / 100,
-    maxFrequency_THz: Math.round(maxFreq_THz * 1000) / 1000,
-    lowestFrequency_THz: Math.round(lowestFreq_THz * 1000) / 1000,
+    avgFrequency_THz: avgFreq_THz,
+    avgFrequency_cm1: avgFreq_THz / CM1_TO_THZ,
+    maxFrequency_THz: maxFreq_THz,
+    lowestFrequency_THz: lowestFreq_THz,
     latticeClassification,
     zeroPointEnergy: stability.zeroPointEnergy,
     scRelevance: {
@@ -1753,7 +1779,7 @@ export function detectSCSignals(baseFormula: string, dopedFormula: string, doped
 
   let hessianPhonon: SCSignal["hessianPhonon"] = null;
   if (dopedHessian && dopedHessian.frequencies.length > 0) {
-    const analysis = processPhononStability(dopedHessian);
+    const analysis = processPhononStability(dopedHessian, dopedFormula);
     hessianPhonon = {
       softModeCount: analysis.softModeCount,
       imaginaryModeCount: analysis.imaginaryModeCount,
