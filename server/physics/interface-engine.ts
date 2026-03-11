@@ -390,17 +390,24 @@ function computeEpitaxialStrain(layerA: string, layerB: string, pressureGpa: num
   const strainMagnitude = Math.min(0.1, latticeMismatch);
 
   let strainEnhancedCoupling = 0;
-  if (strainMagnitude > 0.001 && strainMagnitude < 0.05) {
-    strainEnhancedCoupling = Math.min(1.0, strainMagnitude * 15 * (1.0 + avgBulk / 200));
-  } else if (strainMagnitude >= 0.05) {
-    strainEnhancedCoupling = Math.max(0, 0.8 - (strainMagnitude - 0.05) * 10);
+  if (strainMagnitude > 0.001 && strainMagnitude < 0.025) {
+    strainEnhancedCoupling = Math.min(1.0, strainMagnitude * 30 * (1.0 + avgBulk / 200));
+  } else if (strainMagnitude >= 0.025 && strainMagnitude < 0.03) {
+    strainEnhancedCoupling = Math.max(0, 0.9 - (strainMagnitude - 0.025) * 12);
+  } else if (strainMagnitude >= 0.03) {
+    strainEnhancedCoupling = Math.max(0, 0.3 - (strainMagnitude - 0.03) * 8);
+  }
+
+  let strainConfidencePenalty = 1.0;
+  if (strainMagnitude > 0.03) {
+    strainConfidencePenalty = Math.max(0.2, 1.0 - (strainMagnitude - 0.03) * 15);
   }
 
   const strainScore = Math.min(1.0,
-    strainEnhancedCoupling * 0.5 +
-    (strainMagnitude > 0.005 && strainMagnitude < 0.04 ? 0.3 : 0) +
+    (strainEnhancedCoupling * 0.5 +
+    (strainMagnitude > 0.005 && strainMagnitude < 0.025 ? 0.3 : 0) +
     (criticalThickness > 5 ? 0.15 : 0) +
-    (avgBulk > 100 ? 0.05 : 0)
+    (avgBulk > 100 ? 0.05 : 0)) * strainConfidencePenalty
   );
 
   return {
@@ -413,11 +420,11 @@ function computeEpitaxialStrain(layerA: string, layerB: string, pressureGpa: num
   };
 }
 
-function computeDimensionalConfinement(layerA: string, layerB: string): DimensionalConfinement {
+function computeDimensionalConfinement(layerA: string, layerB: string, filmThicknessNm: number = 0): DimensionalConfinement {
   const elementsA = parseFormulaElements(layerA);
   const elementsB = parseFormulaElements(layerB);
 
-  let confinementDimension = 2;
+  let confinementDimension = 3;
 
   const hasLayered = (els: string[]) =>
     (els.includes("Se") || els.includes("S") || els.includes("Te")) &&
@@ -429,11 +436,18 @@ function computeDimensionalConfinement(layerA: string, layerB: string): Dimensio
   if (hasLayered(elementsA) || hasLayered(elementsB)) confinementDimension = 2;
   if (hasPerovskite(elementsA) && hasPerovskite(elementsB)) confinementDimension = 2;
 
-  const quantumWellWidth = 1.0;
+  const latticeA = getAverageLatticeConstant(layerA);
+  const monolayerNm = latticeA * 0.1;
+  let quantumWellWidth: number;
+  if (filmThicknessNm > 0) {
+    quantumWellWidth = filmThicknessNm / Math.max(0.1, monolayerNm);
+  } else {
+    quantumWellWidth = confinementDimension <= 2 ? 3.0 : 10.0;
+  }
 
   const twoDEnhancementFactor = confinementDimension <= 2
-    ? Math.min(2.0, 1.0 + 0.5 / Math.max(0.5, quantumWellWidth))
-    : 1.0;
+    ? Math.min(3.0, 1.0 + 1.5 / Math.max(0.5, quantumWellWidth))
+    : Math.min(1.5, 1.0 + 0.3 / Math.max(1.0, quantumWellWidth));
 
   const confinementScore = Math.min(1.0,
     (confinementDimension <= 2 ? 0.4 : 0.1) +
@@ -444,7 +458,7 @@ function computeDimensionalConfinement(layerA: string, layerB: string): Dimensio
 
   return {
     confinementDimension,
-    quantumWellWidth,
+    quantumWellWidth: Number(quantumWellWidth.toFixed(4)),
     twoDEnhancementFactor: Number(twoDEnhancementFactor.toFixed(4)),
     confinementScore: Number(confinementScore.toFixed(4)),
   };
@@ -495,11 +509,11 @@ function matchKnownSystem(layerA: string, layerB: string): KnownInterfaceSystem 
   return null;
 }
 
-export function analyzeInterface(layerA: string, layerB: string, pressureGpa: number = 0): InterfaceAnalysis {
+export function analyzeInterface(layerA: string, layerB: string, pressureGpa: number = 0, filmThicknessNm: number = 0): InterfaceAnalysis {
   const chargeTransfer = computeChargeTransfer(layerA, layerB);
   const phononCoupling = computeInterfacePhonons(layerA, layerB, pressureGpa);
   const epitaxialStrain = computeEpitaxialStrain(layerA, layerB, pressureGpa);
-  const dimensionalConfinement = computeDimensionalConfinement(layerA, layerB);
+  const dimensionalConfinement = computeDimensionalConfinement(layerA, layerB, filmThicknessNm);
 
   const knownMatch = matchKnownSystem(layerA, layerB);
 
