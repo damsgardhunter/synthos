@@ -173,13 +173,36 @@ function applyHydrideFilter(formula: string, features: MLFeatureVector): FamilyF
     reasons.push(`H coordination (H/M ratio) = ${hCoordination.toFixed(1)} < 4 (no cage structure)`);
   }
 
-  const estimatedPressure = hCoordination >= 6 ? 150 : hCoordination >= 4 ? 100 : 50;
-  if (estimatedPressure >= 50 && estimatedPressure <= 200) {
+  const totalAtoms = getTotalAtoms(counts);
+  let sumAtomicVol = 0;
+  let sumCubeR = 0;
+  let atomsWithData = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const d = getElementData(el);
+    if (d) {
+      const rA = (d.atomicRadius || 150) / 100;
+      sumAtomicVol += n * (4 / 3) * Math.PI * Math.pow(rA, 3);
+      sumCubeR += n * Math.pow(rA, 3);
+      atomsWithData += n;
+    }
+  }
+  const volPerAtom = atomsWithData > 0 ? sumAtomicVol / atomsWithData : 14.0;
+  const avgCubeR = atomsWithData > 0 ? sumCubeR / atomsWithData : 3.375;
+  const cellVolEstimate = totalAtoms * Math.pow(2 * Math.pow(avgCubeR, 1 / 3), 3);
+  const packingFraction = cellVolEstimate > 0 ? sumAtomicVol / cellVolEstimate : 0.52;
+
+  const volumeFactor = volPerAtom > 12 ? 1.4 : volPerAtom > 8 ? 1.15 : volPerAtom < 4 ? 0.7 : 1.0;
+  const packingAdjust = packingFraction > 0.68 ? 0.8 : packingFraction < 0.5 ? 1.3 : 1.0;
+
+  const basePressure = hCoordination >= 6 ? 150 : hCoordination >= 4 ? 100 : 50;
+  const estimatedPressure = Math.round(basePressure * volumeFactor * packingAdjust);
+
+  if (estimatedPressure >= 30 && estimatedPressure <= 250) {
     score += 0.20;
-    reasons.push(`Estimated pressure stability ~ ${estimatedPressure} GPa (within 50-200 GPa range)`);
+    reasons.push(`Estimated pressure stability ~ ${estimatedPressure} GPa (vol/atom=${volPerAtom.toFixed(1)} A^3, APF=${packingFraction.toFixed(2)})`);
   } else {
     pass = false;
-    reasons.push(`Estimated pressure stability ~ ${estimatedPressure} GPa (outside 50-200 GPa range)`);
+    reasons.push(`Estimated pressure stability ~ ${estimatedPressure} GPa (outside 30-250 GPa range, vol/atom=${volPerAtom.toFixed(1)} A^3)`);
   }
 
   if (features.electronPhononLambda >= 1.5) {
@@ -197,14 +220,16 @@ function applyHydrideFilter(formula: string, features: MLFeatureVector): FamilyF
   const lambda = features.electronPhononLambda;
   if (lambda > 0 && features.logPhononFreq > 0) {
     const denom = lambda - muStar * (1 + 0.62 * lambda);
-    if (denom > 0) {
+    if (denom >= 0.1) {
       const lambdaBar = 2.46 * (1 + 3.8 * muStar);
       const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
       const exponent = -1.04 * (1 + lambda) / denom;
       const omegaLogK = features.logPhononFreq * 1.4388;
-      const tcMcMillan = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+      const tcMcMillan = Math.min((omegaLogK / 1.2) * f1 * Math.exp(exponent), 500);
       score += 0.10;
       reasons.push(`McMillan Tc estimate (mu*=0.10) ~ ${tcMcMillan.toFixed(1)} K`);
+    } else if (denom > 0) {
+      reasons.push(`McMillan denom=${denom.toFixed(3)} too small for reliable Tc (near instability)`);
     }
   }
 
@@ -224,21 +249,29 @@ function applyNitrideFilter(formula: string, features: MLFeatureVector): FamilyF
   let score = 0;
   let pass = true;
 
-  const alkaliElements = ["Li", "Na", "K", "Rb", "Cs"];
-  const alkaliValences: Record<string, number> = { Li: 1, Na: 1, K: 1, Rb: 1, Cs: 1 };
-  let extraElectrons = 0;
-  for (const a of alkaliElements) {
+  const donorValences: Record<string, number> = {
+    Li: 1, Na: 1, K: 1, Rb: 1, Cs: 1,
+    Ca: 2, Sr: 2, Ba: 2, Mg: 2,
+    Eu: 2, Yb: 2,
+    La: 3, Ce: 3, Pr: 3, Nd: 3, Sm: 3, Gd: 3, Y: 3,
+  };
+  const donorElements = Object.keys(donorValences);
+  const nCount = counts["N"] || 0;
+  let rawDonorElectrons = 0;
+  for (const a of donorElements) {
     if (counts[a]) {
-      extraElectrons += counts[a] * (alkaliValences[a] || 1);
+      rawDonorElectrons += counts[a] * donorValences[a];
     }
   }
+  const normBase = nCount > 0 ? nCount : getTotalAtoms(counts);
+  const extraElectrons = normBase > 0 ? rawDonorElectrons / normBase : 0;
 
   if (extraElectrons > 0.1) {
     score += 0.30;
-    reasons.push(`Electron doping: x*valence = ${extraElectrons.toFixed(2)} > 0.1 (sufficient carrier concentration)`);
+    reasons.push(`Electron doping: ${rawDonorElectrons.toFixed(2)} e / ${normBase.toFixed(1)} N = ${extraElectrons.toFixed(2)} e/N > 0.1 (sufficient carrier concentration)`);
   } else {
     pass = false;
-    reasons.push(`Electron doping: x*valence = ${extraElectrons.toFixed(2)} <= 0.1 (insufficient carriers)`);
+    reasons.push(`Electron doping: ${rawDonorElectrons.toFixed(2)} e / ${normBase.toFixed(1)} N = ${extraElectrons.toFixed(2)} e/N <= 0.1 (insufficient carriers)`);
   }
 
   const layerSpacingIncrease = extraElectrons > 0 ? Math.min(25, extraElectrons * 8) : 0;
