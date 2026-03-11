@@ -72,7 +72,11 @@ function computeHarrisonSK(el1: string, el2: string): SKPairParams {
   const ve2 = d2data?.valenceElectrons ?? 4;
   const veAvg = (ve1 + ve2) / 2;
 
-  const dScale = hasDEither ? (veAvg > 5 ? 1.3 : 1.0) : 0.05;
+  const LATE_TM = new Set(["Cu", "Ag", "Au", "Zn", "Pd", "Pt", "Ni"]);
+  const isLateTM1 = LATE_TM.has(el1);
+  const isLateTM2 = LATE_TM.has(el2);
+  const lateTMDamping = (isLateTM1 && isLateTM2) ? 0.4 : (isLateTM1 || isLateTM2) ? 0.65 : 1.0;
+  const dScale = hasDEither ? (veAvg > 5 ? 1.3 : 1.0) * lateTMDamping : 0.05;
 
   const params: SKPairParams = {
     sss: -1.32 * invD2,
@@ -226,7 +230,7 @@ function getNeighborDisplacements(latticeType: string): number[][] {
   }
 }
 
-function buildTBGraph(formula: string, latticeParam?: number, crystalSystem?: string): TBGraph {
+function buildTBGraph(formula: string, latticeParam?: number, crystalSystem?: string, customLatticeVectors?: number[][]): TBGraph {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const latticeType = crystalSystem ?? guessLatticeType(elements);
@@ -248,7 +252,9 @@ function buildTBGraph(formula: string, latticeParam?: number, crystalSystem?: st
     a = entry.lattice.a;
   }
 
-  const latticeVectors = getDefaultLatticeVectors(latticeType, a);
+  const latticeVectors = customLatticeVectors && customLatticeVectors.length === 3
+    ? customLatticeVectors
+    : getDefaultLatticeVectors(latticeType, a);
 
   const nodes: TBGraphNode[] = [];
   let totalOrbitals = 0;
@@ -551,10 +557,10 @@ export interface TBBandStructureResult {
   formula: string;
 }
 
-export function computeBandStructure(formula: string, nPoints: number = 30): TBBandStructureResult {
+export function computeBandStructure(formula: string, nPoints: number = 30, customLatticeVectors?: number[][]): TBBandStructureResult {
   const elements = parseFormulaElements(formula);
   const crystalSystem = guessLatticeType(elements);
-  const graph = buildTBGraph(formula, undefined, crystalSystem);
+  const graph = buildTBGraph(formula, undefined, crystalSystem, customLatticeVectors);
   const path = getHighSymmetryPath(crystalSystem);
 
   const kpoints: number[][] = [];
@@ -616,10 +622,10 @@ export interface TBDOSResult {
   totalStates: number;
 }
 
-export function computeDOS(formula: string, nKpoints: number = 12, nBins: number = 200): TBDOSResult {
+export function computeDOS(formula: string, nKpoints: number = 12, nBins: number = 200, customLatticeVectors?: number[][]): TBDOSResult {
   const elements = parseFormulaElements(formula);
   const crystalSystem = guessLatticeType(elements);
-  const graph = buildTBGraph(formula, undefined, crystalSystem);
+  const graph = buildTBGraph(formula, undefined, crystalSystem, customLatticeVectors);
 
   const allEigenvalues: number[] = [];
   const nk = Math.min(nKpoints, 20);
@@ -671,9 +677,9 @@ export interface FermiProperties {
   bandwidth: number;
 }
 
-export function computeFermiProperties(formula: string): FermiProperties {
-  const bandResult = computeBandStructure(formula, 20);
-  const dosResult = computeDOS(formula, 8, 150);
+export function computeFermiProperties(formula: string, customLatticeVectors?: number[][]): FermiProperties {
+  const bandResult = computeBandStructure(formula, 20, customLatticeVectors);
+  const dosResult = computeDOS(formula, 8, 150, customLatticeVectors);
 
   const fermiE = bandResult.fermiEnergy;
 
@@ -793,11 +799,15 @@ export function computeElectronPhononProxies(formula: string, fermiProps: FermiP
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
 
+  const LATE_TM_SET = new Set(["Cu", "Ag", "Au", "Zn", "Pd", "Pt", "Ni"]);
   let avgI2 = 0;
   for (const el of elements) {
     const sk = getSKParams(el, el);
     const frac = (counts[el] || 1) / totalAtoms;
-    avgI2 += (Math.abs(sk.sss) + Math.abs(sk.pps) + Math.abs(sk.dds)) * frac;
+    const spContrib = Math.abs(sk.sss) + Math.abs(sk.pps);
+    const dContrib = Math.abs(sk.dds);
+    const dWeight = LATE_TM_SET.has(el) ? 0.25 : 1.0;
+    avgI2 += (spContrib + dContrib * dWeight) * frac;
   }
   avgI2 = avgI2 * avgI2;
 
@@ -885,8 +895,10 @@ const tbStats = {
   totalTimeMs: 0,
 };
 
-export function computeTBProperties(formula: string, pressure: number = 0): TBProperties {
-  const cacheKey = `${formula}@${pressure}`;
+export function computeTBProperties(formula: string, pressure: number = 0, customLatticeVectors?: number[][]): TBProperties {
+  const cacheKey = customLatticeVectors
+    ? `${formula}@${pressure}@custom`
+    : `${formula}@${pressure}`;
   const cached = tbPropertiesCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < TB_CACHE_TTL) {
     tbStats.cacheHits++;
@@ -909,9 +921,9 @@ export function computeTBProperties(formula: string, pressure: number = 0): TBPr
     });
   }
 
-  const bandResult = computeBandStructure(formula, 20);
-  const dosResult = computeDOS(formula, 8, 150);
-  const fermiProps = computeFermiProperties(formula);
+  const bandResult = computeBandStructure(formula, 20, customLatticeVectors);
+  const dosResult = computeDOS(formula, 8, 150, customLatticeVectors);
+  const fermiProps = computeFermiProperties(formula, customLatticeVectors);
   const flatBandResult = detectFlatBands(bandResult);
   const ephProxies = computeElectronPhononProxies(formula, fermiProps);
 
