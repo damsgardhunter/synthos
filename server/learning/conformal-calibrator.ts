@@ -96,13 +96,16 @@ function computeECE(entries: CalibrationEntry[], tempScale: number, nBins = 10):
   const coverageLevels = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99];
   let eceSum = 0;
 
+  const scaledNCS = entries
+    .map(e => e.absError / Math.max(1e-4, e.predictedSigma * tempScale))
+    .sort((a, b) => a - b);
+
   for (const targetCoverage of coverageLevels) {
-    const zScore = normalQuantile(targetCoverage);
+    const confQ = computeQuantile(scaledNCS, 1 - targetCoverage);
     let covered = 0;
     for (const e of entries) {
-      const sigma = e.predictedSigma * tempScale;
-      const halfWidth = zScore * sigma;
-      if (Math.abs(e.predictedTc - e.actualTc) <= halfWidth) {
+      const sigma = Math.max(1e-4, e.predictedSigma * tempScale);
+      if (Math.abs(e.predictedTc - e.actualTc) <= confQ * sigma) {
         covered++;
       }
     }
@@ -237,7 +240,8 @@ export function recalibrateFromLedger(): CalibrationState {
 
   temperatureScale = fitTemperatureScale(entries);
 
-  const scaledScores = entries.map(e => e.absError / (e.predictedSigma * temperatureScale));
+  const SIGMA_FLOOR = 1e-4;
+  const scaledScores = entries.map(e => e.absError / Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale));
   scaledScores.sort((a, b) => a - b);
 
   conformalQ90 = computeQuantile(scaledScores, 0.10);
@@ -248,7 +252,7 @@ export function recalibrateFromLedger(): CalibrationState {
 
   let covered95 = 0;
   for (const e of entries) {
-    const sigma = e.predictedSigma * temperatureScale;
+    const sigma = Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale);
     if (Math.abs(e.predictedTc - e.actualTc) <= conformalQ95 * sigma) {
       covered95++;
     }
@@ -265,11 +269,11 @@ export function recalibrateFromLedger(): CalibrationState {
   const binCount = 10;
   for (let b = 0; b < binCount; b++) {
     const targetCov = (b + 1) / binCount;
-    const z = normalQuantile(targetCov);
+    const confQ = computeQuantile(scaledScores, 1 - targetCov);
     let covered = 0;
     for (const e of entries) {
-      const sigma = e.predictedSigma * temperatureScale;
-      if (Math.abs(e.predictedTc - e.actualTc) <= z * sigma) covered++;
+      const sigma = Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale);
+      if (Math.abs(e.predictedTc - e.actualTc) <= confQ * sigma) covered++;
     }
     const obsCov = covered / entries.length;
     maxCalGap = Math.max(maxCalGap, Math.abs(obsCov - targetCov));
@@ -284,10 +288,11 @@ export function recalibrateFromLedger(): CalibrationState {
     byFamily.set(e.family, arr);
   }
 
+  const MIN_FAMILY_SAMPLES = 20;
   for (const [family, famEntries] of byFamily) {
-    if (famEntries.length < 5) continue;
+    if (famEntries.length < MIN_FAMILY_SAMPLES) continue;
     const famScores = famEntries
-      .map(e => e.absError / (e.predictedSigma * temperatureScale))
+      .map(e => e.absError / Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale))
       .sort((a, b) => a - b);
 
     const famECE = computeECE(famEntries, temperatureScale);
