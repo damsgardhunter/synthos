@@ -644,6 +644,28 @@ export function predictStability(formula: string): StabilityPrediction {
 
   decompositionRisk += familyCtx.decompBias;
 
+  const LOW_MP_THRESHOLD = 600;
+  const VERY_LOW_MP_THRESHOLD = 350;
+  let weightedMinMp = 0;
+  let minConstituentMp = Infinity;
+  let lowMpFraction = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const mp = data?.meltingPoint ?? 1000;
+    const frac = (counts[el] || 1) / totalAtoms;
+    weightedMinMp += mp * frac;
+    if (mp < minConstituentMp) minConstituentMp = mp;
+    if (mp < LOW_MP_THRESHOLD) lowMpFraction += frac;
+  }
+
+  if (minConstituentMp < VERY_LOW_MP_THRESHOLD) {
+    const severity = (VERY_LOW_MP_THRESHOLD - minConstituentMp) / VERY_LOW_MP_THRESHOLD;
+    decompositionRisk += severity * 0.25 * lowMpFraction;
+  } else if (minConstituentMp < LOW_MP_THRESHOLD) {
+    const severity = (LOW_MP_THRESHOLD - minConstituentMp) / LOW_MP_THRESHOLD;
+    decompositionRisk += severity * 0.12 * lowMpFraction;
+  }
+
   if (volumeGhostFlag) {
     decompositionRisk = Math.min(1.0, decompositionRisk + 0.2);
   }
@@ -654,9 +676,17 @@ export function predictStability(formula: string): StabilityPrediction {
   if (volumeGhostFlag) {
     stabilityClass = "unstable";
   } else if (synthesizability > 0.6 && decompositionRisk < 0.4 && formationEnergy < 0.1) {
-    stabilityClass = "stable";
+    if (minConstituentMp < VERY_LOW_MP_THRESHOLD && lowMpFraction > 0.15) {
+      stabilityClass = "metastable";
+    } else {
+      stabilityClass = "stable";
+    }
   } else if (synthesizability > 0.35 && decompositionRisk < 0.65) {
-    stabilityClass = "metastable";
+    if (minConstituentMp < VERY_LOW_MP_THRESHOLD && lowMpFraction > 0.3) {
+      stabilityClass = "unstable";
+    } else {
+      stabilityClass = "metastable";
+    }
   } else {
     stabilityClass = "unstable";
   }
