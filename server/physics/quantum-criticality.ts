@@ -437,6 +437,11 @@ function computeStructuralChannel(
   const hasSTO = elements.includes("Sr") && elements.includes("Ti") && elements.includes("O");
   if (hasSTO) structScore = Math.max(structScore, 0.60);
 
+  if (phonon.anharmonicityIndex > 0.6) {
+    const firstOrderPenalty = 1.0 - Math.min(0.7, (phonon.anharmonicityIndex - 0.6) * 1.75);
+    structScore *= firstOrderPenalty;
+  }
+
   return Math.min(1.0, structScore);
 }
 
@@ -523,8 +528,10 @@ function computeDomeProfile(
     tcEnhancementFactor = 1.0 + domeAmplitude * 1.5;
 
     if (controlParameter > 0.9) {
-      tcEnhancementFactor *= 0.7;
+      tcEnhancementFactor *= Math.pow(0.1, (controlParameter - 0.9) * 10);
     }
+  } else if (controlParameter > 0.95) {
+    tcEnhancementFactor = Math.pow(0.1, (controlParameter - 0.9) * 10);
   }
 
   if (pressureGpa !== undefined && pressureGpa > 0 &&
