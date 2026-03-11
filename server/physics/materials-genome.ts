@@ -508,7 +508,11 @@ function normalizeCacheKey(formula: string): string {
 export function encodeGenome(formula: string): MaterialGenome {
   const cacheKey = normalizeCacheKey(formula);
   const cached = genomeCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    genomeCache.delete(cacheKey);
+    genomeCache.set(cacheKey, cached);
+    return cached;
+  }
 
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
