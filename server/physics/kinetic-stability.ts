@@ -256,7 +256,19 @@ function computeDiffusionBarriers(formula: string, pressureGpa: number = 0): Dif
     effectiveBarrier = minBarrier;
     const nElements = elements.length;
     if (nElements > 2) {
-      const latticeTrappingBonus = 0.03 * (nElements - 2);
+      const radii: number[] = [];
+      for (const el of elements) {
+        const d = getElementData(el);
+        if (d?.atomicRadius) radii.push(d.atomicRadius);
+      }
+      let radiusMismatchMultiplier = 1.0;
+      if (radii.length >= 2) {
+        const minR = Math.min(...radii);
+        const maxR = Math.max(...radii);
+        const mismatch = (maxR - minR) / Math.max(maxR, 1);
+        radiusMismatchMultiplier = 1.0 + Math.min(2.0, mismatch * 5);
+      }
+      const latticeTrappingBonus = 0.03 * (nElements - 2) * radiusMismatchMultiplier;
       effectiveBarrier += latticeTrappingBonus;
     }
   }
@@ -312,15 +324,32 @@ function computeNucleationBarrier(formula: string, eAboveHull: number): Nucleati
       }
     }
   }
+
+  const isHydride = elements.includes("H") && ((counts["H"] || 0) / totalAtoms) > 0.3;
+  let desorptionPenalty = 0;
+  if (isHydride) {
+    competingPhases.push("H2");
+    for (const el of elements) {
+      if (el !== "H") competingPhases.push(el);
+    }
+    const formE = computeMiedemaFormationEnergy(formula);
+    if (formE > -0.3) {
+      desorptionPenalty = Math.min(0.5, (formE + 0.3) * 2.0);
+    }
+  }
+
   if (competingPhases.length === 0) {
     competingPhases.push(...elements);
   }
 
+  const penalizedBarrier = Math.max(0.05, effectiveBarrier - desorptionPenalty);
+  const penalizedRate = attemptFreq * Math.exp(-penalizedBarrier / (kB * 300));
+
   return {
-    nucleationBarrier: Math.round(effectiveBarrier * 10000) / 10000,
+    nucleationBarrier: Math.round(penalizedBarrier * 10000) / 10000,
     criticalNucleusRadius: Math.round(criticalRadius * 100) / 100,
-    nucleationRate300K: nucleationRate,
-    competingPhases: competingPhases.slice(0, 5),
+    nucleationRate300K: penalizedRate,
+    competingPhases: Array.from(new Set(competingPhases)).slice(0, 8),
   };
 }
 
