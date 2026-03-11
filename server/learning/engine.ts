@@ -1712,7 +1712,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     const isHighPressureOnly = enforcedPressure > 50;
 
-    await storage.insertSuperconductorCandidate({
+    const finalPayload = {
       ...candidateData,
       pressureGpa: enforcedPressure,
       ensembleScore: adjustedEnsemble,
@@ -1720,29 +1720,69 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       roomTempViable: isHighPressureOnly ? false : candidateData.roomTempViable,
       mlFeatures: { ...enrichedMlFeatures, ...deliberationFeatures, pressureViability: pressureViability.label } as any,
       notes: `${existingNotes} ${stabilityNote}${kineticNote}${deliberationNote}${pressureNote}`.trim(),
-    });
+    };
 
-    const candidateTc = candidateData.predictedTc ?? 0;
-    if (generatorSource) {
-      recordGeneratorOutcome(generatorSource, true, candidateTc, 0.5);
-    }
-    if (candidateTc > 0) {
-      incorporateSuccessData(candidateData.formula, candidateTc).catch(() => {});
-    }
-
-    try {
-      const lambda = candidateData.electronPhononCoupling ?? 0;
-      const mlFeats = candidateData.mlFeatures as Record<string, any> | undefined;
-      const prototype = mlFeats?.prototype ?? mlFeats?.predictedPrototype ?? null;
-      const system = mlFeats?.crystalSystem ?? candidateData.crystalStructure ?? null;
-      const sg = mlFeats?.spacegroupSymbol ?? null;
-      recordStructureOutcome(candidateData.formula, prototype, system, sg, lambda, candidateTc, true);
-    } catch {}
+    queueCandidateWrite(finalPayload, generatorSource);
 
     return true;
   } catch (err: any) {
     console.log(`[Engine] insertCandidateWithStabilityCheck failed for ${candidateData.formula}: ${err?.message?.slice(0, 120) ?? "unknown"}`);
     return false;
+  }
+}
+
+type InsertPayload = Parameters<typeof storage.insertSuperconductorCandidate>[0];
+const candidateWriteQueue: { payload: InsertPayload; generatorSource?: string }[] = [];
+const WRITE_QUEUE_FLUSH_SIZE = 25;
+const WRITE_QUEUE_FLUSH_INTERVAL_MS = 3000;
+let writeQueueFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let writeQueueTotalFlushed = 0;
+
+async function flushCandidateWriteQueue(): Promise<number> {
+  if (candidateWriteQueue.length === 0) return 0;
+  const batch = candidateWriteQueue.splice(0, candidateWriteQueue.length);
+  const payloads = batch.map(b => b.payload);
+  try {
+    const insertedCount = await storage.bulkInsertSuperconductorCandidates(payloads);
+    writeQueueTotalFlushed += insertedCount;
+    for (const item of batch) {
+      const tc = item.payload.predictedTc ?? 0;
+      if (item.generatorSource) {
+        recordGeneratorOutcome(item.generatorSource, true, tc, 0.5);
+      }
+      if (tc > 0) {
+        incorporateSuccessData(item.payload.formula, tc).catch(() => {});
+      }
+      try {
+        const lambda = item.payload.electronPhononCoupling ?? 0;
+        const mlFeats = item.payload.mlFeatures as Record<string, any> | undefined;
+        const prototype = mlFeats?.prototype ?? mlFeats?.predictedPrototype ?? null;
+        const system = mlFeats?.crystalSystem ?? item.payload.crystalStructure ?? null;
+        const sg = mlFeats?.spacegroupSymbol ?? null;
+        recordStructureOutcome(item.payload.formula, prototype, system, sg, lambda, tc, true);
+      } catch {}
+    }
+    return insertedCount;
+  } catch (err: any) {
+    console.error(`[Engine] Write queue flush failed for ${batch.length} candidates: ${err?.message?.slice(0, 120)}`);
+    return 0;
+  }
+}
+
+function scheduleWriteQueueFlush(): void {
+  if (writeQueueFlushTimer) return;
+  writeQueueFlushTimer = setTimeout(async () => {
+    writeQueueFlushTimer = null;
+    await flushCandidateWriteQueue();
+  }, WRITE_QUEUE_FLUSH_INTERVAL_MS);
+}
+
+function queueCandidateWrite(payload: InsertPayload, generatorSource?: string): void {
+  candidateWriteQueue.push({ payload, generatorSource });
+  if (candidateWriteQueue.length >= WRITE_QUEUE_FLUSH_SIZE) {
+    flushCandidateWriteQueue();
+  } else {
+    scheduleWriteQueueFlush();
   }
 }
 
@@ -3999,6 +4039,8 @@ async function runPhase11_StructurePrediction() {
       }
     }
 
+    await flushCandidateWriteQueue();
+
     const csCount = await storage.getCrystalStructureCount();
     const progress11 = computeProgress(11, csCount);
     await updatePhaseStatus(11, "active", progress11, csCount);
@@ -5931,6 +5973,11 @@ async function runAutonomousFastPath() {
           console.log(`[Autonomous] REJECTED: ${formula} Tc=${result.tc}K reason=${result.reason}`);
         }
       }
+    }
+
+    const queueFlushed = await flushCandidateWriteQueue();
+    if (queueFlushed > 0) {
+      console.log(`[Engine] Write queue flushed: ${queueFlushed} candidates bulk-inserted`);
     }
 
     lastCycleCandidates = thisCycleCandidates;

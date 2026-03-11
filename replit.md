@@ -58,6 +58,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Crystal Distribution Database**: Learned crystallographic distributions from ~500k structures.
 - **Multi-Task GNN Surrogate**: Extended GNN predicting 18 properties simultaneously.
 - **Autonomous Discovery Loop**: Massive generation pipeline with multi-stage filtering and tiered acceptance.
+- **Candidate Write Queue**: `insertCandidateWithStabilityCheck` queues validated payloads instead of writing to DB immediately. `queueCandidateWrite()` accumulates candidates; `flushCandidateWriteQueue()` bulk-inserts via `storage.bulkInsertSuperconductorCandidates()` in chunks of 25 with upsert. Flush triggers: queue reaches 25 items, 3-second timer, or explicit flush at end of main screening loop and Phase 11. Post-insert side effects (generator outcomes, success data, structure outcomes) run after bulk flush.
 - **Semantic Insight Deduplication**: Uses OpenAI text-embedding-3-small for semantic deduplication.
 - **Cross-Engine Intelligence Hub**: Central data bus (`cross-engine-hub.ts`) collecting outputs from all 9 sub-engines (topology, fermi, pairing, pressure, defect, physics, ML, synthesis, theory) with pattern aggregation and multi-engine convergence detection.
 - **Novel Synthesis Path Discovery**: Evolutionary synthesis optimizer (`synthesis-discovery.ts`) using genetic algorithm with multi-engine fitness function to discover novel multi-step synthesis routes.

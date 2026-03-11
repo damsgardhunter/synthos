@@ -385,6 +385,14 @@ const PROTOTYPE_REGISTRY: Record<string, PrototypeInfo> = {
     stoichiometry: "AB2",
     sites: ["A", "B"],
   },
+  Antifluorite: {
+    name: "Antifluorite",
+    spaceGroup: "Fm-3m",
+    crystalSystem: "cubic",
+    dimensionality: "3D",
+    stoichiometry: "A2B",
+    sites: ["A", "B"],
+  },
 };
 
 function generateAlB2(): PrototypeCandidate[] {

@@ -55,6 +55,7 @@ export interface IStorage {
   getUnscoredCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   getCandidatesNeedingPhysicsRecalc(physicsVersion: number, limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
+  bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   getSuperconductorCount(): Promise<number>;
   getSuperconductorsByStage(stage: number, limit?: number): Promise<SuperconductorCandidate[]>;
@@ -281,6 +282,45 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return s;
+  }
+
+  async bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number> {
+    if (candidates.length === 0) return 0;
+    let inserted = 0;
+    const CHUNK_SIZE = 25;
+    for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
+      const chunk = candidates.slice(i, i + CHUNK_SIZE);
+      const sanitizedChunk = chunk.map(sc => {
+        const sanitized: Record<string, any> = {};
+        for (const [key, val] of Object.entries(sc)) {
+          if (typeof val === "number" && !Number.isFinite(val)) {
+            sanitized[key] = key === "predictedTc" || key === "ensembleScore" ? 0 : null;
+          } else {
+            sanitized[key] = val;
+          }
+        }
+        return sanitized as InsertSuperconductorCandidate;
+      });
+      try {
+        const results = await db.insert(superconductorCandidates).values(sanitizedChunk)
+          .onConflictDoUpdate({
+            target: superconductorCandidates.formula,
+            set: {
+              ensembleScore: sql`GREATEST(${superconductorCandidates.ensembleScore}, EXCLUDED.ensemble_score)`,
+              xgboostScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.xgboost_score ELSE ${superconductorCandidates.xgboostScore} END`,
+              neuralNetScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.neural_net_score ELSE ${superconductorCandidates.neuralNetScore} END`,
+              predictedTc: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.predicted_tc ELSE ${superconductorCandidates.predictedTc} END`,
+              mlFeatures: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.ml_features ELSE ${superconductorCandidates.mlFeatures} END`,
+              notes: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.notes ELSE ${superconductorCandidates.notes} END`,
+            },
+          })
+          .returning();
+        inserted += results.length;
+      } catch (e: any) {
+        console.error(`[Storage] Bulk insert chunk failed (${chunk.length} candidates): ${e?.message?.slice(0, 120)}`);
+      }
+    }
+    return inserted;
   }
 
   async updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void> {
