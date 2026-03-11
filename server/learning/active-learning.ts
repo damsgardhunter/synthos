@@ -1788,14 +1788,15 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: `Batch cycle ${batchCycleNum} complete`,
-    detail: `${dftSuccessCount} evaluated, GT=${gtSummary.totalDatapoints} R²=${preR2.toFixed(4)}→${postR2.toFixed(4)} MAE=${preMAE.toFixed(2)}→${postMAE.toFixed(2)} N=${preDatasetSize}→${postDatasetSize}`,
+    detail: `${dftSuccessCount} evaluated, GT=${gtSummary.totalDatapoints} R²=${postR2.toFixed(4)} (Δ${(postR2 - preR2) >= 0 ? '+' : ''}${(postR2 - preR2).toFixed(4)}) MAE=${postMAE.toFixed(2)} (Δ${(postMAE - preMAE) >= 0 ? '+' : ''}${(postMAE - preMAE).toFixed(2)}) N=${preDatasetSize}→${postDatasetSize}`,
     dataSource: "Active Learning",
   });
 
   const discoveryUpdates: Array<{ id: number; discoveryScore: number }> = [];
   for (const { candidate } of selected) {
     try {
-      const hullDist = (candidate.mlFeatures as any)?.stabilityGate?.hullDistance ?? 0.05;
+      const rawHull = (candidate.mlFeatures as any)?.stabilityGate?.hullDistance;
+      const hullDist = rawHull != null ? rawHull : 0.15;
       const discoveryResult = computeDiscoveryScore({
         predictedTc: candidate.predictedTc ?? 0,
         formula: candidate.formula,
