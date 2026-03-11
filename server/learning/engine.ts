@@ -526,6 +526,8 @@ let engineTempo: EngineTempo = "exploring";
 let cycleIntervalMs = 15000;
 let exploitCyclesRemaining = 0;
 let currentExploitFamily: string | null = null;
+let exploitStagnantCycles = 0;
+let exploitLastInsertCount = 0;
 let totalDFTEnriched = 0;
 let currentStatusMessage = "Initializing research systems";
 
@@ -6643,6 +6645,8 @@ async function runLearningCycle() {
         setMutationIntensity(3);
         exploitCyclesRemaining = 0;
         currentExploitFamily = null;
+        exploitStagnantCycles = 0;
+        exploitLastInsertCount = 0;
         emit("log", {
           phase: "engine",
           event: "Tc plateau level-3 diversification",
@@ -6656,6 +6660,8 @@ async function runLearningCycle() {
         setChemicalSpaceExpansionMode(true);
         exploitCyclesRemaining = 0;
         currentExploitFamily = null;
+        exploitStagnantCycles = 0;
+        exploitLastInsertCount = 0;
         emit("log", {
           phase: "engine",
           event: "Tc plateau level-4 chemical space expansion",
@@ -7417,8 +7423,10 @@ async function runLearningCycle() {
           let lfInserted = 0;
           let lfBest = 0;
 
+          const lfSeeds: { struct: GeneratedStructure; score: number }[] = [];
           for (const struct of lfStructures) {
             try {
+              if (struct.volumePerAtom < 8 || struct.volumePerAtom > 30) continue;
               const normalized = normalizeFormula(struct.formula);
               const existsInDb = await storage.getSuperconductorByFormula(normalized);
               if (existsInDb) continue;
@@ -7428,11 +7436,12 @@ async function runLearningCycle() {
               if (gb.tcPredicted < 5) continue;
 
               const cappedTc = Math.round(gb.tcPredicted);
+              const ensScore = Math.min(0.9, gb.score);
               const inserted = await insertCandidateWithStabilityCheck({
                 formula: normalized,
                 predictedTc: cappedTc,
                 dataConfidence: "low",
-                ensembleScore: Math.min(0.9, gb.score),
+                ensembleScore: ensScore,
                 verificationStage: 0,
                 crystalStructure: struct.bravaisType,
                 notes: `[lattice-free: ${struct.bravaisType}, ${struct.atoms.length} atoms, vol/atom=${struct.volumePerAtom.toFixed(1)} A^3]`,
@@ -7442,19 +7451,21 @@ async function runLearningCycle() {
                 totalScCandidates++;
                 alreadyScreenedFormulas.add(normalized);
                 if (cappedTc > lfBest) lfBest = cappedTc;
+                if (ensScore > 0.4) lfSeeds.push({ struct, score: ensScore });
               }
             } catch (lfErr: any) {
               console.error(`[Engine] Lattice-free insert failed:`, lfErr?.message?.slice(0, 80) ?? "unknown");
             }
           }
 
-          seedEvoPopulation(lfStructures);
+          seedEvoPopulation(lfSeeds.map(s => s.struct));
 
           const evoOffspring = runEvolutionaryGeneration(15);
           let evoInserted = 0;
           let evoBest = 0;
           for (const evoStruct of evoOffspring) {
             try {
+              if (evoStruct.volumePerAtom < 8 || evoStruct.volumePerAtom > 30) continue;
               const normalized = normalizeFormula(evoStruct.formula);
               const evoExists = await storage.getSuperconductorByFormula(normalized);
               if (evoExists || alreadyScreenedFormulas.has(normalized)) continue;
@@ -7575,12 +7586,36 @@ async function runLearningCycle() {
           const shouldRandomExplore = Math.random() < exploreProbability;
           const underExplored = strategy.performanceSignals?.underExplored as string[] | undefined;
 
+          const tempoFocusLimit = engineTempo === "excited" || engineTempo === "exploring" ? 8 : 2;
+
+          const exploitCurrentCount = currentExploitFamily
+            ? ((strategy.performanceSignals?.familyStats as any)?.[currentExploitFamily]?.count ?? 0)
+            : 0;
+          if (currentExploitFamily && exploitCurrentCount === exploitLastInsertCount) {
+            exploitStagnantCycles++;
+          } else {
+            exploitStagnantCycles = 0;
+          }
+          exploitLastInsertCount = exploitCurrentCount;
+
           if (exploitCyclesRemaining > 0 && currentExploitFamily) {
             const tcGapJustifiesSwitch = llmTopFamily !== currentExploitFamily && llmTopMaxTc > currentMaxTc + 20;
 
-            if (tcGapJustifiesSwitch) {
+            if (exploitStagnantCycles >= 4) {
+              emit("log", {
+                phase: "engine",
+                event: "Exploit stagnation abort",
+                detail: `${currentExploitFamily}: 0 new candidates passed stability for ${exploitStagnantCycles} consecutive cycles. Terminating exploit window early.`,
+                dataSource: "Strategy Analyzer",
+              });
+              exploitCyclesRemaining = 0;
+              currentExploitFamily = null;
+              exploitStagnantCycles = 0;
+            } else if (tcGapJustifiesSwitch) {
               currentExploitFamily = llmTopFamily;
               exploitCyclesRemaining = 8;
+              exploitStagnantCycles = 0;
+              exploitLastInsertCount = 0;
               emit("log", {
                 phase: "engine",
                 event: "Strategy override",
@@ -7591,7 +7626,7 @@ async function runLearningCycle() {
               const randomFamily = underExplored[Math.floor(Math.random() * underExplored.length)];
               const explorationAreas = [
                 { area: randomFamily, priority: 0.8, reasoning: "Random exploration of under-explored family" },
-                ...strategy.focusAreas.filter(f => f.area !== randomFamily).slice(0, 4),
+                ...strategy.focusAreas.filter(f => f.area !== randomFamily).slice(0, tempoFocusLimit),
               ];
               strategy.focusAreas = explorationAreas as any;
               emit("log", {
@@ -7633,6 +7668,8 @@ async function runLearningCycle() {
           } else {
             currentExploitFamily = llmTopFamily;
             exploitCyclesRemaining = 8;
+            exploitStagnantCycles = 0;
+            exploitLastInsertCount = 0;
             emit("log", {
               phase: "engine",
               event: "Exploit window started",
@@ -7641,8 +7678,9 @@ async function runLearningCycle() {
             });
           }
 
+          const hintLimit = engineTempo === "excited" || engineTempo === "exploring" ? 5 : 2;
           currentStrategyHint = strategy.focusAreas
-            .slice(0, 3)
+            .slice(0, hintLimit)
             .map(f => f.area)
             .join(", ");
           currentStrategyFocusAreas = strategy.focusAreas.map(f => ({ area: f.area, priority: f.priority }));
