@@ -2,6 +2,7 @@ import { normalizeFormula, classifyFamily } from "./utils";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
+import { parseFormulaCounts as parseFormulaCountsNested } from "./physics-engine";
 
 const MAX_FORMULAS = 2000;
 
@@ -228,6 +229,86 @@ function elementSubstitutionDistance(elA: string, elB: string): number {
 
 const MIN_SUBSTITUTION_DISTANCE = 1.0;
 
+function canBeChargeNeutral(counts: Record<string, number>): boolean {
+  const elements = Object.keys(counts);
+  if (elements.length <= 1) return true;
+
+  const allMetallic = elements.every(el => {
+    const states = CHARGE_BALANCE_OX_STATES[el];
+    return !states || states.every(s => s >= 0);
+  });
+  if (allMetallic) return true;
+
+  if (elements.length <= 5) {
+    let bestImbalance = Infinity;
+    const enumerate = (idx: number, charge: number): void => {
+      if (bestImbalance === 0) return;
+      if (idx === elements.length) {
+        bestImbalance = Math.min(bestImbalance, Math.abs(charge));
+        return;
+      }
+      const el = elements[idx];
+      const c = counts[el] ?? 1;
+      const states = CHARGE_BALANCE_OX_STATES[el];
+      if (!states) { enumerate(idx + 1, charge); return; }
+      for (const ox of states) {
+        enumerate(idx + 1, charge + ox * c);
+      }
+    };
+    enumerate(0, 0);
+    return bestImbalance === 0;
+  }
+
+  let maxCharge = 0;
+  let minCharge = 0;
+  for (const el of elements) {
+    const c = counts[el] ?? 1;
+    const states = CHARGE_BALANCE_OX_STATES[el];
+    if (!states) continue;
+    maxCharge += Math.max(...states) * c;
+    minCharge += Math.min(...states) * c;
+  }
+  return minCharge <= 0 && maxCharge >= 0;
+}
+
+function passesStericCheck(counts: Record<string, number>): boolean {
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  if (totalAtoms < 2) return false;
+
+  let volumeSum = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const r = data?.atomicRadius ?? 150;
+    const rAng = r / 100;
+    volumeSum += counts[el] * (4 / 3) * Math.PI * rAng * rAng * rAng;
+  }
+
+  const packingFraction = 0.74;
+  const minCellVolume = volumeSum / packingFraction;
+
+  const avgRadius = elements.reduce((s, el) => {
+    const data = getElementData(el);
+    return s + (counts[el] / totalAtoms) * ((data?.atomicRadius ?? 150) / 100);
+  }, 0);
+
+  const maxCellVolume = totalAtoms * (4 / 3) * Math.PI * (avgRadius * 3) * (avgRadius * 3) * (avgRadius * 3);
+
+  if (minCellVolume > maxCellVolume) return false;
+
+  let maxRadius = 0;
+  let minRadius = Infinity;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const r = (data?.atomicRadius ?? 150) / 100;
+    if (r > maxRadius) maxRadius = r;
+    if (r < minRadius) minRadius = r;
+  }
+  if (maxRadius > 0 && minRadius > 0 && maxRadius / minRadius > 4.0) return false;
+
+  return true;
+}
+
 function hasSuperconductingPotential(formula: string): boolean {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -241,21 +322,13 @@ function hasSuperconductingPotential(formula: string): boolean {
   const hasPrimarySCElement = hasHighCoupling || hasSCActiveTM || hasLightPhonon;
   if (!hasPrimarySCElement && !hasSCActiveMain) return false;
   if (!hasPrimarySCElement && hasSCActiveMain && !hasReservoir) return false;
+  if (!canBeChargeNeutral(counts)) return false;
+  if (!passesStericCheck(counts)) return false;
   return true;
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return parseFormulaCountsNested(formula);
 }
 
 function countsToFormula(counts: Record<string, number>): string {
