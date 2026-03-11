@@ -134,7 +134,8 @@ const MC_DROPOUT_RATE = 0.1;
 const N_GAUSSIAN_BASIS = 20;
 const GAUSSIAN_START = 0.5;
 const GAUSSIAN_END = 6.0;
-const GAUSSIAN_WIDTH = 0.5;
+const GAUSSIAN_STEP = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
+const GAUSSIAN_WIDTH = GAUSSIAN_STEP;
 
 let cachedEnsembleModels: GNNWeights[] | null = null;
 let modelTrainedAt = 0;
@@ -231,9 +232,15 @@ function initVector(size: number, val = 0): number[] {
 function matVecMul(mat: number[][], vec: number[]): number[] {
   const result: number[] = [];
   for (let i = 0; i < mat.length; i++) {
+    const row = mat[i];
+    if (row.length !== vec.length) {
+      throw new Error(
+        `matVecMul shape mismatch: row ${i} has ${row.length} cols but vec has ${vec.length} elements`
+      );
+    }
     let sum = 0;
     for (let j = 0; j < vec.length; j++) {
-      sum += (mat[i][j] ?? 0) * (vec[j] ?? 0);
+      sum += row[j] * vec[j];
     }
     result.push(sum);
   }
@@ -287,10 +294,9 @@ function softmax(values: number[]): number[] {
 }
 
 function gaussianDistanceExpansion(distance: number): number[] {
-  const step = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
   const basis: number[] = [];
   for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
-    const center = GAUSSIAN_START + i * step;
+    const center = GAUSSIAN_START + i * GAUSSIAN_STEP;
     const diff = distance - center;
     basis.push(Math.exp(-(diff * diff) / (2 * GAUSSIAN_WIDTH * GAUSSIAN_WIDTH)));
   }

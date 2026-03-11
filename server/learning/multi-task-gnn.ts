@@ -61,10 +61,15 @@ function initVector(dim: number): number[] {
 }
 
 function matVecMul(mat: number[][], vec: number[]): number[] {
-  return mat.map(row => {
+  return mat.map((row, idx) => {
+    if (row.length !== vec.length) {
+      throw new Error(
+        `matVecMul shape mismatch: row ${idx} has ${row.length} cols but vec has ${vec.length} elements`
+      );
+    }
     let s = 0;
-    for (let i = 0; i < Math.min(row.length, vec.length); i++) {
-      s += row[i] * (vec[i] ?? 0);
+    for (let i = 0; i < row.length; i++) {
+      s += row[i] * vec[i];
     }
     return s;
   });
