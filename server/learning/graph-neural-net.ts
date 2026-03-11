@@ -63,6 +63,8 @@ interface GNNWeights {
   W_conv_value: number[][];
   b_conv_gate: number[];
   b_conv_value: number[];
+  W_input_proj: number[][];
+  b_input_proj: number[];
   W_3body: number[][];
   W_3body_update: number[][];
   W_attn_pool: number[][];
@@ -978,6 +980,11 @@ function threeBodyInteractionLayer(
 
   const threeBodyAgg: number[][] = embeddings.map(() => initVector(HIDDEN_DIM));
 
+  const neighborCounts = new Uint16Array(nNodes);
+  for (const tb of graph.threeBodyFeatures) {
+    neighborCounts[tb.center]++;
+  }
+
   for (const tb of graph.threeBodyFeatures) {
     const angleFeature = tb.angle / Math.PI;
     const distFeature = Math.min(1.0, (tb.distance1 + tb.distance2) / 12.0);
@@ -986,25 +993,26 @@ function threeBodyInteractionLayer(
     const n1Embed = embeddings[tb.neighbor1] ?? initVector(HIDDEN_DIM);
     const n2Embed = embeddings[tb.neighbor2] ?? initVector(HIDDEN_DIM);
 
-    const pairMsg = n1Embed.map((v, i) => (v + (n2Embed[i] ?? 0)) * 0.5 * angleFeature);
+    const asymScale = 1.0 + asymmetry * 0.3;
+    const pairMsg = n1Embed.map((v, i) => (v + (n2Embed[i] ?? 0)) * 0.5 * angleFeature * asymScale);
     const transformed = matVecMul(W_3body, pairMsg);
 
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      threeBodyAgg[tb.center][k] += (transformed[k] ?? 0) * (1.0 - asymmetry * 0.5) * distFeature;
+      threeBodyAgg[tb.center][k] += (transformed[k] ?? 0) * distFeature;
     }
   }
 
   const newEmbeddings: number[][] = [];
   for (let i = 0; i < nNodes; i++) {
-    const neighborCount = graph.threeBodyFeatures.filter(tb => tb.center === i).length;
-    if (neighborCount > 0) {
-      const normFactor = Math.sqrt(neighborCount);
+    const nc = neighborCounts[i];
+    if (nc > 0) {
+      const normFactor = Math.sqrt(nc);
       for (let k = 0; k < HIDDEN_DIM; k++) {
         threeBodyAgg[i][k] /= normFactor;
       }
     }
 
-    const combined = embeddings[i].map((v, k) => v + (threeBodyAgg[i][k] ?? 0));
+    const combined = [...embeddings[i], ...threeBodyAgg[i]];
     const updated = relu(matVecMul(W_3body_update, combined));
     newEmbeddings.push(updated);
   }
@@ -1403,6 +1411,13 @@ function attentionPooling(graph: CrystalGraph, W_pool: number[][]): number[] {
 }
 
 export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?: () => number): GNNPrediction {
+  for (let i = 0; i < graph.nodes.length; i++) {
+    const raw = graph.nodes[i].embedding;
+    const input = raw.length >= NODE_DIM ? raw.slice(0, NODE_DIM) : [...raw, ...new Array(NODE_DIM - raw.length).fill(0)];
+    const projected = relu(vecAdd(matVecMul(weights.W_input_proj, input), weights.b_input_proj));
+    graph.nodes[i].embedding = projected;
+  }
+
   const saveResidual = (nodes: CrystalGraph["nodes"]) =>
     nodes.map(n => {
       const e = [...n.embedding];
@@ -1569,8 +1584,10 @@ function initWeights(rng: () => number): GNNWeights {
     W_conv_value: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
     b_conv_gate: initVector(HIDDEN_DIM),
     b_conv_value: initVector(HIDDEN_DIM),
-    W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
-    W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
+    W_input_proj: initMatrix(HIDDEN_DIM, NODE_DIM, rng, Math.sqrt(2.0 / NODE_DIM)),
+    b_input_proj: initVector(HIDDEN_DIM),
+    W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM) * 1.5),
+    W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
