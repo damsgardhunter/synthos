@@ -1,5 +1,5 @@
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
-import { getAllPhysicsResults, getPhysicsResult, type PhysicsResult } from "./physics-results-store";
+import { getAllPhysicsResults, getPhysicsResult, getPhysicsStoreSize, type PhysicsResult } from "./physics-results-store";
 import {
   getElementData,
   getCompositionWeightedProperty,
@@ -14,6 +14,16 @@ import {
   computeElectronPhononCoupling,
   parseFormulaElements,
 } from "./physics-engine";
+
+function seededRng(seed: number): () => number {
+  let s = seed | 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) | 0;
+    return (s >>> 0) / 4294967296;
+  };
+}
+
+const ENSEMBLE_SEEDS = [314159, 271828, 173205];
 
 interface LambdaTreeNode {
   featureIndex: number;
@@ -333,10 +343,12 @@ function trainLambdaGBM(
   y: number[],
   nEstimators: number = 150,
   learningRate: number = 0.08,
-  maxDepth: number = 4
+  maxDepth: number = 4,
+  seed: number = 42
 ): LambdaGBModel {
   const n = X.length;
   const nFeatures = X[0]?.length ?? 0;
+  const rng = seededRng(seed);
   const basePrediction = y.reduce((s, v) => s + v, 0) / n;
   const predictions = new Array(n).fill(basePrediction);
   const trees: LambdaTreeNode[] = [];
@@ -345,7 +357,7 @@ function trainLambdaGBM(
   const valSize = Math.max(2, Math.floor(n * 0.2));
   const shuffled = Array.from({ length: n }, (_, i) => i);
   for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
   const valIdx = new Set(shuffled.slice(0, valSize));
@@ -398,14 +410,14 @@ function predictWithModel(model: LambdaGBModel, x: number[]): number {
   return Math.max(0, pred);
 }
 
-function bootstrapSample(X: number[][], y: number[]): { X: number[][]; y: number[]; oobIndices: number[] } {
+function bootstrapSample(X: number[][], y: number[], rng: () => number): { X: number[][]; y: number[]; oobIndices: number[] } {
   const n = X.length;
   const size = Math.floor(n * 0.8);
   const bsX: number[][] = [];
   const bsY: number[] = [];
   const selectedSet = new Set<number>();
   for (let i = 0; i < size; i++) {
-    const idx = Math.floor(Math.random() * n);
+    const idx = Math.floor(rng() * n);
     bsX.push(X[idx]);
     bsY.push(y[idx]);
     selectedSet.add(idx);
@@ -501,8 +513,9 @@ export function trainLambdaRegressor(): void {
 
   const models: LambdaGBModel[] = [];
   for (let i = 0; i < LAMBDA_ENSEMBLE_SIZE; i++) {
-    const { X: bsX, y: bsY } = bootstrapSample(X, y);
-    const model = trainLambdaGBM(bsX, bsY, 150, 0.08, 4);
+    const rng = seededRng(ENSEMBLE_SEEDS[i] + X.length);
+    const { X: bsX, y: bsY } = bootstrapSample(X, y, rng);
+    const model = trainLambdaGBM(bsX, bsY, 150, 0.08, 4, ENSEMBLE_SEEDS[i]);
     models.push(model);
   }
 
@@ -517,13 +530,13 @@ export function trainLambdaRegressor(): void {
 
   retrainCount++;
   lastRetrainTime = Date.now();
-  lastPhysicsStoreSize = getAllPhysicsResults().length;
+  lastPhysicsStoreSize = getPhysicsStoreSize();
 }
 
 function shouldRetrain(): boolean {
   if (!lambdaEnsemble) return true;
 
-  const currentPhysicsSize = getAllPhysicsResults().length;
+  const currentPhysicsSize = getPhysicsStoreSize();
   const newResults = currentPhysicsSize - lastPhysicsStoreSize;
   if (newResults >= MIN_RETRAIN_SAMPLES) return true;
 

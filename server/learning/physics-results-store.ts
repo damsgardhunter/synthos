@@ -236,6 +236,10 @@ export function getAllPhysicsResults(): PhysicsResult[] {
   return Array.from(store.values());
 }
 
+export function getPhysicsStoreSize(): number {
+  return store.size;
+}
+
 export function getPhysicsStoreStats() {
   const results = Array.from(store.values());
   const n = results.length || 1;
