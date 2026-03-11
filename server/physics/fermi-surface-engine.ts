@@ -1182,14 +1182,22 @@ function computeLindhardSusceptibility(
   const chi0PeakQ = qVectors[0].q;
   const chi0Average = qVectors.reduce((s, v) => s + v.chi0, 0) / qVectors.length;
 
-  const divergenceProximity = Math.min(1.0, chi0Peak / (chi0Peak + 5.0));
+  const peakToAvgRatio = chi0Average > 1e-10 ? chi0Peak / chi0Average : 1.0;
+
+  const sharpnessTerm = Math.min(1.0, (peakToAvgRatio - 1.0) / 4.0);
+  const magnitudeTerm = Math.min(1.0, chi0Peak / (chi0Peak + 5.0));
+  const divergenceProximity = Math.min(1.0, 0.6 * magnitudeTerm + 0.4 * Math.max(0, sharpnessTerm));
+
+  const phaseCompetitionRisk = peakToAvgRatio > 3.0;
 
   const electronPockets = pockets.filter(p => p.type === "electron");
   const holePockets = pockets.filter(p => p.type === "hole");
   const hasEHNesting = electronPockets.length > 0 && holePockets.length > 0;
 
-  const sdwSusceptibility = chi0Peak * (hasEHNesting ? 1.2 : 0.6) * (1 + divergenceProximity);
-  const cdwSusceptibility = chi0Peak * 0.8 * (1 + divergenceProximity * 0.5);
+  const competitionPenalty = phaseCompetitionRisk ? Math.min(1.5, 1.0 + (peakToAvgRatio - 3.0) * 0.1) : 1.0;
+
+  const sdwSusceptibility = chi0Peak * (hasEHNesting ? 1.2 : 0.6) * (1 + divergenceProximity) * competitionPenalty;
+  const cdwSusceptibility = chi0Peak * 0.8 * (1 + divergenceProximity * 0.5) * competitionPenalty;
 
   return {
     chi0Peak: Number(chi0Peak.toFixed(4)),
@@ -1225,40 +1233,89 @@ function computeNestingVectors(
     }
   }
 
-  const sampleSize = Math.min(fermiKPoints.length, 100);
-  const sampled = fermiKPoints.length > sampleSize
-    ? fermiKPoints.filter((_, i) => i % Math.ceil(fermiKPoints.length / sampleSize) === 0)
-    : fermiKPoints;
+  const MAX_SAMPLE = 150;
+  let sampled: typeof fermiKPoints;
+  if (fermiKPoints.length > MAX_SAMPLE) {
+    const prob = MAX_SAMPLE / fermiKPoints.length;
+    const seedVal = fermiKPoints.length * 7 + 13;
+    let rng = seedVal;
+    const lcgNext = () => { rng = (rng * 1664525 + 1013904223) & 0x7fffffff; return rng / 0x7fffffff; };
+    sampled = fermiKPoints.filter(() => lcgNext() < prob);
+    if (sampled.length < 20) sampled = fermiKPoints.slice(0, MAX_SAMPLE);
+  } else {
+    sampled = fermiKPoints;
+  }
 
-  const qBins: Map<string, { q: number[]; count: number; pockets: Set<string> }> = new Map();
   const qResolution = 0.05;
+  const qBins: Map<string, { qSum: number[]; count: number; pockets: Set<string> }> = new Map();
+
+  const binKey = (qx: number, qy: number, qz: number) =>
+    `${Math.round(qx / qResolution)},${Math.round(qy / qResolution)},${Math.round(qz / qResolution)}`;
 
   for (let i = 0; i < sampled.length; i++) {
     for (let j = i + 1; j < sampled.length; j++) {
       if (sampled[i].pocketIndex === sampled[j].pocketIndex) continue;
 
-      const q = [
-        sampled[j].k[0] - sampled[i].k[0],
-        sampled[j].k[1] - sampled[i].k[1],
-        sampled[j].k[2] - sampled[i].k[2],
-      ];
+      const qx = sampled[j].k[0] - sampled[i].k[0];
+      const qy = sampled[j].k[1] - sampled[i].k[1];
+      const qz = sampled[j].k[2] - sampled[i].k[2];
+      const pairKey = `${sampled[i].pocketIndex}-${sampled[j].pocketIndex}`;
 
-      const qKey = q.map(v => Math.round(v / qResolution) * qResolution).join(",");
-
-      if (!qBins.has(qKey)) {
-        qBins.set(qKey, {
-          q: q.map(v => Number(v.toFixed(3))),
-          count: 0,
-          pockets: new Set(),
-        });
+      const primaryKey = binKey(qx, qy, qz);
+      if (!qBins.has(primaryKey)) {
+        qBins.set(primaryKey, { qSum: [0, 0, 0], count: 0, pockets: new Set() });
       }
-      const bin = qBins.get(qKey)!;
+      const bin = qBins.get(primaryKey)!;
+      bin.qSum[0] += qx;
+      bin.qSum[1] += qy;
+      bin.qSum[2] += qz;
       bin.count++;
-      bin.pockets.add(`${sampled[i].pocketIndex}-${sampled[j].pocketIndex}`);
+      bin.pockets.add(pairKey);
     }
   }
 
-  const sortedBins = Array.from(qBins.values())
+  const mergedBins: { q: number[]; count: number; pockets: Set<string> }[] = [];
+  const visited = new Set<string>();
+
+  const qBinKeys = Array.from(qBins.keys());
+  for (const key of qBinKeys) {
+    if (visited.has(key)) continue;
+    const bin = qBins.get(key)!;
+    if (bin.count < 1) continue;
+    visited.add(key);
+
+    let totalCount = bin.count;
+    const totalQ = [...bin.qSum];
+    const allPockets = new Set<string>();
+    bin.pockets.forEach(p => allPockets.add(p));
+
+    const parts = key.split(",").map(Number);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          if (dx === 0 && dy === 0 && dz === 0) continue;
+          const neighborKey = `${parts[0] + dx},${parts[1] + dy},${parts[2] + dz}`;
+          const neighbor = qBins.get(neighborKey);
+          if (neighbor && !visited.has(neighborKey)) {
+            visited.add(neighborKey);
+            totalCount += neighbor.count;
+            totalQ[0] += neighbor.qSum[0];
+            totalQ[1] += neighbor.qSum[1];
+            totalQ[2] += neighbor.qSum[2];
+            neighbor.pockets.forEach(p => allPockets.add(p));
+          }
+        }
+      }
+    }
+
+    mergedBins.push({
+      q: [totalQ[0] / totalCount, totalQ[1] / totalCount, totalQ[2] / totalCount],
+      count: totalCount,
+      pockets: allPockets,
+    });
+  }
+
+  const sortedBins = mergedBins
     .filter(b => b.count > 1)
     .sort((a, b) => b.count - a.count)
     .slice(0, 5);
@@ -1269,7 +1326,7 @@ function computeNestingVectors(
     const pocketPairs = Array.from(bin.pockets);
     const firstPair = pocketPairs[0]?.split("-").map(Number) ?? [0, 1];
     nestingVectors.push({
-      q: bin.q,
+      q: bin.q.map(v => Number(v.toFixed(4))),
       strength: Number((bin.count / maxCount).toFixed(4)),
       connectedPockets: [firstPair[0], firstPair[1]],
     });
