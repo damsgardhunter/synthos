@@ -172,9 +172,23 @@ function parseFormulaElements(formula: string): Record<string, number> {
 }
 
 const seenCompositions: Map<string, Record<string, number>> = new Map();
+const MAX_DISTANCE_SAMPLE = 500;
+let seenSample: Record<string, number>[] = [];
 
-function computeCompositionFractions(formula: string): Record<string, number> {
-  const counts = parseFormulaCounts(formula);
+function rebuildSeenSample(): void {
+  const allFracs = Array.from(seenCompositions.values());
+  if (allFracs.length <= MAX_DISTANCE_SAMPLE) {
+    seenSample = allFracs;
+    return;
+  }
+  seenSample = [];
+  const step = allFracs.length / MAX_DISTANCE_SAMPLE;
+  for (let i = 0; i < MAX_DISTANCE_SAMPLE; i++) {
+    seenSample.push(allFracs[Math.floor(i * step)]);
+  }
+}
+
+function computeFractionsFromCounts(counts: Record<string, number>): Record<string, number> {
   const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
   const fracs: Record<string, number> = {};
   for (const el of Object.keys(counts)) {
@@ -183,38 +197,52 @@ function computeCompositionFractions(formula: string): Record<string, number> {
   return fracs;
 }
 
-function computeCompositionDistance(formula: string): number {
-  const fracsA = computeCompositionFractions(formula);
-  if (seenCompositions.size === 0) return 1.0;
+function computeCompositionFractions(formula: string): Record<string, number> {
+  return computeFractionsFromCounts(parseFormulaCounts(formula));
+}
+
+function fracDistance(fracsA: Record<string, number>, fracsB: Record<string, number>): number {
+  const keysA = Object.keys(fracsA);
+  const keysB = Object.keys(fracsB);
+  let sumSq = 0;
+  for (const el of keysA) {
+    const diff = fracsA[el] - (fracsB[el] || 0);
+    sumSq += diff * diff;
+  }
+  for (const el of keysB) {
+    if (!(el in fracsA)) {
+      sumSq += fracsB[el] * fracsB[el];
+    }
+  }
+  return Math.sqrt(sumSq);
+}
+
+function computeCompositionDistanceFromFracs(fracsA: Record<string, number>): number {
+  if (seenSample.length === 0) return 1.0;
 
   let minDist = Infinity;
-  seenCompositions.forEach((fracsB) => {
-    const allKeys = new Set([...Object.keys(fracsA), ...Object.keys(fracsB)]);
-    let sumSq = 0;
-    allKeys.forEach(el => {
-      const diff = (fracsA[el] || 0) - (fracsB[el] || 0);
-      sumSq += diff * diff;
-    });
-    minDist = Math.min(minDist, Math.sqrt(sumSq));
-  });
+  for (let i = 0; i < seenSample.length; i++) {
+    const d = fracDistance(fracsA, seenSample[i]);
+    if (d < minDist) minDist = d;
+    if (d === 0) return 0;
+  }
   return Math.min(1.0, minDist);
 }
 
-function computeElementRarity(formula: string): number {
-  const counts = parseFormulaElements(formula);
+const COMMON_ELEMENTS = new Set([
+  "Fe", "Cu", "Ni", "Co", "Ti", "Al", "Mg", "Zn", "Mn", "Cr",
+  "O", "N", "C", "H", "S", "Si", "B", "P", "Se", "Te",
+  "La", "Y", "Ba", "Sr", "Ca", "Nb", "V", "Mo", "W", "Pb",
+]);
+
+function computeElementRarityFromCounts(counts: Record<string, number>): number {
   const elements = Object.keys(counts);
   if (elements.length === 0) return 0;
-
-  const commonElements = new Set([
-    "Fe", "Cu", "Ni", "Co", "Ti", "Al", "Mg", "Zn", "Mn", "Cr",
-    "O", "N", "C", "H", "S", "Si", "B", "P", "Se", "Te",
-    "La", "Y", "Ba", "Sr", "Ca", "Nb", "V", "Mo", "W", "Pb",
-  ]);
 
   let raritySum = 0;
   for (const el of elements) {
     const data = getElementData(el);
-    const isCommon = commonElements.has(el);
+    const isCommon = COMMON_ELEMENTS.has(el);
     const atomicNumber = data?.atomicNumber ?? 50;
     let elRarity = isCommon ? 0.1 : 0.5;
     if (atomicNumber > 56 && atomicNumber <= 71) elRarity += 0.2;
@@ -224,8 +252,7 @@ function computeElementRarity(formula: string): number {
   return Math.min(1.0, raritySum / elements.length);
 }
 
-function computeStructuralUniqueness(candidate: SuperconductorCandidate): number {
-  const counts = parseFormulaElements(candidate.formula);
+function computeStructuralUniquenessFromCounts(counts: Record<string, number>, candidate: SuperconductorCandidate): number {
   const elements = Object.keys(counts);
   const nElements = elements.length;
 
@@ -365,9 +392,11 @@ function computeCuriosityScore(
 }
 
 function computeNoveltyScore(candidate: SuperconductorCandidate): number {
-  const compositionDist = computeCompositionDistance(candidate.formula);
-  const elementRarity = computeElementRarity(candidate.formula);
-  const structuralUniqueness = computeStructuralUniqueness(candidate);
+  const counts = parseFormulaCounts(candidate.formula);
+  const fracs = computeFractionsFromCounts(counts);
+  const compositionDist = computeCompositionDistanceFromFracs(fracs);
+  const elementRarity = computeElementRarityFromCounts(counts);
+  const structuralUniqueness = computeStructuralUniquenessFromCounts(counts, candidate);
   const baseNovelty = 0.4 * compositionDist + 0.3 * elementRarity + 0.3 * structuralUniqueness;
 
   let fingerprintNovelty = 0.5;
@@ -413,6 +442,7 @@ export function selectForDFT(
   for (const c of candidates) {
     seenCompositions.set(c.formula, computeCompositionFractions(c.formula));
   }
+  rebuildSeenSample();
 
   const bestTcSoFar = convergenceStats.bestTcFromLoop > 0
     ? convergenceStats.bestTcFromLoop
