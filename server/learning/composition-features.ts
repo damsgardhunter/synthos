@@ -86,7 +86,6 @@ export interface CompositionFeatures {
 
   massMean: number;
   massStd: number;
-  massVariance: number;
   massMin: number;
   massMax: number;
 
@@ -297,16 +296,21 @@ export function computeCompositionFeatures(formula: string): CompositionFeatures
   const meltingMinVal = statMin(melt);
   const meltingMaxVal = statMax(melt);
 
+  const FCC_PACKING = 0.74;
   const avgRadius_m = radiusMean * 1e-12;
-  const volumePerAtom = avgRadius_m > 0 ? (4 / 3) * Math.PI * avgRadius_m ** 3 * 1e30 : 0;
+  const sphereVol = avgRadius_m > 0 ? (4 / 3) * Math.PI * avgRadius_m ** 3 * 1e30 : 0;
+  const volumePerAtom = sphereVol > 0 ? sphereVol / FCC_PACKING : 0;
   const densityEstimate = massMean > 0 && volumePerAtom > 0 ? massMean / (volumePerAtom * 6.022e23) * 1e24 : 0;
-
-  const coordNumberEstimate = enMean > 0 ? Math.min(12, Math.max(4, Math.round(12 * (1 - enStdVal / (enMean + 0.01))))) : 6;
 
   const ionicCharacter = en.count >= 2 ? 1 - Math.exp(-0.25 * (enMaxVal - enMinVal) ** 2) : 0;
   const covalentCharacter = 1 - ionicCharacter;
   const totalBlock = dCount + fCount + pCount + sCount || 1;
   const metallicCharacter = (dCount + fCount) / totalBlock;
+
+  const enBasedCoord = enMean > 0 ? 12 * (1 - enStdVal / (enMean + 0.01)) : 6;
+  const coordNumberEstimate = Math.min(12, Math.max(4, Math.round(
+    metallicCharacter * Math.max(enBasedCoord, 10) + (1 - metallicCharacter) * enBasedCoord
+  )));
 
   const shannonEntropy = fractions.reduce((s, f) => f > 0 ? s - f * Math.log(f) : s, 0);
   const avgFrac = 1 / Math.max(1, elements.length);
@@ -325,7 +329,7 @@ export function computeCompositionFeatures(formula: string): CompositionFeatures
   const result: CompositionFeatures = {
     enMean, enStd: enStdVal, enMin: enMinVal, enMax: enMaxVal, enRange: enMaxVal - enMinVal, enGeomMean,
     radiusMean, radiusStd: radiusStdVal, radiusMin: radiusMinVal, radiusMax: radiusMaxVal, radiusRange: radiusMaxVal - radiusMinVal,
-    massMean, massStd: massStdVal, massVariance: massStdVal ** 2, massMin: massMinVal, massMax: massMaxVal,
+    massMean, massStd: massStdVal, massMin: massMinVal, massMax: massMaxVal,
     vecMean, vecStd: vecStdVal,
     ieMean, ieStd: ieStdVal, ieMin: ieMinVal, ieMax: ieMaxVal,
     eaMean, eaStd: eaStdVal,
@@ -357,7 +361,7 @@ export function compositionFeatureVector(cf: CompositionFeatures): number[] {
   return [
     cf.enMean, cf.enStd, cf.enMin, cf.enMax, cf.enRange, cf.enGeomMean,
     cf.radiusMean, cf.radiusStd, cf.radiusMin, cf.radiusMax, cf.radiusRange,
-    cf.massMean, cf.massStd, cf.massVariance, cf.massMin, cf.massMax,
+    cf.massMean, cf.massStd, cf.massMin, cf.massMax,
     cf.vecMean, cf.vecStd,
     cf.ieMean, cf.ieStd, cf.ieMin, cf.ieMax,
     cf.eaMean, cf.eaStd,
@@ -379,7 +383,7 @@ export function compositionFeatureVector(cf: CompositionFeatures): number[] {
 export const COMPOSITION_FEATURE_NAMES = [
   "comp_enMean", "comp_enStd", "comp_enMin", "comp_enMax", "comp_enRange", "comp_enGeom",
   "comp_radiusMean", "comp_radiusStd", "comp_radiusMin", "comp_radiusMax", "comp_radiusRange",
-  "comp_massMean", "comp_massStd", "comp_massVariance", "comp_massMin", "comp_massMax",
+  "comp_massMean", "comp_massStd", "comp_massMin", "comp_massMax",
   "comp_vecMean", "comp_vecStd",
   "comp_ieMean", "comp_ieStd", "comp_ieMin", "comp_ieMax",
   "comp_eaMean", "comp_eaStd",
