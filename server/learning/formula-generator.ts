@@ -4,6 +4,7 @@ import type { EventEmitter } from "./engine";
 import { trackDuplicatesSkipped } from "./strategy-analyzer";
 import { normalizeFormula } from "./utils";
 import { passesValenceFilter, passesCompositionComplexityFilter } from "./candidate-generator";
+import { rlAgent } from "./rl-agent";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -91,7 +92,19 @@ const TARGET_APPLICATIONS = [
   "spin-orbit coupled material",
 ];
 
+const APPLICATION_FAMILY_MAP: Record<string, string[]> = {
+  "high-temperature superconductor": ["cuprate", "hydride", "layered-pnictide"],
+  "topological insulator": ["kagome-metal", "chalcogenide"],
+  "heavy fermion superconductor": ["intermetallic", "oxide-perovskite"],
+  "kagome lattice metal": ["kagome-metal"],
+  "clathrate hydride superconductor": ["hydride"],
+  "spin-orbit coupled material": ["chalcogenide", "kagome-metal"],
+  "ultra-hard coating material": ["boride", "intermetallic"],
+  "MXene-based compound": ["intermetallic", "boride"],
+};
+
 let applicationIndex = 0;
+let applicationSuccessStreak: Record<string, number> = {};
 let recentlyGenerated: string[] = [];
 let recentlyGeneratedLoaded = false;
 let inverseDesignMode = false;
@@ -126,9 +139,51 @@ export function getGenerationModes(): { inverseDesign: boolean; boundaryHunting:
 }
 
 export function getNextTargetApplication(): string {
+  try {
+    const stats = rlAgent.getStats();
+
+    if (stats.recentAvgReward > 0.3 && stats.topElementGroups.length > 0) {
+      const topFamilies = stats.topElementGroups.slice(0, 3).map(g => g.name.toLowerCase());
+
+      let bestApp: string | null = null;
+      let bestScore = -1;
+
+      for (const app of TARGET_APPLICATIONS) {
+        const mappedFamilies = APPLICATION_FAMILY_MAP[app];
+        if (!mappedFamilies) continue;
+
+        let overlap = 0;
+        for (const fam of mappedFamilies) {
+          if (topFamilies.some(tf => fam.includes(tf) || tf.includes(fam))) overlap++;
+        }
+
+        const streak = applicationSuccessStreak[app] || 0;
+        const streakBonus = Math.min(0.3, streak * 0.1);
+        const score = overlap + streakBonus;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestApp = app;
+        }
+      }
+
+      if (bestApp && bestScore > 0) {
+        return bestApp;
+      }
+    }
+  } catch {}
+
   const app = TARGET_APPLICATIONS[applicationIndex % TARGET_APPLICATIONS.length];
   applicationIndex++;
   return app;
+}
+
+export function recordApplicationSuccess(application: string, count: number): void {
+  if (count > 0) {
+    applicationSuccessStreak[application] = (applicationSuccessStreak[application] || 0) + count;
+  } else {
+    applicationSuccessStreak[application] = 0;
+  }
 }
 
 interface GeneratedFormula {
@@ -203,7 +258,11 @@ export async function generateNovelFormulas(
       messages: [
         {
           role: "system",
-          content: `You are a materials science AI that generates novel chemical compositions optimized for strong pairing susceptibility. Rather than directly targeting high Tc, focus on compositions with: high density of states at the Fermi level, strong electron-phonon or electron-boson coupling channels, favorable Fermi surface nesting, proximity to quantum critical points, and mixed stiff-soft bonding networks. Each material should be chemically plausible (valid stoichiometry, realistic oxidation states). Stoichiometry rules: prefer integer counts (e.g. MgB2, LaH10) but fractional counts up to 2 decimal places are allowed for doped systems (e.g. Ba0.6K0.4BiO3, La1.85Sr0.15CuO4). Do NOT use very small fractions like Fe0.01 or stoichiometries with more than 5 distinct elements. Return JSON with key 'materials' containing an array of objects, each with: 'name' (descriptive), 'formula' (chemical formula), 'predictedProperties' (object with 'bandGap' number or null, 'formationEnergy' number or null, 'stability' number 0-1, 'description' string under 100 chars), 'confidence' (0-1 float), 'notes' (brief rationale under 150 chars focusing on pairing mechanism).`,
+          content: `You are a materials science AI that generates novel chemical compositions optimized for strong pairing susceptibility. Focus on: high DOS at Fermi level, strong electron-phonon coupling, favorable nesting, proximity to quantum critical points, and mixed stiff-soft bonding. Each material must be chemically plausible. Stoichiometry: prefer integers (MgB2, LaH10) but fractions to 2 decimal places are allowed for doped systems (Ba0.6K0.4BiO3, La1.85Sr0.15CuO4). No fractions below 0.05. Max 5 distinct elements. Return JSON: {"materials": [...]}`,
+        },
+        {
+          role: "assistant",
+          content: `{"materials": [{"name": "Strontium-doped lanthanum cuprate", "formula": "La1.85Sr0.15CuO4", "predictedProperties": {"bandGap": null, "formationEnergy": -2.1, "stability": 0.8, "description": "Hole-doped 214 cuprate with optimal carrier concentration"}, "confidence": 0.75, "notes": "Strong dx2-y2 pairing channel, VHS near Ef at optimal doping"}, {"name": "Yttrium decahydride", "formula": "YH10", "predictedProperties": {"bandGap": null, "formationEnergy": -0.3, "stability": 0.4, "description": "Sodalite-cage clathrate hydride"}, "confidence": 0.6, "notes": "High phonon frequency H cage, strong e-ph lambda > 2.5"}]}`,
         },
         {
           role: "user",
@@ -323,5 +382,6 @@ export async function generateNovelFormulas(
     });
   }
 
+  recordApplicationSuccess(application, generated);
   return generated;
 }
