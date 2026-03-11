@@ -37,19 +37,44 @@ export interface AflowResult {
 }
 
 function normalizeFormulaForAflow(formula: string): string {
-  return formula
+  const cleaned = formula
     .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
     .replace(/\s+/g, "");
+
+  const elementPattern = /([A-Z][a-z]?)(\d*)/g;
+  const elements: { el: string; count: string }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = elementPattern.exec(cleaned)) !== null) {
+    if (match[1]) {
+      elements.push({ el: match[1], count: match[2] || "" });
+    }
+  }
+  if (elements.length === 0) return cleaned;
+
+  elements.sort((a, b) => a.el.localeCompare(b.el));
+  return elements.map(e => `${e.el}${e.count}`).join("");
 }
 
 let aflowConsecutiveFailures = 0;
 let aflowBackoffUntil = 0;
+let aflowInFlight = 0;
+
+function aflowRecordFailure(reason: string): void {
+  if (aflowInFlight <= 1) {
+    if (aflowConsecutiveFailures === 0) {
+      console.log(`[AFLOW API] ${reason}, backing off`);
+    }
+    aflowConsecutiveFailures++;
+    aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
+  }
+}
 
 async function aflowFetch(query: string): Promise<any[] | null> {
   if (Date.now() < aflowBackoffUntil) {
     return null;
   }
 
+  aflowInFlight++;
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
     const response = await fetch(url, {
@@ -59,36 +84,35 @@ async function aflowFetch(query: string): Promise<any[] | null> {
 
     if (!response.ok) {
       if (response.status === 429) {
-        console.log("[AFLOW API] Rate limited, backing off");
-        aflowConsecutiveFailures++;
-        aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
+        aflowRecordFailure("Rate limited");
       }
       return null;
     }
 
     const text = await response.text();
     if (!text || !text.trim().startsWith("[")) {
-      if (aflowConsecutiveFailures === 0) {
-        console.log("[AFLOW API] Non-JSON response from server, backing off");
-      }
-      aflowConsecutiveFailures++;
-      aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
+      aflowRecordFailure("Non-JSON response from server");
       return null;
     }
 
-    const data = JSON.parse(text);
+    let data: any;
+    try {
+      data = JSON.parse(text);
+    } catch (parseErr: any) {
+      aflowRecordFailure(`Malformed JSON body: ${parseErr?.message?.slice(0, 60) ?? "unknown"}`);
+      return null;
+    }
+
     aflowConsecutiveFailures = 0;
     if (Array.isArray(data)) return data;
     return null;
   } catch (err: any) {
     if (err?.name !== "AbortError") {
-      if (aflowConsecutiveFailures === 0) {
-        console.log(`[AFLOW API] Request failed: ${err?.message || "unknown"}, backing off`);
-      }
-      aflowConsecutiveFailures++;
-      aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
+      aflowRecordFailure(`Request failed: ${err?.message || "unknown"}`);
     }
     return null;
+  } finally {
+    aflowInFlight--;
   }
 }
 
@@ -235,8 +259,9 @@ export function crossValidateWithMP(
       let agreement: CrossValidationResult["agreement"] = "no-comparison";
       if (stability != null) {
         const mappedExternal = mpSummary.energyAboveHull <= 0 ? 1.0 : Math.max(0, 1 - mpSummary.energyAboveHull * 5);
-        deviation = stability > 0 ? Math.abs(stability - mappedExternal) / stability * 100 : null;
-        agreement = deviation != null ? (deviation > 30 ? "major-discrepancy" : deviation > 10 ? "minor-discrepancy" : "match") : "no-comparison";
+        const denominator = Math.max(Math.abs(mappedExternal), Math.abs(stability), 0.001);
+        deviation = Math.abs(stability - mappedExternal) / denominator * 100;
+        agreement = deviation > 30 ? "major-discrepancy" : deviation > 10 ? "minor-discrepancy" : "match";
       }
       results.push({
         source: "Materials Project",
@@ -304,9 +329,10 @@ export function crossValidateWithAflow(
     const stability = candidate.stabilityScore ?? null;
     let deviation: number | null = null;
     let agreement: CrossValidationResult["agreement"] = "no-comparison";
-    if (stability != null && stability > 0) {
+    if (stability != null) {
       const mappedExternal = entry.enthalpy_formation_atom < 0 ? Math.min(1, Math.abs(entry.enthalpy_formation_atom) / 2) : 0;
-      deviation = Math.abs(stability - mappedExternal) / stability * 100;
+      const denominator = Math.max(Math.abs(mappedExternal), Math.abs(stability), 0.001);
+      deviation = Math.abs(stability - mappedExternal) / denominator * 100;
       agreement = deviation > 30 ? "major-discrepancy" : deviation > 10 ? "minor-discrepancy" : "match";
     }
     results.push({
