@@ -88,6 +88,34 @@ const VARIABLE_TO_GENERATOR_MAP: Record<string, string[]> = {
   band_flatness: ["motif_diffusion", "rl"],
 };
 
+const KNOWN_BIAS_VARIABLES = new Set<string>([
+  ...Object.keys(VARIABLE_TO_FAMILY_MAP),
+  ...Object.keys(VARIABLE_TO_ELEMENT_MAP),
+  ...Object.keys(VARIABLE_TO_MOTIF_MAP),
+  ...Object.keys(VARIABLE_TO_GENERATOR_MAP),
+  "Tc", "mu_star", "omega_log", "phonon_softening", "anharmonicity",
+  "debye_temp", "temperature", "strain", "doping", "defect_density",
+  "topology_z2", "berry_phase", "atomic_mass_avg", "electronegativity_spread",
+  "coordination_number", "bond_length_dist", "van_hove_distance",
+  "pairing_symmetry", "orbital_fluct",
+]);
+
+export function validateBiasedVariables(variables: string[]): { valid: string[]; rejected: string[] } {
+  const valid: string[] = [];
+  const rejected: string[] = [];
+  for (const v of variables) {
+    if (KNOWN_BIAS_VARIABLES.has(v)) {
+      valid.push(v);
+    } else {
+      rejected.push(v);
+    }
+  }
+  if (rejected.length > 0) {
+    console.log(`[TheoryBias] Rejected ${rejected.length} unknown biased variables: ${rejected.slice(0, 5).join(", ")}${rejected.length > 5 ? "..." : ""}`);
+  }
+  return { valid, rejected };
+}
+
 let currentBias: TheoryGeneratorBias | null = null;
 let performanceHistory: TheoryPerformanceRecord[] = [];
 let totalBiasApplications = 0;

@@ -79,7 +79,7 @@ import { predictKineticStability, formatKineticStabilityNote, type KineticStabil
 import { detectQuantumCriticality, type QuantumCriticalAnalysis } from "../physics/quantum-criticality";
 import { discoveryMemory, buildFingerprint } from "./discovery-memory";
 import { getGeneratorAllocations, allocateBudget, recordGeneratorOutcome, recordDFTOutcome, recordVerificationOutcome, getGeneratorCompetitionStats, rebalanceWeights, applyTheoryBias, resetToDefaultWeights } from "./generator-manager";
-import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, recordPreBiasBaseline, recordPostBiasPerformance, evaluateTheoryBiasSafety, resetTheoryBias, getTheoryBiasSafetyStats, type TheoryGeneratorBias } from "./theory-guided-generator";
+import { computeTheoryGeneratorBias, recordTheoryBiasOutcome, getTheoryGuidedGeneratorStats, getRLBiasFromTheory, recordPreBiasBaseline, recordPostBiasPerformance, evaluateTheoryBiasSafety, resetTheoryBias, getTheoryBiasSafetyStats, validateBiasedVariables, type TheoryGeneratorBias } from "./theory-guided-generator";
 import { buildAndStoreFeatureRecord, getDatasetSize, getFeatureDataset } from "../theory/physics-feature-db";
 import { updatePhysicsParameters } from "../theory/self-improving-physics";
 import { addMaterialToDataset, updateLandscape, getLandscapeStats } from "../landscape/discovery-landscape";
@@ -117,8 +117,9 @@ import {
 import {
   runCausalDiscovery, generateCausalDataset, getCausalDiscoveryStats,
   getDiscoveredHypotheses as getCausalHypotheses, getCausalRules,
-  getLatestGraph, type CausalRule,
+  getLatestGraph, buildCausalDataRecord, type CausalRule, type CausalDataRecord,
 } from "../theory/causal-physics-discovery";
+import { getGroundTruthSummary, getGroundTruthDataset } from "./ground-truth-store";
 import { crossEngineHub } from "./cross-engine-hub";
 import { discoverNovelSynthesisPaths, getSynthesisDiscoveryStats, recordDFTFeedbackForGA, getGAEvolutionStats, getStructuralMotifStats, type MultiEngineInsights } from "./synthesis-discovery";
 import { planAndTrack, getSynthesisPlannerStats } from "../synthesis/synthesis-planner";
@@ -5437,7 +5438,8 @@ async function runAutonomousFastPath() {
         if (theories.length > 0) {
           const allTheories = getTheoryDatabase();
           const feedback = generateDiscoveryFeedback(allTheories);
-          theoryFeedbackBias = { biasedVariables: feedback.biasedVariables ?? [], biasedElements: feedback.biasedElements ?? [] };
+          const { valid: validBiasVars } = validateBiasedVariables(feedback.biasedVariables ?? []);
+          theoryFeedbackBias = { biasedVariables: validBiasVars, biasedElements: feedback.biasedElements ?? [] };
           crossEngineHub.recordInsight("theory", "global", {
             discoveredEquations: theories.slice(0, 3).map((t: any) => t.equation?.slice(0, 60) ?? ""),
             biases: [...(feedback.biasedVariables ?? []), ...(feedback.biasedElements ?? [])],
@@ -5450,7 +5452,38 @@ async function runAutonomousFastPath() {
 
     if (cycleCount - lastCausalDiscoveryCycle >= 20 && cycleCount % 20 === 0) {
       try {
-        const causalDataset = generateCausalDataset(60);
+        const gtSummary = getGroundTruthSummary();
+        const MIN_CAUSAL_DATAPOINTS = 500;
+        let causalDataset: CausalDataRecord[];
+
+        if (gtSummary.totalDatapoints >= MIN_CAUSAL_DATAPOINTS) {
+          const gtData = getGroundTruthDataset();
+          const gtRecords: CausalDataRecord[] = [];
+          for (const dp of gtData) {
+            try {
+              const rec = buildCausalDataRecord(dp.formula);
+              if (dp.Tc > 0) rec.Tc = dp.Tc;
+              if (dp.lambda !== null) rec.lambda = dp.lambda;
+              if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
+              if (dp.omega_log !== null) rec.phonon_freq = dp.omega_log;
+              if (dp.mu_star !== null) rec.mu_star = dp.mu_star;
+              rec.pressure = dp.pressure;
+              gtRecords.push(rec);
+            } catch {}
+          }
+          if (gtRecords.length >= MIN_CAUSAL_DATAPOINTS) {
+            causalDataset = gtRecords;
+            console.log(`[Engine] Causal discovery using ${gtRecords.length} ground-truth datapoints (synthetic fallback disabled)`);
+          } else {
+            const synthPad = generateCausalDataset(MIN_CAUSAL_DATAPOINTS - gtRecords.length);
+            causalDataset = [...gtRecords, ...synthPad];
+            console.log(`[Engine] Causal discovery: ${gtRecords.length} ground-truth + ${synthPad.length} synthetic = ${causalDataset.length} total`);
+          }
+        } else {
+          console.log(`[Engine] Causal discovery deferred: only ${gtSummary.totalDatapoints} ground-truth datapoints (need ${MIN_CAUSAL_DATAPOINTS}). Using minimal synthetic dataset.`);
+          causalDataset = generateCausalDataset(Math.max(60, gtSummary.totalDatapoints));
+        }
+
         const causalResult = runCausalDiscovery(causalDataset);
         lastCausalDiscoveryCycle = cycleCount;
         if (causalResult.designGuidance.length > 0) {
@@ -5460,7 +5493,7 @@ async function runAutonomousFastPath() {
             causalImpactOnTc: g.causalImpactOnTc,
           }));
         }
-        emit("log", { phase: "engine", event: "Causal discovery cycle", detail: `Causal graph: ${causalResult.graph.edges.length} edges, ${causalResult.hypotheses.length} hypotheses, ${causalResult.rules.length} rules. Top guidance: ${causalResult.designGuidance[0]?.variable ?? "none"} (${causalResult.designGuidance[0]?.direction ?? ""})`, dataSource: "Integrated Subsystems" });
+        emit("log", { phase: "engine", event: "Causal discovery cycle", detail: `Causal graph: ${causalResult.graph.edges.length} edges, ${causalResult.hypotheses.length} hypotheses, ${causalResult.rules.length} rules. Dataset: ${causalDataset.length} (GT=${gtSummary.totalDatapoints}). Top guidance: ${causalResult.designGuidance[0]?.variable ?? "none"} (${causalResult.designGuidance[0]?.direction ?? ""})`, dataSource: "Integrated Subsystems" });
       } catch (e) { console.error("[Engine] Causal discovery cycle failed:", e); }
     }
 
@@ -7929,7 +7962,8 @@ export async function startEngine() {
     if (theories.length > 0) {
       const allTheories = getTheoryDatabase();
       const feedback = generateDiscoveryFeedback(allTheories);
-      theoryFeedbackBias = { biasedVariables: feedback.biasedVariables ?? [], biasedElements: feedback.biasedElements ?? [] };
+      const { valid: validBiasVars2 } = validateBiasedVariables(feedback.biasedVariables ?? []);
+      theoryFeedbackBias = { biasedVariables: validBiasVars2, biasedElements: feedback.biasedElements ?? [] };
       emit("log", { phase: "engine", event: "Theory discovery auto-started", detail: `Initial run: ${theories.length} theories discovered, top score=${theories[0]?.theoryScore?.toFixed(3)}`, dataSource: "Integrated Subsystems" });
     }
   } catch (e: any) {
@@ -7937,8 +7971,35 @@ export async function startEngine() {
   }
 
   try {
-    const causalDataset = generateCausalDataset(60);
-    const causalResult = runCausalDiscovery(causalDataset);
+    const gtSummaryInit = getGroundTruthSummary();
+    const MIN_CAUSAL_INIT = 500;
+    let causalDatasetInit: CausalDataRecord[];
+
+    if (gtSummaryInit.totalDatapoints >= MIN_CAUSAL_INIT) {
+      const gtDataInit = getGroundTruthDataset();
+      const gtRecsInit: CausalDataRecord[] = [];
+      for (const dp of gtDataInit) {
+        try {
+          const rec = buildCausalDataRecord(dp.formula);
+          if (dp.Tc > 0) rec.Tc = dp.Tc;
+          if (dp.lambda !== null) rec.lambda = dp.lambda;
+          if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
+          if (dp.omega_log !== null) rec.phonon_freq = dp.omega_log;
+          if (dp.mu_star !== null) rec.mu_star = dp.mu_star;
+          rec.pressure = dp.pressure;
+          gtRecsInit.push(rec);
+        } catch {}
+      }
+      causalDatasetInit = gtRecsInit.length >= MIN_CAUSAL_INIT
+        ? gtRecsInit
+        : [...gtRecsInit, ...generateCausalDataset(MIN_CAUSAL_INIT - gtRecsInit.length)];
+      console.log(`[Engine] Causal auto-start: ${gtRecsInit.length} GT records used`);
+    } else {
+      console.log(`[Engine] Causal auto-start deferred: ${gtSummaryInit.totalDatapoints}/${MIN_CAUSAL_INIT} GT datapoints. Using synthetic.`);
+      causalDatasetInit = generateCausalDataset(60);
+    }
+
+    const causalResult = runCausalDiscovery(causalDatasetInit);
     lastCausalDiscoveryCycle = cycleCount;
     if (causalResult.designGuidance.length > 0) {
       causalDesignGuidance = causalResult.designGuidance.map(g => ({
@@ -7947,7 +8008,7 @@ export async function startEngine() {
         causalImpactOnTc: g.causalImpactOnTc,
       }));
     }
-    emit("log", { phase: "engine", event: "Causal discovery auto-started", detail: `Initial run: ${causalResult.graph.edges.length} causal edges, ${causalResult.hypotheses.length} mechanism hypotheses, ${causalResult.rules.length} causal rules, ${causalResult.designGuidance.length} design guidance vars`, dataSource: "Integrated Subsystems" });
+    emit("log", { phase: "engine", event: "Causal discovery auto-started", detail: `Initial run: ${causalResult.graph.edges.length} causal edges, ${causalResult.hypotheses.length} mechanism hypotheses, ${causalResult.rules.length} causal rules, ${causalResult.designGuidance.length} design guidance vars. Dataset=${causalDatasetInit.length} (GT=${gtSummaryInit.totalDatapoints})`, dataSource: "Integrated Subsystems" });
   } catch (e: any) {
     emit("log", { phase: "engine", event: "Causal discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
   }
