@@ -7255,32 +7255,35 @@ async function runLearningCycle() {
           scored.sort((a, b) => b.discoveryScore - a.discoveryScore);
           const topProto = scored.slice(0, 30);
 
-          for (const entry of topProto) {
+          const PROTO_CONCURRENCY = 10;
+          for (let batchStart = 0; batchStart < topProto.length; batchStart += PROTO_CONCURRENCY) {
             if (!shouldContinue()) break;
-            const { pc, normalized, features, gbResult, gnnResult, discoveryScore, discoveryDetails } = entry;
+            const batch = topProto.slice(batchStart, batchStart + PROTO_CONCURRENCY);
 
-            let protoTopoScore = 0;
-            try {
-              const protoElectronic = computeElectronicStructure(normalized, null);
-              const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
-              protoTopoScore = protoTopo.topologicalScore;
-              trackTopologyResult(protoTopo);
-            } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
+            const batchResults = await Promise.allSettled(batch.map(async (entry) => {
+              const { pc, normalized, features, gbResult, gnnResult, discoveryScore } = entry;
 
-            const lambdaML = features.electronPhononLambda ?? 0;
-            const metallicityML = features.metallicity ?? 0.5;
-            const isHydride = pc.prototype?.toLowerCase().includes("clathrate") || pc.prototype?.toLowerCase().includes("sodalite") || pc.prototype?.toLowerCase().includes("hydride");
-            const protoFamilyPressure = estimateFamilyPressure(normalized);
-            const insertPressure = isHydride ? Math.max(150, protoFamilyPressure) : protoFamilyPressure;
-            let predictedTc: number;
-            if (gnnResult.confidence > 0.3 && gnnResult.tc > 0) {
-              predictedTc = Math.round(gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4);
-            } else {
-              predictedTc = Math.round(gbResult.tcPredicted);
-            }
-            predictedTc = applyAmbientTcCap(predictedTc, lambdaML, insertPressure, metallicityML, normalized);
+              let protoTopoScore = 0;
+              try {
+                const protoElectronic = computeElectronicStructure(normalized, null);
+                const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
+                protoTopoScore = protoTopo.topologicalScore;
+                trackTopologyResult(protoTopo);
+              } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
 
-            try {
+              const lambdaML = features.electronPhononLambda ?? 0;
+              const metallicityML = features.metallicity ?? 0.5;
+              const isHydride = pc.prototype?.toLowerCase().includes("clathrate") || pc.prototype?.toLowerCase().includes("sodalite") || pc.prototype?.toLowerCase().includes("hydride");
+              const protoFamilyPressure = estimateFamilyPressure(normalized);
+              const insertPressure = isHydride ? Math.max(150, protoFamilyPressure) : protoFamilyPressure;
+              let predictedTc: number;
+              if (gnnResult.confidence > 0.3 && gnnResult.tc > 0) {
+                predictedTc = Math.round(gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4);
+              } else {
+                predictedTc = Math.round(gbResult.tcPredicted);
+              }
+              predictedTc = applyAmbientTcCap(predictedTc, lambdaML, insertPressure, metallicityML, normalized);
+
               const id = `sc-proto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
               const siteStr = Object.entries(pc.siteAssignment).map(([k, v]) => `${k}=${(Array.isArray(v) ? v : [v]).join(",")}`).join("; ");
               const inserted = await insertCandidateWithStabilityCheck({
@@ -7306,6 +7309,7 @@ async function runLearningCycle() {
                   gnnUncertainty: gnnResult.uncertainty,
                   gnnLambda: gnnResult.lambda,
                   gnnTc: gnnResult.tc,
+                  topologicalScore: protoTopoScore,
                 },
                 xgboostScore: gbResult.score,
                 neuralNetScore: gnnResult.confidence,
@@ -7334,7 +7338,15 @@ async function runLearningCycle() {
                 discoveryScore,
               }, "structure_diffusion");
 
-              if (inserted) {
+              return { inserted, pc, discoveryScore };
+            }));
+
+            for (const r of batchResults) {
+              if (r.status === "fulfilled" && r.value.inserted) {
+                const { pc, discoveryScore } = r.value;
+                if (!prototypeCounts[pc.prototype]) {
+                  prototypeCounts[pc.prototype] = { generated: 0, passed: 0, inserted: 0 };
+                }
                 prototypeCounts[pc.prototype].passed++;
                 protoPassedStability++;
                 prototypeCounts[pc.prototype].inserted++;
@@ -7344,8 +7356,10 @@ async function runLearningCycle() {
                 if (discoveryScore > bestDiscoveryScore) {
                   bestDiscoveryScore = discoveryScore;
                 }
+              } else if (r.status === "rejected") {
+                console.error(`[Engine] Prototype candidate insert failed:`, r.reason);
               }
-            } catch (e) { console.error(`[Engine] Prototype candidate insert failed:`, e); }
+            }
           }
 
           const protoSummary = Object.entries(prototypeCounts)
