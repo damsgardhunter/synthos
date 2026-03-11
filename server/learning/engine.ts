@@ -6201,9 +6201,12 @@ async function runAutonomousFastPath() {
         const failureTrainingData = failedFormulas
           .filter(f => f.tc > 0)
           .map(f => ({ formula: f.formula, tc: f.tc, formationEnergy: undefined as number | undefined, structure: undefined as any }));
-        if (failureTrainingData.length >= 5) {
+        const totalTrainingSize = getDatasetSize();
+        const growthThreshold = Math.max(10, Math.ceil(totalTrainingSize * 0.10));
+        if (failureTrainingData.length >= growthThreshold) {
           invalidateGNNModel();
           autonomousGNNRetrainCount++;
+          console.log(`[Engine] GNN invalidated: ${failureTrainingData.length} new failures >= ${growthThreshold} (10% of ${totalTrainingSize} training set)`);
         }
       } catch (e) { console.error("[Engine] GNN model invalidation failed:", e); }
     }
@@ -6323,22 +6326,27 @@ async function runAutonomousFastPath() {
       const synthGuidance = crossEngineHub.getSynthesisGuidance();
       const topoGuidance = crossEngineHub.getTopologicalGuidance();
 
+      const syntheticRewardCap = Math.max(5, autonomousBestTc * 0.15);
+
       if (hubPatterns.length > 0) {
         const highTcConvergence = hubPatterns.find(p => p.name === "multi-engine-convergence");
         if (highTcConvergence && highTcConvergence.formulaExamples.length > 0) {
+          const cappedConvergenceTc = Math.min(highTcConvergence.avgTcBoost, syntheticRewardCap);
           for (const exFormula of highTcConvergence.formulaExamples.slice(0, 3)) {
             const els = parseFormulaElements(exFormula);
-            rlAgent.recordElementOutcome(els, highTcConvergence.avgTcBoost, true);
+            rlAgent.recordElementOutcome(els, cappedConvergenceTc, true);
           }
         }
       }
 
       if (topoGuidance.recommendedElements.length > 0) {
-        rlAgent.recordElementOutcome(topoGuidance.recommendedElements, 30, true);
+        const cappedTopoTc = Math.min(30, syntheticRewardCap);
+        rlAgent.recordElementOutcome(topoGuidance.recommendedElements, cappedTopoTc, true);
       }
 
       if (synthGuidance.dopingRecommended && synthGuidance.dopantSuggestions.length > 0) {
-        rlAgent.recordElementOutcome(synthGuidance.dopantSuggestions.slice(0, 3), 20, true);
+        const cappedDopingTc = Math.min(20, syntheticRewardCap);
+        rlAgent.recordElementOutcome(synthGuidance.dopantSuggestions.slice(0, 3), cappedDopingTc, true);
       }
     } catch (e) { console.error("[Engine] Cross-engine hub steering failed:", e); }
 
