@@ -146,7 +146,7 @@ async function crossValidateWithMP(
 }
 
 function determineDataSource(source: string): DataSourceTag {
-  if (source === "OQMD") return "experimental";
+  if (source === "OQMD") return "dft-computed";
   if (source === "Materials Project" || source === "MP") return "dft-computed";
   if (source === "Materials Science DB" || source === "Materials Science KB") return "llm-estimated";
   return "llm-estimated";
@@ -182,7 +182,7 @@ export async function fetchOQMDMaterials(
   try {
     emit("log", { phase: "phase-4", event: "OQMD fetch started", detail: `Requesting ${limit} entries from OQMD API (offset ${offset})`, dataSource: "OQMD" });
 
-    const url = `http://oqmd.org/oqmdapi/formationenergy?fields=name,entry_id,spacegroup,band_gap,stability,delta_e,composition&limit=${limit}&offset=${offset}&format=json`;
+    const url = `https://oqmd.org/oqmdapi/formationenergy?fields=name,entry_id,spacegroup,band_gap,stability,delta_e,composition&limit=${limit}&offset=${offset}&format=json`;
     const resp = await fetchWithTimeout(url, 20000);
 
     if (!resp.ok) {
@@ -222,11 +222,15 @@ export async function fetchOQMDMaterials(
           properties: {
             entry_id: entry.entry_id,
             fetchedLive: true,
-            dataSource: "experimental" as DataSourceTag,
+            dataSource: "dft-computed" as DataSourceTag,
           },
         });
         indexed++;
-      } catch (e) {
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        if (!msg.includes("duplicate") && !msg.includes("unique")) {
+          console.warn(`[OQMD] Failed to insert ${entry.name} (${id}): ${msg.slice(0, 150)}`);
+        }
       }
     }
 
