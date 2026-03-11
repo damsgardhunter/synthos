@@ -161,12 +161,23 @@ function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undef
   return allenDynesTcRaw(lambda, freq, mu, undefined, isHydride);
 }
 
-function detectHydrideForTc(formula: string): boolean {
+type HydrideClass = "none" | "hydrogen-doped" | "hydride" | "superhydride";
+
+function classifyHydride(formula: string): HydrideClass {
   const counts = parseFormulaCounts(formula);
   const hCount = counts["H"] || 0;
-  if (hCount < 4) return false;
+  if (hCount < 2) return "none";
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  return hCount / totalAtoms >= 0.5;
+  const hFrac = hCount / totalAtoms;
+  if (hFrac >= 0.75) return "superhydride";
+  if (hFrac >= 0.5) return "hydride";
+  if (hFrac >= 0.2) return "hydrogen-doped";
+  return "none";
+}
+
+function detectHydrideForTc(formula: string): boolean {
+  const cls = classifyHydride(formula);
+  return cls === "hydride" || cls === "superhydride";
 }
 
 const VALID_ELEMENTS_SET = new Set([
@@ -192,15 +203,22 @@ function sanitizeNumericFields(obj: Record<string, any>): Record<string, any> {
   return result;
 }
 
-function computeEdgeOfInstabilityScore(result: any): number {
+function computeEdgeOfInstabilityScore(result: any, formula?: string): number {
   const vanHove = result.electronicStructure?.vanHoveProximity ?? 0;
   const phononSoftening = result.phononSpectrum?.phononSofteningIndex ?? 0;
   const nesting = result.electronicStructure?.fermiSurfaceNestingScore ?? result.electronicStructure?.nestingScore ?? 0;
   const spinFluc = result.electronicStructure?.spinFluctuationStrength ?? 0;
-  const dosEf = result.electronicStructure?.densityOfStatesAtFermi ?? 0;
+  const dosEfRaw = result.electronicStructure?.densityOfStatesAtFermi ?? 0;
   const minPhonon = result.phononSpectrum?.minFrequency ?? 0;
 
-  if (minPhonon < -30 || dosEf > 10) return 0.1;
+  let numAtoms = 1;
+  if (formula) {
+    const counts = parseFormulaCounts(formula);
+    numAtoms = Math.max(1, Object.values(counts).reduce((s, n) => s + n, 0));
+  }
+  const dosEfPerAtom = dosEfRaw / numAtoms;
+
+  if (minPhonon < -30 || dosEfPerAtom > 10) return 0.1;
 
   let count = 0;
   if (vanHove > 0.7) count++;
@@ -2449,7 +2467,7 @@ async function runPhase10_Physics() {
                   omegaLog: hubInsights.physics.omegaLog,
                   dosAtFermi: hubInsights.physics.dosAtFermi,
                   metallicity: hubInsights.physics.metallicity,
-                  stabilityScore: computeEdgeOfInstabilityScore(result),
+                  stabilityScore: computeEdgeOfInstabilityScore(result, candidate.formula),
                   correlationStrength: hubInsights.physics.correlationStrength,
                 } : undefined,
                 topology: topoAnalysis ? {
