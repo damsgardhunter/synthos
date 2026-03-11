@@ -252,6 +252,8 @@ const MAX_MEMORY_SIZE = 500;
 const FAILURE_CACHE_SIZE = 50;
 const MIN_TC_THRESHOLD = 20;
 const CLUSTER_SIMILARITY_THRESHOLD = 0.75;
+const CLUSTER_SPLIT_MIN_SIZE = 6;
+const CLUSTER_SPLIT_TC_CV = 0.6;
 
 export class DiscoveryMemory {
   private records: DiscoveryRecord[] = [];
@@ -651,7 +653,106 @@ export class DiscoveryMemory {
     }
     cluster.dominantElements = Array.from(elTcWeights.entries())
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
+      .slice(0, 8)
+      .map(([el]) => el);
+
+    if (cluster.members.length >= CLUSTER_SPLIT_MIN_SIZE) {
+      this.trySplitCluster(cluster);
+    }
+  }
+
+  private trySplitCluster(cluster: PatternCluster): void {
+    const tcs = cluster.members.map(m => m.tc);
+    const mean = tcs.reduce((s, v) => s + v, 0) / tcs.length;
+    if (mean <= 0) return;
+    const variance = tcs.reduce((s, v) => s + (v - mean) ** 2, 0) / tcs.length;
+    const cv = Math.sqrt(variance) / mean;
+
+    if (cv < CLUSTER_SPLIT_TC_CV) return;
+
+    const vecs = cluster.members.map(m => fingerprintToVector(m.fingerprint));
+
+    let bestSeedA = 0;
+    let bestSeedB = 1;
+    let maxDist = 0;
+    for (let i = 0; i < vecs.length; i++) {
+      for (let j = i + 1; j < vecs.length; j++) {
+        const d = vectorEuclideanDistance(vecs[i], vecs[j]);
+        if (d > maxDist) {
+          maxDist = d;
+          bestSeedA = i;
+          bestSeedB = j;
+        }
+      }
+    }
+
+    if (maxDist < 0.3) return;
+
+    const groupA: DiscoveryRecord[] = [];
+    const groupB: DiscoveryRecord[] = [];
+    let centroidA = [...vecs[bestSeedA]];
+    let centroidB = [...vecs[bestSeedB]];
+
+    for (let iter = 0; iter < 5; iter++) {
+      groupA.length = 0;
+      groupB.length = 0;
+      for (let i = 0; i < cluster.members.length; i++) {
+        const distA = vectorEuclideanDistance(vecs[i], centroidA);
+        const distB = vectorEuclideanDistance(vecs[i], centroidB);
+        if (distA <= distB) {
+          groupA.push(cluster.members[i]);
+        } else {
+          groupB.push(cluster.members[i]);
+        }
+      }
+
+      if (groupA.length === 0 || groupB.length === 0) return;
+
+      centroidA = averageVectors(groupA.map(m => fingerprintToVector(m.fingerprint)));
+      centroidB = averageVectors(groupB.map(m => fingerprintToVector(m.fingerprint)));
+    }
+
+    if (groupA.length < 3 || groupB.length < 3) return;
+
+    const clusterIdx = this.clusters.indexOf(cluster);
+    if (clusterIdx === -1) return;
+
+    const clusterA: PatternCluster = {
+      centroid: centroidA,
+      members: groupA,
+      avgTc: groupA.reduce((s, m) => s + m.tc, 0) / groupA.length,
+      dominantFamily: tcWeightedDominant(groupA.map(m => ({ value: m.fingerprint.family, tc: m.tc }))),
+      dominantElements: [],
+      dominantOrbital: tcWeightedDominant(groupA.map(m => ({ value: m.fingerprint.orbitalCharacter, tc: m.tc }))),
+      dominantPairing: tcWeightedDominant(groupA.map(m => ({ value: m.fingerprint.pairingChannel, tc: m.tc }))),
+    };
+    const clusterB: PatternCluster = {
+      centroid: centroidB,
+      members: groupB,
+      avgTc: groupB.reduce((s, m) => s + m.tc, 0) / groupB.length,
+      dominantFamily: tcWeightedDominant(groupB.map(m => ({ value: m.fingerprint.family, tc: m.tc }))),
+      dominantElements: [],
+      dominantOrbital: tcWeightedDominant(groupB.map(m => ({ value: m.fingerprint.orbitalCharacter, tc: m.tc }))),
+      dominantPairing: tcWeightedDominant(groupB.map(m => ({ value: m.fingerprint.pairingChannel, tc: m.tc }))),
+    };
+
+    this.fillClusterElements(clusterA);
+    this.fillClusterElements(clusterB);
+
+    this.clusters.splice(clusterIdx, 1, clusterA, clusterB);
+  }
+
+  private fillClusterElements(cluster: PatternCluster): void {
+    const elTcWeights = new Map<string, number>();
+    for (const m of cluster.members) {
+      const els = parseFormulaElements(m.formula);
+      for (const el of els) {
+        elTcWeights.set(el, (elTcWeights.get(el) || 0) + m.tc);
+      }
+    }
+    cluster.dominantElements = Array.from(elTcWeights.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
       .map(([el]) => el);
   }
 

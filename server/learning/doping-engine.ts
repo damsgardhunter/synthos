@@ -127,10 +127,19 @@ export async function analyzeHessianPhonons(formula: string): Promise<HessianPho
     const maxFreq = phonon.maxPhononFrequency;
     const logAvg = phonon.logAverageFrequency;
     const nModes = Math.max(6, Math.min(20, parseFormulaElements(formula).length * 3));
+    const nAcoustic = 3;
+    const nOptical = nModes - nAcoustic;
     const syntheticFreqs: number[] = [];
-    for (let i = 0; i < nModes; i++) {
-      const frac = (i + 1) / nModes;
-      syntheticFreqs.push(maxFreq * frac * (0.7 + 0.6 * ((i * 7 + 3) % 11) / 11));
+    for (let i = 0; i < nAcoustic; i++) {
+      const frac = (i + 1) / nAcoustic;
+      syntheticFreqs.push(maxFreq * 0.4 * Math.sqrt(frac) * (0.8 + 0.4 * ((i * 7 + 3) % 5) / 5));
+    }
+    const opticalFloor = maxFreq * 0.4;
+    const opticalRange = maxFreq - opticalFloor;
+    for (let i = 0; i < nOptical; i++) {
+      const frac = (i + 0.5) / nOptical;
+      const clustering = 0.5 + 0.5 * Math.sin(frac * Math.PI);
+      syntheticFreqs.push(opticalFloor + opticalRange * frac * clustering * (0.85 + 0.3 * ((i * 11 + 7) % 9) / 9));
     }
     if (phonon.hasImaginaryModes) {
       syntheticFreqs[0] = -Math.abs(logAvg * 0.1);
@@ -256,9 +265,21 @@ export async function detectAnharmonicVibrations(formula: string): Promise<Anhar
     const elements = parseFormulaElements(formula);
     const counts = parseFormulaCounts(formula);
     const totalAtoms = getTotalAtoms(counts);
+    const FALLBACK_MASSES: Record<string, number> = {
+      H: 1.008, He: 4.003, Li: 6.941, Be: 9.012, B: 10.81, C: 12.01, N: 14.01, O: 16.00,
+      F: 19.00, Na: 22.99, Mg: 24.31, Al: 26.98, Si: 28.09, P: 30.97, S: 32.07, Cl: 35.45,
+      K: 39.10, Ca: 40.08, Ti: 47.87, V: 50.94, Cr: 52.00, Mn: 54.94, Fe: 55.85, Co: 58.93,
+      Ni: 58.69, Cu: 63.55, Zn: 65.38, Ga: 69.72, Ge: 72.63, As: 74.92, Se: 78.97, Br: 79.90,
+      Rb: 85.47, Sr: 87.62, Y: 88.91, Zr: 91.22, Nb: 92.91, Mo: 95.95, Ru: 101.1, Rh: 102.9,
+      Pd: 106.4, Ag: 107.9, In: 114.8, Sn: 118.7, Sb: 121.8, Te: 127.6, I: 126.9, Cs: 132.9,
+      Ba: 137.3, La: 138.9, Ce: 140.1, Pr: 140.9, Nd: 144.2, Hf: 178.5, Ta: 180.9, W: 183.8,
+      Re: 186.2, Os: 190.2, Ir: 192.2, Pt: 195.1, Au: 197.0, Tl: 204.4, Pb: 207.2, Bi: 209.0,
+      Sc: 44.96, Gd: 157.3, Sm: 150.4, Dy: 162.5, Er: 167.3, Yb: 173.0, Lu: 175.0,
+    };
     const avgMass = elements.reduce((s, el) => {
       const d = getElementData(el);
-      return s + (d?.atomicMass ?? 40) * (counts[el] ?? 1);
+      const mass = d?.atomicMass ?? FALLBACK_MASSES[el] ?? 50;
+      return s + mass * (counts[el] ?? 1);
     }, 0) / Math.max(1, totalAtoms);
 
     const displacements = [-0.10, -0.08, -0.05, -0.03, -0.01, 0.0, 0.01, 0.03, 0.05, 0.08, 0.10];
@@ -274,8 +295,8 @@ export async function detectAnharmonicVibrations(formula: string): Promise<Anhar
 
     const forces = displacements.map(d => {
       const linear = -k_eff * d;
-      const cubicF = -3 * anharmonicIndex * 0.3 * k_eff * d * d;
-      const quarticF = -4 * anharmonicIndex * 0.15 * k_eff * d * d * d;
+      const cubicF = -0.9 * k_eff * anharmonicIndex * d * Math.abs(d);
+      const quarticF = -0.6 * k_eff * anharmonicIndex * d * d * d;
       return linear + cubicF + quarticF;
     });
 
