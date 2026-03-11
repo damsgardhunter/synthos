@@ -62,16 +62,25 @@ export interface HeterostructureCandidate {
   rank: number;
 }
 
-function parseFormulaElements(formula: string): string[] {
+const SUBSCRIPT_MAP = "₀₁₂₃₄₅₆₇₈₉";
+function cleanFormula(formula: string): string {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = "";
+  for (let i = 0; i < formula.length; i++) {
+    const idx = SUBSCRIPT_MAP.indexOf(formula[i]);
+    cleaned += idx >= 0 ? String(idx) : formula[i];
+  }
+  return cleaned.replace(/[\u2080-\u2089]/g, c => String(c.charCodeAt(0) - 0x2080));
+}
+
+function parseFormulaElements(formula: string): string[] {
+  const cleaned = cleanFormula(formula);
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const cleaned = cleanFormula(formula);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
@@ -161,18 +170,56 @@ function getAverageBulkModulus(formula: string): number {
   return count > 0 ? sum : 100;
 }
 
+const BULK_WORK_FUNCTIONS: Record<string, number> = {
+  Al: 4.28, Ag: 4.26, Au: 5.10, Ba: 2.52, Be: 4.98, Bi: 4.34, Ca: 2.87,
+  Cd: 4.22, Ce: 2.90, Co: 5.00, Cr: 4.50, Cs: 2.14, Cu: 4.65, Fe: 4.50,
+  Ga: 4.20, Ge: 5.00, Hf: 3.90, Hg: 4.49, In: 4.12, Ir: 5.27, K: 2.30,
+  La: 3.50, Li: 2.90, Mg: 3.66, Mn: 4.10, Mo: 4.60, Na: 2.75, Nb: 4.30,
+  Nd: 3.20, Ni: 5.15, Os: 5.93, Pb: 4.25, Pd: 5.12, Pt: 5.65, Rb: 2.16,
+  Re: 4.72, Rh: 4.98, Ru: 4.71, Sc: 3.50, Si: 4.85, Sn: 4.42, Sr: 2.59,
+  Ta: 4.25, Te: 4.95, Th: 3.40, Ti: 4.33, Tl: 3.84, U: 3.63, V: 4.30,
+  W: 4.55, Y: 3.10, Zn: 4.33, Zr: 4.05,
+};
+
+const PACKING_DENSITY: Record<string, number> = {
+  fcc: 0.74, hcp: 0.74, bcc: 0.68, diamond: 0.34, sc: 0.52,
+};
+
 function estimateWorkFunction(formula: string): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = getTotalAtoms(counts);
   let sum = 0;
+  let hasBulkData = false;
   for (const el of elements) {
-    const data = getElementData(el);
-    const ie = data?.firstIonizationEnergy ?? 7;
-    const ea = data?.electronAffinity ?? 0;
-    const wf = (ie + Math.max(0, ea)) / 2;
-    sum += wf * (counts[el] || 1) / totalAtoms;
+    const frac = (counts[el] || 1) / totalAtoms;
+    const bulkWF = BULK_WORK_FUNCTIONS[el];
+    if (bulkWF !== undefined) {
+      sum += bulkWF * frac;
+      hasBulkData = true;
+    } else {
+      const data = getElementData(el);
+      const ie = data?.firstIonizationEnergy ?? 7;
+      const ea = data?.electronAffinity ?? 0;
+      const wf = (ie + Math.max(0, ea)) / 2;
+      sum += wf * frac;
+    }
   }
+
+  if (hasBulkData) {
+    const avgMass = elements.reduce((s, el) => {
+      const d = getElementData(el);
+      return s + (d?.atomicMass ?? 50) * (counts[el] || 1) / totalAtoms;
+    }, 0);
+    const avgRadius = elements.reduce((s, el) => {
+      const d = getElementData(el);
+      return s + (d?.atomicRadius ?? 150) * (counts[el] || 1) / totalAtoms;
+    }, 0);
+    const packingProxy = avgMass > 100 ? 0.74 : avgMass > 50 ? 0.70 : 0.68;
+    const packingCorrection = (packingProxy - 0.68) * 0.5;
+    sum += packingCorrection;
+  }
+
   return sum;
 }
 
