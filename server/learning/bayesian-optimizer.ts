@@ -305,10 +305,14 @@ export class BayesianOptimizer {
 
     if (this.observations.length > this.maxObservations) {
       this.observations.sort((a, b) => b.tc - a.tc);
-      const topHalf = this.observations.slice(0, Math.floor(this.maxObservations * 0.7));
-      const bottomHalf = this.observations.slice(Math.floor(this.maxObservations * 0.7));
-      const sampled = bottomHalf.filter(() => Math.random() < 0.5);
-      this.observations = [...topHalf, ...sampled].slice(0, this.maxObservations);
+      const keepCount = Math.floor(this.maxObservations * 0.7);
+      const topSlice = this.observations.slice(0, keepCount);
+      const bottomSlice = this.observations.slice(keepCount);
+
+      const targetFromBottom = this.maxObservations - keepCount;
+      const diverseKeep = this.diversityPrune(bottomSlice, targetFromBottom);
+      this.observations = [...topSlice, ...diverseKeep];
+
       this.bestTcObserved = this.observations.length > 0
         ? Math.max(...this.observations.map(o => o.tc))
         : 0;
@@ -323,23 +327,123 @@ export class BayesianOptimizer {
     }
   }
 
-  private adaptLengthScale(): void {
-    const recent = this.observations.slice(-20);
-    const predictions = recent.map(o => this.predictFromFeatures(o.features));
-    const avgStd = predictions.reduce((s, p) => s + p.std, 0) / predictions.length;
-    const avgMean = predictions.reduce((s, p) => s + Math.abs(p.mean), 0) / predictions.length;
-    const relUncertainty = avgMean > 0 ? avgStd / avgMean : avgStd;
+  private diversityPrune(pool: Observation[], keep: number): Observation[] {
+    if (pool.length <= keep) return pool;
 
-    const factor = relUncertainty > 0.8 ? 1.15
-      : relUncertainty < 0.2 ? 0.9
-      : 1.0;
-
-    if (factor !== 1.0) {
-      const clampMin = [0.15, 0.3, 0.1];
-      const clampMax = [2.0, 3.0, 1.5];
-      for (let g = 0; g < N_LS_GROUPS; g++) {
-        this.groupLengthScales[g] = Math.max(clampMin[g], Math.min(clampMax[g], this.groupLengthScales[g] * factor));
+    const n = pool.length;
+    const distSq = (a: number[], b: number[]): number => {
+      let s = 0;
+      for (let i = 0; i < a.length; i++) {
+        const d = a[i] - b[i];
+        s += d * d;
       }
+      return s;
+    };
+
+    const minDists = new Float64Array(n).fill(Infinity);
+    const selected = new Uint8Array(n);
+    const result: Observation[] = [];
+
+    let firstIdx = 0;
+    for (let i = 1; i < n; i++) {
+      if (pool[i].tc > pool[firstIdx].tc) firstIdx = i;
+    }
+    selected[firstIdx] = 1;
+    result.push(pool[firstIdx]);
+
+    for (let i = 0; i < n; i++) {
+      if (i !== firstIdx) {
+        minDists[i] = distSq(pool[i].features, pool[firstIdx].features);
+      }
+    }
+
+    while (result.length < keep) {
+      let farthestIdx = -1;
+      let farthestDist = -1;
+      for (let i = 0; i < n; i++) {
+        if (!selected[i] && minDists[i] > farthestDist) {
+          farthestDist = minDists[i];
+          farthestIdx = i;
+        }
+      }
+      if (farthestIdx < 0) break;
+
+      selected[farthestIdx] = 1;
+      result.push(pool[farthestIdx]);
+
+      for (let i = 0; i < n; i++) {
+        if (!selected[i]) {
+          const d = distSq(pool[i].features, pool[farthestIdx].features);
+          if (d < minDists[i]) minDists[i] = d;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private computeLogMarginalLikelihood(obs: Observation[], groupLS: number[]): number {
+    const n = obs.length;
+    if (n === 0) return -Infinity;
+
+    const ls = buildLengthScaleArray(groupLS);
+    const K: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = i; j < n; j++) {
+        const k = maternKernel52ARD(obs[i].features, obs[j].features, ls, this.signalVariance);
+        K[i][j] = k;
+        K[j][i] = k;
+      }
+      K[i][i] += this.noiseVariance;
+    }
+
+    const L = choleskyDecompose(K);
+
+    const yRaw = obs.map(o => o.tc);
+    const yMean = yRaw.reduce((s, v) => s + v, 0) / n;
+    const y = yRaw.map(v => v - yMean);
+    const alpha = choleskySolve(L, y);
+
+    let dataFit = 0;
+    for (let i = 0; i < n; i++) dataFit += y[i] * alpha[i];
+
+    let logDet = 0;
+    for (let i = 0; i < n; i++) logDet += Math.log(Math.max(L[i][i], 1e-15));
+    logDet *= 2;
+
+    return -0.5 * dataFit - 0.5 * logDet - 0.5 * n * Math.log(2 * Math.PI);
+  }
+
+  private adaptLengthScale(): void {
+    const subset = this.observations.length > 80
+      ? this.observations.slice(-80)
+      : this.observations;
+
+    const clampMin = [0.15, 0.3, 0.1];
+    const clampMax = [2.0, 3.0, 1.5];
+
+    const currentLML = this.computeLogMarginalLikelihood(subset, this.groupLengthScales);
+
+    const perturbFactors = [0.8, 1.25];
+    let bestLML = currentLML;
+    let bestGroup = [...this.groupLengthScales];
+
+    for (let g = 0; g < N_LS_GROUPS; g++) {
+      for (const factor of perturbFactors) {
+        const candidate = [...this.groupLengthScales];
+        candidate[g] = Math.max(clampMin[g], Math.min(clampMax[g], candidate[g] * factor));
+        if (candidate[g] === this.groupLengthScales[g]) continue;
+
+        const lml = this.computeLogMarginalLikelihood(subset, candidate);
+        if (lml > bestLML) {
+          bestLML = lml;
+          bestGroup = candidate;
+        }
+      }
+    }
+
+    if (bestLML > currentLML) {
+      this.groupLengthScales = bestGroup;
       this.lengthScales = buildLengthScaleArray(this.groupLengthScales);
     }
 
@@ -368,13 +472,8 @@ export class BayesianOptimizer {
       const sorted = [...this.observations].sort((a, b) => b.tc - a.tc);
       const topSlice = sorted.slice(0, 140);
       const remaining = sorted.slice(140);
-      const randomSample: typeof this.observations = [];
-      for (let i = remaining.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
-      }
-      randomSample.push(...remaining.slice(0, 60));
-      obs = [...topSlice, ...randomSample];
+      const diverseRemaining = this.diversityPrune(remaining, 60);
+      obs = [...topSlice, ...diverseRemaining];
     } else {
       obs = [...this.observations];
     }
