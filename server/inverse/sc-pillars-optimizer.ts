@@ -165,20 +165,12 @@ function parseCounts(formula: string): Record<string, number> {
 }
 
 function countsToFormula(counts: Record<string, number>): string {
-  const metals: string[] = [];
-  const nonmetals: string[] = [];
-  for (const el of Object.keys(counts)) {
-    if (counts[el] <= 0) continue;
-    const ed = ELEMENTAL_DATA[el];
-    const en = ed?.paulingElectronegativity ?? 2.0;
-    if (en <= 2.0 || isTransitionMetal(el) || isRareEarth(el)) metals.push(el);
-    else nonmetals.push(el);
-  }
-  metals.sort((a, b) => a.localeCompare(b));
-  nonmetals.sort((a, b) => a.localeCompare(b));
-  return [...metals, ...nonmetals].map(el => {
-    const n = counts[el];
-    return n === 1 ? el : `${el}${Math.round(n)}`;
+  const sorted = Object.entries(counts)
+    .filter(([, n]) => n > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+  return sorted.map(([el, n]) => {
+    const rounded = Math.round(n);
+    return rounded === 1 ? el : `${el}${rounded}`;
   }).join("");
 }
 

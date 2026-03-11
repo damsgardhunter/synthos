@@ -96,12 +96,7 @@ function parseCounts(formula: string): Record<string, number> {
 function countsToFormula(counts: Record<string, number>): string {
   const entries = Object.entries(counts)
     .filter(([, n]) => n > 0)
-    .sort(([a], [b]) => {
-      const ed = ELEMENTAL_DATA;
-      const aEN = ed[a]?.paulingElectronegativity ?? 2.0;
-      const bEN = ed[b]?.paulingElectronegativity ?? 2.0;
-      return aEN - bEN;
-    });
+    .sort(([a], [b]) => a.localeCompare(b));
   return entries.map(([el, n]) => n === 1 ? el : `${el}${n}`).join("");
 }
 

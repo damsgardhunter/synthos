@@ -1265,7 +1265,7 @@ const DOPING_FRACTIONS = [0.02, 0.05, 0.10, 0.15, 0.20];
 const SEARCH_LIMITS = {
   maxDopantsPerMaterial: 2,
   maxDopingFraction: 0.20,
-  maxSupercellAtoms: 27,
+  maxSupercellAtoms: 128,
 };
 
 function classifyLayeredOrCage(formula: string): string {
