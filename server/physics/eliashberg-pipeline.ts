@@ -987,6 +987,18 @@ export function runEliashbergFromAlpha2FFile(
     );
   }
 
+  const isHighPressureHydrideDfpt = hRatioDfpt >= 4 && pressureGpa >= 100;
+  let dfptLambdaUncorrected = coupling.lambdaUncorrected;
+  if (isHighPressureHydrideDfpt) {
+    const anharmonicFrac = Math.min(0.25, 0.03 + pressureGpa * 0.0005 + hRatioDfpt * 0.01);
+    dfptLambdaUncorrected = Number((coupling.lambdaUncorrected * (1 - anharmonicFrac)).toFixed(4));
+    dfptWarnings.push(
+      `DFPT harmonic lambda_uncorrected adjusted by -${(anharmonicFrac * 100).toFixed(0)}% for anharmonic H modes ` +
+      `(H-ratio=${hRatioDfpt.toFixed(1)}, P=${pressureGpa} GPa). ` +
+      `Raw harmonic value: ${coupling.lambdaUncorrected.toFixed(4)}.`
+    );
+  }
+
   const dfptUncFrac = dfptConfidence === "high" ? 0.10 : dfptConfidence === "medium" ? 0.20 : 0.35;
   const confidenceBand: [number, number] = [
     Math.max(0, Math.round(tcBest * (1 - dfptUncFrac))),
@@ -999,6 +1011,8 @@ export function runEliashbergFromAlpha2FFile(
   pipelineStats.tcSum += tcBest;
   pipelineStats.avgLambda = pipelineStats.lambdaSum / pipelineStats.totalRuns;
   pipelineStats.avgTc = pipelineStats.tcSum / pipelineStats.totalRuns;
+  if (integratedLambda > 1.5) pipelineStats.strongCouplingCount++;
+  if (tcBest > 100) pipelineStats.highTcCount++;
 
   return {
     formula,
@@ -1006,7 +1020,7 @@ export function runEliashbergFromAlpha2FFile(
     tier: "dfpt",
     alpha2F: alpha2FSpec,
     lambda: integratedLambda,
-    lambdaUncorrected: coupling.lambdaUncorrected,
+    lambdaUncorrected: dfptLambdaUncorrected,
     omegaLog,
     omega2,
     muStar,
