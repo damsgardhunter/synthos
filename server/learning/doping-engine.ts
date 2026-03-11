@@ -1291,11 +1291,25 @@ function classifyLayeredOrCage(formula: string): string {
   return "general";
 }
 
-function getSupercellMultiplier(totalAtoms: number): number {
-  if (totalAtoms <= 4) return 8;
-  if (totalAtoms <= 8) return 4;
-  if (totalAtoms <= 12) return 2;
-  return 1;
+function getSupercellMultiplier(totalAtoms: number, targetFraction?: number): number {
+  let mult: number;
+  if (totalAtoms <= 4) mult = 8;
+  else if (totalAtoms <= 8) mult = 4;
+  else if (totalAtoms <= 12) mult = 2;
+  else mult = 1;
+
+  if (targetFraction && targetFraction > 0) {
+    const minSitesNeeded = Math.ceil(1 / targetFraction);
+    while (totalAtoms * mult < minSitesNeeded && mult < 16) {
+      mult *= 2;
+    }
+  }
+
+  if (totalAtoms * mult > 128) {
+    mult = Math.max(1, Math.floor(128 / totalAtoms));
+  }
+
+  return mult;
 }
 
 function getDopantPriority(site: string, dopant: string, elements: string[]): number {
@@ -2031,15 +2045,26 @@ export function detectSCSignals(baseFormula: string, dopedFormula: string, doped
   const baseElements = parseFormulaElements(baseFormula);
   const dopedElements = parseFormulaElements(dopedFormula);
 
+  const baseCounts = parseFormulaCounts(baseFormula);
+  const baseTotalAtoms = getTotalAtoms(baseCounts);
+  const dopedCounts = parseFormulaCounts(dopedFormula);
+  const dopedTotalAtoms = getTotalAtoms(dopedCounts);
+
   let baseStonerMax = 0;
   for (const el of baseElements) {
     const I = getStonerParameter(el) ?? 0;
-    baseStonerMax = Math.max(baseStonerMax, I * baseDOS);
+    if (I <= 0) continue;
+    const elFrac = (baseCounts[el] || 0) / baseTotalAtoms;
+    const pdos = baseDOS * elFrac;
+    baseStonerMax = Math.max(baseStonerMax, I * pdos);
   }
   let dopedStonerMax = 0;
   for (const el of dopedElements) {
     const I = getStonerParameter(el) ?? 0;
-    dopedStonerMax = Math.max(dopedStonerMax, I * dopedDOS);
+    if (I <= 0) continue;
+    const elFrac = (dopedCounts[el] || 0) / dopedTotalAtoms;
+    const pdos = dopedDOS * elFrac;
+    dopedStonerMax = Math.max(dopedStonerMax, I * pdos);
   }
 
   const magnetismSuppressed = baseStonerMax > 0.8 && dopedStonerMax < 0.9;
@@ -2183,10 +2208,13 @@ export function runDopingSearchLoop(
     if (results.length >= maxDopants * 2) break;
 
     const levels: DopingSearchResult["levels"] = [];
-    const supercellMult = getSupercellMultiplier(getTotalAtoms(counts));
     const cellVolume = estimateUnitCellVolume(counts);
+    const totalAtoms = getTotalAtoms(counts);
 
     for (const fraction of clampedFracs) {
+      const siteCount = counts[pair.site] || 0;
+      const supercellMult = getSupercellMultiplier(totalAtoms, siteCount > 0 ? fraction / (siteCount / totalAtoms) : fraction);
+
       const supercellCounts: Record<string, number> = {};
       for (const [el, n] of Object.entries(counts)) {
         supercellCounts[el] = n * supercellMult;
@@ -2195,14 +2223,20 @@ export function runDopingSearchLoop(
       let nChanged = 0;
       if (pair.type === "substitutional") {
         const sitesInSupercell = supercellCounts[pair.site];
-        nChanged = Math.max(1, Math.round(sitesInSupercell * fraction));
+        nChanged = Math.round(sitesInSupercell * fraction);
+        if (nChanged < 1) continue;
         if (nChanged >= sitesInSupercell) continue;
+        const actualFraction = nChanged / sitesInSupercell;
+        if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
         supercellCounts[pair.site] -= nChanged;
         supercellCounts[pair.dopant] = (supercellCounts[pair.dopant] || 0) + nChanged;
       } else {
         const sitesInSupercell = supercellCounts[pair.site];
-        nChanged = Math.max(1, Math.round(sitesInSupercell * fraction));
+        nChanged = Math.round(sitesInSupercell * fraction);
+        if (nChanged < 1) continue;
         if (nChanged >= sitesInSupercell) continue;
+        const actualFraction = nChanged / sitesInSupercell;
+        if (Math.abs(actualFraction - fraction) / fraction > 0.5) continue;
         supercellCounts[pair.site] -= nChanged;
       }
 
@@ -2216,8 +2250,10 @@ export function runDopingSearchLoop(
         ? classifyDopingCharacter(pair.site, "", "vacancy")
         : classifyDopingCharacter(pair.site, pair.dopant, "substitutional");
 
-      const supercellVolume = cellVolume * supercellMult;
-      const carrierDensity = computeCarrierDensity(valenceChange, nChanged, supercellVolume);
+      const reducedTotalAtoms = getTotalAtoms(reduced);
+      const carrierDensityPerFU = reducedTotalAtoms > 0
+        ? Math.abs(valenceChange) * (nChanged / supercellMult) / (cellVolume * 1e-21)
+        : computeCarrierDensity(valenceChange, nChanged, cellVolume * supercellMult);
 
       try {
         const features = extractFeatures(resultFormula);
@@ -2232,7 +2268,7 @@ export function runDopingSearchLoop(
           resultFormula,
           predictedTc: tc,
           tcUncertainty: unc,
-          carrierDensity,
+          carrierDensity: carrierDensityPerFU,
           dopingCharacter: character,
           scSignals,
         });
