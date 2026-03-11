@@ -382,6 +382,15 @@ export function simulateCrystalGrowth(
     growthStats.bestFormula = formula;
   }
 
+  if (criticalCurrentImpact.grainBoundaryLimiting) {
+    const mc = materialClass.toLowerCase();
+    if (mc.includes("cuprate") || mc.includes("oxide")) {
+      notes.push("Grain boundaries are limiting Jc (weak-link regime) — melt-texturing or biaxially textured substrates recommended");
+    } else {
+      notes.push("Grain boundary density exceeds optimal pinning range — may limit Jc at high fields");
+    }
+  }
+
   if (nucleationProbability > 0.9) notes.push("High nucleation probability indicates easy crystal formation");
   if (growthRate < 1) notes.push("Slow growth rate favors high crystal quality");
 

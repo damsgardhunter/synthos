@@ -205,6 +205,30 @@ function ruleSolidState(formula: string, fb: FormulaBreakdown): HeuristicRoute |
     steps.push("Furnace-cool to room temperature");
   }
 
+  const hasAs = fb.elements.includes("As");
+  const hasP = fb.elements.includes("P");
+  const hasChalcogen = fb.hasS || fb.hasSe || fb.hasTe;
+  let noteText = isCuprate
+    ? "Cuprate synthesis requires careful oxygen annealing for optimal Tc."
+    : `Standard ceramic/solid-state synthesis. Multiple grind-sinter cycles improve phase purity.`;
+
+  if (hasAs || hasP) {
+    const toxicEl = hasAs ? "As" : "P";
+    const hazard = hasAs ? "highly toxic (lethal vapor)" : "pyrophoric";
+    noteText += ` SAFETY: ${toxicEl} is ${hazard} — use double-sealed quartz ampoules with alumina inner crucible. Handle only in fume hood with appropriate PPE.`;
+    steps.splice(2, 0, `Seal precursors in double-walled quartz ampoule (inner alumina crucible) under vacuum to contain volatile ${toxicEl}`);
+  }
+
+  if (hasChalcogen && !fb.hasO) {
+    const chalcogen = fb.hasTe ? "Te" : fb.hasSe ? "Se" : "S";
+    const preReactionTemp = chalcogen === "S" ? 400 : chalcogen === "Se" ? 500 : 600;
+    noteText += ` Pre-reaction at ${preReactionTemp}K recommended to avoid violent exotherm from ${chalcogen} vapor pressure buildup.`;
+    const sinterIdx = steps.findIndex(s => s.includes("Sinter"));
+    if (sinterIdx >= 0) {
+      steps.splice(sinterIdx, 0, `Pre-react at ${preReactionTemp}K for 12h (ramp at 0.3K/min) to safely combine ${chalcogen} before high-temperature sintering`);
+    }
+  }
+
   return {
     rule: "solid-state-reaction",
     method: "solid-state",
@@ -215,11 +239,9 @@ function ruleSolidState(formula: string, fb: FormulaBreakdown): HeuristicRoute |
     temperature,
     pressure: 0,
     atmosphere: fb.hasO ? "O₂" : "Ar",
-    difficulty: "moderate",
+    difficulty: (hasAs || hasP) ? "hard" : "moderate",
     confidence: 0.75,
-    notes: isCuprate
-      ? "Cuprate synthesis requires careful oxygen annealing for optimal Tc."
-      : `Standard ceramic/solid-state synthesis. Multiple grind-sinter cycles improve phase purity.`,
+    notes: noteText,
   };
 }
 
@@ -386,6 +408,7 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
 
   const precursors = [...fb.metals, chalcogen];
   const maxMp = maxMeltingPoint(fb.metals);
+  const preReactionTemp = chalcogen === "S" ? 400 : chalcogen === "Se" ? 500 : 600;
   const temperature = Math.min(maxMp, 1200);
 
   return {
@@ -398,7 +421,9 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
       `Weigh stoichiometric amounts of ${precursors.join(", ")} (all >99.9%)`,
       "Load into quartz ampoule in Ar glovebox",
       `Seal ampoule under vacuum (10⁻³ mbar)`,
-      `Heat slowly (1K/min) to ${temperature}K to avoid ${chalcogen} explosion`,
+      `Pre-react at ${preReactionTemp}K for 12h (ramp at 0.3K/min) to safely incorporate ${chalcogen} and avoid vapor pressure burst`,
+      "Cool to room temperature, re-grind and re-seal if needed",
+      `Ramp at 1K/min to ${temperature}K for final reaction`,
       `Hold at ${temperature}K for 48-72h with occasional rocking`,
       "Cool at 2K/min to room temperature",
       "Break ampoule, characterize product by XRD",
@@ -408,7 +433,7 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
     atmosphere: "vacuum (sealed tube)",
     difficulty: "moderate",
     confidence: 0.75,
-    notes: `Sealed-tube synthesis for ${chalcogen}-containing compound. Slow heating critical to prevent violent reaction with volatile ${chalcogen}.`,
+    notes: `Sealed-tube synthesis for ${chalcogen}-containing compound. Two-step process: low-temperature pre-reaction at ${preReactionTemp}K prevents violent exotherm from ${chalcogen} vapor pressure, followed by high-temperature sintering.`,
   };
 }
 
@@ -429,22 +454,22 @@ function rulePnictide(formula: string, fb: FormulaBreakdown): HeuristicRoute | n
     product: formula,
     equation: formatEquation(precursors, [formula]),
     steps: [
-      `Weigh ${precursors.join(", ")} in stoichiometric ratio (handle ${pnictogen} in fume hood)`,
-      `Load into alumina crucible inside quartz tube`,
-      `Evacuate and seal tube`,
-      `Ramp at 0.5K/min to ${temperature}K (${pnictogen} is volatile and ${hasAs ? "toxic" : "pyrophoric"})`,
+      `Weigh ${precursors.join(", ")} in stoichiometric ratio (handle ${pnictogen} in fume hood with full PPE)`,
+      `Load into alumina crucible, place inside inner quartz tube`,
+      `Evacuate inner tube and seal; place inside outer quartz tube and evacuate+seal (double-sealed ampoule for safety)`,
+      `Ramp at 0.5K/min to ${temperature}K (${pnictogen} is volatile and ${hasAs ? "highly toxic — lethal As₂O₃ vapor" : "pyrophoric"})`,
       `Hold at ${temperature}K for 48h`,
       "Slow-cool at 1K/min to 700K, then furnace-cool",
       "Grind, re-pelletize, re-anneal for improved phase purity",
     ],
     temperature,
     pressure: 0,
-    atmosphere: "vacuum (sealed tube)",
+    atmosphere: "vacuum (double-sealed tube)",
     difficulty: hasAs ? "hard" : "moderate",
     confidence: 0.7,
     notes: hasAs
-      ? "Arsenide synthesis requires strict safety protocols. As vapor is highly toxic."
-      : "Phosphide synthesis under sealed-tube conditions. P vapor is pyrophoric.",
+      ? "SAFETY: Arsenide synthesis requires double-sealed quartz ampoules. As sublimes at ~887K and forms lethal As₂O₃ vapor. Work only in fume hood with appropriate PPE. Dispose of broken ampoules as toxic waste."
+      : "SAFETY: Phosphide synthesis requires double-sealed quartz ampoules. P vapor is pyrophoric and can ignite spontaneously. Use alumina inner crucible to prevent P-quartz reaction.",
   };
 }
 
@@ -518,6 +543,76 @@ function ruleNitrideSynthesis(formula: string, fb: FormulaBreakdown): HeuristicR
   };
 }
 
+function ruleFluxGrowth(formula: string, fb: FormulaBreakdown): HeuristicRoute | null {
+  if (fb.elements.length < 2 || fb.hasH) return null;
+  if (fb.metals.length === 0) return null;
+
+  let fluxMaterial: string;
+  let fluxMeltPoint: number;
+  let fluxRatio: string;
+  let decantTemp: number;
+
+  if (fb.transitionMetals.includes("Cu") || fb.metals.includes("Cu")) {
+    fluxMaterial = "excess Cu (self-flux)";
+    fluxMeltPoint = 1358;
+    fluxRatio = "1:10-20 (sample:Cu)";
+    decantTemp = 1050;
+  } else if (fb.hasS || fb.hasSe || fb.hasTe) {
+    fluxMaterial = "Sn";
+    fluxMeltPoint = 505;
+    fluxRatio = "1:20-50 (sample:Sn)";
+    decantTemp = 400;
+  } else if (fb.rareEarths.length > 0) {
+    fluxMaterial = "In";
+    fluxMeltPoint = 430;
+    fluxRatio = "1:30-50 (sample:In)";
+    decantTemp = 350;
+  } else if (fb.transitionMetals.length >= 2) {
+    fluxMaterial = "Pb";
+    fluxMeltPoint = 601;
+    fluxRatio = "1:20-40 (sample:Pb)";
+    decantTemp = 500;
+  } else if (fb.hasO) {
+    fluxMaterial = "PbO-PbF₂ eutectic";
+    fluxMeltPoint = 800;
+    fluxRatio = "1:10 (sample:flux)";
+    decantTemp = 750;
+  } else {
+    fluxMaterial = "Sn";
+    fluxMeltPoint = 505;
+    fluxRatio = "1:20 (sample:Sn)";
+    decantTemp = 400;
+  }
+
+  const maxMp = maxMeltingPoint(fb.metals);
+  const soakTemp = Math.min(maxMp, fluxMeltPoint + 400);
+  const precursors = [...fb.elements, fluxMaterial];
+
+  return {
+    rule: "flux-growth",
+    method: "flux-growth",
+    precursors,
+    product: `${formula} single crystals`,
+    equation: formatEquation(precursors, [`${formula} crystals`, `${fluxMaterial} (recovered)`]),
+    steps: [
+      `Weigh ${fb.elements.join(", ")} in stoichiometric ratio with ${fluxMaterial} at ratio ${fluxRatio}`,
+      `Load into alumina crucible, seal in quartz ampoule under vacuum or inert gas`,
+      `Heat to ${soakTemp}K over 12h to dissolve all components in ${fluxMaterial} melt`,
+      `Hold at ${soakTemp}K for 6-12h for complete dissolution`,
+      `Slow-cool at 1-3K/h to ${decantTemp}K — nucleation and crystal growth occur during this stage`,
+      `At ${decantTemp}K, decant or centrifuge to separate crystals from flux`,
+      `Etch residual flux with dilute acid (HCl for Sn/In/Pb flux, HNO₃ for Cu flux)`,
+      "Characterize crystals by Laue diffraction and single-crystal XRD",
+    ],
+    temperature: soakTemp,
+    pressure: 0,
+    atmosphere: "vacuum or Ar (sealed ampoule)",
+    difficulty: "hard",
+    confidence: 0.6,
+    notes: `Flux growth produces single crystals ideal for anisotropic transport measurements. ${fluxMaterial} flux selected based on composition. Crystals typically 0.5-5mm in size. Slow cooling rate (1-3K/h) is critical for large, defect-free crystals.`,
+  };
+}
+
 const ALL_RULES = [
   ruleHydrogenation,
   ruleAlloying,
@@ -528,6 +623,7 @@ const ALL_RULES = [
   ruleBorideSynthesis,
   ruleChalcogenide,
   rulePnictide,
+  ruleFluxGrowth,
   ruleThinFilm,
   ruleNitrideSynthesis,
 ];
