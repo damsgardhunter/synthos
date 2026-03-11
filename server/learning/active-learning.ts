@@ -1302,7 +1302,7 @@ async function retrainGNNWithEnrichedData(
   emit("log", {
     phase: "active-learning",
     event: "GNN + XGBoost retrained",
-    detail: `R² ${r2Before.toFixed(4)} → ${r2After.toFixed(4)}, MAE ${maeBefore.toFixed(2)} → ${maeAfter.toFixed(2)}, GNN samples: ${trainingData.length} (${dftMergeCount} from DFT dataset, total DFT pool: ${dftDataset.length}), XGBoost: ${xgbResult.datasetSize} samples (${xgbResult.newEntries} from eval dataset), evaluated pool: ${evalStats.totalEvaluated}${converged ? ' [CONVERGED]' : ''}`,
+    detail: `R² ${r2Before.toFixed(4)}→${r2After.toFixed(4)} MAE ${maeBefore.toFixed(2)}→${maeAfter.toFixed(2)} | GNN=${trainingData.length} (+${dftMergeCount} DFT) XGB=${xgbResult.datasetSize} (+${xgbResult.newEntries})${converged ? ' [CONVERGED]' : ''}`,
     dataSource: "Active Learning",
   });
 
@@ -1358,7 +1358,7 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: "DFT candidates selected",
-    detail: `Selected ${selected.length} candidates [${tierCounts.bestTc} EI-best, ${tierCounts.highUncertainty} UCB-uncertain, ${tierCounts.pureCuriosity} curiosity, ${tierCounts.randomExploration} random, ${tierCounts.pressureExploration} pressure] (avg unc: ${avgUncertaintyBefore.toFixed(3)}, kappa=${computeAdaptiveAlpha().toFixed(2)}, top: ${selected[0]?.candidate.formula ?? 'none'} EI=${selected[0]?.eiScore?.toFixed(3) ?? 0} UCB=${selected[0]?.ucbScore?.toFixed(3) ?? 0})`,
+    detail: `${selected.length} candidates [EI=${tierCounts.bestTc} UCB=${tierCounts.highUncertainty} cur=${tierCounts.pureCuriosity} rnd=${tierCounts.randomExploration} P=${tierCounts.pressureExploration}] unc=${avgUncertaintyBefore.toFixed(3)} κ=${computeAdaptiveAlpha().toFixed(2)} top=${selected[0]?.candidate.formula ?? 'none'}`,
     dataSource: "Active Learning",
   });
 
@@ -1431,7 +1431,9 @@ export async function runActiveLearningCycle(
                 vacancyFraction: variant.metrics.vacancyFraction,
                 bondVariance: variant.metrics.bondVariance,
                 latticeStrain: variant.metrics.localStrainMean,
-                siteMixingEntropy: variant.metrics.siteMixingFraction > 0 ? -variant.metrics.siteMixingFraction * Math.log(variant.metrics.siteMixingFraction) : 0,
+                siteMixingEntropy: variant.metrics.siteMixingFraction > 0 && variant.metrics.siteMixingFraction < 1
+                  ? -(variant.metrics.siteMixingFraction * Math.log(variant.metrics.siteMixingFraction) + (1 - variant.metrics.siteMixingFraction) * Math.log(1 - variant.metrics.siteMixingFraction))
+                  : 0,
                 configurationalEntropy: variant.metrics.configurationalEntropy,
                 dosDisorderSignal: variant.metrics.dosDisorderSignal,
               };
@@ -1578,7 +1580,7 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: "Discovery efficiency",
-    detail: `${usefulDiscoveries} useful materials / ${selected.length} evaluations (${(discoveryEff.efficiencyRatio * 100).toFixed(1)}%). Failures: ${unstablePhonons} unstable phonons, ${highFormationEnergy} high formation energy, ${nonMetallic} non-metallic, ${lowTcCount} low Tc, ${pipelineCrashCount} pipeline crashes`,
+    detail: `${usefulDiscoveries}/${selected.length} useful (${(discoveryEff.efficiencyRatio * 100).toFixed(1)}%) | phonon-fail=${unstablePhonons} high-FE=${highFormationEnergy} insulator=${nonMetallic} low-Tc=${lowTcCount} crash=${pipelineCrashCount}`,
     dataSource: "Active Learning",
   });
 
@@ -1630,14 +1632,7 @@ export async function runActiveLearningCycle(
           emit("log", {
             phase: "active-learning",
             event: "Interface discovery",
-            detail: `Relaxed ${interfaceResults.length} interfaces from ${topFilmsForInterface.length} films. ` +
-              `Best: ${bestInterface.film}/${bestInterface.substrate} ` +
-              `(score=${bestInterface.compositeScore.toFixed(3)}, ` +
-              `charge=${bestInterface.chargeTransfer.chargePerAtom.toFixed(4)} e/atom, ` +
-              `strain=${bestInterface.strain.strainPercent.toFixed(2)}%, ` +
-              `phonon=${bestInterface.phononCoupling.couplingProxy.toFixed(3)}, ` +
-              `xtb=${bestInterface.xtbConverged ? "converged" : "fallback"}). ` +
-              `${sigCT} significant charge transfer, ${optStrain} optimal strain range.`,
+            detail: `${interfaceResults.length} interfaces from ${topFilmsForInterface.length} films. Best: ${bestInterface.film}/${bestInterface.substrate} score=${bestInterface.compositeScore.toFixed(3)} CT=${bestInterface.chargeTransfer.chargePerAtom.toFixed(4)}e/atom strain=${bestInterface.strain.strainPercent.toFixed(1)}% (${sigCT} sig-CT, ${optStrain} opt-strain)`,
             dataSource: "Active Learning",
           });
         }
@@ -1667,7 +1662,7 @@ export async function runActiveLearningCycle(
     emit("log", {
       phase: "active-learning",
       event: "Batch retrain triggered",
-      detail: `Trigger: ${retrainReason}, total enriched=${totalEnrichedSinceLastRetrain}, ground-truth dataset=${getGroundTruthSummary().totalDatapoints}, ledger=${computeMetrics().count} entries`,
+      detail: `${retrainReason} | enriched=${totalEnrichedSinceLastRetrain} GT=${getGroundTruthSummary().totalDatapoints} ledger=${computeMetrics().count}`,
       dataSource: "Active Learning",
     });
     const preRetrainSnapshot = await storage.getSuperconductorCandidates(100);
@@ -1771,7 +1766,7 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: `Batch cycle ${batchCycleNum} complete`,
-    detail: `${dftSuccessCount} structures evaluated, ${gtSummary.totalDatapoints} total ground-truth datapoints, R² ${preR2.toFixed(4)} -> ${postR2.toFixed(4)}, MAE ${preMAE.toFixed(2)} -> ${postMAE.toFixed(2)}, dataset size ${preDatasetSize} -> ${postDatasetSize}`,
+    detail: `${dftSuccessCount} evaluated, GT=${gtSummary.totalDatapoints} R²=${preR2.toFixed(4)}→${postR2.toFixed(4)} MAE=${preMAE.toFixed(2)}→${postMAE.toFixed(2)} N=${preDatasetSize}→${postDatasetSize}`,
     dataSource: "Active Learning",
   });
 
@@ -1801,7 +1796,7 @@ export async function runActiveLearningCycle(
   emit("log", {
     phase: "active-learning",
     event: "Active learning cycle complete",
-    detail: `DFT enriched: ${dftSuccessCount}/${selected.length}, uncertainty reduction: ${uncertaintyReduction}%, model retrains: ${convergenceStats.modelRetrains}, best Tc: ${convergenceStats.bestTcFromLoop.toFixed(1)}K`,
+    detail: `DFT ${dftSuccessCount}/${selected.length} unc-Δ=${uncertaintyReduction}% retrains=${convergenceStats.modelRetrains} best-Tc=${convergenceStats.bestTcFromLoop.toFixed(1)}K`,
     dataSource: "Active Learning",
   });
 
