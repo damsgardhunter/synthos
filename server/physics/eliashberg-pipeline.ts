@@ -485,11 +485,15 @@ function solveEliashbergGapEquation(
 ): MatsubaraGapSolution {
   const kB = 0.08617;
   const T = Math.max(1, trialTc);
-  const nMatsubara = 32;
+
+  const maxPhononMeV = alpha2FSpec.maxFrequency * 0.1240;
+  const matsubaraSpacing = Math.PI * kB * T;
+  const minMatsubara = Math.ceil(maxPhononMeV / matsubaraSpacing / 2) + 8;
+  const nMatsubara = Math.max(64, Math.min(512, minMatsubara));
 
   const omegaN: number[] = [];
   for (let n = 0; n < nMatsubara; n++) {
-    omegaN.push(Math.PI * kB * T * (2 * n + 1));
+    omegaN.push(matsubaraSpacing * (2 * n + 1));
   }
 
   const lambda = alpha2FSpec.integratedLambda;
