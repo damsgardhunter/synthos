@@ -5,6 +5,8 @@ import {
   getCompositionWeightedProperty,
   getAverageMass,
   isTransitionMetal,
+  isRareEarth,
+  isActinide,
 } from "./elemental-data";
 import {
   computeElectronicStructure,
@@ -149,8 +151,9 @@ function extractLambdaFeatures(formula: string, pressure: number = 0): Record<st
   const enSpread = enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
 
   const hCount = counts["H"] || 0;
+  const ALKALI_ALKALINE = new Set(["Li", "Na", "K", "Rb", "Cs", "Be", "Mg", "Ca", "Sr", "Ba"]);
   const metalAtomCount = elements
-    .filter(e => isTransitionMetal(e) || ["La", "Y", "Ce", "Sc", "Ba", "Sr", "Ca"].includes(e))
+    .filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || ALKALI_ALKALINE.has(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
   const hydrogenRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
 
@@ -202,18 +205,42 @@ function featuresToArray(features: Record<string, number>): number[] {
   });
 }
 
+function preSortFeatures(X: number[][], nSamples: number, nFeatures: number): number[][] {
+  const sorted: number[][] = [];
+  for (let fi = 0; fi < nFeatures; fi++) {
+    const order = Array.from({ length: nSamples }, (_, i) => i);
+    order.sort((a, b) => X[a][fi] - X[b][fi]);
+    sorted.push(order);
+  }
+  return sorted;
+}
+
 function findBestSplit(
   X: number[][],
   residuals: number[],
   indices: number[],
-  featureIndex: number
+  featureIndex: number,
+  preSorted?: number[][]
 ): { threshold: number; improvement: number; leftIndices: number[]; rightIndices: number[] } {
-  const pairs = indices
-    .map(i => ({ val: X[i][featureIndex], res: residuals[i], idx: i }))
-    .sort((a, b) => a.val - b.val);
+  let pairs: { val: number; res: number; idx: number }[];
+
+  if (preSorted && indices.length > 50) {
+    const indexSet = new Set(indices);
+    pairs = [];
+    for (const idx of preSorted[featureIndex]) {
+      if (indexSet.has(idx)) {
+        pairs.push({ val: X[idx][featureIndex], res: residuals[idx], idx });
+      }
+    }
+  } else {
+    pairs = indices
+      .map(i => ({ val: X[i][featureIndex], res: residuals[i], idx: i }))
+      .sort((a, b) => a.val - b.val);
+  }
 
   const n = pairs.length;
   const totalSum = pairs.reduce((s, p) => s + p.res, 0);
+  const parentScore = (totalSum * totalSum) / n;
 
   let bestImprovement = -Infinity;
   let bestThreshold = 0;
@@ -228,7 +255,7 @@ function findBestSplit(
 
     if (pairs[i].val === pairs[i + 1].val) continue;
 
-    const improvement = (leftSum * leftSum) / leftCount + (rightSum * rightSum) / rightCount;
+    const improvement = (leftSum * leftSum) / leftCount + (rightSum * rightSum) / rightCount - parentScore;
     if (improvement > bestImprovement) {
       bestImprovement = improvement;
       bestThreshold = (pairs[i].val + pairs[i + 1].val) / 2;
@@ -249,7 +276,8 @@ function buildTree(
   residuals: number[],
   indices: number[],
   depth: number,
-  maxDepth: number
+  maxDepth: number,
+  preSorted?: number[][]
 ): LambdaTreeNode | number {
   if (depth >= maxDepth || indices.length < 4) {
     const sum = indices.reduce((s, i) => s + residuals[i], 0);
@@ -264,7 +292,7 @@ function buildTree(
   let bestRight: number[] = [];
 
   for (let fi = 0; fi < nFeatures; fi++) {
-    const split = findBestSplit(X, residuals, indices, fi);
+    const split = findBestSplit(X, residuals, indices, fi, preSorted);
     if (split.improvement > bestImprovement && split.leftIndices.length >= 2 && split.rightIndices.length >= 2) {
       bestImprovement = split.improvement;
       bestFeature = fi;
@@ -282,8 +310,8 @@ function buildTree(
   return {
     featureIndex: bestFeature,
     threshold: bestThreshold,
-    left: buildTree(X, residuals, bestLeft, depth + 1, maxDepth),
-    right: buildTree(X, residuals, bestRight, depth + 1, maxDepth),
+    left: buildTree(X, residuals, bestLeft, depth + 1, maxDepth, preSorted),
+    right: buildTree(X, residuals, bestRight, depth + 1, maxDepth, preSorted),
   };
 }
 
@@ -302,15 +330,17 @@ function trainLambdaGBM(
   maxDepth: number = 4
 ): LambdaGBModel {
   const n = X.length;
+  const nFeatures = X[0]?.length ?? 0;
   const basePrediction = y.reduce((s, v) => s + v, 0) / n;
   const predictions = new Array(n).fill(basePrediction);
   const trees: LambdaTreeNode[] = [];
   const allIndices = Array.from({ length: n }, (_, i) => i);
+  const preSorted = nFeatures > 0 ? preSortFeatures(X, n, nFeatures) : undefined;
 
   for (let t = 0; t < nEstimators; t++) {
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
-    const tree = buildTree(X, residuals, allIndices, 0, maxDepth);
+    const tree = buildTree(X, residuals, allIndices, 0, maxDepth, preSorted);
     if (typeof tree === "number") break;
 
     trees.push(tree);
