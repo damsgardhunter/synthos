@@ -16,18 +16,10 @@ export function generateMAXPhase(): FamilyGenerationResult {
         for (const n of nValues) {
           const mCount = n + 1;
           const xCount = n;
-          let formula: string;
-          if (mCount === 1) {
-            formula = `${m}${a}`;
-          } else {
-            formula = `${m}${mCount}${a}`;
-          }
-          if (xCount === 1) {
-            formula += x;
-          } else {
-            formula += `${x}${xCount}`;
-          }
-          formulas.push(formula);
+          const mPart = mCount === 1 ? m : `${m}${mCount}`;
+          const aPart = a;
+          const xPart = xCount === 1 ? x : `${x}${xCount}`;
+          formulas.push(`${mPart}${aPart}${xPart}`);
         }
       }
     }
@@ -144,7 +136,7 @@ export function generateMixedMechanism(): FamilyGenerationResult {
   for (const sp of niOSpacers) {
     formulas.push(`${sp}NiO2`);
     formulas.push(`${sp}NiO3`);
-    formulas.push(`${sp}4Ni3O8`);
+    formulas.push(`${sp}1.33NiO2.67`);
   }
 
   const cuOSpacers = ["La", "Y", "Bi", "Tl", "Hg", "Ba", "Sr", "Ca", "Nd"];
