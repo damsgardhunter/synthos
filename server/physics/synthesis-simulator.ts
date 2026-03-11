@@ -241,7 +241,14 @@ export function simulateSynthesisEffects(
     lambdaMod *= 1.0 + currentEffect;
   }
 
-  const effectiveMult = lambdaMod * (phasePurity * phasePurity) * Math.min(1, omegaMod);
+  let purityPenalty: number;
+  if (phasePurity >= 0.8) {
+    purityPenalty = phasePurity * phasePurity;
+  } else {
+    const impurityFraction = 1 - phasePurity;
+    purityPenalty = Math.max(0.05, Math.exp(-4.0 * impurityFraction));
+  }
+  const effectiveMult = lambdaMod * purityPenalty * Math.min(1, omegaMod);
 
   return {
     lambdaModifier: lambdaMod,

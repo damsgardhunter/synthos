@@ -2029,6 +2029,7 @@ async function runPhase10_Physics() {
           (updatedMlFeatures as any).reactionNetwork = {
             reactionStabilityScore: reactionResult.reactionStabilityScore,
             metastableLifetime: reactionResult.metastableLifetime,
+            metastableLifetimeLog10s: reactionResult.metastableLifetimeLog10s,
             decompositionComplexity: reactionResult.decompositionComplexity,
             pathwayCount: reactionResult.reactionGraph?.edges?.length ?? 0,
           };

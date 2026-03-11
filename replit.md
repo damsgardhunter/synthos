@@ -234,7 +234,7 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - structure-predictor.ts: totalAtoms=0 guard in computeMiedemaFormationEnergy; 6 new KNOWN_PROTOTYPES (Heusler, Skutterudite, Chevrel, K2NiF4, infinite-layer, Pyrochlore); matchPrototype extended for all 6; PROTOTYPE_CA_RATIOS added for all 6.
   - rl-agent.ts: Binary hydride formula fix — 2-element templates now generate `${el1}H${hCount}` instead of duplicating `${el1}${el2}H${hCount}`.
   - elemental-data.ts: Bi mcMillanHopfieldEta=0.15; Ac bulkModulus=12/eta=0.3/gamma=1.0/gruneisen=1.0; sommerfeldGamma filled for B(0.1), C(0.05), N(0.05), Si(0.1).
-  - synthesis-simulator.ts: Upper bound clamping on mutated parameters (temp≤2500K, pressure≤300GPa, coolingRate≤10000, duration≤168h); non-linear phasePurity^2 degradation; atmosphere compatibility check (oxygen penalizes hydrides).
+  - synthesis-simulator.ts: Upper bound clamping on mutated parameters (temp≤2500K, pressure≤300GPa, coolingRate≤10000, duration≤168h); non-linear phasePurity penalty (quadratic above 0.8, exponential decay below 0.8 with floor 0.05); atmosphere compatibility check (oxygen penalizes hydrides).
   - supercon-dataset.ts: Lambda added for V3Si(1.60), NbC(0.98), VN(0.94), TaC(0.86), MoC(1.10), MoN(1.04), ZrN(1.12); pressure+lambda for LaH6(110GPa), SnH4(96GPa), GeH4(220GPa), SiH4(125GPa), PH3(200GPa).
   - inverse-generator.ts: 5 new PROTOTYPE_TC_AFFINITY entries (Skutterudite, Chevrel, Borocarbide, Pyrochlore, InfiniteLayer); FORBIDDEN_ELEMENTS set blocking noble gases (He/Ne/Ar/Kr/Xe/Rn) and radioactive elements (Po/At/Fr/Ra/Pm/Tc).
 - **Round 11 comprehensive fixes**:
@@ -278,6 +278,8 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - topology-engine.ts: Chern-based TSC classification added ("chiral-topological-superconductor" for majorana>0.5 && chern>0.5); weaker mixed-case TSC detection (majorana>0.4 + z2/chern>0.3 + SOC>0.3).
   - bayesian-optimizer.ts: GP mean subtraction added — yMean computed from observations, subtracted before solving alpha, added back in predictions; far-from-data predictions revert to dataset mean instead of 0K.
   - active-learning.ts: Retrain skipped when all DFT enrichment fails (dftSuccessCount=0); hasNewData strictly requires totalEnrichedSinceLastRetrain>0.
+  - reaction-network-engine.ts: Bell-Evans-Polanyi barrier model (Ea=E0+alpha*|dHrxn|) with mechanism-specific alpha/E0 coefficients; formula canonicalization before convex hull calls; decompositionComplexity uses step count + distinct phases + barrier spread; metastableLifetimeLog10s numeric field (log10 seconds) alongside string; normalizeFormulaString handles unicode sub/superscripts.
+  - synthesis-simulator.ts: phasePurity penalty now exponential below 0.8 (exp(-4*impurityFraction), floor 0.05) — 10% impurity gives ~67% Tc multiplier, 20% gives ~45%.
   - pressure-engine.ts: Allen-Dynes f1 strong-coupling formula corrected to use ^(3/2) inner exponent matching physics-engine.ts; Tc fade at denom<0.05 changed from linear to sqrt for less aggressive suppression.
   - pairing-mechanisms.ts: Topological boost weight normalization — all weights clamped ≥0 and re-normalized to sum=1.0 after topo boost adjustment; prevents negative weights for low-wSpin material classes.
   - fermi-surface-engine.ts: Pocket detection threshold lowered from crossingCount<3 to <2; nesting detection threshold similarly lowered; captures small BZ-corner pockets in pnictides.

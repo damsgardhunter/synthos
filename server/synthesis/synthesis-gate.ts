@@ -87,16 +87,40 @@ const stats: SynthesisGateStats = {
 
 let scoreSum = 0;
 
-function parseFormulaCounts(formula: string): Record<string, number> {
+function normalizeFormulaString(formula: string): string {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const subscriptMap: Record<string, string> = {
+    "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+    "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
+  };
+  const superscriptMap: Record<string, string> = {
+    "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4",
+    "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+  };
+  let cleaned = formula;
+  for (const [sub, digit] of Object.entries(subscriptMap)) {
+    cleaned = cleaned.split(sub).join(digit);
+  }
+  for (const [sup, digit] of Object.entries(superscriptMap)) {
+    cleaned = cleaned.split(sup).join(digit);
+  }
+  cleaned = cleaned.replace(/[^\x20-\x7E]/g, "");
+  return cleaned.trim();
+}
+
+function parseFormulaCounts(formula: string): Record<string, number> {
+  const cleaned = normalizeFormulaString(formula);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+    if (isNaN(num) || num <= 0) {
+      counts[el] = (counts[el] || 0) + 1;
+    } else {
+      counts[el] = (counts[el] || 0) + num;
+    }
   }
   return counts;
 }

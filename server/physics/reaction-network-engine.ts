@@ -84,6 +84,7 @@ export interface ReactionNetworkResult {
   energyAboveHull: number;
   reactionStabilityScore: number;
   metastableLifetime: string;
+  metastableLifetimeLog10s: number;
   decompositionComplexity: number;
   decompositionPathways: DecompositionPathway[];
   reactionGraph: {
@@ -92,6 +93,15 @@ export interface ReactionNetworkResult {
   };
   metastabilityAssessment: MetastabilityAssessment;
   stabilityVerdict: string;
+}
+
+function canonicalizeFormula(formula: string): string {
+  const counts = parseFormulaCounts(formula);
+  const sorted = Object.keys(counts).sort();
+  return sorted.map(el => {
+    const n = counts[el];
+    return n === 1 ? el : `${el}${n}`;
+  }).join("");
 }
 
 function generateBinaryFormulas(elements: string[]): string[] {
@@ -170,12 +180,37 @@ function estimateEntropyCorrection(
   return -temperatureK * kB * mixingEntropy;
 }
 
+const BEP_ALPHA: Record<string, number> = {
+  "elemental-decomposition": 0.75,
+  "oxidative-decomposition": 0.65,
+  "dehydrogenation": 0.80,
+  "hydrogen-redistribution": 0.70,
+  "binary-disproportionation": 0.60,
+  "multi-phase-decomposition": 0.55,
+  "phase-separation": 0.65,
+};
+
+const BEP_E0: Record<string, number> = {
+  "elemental-decomposition": 0.5,
+  "oxidative-decomposition": 0.3,
+  "dehydrogenation": 0.6,
+  "hydrogen-redistribution": 0.4,
+  "binary-disproportionation": 0.35,
+  "multi-phase-decomposition": 0.25,
+  "phase-separation": 0.4,
+};
+
 function estimateReactionBarrier(
   deltaE: number,
   elements: string[],
   counts: Record<string, number>,
-  pressureGpa: number = 0
+  pressureGpa: number = 0,
+  mechanism: string = "phase-separation"
 ): number {
+  const alpha = BEP_ALPHA[mechanism] ?? 0.65;
+  const e0 = BEP_E0[mechanism] ?? 0.4;
+  const bepBarrier = Math.max(0.02, e0 + alpha * Math.abs(deltaE));
+
   let avgMeltingPoint = 0;
   let count = 0;
   for (const el of elements) {
@@ -187,15 +222,10 @@ function estimateReactionBarrier(
   }
   avgMeltingPoint = count > 0 ? avgMeltingPoint / count : 1000;
 
+  const thermalFactor = 0.15 * Math.log(Math.max(avgMeltingPoint, 300) / 300);
+
   const structuralComplexity = Math.log(Math.max(2, elements.length)) / Math.log(6);
-
-  const kineticBase = Math.abs(deltaE) > 0
-    ? Math.max(0.05, Math.abs(deltaE) * 10 + 0.2)
-    : 1.5;
-
-  const thermalFactor = 0.3 * Math.log(Math.max(avgMeltingPoint, 300) / 300);
-
-  const complexityBonus = structuralComplexity * 0.4;
+  const complexityBonus = structuralComplexity * 0.2;
 
   let pressureBarrierBoost = 0;
   if (pressureGpa > 0) {
@@ -208,7 +238,7 @@ function estimateReactionBarrier(
     }
   }
 
-  return Math.round((kineticBase + thermalFactor + complexityBonus + pressureBarrierBoost) * 1000) / 1000;
+  return Math.round((bepBarrier + thermalFactor + complexityBonus + pressureBarrierBoost) * 1000) / 1000;
 }
 
 function classifyDecompositionMechanism(
@@ -238,16 +268,17 @@ function classifyDecompositionMechanism(
   return "phase-separation";
 }
 
-function computeDecompositionProbability(barrier: number, temperatureK: number = 300): number {
+function computeDecompositionProbability(barrier: number, temperatureK: number = 300): { probability: number; lifetimeLog10s: number } {
   const kB = 8.617e-5;
   const attemptFreq = 1e13;
   const rate = attemptFreq * Math.exp(-barrier / (kB * temperatureK));
   const lifetimeS = 1 / Math.max(rate, 1e-100);
+  const lifetimeLog10s = Math.log10(Math.max(lifetimeS, 1e-30));
   const oneYearS = 3.15e7;
-  if (lifetimeS > 1e20 * oneYearS) return 0.0;
-  if (lifetimeS < 1) return 1.0;
+  if (lifetimeS > 1e20 * oneYearS) return { probability: 0.0, lifetimeLog10s: Math.min(lifetimeLog10s, 40) };
+  if (lifetimeS < 1) return { probability: 1.0, lifetimeLog10s };
   const prob = 1 - Math.exp(-oneYearS / lifetimeS);
-  return Math.round(prob * 10000) / 10000;
+  return { probability: Math.round(prob * 10000) / 10000, lifetimeLog10s: Math.round(lifetimeLog10s * 100) / 100 };
 }
 
 export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0): ReactionNetworkResult {
@@ -316,30 +347,39 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
     }
   }
 
-  const hullResult = computeConvexHull(formula, elements, competingFormulas);
+  const canonicalFormula = canonicalizeFormula(formula);
+  const canonicalizedCompeting = competingFormulas.map(c => ({
+    formula: canonicalizeFormula(c.formula),
+    energy: c.energy,
+  }));
+  const hullResult = computeConvexHull(canonicalFormula, elements, canonicalizedCompeting);
   const energyAboveHull = hullResult.energyAboveHull;
 
   const stableCompetitors = competingFormulas
     .filter(c => c.energy < 0)
     .sort((a, b) => a.energy - b.energy);
 
+  let globalMinLifetimeLog10s = 40;
+
   if (elements.length >= 2) {
     const elementalEnergy = 0 - formationEnergy;
-    const barrier = estimateReactionBarrier(elementalEnergy, elements, counts, pressureGpa);
-    const prob = computeDecompositionProbability(barrier);
+    const mechType = "elemental-decomposition";
+    const barrier = estimateReactionBarrier(elementalEnergy, elements, counts, pressureGpa, mechType);
+    const { probability: prob, lifetimeLog10s } = computeDecompositionProbability(barrier);
+    globalMinLifetimeLog10s = Math.min(globalMinLifetimeLog10s, lifetimeLog10s);
     pathways.push({
       products: [...elements],
       reactionEnergy: Math.round(elementalEnergy * 10000) / 10000,
       barrier,
       probability: prob,
-      mechanism: "elemental-decomposition",
+      mechanism: mechType,
     });
     edges.push({
       from: formula,
       to: [...elements],
       energy: elementalEnergy,
       barrier,
-      type: "elemental-decomposition",
+      type: mechType,
     });
   }
 
@@ -359,9 +399,10 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
 
     let productTotalEnergy = comp.energy;
     const reactionEnergy = productTotalEnergy - formationEnergy;
-    const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa);
-    const prob = computeDecompositionProbability(barrier);
     const mechanism = classifyDecompositionMechanism(elements, products);
+    const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa, mechanism);
+    const { probability: prob, lifetimeLog10s } = computeDecompositionProbability(barrier);
+    globalMinLifetimeLog10s = Math.min(globalMinLifetimeLog10s, lifetimeLog10s);
 
     pathways.push({
       products,
@@ -395,9 +436,10 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
         const productEnergy = compA.energy + compB.energy;
         const reactionEnergy = productEnergy - formationEnergy;
         if (reactionEnergy < 0) {
-          const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa);
-          const prob = computeDecompositionProbability(barrier);
           const mechanism = classifyDecompositionMechanism(elements, products);
+          const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa, mechanism);
+          const { probability: prob, lifetimeLog10s } = computeDecompositionProbability(barrier);
+          globalMinLifetimeLog10s = Math.min(globalMinLifetimeLog10s, lifetimeLog10s);
           pathways.push({
             products,
             reactionEnergy: Math.round(reactionEnergy * 10000) / 10000,
@@ -421,7 +463,7 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
 
   const metastability = assessMetastability(formula, energyAboveHull);
 
-  const decompositionComplexity = computeDecompositionComplexity(elements, pathways);
+  const decompositionComplexity = computeDecompositionComplexity(elements, pathways, edges);
 
   const reactionStabilityScore = computeReactionStabilityScore(
     formationEnergy,
@@ -449,6 +491,7 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0)
     energyAboveHull: Math.round(energyAboveHull * 10000) / 10000,
     reactionStabilityScore,
     metastableLifetime: metastability.estimatedLifetime,
+    metastableLifetimeLog10s: Math.round(globalMinLifetimeLog10s * 100) / 100,
     decompositionComplexity,
     decompositionPathways: pathways.slice(0, 10),
     reactionGraph: {
@@ -474,20 +517,36 @@ function deduplicateNodes(nodes: ReactionNode[]): ReactionNode[] {
 
 function computeDecompositionComplexity(
   elements: string[],
-  pathways: DecompositionPathway[]
+  pathways: DecompositionPathway[],
+  edges: ReactionEdge[]
 ): number {
   if (pathways.length === 0) return 0;
 
-  const nElements = elements.length;
   const nPathways = pathways.length;
+  const stepCount = edges.length;
+
+  const allProducts = new Set<string>();
+  for (const p of pathways) {
+    for (const prod of p.products) {
+      allProducts.add(prod);
+    }
+  }
+  const distinctPhases = allProducts.size;
+
   const avgProducts = pathways.reduce((s, p) => s + p.products.length, 0) / nPathways;
   const mechanismTypes = new Set(pathways.map(p => p.mechanism)).size;
 
+  const maxBarrier = Math.max(...pathways.map(p => p.barrier));
+  const minBarrier = Math.min(...pathways.map(p => p.barrier));
+  const barrierSpread = maxBarrier > 0 ? (maxBarrier - minBarrier) / maxBarrier : 0;
+
   const score = Math.min(1.0,
-    (nElements / 6) * 0.25 +
-    (nPathways / 10) * 0.25 +
-    (avgProducts / 4) * 0.25 +
-    (mechanismTypes / 5) * 0.25
+    (stepCount / 15) * 0.20 +
+    (distinctPhases / 10) * 0.20 +
+    (avgProducts / 4) * 0.15 +
+    (mechanismTypes / 5) * 0.15 +
+    (nPathways / 10) * 0.15 +
+    barrierSpread * 0.15
   );
 
   return Math.round(score * 1000) / 1000;
