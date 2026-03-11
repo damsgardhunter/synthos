@@ -601,19 +601,22 @@ export function trainVAE(formulas: string[], epochs: number = 20): void {
         const loss = recLoss + vaeBeta * kl;
         totalLoss += loss;
 
+        const h1Dec = leakyRelu(vecAdd(matVecMul(w.W_dec1, z), w.b_dec1));
+
         for (let i = 0; i < w.W_dec2.length; i++) {
-          const error = (reconstructed[i] ?? 0) - (genome.vector[i] ?? 0);
+          const error = (2.0 / genome.vector.length) * ((reconstructed[i] ?? 0) - (genome.vector[i] ?? 0));
           for (let j = 0; j < w.W_dec2[i].length; j++) {
-            w.W_dec2[i][j] -= lr * error * (Math.random() * 0.5 + 0.5);
+            w.W_dec2[i][j] -= lr * error * (h1Dec[j] ?? 0);
           }
-          w.b_dec2[i] -= lr * error * 0.5;
+          w.b_dec2[i] -= lr * error;
         }
 
         for (let i = 0; i < w.W_mu.length; i++) {
-          const muGrad = mu[i] * 0.001;
+          const muGrad = vaeBeta * (mu[i] ?? 0) / mu.length;
           for (let j = 0; j < w.W_mu[i].length; j++) {
-            w.W_mu[i][j] -= lr * muGrad * (Math.random() * 0.5 + 0.5);
+            w.W_mu[i][j] -= lr * muGrad;
           }
+          w.b_mu[i] -= lr * muGrad;
         }
 
       } catch {}
