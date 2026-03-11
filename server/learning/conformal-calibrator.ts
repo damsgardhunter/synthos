@@ -171,11 +171,14 @@ function getPredictedSigmaForEntry(entry: PredictionRealityEntry): number {
   }
 }
 
+const MAX_CALIBRATION_WINDOW = 1000;
+
 function buildCalibrationDataset(): CalibrationEntry[] {
   const ledgerSize = getLedgerSize();
   if (ledgerSize === 0) return [];
 
-  const entries = getLedgerSlice(0, ledgerSize);
+  const startIdx = Math.max(0, ledgerSize - MAX_CALIBRATION_WINDOW);
+  const entries = getLedgerSlice(startIdx, ledgerSize);
   const calibEntries: CalibrationEntry[] = [];
 
   for (const entry of entries) {
@@ -185,7 +188,7 @@ function buildCalibrationDataset(): CalibrationEntry[] {
     if (!Number.isFinite(predictedSigma) || predictedSigma <= 0) continue;
 
     const absError = Math.abs(entry.model_prediction.Tc - entry.ground_truth.Tc);
-    const ncs = absError / predictedSigma;
+    const ncs = absError / Math.max(1e-4, predictedSigma);
 
     calibEntries.push({
       formula: entry.formula,
@@ -421,7 +424,9 @@ export interface IntervalValidationResult {
 }
 
 export function validateIntervalsCoverage(): IntervalValidationResult {
-  const entries = getLedgerSlice(0, getLedgerSize());
+  const totalSize = getLedgerSize();
+  const valStart = Math.max(0, totalSize - MAX_CALIBRATION_WINDOW);
+  const entries = getLedgerSlice(valStart, totalSize);
   const coverageLevels = [0.90, 0.95, 0.99];
   const perLevel: IntervalValidationResult["perLevel"] = [];
 
