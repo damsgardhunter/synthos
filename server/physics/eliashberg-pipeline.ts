@@ -746,20 +746,11 @@ export function runEliashbergPipeline(
   const hRatioPipe = metalAtomsPipe > 0 ? hCountPipe / metalAtomsPipe : 0;
   const isHighPressureHydride = hRatioPipe >= 4 && pressureGpa >= 100;
 
-  let surrogateAnharmonicPenalty = 1.0;
   let surrogateAnharmonicUncertainty = 0.0;
   if (isHighPressureHydride) {
-    const anharmonicityEst = Math.min(0.5, 0.05 + pressureGpa * 0.001 + hRatioPipe * 0.02);
-    surrogateAnharmonicPenalty = 1.0 - anharmonicityEst;
-    surrogateAnharmonicUncertainty = 0.15;
+    const anharmonicityEst = Math.min(0.35, 0.05 + pressureGpa * 0.0008 + hRatioPipe * 0.015);
+    surrogateAnharmonicUncertainty = anharmonicityEst;
   }
-
-  const lambdaPenalized = Number(
-    (alpha2FSpec.integratedLambda * surrogateAnharmonicPenalty).toFixed(4)
-  );
-  const lambdaUncorrectedPenalized = Number(
-    (coupling.lambdaUncorrected * surrogateAnharmonicPenalty).toFixed(4)
-  );
 
   let confidence: "low" | "medium" | "high" = "medium";
   if (alpha2FSpec.convergenceCheck.converged && gapSolution.converged) {
@@ -783,6 +774,11 @@ export function runEliashbergPipeline(
 
   if (isHighPressureHydride) {
     if (confidence === "high") confidence = "medium";
+    warnings.push(
+      `Surrogate anharmonicity uncertainty: harmonic approximation may overestimate phonon frequencies ` +
+      `for high-pressure hydride (H-ratio=${hRatioPipe.toFixed(1)}, P=${pressureGpa} GPa). ` +
+      `Confidence band widened by ${(surrogateAnharmonicUncertainty * 100).toFixed(0)}%. DFPT verification recommended.`
+    );
   }
 
   const baseUncertaintyFrac = confidence === "high" ? 0.15 : confidence === "medium" ? 0.25 : 0.40;
@@ -797,8 +793,8 @@ export function runEliashbergPipeline(
     pressureGpa,
     tier: "surrogate",
     alpha2F: alpha2FSpec,
-    lambda: lambdaPenalized,
-    lambdaUncorrected: lambdaUncorrectedPenalized,
+    lambda: alpha2FSpec.integratedLambda,
+    lambdaUncorrected: coupling.lambdaUncorrected,
     omegaLog: alpha2FSpec.omegaLog,
     omega2: alpha2FSpec.omega2,
     muStar,
