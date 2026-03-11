@@ -576,6 +576,16 @@ function recordRejection(formula: string, reason: string, tc: number, lambda?: n
   rejectedFormulas.set(normalizeFormula(formula), { reason, tc, lambda, timestamp: Date.now() });
   if (rejectedFormulas.size > MAX_REJECTED_CACHE_SIZE) pruneRejectedCache();
 }
+function getHydrideUnverifiedPenalty(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const hCount = counts["H"] ?? 0;
+  if (hCount < 4) return 1.0;
+  const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
+  const hFraction = hCount / totalAtoms;
+  if (hFraction > 0.7) return 0.4;
+  if (hFraction > 0.5) return 0.6;
+  return 0.75;
+}
 const formulasInFlight = new Map<string, number>();
 const IN_FLIGHT_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -3371,6 +3381,8 @@ async function runPhase11_StructurePrediction() {
               let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
               rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
               const structUncertainty = Math.max(0.5, 0.3 + variant.structuralNovelty * 0.4);
+              const structHPenalty = getHydrideUnverifiedPenalty(variant.formula);
+              rawTc = Math.round(rawTc * structHPenalty);
 
               const id = `sc-struct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
               try {
@@ -3448,6 +3460,8 @@ async function runPhase11_StructurePrediction() {
             const metallicityML = features.metallicity ?? 0.5;
             let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
             rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, variant.formula);
+            const novelHPenalty = getHydrideUnverifiedPenalty(variant.formula);
+            rawTc = Math.round(rawTc * novelHPenalty);
 
             const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             try {
@@ -3530,6 +3544,8 @@ async function runPhase11_StructurePrediction() {
             const metallicityML = features.metallicity ?? 0.5;
             let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, evoFormula);
             rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, evoFormula);
+            const evoHPenalty = getHydrideUnverifiedPenalty(evoFormula);
+            rawTc = Math.round(rawTc * evoHPenalty);
             const id = `sc-evo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             try {
               const inserted = await insertCandidateWithStabilityCheck({
@@ -3600,6 +3616,8 @@ async function runPhase11_StructurePrediction() {
           const metallicityML = features.metallicity ?? 0.5;
           let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, normalized);
           rawTc = applyAmbientTcCap(rawTc, lambdaML, 0, metallicityML, normalized);
+          const motifHPenalty = getHydrideUnverifiedPenalty(normalized);
+          rawTc = Math.round(rawTc * motifHPenalty);
           const motifDiffDim = (crystal as any).atoms?.length > 0 && (crystal as any).lattice
             ? inferDimensionalityFromStructure((crystal as any).lattice, (crystal as any).atoms, crystal.spaceGroup)
             : "3D";
@@ -3898,7 +3916,8 @@ async function runPhase11_StructurePrediction() {
             const vaePhysTc = vaeLambda > 0
               ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq, undefined, normalized))
               : 0;
-            const cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+            let cappedTc = applyAmbientTcCap(vaePhysTc, vaeLambda, estimateFamilyPressure(normalized), features.metallicity ?? 0.5, normalized);
+            cappedTc = Math.round(cappedTc * getHydrideUnverifiedPenalty(normalized));
             const synthWeightedScore = Math.min(0.9, gbResult.score * 0.6 + synthGate.compositeScore * 0.4);
             const inserted = await insertCandidateWithStabilityCheck({
               formula: normalized,
@@ -3942,9 +3961,10 @@ async function runPhase11_StructurePrediction() {
             const features = getCachedFeatures(normalized);
             const gbResult = gbPredict(features);
             if (gbResult.tcPredicted >= 10) {
+              const structFirstTc = Math.round(gbResult.tcPredicted * getHydrideUnverifiedPenalty(normalized));
               const inserted = await insertCandidateWithStabilityCheck({
                 formula: normalized,
-                predictedTc: Math.round(gbResult.tcPredicted),
+                predictedTc: structFirstTc,
                 dataConfidence: "low",
                 ensembleScore: Math.min(0.9, gbResult.score),
                 verificationStage: 0,
@@ -5024,6 +5044,8 @@ async function runAutonomousFastPath() {
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
             predictedTc = applyAmbientTcCap(predictedTc, lambdaML, protoPressure, metallicityML, normalized);
+            const protoHPenalty = getHydrideUnverifiedPenalty(normalized);
+            predictedTc = Math.round(predictedTc * protoHPenalty);
 
             try {
               const id = `sc-protoenum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -5518,6 +5540,10 @@ async function runAutonomousFastPath() {
         result = await runAutonomousDiscoveryCycle(formula);
       } finally {
         releaseFormulaInFlight(formula);
+      }
+
+      if (result.reason.startsWith("error:") || result.reason.startsWith("insert-failed")) {
+        alreadyScreenedFormulas.delete(normalizeFormula(formula));
       }
 
       const candFamily = classifyFamily(formula);
