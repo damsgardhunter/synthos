@@ -169,7 +169,7 @@ export function computePhononPairing(
       const lambdaEff = lambda - muStar * (1 + lambda);
       if (lambdaEff > 0) {
         const tcSisso = 0.182 * omegaLogK * Math.pow(lambdaEff, 0.572) *
-          Math.pow(1 + 6.5 * muStar * Math.log(lambda), -0.278);
+          Math.pow(1 + 6.5 * muStar * Math.log(Math.max(1.1, lambda)), -0.278);
         if (Number.isFinite(tcSisso) && tcSisso > tcAllenDynes) {
           tcAllenDynes = tcSisso;
         }
@@ -195,6 +195,11 @@ export function computePhononPairing(
     const maxFreq = phonon.maxPhononFrequency;
     const nBranches = branches.length;
 
+    const normSum = branches.reduce((s, bb) => {
+      const af = bb.frequencies.reduce((ss, f) => ss + Math.abs(f), 0) / Math.max(1, bb.frequencies.length);
+      return s + (af > 0 ? (1.0 / af) * (bb.isSoft ? 2.0 : 1.0) : 0);
+    }, 0);
+
     for (let b = 0; b < nBranches; b++) {
       const br = branches[b];
       const freqs = br.frequencies;
@@ -208,10 +213,6 @@ export function computePhononPairing(
       let branchWeight = avgFreq > 0 ? (1.0 / avgFreq) : 0;
       if (br.isSoft) branchWeight *= 2.0;
 
-      const normSum = branches.reduce((s, bb) => {
-        const af = bb.frequencies.reduce((ss, f) => ss + Math.abs(f), 0) / Math.max(1, bb.frequencies.length);
-        return s + (af > 0 ? (1.0 / af) * (bb.isSoft ? 2.0 : 1.0) : 0);
-      }, 0);
       const branchLambda = normSum > 0
         ? lambda * branchWeight / normSum
         : lambda / Math.max(1, nBranches);
