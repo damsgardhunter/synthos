@@ -739,10 +739,21 @@ export function selectForDFT(
   }
   rebuildSeenSample();
 
-  const topForPressure = selected.slice(0, 5);
+  const tierPriority: Record<string, number> = {
+    "high-uncertainty": 0,
+    "pure-curiosity": 1,
+    "random-exploration": 2,
+    "best-tc": 3,
+  };
+  const pressureCandidates = [...selected]
+    .sort((a, b) => (tierPriority[a.selectionTier] ?? 4) - (tierPriority[b.selectionTier] ?? 4))
+    .slice(0, Math.min(selected.length, 8));
+  const pressureSeenFormulas = new Set<string>();
   let pressureAdded = 0;
-  for (const ranked of topForPressure) {
-    if (pressureAdded >= pressureExplorationSlots) break;
+  for (const ranked of pressureCandidates) {
+    if (pressureAdded >= pressureExplorationSlots || selected.length >= budget) break;
+    if (pressureSeenFormulas.has(ranked.candidate.formula)) continue;
+    pressureSeenFormulas.add(ranked.candidate.formula);
     try {
       const samples = generateAdaptivePressureSamples(ranked.candidate.formula, 2);
       for (const sample of samples) {
