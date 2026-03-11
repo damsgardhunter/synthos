@@ -526,36 +526,6 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
-    name: "YBCO-123",
-    spaceGroup: "Pmmm",
-    latticeType: "orthorhombic",
-    cOverA: 3.0,
-    sites: [
-      { label: "A1", x: 0.5, y: 0.5, z: 0.18, role: "spacer" },
-      { label: "A2", x: 0.5, y: 0.5, z: 0.82, role: "spacer" },
-      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "chain-TM" },
-      { label: "B", x: 0.0, y: 0.0, z: 0.36, role: "plane-TM" },
-      { label: "B", x: 0.0, y: 0.0, z: 0.64, role: "plane-TM" },
-      { label: "X", x: 0.0, y: 0.5, z: 0.0, role: "chain-O" },
-      { label: "X", x: 0.5, y: 0.0, z: 0.38, role: "plane-O" },
-      { label: "X", x: 0.0, y: 0.5, z: 0.38, role: "plane-O" },
-      { label: "X", x: 0.5, y: 0.0, z: 0.62, role: "plane-O" },
-      { label: "X", x: 0.0, y: 0.5, z: 0.62, role: "plane-O" },
-      { label: "X", x: 0.0, y: 0.0, z: 0.16, role: "apical-O" },
-      { label: "X", x: 0.0, y: 0.0, z: 0.84, role: "apical-O" },
-    ],
-    stoichiometryRatio: [1, 2, 3, 7],
-    coordination: [10, 5, 4, 2],
-    chemistryRules: (elements: string[]) => {
-      if (elements.length < 3 || elements.length > 4) return false;
-      const hasSpacer = elements.some(e => ["Y", "La", "Nd", "Sm", "Gd", "Eu", "Ho", "Er", "Dy", "Yb"].includes(e));
-      const hasAlkalineEarth = elements.some(e => ["Ba", "Sr", "Ca"].includes(e));
-      const hasTM = elements.some(e => ["Cu", "Co", "Ni", "Fe"].includes(e));
-      const hasO = elements.includes("O");
-      return (hasSpacer || hasAlkalineEarth) && hasTM && hasO;
-    },
-  },
-  {
     name: "FeSe-11",
     spaceGroup: "P4/nmm",
     latticeType: "tetragonal",
@@ -1000,38 +970,6 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
-    name: "FeB-B27",
-    spaceGroup: "Pnma",
-    latticeType: "orthorhombic",
-    cOverA: 1.3,
-    sites: [
-      { label: "A", x: 0.18, y: 0.25, z: 0.12, role: "metal" },
-      { label: "B", x: 0.03, y: 0.25, z: 0.62, role: "boron" },
-    ],
-    stoichiometryRatio: [4, 4],
-    coordination: [7, 7],
-    chemistryRules: (elements) => {
-      if (elements.length !== 2) return false;
-      return elements.some(e => ["Fe", "Co", "Ni", "Mn", "Cr", "Mo", "W"].includes(e)) && elements.includes("B");
-    },
-  },
-  {
-    name: "CrB-Bf",
-    spaceGroup: "Cmcm",
-    latticeType: "orthorhombic",
-    cOverA: 1.1,
-    sites: [
-      { label: "A", x: 0.0, y: 0.14, z: 0.25, role: "metal" },
-      { label: "B", x: 0.0, y: 0.44, z: 0.25, role: "boron" },
-    ],
-    stoichiometryRatio: [4, 4],
-    coordination: [7, 7],
-    chemistryRules: (elements) => {
-      if (elements.length !== 2) return false;
-      return elements.some(e => ["Cr", "Mo", "W", "V", "Nb", "Ta", "Ni"].includes(e)) && elements.includes("B");
-    },
-  },
-  {
     name: "Th3P4-D7_3",
     spaceGroup: "I-43d",
     latticeType: "cubic",
@@ -1094,23 +1032,6 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
       return elements.some(e => isRareEarth(e) || ["Mg", "Ca", "Y", "Zr", "Hf", "Ti"].includes(e)) && elements.some(e => isTransitionMetal(e) || ["Al"].includes(e));
-    },
-  },
-  {
-    name: "Fe3C-Cementite",
-    spaceGroup: "Pnma",
-    latticeType: "orthorhombic",
-    cOverA: 1.5,
-    sites: [
-      { label: "A", x: 0.04, y: 0.25, z: 0.40, role: "metal-1" },
-      { label: "A", x: 0.18, y: 0.06, z: 0.33, role: "metal-2" },
-      { label: "B", x: 0.88, y: 0.25, z: 0.44, role: "carbon" },
-    ],
-    stoichiometryRatio: [12, 4],
-    coordination: [12, 6],
-    chemistryRules: (elements) => {
-      if (elements.length !== 2) return false;
-      return elements.some(e => ["Fe", "Co", "Ni", "Cr", "Mn"].includes(e)) && elements.includes("C");
     },
   },
   {

@@ -119,6 +119,7 @@ const convergenceStats: ActiveLearningConvergence = {
 };
 
 let totalEnrichedSinceLastRetrain = 0;
+let enrichmentLogCount = 0;
 let lastRetrainCycle = 0;
 const RETRAIN_CYCLE_INTERVAL = 20;
 const RETRAIN_DFT_THRESHOLD = 50;
@@ -795,12 +796,15 @@ async function runDFTEnrichmentForCandidate(
       .map(s => `${s.name}:${s.status}`)
       .join(", ");
 
-    emit("log", {
-      phase: "active-learning",
-      event: "Quantum engine enrichment",
-      detail: `${candidate.formula} @ ${evalPressure} GPa -- tier=${entry.tier}, lambda=${entry.lambda.toFixed(3)}, omegaLog=${entry.omegaLog.toFixed(1)}, Tc=${entry.tc.toFixed(1)}K, DOS(EF)=${entry.dosAtEF.toFixed(2)}, phonon_stable=${entry.isPhononStable}, confidence=${entry.confidence} [${stepsSummary}]`,
-      dataSource: "Active Learning",
-    });
+    if (entry.tc > 50 || entry.tier === "full-dft" || enrichmentLogCount < 5) {
+      emit("log", {
+        phase: "active-learning",
+        event: "Quantum engine enrichment",
+        detail: `${candidate.formula} @ ${evalPressure} GPa -- tier=${entry.tier}, Tc=${entry.tc.toFixed(1)}K, lambda=${entry.lambda.toFixed(3)}, phonon_stable=${entry.isPhononStable}, confidence=${entry.confidence}`,
+        dataSource: "Active Learning",
+      });
+    }
+    enrichmentLogCount++;
 
     if (entry.lambda > 0 && entry.tc > 0) {
       recordPipelineResult(entry.lambda, entry.tc);
@@ -868,7 +872,8 @@ async function runDFTEnrichmentForCandidate(
     await storage.updateSuperconductorCandidate(candidate.id, updates);
 
     const formEnergy = entry.formationEnergy;
-    const isStable = entry.isPhononStable && (formEnergy === null || formEnergy < 0.5);
+    const isStable = entry.isPhononStable && (formEnergy === null || formEnergy < 0.1);
+    const isMetastable = !isStable && entry.isPhononStable && formEnergy !== null && formEnergy < 0.25;
     const dftSource = entry.tier === "full-dft" ? "external" as const : "active-learning" as const;
     incorporateDFTResult(
       candidate.formula,
@@ -986,12 +991,15 @@ async function runDFTEnrichmentForCandidate(
     const hasExternalData = dftData.sources.mp || dftData.sources.aflow;
     const sourceType = hasExternalData ? "external+analytical" : "analytical";
 
-    emit("log", {
-      phase: "active-learning",
-      event: "DFT enrichment (fallback)",
-      detail: `${candidate.formula} -- DFT data (${sourceType}, coverage=${dftData.dftCoverage.toFixed(2)}): ${desc}`,
-      dataSource: "Active Learning",
-    });
+    if (enrichmentLogCount < 5 || dftData.dftCoverage > 0.5) {
+      emit("log", {
+        phase: "active-learning",
+        event: "DFT enrichment (fallback)",
+        detail: `${candidate.formula} -- DFT data (${sourceType}, coverage=${dftData.dftCoverage.toFixed(2)})`,
+        dataSource: "Active Learning",
+      });
+    }
+    enrichmentLogCount++;
 
     const features = extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
     const gb = gbPredict(features);
@@ -1020,7 +1028,7 @@ async function runDFTEnrichmentForCandidate(
     await storage.updateSuperconductorCandidate(candidate.id, updates);
 
     const formEnergy = dftData.formationEnergy?.value ?? null;
-    const isStable = formEnergy !== null ? formEnergy < 0.5 : true;
+    const isStable = formEnergy !== null ? formEnergy < 0.1 : false;
     const dftSource = hasExternalDFT ? "external" as const : "active-learning" as const;
     incorporateDFTResult(
       candidate.formula,
@@ -1300,6 +1308,7 @@ export async function runActiveLearningCycle(
   let dftSuccessCount = 0;
   let bestTcThisLoop = 0;
   let pipelineCrashCount = 0;
+  enrichmentLogCount = 0;
   const enrichedFormulaPressures = new Set<string>();
 
   for (const ranked of selected) {
