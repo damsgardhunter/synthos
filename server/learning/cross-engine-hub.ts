@@ -282,8 +282,24 @@ class CrossEngineHub {
     ).length;
 
     const recommendedElements: string[] = [];
-    if (avgSOC > 0.3) recommendedElements.push("Bi", "Pb", "Ir");
-    if (avgBandInversion > 0.3) recommendedElements.push("Sn", "Te", "Se");
+
+    const CLASS_ELEMENTS: Record<string, string[]> = {
+      "topological_insulator": ["Bi", "Sb", "Te", "Se", "Sn"],
+      "weyl_semimetal": ["Ta", "Nb", "As", "P", "W"],
+      "dirac_semimetal": ["Cd", "As", "Na", "Bi", "Zn"],
+      "nodal_line": ["Ca", "Sr", "Si", "Ge", "Pb"],
+      "topological_superconductor": ["Cu", "Bi", "Sr", "Ir", "Pt"],
+    };
+
+    const classEls = CLASS_ELEMENTS[bestClass];
+    if (classEls) {
+      recommendedElements.push(...classEls);
+    } else {
+      if (avgSOC > 0.3) recommendedElements.push("Bi", "Pb", "Ir", "Pt");
+      if (avgBandInversion > 0.3) recommendedElements.push("Sn", "Te", "Se");
+    }
+
+    if (avgMajorana > 0.3 && !recommendedElements.includes("Ir")) recommendedElements.push("Ir");
 
     const uniqueElements = Array.from(new Set(recommendedElements));
 

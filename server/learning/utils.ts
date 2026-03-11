@@ -208,7 +208,7 @@ export function normalizeFormula(raw: string): string {
     }
   }
 
-  elements.sort((a, b) => (ELECTRONEGATIVITY[a] ?? 2.0) - (ELECTRONEGATIVITY[b] ?? 2.0));
+  elements.sort((a, b) => a.localeCompare(b));
 
   let result = "";
   for (const el of elements) {
