@@ -683,18 +683,16 @@ function applyIntercalatedLayeredFilter(formula: string, features: MLFeatureVect
   let score = 0;
   let pass = true;
 
-  const INTERCALANTS = ["Li", "Na", "K", "Rb", "Cs", "Ca", "Sr", "Ba", "Eu", "Yb"];
-  const HOST_METALS = ["Nb", "Ta", "Mo", "W", "Ti", "Zr", "Hf", "V"];
-  const HOST_ANIONS = ["Se", "S", "Te", "O", "C"];
+  const INTERCALANTS = ["Li", "Na", "K", "Rb", "Cs", "Ca", "Sr", "Ba", "Mg", "Eu", "Yb"];
+  const ANION_ELEMENTS = ["O", "S", "Se", "Te", "N", "C", "F", "Cl", "Br", "I"];
 
   const intercalantCount = elements
     .filter(e => INTERCALANTS.includes(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
-  const hostMetalCount = elements
-    .filter(e => HOST_METALS.includes(e))
-    .reduce((s, e) => s + (counts[e] || 0), 0);
-  const hostAnionCount = elements
-    .filter(e => HOST_ANIONS.includes(e))
+  const hostElements = elements.filter(e => !INTERCALANTS.includes(e) && !ANION_ELEMENTS.includes(e));
+  const hostMetalCount = hostElements.reduce((s, e) => s + (counts[e] || 0), 0);
+  const anionCount = elements
+    .filter(e => ANION_ELEMENTS.includes(e))
     .reduce((s, e) => s + (counts[e] || 0), 0);
 
   if (intercalantCount > 0) {
@@ -705,12 +703,21 @@ function applyIntercalatedLayeredFilter(formula: string, features: MLFeatureVect
     reasons.push(`No intercalant species detected`);
   }
 
-  if (hostAnionCount >= 1) {
-    score += 0.20;
-    reasons.push(`Host lattice anions present (count=${hostAnionCount})`);
+  const hasHostLattice = anionCount >= 1 || (hostMetalCount >= 1 && (features.layeredStructure || features.dimensionalityScore >= 0.5));
+  if (hasHostLattice) {
+    if (anionCount >= 1 && hostMetalCount >= 1) {
+      score += 0.20;
+      reasons.push(`Host lattice: ${hostElements.join("/")} with anions (count=${anionCount}), metals (count=${hostMetalCount})`);
+    } else if (anionCount >= 1) {
+      score += 0.15;
+      reasons.push(`Host anions present (count=${anionCount}), host metals not in standard list but layered character may indicate valid host`);
+    } else {
+      score += 0.10;
+      reasons.push(`Host metals ${hostElements.join("/")} detected with layered character (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
+    }
   } else {
     pass = false;
-    reasons.push(`No host lattice anions detected`);
+    reasons.push(`No host lattice detected (anions=${anionCount}, host metals=${hostMetalCount}, layered=${features.layeredStructure})`);
   }
 
   const is2DFermiSurface = features.dimensionalityScore >= 0.6 ||
@@ -724,12 +731,18 @@ function applyIntercalatedLayeredFilter(formula: string, features: MLFeatureVect
     reasons.push(`No 2D Fermi surface detected (dimensionality=${features.dimensionalityScore.toFixed(2)})`);
   }
 
+  const lambdaThreshold = (is2DFermiSurface && features.dosAtEF > 2.0) ? 0.15 :
+    (is2DFermiSurface && features.dosAtEF > 1.5) ? 0.20 : 0.30;
+
   if (features.electronPhononLambda >= 0.3) {
     score += 0.15;
     reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} >= 0.3 (adequate e-ph coupling for intercalated system)`);
+  } else if (features.electronPhononLambda >= lambdaThreshold) {
+    score += 0.10;
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} below 0.3 but >= ${lambdaThreshold.toFixed(2)} (2D electronic enhancement with DOS(EF)=${features.dosAtEF.toFixed(2)} may compensate weak phonon coupling)`);
   } else {
     pass = false;
-    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < 0.3 (insufficient electron-phonon coupling)`);
+    reasons.push(`Lambda = ${features.electronPhononLambda.toFixed(2)} < ${lambdaThreshold.toFixed(2)} (insufficient coupling even with electronic enhancement)`);
   }
 
   if (features.metallicity < 0.1 && features.mottProximityScore > 0.5) {
