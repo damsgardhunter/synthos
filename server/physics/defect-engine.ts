@@ -6,6 +6,7 @@ export enum DefectType {
   Antisite = "antisite",
   Dopant = "dopant",
   GrainBoundary = "grain-boundary",
+  MolecularH2 = "molecular-h2",
 }
 
 export interface DefectStructure {
@@ -157,6 +158,7 @@ const defectStats = {
     [DefectType.Antisite]: 0,
     [DefectType.Dopant]: 0,
     [DefectType.GrainBoundary]: 0,
+    [DefectType.MolecularH2]: 0,
   } as Record<string, number>,
   bestTcImprovement: 0,
   bestTcFormula: "",
@@ -283,6 +285,14 @@ export function computeDefectFormationEnergy(
       Ef = surfaceEnergy * 0.8 + hostEnergy * 0.2;
       break;
     }
+    case DefectType.MolecularH2: {
+      const hEnergy = getElementEnergy("H");
+      const h2BondEnergy = 4.52;
+      const latticeDisruption = hostEnergy * 0.6;
+      Ef = h2BondEnergy - 2 * hEnergy * 0.3 - latticeDisruption * 0.2;
+      Ef = Math.max(0.2, Ef);
+      break;
+    }
     default:
       Ef = 2.0;
   }
@@ -400,6 +410,28 @@ export function generateDefectVariants(formula: string): DefectStructure[] {
     defectStats.typeBreakdown[DefectType.Dopant]++;
   }
 
+  const hCount = comp["H"] || 0;
+  const totalAtoms = Object.values(comp).reduce((s, n) => s + n, 0);
+  const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
+  if (hFraction > 0.5 && hCount >= 4) {
+    const h2Ef = computeDefectFormationEnergy(formula, DefectType.MolecularH2, "H");
+    const h2Density = estimateDefectDensity(h2Ef);
+    const h2Conc = Math.min(0.08, Math.max(0.005, 0.04 * Math.exp(-Math.max(0, h2Ef - 0.5) / 0.4)));
+
+    const h2Comp = { ...comp, H: Math.max(0, hCount - 2 * h2Conc * totalAtoms) };
+    variants.push({
+      type: DefectType.MolecularH2,
+      site: "H-H cage site",
+      element: "H",
+      concentration: h2Conc,
+      formationEnergy: h2Ef,
+      defectDensity: h2Density,
+      mutatedFormula: formulaFromComposition(h2Comp),
+    });
+    defectStats.totalDefectsGenerated++;
+    defectStats.typeBreakdown[DefectType.MolecularH2]++;
+  }
+
   const grainSizeNm = 100;
   const gbConc = estimateGrainBoundaryConcentration(grainSizeNm);
   const gbEf = computeDefectFormationEnergy(formula, DefectType.GrainBoundary, elements[0]);
@@ -461,6 +493,11 @@ export function adjustElectronicStructure(
       lambdaModifier = 1.0 + normalizedDensity * 0.08;
       scatteringRate = normalizedDensity * 0.05;
       break;
+    case DefectType.MolecularH2:
+      dosModifier = 1.0 - normalizedDensity * 0.35;
+      lambdaModifier = 1.0 - normalizedDensity * 0.50;
+      scatteringRate = normalizedDensity * 0.6;
+      break;
     case DefectType.GrainBoundary: {
       const dWave = formula ? isDWaveLikely(formula) : false;
       if (dWave) {
@@ -476,15 +513,26 @@ export function adjustElectronicStructure(
     }
   }
 
+  const dWaveGlobal = formula ? isDWaveLikely(formula) : false;
+  if (dWaveGlobal && defectType !== DefectType.GrainBoundary) {
+    const agPairBreaking = normalizedDensity * 1.5;
+    scatteringRate = Math.max(scatteringRate, agPairBreaking);
+    lambdaModifier = Math.min(lambdaModifier, 1.0 - normalizedDensity * 0.4);
+  }
+
   const adjustedDos = dosAtEF * dosModifier;
   const adjustedLambda = lambda * lambdaModifier;
 
-  const pairBreaking = 1.0 - scatteringRate * 0.5;
   const dosBoost = dosModifier > 1.0 ? (dosModifier - 1.0) * 0.3 : 0;
   const lambdaEffect = lambdaModifier - 1.0;
-  const tcModifier = 1.0 + dosBoost + lambdaEffect * 0.5 - scatteringRate * 0.2;
+  let tcModifier = 1.0 + dosBoost + lambdaEffect * 0.5 - scatteringRate * 0.2;
 
-  const tcMod = Math.max(0.5, Math.min(1.5, tcModifier));
+  if (dWaveGlobal) {
+    const agSuppression = Math.exp(-2.0 * normalizedDensity);
+    tcModifier *= agSuppression;
+  }
+
+  const tcMod = Math.max(0.1, Math.min(1.5, tcModifier));
 
   const improvement = tcMod - 1.0;
   if (improvement > 0 && improvement > defectStats.bestTcImprovement) {
@@ -499,6 +547,8 @@ export function adjustElectronicStructure(
     notes = "Interstitials can enhance both DOS and electron-phonon coupling through new bonding channels";
   } else if (defectType === DefectType.Antisite) {
     notes = "Antisite defects primarily act as pair-breaking scattering centers";
+  } else if (defectType === DefectType.MolecularH2) {
+    notes = "Local H2 molecular formation breaks the atomic H network, eliminating phonon-mediated pairing at the defect site";
   } else if (defectType === DefectType.GrainBoundary) {
     const dWave = formula ? isDWaveLikely(formula) : false;
     notes = dWave
