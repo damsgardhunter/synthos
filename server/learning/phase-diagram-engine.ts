@@ -105,6 +105,81 @@ export function computeMiedemaFormationEnergy(formula: string): number {
   return Math.max(-30.0, Math.min(5.0, efPerAtom));
 }
 
+const OXIDE_ANIONS = new Set(["O", "F", "Cl", "Br", "I"]);
+const CHALCOGENIDE_ANIONS = new Set(["S", "Se", "Te"]);
+const PNICTIDE_ANIONS = new Set(["N", "P", "As", "Sb"]);
+
+function classifyCompoundType(formula: string): "intermetallic" | "oxide" | "chalcogenide" | "pnictide" | "mixed" {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  const hasOxide = elements.some(el => OXIDE_ANIONS.has(el) && (counts[el] / totalAtoms) > 0.1);
+  const hasChalc = elements.some(el => CHALCOGENIDE_ANIONS.has(el) && (counts[el] / totalAtoms) > 0.1);
+  const hasPnic = elements.some(el => PNICTIDE_ANIONS.has(el) && (counts[el] / totalAtoms) > 0.1);
+  if (hasOxide && (hasChalc || hasPnic)) return "mixed";
+  if (hasOxide) return "oxide";
+  if (hasChalc) return "chalcogenide";
+  if (hasPnic) return "pnictide";
+  return "intermetallic";
+}
+
+function computeIonicFormationEnergy(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  const OXIDE_ENERGIES: Record<string, number> = {
+    "Li": -3.0, "Na": -2.1, "K": -1.8, "Rb": -1.7, "Cs": -1.6,
+    "Mg": -3.0, "Ca": -3.2, "Sr": -3.0, "Ba": -2.8,
+    "Al": -2.8, "Ga": -1.8, "In": -1.5,
+    "Ti": -4.8, "Zr": -5.5, "Hf": -5.6,
+    "V": -2.6, "Nb": -3.9, "Ta": -4.1,
+    "Cr": -1.8, "Mo": -1.2, "W": -1.4,
+    "Mn": -1.9, "Fe": -1.3, "Co": -1.0, "Ni": -1.0,
+    "Cu": -0.6, "Zn": -1.7, "Y": -4.7, "La": -4.6,
+    "Ce": -4.5, "Sc": -4.7, "Bi": -0.8,
+  };
+
+  let ionicEnergy = 0;
+  let ionicWeight = 0;
+
+  for (const el of elements) {
+    if (OXIDE_ANIONS.has(el) || CHALCOGENIDE_ANIONS.has(el) || PNICTIDE_ANIONS.has(el)) continue;
+    const data = ELEMENTAL_DATA[el];
+    if (!data) continue;
+
+    const frac = counts[el] / totalAtoms;
+    let pairEnergy = OXIDE_ENERGIES[el] ?? -1.5;
+
+    const anionFrac = elements
+      .filter(e => OXIDE_ANIONS.has(e) || CHALCOGENIDE_ANIONS.has(e) || PNICTIDE_ANIONS.has(e))
+      .reduce((s, e) => s + counts[e] / totalAtoms, 0);
+
+    if (elements.includes("S") || elements.includes("Se") || elements.includes("Te")) {
+      pairEnergy *= 0.65;
+    }
+
+    ionicEnergy += frac * pairEnergy * anionFrac * 2;
+    ionicWeight += frac;
+  }
+
+  if (ionicWeight < 0.01) return 0;
+  return Math.max(-10.0, Math.min(2.0, ionicEnergy / ionicWeight));
+}
+
+export function estimateFormationEnergy(formula: string): number {
+  const compType = classifyCompoundType(formula);
+  if (compType === "intermetallic") {
+    return computeMiedemaFormationEnergy(formula);
+  }
+  const ionicE = computeIonicFormationEnergy(formula);
+  if (compType === "mixed") {
+    const miedemaE = computeMiedemaFormationEnergy(formula);
+    return 0.4 * miedemaE + 0.6 * ionicE;
+  }
+  return ionicE;
+}
+
 export interface HullVertex {
   composition: string;
   energy: number;

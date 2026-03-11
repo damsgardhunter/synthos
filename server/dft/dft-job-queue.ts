@@ -106,6 +106,27 @@ export async function submitDFTJob(
   return job;
 }
 
+export async function promoteDFTJob(formula: string, newPriority: number): Promise<boolean> {
+  try {
+    const jobs = await storage.getDftJobsByFormula(formula);
+    const queued = jobs.filter(j => j.status === "queued");
+    if (queued.length === 0) return false;
+    for (const job of queued) {
+      if ((job.priority ?? 0) < newPriority) {
+        await storage.updateDftJob(job.id, { priority: newPriority } as any);
+        console.log(`[DFT-Queue] Promoted job #${job.id} for ${formula}: priority ${job.priority} -> ${newPriority}`);
+        if (broadcastFn) {
+          broadcastFn("dftJobPromoted", { jobId: job.id, formula, oldPriority: job.priority, newPriority });
+        }
+      }
+    }
+    return true;
+  } catch (err: any) {
+    console.log(`[DFT-Queue] Failed to promote ${formula}: ${err.message?.slice(0, 80)}`);
+    return false;
+  }
+}
+
 async function processNextJob(): Promise<boolean> {
   if (activeWorkers >= MAX_CONCURRENT) return false;
 

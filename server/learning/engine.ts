@@ -32,7 +32,7 @@ import { scanMaterialSignals } from "./material-signal-scanner";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
 import { runSynthesisReasoning } from "./synthesis-reasoning";
-import { runConvexHullAnalysis, passesStabilityGate, computeMiedemaFormationEnergy } from "./phase-diagram-engine";
+import { runConvexHullAnalysis, passesStabilityGate, computeMiedemaFormationEnergy, estimateFormationEnergy } from "./phase-diagram-engine";
 import type { StabilityGateResult } from "./phase-diagram-engine";
 import { invalidateGNNModel, trainGNNSurrogate } from "./graph-neural-net";
 import { runStructuralMutations } from "./structural-mutator";
@@ -56,7 +56,7 @@ import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, sa
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
 import { recordEvaluationResult, getCalibrationStats } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
-import { submitDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
+import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBasedDiffusion, getDistributionDiffusionStats } from "../ai/crystal-structure-diffusion";
 import { multiTaskPredict, trackMultiTaskPrediction, getMultiTaskStats } from "./multi-task-gnn";
@@ -1819,8 +1819,8 @@ async function runDFTEnrichment() {
           updates.formationEnergy = dftData.formationEnergy.value;
         } else if (candidate.formationEnergy == null) {
           try {
-            updates.formationEnergy = computeMiedemaFormationEnergy(candidate.formula);
-          } catch (e) { console.error("[Engine] Miedema formation energy failed:", e); }
+            updates.formationEnergy = estimateFormationEnergy(candidate.formula);
+          } catch (e) { console.error("[Engine] Formation energy estimate failed:", e); }
         }
         if (dftData.bandGap.source !== "analytical") {
           updates.bandGap = dftData.bandGap.value;
@@ -1923,14 +1923,21 @@ async function runDFTEnrichment() {
           if (mlFeatures.qeDFT) continue;
 
           try {
-            const priority = Math.round((elite.ensembleScore ?? 0) * 100);
+            const basePriority = Math.round((elite.ensembleScore ?? 0) * 100);
+            const eliteTc = elite.predictedTc ?? 0;
+            const isRoomTempCandidate = eliteTc >= 250 && (elite.pressureGpa ?? 999) < 50;
+            const priority = isRoomTempCandidate ? Math.max(basePriority, 95) : basePriority;
             await submitDFTJob(elite.formula, null, priority, "scf");
             submitted++;
+
+            if (isRoomTempCandidate) {
+              await promoteDFTJob(elite.formula, 99);
+            }
 
             emit("log", {
               phase: "engine",
               event: "full DFT queued",
-              detail: `${elite.formula} (top 0.1%, score=${(elite.ensembleScore ?? 0).toFixed(3)}, Tc=${(elite.predictedTc ?? 0).toFixed(1)}K) → Quantum ESPRESSO SCF+phonon queue`,
+              detail: `${elite.formula} (top 0.1%, score=${(elite.ensembleScore ?? 0).toFixed(3)}, Tc=${eliteTc.toFixed(1)}K, priority=${priority}${isRoomTempCandidate ? " EXPEDITED" : ""}) → Quantum ESPRESSO SCF+phonon queue`,
               dataSource: "QE-DFT Queue",
             });
           } catch (err: any) {
@@ -3894,7 +3901,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     }
 
     try {
-      const miedemaEf = computeMiedemaFormationEnergy(formula);
+      const miedemaEf = estimateFormationEnergy(formula);
       if (miedemaEf < -30.0 || miedemaEf > 5.0) {
         pipelineStageMetrics.formationEnergyRejects++;
         console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside physical range [-30, 5], rejecting`);
@@ -4110,7 +4117,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       })()),
       verificationStage,
       notes: `${pairingNote} ${instNote} ${tierNote} [autonomous-loop]${gnnResult ? ` [GNN: Tc=${gnnResult.tc}K, λ=${gnnResult.lambda}, conf=${(gnnResult.confidence * 100).toFixed(0)}%]` : ''}`,
-      formationEnergy: (() => { try { return computeMiedemaFormationEnergy(normalizedFormula); } catch { return null; } })(),
+      formationEnergy: (() => { try { return estimateFormationEnergy(normalizedFormula); } catch { return null; } })(),
       mlFeatures: {
         phononDOS: { totalStates: physicsResult.phononDOS.totalStates, binCount: physicsResult.phononDOS.frequencies.length },
         alpha2F: { integratedLambda: physicsResult.alpha2F.integratedLambda, binCount: physicsResult.alpha2F.frequencies.length },
