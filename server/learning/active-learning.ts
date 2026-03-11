@@ -1467,8 +1467,7 @@ export async function runActiveLearningCycle(
     });
   }
 
-  const DOPING_FRACTIONS = [0.02, 0.05, 0.10, 0.15, 0.20];
-  const dopingTopN = Math.min(5, selected.length);
+  const dopingTopN = Math.min(3, selected.length);
   let dopingVariantsEvaluated = 0;
   let dopingBestTc = 0;
   let dopingBestFormula = "";
@@ -1480,23 +1479,19 @@ export async function runActiveLearningCycle(
       const baseElements = Object.keys(baseCounts);
       if (baseElements.length < 2 || baseElements.length > 5) continue;
 
-      const dopedVariants = generateDopedVariantsForAL(candidate.formula, 6);
+      const baseTc = candidate.predictedTc ?? 0;
+      const dopedVariants = generateDopedVariantsForAL(candidate.formula, 4);
 
       for (const variant of dopedVariants) {
         try {
           dopingVariantsEvaluated++;
-          const dopantData = variant.dopant ? getElementData(variant.dopant) : null;
-          const matOverrides: Record<string, number> = {
-            dopingCarrierDensity: variant.carrierDensity > 0 ? Math.log10(variant.carrierDensity) : 0,
-            dopingLatticeStrain: variant.relaxation?.latticeStrain ?? 0,
-            dopingBondVariance: variant.relaxation?.bondVariance ?? 0,
-            dopantAtomicNumber: dopantData?.atomicNumber ?? 0,
-            dopantFraction: variant.fraction,
-            dopantValenceDiff: variant.valenceChange,
-          };
-          const features = extractFeatures(variant.resultFormula, matOverrides as any);
-          const prediction = gbPredictWithUncertainty(features, variant.resultFormula);
-          const tc = prediction.tcMean ?? 0;
+          const features = extractFeatures(variant.resultFormula, undefined, undefined, undefined, undefined);
+          const gb = gbPredict(features, variant.resultFormula);
+          const compositionTc = gb.tcPredicted;
+
+          const strainPenalty = variant.relaxation ? Math.max(0, 1 - Math.abs(variant.relaxation.latticeStrain) * 5) : 1.0;
+          const carrierBoost = variant.carrierDensity > 0 ? Math.min(1.2, 1 + 0.05 * Math.log10(variant.carrierDensity + 1)) : 1.0;
+          const tc = Math.max(compositionTc, baseTc) * strainPenalty * carrierBoost;
 
           if (tc > dopingBestTc) {
             dopingBestTc = tc;
@@ -1520,7 +1515,12 @@ export async function runActiveLearningCycle(
   }
 
   const cycleDatapoints = getDatapointsByCycle(getCurrentCycleNumber());
-  const USEFUL_TC_THRESHOLD = 20;
+  function usefulTcThreshold(pressureGpa: number): number {
+    if (pressureGpa >= 100) return 150;
+    if (pressureGpa >= 50) return 80;
+    if (pressureGpa >= 10) return 40;
+    return 20;
+  }
   let usefulDiscoveries = 0;
   let stableCount = 0;
   let unstablePhonons = 0;
@@ -1529,13 +1529,15 @@ export async function runActiveLearningCycle(
   let lowTcCount = 0;
 
   for (const dp of cycleDatapoints) {
-    const isUseful = dp.Tc >= USEFUL_TC_THRESHOLD && dp.phonon_stable;
+    const dpPressure = (dp as any).pressure_gpa ?? 0;
+    const threshold = usefulTcThreshold(dpPressure);
+    const isUseful = dp.Tc >= threshold && dp.phonon_stable;
     if (isUseful) usefulDiscoveries++;
     if (dp.phonon_stable) stableCount++;
     if (!dp.phonon_stable) unstablePhonons++;
     if (dp.formation_energy !== null && dp.formation_energy > 0.5) highFormationEnergy++;
     if (dp.band_gap !== null && dp.band_gap > 0.5) nonMetallic++;
-    if (dp.Tc < USEFUL_TC_THRESHOLD && dp.phonon_stable) lowTcCount++;
+    if (dp.Tc < threshold && dp.phonon_stable) lowTcCount++;
   }
 
   const discoveryEff: DiscoveryEfficiency = {
