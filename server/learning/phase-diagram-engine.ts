@@ -102,7 +102,7 @@ export function computeMiedemaFormationEnergy(formula: string): number {
   }
 
   const efPerAtom = deltaH / totalAtoms;
-  return Math.max(-30.0, Math.min(5.0, efPerAtom));
+  return Math.max(-5.0, Math.min(2.0, efPerAtom));
 }
 
 const OXIDE_ANIONS = new Set(["O", "F", "Cl", "Br", "I"]);
@@ -563,7 +563,9 @@ function pressureHullMultiplier(pressureGpa: number): number {
 }
 
 export async function passesStabilityGate(formula: string, pressureGpa: number = 0): Promise<StabilityGateResult> {
-  const formationEnergy = computeMiedemaFormationEnergy(formula);
+  const compoundType = classifyCompoundType(formula);
+  const miedemaApplicable = compoundType === "intermetallic" || compoundType === "pnictide";
+  const formationEnergy = miedemaApplicable ? computeMiedemaFormationEnergy(formula) : 0;
   let hullDistance: number;
   let decompositionProducts: string[] = [];
 
@@ -572,7 +574,7 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     hullDistance = hullResult.energyAboveHull;
     decompositionProducts = hullResult.decompositionProducts;
   } catch {
-    hullDistance = Math.max(0, formationEnergy * 0.3);
+    hullDistance = miedemaApplicable ? Math.max(0, formationEnergy * 0.3) : 0.05;
   }
 
   const pMult = pressureHullMultiplier(pressureGpa);

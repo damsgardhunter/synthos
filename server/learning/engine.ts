@@ -5041,19 +5041,19 @@ async function runAutonomousFastPath() {
             const gnnResult = gnnPredictWithUncertainty(normalized, proto.prototype, protoPressure);
 
             let predictedTc: number;
-            if (gnnResult.confidence > 0.3 && gnnResult.tc > 0) {
+            const gnnHasStructure = gnnResult.confidence > 0.3 && gnnResult.tc > 0;
+            if (gnnHasStructure) {
               predictedTc = Math.round(gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4);
             } else {
               predictedTc = Math.round(gbResult.tcPredicted);
+              const structBonus = proto.crystalSystem === "tetragonal" ? 1.08
+                : proto.crystalSystem === "hexagonal" ? 1.05 : 1.0;
+              const dimBonus = (proto.prototype.includes("214") || proto.prototype.includes("FeSe")
+                || proto.prototype.includes("MX2") || proto.prototype.includes("Infinite")
+                || proto.prototype.includes("BiS2") || proto.prototype.includes("T-prime")
+                || proto.prototype.includes("1111")) ? 1.12 : 1.0;
+              predictedTc = Math.round(predictedTc * structBonus * dimBonus);
             }
-
-            const structBonus = proto.crystalSystem === "tetragonal" ? 1.08
-              : proto.crystalSystem === "hexagonal" ? 1.05 : 1.0;
-            const dimBonus = (proto.prototype.includes("214") || proto.prototype.includes("FeSe")
-              || proto.prototype.includes("MX2") || proto.prototype.includes("Infinite")
-              || proto.prototype.includes("BiS2") || proto.prototype.includes("T-prime")
-              || proto.prototype.includes("1111")) ? 1.12 : 1.0;
-            predictedTc = Math.round(predictedTc * structBonus * dimBonus);
             predictedTc = applyAmbientTcCap(predictedTc, lambdaML, protoPressure, metallicityML, normalized);
             predictedTc = Math.round(predictedTc * protoHPenalty);
 
