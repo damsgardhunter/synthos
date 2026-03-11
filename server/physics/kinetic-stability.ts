@@ -598,16 +598,19 @@ export function predictKineticStability(formula: string, eAboveHull: number): Ki
     nucleation.nucleationBarrier,
   );
 
-  const gbPenalty = gb.gbDecompositionFactor * 0.15;
-  const correctedBarrier = Math.max(0.01, effectiveBarrier - gbPenalty);
-
   const attemptFreq = 1e13;
-  const rate300K = attemptFreq * Math.exp(-correctedBarrier / (kB * 300));
+
+  const rateBulk = attemptFreq * Math.exp(-effectiveBarrier / (kB * 300));
+  const gbBarrierReduction = 0.4;
+  const gbReducedBarrier = Math.max(0.01, effectiveBarrier * (1 - gbBarrierReduction));
+  const rateGB = attemptFreq * Math.exp(-gbReducedBarrier / (kB * 300));
+  const gbFrac = Math.min(0.5, gb.gbDecompositionFactor * 0.3);
+  const rate300K = (1 - gbFrac) * rateBulk + gbFrac * rateGB;
   const lifetime300K = 1 / Math.max(rate300K, 1e-100);
 
   const barrierUncertainty = 0.1;
-  const rateLow = attemptFreq * Math.exp(-(correctedBarrier + barrierUncertainty) / (kB * 300));
-  const rateHigh = attemptFreq * Math.exp(-(correctedBarrier - barrierUncertainty) / (kB * 300));
+  const rateLow = attemptFreq * Math.exp(-(effectiveBarrier + barrierUncertainty) / (kB * 300));
+  const rateHigh = attemptFreq * Math.exp(-(effectiveBarrier - barrierUncertainty) / (kB * 300));
   const lifetimeFromHigh = 1 / Math.max(rateLow, 1e-100);
   const lifetimeFromLow = 1 / Math.max(rateHigh, 1e-100);
   const confidenceHigh = lifetimeFromHigh;

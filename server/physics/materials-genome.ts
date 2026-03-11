@@ -144,11 +144,13 @@ function encodeStructureSegment(
   const avgMass = getCompositionWeightedProperty(counts, "atomicMass") ?? 50;
 
   const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
-  const enSpread = enValues.length > 1 ? (Math.max(...enValues) - Math.min(...enValues)) / 3.0 : 0;
+  const rawEnSpread = enValues.length > 1 ? (Math.max(...enValues) - Math.min(...enValues)) : 0;
+  const enSpread = rawEnSpread / (1 + rawEnSpread);
 
   const massValues = elements.map(e => getElementData(e)?.atomicMass ?? 50);
-  const massSpread = massValues.length > 1 ?
-    (Math.max(...massValues) - Math.min(...massValues)) / 200 : 0;
+  const rawMassSpread = massValues.length > 1 ?
+    (Math.max(...massValues) - Math.min(...massValues)) : 0;
+  const massSpread = rawMassSpread / (100 + rawMassSpread);
 
   const vec = [
     numElements,
@@ -197,12 +199,20 @@ function encodeOrbitalSegment(
 
   let maxHubbardU = 0;
   let maxStonerI = 0;
+  let weightedHubbardU = 0;
+  let hubbardWeight = 0;
   for (const el of elements) {
     const u = getHubbardU(el);
-    if (u !== null && u > maxHubbardU) maxHubbardU = u;
+    if (u !== null) {
+      if (u > maxHubbardU) maxHubbardU = u;
+      const frac = (counts[el] || 1) / totalAtoms;
+      weightedHubbardU += u * frac;
+      hubbardWeight += frac;
+    }
     const s = getStonerParameter(el);
     if (s !== null && s > maxStonerI) maxStonerI = s;
   }
+  const avgHubbardU = hubbardWeight > 0 ? weightedHubbardU / hubbardWeight : 0;
 
   let avgBandwidth = 0;
   for (const el of elements) {
@@ -214,10 +224,11 @@ function encodeOrbitalSegment(
     of.p,
     of.d,
     of.f,
-    avgValence / 8,
+    avgValence / 16,
     hasDElectrons ? 1 : 0,
     hasFElectrons ? 1 : 0,
     maxHubbardU / 10,
+    avgHubbardU / 10,
     maxStonerI,
     avgBandwidth / 15,
     electronic.correlationStrength,
