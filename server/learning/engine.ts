@@ -4373,6 +4373,11 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     if (gnnResult && gnnResult.confidence > 0.3) {
       primaryTc = gnnResult.tc * 0.6 + gbResult.tcPredicted * 0.4;
       ensembleConfidence = gnnResult.confidence * 0.6 + gbResult.score * 0.4;
+      const tcDivergence = Math.abs(gnnResult.tc - gbResult.tcPredicted);
+      if (tcDivergence > 50) {
+        const disagreementPenalty = Math.min(0.5, (tcDivergence - 50) / 200);
+        ensembleConfidence = Math.max(0.05, ensembleConfidence - disagreementPenalty);
+      }
     }
 
     crossEngineHub.recordInsight("ml", formula, {
@@ -4554,7 +4559,14 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         const gnnScore = gnnResult ? (Math.min(1, gnnResult.tc > 100 ? 0.8 : gnnResult.tc > 20 ? 0.5 : 0.2) * gnnResult.confidence) : 0;
         const gbScore = gbResult.score;
         const noveltyBonus = synthesizabilityScore * 0.1;
-        return gnnScore > 0 ? (gnnScore * 0.6 + gbScore * 0.3 + noveltyBonus) : (0.3 + (finalTc / 400) + (synthesizabilityScore * 0.2));
+        let rawScore = gnnScore > 0 ? (gnnScore * 0.6 + gbScore * 0.3 + noveltyBonus) : (0.3 + (finalTc / 400) + (synthesizabilityScore * 0.2));
+        if (gnnResult) {
+          const insertDivergence = Math.abs(gnnResult.tc - gbResult.tcPredicted);
+          if (insertDivergence > 50) {
+            rawScore = Math.max(0.05, rawScore - Math.min(0.5, (insertDivergence - 50) / 200));
+          }
+        }
+        return rawScore;
       })()),
       verificationStage,
       notes: `${pairingNote} ${instNote} ${tierNote} [autonomous-loop]${gnnResult ? ` [GNN: Tc=${gnnResult.tc}K, λ=${gnnResult.lambda}, conf=${(gnnResult.confidence * 100).toFixed(0)}%]` : ''}`,
@@ -6844,13 +6856,20 @@ async function runLearningCycle() {
                 },
                 xgboostScore: gbResult.score,
                 neuralNetScore: gnnResult.confidence,
-                ensembleScore: Math.min(0.9, gnnResult.confidence * 0.6 + gbResult.score * 0.3 + (discoveryScore > 0.5 ? 0.1 : 0.05)),
+                ensembleScore: Math.min(0.9, (() => {
+                  let rawEnsemble = gnnResult.confidence * 0.6 + gbResult.score * 0.3 + (discoveryScore > 0.5 ? 0.1 : 0.05);
+                  const protoTcDivergence = Math.abs(gnnResult.tc - gbResult.tcPredicted);
+                  if (protoTcDivergence > 50) {
+                    rawEnsemble = Math.max(0.05, rawEnsemble - Math.min(0.5, (protoTcDivergence - 50) / 200));
+                  }
+                  return rawEnsemble;
+                })()),
                 roomTempViable: false,
                 status: "theoretical",
                 notes: `[${pc.prototype} prototype: ${pc.spaceGroup}, ${pc.crystalSystem}, ${pc.dimensionality}, sites: ${siteStr}] [Discovery: ${discoveryScore.toFixed(3)}]`,
                 electronPhononCoupling: gnnResult.lambda || lambdaML || null,
                 logPhononFrequency: features.logPhononFreq ?? null,
-                coulombPseudopotential: isHydride ? 0.10 : 0.12,
+                coulombPseudopotential: estimateMuStar(pc.formula),
                 pairingSymmetry: derivePairingSymmetry("phonon-mediated", features.dWaveSymmetry),
                 pairingMechanism: "phonon-mediated",
                 correlationStrength: features.correlationStrength ?? null,
