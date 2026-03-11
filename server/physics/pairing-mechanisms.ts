@@ -524,7 +524,25 @@ export function computeExcitonicPairing(
     electronHoleAsymmetry = Math.max(electronHoleAsymmetry, electronic.correlationStrength * 0.6);
   }
 
-  let dielectricScreening = metallicity > 0.7 ? 1.0 : Math.max(0.1, metallicity * 1.2);
+  const POLARIZABILITY: Record<string, number> = {
+    Te: 5.5, Bi: 7.4, Pb: 6.8, Tl: 7.6, Se: 3.8, Sb: 6.6, Sn: 7.7,
+    In: 5.4, I: 5.35, Hg: 5.0, As: 4.3, Ge: 6.07, Ga: 8.12, Po: 6.8,
+    Ba: 39.7, Sr: 27.6, La: 31.1, Ce: 29.6, Nd: 31.4, Y: 22.7,
+  };
+  let avgPolarizability = 0;
+  let polCount = 0;
+  for (const el of elements) {
+    if (POLARIZABILITY[el]) {
+      avgPolarizability += POLARIZABILITY[el];
+      polCount++;
+    }
+  }
+  avgPolarizability = polCount > 0 ? avgPolarizability / polCount : 0;
+  const polarizabilityScreening = Math.min(0.4, avgPolarizability / 20.0);
+
+  let dielectricScreening = metallicity > 0.7
+    ? 1.0
+    : Math.max(0.1, metallicity * 1.2 + polarizabilityScreening);
 
   const excitonCoupling = excitonBindingProxy * (1.0 - dielectricScreening * 0.5) * (1.0 + electronHoleAsymmetry * 0.3);
 
@@ -900,8 +918,13 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
     }
   }
 
+  const cdwPhononPenalty = cdwResult.cdwOrderParameter > 0.5
+    ? Math.max(0.4, 1.0 - (cdwResult.cdwOrderParameter - 0.5) * 0.8)
+    : 1.0;
+  const effectivePhononStrength = phononResult.phononPairingStrength * cdwPhononPenalty;
+
   const compositePairingStrength =
-    wPhonon * phononResult.phononPairingStrength +
+    wPhonon * effectivePhononStrength +
     wSpin * spinResult.spinPairingStrength +
     wOrbital * orbitalResult.orbitalPairingStrength +
     wExcitonic * excitonicResult.excitonicPairingStrength +
@@ -911,7 +934,7 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
     wTopo * topoStrength;
 
   const mechanisms = [
-    { name: "phonon", strength: phononResult.phononPairingStrength * wPhonon },
+    { name: "phonon", strength: effectivePhononStrength * wPhonon },
     { name: "spin-fluctuation", strength: spinResult.spinPairingStrength * wSpin },
     { name: "orbital-fluctuation", strength: orbitalResult.orbitalPairingStrength * wOrbital },
     { name: "excitonic", strength: excitonicResult.excitonicPairingStrength * wExcitonic },
