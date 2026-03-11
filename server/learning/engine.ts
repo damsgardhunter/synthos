@@ -328,7 +328,7 @@ function checkOxidationBalance(counts: Record<string, number>): boolean {
 
   const statesPerElement = elements.map(el => {
     const ox = COMMON_OXIDATION_STATES[el];
-    if (!ox || ox.length === 0) return [0, 2, 3, -2];
+    if (!ox || ox.length === 0) return [2, 3, -2];
     return ox;
   });
 
@@ -453,16 +453,32 @@ let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 50000;
-const formulasInFlight = new Set<string>();
+const formulasInFlight = new Map<string, number>();
+const IN_FLIGHT_TIMEOUT_MS = 10 * 60 * 1000;
+
+function pruneExpiredInFlight(): void {
+  const now = Date.now();
+  for (const [f, ts] of formulasInFlight) {
+    if (now - ts > IN_FLIGHT_TIMEOUT_MS) formulasInFlight.delete(f);
+  }
+}
 
 export function isFormulaInFlight(formula: string): boolean {
-  return formulasInFlight.has(normalizeFormula(formula));
+  const normF = normalizeFormula(formula);
+  const ts = formulasInFlight.get(normF);
+  if (ts == null) return false;
+  if (Date.now() - ts > IN_FLIGHT_TIMEOUT_MS) {
+    formulasInFlight.delete(normF);
+    return false;
+  }
+  return true;
 }
 
 export function markFormulaInFlight(formula: string): boolean {
+  pruneExpiredInFlight();
   const normF = normalizeFormula(formula);
-  if (formulasInFlight.has(normF)) return false;
-  formulasInFlight.add(normF);
+  if (isFormulaInFlight(normF)) return false;
+  formulasInFlight.set(normF, Date.now());
   return true;
 }
 
