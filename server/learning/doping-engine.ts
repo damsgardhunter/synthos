@@ -1224,7 +1224,9 @@ const INTERSTITIAL_DOPANTS: Record<string, string[]> = {
   general: ["Li", "H", "Na", "F"],
 };
 
-const VACANCY_TARGETS = ["O", "F", "S", "Se", "Te", "N", "Cl"];
+const ANION_VACANCY_TARGETS = ["O", "F", "S", "Se", "Te", "N", "Cl"];
+const CATION_VACANCY_TARGETS = ["Cu", "La", "Sr", "Ba", "Y", "Ca", "Bi", "Tl", "Hg", "Nd", "Gd", "Ce", "Fe", "Ti", "Nb", "V", "Mo", "W"];
+const VACANCY_TARGETS = [...ANION_VACANCY_TARGETS, ...CATION_VACANCY_TARGETS];
 
 const DOPING_FRACTIONS = [0.02, 0.05, 0.10, 0.15, 0.20];
 
@@ -1327,13 +1329,19 @@ function generateSubstitutionalVariants(
       const radiusDiff = siteData.atomicRadius > 0 && dopantData.atomicRadius > 0
         ? Math.abs(siteData.atomicRadius - dopantData.atomicRadius) / siteData.atomicRadius
         : 0.5;
-      if (radiusDiff > 0.3) continue;
+      if (radiusDiff > 0.30) continue;
 
+      const isHighStrain = radiusDiff > 0.15;
       const { character, valenceChange } = classifyDopingCharacter(site, dopant, "substitutional");
 
-      const fractions = radiusDiff < 0.15
-        ? DOPING_FRACTIONS
-        : DOPING_FRACTIONS.filter(f => f <= 0.10);
+      let fractions: number[];
+      if (isHighStrain) {
+        fractions = DOPING_FRACTIONS.filter(f => f <= 0.05);
+      } else if (radiusDiff < 0.10) {
+        fractions = DOPING_FRACTIONS;
+      } else {
+        fractions = DOPING_FRACTIONS.filter(f => f <= 0.10);
+      }
 
       for (const fraction of fractions) {
         if (variants.length >= maxVariants) break;
@@ -1350,11 +1358,7 @@ function generateSubstitutionalVariants(
         supercellCounts[site] = sitesInSupercell - nReplace;
         supercellCounts[dopant] = (supercellCounts[dopant] || 0) + nReplace;
 
-        const gcd = findGCD(Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v)));
-        const reduced: Record<string, number> = {};
-        for (const [el, n] of Object.entries(supercellCounts)) {
-          if (n > 0) reduced[el] = n / gcd;
-        }
+        const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
 
         const resultFormula = countsToFormula(reduced);
         if (!isValidFormula(resultFormula)) continue;
@@ -1368,10 +1372,11 @@ function generateSubstitutionalVariants(
           ? ` [${dopingLabel}: delta_q=${valenceChange > 0 ? "+" : ""}${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3]`
           : " [isovalent substitution]";
 
+        const strainNote = isHighStrain ? " [HIGH STRAIN -- reduced stability expected]" : "";
         const rationale = `${dopant} substitution at ${site} site (${(fraction * 100).toFixed(0)}%): `
-          + `radius match ${(1 - radiusDiff).toFixed(2)}, `
+          + `radius match ${((1 - radiusDiff) * 100).toFixed(0)}%, `
           + `replaces ${nReplace}/${sitesInSupercell} ${site} atoms in ${supercellMult > 1 ? supercellMult + "x supercell" : "unit cell"}`
-          + chargeInfo;
+          + chargeInfo + strainNote;
 
         variants.push({
           type: "substitutional",
@@ -1412,9 +1417,10 @@ function generateVacancyVariants(
     const siteCount = counts[site];
     if (siteCount < 1) continue;
 
+    const isCationVacancy = CATION_VACANCY_TARGETS.includes(site);
     const { character, valenceChange } = classifyDopingCharacter(site, "", "vacancy");
 
-    const fracs = [0.05, 0.10, 0.15];
+    const fracs = isCationVacancy ? [0.02, 0.05, 0.10] : [0.05, 0.10, 0.15];
     for (const fraction of fracs) {
       if (variants.length >= maxVariants) break;
 
@@ -1429,11 +1435,7 @@ function generateVacancyVariants(
 
       supercellCounts[site] = sitesInSupercell - nRemove;
 
-      const gcd = findGCD(Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v)));
-      const reduced: Record<string, number> = {};
-      for (const [el, n] of Object.entries(supercellCounts)) {
-        if (n > 0) reduced[el] = n / gcd;
-      }
+      const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
 
       const resultFormula = countsToFormula(reduced);
       if (!isValidFormula(resultFormula)) continue;
@@ -1450,7 +1452,7 @@ function generateVacancyVariants(
         fraction,
         resultFormula: normalizeFormula(resultFormula),
         supercellSize: supercellMult,
-        rationale: `${site} vacancy doping (${(fraction * 100).toFixed(0)}%): removed ${nRemove}/${sitesInSupercell} ${site} atoms — creates ${carrierType} carriers (delta_q=${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3)`,
+        rationale: `${site} ${isCationVacancy ? "cation" : "anion"} vacancy (${(fraction * 100).toFixed(0)}%): removed ${nRemove}/${sitesInSupercell} ${site} atoms — creates ${carrierType} carriers (delta_q=${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3)`,
         dopingCharacter: character,
         valenceChange,
         carrierDensity,
@@ -1495,11 +1497,7 @@ function generateInterstitialVariants(
 
       supercellCounts[dopant] = (supercellCounts[dopant] || 0) + nInsert;
 
-      const gcd = findGCD(Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v)));
-      const reduced: Record<string, number> = {};
-      for (const [el, n] of Object.entries(supercellCounts)) {
-        if (n > 0) reduced[el] = n / gcd;
-      }
+      const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
 
       const resultFormula = countsToFormula(reduced);
       if (!isValidFormula(resultFormula)) continue;
@@ -1526,6 +1524,38 @@ function generateInterstitialVariants(
   }
 
   return variants;
+}
+
+function reduceToFormulaUnit(supercellCounts: Record<string, number>, supercellMult: number): Record<string, number> {
+  const intCounts = Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v));
+  const gcd = findGCD(intCounts);
+
+  if (gcd > 1) {
+    const reduced: Record<string, number> = {};
+    for (const [el, n] of Object.entries(supercellCounts)) {
+      if (n > 0) reduced[el] = n / gcd;
+    }
+    const total = Object.values(reduced).reduce((s, n) => s + n, 0);
+    if (total <= 20) return reduced;
+  }
+
+  if (supercellMult > 1) {
+    const perUnit: Record<string, number> = {};
+    for (const [el, n] of Object.entries(supercellCounts)) {
+      if (n > 0) {
+        const v = n / supercellMult;
+        perUnit[el] = Math.round(v * 1000) / 1000;
+      }
+    }
+    const total = Object.values(perUnit).reduce((s, n) => s + n, 0);
+    if (total <= 20) return perUnit;
+  }
+
+  const reduced: Record<string, number> = {};
+  for (const [el, n] of Object.entries(supercellCounts)) {
+    if (n > 0) reduced[el] = n / Math.max(1, gcd);
+  }
+  return reduced;
 }
 
 function findGCD(nums: number[]): number {
@@ -2064,11 +2094,7 @@ export function runDopingSearchLoop(
         supercellCounts[pair.site] -= nChanged;
       }
 
-      const gcd = findGCD(Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v)));
-      const reduced: Record<string, number> = {};
-      for (const [el, n] of Object.entries(supercellCounts)) {
-        if (n > 0) reduced[el] = n / gcd;
-      }
+      const reduced = reduceToFormulaUnit(supercellCounts, supercellMult);
 
       const resultFormula = normalizeFormula(countsToFormula(reduced));
       if (!isValidFormula(resultFormula)) continue;
