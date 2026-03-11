@@ -34,6 +34,7 @@ export interface RelaxationMetrics {
   volumeChange: number;
   energyPerAtom: number;
   wallTimeMs: number;
+  latticeCollapse: boolean;
   phononAnalysis?: HessianPhononAnalysis | null;
 }
 
@@ -1534,9 +1535,9 @@ function generateInterstitialVariants(
 
     let fracs: number[];
     if (packingFraction > 0.68) {
-      fracs = [0.01, 0.02];
+      fracs = [0.02];
     } else if (packingFraction > 0.60) {
-      fracs = [0.02, 0.05];
+      fracs = [0.03, 0.05];
     } else {
       fracs = [0.05, 0.10];
     }
@@ -1629,15 +1630,21 @@ function reduceToFormulaUnit(supercellCounts: Record<string, number>, supercellM
 
 function findGCD(nums: number[]): number {
   if (nums.length === 0) return 1;
+  for (const n of nums) {
+    if (n <= 0) return 1;
+    if (Math.abs(n - Math.round(n)) > 0.01) return 1;
+  }
   const gcd2 = (a: number, b: number): number => {
     a = Math.abs(Math.round(a));
     b = Math.abs(Math.round(b));
+    if (a === 0) return b || 1;
+    if (b === 0) return a;
     while (b > 0) {
       [a, b] = [b, a % b];
     }
     return a || 1;
   };
-  return nums.reduce((acc, n) => gcd2(acc, n), nums[0]);
+  return nums.reduce((acc, n) => gcd2(Math.round(acc), Math.round(n)), Math.round(nums[0]));
 }
 
 export async function relaxDopedStructure(formula: string): Promise<RelaxationMetrics | null> {
@@ -1665,8 +1672,8 @@ export async function relaxDopedStructure(formula: string): Promise<RelaxationMe
           const dz = atoms[i].z - atoms[j].z;
           const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-          const ri = (getElementData(atoms[i].element)?.atomicRadius ?? 130) / 100;
-          const rj = (getElementData(atoms[j].element)?.atomicRadius ?? 130) / 100;
+          const ri = (getElementData(atoms[i].element)?.atomicRadius ?? 130) * 0.77 / 100;
+          const rj = (getElementData(atoms[j].element)?.atomicRadius ?? 130) * 0.77 / 100;
           const bondCutoff = (ri + rj) * 1.3;
 
           if (d < bondCutoff && d > 0.3) {
@@ -1684,15 +1691,22 @@ export async function relaxDopedStructure(formula: string): Promise<RelaxationMe
 
     const energyPerAtom = atoms.length > 0 ? (optResult.optimizedEnergy * 27.2114) / atoms.length : 0;
 
+    const latticeCollapse = maxDisplacement > 1.5 || Math.abs(volumeChange) > 30;
+    if (latticeCollapse) {
+      console.log(`[Doping] Lattice collapse detected for ${formula}: maxDisp=${maxDisplacement.toFixed(3)} Å, volChange=${volumeChange.toFixed(1)}%`);
+    }
+
     let phononAnalysis: HessianPhononAnalysis | null = null;
-    try {
-      phononAnalysis = await analyzeHessianPhonons(formula);
-    } catch (phErr) {
-      console.log(`[Doping] Hessian phonon analysis failed for ${formula}: ${phErr instanceof Error ? phErr.message.slice(0, 80) : String(phErr).slice(0, 80)}`);
+    if (!latticeCollapse) {
+      try {
+        phononAnalysis = await analyzeHessianPhonons(formula);
+      } catch (phErr) {
+        console.log(`[Doping] Hessian phonon analysis failed for ${formula}: ${phErr instanceof Error ? phErr.message.slice(0, 80) : String(phErr).slice(0, 80)}`);
+      }
     }
 
     return {
-      converged: optResult.converged,
+      converged: optResult.converged && !latticeCollapse,
       latticeStrain,
       bondVariance,
       meanDisplacement,
@@ -1700,6 +1714,7 @@ export async function relaxDopedStructure(formula: string): Promise<RelaxationMe
       volumeChange,
       energyPerAtom,
       wallTimeMs: optResult.wallTimeSeconds * 1000,
+      latticeCollapse,
       phononAnalysis,
     };
   } catch {
@@ -1736,6 +1751,7 @@ export function generateDopedVariants(
   seen.add(normalizeFormula(formula));
   let valenceRejected = 0;
   let capRejected = 0;
+  const valenceRejectedByFamily: Record<string, number> = {};
   const unique = allVariants.filter(v => {
     if (seen.has(v.resultFormula)) return false;
     seen.add(v.resultFormula);
@@ -1746,12 +1762,17 @@ export function generateDopedVariants(
     const valenceCheck = checkValenceSumRule(v.resultFormula);
     if (!valenceCheck.pass) {
       valenceRejected++;
+      const family = classifyLayeredOrCage(v.resultFormula);
+      valenceRejectedByFamily[family] = (valenceRejectedByFamily[family] || 0) + 1;
       return false;
     }
     return true;
   });
   if (valenceRejected > 0) {
-    console.log(`[Doping] Valence-sum gate rejected ${valenceRejected} variants from ${formula}`);
+    const familyBreakdown = Object.entries(valenceRejectedByFamily)
+      .map(([fam, count]) => `${fam}:${count}`)
+      .join(", ");
+    console.log(`[Doping] Valence-sum gate rejected ${valenceRejected}/${allVariants.length} variants from ${formula} [${familyBreakdown}]`);
   }
 
   stats.totalBaseMaterials++;
@@ -1819,13 +1840,27 @@ export function runDopingBatch(
   let subCount = 0, vacCount = 0, intCount = 0;
   let eDoped = 0, hDoped = 0;
 
+  const perBase: DopingSpec[][] = [];
   for (const base of formulas) {
-    if (dopedFormulas.length >= maxTotalDoped) break;
-
     const result = generateDopedVariants(base, maxVariantsPerBase);
-    for (const v of result.variants) {
+    const filtered = result.variants.filter(v =>
+      !(excludeSet && excludeSet.has(v.resultFormula))
+    );
+    if (filtered.length > 0) perBase.push(filtered);
+  }
+
+  const seen = new Set<string>();
+  let round = 0;
+  let anyLeft = true;
+  while (dopedFormulas.length < maxTotalDoped && anyLeft) {
+    anyLeft = false;
+    for (const variants of perBase) {
       if (dopedFormulas.length >= maxTotalDoped) break;
-      if (excludeSet && excludeSet.has(v.resultFormula)) continue;
+      if (round >= variants.length) continue;
+      anyLeft = true;
+      const v = variants[round];
+      if (seen.has(v.resultFormula)) continue;
+      seen.add(v.resultFormula);
 
       dopedFormulas.push(v.resultFormula);
       specs.push(v);
@@ -1835,6 +1870,7 @@ export function runDopingBatch(
       if (v.dopingCharacter === "electron" || v.dopingCharacter === "interstitial-electron") eDoped++;
       if (v.dopingCharacter === "hole" || v.dopingCharacter === "vacancy-hole") hDoped++;
     }
+    round++;
   }
 
   return {
