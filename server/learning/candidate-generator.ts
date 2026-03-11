@@ -402,6 +402,20 @@ function reduceStoichiometry(counts: Record<string, number>): Record<string, num
   return rationalized;
 }
 
+function quickCountsCheck(counts: Record<string, number>): boolean {
+  const keys = Object.keys(counts);
+  if (keys.length > 5) return false;
+  let total = 0;
+  for (const k of keys) {
+    const v = counts[k];
+    if (v > 12) return false;
+    total += v;
+    if (total > 20) return false;
+  }
+  if (total < 2) return false;
+  return true;
+}
+
 function canonicalize(formula: string): string {
   const counts = parseFormulaCounts(formula);
   const reduced = reduceStoichiometry(counts);
@@ -601,6 +615,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
         const newCounts = { ...counts };
         newCounts[sub] = newCounts[el];
         delete newCounts[el];
+        if (!quickCountsCheck(newCounts)) continue;
         const formula = canonicalize(countsToFormula(newCounts));
         if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
         if (results.size >= count) break;
@@ -622,6 +637,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
             delete newCounts[el];
             newCounts[sub2] = newCounts[el2];
             delete newCounts[el2];
+            if (!quickCountsCheck(newCounts)) continue;
             const formula = canonicalize(countsToFormula(newCounts));
             if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
             if (results.size >= count) break;
@@ -639,6 +655,7 @@ export function generateElementSubstitutions(baseFormulas: string[], count: numb
       for (const variation of [stoich + 1, stoich - 1, stoich * 2, Math.max(1, Math.round(stoich / 2))]) {
         if (variation < 1 || variation > 12 || variation === stoich) continue;
         const newCounts = { ...counts, [el]: variation };
+        if (!quickCountsCheck(newCounts)) continue;
         const formula = canonicalize(countsToFormula(newCounts));
         if (formula && formula.length > 1 && passesElementCountCap(formula)) results.add(formula);
         if (results.size >= count) break;
@@ -674,7 +691,7 @@ export function generateCompositionInterpolations(formula1: string, formula2: st
       const rounded = Math.round(interp);
       if (rounded > 0) interpolated[el] = rounded;
     }
-    if (Object.keys(interpolated).length >= 2) {
+    if (Object.keys(interpolated).length >= 2 && quickCountsCheck(interpolated)) {
       const formula = canonicalize(countsToFormula(interpolated));
       if (formula && formula.length > 1 && !seen.has(formula) && passesElementCountCap(formula)) {
         seen.add(formula);
@@ -730,8 +747,16 @@ export function generateRandomDopedVariants(baseFormulas: string[], dopantElemen
   return Array.from(results).slice(0, count);
 }
 
-const DOPING_FRACTIONS = [0.05, 0.1, 0.15, 0.2, 0.25];
+const DOPING_FRACTIONS = [0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.25];
 const SC_DOPANTS = ["Al", "Mg", "C", "N", "Li", "Na", "Ca", "Sr", "La", "Y", "Sc", "F", "Si", "Ge", "P", "Cu", "Fe", "Co", "Ni"];
+
+function isDopantCompatible(hostEl: string, dopant: string): boolean {
+  const hostIsAnion = ANION_ELEMENTS.has(hostEl);
+  const dopantIsAnion = ANION_ELEMENTS.has(dopant);
+  if (hostIsAnion !== dopantIsAnion) return false;
+  const dist = elementSubstitutionDistance(hostEl, dopant);
+  return dist < 3.0;
+}
 
 export function generateFractionalDopedVariants(baseFormulas: string[], count: number = 100): string[] {
   const results = new Set<string>();
@@ -747,6 +772,7 @@ export function generateFractionalDopedVariants(baseFormulas: string[], count: n
 
       for (const dopant of SC_DOPANTS) {
         if (elements.includes(dopant)) continue;
+        if (!isDopantCompatible(hostEl, dopant)) continue;
 
         for (const frac of DOPING_FRACTIONS) {
           const dopantAmount = +(hostCount * frac).toFixed(2);
@@ -756,6 +782,9 @@ export function generateFractionalDopedVariants(baseFormulas: string[], count: n
           const newCounts = { ...counts };
           newCounts[hostEl] = hostRemain;
           newCounts[dopant] = dopantAmount;
+          const elCount = Object.keys(newCounts).filter(e => newCounts[e] > 0).length;
+          const totalAtoms = Object.values(newCounts).reduce((s, n) => s + n, 0);
+          if (elCount > 5 || totalAtoms > 20) continue;
           const formula = canonicalize(countsToFormula(newCounts));
           if (formula && formula.length > 2 && passesElementCountCap(formula)) results.add(formula);
           if (results.size >= count) break;
