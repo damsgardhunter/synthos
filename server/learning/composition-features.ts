@@ -12,32 +12,62 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
-function weightedMean(values: number[], weights: number[]): number {
-  const totalW = weights.reduce((s, w) => s + w, 0);
-  if (totalW === 0) return 0;
-  return values.reduce((s, v, i) => s + v * weights[i], 0) / totalW;
+interface RunningStats {
+  sum: number;
+  sumSq: number;
+  wSum: number;
+  wSumSq: number;
+  min: number;
+  max: number;
+  count: number;
+  logSum: number;
+  allPositive: boolean;
 }
 
-function weightedStd(values: number[], weights: number[]): number {
-  const mean = weightedMean(values, weights);
-  const totalW = weights.reduce((s, w) => s + w, 0);
-  if (totalW === 0) return 0;
-  const variance = values.reduce((s, v, i) => s + weights[i] * (v - mean) ** 2, 0) / totalW;
-  return Math.sqrt(variance);
+function initStats(): RunningStats {
+  return { sum: 0, sumSq: 0, wSum: 0, wSumSq: 0, min: Infinity, max: -Infinity, count: 0, logSum: 0, allPositive: true };
 }
 
-function geometricMean(values: number[], weights: number[]): number {
-  const totalW = weights.reduce((s, w) => s + w, 0);
-  if (totalW === 0 || values.some(v => v <= 0)) return 0;
-  const logSum = values.reduce((s, v, i) => s + weights[i] * Math.log(v), 0);
-  return Math.exp(logSum / totalW);
+function pushStat(s: RunningStats, value: number, weight: number): void {
+  s.sum += value * weight;
+  s.sumSq += weight * value * value;
+  s.wSum += weight;
+  s.wSumSq += weight * weight;
+  if (value < s.min) s.min = value;
+  if (value > s.max) s.max = value;
+  s.count++;
+  if (value > 0) {
+    s.logSum += weight * Math.log(value);
+  } else {
+    s.allPositive = false;
+  }
 }
 
-function harmonicMean(values: number[], weights: number[]): number {
-  const totalW = weights.reduce((s, w) => s + w, 0);
-  if (totalW === 0 || values.some(v => v === 0)) return 0;
-  const recipSum = values.reduce((s, v, i) => s + weights[i] / v, 0);
-  return totalW / recipSum;
+function statMean(s: RunningStats): number {
+  return s.wSum > 0 ? s.sum / s.wSum : 0;
+}
+
+function statStd(s: RunningStats): number {
+  if (s.count < 2 || s.wSum <= 0) return 0;
+  const mean = s.sum / s.wSum;
+  const popVar = (s.sumSq / s.wSum) - mean * mean;
+  const effectiveN = (s.wSum * s.wSum) / s.wSumSq;
+  if (effectiveN <= 1.001) return Math.sqrt(Math.max(0, popVar));
+  const besselFactor = effectiveN / (effectiveN - 1);
+  return Math.sqrt(Math.max(0, popVar * besselFactor));
+}
+
+function statMin(s: RunningStats): number {
+  return s.count > 0 ? s.min : 0;
+}
+
+function statMax(s: RunningStats): number {
+  return s.count > 0 ? s.max : 0;
+}
+
+function statGeomMean(s: RunningStats): number {
+  if (s.count === 0 || s.wSum <= 0 || !s.allPositive) return 0;
+  return Math.exp(s.logSum / s.wSum);
 }
 
 export interface CompositionFeatures {
@@ -141,80 +171,85 @@ const compositionCache = new Map<string, { features: CompositionFeatures; ts: nu
 const COMP_CACHE_MAX = 2000;
 const COMP_CACHE_TTL = 30 * 60 * 1000;
 
+function evictCacheIfNeeded(): void {
+  if (compositionCache.size < COMP_CACHE_MAX) return;
+  const now = Date.now();
+  let oldestKey: string | null = null;
+  let oldestTs = Infinity;
+  const keys = Array.from(compositionCache.keys());
+  for (const key of keys) {
+    const entry = compositionCache.get(key)!;
+    if (now - entry.ts > COMP_CACHE_TTL) {
+      compositionCache.delete(key);
+      if (compositionCache.size < COMP_CACHE_MAX) return;
+    } else if (entry.ts < oldestTs) {
+      oldestTs = entry.ts;
+      oldestKey = key;
+    }
+  }
+  if (oldestKey && compositionCache.size >= COMP_CACHE_MAX) {
+    compositionCache.delete(oldestKey);
+  }
+}
+
 export function computeCompositionFeatures(formula: string): CompositionFeatures {
   const cached = compositionCache.get(formula);
-  if (cached && Date.now() - cached.ts < COMP_CACHE_TTL) return cached.features;
+  if (cached && Date.now() - cached.ts < COMP_CACHE_TTL) {
+    cached.ts = Date.now();
+    return cached.features;
+  }
 
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const fractions: number[] = [];
   const totalAtoms = Object.values(counts).reduce((s, c) => s + c, 0);
 
-  const elData: (ElementalProperties | null)[] = [];
   for (const el of elements) {
     fractions.push(counts[el] / totalAtoms);
-    elData.push(ELEMENTAL_DATA[el] ?? null);
   }
 
-  const enVals: number[] = [];
-  const enWeights: number[] = [];
-  const radiusVals: number[] = [];
-  const radiusWeights: number[] = [];
-  const massVals: number[] = [];
-  const massWeights: number[] = [];
-  const vecVals: number[] = [];
-  const vecWeights: number[] = [];
-  const ieVals: number[] = [];
-  const ieWeights: number[] = [];
-  const eaVals: number[] = [];
-  const eaWeights: number[] = [];
-  const debyeVals: number[] = [];
-  const debyeWeights: number[] = [];
-  const bulkVals: number[] = [];
-  const bulkWeights: number[] = [];
-  const meltVals: number[] = [];
-  const meltWeights: number[] = [];
-  const stonerVals: number[] = [];
-  const stonerWeights: number[] = [];
-  const hubbardVals: number[] = [];
-  const hubbardWeights: number[] = [];
-  const hopfieldVals: number[] = [];
-  const hopfieldWeights: number[] = [];
-  const gruneisenVals: number[] = [];
-  const gruneisenWeights: number[] = [];
-  const anVals: number[] = [];
-  const anWeights: number[] = [];
-  const pettiVals: number[] = [];
-  const pettiWeights: number[] = [];
-  const gammaVals: number[] = [];
-  const gammaWeights: number[] = [];
-  const latticeVals: number[] = [];
-  const latticeWeights: number[] = [];
+  const en = initStats();
+  const radius = initStats();
+  const mass = initStats();
+  const vec = initStats();
+  const ie = initStats();
+  const ea = initStats();
+  const debye = initStats();
+  const bulk = initStats();
+  const melt = initStats();
+  const stoner = initStats();
+  const hubbard = initStats();
+  const hopfield = initStats();
+  const gruneisen = initStats();
+  const an = initStats();
+  const petti = initStats();
+  const gamma = initStats();
+  const lattice = initStats();
 
   let dCount = 0, fCount = 0, pCount = 0, sCount = 0;
 
   for (let i = 0; i < elements.length; i++) {
-    const d = elData[i];
+    const d = ELEMENTAL_DATA[elements[i]] ?? null;
     const w = fractions[i];
     if (!d) continue;
 
-    if (d.paulingElectronegativity != null) { enVals.push(d.paulingElectronegativity); enWeights.push(w); }
-    radiusVals.push(d.atomicRadius); radiusWeights.push(w);
-    massVals.push(d.atomicMass); massWeights.push(w);
-    vecVals.push(d.valenceElectrons); vecWeights.push(w);
-    ieVals.push(d.firstIonizationEnergy); ieWeights.push(w);
-    if (d.electronAffinity != null) { eaVals.push(d.electronAffinity); eaWeights.push(w); }
-    if (d.debyeTemperature != null) { debyeVals.push(d.debyeTemperature); debyeWeights.push(w); }
-    if (d.bulkModulus != null) { bulkVals.push(d.bulkModulus); bulkWeights.push(w); }
-    if (d.meltingPoint != null) { meltVals.push(d.meltingPoint); meltWeights.push(w); }
-    if (d.stonerParameter != null) { stonerVals.push(d.stonerParameter); stonerWeights.push(w); }
-    if (d.hubbardU != null) { hubbardVals.push(d.hubbardU); hubbardWeights.push(w); }
-    if (d.mcMillanHopfieldEta != null) { hopfieldVals.push(d.mcMillanHopfieldEta); hopfieldWeights.push(w); }
-    if (d.gruneisenParameter != null) { gruneisenVals.push(d.gruneisenParameter); gruneisenWeights.push(w); }
-    anVals.push(d.atomicNumber); anWeights.push(w);
-    pettiVals.push(d.pettiforScale); pettiWeights.push(w);
-    if (d.sommerfeldGamma != null) { gammaVals.push(d.sommerfeldGamma); gammaWeights.push(w); }
-    if (d.latticeConstant != null) { latticeVals.push(d.latticeConstant); latticeWeights.push(w); }
+    if (d.paulingElectronegativity != null) pushStat(en, d.paulingElectronegativity, w);
+    pushStat(radius, d.atomicRadius, w);
+    pushStat(mass, d.atomicMass, w);
+    pushStat(vec, d.valenceElectrons, w);
+    pushStat(ie, d.firstIonizationEnergy, w);
+    if (d.electronAffinity != null) pushStat(ea, d.electronAffinity, w);
+    if (d.debyeTemperature != null) pushStat(debye, d.debyeTemperature, w);
+    if (d.bulkModulus != null) pushStat(bulk, d.bulkModulus, w);
+    if (d.meltingPoint != null) pushStat(melt, d.meltingPoint, w);
+    if (d.stonerParameter != null) pushStat(stoner, d.stonerParameter, w);
+    if (d.hubbardU != null) pushStat(hubbard, d.hubbardU, w);
+    if (d.mcMillanHopfieldEta != null) pushStat(hopfield, d.mcMillanHopfieldEta, w);
+    if (d.gruneisenParameter != null) pushStat(gruneisen, d.gruneisenParameter, w);
+    pushStat(an, d.atomicNumber, w);
+    pushStat(petti, d.pettiforScale, w);
+    if (d.sommerfeldGamma != null) pushStat(gamma, d.sommerfeldGamma, w);
+    if (d.latticeConstant != null) pushStat(lattice, d.latticeConstant, w);
 
     const el = elements[i];
     if (D_BLOCK.has(el)) dCount += w;
@@ -223,53 +258,52 @@ export function computeCompositionFeatures(formula: string): CompositionFeatures
     if (S_BLOCK.has(el)) sCount += w;
   }
 
-  const enMean = enVals.length > 0 ? weightedMean(enVals, enWeights) : 0;
-  const enStd = enVals.length > 1 ? weightedStd(enVals, enWeights) : 0;
-  const enMin = enVals.length > 0 ? Math.min(...enVals) : 0;
-  const enMax = enVals.length > 0 ? Math.max(...enVals) : 0;
-  const enGeomMean = enVals.length > 0 ? geometricMean(enVals, enWeights) : 0;
+  const enMean = statMean(en);
+  const enStdVal = statStd(en);
+  const enMinVal = statMin(en);
+  const enMaxVal = statMax(en);
+  const enGeomMean = statGeomMean(en);
 
-  const radiusMean = radiusVals.length > 0 ? weightedMean(radiusVals, radiusWeights) : 0;
-  const radiusStd = radiusVals.length > 1 ? weightedStd(radiusVals, radiusWeights) : 0;
-  const radiusMin = radiusVals.length > 0 ? Math.min(...radiusVals) : 0;
-  const radiusMax = radiusVals.length > 0 ? Math.max(...radiusVals) : 0;
+  const radiusMean = statMean(radius);
+  const radiusStdVal = statStd(radius);
+  const radiusMinVal = statMin(radius);
+  const radiusMaxVal = statMax(radius);
 
-  const massMean = massVals.length > 0 ? weightedMean(massVals, massWeights) : 0;
-  const massStd = massVals.length > 1 ? weightedStd(massVals, massWeights) : 0;
-  const massMin = massVals.length > 0 ? Math.min(...massVals) : 0;
-  const massMax = massVals.length > 0 ? Math.max(...massVals) : 0;
+  const massMean = statMean(mass);
+  const massStdVal = statStd(mass);
+  const massMinVal = statMin(mass);
+  const massMaxVal = statMax(mass);
 
-  const vecMean = vecVals.length > 0 ? weightedMean(vecVals, vecWeights) : 0;
-  const vecStd = vecVals.length > 1 ? weightedStd(vecVals, vecWeights) : 0;
+  const vecMean = statMean(vec);
+  const vecStdVal = statStd(vec);
 
-  const ieMean = ieVals.length > 0 ? weightedMean(ieVals, ieWeights) : 0;
-  const ieStd = ieVals.length > 1 ? weightedStd(ieVals, ieWeights) : 0;
-  const ieMin = ieVals.length > 0 ? Math.min(...ieVals) : 0;
-  const ieMax = ieVals.length > 0 ? Math.max(...ieVals) : 0;
+  const ieMean = statMean(ie);
+  const ieStdVal = statStd(ie);
+  const ieMinVal = statMin(ie);
+  const ieMaxVal = statMax(ie);
 
-  const eaMean = eaVals.length > 0 ? weightedMean(eaVals, eaWeights) : 0;
-  const eaStd = eaVals.length > 1 ? weightedStd(eaVals, eaWeights) : 0;
+  const eaMean = statMean(ea);
+  const eaStdVal = statStd(ea);
 
-  const debyeMean = debyeVals.length > 0 ? weightedMean(debyeVals, debyeWeights) : 0;
-  const debyeStd = debyeVals.length > 1 ? weightedStd(debyeVals, debyeWeights) : 0;
-  const debyeGeomMean = debyeVals.length > 0 ? geometricMean(debyeVals, debyeWeights) : 0;
+  const debyeMean = statMean(debye);
+  const debyeStdVal = statStd(debye);
+  const debyeGeomMean = statGeomMean(debye);
 
-  const bulkModMean = bulkVals.length > 0 ? weightedMean(bulkVals, bulkWeights) : 0;
-  const bulkModStd = bulkVals.length > 1 ? weightedStd(bulkVals, bulkWeights) : 0;
+  const bulkModMean = statMean(bulk);
+  const bulkModStdVal = statStd(bulk);
 
-  const meltingMean = meltVals.length > 0 ? weightedMean(meltVals, meltWeights) : 0;
-  const meltingStd = meltVals.length > 1 ? weightedStd(meltVals, meltWeights) : 0;
-  const meltingMin = meltVals.length > 0 ? Math.min(...meltVals) : 0;
-  const meltingMax = meltVals.length > 0 ? Math.max(...meltVals) : 0;
+  const meltingMean = statMean(melt);
+  const meltingStdVal = statStd(melt);
+  const meltingMinVal = statMin(melt);
+  const meltingMaxVal = statMax(melt);
 
   const avgRadius_m = radiusMean * 1e-12;
   const volumePerAtom = avgRadius_m > 0 ? (4 / 3) * Math.PI * avgRadius_m ** 3 * 1e30 : 0;
   const densityEstimate = massMean > 0 && volumePerAtom > 0 ? massMean / (volumePerAtom * 6.022e23) * 1e24 : 0;
 
-  const avgEN = enMean;
-  const coordNumberEstimate = avgEN > 0 ? Math.min(12, Math.max(4, Math.round(12 * (1 - enStd / (avgEN + 0.01))))) : 6;
+  const coordNumberEstimate = enMean > 0 ? Math.min(12, Math.max(4, Math.round(12 * (1 - enStdVal / (enMean + 0.01))))) : 6;
 
-  const ionicCharacter = enVals.length >= 2 ? 1 - Math.exp(-0.25 * (enMax - enMin) ** 2) : 0;
+  const ionicCharacter = en.count >= 2 ? 1 - Math.exp(-0.25 * (enMaxVal - enMinVal) ** 2) : 0;
   const covalentCharacter = 1 - ionicCharacter;
   const totalBlock = dCount + fCount + pCount + sCount || 1;
   const metallicCharacter = (dCount + fCount) / totalBlock;
@@ -278,45 +312,42 @@ export function computeCompositionFeatures(formula: string): CompositionFeatures
   const avgFrac = 1 / Math.max(1, elements.length);
   const stoichVariance = fractions.reduce((s, f) => s + (f - avgFrac) ** 2, 0) / Math.max(1, elements.length);
 
-  const gammaMean = gammaVals.length > 0 ? weightedMean(gammaVals, gammaWeights) : 0;
-  const gammaStd = gammaVals.length > 1 ? weightedStd(gammaVals, gammaWeights) : 0;
+  const gammaMean = statMean(gamma);
+  const gammaStdVal = statStd(gamma);
 
-  const latticeConstMean = latticeVals.length > 0 ? weightedMean(latticeVals, latticeWeights) : 0;
-  const latticeConstStd = latticeVals.length > 1 ? weightedStd(latticeVals, latticeWeights) : 0;
+  const latticeConstMean = statMean(lattice);
+  const latticeConstStdVal = statStd(lattice);
 
-  const pettiforMean = pettiVals.length > 0 ? weightedMean(pettiVals, pettiWeights) : 0;
-  const pettiforStd = pettiVals.length > 1 ? weightedStd(pettiVals, pettiWeights) : 0;
-  const pettiforRange = pettiVals.length > 0 ? Math.max(...pettiVals) - Math.min(...pettiVals) : 0;
+  const pettiforMean = statMean(petti);
+  const pettiforStdVal = statStd(petti);
+  const pettiforRange = petti.count > 0 ? statMax(petti) - statMin(petti) : 0;
 
   const result: CompositionFeatures = {
-    enMean, enStd, enMin, enMax, enRange: enMax - enMin, enGeomMean,
-    radiusMean, radiusStd, radiusMin, radiusMax, radiusRange: radiusMax - radiusMin,
-    massMean, massStd, massVariance: massStd ** 2, massMin, massMax,
-    vecMean, vecStd,
-    ieMean, ieStd, ieMin, ieMax,
-    eaMean, eaStd,
-    debyeMean, debyeStd, debyeGeomMean,
-    bulkModMean, bulkModStd,
-    meltingMean, meltingStd, meltingMin, meltingMax,
+    enMean, enStd: enStdVal, enMin: enMinVal, enMax: enMaxVal, enRange: enMaxVal - enMinVal, enGeomMean,
+    radiusMean, radiusStd: radiusStdVal, radiusMin: radiusMinVal, radiusMax: radiusMaxVal, radiusRange: radiusMaxVal - radiusMinVal,
+    massMean, massStd: massStdVal, massVariance: massStdVal ** 2, massMin: massMinVal, massMax: massMaxVal,
+    vecMean, vecStd: vecStdVal,
+    ieMean, ieStd: ieStdVal, ieMin: ieMinVal, ieMax: ieMaxVal,
+    eaMean, eaStd: eaStdVal,
+    debyeMean, debyeStd: debyeStdVal, debyeGeomMean,
+    bulkModMean, bulkModStd: bulkModStdVal,
+    meltingMean, meltingStd: meltingStdVal, meltingMin: meltingMinVal, meltingMax: meltingMaxVal,
     densityEstimate, volumePerAtom, coordNumberEstimate,
-    avgStonerParam: stonerVals.length > 0 ? weightedMean(stonerVals, stonerWeights) : 0,
-    avgHubbardU: hubbardVals.length > 0 ? weightedMean(hubbardVals, hubbardWeights) : 0,
-    avgHopfieldEta: hopfieldVals.length > 0 ? weightedMean(hopfieldVals, hopfieldWeights) : 0,
-    avgGruneisen: gruneisenVals.length > 0 ? weightedMean(gruneisenVals, gruneisenWeights) : 0,
+    avgStonerParam: statMean(stoner),
+    avgHubbardU: statMean(hubbard),
+    avgHopfieldEta: statMean(hopfield),
+    avgGruneisen: statMean(gruneisen),
     ionicCharacter, covalentCharacter, metallicCharacter,
     dElectronFrac: dCount, fElectronFrac: fCount, pElectronFrac: pCount, sElectronFrac: sCount,
-    atomicNumberMean: anVals.length > 0 ? weightedMean(anVals, anWeights) : 0,
-    atomicNumberStd: anVals.length > 1 ? weightedStd(anVals, anWeights) : 0,
-    pettiforMean, pettiforStd, pettiforRange,
+    atomicNumberMean: statMean(an),
+    atomicNumberStd: statStd(an),
+    pettiforMean, pettiforStd: pettiforStdVal, pettiforRange,
     shannonEntropy, nAtoms: totalAtoms, stoichVariance,
-    gammaMean, gammaStd,
-    latticeConstMean, latticeConstStd,
+    gammaMean, gammaStd: gammaStdVal,
+    latticeConstMean, latticeConstStd: latticeConstStdVal,
   };
 
-  if (compositionCache.size >= COMP_CACHE_MAX) {
-    const oldest = compositionCache.keys().next().value;
-    if (oldest) compositionCache.delete(oldest);
-  }
+  evictCacheIfNeeded();
   compositionCache.set(formula, { features: result, ts: Date.now() });
 
   return result;
