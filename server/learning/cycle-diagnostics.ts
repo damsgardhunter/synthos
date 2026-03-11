@@ -142,8 +142,9 @@ export function generateCycleDiagnostics(): CycleDiagnosticReport {
   if (newSamples === 0 && cycleNumber > 0) alerts.push("No new samples added this cycle — exploration may be stuck");
 
   for (const [family, fb] of Object.entries(familyBias)) {
-    if (fb.bias > 30) alerts.push(`${family}: overpredicts Tc by ${fb.bias.toFixed(0)}K on average`);
-    if (fb.bias < -30) alerts.push(`${family}: underpredicts Tc by ${Math.abs(fb.bias).toFixed(0)}K on average`);
+    if (Math.abs(fb.bias) < 5) continue;
+    if (fb.bias > 30) alerts.push(`${family}: overpredicts Tc by ${fb.bias.toFixed(1)}K on average`);
+    if (fb.bias < -30) alerts.push(`${family}: underpredicts Tc by ${Math.abs(fb.bias).toFixed(1)}K on average`);
   }
 
   const trendRMSEs = (trend.recentCycles ?? []).map((c: any) => c.rmse).filter((r: number) => r > 0);

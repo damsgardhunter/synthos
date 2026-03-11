@@ -346,7 +346,8 @@ class CrossEngineHub {
 
     if (withPressure.length > 0) {
       const avgOptP = withPressure.reduce((s, i) => s + (i.pressure?.optimalPressure ?? 0), 0) / withPressure.length;
-      if (avgOptP > 50) {
+      const pressureThreshold = this.getDynamicPressureThreshold(insights);
+      if (avgOptP > pressureThreshold) {
         pressureRequired = true;
         recommendedMethod = "high-pressure";
       }
@@ -737,6 +738,42 @@ class CrossEngineHub {
     }
 
     return patterns;
+  }
+
+  private getDynamicPressureThreshold(insights: EngineInsight[]): number {
+    const topoInsights = insights.filter(i => i.topology);
+    const pairingInsights = insights.filter(i => i.pairing);
+
+    const hasHydrides = insights.some(i => {
+      const f = (i.formula || "").toLowerCase();
+      const hMatch = f.match(/h(\d+)/);
+      return hMatch && parseInt(hMatch[1]) >= 3;
+    });
+    if (hasHydrides) return 100;
+
+    const hasCuprates = insights.some(i => {
+      const f = (i.formula || "").toLowerCase();
+      return f.includes("cu") && f.includes("o");
+    });
+    if (hasCuprates) return 10;
+
+    const hasA15 = insights.some(i => {
+      const f = (i.formula || "").toLowerCase();
+      return f.includes("nb") || f.includes("v3");
+    });
+    if (hasA15) return 20;
+
+    if (topoInsights.length > 0) {
+      const avgSOC = topoInsights.reduce((s, i) => s + (i.topology?.socStrength ?? 0), 0) / topoInsights.length;
+      if (avgSOC > 0.5) return 30;
+    }
+
+    if (pairingInsights.length > 0) {
+      const dominant = this.getMostCommonValue(pairingInsights.map(i => i.pairing?.dominantMechanism ?? "phonon"));
+      if (dominant === "spin") return 15;
+    }
+
+    return 50;
   }
 
   private getMostCommonValue(values: string[]): string {
