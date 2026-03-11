@@ -7387,15 +7387,28 @@ async function runLearningCycle() {
             "Fe", "Cu", "Ni", "Co", "Mn", "Sc", "Hf", "Re"];
           const anions = ["H", "N", "B", "C", "O", "S", "Se", "P", "As", "Te"];
           const lfFormulas: string[] = [];
-          for (let fi = 0; fi < 60; fi++) {
-            const m1 = scElements[Math.floor(Math.random() * scElements.length)];
-            const m2 = scElements[Math.floor(Math.random() * scElements.length)];
-            const an = anions[Math.floor(Math.random() * anions.length)];
-            if (m1 === m2) continue;
-            const n1 = Math.floor(Math.random() * 3) + 1;
-            const n2 = Math.floor(Math.random() * 3) + 1;
-            const n3 = Math.floor(Math.random() * 6) + 1;
-            const f = `${m1}${n1 > 1 ? n1 : ""}${m2}${n2 > 1 ? n2 : ""}${an}${n3 > 1 ? n3 : ""}`;
+          for (let fi = 0; fi < 80; fi++) {
+            const numMetals = Math.random() < 0.35 ? 3 : 2;
+            const numAnions = Math.random() < 0.25 ? 2 : 1;
+            const metals: string[] = [];
+            while (metals.length < numMetals) {
+              const m = scElements[Math.floor(Math.random() * scElements.length)];
+              if (!metals.includes(m)) metals.push(m);
+            }
+            const chosenAnions: string[] = [];
+            while (chosenAnions.length < numAnions) {
+              const a = anions[Math.floor(Math.random() * anions.length)];
+              if (!chosenAnions.includes(a)) chosenAnions.push(a);
+            }
+            let f = "";
+            for (const m of metals) {
+              const n = Math.floor(Math.random() * 3) + 1;
+              f += `${m}${n > 1 ? n : ""}`;
+            }
+            for (const a of chosenAnions) {
+              const n = Math.floor(Math.random() * 6) + 1;
+              f += `${a}${n > 1 ? n : ""}`;
+            }
             const nf = normalizeFormula(f);
             if (!alreadyScreenedFormulas.has(nf) && isValidFormula(f)) lfFormulas.push(f);
           }
@@ -7589,12 +7602,30 @@ async function runLearningCycle() {
               });
             } else {
               const currentFamilyArea = strategy.focusAreas.find(f => f.area === currentExploitFamily);
+              const exploitFamilyStats = (strategy.performanceSignals?.familyStats as any)?.[currentExploitFamily];
+              const exploitAvgScore = exploitFamilyStats?.avgScore ?? 0;
+              const exploitPipelineRate = exploitFamilyStats?.count > 0
+                ? (exploitFamilyStats.pipelinePasses ?? 0) / exploitFamilyStats.count
+                : 0;
+              const isUnderperforming = exploitFamilyStats?.count >= 5 && exploitAvgScore < 0.2 && exploitPipelineRate < 0.15;
+
               if (currentFamilyArea) {
-                currentFamilyArea.priority = Math.max(currentFamilyArea.priority, 0.8);
+                if (isUnderperforming) {
+                  currentFamilyArea.priority = Math.min(currentFamilyArea.priority, 0.3);
+                  exploitCyclesRemaining = Math.min(exploitCyclesRemaining, 1);
+                  emit("log", {
+                    phase: "engine",
+                    event: "Exploit deprioritized",
+                    detail: `${currentExploitFamily} underperforming: avgScore=${exploitAvgScore.toFixed(3)}, pipelineRate=${exploitPipelineRate.toFixed(3)}, count=${exploitFamilyStats.count}. Deprioritizing to ${currentFamilyArea.priority.toFixed(2)}, exploit ending next cycle.`,
+                    dataSource: "Strategy Analyzer",
+                  });
+                } else {
+                  currentFamilyArea.priority = Math.max(currentFamilyArea.priority, 0.8);
+                }
               }
               strategy.focusAreas.sort((a, b) => {
-                if (a.area === currentExploitFamily) return -1;
-                if (b.area === currentExploitFamily) return 1;
+                if (a.area === currentExploitFamily && !isUnderperforming) return -1;
+                if (b.area === currentExploitFamily && !isUnderperforming) return 1;
                 return b.priority - a.priority;
               });
             }
