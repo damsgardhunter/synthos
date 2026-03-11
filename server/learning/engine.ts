@@ -4953,6 +4953,15 @@ async function runAutonomousFastPath() {
             candidatePressureMap.set(`${v.formula}@${v.pressureGpa}`, v.pressureGpa);
             pressureVariantFormulas.push(v.formula);
           }
+          if (v.seedBO && v.pressureGpa > 0) {
+            try {
+              const feat = extractFeatures(v.formula);
+              const gbResult = gbPredict(feat);
+              if (gbResult.tcPredicted > 0) {
+                addPressureObservation(v.formula, v.pressureGpa, gbResult.tcPredicted, true, 0);
+              }
+            } catch {}
+          }
         }
       }
     }

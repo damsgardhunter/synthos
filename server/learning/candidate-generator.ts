@@ -857,11 +857,28 @@ export interface RapidScreenResult {
   gbScore: number;
 }
 
+function computeWeightedVEC(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  let vecSum = 0;
+  let atomSum = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const data = getElementData(el);
+    if (data) {
+      vecSum += data.valenceElectrons * n;
+      atomSum += n;
+    }
+  }
+  return atomSum > 0 ? vecSum / atomSum : 0;
+}
+
 export function rapidGBScreen(formulas: string[]): RapidScreenResult[] {
   const results: RapidScreenResult[] = [];
 
   for (const formula of formulas) {
     try {
+      const vec = computeWeightedVEC(formula);
+      if (vec < 1.0 || vec > 11.0) continue;
+
       const features = extractFeatures(formula);
       const gb = gbPredict(features);
       if (gb.tcPredicted >= 5) {
@@ -887,11 +904,37 @@ export function estimateFamilyPressure(formula: string): number {
   const hCount = counts["H"] || 0;
   const hydrogenRatio = totalAtoms > 0 ? hCount / totalAtoms : 0;
 
-  if (hydrogenRatio >= 0.7) return 200;
-  if (hydrogenRatio >= 0.5) return 150;
-  if (hydrogenRatio >= 0.3) return 100;
-  if (hCount > 0 && hydrogenRatio >= 0.15) return 50;
-  return 0;
+  if (hydrogenRatio < 0.15 || hCount === 0) return 0;
+
+  let basePressure: number;
+  if (hydrogenRatio >= 0.7) basePressure = 200;
+  else if (hydrogenRatio >= 0.5) basePressure = 150;
+  else if (hydrogenRatio >= 0.3) basePressure = 100;
+  else basePressure = 50;
+
+  let avgVolume = 0;
+  let wt = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const data = getElementData(el);
+    const r = data?.atomicRadius ?? 130;
+    avgVolume += (r ** 3) * n;
+    wt += n;
+  }
+  avgVolume = wt > 0 ? avgVolume / wt : 130 ** 3;
+  const refVolume = 130 ** 3;
+  const volumeRatio = avgVolume / refVolume;
+
+  if (volumeRatio < 0.5) {
+    basePressure = Math.round(basePressure * 0.7);
+  } else if (volumeRatio < 0.8) {
+    basePressure = Math.round(basePressure * 0.85);
+  } else if (volumeRatio > 1.5) {
+    basePressure = Math.round(basePressure * 1.3);
+  } else if (volumeRatio > 1.2) {
+    basePressure = Math.round(basePressure * 1.15);
+  }
+
+  return Math.max(0, Math.min(350, basePressure));
 }
 
 export function mutatePressure(pressure: number): number {
@@ -899,14 +942,60 @@ export function mutatePressure(pressure: number): number {
   return Math.max(0, Math.min(350, Math.round(pressure + delta)));
 }
 
-export function generatePressureVariants(formula: string, basePressure: number): { formula: string; pressureGpa: number }[] {
-  const variants: { formula: string; pressureGpa: number }[] = [];
-  const offsets = basePressure > 0 ? [-50, 0, 50, 100] : [0, 50, 100];
+export function generatePressureVariants(formula: string, basePressure: number): { formula: string; pressureGpa: number; seedBO: boolean }[] {
+  const variants: { formula: string; pressureGpa: number; seedBO: boolean }[] = [];
+  const offsets = basePressure > 0 ? [-50, -25, 0, 25, 50, 100] : [0, 25, 50, 100];
+  const seen = new Set<number>();
   for (const offset of offsets) {
     const p = Math.max(0, Math.min(350, basePressure + offset));
-    variants.push({ formula, pressureGpa: p });
+    if (seen.has(p)) continue;
+    seen.add(p);
+    variants.push({ formula, pressureGpa: p, seedBO: true });
   }
   return variants;
+}
+
+const FOCUS_ELEMENTS: Record<string, string[][]> = {
+  Carbides: [["Nb", "C"], ["Ti", "C"], ["Mo", "C"], ["V", "C"], ["Zr", "C"], ["Hf", "C"], ["Ta", "C"], ["W", "C"]],
+  Borides: [["Nb", "B"], ["Ti", "B"], ["Zr", "B"], ["Mo", "B"], ["V", "B"], ["Ta", "B"], ["Mg", "B"], ["Ca", "B"]],
+  Nitrides: [["Nb", "N"], ["Ti", "N"], ["Zr", "N"], ["V", "N"], ["Mo", "N"], ["Ta", "N"], ["Hf", "N"]],
+  Hydrides: [["La", "H"], ["Y", "H"], ["Ca", "H"], ["Sr", "H"], ["Ba", "H"], ["Th", "H"], ["Sc", "H"]],
+  Intermetallics: [["Nb", "Ge"], ["Nb", "Sn"], ["V", "Si"], ["Nb", "Al"], ["Mo", "Ge"], ["V", "Ga"]],
+  Cuprates: [["Ba", "Cu", "O"], ["La", "Cu", "O"], ["Y", "Ba", "Cu", "O"], ["Bi", "Sr", "Cu", "O"]],
+  Pnictides: [["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["La", "Fe", "As"], ["Fe", "Se"]],
+  Chalcogenides: [["Fe", "Se"], ["Nb", "Se"], ["Mo", "Se"], ["Fe", "Te"]],
+  Sulfides: [["Mo", "S"], ["Nb", "S"], ["Ta", "S"], ["Ti", "S"]],
+  Oxides: [["Sr", "Ti", "O"], ["Ba", "Ti", "O"], ["La", "Mn", "O"]],
+  Alloys: [["Nb", "Ti"], ["Nb", "Zr"], ["Mo", "Re"], ["V", "Ti"]],
+  Kagome: [["K", "V", "Sb"], ["Rb", "V", "Sb"], ["Cs", "V", "Sb"], ["K", "V", "Bi"], ["Cs", "Ti", "Sb"], ["Ba", "V", "Sb"], ["Ca", "V", "Sb"], ["Sr", "V", "Bi"]],
+  "Mixed-mechanism": [["La", "Fe", "As", "O"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Fe", "Se"], ["Fe", "Te"], ["La", "Ni", "O"], ["Nd", "Ni", "O"], ["La", "Cu", "O"], ["Y", "Cu", "O"], ["Ba", "Co", "As"], ["Sr", "Co", "As"], ["Ca", "Fe", "As"]],
+  Layered: [["Nb", "Se"], ["Ta", "Se"], ["Mo", "S"], ["W", "Se"], ["Ti", "Se"], ["Nb", "S"], ["Mo", "Se"], ["Ta", "S"]],
+  "Layered-chalcogenide": [["Nb", "Se"], ["Ta", "Se"], ["Mo", "S"], ["W", "Se"], ["Ti", "Se"], ["Nb", "S"], ["Mo", "Se"], ["Ta", "S"], ["Li", "Nb", "Se"], ["Cu", "Nb", "Se"]],
+  "Layered-pnictide": [["La", "Fe", "As"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Ce", "Fe", "As"], ["La", "Co", "As"], ["Ba", "Co", "As"], ["La", "Fe", "P"], ["Ba", "Ni", "As"]],
+  "Intercalated-layered": [["Li", "Nb", "Se"], ["Na", "Nb", "Se"], ["K", "Mo", "S"], ["Ca", "Ta", "Se"], ["Li", "C"], ["K", "C"], ["Ca", "C"], ["Sr", "Nb", "Se"]],
+};
+
+const SC_BIASED_SEEDS: string[][] = [
+  ["Nb", "B", "C"], ["Ta", "B", "C"], ["V", "B", "N"], ["Ti", "B", "N"],
+  ["Nb", "C", "N"], ["Ta", "C", "N"],
+  ["La", "Nb", "B"], ["Sc", "Nb", "C"],
+];
+
+const UNCONVENTIONAL_SEEDS: string[][] = [
+  ["Nb", "Se"], ["Ta", "Se"], ["Nb", "S"], ["Mo", "Se"],
+  ["Fe", "Se"], ["Fe", "Te"], ["Fe", "As"],
+  ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["La", "Fe", "P"],
+  ["K", "V", "Sb"], ["Cs", "V", "Bi"], ["Rb", "V", "Sb"],
+  ["La", "Ni", "O"], ["Sr", "Co", "O"], ["Ba", "Cu", "O"],
+  ["Ca", "H"], ["La", "H"], ["Y", "H"],
+  ["Nb", "Se", "S"], ["Ta", "Se", "Te"], ["Mo", "S", "Se"],
+];
+
+export function selectSeedPairs(focusArea: string): string[][] {
+  const focusPairs = FOCUS_ELEMENTS[focusArea] || FOCUS_ELEMENTS["Carbides"];
+  const biasedSubset = fisherYatesShuffle(SC_BIASED_SEEDS).slice(0, 4);
+  const unconvSubset = fisherYatesShuffle(UNCONVENTIONAL_SEEDS).slice(0, 8);
+  return [...focusPairs, ...biasedSubset, ...unconvSubset];
 }
 
 export function runMassiveGeneration(
@@ -923,46 +1012,7 @@ export function runMassiveGeneration(
     passedPreScreen: 0,
   };
 
-  const focusElements: Record<string, string[][]> = {
-    Carbides: [["Nb", "C"], ["Ti", "C"], ["Mo", "C"], ["V", "C"], ["Zr", "C"], ["Hf", "C"], ["Ta", "C"], ["W", "C"]],
-    Borides: [["Nb", "B"], ["Ti", "B"], ["Zr", "B"], ["Mo", "B"], ["V", "B"], ["Ta", "B"], ["Mg", "B"], ["Ca", "B"]],
-    Nitrides: [["Nb", "N"], ["Ti", "N"], ["Zr", "N"], ["V", "N"], ["Mo", "N"], ["Ta", "N"], ["Hf", "N"]],
-    Hydrides: [["La", "H"], ["Y", "H"], ["Ca", "H"], ["Sr", "H"], ["Ba", "H"], ["Th", "H"], ["Sc", "H"]],
-    Intermetallics: [["Nb", "Ge"], ["Nb", "Sn"], ["V", "Si"], ["Nb", "Al"], ["Mo", "Ge"], ["V", "Ga"]],
-    Cuprates: [["Ba", "Cu", "O"], ["La", "Cu", "O"], ["Y", "Ba", "Cu", "O"], ["Bi", "Sr", "Cu", "O"]],
-    Pnictides: [["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["La", "Fe", "As"], ["Fe", "Se"]],
-    Chalcogenides: [["Fe", "Se"], ["Nb", "Se"], ["Mo", "Se"], ["Fe", "Te"]],
-    Sulfides: [["Mo", "S"], ["Nb", "S"], ["Ta", "S"], ["Ti", "S"]],
-    Oxides: [["Sr", "Ti", "O"], ["Ba", "Ti", "O"], ["La", "Mn", "O"]],
-    Alloys: [["Nb", "Ti"], ["Nb", "Zr"], ["Mo", "Re"], ["V", "Ti"]],
-    Kagome: [["K", "V", "Sb"], ["Rb", "V", "Sb"], ["Cs", "V", "Sb"], ["K", "V", "Bi"], ["Cs", "Ti", "Sb"], ["Ba", "V", "Sb"], ["Ca", "V", "Sb"], ["Sr", "V", "Bi"]],
-    "Mixed-mechanism": [["La", "Fe", "As", "O"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Fe", "Se"], ["Fe", "Te"], ["La", "Ni", "O"], ["Nd", "Ni", "O"], ["La", "Cu", "O"], ["Y", "Cu", "O"], ["Ba", "Co", "As"], ["Sr", "Co", "As"], ["Ca", "Fe", "As"]],
-    Layered: [["Nb", "Se"], ["Ta", "Se"], ["Mo", "S"], ["W", "Se"], ["Ti", "Se"], ["Nb", "S"], ["Mo", "Se"], ["Ta", "S"]],
-    "Layered-chalcogenide": [["Nb", "Se"], ["Ta", "Se"], ["Mo", "S"], ["W", "Se"], ["Ti", "Se"], ["Nb", "S"], ["Mo", "Se"], ["Ta", "S"], ["Li", "Nb", "Se"], ["Cu", "Nb", "Se"]],
-    "Layered-pnictide": [["La", "Fe", "As"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["Ce", "Fe", "As"], ["La", "Co", "As"], ["Ba", "Co", "As"], ["La", "Fe", "P"], ["Ba", "Ni", "As"]],
-    "Intercalated-layered": [["Li", "Nb", "Se"], ["Na", "Nb", "Se"], ["K", "Mo", "S"], ["Ca", "Ta", "Se"], ["Li", "C"], ["K", "C"], ["Ca", "C"], ["Sr", "Nb", "Se"]],
-  };
-
-  const scBiasedSeeds: string[][] = [
-    ["Nb", "B", "C"], ["Ta", "B", "C"], ["V", "B", "N"], ["Ti", "B", "N"],
-    ["Nb", "C", "N"], ["Ta", "C", "N"],
-    ["La", "Nb", "B"], ["Sc", "Nb", "C"],
-  ];
-
-  const unconventionalSeeds: string[][] = [
-    ["Nb", "Se"], ["Ta", "Se"], ["Nb", "S"], ["Mo", "Se"],
-    ["Fe", "Se"], ["Fe", "Te"], ["Fe", "As"],
-    ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["La", "Fe", "P"],
-    ["K", "V", "Sb"], ["Cs", "V", "Bi"], ["Rb", "V", "Sb"],
-    ["La", "Ni", "O"], ["Sr", "Co", "O"], ["Ba", "Cu", "O"],
-    ["Ca", "H"], ["La", "H"], ["Y", "H"],
-    ["Nb", "Se", "S"], ["Ta", "Se", "Te"], ["Mo", "S", "Se"],
-  ];
-
-  const focusPairs = focusElements[focusArea] || focusElements["Carbides"];
-  const biasedSubset = fisherYatesShuffle(scBiasedSeeds).slice(0, 4);
-  const unconvSubset = fisherYatesShuffle(unconventionalSeeds).slice(0, 8);
-  const combinedPairs = [...focusPairs, ...biasedSubset, ...unconvSubset];
+  const combinedPairs = selectSeedPairs(focusArea);
   const seedSet = new Set<string>();
   for (const pair of combinedPairs) {
     const stoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3], [2, 3], [3, 2]];
@@ -1060,7 +1110,8 @@ export function runMassiveGeneration(
     if (passesElementCountCap(canonProto)) allGenerated.add(canonProto);
   }
 
-  for (const pair of focusPairs) {
+  const focusPairsForSweep = FOCUS_ELEMENTS[focusArea] || FOCUS_ELEMENTS["Carbides"];
+  for (const pair of focusPairsForSweep) {
     if (allGenerated.size >= MAX_FORMULAS) break;
     const swept = generateCompositionSweep(pair, 6);
     for (const f of swept) {
