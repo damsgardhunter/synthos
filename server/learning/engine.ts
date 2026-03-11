@@ -563,6 +563,19 @@ let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
 const MAX_SCREENED_CACHE_SIZE = 50000;
+const rejectedFormulas = new Map<string, { reason: string; tc: number; lambda?: number; timestamp: number }>();
+const MAX_REJECTED_CACHE_SIZE = 100000;
+function pruneRejectedCache(): void {
+  if (rejectedFormulas.size > MAX_REJECTED_CACHE_SIZE) {
+    const entries = [...rejectedFormulas.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+    const toRemove = entries.slice(0, Math.floor(MAX_REJECTED_CACHE_SIZE * 0.3));
+    for (const [key] of toRemove) rejectedFormulas.delete(key);
+  }
+}
+function recordRejection(formula: string, reason: string, tc: number, lambda?: number): void {
+  rejectedFormulas.set(normalizeFormula(formula), { reason, tc, lambda, timestamp: Date.now() });
+  if (rejectedFormulas.size > MAX_REJECTED_CACHE_SIZE) pruneRejectedCache();
+}
 const formulasInFlight = new Map<string, number>();
 const IN_FLIGHT_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -4306,6 +4319,11 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: 0, reason: "valence-filter-failed" };
     }
 
+    const prevRejection = rejectedFormulas.get(normalizeFormula(formula));
+    if (prevRejection) {
+      return { passed: false, tc: prevRejection.tc, reason: `cached-reject: ${prevRejection.reason}` };
+    }
+
     const existingCandidate = await storage.getSuperconductorByFormula(formula);
     if (existingCandidate) {
       pipelineStageMetrics.duplicateRejects++;
@@ -4321,6 +4339,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
         detail: `${formula}: ${stabilityScreen.reason}`,
         dataSource: "Stability Predictor (GNN)",
       });
+      recordRejection(formula, `stability-prefilter: ${stabilityScreen.reason}`, 0);
       return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
 
@@ -4328,6 +4347,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     const surrogateTc = Number.isFinite(surrogateResult.predictedTc) ? surrogateResult.predictedTc : 0;
     if (!surrogateResult.pass) {
       pipelineStageMetrics.surrogateRejects++;
+      recordRejection(formula, `surrogate-reject`, surrogateTc);
       return { passed: false, tc: surrogateTc, reason: `surrogate-reject: Tc=${surrogateTc}K, ${surrogateResult.reasoning.join("; ")}` };
     }
 
@@ -4336,6 +4356,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       if (miedemaEf < -5.0 || miedemaEf > 0.5) {
         pipelineStageMetrics.formationEnergyRejects++;
         console.log(`[Autonomous] ${formula}: Formation energy ${miedemaEf.toFixed(3)} eV/atom outside synthesizable range [-5, 0.5], rejecting`);
+        recordRejection(formula, `formation-energy-unstable`, 0);
         return { passed: false, tc: 0, reason: `formation-energy-unstable: ${miedemaEf.toFixed(3)} eV/atom` };
       }
     } catch (e) { console.error(`[Autonomous] Formation energy check failed for ${formula}:`, e); }
@@ -4391,6 +4412,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     const preFilter = physicsPredictor.preFilter(physicsPred);
     if (!preFilter.pass) {
       pipelineStageMetrics.physicsPrefilterRejects++;
+      recordRejection(formula, `physics-prefilter: ${preFilter.reason}`, Math.round(primaryTc));
       return { passed: false, tc: Math.round(primaryTc), reason: `physics-prefilter: ${preFilter.reason}`, physicsPred };
     }
 
@@ -4428,6 +4450,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
           pipelineStageMetrics.phononRejects++;
           const reason = (phononCheck as any).instabilityReason || "severe phonon instability";
           console.log(`[Autonomous] ${formula}: REJECTED — ${reason}`);
+          recordRejection(formula, `phonon-instability`, 0);
           return { passed: false, tc: 0, reason: `phonon-instability: ${reason}` };
         }
       }
@@ -4521,6 +4544,17 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
 
     if (tier === 0) {
       pipelineStageMetrics.belowTierRejects++;
+      recordRejection(formula, "below-tier3-thresholds", finalTc, lambda);
+      try {
+        const negHullDist = physicsResult.competingPhases.length > 0 ? 0.05 * physicsResult.competingPhases.length : 0.02;
+        physicsPredictor.addTrainingSample(
+          features,
+          lambda,
+          physicsResult.electronicStructure.densityOfStatesAtFermi,
+          physicsResult.coupling.omegaLog,
+          negHullDist
+        );
+      } catch (e) { /* negative training sample failed, not critical */ }
       return { passed: false, tc: finalTc, reason: "below-tier3-thresholds" };
     }
 
@@ -4581,12 +4615,14 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     };
 
     let autonomousInserted = false;
+    let wasDuplicate = false;
     try {
       autonomousInserted = await insertCandidateWithStabilityCheck(candidatePayload, "rl");
     } catch (insertErr: any) {
       const isDuplicate = insertErr?.message?.includes("duplicate") || insertErr?.code === "23505";
       if (isDuplicate) {
         autonomousInserted = true;
+        wasDuplicate = true;
       } else {
         autonomousInserted = false;
       }
@@ -4596,8 +4632,10 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: finalTc, reason: `insert-failed (λ=${lambda.toFixed(2)},tier=${tier})` };
     }
 
-    totalScCandidates++;
-    recentNewCandidates++;
+    if (!wasDuplicate) {
+      totalScCandidates++;
+      recentNewCandidates++;
+    }
 
     try {
       const memFingerprint = buildFingerprint(formula, finalTc, {
