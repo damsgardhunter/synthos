@@ -281,7 +281,7 @@ function encodeCouplingSegment(
     coupling.muStar,
     isStrong,
     coupling.anharmonicCorrectionFactor,
-    electronic.densityOfStatesAtFermi / 10,
+    Math.log1p(electronic.densityOfStatesAtFermi) / Math.log1p(50),
     electronic.metallicity,
     electronic.nestingScore,
     electronic.vanHoveProximity,
