@@ -744,7 +744,8 @@ export function computePlasmonPairing(
   }
   const electronDensity = totalVE / Math.max(1, totalAtoms);
 
-  const plasmaFrequency = Math.min(1.0, Math.sqrt(electronDensity * metallicity) * 0.3);
+  const effectiveMass = 1.0 + (electronic.bandFlatness > 0 ? electronic.bandFlatness * 4.0 : 0);
+  const plasmaFrequency = Math.min(1.0, Math.sqrt(electronDensity * metallicity / effectiveMass) * 0.3);
 
   const dimensionalityFactor = electronic.bandFlatness > 0.5
     ? 0.7
@@ -841,29 +842,37 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
     elements.some(e => ["Ba", "K", "Rb"].includes(e));
   const isTitanate = elements.includes("Sr") && elements.includes("Ti") && elements.includes("O");
 
-  let wPhonon = 0.28, wSpin = 0.21, wOrbital = 0.14, wExcitonic = 0.07, wCDW = 0.09, wPolaronic = 0.07, wPlasmon = 0.07, wTopo = 0.07;
+  const WEIGHT_SETS: Record<string, number[]> = {
+    default:      [0.28, 0.21, 0.14, 0.07, 0.09, 0.07, 0.07, 0.07],
+    cuprate:      [0.08, 0.38, 0.17, 0.05, 0.14, 0.06, 0.06, 0.06],
+    pnictide:     [0.11, 0.28, 0.23, 0.05, 0.12, 0.07, 0.06, 0.08],
+    superhydride: [0.85, 0.02, 0.02, 0.01, 0.02, 0.04, 0.02, 0.02],
+    hydride:      [0.52, 0.07, 0.07, 0.03, 0.05, 0.14, 0.07, 0.05],
+    nickelate:    [0.09, 0.33, 0.18, 0.05, 0.11, 0.09, 0.07, 0.08],
+    bismuthate:   [0.18, 0.09, 0.09, 0.05, 0.09, 0.33, 0.09, 0.08],
+    titanate:     [0.14, 0.07, 0.06, 0.05, 0.05, 0.18, 0.38, 0.07],
+    cdw:          [0.18, 0.14, 0.09, 0.05, 0.28, 0.09, 0.09, 0.08],
+    excitonic:    [0.16, 0.14, 0.09, 0.28, 0.09, 0.09, 0.06, 0.09],
+    plasmon:      [0.18, 0.14, 0.09, 0.05, 0.09, 0.09, 0.28, 0.08],
+  };
 
-  if (isCuprate) {
-    wPhonon = 0.08; wSpin = 0.38; wOrbital = 0.17; wExcitonic = 0.05; wCDW = 0.14; wPolaronic = 0.06; wPlasmon = 0.06; wTopo = 0.06;
-  } else if (isPnictide) {
-    wPhonon = 0.11; wSpin = 0.28; wOrbital = 0.23; wExcitonic = 0.05; wCDW = 0.12; wPolaronic = 0.07; wPlasmon = 0.06; wTopo = 0.08;
-  } else if (isSuperhydride) {
-    wPhonon = 0.85; wSpin = 0.02; wOrbital = 0.02; wExcitonic = 0.01; wCDW = 0.02; wPolaronic = 0.04; wPlasmon = 0.02; wTopo = 0.02;
-  } else if (isHydride) {
-    wPhonon = 0.52; wSpin = 0.07; wOrbital = 0.07; wExcitonic = 0.03; wCDW = 0.05; wPolaronic = 0.14; wPlasmon = 0.07; wTopo = 0.05;
-  } else if (isNickelate) {
-    wPhonon = 0.09; wSpin = 0.33; wOrbital = 0.18; wExcitonic = 0.05; wCDW = 0.11; wPolaronic = 0.09; wPlasmon = 0.07; wTopo = 0.08;
-  } else if (isBismuthate) {
-    wPhonon = 0.18; wSpin = 0.09; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.09; wPolaronic = 0.33; wPlasmon = 0.09; wTopo = 0.08;
-  } else if (isTitanate) {
-    wPhonon = 0.14; wSpin = 0.07; wOrbital = 0.06; wExcitonic = 0.05; wCDW = 0.05; wPolaronic = 0.18; wPlasmon = 0.38; wTopo = 0.07;
-  } else if (isCDWMaterial) {
-    wPhonon = 0.18; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.28; wPolaronic = 0.09; wPlasmon = 0.09; wTopo = 0.08;
-  } else if (excitonicResult.isExcitonicCandidate) {
-    wPhonon = 0.16; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.28; wCDW = 0.09; wPolaronic = 0.09; wPlasmon = 0.06; wTopo = 0.09;
-  } else if (plasmonResult.isPlasmonCandidate) {
-    wPhonon = 0.18; wSpin = 0.14; wOrbital = 0.09; wExcitonic = 0.05; wCDW = 0.09; wPolaronic = 0.09; wPlasmon = 0.28; wTopo = 0.08;
-  }
+  const matchedSets: number[][] = [];
+  if (isCuprate) matchedSets.push(WEIGHT_SETS.cuprate);
+  if (isPnictide) matchedSets.push(WEIGHT_SETS.pnictide);
+  if (isSuperhydride) matchedSets.push(WEIGHT_SETS.superhydride);
+  else if (isHydride) matchedSets.push(WEIGHT_SETS.hydride);
+  if (isNickelate) matchedSets.push(WEIGHT_SETS.nickelate);
+  if (isBismuthate) matchedSets.push(WEIGHT_SETS.bismuthate);
+  if (isTitanate) matchedSets.push(WEIGHT_SETS.titanate);
+  if (isCDWMaterial) matchedSets.push(WEIGHT_SETS.cdw);
+  if (excitonicResult.isExcitonicCandidate) matchedSets.push(WEIGHT_SETS.excitonic);
+  if (plasmonResult.isPlasmonCandidate) matchedSets.push(WEIGHT_SETS.plasmon);
+
+  const blended = matchedSets.length > 0
+    ? matchedSets[0].map((_, i) => matchedSets.reduce((s, ws) => s + ws[i], 0) / matchedSets.length)
+    : WEIGHT_SETS.default;
+
+  let [wPhonon, wSpin, wOrbital, wExcitonic, wCDW, wPolaronic, wPlasmon, wTopo] = blended;
 
   let topologicalBoostApplied = false;
   let tripletOddParityWeight = 0;
