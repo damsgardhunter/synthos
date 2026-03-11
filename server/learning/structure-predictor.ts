@@ -314,7 +314,7 @@ export async function evaluateConvexHullStability(
   };
 }
 
-function matchPrototype(formula: string): typeof KNOWN_PROTOTYPES[string] | null {
+export function matchPrototype(formula: string): typeof KNOWN_PROTOTYPES[string] | null {
   const elements = parseFormulaElements(formula);
 
   if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3) {

@@ -17,7 +17,7 @@ import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionT
 import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor, allenDynesTcRaw } from "./physics-engine";
 import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
-import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity } from "./structure-predictor";
+import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity, matchPrototype } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty, requiresQuantitativeContent } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
@@ -7437,14 +7437,25 @@ async function runLearningCycle() {
 
               const cappedTc = Math.round(gb.tcPredicted);
               const ensScore = Math.min(0.9, gb.score);
+              const protoMatch = matchPrototype(normalized);
+              const structLabel = protoMatch
+                ? `${protoMatch.prototype} (rediscovered via lattice-free)`
+                : `lattice-free: ${struct.bravaisType}`;
               const inserted = await insertCandidateWithStabilityCheck({
                 formula: normalized,
                 predictedTc: cappedTc,
                 dataConfidence: "low",
                 ensembleScore: ensScore,
                 verificationStage: 0,
-                crystalStructure: struct.bravaisType,
-                notes: `[lattice-free: ${struct.bravaisType}, ${struct.atoms.length} atoms, vol/atom=${struct.volumePerAtom.toFixed(1)} A^3]`,
+                crystalStructure: protoMatch ? `${protoMatch.spaceGroup} (${protoMatch.crystalSystem})` : struct.bravaisType,
+                mlFeatures: protoMatch ? {
+                  matchedPrototype: protoMatch.prototype,
+                  spaceGroup: protoMatch.spaceGroup,
+                  crystalSystem: protoMatch.crystalSystem,
+                  dimensionality: protoMatch.dimensionality,
+                  latticeFreeBravais: struct.bravaisType,
+                } as any : undefined,
+                notes: `[${structLabel}, ${struct.atoms.length} atoms, vol/atom=${struct.volumePerAtom.toFixed(1)} A^3]`,
               }, "structure_diffusion");
               if (inserted) {
                 lfInserted++;
@@ -7475,14 +7486,26 @@ async function runLearningCycle() {
               if (gb.tcPredicted < 5) continue;
 
               const cappedTc = Math.round(gb.tcPredicted);
+              const evoProtoMatch = matchPrototype(normalized);
+              const evoLabel = evoProtoMatch
+                ? `${evoProtoMatch.prototype} (rediscovered via evo-${evoStruct.generationMethod})`
+                : `evo-${evoStruct.generationMethod}: ${evoStruct.bravaisType}`;
               const inserted = await insertCandidateWithStabilityCheck({
                 formula: normalized,
                 predictedTc: cappedTc,
                 dataConfidence: "low",
                 ensembleScore: Math.min(0.9, gb.score),
                 verificationStage: 0,
-                crystalStructure: evoStruct.bravaisType,
-                notes: `[evo-${evoStruct.generationMethod}: ${evoStruct.bravaisType}, ${evoStruct.atoms.length} atoms, vol/atom=${evoStruct.volumePerAtom.toFixed(1)} A^3]`,
+                crystalStructure: evoProtoMatch ? `${evoProtoMatch.spaceGroup} (${evoProtoMatch.crystalSystem})` : evoStruct.bravaisType,
+                mlFeatures: evoProtoMatch ? {
+                  matchedPrototype: evoProtoMatch.prototype,
+                  spaceGroup: evoProtoMatch.spaceGroup,
+                  crystalSystem: evoProtoMatch.crystalSystem,
+                  dimensionality: evoProtoMatch.dimensionality,
+                  evoBravais: evoStruct.bravaisType,
+                  evoMethod: evoStruct.generationMethod,
+                } as any : undefined,
+                notes: `[${evoLabel}, ${evoStruct.atoms.length} atoms, vol/atom=${evoStruct.volumePerAtom.toFixed(1)} A^3]`,
               }, "structure_diffusion");
               if (inserted) {
                 evoInserted++;
@@ -7582,7 +7605,7 @@ async function runLearningCycle() {
             ? ((strategy.performanceSignals?.familyStats as any)?.[currentExploitFamily]?.maxTc ?? 0)
             : 0;
 
-          const exploreProbability = 0.15;
+          const exploreProbability = engineTempo === "exploring" ? 0.3 : engineTempo === "excited" ? 0.05 : 0.15;
           const shouldRandomExplore = Math.random() < exploreProbability;
           const underExplored = strategy.performanceSignals?.underExplored as string[] | undefined;
 

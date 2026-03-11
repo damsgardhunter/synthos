@@ -716,11 +716,12 @@ export function runEvolutionaryGeneration(count: number = 10): GeneratedStructur
     return [];
   }
 
+  const effectiveCount = Math.min(count, 50);
   evoGeneration++;
   const offspring: GeneratedStructure[] = [];
-  const maxAttempts = count * 5;
+  const maxAttempts = effectiveCount * 5;
 
-  for (let attempt = 0; attempt < maxAttempts && offspring.length < count; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts && offspring.length < effectiveCount; attempt++) {
     let child: GeneratedStructure | null = null;
 
     if (Math.random() < 0.6 || evoPopulation.length < 4) {
