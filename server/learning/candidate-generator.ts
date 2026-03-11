@@ -1105,15 +1105,34 @@ export function runMassiveGeneration(
     protoWeights.slice(0, i + 1).reduce((s, w) => s + w, 0) / protoWeightSum
   );
 
-  for (let i = 0; i < 150; i++) {
+  const slotMedianRadii = PROTO_TEMPLATES.map(p =>
+    p.slots.map(slotGroup => {
+      const radii = slotGroup.map(el => getElementData(el)?.atomicRadius ?? 130).sort((a, b) => a - b);
+      return radii[Math.floor(radii.length / 2)];
+    })
+  );
+
+  for (let i = 0; i < 200; i++) {
+    if (allGenerated.size >= MAX_FORMULAS) break;
     const r = Math.random();
     let protoIdx = protoCDF.findIndex(c => r <= c);
     if (protoIdx < 0) protoIdx = PROTO_TEMPLATES.length - 1;
     const proto = PROTO_TEMPLATES[protoIdx];
+    const medians = slotMedianRadii[protoIdx];
     const chosen: string[] = [];
-    for (const slotGroup of proto.slots) {
-      chosen.push(slotGroup[Math.floor(Math.random() * slotGroup.length)]);
+    let radiusOk = true;
+    for (let si = 0; si < proto.slots.length; si++) {
+      const slotGroup = proto.slots[si];
+      const el = slotGroup[Math.floor(Math.random() * slotGroup.length)];
+      const elRadius = getElementData(el)?.atomicRadius ?? 130;
+      const median = medians[si];
+      if (median > 0 && Math.abs(elRadius - median) / median > 0.15) {
+        radiusOk = false;
+        break;
+      }
+      chosen.push(el);
     }
+    if (!radiusOk) continue;
     if (new Set(chosen).size < chosen.length) continue;
     const stoich = proto.stoichs[Math.floor(Math.random() * proto.stoichs.length)];
     let formula = "";
