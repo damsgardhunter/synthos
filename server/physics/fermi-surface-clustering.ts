@@ -53,6 +53,10 @@ export interface ClusterGuidance {
   suggestions: string[];
 }
 
+const FS_FEATURE_WEIGHTS = [
+  1.0, 1.0, 1.0, 1.2, 1.3, 1.8, 1.0, 1.2, 1.8,
+];
+
 function weightedCentroid(raw: number[]): number[] {
   return raw.map((v, i) => v * FS_FEATURE_WEIGHTS[i]);
 }
@@ -100,18 +104,6 @@ const clusterMembers: Map<string, FSClusterMember[]> = new Map();
 const novelClusterMembers: Map<string, FSClusterMember[]> = new Map();
 const assignmentCache: Map<string, ClusterAssignment> = new Map();
 let novelClusterCount = 0;
-
-const FS_FEATURE_WEIGHTS = [
-  1.0,
-  1.0,
-  1.0,
-  1.2,
-  1.3,
-  1.8,
-  1.0,
-  1.2,
-  1.8,
-];
 
 function fsResultToVector(fs: FermiSurfaceResult): number[] {
   const raw = [

@@ -105,6 +105,7 @@ export interface ReactionNetworkResult {
   formula: string;
   formationEnergy: number;
   energyAboveHull: number;
+  hullApproximationNoise: number;
   reactionStabilityScore: number;
   metastableLifetime: string;
   metastableLifetimeLog10s: number;
@@ -475,8 +476,9 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0,
     });
   }
 
-  for (let i = 0; i < stableCompetitors.length && i < 5; i++) {
-    for (let j = i + 1; j < stableCompetitors.length && j < 5; j++) {
+  const pairLimit = Math.min(stableCompetitors.length, 5);
+  for (let i = 0; i < pairLimit; i++) {
+    for (let j = i + 1; j < pairLimit; j++) {
       const compA = stableCompetitors[i];
       const compB = stableCompetitors[j];
       const elsA = parseFormulaElements(compA.formula);
@@ -514,24 +516,80 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0,
     }
   }
 
+  if (elements.length >= 4) {
+    const tripletLimit = Math.min(stableCompetitors.length, 4);
+    for (let i = 0; i < tripletLimit; i++) {
+      for (let j = i + 1; j < tripletLimit; j++) {
+        for (let k = j + 1; k < tripletLimit; k++) {
+          const compA = stableCompetitors[i];
+          const compB = stableCompetitors[j];
+          const compC = stableCompetitors[k];
+          const elsA = parseFormulaElements(compA.formula);
+          const elsB = parseFormulaElements(compB.formula);
+          const elsC = parseFormulaElements(compC.formula);
+          const combined = new Set([...elsA, ...elsB, ...elsC]);
+          if (elements.every(e => combined.has(e))) {
+            const products = [compA.formula, compB.formula, compC.formula];
+            const key = [...products].sort().join("+");
+            if (seenProductSets.has(key)) continue;
+            seenProductSets.add(key);
+
+            const productEnergy = compA.energy + compB.energy + compC.energy;
+            const reactionEnergy = productEnergy - formationEnergy;
+            if (reactionEnergy < 0) {
+              const mechanism = classifyDecompositionMechanism(elements, products);
+              const barrier = estimateReactionBarrier(Math.abs(reactionEnergy), elements, counts, pressureGpa, mechanism);
+              const { probability: prob, lifetimeLog10s } = computeDecompositionProbability(barrier);
+              globalMinLifetimeLog10s = Math.min(globalMinLifetimeLog10s, lifetimeLog10s);
+              pathways.push({
+                products,
+                reactionEnergy: Math.round(reactionEnergy * 10000) / 10000,
+                barrier,
+                probability: prob,
+                mechanism,
+              });
+              edges.push({
+                from: formula,
+                to: products,
+                energy: reactionEnergy,
+                barrier,
+                type: mechanism,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
   pathways.sort((a, b) => a.reactionEnergy - b.reactionEnergy);
 
   const metastability = assessMetastability(formula, energyAboveHull);
 
   const decompositionComplexity = computeDecompositionComplexity(elements, pathways, edges);
 
+  const hullNoiseEstimate = estimateHullApproximationNoise(elements, competingFormulas.length);
+
   const reactionStabilityScore = computeReactionStabilityScore(
     formationEnergy,
     energyAboveHull,
     pathways,
-    decompositionComplexity
+    decompositionComplexity,
+    hullNoiseEstimate
   );
 
   let stabilityVerdict: string;
+  const hullConfidenceTag = hullNoiseEstimate > 0.03
+    ? " (approx. hull, confidence reduced)"
+    : "";
   if (energyAboveHull <= 0.005) {
-    stabilityVerdict = "thermodynamically stable (on convex hull)";
+    if (hullNoiseEstimate > 0.02) {
+      stabilityVerdict = "near-hull within sampling uncertainty";
+    } else {
+      stabilityVerdict = "thermodynamically stable (on convex hull)";
+    }
   } else if (energyAboveHull <= 0.05) {
-    stabilityVerdict = "near-hull, likely synthesizable";
+    stabilityVerdict = "near-hull, likely synthesizable" + hullConfidenceTag;
   } else if (metastability.isMetastable) {
     stabilityVerdict = `metastable (barrier=${metastability.kineticBarrier.toFixed(3)} eV, lifetime=${metastability.estimatedLifetime})`;
   } else if (energyAboveHull <= 0.2) {
@@ -544,6 +602,7 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0,
     formula,
     formationEnergy: Math.round(formationEnergy * 10000) / 10000,
     energyAboveHull: Math.round(energyAboveHull * 10000) / 10000,
+    hullApproximationNoise: Math.round(hullNoiseEstimate * 10000) / 10000,
     reactionStabilityScore,
     metastableLifetime: metastability.estimatedLifetime,
     metastableLifetimeLog10s: Math.round(globalMinLifetimeLog10s * 100) / 100,
@@ -607,11 +666,27 @@ function computeDecompositionComplexity(
   return Math.round(score * 1000) / 1000;
 }
 
+function estimateHullApproximationNoise(elements: string[], competingPhaseCount: number): number {
+  const nElem = elements.length;
+  const stoichCombinationsInFullHull = nElem <= 2
+    ? 5
+    : nElem === 3
+      ? 30
+      : nElem === 4
+        ? 150
+        : Math.pow(nElem, 3) * 2;
+  const sampledFraction = Math.min(1.0, competingPhaseCount / stoichCombinationsInFullHull);
+  const missingPhasePenalty = (1 - sampledFraction) * 0.05 * Math.sqrt(nElem);
+  const baseNoise = nElem <= 2 ? 0.005 : nElem === 3 ? 0.015 : nElem === 4 ? 0.03 : 0.05;
+  return Math.round(Math.min(0.15, baseNoise + missingPhasePenalty) * 10000) / 10000;
+}
+
 function computeReactionStabilityScore(
   formationEnergy: number,
   energyAboveHull: number,
   pathways: DecompositionPathway[],
-  decompositionComplexity: number
+  decompositionComplexity: number,
+  hullNoise: number = 0
 ): number {
   let score = 1.0;
 
@@ -622,6 +697,11 @@ function computeReactionStabilityScore(
   }
 
   score -= Math.min(0.3, energyAboveHull * 3);
+
+  if (energyAboveHull < hullNoise * 2) {
+    const uncertaintyPenalty = Math.min(0.1, hullNoise * 1.5);
+    score -= uncertaintyPenalty;
+  }
 
   if (pathways.length > 0) {
     const minBarrier = Math.min(...pathways.map(p => p.barrier));
