@@ -87,6 +87,7 @@ export interface HydrogenPercolationResult {
   largestClusterSize: number;
   largestClusterFraction: number;
   percolates3D: boolean;
+  percolationConfidence: number;
   cutoffAngstrom: number;
 }
 
@@ -221,10 +222,10 @@ export function checkHydrogenPercolation(
   const hCount = hAtoms.length;
 
   if (hCount === 0) {
-    return { hAtomCount: 0, clusterCount: 0, largestClusterSize: 0, largestClusterFraction: 0, percolates3D: false, cutoffAngstrom: cutoff };
+    return { hAtomCount: 0, clusterCount: 0, largestClusterSize: 0, largestClusterFraction: 0, percolates3D: false, percolationConfidence: 0, cutoffAngstrom: cutoff };
   }
   if (hCount === 1) {
-    return { hAtomCount: 1, clusterCount: 1, largestClusterSize: 1, largestClusterFraction: 1, percolates3D: false, cutoffAngstrom: cutoff };
+    return { hAtomCount: 1, clusterCount: 1, largestClusterSize: 1, largestClusterFraction: 1, percolates3D: false, percolationConfidence: 0, cutoffAngstrom: cutoff };
   }
 
   const uf = unionFind(hCount);
@@ -324,16 +325,30 @@ export function checkHydrogenPercolation(
   const largestClusterFraction = largestClusterSize / hCount;
 
   let percolates3D = false;
+  let axesSpanned = 0;
   for (const root of roots) {
     const spans = finalSpans[root];
-    if (spans && spans[0] && spans[1] && spans[2]) {
+    if (!spans) continue;
+    let rootAxes = 0;
+    if (spans[0]) rootAxes++;
+    if (spans[1]) rootAxes++;
+    if (spans[2]) rootAxes++;
+    if (rootAxes > axesSpanned) axesSpanned = rootAxes;
+    if (rootAxes === 3) {
       percolates3D = true;
       break;
     }
   }
 
-  if (!percolates3D && largestClusterFraction >= 0.9 && hCount >= 4) {
-    percolates3D = true;
+  let percolationConfidence: number;
+  if (percolates3D) {
+    percolationConfidence = Math.min(1.0, 0.7 + 0.3 * largestClusterFraction);
+  } else if (axesSpanned === 2) {
+    percolationConfidence = Math.min(0.6, 0.3 + 0.3 * largestClusterFraction);
+  } else if (largestClusterFraction >= 0.9 && hCount >= 4) {
+    percolationConfidence = 0.4 * largestClusterFraction;
+  } else {
+    percolationConfidence = 0.1 * largestClusterFraction;
   }
 
   return {
@@ -342,6 +357,7 @@ export function checkHydrogenPercolation(
     largestClusterSize,
     largestClusterFraction: Number(largestClusterFraction.toFixed(4)),
     percolates3D,
+    percolationConfidence: Number(percolationConfidence.toFixed(4)),
     cutoffAngstrom: cutoff,
   };
 }
@@ -816,13 +832,13 @@ export function analyzeHydrogenNetwork(
   let percolationDetail: HydrogenPercolationResult | undefined;
   if (isHydride && atomPositions && latticeParams && atomPositions.length > 0) {
     const percResult = checkHydrogenPercolation(atomPositions, latticeParams, undefined, estimatedPressure);
-    percolates = percResult.percolates3D;
+    percolates = percResult.percolates3D || percResult.percolationConfidence >= 0.5;
     geometricPercolationUsed = true;
     percolationDetail = percResult;
-    if (percolates) {
+    if (percResult.percolates3D) {
       networkPercolation = Math.max(networkPercolation, percResult.largestClusterFraction);
     } else {
-      networkPercolation = Math.min(networkPercolation, percResult.largestClusterFraction * 0.5);
+      networkPercolation = percResult.percolationConfidence * percResult.largestClusterFraction;
     }
   } else {
     const percolationMetric = coordination * hFraction;
