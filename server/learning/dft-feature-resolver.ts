@@ -14,6 +14,7 @@ import { runXTBEnrichment, isDFTAvailable } from "../dft/qe-dft-engine";
 import type { XTBEnrichedFeatures, PhononStability } from "../dft/qe-dft-engine";
 import type { FiniteDisplacementPhononResult } from "../dft/phonon-calculator";
 import { estimatePhononStability } from "./crystal-prototypes";
+import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 
 export type DFTSource = "dft-mp" | "dft-aflow" | "dft-xtb" | "analytical";
 
@@ -182,17 +183,31 @@ function computeAnalyticalFallbacks(formula: string): {
   const density = estimateDensity(elements, counts, totalAtoms);
 
   const debyeWeighted = getCompositionWeightedProperty(counts, "debyeTemperature");
-  let debyeTemp = debyeWeighted && debyeWeighted > 0 ? debyeWeighted : 300;
-  if ((!debyeWeighted || debyeWeighted <= 0) && bulkModulus > 0 && density > 0) {
+  let debyeTemp = debyeWeighted && debyeWeighted > 0 ? debyeWeighted : 0;
+  if (debyeTemp <= 0 && bulkModulus > 0 && density > 0) {
     debyeTemp = 41.6 * Math.sqrt(bulkModulus / density);
-    debyeTemp = Math.max(50, Math.min(2500, debyeTemp));
   }
+  debyeTemp = Math.max(50, Math.min(2500, debyeTemp || 300));
 
   let formationEnergy = 0;
   if (elements.length >= 2) {
-    const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
-    const enSpread = Math.max(...enValues) - Math.min(...enValues);
-    formationEnergy = -0.5 * enSpread;
+    if (metalFrac > 0.8 && enSpread < 1.0) {
+      try {
+        formationEnergy = computeMiedemaFormationEnergy(formula);
+      } catch {
+        formationEnergy = -0.5 * enSpread;
+      }
+    } else {
+      formationEnergy = -0.5 * enSpread;
+      if (metalFrac > 0.5 && enSpread < 0.5) {
+        try {
+          const miedema = computeMiedemaFormationEnergy(formula);
+          if (Math.abs(miedema) > Math.abs(formationEnergy)) {
+            formationEnergy = miedema;
+          }
+        } catch {}
+      }
+    }
   }
 
   let dosAtFermi: number | null = null;
@@ -205,16 +220,19 @@ function computeAnalyticalFallbacks(formula: string): {
     }
   }
 
+  const dosPerAtom = dosAtFermi != null ? dosAtFermi / totalAtoms : null;
+
   const omegaLog = 0.5 * debyeTemp;
 
   const averagePhononFreq = estimateAveragePhononFreq(debyeTemp, avgMass);
 
   let lambda: number | null = null;
-  if (isMetallic && dosAtFermi != null && dosAtFermi > 0) {
+  if (isMetallic && dosPerAtom != null && dosPerAtom > 0) {
     const hopfieldEta = getCompositionWeightedProperty(counts, "mcMillanHopfieldEta");
     if (hopfieldEta && hopfieldEta > 0) {
-      const omega2 = (debyeTemp * 0.695) ** 2;
-      lambda = (dosAtFermi * hopfieldEta) / (avgMass * omega2) * 1e4;
+      const omega2 = Math.max(1, (debyeTemp * 0.695) ** 2);
+      const avgMassPerAtom = avgMass > 0 ? avgMass : 50;
+      lambda = (dosPerAtom * hopfieldEta) / (avgMassPerAtom * omega2) * 1e4;
       lambda = Math.min(Math.max(lambda, 0.1), 5.0);
     }
   }
@@ -280,6 +298,23 @@ function estimateBulkModulus(elements: string[], counts: Record<string, number>)
   return 100;
 }
 
+function estimatePackingFraction(elements: string[], counts: Record<string, number>, totalAtoms: number): number {
+  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "Te", "I", "Xe"];
+  const metalElements = elements.filter(e => !nonmetals.includes(e));
+  const metalFrac = metalElements.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+  const hCount = counts["H"] || 0;
+  const hFrac = hCount / totalAtoms;
+
+  if (hFrac > 0.6) return 0.45;
+  if (metalFrac >= 0.9) {
+    const hasFCC = metalElements.some(e => ["Cu", "Al", "Ni", "Ag", "Au", "Pt", "Pd", "Pb", "Ca", "Sr"].includes(e));
+    return hasFCC ? 0.74 : 0.68;
+  }
+  if (metalFrac >= 0.5) return 0.70;
+  if (elements.length >= 4) return 0.60;
+  return 0.65;
+}
+
 function estimateDensity(elements: string[], counts: Record<string, number>, totalAtoms: number): number {
   let totalMass = 0;
   let totalVolume = 0;
@@ -292,7 +327,7 @@ function estimateDensity(elements: string[], counts: Record<string, number>, tot
     totalVolume += (4 / 3) * Math.PI * Math.pow(r_cm, 3) * n;
   }
   if (totalVolume <= 0) return 5.0;
-  const packingFraction = 0.68;
+  const packingFraction = estimatePackingFraction(elements, counts, totalAtoms);
   const cellVolume = totalVolume / packingFraction;
   const amu_to_g = 1.66054e-24;
   const density = (totalMass * amu_to_g) / cellVolume;
