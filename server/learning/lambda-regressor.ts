@@ -171,8 +171,14 @@ function extractLambdaFeatures(formula: string, pressure: number = 0): Record<st
     const data = getElementData(el);
     if (data) {
       const frac = (counts[el] || 1) / totalAtoms;
-      const dEl = data.electronConfiguration?.match(/\dd(\d+)/);
-      if (dEl) dElectrons += parseInt(dEl[1]) * frac;
+      const z = data.atomicNumber;
+      let dCount = 0;
+      if (z >= 21 && z <= 30) dCount = z - 20;
+      else if (z >= 39 && z <= 48) dCount = z - 38;
+      else if (z >= 57 && z <= 71) dCount = Math.min(z - 56, 10);
+      else if (z >= 72 && z <= 80) dCount = z - 70;
+      else if (z >= 89 && z <= 103) dCount = Math.min(z - 88, 10);
+      dElectrons += dCount * frac;
       totalValenceElectrons += data.valenceElectrons * frac;
     }
   }
@@ -334,23 +340,51 @@ function trainLambdaGBM(
   const basePrediction = y.reduce((s, v) => s + v, 0) / n;
   const predictions = new Array(n).fill(basePrediction);
   const trees: LambdaTreeNode[] = [];
-  const allIndices = Array.from({ length: n }, (_, i) => i);
   const preSorted = nFeatures > 0 ? preSortFeatures(X, n, nFeatures) : undefined;
+
+  const valSize = Math.max(2, Math.floor(n * 0.2));
+  const shuffled = Array.from({ length: n }, (_, i) => i);
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const valIdx = new Set(shuffled.slice(0, valSize));
+  const trainIdx = shuffled.slice(valSize);
+  const valPreds = new Array(n).fill(basePrediction);
+
+  let bestValMSE = Infinity;
+  let patience = 10;
+  let staleRounds = 0;
 
   for (let t = 0; t < nEstimators; t++) {
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
-    const tree = buildTree(X, residuals, allIndices, 0, maxDepth, preSorted);
+    const tree = buildTree(X, residuals, trainIdx, 0, maxDepth, preSorted);
     if (typeof tree === "number") break;
 
     trees.push(tree);
 
     for (let i = 0; i < n; i++) {
-      predictions[i] += learningRate * predictTree(tree, X[i]);
+      const update = learningRate * predictTree(tree, X[i]);
+      predictions[i] += update;
+      valPreds[i] += update;
     }
 
-    const mse = y.reduce((s, yi, i) => s + (yi - predictions[i]) ** 2, 0) / n;
-    if (mse < 0.001) break;
+    let valSSE = 0;
+    let valCount = 0;
+    for (const vi of valIdx) {
+      valSSE += (y[vi] - valPreds[vi]) ** 2;
+      valCount++;
+    }
+    const valMSE = valCount > 0 ? valSSE / valCount : 0;
+
+    if (valMSE < bestValMSE - 1e-6) {
+      bestValMSE = valMSE;
+      staleRounds = 0;
+    } else {
+      staleRounds++;
+      if (staleRounds >= patience) break;
+    }
   }
 
   return { trees, learningRate, basePrediction, trainedAt: Date.now() };
@@ -364,33 +398,44 @@ function predictWithModel(model: LambdaGBModel, x: number[]): number {
   return Math.max(0, pred);
 }
 
-function bootstrapSample(X: number[][], y: number[]): { X: number[][]; y: number[] } {
+function bootstrapSample(X: number[][], y: number[]): { X: number[][]; y: number[]; oobIndices: number[] } {
   const n = X.length;
   const size = Math.floor(n * 0.8);
   const bsX: number[][] = [];
   const bsY: number[] = [];
+  const selectedSet = new Set<number>();
   for (let i = 0; i < size; i++) {
     const idx = Math.floor(Math.random() * n);
     bsX.push(X[idx]);
     bsY.push(y[idx]);
+    selectedSet.add(idx);
   }
-  return { X: bsX, y: bsY };
+  const oobIndices: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (!selectedSet.has(i)) oobIndices.push(i);
+  }
+  return { X: bsX, y: bsY, oobIndices };
 }
 
 function buildTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
   const X: number[][] = [];
   const y: number[] = [];
   const formulas: string[] = [];
+  const keyIndex = new Map<string, number>();
 
   for (const entry of SUPERCON_TRAINING_DATA) {
     if (entry.lambda == null || entry.lambda <= 0) continue;
     try {
-      const features = extractLambdaFeatures(entry.formula, entry.pressureGPa ?? 0);
+      const pressure = entry.pressureGPa ?? 0;
+      const features = extractLambdaFeatures(entry.formula, pressure);
       const vec = featuresToArray(features);
       if (vec.some(v => !Number.isFinite(v))) continue;
+      const key = `${entry.formula}@${Math.round(pressure)}GPa`;
+      const idx = X.length;
       X.push(vec);
       y.push(entry.lambda);
       formulas.push(entry.formula);
+      keyIndex.set(key, idx);
     } catch {
       continue;
     }
@@ -399,8 +444,9 @@ function buildTrainingData(): { X: number[][]; y: number[]; formulas: string[] }
   const physicsResults = getAllPhysicsResults();
   for (const result of physicsResults) {
     if (result.lambda <= 0) continue;
-    const existing = formulas.indexOf(result.formula);
-    if (existing !== -1 && result.tier !== "full-dft") continue;
+    const key = `${result.formula}@${Math.round(result.pressure)}GPa`;
+    const existing = keyIndex.get(key);
+    if (existing !== undefined && result.tier !== "full-dft") continue;
 
     try {
       const features = extractLambdaFeatures(result.formula, result.pressure);
@@ -408,13 +454,15 @@ function buildTrainingData(): { X: number[][]; y: number[]; formulas: string[] }
       const vec = featuresToArray(features);
       if (vec.some(v => !Number.isFinite(v))) continue;
 
-      if (existing !== -1) {
+      if (existing !== undefined) {
         X[existing] = vec;
         y[existing] = result.lambda;
       } else {
+        const idx = X.length;
         X.push(vec);
         y.push(result.lambda);
         formulas.push(result.formula);
+        keyIndex.set(key, idx);
       }
     } catch {
       continue;
