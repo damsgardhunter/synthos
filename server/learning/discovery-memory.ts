@@ -141,6 +141,24 @@ function dominantValue<T>(arr: T[]): T {
   return best;
 }
 
+function tcWeightedDominant(items: { value: string; tc: number }[]): string {
+  if (items.length === 0) return "";
+  const weights = new Map<string, number>();
+  for (const item of items) {
+    weights.set(item.value, (weights.get(item.value) || 0) + Math.max(1, item.tc));
+  }
+  let best = items[0].value;
+  let bestWeight = 0;
+  const entries = Array.from(weights.entries());
+  for (const [val, w] of entries) {
+    if (w > bestWeight) {
+      bestWeight = w;
+      best = val;
+    }
+  }
+  return best;
+}
+
 const ELEMENT_CLASS_MAP: Record<string, string> = {
   Li: "alkali", Na: "alkali", K: "alkali", Rb: "alkali", Cs: "alkali",
   Be: "alkaline-earth", Mg: "alkaline-earth", Ca: "alkaline-earth", Sr: "alkaline-earth", Ba: "alkaline-earth",
@@ -254,10 +272,11 @@ export class DiscoveryMemory {
     const existing = this.records.find(r => r.formula === formula);
     if (existing) {
       if (tc > existing.tc) {
+        const oldFingerprint = existing.fingerprint;
         existing.tc = tc;
         existing.fingerprint = fingerprint;
         existing.timestamp = Date.now();
-        this.rebuildClusters();
+        this.updateExistingRecordCluster(existing, oldFingerprint);
       }
       return existing;
     }
@@ -577,17 +596,63 @@ export class DiscoveryMemory {
     }
   }
 
-  private updateClusterMetadata(cluster: PatternCluster): void {
-    cluster.dominantFamily = dominantValue(cluster.members.map(m => m.fingerprint.family));
-    cluster.dominantOrbital = dominantValue(cluster.members.map(m => m.fingerprint.orbitalCharacter));
-    cluster.dominantPairing = dominantValue(cluster.members.map(m => m.fingerprint.pairingChannel));
+  private updateExistingRecordCluster(record: DiscoveryRecord, oldFingerprint: PatternFingerprint): void {
+    const oldVec = fingerprintToVector(oldFingerprint);
+    const newVec = fingerprintToVector(record.fingerprint);
 
-    const elCounts = countElements(cluster.members);
-    const sortedEls = Array.from(elCounts.entries())
+    for (const cluster of this.clusters) {
+      const memberIdx = cluster.members.findIndex(m => m.id === record.id);
+      if (memberIdx === -1) continue;
+
+      const n = cluster.members.length;
+      cluster.avgTc = cluster.members.reduce((s, m) => s + m.tc, 0) / n;
+
+      if (n === 1) {
+        cluster.centroid = newVec;
+      } else {
+        cluster.centroid = cluster.centroid.map((c, i) =>
+          (c * n - oldVec[i] + newVec[i]) / n
+        );
+      }
+
+      const newSim = vectorCosineSimilarity(newVec, cluster.centroid);
+      if (newSim < CLUSTER_SIMILARITY_THRESHOLD && n > 1) {
+        cluster.members.splice(memberIdx, 1);
+        cluster.avgTc = cluster.members.reduce((s, m) => s + m.tc, 0) / cluster.members.length;
+        cluster.centroid = averageVectors(cluster.members.map(m => fingerprintToVector(m.fingerprint)));
+        this.updateClusterMetadata(cluster);
+        this.updateClusters(record);
+      } else {
+        this.updateClusterMetadata(cluster);
+      }
+      return;
+    }
+
+    this.updateClusters(record);
+  }
+
+  private updateClusterMetadata(cluster: PatternCluster): void {
+    cluster.dominantFamily = tcWeightedDominant(
+      cluster.members.map(m => ({ value: m.fingerprint.family, tc: m.tc }))
+    );
+    cluster.dominantOrbital = tcWeightedDominant(
+      cluster.members.map(m => ({ value: m.fingerprint.orbitalCharacter, tc: m.tc }))
+    );
+    cluster.dominantPairing = tcWeightedDominant(
+      cluster.members.map(m => ({ value: m.fingerprint.pairingChannel, tc: m.tc }))
+    );
+
+    const elTcWeights = new Map<string, number>();
+    for (const m of cluster.members) {
+      const els = parseFormulaElements(m.formula);
+      for (const el of els) {
+        elTcWeights.set(el, (elTcWeights.get(el) || 0) + m.tc);
+      }
+    }
+    cluster.dominantElements = Array.from(elTcWeights.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([el]) => el);
-    cluster.dominantElements = sortedEls;
   }
 
   private rebuildClusters(): void {
