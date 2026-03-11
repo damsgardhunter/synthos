@@ -467,8 +467,18 @@ function encodePairingSegment(formula: string): number[] {
   }
 }
 
+function normalizeCacheKey(formula: string): string {
+  let key = formula;
+  for (let i = 0; i < key.length; i++) {
+    const idx = "₀₁₂₃₄₅₆₇₈₉".indexOf(key[i]);
+    if (idx >= 0) key = key.slice(0, i) + String(idx) + key.slice(i + 1);
+  }
+  return key.replace(/\s+/g, "");
+}
+
 export function encodeGenome(formula: string): MaterialGenome {
-  const cached = genomeCache.get(formula);
+  const cacheKey = normalizeCacheKey(formula);
+  const cached = genomeCache.get(cacheKey);
   if (cached) return cached;
 
   const elements = parseFormulaElements(formula);
@@ -508,6 +518,9 @@ export function encodeGenome(formula: string): MaterialGenome {
   else if (of.p >= of.s && of.p >= of.f) dominantOrbital = "p";
   else if (of.f >= of.s) dominantOrbital = "f";
 
+  const family = classifyFamily(formula);
+  const dimScore = computeDimensionalityScore(formula);
+
   const genome: MaterialGenome = {
     formula,
     vector,
@@ -522,10 +535,10 @@ export function encodeGenome(formula: string): MaterialGenome {
       pairing: pairingVec,
     },
     metadata: {
-      family: classifyFamily(formula),
+      family,
       metallicity: electronic.metallicity,
       lambda: coupling.lambda,
-      dimensionalityScore: computeDimensionalityScore(formula),
+      dimensionalityScore: dimScore,
       dominantOrbital,
       encodedAt: Date.now(),
     },
@@ -535,7 +548,7 @@ export function encodeGenome(formula: string): MaterialGenome {
     const oldest = genomeCache.keys().next().value;
     if (oldest) genomeCache.delete(oldest);
   }
-  genomeCache.set(formula, genome);
+  genomeCache.set(cacheKey, genome);
 
   return genome;
 }

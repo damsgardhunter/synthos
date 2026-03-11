@@ -1,0 +1,243 @@
+
+function computeMiedemaFormationEnergy(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  if (elements.length < 2) return 0;
+
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  const fractions: Record<string, number> = {};
+  for (const el of elements) {
+    fractions[el] = counts[el] / totalAtoms;
+  }
+
+  let deltaH = 0;
+  for (let i = 0; i < elements.length; i++) {
+    for (let j = i + 1; j < elements.length; j++) {
+      const dA = ELEMENTAL_DATA[elements[i]];
+      const dB = ELEMENTAL_DATA[elements[j]];
+      if (!dA || !dB) continue;
+
+      const phiA = dA.miedemaPhiStar;
+      const phiB = dB.miedemaPhiStar;
+      const nwsA = dA.miedemaNws13;
+      const nwsB = dB.miedemaNws13;
+      const vA = dA.miedemaV23;
+      const vB = dB.miedemaV23;
+
+      if (phiA == null || phiB == null || nwsA == null || nwsB == null || vA == null || vB == null) continue;
+
+      const deltaPhi = phiA - phiB;
+      const deltaNws = nwsA - nwsB;
+      const nwsAvg = (nwsA + nwsB) / 2;
+      const fAB = 2 * fractions[elements[i]] * fractions[elements[j]];
+      const vAvg = (vA * fractions[elements[i]] + vB * fractions[elements[j]]) / (fractions[elements[i]] + fractions[elements[j]]);
+      const interfaceEnergy = -14.1 * deltaPhi * deltaPhi + 9.4 * deltaNws * deltaNws;
+      deltaH += fAB * vAvg * interfaceEnergy / (nwsAvg * nwsAvg);
+    }
+  }
+
+  return deltaH / totalAtoms;
+}
+
+function computeGibbsFreeEnergy(formula: string, temperature: number): number {
+  const dH = computeMiedemaFormationEnergy(formula);
+  const elements = parseFormulaElements(formula);
+  const nElements = elements.length;
+  const configEntropy = nElements > 1 ? 8.314e-3 * Math.log(nElements) * nElements : 0;
+  const dG = dH - temperature * configEntropy * 1e-3;
+  return dG;
+}
+
+function computeKineticBarrier(elements: string[], temperature: number): number {
+  let maxMp = 0;
+  for (const el of elements) {
+    const mp = getMeltingPoint(el);
+    if (mp !== null && mp > maxMp) maxMp = mp;
+  }
+  const tammTemperature = maxMp > 0 ? 0.57 * maxMp : 1200;
+  const barrier = Math.max(0.1, (tammTemperature - temperature) / tammTemperature);
+  return Math.max(0, Math.min(3.0, barrier * 2.0));
+}
+
+function computeArrheniusRate(barrierEv: number, temperature: number): number {
+  const kB = 8.617e-5;
+  if (temperature <= 0) return 0;
+  const exponent = -barrierEv / (kB * temperature);
+  return Math.exp(Math.max(-50, Math.min(50, exponent)));
+}
+
+function computeMetastableQuenchFeasibility(formula: string, pressure: number): number {
+  const elements = parseFormulaElements(formula);
+  const hasH = elements.includes("H");
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  const hFrac = (counts["H"] || 0) / totalAtoms;
+
+  let feasibility = 0.7;
+
+  if (hasH && hFrac > 0.5) {
+    feasibility -= 0.3;
+    if (pressure > 100) feasibility += 0.15;
+  }
+
+  if (pressure > 50) {
+    feasibility -= 0.1;
+    if (pressure > 200) feasibility -= 0.2;
+  }
+
+  const dH = computeMiedemaFormationEnergy(formula);
+  if (dH > 0.5) feasibility -= 0.2;
+  if (dH < -0.5) feasibility += 0.1;
+
+  return Math.max(0, Math.min(1, feasibility));
+}
+
+function computeThermodynamicScoring(formula: string, steps: ReactionStep[]): ThermodynamicScoring {
+  const elements = parseFormulaElements(formula);
+  const maxTemp = Math.max(...steps.map(s => s.temperature), 300);
+  const maxPressure = Math.max(...steps.map(s => s.pressure), 0);
+
+  const gibbs = computeGibbsFreeEnergy(formula, maxTemp);
+  const barrier = computeKineticBarrier(elements, maxTemp);
+  const rate = computeArrheniusRate(barrier, maxTemp);
+  const quench = computeMetastableQuenchFeasibility(formula, maxPressure);
+
+  const gibbsFactor = gibbs < 0 ? 1.0 : Math.max(0, 1.0 - gibbs * 0.5);
+  const barrierFactor = Math.max(0, 1.0 - barrier * 0.3);
+  const rateFactor = Math.min(1.0, rate * 10);
+  const overallFeasibility = Math.max(0, Math.min(1, (gibbsFactor * 0.35 + barrierFactor * 0.25 + rateFactor * 0.2 + quench * 0.2)));
+
+  return {
+    gibbsFreeEnergy: Number(gibbs.toFixed(4)),
+    kineticBarrier: Number(barrier.toFixed(4)),
+    arrheniusRate: Number(rate.toFixed(6)),
+    metastableQuenchFeasibility: Number(quench.toFixed(4)),
+    overallFeasibility: Number(overallFeasibility.toFixed(4)),
+  };
+}
+
+function generateSolidStateRoute(formula: string, elements: string[], counts: Record<string, number>): SynthesisRoute {
+  const precursors = selectPrecursors(elements, "solid-state");
+  let maxMp = 0;
+  for (const el of elements) {
+    const mp = getMeltingPoint(el);
+    if (mp !== null && mp > maxMp) maxMp = mp;
+  }
+  const sinterTemp = Math.round(Math.max(800, Math.min(1600, 0.57 * maxMp)));
+  const calcineTemp = Math.round(sinterTemp * 0.7);
+
+  const steps: ReactionStep[] = [
+    {
+      stepNumber: 1,
+      reactants: precursors,
+      products: ["mixed powder"],
+      temperature: 25,
+      pressure: 0,
+      atmosphere: "air",
+      reactionType: "mixing",
+      duration: "4 hours",
+      notes: "Ball mill precursor powders with zirconia media at 300 rpm",
+    },
+    {
+      stepNumber: 2,
+      reactants: ["mixed powder"],
+      products: ["calcined powder"],
+      temperature: calcineTemp,
+      pressure: 0,
+      atmosphere: elements.includes("O") ? "flowing O2" : "Ar",
+      reactionType: "calcination",
+      duration: "12 hours",
+      notes: `Ramp at 5 C/min to ${calcineTemp} C, hold 12h`,
+    },
+    {
+      stepNumber: 3,
+      reactants: ["calcined powder"],
+      products: ["reground powder"],
+      temperature: 25,
+      pressure: 0,
+      atmosphere: "air",
+      reactionType: "grinding",
+      duration: "2 hours",
+      notes: "Regrind calcined powder in agate mortar",
+    },
+    {
+      stepNumber: 4,
+      reactants: ["reground powder"],
+      products: ["pellet"],
+      temperature: 25,
+      pressure: 200,
+      atmosphere: "air",
+      reactionType: "pressing",
+      duration: "30 minutes",
+      notes: "Uniaxial press at 200 MPa into 13mm pellet",
+    },
+    {
+      stepNumber: 5,
+      reactants: ["pellet"],
+      products: [formula],
+      temperature: sinterTemp,
+      pressure: 0,
+      atmosphere: elements.includes("O") ? "flowing O2 at 50 mL/min" : "Ar/5% H2",
+      reactionType: "sintering",
+      duration: "24 hours",
+      notes: `Ramp at 3 C/min to ${sinterTemp} C, hold 24h, furnace cool`,
+    },
+  ];
+
+  const thermo = computeThermodynamicScoring(formula, steps);
+  const equipment = ["Planetary ball mill", "Box furnace", "Uniaxial press", "Agate mortar", "Tube furnace"];
+
+  return {
+    routeId: `ss-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    routeName: "Solid-State Reaction",
+    method: "solid-state",
+    steps,
+    precursors,
+    thermodynamics: thermo,
+    totalDuration: `~48 hours (including cooling)`,
+    maxTemperature: sinterTemp,
+    maxPressure: 200,
+    difficulty: sinterTemp > 1400 ? "hard" : sinterTemp > 1000 ? "moderate" : "easy",
+    equipment,
+    feasibilityScore: thermo.overallFeasibility,
+    notes: `Standard solid-state synthesis at ${sinterTemp} C`,
+  };
+}
+
+function generateArcMeltingRoute(formula: string, elements: string[]): SynthesisRoute {
+  const precursors = selectPrecursors(elements, "arc-melting");
+
+  const steps: ReactionStep[] = [
+    {
+      stepNumber: 1,
+      reactants: precursors,
+      products: ["weighed elements"],
+      temperature: 25,
+      pressure: 0,
+      atmosphere: "argon glovebox",
+      reactionType: "preparation",
+      duration: "1 hour",
+      notes: "Weigh stoichiometric amounts in argon glovebox",
+    },
+    {
+      stepNumber: 2,
+      reactants: ["weighed elements"],
+      products: ["arc-melted button"],
+      temperature: 3000,
+      pressure: 0,
+      atmosphere: "ultra-high purity Ar",
+      reactionType: "arc-melting",
+      duration: "5 minutes per melt, 4 flips",
+      notes: "Arc-melt on water-cooled Cu hearth, flip and remelt 4x for homogeneity",
+    },
+    {
+      stepNumber: 3,
+      reactants: ["arc-melted button"],
+      products: [formula],
+      temperature: 900,
+      pressure: 0,
+      atmosphere: "sealed quartz tube under Ar",
+      reactionType: "annealing",
+      duration: "7 days",
+      notes: "Wrap in Ta foil, seal in evacuated quartz tube, anneal at 900 C for 7 days",
+    },
