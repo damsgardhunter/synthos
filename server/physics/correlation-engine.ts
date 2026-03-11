@@ -1,5 +1,6 @@
 import {
   parseFormulaElements,
+  parseFormulaCounts,
 } from "../learning/physics-engine";
 import {
   getHubbardU,
@@ -56,9 +57,25 @@ const CUPRATE_ELEMENTS = ["Cu", "Ba", "La", "Y", "Sr", "Ca", "Bi", "Tl", "Hg"];
 const FE_PNICTIDE_ELEMENTS = ["Fe", "As", "Se", "Te", "P"];
 const HEAVY_FERMION_ELEMENTS = ["Ce", "U", "Yb", "Pr", "Sm"];
 
-function detectMaterialClass(elements: string[]): string[] {
+function detectMaterialClass(elements: string[], formula?: string): string[] {
   const syms = elements;
   const patterns: string[] = [];
+
+  if (formula) {
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+    const hCount = counts["H"] || 0;
+    const hFraction = hCount / totalAtoms;
+    const metalAtoms = syms.filter(e => isTransitionMetal(e) || isRareEarth(e))
+      .reduce((s, e) => s + (counts[e] || 0), 0);
+    const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
+
+    if (hFraction > 0.7 || hRatio >= 6) {
+      patterns.push("superhydride-phonon-dominated");
+    } else if (hFraction > 0.4 && hRatio >= 3) {
+      patterns.push("hydride-phonon-enhanced");
+    }
+  }
 
   const hasCu = syms.includes("Cu");
   const hasO = syms.includes("O");
@@ -135,6 +152,14 @@ export function computeCorrelationScore(
   return 0.3 * uNorm + 0.3 * dosNorm + 0.2 * fbNorm + 0.2 * nNorm;
 }
 
+function normalizeWeights(
+  spin: number, orbital: number, phonon: number,
+): [number, number, number] {
+  const total = spin + orbital + phonon;
+  if (total <= 0) return [0.1, 0.1, 0.8];
+  return [spin / total, orbital / total, phonon / total];
+}
+
 export function adjustPairingWeights(
   correlationScore: number,
   regime: CorrelationRegime,
@@ -144,6 +169,36 @@ export function adjustPairingWeights(
   let orbitalFluctuationWeight: number;
   let phononWeight: number;
   let effectiveLambdaModifier: number;
+
+  if (materialClass.includes("superhydride-phonon-dominated")) {
+    spinFluctuationWeight = 0.03;
+    orbitalFluctuationWeight = 0.02;
+    phononWeight = 0.95;
+    effectiveLambdaModifier = 1.0 + correlationScore * 0.1;
+
+    const [ns, no, np] = normalizeWeights(spinFluctuationWeight, orbitalFluctuationWeight, phononWeight);
+    return {
+      spinFluctuationWeight: ns,
+      orbitalFluctuationWeight: no,
+      phononWeight: np,
+      effectiveLambdaModifier,
+    };
+  }
+
+  if (materialClass.includes("hydride-phonon-enhanced")) {
+    spinFluctuationWeight = 0.08;
+    orbitalFluctuationWeight = 0.07;
+    phononWeight = 0.85;
+    effectiveLambdaModifier = 1.0 + correlationScore * 0.15;
+
+    const [ns, no, np] = normalizeWeights(spinFluctuationWeight, orbitalFluctuationWeight, phononWeight);
+    return {
+      spinFluctuationWeight: ns,
+      orbitalFluctuationWeight: no,
+      phononWeight: np,
+      effectiveLambdaModifier,
+    };
+  }
 
   switch (regime) {
     case "Mott-proximate":
@@ -174,30 +229,30 @@ export function adjustPairingWeights(
   }
 
   if (materialClass.includes("cuprate") || materialClass.includes("Mott")) {
-    spinFluctuationWeight = Math.min(0.7, spinFluctuationWeight + 0.1);
-    phononWeight = Math.max(0.1, phononWeight - 0.1);
+    const boostFactor = 1.25;
+    spinFluctuationWeight *= boostFactor;
+    phononWeight *= (1.0 / boostFactor);
   }
 
   if (materialClass.includes("Fe-pnictide") || materialClass.includes("spin-fluctuation")) {
-    spinFluctuationWeight = Math.min(0.65, spinFluctuationWeight + 0.15);
-    orbitalFluctuationWeight = Math.min(0.3, orbitalFluctuationWeight + 0.05);
-    phononWeight = Math.max(0.1, phononWeight - 0.15);
+    const spinBoost = 1.4;
+    const orbBoost = 1.2;
+    spinFluctuationWeight *= spinBoost;
+    orbitalFluctuationWeight *= orbBoost;
+    phononWeight *= (1.0 / (spinBoost * 0.5 + orbBoost * 0.5));
   }
 
   if (materialClass.includes("heavy-fermion") || materialClass.includes("Kondo")) {
-    orbitalFluctuationWeight = Math.min(0.4, orbitalFluctuationWeight + 0.1);
+    orbitalFluctuationWeight *= 1.5;
     effectiveLambdaModifier *= 0.8;
   }
 
-  const total = spinFluctuationWeight + orbitalFluctuationWeight + phononWeight;
-  spinFluctuationWeight /= total;
-  orbitalFluctuationWeight /= total;
-  phononWeight /= total;
+  const [ns, no, np] = normalizeWeights(spinFluctuationWeight, orbitalFluctuationWeight, phononWeight);
 
   return {
-    spinFluctuationWeight,
-    orbitalFluctuationWeight,
-    phononWeight,
+    spinFluctuationWeight: ns,
+    orbitalFluctuationWeight: no,
+    phononWeight: np,
     effectiveLambdaModifier,
   };
 }
@@ -225,7 +280,7 @@ export function estimateCorrelationEffects(
 
   const correlationScore = computeCorrelationScore(UoverW, dosAtEF, flatBandScore, nestingScore);
   const regimeResult = detectCorrelatedRegime(UoverW, dosAtEF, flatBandScore, nestingScore);
-  const materialPatterns = detectMaterialClass(elements);
+  const materialPatterns = detectMaterialClass(elements, formula);
 
   const primaryClass = materialPatterns[0] || "conventional";
   const pairingWeights = adjustPairingWeights(correlationScore, regimeResult.regime, primaryClass);
