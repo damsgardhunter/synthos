@@ -788,6 +788,13 @@ function findBestSplitForSubset(
   };
 }
 
+const MAX_TREE_DEPTH = 10;
+
+function leafValue(residuals: number[], indices: number[]): number {
+  if (indices.length === 0) return 0;
+  return indices.reduce((s, i) => s + residuals[i], 0) / indices.length;
+}
+
 function buildTree(
   X: number[][],
   residuals: number[],
@@ -796,9 +803,9 @@ function buildTree(
   maxDepth: number,
   minSamples: number
 ): TreeNode | number {
-  if (depth >= maxDepth || indices.length < minSamples) {
-    const sum = indices.reduce((s, i) => s + residuals[i], 0);
-    return sum / indices.length;
+  const clampedMaxDepth = Math.min(maxDepth, MAX_TREE_DEPTH);
+  if (depth >= clampedMaxDepth || indices.length < minSamples) {
+    return leafValue(residuals, indices);
   }
 
   const nFeatures = X[0].length;
@@ -820,15 +827,14 @@ function buildTree(
   }
 
   if (bestFeature === -1) {
-    const sum = indices.reduce((s, i) => s + residuals[i], 0);
-    return sum / indices.length;
+    return leafValue(residuals, indices);
   }
 
   return {
     featureIndex: bestFeature,
     threshold: bestThreshold,
-    left: buildTree(X, residuals, bestLeftIdx, depth + 1, maxDepth, minSamples),
-    right: buildTree(X, residuals, bestRightIdx, depth + 1, maxDepth, minSamples),
+    left: buildTree(X, residuals, bestLeftIdx, depth + 1, clampedMaxDepth, minSamples),
+    right: buildTree(X, residuals, bestRightIdx, depth + 1, clampedMaxDepth, minSamples),
   };
 }
 
