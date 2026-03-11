@@ -147,7 +147,7 @@ import { getParameterSpace } from "./synthesis/synthesis-variables";
 import { getSynthesisOptimizerStats } from "./synthesis/synthesis-condition-optimizer";
 import {
   getSimulatorStats, simulateSynthesisEffects, defaultSynthesisVector,
-  optimizeSynthesisForFixedMaterial, optimizeSynthesisPath,
+  optimizeSynthesisForFixedMaterial, optimizeSynthesisPath, computeSynthesisVerdict,
 } from "./physics/synthesis-simulator";
 import { getSynthesisLearningStats, querySimilarSynthesis } from "./synthesis/synthesis-learning-db";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "./physics/defect-engine";
@@ -2160,6 +2160,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ simulator, learning });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch synthesis simulator stats", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/synthesis-verdict/:formula", generalLimiter, (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      if (!formula || formula.length < 1 || formula.length > 100 || !/^[A-Za-z0-9.]+$/.test(formula)) {
+        return res.status(400).json({ error: "Invalid formula" });
+      }
+      const materialClass = (req.query.class as string) || "default";
+      const targetTc = parseFloat(req.query.targetTc as string) || 100;
+      const verdict = computeSynthesisVerdict(formula, materialClass, Math.max(1, Math.min(targetTc, 500)));
+      res.json(verdict);
+    } catch (e: any) {
+      res.status(500).json({ error: "Synthesis verdict failed", detail: e.message?.slice(0, 200) });
     }
   });
 

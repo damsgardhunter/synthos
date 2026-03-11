@@ -567,6 +567,11 @@ export function optimizeSynthesisPath(
   const maxCR = Math.max(...steps.map(s => s.coolingRate));
   const overallComplexity = maxP / 100 + maxCR / 1000 + steps.length / 5;
 
+  resolveAtmosphereConflicts(steps);
+  for (const step of steps) {
+    resolveQuenchMedia(step);
+  }
+
   const feasibility = checkSynthesisFeasibility({
     temperature: Math.max(...steps.map(s => Math.max(s.temperature, s.annealTemp))),
     pressure: maxP,
@@ -585,6 +590,61 @@ export function optimizeSynthesisPath(
     overallComplexity,
     feasibilityScore: feasibility.feasibilityScore,
   };
+}
+
+function resolveAtmosphereConflicts(steps: SynthesisStep[]): void {
+  const REACTIVE_ATMOSPHERES = new Set(["oxygen", "hydrogen", "nitrogen"]);
+  const LOW_PRESSURE_ATMOSPHERES = new Set(["vacuum"]);
+
+  for (let i = 1; i < steps.length; i++) {
+    const prev = steps[i - 1];
+    const curr = steps[i];
+
+    const prevIsVacuum = LOW_PRESSURE_ATMOSPHERES.has(prev.atmosphere);
+    const currIsReactive = REACTIVE_ATMOSPHERES.has(curr.atmosphere) && curr.pressure > 5;
+    const prevIsReactive = REACTIVE_ATMOSPHERES.has(prev.atmosphere) && prev.pressure > 5;
+    const currIsVacuum = LOW_PRESSURE_ATMOSPHERES.has(curr.atmosphere);
+
+    if ((prevIsVacuum && currIsReactive) || (prevIsReactive && currIsVacuum)) {
+      const prevIsCooling = prev.method === "quench" || prev.coolingRate > 10;
+      if (!prevIsCooling) {
+        curr.atmosphere = "argon";
+        curr.notes += " [atmosphere adjusted: inert purge required between vacuum and reactive gas]";
+      }
+    }
+
+    if (prev.atmosphere === "hydrogen" && curr.atmosphere === "oxygen") {
+      curr.atmosphere = "argon";
+      curr.notes += " [atmosphere adjusted: H2/O2 transition requires inert purge]";
+    }
+    if (prev.atmosphere === "oxygen" && curr.atmosphere === "hydrogen") {
+      curr.atmosphere = "argon";
+      curr.notes += " [atmosphere adjusted: O2/H2 transition requires inert purge]";
+    }
+  }
+}
+
+function resolveQuenchMedia(step: SynthesisStep): void {
+  if (step.method !== "quench") return;
+
+  if (step.coolingRate >= 5000) {
+    step.notes = step.notes.replace(/\bquench\b/i, "liquid-nitrogen quench");
+    if (!step.notes.toLowerCase().includes("liquid")) {
+      step.notes += " (liquid nitrogen)";
+    }
+  } else if (step.coolingRate >= 500) {
+    if (!step.notes.toLowerCase().includes("water") && !step.notes.toLowerCase().includes("liquid")) {
+      step.notes += " (water quench)";
+    }
+  } else if (step.coolingRate >= 10) {
+    if (!step.notes.toLowerCase().includes("oil") && !step.notes.toLowerCase().includes("air")) {
+      step.notes += " (air cool)";
+    }
+  } else {
+    if (!step.notes.toLowerCase().includes("furnace")) {
+      step.notes += " (furnace cool)";
+    }
+  }
 }
 
 export function mutateSynthesisPath(path: SynthesisPath): SynthesisPath {
@@ -622,6 +682,11 @@ export function mutateSynthesisPath(path: SynthesisPath): SynthesisPath {
     const idx = Math.floor(Math.random() * newSteps.length);
     newSteps.splice(idx, 1);
     newSteps.forEach((s, i) => { s.order = i + 1; });
+  }
+
+  resolveAtmosphereConflicts(newSteps);
+  for (const step of newSteps) {
+    resolveQuenchMedia(step);
   }
 
   const totalDuration = newSteps.reduce((s, st) => s + st.duration, 0);
@@ -751,6 +816,71 @@ export function getSimulatorStats() {
     constraintViolations: simulatorStats.constraintViolations,
     feasibilityBreakdown: { ...simulatorStats.feasibilityBreakdown },
     modeBreakdown: { ...simulatorStats.modeBreakdown },
+  };
+}
+
+export interface SynthesisVerdict {
+  formula: string;
+  materialClass: string;
+  feasibility: FeasibilityResult;
+  synthesisPath: SynthesisPath;
+  synthesisVector: SynthesisVector;
+  synthesisEffects: SynthesisEffects;
+  overallScore: number;
+  verdict: "promising" | "challenging" | "impractical";
+  summary: string;
+}
+
+export function computeSynthesisVerdict(
+  formula: string,
+  materialClass: string,
+  targetTc: number = 100
+): SynthesisVerdict {
+  const sv = defaultSynthesisVector(materialClass);
+  const effects = simulateSynthesisEffects(formula, materialClass, sv);
+  const feasibility = checkSynthesisFeasibility(sv, materialClass);
+  const path = optimizeSynthesisPath(formula, materialClass, targetTc);
+  const cost = computeSynthesisCost(sv, targetTc);
+  const complexity = computeSynthesisComplexity(sv, materialClass);
+
+  let overallScore = feasibility.feasibilityScore * 0.35
+    + path.feasibilityScore * 0.25
+    + effects.phasePurity * 0.20
+    + Math.max(0, 1 - complexity / 5) * 0.10
+    + Math.max(0, 1 - cost / 1000) * 0.10;
+
+  overallScore = Math.max(0, Math.min(1, overallScore));
+
+  let verdict: "promising" | "challenging" | "impractical";
+  let summary: string;
+
+  if (overallScore >= 0.6 && feasibility.labFeasible) {
+    verdict = "promising";
+    summary = `${formula} is synthesizable via ${path.steps[0]?.method ?? "standard"} route. `
+      + `Estimated ${path.steps.length} steps, ${path.totalDuration.toFixed(1)}h total. `
+      + `Phase purity ${(effects.phasePurity * 100).toFixed(0)}%.`;
+  } else if (overallScore >= 0.35 || feasibility.industrialFeasible) {
+    verdict = "challenging";
+    const violations = feasibility.constraintViolations.slice(0, 2).join("; ");
+    summary = `${formula} synthesis is feasible but challenging. `
+      + (violations ? `Issues: ${violations}. ` : "")
+      + `Requires specialized equipment (${feasibility.classification}).`;
+  } else {
+    verdict = "impractical";
+    summary = `${formula} synthesis is currently impractical. `
+      + `${feasibility.constraintViolations[0] ?? "Extreme conditions required"}.`;
+  }
+
+  return {
+    formula,
+    materialClass,
+    feasibility,
+    synthesisPath: path,
+    synthesisVector: sv,
+    synthesisEffects: effects,
+    overallScore: Math.round(overallScore * 1000) / 1000,
+    verdict,
+    summary,
   };
 }
 
