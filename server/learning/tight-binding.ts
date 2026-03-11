@@ -67,6 +67,7 @@ export interface TBDOS {
   dos: number[];
   dosAtFermi: number;
   totalStates: number;
+  uncertaintyMultiplier: number;
 }
 
 function parseFormulaElements(formula: string): string[] {
@@ -153,8 +154,9 @@ function getHighSymmetryPath(latticeType: string): { points: number[][]; labels:
           [1/3, 1/3, 0],
           [0.5, 0, 0],
           [0, 0, 0],
+          [0, 0, 0.5],
         ],
-        labels: ["Γ", "K", "M", "Γ"],
+        labels: ["Γ", "K", "M", "Γ", "A"],
       };
     case "bcc":
       return {
@@ -179,6 +181,19 @@ function getHighSymmetryPath(latticeType: string): { points: number[][]; labels:
         ],
         labels: ["Γ", "X", "W", "K", "Γ", "L"],
       };
+    case "tetragonal":
+      return {
+        points: [
+          [0, 0, 0],
+          [0.5, 0, 0],
+          [0.5, 0.5, 0],
+          [0, 0, 0],
+          [0, 0, 0.5],
+          [0.5, 0, 0.5],
+          [0.5, 0.5, 0.5],
+        ],
+        labels: ["Γ", "X", "M", "Γ", "Z", "R", "A"],
+      };
     default:
       return {
         points: [
@@ -199,8 +214,13 @@ function guessLatticeType(elements: string[]): string {
     if (["Fe", "Cr", "V", "Nb", "Mo", "W", "Ta", "Na", "K", "Li", "Ba"].includes(el)) return "bcc";
     if (["Cu", "Ag", "Au", "Al", "Ni", "Pd", "Pt", "Pb", "Ca", "Sr"].includes(el)) return "fcc";
     if (["Ti", "Zr", "Hf", "Co", "Zn", "Mg", "Be", "Y", "Sc"].includes(el)) return "hexagonal";
+    if (["Sn", "In"].includes(el)) return "tetragonal";
   }
   if (elements.includes("B") && elements.some(e => isTransitionMetal(e) || isRareEarth(e))) return "hexagonal";
+  if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3) return "tetragonal";
+  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se"))) return "tetragonal";
+  if (elements.length >= 3 && elements.includes("O") &&
+    elements.some(e => ["La", "Sr", "Ba", "Ca", "Y", "Nd", "Pr"].includes(e))) return "tetragonal";
   if (elements.length >= 3 && elements.includes("O")) return "cubic";
   return "cubic";
 }
@@ -504,7 +524,7 @@ function solveEigenvaluesSymmetric(H: number[][], n: number): number[] {
 
   const stEigenvalues = solveTridiagonalEigenvalues(tridiag, offTridiag, n);
 
-  return stEigenvalues.sort((a, b) => a - b);
+  return stEigenvalues;
 }
 
 function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: number): number[] {
@@ -529,7 +549,12 @@ function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: numbe
     let count = 0;
     let d = 1.0;
     for (let i = 0; i < n; i++) {
-      d = (diag[i] - x) - (i > 0 && d !== 0 ? (offDiag[i - 1] * offDiag[i - 1]) / d : 0);
+      if (i > 0) {
+        const dSafe = Math.abs(d) < 1e-12 ? (d >= 0 ? 1e-12 : -1e-12) : d;
+        d = (diag[i] - x) - (offDiag[i - 1] * offDiag[i - 1]) / dSafe;
+      } else {
+        d = diag[i] - x;
+      }
       if (d < 0) count++;
     }
     return count;
@@ -855,7 +880,7 @@ export function computeTightBindingDOS(bands: TBBandStructure): TBDOS {
   }
 
   if (allEnergies.length === 0) {
-    return { energies: [], dos: [], dosAtFermi: 0, totalStates: 0 };
+    return { energies: [], dos: [], dosAtFermi: 0, totalStates: 0, uncertaintyMultiplier: 1.0 };
   }
 
   const eMin = Math.min(...allEnergies);
@@ -893,11 +918,17 @@ export function computeTightBindingDOS(bands: TBBandStructure): TBDOS {
 
   const totalStates = dos.reduce((s, d) => s + d * dE, 0);
 
+  const tbConf = bands.tbConfidence;
+  const uncertaintyMultiplier = tbConf >= 0.7 ? 1.0
+    : tbConf >= 0.4 ? 1.0 + (0.7 - tbConf)
+    : 2.0;
+
   return {
     energies,
     dos,
     dosAtFermi: Number(dosAtFermi.toFixed(6)),
     totalStates: Number(totalStates.toFixed(4)),
+    uncertaintyMultiplier,
   };
 }
 
