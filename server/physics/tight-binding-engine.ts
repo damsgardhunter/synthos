@@ -491,8 +491,14 @@ function diagonalizeHamiltonian(H: number[][]): number[] {
   function countBelow(x: number): number {
     let count = 0;
     let d = 1.0;
+    const STURM_EPS = 1e-14;
     for (let i = 0; i < n; i++) {
-      d = (diag[i] - x) - (i > 0 && d !== 0 ? (offDiag[i - 1] * offDiag[i - 1]) / d : 0);
+      const offSq = i > 0 ? offDiag[i - 1] * offDiag[i - 1] : 0;
+      if (Math.abs(d) < STURM_EPS) {
+        d = (diag[i] - x) - offSq / (d >= 0 ? STURM_EPS : -STURM_EPS);
+      } else {
+        d = (diag[i] - x) - offSq / d;
+      }
       if (d < 0) count++;
     }
     return count;
@@ -678,8 +684,8 @@ export interface FermiProperties {
 }
 
 export function computeFermiProperties(formula: string, customLatticeVectors?: number[][]): FermiProperties {
-  const bandResult = computeBandStructure(formula, 20, customLatticeVectors);
-  const dosResult = computeDOS(formula, 8, 150, customLatticeVectors);
+  const bandResult = computeBandStructure(formula, 40, customLatticeVectors);
+  const dosResult = computeDOS(formula, 10, 200, customLatticeVectors);
 
   const fermiE = bandResult.fermiEnergy;
 
@@ -695,6 +701,16 @@ export function computeFermiProperties(formula: string, customLatticeVectors?: n
       }
     }
     dosAtFermi = dosResult.dos[bestIdx] ?? 0;
+
+    if (bestIdx > 0 && bestIdx < dosResult.dos.length - 1) {
+      const w0 = 1.0 / (1.0 + bestDist * 10);
+      const d1 = Math.abs(dosResult.energies[bestIdx - 1] - fermiE);
+      const d2 = Math.abs(dosResult.energies[bestIdx + 1] - fermiE);
+      const w1 = 1.0 / (1.0 + d1 * 10);
+      const w2 = 1.0 / (1.0 + d2 * 10);
+      const wSum = w0 + w1 + w2;
+      dosAtFermi = (dosResult.dos[bestIdx] * w0 + dosResult.dos[bestIdx - 1] * w1 + dosResult.dos[bestIdx + 1] * w2) / wSum;
+    }
   }
 
   let effectiveMass = 1.0;
