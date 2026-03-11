@@ -154,7 +154,7 @@ function getAverageLatticeConstant(formula: string): number {
   return count > 0 ? sum : 4.0;
 }
 
-function getAverageBulkModulus(formula: string): number {
+function getAverageBulkModulus(formula: string, pressureGpa: number = 0): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = getTotalAtoms(counts);
@@ -167,7 +167,9 @@ function getAverageBulkModulus(formula: string): number {
       count++;
     }
   }
-  return count > 0 ? sum : 100;
+  const B0 = count > 0 ? sum : 30;
+  const Bprime = 4.0;
+  return B0 + Bprime * pressureGpa;
 }
 
 const BULK_WORK_FUNCTIONS: Record<string, number> = {
@@ -223,6 +225,20 @@ function estimateWorkFunction(formula: string): number {
   return sum;
 }
 
+function estimateMetallicity(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = getTotalAtoms(counts);
+  let metalFrac = 0;
+  for (const el of elements) {
+    if (isTransitionMetal(el) || isRareEarth(el) || isActinide(el) ||
+        ["Li","Na","K","Rb","Cs","Be","Mg","Ca","Sr","Ba","Al","Ga","In","Tl","Sn","Pb","Bi"].includes(el)) {
+      metalFrac += (counts[el] || 1) / totalAtoms;
+    }
+  }
+  return metalFrac;
+}
+
 function computeChargeTransfer(layerA: string, layerB: string): ChargeTransferAnalysis {
   const enA = getAverageElectronegativity(layerA);
   const enB = getAverageElectronegativity(layerB);
@@ -232,28 +248,56 @@ function computeChargeTransfer(layerA: string, layerB: string): ChargeTransferAn
   const enMismatch = Math.abs(enA - enB);
   const wfMismatch = Math.abs(wfA - wfB);
 
+  const metalA = estimateMetallicity(layerA);
+  const metalB = estimateMetallicity(layerB);
+  const bothMetallic = metalA > 0.6 && metalB > 0.6;
+
   let chargeTransferDirection: string;
   let dopingType: "electron" | "hole" | "neutral";
-  if (enA > enB + 0.1) {
-    chargeTransferDirection = `${layerB} → ${layerA}`;
-    dopingType = "electron";
-  } else if (enB > enA + 0.1) {
-    chargeTransferDirection = `${layerA} → ${layerB}`;
-    dopingType = "hole";
+
+  if (bothMetallic) {
+    if (wfA > wfB + 0.1) {
+      chargeTransferDirection = `${layerB} → ${layerA}`;
+      dopingType = "electron";
+    } else if (wfB > wfA + 0.1) {
+      chargeTransferDirection = `${layerA} → ${layerB}`;
+      dopingType = "hole";
+    } else {
+      chargeTransferDirection = "minimal";
+      dopingType = "neutral";
+    }
   } else {
-    chargeTransferDirection = "minimal";
-    dopingType = "neutral";
+    if (enA > enB + 0.1) {
+      chargeTransferDirection = `${layerB} → ${layerA}`;
+      dopingType = "electron";
+    } else if (enB > enA + 0.1) {
+      chargeTransferDirection = `${layerA} → ${layerB}`;
+      dopingType = "hole";
+    } else {
+      chargeTransferDirection = "minimal";
+      dopingType = "neutral";
+    }
   }
 
-  const transferredChargeDensity = Math.min(1.0, (enMismatch * 0.3 + wfMismatch * 0.15));
+  const enWeight = bothMetallic ? 0.15 : 0.3;
+  const wfWeight = bothMetallic ? 0.35 : 0.15;
+  const transferredChargeDensity = Math.min(1.0, (enMismatch * enWeight + wfMismatch * wfWeight));
 
-  const chargeTransferScore = Math.min(1.0,
-    enMismatch * 0.25 +
-    wfMismatch * 0.1 +
+  const enScoreWeight = bothMetallic ? 0.10 : 0.25;
+  const wfScoreWeight = bothMetallic ? 0.25 : 0.10;
+  let chargeTransferScore = Math.min(1.0,
+    enMismatch * enScoreWeight +
+    wfMismatch * wfScoreWeight +
     transferredChargeDensity * 0.4 +
     (enMismatch > 0.5 ? 0.15 : 0) +
     (wfMismatch > 1.0 ? 0.1 : 0)
   );
+
+  if (chargeTransferScore > 0.8) {
+    const excess = chargeTransferScore - 0.8;
+    const stabilityPenalty = excess * 1.5;
+    chargeTransferScore = chargeTransferScore - stabilityPenalty;
+  }
 
   return {
     electronegativityMismatch: Number(enMismatch.toFixed(4)),
@@ -265,13 +309,13 @@ function computeChargeTransfer(layerA: string, layerB: string): ChargeTransferAn
   };
 }
 
-function computeInterfacePhonons(layerA: string, layerB: string): InterfacePhononAnalysis {
+function computeInterfacePhonons(layerA: string, layerB: string, pressureGpa: number = 0): InterfacePhononAnalysis {
   const tdA = getAverageDebyeTemp(layerA);
   const tdB = getAverageDebyeTemp(layerB);
   const massA = getAverageMassForFormula(layerA);
   const massB = getAverageMassForFormula(layerB);
-  const bulkA = getAverageBulkModulus(layerA);
-  const bulkB = getAverageBulkModulus(layerB);
+  const bulkA = getAverageBulkModulus(layerA, pressureGpa);
+  const bulkB = getAverageBulkModulus(layerB, pressureGpa);
 
   const soundVelocityA = Math.sqrt(bulkA * 1e9 / (massA * 1.66e-27)) * 1e-3;
   const soundVelocityB = Math.sqrt(bulkB * 1e9 / (massB * 1.66e-27)) * 1e-3;
@@ -312,14 +356,14 @@ function computeInterfacePhonons(layerA: string, layerB: string): InterfacePhono
   };
 }
 
-function computeEpitaxialStrain(layerA: string, layerB: string): EpitaxialStrainAnalysis {
+function computeEpitaxialStrain(layerA: string, layerB: string, pressureGpa: number = 0): EpitaxialStrainAnalysis {
   const latticeA = getAverageLatticeConstant(layerA);
   const latticeB = getAverageLatticeConstant(layerB);
 
   const latticeMismatch = Math.abs(latticeA - latticeB) / Math.max(latticeA, latticeB, 0.01);
 
-  const bulkA = getAverageBulkModulus(layerA);
-  const bulkB = getAverageBulkModulus(layerB);
+  const bulkA = getAverageBulkModulus(layerA, pressureGpa);
+  const bulkB = getAverageBulkModulus(layerB, pressureGpa);
   const avgBulk = (bulkA + bulkB) / 2;
 
   const criticalThickness = latticeMismatch > 0.001
@@ -439,10 +483,10 @@ function matchKnownSystem(layerA: string, layerB: string): KnownInterfaceSystem 
   return null;
 }
 
-export function analyzeInterface(layerA: string, layerB: string): InterfaceAnalysis {
+export function analyzeInterface(layerA: string, layerB: string, pressureGpa: number = 0): InterfaceAnalysis {
   const chargeTransfer = computeChargeTransfer(layerA, layerB);
-  const phononCoupling = computeInterfacePhonons(layerA, layerB);
-  const epitaxialStrain = computeEpitaxialStrain(layerA, layerB);
+  const phononCoupling = computeInterfacePhonons(layerA, layerB, pressureGpa);
+  const epitaxialStrain = computeEpitaxialStrain(layerA, layerB, pressureGpa);
   const dimensionalConfinement = computeDimensionalConfinement(layerA, layerB);
 
   const knownMatch = matchKnownSystem(layerA, layerB);
