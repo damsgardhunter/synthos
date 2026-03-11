@@ -855,8 +855,11 @@ async function runDFTEnrichmentForCandidate(
       updates.decompositionEnergy = entry.formationEnergy;
     }
 
+    const dftWeight = entry.tier === "full-dft" ? 0.95
+      : entry.tier === "xtb" ? 0.70
+      : 0.80;
     const reconciledTc = entry.tc > 0
-      ? entry.tc * 0.7 + gb.tcPredicted * 0.3
+      ? entry.tc * dftWeight + gb.tcPredicted * (1 - dftWeight)
       : gb.tcPredicted;
     if (reconciledTc > 0) {
       updates.predictedTc = Math.round(reconciledTc * 10) / 10;
@@ -1297,11 +1300,15 @@ export async function runActiveLearningCycle(
   let dftSuccessCount = 0;
   let bestTcThisLoop = 0;
   let pipelineCrashCount = 0;
+  const enrichedFormulaPressures = new Set<string>();
 
   for (const ranked of selected) {
     const { candidate } = ranked;
     const isPressureTier = ranked.selectionTier === "pressure-exploration";
     const candidatePressure = ranked.targetPressureGpa ?? candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const fpKey = `${candidate.formula}@${candidatePressure}`;
+    if (enrichedFormulaPressures.has(fpKey)) continue;
+    enrichedFormulaPressures.add(fpKey);
     if (isPressureTier) session.pressureTierDftRuns++;
     const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure);
     if (enriched) {

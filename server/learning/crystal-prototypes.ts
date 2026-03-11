@@ -1064,7 +1064,72 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   {
-    name: "CoSn
+    name: "CoSn-B35",
+    spaceGroup: "P6/mmm",
+    latticeType: "hexagonal",
+    cOverA: 0.8,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "pnictogen-1" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.5, role: "pnictogen-2" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.0, role: "kagome-metal" },
+    ],
+    stoichiometryRatio: [1, 2, 3],
+    coordination: [12, 12, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Co", "Fe", "Ni", "Mn"].includes(e)) && elements.some(e => ["Sn", "Ge", "Sb"].includes(e));
+    },
+  },
+  {
+    name: "MgCu2-C15",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.125, y: 0.125, z: 0.125, role: "large-atom" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "small-atom-network" },
+    ],
+    stoichiometryRatio: [8, 16],
+    coordination: [16, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => isRareEarth(e) || ["Mg", "Ca", "Y", "Zr", "Hf", "Ti"].includes(e)) && elements.some(e => isTransitionMetal(e) || ["Al"].includes(e));
+    },
+  },
+  {
+    name: "Fe3C-Cementite",
+    spaceGroup: "Pnma",
+    latticeType: "orthorhombic",
+    cOverA: 1.5,
+    sites: [
+      { label: "A", x: 0.04, y: 0.25, z: 0.40, role: "metal-1" },
+      { label: "A", x: 0.18, y: 0.06, z: 0.33, role: "metal-2" },
+      { label: "B", x: 0.88, y: 0.25, z: 0.44, role: "carbon" },
+    ],
+    stoichiometryRatio: [12, 4],
+    coordination: [12, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.some(e => ["Fe", "Co", "Ni", "Cr", "Mn"].includes(e)) && elements.includes("C");
+    },
+  },
+  {
+    name: "AIB2-variant",
+    spaceGroup: "P-6m2",
+    latticeType: "hexagonal",
+    cOverA: 1.1,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal-1" },
+      { label: "B", x: 0.333, y: 0.667, z: 0.5, role: "metalloid-1" },
+      { label: "C", x: 0.667, y: 0.333, z: 0.5, role: "metalloid-2" },
+    ],
+    stoichiometryRatio: [1, 1, 1],
+    coordination: [12, 6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      return elements.some(e => isRareEarth(e) || isTransitionMetal(e)) && elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi"].includes(e));
+    },
+  },
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {
