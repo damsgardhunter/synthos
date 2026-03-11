@@ -38,6 +38,8 @@ export interface DOSSurrogateResult {
   flatBandIndicator: number;
   nestingScore: number;
   orbitalMixingAtFermi: number;
+  magneticRisk: boolean;
+  stonerParameter: number;
   predictionTier: "gnn-dos-head" | "physics-heuristic";
   wallTimeMs: number;
 }
@@ -50,6 +52,8 @@ export interface DOSPrefilterResult {
   dosAtFermi: number;
   flatBandIndicator: number;
   scFavorability: number;
+  magneticRisk: boolean;
+  stonerParameter: number;
 }
 
 interface DOSHeadWeights {
@@ -142,12 +146,18 @@ export function dosHeadForward(latentEmbedding: number[]): OrbitalDOS {
     const raw = vecAdd(matVecMul(weights.W_dos_orbital[orb], hidden), weights.b_dos_orbital[orb]);
     orbitalDOS[orb] = raw.map(v => {
       const sp = softplus(isFinite(v) ? v : 0);
-      return isFinite(sp) ? sp : 0;
+      const safe = isFinite(sp) ? sp : 0;
+      return Math.max(0, safe);
     });
 
     for (let i = 0; i < DOS_BINS; i++) {
       totalDOS[i] += orbitalDOS[orb][i];
     }
+  }
+
+  for (let i = 0; i < DOS_BINS; i++) {
+    totalDOS[i] = Math.max(0, totalDOS[i]);
+    if (!isFinite(totalDOS[i])) totalDOS[i] = 0;
   }
 
   const energyGrid = Array.from({ length: DOS_BINS }, (_, i) =>
@@ -557,6 +567,50 @@ function computeOrbitalMixing(dos: OrbitalDOS): number {
   return Math.min(1.0, mixing);
 }
 
+function computeStonerParameter(dos: OrbitalDOS): { magneticRisk: boolean; stonerParameter: number } {
+  const total = dos.dosAtFermi;
+  if (total < 0.05) return { magneticRisk: false, stonerParameter: 0 };
+
+  const dFrac = total > 0 ? dos.orbitalDOSAtFermi.d / total : 0;
+  const fFrac = total > 0 ? dos.orbitalDOSAtFermi.f / total : 0;
+
+  const STONER_I_D = 0.7;
+  const STONER_I_F = 0.5;
+
+  const effectiveDOS_d = dos.orbitalDOSAtFermi.d;
+  const effectiveDOS_f = dos.orbitalDOSAtFermi.f;
+
+  const stonerProduct_d = STONER_I_D * effectiveDOS_d;
+  const stonerProduct_f = STONER_I_F * effectiveDOS_f;
+  const stonerParameter = Math.max(stonerProduct_d, stonerProduct_f);
+
+  let magneticRisk = false;
+
+  if (stonerParameter > 0.8) {
+    magneticRisk = true;
+  }
+
+  if ((dFrac > 0.6 || fFrac > 0.5) && total > 0.5) {
+    const fermiIdx = dos.fermiIndex;
+    const nBins = dos.totalDOS.length;
+    const windowStart = Math.max(0, fermiIdx - 2);
+    const windowEnd = Math.min(nBins - 1, fermiIdx + 2);
+    let peakSharpness = 0;
+    for (let i = windowStart; i <= windowEnd; i++) {
+      const dVal = dos.orbitalDOS.d[i] + dos.orbitalDOS.f[i];
+      peakSharpness = Math.max(peakSharpness, dVal);
+    }
+    const globalAvgDF = dos.totalDOS.reduce((s, _, i) =>
+      s + dos.orbitalDOS.d[i] + dos.orbitalDOS.f[i], 0) / nBins;
+
+    if (globalAvgDF > 1e-8 && peakSharpness / globalAvgDF > 2.5) {
+      magneticRisk = true;
+    }
+  }
+
+  return { magneticRisk, stonerParameter: Number(stonerParameter.toFixed(4)) };
+}
+
 export function predictDOS(formula: string, latentEmbedding?: number[]): DOSSurrogateResult {
   const startTime = Date.now();
 
@@ -579,13 +633,19 @@ export function predictDOS(formula: string, latentEmbedding?: number[]): DOSSurr
 
   const isMetallic = orbitalDOS.dosAtFermi > 0.1;
 
-  const scFavorability = Math.min(1.0,
+  const stoner = computeStonerParameter(orbitalDOS);
+
+  let scFavorability = Math.min(1.0,
     0.25 * vhsScore +
     0.25 * (isMetallic ? Math.min(1.0, orbitalDOS.dosAtFermi) : 0) +
     0.18 * flatBandIndicator +
     0.12 * nestingScore +
     0.20 * orbitalMixingAtFermi
   );
+
+  if (stoner.magneticRisk) {
+    scFavorability *= 0.7;
+  }
 
   return {
     formula,
@@ -597,6 +657,8 @@ export function predictDOS(formula: string, latentEmbedding?: number[]): DOSSurr
     flatBandIndicator,
     nestingScore,
     orbitalMixingAtFermi,
+    magneticRisk: stoner.magneticRisk,
+    stonerParameter: stoner.stonerParameter,
     predictionTier: tier,
     wallTimeMs: Date.now() - startTime,
   };
@@ -619,6 +681,10 @@ export function dosPrefilter(formula: string, latentEmbedding?: number[]): DOSPr
     reason = `Low SC favorability: ${result.scFavorability.toFixed(3)}, no VHS near Fermi`;
   }
 
+  if (result.magneticRisk && pass) {
+    reason += ` [MAGNETIC WARNING: Stoner parameter=${result.stonerParameter.toFixed(3)}, high d/f DOS at EF — check spin-fluctuation competition]`;
+  }
+
   return {
     pass,
     score: result.scFavorability,
@@ -627,6 +693,8 @@ export function dosPrefilter(formula: string, latentEmbedding?: number[]): DOSPr
     dosAtFermi: result.orbitalDOS.dosAtFermi,
     flatBandIndicator: result.flatBandIndicator,
     scFavorability: result.scFavorability,
+    magneticRisk: result.magneticRisk,
+    stonerParameter: result.stonerParameter,
   };
 }
 
