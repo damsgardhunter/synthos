@@ -558,14 +558,19 @@ function trainGradientBoosting(
   const trees: TreeNode[] = [];
 
   const yVariance = trainY.reduce((s, yi) => s + (yi - basePrediction) ** 2, 0) / nTrain;
-  const mseThreshold = Math.max(1.0, 0.01 * yVariance);
+  const RESIDUAL_EPSILON = 1e-6;
+  const relativeConvergenceThreshold = Math.max(RESIDUAL_EPSILON, 0.001 * yVariance);
 
   let bestValMSE = Infinity;
   let valIncreaseCount = 0;
   const MAX_VAL_INCREASE = 3;
+  let prevTrainMSE = yVariance;
 
   for (let iter = 0; iter < nEstimators; iter++) {
     const residuals = trainY.map((yi, i) => yi - trainPredictions[i]);
+
+    const residualMSE = residuals.reduce((s, r) => s + r * r, 0) / nTrain;
+    if (residualMSE < RESIDUAL_EPSILON) break;
 
     const tree = buildTree(trainX, residuals, allTrainIndices, 0, maxDepth, 12);
     if (typeof tree === "number") break;
@@ -577,7 +582,11 @@ function trainGradientBoosting(
     }
 
     const trainMSE = trainY.reduce((s, yi, i) => s + (yi - trainPredictions[i]) ** 2, 0) / nTrain;
-    if (trainMSE < mseThreshold) break;
+    if (trainMSE < relativeConvergenceThreshold) break;
+
+    const mseImprovement = prevTrainMSE - trainMSE;
+    if (mseImprovement >= 0 && mseImprovement < RESIDUAL_EPSILON * 10) break;
+    prevTrainMSE = trainMSE;
 
     for (let i = 0; i < valX.length; i++) {
       valPredictions[i] += learningRate * predictTree(tree, valX[i]);
