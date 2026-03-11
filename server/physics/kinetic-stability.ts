@@ -27,6 +27,12 @@ function expandParentheses(formula: string): string {
     if (result === prev) break;
     iterations++;
   }
+  if (iterations >= 20) {
+    console.warn(`[kinetic-stability] expandParentheses hit 20-iteration limit for formula: "${formula}" — result may be incomplete`);
+  }
+  if (/[()]/.test(result)) {
+    console.warn(`[kinetic-stability] expandParentheses has dangling parentheses in: "${result}" from input: "${formula}"`);
+  }
   return result.replace(/[()]/g, "");
 }
 
@@ -144,6 +150,21 @@ function computeGrainBoundaryEnergy(formula: string): GrainBoundaryAnalysis {
     gbDecompositionFactor = Math.min(1.0, averageGBEnergy / Math.max(formE * 5, 0.1));
   } else {
     gbDecompositionFactor = Math.min(0.3, averageGBEnergy / (Math.abs(formE) * 10 + 1));
+  }
+
+  const radii: number[] = [];
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data?.atomicRadius) radii.push(data.atomicRadius);
+  }
+  if (radii.length >= 2) {
+    const minR = Math.min(...radii);
+    const maxR = Math.max(...radii);
+    const radiusMismatch = (maxR - minR) / Math.max(maxR, 1);
+    if (radiusMismatch > 0.15) {
+      const strainPenalty = Math.min(0.4, (radiusMismatch - 0.15) * 2.0);
+      gbDecompositionFactor = Math.min(1.0, gbDecompositionFactor + strainPenalty);
+    }
   }
 
   if (isHydride) {
