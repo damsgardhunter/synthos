@@ -54,6 +54,7 @@ export const novelPredictions = pgTable("novel_predictions", {
   targetApplication: text("target_application").notNull(),
   status: text("status").notNull().default("predicted"),
   notes: text("notes"),
+  signalMetadata: jsonb("signal_metadata"),
   predictedAt: timestamp("predicted_at").defaultNow(),
 });
 

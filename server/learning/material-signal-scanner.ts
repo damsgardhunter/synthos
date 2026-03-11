@@ -384,6 +384,7 @@ interface SignalMatch {
   candidateName: string;
   matchScore: number;
   matchReasons: string[];
+  family: string;
 }
 
 function scoreCandidate(candidate: CandidateData, signal: MaterialSignal): SignalMatch | null {
@@ -428,6 +429,7 @@ function scoreCandidate(candidate: CandidateData, signal: MaterialSignal): Signa
     candidateName: candidate.name || formula,
     matchScore: Math.min(1, score),
     matchReasons: reasons,
+    family: classifyFamily(formula),
   };
 }
 
@@ -550,20 +552,47 @@ export async function scanMaterialSignals(
     matches.sort((a, b) => b.matchScore - a.matchScore);
 
     const existingMilestones = await storage.getMilestones(500);
-    let verificationsThisCycle = 0;
+    const existingSet = new Set(existingMilestones.map(m => `${m.type}::${m.relatedFormula}`));
 
+    const eligible: SignalMatch[] = [];
     for (const match of matches) {
-      if (verificationsThisCycle >= MAX_VERIFICATIONS_PER_CYCLE) break;
-
       const dedupeKey = `${match.signal.id}::${match.formula}`;
-
-      const alreadyDiscovered = existingMilestones.some(m =>
-        m.type === `signal-${match.signal.id}` && m.relatedFormula === match.formula
-      );
-      if (alreadyDiscovered) continue;
-
+      if (existingSet.has(`signal-${match.signal.id}::${match.formula}`)) continue;
       const cooldownUntil = rejectedCooldown.get(dedupeKey);
       if (cooldownUntil && cycleNumber < cooldownUntil) continue;
+      eligible.push(match);
+    }
+
+    const familyBuckets = new Map<string, SignalMatch[]>();
+    for (const match of eligible) {
+      const bucket = familyBuckets.get(match.family) || [];
+      bucket.push(match);
+      familyBuckets.set(match.family, bucket);
+    }
+
+    const roundRobinOrder: SignalMatch[] = [];
+    const familyKeys = [...familyBuckets.keys()].sort();
+    const familyPointers = new Map<string, number>(familyKeys.map(k => [k, 0]));
+    let placed = 0;
+    while (placed < eligible.length && roundRobinOrder.length < MAX_VERIFICATIONS_PER_CYCLE) {
+      let anyAdded = false;
+      for (const fk of familyKeys) {
+        if (roundRobinOrder.length >= MAX_VERIFICATIONS_PER_CYCLE) break;
+        const bucket = familyBuckets.get(fk)!;
+        const ptr = familyPointers.get(fk)!;
+        if (ptr < bucket.length) {
+          roundRobinOrder.push(bucket[ptr]);
+          familyPointers.set(fk, ptr + 1);
+          placed++;
+          anyAdded = true;
+        }
+      }
+      if (!anyAdded) break;
+    }
+
+    let verificationsThisCycle = 0;
+
+    for (const match of roundRobinOrder) {
 
       emit("log", {
         phase: "signal-scanner",
@@ -608,6 +637,16 @@ export async function scanMaterialSignals(
         } catch {}
 
         const novelId = `signal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const signalMeta = {
+          signalId: match.signal.id,
+          signalName: match.signal.name,
+          matchScore: Math.round(match.matchScore * 1000) / 1000,
+          family: match.family,
+          datapoints: match.matchReasons,
+          verificationReasoning: verification.reasoning,
+          verifiedAt: new Date().toISOString(),
+          cycle: cycleNumber,
+        };
         try {
           const existing = await storage.getNovelPredictionByFormula(match.formula);
           if (!existing) {
@@ -626,6 +665,7 @@ export async function scanMaterialSignals(
               targetApplication: match.signal.name,
               status: "signal-verified",
               notes: `Signal scanner: ${match.matchReasons.join("; ")}. AI verification: ${verification.reasoning}`,
+              signalMetadata: signalMeta,
             });
 
             emit("prediction", {
@@ -636,8 +676,11 @@ export async function scanMaterialSignals(
               targetApplication: match.signal.name,
             });
           } else {
+            const existingSignals = Array.isArray((existing as any).signalMetadata) ? (existing as any).signalMetadata : (existing as any).signalMetadata ? [(existing as any).signalMetadata] : [];
+            existingSignals.push(signalMeta);
             await storage.updateNovelPrediction(existing.id, {
               notes: `${existing.notes || ""} | Signal: ${match.signal.name} verified. ${verification.reasoning}`,
+              signalMetadata: existingSignals,
             });
           }
         } catch {}
