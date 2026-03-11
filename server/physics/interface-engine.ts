@@ -479,8 +479,8 @@ const KNOWN_INTERFACE_SYSTEMS: KnownInterfaceSystem[] = [
 ];
 
 function matchKnownSystem(layerA: string, layerB: string): KnownInterfaceSystem | null {
-  const normA = layerA.replace(/\s/g, "");
-  const normB = layerB.replace(/\s/g, "");
+  const normA = cleanFormula(layerA).replace(/\s/g, "");
+  const normB = cleanFormula(layerB).replace(/\s/g, "");
   for (const known of KNOWN_INTERFACE_SYSTEMS) {
     const kA = known.layerA.replace(/\s/g, "");
     const kB = known.layerB.replace(/\s/g, "");
@@ -489,8 +489,8 @@ function matchKnownSystem(layerA: string, layerB: string): KnownInterfaceSystem 
     }
   }
 
-  const elsA = parseFormulaElements(layerA);
-  const elsB = parseFormulaElements(layerB);
+  const elsA = parseFormulaElements(layerA).map(e => e.trim());
+  const elsB = parseFormulaElements(layerB).map(e => e.trim());
 
   if (elsA.includes("Fe") && elsA.includes("Se") && elsB.includes("Sr") && elsB.includes("Ti") && elsB.includes("O")) {
     return KNOWN_INTERFACE_SYSTEMS[0];
@@ -588,9 +588,19 @@ const FILM_POOL = [
 export function generateHeterostructureCandidates(): HeterostructureCandidate[] {
   const candidates: HeterostructureCandidate[] = [];
 
+  const latticeCache: Record<string, number> = {};
+  for (const f of [...FILM_POOL, ...SUBSTRATE_POOL]) {
+    if (!(f in latticeCache)) latticeCache[f] = getAverageLatticeConstant(f);
+  }
+
   for (const film of FILM_POOL) {
     for (const substrate of SUBSTRATE_POOL) {
       if (film === substrate) continue;
+
+      const latA = latticeCache[film];
+      const latB = latticeCache[substrate];
+      const mismatch = Math.abs(latA - latB) / Math.max(latA, latB, 0.01);
+      if (mismatch > 0.15) continue;
 
       const analysis = analyzeInterface(film, substrate);
 
