@@ -529,6 +529,7 @@ export function passesValenceFilter(formula: string): boolean {
   for (const el of elements) {
     const count = counts[el];
     if (count <= 0 || !Number.isFinite(count)) return false;
+    if (count < 0.05) return false;
     if (!ELEMENTAL_DATA[el]) return false;
   }
 
@@ -557,6 +558,18 @@ export function passesValenceFilter(formula: string): boolean {
   const alkaliCount = elements.filter(el => ["Li", "Na", "K", "Rb", "Cs"].includes(el)).length;
   if (alkaliCount > 2) return false;
 
+  const METALLOID_SET = new Set(["Si", "Ge", "Sn", "Sb", "As", "P", "Bi", "Ga", "In", "Tl", "Pb"]);
+  const TM_SET = new Set([
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
+    "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
+    "La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd",
+  ]);
+  const strongAnions = elements.filter(el => ["O", "F", "Cl", "Br", "I", "S", "Se", "Te"].includes(el));
+  const isIntermetallic = strongAnions.length === 0 &&
+    elements.every(el => TM_SET.has(el) || METALLOID_SET.has(el) || ALKALINE_EARTH_METALS.has(el) ||
+      ["Li", "Na", "K", "Rb", "Cs", "H", "B", "C", "N"].includes(el));
+
   const hCount = counts["H"] || 0;
   const nonHElements = elements.filter(el => el !== "H");
   const ALKALI_SET = new Set(["Li", "Na", "K", "Rb", "Cs"]);
@@ -565,7 +578,7 @@ export function passesValenceFilter(formula: string): boolean {
     && (ALKALI_SET.has(nonHElements[0]) || AE_SET.has(nonHElements[0])
         || ["La", "Y", "Sc", "Th", "Ce", "Ti", "Zr", "Hf", "V", "Nb", "Ta"].includes(nonHElements[0]));
   const isHighHydrogenRatio = hCount > 0 && hCount / totalAtoms > 0.6;
-  if (!isBinaryHydride && !isHighHydrogenRatio) {
+  if (!isBinaryHydride && !isHighHydrogenRatio && !isIntermetallic) {
     if (!passesStrictChargeBalance(elements, counts)) return false;
   }
 

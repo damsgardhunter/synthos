@@ -170,7 +170,7 @@ export async function generateNovelFormulas(
       : "Use general materials science knowledge.";
 
   let strategyContext = strategyHint
-    ? `\n\nCurrent research strategy prioritizes: ${strategyHint}. When generating candidates, prefer compositions from these material families if relevant to the target application. IMPORTANT: Do NOT generate materials from families not listed in the strategy priorities unless exploring novel chemical space. If a family (e.g., Hydrides, Carbides) is not listed above, reduce generation probability for that family.`
+    ? `\n\nCurrent research strategy prioritizes: ${strategyHint}. Approximately 70% of generated candidates should come from these prioritized material families. The remaining 30% should explore other chemical spaces to maintain diversity and avoid confirmation bias. Balance focused exploitation with broad exploration.`
     : "";
 
   if (inverseDesignMode) {
@@ -203,7 +203,7 @@ export async function generateNovelFormulas(
       messages: [
         {
           role: "system",
-          content: `You are a materials science AI that generates novel chemical compositions optimized for strong pairing susceptibility. Rather than directly targeting high Tc, focus on compositions with: high density of states at the Fermi level, strong electron-phonon or electron-boson coupling channels, favorable Fermi surface nesting, proximity to quantum critical points, and mixed stiff-soft bonding networks. Each material should be chemically plausible (valid stoichiometry, realistic oxidation states). IMPORTANT: Use only integer stoichiometry (e.g. NbC, MgB2, LaH10). Do NOT use fractional atomic counts like Fe0.07C or Mn0.5Ni0.5. All atom counts must be whole numbers >= 1. Return JSON with key 'materials' containing an array of objects, each with: 'name' (descriptive), 'formula' (chemical formula with integer stoichiometry), 'predictedProperties' (object with 'bandGap' number or null, 'formationEnergy' number or null, 'stability' number 0-1, 'description' string under 100 chars), 'confidence' (0-1 float), 'notes' (brief rationale under 150 chars focusing on pairing mechanism).`,
+          content: `You are a materials science AI that generates novel chemical compositions optimized for strong pairing susceptibility. Rather than directly targeting high Tc, focus on compositions with: high density of states at the Fermi level, strong electron-phonon or electron-boson coupling channels, favorable Fermi surface nesting, proximity to quantum critical points, and mixed stiff-soft bonding networks. Each material should be chemically plausible (valid stoichiometry, realistic oxidation states). Stoichiometry rules: prefer integer counts (e.g. MgB2, LaH10) but fractional counts up to 2 decimal places are allowed for doped systems (e.g. Ba0.6K0.4BiO3, La1.85Sr0.15CuO4). Do NOT use very small fractions like Fe0.01 or stoichiometries with more than 5 distinct elements. Return JSON with key 'materials' containing an array of objects, each with: 'name' (descriptive), 'formula' (chemical formula), 'predictedProperties' (object with 'bandGap' number or null, 'formationEnergy' number or null, 'stability' number 0-1, 'description' string under 100 chars), 'confidence' (0-1 float), 'notes' (brief rationale under 150 chars focusing on pairing mechanism).`,
         },
         {
           role: "user",
