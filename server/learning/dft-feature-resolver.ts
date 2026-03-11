@@ -84,20 +84,39 @@ function normalizeFormula(formula: string): string {
 
 function parseFormulaElements(formula: string): string[] {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[()[\]]/g, "");
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
+function expandParentheses(formula: string): string {
+  let result = formula;
+  let safety = 20;
+  while (/[(\[]/.test(result) && safety-- > 0) {
+    result = result.replace(/[(\[]([^()\[\]]+)[)\]](\d*\.?\d*)/g, (_m, inner, mult) => {
+      const factor = mult ? parseFloat(mult) : 1;
+      return inner.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_: string, el: string, n: string) => {
+        const count = n ? parseFloat(n) : 1;
+        const newCount = count * factor;
+        return newCount === 1 ? el : `${el}${newCount}`;
+      });
+    });
+  }
+  return result;
+}
+
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = expandParentheses(cleaned);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const num = match[2] ? parseFloat(match[2]) : 1;
+    if (isNaN(num)) continue;
     counts[el] = (counts[el] || 0) + num;
   }
   return counts;
@@ -127,12 +146,32 @@ function computeAnalyticalFallbacks(formula: string): {
   const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "Te", "I", "Xe"];
   const metalElements = elements.filter(e => !nonmetals.includes(e));
   const metalFrac = metalElements.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
-  const isMetallic = metalFrac > 0.3 || metalElements.some(e => isTransitionMetal(e));
+
+  const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
+  const enSpread = enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
+
+  const oFrac = (counts["O"] || 0) / totalAtoms;
+  const fFrac = (counts["F"] || 0) / totalAtoms;
+  const clFrac = (counts["Cl"] || 0) / totalAtoms;
+  const halideOxideFrac = oFrac + fFrac + clFrac;
+
+  let isMetallic: boolean;
+  if (enSpread > 2.5 && halideOxideFrac > 0.4) {
+    isMetallic = false;
+  } else if (metalFrac >= 0.7 && enSpread < 1.0) {
+    isMetallic = true;
+  } else if (metalFrac > 0.3 && enSpread < 2.0 && halideOxideFrac < 0.5) {
+    isMetallic = true;
+  } else if (metalElements.some(e => isTransitionMetal(e)) && halideOxideFrac < 0.5 && enSpread < 2.0) {
+    isMetallic = true;
+  } else if (metalFrac > 0.5) {
+    isMetallic = enSpread < 2.5;
+  } else {
+    isMetallic = false;
+  }
 
   let bandGap = 0;
   if (!isMetallic) {
-    const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
-    const enSpread = enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
     bandGap = Math.max(0, enSpread * 0.8);
   }
 
