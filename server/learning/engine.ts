@@ -6958,7 +6958,8 @@ async function runLearningCycle() {
                   addPressureObservation(c.formula, pt.pressure, pt.tc, stabPt?.stable ?? false, stabPt?.enthalpy ?? 0);
                 }
 
-                const bayesResult = optimizePressureForFormula(c.formula, 3, 15);
+                const familyP = estimateFamilyPressure(c.formula);
+                const bayesResult = optimizePressureForFormula(c.formula, 3, 15, familyP);
                 bayesOptCount++;
                 if (bayesResult.predictedTcAtOptimal > 50) {
                   emit("log", {

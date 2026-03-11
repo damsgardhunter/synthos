@@ -1,6 +1,7 @@
 import { predictPressureCurve, type PressureCurve } from "./pressure-aware-surrogate";
 import { computeEnthalpyStability } from "./enthalpy-stability";
 import { buildPressureResponseProfile, interpolateAtPressure } from "./pressure-property-map";
+import { estimateFamilyPressure } from "./candidate-generator";
 
 interface PressureObservation {
   formula: string;
@@ -221,7 +222,8 @@ function expectedImprovement(
 export function optimizePressureForFormula(
   formula: string,
   nIterations: number = 5,
-  nCandidatesPerIter: number = 20
+  nCandidatesPerIter: number = 20,
+  familyPressureHint?: number
 ): BayesianPressureResult {
   const cached = resultCache.get(formula);
   if (cached && Date.now() - cached.acquisitionHistory.length * 1000 < 10 * 60 * 1000) {
@@ -244,6 +246,17 @@ export function optimizePressureForFormula(
     };
   }
 
+  const hint = familyPressureHint ?? 0;
+  let searchMin = PRESSURE_SEARCH_MIN;
+  let searchMax = PRESSURE_SEARCH_MAX;
+  if (hint > 50) {
+    searchMin = Math.max(0, hint - 80);
+    searchMax = Math.min(PRESSURE_SEARCH_MAX, hint + 100);
+  } else if (hint > 0) {
+    searchMin = 0;
+    searchMax = Math.min(PRESSURE_SEARCH_MAX, hint + 60);
+  }
+
   let bestTc = Math.max(...obs.map(o => o.tc));
   const acquisitionHistory: { pressure: number; acquisition: number }[] = [];
 
@@ -264,8 +277,8 @@ export function optimizePressureForFormula(
     const ls = lsOptions[iter % lsOptions.length];
 
     for (let c = 0; c < nCandidatesPerIter; c++) {
-      const candidateP = PRESSURE_SEARCH_MIN +
-        (PRESSURE_SEARCH_MAX - PRESSURE_SEARCH_MIN) * (c / (nCandidatesPerIter - 1));
+      const candidateP = searchMin +
+        (searchMax - searchMin) * (c / (nCandidatesPerIter - 1));
 
       const pressurePenalty = candidateP / 500;
 
@@ -304,7 +317,7 @@ export function optimizePressureForFormula(
   let optimalTc = 0;
 
   const scanStep = 5;
-  for (let p = PRESSURE_SEARCH_MIN; p <= PRESSURE_SEARCH_MAX; p += scanStep) {
+  for (let p = searchMin; p <= searchMax; p += scanStep) {
     const pred = gpPredict(obs, p, 30);
     const penalizedTc = pred.mean - (p / 500) * pred.mean;
     if (penalizedTc > optimalTc) {
@@ -348,7 +361,7 @@ export function batchOptimizePressure(
   formulas: string[],
   maxFormulas: number = 10
 ): BayesianPressureResult[] {
-  return formulas.slice(0, maxFormulas).map(f => optimizePressureForFormula(f));
+  return formulas.slice(0, maxFormulas).map(f => optimizePressureForFormula(f, 5, 20, estimateFamilyPressure(f)));
 }
 
 export function getBayesianPressureStats(): BayesianPressureStats {
