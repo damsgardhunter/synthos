@@ -604,7 +604,7 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     f.hasPnictogen ? 1 : 0,
     sanitize(f.cooperPairStrength, FEATURE_MEANS.cooperPairStrength),
     sanitize(f.dimensionalityScore, FEATURE_MEANS.dimensionalityScore),
-    f.anharmonicityFlag ? 1 : 0,
+    sanitize(f.anharmonicityScore, 0.3),
     sanitize(f.electronDensityEstimate, FEATURE_MEANS.electronDensityEstimate),
     sanitize(f.phononCouplingEstimate, FEATURE_MEANS.phononCouplingEstimate),
     f.dWaveSymmetry ? 1 : 0,

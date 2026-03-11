@@ -16,6 +16,7 @@ import {
   type TcWithUncertainty,
 } from "./physics-engine";
 import { estimateFamilyPressure } from "./candidate-generator";
+import { normalizeFormula } from "./utils";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import {
   ELEMENTAL_DATA,
@@ -273,6 +274,7 @@ export interface MLFeatureVector {
   fermiSurfaceType: string;
   dimensionalityScore: number;
   anharmonicityFlag: boolean;
+  anharmonicityScore: number;
   electronPhononLambda: number;
   logPhononFreq: number;
   upperCriticalField: number | null;
@@ -343,6 +345,7 @@ export interface MLFeatureVector {
   cageLatticeFlag: number;
   looselyBondedFraction: number;
   combinedElectronPhononScore: number;
+  anharmonicityScore: number;
   maxAtomicNumber: number;
   feasibilityScore: number;
   _sourceFormula?: string;
@@ -394,6 +397,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   const hasHydrogen = elements.includes("H");
   const hasChalcogen = elements.some(e => CHALCOGENS.includes(e));
   const hasPnictogen = elements.some(e => PNICTOGENS.includes(e));
+
+  const LIGHT_ELEMENTS = ["H","He","Li","Be","B","C","N","O","F"];
+  const lightElementFraction = elements.filter(e => LIGHT_ELEMENTS.includes(e))
+    .reduce((s, e) => s + (counts[e] ?? 0), 0) / totalAtoms;
+  const hFraction = (counts["H"] ?? 0) / totalAtoms;
 
   const avgEN = getCompositionWeightedProperty(counts, "paulingElectronegativity") ?? 1.5;
   const enSpread = enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
@@ -648,6 +656,15 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     phononHardnessVal = coupling.omega2Avg > 0 ? coupling.omegaLog / coupling.omega2Avg : 0;
   }
 
+  let miedemaFE: number | null = null;
+  try { miedemaFE = computeMiedemaFormationEnergy(formula); } catch { /* safe fallback */ }
+
+  const tbSafe = predictTBProperties(formula);
+
+  const normalizedFormula = normalizeFormula(formula);
+
+  const anharmonicityScore = Math.min(1.0, phonon.anharmonicityIndex * 2.5);
+
   return {
     avgElectronegativity: avgEN,
     maxAtomicMass: massValues.length > 0 ? Math.max(...massValues) : 0,
@@ -658,7 +675,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     hasChalcogen,
     hasPnictogen,
     bandGap: mat?.bandGap ?? null,
-    formationEnergy: mat?.formationEnergy ?? (() => { try { return computeMiedemaFormationEnergy(formula); } catch { return null; } })(),
+    formationEnergy: mat?.formationEnergy ?? miedemaFE,
     stability: mat?.stability ?? null,
     crystalSymmetry: useSpacegroup,
     electronDensityEstimate,
@@ -711,18 +728,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     phononHardness: phononHardnessVal,
     massEnhancement: massEnhancementVal,
     couplingAsymmetry: couplingAsymmetryVal,
-    ...(() => {
-      try {
-        const tbSurr = predictTBProperties(formula);
-        return {
-          dosAtEF_tb: tbSurr.dosAtEF,
-          bandFlatness_tb: tbSurr.bandFlatness,
-          lambdaProxy_tb: tbSurr.lambdaProxy,
-        };
-      } catch {
-        return { dosAtEF_tb: 0, bandFlatness_tb: 0, lambdaProxy_tb: 0 };
-      }
-    })(),
+    dosAtEF_tb: tbSafe.dosAtEF,
+    bandFlatness_tb: tbSafe.bandFlatness,
+    lambdaProxy_tb: tbSafe.lambdaProxy,
     ...(() => {
       const derived = getDerivedFeatures(formula);
       if (derived) {
@@ -762,21 +770,23 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       const smf = phonon.softModeScore;
       const imf = phonon.hasImaginaryModes ? 1.0 : 0.0;
       const pv = phonon.maxPhononFrequency > 0 ? Math.min(1.0, ((phonon.maxPhononFrequency - phonon.logAverageFrequency) / phonon.maxPhononFrequency) * 1.5) : 0;
-      const anh = Math.min(1.0, phonon.anharmonicityIndex * 2.0);
-      const lightEls = elements.filter((e: string) => ["H","He","Li","Be","B","C","N","O","F"].includes(e));
-      const lightFrac = lightEls.reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms;
-      const hFrac = (counts["H"] ?? 0) / totalAtoms;
-      const leb = hFrac > 0.3
-        ? Math.min(1.5, Math.min(1.0, 0.4 + hFrac * 0.8) + (lightFrac - hFrac) * 1.5)
-        : Math.min(1.0, lightFrac * 2.0);
-      const raw = smf * 1.5 + imf * 0.8 + pv * 1.2 + anh * 1.0 + leb * 0.7;
+      const leb = hFraction > 0.3
+        ? Math.min(1.5, Math.min(1.0, 0.4 + hFraction * 0.8) + (lightElementFraction - hFraction) * 1.5)
+        : Math.min(1.0, lightElementFraction * 2.0);
+      const raw = smf * 1.5 + imf * 0.8 + pv * 1.2 + anharmonicityScore * 1.0 + leb * 0.7;
       return 1.0 / (1.0 + Math.exp(-1.2 * (raw - 3.0)));
     })(),
     softPhononCount: Math.round(phonon.softModeScore * totalAtoms * 3),
     phononVarianceScore: phonon.maxPhononFrequency > 0 ? Math.min(1.0, ((phonon.maxPhononFrequency - phonon.logAverageFrequency) / phonon.maxPhononFrequency) * 1.5) : 0,
     instabilityFlag: phonon.hasImaginaryModes ? 1 : 0,
-    lightElementFraction: elements.filter((e: string) => ["H","He","Li","Be","B","C","N","O","F"].includes(e)).reduce((s: number, e: string) => s + (counts[e] ?? 0), 0) / totalAtoms,
-    cageLatticeFlag: (elements.some((e: string) => ["B","C","Si","Ge","Al","Ga","Sn"].includes(e)) && elements.some((e: string) => ["La","Ce","Ba","Sr","Ca","Y","K","Na","Rb","Cs"].includes(e))) ? 1 : 0,
+    lightElementFraction,
+    cageLatticeFlag: (() => {
+      const CLATHRATE_SG = ["Pm-3n", "Fd-3m", "Im-3m", "P4_132", "Pm3n", "Fd3m", "Im3m"];
+      if (useSpacegroup && CLATHRATE_SG.some(sg => useSpacegroup.includes(sg))) return 1;
+      const hasFramework = elements.some((e: string) => ["B","C","Si","Ge","Al","Ga","Sn"].includes(e));
+      const hasGuest = elements.some((e: string) => ["La","Ce","Ba","Sr","Ca","Y","K","Na","Rb","Cs"].includes(e));
+      return (hasFramework && hasGuest) ? 1 : 0;
+    })(),
     maxAtomicNumber: Math.max(...elements.map(e => getElementData(e)?.atomicNumber ?? 0)),
     feasibilityScore: (() => {
       const TOXIC_ELEMENTS: Record<string, number> = { Be: 0.3, Tl: 0.25, Cd: 0.3, Hg: 0.35, Pb: 0.2, As: 0.25, Os: 0.15, Cr: 0.1 };
@@ -800,7 +810,8 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       const corrBonus = (corr > 0.3 && corr < 0.8) ? 0.15 : corr * 0.05;
       return dosNorm * 0.20 + electronic.metallicity * 0.15 + lam * 0.25 + electronic.nestingScore * 0.15 + corrBonus + electronic.vanHoveProximity * 0.10;
     })(),
-    _sourceFormula: formula,
+    anharmonicityScore,
+    _sourceFormula: normalizedFormula,
   };
 }
 
@@ -1017,7 +1028,7 @@ export async function runMLPrediction(
           correlationStrength: c.features.correlationStrength,
           fermiSurfaceTopology: c.features.fermiSurfaceType,
           dimensionalityScore: c.features.dimensionalityScore,
-          anharmonic: c.features.anharmonicityFlag,
+          anharmonic: c.features.anharmonicityScore > 0.4,
           upperCriticalField_T: c.features.upperCriticalField,
         },
         ...(physics ? {
