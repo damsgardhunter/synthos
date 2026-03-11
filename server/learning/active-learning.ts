@@ -381,69 +381,56 @@ function computeStructuralUniquenessFromCounts(counts: Record<string, number>, c
   return Math.min(1.0, uniqueness);
 }
 
-let trainingSetVectors: { formula: string; vec: number[] }[] | null = null;
+const PERIODIC_ELEMENTS = [
+  "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+  "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+  "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+  "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Th","U"
+];
+const PERIODIC_DIM = PERIODIC_ELEMENTS.length;
+const ELEM_INDEX = new Map<string, number>();
+PERIODIC_ELEMENTS.forEach((el, i) => ELEM_INDEX.set(el, i));
 
-function getTrainingSetVectors(): { formula: string; vec: number[] }[] {
-  if (trainingSetVectors) return trainingSetVectors;
-  const PERIODIC_ELEMENTS = [
-    "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
-    "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
-    "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
-    "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
-    "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Th","U"
-  ];
-  const elIndex = new Map<string, number>();
-  PERIODIC_ELEMENTS.forEach((el, i) => elIndex.set(el, i));
-  const dim = PERIODIC_ELEMENTS.length;
+let trainingSetVectors: { formula: string; vec: Float64Array }[] | null = null;
 
-  trainingSetVectors = SUPERCON_TRAINING_DATA.map(entry => {
-    const counts = parseFormulaElements(entry.formula);
-    const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
-    const vec = new Array(dim).fill(0);
-    for (const [el, n] of Object.entries(counts)) {
-      const idx = elIndex.get(el);
-      if (idx !== undefined) vec[idx] = n / total;
-    }
-    return { formula: entry.formula, vec };
-  });
-  return trainingSetVectors;
-}
-
-function computeFixedDimVector(formula: string): number[] {
-  const PERIODIC_ELEMENTS = [
-    "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
-    "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
-    "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
-    "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
-    "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Th","U"
-  ];
-  const elIndex = new Map<string, number>();
-  PERIODIC_ELEMENTS.forEach((el, i) => elIndex.set(el, i));
-  const dim = PERIODIC_ELEMENTS.length;
-  const counts = parseFormulaElements(formula);
+function formulaToFixedVec(formula: string): Float64Array {
+  const counts = parseFormulaCounts(formula);
   const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
-  const vec = new Array(dim).fill(0);
+  const vec = new Float64Array(PERIODIC_DIM);
   for (const [el, n] of Object.entries(counts)) {
-    const idx = elIndex.get(el);
+    const idx = ELEM_INDEX.get(el);
     if (idx !== undefined) vec[idx] = n / total;
   }
   return vec;
 }
 
+function getTrainingSetVectors(): { formula: string; vec: Float64Array }[] {
+  if (trainingSetVectors) return trainingSetVectors;
+  trainingSetVectors = SUPERCON_TRAINING_DATA.map(entry => ({
+    formula: entry.formula,
+    vec: formulaToFixedVec(entry.formula),
+  }));
+  return trainingSetVectors;
+}
+
 function computeStructuralDistanceFromTrainingSet(formula: string): number {
   const refVecs = getTrainingSetVectors();
-  const candidateVec = computeFixedDimVector(formula);
+  const cv = formulaToFixedVec(formula);
 
-  let minDist = Infinity;
-  for (const ref of refVecs) {
+  let minDistSq = Infinity;
+  for (let r = 0; r < refVecs.length; r++) {
+    const rv = refVecs[r].vec;
     let sumSq = 0;
-    for (let i = 0; i < candidateVec.length; i++) {
-      const diff = candidateVec[i] - ref.vec[i];
+    for (let i = 0; i < PERIODIC_DIM; i++) {
+      if (sumSq >= minDistSq) break;
+      const diff = cv[i] - rv[i];
       sumSq += diff * diff;
     }
-    minDist = Math.min(minDist, Math.sqrt(sumSq));
+    if (sumSq < minDistSq) minDistSq = sumSq;
+    if (minDistSq === 0) return 0;
   }
-  return Math.min(1.0, minDist / 0.8);
+  return Math.min(1.0, Math.sqrt(minDistSq) / 0.8);
 }
 
 function computeExpectedImprovement(
