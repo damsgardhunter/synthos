@@ -455,16 +455,43 @@ function computeMagneticMomentProxy(atomicNumber: number): number {
   return Math.min(1.0, Math.sqrt(n * (n + 2)) / 8.0);
 }
 
+function getOrbitalBlock(atomicNumber: number): number {
+  if (atomicNumber <= 0) return 0;
+  const sBlock = new Set([1, 2, 3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88]);
+  const fBlock = new Set([
+    57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,
+    89,90,91,92,93,94,95,96,97,98,99,100,101,102,103
+  ]);
+  if (sBlock.has(atomicNumber)) return 0.0;
+  if (fBlock.has(atomicNumber)) return 1.0;
+  if (atomicNumber <= 2) return 0.0;
+  const dBlockRanges = [[21,30],[39,48],[72,80],[104,112]];
+  for (const [lo, hi] of dBlockRanges) {
+    if (atomicNumber >= lo && atomicNumber <= hi) return 0.667;
+  }
+  return 0.333;
+}
+
 function computeValenceShellEncoding(atomicNumber: number, valenceElectrons: number): number {
-  let period = 1;
-  if (atomicNumber > 2) period = 2;
-  if (atomicNumber > 10) period = 3;
-  if (atomicNumber > 18) period = 4;
-  if (atomicNumber > 36) period = 5;
-  if (atomicNumber > 54) period = 6;
-  if (atomicNumber > 86) period = 7;
-  const shellFill = Math.min(1.0, valenceElectrons / (2 * period * period));
-  return shellFill;
+  const blockFeature = getOrbitalBlock(atomicNumber);
+
+  let maxOccupancy: number;
+  if (blockFeature < 0.1) maxOccupancy = 2;
+  else if (blockFeature < 0.4) maxOccupancy = 6;
+  else if (blockFeature < 0.8) maxOccupancy = 10;
+  else maxOccupancy = 14;
+
+  const shellFill = Math.min(1.0, valenceElectrons / maxOccupancy);
+  return shellFill * 0.5 + blockFeature * 0.5;
+}
+
+function pressureDistanceScale(pressureGpa: number): number {
+  if (pressureGpa <= 0) return 1.0;
+  const B0 = 150;
+  const Bp = 4.0;
+  const ratio = 1 + (Bp * pressureGpa) / B0;
+  const volumeRatio = Math.pow(ratio, -1.0 / Bp);
+  return Math.cbrt(volumeRatio);
 }
 
 function getCovalentRadius(atomicNumber: number, atomicRadius: number): number {
@@ -810,7 +837,8 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
             const ri = nodes[i].atomicRadius / 100;
             const rj = nodes[j].atomicRadius / 100;
-            const distance = (ri + rj) * 0.9;
+            const pScale = pressureDistanceScale(pressureGpa ?? 0);
+            const distance = (ri + rj) * 0.9 * pScale;
 
             const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
             const bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
@@ -1081,7 +1109,8 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
       } else {
         const ri = nodes[i].atomicRadius / 100;
         const rj = nodes[j].atomicRadius / 100;
-        distance = (ri + rj) * 1.1;
+        const pScale = pressureDistanceScale(pressureGpa ?? 0);
+        distance = (ri + rj) * 1.1 * pScale;
       }
 
       const cutoff = 6.0;
