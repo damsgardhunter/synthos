@@ -1032,21 +1032,27 @@ export async function runMLPrediction(
     const entry = scored[i];
     try {
       const crystal = crystalData.get(normalizeFormula(entry.mat.formula));
-      const crystalStructure = crystal ? {
-        latticeParams: undefined,
-        atomicPositions: undefined,
-      } : undefined;
+      const crystalStructure = crystal ? { spaceGroup: crystal.spaceGroup, latticeParams: [], atomicPositions: [] } : undefined;
       entry.gnn = getGNNPrediction(entry.mat.formula, crystalStructure);
     } catch {}
   }
 
-  scored.sort((a, b) => {
-    const aGnnScore = a.gnn ? (Math.min(1, a.gnn.predictedTc > 100 ? 0.8 : a.gnn.predictedTc > 20 ? 0.5 : 0.2) * a.gnn.confidence) : 0;
-    const bGnnScore = b.gnn ? (Math.min(1, b.gnn.predictedTc > 100 ? 0.8 : b.gnn.predictedTc > 20 ? 0.5 : 0.2) * b.gnn.confidence) : 0;
-    const aEnsemble = aGnnScore * 0.6 + a.xgb.score * 0.3 + (a.hasCrystal ? 0.1 : 0) + (a.hasPhysics ? 0.05 : 0);
-    const bEnsemble = bGnnScore * 0.6 + b.xgb.score * 0.3 + (b.hasCrystal ? 0.1 : 0) + (b.hasPhysics ? 0.05 : 0);
-    return bEnsemble - aEnsemble;
-  });
+  function computeEnsembleScore(entry: typeof scored[0], nnScore?: number): number {
+    const gnnScore = entry.gnn
+      ? (Math.min(1, entry.gnn.predictedTc > 100 ? 0.8 : entry.gnn.predictedTc > 20 ? 0.5 : 0.2) * entry.gnn.confidence)
+      : 0;
+    const structBonus = entry.hasCrystal ? 0.1 : 0;
+    const physicsBonus = entry.hasPhysics ? 0.05 : 0;
+    if (entry.gnn) {
+      return Math.min(0.95, gnnScore * 0.6 + entry.xgb.score * 0.3 + structBonus + physicsBonus);
+    }
+    if (nnScore != null) {
+      return Math.min(0.95, entry.xgb.score * 0.4 + nnScore * 0.6);
+    }
+    return Math.min(0.95, entry.xgb.score * 0.5 + structBonus + physicsBonus);
+  }
+
+  scored.sort((a, b) => computeEnsembleScore(b) - computeEnsembleScore(a));
   const topCandidates = scored.slice(0, 5);
 
   if (topCandidates.length === 0) return { candidates, insights };
@@ -1165,21 +1171,16 @@ export async function runMLPrediction(
     const nnInsights = parsed.insights ?? [];
     insights.push(...nnInsights);
 
-    for (let i = 0; i < nnCandidates.length; i++) {
-      const nn = nnCandidates[i];
-      const xgb = topCandidates[i];
-      if (!nn || !xgb) continue;
+    const nnByFormula = new Map<string, any>();
+    for (const nn of nnCandidates) {
+      if (nn?.formula) nnByFormula.set(normalizeFormula(nn.formula), nn);
+    }
 
-      const gnnPred = xgb.gnn;
-      const hasStructureData = xgb.hasCrystal;
-      const structuralNoveltyBonus = hasStructureData ? 0.1 : 0;
-      let ensembleScore: number;
-      if (gnnPred) {
-        const gnnScore = Math.min(1, gnnPred.predictedTc > 100 ? 0.8 : gnnPred.predictedTc > 20 ? 0.5 : 0.2) * gnnPred.confidence;
-        ensembleScore = Math.min(0.95, gnnScore * 0.6 + xgb.xgb.score * 0.3 + structuralNoveltyBonus);
-      } else {
-        ensembleScore = Math.min(0.95, xgb.xgb.score * 0.4 + (nn.neuralNetScore ?? 0.5) * 0.6);
-      }
+    for (const xgb of topCandidates) {
+      const nn = nnByFormula.get(normalizeFormula(xgb.mat.formula));
+      if (!nn) continue;
+
+      const ensembleScore = computeEnsembleScore(xgb, nn.neuralNetScore);
 
       const featureLambda = xgb.features.electronPhononLambda ?? 0;
       const llmRefinedTc = nn.refinedTc ?? xgb.xgb.tcEstimate;
