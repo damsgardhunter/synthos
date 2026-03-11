@@ -319,8 +319,7 @@ function isConceptualDuplicate(text: string, existingTexts: string[]): boolean {
 const CORRELATION_DIRECTIONS = ["higher", "lower", "greater", "less", "increase", "decrease", "enhance", "reduce", "correlat", "positive", "negative", "inverse"];
 
 interface CorrelationFingerprint {
-  propX: string;
-  propY: string;
+  pairs: [string, string][];
   direction: string;
   rValue?: number;
 }
@@ -343,12 +342,18 @@ function extractCorrelationFingerprint(text: string): CorrelationFingerprint | n
     }
   }
 
-  const sorted = matchedProps.slice(0, 2).sort();
+  const uniqueProps = [...new Set(matchedProps)].sort();
+  const pairs: [string, string][] = [];
+  for (let i = 0; i < uniqueProps.length; i++) {
+    for (let j = i + 1; j < uniqueProps.length; j++) {
+      pairs.push([uniqueProps[i], uniqueProps[j]]);
+    }
+  }
 
   const rMatch = lower.match(/r[\s=:]*([+-]?\d+\.?\d*)/);
   const rValue = rMatch ? parseFloat(rMatch[1]) : undefined;
 
-  return { propX: sorted[0], propY: sorted[1], direction, rValue };
+  return { pairs, direction, rValue };
 }
 
 function normalizeDirection(dir: string): string {
@@ -359,28 +364,38 @@ function normalizeDirection(dir: string): string {
 
 function isCorrelationDuplicate(text: string, existingTexts: string[]): boolean {
   const fp = extractCorrelationFingerprint(text);
-  if (!fp) return false;
+  if (!fp || fp.pairs.length === 0) return false;
 
   for (const existing of existingTexts) {
     const efp = extractCorrelationFingerprint(existing);
-    if (!efp) continue;
+    if (!efp || efp.pairs.length === 0) continue;
 
-    if (fp.propX === efp.propX && fp.propY === efp.propY) {
-      const dirNew = normalizeDirection(fp.direction);
-      const dirExisting = normalizeDirection(efp.direction);
-      if (dirNew !== "unknown" && dirExisting !== "unknown" && dirNew !== dirExisting) {
-        continue;
-      }
-      if (fp.rValue !== undefined && efp.rValue !== undefined) {
-        if (Math.abs(fp.rValue - efp.rValue) > 0.1) continue;
-      }
-      return true;
+    const sharedPairs = fp.pairs.filter(([a, b]) =>
+      efp.pairs.some(([ea, eb]) => a === ea && b === eb)
+    );
+    if (sharedPairs.length === 0) continue;
+
+    const overlapRatio = sharedPairs.length / Math.min(fp.pairs.length, efp.pairs.length);
+    if (overlapRatio < 0.5) continue;
+
+    const dirNew = normalizeDirection(fp.direction);
+    const dirExisting = normalizeDirection(efp.direction);
+    if (dirNew !== "unknown" && dirExisting !== "unknown" && dirNew !== dirExisting) {
+      continue;
     }
+    if (fp.rValue !== undefined && efp.rValue !== undefined) {
+      if (Math.abs(fp.rValue - efp.rValue) > 0.1) continue;
+    }
+    return true;
   }
   return false;
 }
 
 const ROLLING_WINDOW_SIZE = 100;
+const EMBEDDING_CACHE_MAX = 2000;
+const SEMANTIC_DUP_THRESHOLD = 0.75;
+const DIRECTION_CHECK_LOW = 0.70;
+const DIRECTION_CHECK_HIGH = 0.95;
 
 const MAX_NOVEL_INSIGHTS_PER_CYCLE = 3;
 let novelInsightQueue: { text: string; phaseId: number; phaseName: string; relatedFormulas: string[] }[] = [];
@@ -388,9 +403,15 @@ let novelInsightQueue: { text: string; phaseId: number; phaseName: string; relat
 interface EmbeddingEntry {
   text: string;
   embedding: Float32Array;
+  addedAt: number;
 }
 
-const embeddingCache: EmbeddingEntry[] = [];
+const embeddingCacheMap = new Map<string, EmbeddingEntry>();
+const embeddingCacheOrder: string[] = [];
+
+function embeddingCacheKey(text: string): string {
+  return text.toLowerCase().trim().replace(/\s+/g, ' ');
+}
 
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length) return 0;
@@ -419,23 +440,53 @@ export async function computeInsightEmbedding(text: string): Promise<Float32Arra
 }
 
 function addToEmbeddingCache(text: string, embedding: Float32Array): void {
-  embeddingCache.push({ text, embedding });
-  while (embeddingCache.length > ROLLING_WINDOW_SIZE) {
-    embeddingCache.shift();
+  const key = embeddingCacheKey(text);
+  if (embeddingCacheMap.has(key)) return;
+
+  embeddingCacheMap.set(key, { text, embedding, addedAt: Date.now() });
+  embeddingCacheOrder.push(key);
+
+  while (embeddingCacheMap.size > EMBEDDING_CACHE_MAX) {
+    const oldest = embeddingCacheOrder.shift();
+    if (oldest) embeddingCacheMap.delete(oldest);
   }
 }
 
-function isSemanticDuplicate(embedding: Float32Array): { isDuplicate: boolean; bestSimilarity: number; matchText: string } {
+function extractDirectionFromText(text: string): string {
+  const lower = text.toLowerCase();
+  for (const dir of CORRELATION_DIRECTIONS) {
+    if (lower.includes(dir)) return normalizeDirection(dir);
+  }
+  return "unknown";
+}
+
+function isSemanticDuplicate(embedding: Float32Array, candidateText: string): { isDuplicate: boolean; bestSimilarity: number; matchText: string } {
   let bestSimilarity = 0;
   let matchText = "";
-  for (const entry of embeddingCache) {
+  for (const entry of embeddingCacheMap.values()) {
     const sim = cosineSimilarity(embedding, entry.embedding);
     if (sim > bestSimilarity) {
       bestSimilarity = sim;
       matchText = entry.text;
     }
   }
-  return { isDuplicate: bestSimilarity > 0.75, bestSimilarity, matchText };
+
+  if (bestSimilarity > DIRECTION_CHECK_HIGH) {
+    return { isDuplicate: true, bestSimilarity, matchText };
+  }
+
+  if (bestSimilarity > DIRECTION_CHECK_LOW) {
+    const newDir = extractDirectionFromText(candidateText);
+    const oldDir = extractDirectionFromText(matchText);
+    if (newDir !== "unknown" && oldDir !== "unknown" && newDir !== oldDir) {
+      return { isDuplicate: false, bestSimilarity, matchText };
+    }
+    if (bestSimilarity > SEMANTIC_DUP_THRESHOLD) {
+      return { isDuplicate: true, bestSimilarity, matchText };
+    }
+  }
+
+  return { isDuplicate: bestSimilarity > SEMANTIC_DUP_THRESHOLD, bestSimilarity, matchText };
 }
 
 export async function evaluateInsightNovelty(
@@ -566,7 +617,7 @@ export async function evaluateInsightNovelty(
   for (const candidate of potentiallyNovel) {
     const embedding = await computeInsightEmbedding(candidate.text);
     if (embedding) {
-      const { isDuplicate, bestSimilarity, matchText } = isSemanticDuplicate(embedding);
+      const { isDuplicate, bestSimilarity, matchText } = isSemanticDuplicate(embedding, candidate.text);
       if (isDuplicate) {
         try {
           await storage.insertNovelInsight({
