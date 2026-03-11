@@ -1485,13 +1485,32 @@ export async function runActiveLearningCycle(
       for (const variant of dopedVariants) {
         try {
           dopingVariantsEvaluated++;
+
+          const absValenceDiff = Math.abs(variant.valenceChange);
+          const dopantData = variant.dopant ? getElementData(variant.dopant) : null;
+          const hostElements = Object.keys(baseCounts);
+          let radiusMismatch = 0;
+          if (dopantData) {
+            const hostRadii = hostElements.map(el => getElementData(el)?.atomicRadius ?? 150).filter(r => r > 0);
+            const avgHostRadius = hostRadii.length > 0 ? hostRadii.reduce((s, r) => s + r, 0) / hostRadii.length : 150;
+            radiusMismatch = Math.abs((dopantData.atomicRadius ?? 150) - avgHostRadius) / avgHostRadius;
+          }
+
+          const maxSolubleFraction = radiusMismatch > 0.3 ? 0.03
+            : radiusMismatch > 0.15 ? 0.08
+            : absValenceDiff > 2 ? 0.05
+            : 0.25;
+          if (variant.fraction > maxSolubleFraction) continue;
+
+          const solubilityPenalty = 1 - 0.3 * Math.min(1, radiusMismatch / 0.3) - 0.2 * Math.min(1, absValenceDiff / 3);
+
           const features = extractFeatures(variant.resultFormula, undefined, undefined, undefined, undefined);
           const gb = gbPredict(features, variant.resultFormula);
           const compositionTc = gb.tcPredicted;
 
           const strainPenalty = variant.relaxation ? Math.max(0, 1 - Math.abs(variant.relaxation.latticeStrain) * 5) : 1.0;
           const carrierBoost = variant.carrierDensity > 0 ? Math.min(1.2, 1 + 0.05 * Math.log10(variant.carrierDensity + 1)) : 1.0;
-          const tc = Math.max(compositionTc, baseTc) * strainPenalty * carrierBoost;
+          const tc = Math.max(compositionTc, baseTc) * strainPenalty * carrierBoost * Math.max(0.3, solubilityPenalty);
 
           if (tc > dopingBestTc) {
             dopingBestTc = tc;
@@ -1602,29 +1621,30 @@ export async function runActiveLearningCycle(
     .map(s => s.candidate.formula);
 
   if (topFilmsForInterface.length > 0) {
-    try {
-      const interfaceResults = await runInterfaceDiscoveryForActiveLearning(topFilmsForInterface, 3);
-      if (interfaceResults.length > 0) {
-        const bestInterface = interfaceResults[0];
-        const sigCT = interfaceResults.filter(r => r.chargeTransfer.isSignificant).length;
-        const optStrain = interfaceResults.filter(r => r.strain.isOptimalRange).length;
-        emit("log", {
-          phase: "active-learning",
-          event: "Interface discovery",
-          detail: `Relaxed ${interfaceResults.length} interfaces from ${topFilmsForInterface.length} films. ` +
-            `Best: ${bestInterface.film}/${bestInterface.substrate} ` +
-            `(score=${bestInterface.compositeScore.toFixed(3)}, ` +
-            `charge=${bestInterface.chargeTransfer.chargePerAtom.toFixed(4)} e/atom, ` +
-            `strain=${bestInterface.strain.strainPercent.toFixed(2)}%, ` +
-            `phonon=${bestInterface.phononCoupling.couplingProxy.toFixed(3)}, ` +
-            `xtb=${bestInterface.xtbConverged ? "converged" : "fallback"}). ` +
-            `${sigCT} significant charge transfer, ${optStrain} optimal strain range.`,
-          dataSource: "Active Learning",
-        });
-      }
-    } catch (e: any) {
-      console.error("[ActiveLearning] Interface discovery error:", e?.message?.slice(0, 200));
-    }
+    runInterfaceDiscoveryForActiveLearning(topFilmsForInterface, 3)
+      .then(interfaceResults => {
+        if (interfaceResults.length > 0) {
+          const bestInterface = interfaceResults[0];
+          const sigCT = interfaceResults.filter(r => r.chargeTransfer.isSignificant).length;
+          const optStrain = interfaceResults.filter(r => r.strain.isOptimalRange).length;
+          emit("log", {
+            phase: "active-learning",
+            event: "Interface discovery",
+            detail: `Relaxed ${interfaceResults.length} interfaces from ${topFilmsForInterface.length} films. ` +
+              `Best: ${bestInterface.film}/${bestInterface.substrate} ` +
+              `(score=${bestInterface.compositeScore.toFixed(3)}, ` +
+              `charge=${bestInterface.chargeTransfer.chargePerAtom.toFixed(4)} e/atom, ` +
+              `strain=${bestInterface.strain.strainPercent.toFixed(2)}%, ` +
+              `phonon=${bestInterface.phononCoupling.couplingProxy.toFixed(3)}, ` +
+              `xtb=${bestInterface.xtbConverged ? "converged" : "fallback"}). ` +
+              `${sigCT} significant charge transfer, ${optStrain} optimal strain range.`,
+            dataSource: "Active Learning",
+          });
+        }
+      })
+      .catch((e: any) => {
+        console.error("[ActiveLearning] Interface discovery error:", e?.message?.slice(0, 200));
+      });
   }
 
   totalEnrichedSinceLastRetrain += dftSuccessCount;
