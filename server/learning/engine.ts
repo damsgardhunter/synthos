@@ -6283,7 +6283,7 @@ async function runAutonomousFastPath() {
       try {
         const topFp = buildFingerprint(bestFormulaThisBatch, bestTcThisBatch, {});
         const memBonus = discoveryMemory.computeMemoryRewardBonus(topFp);
-        rlReward += memBonus.bonus * 0.5;
+        rlReward += memBonus.rawBonus * 0.5;
       } catch (e) { console.error("[Engine] Memory reward bonus computation failed:", e); }
     }
 

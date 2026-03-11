@@ -49,8 +49,10 @@ export interface GenerationBias {
 
 export interface MemoryRewardBonus {
   bonus: number;
+  rawBonus: number;
   nearestPattern: string;
   similarity: number;
+  rawSimilarity: number;
 }
 
 const FINGERPRINT_KEYS: (keyof PatternFingerprint)[] = [
@@ -154,10 +156,12 @@ const ELEMENT_CLASS_MAP: Record<string, string> = {
   Yb: "lanthanide", Lu: "lanthanide",
   Al: "p-block-metal", Ga: "p-block-metal", In: "p-block-metal", Sn: "p-block-metal",
   Tl: "p-block-metal", Pb: "p-block-metal", Bi: "p-block-metal",
-  B: "metalloid", Si: "metalloid", Ge: "metalloid", As: "metalloid",
-  Sb: "metalloid", Te: "metalloid", Se: "metalloid",
-  H: "nonmetal", C: "nonmetal", N: "nonmetal", O: "nonmetal", F: "nonmetal",
-  P: "nonmetal", S: "nonmetal", Cl: "nonmetal",
+  B: "metalloid", Si: "metalloid", Ge: "metalloid",
+  Sb: "metalloid",
+  O: "chalcogen", S: "chalcogen", Se: "chalcogen", Te: "chalcogen",
+  F: "halogen", Cl: "halogen", Br: "halogen", I: "halogen",
+  N: "pnictogen", P: "pnictogen", As: "pnictogen",
+  H: "hydrogen", C: "carbon",
 };
 
 function getElementClasses(formula: string): string[] {
@@ -169,6 +173,20 @@ function getElementClasses(formula: string): string[] {
   }
   return Array.from(classes);
 }
+
+const FAMILY_ORBITAL_DEFAULTS: Record<string, string> = {
+  Hydride: "s/p",
+  Clathrate: "s/p",
+  Cuprate: "d-x2y2",
+  Pnictide: "d",
+  Chalcogenide: "d",
+  Intermetallic: "d",
+  "Heavy-fermion": "f",
+  Borocarbide: "d",
+  Bismuthate: "s/p",
+  Chevrel: "d",
+  Organic: "p",
+};
 
 export function buildFingerprint(
   formula: string,
@@ -191,6 +209,8 @@ export function buildFingerprint(
   const family = classifyFamily(formula);
   const elementClasses = getElementClasses(formula);
 
+  const defaultOrbital = FAMILY_ORBITAL_DEFAULTS[family] ?? "d";
+
   return {
     dosLevel: physicsContext?.dosLevel ?? 0.5,
     flatBandScore: physicsContext?.flatBandScore ?? (physicsContext?.bandFlatness ?? 0),
@@ -200,7 +220,7 @@ export function buildFingerprint(
     hydrogenDensity: physicsContext?.hydrogenDensity ?? (physicsContext?.hydrogenRatio ?? 0),
     dimensionality: physicsContext?.dimensionality ?? 3,
     elementClasses,
-    orbitalCharacter: physicsContext?.orbitalCharacter ?? "d",
+    orbitalCharacter: physicsContext?.orbitalCharacter ?? defaultOrbital,
     pairingChannel: physicsContext?.pairingChannel ?? "s-wave",
     correlationStrength: physicsContext?.correlationStrength ?? 0.3,
     metallicity: physicsContext?.metallicity ?? 0.7,
@@ -211,11 +231,13 @@ export function buildFingerprint(
 }
 
 const MAX_MEMORY_SIZE = 500;
+const FAILURE_CACHE_SIZE = 50;
 const MIN_TC_THRESHOLD = 20;
 const CLUSTER_SIMILARITY_THRESHOLD = 0.75;
 
 export class DiscoveryMemory {
   private records: DiscoveryRecord[] = [];
+  private failureCache: DiscoveryRecord[] = [];
   private clusters: PatternCluster[] = [];
   private nextId = 1;
 
@@ -224,7 +246,10 @@ export class DiscoveryMemory {
     fingerprint: PatternFingerprint,
     tc: number,
   ): DiscoveryRecord | null {
-    if (tc < MIN_TC_THRESHOLD) return null;
+    if (tc < MIN_TC_THRESHOLD) {
+      this.recordFailure(formula, fingerprint, tc);
+      return null;
+    }
 
     const existing = this.records.find(r => r.formula === formula);
     if (existing) {
@@ -248,13 +273,71 @@ export class DiscoveryMemory {
     this.records.push(record);
 
     if (this.records.length > MAX_MEMORY_SIZE) {
-      this.records.sort((a, b) => b.tc - a.tc);
-      this.records = this.records.slice(0, MAX_MEMORY_SIZE);
+      this.evictWithDiversity();
     }
 
     this.updateClusters(record);
 
     return record;
+  }
+
+  private recordFailure(formula: string, fingerprint: PatternFingerprint, tc: number): void {
+    const existing = this.failureCache.find(r => r.formula === formula);
+    if (existing) return;
+
+    const vec = fingerprintToVector(fingerprint);
+    let isNovel = true;
+    for (const f of this.failureCache) {
+      const sim = vectorCosineSimilarity(vec, fingerprintToVector(f.fingerprint));
+      if (sim > 0.9) {
+        isNovel = false;
+        break;
+      }
+    }
+    if (!isNovel) return;
+
+    const record: DiscoveryRecord = {
+      id: `fail-${this.nextId++}`,
+      formula,
+      tc,
+      fingerprint,
+      timestamp: Date.now(),
+    };
+    this.failureCache.push(record);
+
+    if (this.failureCache.length > FAILURE_CACHE_SIZE) {
+      this.failureCache.shift();
+    }
+  }
+
+  private evictWithDiversity(): void {
+    const keepTop = Math.floor(MAX_MEMORY_SIZE * 0.8);
+    const keepNovel = MAX_MEMORY_SIZE - keepTop;
+
+    this.records.sort((a, b) => b.tc - a.tc);
+    const topRecords = this.records.slice(0, keepTop);
+    const candidates = this.records.slice(keepTop);
+
+    const keptVecs = topRecords.map(r => fingerprintToVector(r.fingerprint));
+    const novelScored = candidates.map(r => {
+      const vec = fingerprintToVector(r.fingerprint);
+      let minSim = 1;
+      for (const kv of keptVecs) {
+        const sim = vectorCosineSimilarity(vec, kv);
+        if (sim < minSim) minSim = sim;
+      }
+      return { record: r, novelty: 1 - minSim };
+    });
+
+    novelScored.sort((a, b) => b.novelty - a.novelty);
+    const novelRecords = novelScored.slice(0, keepNovel).map(s => s.record);
+
+    this.records = [...topRecords, ...novelRecords];
+    this.rebuildClusters();
+  }
+
+  getFailureCache(): DiscoveryRecord[] {
+    return [...this.failureCache];
   }
 
   queryPatternSimilarity(features: PatternFingerprint, topK: number = 5): {
@@ -271,6 +354,16 @@ export class DiscoveryMemory {
 
     scored.sort((a, b) => b.similarity - a.similarity);
     return scored.slice(0, topK);
+  }
+
+  isKnownFailure(features: PatternFingerprint, threshold: number = 0.85): boolean {
+    if (this.failureCache.length === 0) return false;
+    const vec = fingerprintToVector(features);
+    for (const f of this.failureCache) {
+      const sim = vectorCosineSimilarity(vec, fingerprintToVector(f.fingerprint));
+      if (sim > threshold) return true;
+    }
+    return false;
   }
 
   getTopPatterns(n: number = 10): DiscoveryRecord[] {
@@ -363,12 +456,12 @@ export class DiscoveryMemory {
 
   computeMemoryRewardBonus(features: PatternFingerprint): MemoryRewardBonus {
     if (this.records.length === 0) {
-      return { bonus: 0.1, nearestPattern: "none", similarity: 0 };
+      return { bonus: 0.1, rawBonus: 0.1, nearestPattern: "none", similarity: 0, rawSimilarity: 0 };
     }
 
     const matches = this.queryPatternSimilarity(features, 3);
     if (matches.length === 0) {
-      return { bonus: 0.1, nearestPattern: "none", similarity: 0 };
+      return { bonus: 0.1, rawBonus: 0.1, nearestPattern: "none", similarity: 0, rawSimilarity: 0 };
     }
 
     const best = matches[0];
@@ -393,10 +486,16 @@ export class DiscoveryMemory {
       bonus += Math.min(0.1, tcImprovement * 0.05);
     }
 
+    if (this.isKnownFailure(features, 0.8)) {
+      bonus -= 0.05;
+    }
+
     return {
       bonus: Math.round(bonus * 1000) / 1000,
+      rawBonus: bonus,
       nearestPattern: best.record.formula,
       similarity: Math.round(sim * 1000) / 1000,
+      rawSimilarity: sim,
     };
   }
 
@@ -413,6 +512,7 @@ export class DiscoveryMemory {
     clusterCount: number;
     avgTc: number;
     bestTc: number;
+    failureCacheSize: number;
     topFamilies: { family: string; count: number }[];
   } {
     const avgTc = this.records.length > 0
@@ -437,6 +537,7 @@ export class DiscoveryMemory {
       clusterCount: this.clusters.length,
       avgTc: Math.round(avgTc * 10) / 10,
       bestTc: Math.round(bestTc * 10) / 10,
+      failureCacheSize: this.failureCache.length,
       topFamilies,
     };
   }
