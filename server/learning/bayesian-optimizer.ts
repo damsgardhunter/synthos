@@ -220,16 +220,25 @@ function choleskyForwardSolve(L: number[][], b: number[]): number[] {
   return y;
 }
 
+const INV_SQRT_2 = 1 / Math.sqrt(2);
+const INV_SQRT_2PI = 0.3989422804014327;
+
+function erf(x: number): number {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const ax = Math.abs(x);
+  const t = 1 / (1 + p * ax);
+  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
+  return sign * y;
+}
+
 function standardNormalCDF(x: number): number {
-  const t = 1 / (1 + 0.2316419 * Math.abs(x));
-  const d = 0.3989422804014327;
-  const p = d * Math.exp(-x * x / 2) * t *
-    (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  return x > 0 ? 1 - p : p;
+  return 0.5 * (1 + erf(x * INV_SQRT_2));
 }
 
 function standardNormalPDF(x: number): number {
-  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+  return INV_SQRT_2PI * Math.exp(-0.5 * x * x);
 }
 
 export class BayesianOptimizer {
@@ -300,6 +309,9 @@ export class BayesianOptimizer {
       const bottomHalf = this.observations.slice(Math.floor(this.maxObservations * 0.7));
       const sampled = bottomHalf.filter(() => Math.random() < 0.5);
       this.observations = [...topHalf, ...sampled].slice(0, this.maxObservations);
+      this.bestTcObserved = this.observations.length > 0
+        ? Math.max(...this.observations.map(o => o.tc))
+        : 0;
     }
 
     this.cachedL = null;
@@ -402,13 +414,14 @@ export class BayesianOptimizer {
     }
 
     const { L, alpha, obs: usedObs } = this.buildGP();
+    const yMean = this.cachedYMean;
 
     const kStar: number[] = new Array(usedObs.length);
     for (let i = 0; i < usedObs.length; i++) {
       kStar[i] = maternKernel52ARD(features, usedObs[i].features, this.lengthScales, this.signalVariance);
     }
 
-    let mean = this.cachedYMean;
+    let mean = yMean;
     for (let i = 0; i < usedObs.length; i++) {
       mean += kStar[i] * alpha[i];
     }
@@ -418,7 +431,8 @@ export class BayesianOptimizer {
     for (let i = 0; i < v.length; i++) {
       variance -= v[i] * v[i];
     }
-    variance = Math.max(variance, 1e-6);
+    const MIN_VARIANCE = 1e-6;
+    variance = Math.max(variance, MIN_VARIANCE);
 
     return { mean: Math.max(0, mean), std: Math.sqrt(variance) };
   }
@@ -430,11 +444,11 @@ export class BayesianOptimizer {
 
   acquisitionEI(formula: string, xi: number = 0.01): number {
     const { mean, std } = this.predict(formula);
-    if (std < 1e-8) return 0;
+    if (std < 1e-3) return 0;
     const improvement = mean - this.bestTcObserved - xi;
     const z = improvement / std;
     const result = improvement * standardNormalCDF(z) + std * standardNormalPDF(z);
-    return Number.isFinite(result) ? result : 0;
+    return Number.isFinite(result) ? Math.max(0, result) : 0;
   }
 
   thompsonSample(formula: string): number {
