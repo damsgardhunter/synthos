@@ -17,6 +17,7 @@ export interface DopingSpec {
   fraction: number;
   resultFormula: string;
   supercellSize: number;
+  minSupercellSize?: number;
   rationale: string;
   dopingCharacter: DopingCharacter;
   valenceChange: number;
@@ -1529,16 +1530,20 @@ function generateInterstitialVariants(
 
     const { character, valenceChange } = classifyDopingCharacter("", dopant, "interstitial");
 
+    const voidFraction = Math.max(0, 1 - packingFraction);
+
     let fracs: number[];
-    if (isHighDensity) {
-      fracs = [0.02];
+    if (packingFraction > 0.68) {
+      fracs = [0.01, 0.02];
     } else if (packingFraction > 0.60) {
-      fracs = [0.03, 0.05];
+      fracs = [0.02, 0.05];
     } else {
       fracs = [0.05, 0.10];
     }
     for (const fraction of fracs) {
       if (variants.length >= maxVariants) break;
+
+      if (fraction > voidFraction * 0.5) continue;
 
       const supercellCounts: Record<string, number> = {};
       for (const [el, n] of Object.entries(counts)) {
@@ -1546,7 +1551,11 @@ function generateInterstitialVariants(
       }
 
       const totalInSupercell = getTotalAtoms(supercellCounts);
-      const nInsert = Math.max(1, Math.round(totalInSupercell * fraction));
+      const maxInsertByVolume = Math.max(1, Math.floor(totalInSupercell * voidFraction * 0.3));
+      const nInsert = Math.min(
+        Math.max(1, Math.round(totalInSupercell * fraction)),
+        maxInsertByVolume
+      );
 
       supercellCounts[dopant] = (supercellCounts[dopant] || 0) + nInsert;
 
@@ -1561,6 +1570,8 @@ function generateInterstitialVariants(
       const supercellVolume = cellVolume * supercellMult;
       const carrierDensity = computeCarrierDensity(valenceChange, nInsert, supercellVolume);
 
+      const needsSupercell = supercellMult > 1 && nInsert < supercellMult;
+
       variants.push({
         type: "interstitial",
         base: formula,
@@ -1568,7 +1579,8 @@ function generateInterstitialVariants(
         fraction,
         resultFormula: normalizeFormula(resultFormula),
         supercellSize: supercellMult,
-        rationale: `${dopant} interstitial insertion (${(fraction * 100).toFixed(0)}%): ${nInsert} atoms into ${structureType} structure (APF=${packingFraction.toFixed(2)}) — electron-doping (delta_q=+${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3)`,
+        minSupercellSize: needsSupercell ? supercellMult : 1,
+        rationale: `${dopant} interstitial insertion (${(fraction * 100).toFixed(0)}%): ${nInsert} atoms into ${structureType} structure (APF=${packingFraction.toFixed(2)}, void=${(voidFraction * 100).toFixed(0)}%) — electron-doping (delta_q=+${valenceChange}, n=${carrierDensity.toExponential(1)} cm^-3)${needsSupercell ? ` [requires ${supercellMult}x supercell]` : ""}`,
         dopingCharacter: character,
         valenceChange,
         carrierDensity,
@@ -1583,13 +1595,17 @@ function reduceToFormulaUnit(supercellCounts: Record<string, number>, supercellM
   const intCounts = Object.values(supercellCounts).filter(v => v > 0).map(v => Math.round(v));
   const gcd = findGCD(intCounts);
 
-  if (gcd > 1) {
+  const safeGcd = supercellMult > 1
+    ? findGCD([gcd, supercellMult])
+    : gcd;
+
+  if (safeGcd > 1) {
     const reduced: Record<string, number> = {};
     for (const [el, n] of Object.entries(supercellCounts)) {
-      if (n > 0) reduced[el] = n / gcd;
+      if (n > 0) reduced[el] = n / safeGcd;
     }
     const total = Object.values(reduced).reduce((s, n) => s + n, 0);
-    if (total <= 20) return reduced;
+    if (total <= 128) return reduced;
   }
 
   if (supercellMult > 1) {
@@ -1601,12 +1617,12 @@ function reduceToFormulaUnit(supercellCounts: Record<string, number>, supercellM
       }
     }
     const total = Object.values(perUnit).reduce((s, n) => s + n, 0);
-    if (total <= 20) return perUnit;
+    if (total <= 128) return perUnit;
   }
 
   const reduced: Record<string, number> = {};
   for (const [el, n] of Object.entries(supercellCounts)) {
-    if (n > 0) reduced[el] = n / Math.max(1, gcd);
+    if (n > 0) reduced[el] = n / Math.max(1, safeGcd);
   }
   return reduced;
 }
@@ -1648,7 +1664,12 @@ export async function relaxDopedStructure(formula: string): Promise<RelaxationMe
           const dy = atoms[i].y - atoms[j].y;
           const dz = atoms[i].z - atoms[j].z;
           const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (d < 3.5) {
+
+          const ri = (getElementData(atoms[i].element)?.atomicRadius ?? 130) / 100;
+          const rj = (getElementData(atoms[j].element)?.atomicRadius ?? 130) / 100;
+          const bondCutoff = (ri + rj) * 1.3;
+
+          if (d < bondCutoff && d > 0.3) {
             distances.push(d);
           }
         }
