@@ -197,6 +197,7 @@ interface CalibrationData {
   residuals: number[];
   percentiles: { p5: number; p10: number; p25: number; p50: number; p75: number; p90: number; p95: number };
   absResidualPercentiles: { p50: number; p75: number; p90: number; p95: number };
+  relativeErrorPercentiles: { p50: number; p75: number; p90: number; p95: number };
   predictedVsActual: { formula: string; actual: number; predicted: number; residual: number }[];
   computedAt: number;
 }
@@ -241,6 +242,13 @@ function computeCalibration(model: GBModel): CalibrationData {
   const sortedResiduals = [...residuals].sort((a, b) => a - b);
   const absResiduals = residuals.map(r => Math.abs(r)).sort((a, b) => a - b);
 
+  const relativeErrors: number[] = [];
+  for (let i = 0; i < residuals.length; i++) {
+    const denom = Math.max(5, actualTcs[i]);
+    relativeErrors.push(Math.abs(residuals[i]) / denom);
+  }
+  relativeErrors.sort((a, b) => a - b);
+
   return {
     r2: Math.round(r2 * 10000) / 10000,
     mae: Math.round(mae * 100) / 100,
@@ -263,6 +271,12 @@ function computeCalibration(model: GBModel): CalibrationData {
       p75: Math.round(computePercentile(absResiduals, 75) * 100) / 100,
       p90: Math.round(computePercentile(absResiduals, 90) * 100) / 100,
       p95: Math.round(computePercentile(absResiduals, 95) * 100) / 100,
+    },
+    relativeErrorPercentiles: {
+      p50: Math.round(computePercentile(relativeErrors, 50) * 10000) / 10000,
+      p75: Math.round(computePercentile(relativeErrors, 75) * 10000) / 10000,
+      p90: Math.round(computePercentile(relativeErrors, 90) * 10000) / 10000,
+      p95: Math.round(computePercentile(relativeErrors, 95) * 10000) / 10000,
     },
     predictedVsActual: details,
     computedAt: Date.now(),
@@ -1338,9 +1352,14 @@ export function getConfidenceBand(predictedTc: number): { lower: number; upper: 
     const model = getTrainedModel();
     cachedCalibration = computeCalibration(model);
   }
-  const p90 = cachedCalibration.absResidualPercentiles.p90;
-  const scaleFactor = Math.max(1, predictedTc / 50);
-  const errorMargin = p90 * Math.sqrt(scaleFactor);
+
+  const relP90 = cachedCalibration.relativeErrorPercentiles.p90;
+  const absP90 = cachedCalibration.absResidualPercentiles.p90;
+
+  const relativeMargin = predictedTc * relP90;
+  const absoluteFloor = Math.min(absP90, 5);
+  const errorMargin = Math.max(relativeMargin, absoluteFloor);
+
   return {
     lower: Math.round(Math.max(0, predictedTc - errorMargin) * 10) / 10,
     upper: Math.round((predictedTc + errorMargin) * 10) / 10,
@@ -1410,7 +1429,7 @@ function logModelVersion(trigger: string, datasetSize: number): ModelVersionReco
     ensembleTreeCounts: ensembleStats.modelTreeCounts,
     successExamples: successExamples.length,
     failureExamples: failureExamples.length,
-    evaluatedEntries: evaluatedDataset.length,
+    evaluatedEntries: evaluatedDataset.size,
     trigger,
     predictionVariance: Math.round(predVariance * 100) / 100,
   };
@@ -1472,8 +1491,7 @@ export interface EvaluatedEntry {
   dosAtEF?: number;
 }
 
-const evaluatedDataset: EvaluatedEntry[] = [];
-const evaluatedFormulas = new Set<string>();
+const evaluatedDataset = new Map<string, EvaluatedEntry>();
 let xgboostRetrainCount = 0;
 let lastXGBoostRetrainCycle = 0;
 let totalDFTFeedback = 0;
@@ -1497,7 +1515,7 @@ export function incorporateDFTResult(
 ): boolean {
   totalDFTFeedback++;
 
-  const existing = evaluatedDataset.find(e => e.formula === formula);
+  const existing = evaluatedDataset.get(formula);
   if (existing) {
     if (SOURCE_PRIORITY[source] > SOURCE_PRIORITY[existing.source]) {
       existing.tc = Math.max(0, tc);
@@ -1513,8 +1531,7 @@ export function incorporateDFTResult(
     return false;
   }
 
-  evaluatedFormulas.add(formula);
-  evaluatedDataset.push({
+  evaluatedDataset.set(formula, {
     formula,
     tc: Math.max(0, tc),
     formationEnergy,
@@ -1542,17 +1559,23 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   const seen = new Set(augmentedData.map(e => e.formula));
   let newFromEval = 0;
-  for (const entry of evaluatedDataset) {
-    if (seen.has(entry.formula)) continue;
-    seen.add(entry.formula);
-    augmentedData.push({
+  for (const [formula, entry] of evaluatedDataset) {
+    if (seen.has(formula)) continue;
+    seen.add(formula);
+    const newEntry: SuperconEntry = {
       formula: entry.formula,
       tc: entry.tc,
       family: entry.stable ? "DFT-Evaluated" : "DFT-Failed",
       isSuperconductor: entry.tc > 0 && entry.stable,
       pressureGPa: 0,
-    });
+    };
+    augmentedData.push(newEntry);
+    SUPERCON_TRAINING_DATA.push(newEntry);
     newFromEval++;
+  }
+
+  if (newFromEval > 0) {
+    cachedTrainingSnapshot = null;
   }
 
   const X: number[][] = [];
@@ -1618,25 +1641,27 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 }
 
 export function getEvaluatedDatasetStats() {
+  const entries = [...evaluatedDataset.values()];
+  const n = entries.length;
+  let dft = 0, xtb = 0, external = 0, activeLearning = 0, stableCount = 0, tcSum = 0;
+  for (const e of entries) {
+    if (e.source === "dft") dft++;
+    else if (e.source === "xtb") xtb++;
+    else if (e.source === "external") external++;
+    else if (e.source === "active-learning") activeLearning++;
+    if (e.stable) stableCount++;
+    tcSum += e.tc;
+  }
   return {
-    totalEvaluated: evaluatedDataset.length,
+    totalEvaluated: n,
     totalDFTFeedback,
     xgboostRetrainCount,
     lastXGBoostRetrainCycle,
-    bySource: {
-      dft: evaluatedDataset.filter(e => e.source === "dft").length,
-      xtb: evaluatedDataset.filter(e => e.source === "xtb").length,
-      external: evaluatedDataset.filter(e => e.source === "external").length,
-      activeLearning: evaluatedDataset.filter(e => e.source === "active-learning").length,
-    },
-    stableCount: evaluatedDataset.filter(e => e.stable).length,
-    unstableCount: evaluatedDataset.filter(e => !e.stable).length,
-    avgTc: evaluatedDataset.length > 0
-      ? evaluatedDataset.reduce((s, e) => s + e.tc, 0) / evaluatedDataset.length
-      : 0,
-    datasetGrowthRate: evaluatedDataset.length > 0
-      ? evaluatedDataset.length / Math.max(1, xgboostRetrainCount)
-      : 0,
+    bySource: { dft, xtb, external, activeLearning },
+    stableCount,
+    unstableCount: n - stableCount,
+    avgTc: n > 0 ? tcSum / n : 0,
+    datasetGrowthRate: n > 0 ? n / Math.max(1, xgboostRetrainCount) : 0,
   };
 }
 
