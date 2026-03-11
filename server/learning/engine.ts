@@ -1050,7 +1050,7 @@ async function runPhase7_Superconductor() {
               for (const [el, stats] of ls.elementSuccessMatrix) {
                 if (stats.count >= 3 && stats.totalReward > 0) {
                   const avgReward = stats.totalReward / stats.count;
-                  const syntheticTc = avgReward * campaign.target.targetTc;
+                  const syntheticTc = Math.min(300, avgReward * campaign.target.targetTc);
                   const elVerified = verifiedInverseResults.some(r => r.formula.includes(el));
                   if (elVerified) {
                     rlAgent.recordElementOutcome([el], syntheticTc, syntheticTc > 20);

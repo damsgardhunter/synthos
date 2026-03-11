@@ -62,6 +62,17 @@ let cachedVarianceEnsembleXGB: GBEnsemble | null = null;
 function bootstrapSample(X: number[][], y: number[], ratio: number = BOOTSTRAP_SAMPLE_RATIO): { X: number[][]; y: number[] } {
   const n = X.length;
   const sampleSize = Math.floor(n * ratio);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const sampledX: number[][] = [];
+    const sampledY: number[] = [];
+    for (let i = 0; i < sampleSize; i++) {
+      const idx = Math.floor(Math.random() * n);
+      sampledX.push(X[idx]);
+      sampledY.push(y[idx]);
+    }
+    const uniqueY = new Set(sampledY.map(v => Math.round(v * 10)));
+    if (uniqueY.size > 1 || n < 5) return { X: sampledX, y: sampledY };
+  }
   const sampledX: number[][] = [];
   const sampledY: number[] = [];
   for (let i = 0; i < sampleSize; i++) {
@@ -130,6 +141,7 @@ interface CalibrationData {
 let cachedCalibration: CalibrationData | null = null;
 
 function computePercentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
   const idx = (p / 100) * (sorted.length - 1);
   const lower = Math.floor(idx);
   const upper = Math.ceil(idx);
@@ -140,12 +152,9 @@ function computePercentile(sorted: number[], p: number): number {
 function computeCalibration(model: GBModel): CalibrationData {
   const details: { formula: string; actual: number; predicted: number; residual: number }[] = [];
   const residuals: number[] = [];
+  const actualTcs: number[] = [];
   let sse = 0;
-  let sst = 0;
   let totalAbsError = 0;
-
-  const allTc = SUPERCON_TRAINING_DATA.map(e => e.tc);
-  const meanTc = allTc.reduce((s, v) => s + v, 0) / allTc.length;
 
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
@@ -155,9 +164,9 @@ function computeCalibration(model: GBModel): CalibrationData {
       const pred = predictWithModel(model, x);
       const residual = entry.tc - pred;
       residuals.push(residual);
+      actualTcs.push(entry.tc);
       details.push({ formula: entry.formula, actual: entry.tc, predicted: Math.round(pred * 10) / 10, residual: Math.round(residual * 10) / 10 });
       sse += residual ** 2;
-      sst += (entry.tc - meanTc) ** 2;
       totalAbsError += Math.abs(residual);
     } catch {
       continue;
@@ -165,8 +174,10 @@ function computeCalibration(model: GBModel): CalibrationData {
   }
 
   const n = details.length;
-  const mse = sse / n;
-  const mae = totalAbsError / n;
+  const meanTc = n > 0 ? actualTcs.reduce((s, v) => s + v, 0) / n : 0;
+  const sst = actualTcs.reduce((s, v) => s + (v - meanTc) ** 2, 0);
+  const mse = n > 0 ? sse / n : 0;
+  const mae = n > 0 ? totalAbsError / n : 0;
   const r2 = sst < 1e-6 ? 0 : 1 - sse / sst;
   const rmse = Math.sqrt(mse);
 

@@ -1067,6 +1067,18 @@ export function updatePillarWeightsFromReward(tcReward: number, evaluation: Pill
   for (const key of Object.keys(pillarWeights) as (keyof typeof pillarWeights)[]) {
     pillarWeights[key] /= totalWeight;
   }
+
+  if (rewardCount > 0 && rewardCount % 10 === 0) {
+    regularizePillarWeights(0.15);
+  }
+}
+
+function regularizePillarWeights(decayStrength: number): void {
+  const nPillars = Object.keys(pillarWeights).length;
+  const uniform = 1.0 / nPillars;
+  for (const key of Object.keys(pillarWeights) as (keyof typeof pillarWeights)[]) {
+    pillarWeights[key] = pillarWeights[key] * (1 - decayStrength) + uniform * decayStrength;
+  }
 }
 
 const pillarDFTFeedback: { pillar: string; correct: number; total: number }[] = [];
