@@ -199,6 +199,7 @@ interface RankedCandidate {
   acquisitionScore: number;
   normalizedTc: number;
   uncertainty: number;
+  gnnUncertainty: number;
   xgbUncertainty: number;
   selectionTier: "best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration" | "pure-curiosity";
   targetPressureGpa?: number;
@@ -709,6 +710,7 @@ export function selectForDFT(
         acquisitionScore: s.acquisitionScore,
         normalizedTc: s.normalizedTc,
         uncertainty: s.combinedUncertainty,
+        gnnUncertainty: s.gnnUncertainty,
         xgbUncertainty: s.xgbUncertainty,
         selectionTier: tier,
         eiScore: s.eiScore,
@@ -774,6 +776,7 @@ export function selectForDFT(
           acquisitionScore: ranked.acquisitionScore + sample.uncertainty * 0.5,
           normalizedTc: ranked.normalizedTc,
           uncertainty: sample.uncertainty,
+          gnnUncertainty: sample.uncertainty,
           xgbUncertainty: sample.uncertainty,
           selectionTier: "pressure-exploration",
           targetPressureGpa: sample.pressureGpa,
@@ -1737,7 +1740,7 @@ export async function runActiveLearningCycle(
   session.recordCycleEnd(bestTcThisLoop);
 
   const avgGnnUnc = selected.length > 0
-    ? selected.reduce((s, r) => s + (r.uncertainty - r.xgbUncertainty * 0.5) * 2, 0) / selected.length
+    ? selected.reduce((s, r) => s + r.gnnUncertainty, 0) / selected.length
     : 0;
   const uncReductionPct = avgUncertaintyBefore > 0
     ? (avgUncertaintyBefore - avgUncertaintyAfter) / avgUncertaintyBefore * 100
