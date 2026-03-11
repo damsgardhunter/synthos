@@ -104,7 +104,10 @@ function applyZScore(raw: number[]): number[] {
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => String("⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)));
+  cleaned = cleaned.replace(/[⁺⁻]+/g, "");
+  cleaned = cleaned.replace(/[A-Z][a-z]?\d*[+\-]/g, match => match.replace(/\d*[+\-]$/, ""));
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let m;

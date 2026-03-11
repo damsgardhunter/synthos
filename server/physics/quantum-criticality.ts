@@ -94,6 +94,9 @@ function expandParentheses(formula: string): string {
 function parseFormulaCounts(formula: string): Record<string, number> {
   let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => String("⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)));
+  cleaned = cleaned.replace(/[⁺⁻]+/g, "");
+  cleaned = cleaned.replace(/(\d)[+\-]\b/g, "$1");
+  cleaned = cleaned.replace(/[A-Z][a-z]?\d*[+\-]/g, match => match.replace(/\d*[+\-]$/, ""));
   cleaned = expandParentheses(cleaned);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
@@ -122,16 +125,20 @@ function estimateStructuralTransitionPressure(
 
   if (hRatio < 0.3) return -1;
 
+  const hasCovalentNetwork = elements.some(e => ["C", "B", "N"].includes(e));
+  const bulkFloor = hasCovalentNetwork ? 150 : 50;
+
   let avgBulk = 0;
   let metalFrac = 0;
   for (const el of elements) {
     if (el === "H") continue;
     const data = getElementData(el);
     const frac = (counts[el] || 1) / totalAtoms;
-    avgBulk += (data?.bulkModulus ?? 50) * frac;
+    avgBulk += (data?.bulkModulus ?? bulkFloor) * frac;
     metalFrac += frac;
   }
   avgBulk /= Math.max(metalFrac, 0.01);
+  if (hasCovalentNetwork) avgBulk = Math.max(avgBulk, bulkFloor);
 
   const baseTransitionP = avgBulk * 0.8 + hRatio * 100;
 

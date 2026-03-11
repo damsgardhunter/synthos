@@ -390,6 +390,8 @@ export function parseFormulaElements(formula: string): string[] {
   if (typeof formula !== "string") formula = String(formula ?? "");
   let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => String("⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)));
+  cleaned = cleaned.replace(/[⁺⁻]+/g, "");
+  cleaned = cleaned.replace(/[A-Z][a-z]?\d*[+\-]/g, match => match.replace(/\d*[+\-]$/, ""));
   cleaned = cleaned.replace(/[()[\]]/g, "");
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
