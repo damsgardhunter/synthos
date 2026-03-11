@@ -17,6 +17,7 @@ import {
   isTransitionMetal,
   isRareEarth,
 } from "../learning/elemental-data";
+import { computeFermiSurface, type LindhardSusceptibility } from "./fermi-surface-engine";
 
 export type QCPType =
   | "Mott"
@@ -79,6 +80,40 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
+function estimateFilling(
+  elements: string[],
+  counts: Record<string, number>,
+  targetElement: string,
+): { filling: number; integerDistance: number } {
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  const data = getElementData(targetElement);
+  const valence = data?.valenceElectrons ?? 2;
+
+  let chargeTransfer = 0;
+  for (const el of elements) {
+    if (el === targetElement) continue;
+    const elData = getElementData(el);
+    const elEN = elData?.paulingElectronegativity ?? 1.5;
+    const targetEN = data?.paulingElectronegativity ?? 1.5;
+    const enDiff = elEN - targetEN;
+    const frac = (counts[el] || 1) / totalAtoms;
+    chargeTransfer += enDiff * 0.3 * frac;
+  }
+
+  const effectiveElectrons = valence + chargeTransfer;
+
+  const dOrbitals = 10;
+  const fOrbitals = 14;
+  const orbitalCapacity = valence > 8 ? fOrbitals : (valence > 2 || isTransitionMetal(targetElement) || isRareEarth(targetElement)) ? dOrbitals : 2;
+
+  const filling = Math.max(0, Math.min(1, effectiveElectrons / orbitalCapacity));
+
+  const nearestInteger = Math.round(filling * orbitalCapacity);
+  const integerDistance = Math.abs(filling * orbitalCapacity - nearestInteger) / orbitalCapacity;
+
+  return { filling, integerDistance };
+}
+
 function computeMottChannel(
   elements: string[],
   counts: Record<string, number>,
@@ -86,6 +121,7 @@ function computeMottChannel(
 ): number {
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   let maxUoverW = 0;
+  let bestFillingPenalty = 1.0;
 
   for (const el of elements) {
     const U = getHubbardU(el);
@@ -93,30 +129,47 @@ function computeMottChannel(
     const W = Math.max(0.5, estimateBandwidthW(el));
     const frac = (counts[el] || 1) / totalAtoms;
     const ratio = (U / W) * Math.sqrt(frac);
-    if (ratio > maxUoverW) maxUoverW = ratio;
+
+    if (ratio > maxUoverW) {
+      maxUoverW = ratio;
+
+      const { filling, integerDistance } = estimateFilling(elements, counts, el);
+      if (integerDistance > 0.15) {
+        bestFillingPenalty = Math.max(0.2, 1.0 - (integerDistance - 0.15) * 4.0);
+      } else {
+        bestFillingPenalty = 1.0;
+      }
+    }
   }
 
   const mottProx = electronic.mottProximityScore ?? 0;
   const correlation = electronic.correlationStrength ?? 0;
 
   let mottScore = 0;
-  if (maxUoverW > 0.3) {
+
+  if (maxUoverW > 1.5) {
+    mottScore = 0.95;
+  } else if (maxUoverW > 0.8) {
     const distFromTransition = Math.abs(maxUoverW - 1.0);
-    mottScore = Math.exp(-distFromTransition * distFromTransition * 4.0);
+    mottScore = Math.exp(-distFromTransition * distFromTransition * 8.0);
+  } else if (maxUoverW > 0.3) {
+    mottScore = maxUoverW * 0.3;
   }
 
-  mottScore = Math.max(mottScore, mottProx * 0.8);
+  mottScore *= bestFillingPenalty;
+
+  mottScore = Math.max(mottScore, mottProx * 0.8 * bestFillingPenalty);
 
   if (correlation > 0.5) {
-    mottScore = Math.min(1.0, mottScore + (correlation - 0.5) * 0.3);
+    mottScore = Math.min(1.0, mottScore + (correlation - 0.5) * 0.3 * bestFillingPenalty);
   }
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3 &&
     elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
   const isNickelate = elements.includes("Ni") && elements.includes("O") && elements.length >= 3;
 
-  if (isCuprate) mottScore = Math.max(mottScore, 0.90);
-  if (isNickelate) mottScore = Math.max(mottScore, 0.75);
+  if (isCuprate) mottScore = Math.max(mottScore, 0.90 * bestFillingPenalty);
+  if (isNickelate) mottScore = Math.max(mottScore, 0.75 * bestFillingPenalty);
 
   return Math.min(1.0, mottScore);
 }
@@ -126,6 +179,7 @@ function computeSDWChannel(
   elements: string[],
   counts: Record<string, number>,
   electronic: ElectronicStructure,
+  lindhard?: LindhardSusceptibility,
 ): number {
   const spin = computeDynamicSpinSusceptibility(formula, electronic);
   const nestingScore = electronic.nestingScore ?? 0;
@@ -147,7 +201,14 @@ function computeSDWChannel(
     sdwScore = Math.exp(-distFromCritical * distFromCritical * 2.0) * 0.6;
   }
 
-  if (nestingScore > 0.4) {
+  if (lindhard && lindhard.sdwSusceptibility > 0) {
+    const chi0Contribution = Math.min(0.5, lindhard.sdwSusceptibility * 0.1);
+    sdwScore += chi0Contribution;
+
+    if (lindhard.divergenceProximity > 0.5) {
+      sdwScore += (lindhard.divergenceProximity - 0.5) * 0.4;
+    }
+  } else if (nestingScore > 0.4) {
     sdwScore += nestingScore * 0.3;
   }
 
@@ -171,6 +232,7 @@ function computeCDWChannel(
   elements: string[],
   electronic: ElectronicStructure,
   phonon: PhononSpectrum,
+  lindhard?: LindhardSusceptibility,
 ): number {
   const nestingScore = electronic.nestingScore ?? 0;
   const vanHoveProx = electronic.vanHoveProximity ?? 0;
@@ -178,15 +240,25 @@ function computeCDWChannel(
 
   let cdwScore = 0;
 
-  const nestingDriven = Math.min(1.0, nestingScore * dosEF * 0.3);
-  cdwScore += nestingDriven * 0.4;
+  if (lindhard && lindhard.cdwSusceptibility > 0) {
+    const chi0Contribution = Math.min(0.5, lindhard.cdwSusceptibility * 0.08);
+    cdwScore += chi0Contribution * 0.5;
+
+    if (lindhard.divergenceProximity > 0.3 && phonon.softModePresent) {
+      cdwScore += lindhard.divergenceProximity * phonon.softModeScore * 0.4;
+    }
+  } else {
+    const nestingDriven = Math.min(1.0, nestingScore * dosEF * 0.3);
+    cdwScore += nestingDriven * 0.4;
+  }
 
   if (vanHoveProx > 0.3) {
     cdwScore += (vanHoveProx - 0.3) * 0.4;
   }
 
   if (phonon.softModePresent) {
-    cdwScore += phonon.softModeScore * 0.3;
+    const lindhardBoost = lindhard ? (1 + lindhard.divergenceProximity * 0.5) : 1.0;
+    cdwScore += phonon.softModeScore * 0.3 * lindhardBoost;
   }
 
   const isNbSe2 = elements.includes("Nb") && elements.includes("Se");
@@ -470,9 +542,17 @@ export function detectQuantumCriticality(
   const phonon = physicsData?.phonon ?? computePhononSpectrum(formula, electronic);
   const coupling = physicsData?.coupling ?? computeElectronPhononCoupling(electronic, phonon, formula, 0);
 
+  let lindhard: LindhardSusceptibility | undefined;
+  try {
+    const fs = computeFermiSurface(formula);
+    lindhard = fs.lindhardSusceptibility;
+  } catch {
+    lindhard = undefined;
+  }
+
   const mottScore = computeMottChannel(elements, counts, electronic);
-  const sdwScore = computeSDWChannel(formula, elements, counts, electronic);
-  const cdwScore = computeCDWChannel(elements, electronic, phonon);
+  const sdwScore = computeSDWChannel(formula, elements, counts, electronic, lindhard);
+  const cdwScore = computeCDWChannel(elements, electronic, phonon, lindhard);
   const nematicScore = computeNematicChannel(elements, electronic);
   const structuralScore = computeStructuralChannel(elements, counts, phonon, coupling);
   const orbitalSelectiveScore = computeOrbitalSelectiveChannel(elements, counts, electronic);

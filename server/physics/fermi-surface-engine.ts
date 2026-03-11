@@ -21,6 +21,15 @@ export interface NestingVector {
   connectedPockets: [number, number];
 }
 
+export interface LindhardSusceptibility {
+  chi0Peak: number;
+  chi0PeakQ: number[];
+  chi0Average: number;
+  divergenceProximity: number;
+  sdwSusceptibility: number;
+  cdwSusceptibility: number;
+}
+
 export interface FermiSurfaceResult {
   formula: string;
   fermiEnergy: number;
@@ -34,6 +43,7 @@ export interface FermiSurfaceResult {
   cylindricalCharacter: number;
   nestingVectors: NestingVector[];
   nestingScore: number;
+  lindhardSusceptibility: LindhardSusceptibility;
   fsDimensionality: number;
   sigmaBandPresence: number;
   multiBandScore: number;
@@ -685,6 +695,123 @@ function detectFermiPockets(
   return pockets;
 }
 
+function computeLindhardSusceptibility(
+  pockets: FermiPocket[],
+  evaluations: BZEvaluation[],
+  fermiEnergy: number,
+  nestingVectors: NestingVector[],
+): LindhardSusceptibility {
+  if (pockets.length < 2 || evaluations.length === 0) {
+    return {
+      chi0Peak: 0, chi0PeakQ: [0, 0, 0], chi0Average: 0,
+      divergenceProximity: 0, sdwSusceptibility: 0, cdwSusceptibility: 0,
+    };
+  }
+
+  const fermiTolerance = 0.15;
+  const kBT = 0.025;
+
+  const fermiPoints: { k: number[]; energy: number; velocity: number; bandIndex: number; pocketIndex: number }[] = [];
+  for (const pocket of pockets) {
+    for (const ev of evaluations) {
+      if (pocket.bandIndex < ev.eigenvalues.length) {
+        const e = ev.eigenvalues[pocket.bandIndex];
+        if (Math.abs(e - fermiEnergy) < fermiTolerance * 2) {
+          fermiPoints.push({
+            k: ev.k,
+            energy: e,
+            velocity: pocket.avgVelocity || 0.5,
+            bandIndex: pocket.bandIndex,
+            pocketIndex: pocket.index,
+          });
+        }
+      }
+    }
+  }
+
+  if (fermiPoints.length < 4) {
+    return {
+      chi0Peak: 0, chi0PeakQ: [0, 0, 0], chi0Average: 0,
+      divergenceProximity: 0, sdwSusceptibility: 0, cdwSusceptibility: 0,
+    };
+  }
+
+  const qVectors: { q: number[]; chi0: number }[] = [];
+
+  if (nestingVectors.length > 0) {
+    for (const nv of nestingVectors) {
+      let chi0_q = 0;
+      let pairCount = 0;
+
+      for (let i = 0; i < Math.min(fermiPoints.length, 60); i++) {
+        for (let j = 0; j < Math.min(fermiPoints.length, 60); j++) {
+          if (i === j) continue;
+          if (fermiPoints[i].pocketIndex === fermiPoints[j].pocketIndex) continue;
+
+          const dq = [
+            fermiPoints[j].k[0] - fermiPoints[i].k[0] - nv.q[0],
+            fermiPoints[j].k[1] - fermiPoints[i].k[1] - nv.q[1],
+            fermiPoints[j].k[2] - fermiPoints[i].k[2] - nv.q[2],
+          ];
+          const dqMag = Math.sqrt(dq[0] * dq[0] + dq[1] * dq[1] + dq[2] * dq[2]);
+
+          if (dqMag < 0.1) {
+            const eDiff = fermiPoints[j].energy - fermiPoints[i].energy;
+            const denominator = Math.abs(eDiff) + kBT;
+            const fDiff = 1 / (1 + Math.exp(fermiPoints[i].energy / kBT))
+                        - 1 / (1 + Math.exp(fermiPoints[j].energy / kBT));
+            chi0_q += Math.abs(fDiff) / denominator;
+            pairCount++;
+          }
+        }
+      }
+
+      if (pairCount > 0) {
+        chi0_q /= pairCount;
+        chi0_q *= pairCount;
+      }
+
+      qVectors.push({ q: nv.q, chi0: chi0_q });
+    }
+  }
+
+  if (qVectors.length === 0) {
+    const dosEF = fermiPoints.filter(fp => Math.abs(fp.energy - fermiEnergy) < fermiTolerance).length;
+    const baseChi0 = dosEF * 0.01;
+    return {
+      chi0Peak: baseChi0,
+      chi0PeakQ: [0, 0, 0],
+      chi0Average: baseChi0,
+      divergenceProximity: Math.min(1.0, baseChi0 * 0.1),
+      sdwSusceptibility: baseChi0 * 0.5,
+      cdwSusceptibility: baseChi0 * 0.3,
+    };
+  }
+
+  qVectors.sort((a, b) => b.chi0 - a.chi0);
+  const chi0Peak = qVectors[0].chi0;
+  const chi0PeakQ = qVectors[0].q;
+  const chi0Average = qVectors.reduce((s, v) => s + v.chi0, 0) / qVectors.length;
+
+  const divergenceProximity = Math.min(1.0, chi0Peak / (chi0Peak + 5.0));
+
+  const electronPockets = pockets.filter(p => p.type === "electron");
+  const holePockets = pockets.filter(p => p.type === "hole");
+  const hasEHNesting = electronPockets.length > 0 && holePockets.length > 0;
+
+  const sdwSusceptibility = chi0Peak * (hasEHNesting ? 1.2 : 0.6) * (1 + divergenceProximity);
+  const cdwSusceptibility = chi0Peak * 0.8 * (1 + divergenceProximity * 0.5);
+
+  return {
+    chi0Peak: Number(chi0Peak.toFixed(4)),
+    chi0PeakQ: chi0PeakQ.map(v => Number(v.toFixed(4))),
+    chi0Average: Number(chi0Average.toFixed(4)),
+    divergenceProximity: Number(divergenceProximity.toFixed(4)),
+    sdwSusceptibility: Number(sdwSusceptibility.toFixed(4)),
+    cdwSusceptibility: Number(cdwSusceptibility.toFixed(4)),
+  };
+}
+
 function computeNestingVectors(
   pockets: FermiPocket[],
   evaluations: BZEvaluation[],
@@ -925,6 +1052,8 @@ export function computeFermiSurface(formula: string): FermiSurfaceResult {
     ? Number(Math.min(1.0, nestingVectors.reduce((s, nv) => s + nv.strength, 0) / Math.max(1, nestingVectors.length)).toFixed(4))
     : 0;
 
+  const lindhardSusceptibility = computeLindhardSusceptibility(pockets, evaluations, fermiEnergy, nestingVectors);
+
   const fsDimensionality = computeFSDimensionality(pockets, evaluations, fermiEnergy);
   const sigmaBandPresence = computeSigmaBandPresence(pockets, elements);
   const multiBandScore = computeMultiBandScore(pockets);
@@ -942,6 +1071,7 @@ export function computeFermiSurface(formula: string): FermiSurfaceResult {
     cylindricalCharacter: Number(avgCylindrical.toFixed(4)),
     nestingVectors,
     nestingScore,
+    lindhardSusceptibility,
     fsDimensionality,
     sigmaBandPresence,
     multiBandScore,
