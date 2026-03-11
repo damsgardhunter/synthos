@@ -15,7 +15,7 @@ export interface EvaluationRecord {
   predictedFormationEnergy: number;
   actualFormationEnergy: number | null;
   timestamp: number;
-  source: "dft" | "xtb";
+  source: "dft" | "xtb" | "surrogate";
 }
 
 export interface FamilyCalibration {
@@ -322,7 +322,7 @@ export function recordEvaluationResult(
   formula: string,
   predicted: { tc: number; stable: boolean; formationEnergy: number },
   actual: { tc: number; stable: boolean; formationEnergy: number | null },
-  source: "dft" | "xtb" = "dft"
+  source: "dft" | "xtb" | "surrogate" = "dft"
 ): void {
   const family = classifyFamily(formula);
 
@@ -347,12 +347,14 @@ export function recordEvaluationResult(
   addToKnownVectors(formula);
 
   const acc = getOrCreateFamilyAccumulator(family);
-  const absErr = Math.abs(predicted.tc - actual.tc);
-  acc.sumAbsErr += absErr;
-  acc.sumSignedErr += (predicted.tc - actual.tc);
-  if (predicted.tc > actual.tc * 1.2) acc.overestimates++;
-  if (predicted.stable === actual.stable) acc.stableCorrect++;
-  acc.count++;
+  if (source !== "surrogate") {
+    const absErr = Math.abs(predicted.tc - actual.tc);
+    acc.sumAbsErr += absErr;
+    acc.sumSignedErr += (predicted.tc - actual.tc);
+    if (predicted.tc > actual.tc * 1.2) acc.overestimates++;
+    if (predicted.stable === actual.stable) acc.stableCorrect++;
+    acc.count++;
+  }
 
   if (evaluationHistory.length % 20 === 0 && evaluationHistory.length >= 10) {
     adaptWeights();
@@ -362,7 +364,7 @@ export function recordEvaluationResult(
 function adaptWeights(): void {
   adaptationCycle++;
 
-  const recent = evaluationHistory.slice(-50);
+  const recent = evaluationHistory.slice(-50).filter(r => r.source !== "surrogate");
   if (recent.length < 10) return;
 
   const tcErrors = recent.map(r => Math.abs(r.predictedTc - r.actualTc));
@@ -415,15 +417,17 @@ export function getCalibrationStats(): FeedbackLoopStats {
 
   familyCalibrations.sort((a, b) => b.sampleCount - a.sampleCount);
 
-  const globalAbsErr = evaluationHistory.length > 0
-    ? evaluationHistory.reduce((s, r) => s + Math.abs(r.predictedTc - r.actualTc), 0) / evaluationHistory.length
+  const calibratedHistory = evaluationHistory.filter(r => r.source !== "surrogate");
+
+  const globalAbsErr = calibratedHistory.length > 0
+    ? calibratedHistory.reduce((s, r) => s + Math.abs(r.predictedTc - r.actualTc), 0) / calibratedHistory.length
     : 0;
 
-  const globalOverestimate = evaluationHistory.length > 0
-    ? evaluationHistory.filter(r => r.predictedTc > r.actualTc * 1.2).length / evaluationHistory.length
+  const globalOverestimate = calibratedHistory.length > 0
+    ? calibratedHistory.filter(r => r.predictedTc > r.actualTc * 1.2).length / calibratedHistory.length
     : 0;
 
-  const recentErrors = evaluationHistory.slice(-MAX_RECENT_ERRORS).map(r => ({
+  const recentErrors = calibratedHistory.slice(-MAX_RECENT_ERRORS).map(r => ({
     formula: r.formula,
     predicted: r.predictedTc,
     actual: r.actualTc,
@@ -433,7 +437,7 @@ export function getCalibrationStats(): FeedbackLoopStats {
   const expWeight = computeExplorationWeight();
 
   return {
-    totalEvaluations: evaluationHistory.length,
+    totalEvaluations: calibratedHistory.length,
     globalMeanAbsError: Math.round(globalAbsErr * 100) / 100,
     globalOverestimateRatio: Math.round(globalOverestimate * 1000) / 1000,
     familyCalibrations,

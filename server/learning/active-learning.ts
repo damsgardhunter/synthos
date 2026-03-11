@@ -119,6 +119,8 @@ const convergenceStats: ActiveLearningConvergence = {
 };
 
 let totalEnrichedSinceLastRetrain = 0;
+const GNN_ENSEMBLE_WEIGHT = 0.4;
+const SURROGATE_ENSEMBLE_WEIGHT = 0.6;
 let enrichmentLogCount = 0;
 let lastRetrainCycle = 0;
 const RETRAIN_CYCLE_INTERVAL = 20;
@@ -924,7 +926,7 @@ async function runDFTEnrichmentForCandidate(
     } catch {}
 
     const ensemblePredictedTc = gnnTcPredicted > 0
-      ? gnnTcPredicted * 0.4 + gb.tcPredicted * 0.6
+      ? gnnTcPredicted * GNN_ENSEMBLE_WEIGHT + gb.tcPredicted * SURROGATE_ENSEMBLE_WEIGHT
       : gb.tcPredicted;
 
     const modelPred: ModelPrediction = {
@@ -978,7 +980,7 @@ async function runDFTEnrichmentForCandidate(
       getCurrentCycleNumber()
     );
 
-    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * 0.4 + reconciledTc * 0.6 : reconciledTc;
+    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * GNN_ENSEMBLE_WEIGHT + reconciledTc * SURROGATE_ENSEMBLE_WEIGHT : reconciledTc;
     const fidelity = entry.tier === "full-dft" ? "dft" as const : "xtb" as const;
     recordEvaluationResult(
       candidate.formula,
@@ -1076,7 +1078,7 @@ async function runDFTEnrichmentForCandidate(
       gnnFePredicted = gnnPred.formationEnergy;
     } catch {}
 
-    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * 0.6 + gb.tcPredicted * 0.4 : gb.tcPredicted;
+    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * GNN_ENSEMBLE_WEIGHT + gb.tcPredicted * SURROGATE_ENSEMBLE_WEIGHT : gb.tcPredicted;
 
     const fallbackModelPred: ModelPrediction = {
       predicted_Tc: predictedTc,
@@ -1132,7 +1134,7 @@ async function runDFTEnrichmentForCandidate(
       candidate.formula,
       { tc: predictedTc, stable: gnnStablePredicted, formationEnergy: gnnFePredicted },
       { tc: gb.tcPredicted, stable: isStable, formationEnergy: formEnergy },
-      hasExternalDFT ? "dft" : "xtb"
+      hasExternalDFT ? "dft" : "surrogate"
     );
 
     return true;
@@ -1157,7 +1159,7 @@ async function runDFTEnrichmentForCandidate(
       candidate.formula,
       { tc: failPredTc, stable: true, formationEnergy: 0 },
       { tc: 0, stable: false, formationEnergy: null },
-      "xtb"
+      "surrogate"
     );
 
     return false;
