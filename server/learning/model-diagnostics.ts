@@ -142,6 +142,13 @@ export interface ErrorCluster {
   suggestedAction: string;
 }
 
+export interface CrossModelInsight {
+  models: string[];
+  family: string;
+  pattern: string;
+  suggestion: string;
+}
+
 export interface ErrorAnalysisReport {
   totalOutcomes: number;
   totalErrors: number;
@@ -150,9 +157,11 @@ export interface ErrorAnalysisReport {
   overallBias: "over" | "under" | "neutral";
   overallMeanError: number;
   overallRMSE: number;
+  overallNRMSE: number;
   topFailures: { formula: string; predicted: number; actual: number; error: number; family: string }[];
   familyDataGaps: { family: string; sampleCount: number; needsMore: boolean }[];
   dataRequestSuggestions: string[];
+  crossModelInsights: CrossModelInsight[];
 }
 
 export interface FailedMaterialSummary {
@@ -317,25 +326,49 @@ function computeCalibrationBins(): CalibrationBin[] {
 }
 
 function computeErrorAnalysis(): ErrorAnalysisReport {
-  const outcomes = getOutcomes();
+  const allOutcomes = getOutcomes();
+  const outcomes = allOutcomes.filter(o =>
+    Number.isFinite(o.predicted) && Number.isFinite(o.actual)
+  );
   const totalOutcomes = outcomes.length;
 
   if (totalOutcomes === 0) {
     return {
       totalOutcomes: 0, totalErrors: 0, largeErrors: 0,
       errorClusters: [], overallBias: "neutral", overallMeanError: 0, overallRMSE: 0,
+      overallNRMSE: 0,
       topFailures: [], familyDataGaps: [], dataRequestSuggestions: [],
+      crossModelInsights: [],
     };
   }
 
+  const now = Date.now();
+  const HALF_LIFE_MS = 3600_000;
+  const weights = outcomes.map(o => {
+    const age = now - o.timestamp;
+    return Math.pow(0.5, age / HALF_LIFE_MS);
+  });
+  const totalWeight = weights.reduce((s, w) => s + w, 0);
+
   const errors = outcomes.map(o => o.predicted - o.actual);
   const absErrors = errors.map(e => Math.abs(e));
-  const overallMeanError = errors.reduce((s, e) => s + e, 0) / errors.length;
-  const overallRMSE = Math.sqrt(absErrors.reduce((s, e) => s + e * e, 0) / absErrors.length);
+  const overallMeanError = totalWeight > 0
+    ? errors.reduce((s, e, i) => s + e * weights[i], 0) / totalWeight
+    : 0;
+  const weightedSqErr = totalWeight > 0
+    ? errors.reduce((s, e, i) => s + e * e * weights[i], 0) / totalWeight
+    : 0;
+  const overallRMSE = Math.sqrt(weightedSqErr);
+
+  const actualRange = Math.max(1, Math.max(...outcomes.map(o => Math.abs(o.actual))));
+  const overallNRMSE = overallRMSE / actualRange;
+
   const largeErrorThreshold = 30;
   const largeErrors = absErrors.filter(e => e > largeErrorThreshold).length;
   const totalErrors = absErrors.filter(e => e > 5).length;
-  const overallBias: "over" | "under" | "neutral" = overallMeanError > 5 ? "over" : overallMeanError < -5 ? "under" : "neutral";
+  const avgActualAll = outcomes.reduce((s, o) => s + Math.abs(o.actual), 0) / totalOutcomes;
+  const biasThreshGlobal = Math.max(5, avgActualAll * 0.15);
+  const overallBias: "over" | "under" | "neutral" = overallMeanError > biasThreshGlobal ? "over" : overallMeanError < -biasThreshGlobal ? "under" : "neutral";
 
   const clusters: ErrorCluster[] = [];
   const families = ["hydride", "cuprate", "pnictide", "boride", "conventional"];
@@ -487,6 +520,40 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
     }
   }
 
+  const crossModelInsights: CrossModelInsight[] = [];
+  const uniqueModels = [...new Set(outcomes.map(o => o.model))];
+  if (uniqueModels.length >= 2) {
+    for (const family of families) {
+      const modelBiases: { model: string; mean: number; count: number }[] = [];
+      for (const model of uniqueModels) {
+        const mfOutcomes = outcomes.filter(o => o.model === model && o.family === family);
+        if (mfOutcomes.length < 2) continue;
+        const mean = mfOutcomes.reduce((s, o) => s + (o.predicted - o.actual), 0) / mfOutcomes.length;
+        modelBiases.push({ model, mean, count: mfOutcomes.length });
+      }
+      if (modelBiases.length >= 2) {
+        const allOver = modelBiases.every(mb => mb.mean > 5);
+        const allUnder = modelBiases.every(mb => mb.mean < -5);
+        const mixed = modelBiases.some(mb => mb.mean > 5) && modelBiases.some(mb => mb.mean < -5);
+        if (allOver || allUnder) {
+          crossModelInsights.push({
+            models: modelBiases.map(mb => mb.model),
+            family,
+            pattern: `All models ${allOver ? "overpredict" : "underpredict"} ${family}`,
+            suggestion: `Systematic ${family} bias across models suggests feature extraction issue (e.g., lambdaProxy or DOS estimation)`,
+          });
+        } else if (mixed) {
+          crossModelInsights.push({
+            models: modelBiases.map(mb => mb.model),
+            family,
+            pattern: `Models disagree on ${family} direction`,
+            suggestion: `Ensemble averaging healthy for ${family}; model disagreement provides natural uncertainty estimate`,
+          });
+        }
+      }
+    }
+  }
+
   return {
     totalOutcomes,
     totalErrors,
@@ -495,9 +562,11 @@ function computeErrorAnalysis(): ErrorAnalysisReport {
     overallBias,
     overallMeanError: Math.round(overallMeanError * 100) / 100,
     overallRMSE: Math.round(overallRMSE * 100) / 100,
+    overallNRMSE: Math.round(overallNRMSE * 10000) / 10000,
     topFailures,
     familyDataGaps,
     dataRequestSuggestions,
+    crossModelInsights,
   };
 }
 
@@ -932,7 +1001,14 @@ export function getModelDiagnosticsForLLM(): string {
     lines.push(`  Total evaluations: ${d.errorAnalysis.totalOutcomes}`);
     lines.push(`  Errors > 5K: ${d.errorAnalysis.totalErrors} | Errors > 30K: ${d.errorAnalysis.largeErrors}`);
     lines.push(`  Overall bias: ${d.errorAnalysis.overallBias} (mean error=${d.errorAnalysis.overallMeanError}K)`);
-    lines.push(`  Overall RMSE: ${d.errorAnalysis.overallRMSE}K`);
+    lines.push(`  Overall RMSE: ${d.errorAnalysis.overallRMSE}K (NRMSE: ${(d.errorAnalysis.overallNRMSE * 100).toFixed(1)}%)`);
+
+    if (d.errorAnalysis.crossModelInsights.length > 0) {
+      lines.push("  Cross-model insights:");
+      for (const ci of d.errorAnalysis.crossModelInsights) {
+        lines.push(`    ${ci.pattern} [${ci.models.join(", ")}]: ${ci.suggestion}`);
+      }
+    }
 
     if (d.errorAnalysis.errorClusters.length > 0) {
       lines.push("  Error clusters:");
