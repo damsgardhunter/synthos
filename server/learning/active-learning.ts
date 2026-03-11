@@ -589,68 +589,52 @@ export function selectForDFT(
   for (const candidate of candidates) {
     const tc = candidate.predictedTc ?? 0;
     const normalizedTc = Math.min(1.0, Math.max(0, tc / tcScale));
-
     const candidatePressure = candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    const defaultSigmaK = tc * 0.3;
 
     let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
-    let gnnSigmaK = tc * 0.3;
+    let gnnSigmaK = defaultSigmaK;
+    let xgbUncertainty = 0.5;
+    let xgbSigmaK = defaultSigmaK;
+    let embeddingUncertainty = 0.5;
+    let oodScoreVal = 0;
+    let oodIsOOD = false;
+
     try {
       const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
       gnnUncertainty = Math.max(gnnUncertainty, gnnResult.uncertainty);
       if (gnnResult.uncertaintyBreakdown) {
         gnnSigmaK = gnnResult.uncertaintyBreakdown.totalSigma ?? tc * gnnUncertainty;
       }
-    } catch (e: any) { console.error("[ActiveLearning] GNN predict error:", e?.message?.slice(0, 200)); }
+    } catch {}
 
-    let xgbUncertainty = 0.5;
-    let xgbSigmaK = tc * 0.3;
     try {
       const features = extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
       const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
       xgbUncertainty = xgbResult.normalizedUncertainty;
       xgbSigmaK = xgbResult.totalStd ?? xgbResult.tcStd ?? tc * xgbUncertainty;
-    } catch (e: any) { console.error("[ActiveLearning] XGB uncertainty error:", e?.message?.slice(0, 200)); }
-
-    let embeddingUncertainty = 0.5;
-    try {
-      const emb = computeStructureEmbedding(candidate.formula);
-      embeddingUncertainty = estimateStructureUncertainty(emb);
     } catch {}
 
-    const sigmaRaw = Math.sqrt(
-      0.5 * gnnSigmaK * gnnSigmaK +
-      0.5 * xgbSigmaK * xgbSigmaK
-    );
+    try {
+      embeddingUncertainty = estimateStructureUncertainty(computeStructureEmbedding(candidate.formula));
+    } catch {}
 
-    let baseCombinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
-
-    let oodScoreVal = 0;
     try {
       const ood = computeOODScore(candidate.formula);
       oodScoreVal = ood.oodScore;
-      if (ood.isOOD) {
-        baseCombinedUncertainty = Math.min(1.0, baseCombinedUncertainty * (1 + ood.oodScore));
-      }
+      oodIsOOD = ood.isOOD;
     } catch {}
 
-    const combinedUncertainty = baseCombinedUncertainty;
+    const sigmaRaw = Math.sqrt(0.5 * gnnSigmaK * gnnSigmaK + 0.5 * xgbSigmaK * xgbSigmaK);
+    let combinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
+    if (oodIsOOD) combinedUncertainty = Math.min(1.0, combinedUncertainty * (1 + oodScoreVal));
 
     const stabilityProbability = computeStabilityProbability(candidate, candidatePressure);
-
     const noveltyScore = computeNoveltyScore(candidate);
-
     const structuralDistance = computeStructuralDistanceFromTrainingSet(candidate.formula);
-
     const eiScore = computeExpectedImprovement(tc, sigmaRaw, bestTcSoFar, tcScale);
-
     const ucbScore = computeUCB(tc, sigmaRaw, kappa, tcScale);
-
-    const curiosityScore = computeCuriosityScore(
-      structuralDistance,
-      combinedUncertainty,
-      oodScoreVal,
-      noveltyScore
-    );
+    const curiosityScore = computeCuriosityScore(structuralDistance, combinedUncertainty, oodScoreVal, noveltyScore);
 
     const acquisitionScore =
       0.30 * eiScore +
@@ -681,81 +665,53 @@ export function selectForDFT(
 
   const selected: RankedCandidate[] = [];
   const seenFormulas = new Set<string>();
+  const nonPressureBudget = budget - pressureExplorationSlots;
+
+  function addFromTier(
+    sortedList: typeof scored,
+    tier: string,
+    maxForTier: number
+  ): number {
+    let added = 0;
+    for (const s of sortedList) {
+      if (added >= maxForTier || selected.length >= nonPressureBudget) break;
+      if (seenFormulas.has(s.candidate.formula)) continue;
+      seenFormulas.add(s.candidate.formula);
+      selected.push({
+        candidate: s.candidate,
+        acquisitionScore: s.acquisitionScore,
+        normalizedTc: s.normalizedTc,
+        uncertainty: s.combinedUncertainty,
+        xgbUncertainty: s.xgbUncertainty,
+        selectionTier: tier,
+        eiScore: s.eiScore,
+        ucbScore: s.ucbScore,
+        curiosityScore: tier === "pure-curiosity" ? s.curiosityScore : undefined,
+        structuralDistance: s.structuralDistance,
+      });
+      added++;
+    }
+    return added;
+  }
 
   const byEI = [...scored].sort((a, b) => b.eiScore - a.eiScore || b.ucbScore - a.ucbScore);
-  for (const s of byEI) {
-    if (selected.length >= bestTcSlots) break;
-    if (seenFormulas.has(s.candidate.formula)) continue;
-    seenFormulas.add(s.candidate.formula);
-    selected.push({
-      candidate: s.candidate,
-      acquisitionScore: s.acquisitionScore,
-      normalizedTc: s.normalizedTc,
-      uncertainty: s.combinedUncertainty,
-      xgbUncertainty: s.xgbUncertainty,
-      selectionTier: "best-tc",
-      eiScore: s.eiScore,
-      ucbScore: s.ucbScore,
-      structuralDistance: s.structuralDistance,
-    });
-  }
+  const eiFilled = addFromTier(byEI, "best-tc", bestTcSlots);
 
   const byUCB = [...scored].sort((a, b) => b.ucbScore - a.ucbScore || b.combinedUncertainty - a.combinedUncertainty);
-  for (const s of byUCB) {
-    if (selected.length >= bestTcSlots + highUncertaintySlots) break;
-    if (seenFormulas.has(s.candidate.formula)) continue;
-    seenFormulas.add(s.candidate.formula);
-    selected.push({
-      candidate: s.candidate,
-      acquisitionScore: s.acquisitionScore,
-      normalizedTc: s.normalizedTc,
-      uncertainty: s.combinedUncertainty,
-      xgbUncertainty: s.xgbUncertainty,
-      selectionTier: "high-uncertainty",
-      eiScore: s.eiScore,
-      ucbScore: s.ucbScore,
-      structuralDistance: s.structuralDistance,
-    });
-  }
+  const ucbTarget = highUncertaintySlots + (bestTcSlots - eiFilled);
+  const ucbFilled = addFromTier(byUCB, "high-uncertainty", ucbTarget);
 
   const byCuriosity = [...scored].sort((a, b) => b.curiosityScore - a.curiosityScore || b.structuralDistance - a.structuralDistance);
-  for (const s of byCuriosity) {
-    if (selected.filter(r => r.selectionTier === "pure-curiosity").length >= pureCuriositySlots) break;
-    if (seenFormulas.has(s.candidate.formula)) continue;
-    seenFormulas.add(s.candidate.formula);
-    selected.push({
-      candidate: s.candidate,
-      acquisitionScore: s.acquisitionScore,
-      normalizedTc: s.normalizedTc,
-      uncertainty: s.combinedUncertainty,
-      xgbUncertainty: s.xgbUncertainty,
-      selectionTier: "pure-curiosity",
-      eiScore: s.eiScore,
-      ucbScore: s.ucbScore,
-      curiosityScore: s.curiosityScore,
-      structuralDistance: s.structuralDistance,
-    });
-  }
+  const curiosityTarget = pureCuriositySlots + (ucbTarget - ucbFilled);
+  addFromTier(byCuriosity, "pure-curiosity", curiosityTarget);
 
-  const remaining = scored.filter(s => !seenFormulas.has(s.candidate.formula));
-  for (let i = remaining.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
-  }
-  for (const s of remaining) {
-    if (selected.length >= budget - pressureExplorationSlots) break;
-    seenFormulas.add(s.candidate.formula);
-    selected.push({
-      candidate: s.candidate,
-      acquisitionScore: s.acquisitionScore,
-      normalizedTc: s.normalizedTc,
-      uncertainty: s.combinedUncertainty,
-      xgbUncertainty: s.xgbUncertainty,
-      selectionTier: "random-exploration",
-      eiScore: s.eiScore,
-      ucbScore: s.ucbScore,
-      structuralDistance: s.structuralDistance,
-    });
+  if (selected.length < nonPressureBudget) {
+    const remaining = scored.filter(s => !seenFormulas.has(s.candidate.formula));
+    for (let i = remaining.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+    }
+    addFromTier(remaining, "random-exploration", nonPressureBudget - selected.length);
   }
 
   const topForPressure = selected.slice(0, 5);
