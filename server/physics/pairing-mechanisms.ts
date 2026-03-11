@@ -985,8 +985,12 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
       pairingSymmetry = "triplet (topology-driven)";
     } else {
       pairingSymmetry = spinResult.pairingSymmetry;
-      if (pairingSymmetry === "s-wave") {
+      const fsTopo = electronic.fermiSurfaceTopology?.toLowerCase() ?? "";
+      const isCylindrical = fsTopo.includes("cylindrical") || fsTopo.includes("2d");
+      if (pairingSymmetry === "s-wave" && isCylindrical) {
         pairingSymmetry = "d-wave";
+      } else if (pairingSymmetry === "s-wave" && !isCylindrical) {
+        pairingSymmetry = spinResult.nestingAmplification > 1.5 ? "d-wave" : "s+/-";
       }
     }
   } else if (dominant === "orbital-fluctuation") {
@@ -1003,9 +1007,11 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
     pairingSymmetry = "s-wave";
   }
 
+  const clampedSpinFlucE = Math.min(500, spinResult.spinFluctuationEnergy);
+
   let estimatedTcFromPairing = phononResult.tcAllenDynes;
   if (mechanisms[0].name === "spin-fluctuation" && spinResult.spinPairingStrength > 0.5) {
-    const spinTc = spinResult.spinFluctuationEnergy * spinResult.spinPairingStrength * 0.5;
+    const spinTc = clampedSpinFlucE * spinResult.spinPairingStrength * 0.5;
     estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(300, spinTc));
   }
   if (mechanisms[0].name === "orbital-fluctuation" && orbitalResult.orbitalPairingStrength > 0.5) {
@@ -1027,6 +1033,20 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
   if (mechanisms[0].name === "topological" && topoStrength > 0.4) {
     const topoTc = topoStrength * 30;
     estimatedTcFromPairing = Math.max(estimatedTcFromPairing, Math.min(30, topoTc));
+  }
+
+  const rawStrengths = [
+    phononResult.phononPairingStrength,
+    spinResult.spinPairingStrength,
+    orbitalResult.orbitalPairingStrength,
+    cdwResult.cdwPairingStrength,
+    polaronicResult.polaronicPairingStrength,
+    plasmonResult.plasmonPairingStrength,
+  ];
+  const cooperatingCount = rawStrengths.filter(s => s > 0.4).length;
+  if (cooperatingCount >= 2 && compositePairingStrength > 0.4) {
+    const cooperationBonus = 1.0 + 0.08 * (cooperatingCount - 1);
+    estimatedTcFromPairing *= cooperationBonus;
   }
 
   return {
