@@ -148,6 +148,23 @@ const BANNED_META_PHRASES = [
   "needs more investigation",
   "deserves attention",
   "requires further analysis",
+  "as an ai",
+  "as a language model",
+  "i cannot verify",
+  "i cannot confirm",
+  "i'm not able to",
+  "i am not able to",
+  "this is speculative",
+  "i should note that",
+  "it's important to note",
+  "it is important to note",
+  "please note that",
+  "i don't have access",
+  "beyond my training",
+  "my training data",
+  "i was trained",
+  "hypothetical scenario",
+  "for illustrative purposes",
 ];
 
 const QUANTITATIVE_PROPERTY_NAMES = [
@@ -269,10 +286,14 @@ const CONCEPT_SYNONYMS: [string, string][] = [
   ["density of states", "dos"],
 ];
 
+const COMPILED_SYNONYM_REGEXES: [string, RegExp][] = CONCEPT_SYNONYMS.map(
+  ([canonical, synonym]) => [canonical, new RegExp(synonym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')]
+);
+
 function extractConceptFingerprint(text: string): Set<string> {
   let lower = text.toLowerCase().replace(/[.,;:!?]/g, " ");
-  for (const [a, b] of CONCEPT_SYNONYMS) {
-    lower = lower.replace(new RegExp(b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), a);
+  for (const [canonical, regex] of COMPILED_SYNONYM_REGEXES) {
+    lower = lower.replace(regex, canonical);
   }
   const keyTerms = INSIGHT_KEY_TERMS.filter(t => lower.includes(t));
   return new Set(keyTerms);
