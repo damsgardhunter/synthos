@@ -154,7 +154,7 @@ export async function runQuantumEnginePipeline(
             const elec = computeElectronicStructure(formula);
             fermiDos = elec.densityOfStatesAtFermi;
           } catch {
-            fermiDos = isMetallic ? 2.5 : 0.5;
+            fermiDos = isMetallic ? 3.0 : 0.5;
           }
         }
 

@@ -4,11 +4,55 @@ import {
   computeElectronicStructure,
   computePhononSpectrum,
   computeElectronPhononCoupling,
+  parseFormulaElements,
   type ElectronicStructure,
   type PhononSpectrum,
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
 import { runEliashbergPipeline } from "./eliashberg-pipeline";
+import { getElementData, isTransitionMetal } from "../learning/elemental-data";
+
+function estimateDosAtFermi(formula: string, isMetallic: boolean, computedDos: number): number {
+  if (computedDos > 0.1) return computedDos;
+  if (!isMetallic) return 0.5;
+
+  const elements = parseFormulaElements(formula);
+  const counts: Record<string, number> = {};
+  const re = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(formula)) !== null) {
+    counts[m[1]] = m[2] ? parseFloat(m[2]) : 1;
+  }
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+
+  const hCount = counts["H"] || 0;
+  const hRatio = hCount / Math.max(1, totalAtoms - hCount);
+
+  let dos = 2.5;
+
+  if (hRatio >= 6) {
+    dos = 4.0 + Math.min(4, hRatio * 0.3);
+  } else if (hRatio >= 3) {
+    dos = 3.0 + hRatio * 0.2;
+  }
+
+  let hasTM = false;
+  let hasVHS = false;
+  for (const el of elements) {
+    if (isTransitionMetal(el)) hasTM = true;
+    const data = getElementData(el);
+    if (data) {
+      const ve = data.valenceElectrons;
+      if (ve >= 4 && ve <= 6 && isTransitionMetal(el)) hasVHS = true;
+    }
+  }
+
+  if (hasTM && elements.length >= 3) dos += 1.0;
+  if (hasVHS) dos += 1.5;
+  if (elements.includes("Cu") && elements.includes("O")) dos += 2.0;
+
+  return Math.min(15, dos);
+}
 
 export type PhysicsTier = "full-dft" | "xtb" | "surrogate";
 
@@ -230,7 +274,7 @@ export async function computePhonons(formula: string): Promise<PhononResult> {
       frequencies: [],
       isStable: !phonon.hasImaginaryModes,
       imaginaryCount: phonon.hasImaginaryModes ? 1 : 0,
-      lowestFrequency: phonon.softModePresent ? -phonon.softModeScore * 10 : phonon.logAverageFrequency * 0.1,
+      lowestFrequency: phonon.softModePresent ? 0 : phonon.logAverageFrequency * 0.1,
       highestFrequency: phonon.maxPhononFrequency,
       debyeTemperature: phonon.debyeTemperature,
       maxPhononFrequency: phonon.maxPhononFrequency,
@@ -272,7 +316,9 @@ export async function computeEph(formula: string, pressureGpa: number = 0): Prom
         tier = "full-dft";
         electronicOverride = computeElectronicStructure(formula);
         if (dft.scf.fermiEnergy !== null) {
-          electronicOverride.densityOfStatesAtFermi = dft.scf.isMetallic ? 2.5 : 0.5;
+          electronicOverride.densityOfStatesAtFermi = estimateDosAtFermi(
+            formula, dft.scf.isMetallic, electronicOverride.densityOfStatesAtFermi
+          );
         }
         if (dft.scf.bandGap !== null) {
           (electronicOverride as any).bandGap = dft.scf.bandGap;
@@ -357,7 +403,9 @@ export async function computeTc(formula: string, pressureGpa: number = 0): Promi
         tier = "full-dft";
         electronicOverride = computeElectronicStructure(formula);
         if (dft.scf.fermiEnergy !== null) {
-          electronicOverride.densityOfStatesAtFermi = dft.scf.isMetallic ? 2.5 : 0.5;
+          electronicOverride.densityOfStatesAtFermi = estimateDosAtFermi(
+            formula, dft.scf.isMetallic, electronicOverride.densityOfStatesAtFermi
+          );
         }
         if (dft.scf.bandGap !== null) {
           (electronicOverride as any).bandGap = dft.scf.bandGap;
