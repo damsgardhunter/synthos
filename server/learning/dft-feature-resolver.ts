@@ -347,7 +347,7 @@ function estimateDOSAtFermi(elements: string[], counts: Record<string, number>, 
   const baseDOS = 0.3 + avgValence * 0.15;
   const tmCount = elements.filter(e => isTransitionMetal(e)).reduce((s, e) => s + (counts[e] || 0), 0);
   const tmFrac = tmCount / totalAtoms;
-  const tmBoost = tmFrac > 0.3 ? 1.5 : 1.0;
+  const tmBoost = 1.0 + 0.5 / (1.0 + Math.exp(-12 * (tmFrac - 0.3)));
   return Math.min(5.0, baseDOS * tmBoost);
 }
 
@@ -356,6 +356,59 @@ function estimateAveragePhononFreq(debyeTemp: number, avgMass: number): number {
   const omegaD_meV = kB * debyeTemp * 1000;
   const avgFreq = omegaD_meV * 0.7 / Math.sqrt(avgMass / 50);
   return Math.max(1, Math.min(200, avgFreq));
+}
+
+function estimateLatticeType(elements: string[], counts: Record<string, number>, totalCount: number): "fcc" | "bcc" | "hcp" | "layered" | "cage" | "other" {
+  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "Te", "I", "Xe"];
+  const metalEls = elements.filter(e => !nonmetals.includes(e));
+  const metalFrac = metalEls.reduce((s, e) => s + (counts[e] || 0), 0) / totalCount;
+  const hFrac = (counts["H"] || 0) / totalCount;
+
+  if (hFrac > 0.6) return "cage";
+
+  const FCC_METALS = new Set(["Cu", "Al", "Ni", "Ag", "Au", "Pt", "Pd", "Pb", "Ca", "Sr", "Rh", "Ir"]);
+  const HCP_METALS = new Set(["Ti", "Zr", "Hf", "Mg", "Zn", "Cd", "Co", "Ru", "Os", "Y", "Sc", "La"]);
+  const BCC_METALS = new Set(["Nb", "V", "Ta", "Mo", "W", "Cr", "Fe", "Ba", "K", "Na", "Cs", "Rb"]);
+
+  if (metalFrac >= 0.9 && metalEls.length <= 2) {
+    const primary = metalEls.sort((a, b) => (counts[b] || 0) - (counts[a] || 0))[0];
+    if (FCC_METALS.has(primary)) return "fcc";
+    if (HCP_METALS.has(primary)) return "hcp";
+    if (BCC_METALS.has(primary)) return "bcc";
+  }
+
+  if (elements.some(e => ["La", "Y", "Sr", "Ba"].includes(e)) &&
+      elements.some(e => ["Cu", "Fe", "Ni"].includes(e)) &&
+      elements.some(e => ["O", "As", "Se", "P"].includes(e))) {
+    return "layered";
+  }
+
+  if (metalFrac > 0.5) return "bcc";
+  return "other";
+}
+
+function latticeVolPerAtom(avgR: number, latticeType: string): number {
+  switch (latticeType) {
+    case "fcc": {
+      const a = 2 * Math.SQRT2 * avgR;
+      return (a * a * a) / 4;
+    }
+    case "bcc": {
+      const a = (4 * avgR) / Math.sqrt(3);
+      return (a * a * a) / 2;
+    }
+    case "hcp": {
+      const a = 2 * avgR;
+      const c = a * 1.633;
+      return (Math.sqrt(3) / 2) * a * a * c / 2;
+    }
+    case "layered":
+      return Math.pow(2.4 * avgR, 3);
+    case "cage":
+      return Math.pow(2.8 * avgR, 3);
+    default:
+      return Math.pow(2.3 * avgR, 3);
+  }
 }
 
 function estimateAtomicPacking(elements: string[], counts: Record<string, number>): number {
@@ -373,7 +426,9 @@ function estimateAtomicPacking(elements: string[], counts: Record<string, number
   }
   if (totalCount === 0) return 0.5;
   const avgR = totalRadius / totalCount;
-  const cellVol = totalCount * Math.pow(2.2 * avgR, 3);
+  const latticeType = estimateLatticeType(elements, counts, totalCount);
+  const volPerAtom = latticeVolPerAtom(avgR, latticeType);
+  const cellVol = totalCount * volPerAtom;
   if (cellVol <= 0) return 0.5;
   const apf = totalAtomVol / cellVol;
   return Math.max(0.1, Math.min(0.85, apf));
@@ -483,7 +538,9 @@ export async function resolveDFTFeatures(formula: string, pressureGpa: number = 
 
   const fdPhonons = xtbData?.finiteDisplacementPhonons ?? null;
   const rawFdPhononMax = fdPhonons ? fdPhonons.highestFrequency : null;
-  const fdPhononMax = rawFdPhononMax != null ? (rawFdPhononMax > 5000 ? rawFdPhononMax / 20 : rawFdPhononMax) : null;
+  const fdPhononMax = rawFdPhononMax != null
+    ? (rawFdPhononMax > 4000 ? null : rawFdPhononMax)
+    : null;
 
   const mpPhononMax = raw.mpPhonon?.hasPhononData && raw.mpPhonon.lastPhononFreq
     ? raw.mpPhonon.lastPhononFreq : null;
