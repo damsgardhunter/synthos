@@ -100,6 +100,7 @@ export interface EliashbergPipelineResult {
   electronic: ElectronicStructure;
   confidence: "low" | "medium" | "high";
   confidenceBand: [number, number];
+  warnings: string[];
   wallTimeMs: number;
 }
 
@@ -649,12 +650,25 @@ function computeIsotopeEffect(
     alpha = bcsAlpha * (1 - 0.2 * (lambda - 0.5));
   }
 
-  const massRatio = 2.0;
+  const isotopeSubstitutions: Record<string, number> = {
+    "H": 2.014 / 1.008,
+    "Li": 7.016 / 6.941,
+    "B": 11.009 / 10.811,
+    "C": 13.003 / 12.011,
+    "N": 15.000 / 14.007,
+    "O": 17.999 / 15.999,
+    "S": 33.968 / 32.065,
+    "Ca": 43.956 / 40.078,
+    "Fe": 57.933 / 55.845,
+    "Cu": 64.928 / 63.546,
+    "Zn": 67.925 / 65.380,
+  };
+  const massRatio = isotopeSubstitutions[lightestEl] ?? (lightestMass + 2) / lightestMass;
   const isotopeTcShift = alpha * Math.log(massRatio) * alpha2FSpec.omegaLog * 1.4388 / 1.2;
 
   return {
     alpha: Number(Math.max(0, Math.min(0.5, alpha)).toFixed(4)),
-    massRatio,
+    massRatio: Number(massRatio.toFixed(4)),
     referenceElement: lightestEl,
     isotopeTcShift: Number(isotopeTcShift.toFixed(2)),
   };
@@ -754,9 +768,17 @@ export function runEliashbergPipeline(
     confidence = "low";
   }
 
+  const warnings: string[] = [];
+
   if (muStarSweep.sensitivityFlag) {
     if (confidence === "high") confidence = "medium";
     else if (confidence === "medium") confidence = "low";
+    const variation = (muStarSweep.maxVariation * 100).toFixed(1);
+    warnings.push(
+      `Electronic screening model unstable: Tc varies by ${variation}% across mu* = ${(muStar - 0.025).toFixed(3)}..${(muStar + 0.025).toFixed(3)}. ` +
+      `Coulomb pseudopotential is poorly constrained for this material. Consider DFPT-level screening calculation.`
+    );
+    console.warn(`[Eliashberg] ${formula} @ ${pressureGpa} GPa: mu* sensitivity flag triggered (${variation}% Tc variation)`);
   }
 
   if (isHighPressureHydride) {
@@ -792,6 +814,7 @@ export function runEliashbergPipeline(
     electronic,
     confidence,
     confidenceBand,
+    warnings,
     wallTimeMs: Date.now() - startTime,
   };
 
@@ -909,6 +932,7 @@ export function runEliashbergFromAlpha2FFile(
     electronic,
     confidence: "high",
     confidenceBand,
+    warnings: [],
     wallTimeMs: Date.now() - startTime,
   };
 }
