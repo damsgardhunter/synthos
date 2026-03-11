@@ -2,7 +2,10 @@ import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { computeCompositionFeatures, compositionFeatureVector, COMPOSITION_FEATURE_NAMES } from "./composition-features";
+import { classifyFamily } from "./utils";
 import { storage } from "../storage";
+import { systemMetrics } from "../../shared/schema";
+import { db } from "../db";
 
 interface HyperparamOverrides {
   nTrees?: number;
@@ -1649,10 +1652,12 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   for (const [formula, entry] of evaluatedDataset) {
     if (existingFormulas.has(formula)) continue;
     existingFormulas.add(formula);
+    const originalFamily = classifyFamily(entry.formula);
+    const dftStatus = entry.stable ? "DFT-Evaluated" : "DFT-Failed";
     const newEntry: SuperconEntry = {
       formula: entry.formula,
       tc: entry.tc,
-      family: entry.stable ? "DFT-Evaluated" : "DFT-Failed",
+      family: `${originalFamily}|${dftStatus}`,
       isSuperconductor: entry.tc > 0 && entry.stable,
       pressureGPa: entry.pressureGPa,
     };
@@ -1694,8 +1699,15 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   const vr = logModelVersion("evaluated-retrain", X.length);
 
   if (shouldRetrainOnErrorRate()) {
+    const correctedLR = hpLR * 0.6;
+    const correctedDepth = Math.max(3, hpDepth - 1);
+    const correctedMinSamples = (hp.minSamples ?? 5) + 3;
+    console.log(
+      `[XGBoost] Error-rate correction: LR ${hpLR}->${correctedLR.toFixed(3)}, ` +
+      `depth ${hpDepth}->${correctedDepth}, minSamples +3 to ${correctedMinSamples}`
+    );
     invalidateModel();
-    cachedModel = trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
+    cachedModel = trainGradientBoosting(X, y, hpTrees, correctedLR, correctedDepth);
     cachedCalibration = computeCalibration(cachedModel);
     if (X.length >= 30) {
       cachedEnsembleXGB = trainEnsembleXGB(X, y);
@@ -1796,9 +1808,11 @@ export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
     }
 
     surrogatePassCount++;
+    maybePersistSurrogateMetrics();
     return { pass: true, predictedTc, score: result.score, reasoning: result.reasoning };
   } catch {
     surrogateRejectCount++;
+    maybePersistSurrogateMetrics();
     return { pass: false, predictedTc: 0, score: 0, reasoning: ["Feature extraction failed — rejecting candidate"] };
   }
 }
@@ -1912,6 +1926,14 @@ export async function incorporateFailureData(): Promise<number> {
       }
       logModelVersion("failure-retrain", X.length);
     }
+
+    if (failureExamples.length >= 10 && failureExamples.length % 10 === 0) {
+      try {
+        const { updateOODModel } = require("./ood-detector");
+        updateOODModel();
+        console.log(`[XGBoost] OOD model updated at ${failureExamples.length} failure examples`);
+      } catch {}
+    }
   }
 
   return added;
@@ -1919,4 +1941,37 @@ export async function incorporateFailureData(): Promise<number> {
 
 export function getFailureExampleCount(): number {
   return failureExamples.length;
+}
+
+let lastMetricsPersistCount = 0;
+const METRICS_PERSIST_INTERVAL = 50;
+
+export async function persistSurrogateMetrics(): Promise<void> {
+  if (surrogateScreenCount - lastMetricsPersistCount < METRICS_PERSIST_INTERVAL) return;
+  lastMetricsPersistCount = surrogateScreenCount;
+  try {
+    const passRate = surrogateScreenCount > 0 ? surrogatePassCount / surrogateScreenCount : 0;
+    await db.insert(systemMetrics).values([
+      {
+        metricName: "surrogate_screen_total",
+        metricValue: surrogateScreenCount,
+        metadata: {
+          passed: surrogatePassCount,
+          rejected: surrogateRejectCount,
+          passRate: Math.round(passRate * 10000) / 10000,
+          successExamples: successExamples.length,
+          failureExamples: failureExamples.length,
+          modelVersion,
+        },
+      },
+    ]);
+  } catch (err) {
+    console.warn("[XGBoost] Failed to persist surrogate metrics:", err);
+  }
+}
+
+export function maybePersistSurrogateMetrics(): void {
+  if (surrogateScreenCount - lastMetricsPersistCount >= METRICS_PERSIST_INTERVAL) {
+    persistSurrogateMetrics().catch(() => {});
+  }
 }

@@ -366,4 +366,16 @@ export type InsertMilestone = z.infer<typeof insertMilestoneSchema>;
 export type InverseDesignCampaign = typeof inverseDesignCampaigns.$inferSelect;
 export type InsertInverseDesignCampaign = z.infer<typeof insertInverseDesignCampaignSchema>;
 
+export const systemMetrics = pgTable("system_metrics", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  metricName: text("metric_name").notNull(),
+  metricValue: real("metric_value").notNull(),
+  metadata: jsonb("metadata"),
+  recordedAt: timestamp("recorded_at").defaultNow(),
+});
+
+export const insertSystemMetricSchema = createInsertSchema(systemMetrics).omit({ id: true, recordedAt: true });
+export type SystemMetric = typeof systemMetrics.$inferSelect;
+export type InsertSystemMetric = z.infer<typeof insertSystemMetricSchema>;
+
 export * from "./models/chat";
