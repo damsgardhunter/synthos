@@ -612,6 +612,7 @@ function broadcastThought(text: string, category: ThoughtCategory) {
 
 function updateTempo() {
   const prevTempo = engineTempo;
+  const prevInterval = cycleIntervalMs;
   if (recentTcImproved || recentNewCandidates >= 3) {
     engineTempo = "excited";
     cycleIntervalMs = 10000;
@@ -624,6 +625,10 @@ function updateTempo() {
   }
   if (prevTempo !== engineTempo) {
     broadcast("tempoChange", { tempo: engineTempo, intervalMs: cycleIntervalMs });
+    if (cycleIntervalMs < prevInterval && cycleTimer && state === "running") {
+      clearTimeout(cycleTimer);
+      cycleTimer = setTimeout(runLearningCycle, cycleIntervalMs);
+    }
   }
 }
 
@@ -671,7 +676,8 @@ const emit: EventEmitter = (type: string, data: any) => {
     const evt = data.event as string;
     const shouldDedup = DEDUP_EVENT_PATTERNS.some(p => evt.includes(p));
     if (shouldDedup) {
-      const cacheKey = `${evt}::${data.detail || ""}`;
+      const detailTrunc = (data.detail || "").slice(0, 80);
+      const cacheKey = `${evt}::${detailTrunc}`;
       if (recentLogCache.has(cacheKey)) {
         return;
       }
@@ -691,7 +697,7 @@ const emit: EventEmitter = (type: string, data: any) => {
       event: data.event,
       detail: data.detail || null,
       dataSource: data.dataSource || null,
-    }).catch(() => {});
+    }).catch((e: any) => { console.error(`[Engine] Research log write failed: ${e?.message?.slice(0, 120) ?? "unknown"}`); });
     if (data.event === "Novel insight discovered") {
       const detail = data.detail || "";
       const insightText = detail.replace(/^\[NOVEL \d+%\]\s*/, "");
