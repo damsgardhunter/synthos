@@ -107,6 +107,7 @@ export interface KineticStabilityResult {
   pressureStabilization: PressureStabilizationAnalysis;
   stabilizationStrategies: StabilizationStrategy[];
   overallVerdict: string;
+  phononTunnelingApplied: boolean;
 }
 
 const kB = 8.617e-5;
@@ -593,10 +594,21 @@ export function predictKineticStability(formula: string, eAboveHull: number): Ki
 
   const metastability = assessMetastability(formula, eAboveHull);
 
-  const effectiveBarrier = Math.min(
+  let effectiveBarrier = Math.min(
     diffusion.effectiveBarrier,
     nucleation.nucleationBarrier,
   );
+
+  const elements = parseFormulaElements(formula);
+  const isHydride = elements.includes("H");
+  if (isHydride && effectiveBarrier > 0.05) {
+    const hMass = 1.008;
+    const barrierWidth_A = 1.0;
+    const tunnelExponent = barrierWidth_A * Math.sqrt(2 * hMass * effectiveBarrier * 96485) / 1.055e-34 * 1e-10;
+    const tunnelProb = Math.exp(-Math.min(50, tunnelExponent * 0.01));
+    const tunnelReduction = Math.min(0.3, tunnelProb * 2);
+    effectiveBarrier = effectiveBarrier * (1 - tunnelReduction);
+  }
 
   const attemptFreq = 1e13;
 
@@ -659,6 +671,7 @@ export function predictKineticStability(formula: string, eAboveHull: number): Ki
     pressureStabilization: pressure,
     stabilizationStrategies: strategies,
     overallVerdict,
+    phononTunnelingApplied: elements.includes("H") && effectiveBarrier > 0.05,
   };
 }
 

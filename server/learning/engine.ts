@@ -1284,7 +1284,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       return false;
     }
 
-    const stabilityResult = await passesStabilityGate(candidateData.formula);
+    const stabilityResult = await passesStabilityGate(candidateData.formula, candidateData.pressureGpa ?? 0);
 
     if (!stabilityResult.pass) {
       emit("log", {
@@ -1316,7 +1316,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         emit("log", {
           phase: "engine",
           event: "Kinetic stability assessed",
-          detail: `${candidateData.formula}: kineticScore=${kineticResult.kineticScore}, lifetime=${kineticResult.lifetimeString}, strategies=${kineticResult.stabilizationStrategies.length}, ambientStable=${kineticResult.pressureStabilization.ambientStabilizable}`,
+          detail: `${candidateData.formula}: kineticScore=${kineticResult.kineticScore}, lifetime=${kineticResult.lifetimeString}, strategies=${kineticResult.stabilizationStrategies.length}, ambientStable=${kineticResult.pressureStabilization.ambientStabilizable}${kineticResult.phononTunnelingApplied ? ", phonon-tunneling-corrected" : ""}`,
           dataSource: "Kinetic Stability Engine",
         });
       }
