@@ -688,12 +688,18 @@ export async function evaluateInsightNovelty(
   try {
     const recentKnown = existingInsights.slice(0, 50).map(i => i.insightText);
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `You are a materials science novelty evaluator. Given a list of scientific insights, determine which ones are genuinely NOVEL (not just restating textbook knowledge or well-known facts).
+    const LLM_BATCH_SIZE = 5;
+    const allEvaluations: { ev: any; globalIdx: number }[] = [];
+
+    for (let batchStart = 0; batchStart < afterEmbeddingFilter.length; batchStart += LLM_BATCH_SIZE) {
+      const batch = afterEmbeddingFilter.slice(batchStart, batchStart + LLM_BATCH_SIZE);
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a materials science novelty evaluator. Given a list of scientific insights, determine which ones are genuinely NOVEL (not just restating textbook knowledge or well-known facts).
 
 A NOVEL insight MUST be quantitative and data-backed. It MUST contain at least one of:
 - A specific number, percentage, or measurement (e.g., "Tc=152K", "lambda=0.72", "30% increase")
@@ -731,30 +737,41 @@ Return JSON with 'evaluations' array, each with:
 - 'noveltyScore' (0-1, where 1 = groundbreaking, 0.5 = interesting, 0.1 = textbook)
 - 'reason' (under 100 chars explaining why novel or not)
 - 'category' (one of: 'novel-correlation', 'new-mechanism', 'cross-domain', 'computational-discovery', 'design-principle', 'phonon-softening', 'fermi-nesting', 'charge-transfer', 'structural-motif', 'electron-density', 'textbook', 'known-pattern', 'incremental')`,
-        },
-        {
-          role: "user",
-          content: `Evaluate these insights for novelty:\n${afterEmbeddingFilter.map((p, i) => `${i}. "${p.text}"`).join("\n")}`,
-        },
-      ],
-      response_format: { type: "json_object" },
-      max_completion_tokens: 600,
-    });
+          },
+          {
+            role: "user",
+            content: `Evaluate these insights for novelty:\n${batch.map((p, i) => `${i}. "${p.text}"`).join("\n")}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 600,
+      });
 
-    const content = response.choices[0]?.message?.content;
-    if (!content) return { novel: 0, total: insights.length };
+      const content = response.choices[0]?.message?.content;
+      if (!content) continue;
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      return { novel: 0, total: insights.length };
+      let parsed: any;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        try {
+          const repaired = content.replace(/,\s*([}\]])/g, '$1').replace(/\}\s*$/, '}}');
+          parsed = JSON.parse(repaired);
+        } catch {
+          continue;
+        }
+      }
+
+      const batchEvals = parsed.evaluations ?? [];
+      for (const ev of batchEvals) {
+        allEvaluations.push({ ev, globalIdx: batchStart + (ev.index ?? 0) });
+      }
     }
 
-    const evaluations = parsed.evaluations ?? [];
+    const evaluations = allEvaluations;
 
-    for (const ev of evaluations) {
-      const entry = afterEmbeddingFilter[ev.index];
+    for (const { ev, globalIdx } of evaluations) {
+      const entry = afterEmbeddingFilter[globalIdx];
       if (!entry) continue;
 
       const noveltyThreshold = tempo === "contemplating" ? 0.30 : tempo === "excited" ? 0.45 : 0.40;
@@ -845,22 +862,17 @@ function levenshteinSimilarity(a: string, b: string): number {
   const shorter = a.length > b.length ? b : a;
   if (longer.length === 0) return 1;
 
-  const matrix: number[][] = [];
-  for (let i = 0; i <= shorter.length; i++) {
-    matrix[i] = [i];
-  }
-  for (let j = 0; j <= longer.length; j++) {
-    matrix[0][j] = j;
-  }
+  let prev = new Uint16Array(longer.length + 1);
+  let curr = new Uint16Array(longer.length + 1);
+  for (let j = 0; j <= longer.length; j++) prev[j] = j;
+
   for (let i = 1; i <= shorter.length; i++) {
+    curr[0] = i;
     for (let j = 1; j <= longer.length; j++) {
       const cost = shorter[i - 1] === longer[j - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      );
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
     }
+    [prev, curr] = [curr, prev];
   }
-  return 1 - matrix[shorter.length][longer.length] / longer.length;
+  return 1 - prev[longer.length] / longer.length;
 }
