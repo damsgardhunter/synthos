@@ -341,7 +341,19 @@ function encodeDimensionalitySegment(
     "Borides": 0.4, "Carbides": 0.5, "Nitrides": 0.6,
     "Oxides": 0.7, "Heavy-fermion": 0.8, "Conventional": 0.9,
   };
-  const familyCode = familyMap[family] ?? 0.5;
+  let familyCode = familyMap[family] ?? 0.5;
+  if (family === "Hydrides") {
+    const fc = parseFormulaCounts(formula);
+    const ta = getTotalAtoms(fc);
+    const hRatio = (fc["H"] || 0) / ta;
+    if (hRatio < 0.1) {
+      familyCode = 0.85;
+    } else if (hRatio < 0.3) {
+      familyCode = 0.6;
+    } else if (hRatio < 0.6) {
+      familyCode = 0.4;
+    }
+  }
 
   const hBondingMap: Record<string, number> = {
     "metallic-network": 0.9, "cage-clathrate": 0.7,
@@ -406,11 +418,22 @@ function encodeCompositionSegment(
   const avgDebye = getCompositionWeightedProperty(counts, "debyeTemperature") ?? 300;
   const avgIE = getCompositionWeightedProperty(counts, "firstIonizationEnergy") ?? 7;
 
+  const oFrac = (counts["O"] || 0) / totalAtoms;
+  const sFrac = (counts["S"] || 0) / totalAtoms;
+  const seFrac = (counts["Se"] || 0) / totalAtoms;
+  const teFrac = (counts["Te"] || 0) / totalAtoms;
+  const chalcogenFrac = oFrac + sFrac + seFrac + teFrac;
+
   const vec = [
     ...periodicPeriods,
     tmFrac,
     reFrac,
     actFrac,
+    oFrac,
+    sFrac,
+    seFrac,
+    teFrac,
+    chalcogenFrac,
     avgBulk / 500,
     avgDebye / 2000,
     avgIE / 25,
