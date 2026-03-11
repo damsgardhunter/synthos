@@ -1032,7 +1032,7 @@ export function gbPredict(features: MLFeatureVector, formula?: string): { tcPred
   for (const [fi] of top3) {
     const name = FEATURE_NAMES[fi] || `f${fi}`;
     const val = x[fi];
-    reasoning.push(`${name}=${val.toFixed(2)} (key predictor)`);
+    reasoning.push(`${name}=${val.toFixed(4)} (key predictor)`);
   }
 
   let score = 0;
@@ -1083,26 +1083,29 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   if (!cachedEnsembleXGB) {
     const singlePred = predictWithModel(cachedModel!, x);
     const safeTc = Number.isFinite(singlePred) ? Math.max(0, singlePred) : 0;
+    const nSamples = cachedTrainingSnapshot?.X.length ?? 0;
+    const coldStartUncertainty = nSamples < 5 ? 0.95 : nSamples < 15 ? 0.85 : nSamples < 30 ? 0.75 : 0.6;
+    const coldStartStd = coldStartUncertainty * Math.max(1, safeTc + 10);
     return {
       tcMean: safeTc,
-      tcStd: 0,
-      tcCI95: [Math.max(0, safeTc), safeTc],
-      epistemicStd: 0,
+      tcStd: coldStartStd,
+      tcCI95: [Math.max(0, safeTc - 1.96 * coldStartStd), safeTc + 1.96 * coldStartStd],
+      epistemicStd: coldStartStd,
       aleatoricStd: 0,
-      totalStd: 0,
-      normalizedUncertainty: 0.5,
+      totalStd: coldStartStd,
+      normalizedUncertainty: coldStartUncertainty,
       score: safeTc > 100 ? 0.7 : safeTc > 20 ? 0.4 : 0.1,
       perModelPredictions: [safeTc],
-      acquisitionScore: safeTc / 300 + 0.5,
-      reasoning: ["Single model (no ensemble yet)"],
+      acquisitionScore: safeTc / 300 + 1.5 * coldStartUncertainty,
+      reasoning: [`Single model (${nSamples} samples, no ensemble yet — high uncertainty)`],
     };
   }
 
   const result = predictEnsembleXGB(cachedEnsembleXGB, x);
   const meanTc = result.mean;
 
-  const epistemicVar = result.predictions.reduce((s, v) => s + (v - meanTc) ** 2, 0) / result.predictions.length;
-  const epistemicStd = Math.sqrt(epistemicVar);
+  const epistemicStd = result.std;
+  const epistemicVar = epistemicStd * epistemicStd;
 
   let aleatoricVar = 0;
   if (cachedVarianceEnsembleXGB) {
