@@ -10,7 +10,7 @@ export interface FermiPocket {
   type: "electron" | "hole";
   volume: number;
   cylindricalCharacter: number;
-  orbitalCharacter: { s: number; p: number; d: number };
+  orbitalCharacter: { s: number; p: number; d: number; f: number };
   bandIndex: number;
   avgVelocity: number;
 }
@@ -252,7 +252,7 @@ function generateBZGrid(latticeType: string, gridSize: number, caRatio: number =
 interface BZEvaluation {
   k: number[];
   eigenvalues: number[];
-  orbChars: { s: number; p: number; d: number }[];
+  orbChars: { s: number; p: number; d: number; f: number }[];
 }
 
 function birchMurnaghanCompression(pressureGpa: number, K0: number = 150, K0p: number = 4.0): number {
@@ -293,8 +293,9 @@ function evaluateBZGrid(
     const data = getElementData(el);
     const count = Math.round(counts[el] || 1);
     if (data) totalVE += data.valenceElectrons * count;
-    const hasDOrbs = isTransitionMetal(el) || isRareEarth(el) || isActinide(el);
-    nOrbitals += count * (hasDOrbs ? 9 : 4);
+    const hasFOrbs = isRareEarth(el) || isActinide(el);
+    const hasDOrbs = isTransitionMetal(el) || hasFOrbs;
+    nOrbitals += count * (hasFOrbs ? 16 : (hasDOrbs ? 9 : 4));
   }
   nOrbitals = Math.min(nOrbitals, 128);
 
@@ -379,23 +380,24 @@ function buildHamiltonianAtKForFS(
   counts: Record<string, number>,
   latticeConstant: number,
   maxOrbitals: number,
-): { eigenvalues: number[]; orbChars: { s: number; p: number; d: number }[] } {
-  const atomList: { el: string; orbitalStart: number }[] = [];
+): { eigenvalues: number[]; orbChars: { s: number; p: number; d: number; f: number }[] } {
+  const atomList: { el: string; orbitalStart: number; hasFOrbs: boolean }[] = [];
   let nOrbitals = 0;
 
   for (const el of elements) {
     const count = Math.round(counts[el] || 1);
-    const hasDOrbs = isTransitionMetal(el) || isRareEarth(el) || isActinide(el);
-    const orbsPerAtom = hasDOrbs ? 9 : 4;
+    const hasFOrbs = isRareEarth(el) || isActinide(el);
+    const hasDOrbs = isTransitionMetal(el) || hasFOrbs;
+    const orbsPerAtom = hasFOrbs ? 16 : (hasDOrbs ? 9 : 4);
 
     for (let i = 0; i < count; i++) {
       if (nOrbitals + orbsPerAtom > maxOrbitals) break;
-      atomList.push({ el, orbitalStart: nOrbitals });
+      atomList.push({ el, orbitalStart: nOrbitals, hasFOrbs });
       nOrbitals += orbsPerAtom;
     }
   }
 
-  if (nOrbitals > 50) nOrbitals = 50;
+  if (nOrbitals > 128) nOrbitals = 128;
 
   const H: number[][] = [];
   const H_im: number[][] = [];
@@ -606,11 +608,11 @@ function buildHamiltonianAtKForFS(
     eigenvalues = solveEigenvaluesSymmetricFS(H_eff, nOrbitals);
   }
 
-  const orbChars: { s: number; p: number; d: number }[] = [];
+  const orbChars: { s: number; p: number; d: number; f: number }[] = [];
   for (let band = 0; band < nOrbitals; band++) {
-    let sWeight = 0, pWeight = 0, dWeight = 0;
+    let sWeight = 0, pWeight = 0, dWeight = 0, fWeight = 0;
     for (const atom of atomList) {
-      const hasDOrbs = isTransitionMetal(atom.el) || isRareEarth(atom.el) || isActinide(atom.el);
+      const hasDOrbs = isTransitionMetal(atom.el) || atom.hasFOrbs;
       const o = atom.orbitalStart;
       sWeight += o < nOrbitals ? 1.0 / nOrbitals : 0;
       for (let p = 0; p < 3; p++) {
@@ -621,9 +623,14 @@ function buildHamiltonianAtKForFS(
           dWeight += (o + 4 + d < nOrbitals) ? 1.0 / nOrbitals : 0;
         }
       }
+      if (atom.hasFOrbs) {
+        for (let f = 0; f < 7; f++) {
+          fWeight += (o + 9 + f < nOrbitals) ? 1.0 / nOrbitals : 0;
+        }
+      }
     }
-    const total = sWeight + pWeight + dWeight || 1;
-    orbChars.push({ s: sWeight / total, p: pWeight / total, d: dWeight / total });
+    const total = sWeight + pWeight + dWeight + fWeight || 1;
+    orbChars.push({ s: sWeight / total, p: pWeight / total, d: dWeight / total, f: fWeight / total });
   }
 
   return { eigenvalues, orbChars };
@@ -705,7 +712,7 @@ function detectFermiPockets(
     let aboveCount = 0;
     let belowCount = 0;
     let totalVelocity = 0;
-    let totalS = 0, totalP = 0, totalD = 0;
+    let totalS = 0, totalP = 0, totalD = 0, totalF = 0;
     let charCount = 0;
 
     for (const ev of evaluations) {
@@ -723,6 +730,7 @@ function detectFermiPockets(
         totalS += ev.orbChars[b].s;
         totalP += ev.orbChars[b].p;
         totalD += ev.orbChars[b].d;
+        totalF += (ev.orbChars[b].f || 0);
         charCount++;
       }
     }
@@ -766,8 +774,8 @@ function detectFermiPockets(
       : 0.0;
 
     const orbChar = charCount > 0
-      ? { s: totalS / charCount, p: totalP / charCount, d: totalD / charCount }
-      : { s: 0.33, p: 0.33, d: 0.34 };
+      ? { s: totalS / charCount, p: totalP / charCount, d: totalD / charCount, f: totalF / charCount }
+      : { s: 0.25, p: 0.25, d: 0.25, f: 0.25 };
 
     pockets.push({
       index: pockets.length,
@@ -778,6 +786,7 @@ function detectFermiPockets(
         s: Number(orbChar.s.toFixed(4)),
         p: Number(orbChar.p.toFixed(4)),
         d: Number(orbChar.d.toFixed(4)),
+        f: Number(orbChar.f.toFixed(4)),
       },
       bandIndex: b,
       avgVelocity: Number(avgVelocity.toFixed(4)),
@@ -1098,7 +1107,8 @@ function computeMultiBandScore(pockets: FermiPocket[]): number {
 
   const orbitalTypes = new Set<string>();
   for (const pocket of pockets) {
-    if (pocket.orbitalCharacter.d > 0.5) orbitalTypes.add("d");
+    if (pocket.orbitalCharacter.f > 0.4) orbitalTypes.add("f");
+    else if (pocket.orbitalCharacter.d > 0.5) orbitalTypes.add("d");
     else if (pocket.orbitalCharacter.p > 0.5) orbitalTypes.add("p");
     else if (pocket.orbitalCharacter.s > 0.5) orbitalTypes.add("s");
     else orbitalTypes.add("mixed");
@@ -1161,9 +1171,15 @@ export function computeFermiSurface(formula: string, pressureGpa: number = 0): F
     ? pockets.reduce((s, p) => s + p.cylindricalCharacter * p.volume, 0) / Math.max(0.001, totalVolume)
     : 0;
 
-  const nestingScore = nestingVectors.length > 0
-    ? Number(Math.min(1.0, nestingVectors.reduce((s, nv) => s + nv.strength, 0) / Math.max(1, nestingVectors.length)).toFixed(4))
+  let nestingScore = nestingVectors.length > 0
+    ? Math.min(1.0, nestingVectors.reduce((s, nv) => s + nv.strength, 0) / Math.max(1, nestingVectors.length))
     : 0;
+
+  if (avgCylindrical > 0.8) {
+    const cylindricalBonus = 0.25 * (avgCylindrical - 0.8) / 0.2;
+    nestingScore = Math.min(1.0, nestingScore + cylindricalBonus);
+  }
+  nestingScore = Number(nestingScore.toFixed(4));
 
   const lindhardSusceptibility = computeLindhardSusceptibility(pockets, evaluations, fermiEnergy, nestingVectors);
 
