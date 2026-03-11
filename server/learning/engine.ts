@@ -1572,7 +1572,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
   }
 }
 
-const reEvalApplied = new Map<string, { lambda: number; omegaLog: number; muStar: number; hasCrystal: boolean }>();
+const reEvalApplied = new Map<string, { formula: string; lambda: number; omegaLog: number; muStar: number; hasCrystal: boolean; pressureGpa: number }>();
 let cyclesSinceTcImproved = 0;
 let lastBestTcSeen = 0;
 let lastBestPairingSusc = 0;
@@ -1647,16 +1647,23 @@ async function reEvaluateTopCandidates() {
       const crystals = await storage.getCrystalStructuresByFormula(candidate.formula);
       const hasCrystal = crystals.some(c => c.synthesizability != null && c.synthesizability > 0.7);
 
-      const prev = reEvalApplied.get(candidate.id);
+      const candidatePressure = candidate.pressureGpa ?? 0;
+      const cacheKey = `${candidate.id}:${candidate.formula}`;
+      const prev = reEvalApplied.get(cacheKey);
       const inputsChanged = !prev ||
+        prev.formula !== candidate.formula ||
         (lambda > 0 && Math.abs(lambda - prev.lambda) > 0.05) ||
         (omegaLog > 0 && Math.abs(omegaLog - prev.omegaLog) > 5) ||
         (Math.abs(muStar - prev.muStar) > 0.01) ||
+        (Math.abs(candidatePressure - prev.pressureGpa) > 2) ||
         (hasCrystal && !prev.hasCrystal);
 
       if (!inputsChanged) continue;
 
-      reEvalApplied.set(candidate.id, { lambda, omegaLog, muStar, hasCrystal });
+      if (prev && prev.formula !== candidate.formula) {
+        reEvalApplied.delete(`${candidate.id}:${prev.formula}`);
+      }
+      reEvalApplied.set(cacheKey, { formula: candidate.formula, lambda, omegaLog, muStar, hasCrystal, pressureGpa: candidatePressure });
 
       const reEvalFamily = classifyFamily(candidate.formula);
       let newTc = computeEliashbergTc(lambda, omegaLog, muStar, reEvalFamily ?? undefined);
