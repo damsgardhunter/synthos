@@ -308,11 +308,12 @@ function computeSDWChannel(
   }
 
   if (lindhard && lindhard.sdwSusceptibility > 0) {
+    const divProx = Math.min(1.0, Math.max(0, lindhard.divergenceProximity));
     const chi0Contribution = Math.min(0.5, lindhard.sdwSusceptibility * 0.1);
     sdwScore += chi0Contribution;
 
-    if (lindhard.divergenceProximity > 0.5) {
-      sdwScore += (lindhard.divergenceProximity - 0.5) * 0.4;
+    if (divProx > 0.5) {
+      sdwScore += (divProx - 0.5) * 0.4;
     }
   } else if (nestingScore > 0.4) {
     sdwScore += nestingScore * 0.3;
@@ -346,12 +347,14 @@ function computeCDWChannel(
 
   let cdwScore = 0;
 
+  const cdwDivProx = lindhard ? Math.min(1.0, Math.max(0, lindhard.divergenceProximity)) : 0;
+
   if (lindhard && lindhard.cdwSusceptibility > 0) {
     const chi0Contribution = Math.min(0.5, lindhard.cdwSusceptibility * 0.08);
     cdwScore += chi0Contribution * 0.5;
 
-    if (lindhard.divergenceProximity > 0.3 && phonon.softModePresent) {
-      cdwScore += lindhard.divergenceProximity * phonon.softModeScore * 0.4;
+    if (cdwDivProx > 0.3 && phonon.softModePresent) {
+      cdwScore += cdwDivProx * phonon.softModeScore * 0.4;
     }
   } else {
     const nestingDriven = Math.min(1.0, nestingScore * dosEF * 0.3);
@@ -363,7 +366,7 @@ function computeCDWChannel(
   }
 
   if (phonon.softModePresent) {
-    const lindhardBoost = lindhard ? (1 + lindhard.divergenceProximity * 0.5) : 1.0;
+    const lindhardBoost = 1 + cdwDivProx * 0.5;
     cdwScore += phonon.softModeScore * 0.3 * lindhardBoost;
   }
 
@@ -472,10 +475,20 @@ function computeOrbitalSelectiveChannel(
     if (ratio < minUoverW) minUoverW = ratio;
   }
 
-  if (tmCount >= 1 && maxUoverW > 0.3 && minUoverW < Infinity) {
+  if (tmCount > 1 && maxUoverW > 0.3 && minUoverW < Infinity) {
     const spread = maxUoverW - minUoverW;
     if (spread > 0.2) {
       osmpScore = Math.min(1.0, spread * 1.5);
+    }
+  } else if (tmCount === 1 && maxUoverW > 0.5) {
+    const tmEl = elements.find(e => isTransitionMetal(e))!;
+    const { filling } = estimateFilling(elements, counts, tmEl);
+    const dElectrons = filling * 10;
+    const t2gFilling = Math.min(6, dElectrons) / 6;
+    const egFilling = Math.max(0, dElectrons - 6) / 4;
+    const orbitalSpread = Math.abs(t2gFilling - egFilling);
+    if (orbitalSpread > 0.15 && dElectrons >= 3 && dElectrons <= 7) {
+      osmpScore = Math.min(1.0, orbitalSpread * maxUoverW * 0.8);
     }
   }
 
