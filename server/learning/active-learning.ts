@@ -101,25 +101,57 @@ const RETRAIN_CYCLE_INTERVAL = 20;
 const RETRAIN_DFT_THRESHOLD = 50;
 const recentUncertaintyDrops: number[] = [];
 
+const EMA_ALPHA = 0.05;
+const RUNNING_SUM_RESET_THRESHOLD = 10000;
+
 const quantumEnginePipelineStats = {
   fullPipelineRuns: 0,
   fallbackRuns: 0,
-  avgLambdaFromPipeline: 0,
-  avgTcFromPipeline: 0,
   lambdaSum: 0,
   tcSum: 0,
   successfulPipelineRuns: 0,
+  emaLambda: 0,
+  emaTc: 0,
+  windowCount: 0,
 };
 
+function recordPipelineResult(lambda: number, tc: number): void {
+  quantumEnginePipelineStats.successfulPipelineRuns++;
+  quantumEnginePipelineStats.lambdaSum += lambda;
+  quantumEnginePipelineStats.tcSum += tc;
+  quantumEnginePipelineStats.windowCount++;
+
+  const n = quantumEnginePipelineStats.successfulPipelineRuns;
+  if (n === 1) {
+    quantumEnginePipelineStats.emaLambda = lambda;
+    quantumEnginePipelineStats.emaTc = tc;
+  } else {
+    quantumEnginePipelineStats.emaLambda =
+      EMA_ALPHA * lambda + (1 - EMA_ALPHA) * quantumEnginePipelineStats.emaLambda;
+    quantumEnginePipelineStats.emaTc =
+      EMA_ALPHA * tc + (1 - EMA_ALPHA) * quantumEnginePipelineStats.emaTc;
+  }
+
+  if (quantumEnginePipelineStats.windowCount >= RUNNING_SUM_RESET_THRESHOLD) {
+    const avgL = quantumEnginePipelineStats.lambdaSum / quantumEnginePipelineStats.windowCount;
+    const avgT = quantumEnginePipelineStats.tcSum / quantumEnginePipelineStats.windowCount;
+    quantumEnginePipelineStats.lambdaSum = avgL * 100;
+    quantumEnginePipelineStats.tcSum = avgT * 100;
+    quantumEnginePipelineStats.windowCount = 100;
+  }
+}
+
 export function getQuantumEnginePipelineStats() {
-  const n = quantumEnginePipelineStats.successfulPipelineRuns || 1;
+  const n = quantumEnginePipelineStats.successfulPipelineRuns;
   const engineStats = getQuantumEngineStats();
   return {
     fullPipelineRuns: quantumEnginePipelineStats.fullPipelineRuns,
     fallbackRuns: quantumEnginePipelineStats.fallbackRuns,
-    activeLearningAvgLambda: Number((quantumEnginePipelineStats.lambdaSum / n).toFixed(4)),
-    activeLearningAvgTc: Number((quantumEnginePipelineStats.tcSum / n).toFixed(2)),
-    successfulPipelineRuns: quantumEnginePipelineStats.successfulPipelineRuns,
+    activeLearningAvgLambda: n > 0 ? Number((quantumEnginePipelineStats.lambdaSum / quantumEnginePipelineStats.windowCount).toFixed(4)) : null,
+    activeLearningAvgTc: n > 0 ? Number((quantumEnginePipelineStats.tcSum / quantumEnginePipelineStats.windowCount).toFixed(2)) : null,
+    activeLearningEmaLambda: n > 0 ? Number(quantumEnginePipelineStats.emaLambda.toFixed(4)) : null,
+    activeLearningEmaTc: n > 0 ? Number(quantumEnginePipelineStats.emaTc.toFixed(2)) : null,
+    successfulPipelineRuns: n,
     ...engineStats,
   };
 }
@@ -235,21 +267,52 @@ const COMMON_ELEMENTS = new Set([
   "La", "Y", "Ba", "Sr", "Ca", "Nb", "V", "Mo", "W", "Pb",
 ]);
 
+const DOS_WEIGHT: Record<string, number> = {
+  Nb: 0.85, V: 0.80, Ta: 0.75, Mo: 0.70, W: 0.65,
+  Ti: 0.60, Zr: 0.65, Hf: 0.60,
+  Fe: 0.55, Co: 0.50, Ni: 0.50, Mn: 0.45, Cr: 0.45,
+  Pd: 0.60, Pt: 0.55, Rh: 0.50, Ir: 0.50, Ru: 0.45, Os: 0.45,
+  Cu: 0.35, Zn: 0.25, Ag: 0.30, Au: 0.25,
+  La: 0.40, Ce: 0.50, Pr: 0.45, Nd: 0.45, Sm: 0.40, Eu: 0.35,
+  Gd: 0.45, Tb: 0.40, Dy: 0.40, Ho: 0.35, Er: 0.35, Tm: 0.30,
+  Yb: 0.25, Lu: 0.30,
+  Sc: 0.35, Y: 0.40,
+  H: 0.70, B: 0.45, C: 0.30, N: 0.35,
+  O: 0.20, S: 0.30, Se: 0.35, Te: 0.40,
+  P: 0.30, As: 0.40, Sb: 0.35, Bi: 0.40,
+  Al: 0.20, Ga: 0.25, In: 0.30, Tl: 0.35,
+  Si: 0.20, Ge: 0.25, Sn: 0.30, Pb: 0.35,
+  Ba: 0.15, Sr: 0.15, Ca: 0.15, Mg: 0.15, Be: 0.20,
+  Li: 0.15, Na: 0.10, K: 0.10, Rb: 0.10, Cs: 0.10,
+  Th: 0.40, U: 0.50,
+};
+
 function computeElementRarityFromCounts(counts: Record<string, number>): number {
   const elements = Object.keys(counts);
   if (elements.length === 0) return 0;
+  const total = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
 
   let raritySum = 0;
+  let dosExplorationSum = 0;
   for (const el of elements) {
     const data = getElementData(el);
     const isCommon = COMMON_ELEMENTS.has(el);
     const atomicNumber = data?.atomicNumber ?? 50;
+    const frac = (counts[el] || 0) / total;
+
     let elRarity = isCommon ? 0.1 : 0.5;
     if (atomicNumber > 56 && atomicNumber <= 71) elRarity += 0.2;
     if (atomicNumber > 88) elRarity += 0.3;
+
+    const dosWeight = DOS_WEIGHT[el] ?? 0.3;
+    const dosExploration = (1 - dosWeight) * 0.6 + dosWeight * 0.4;
+    dosExplorationSum += dosExploration * frac;
+
     raritySum += Math.min(1.0, elRarity);
   }
-  return Math.min(1.0, raritySum / elements.length);
+
+  const baseRarity = Math.min(1.0, raritySum / elements.length);
+  return Math.min(1.0, 0.5 * baseRarity + 0.5 * dosExplorationSum);
 }
 
 function computeStructuralUniquenessFromCounts(counts: Record<string, number>, candidate: SuperconductorCandidate): number {
@@ -693,9 +756,7 @@ async function runDFTEnrichmentForCandidate(
     });
 
     if (entry.lambda > 0 && entry.tc > 0) {
-      quantumEnginePipelineStats.successfulPipelineRuns++;
-      quantumEnginePipelineStats.lambdaSum += entry.lambda;
-      quantumEnginePipelineStats.tcSum += entry.tc;
+      recordPipelineResult(entry.lambda, entry.tc);
     }
 
     const features = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
