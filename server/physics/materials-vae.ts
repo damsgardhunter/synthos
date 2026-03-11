@@ -9,6 +9,16 @@ const GENOME_DIM = 256;
 const LATENT_DIM = 64;
 const HIDDEN_DIM = 128;
 
+let vaeBeta = 1.0;
+
+export function setVAEBeta(beta: number): void {
+  vaeBeta = Math.max(0.01, Math.min(10.0, beta));
+}
+
+export function getVAEBeta(): number {
+  return vaeBeta;
+}
+
 interface VAEWeights {
   W_enc1: number[][];
   b_enc1: number[];
@@ -133,7 +143,7 @@ function encode(genome: number[]): { mu: number[]; logvar: number[] } {
   const mu = vecAdd(matVecMul(w.W_mu, h2), w.b_mu);
   const logvar = vecAdd(matVecMul(w.W_logvar, h2), w.b_logvar);
 
-  const clampedLogvar = logvar.map(v => Math.max(-10, Math.min(2, v)));
+  const clampedLogvar = logvar.map(v => Math.max(-10, Math.min(5, v)));
 
   return { mu, logvar: clampedLogvar };
 }
@@ -145,11 +155,28 @@ function reparameterize(mu: number[], logvar: number[]): number[] {
   });
 }
 
+const POSITIVE_DIMS = new Set<number>();
+(function initPositiveDims() {
+  for (let i = 0; i <= 7; i++) POSITIVE_DIMS.add(i);
+  for (let i = 40; i <= 51; i++) POSITIVE_DIMS.add(i);
+  for (let i = 168; i <= 207; i++) POSITIVE_DIMS.add(i);
+})();
+
+function adaptiveOutput(vec: number[]): number[] {
+  return vec.map((v, i) => {
+    const clamped = Math.max(-10, Math.min(10, v));
+    if (POSITIVE_DIMS.has(i)) {
+      return 1 / (1 + Math.exp(-clamped));
+    }
+    return Math.tanh(clamped);
+  });
+}
+
 function decode(z: number[]): number[] {
   const w = getVAEWeights();
 
   const h1 = leakyRelu(vecAdd(matVecMul(w.W_dec1, z), w.b_dec1));
-  const out = tanh(vecAdd(matVecMul(w.W_dec2, h1), w.b_dec2));
+  const out = adaptiveOutput(vecAdd(matVecMul(w.W_dec2, h1), w.b_dec2));
 
   return out;
 }
@@ -180,7 +207,7 @@ export function encodeToLatent(formula: string): VAELatentPoint {
   const recLoss = reconstructionLoss(genome.vector, reconstructed);
   const kl = klDivergence(mu, logvar);
 
-  return { z, mu, logvar, reconstructionLoss: recLoss, klDivergence: kl };
+  return { z, mu, logvar, reconstructionLoss: recLoss, klDivergence: kl * vaeBeta };
 }
 
 export function decodeFromLatent(z: number[]): number[] {
@@ -543,7 +570,7 @@ export function trainVAE(formulas: string[], epochs: number = 20): void {
 
         const recLoss = reconstructionLoss(genome.vector, reconstructed);
         const kl = klDivergence(mu, logvar);
-        const loss = recLoss + 0.001 * kl;
+        const loss = recLoss + vaeBeta * kl;
         totalLoss += loss;
 
         for (let i = 0; i < w.W_dec2.length; i++) {
@@ -588,5 +615,5 @@ export function getVAEStats() {
   if (vaeStats.recentDesigns.length > 0) {
     vaeStats.convergenceRate = vaeStats.recentDesigns.filter(d => d.converged).length / vaeStats.recentDesigns.length;
   }
-  return { ...vaeStats };
+  return { ...vaeStats, beta: vaeBeta };
 }
