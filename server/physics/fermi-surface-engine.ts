@@ -255,9 +255,17 @@ interface BZEvaluation {
   orbChars: { s: number; p: number; d: number }[];
 }
 
+function birchMurnaghanCompression(pressureGpa: number, K0: number = 150, K0p: number = 4.0): number {
+  if (pressureGpa <= 0) return 1.0;
+  const eta = 1 + (K0p / K0) * pressureGpa;
+  const volumeRatio = Math.pow(eta, -1 / K0p);
+  return Math.pow(volumeRatio, 1 / 3);
+}
+
 function evaluateBZGrid(
   formula: string,
   gridPoints: number[][],
+  pressureGpa: number = 0,
 ): { evaluations: BZEvaluation[]; fermiEnergy: number; nOrbitals: number } {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -271,6 +279,14 @@ function evaluateBZGrid(
     }
   }
 
+  if (pressureGpa > 0) {
+    const hCount = counts["H"] || 0;
+    const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
+    const K0 = hFraction > 0.5 ? 100 : (elements.some(e => isTransitionMetal(e)) ? 180 : 150);
+    const compression = birchMurnaghanCompression(pressureGpa, K0);
+    latticeConstant *= compression;
+  }
+
   let totalVE = 0;
   let nOrbitals = 0;
   for (const el of elements) {
@@ -280,7 +296,7 @@ function evaluateBZGrid(
     const hasDOrbs = isTransitionMetal(el) || isRareEarth(el) || isActinide(el);
     nOrbitals += count * (hasDOrbs ? 9 : 4);
   }
-  nOrbitals = Math.min(nOrbitals, 50);
+  nOrbitals = Math.min(nOrbitals, 128);
 
   const evaluations: BZEvaluation[] = [];
 
@@ -1095,8 +1111,9 @@ function computeMultiBandScore(pockets: FermiPocket[]): number {
 const fsCache = new Map<string, FermiSurfaceResult>();
 const FS_CACHE_MAX = 200;
 
-export function computeFermiSurface(formula: string): FermiSurfaceResult {
-  const cached = fsCache.get(formula);
+export function computeFermiSurface(formula: string, pressureGpa: number = 0): FermiSurfaceResult {
+  const cacheKey = pressureGpa > 0 ? `${formula}_${Math.round(pressureGpa)}` : formula;
+  const cached = fsCache.get(cacheKey);
   if (cached) return cached;
 
   const elements = parseFormulaElements(formula);
@@ -1118,10 +1135,14 @@ export function computeFermiSurface(formula: string): FermiSurfaceResult {
     } else if (elements.some(e => ["Mg", "Be"].includes(e))) {
       caRatio = 1.623;
     }
+    if (pressureGpa > 10) {
+      const compressionFactor = birchMurnaghanCompression(pressureGpa, 100);
+      caRatio *= (1 + 0.1 * (1 - compressionFactor));
+    }
   }
   const gridPoints = generateBZGrid(latticeType, gridSize, caRatio);
 
-  const { evaluations, fermiEnergy, nOrbitals } = evaluateBZGrid(formula, gridPoints);
+  const { evaluations, fermiEnergy, nOrbitals } = evaluateBZGrid(formula, gridPoints, pressureGpa);
 
   const pockets = detectFermiPockets(evaluations, fermiEnergy, nOrbitals);
 
@@ -1180,7 +1201,7 @@ export function computeFermiSurface(formula: string): FermiSurfaceResult {
     const firstKey = fsCache.keys().next().value;
     if (firstKey !== undefined) fsCache.delete(firstKey);
   }
-  fsCache.set(formula, result);
+  fsCache.set(cacheKey, result);
 
   return result;
 }
