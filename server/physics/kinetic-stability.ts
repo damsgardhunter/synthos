@@ -300,16 +300,19 @@ function computePressureStabilization(formula: string, eAboveHull: number): Pres
 
   let avgBulkModulus = 0;
   let avgMass = 0;
+  let avgMp = 0;
   let totalFrac = 0;
   for (const el of elements) {
     const data = getElementData(el);
     const frac = (counts[el] || 1) / totalAtoms;
     avgBulkModulus += (data?.bulkModulus ?? 50) * frac;
     avgMass += (data?.atomicMass ?? 50) * frac;
+    avgMp += (data?.meltingPoint ?? 1000) * frac;
     totalFrac += frac;
   }
   avgBulkModulus /= Math.max(totalFrac, 0.01);
   avgMass /= Math.max(totalFrac, 0.01);
+  avgMp /= Math.max(totalFrac, 0.01);
 
   const compressibility = 1 / Math.max(avgBulkModulus, 1);
 
@@ -320,27 +323,59 @@ function computePressureStabilization(formula: string, eAboveHull: number): Pres
     ? eAboveHull * avgBulkModulus * 0.5 + (hasH ? hFraction * 50 : 0)
     : 0;
 
-  const criticalDecompRate = avgBulkModulus > 100
-    ? avgBulkModulus * 0.01
-    : avgBulkModulus * 0.05;
+  const diffusionBarrierEv = avgMp * kB * 18 * (hasH ? 0.7 : 1.0);
+  const kineticTrappingEnergy = diffusionBarrierEv - eAboveHull;
 
-  const ambientStabilizable = eAboveHull < 0.05 || (eAboveHull < 0.15 && avgBulkModulus > 150);
+  const decompressionPrefactor = avgBulkModulus * 0.001;
+  const trappingFactor = Math.max(0, kineticTrappingEnergy) / Math.max(eAboveHull, 0.01);
+  const hMobilityPenalty = hasH ? Math.exp(-hFraction * 2.5) : 1.0;
+
+  const criticalDecompRate = decompressionPrefactor
+    * Math.pow(trappingFactor, 1.5)
+    * hMobilityPenalty
+    * (1 + 0.1 * elements.length);
+
+  const MIN_VIABLE_DECOMP_RATE = 0.5;
+
+  let ambientStabilizable: boolean;
+  if (minPressureGPa > 50) {
+    ambientStabilizable = false;
+  } else if (minPressureGPa > 10) {
+    ambientStabilizable = criticalDecompRate >= MIN_VIABLE_DECOMP_RATE
+      && kineticTrappingEnergy > 0.3
+      && eAboveHull < 0.15;
+  } else if (minPressureGPa > 1) {
+    ambientStabilizable = criticalDecompRate >= MIN_VIABLE_DECOMP_RATE * 0.5
+      && eAboveHull < 0.2;
+  } else {
+    ambientStabilizable = eAboveHull < 0.05 || (eAboveHull < 0.15 && avgBulkModulus > 150);
+  }
+
+  if (criticalDecompRate < MIN_VIABLE_DECOMP_RATE && minPressureGPa > 5) {
+    ambientStabilizable = false;
+  }
 
   let pressureRetention: string;
   if (minPressureGPa < 1) {
     pressureRetention = "Ambient-stable — no pressure required";
   } else if (minPressureGPa < 10) {
-    pressureRetention = `Low pressure needed (~${Math.round(minPressureGPa)} GPa) — diamond anvil cell synthesis possible`;
+    const rateNote = criticalDecompRate < MIN_VIABLE_DECOMP_RATE
+      ? "; kinetic trapping insufficient for ambient recovery"
+      : "; controlled decompression may preserve metastable phase";
+    pressureRetention = `Low pressure needed (~${Math.round(minPressureGPa)} GPa) — diamond anvil cell synthesis possible${rateNote}`;
   } else if (minPressureGPa < 100) {
-    pressureRetention = `Moderate pressure (~${Math.round(minPressureGPa)} GPa) — requires high-pressure synthesis`;
+    const rateNote = criticalDecompRate < MIN_VIABLE_DECOMP_RATE
+      ? "; rapid H diffusion prevents ambient phase retention"
+      : "; slow decompression required to trap metastable structure";
+    pressureRetention = `Moderate pressure (~${Math.round(minPressureGPa)} GPa) — requires high-pressure synthesis${rateNote}`;
   } else {
-    pressureRetention = `Very high pressure (~${Math.round(minPressureGPa)} GPa) — extreme conditions required`;
+    pressureRetention = `Very high pressure (~${Math.round(minPressureGPa)} GPa) — extreme conditions required; ambient recovery highly unlikely (critDecompRate=${criticalDecompRate.toFixed(2)} GPa/s)`;
   }
 
   return {
     estimatedBulkModulus: Math.round(avgBulkModulus * 10) / 10,
     compressibility: Math.round(compressibility * 100000) / 100000,
-    criticalDecompressionRate: Math.round(criticalDecompRate * 100) / 100,
+    criticalDecompressionRate: Math.round(criticalDecompRate * 1000) / 1000,
     pressureRetentionWindow: pressureRetention,
     ambientStabilizable,
     minStabilizationPressure: Math.round(minPressureGPa * 10) / 10,
