@@ -91,6 +91,34 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
+const FAMILY_PHONON_DEFAULTS: Record<string, { debyeTemp: number; omegaLog: number }> = {
+  hydride:     { debyeTemp: 1500, omegaLog: 800 },
+  superhydride:{ debyeTemp: 2200, omegaLog: 1200 },
+  cuprate:     { debyeTemp: 400,  omegaLog: 250 },
+  pnictide:    { debyeTemp: 300,  omegaLog: 200 },
+  boride:      { debyeTemp: 900,  omegaLog: 500 },
+  carbide:     { debyeTemp: 700,  omegaLog: 400 },
+  nitride:     { debyeTemp: 600,  omegaLog: 350 },
+  chalcogenide:{ debyeTemp: 250,  omegaLog: 160 },
+  heavyfermion:{ debyeTemp: 150,  omegaLog: 80 },
+  default:     { debyeTemp: 300,  omegaLog: 200 },
+};
+
+function detectPhononFamily(elements: string[], counts: Record<string, number>, totalAtoms: number): string {
+  const hCount = counts["H"] || 0;
+  const hRatio = hCount / Math.max(1, totalAtoms - hCount);
+  if (hRatio >= 6) return "superhydride";
+  if (hCount > 0 && hRatio >= 1) return "hydride";
+  if (elements.includes("Cu") && elements.includes("O")) return "cuprate";
+  if (elements.some(e => ["As", "P", "Sb"].includes(e)) && elements.includes("Fe")) return "pnictide";
+  if (elements.includes("B") && !elements.includes("O")) return "boride";
+  if (elements.includes("C") && !elements.includes("O")) return "carbide";
+  if (elements.includes("N") && !elements.includes("O")) return "nitride";
+  if (elements.some(e => ["S", "Se", "Te"].includes(e))) return "chalcogenide";
+  if (elements.some(e => ["Ce", "U", "Yb", "Sm"].includes(e))) return "heavyfermion";
+  return "default";
+}
+
 function extractLambdaFeatures(formula: string, pressure: number = 0): Record<string, number> {
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
@@ -101,10 +129,21 @@ function extractLambdaFeatures(formula: string, pressure: number = 0): Record<st
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
 
   const avgMass = getAverageMass(counts);
-  const debyeTemp = phonon.debyeTemperature;
+  const family = detectPhononFamily(elements, counts, totalAtoms);
+  const familyDefaults = FAMILY_PHONON_DEFAULTS[family] || FAMILY_PHONON_DEFAULTS.default;
+  const debyeTemp0 = phonon.debyeTemperature > 50 ? phonon.debyeTemperature : familyDefaults.debyeTemp;
   const hopfieldEta = getCompositionWeightedProperty(counts, "mcMillanHopfieldEta") ?? 0;
-  const avgBulk = getCompositionWeightedProperty(counts, "bulkModulus") ?? 0;
+  const avgBulk0 = getCompositionWeightedProperty(counts, "bulkModulus") ?? 0;
   const avgGamma = getCompositionWeightedProperty(counts, "sommerfeldGamma") ?? 0;
+
+  const gruneisen = 1.5;
+  const bPrime = 4.0;
+  const pressureRatio = avgBulk0 > 0 ? pressure / avgBulk0 : 0;
+  const compressionFactor = Math.pow(1 + bPrime * pressureRatio, 1 / bPrime);
+  const bulkPressureScale = compressionFactor;
+  const debyePressureScale = Math.pow(compressionFactor, gruneisen);
+  const avgBulk = avgBulk0 * Math.max(1, bulkPressureScale);
+  const debyeTemp = debyeTemp0 * Math.max(1, debyePressureScale);
 
   const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
   const enSpread = enValues.length > 1 ? Math.max(...enValues) - Math.min(...enValues) : 0;
@@ -272,9 +311,9 @@ function trainLambdaGBM(
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
     const tree = buildTree(X, residuals, allIndices, 0, maxDepth);
-    if (typeof tree === "number" && Math.abs(tree) < 1e-6) break;
+    if (typeof tree === "number") break;
 
-    trees.push(typeof tree === "number" ? { featureIndex: 0, threshold: 0, left: tree, right: tree } : tree);
+    trees.push(tree);
 
     for (let i = 0; i < n; i++) {
       predictions[i] += learningRate * predictTree(tree, X[i]);
