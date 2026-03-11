@@ -80,6 +80,24 @@ export interface ActiveLearningCycleRecord {
   discoveryEfficiency: DiscoveryEfficiency;
 }
 
+class ActiveLearningSession {
+  stagnationCycles = 0;
+  lastBestTc = 0;
+  pressureTierDftRuns = 0;
+  pressureTierSuccesses = 0;
+
+  recordCycleEnd(bestTcThisCycle: number): void {
+    if (bestTcThisCycle > this.lastBestTc + 1.0) {
+      this.stagnationCycles = 0;
+      this.lastBestTc = bestTcThisCycle;
+    } else {
+      this.stagnationCycles++;
+    }
+  }
+}
+
+const session = new ActiveLearningSession();
+
 const cycleHistory: ActiveLearningCycleRecord[] = [];
 const MAX_CYCLE_HISTORY = 100;
 
@@ -87,7 +105,7 @@ export function getActiveLearningCycleHistory(): ActiveLearningCycleRecord[] {
   return [...cycleHistory];
 }
 
-let convergenceStats: ActiveLearningConvergence = {
+const convergenceStats: ActiveLearningConvergence = {
   totalDFTRuns: 0,
   avgUncertaintyBefore: 1.0,
   avgUncertaintyAfter: 1.0,
@@ -156,8 +174,14 @@ export function getQuantumEnginePipelineStats() {
   };
 }
 
-export function getActiveLearningStats(): ActiveLearningConvergence {
-  return { ...convergenceStats };
+export function getActiveLearningStats() {
+  return {
+    ...convergenceStats,
+    stagnationCycles: session.stagnationCycles,
+    pressureTierDftRuns: session.pressureTierDftRuns,
+    pressureTierSuccesses: session.pressureTierSuccesses,
+    adaptiveAlpha: computeAdaptiveAlpha(),
+  };
 }
 
 interface RankedCandidate {
@@ -196,7 +220,21 @@ function computeAdaptiveAlpha(): number {
   const baseAlpha = 2.0;
   const decayRate = 0.3;
   const minAlpha = 0.5;
-  return Math.max(minAlpha, baseAlpha - decayRate * convergenceStats.modelRetrains);
+  const retrains = convergenceStats.modelRetrains;
+  const stagnation = session.stagnationCycles;
+
+  let alpha = Math.max(minAlpha, baseAlpha - decayRate * retrains);
+
+  if (stagnation >= 5) {
+    const stagnationBoost = Math.min(0.8, 0.15 * (stagnation - 4));
+    alpha = Math.min(baseAlpha, alpha + stagnationBoost);
+  }
+
+  if (retrains === 0 && convergenceStats.totalDFTRuns >= 20) {
+    alpha = Math.max(alpha, 1.0);
+  }
+
+  return alpha;
 }
 
 function parseFormulaElements(formula: string): Record<string, number> {
@@ -1251,12 +1289,18 @@ export async function runActiveLearningCycle(
 
   for (const ranked of selected) {
     const { candidate } = ranked;
+    const isPressureTier = ranked.selectionTier === "pressure-exploration";
     const candidatePressure = ranked.targetPressureGpa ?? (candidate as any).pressureGpa ?? estimateFamilyPressure(candidate.formula);
+    if (isPressureTier) session.pressureTierDftRuns++;
     const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure);
     if (enriched) {
       dftSuccessCount++;
       convergenceStats.totalDFTRuns++;
       recordPressureCoverage(candidate.formula, candidatePressure);
+      if (isPressureTier) {
+        session.pressureTierSuccesses++;
+        pressureCoverageStats.totalPressurePoints++;
+      }
     } else {
       pipelineCrashCount++;
     }
@@ -1555,6 +1599,7 @@ export async function runActiveLearningCycle(
   if (bestTcThisLoop > convergenceStats.bestTcFromLoop) {
     convergenceStats.bestTcFromLoop = bestTcThisLoop;
   }
+  session.recordCycleEnd(bestTcThisLoop);
 
   const avgGnnUnc = selected.length > 0
     ? selected.reduce((s, r) => s + (r.uncertainty - r.xgbUncertainty * 0.5) * 2, 0) / selected.length
