@@ -60,23 +60,50 @@ function initVector(dim: number): number[] {
   return new Array(dim).fill(0);
 }
 
+const _mtBufferPool: Map<number, Float64Array[]> = new Map();
+
+function mtAcquire(size: number): Float64Array {
+  const pool = _mtBufferPool.get(size);
+  if (pool && pool.length > 0) return pool.pop()!;
+  return new Float64Array(size);
+}
+
+function mtRelease(buf: Float64Array): void {
+  const size = buf.length;
+  let pool = _mtBufferPool.get(size);
+  if (!pool) { pool = []; _mtBufferPool.set(size, pool); }
+  if (pool.length < 32) pool.push(buf);
+}
+
 function matVecMul(mat: number[][], vec: number[]): number[] {
-  return mat.map((row, idx) => {
+  const rows = mat.length;
+  const out = mtAcquire(rows);
+  for (let i = 0; i < rows; i++) {
+    const row = mat[i];
     if (row.length !== vec.length) {
+      mtRelease(out);
       throw new Error(
-        `matVecMul shape mismatch: row ${idx} has ${row.length} cols but vec has ${vec.length} elements`
+        `matVecMul shape mismatch: row ${i} has ${row.length} cols but vec has ${vec.length} elements`
       );
     }
     let s = 0;
-    for (let i = 0; i < row.length; i++) {
-      s += row[i] * vec[i];
+    for (let j = 0; j < row.length; j++) {
+      s += row[j] * vec[j];
     }
-    return s;
-  });
+    out[i] = s;
+  }
+  const result = Array.from(out);
+  mtRelease(out);
+  return result;
 }
 
 function relu(vec: number[]): number[] {
-  return vec.map(v => Math.max(0, v));
+  const n = vec.length;
+  const out = mtAcquire(n);
+  for (let i = 0; i < n; i++) out[i] = vec[i] > 0 ? vec[i] : 0;
+  const result = Array.from(out);
+  mtRelease(out);
+  return result;
 }
 
 function sigmoid(x: number): number {
@@ -84,7 +111,12 @@ function sigmoid(x: number): number {
 }
 
 function vecAdd(a: number[], b: number[]): number[] {
-  return a.map((v, i) => v + (b[i] ?? 0));
+  const n = a.length;
+  const out = mtAcquire(n);
+  for (let i = 0; i < n; i++) out[i] = a[i] + (b[i] ?? 0);
+  const result = Array.from(out);
+  mtRelease(out);
+  return result;
 }
 
 let multiTaskWeights: MultiTaskWeights | null = null;

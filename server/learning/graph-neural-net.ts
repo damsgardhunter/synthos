@@ -209,6 +209,32 @@ function initMatrix(rows: number, cols: number, rng: () => number, scale?: numbe
   return m;
 }
 
+const _bufferPool: Map<number, Float64Array[]> = new Map();
+
+function acquireBuffer(size: number): Float64Array {
+  const pool = _bufferPool.get(size);
+  if (pool && pool.length > 0) {
+    return pool.pop()!;
+  }
+  return new Float64Array(size);
+}
+
+function releaseBuffer(buf: Float64Array): void {
+  const size = buf.length;
+  let pool = _bufferPool.get(size);
+  if (!pool) {
+    pool = [];
+    _bufferPool.set(size, pool);
+  }
+  if (pool.length < 64) {
+    pool.push(buf);
+  }
+}
+
+function toArray(buf: Float64Array): number[] {
+  return Array.from(buf);
+}
+
 function layerNorm(vec: number[], eps: number = 1e-5): number[] {
   const n = vec.length;
   if (n === 0) return vec;
@@ -222,7 +248,11 @@ function layerNorm(vec: number[], eps: number = 1e-5): number[] {
   }
   variance /= n;
   const std = Math.sqrt(variance + eps);
-  return vec.map(v => (v - mean) / std);
+  const out = acquireBuffer(n);
+  for (let i = 0; i < n; i++) out[i] = (vec[i] - mean) / std;
+  const result = toArray(out);
+  releaseBuffer(out);
+  return result;
 }
 
 function initVector(size: number, val = 0): number[] {
@@ -230,10 +260,12 @@ function initVector(size: number, val = 0): number[] {
 }
 
 function matVecMul(mat: number[][], vec: number[]): number[] {
-  const result: number[] = [];
-  for (let i = 0; i < mat.length; i++) {
+  const rows = mat.length;
+  const out = acquireBuffer(rows);
+  for (let i = 0; i < rows; i++) {
     const row = mat[i];
     if (row.length !== vec.length) {
+      releaseBuffer(out);
       throw new Error(
         `matVecMul shape mismatch: row ${i} has ${row.length} cols but vec has ${vec.length} elements`
       );
@@ -242,21 +274,38 @@ function matVecMul(mat: number[][], vec: number[]): number[] {
     for (let j = 0; j < vec.length; j++) {
       sum += row[j] * vec[j];
     }
-    result.push(sum);
+    out[i] = sum;
   }
+  const result = toArray(out);
+  releaseBuffer(out);
   return result;
 }
 
 function vecAdd(a: number[], b: number[]): number[] {
-  return a.map((v, i) => v + (b[i] ?? 0));
+  const n = a.length;
+  const out = acquireBuffer(n);
+  for (let i = 0; i < n; i++) out[i] = a[i] + (b[i] ?? 0);
+  const result = toArray(out);
+  releaseBuffer(out);
+  return result;
 }
 
 function relu(v: number[]): number[] {
-  return v.map(x => Math.max(0, x));
+  const n = v.length;
+  const out = acquireBuffer(n);
+  for (let i = 0; i < n; i++) out[i] = v[i] > 0 ? v[i] : 0;
+  const result = toArray(out);
+  releaseBuffer(out);
+  return result;
 }
 
 function leakyRelu(v: number[], alpha: number = 0.01): number[] {
-  return v.map(x => x >= 0 ? x : alpha * x);
+  const n = v.length;
+  const out = acquireBuffer(n);
+  for (let i = 0; i < n; i++) out[i] = v[i] >= 0 ? v[i] : alpha * v[i];
+  const result = toArray(out);
+  releaseBuffer(out);
+  return result;
 }
 
 function sigmoid(x: number): number {
@@ -280,33 +329,49 @@ function dotProduct(a: number[], b: number[]): number {
   let sum = 0;
   const len = Math.min(a.length, b.length);
   for (let i = 0; i < len; i++) {
-    sum += (a[i] ?? 0) * (b[i] ?? 0);
+    sum += a[i] * b[i];
   }
   return sum;
 }
 
 function softmax(values: number[]): number[] {
-  if (values.length === 0) return [];
-  const maxVal = Math.max(...values);
-  const exps = values.map(v => Math.exp(Math.min(v - maxVal, 20)));
-  const sumExps = exps.reduce((s, e) => s + e, 0);
-  return exps.map(e => e / Math.max(sumExps, 1e-10));
+  const n = values.length;
+  if (n === 0) return [];
+  let maxVal = values[0];
+  for (let i = 1; i < n; i++) if (values[i] > maxVal) maxVal = values[i];
+  const out = acquireBuffer(n);
+  let sumExps = 0;
+  for (let i = 0; i < n; i++) {
+    out[i] = Math.exp(Math.min(values[i] - maxVal, 20));
+    sumExps += out[i];
+  }
+  const invSum = 1 / Math.max(sumExps, 1e-10);
+  for (let i = 0; i < n; i++) out[i] *= invSum;
+  const result = toArray(out);
+  releaseBuffer(out);
+  return result;
 }
 
+const _gaussianBuffer = new Float64Array(N_GAUSSIAN_BASIS);
+const _invTwoSigmaSq = 1 / (2 * GAUSSIAN_WIDTH * GAUSSIAN_WIDTH);
+
 function gaussianDistanceExpansion(distance: number): number[] {
-  const basis: number[] = [];
   for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
-    const center = GAUSSIAN_START + i * GAUSSIAN_STEP;
-    const diff = distance - center;
-    basis.push(Math.exp(-(diff * diff) / (2 * GAUSSIAN_WIDTH * GAUSSIAN_WIDTH)));
+    const diff = distance - (GAUSSIAN_START + i * GAUSSIAN_STEP);
+    _gaussianBuffer[i] = Math.exp(-(diff * diff) * _invTwoSigmaSq);
   }
-  return basis;
+  return Array.from(_gaussianBuffer);
 }
 
 function applyDropout(vec: number[], rate: number, rng: () => number): number[] {
   if (rate <= 0) return vec;
+  const n = vec.length;
   const scale = 1.0 / (1.0 - rate);
-  return vec.map(v => rng() < rate ? 0 : v * scale);
+  const out = acquireBuffer(n);
+  for (let i = 0; i < n; i++) out[i] = rng() < rate ? 0 : vec[i] * scale;
+  const result = toArray(out);
+  releaseBuffer(out);
+  return result;
 }
 
 function getPeriod(atomicNumber: number): number {
