@@ -399,23 +399,41 @@ const KNOWN_STABLE_PROTOTYPES: Record<string, string[]> = {
 function computeGoldschmidtTolerance(formula: string): number | null {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
 
   const hasO = elements.includes("O");
   if (!hasO || elements.length < 3) return null;
 
-  const nonOElements = elements.filter(e => e !== "O");
+  const nonOElements = elements.filter(e => e !== "O" && e !== "F");
   if (nonOElements.length < 2) return null;
 
-  const sorted = nonOElements.sort((a, b) => {
-    const dA = getElementData(a);
-    const dB = getElementData(b);
-    return (dB?.atomicRadius ?? 0) - (dA?.atomicRadius ?? 0);
+  const cationData = nonOElements.map(el => {
+    const d = getElementData(el);
+    return {
+      el,
+      radius: (d?.atomicRadius ?? 130) / 100,
+      count: counts[el] || 1,
+    };
   });
 
-  const rA = (getElementData(sorted[0])?.atomicRadius ?? 130) / 100;
-  const rB = (getElementData(sorted[1])?.atomicRadius ?? 130) / 100;
-  const rO = 1.40;
+  const aSiteCations = cationData.filter(c => c.radius > 1.0);
+  const bSiteCations = cationData.filter(c => c.radius <= 1.0);
 
+  if (aSiteCations.length === 0 || bSiteCations.length === 0) {
+    const sorted = cationData.sort((a, b) => b.radius - a.radius);
+    const rA = sorted[0].radius;
+    const rB = sorted[sorted.length > 1 ? 1 : 0].radius;
+    const rO = 1.40;
+    return (rA + rO) / (Math.SQRT2 * (rB + rO));
+  }
+
+  const aTotalCount = aSiteCations.reduce((s, c) => s + c.count, 0);
+  const rA = aSiteCations.reduce((s, c) => s + c.radius * c.count, 0) / aTotalCount;
+
+  const bTotalCount = bSiteCations.reduce((s, c) => s + c.count, 0);
+  const rB = bSiteCations.reduce((s, c) => s + c.radius * c.count, 0) / bTotalCount;
+
+  const rO = 1.40;
   const t = (rA + rO) / (Math.SQRT2 * (rB + rO));
   return t;
 }
