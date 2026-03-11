@@ -113,10 +113,6 @@ function estimateDecompositionEnthalpy(formula: string, pressureGpa: number): nu
 export function computeEnthalpy(formula: string, pressureGpa: number): EnthalpyPoint {
   const formationE = computeMiedemaFormationEnergy(formula);
 
-  const counts = parseFormulaCounts(formula);
-  const totalAtoms = getTotalAtoms(counts);
-  const energyPerAtom = formationE / Math.max(1, totalAtoms);
-
   let features;
   try {
     features = extractFeatures(formula, { pressureGpa } as any);
@@ -127,7 +123,7 @@ export function computeEnthalpy(formula: string, pressureGpa: number): EnthalpyP
   const dftFormationE = features?.formationEnergy ?? null;
   const totalEnergy = dftFormationE !== null && dftFormationE !== 0
     ? dftFormationE
-    : energyPerAtom;
+    : formationE;
 
   const bmResult = relaxStructureAtPressure(formula, pressureGpa);
   const volumeA3 = bmResult.compressedVolume;
@@ -153,11 +149,7 @@ export function computeEnthalpyStability(formula: string, pressureGpa: number): 
   const point = computeEnthalpy(formula, pressureGpa);
 
   const decompH = estimateDecompositionEnthalpy(formula, pressureGpa);
-  const formationE = computeMiedemaFormationEnergy(formula);
-  const counts = parseFormulaCounts(formula);
-  const totalAtoms = getTotalAtoms(counts);
-  const elementalEnergy = formationE / Math.max(1, totalAtoms);
-  const decompositionEnthalpy = elementalEnergy + decompH;
+  const decompositionEnthalpy = point.totalEnergy + decompH;
 
   const diff = point.enthalpy - decompositionEnthalpy;
   const isStable = diff <= STABILITY_THRESHOLD;
@@ -176,6 +168,51 @@ export function computeEnthalpyStability(formula: string, pressureGpa: number): 
   };
 }
 
+function findRefinementPressures(points: EnthalpyPoint[]): number[] {
+  const refinements: number[] = [];
+  const sorted = [...points].sort((a, b) => a.pressureGpa - b.pressureGpa);
+
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    const gap = curr.pressureGpa - prev.pressureGpa;
+    if (gap < 5) continue;
+
+    if (prev.isStable !== curr.isStable) {
+      const mid = (prev.pressureGpa + curr.pressureGpa) / 2;
+      refinements.push(mid);
+      if (gap > 15) {
+        refinements.push(prev.pressureGpa + gap * 0.25);
+        refinements.push(prev.pressureGpa + gap * 0.75);
+      }
+    }
+
+    if (gap > 10) {
+      const dH = Math.abs(curr.enthalpy - prev.enthalpy);
+      const gradient = dH / gap;
+      if (gradient > 0.005) {
+        refinements.push((prev.pressureGpa + curr.pressureGpa) / 2);
+      }
+    }
+  }
+
+  const existingPressures = points.map(pt => pt.pressureGpa);
+  const accepted: number[] = [];
+  for (const p of refinements) {
+    if (p <= 0 || p > 350) continue;
+    let tooClose = false;
+    for (let i = 0; i < existingPressures.length; i++) {
+      if (Math.abs(p - existingPressures[i]) < 2) { tooClose = true; break; }
+    }
+    if (tooClose) continue;
+    for (let i = 0; i < accepted.length; i++) {
+      if (Math.abs(p - accepted[i]) < 2) { tooClose = true; break; }
+    }
+    if (!tooClose) accepted.push(p);
+  }
+  return accepted;
+}
+
 export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
   const cacheKey = normalizeFormula(formula);
   const cached = enthalpyCache.get(cacheKey);
@@ -191,6 +228,28 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
       continue;
     }
   }
+
+  const refinePressures = findRefinementPressures(points);
+  for (const p of refinePressures.slice(0, 10)) {
+    try {
+      points.push(computeEnthalpy(formula, p));
+    } catch {
+      continue;
+    }
+  }
+
+  points.sort((a, b) => a.pressureGpa - b.pressureGpa);
+
+  const secondPass = findRefinementPressures(points);
+  for (const p of secondPass.slice(0, 5)) {
+    try {
+      points.push(computeEnthalpy(formula, p));
+    } catch {
+      continue;
+    }
+  }
+
+  points.sort((a, b) => a.pressureGpa - b.pressureGpa);
 
   let minEnthalpy = Infinity;
   let minEnthalpyPressure = 0;
