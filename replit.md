@@ -528,6 +528,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
     - Cache uses `Map<string, timestamp>` with `formula::fingerprint` keys, 2000-entry cap, 30-minute TTL, LRU eviction. Different formulas (e.g. LaH10 Fm-3m vs LaH10 P4/nmm) now correctly distinguished.
     - `recordFormulaFailure()` no longer called on geometry rejection — geometry is a soft gate, not a permanent block.
 
+- **Nested Formula Parser**: All 8 `server/synthesis/` files upgraded from flat regex `([A-Z][a-z]?)(\d*\.?\d*)` to recursive `parseNestedFormula()` that handles parenthesized groups like `(NH4)2SO4`, `Ba(NO3)2`, `Cu(NO3)2`. Handles arbitrary nesting depth and multiplier propagation. Files: reaction-pathway.ts, reaction-network.ts, heuristic-synthesis-generator.ts, synthesis-analogy-engine.ts, synthesis-gate.ts, synthesis-planner.ts, retrosynthesis-engine.ts, thermodynamic-feasibility.ts, ml-synthesis-predictor.ts, reaction-templates.ts.
+- **Superhydride Precursor Selection**: `selectPrecursors()` in reaction-pathway.ts upgraded for high-pressure hydrides. When target contains H and method is "high-pressure": H element → solid hydrogen source (CaH2, LiH, NaH, NH3BH3) preferred over H2 gas; non-H metals → elemental form preferred (for DAC loading). Previously defaulted to `options[0]` for all high-pressure.
+- **Hygroscopic Pre-Drying Step**: `buildPreDryingStep()` and `injectPreDryingStep()` in reaction-pathway.ts. When selected precursors include hygroscopic compounds (La2O3, LaCl3, NaOH, LiOH, KOH, MgCl2, CaCl2, BaO, SrO, CaO, NaH, LiH, CaH2, P2O5, Re2O7, Cs2CO3, Rb2CO3), a pre-drying step at 200 C under vacuum is automatically prepended to all synthesis routes (solid-state, arc-melting, high-pressure, ball-milling, CVD). Step numbers renumbered accordingly.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

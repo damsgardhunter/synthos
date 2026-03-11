@@ -6,13 +6,39 @@ import type { SynthesisRoute, ReactionStep, ThermodynamicScoring } from "./react
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  return parseNestedFormula(cleaned);
+}
+
+function parseNestedFormula(s: string): Record<string, number> {
   const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '(') {
+      let depth = 1;
+      let j = i + 1;
+      while (j < s.length && depth > 0) {
+        if (s[j] === '(') depth++;
+        else if (s[j] === ')') depth--;
+        j++;
+      }
+      const inner = parseNestedFormula(s.substring(i + 1, j - 1));
+      let numStr = '';
+      while (j < s.length && (s[j] >= '0' && s[j] <= '9' || s[j] === '.')) {
+        numStr += s[j]; j++;
+      }
+      const mult = numStr ? parseFloat(numStr) : 1;
+      for (const [el, cnt] of Object.entries(inner)) {
+        counts[el] = (counts[el] || 0) + cnt * mult;
+      }
+      i = j;
+    } else if (s[i] >= 'A' && s[i] <= 'Z') {
+      let el = s[i]; i++;
+      while (i < s.length && s[i] >= 'a' && s[i] <= 'z') { el += s[i]; i++; }
+      let numStr = '';
+      while (i < s.length && (s[i] >= '0' && s[i] <= '9' || s[i] === '.')) { numStr += s[i]; i++; }
+      const num = numStr ? parseFloat(numStr) : 1;
+      counts[el] = (counts[el] || 0) + num;
+    } else { i++; }
   }
   return counts;
 }

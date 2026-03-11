@@ -63,13 +63,49 @@ const feasibilityValues: number[] = [];
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  return parseNestedFormula(cleaned);
+}
+
+function parseNestedFormula(s: string): Record<string, number> {
   const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '(') {
+      let depth = 1;
+      let j = i + 1;
+      while (j < s.length && depth > 0) {
+        if (s[j] === '(') depth++;
+        else if (s[j] === ')') depth--;
+        j++;
+      }
+      const inner = parseNestedFormula(s.substring(i + 1, j - 1));
+      let numStr = '';
+      while (j < s.length && (s[j] >= '0' && s[j] <= '9' || s[j] === '.')) {
+        numStr += s[j];
+        j++;
+      }
+      const mult = numStr ? parseFloat(numStr) : 1;
+      for (const [el, cnt] of Object.entries(inner)) {
+        counts[el] = (counts[el] || 0) + cnt * mult;
+      }
+      i = j;
+    } else if (s[i] >= 'A' && s[i] <= 'Z') {
+      let el = s[i];
+      i++;
+      while (i < s.length && s[i] >= 'a' && s[i] <= 'z') {
+        el += s[i];
+        i++;
+      }
+      let numStr = '';
+      while (i < s.length && (s[i] >= '0' && s[i] <= '9' || s[i] === '.')) {
+        numStr += s[i];
+        i++;
+      }
+      const num = numStr ? parseFloat(numStr) : 1;
+      counts[el] = (counts[el] || 0) + num;
+    } else {
+      i++;
+    }
   }
   return counts;
 }
@@ -155,8 +191,17 @@ function getPrecursorsForElement(el: string): string[] {
   return COMMON_PRECURSORS[el] || [`${el} (elemental)`];
 }
 
-function selectPrecursors(elements: string[], method: string): string[] {
+const HYGROSCOPIC_PRECURSORS = new Set([
+  "La2O3", "LaCl3", "NaOH", "LiOH", "KOH", "CsOH",
+  "MgCl2", "CaCl2", "BaO", "SrO", "CaO",
+  "NaH", "LiH", "CaH2", "P2O5", "Re2O7",
+  "Cs2CO3", "Rb2CO3",
+]);
+
+function selectPrecursors(elements: string[], method: string, targetFormula?: string): string[] {
   const precursors: string[] = [];
+  const isHydride = targetFormula ? elements.includes("H") : false;
+
   for (const el of elements) {
     const options = getPrecursorsForElement(el);
     if (method === "solid-state" || method === "ball-milling") {
@@ -169,12 +214,44 @@ function selectPrecursors(elements: string[], method: string): string[] {
       const halide = options.find(p => p.includes("Cl"));
       precursors.push(halide || options[0]);
     } else if (method === "high-pressure") {
-      precursors.push(options[0]);
+      if (isHydride && el === "H") {
+        const solidH = options.find(p => ["CaH2", "LiH", "NaH", "NH3BH3"].includes(p));
+        const gasH = options.find(p => p === "H2");
+        precursors.push(solidH || gasH || options[0]);
+      } else if (isHydride && el !== "H") {
+        const elemental = options.find(p => p === el || p.includes("elemental"));
+        precursors.push(elemental || options[0]);
+      } else {
+        precursors.push(options[0]);
+      }
     } else {
       precursors.push(options[0]);
     }
   }
   return precursors;
+}
+
+function buildPreDryingStep(precursors: string[]): ReactionStep | null {
+  const hygro = precursors.filter(p => HYGROSCOPIC_PRECURSORS.has(p));
+  if (hygro.length === 0) return null;
+  return {
+    stepNumber: 0,
+    reactants: hygro,
+    products: hygro.map(p => `${p} (dried)`),
+    temperature: 200,
+    pressure: 0,
+    atmosphere: "vacuum or dry Ar",
+    reactionType: "pre-drying",
+    duration: "4 hours",
+    notes: `Pre-dry hygroscopic precursors (${hygro.join(", ")}) at 200 C under vacuum to remove adsorbed moisture. Store in desiccator until use.`,
+  };
+}
+
+function injectPreDryingStep(steps: ReactionStep[], precursors: string[]): ReactionStep[] {
+  const dryStep = buildPreDryingStep(precursors);
+  if (!dryStep) return steps;
+  dryStep.stepNumber = 1;
+  return [dryStep, ...steps.map(s => ({ ...s, stepNumber: s.stepNumber + 1 }))];
 }
 
 function computeMiedemaFormationEnergy(formula: string): number {
@@ -295,7 +372,7 @@ function computeThermodynamicScoring(formula: string, steps: ReactionStep[]): Th
 }
 
 function generateSolidStateRoute(formula: string, elements: string[], counts: Record<string, number>): SynthesisRoute {
-  const precursors = selectPrecursors(elements, "solid-state");
+  const precursors = selectPrecursors(elements, "solid-state", formula);
   let maxMp = 0;
   for (const el of elements) {
     const mp = getMeltingPoint(el);
@@ -362,14 +439,15 @@ function generateSolidStateRoute(formula: string, elements: string[], counts: Re
     },
   ];
 
-  const thermo = computeThermodynamicScoring(formula, steps);
+  const finalSteps = injectPreDryingStep(steps, precursors);
+  const thermo = computeThermodynamicScoring(formula, finalSteps);
   const equipment = ["Planetary ball mill", "Box furnace", "Uniaxial press", "Agate mortar", "Tube furnace"];
 
   return {
     routeId: `ss-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     routeName: "Solid-State Reaction",
     method: "solid-state",
-    steps,
+    steps: finalSteps,
     precursors,
     thermodynamics: thermo,
     totalDuration: `~48 hours (including cooling)`,
@@ -383,7 +461,7 @@ function generateSolidStateRoute(formula: string, elements: string[], counts: Re
 }
 
 function generateArcMeltingRoute(formula: string, elements: string[]): SynthesisRoute {
-  const precursors = selectPrecursors(elements, "arc-melting");
+  const precursors = selectPrecursors(elements, "arc-melting", formula);
 
   const steps: ReactionStep[] = [
     {
@@ -421,14 +499,15 @@ function generateArcMeltingRoute(formula: string, elements: string[]): Synthesis
     },
   ];
 
-  const thermo = computeThermodynamicScoring(formula, steps);
+  const finalSteps = injectPreDryingStep(steps, precursors);
+  const thermo = computeThermodynamicScoring(formula, finalSteps);
   const equipment = ["Arc furnace", "Water-cooled Cu hearth", "Ar glovebox", "Analytical balance", "Quartz tube sealer"];
 
   return {
     routeId: `am-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     routeName: "Arc Melting",
     method: "arc-melting",
-    steps,
+    steps: finalSteps,
     precursors,
     thermodynamics: thermo,
     totalDuration: "~8 days",
@@ -442,7 +521,7 @@ function generateArcMeltingRoute(formula: string, elements: string[]): Synthesis
 }
 
 function generateHighPressureRoute(formula: string, elements: string[], targetPressureGpa: number): SynthesisRoute {
-  const precursors = selectPrecursors(elements, "high-pressure");
+  const precursors = selectPrecursors(elements, "high-pressure", formula);
   const pressure = Math.max(1, targetPressureGpa);
   const hasH = elements.includes("H");
 
@@ -500,7 +579,8 @@ function generateHighPressureRoute(formula: string, elements: string[], targetPr
     });
   }
 
-  const thermo = computeThermodynamicScoring(formula, steps);
+  const finalSteps = injectPreDryingStep(steps, precursors);
+  const thermo = computeThermodynamicScoring(formula, finalSteps);
   const equipment = [
     "Diamond anvil cell (DAC)",
     "YAG/CO2 laser heating system",
@@ -515,7 +595,7 @@ function generateHighPressureRoute(formula: string, elements: string[], targetPr
     routeId: `hp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     routeName: `High-Pressure Synthesis (${pressure} GPa)`,
     method: "high-pressure",
-    steps,
+    steps: finalSteps,
     precursors,
     thermodynamics: thermo,
     totalDuration: pressure > 50 ? "~8 hours" : "~6 hours",
@@ -529,7 +609,7 @@ function generateHighPressureRoute(formula: string, elements: string[], targetPr
 }
 
 function generateBallMillingRoute(formula: string, elements: string[]): SynthesisRoute {
-  const precursors = selectPrecursors(elements, "ball-milling");
+  const precursors = selectPrecursors(elements, "ball-milling", formula);
 
   const steps: ReactionStep[] = [
     {
@@ -567,14 +647,15 @@ function generateBallMillingRoute(formula: string, elements: string[]): Synthesi
     },
   ];
 
-  const thermo = computeThermodynamicScoring(formula, steps);
+  const finalSteps = injectPreDryingStep(steps, precursors);
+  const thermo = computeThermodynamicScoring(formula, finalSteps);
   const equipment = ["Planetary ball mill", "WC balls and jar", "Cold isostatic press", "Tube furnace"];
 
   return {
     routeId: `bm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     routeName: "Mechanochemical Ball Milling",
     method: "ball-milling",
-    steps,
+    steps: finalSteps,
     precursors,
     thermodynamics: thermo,
     totalDuration: "~28 hours",
@@ -588,7 +669,7 @@ function generateBallMillingRoute(formula: string, elements: string[]): Synthesi
 }
 
 function generateCVDRoute(formula: string, elements: string[]): SynthesisRoute {
-  const precursors = selectPrecursors(elements, "CVD");
+  const precursors = selectPrecursors(elements, "CVD", formula);
 
   const steps: ReactionStep[] = [
     {
@@ -637,14 +718,15 @@ function generateCVDRoute(formula: string, elements: string[]): SynthesisRoute {
     },
   ];
 
-  const thermo = computeThermodynamicScoring(formula, steps);
+  const finalSteps = injectPreDryingStep(steps, precursors);
+  const thermo = computeThermodynamicScoring(formula, finalSteps);
   const equipment = ["MOCVD reactor", "Mass flow controllers", "Substrate heater", "Vacuum pump", "Precursor bubblers"];
 
   return {
     routeId: `cvd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     routeName: "Chemical Vapor Deposition",
     method: "CVD",
-    steps,
+    steps: finalSteps,
     precursors,
     thermodynamics: thermo,
     totalDuration: "~5 hours",
