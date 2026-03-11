@@ -2068,7 +2068,11 @@ async function runPhase10_Physics() {
 
         let edgeBoost = 0;
         if (!isExtremeInstability && edgeOfInstabilityCount >= 1 && edgeOfInstabilityCount <= 3) {
-          edgeBoost = edgeOfInstabilityCount * 0.04 + instProx.overallProximity * 0.06;
+          const proximityDamping = instProx.overallProximity > 0.85
+            ? Math.max(0, 1 - (instProx.overallProximity - 0.85) * 4)
+            : 1.0;
+          edgeBoost = (edgeOfInstabilityCount * 0.03 + instProx.overallProximity * 0.04) * proximityDamping;
+          edgeBoost = Math.min(0.12, edgeBoost);
         }
 
         const currentEnsemble = candidate.ensembleScore ?? 0;

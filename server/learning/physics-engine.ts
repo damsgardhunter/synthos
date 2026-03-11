@@ -252,6 +252,14 @@ export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: numbe
   }
 
   const clampedSigma = (s: number) => Math.max(0.05, Math.min(0.95, s));
+
+  for (const e of entries) {
+    if (e.method === "physics" && e.sigma > 0.4) {
+      const penalty = Math.min(0.5, (e.sigma - 0.4) * 1.5);
+      e.tc = e.tc * (1 - penalty);
+    }
+  }
+
   const invVar = entries.map(e => ({ ...e, w: 1 / (clampedSigma(e.sigma) ** 2) }));
 
   const tcs = entries.map(e => e.tc);
