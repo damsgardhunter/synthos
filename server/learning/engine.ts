@@ -1649,6 +1649,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           deprioritized: synthesisGateResult.deprioritize,
         },
       } : {}),
+      ...(explorationModeActive ? { constraintRelaxed: true } : {}),
     };
 
     let deliberationResult;
@@ -1798,6 +1799,8 @@ let lastBestTcSeen = 0;
 let lastBestPairingSusc = 0;
 let explorationModeActive = false;
 let explorationModeSavedConstraints: { allowBeyondEmpirical: boolean; empiricalPenaltyStrength: number } | null = null;
+let currentMutationLevel = 1;
+let peakMutationLevel = 1;
 
 function lambdaBarForFamily(muStar: number, family?: string): number {
   const base = 1 + 3.8 * muStar;
@@ -5800,7 +5803,7 @@ async function runAutonomousFastPath() {
 
       const surrogateOnlyReasons = ["invalid-elements", "stability-prefilter", "surrogate-reject", "formation-energy", "low-gb-tc"];
       const isSurrogateOnly = surrogateOnlyReasons.some(r => result.reason.startsWith(r));
-      if (!isSurrogateOnly && result.physicsPred) {
+      if (!isSurrogateOnly && result.physicsPred && !explorationModeActive) {
         bayesianOptimizer.addObservation(formula, result.tc, result.physicsPred.lambda ?? 0, result.passed ? 1 : 0);
       }
 
@@ -5868,7 +5871,7 @@ async function runAutonomousFastPath() {
             const obsLambda = hubIns?.physics?.lambda ?? (result.physicsPred?.lambda ?? 0.5);
             const obsStability = 1 - (result.physicsPred?.hullDistance ?? 0.2);
             bayesianOptimizer.addObservation(formula, result.tc, obsLambda, obsStability);
-            if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3) {
+            if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3 && !explorationModeActive) {
               incorporateSuccessData(formula, result.tc, { topologicalScore: hubIns.topology.topologicalScore });
             }
           } catch (e) { console.error("[Engine] Cross-engine BO feed failed:", e); }
@@ -5916,7 +5919,7 @@ async function runAutonomousFastPath() {
       } catch (e) { console.error("[Engine] Constraint weight update failed:", e); }
 
       try {
-        if (result.tc > 0) {
+        if (result.tc > 0 && !explorationModeActive) {
           buildAndStoreFeatureRecord(formula, result.tc, null, result.passed ? 0.5 : 0.1);
         }
       } catch (e) { console.error("[Engine] Feature record build failed:", e); }
@@ -6592,6 +6595,8 @@ async function runLearningCycle() {
       }
 
       if (cyclesSinceTcImproved >= 12 && cyclesSinceTcImproved < 16) {
+        currentMutationLevel = 2;
+        peakMutationLevel = Math.max(peakMutationLevel, 2);
         setMutationIntensity(2);
         emit("log", {
           phase: "engine",
@@ -6600,6 +6605,8 @@ async function runLearningCycle() {
           dataSource: "Engine",
         });
       } else if (cyclesSinceTcImproved >= 16 && cyclesSinceTcImproved < 20) {
+        currentMutationLevel = 3;
+        peakMutationLevel = Math.max(peakMutationLevel, 3);
         setMutationIntensity(3);
         exploitCyclesRemaining = 0;
         currentExploitFamily = null;
@@ -6610,6 +6617,8 @@ async function runLearningCycle() {
           dataSource: "Engine",
         });
       } else if (cyclesSinceTcImproved >= 20) {
+        currentMutationLevel = 4;
+        peakMutationLevel = Math.max(peakMutationLevel, 4);
         setMutationIntensity(3);
         setChemicalSpaceExpansionMode(true);
         exploitCyclesRemaining = 0;
@@ -6622,7 +6631,23 @@ async function runLearningCycle() {
         });
       } else if (cyclesSinceTcImproved <= 5) {
         setChemicalSpaceExpansionMode(false);
-        setMutationIntensity(1);
+        if (peakMutationLevel <= 1) {
+          currentMutationLevel = 1;
+          setMutationIntensity(1);
+        } else {
+          const cooldownTarget = Math.max(1, peakMutationLevel - cyclesSinceTcImproved);
+          currentMutationLevel = cooldownTarget;
+          setMutationIntensity(Math.min(3, cooldownTarget));
+          if (cooldownTarget <= 1) {
+            peakMutationLevel = 1;
+          }
+          emit("log", {
+            phase: "engine",
+            event: "Mutation intensity cooldown",
+            detail: `Tc improved ${cyclesSinceTcImproved} cycles ago. Cooling down mutation from peak level ${peakMutationLevel} to ${cooldownTarget}.`,
+            dataSource: "Engine",
+          });
+        }
       }
 
       if (cyclesSinceTcImproved >= 8 && cyclesSinceTcImproved % 8 === 0) {
