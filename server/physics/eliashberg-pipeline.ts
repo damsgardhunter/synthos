@@ -238,12 +238,37 @@ function buildAlpha2FSpectralFunction(
     hModeBoost = 1.0 + Math.min(2.0, hRatio * 0.15) * Math.min(1.0, pressureGpa / 200);
   }
 
-  const nBins = phononDOS.frequencies.length;
-  const frequencies = [...phononDOS.frequencies];
+  const dosMaxFreq = phononDOS.frequencies.length > 0
+    ? Math.max(...phononDOS.frequencies.filter(f => f > 0))
+    : 500;
+  const rawMaxFreq = phononMaxFreq && phononMaxFreq > dosMaxFreq
+    ? phononMaxFreq
+    : dosMaxFreq;
+  const maxFreq = rawMaxFreq * 1.2;
+
+  const hasHighFreqH = hRatio >= 4 && rawMaxFreq > 1500;
+  const requiredMaxFreq = hasHighFreqH ? Math.max(maxFreq, 3500) : maxFreq;
+
+  let frequencies: number[];
+  let nBins: number;
+
+  if (requiredMaxFreq > dosMaxFreq * 1.05) {
+    const originalBinWidth = phononDOS.frequencies.length > 1
+      ? phononDOS.frequencies[1] - phononDOS.frequencies[0]
+      : 10;
+    const extBins = Math.ceil((requiredMaxFreq - dosMaxFreq) / originalBinWidth);
+    frequencies = [...phononDOS.frequencies];
+    for (let i = 0; i < extBins; i++) {
+      frequencies.push(dosMaxFreq + (i + 1) * originalBinWidth);
+    }
+    nBins = frequencies.length;
+  } else {
+    frequencies = [...phononDOS.frequencies];
+    nBins = frequencies.length;
+  }
+
   const alpha2F = new Array(nBins).fill(0);
   const cumulativeLambda = new Array(nBins).fill(0);
-  const dosMaxFreq = frequencies.length > 0 ? Math.max(...frequencies.filter(f => f > 0)) : 500;
-  const maxFreq = phononMaxFreq && phononMaxFreq > dosMaxFreq ? phononMaxFreq * 1.2 : dosMaxFreq;
 
   const couplingPrefactor = avgEta * N_EF * 1.2;
   const binWidth = nBins > 1 ? frequencies[1] - frequencies[0] : 1;
@@ -266,27 +291,45 @@ function buildAlpha2FSpectralFunction(
   const H_PARTIAL_DOS_THRESHOLD = 0.70;
   const hasPartialH = phononDOS.partialDOS && phononDOS.partialDOS["H"];
 
+  const hasStiffNonH = elements.some(e =>
+    e !== "H" && ["B", "C", "N", "O"].includes(e)
+  );
+  const GUESS_PENALTY = hasStiffNonH ? 0.4 : 0.8;
+
+  const originalNBins = phononDOS.frequencies.length;
+
   for (let i = 0; i < nBins; i++) {
     const omega = frequencies[i];
-    const g = phononDOS.dos[i];
-    if (omega <= 0 || g <= 0) {
+    const g = i < originalNBins ? (phononDOS.dos[i] ?? 0) : 0;
+
+    let extendedG = g;
+    if (i >= originalNBins && hRatio >= 4 && omega > 0) {
+      const tailDecay = Math.exp(-0.5 * Math.pow((omega - dosMaxFreq) / (dosMaxFreq * 0.3), 2));
+      extendedG = (phononDOS.dos[originalNBins - 1] ?? 0) * tailDecay * 0.5;
+    }
+
+    if (omega <= 0 || extendedG <= 0) {
       cumulativeLambda[i] = integratedLambda;
       continue;
     }
 
     let hFraction = 0;
-    if (hasPartialH && g > 0) {
-      hFraction = phononDOS.partialDOS!["H"][i] / g;
+    if (hasPartialH && i < originalNBins && g > 0) {
+      hFraction = (phononDOS.partialDOS!["H"][i] ?? 0) / g;
+    } else if (i >= originalNBins && hRatio >= 4) {
+      hFraction = 0.9;
     }
 
     let modeWeight = 1.0;
-    if (hFraction >= H_PARTIAL_DOS_THRESHOLD && hRatio >= 4) {
-      modeWeight = hModeBoost;
-    } else if (!hasPartialH && omega > hModeCutoff && hRatio >= 4) {
-      modeWeight = hModeBoost;
+    if (hasPartialH || i >= originalNBins) {
+      if (hFraction >= H_PARTIAL_DOS_THRESHOLD && hRatio >= 4) {
+        modeWeight = hModeBoost;
+      }
+    } else if (omega > hModeCutoff && hRatio >= 4) {
+      modeWeight = hModeBoost * GUESS_PENALTY;
     }
 
-    alpha2F[i] = couplingPrefactor * g * omega * 0.01 * modeWeight;
+    alpha2F[i] = couplingPrefactor * extendedG * omega * 0.01 * modeWeight;
 
     const lambdaContrib = 2 * alpha2F[i] / omega * binWidth;
     integratedLambda += lambdaContrib;
@@ -298,7 +341,7 @@ function buildAlpha2FSpectralFunction(
     }
     omega2WeightedSum += alpha2F[i] * omega * binWidth;
 
-    const isHydrogenMode = hasPartialH
+    const isHydrogenMode = (hasPartialH || i >= originalNBins)
       ? hFraction >= H_PARTIAL_DOS_THRESHOLD
       : (omega > hModeCutoff && hRatio >= 4);
 
@@ -370,7 +413,7 @@ function buildAlpha2FSpectralFunction(
       dominantRange,
     },
     nBins,
-    maxFrequency: Number(maxFreq.toFixed(2)),
+    maxFrequency: Number(requiredMaxFreq.toFixed(2)),
     convergenceCheck: {
       converged: lambdaVariation < 0.15,
       lambdaVariation: Number(lambdaVariation.toFixed(4)),
