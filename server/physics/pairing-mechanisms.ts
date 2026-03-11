@@ -882,26 +882,21 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
 
     const z2Strength = topoAnalysisUsed ? topoAnalysisUsed.z2Score : 0;
     const weylStrength = topoAnalysisUsed ? topoAnalysisUsed.diracNodeProbability : 0;
+    const socStrength = topoAnalysisUsed ? topoAnalysisUsed.socStrength : 0;
     const topoSignal = Math.max(z2Strength, weylStrength);
 
     const tripletBoost = Math.min(0.20, topoSignal * 0.25);
+    const dampFactor = Math.max(0.3, 1.0 - tripletBoost);
+
+    wPhonon *= dampFactor;
+    wOrbital *= dampFactor;
+    wCDW *= dampFactor;
+    wPolaronic *= dampFactor;
+    wPlasmon *= dampFactor;
+    wExcitonic *= dampFactor;
+
     wSpin += tripletBoost * 0.6;
     wTopo += tripletBoost * 0.4;
-
-    wPhonon -= tripletBoost * 0.4;
-    wOrbital -= tripletBoost * 0.2;
-    wCDW -= tripletBoost * 0.15;
-    wPolaronic -= tripletBoost * 0.15;
-    wPlasmon -= tripletBoost * 0.10;
-
-    wPhonon = Math.max(0, wPhonon);
-    wSpin = Math.max(0, wSpin);
-    wOrbital = Math.max(0, wOrbital);
-    wExcitonic = Math.max(0, wExcitonic);
-    wCDW = Math.max(0, wCDW);
-    wPolaronic = Math.max(0, wPolaronic);
-    wPlasmon = Math.max(0, wPlasmon);
-    wTopo = Math.max(0, wTopo);
 
     const weightSum = wPhonon + wSpin + wOrbital + wExcitonic + wCDW + wPolaronic + wPlasmon + wTopo;
     if (weightSum > 0) {
@@ -915,7 +910,8 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
       wTopo /= weightSum;
     }
 
-    tripletOddParityWeight = wSpin + wTopo;
+    const socGate = Math.min(1.0, socStrength / 0.3);
+    tripletOddParityWeight = (wSpin + wTopo) * socGate;
 
     if (hasNontrivialZ2 && z2Strength > 0.6) {
       topoPairingSymmetry = "p+ip (topological)";
@@ -924,18 +920,17 @@ export function computePairingProfile(formula: string, externalTopo?: Topologica
     }
   } else if (topoStrength > 0.5) {
     const topoBoost = Math.min(0.08, topoStrength * 0.1);
-    wTopo += topoBoost;
-    wPhonon -= topoBoost * 0.5;
-    wSpin -= topoBoost * 0.5;
+    const dampFactor = Math.max(0.5, 1.0 - topoBoost);
 
-    wPhonon = Math.max(0, wPhonon);
-    wSpin = Math.max(0, wSpin);
-    wOrbital = Math.max(0, wOrbital);
-    wExcitonic = Math.max(0, wExcitonic);
-    wCDW = Math.max(0, wCDW);
-    wPolaronic = Math.max(0, wPolaronic);
-    wPlasmon = Math.max(0, wPlasmon);
-    wTopo = Math.max(0, wTopo);
+    wPhonon *= dampFactor;
+    wSpin *= dampFactor;
+    wOrbital *= dampFactor;
+    wExcitonic *= dampFactor;
+    wCDW *= dampFactor;
+    wPolaronic *= dampFactor;
+    wPlasmon *= dampFactor;
+
+    wTopo += topoBoost;
 
     const weightSum = wPhonon + wSpin + wOrbital + wExcitonic + wCDW + wPolaronic + wPlasmon + wTopo;
     if (weightSum > 0) {
