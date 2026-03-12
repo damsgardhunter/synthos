@@ -866,10 +866,9 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
   const avgCylindrical = pockets.length > 0
     ? pockets.reduce((s, p) => s + p.cylindricalCharacter, 0) / pockets.length : 0;
 
-  let fsDim = 3.0;
-  if (avgCylindrical > 0.7) fsDim = 2.0;
-  else if (avgCylindrical > 0.5) fsDim = 2.5;
-  const pathDimensionality = fsDim;
+  let pathDimensionality = 3.0;
+  if (avgCylindrical > 0.7) pathDimensionality = 2.0;
+  else if (avgCylindrical > 0.5) pathDimensionality = 2.5;
 
   const SIGMA_BAND_MIN_S_CHAR = 0.3;
   const SIGMA_BAND_MIN_VEL_EV_ANG = 2.0;
@@ -918,13 +917,14 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
     nestingVectors: nesting.vectors,
     nestingScore: nesting.nestingScore,
     fsDimensionality: pathDimensionality,
+    fsDimensionalityIsPathEstimate: true,
     sigmaBandPresence: sigmaBand,
     multiBandScore: multiBand,
     mlFeatures,
   };
 }
 
-export function extractTopologyFromDFT(bandResult: DFTBandStructureResult): DFTTopologyFromBands {
+export function extractTopologyFromDFT(bandResult: DFTBandStructureResult, precomputedDOS?: number): DFTTopologyFromBands {
   const { bandCrossings, bandInversions, vanHoveSingularities, topologicalIndicators } = bandResult;
 
   const hasFlatBand = bandResult.flatBandScore > 0.3;
@@ -952,14 +952,14 @@ export function extractTopologyFromDFT(bandResult: DFTBandStructureResult): DFTT
     }
   }
 
-  const dosAtFermi = estimateDOSAtFermi(bandResult);
+  const dosAtFermi = precomputedDOS !== undefined ? precomputedDOS : estimateDOSAtFermi(bandResult);
 
   let topologyScore = 0;
   if (hasBandInversion) topologyScore += 0.3 * Math.min(1.0, bandInversions.length / 3);
   if (hasDiracCrossing) topologyScore += 0.25 * bandResult.diracCrossingScore;
   if (hasFlatBand) topologyScore += 0.15 * bandResult.flatBandScore;
   if (topologicalIndicators.nodalLineIndicator > 0) topologyScore += 0.15 * topologicalIndicators.nodalLineIndicator;
-  if (topologicalIndicators.parityChanges > 0) topologyScore += 0.15 * Math.min(1.0, topologicalIndicators.parityChanges / 8);
+  if (topologicalIndicators.parityChanges > 0) topologyScore += 0.15 * Math.min(1.0, topologicalIndicators.parityChanges / 4);
   topologyScore = Math.min(1.0, topologyScore);
 
   return {
@@ -979,22 +979,23 @@ export function extractTopologyFromDFT(bandResult: DFTBandStructureResult): DFTT
   };
 }
 
+const DOS_WINDOW_EV = 0.1;
+
 function estimateDOSAtFermi(bandResult: DFTBandStructureResult): number {
   if (bandResult.eigenvalues.length === 0 || bandResult.nBands === 0) return 0;
 
   let statesNearFermi = 0;
-  const window = 0.1;
+  const nKpts = bandResult.eigenvalues.length;
 
   for (const kpt of bandResult.eigenvalues) {
     for (const e of kpt.energies) {
-      if (Math.abs(e) < window) {
+      if (Math.abs(e) < DOS_WINDOW_EV) {
         statesNearFermi++;
       }
     }
   }
 
-  const totalStates = bandResult.eigenvalues.length * bandResult.nBands;
-  return totalStates > 0 ? (statesNearFermi / totalStates) * bandResult.nBands : 0;
+  return nKpts > 0 ? statesNearFermi / (nKpts * 2 * DOS_WINDOW_EV) : 0;
 }
 
 export function enhanceElectronicStructure(bandResult: DFTBandStructureResult): DFTElectronicEnhancement {
@@ -1222,7 +1223,8 @@ export function runAutomatedTopologyPipeline(
   const crossingDispersion = classifyCrossingDispersion(bandResult);
   const socGaps = detectSOCGaps(bandResult);
   const fermiIsosurface = computeFermiIsosurface(bandResult);
-  const topologyFromBands = extractTopologyFromDFT(bandResult);
+  const sharedDOS = estimateDOSAtFermi(bandResult);
+  const topologyFromBands = extractTopologyFromDFT(bandResult, sharedDOS);
   const fermiSurface = buildFermiSurfaceFromDFT(bandResult);
   const lindhardNesting = computeLindhardNesting(bandResult);
   const classification = classifyDFTTopology(bandResult, socStrength);
