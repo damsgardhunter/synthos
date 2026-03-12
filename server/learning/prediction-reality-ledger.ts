@@ -77,6 +77,20 @@ const retrainConfig: RetrainTriggerConfig = {
   enabled: true,
 };
 
+type LedgerListener = () => void;
+const ledgerListeners: LedgerListener[] = [];
+
+export function onLedgerEntry(listener: LedgerListener): void {
+  ledgerListeners.push(listener);
+}
+
+let cachedGlobalMetrics: PredictionRealityMetrics | null = null;
+let cachedGlobalMetricsDirty = true;
+
+let _gnnModule: any = null;
+let _gbModule: any = null;
+let _mlModule: any = null;
+
 export function recordPredictionVsReality(
   formula: string,
   pressure: number,
@@ -109,17 +123,17 @@ export function recordPredictionVsReality(
 
   let predicted_sigma: number | null = null;
   try {
-    const { gnnPredictWithUncertainty } = require("./graph-neural-net");
-    const { gbPredictWithUncertainty } = require("./gradient-boost");
-    const { extractFeatures } = require("./ml-predictor");
+    if (!_gnnModule) _gnnModule = require("./graph-neural-net");
+    if (!_gbModule) _gbModule = require("./gradient-boost");
+    if (!_mlModule) _mlModule = require("./ml-predictor");
     let gnnSigma = 0, xgbSigma = 0;
     try {
-      const gnnRes = gnnPredictWithUncertainty(formula);
+      const gnnRes = _gnnModule.gnnPredictWithUncertainty(formula);
       if (Number.isFinite(gnnRes.totalStd) && gnnRes.totalStd > 0) gnnSigma = gnnRes.totalStd;
     } catch {}
     try {
-      const feats = extractFeatures(formula);
-      const xgbRes = gbPredictWithUncertainty(feats, formula);
+      const feats = _mlModule.extractFeatures(formula);
+      const xgbRes = _gbModule.gbPredictWithUncertainty(feats, formula);
       if (Number.isFinite(xgbRes.totalStd) && xgbRes.totalStd > 0) xgbSigma = xgbRes.totalStd;
     } catch {}
     if (gnnSigma > 0 && xgbSigma > 0) {
@@ -160,17 +174,51 @@ export function recordPredictionVsReality(
   }
 
   samplesSinceLastRetrain++;
+  cachedGlobalMetricsDirty = true;
 
-  try {
-    const { notifyNewLedgerEntry } = require("./conformal-calibrator");
-    notifyNewLedgerEntry();
-  } catch {}
+  for (const listener of [...ledgerListeners]) {
+    try { listener(); } catch {}
+  }
 
   return entry;
 }
 
-export function computeMetrics(entries?: PredictionRealityEntry[]): PredictionRealityMetrics {
-  const data = entries ?? ledger;
+function quickSelectMedian(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  if (arr.length === 1) return arr[0];
+  const a = arr.slice();
+  const n = a.length;
+
+  function partition(lo: number, hi: number, pivotIdx: number): number {
+    const pivotVal = a[pivotIdx];
+    [a[pivotIdx], a[hi]] = [a[hi], a[pivotIdx]];
+    let storeIdx = lo;
+    for (let i = lo; i < hi; i++) {
+      if (a[i] < pivotVal) {
+        [a[storeIdx], a[i]] = [a[i], a[storeIdx]];
+        storeIdx++;
+      }
+    }
+    [a[storeIdx], a[hi]] = [a[hi], a[storeIdx]];
+    return storeIdx;
+  }
+
+  function select(lo: number, hi: number, k: number): number {
+    if (lo === hi) return a[lo];
+    const pivotIdx = lo + ((hi - lo) >> 1);
+    const p = partition(lo, hi, pivotIdx);
+    if (k === p) return a[k];
+    return k < p ? select(lo, p - 1, k) : select(p + 1, hi, k);
+  }
+
+  const mid = n >> 1;
+  if (n % 2 === 1) return select(0, n - 1, mid);
+  const upper = select(0, n - 1, mid);
+  const lower = select(0, n - 1, mid - 1);
+  return (lower + upper) / 2;
+}
+
+function computeMetricsInternal(data: PredictionRealityEntry[]): PredictionRealityMetrics {
   if (data.length === 0) {
     return {
       count: 0, rmse: 0, mae: 0, bias: 0, r2: 0, maxError: 0,
@@ -190,12 +238,13 @@ export function computeMetrics(entries?: PredictionRealityEntry[]): PredictionRe
   let within10 = 0;
   let within30 = 0;
   let within50 = 0;
-  const absErrors: number[] = [];
+  const absErrors: number[] = new Array(n);
 
   const actualMean = data.reduce((s, e) => s + e.ground_truth.Tc, 0) / n;
   let ssTot = 0;
 
-  for (const e of data) {
+  for (let i = 0; i < n; i++) {
+    const e = data[i];
     sumSqErr += e.error.tc_squared_error;
     sumAbsErr += e.error.tc_abs_error;
     sumSignedErr += e.error.tc_error;
@@ -208,16 +257,11 @@ export function computeMetrics(entries?: PredictionRealityEntry[]): PredictionRe
     if (e.error.tc_abs_error <= 10) within10++;
     if (e.error.tc_abs_error <= 30) within30++;
     if (e.error.tc_abs_error <= 50) within50++;
-    absErrors.push(e.error.tc_abs_error);
+    absErrors[i] = e.error.tc_abs_error;
     ssTot += (e.ground_truth.Tc - actualMean) ** 2;
   }
 
-  absErrors.sort((a, b) => a - b);
-  const medianIdx = Math.floor(absErrors.length / 2);
-  const medianAbsError = absErrors.length % 2 === 0
-    ? (absErrors[medianIdx - 1] + absErrors[medianIdx]) / 2
-    : absErrors[medianIdx];
-
+  const medianAbsError = quickSelectMedian(absErrors);
   const r2 = ssTot > 0 ? 1 - sumSqErr / ssTot : 0;
 
   return {
@@ -234,6 +278,16 @@ export function computeMetrics(entries?: PredictionRealityEntry[]): PredictionRe
     pct_within_30K: within30 / n,
     pct_within_50K: within50 / n,
   };
+}
+
+export function computeMetrics(entries?: PredictionRealityEntry[]): PredictionRealityMetrics {
+  if (!entries) {
+    if (!cachedGlobalMetricsDirty && cachedGlobalMetrics) return cachedGlobalMetrics;
+    cachedGlobalMetrics = computeMetricsInternal(ledger);
+    cachedGlobalMetricsDirty = false;
+    return cachedGlobalMetrics;
+  }
+  return computeMetricsInternal(entries);
 }
 
 export function computeRecentMetrics(windowSize: number = 100): PredictionRealityMetrics {

@@ -1,4 +1,4 @@
-import { getLedgerSlice, getLedgerSize, type PredictionRealityEntry } from "./prediction-reality-ledger";
+import { getLedgerSlice, getLedgerSize, onLedgerEntry, type PredictionRealityEntry } from "./prediction-reality-ledger";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 import { extractFeatures } from "./ml-predictor";
@@ -371,6 +371,8 @@ export function notifyNewLedgerEntry(): void {
     recalibrateFromLedger();
   }
 }
+
+onLedgerEntry(notifyNewLedgerEntry);
 
 export function getECE(): { before: number; after: number; improvement: number; mce: number } {
   return {
