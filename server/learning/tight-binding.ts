@@ -781,9 +781,33 @@ function computeTbConfidence(
   return Number(Math.min(1.0, Math.max(0.0, confidence)).toFixed(4));
 }
 
+function estimateSynthesisPressureGPa(elements: string[], counts: Record<string, number>): number {
+  const hCount = counts["H"] || 0;
+  if (hCount === 0) return 0;
+  const nonH = elements.filter(e => e !== "H");
+  if (nonH.length === 0) return 0;
+  let nonHTotal = 0;
+  for (const el of nonH) nonHTotal += counts[el] || 1;
+  const hRatio = hCount / Math.max(1, nonHTotal);
+  if (hRatio >= 8) return 250;
+  if (hRatio >= 6) return 200;
+  if (hRatio >= 4) return 150;
+  if (hRatio >= 2) return 50;
+  return 0;
+}
+
+function applyMurnaghanCompression(a0: number, pressureGPa: number): number {
+  if (pressureGPa <= 0) return a0;
+  const B0 = 100;
+  const Bp = 4.0;
+  const volumeRatio = Math.pow(1 + (Bp * pressureGPa) / B0, -1.0 / Bp);
+  return a0 * Math.pow(volumeRatio, 1.0 / 3.0);
+}
+
 export function computeTightBindingBands(
   formula: string,
   structure?: string | null,
+  pressureGPa?: number,
 ): TBBandStructure {
   const { elements, counts } = parseComposition(formula);
 
@@ -805,6 +829,11 @@ export function computeTightBindingBands(
   } else {
     const nElements = elements.length;
     latticeConstant = nElements >= 3 ? 5.5 : nElements === 2 ? 4.5 : 3.5;
+  }
+
+  const effectivePressure = pressureGPa ?? estimateSynthesisPressureGPa(elements, counts);
+  if (effectivePressure > 0) {
+    latticeConstant = applyMurnaghanCompression(latticeConstant, effectivePressure);
   }
 
   const hasTM = elements.some(el => isTransitionMetal(el) || isRareEarth(el));
