@@ -1171,19 +1171,35 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
     const tolerance = computeGoldschmidtTolerance(formula, comp);
     const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements, formula, comp);
 
-    const miedemaSg = (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1";
+    const rawSg = (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1";
+    const miedemaSg = normalizeSpaceGroup(rawSg);
     const miedemaCs = (typeof parsed.crystalSystem === "string" && parsed.crystalSystem) || protoMatch?.crystalSystem || "triclinic";
     const miedemaProto = (typeof parsed.prototype === "string" && parsed.prototype) || protoMatch?.prototype || "unknown";
     const miedemaDim = (typeof parsed.dimensionality === "string" && parsed.dimensionality) || protoMatch?.dimensionality || "3D";
     const hints = buildStructuralHints(tolerance, miedemaCs, miedemaDim, miedemaProto, elements);
 
+    const rawA = toNum(parsed.latticeA, 4.0);
+    const rawC = toNum(parsed.latticeC, rawA);
+    const csLower = miedemaCs.toLowerCase();
+    let llmA = rawA;
+    let llmB = toNum(parsed.latticeB, rawA);
+    let llmC = rawC;
+    if (csLower === "cubic") {
+      llmB = llmA;
+      llmC = llmA;
+    } else if (csLower === "tetragonal") {
+      llmB = llmA;
+    } else if (csLower === "hexagonal" || csLower === "trigonal") {
+      llmB = llmA;
+    }
+
     const result: StructurePrediction = {
       spaceGroup: miedemaSg,
       crystalSystem: miedemaCs,
       latticeParams: {
-        a: toNum(parsed.latticeA, 4.0),
-        b: toNum(parsed.latticeB, 4.0),
-        c: toNum(parsed.latticeC, 4.0),
+        a: llmA,
+        b: llmB,
+        c: llmC,
         alpha: toNum(parsed.alpha, 90),
         beta: toNum(parsed.beta, 90),
         gamma: toNum(parsed.gamma, 90),
