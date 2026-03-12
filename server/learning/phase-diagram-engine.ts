@@ -560,48 +560,55 @@ export async function getCompetingPhases(
 
 function surrogateKineticBarrier(
   eAboveHull: number,
+  minMeltingPoint: number,
   avgMeltingPoint: number,
   numElements: number,
   avgMass: number
 ): number {
   if (eAboveHull <= 0) return 1.5;
 
-  const meltFactor = 0.25 * Math.log(Math.max(avgMeltingPoint, 300) / 300);
+  const minMeltFactor = 0.35 * Math.log(Math.max(minMeltingPoint, 200) / 200);
+  const avgMeltFactor = 0.10 * Math.log(Math.max(avgMeltingPoint, 300) / 300);
 
   const configEntropy = numElements > 1 ? 0.05 * Math.log(numElements) : 0;
 
   const massFactor = 0.02 * Math.log(Math.max(avgMass, 10) / 10);
 
-  const barrier = eAboveHull * 5.5 + meltFactor + configEntropy + massFactor;
+  const barrier = eAboveHull * 5.5 + minMeltFactor + avgMeltFactor + configEntropy + massFactor;
 
   return Math.max(0.05, Math.min(3.0, barrier));
 }
 
 export function assessMetastability(
   formula: string,
-  eAboveHull: number
+  eAboveHull: number,
+  hullDecompositionProducts?: string[]
 ): MetastabilityAssessment {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
 
   let avgMeltingPoint = 0;
+  let minMeltingPoint = Infinity;
   let avgMass = 0;
   let count = 0;
   for (const el of elements) {
     const data = getElementData(el);
     const n = counts[el] || 1;
     if (data) {
-      if (data.meltingPoint) avgMeltingPoint += data.meltingPoint * n;
+      const mp = data.meltingPoint ?? 1000;
+      avgMeltingPoint += mp * n;
+      if (mp < minMeltingPoint) minMeltingPoint = mp;
       avgMass += (data.atomicMass ?? 50) * n;
       count += n;
     }
   }
   avgMeltingPoint = count > 0 ? avgMeltingPoint / count : 1000;
+  if (!isFinite(minMeltingPoint)) minMeltingPoint = 500;
   avgMass = count > 0 ? avgMass / count : 50;
 
   const kB = 8.617e-5;
   const attemptFrequency = 1e13;
-  const kineticBarrier = surrogateKineticBarrier(eAboveHull, avgMeltingPoint, elements.length, avgMass);
+  const kineticBarrier = surrogateKineticBarrier(eAboveHull, minMeltingPoint, avgMeltingPoint, elements.length, avgMass);
 
   const roomTempRate = attemptFrequency * Math.exp(-kineticBarrier / (kB * 300));
   let estimatedLifetime: string;
@@ -627,20 +634,13 @@ export function assessMetastability(
 
   const isMetastable = eAboveHull > 0.005 && eAboveHull <= 0.2 && kineticBarrier > 0.5;
 
-  const decompositionPathway: string[] = [];
-  if (eAboveHull > 0) {
-    for (let i = 0; i < elements.length; i++) {
-      for (let j = i + 1; j < elements.length; j++) {
-        const binary = `${elements[i]}${elements[j]}`;
-        const binaryE = computeMiedemaFormationEnergy(binary);
-        if (binaryE < 0) {
-          decompositionPathway.push(binary);
-        }
-      }
-    }
-    if (decompositionPathway.length === 0) {
-      decompositionPathway.push(...elements);
-    }
+  let decompositionPathway: string[];
+  if (hullDecompositionProducts && hullDecompositionProducts.length > 0) {
+    decompositionPathway = [...hullDecompositionProducts];
+  } else if (eAboveHull > 0) {
+    decompositionPathway = elements.slice();
+  } else {
+    decompositionPathway = [];
   }
 
   return {
@@ -1000,7 +1000,7 @@ export async function runConvexHullAnalysis(
   }
 
   const hullResult = await getCompetingPhases(formula);
-  const metastability = assessMetastability(formula, hullResult.energyAboveHull);
+  const metastability = assessMetastability(formula, hullResult.energyAboveHull, hullResult.decompositionProducts);
 
   const decompStr = hullResult.decompositionProducts.length > 0
     ? hullResult.decompositionProducts.join(" + ")

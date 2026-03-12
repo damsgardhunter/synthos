@@ -564,7 +564,7 @@ export function analyzeReactionNetwork(formula: string, pressureGpa: number = 0,
 
   pathways.sort((a, b) => a.reactionEnergy - b.reactionEnergy);
 
-  const metastability = assessMetastability(formula, energyAboveHull);
+  const metastability = assessMetastability(formula, energyAboveHull, hullResult.decompositionProducts);
 
   const decompositionComplexity = computeDecompositionComplexity(elements, pathways, edges);
 

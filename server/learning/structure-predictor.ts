@@ -235,7 +235,7 @@ export async function evaluateConvexHullStability(
 
     try {
       const hullResult = await getCompetingPhases(formula);
-      const metastability = assessMetastability(formula, hullResult.energyAboveHull);
+      const metastability = assessMetastability(formula, hullResult.energyAboveHull, hullResult.decompositionProducts);
       const miedemaFormE = computeMiedemaFormationEnergy(formula);
       const eAboveHull = hullResult.energyAboveHull;
       const isStable = hullResult.isOnHull;
