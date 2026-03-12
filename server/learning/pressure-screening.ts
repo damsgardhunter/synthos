@@ -17,19 +17,25 @@ export interface FastPressureEstimate {
   passesPrescreen: boolean;
 }
 
-export interface PressureCluster {
+export interface PressureClusterDef {
   id: string;
   label: string;
   minGpa: number;
   maxGpa: number;
   physics: string;
   expectedFamilies: string[];
+  baseWeight: number;
+}
+
+export interface ClusterAnalytics {
   weight: number;
   discoveryCount: number;
   bestTcFound: number;
   totalScreened: number;
   hitRate: number;
 }
+
+export interface PressureCluster extends PressureClusterDef, ClusterAnalytics {}
 
 export interface PressureClusterStats {
   clusters: PressureCluster[];
@@ -39,99 +45,31 @@ export interface PressureClusterStats {
   recentAssignments: { formula: string; cluster: string; tc: number }[];
 }
 
-const PRESSURE_CLUSTERS: PressureCluster[] = [
-  {
-    id: "ambient",
-    label: "Ambient / Low Pressure",
-    minGpa: 0,
-    maxGpa: 10,
-    physics: "Conventional BCS metals, cuprates, pnictides at ambient conditions",
-    expectedFamilies: ["cuprate", "pnictide", "conventional", "heavy-fermion", "organic"],
-    weight: 1.0,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
-  {
-    id: "low-moderate",
-    label: "Low-Moderate Pressure",
-    minGpa: 10,
-    maxGpa: 50,
-    physics: "Enhanced phonon coupling, incipient structural transitions, near-ambient SC candidates",
-    expectedFamilies: ["conventional", "pnictide", "boride", "chalcogenide"],
-    weight: 1.2,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
-  {
-    id: "structural-transition",
-    label: "Structural Transition Zone",
-    minGpa: 50,
-    maxGpa: 100,
-    physics: "Structural phase transitions, metallization of semiconductors, enhanced e-ph coupling at transitions",
-    expectedFamilies: ["chalcogenide", "conventional", "pnictide"],
-    weight: 1.0,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
-  {
-    id: "high-pressure",
-    label: "High Pressure",
-    minGpa: 100,
-    maxGpa: 150,
-    physics: "Dense metallic phases, incipient hydride formation, strong lattice hardening",
-    expectedFamilies: ["hydride", "conventional"],
-    weight: 0.9,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
-  {
-    id: "hydride-onset",
-    label: "Hydride Superconductor Onset",
-    minGpa: 150,
-    maxGpa: 200,
-    physics: "Hydrogen-rich clathrate/cage structures stabilize, strong phonon-mediated pairing",
-    expectedFamilies: ["hydride"],
-    weight: 1.3,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
-  {
-    id: "hydride-peak",
-    label: "Peak Hydride Superconductivity",
-    minGpa: 200,
-    maxGpa: 300,
-    physics: "Optimal H-cage phonon frequencies, record Tc hydrides (LaH10, YH9)",
-    expectedFamilies: ["hydride"],
-    weight: 1.1,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
-  {
-    id: "extreme",
-    label: "Extreme Pressure",
-    minGpa: 300,
-    maxGpa: 350,
-    physics: "Ultra-dense phases, metallic hydrogen regime, exotic pairing",
-    expectedFamilies: ["hydride"],
-    weight: 0.6,
-    discoveryCount: 0,
-    bestTcFound: 0,
-    totalScreened: 0,
-    hitRate: 0,
-  },
+const CLUSTER_DEFS: readonly PressureClusterDef[] = [
+  { id: "ambient", label: "Ambient / Low Pressure", minGpa: 0, maxGpa: 10, physics: "Conventional BCS metals, cuprates, pnictides at ambient conditions", expectedFamilies: ["cuprate", "pnictide", "conventional", "heavy-fermion", "organic"], baseWeight: 1.0 },
+  { id: "low-moderate", label: "Low-Moderate Pressure", minGpa: 10, maxGpa: 50, physics: "Enhanced phonon coupling, incipient structural transitions, near-ambient SC candidates", expectedFamilies: ["conventional", "pnictide", "boride", "chalcogenide"], baseWeight: 1.2 },
+  { id: "structural-transition", label: "Structural Transition Zone", minGpa: 50, maxGpa: 100, physics: "Structural phase transitions, metallization of semiconductors, enhanced e-ph coupling at transitions", expectedFamilies: ["chalcogenide", "conventional", "pnictide"], baseWeight: 1.0 },
+  { id: "high-pressure", label: "High Pressure", minGpa: 100, maxGpa: 150, physics: "Dense metallic phases, incipient hydride formation, strong lattice hardening", expectedFamilies: ["hydride", "conventional"], baseWeight: 0.9 },
+  { id: "hydride-onset", label: "Hydride Superconductor Onset", minGpa: 150, maxGpa: 200, physics: "Hydrogen-rich clathrate/cage structures stabilize, strong phonon-mediated pairing", expectedFamilies: ["hydride"], baseWeight: 1.3 },
+  { id: "hydride-peak", label: "Peak Hydride Superconductivity", minGpa: 200, maxGpa: 300, physics: "Optimal H-cage phonon frequencies, record Tc hydrides (LaH10, YH9)", expectedFamilies: ["hydride"], baseWeight: 1.1 },
+  { id: "extreme", label: "Extreme Pressure", minGpa: 300, maxGpa: 350, physics: "Ultra-dense phases, metallic hydrogen regime, exotic pairing", expectedFamilies: ["hydride"], baseWeight: 0.6 },
 ];
+
+const CLUSTER_BOUNDARIES = CLUSTER_DEFS.map(c => c.maxGpa);
+
+const clusterAnalytics = new Map<string, ClusterAnalytics>();
+function getAnalytics(id: string, baseWeight: number): ClusterAnalytics {
+  let a = clusterAnalytics.get(id);
+  if (!a) {
+    a = { weight: baseWeight, discoveryCount: 0, bestTcFound: 0, totalScreened: 0, hitRate: 0 };
+    clusterAnalytics.set(id, a);
+  }
+  return a;
+}
+
+function getMergedClusters(): PressureCluster[] {
+  return CLUSTER_DEFS.map(def => ({ ...def, ...getAnalytics(def.id, def.baseWeight) }));
+}
 
 const recentAssignments: { formula: string; cluster: string; tc: number }[] = [];
 const MAX_RECENT = 100;
@@ -148,8 +86,7 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
-function estimateBulkModulus(formula: string): number {
-  const counts = parseFormulaCounts(formula);
+function estimateBulkModulusFromCounts(counts: Record<string, number>): number {
   const elements = Object.keys(counts);
 
   let weightedB = 0;
@@ -218,8 +155,7 @@ function latticeVolPerAtom(r: number, latticeType: string): number {
   }
 }
 
-function estimateReferenceVolume(formula: string, pressureGpa: number = 0): number {
-  const counts = parseFormulaCounts(formula);
+function estimateReferenceVolumeFromCounts(counts: Record<string, number>, pressureGpa: number = 0): number {
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   const latticeType = inferLatticeType(elements, counts, totalAtoms);
@@ -240,14 +176,15 @@ function estimateReferenceVolume(formula: string, pressureGpa: number = 0): numb
   return Math.max(10, V0 / totalAtoms);
 }
 
-export function fastVolumeAtPressure(formula: string, pressureGpa: number): {
+export function fastVolumeAtPressure(formula: string, pressureGpa: number, precomputedCounts?: Record<string, number>): {
   volumeRatio: number;
   estimatedVolume: number;
   referenceVolume: number;
   bulkModulus: number;
 } {
-  const B0 = estimateBulkModulus(formula);
-  const V0 = estimateReferenceVolume(formula, pressureGpa);
+  const counts = precomputedCounts ?? parseFormulaCounts(formula);
+  const B0 = estimateBulkModulusFromCounts(counts);
+  const V0 = estimateReferenceVolumeFromCounts(counts, pressureGpa);
 
   const Bp = 4.0;
   const ratio = Math.max(0.3, Math.pow(1 + Bp * pressureGpa / Math.max(10, B0), -1 / Bp));
@@ -264,9 +201,12 @@ export function fastVolumeAtPressure(formula: string, pressureGpa: number): {
 export function fastPressureScreen(
   formula: string,
   pressureGpa: number,
-  tcThreshold: number = 10
+  tcThreshold: number = 10,
+  precomputedCounts?: Record<string, number>
 ): FastPressureEstimate {
-  const vol = fastVolumeAtPressure(formula, pressureGpa);
+  const counts = precomputedCounts ?? parseFormulaCounts(formula);
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const vol = fastVolumeAtPressure(formula, pressureGpa, counts);
 
   let estimatedTc = 0;
   try {
@@ -285,8 +225,6 @@ export function fastPressureScreen(
   const compressionFactor = 1 + pressureGpa * 0.002;
   estimatedTc *= compressionFactor;
 
-  const counts = parseFormulaCounts(formula);
-  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   const hFrac = (counts["H"] || 0) / totalAtoms;
   if (hFrac > 0.5 && pressureGpa >= 100) {
     estimatedTc *= 1 + (hFrac - 0.5) * pressureGpa * 0.001;
@@ -295,6 +233,9 @@ export function fastPressureScreen(
   const estimatedBandgap = Math.max(0, 1.5 - pressureGpa * 0.01 * vol.volumeRatio);
 
   const volumeStability = vol.volumeRatio > 0.55 ? 1.0 : vol.volumeRatio > 0.5 ? 0.5 : 0.0;
+  if (volumeStability === 0) {
+    estimatedTc = 0;
+  }
   const pressureFeasibility = pressureGpa <= 50 ? 1.0 : pressureGpa <= 150 ? 0.7 : pressureGpa <= 300 ? 0.4 : 0.2;
   const estimatedStability = volumeStability * 0.6 + pressureFeasibility * 0.4;
 
@@ -322,7 +263,8 @@ export function batchPressureScreen(
   tcThreshold: number = 10
 ): FastPressureEstimate[] {
   const pts = pressures ?? [0, 5, 10, 25, 50, 75, 100, 150, 200, 250, 300, 350];
-  return pts.map(p => fastPressureScreen(formula, p, tcThreshold));
+  const counts = parseFormulaCounts(formula);
+  return pts.map(p => fastPressureScreen(formula, p, tcThreshold, counts));
 }
 
 export function findBestScreeningPressure(formula: string): {
@@ -349,13 +291,24 @@ export function findBestScreeningPressure(formula: string): {
   };
 }
 
-export function assignPressureCluster(pressureGpa: number): PressureCluster {
-  for (const cluster of PRESSURE_CLUSTERS) {
-    if (pressureGpa >= cluster.minGpa && pressureGpa < cluster.maxGpa) {
-      return cluster;
+function findClusterIndex(pressureGpa: number): number {
+  let lo = 0;
+  let hi = CLUSTER_BOUNDARIES.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pressureGpa < CLUSTER_BOUNDARIES[mid]) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
     }
   }
-  return PRESSURE_CLUSTERS[PRESSURE_CLUSTERS.length - 1];
+  return Math.min(lo, CLUSTER_DEFS.length - 1);
+}
+
+export function assignPressureCluster(pressureGpa: number): PressureCluster {
+  const idx = findClusterIndex(pressureGpa);
+  const def = CLUSTER_DEFS[idx];
+  return { ...def, ...getAnalytics(def.id, def.baseWeight) };
 }
 
 export function recordClusterDiscovery(
@@ -364,54 +317,59 @@ export function recordClusterDiscovery(
   tc: number,
   isSuccess: boolean
 ): void {
-  const cluster = assignPressureCluster(pressureGpa);
-  cluster.totalScreened++;
+  const idx = findClusterIndex(pressureGpa);
+  const def = CLUSTER_DEFS[idx];
+  const analytics = getAnalytics(def.id, def.baseWeight);
+  analytics.totalScreened++;
 
   if (isSuccess && tc > 0) {
-    cluster.discoveryCount++;
-    if (tc > cluster.bestTcFound) {
-      cluster.bestTcFound = tc;
+    analytics.discoveryCount++;
+    if (tc > analytics.bestTcFound) {
+      analytics.bestTcFound = tc;
     }
   }
 
-  cluster.hitRate = cluster.totalScreened > 0
-    ? cluster.discoveryCount / cluster.totalScreened
+  analytics.hitRate = analytics.totalScreened > 0
+    ? analytics.discoveryCount / analytics.totalScreened
     : 0;
 
-  recentAssignments.push({ formula, cluster: cluster.id, tc });
+  recentAssignments.push({ formula, cluster: def.id, tc });
   while (recentAssignments.length > MAX_RECENT) recentAssignments.shift();
 
   rebalanceClusterWeights();
 }
 
 function rebalanceClusterWeights(): void {
-  const totalDiscoveries = PRESSURE_CLUSTERS.reduce((s, c) => s + c.discoveryCount, 0);
+  const allAnalytics = CLUSTER_DEFS.map(def => getAnalytics(def.id, def.baseWeight));
+  const totalDiscoveries = allAnalytics.reduce((s, a) => s + a.discoveryCount, 0);
   if (totalDiscoveries < 5) return;
 
-  const avgHitRate = PRESSURE_CLUSTERS.reduce((s, c) => s + c.hitRate, 0) / PRESSURE_CLUSTERS.length;
+  const avgHitRate = allAnalytics.reduce((s, a) => s + a.hitRate, 0) / allAnalytics.length;
 
-  for (const cluster of PRESSURE_CLUSTERS) {
-    if (cluster.totalScreened < 3) continue;
+  for (const def of CLUSTER_DEFS) {
+    const analytics = getAnalytics(def.id, def.baseWeight);
+    if (analytics.totalScreened < 3) continue;
 
-    const hitRateRatio = avgHitRate > 0 ? cluster.hitRate / avgHitRate : 1;
-    const tcBonus = cluster.bestTcFound > 77 ? 0.2 : 0;
+    const hitRateRatio = avgHitRate > 0 ? analytics.hitRate / avgHitRate : 1;
+    const tcBonus = analytics.bestTcFound > 77 ? 0.2 : 0;
 
     const rawWeight = 0.6 + hitRateRatio * 0.5 + tcBonus;
 
-    if (cluster.id === "ambient" || cluster.id === "low-moderate") {
-      cluster.weight = Math.max(0.8, Math.min(2.0, rawWeight * 1.2));
-    } else if (cluster.id === "extreme") {
-      cluster.weight = Math.max(0.3, Math.min(1.5, rawWeight * 0.7));
+    if (def.id === "ambient" || def.id === "low-moderate") {
+      analytics.weight = Math.max(0.8, Math.min(2.0, rawWeight * 1.2));
+    } else if (def.id === "extreme") {
+      analytics.weight = Math.max(0.3, Math.min(1.5, rawWeight * 0.7));
     } else {
-      cluster.weight = Math.max(0.4, Math.min(2.0, rawWeight));
+      analytics.weight = Math.max(0.4, Math.min(2.0, rawWeight));
     }
   }
 }
 
 export function getClusterExplorationBias(): Record<string, number> {
-  const totalWeight = PRESSURE_CLUSTERS.reduce((s, c) => s + c.weight, 0);
+  const merged = getMergedClusters();
+  const totalWeight = merged.reduce((s, c) => s + c.weight, 0);
   const bias: Record<string, number> = {};
-  for (const cluster of PRESSURE_CLUSTERS) {
+  for (const cluster of merged) {
     bias[cluster.id] = Math.round((cluster.weight / totalWeight) * 10000) / 10000;
   }
   return bias;
@@ -434,8 +392,8 @@ export function samplePressureFromClusters(count: number = 10): number[] {
       }
     }
 
-    const cluster = PRESSURE_CLUSTERS[selectedIdx];
-    const p = cluster.minGpa + Math.random() * (cluster.maxGpa - cluster.minGpa);
+    const def = CLUSTER_DEFS[selectedIdx];
+    const p = def.minGpa + Math.random() * (def.maxGpa - def.minGpa);
     samples.push(Math.round(p));
   }
 
@@ -443,11 +401,12 @@ export function samplePressureFromClusters(count: number = 10): number[] {
 }
 
 export function getPressureClusterStats(): PressureClusterStats {
-  const totalDiscoveries = PRESSURE_CLUSTERS.reduce((s, c) => s + c.discoveryCount, 0);
+  const merged = getMergedClusters();
+  const totalDiscoveries = merged.reduce((s, c) => s + c.discoveryCount, 0);
 
   let mostProductive = "ambient";
   let bestRate = 0;
-  for (const cluster of PRESSURE_CLUSTERS) {
+  for (const cluster of merged) {
     if (cluster.hitRate > bestRate && cluster.totalScreened >= 3) {
       bestRate = cluster.hitRate;
       mostProductive = cluster.id;
@@ -455,7 +414,7 @@ export function getPressureClusterStats(): PressureClusterStats {
   }
 
   return {
-    clusters: PRESSURE_CLUSTERS.map(c => ({
+    clusters: merged.map(c => ({
       ...c,
       hitRate: Math.round(c.hitRate * 10000) / 10000,
       weight: Math.round(c.weight * 10000) / 10000,
