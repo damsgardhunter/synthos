@@ -128,6 +128,7 @@ import { recordStructureOutcome } from "../crystal/structure-reward-system";
 import { runStructureLearningCycle } from "../crystal/structure-learning-loop";
 import { ELEMENTAL_DATA } from "./elemental-data";
 import { runModelImprovementCycle, runCombinedModelLLMCycle, getModelImprovementStats } from "./model-improvement-loop";
+import { ensureFeatureStateLoaded } from "./model-llm-controller";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
 import { recordPredictionOutcome } from "./model-diagnostics";
 
@@ -8086,6 +8087,10 @@ export async function startEngine() {
       cycleCount = maxCycle;
     }
   } catch (e) { console.error("[Engine] Max convergence cycle restore failed:", e); }
+
+  try {
+    await ensureFeatureStateLoaded();
+  } catch (e) { console.error("[Engine] Feature state restore failed:", e); }
 
   try {
     const xtbHealth = await checkXTBHealth();

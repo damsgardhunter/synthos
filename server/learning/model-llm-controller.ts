@@ -14,6 +14,9 @@ import { getUncertaintyForLLM, proposeUncertaintyImprovements, type UncertaintyP
 import { evaluateRetrainNeed, getSchedulerForLLM, type RetrainDecision } from "./retrain-scheduler";
 import { getGroundTruthForLLM } from "./ground-truth-store";
 import { getMetricsForLLM as getPredictionLedgerForLLM } from "./prediction-reality-ledger";
+import { db } from "../db";
+import { systemState } from "@shared/schema";
+import { eq } from "drizzle-orm";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -75,6 +78,7 @@ export interface ModelLLMReport {
 
 const MAX_CUSTOM_FEATURES = 20;
 const customFeatures: ComputedFeatureDefinition[] = [];
+let featureStateLoaded = false;
 let architectureState: ArchitectureRecommendation | null = null;
 let lastArchitectureCheck = 0;
 const ARCHITECTURE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -86,6 +90,63 @@ function getDatasetSizeBucket(size: number): number {
     if (size >= ARCHITECTURE_SIZE_THRESHOLDS[i]) return i;
   }
   return -1;
+}
+
+const FEATURE_STATE_KEY = "custom_features_enabled";
+
+interface PersistedFeatureState {
+  enabledFeatures: string[];
+  lastUpdated: number;
+}
+
+async function persistFeatureState(): Promise<void> {
+  const enabledNames = customFeatures.filter(c => c.enabled).map(c => c.name);
+  const state: PersistedFeatureState = { enabledFeatures: enabledNames, lastUpdated: Date.now() };
+  try {
+    await db.insert(systemState)
+      .values({ key: FEATURE_STATE_KEY, value: state, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: systemState.key,
+        set: { value: state, updatedAt: new Date() },
+      });
+  } catch (e) {
+    console.log(`[Model LLM] Feature state persistence failed: ${e instanceof Error ? e.message : "unknown"}`);
+  }
+}
+
+async function loadFeatureState(): Promise<void> {
+  if (featureStateLoaded) return;
+  featureStateLoaded = true;
+  try {
+    const row = await db.select().from(systemState).where(eq(systemState.key, FEATURE_STATE_KEY)).limit(1);
+    if (row.length === 0) return;
+    const state = row[0].value as PersistedFeatureState;
+    if (!state || !Array.isArray(state.enabledFeatures)) return;
+    let restored = 0;
+    for (const name of state.enabledFeatures) {
+      const builtin = COMPUTABLE_FEATURES[name];
+      if (!builtin) continue;
+      const existing = customFeatures.find(cf => cf.name === name);
+      if (existing) {
+        existing.enabled = true;
+      } else {
+        customFeatures.push({
+          name,
+          formula: builtin.description,
+          computeFn: builtin.compute,
+          createdAt: state.lastUpdated || Date.now(),
+          proposedBy: "restored",
+          enabled: true,
+        });
+      }
+      restored++;
+    }
+    if (restored > 0) {
+      console.log(`[Model LLM] Restored ${restored} persisted features: ${state.enabledFeatures.join(", ")}`);
+    }
+  } catch (e) {
+    console.log(`[Model LLM] Feature state load failed: ${e instanceof Error ? e.message : "unknown"}`);
+  }
 }
 
 function isUnconventionalProxy(f: MLFeatureVector): boolean {
@@ -218,6 +279,10 @@ export function getActiveCustomFeatures(): ComputedFeatureDefinition[] {
   return customFeatures.filter(c => c.enabled);
 }
 
+export async function ensureFeatureStateLoaded(): Promise<void> {
+  await loadFeatureState();
+}
+
 export function getAvailableFeatureDefinitions(): { name: string; description: string }[] {
   return Object.entries(COMPUTABLE_FEATURES).map(([name, def]) => ({
     name,
@@ -240,6 +305,7 @@ export function enableBuiltinFeature(name: string): boolean {
     const existing = customFeatures.find(cf => cf.name === name);
     if (existing) {
       existing.enabled = true;
+      persistFeatureState();
       return true;
     }
 
@@ -264,6 +330,7 @@ export function enableBuiltinFeature(name: string): boolean {
     });
 
     console.log(`[Model LLM] Enabled computed feature: ${name} — ${builtin.description}`);
+    persistFeatureState();
     return true;
   } finally {
     featureMutexLocked = false;
@@ -274,6 +341,7 @@ export function disableCustomFeature(name: string): boolean {
   const feature = customFeatures.find(cf => cf.name === name);
   if (feature) {
     feature.enabled = false;
+    persistFeatureState();
     return true;
   }
   return false;
@@ -442,7 +510,9 @@ ${latestGnn ? `- GNN latest v${latestGnn.version}: ${JSON.stringify(latestGnn.me
 
 Rules:
 - dataset < 100 samples: prefer xgboost (GNN needs more data)
-- dataset > 500 samples with graph data: consider gnn or ensemble
+- dataset 200-500 samples: prefer ensemble weighted 70% xgboost / 30% GNN (GNN has too many parameters to be primary at this scale, but contributes structural info)
+- dataset > 500 samples with graph data: consider gnn or ensemble with higher GNN weight
+- dataset > 1000 samples with graph data: GNN can be primary or balanced ensemble
 - If one model has much better R² than the other, weight it higher in ensemble
 - If both models have R² > 0.8, recommend ensemble with balanced weights
 

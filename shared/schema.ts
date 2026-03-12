@@ -379,4 +379,12 @@ export const insertSystemMetricSchema = createInsertSchema(systemMetrics).omit({
 export type SystemMetric = typeof systemMetrics.$inferSelect;
 export type InsertSystemMetric = z.infer<typeof insertSystemMetricSchema>;
 
+export const systemState = pgTable("system_state", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export type SystemState = typeof systemState.$inferSelect;
+
 export * from "./models/chat";
