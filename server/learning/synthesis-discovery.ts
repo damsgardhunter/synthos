@@ -153,6 +153,7 @@ const STRUCTURAL_MOTIFS = [
   "MgB2-sigma", "Ruddlesden-Popper", "nickelate-IL", "H-channel",
   "anti-perovskite", "Chevrel-phase", "Heusler-L21", "pyrochlore",
   "skutterudite", "BiS2-layer", "infinite-layer", "Laves-MgZn2",
+  "generic-metallic",
 ] as const;
 
 type StructuralMotif = typeof STRUCTURAL_MOTIFS[number];
@@ -181,6 +182,9 @@ function initMotifRewards(): void {
     });
   }
 }
+
+const CUPRATE_SPACERS = new Set(["Y","La","Ba","Sr","Ca","Nd","Sm","Gd","Pr","Eu","Bi","Tl","Hg","Pb"]);
+const HEXAGONAL_SPACE_GROUPS = new Set(["P6/mmm","P63/mmc","P6mm","P-6m2","P6/m","P63/mcm","P-62m"]);
 
 function classifyStructuralMotif(formula: string, materialClass: string): StructuralMotif[] {
   const elements = parseFormulaElements(formula);
@@ -212,7 +216,11 @@ function classifyStructuralMotif(formula: string, materialClass: string): Struct
     motifs.push("clathrate-cage");
   }
 
-  if (mc.includes("cuprate") || (elements.includes("Cu") && elements.includes("O"))) {
+  const cuCount = counts["Cu"] || 0;
+  const oCount = counts["O"] || 0;
+  if (mc.includes("cuprate")) {
+    motifs.push("CuO2-plane");
+  } else if (elements.includes("Cu") && elements.includes("O") && oCount >= cuCount * 2 && elements.some(e => CUPRATE_SPACERS.has(e))) {
     motifs.push("CuO2-plane");
   }
 
@@ -220,16 +228,31 @@ function classifyStructuralMotif(formula: string, materialClass: string): Struct
     motifs.push("FeAs-layer");
   }
 
-  if (mc.includes("kagome") || elements.includes("V") && elements.includes("Si")) {
+  if (mc.includes("kagome") || (mc.includes("hexagonal") && elements.includes("V"))) {
     motifs.push("kagome-flat");
   }
 
-  if (mc.includes("hexagonal") || elements.includes("B") && !elements.some(e => isTransitionMetal(e))) {
+  if (mc.includes("hexagonal") || (elements.includes("B") && !elements.some(e => isTransitionMetal(e)))) {
     motifs.push("hexagonal-layer");
   }
 
-  if (mc.includes("nickelate") || (elements.includes("Ni") && elements.includes("O"))) {
-    motifs.push("nickelate-IL");
+  const niCount = counts["Ni"] || 0;
+  const oCountNi = counts["O"] || 0;
+  if (mc.includes("nickelate") || mc.includes("infinite-layer") || mc.includes("infinite layer")) {
+    if (elements.includes("Ni") && elements.includes("O") && oCountNi <= niCount * 2 && elements.some(e => isRareEarth(e))) {
+      motifs.push("nickelate-IL");
+    } else {
+      motifs.push("nickelate-IL");
+    }
+  } else if (elements.includes("Ni") && elements.includes("O") && elements.some(e => isRareEarth(e))) {
+    const nonNiO = elements.filter(e => e !== "Ni" && e !== "O");
+    const reCount = nonNiO.filter(e => isRareEarth(e)).reduce((s, e) => s + (counts[e] || 0), 0);
+    const ratioONi = niCount > 0 ? oCountNi / niCount : 0;
+    if (ratioONi <= 2.5 && reCount > 0 && reCount <= niCount * 1.5) {
+      motifs.push("nickelate-IL");
+    } else if (oCountNi > niCount * 2.5) {
+      motifs.push("Ruddlesden-Popper");
+    }
   }
 
   if (mc.includes("heusler") || (elements.length >= 3 && elements.filter(e => isTransitionMetal(e)).length >= 2)) {
@@ -253,8 +276,7 @@ function classifyStructuralMotif(formula: string, materialClass: string): Struct
   }
 
   if (motifs.length === 0) {
-    if (elements.length <= 2 && elements.includes("O")) motifs.push("NaCl-rocksalt");
-    else motifs.push("hexagonal-layer");
+    motifs.push("generic-metallic");
   }
 
   return motifs;
