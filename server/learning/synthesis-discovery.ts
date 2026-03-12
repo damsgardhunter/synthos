@@ -1465,7 +1465,8 @@ export function discoverNovelSynthesisPaths(
       if (r < crossoverProb) {
         childGenome = crossoverGenomes(parent1.genome, parent2.genome);
       } else if (r < crossoverProb + mutationProb) {
-        childGenome = mutateGenome(parent1.genome, adjustedMutRate);
+        const mutationSource = Math.random() < 0.5 ? parent1 : parent2;
+        childGenome = mutateGenome(mutationSource.genome, adjustedMutRate);
       } else {
         childGenome = randomGenome();
       }
@@ -1496,9 +1497,10 @@ export function discoverNovelSynthesisPaths(
     topRoutes.push(population[0]);
   }
 
-  const convergenceScore = population.length >= 2
+  const rawConvergence = population.length >= 2
     ? 1 - Math.abs(population[0].fitnessScore - population[Math.min(4, population.length - 1)].fitnessScore) / Math.max(0.01, population[0].fitnessScore)
     : 0;
+  const convergenceScore = Math.max(0, Math.min(1, rawConvergence));
 
   const engineInputSummary: string[] = [];
   if (insights.physics) engineInputSummary.push("physics-engine");
