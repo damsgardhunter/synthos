@@ -69,6 +69,7 @@ export interface ModelLLMReport {
   uncertaintySummary: string;
   schedulerSummary: string;
   groundTruthSummary: string;
+  predictionLedgerSummary: string;
   featureProposals: FeatureProposal[];
   architectureRecommendation: ArchitectureRecommendation | null;
   uncertaintyProposals: UncertaintyProposal[];
@@ -146,6 +147,47 @@ async function loadFeatureState(): Promise<void> {
     }
   } catch (e) {
     console.log(`[Model LLM] Feature state load failed: ${e instanceof Error ? e.message : "unknown"}`);
+  }
+}
+
+function truncateAtWordBoundary(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const truncated = text.slice(0, maxLen);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return (lastSpace > maxLen * 0.5 ? truncated.slice(0, lastSpace) : truncated) + "...";
+}
+
+async function persistArchitectureDecision(rec: ArchitectureRecommendation): Promise<void> {
+  try {
+    await db.insert(systemState)
+      .values({
+        key: "architecture_decision_log",
+        value: {
+          primaryModel: rec.primaryModel,
+          reasoning: rec.reasoning,
+          weights: rec.modelConfigs.map(c => ({ model: c.model, weight: c.weight })),
+          dataset: rec.datasetCharacteristics,
+          switchRecommended: rec.switchRecommended,
+          timestamp: Date.now(),
+        },
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: systemState.key,
+        set: {
+          value: {
+            primaryModel: rec.primaryModel,
+            reasoning: rec.reasoning,
+            weights: rec.modelConfigs.map(c => ({ model: c.model, weight: c.weight })),
+            dataset: rec.datasetCharacteristics,
+            switchRecommended: rec.switchRecommended,
+            timestamp: Date.now(),
+          },
+          updatedAt: new Date(),
+        },
+      });
+  } catch (e) {
+    console.log(`[Model LLM] Architecture decision persistence failed: ${e instanceof Error ? e.message : "unknown"}`);
   }
 }
 
@@ -503,18 +545,21 @@ Available architectures:
 Current state:
 - XGBoost: ${xgbDataset} samples, ${featureCount} features, R²=${diagnostics.xgboost.r2}, MAE=${diagnostics.xgboost.mae}K
 - GNN: ${gnnDataset} samples, R²=${diagnostics.gnn.latestR2}, MAE=${diagnostics.gnn.latestMAE}K
-- Family diversity: ${familyDiversity} families
+- Family diversity: ${familyDiversity} families (${diagnostics.familyBias.filter(f => f.count > 0).map(f => `${f.family}:${f.count}`).join(", ")})
+- Dominant family: ${diagnostics.familyBias.reduce((a, b) => b.count > a.count ? b : a, { family: "unknown", count: 0 }).family}
 - Graph data available: ${graphDataAvailable}
 ${latestXgb ? `- XGBoost latest v${latestXgb.version}: ${JSON.stringify(latestXgb.metrics)}` : ""}
 ${latestGnn ? `- GNN latest v${latestGnn.version}: ${JSON.stringify(latestGnn.metrics)}` : ""}
 
 Rules:
-- dataset < 100 samples: prefer xgboost (GNN needs more data)
+- dataset < 100 samples AND family diversity >= 3: prefer xgboost (diverse chemistries need tabular features; GNN lacks data)
+- dataset < 100 samples AND family diversity <= 2: GNN may be viable even at small sizes if crystal graphs are structurally similar (e.g. all hydrides). Consider ensemble 40% GNN / 60% XGBoost.
 - dataset 200-500 samples: prefer ensemble weighted 70% xgboost / 30% GNN (GNN has too many parameters to be primary at this scale, but contributes structural info)
 - dataset > 500 samples with graph data: consider gnn or ensemble with higher GNN weight
 - dataset > 1000 samples with graph data: GNN can be primary or balanced ensemble
 - If one model has much better R² than the other, weight it higher in ensemble
-- If both models have R² > 0.8, recommend ensemble with balanced weights
+- When both models have R² > 0.8, DO NOT simply use 50/50 balanced weights. Instead determine which model has lower MAE on the dominant material family in the current dataset. The model with better family-specific accuracy should receive 60-70% weight.
+- General principle: weights should reflect per-family variance calibration — the model that is least uncertain about the material families being actively generated should receive higher weight
 
 Respond in JSON:
 {
@@ -572,6 +617,9 @@ Respond in JSON:
     lastArchitectureDatasetBucket = getDatasetSizeBucket(safeSize);
 
     console.log(`[Model LLM] Architecture recommendation: ${recommendation.primaryModel} (switch=${recommendation.switchRecommended}, bucket=${lastArchitectureDatasetBucket})`);
+    console.log(`[Model LLM] Architecture reasoning: ${truncateAtWordBoundary(recommendation.reasoning, 300)}`);
+    console.log(`[Model LLM] Architecture weights: ${configs.map(c => `${c.model}=${c.weight.toFixed(3)}`).join(", ")}`);
+    persistArchitectureDecision(recommendation);
     return recommendation;
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : "unknown";
@@ -618,6 +666,8 @@ export function shouldReassessArchitecture(): boolean {
   return false;
 }
 
+let lastRetrainEvalDatasetSize = 0;
+
 export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMReport> {
   const diagnosticsSummary = getModelDiagnosticsForLLM();
   const failedMaterialsSummary = getFailedMaterialsForLLM();
@@ -627,14 +677,20 @@ export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMRe
   const groundTruthSummary = getGroundTruthForLLM();
   const predictionLedgerSummary = getPredictionLedgerForLLM();
 
+  const subPhase = currentCycle % 10;
+  const isFeaturePhase = subPhase <= 4;
+  const isUncertaintyPhase = subPhase >= 5;
+
   let featureProposals: FeatureProposal[] = [];
-  try {
-    featureProposals = await proposeNewFeatures();
-    for (const proposal of featureProposals) {
-      enableBuiltinFeature(proposal.name);
+  if (isFeaturePhase) {
+    try {
+      featureProposals = await proposeNewFeatures();
+      for (const proposal of featureProposals) {
+        enableBuiltinFeature(proposal.name);
+      }
+    } catch (e) {
+      console.log(`[Model LLM] Feature proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
-  } catch (e) {
-    console.log(`[Model LLM] Feature proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
   }
 
   let architectureRecommendation: ArchitectureRecommendation | null = null;
@@ -647,17 +703,24 @@ export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMRe
   }
 
   let uncertaintyProposals: UncertaintyProposal[] = [];
-  try {
-    uncertaintyProposals = await proposeUncertaintyImprovements();
-  } catch (e) {
-    console.log(`[Model LLM] Uncertainty proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
+  if (isUncertaintyPhase) {
+    try {
+      uncertaintyProposals = await proposeUncertaintyImprovements();
+    } catch (e) {
+      console.log(`[Model LLM] Uncertainty proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
+    }
   }
 
   let retrainDecision: RetrainDecision | null = null;
-  try {
-    retrainDecision = await evaluateRetrainNeed();
-  } catch (e) {
-    console.log(`[Model LLM] Retrain scheduling failed: ${e instanceof Error ? e.message : "unknown"}`);
+  const diagnostics = getComprehensiveModelDiagnostics();
+  const currentDatasetSize = diagnostics.xgboost.nSamples;
+  if (currentDatasetSize !== lastRetrainEvalDatasetSize) {
+    lastRetrainEvalDatasetSize = currentDatasetSize;
+    try {
+      retrainDecision = await evaluateRetrainNeed();
+    } catch (e) {
+      console.log(`[Model LLM] Retrain scheduling failed: ${e instanceof Error ? e.message : "unknown"}`);
+    }
   }
 
   return {
