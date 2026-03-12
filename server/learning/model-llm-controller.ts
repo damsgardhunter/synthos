@@ -84,7 +84,11 @@ const COMPUTABLE_FEATURES: Record<string, {
   description: string;
 }> = {
   van_hove_distance: {
-    compute: (f) => Math.abs(f.vanHoveProximity),
+    compute: (f) => {
+      const raw = f.vanHoveProximity;
+      if (raw === undefined || raw === null || !Number.isFinite(raw)) return 999;
+      return Math.abs(raw);
+    },
     description: "|E_van_hove - E_F| distance to van Hove singularity",
   },
   lambda_over_omega: {
@@ -141,13 +145,20 @@ const COMPUTABLE_FEATURES: Record<string, {
   },
 };
 
+const DISTANCE_FEATURES = new Set(["van_hove_distance", "mott_hubbard_proximity"]);
+const DISTANCE_PENALTY = 999;
+
+function featureNaNFallback(name: string): number {
+  return DISTANCE_FEATURES.has(name) ? DISTANCE_PENALTY : 0;
+}
+
 export function computeCustomFeature(name: string, features: MLFeatureVector): number | null {
   const builtin = COMPUTABLE_FEATURES[name];
   if (builtin) {
     try {
       const val = builtin.compute(features);
-      return Number.isFinite(val) ? val : 0;
-    } catch { return 0; }
+      return Number.isFinite(val) ? val : featureNaNFallback(name);
+    } catch { return featureNaNFallback(name); }
   }
 
   const custom = customFeatures.find(cf => cf.name === name && cf.enabled);
@@ -180,33 +191,49 @@ export function getAvailableFeatureDefinitions(): { name: string; description: s
   }));
 }
 
+let featureMutexLocked = false;
+
 export function enableBuiltinFeature(name: string): boolean {
-  const builtin = COMPUTABLE_FEATURES[name];
-  if (!builtin) return false;
+  if (featureMutexLocked) {
+    console.log(`[Model LLM] Skipped feature enable for ${name}: concurrent modification in progress`);
+    return false;
+  }
+  featureMutexLocked = true;
+  try {
+    const builtin = COMPUTABLE_FEATURES[name];
+    if (!builtin) return false;
 
-  const existing = customFeatures.find(cf => cf.name === name);
-  if (existing) {
-    existing.enabled = true;
+    const existing = customFeatures.find(cf => cf.name === name);
+    if (existing) {
+      existing.enabled = true;
+      return true;
+    }
+
+    if (customFeatures.length >= MAX_CUSTOM_FEATURES) {
+      const disabledIdx = customFeatures.findIndex(cf => !cf.enabled);
+      if (disabledIdx !== -1) {
+        const removed = customFeatures[disabledIdx];
+        customFeatures.splice(disabledIdx, 1);
+        console.log(`[Model LLM] Evicted disabled feature: ${removed.name} to make room for ${name}`);
+      } else {
+        return false;
+      }
+    }
+
+    customFeatures.push({
+      name,
+      formula: builtin.description,
+      computeFn: builtin.compute,
+      createdAt: Date.now(),
+      proposedBy: "model_llm",
+      enabled: true,
+    });
+
+    console.log(`[Model LLM] Enabled computed feature: ${name} — ${builtin.description}`);
     return true;
+  } finally {
+    featureMutexLocked = false;
   }
-
-  if (customFeatures.length >= MAX_CUSTOM_FEATURES) {
-    const disabled = customFeatures.findIndex(cf => !cf.enabled);
-    if (disabled !== -1) customFeatures.splice(disabled, 1);
-    else return false;
-  }
-
-  customFeatures.push({
-    name,
-    formula: builtin.description,
-    computeFn: builtin.compute,
-    createdAt: Date.now(),
-    proposedBy: "model_llm",
-    enabled: true,
-  });
-
-  console.log(`[Model LLM] Enabled computed feature: ${name} — ${builtin.description}`);
-  return true;
 }
 
 export function disableCustomFeature(name: string): boolean {
@@ -241,6 +268,7 @@ export async function proposeNewFeatures(): Promise<FeatureProposal[]> {
       model: "gpt-4o-mini",
       temperature: 0.3,
       max_tokens: 800,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
@@ -264,13 +292,17 @@ Propose 1-3 features to ENABLE from the available list. Focus on:
 - Features that could help with the failure patterns observed
 - Features that add physics knowledge the model is missing
 
-Respond ONLY with a JSON array:
-[{
-  "name": "feature_name_from_available_list",
-  "physicsRationale": "why this feature captures SC physics",
-  "expectedImpact": "what improvement to expect",
-  "priority": 1
-}]`,
+Respond in JSON:
+{
+  "proposals": [
+    {
+      "name": "feature_name_from_available_list",
+      "physicsRationale": "why this feature captures SC physics",
+      "expectedImpact": "what improvement to expect",
+      "priority": 1
+    }
+  ]
+}`,
         },
         {
           role: "user",
@@ -279,14 +311,18 @@ Respond ONLY with a JSON array:
       ],
     });
 
-    const content = response.choices[0]?.message?.content ?? "[]";
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) return [];
+    const content = response.choices[0]?.message?.content ?? "{}";
+    let parsed: any;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      console.log(`[Model LLM] Feature proposal JSON parse failed, content length=${content.length}`);
+      return [];
+    }
+    const proposals = Array.isArray(parsed) ? parsed : Array.isArray(parsed.proposals) ? parsed.proposals : [];
+    if (proposals.length === 0) return [];
 
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
+    return proposals
       .filter((p: any) => p.name && COMPUTABLE_FEATURES[p.name])
       .slice(0, 3)
       .map((p: any) => ({
@@ -427,15 +463,13 @@ export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMRe
   const predictionLedgerSummary = getPredictionLedgerForLLM();
 
   let featureProposals: FeatureProposal[] = [];
-  if (currentCycle % 10 === 0) {
-    try {
-      featureProposals = await proposeNewFeatures();
-      for (const proposal of featureProposals) {
-        enableBuiltinFeature(proposal.name);
-      }
-    } catch (e) {
-      console.log(`[Model LLM] Feature proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
+  try {
+    featureProposals = await proposeNewFeatures();
+    for (const proposal of featureProposals) {
+      enableBuiltinFeature(proposal.name);
     }
+  } catch (e) {
+    console.log(`[Model LLM] Feature proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
   }
 
   let architectureRecommendation: ArchitectureRecommendation | null = null;
@@ -448,12 +482,10 @@ export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMRe
   }
 
   let uncertaintyProposals: UncertaintyProposal[] = [];
-  if (currentCycle % 15 === 0) {
-    try {
-      uncertaintyProposals = await proposeUncertaintyImprovements();
-    } catch (e) {
-      console.log(`[Model LLM] Uncertainty proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
-    }
+  try {
+    uncertaintyProposals = await proposeUncertaintyImprovements();
+  } catch (e) {
+    console.log(`[Model LLM] Uncertainty proposal cycle failed: ${e instanceof Error ? e.message : "unknown"}`);
   }
 
   let retrainDecision: RetrainDecision | null = null;
