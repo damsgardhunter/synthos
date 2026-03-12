@@ -96,8 +96,8 @@ function initMatrix(rows: number, cols: number, scale?: number): number[][] {
   return m;
 }
 
-function initVector(dim: number): number[] {
-  return new Array(dim).fill(0);
+function initVector(dim: number, positiveBias?: number): number[] {
+  return new Array(dim).fill(positiveBias ?? 0);
 }
 
 const _mtBufferPool: Map<number, Float64Array[]> = new Map();
@@ -166,15 +166,15 @@ function getMultiTaskWeights(): MultiTaskWeights {
 
   multiTaskWeights = {
     W_band: initMatrix(HEADS, HIDDEN),
-    b_band: initVector(HEADS),
+    b_band: initVector(HEADS, 0.1),
     W_dos: initMatrix(HEADS, HIDDEN),
-    b_dos: initVector(HEADS),
+    b_dos: initVector(HEADS, 0.1),
     W_elastic: initMatrix(HEADS, HIDDEN),
-    b_elastic: initVector(HEADS),
+    b_elastic: initVector(HEADS, 0.2),
     W_magnetic: initMatrix(HEADS, HIDDEN),
     b_magnetic: initVector(HEADS),
     W_phonon_detail: initMatrix(HEADS, HIDDEN),
-    b_phonon_detail: initVector(HEADS),
+    b_phonon_detail: initVector(HEADS, 0.15),
     W_topology: initMatrix(HEADS, HIDDEN),
     b_topology: initVector(HEADS),
   };
@@ -200,11 +200,15 @@ function extractGraphPooling(graph: CrystalGraph): number[] {
   return pooled.slice(0, HIDDEN);
 }
 
-export function multiTaskPredict(formula: string): MultiTaskPrediction {
+interface MultiTaskOptions {
+  skipPhysics?: boolean;
+  highPriority?: boolean;
+}
+
+function multiTaskCore(formula: string) {
   const gnnWeights = getGNNModel();
   const graph = buildCrystalGraph(formula);
   const basePred = GNNPredict(graph, gnnWeights);
-
   const pooled = extractGraphPooling(graph);
   const mtWeights = getMultiTaskWeights();
 
@@ -215,17 +219,30 @@ export function multiTaskPredict(formula: string): MultiTaskPrediction {
   const phononOut = vecAdd(matVecMul(mtWeights.W_phonon_detail, pooled), mtWeights.b_phonon_detail);
   const topoOut = vecAdd(matVecMul(mtWeights.W_topology, pooled), mtWeights.b_topology);
 
+  return { basePred, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut };
+}
+
+export function multiTaskPredict(formula: string, opts?: MultiTaskOptions): MultiTaskPrediction {
+  const { basePred, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut } = multiTaskCore(formula);
+
   let electronic: any = null;
   let phonon: any = null;
   let coupling: any = null;
   let features: any = null;
 
-  try {
-    electronic = computeElectronicStructure(formula, null);
-    phonon = computePhononSpectrum(formula, electronic);
-    coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
-    features = extractFeatures(formula);
-  } catch {}
+  const needsPhysics = !opts?.skipPhysics &&
+    (opts?.highPriority || basePred.confidence < 0.3);
+
+  if (needsPhysics) {
+    try {
+      electronic = computeElectronicStructure(formula, null);
+      phonon = computePhononSpectrum(formula, electronic);
+      coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
+      features = extractFeatures(formula);
+    } catch {}
+  } else {
+    try { features = extractFeatures(formula); } catch {}
+  }
 
   const bandGap = electronic
     ? electronic.bandGap ?? Math.max(0, sigmoid(bandOut[0]) * 5)
@@ -381,7 +398,7 @@ export function computePropertyGradient(
   targetProperty: keyof MultiTaskPrediction,
   delta: number = 0.01
 ): Record<string, number> {
-  const basePred = multiTaskPredict(formula);
+  const basePred = multiTaskPredict(formula, { skipPhysics: true });
   const baseValue = Number(basePred[targetProperty]) || 0;
   const gradients: Record<string, number> = {};
 
@@ -393,15 +410,29 @@ export function computePropertyGradient(
     if (match[1] && !elements.includes(match[1])) elements.push(match[1]);
   }
 
+  const perturbedEntries: { el: string; formula: string }[] = [];
   for (const el of elements) {
-    const perturbedFormula = perturbElement(formula, el, 1);
-    if (perturbedFormula === formula) continue;
+    const pf = perturbElement(formula, el, 1);
+    if (pf !== formula) perturbedEntries.push({ el, formula: pf });
+  }
+
+  const gnnWeights = getGNNModel();
+  const mtWeights = getMultiTaskWeights();
+
+  const graphs = perturbedEntries.map(e => {
+    try { return buildCrystalGraph(e.formula); }
+    catch { return null; }
+  });
+
+  for (let i = 0; i < perturbedEntries.length; i++) {
+    const g = graphs[i];
+    if (!g) { gradients[perturbedEntries[i].el] = 0; continue; }
     try {
-      const perturbedPred = multiTaskPredict(perturbedFormula);
-      const perturbedValue = Number(perturbedPred[targetProperty]) || 0;
-      gradients[el] = perturbedValue - baseValue;
+      const pred = GNNPredict(g, gnnWeights);
+      const perturbedValue = Number(pred[targetProperty as keyof typeof pred]) || 0;
+      gradients[perturbedEntries[i].el] = perturbedValue - baseValue;
     } catch {
-      gradients[el] = 0;
+      gradients[perturbedEntries[i].el] = 0;
     }
   }
 
