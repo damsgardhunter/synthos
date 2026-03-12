@@ -674,7 +674,7 @@ function validateSemicorePP(element: string, ppPath: string): boolean {
       return false;
     }
 
-    const zValMatch = header.match(/z_valence\s*=\s*"?\s*([\d.]+)/);
+    const zValMatch = header.match(/z_valence\s*=\s*"?\s*([\d.]+(?:e[+-]?\d+)?)/);
     if (zValMatch) {
       const ppZVal = parseFloat(zValMatch[1]);
       const expectedZ = getZValence(element);

@@ -63,7 +63,7 @@ Heavy initializers are staggered to avoid event loop blocking:
 
 ### Core Features Specifications
 - **ML Governance**: Architecture selection heuristic favors XGBoost for <100 samples, 70/30 XGBoost/GNN for 200-500, GNN-primary for >1000 samples. Architecture reassessment triggers at dataset bucket thresholds [128, 256, 512, 1024, 2048, 4096].
-- **DFT Backend (Quantum ESPRESSO)**: Handles high-pressure calculations with Murnaghan EOS, pressure-dependent geometry validation, and parallel pseudopotential download. Dynamic cutoffs and k-point meshing. Includes vc-relax pre-processing.
+- **DFT Backend (Quantum ESPRESSO)**: Handles high-pressure calculations with Murnaghan EOS, pressure-dependent geometry validation, and parallel pseudopotential download. Dynamic cutoffs and k-point meshing. Includes vc-relax pre-processing. UPF z_valence parser handles scientific notation (e.g., `1.300000000000e1` = 13).
 - **GNN Surrogate**: 5-model deep ensemble with heteroscedastic heads, MC dropout (10 passes), and uncertainty decomposition (epistemic + aleatoric). Node embeddings are symmetry-augmented.
 - **Eliashberg Electron-Phonon Pipeline**: Computes full alpha2F(omega) spectral function, lambda, omega_log, Allen-Dynes Tc, and isotope effect. Supports both surrogate and DFPT tiers. Includes atom-projected mode-resolved lambda analysis.
 - **Orbital-Resolved DOS Surrogate**: Predicts 64-bin eDOS across 4 orbital channels (s, p, d, f) with Van Hove Singularity (VHS) detection.
