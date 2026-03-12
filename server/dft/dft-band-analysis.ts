@@ -810,17 +810,18 @@ export function computeDFTNesting(pockets: DFTFermiPocket[], bandResult: DFTBand
           const kptJ = bandResult.eigenvalues[kIdxJ];
           if (!kptI || !kptJ) continue;
 
-          const q = [
-            kptJ.kCoords[0] - kptI.kCoords[0],
-            kptJ.kCoords[1] - kptI.kCoords[1],
-            kptJ.kCoords[2] - kptI.kCoords[2],
-          ];
-          const binKey = q.map(v => Math.round(v / binRes) * binRes).map(v => v.toFixed(3)).join(",");
+          const qx = kptJ.kCoords[0] - kptI.kCoords[0];
+          const qy = kptJ.kCoords[1] - kptI.kCoords[1];
+          const qz = kptJ.kCoords[2] - kptI.kCoords[2];
+          const bx = Math.round(qx / binRes);
+          const by = Math.round(qy / binRes);
+          const bz = Math.round(qz / binRes);
+          const binKey = `${bx},${by},${bz}`;
 
           if (qBins.has(binKey)) {
             qBins.get(binKey)!.count++;
           } else {
-            qBins.set(binKey, { q: q.map(v => Math.round(v / binRes) * binRes), count: 1, pocketPair: [i, j] });
+            qBins.set(binKey, { q: [bx * binRes, by * binRes, bz * binRes], count: 1, pocketPair: [i, j] });
           }
         }
       }
@@ -932,12 +933,20 @@ export function extractTopologyFromDFT(bandResult: DFTBandStructureResult): DFTT
   const hasBandInversion = bandInversions.length > 0;
 
   let flatBandCount = 0;
-  if (bandResult.eigenvalues.length > 0 && bandResult.nBands > 0) {
+  const nKpts = bandResult.eigenvalues.length;
+  if (nKpts > 0 && bandResult.nBands > 0) {
     for (let b = 0; b < bandResult.nBands; b++) {
-      const energies = bandResult.eigenvalues.map(kpt => kpt.energies[b]).filter(e => e !== undefined) as number[];
-      if (energies.length < 3) continue;
-      const range = Math.max(...energies) - Math.min(...energies);
-      if (range < 0.15 && Math.abs(energies.reduce((s, e) => s + e, 0) / energies.length) < 2.0) {
+      let bMin = Infinity, bMax = -Infinity, bSum = 0, bCount = 0;
+      for (let k = 0; k < nKpts; k++) {
+        const e = bandResult.eigenvalues[k].energies[b];
+        if (e === undefined) continue;
+        if (e < bMin) bMin = e;
+        if (e > bMax) bMax = e;
+        bSum += e;
+        bCount++;
+      }
+      if (bCount < 3) continue;
+      if (bMax - bMin < 0.15 && Math.abs(bSum / bCount) < 2.0) {
         flatBandCount++;
       }
     }
