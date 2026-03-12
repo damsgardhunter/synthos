@@ -377,7 +377,7 @@ function estimateStabilityProbability(obs: PressureObservation[], targetPressure
   for (const o of obs) {
     const dist = Math.abs(o.pressureGpa - targetPressure);
     if (dist < 50) {
-      if (o.enthalpy > 0.5) enthalpyPenalty += Math.min(1, o.enthalpy / 2);
+      if (o.enthalpy > 0.1) enthalpyPenalty += Math.min(1, o.enthalpy / 0.5);
       enthalpyCount++;
     }
   }

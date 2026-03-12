@@ -57,6 +57,15 @@ function evictCacheIfNeeded(): void {
   }
 }
 
+function pressureDomeFactor(pressureGpa: number, peakPressure: number = 150): number {
+  const ratio = pressureGpa / peakPressure;
+  return Math.exp(-0.5 * (ratio - 1) ** 2 / 0.3);
+}
+
+function pressureBandgapFactor(pressureGpa: number): number {
+  return Math.exp(-pressureGpa * 0.003);
+}
+
 function predictAtPressure(formula: string, pressureGpa: number): PressurePoint {
   const mat = { pressureGpa } as any;
   const features = extractFeatures(formula, mat);
@@ -69,22 +78,32 @@ function predictAtPressure(formula: string, pressureGpa: number): PressurePoint 
   let gnnTc = 0;
   let gnnFormationEnergy = 0;
   let gnnBandgap = 0;
+  let gnnValid = false;
 
   try {
     const gnnResult: GNNPrediction = getGNNPrediction(formula);
-    const pressureFactor = 1 + pressureGpa * 0.002;
-    gnnTc = Math.max(0, gnnResult.predictedTc * pressureFactor);
-    gnnFormationEnergy = gnnResult.formationEnergy + pressureGpa * 0.01;
-    gnnBandgap = Math.max(0, gnnResult.bandgap - pressureGpa * 0.005);
+    if (Number.isFinite(gnnResult.predictedTc)) {
+      const domeFactor = pressureDomeFactor(pressureGpa);
+      gnnTc = Math.max(0, gnnResult.predictedTc * domeFactor);
+      gnnFormationEnergy = gnnResult.formationEnergy * (1 + pressureGpa * 0.003);
+      gnnBandgap = Math.max(0, gnnResult.bandgap * pressureBandgapFactor(pressureGpa));
+      gnnValid = true;
+    }
   } catch {}
 
-  const ensembleTc = xgbTc * 0.5 + gnnTc * 0.5;
-  const formationEnergy = gnnFormationEnergy !== 0
+  let ensembleTc: number;
+  if (gnnValid) {
+    ensembleTc = xgbTc * 0.5 + gnnTc * 0.5;
+  } else {
+    ensembleTc = xgbTc;
+  }
+
+  const formationEnergy = gnnValid
     ? gnnFormationEnergy
-    : (features.formationEnergy ?? 0) + pressureGpa * 0.01;
-  const bandgap = gnnBandgap !== 0
+    : (features.formationEnergy ?? 0) * (1 + pressureGpa * 0.003);
+  const bandgap = gnnValid
     ? gnnBandgap
-    : Math.max(0, (features.bandGap ?? 0) - pressureGpa * 0.005);
+    : Math.max(0, (features.bandGap ?? 0) * pressureBandgapFactor(pressureGpa));
 
   let enthalpy = 0;
   let enthalpyStable = true;
@@ -94,7 +113,7 @@ function predictAtPressure(formula: string, pressureGpa: number): PressurePoint 
     enthalpyStable = hPoint.isStable;
   } catch {
     enthalpy = formationEnergy + pressureGpa * 0.006;
-    enthalpyStable = enthalpy < 0.5;
+    enthalpyStable = enthalpy < 0.1;
   }
 
   return {
