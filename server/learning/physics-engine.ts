@@ -1167,13 +1167,27 @@ export function computeElectronicStructure(
   } else if (hasH && hRatio >= 6) {
     fermiSurfaceTopology = "nested multi-sheet with strong e-ph coupling pockets";
   } else if (hasTM && elements.length >= 3) {
-    if (vec > 4 && vec < 7) {
+    const tmEls = elements.filter(e => isTransitionMetal(e));
+    const has5d = tmEls.some(e => {
+      const d = getElementData(e);
+      return d && d.atomicNumber >= 72;
+    });
+    if (has5d) {
+      fermiSurfaceTopology = "multi-band with strong SOC-split pockets (reduced nesting)";
+    } else if (vec > 4 && vec < 7) {
       fermiSurfaceTopology = "multi-band with electron and hole pockets (partial nesting)";
     } else {
       fermiSurfaceTopology = "multi-band with electron and hole pockets";
     }
   } else if (hasTM) {
-    fermiSurfaceTopology = "complex multi-sheet d-band dominated";
+    const tmEls = elements.filter(e => isTransitionMetal(e));
+    const has5d = tmEls.some(e => {
+      const d = getElementData(e);
+      return d && d.atomicNumber >= 72;
+    });
+    fermiSurfaceTopology = has5d
+      ? "complex multi-sheet d-band with strong relativistic effects"
+      : "complex multi-sheet d-band dominated";
   } else if (vec > 1 && vec < 3) {
     fermiSurfaceTopology = "nearly free electron (spherical)";
   }
@@ -1228,6 +1242,10 @@ export function computeElectronicStructure(
 
   if (fermiSurfaceTopology.includes("2D") || isCuprate || isPnictide) {
     nestingScore = Math.min(1.0, nestingScore + 0.1);
+  }
+
+  if (fermiSurfaceTopology.includes("SOC-split") || fermiSurfaceTopology.includes("relativistic")) {
+    nestingScore *= 0.6;
   }
 
   if (isPnictide || isDichalcogenide) {
