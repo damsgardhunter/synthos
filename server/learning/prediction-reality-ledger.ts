@@ -182,6 +182,7 @@ export function recordPredictionVsReality(
 
   samplesSinceLastRetrain++;
   cachedGlobalMetricsDirty = true;
+  cachedCICoverageDirty = true;
 
   for (const listener of [...ledgerListeners]) {
     try { listener(); } catch {}
@@ -462,24 +463,45 @@ export interface CycleImprovementRecord {
 const cycleImprovementHistory: CycleImprovementRecord[] = [];
 const MAX_CYCLE_HISTORY = 200;
 
-function computeCICoverage(entries: PredictionRealityEntry[], zMultiplier: number): number {
-  let covered = 0;
+interface CICoverageResult {
+  coverage90: number;
+  coverage95: number;
+  coverage99: number;
+}
+let cachedCICoverage: CICoverageResult | null = null;
+let cachedCICoverageDirty = true;
+
+function computeCICoverageAll(entries: PredictionRealityEntry[]): CICoverageResult {
+  if (!cachedCICoverageDirty && cachedCICoverage) return cachedCICoverage;
+
+  const z90 = 1.645, z95 = 1.96, z99 = 2.576;
+  let covered90 = 0, covered95 = 0, covered99 = 0;
   let total = 0;
+
   for (const e of entries) {
     const pred = e.model_prediction?.Tc;
     const actual = e.ground_truth?.Tc;
     if (!Number.isFinite(pred) || !Number.isFinite(actual)) continue;
-    let sigma: number;
-    if (e.predicted_sigma != null && Number.isFinite(e.predicted_sigma) && e.predicted_sigma > 0) {
-      sigma = e.predicted_sigma;
-    } else {
-      sigma = Math.max(Math.abs(e.error?.tc_abs_error ?? 10), 1);
-    }
-    const halfWidth = zMultiplier * sigma;
-    if (actual >= pred - halfWidth && actual <= pred + halfWidth) covered++;
+    if (e.predicted_sigma == null || !Number.isFinite(e.predicted_sigma) || e.predicted_sigma <= 0) continue;
+    const sigma = e.predicted_sigma;
+    const hw90 = z90 * sigma;
+    const hw95 = z95 * sigma;
+    const hw99 = z99 * sigma;
+    const err = Math.abs(actual - pred);
+    if (err <= hw90) covered90++;
+    if (err <= hw95) covered95++;
+    if (err <= hw99) covered99++;
     total++;
   }
-  return total > 0 ? covered / total : zMultiplier > 2 ? 0.99 : zMultiplier > 1.9 ? 0.95 : 0.90;
+
+  const result: CICoverageResult = {
+    coverage90: total >= 5 ? covered90 / total : NaN,
+    coverage95: total >= 5 ? covered95 / total : NaN,
+    coverage99: total >= 5 ? covered99 / total : NaN,
+  };
+  cachedCICoverage = result;
+  cachedCICoverageDirty = false;
+  return result;
 }
 
 export function recordCycleImprovement(
@@ -487,12 +509,12 @@ export function recordCycleImprovement(
   gnnMetrics: { r2: number; rmse: number },
   xgbMetrics: { r2: number; rmse: number }
 ): CycleImprovementRecord {
-  const cycleEntries = ledger.filter(e => e.cycle === cycle);
   const allMetrics = computeMetrics();
+  const ci = computeCICoverageAll(ledger);
 
-  const ciCoverage90 = computeCICoverage(ledger, 1.645);
-  const ciCoverage95 = computeCICoverage(ledger, 1.96);
-  const ciCoverage99 = computeCICoverage(ledger, 2.576);
+  const ciCoverage90 = Number.isFinite(ci.coverage90) ? ci.coverage90 : 0.90;
+  const ciCoverage95 = Number.isFinite(ci.coverage95) ? ci.coverage95 : 0.95;
+  const ciCoverage99 = Number.isFinite(ci.coverage99) ? ci.coverage99 : 0.99;
 
   const record: CycleImprovementRecord = {
     cycle,
@@ -522,11 +544,15 @@ export function recordCycleImprovement(
     : 0;
   const trendDir = trend < -1 ? "improving" : trend > 1 ? "degrading" : "stable";
 
-  const coverageNote = ciCoverage95 < 0.90 ? " [CI95 MISCALIBRATED]" : ciCoverage95 > 0.99 ? " [CI95 OVERCONSERVATIVE]" : "";
+  const hasCIData = Number.isFinite(ci.coverage95);
+  const coverageStr = hasCIData ? `${(ciCoverage95 * 100).toFixed(1)}%` : "N/A (no predicted_sigma)";
+  const coverageNote = hasCIData
+    ? (ciCoverage95 < 0.90 ? " [CI95 MISCALIBRATED]" : ciCoverage95 > 0.99 ? " [CI95 OVERCONSERVATIVE]" : "")
+    : "";
   console.log(
     `[Prediction Ledger] Cycle ${cycle}: Tc RMSE=${record.rmse.toFixed(2)}K, MAE=${record.mae.toFixed(2)}K, ` +
     `R²=${record.r2.toFixed(4)}, GNN R²=${gnnMetrics.r2.toFixed(4)}, XGB R²=${xgbMetrics.r2.toFixed(4)}, ` +
-    `CI95 coverage=${(ciCoverage95 * 100).toFixed(1)}% (goal: 95%) [${trendDir}]${coverageNote}`
+    `CI95 coverage=${coverageStr} (goal: 95%) [${trendDir}]${coverageNote}`
   );
 
   return record;
