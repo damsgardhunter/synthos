@@ -786,6 +786,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `computeNoveltyScore` now returns 0.05 immediately for any formula in `seenFormulas`, instead of subtracting a flat 0.4 penalty. The old penalty left seen materials with novelty up to 0.6 (if they were compositionally distant), which could cause the agent to re-mine the same material if its Tc prediction was high enough. A near-zero floor effectively removes seen formulas from the exploration frontier.
 - **Retrain-Aware Calibration Factor (surrogate-fitness.ts, engine.ts)**:
   - `getGlobalCalibrationFactor` now tracks `lastRetrainEvalIndex` — after a GNN retrain, it uses only post-retrain evaluation history (not stale pre-retrain errors). If fewer than 5 post-retrain evaluations exist, it returns 1.0 (no dampening) to avoid penalizing the new model with old errors. Post-retrain samples are recency-weighted (later samples count more) to quickly adapt to the new model's accuracy. `notifyModelRetrain()` is exported and called from both GNN invalidation paths in engine.ts.
+- **Tiered Overestimate Threshold (surrogate-fitness.ts)**:
+  - `computeExplorationWeight` now uses Tc-dependent overestimate margins instead of a flat 20% ratio: Tc<20K uses flat 5K margin (a 1K error on a 5K material is noise); Tc<77K uses 30% margin; Tc>77K uses 20% margin. This prevents low-Tc noise from inflating the overestimate ratio while correctly flagging 50K errors on 250K materials.
+- **Toxicity Penalty in Synthesis Heuristic (surrogate-fitness.ts)**:
+  - `computeSynthesisHeuristicScore` now penalizes toxic elements (Be, Tl, Cd, Hg, Pb, As) with a -0.1 score reduction. These elements are sometimes Tc-active (e.g., Tl-based cuprates) but extremely hazardous to synthesize and handle, making them poor candidates for practical materials discovery.
+- **O(1) Circular Buffer for Known Vectors (surrogate-fitness.ts)**:
+  - Replaced `Array.shift()` (O(N)) with a circular buffer (`knownVectorBuffer`) using head pointer and modular indexing. Formula deduplication uses a companion `Set<string>` for O(1) lookup instead of `Array.some()`. Buffer capacity increased from 500 to 2000 for longer discovery runs without performance degradation.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

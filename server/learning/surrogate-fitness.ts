@@ -154,8 +154,11 @@ const COMP_VECTOR_KEYS = [
   "entropy", "pettiMean", "pettiStd",
 ] as const;
 
-const knownCompositionVectors: { formula: string; vec: number[] }[] = [];
-const MAX_KNOWN_VECTORS = 500;
+const MAX_KNOWN_VECTORS = 2000;
+const knownVectorBuffer: { formula: string; vec: number[] }[] = new Array(MAX_KNOWN_VECTORS);
+let kvHead = 0;
+let kvCount = 0;
+const knownVectorFormulas = new Set<string>();
 
 const COMP_VECTOR_RANGES: { min: number; max: number }[] = [];
 let _compRangesInitialized = false;
@@ -214,13 +217,28 @@ function euclideanDistance(a: number[], b: number[]): number {
 }
 
 function addToKnownVectors(formula: string): void {
-  if (knownCompositionVectors.some(v => v.formula === formula)) return;
+  if (knownVectorFormulas.has(formula)) return;
   const vec = compositionToVector(formula);
   if (!vec) return;
-  knownCompositionVectors.push({ formula, vec });
-  if (knownCompositionVectors.length > MAX_KNOWN_VECTORS) {
-    knownCompositionVectors.shift();
+
+  if (kvCount >= MAX_KNOWN_VECTORS) {
+    const evicted = knownVectorBuffer[kvHead];
+    if (evicted) knownVectorFormulas.delete(evicted.formula);
   }
+
+  knownVectorBuffer[kvHead] = { formula, vec };
+  knownVectorFormulas.add(formula);
+  kvHead = (kvHead + 1) % MAX_KNOWN_VECTORS;
+  if (kvCount < MAX_KNOWN_VECTORS) kvCount++;
+}
+
+function getKnownVectors(): { formula: string; vec: number[] }[] {
+  const result: { formula: string; vec: number[] }[] = [];
+  for (let i = 0; i < kvCount; i++) {
+    const entry = knownVectorBuffer[i];
+    if (entry) result.push(entry);
+  }
+  return result;
 }
 
 function computeNoveltyScore(formula: string): number {
@@ -233,10 +251,11 @@ function computeNoveltyScore(formula: string): number {
   if (familyCount > 20) novelty -= 0.2;
   else if (familyCount > 10) novelty -= 0.1;
 
-  if (knownCompositionVectors.length >= 3) {
+  const knownVecs = getKnownVectors();
+  if (knownVecs.length >= 3) {
     const candidateVec = compositionToVector(formula);
     if (candidateVec) {
-      const distances = knownCompositionVectors.map(kv => euclideanDistance(candidateVec, kv.vec));
+      const distances = knownVecs.map(kv => euclideanDistance(candidateVec, kv.vec));
       distances.sort((a, b) => a - b);
       const kNearest = Math.min(5, distances.length);
       const avgNearestDist = distances.slice(0, kNearest).reduce((s, d) => s + d, 0) / kNearest;
@@ -263,6 +282,9 @@ function computeSynthesisHeuristicScore(formula: string): number {
   const hasRareElements = uniqueElements.some(e => ["Tc", "Pm", "At", "Fr", "Ra"].includes(e));
   if (hasRareElements) score -= 0.3;
 
+  const hasToxicElements = uniqueElements.some(e => ["Be", "Tl", "Cd", "Hg", "Pb", "As"].includes(e));
+  if (hasToxicElements) score -= 0.1;
+
   return Math.max(0, Math.min(1, score));
 }
 
@@ -275,7 +297,10 @@ function computeExplorationWeight(): number {
   if (nEvals < 5) return EXPLORATION_WEIGHT_MAX;
   const decayed = EXPLORATION_WEIGHT_MAX * Math.pow(0.5, nEvals / EXPLORATION_DECAY_HALF_LIFE);
   const recent = evaluationHistory.slice(-30);
-  const recentOverestimates = recent.filter(r => r.predictedTc > r.actualTc * 1.2).length / recent.length;
+  const recentOverestimates = recent.filter(r => {
+    const margin = r.actualTc < 20 ? 5 : (r.actualTc < 77 ? r.actualTc * 0.3 : r.actualTc * 0.2);
+    return r.predictedTc > r.actualTc + margin;
+  }).length / recent.length;
   const recentMeanAbsErr = recent.reduce((s, r) => s + Math.abs(r.predictedTc - r.actualTc), 0) / recent.length;
   let boost = 0;
   if (recentMeanAbsErr > 25) boost += 0.05;
@@ -511,7 +536,7 @@ export function getCalibrationStats(): FeedbackLoopStats {
       currentWeight: Math.round(expWeight * 1000) / 1000,
     },
     noveltySearch: {
-      knownCompositions: knownCompositionVectors.length,
+      knownCompositions: kvCount,
       vectorDimensions: COMP_VECTOR_KEYS.length,
     },
   };
