@@ -117,6 +117,7 @@ export function recordPhysicsResult(result: PhysicsResult): void {
   store.set(result.formula, { ...result });
   touchAccess(result.formula);
   evictIfNeeded();
+  try { require("./unified-training-dataset").invalidateUnifiedCache(); } catch {}
 
   const derived = computeDerivedFeatures(result);
   derivedFeaturesCache.set(result.formula, derived);

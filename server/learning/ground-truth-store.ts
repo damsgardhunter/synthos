@@ -79,11 +79,13 @@ export function addGroundTruthDatapoint(dp: GroundTruthDatapoint): void {
     };
     if ((sourcePriority[dp.source] ?? 0) >= (sourcePriority[old.source] ?? 0)) {
       datapoints[existing] = dp;
+      try { require("./unified-training-dataset").invalidateUnifiedCache(); } catch {}
     }
     return;
   }
 
   datapoints.push(dp);
+  try { require("./unified-training-dataset").invalidateUnifiedCache(); } catch {}
   if (datapoints.length > MAX_DATAPOINTS) {
     const excess = datapoints.length - MAX_DATAPOINTS;
     const prunable: number[] = [];

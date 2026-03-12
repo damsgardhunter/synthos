@@ -35,7 +35,21 @@ export interface DatasetSnapshot {
 const snapshotHistory: DatasetSnapshot[] = [];
 const MAX_SNAPSHOTS = 100;
 
-export function buildUnifiedDataset(): UnifiedTrainingRecord[] {
+let cachedDataset: UnifiedTrainingRecord[] | null = null;
+let cachedSnapshot: DatasetSnapshot | null = null;
+let dataVersion = 0;
+let cachedDataVersion = -1;
+let cachedSnapshotVersion = -1;
+
+export function invalidateUnifiedCache(): void {
+  dataVersion++;
+}
+
+function rebuildIfDirty(): UnifiedTrainingRecord[] {
+  if (cachedDataset !== null && cachedDataVersion === dataVersion) {
+    return cachedDataset;
+  }
+
   const records = new Map<string, UnifiedTrainingRecord>();
 
   for (const sd of SUPERCON_TRAINING_DATA) {
@@ -63,9 +77,6 @@ export function buildUnifiedDataset(): UnifiedTrainingRecord[] {
   const groundTruth = getGroundTruthDataset();
   for (const dp of groundTruth) {
     const key = `${dp.formula}|${Math.round(dp.pressure)}`;
-    const existing = records.get(key);
-    if (existing && existing.source === "supercon-seed") {
-    }
     records.set(key, {
       formula: dp.formula,
       pressure: dp.pressure,
@@ -131,11 +142,22 @@ export function buildUnifiedDataset(): UnifiedTrainingRecord[] {
     }
   }
 
-  return Array.from(records.values());
+  cachedDataset = Array.from(records.values());
+  cachedDataVersion = dataVersion;
+  cachedSnapshot = null;
+  cachedSnapshotVersion = -1;
+  return cachedDataset;
 }
 
-export function getUnifiedDatasetStats(): DatasetSnapshot {
-  const dataset = buildUnifiedDataset();
+export function buildUnifiedDataset(): UnifiedTrainingRecord[] {
+  return rebuildIfDirty();
+}
+
+function computeSnapshotFromDataset(dataset: UnifiedTrainingRecord[]): DatasetSnapshot {
+  if (cachedSnapshot !== null && cachedSnapshotVersion === dataVersion) {
+    return cachedSnapshot;
+  }
+
   const sourceBreakdown: Record<string, number> = {};
   const tierBreakdown: Record<string, number> = {};
   let withPhysics = 0;
@@ -181,6 +203,15 @@ export function getUnifiedDatasetStats(): DatasetSnapshot {
     snapshotTimestamp: Date.now(),
   };
 
+  cachedSnapshot = snapshot;
+  cachedSnapshotVersion = dataVersion;
+  return snapshot;
+}
+
+export function getUnifiedDatasetStats(): DatasetSnapshot {
+  const dataset = rebuildIfDirty();
+  const snapshot = computeSnapshotFromDataset(dataset);
+
   snapshotHistory.push(snapshot);
   if (snapshotHistory.length > MAX_SNAPSHOTS) {
     snapshotHistory.splice(0, snapshotHistory.length - MAX_SNAPSHOTS);
@@ -211,7 +242,7 @@ export function getUnifiedDatasetForLLM(): string {
 export function getTrainingSlice(
   filter?: { minTc?: number; maxTc?: number; source?: string; tier?: string; requirePhysics?: boolean }
 ): UnifiedTrainingRecord[] {
-  let dataset = buildUnifiedDataset();
+  let dataset = rebuildIfDirty();
   if (filter) {
     if (filter.minTc !== undefined) dataset = dataset.filter(r => r.Tc >= filter.minTc!);
     if (filter.maxTc !== undefined) dataset = dataset.filter(r => r.Tc <= filter.maxTc!);
