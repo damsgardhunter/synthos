@@ -829,6 +829,7 @@ function updateTempo() {
   }
   if (prevTempo !== engineTempo) {
     setEngineTempo(engineTempo);
+    rlAgent.setEngineTempo(engineTempo);
     broadcast("tempoChange", { tempo: engineTempo, intervalMs: cycleIntervalMs });
     if (cycleIntervalMs < prevInterval && cycleTimer && state === "running") {
       clearTimeout(cycleTimer);
@@ -4938,6 +4939,14 @@ async function runAutonomousFastPath() {
   broadcast("taskStart", { task: "Autonomous Screening" });
 
   try {
+    let lastRetrainDatasetSize = 277;
+    try {
+      const { getSchedulerStats } = require("./retrain-scheduler");
+      const stats = getSchedulerStats();
+      if (stats.state.lastRetrainDatasetSize > 0) {
+        lastRetrainDatasetSize = stats.state.lastRetrainDatasetSize;
+      }
+    } catch {}
     const rlState = {
       bestTc: autonomousBestTc || (previousCycleMetrics?.bestTc ?? 0),
       avgRecentTc: previousCycleMetrics?.bestTc ?? 0,
@@ -4947,6 +4956,7 @@ async function runAutonomousFastPath() {
       explorationBudgetUsed: autonomousTotalScreened / Math.max(1, autonomousTotalScreened + 1000),
       elementSuccessEntropy: 0.5,
       cycleNumber: cycleCount,
+      lastRetrainDatasetSize,
     };
 
     const rlAction = rlAgent.selectAction(rlState);

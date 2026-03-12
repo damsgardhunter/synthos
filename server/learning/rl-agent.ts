@@ -82,6 +82,7 @@ interface RLState {
   explorationBudgetUsed: number;
   elementSuccessEntropy: number;
   cycleNumber: number;
+  lastRetrainDatasetSize?: number;
 }
 
 const PNICTOGEN_ELEMENTS = new Set(["N", "P", "As", "Sb", "Bi"]);
@@ -395,6 +396,9 @@ function sampleFromDistribution(probs: number[]): number {
 }
 
 function stateToFeatures(state: RLState): number[] {
+  const datasetStaleness = state.lastRetrainDatasetSize !== undefined
+    ? Math.min(1, state.lastRetrainDatasetSize / 2000)
+    : 0.5;
   return [
     state.bestTc / 400,
     state.avgRecentTc / 200,
@@ -404,6 +408,7 @@ function stateToFeatures(state: RLState): number[] {
     state.explorationBudgetUsed,
     state.elementSuccessEntropy,
     Math.min(1, state.cycleNumber / 5000),
+    datasetStaleness,
   ];
 }
 
@@ -423,7 +428,10 @@ function computePhysicsPrincipleReward(context: PhysicsAwareRewardContext): numb
     if (context.metallicity >= 0.5) {
       reward += 0.2 * context.metallicity;
     } else if (context.metallicity < 0.2) {
-      reward -= 0.3;
+      const dopedInsulatorFamilies = new Set(["oxide-perovskite", "cuprate", "nickelate"]);
+      if (!context.chemicalFamily || !dopedInsulatorFamilies.has(context.chemicalFamily)) {
+        reward -= 0.3;
+      }
     }
   }
 
@@ -501,6 +509,7 @@ export class RLChemicalSpaceAgent {
   private gamma = 0.99;
   private epsilon = 0.15;
   private epsilonDecay = 0.9995;
+  private baseEpsilonDecay = 0.9995;
   private minEpsilon = 0.05;
   private temperature = 1.0;
   private temperatureDecay = 0.999;
@@ -561,7 +570,7 @@ export class RLChemicalSpaceAgent {
     this.policy.layeringDimension[1] = 0.25;
     this.policy.layeringDimension[3] = 0.1;
 
-    this.policy.hydrogenDensity[0] = 0.0;
+    this.policy.hydrogenDensity[0] = 0.05;
     this.policy.hydrogenDensity[2] = 0.2;
     this.policy.hydrogenDensity[3] = 0.3;
 
@@ -581,6 +590,16 @@ export class RLChemicalSpaceAgent {
     for (const prior of KNOWN_PAIR_PRIORS) {
       const key = this.makeElementPairKey(prior.el1, prior.el2);
       this.policy.elementPairSpecific.set(key, prior.bias);
+    }
+  }
+
+  setEngineTempo(tempo: string): void {
+    if (tempo === "excited") {
+      this.epsilonDecay = 0.995;
+    } else if (tempo === "contemplating") {
+      this.epsilonDecay = 0.9999;
+    } else {
+      this.epsilonDecay = this.baseEpsilonDecay;
     }
   }
 
@@ -897,7 +916,10 @@ export class RLChemicalSpaceAgent {
       this.replayBatch(32);
     }
 
-    this.epsilon = Math.max(this.minEpsilon, this.epsilon * this.epsilonDecay);
+    const stateFeats = stateToFeatures(state);
+    const staleness = stateFeats[8];
+    const stalenessBoost = staleness < 0.3 ? 0.02 : 0;
+    this.epsilon = Math.max(this.minEpsilon, (this.epsilon + stalenessBoost) * this.epsilonDecay);
     this.temperature = Math.max(this.minTemperature, this.temperature * this.temperatureDecay);
     this.totalUpdates++;
   }
