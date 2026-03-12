@@ -5,6 +5,7 @@ import {
   isRareEarth,
   isActinide,
 } from "./elemental-data";
+import { predictStructure } from "../crystal/structure-predictor-ml";
 
 export interface SlaterKosterParams {
   ssSigma: number;
@@ -116,32 +117,33 @@ function getSlaterKosterParams(el1: string, el2: string, distance: number): Slat
   const r2 = d2 ? d2.atomicRadius / 100 : 1.5;
   const r0 = (r1 + r2) * 0.9;
 
-  const decay = Math.exp(-1.5 * (distance / r0 - 1.0));
+  const distRatio = distance / r0 - 1.0;
+  const ssDecay = Math.exp(-1.2 * distRatio);
+  const spDecay = Math.exp(-1.4 * distRatio);
+  const ppDecay = Math.exp(-1.6 * distRatio);
+  const sdDecay = Math.exp(-1.6 * distRatio);
+  const pdDecay = Math.exp(-1.8 * distRatio);
+  const ddDecay = Math.exp(-2.0 * distRatio);
 
   const ve1 = d1 ? d1.valenceElectrons : 4;
   const ve2 = d2 ? d2.valenceElectrons : 4;
   const veAvg = (ve1 + ve2) / 2;
 
-  const baseSsSigma = -1.5 * decay;
-  const baseSpSigma = 1.8 * decay;
-  const basePpSigma = 2.5 * decay;
-  const basePpPi = -0.8 * decay;
-
-  const hasDElectrons = (isTransitionMetal(el1) || isRareEarth(el1) || isActinide(el1))
-    || (isTransitionMetal(el2) || isRareEarth(el2) || isActinide(el2));
-  const dScale = hasDElectrons ? 1.0 : 0.1;
+  const hasD1 = isTransitionMetal(el1) || isRareEarth(el1) || isActinide(el1);
+  const hasD2 = isTransitionMetal(el2) || isRareEarth(el2) || isActinide(el2);
+  const eitherHasD = hasD1 || hasD2;
 
   return {
-    ssSigma: baseSsSigma,
-    spSigma: baseSpSigma,
-    ppSigma: basePpSigma,
-    ppPi: basePpPi,
-    sdSigma: -1.2 * decay * dScale,
-    pdSigma: -1.5 * decay * dScale,
-    pdPi: 0.7 * decay * dScale,
-    ddSigma: -2.0 * decay * dScale * (veAvg > 4 ? 1.2 : 0.8),
-    ddPi: 1.2 * decay * dScale,
-    ddDelta: -0.4 * decay * dScale,
+    ssSigma: -1.5 * ssDecay,
+    spSigma: 1.8 * spDecay,
+    ppSigma: 2.5 * ppDecay,
+    ppPi: -0.8 * ppDecay,
+    sdSigma: eitherHasD ? -1.2 * sdDecay : 0,
+    pdSigma: eitherHasD ? -1.5 * pdDecay : 0,
+    pdPi: eitherHasD ? 0.7 * pdDecay : 0,
+    ddSigma: (hasD1 && hasD2) ? -2.0 * ddDecay * (veAvg > 4 ? 1.2 : 0.8) : 0,
+    ddPi: (hasD1 && hasD2) ? 1.2 * ddDecay : 0,
+    ddDelta: (hasD1 && hasD2) ? -0.4 * ddDecay : 0,
   };
 }
 
@@ -208,7 +210,22 @@ function getHighSymmetryPath(latticeType: string): { points: number[][]; labels:
   }
 }
 
-function guessLatticeType(elements: string[]): string {
+const CRYSTAL_SYSTEM_TO_LATTICE: Record<string, string> = {
+  cubic: "cubic", tetragonal: "tetragonal", hexagonal: "hexagonal",
+  trigonal: "hexagonal", orthorhombic: "cubic", monoclinic: "cubic", triclinic: "cubic",
+};
+
+function guessLatticeType(elements: string[], formula?: string): string {
+  if (formula) {
+    try {
+      const pred = predictStructure(formula);
+      if (pred && pred.confidence > 0.3 && pred.crystalSystem?.predicted) {
+        const mapped = CRYSTAL_SYSTEM_TO_LATTICE[pred.crystalSystem.predicted];
+        if (mapped) return mapped;
+      }
+    } catch {}
+  }
+
   if (elements.length === 1) {
     const el = elements[0];
     if (["Fe", "Cr", "V", "Nb", "Mo", "W", "Ta", "Na", "K", "Li", "Ba"].includes(el)) return "bcc";
@@ -216,12 +233,21 @@ function guessLatticeType(elements: string[]): string {
     if (["Ti", "Zr", "Hf", "Co", "Zn", "Mg", "Be", "Y", "Sc"].includes(el)) return "hexagonal";
     if (["Sn", "In"].includes(el)) return "tetragonal";
   }
+
+  const hasCu = elements.includes("Cu");
+  const hasNi = elements.includes("Ni");
+  const hasO = elements.includes("O");
+  const hasFe = elements.includes("Fe");
+  const hasAsPnictide = elements.includes("As") || elements.includes("Se") || elements.includes("P");
+
+  if (hasCu && hasO && elements.length >= 3) return "tetragonal";
+  if (hasNi && hasO && elements.length >= 3) return "tetragonal";
+  if (hasFe && hasAsPnictide) return "tetragonal";
+
   if (elements.includes("B") && elements.some(e => isTransitionMetal(e) || isRareEarth(e))) return "hexagonal";
-  if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3) return "tetragonal";
-  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se"))) return "tetragonal";
-  if (elements.length >= 3 && elements.includes("O") &&
-    elements.some(e => ["La", "Sr", "Ba", "Ca", "Y", "Nd", "Pr"].includes(e))) return "tetragonal";
-  if (elements.length >= 3 && elements.includes("O")) return "cubic";
+  if (elements.length >= 3 && hasO &&
+    elements.some(e => ["La", "Sr", "Ba", "Ca", "Y", "Nd", "Pr", "Sm", "Gd"].includes(e))) return "tetragonal";
+  if (elements.length >= 3 && hasO) return "cubic";
   return "cubic";
 }
 
@@ -632,7 +658,7 @@ export function computeTightBindingBands(
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
 
-  const latticeType = guessLatticeType(elements);
+  const latticeType = guessLatticeType(elements, formula);
   const path = getHighSymmetryPath(latticeType);
   const nPerSegment = 30;
   const { kPoints, kLabels } = interpolateKPoints(path, nPerSegment);
