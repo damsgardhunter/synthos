@@ -417,19 +417,25 @@ export function getClusterExplorationBias(): Record<string, number> {
 }
 
 export function samplePressureFromClusters(count: number = 10): number[] {
-  const bias = getClusterExplorationBias();
-  const weights = Object.values(bias);
-
-  if (weights.length === 0) {
+  const merged = getMergedClusters();
+  if (merged.length === 0) {
     return Array.from({ length: count }, () => Math.round(Math.random() * 350));
   }
+
+  const rawWeights = merged.map(c => c.weight);
+  const totalWeight = rawWeights.reduce((s, w) => s + w, 0);
+  if (totalWeight <= 0) {
+    return Array.from({ length: count }, () => Math.round(Math.random() * 350));
+  }
+
+  const normalizedWeights = rawWeights.map(w => w / totalWeight);
 
   const samples: number[] = [];
   for (let i = 0; i < count; i++) {
     let r = Math.random();
-    let selectedIdx = weights.length - 1;
-    for (let j = 0; j < weights.length; j++) {
-      r -= weights[j];
+    let selectedIdx = normalizedWeights.length - 1;
+    for (let j = 0; j < normalizedWeights.length; j++) {
+      r -= normalizedWeights[j];
       if (r <= 0) {
         selectedIdx = j;
         break;
