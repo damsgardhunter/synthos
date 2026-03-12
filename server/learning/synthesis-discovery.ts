@@ -1,5 +1,5 @@
 import { getElementData, isTransitionMetal, isRareEarth, isActinide } from "./elemental-data";
-import { classifyFamily, parseFormulaCounts } from "./utils";
+import { classifyFamily, parseFormulaCounts, normalizeFormula } from "./utils";
 import { computeSurrogateFitness, getCurrentFitnessWeights, getExplorationWeight } from "./surrogate-fitness";
 import type { TopologicalAnalysis } from "../physics/topology-engine";
 import type { FermiSurfaceResult } from "../physics/fermi-surface-engine";
@@ -290,6 +290,25 @@ const VERIFICATION_STAGE_MULTIPLIERS: Record<string, number> = {
   surrogate: 0.3,
 };
 
+const FAMILY_SUCCESS_TC_THRESHOLDS: Record<string, number> = {
+  Hydride: 100,
+  Cuprate: 50,
+  Nickelate: 30,
+  Pnictide: 20,
+  Bismuthate: 10,
+  Boride: 10,
+  Chalcogenide: 5,
+  Intermetallic: 5,
+  HeavyFermion: 0.5,
+  Organic: 2,
+  Elemental: 2,
+};
+
+function getFamilySuccessThreshold(formula: string, materialClass: string): number {
+  const family = classifyFamily(formula) || materialClass;
+  return FAMILY_SUCCESS_TC_THRESHOLDS[family] ?? 20;
+}
+
 export function rewardStructuralMotif(
   formula: string,
   materialClass: string,
@@ -298,7 +317,8 @@ export function rewardStructuralMotif(
 ): void {
   initMotifRewards();
   const motifs = classifyStructuralMotif(formula, materialClass);
-  const isSuccess = result.tc > 20 && result.stable && result.formationEnergy < 0.5;
+  const successThreshold = getFamilySuccessThreshold(formula, materialClass);
+  const isSuccess = result.tc > successThreshold && result.stable && result.formationEnergy < 0.5;
   const stageMult = VERIFICATION_STAGE_MULTIPLIERS[verificationStage] ?? 1.0;
 
   for (const motif of motifs) {
@@ -467,6 +487,9 @@ function getCompositionBias(formula: string): number {
   return Math.max(-0.3, Math.min(0.3, bias / motifCount));
 }
 
+const STAGNATION_BOOST_FACTOR = 1.2;
+const STAGNATION_MAX_RATE = 0.35;
+
 function adaptMutationRate(currentBestFitness: number): number {
   if (currentBestFitness > adaptiveMutationState.lastBestFitness + 0.005) {
     adaptiveMutationState.generationsWithoutImprovement = 0;
@@ -479,8 +502,8 @@ function adaptMutationRate(currentBestFitness: number): number {
     adaptiveMutationState.generationsWithoutImprovement++;
     if (adaptiveMutationState.generationsWithoutImprovement >= adaptiveMutationState.stagnationThreshold) {
       adaptiveMutationState.currentRate = Math.min(
-        adaptiveMutationState.maxRate,
-        adaptiveMutationState.currentRate * 1.5
+        STAGNATION_MAX_RATE,
+        adaptiveMutationState.currentRate * STAGNATION_BOOST_FACTOR
       );
       adaptiveMutationState.generationsWithoutImprovement = 0;
       adaptiveMutationState.totalAdaptations++;
@@ -504,14 +527,15 @@ function selectParentsByFitness(
     pool.push(nonElite.splice(idx, 1)[0]);
   }
 
-  const totalFitness = pool.reduce((s, r) => s + Math.max(0.001, r.fitnessScore), 0);
+  const weights = pool.map(r => Math.max(0.001, r.fitnessScore));
+  const totalFitness = weights.reduce((s, w) => s + w, 0);
   const pick = (): NovelSynthesisRoute => {
     let r = Math.random() * totalFitness;
-    for (const individual of pool) {
-      r -= Math.max(0.001, individual.fitnessScore);
-      if (r <= 0) return individual;
+    for (let i = 0; i < pool.length; i++) {
+      r -= weights[i];
+      if (r <= 0) return pool[i];
     }
-    return pool[pool.length - 1];
+    return pool[0];
   };
 
   const p1 = pick();
@@ -551,7 +575,8 @@ const ELITE_ARCHIVE_SIZE = 5;
 const eliteArchive: NovelSynthesisRoute[] = [];
 
 function updateEliteArchive(route: NovelSynthesisRoute): void {
-  const existingIdx = eliteArchive.findIndex(r => r.formula === route.formula && r.id === route.id);
+  const normFormula = normalizeFormula(route.formula);
+  const existingIdx = eliteArchive.findIndex(r => normalizeFormula(r.formula) === normFormula);
   if (existingIdx >= 0) {
     if (route.fitnessScore > eliteArchive[existingIdx].fitnessScore) {
       eliteArchive[existingIdx] = route;
@@ -1148,6 +1173,45 @@ function buildRationale(genome: SynthesisGenome, insights: MultiEngineInsights):
   return rationale;
 }
 
+const VALENCE_OXIDATION_STATES: Record<string, number[]> = {
+  H: [1, -1], Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  B: [3], Al: [3], Ga: [3], In: [3], Tl: [1, 3],
+  C: [-4, 4], Si: [4, -4], Ge: [4], Sn: [2, 4], Pb: [2, 4],
+  N: [-3, 3, 5], P: [-3, 3, 5], As: [-3, 3, 5], Sb: [-3, 3, 5], Bi: [3, 5],
+  O: [-2], S: [-2, 4, 6], Se: [-2, 4, 6], Te: [-2, 4, 6],
+  F: [-1], Cl: [-1], Br: [-1], I: [-1],
+  Ti: [2, 3, 4], V: [2, 3, 4, 5], Cr: [2, 3, 6], Mn: [2, 3, 4, 7],
+  Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2, 3], Zn: [2],
+  Zr: [4], Nb: [3, 5], Mo: [4, 6], Ru: [3, 4], Rh: [3], Pd: [2, 4],
+  Ag: [1], Hf: [4], Ta: [5], W: [4, 6], Re: [4, 7],
+  Os: [4, 8], Ir: [3, 4], Pt: [2, 4], Au: [1, 3],
+  Sc: [3], Y: [3], La: [3], Ce: [3, 4], Pr: [3], Nd: [3], Sm: [3],
+  Eu: [2, 3], Gd: [3], Lu: [3], Th: [4], U: [3, 4, 5, 6],
+};
+
+function computeValenceSumError(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  if (elements.length < 2) return 0;
+
+  let bestError = Infinity;
+  const statesPerEl = elements.map(el => VALENCE_OXIDATION_STATES[el] ?? [2, 3, -2]);
+
+  function search(idx: number, runningSum: number): void {
+    if (idx === elements.length) {
+      bestError = Math.min(bestError, Math.abs(runningSum));
+      return;
+    }
+    if (bestError === 0) return;
+    for (const ox of statesPerEl[idx]) {
+      search(idx + 1, runningSum + ox * counts[elements[idx]]);
+    }
+  }
+  search(0, 0);
+  return bestError === Infinity ? 2.0 : bestError;
+}
+
 function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, bestKnownTc: number = 0): NovelSynthesisRoute {
   const steps = genomeToSteps(genome, insights);
   const sv = genomeToSynthesisVector(genome, insights);
@@ -1167,6 +1231,11 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
       feasibilityScore = Math.min(1, feasibilityScore + 0.05);
     }
   } catch {}
+
+  const vse = computeValenceSumError(insights.formula);
+  if (vse > 1.0) {
+    feasibilityScore *= Math.max(0.1, 1 - (vse - 1.0) * 0.3);
+  }
 
   feasibilityScore = Math.max(0, Math.min(1, feasibilityScore));
   const noveltyScore = computeNoveltyScore(genome, insights);
