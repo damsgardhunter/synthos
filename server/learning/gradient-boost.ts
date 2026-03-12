@@ -1157,6 +1157,7 @@ function applicationAwareScore(tc: number, application?: string | null): number 
 }
 
 export function gbPredict(features: MLFeatureVector, formula?: string): { tcPredicted: number; score: number; reasoning: string[] } {
+  const t0 = Date.now();
   const model = getTrainedModel();
   const x = featureVectorToArray(features, formula);
   const tcPredicted = predictWithModel(model, x);
@@ -1193,6 +1194,8 @@ export function gbPredict(features: MLFeatureVector, formula?: string): { tcPred
   score = Math.max(0.01, Math.min(0.95, score));
 
   const safeTc = Number.isFinite(tcPredicted) ? Math.min(350, Math.max(0, Math.round(tcPredicted * 10) / 10)) : 0;
+  const elapsed = Date.now() - t0;
+  try { const { recordInferenceTime } = require("./model-diagnostics"); recordInferenceTime("xgboost", elapsed); } catch {}
   return { tcPredicted: safeTc, score, reasoning };
 }
 

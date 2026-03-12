@@ -2998,6 +2998,7 @@ export function getGNNPrediction(formula: string, structure?: any, prototype?: s
 
 
 export function gnnPredictWithUncertainty(formula: string, prototype?: string, pressureGpa?: number): GNNPredictionWithUncertainty {
+  const t0 = Date.now();
   const ensembleModels = getEnsembleModels();
   const predictions: GNNPrediction[] = [];
   const perModelMeans: { tc: number; fe: number; lambda: number; bg: number }[] = [];
@@ -3139,7 +3140,7 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
   };
 
   const s = (v: number, fb = 0) => Number.isFinite(v) ? v : fb;
-  return {
+  const result = {
     tc: Math.round(s(meanTc) * 10) / 10,
     formationEnergy: Math.round(s(meanFE) * 1000) / 1000,
     lambda: Math.round(s(meanLambda) * 1000) / 1000,
@@ -3151,12 +3152,15 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
     phononStability: phononStable,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, s(confidenceAdjusted, 0.5))) * 100) / 100,
     latentDistance: Math.round(s(latentDist) * 1000) / 1000,
-    tcCI95: [Math.round(s(tcCI95Lower) * 10) / 10, Math.round(s(tcCI95Upper) * 10) / 10],
-    lambdaCI95: [Math.round(s(lambdaCI95Lower) * 1000) / 1000, Math.round(s(lambdaCI95Upper) * 1000) / 1000],
+    tcCI95: [Math.round(s(tcCI95Lower) * 10) / 10, Math.round(s(tcCI95Upper) * 10) / 10] as [number, number],
+    lambdaCI95: [Math.round(s(lambdaCI95Lower) * 1000) / 1000, Math.round(s(lambdaCI95Upper) * 1000) / 1000] as [number, number],
     epistemicUncertainty: Math.round(s(Math.sqrt(epistemicTcVar)) * 100) / 100,
     aleatoricUncertainty: Math.round(s(Math.sqrt(aleatoricTcVar)) * 100) / 100,
     totalStd: Math.round(s(totalTcStd) * 100) / 100,
   };
+  const elapsed = Date.now() - t0;
+  try { const { recordInferenceTime } = require("./model-diagnostics"); recordInferenceTime("gnn", elapsed); } catch {}
+  return result;
 }
 
 export function getUncertaintyDecomposition(formula: string): UncertaintyBreakdown {
