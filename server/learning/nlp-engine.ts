@@ -16,8 +16,8 @@ const PHYSICS_RULES: { pattern: RegExp; valid: boolean; reason: string }[] = [
   { pattern: /(?:negative|lower)\s+band\s*gap.*(?:metal|conduct)/i, valid: false, reason: "Band gap cannot be negative" },
   { pattern: /(?:superconducti|superconduct).*(?:increas|higher).*(?:temperatur|heat)/i, valid: false, reason: "Superconductivity is suppressed, not enhanced, by higher temperature" },
   { pattern: /(?:insulator|semiconductor).*(?:zero|no)\s+(?:resistance|resistiv)/i, valid: false, reason: "Insulators cannot have zero resistance" },
-  { pattern: /formation\s+energy.*(?:enhance|increas|boost|improv|correlat|predict|indicat).*(?:superconduct|tc|critical\s+temp|pairing)/i, valid: false, reason: "Formation energy measures thermodynamic stability, NOT superconducting tendency" },
-  { pattern: /(?:low|negative|lower)\s+formation\s+energy.*(?:enhance|favor|promot|lead).*(?:superconduct|tc|higher\s+tc)/i, valid: false, reason: "Formation energy does not predict superconductivity" },
+  { pattern: /(?:lower|negative|more\s+negative)\s+formation\s+energy.*(?:directly|linearly)\s+(?:correlat|predict|determin).*(?:higher|increased)\s+tc/i, valid: false, reason: "Formation energy does not linearly predict Tc" },
+  { pattern: /(?:low|negative|lower)\s+formation\s+energy.*(?:enhance|boost|improv).*(?:superconduct|tc|critical\s+temp)/i, valid: false, reason: "Formation energy does not enhance superconductivity" },
 ];
 
 const HC2_PATTERN = /Hc2\s*[=:>]\s*(\d+)/i;
@@ -406,14 +406,32 @@ async function getCachedDatasetStats(emit: EventEmitter, materials: Material[], 
   return { dataset, dataStats: _datasetStatsCache!.stats };
 }
 
-export async function analyzeBondingPatterns(
-  emit: EventEmitter,
-  materials: Material[]
-): Promise<string[]> {
-  if (materials.length === 0) return [];
+let _lastConceptualResult: { bondingInsights: string[]; predictionInsights: string[]; timestamp: number } | null = null;
+const CONCEPTUAL_CACHE_TTL = 3 * 60 * 1000;
 
-  const cached = await getCachedDatasetStats(emit, materials, "phase-3");
-  if (!cached) return [];
+function filterInsights(rawInsights: string[], emit: EventEmitter, phase: string): string[] {
+  return rawInsights.map(s => sanitizeForbiddenWords(s)).filter(insight => {
+    const physCheck = validatePhysicsRules(insight);
+    if (!physCheck.valid) {
+      emit("log", { phase, event: "Insight rejected (physics violation)", detail: `"${insight}" — ${physCheck.reason}`, dataSource: "Physics Validator" });
+      return false;
+    }
+    const qualCheck = isInsightSpecificEnough(insight);
+    if (!qualCheck.valid) {
+      emit("log", { phase, event: "Insight rejected (low quality)", detail: `"${insight}" — ${qualCheck.reason}`, dataSource: "Quality Filter" });
+      return false;
+    }
+    return true;
+  });
+}
+
+async function runConceptualAnalysis(emit: EventEmitter, materials: Material[]): Promise<{ bondingInsights: string[]; predictionInsights: string[] }> {
+  if (_lastConceptualResult && Date.now() - _lastConceptualResult.timestamp < CONCEPTUAL_CACHE_TTL) {
+    return _lastConceptualResult;
+  }
+
+  const cached = await getCachedDatasetStats(emit, materials, "phase-3/5");
+  if (!cached) return { bondingInsights: [], predictionInsights: [] };
   const { dataset, dataStats } = cached;
 
   let scCorrelations = "";
@@ -431,8 +449,8 @@ export async function analyzeBondingPatterns(
 
   emit("log", {
     phase: "phase-3",
-    event: "Bonding statistical analysis started",
-    detail: `Analyzing cross-property correlations across ${dataset.length} materials. ${dataStats.split("\n")[0] || ""}`,
+    event: "Conceptual analysis started",
+    detail: `Unified bonding + prediction analysis across ${dataset.length} materials. ${dataStats.split("\n")[0] || ""}`,
     dataSource: "Statistical Analysis",
   });
 
@@ -443,33 +461,30 @@ export async function analyzeBondingPatterns(
         {
           role: "system",
           content:
-            `You are a condensed matter physics AI specializing in superconductor discovery. Your task is to identify CROSS-PROPERTY CORRELATIONS and PHYSICS RELATIONSHIPS from the provided correlation data.
+            `You are a condensed matter physics AI specializing in superconductor discovery. Produce TWO types of insights from the correlation data:
+
+1. "bonding_insights": Cross-property CORRELATIONS describing relationships between physical properties (e.g., "Higher electron-phonon coupling λ correlates with elevated Tc in hydrides with r=0.78, p<0.001").
+2. "prediction_insights": PREDICTIVE RULES that can forecast unknown material behavior (e.g., "Low band gap metals with λ>1.5 predict Tc above 40K in boride families").
 
 CRITICAL INSTRUCTIONS:
-- Do NOT produce dataset statistics or summaries (e.g., "85% of materials have...", "the average band gap is...").
-- Only produce insights about RELATIONSHIPS BETWEEN PROPERTIES (e.g., "Higher electron-phonon coupling λ correlates with elevated Tc in hydrides").
-- Each insight must describe a correlation, trend, or causal relationship between two or more physical properties.
-- Reference specific material families, dimensionalities, or pairing mechanisms when the data supports it.
-- Include quantitative evidence (correlation coefficients, Tc values, p-values) from the provided statistics.
-- Only cite correlations that are statistically significant (p < 0.05). Ignore n.s. (not significant) correlations.
-- VARY your insight topics. Rotate through these categories:
-  * Phonon softening: How soft modes or anharmonic phonons in specific structures enhance Tc
-  * Fermi surface nesting: Nesting vectors, topology effects on pairing strength
-  * Charge transfer layers: How charge reservoir layers affect carrier density and Tc
-  * Structural motifs: Role of octahedral tilts, layering, cage structures, or rattler atoms
-  * Electron density redistribution: Charge localization, orbital hybridization effects on DOS
-  * Spin-orbit coupling: SOC effects on band topology and unconventional pairing
-  * Pressure-dependent phonon hardening: How lattice stiffening under pressure shifts omega_log
+- Do NOT produce dataset statistics or summaries.
+- Each insight must describe a relationship between two or more physical properties.
+- Reference specific material families, dimensionalities, or pairing mechanisms when data supports it.
+- Include quantitative evidence (r values, p-values, Tc thresholds) from the provided statistics.
+- Only cite correlations that are statistically significant (p < 0.05). Ignore n.s. correlations.
+- VARY topics across: phonon softening, Fermi surface nesting, charge transfer layers, structural motifs, electron density redistribution, spin-orbit coupling, pressure-dependent phonon hardening, Debye/bulk modulus ratios.
 
 PHYSICS RULES:
-- Lower (more negative) formation energy = MORE stable
-- Band gap cannot be negative
-- Superconductivity occurs at LOW temperatures
-- Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
-- Formation energy measures THERMODYNAMIC STABILITY only. It does NOT predict or enhance superconductivity or Tc. Never claim formation energy correlates with Tc or superconducting properties.
-- Hc2 (upper critical field) for conventional superconductors is bounded by ~2*Tc Tesla (WHH limit). For hydrides/cuprates the limit is ~200T.
+- Lower (more negative) formation energy = MORE stable.
+- Formation energy measures THERMODYNAMIC STABILITY only. It does NOT linearly predict or enhance Tc. However, metastability (slightly positive formation energy above the convex hull) can indicate structural instabilities that may favor strong electron-phonon coupling in hydrides and cage compounds.
+- Band gap >= 0; metals have near-zero band gap.
+- Superconductivity occurs at LOW temperatures.
+- Higher λ generally predicts higher Tc in conventional superconductors.
+- Hc2 limit: ~100T conventional, ~200T for hydrides/cuprates.
+- Dimensionality affects pairing: 2D materials can have enhanced Tc via nesting.
+- Better Tc predictors: DOS at Fermi level, phonon frequency, λ, dimensionality.
 
-Return a JSON object with a single key 'insights' containing an array of 3-5 concise cross-property correlation statements (each under 120 characters).`,
+Return a JSON object with 'bonding_insights' (array of 3-5 correlation statements, each under 120 chars) and 'prediction_insights' (array of 3-5 predictive rules, each under 120 chars).`,
         },
         {
           role: "user",
@@ -477,68 +492,52 @@ Return a JSON object with a single key 'insights' containing an array of 3-5 con
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 500,
+      max_completion_tokens: 800,
     });
 
     const content = response.choices[0]?.message?.content;
     if (!content) {
       emit("log", { phase: "phase-3", event: "NLP returned empty response", detail: "No content in OpenAI response", dataSource: "OpenAI NLP" });
-      return [];
+      return { bondingInsights: [], predictionInsights: [] };
     }
 
-    let parsed: { insights: string[] };
+    let parsed: { bonding_insights?: string[]; prediction_insights?: string[] };
     try {
       parsed = JSON.parse(content);
     } catch (parseErr) {
       emit("log", { phase: "phase-3", event: "NLP JSON parse error", detail: content.slice(0, 200), dataSource: "OpenAI NLP" });
-      return [];
+      return { bondingInsights: [], predictionInsights: [] };
     }
 
-    const rawInsights = (parsed.insights ?? []).map(s => sanitizeForbiddenWords(s));
-    const insights = rawInsights.filter(insight => {
-      const physCheck = validatePhysicsRules(insight);
-      if (!physCheck.valid) {
-        emit("log", {
-          phase: "phase-3",
-          event: "Insight rejected (physics violation)",
-          detail: `"${insight}" — ${physCheck.reason}`,
-          dataSource: "Physics Validator",
-        });
-        return false;
-      }
-      const qualCheck = isInsightSpecificEnough(insight);
-      if (!qualCheck.valid) {
-        emit("log", {
-          phase: "phase-3",
-          event: "Insight rejected (low quality)",
-          detail: `"${insight}" — ${qualCheck.reason}`,
-          dataSource: "Quality Filter",
-        });
-        return false;
-      }
-      return true;
-    });
+    const bondingInsights = filterInsights(parsed.bonding_insights ?? [], emit, "phase-3");
+    const predictionInsights = filterInsights(parsed.prediction_insights ?? [], emit, "phase-5");
 
-    if (insights.length > 0) {
-      emit("log", {
-        phase: "phase-3",
-        event: "Bonding patterns discovered",
-        detail: insights[0],
-        dataSource: "Statistical Analysis",
-      });
-      emit("insight", { phase: 3, insights });
-    }
-
-    return insights;
+    _lastConceptualResult = { bondingInsights, predictionInsights, timestamp: Date.now() };
+    return _lastConceptualResult;
   } catch (err: any) {
     emit("log", {
       phase: "phase-3",
-      event: "NLP analysis error",
+      event: "Conceptual analysis error",
       detail: err.message?.slice(0, 200) || "Unknown error",
       dataSource: "Statistical Analysis",
     });
-    return [];
+    return { bondingInsights: [], predictionInsights: [] };
   }
+}
+
+export async function analyzeBondingPatterns(
+  emit: EventEmitter,
+  materials: Material[]
+): Promise<string[]> {
+  if (materials.length === 0) return [];
+  const result = await runConceptualAnalysis(emit, materials);
+  const insights = result.bondingInsights;
+
+  if (insights.length > 0) {
+    emit("log", { phase: "phase-3", event: "Bonding patterns discovered", detail: insights[0], dataSource: "Statistical Analysis" });
+    emit("insight", { phase: 3, insights });
+  }
+  return insights;
 }
 
 export async function analyzePropertyPredictionPatterns(
@@ -546,134 +545,14 @@ export async function analyzePropertyPredictionPatterns(
   materials: Material[]
 ): Promise<string[]> {
   if (materials.length === 0) return [];
+  const result = await runConceptualAnalysis(emit, materials);
+  const insights = result.predictionInsights;
 
-  const cached = await getCachedDatasetStats(emit, materials, "phase-5");
-  if (!cached) return [];
-  const { dataset, dataStats } = cached;
-
-  let scCorrelations = "";
-  try {
-    const candidates = await storage.getSuperconductorCandidates(500);
-    scCorrelations = computeSuperconductorCorrelations(candidates);
-  } catch (err: any) {
-    emit("log", {
-      phase: "phase-5",
-      event: "Superconductor correlation fetch failed",
-      detail: `Proceeding without SC correlations: ${err?.message?.slice(0, 150) || "unknown error"}`,
-      dataSource: "Statistical Analysis",
-    });
+  if (insights.length > 0) {
+    emit("log", { phase: "phase-5", event: "Prediction patterns discovered", detail: insights[0], dataSource: "Statistical Analysis" });
+    emit("insight", { phase: 5, insights });
   }
-
-  emit("log", {
-    phase: "phase-5",
-    event: "Property prediction statistical analysis started",
-    detail: `Analyzing cross-property correlations across ${dataset.length} materials for predictive rules. ${dataStats.split("\n")[0] || ""}`,
-    dataSource: "Statistical Analysis",
-  });
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            `You are a condensed matter physics AI specializing in superconductor property prediction. Your task is to derive PREDICTIVE RULES from cross-property correlations.
-
-CRITICAL INSTRUCTIONS:
-- Do NOT produce dataset statistics or summaries (e.g., "X% of materials have...", "average band gap is...").
-- Only produce insights about RELATIONSHIPS BETWEEN PROPERTIES that can predict unknown material behavior.
-- Each insight must be a predictive rule linking two or more physical properties (e.g., "Low band gap metals with λ>1.5 predict Tc above 40K in boride families").
-- Reference specific material families, element groups, or structural features when the data supports it.
-- Include quantitative thresholds from the correlation data.
-- Only cite correlations that are statistically significant (p < 0.05). Ignore n.s. (not significant) correlations.
-- VARY your insight topics across these physics categories:
-  * Phonon softening effects on Tc predictions
-  * Fermi surface nesting strength as a Tc predictor
-  * Charge transfer between structural layers and carrier doping
-  * Structural motifs (cages, layers, chains) that predict high lambda
-  * Electron density at bond critical points as stability predictor
-  * Atomic packing fraction effects on phonon spectrum
-  * Debye temperature / bulk modulus ratio as Tc screening metric
-
-PHYSICS RULES:
-- Lower (more negative) formation energy = MORE stable
-- Band gap is always >= 0; metals have near-zero band gap
-- Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
-- Dimensionality affects pairing: 2D materials can have enhanced Tc via nesting effects
-- Formation energy measures THERMODYNAMIC STABILITY only. It does NOT predict or correlate with superconductivity or Tc. Never generate rules linking formation energy to Tc or superconducting properties.
-- Better Tc predictors: density of states at Fermi level, phonon frequency, electron-phonon coupling λ, dimensionality.
-
-Return a JSON object with 'insights' (array of 3-5 concise predictive correlation rules, each under 120 chars) and 'applications' (array of objects with 'pattern' and 'targetProperty' keys).`,
-        },
-        {
-          role: "user",
-          content: `Cross-property correlation data (with significance levels):\n${dataStats}\n${scCorrelations}`,
-        },
-      ],
-      response_format: { type: "json_object" },
-      max_completion_tokens: 600,
-    });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      emit("log", { phase: "phase-5", event: "NLP returned empty response", detail: "No content in prediction response", dataSource: "Statistical Analysis" });
-      return [];
-    }
-
-    let parsed: { insights: string[]; applications?: { pattern: string; targetProperty: string }[] };
-    try {
-      parsed = JSON.parse(content);
-    } catch (parseErr) {
-      emit("log", { phase: "phase-5", event: "NLP JSON parse error", detail: content.slice(0, 200), dataSource: "Statistical Analysis" });
-      return [];
-    }
-
-    const rawInsights = (parsed.insights ?? []).map(s => sanitizeForbiddenWords(s));
-    const insights = rawInsights.filter(insight => {
-      const physCheck = validatePhysicsRules(insight);
-      if (!physCheck.valid) {
-        emit("log", {
-          phase: "phase-5",
-          event: "Insight rejected (physics violation)",
-          detail: `"${insight}" — ${physCheck.reason}`,
-          dataSource: "Physics Validator",
-        });
-        return false;
-      }
-      const qualCheck = isInsightSpecificEnough(insight);
-      if (!qualCheck.valid) {
-        emit("log", {
-          phase: "phase-5",
-          event: "Insight rejected (low quality)",
-          detail: `"${insight}" — ${qualCheck.reason}`,
-          dataSource: "Quality Filter",
-        });
-        return false;
-      }
-      return true;
-    });
-
-    if (insights.length > 0) {
-      emit("log", {
-        phase: "phase-5",
-        event: "Prediction patterns discovered",
-        detail: insights[0],
-        dataSource: "Statistical Analysis",
-      });
-      emit("insight", { phase: 5, insights });
-    }
-
-    return insights;
-  } catch (err: any) {
-    emit("log", {
-      phase: "phase-5",
-      event: "Property prediction error",
-      detail: err.message?.slice(0, 200) || "Unknown error",
-      dataSource: "Statistical Analysis",
-    });
-    return [];
-  }
+  return insights;
 }
 
 export async function classifyMaterialApplications(
@@ -686,18 +565,28 @@ export async function classifyMaterialApplications(
   try {
     const classified = await batchProcess(
       materials,
-      async (mat) => {
+      async (mat: any) => {
+        const props: string[] = [
+          `Material: ${mat.name} (${mat.formula})`,
+          `band gap: ${mat.bandGap ?? "unknown"} eV`,
+          `formation energy: ${mat.formationEnergy ?? "unknown"} eV/atom`,
+        ];
+        if (mat.predictedTc != null) props.push(`predicted Tc: ${mat.predictedTc} K`);
+        if (mat.stabilityScore != null) props.push(`stability: ${mat.stabilityScore}`);
+        if (mat.criticalCurrentDensity != null) props.push(`Jc: ${mat.criticalCurrentDensity} A/cm²`);
+        if (mat.electronPhononCoupling != null) props.push(`λ: ${mat.electronPhononCoupling}`);
+
         const response = await openai.chat.completions.create({
           model: "gpt-4o-mini",
           messages: [
             {
               role: "system",
               content:
-                'Classify this material into one application category: "energy", "aerospace", "electronics", "biomedical", "construction", or "catalysis". Return JSON with "category" key only.',
+                'Classify this material into one application category: "energy" (superconducting magnets, power cables, fusion), "aerospace" (lightweight structural, thermal barriers, SC sensors), "electronics" (semiconductors, quantum computing, SQUID), "biomedical" (MRI magnets, implants), "construction" (structural), or "catalysis" (surface chemistry, hydrogen evolution). Consider superconducting properties (Tc, Jc, λ) when classifying energy/aerospace/electronics applications. Return JSON with "category" key only.',
             },
             {
               role: "user",
-              content: `Material: ${mat.name} (${mat.formula}), band gap: ${mat.bandGap ?? "unknown"} eV, formation energy: ${mat.formationEnergy ?? "unknown"} eV/atom`,
+              content: props.join(", "),
             },
           ],
           response_format: { type: "json_object" },
