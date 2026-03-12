@@ -88,6 +88,50 @@ const VARIABLE_TO_GENERATOR_MAP: Record<string, string[]> = {
   band_flatness: ["motif_diffusion", "rl"],
 };
 
+const MAX_FAMILY_BOOST = 1.5;
+const MAX_ELEMENT_BOOST = 1.0;
+const MAX_MOTIF_BOOST = 1.2;
+const MAX_GENERATOR_BOOST = 0.8;
+const MIN_EFFECTIVENESS_FLOOR = 0.1;
+
+const VARIABLE_SYNONYMS: Record<string, string> = {
+  electron_phonon_coupling: "lambda",
+  epc: "lambda",
+  el_ph_coupling: "lambda",
+  dos_at_ef: "DOS_EF",
+  dos_ef: "DOS_EF",
+  density_of_states: "DOS_EF",
+  fermi_nesting: "nesting_score",
+  fs_nesting: "nesting_score",
+  phonon_frequency: "phonon_freq",
+  debye_frequency: "phonon_freq",
+  omega_ln: "omega_log",
+  h_density: "hydrogen_density",
+  h_content: "hydrogen_density",
+  hydrogen_content: "hydrogen_density",
+  layer_count: "layeredness",
+  mott_gap: "mott_proximity",
+  spin_fluctuation: "spin_fluct_strength",
+  magnetic_fluctuation: "spin_fluct_strength",
+  ct_energy: "charge_transfer",
+  band_width: "bandwidth",
+  w_band: "bandwidth",
+  flat_band: "band_flatness",
+  flatness: "band_flatness",
+  applied_pressure: "pressure",
+  hydrostatic_pressure: "pressure",
+  el_ph_lambda: "coupling_strength",
+};
+
+function normalizeVariableName(v: string): string {
+  const lower = v.toLowerCase().replace(/[\s-]+/g, "_");
+  return VARIABLE_SYNONYMS[lower] || v;
+}
+
+function cappedAdd(current: number, boost: number, cap: number): number {
+  return Math.min(cap, current + boost);
+}
+
 const KNOWN_BIAS_VARIABLES = new Set<string>([
   ...Object.keys(VARIABLE_TO_FAMILY_MAP),
   ...Object.keys(VARIABLE_TO_ELEMENT_MAP),
@@ -104,8 +148,9 @@ export function validateBiasedVariables(variables: string[]): { valid: string[];
   const valid: string[] = [];
   const rejected: string[] = [];
   for (const v of variables) {
-    if (KNOWN_BIAS_VARIABLES.has(v)) {
-      valid.push(v);
+    const normalized = normalizeVariableName(v);
+    if (KNOWN_BIAS_VARIABLES.has(normalized)) {
+      valid.push(normalized);
     } else {
       rejected.push(v);
     }
@@ -177,34 +222,34 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
     const weight = theory.theoryScore;
 
     for (const fi of theory.featureImportance.slice(0, 4)) {
-      const varName = fi.variable;
+      const varName = normalizeVariableName(fi.variable);
       const importance = fi.importance * weight;
 
       const families = VARIABLE_TO_FAMILY_MAP[varName];
       if (families) {
         for (const fam of families) {
-          familyPreferences[fam] = (familyPreferences[fam] || 0) + importance * 0.3;
+          familyPreferences[fam] = cappedAdd(familyPreferences[fam] || 0, importance * 0.3, MAX_FAMILY_BOOST);
         }
       }
 
       const elements = VARIABLE_TO_ELEMENT_MAP[varName];
       if (elements) {
         for (const el of elements) {
-          elementBoosts[el] = (elementBoosts[el] || 0) + importance * 0.2;
+          elementBoosts[el] = cappedAdd(elementBoosts[el] || 0, importance * 0.2, MAX_ELEMENT_BOOST);
         }
       }
 
       const motifs = VARIABLE_TO_MOTIF_MAP[varName];
       if (motifs) {
         for (const m of motifs) {
-          motifBiases[m] = (motifBiases[m] || 0) + importance * 0.25;
+          motifBiases[m] = cappedAdd(motifBiases[m] || 0, importance * 0.25, MAX_MOTIF_BOOST);
         }
       }
 
       const generators = VARIABLE_TO_GENERATOR_MAP[varName];
       if (generators) {
         for (const gen of generators) {
-          generatorWeightBoosts[gen] = (generatorWeightBoosts[gen] || 0) + importance * 0.15;
+          generatorWeightBoosts[gen] = cappedAdd(generatorWeightBoosts[gen] || 0, importance * 0.15, MAX_GENERATOR_BOOST);
         }
       }
     }
@@ -228,28 +273,29 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
     sourceCausalEdges = strongEdges.length;
 
     for (const edge of strongEdges) {
-      if (edge.target === "Tc" || edge.target === "lambda" || edge.target === "coupling_strength") {
-        const sourceVar = edge.source;
+      const normalizedTarget = normalizeVariableName(edge.target);
+      if (normalizedTarget === "Tc" || normalizedTarget === "lambda" || normalizedTarget === "coupling_strength") {
+        const sourceVar = normalizeVariableName(edge.source);
         const boost = edge.strength * 0.4;
 
         const families = VARIABLE_TO_FAMILY_MAP[sourceVar];
         if (families) {
           for (const fam of families) {
-            familyPreferences[fam] = (familyPreferences[fam] || 0) + boost;
+            familyPreferences[fam] = cappedAdd(familyPreferences[fam] || 0, boost, MAX_FAMILY_BOOST);
           }
         }
 
         const elements = VARIABLE_TO_ELEMENT_MAP[sourceVar];
         if (elements) {
           for (const el of elements) {
-            elementBoosts[el] = (elementBoosts[el] || 0) + boost * 0.5;
+            elementBoosts[el] = cappedAdd(elementBoosts[el] || 0, boost * 0.5, MAX_ELEMENT_BOOST);
           }
         }
 
         const generators = VARIABLE_TO_GENERATOR_MAP[sourceVar];
         if (generators) {
           for (const gen of generators) {
-            generatorWeightBoosts[gen] = (generatorWeightBoosts[gen] || 0) + boost * 0.3;
+            generatorWeightBoosts[gen] = cappedAdd(generatorWeightBoosts[gen] || 0, boost * 0.3, MAX_GENERATOR_BOOST);
           }
         }
       }
@@ -257,12 +303,13 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
   }
 
   for (const rule of rules.filter(r => r.strength > 0.3).slice(0, 10)) {
-    if (rule.consequent === "Tc" || rule.consequent === "lambda") {
-      const antVar = rule.antecedent;
+    const normalizedConsequent = normalizeVariableName(rule.consequent);
+    if (normalizedConsequent === "Tc" || normalizedConsequent === "lambda") {
+      const antVar = normalizeVariableName(rule.antecedent);
       const motifs = VARIABLE_TO_MOTIF_MAP[antVar];
       if (motifs) {
         for (const m of motifs) {
-          motifBiases[m] = (motifBiases[m] || 0) + rule.strength * 0.2;
+          motifBiases[m] = cappedAdd(motifBiases[m] || 0, rule.strength * 0.2, MAX_MOTIF_BOOST);
         }
       }
     }
@@ -312,7 +359,7 @@ function computeEffectivenessMultiplier(): number {
   }
 
   const ratio = positiveCount / recent.length;
-  return 0.5 + ratio;
+  return Math.max(MIN_EFFECTIVENESS_FLOOR, 0.5 + ratio);
 }
 
 export function recordTheoryBiasOutcome(
