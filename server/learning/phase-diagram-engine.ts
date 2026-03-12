@@ -101,8 +101,7 @@ export function computeMiedemaFormationEnergy(formula: string): number {
     }
   }
 
-  const efPerAtom = deltaH / totalAtoms;
-  return Math.max(-5.0, Math.min(2.0, efPerAtom));
+  return Math.max(-5.0, Math.min(2.0, deltaH));
 }
 
 const OXIDE_ANIONS = new Set(["O", "F", "Cl", "Br", "I"]);
@@ -143,6 +142,12 @@ function computeIonicFormationEnergy(formula: string): number {
   let ionicEnergy = 0;
   let ionicWeight = 0;
 
+  const anionFrac = elements
+    .filter(e => OXIDE_ANIONS.has(e) || CHALCOGENIDE_ANIONS.has(e) || PNICTIDE_ANIONS.has(e))
+    .reduce((s, e) => s + counts[e] / totalAtoms, 0);
+
+  const hasChalcogenide = elements.includes("S") || elements.includes("Se") || elements.includes("Te");
+
   for (const el of elements) {
     if (OXIDE_ANIONS.has(el) || CHALCOGENIDE_ANIONS.has(el) || PNICTIDE_ANIONS.has(el)) continue;
     const data = ELEMENTAL_DATA[el];
@@ -151,11 +156,7 @@ function computeIonicFormationEnergy(formula: string): number {
     const frac = counts[el] / totalAtoms;
     let pairEnergy = OXIDE_ENERGIES[el] ?? -1.5;
 
-    const anionFrac = elements
-      .filter(e => OXIDE_ANIONS.has(e) || CHALCOGENIDE_ANIONS.has(e) || PNICTIDE_ANIONS.has(e))
-      .reduce((s, e) => s + counts[e] / totalAtoms, 0);
-
-    if (elements.includes("S") || elements.includes("Se") || elements.includes("Te")) {
+    if (hasChalcogenide) {
       pairEnergy *= 0.65;
     }
 
@@ -167,9 +168,68 @@ function computeIonicFormationEnergy(formula: string): number {
   return Math.max(-10.0, Math.min(2.0, ionicEnergy / ionicWeight));
 }
 
+const HYDRIDE_FORMATION_ENERGIES: Record<string, number> = {
+  "Li": -0.94, "Na": -0.56, "K": -0.57, "Rb": -0.52, "Cs": -0.54,
+  "Mg": -0.37, "Ca": -0.96, "Sr": -0.93, "Ba": -0.89,
+  "Ti": -0.70, "Zr": -0.91, "Hf": -0.72,
+  "V": -0.36, "Nb": -0.21, "Ta": -0.20,
+  "Y": -1.13, "La": -1.09, "Sc": -0.96,
+  "Pd": -0.10, "Ce": -1.06,
+  "Fe": 0.15, "Co": 0.20, "Ni": 0.08, "Cu": 0.25,
+  "Al": -0.04, "Ga": 0.12,
+};
+
+function computeHydrideFormationEnergy(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = getTotalAtoms(counts);
+
+  const hCount = counts["H"] ?? 0;
+  const hFrac = hCount / totalAtoms;
+  const metalElements = elements.filter(el => el !== "H");
+
+  if (metalElements.length === 0) return 0;
+
+  let weightedEnergy = 0;
+  let metalWeight = 0;
+
+  for (const el of metalElements) {
+    const frac = counts[el] / totalAtoms;
+    const hydrideE = HYDRIDE_FORMATION_ENERGIES[el] ?? -0.3;
+    weightedEnergy += frac * hydrideE;
+    metalWeight += frac;
+  }
+
+  if (metalWeight < 0.01) return 0;
+
+  const baseEnergy = weightedEnergy / metalWeight;
+  const stoichFactor = Math.min(hFrac / (1 - hFrac + 0.01), 3.0);
+  const energy = baseEnergy * stoichFactor;
+
+  if (metalElements.length > 1) {
+    const metalMiedema = computeMiedemaFormationEnergy(
+      metalElements.map(el => el + (counts[el] ?? 1)).join("")
+    );
+    return Math.max(-5.0, Math.min(2.0, energy + 0.3 * metalMiedema));
+  }
+
+  return Math.max(-5.0, Math.min(2.0, energy));
+}
+
+function isHydrideIntermetallic(formula: string): boolean {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = getTotalAtoms(counts);
+  const hFrac = (counts["H"] ?? 0) / totalAtoms;
+  return elements.includes("H") && hFrac > 0.05;
+}
+
 export function estimateFormationEnergy(formula: string): number {
   const compType = classifyCompoundType(formula);
   if (compType === "intermetallic") {
+    if (isHydrideIntermetallic(formula)) {
+      return computeHydrideFormationEnergy(formula);
+    }
     return computeMiedemaFormationEnergy(formula);
   }
   const ionicE = computeIonicFormationEnergy(formula);
