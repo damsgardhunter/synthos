@@ -5,6 +5,7 @@ import {
 } from "../learning/physics-engine";
 import {
   getElementData,
+  ELEMENTAL_DATA,
 } from "../learning/elemental-data";
 
 export interface PressurePathway {
@@ -50,26 +51,131 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
+function normalizeToIntegers(counts: Record<string, number>): Record<string, number> {
+  const entries = Object.entries(counts).filter(([, n]) => n > 0);
+  if (entries.length === 0) return counts;
+
+  const vals = entries.map(([, n]) => n);
+  const allInteger = vals.every(n => Number.isInteger(n));
+  if (allInteger) return counts;
+
+  let multiplier = 1;
+  for (let m = 1; m <= 100; m++) {
+    if (vals.every(n => Math.abs(n * m - Math.round(n * m)) < 0.01)) {
+      multiplier = m;
+      break;
+    }
+  }
+
+  const result: Record<string, number> = {};
+  for (const [el, n] of entries) {
+    const rounded = Math.round(n * multiplier);
+    if (rounded > 0) result[el] = rounded;
+  }
+
+  const resultVals = Object.values(result);
+  if (resultVals.length === 0) {
+    const fallback: Record<string, number> = {};
+    for (const [el, n] of entries) fallback[el] = Math.max(1, Math.round(n));
+    return fallback;
+  }
+
+  const gcdAll = resultVals.reduce((a, b) => gcd(a, b));
+  if (gcdAll > 1) {
+    for (const el of Object.keys(result)) {
+      result[el] /= gcdAll;
+    }
+  }
+
+  return result;
+}
+
+function gcd(a: number, b: number): number {
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b) { [a, b] = [b, a % b]; }
+  return a;
+}
+
+function hillSort(a: string, b: string): number {
+  const priority = (el: string): number => {
+    if (el === "C") return 0;
+    if (el === "H") return 1;
+    return 2;
+  };
+  const pa = priority(a);
+  const pb = priority(b);
+  if (pa !== pb) return pa - pb;
+  return a.localeCompare(b);
+}
+
 function buildFormula(counts: Record<string, number>): string {
-  return Object.entries(counts)
+  const intCounts = normalizeToIntegers(counts);
+  return Object.entries(intCounts)
     .filter(([, n]) => n > 0)
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => hillSort(a, b))
     .map(([el, n]) => n === 1 ? el : `${el}${n}`)
     .join("");
 }
 
-const CHEMICAL_PRESSURE_ELEMENTS: Record<string, { smaller: string[]; larger: string[] }> = {
-  La: { smaller: ["Y", "Sc", "Lu"], larger: ["Ce", "Pr", "Nd"] },
-  Y: { smaller: ["Sc", "Lu"], larger: ["La", "Gd"] },
-  Ca: { smaller: ["Mg", "Be"], larger: ["Sr", "Ba"] },
-  Sr: { smaller: ["Ca", "Mg"], larger: ["Ba"] },
-  Ba: { smaller: ["Sr", "Ca"], larger: [] },
-  Nb: { smaller: ["V", "Mo"], larger: ["Ta"] },
-  Ti: { smaller: ["V", "Cr"], larger: ["Zr", "Hf"] },
-  Zr: { smaller: ["Ti"], larger: ["Hf"] },
-  Th: { smaller: ["U", "Ce"], larger: [] },
-  Ce: { smaller: ["Pr", "Nd"], larger: ["La"] },
+const PERIODIC_GROUPS: Record<number, string[]> = {
+  1: ["Li", "Na", "K", "Rb", "Cs"],
+  2: ["Be", "Mg", "Ca", "Sr", "Ba"],
+  3: ["Sc", "Y", "La", "Lu"],
+  4: ["Ti", "Zr", "Hf"],
+  5: ["V", "Nb", "Ta"],
+  6: ["Cr", "Mo", "W"],
+  7: ["Mn", "Re"],
+  8: ["Fe", "Ru", "Os"],
+  9: ["Co", "Rh", "Ir"],
+  10: ["Ni", "Pd", "Pt"],
+  11: ["Cu", "Ag", "Au"],
+  12: ["Zn", "Cd"],
+  13: ["B", "Al", "Ga", "In", "Tl"],
+  14: ["C", "Si", "Ge", "Sn", "Pb"],
+  15: ["N", "P", "As", "Sb", "Bi"],
+  16: ["O", "S", "Se", "Te"],
+  17: ["F", "Cl", "Br", "I"],
 };
+
+const _elementToGroup = new Map<string, number>();
+for (const [g, els] of Object.entries(PERIODIC_GROUPS)) {
+  for (const el of els) _elementToGroup.set(el, Number(g));
+}
+
+function getChemicalPressureSubstitutes(el: string): { smaller: string[]; larger: string[] } {
+  const data = getElementData(el);
+  if (!data) return { smaller: [], larger: [] };
+  const group = _elementToGroup.get(el);
+  if (group === undefined) return { smaller: [], larger: [] };
+
+  const groupMembers = PERIODIC_GROUPS[group] ?? [];
+  const elRadius = data.atomicRadius;
+  if (!elRadius) return { smaller: [], larger: [] };
+
+  const smaller: string[] = [];
+  const larger: string[] = [];
+  for (const candidate of groupMembers) {
+    if (candidate === el) continue;
+    const cData = getElementData(candidate);
+    if (!cData || !cData.atomicRadius) continue;
+    if (cData.atomicRadius < elRadius) smaller.push(candidate);
+    else if (cData.atomicRadius > elRadius) larger.push(candidate);
+  }
+
+  smaller.sort((a, b) => {
+    const ra = getElementData(a)!.atomicRadius;
+    const rb = getElementData(b)!.atomicRadius;
+    return rb - ra;
+  });
+  larger.sort((a, b) => {
+    const ra = getElementData(a)!.atomicRadius;
+    const rb = getElementData(b)!.atomicRadius;
+    return ra - rb;
+  });
+
+  return { smaller, larger };
+}
 
 const STABILIZING_DOPANTS: Record<string, { dopant: string; fraction: number; reason: string }[]> = {
   hydride: [
@@ -90,19 +196,22 @@ const STABILIZING_DOPANTS: Record<string, { dopant: string; fraction: number; re
   ],
 };
 
-function classifyMaterial(formula: string): "hydride" | "cage" | "layered" | "conventional" {
+function classifyMaterial(formula: string): string[] {
   const counts = parseFormulaCounts(formula);
   const hCount = counts["H"] || 0;
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const types: string[] = [];
 
-  if (hCount / totalAtoms > 0.5) return "hydride";
-  if (hCount > 0 && hCount / totalAtoms > 0.3) return "cage";
+  const hFrac = totalAtoms > 0 ? hCount / totalAtoms : 0;
+  if (hFrac > 0.5) types.push("hydride");
+  if (hCount > 0 && hFrac > 0.3 && Object.keys(counts).length <= 3) types.push("cage");
 
   const layeredElements = ["Cu", "Fe", "Ni", "Bi", "Tl"];
   const hasLayered = Object.keys(counts).some(el => layeredElements.includes(el));
-  if (hasLayered && Object.keys(counts).length >= 3) return "layered";
+  if (hasLayered && Object.keys(counts).length >= 3) types.push("layered");
 
-  return "conventional";
+  if (types.length === 0) types.push("conventional");
+  return types;
 }
 
 function estimateChemicalPressureEffect(
@@ -116,14 +225,20 @@ function estimateChemicalPressureEffect(
 
   if (!origData || !subData) return { pressureReduction: 0, tcRetention: 0.5 };
 
-  const origRadius = origData.atomicRadius ?? 150;
-  const subRadius = subData.atomicRadius ?? 150;
-  const radiusDiff = (subRadius - origRadius) / origRadius;
+  const origRadius = origData.atomicRadius;
+  const subRadius = subData.atomicRadius;
+  if (!origRadius || !subRadius) return { pressureReduction: 0, tcRetention: 0.5 };
+
+  const radiusDiff = (origRadius - subRadius) / origRadius;
 
   const pressureEquivalent = radiusDiff * originalPressure * 0.3;
   const pressureReduction = Math.max(0, Math.min(originalPressure * 0.8, pressureEquivalent));
 
-  const massDiff = Math.abs((subData.atomicMass ?? 100) - (origData.atomicMass ?? 100)) / (origData.atomicMass ?? 100);
+  const origMass = origData.atomicMass;
+  const subMass = subData.atomicMass;
+  if (!origMass || !subMass) return { pressureReduction: Math.round(pressureReduction * 10) / 10, tcRetention: 0.5 };
+
+  const massDiff = Math.abs(subMass - origMass) / origMass;
   const electronDiff = Math.abs((subData.paulingElectronegativity ?? 1.5) - (origData.paulingElectronegativity ?? 1.5));
   const tcRetention = Math.max(0.1, 1 - 0.3 * massDiff - 0.2 * electronDiff - 0.1 * Math.abs(radiusDiff));
 
@@ -136,8 +251,8 @@ function generateIsovalentSubstitutions(formula: string, sourcePressure: number)
 
   for (const [el, amount] of Object.entries(counts)) {
     if (el === "H") continue;
-    const chemPressure = CHEMICAL_PRESSURE_ELEMENTS[el];
-    if (!chemPressure) continue;
+    const chemPressure = getChemicalPressureSubstitutes(el);
+    if (chemPressure.smaller.length === 0) continue;
 
     for (const smaller of chemPressure.smaller) {
       const effect = estimateChemicalPressureEffect(formula, sourcePressure, smaller, el);
@@ -166,18 +281,36 @@ function generateIsovalentSubstitutions(formula: string, sourcePressure: number)
 
 function generateChemicalDopings(formula: string, sourcePressure: number, sourceTc: number): StabilizationStrategy[] {
   const counts = parseFormulaCounts(formula);
-  const matType = classifyMaterial(formula);
+  const matTypes = classifyMaterial(formula);
   const strategies: StabilizationStrategy[] = [];
 
-  const dopants = STABILIZING_DOPANTS[matType] ?? STABILIZING_DOPANTS["conventional"] ?? [];
+  const seenDopants = new Set<string>();
+  const dopants: { dopant: string; fraction: number; reason: string }[] = [];
+  for (const t of matTypes) {
+    for (const d of STABILIZING_DOPANTS[t] ?? []) {
+      if (!seenDopants.has(d.dopant)) {
+        seenDopants.add(d.dopant);
+        dopants.push(d);
+      }
+    }
+  }
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
 
   for (const { dopant, fraction, reason } of dopants) {
     if (counts[dopant] && counts[dopant] > 0.5) continue;
 
-    const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-    const dopantAmount = Math.max(0.5, Math.round(totalAtoms * fraction * 10) / 10);
+    const rawDopant = totalAtoms * fraction;
+    let scaleFactor = 1;
+    if (rawDopant < 0.5 && rawDopant > 0) {
+      scaleFactor = Math.ceil(1 / rawDopant);
+    }
+    const dopantAmount = Math.max(1, Math.round(rawDopant * scaleFactor));
 
-    const newCounts = { ...counts };
+    const newCounts: Record<string, number> = {};
+    for (const [el, n] of Object.entries(counts)) {
+      newCounts[el] = n * scaleFactor;
+    }
     newCounts[dopant] = (newCounts[dopant] || 0) + dopantAmount;
     const newFormula = buildFormula(newCounts);
 
@@ -222,14 +355,19 @@ function generateAnionSubstitutions(formula: string, sourcePressure: number): St
     if (newCounts["H"] <= 0) delete newCounts["H"];
     const newFormula = buildFormula(newCounts);
 
-    const massPenalty = replaceCount / hCount;
+    const replaceFraction = hCount > 0 ? replaceCount / hCount : 0;
+    const anionData = getElementData(anion);
+    const anionMass = anionData?.atomicMass ?? 11;
+    const hMass = 1.008;
+    const phononPenalty = replaceFraction * Math.min(1.0, (anionMass - hMass) / (12 - hMass)) * 0.6;
+    const massPenalty = replaceFraction * 0.3;
 
     strategies.push({
       type: "anion-substitution",
       formula: newFormula,
       description: `Replace ${replaceCount}H with ${anion}: ${reason}`,
       estimatedAmbientTc: 0,
-      tcRetention: Math.max(0.2, 1 - massPenalty * 0.8),
+      tcRetention: Math.max(0.1, 1 - massPenalty - phononPenalty),
       stabilityGain: stabilityBoost,
       pressureReduction: sourcePressure * stabilityBoost * 0.5,
       confidence: 0.55,
@@ -299,20 +437,50 @@ export function searchPressurePathways(
       const omegaLogK = coupling.omegaLog * 1.4388;
       const denom = coupling.lambda - coupling.muStar * (1 + 0.62 * coupling.lambda);
 
-      if (Math.abs(denom) > 1e-6 && denom > 0 && coupling.lambda > 0.2) {
-        const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
-        const f1 = Math.pow(1 + Math.pow(coupling.lambda / lambdaBar, 3 / 2), 1 / 3);
-        const physicsTc = (omegaLogK / 1.2) * f1 * Math.exp(-1.04 * (1 + coupling.lambda) / denom);
+      const lambdaMuRatio = coupling.muStar > 0 ? coupling.lambda / coupling.muStar : Infinity;
+      const isDefaultMuStar = coupling.muStar === 0.1 || coupling.muStar === 0.13;
 
-        if (Number.isFinite(physicsTc) && physicsTc > 0) {
-          const blended = Math.round(0.6 * strategy.estimatedAmbientTc + 0.4 * physicsTc);
-          strategy.estimatedAmbientTc = Math.min(400, Math.max(1, blended));
+      if (Math.abs(denom) > 1e-6 && denom > 0 && coupling.lambda > 0.2) {
+        if (lambdaMuRatio < 1.5) {
+          strategy.confidence *= 0.3;
+          strategy.estimatedAmbientTc = Math.round(strategy.estimatedAmbientTc * 0.1);
+        } else {
+          const lambdaBar = 2.46 * (1 + 3.8 * coupling.muStar);
+          const f1 = Math.pow(1 + Math.pow(coupling.lambda / lambdaBar, 3 / 2), 1 / 3);
+          const physicsTc = (omegaLogK / 1.2) * f1 * Math.exp(-1.04 * (1 + coupling.lambda) / denom);
+
+          if (Number.isFinite(physicsTc) && physicsTc > 0) {
+            if (isDefaultMuStar) {
+              strategy.confidence *= 0.8;
+            }
+            const heuristic = strategy.estimatedAmbientTc;
+            const ratio = physicsTc / Math.max(1, heuristic);
+            let blended: number;
+            if (ratio < 0.3) {
+              blended = physicsTc;
+              strategy.confidence *= 0.4;
+            } else if (ratio < 0.6) {
+              blended = Math.round(0.3 * heuristic + 0.7 * physicsTc);
+              strategy.confidence *= 0.7;
+            } else {
+              blended = Math.round(0.5 * heuristic + 0.5 * physicsTc);
+            }
+            strategy.estimatedAmbientTc = Math.min(400, Math.max(1, blended));
+          }
         }
+      } else if (denom <= 0 && coupling.lambda > 0.2) {
+        console.log(
+          `[pressure-pathway] Super-coupled regime for ${strategy.formula}: ` +
+          `λ=${coupling.lambda.toFixed(3)}, μ*=${coupling.muStar.toFixed(3)}, denom=${denom.toFixed(6)} — ` +
+          `possible high-interest candidate or simulation artifact`
+        );
+        strategy.confidence *= 0.5;
       }
 
-      if (electronic.metallicity < 0.3) {
-        strategy.estimatedAmbientTc = Math.round(strategy.estimatedAmbientTc * 0.3);
-        strategy.confidence *= 0.5;
+      const metallicityFactor = Math.min(1, electronic.metallicity / 0.3);
+      if (metallicityFactor < 1) {
+        strategy.estimatedAmbientTc = Math.round(strategy.estimatedAmbientTc * metallicityFactor);
+        strategy.confidence *= 0.3 + 0.7 * metallicityFactor;
       }
     } catch {}
   }
@@ -324,8 +492,8 @@ export function searchPressurePathways(
   const bestAmbientFormula = best?.formula ?? formula;
   const retentionPercent = sourceTc > 0 ? Math.round((bestAmbientTc / sourceTc) * 100) : 0;
 
-  const pressureDifficulty = sourcePressure > 200 ? 0.3 : sourcePressure > 100 ? 0.5 : sourcePressure > 50 ? 0.7 : 0.9;
-  const tcFeasibility = bestAmbientTc > 50 ? 0.8 : bestAmbientTc > 20 ? 0.6 : 0.3;
+  const pressureDifficulty = 1 / (1 + Math.exp((sourcePressure - 100) / 50));
+  const tcFeasibility = 1 / (1 + Math.exp(-(bestAmbientTc - 30) / 15));
   const feasibility = Math.round(pressureDifficulty * tcFeasibility * 100) / 100;
 
   return {
@@ -340,6 +508,7 @@ export function searchPressurePathways(
   };
 }
 
+const PATHWAY_CACHE_LIMIT = 200;
 const pathwayHistory: PressurePathway[] = [];
 const pathwayCache = new Map<string, PressurePathway>();
 
@@ -352,8 +521,8 @@ export function getPathwayForCandidate(
   if (pathwayCache.has(key)) return pathwayCache.get(key)!;
   const pathway = searchPressurePathways(formula, tc, pressure);
   pathwayCache.set(key, pathway);
-  if (pathwayHistory.length < 200) pathwayHistory.push(pathway);
-  if (pathwayCache.size > 100) {
+  if (pathwayHistory.length < PATHWAY_CACHE_LIMIT) pathwayHistory.push(pathway);
+  if (pathwayCache.size > PATHWAY_CACHE_LIMIT) {
     const firstKey = pathwayCache.keys().next().value;
     if (firstKey) pathwayCache.delete(firstKey);
   }

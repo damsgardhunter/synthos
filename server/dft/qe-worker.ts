@@ -4,7 +4,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { matchPrototype } from "../learning/structure-predictor";
-import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
+import { isTransitionMetal, isRareEarth, ELEMENTAL_DATA, getElementData } from "../learning/elemental-data";
 import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
 import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
@@ -20,9 +20,37 @@ const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 
-function computePressureScale(pressureGpa: number): number {
+function fracDistAngstrom(
+  fdx: number, fdy: number, fdz: number,
+  latticeA: number, cOverA: number = 1.0, bOverA: number = 1.0,
+  gammaRad: number = Math.PI / 2,
+): number {
+  const a = latticeA;
+  const b = latticeA * bOverA;
+  const c = latticeA * cOverA;
+  const cosG = Math.cos(gammaRad);
+  const dx = fdx * a + fdy * b * cosG;
+  const dy = fdy * b * Math.sin(gammaRad);
+  const dz = fdz * c;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function estimateBulkModulus(elements: string[]): number {
+  let totalB = 0;
+  let count = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data && data.bulkModulus != null && data.bulkModulus > 0) {
+      totalB += data.bulkModulus;
+      count++;
+    }
+  }
+  return count > 0 ? totalB / count : 100;
+}
+
+function computePressureScale(pressureGpa: number, elements?: string[]): number {
   if (pressureGpa <= 0) return 1.0;
-  const B0 = 100;
+  const B0 = elements ? estimateBulkModulus(elements) : 100;
   const B0p = 4.0;
   const inner = 1 + B0p * (pressureGpa / B0);
   const eta = inner > 0 ? Math.pow(inner, -1 / B0p) : 0.5;
@@ -96,6 +124,8 @@ export interface QESCFResult {
   totalForce: number | null;
   pressure: number | null;
   converged: boolean;
+  convergenceQuality: "strict" | "loose" | "none";
+  lastScfAccuracyRy: number | null;
   nscfIterations: number;
   wallTimeSeconds: number;
   magnetization: number | null;
@@ -124,6 +154,9 @@ export interface QEFullResult {
   retryCount?: number;
   xtbPreRelaxed?: boolean;
   vcRelaxed?: boolean;
+  relaxedLatticeA?: number;
+  initialLatticeA?: number;
+  initialPositions?: Array<{ element: string; x: number; y: number; z: number }>;
   ppValidated?: boolean;
   rejectionReason?: string;
   failureStage?: string;
@@ -140,19 +173,30 @@ const structureHashMap = new Map<string, number>();
 function isStructureDuplicate(hash: string, formula: string): boolean {
   const key = `${formula}::${hash}`;
   const now = Date.now();
-  if (structureHashMap.size > HASH_CACHE_MAX) {
+  if (structureHashMap.has(key)) {
+    structureHashMap.delete(key);
+    structureHashMap.set(key, now);
+    return true;
+  }
+  if (structureHashMap.size >= HASH_CACHE_MAX) {
     const cutoff = now - HASH_CACHE_TTL_MS;
+    let purged = false;
     for (const [k, ts] of structureHashMap) {
-      if (ts < cutoff) structureHashMap.delete(k);
+      if (ts < cutoff) {
+        structureHashMap.delete(k);
+        purged = true;
+      }
     }
-    if (structureHashMap.size > HASH_CACHE_MAX) {
-      const oldest = [...structureHashMap.entries()].sort((a, b) => a[1] - b[1]);
-      for (let i = 0; i < oldest.length - HASH_CACHE_MAX / 2; i++) {
-        structureHashMap.delete(oldest[i][0]);
+    if (!purged || structureHashMap.size >= HASH_CACHE_MAX) {
+      const iter = structureHashMap.keys();
+      const evictCount = Math.max(1, Math.floor(HASH_CACHE_MAX * 0.1));
+      for (let i = 0; i < evictCount; i++) {
+        const oldest = iter.next();
+        if (oldest.done) break;
+        structureHashMap.delete(oldest.value);
       }
     }
   }
-  if (structureHashMap.has(key)) return true;
   structureHashMap.set(key, now);
   return false;
 }
@@ -172,19 +216,66 @@ export function getStageFailureCounts(): Record<string, number> {
   return { ...stageFailureCounts };
 }
 
-const ATOMIC_NUMBER: Record<string, number> = {
-  H: 1, He: 2, Li: 3, Be: 4, B: 5, C: 6, N: 7, O: 8, F: 9, Ne: 10,
-  Na: 11, Mg: 12, Al: 13, Si: 14, P: 15, S: 16, Cl: 17, Ar: 18,
-  K: 19, Ca: 20, Sc: 21, Ti: 22, V: 23, Cr: 24, Mn: 25, Fe: 26, Co: 27, Ni: 28, Cu: 29, Zn: 30,
-  Ga: 31, Ge: 32, As: 33, Se: 34, Br: 35, Kr: 36, Rb: 37, Sr: 38, Y: 39, Zr: 40,
-  Nb: 41, Mo: 42, Tc: 43, Ru: 44, Rh: 45, Pd: 46, Ag: 47, Cd: 48, In: 49, Sn: 50,
-  Sb: 51, Te: 52, I: 53, Xe: 54, Cs: 55, Ba: 56, La: 57, Ce: 58, Hf: 72, Ta: 73,
-  W: 74, Re: 75, Os: 76, Ir: 77, Pt: 78, Au: 79, Hg: 80, Tl: 81, Pb: 82, Bi: 83, Th: 90, U: 92, Pa: 91,
-};
+function getAtomicNumber(el: string): number {
+  const data = getElementData(el);
+  return data ? data.atomicNumber : 0;
+}
+
+const RY_TO_EV = 13.605693122994;
+const BOHR_TO_ANG = 0.529177210903;
+
+function resolvePPFilename(element: string): string {
+  const ppDir = QE_PSEUDO_DIR;
+  const simpleName = `${element}.UPF`;
+  if (fs.existsSync(path.join(ppDir, simpleName))) return simpleName;
+  try {
+    const entries = fs.readdirSync(ppDir);
+    const match = entries.find(f => f.startsWith(element + ".") && (f.endsWith(".UPF") || f.endsWith(".upf")));
+    if (match) return match;
+  } catch {}
+  return simpleName;
+}
+
+function detectPPType(element: string): "paw" | "uspp" | "nc" {
+  const ppPath = path.join(QE_PSEUDO_DIR, resolvePPFilename(element));
+  try {
+    const head = fs.readFileSync(ppPath, "utf-8").slice(0, 2000);
+    if (head.includes('is_paw="true"') || head.includes("is_paw='.true.'") || head.includes("pseudo_type=\"PAW\"")) return "paw";
+    if (head.includes('is_ultrasoft="true"') || head.includes("is_ultrasoft='.true.'") || head.includes("pseudo_type=\"US\"") || head.includes("Ultrasoft")) return "uspp";
+    if (head.includes("pseudo_type=\"NC\"") || head.includes("Norm-Conserving") || head.includes("norm-conserving")) return "nc";
+    if (head.includes('is_ultrasoft="false"') && head.includes('is_paw="false"')) return "nc";
+  } catch {}
+  return "paw";
+}
+
+function ecutrhoMultiplier(elements: string[]): number {
+  let allNC = true;
+  for (const el of elements) {
+    const ppType = detectPPType(el);
+    if (ppType !== "nc") { allNC = false; break; }
+  }
+  return allNC ? 4 : 8;
+}
+
+function getAtomicMass(el: string): number {
+  const local = ELEMENT_DATA[el];
+  if (local) return local.mass;
+  const central = getElementData(el);
+  return central ? central.atomicMass : 50;
+}
+
+function getZValence(el: string): number {
+  const local = ELEMENT_DATA[el];
+  if (local) return local.zValence;
+  const central = getElementData(el);
+  return central ? central.valenceElectrons : 4;
+}
 
 function computeStructureFingerprint(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
+  cOverA: number = 1.0,
+  gammaRad: number = Math.PI / 2,
 ): string {
   const n = positions.length;
   if (n === 0) return "empty";
@@ -206,10 +297,7 @@ function computeStructureFingerprint(
       fdx -= Math.round(fdx);
       fdy -= Math.round(fdy);
       fdz -= Math.round(fdz);
-      const dx = fdx * latticeA;
-      const dy = fdy * latticeA;
-      const dz = fdz * latticeA;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, 1.0, gammaRad);
 
       const [elA, elB] = [positions[i].element, positions[j].element].sort();
       labeledDistances.push(`${elA}-${elB}:${(Math.round(dist * 20) / 20).toFixed(2)}`);
@@ -238,8 +326,9 @@ function computeStructureFingerprint(
 function approximateEigenvalues(matrix: Float64Array[], n: number): number[] {
   const eigenvalues: number[] = [];
   const a = matrix.map(row => new Float64Array(row));
+  const maxIter = Math.max(n * 10, 50);
 
-  for (let iter = 0; iter < n * 5; iter++) {
+  for (let iter = 0; iter < maxIter; iter++) {
     let maxVal = 0;
     let p = 0, q = 1;
     for (let i = 0; i < n; i++) {
@@ -251,7 +340,7 @@ function approximateEigenvalues(matrix: Float64Array[], n: number): number[] {
         }
       }
     }
-    if (maxVal < 1e-6) break;
+    if (maxVal < 1e-10) break;
 
     const theta = 0.5 * Math.atan2(2 * a[p][q], a[p][p] - a[q][q]);
     const c = Math.cos(theta);
@@ -278,14 +367,89 @@ function approximateEigenvalues(matrix: Float64Array[], n: number): number[] {
   return eigenvalues;
 }
 
+function approximateHermitianEigenvalues(
+  realPart: Float64Array[], imagPart: Float64Array[], n: number,
+): number[] {
+  const hr = realPart.map(row => new Float64Array(row));
+  const hi = imagPart.map(row => new Float64Array(row));
+  const maxIter = Math.max(n * 15, 100);
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let maxOff = 0;
+    let p = 0, q = 1;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const mag = Math.sqrt(hr[i][j] * hr[i][j] + hi[i][j] * hi[i][j]);
+        if (mag > maxOff) {
+          maxOff = mag;
+          p = i;
+          q = j;
+        }
+      }
+    }
+    if (maxOff < 1e-10) break;
+
+    const mag_pq = Math.sqrt(hr[p][q] * hr[p][q] + hi[p][q] * hi[p][q]);
+    if (mag_pq < 1e-14) continue;
+    const phaseR = hr[p][q] / mag_pq;
+    const phaseI = -hi[p][q] / mag_pq;
+
+    for (let i = 0; i < n; i++) {
+      const origR = hr[i][q];
+      const origI = hi[i][q];
+      hr[i][q] = origR * phaseR - origI * phaseI;
+      hi[i][q] = origR * phaseI + origI * phaseR;
+      hr[q][i] = hr[i][q];
+      hi[q][i] = -hi[i][q];
+    }
+    for (let j = 0; j < n; j++) {
+      const origR = hr[q][j];
+      const origI = hi[q][j];
+      hr[q][j] = origR * phaseR + origI * phaseI;
+      hi[q][j] = -origR * phaseI + origI * phaseR;
+      hr[j][q] = hr[q][j];
+      hi[j][q] = -hi[q][j];
+    }
+
+    const diff = hr[p][p] - hr[q][q];
+    const theta = 0.5 * Math.atan2(2 * hr[p][q], diff);
+    const c = Math.cos(theta);
+    const s = Math.sin(theta);
+
+    for (let i = 0; i < n; i++) {
+      if (i === p || i === q) continue;
+      const ripR = hr[i][p]; const riqR = hr[i][q];
+      const ripI = hi[i][p]; const riqI = hi[i][q];
+      hr[i][p] = c * ripR + s * riqR;
+      hi[i][p] = c * ripI + s * riqI;
+      hr[i][q] = -s * ripR + c * riqR;
+      hi[i][q] = -s * ripI + c * riqI;
+      hr[p][i] = hr[i][p]; hi[p][i] = -hi[i][p];
+      hr[q][i] = hr[i][q]; hi[q][i] = -hi[i][q];
+    }
+    const app = hr[p][p]; const aqq = hr[q][q]; const apq = hr[p][q];
+    hr[p][p] = c * c * app + 2 * s * c * apq + s * s * aqq;
+    hr[q][q] = s * s * app - 2 * s * c * apq + c * c * aqq;
+    hr[p][q] = hr[q][p] = 0;
+    hi[p][q] = hi[q][p] = 0;
+  }
+
+  const eigenvalues: number[] = [];
+  for (let i = 0; i < n; i++) {
+    eigenvalues.push(hr[i][i]);
+  }
+  return eigenvalues;
+}
+
 function runXTBStabilityCheck(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
   workDir: string,
   pressureGpa: number = 0,
-): { stable: boolean; ePerAtom: number } | null {
+): { stable: boolean; ePerAtom: number; basis: string } | null {
   try {
-    const scale = pressureGpa > 0 ? computePressureScale(pressureGpa) : 1.0;
+    const posElements = Array.from(new Set(positions.map(p => p.element)));
+    const scale = pressureGpa > 0 ? computePressureScale(pressureGpa, posElements) : 1.0;
     let xyz = `${positions.length}\nstability check${pressureGpa > 0 ? ` @ ${pressureGpa} GPa` : ""}\n`;
     for (const p of positions) {
       xyz += `${p.element}  ${(p.x * latticeA * scale).toFixed(6)}  ${(p.y * latticeA * scale).toFixed(6)}  ${(p.z * latticeA * scale).toFixed(6)}\n`;
@@ -304,17 +468,47 @@ function runXTBStabilityCheck(
     const out = execSync(`${XTB_BIN} ${xyzFile} --gfn 2 --sp 2>&1 || true`, {
       cwd: workDir,
       timeout: 15000,
-      maxBuffer: 5 * 1024 * 1024,
+      maxBuffer: 20 * 1024 * 1024,
       env,
     }).toString();
 
-    const eMatch = out.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
+    const HA_TO_EV = 27.211386;
+    const eMatch = out.match(/TOTAL ENERGY\s+([-+]?\d*\.?\d+(?:[eEdD][-+]?\d+)?)\s+Eh/);
     if (!eMatch) return null;
-    const totalEHa = parseFloat(eMatch[1]);
+    const raw = eMatch[1].replace(/[dD]/, "e");
+    const totalEHa = parseFloat(raw);
+    if (!isFinite(totalEHa)) return null;
     const ePerAtomHa = totalEHa / positions.length;
-    const ePerAtomEv = ePerAtomHa * 27.2114;
-    const isStable = ePerAtomEv < -1.0;
-    return { stable: isStable, ePerAtom: ePerAtomEv };
+    const ePerAtomEv = ePerAtomHa * HA_TO_EV;
+
+    const elCounts: Record<string, number> = {};
+    for (const p of positions) {
+      elCounts[p.element] = (elCounts[p.element] || 0) + 1;
+    }
+    const elements = Object.keys(elCounts);
+    const totalAtoms = positions.length;
+
+    let refEPerAtom = 0;
+    let hasRef = true;
+    for (const el of elements) {
+      const zVal = getZValence(el);
+      if (!zVal) { hasRef = false; break; }
+      const atomicE = -(zVal * 0.5);
+      refEPerAtom += atomicE * (elCounts[el] / totalAtoms);
+    }
+
+    let isStable: boolean;
+    let basis: string;
+    if (hasRef) {
+      const formationLike = (ePerAtomHa - refEPerAtom) * HA_TO_EV;
+      isStable = formationLike < 0.5;
+      basis = `relative (Ef-like=${formationLike.toFixed(3)} eV/atom)`;
+    } else {
+      isStable = ePerAtomEv < -1.0;
+      basis = `absolute (E/atom=${ePerAtomEv.toFixed(3)} eV)`;
+    }
+
+    return { stable: isStable, ePerAtom: ePerAtomEv, basis };
   } catch {
     return null;
   }
@@ -362,7 +556,18 @@ const ATOMIC_VOLUMES: Record<string, number> = {
   Th: 33, Pa: 25, U: 21, Np: 20, Pu: 20,
 };
 
-function estimateLatticeConstant(elements: string[], counts?: Record<string, number>): number {
+function getAtomicVolume(el: string): number {
+  const local = ATOMIC_VOLUMES[el];
+  if (local != null) return local;
+  const central = getElementData(el);
+  if (central && central.atomicRadius > 0) {
+    const rAng = central.atomicRadius / 100;
+    return (4 / 3) * Math.PI * rAng * rAng * rAng;
+  }
+  return 15;
+}
+
+function estimateLatticeConstant(elements: string[], counts?: Record<string, number>, pressureGPa: number = 0): number {
   let totalVolume = 0;
   let totalAtoms = 0;
   const effectiveCounts: Record<string, number> = {};
@@ -371,13 +576,13 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
     for (const el of Object.keys(counts)) {
       const n = Math.round(counts[el] || 1);
       effectiveCounts[el] = n;
-      totalVolume += n * (ATOMIC_VOLUMES[el] ?? 15);
+      totalVolume += n * getAtomicVolume(el);
       totalAtoms += n;
     }
   } else {
     for (const el of elements) {
       effectiveCounts[el] = (effectiveCounts[el] || 0) + 1;
-      totalVolume += ATOMIC_VOLUMES[el] ?? 15;
+      totalVolume += getAtomicVolume(el);
       totalAtoms++;
     }
   }
@@ -405,6 +610,14 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
       packingFactor = 0.60;
     }
     cellVolume = totalVolume / packingFactor;
+  }
+
+  if (pressureGPa > 0) {
+    const B0 = estimateBulkModulus(elements);
+    const B0p = 4.0;
+    const eta = 1 + B0p * (pressureGPa / B0);
+    const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.5;
+    cellVolume = cellVolume * Math.max(0.5, Math.min(1.0, volRatio));
   }
 
   const a = Math.cbrt(cellVolume);
@@ -449,18 +662,60 @@ function validateSemicorePP(element: string, ppPath: string): boolean {
   if (!SEMICORE_REQUIRED.has(element)) return true;
   try {
     const fd = fs.openSync(ppPath, "r");
-    const buf = Buffer.alloc(2048);
-    fs.readSync(fd, buf, 0, 2048, 0);
+    const buf = Buffer.alloc(4096);
+    const bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
     fs.closeSync(fd);
-    const header = buf.toString("utf-8").toLowerCase();
-    if (header.includes("rrkjus") && !header.includes("spn") && !header.includes("spfn") && !header.includes("spdn")) {
+    const header = buf.toString("utf-8", 0, bytesRead).toLowerCase();
+
+    const hasSemicoreTag = header.includes("spn") || header.includes("spfn") || header.includes("spdn") || header.includes("spnl");
+
+    if (header.includes("rrkjus") && !hasSemicoreTag) {
       console.log(`[QE-Worker] WARNING: PP for ${element} appears to lack semicore states (rrkjus without sp*). Re-downloading semicore version.`);
       return false;
     }
+
+    const zValMatch = header.match(/z_valence\s*=\s*"?\s*([\d.]+)/);
+    if (zValMatch) {
+      const ppZVal = parseFloat(zValMatch[1]);
+      const expectedZ = getZValence(element);
+      if (ppZVal > 0 && expectedZ > 0 && ppZVal < expectedZ * 0.6) {
+        console.log(`[QE-Worker] WARNING: PP for ${element} has z_valence=${ppZVal} but expected ~${expectedZ} (semicore likely missing). Re-downloading.`);
+        return false;
+      }
+    }
+
+    const nwfcMatch = header.match(/number_of_wfc\s*=\s*"?\s*(\d+)/);
+    if (nwfcMatch) {
+      const nwfc = parseInt(nwfcMatch[1]);
+      if (nwfc < 3 && SEMICORE_REQUIRED.has(element)) {
+        console.log(`[QE-Worker] WARNING: PP for ${element} has only ${nwfc} wavefunctions (semicore elements typically need ≥3). Re-downloading.`);
+        return false;
+      }
+    }
+
     return true;
-  } catch {
-    return true;
+  } catch (err) {
+    console.log(`[QE-Worker] WARNING: Failed to validate semicore PP for ${element}: ${err instanceof Error ? err.message : "unknown error"}`);
+    return false;
   }
+}
+
+function cleanQETmpDir(tmpDir: string): void {
+  if (!fs.existsSync(tmpDir)) return;
+  try {
+    const entries = fs.readdirSync(tmpDir);
+    for (const entry of entries) {
+      const fullPath = path.join(tmpDir, entry);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory() && (entry.endsWith(".save") || entry.endsWith(".save_tmp"))) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        } else if (entry.endsWith(".xml") || entry.endsWith(".wfc") || entry.endsWith(".mix") || entry.endsWith(".restart_xml")) {
+          fs.unlinkSync(fullPath);
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 function cleanupPseudoDir(): void {
@@ -532,47 +787,120 @@ const PP_DOWNLOAD_URLS: Record<string, string> = {
   Te: "https://pseudopotentials.quantum-espresso.org/upf_files/Te.pbe-dn-kjpaw_psl.1.0.0.UPF",
 };
 
+const PP_FALLBACK_URLS: Record<string, string> = {
+  H:  "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/H.pbe-kjpaw_psl.1.0.0.UPF",
+  C:  "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/C.pbe-n-kjpaw_psl.1.0.0.UPF",
+  N:  "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/N.pbe-n-kjpaw_psl.1.0.0.UPF",
+  O:  "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/O.pbe-n-kjpaw_psl.1.0.0.UPF",
+  Fe: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Fe.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Cu: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Cu.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Al: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Al.pbe-n-kjpaw_psl.1.0.0.UPF",
+  Si: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Si.pbe-n-kjpaw_psl.1.0.0.UPF",
+  La: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/La.pbe-spfn-kjpaw_psl.1.0.0.UPF",
+  Ti: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Ti.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Nb: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Nb.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Pb: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Pb.pbe-dn-kjpaw_psl.1.0.0.UPF",
+};
+
+function downloadPPToTemp(url: string, tmpFile: string): boolean {
+  try {
+    execSync(`curl -sL --max-time 25 -o "${tmpFile}" "${url}"`, { timeout: 30000 });
+    return fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 10000;
+  } catch {
+    try { fs.unlinkSync(tmpFile); } catch {}
+    return false;
+  }
+}
+
 function ensurePseudopotential(element: string): string {
   if (!fs.existsSync(QE_PSEUDO_DIR)) {
     fs.mkdirSync(QE_PSEUDO_DIR, { recursive: true });
   }
 
   const ppFile = path.join(QE_PSEUDO_DIR, `${element}.UPF`);
+  const lockFile = ppFile + ".lock";
+  const tmpFile = ppFile + `.tmp.${process.pid}`;
+
   if (fs.existsSync(ppFile) && validatePseudopotential(ppFile) && validateSemicorePP(element, ppFile)) {
     return ppFile;
   }
 
-  if (fs.existsSync(ppFile)) {
-    const reason = !validatePseudopotential(ppFile) ? "invalid" : "missing semicore states";
-    console.log(`[QE-Worker] PP for ${element} rejected (${reason}, ${fs.statSync(ppFile).size} bytes), removing`);
-    try { fs.unlinkSync(ppFile); } catch {}
-  }
-
-  const sourceFile = path.join(PP_SOURCE_DIR, `${element}.UPF`);
-  if (fs.existsSync(sourceFile) && validatePseudopotential(sourceFile) && validateSemicorePP(element, sourceFile)) {
-    fs.copyFileSync(sourceFile, ppFile);
-    console.log(`[QE-Worker] Copied valid PP for ${element} from repo (${fs.statSync(ppFile).size} bytes)`);
-    return ppFile;
-  }
-
-  const url = PP_DOWNLOAD_URLS[element];
-  if (url) {
-    try {
-      console.log(`[QE-Worker] Downloading PP for ${element} from QE library...`);
-      execSync(`curl -sL -o "${ppFile}" "${url}"`, { timeout: 30000 });
-      if (fs.existsSync(ppFile) && validatePseudopotential(ppFile)) {
-        console.log(`[QE-Worker] Downloaded valid PP for ${element} (${fs.statSync(ppFile).size} bytes)`);
+  let lockFd: number | null = null;
+  try {
+    lockFd = fs.openSync(lockFile, "wx");
+  } catch {
+    for (let wait = 0; wait < 15; wait++) {
+      execSync("sleep 1", { timeout: 5000 });
+      if (fs.existsSync(ppFile) && validatePseudopotential(ppFile) && validateSemicorePP(element, ppFile)) {
         return ppFile;
-      } else {
-        try { fs.unlinkSync(ppFile); } catch {}
-        console.log(`[QE-Worker] Downloaded PP for ${element} failed validation`);
       }
-    } catch (dlErr: any) {
-      console.log(`[QE-Worker] PP download failed for ${element}: ${dlErr.message?.slice(0, 100)}`);
+      if (!fs.existsSync(lockFile)) break;
+    }
+    try {
+      const lockStat = fs.statSync(lockFile);
+      if (Date.now() - lockStat.mtimeMs > 60000) {
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
+    } catch {}
+    try {
+      lockFd = fs.openSync(lockFile, "wx");
+    } catch {
+      if (fs.existsSync(ppFile) && validatePseudopotential(ppFile) && validateSemicorePP(element, ppFile)) return ppFile;
+      throw new Error(`No valid pseudopotential for ${element} — another worker holds the lock and PP is not yet ready`);
     }
   }
 
-  throw new Error(`No valid pseudopotential for ${element} — need a verified UPF file in ${PP_SOURCE_DIR}/${element}.UPF`);
+  try {
+    if (fs.existsSync(ppFile)) {
+      const reason = !validatePseudopotential(ppFile) ? "invalid" : "missing semicore states";
+      console.log(`[QE-Worker] PP for ${element} rejected (${reason}, ${fs.statSync(ppFile).size} bytes), removing`);
+      try { fs.unlinkSync(ppFile); } catch {}
+    }
+
+    const sourceFile = path.join(PP_SOURCE_DIR, `${element}.UPF`);
+    if (fs.existsSync(sourceFile) && validatePseudopotential(sourceFile) && validateSemicorePP(element, sourceFile)) {
+      fs.copyFileSync(sourceFile, tmpFile);
+      fs.renameSync(tmpFile, ppFile);
+      console.log(`[QE-Worker] Copied valid PP for ${element} from repo (${fs.statSync(ppFile).size} bytes)`);
+      return ppFile;
+    }
+
+    const urls = [PP_DOWNLOAD_URLS[element], PP_FALLBACK_URLS[element]].filter(Boolean);
+    for (const url of urls) {
+      try {
+        const mirror = url!.includes("github") ? "pslibrary" : "QE";
+        console.log(`[QE-Worker] Downloading PP for ${element} from ${mirror}...`);
+        if (!downloadPPToTemp(url!, tmpFile)) {
+          console.log(`[QE-Worker] Download from ${mirror} failed for ${element}`);
+          continue;
+        }
+        if (!validatePseudopotential(tmpFile)) {
+          try { fs.unlinkSync(tmpFile); } catch {}
+          console.log(`[QE-Worker] Downloaded PP for ${element} from ${mirror} failed validation`);
+          continue;
+        }
+        if (!validateSemicorePP(element, tmpFile)) {
+          console.log(`[QE-Worker] Downloaded PP for ${element} from ${mirror} lacks semicore states, removing`);
+          try { fs.unlinkSync(tmpFile); } catch {}
+          continue;
+        }
+        fs.renameSync(tmpFile, ppFile);
+        console.log(`[QE-Worker] Downloaded valid PP for ${element} from ${mirror} (${fs.statSync(ppFile).size} bytes)`);
+        return ppFile;
+      } catch (dlErr: any) {
+        console.log(`[QE-Worker] PP download failed for ${element}: ${dlErr.message?.slice(0, 100)}`);
+        try { fs.unlinkSync(tmpFile); } catch {}
+      }
+    }
+
+    throw new Error(`No valid pseudopotential for ${element} — need a verified UPF file in ${PP_SOURCE_DIR}/${element}.UPF`);
+  } finally {
+    if (lockFd !== null) {
+      try { fs.closeSync(lockFd); } catch {}
+      try { fs.unlinkSync(lockFile); } catch {}
+    }
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
 }
 
 function estimateCOverA(elements: string[], counts: Record<string, number>): number {
@@ -630,21 +958,15 @@ function estimateBOverA(elements: string[], counts: Record<string, number>): num
 }
 
 function autoKPoints(latticeA: number, cOverA?: number, minK: number = 12, dimensionality?: string): string {
-  const densityFactor = 60;
+  const densityFactor = 80;
   const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
   const layeredBoost = isLayered ? 1.5 : 1.0;
-
-  const kab = Math.max(minK, Math.ceil(densityFactor / latticeA));
-  if (cOverA && cOverA > 1.5) {
-    const effectiveC = latticeA * cOverA;
-    const baseKc = Math.ceil(densityFactor / effectiveC);
-    const kc = Math.max(
-      Math.max(1, Math.ceil(minK / cOverA)),
-      isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc
-    );
-    return `  ${kab} ${kab} ${kc}  0 0 0`;
-  }
-  return `  ${kab} ${kab} ${kab}  0 0 0`;
+  const effCOverA = cOverA ?? 1.0;
+  const ka = Math.max(minK, Math.ceil(densityFactor / latticeA));
+  const kb = ka;
+  const baseKc = Math.ceil(densityFactor / (latticeA * effCOverA));
+  const kc = Math.max(minK, isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc);
+  return `  ${ka} ${kb} ${kc}  0 0 0`;
 }
 
 const MAGNETIC_ELEMENTS: Record<string, number> = {
@@ -675,6 +997,19 @@ function isAFMCandidate(elements: string[], counts: Record<string, number>): boo
   return false;
 }
 
+function determineAFMPattern(elements: string[], counts: Record<string, number>): "checkerboard" | "layered" | "alternating" {
+  const hasCu = elements.includes("Cu");
+  const hasO = elements.includes("O");
+  const hasFe = elements.includes("Fe");
+  const hasAs = elements.includes("As");
+  const hasP = elements.includes("P");
+
+  if (hasCu && hasO) return "layered";
+  if (hasFe && (hasAs || hasP)) return "checkerboard";
+  if (elements.includes("Mn") && hasO) return "checkerboard";
+  return "alternating";
+}
+
 function generateMagnetizationLines(
   elements: string[],
   counts: Record<string, number>,
@@ -692,14 +1027,24 @@ function generateMagnetizationLines(
 
   if (magneticIndices.length === 0) return "";
 
+  const afmPattern = useAFM ? determineAFMPattern(elements, counts) : null;
+
   for (let idx = 0; idx < elements.length; idx++) {
     const el = elements[idx];
     let mag = MAGNETIC_ELEMENTS[el] ?? 0.0;
 
     if (useAFM && mag !== 0) {
       const magSubIndex = magneticIndices.indexOf(idx);
-      if (magSubIndex >= 0 && magSubIndex % 2 === 1) {
-        mag = -mag;
+      if (magSubIndex >= 0) {
+        if (afmPattern === "checkerboard") {
+          mag = magSubIndex % 2 === 1 ? -mag : mag;
+        } else if (afmPattern === "layered") {
+          const nMag = magneticIndices.length;
+          const halfPoint = Math.ceil(nMag / 2);
+          mag = magSubIndex >= halfPoint ? -mag : mag;
+        } else {
+          mag = magSubIndex % 2 === 1 ? -mag : mag;
+        }
       }
     }
 
@@ -729,7 +1074,26 @@ function determineCrystalSystem(elements: string[], counts: Record<string, numbe
     return { ibrav: 4, cOverA };
   }
 
-  return { ibrav: 6, cOverA };
+  return { ibrav: 0, cOverA };
+}
+
+function generateCellParameters(latticeA: number, cOverA: number, ibrav: number, bOverA: number = 1.0, elements?: string[], counts?: Record<string, number>): string {
+  const a = latticeA;
+  const b = latticeA * bOverA;
+  const c = latticeA * cOverA;
+  const isHexagonal = ibrav === 4 || ((elements && counts)
+    ? determineCrystalSystem(elements, counts).ibrav === 4
+    : (cOverA > 1.4 && cOverA < 1.8 && Math.abs(bOverA - 1.0) < 0.05));
+  if (isHexagonal) {
+    return `CELL_PARAMETERS {angstrom}
+  ${a.toFixed(8)}  0.000000000  0.000000000
+  ${(-a / 2).toFixed(8)}  ${(a * Math.sqrt(3) / 2).toFixed(8)}  0.000000000
+  0.000000000  0.000000000  ${c.toFixed(8)}`;
+  }
+  return `CELL_PARAMETERS {angstrom}
+  ${a.toFixed(8)}  0.000000000  0.000000000
+  0.000000000  ${b.toFixed(8)}  0.000000000
+  0.000000000  0.000000000  ${c.toFixed(8)}`;
 }
 
 function generateSCFInput(
@@ -747,7 +1111,7 @@ function generateSCFInput(
   const hasHydrogen = elements.includes("H");
   const baseEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), hasHydrogen ? 80 : 45);
   const ecutwfc = Math.max(baseEcutwfc, hasHydrogen ? 100 : 60);
-  const ecutrho = ecutwfc * 8;
+  const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
   const nspin = hasMagnetic ? 2 : 1;
@@ -760,11 +1124,11 @@ function generateSCFInput(
 
   let atomicSpecies = "";
   for (const el of elements) {
-    const data = ELEMENT_DATA[el];
-    if (!data?.mass) {
+    const mass = getAtomicMass(el);
+    if (!mass) {
       throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
     }
-    atomicSpecies += `  ${el}  ${data.mass.toFixed(3)}  ${el}.UPF\n`;
+    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${resolvePPFilename(el)}\n`;
   }
 
   let atomicPositions = "";
@@ -773,12 +1137,9 @@ function generateSCFInput(
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
-  const { ibrav, cOverA } = determineCrystalSystem(elements, counts);
-  const celldm1 = (latticeA * 1.8897259886).toFixed(6);
-  let celldmLines = `  celldm(1) = ${celldm1},\n`;
-  if (ibrav === 4 || ibrav === 6) {
-    celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
-  }
+  const { cOverA } = determineCrystalSystem(elements, counts);
+  const bOverA = estimateBOverA(elements, counts);
+  const cellBlock = `\n${generateCellParameters(latticeA, cOverA, 0, bOverA, elements, counts)}`;
 
   return `&CONTROL
   calculation = 'scf',
@@ -792,14 +1153,14 @@ function generateSCFInput(
   etot_conv_thr = 1.0d-4,
 /
 &SYSTEM
-  ibrav = ${ibrav},
-${celldmLines}  nat = ${totalAtoms},
+  ibrav = 0,
+  nat = ${totalAtoms},
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
   occupations = 'smearing',
   smearing = 'mv',
-  degauss = 0.02,
+  degauss = 0.005,
   nspin = ${nspin},
 ${startingMagLines}/
 &ELECTRONS
@@ -815,11 +1176,12 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, cOverA)}
+${autoKPoints(latticeA, cOverA, bOverA)}
+${cellBlock}
 `;
 }
 
-function perturbCoord(v: number, sigma: number = 0.03): number {
+function perturbCoord(v: number, sigma: number = 0.005): number {
   const u1 = Math.random() || 1e-10;
   const u2 = Math.random();
   const noise = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * sigma;
@@ -830,7 +1192,7 @@ function perturbCoord(v: number, sigma: number = 0.03): number {
 
 function perturbPositions(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  sigma: number = 0.03,
+  sigma: number = 0.005,
   latticeA?: number,
 ): Array<{ element: string; x: number; y: number; z: number }> {
   if (!latticeA || latticeA <= 0) {
@@ -858,7 +1220,7 @@ function perturbPositions(
         let fdx = px - ox; fdx -= Math.round(fdx);
         let fdy = py - oy; fdy -= Math.round(fdy);
         let fdz = pz - oz; fdz -= Math.round(fdz);
-        const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+        const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA);
         const dMin = minPairDistance(result[i].element, result[j < i ? j : j].element);
         if (dist < dMin) { valid = false; break; }
       }
@@ -896,7 +1258,7 @@ function generateAtomicPositions(
         }
         if (positions.length > 0) {
           console.log(`[QE-Worker] Using ${template.name} prototype for ${formula} (${positions.length} atoms)`);
-          return perturbPositions(positions, 0.025, latticeA);
+          return perturbPositions(positions, 0.005, latticeA);
         }
       }
     } catch {}
@@ -922,7 +1284,7 @@ function generateAtomicPositions(
   if (totalAtoms <= 2 && elements.length === 2) {
     positions.push({ element: elements[0], x: 0, y: 0, z: 0 });
     positions.push({ element: elements[1], x: 0.5, y: 0.5, z: 0.5 });
-    return perturbPositions(positions, 0.02, latticeA);
+    return perturbPositions(positions, 0.005, latticeA);
   }
 
   if (totalAtoms <= 2 && elements.length === 1) {
@@ -930,7 +1292,7 @@ function generateAtomicPositions(
     if (totalAtoms > 1) {
       positions.push({ element: elements[0], x: 0.5, y: 0.5, z: 0.5 });
     }
-    return perturbPositions(positions, 0.02, latticeA);
+    return perturbPositions(positions, 0.005, latticeA);
   }
 
   const hCount = Math.round(counts["H"] || 0);
@@ -939,46 +1301,58 @@ function generateAtomicPositions(
 
   if (hCount > 0 && metalCount > 0 && hCount / metalCount >= 4) {
     const hPerMetal = Math.round(hCount / metalCount);
-    const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms, latticeA ?? 5.0);
+    const effectiveLatticeA = latticeA ?? estimateLatticeConstant(elements, counts);
+    const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms, effectiveLatticeA);
     if (cagePositions.length === totalAtoms && cagePositions.length <= 16) {
       if (latticeA && latticeA > 0) {
         const distValid = validatePositionDistances(cagePositions, latticeA);
         if (distValid) {
           console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms, dist-checked)`);
-          return perturbPositions(cagePositions, 0.02, latticeA);
+          return perturbPositions(cagePositions, 0.005, latticeA);
         } else {
           console.log(`[QE-Worker] Hydride cage for ${formula} failed distance check, trying lattice-free fallback`);
         }
       } else {
         console.log(`[QE-Worker] Using hydride cage motif for ${formula} (H/metal=${hPerMetal}, ${cagePositions.length} atoms)`);
-        return perturbPositions(cagePositions, 0.03);
+        return perturbPositions(cagePositions, 0.005);
       }
     }
   }
 
-  const cubicSitesSets = [
-    [
-      [0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5],
-      [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.25, 0.75, 0.75],
-      [0.75, 0.25, 0.75], [0.75, 0.75, 0.75], [0.25, 0.25, 0.75], [0.75, 0.25, 0.25],
-      [0.25, 0.75, 0.25], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25], [0.25, 0.25, 0.0],
-    ],
-    [
-      [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5],
-      [0.5, 0.5, 0.5], [0.25, 0.25, 0.0], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25],
-      [0.75, 0.75, 0.5], [0.75, 0.5, 0.75], [0.5, 0.75, 0.75], [0.75, 0.25, 0.5],
-      [0.25, 0.75, 0.5], [0.5, 0.25, 0.75], [0.5, 0.75, 0.25], [0.75, 0.5, 0.25],
-    ],
-    [
-      [0.0, 0.0, 0.0], [0.333, 0.333, 0.0], [0.667, 0.667, 0.0],
-      [0.0, 0.0, 0.5], [0.333, 0.333, 0.5], [0.667, 0.667, 0.5],
-      [0.167, 0.167, 0.25], [0.5, 0.5, 0.25], [0.833, 0.833, 0.25],
-      [0.167, 0.167, 0.75], [0.5, 0.5, 0.75], [0.833, 0.833, 0.75],
-      [0.25, 0.0, 0.125], [0.0, 0.25, 0.375], [0.75, 0.5, 0.125], [0.5, 0.75, 0.375],
-    ],
+  const BCC_ELEMENTS = new Set(["Fe", "Cr", "V", "Nb", "Mo", "W", "Ta", "Na", "K", "Rb", "Cs", "Ba", "Li"]);
+  const HCP_ELEMENTS = new Set(["Ti", "Zr", "Hf", "Mg", "Be", "Sc", "Y", "Co", "Zn", "Cd", "Re", "Os", "Ru"]);
+
+  const fccSites = [
+    [0.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5],
+    [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.25, 0.75, 0.75],
+    [0.75, 0.25, 0.75], [0.75, 0.75, 0.75], [0.25, 0.25, 0.75], [0.75, 0.25, 0.25],
+    [0.25, 0.75, 0.25], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25], [0.25, 0.25, 0.0],
+  ];
+  const bccSites = [
+    [0.0, 0.0, 0.0], [0.5, 0.5, 0.5],
+    [0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5],
+    [0.25, 0.25, 0.0], [0.0, 0.25, 0.25], [0.25, 0.0, 0.25],
+    [0.75, 0.75, 0.5], [0.75, 0.5, 0.75], [0.5, 0.75, 0.75], [0.75, 0.25, 0.5],
+    [0.25, 0.75, 0.5], [0.5, 0.25, 0.75], [0.5, 0.75, 0.25], [0.75, 0.5, 0.25],
+  ];
+  const hcpSites = [
+    [0.0, 0.0, 0.0], [0.333, 0.333, 0.0], [0.667, 0.667, 0.0],
+    [0.0, 0.0, 0.5], [0.333, 0.333, 0.5], [0.667, 0.667, 0.5],
+    [0.167, 0.167, 0.25], [0.5, 0.5, 0.25], [0.833, 0.833, 0.25],
+    [0.167, 0.167, 0.75], [0.5, 0.5, 0.75], [0.833, 0.833, 0.75],
+    [0.25, 0.0, 0.125], [0.0, 0.25, 0.375], [0.75, 0.5, 0.125], [0.5, 0.75, 0.375],
   ];
 
-  const cubicSites = cubicSitesSets[Math.floor(Math.random() * cubicSitesSets.length)];
+  const bccCount = elements.reduce((s, e) => s + (BCC_ELEMENTS.has(e) ? Math.round(counts[e] || 1) : 0), 0);
+  const hcpCount = elements.reduce((s, e) => s + (HCP_ELEMENTS.has(e) ? Math.round(counts[e] || 1) : 0), 0);
+  let cubicSites: number[][];
+  if (bccCount > hcpCount && bccCount > 0) {
+    cubicSites = bccSites;
+  } else if (hcpCount > bccCount && hcpCount > 0) {
+    cubicSites = hcpSites;
+  } else {
+    cubicSites = fccSites;
+  }
 
   let siteIdx = 0;
   const pendingAtoms: Array<{ element: string; remaining: number }> = [];
@@ -1010,7 +1384,7 @@ function generateAtomicPositions(
               let fdx = x - p.x; fdx -= Math.round(fdx);
               let fdy = y - p.y; fdy -= Math.round(fdy);
               let fdz = z - p.z; fdz -= Math.round(fdz);
-              const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+              const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA);
               const dMin = 0.75 * ((COVALENT_RADIUS[element] ?? 1.4) + (COVALENT_RADIUS[p.element] ?? 1.4));
               if (dist < dMin) { valid = false; break; }
             }
@@ -1021,14 +1395,39 @@ function generateAtomicPositions(
           break;
         }
         if (!placed) {
-          positions.push({ element, x: Math.random(), y: Math.random(), z: Math.random() });
+          let relaxedPlaced = false;
+          for (let relaxAttempt = 0; relaxAttempt < 100; relaxAttempt++) {
+            const x = Math.random();
+            const y = Math.random();
+            const z = Math.random();
+            let valid = true;
+            if (latticeA && latticeA > 0) {
+              for (const p of positions) {
+                let fdx = x - p.x; fdx -= Math.round(fdx);
+                let fdy = y - p.y; fdy -= Math.round(fdy);
+                let fdz = z - p.z; fdz -= Math.round(fdz);
+                const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA);
+                const dMin = 0.5 * ((COVALENT_RADIUS[element] ?? 1.4) + (COVALENT_RADIUS[p.element] ?? 1.4));
+                if (dist < dMin) { valid = false; break; }
+              }
+            }
+            if (valid) {
+              positions.push({ element, x, y, z });
+              relaxedPlaced = true;
+              console.log(`[QE-Worker] Atom ${element} placed with relaxed distance check (0.5×r_cov) after 200 strict attempts failed`);
+              break;
+            }
+          }
+          if (!relaxedPlaced) {
+            throw new Error(`Cannot place ${element} — cell too small for ${totalAtoms} atoms at latticeA=${latticeA?.toFixed(2) ?? "?"}Å`);
+          }
         }
       }
     }
     console.log(`[QE-Worker] Placed ${positions.length} atoms total (${positions.length - cubicSites.length} at generated positions, dist-enforced)`);
   }
 
-  return perturbPositions(positions, 0.03, latticeA);
+  return perturbPositions(positions, 0.005, latticeA);
 }
 
 function validatePositionDistances(
@@ -1040,7 +1439,7 @@ function validatePositionDistances(
       let fdx = positions[i].x - positions[j].x; fdx -= Math.round(fdx);
       let fdy = positions[i].y - positions[j].y; fdy -= Math.round(fdy);
       let fdz = positions[i].z - positions[j].z; fdz -= Math.round(fdz);
-      const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+      const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA);
       const dMin = 0.75 * ((COVALENT_RADIUS[positions[i].element] ?? 1.4) + (COVALENT_RADIUS[positions[j].element] ?? 1.4));
       if (dist < dMin) return false;
     }
@@ -1057,7 +1456,8 @@ function repairStructureGeometry(
   const MAX_RESCALES = 3;
   let rescaleCount = 0;
   let repaired = false;
-  const pressureScale = pressureGPa > 50 ? computePressureScale(pressureGPa) : 1.0;
+  const repairEls = Array.from(new Set(positions.map(p => p.element)));
+  const pressureScale = pressureGPa > 50 ? computePressureScale(pressureGPa, repairEls) : 1.0;
   let curPositions = positions.map(p => ({ ...p }));
   let curLattice = latticeA;
 
@@ -1073,7 +1473,7 @@ function repairStructureGeometry(
         fdx -= Math.round(fdx);
         fdy -= Math.round(fdy);
         fdz -= Math.round(fdz);
-        const dist = Math.sqrt((fdx * curLattice) ** 2 + (fdy * curLattice) ** 2 + (fdz * curLattice) ** 2);
+        const dist = fracDistAngstrom(fdx, fdy, fdz, curLattice);
         const dMin = 0.7 * ((COVALENT_RADIUS[curPositions[i].element] ?? 1.4) + (COVALENT_RADIUS[curPositions[j].element] ?? 1.4)) * pressureScale;
 
         if (dist < dMin && dist > 0.01) {
@@ -1121,16 +1521,26 @@ function repairStructureGeometry(
   return { positions: curPositions, latticeA: curLattice, repaired };
 }
 
-function inferCrystalSystem(latticeA: number): string {
-  return "cubic";
+function inferCrystalSystem(elements: string[], counts: Record<string, number>): string {
+  const { ibrav } = determineCrystalSystem(elements, counts);
+  if (ibrav === 1) return "cubic";
+  if (ibrav === 4) return "hexagonal";
+  const cOverA = estimateCOverA(elements, counts);
+  if (Math.abs(cOverA - 1.0) < 0.15) return "cubic";
+  if (cOverA > 1.4 && cOverA < 1.8) return "hexagonal";
+  const bOverA = estimateBOverA(elements, counts);
+  if (Math.abs(bOverA - 1.0) < 0.05) return "tetragonal";
+  return "orthorhombic";
 }
 
 function snapToWyckoffSites(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
+  elements?: string[],
+  counts?: Record<string, number>,
 ): { positions: Array<{ element: string; x: number; y: number; z: number }>; snapped: boolean; snapCount: number } {
   const allDists = getAllDistributions();
-  const system = inferCrystalSystem(latticeA);
+  const system = (elements && counts) ? inferCrystalSystem(elements, counts) : "cubic";
   const dist = allDists.find(d => d.system === system) || allDists[0];
   const wyckoffSites = dist.commonWyckoff;
 
@@ -1144,6 +1554,7 @@ function snapToWyckoffSites(
 
   for (let i = 0; i < snappedPositions.length; i++) {
     const pos = snappedPositions[i];
+    const origX = pos.x, origY = pos.y, origZ = pos.z;
     const pref = getElementSitePreference(pos.element);
     let bestDist = Infinity;
     let bestSite: { typicalX: number; typicalY: number; typicalZ: number } | null = null;
@@ -1202,7 +1613,25 @@ function snapToWyckoffSites(
       pos.x -= Math.floor(pos.x);
       pos.y -= Math.floor(pos.y);
       pos.z -= Math.floor(pos.z);
-      snapCount++;
+
+      let collision = false;
+      for (let j = 0; j < snappedPositions.length; j++) {
+        if (j === i) continue;
+        let fdx = pos.x - snappedPositions[j].x; fdx -= Math.round(fdx);
+        let fdy = pos.y - snappedPositions[j].y; fdy -= Math.round(fdy);
+        let fdz = pos.z - snappedPositions[j].z; fdz -= Math.round(fdz);
+        const pairDist = fracDistAngstrom(fdx, fdy, fdz, latticeA);
+        const dMin = minPairDistance(pos.element, snappedPositions[j].element);
+        if (pairDist < dMin) { collision = true; break; }
+      }
+
+      if (collision) {
+        pos.x = origX;
+        pos.y = origY;
+        pos.z = origZ;
+      } else {
+        snapCount++;
+      }
     }
   }
 
@@ -1289,7 +1718,7 @@ function generateHydrideCagePositions(
         let fdx = hx - p.x; fdx -= Math.round(fdx);
         let fdy = hy - p.y; fdy -= Math.round(fdy);
         let fdz = hz - p.z; fdz -= Math.round(fdz);
-        const dist = Math.sqrt((fdx * latticeA) ** 2 + (fdy * latticeA) ** 2 + (fdz * latticeA) ** 2);
+        const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA);
         const dMin = p.element === "H" ? 1.0 : 0.75 * ((COVALENT_RADIUS["H"] ?? 0.31) + (COVALENT_RADIUS[p.element] ?? 1.4));
         if (dist < dMin) { tooClose = true; break; }
       }
@@ -1349,7 +1778,7 @@ function generatePhononInput(formula: string, elements: string[] = []): string {
 `;
 }
 
-function parseSCFOutput(stdout: string): QESCFResult {
+function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult {
   const result: QESCFResult = {
     totalEnergy: 0,
     totalEnergyPerAtom: 0,
@@ -1359,6 +1788,8 @@ function parseSCFOutput(stdout: string): QESCFResult {
     totalForce: null,
     pressure: null,
     converged: false,
+    convergenceQuality: "none",
+    lastScfAccuracyRy: null,
     nscfIterations: 0,
     wallTimeSeconds: 0,
     magnetization: null,
@@ -1368,28 +1799,29 @@ function parseSCFOutput(stdout: string): QESCFResult {
   const convergenceMatch = stdout.match(/convergence has been achieved in\s+(\d+)\s+iterations/);
   if (convergenceMatch) {
     result.converged = true;
+    result.convergenceQuality = "strict";
     result.nscfIterations = parseInt(convergenceMatch[1]);
   }
 
-  if (!result.converged) {
-    const iterMatches = [...stdout.matchAll(/estimated scf accuracy\s+<\s+([\d.Ee+-]+)\s+Ry/g)];
-    if (iterMatches.length > 0) {
-      const lastAccuracy = parseFloat(iterMatches[iterMatches.length - 1][1]);
-      result.nscfIterations = iterMatches.length;
-      if (lastAccuracy < 1.0e-3) {
-        result.converged = true;
-      }
+  const iterMatches = Array.from(stdout.matchAll(/estimated scf accuracy\s+<\s+([\d.Ee+-]+)\s+Ry/g));
+  if (iterMatches.length > 0) {
+    const lastAccuracy = parseFloat(iterMatches[iterMatches.length - 1][1]);
+    result.lastScfAccuracyRy = lastAccuracy;
+    result.nscfIterations = Math.max(result.nscfIterations, iterMatches.length);
+    if (!result.converged && lastAccuracy < 1.0e-5) {
+      result.converged = true;
+      result.convergenceQuality = "loose";
     }
   }
 
   const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
   if (energyMatch) {
-    result.totalEnergy = parseFloat(energyMatch[1]) * 13.6057;
+    result.totalEnergy = parseFloat(energyMatch[1]) * RY_TO_EV;
   }
   if (!energyMatch) {
     const energyLines = [...stdout.matchAll(/total energy\s+=\s+([-\d.]+)\s+Ry/g)];
     if (energyLines.length > 0) {
-      result.totalEnergy = parseFloat(energyLines[energyLines.length - 1][1]) * 13.6057;
+      result.totalEnergy = parseFloat(energyLines[energyLines.length - 1][1]) * RY_TO_EV;
     }
   }
 
@@ -1407,11 +1839,12 @@ function parseSCFOutput(stdout: string): QESCFResult {
   if (gapMatch) {
     if (gapMatch[2]) {
       result.bandGap = parseFloat(gapMatch[2]) - parseFloat(gapMatch[1]);
-      result.isMetallic = result.bandGap < 0.01;
     } else {
       result.bandGap = parseFloat(gapMatch[1]);
-      result.isMetallic = result.bandGap < 0.01;
     }
+    const degaussEv = degaussRy * RY_TO_EV;
+    const metallicThreshold = Math.max(0.01, degaussEv * 1.5);
+    result.isMetallic = result.bandGap < metallicThreshold;
   }
 
   const forceMatch = stdout.match(/Total force\s+=\s+([\d.]+)/);
@@ -1514,6 +1947,8 @@ function softValidateGeometry(
   latticeA: number,
   _isRelaxed: boolean,
   pressureGPa: number = 0,
+  cOverA: number = 1.0,
+  gammaRad: number = Math.PI / 2,
 ): { valid: boolean; reason: string; warnings: string[] } {
   const warnings: string[] = [];
   if (positions.length === 0) return { valid: false, reason: "No atomic positions", warnings };
@@ -1525,7 +1960,8 @@ function softValidateGeometry(
   if (latticeA > 50) return { valid: false, reason: `Lattice constant too large: ${latticeA.toFixed(2)} A (max 50)`, warnings };
 
   const totalAtoms = positions.length;
-  const volumeAng3 = latticeA ** 3;
+  const sinG = Math.sin(gammaRad);
+  const volumeAng3 = latticeA * latticeA * latticeA * cOverA * sinG;
   const volumePerAtom = volumeAng3 / totalAtoms;
   const hasHydrogen = positions.some(p => p.element === "H");
   const minVolPerAtom = isHighPressure ? (hasHydrogen ? 1.5 : 3.0) : (hasHydrogen ? 2.5 : 5.0);
@@ -1533,7 +1969,8 @@ function softValidateGeometry(
     return { valid: false, reason: `Volume per atom too small: ${volumePerAtom.toFixed(1)} A^3 (min ${minVolPerAtom}${isHighPressure ? " @HP" : ""})`, warnings };
   }
 
-  const pressureDistScale = isHighPressure ? computePressureScale(pressureGPa) : 1.0;
+  const posEls = Array.from(new Set(positions.map(p => p.element)));
+  const pressureDistScale = isHighPressure ? computePressureScale(pressureGPa, posEls) : 1.0;
 
   let closestDist = Infinity;
   let closestPair = "";
@@ -1545,10 +1982,7 @@ function softValidateGeometry(
       fdx -= Math.round(fdx);
       fdy -= Math.round(fdy);
       fdz -= Math.round(fdz);
-      const dx = fdx * latticeA;
-      const dy = fdy * latticeA;
-      const dz = fdz * latticeA;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, 1.0, gammaRad);
       const dMin = minPairDistance(positions[i].element, positions[j].element) * pressureDistScale;
       if (dist < dMin) {
         return {
@@ -1633,7 +2067,7 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   }
 
   for (const el of elements) {
-    if (!ELEMENT_DATA[el]) {
+    if (!ELEMENT_DATA[el] && !getElementData(el)) {
       return { valid: false, reason: `Unsupported element: ${el}` };
     }
   }
@@ -1650,7 +2084,8 @@ function tryXTBPreRelaxation(
   try {
     if (!fs.existsSync(XTB_BIN)) return null;
 
-    const scale = pressureGpa > 0 ? computePressureScale(pressureGpa) : 1.0;
+    const preRelaxElements = Array.from(new Set(positions.map(p => p.element)));
+    const scale = pressureGpa > 0 ? computePressureScale(pressureGpa, preRelaxElements) : 1.0;
     const effectiveLattice = latticeA * scale;
     const xyzPath = path.join(workDir, "pre_relax.xyz");
     const nAtoms = positions.length;
@@ -1789,26 +2224,30 @@ function generateSCFInputWithParams(
   const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), hasHydrogen2 ? 80 : 45);
   const baseEcutwfc = Math.max(rawEcutwfc, hasHydrogen2 ? 100 : 60);
   const ecutwfc = baseEcutwfc + (params.ecutwfcBoost ?? 0);
-  const ecutrho = ecutwfc * 8;
+  const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
   const smearing = params.smearing || "mv";
-  const degauss = params.degauss || 0.02;
+  const degauss = params.degauss || 0.005;
   const convThr = params.convThr ?? "1.0d-4";
   const forcConvThr = params.forcConvThr ?? "1.0d-2";
   const etotConvThr = params.etotConvThr ?? "1.0d-4";
 
   let atomicSpecies = "";
   for (const el of elements) {
-    const data = ELEMENT_DATA[el];
-    if (!data?.mass) {
+    const mass = getAtomicMass(el);
+    if (!mass) {
       throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
     }
-    atomicSpecies += `  ${el}  ${data.mass.toFixed(3)}  ${el}.UPF\n`;
+    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${resolvePPFilename(el)}\n`;
   }
 
   let atomicPositions = "";
   for (const pos of positions) {
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
+
+  const cOverA2 = estimateCOverA(elements, counts);
+  const bOverA2 = estimateBOverA(elements, counts);
+  const cellBlock2 = `\n${generateCellParameters(latticeA, cOverA2, 0, bOverA2, elements, counts)}`;
 
   return `&CONTROL
   calculation = 'scf',
@@ -1822,8 +2261,7 @@ function generateSCFInputWithParams(
   etot_conv_thr = ${etotConvThr},
 /
 &SYSTEM
-  ibrav = 1,
-  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
+  ibrav = 0,
   nat = ${totalAtoms},
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
@@ -1846,7 +2284,8 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, estimateCOverA(elements, counts))}
+${autoKPoints(latticeA, cOverA2, bOverA2)}
+${cellBlock2}
 `;
 }
 
@@ -1867,7 +2306,7 @@ function generateVCRelaxInput(
   const hasHydrogen = elements.includes("H");
   const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_VCR[el] ?? 45), hasHydrogen ? 80 : 45);
   const ecutwfc = Math.max(rawEcutwfc, hasHydrogen ? 100 : 60);
-  const ecutrho = ecutwfc * 8;
+  const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
   const nspin = hasMagnetic ? 2 : 1;
@@ -1878,11 +2317,11 @@ function generateVCRelaxInput(
 
   let atomicSpecies = "";
   for (const el of elements) {
-    const data = ELEMENT_DATA[el];
-    if (!data?.mass) {
+    const mass = getAtomicMass(el);
+    if (!mass) {
       throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
     }
-    atomicSpecies += `  ${el}  ${data.mass.toFixed(3)}  ${el}.UPF\n`;
+    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${resolvePPFilename(el)}\n`;
   }
 
   let atomicPositions = "";
@@ -1892,6 +2331,10 @@ function generateVCRelaxInput(
 
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const cOverA = estimateCOverA(elements, counts);
+  const bOverAVcr = estimateBOverA(elements, counts);
+  const cellBlock = `\n${generateCellParameters(latticeA, cOverA, 0, bOverAVcr, elements, counts)}`;
+  const hasMagneticEl = elements.some(el => el in MAGNETIC_ELEMENTS);
+  const vcRelaxDegauss = hasMagneticEl ? 0.02 : 0.015;
 
   return `&CONTROL
   calculation = 'vc-relax',
@@ -1906,15 +2349,14 @@ function generateVCRelaxInput(
   nstep = 100,
 /
 &SYSTEM
-  ibrav = 1,
-  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
+  ibrav = 0,
   nat = ${totalAtoms},
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
   occupations = 'smearing',
   smearing = 'mv',
-  degauss = 0.02,
+  degauss = ${vcRelaxDegauss},
   nspin = ${nspin},
 ${magLines}/
 &ELECTRONS
@@ -1930,7 +2372,7 @@ ${magLines}/
 /
 &CELL
   cell_dynamics = 'bfgs',
-  press = ${(pressureGPa * 10.0).toFixed(1)},
+  press = ${(pressureGPa * 10.0).toFixed(4)},
   press_conv_thr = ${pressureGPa > 50 ? 1.0 : 0.5},
 /
 ATOMIC_SPECIES
@@ -1938,7 +2380,8 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, cOverA)}
+${autoKPoints(latticeA, cOverA, bOverAVcr)}
+${cellBlock}
 `;
 }
 
@@ -1974,7 +2417,7 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
 
   const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
   if (energyMatch) {
-    result.totalEnergy = parseFloat(energyMatch[1]) * 13.6057;
+    result.totalEnergy = parseFloat(energyMatch[1]) * RY_TO_EV;
   }
 
   const wallMatch = stdout.match(/WALL\s*:\s*(\d+)m?\s*([\d.]+)s/i) || stdout.match(/PWSCF\s*:\s*(?:(\d+)h)?(\d+)m\s*([\d.]+)s/i);
@@ -2002,38 +2445,85 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
       const a1 = Math.sqrt(vectors[0][0]**2 + vectors[0][1]**2 + vectors[0][2]**2);
       if (unit.includes("bohr")) {
         result.finalLatticeBohr = a1;
-        result.finalLatticeAng = a1 * 0.529177;
+        result.finalLatticeAng = a1 * BOHR_TO_ANG;
       } else if (unit.includes("angstrom")) {
         result.finalLatticeAng = a1;
-        result.finalLatticeBohr = a1 / 0.529177;
+        result.finalLatticeBohr = a1 / BOHR_TO_ANG;
       } else {
         const celldmMatch = stdout.match(/celldm\(1\)\s*=\s*([\d.]+)/);
         if (celldmMatch) {
           const celldm1 = parseFloat(celldmMatch[1]);
           result.finalLatticeBohr = a1 * celldm1;
-          result.finalLatticeAng = result.finalLatticeBohr * 0.529177;
+          result.finalLatticeAng = result.finalLatticeBohr * BOHR_TO_ANG;
         } else {
           result.finalLatticeBohr = a1;
-          result.finalLatticeAng = a1 * 0.529177;
+          result.finalLatticeAng = a1 * BOHR_TO_ANG;
         }
       }
     }
+  }
+
+  let cellVectorsAng: number[][] | null = null;
+  if (result.finalCellVectors && cellLines) {
+    const cellUnit = cellLines[1].toLowerCase();
+    if (cellUnit.includes("angstrom")) {
+      cellVectorsAng = result.finalCellVectors;
+    } else if (cellUnit.includes("bohr")) {
+      cellVectorsAng = result.finalCellVectors.map(row => row.map(v => v * BOHR_TO_ANG));
+    } else {
+      const celldmMatch = stdout.match(/celldm\(1\)\s*=\s*([\d.]+)/);
+      const alatAng = celldmMatch ? parseFloat(celldmMatch[1]) * BOHR_TO_ANG : (result.finalLatticeAng ?? 1.0);
+      cellVectorsAng = result.finalCellVectors.map(row => row.map(v => v * alatAng));
+    }
+  }
+
+  function invertCell3x3(v: number[][]): number[][] | null {
+    const det = v[0][0]*(v[1][1]*v[2][2]-v[1][2]*v[2][1])
+              - v[0][1]*(v[1][0]*v[2][2]-v[1][2]*v[2][0])
+              + v[0][2]*(v[1][0]*v[2][1]-v[1][1]*v[2][0]);
+    if (Math.abs(det) < 1e-10) return null;
+    return [
+      [(v[1][1]*v[2][2]-v[1][2]*v[2][1])/det, (v[0][2]*v[2][1]-v[0][1]*v[2][2])/det, (v[0][1]*v[1][2]-v[0][2]*v[1][1])/det],
+      [(v[1][2]*v[2][0]-v[1][0]*v[2][2])/det, (v[0][0]*v[2][2]-v[0][2]*v[2][0])/det, (v[0][2]*v[1][0]-v[0][0]*v[1][2])/det],
+      [(v[1][0]*v[2][1]-v[1][1]*v[2][0])/det, (v[0][1]*v[2][0]-v[0][0]*v[2][1])/det, (v[0][0]*v[1][1]-v[0][1]*v[1][0])/det],
+    ];
   }
 
   const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL|\n\s*Writing)/g)];
   if (posBlocks.length > 0) {
     const lastBlock = posBlocks[posBlocks.length - 1];
     const coordType = lastBlock[1].toLowerCase();
-    const lines = lastBlock[2].trim().split("\n");
+    const lines = lastBlock[2].trim().split("\n").filter((l: string) => l.trim().length > 0 && !l.trim().startsWith("!") && !l.trim().startsWith("#"));
     const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
       if (parts.length >= 4) {
         const el = parts[0];
-        const x = parseFloat(parts[1]);
-        const y = parseFloat(parts[2]);
-        const z = parseFloat(parts[3]);
+        let x = parseFloat(parts[1]);
+        let y = parseFloat(parts[2]);
+        let z = parseFloat(parts[3]);
         if (!isNaN(x) && !isNaN(y) && !isNaN(z) && el.match(/^[A-Z][a-z]?$/)) {
+          if (coordType !== "crystal") {
+            let posAng = [x, y, z];
+            if (coordType === "bohr") {
+              posAng = [x * BOHR_TO_ANG, y * BOHR_TO_ANG, z * BOHR_TO_ANG];
+            } else if (coordType === "alat") {
+              const celldmMatch2 = stdout.match(/celldm\(1\)\s*=\s*([\d.]+)/);
+              const alatAng = celldmMatch2 ? parseFloat(celldmMatch2[1]) * BOHR_TO_ANG : (result.finalLatticeAng ?? 1.0);
+              posAng = [x * alatAng, y * alatAng, z * alatAng];
+            }
+            const inv = cellVectorsAng ? invertCell3x3(cellVectorsAng) : null;
+            if (inv) {
+              x = inv[0][0]*posAng[0] + inv[0][1]*posAng[1] + inv[0][2]*posAng[2];
+              y = inv[1][0]*posAng[0] + inv[1][1]*posAng[1] + inv[1][2]*posAng[2];
+              z = inv[2][0]*posAng[0] + inv[2][1]*posAng[1] + inv[2][2]*posAng[2];
+            } else {
+              const lat = result.finalLatticeAng ?? 1.0;
+              x = posAng[0] / lat;
+              y = posAng[1] / lat;
+              z = posAng[2] / lat;
+            }
+          }
           positions.push({ element: el, x, y, z });
         }
       }
@@ -2051,26 +2541,58 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
     const proc = spawn(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let resolved = false;
+    let stdoutEnded = false;
+    let stderrEnded = false;
+    let exitCode: number | null = null;
+
+    function tryResolve() {
+      if (resolved) return;
+      if (stdoutEnded && stderrEnded && exitCode !== null) {
+        resolved = true;
+        clearTimeout(timeout);
+        if (killTimeout) clearTimeout(killTimeout);
+        resolve({ stdout, stderr, exitCode: exitCode ?? -1 });
+      }
+    }
 
     const inputStream = fs.createReadStream(inputFile);
-    inputStream.pipe(proc.stdin);
+    inputStream.on("error", (err: Error) => {
+      stderr += `\nInput file error: ${err.message}`;
+      try { proc.stdin.end(); } catch {}
+    });
+    inputStream.pipe(proc.stdin).on("error", () => {});
 
     proc.stdout.on("data", (data: Buffer) => { stdout += data.toString(); });
     proc.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
+    proc.stdout.on("end", () => { stdoutEnded = true; tryResolve(); });
+    proc.stderr.on("end", () => { stderrEnded = true; tryResolve(); });
 
+    let killTimeout: ReturnType<typeof setTimeout> | null = null;
     const timeout = setTimeout(() => {
-      proc.kill("SIGKILL");
-      resolve({ stdout, stderr: stderr + "\nTIMEOUT: QE calculation exceeded time limit", exitCode: -1 });
+      if (resolved) return;
+      try { proc.kill("SIGTERM"); } catch {}
+      killTimeout = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        try { proc.kill("SIGKILL"); } catch {}
+        try { inputStream.destroy(); } catch {}
+        resolve({ stdout, stderr: stderr + "\nTIMEOUT: QE calculation exceeded time limit", exitCode: -1 });
+      }, 2000);
     }, QE_TIMEOUT_MS);
 
     proc.on("close", (code: number | null) => {
-      clearTimeout(timeout);
-      resolve({ stdout, stderr, exitCode: code ?? -1 });
+      exitCode = code ?? -1;
+      tryResolve();
     });
 
     proc.on("error", (err: Error) => {
+      if (resolved) return;
+      resolved = true;
       clearTimeout(timeout);
-      resolve({ stdout, stderr: err.message, exitCode: -1 });
+      if (killTimeout) clearTimeout(killTimeout);
+      try { inputStream.destroy(); } catch {}
+      resolve({ stdout, stderr: stderr + `\n${err.message}`, exitCode: -1 });
     });
   });
 }
@@ -2138,24 +2660,28 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     }
 
-    let latticeA = estimateLatticeConstant(elements, counts);
     result.ppValidated = true;
     const workerPressure = result.estimatedPressureGPa ?? 0;
+    let latticeA = estimateLatticeConstant(elements, counts, workerPressure);
+    result.initialLatticeA = latticeA;
 
     if (workerPressure > 0) {
-      const pressureScale = computePressureScale(workerPressure);
-      const originalLattice = latticeA;
-      latticeA = latticeA * pressureScale;
-      console.log(`[QE-Worker] Compressed lattice for ${formula} under ${workerPressure} GPa: ${originalLattice.toFixed(3)} -> ${latticeA.toFixed(3)} A (scale=${pressureScale.toFixed(3)})`);
+      console.log(`[QE-Worker] Lattice for ${formula} Murnaghan-compressed for ${workerPressure} GPa: ${latticeA.toFixed(3)} A (B0=${estimateBulkModulus(elements).toFixed(0)} GPa)`);
     }
 
     let positions = generateAtomicPositions(elements, counts, formula, latticeA);
+    result.initialPositions = positions.map(p => ({ ...p }));
 
     let protoDimensionality: string | undefined;
     try {
       const proto = selectPrototype(formula);
-      if (proto) result.prototypeUsed = proto.template.name;
-    } catch {}
+      if (proto) {
+        result.prototypeUsed = proto.template.name;
+        console.log(`[QE-Worker] Prototype matched for ${formula}: ${proto.template.name}`);
+      }
+    } catch (protoErr: any) {
+      console.log(`[QE-Worker] Prototype selection failed for ${formula}: ${protoErr.message?.slice(0, 150) ?? "unknown error"} — using generated positions`);
+    }
     try {
       const protoMatch = matchPrototype(formula);
       if (protoMatch?.dimensionality) {
@@ -2171,28 +2697,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     if (positions.length >= 2) {
-      const snapResult = snapToWyckoffSites(positions, latticeA);
+      const snapResult = snapToWyckoffSites(positions, latticeA, elements, counts);
       if (snapResult.snapped) {
         positions = snapResult.positions;
-        console.log(`[QE-Worker] Wyckoff-snapped ${snapResult.snapCount}/${positions.length} atoms for ${formula} (helps DFT convergence)`);
-
-        const postSnapRepair = repairStructureGeometry(positions, latticeA, workerPressure);
-        if (postSnapRepair.repaired) {
-          positions = postSnapRepair.positions;
-          latticeA = postSnapRepair.latticeA;
-        }
+        console.log(`[QE-Worker] Wyckoff-snapped ${snapResult.snapCount}/${positions.length} atoms for ${formula} (collision-checked, no post-snap repair needed)`);
       }
     }
 
-    const preXtbFingerprint = computeStructureFingerprint(positions, latticeA);
-    if (isStructureDuplicate(preXtbFingerprint, formula)) {
-      result.error = `Duplicate structure (fingerprint=${preXtbFingerprint.slice(0, 8)})`;
-      result.failureStage = "duplicate";
-      result.rejectionReason = "Duplicate structure fingerprint already computed";
-      stageFailureCounts.duplicate++;
-      console.log(`[QE-Worker] ${formula} skipped: duplicate structure before xTB (fingerprint=${preXtbFingerprint.slice(0, 12)})`);
-      return result;
-    }
+    const fpCoverA = estimateCOverA(elements, counts);
+    const { ibrav: fpIbrav } = determineCrystalSystem(elements, counts);
+    const fpGamma = fpIbrav === 4 ? (2 * Math.PI / 3) : (Math.PI / 2);
 
     const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
     result.xtbPreRelaxed = !!relaxed;
@@ -2200,14 +2714,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       positions = relaxed;
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
 
-      const postXtbGeom = softValidateGeometry(positions, latticeA, true, workerPressure);
+      const postXtbGeom = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma);
       if (!postXtbGeom.valid) {
         const xtbRepair = repairStructureGeometry(positions, latticeA, workerPressure);
         if (xtbRepair.repaired) {
           positions = xtbRepair.positions;
           latticeA = xtbRepair.latticeA;
           console.log(`[QE-Worker] Repaired post-xTB geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
-          const recheck = softValidateGeometry(positions, latticeA, true, workerPressure);
+          const recheck = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma);
           if (!recheck.valid) {
             result.error = `Geometry rejected (post-xTB repair failed): ${recheck.reason}`;
             result.failureStage = "geometry";
@@ -2232,18 +2746,30 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
     if (stabilityCheck && !stabilityCheck.stable) {
-      result.error = `xTB stability pre-filter: E/atom = ${stabilityCheck.ePerAtom.toFixed(3)} eV (must be < -1.0 eV/atom)`;
+      result.error = `xTB stability pre-filter: ${stabilityCheck.basis}`;
       result.failureStage = "xtb_prefilter";
-      result.rejectionReason = `Unstable: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV`;
+      result.rejectionReason = `Unstable: ${stabilityCheck.basis}`;
       stageFailureCounts.xtb_prefilter++;
-      console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: E/atom=${stabilityCheck.ePerAtom.toFixed(3)} eV (threshold: < -1.0 eV/atom)${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
+      console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: ${stabilityCheck.basis}${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
+      return result;
+    }
+
+    const postRelaxFingerprint = computeStructureFingerprint(positions, latticeA, fpCoverA, fpGamma);
+    if (isStructureDuplicate(postRelaxFingerprint, formula)) {
+      result.error = `Duplicate structure after relaxation (fingerprint=${postRelaxFingerprint.slice(0, 8)})`;
+      result.failureStage = "duplicate";
+      result.rejectionReason = "Duplicate structure fingerprint (post-relaxation)";
+      stageFailureCounts.duplicate++;
+      console.log(`[QE-Worker] ${formula} skipped: duplicate structure post-xTB (fingerprint=${postRelaxFingerprint.slice(0, 12)})`);
       return result;
     }
 
     const cOverA = estimateCOverA(elements, counts);
+    const bOverAFull = estimateBOverA(elements, counts);
     result.kPoints = autoKPoints(latticeA, cOverA, 12, protoDimensionality).trim();
 
     result.vcRelaxed = false;
+    const preVcLatticeA = latticeA;
     try {
       console.log(`[QE-Worker] Starting vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa (${(workerPressure * 10).toFixed(0)} kbar)` : ""})`);
       const vcRelaxInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
@@ -2264,6 +2790,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         result.vcRelaxed = true;
         if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
           latticeA = vcParsed.finalLatticeAng;
+          result.relaxedLatticeA = latticeA;
           console.log(`[QE-Worker] vc-relax updated lattice for ${formula}: ${latticeA.toFixed(3)} A`);
         }
         console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "converged" : "partial"} for ${formula}: ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s`);
@@ -2271,24 +2798,23 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         console.log(`[QE-Worker] vc-relax produced no usable positions for ${formula} (exit=${vcResult.exitCode}), proceeding with original geometry`);
       }
 
-      try {
-        fs.rmSync(path.join(jobDir, "tmp"), { recursive: true, force: true });
-        fs.mkdirSync(path.join(jobDir, "tmp"), { recursive: true });
-      } catch {}
+      cleanQETmpDir(path.join(jobDir, "tmp"));
     } catch (vcErr: any) {
-      console.log(`[QE-Worker] vc-relax failed for ${formula}: ${(vcErr.message || "").slice(0, 200)}, proceeding with original geometry`);
-      try {
-        fs.rmSync(path.join(jobDir, "tmp"), { recursive: true, force: true });
-        fs.mkdirSync(path.join(jobDir, "tmp"), { recursive: true });
-      } catch {}
+      console.log(`[QE-Worker] vc-relax failed for ${formula}: ${(vcErr.message || "").slice(-200)}, proceeding with original geometry`);
+      cleanQETmpDir(path.join(jobDir, "tmp"));
+    }
+
+    result.kPoints = autoKPoints(latticeA, cOverA, bOverAFull).trim();
+    if (Math.abs(latticeA - preVcLatticeA) > 0.01) {
+      console.log(`[QE-Worker] K-points recomputed for ${formula} after vc-relax lattice change (${preVcLatticeA.toFixed(3)} -> ${latticeA.toFixed(3)} A): ${result.kPoints}`);
     }
 
     const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
       { mixingBeta: 0.3, maxSteps: 300, diag: "david", convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
       { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
       { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
-      { mixingBeta: 0.07, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.02, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
+      { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.003, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
+      { mixingBeta: 0.07, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.001, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
     ];
 
     const firstAttempt = opts?.startAttempt ?? 0;
@@ -2302,10 +2828,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       fs.writeFileSync(scfInputFile, scfInput);
 
       if (attempt > 0) {
-        try {
-          fs.rmSync(path.join(jobDir, "tmp"), { recursive: true, force: true });
-          fs.mkdirSync(path.join(jobDir, "tmp"), { recursive: true });
-        } catch {}
+        cleanQETmpDir(path.join(jobDir, "tmp"));
       }
 
       const smearInfo = params.smearing ? `, smearing=${params.smearing}` : "";
@@ -2319,18 +2842,19 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       );
 
       fs.writeFileSync(path.join(jobDir, `scf_attempt${attempt}.out`), scfResult.stdout);
-      result.scf = parseSCFOutput(scfResult.stdout);
+      const usedDegauss = params.degauss || 0.005;
+      result.scf = parseSCFOutput(scfResult.stdout, usedDegauss);
 
       if (scfResult.exitCode !== 0 && !result.scf.converged) {
         const isPPError = scfResult.stderr.includes("read_upf") || scfResult.stderr.includes("readpp") || scfResult.stderr.includes("EOF marker");
         if (isPPError) {
-          result.scf.error = `Pseudopotential read failure: ${scfResult.stderr.slice(0, 300)}`;
+          result.scf.error = `Pseudopotential read failure: ${scfResult.stderr.slice(-300)}`;
           console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
           recordFormulaFailure(formula);
           break;
         }
-        result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${scfResult.stderr.slice(0, 500)}`;
-        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}: ${result.scf.error.slice(0, 200)}`);
+        result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${scfResult.stderr.slice(-500)}`;
+        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}: ${result.scf.error.slice(-200)}`);
         retryCount = attempt + 1;
       } else if (result.scf.converged) {
         scfConverged = true;
@@ -2345,14 +2869,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     result.retryCount = retryCount;
 
     const scfUsable = scfConverged ||
-      (result.scf && result.scf.totalEnergy !== 0 && result.scf.fermiEnergy !== null);
+      (result.scf && result.scf.totalEnergy !== 0 && result.scf.fermiEnergy !== null &&
+       result.scf.lastScfAccuracyRy !== null && result.scf.lastScfAccuracyRy < 1.0e-6);
 
     if (!scfConverged && !scfUsable) {
       result.failureStage = "scf";
       stageFailureCounts.scf++;
       recordFormulaFailure(formula);
+      if (result.scf && result.scf.totalEnergy !== 0 && result.scf.lastScfAccuracyRy !== null) {
+        console.log(`[QE-Worker] SCF not converged for ${formula}: accuracy=${result.scf.lastScfAccuracyRy.toExponential(2)} Ry (threshold 1e-6 Ry for phonon safety) — discarding non-physical energy`);
+      }
     } else if (!scfConverged && scfUsable) {
-      console.log(`[QE-Worker] SCF not formally converged for ${formula} but has usable data (E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy}) — proceeding`);
+      console.log(`[QE-Worker] SCF near-converged for ${formula} (accuracy=${result.scf!.lastScfAccuracyRy?.toExponential(2)} Ry < 1e-6 Ry, quality=${result.scf!.convergenceQuality}): E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy} — proceeding with caution`);
     }
 
     if (scfUsable && result.scf?.fermiEnergy !== null) {
@@ -2389,13 +2917,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
         if (!bandResult.converged && bandResult.error) {
           stageFailureCounts.bands++;
-          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(0, 200)} (continuing to phonon)`);
+          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(-200)} — cleaning tmp before phonon`);
+          cleanQETmpDir(path.join(jobDir, "tmp"));
         } else {
           console.log(`[QE-Worker] Band structure done for ${formula}: ${bandResult.nBands} bands, ${bandResult.bandCrossings.length} crossings, flat=${bandResult.flatBandScore.toFixed(3)}`);
         }
       } catch (bandErr: any) {
-        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message} (continuing to phonon)`);
+        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message?.slice(-200) ?? bandErr} — cleaning tmp before phonon`);
         stageFailureCounts.bands++;
+        cleanQETmpDir(path.join(jobDir, "tmp"));
       }
     }
 
@@ -2416,10 +2946,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.phonon = parsePhononOutput(phResult.stdout);
 
       if (phResult.exitCode !== 0 && !result.phonon.converged) {
-        result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(0, 500)}`;
+        result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(-500)}`;
         result.failureStage = "phonon";
         stageFailureCounts.phonon++;
-        console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(0, 200)}`);
+        console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(-200)}`);
       } else {
         console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);
       }
@@ -2428,9 +2958,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     result.error = err.message;
     console.log(`[QE-Worker] Error for ${formula}: ${err.message}`);
   } finally {
-    try {
-      fs.rmSync(jobDir, { recursive: true, force: true });
-    } catch {}
+    for (let cleanAttempt = 0; cleanAttempt < 3; cleanAttempt++) {
+      try {
+        fs.rmSync(jobDir, { recursive: true, force: true });
+        break;
+      } catch (rmErr: any) {
+        if (cleanAttempt < 2 && rmErr.code === "EBUSY") {
+          await new Promise(r => setTimeout(r, 500 * (cleanAttempt + 1)));
+        }
+      }
+    }
   }
 
   result.wallTimeTotal = (Date.now() - startTime) / 1000;

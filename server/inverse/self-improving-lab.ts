@@ -1,6 +1,6 @@
 import { TargetProperties, InverseCandidate, computeTargetDistance, computeReward, CompositionBias } from "./target-schema";
 import { generateInverseCandidates, refineCandidate, createInitialBias } from "./inverse-generator";
-import { checkPhysicsConstraints, type ConstraintResult } from "./physics-constraint-engine";
+import { checkPhysicsConstraints, createConstraintRegistry, ConstraintRegistry, type ConstraintResult } from "./physics-constraint-engine";
 import { evaluatePillars, type PillarEvaluation, type SCPillarTargets } from "./sc-pillars-optimizer";
 import { runDifferentiableOptimization } from "./differentiable-optimizer";
 import { solveConstraints, type ConstraintSolution } from "./constraint-solver";
@@ -12,9 +12,9 @@ import { gnnPredictWithUncertainty } from "../learning/graph-neural-net";
 import {
   type DesignProgram, type DesignGraph, type GraphAnalysis,
   generateDesignProgram, executeDesignProgram, mutateDesignProgram, crossoverPrograms,
-  generateDesignGraph, mutateDesignGraph, analyzeGraph,
+  mutateDesignGraph, analyzeGraph,
   programToGraph, graphToProgram,
-  registerProgram, registerGraph, recordConversion,
+  registerProgram, registerGraph, recordConversion, linkProgramToGraph,
   getDesignRepresentationStats,
 } from "./design-representations";
 
@@ -76,6 +76,7 @@ export type FailureType =
   | "poor-electron-phonon"
   | "synthesis-infeasible"
   | "phonon-instability"
+  | "structural-instability"
   | "insufficient-dos";
 
 export interface KnowledgeEntry {
@@ -101,10 +102,13 @@ export interface INRPrediction {
   curvature: number;
 }
 
+export type CandidateDerivation = "generated" | "refinement" | "differentiable-opt";
+
 export interface DesignCandidate {
   formula: string;
   strategyId: string;
   iteration: number;
+  derivation: CandidateDerivation;
   constraintResult: ConstraintResult | null;
   pillarEval: PillarEvaluation | null;
   surrogateScores: {
@@ -168,6 +172,36 @@ export interface LabState {
   maxIterations: number;
   startedAt: number;
   lastIterationAt: number;
+  pipelineTiming: {
+    surrogateMs: number;
+    constraintMs: number;
+    pillarMs: number;
+    inrTrainingMs: number;
+    designRepMs: number;
+    iterationCount: number;
+  };
+}
+
+const labRegistries = new Map<LabState, ConstraintRegistry>();
+
+function getLabRegistry(state: LabState): ConstraintRegistry {
+  let reg = labRegistries.get(state);
+  if (!reg) {
+    reg = createConstraintRegistry();
+    labRegistries.set(state, reg);
+  }
+  return reg;
+}
+
+export interface BottleneckAnalysis {
+  surrogateMs: number;
+  constraintMs: number;
+  pillarMs: number;
+  inrTrainingMs: number;
+  designRepMs: number;
+  totalPipelineMs: number;
+  bottleneck: string;
+  percentages: Record<string, number>;
 }
 
 export interface LabStats {
@@ -188,6 +222,7 @@ export interface LabStats {
   topCandidates: { formula: string; tc: number; distance: number; strategy: string }[];
   strategiesEvolved: number;
   iterationsPerMinute: number;
+  bottleneckAnalysis: BottleneckAnalysis | null;
 }
 
 const labs = new Map<string, LabState>();
@@ -226,6 +261,28 @@ const PROTOTYPE_MAP: Record<string, string[]> = {
   "charge-transfer-layer": ["Perovskite", "YBCO", "Layered"],
 };
 
+const STRATEGY_COMPATIBLE_ELEMENTS: Record<string, string[]> = {
+  "hydride-cage-optimizer": ["La", "Y", "Sc", "Ca", "Sr", "Ba", "Th", "Ce", "Pr", "Nd", "Eu", "H", "Zr", "Hf"],
+  "layered-intercalation": ["Cu", "Fe", "Ni", "Co", "Sr", "Ba", "La", "Y", "O", "As", "Se", "S", "Ca", "Nd"],
+  "high-entropy-alloy": ["Nb", "Ti", "Zr", "Hf", "V", "Ta", "Mo", "W", "Re", "B", "C", "N", "Cr"],
+  "light-element-phonon": ["B", "C", "N", "Li", "Be", "Mg", "Al", "Si", "H", "Na", "Ca"],
+  "topological-edge": ["Bi", "Sb", "Te", "Se", "Sn", "Pb", "In", "Tl", "S", "Cu", "Ag"],
+  "pressure-stabilized": ["La", "Y", "Ca", "H", "S", "Se", "P", "Cl", "Br", "Sr", "Ba", "Ce"],
+  "electron-phonon-resonance": ["Nb", "V", "Mo", "Sn", "Ge", "Si", "B", "N", "H", "Ti", "Zr"],
+  "charge-transfer-layer": ["Cu", "Bi", "Sr", "Ca", "La", "Ba", "O", "Tl", "Hg", "Y", "Nd", "Pb"],
+};
+
+const LAMBDA_CEILING: Record<string, number> = {
+  "hydride-cage-optimizer": 6.0,
+  "layered-intercalation": 2.5,
+  "high-entropy-alloy": 1.8,
+  "light-element-phonon": 3.0,
+  "topological-edge": 1.5,
+  "pressure-stabilized": 5.0,
+  "electron-phonon-resonance": 3.5,
+  "charge-transfer-layer": 2.5,
+};
+
 function createDefaultStrategy(type: StrategyType, generation: number = 0, parentId: string | null = null): DesignStrategy {
   const pool = ELEMENT_POOLS[type] ?? ELEMENT_POOLS["hydride-cage-optimizer"];
   const templates = STOICH_TEMPLATES[type] ?? STOICH_TEMPLATES["hydride-cage-optimizer"];
@@ -242,7 +299,7 @@ function createDefaultStrategy(type: StrategyType, generation: number = 0, paren
       prototypePreference: prototypes,
       hydrogenDensity: type.includes("hydride") || type.includes("pressure") ? "high" : "medium",
       targetLambdaRange: [1.0, 4.0],
-      pressureRegime: type === "pressure-stabilized" ? "high" : "ambient",
+      pressureRegime: (type === "pressure-stabilized" || type === "hydride-cage-optimizer") ? "high" : "ambient",
       branchingFactor: 3,
       mutationRate: 0.15,
       explorationWeight: Math.max(0.1, 0.5 - generation * 0.05),
@@ -278,6 +335,37 @@ function createImplicitNeuralField(): ImplicitNeuralField {
   }
 
   return { weights, biases, layerSizes, activations: ["relu", "relu", "sigmoid"] };
+}
+
+function estimateHullDistance(formula: string, pillarEval: PillarEvaluation | null, constraintPenalty: number = 0): number {
+  const numbers = formula.match(/\d+/g)?.map(Number) || [];
+  const elements = formula.match(/[A-Z][a-z]?/g) || [];
+  const nElements = new Set(elements).size;
+
+  let hullEstimate = 0.02;
+
+  if (nElements >= 5) {
+    hullEstimate += 0.03 * (nElements - 4);
+  }
+
+  const maxStoich = Math.max(...numbers, 1);
+  if (maxStoich >= 10) {
+    hullEstimate += 0.02 * Math.log2(maxStoich / 8);
+  }
+
+  if (pillarEval) {
+    const structInstab = pillarEval.instability?.structuralInstability ?? 0;
+    hullEstimate += structInstab * 0.08;
+
+    const compositeFit = pillarEval.compositeFitness ?? 0.5;
+    hullEstimate += (1 - compositeFit) * 0.04;
+  }
+
+  if (constraintPenalty > 0) {
+    hullEstimate += constraintPenalty * 0.05;
+  }
+
+  return Math.min(0.5, Math.max(0.005, hullEstimate));
 }
 
 function evaluateINR(field: ImplicitNeuralField, x: number, y: number, z: number): INRPrediction {
@@ -358,6 +446,128 @@ function evaluateINRRaw(field: ImplicitNeuralField, x: number, y: number, z: num
   return input[0];
 }
 
+function forwardPass(field: ImplicitNeuralField, x: number, y: number, z: number): { activations: number[][]; preActivations: number[][] } {
+  const activations: number[][] = [[x, y, z]];
+  const preActivations: number[][] = [];
+  let input = [x, y, z];
+  let biasOffset = 0;
+
+  for (let l = 0; l < field.layerSizes.length - 1; l++) {
+    const fanIn = field.layerSizes[l];
+    const fanOut = field.layerSizes[l + 1];
+    const pre: number[] = new Array(fanOut).fill(0);
+    const output: number[] = new Array(fanOut).fill(0);
+
+    for (let j = 0; j < fanOut; j++) {
+      let sum = field.biases[biasOffset + j];
+      for (let i = 0; i < fanIn; i++) {
+        sum += input[i] * field.weights[l][i * fanOut + j];
+      }
+      pre[j] = sum;
+      if (field.activations[l] === "relu") {
+        output[j] = Math.max(0, sum);
+      } else if (field.activations[l] === "sigmoid") {
+        const clamped = Math.max(-10, Math.min(10, sum));
+        output[j] = 1 / (1 + Math.exp(-clamped));
+      } else {
+        output[j] = sum;
+      }
+    }
+
+    preActivations.push(pre);
+    activations.push(output);
+    input = output;
+    biasOffset += fanOut;
+  }
+
+  return { activations, preActivations };
+}
+
+function backpropagateINR(
+  field: ImplicitNeuralField,
+  activations: number[][],
+  preActivations: number[][],
+  outputError: number,
+  lr: number,
+): void {
+  const numLayers = field.layerSizes.length - 1;
+  let delta: number[] = [outputError];
+
+  for (let l = numLayers - 1; l >= 0; l--) {
+    const fanIn = field.layerSizes[l];
+    const fanOut = field.layerSizes[l + 1];
+    const act = field.activations[l];
+
+    const localGrad: number[] = new Array(fanOut);
+    for (let j = 0; j < fanOut; j++) {
+      if (act === "relu") {
+        localGrad[j] = preActivations[l][j] > 0 ? delta[j] : 0;
+      } else if (act === "sigmoid") {
+        const s = activations[l + 1][j];
+        localGrad[j] = delta[j] * s * (1 - s);
+      } else {
+        localGrad[j] = delta[j];
+      }
+    }
+
+    let biasOffset = 0;
+    for (let ll = 0; ll < l; ll++) biasOffset += field.layerSizes[ll + 1];
+
+    for (let j = 0; j < fanOut; j++) {
+      field.biases[biasOffset + j] -= lr * localGrad[j];
+    }
+    for (let i = 0; i < fanIn; i++) {
+      for (let j = 0; j < fanOut; j++) {
+        field.weights[l][i * fanOut + j] -= lr * localGrad[j] * activations[l][i];
+      }
+    }
+
+    if (l > 0) {
+      const prevDelta: number[] = new Array(fanIn).fill(0);
+      for (let i = 0; i < fanIn; i++) {
+        for (let j = 0; j < fanOut; j++) {
+          prevDelta[i] += field.weights[l][i * fanOut + j] * localGrad[j];
+        }
+      }
+      delta = prevDelta;
+    }
+  }
+}
+
+function generateLatticeSites(nElements: number, totalAtoms: number): number[][] {
+  const sites: number[][] = [];
+  const nSites = Math.min(totalAtoms, 8);
+  const spacing = 2.0 / Math.cbrt(Math.max(1, nSites));
+
+  let seedVal = nElements * 7 + totalAtoms * 13;
+  function seededRand(): number {
+    seedVal = (seedVal * 1103515245 + 12345) & 0x7fffffff;
+    return (seedVal / 0x7fffffff) * 2 - 1;
+  }
+
+  for (let i = 0; i < nSites; i++) {
+    const sx = seededRand() * (1 - spacing * 0.3);
+    const sy = seededRand() * (1 - spacing * 0.3);
+    const sz = seededRand() * (1 - spacing * 0.3);
+    sites.push([sx, sy, sz]);
+  }
+  return sites;
+}
+
+function computeTargetDensity(
+  x: number, y: number, z: number,
+  sites: number[][],
+  sigma: number,
+): number {
+  let density = 0;
+  for (const [sx, sy, sz] of sites) {
+    const dx = x - sx, dy = y - sy, dz = z - sz;
+    const r2 = dx * dx + dy * dy + dz * dz;
+    density += Math.exp(-r2 / (2 * sigma * sigma));
+  }
+  return Math.min(1, density / Math.max(1, sites.length) * 2);
+}
+
 function trainINRFromComposition(formula: string): ImplicitNeuralField {
   const field = createImplicitNeuralField();
 
@@ -365,7 +575,10 @@ function trainINRFromComposition(formula: string): ImplicitNeuralField {
   const numbers = formula.match(/\d+/g) || [];
   const totalAtoms = numbers.reduce((s, n) => s + parseInt(n), 0) || elements.length;
 
-  const lr = 0.01;
+  const sites = generateLatticeSites(elements.length, totalAtoms);
+  const sigma = 0.4 / Math.cbrt(Math.max(1, totalAtoms / 4));
+
+  const lr = 0.005;
   const iterations = 50;
 
   for (let iter = 0; iter < iterations; iter++) {
@@ -374,28 +587,13 @@ function trainINRFromComposition(formula: string): ImplicitNeuralField {
       const y = Math.random() * 2 - 1;
       const z = Math.random() * 2 - 1;
 
-      const r = Math.sqrt(x * x + y * y + z * z);
-      const targetDensity = Math.exp(-r * totalAtoms / 5) * (0.3 + 0.7 * Math.sin(r * Math.PI * elements.length));
-      const clampedTarget = Math.max(0, Math.min(1, targetDensity));
+      const targetDensity = computeTargetDensity(x, y, z, sites, sigma);
 
-      const predicted = evaluateINRRaw(field, x, y, z);
-      const error = predicted - clampedTarget;
+      const { activations, preActivations } = forwardPass(field, x, y, z);
+      const predicted = activations[activations.length - 1][0];
+      const error = predicted - targetDensity;
 
-      const lastLayerIdx = field.layerSizes.length - 2;
-      const fanIn = field.layerSizes[lastLayerIdx];
-      const fanOut = field.layerSizes[lastLayerIdx + 1];
-      let biasOffset = 0;
-      for (let l = 0; l < lastLayerIdx; l++) {
-        biasOffset += field.layerSizes[l + 1];
-      }
-
-      for (let j = 0; j < fanOut; j++) {
-        field.biases[biasOffset + j] -= lr * error * 0.1;
-      }
-
-      for (let i = 0; i < fanIn * fanOut; i++) {
-        field.weights[lastLayerIdx][i] -= lr * error * 0.01;
-      }
+      backpropagateINR(field, activations, preActivations, error, lr);
     }
   }
 
@@ -413,16 +611,23 @@ function analyzeFailure(
   constraintPenalty: number,
   targetTc: number,
   maxPressure: number,
+  structuralInstability: number,
 ): FailureRecord | null {
   let failureType: FailureType | null = null;
   let failureReason = "";
   let suggestion = "";
 
-  if (tc < targetTc * 0.3) {
+  if (structuralInstability > 0.6) {
+    failureType = "structural-instability";
+    failureReason = `Structural instability score ${structuralInstability.toFixed(2)} indicates imaginary phonon modes or lattice collapse`;
+    suggestion = "Lattice is dynamically unstable; try substituting elements with different atomic radii or reducing stoichiometry of light atoms";
+  } else if (tc < targetTc * 0.3) {
     failureType = "low-tc";
     failureReason = `Tc=${Math.round(tc)}K far below target ${targetTc}K (${Math.round(tc / targetTc * 100)}% of target)`;
     if (lambda < 1.0) {
       suggestion = "Increase electron-phonon coupling by targeting higher-Z elements or hydrogen-rich compositions";
+    } else if (structuralInstability > 0.4) {
+      suggestion = "Lambda adequate but structural instability detected; phonon softening may suppress Tc. Try pressure stabilization or stiffer lattice formers";
     } else {
       suggestion = "Lambda adequate but phonon frequencies may be too low; try lighter elements or higher-symmetry structures";
     }
@@ -442,6 +647,10 @@ function analyzeFailure(
     failureType = "poor-electron-phonon";
     failureReason = `Lambda=${lambda.toFixed(2)} too low for significant superconductivity`;
     suggestion = "Target materials with van Hove singularities near Fermi level or stronger phonon modes";
+  } else if (structuralInstability > 0.4) {
+    failureType = "structural-instability";
+    failureReason = `Moderate structural instability (${structuralInstability.toFixed(2)}) may compromise lattice dynamics; Tc=${Math.round(tc)}K prediction uncertain`;
+    suggestion = "Borderline lattice stability; consider pressure stabilization or substituting elements with better size matching before optimizing DOS";
   } else if (tc < targetTc * 0.6) {
     failureType = "insufficient-dos";
     failureReason = `Tc=${Math.round(tc)}K below 60% of target; likely insufficient density of states`;
@@ -505,11 +714,13 @@ function evolveStrategy(
 
   const relevantKnowledge = kb.filter(e => e.strategyType === parent.type && e.confidence > 0.4);
 
+  const evolveCeiling = LAMBDA_CEILING[parent.type] ?? 4.0;
+
   for (const knowledge of relevantKnowledge) {
     if (knowledge.pattern.includes("low-tc") && knowledge.confidence > 0.5) {
       child.parameters.targetLambdaRange = [
-        Math.min(child.parameters.targetLambdaRange[0] + 0.3, 3.0),
-        Math.min(child.parameters.targetLambdaRange[1] + 0.5, 6.0),
+        Math.min(child.parameters.targetLambdaRange[0] + 0.3, evolveCeiling),
+        Math.min(child.parameters.targetLambdaRange[1] + 0.5, evolveCeiling),
       ];
       if (!child.parameters.elementPool.includes("H") && parent.type !== "topological-edge") {
         child.parameters.elementPool.push("H");
@@ -533,6 +744,18 @@ function evolveStrategy(
       }
     }
 
+    if (knowledge.pattern.includes("structural-instability") && knowledge.confidence > 0.4) {
+      child.parameters.mutationRate = Math.max(0.05, child.parameters.mutationRate - 0.05);
+      child.parameters.branchingFactor = Math.max(2, child.parameters.branchingFactor - 1);
+      const stabilizers = ["La", "Y", "Zr"];
+      for (const el of stabilizers) {
+        if (!child.parameters.elementPool.includes(el)) {
+          child.parameters.elementPool.push(el);
+          break;
+        }
+      }
+    }
+
     if (knowledge.pattern.includes("poor-electron-phonon") && knowledge.confidence > 0.4) {
       const ephElements = ["Nb", "V", "Ti", "Mo", "B"];
       for (const el of ephElements) {
@@ -544,12 +767,25 @@ function evolveStrategy(
     }
   }
 
+  const basePoolSize = (ELEMENT_POOLS[parent.type] ?? ELEMENT_POOLS["hydride-cage-optimizer"]).length;
+  const maxPoolSize = basePoolSize + 4;
+
   if (Math.random() < child.parameters.mutationRate) {
     const allPools = Object.values(ELEMENT_POOLS);
     const randomPool = allPools[Math.floor(Math.random() * allPools.length)];
     const randomElement = randomPool[Math.floor(Math.random() * randomPool.length)];
     if (!child.parameters.elementPool.includes(randomElement)) {
-      child.parameters.elementPool.push(randomElement);
+      if (child.parameters.elementPool.length >= maxPoolSize) {
+        const basePool = ELEMENT_POOLS[parent.type] ?? ELEMENT_POOLS["hydride-cage-optimizer"];
+        const removable = child.parameters.elementPool.filter(el => !basePool.includes(el));
+        if (removable.length > 0) {
+          const removeIdx = child.parameters.elementPool.indexOf(removable[Math.floor(Math.random() * removable.length)]);
+          child.parameters.elementPool.splice(removeIdx, 1);
+        }
+      }
+      if (child.parameters.elementPool.length < maxPoolSize) {
+        child.parameters.elementPool.push(randomElement);
+      }
     }
   }
 
@@ -563,7 +799,17 @@ function evolveStrategy(
     const crossoverPool = bestStrategy.parameters.elementPool;
     const crossoverElement = crossoverPool[Math.floor(Math.random() * crossoverPool.length)];
     if (!child.parameters.elementPool.includes(crossoverElement)) {
-      child.parameters.elementPool.push(crossoverElement);
+      if (child.parameters.elementPool.length >= maxPoolSize) {
+        const basePool = ELEMENT_POOLS[parent.type] ?? ELEMENT_POOLS["hydride-cage-optimizer"];
+        const removable = child.parameters.elementPool.filter(el => !basePool.includes(el));
+        if (removable.length > 0) {
+          const removeIdx = child.parameters.elementPool.indexOf(removable[Math.floor(Math.random() * removable.length)]);
+          child.parameters.elementPool.splice(removeIdx, 1);
+        }
+      }
+      if (child.parameters.elementPool.length < maxPoolSize) {
+        child.parameters.elementPool.push(crossoverElement);
+      }
     }
   }
 
@@ -577,10 +823,20 @@ function selectStrategy(strategies: DesignStrategy[], iteration: number): Design
 
   const temperature = Math.max(0.1, 1.0 - iteration * 0.005);
 
-  const scores = strategies.map(s => {
-    const exploitation = s.fitness;
+  const combined = strategies.map(s => {
     const exploration = s.uses === 0 ? 1.0 : Math.sqrt(Math.log(iteration + 1) / s.uses);
-    return exploitation * (1 - temperature) + exploration * temperature;
+    return { strategy: s, exploration };
+  });
+
+  const sorted = [...combined].sort((a, b) => a.strategy.fitness - b.strategy.fitness);
+  const rankMap = new Map<string, number>();
+  for (let i = 0; i < sorted.length; i++) {
+    rankMap.set(sorted[i].strategy.id, (i + 1) / sorted.length);
+  }
+
+  const scores = combined.map(c => {
+    const rankScore = rankMap.get(c.strategy.id)!;
+    return rankScore * (1 - temperature) + c.exploration * temperature;
   });
 
   const maxScore = Math.max(...scores);
@@ -659,6 +915,14 @@ export function createLab(id: string, targetTc: number = 293, maxPressure: numbe
     maxIterations,
     startedAt: Date.now(),
     lastIterationAt: 0,
+    pipelineTiming: {
+      surrogateMs: 0,
+      constraintMs: 0,
+      pillarMs: 0,
+      inrTrainingMs: 0,
+      designRepMs: 0,
+      iterationCount: 0,
+    },
   };
 
   labs.set(id, state);
@@ -695,8 +959,13 @@ export function runLabIteration(id: string): LabIterationResult | null {
         suggestedElements: guidance.preferredElements,
       };
       if (constraintGuidance.suggestedElements) {
-        for (const el of constraintGuidance.suggestedElements.slice(0, 3)) {
-          if (!strategy.parameters.elementPool.includes(el)) {
+        const compatible = STRATEGY_COMPATIBLE_ELEMENTS[strategy.type] ?? [];
+        const basePool = ELEMENT_POOLS[strategy.type] ?? ELEMENT_POOLS["hydride-cage-optimizer"];
+        const maxPoolSize = basePool.length + 4;
+        const filtered = constraintGuidance.suggestedElements
+          .filter(el => compatible.includes(el));
+        for (const el of filtered.slice(0, 2)) {
+          if (!strategy.parameters.elementPool.includes(el) && strategy.parameters.elementPool.length < maxPoolSize) {
             strategy.parameters.elementPool.push(el);
           }
         }
@@ -704,12 +973,13 @@ export function runLabIteration(id: string): LabIterationResult | null {
     }
   } catch {}
 
+  const lambdaCeiling = LAMBDA_CEILING[strategy.type] ?? 4.0;
   try {
     const solution = solveConstraints(state.targetTc, 0.10);
     if (solution?.requiredLambda) {
       strategy.parameters.targetLambdaRange = [
-        Math.max(strategy.parameters.targetLambdaRange[0], solution.requiredLambda.min),
-        Math.max(strategy.parameters.targetLambdaRange[1], solution.requiredLambda.optimal),
+        Math.min(lambdaCeiling, Math.max(strategy.parameters.targetLambdaRange[0], solution.requiredLambda.min)),
+        Math.min(lambdaCeiling, Math.max(strategy.parameters.targetLambdaRange[1], solution.requiredLambda.optimal)),
       ];
     }
   } catch {}
@@ -724,20 +994,35 @@ export function runLabIteration(id: string): LabIterationResult | null {
     for (const best of topN) {
       try {
         const refined = refineCandidate(best, target, state.bias);
-        rawCandidates.push(...refined.slice(0, 3));
+        for (const r of refined.slice(0, 3)) {
+          r.derivation = "refinement";
+          rawCandidates.push(r);
+        }
       } catch {}
     }
   }
 
   if (state.iteration > 8 && state.learningState.bestCandidates.length > 0) {
+    const pillarTargets: SCPillarTargets = {
+      minCoupling: strategy.parameters.targetLambdaRange[0],
+      minPhonon: 0.5,
+      minDos: 0.3,
+      minNesting: 0.2,
+      minPairingGlue: 0.3,
+      minInstability: 0.10,
+      minHydrogenCage: strategy.parameters.hydrogenDensity === "high" ? 0.4 : 0.0,
+    };
     const topForGrad = state.learningState.bestCandidates.slice(0, 2);
     for (const best of topForGrad) {
       try {
+        const preEval = evaluatePillars(best.formula, pillarTargets, { maxPressureGPa: state.maxPressure });
+        if (preEval.compositeFitness < 0.7) continue;
         const diffResult = runDifferentiableOptimization(best.formula, target);
         if (diffResult?.optimizedFormula && diffResult.optimizedFormula !== best.formula) {
           rawCandidates.push({
             formula: diffResult.optimizedFormula,
             source: "inverse" as const,
+            derivation: "differentiable-opt" as const,
             campaignId: state.id,
             targetDistance: 1.0,
             iteration: state.iteration,
@@ -756,16 +1041,24 @@ export function runLabIteration(id: string): LabIterationResult | null {
 
   state.totalGenerated += deduplicated.length;
 
+  const labRegistry = getLabRegistry(state);
   const candidates: DesignCandidate[] = [];
   let iterConversions = 0;
   let iterProgramsGenerated = 0;
   let iterGraphsGenerated = 0;
+
+  let iterSurrogateMs = 0;
+  let iterConstraintMs = 0;
+  let iterPillarMs = 0;
+  let iterInrMs = 0;
+  let iterDesignMs = 0;
 
   for (const raw of deduplicated) {
     const candidate: DesignCandidate = {
       formula: raw.formula,
       strategyId: strategy.id,
       iteration: state.iteration,
+      derivation: (raw.derivation as CandidateDerivation) ?? "generated",
       constraintResult: null,
       pillarEval: null,
       surrogateScores: null,
@@ -780,12 +1073,16 @@ export function runLabIteration(id: string): LabIterationResult | null {
     };
 
     try {
-      candidate.constraintResult = checkPhysicsConstraints(raw.formula);
+      const t0Constraint = Date.now();
+      try {
+      candidate.constraintResult = checkPhysicsConstraints(raw.formula, { maxPressureGPa: state.maxPressure, registry: labRegistry });
+      } finally { iterConstraintMs += Date.now() - t0Constraint; }
       if (!candidate.constraintResult.isValid && candidate.constraintResult.totalPenalty > 0.5) {
         const failure = analyzeFailure(
           raw.formula, strategy.id, state.iteration,
           0, 0, 0, 0, candidate.constraintResult.totalPenalty,
           state.targetTc, state.maxPressure,
+          0,
         );
         if (failure) {
           candidate.failureAnalysis = failure;
@@ -798,41 +1095,52 @@ export function runLabIteration(id: string): LabIterationResult | null {
     } catch {}
 
     try {
-      const features = extractFeatures(raw.formula);
-      const gb = gbPredict(features);
-      const gnn = gnnPredictWithUncertainty(raw.formula);
-      const ensembleTc = gb.tcPredicted * 0.35 + (gnn.tc ?? 0) * 0.65;
+      const t0Surrogate = Date.now();
+      try {
+        const features = extractFeatures(raw.formula);
+        const gb = gbPredict(features);
+        const gnn = gnnPredictWithUncertainty(raw.formula);
+        const gnnConf = gnn.confidence ?? 0;
+        const gnnWeight = gnnConf > 0.5 ? 0.65 : gnnConf > 0.3 ? 0.45 : 0.25;
+        const gbWeight = 1 - gnnWeight;
+        const ensembleTc = gb.tcPredicted * gbWeight + (gnn.tc ?? 0) * gnnWeight;
 
-      candidate.surrogateScores = {
-        gbTc: gb.tcPredicted,
-        gnnTc: gnn.tc ?? 0,
-        ensembleTc,
-        gnnLambda: gnn.lambda ?? 0,
-        confidence: gnn.confidence ?? 0,
-      };
+        candidate.surrogateScores = {
+          gbTc: gb.tcPredicted,
+          gnnTc: gnn.tc ?? 0,
+          ensembleTc,
+          gnnLambda: gnn.lambda ?? 0,
+          confidence: gnn.confidence ?? 0,
+        };
 
-      candidate.targetDistance = computeTargetDistance(target, {
-        tc: ensembleTc,
-        lambda: gnn.lambda ?? gb.score * 2,
-        hull: 0.02,
-        pressure: 0,
-      });
-      candidate.reward = computeReward(candidate.targetDistance);
-      candidate.physicsValidated = true;
+        const hullEst = estimateHullDistance(raw.formula, candidate.pillarEval, candidate.constraintResult?.totalPenalty ?? 0);
+
+        candidate.targetDistance = computeTargetDistance(target, {
+          tc: ensembleTc,
+          lambda: gnn.lambda ?? gb.score * 2,
+          hull: hullEst,
+          pressure: 0,
+        });
+        candidate.reward = computeReward(candidate.targetDistance);
+        candidate.physicsValidated = true;
+      } finally { iterSurrogateMs += Date.now() - t0Surrogate; }
 
       try {
-        const pillarTargets: SCPillarTargets = {
-          minLambda: strategy.parameters.targetLambdaRange[1],
-          minOmegaLogK: 500,
-          minDOS: 3.0,
-          minNesting: 0.5,
-          minFlatBand: 0.6,
-          minPairingGlue: 0.5,
-          minInstability: 0.3,
-          minHydrogenCage: strategy.parameters.hydrogenDensity === "high" ? 0.6 : 0.3,
-          preferredMotifs: ["cage", "layered", "kagome"],
-        };
-        candidate.pillarEval = evaluatePillars(raw.formula, pillarTargets);
+        const t0Pillar = Date.now();
+        try {
+          const pillarTargets: SCPillarTargets = {
+            minLambda: strategy.parameters.targetLambdaRange[1],
+            minOmegaLogK: 500,
+            minDOS: 3.0,
+            minNesting: 0.5,
+            minFlatBand: 0.6,
+            minPairingGlue: 0.5,
+            minInstability: 0.3,
+            minHydrogenCage: strategy.parameters.hydrogenDensity === "high" ? 0.6 : 0.3,
+            preferredMotifs: ["cage", "layered", "kagome"],
+          };
+          candidate.pillarEval = evaluatePillars(raw.formula, pillarTargets, { maxPressureGPa: state.maxPressure });
+        } finally { iterPillarMs += Date.now() - t0Pillar; }
       } catch {}
     } catch {
       continue;
@@ -846,15 +1154,17 @@ export function runLabIteration(id: string): LabIterationResult | null {
       const phononStable = phononScore > 0.3;
       const synthFeasibility = candidate.pillarEval?.compositeFitness ?? 0.5;
 
-      if (!phononStable && lambda < 0.8) {
+      const candidateHull = estimateHullDistance(raw.formula, candidate.pillarEval, penalty);
+
+      if (!phononStable) {
         const failure: FailureRecord = {
           formula: raw.formula,
           strategyId: strategy.id,
           iteration: state.iteration,
           failureType: "phonon-instability",
-          failureReason: `Phonon instability detected; lambda=${lambda.toFixed(2)} insufficient to compensate`,
-          metrics: { tc, lambda, pressure: 0, hullDistance: 0.02, constraintPenalty: penalty },
-          suggestion: "Target stiffer lattice or lighter elements for better phonon stability",
+          failureReason: `Phonon instability (score=${phononScore.toFixed(2)}) invalidates Tc prediction; McMillan/Allen-Dynes equations require a stable lattice (lambda=${lambda.toFixed(2)})`,
+          metrics: { tc, lambda, pressure: 0, hullDistance: candidateHull, constraintPenalty: penalty },
+          suggestion: "Lattice has imaginary phonon modes; target stiffer lattice, apply pressure stabilization, or use lighter elements for better phonon stability",
           timestamp: Date.now(),
         };
         candidate.failureAnalysis = failure;
@@ -868,7 +1178,7 @@ export function runLabIteration(id: string): LabIterationResult | null {
           iteration: state.iteration,
           failureType: "synthesis-infeasible",
           failureReason: `Low synthesis feasibility (${(synthFeasibility * 100).toFixed(0)}%) combined with Tc=${Math.round(tc)}K`,
-          metrics: { tc, lambda, pressure: 0, hullDistance: 0.02, constraintPenalty: penalty },
+          metrics: { tc, lambda, pressure: 0, hullDistance: candidateHull, constraintPenalty: penalty },
           suggestion: "Use more commonly synthesized compositions or standard structure types",
           timestamp: Date.now(),
         };
@@ -877,10 +1187,12 @@ export function runLabIteration(id: string): LabIterationResult | null {
         state.totalFailuresAnalyzed++;
         updateKnowledgeBase(state.knowledgeBase, failure, strategy.type);
       } else if (tc < state.targetTc * 0.3 || lambda < 0.5 || penalty > 0.3) {
+        const structInstab = candidate.pillarEval?.instability?.structuralInstability ?? 0;
         const failure = analyzeFailure(
           raw.formula, strategy.id, state.iteration,
-          tc, lambda, 0, 0.02, penalty,
+          tc, lambda, 0, candidateHull, penalty,
           state.targetTc, state.maxPressure,
+          structInstab,
         );
         if (failure) {
           candidate.failureAnalysis = failure;
@@ -893,47 +1205,70 @@ export function runLabIteration(id: string): LabIterationResult | null {
       }
     }
 
+    { const t0Inr = Date.now();
     try {
       candidate.inrField = trainINRFromComposition(raw.formula);
-      const centerPred = evaluateINR(candidate.inrField, 0, 0, 0);
-      candidate.inrDensity = centerPred.density;
-    } catch {}
+      let densitySum = 0;
+      let densityMax = 0;
+      const gridN = 3;
+      const step = 2 / gridN;
+      for (let ix = 0; ix < gridN; ix++) {
+        for (let iy = 0; iy < gridN; iy++) {
+          for (let iz = 0; iz < gridN; iz++) {
+            const gx = -1 + step * (ix + 0.5);
+            const gy = -1 + step * (iy + 0.5);
+            const gz = -1 + step * (iz + 0.5);
+            const pred = evaluateINR(candidate.inrField, gx, gy, gz);
+            densitySum += pred.density;
+            if (pred.density > densityMax) densityMax = pred.density;
+          }
+        }
+      }
+      const totalSamples = gridN * gridN * gridN;
+      candidate.inrDensity = densitySum / totalSamples * 0.5 + densityMax * 0.5;
+    } catch {} finally { iterInrMs += Date.now() - t0Inr; } }
 
+    { const t0Design = Date.now();
     try {
       candidate.designProgram = generateDesignProgram(
         strategy.type, strategy.parameters.elementPool, state.iteration, null);
       const tc = candidate.surrogateScores?.ensembleTc ?? 0;
       registerProgram(candidate.designProgram, tc);
       iterProgramsGenerated++;
-    } catch {}
 
-    try {
-      candidate.designGraph = generateDesignGraph(
-        strategy.type, strategy.parameters.elementPool, state.iteration, null);
-      const tc = candidate.surrogateScores?.ensembleTc ?? 0;
-      registerGraph(candidate.designGraph, tc);
+      const derivedGraph = programToGraph(candidate.designProgram);
+      candidate.designGraph = derivedGraph;
+      registerGraph(derivedGraph, tc);
+      linkProgramToGraph(candidate.designProgram.id, derivedGraph.id);
+      recordConversion();
       iterGraphsGenerated++;
-    } catch {}
-
-    if (candidate.designProgram && Math.random() < 0.2) {
-      try {
-        const convertedGraph = programToGraph(candidate.designProgram);
-        registerGraph(convertedGraph, candidate.surrogateScores?.ensembleTc ?? 0);
-        recordConversion();
-        iterConversions++;
-      } catch {}
-    }
+      iterConversions++;
+    } catch {} finally { iterDesignMs += Date.now() - t0Design; } }
 
     candidates.push(candidate);
   }
 
   state.totalPassed += candidates.filter(c => c.physicsValidated).length;
 
+  state.pipelineTiming.surrogateMs += iterSurrogateMs;
+  state.pipelineTiming.constraintMs += iterConstraintMs;
+  state.pipelineTiming.pillarMs += iterPillarMs;
+  state.pipelineTiming.inrTrainingMs += iterInrMs;
+  state.pipelineTiming.designRepMs += iterDesignMs;
+  state.pipelineTiming.iterationCount++;
+
   const scored = candidates
     .filter(c => c.surrogateScores !== null)
     .sort((a, b) => {
-      const aScore = a.surrogateScores!.ensembleTc * 0.7 + a.reward * a.surrogateScores!.ensembleTc * 0.3;
-      const bScore = b.surrogateScores!.ensembleTc * 0.7 + b.reward * b.surrogateScores!.ensembleTc * 0.3;
+      const maxTc = Math.max(1, state.targetTc);
+      const aNormTc = Math.min(1, a.surrogateScores!.ensembleTc / maxTc);
+      const bNormTc = Math.min(1, b.surrogateScores!.ensembleTc / maxTc);
+      const aStability = 1 - (a.pillarEval?.instability?.compositeInstability ?? 0.5);
+      const bStability = 1 - (b.pillarEval?.instability?.compositeInstability ?? 0.5);
+      const aFitness = a.pillarEval?.compositeFitness ?? 0;
+      const bFitness = b.pillarEval?.compositeFitness ?? 0;
+      const aScore = aNormTc * 0.5 + aStability * 0.3 + aFitness * 0.2;
+      const bScore = bNormTc * 0.5 + bStability * 0.3 + bFitness * 0.2;
       return bScore - aScore;
     });
 
@@ -954,6 +1289,15 @@ export function runLabIteration(id: string): LabIterationResult | null {
   strategy.successes += scored.filter(c => c.surrogateScores!.ensembleTc > state.targetTc * 0.3).length;
   strategy.fitness = strategy.bestTc / state.targetTc * 0.6 + (strategy.successes / Math.max(1, strategy.uses)) * 0.4;
 
+  const successRate = strategy.successes / Math.max(1, strategy.uses);
+  if (strategy.uses >= 3) {
+    if (successRate > 0.5) {
+      strategy.parameters.branchingFactor = Math.min(8, strategy.parameters.branchingFactor + 1);
+    } else if (successRate < 0.1) {
+      strategy.parameters.branchingFactor = Math.max(1, strategy.parameters.branchingFactor - 1);
+    }
+  }
+
   const bestDistIter = scored.length > 0 ? Math.min(...scored.map(c => c.targetDistance)) : 1.0;
   if (bestDistIter < state.bestDistance) {
     state.bestDistance = bestDistIter;
@@ -968,16 +1312,20 @@ export function runLabIteration(id: string): LabIterationResult | null {
     : 1.0;
   const convergenceDelta = prevBestDist - state.bestDistance;
   state.convergenceHistory.push(state.bestDistance);
+  if (state.convergenceHistory.length > 200) {
+    state.convergenceHistory = state.convergenceHistory.slice(-100);
+  }
 
   const inverseCandidates: InverseCandidate[] = scored.map(c => ({
     formula: c.formula,
     source: "inverse" as const,
+    derivation: c.derivation,
     campaignId: state.id,
     targetDistance: c.targetDistance,
     iteration: state.iteration,
     predictedTc: c.surrogateScores!.ensembleTc,
     predictedLambda: c.surrogateScores!.gnnLambda,
-    predictedHull: 0.02,
+    predictedHull: estimateHullDistance(c.formula, c.pillarEval, c.constraintResult?.totalPenalty ?? 0),
     predictedPressure: 0,
   }));
 
@@ -985,7 +1333,7 @@ export function runLabIteration(id: string): LabIterationResult | null {
     formula: c.formula,
     tc: c.surrogateScores!.ensembleTc,
     lambda: c.surrogateScores!.gnnLambda,
-    hull: 0.02,
+    hull: estimateHullDistance(c.formula, c.pillarEval, c.constraintResult?.totalPenalty ?? 0),
     pressure: 0,
     passedPipeline: c.physicsValidated,
   }));
@@ -1004,10 +1352,35 @@ export function runLabIteration(id: string): LabIterationResult | null {
       .sort((a, b) => b.fitness - a.fitness)
       .slice(0, 2);
 
+    const activeTypes = new Set(state.strategies.map(s => s.type));
+
     for (const worst of worstStrategies) {
       if (worst.uses >= 3 && worst.fitness < 0.1) {
         const parent = bestStrategies[Math.floor(Math.random() * bestStrategies.length)];
+
+        const sameTypeCount = state.strategies.filter(s => s.type === parent.type).length;
+        if (sameTypeCount >= Math.ceil(state.strategies.length / 2)) continue;
+
+        if (activeTypes.size <= 3 && worst.type !== parent.type) continue;
+
         const evolved = evolveStrategy(parent, state.knowledgeBase, state.strategies);
+
+        const parentPool = new Set(parent.parameters.elementPool);
+        const evolvedPool = new Set(evolved.parameters.elementPool);
+        const intersection = [...evolvedPool].filter(el => parentPool.has(el)).length;
+        const union = new Set([...parentPool, ...evolvedPool]).size;
+        const jaccard = union > 0 ? intersection / union : 1;
+        if (jaccard > 0.85) {
+          const basePool = ELEMENT_POOLS[evolved.type] ?? ELEMENT_POOLS["hydride-cage-optimizer"];
+          const extraElements = basePool.filter(el => !evolvedPool.has(el));
+          if (extraElements.length > 0) {
+            const addCount = Math.min(2, extraElements.length);
+            for (let i = 0; i < addCount; i++) {
+              evolved.parameters.elementPool.push(extraElements[i]);
+            }
+          }
+        }
+
         const idx = state.strategies.indexOf(worst);
         if (idx >= 0) {
           state.strategies[idx] = evolved;
@@ -1021,8 +1394,33 @@ export function runLabIteration(id: string): LabIterationResult | null {
   if (state.convergenceHistory.length >= 20) {
     const last20 = state.convergenceHistory.slice(-20);
     const range = Math.max(...last20) - Math.min(...last20);
-    if (range < 0.01 && state.bestDistance < 0.15) {
-      state.status = "converged";
+    if (range < 0.01) {
+      if (state.bestDistance < 0.15) {
+        state.status = "converged";
+      } else {
+        for (const s of state.strategies) {
+          if (s.parameters.pressureRegime === "ambient") {
+            s.parameters.pressureRegime = "moderate";
+          } else if (s.parameters.pressureRegime === "moderate") {
+            s.parameters.pressureRegime = "high";
+          }
+
+          const basePool = ELEMENT_POOLS[s.type] ?? ELEMENT_POOLS["hydride-cage-optimizer"];
+          const compatible = STRATEGY_COMPATIBLE_ELEMENTS[s.type] ?? [];
+          const unexplored = compatible.filter(el => !s.parameters.elementPool.includes(el));
+          if (unexplored.length > 0) {
+            const addCount = Math.min(3, unexplored.length);
+            for (let i = 0; i < addCount; i++) {
+              s.parameters.elementPool.push(unexplored[i]);
+            }
+          }
+
+          s.parameters.mutationRate = Math.min(0.30, s.parameters.mutationRate + 0.05);
+          s.parameters.explorationWeight = Math.min(0.8, s.parameters.explorationWeight + 0.15);
+        }
+
+        state.convergenceHistory = state.convergenceHistory.slice(-5);
+      }
     }
   }
 
@@ -1073,6 +1471,44 @@ export function runLabIteration(id: string): LabIterationResult | null {
   totalLabRuns++;
 
   return iterResult;
+}
+
+function computeBottleneckAnalysis(state: LabState): BottleneckAnalysis | null {
+  const t = state.pipelineTiming;
+  if (t.iterationCount === 0) return null;
+
+  const total = t.surrogateMs + t.constraintMs + t.pillarMs + t.inrTrainingMs + t.designRepMs;
+  if (total === 0) return null;
+
+  const segments: Record<string, number> = {
+    Surrogates: t.surrogateMs,
+    Constraints: t.constraintMs,
+    Pillars: t.pillarMs,
+    "INR Training": t.inrTrainingMs,
+    "Design Rep": t.designRepMs,
+  };
+
+  const percentages: Record<string, number> = {};
+  let maxLabel = "Surrogates";
+  let maxMs = 0;
+  for (const [label, ms] of Object.entries(segments)) {
+    percentages[label] = Math.round((ms / total) * 1000) / 10;
+    if (ms > maxMs) {
+      maxMs = ms;
+      maxLabel = label;
+    }
+  }
+
+  return {
+    surrogateMs: Math.round(t.surrogateMs / t.iterationCount),
+    constraintMs: Math.round(t.constraintMs / t.iterationCount),
+    pillarMs: Math.round(t.pillarMs / t.iterationCount),
+    inrTrainingMs: Math.round(t.inrTrainingMs / t.iterationCount),
+    designRepMs: Math.round(t.designRepMs / t.iterationCount),
+    totalPipelineMs: Math.round(total / t.iterationCount),
+    bottleneck: maxLabel,
+    percentages,
+  };
 }
 
 export function getLabStats(id: string): LabStats | null {
@@ -1129,6 +1565,7 @@ export function getLabStats(id: string): LabStats | null {
     })),
     strategiesEvolved: state.totalStrategiesEvolved,
     iterationsPerMinute: Math.round(iterPerMin * 10) / 10,
+    bottleneckAnalysis: computeBottleneckAnalysis(state),
   };
 }
 
@@ -1169,5 +1606,119 @@ export function getAllLabStats(): {
     activeLabs: labSummaries.filter(l => l.status === "running").length,
     totalRuns: totalLabRuns,
     labs: labSummaries,
+  };
+}
+
+interface GlobalKnowledgeEntry extends KnowledgeEntry {
+  sourceLabIds: string[];
+  mergedAt: number;
+  propagated?: boolean;
+}
+
+let globalKnowledgeBase: GlobalKnowledgeEntry[] = [];
+
+export function syncGlobalKnowledgeBase(): {
+  totalEntries: number;
+  newEntriesMerged: number;
+  labsSynced: string[];
+} {
+  const merged = new Map<string, GlobalKnowledgeEntry>();
+  const labsSynced: string[] = [];
+
+  for (const [labId, state] of labs.entries()) {
+    labsSynced.push(labId);
+
+    for (const entry of state.knowledgeBase) {
+      if (entry.confidence < 0.3) continue;
+      if ((entry as any)._fromGlobalSync) continue;
+
+      const key = `${entry.strategyType}::${entry.pattern}`;
+      const existing = merged.get(key);
+
+      if (existing) {
+        existing.failureCount += entry.failureCount;
+        existing.successCount += entry.successCount;
+        if (!existing.sourceLabIds.includes(labId)) {
+          existing.sourceLabIds.push(labId);
+        }
+        if (entry.suggestion.length > existing.suggestion.length) {
+          existing.suggestion = entry.suggestion;
+        }
+        existing.lastUpdated = Math.max(existing.lastUpdated, entry.lastUpdated);
+      } else {
+        merged.set(key, {
+          strategyType: entry.strategyType,
+          pattern: entry.pattern,
+          failureCount: entry.failureCount,
+          successCount: entry.successCount,
+          suggestion: entry.suggestion,
+          confidence: 0,
+          lastUpdated: entry.lastUpdated,
+          sourceLabIds: [labId],
+          mergedAt: Date.now(),
+        });
+      }
+    }
+  }
+
+  for (const entry of merged.values()) {
+    const totalObs = entry.failureCount + entry.successCount;
+    entry.confidence = totalObs > 0
+      ? entry.successCount / totalObs * 0.6 + Math.min(1, totalObs / 20) * 0.4
+      : 0;
+  }
+
+  const previousSize = globalKnowledgeBase.length;
+  globalKnowledgeBase = Array.from(merged.values());
+
+  let propagatedCount = 0;
+  for (const [labId, state] of labs.entries()) {
+    for (const globalEntry of globalKnowledgeBase) {
+      if (globalEntry.confidence < 0.5) continue;
+      if (globalEntry.sourceLabIds.length < 2) continue;
+      if (globalEntry.sourceLabIds.length === 1 && globalEntry.sourceLabIds[0] === labId) continue;
+
+      const localMatch = state.knowledgeBase.find(
+        k => k.pattern === globalEntry.pattern && k.strategyType === globalEntry.strategyType
+      );
+
+      if (!localMatch) {
+        const propagated: KnowledgeEntry & { _fromGlobalSync?: boolean } = {
+          strategyType: globalEntry.strategyType,
+          pattern: globalEntry.pattern,
+          failureCount: globalEntry.failureCount,
+          successCount: globalEntry.successCount,
+          suggestion: globalEntry.suggestion,
+          confidence: globalEntry.confidence * 0.8,
+          lastUpdated: Date.now(),
+          _fromGlobalSync: true,
+        };
+        state.knowledgeBase.push(propagated as KnowledgeEntry);
+        propagatedCount++;
+      }
+    }
+  }
+
+  return {
+    totalEntries: globalKnowledgeBase.length,
+    newEntriesMerged: Math.max(0, globalKnowledgeBase.length - previousSize),
+    labsSynced,
+  };
+}
+
+export function getGlobalKnowledgeBase(): {
+  entries: GlobalKnowledgeEntry[];
+  totalEntries: number;
+  topPatterns: { pattern: string; confidence: number; observations: number }[];
+} {
+  const sorted = [...globalKnowledgeBase].sort((a, b) => b.confidence - a.confidence);
+  return {
+    entries: sorted,
+    totalEntries: sorted.length,
+    topPatterns: sorted.slice(0, 15).map(e => ({
+      pattern: e.pattern,
+      confidence: Math.round(e.confidence * 100) / 100,
+      observations: e.failureCount + e.successCount,
+    })),
   };
 }

@@ -1,0 +1,44 @@
+Update analyzeFailure Signature and LogicModify the function to accept structuralInstability and prioritize it as a failure type. Structural instability is often a "silent killer" of high-$T_c$ predictions because the McMillan/Allen-Dynes equations assume a stable lattice.TypeScriptfunction analyzeFailure(
+  formula: string,
+  strategyId: string,
+  iteration: number,
+  tc: number,
+  lambda: number,
+  pressure: number,
+  hullDistance: number,
+  constraintPenalty: number,
+  targetTc: number,
+  maxPressure: number,
+  structuralInstability: number, // Added parameter
+): FailureRecord | null {
+  let failureType: FailureType | null = null;
+  let failureReason = "";
+  let suggestion = "";
+
+  // PRIORITY 1: Structural Stability
+  // If structuralInstability is high (> 0.6), the Tc prediction is physically invalid
+  if (structuralInstability > 0.6) {
+    failureType = "structural-instability";
+    failureReason = `Structural instability score ${structuralInstability.toFixed(2)} indicates imaginary phonon modes or lattice collapse`;
+    suggestion = "Lattice is dynamically unstable; try substituting elements with different atomic radii or reducing stoichiometry of light atoms";
+  } 
+  // PRIORITY 2: Existing Tc and Constraint checks
+  else if (tc < targetTc * 0.3) {
+    failureType = "low-tc";
+    // ... rest of existing logic
+2. Update the Calling LoopIn the main loop where analyzeFailure is called, you must pass the structuralInstability value. Since you are already using evaluatePillars (which returns the instability breakdown), the integration is straightforward:TypeScript// Inside the self-improving-lab's main cycle
+const evaluation = evaluatePillars(formula, targets, { maxPressureGPa });
+
+const failure = analyzeFailure(
+  formula,
+  activeStrategy.id,
+  iteration,
+  evaluation.tcPredicted,
+  evaluation.lambda,
+  pressure,
+  evaluation.instability.hullDistance ?? 0,
+  evaluation.constraintPenalty,
+  targetTc,
+  maxPressure,
+  evaluation.instability.structuralInstability // Pass the pillar metric here
+);

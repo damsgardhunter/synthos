@@ -26,6 +26,7 @@ import {
 } from "./model-llm-controller";
 import { getUncertaintyForLLM, getVarianceSummary, getFrontierUncertainty } from "./uncertainty-tracker";
 import { evaluateRetrainNeed, recordRetrainOutcome, getSchedulerForLLM, getSchedulerStats } from "./retrain-scheduler";
+import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import type { EventEmitter } from "./engine";
 
 interface MetricTrend {
@@ -39,6 +40,7 @@ interface ImprovementStats {
   experimentsRun: number;
   improvementsAchieved: number;
   rollbacksPerformed: number;
+  emergencyDataFetches: number;
   currentModelHealth: { model: string; status: string; reasons: string[] }[];
   trends: MetricTrend[];
   lastCycleAt: number | null;
@@ -73,6 +75,12 @@ let pendingImprovementTask: Promise<{ ran: boolean; experiment?: ExperimentRecor
 let consecutivePhononMissing = 0;
 let consecutiveLambdaMissing = 0;
 const PHYSICS_FEATURE_WARNING_THRESHOLD = 5;
+
+const NEGATIVE_R2_FETCH_LIMIT = 200;
+const NEGATIVE_R2_DATASET_CAP = 1000;
+const NEGATIVE_R2_COOLDOWN_CYCLES = 8;
+let lastNegativeR2FetchCycle = -999;
+let emergencyFetchCount = 0;
 
 function isOnCooldown(model: string, currentCycle: number): boolean {
   const entry = cooldowns.find(c => c.model === model);
@@ -294,6 +302,137 @@ function filterForExploration(proposals: ExperimentProposal[]): ExperimentPropos
   return proposals;
 }
 
+interface NegativeR2Check {
+  triggered: boolean;
+  models: { name: string; r2: number; datasetSize: number }[];
+  totalDatasetSize: number;
+}
+
+function detectNegativeR2(diagnostics: ComprehensiveModelDiagnostics): NegativeR2Check {
+  const negativeModels: { name: string; r2: number; datasetSize: number }[] = [];
+
+  if (diagnostics.xgboost.r2 < 0) {
+    negativeModels.push({ name: "xgboost", r2: diagnostics.xgboost.r2, datasetSize: diagnostics.xgboost.datasetSize });
+  }
+  if (diagnostics.gnn.latestR2 < 0) {
+    negativeModels.push({ name: "gnn", r2: diagnostics.gnn.latestR2, datasetSize: diagnostics.gnn.datasetSize });
+  }
+  if (diagnostics.lambda.r2 < 0) {
+    negativeModels.push({ name: "lambda-regressor", r2: diagnostics.lambda.r2, datasetSize: diagnostics.lambda.datasetSize });
+  }
+
+  const totalDatasetSize = negativeModels.length > 0
+    ? Math.min(...negativeModels.map(m => m.datasetSize))
+    : Math.max(diagnostics.xgboost.datasetSize, diagnostics.gnn.datasetSize, diagnostics.lambda.datasetSize);
+
+  return {
+    triggered: negativeModels.length > 0,
+    models: negativeModels,
+    totalDatasetSize,
+  };
+}
+
+async function runEmergencyDataFetch(
+  emit: EventEmitter,
+  negR2: NegativeR2Check,
+  currentCycle: number
+): Promise<boolean> {
+  if (!negR2.triggered) return false;
+  if (negR2.totalDatasetSize >= NEGATIVE_R2_DATASET_CAP) {
+    emit("log", {
+      phase: "engine",
+      event: "Negative R² detected but dataset already large",
+      detail: `Models with R²<0: ${negR2.models.map(m => `${m.name}(R²=${m.r2.toFixed(3)})`).join(", ")}. Dataset=${negR2.totalDatasetSize} (cap=${NEGATIVE_R2_DATASET_CAP}). Skipping emergency fetch — issue is likely model architecture, not data scarcity.`,
+      dataSource: "Model Improvement Loop",
+    });
+    return false;
+  }
+  if (currentCycle - lastNegativeR2FetchCycle < NEGATIVE_R2_COOLDOWN_CYCLES) {
+    emit("log", {
+      phase: "engine",
+      event: "Negative R² emergency fetch on cooldown",
+      detail: `Last fetch was cycle ${lastNegativeR2FetchCycle}, cooldown=${NEGATIVE_R2_COOLDOWN_CYCLES} cycles. Current=${currentCycle}.`,
+      dataSource: "Model Improvement Loop",
+    });
+    return false;
+  }
+
+  const modelSummary = negR2.models.map(m => `${m.name}(R²=${m.r2.toFixed(3)}, n=${m.datasetSize})`).join(", ");
+  emit("log", {
+    phase: "engine",
+    event: "Negative R² emergency data fetch triggered",
+    detail: `[Improvement-Loop] Low R² detected: ${modelSummary}. Triggering emergency data fetch (target: ${NEGATIVE_R2_FETCH_LIMIT} new materials).`,
+    dataSource: "Model Improvement Loop",
+  });
+
+  let totalFetched = 0;
+
+  try {
+    const oqmdOffset = getNextOQMDOffset();
+    const oqmdCount = await fetchOQMDMaterials(emit, NEGATIVE_R2_FETCH_LIMIT, oqmdOffset);
+    totalFetched += oqmdCount;
+    if (oqmdCount > 0) {
+      emit("log", {
+        phase: "engine",
+        event: "Emergency fetch: OQMD batch complete",
+        detail: `Fetched ${oqmdCount} DFT-computed materials from OQMD (offset=${oqmdOffset})`,
+        dataSource: "Model Improvement Loop",
+      });
+    }
+  } catch (e) {
+    emit("log", {
+      phase: "engine",
+      event: "Emergency fetch: OQMD failed",
+      detail: e instanceof Error ? e.message : "unknown error",
+      dataSource: "Model Improvement Loop",
+    });
+  }
+
+  try {
+    const elementCount = await fetchElementFocusedMaterials(emit);
+    totalFetched += elementCount;
+  } catch (e) {
+    emit("log", {
+      phase: "engine",
+      event: "Emergency fetch: element-focused failed",
+      detail: e instanceof Error ? e.message : "unknown error",
+      dataSource: "Model Improvement Loop",
+    });
+  }
+
+  try {
+    const knownCount = await fetchKnownMaterials(emit);
+    totalFetched += knownCount;
+  } catch (e) {
+    emit("log", {
+      phase: "engine",
+      event: "Emergency fetch: known materials failed",
+      detail: e instanceof Error ? e.message : "unknown error",
+      dataSource: "Model Improvement Loop",
+    });
+  }
+
+  if (totalFetched > 0) {
+    lastNegativeR2FetchCycle = currentCycle;
+    emergencyFetchCount++;
+    emit("log", {
+      phase: "engine",
+      event: `Emergency data fetch complete`,
+      detail: `[Improvement-Loop] Dataset expanded: ${negR2.totalDatasetSize} -> ${negR2.totalDatasetSize + totalFetched} (fetched ${totalFetched} new materials, fetch #${emergencyFetchCount}). DFT validation will auto-process via qe-worker.`,
+      dataSource: "Model Improvement Loop",
+    });
+  } else {
+    emit("log", {
+      phase: "engine",
+      event: "Emergency data fetch: no materials fetched",
+      detail: "All data sources returned 0 materials. Will retry next eligible cycle without cooldown.",
+      dataSource: "Model Improvement Loop",
+    });
+  }
+
+  return totalFetched > 0;
+}
+
 function shouldRunGreenExpansion(diagnostics: ComprehensiveModelDiagnostics): string | null {
   const variance = getVarianceSummary();
   if (variance.highUncertaintyFraction < HIGH_UNCERTAINTY_FRACTION_THRESHOLD) return null;
@@ -318,6 +457,11 @@ async function runImprovementCycleInner(
   const diagnosticsBefore = getComprehensiveModelDiagnostics();
   const health = getModelHealthSummary();
   const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
+
+  const negR2Check = detectNegativeR2(diagnosticsBefore);
+  if (negR2Check.triggered) {
+    await runEmergencyDataFetch(emit, negR2Check, currentCycle);
+  }
 
   const topFeatures = getFeatureImportanceReport(10);
   let physicsAutoTriggered = false;
@@ -623,6 +767,7 @@ export function getModelImprovementStats(): ImprovementStats {
     experimentsRun: totalExperimentsRun,
     improvementsAchieved: totalImprovementsAchieved,
     rollbacksPerformed: totalRollbacksPerformed,
+    emergencyDataFetches: emergencyFetchCount,
     currentModelHealth: health.map(h => ({ model: h.model, status: h.status, reasons: h.reasons })),
     trends: metricTrends,
     lastCycleAt: lastImprovementCycleAt,
@@ -676,6 +821,14 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
     if (!hasLambda) {
       lines.push(`  ** Model ignores e-ph coupling (${consecutiveLambdaMissing} consecutive cycles) — ${consecutiveLambdaMissing >= PHYSICS_FEATURE_WARNING_THRESHOLD ? "AUTO-TRIGGER pending" : "lambda features underused"} **`);
     }
+  }
+
+  const negR2Models: string[] = [];
+  if (diagnostics.xgboost.r2 < 0) negR2Models.push(`XGBoost(R²=${diagnostics.xgboost.r2})`);
+  if (diagnostics.gnn.latestR2 < 0) negR2Models.push(`GNN(R²=${diagnostics.gnn.latestR2})`);
+  if (diagnostics.lambda.r2 < 0) negR2Models.push(`Lambda(R²=${diagnostics.lambda.r2})`);
+  if (negR2Models.length > 0) {
+    lines.push(`  ** NEGATIVE R² DETECTED: ${negR2Models.join(", ")} — emergency data fetch ${emergencyFetchCount > 0 ? `active (${emergencyFetchCount} fetches performed)` : "pending"} **`);
   }
 
   const errorAnalysis = getErrorAnalysis();

@@ -24,7 +24,7 @@ export function createInitialLearningState(): InverseLearningState {
 
 function parseFormulaElements(formula: string): string[] {
   const matches = formula.match(/[A-Z][a-z]?/g);
-  return matches || [];
+  return Array.from(new Set(matches || []));
 }
 
 function makePairKey(a: string, b: string): string {
@@ -50,14 +50,24 @@ export function updateLearningState(
     const result = resultMap.get(candidate.formula);
     if (!result) continue;
 
-    const distance = computeTargetDistance(target, {
-      tc: result.tc,
-      lambda: result.lambda,
-      hull: result.hull,
-      pressure: result.pressure,
-    });
+    const distance = candidate.targetDistance > 0
+      ? candidate.targetDistance
+      : computeTargetDistance(target, {
+          tc: result.tc,
+          lambda: result.lambda,
+          hull: result.hull,
+          pressure: result.pressure,
+        });
 
-    const reward = computeReward(distance);
+    let reward = computeReward(distance);
+
+    if (candidate.synthesisVector) {
+      const sv = candidate.synthesisVector;
+      if (sv.temperature > 3000) reward *= 0.7;
+      else if (sv.temperature > 2000) reward *= 0.85;
+      if (sv.pressure > 300) reward *= 0.7;
+      else if (sv.pressure > 150) reward *= 0.85;
+    }
 
     candidate.targetDistance = distance;
     candidate.predictedTc = result.tc;
@@ -113,6 +123,9 @@ export function updateLearningState(
 
   state.iterationsRun += 1;
   state.convergenceHistory.push(state.bestDistance);
+  if (state.convergenceHistory.length > 200) {
+    state.convergenceHistory = state.convergenceHistory.slice(-100);
+  }
 
   return state;
 }

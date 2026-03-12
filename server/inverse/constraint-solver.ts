@@ -15,6 +15,7 @@ export interface ConstraintSolution {
   chargeTransfer: ChargeTransferConstraint;
   feasibilityScore: number;
   feasibilityNote: string;
+  theoreticalConfidence: number;
   structuralTargets: StructuralTarget[];
   elementSuggestions: ElementSuggestion[];
   constraintChain: ConstraintStep[];
@@ -36,6 +37,7 @@ interface PhononConstraint {
   optimalOmegaLog: number;
   maxPhononFreq: number;
   requiredBondStiffness: string;
+  bondStiffnessRange: { min: number; max: number; unit: string };
   lightElementFraction: number;
   debyeTempRange: { min: number; max: number };
   feasibility: number;
@@ -48,9 +50,12 @@ interface CouplingConstraint {
   requiredDOSContribution: number;
   requiredPhononSoftness: number;
   orbitalOverlapRequirement: string;
+  orbitalOverlapSummary: string;
   bondingNetworkType: string;
+  bondingNetworkSummary: string;
   hopfieldParameter: { min: number; optimal: number };
   feasibility: number;
+  theoreticalConfidence: number;
   note: string;
 }
 
@@ -58,6 +63,7 @@ interface ChargeTransferConstraint {
   required: boolean;
   deltaCharge: { min: number; optimal: number };
   layerType: string;
+  layerTypeSummary: string;
   donorCandidates: string[];
   acceptorCandidates: string[];
   interlayerCoupling: string;
@@ -70,6 +76,7 @@ interface StructuralTarget {
   reason: string;
   priority: number;
   exemplars: string[];
+  modelWarning?: string;
 }
 
 interface ElementSuggestion {
@@ -84,7 +91,7 @@ interface ConstraintStep {
   parameter: string;
   constraint: string;
   value: string;
-  status: "satisfied" | "feasible" | "challenging" | "unlikely";
+  status: "satisfied" | "feasible" | "challenging" | "unlikely" | "not-applicable";
 }
 
 interface SweepPoint {
@@ -93,14 +100,19 @@ interface SweepPoint {
   tc: number;
 }
 
-function mcMillanTc(lambda: number, omegaLogK: number, muStar: number): number {
+function mcMillanTc(lambda: number, omegaLogK: number, muStar: number, omega2K?: number): number {
+  if (omegaLogK <= 0) return 0;
   const denom = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denom) < 1e-6 || denom <= 0) return 0;
   const lambdaBar = 2.46 * (1 + 3.8 * muStar);
   const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+  const w2 = omega2K && omega2K > 0 ? omega2K : omegaLogK * 1.3;
+  const omega2Ratio = Math.max(1.0, w2 / omegaLogK);
+  const lambda2 = 2.46 * (1 + 3.8 * muStar) * Math.sqrt(omega2Ratio);
+  const f2 = 1 + (lambda * lambda / (lambda * lambda + lambda2 * lambda2)) * (omega2Ratio - 1) * 0.15;
   const exponent = -1.04 * (1 + lambda) / denom;
   if (exponent < -50) return 0;
-  const tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+  const tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
   return Number.isFinite(tc) && tc > 0 ? tc : 0;
 }
 
@@ -110,7 +122,9 @@ function solveRequiredLambda(
   muStar: number,
 ): number {
   let lo = 0.1, hi = 5.0;
-  for (let i = 0; i < 80; i++) {
+  const tcAtHi = mcMillanTc(hi, omegaLogK, muStar);
+  if (tcAtHi < targetTc) return NaN;
+  for (let i = 0; i < 53; i++) {
     const mid = (lo + hi) / 2;
     const tc = mcMillanTc(mid, omegaLogK, muStar);
     if (tc < targetTc) lo = mid;
@@ -125,7 +139,9 @@ function solveRequiredOmegaLog(
   muStar: number,
 ): number {
   let lo = 50, hi = 5000;
-  for (let i = 0; i < 80; i++) {
+  const tcAtHi = mcMillanTc(lambda, hi, muStar);
+  if (tcAtHi < targetTc) return NaN;
+  for (let i = 0; i < 53; i++) {
     const mid = (lo + hi) / 2;
     const tc = mcMillanTc(lambda, mid, muStar);
     if (tc < targetTc) lo = mid;
@@ -144,45 +160,55 @@ function sweepLambdaOmega(
     if (omega > 0 && omega < 5000) {
       const actualTc = mcMillanTc(lam, omega, muStar);
       if (Math.abs(actualTc - targetTc) < targetTc * 0.05) {
-        solutions.push({ lambda: Math.round(lam * 100) / 100, omegaLogK: Math.round(omega), tc: Math.round(actualTc * 10) / 10 });
+        solutions.push({ lambda: lam, omegaLogK: omega, tc: actualTc });
       }
     }
   }
   return solutions;
 }
 
-function assessFeasibility(lambda: number, omegaLogK: number): { score: number; note: string } {
-  let score = 1.0;
+function assessFeasibility(lambda: number, omegaLogK: number): { score: number; note: string; theoreticalConfidence: number } {
+  let synthesisEase = 1.0;
+  let theoreticalConfidence = 0.5;
   const notes: string[] = [];
 
-  if (lambda > 3.5) {
-    score *= 0.2;
-    notes.push("lambda > 3.5 is extremely rare");
-  } else if (lambda > 2.5) {
-    score *= 0.5;
-    notes.push("lambda > 2.5 requires strong e-ph coupling (hydride-like)");
+  const lambdaPenalty = 1 / (1 + Math.exp(3 * (lambda - 2.5)));
+  synthesisEase *= 0.3 + 0.7 * lambdaPenalty;
+  if (lambda > 2.5) {
+    notes.push("lambda > 2.5 requires extreme e-ph coupling (hydride-class)");
   } else if (lambda > 1.5) {
-    score *= 0.8;
     notes.push("lambda 1.5-2.5 is achievable in hydrides and some compounds");
   }
 
+  if (lambda >= 0.5 && lambda <= 2.0) {
+    theoreticalConfidence += 0.3;
+  } else if (lambda > 2.0 && lambda <= 3.0) {
+    theoreticalConfidence += 0.15;
+  }
+
+  const omegaPenalty = 1 / (1 + Math.exp(3 * (omegaLogK - 1500) / 1000));
+  synthesisEase *= 0.3 + 0.7 * omegaPenalty;
   if (omegaLogK > 2000) {
-    score *= 0.3;
     notes.push("omegaLog > 2000K requires very light elements (H-dominant)");
   } else if (omegaLogK > 1200) {
-    score *= 0.6;
     notes.push("omegaLog 1200-2000K achievable with H, B, C");
   } else if (omegaLogK > 600) {
-    score *= 0.9;
     notes.push("omegaLog 600-1200K achievable with light-element compounds");
   }
 
-  if (lambda > 2.0 && omegaLogK > 1500) {
-    score *= 1.2;
-    notes.push("high lambda + high omegaLog is the hydride sweet spot");
+  if (omegaLogK >= 200 && omegaLogK <= 1500) {
+    theoreticalConfidence += 0.2;
+  } else if (omegaLogK > 1500 && omegaLogK <= 3000) {
+    theoreticalConfidence += 0.1;
   }
 
-  return { score: Math.min(1, Math.round(score * 100) / 100), note: notes.join("; ") };
+  if (lambda > 2.0 && omegaLogK > 1500) {
+    theoreticalConfidence = Math.min(1.0, theoreticalConfidence + 0.15);
+    notes.push("high lambda + high omegaLog: strong theoretical basis (hydride sweet spot) but extreme synthesis conditions required");
+  }
+
+  const score = Math.min(1, synthesisEase);
+  return { score, note: notes.join("; "), theoreticalConfidence: Math.min(1.0, theoreticalConfidence) };
 }
 
 function suggestStructures(lambda: number, omegaLogK: number): StructuralTarget[] {
@@ -227,6 +253,7 @@ function suggestStructures(lambda: number, omegaLogK: number): StructuralTarget[
       reason: "Low phonon freq + high coupling suggests unconventional layered mechanism",
       priority: 3,
       exemplars: ["YBCO", "Bi2212", "HgBaCuO"],
+      modelWarning: "Allen-Dynes/McMillan Tc likely underestimates for this regime. Cuprate superconductivity involves non-BCS spin-fluctuation or charge-transfer pairing not captured by phonon-mediated models. Actual Tc may be 2-5x higher than predicted.",
     });
   }
 
@@ -270,12 +297,21 @@ function suggestElements(lambda: number, omegaLogK: number): ElementSuggestion[]
       reason: "Alkaline earth and rare earth metals stabilize cage structures and donate electrons",
       confidence: 0.85,
     });
-    suggestions.push({
-      elements: ["Nb", "V", "Ta", "Mo", "W"],
-      role: "strong coupling provider",
-      reason: "4d/5d transition metals have high Hopfield parameters for strong e-ph coupling",
-      confidence: 0.75,
-    });
+    if (omegaLogK > 800) {
+      suggestions.push({
+        elements: ["V", "Ti", "Nb"],
+        role: "strong coupling provider",
+        reason: "3d/4d transition metals with moderate mass sustain high phonon frequencies while providing strong e-ph coupling (lambda = eta / M<omega^2>)",
+        confidence: 0.8,
+      });
+    } else {
+      suggestions.push({
+        elements: ["Nb", "V", "Ta", "Mo", "W"],
+        role: "strong coupling provider",
+        reason: "4d/5d transition metals have high Hopfield parameters for strong e-ph coupling. At low omega_log, their high mass does not suppress phonon frequencies critically.",
+        confidence: 0.75,
+      });
+    }
   }
 
   if (lambda > 0.8 && lambda < 1.5) {
@@ -291,7 +327,7 @@ function suggestElements(lambda: number, omegaLogK: number): ElementSuggestion[]
     suggestions.push({
       elements: ["Cu", "Fe", "Ni"],
       role: "correlated electron host",
-      reason: "Low phonon scale + high coupling may indicate unconventional pairing",
+      reason: "Low phonon scale + high coupling may indicate unconventional pairing. Note: McMillan model underestimates Tc for correlated-electron systems; actual Tc may exceed phonon-mediated predictions via spin-fluctuation or orbital-fluctuation mechanisms.",
       confidence: 0.5,
     });
   }
@@ -300,63 +336,56 @@ function suggestElements(lambda: number, omegaLogK: number): ElementSuggestion[]
 }
 
 function solveDOSConstraint(targetTc: number, lambda: number): DOSConstraint {
-  let minDOS: number, optimalDOS: number, maxDOS: number;
-  let orbitalChar: string, bandReq: string, vhp: number;
   const notes: string[] = [];
 
-  if (targetTc > 200) {
-    minDOS = 5.0;
-    optimalDOS = 8.0;
-    maxDOS = 15.0;
+  const tcNorm = Math.max(1, targetTc);
+  const baseDOS = 0.6 + 1.8 * Math.log10(tcNorm);
+  const baseOptimal = baseDOS * 1.8;
+  const baseMax = baseDOS * 3.5;
+
+  const lambdaScale = lambda / 1.5;
+  let minDOS = baseDOS * lambdaScale;
+  let optimalDOS = baseOptimal * lambdaScale;
+  let maxDOS = baseMax;
+
+  minDOS = Math.max(0.5, minDOS);
+  optimalDOS = Math.max(1.0, optimalDOS);
+  maxDOS = Math.max(optimalDOS * 1.5, maxDOS);
+
+  let orbitalChar: string, bandReq: string;
+  const vhp = 1 / (1 + Math.exp(0.03 * (targetTc - 150)));
+  if (targetTc > 150) {
     orbitalChar = "d-dominant with s-p hybridization";
     bandReq = "Multiple bands crossing Fermi level with van Hove singularity nearby";
-    vhp = 0.05;
-    notes.push("Ultra-high Tc demands DOS(Ef) > 5 states/eV with VHS proximity");
-  } else if (targetTc > 100) {
-    minDOS = 3.0;
-    optimalDOS = 6.0;
-    maxDOS = 12.0;
+    notes.push(`Ultra-high Tc=${targetTc}K demands DOS(Ef) > ${minDOS.toFixed(1)} states/eV with VHS proximity`);
+  } else if (targetTc > 80) {
     orbitalChar = "d-dominant";
     bandReq = "High band degeneracy at Fermi level";
-    vhp = 0.15;
-    notes.push("High Tc requires DOS(Ef) > 3 states/eV");
-  } else if (targetTc > 40) {
-    minDOS = 1.5;
-    optimalDOS = 3.5;
-    maxDOS = 8.0;
+    notes.push(`High Tc=${targetTc}K requires DOS(Ef) > ${minDOS.toFixed(1)} states/eV`);
+  } else if (targetTc > 30) {
     orbitalChar = "mixed d-p";
     bandReq = "Good metallicity with moderate band crossing";
-    vhp = 0.3;
-    notes.push("Moderate Tc achievable with DOS(Ef) > 1.5 states/eV");
+    notes.push(`Moderate Tc=${targetTc}K achievable with DOS(Ef) > ${minDOS.toFixed(1)} states/eV`);
   } else {
-    minDOS = 0.8;
-    optimalDOS = 2.0;
-    maxDOS = 6.0;
     orbitalChar = "s-p or d";
     bandReq = "Metallic band structure";
-    vhp = 0.5;
-    notes.push("Low Tc requires only modest DOS(Ef)");
+    notes.push(`Low Tc=${targetTc}K requires modest DOS(Ef)`);
   }
 
-  if (lambda > 2.0) {
-    minDOS = Math.max(minDOS, 4.0);
-    optimalDOS = Math.max(optimalDOS, 6.0);
-    notes.push("Strong coupling (lambda > 2) requires enhanced DOS to sustain pairing");
+  if (lambdaScale > 1.0) {
+    notes.push(`Strong coupling (lambda=${lambda.toFixed(2)}) scales DOS requirement by ${lambdaScale.toFixed(2)}x`);
   }
 
-  let feasibility = 1.0;
-  if (optimalDOS > 8) feasibility *= 0.4;
-  else if (optimalDOS > 5) feasibility *= 0.7;
-  else if (optimalDOS > 3) feasibility *= 0.9;
+  const feasibility = 1 / (1 + Math.exp(2.5 * (optimalDOS - 10)));
 
   return {
-    minDOS: Math.round(minDOS * 10) / 10,
-    optimalDOS: Math.round(optimalDOS * 10) / 10,
-    maxDOS: Math.round(maxDOS * 10) / 10,
+    minDOS,
+    optimalDOS,
+    maxDOS,
     requiredOrbitalCharacter: orbitalChar,
     bandStructureRequirement: bandReq,
     vanHoveProximity: vhp,
-    feasibility: Math.round(feasibility * 100) / 100,
+    feasibility,
     note: notes.join("; "),
   };
 }
@@ -369,22 +398,27 @@ function solvePhononConstraint(_targetTc: number, optimalOmegaLog: number): Phon
   let preferred: string[];
   let maxPhononFreq: number;
 
+  let stiffnessMin: number, stiffnessMax: number;
+
   if (optimalOmegaLog > 1500) {
     bondStiffness = "Very stiff covalent/metallic bonds (>500 N/m spring constant)";
+    stiffnessMin = 500; stiffnessMax = 1500;
     lightFraction = 0.7;
     maxAvgMass = 10;
-    preferred = ["H", "B", "C", "N"];
+    preferred = ["H", "Li", "Be", "B"];
     maxPhononFreq = optimalOmegaLog * 3;
-    notes.push("Requires H-dominant composition for phonon freq > 1500K");
+    notes.push("Requires H-dominant composition for phonon freq > 1500K; N excluded (N-phonons rarely exceed 1000-1200K)");
   } else if (optimalOmegaLog > 800) {
     bondStiffness = "Stiff covalent bonds (200-500 N/m)";
+    stiffnessMin = 200; stiffnessMax = 500;
     lightFraction = 0.4;
     maxAvgMass = 30;
-    preferred = ["B", "C", "N", "O", "Si"];
+    preferred = ["H", "B", "C", "N", "O"];
     maxPhononFreq = optimalOmegaLog * 2.5;
     notes.push("Moderate light-element content needed for phonon freq 800-1500K");
   } else if (optimalOmegaLog > 400) {
     bondStiffness = "Moderate bond stiffness (100-200 N/m)";
+    stiffnessMin = 100; stiffnessMax = 200;
     lightFraction = 0.15;
     maxAvgMass = 60;
     preferred = ["B", "C", "N", "Nb", "V", "Ti"];
@@ -392,6 +426,7 @@ function solvePhononConstraint(_targetTc: number, optimalOmegaLog: number): Phon
     notes.push("Standard metallic/covalent bonds sufficient");
   } else {
     bondStiffness = "Soft bonds acceptable (<100 N/m)";
+    stiffnessMin = 20; stiffnessMax = 100;
     lightFraction = 0.0;
     maxAvgMass = 120;
     preferred = ["Nb", "Sn", "Pb", "Bi"];
@@ -399,8 +434,8 @@ function solvePhononConstraint(_targetTc: number, optimalOmegaLog: number): Phon
     notes.push("Heavy-element conventional superconductors feasible");
   }
 
-  const debyeMin = Math.round(optimalOmegaLog * 0.8);
-  const debyeMax = Math.round(optimalOmegaLog * 2.5);
+  const debyeMin = optimalOmegaLog * 0.8;
+  const debyeMax = optimalOmegaLog * 2.5;
 
   let feasibility = 1.0;
   if (optimalOmegaLog > 2000) feasibility *= 0.3;
@@ -413,13 +448,14 @@ function solvePhononConstraint(_targetTc: number, optimalOmegaLog: number): Phon
   }
 
   return {
-    minOmegaLog: Math.round(optimalOmegaLog * 0.6),
-    optimalOmegaLog: Math.round(optimalOmegaLog),
-    maxPhononFreq: Math.round(maxPhononFreq),
+    minOmegaLog: optimalOmegaLog * 0.6,
+    optimalOmegaLog,
+    maxPhononFreq,
     requiredBondStiffness: bondStiffness,
-    lightElementFraction: Math.round(lightFraction * 100) / 100,
+    bondStiffnessRange: { min: stiffnessMin, max: stiffnessMax, unit: "N/m" },
+    lightElementFraction: lightFraction,
     debyeTempRange: { min: debyeMin, max: debyeMax },
-    feasibility: Math.round(feasibility * 100) / 100,
+    feasibility,
     note: notes.join("; "),
     elementMassConstraints: { maxAvgMass, preferredElements: preferred },
   };
@@ -437,61 +473,81 @@ function solveCouplingConstraint(
   const dosContribution = optimalDOS * 0.15;
 
   let orbitalReq: string;
+  let orbitalSummary: string;
   let bondingNet: string;
+  let bondingSummary: string;
   let hopfieldMin: number;
   let hopfieldOptimal: number;
 
   if (optimalLambda > 2.5) {
     orbitalReq = "Strong s-d hybridization with large orbital overlap integrals";
+    orbitalSummary = "Strong s-d hybridization";
     bondingNet = "3D metallic hydrogen network or cage structure with high connectivity";
+    bondingSummary = "3D H-network or cage";
     hopfieldMin = 8.0;
     hopfieldOptimal = 15.0;
     notes.push("Lambda > 2.5 requires extraordinary orbital overlap (hydride territory)");
   } else if (optimalLambda > 1.5) {
     orbitalReq = "Moderate d-orbital overlap with p-orbital hybridization";
+    orbitalSummary = "Moderate d-p overlap";
     bondingNet = "Layered or cage structure with strong intralayer bonding";
+    bondingSummary = "Layered or cage structure";
     hopfieldMin = 4.0;
     hopfieldOptimal = 8.0;
     notes.push("Lambda 1.5-2.5 achievable with good d-band metals and light anions");
   } else if (optimalLambda > 0.8) {
     orbitalReq = "Standard d-band overlap";
+    orbitalSummary = "Standard d-band overlap";
     bondingNet = "Compact metallic bonding";
+    bondingSummary = "Compact metallic bonding";
     hopfieldMin = 1.5;
     hopfieldOptimal = 4.0;
     notes.push("Moderate lambda achievable with conventional BCS materials");
   } else {
     orbitalReq = "Any metallic orbital overlap";
+    orbitalSummary = "Any metallic overlap";
     bondingNet = "Simple metallic structure";
+    bondingSummary = "Simple metallic structure";
     hopfieldMin = 0.5;
     hopfieldOptimal = 2.0;
     notes.push("Weak coupling — standard metals sufficient");
   }
 
-  let feasibility = 1.0;
-  if (optimalLambda > 3.0) feasibility *= 0.25;
-  else if (optimalLambda > 2.0) feasibility *= 0.5;
-  else if (optimalLambda > 1.5) feasibility *= 0.75;
+  const lambdaSynthPenalty = 1 / (1 + Math.exp(2.5 * (optimalLambda - 2.5)));
+  const hopfieldSynthPenalty = hopfieldOptimal > 8
+    ? 0.3 + 0.7 / (1 + Math.exp(0.8 * (hopfieldOptimal - 15)))
+    : 1.0;
+  const synthesisFeasibility = lambdaSynthPenalty * hopfieldSynthPenalty;
+
+  const lambdaConfidence = 1 / (1 + Math.exp(1.5 * (optimalLambda - 4.0)));
+  let theoreticalConfidence = 0.4 + 0.6 * lambdaConfidence;
+  if (optimalLambda > 1.5) {
+    notes.push("High lambda is physically valid for strong e-ph coupling — synthesis difficulty does not reduce theoretical confidence");
+  }
+  theoreticalConfidence = Math.min(1.0, theoreticalConfidence);
 
   if (hopfieldOptimal > 10) {
-    feasibility *= 0.6;
-    notes.push("Hopfield eta > 10 eV/A^2 is rare outside metallic hydrogen systems");
+    notes.push("Hopfield eta > 10 eV/A^2 is rare outside metallic hydrogen systems (synthesis challenge, not theoretical limitation)");
   }
 
   return {
     lambdaRange: {
-      min: Math.round(optimalLambda * 0.7 * 100) / 100,
-      max: Math.round(optimalLambda * 1.4 * 100) / 100,
-      optimal: Math.round(optimalLambda * 1000) / 1000,
+      min: optimalLambda * 0.7,
+      max: optimalLambda * 1.4,
+      optimal: optimalLambda,
     },
-    requiredDOSContribution: Math.round(dosContribution * 100) / 100,
-    requiredPhononSoftness: Math.round(phononSoftness * 100) / 100,
+    requiredDOSContribution: dosContribution,
+    requiredPhononSoftness: phononSoftness,
     orbitalOverlapRequirement: orbitalReq,
+    orbitalOverlapSummary: orbitalSummary,
     bondingNetworkType: bondingNet,
+    bondingNetworkSummary: bondingSummary,
     hopfieldParameter: {
-      min: Math.round(hopfieldMin * 10) / 10,
-      optimal: Math.round(hopfieldOptimal * 10) / 10,
+      min: hopfieldMin,
+      optimal: hopfieldOptimal,
     },
-    feasibility: Math.round(feasibility * 100) / 100,
+    feasibility: synthesisFeasibility,
+    theoreticalConfidence,
     note: notes.join("; "),
   };
 }
@@ -513,10 +569,13 @@ function solveChargeTransferConstraint(
     let acceptors: string[];
     let coupling: string;
 
+    let layerSummary: string;
+
     if (targetTc > 100) {
       deltaMin = 0.15;
       deltaOptimal = 0.3;
       layerType = "Conducting-insulating bilayer (CuO2-type or FeAs-type)";
+      layerSummary = "Conducting-insulating bilayer";
       donors = ["La", "Sr", "Ba", "Ca", "Y", "Bi", "Tl"];
       acceptors = ["CuO2", "FeAs", "FeSe", "NiO2"];
       coupling = "Strong interlayer coupling with charge reservoir";
@@ -525,6 +584,7 @@ function solveChargeTransferConstraint(
       deltaMin = 0.08;
       deltaOptimal = 0.18;
       layerType = "Weakly coupled layered structure";
+      layerSummary = "Weakly coupled layers";
       donors = ["Sr", "Ba", "K", "Rb", "Cs"];
       acceptors = ["FeSe", "TiS2", "NbSe2", "TaS2"];
       coupling = "Moderate interlayer coupling via van der Waals or ionic bonding";
@@ -532,6 +592,10 @@ function solveChargeTransferConstraint(
     }
 
     let feasibility = isUnconventionalRegime ? 0.7 : 0.6;
+    if (isUnconventionalRegime) {
+      notes.push("WARNING: McMillan/Allen-Dynes lambda used to identify this regime was derived from BCS theory — unreliable for unconventional pairing; charge-transfer candidates suggested as alternative mechanism");
+      feasibility *= 0.85;
+    }
     if (targetTc > 150 && isUnconventionalRegime) {
       feasibility *= 0.6;
       notes.push("Very high Tc via charge transfer mechanism is challenging to engineer");
@@ -541,10 +605,11 @@ function solveChargeTransferConstraint(
       required: true,
       deltaCharge: { min: deltaMin, optimal: deltaOptimal },
       layerType,
+      layerTypeSummary: layerSummary,
       donorCandidates: donors,
       acceptorCandidates: acceptors,
       interlayerCoupling: coupling,
-      feasibility: Math.round(feasibility * 100) / 100,
+      feasibility,
       note: notes.join("; "),
     };
   }
@@ -553,6 +618,7 @@ function solveChargeTransferConstraint(
     required: false,
     deltaCharge: { min: 0, optimal: 0 },
     layerType: "Not required for conventional phonon-mediated SC",
+    layerTypeSummary: "Not required",
     donorCandidates: [],
     acceptorCandidates: [],
     interlayerCoupling: "N/A — conventional BCS mechanism",
@@ -569,9 +635,22 @@ export function solveConstraints(
   const muStarClamped = Math.max(0.08, Math.min(0.20, muStar));
 
   const optimalOmegaLog = targetTc > 200 ? 1500 : targetTc > 100 ? 800 : targetTc > 50 ? 500 : 300;
-  const optimalLambda = solveRequiredLambda(targetTc, optimalOmegaLog, muStarClamped);
+  let optimalLambda = solveRequiredLambda(targetTc, optimalOmegaLog, muStarClamped);
+  const primaryUnreachable = !Number.isFinite(optimalLambda);
 
   const sweepSolutions = sweepLambdaOmega(targetTc, muStarClamped);
+
+  if (primaryUnreachable && sweepSolutions.length > 0) {
+    const bestSweep = sweepSolutions.reduce((a, b) =>
+      Math.abs(a.tc - targetTc) < Math.abs(b.tc - targetTc) ? a : b
+    );
+    optimalLambda = bestSweep.lambda;
+  } else if (primaryUnreachable) {
+    const maxPhysicalLambda = solveRequiredLambda(targetTc, 5000, muStarClamped);
+    optimalLambda = Number.isFinite(maxPhysicalLambda)
+      ? Math.min(maxPhysicalLambda, 3.5)
+      : 3.5;
+  }
 
   let lambdaMin = Infinity, lambdaMax = 0;
   let omegaMin = Infinity, omegaMax = 0;
@@ -591,12 +670,24 @@ export function solveConstraints(
     omegaMax = optimalOmegaLog * 2.0;
   }
 
+  const constraintsUnreachable = primaryUnreachable && sweepSolutions.length === 0;
   const feasibility = assessFeasibility(optimalLambda, optimalOmegaLog);
+  if (constraintsUnreachable) {
+    feasibility.score = Math.min(feasibility.score, 0.05);
+    feasibility.theoreticalConfidence = Math.min(feasibility.theoreticalConfidence, 0.1);
+    feasibility.note += "; WARNING: target Tc exceeds Allen-Dynes/McMillan theory limit (lambda capped at 3.5, equation breaks down beyond ~3.0) — likely requires unconventional pairing mechanism or extreme pressure";
+  } else if (primaryUnreachable) {
+    feasibility.note += "; NOTE: target Tc unreachable at estimated omega_log=" + optimalOmegaLog + "K but reachable via alternative lambda-omega combinations found in sweep";
+  }
+  const unreachableConfidenceCap = constraintsUnreachable ? feasibility.theoreticalConfidence : Infinity;
   const structuralTargets = suggestStructures(optimalLambda, optimalOmegaLog);
   const elementSuggestions = suggestElements(optimalLambda, optimalOmegaLog);
 
   if (pressureGpa > 50) {
-    feasibility.score = Math.min(feasibility.score * 1.3, 1.0);
+    feasibility.theoreticalConfidence = Math.min(feasibility.theoreticalConfidence * 1.3, 1.0);
+    const pressureSynthPenalty = 1 / (1 + Math.exp(0.02 * (pressureGpa - 100)));
+    feasibility.score *= pressureSynthPenalty;
+    feasibility.note += `; Pressure ${pressureGpa} GPa stabilizes phases (theory confidence boosted) but reduces synthesis ease`;
   }
 
   const dosConstraint = solveDOSConstraint(targetTc, optimalLambda);
@@ -604,13 +695,21 @@ export function solveConstraints(
   const couplingConstraint = solveCouplingConstraint(targetTc, optimalLambda, dosConstraint.optimalDOS, optimalOmegaLog);
   const chargeTransfer = solveChargeTransferConstraint(targetTc, optimalLambda, optimalOmegaLog);
 
-  const compositeFeasibility = Math.round(
-    (feasibility.score * 0.3 +
-      dosConstraint.feasibility * 0.2 +
-      phononConstraint.feasibility * 0.2 +
-      couplingConstraint.feasibility * 0.2 +
-      chargeTransfer.feasibility * 0.1) * 100
-  ) / 100;
+  const allFeasibilities = [
+    feasibility.score,
+    dosConstraint.feasibility,
+    phononConstraint.feasibility,
+    couplingConstraint.feasibility,
+    chargeTransfer.feasibility,
+  ];
+  const minFeasibility = allFeasibilities.reduce((a, b) => Math.min(a, b), 1.0);
+  const weightedMean =
+    feasibility.score * 0.3 +
+    dosConstraint.feasibility * 0.2 +
+    phononConstraint.feasibility * 0.2 +
+    couplingConstraint.feasibility * 0.2 +
+    chargeTransfer.feasibility * 0.1;
+  const compositeFeasibility = weightedMean * Math.sqrt(minFeasibility);
 
   const allNotes = [feasibility.note];
   if (dosConstraint.note) allNotes.push(`DOS: ${dosConstraint.note}`);
@@ -658,23 +757,25 @@ export function solveConstraints(
     {
       step: 6,
       parameter: "phonon",
-      constraint: `Bond stiffness: ${phononConstraint.requiredBondStiffness.split("(")[0].trim()}; light-element fraction >= ${phononConstraint.lightElementFraction}`,
-      value: `Debye ${phononConstraint.debyeTempRange.min}-${phononConstraint.debyeTempRange.max}K; avg mass < ${phononConstraint.elementMassConstraints.maxAvgMass} amu`,
+      constraint: `Bond stiffness: ${phononConstraint.bondStiffnessRange.min}-${phononConstraint.bondStiffnessRange.max} ${phononConstraint.bondStiffnessRange.unit}; light-element fraction >= ${phononConstraint.lightElementFraction.toFixed(2)}`,
+      value: `Debye ${Math.round(phononConstraint.debyeTempRange.min)}-${Math.round(phononConstraint.debyeTempRange.max)}K; avg mass < ${phononConstraint.elementMassConstraints.maxAvgMass} amu`,
       status: phononConstraint.feasibility > 0.7 ? "feasible" : phononConstraint.feasibility > 0.4 ? "challenging" : "unlikely",
     },
     {
       step: 7,
       parameter: "e-ph coupling",
-      constraint: `Hopfield eta > ${couplingConstraint.hopfieldParameter.min} eV/A^2; ${couplingConstraint.orbitalOverlapRequirement.split(" with")[0]}`,
-      value: `eta optimal ${couplingConstraint.hopfieldParameter.optimal} eV/A^2; ${couplingConstraint.bondingNetworkType.split(" with")[0]}`,
+      constraint: `Hopfield eta > ${couplingConstraint.hopfieldParameter.min.toFixed(1)} eV/A^2; ${couplingConstraint.orbitalOverlapSummary}`,
+      value: `eta optimal ${couplingConstraint.hopfieldParameter.optimal.toFixed(1)} eV/A^2; ${couplingConstraint.bondingNetworkSummary}`,
       status: couplingConstraint.feasibility > 0.7 ? "feasible" : couplingConstraint.feasibility > 0.4 ? "challenging" : "unlikely",
     },
     {
       step: 8,
       parameter: "charge transfer",
-      constraint: chargeTransfer.required ? `Delta-charge > ${chargeTransfer.deltaCharge.min}e; ${chargeTransfer.layerType.split("(")[0].trim()}` : "Not required",
+      constraint: chargeTransfer.required ? `Delta-charge > ${chargeTransfer.deltaCharge.min}e; ${chargeTransfer.layerTypeSummary}` : "Not required",
       value: chargeTransfer.required ? `optimal ${chargeTransfer.deltaCharge.optimal}e; donors: ${chargeTransfer.donorCandidates.slice(0, 3).join(",")}` : "N/A",
-      status: chargeTransfer.required ? (chargeTransfer.feasibility > 0.5 ? "feasible" : "challenging") : "satisfied",
+      status: chargeTransfer.required
+        ? (chargeTransfer.feasibility > 0.5 ? "feasible" : "challenging")
+        : ((optimalOmegaLog < 600 && optimalLambda > 1.2) ? "not-applicable" : "satisfied"),
     },
     {
       step: 9,
@@ -696,14 +797,14 @@ export function solveConstraints(
     targetTc,
     muStar: muStarClamped,
     requiredLambda: {
-      min: Math.round(lambdaMin * 100) / 100,
-      max: Math.round(lambdaMax * 100) / 100,
-      optimal: Math.round(optimalLambda * 1000) / 1000,
+      min: lambdaMin,
+      max: lambdaMax,
+      optimal: optimalLambda,
     },
     requiredOmegaLog: {
-      min: Math.round(omegaMin),
-      max: Math.round(omegaMax),
-      optimal: Math.round(optimalOmegaLog),
+      min: omegaMin,
+      max: omegaMax,
+      optimal: optimalOmegaLog,
     },
     requiredDOS: dosConstraint,
     requiredPhonon: phononConstraint,
@@ -711,6 +812,9 @@ export function solveConstraints(
     chargeTransfer,
     feasibilityScore: compositeFeasibility,
     feasibilityNote: compositeNote,
+    theoreticalConfidence: Math.min(unreachableConfidenceCap,
+      feasibility.theoreticalConfidence * 0.5 + couplingConstraint.theoreticalConfidence * 0.5
+    ),
     structuralTargets,
     elementSuggestions,
     constraintChain: chain,
@@ -735,6 +839,7 @@ export interface FormulaEvaluation {
   matchScore: number;
   constraintsSatisfied: number;
   constraintsTotal: number;
+  evaluationError?: string;
   constraintSatisfaction: {
     dos: { met: boolean; value: number; required: number; gap: number };
     lambda: { met: boolean; value: number; required: number; gap: number };
@@ -755,13 +860,13 @@ export function evaluateFormulaAgainstConstraints(
     const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
     const omegaLogK = coupling.omegaLog * 1.4388;
 
-    const satisfiesLambda = coupling.lambda >= solution.requiredLambda.min * 0.8 &&
-      coupling.lambda <= solution.requiredLambda.max * 1.2;
-    const satisfiesOmega = omegaLogK >= solution.requiredOmegaLog.min * 0.8 &&
-      omegaLogK <= solution.requiredOmegaLog.max * 1.2;
-    const satisfiesDOS = electronic.densityOfStatesAtFermi >= solution.requiredDOS.minDOS * 0.8;
-    const satisfiesPhonon = phonon.debyeTemperature >= solution.requiredPhonon.debyeTempRange.min * 0.8;
-    const satisfiesCoupling = coupling.lambda >= solution.requiredCoupling.lambdaRange.min * 0.8;
+    const satisfiesLambda = coupling.lambda >= solution.requiredLambda.min &&
+      coupling.lambda <= solution.requiredLambda.max;
+    const satisfiesOmega = omegaLogK >= solution.requiredOmegaLog.min &&
+      omegaLogK <= solution.requiredOmegaLog.max;
+    const satisfiesDOS = electronic.densityOfStatesAtFermi >= solution.requiredDOS.minDOS;
+    const satisfiesPhonon = phonon.debyeTemperature >= solution.requiredPhonon.debyeTempRange.min;
+    const satisfiesCoupling = coupling.lambda >= solution.requiredCoupling.lambdaRange.min;
 
     const tc = mcMillanTc(coupling.lambda, omegaLogK, solution.muStar);
     const gapToTarget = Math.abs(tc - solution.targetTc);
@@ -769,10 +874,9 @@ export function evaluateFormulaAgainstConstraints(
     const lambdaDist = Math.abs(coupling.lambda - solution.requiredLambda.optimal) / Math.max(0.1, solution.requiredLambda.optimal);
     const omegaDist = Math.abs(omegaLogK - solution.requiredOmegaLog.optimal) / Math.max(1, solution.requiredOmegaLog.optimal);
     const dosDist = Math.abs(electronic.densityOfStatesAtFermi - solution.requiredDOS.optimalDOS) / Math.max(0.1, solution.requiredDOS.optimalDOS);
-    const couplingPenalty = satisfiesCoupling ? 0 : 0.4;
-    const phononPenalty = satisfiesPhonon ? 0 : 0.3;
+    const tcDist = gapToTarget / Math.max(1, solution.targetTc);
 
-    const matchScore = Math.max(0, 1 - 0.25 * lambdaDist - 0.25 * omegaDist - 0.2 * dosDist - 0.15 * couplingPenalty - 0.15 * phononPenalty);
+    const matchScore = Math.max(0, 1 - 0.3 * tcDist - 0.2 * lambdaDist - 0.2 * omegaDist - 0.15 * dosDist - 0.15 * Math.min(1, lambdaDist + omegaDist));
 
     const orbChar = electronic.orbitalFractions;
     const dominant = Object.entries(orbChar).sort((a, b) => b[1] - a[1])[0];
@@ -781,7 +885,19 @@ export function evaluateFormulaAgainstConstraints(
     const constraintsSatisfied = checks.filter(Boolean).length;
 
     const orbDominant = dominant[0];
-    const hopfieldEstimate = orbDominant === "d" ? "Moderate-high (d-band)" : orbDominant === "p" ? "Moderate (p-band)" : "Low (s-band)";
+    const dosVal = electronic.densityOfStatesAtFermi;
+    const metalVal = electronic.metallicity;
+    let hopfieldEstimate: string;
+    if (orbDominant === "d") {
+      if (dosVal > 4.0 && metalVal > 0.7) hopfieldEstimate = "Very high (d-band, high DOS)";
+      else if (dosVal > 2.0 || metalVal > 0.5) hopfieldEstimate = "Moderate-high (d-band)";
+      else hopfieldEstimate = "Moderate (d-band, low DOS)";
+    } else if (orbDominant === "p") {
+      if (dosVal > 3.0 && metalVal > 0.6) hopfieldEstimate = "Moderate-high (p-band, high DOS)";
+      else hopfieldEstimate = "Moderate (p-band)";
+    } else {
+      hopfieldEstimate = dosVal > 2.0 ? "Low-moderate (s-band)" : "Low (s-band)";
+    }
 
     return {
       formula,
@@ -838,7 +954,8 @@ export function evaluateFormulaAgainstConstraints(
         },
       },
     };
-  } catch {
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     return {
       formula,
       satisfiesLambda: false,
@@ -857,22 +974,29 @@ export function evaluateFormulaAgainstConstraints(
       matchScore: 0,
       constraintsSatisfied: 0,
       constraintsTotal: 5,
+      evaluationError: errorMsg,
       constraintSatisfaction: {
         dos: { met: false, value: 0, required: solution.requiredDOS.minDOS, gap: solution.requiredDOS.minDOS },
         lambda: { met: false, value: 0, required: solution.requiredLambda.optimal, gap: solution.requiredLambda.optimal },
         omegaLog: { met: false, value: 0, required: solution.requiredOmegaLog.optimal, gap: solution.requiredOmegaLog.optimal },
         phonon: { met: false, debyeTemp: 0, requiredRange: `${solution.requiredPhonon.debyeTempRange.min}-${solution.requiredPhonon.debyeTempRange.max}K` },
         coupling: { met: false, hopfieldEstimate: "unknown", bondingType: "unknown" },
-        chargeTransfer: { relevant: solution.chargeTransfer.required, note: "Evaluation failed" },
+        chargeTransfer: { relevant: solution.chargeTransfer.required, note: `Evaluation failed: ${errorMsg}` },
       },
     };
   }
 }
 
 const constraintCache = new Map<string, ConstraintSolution>();
+let cacheVersion = 0;
+
+export function invalidateConstraintCache(): void {
+  constraintCache.clear();
+  cacheVersion++;
+}
 
 export function getCachedConstraints(targetTc: number, muStar: number = 0.10): ConstraintSolution {
-  const key = `${targetTc}-${muStar.toFixed(3)}`;
+  const key = `v${cacheVersion}-${targetTc}-${muStar.toFixed(3)}`;
   if (constraintCache.has(key)) return constraintCache.get(key)!;
   const solution = solveConstraints(targetTc, muStar);
   constraintCache.set(key, solution);

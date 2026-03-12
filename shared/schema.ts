@@ -326,6 +326,43 @@ export const inverseDesignCampaigns = pgTable("inverse_design_campaigns", {
 
 export const insertInverseDesignCampaignSchema = createInsertSchema(inverseDesignCampaigns).omit({ createdAt: true });
 
+export const quantumEngineDataset = pgTable("quantum_engine_dataset", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  material: text("material").notNull(),
+  pressure: real("pressure").notNull().default(0),
+  lambda: real("lambda").notNull().default(0),
+  omegaLog: real("omega_log").notNull().default(0),
+  tc: real("tc").notNull().default(0),
+  dosAtEF: real("dos_at_ef").notNull().default(0),
+  phononSpectrum: jsonb("phonon_spectrum").notNull().default([]),
+  alpha2FSummary: jsonb("alpha2f_summary").notNull().default({}),
+  formationEnergy: real("formation_energy"),
+  bandGap: real("band_gap"),
+  isMetallic: boolean("is_metallic").notNull().default(false),
+  isPhononStable: boolean("is_phonon_stable").notNull().default(false),
+  scfConverged: boolean("scf_converged").notNull().default(false),
+  gapRatio: real("gap_ratio").notNull().default(3.53),
+  muStar: real("mu_star").notNull().default(0.1),
+  omega2: real("omega2").notNull().default(0),
+  isStrongCoupling: boolean("is_strong_coupling").notNull().default(false),
+  isotopeAlpha: real("isotope_alpha").notNull().default(0.5),
+  tcAllenDynes: real("tc_allen_dynes").notNull().default(0),
+  tcEliashberg: real("tc_eliashberg").notNull().default(0),
+  confidence: text("confidence").notNull().default("low"),
+  tier: text("tier").notNull().default("surrogate"),
+  wallTimeMs: real("wall_time_ms").notNull().default(0),
+  dosPrefilter: jsonb("dos_prefilter"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => [
+  index("qe_dataset_material_idx").on(table.material),
+  index("qe_dataset_tc_idx").on(table.tc),
+  index("qe_dataset_created_at_idx").on(table.createdAt),
+]);
+
+export const insertQuantumEngineDatasetSchema = createInsertSchema(quantumEngineDataset).omit({ id: true, createdAt: true });
+export type QuantumEngineDatasetRow = typeof quantumEngineDataset.$inferSelect;
+export type InsertQuantumEngineDatasetRow = z.infer<typeof insertQuantumEngineDatasetSchema>;
+
 export const insertSynthesisProcessSchema = createInsertSchema(synthesisProcesses).omit({ discoveredAt: true });
 export const insertChemicalReactionSchema = createInsertSchema(chemicalReactions).omit({ learnedAt: true });
 export const insertSuperconductorCandidateSchema = createInsertSchema(superconductorCandidates).omit({ generatedAt: true });

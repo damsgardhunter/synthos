@@ -70,7 +70,9 @@ function variantPassesChargeBalance(elements: string[], ratios: number[]): boole
     for (const ox of states) enumerate(idx + 1, charge + ox * ratios[idx]);
   };
   enumerate(0, 0);
-  return best <= 1;
+  const totalAtoms = ratios.reduce((s, r) => s + r, 0);
+  const tolerance = Math.max(1, Math.floor(totalAtoms / 4));
+  return best <= tolerance;
 }
 
 const COMMON_OXIDATION_STATES: Record<string, number[]> = {
@@ -106,8 +108,11 @@ function hasPlausibleChargeBalance(formula: string): boolean {
   });
   if (allMetallic && !hasAnion) return true;
 
+  const totalAtoms = entries.reduce((s, [, count]) => s + count, 0);
+  const tolerance = Math.max(1, Math.floor(totalAtoms / 4));
+
   function canBalance(idx: number, runningSum: number): boolean {
-    if (idx === entries.length) return runningSum === 0;
+    if (idx === entries.length) return Math.abs(runningSum) <= tolerance;
     const [el, count] = entries[idx];
     const states = COMMON_OXIDATION_STATES[el];
     if (!states) return canBalance(idx + 1, runningSum);
@@ -163,17 +168,38 @@ function selectPrototypes(target: TargetProperties): string[] {
   }
 
   const candidates: { proto: string; score: number }[] = [];
+  const seen = new Set<string>();
   for (const [proto, info] of Object.entries(PROTOTYPE_TC_AFFINITY)) {
     if (target.targetTc >= info.minTc && target.targetTc <= info.maxTc * 1.5) {
       const tcCenter = (info.minTc + info.maxTc) / 2;
       const tcFit = 1.0 - Math.abs(target.targetTc - tcCenter) / (info.maxTc - info.minTc + 1);
       candidates.push({ proto, score: Math.max(0, tcFit) });
+      seen.add(proto);
     }
   }
 
   if (target.targetTc > 200) {
-    candidates.push({ proto: "Clathrate", score: 0.9 });
-    candidates.push({ proto: "Layered", score: 0.7 });
+    if (!seen.has("Clathrate")) candidates.push({ proto: "Clathrate", score: 0.9 });
+    if (!seen.has("Layered")) candidates.push({ proto: "Layered", score: 0.7 });
+  }
+
+  const isHighPressure = target.maxPressure > 50;
+  const highPressureFallbacks = ["BCC", "A15", "FCC", "NaCl"];
+  for (const fb of highPressureFallbacks) {
+    if (isHighPressure && !seen.has(fb)) {
+      candidates.push({ proto: fb, score: 0.3 });
+      seen.add(fb);
+    }
+  }
+
+  if (candidates.length < 3) {
+    for (const [proto] of Object.entries(PROTOTYPE_TC_AFFINITY)) {
+      if (!seen.has(proto)) {
+        candidates.push({ proto, score: 0.1 });
+        seen.add(proto);
+        if (candidates.length >= 5) break;
+      }
+    }
   }
 
   candidates.sort((a, b) => b.score - a.score);
@@ -218,9 +244,11 @@ function selectElements(
 }
 
 function buildFormula(elements: string[], ratios: number[]): string {
+  const hasHydrogen = elements.includes("H");
+  const ratioCap = hasHydrogen ? 36 : 12;
   let formula = "";
   for (let i = 0; i < elements.length; i++) {
-    const r = Math.min(ratios[i], 12);
+    const r = Math.min(ratios[i], elements[i] === "H" ? ratioCap : 12);
     formula += elements[i];
     if (r > 1) formula += r;
   }
@@ -410,7 +438,7 @@ export function refineCandidate(
         seen.add(newFormula);
         const baseSynth = base.synthesisVector;
         const mutSv = baseSynth
-          ? mutateSynthesisVector({ ...defaultSynthesisVector(), temperature: baseSynth.temperature, pressure: baseSynth.pressure, coolingRate: baseSynth.coolingRate, annealTime: baseSynth.annealTime, strain: baseSynth.strain, currentDensity: 0, magneticField: 0, thermalCycles: 1, oxygenPressure: 0 })
+          ? mutateSynthesisVector({ ...baseSynth })
           : mutateSynthesisVector(defaultSynthesisVector());
         refined.push({
           ...base,
@@ -444,9 +472,39 @@ export function refineCandidate(
     "W": ["Mo", "Cr"],
   };
 
+  const periodicGroups: string[][] = [
+    ["Li", "Na", "K", "Rb", "Cs"],
+    ["Be", "Mg", "Ca", "Sr", "Ba"],
+    ["Sc", "Y", "La", "Ce", "Gd", "Nd", "Pr", "Sm", "Eu"],
+    ["Ti", "Zr", "Hf"],
+    ["V", "Nb", "Ta"],
+    ["Cr", "Mo", "W"],
+    ["Mn", "Re"],
+    ["Fe", "Ru", "Os"],
+    ["Co", "Rh", "Ir"],
+    ["Ni", "Pd", "Pt"],
+    ["Cu", "Ag", "Au"],
+    ["Zn", "Cd"],
+    ["B", "Al", "Ga", "In"],
+    ["C", "Si", "Ge", "Sn", "Pb"],
+    ["N", "P", "As", "Sb", "Bi"],
+    ["O", "S", "Se", "Te"],
+    ["F", "Cl", "Br", "I"],
+  ];
+
+  function getSubstitutes(el: string): string[] {
+    if (substitutions[el]) return substitutions[el];
+    for (const group of periodicGroups) {
+      if (group.includes(el)) {
+        return group.filter(g => g !== el);
+      }
+    }
+    return [];
+  }
+
   for (let i = 0; i < elements.length; i++) {
-    const subs = substitutions[elements[i]];
-    if (!subs) continue;
+    const subs = getSubstitutes(elements[i]);
+    if (subs.length === 0) continue;
     for (const sub of subs) {
       if (target.excludeElements?.includes(sub)) continue;
       if (elements.includes(sub)) continue;
@@ -465,7 +523,7 @@ export function refineCandidate(
     }
   }
 
-  return refined.filter(c => hasPlausibleChargeBalance(c.formula) && passesElementCountCap(c.formula));
+  return refined.filter(c => isValidFormula(c.formula) && hasPlausibleChargeBalance(c.formula) && passesElementCountCap(c.formula));
 }
 
 export function createInitialBias(target: TargetProperties): CompositionBias {
@@ -500,16 +558,17 @@ export function createInitialBias(target: TargetProperties): CompositionBias {
     }
   }
 
+  const lowTc = target.targetTc < 50;
   const stoichiometryPatterns = [
-    { pattern: "AB", weight: 1.0 },
-    { pattern: "AB2", weight: 1.0 },
-    { pattern: "AB3", weight: 0.8 },
-    { pattern: "ABC3", weight: 1.2 },
-    { pattern: "AB2C2", weight: 1.3 },
-    { pattern: "A2B2C", weight: 1.1 },
-    { pattern: "A3BC", weight: 1.0 },
+    { pattern: "AB", weight: lowTc ? 2.0 : 1.0 },
+    { pattern: "AB2", weight: lowTc ? 2.0 : 1.0 },
+    { pattern: "AB3", weight: lowTc ? 1.5 : 0.8 },
+    { pattern: "ABC3", weight: lowTc ? 0.8 : 1.2 },
+    { pattern: "AB2C2", weight: lowTc ? 0.8 : 1.3 },
+    { pattern: "A2B2C", weight: lowTc ? 0.7 : 1.1 },
+    { pattern: "A3BC", weight: lowTc ? 0.7 : 1.0 },
     { pattern: "ABH", weight: target.targetTc > 200 ? 2.0 : 0.5 },
-    { pattern: "ABCD2", weight: 1.0 },
+    { pattern: "ABCD2", weight: lowTc ? 0.3 : 1.0 },
   ];
 
   return { elementWeights, prototypeWeights, stoichiometryPatterns };

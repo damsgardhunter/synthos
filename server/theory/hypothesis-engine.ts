@@ -31,14 +31,35 @@ interface ConditionalRule {
   confidence: number;
   sampleCount: number;
   avgTc: number;
+  conservativeTc: number;
 }
 
 interface CoOccurrencePattern {
   features: string[];
+  featureRangeLabels: string[];
   frequency: number;
   avgTc: number;
   maxTc: number;
 }
+
+const HYPOTHESIS_CONFIG = {
+  minSampleFraction: 0.05,
+  minSampleFloor: 5,
+  tcLiftThresholdSingle: 1.2,
+  tcLiftThresholdPair: 1.3,
+  tcLiftThresholdCoOccurrence: 1.3,
+  minConfidence: 0.15,
+  conservativeTcPenalty: 0.5,
+  maxRules: 20,
+  maxCoOccurrencePatterns: 15,
+  maxCorrelationPatterns: 30,
+  maxCoOccurrenceFeatures: 12,
+  minFeatureCorrelation: 0.05,
+  aprioriSingleLiftThreshold: 1.15,
+  bonferroniAlphaFamily: 0.05,
+  correlationThreshold: 0.3,
+  tcAssociationThreshold: 0.15,
+} as const;
 
 const hypothesisStore: Map<string, Hypothesis> = new Map();
 let nextHypothesisId = 1;
@@ -47,15 +68,54 @@ function generateId(): string {
   return `hyp-${nextHypothesisId++}-${Date.now().toString(36)}`;
 }
 
+function toRanks(x: number[]): number[] {
+  const n = x.length;
+  const indexed = x.map((val, i) => ({ val, i }));
+  indexed.sort((a, b) => a.val - b.val);
+  const ranks = new Array(n);
+  let pos = 0;
+  while (pos < n) {
+    let end = pos + 1;
+    while (end < n && indexed[end].val === indexed[pos].val) end++;
+    const avgRank = (pos + end - 1) / 2;
+    for (let k = pos; k < end; k++) ranks[indexed[k].i] = avgRank;
+    pos = end;
+  }
+  return ranks;
+}
+
+function pearsonR(x: number[], y: number[]): number {
+  const n = x.length;
+  if (n < 3) return 0;
+  const mx = x.reduce((a, b) => a + b, 0) / n;
+  const my = y.reduce((a, b) => a + b, 0) / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    const xi = x[i] - mx;
+    const yi = y[i] - my;
+    num += xi * yi;
+    dx += xi * xi;
+    dy += yi * yi;
+  }
+  if (dx < 1e-10 || dy < 1e-10) return 0;
+  const denom = Math.sqrt(dx) * Math.sqrt(dy);
+  if (denom < 1e-10) return 0;
+  return Math.max(-1, Math.min(1, num / denom));
+}
+
+function robustCorrelation(x: number[], y: number[]): number {
+  const p = pearsonR(x, y);
+  const s = pearsonR(toRanks(x), toRanks(y));
+  return Math.abs(s) > Math.abs(p) ? s : p;
+}
+
 function computeCorrelations(records: FeatureRecord[]): CorrelationPattern[] {
   const patterns: CorrelationPattern[] = [];
   const withTc = records.filter(r => r.tc !== null && r.tc > 0);
   if (withTc.length < 10) return patterns;
 
   const tcValues = withTc.map(r => r.tc!);
-  const tcMean = tcValues.reduce((s, v) => s + v, 0) / tcValues.length;
-  const tcStd = Math.sqrt(tcValues.reduce((s, v) => s + (v - tcMean) ** 2, 0) / tcValues.length);
-  if (tcStd < 1e-6) return patterns;
+  const tcRanks = toRanks(tcValues);
 
   for (let i = 0; i < FEATURE_NAMES.length; i++) {
     for (let j = i + 1; j < FEATURE_NAMES.length; j++) {
@@ -64,41 +124,118 @@ function computeCorrelations(records: FeatureRecord[]): CorrelationPattern[] {
       const vals1 = withTc.map(r => r.featureVector[f1]);
       const vals2 = withTc.map(r => r.featureVector[f2]);
 
-      const mean1 = vals1.reduce((s, v) => s + v, 0) / vals1.length;
-      const mean2 = vals2.reduce((s, v) => s + v, 0) / vals2.length;
-      const std1 = Math.sqrt(vals1.reduce((s, v) => s + (v - mean1) ** 2, 0) / vals1.length);
-      const std2 = Math.sqrt(vals2.reduce((s, v) => s + (v - mean2) ** 2, 0) / vals2.length);
+      const corr = robustCorrelation(vals1, vals2);
 
-      if (std1 < 1e-6 || std2 < 1e-6) continue;
-
-      let cov12 = 0;
-      for (let k = 0; k < vals1.length; k++) {
-        cov12 += (vals1[k] - mean1) * (vals2[k] - mean2);
-      }
-      cov12 /= vals1.length;
-      const corr = cov12 / (std1 * std2);
-
-      let covTc1 = 0;
-      let covTc2 = 0;
-      for (let k = 0; k < vals1.length; k++) {
-        covTc1 += (vals1[k] - mean1) * (tcValues[k] - tcMean);
-        covTc2 += (vals2[k] - mean2) * (tcValues[k] - tcMean);
-      }
-      covTc1 /= vals1.length;
-      covTc2 /= vals2.length;
-      const tcCorr1 = covTc1 / (std1 * tcStd);
-      const tcCorr2 = covTc2 / (std2 * tcStd);
+      const tcCorr1 = robustCorrelation(vals1, tcValues);
+      const tcCorr2 = robustCorrelation(vals2, tcValues);
 
       const highTcAssociation = (Math.abs(tcCorr1) + Math.abs(tcCorr2)) / 2;
 
-      if (Math.abs(corr) > 0.3 && highTcAssociation > 0.15) {
+      if (Math.abs(corr) > HYPOTHESIS_CONFIG.correlationThreshold && highTcAssociation > HYPOTHESIS_CONFIG.tcAssociationThreshold) {
         patterns.push({ feature1: f1, feature2: f2, correlation: corr, highTcAssociation });
       }
     }
   }
 
   patterns.sort((a, b) => b.highTcAssociation - a.highTcAssociation);
-  return patterns.slice(0, 30);
+  return patterns.slice(0, HYPOTHESIS_CONFIG.maxCorrelationPatterns);
+}
+
+function findElbowThresholds(vals: number[]): number[] {
+  const sorted = [...vals].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (n < 6) {
+    return [sorted[Math.floor(n / 2)]];
+  }
+
+  const gaps: { idx: number; gap: number }[] = [];
+  for (let i = 1; i < n; i++) {
+    gaps.push({ idx: i, gap: sorted[i] - sorted[i - 1] });
+  }
+  gaps.sort((a, b) => b.gap - a.gap);
+
+  const thresholds: number[] = [];
+  const usedRegions = new Set<number>();
+  for (const g of gaps.slice(0, 5)) {
+    const region = Math.floor(g.idx / n * 4);
+    if (usedRegions.has(region)) continue;
+    usedRegions.add(region);
+    const threshold = (sorted[g.idx - 1] + sorted[g.idx]) / 2;
+    const tooClose = thresholds.some(t => Math.abs(t - threshold) < (sorted[n - 1] - sorted[0]) * 0.05);
+    if (tooClose) continue;
+    thresholds.push(threshold);
+    if (thresholds.length >= 3) break;
+  }
+
+  if (thresholds.length === 0) {
+    thresholds.push(sorted[Math.floor(n / 2)]);
+  }
+
+  return thresholds.sort((a, b) => a - b);
+}
+
+function lnGamma(z: number): number {
+  if (z <= 0) return 0;
+  const c = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.001208650973866179, -5.395239384953e-6];
+  let x = z;
+  let y = z;
+  let tmp = x + 5.5;
+  tmp -= (x + 0.5) * Math.log(tmp);
+  let ser = 1.000000000190015;
+  for (let j = 0; j < 6; j++) ser += c[j] / ++y;
+  return -tmp + Math.log(2.5066282746310005 * ser / x);
+}
+
+function regularizedIncompleteBeta(a: number, b: number, x: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  if (x > (a + 1) / (a + b + 2)) {
+    return 1 - regularizedIncompleteBeta(b, a, 1 - x);
+  }
+  const lnPre = a * Math.log(x) + b * Math.log(1 - x) - Math.log(a) - lnGamma(a) - lnGamma(b) + lnGamma(a + b);
+  const front = Math.exp(lnPre);
+  let num = 1;
+  let den = 1;
+  let f = 1;
+  for (let m = 1; m <= 200; m++) {
+    const d2m = (m * (b - m) * x) / ((a + 2 * m - 1) * (a + 2 * m));
+    f = 1 + d2m / f; if (Math.abs(f) < 1e-30) f = 1e-30;
+    num = 1 + d2m / num; if (Math.abs(num) < 1e-30) num = 1e-30;
+    f = 1 / f;
+    den *= f * num;
+    const d2m1 = -((a + m) * (a + b + m) * x) / ((a + 2 * m) * (a + 2 * m + 1));
+    f = 1 + d2m1 / f; if (Math.abs(f) < 1e-30) f = 1e-30;
+    num = 1 + d2m1 / num; if (Math.abs(num) < 1e-30) num = 1e-30;
+    f = 1 / f;
+    const delta = f * num;
+    den *= delta;
+    if (Math.abs(delta - 1) < 1e-10) break;
+  }
+  return Math.max(0, Math.min(1, front * den));
+}
+
+function studentTCdf(t: number, df: number): number {
+  if (df <= 0) return 0.5;
+  const x = df / (df + t * t);
+  const ibeta = regularizedIncompleteBeta(df / 2, 0.5, x);
+  const p = 0.5 * ibeta;
+  return t > 0 ? 1 - p : p;
+}
+
+function welchOneSidedPValue(
+  groupMean: number, groupStd: number, groupN: number,
+  compMean: number, compStd: number, compN: number,
+): number {
+  if (groupN < 2 || compN < 2) return 1;
+  const se = Math.sqrt((groupStd ** 2) / groupN + (compStd ** 2) / compN);
+  if (se < 1e-10) return groupMean > compMean ? 0 : 1;
+  const t = (groupMean - compMean) / se;
+  const v1 = (groupStd ** 2) / groupN;
+  const v2 = (compStd ** 2) / compN;
+  const dfNum = (v1 + v2) ** 2;
+  const dfDen = (v1 ** 2) / (groupN - 1) + (v2 ** 2) / (compN - 1);
+  const df = dfDen > 0 ? dfNum / dfDen : 1;
+  return 1 - studentTCdf(t, df);
 }
 
 function discoverConditionalRules(records: FeatureRecord[]): ConditionalRule[] {
@@ -106,50 +243,105 @@ function discoverConditionalRules(records: FeatureRecord[]): ConditionalRule[] {
   const withTc = records.filter(r => r.tc !== null && r.tc > 0);
   if (withTc.length < 10) return rules;
 
+  const minSamples = Math.max(HYPOTHESIS_CONFIG.minSampleFloor, Math.ceil(withTc.length * HYPOTHESIS_CONFIG.minSampleFraction));
   const overallAvgTc = withTc.reduce((s, r) => s + r.tc!, 0) / withTc.length;
+  const overallSumTc = withTc.reduce((s, r) => s + r.tc!, 0);
 
   const thresholds: Record<string, number[]> = {};
   for (const fname of FEATURE_NAMES) {
-    const vals = withTc.map(r => r.featureVector[fname]).sort((a, b) => a - b);
-    thresholds[fname] = [
-      vals[Math.floor(vals.length * 0.25)],
-      vals[Math.floor(vals.length * 0.5)],
-      vals[Math.floor(vals.length * 0.75)],
-    ];
+    const vals = withTc.map(r => r.featureVector[fname]);
+    thresholds[fname] = findElbowThresholds(vals);
   }
 
-  const keyFeatures = ["DOS_EF", "electron_phonon_lambda", "nesting_score", "pairing_strength",
-    "phonon_log_frequency", "band_flatness", "correlation_strength", "orbital_degeneracy",
-    "debye_temp", "hydrogen_density", "charge_transfer", "quantum_critical_score"];
+  const keyFeatures: (keyof PhysicsFeatureVector)[] = FEATURE_NAMES.filter(f => thresholds[f] && thresholds[f].length > 0);
+
+  let totalTests = 0;
+  for (const f1 of keyFeatures) {
+    for (const f2 of keyFeatures) {
+      if (f2 === f1) continue;
+      totalTests += thresholds[f1].length * thresholds[f2].length;
+    }
+  }
+  const bonferroniAlpha = HYPOTHESIS_CONFIG.bonferroniAlphaFamily / Math.max(1, totalTests);
+
+  const featureVecs = new Map<string, Float64Array>();
+  for (const f of keyFeatures) {
+    const arr = new Float64Array(withTc.length);
+    for (let i = 0; i < withTc.length; i++) {
+      arr[i] = withTc[i].featureVector[f];
+    }
+    featureVecs.set(f, arr);
+  }
+
+  const tcArr = new Float64Array(withTc.length);
+  for (let i = 0; i < withTc.length; i++) tcArr[i] = withTc[i].tc!;
 
   for (const f1 of keyFeatures) {
-    if (!thresholds[f1]) continue;
+    const vec1 = featureVecs.get(f1)!;
     for (const t1 of thresholds[f1]) {
-      const matchingHigh = withTc.filter(r => r.featureVector[f1 as keyof PhysicsFeatureVector] > t1);
-      if (matchingHigh.length < 3) continue;
-      const avgTcHigh = matchingHigh.reduce((s, r) => s + r.tc!, 0) / matchingHigh.length;
-      if (avgTcHigh <= overallAvgTc * 1.2) continue;
+      const mask1 = new Uint8Array(withTc.length);
+      let count1 = 0;
+      let sumTc1 = 0;
+      for (let i = 0; i < withTc.length; i++) {
+        if (vec1[i] > t1) { mask1[i] = 1; count1++; sumTc1 += tcArr[i]; }
+      }
+      if (count1 < minSamples) continue;
+      const avgTcHigh = sumTc1 / count1;
+      if (avgTcHigh <= overallAvgTc * HYPOTHESIS_CONFIG.tcLiftThresholdSingle) continue;
 
       for (const f2 of keyFeatures) {
-        if (f2 === f1 || !thresholds[f2]) continue;
+        if (f2 === f1) continue;
+        const vec2 = featureVecs.get(f2)!;
         for (const t2 of thresholds[f2]) {
-          const matching = withTc.filter(r => r.featureVector[f1 as keyof PhysicsFeatureVector] > t1 && r.featureVector[f2 as keyof PhysicsFeatureVector] > t2);
-          if (matching.length < 3) continue;
-          const avgTc = matching.reduce((s, r) => s + r.tc!, 0) / matching.length;
-          if (avgTc <= overallAvgTc * 1.3) continue;
+          let count = 0;
+          let sumTc = 0;
+          let sumTcSq = 0;
+          for (let i = 0; i < withTc.length; i++) {
+            if (mask1[i] && vec2[i] > t2) {
+              const tc = tcArr[i];
+              count++;
+              sumTc += tc;
+              sumTcSq += tc * tc;
+            }
+          }
+          if (count < minSamples) continue;
+          const avgTc = sumTc / count;
+          if (avgTc <= overallAvgTc * HYPOTHESIS_CONFIG.tcLiftThresholdPair) continue;
 
-          const confidence = Math.min(1, (avgTc / overallAvgTc - 1) * matching.length / withTc.length * 10);
-          if (confidence < 0.2) continue;
+          const tcLift = avgTc / overallAvgTc - 1;
+          const prevalence = count / withTc.length;
+          const samplePenalty = Math.sqrt(count);
+          const confidence = Math.min(1, tcLift * prevalence * samplePenalty);
+          if (confidence < HYPOTHESIS_CONFIG.minConfidence) continue;
+
+          const groupVar = count > 1 ? (sumTcSq - count * avgTc * avgTc) / (count - 1) : 0;
+          const groupStd = Math.sqrt(Math.max(0, groupVar));
+
+          const compN = withTc.length - count;
+          const compSumTc = overallSumTc - sumTc;
+          const compMean = compN > 0 ? compSumTc / compN : 0;
+          const compSumSq = withTc.reduce((s, r, i) => {
+            if (!(mask1[i] && vec2[i] > t2)) s += (r.tc! - compMean) ** 2;
+            return s;
+          }, 0);
+          const compStd = compN > 1 ? Math.sqrt(compSumSq / (compN - 1)) : 0;
+
+          const pValue = welchOneSidedPValue(avgTc, groupStd, count, compMean, compStd, compN);
+          if (pValue > bonferroniAlpha) continue;
+
+          const tcStd = groupStd;
+          const conservativeTc = avgTc - tcStd * HYPOTHESIS_CONFIG.conservativeTcPenalty;
 
           rules.push({
             conditions: [
               { feature: f1, operator: ">", threshold: Number(t1.toFixed(3)) },
               { feature: f2, operator: ">", threshold: Number(t2.toFixed(3)) },
             ],
-            outcome: `Tc likely > ${Math.round(avgTc * 0.7)}K`,
+            outcome: `Tc likely > ${Math.round(Math.max(0, conservativeTc))}K (n=${count}, p=${pValue.toExponential(1)})`,
             confidence: Number(confidence.toFixed(3)),
-            sampleCount: matching.length,
+            sampleCount: count,
             avgTc: Number(avgTc.toFixed(1)),
+            conservativeTc: Number(Math.max(0, conservativeTc).toFixed(1)),
           });
         }
       }
@@ -157,7 +349,47 @@ function discoverConditionalRules(records: FeatureRecord[]): ConditionalRule[] {
   }
 
   rules.sort((a, b) => b.confidence * b.avgTc - a.confidence * a.avgTc);
-  return rules.slice(0, 20);
+  return rules.slice(0, HYPOTHESIS_CONFIG.maxRules);
+}
+
+function selectTopTcCorrelatedFeatures(withTc: FeatureRecord[], maxFeatures: number): (keyof PhysicsFeatureVector)[] {
+  const tcValues = withTc.map(r => r.tc!);
+  const featureCorrelations: { name: keyof PhysicsFeatureVector; absCorr: number }[] = [];
+
+  for (const fname of FEATURE_NAMES) {
+    const vals = withTc.map(r => r.featureVector[fname]);
+    const corr = robustCorrelation(vals, tcValues);
+    featureCorrelations.push({ name: fname, absCorr: Math.abs(corr) });
+  }
+
+  featureCorrelations.sort((a, b) => b.absCorr - a.absCorr);
+  return featureCorrelations
+    .filter(f => f.absCorr >= HYPOTHESIS_CONFIG.minFeatureCorrelation)
+    .slice(0, maxFeatures)
+    .map(f => f.name);
+}
+
+interface FeatureRange {
+  feature: keyof PhysicsFeatureVector;
+  lo: number;
+  hi: number;
+  label: string;
+}
+
+function computeFeatureRanges(withTc: FeatureRecord[], feature: keyof PhysicsFeatureVector): FeatureRange[] {
+  const vals = withTc.map(r => r.featureVector[feature]).sort((a, b) => a - b);
+  const n = vals.length;
+  if (n < 8) return [];
+  const q25 = vals[Math.floor(n * 0.25)];
+  const q50 = vals[Math.floor(n * 0.50)];
+  const q75 = vals[Math.floor(n * 0.75)];
+
+  return [
+    { feature, lo: q50, hi: Infinity, label: "high" },
+    { feature, lo: q75, hi: Infinity, label: "very high" },
+    { feature, lo: q25, hi: q75, label: "moderate" },
+    { feature, lo: -Infinity, hi: q25, label: "low" },
+  ];
 }
 
 function findCoOccurrencePatterns(records: FeatureRecord[]): CoOccurrencePattern[] {
@@ -165,74 +397,149 @@ function findCoOccurrencePatterns(records: FeatureRecord[]): CoOccurrencePattern
   const withTc = records.filter(r => r.tc !== null && r.tc > 0);
   if (withTc.length < 10) return patterns;
 
+  const minSamples = Math.max(HYPOTHESIS_CONFIG.minSampleFloor, Math.ceil(withTc.length * HYPOTHESIS_CONFIG.minSampleFraction));
   const overallAvgTc = withTc.reduce((s, r) => s + r.tc!, 0) / withTc.length;
 
-  const featureMedians: Record<string, number> = {};
-  for (const fname of FEATURE_NAMES) {
-    const vals = withTc.map(r => r.featureVector[fname]).sort((a, b) => a - b);
-    featureMedians[fname] = vals[Math.floor(vals.length / 2)];
+  const topFeatures = selectTopTcCorrelatedFeatures(withTc, HYPOTHESIS_CONFIG.maxCoOccurrenceFeatures);
+  if (topFeatures.length < 3) return patterns;
+
+  const featureRanges = new Map<keyof PhysicsFeatureVector, FeatureRange[]>();
+  for (const f of topFeatures) {
+    featureRanges.set(f, computeFeatureRanges(withTc, f));
   }
 
-  const importantFeatures = ["DOS_EF", "electron_phonon_lambda", "nesting_score",
-    "band_flatness", "pairing_strength", "orbital_degeneracy", "charge_transfer",
-    "quantum_critical_score", "hydrogen_density"];
+  const featureVectors = new Map<string, Uint8Array>();
+  for (const f of topFeatures) {
+    const ranges = featureRanges.get(f)!;
+    for (const range of ranges) {
+      const key = `${f}:${range.label}`;
+      const mask = new Uint8Array(withTc.length);
+      for (let i = 0; i < withTc.length; i++) {
+        const v = withTc[i].featureVector[f];
+        if (v > range.lo && (range.hi === Infinity || v <= range.hi)) mask[i] = 1;
+      }
+      featureVectors.set(key, mask);
+    }
+  }
 
-  for (let i = 0; i < importantFeatures.length; i++) {
-    for (let j = i + 1; j < importantFeatures.length; j++) {
-      for (let k = j + 1; k < importantFeatures.length; k++) {
-        const f1 = importantFeatures[i];
-        const f2 = importantFeatures[j];
-        const f3 = importantFeatures[k];
+  const singleItemsets: { key: string; feature: keyof PhysicsFeatureVector; label: string; mask: Uint8Array; count: number; avgTc: number }[] = [];
 
-        const matching = withTc.filter(r =>
-          r.featureVector[f1 as keyof PhysicsFeatureVector] > featureMedians[f1] &&
-          r.featureVector[f2 as keyof PhysicsFeatureVector] > featureMedians[f2] &&
-          r.featureVector[f3 as keyof PhysicsFeatureVector] > featureMedians[f3]
-        );
-
-        if (matching.length < 3) continue;
-
-        const avgTc = matching.reduce((s, r) => s + r.tc!, 0) / matching.length;
-        const maxTc = Math.max(...matching.map(r => r.tc!));
-
-        if (avgTc > overallAvgTc * 1.3) {
-          patterns.push({
-            features: [f1, f2, f3],
-            frequency: matching.length / withTc.length,
-            avgTc: Number(avgTc.toFixed(1)),
-            maxTc: Number(maxTc.toFixed(1)),
-          });
-        }
+  for (const f of topFeatures) {
+    const ranges = featureRanges.get(f)!;
+    for (const range of ranges) {
+      const key = `${f}:${range.label}`;
+      const mask = featureVectors.get(key)!;
+      let count = 0;
+      let sumTc = 0;
+      for (let i = 0; i < withTc.length; i++) {
+        if (mask[i]) { count++; sumTc += withTc[i].tc!; }
+      }
+      if (count < minSamples) continue;
+      const avgTc = sumTc / count;
+      if (avgTc > overallAvgTc * HYPOTHESIS_CONFIG.aprioriSingleLiftThreshold) {
+        singleItemsets.push({ key, feature: f, label: range.label, mask, count, avgTc });
       }
     }
   }
 
-  patterns.sort((a, b) => b.avgTc * b.frequency - a.avgTc * a.frequency);
-  return patterns.slice(0, 15);
+  const pairItemsets: { keys: string[]; features: (keyof PhysicsFeatureVector)[]; mask: Uint8Array; count: number; avgTc: number }[] = [];
+
+  for (let i = 0; i < singleItemsets.length; i++) {
+    for (let j = i + 1; j < singleItemsets.length; j++) {
+      if (singleItemsets[i].feature === singleItemsets[j].feature) continue;
+      const mask = new Uint8Array(withTc.length);
+      let count = 0;
+      let sumTc = 0;
+      for (let k = 0; k < withTc.length; k++) {
+        if (singleItemsets[i].mask[k] && singleItemsets[j].mask[k]) {
+          mask[k] = 1;
+          count++;
+          sumTc += withTc[k].tc!;
+        }
+      }
+      if (count < minSamples) continue;
+      const avgTc = sumTc / count;
+      if (avgTc > overallAvgTc * HYPOTHESIS_CONFIG.tcLiftThresholdPair) {
+        pairItemsets.push({
+          keys: [singleItemsets[i].key, singleItemsets[j].key],
+          features: [singleItemsets[i].feature, singleItemsets[j].feature],
+          mask, count, avgTc,
+        });
+      }
+    }
+  }
+
+  for (let i = 0; i < pairItemsets.length; i++) {
+    for (let j = 0; j < singleItemsets.length; j++) {
+      const pair = pairItemsets[i];
+      const single = singleItemsets[j];
+      if (pair.features.includes(single.feature)) continue;
+
+      let count = 0;
+      let sumTc = 0;
+      let maxTc = 0;
+      for (let k = 0; k < withTc.length; k++) {
+        if (pair.mask[k] && single.mask[k]) {
+          const tc = withTc[k].tc!;
+          count++;
+          sumTc += tc;
+          if (tc > maxTc) maxTc = tc;
+        }
+      }
+      if (count < minSamples) continue;
+      const avgTc = sumTc / count;
+
+      if (avgTc > overallAvgTc * HYPOTHESIS_CONFIG.tcLiftThresholdCoOccurrence) {
+        const allKeys = [...pair.keys, single.key];
+        const featureNames = allKeys.map(k => k.split(":")[0]);
+        const rangeLabels = allKeys.map(k => k.split(":")[1] || "high");
+        patterns.push({
+          features: featureNames,
+          featureRangeLabels: rangeLabels,
+          frequency: count / withTc.length,
+          avgTc: Number(avgTc.toFixed(1)),
+          maxTc: Number(maxTc.toFixed(1)),
+        });
+      }
+    }
+  }
+
+  const seen = new Set<string>();
+  const deduped = patterns.filter(p => {
+    const key = p.features.map((f, i) => `${f}:${p.featureRangeLabels[i]}`).sort().join("+");
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  deduped.sort((a, b) => b.avgTc * b.frequency - a.avgTc * a.frequency);
+  return deduped.slice(0, HYPOTHESIS_CONFIG.maxCoOccurrencePatterns);
 }
 
 function featureToReadable(f: string): string {
   const map: Record<string, string> = {
-    DOS_EF: "high density of states at Fermi level",
-    electron_phonon_lambda: "strong electron-phonon coupling",
-    nesting_score: "strong Fermi surface nesting",
-    band_flatness: "flat bands near Fermi level",
-    pairing_strength: "strong pairing interaction",
-    orbital_degeneracy: "orbital degeneracy",
-    charge_transfer: "significant charge transfer",
-    quantum_critical_score: "quantum criticality proximity",
-    hydrogen_density: "high hydrogen content",
-    phonon_log_frequency: "high phonon frequency",
-    debye_temp: "high Debye temperature",
-    correlation_strength: "strong electronic correlations",
-    van_hove_distance: "van Hove singularity proximity",
-    lattice_anisotropy: "lattice anisotropy",
-    mott_proximity: "Mott insulator proximity",
-    spin_fluctuation: "spin fluctuations",
-    cdw_proximity: "CDW instability proximity",
-    bandwidth: "narrow bandwidth",
-    anharmonicity: "phonon anharmonicity",
-    fermi_surface_dimensionality: "quasi-2D Fermi surface",
+    DOS_EF: "high density of states at E_F (N(E_F))",
+    electron_phonon_lambda: "strong electron-phonon coupling (λ)",
+    nesting_score: "strong Fermi surface nesting (χ₀)",
+    band_flatness: "flat bands near Fermi level (∂²ε/∂k²)",
+    pairing_strength: "strong pairing interaction (V_pair)",
+    orbital_degeneracy: "orbital degeneracy (N_orb)",
+    charge_transfer: "significant charge transfer (Δq)",
+    quantum_critical_score: "quantum criticality proximity (δ_QCP)",
+    hydrogen_density: "high hydrogen content (n_H)",
+    phonon_log_frequency: "high logarithmic phonon frequency (ω_log)",
+    debye_temp: "high Debye temperature (Θ_D)",
+    correlation_strength: "strong electronic correlations (U/t)",
+    van_hove_distance: "van Hove singularity proximity (ε_vH)",
+    lattice_anisotropy: "lattice anisotropy (c/a ratio)",
+    mott_proximity: "Mott insulator proximity (U/W)",
+    spin_fluctuation: "spin fluctuations (χ_spin)",
+    cdw_proximity: "CDW instability proximity (χ_CDW)",
+    bandwidth: "narrow bandwidth (W)",
+    anharmonicity: "phonon anharmonicity (γ_ph)",
+    fermi_surface_dimensionality: "quasi-2D Fermi surface (d_FS)",
   };
   return map[f] || f.replace(/_/g, " ");
 }
@@ -256,12 +563,12 @@ function generateHypothesesFromPatterns(
       statement,
       mathematicalForm: mathForm,
       supportingEvidence: [],
-      confidenceScore: rule.confidence * 0.5,
+      confidenceScore: rule.confidence,
       testCount: 0,
       supportCount: 0,
       refuteCount: 0,
       requiredConditions: rule.conditions.map(c => `${c.feature}${c.operator}${c.threshold}`),
-      predictedTcRange: [Math.round(rule.avgTc * 0.5), Math.round(rule.avgTc * 1.5)],
+      predictedTcRange: [Math.round(rule.conservativeTc * 0.7), Math.round(rule.avgTc * 1.3)],
       discoveredAt: Date.now(),
       status: "proposed",
       lastTestedAt: 0,
@@ -269,9 +576,12 @@ function generateHypothesesFromPatterns(
   }
 
   for (const pattern of coOccurrences.slice(0, 5)) {
-    const featureDescs = pattern.features.map(f => featureToReadable(f));
+    const featureDescs = pattern.features.map((f, i) => {
+      const rangeLabel = pattern.featureRangeLabels[i] || "high";
+      return `${rangeLabel} ${featureToReadable(f)}`;
+    });
     const statement = `Co-occurrence of ${featureDescs.join(", ")} correlates with enhanced Tc (avg ${pattern.avgTc}K)`;
-    const mathForm = pattern.features.join(" * ");
+    const mathForm = pattern.features.map((f, i) => `${f}∈${pattern.featureRangeLabels[i] || "high"}`).join(" ∧ ");
 
     hypotheses.push({
       id: generateId(),
@@ -282,7 +592,7 @@ function generateHypothesesFromPatterns(
       testCount: 0,
       supportCount: 0,
       refuteCount: 0,
-      requiredConditions: pattern.features.map(f => `${f}>median`),
+      requiredConditions: pattern.features.map((f, i) => `${f}∈${pattern.featureRangeLabels[i] || "high"}`),
       predictedTcRange: [Math.round(pattern.avgTc * 0.5), Math.round(pattern.maxTc)],
       discoveredAt: Date.now(),
       status: "proposed",

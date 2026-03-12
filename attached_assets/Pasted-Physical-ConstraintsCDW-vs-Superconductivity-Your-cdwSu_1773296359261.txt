@@ -1,0 +1,13 @@
+Physical ConstraintsCDW vs. Superconductivity:Your cdwSusc (Charge Density Wave) calculation correctly identifies dichalcogenides ($NbSe_2$, etc.) and flat-band systems.Constraint: CDWs and Superconductivity are often in direct competition for the same states at the Fermi level.Refinement: In computeInstabilityProximity, you calculate the score but don't explicitly apply a penalty to the compositePairingGlue. If cdwSusc > 0.7, you should arguably apply a reduction factor to the compositePairingGlue to simulate the opening of a CDW gap that kills the SC transition.Mott Proximity Scaling:const mottProx = Math.min(1.0, electronic.mottProximityScore ?? 0);Constraint: You apply a $15\%$ weight to Mott proximity in the compositeInstability.Refinement: For Cuprates, proximity to a Mott Insulating state is actually a driver of high-$T_c$ (via superexchange). By labeling it purely as an "instability" alongside CDW/SDW, the optimizer might try to move away from the Mott state when searching for Cuprate-like motifs. Ensure your motif logic adjusts these weights dynamically.3. Suggested FixesI. Correcting the Hydride Stability Logic:Instead of penalizing high $H$-ratios, penalize the lack of high-pressure support for those ratios:TypeScriptif (hRatio >= 4) {
+  // High H-ratio is only stable if pressure is high or lambda is well-behaved
+  const pressureSupport = (electronic.pressureGPa ?? 0) / 150; 
+  structInstab = Math.max(0, 0.8 - pressureSupport); 
+}
+II. Normalizing Mechanism Detection:TypeScriptconst rawContributions = [
+  { name: "phonon", val: phononContribution },
+  { name: "spin-fluctuation", val: spinContribution },
+  // ... etc
+];
+rawContributions.sort((a, b) => b.val - a.val);
+dominantMechanism = rawContributions[0].name;
+III. Syncing with HydrogenCageMetrics:Your computeHydrogenCageMetrics (lines 538+) uses totalAtoms - hCount. This should be extracted into a shared getHRatio(counts) utility to ensure that computeInstabilityProximity and computeHydrogenCageMetrics always use the same definition of stoichiometry.

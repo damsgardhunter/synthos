@@ -23,6 +23,8 @@ import {
   pauseLab as pauseSelfImprovingLab,
   resumeLab as resumeSelfImprovingLab,
   getAllLabStats as getSelfImprovingLabOverview,
+  syncGlobalKnowledgeBase,
+  getGlobalKnowledgeBase,
 } from "./inverse/self-improving-lab";
 import {
   generateDesignProgram, executeDesignProgram, mutateDesignProgram, crossoverPrograms,
@@ -129,7 +131,7 @@ import {
   runCausalDiscovery, generateCausalDataset, getCausalDiscoveryStats,
   buildCausalDataRecord, simulateIntervention, runCounterfactual,
   getOntology, getCausalVariables, getDiscoveredHypotheses,
-  getCausalRules, getLatestGraph,
+  getCausalRules, getLatestGraph, getDesignGuidance,
 } from "./theory/causal-physics-discovery";
 import { computeMultiScaleFeatures, computeCrossScaleCoupling, runSensitivityAnalysis } from "./theory/multi-scale-engine";
 import { getPhysicsParameters, getParameterHistory, getModelPerformance } from "./theory/self-improving-physics";
@@ -1373,11 +1375,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/physics-constraints/check", writeLimiter, (req, res) => {
     try {
-      const { formula } = req.body;
+      const { formula, maxPressureGPa } = req.body;
       if (!formula || typeof formula !== "string") {
         return res.status(400).json({ error: "formula is required" });
       }
-      const result = checkPhysicsConstraints(formula);
+      const result = checkPhysicsConstraints(formula, {
+        maxPressureGPa: typeof maxPressureGPa === "number" ? maxPressureGPa : undefined,
+      });
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Constraint check failed", detail: e.message?.slice(0, 200) });
@@ -1386,11 +1390,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/physics-constraints/batch", writeLimiter, (req, res) => {
     try {
-      const { formulas } = req.body;
+      const { formulas, maxPressureGPa } = req.body;
       if (!Array.isArray(formulas) || formulas.length === 0) {
         return res.status(400).json({ error: "formulas array is required" });
       }
-      const result = constraintGuidedGenerate(formulas.slice(0, 200));
+      const result = constraintGuidedGenerate(formulas.slice(0, 200), {
+        maxPressureGPa: typeof maxPressureGPa === "number" ? maxPressureGPa : undefined,
+      });
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Batch constraint check failed", detail: e.message?.slice(0, 200) });
@@ -1407,11 +1413,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/sc-pillars/evaluate", writeLimiter, (req, res) => {
     try {
-      const { formula, targets } = req.body;
+      const { formula, targets, maxPressureGPa } = req.body;
       if (!formula || typeof formula !== "string") {
         return res.status(400).json({ error: "formula is required" });
       }
-      const result = evaluatePillars(formula, targets ?? DEFAULT_PILLAR_TARGETS);
+      const result = evaluatePillars(formula, targets ?? DEFAULT_PILLAR_TARGETS, {
+        maxPressureGPa: typeof maxPressureGPa === "number" ? maxPressureGPa : undefined,
+      });
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Pillar evaluation failed", detail: e.message?.slice(0, 200) });
@@ -2949,6 +2957,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.post("/api/self-improving-lab/sync-knowledge", writeLimiter, (_req, res) => {
+    try {
+      res.json(syncGlobalKnowledgeBase());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to sync knowledge base", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/self-improving-lab/global-knowledge", (_req, res) => {
+    try {
+      res.json(getGlobalKnowledgeBase());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch global knowledge", detail: e.message?.slice(0, 200) });
+    }
+  });
+
   app.get("/api/self-improving-lab/:id", (req, res) => {
     try {
       const stats = getSelfImprovingLabDetail(req.params.id);
@@ -3272,6 +3296,73 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(getCausalRules());
     } catch (e: any) {
       res.status(500).json({ error: "Failed to get rules", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/causal-discovery/guidance", generalLimiter, (_req, res) => {
+    try {
+      res.json(getDesignGuidance());
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to get design guidance", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/theory-report", generalLimiter, (_req, res) => {
+    try {
+      const causalStats = getCausalDiscoveryStats();
+      const symbolicStats = getSymbolicDiscoveryStats();
+      const graph = getLatestGraph();
+      const hypotheses = getDiscoveredHypotheses();
+      const rules = getCausalRules();
+      const guidance = getDesignGuidance();
+
+      const categoryDiscoveryProgress: Record<string, { variables: number; rulesDiscovered: number; coveragePercent: number }> = {};
+      const ruleChains = rules.flatMap(r => r.causalChain ?? []);
+      for (const [cat, count] of Object.entries(causalStats.variableCategories)) {
+        const rulesInCat = ruleChains.filter(v => {
+          const meta = getCausalVariables().find(cv => cv.name === v);
+          return meta?.category === cat;
+        }).length;
+        categoryDiscoveryProgress[cat] = {
+          variables: count,
+          rulesDiscovered: rulesInCat,
+          coveragePercent: count > 0 ? Math.round((Math.min(rulesInCat, count) / count) * 100) : 0,
+        };
+      }
+
+      res.json({
+        causal: {
+          totalRuns: causalStats.totalRuns,
+          graphSize: causalStats.latestGraphSize,
+          hypothesesCount: causalStats.totalHypotheses,
+          rulesCount: causalStats.totalCausalRules,
+          topHypotheses: causalStats.topHypotheses.slice(0, 5),
+          topEdges: causalStats.topEdges.slice(0, 5),
+          variableCategories: causalStats.variableCategories,
+          categoryDiscoveryProgress,
+        },
+        symbolic: {
+          totalTheories: symbolicStats.totalTheories,
+          bestScore: symbolicStats.bestTheoryScore,
+          averageScore: symbolicStats.averageTheoryScore,
+          familyCoverage: symbolicStats.familyCoverage,
+          featureLibrarySize: symbolicStats.featureLibrarySize,
+        },
+        guidance: guidance.slice(0, 10),
+        summary: {
+          totalDiscoveryRuns: causalStats.totalRuns,
+          totalTheories: symbolicStats.totalTheories,
+          totalHypotheses: causalStats.totalHypotheses,
+          totalRules: causalStats.totalCausalRules,
+          graphNodes: graph?.nodes.length ?? 0,
+          graphEdges: graph?.edges.length ?? 0,
+          topRecommendation: guidance.length > 0
+            ? guidance[0].recommendation
+            : "Run causal discovery to generate recommendations",
+        },
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to generate theory report", detail: e.message?.slice(0, 200) });
     }
   });
 
@@ -3600,7 +3691,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/quantum-engine/dataset", async (_req, res) => {
     try {
-      const dataset = getQuantumEngineDataset();
+      const dataset = await getQuantumEngineDataset();
       res.json({ dataset, total: dataset.length });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch quantum engine dataset", detail: e.message?.slice(0, 200) });
@@ -3611,7 +3702,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const rawLimit = Number(req.query.limit);
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 20;
-      const results = getRecentQuantumEngineResults(limit);
+      const results = await getRecentQuantumEngineResults(limit);
       res.json({ results, total: results.length });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch recent quantum engine results", detail: e.message?.slice(0, 200) });

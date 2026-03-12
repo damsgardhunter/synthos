@@ -79,9 +79,32 @@ export interface ConstraintStats {
   topRepairPatterns: { from: string; to: string; count: number }[];
 }
 
+function flattenParentheses(input: string): string {
+  let result = input;
+  let safety = 20;
+  while (result.includes("(") && safety-- > 0) {
+    result = result.replace(/\(([^()]+)\)(\d*\.?\d*)/g, (_, inner, mult) => {
+      const m = mult ? parseFloat(mult) : 1;
+      if (m === 1) return inner;
+      return inner.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_: string, el: string, n: string) => {
+        const count = n ? parseFloat(n) : 1;
+        return `${el}${count * m}`;
+      });
+    });
+  }
+  return result;
+}
+
 function parseCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") return {};
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula;
+  cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]*[⁺⁻]/g, "");
+  cleaned = cleaned.replace(/\d*[+\-](?![a-z\d])/g, "");
+  cleaned = cleaned.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => String("⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)));
+  cleaned = cleaned.replace(/[^\x20-\x7E]/g, "");
+  cleaned = cleaned.replace(/,/g, "");
+  cleaned = flattenParentheses(cleaned);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let m;
@@ -93,18 +116,73 @@ function parseCounts(formula: string): Record<string, number> {
   return counts;
 }
 
+function formulaElementSort(a: string, b: string): number {
+  const enA = ELEMENTAL_DATA[a]?.paulingElectronegativity ?? 2.0;
+  const enB = ELEMENTAL_DATA[b]?.paulingElectronegativity ?? 2.0;
+  if (enA !== enB) return enA - enB;
+  return a.localeCompare(b);
+}
+
 function countsToFormula(counts: Record<string, number>): string {
   const entries = Object.entries(counts)
     .filter(([, n]) => n > 0)
-    .sort(([a], [b]) => a.localeCompare(b));
-  return entries.map(([el, n]) => n === 1 ? el : `${el}${n}`).join("");
+    .sort(([a], [b]) => formulaElementSort(a, b));
+  return entries.map(([el, n]) => {
+    if (Number.isInteger(n)) return n === 1 ? el : `${el}${n}`;
+    if (n < 1) return `${el}${parseFloat(n.toFixed(2))}`;
+    const rounded = Math.round(n);
+    if (Math.abs(n - rounded) < 0.01) return rounded === 1 ? el : `${el}${rounded}`;
+    return `${el}${parseFloat(n.toFixed(1))}`;
+  }).join("");
 }
 
 function getOxidationStates(el: string): number[] {
-  return OXIDATION_STATES[el] || [0];
+  return OXIDATION_STATES[el] || [];
 }
 
 function getRadius(el: string): number {
+  return ELEMENTAL_DATA[el]?.atomicRadius ?? 130;
+}
+
+const IONIC_RADII: Record<string, Record<number, number>> = {
+  H: { 1: 10, "-1": 154 }, Li: { 1: 76 }, Na: { 1: 102 }, K: { 1: 138 }, Rb: { 1: 152 }, Cs: { 1: 167 },
+  Be: { 2: 45 }, Mg: { 2: 72 }, Ca: { 2: 100 }, Sr: { 2: 118 }, Ba: { 2: 135 },
+  Sc: { 3: 75 }, Y: { 3: 90 }, La: { 3: 103 },
+  Ti: { 2: 86, 3: 67, 4: 61 }, Zr: { 4: 72 }, Hf: { 4: 71 },
+  V: { 2: 79, 3: 64, 4: 58, 5: 54 }, Nb: { 3: 72, 5: 64 }, Ta: { 5: 64 },
+  Cr: { 2: 80, 3: 62, 6: 44 }, Mo: { 4: 65, 6: 59 }, W: { 4: 66, 6: 60 },
+  Mn: { 2: 83, 3: 65, 4: 53, 7: 46 }, Re: { 4: 63, 7: 53 },
+  Fe: { 2: 78, 3: 65 }, Ru: { 3: 68, 4: 62 }, Os: { 4: 63 },
+  Co: { 2: 75, 3: 61 }, Rh: { 3: 67 }, Ir: { 3: 68, 4: 63 },
+  Ni: { 2: 69, 3: 56 }, Pd: { 2: 86, 4: 62 }, Pt: { 2: 80, 4: 63 },
+  Cu: { 1: 77, 2: 73 }, Ag: { 1: 115 }, Au: { 1: 137, 3: 85 },
+  Zn: { 2: 74 }, Cd: { 2: 95 },
+  B: { 3: 27 }, Al: { 3: 54 }, Ga: { 3: 62 }, In: { 3: 80 }, Tl: { 1: 150, 3: 89 },
+  C: { 4: 16, "-4": 260 }, Si: { 4: 40, "-4": 271 }, Ge: { 4: 53 }, Sn: { 2: 93, 4: 69 }, Pb: { 2: 119, 4: 78 },
+  N: { "-3": 146, 3: 16, 5: 13 }, P: { "-3": 212, 3: 44, 5: 38 }, As: { "-3": 222, 3: 58, 5: 46 }, Sb: { 3: 76, 5: 60 }, Bi: { 3: 103, 5: 76 },
+  O: { "-2": 140 }, S: { "-2": 184, 4: 37, 6: 29 }, Se: { "-2": 198, 4: 50, 6: 42 }, Te: { "-2": 221, 4: 66, 6: 56 },
+  F: { "-1": 133 }, Cl: { "-1": 181 }, Br: { "-1": 196 }, I: { "-1": 220 },
+  Ce: { 3: 101, 4: 87 }, Pr: { 3: 99, 4: 85 }, Nd: { 3: 98 }, Sm: { 2: 122, 3: 96 },
+  Eu: { 2: 117, 3: 95 }, Gd: { 3: 94 }, Tb: { 3: 92, 4: 76 }, Dy: { 3: 91 },
+  Ho: { 3: 90 }, Er: { 3: 89 }, Tm: { 3: 88 }, Yb: { 2: 102, 3: 87 }, Lu: { 3: 86 },
+  Th: { 4: 94 }, U: { 3: 103, 4: 89, 5: 76, 6: 73 },
+};
+
+function getIonicRadius(el: string, oxState?: number): number {
+  if (oxState !== undefined) {
+    const radii = IONIC_RADII[el];
+    if (radii) {
+      const key = String(oxState);
+      if (radii[key as any] !== undefined) return radii[key as any];
+      const entries = Object.entries(radii);
+      if (entries.length > 0) {
+        const closest = entries.reduce((best, curr) =>
+          Math.abs(Number(curr[0]) - oxState) < Math.abs(Number(best[0]) - oxState) ? curr : best
+        );
+        return Number(closest[1]);
+      }
+    }
+  }
   return ELEMENTAL_DATA[el]?.atomicRadius ?? 130;
 }
 
@@ -121,8 +199,10 @@ function checkChargeNeutrality(counts: Record<string, number>): {
   if (elements.length === 0) return { imbalance: 0, bestAssignment: {}, achievable: true };
 
   const metalloids = new Set(["B", "Si", "Ge", "As", "Sb", "Te"]);
+  const nonMetals = new Set(["C", "N", "O", "F", "P", "S", "Cl", "Se", "Br", "I"]);
+  const hasNonMetalPartner = elements.some(el => nonMetals.has(el) || metalloids.has(el));
   const metalOrMetalloid = (el: string): boolean => {
-    if (el === "H") return true;
+    if (el === "H") return !hasNonMetalPartner;
     if (metalloids.has(el)) return true;
     const ed = ELEMENTAL_DATA[el];
     if (!ed) return false;
@@ -147,6 +227,26 @@ function checkChargeNeutrality(counts: Record<string, number>): {
   if (isMetallic && !hasHighENAnion) {
     const assignment: Record<string, number> = {};
     elements.forEach(el => assignment[el] = 0);
+
+    const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+    if (totalAtoms > 0) {
+      let totalVE = 0;
+      for (const el of elements) {
+        const ve = ELEMENTAL_DATA[el]?.valenceElectrons ?? 0;
+        totalVE += ve * counts[el];
+      }
+      const vec = totalVE / totalAtoms;
+
+      if (vec < 0.5 || vec > 14.0) {
+        const deviation = vec < 0.5 ? 0.5 - vec : vec - 14.0;
+        return {
+          imbalance: Math.max(1, Math.ceil(deviation)),
+          bestAssignment: assignment,
+          achievable: false,
+        };
+      }
+    }
+
     return { imbalance: 0, bestAssignment: assignment, achievable: true };
   }
 
@@ -154,63 +254,141 @@ function checkChargeNeutrality(counts: Record<string, number>): {
   let bestImbalance = Infinity;
   let bestAssignment: Record<string, number> = {};
 
-  function search(idx: number, assignment: Record<string, number>, currentSum: number) {
-    if (idx === elements.length) {
-      const imb = Math.abs(currentSum);
-      if (imb < bestImbalance) {
-        bestImbalance = imb;
-        bestAssignment = { ...assignment };
-      }
-      return;
-    }
-    const el = elements[idx];
-    const count = counts[el];
-    for (const ox of oxStates[idx]) {
-      assignment[el] = ox;
-      search(idx + 1, assignment, currentSum + ox * count);
-    }
-  }
+  const totalCombinations = oxStates.reduce((prod, s) => prod * Math.max(s.length, 1), 1);
 
-  if (elements.length <= 6) {
-    search(0, {}, 0);
-  } else {
-    const anions = elements.filter(el => getEN(el) > 2.5);
-    const cations = elements.filter(el => getEN(el) <= 2.5);
+  if (totalCombinations <= 5000) {
+    type DPEntry = { sum: number; assignment: Record<string, number> };
+    let frontier: DPEntry[] = [{ sum: 0, assignment: {} }];
 
-    let totalAnionCharge = 0;
-    const assignment: Record<string, number> = {};
-    for (const el of anions) {
-      const states = getOxidationStates(el);
-      const negState = states.find(s => s < 0) ?? states[0];
-      assignment[el] = negState;
-      totalAnionCharge += negState * counts[el];
-    }
-
-    let totalCationCharge = 0;
-    for (const el of cations) {
-      const states = getOxidationStates(el).filter(s => s > 0);
+    for (let idx = 0; idx < elements.length; idx++) {
+      const el = elements[idx];
+      const count = counts[el];
+      const states = oxStates[idx];
       if (states.length === 0) {
-        assignment[el] = 0;
+        for (const entry of frontier) {
+          entry.assignment[el] = 0;
+        }
         continue;
       }
-      const targetPerAtom = Math.abs(totalAnionCharge) / cations.reduce((s, c) => s + counts[c], 0);
-      const best = states.reduce((a, b) => Math.abs(a - targetPerAtom) < Math.abs(b - targetPerAtom) ? a : b);
-      assignment[el] = best;
-      totalCationCharge += best * counts[el];
+      const next: DPEntry[] = [];
+      for (const entry of frontier) {
+        for (const ox of states) {
+          next.push({
+            sum: entry.sum + ox * count,
+            assignment: { ...entry.assignment, [el]: ox },
+          });
+        }
+      }
+      const seen = new Map<number, DPEntry>();
+      for (const entry of next) {
+        if (!seen.has(entry.sum)) {
+          seen.set(entry.sum, entry);
+        }
+      }
+      frontier = Array.from(seen.values());
     }
 
-    bestImbalance = Math.abs(totalAnionCharge + totalCationCharge);
-    bestAssignment = assignment;
+    for (const entry of frontier) {
+      const imb = Math.abs(entry.sum);
+      if (imb < bestImbalance) {
+        bestImbalance = imb;
+        bestAssignment = entry.assignment;
+      }
+    }
+  } else {
+    const assignment: Record<string, number> = {};
+    for (let i = 0; i < elements.length; i++) {
+      const states = oxStates[i];
+      if (states.length === 0) { assignment[elements[i]] = 0; continue; }
+      const en = getEN(elements[i]);
+      if (en > 2.5) {
+        assignment[elements[i]] = states.find(s => s < 0) ?? states[0];
+      } else {
+        assignment[elements[i]] = states.find(s => s > 0) ?? states[0];
+      }
+    }
+
+    function computeSum(a: Record<string, number>): number {
+      let s = 0;
+      for (const el of elements) s += (a[el] ?? 0) * counts[el];
+      return s;
+    }
+
+    bestImbalance = Math.abs(computeSum(assignment));
+    bestAssignment = { ...assignment };
+
+    const SA_RESTARTS = 5;
+    const ITERS_PER_RESTART = 400;
+    const cooling = 0.993;
+
+    for (let restart = 0; restart < SA_RESTARTS && bestImbalance > 0; restart++) {
+      const current: Record<string, number> = {};
+      for (let i = 0; i < elements.length; i++) {
+        const states = oxStates[i];
+        if (states.length === 0) { current[elements[i]] = 0; continue; }
+        if (restart === 0) {
+          current[elements[i]] = assignment[elements[i]];
+        } else {
+          current[elements[i]] = states[Math.floor(Math.random() * states.length)];
+        }
+      }
+      let currentImb = Math.abs(computeSum(current));
+      let temp = 1.0;
+
+      for (let iter = 0; iter < ITERS_PER_RESTART && currentImb > 0; iter++) {
+        const elIdx = Math.floor(Math.random() * elements.length);
+        const el = elements[elIdx];
+        const states = oxStates[elIdx];
+        if (states.length <= 1) { temp *= cooling; continue; }
+
+        const oldOx = current[el];
+        const candidates = states.filter(s => s !== oldOx);
+        if (candidates.length === 0) { temp *= cooling; continue; }
+        const newOx = candidates[Math.floor(Math.random() * candidates.length)];
+
+        current[el] = newOx;
+        const newImb = Math.abs(computeSum(current));
+        const delta = newImb - currentImb;
+
+        if (delta <= 0 || Math.random() < Math.exp(-delta / Math.max(temp, 0.01))) {
+          currentImb = newImb;
+          if (currentImb < bestImbalance) {
+            bestImbalance = currentImb;
+            bestAssignment = { ...current };
+          }
+        } else {
+          current[el] = oldOx;
+        }
+        temp *= cooling;
+      }
+    }
   }
 
   return {
     imbalance: bestImbalance,
     bestAssignment,
-    achievable: bestImbalance === 0,
+    achievable: bestImbalance < 0.01,
   };
 }
 
-function checkRadiusCompatibility(counts: Record<string, number>): {
+const radiusCache = new Map<string, number>();
+
+function getCachedRadius(el: string, oxState?: number): number {
+  const key = oxState !== undefined && oxState !== 0 ? `${el}:${oxState}` : el;
+  let r = radiusCache.get(key);
+  if (r === undefined) {
+    r = (oxState !== undefined && oxState !== 0) ? getIonicRadius(el, oxState) : getRadius(el);
+    radiusCache.set(key, r);
+  }
+  return r;
+}
+
+const INTERSTITIAL_RATIOS: Record<string, number> = {
+  octahedral: 0.414,
+  tetrahedral: 0.225,
+};
+
+function checkRadiusCompatibility(counts: Record<string, number>, chargeAssignment?: Record<string, number>): {
   score: number;
   violations: string[];
 } {
@@ -221,19 +399,57 @@ function checkRadiusCompatibility(counts: Record<string, number>): {
   let totalPairs = 0;
   let compatiblePairs = 0;
 
-  for (let i = 0; i < elements.length; i++) {
-    for (let j = i + 1; j < elements.length; j++) {
+  const hCount = counts["H"] ?? 0;
+  const hasH = hCount > 0;
+  const nonHElements = elements.filter(el => el !== "H");
+
+  if (hasH && nonHElements.length > 0) {
+    let weightedRadiusSum = 0;
+    let totalHostAtoms = 0;
+    for (const el of nonHElements) {
+      const r = getCachedRadius(el, chargeAssignment?.[el]);
+      weightedRadiusSum += r * counts[el];
+      totalHostAtoms += counts[el];
+    }
+    const avgHostRadius = totalHostAtoms > 0 ? weightedRadiusSum / totalHostAtoms : 130;
+
+    const hRadius = getCachedRadius("H", chargeAssignment?.["H"]);
+
+    const tetraHoleRadius = avgHostRadius * INTERSTITIAL_RATIOS.tetrahedral;
+    const octaHoleRadius = avgHostRadius * INTERSTITIAL_RATIOS.octahedral;
+
+    if (hRadius > avgHostRadius * 0.8) {
       totalPairs++;
-      const elA = elements[i];
-      const elB = elements[j];
+      violations.push(`H radius (${hRadius} pm) too large relative to host lattice (avg ${avgHostRadius.toFixed(0)} pm)`);
+    } else {
+      totalPairs++;
+      compatiblePairs++;
+    }
 
-      if (elA === "H" || elB === "H") {
-        compatiblePairs++;
-        continue;
-      }
+    const maxOctaSites = totalHostAtoms;
+    const maxTetraSites = totalHostAtoms * 2;
+    let maxHSites: number;
+    if (hRadius <= tetraHoleRadius) {
+      maxHSites = maxOctaSites + maxTetraSites;
+    } else if (hRadius <= octaHoleRadius) {
+      maxHSites = maxOctaSites;
+    } else {
+      maxHSites = Math.ceil(maxOctaSites * 0.25);
+    }
 
-      const rA = getRadius(elA);
-      const rB = getRadius(elB);
+    if (hCount > maxHSites * 1.5) {
+      violations.push(`H count (${hCount}) exceeds estimated interstitial capacity (~${maxHSites} sites)`);
+    }
+  }
+
+  for (let i = 0; i < nonHElements.length; i++) {
+    for (let j = i + 1; j < nonHElements.length; j++) {
+      totalPairs++;
+      const elA = nonHElements[i];
+      const elB = nonHElements[j];
+
+      const rA = getCachedRadius(elA, chargeAssignment?.[elA]);
+      const rB = getCachedRadius(elB, chargeAssignment?.[elB]);
       const ratio = Math.max(rA, rB) / Math.max(Math.min(rA, rB), 1);
 
       if (ratio > 4.0) {
@@ -250,7 +466,31 @@ function checkRadiusCompatibility(counts: Record<string, number>): {
   };
 }
 
-function checkCoordination(counts: Record<string, number>): {
+const RADIUS_RATIO_COORD: [number, number][] = [
+  [0.155, 2], [0.225, 3], [0.414, 4], [0.732, 6], [1.0, 8],
+];
+
+function maxCoordByRadiusRatio(rCation: number, rAnion: number): number {
+  if (rAnion <= 0) return 12;
+  const ratio = rCation / rAnion;
+  for (const [threshold, coord] of RADIUS_RATIO_COORD) {
+    if (ratio < threshold) return coord;
+  }
+  return 12;
+}
+
+function weightedAnionRadius(anions: string[], counts: Record<string, number>, chargeAssignment?: Record<string, number>): number {
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (const a of anions) {
+    const w = counts[a] ?? 1;
+    weightedSum += getCachedRadius(a, chargeAssignment?.[a]) * w;
+    totalWeight += w;
+  }
+  return totalWeight > 0 ? weightedSum / totalWeight : 130;
+}
+
+function checkCoordination(counts: Record<string, number>, chargeAssignment?: Record<string, number>, pressureGPa?: number): {
   score: number;
   violations: string[];
 } {
@@ -262,23 +502,53 @@ function checkCoordination(counts: Record<string, number>): {
   let validElements = 0;
   let total = 0;
 
+  const cations = chargeAssignment
+    ? elements.filter(el => (chargeAssignment[el] ?? 0) > 0)
+    : [];
+  const anions = chargeAssignment
+    ? elements.filter(el => (chargeAssignment[el] ?? 0) < 0)
+    : [];
+
+  const isHighPressure = (pressureGPa ?? 0) > 50;
+
   for (const el of elements) {
     total++;
     const limits = COORDINATION_LIMITS[el];
     if (!limits) { validElements++; continue; }
 
-    if (el === "H") { validElements++; continue; }
+    if (el === "H") {
+      if (isHighPressure) {
+        const hCount = counts["H"] ?? 0;
+        const nonHAtoms = totalAtoms - hCount;
+        if (nonHAtoms > 0 && hCount / nonHAtoms > 12) {
+          violations.push(`H/host ratio ${(hCount / nonHAtoms).toFixed(1)} exceeds high-pressure cage limit (12)`);
+        } else {
+          validElements++;
+        }
+      } else {
+        validElements++;
+      }
+      continue;
+    }
 
-    const elCount = counts[el];
-    const neighborCount = totalAtoms - elCount;
-    const effectiveCoord = neighborCount > 0 ? Math.min(neighborCount, limits[1] + 2) : 0;
+    let maxByRadius = limits[1];
+    if (chargeAssignment && (chargeAssignment[el] ?? 0) > 0 && anions.length > 0) {
+      const cationR = getCachedRadius(el, chargeAssignment[el]);
+      const wAnionR = weightedAnionRadius(anions, counts, chargeAssignment);
+      maxByRadius = Math.min(limits[1], maxCoordByRadiusRatio(cationR, wAnionR));
+    }
 
-    if (effectiveCoord >= limits[0] * 0.5) {
+    const coordLimit = Math.max(maxByRadius, limits[0]);
+
+    if (coordLimit >= limits[0]) {
       validElements++;
     } else if (elements.length >= 3) {
+      if (maxByRadius < limits[0]) {
+        violations.push(`${el} radius ratio limits coordination to ${maxByRadius} but needs ${limits[0]}`);
+      }
       validElements++;
     } else {
-      violations.push(`${el} has insufficient neighbors for coordination (need ${limits[0]}, available ${effectiveCoord})`);
+      violations.push(`${el} coordination limited to ${maxByRadius} by radius ratio (min required: ${limits[0]})`);
     }
   }
 
@@ -288,7 +558,7 @@ function checkCoordination(counts: Record<string, number>): {
   };
 }
 
-function checkBondStability(counts: Record<string, number>): {
+function checkBondStability(counts: Record<string, number>, pressureGPa?: number): {
   score: number;
   violations: string[];
 } {
@@ -317,17 +587,14 @@ function checkBondStability(counts: Record<string, number>): {
     }
   }
 
-  if (totalAtoms > 30) {
-    score -= 0.3;
-    violations.push(`Total atom count ${totalAtoms} is unreasonably large`);
-  }
-
+  const isHighPressure = (pressureGPa ?? 0) > 50;
   const hasAnyMetal = elements.some(el => {
     if (el === "H") return false;
     const en = getEN(el);
     return en <= 2.0;
   });
-  if (!hasAnyMetal && elements.length > 1 && !elements.includes("H")) {
+  const isHighPressureHydride = isHighPressure && elements.includes("H");
+  if (!hasAnyMetal && elements.length > 1 && !isHighPressureHydride) {
     score -= 0.15;
     violations.push("No metallic elements - limited metallic bonding for SC");
   }
@@ -353,9 +620,18 @@ function checkElectronCount(counts: Record<string, number>): {
   const violations: string[] = [];
   let score = 1.0;
 
-  if (valencePerAtom < 0.5) {
-    score -= 0.3;
-    violations.push(`Very low valence electron density: ${valencePerAtom.toFixed(2)} e/atom`);
+  const SC_VEC_LOW = 2.0;
+  const SC_VEC_HIGH = 7.0;
+  if (valencePerAtom < SC_VEC_LOW) {
+    const deviation = SC_VEC_LOW - valencePerAtom;
+    const penalty = Math.min(0.3, deviation * 0.15);
+    score -= penalty;
+    violations.push(`Low valence density ${valencePerAtom.toFixed(2)} e/atom (SC sweet spot: ${SC_VEC_LOW}-${SC_VEC_HIGH})`);
+  } else if (valencePerAtom > SC_VEC_HIGH) {
+    const deviation = valencePerAtom - SC_VEC_HIGH;
+    const penalty = Math.min(0.2, deviation * 0.05);
+    score -= penalty;
+    violations.push(`High valence density ${valencePerAtom.toFixed(2)} e/atom (SC sweet spot: ${SC_VEC_LOW}-${SC_VEC_HIGH})`);
   }
 
   return { score: Math.max(0, score), violations };
@@ -371,32 +647,94 @@ let constraintWeights: Record<string, number> = {
   stoichiometry_excess: 0.8,
 };
 
-let totalChecked = 0;
-let totalValid = 0;
-let totalRepaired = 0;
-let totalRejected = 0;
-let violationCounts: Record<string, number> = {};
-let penaltySum = 0;
-let repairAttempts = 0;
-let repairSuccesses = 0;
-let repairPatterns: Map<string, { from: string; to: string; count: number }> = new Map();
-let constraintRewards: Record<string, { totalReward: number; count: number }> = {};
+const WEIGHT_FLOORS: Record<string, number> = {
+  charge_neutrality: 0.8,
+  noble_gas: 0.7,
+  bond_instability: 0.4,
+  stoichiometry_excess: 0.5,
+  radius_incompatibility: 0.3,
+  coordination_violation: 0.2,
+  electron_count: 0.1,
+};
 
-let inRepairCheck = false;
+export class ConstraintRegistry {
+  totalChecked = 0;
+  totalValid = 0;
+  totalRepaired = 0;
+  totalRejected = 0;
+  violationCounts: Record<string, number> = {};
+  penaltySum = 0;
+  repairAttempts = 0;
+  repairSuccesses = 0;
+  repairPatterns: Map<string, { from: string; to: string; count: number }> = new Map();
+  constraintRewards: Record<string, { totalReward: number; count: number }> = {};
+  weightUpdateCount = 0;
+  private _topPatternsCache: { from: string; to: string; count: number }[] | null = null;
+  private _topPatternsCacheAt = 0;
 
-export function checkPhysicsConstraints(formula: string): ConstraintResult {
-  totalChecked++;
+  getTopPatterns(): { from: string; to: string; count: number }[] {
+    if (this._topPatternsCache && this.totalChecked - this._topPatternsCacheAt < 100) {
+      return this._topPatternsCache;
+    }
+    this._topPatternsCache = Array.from(this.repairPatterns.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+    this._topPatternsCacheAt = this.totalChecked;
+    return this._topPatternsCache;
+  }
+
+  invalidateTopPatternsCache(): void {
+    this._topPatternsCache = null;
+  }
+
+  reset(): void {
+    this.totalChecked = 0;
+    this.totalValid = 0;
+    this.totalRepaired = 0;
+    this.totalRejected = 0;
+    this.violationCounts = {};
+    this.penaltySum = 0;
+    this.repairAttempts = 0;
+    this.repairSuccesses = 0;
+    this.repairPatterns = new Map();
+    this.constraintRewards = {};
+    this.weightUpdateCount = 0;
+    this._topPatternsCache = null;
+    this._topPatternsCacheAt = 0;
+  }
+}
+
+const globalRegistry = new ConstraintRegistry();
+
+export function createConstraintRegistry(): ConstraintRegistry {
+  return new ConstraintRegistry();
+}
+
+export function checkPhysicsConstraints(formula: string, options?: { maxPressureGPa?: number; autoRepair?: boolean; _inRepairCheck?: boolean; registry?: ConstraintRegistry }): ConstraintResult {
+  const registry = options?.registry ?? globalRegistry;
+  registry.totalChecked++;
   const counts = parseCounts(formula);
   const elements = Object.keys(counts);
   const violations: ConstraintViolation[] = [];
+  const pressureGPa = options?.maxPressureGPa ?? 0;
 
+  const NOBLE_PRESSURE_THRESHOLDS: Record<string, number> = { Xe: 50, Kr: 50, Ar: 100 };
   for (const el of elements) {
     if (NOBLE_GASES.has(el)) {
-      violations.push({
-        type: "noble_gas",
-        severity: 1.0,
-        detail: `Noble gas ${el} cannot form stable compounds`,
-      });
+      const threshold = NOBLE_PRESSURE_THRESHOLDS[el];
+      if (threshold !== undefined && pressureGPa > threshold) {
+        violations.push({
+          type: "noble_gas",
+          severity: 0.2,
+          detail: `Noble gas ${el} — may form compounds above ${threshold} GPa (target: ${pressureGPa} GPa)`,
+        });
+      } else {
+        violations.push({
+          type: "noble_gas",
+          severity: 1.0,
+          detail: `Noble gas ${el} cannot form stable compounds`,
+        });
+      }
     }
     if (!ELEMENTAL_DATA[el]) {
       violations.push({
@@ -417,28 +755,60 @@ export function checkPhysicsConstraints(formula: string): ConstraintResult {
     });
   }
 
+  const elLimit = pressureGPa > 50 ? 16 : 12;
   for (const [el, n] of Object.entries(counts)) {
-    if (n > 12) {
+    if (n > elLimit) {
       violations.push({
         type: "stoichiometry_excess",
         severity: 0.6,
-        detail: `${el}${n} exceeds stoichiometry limit (max 12)`,
+        detail: `${el}${Math.round(n)} exceeds stoichiometry limit (max ${elLimit})`,
         repairSuggestion: `Reduce ${el} count`,
       });
     }
   }
 
-  const chargeResult = checkChargeNeutrality(counts);
-  if (chargeResult.imbalance > 0) {
+  let chargeResult = checkChargeNeutrality(counts);
+  let autoRepaired = false;
+  if (chargeResult.imbalance >= 0.01 && options?.autoRepair && chargeResult.imbalance <= 6) {
+    const repairedCounts = { ...counts };
+    repairChargeBalance(repairedCounts, chargeResult);
+    const recharged = checkChargeNeutrality(repairedCounts);
+    if (recharged.imbalance < chargeResult.imbalance) {
+      Object.assign(counts, repairedCounts);
+      chargeResult = recharged;
+      autoRepaired = true;
+
+      const newTotal = Object.values(counts).reduce((s, n) => s + n, 0);
+      if (newTotal > 25) {
+        violations.push({
+          type: "stoichiometry_excess",
+          severity: 0.7,
+          detail: `Excessive total atoms after auto-repair: ${newTotal}`,
+          repairSuggestion: "Reduce stoichiometric coefficients",
+        });
+      }
+      for (const [el, n] of Object.entries(counts)) {
+        if (n > elLimit) {
+          violations.push({
+            type: "stoichiometry_excess",
+            severity: 0.6,
+            detail: `${el}${Math.round(n)} exceeds stoichiometry limit (max ${elLimit}) after auto-repair`,
+            repairSuggestion: `Reduce ${el} count`,
+          });
+        }
+      }
+    }
+  }
+  if (chargeResult.imbalance >= 0.01) {
     violations.push({
       type: "charge_neutrality",
       severity: Math.min(1.0, chargeResult.imbalance / 6),
-      detail: `Charge imbalance: ${chargeResult.imbalance} (states: ${Object.entries(chargeResult.bestAssignment).map(([e, s]) => `${e}${s > 0 ? "+" : ""}${s}`).join(", ")})`,
+      detail: `Charge imbalance: ${chargeResult.imbalance.toFixed(2)} (states: ${Object.entries(chargeResult.bestAssignment).map(([e, s]) => `${e}${s > 0 ? "+" : ""}${s}`).join(", ")})`,
       repairSuggestion: chargeResult.imbalance <= 4 ? "Adjust stoichiometry for charge balance" : undefined,
     });
   }
 
-  const radiusResult = checkRadiusCompatibility(counts);
+  const radiusResult = checkRadiusCompatibility(counts, chargeResult.achievable ? chargeResult.bestAssignment : undefined);
   for (const v of radiusResult.violations) {
     violations.push({
       type: "radius_incompatibility",
@@ -447,7 +817,7 @@ export function checkPhysicsConstraints(formula: string): ConstraintResult {
     });
   }
 
-  const coordResult = checkCoordination(counts);
+  const coordResult = checkCoordination(counts, chargeResult.achievable ? chargeResult.bestAssignment : undefined, pressureGPa);
   for (const v of coordResult.violations) {
     violations.push({
       type: "coordination_violation",
@@ -456,7 +826,7 @@ export function checkPhysicsConstraints(formula: string): ConstraintResult {
     });
   }
 
-  const bondResult = checkBondStability(counts);
+  const bondResult = checkBondStability(counts, pressureGPa);
   for (const v of bondResult.violations) {
     violations.push({
       type: "bond_instability",
@@ -478,25 +848,33 @@ export function checkPhysicsConstraints(formula: string): ConstraintResult {
   for (const v of violations) {
     const w = constraintWeights[v.type] ?? 0.5;
     totalPenalty += v.severity * w;
-    violationCounts[v.type] = (violationCounts[v.type] || 0) + 1;
+    registry.violationCounts[v.type] = (registry.violationCounts[v.type] || 0) + 1;
   }
 
   const isValid = totalPenalty < 0.5;
-  if (isValid) totalValid++;
-  else totalRejected++;
+  if (isValid) registry.totalValid++;
+  else registry.totalRejected++;
 
-  penaltySum += totalPenalty;
+  registry.penaltySum += totalPenalty;
+
+  const autoRepairedFormula = options?.autoRepair ? countsToFormula(counts) : null;
+  const effectiveFormula = (autoRepairedFormula && autoRepairedFormula !== formula) ? autoRepairedFormula : formula;
 
   let repairedFormula: string | null = null;
-  if (!isValid && totalPenalty < 2.0 && !inRepairCheck) {
-    repairedFormula = repairFormula(formula, counts, violations, chargeResult);
-    if (repairedFormula && repairedFormula !== formula) {
-      totalRepaired++;
+  if (!isValid && totalPenalty < 3.5 && !options?._inRepairCheck) {
+    repairedFormula = repairFormula(effectiveFormula, counts, violations, chargeResult, pressureGPa, registry);
+    if (repairedFormula && repairedFormula !== effectiveFormula) {
+      registry.totalRepaired++;
     }
   }
 
+  if (!repairedFormula && autoRepaired && autoRepairedFormula && autoRepairedFormula !== formula) {
+    repairedFormula = autoRepairedFormula;
+    registry.totalRepaired++;
+  }
+
   return {
-    formula,
+    formula: effectiveFormula,
     isValid,
     violations,
     totalPenalty,
@@ -514,64 +892,103 @@ function repairFormula(
   counts: Record<string, number>,
   violations: ConstraintViolation[],
   chargeResult: ReturnType<typeof checkChargeNeutrality>,
+  pressureGPa?: number,
+  registry: ConstraintRegistry = globalRegistry,
 ): string | null {
-  repairAttempts++;
+  registry.repairAttempts++;
   const repaired = { ...counts };
+  const NOBLE_PRESSURE_THRESHOLDS: Record<string, number> = { Xe: 50, Kr: 50, Ar: 100 };
 
+  let removedNobleGas = false;
   for (const el of Object.keys(repaired)) {
     if (NOBLE_GASES.has(el)) {
+      const threshold = NOBLE_PRESSURE_THRESHOLDS[el];
+      if (threshold !== undefined && (pressureGPa ?? 0) > threshold) continue;
       delete repaired[el];
+      removedNobleGas = true;
     }
   }
 
+  const repairLimit = (pressureGPa ?? 0) > 50 ? 16 : 12;
   for (const [el, n] of Object.entries(repaired)) {
-    if (n > 12) {
-      repaired[el] = Math.min(n, 8);
+    if (n > repairLimit) {
+      repaired[el] = Math.min(n, repairLimit - 4);
     }
   }
 
-  if (chargeResult.imbalance > 0 && chargeResult.imbalance <= 6) {
-    repairChargeBalance(repaired, chargeResult);
+  const effectiveChargeResult = removedNobleGas ? checkChargeNeutrality(repaired) : chargeResult;
+  if (effectiveChargeResult.imbalance >= 0.01 && effectiveChargeResult.imbalance <= 6) {
+    repairChargeBalance(repaired, effectiveChargeResult);
   }
 
   const totalAtoms = Object.values(repaired).reduce((s, n) => s + n, 0);
   if (totalAtoms > 25) {
-    const scale = 20 / totalAtoms;
-    for (const el of Object.keys(repaired)) {
-      repaired[el] = Math.max(1, Math.round(repaired[el] * scale));
+    const targetTotal = 20;
+    const scale = targetTotal / totalAtoms;
+    const elKeys = Object.keys(repaired);
+    const scaled = elKeys.map(el => Math.max(1, repaired[el] * scale));
+    const floored = scaled.map(v => Math.max(1, Math.floor(v)));
+    let deficit = targetTotal - floored.reduce((s, n) => s + n, 0);
+    if (deficit > 0) {
+      const remainders = scaled.map((v, i) => ({ i, r: v - floored[i] }))
+        .sort((a, b) => b.r - a.r);
+      for (const { i } of remainders) {
+        if (deficit <= 0) break;
+        floored[i]++;
+        deficit--;
+      }
+    } else if (deficit < 0) {
+      const sortedByCount = floored.map((v, i) => ({ i, v }))
+        .sort((a, b) => b.v - a.v);
+      for (const { i } of sortedByCount) {
+        if (deficit >= 0) break;
+        if (floored[i] > 1) {
+          floored[i]--;
+          deficit++;
+        }
+      }
+    }
+    for (let j = 0; j < elKeys.length; j++) {
+      repaired[elKeys[j]] = floored[j];
+    }
+    const postScaleCharge = checkChargeNeutrality(repaired);
+    if (postScaleCharge.imbalance >= 0.01 && postScaleCharge.imbalance <= 6) {
+      repairChargeBalance(repaired, postScaleCharge);
     }
   }
 
-  const remaining = Object.keys(repaired).filter(el => repaired[el] > 0);
-  if (remaining.length < 2) return null;
+  const remainingEls = Object.keys(repaired).filter(el => repaired[el] > 0);
+  if (remainingEls.length < 2) return null;
 
   const result = countsToFormula(repaired);
   if (result === formula) return null;
 
-  inRepairCheck = true;
-  const recheck = checkPhysicsConstraints(result);
-  totalChecked--;
+  const recheck = checkPhysicsConstraints(result, { maxPressureGPa: pressureGPa, _inRepairCheck: true, registry });
+  registry.totalChecked--;
 
-  if (recheck.totalPenalty < 0.5) {
-    repairSuccesses++;
-    const key = `${formula}->${result}`;
-    const existing = repairPatterns.get(key);
-    if (existing) existing.count++;
-    else repairPatterns.set(key, { from: formula, to: result, count: 1 });
-    inRepairCheck = false;
-    return result;
+  const origRecheck = recheck.totalPenalty >= 0.5
+    ? checkPhysicsConstraints(formula, { maxPressureGPa: pressureGPa, _inRepairCheck: true, registry })
+    : null;
+  if (origRecheck) registry.totalChecked--;
+
+  const accepted = recheck.totalPenalty < 0.5
+    || (origRecheck && recheck.totalPenalty < origRecheck.totalPenalty * 0.9);
+
+  if (!accepted) return null;
+
+  registry.repairSuccesses++;
+  const key = `${formula}->${result}`;
+  const existing = registry.repairPatterns.get(key);
+  if (existing) existing.count++;
+  else {
+    registry.repairPatterns.set(key, { from: formula, to: result, count: 1 });
+    if (registry.repairPatterns.size > 5000) {
+      const oldest = registry.repairPatterns.keys().next().value;
+      if (oldest) registry.repairPatterns.delete(oldest);
+    }
   }
-
-  const origRecheck = checkPhysicsConstraints(formula);
-  totalChecked--;
-  inRepairCheck = false;
-
-  if (recheck.totalPenalty < origRecheck.totalPenalty * 0.7) {
-    repairSuccesses++;
-    return result;
-  }
-
-  return null;
+  registry.invalidateTopPatternsCache();
+  return result;
 }
 
 function repairChargeBalance(counts: Record<string, number>, chargeResult: ReturnType<typeof checkChargeNeutrality>): void {
@@ -588,23 +1005,41 @@ function repairChargeBalance(counts: Record<string, number>, chargeResult: Retur
 
   if (totalPos === totalNeg) return;
 
-  for (let iter = 0; iter < 5 && totalPos !== totalNeg; iter++) {
-    if (totalPos > totalNeg) {
-      const target = anions.sort((a, b) => counts[a] - counts[b])[0];
-      if (!target) break;
-      counts[target]++;
-      totalNeg += Math.abs(assignment[target] ?? 1);
-    } else {
-      const target = cations.sort((a, b) => counts[a] - counts[b])[0];
-      if (!target) break;
-      counts[target]++;
-      totalPos += (assignment[target] ?? 1);
+  for (let iter = 0; iter < 10; iter++) {
+    const freshCharge = checkChargeNeutrality(counts);
+    if (freshCharge.imbalance < 0.01) break;
+
+    const freshAssignment = freshCharge.bestAssignment;
+    const freshAnions = elements.filter(el => counts[el] > 0 && (freshAssignment[el] ?? 0) < 0);
+    const freshCations = elements.filter(el => counts[el] > 0 && (freshAssignment[el] ?? 0) > 0);
+    const freshPos = freshCations.reduce((s, el) => s + (freshAssignment[el] ?? 0) * counts[el], 0);
+    const freshNeg = freshAnions.reduce((s, el) => s + Math.abs(freshAssignment[el] ?? 0) * counts[el], 0);
+    const candidates = freshPos > freshNeg ? freshAnions : freshCations;
+    if (candidates.length === 0) break;
+
+    let bestEl: string | null = null;
+    let bestPenalty = Infinity;
+
+    for (const el of candidates) {
+      const testCounts = { ...counts };
+      testCounts[el]++;
+      const testCharge = checkChargeNeutrality(testCounts);
+      const radiusCheck = checkRadiusCompatibility(testCounts, testCharge.achievable ? testCharge.bestAssignment : undefined);
+      const penalty = testCharge.imbalance + (1.0 - radiusCheck.score) * 0.5;
+      if (penalty < bestPenalty) {
+        bestPenalty = penalty;
+        bestEl = el;
+      }
     }
+
+    if (!bestEl || bestPenalty >= freshCharge.imbalance) break;
+    counts[bestEl]++;
   }
 }
 
 export function constraintGuidedGenerate(
   rawFormulas: string[],
+  options?: { maxPressureGPa?: number; registry?: ConstraintRegistry },
 ): { valid: string[]; repaired: string[]; rejected: string[]; details: ConstraintResult[] } {
   const valid: string[] = [];
   const repaired: string[] = [];
@@ -612,7 +1047,7 @@ export function constraintGuidedGenerate(
   const details: ConstraintResult[] = [];
 
   for (const formula of rawFormulas) {
-    const result = checkPhysicsConstraints(formula);
+    const result = checkPhysicsConstraints(formula, { maxPressureGPa: options?.maxPressureGPa, registry: options?.registry });
     details.push(result);
 
     if (result.isValid) {
@@ -631,43 +1066,54 @@ export function updateConstraintWeightsFromReward(
   formula: string,
   tcReward: number,
   violations: ConstraintViolation[],
+  reg?: ConstraintRegistry,
 ): void {
+  const registry = reg ?? globalRegistry;
   const normalizedReward = Math.min(1.0, Math.max(-1.0, tcReward / 200));
 
   for (const v of violations) {
-    if (!constraintRewards[v.type]) {
-      constraintRewards[v.type] = { totalReward: 0, count: 0 };
+    if (!registry.constraintRewards[v.type]) {
+      registry.constraintRewards[v.type] = { totalReward: 0, count: 0 };
     }
-    constraintRewards[v.type].totalReward += normalizedReward;
-    constraintRewards[v.type].count++;
+    registry.constraintRewards[v.type].totalReward += normalizedReward;
+    registry.constraintRewards[v.type].count++;
   }
 
-  const lr = 0.005;
-  for (const [ctype, data] of Object.entries(constraintRewards)) {
+  const baseLr = 0.01;
+  const lr = baseLr / (1 + 0.001 * registry.weightUpdateCount);
+
+  let anyUpdated = false;
+  for (const [ctype, data] of Object.entries(registry.constraintRewards)) {
     if (data.count < 5) continue;
     const avgReward = data.totalReward / data.count;
+    const floor = WEIGHT_FLOORS[ctype] ?? 0.1;
     if (avgReward > 0.3) {
-      constraintWeights[ctype] = Math.max(0.1, constraintWeights[ctype] - lr);
+      constraintWeights[ctype] = Math.max(floor, constraintWeights[ctype] - lr);
+      anyUpdated = true;
     } else if (avgReward < -0.1) {
       constraintWeights[ctype] = Math.min(2.0, constraintWeights[ctype] + lr);
+      anyUpdated = true;
     }
   }
+  if (anyUpdated) registry.weightUpdateCount++;
 }
 
-export function getConstraintEngineStats(): ConstraintStats {
-  const topPatterns = Array.from(repairPatterns.values())
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 10);
+export function resetConstraintStats(reg?: ConstraintRegistry): void {
+  (reg ?? globalRegistry).reset();
+}
+
+export function getConstraintEngineStats(reg?: ConstraintRegistry): ConstraintStats {
+  const registry = reg ?? globalRegistry;
 
   return {
-    totalChecked,
-    totalValid,
-    totalRepaired,
-    totalRejected,
-    violationCounts: { ...violationCounts },
-    avgPenalty: totalChecked > 0 ? penaltySum / totalChecked : 0,
+    totalChecked: registry.totalChecked,
+    totalValid: registry.totalValid,
+    totalRepaired: registry.totalRepaired,
+    totalRejected: registry.totalRejected,
+    violationCounts: { ...registry.violationCounts },
+    avgPenalty: registry.totalChecked > 0 ? registry.penaltySum / registry.totalChecked : 0,
     constraintWeights: { ...constraintWeights },
-    repairSuccessRate: repairAttempts > 0 ? repairSuccesses / repairAttempts : 0,
-    topRepairPatterns: topPatterns,
+    repairSuccessRate: registry.repairAttempts > 0 ? registry.repairSuccesses / registry.repairAttempts : 0,
+    topRepairPatterns: registry.getTopPatterns(),
   };
 }

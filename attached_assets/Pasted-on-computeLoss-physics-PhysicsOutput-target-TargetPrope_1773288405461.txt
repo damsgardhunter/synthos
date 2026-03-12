@@ -1,0 +1,123 @@
+on computeLoss(physics: PhysicsOutput, target: TargetProperties, synthVec?: SynthesisVector): number {
+  const tcLoss = Math.pow(Math.max(0, target.targetTc - physics.tc) / target.targetTc, 2) * 0.55;
+  const lambdaLoss = physics.lambda < target.minLambda
+    ? Math.pow((target.minLambda - physics.lambda) / target.minLambda, 2) * 0.15
+    : 0;
+  const metalLoss = target.metallicRequired && physics.metallicity < 0.5
+    ? Math.pow(0.5 - physics.metallicity, 2) * 0.1
+    : 0;
+  const stabilityLoss = physics.stability < 0.3 ? (0.3 - physics.stability) * 0.15 : 0;
+
+  let synthLoss = 0;
+  if (synthVec) {
+    const complexity = computeSynthesisComplexity(synthVec);
+    const feasibility = checkSynthesisFeasibility(synthVec);
+    const infeasibilityPenalty = feasibility.labFeasible ? 0 : (1 - feasibility.feasibilityScore) * 0.15;
+    synthLoss = Math.min(0.1, complexity * 0.02) + infeasibilityPenalty;
+  }
+
+  return tcLoss + lambdaLoss + metalLoss + stabilityLoss + synthLoss;
+}
+
+export function runDifferentiableOptimization(
+  initialFormula: string,
+  target: TargetProperties,
+  maxSteps: number = 20,
+  learningRate: number = 1.0
+): DifferentiableResult {
+  let state = parseToState(initialFormula, target.maxPressure < 200 ? 0 : target.maxPressure);
+  const matClass = initialFormula.includes("H") ? "hydride" : "default";
+  state.synthesisVector = defaultSynthesisVector(matClass);
+  const steps: OptimizationStep[] = [];
+  let bestTc = 0;
+  let bestFormula = initialFormula;
+  let bestState = state;
+  let stagnationCount = 0;
+
+  const initialPhysics = evaluatePhysics(initialFormula, state.pressure, state.synthesisVector);
+  const initialTc = initialPhysics.tc;
+
+  for (let step = 0; step < maxSteps; step++) {
+    const formula = formulaFromState(state);
+    const physics = evaluatePhysics(formula, state.pressure, state.synthesisVector);
+    const loss = computeLoss(physics, target, state.synthesisVector);
+
+    const analyticGrad = computeAnalyticMcMillanGradients(
+      physics.lambda, physics.omegaLog, physics.muStar
+    );
+    const elementGrad = computeNumericalElementGradients(state, physics.tc);
+
+    const gradNorm = Math.sqrt(
+      analyticGrad.dTc_dLambda ** 2 +
+      analyticGrad.dTc_dOmegaLog ** 2 +
+      analyticGrad.dTc_dMuStar ** 2
+    );
+
+    const { action, stateUpdate } = interpretGradients(
+      analyticGrad, elementGrad, physics, target
+    );
+
+    steps.push({
+      step,
+      formula,
+      tc: Math.round(physics.tc * 10) / 10,
+      lambda: Math.round(physics.lambda * 1000) / 1000,
+      omegaLog: Math.round(physics.omegaLog * 10) / 10,
+      muStar: Math.round(physics.muStar * 1000) / 1000,
+      gbTc: Math.round(physics.gbTc * 10) / 10,
+      loss: Math.round(loss * 10000) / 10000,
+      gradientNorm: Math.round(gradNorm * 100) / 100,
+      action,
+    });
+
+    if (physics.tc > bestTc) {
+      bestTc = physics.tc;
+      bestFormula = formula;
+      bestState = { ...state, counts: { ...state.counts }, synthesisVector: state.synthesisVector ? { ...state.synthesisVector } : undefined };
+      stagnationCount = 0;
+    } else {
+      const annealTemp = Math.max(0.01, 1.0 - step / maxSteps);
+      const tcDelta = physics.tc - bestTc;
+      const acceptProb = Math.exp(tcDelta / (annealTemp * Math.max(1, target.targetTc * 0.1)));
+      if (Math.random() < acceptProb) {
+        stagnationCount = Math.max(0, stagnationCount - 1);
+      } else {
+        stagnationCount++;
+      }
+    }
+
+    if (Math.abs(physics.tc - target.targetTc) / target.targetTc < 0.05) {
+      break;
+    }
+
+    if (stagnationCount >= 4) {
+      const annealTemp = Math.max(0.01, 1.0 - step / maxSteps);
+
+      if (annealTemp > 0.3 && Math.random() < annealTemp * 0.5) {
+        const allEls = Object.keys(state.counts).filter(e => (state.counts[e] || 0) > 0);
+        if (allEls.length > 0) {
+          const randomEl = allEls[Math.floor(Math.random() * allEls.length)];
+          const subs = getSubstitutionGroup(randomEl);
+          if (subs.length > 0) {
+            const replacement = subs[Math.floor(Math.random() * subs.length)];
+            state = substituteElement(state, randomEl, replacement);
+            stagnationCount = 0;
+            continue;
+          }
+        }
+      }
+
+      const weakest = [...elementGrad.entries()]
+        .filter(([el]) => (state.counts[el] || 0) > 0)
+        .sort((a, b) => a[1] - b[1])[0];
+
+      if (weakest) {
+        const subs = getSubstitutionGroup(weakest[0]);
+        if (subs.length > 0) {
+          const replacement = subs[Math.floor(Math.random() * subs.length)];
+          state = substituteElement(state, weakest[0], replacement);
+          stagnationCount = 0;
+          continue;
+        }
+      }
+    }

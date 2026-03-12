@@ -1,0 +1,11 @@
+ Logic Flaw: Random Instruction OrderTypeScriptconst shuffled = insertable.sort(() => Math.random() - 0.5);
+for (let i = 0; i < Math.min(numToInsert, shuffled.length); i++) {
+  child.instructions.push({ ...shuffled[i], order: child.instructions.length });
+}
+The Issue: You are appending new instructions to the end of the instructions array with an increasing order.The Risk: In executeDesignProgram, the instructions are sorted by order. If an apply_strain or dope_sites instruction is added after the optimize_dos instruction, the DOS optimization logic will be calculating results for the unstrained or undoped lattice.Fix: Define Priority Tiers for instructions. create_lattice and set_symmetry should always be Tier 0; populate_sites Tier 1; apply_strain/doping Tier 2; and optimize/analyze Tier 3.4. Stoichiometry Fraction vs. Absolute CountIn the dope_sites mutation:TypeScript{ type: "dope_sites", params: { dopant: pickEl(elementPool), fraction: 0.05 + Math.random() * 0.15, ... } }
+The Issue: You are using a fraction (e.g., 0.20). But in executeDesignProgram, this is converted using Math.round(dopingLevel * 10).The Bug: If the user has a complex unit cell with 50 atoms, a 20% doping should be 10 atoms. Your logic will result in Math.round(0.20 * 10) = 2 atoms. This is a 4% doping, not 20%.Fix: executeDesignProgram should calculate the dopant count as Math.round(dopingLevel * totalHostAtoms).5. Numerical Stability: pickEl FallbacksTypeScriptconst pickEl = (pool: string[]): string => {
+  if (pool.length > 0) return pool[...];
+  if (parentElements.length > 0) return parentElements[...];
+  return "O";
+};
+The Issue: Oxygen ("O") is the hardcoded fallback.The Risk: If you are evolving a pure Metallic Hydrogen system or a Heavy Fermion system, randomly injecting Oxygen via mutation is a "lethal mutation" that will drop the $T_c$ to near-zero.Improvement: Use a "Chemistry-Aware Fallback." If the current elements are transition metals, fallback to a similar transition metal (e.g., Nb or V) instead of an oxidizer like Oxygen.

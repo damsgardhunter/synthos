@@ -345,9 +345,10 @@ function countsToFormula(counts: Record<string, number>): string {
   for (const el of elements) {
     let c = counts[el];
     if (c > 12) c = 12;
-    if (c === 1) result += el;
-    else if (Number.isInteger(c)) result += `${el}${c}`;
-    else result += `${el}${Math.round(c * 100) / 100}`;
+    const rounded = Math.round(c);
+    if (rounded <= 0) continue;
+    if (rounded === 1) result += el;
+    else result += `${el}${rounded}`;
   }
   return result;
 }

@@ -3325,7 +3325,7 @@ function TheoryDiscoveryPanel() {
 }
 
 function CausalDiscoveryPanel() {
-  const [causalView, setCausalView] = useState<"overview" | "graph" | "hypotheses" | "intervention" | "ontology" | "rules" | "pressure">("overview");
+  const [causalView, setCausalView] = useState<"overview" | "graph" | "hypotheses" | "intervention" | "ontology" | "rules" | "pressure" | "guidance">("overview");
   const [interventionFormula, setInterventionFormula] = useState("LaH10");
   const [interventionVar, setInterventionVar] = useState("pressure");
   const [interventionValue, setInterventionValue] = useState("100");
@@ -3338,6 +3338,7 @@ function CausalDiscoveryPanel() {
   const graphQuery = useQuery<any>({ queryKey: ["/api/causal-discovery/graph"] });
   const hypothesesQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/hypotheses"] });
   const rulesQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/rules"] });
+  const guidanceQuery = useQuery<any[]>({ queryKey: ["/api/causal-discovery/guidance"] });
 
   const runMutation = useMutation({
     mutationFn: () => apiRequest("POST", "/api/causal-discovery/run", { datasetSize: 60 }),
@@ -3346,6 +3347,8 @@ function CausalDiscoveryPanel() {
       queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/graph"] });
       queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/hypotheses"] });
       queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/rules"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/causal-discovery/guidance"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/theory-report"] });
     },
   });
 
@@ -3380,6 +3383,7 @@ function CausalDiscoveryPanel() {
     { key: "ontology", label: "Ontology", icon: Network },
     { key: "rules", label: "Causal Rules", icon: BookOpen },
     { key: "pressure", label: "Pressure Regimes", icon: Gauge },
+    { key: "guidance", label: "Design Guidance", icon: Target },
   ];
 
   return (
@@ -3565,6 +3569,17 @@ function CausalDiscoveryPanel() {
                       <CardContent className="pt-4 pb-3">
                         <div className="flex items-start justify-between mb-2">
                           <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              {h.hypothesisType && (
+                                <Badge
+                                  variant={h.hypothesisType === "design" ? "default" : "outline"}
+                                  className={`text-[10px] ${h.hypothesisType === "design" ? "bg-green-600" : ""}`}
+                                  data-testid={`badge-hyp-type-${i}`}
+                                >
+                                  {h.hypothesisType === "design" ? "Design" : "Observation"}
+                                </Badge>
+                              )}
+                            </div>
                             <p className="text-sm font-medium" data-testid={`text-hypothesis-${i}`}>{h.statement}</p>
                             <div className="flex items-center gap-1 mt-1">
                               {h.causalChain?.map((v: string, ci: number) => (
@@ -3907,6 +3922,58 @@ function CausalDiscoveryPanel() {
                 })()
               ) : (
                 <p className="text-sm text-muted-foreground text-center py-8">Run causal discovery to see pressure regime comparison data.</p>
+              )}
+            </div>
+          )}
+
+          {causalView === "guidance" && (
+            <div className="space-y-4">
+              {guidanceQuery.isLoading ? (
+                <div className="space-y-3">
+                  {[0,1,2].map(i => <Skeleton key={i} className="h-24" />)}
+                </div>
+              ) : (guidanceQuery.data ?? []).length > 0 ? (
+                <>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <Target className="h-4 w-4 text-green-500" />
+                        Material Design Recommendations
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-xs text-muted-foreground mb-3">
+                        Ranked by causal impact on Tc. Direction determined via partial correlation (controlling for other intervention variables).
+                      </p>
+                      <div className="space-y-3">
+                        {(guidanceQuery.data ?? []).map((g: any, i: number) => (
+                          <div key={i} className="border rounded-lg p-3" data-testid={`guidance-card-${i}`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <Badge variant={g.direction === "maximize" ? "default" : "secondary"} className="text-xs" data-testid={`badge-guidance-dir-${i}`}>
+                                  #{g.rank} {g.direction === "maximize" ? "↑ Maximize" : "↓ Minimize"}
+                                </Badge>
+                                <span className="text-sm font-medium" data-testid={`text-guidance-label-${i}`}>{g.variableLabel || g.variable}</span>
+                              </div>
+                              <Badge variant="outline" className="font-mono text-xs" data-testid={`text-guidance-impact-${i}`}>
+                                Impact: {g.causalImpactOnTc}
+                              </Badge>
+                            </div>
+                            <p className="text-sm text-green-700 dark:text-green-400 font-medium mb-1" data-testid={`text-guidance-rec-${i}`}>
+                              {g.recommendation}
+                            </p>
+                            <div className="text-xs text-muted-foreground flex items-center gap-1">
+                              <span>Pathway:</span>
+                              <code className="bg-muted px-1 rounded">{g.mechanism}</code>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-8">No design guidance available. Run causal discovery first to generate recommendations.</p>
               )}
             </div>
           )}

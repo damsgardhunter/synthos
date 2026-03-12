@@ -2,7 +2,7 @@ import { TargetProperties, InverseCandidate, computeTargetDistance, computeRewar
 import { generateInverseCandidates, refineCandidate, createInitialBias } from "./inverse-generator";
 import { solveConstraints, type ConstraintSolution } from "./constraint-solver";
 import { solveConstraintGraph, getConstraintGraphGuidance, type GraphSolution } from "./constraint-graph-solver";
-import { checkPhysicsConstraints, type ConstraintResult } from "./physics-constraint-engine";
+import { checkPhysicsConstraints, createConstraintRegistry, ConstraintRegistry, type ConstraintResult } from "./physics-constraint-engine";
 import { evaluatePillars, type PillarEvaluation, type SCPillarTargets } from "./sc-pillars-optimizer";
 import { runDifferentiableOptimization, type DifferentiableResult } from "./differentiable-optimizer";
 import { updateLearningState, deriveCompositionBias, createInitialLearningState, type InverseLearningState } from "./inverse-learning";
@@ -73,12 +73,24 @@ export interface PipelineState {
   bestDistance: number;
   convergenceHistory: number[];
   iterationHistory: PipelineIterationResult[];
+  seenFormulas: Set<string>;
   totalCandidatesGenerated: number;
   totalConstraintsPassed: number;
   totalSurrogateEvaluated: number;
   totalPhysicsValidated: number;
   startedAt: number;
   lastIterationAt: number;
+}
+
+const pipelineRegistries = new Map<PipelineState, ConstraintRegistry>();
+
+function getPipelineRegistry(state: PipelineState): ConstraintRegistry {
+  let reg = pipelineRegistries.get(state);
+  if (!reg) {
+    reg = createConstraintRegistry();
+    pipelineRegistries.set(state, reg);
+  }
+  return reg;
 }
 
 export interface PipelineStats {
@@ -98,8 +110,20 @@ export interface PipelineStats {
 }
 
 const pipelines = new Map<string, PipelineState>();
+const pipelineCompletedAt = new Map<string, number>();
+const PIPELINE_TTL_MS = 30 * 60 * 1000;
 let totalPipelineRuns = 0;
 let totalCandidatesProcessed = 0;
+
+function pruneCompletedPipelines(): void {
+  const now = Date.now();
+  for (const [id, completedTime] of pipelineCompletedAt) {
+    if (now - completedTime > PIPELINE_TTL_MS) {
+      pipelines.delete(id);
+      pipelineCompletedAt.delete(id);
+    }
+  }
+}
 
 function goalToTargetProperties(goal: PipelineGoal): TargetProperties {
   return {
@@ -159,6 +183,7 @@ export function createPipeline(id: string, goal?: Partial<PipelineGoal>): Pipeli
     bestDistance: 1.0,
     convergenceHistory: [],
     iterationHistory: [],
+    seenFormulas: new Set<string>(),
     totalCandidatesGenerated: 0,
     totalConstraintsPassed: 0,
     totalSurrogateEvaluated: 0,
@@ -180,6 +205,16 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
   state.iteration++;
   state.lastIterationAt = Date.now();
 
+  try {
+  return _runPipelineIterationInner(state, id, startTime);
+  } catch (e: any) {
+    console.error("[NextGenPipeline] iteration error:", e?.message?.slice(0, 300));
+    state.status = "idle";
+    return null;
+  }
+}
+
+function _runPipelineIterationInner(state: PipelineState, id: string, startTime: number): PipelineIterationResult {
   const target = goalToTargetProperties(state.goal);
   const allCandidates: PipelineCandidate[] = [];
 
@@ -206,11 +241,14 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
   }
 
   if (state.learningState.bestCandidates.length > 0) {
-    const topN = state.learningState.bestCandidates.slice(0, 5);
+    const isEarlyStage = state.bestDistance >= 0.3;
+    const topNCount = isEarlyStage ? 3 : 5;
+    const perCandidateRefined = isEarlyStage ? 2 : 4;
+    const topN = state.learningState.bestCandidates.slice(0, topNCount);
     for (const best of topN) {
       try {
         const refined = refineCandidate(best, target, state.bias);
-        for (const r of refined.slice(0, 4)) {
+        for (const r of refined.slice(0, perCandidateRefined)) {
           allCandidates.push({
             formula: r.formula,
             source: "refinement",
@@ -228,8 +266,11 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
     }
   }
 
-  if (state.iteration > 3 && state.learningState.bestCandidates.length > 0) {
-    const topForGradient = state.learningState.bestCandidates.slice(0, 3);
+  const gradientWarmup = Math.max(8, Math.floor(state.goal.maxIterations * 0.15));
+  if (state.iteration > gradientWarmup && state.bestDistance < 0.5 && state.learningState.bestCandidates.length > 0) {
+    const topForGradient = state.learningState.bestCandidates
+      .filter(c => c.targetDistance < 0.6)
+      .slice(0, 3);
     for (const best of topForGradient) {
       try {
         const diffResult = runDifferentiableOptimization(best.formula, target);
@@ -251,25 +292,36 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
     }
   }
 
-  const uniqueFormulas = new Set<string>();
   const deduplicated = allCandidates.filter(c => {
-    if (uniqueFormulas.has(c.formula)) return false;
-    uniqueFormulas.add(c.formula);
+    if (state.seenFormulas.has(c.formula)) return false;
+    state.seenFormulas.add(c.formula);
     return true;
   });
+  if (state.seenFormulas.size > 5000) {
+    const entries = Array.from(state.seenFormulas);
+    state.seenFormulas = new Set(entries.slice(-2500));
+  }
 
   state.totalCandidatesGenerated += deduplicated.length;
 
-  const constraintThreshold = state.goal.constraintStrictness === "strict" ? 0.3
+  const baseThreshold = state.goal.constraintStrictness === "strict" ? 0.3
     : state.goal.constraintStrictness === "relaxed" ? 0.8 : 0.5;
+  const convergenceProgress = Math.min(1, state.iteration / Math.max(1, state.goal.maxIterations));
+  const constraintThreshold = baseThreshold + (1.0 - baseThreshold) * Math.pow(1 - convergenceProgress, 2);
 
+  const pipelineRegistry = getPipelineRegistry(state);
   const constraintPassed: PipelineCandidate[] = [];
   for (const candidate of deduplicated) {
     try {
-      const result = checkPhysicsConstraints(candidate.formula);
+      const result = checkPhysicsConstraints(candidate.formula, { maxPressureGPa: state.goal.maxPressure, registry: pipelineRegistry });
       candidate.constraintResult = result;
       if (result.isValid || result.totalPenalty < constraintThreshold) {
         constraintPassed.push(candidate);
+      } else {
+        const acceptProb = Math.exp(-result.totalPenalty / Math.max(0.1, constraintThreshold));
+        if (Math.random() < acceptProb * 0.3) {
+          constraintPassed.push(candidate);
+        }
       }
     } catch (e: any) { console.error("[NextGenPipeline] constraint check error:", e?.message?.slice(0, 200)); }
   }
@@ -290,7 +342,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
 
   for (const candidate of constraintPassed) {
     try {
-      candidate.pillarEvaluation = evaluatePillars(candidate.formula, pillarTargets);
+      candidate.pillarEvaluation = evaluatePillars(candidate.formula, pillarTargets, { maxPressureGPa: state.goal.maxPressure });
     } catch (e: any) { console.error("[NextGenPipeline] pillar eval error:", e?.message?.slice(0, 200)); }
   }
 
@@ -311,11 +363,15 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
         ensembleTc,
       };
 
+      const hullEstimate = Math.max(0, gnn.formationEnergy ?? 0.02);
+      const pressureEstimate = candidate.constraintResult
+        ? (candidate.constraintResult.totalPenalty > 0.5 ? state.goal.maxPressure * 0.8 : 0)
+        : 0;
       const predicted = {
         tc: ensembleTc,
         lambda: gnn.lambda ?? gb.score * 2,
-        hull: 0.02,
-        pressure: 0,
+        hull: hullEstimate,
+        pressure: pressureEstimate,
       };
       candidate.targetDistance = computeTargetDistance(target, predicted);
       candidate.reward = computeReward(candidate.targetDistance);
@@ -333,8 +389,10 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
       const bTc = b.surrogateScores!.ensembleTc;
       const pillarA = a.pillarEvaluation?.overallFitness ?? 0;
       const pillarB = b.pillarEvaluation?.overallFitness ?? 0;
-      const compositeA = aTc * state.goal.surrogateWeight + pillarA * (1 - state.goal.surrogateWeight) * state.goal.targetTc;
-      const compositeB = bTc * state.goal.surrogateWeight + pillarB * (1 - state.goal.surrogateWeight) * state.goal.targetTc;
+      const normTcA = aTc / Math.max(1, state.goal.targetTc);
+      const normTcB = bTc / Math.max(1, state.goal.targetTc);
+      const compositeA = normTcA * state.goal.surrogateWeight + pillarA * (1 - state.goal.surrogateWeight);
+      const compositeB = normTcB * state.goal.surrogateWeight + pillarB * (1 - state.goal.surrogateWeight);
       return compositeB - compositeA;
     });
 
@@ -370,13 +428,18 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
     : 1.0;
   const convergenceDelta = prevBestDist - state.bestDistance;
   state.convergenceHistory.push(state.bestDistance);
+  if (state.convergenceHistory.length > 200) {
+    state.convergenceHistory = state.convergenceHistory.slice(-100);
+  }
 
   const results = scored.map(c => ({
     formula: c.formula,
     tc: c.surrogateScores!.ensembleTc,
     lambda: c.surrogateScores!.gnnLambda,
-    hull: 0.02,
-    pressure: 0,
+    hull: c.targetDistance < 1.0 ? Math.max(0, c.targetDistance * 0.1) : 0.02,
+    pressure: c.constraintResult
+      ? (c.constraintResult.totalPenalty > 0.5 ? state.goal.maxPressure * 0.8 : 0)
+      : 0,
     passedPipeline: c.physicsValidated && (c.constraintResult?.isValid ?? true),
   }));
 
@@ -392,26 +455,47 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
     predictedPressure: 0,
   }));
 
-  state.learningState = updateLearningState(
-    state.learningState,
-    inverseCandidates,
-    results,
-    target,
-  );
+  try {
+    state.learningState = updateLearningState(
+      state.learningState,
+      inverseCandidates,
+      results,
+      target,
+    );
+  } catch (e: any) {
+    console.error("[NextGenPipeline] learning state update error:", e?.message?.slice(0, 300));
+  }
 
   const baseBias = createInitialBias(target);
   state.bias = deriveCompositionBias(state.learningState, baseBias);
 
-  if (state.convergenceHistory.length >= 15) {
+  if (state.convergenceHistory.length >= 20) {
+    const last20 = state.convergenceHistory.slice(-20);
+    const stagnationRange = Math.max(...last20) - Math.min(...last20);
+    if (stagnationRange < 0.005 && state.bestDistance > 0.15) {
+      for (const [el, w] of state.bias.elementWeights) {
+        state.bias.elementWeights.set(el, w * (0.6 + Math.random() * 0.8));
+      }
+      if (state.seenFormulas.size > 100) {
+        const entries = Array.from(state.seenFormulas);
+        state.seenFormulas = new Set(entries.slice(-50));
+      }
+    }
+  }
+
+  const minConvergeIters = Math.max(20, Math.floor(state.goal.maxIterations * 0.2));
+  if (state.convergenceHistory.length >= 15 && state.iteration >= minConvergeIters) {
     const last15 = state.convergenceHistory.slice(-15);
     const range = Math.max(...last15) - Math.min(...last15);
     if (range < state.goal.convergenceThreshold && state.bestDistance < 0.15) {
       state.status = "converged";
+      pipelineCompletedAt.set(id, Date.now());
     }
   }
 
   if (state.iteration >= state.goal.maxIterations) {
     state.status = "completed";
+    pipelineCompletedAt.set(id, Date.now());
   }
 
   if (state.status !== "converged" && state.status !== "completed") {
@@ -428,7 +512,11 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
     bestFormulaThisIteration,
     averageTargetDistance: avgDistance,
     convergenceDelta,
-    topCandidates: scored.slice(0, 10),
+    topCandidates: scored.slice(0, 10).map(c => ({
+      ...c,
+      constraintResult: null,
+      pillarEvaluation: null,
+    })),
     wallTimeMs: Date.now() - startTime,
   };
 
@@ -444,6 +532,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
 }
 
 export function getPipelineState(id: string): PipelineState | undefined {
+  pruneCompletedPipelines();
   return pipelines.get(id);
 }
 
@@ -457,7 +546,14 @@ export function getPipelineStats(id: string): PipelineStats | null {
   let estimatedItersToConverge: number | null = null;
   if (state.convergenceHistory.length >= 5) {
     const recent = state.convergenceHistory.slice(-5);
-    const avgImprovement = (recent[0] - recent[recent.length - 1]) / recent.length;
+    let weightedImprovement = 0;
+    let totalWeight = 0;
+    for (let i = 0; i < recent.length - 1; i++) {
+      const weight = i + 1;
+      weightedImprovement += (recent[i] - recent[i + 1]) * weight;
+      totalWeight += weight;
+    }
+    const avgImprovement = totalWeight > 0 ? weightedImprovement / totalWeight : 0;
     if (avgImprovement > 0.001) {
       estimatedItersToConverge = Math.ceil(state.bestDistance / avgImprovement);
     }

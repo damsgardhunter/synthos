@@ -1356,7 +1356,8 @@ async function runPhase7_Superconductor() {
         const topExisting = await storage.getSuperconductorCandidatesByTc(10);
         const existingFormulas = topExisting.map(c => c.formula);
         const targetTc = elasticTcTarget(autonomousBestTc);
-        const pillarResult = runPillarCycle(existingFormulas, targetTc);
+        const pillarPressure = Math.max(50, ...getAllActiveCampaigns().map(c => c.target?.maxPressure ?? 50));
+        const pillarResult = runPillarCycle(existingFormulas, targetTc, pillarPressure);
         let pillarInserted = 0;
 
         for (const formula of pillarResult.formulas) {
@@ -2928,6 +2929,19 @@ async function runPhase10_Physics() {
           console.error(`[Engine] Quantum criticality failed for ${candidate.formula}:`, qcErr instanceof Error ? qcErr.message.slice(0, 80) : "unknown");
         }
 
+        if (result.fdPhononSummary) {
+          (updatedMlFeatures as any).fdPhononSummary = {
+            dynamicallyStable: result.fdPhononSummary.dynamicallyStable,
+            imaginaryModeCount: result.fdPhononSummary.imaginaryModeCount,
+            lowestFrequency: result.fdPhononSummary.lowestFrequency,
+            highestFrequency: result.fdPhononSummary.highestFrequency,
+            omegaLog: result.fdPhononSummary.omegaLog,
+            lambdaContribution: result.fdPhononSummary.lambdaContribution,
+            forceConstantClampedEntries: result.fdPhononSummary.forceConstantClampedEntries,
+            timestamp: Date.now(),
+          };
+        }
+
         await storage.updateSuperconductorCandidate(candidate.id, {
           electronPhononCoupling: result.coupling.lambda,
           logPhononFrequency: result.coupling.omegaLog,
@@ -2953,6 +2967,33 @@ async function runPhase10_Physics() {
 
         if (updatedTc !== currentTc) {
           emit("log", { phase: "phase-10", event: "Tc updated by physics", detail: `${candidate.formula}: ML estimate ${currentTc}K -> Eliashberg ${updatedTc}K (lambda=${result.coupling.lambda.toFixed(2)}, Hc2=${result.criticalFields.upperCriticalField}T, ${result.correlation.regime}, ${result.competingPhases.length} competing phases)`, dataSource: "Physics Engine" });
+        }
+
+        if (result.fdPhononSummary?.dynamicallyStable &&
+            result.fdPhononSummary.lambdaContribution != null &&
+            result.fdPhononSummary.lambdaContribution > 0.5 &&
+            updatedTc > 10) {
+          try {
+            const dfptJob = await submitDFTJob(candidate.formula, null, 90, "scf");
+            const promoted = dfptJob ? await promoteDFTJob(candidate.formula, 90) : false;
+            if (dfptJob && promoted) {
+              emit("log", {
+                phase: "phase-10",
+                event: "DFPT promotion: high-lambda stable candidate",
+                detail: `${candidate.formula}: FD stable, λ_FD=${result.fdPhononSummary.lambdaContribution.toFixed(3)}, Tc=${updatedTc.toFixed(1)}K — promoted to full DFPT queue (priority=90)`,
+                dataSource: "Physics Engine",
+              });
+            } else if (dfptJob) {
+              emit("log", {
+                phase: "phase-10",
+                event: "DFPT queued (not promoted)",
+                detail: `${candidate.formula}: FD stable, λ_FD=${result.fdPhononSummary.lambdaContribution.toFixed(3)} — queued but promotion returned false`,
+                dataSource: "Physics Engine",
+              });
+            }
+          } catch (dfptErr: any) {
+            console.error(`[Engine] DFPT promotion failed for ${candidate.formula}:`, dfptErr?.message?.slice(0, 80));
+          }
         }
 
         try {
@@ -5107,7 +5148,8 @@ async function runAutonomousFastPath() {
       });
     }
 
-    const constraintFiltered = constraintGuidedGenerate(candidates);
+    const activeCampaignPressure = Math.max(50, ...getAllActiveCampaigns().map(c => c.target?.maxPressure ?? 50));
+    const constraintFiltered = constraintGuidedGenerate(candidates, { maxPressureGPa: activeCampaignPressure });
     const physicsCleanCandidates = [...constraintFiltered.valid, ...constraintFiltered.repaired];
 
     if (constraintFiltered.rejected.length > 0 || constraintFiltered.repaired.length > 0) {

@@ -122,10 +122,18 @@ export interface PillarEvaluation {
   physicsValid: boolean;
 }
 
+export interface MutationLineage {
+  parentFormula: string;
+  targetedPillar: string;
+  fitnessImprovement: number;
+  generation: number;
+}
+
 export interface PillarGuidedCandidate {
   formula: string;
   evaluation: PillarEvaluation;
   designRationale: string;
+  lineage?: MutationLineage;
 }
 
 export interface PillarOptimizerStats {
@@ -135,7 +143,9 @@ export interface PillarOptimizerStats {
   bestFitness: number;
   bestFormula: string;
   pillarSatisfactionRates: Record<string, number>;
+  familySatisfactionRates: Record<string, Record<string, number>>;
   elementAffinityScores: Record<string, number>;
+  elementSurpriseFactors: Record<string, number>;
   topCandidates: { formula: string; fitness: number; tc: number; pillars: number }[];
   pillarWeights: Record<string, number>;
 }
@@ -167,20 +177,46 @@ function parseCounts(formula: string): Record<string, number> {
 function countsToFormula(counts: Record<string, number>): string {
   const sorted = Object.entries(counts)
     .filter(([, n]) => n > 0)
-    .sort(([a], [b]) => a.localeCompare(b));
+    .sort(([a], [b]) => {
+      const enA = ELEMENTAL_DATA[a]?.paulingElectronegativity ?? 2.0;
+      const enB = ELEMENTAL_DATA[b]?.paulingElectronegativity ?? 2.0;
+      if (enA !== enB) return enA - enB;
+      return a.localeCompare(b);
+    });
   return sorted.map(([el, n]) => {
+    if (Number.isInteger(n)) return n === 1 ? el : `${el}${n}`;
+    if (n < 1) return `${el}${parseFloat(n.toFixed(2))}`;
     const rounded = Math.round(n);
-    return rounded === 1 ? el : `${el}${rounded}`;
+    if (Math.abs(n - rounded) < 0.01) return rounded === 1 ? el : `${el}${rounded}`;
+    return `${el}${parseFloat(n.toFixed(1))}`;
   }).join("");
+}
+
+const CAGE_FORMING_METALS = new Set([
+  "La", "Y", "Sc", "Ca", "Sr", "Ba", "Ce", "Pr", "Nd", "Th", "Ac",
+  "Lu", "Gd", "Eu", "Sm", "Yb", "Dy", "Ho", "Er", "Tm",
+]);
+
+function getHRatio(counts: Record<string, number>): number {
+  const hCount = counts["H"] || 0;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  return hCount / Math.max(1, totalAtoms - hCount);
 }
 
 function detectMotif(formula: string, elements: string[], counts: Record<string, number>): { match: string; score: number } {
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   const hCount = counts["H"] || 0;
-  const hRatio = hCount / Math.max(1, totalAtoms - hCount);
+  const nonHElements = elements.filter(e => e !== "H");
+  const hRatio = getHRatio(counts);
 
-  if (hRatio >= 4) return { match: "cage-clathrate", score: 0.95 };
-  if (hRatio >= 2) return { match: "layered-hydride", score: 0.85 };
+  if (hCount > 0 && hRatio >= 2) {
+    const hasCageFormer = nonHElements.some(e => CAGE_FORMING_METALS.has(e));
+    if (hRatio >= 6 && hasCageFormer) return { match: "cage-clathrate", score: 0.95 };
+    if (hRatio >= 4 && hasCageFormer) return { match: "cage-clathrate", score: 0.90 };
+    if (hRatio >= 4) return { match: "cage-clathrate", score: 0.80 };
+    if (nonHElements.length === 1 && hRatio < 4) return { match: "covalent-hydride", score: 0.85 };
+    return { match: "layered-hydride", score: 0.85 };
+  }
 
   const hasCu = elements.includes("Cu");
   const hasO = elements.includes("O");
@@ -196,12 +232,12 @@ function detectMotif(formula: string, elements: string[], counts: Record<string,
   if (hasKagomeEl && hasSb && elements.length >= 3) return { match: "kagome", score: 0.80 };
 
   if (elements.length === 2) {
-    const hasTM = elements.some(e => isTransitionMetal(e));
-    const hasLightAtom = elements.some(e => LIGHT_ATOMS.includes(e));
-    if (hasTM && hasLightAtom) {
-      const tmEl = elements.find(e => isTransitionMetal(e))!;
-      const tmCount = counts[tmEl] || 0;
-      if (tmCount === 3) return { match: "A15", score: 0.88 };
+    const tmEls = elements.filter(e => isTransitionMetal(e) && !CAGE_FORMING_METALS.has(e));
+    const nonTmEls = elements.filter(e => !isTransitionMetal(e));
+    if (tmEls.length === 1 && nonTmEls.length === 1) {
+      const tmCount = counts[tmEls[0]] || 0;
+      const nonTmCount = counts[nonTmEls[0]] || 0;
+      if (tmCount === 3 && nonTmCount === 1) return { match: "A15", score: 0.88 };
     }
   }
 
@@ -229,7 +265,9 @@ function computePairingGlue(
   const elements = parseFormulaElements(formula);
   const spin = computeDynamicSpinSusceptibility(formula, electronic);
 
-  const phononContribution = Math.min(1.0, lambda / 2.0);
+  const phononContribution = lambda <= 2.0
+    ? Math.min(1.0, lambda / 2.0)
+    : Math.min(1.0, Math.sqrt(lambda) / Math.sqrt(2.0));
 
   let spinContribution = 0;
   if (spin.stonerEnhancement > 2.0) {
@@ -253,10 +291,13 @@ function computePairingGlue(
   }
 
   let excitonicContribution = 0;
-  if (electronic.correlationStrength > 0.5 && electronic.metallicity > 0.3) {
+  if (electronic.correlationStrength > 0.5 && electronic.metallicity > 0.05) {
     const mottScore = electronic.mottProximityScore ?? 0;
     if (mottScore > 0.3) {
-      excitonicContribution = Math.min(0.8, mottScore * 0.6 + electronic.correlationStrength * 0.2);
+      const metalFactor = electronic.metallicity < 0.3
+        ? 0.5 + 0.5 * (electronic.metallicity / 0.3)
+        : 1.0;
+      excitonicContribution = Math.min(0.8, (mottScore * 0.6 + electronic.correlationStrength * 0.2) * metalFactor);
     }
   }
 
@@ -267,14 +308,14 @@ function computePairingGlue(
     0.15 * excitonicContribution;
 
   let dominantMechanism = "phonon";
-  const contributions = [
-    { name: "phonon", val: phononContribution * 0.50 },
-    { name: "spin-fluctuation", val: spinContribution * 0.25 },
-    { name: "charge-fluctuation", val: chargeContribution * 0.10 },
-    { name: "excitonic", val: excitonicContribution * 0.15 },
+  const rawContributions = [
+    { name: "phonon", val: phononContribution },
+    { name: "spin-fluctuation", val: spinContribution },
+    { name: "charge-fluctuation", val: chargeContribution },
+    { name: "excitonic", val: excitonicContribution },
   ];
-  contributions.sort((a, b) => b.val - a.val);
-  if (contributions[0].val > 0) dominantMechanism = contributions[0].name;
+  rawContributions.sort((a, b) => b.val - a.val);
+  if (rawContributions[0].val > 0) dominantMechanism = rawContributions[0].name;
 
   return {
     electronPhononContribution: Number(phononContribution.toFixed(4)),
@@ -290,6 +331,7 @@ function computeInstabilityProximity(
   formula: string,
   electronic: ReturnType<typeof computeElectronicStructure>,
   lambda: number,
+  pressureGPa?: number,
 ): InstabilityBreakdown {
   const elements = parseFormulaElements(formula);
   const spin = computeDynamicSpinSusceptibility(formula, electronic);
@@ -327,9 +369,18 @@ function computeInstabilityProximity(
   const hasH = elements.includes("H");
   if (hasH) {
     const counts = parseCounts(formula);
-    const hRatio = (counts["H"] || 0) / Math.max(1, Object.values(counts).reduce((s, n) => s + n, 0) - (counts["H"] || 0));
-    if (hRatio >= 4) structInstab = Math.min(1.0, 0.5 + hRatio * 0.05);
-    if (lambda > 2.0) structInstab = Math.max(structInstab, Math.min(1.0, lambda * 0.3));
+    const hRatio = getHRatio(counts);
+    const pressureSupport = Math.min(1.0, (pressureGPa ?? 0) / 150);
+    if (hRatio >= 4) {
+      structInstab = Math.max(0, 0.8 - pressureSupport);
+    }
+    if (lambda > 3.5 && hRatio < 4) {
+      structInstab = Math.max(structInstab, Math.min(1.0, 0.4 + (lambda - 3.5) * 0.3));
+    } else if (lambda > 3.5 && hRatio >= 4) {
+      const pressureMitigation = pressureSupport * 0.4;
+      structInstab = Math.max(structInstab, Math.min(0.5, (lambda - 3.5) * 0.15 - pressureMitigation));
+    }
+    if (lambda > 2.0) structInstab = Math.max(structInstab, Math.min(1.0, (lambda - 2.0) * 0.2));
   }
   if (electronic.flatBandIndicator > 0.6) {
     structInstab = Math.max(structInstab, electronic.flatBandIndicator * 0.4);
@@ -392,15 +443,10 @@ function computeHydrogenCageMetrics(
     };
   }
 
-  const hRatio = hCount / Math.max(1, nonHAtoms);
+  const hRatio = getHRatio(counts);
   const bondingType = classifyHydrogenBonding(formula, hRatio >= 6 ? 150 : hRatio >= 4 ? 100 : 50);
 
-  let networkDim = 0;
-  if (hRatio >= 6) networkDim = 3.0;
-  else if (hRatio >= 4) networkDim = 2.5;
-  else if (hRatio >= 2) networkDim = 2.0;
-  else if (hRatio >= 1) networkDim = 1.5;
-  else networkDim = 1.0;
+  const networkDim = 1.0 + 2.0 / (1.0 + Math.exp(-1.5 * (hRatio - 3)));
 
   let cageScore = 0;
   const hasSodaliteFormer = elements.some(e => SODALITE_CAGE_ELEMENTS.includes(e));
@@ -436,8 +482,13 @@ function computeHydrogenCageMetrics(
   if (cageScore >= 0.8) {
     const metalCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) ||
       SODALITE_CAGE_ELEMENTS.includes(e)).length;
+    const cageFormingCount = elements.filter(e =>
+      SODALITE_CAGE_ELEMENTS.includes(e) || CLATHRATE_CAGE_ELEMENTS.includes(e) || CAGE_FORMING_METALS.has(e)).length;
+    const isDoubleCage = cageFormingCount >= 2;
     if (metalCount === 1 && nonHAtoms <= 2) {
       cageSymmetry = 0.95;
+    } else if (isDoubleCage && metalCount <= 3) {
+      cageSymmetry = 0.90;
     } else if (metalCount <= 2) {
       cageSymmetry = 0.75;
     } else {
@@ -447,7 +498,22 @@ function computeHydrogenCageMetrics(
     cageSymmetry = 0.40;
   }
 
-  const hCoordination = Math.min(12, Math.round(hRatio * 2));
+  let hCoordination: number;
+  if (hRatio >= 8 && hasSodaliteFormer) {
+    hCoordination = 12;
+  } else if (hRatio >= 6 && hasSodaliteFormer) {
+    hCoordination = 9;
+  } else if (hRatio >= 6 && hasClathFormer) {
+    hCoordination = 8;
+  } else if (hRatio >= 4) {
+    hCoordination = 6;
+  } else if (hRatio >= 2) {
+    hCoordination = 4;
+  } else if (hRatio >= 1) {
+    hCoordination = 3;
+  } else {
+    hCoordination = 2;
+  }
 
   const compositeHydrogenScore =
     0.25 * (networkDim / 3.0) +
@@ -496,28 +562,26 @@ function computeFermiSurfaceGeometry(
   else if (isNickelate) cylindricalScore = Math.max(cylindricalScore, 0.88);
 
   const kzVariance = Math.max(0, 1.0 - cylindricalScore);
-  const fsDimensionality = cylindricalScore >= 0.8 ? 2.0 :
-    cylindricalScore >= 0.5 ? 2.0 + (0.8 - cylindricalScore) / 0.3 :
-    3.0;
+  const fsDimensionality = 2.0 + 1.0 / (1.0 + Math.exp(10 * (cylindricalScore - 0.5)));
 
   let nestingStrength = electronic.nestingScore ?? 0;
   let electronHolePocketOverlap = 0;
   let nestingVectorQ = "none";
 
   if (isPnictide) {
-    nestingStrength = Math.max(nestingStrength, 0.80);
+    nestingStrength = 0.6 * nestingStrength + 0.4 * 0.80;
     electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.9);
     nestingVectorQ = "(pi,pi)";
   } else if (isCuprate) {
-    nestingStrength = Math.max(nestingStrength, 0.85);
+    nestingStrength = 0.55 * nestingStrength + 0.45 * 0.85;
     electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.85);
     nestingVectorQ = "(pi,pi)";
   } else if (isNickelate) {
-    nestingStrength = Math.max(nestingStrength, 0.75);
+    nestingStrength = 0.6 * nestingStrength + 0.4 * 0.75;
     electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.80);
     nestingVectorQ = "(pi,pi)";
   } else if (isDichalcogenide) {
-    nestingStrength = Math.max(nestingStrength, 0.65);
+    nestingStrength = 0.65 * nestingStrength + 0.35 * 0.65;
     electronHolePocketOverlap = Math.min(1.0, nestingStrength * 0.7);
     nestingVectorQ = "(2/3pi,0)";
   }
@@ -542,7 +606,7 @@ function computeFermiSurfaceGeometry(
 
   const vanHoveProx = electronic.vanHoveProximity ?? 0;
   if (vanHoveProx > 0) {
-    vanHoveDistance = Math.max(0, (1.0 - vanHoveProx) * 0.5);
+    vanHoveDistance = Math.exp(-3.0 * vanHoveProx);
   }
 
   try {
@@ -555,7 +619,8 @@ function computeFermiSurfaceGeometry(
         const dist = Math.abs(vhs.energy - tb.bands.fermiEnergy);
         if (dist < minDist) minDist = dist;
       }
-      vanHoveDistance = Number(Math.min(1.0, minDist).toFixed(4));
+      const tbDistance = Math.min(1.0, minDist);
+      vanHoveDistance = Math.min(vanHoveDistance, tbDistance);
       vanHoveNearFermi = vanHoveDistance < 0.05;
 
       if (vanHoveNearFermi) {
@@ -603,35 +668,61 @@ function computeFermiSurfaceGeometry(
   };
 }
 
-let pillarWeights = {
-  coupling: 0.18,
-  phonon: 0.12,
-  dos: 0.12,
-  nesting: 0.10,
-  structure: 0.10,
-  pairingGlue: 0.18,
-  instability: 0.10,
-  hydrogenCage: 0.10,
-};
+export class PillarOptimizerContext {
+  pillarWeights = {
+    coupling: 0.18,
+    phonon: 0.12,
+    dos: 0.12,
+    nesting: 0.10,
+    structure: 0.10,
+    pairingGlue: 0.18,
+    instability: 0.10,
+    hydrogenCage: 0.10,
+  };
+  totalEvaluated = 0;
+  totalGenerated = 0;
+  fitnessSum = 0;
+  bestFitness = 0;
+  bestFormula = "";
+  bestTc = 0;
+  pillarSatisfied: Record<string, number> = {
+    coupling: 0, phonon: 0, dos: 0, nesting: 0, structure: 0,
+    pairingGlue: 0, instability: 0, hydrogenCage: 0,
+  };
+  elementAffinity: Record<string, { totalFitness: number; count: number }> = {};
+  elementAffinityHistory: Record<string, number[]> = {};
+  topCandidates: { formula: string; fitness: number; tc: number; pillars: number }[] = [];
+  familySatisfied: Record<string, Record<string, number>> = {};
+  familyCounts: Record<string, number> = {};
 
-let totalEvaluated = 0;
-let totalGenerated = 0;
-let fitnessSum = 0;
-let bestFitness = 0;
-let bestFormula = "";
-let bestTc = 0;
-let pillarSatisfied: Record<string, number> = {
-  coupling: 0, phonon: 0, dos: 0, nesting: 0, structure: 0,
-  pairingGlue: 0, instability: 0, hydrogenCage: 0,
-};
-let elementAffinity: Record<string, { totalFitness: number; count: number }> = {};
-let topCandidates: { formula: string; fitness: number; tc: number; pillars: number }[] = [];
+  reset() {
+    this.totalEvaluated = 0;
+    this.totalGenerated = 0;
+    this.fitnessSum = 0;
+    this.bestFitness = 0;
+    this.bestFormula = "";
+    this.bestTc = 0;
+    this.pillarSatisfied = {
+      coupling: 0, phonon: 0, dos: 0, nesting: 0, structure: 0,
+      pairingGlue: 0, instability: 0, hydrogenCage: 0,
+    };
+    this.elementAffinity = {};
+    this.elementAffinityHistory = {};
+    this.topCandidates = [];
+    this.familySatisfied = {};
+    this.familyCounts = {};
+  }
+}
+
+const defaultCtx = new PillarOptimizerContext();
 
 export function evaluatePillars(
   formula: string,
-  targets: SCPillarTargets = DEFAULT_PILLAR_TARGETS
+  targets: SCPillarTargets = DEFAULT_PILLAR_TARGETS,
+  options?: { maxPressureGPa?: number; ctx?: PillarOptimizerContext },
 ): PillarEvaluation {
-  totalEvaluated++;
+  const ctx = options?.ctx ?? defaultCtx;
+  ctx.totalEvaluated++;
 
   const elements = parseFormulaElements(formula);
   const counts = parseCounts(formula);
@@ -650,30 +741,63 @@ export function evaluatePillars(
 
   const motif = detectMotif(formula, elements, counts);
   const pairingGlue = computePairingGlue(formula, lambda, electronic);
-  const instability = computeInstabilityProximity(formula, electronic, lambda);
+  const instability = computeInstabilityProximity(formula, electronic, lambda, options?.maxPressureGPa);
   const hydrogenCage = computeHydrogenCageMetrics(formula, elements, counts);
+
+  if (instability.cdwSusceptibility > 0.3) {
+    const cdwSuppression = Math.exp(-2.0 * (instability.cdwSusceptibility - 0.3));
+    pairingGlue.compositePairingGlue *= Math.max(0.25, cdwSuppression);
+  }
   const fermiSurface = computeFermiSurfaceGeometry(formula, electronic, elements);
 
   const motifBonus = (targets.preferredMotifs ?? []).some(pm => motif.match.includes(pm)) ? 0.2 : 0;
 
   const isHydride = hydrogenCage.isHydride;
-  const hydrogenCageWeight = isHydride ? pillarWeights.hydrogenCage : 0;
+  const hydrogenCageWeight = isHydride ? ctx.pillarWeights.hydrogenCage : 0;
 
-  const activeWeights = { ...pillarWeights };
+  const activeWeights = { ...ctx.pillarWeights };
   if (!isHydride) {
     activeWeights.hydrogenCage = 0;
-    const redistrib = pillarWeights.hydrogenCage / 7;
-    activeWeights.coupling += redistrib;
-    activeWeights.phonon += redistrib;
-    activeWeights.dos += redistrib;
-    activeWeights.nesting += redistrib;
-    activeWeights.structure += redistrib;
-    activeWeights.pairingGlue += redistrib;
-    activeWeights.instability += redistrib;
+    const freed = ctx.pillarWeights.hydrogenCage;
+    const motifMatch = motif.match;
+    if (motifMatch === "layered-cuprate" || motifMatch === "layered-pnictide") {
+      activeWeights.pairingGlue += freed * 0.35;
+      activeWeights.nesting += freed * 0.30;
+      activeWeights.dos += freed * 0.15;
+      activeWeights.instability += freed * 0.10;
+      activeWeights.coupling += freed * 0.10;
+    } else if (motifMatch === "kagome" || motifMatch === "flat-band") {
+      activeWeights.dos += freed * 0.30;
+      activeWeights.nesting += freed * 0.25;
+      activeWeights.pairingGlue += freed * 0.25;
+      activeWeights.instability += freed * 0.10;
+      activeWeights.coupling += freed * 0.10;
+    } else if (motifMatch === "A15") {
+      activeWeights.coupling += freed * 0.35;
+      activeWeights.phonon += freed * 0.30;
+      activeWeights.dos += freed * 0.20;
+      activeWeights.pairingGlue += freed * 0.15;
+    } else if (motifMatch === "perovskite") {
+      activeWeights.pairingGlue += freed * 0.30;
+      activeWeights.instability += freed * 0.25;
+      activeWeights.nesting += freed * 0.20;
+      activeWeights.structure += freed * 0.15;
+      activeWeights.coupling += freed * 0.10;
+    } else {
+      const redistrib = freed / 7;
+      activeWeights.coupling += redistrib;
+      activeWeights.phonon += redistrib;
+      activeWeights.dos += redistrib;
+      activeWeights.nesting += redistrib;
+      activeWeights.structure += redistrib;
+      activeWeights.pairingGlue += redistrib;
+      activeWeights.instability += redistrib;
+    }
   }
 
+  const dosGate = Math.min(1.0, dos / 2.0);
   const fsNestingBoost = fermiSurface.nestingStrength > nestingScore
-    ? (fermiSurface.nestingStrength - nestingScore) * 0.4
+    ? (fermiSurface.nestingStrength - nestingScore) * 0.4 * dosGate
     : 0;
   const enhancedNesting = Math.min(1.0, nestingScore + fsNestingBoost);
 
@@ -726,8 +850,11 @@ export function evaluatePillars(
     (instability.compositeInstability >= targets.minInstability ? 1 : 0) +
     (isHydride && hydrogenCage.compositeHydrogenScore >= targets.minHydrogenCage ? 1 : 0);
 
-  const weakestPillar = (Object.entries(activePillarScores) as [string, number][])
-    .reduce((a, b) => a[1] < b[1] ? a : b)[0];
+  const activeEntries = (Object.entries(activePillarScores) as [string, number][])
+    .filter(([key]) => activeWeights[key as keyof typeof activeWeights] > 0);
+  const weakestPillar = activeEntries.length > 0
+    ? activeEntries.reduce((a, b) => a[1] < b[1] ? a : b)[0]
+    : "coupling";
 
   let tcPredicted = 0;
   try {
@@ -736,41 +863,81 @@ export function evaluatePillars(
     tcPredicted = gb.tcPredicted;
   } catch {}
 
-  const constraint = checkPhysicsConstraints(formula);
+  const constraint = checkPhysicsConstraints(formula, { maxPressureGPa: options?.maxPressureGPa });
 
-  if (!constraint.isValid && constraint.totalPenalty > 1.0) {
-    compositeFitness *= 0.5;
-  }
-
-  if (tcPredicted > 0 && tcPredicted < 50) {
-    const tcScaling = Math.pow(tcPredicted / 50, 0.6);
-    compositeFitness *= Math.max(0.3, tcScaling);
-  }
-
-  fitnessSum += compositeFitness;
-
-  for (const [key, score] of Object.entries(pillarScores)) {
-    if (score >= 0.7) {
-      pillarSatisfied[key] = (pillarSatisfied[key] || 0) + 1;
+  if (!constraint.isValid) {
+    if (constraint.totalPenalty > 2.0) {
+      compositeFitness *= 0.05;
+    } else if (constraint.totalPenalty > 1.0) {
+      compositeFitness *= 0.15;
+    } else {
+      compositeFitness *= 0.4;
     }
   }
 
-  for (const el of elements) {
-    if (!elementAffinity[el]) elementAffinity[el] = { totalFitness: 0, count: 0 };
-    elementAffinity[el].totalFitness += compositeFitness;
-    elementAffinity[el].count++;
+  if (tcPredicted > 0 && tcPredicted < 20) {
+    const tcScaling = Math.pow(tcPredicted / 20, 0.8);
+    compositeFitness *= Math.max(0.4, tcScaling);
   }
 
-  if (compositeFitness > bestFitness) {
-    bestFitness = compositeFitness;
-    bestFormula = formula;
-    bestTc = tcPredicted;
+  ctx.fitnessSum += compositeFitness;
+
+  const pillarSatisfiedFlags: Record<string, boolean> = {
+    coupling: lambda >= targets.minLambda,
+    phonon: omegaLogK >= targets.minOmegaLogK,
+    dos: dos >= targets.minDOS,
+    nesting: nestingScore >= targets.minNesting,
+    structure: flatBandScore >= targets.minFlatBand || motif.score >= 0.7,
+    pairingGlue: pairingGlue.compositePairingGlue >= targets.minPairingGlue,
+    instability: instability.compositeInstability >= targets.minInstability,
+    hydrogenCage: isHydride && hydrogenCage.compositeHydrogenScore >= targets.minHydrogenCage,
+  };
+  for (const [key, satisfied] of Object.entries(pillarSatisfiedFlags)) {
+    if (satisfied) {
+      ctx.pillarSatisfied[key] = (ctx.pillarSatisfied[key] || 0) + 1;
+    }
+  }
+
+  const motifFamily = motif.match.includes("cuprate") ? "cuprate"
+    : motif.match.includes("pnictide") ? "pnictide"
+    : motif.match.includes("kagome") ? "kagome"
+    : motif.match === "A15" ? "A15"
+    : motif.match.includes("perovskite") ? "perovskite"
+    : isHydride ? "hydride"
+    : "other";
+  if (!ctx.familySatisfied[motifFamily]) {
+    ctx.familySatisfied[motifFamily] = {};
+  }
+  ctx.familyCounts[motifFamily] = (ctx.familyCounts[motifFamily] || 0) + 1;
+  for (const [key, satisfied] of Object.entries(pillarSatisfiedFlags)) {
+    if (satisfied) {
+      ctx.familySatisfied[motifFamily][key] = (ctx.familySatisfied[motifFamily][key] || 0) + 1;
+    }
+  }
+
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  for (const el of elements) {
+    if (!ctx.elementAffinity[el]) ctx.elementAffinity[el] = { totalFitness: 0, count: 0 };
+    const atomFraction = (counts[el] || 1) / Math.max(1, totalAtoms);
+    ctx.elementAffinity[el].totalFitness += compositeFitness * atomFraction;
+    ctx.elementAffinity[el].count++;
+    if (!ctx.elementAffinityHistory[el]) ctx.elementAffinityHistory[el] = [];
+    ctx.elementAffinityHistory[el].push(compositeFitness * atomFraction);
+    if (ctx.elementAffinityHistory[el].length > 100) {
+      ctx.elementAffinityHistory[el] = ctx.elementAffinityHistory[el].slice(-100);
+    }
+  }
+
+  if (compositeFitness > ctx.bestFitness) {
+    ctx.bestFitness = compositeFitness;
+    ctx.bestFormula = formula;
+    ctx.bestTc = tcPredicted;
   }
 
   if (compositeFitness > 0.5) {
-    topCandidates.push({ formula, fitness: compositeFitness, tc: tcPredicted, pillars: satisfiedPillars });
-    topCandidates.sort((a, b) => b.fitness - a.fitness);
-    if (topCandidates.length > 20) topCandidates = topCandidates.slice(0, 20);
+    ctx.topCandidates.push({ formula, fitness: compositeFitness, tc: tcPredicted, pillars: satisfiedPillars });
+    ctx.topCandidates.sort((a, b) => b.fitness - a.fitness);
+    if (ctx.topCandidates.length > 20) ctx.topCandidates = ctx.topCandidates.slice(0, 20);
   }
 
   return {
@@ -804,6 +971,7 @@ interface DesignTemplate {
   lightAtom: string;
   stoichiometryRange: [number, number];
   lightAtomRange: [number, number];
+  pressureAffinity: "high" | "ambient" | "any";
 }
 
 const DESIGN_TEMPLATES: DesignTemplate[] = [
@@ -817,6 +985,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "H",
     stoichiometryRange: [1, 2],
     lightAtomRange: [6, 10],
+    pressureAffinity: "high",
   },
   {
     name: "metal-boride",
@@ -828,6 +997,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "B",
     stoichiometryRange: [1, 3],
     lightAtomRange: [2, 6],
+    pressureAffinity: "any",
   },
   {
     name: "metal-carbide",
@@ -839,6 +1009,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "C",
     stoichiometryRange: [1, 3],
     lightAtomRange: [1, 4],
+    pressureAffinity: "any",
   },
   {
     name: "metal-nitride",
@@ -850,6 +1021,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "N",
     stoichiometryRange: [1, 3],
     lightAtomRange: [1, 4],
+    pressureAffinity: "any",
   },
   {
     name: "ternary-hydride",
@@ -861,6 +1033,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "H",
     stoichiometryRange: [1, 2],
     lightAtomRange: [4, 8],
+    pressureAffinity: "high",
   },
   {
     name: "high-dos-intermetallic",
@@ -870,8 +1043,9 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
       ["Nb", "Al"], ["Mo", "Ge"], ["Ta", "Si"], ["Nb", "Ga"],
     ],
     lightAtom: "",
-    stoichiometryRange: [1, 3],
+    stoichiometryRange: [3, 3],
     lightAtomRange: [1, 1],
+    pressureAffinity: "ambient",
   },
   {
     name: "layered-pnictide",
@@ -883,6 +1057,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "",
     stoichiometryRange: [1, 2],
     lightAtomRange: [1, 2],
+    pressureAffinity: "ambient",
   },
   {
     name: "cuprate-layered",
@@ -894,6 +1069,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "O",
     stoichiometryRange: [1, 3],
     lightAtomRange: [4, 7],
+    pressureAffinity: "ambient",
   },
   {
     name: "sodalite-superhydride",
@@ -905,6 +1081,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "H",
     stoichiometryRange: [1, 1],
     lightAtomRange: [8, 12],
+    pressureAffinity: "high",
   },
   {
     name: "spin-fluctuation-pnictide",
@@ -916,6 +1093,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "",
     stoichiometryRange: [1, 2],
     lightAtomRange: [2, 2],
+    pressureAffinity: "ambient",
   },
   {
     name: "mott-proximate",
@@ -927,6 +1105,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "O",
     stoichiometryRange: [1, 2],
     lightAtomRange: [3, 7],
+    pressureAffinity: "ambient",
   },
   {
     name: "dichalcogenide-nested",
@@ -938,6 +1117,7 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "",
     stoichiometryRange: [1, 2],
     lightAtomRange: [2, 3],
+    pressureAffinity: "ambient",
   },
   {
     name: "nickelate-layered",
@@ -949,15 +1129,51 @@ const DESIGN_TEMPLATES: DesignTemplate[] = [
     lightAtom: "O",
     stoichiometryRange: [1, 2],
     lightAtomRange: [2, 4],
+    pressureAffinity: "ambient",
   },
 ];
 
-function generateFromTemplate(template: DesignTemplate, count: number): string[] {
+const STOICH_MULTIPLIERS_LIGHT = [1, 1.5, 2, 3];
+const STOICH_MULTIPLIERS_METAL = [0.5, 1];
+let stoichIndex = 0;
+
+const TYPICAL_VALENCE: Record<string, number> = {
+  Y: 3, La: 3, Nd: 3, Pr: 3, Ce: 3, Sm: 3, Gd: 3,
+  Ba: 2, Sr: 2, Ca: 2, Bi: 3,
+  Cu: 2, Ni: 2, V: 3, Fe: 3, Co: 2,
+};
+
+function valenceBalancedOxygen(counts: Record<string, number>, lightAtom: string): number | null {
+  if (lightAtom !== "O") return null;
+  let totalPositiveCharge = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    if (el === "O") continue;
+    const v = TYPICAL_VALENCE[el];
+    if (v === undefined) return null;
+    totalPositiveCharge += v * n;
+  }
+  if (totalPositiveCharge <= 0) return null;
+  return Math.max(1, Math.round(totalPositiveCharge / 2));
+}
+
+function generateFromTemplate(template: DesignTemplate, count: number, globalSeen?: Set<string>): string[] {
+  if (count <= 0) return [];
   const formulas: string[] = [];
-  const seen = new Set<string>();
+  const seen = globalSeen ?? new Set<string>();
+  const isA15 = template.targetMotif === "A15" && template.baseElements[0]?.length === 2;
 
   for (const baseEls of template.baseElements) {
     if (formulas.length >= count) break;
+
+    if (isA15) {
+      const counts: Record<string, number> = { [baseEls[0]]: 3, [baseEls[1]]: 1 };
+      const f = countsToFormula(counts);
+      if (!seen.has(f) && f.length > 1) {
+        seen.add(f);
+        formulas.push(f);
+      }
+      continue;
+    }
 
     for (let metalStoich = template.stoichiometryRange[0]; metalStoich <= template.stoichiometryRange[1]; metalStoich++) {
       for (let lightCount = template.lightAtomRange[0]; lightCount <= template.lightAtomRange[1]; lightCount++) {
@@ -971,9 +1187,21 @@ function generateFromTemplate(template: DesignTemplate, count: number): string[]
           } else if (i === 0) {
             counts[el] = metalStoich;
           } else if (LIGHT_ATOMS.includes(el) || PNICTOGEN_ELEMENTS.includes(el) || CHALCOGEN_ELEMENTS.includes(el)) {
-            counts[el] = Math.max(1, Math.round(metalStoich * (1 + Math.random())));
+            const mult = STOICH_MULTIPLIERS_LIGHT[stoichIndex % STOICH_MULTIPLIERS_LIGHT.length];
+            stoichIndex++;
+            counts[el] = Math.max(1, Math.round(metalStoich * mult));
           } else {
-            counts[el] = Math.max(1, Math.round(metalStoich * (0.5 + Math.random() * 0.5)));
+            const mult = STOICH_MULTIPLIERS_METAL[stoichIndex % STOICH_MULTIPLIERS_METAL.length];
+            stoichIndex++;
+            counts[el] = Math.max(1, Math.round(metalStoich * mult));
+          }
+        }
+
+        if (template.lightAtom === "O") {
+          const balancedO = valenceBalancedOxygen(counts, "O");
+          if (balancedO !== null) {
+            const [lo, hi] = template.lightAtomRange;
+            counts["O"] = Math.max(lo, Math.min(hi, balancedO));
           }
         }
 
@@ -992,20 +1220,51 @@ function generateFromTemplate(template: DesignTemplate, count: number): string[]
 export function runPillarGuidedGeneration(
   targets: SCPillarTargets = DEFAULT_PILLAR_TARGETS,
   candidatesPerTemplate: number = 8,
+  pressureGPa?: number,
 ): PillarGuidedCandidate[] {
   const results: PillarGuidedCandidate[] = [];
   const allFormulas: string[] = [];
+  const globalSeen = new Set<string>();
 
+  const isHighPressure = pressureGPa !== undefined && pressureGPa > 50;
+  const isAmbient = pressureGPa === undefined || pressureGPa <= 5;
+  const isMidPressure = !isHighPressure && !isAmbient;
+
+  const prioritized: DesignTemplate[] = [];
+  const secondary: DesignTemplate[] = [];
   for (const template of DESIGN_TEMPLATES) {
-    const formulas = generateFromTemplate(template, candidatesPerTemplate);
+    if (template.pressureAffinity === "any") {
+      prioritized.push(template);
+    } else if (isHighPressure && template.pressureAffinity === "high") {
+      prioritized.push(template);
+    } else if (isAmbient && template.pressureAffinity === "ambient") {
+      prioritized.push(template);
+    } else if (isMidPressure) {
+      secondary.push(template);
+    } else {
+      secondary.push(template);
+    }
+  }
+
+  const prioritizedAllocation = candidatesPerTemplate <= 0 ? 0 :
+    isMidPressure ? candidatesPerTemplate : Math.max(1, Math.round(candidatesPerTemplate * 1.5));
+  const secondaryAllocation = candidatesPerTemplate <= 0 ? 0 :
+    isMidPressure ? candidatesPerTemplate : Math.max(1, Math.round(candidatesPerTemplate * 0.5));
+
+  for (const template of prioritized) {
+    const formulas = generateFromTemplate(template, prioritizedAllocation, globalSeen);
+    allFormulas.push(...formulas);
+  }
+  for (const template of secondary) {
+    const formulas = generateFromTemplate(template, secondaryAllocation, globalSeen);
     allFormulas.push(...formulas);
   }
 
-  totalGenerated += allFormulas.length;
+  defaultCtx.totalGenerated += allFormulas.length;
 
   for (const formula of allFormulas) {
     try {
-      const evaluation = evaluatePillars(formula, targets);
+      const evaluation = evaluatePillars(formula, targets, { maxPressureGPa: pressureGPa });
       if (!evaluation.physicsValid) continue;
 
       const strengths: string[] = [];
@@ -1037,7 +1296,7 @@ export function runPillarGuidedGeneration(
 let rewardBaseline = 30;
 let rewardCount = 0;
 
-export function updatePillarWeightsFromReward(tcReward: number, evaluation: PillarEvaluation): void {
+export function updatePillarWeightsFromReward(tcReward: number, evaluation: PillarEvaluation, ctx: PillarOptimizerContext = defaultCtx): void {
   rewardCount++;
   rewardBaseline = rewardBaseline * 0.99 + tcReward * 0.01;
 
@@ -1047,43 +1306,56 @@ export function updatePillarWeightsFromReward(tcReward: number, evaluation: Pill
 
   const pillarEntries = Object.entries(evaluation.pillarScores) as [string, number][];
   for (const [pillar, score] of pillarEntries) {
-    const key = pillar as keyof typeof pillarWeights;
+    const key = pillar as keyof typeof ctx.pillarWeights;
     if (score >= 0.7 && normalizedReward > 0.1) {
-      pillarWeights[key] = Math.min(0.5, pillarWeights[key] + lr);
+      ctx.pillarWeights[key] = Math.min(0.5, ctx.pillarWeights[key] + lr);
     } else if (score < 0.3 && normalizedReward < -0.1) {
-      pillarWeights[key] = Math.max(0.05, pillarWeights[key] - lr * 0.5);
+      ctx.pillarWeights[key] = Math.max(0.05, ctx.pillarWeights[key] - lr * 0.5);
     }
   }
 
-  const totalWeight = Object.values(pillarWeights).reduce((s, w) => s + w, 0);
-  for (const key of Object.keys(pillarWeights) as (keyof typeof pillarWeights)[]) {
-    pillarWeights[key] /= totalWeight;
+  const totalWeight = Object.values(ctx.pillarWeights).reduce((s, w) => s + w, 0);
+  for (const key of Object.keys(ctx.pillarWeights) as (keyof typeof ctx.pillarWeights)[]) {
+    ctx.pillarWeights[key] /= totalWeight;
   }
 
   if (rewardCount > 0 && rewardCount % 10 === 0) {
-    regularizePillarWeights(0.15);
+    regularizePillarWeights(ctx);
   }
 }
 
-function regularizePillarWeights(decayStrength: number): void {
-  const nPillars = Object.keys(pillarWeights).length;
+function regularizePillarWeights(ctx: PillarOptimizerContext = defaultCtx): void {
+  const weights = Object.values(ctx.pillarWeights);
+  const nPillars = weights.length;
   const uniform = 1.0 / nPillars;
-  for (const key of Object.keys(pillarWeights) as (keyof typeof pillarWeights)[]) {
-    pillarWeights[key] = pillarWeights[key] * (1 - decayStrength) + uniform * decayStrength;
+  const mean = weights.reduce((s, w) => s + w, 0) / nPillars;
+  const variance = weights.reduce((s, w) => s + (w - mean) ** 2, 0) / nPillars;
+  const decayStrength = Math.min(0.5, 0.10 + 2.0 * variance);
+  for (const key of Object.keys(ctx.pillarWeights) as (keyof typeof ctx.pillarWeights)[]) {
+    ctx.pillarWeights[key] = ctx.pillarWeights[key] * (1 - decayStrength) + uniform * decayStrength;
   }
 }
 
 const pillarDFTFeedback: { pillar: string; correct: number; total: number }[] = [];
 
+const MECHANISM_TO_PILLARS: Record<string, string[]> = {
+  "phonon": ["coupling", "phonon"],
+  "spin-fluctuation": ["nesting", "pairingGlue"],
+  "charge-fluctuation": ["dos", "pairingGlue"],
+  "excitonic": ["dos", "pairingGlue", "instability"],
+};
+
 export function incorporateDFTFeedbackIntoPillars(
   formula: string,
   predictedTc: number,
   actualTc: number,
-  actualStable: boolean
+  actualStable: boolean,
+  pressureGPa?: number,
+  ctx: PillarOptimizerContext = defaultCtx,
 ): void {
   let evaluation: PillarEvaluation | null = null;
   try {
-    evaluation = evaluatePillars(formula);
+    evaluation = evaluatePillars(formula, undefined, { maxPressureGPa: pressureGPa, ctx });
   } catch {
     return;
   }
@@ -1094,11 +1366,13 @@ export function incorporateDFTFeedbackIntoPillars(
   const accurate = Math.abs(predictionError) <= 20;
 
   const lr = 0.005;
+  const mechanism = evaluation.pairingGlue.dominantMechanism;
+  const mechanismAlignedPillars = new Set(MECHANISM_TO_PILLARS[mechanism] ?? []);
   const pillarEntries = Object.entries(evaluation.pillarScores) as [string, number][];
 
   for (const [pillar, score] of pillarEntries) {
-    const key = pillar as keyof typeof pillarWeights;
-    if (pillarWeights[key] === undefined) continue;
+    const key = pillar as keyof typeof ctx.pillarWeights;
+    if (ctx.pillarWeights[key] === undefined) continue;
 
     let existing = pillarDFTFeedback.find(f => f.pillar === pillar);
     if (!existing) {
@@ -1107,24 +1381,35 @@ export function incorporateDFTFeedbackIntoPillars(
     }
     existing.total++;
 
+    const isAligned = mechanismAlignedPillars.has(pillar);
+    const isStructural = pillar === "structure" || pillar === "instability" || pillar === "hydrogenCage";
+
     if (overestimated && score >= 0.6) {
-      pillarWeights[key] = Math.max(0.04, pillarWeights[key] - lr);
+      ctx.pillarWeights[key] = Math.max(0.04, ctx.pillarWeights[key] - lr);
     } else if (accurate && score >= 0.6) {
-      pillarWeights[key] = Math.min(0.5, pillarWeights[key] + lr * 0.5);
-      existing.correct++;
+      if (isAligned) {
+        ctx.pillarWeights[key] = Math.min(0.5, ctx.pillarWeights[key] + lr * 0.5);
+        existing.correct++;
+      } else if (isStructural) {
+        ctx.pillarWeights[key] = Math.min(0.5, ctx.pillarWeights[key] + lr * 0.2);
+        existing.correct++;
+      }
     } else if (underestimated && score < 0.4) {
-      pillarWeights[key] = Math.min(0.5, pillarWeights[key] + lr * 0.3);
-      existing.correct++;
+      if (isAligned) {
+        ctx.pillarWeights[key] = Math.min(0.5, ctx.pillarWeights[key] + lr * 0.3);
+        existing.correct++;
+      }
     }
 
     if (!actualStable && score >= 0.5) {
-      pillarWeights[key] = Math.max(0.04, pillarWeights[key] - lr * 0.3);
+      const instabilityPenaltyMult = (pillar === "instability") ? 1.0 : 0.3;
+      ctx.pillarWeights[key] = Math.max(0.04, ctx.pillarWeights[key] - lr * instabilityPenaltyMult);
     }
   }
 
-  const totalWeight = Object.values(pillarWeights).reduce((s, w) => s + w, 0);
-  for (const key of Object.keys(pillarWeights) as (keyof typeof pillarWeights)[]) {
-    pillarWeights[key] /= totalWeight;
+  const totalWeight = Object.values(ctx.pillarWeights).reduce((s, w) => s + w, 0);
+  for (const key of Object.keys(ctx.pillarWeights) as (keyof typeof ctx.pillarWeights)[]) {
+    ctx.pillarWeights[key] /= totalWeight;
   }
 }
 
@@ -1135,40 +1420,52 @@ export function getPillarDFTFeedbackStats(): { pillar: string; accuracy: number;
     .sort((a, b) => b.total - a.total);
 }
 
+let mutationGeneration = 0;
+
 export function runPillarCycle(
   existingFormulas: string[],
   targetTc: number = 200,
+  pressureGPa?: number,
 ): { formulas: string[]; evaluations: PillarEvaluation[]; bestFormula: string; bestFitness: number; bestTc: number } {
+  mutationGeneration++;
+  const t = Math.max(0, Math.min(1, (targetTc - 20) / 280));
   const targets: SCPillarTargets = {
     ...DEFAULT_PILLAR_TARGETS,
-    minLambda: targetTc > 150 ? 2.0 : targetTc > 50 ? 1.5 : 1.0,
-    minOmegaLogK: targetTc > 150 ? 800 : targetTc > 50 ? 600 : 400,
-    minDOS: targetTc > 150 ? 3.0 : 2.0,
-    minPairingGlue: targetTc > 150 ? 0.6 : targetTc > 50 ? 0.45 : 0.3,
-    minInstability: targetTc > 150 ? 0.5 : targetTc > 50 ? 0.35 : 0.25,
-    minHydrogenCage: targetTc > 150 ? 0.6 : 0.4,
+    minLambda: 1.0 + 1.0 * t,
+    minOmegaLogK: 400 + 400 * t,
+    minDOS: 2.0 + 1.0 * t,
+    minPairingGlue: 0.3 + 0.3 * t,
+    minInstability: 0.25 + 0.25 * t,
+    minHydrogenCage: 0.4 + 0.2 * t,
   };
 
-  const guided = runPillarGuidedGeneration(targets, 6);
+  const guided = runPillarGuidedGeneration(targets, 6, pressureGPa);
 
   const reEvalExisting: PillarEvaluation[] = [];
   for (const f of existingFormulas.slice(0, 10)) {
     try {
-      reEvalExisting.push(evaluatePillars(f, targets));
+      reEvalExisting.push(evaluatePillars(f, targets, { maxPressureGPa: pressureGPa }));
     } catch {}
   }
 
   for (const ex of reEvalExisting) {
     if (ex.compositeFitness > 0.6) {
       try {
-        const mutated = mutateTowardWeakPillar(ex, targets);
+        const mutated = mutateTowardWeakPillar(ex, targets, pressureGPa);
         if (mutated) {
-          const mutEval = evaluatePillars(mutated, targets);
+          const mutEval = evaluatePillars(mutated, targets, { maxPressureGPa: pressureGPa });
           if (mutEval.compositeFitness > ex.compositeFitness) {
+            const fitnessImprovement = mutEval.compositeFitness - ex.compositeFitness;
             guided.push({
               formula: mutated,
               evaluation: mutEval,
-              designRationale: `Mutation of ${ex.formula}: improved ${ex.weakestPillar}`,
+              designRationale: `Mutation of ${ex.formula}: improved ${ex.weakestPillar} (+${(fitnessImprovement * 100).toFixed(1)}%)`,
+              lineage: {
+                parentFormula: ex.formula,
+                targetedPillar: ex.weakestPillar,
+                fitnessImprovement,
+                generation: mutationGeneration,
+              },
             });
           }
         }
@@ -1204,139 +1501,258 @@ export function runPillarCycle(
   };
 }
 
-function mutateTowardWeakPillar(
-  evaluation: PillarEvaluation,
-  targets: SCPillarTargets,
-): string | null {
-  const counts = parseCounts(evaluation.formula);
-  const elements = Object.keys(counts);
-  const mutated = { ...counts };
+let mutationSeed = 0;
+function pickFrom<T>(arr: T[]): T {
+  mutationSeed++;
+  return arr[mutationSeed % arr.length];
+}
 
+const RARE_EARTH_CAGE = ["La", "Y", "Ce", "Sc", "Ca", "Sr", "Ba", "Th"];
+const MAGNETIC_3D = ["Fe", "Co", "Mn", "Ni", "Cr"];
+const VAN_HOVE_TM = ["V", "Nb", "Ti", "Mo", "Ta"];
+
+const MUTATION_OXIDATION: Record<string, number> = {
+  H: 1, Li: 1, Na: 1, K: 1,
+  Be: 2, Mg: 2, Ca: 2, Sr: 2, Ba: 2,
+  Sc: 3, Y: 3, La: 3, Ce: 3, Th: 4,
+  Ti: 4, Zr: 4, Hf: 4,
+  V: 5, Nb: 5, Ta: 5,
+  Cr: 3, Mo: 6, W: 6,
+  Mn: 2, Fe: 3, Co: 2, Ni: 2, Cu: 2,
+  B: 3, Al: 3, Ga: 3, In: 3,
+  C: -4, Si: -4, Ge: -4, Sn: 4,
+  N: -3, P: -3, As: -3, Sb: -3,
+  O: -2, S: -2, Se: -2, Te: -2,
+  F: -1, Cl: -1, Br: -1,
+};
+
+const ISOVALENT_GROUPS: string[][] = [
+  ["La", "Y", "Ce", "Nd", "Pr", "Gd", "Sc"],
+  ["Ca", "Sr", "Ba"],
+  ["Ti", "Zr", "Hf"],
+  ["V", "Nb", "Ta"],
+  ["Cr", "Mo", "W"],
+  ["Fe", "Co", "Ni"],
+  ["Cu", "Ag"],
+  ["As", "P", "Sb"],
+  ["S", "Se", "Te"],
+  ["B", "Al", "Ga"],
+  ["Si", "Ge", "Sn"],
+];
+
+function quickChargeCheck(counts: Record<string, number>): boolean {
+  let totalCharge = 0;
+  let unknownCount = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const ox = MUTATION_OXIDATION[el];
+    if (ox === undefined) {
+      unknownCount++;
+      continue;
+    }
+    totalCharge += ox * n;
+  }
+  if (unknownCount > 0) return true;
+  return Math.abs(totalCharge) <= 4;
+}
+
+function findIsovalentSubstitute(el: string, exclude: string[]): string | null {
+  for (const group of ISOVALENT_GROUPS) {
+    if (group.includes(el)) {
+      const candidates = group.filter(e => e !== el && !exclude.includes(e));
+      if (candidates.length > 0) return pickFrom(candidates);
+    }
+  }
+  return null;
+}
+
+function applyMutation(
+  evaluation: PillarEvaluation,
+  mutated: Record<string, number>,
+  elements: string[],
+): boolean {
   switch (evaluation.weakestPillar) {
     case "coupling": {
       const hasLight = elements.some(e => LIGHT_ATOMS.includes(e));
       if (!hasLight) {
-        const lightEl = ["H", "B", "C"][Math.floor(Math.random() * 3)];
-        mutated[lightEl] = 2 + Math.floor(Math.random() * 4);
+        const lightEl = pickFrom(["H", "B", "C", "N"]);
+        mutated[lightEl] = pickFrom([2, 3, 4]);
       } else {
-        for (const el of elements) {
-          if (LIGHT_ATOMS.includes(el)) {
-            mutated[el] = Math.min(10, mutated[el] + 2);
-            break;
-          }
-        }
+        const lightEls = elements.filter(e => LIGHT_ATOMS.includes(e));
+        const el = pickFrom(lightEls);
+        mutated[el] = Math.min(10, mutated[el] + pickFrom([1, 2, 3]));
       }
-      break;
+      return true;
     }
     case "phonon": {
       if (!elements.includes("H")) {
-        mutated["H"] = 4 + Math.floor(Math.random() * 4);
+        mutated["H"] = pickFrom([4, 6, 8]);
       } else {
-        mutated["H"] = Math.min(12, (mutated["H"] || 0) + 2);
+        mutated["H"] = Math.min(12, (mutated["H"] || 0) + pickFrom([1, 2, 3]));
       }
-      break;
+      return true;
     }
     case "dos": {
       const hasTM = elements.some(e => HIGH_COUPLING_TM.includes(e));
       if (!hasTM) {
-        const tm = HIGH_COUPLING_TM[Math.floor(Math.random() * HIGH_COUPLING_TM.length)];
-        mutated[tm] = 1 + Math.floor(Math.random() * 2);
+        const tm = pickFrom(HIGH_COUPLING_TM);
+        mutated[tm] = pickFrom([1, 2]);
       } else {
-        for (const el of elements) {
-          if (HIGH_COUPLING_TM.includes(el)) {
-            mutated[el] = Math.min(4, mutated[el] + 1);
-            break;
-          }
-        }
+        const tmEls = elements.filter(e => HIGH_COUPLING_TM.includes(e));
+        const el = pickFrom(tmEls);
+        mutated[el] = Math.min(4, mutated[el] + 1);
       }
-      break;
+      return true;
     }
     case "nesting": {
       const hasPnictogen = elements.some(e => PNICTOGEN_ELEMENTS.includes(e));
       if (!hasPnictogen && !elements.includes("O")) {
-        const pn = PNICTOGEN_ELEMENTS[Math.floor(Math.random() * PNICTOGEN_ELEMENTS.length)];
-        mutated[pn] = 2;
+        mutated[pickFrom(PNICTOGEN_ELEMENTS)] = 2;
       }
       const hasLayerFormer = elements.some(e => LAYER_FORMERS.includes(e));
       if (!hasLayerFormer) {
-        const lf = LAYER_FORMERS[Math.floor(Math.random() * LAYER_FORMERS.length)];
-        mutated[lf] = 2;
+        mutated[pickFrom(LAYER_FORMERS)] = pickFrom([1, 2]);
       }
-      break;
+      return true;
     }
     case "structure": {
       const hasCageFormer = elements.some(e => CAGE_FORMERS.includes(e));
       if (!hasCageFormer) {
-        const cf = CAGE_FORMERS[Math.floor(Math.random() * CAGE_FORMERS.length)];
-        mutated[cf] = 1;
+        const existingMetal = elements.find(e => isTransitionMetal(e) || isRareEarth(e));
+        if (existingMetal) {
+          const sub = findIsovalentSubstitute(existingMetal, elements);
+          if (sub && CAGE_FORMERS.includes(sub)) {
+            mutated[sub] = mutated[existingMetal];
+            delete mutated[existingMetal];
+          } else {
+            mutated[pickFrom(CAGE_FORMERS)] = 1;
+          }
+        } else {
+          mutated[pickFrom(CAGE_FORMERS)] = 1;
+        }
       }
       if (!elements.includes("H") && !elements.includes("B")) {
-        mutated["H"] = 6;
+        const existingLight = elements.find(e => LIGHT_ATOMS.includes(e));
+        if (existingLight) {
+          const sub = findIsovalentSubstitute(existingLight, elements);
+          if (sub) {
+            mutated[sub] = mutated[existingLight];
+            delete mutated[existingLight];
+          } else {
+            mutated[pickFrom(["H", "B"])] = pickFrom([4, 6]);
+          }
+        } else {
+          mutated[pickFrom(["H", "B"])] = pickFrom([4, 6]);
+        }
       }
-      break;
+      return true;
     }
     case "pairingGlue": {
       if (evaluation.pairingGlue.spinFluctuationContribution < 0.3) {
-        const hasMagnetic = elements.some(e => ["Fe", "Co", "Mn"].includes(e));
+        const hasMagnetic = elements.some(e => MAGNETIC_3D.includes(e));
         if (!hasMagnetic) {
-          mutated["Fe"] = 2;
+          mutated[pickFrom(MAGNETIC_3D)] = 2;
           if (!elements.some(e => PNICTOGEN_ELEMENTS.includes(e))) {
-            mutated["As"] = 2;
+            mutated[pickFrom(["As", "P"])] = 2;
           }
         }
       } else {
         const hasLight = elements.some(e => LIGHT_ATOMS.includes(e));
         if (!hasLight) {
-          mutated["H"] = 4 + Math.floor(Math.random() * 4);
+          mutated[pickFrom(["H", "B"])] = pickFrom([4, 6]);
         }
       }
-      break;
+      return true;
     }
     case "instability": {
       if (evaluation.instability.mottProximity < 0.3) {
         if (!elements.includes("Cu") && !elements.includes("O")) {
-          mutated["Cu"] = 1;
-          mutated["O"] = 4;
+          mutated["Cu"] = pickFrom([1, 2]);
+          mutated["O"] = pickFrom([3, 4]);
           const hasRE = elements.some(e => isRareEarth(e));
-          if (!hasRE) mutated["La"] = 1;
+          if (!hasRE) mutated[pickFrom(RARE_EARTH_CAGE)] = 1;
         }
       }
       if (evaluation.instability.vanHoveProximity < 0.3) {
         const hasTM = elements.some(e => isTransitionMetal(e));
         if (!hasTM) {
-          mutated["V"] = 2;
+          mutated[pickFrom(VAN_HOVE_TM)] = pickFrom([1, 2]);
         }
       }
-      break;
+      return true;
     }
     case "hydrogenCage": {
+      if (!evaluation.hydrogenCage.isHydride) return false;
       if (!elements.includes("H")) {
-        mutated["H"] = 8;
+        mutated["H"] = pickFrom([6, 8, 10]);
       } else {
-        mutated["H"] = Math.min(12, (mutated["H"] || 0) + 3);
+        mutated["H"] = Math.min(12, (mutated["H"] || 0) + pickFrom([2, 3]));
       }
       const hasCage = elements.some(e => SODALITE_CAGE_ELEMENTS.includes(e));
       if (!hasCage) {
-        mutated["La"] = 1;
+        mutated[pickFrom(RARE_EARTH_CAGE)] = 1;
       }
-      break;
+      return true;
     }
+    default:
+      return false;
   }
-
-  const result = countsToFormula(mutated);
-  if (result === evaluation.formula) return null;
-
-  const constraint = checkPhysicsConstraints(result);
-  if (!constraint.isValid && !constraint.repairedFormula) return null;
-
-  return constraint.isValid ? result : constraint.repairedFormula;
 }
 
-export function getPillarOptimizerStats(): PillarOptimizerStats {
+function mutateTowardWeakPillar(
+  evaluation: PillarEvaluation,
+  targets: SCPillarTargets,
+  pressureGPa?: number,
+): string | null {
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const counts = parseCounts(evaluation.formula);
+    const elements = Object.keys(counts);
+    const mutated = { ...counts };
+
+    const applied = applyMutation(evaluation, mutated, elements);
+    if (!applied) return null;
+
+    if (!quickChargeCheck(mutated)) continue;
+
+    const result = countsToFormula(mutated);
+    if (result === evaluation.formula) continue;
+
+    const constraint = checkPhysicsConstraints(result, { maxPressureGPa: pressureGPa });
+    if (!constraint.isValid && !constraint.repairedFormula) continue;
+
+    return constraint.isValid ? result : constraint.repairedFormula;
+  }
+  return null;
+}
+
+export function getPillarOptimizerStats(ctx: PillarOptimizerContext = defaultCtx): PillarOptimizerStats {
   const affinityScores: Record<string, number> = {};
-  for (const [el, data] of Object.entries(elementAffinity)) {
+  const surpriseFactors: Record<string, number> = {};
+
+  const allAverages: number[] = [];
+  for (const [, data] of Object.entries(ctx.elementAffinity)) {
     if (data.count >= 3) {
-      affinityScores[el] = Math.round((data.totalFitness / data.count) * 1000) / 1000;
+      allAverages.push(data.totalFitness / data.count);
+    }
+  }
+  const globalMean = allAverages.length > 0
+    ? allAverages.reduce((s, v) => s + v, 0) / allAverages.length
+    : 0;
+
+  for (const [el, data] of Object.entries(ctx.elementAffinity)) {
+    if (data.count >= 3) {
+      const currentAvg = data.totalFitness / data.count;
+      affinityScores[el] = Math.round(currentAvg * 1000) / 1000;
+
+      const history = ctx.elementAffinityHistory[el] || [];
+      if (history.length >= 5) {
+        const midpoint = Math.floor(history.length / 2);
+        const recentSlice = history.slice(midpoint);
+        const recentMean = recentSlice.reduce((s, v) => s + v, 0) / recentSlice.length;
+        const historicalMean = history.slice(0, midpoint).reduce((s, v) => s + v, 0) / midpoint;
+        const baseline = globalMean > 0 ? globalMean : 1;
+        surpriseFactors[el] = Math.round(((recentMean - historicalMean) / baseline) * 1000) / 1000;
+      }
     }
   }
 
@@ -1346,20 +1762,37 @@ export function getPillarOptimizerStats(): PillarOptimizerStats {
   const topAffinity: Record<string, number> = {};
   for (const [el, score] of sorted) topAffinity[el] = score;
 
+  const topSurprise: Record<string, number> = {};
+  const sortedSurprise = Object.entries(surpriseFactors)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(0, 20);
+  for (const [el, sf] of sortedSurprise) topSurprise[el] = sf;
+
   const satisfactionRates: Record<string, number> = {};
-  for (const [key, count] of Object.entries(pillarSatisfied)) {
-    satisfactionRates[key] = totalEvaluated > 0 ? Math.round((count / totalEvaluated) * 1000) / 1000 : 0;
+  for (const [key, count] of Object.entries(ctx.pillarSatisfied)) {
+    satisfactionRates[key] = ctx.totalEvaluated > 0 ? Math.round((count / ctx.totalEvaluated) * 1000) / 1000 : 0;
+  }
+
+  const familySatisfactionRates: Record<string, Record<string, number>> = {};
+  for (const [family, pillarCounts] of Object.entries(ctx.familySatisfied)) {
+    const familyTotal = ctx.familyCounts[family] || 1;
+    familySatisfactionRates[family] = {};
+    for (const [pillar, count] of Object.entries(pillarCounts)) {
+      familySatisfactionRates[family][pillar] = Math.round((count / familyTotal) * 1000) / 1000;
+    }
   }
 
   return {
-    totalEvaluated,
-    totalGenerated,
-    avgCompositeFitness: totalEvaluated > 0 ? Math.round((fitnessSum / totalEvaluated) * 1000) / 1000 : 0,
-    bestFitness: Math.round(bestFitness * 1000) / 1000,
-    bestFormula,
+    totalEvaluated: ctx.totalEvaluated,
+    totalGenerated: ctx.totalGenerated,
+    avgCompositeFitness: ctx.totalEvaluated > 0 ? Math.round((ctx.fitnessSum / ctx.totalEvaluated) * 1000) / 1000 : 0,
+    bestFitness: Math.round(ctx.bestFitness * 1000) / 1000,
+    bestFormula: ctx.bestFormula,
     pillarSatisfactionRates: satisfactionRates,
+    familySatisfactionRates,
     elementAffinityScores: topAffinity,
-    topCandidates: topCandidates.slice(0, 10),
-    pillarWeights: { ...pillarWeights },
+    elementSurpriseFactors: topSurprise,
+    topCandidates: ctx.topCandidates.slice(0, 10),
+    pillarWeights: { ...ctx.pillarWeights },
   };
 }

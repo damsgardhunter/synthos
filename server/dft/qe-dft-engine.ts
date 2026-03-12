@@ -1,6 +1,10 @@
-import { execSync } from "child_process";
+import { execSync, execFile } from "child_process";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 import { getElementData } from "../learning/elemental-data";
 import { fillPrototype, computeBondValenceSum, checkIonicRadiusCompatibility } from "../learning/crystal-prototypes";
 import { computeFiniteDisplacementPhonons } from "./phonon-calculator";
@@ -8,6 +12,7 @@ import type { FiniteDisplacementPhononResult } from "./phonon-calculator";
 import { analyzeDistortion, recordDistortionAnalysis, type DistortionAnalysis } from "../crystal/distortion-detector";
 import { relaxStructureAtPressure } from "../learning/pressure-engine";
 import { normalizeFormula } from "../learning/utils";
+import { getGroundTruthDataset } from "../learning/ground-truth-store";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
@@ -102,20 +107,33 @@ const VALID_ELEMENTS = new Set([
 ]);
 
 function parseFormula(formula: string): Record<string, number> {
+  if (/-\d/.test(formula)) {
+    console.warn(`[DFT] parseFormula: rejected formula with negative stoichiometry: "${formula}"`);
+    return {};
+  }
+
   const cleaned = formula
     .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
-    .replace(/\s+/g, "")
-    .replace(/-/g, "");
+    .replace(/\s+/g, "");
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
+  let hasInvalidElement = false;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
-    if (!VALID_ELEMENTS.has(el)) continue;
+    if (!VALID_ELEMENTS.has(el)) {
+      hasInvalidElement = true;
+      console.warn(`[DFT] parseFormula: skipping non-physical element symbol "${el}" in "${formula}"`);
+      continue;
+    }
     const num = match[2] ? parseFloat(match[2]) : 1;
-    if (num > 0) counts[el] = (counts[el] || 0) + num;
+    if (!isFinite(num) || num <= 0) continue;
+    counts[el] = (counts[el] || 0) + num;
   }
-  return counts;
+  if (hasInvalidElement && Object.keys(counts).length === 0) {
+    console.warn(`[DFT] parseFormula: formula "${formula}" produced no valid elements`);
+  }
+  return normalizeCountsToIntegers(counts);
 }
 
 const BULK_MODULI_GPA: Record<string, number> = {
@@ -134,6 +152,26 @@ const BULK_MODULI_GPA: Record<string, number> = {
 
 const B_PRIME_DEFAULT = 4.0;
 
+function getGroupBulkModulusFallback(symbol: string): number {
+  const data = getElementData(symbol);
+  if (!data) return 50;
+  const z = data.atomicNumber;
+
+  if ([1].includes(z)) return 1.0;
+  if ([2, 10, 18, 36, 54, 86].includes(z)) return 1.0;
+  if ([3, 11, 19, 37, 55, 87].includes(z)) return 5.0;
+  if ([4, 12, 20, 38, 56, 88].includes(z)) return 20;
+  if ([9, 17, 35, 53, 85].includes(z)) return 3.0;
+  if ([7, 8, 15, 16, 33, 34, 51, 52].includes(z)) return 15;
+  if (z >= 57 && z <= 71) return 35;
+  if (z >= 89 && z <= 96) return 70;
+  if ((z >= 21 && z <= 30) || (z >= 39 && z <= 48) || (z >= 72 && z <= 80)) return 150;
+  if ([5, 6, 14, 32].includes(z)) return 100;
+  if ([13, 31, 49, 50, 81, 82, 83, 84].includes(z)) return 45;
+
+  return 50;
+}
+
 export function getCompressedRadius(symbol: string, pressureGPa: number): number {
   const r0 = COVALENT_RADII[symbol] ?? 1.4;
   if (pressureGPa <= 0) return r0;
@@ -141,11 +179,15 @@ export function getCompressedRadius(symbol: string, pressureGPa: number): number
   if (symbol === "H") {
     const pNorm = pressureGPa / 500;
     const compressionFactor = 1.0 / (1.0 + 1.8 * pNorm + 0.6 * pNorm * pNorm);
-    const rMin = 0.18;
-    return Math.max(rMin, r0 * compressionFactor);
+    const rCompressed = r0 * compressionFactor;
+    const rMinUltraHighP = 0.24;
+    if (pressureGPa > 300) {
+      return Math.max(rMinUltraHighP, rCompressed);
+    }
+    return rCompressed;
   }
 
-  const B0 = BULK_MODULI_GPA[symbol] ?? 100;
+  const B0 = BULK_MODULI_GPA[symbol] ?? getGroupBulkModulusFallback(symbol);
   const Bp = B_PRIME_DEFAULT;
   const volumeRatio = Math.pow(1 + Bp * pressureGPa / B0, -1 / Bp);
   const radiusRatio = Math.cbrt(Math.max(0.3, volumeRatio));
@@ -157,7 +199,7 @@ function getAvgRadius(el: string): number {
   return COVALENT_RADII[el] || (getElementData(el)?.atomicRadius ?? 150) / 100;
 }
 
-const PROTOTYPE_PACKING: Record<string, number> = {
+const PROTOTYPE_PACKING_AMBIENT: Record<string, number> = {
   "A15": 0.68, "NaCl": 0.74, "AlB2": 0.74, "Perovskite": 0.74,
   "ThCr2Si2": 0.68, "Heusler": 0.74, "BCC": 0.68, "FCC": 0.74,
   "Layered": 0.60, "Kagome": 0.60, "HexBoride": 0.74, "MX2": 0.60,
@@ -171,6 +213,42 @@ const PROTOTYPE_PACKING: Record<string, number> = {
   "T-prime": 0.60, "Ruddlesden-Popper": 0.65, "Double-perovskite": 0.74,
   "Garnet": 0.68,
 };
+
+function getEffectivePackingFactor(protoName: string | undefined, pressureGPa: number = 0): number {
+  const ambient = protoName ? (PROTOTYPE_PACKING_AMBIENT[protoName] ?? 0.68) : 0.68;
+  if (pressureGPa <= 0) return ambient;
+  const pressureIncrease = (0.90 - ambient) * (1 - Math.exp(-pressureGPa / 200));
+  return Math.min(0.92, ambient + pressureIncrease);
+}
+
+const PROTOTYPE_PACKING = PROTOTYPE_PACKING_AMBIENT;
+
+function estimatePressureCOverA(
+  ambientCOverA: number,
+  latticeType: "cubic" | "hexagonal" | "tetragonal",
+  pressureGPa: number,
+): number {
+  if (latticeType === "cubic" || pressureGPa <= 0) return ambientCOverA;
+
+  if (latticeType === "hexagonal") {
+    const idealHcp = 1.633;
+    const drift = (ambientCOverA - idealHcp) * Math.exp(-pressureGPa / 150);
+    return idealHcp + drift;
+  }
+
+  if (latticeType === "tetragonal") {
+    if (ambientCOverA > 1.0) {
+      const excess = ambientCOverA - 1.0;
+      const compressed = excess * Math.exp(-pressureGPa / 200);
+      return 1.0 + compressed;
+    }
+    const deficit = 1.0 - ambientCOverA;
+    const compressed = deficit * Math.exp(-pressureGPa / 200);
+    return 1.0 - compressed;
+  }
+
+  return ambientCOverA;
+}
 
 const ATOMIC_VOLUMES: Record<string, number> = {
   H: 5.0, He: 6.0, Li: 20.0, Be: 8.0, B: 8.0, C: 9.0, N: 10.0,
@@ -212,8 +290,15 @@ function validateVolumeRatio(generatedVolume: number, expectedVolume: number): {
   return { valid: ratio >= 0.5 && ratio <= 2.0, ratio };
 }
 
-function estimateLatticeParam(elements: string[], counts: Record<string, number>, protoName?: string): number {
-  const packingFactor = protoName ? (PROTOTYPE_PACKING[protoName] ?? 0.68) : 0.68;
+function estimateLatticeParam(
+  elements: string[],
+  counts: Record<string, number>,
+  protoName?: string,
+  latticeType?: "cubic" | "hexagonal" | "tetragonal",
+  cOverA?: number,
+  pressureGPa: number = 0,
+): number {
+  const packingFactor = getEffectivePackingFactor(protoName, pressureGPa);
   let expectedVolume = computeExpectedVolume(counts, 1.0 / packingFactor);
 
   const totalAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
@@ -224,12 +309,38 @@ function estimateLatticeParam(elements: string[], counts: Record<string, number>
     expectedVolume = minTotalVolume;
   }
 
+  const effectiveCOverA = cOverA ?? 1.0;
+
+  if (latticeType === "hexagonal" && effectiveCOverA > 0) {
+    const SQRT3_OVER_2 = Math.sqrt(3) / 2;
+    const a = Math.pow(expectedVolume / (SQRT3_OVER_2 * effectiveCOverA), 1 / 3);
+    return Math.max(a, 2.5);
+  }
+
+  if (latticeType === "tetragonal" && effectiveCOverA > 0) {
+    const a = Math.cbrt(expectedVolume / effectiveCOverA);
+    return Math.max(a, 2.5);
+  }
+
   const latticeA = Math.cbrt(expectedVolume);
   return Math.max(latticeA, 3.0);
 }
 
+type PrototypeName =
+  | "A15" | "NaCl" | "AlB2" | "Perovskite" | "ThCr2Si2" | "Heusler"
+  | "BCC" | "FCC" | "Layered" | "Kagome" | "HexBoride" | "MX2"
+  | "Anti-perovskite" | "CsCl" | "Cu2Mg-Laves" | "Fluorite" | "Cr3Si"
+  | "Ni3Sn" | "Fe3C" | "Spinel" | "Clathrate-H32" | "Skutterudite"
+  | "BiS2-layered" | "Kagome-variant" | "Chevrel" | "Pyrite" | "Wurtzite"
+  | "Antifluorite" | "Laves-C14" | "Laves-C15" | "HfFe6Ge6" | "CeCu2Si2"
+  | "PuCoGa5-115" | "Infinite-layer" | "T-prime" | "Ruddlesden-Popper"
+  | "Double-perovskite" | "Garnet";
+
+const PROTOTYPE_MATCH_TOLERANCE = 0.5;
+const PROTOTYPE_FUZZY_TOLERANCE = 0.8;
+
 interface PrototypeStructure {
-  name: string;
+  name: PrototypeName;
   fractionalPositions: { site: string; x: number; y: number; z: number }[];
   latticeType: "cubic" | "hexagonal" | "tetragonal";
   aRatio: number;
@@ -936,64 +1047,331 @@ function getProtoSiteCounts(proto: PrototypeStructure): Record<string, number> {
 
 const RARE_EARTHS = new Set(["La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Y", "Sc"]);
 const TRANSITION_METALS = new Set(["Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"]);
-const ANIONS = new Set(["O", "S", "Se", "Te", "F", "Cl", "Br", "I", "N", "P", "As"]);
+const ANIONS = new Set(["O", "S", "Se", "Te", "F", "Cl", "Br", "I", "N"]);
+const PNICTIDES = new Set(["P", "As", "Sb"]);
 const ALKALINE_EARTH = new Set(["Ca", "Sr", "Ba", "Mg"]);
 const ALKALI = new Set(["Li", "Na", "K", "Rb", "Cs"]);
 
-function classifyElement(el: string): "H" | "rare-earth" | "TM" | "anion" | "alkaline" | "alkali" | "metalloid" | "other" {
+function classifyElement(el: string): "H" | "rare-earth" | "TM" | "anion" | "pnictide" | "alkaline" | "alkali" | "metalloid" | "other" {
   if (el === "H") return "H";
   if (RARE_EARTHS.has(el)) return "rare-earth";
   if (TRANSITION_METALS.has(el)) return "TM";
+  if (PNICTIDES.has(el)) return "pnictide";
   if (ANIONS.has(el)) return "anion";
   if (ALKALINE_EARTH.has(el)) return "alkaline";
   if (ALKALI.has(el)) return "alkali";
-  if (["B", "Si", "Ge", "Sn", "Sb", "Bi", "Al", "Ga", "In", "Tl", "Pb"].includes(el)) return "metalloid";
+  if (["B", "Si", "Ge", "Sn", "Bi", "Al", "Ga", "In", "Tl", "Pb"].includes(el)) return "metalloid";
   return "other";
 }
 
-function selectBestPrototypeByChemistry(counts: Record<string, number>, elements: string[]): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
-  const roles = elements.map(el => classifyElement(el));
-  const nElements = elements.length;
+interface ChemicalProfile {
+  elements: string[];
+  counts: Record<string, number>;
+  elementsByCount: string[];
+  roles: ReturnType<typeof classifyElement>[];
+  reducedRatios: number[];
+  sortedReducedRatios: number[];
+  gcdVal: number;
+  nElements: number;
+  hasRE: boolean;
+  hasTM: boolean;
+  hasAnion: boolean;
+  hasPnictide: boolean;
+  hasAlkaline: boolean;
+  hasAlkali: boolean;
+  hasMetalloid: boolean;
+  hasAnionLike: boolean;
+  hasH: boolean;
+}
+
+function buildChemicalProfile(counts: Record<string, number>): ChemicalProfile {
+  const elements = Object.keys(counts).filter(el => counts[el] > 0);
   const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+  const roles = elements.map(el => classifyElement(el));
+
+  const ratios = elementsByCount.map(el => Math.round(counts[el]));
+  const gcdVal = ratios.length > 0 ? ratios.reduce((a, b) => gcd(a, b)) : 1;
+  const reducedRatios = ratios.map(r => r / Math.max(1, gcdVal));
+  const sortedReducedRatios = [...reducedRatios].sort((a, b) => b - a);
 
   const hasRE = roles.includes("rare-earth");
   const hasTM = roles.includes("TM");
   const hasAnion = roles.includes("anion");
+  const hasPnictide = roles.includes("pnictide");
   const hasAlkaline = roles.includes("alkaline");
   const hasAlkali = roles.includes("alkali");
   const hasMetalloid = roles.includes("metalloid");
+  const hasH = roles.includes("H");
 
-  let targetProtoName: string | null = null;
+  return {
+    elements,
+    counts,
+    elementsByCount,
+    roles,
+    reducedRatios,
+    sortedReducedRatios,
+    gcdVal,
+    nElements: elements.length,
+    hasRE,
+    hasTM,
+    hasAnion,
+    hasPnictide,
+    hasAlkaline,
+    hasAlkali,
+    hasMetalloid,
+    hasAnionLike: hasAnion || hasPnictide,
+    hasH,
+  };
+}
 
-  if (nElements === 3 && (hasRE || hasAlkaline || hasAlkali) && hasTM && hasAnion) {
+interface LearnedThresholds {
+  perovskiteAnionRatioMin: number;
+  ruddlesdenPopperAnionRatioMin: number;
+  pyriteAnionTMRatioMin: number;
+  a15TMMetalloidRatioMin: number;
+  updatedAt: number;
+}
+
+const DEFAULT_THRESHOLDS: LearnedThresholds = {
+  perovskiteAnionRatioMin: 1.2,
+  ruddlesdenPopperAnionRatioMin: 2.5,
+  pyriteAnionTMRatioMin: 1.8,
+  a15TMMetalloidRatioMin: 2.5,
+  updatedAt: 0,
+};
+
+let learnedThresholds: LearnedThresholds = { ...DEFAULT_THRESHOLDS };
+let lastThresholdRefresh = 0;
+const THRESHOLD_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+function refreshLearnedThresholds(): LearnedThresholds {
+  const now = Date.now();
+  if (now - lastThresholdRefresh < THRESHOLD_REFRESH_INTERVAL_MS) {
+    return learnedThresholds;
+  }
+  lastThresholdRefresh = now;
+
+  try {
+    const dataset = getGroundTruthDataset();
+    if (dataset.length < 20) return learnedThresholds;
+
+    const stableHighConf = dataset.filter(
+      dp => dp.phonon_stable && (dp.confidence === "high" || dp.confidence === "medium") && dp.Tc > 0
+    );
+    if (stableHighConf.length < 10) return learnedThresholds;
+
+    const perovskitePoints: number[] = [];
+    const rpPoints: number[] = [];
+    const pyritePoints: number[] = [];
+    const a15Points: number[] = [];
+
+    for (const dp of stableHighConf) {
+      const counts = parseFormula(dp.formula);
+      const elements = Object.keys(counts).filter(el => counts[el] > 0);
+      if (elements.length < 2) continue;
+
+      const roles = elements.map(el => classifyElement(el));
+      const hasTM = roles.some(r => r === "TM");
+      const hasAnion = roles.some(r => r === "anion");
+      const hasMetalloid = roles.some(r => r === "metalloid");
+      const hasSpacer = roles.some(r => r === "rare-earth" || r === "alkaline" || r === "alkali");
+
+      if (elements.length === 3 && hasSpacer && hasTM && hasAnion) {
+        const anionEl = elements.find(e => ANIONS.has(e));
+        if (anionEl) {
+          const anionCount = counts[anionEl] || 0;
+          const totalNonAnion = Object.values(counts).reduce((s, n) => s + n, 0) - anionCount;
+          const ratio = anionCount / Math.max(1, totalNonAnion);
+
+          const struct = (dp.structure || "").toLowerCase();
+          if (struct.includes("ruddlesden") || struct.includes("rp") || struct.includes("214")) {
+            rpPoints.push(ratio);
+          } else if (struct.includes("perovskite") || struct.includes("113")) {
+            perovskitePoints.push(ratio);
+          }
+        }
+      }
+
+      if (elements.length === 2 && hasTM && hasAnion) {
+        const tmEl = elements.find(e => TRANSITION_METALS.has(e));
+        const anEl = elements.find(e => ANIONS.has(e));
+        if (tmEl && anEl) {
+          const ratio = (counts[anEl] || 0) / Math.max(1, counts[tmEl] || 1);
+          const struct = (dp.structure || "").toLowerCase();
+          if (struct.includes("pyrite")) {
+            pyritePoints.push(ratio);
+          }
+        }
+      }
+
+      if (elements.length === 2 && hasTM && hasMetalloid) {
+        const tmEl = elements.find(e => TRANSITION_METALS.has(e));
+        const mEl = elements.find(e => classifyElement(e) === "metalloid");
+        if (tmEl && mEl) {
+          const ratio = (counts[tmEl] || 0) / Math.max(1, counts[mEl] || 1);
+          const struct = (dp.structure || "").toLowerCase();
+          if (struct.includes("a15") || struct.includes("cr3si")) {
+            a15Points.push(ratio);
+          }
+        }
+      }
+    }
+
+    const computeMinBound = (points: number[], fallback: number, minSamples: number = 3): number => {
+      if (points.length < minSamples) return fallback;
+      const sorted = [...points].sort((a, b) => a - b);
+      const p10 = sorted[Math.floor(sorted.length * 0.1)];
+      return Math.max(fallback * 0.6, Math.min(fallback * 1.4, p10));
+    };
+
+    learnedThresholds = {
+      perovskiteAnionRatioMin: computeMinBound(perovskitePoints, DEFAULT_THRESHOLDS.perovskiteAnionRatioMin),
+      ruddlesdenPopperAnionRatioMin: computeMinBound(rpPoints, DEFAULT_THRESHOLDS.ruddlesdenPopperAnionRatioMin),
+      pyriteAnionTMRatioMin: computeMinBound(pyritePoints, DEFAULT_THRESHOLDS.pyriteAnionTMRatioMin),
+      a15TMMetalloidRatioMin: computeMinBound(a15Points, DEFAULT_THRESHOLDS.a15TMMetalloidRatioMin),
+      updatedAt: now,
+    };
+
+    const changed = Object.keys(DEFAULT_THRESHOLDS).filter(
+      k => k !== "updatedAt" && (learnedThresholds as any)[k] !== (DEFAULT_THRESHOLDS as any)[k]
+    );
+    if (changed.length > 0) {
+      dftLog(`[DFT] Pattern miner: updated thresholds from ${stableHighConf.length} ground truth points: ${changed.map(k => `${k}=${(learnedThresholds as any)[k].toFixed(2)}`).join(", ")}`);
+    }
+  } catch (err: any) {
+    console.warn(`[DFT] Pattern miner: threshold refresh failed: ${err?.message?.slice(0, 80)}`);
+  }
+
+  return learnedThresholds;
+}
+
+function siteMapMatchesStoichiometry(
+  proto: PrototypeStructure,
+  siteMap: Record<string, string>,
+  counts: Record<string, number>,
+): boolean {
+  const mappedCounts: Record<string, number> = {};
+  for (const pos of proto.fractionalPositions) {
+    const el = siteMap[pos.site];
+    if (!el) return false;
+    mappedCounts[el] = (mappedCounts[el] || 0) + 1;
+  }
+
+  const inputEntries = Object.entries(counts).filter(([, n]) => n > 0);
+  const mappedEntries = Object.entries(mappedCounts);
+
+  if (inputEntries.length !== mappedEntries.length) return false;
+
+  const inputGCD = inputEntries.reduce((g, [, n]) => gcd(g, Math.round(n)), 0);
+  const mappedGCD = mappedEntries.reduce((g, [, n]) => gcd(g, n), 0);
+
+  const inputReduced: Record<string, number> = {};
+  for (const [el, n] of inputEntries) {
+    inputReduced[el] = Math.round(n) / Math.max(1, inputGCD);
+  }
+  const mappedReduced: Record<string, number> = {};
+  for (const [el, n] of mappedEntries) {
+    mappedReduced[el] = n / Math.max(1, mappedGCD);
+  }
+
+  for (const el of Object.keys(inputReduced)) {
+    if (!(el in mappedReduced)) return false;
+    if (Math.abs(mappedReduced[el] - inputReduced[el]) > 0.01) return false;
+  }
+  return true;
+}
+
+function estimateSiteNearestNeighborDistance(proto: PrototypeStructure): Record<string, number> {
+  const sitePositions: Record<string, { x: number; y: number; z: number }[]> = {};
+  for (const pos of proto.fractionalPositions) {
+    if (!sitePositions[pos.site]) sitePositions[pos.site] = [];
+    sitePositions[pos.site].push({ x: pos.x, y: pos.y, z: pos.z });
+  }
+
+  const cOverA = proto.cOverA || 1.0;
+  const aRatio = proto.aRatio || 1.0;
+  const sx = aRatio;
+  const sy = aRatio;
+  const sz = aRatio * cOverA;
+
+  const allPositions = proto.fractionalPositions.map(p => [p.x, p.y, p.z]);
+  const result: Record<string, number> = {};
+
+  for (const site of Object.keys(sitePositions)) {
+    const positions = sitePositions[site];
+    let totalMinDist = 0;
+    for (const pos of positions) {
+      let minDist = Infinity;
+      for (const other of allPositions) {
+        let dx = Math.abs(pos.x - other[0]);
+        let dy = Math.abs(pos.y - other[1]);
+        let dz = Math.abs(pos.z - other[2]);
+        dx = Math.min(dx, 1 - dx) * sx;
+        dy = Math.min(dy, 1 - dy) * sy;
+        dz = Math.min(dz, 1 - dz) * sz;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > 1e-6 && dist < minDist) minDist = dist;
+      }
+      totalMinDist += minDist;
+    }
+    result[site] = totalMinDist / Math.max(1, positions.length);
+  }
+
+  return result;
+}
+
+function selectBestPrototypeByChemistry(counts: Record<string, number>, elements: string[], profile?: ChemicalProfile): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
+  const p = profile ?? buildChemicalProfile(counts);
+  const {
+    nElements, elementsByCount, roles,
+    hasRE, hasTM, hasAnion, hasPnictide,
+    hasAlkaline, hasAlkali, hasMetalloid, hasAnionLike, hasH,
+  } = p;
+
+  const th = refreshLearnedThresholds();
+
+  let targetProtoName: PrototypeName | null = null;
+
+  if (nElements === 3 && (hasRE || hasAlkaline || hasAlkali) && hasTM && hasPnictide) {
+    targetProtoName = "ThCr2Si2";
+  } else if (nElements === 3 && (hasRE || hasAlkaline || hasAlkali) && hasTM && hasAnion) {
     const anionEl = elements.find(e => ANIONS.has(e))!;
     const anionCount = counts[anionEl] || 0;
     const totalNonAnion = Object.values(counts).reduce((s, n) => s + n, 0) - anionCount;
     const anionRatio = anionCount / Math.max(1, totalNonAnion);
-    if (anionRatio >= 2.5) targetProtoName = "Ruddlesden-Popper";
-    else if (anionRatio >= 1.2) targetProtoName = "Perovskite";
+    if (anionRatio >= th.ruddlesdenPopperAnionRatioMin) targetProtoName = "Ruddlesden-Popper";
+    else if (anionRatio >= th.perovskiteAnionRatioMin) targetProtoName = "Perovskite";
     else targetProtoName = "ThCr2Si2";
   } else if (nElements === 3 && hasTM && hasAnion && hasMetalloid) {
     targetProtoName = "BiS2-layered";
+  } else if (nElements === 3 && hasTM && hasPnictide && hasMetalloid) {
+    targetProtoName = "ThCr2Si2";
+  } else if (nElements === 2 && hasTM && hasPnictide) {
+    const tmEl = elements.find(e => TRANSITION_METALS.has(e))!;
+    const pnEl = elements.find(e => PNICTIDES.has(e))!;
+    const tmCount = counts[tmEl] || 0;
+    const pnCount = counts[pnEl] || 0;
+    if (tmCount / pnCount >= th.a15TMMetalloidRatioMin) targetProtoName = "Cr3Si";
+    else targetProtoName = "NaCl";
   } else if (nElements === 2 && hasTM && hasAnion) {
     const tmEl = elements.find(e => TRANSITION_METALS.has(e))!;
     const anEl = elements.find(e => ANIONS.has(e))!;
     const tmCount = counts[tmEl] || 0;
     const anCount = counts[anEl] || 0;
-    if (anCount / tmCount >= 1.8) targetProtoName = "Pyrite";
-    else if (tmCount / anCount >= 2.5) targetProtoName = "Cr3Si";
+    if (anCount / tmCount >= th.pyriteAnionTMRatioMin) targetProtoName = "Pyrite";
+    else if (tmCount / anCount >= th.a15TMMetalloidRatioMin) targetProtoName = "Cr3Si";
     else targetProtoName = "NaCl";
   } else if (nElements === 2 && hasTM && hasMetalloid) {
     const tmEl = elements.find(e => TRANSITION_METALS.has(e))!;
     const mEl = elements.find(e => classifyElement(e) === "metalloid")!;
     const tmCount = counts[tmEl] || 0;
     const mCount = counts[mEl] || 0;
-    if (tmCount / mCount >= 2.5) targetProtoName = "A15";
+    if (tmCount / mCount >= th.a15TMMetalloidRatioMin) targetProtoName = "A15";
     else if (mCount / tmCount >= 2) targetProtoName = "AlB2";
     else targetProtoName = "CsCl";
   } else if (nElements === 2 && (hasRE || hasAlkaline) && hasTM) {
     targetProtoName = "Cu2Mg-Laves";
-  } else if (nElements === 2 && roles.includes("H")) {
+  } else if (nElements === 2 && hasH) {
     const metalEl = elements.find(e => e !== "H");
     const hCount = counts["H"] || 0;
     const metalCount = metalEl ? (counts[metalEl] || 0) : 1;
@@ -1001,9 +1379,9 @@ function selectBestPrototypeByChemistry(counts: Record<string, number>, elements
     if (hRatio >= 2) targetProtoName = "AlB2";
     else if (hRatio <= 0.5) targetProtoName = "CsCl";
     else targetProtoName = "NaCl";
-  } else if (nElements === 3 && roles.includes("H") && (hasTM || hasRE || hasAlkaline || hasAlkali)) {
-    const nonHNonAnion = elements.filter(e => e !== "H" && !ANIONS.has(e));
-    if (nonHNonAnion.length >= 2) targetProtoName = "Perovskite";
+  } else if (nElements === 3 && hasH && (hasTM || hasRE || hasAlkaline || hasAlkali)) {
+    const nonHNonAnionNonPnictide = elements.filter(e => e !== "H" && !ANIONS.has(e) && !PNICTIDES.has(e));
+    if (nonHNonAnionNonPnictide.length >= 2) targetProtoName = "Perovskite";
     else targetProtoName = "ThCr2Si2";
   } else if (nElements === 1) {
     const el = elements[0];
@@ -1016,12 +1394,13 @@ function selectBestPrototypeByChemistry(counts: Record<string, number>, elements
       targetProtoName = "FCC";
     }
   } else if (nElements === 4) {
-    const hasPnictide = elements.some(e => ["As", "P", "Sb"].includes(e));
     const hasOorF = elements.some(e => e === "O" || e === "F");
     const hasSpacer = elements.some(e => RARE_EARTHS.has(e) || ALKALINE_EARTH.has(e) || ALKALI.has(e));
-    if (hasSpacer && hasTM && hasPnictide && hasOorF) {
+    if (hasSpacer && hasTM && hasPnictide) {
       targetProtoName = "ThCr2Si2";
-    } else if (hasSpacer && hasTM && hasAnion) {
+    } else if (hasSpacer && hasTM && hasPnictide && hasOorF) {
+      targetProtoName = "ThCr2Si2";
+    } else if (hasSpacer && hasTM && hasAnionLike) {
       targetProtoName = "Perovskite";
     } else {
       targetProtoName = "Perovskite";
@@ -1039,17 +1418,137 @@ function selectBestPrototypeByChemistry(counts: Record<string, number>, elements
   const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
   const siteMap: Record<string, string> = {};
 
-  for (let i = 0; i < Math.min(sites.length, elementsByCount.length); i++) {
-    siteMap[sites[i]] = elementsByCount[i];
-  }
-  for (let i = elementsByCount.length; i < sites.length; i++) {
-    siteMap[sites[i]] = elementsByCount[elementsByCount.length - 1];
+  const siteAvgVolumes = estimateSiteNearestNeighborDistance(proto);
+  const sitesByVolume = Object.keys(siteAvgVolumes).sort(
+    (a, b) => siteAvgVolumes[b] - siteAvgVolumes[a]
+  );
+  const uniqueElements = Array.from(new Set(elementsByCount));
+  const elementsByRadius = uniqueElements.sort(
+    (a, b) => (COVALENT_RADII[b] || 1.0) - (COVALENT_RADII[a] || 1.0)
+  );
+
+  const useRadiusMapping = sitesByVolume.length === elementsByRadius.length
+    && sitesByVolume.length <= elementsByCount.length;
+
+  const orderedElements = useRadiusMapping ? elementsByRadius : elementsByCount;
+  const orderedSites = useRadiusMapping ? sitesByVolume : sites;
+
+  if (orderedSites.length > orderedElements.length) {
+    let matched = false;
+    for (let i = 0; i < Math.min(orderedSites.length, orderedElements.length); i++) {
+      siteMap[orderedSites[i]] = orderedElements[i];
+    }
+    for (let i = orderedElements.length; i < orderedSites.length; i++) {
+      let bestEl = orderedElements[orderedElements.length - 1];
+      let bestRatioDiff = Infinity;
+      for (const el of orderedElements) {
+        const elSiteCount = proto.fractionalPositions.filter(
+          p => siteMap[p.site] === el || p.site === orderedSites[i]
+        ).length;
+        const targetCount = Math.round(counts[el] || 1);
+        const diff = Math.abs(elSiteCount - targetCount);
+        if (diff < bestRatioDiff) {
+          bestRatioDiff = diff;
+          bestEl = el;
+        }
+      }
+      siteMap[orderedSites[i]] = bestEl;
+    }
+
+    if (siteMapMatchesStoichiometry(proto, siteMap, counts)) {
+      matched = true;
+    }
+
+    if (!matched) {
+      return null;
+    }
+  } else {
+    for (let i = 0; i < Math.min(orderedSites.length, orderedElements.length); i++) {
+      siteMap[orderedSites[i]] = orderedElements[i];
+    }
+
+    if (!siteMapMatchesStoichiometry(proto, siteMap, counts)) {
+      return null;
+    }
   }
 
   return { proto, siteMap };
 }
 
-function isPrototypeChemicallyCompatible(protoName: string, elements: string[], counts: Record<string, number>): boolean {
+const COMMON_ANION_CHARGES: Record<string, number> = {
+  O: -2, S: -2, Se: -2, Te: -2,
+  F: -1, Cl: -1, Br: -1, I: -1,
+  N: -3,
+};
+
+const COMMON_CATION_CHARGES: Record<string, number[]> = {
+  Li: [1], Na: [1], K: [1], Rb: [1], Cs: [1],
+  Be: [2], Mg: [2], Ca: [2], Sr: [2], Ba: [2],
+  Al: [3], Ga: [3], In: [3],
+  Sc: [3], Y: [3], La: [3],
+  Ti: [2, 3, 4], V: [2, 3, 4, 5], Cr: [2, 3, 6], Mn: [2, 3, 4, 7],
+  Fe: [2, 3], Co: [2, 3], Ni: [2, 3], Cu: [1, 2],
+  Zn: [2], Zr: [4], Nb: [3, 5], Mo: [4, 6],
+  Ru: [3, 4], Rh: [3], Pd: [2, 4], Ag: [1],
+  Sn: [2, 4], Sb: [3, 5], Pb: [2, 4], Bi: [3, 5],
+  Hf: [4], Ta: [5], W: [4, 6], Re: [4, 7],
+  Os: [4], Ir: [3, 4], Pt: [2, 4], Au: [1, 3],
+  Ce: [3, 4], Pr: [3], Nd: [3], Sm: [3], Eu: [2, 3], Gd: [3],
+  Tb: [3, 4], Dy: [3], Ho: [3], Er: [3], Tm: [3], Yb: [2, 3], Lu: [3],
+  Th: [4], U: [4, 6],
+};
+
+function checkChargeBalance(elements: string[], counts: Record<string, number>): boolean {
+  const anionEls = elements.filter(e => e in COMMON_ANION_CHARGES);
+  const cationEls = elements.filter(e => e in COMMON_CATION_CHARGES && !(e in COMMON_ANION_CHARGES));
+  if (anionEls.length === 0 || cationEls.length === 0) return true;
+
+  const totalAnionCharge = anionEls.reduce(
+    (s, e) => s + COMMON_ANION_CHARGES[e] * Math.round(counts[e] || 0), 0
+  );
+
+  for (const charges of cationChargePermutations(cationEls, counts)) {
+    const totalCationCharge = charges.reduce((s, c) => s + c, 0);
+    if (Math.abs(totalCationCharge + totalAnionCharge) < 0.5) return true;
+  }
+
+  const maxCationCharge = cationEls.reduce((s, e) => {
+    const maxOx = Math.max(...(COMMON_CATION_CHARGES[e] || [1]));
+    return s + maxOx * Math.round(counts[e] || 0);
+  }, 0);
+
+  const chargeRatio = maxCationCharge / Math.abs(totalAnionCharge || 1);
+  return chargeRatio >= 0.5;
+}
+
+function cationChargePermutations(
+  cationEls: string[], counts: Record<string, number>
+): number[][] {
+  const result: number[][] = [];
+  const elCharges = cationEls.map(e => ({
+    options: (COMMON_CATION_CHARGES[e] || [2]).map(c => c * Math.round(counts[e] || 0)),
+  }));
+
+  if (elCharges.length === 0) return [[]];
+  if (elCharges.length === 1) return elCharges[0].options.map(o => [o]);
+  if (elCharges.length > 4) {
+    const single = elCharges.map(ec => ec.options[0]);
+    return [single];
+  }
+
+  function gen(idx: number, current: number[]) {
+    if (idx === elCharges.length) { result.push([...current]); return; }
+    for (const opt of elCharges[idx].options) {
+      current.push(opt);
+      gen(idx + 1, current);
+      current.pop();
+    }
+  }
+  gen(0, []);
+  return result;
+}
+
+function isPrototypeChemicallyCompatible(protoName: PrototypeName | string, elements: string[], counts: Record<string, number>): boolean {
   const hasElement = (el: string) => elements.includes(el);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
 
@@ -1083,47 +1582,110 @@ function isPrototypeChemicallyCompatible(protoName: string, elements: string[], 
     if (!hasTMEl) return false;
   }
 
+  const anionHeavyProtos = new Set([
+    "Perovskite", "Anti-perovskite", "Ruddlesden-Popper", "Double-perovskite",
+    "Pyrite", "NaCl", "MX2", "Fluorite", "Antifluorite", "Spinel", "Garnet",
+    "Wurtzite", "BiS2-layered",
+  ]);
+  if (anionHeavyProtos.has(protoName)) {
+    if (!checkChargeBalance(elements, counts)) {
+      return false;
+    }
+  }
+
   return true;
 }
 
-function matchPrototype(counts: Record<string, number>): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
-  const elements = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-  const nElements = elements.length;
+interface PrecomputedProtoData {
+  proto: PrototypeStructure;
+  siteCounts: Record<string, number>;
+  sites: string[];
+  nSites: number;
+  siteRatios: number[];
+  siteGcd: number;
+  siteReduced: number[];
+  sortedSiteReduced: number[];
+}
 
-  const ratios = elements.map(el => Math.round(counts[el]));
-  const gcdVal = ratios.reduce((a, b) => gcd(a, b));
-  const reduced = ratios.map(r => r / gcdVal);
+let _protoDataCache: PrecomputedProtoData[] | null = null;
 
-  for (const proto of CRYSTAL_PROTOTYPES) {
+function getPrecomputedProtoData(): PrecomputedProtoData[] {
+  if (_protoDataCache) return _protoDataCache;
+  _protoDataCache = CRYSTAL_PROTOTYPES.map(proto => {
     const siteCounts = getProtoSiteCounts(proto);
     const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
-
-    if (sites.length !== nElements) continue;
-
     const siteRatios = sites.map(s => siteCounts[s]);
     const siteGcd = siteRatios.reduce((a, b) => gcd(a, b));
     const siteReduced = siteRatios.map(r => r / siteGcd);
-
-    const sortedReduced = [...reduced].sort((a, b) => b - a);
     const sortedSiteReduced = [...siteReduced].sort((a, b) => b - a);
+    return { proto, siteCounts, sites, nSites: sites.length, siteRatios, siteGcd, siteReduced, sortedSiteReduced };
+  });
+  return _protoDataCache;
+}
+
+function isMetallic(role: ReturnType<typeof classifyElement>): boolean {
+  return role === "TM" || role === "rare-earth" || role === "alkaline" || role === "alkali";
+}
+
+function selectChemistryAwareFallbacks(
+  elements: string[],
+  nElements: number,
+  roles: ReturnType<typeof classifyElement>[],
+): PrototypeName[] {
+  const allMetallic = roles.every(r => isMetallic(r) || r === "metalloid");
+  const hasNonmetal = roles.some(r => r === "anion" || r === "pnictide");
+
+  if (nElements === 2) {
+    if (allMetallic) {
+      return ["CsCl", "Cu2Mg-Laves", "Laves-C14", "Laves-C15", "NaCl"];
+    }
+    if (hasNonmetal) {
+      return ["NaCl", "Wurtzite", "Fluorite", "CsCl"];
+    }
+    return ["NaCl", "CsCl", "AlB2"];
+  }
+
+  if (nElements === 3) {
+    if (allMetallic) {
+      return ["Heusler", "Laves-C14", "Laves-C15", "Perovskite"];
+    }
+    return ["Perovskite", "ThCr2Si2", "Spinel", "NaCl"];
+  }
+
+  if (nElements === 4) {
+    return ["Double-perovskite", "Garnet", "Spinel", "Perovskite"];
+  }
+
+  return ["Perovskite", "Garnet", "Spinel"];
+}
+
+function matchPrototype(counts: Record<string, number>, profile?: ChemicalProfile): { proto: PrototypeStructure; siteMap: Record<string, string> } | null {
+  const p = profile ?? buildChemicalProfile(counts);
+  const elements = p.elementsByCount;
+  const nElements = p.nElements;
+  const sortedReduced = p.sortedReducedRatios;
+
+  const protoData = getPrecomputedProtoData();
+
+  for (const pd of protoData) {
+    if (pd.nSites !== nElements) continue;
 
     let match = true;
     for (let i = 0; i < sortedReduced.length; i++) {
-      if (sortedReduced[i] !== sortedSiteReduced[i]) {
+      if (sortedReduced[i] !== pd.sortedSiteReduced[i]) {
         match = false;
         break;
       }
     }
 
     if (match) {
-      if (!isPrototypeChemicallyCompatible(proto.name, elements, counts)) continue;
+      if (!isPrototypeChemicallyCompatible(pd.proto.name, elements, counts)) continue;
       const siteMap: Record<string, string> = {};
-      const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-      const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
-      for (let i = 0; i < elementsByCount.length; i++) {
-        siteMap[sitesByCount[i]] = elementsByCount[i];
+      for (let i = 0; i < elements.length; i++) {
+        siteMap[pd.sites[i]] = elements[i];
       }
-      return { proto, siteMap };
+      if (!siteMapMatchesStoichiometry(pd.proto, siteMap, counts)) continue;
+      return { proto: pd.proto, siteMap };
     }
   }
 
@@ -1131,31 +1693,24 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
   let bestScore = Infinity;
   let bestSiteMap: Record<string, string> = {};
 
-  for (const proto of CRYSTAL_PROTOTYPES) {
-    const siteCounts = getProtoSiteCounts(proto);
-    const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
-    if (sites.length !== nElements) continue;
-
-    const siteRatios = sites.map(s => siteCounts[s]);
-    const siteGcd = siteRatios.reduce((a, b) => gcd(a, b));
-    const siteReduced = siteRatios.map(r => r / siteGcd);
-    const sortedSiteReduced = [...siteReduced].sort((a, b) => b - a);
-    const sortedReduced = [...reduced].sort((a, b) => b - a);
+  for (const pd of protoData) {
+    if (pd.nSites !== nElements) continue;
 
     let score = 0;
     for (let i = 0; i < sortedReduced.length; i++) {
-      const diff = Math.abs(sortedReduced[i] - sortedSiteReduced[i]);
-      score += diff / Math.max(1, sortedSiteReduced[i]);
+      const diff = Math.abs(sortedReduced[i] - pd.sortedSiteReduced[i]);
+      score += diff / Math.max(1, pd.sortedSiteReduced[i]);
     }
 
-    if (score < bestScore && score < 0.5 && isPrototypeChemicallyCompatible(proto.name, elements, counts)) {
-      bestScore = score;
-      bestProto = proto;
-      const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-      const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
-      bestSiteMap = {};
-      for (let i = 0; i < elementsByCount.length; i++) {
-        bestSiteMap[sitesByCount[i]] = elementsByCount[i];
+    if (score < bestScore && score < PROTOTYPE_MATCH_TOLERANCE && isPrototypeChemicallyCompatible(pd.proto.name, elements, counts)) {
+      const candidateMap: Record<string, string> = {};
+      for (let i = 0; i < elements.length; i++) {
+        candidateMap[pd.sites[i]] = elements[i];
+      }
+      if (siteMapMatchesStoichiometry(pd.proto, candidateMap, counts)) {
+        bestScore = score;
+        bestProto = pd.proto;
+        bestSiteMap = candidateMap;
       }
     }
   }
@@ -1164,48 +1719,41 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
     return { proto: bestProto, siteMap: bestSiteMap };
   }
 
-  for (const proto of CRYSTAL_PROTOTYPES) {
-    const siteCounts = getProtoSiteCounts(proto);
-    const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
-    if (sites.length >= nElements) continue;
-
-    const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-    const sitesByCount = [...sites].sort((a, b) => siteCounts[b] - siteCounts[a]);
-
-    const siteRatios = sitesByCount.map(s => siteCounts[s]);
-    const siteGcd = siteRatios.reduce((a, b) => gcd(a, b));
-    const siteReduced = siteRatios.map(r => r / siteGcd);
+  for (const pd of protoData) {
+    if (pd.nSites >= nElements) continue;
 
     const mergedReduced: number[] = [];
-    for (let i = 0; i < sitesByCount.length; i++) {
-      if (i < elementsByCount.length) {
-        mergedReduced.push(Math.round(counts[elementsByCount[i]]));
+    for (let i = 0; i < pd.nSites; i++) {
+      if (i < elements.length) {
+        mergedReduced.push(Math.round(counts[elements[i]]));
       }
     }
-    for (let i = sitesByCount.length; i < elementsByCount.length; i++) {
-      mergedReduced[mergedReduced.length - 1] += Math.round(counts[elementsByCount[i]]);
+    for (let i = pd.nSites; i < elements.length; i++) {
+      mergedReduced[mergedReduced.length - 1] += Math.round(counts[elements[i]]);
     }
     const mergedGcd = mergedReduced.reduce((a, b) => gcd(a, b));
     const mergedNorm = mergedReduced.map(r => r / mergedGcd);
 
     const sortedMerged = [...mergedNorm].sort((a, b) => b - a);
-    const sortedSite = [...siteReduced].sort((a, b) => b - a);
 
     let score = 0;
     for (let i = 0; i < sortedMerged.length; i++) {
-      const diff = Math.abs(sortedMerged[i] - sortedSite[i]);
-      score += diff / Math.max(1, sortedSite[i]);
+      const diff = Math.abs(sortedMerged[i] - pd.sortedSiteReduced[i]);
+      score += diff / Math.max(1, pd.sortedSiteReduced[i]);
     }
 
-    if (score < bestScore && score < 0.8 && isPrototypeChemicallyCompatible(proto.name, elements, counts)) {
-      bestScore = score;
-      bestProto = proto;
-      bestSiteMap = {};
-      for (let i = 0; i < Math.min(sitesByCount.length, elementsByCount.length); i++) {
-        bestSiteMap[sitesByCount[i]] = elementsByCount[i];
+    if (score < bestScore && score < PROTOTYPE_FUZZY_TOLERANCE && isPrototypeChemicallyCompatible(pd.proto.name, elements, counts)) {
+      const candidateMap: Record<string, string> = {};
+      for (let i = 0; i < Math.min(pd.nSites, elements.length); i++) {
+        candidateMap[pd.sites[i]] = elements[i];
       }
-      for (let i = elementsByCount.length; i < sitesByCount.length; i++) {
-        bestSiteMap[sitesByCount[i]] = elementsByCount[elementsByCount.length - 1];
+      for (let i = elements.length; i < pd.nSites; i++) {
+        candidateMap[pd.sites[i]] = elements[elements.length - 1];
+      }
+      if (siteMapMatchesStoichiometry(pd.proto, candidateMap, counts)) {
+        bestScore = score;
+        bestProto = pd.proto;
+        bestSiteMap = candidateMap;
       }
     }
   }
@@ -1214,7 +1762,7 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
     return { proto: bestProto, siteMap: bestSiteMap };
   }
 
-  const chemMatch = selectBestPrototypeByChemistry(counts, elements);
+  const chemMatch = selectBestPrototypeByChemistry(counts, elements, p);
   if (chemMatch) {
     chemistryMatchSuccesses++;
     return chemMatch;
@@ -1222,27 +1770,61 @@ function matchPrototype(counts: Record<string, number>): { proto: PrototypeStruc
 
   if (nElements === 1) {
     const el = elements[0];
-    return { proto: CRYSTAL_PROTOTYPES.find(p => p.name === "BCC")!, siteMap: { A: el } };
+    const bccProto = CRYSTAL_PROTOTYPES.find(cp => cp.name === "BCC");
+    if (!bccProto) throw new Error("[DFT] BCC prototype missing from CRYSTAL_PROTOTYPES — cannot generate unary fallback structure");
+    return { proto: bccProto, siteMap: { A: el } };
   }
 
   if (nElements >= 2) {
-    const fallbackBinary = nElements === 2
-      ? CRYSTAL_PROTOTYPES.find(p => p.name === "NaCl")!
-      : CRYSTAL_PROTOTYPES.find(p => p.name === "Perovskite") ?? CRYSTAL_PROTOTYPES.find(p => p.name === "NaCl")!;
-    const siteCounts = getProtoSiteCounts(fallbackBinary);
-    const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
-    const siteMap: Record<string, string> = {};
-    const elementsByCount = [...elements].sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-    for (let i = 0; i < Math.min(sites.length, elementsByCount.length); i++) {
-      siteMap[sites[i]] = elementsByCount[i];
+    const fallbackNames = selectChemistryAwareFallbacks(elements, nElements, p.roles);
+
+    for (const fname of fallbackNames) {
+      const fallbackProto = CRYSTAL_PROTOTYPES.find(cp => cp.name === fname);
+      if (!fallbackProto) continue;
+
+      const siteCounts = getProtoSiteCounts(fallbackProto);
+      const sites = Object.keys(siteCounts).sort((a, b) => siteCounts[b] - siteCounts[a]);
+      const siteMap: Record<string, string> = {};
+      for (let i = 0; i < Math.min(sites.length, elements.length); i++) {
+        siteMap[sites[i]] = elements[i];
+      }
+      for (let i = elements.length; i < sites.length; i++) {
+        siteMap[sites[i]] = elements[elements.length - 1];
+      }
+      if (siteMapMatchesStoichiometry(fallbackProto, siteMap, counts)) {
+        return { proto: fallbackProto, siteMap };
+      }
     }
-    for (let i = elementsByCount.length; i < sites.length; i++) {
-      siteMap[sites[i]] = elementsByCount[elementsByCount.length - 1];
-    }
-    return { proto: fallbackBinary, siteMap };
   }
 
   return null;
+}
+
+function normalizeCountsToIntegers(counts: Record<string, number>): Record<string, number> {
+  const values = Object.values(counts);
+  if (values.every(v => Math.abs(v - Math.round(v)) < 1e-6)) return counts;
+
+  let multiplier = 1;
+  for (const v of values) {
+    const frac = v - Math.floor(v);
+    if (frac > 1e-6) {
+      const denom = Math.round(1 / frac);
+      if (denom >= 2 && denom <= 100) {
+        multiplier = lcm(multiplier, denom);
+      }
+    }
+  }
+  if (multiplier === 1) return counts;
+
+  const result: Record<string, number> = {};
+  for (const [el, n] of Object.entries(counts)) {
+    result[el] = Math.round(n * multiplier);
+  }
+  return result;
+}
+
+function lcm(a: number, b: number): number {
+  return Math.abs(a * b) / gcd(a, b);
 }
 
 function gcd(a: number, b: number): number {
@@ -1252,49 +1834,167 @@ function gcd(a: number, b: number): number {
   return a || 1;
 }
 
+type LatticeVectors = [number, number, number][];
+
+function buildLatticeVectors(
+  latticeType: "cubic" | "hexagonal" | "tetragonal",
+  a: number,
+  c: number,
+): LatticeVectors {
+  if (latticeType === "hexagonal") {
+    return [
+      [a, 0, 0],
+      [a * 0.5, a * (Math.sqrt(3) / 2), 0],
+      [0, 0, c],
+    ];
+  }
+  if (latticeType === "tetragonal") {
+    return [
+      [a, 0, 0],
+      [0, a, 0],
+      [0, 0, c],
+    ];
+  }
+  return [
+    [a, 0, 0],
+    [0, a, 0],
+    [0, 0, a],
+  ];
+}
+
+function fracToCart(
+  fx: number, fy: number, fz: number,
+  vecs: LatticeVectors,
+): [number, number, number] {
+  return [
+    fx * vecs[0][0] + fy * vecs[1][0] + fz * vecs[2][0],
+    fx * vecs[0][1] + fy * vecs[1][1] + fz * vecs[2][1],
+    fx * vecs[0][2] + fy * vecs[1][2] + fz * vecs[2][2],
+  ];
+}
+
+function invertLattice3x3(vecs: LatticeVectors): LatticeVectors {
+  const [a, b, c] = vecs;
+  const det =
+    a[0] * (b[1] * c[2] - b[2] * c[1]) -
+    a[1] * (b[0] * c[2] - b[2] * c[0]) +
+    a[2] * (b[0] * c[1] - b[1] * c[0]);
+  const invDet = 1.0 / det;
+  return [
+    [(b[1] * c[2] - b[2] * c[1]) * invDet, (a[2] * c[1] - a[1] * c[2]) * invDet, (a[1] * b[2] - a[2] * b[1]) * invDet],
+    [(b[2] * c[0] - b[0] * c[2]) * invDet, (a[0] * c[2] - a[2] * c[0]) * invDet, (a[2] * b[0] - a[0] * b[2]) * invDet],
+    [(b[0] * c[1] - b[1] * c[0]) * invDet, (a[1] * c[0] - a[0] * c[1]) * invDet, (a[0] * b[1] - a[1] * b[0]) * invDet],
+  ];
+}
+
+function pbcMinImageDist(
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  vecs: LatticeVectors,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const dz = bz - az;
+
+  const inv = invertLattice3x3(vecs);
+  let f1 = inv[0][0] * dx + inv[0][1] * dy + inv[0][2] * dz;
+  let f2 = inv[1][0] * dx + inv[1][1] * dy + inv[1][2] * dz;
+  let f3 = inv[2][0] * dx + inv[2][1] * dy + inv[2][2] * dz;
+
+  f1 -= Math.round(f1);
+  f2 -= Math.round(f2);
+  f3 -= Math.round(f3);
+
+  const v1 = vecs[0], v2 = vecs[1], v3 = vecs[2];
+  let bestDist2 = Infinity;
+  for (let i1 = -1; i1 <= 1; i1++) {
+    for (let i2 = -1; i2 <= 1; i2++) {
+      for (let i3 = -1; i3 <= 1; i3++) {
+        const g1 = f1 + i1;
+        const g2 = f2 + i2;
+        const g3 = f3 + i3;
+        const rx = g1 * v1[0] + g2 * v2[0] + g3 * v3[0];
+        const ry = g1 * v1[1] + g2 * v2[1] + g3 * v3[1];
+        const rz = g1 * v1[2] + g2 * v2[2] + g3 * v3[2];
+        const d2 = rx * rx + ry * ry + rz * rz;
+        if (d2 < bestDist2) bestDist2 = d2;
+      }
+    }
+  }
+  return Math.sqrt(bestDist2);
+}
+
 function buildStructureFromPrototype(
   proto: PrototypeStructure,
   siteMap: Record<string, string>,
   elements: string[],
   counts: Record<string, number>,
-  scaleFactor: number = 1
-): AtomPosition[] {
-  const a = estimateLatticeParam(elements, counts, proto.name) * scaleFactor;
-  const c = a * proto.cOverA;
+  scaleFactor: number = 1,
+  pressureGPa: number = 0,
+): { atoms: AtomPosition[]; latticeVecs: LatticeVectors } {
+  const effectiveCOverA = estimatePressureCOverA(proto.cOverA, proto.latticeType, pressureGPa);
+  const a = estimateLatticeParam(elements, counts, proto.name, proto.latticeType, effectiveCOverA, pressureGPa) * scaleFactor;
+  const c = a * effectiveCOverA;
+  const vecs = buildLatticeVectors(proto.latticeType, a, c);
 
   const atoms: AtomPosition[] = [];
   for (const pos of proto.fractionalPositions) {
     const element = siteMap[pos.site];
     if (!element) continue;
 
-    let x: number, y: number, z: number;
-    if (proto.latticeType === "hexagonal") {
-      x = a * pos.x + a * 0.5 * pos.y;
-      y = a * (Math.sqrt(3) / 2) * pos.y;
-      z = c * pos.z;
-    } else {
-      x = a * pos.x;
-      y = a * pos.y;
-      z = (proto.latticeType === "tetragonal" ? c : a) * pos.z;
-    }
+    const [x, y, z] = fracToCart(pos.x, pos.y, pos.z, vecs);
     atoms.push({ element, x, y, z });
   }
 
-  for (let i = 0; i < atoms.length; i++) {
-    for (let j = i + 1; j < atoms.length; j++) {
-      const dx = atoms[j].x - atoms[i].x;
-      const dy = atoms[j].y - atoms[i].y;
-      const dz = atoms[j].z - atoms[i].z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist < 0.05) {
-        atoms[j].x += 0.1 * a;
-        atoms[j].y += 0.1 * a;
-        atoms[j].z += 0.1 * (proto.latticeType === "tetragonal" ? c : a);
+  const MAX_EXPANSION_PASSES = 3;
+  let currentVecs = vecs;
+
+  for (let pass = 0; pass < MAX_EXPANSION_PASSES; pass++) {
+    let hasCollision = false;
+    for (let i = 0; i < atoms.length; i++) {
+      for (let j = i + 1; j < atoms.length; j++) {
+        const dist = pbcMinImageDist(
+          atoms[i].x, atoms[i].y, atoms[i].z,
+          atoms[j].x, atoms[j].y, atoms[j].z,
+          currentVecs,
+        );
+        const ri = COVALENT_RADII[atoms[i].element] || 1.0;
+        const rj = COVALENT_RADII[atoms[j].element] || 1.0;
+        const minAllowed = STRUCTURAL_VALIDATION_CONFIG.minDistFraction * (ri + rj);
+        if (dist < minAllowed) {
+          hasCollision = true;
+          break;
+        }
+      }
+      if (hasCollision) break;
+    }
+
+    if (!hasCollision) break;
+
+    for (let i = 0; i < atoms.length; i++) {
+      for (let j = i + 1; j < atoms.length; j++) {
+        const dist = pbcMinImageDist(atoms[i].x, atoms[i].y, atoms[i].z, atoms[j].x, atoms[j].y, atoms[j].z, currentVecs);
+        if (dist < 0.01) {
+          const zScale = proto.latticeType === "tetragonal" ? c : a;
+          atoms[j].x += 0.08 * a * (1 + (j % 3) * 0.05);
+          atoms[j].y += 0.06 * a * (1 + (j % 5) * 0.03);
+          atoms[j].z += 0.07 * zScale * (1 + (j % 7) * 0.02);
+        }
       }
     }
+
+    const expansionFactor = 1.05;
+    for (const atom of atoms) {
+      atom.x *= expansionFactor;
+      atom.y *= expansionFactor;
+      atom.z *= expansionFactor;
+    }
+    currentVecs = currentVecs.map(v =>
+      v.map(c => c * expansionFactor) as [number, number, number]
+    ) as LatticeVectors;
   }
 
-  return atoms;
+  return { atoms, latticeVecs: currentVecs };
 }
 
 function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPosition[]; proto: string } {
@@ -1327,12 +2027,10 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
     }
   }
 
+  const genericVecs: LatticeVectors = [[a, 0, 0], [0, a, 0], [0, 0, a]];
   for (let i = 0; i < atoms.length; i++) {
     for (let j = i + 1; j < atoms.length; j++) {
-      const dx = atoms[j].x - atoms[i].x;
-      const dy = atoms[j].y - atoms[i].y;
-      const dz = atoms[j].z - atoms[i].z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const dist = pbcMinImageDist(atoms[i].x, atoms[i].y, atoms[i].z, atoms[j].x, atoms[j].y, atoms[j].z, genericVecs);
       if (dist < 0.3) {
         atoms[j].x += 0.15 * a / gridSize;
         atoms[j].y += 0.1 * a / gridSize;
@@ -1344,9 +2042,192 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
   return { atoms, proto: "generic-cluster" };
 }
 
-const MIN_VOLUME_PER_ATOM = 10.0;
-const MIN_VOLUME_PER_ATOM_HYDRIDE = 8.0;
-const MAX_SCALE_ATTEMPTS = 5;
+interface StructuralValidationConfig {
+  minRatioThreshold: number;
+  scaleFactorMin: number;
+  scaleFactorMax: number;
+  volLowerFraction: number;
+  volUpperFraction: number;
+  maxScaleAttempts: number;
+  minVolumePerAtom: number;
+  minVolumePerAtomHydride: number;
+  minDistFraction: number;
+}
+
+const STRUCTURAL_VALIDATION_CONFIG: StructuralValidationConfig = {
+  minRatioThreshold: 0.75,
+  scaleFactorMin: 0.5,
+  scaleFactorMax: 2.0,
+  volLowerFraction: 0.5,
+  volUpperFraction: 2.0,
+  maxScaleAttempts: 5,
+  minVolumePerAtom: 10.0,
+  minVolumePerAtomHydride: 8.0,
+  minDistFraction: 0.6,
+};
+
+let _dftLogVerbose = true;
+
+export function setDFTLogVerbose(verbose: boolean): void {
+  _dftLogVerbose = verbose;
+}
+
+function dftLog(message: string, level: "info" | "detail" = "detail"): void {
+  if (level === "info" || _dftLogVerbose) {
+    console.log(message);
+  }
+}
+
+const MIN_VOLUME_PER_ATOM = STRUCTURAL_VALIDATION_CONFIG.minVolumePerAtom;
+const MIN_VOLUME_PER_ATOM_HYDRIDE = STRUCTURAL_VALIDATION_CONFIG.minVolumePerAtomHydride;
+const MAX_SCALE_ATTEMPTS = STRUCTURAL_VALIDATION_CONFIG.maxScaleAttempts;
+
+function findPairwiseMinDistSpatial(
+  atoms: AtomPosition[],
+  pressureGPa: number,
+  latticeVecs: LatticeVectors,
+): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
+  if (atoms.length <= 16) {
+    return computePairwiseDistances(atoms, pressureGPa, latticeVecs);
+  }
+
+  const inv = invertLattice3x3(latticeVecs);
+  const nGrid = 4;
+
+  const grid = new Map<string, number[]>();
+  const fracArr: [number, number, number][] = [];
+
+  for (let i = 0; i < atoms.length; i++) {
+    const a = atoms[i];
+    let f1 = inv[0][0] * a.x + inv[0][1] * a.y + inv[0][2] * a.z;
+    let f2 = inv[1][0] * a.x + inv[1][1] * a.y + inv[1][2] * a.z;
+    let f3 = inv[2][0] * a.x + inv[2][1] * a.y + inv[2][2] * a.z;
+    f1 = f1 - Math.floor(f1);
+    f2 = f2 - Math.floor(f2);
+    f3 = f3 - Math.floor(f3);
+    fracArr.push([f1, f2, f3]);
+
+    const kx = Math.floor(f1 * nGrid) % nGrid;
+    const ky = Math.floor(f2 * nGrid) % nGrid;
+    const kz = Math.floor(f3 * nGrid) % nGrid;
+    const key = `${kx},${ky},${kz}`;
+    const bucket = grid.get(key);
+    if (bucket) bucket.push(i);
+    else grid.set(key, [i]);
+  }
+
+  let minDist = Infinity;
+  let minRatio = Infinity;
+  let pairI = -1, pairJ = -1;
+  let worstI = -1, worstJ = -1;
+
+  for (let i = 0; i < atoms.length; i++) {
+    const kx = Math.floor(fracArr[i][0] * nGrid) % nGrid;
+    const ky = Math.floor(fracArr[i][1] * nGrid) % nGrid;
+    const kz = Math.floor(fracArr[i][2] * nGrid) % nGrid;
+
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const nx = ((kx + dx) % nGrid + nGrid) % nGrid;
+          const ny = ((ky + dy) % nGrid + nGrid) % nGrid;
+          const nz = ((kz + dz) % nGrid + nGrid) % nGrid;
+          const key = `${nx},${ny},${nz}`;
+          const bucket = grid.get(key);
+          if (!bucket) continue;
+          for (const j of bucket) {
+            if (j <= i) continue;
+            const dist = pbcMinImageDist(
+              atoms[i].x, atoms[i].y, atoms[i].z,
+              atoms[j].x, atoms[j].y, atoms[j].z,
+              latticeVecs,
+            );
+            if (dist < minDist) {
+              minDist = dist;
+              pairI = i;
+              pairJ = j;
+            }
+            const minAllowed = getMinInteratomicDistance(atoms[i].element, atoms[j].element, pressureGPa);
+            const ratio = dist / minAllowed;
+            if (ratio < minRatio) {
+              minRatio = ratio;
+              worstI = i;
+              worstJ = j;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (minDist === Infinity) {
+    return computePairwiseDistances(atoms, pressureGPa, latticeVecs);
+  }
+
+  return { minDist, minRatio, worstI, worstJ, pairI, pairJ };
+}
+
+function computeStructuralFingerprint(atoms: AtomPosition[], latticeVecs: LatticeVectors): string {
+  const elCounts: Record<string, number> = {};
+  for (const a of atoms) {
+    elCounts[a.element] = (elCounts[a.element] || 0) + 1;
+  }
+
+  const allDists: number[] = [];
+  for (let i = 0; i < atoms.length; i++) {
+    const nnDists: number[] = [];
+    for (let j = 0; j < atoms.length; j++) {
+      if (j === i) continue;
+      nnDists.push(
+        pbcMinImageDist(atoms[i].x, atoms[i].y, atoms[i].z, atoms[j].x, atoms[j].y, atoms[j].z, latticeVecs),
+      );
+    }
+    nnDists.sort((a, b) => a - b);
+    for (let k = 0; k < Math.min(3, nnDists.length); k++) {
+      allDists.push(nnDists[k]);
+    }
+  }
+  allDists.sort((a, b) => a - b);
+
+  const compStr = Object.entries(elCounts).sort().map(([el, n]) => `${el}${n}`).join("");
+  const distStr = allDists.slice(0, 15).map(d => d.toFixed(2)).join(",");
+  return `${compStr}|${distStr}`;
+}
+
+const _cageFingerprints = new Map<string, Set<string>>();
+
+function isDuplicateCageStructure(
+  formula: string,
+  atoms: AtomPosition[],
+  latticeVecs: LatticeVectors,
+  toleranceÅ: number = 0.15,
+): boolean {
+  const fp = computeStructuralFingerprint(atoms, latticeVecs);
+  const existing = _cageFingerprints.get(formula);
+  if (!existing) {
+    _cageFingerprints.set(formula, new Set([fp]));
+    return false;
+  }
+
+  for (const prevFp of Array.from(existing)) {
+    const prevDists = prevFp.split("|")[1]?.split(",").map(Number) ?? [];
+    const curDists = fp.split("|")[1]?.split(",").map(Number) ?? [];
+    if (prevDists.length === curDists.length && prevDists.length > 0) {
+      let maxDiff = 0;
+      for (let i = 0; i < prevDists.length; i++) {
+        maxDiff = Math.max(maxDiff, Math.abs(prevDists[i] - curDists[i]));
+      }
+      if (maxDiff < toleranceÅ) return true;
+    }
+  }
+
+  existing.add(fp);
+  if (existing.size > 50) {
+    const iter = existing.values();
+    existing.delete(iter.next().value!);
+  }
+  return false;
+}
 
 interface HydrideCageMotif {
   name: string;
@@ -1493,17 +2374,80 @@ const HYDRIDE_CAGE_LIBRARY: HydrideCageMotif[] = [
   },
 ];
 
-function selectHydrideCage(hPerMetal: number): HydrideCageMotif {
-  const sorted = [...HYDRIDE_CAGE_LIBRARY].sort(
-    (a, b) => Math.abs(a.hPerMetal - hPerMetal) - Math.abs(b.hPerMetal - hPerMetal)
-  );
-  return sorted[0];
+function selectHydrideCage(hPerMetal: number, totalHydrogen: number, totalMetalCount: number): HydrideCageMotif {
+  let bestCage = HYDRIDE_CAGE_LIBRARY[0];
+  let bestScore = Infinity;
+
+  for (const cage of HYDRIDE_CAGE_LIBRARY) {
+    const nCopies = Math.max(1, Math.ceil(totalMetalCount / cage.metalFrac.length));
+    const hCapacity = cage.hydrogenFrac.length * nCopies;
+    const hMismatch = Math.abs(cage.hPerMetal - hPerMetal) / Math.max(1, hPerMetal);
+    const overflowFraction = totalHydrogen > hCapacity ? (totalHydrogen - hCapacity) / totalHydrogen : 0;
+    const underuseFraction = hCapacity > totalHydrogen ? (hCapacity - totalHydrogen) / hCapacity : 0;
+    const score = hMismatch * 0.3 + overflowFraction * 5.0 + underuseFraction * 0.2;
+    if (score < bestScore) {
+      bestScore = score;
+      bestCage = cage;
+    }
+  }
+
+  return bestCage;
+}
+
+const METAL_CLASS_BASELINE_RADIUS: Record<string, number> = {
+  alkali: 2.0,
+  alkaline: 1.7,
+  "rare-earth": 1.9,
+  TM: 1.5,
+  other: 1.4,
+};
+
+function seededJitter(seed: number, channel: number): number {
+  let h = ((seed * 2654435761 + channel * 40503) | 0) >>> 0;
+  h = ((h ^ (h >>> 16)) * 0x45d9f3b) >>> 0;
+  h = ((h ^ (h >>> 16)) * 0x45d9f3b) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h / 0xffffffff) - 0.5;
+}
+
+function formulaToHash(formula: string): number {
+  let h = 5381;
+  for (let i = 0; i < formula.length; i++) {
+    h = ((h << 5) + h + formula.charCodeAt(i)) | 0;
+  }
+  return h >>> 0;
+}
+
+function getMetalClassBaselineRadius(metals: string[], counts: Record<string, number>): number {
+  let weightedSum = 0;
+  let totalWeight = 0;
+  for (const el of metals) {
+    const role = classifyElement(el);
+    const baseline = METAL_CLASS_BASELINE_RADIUS[role] ?? 1.4;
+    const weight = Math.round(counts[el] || 1);
+    weightedSum += baseline * weight;
+    totalWeight += weight;
+  }
+  return totalWeight > 0 ? weightedSum / totalWeight : 1.4;
+}
+
+function computeWeightedMetalRadius(metals: string[], counts: Record<string, number>): number {
+  let weightedSum = 0;
+  let totalWeight = 0;
+  for (const el of metals) {
+    const r = COVALENT_RADII[el] ?? 1.4;
+    const n = Math.round(counts[el] || 1);
+    weightedSum += r * n;
+    totalWeight += n;
+  }
+  return totalWeight > 0 ? weightedSum / totalWeight : 1.4;
 }
 
 function generateHydrideCageStructure(
   formula: string,
-  counts: Record<string, number>
-): { atoms: AtomPosition[]; prototype: string } | null {
+  counts: Record<string, number>,
+  pressureGPa: number = 0,
+): { atoms: AtomPosition[]; prototype: string; latticeVecs: LatticeVectors } | null {
   const elements = Object.keys(counts);
   const metals = elements.filter(el => el !== "H");
   const hCount = Math.round(counts["H"] || 0);
@@ -1513,15 +2457,13 @@ function generateHydrideCageStructure(
   const hPerMetal = hCount / totalMetalCount;
   if (hPerMetal < 4) return null;
 
-  const cage = selectHydrideCage(hPerMetal);
+  const formulaHash = formulaToHash(formula);
+  const cage = selectHydrideCage(hPerMetal, hCount, totalMetalCount);
 
-  const metalRadiiSum = metals.reduce((s, el) => {
-    const r = COVALENT_RADII[el] ?? 1.4;
-    return s + r;
-  }, 0);
-  const avgMetalRadius = metalRadiiSum / metals.length;
-  const hRadius = 0.31;
-  const latticeA = cage.baseLatticeFactor * (avgMetalRadius / 1.5);
+  const avgMetalRadius = computeWeightedMetalRadius(metals, counts);
+  const baselineRadius = getMetalClassBaselineRadius(metals, counts);
+  const hRadius = getCompressedRadius("H", pressureGPa);
+  const latticeA = cage.baseLatticeFactor * (avgMetalRadius / baselineRadius);
   const minLattice = 2.0 * avgMetalRadius + 1.5 * hRadius;
   const a = Math.max(latticeA, minLattice, 3.0);
   const c = a * cage.cOverA;
@@ -1542,50 +2484,70 @@ function generateHydrideCageStructure(
   let metalIdx = 0;
   let hPlaced = 0;
 
-  const gridDim = Math.max(1, Math.ceil(Math.cbrt(nCopies)));
+  const cageVecs = buildLatticeVectors(cage.latticeType, a, c);
+
+  const gridX = Math.max(1, Math.ceil(Math.cbrt(nCopies)));
+  const gridY = Math.max(1, Math.ceil(nCopies / gridX));
+  const gridZ = Math.max(1, Math.ceil(nCopies / (gridX * gridY)));
+  const superVecs: LatticeVectors = cageVecs.map((v, idx) => {
+    const gridScale = [gridX, gridY, gridZ][idx];
+    return v.map(cc => cc * gridScale) as [number, number, number];
+  }) as LatticeVectors;
   for (let copy = 0; copy < nCopies; copy++) {
-    const ix = copy % gridDim;
-    const iy = Math.floor(copy / gridDim) % gridDim;
-    const iz = Math.floor(copy / (gridDim * gridDim));
-    const offsetX = ix * a;
-    const offsetY = iy * a;
-    const offsetZ = iz * a;
+    const ix = copy % gridX;
+    const iy = Math.floor(copy / gridX) % gridY;
+    const iz = Math.floor(copy / (gridX * gridY));
+    const [offX, offY, offZ] = fracToCart(ix, iy, iz, cageVecs);
 
     for (let i = 0; i < metalSiteCount && metalIdx < metalList.length; i++) {
       const pos = cage.metalFrac[i];
-      let x: number, y: number, z: number;
-      if (cage.latticeType === "hexagonal") {
-        x = a * pos.x + a * 0.5 * pos.y + offsetX;
-        y = a * (Math.sqrt(3) / 2) * pos.y + offsetY;
-        z = c * pos.z + offsetZ;
-      } else {
-        x = a * pos.x + offsetX;
-        y = a * pos.y + offsetY;
-        z = a * pos.z + offsetZ;
-      }
-      atoms.push({ element: metalList[metalIdx], x, y, z });
+      const [bx, by, bz] = fracToCart(pos.x, pos.y, pos.z, cageVecs);
+      atoms.push({ element: metalList[metalIdx], x: bx + offX, y: by + offY, z: bz + offZ });
       metalIdx++;
     }
 
-    const hPerCopy = Math.min(Math.round(hCount / nCopies), hSiteCount);
+    const hPerCopy = Math.ceil(hCount / nCopies);
+    const minHH = 0.5;
     for (let i = 0; i < hPerCopy && hPlaced < hCount; i++) {
-      const pos = cage.hydrogenFrac[i % hSiteCount];
-      let x: number, y: number, z: number;
-      if (cage.latticeType === "hexagonal") {
-        x = a * pos.x + a * 0.5 * pos.y + offsetX;
-        y = a * (Math.sqrt(3) / 2) * pos.y + offsetY;
-        z = c * pos.z + offsetZ;
-      } else {
-        x = a * pos.x + offsetX;
-        y = a * pos.y + offsetY;
-        z = a * pos.z + offsetZ;
+      const siteIdx = i % hSiteCount;
+      const wrapCount = Math.floor(i / hSiteCount);
+      const pos = cage.hydrogenFrac[siteIdx];
+      let fx = pos.x, fy = pos.y, fz = pos.z;
+      if (wrapCount > 0) {
+        const perturbScale = 0.04 * wrapCount;
+        const seed = formulaHash + copy * 1000 + i;
+        fx += seededJitter(seed, 0) * perturbScale;
+        fy += seededJitter(seed, 1) * perturbScale;
+        fz += seededJitter(seed, 2) * perturbScale;
+        fx = fx - Math.floor(fx);
+        fy = fy - Math.floor(fy);
+        fz = fz - Math.floor(fz);
       }
+      const [bx, by, bz] = fracToCart(fx, fy, fz, cageVecs);
+      let x = bx + offX;
+      let y = by + offY;
+      let z = bz + offZ;
       let tooClose = false;
       for (const existing of atoms) {
-        const dx = x - existing.x;
-        const dy = y - existing.y;
-        const dz = z - existing.z;
-        if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.5) { tooClose = true; break; }
+        if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minHH) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose && wrapCount > 0) {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const retrySeed = formulaHash + copy * 1000 + i * 100 + attempt;
+          const pfx = pos.x + seededJitter(retrySeed, 0) * 0.08 * (attempt + 1);
+          const pfy = pos.y + seededJitter(retrySeed, 1) * 0.08 * (attempt + 1);
+          const pfz = pos.z + seededJitter(retrySeed, 2) * 0.08 * (attempt + 1);
+          const [rx, ry, rz] = fracToCart(pfx - Math.floor(pfx), pfy - Math.floor(pfy), pfz - Math.floor(pfz), cageVecs);
+          x = rx + offX; y = ry + offY; z = rz + offZ;
+          let ok = true;
+          for (const existing of atoms) {
+            if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minHH) { ok = false; break; }
+          }
+          if (ok) { tooClose = false; break; }
+        }
       }
       if (!tooClose) {
         atoms.push({ element: "H", x, y, z });
@@ -1598,9 +2560,12 @@ function generateHydrideCageStructure(
   while (hPlaced < hCount && nCopies > 0) {
     const pos = cage.hydrogenFrac[hPlaced % hSiteCount];
     const copy = Math.floor(hPlaced / hSiteCount) % nCopies;
-    const offsetX = (copy % 2) * a;
-    const offsetY = (Math.floor(copy / 2) % 2) * a;
-    const offsetZ = Math.floor(copy / 4) * a;
+    const [offX, offY, offZ] = fracToCart(
+      copy % 2,
+      Math.floor(copy / 2) % 2,
+      Math.floor(copy / 4),
+      cageVecs,
+    );
 
     let placed = false;
     for (let retry = 0; retry < 10 && !placed; retry++) {
@@ -1609,24 +2574,17 @@ function generateHydrideCageStructure(
       const px = perturbR * Math.cos(perturbAngle);
       const py = perturbR * Math.sin(perturbAngle);
       const pz = perturbR * Math.cos(perturbAngle + 1.5);
-      let x: number, y: number, z: number;
-      if (cage.latticeType === "hexagonal") {
-        x = a * pos.x + a * 0.5 * pos.y + offsetX + px;
-        y = a * (Math.sqrt(3) / 2) * pos.y + offsetY + py;
-        z = c * pos.z + offsetZ + pz;
-      } else {
-        x = a * pos.x + offsetX + px;
-        y = a * pos.y + offsetY + py;
-        z = a * pos.z + offsetZ + pz;
-      }
+      const [bx, by, bz] = fracToCart(pos.x, pos.y, pos.z, cageVecs);
+      const x = bx + offX + px;
+      const y = by + offY + py;
+      const z = bz + offZ + pz;
 
       let tooClose = false;
       for (const existing of atoms) {
-        const dx = x - existing.x;
-        const dy = y - existing.y;
-        const dz = z - existing.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < 0.5) { tooClose = true; break; }
+        if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < 0.5) {
+          tooClose = true;
+          break;
+        }
       }
       if (!tooClose) {
         atoms.push({ element: "H", x, y, z });
@@ -1640,20 +2598,19 @@ function generateHydrideCageStructure(
 
   if (atoms.length < 2) return null;
 
-  console.log(`[DFT] ${formula}: Using hydride cage motif ${cage.name} (H/metal=${hPerMetal.toFixed(1)}, ${atoms.length} atoms)`);
-  return { atoms, prototype: `hydride-cage-${cage.name}` };
+  dftLog(`[DFT] ${formula}: Using hydride cage motif ${cage.name} (H/metal=${hPerMetal.toFixed(1)}, ${atoms.length} atoms)`);
+  return { atoms, prototype: `hydride-cage-${cage.name}`, latticeVecs: superVecs };
 }
 
-function deduplicateSites(atoms: AtomPosition[]): AtomPosition[] {
+function deduplicateSites(atoms: AtomPosition[], latticeVecs?: LatticeVectors): AtomPosition[] {
   const TOLERANCE = 0.05;
+  const vecs = latticeVecs ?? estimateLatticeFromAtoms(atoms);
   const result: AtomPosition[] = [];
   for (const atom of atoms) {
     let isDuplicate = false;
     for (const existing of result) {
-      const dx = Math.abs(atom.x - existing.x);
-      const dy = Math.abs(atom.y - existing.y);
-      const dz = Math.abs(atom.z - existing.z);
-      if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
+      const dist = pbcMinImageDist(atom.x, atom.y, atom.z, existing.x, existing.y, existing.z, vecs);
+      if (dist < TOLERANCE) {
         isDuplicate = true;
         break;
       }
@@ -1663,7 +2620,7 @@ function deduplicateSites(atoms: AtomPosition[]): AtomPosition[] {
     }
   }
   if (result.length < atoms.length) {
-    console.log(`[DFT] deduplicateSites: Dropped ${atoms.length - result.length} duplicate atom(s) (${atoms.length} → ${result.length})`);
+    dftLog(`[DFT] deduplicateSites: Dropped ${atoms.length - result.length} duplicate atom(s) (${atoms.length} → ${result.length})`);
   }
   return result;
 }
@@ -1686,7 +2643,29 @@ function getMinInteratomicDistance(el1: string, el2: string, pressureGPa: number
   return Math.max(bondLength * 0.80, metalFloor);
 }
 
-function computePairwiseDistances(atoms: AtomPosition[], pressureGPa: number = 0): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
+function estimateLatticeFromAtoms(atoms: AtomPosition[]): LatticeVectors {
+  if (atoms.length < 2) return [[10, 0, 0], [0, 10, 0], [0, 0, 10]];
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const a of atoms) {
+    if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+    if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+    if (a.z < minZ) minZ = a.z; if (a.z > maxZ) maxZ = a.z;
+  }
+  const pad = 1.5;
+  const lx = Math.max(maxX - minX + pad, 3.0);
+  const ly = Math.max(maxY - minY + pad, 3.0);
+  const lz = Math.max(maxZ - minZ + pad, 3.0);
+  return [[lx, 0, 0], [0, ly, 0], [0, 0, lz]];
+}
+
+function computePairwiseDistances(
+  atoms: AtomPosition[],
+  pressureGPa: number = 0,
+  latticeVecs?: LatticeVectors,
+): { minDist: number; minRatio: number; worstI: number; worstJ: number; pairI: number; pairJ: number } {
+  const vecs = latticeVecs ?? estimateLatticeFromAtoms(atoms);
   let minDist = Infinity;
   let minRatio = Infinity;
   let pairI = -1;
@@ -1695,10 +2674,7 @@ function computePairwiseDistances(atoms: AtomPosition[], pressureGPa: number = 0
   let worstJ = -1;
   for (let i = 0; i < atoms.length; i++) {
     for (let j = i + 1; j < atoms.length; j++) {
-      const dx = atoms[i].x - atoms[j].x;
-      const dy = atoms[i].y - atoms[j].y;
-      const dz = atoms[i].z - atoms[j].z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const dist = pbcMinImageDist(atoms[i].x, atoms[i].y, atoms[i].z, atoms[j].x, atoms[j].y, atoms[j].z, vecs);
       if (dist < minDist) {
         minDist = dist;
         pairI = i;
@@ -1751,32 +2727,153 @@ function scaleStructure(atoms: AtomPosition[], factor: number): AtomPosition[] {
   }));
 }
 
-function hasHardDistanceViolation(atoms: AtomPosition[], pressureGPa: number = 0): { violated: boolean; pair: string; dist: number } {
-  const hR = getCompressedRadius("H", pressureGPa);
-  const hhFloor = pressureGPa > 50 ? Math.max(2 * hR * 0.85, 0.45) : 0.74;
-  const hmFloor = pressureGPa > 50 ? Math.max(1.2 * Math.cbrt(Math.max(0.4, 1.0 / (1 + pressureGPa / 200))), 0.7) : 1.2;
-  const mmFloor = pressureGPa > 50 ? Math.max(1.8 * Math.cbrt(Math.max(0.5, 1.0 / (1 + pressureGPa / 300))), 1.0) : 1.8;
+function classifyLatticeType(latticeVecs: LatticeVectors): "cubic" | "hexagonal" | "tetragonal" {
+  const v0 = latticeVecs[0], v1 = latticeVecs[1], v2 = latticeVecs[2];
+  const lenA = Math.sqrt(v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]);
+  const lenB = Math.sqrt(v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]);
+  const lenC = Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]);
+  if (lenA < 0.01 || lenB < 0.01 || lenC < 0.01) return "cubic";
+
+  const dot01 = v0[0] * v1[0] + v0[1] * v1[1] + v0[2] * v1[2];
+  const cosAB = dot01 / (lenA * lenB);
+  const abEqual = Math.abs(lenA - lenB) / Math.max(lenA, lenB) < 0.05;
+  const abAngle = Math.acos(Math.max(-1, Math.min(1, cosAB))) * 180 / Math.PI;
+
+  if (abEqual && Math.abs(abAngle - 120) < 10) return "hexagonal";
+
+  const ca = lenC / lenA;
+  if (abEqual && Math.abs(ca - 1.0) > 0.05) return "tetragonal";
+
+  return "cubic";
+}
+
+function lattice3x3Det(vecs: LatticeVectors): number {
+  const [a, b, c] = vecs;
+  return a[0] * (b[1] * c[2] - b[2] * c[1])
+       - a[1] * (b[0] * c[2] - b[2] * c[0])
+       + a[2] * (b[0] * c[1] - b[1] * c[0]);
+}
+
+function scaleStructureAnisotropic(
+  atoms: AtomPosition[],
+  factor: number,
+  latticeVecs: LatticeVectors,
+  pressureGPa: number,
+): { atoms: AtomPosition[]; latticeVecs: LatticeVectors } {
+  const isotropicFallback = () => {
+    const scaled = scaleStructure(atoms, factor);
+    const scaledVecs = latticeVecs.map(v => v.map(c => c * factor) as [number, number, number]) as LatticeVectors;
+    return { atoms: scaled, latticeVecs: scaledVecs };
+  };
+
+  if (pressureGPa <= 50) return isotropicFallback();
+
+  const det = lattice3x3Det(latticeVecs);
+  if (Math.abs(det) < 1e-8) return isotropicFallback();
+
+  const v0 = latticeVecs[0], v1 = latticeVecs[1], v2 = latticeVecs[2];
+  const lenA = Math.sqrt(v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]);
+  const lenC = Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]);
+  if (lenA < 0.01 || lenC < 0.01) return isotropicFallback();
+
+  const currentCA = lenC / lenA;
+  const latticeType = classifyLatticeType(latticeVecs);
+
+  if (latticeType === "cubic") return isotropicFallback();
+
+  const targetCA = estimatePressureCOverA(currentCA, latticeType, pressureGPa);
+  const caRatio = targetCA / currentCA;
+  const abScale = factor;
+  const cScale = factor * Math.max(Math.min(caRatio, 1.3), 0.7);
+
+  let cx = 0, cy = 0, cz = 0;
+  for (const a of atoms) { cx += a.x; cy += a.y; cz += a.z; }
+  cx /= atoms.length; cy /= atoms.length; cz /= atoms.length;
+
+  const inv = invertLattice3x3(latticeVecs);
+  const scaledAtoms = atoms.map(a => {
+    const dx = a.x - cx, dy = a.y - cy, dz = a.z - cz;
+    const f1 = inv[0][0] * dx + inv[0][1] * dy + inv[0][2] * dz;
+    const f2 = inv[1][0] * dx + inv[1][1] * dy + inv[1][2] * dz;
+    const f3 = inv[2][0] * dx + inv[2][1] * dy + inv[2][2] * dz;
+    const sf1 = f1 * abScale, sf2 = f2 * abScale, sf3 = f3 * cScale;
+    const x = sf1 * v0[0] + sf2 * v1[0] + sf3 * v2[0] + cx;
+    const y = sf1 * v0[1] + sf2 * v1[1] + sf3 * v2[1] + cy;
+    const z = sf1 * v0[2] + sf2 * v1[2] + sf3 * v2[2] + cz;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+      return { element: a.element, x: cx + (a.x - cx) * factor, y: cy + (a.y - cy) * factor, z: cz + (a.z - cz) * factor };
+    }
+    return { element: a.element, x, y, z };
+  });
+
+  const scaledVecs: LatticeVectors = [
+    v0.map(c => c * abScale) as [number, number, number],
+    v1.map(c => c * abScale) as [number, number, number],
+    v2.map(c => c * cScale) as [number, number, number],
+  ];
+
+  return { atoms: scaledAtoms, latticeVecs: scaledVecs };
+}
+
+function computeHardFloor(el1: string, el2: string, pressureGPa: number): number {
+  const r1 = getCompressedRadius(el1, pressureGPa);
+  const r2 = getCompressedRadius(el2, pressureGPa);
+  const sumR = r1 + r2;
+  const bothH = el1 === "H" && el2 === "H";
+  const oneH = el1 === "H" || el2 === "H";
+
+  let ambientFloor: number;
+  let radiusFrac: number;
+  let absoluteMin: number;
+
+  if (bothH) {
+    ambientFloor = 0.74;
+    radiusFrac = 0.70;
+    absoluteMin = 0.40;
+  } else if (oneH) {
+    ambientFloor = 1.2;
+    radiusFrac = 0.60;
+    absoluteMin = 0.55;
+  } else {
+    ambientFloor = 1.8;
+    radiusFrac = 0.55;
+    absoluteMin = 0.80;
+  }
+
+  if (pressureGPa <= 0) return ambientFloor;
+
+  const radiusBased = Math.max(sumR * radiusFrac, absoluteMin);
+  const blend = Math.min(pressureGPa / 100, 1.0);
+  return ambientFloor * (1 - blend) + radiusBased * blend;
+}
+
+function hasHardDistanceViolation(
+  atoms: AtomPosition[],
+  pressureGPa: number = 0,
+  latticeVecs?: LatticeVectors,
+): { violated: boolean; pair: string; dist: number } {
+  const vecs = latticeVecs ?? estimateLatticeFromAtoms(atoms);
 
   for (let i = 0; i < atoms.length; i++) {
     for (let j = i + 1; j < atoms.length; j++) {
-      const dx = atoms[i].x - atoms[j].x;
-      const dy = atoms[i].y - atoms[j].y;
-      const dz = atoms[i].z - atoms[j].z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const dist = pbcMinImageDist(atoms[i].x, atoms[i].y, atoms[i].z, atoms[j].x, atoms[j].y, atoms[j].z, vecs);
       const a = atoms[i].element, b = atoms[j].element;
-      const bothH = a === "H" && b === "H";
-      const oneH = a === "H" || b === "H";
-      const bothMetal = !oneH;
-      if (bothH && dist < hhFloor) return { violated: true, pair: "H-H", dist };
-      if (oneH && !bothH && dist < hmFloor) return { violated: true, pair: `${a}-${b}`, dist };
-      if (bothMetal && dist < mmFloor) return { violated: true, pair: `${a}-${b}`, dist };
+      const floor = computeHardFloor(a, b, pressureGPa);
+      if (dist < floor) return { violated: true, pair: `${a}-${b}`, dist };
     }
   }
   return { violated: false, pair: "", dist: 0 };
 }
 
-function validateAndFixStructure(atoms: AtomPosition[], formula: string, pressureGPa: number = 0): AtomPosition[] | null {
-  if (atoms.length < 2) return atoms;
+function validateAndFixStructure(
+  atoms: AtomPosition[],
+  formula: string,
+  pressureGPa: number = 0,
+  latticeVecs?: LatticeVectors,
+): { atoms: AtomPosition[]; latticeVecs: LatticeVectors } | null {
+  if (atoms.length < 2) return { atoms, latticeVecs: latticeVecs ?? estimateLatticeFromAtoms(atoms) };
+
+  const vecs = latticeVecs ?? estimateLatticeFromAtoms(atoms);
 
   const hasHydrogen = atoms.some(a => a.element === "H");
   const minVol = hasHydrogen ? MIN_VOLUME_PER_ATOM_HYDRIDE : MIN_VOLUME_PER_ATOM;
@@ -1787,24 +2884,28 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string, pressur
   const expectedVolume = computeExpectedVolume(counts);
   const targetVolPerAtom = Math.max(minVol * pressureVolShrink, (expectedVolume / Math.max(totalFormulaAtoms, 1)) * pressureVolShrink);
 
+  const cfg = STRUCTURAL_VALIDATION_CONFIG;
   let current = atoms;
+  let currentVecs = vecs;
   const nAtoms = Math.max(totalFormulaAtoms, atoms.length);
 
-  for (let attempt = 0; attempt < MAX_SCALE_ATTEMPTS; attempt++) {
-    const { minDist, minRatio } = computePairwiseDistances(current, pressureGPa);
+  let cached = findPairwiseMinDistSpatial(current, pressureGPa, currentVecs);
+
+  for (let attempt = 0; attempt < cfg.maxScaleAttempts; attempt++) {
+    const { minDist, minRatio } = cached;
     const volume = computeBoundingVolume(current);
     const volumePerAtom = volume / nAtoms;
 
-    const distOk = minRatio >= 0.75;
-    const volOk = volumePerAtom >= targetVolPerAtom * 0.5;
-    const volNotTooLarge = volumePerAtom <= targetVolPerAtom * 2.0;
+    const distOk = minRatio >= cfg.minRatioThreshold;
+    const volOk = volumePerAtom >= targetVolPerAtom * cfg.volLowerFraction;
+    const volNotTooLarge = volumePerAtom <= targetVolPerAtom * cfg.volUpperFraction;
 
     if (distOk && volOk && volNotTooLarge) {
-      const hardCheck = hasHardDistanceViolation(current, pressureGPa);
+      const hardCheck = hasHardDistanceViolation(current, pressureGPa, currentVecs);
       if (!hardCheck.violated) {
-        return current;
+        return { atoms: current, latticeVecs: currentVecs };
       }
-      console.log(`[DFT] ${formula}: Hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å @ ${pressureGPa} GPa — continuing scaling`);
+      dftLog(`[DFT] ${formula}: Hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å @ ${pressureGPa} GPa — continuing scaling`);
     }
 
     const volScale = Math.cbrt(targetVolPerAtom / Math.max(volumePerAtom, 0.01));
@@ -1817,29 +2918,31 @@ function validateAndFixStructure(atoms: AtomPosition[], formula: string, pressur
       scaleFactor = volScale;
     }
 
-    scaleFactor = Math.max(scaleFactor, 0.5);
-    scaleFactor = Math.min(scaleFactor, 2.0);
+    scaleFactor = Math.max(scaleFactor, cfg.scaleFactorMin);
+    scaleFactor = Math.min(scaleFactor, cfg.scaleFactorMax);
 
-    console.log(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) @ ${pressureGPa} GPa — scaling by ${scaleFactor.toFixed(3)}`);
-    current = scaleStructure(current, scaleFactor);
+    dftLog(`[DFT] ${formula}: Structure validation attempt ${attempt + 1} — minDist=${minDist.toFixed(3)}Å, ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų (target=${targetVolPerAtom.toFixed(1)}) @ ${pressureGPa} GPa — scaling by ${scaleFactor.toFixed(3)}`);
+    const scaled = scaleStructureAnisotropic(current, scaleFactor, currentVecs, pressureGPa);
+    current = scaled.atoms;
+    currentVecs = scaled.latticeVecs;
+    cached = findPairwiseMinDistSpatial(current, pressureGPa, currentVecs);
   }
 
-  const hardCheck = hasHardDistanceViolation(current, pressureGPa);
+  const hardCheck = hasHardDistanceViolation(current, pressureGPa, currentVecs);
   if (hardCheck.violated) {
-    console.log(`[DFT] ${formula}: Structure REJECTED — hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å @ ${pressureGPa} GPa after ${MAX_SCALE_ATTEMPTS} attempts`);
+    dftLog(`[DFT] ${formula}: Structure REJECTED — hard distance violation ${hardCheck.pair}=${hardCheck.dist.toFixed(3)}Å @ ${pressureGPa} GPa after ${cfg.maxScaleAttempts} attempts`, "info");
     return null;
   }
 
-  const { minRatio } = computePairwiseDistances(current, pressureGPa);
   const volume = computeBoundingVolume(current);
   const volumePerAtom = volume / nAtoms;
 
-  if (minRatio < 0.75 || volumePerAtom < minVol * pressureVolShrink - 0.1) {
-    console.log(`[DFT] ${formula}: Structure REJECTED after ${MAX_SCALE_ATTEMPTS} fix attempts — ratio=${minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų @ ${pressureGPa} GPa`);
+  if (cached.minRatio < cfg.minRatioThreshold || volumePerAtom < minVol * pressureVolShrink - 0.1) {
+    dftLog(`[DFT] ${formula}: Structure REJECTED after ${cfg.maxScaleAttempts} fix attempts — ratio=${cached.minRatio.toFixed(2)}, vol/atom=${volumePerAtom.toFixed(1)}ų @ ${pressureGPa} GPa`, "info");
     return null;
   }
 
-  return current;
+  return { atoms: current, latticeVecs: currentVecs };
 }
 
 function checkVolumeRatioForAtoms(atoms: AtomPosition[], counts: Record<string, number>, label: string, formula: string): boolean {
@@ -1848,7 +2951,7 @@ function checkVolumeRatioForAtoms(atoms: AtomPosition[], counts: Record<string, 
   const expectedVol = computeExpectedVolume(counts);
   const { valid, ratio } = validateVolumeRatio(volume, expectedVol);
   if (!valid) {
-    console.log(`[DFT] ${formula}: Volume ratio check FAILED for ${label} — generated=${volume.toFixed(1)}ų, expected=${expectedVol.toFixed(1)}ų, ratio=${ratio.toFixed(2)} (must be 0.5-2.0)`);
+    dftLog(`[DFT] ${formula}: Volume ratio check FAILED for ${label} — generated=${volume.toFixed(1)}ų, expected=${expectedVol.toFixed(1)}ų, ratio=${ratio.toFixed(2)} (must be 0.5-2.0)`);
   }
   return valid;
 }
@@ -1863,7 +2966,7 @@ function checkRadiusCompatibility(elements: string[]): boolean {
   return true;
 }
 
-function generateCrystalStructure(formula: string, pressureGPa: number = 0): { atoms: AtomPosition[]; prototype: string } {
+function generateCrystalStructure(formula: string, pressureGPa: number = 0): { atoms: AtomPosition[]; prototype: string; latticeVecs?: LatticeVectors } {
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
 
@@ -1872,30 +2975,30 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
   }
 
   if (elements.length > 5) {
-    console.log(`[DFT] ${formula}: Rejected — ${elements.length} distinct elements exceeds limit of 5`);
+    dftLog(`[DFT] ${formula}: Rejected — ${elements.length} distinct elements exceeds limit of 5`, "info");
     return { atoms: [], prototype: "rejected-too-complex" };
   }
 
   const totalAtomCount = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
   if (totalAtomCount > 20) {
-    console.log(`[DFT] ${formula}: Rejected — ${totalAtomCount} total atoms exceeds limit of 20`);
+    dftLog(`[DFT] ${formula}: Rejected — ${totalAtomCount} total atoms exceeds limit of 20`, "info");
     return { atoms: [], prototype: "rejected-too-complex" };
   }
 
   if (!checkRadiusCompatibility(elements)) {
-    console.log(`[DFT] ${formula}: Radius incompatibility — non-H element radii ratio > 3.0`);
+    dftLog(`[DFT] ${formula}: Radius incompatibility — non-H element radii ratio > 3.0`);
     return { atoms: [], prototype: "rejected-radius" };
   }
 
   const bvsResult = computeBondValenceSum(formula);
   if (bvsResult.deviation > 1.0) {
-    console.log(`[DFT] ${formula}: BVS deviation too high (${bvsResult.deviation.toFixed(2)} > 1.0) — rejecting before structure generation`);
+    dftLog(`[DFT] ${formula}: BVS deviation too high (${bvsResult.deviation.toFixed(2)} > 1.0) — rejecting before structure generation`);
     return { atoms: [], prototype: "rejected-bvs" };
   }
 
   const ionicResult = checkIonicRadiusCompatibility(formula);
   if (!ionicResult.compatible) {
-    console.log(`[DFT] ${formula}: Ionic radius incompatibility (ratio=${ionicResult.radiusRatio.toFixed(2)}, tolerance=${ionicResult.toleranceFactor?.toFixed(2) ?? "N/A"}) — rejecting`);
+    dftLog(`[DFT] ${formula}: Ionic radius incompatibility (ratio=${ionicResult.radiusRatio.toFixed(2)}, tolerance=${ionicResult.toleranceFactor?.toFixed(2) ?? "N/A"}) — rejecting`);
     return { atoms: [], prototype: "rejected-ionic-radius" };
   }
 
@@ -1910,41 +3013,53 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
       z: a.z,
     }));
     const deduped = deduplicateSites(atomPositions);
-    const validated = validateAndFixStructure(deduped, formula, pressureGPa);
-    if (!validated) return { atoms: [], prototype: "rejected-overlap" };
-    if (!checkVolumeRatioForAtoms(validated, counts, chemProto.templateName, formula)) {
+    const vResult = validateAndFixStructure(deduped, formula, pressureGPa);
+    if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
+    if (!checkVolumeRatioForAtoms(vResult.atoms, counts, chemProto.templateName, formula)) {
       return { atoms: [], prototype: "rejected-volume-ratio" };
     }
     prototypeSuccesses++;
-    return { atoms: validated, prototype: `${chemProto.templateName} prototype lattice` };
+    return { atoms: vResult.atoms, prototype: `${chemProto.templateName} prototype lattice`, latticeVecs: vResult.latticeVecs };
   }
 
   const hCount = counts["H"] || 0;
   const metalElements = elements.filter(el => el !== "H");
   const totalMetalCount = metalElements.reduce((s, el) => s + Math.round(counts[el] || 0), 0);
-  if (hCount > 0 && totalMetalCount > 0 && (hCount / totalMetalCount) >= 4) {
-    const hydrideCage = generateHydrideCageStructure(formula, counts);
+  const hMetalRatio = totalMetalCount > 0 ? hCount / totalMetalCount : 0;
+  if (hCount > 0 && totalMetalCount > 0 && hMetalRatio >= 4) {
+    const hydrideCage = generateHydrideCageStructure(formula, counts, pressureGPa);
     if (hydrideCage && hydrideCage.atoms.length >= 2) {
-      const dedupedHydride = deduplicateSites(hydrideCage.atoms);
-      const validated = validateAndFixStructure(dedupedHydride, formula, pressureGPa);
-      if (validated) {
-        prototypeSuccesses++;
-        return { atoms: validated, prototype: hydrideCage.prototype };
+      const dedupedHydride = deduplicateSites(hydrideCage.atoms, hydrideCage.latticeVecs);
+      if (isDuplicateCageStructure(formula, dedupedHydride, hydrideCage.latticeVecs)) {
+        dftLog(`[DFT] ${formula}: Hydride cage rejected — structurally duplicate of previous cage`);
+      } else {
+        const vResult = validateAndFixStructure(dedupedHydride, formula, pressureGPa, hydrideCage.latticeVecs);
+        if (vResult) {
+          prototypeSuccesses++;
+          return { atoms: vResult.atoms, prototype: hydrideCage.prototype, latticeVecs: vResult.latticeVecs };
+        }
       }
     }
+  } else if (hCount > 0 && totalMetalCount > 0) {
+    dftLog(`[DFT] ${formula}: H/metal ratio ${hMetalRatio.toFixed(2)} < 4 — skipping hydride cage generation`);
+  } else if (hCount > 0 && totalMetalCount === 0) {
+    dftLog(`[DFT] ${formula}: Non-hydride stoichiometry (no metals) — skipping cage generation`);
   }
 
-  const protoMatch = matchPrototype(counts);
+  const profile = buildChemicalProfile(counts);
+
+  const protoMatch = matchPrototype(counts, profile);
   if (protoMatch) {
-    const atoms = deduplicateSites(buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts));
+    const built = buildStructureFromPrototype(protoMatch.proto, protoMatch.siteMap, elements, counts, 1, pressureGPa);
+    const atoms = deduplicateSites(built.atoms, built.latticeVecs);
     if (atoms.length >= 2) {
-      const validated = validateAndFixStructure(atoms, formula, pressureGPa);
-      if (!validated) return { atoms: [], prototype: "rejected-overlap" };
-      if (!checkVolumeRatioForAtoms(validated, counts, protoMatch.proto.name, formula)) {
+      const vResult = validateAndFixStructure(atoms, formula, pressureGPa, built.latticeVecs);
+      if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
+      if (!checkVolumeRatioForAtoms(vResult.atoms, counts, protoMatch.proto.name, formula)) {
         return { atoms: [], prototype: "rejected-volume-ratio" };
       }
       prototypeSuccesses++;
-      return { atoms: validated, prototype: protoMatch.proto.name };
+      return { atoms: vResult.atoms, prototype: protoMatch.proto.name, latticeVecs: vResult.latticeVecs };
     }
   }
 
@@ -1962,45 +3077,49 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
     }
   }
 
-  const scaledMatch = matchPrototype(scaledCounts);
+  const scaledProfile = buildChemicalProfile(scaledCounts);
+
+  const scaledMatch = matchPrototype(scaledCounts, scaledProfile);
   if (scaledMatch) {
-    const atoms = deduplicateSites(buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts));
+    const scaledBuilt = buildStructureFromPrototype(scaledMatch.proto, scaledMatch.siteMap, elements, scaledCounts, 1, pressureGPa);
+    const atoms = deduplicateSites(scaledBuilt.atoms, scaledBuilt.latticeVecs);
     if (atoms.length >= 2) {
-      const validated = validateAndFixStructure(atoms, formula, pressureGPa);
-      if (!validated) return { atoms: [], prototype: "rejected-overlap" };
-      if (!checkVolumeRatioForAtoms(validated, scaledCounts, scaledMatch.proto.name + "-scaled", formula)) {
+      const vResult = validateAndFixStructure(atoms, formula, pressureGPa, scaledBuilt.latticeVecs);
+      if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
+      if (!checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, scaledMatch.proto.name + "-scaled", formula)) {
         return { atoms: [], prototype: "rejected-volume-ratio" };
       }
       prototypeSuccesses++;
-      return { atoms: validated, prototype: scaledMatch.proto.name + "-scaled" };
+      return { atoms: vResult.atoms, prototype: scaledMatch.proto.name + "-scaled", latticeVecs: vResult.latticeVecs };
     }
   }
 
   chemistryMatchAttempts++;
-  const chemMatch = selectBestPrototypeByChemistry(scaledCounts, elements);
+  const chemMatch = selectBestPrototypeByChemistry(scaledCounts, elements, scaledProfile);
   if (chemMatch) {
-    const atoms = deduplicateSites(buildStructureFromPrototype(chemMatch.proto, chemMatch.siteMap, elements, scaledCounts));
+    const chemBuilt = buildStructureFromPrototype(chemMatch.proto, chemMatch.siteMap, elements, scaledCounts, 1, pressureGPa);
+    const atoms = deduplicateSites(chemBuilt.atoms, chemBuilt.latticeVecs);
     if (atoms.length >= 2) {
-      const validated = validateAndFixStructure(atoms, formula, pressureGPa);
-      if (validated) {
-        if (checkVolumeRatioForAtoms(validated, scaledCounts, chemMatch.proto.name + "-chem", formula)) {
+      const vResult = validateAndFixStructure(atoms, formula, pressureGPa, chemBuilt.latticeVecs);
+      if (vResult) {
+        if (checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, chemMatch.proto.name + "-chem", formula)) {
           prototypeSuccesses++;
           chemistryMatchSuccesses++;
-          console.log(`[DFT] ${formula}: Chemistry-based prototype match → ${chemMatch.proto.name}`);
-          return { atoms: validated, prototype: chemMatch.proto.name + "-chem" };
+          dftLog(`[DFT] ${formula}: Chemistry-based prototype match → ${chemMatch.proto.name}`);
+          return { atoms: vResult.atoms, prototype: chemMatch.proto.name + "-chem", latticeVecs: vResult.latticeVecs };
         }
       }
     }
   }
 
   const { atoms, proto } = buildGenericStructure(scaledCounts);
-  const validated = validateAndFixStructure(atoms, formula, pressureGPa);
-  if (!validated) return { atoms: [], prototype: "rejected-overlap" };
-  if (!checkVolumeRatioForAtoms(validated, scaledCounts, proto, formula)) {
+  const vResult = validateAndFixStructure(atoms, formula, pressureGPa);
+  if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
+  if (!checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, proto, formula)) {
     return { atoms: [], prototype: "rejected-volume-ratio" };
   }
   prototypeSuccesses++;
-  return { atoms: validated, prototype: proto };
+  return { atoms: vResult.atoms, prototype: proto, latticeVecs: vResult.latticeVecs };
 }
 
 function writeXYZ(atoms: AtomPosition[], filepath: string, comment: string = ""): void {
@@ -2018,9 +3137,9 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
     charges: {},
   };
 
-  const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
-  if (energyMatch) {
-    result.totalEnergy = parseFloat(energyMatch[1]);
+  const parsedEnergy = parseXTBEnergy(output);
+  if (parsedEnergy !== null) {
+    result.totalEnergy = parsedEnergy;
   }
 
   const gapMatch = output.match(/HOMO-LUMO GAP\s+([-\d.]+)\s+eV/);
@@ -2074,16 +3193,50 @@ const optimizedStructureCache = new Map<string, OptimizationResult>();
 const CACHE_MAX = 500;
 const OPT_TIMEOUT_MS = 30_000;
 
-function parseOptimizedXYZ(filepath: string): AtomPosition[] {
-  if (!fs.existsSync(filepath)) return [];
+const XTB_ENERGY_RE = /TOTAL ENERGY\s+([-+]?\d*\.?\d+(?:[eEdD][-+]?\d+)?)\s+Eh/;
+
+function parseXTBEnergy(output: string): number | null {
+  const m = output.match(XTB_ENERGY_RE);
+  if (!m) return null;
+  const raw = m[1].replace(/[dD]/, "e");
+  const val = parseFloat(raw);
+  return isFinite(val) ? val : null;
+}
+
+function uniqueCalcId(prefix: string): string {
+  return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
+}
+
+async function execShellAsync(cmd: string, options: { timeout?: number; env?: NodeJS.ProcessEnv; maxBuffer?: number }): Promise<string> {
+  const { stdout } = await execFileAsync("/bin/sh", ["-c", cmd], {
+    timeout: options.timeout,
+    env: options.env as NodeJS.ProcessEnv,
+    maxBuffer: options.maxBuffer,
+  });
+  return stdout;
+}
+
+function parseOptimizedXYZ(filepath: string, label: string = ""): AtomPosition[] {
+  const tag = label ? ` (${label})` : "";
+  if (!fs.existsSync(filepath)) {
+    dftLog(`[DFT]${tag}: XYZ file not found at ${path.basename(filepath)} — xTB may have crashed before writing output`, "info");
+    return [];
+  }
   const content = fs.readFileSync(filepath, "utf-8").trim();
   const lines = content.split("\n");
-  if (lines.length < 3) return [];
+  if (lines.length < 3) {
+    dftLog(`[DFT]${tag}: XYZ file ${path.basename(filepath)} has only ${lines.length} lines — xTB produced truncated output`, "info");
+    return [];
+  }
 
   const atomCount = parseInt(lines[0].trim(), 10);
-  if (isNaN(atomCount) || atomCount < 1) return [];
+  if (isNaN(atomCount) || atomCount < 1) {
+    dftLog(`[DFT]${tag}: XYZ file ${path.basename(filepath)} has invalid atom count "${lines[0].trim()}" — malformed header`, "info");
+    return [];
+  }
 
   const atoms: AtomPosition[] = [];
+  let skippedLines = 0;
   for (let i = 2; i < Math.min(lines.length, atomCount + 2); i++) {
     const parts = lines[i].trim().split(/\s+/);
     if (parts.length >= 4) {
@@ -2093,9 +3246,20 @@ function parseOptimizedXYZ(filepath: string): AtomPosition[] {
       const z = parseFloat(parts[3]);
       if (element.match(/^[A-Z][a-z]?$/) && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
         atoms.push({ element, x, y, z });
+      } else {
+        skippedLines++;
       }
+    } else {
+      skippedLines++;
     }
   }
+
+  if (atoms.length === 0) {
+    dftLog(`[DFT]${tag}: XYZ file ${path.basename(filepath)} declared ${atomCount} atoms but none could be parsed — xTB produced invalid coordinates`, "info");
+  } else if (skippedLines > 0) {
+    dftLog(`[DFT]${tag}: XYZ file ${path.basename(filepath)} had ${skippedLines} unparseable lines out of ${atomCount} declared atoms`);
+  }
+
   return atoms;
 }
 
@@ -2146,9 +3310,21 @@ function applyPressureScaling(atoms: AtomPosition[], formula: string, pressureGp
   if (pressureGpa <= 0) return atoms;
   try {
     const bm = relaxStructureAtPressure(formula, pressureGpa);
-    const eta = bm.compressedVolume > 0 && bm.bulkModulus > 0
-      ? Math.pow(bm.compressedVolume / (bm.compressedLattice.a * bm.compressedLattice.b * bm.compressedLattice.c / Math.pow(Math.pow(bm.compressedVolume, 1/3) / bm.compressedLattice.a, 3) || 1), 1/3)
-      : 1.0;
+    if (!bm || bm.bulkModulus <= 0 || !isFinite(bm.bulkModulus)) {
+      dftLog(`[DFT] ${formula}: Pressure scaling skipped — invalid bulk modulus (${bm?.bulkModulus})`);
+      return atoms;
+    }
+    const lattA = bm.compressedLattice?.a ?? 0;
+    const lattB = bm.compressedLattice?.b ?? 0;
+    const lattC = bm.compressedLattice?.c ?? 0;
+    if (lattA <= 0 || lattB <= 0 || lattC <= 0 || !isFinite(lattA) || !isFinite(lattB) || !isFinite(lattC)) {
+      dftLog(`[DFT] ${formula}: Pressure scaling skipped — invalid lattice params (a=${lattA}, b=${lattB}, c=${lattC})`);
+      return atoms;
+    }
+    if (bm.compressedVolume <= 0 || !isFinite(bm.compressedVolume)) {
+      dftLog(`[DFT] ${formula}: Pressure scaling skipped — invalid compressed volume (${bm.compressedVolume})`);
+      return atoms;
+    }
     const cubicEta = (() => {
       const B0p = 4.0;
       const pOverB = pressureGpa / Math.max(10, bm.bulkModulus);
@@ -2157,6 +3333,7 @@ function applyPressureScaling(atoms: AtomPosition[], formula: string, pressureGp
       return Math.pow(0.5, 1 / 3);
     })();
     const scale = Math.max(0.8, Math.min(1.0, cubicEta));
+    if (!isFinite(scale)) return atoms;
     return atoms.map(a => ({
       element: a.element,
       x: a.x * scale,
@@ -2179,21 +3356,21 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
   }
 
   if (!fs.existsSync(XTB_BIN)) {
-    console.log(`[DFT] xTB binary not found at ${XTB_BIN}`);
+    dftLog(`[DFT] xTB binary not found at ${XTB_BIN}`, "info");
     return null;
   }
 
   const startTime = Date.now();
-  const calcId = `opt_${cacheKey.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
+  const calcId = uniqueCalcId(`opt_${cacheKey.replace(/[^a-zA-Z0-9]/g, "_")}`);
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  let { atoms, prototype } = generateCrystalStructure(formula, pressureGpa);
+  let { atoms, prototype, latticeVecs: structLatticeVecs } = generateCrystalStructure(formula, pressureGpa);
   if (atoms.length < 2) return null;
 
   if (pressureGpa > 0) {
     atoms = applyPressureScaling(atoms, formula, pressureGpa);
-    console.log(`[DFT] ${formula}: Pressure-scaled geometry at ${pressureGpa} GPa for xTB optimization`);
+    dftLog(`[DFT] ${formula}: Pressure-scaled geometry at ${pressureGpa} GPa for xTB optimization`);
   }
 
   const xyzPath = path.join(calcDir, "input.xyz");
@@ -2210,7 +3387,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
 
     const cmd = `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`;
     if (!cmd.includes("/xtb ")) {
-      console.log(`[DFT] WARNING: Geometry optimization command malformed: ${cmd.slice(0, 200)}`);
+      dftLog(`[DFT] WARNING: Geometry optimization command malformed: ${cmd.slice(0, 200)}`, "info");
       return null;
     }
 
@@ -2222,12 +3399,12 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
     const optInfo = parseOptimizationOutput(output);
 
     const optXyzPath = path.join(calcDir, "xtbopt.xyz");
-    let optimizedAtoms = parseOptimizedXYZ(optXyzPath);
+    let optimizedAtoms = parseOptimizedXYZ(optXyzPath, formula);
 
     if (optimizedAtoms.length === 0) {
       const altPath = path.join(calcDir, "xtbopt.coord");
       if (fs.existsSync(altPath)) {
-        optimizedAtoms = parseOptimizedXYZ(altPath);
+        optimizedAtoms = parseOptimizedXYZ(altPath, formula);
       }
     }
 
@@ -2235,24 +3412,16 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
       optimizedAtoms = atoms;
     }
 
-    let optimizedEnergy = 0;
-    const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
-    if (energyMatch) {
-      optimizedEnergy = parseFloat(energyMatch[1]);
-    }
+    let optimizedEnergy = parseXTBEnergy(output) ?? 0;
 
     if (pressureGpa > 0 && optimizedAtoms.length > 0) {
-      const xExt = optimizedAtoms.map(a => a.x);
-      const yExt = optimizedAtoms.map(a => a.y);
-      const zExt = optimizedAtoms.map(a => a.z);
-      const vol_A3 = Math.max(1, (Math.max(...xExt) - Math.min(...xExt) + 2.0) *
-        (Math.max(...yExt) - Math.min(...yExt) + 2.0) *
-        (Math.max(...zExt) - Math.min(...zExt) + 2.0));
-      const eV_per_GPa_A3 = 0.006242;
+      const pvLattice = structLatticeVecs ?? estimateLatticeFromAtoms(optimizedAtoms);
+      const vol_A3 = Math.max(1, Math.abs(lattice3x3Det(pvLattice)));
+      const eV_per_GPa_A3 = 0.00624151;
       const pvCorrection = pressureGpa * vol_A3 * eV_per_GPa_A3;
-      const pvHartree = pvCorrection / 27.2114;
+      const pvHartree = pvCorrection / 27.211386;
       optimizedEnergy += pvHartree;
-      console.log(`[DFT] ${formula}: PV correction at ${pressureGpa} GPa: +${pvHartree.toFixed(6)} Eh (V~${vol_A3.toFixed(1)} A^3)`);
+      dftLog(`[DFT] ${formula}: PV correction at ${pressureGpa} GPa: +${pvHartree.toFixed(6)} Eh (V~${vol_A3.toFixed(1)} A^3)`);
     }
 
     const result: OptimizationResult = {
@@ -2298,12 +3467,12 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
         result.distortion = distortion;
         recordDistortionAnalysis(distortion);
         if (distortion.overallLevel !== "none") {
-          console.log(`[DFT] ${formula}: Distortion detected (${distortion.overallLevel}, score=${distortion.overallScore}, meanDisp=${distortion.atomicDistortion?.meanDisplacement?.toFixed(4) ?? "N/A"}A, strain=${distortion.latticeDistortion.strainMagnitude.toFixed(5)}, vol=${distortion.latticeDistortion.volumeChangePct.toFixed(2)}%)${distortion.symmetryReduction?.symmetryBroken ? ` [symmetry broken: ${distortion.symmetryReduction.systemBefore}->${distortion.symmetryReduction.systemAfter}]` : ""}`);
+          dftLog(`[DFT] ${formula}: Distortion detected (${distortion.overallLevel}, score=${distortion.overallScore}, meanDisp=${distortion.atomicDistortion?.meanDisplacement?.toFixed(4) ?? "N/A"}A, strain=${distortion.latticeDistortion.strainMagnitude.toFixed(5)}, vol=${distortion.latticeDistortion.volumeChangePct.toFixed(2)}%)${distortion.symmetryReduction?.symmetryBroken ? ` [symmetry broken: ${distortion.symmetryReduction.systemBefore}->${distortion.symmetryReduction.systemAfter}]` : ""}`);
         }
       } catch {}
     }
 
-    if (result.converged && optimizedAtoms.length >= 2) {
+    if (optimizedAtoms.length >= 2) {
       optimizedStructureCache.set(cacheKey, result);
       if (optimizedStructureCache.size > CACHE_MAX) {
         const oldest = optimizedStructureCache.keys().next().value;
@@ -2314,7 +3483,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
     return result;
   } catch (err: any) {
     const isTimeout = err.killed || (err.message && err.message.includes("TIMEOUT"));
-    console.log(`[DFT] ${formula}: Geometry optimization ${isTimeout ? "timed out" : "failed"}: ${err.message?.slice(0, 500) || String(err).slice(0, 500)}`);
+    dftLog(`[DFT] ${formula}: Geometry optimization ${isTimeout ? "timed out" : "failed"}: ${err.message?.slice(0, 500) || String(err).slice(0, 500)}`, "info");
     return null;
   } finally {
     try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
@@ -2350,6 +3519,7 @@ const LANDSCAPE_ENERGY_THRESHOLD = 0.005;
 const LANDSCAPE_DISP_THRESHOLD = 0.15;
 
 export async function runLandscapeExploration(formula: string): Promise<EnergyLandscapeResult | null> {
+  formula = normalizeFormula(formula);
   const cacheKey = formula.replace(/\s+/g, "");
   if (landscapeCache.has(cacheKey)) return landscapeCache.get(cacheKey)!;
 
@@ -2368,17 +3538,36 @@ export async function runLandscapeExploration(formula: string): Promise<EnergyLa
 
   for (let pi = 0; pi < Math.min(LANDSCAPE_PERTURBATION_COUNT, perturbationScales.length); pi++) {
     const scale = perturbationScales[pi];
-    const calcId = `landscape_${cacheKey}_p${pi}_${Date.now()}`;
+    const calcId = uniqueCalcId(`landscape_${cacheKey}_p${pi}`);
     const calcDir = path.join(WORK_DIR, calcId);
     fs.mkdirSync(calcDir, { recursive: true });
 
     try {
-      const perturbedAtoms: AtomPosition[] = refAtoms.map(a => ({
-        element: a.element,
-        x: a.x + (Math.random() - 0.5) * 2 * scale,
-        y: a.y + (Math.random() - 0.5) * 2 * scale,
-        z: a.z + (Math.random() - 0.5) * 2 * scale,
-      }));
+      const useLatticeStrain = pi % 2 === 1;
+      let perturbedAtoms: AtomPosition[];
+
+      if (useLatticeStrain) {
+        const strainMag = scale * 0.5;
+        const sx = 1.0 + (Math.random() - 0.5) * 2 * strainMag;
+        const sy = 1.0 + (Math.random() - 0.5) * 2 * strainMag;
+        const sz = 1.0 + (Math.random() - 0.5) * 2 * strainMag;
+        const shearXY = (Math.random() - 0.5) * strainMag * 0.3;
+        const shearXZ = (Math.random() - 0.5) * strainMag * 0.3;
+        const shearYZ = (Math.random() - 0.5) * strainMag * 0.3;
+        perturbedAtoms = refAtoms.map(a => ({
+          element: a.element,
+          x: a.x * sx + a.y * shearXY + a.z * shearXZ,
+          y: a.y * sy + a.z * shearYZ,
+          z: a.z * sz,
+        }));
+      } else {
+        perturbedAtoms = refAtoms.map(a => ({
+          element: a.element,
+          x: a.x + (Math.random() - 0.5) * 2 * scale,
+          y: a.y + (Math.random() - 0.5) * 2 * scale,
+          z: a.z + (Math.random() - 0.5) * 2 * scale,
+        }));
+      }
 
       const xyzPath = path.join(calcDir, "input.xyz");
       writeXYZ(perturbedAtoms, xyzPath, `${formula} perturbation ${pi} scale=${scale}`);
@@ -2395,23 +3584,24 @@ export async function runLandscapeExploration(formula: string): Promise<EnergyLa
       const output = execSync(cmd, { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }).toString();
 
       const optInfo = parseOptimizationOutput(output);
-      let optEnergy = 0;
-      const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
-      if (energyMatch) optEnergy = parseFloat(energyMatch[1]);
+      const optEnergy = parseXTBEnergy(output) ?? 0;
 
       const optXyzPath = path.join(calcDir, "xtbopt.xyz");
-      let optimizedAtoms = parseOptimizedXYZ(optXyzPath);
+      let optimizedAtoms = parseOptimizedXYZ(optXyzPath, formula);
       if (optimizedAtoms.length === 0) optimizedAtoms = perturbedAtoms;
 
       let rmsDisp = 0;
       const nAtoms = Math.min(refAtoms.length, optimizedAtoms.length);
       if (nAtoms > 0) {
+        const dispLattice = estimateLatticeFromAtoms(refAtoms);
         let sumSq = 0;
         for (let i = 0; i < nAtoms; i++) {
-          const dx = optimizedAtoms[i].x - refAtoms[i].x;
-          const dy = optimizedAtoms[i].y - refAtoms[i].y;
-          const dz = optimizedAtoms[i].z - refAtoms[i].z;
-          sumSq += dx * dx + dy * dy + dz * dz;
+          const d = pbcMinImageDist(
+            optimizedAtoms[i].x, optimizedAtoms[i].y, optimizedAtoms[i].z,
+            refAtoms[i].x, refAtoms[i].y, refAtoms[i].z,
+            dispLattice,
+          );
+          sumSq += d * d;
         }
         rmsDisp = Math.sqrt(sumSq / nAtoms);
       }
@@ -2462,7 +3652,7 @@ export async function runLandscapeExploration(formula: string): Promise<EnergyLa
   }
 
   if (result.distortionModesExist) {
-    console.log(`[DFT] ${formula}: Energy landscape exploration found ${uniqueMinima} unique minima (spread=${result.energySpread.toFixed(5)} Eh, ${minima.length} perturbations)`);
+    dftLog(`[DFT] ${formula}: Energy landscape exploration found ${uniqueMinima} unique minima (spread=${result.energySpread.toFixed(5)} Eh, ${minima.length} perturbations)`);
   }
 
   return result;
@@ -2505,12 +3695,13 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
   formula = normalizeFormula(formula);
   const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
   const cacheKey = formula.replace(/\s+/g, "") + pressureTag;
-  if (xtbResultCache.has(cacheKey)) {
-    return xtbResultCache.get(cacheKey)!;
+  const cached = xtbResultCache.get(cacheKey);
+  if (cached && cached.converged) {
+    return cached;
   }
 
   const startTime = Date.now();
-  const calcId = `${cacheKey.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
+  const calcId = uniqueCalcId(cacheKey.replace(/[^a-zA-Z0-9]/g, "_"));
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
@@ -2526,11 +3717,23 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
   }
 
   if (atoms.length < 2) {
-    let generated = generateCrystalStructure(formula, pressureGpa);
-    atoms = generated.atoms;
-    prototype = generated.prototype;
-    if (pressureGpa > 0 && atoms.length >= 2) {
-      atoms = applyPressureScaling(atoms, formula, pressureGpa);
+    const optCacheKey = formula.replace(/\s+/g, "") + pressureTag;
+    const cachedOpt = optimizedStructureCache.get(optCacheKey);
+    if (cachedOpt && cachedOpt.optimizedAtoms.length >= 2) {
+      atoms = cachedOpt.optimizedAtoms;
+      if (cachedOpt.converged) {
+        prototype = "xTB-optimized-cached";
+        isOptimized = true;
+      } else {
+        prototype = "xTB-unconverged-cached";
+      }
+    } else {
+      let generated = generateCrystalStructure(formula, pressureGpa);
+      atoms = generated.atoms;
+      prototype = generated.prototype;
+      if (pressureGpa > 0 && atoms.length >= 2) {
+        atoms = applyPressureScaling(atoms, formula, pressureGpa);
+      }
     }
     if (atoms.length < 2) return null;
   }
@@ -2607,7 +3810,7 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
     fs.rmSync(calcDir, { recursive: true, force: true });
   } catch {}
 
-  if (result.converged) {
+  if (result.converged || result.totalEnergy !== 0) {
     xtbResultCache.set(cacheKey, result);
     if (xtbResultCache.size > CACHE_MAX) {
       const oldest = xtbResultCache.keys().next().value;
@@ -2661,20 +3864,47 @@ const COHESIVE_ENERGIES_EV: Record<string, number> = {
   Am: 2.73, Cm: 3.99,
 };
 
+function applyCohesiveCorrection(element: string, clusterEnergyPerAtom: number, refType: string): number {
+  const cohesiveEv = COHESIVE_ENERGIES_EV[element];
+  if (cohesiveEv === undefined || cohesiveEv <= 0) return clusterEnergyPerAtom;
+  const HA_TO_EV = 27.211386;
+  const cohesiveHa = cohesiveEv / HA_TO_EV;
+  const isMolecular = MOLECULAR_ELEMENTS.has(element);
+  let correctionHa: number;
+  if (isMolecular) {
+    correctionHa = cohesiveHa * 0.5;
+  } else if (refType === "cluster") {
+    correctionHa = cohesiveHa * 0.35;
+  } else if (refType === "dimer") {
+    correctionHa = cohesiveHa * 0.55;
+  } else {
+    correctionHa = cohesiveHa * 0.85;
+  }
+  return clusterEnergyPerAtom - correctionHa;
+}
+
 async function computeElementalEnergy(element: string): Promise<number | null> {
   if (elementRefEnergies.has(element)) {
     return elementRefEnergies.get(element) ?? null;
   }
 
-  const calcDir = path.join(WORK_DIR, `ref_${element}_${Date.now()}`);
+  const calcDir = path.join(WORK_DIR, uniqueCalcId(`ref_${element}`));
   fs.mkdirSync(calcDir, { recursive: true });
 
   const isMolecular = MOLECULAR_ELEMENTS.has(element);
-  const nnDist = BULK_NN_DISTANCES[element];
+  let nnDist = BULK_NN_DISTANCES[element];
+  if (nnDist === undefined && !isMolecular) {
+    const elData = getElementData(element);
+    if (elData && elData.atomicRadius > 0) {
+      nnDist = (elData.atomicRadius / 100) * 2;
+      dftLog(`[DFT] ${element}: NN distance estimated from atomic radius: ${nnDist.toFixed(2)}Å`);
+    }
+  }
   const useCluster = !isMolecular && nnDist !== undefined;
   let atoms: AtomPosition[];
   let divisor: number;
   let refLabel: string;
+  let refType: string;
 
   if (isMolecular) {
     const bondLength = MOLECULAR_BOND_LENGTHS[element] ?? 1.5;
@@ -2684,6 +3914,7 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
     ];
     divisor = 2;
     refLabel = "dimer";
+    refType = "molecular";
   } else if (useCluster) {
     const d = nnDist;
     atoms = [
@@ -2694,10 +3925,12 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
     ];
     divisor = 4;
     refLabel = `4-atom cluster (NN=${d.toFixed(2)}Å)`;
+    refType = "cluster";
   } else {
     atoms = [{ element, x: 0, y: 0, z: 0 }];
     divisor = 1;
     refLabel = "isolated atom (fallback)";
+    refType = "isolated";
   }
 
   const xyzPath = path.join(calcDir, `${element}.xyz`);
@@ -2712,39 +3945,41 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
       OMP_STACKSIZE: "512M",
     };
 
-    const output = execSync(
+    const output = await execShellAsync(
       `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp 2>&1`,
-      { timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
-    ).toString();
+      { timeout: 30000, env: env as NodeJS.ProcessEnv, maxBuffer: 20 * 1024 * 1024 }
+    );
 
-    const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
-    if (energyMatch && output.includes("normal termination")) {
-      const energyPerAtom = parseFloat(energyMatch[1]) / divisor;
-      console.log(`[DFT] ${element}: xTB ref energy = ${energyPerAtom.toFixed(4)} Ha/atom (${refLabel})`);
-      elementRefEnergies.set(element, energyPerAtom);
+    const parsedEnergy = parseXTBEnergy(output);
+    if (parsedEnergy !== null && output.includes("normal termination")) {
+      const rawEnergyPerAtom = parsedEnergy / divisor;
+      const bulkRefEnergy = applyCohesiveCorrection(element, rawEnergyPerAtom, refType);
+      dftLog(`[DFT] ${element}: xTB ref energy = ${bulkRefEnergy.toFixed(4)} Ha/atom (${refLabel}, cohesive correction applied)`);
+      elementRefEnergies.set(element, bulkRefEnergy);
       try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
-      return energyPerAtom;
+      return bulkRefEnergy;
     }
 
     if (useCluster) {
-      console.log(`[DFT] ${element}: Cluster reference failed, falling back to dimer`);
+      dftLog(`[DFT] ${element}: Cluster reference failed, falling back to dimer`);
       const dimerAtoms: AtomPosition[] = [
         { element, x: 0, y: 0, z: 0 },
         { element, x: nnDist, y: 0, z: 0 },
       ];
       const dimerPath = path.join(calcDir, `${element}_dimer.xyz`);
       writeXYZ(dimerAtoms, dimerPath, `${element} dimer fallback`);
-      const dimerOut = execSync(
+      const dimerOut = await execShellAsync(
         `cd ${calcDir} && ${XTB_BIN} ${dimerPath} --gfn 2 --sp 2>&1`,
-        { timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
-      ).toString();
-      const dimerMatch = dimerOut.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
-      if (dimerMatch && dimerOut.includes("normal termination")) {
-        const energyPerAtom = parseFloat(dimerMatch[1]) / 2;
-        console.log(`[DFT] ${element}: xTB ref energy = ${energyPerAtom.toFixed(4)} Ha/atom (dimer fallback, NN=${nnDist.toFixed(2)}Å)`);
-        elementRefEnergies.set(element, energyPerAtom);
+        { timeout: 30000, env: env as NodeJS.ProcessEnv, maxBuffer: 20 * 1024 * 1024 }
+      );
+      const dimerEnergy = parseXTBEnergy(dimerOut);
+      if (dimerEnergy !== null && dimerOut.includes("normal termination")) {
+        const rawEnergyPerAtom = dimerEnergy / 2;
+        const bulkRefEnergy = applyCohesiveCorrection(element, rawEnergyPerAtom, "dimer");
+        dftLog(`[DFT] ${element}: xTB ref energy = ${bulkRefEnergy.toFixed(4)} Ha/atom (dimer fallback, NN=${nnDist.toFixed(2)}Å, cohesive correction applied)`);
+        elementRefEnergies.set(element, bulkRefEnergy);
         try { fs.rmSync(calcDir, { recursive: true, force: true }); } catch {}
-        return energyPerAtom;
+        return bulkRefEnergy;
       }
     }
   } catch {}
@@ -2758,9 +3993,10 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
 }
 
 export async function computeFormationEnergy(formula: string, dftResult: DFTResult): Promise<number | null> {
+  formula = normalizeFormula(formula);
   if (!dftResult.converged || dftResult.totalEnergy === 0) return null;
   if (dftResult.totalEnergy > 0) {
-    console.log(`[DFT] ${formula}: Positive total energy (${dftResult.totalEnergy.toFixed(4)} Ha) — xTB produced invalid result, skipping Ef`);
+    dftLog(`[DFT] ${formula}: Positive total energy (${dftResult.totalEnergy.toFixed(4)} Ha) — xTB produced invalid result, skipping Ef`, "info");
     return null;
   }
 
@@ -2778,36 +4014,35 @@ export async function computeFormationEnergy(formula: string, dftResult: DFTResu
 
   const counts = parseFormula(formula);
   const elements = Object.keys(counts);
-  const originalTotal = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
-  if (originalTotal === 0 || elements.length === 0) return null;
+  const formulaTotal = Object.values(counts).reduce((s, n) => s + n, 0);
+  if (formulaTotal === 0 || elements.length === 0) return null;
 
-  const scaleFactor = actualAtomCount / originalTotal;
+  const compoundEnergyPerAtom = compoundEnergy / actualAtomCount;
 
-  let elementalTotal = 0;
-  for (const [el, count] of Object.entries(counts)) {
-    const scaledCount = Math.max(1, Math.round(count * scaleFactor));
-    const refE = await computeElementalEnergy(el);
-    if (refE === null) return null;
-    elementalTotal += refE * scaledCount;
+  const refResults = await Promise.all(elements.map(el => computeElementalEnergy(el)));
+  if (refResults.some(r => r === null)) return null;
+
+  let refEnergyPerAtom = 0;
+  for (let i = 0; i < elements.length; i++) {
+    const atomFraction = counts[elements[i]] / formulaTotal;
+    refEnergyPerAtom += (refResults[i] as number) * atomFraction;
   }
 
-  const formationTotal = compoundEnergy - elementalTotal;
-  const HA_TO_EV = 27.2114;
-  let efPerAtom = (formationTotal / actualAtomCount) * HA_TO_EV;
+  const HA_TO_EV = 27.211386;
+  let efPerAtom = (compoundEnergyPerAtom - refEnergyPerAtom) * HA_TO_EV;
 
   if (efPerAtom > 5.0 || efPerAtom < -10.0) {
-    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom wildly out of range, likely reference energy mismatch — discarding`);
+    dftLog(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom wildly out of range, likely reference energy mismatch — discarding`);
     return null;
   }
 
   if (efPerAtom > 1.0) {
-    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom is positive (>1.0), discarding — compound less stable than elements`);
+    dftLog(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom is positive (>1.0), discarding — compound less stable than elements`);
     return null;
   }
 
   if (efPerAtom < -5.0) {
-    console.log(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom unrealistically negative (<-5.0), clamping to -5.0`);
-    efPerAtom = -5.0;
+    dftLog(`[DFT] ${formula}: Formation energy ${efPerAtom.toFixed(3)} eV/atom unusually negative (<-5.0) — flagged as suspect but preserving value for ranking`, "info");
   }
 
   return efPerAtom;
@@ -2823,10 +4058,11 @@ let chemistryMatchSuccesses = 0;
 const phononCache = new Map<string, PhononStability | null>();
 
 export async function runXTBPhononCheck(formula: string): Promise<PhononStability | null> {
+  formula = normalizeFormula(formula);
   if (!isDFTAvailable()) return null;
   if (phononCache.has(formula)) return phononCache.get(formula)!;
 
-  const calcDir = path.join(WORK_DIR, `phonon_${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`);
+  const calcDir = path.join(WORK_DIR, uniqueCalcId(`phonon_${formula.replace(/[^a-zA-Z0-9]/g, "_")}`));
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     XTBHOME: XTB_HOME,
@@ -2851,17 +4087,17 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       try {
         const preOptDir = path.join(calcDir, "pre_opt");
         fs.mkdirSync(preOptDir, { recursive: true });
-        const preOptAtoms = validateAndFixStructure(initialAtoms, formula);
-        if (preOptAtoms && preOptAtoms.length >= 2) {
-          writeXYZ(preOptAtoms, path.join(preOptDir, "input.xyz"), `${formula} pre-opt`);
+        const preOptResult = validateAndFixStructure(initialAtoms, formula);
+        if (preOptResult && preOptResult.atoms.length >= 2) {
+          writeXYZ(preOptResult.atoms, path.join(preOptDir, "input.xyz"), `${formula} pre-opt`);
           const optOut = execSync(
-            `${XTB_BIN} input.xyz --gfn 2 --opt crude --iterations 200 2>&1`,
+            `${XTB_BIN} input.xyz --gfn 2 --opt tight --iterations 200 2>&1`,
             { cwd: preOptDir, timeout: TIMEOUT_MS, env, maxBuffer: 50 * 1024 * 1024 }
           ).toString();
           if (optOut.includes("converged")) {
             const optXYZ = path.join(preOptDir, "xtbopt.xyz");
             if (fs.existsSync(optXYZ)) {
-              const parsed = parseOptimizedXYZ(optXYZ);
+              const parsed = parseOptimizedXYZ(optXYZ, formula);
               if (parsed.length >= 2) {
                 atoms = parsed;
                 optimizedStructureCache.set(optCacheKey, {
@@ -2880,12 +4116,12 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       } catch {}
     }
 
-    const prePhononCheck = validateAndFixStructure(atoms, formula);
-    if (!prePhononCheck) {
-      console.log(`[DFT] ${formula}: Phonon check skipped — structure has atom overlaps`);
+    const prePhononResult = validateAndFixStructure(atoms, formula);
+    if (!prePhononResult) {
+      dftLog(`[DFT] ${formula}: Phonon check skipped — structure has atom overlaps`);
       return null;
     }
-    atoms = prePhononCheck;
+    atoms = prePhononResult.atoms;
 
     writeXYZ(atoms, path.join(calcDir, "input.xyz"), `${formula} phonon check (${prototype})`);
 
@@ -2950,29 +4186,38 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
     const ARTIFACT_THRESHOLD = -5000;
     const PHYSICAL_IMAG_THRESHOLD = -20;
     const lowestFreq = frequencies.length > 0 ? Math.min(...frequencies) : 0;
-    const physicalImagModes = frequencies.filter(f => f < PHYSICAL_IMAG_THRESHOLD && f >= ARTIFACT_THRESHOLD);
     const artifactModes = frequencies.filter(f => f < ARTIFACT_THRESHOLD);
+    const physicalFrequencies = frequencies.filter(f => f >= ARTIFACT_THRESHOLD);
+    const physicalImagModes = physicalFrequencies.filter(f => f < PHYSICAL_IMAG_THRESHOLD);
+
+    if (artifactModes.length > 0) {
+      dftLog(`[DFT] ${formula}: ${artifactModes.length} frequencies below ${ARTIFACT_THRESHOLD} cm-1 (lowest: ${lowestFreq.toFixed(0)}) — catastrophic geometry failure or non-physical PES`, "info");
+    }
 
     const result: PhononStability = {
-      hasImaginaryModes: physicalImagModes.length > 0,
-      imaginaryModeCount: physicalImagModes.length,
+      hasImaginaryModes: physicalImagModes.length > 0 || artifactModes.length > 0,
+      imaginaryModeCount: physicalImagModes.length + artifactModes.length,
       lowestFrequency: lowestFreq,
       frequencies: frequencies.slice(0, 20),
       zeroPointEnergy: zpe,
     };
 
-    if (physicalImagModes.length > 10) {
+    if (artifactModes.length > 0) {
+      (result as any).severeInstability = true;
+      (result as any).geometryFailure = true;
+      (result as any).instabilityReason = `${artifactModes.length} modes below ${ARTIFACT_THRESHOLD} cm-1 — likely catastrophic geometry (atoms overlapping or non-physical PES)`;
+    } else if (physicalImagModes.length > 10) {
       (result as any).severeInstability = true;
       (result as any).instabilityReason = `${physicalImagModes.length} imaginary modes detected (max 10 allowed for xTB screening)`;
-      console.log(`[DFT] ${formula}: Severe phonon instability — ${physicalImagModes.length} imaginary modes`);
+      dftLog(`[DFT] ${formula}: Severe phonon instability — ${physicalImagModes.length} imaginary modes`);
     }
     if (lowestFreq < -1500 && lowestFreq >= ARTIFACT_THRESHOLD) {
       (result as any).severeInstability = true;
       (result as any).instabilityReason = `Lowest frequency ${lowestFreq.toFixed(0)} cm-1 (threshold: -1500 cm-1)`;
-      console.log(`[DFT] ${formula}: Severe phonon instability — lowest freq = ${lowestFreq.toFixed(0)} cm-1`);
+      dftLog(`[DFT] ${formula}: Severe phonon instability — lowest freq = ${lowestFreq.toFixed(0)} cm-1`);
     }
     if (artifactModes.length > 0) {
-      console.log(`[DFT] ${formula}: ${artifactModes.length} xTB numerical artifact modes (< ${ARTIFACT_THRESHOLD} cm-1) discarded`);
+      dftLog(`[DFT] ${formula}: ${artifactModes.length} xTB artifact modes (< ${ARTIFACT_THRESHOLD} cm-1) flagged as geometry failure`);
     }
 
     phononCache.set(formula, result);
@@ -2983,7 +4228,7 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
 
     return result;
   } catch (err) {
-    console.log(`[DFT] ${formula}: xTB --hess failed, using analytical phonon fallback: ${err instanceof Error ? err.message.slice(0, 100) : String(err).slice(0, 100)}`);
+    dftLog(`[DFT] ${formula}: xTB --hess failed, using analytical phonon fallback: ${err instanceof Error ? err.message.slice(0, 100) : String(err).slice(0, 100)}`);
 
     try {
       const optOutput = execSync(
@@ -2995,18 +4240,11 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
       const counts = parseFormula(formula);
       const elements = Object.keys(counts);
       const avgMass = elements.reduce((s, el) => {
-        const masses: Record<string, number> = {
-          H: 1.008, He: 4.003, Li: 6.941, Be: 9.012, B: 10.81, C: 12.01, N: 14.01, O: 16.00, F: 19.00,
-          Na: 22.99, Mg: 24.31, Al: 26.98, Si: 28.09, P: 30.97, S: 32.07, Cl: 35.45,
-          K: 39.10, Ca: 40.08, Sc: 44.96, Ti: 47.87, V: 50.94, Cr: 52.00, Mn: 54.94,
-          Fe: 55.85, Co: 58.93, Ni: 58.69, Cu: 63.55, Zn: 65.38, Ga: 69.72, Ge: 72.63,
-          As: 74.92, Se: 78.97, Br: 79.90, Y: 88.91, Zr: 91.22, Nb: 92.91, Mo: 95.95,
-          Pd: 106.42, Sn: 118.71, Te: 127.60, La: 138.91, Ce: 140.12, Hf: 178.49,
-          Ta: 180.95, W: 183.84, Pt: 195.08, Pb: 207.2, Bi: 208.98, Ba: 137.33, Sr: 87.62,
-        };
-        const elMass = masses[el];
-        if (elMass === undefined) {
-          throw new Error(`Unknown element "${el}" — no atomic mass data. Cannot compute Debye temperature.`);
+        const elData = getElementData(el);
+        const elMass = elData?.atomicMass;
+        if (elMass === undefined || elMass <= 0) {
+          dftLog(`[DFT] ${formula}: Unknown atomic mass for "${el}", using fallback 50.0 amu`, "info");
+          return s + 50.0 * (counts[el] ?? 1);
         }
         return s + elMass * (counts[el] ?? 1);
       }, 0) / Object.values(counts).reduce((s, n) => s + n, 0);
@@ -3037,13 +4275,14 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
         zeroPointEnergy: null,
       };
       (result as any).analyticalEstimate = true;
+      (result as any).noPredictivePower = true;
       (result as any).estimationBasis = converged ? "opt-converged" : "opt-unconverged";
 
-      console.log(`[DFT] ${formula}: Analytical phonon estimate — Debye≈${debyeFreq.toFixed(0)} cm⁻¹, ${nModes} modes, stable=${converged}`);
+      dftLog(`[DFT] ${formula}: Analytical phonon estimate — Debye≈${debyeFreq.toFixed(0)} cm⁻¹, ${nModes} modes, stable=${converged}`);
       phononCache.set(formula, result);
       return result;
     } catch (fallbackErr) {
-      console.log(`[DFT] ${formula}: Phonon fallback also failed: ${fallbackErr instanceof Error ? fallbackErr.message.slice(0, 80) : ""}`);
+      dftLog(`[DFT] ${formula}: Phonon fallback also failed: ${fallbackErr instanceof Error ? fallbackErr.message.slice(0, 80) : ""}`);
       return null;
     }
   } finally {
@@ -3052,6 +4291,7 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
 }
 
 export async function runFiniteDisplacementPhonons(formula: string): Promise<FiniteDisplacementPhononResult | null> {
+  formula = normalizeFormula(formula);
   if (!isDFTAvailable()) return null;
 
   const cacheKey = formula.replace(/\s+/g, "");
@@ -3064,16 +4304,18 @@ export async function runFiniteDisplacementPhonons(formula: string): Promise<Fin
   }
   if (rawAtoms.length < 2 || rawAtoms.length > 8) return null;
 
-  const validatedAtoms = validateAndFixStructure(rawAtoms, formula);
-  if (!validatedAtoms) {
-    console.log(`[DFT] ${formula}: Finite displacement phonons skipped — structure has atom overlaps`);
+  const validatedResult = validateAndFixStructure(rawAtoms, formula);
+  if (!validatedResult) {
+    dftLog(`[DFT] ${formula}: Finite displacement phonons skipped — structure has atom overlaps`);
     return null;
   }
+  const validatedAtoms = validatedResult.atoms;
 
   return computeFiniteDisplacementPhonons(formula, validatedAtoms);
 }
 
 export async function runXTBEnrichment(formula: string, pressureGpa: number = 0): Promise<XTBEnrichedFeatures | null> {
+  formula = normalizeFormula(formula);
   if (!isDFTAvailable()) return null;
 
   totalXTBRuns++;
@@ -3107,9 +4349,11 @@ export async function runXTBEnrichment(formula: string, pressureGpa: number = 0)
     phononResult = await runXTBPhononCheck(formula);
   }
 
+  const isNonPredictive = phononResult && ((phononResult as any).noPredictivePower === true || (phononResult as any).analyticalEstimate === true);
+
   const pressureTag = pressureGpa > 0 ? `_P${Math.round(pressureGpa)}` : "";
   const enrichCacheKey = formula.replace(/\s+/g, "") + pressureTag;
-  if (phononResult) {
+  if (phononResult && !isNonPredictive) {
     const optRes = optimizedStructureCache.get(enrichCacheKey);
     if (optRes?.distortion) {
       const updatedDistortion = analyzeDistortion(
@@ -3127,8 +4371,23 @@ export async function runXTBEnrichment(formula: string, pressureGpa: number = 0)
       );
       optRes.distortion.phononInstability = updatedDistortion.phononInstability;
       if (updatedDistortion.phononInstability?.hasImaginaryModes) {
-        optRes.distortion.overallScore = Math.min(1.0, optRes.distortion.overallScore + 0.05);
-        optRes.distortion.scRelevance += ` Phonon instability: ${phononResult.imaginaryModeCount} imaginary mode(s), lowest freq=${phononResult.lowestFrequency.toFixed(1)} cm-1 — structure wants to distort.`;
+        const lowestFreq = phononResult.lowestFrequency;
+        const isMetallic = dftResult.isMetallic;
+        const isShallowImag = lowestFreq > -50;
+
+        let penalty = 0.05;
+        if (isMetallic && isShallowImag) {
+          penalty = 0.0;
+          optRes.distortion.scRelevance += ` Phonon: ${phononResult.imaginaryModeCount} shallow imaginary mode(s) (lowest=${lowestFreq.toFixed(1)} cm-1) — common xTB artifact for metals, no penalty applied.`;
+        } else if (isMetallic) {
+          penalty = 0.02;
+          optRes.distortion.scRelevance += ` Phonon instability: ${phononResult.imaginaryModeCount} imaginary mode(s), lowest freq=${lowestFreq.toFixed(1)} cm-1 — reduced penalty for metallic system.`;
+        } else {
+          optRes.distortion.scRelevance += ` Phonon instability: ${phononResult.imaginaryModeCount} imaginary mode(s), lowest freq=${lowestFreq.toFixed(1)} cm-1 — structure wants to distort.`;
+        }
+        if (penalty > 0) {
+          optRes.distortion.overallScore = Math.min(1.0, optRes.distortion.overallScore + penalty);
+        }
       }
     }
   }
@@ -3182,6 +4441,11 @@ export function getXTBStats() {
 let xtbHealthy = false;
 
 export async function checkXTBHealth(): Promise<{ available: boolean; version: string; canOptimize: boolean; canHess: boolean; error?: string }> {
+  const MAX_RETRIES = 2;
+  const VERSION_TIMEOUT = 15000;
+  const OPT_TIMEOUT = 30000;
+  const HESS_TIMEOUT = 40000;
+
   const result = { available: false, version: "", canOptimize: false, canHess: false, error: undefined as string | undefined };
 
   if (!fs.existsSync(XTB_BIN)) {
@@ -3190,75 +4454,87 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
     return result;
   }
 
-  try {
-    const env = {
-      ...process.env,
-      XTBHOME: XTB_HOME,
-      XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
-      OMP_STACKSIZE: "100M",
-      PATH: `${path.join(XTB_HOME, "bin")}:${process.env.PATH}`,
-    };
+  const env = {
+    ...process.env,
+    XTBHOME: XTB_HOME,
+    XTBPATH: XTB_PARAM,
+    OMP_NUM_THREADS: "1",
+    OMP_STACKSIZE: "100M",
+  };
 
-    const versionOutput = execSync(`${XTB_BIN} --version 2>&1`, { timeout: 10000, env }).toString();
-    const vMatch = versionOutput.match(/xtb version (\S+)/);
-    result.version = vMatch ? vMatch[1] : "unknown";
-    result.available = true;
-    console.log(`[xTB-Health] Binary found: v${result.version}`);
-
-    const testDir = path.join(WORK_DIR, `health_check_${Date.now()}`);
-    fs.mkdirSync(testDir, { recursive: true });
-
-    const h2Xyz = `2\nH2 molecule test\nH  0.0  0.0  0.0\nH  0.0  0.0  0.74\n`;
-    fs.writeFileSync(path.join(testDir, "input.xyz"), h2Xyz);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    result.error = undefined;
 
     try {
-      const optOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`, { timeout: 15000, env }).toString();
-      if (optOut.includes("normal termination")) {
-        result.canOptimize = true;
-        console.log(`[xTB-Health] Geometry optimization: OK`);
-      } else {
-        console.log(`[xTB-Health] Geometry optimization: completed but no normal termination marker`);
-        result.canOptimize = optOut.includes("TOTAL ENERGY");
+      const versionOutput = execSync(`${XTB_BIN} --version 2>&1`, { timeout: VERSION_TIMEOUT, env }).toString();
+      const vMatch = versionOutput.match(/xtb version (\S+)/);
+      result.version = vMatch ? vMatch[1] : "unknown";
+      result.available = true;
+      console.log(`[xTB-Health] Binary found: v${result.version} (attempt ${attempt}/${MAX_RETRIES})`);
+
+      const testDir = path.join(WORK_DIR, uniqueCalcId("health_check"));
+      fs.mkdirSync(testDir, { recursive: true });
+
+      const h2Xyz = `2\nH2 molecule test\nH  0.0  0.0  0.0\nH  0.0  0.0  0.74\n`;
+      fs.writeFileSync(path.join(testDir, "input.xyz"), h2Xyz);
+
+      try {
+        const optOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`, { timeout: OPT_TIMEOUT, env }).toString();
+        if (optOut.includes("normal termination")) {
+          result.canOptimize = true;
+          console.log(`[xTB-Health] Geometry optimization: OK`);
+        } else {
+          console.log(`[xTB-Health] Geometry optimization: completed but no normal termination marker`);
+          result.canOptimize = optOut.includes("TOTAL ENERGY");
+        }
+      } catch (e: any) {
+        const msg = e.stdout?.toString() || e.message || "";
+        if (msg.includes("TOTAL ENERGY")) {
+          result.canOptimize = true;
+          console.log(`[xTB-Health] Geometry optimization: OK (non-zero exit but energy computed)`);
+        } else {
+          console.log(`[xTB-Health] Geometry optimization: FAILED (attempt ${attempt}) — ${msg.slice(0, 200)}`);
+        }
       }
+
+      try {
+        const hessOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --hess 2>&1`, { timeout: HESS_TIMEOUT, env }).toString();
+        if (hessOut.includes("projected vibrational frequencies") || hessOut.includes("normal termination")) {
+          result.canHess = true;
+          console.log(`[xTB-Health] Hessian calculation: OK`);
+        } else {
+          console.log(`[xTB-Health] Hessian calculation: completed but missing expected output`);
+        }
+      } catch (e: any) {
+        const msg = e.stdout?.toString() || e.message || "";
+        if (msg.includes("vibrational frequencies")) {
+          result.canHess = true;
+          console.log(`[xTB-Health] Hessian calculation: OK (non-zero exit but frequencies computed)`);
+        } else {
+          console.log(`[xTB-Health] Hessian calculation: FAILED (attempt ${attempt}) — ${msg.slice(0, 200)}`);
+        }
+      }
+
+      try { fs.rmSync(testDir, { recursive: true, force: true }); } catch {}
+
+      if (result.canOptimize && result.canHess) break;
+
+      if (attempt < MAX_RETRIES) {
+        console.log(`[xTB-Health] Attempt ${attempt} incomplete (opt=${result.canOptimize}, hess=${result.canHess}), retrying...`);
+      }
+
     } catch (e: any) {
-      const msg = e.stdout?.toString() || e.message || "";
-      if (msg.includes("TOTAL ENERGY")) {
-        result.canOptimize = true;
-        console.log(`[xTB-Health] Geometry optimization: OK (non-zero exit but energy computed)`);
-      } else {
-        console.log(`[xTB-Health] Geometry optimization: FAILED — ${msg.slice(0, 200)}`);
+      result.error = e.message || "Unknown error";
+      console.log(`[xTB-Health] Attempt ${attempt} FAIL: ${result.error}`);
+      if (attempt < MAX_RETRIES) {
+        console.log(`[xTB-Health] Retrying...`);
       }
     }
-
-    try {
-      const hessOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --hess 2>&1`, { timeout: 20000, env }).toString();
-      if (hessOut.includes("projected vibrational frequencies") || hessOut.includes("normal termination")) {
-        result.canHess = true;
-        console.log(`[xTB-Health] Hessian calculation: OK`);
-      } else {
-        console.log(`[xTB-Health] Hessian calculation: completed but missing expected output`);
-      }
-    } catch (e: any) {
-      const msg = e.stdout?.toString() || e.message || "";
-      if (msg.includes("vibrational frequencies")) {
-        result.canHess = true;
-        console.log(`[xTB-Health] Hessian calculation: OK (non-zero exit but frequencies computed)`);
-      } else {
-        console.log(`[xTB-Health] Hessian calculation: FAILED — ${msg.slice(0, 200)}`);
-      }
-    }
-
-    try { fs.rmSync(testDir, { recursive: true, force: true }); } catch {}
-
-  } catch (e: any) {
-    result.error = e.message || "Unknown error";
-    console.log(`[xTB-Health] FAIL: ${result.error}`);
   }
 
   xtbHealthy = result.available && result.canOptimize && result.canHess;
   if (!xtbHealthy) {
-    console.warn(`[xTB-Health] WARNING: xTB is not fully functional. DFT calculations may fail or use fallbacks.`);
+    console.warn(`[xTB-Health] WARNING: xTB is not fully functional after ${MAX_RETRIES} attempts. DFT calculations may fail or use fallbacks.`);
   }
   console.log(`[xTB-Health] Summary: available=${result.available}, opt=${result.canOptimize}, hess=${result.canHess}, healthy=${xtbHealthy}`);
   return result;
@@ -3284,15 +4560,16 @@ export interface MDSamplingRawResult {
 }
 
 export async function runXTBAnharmonicProbe(formula: string): Promise<AnharmonicProbeResult | null> {
+  formula = normalizeFormula(formula);
   if (!isDFTAvailable()) return null;
 
   const { atoms } = generateCrystalStructure(formula);
   if (atoms.length < 2 || atoms.length > 20) return null;
 
-  const validated = validateAndFixStructure(atoms, formula);
-  if (!validated) return null;
+  const vResult = validateAndFixStructure(atoms, formula);
+  if (!vResult) return null;
 
-  const calcDir = path.join(WORK_DIR, `anharm_${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`);
+  const calcDir = path.join(WORK_DIR, uniqueCalcId(`anharm_${formula.replace(/[^a-zA-Z0-9]/g, "_")}`));
   fs.mkdirSync(calcDir, { recursive: true });
 
   const env: Record<string, string> = {
@@ -3308,11 +4585,33 @@ export async function runXTBAnharmonicProbe(formula: string): Promise<Anharmonic
   const forces: number[] = [];
 
   try {
-    const targetAtom = 0;
-    const dispDir = 0;
+    let targetAtom = 0;
+    let minMass = Infinity;
+    for (let i = 0; i < vResult.atoms.length; i++) {
+      const elData = getElementData(vResult.atoms[i].element);
+      const mass = elData?.atomicMass ?? 999;
+      if (mass < minMass) {
+        minMass = mass;
+        targetAtom = i;
+      }
+    }
+    dftLog(`[DFT] ${formula}: Anharmonic probe targeting atom ${targetAtom} (${vResult.atoms[targetAtom].element}, mass=${minMass.toFixed(1)} amu) — lightest atom`);
+
+    let bestDir = 0;
+    let maxSpread = 0;
+    for (let dir = 0; dir < 3; dir++) {
+      const coords = vResult.atoms.map(a => [a.x, a.y, a.z][dir]);
+      const mean = coords.reduce((s, v) => s + v, 0) / coords.length;
+      const spread = coords.reduce((s, v) => s + (v - mean) ** 2, 0);
+      if (spread > maxSpread) {
+        maxSpread = spread;
+        bestDir = dir;
+      }
+    }
+    const dispDir = bestDir;
 
     for (const scale of displacementScales) {
-      const displaced = validated.map((a, idx) => {
+      const displaced = vResult.atoms.map((a, idx) => {
         if (idx !== targetAtom) return { ...a };
         const coords = [a.x, a.y, a.z];
         coords[dispDir] += scale;
@@ -3329,10 +4628,9 @@ export async function runXTBAnharmonicProbe(formula: string): Promise<Anharmonic
           { cwd: stepDir, timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
         ).toString();
 
-        const energyMatch = output.match(/TOTAL ENERGY\s+([-\d.]+)\s+Eh/);
         const gradMatch = output.match(/GRADIENT NORM\s+([-\d.]+)/);
 
-        const energy = energyMatch ? parseFloat(energyMatch[1]) : 0;
+        const energy = parseXTBEnergy(output) ?? 0;
         const grad = gradMatch ? parseFloat(gradMatch[1]) : 0;
 
         energies.push(energy);
@@ -3363,15 +4661,16 @@ export async function runXTBAnharmonicProbe(formula: string): Promise<Anharmonic
 }
 
 export async function runXTBMDSampling(formula: string, temperatureK: number = 300): Promise<MDSamplingRawResult | null> {
+  formula = normalizeFormula(formula);
   if (!isDFTAvailable()) return null;
 
   const { atoms } = generateCrystalStructure(formula);
   if (atoms.length < 2 || atoms.length > 15) return null;
 
-  const validated = validateAndFixStructure(atoms, formula);
-  if (!validated) return null;
+  const vResult = validateAndFixStructure(atoms, formula);
+  if (!vResult) return null;
 
-  const calcDir = path.join(WORK_DIR, `md_${formula.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`);
+  const calcDir = path.join(WORK_DIR, uniqueCalcId(`md_${formula.replace(/[^a-zA-Z0-9]/g, "_")}`));
   fs.mkdirSync(calcDir, { recursive: true });
 
   const env: Record<string, string> = {
@@ -3382,17 +4681,19 @@ export async function runXTBMDSampling(formula: string, temperatureK: number = 3
     OMP_STACKSIZE: "512M",
   };
 
-  writeXYZ(validated, path.join(calcDir, "input.xyz"), `${formula} MD sampling T=${temperatureK}K`);
+  writeXYZ(vResult.atoms, path.join(calcDir, "input.xyz"), `${formula} MD sampling T=${temperatureK}K`);
 
   const totalSteps = 200;
   const timeStepFs = 1.0;
-  const dumpFreq = 10;
+  const dumpFreq = 1;
 
+  const timePsTotal = totalSteps * timeStepFs * 0.001;
+  const dumpPs = dumpFreq * timeStepFs * 0.001;
   const mdInput = [
     `$md`,
     `   temp=${temperatureK}`,
-    `   time=${(totalSteps * timeStepFs * 0.001).toFixed(2)}`,
-    `   dump=${(dumpFreq * timeStepFs * 0.001).toFixed(4)}`,
+    `   time=${timePsTotal.toFixed(4)}`,
+    `   dump=${dumpPs.toFixed(4)}`,
     `   step=${timeStepFs.toFixed(1)}`,
     `   hmass=1`,
     `   shake=0`,
@@ -3439,14 +4740,18 @@ export async function runXTBMDSampling(formula: string, temperatureK: number = 3
     }
 
     if (positions.length >= 2) {
-      for (let f = 1; f < positions.length; f++) {
+      const dt = dumpFreq * timeStepFs;
+      for (let f = 0; f < positions.length; f++) {
         const frameVel: number[][] = [];
-        const dt = dumpFreq * timeStepFs;
+        const prev = f > 0 ? f - 1 : 0;
+        const next = f < positions.length - 1 ? f + 1 : positions.length - 1;
+        const divisor = (next - prev) * dt;
+        if (divisor === 0) continue;
         for (let a = 0; a < positions[f].length; a++) {
           frameVel.push([
-            (positions[f][a][0] - positions[f - 1][a][0]) / dt,
-            (positions[f][a][1] - positions[f - 1][a][1]) / dt,
-            (positions[f][a][2] - positions[f - 1][a][2]) / dt,
+            (positions[next][a][0] - positions[prev][a][0]) / divisor,
+            (positions[next][a][1] - positions[prev][a][1]) / divisor,
+            (positions[next][a][2] - positions[prev][a][2]) / divisor,
           ]);
         }
         velocities.push(frameVel);

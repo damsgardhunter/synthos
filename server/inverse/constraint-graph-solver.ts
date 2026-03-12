@@ -83,15 +83,30 @@ export interface PropagationStep {
   narrowingFactor: number;
 }
 
-function mcMillanTc(lambda: number, omegaLogK: number, muStar: number): number {
+function mcMillanTc(lambda: number, omegaLogK: number, muStar: number, omega2K?: number): number {
+  if (omegaLogK <= 0) return 0;
   const denom = lambda - muStar * (1 + 0.62 * lambda);
   if (Math.abs(denom) < 1e-6 || denom <= 0) return 0;
   const lambdaBar = 2.46 * (1 + 3.8 * muStar);
   const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
+  const w2 = omega2K && omega2K > 0 ? omega2K : omegaLogK * 1.3;
+  const omega2Ratio = Math.max(1.0, w2 / omegaLogK);
+  const lambda2 = 2.46 * (1 + 3.8 * muStar) * Math.sqrt(omega2Ratio);
+  const f2 = 1 + (lambda * lambda / (lambda * lambda + lambda2 * lambda2)) * (omega2Ratio - 1) * 0.15;
   const exponent = -1.04 * (1 + lambda) / denom;
   if (exponent < -50) return 0;
-  const tc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+  const tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
   return Number.isFinite(tc) && tc > 0 ? tc : 0;
+}
+
+function computeCarbotteGapRatio(tcK: number, omegaLogK: number): number {
+  if (omegaLogK <= 0 || tcK <= 0) return 3.53;
+  if (omegaLogK <= 2 * tcK) return 3.53;
+  const ratio = Math.min(0.5, tcK / omegaLogK);
+  const logTerm = Math.log(omegaLogK / (2 * tcK));
+  const correction = 12.5 * ratio * ratio * logTerm;
+  const gapRatio = 3.53 * (1 + correction);
+  return Math.max(3.53, Math.min(6.0, gapRatio));
 }
 
 function buildConstraintGraph(targetTc: number, muStar: number): { nodes: ConstraintGraphNode[]; edges: ConstraintGraphEdge[] } {
@@ -150,8 +165,8 @@ function buildConstraintGraph(targetTc: number, muStar: number): { nodes: Constr
       unit: "",
       feasibility: solution.requiredPhonon.feasibility * 0.9,
       propagated: false,
-      dependsOn: ["element_mass", "bond_stiffness", "pressure"],
-      influences: ["lambda", "omegaLog"],
+      dependsOn: ["element_mass", "bond_stiffness", "pressure", "structural_stability"],
+      influences: ["lambda", "omegaLog", "structural_stability"],
     },
     {
       id: "hopfield_eta",
@@ -203,7 +218,7 @@ function buildConstraintGraph(targetTc: number, muStar: number): { nodes: Constr
       value: 0,
       range: { min: 0, max: 300 },
       unit: "GPa",
-      feasibility: 1.0,
+      feasibility: 1.0 / (1.0 + 0 / 100),
       propagated: true,
       dependsOn: [],
       influences: ["structure", "phonon_softness", "bond_stiffness"],
@@ -217,7 +232,7 @@ function buildConstraintGraph(targetTc: number, muStar: number): { nodes: Constr
       feasibility: solution.requiredPhonon.feasibility,
       propagated: false,
       dependsOn: [],
-      influences: ["omegaLog", "phonon_softness", "debye_temp"],
+      influences: ["omegaLog", "phonon_softness", "debye_temp", "Tc"],
     },
     {
       id: "bond_stiffness",
@@ -255,21 +270,32 @@ function buildConstraintGraph(targetTc: number, muStar: number): { nodes: Constr
     {
       id: "gap_ratio",
       parameter: "Gap Ratio (2Δ/kTc)",
-      value: solution.requiredLambda.optimal > 1.5 ? 4.5 : 3.53,
+      value: computeCarbotteGapRatio(targetTc, solution.requiredOmegaLog.optimal),
       range: { min: 3.0, max: 6.0 },
       unit: "",
       feasibility: 0.9,
       propagated: false,
-      dependsOn: ["lambda"],
+      dependsOn: ["lambda", "Tc", "omegaLog"],
       influences: [],
+    },
+    {
+      id: "structural_stability",
+      parameter: "Mechanical Stability",
+      value: 1.0,
+      range: { min: 0.3, max: 1.0 },
+      unit: "",
+      feasibility: 0.85,
+      propagated: false,
+      dependsOn: ["pressure", "phonon_softness"],
+      influences: ["phonon_softness"],
     },
   ];
 
   const edges: ConstraintGraphEdge[] = [
-    { from: "Tc", to: "lambda", relation: "determines", strength: 1.0, equation: "Tc = (ωlog/1.2) * f1(λ) * exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))" },
-    { from: "Tc", to: "omegaLog", relation: "determines", strength: 1.0, equation: "McMillan-Allen-Dynes equation" },
-    { from: "lambda", to: "Tc", relation: "determines", strength: 1.0, equation: "Allen-Dynes modified McMillan" },
-    { from: "omegaLog", to: "Tc", relation: "determines", strength: 0.9, equation: "Tc ∝ ωlog * exp(-1.04(1+λ)/...)" },
+    { from: "Tc", to: "lambda", relation: "determines", strength: 1.0, equation: "Tc = (ωlog/1.2) * f1(λ) * f2(λ,ω₂/ωlog) * exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))" },
+    { from: "Tc", to: "omegaLog", relation: "determines", strength: 1.0, equation: "Allen-Dynes: Tc = (ωlog/1.2) * f1·f2 * exp(...)" },
+    { from: "lambda", to: "Tc", relation: "determines", strength: 1.0, equation: "Allen-Dynes with f1·f2 strong-coupling + shape corrections" },
+    { from: "omegaLog", to: "Tc", relation: "determines", strength: 0.9, equation: "Tc ∝ ωlog * f1·f2 * exp(-1.04(1+λ)/...)" },
     { from: "DOS", to: "lambda", relation: "contributes", strength: 0.8, equation: "λ = N(Ef) * <I²> / (M * <ω²>)" },
     { from: "phonon_softness", to: "lambda", relation: "enhances", strength: 0.7, equation: "λ ∝ 1/(<ω²>)" },
     { from: "element_mass", to: "omegaLog", relation: "inversely_scales", strength: 0.9, equation: "ω ∝ 1/√M" },
@@ -286,7 +312,7 @@ function buildConstraintGraph(targetTc: number, muStar: number): { nodes: Constr
     { from: "hopfield_eta", to: "lambda", relation: "determines", strength: 0.9, equation: "λ = η / (M * <ω²>)" },
     { from: "pressure", to: "structure", relation: "transforms", strength: 0.6, equation: "P → phase transitions" },
     { from: "pressure", to: "phonon_softness", relation: "modulates", strength: 0.5, equation: "P → phonon hardening/softening" },
-    { from: "pressure", to: "bond_stiffness", relation: "increases", strength: 0.7, equation: "P → k increases" },
+    { from: "pressure", to: "bond_stiffness", relation: "scales", strength: 0.7, equation: "P → k increases" },
     { from: "element_mass", to: "phonon_softness", relation: "inversely_scales", strength: 0.8, equation: "Light atoms → harder phonons" },
     { from: "element_mass", to: "debye_temp", relation: "inversely_scales", strength: 0.9, equation: "θD ∝ √(k/M)" },
     { from: "bond_stiffness", to: "debye_temp", relation: "scales", strength: 0.8, equation: "θD ∝ √(k/M)" },
@@ -295,6 +321,10 @@ function buildConstraintGraph(targetTc: number, muStar: number): { nodes: Constr
     { from: "debye_temp", to: "omegaLog", relation: "correlates", strength: 0.7, equation: "ωlog ≈ 0.65 * θD (Debye)" },
     { from: "structure", to: "charge_transfer", relation: "enables", strength: 0.5, equation: "Layered → charge reservoir" },
     { from: "structure", to: "phonon_softness", relation: "modulates", strength: 0.4, equation: "Structure → phonon spectrum" },
+    { from: "element_mass", to: "Tc", relation: "inversely_scales", strength: 0.7, equation: "Tc ∝ M^(-α), isotope effect α ≈ 0.5" },
+    { from: "structural_stability", to: "phonon_softness", relation: "limits", strength: 0.9, equation: "Stability caps softness: collapse if softness > stability threshold" },
+    { from: "phonon_softness", to: "structural_stability", relation: "inversely_scales", strength: 0.8, equation: "High softness → low stability margin" },
+    { from: "pressure", to: "structural_stability", relation: "modulates", strength: 0.6, equation: "P → stability changes near phase boundaries" },
   ];
 
   return { nodes, edges };
@@ -308,11 +338,12 @@ function propagateConstraints(
 ): PropagationStep[] {
   const steps: PropagationStep[] = [];
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
-  const propagationQueue = ["Tc"];
+  const propagationQueue = ["Tc", "pressure", "element_mass"];
   const visited = new Set<string>();
   let stepCount = 0;
+  const feedbackRelations = new Set(["limits", "inversely_scales"]);
 
-  while (propagationQueue.length > 0 && stepCount < 50) {
+  while (propagationQueue.length > 0 && stepCount < 80) {
     const currentId = propagationQueue.shift()!;
     if (visited.has(currentId)) continue;
     visited.add(currentId);
@@ -324,7 +355,8 @@ function propagateConstraints(
     const outEdges = edges.filter(e => e.from === currentId);
     for (const edge of outEdges) {
       const targetNode = nodeMap.get(edge.to);
-      if (!targetNode || targetNode.propagated) continue;
+      if (!targetNode) continue;
+      if (targetNode.propagated && !feedbackRelations.has(edge.relation)) continue;
 
       const beforeRange = { ...targetNode.range };
       narrowRange(currentNode, targetNode, edge, targetTc, muStar);
@@ -345,13 +377,22 @@ function propagateConstraints(
         narrowingFactor: Math.round(narrowing * 1000) / 1000,
       });
 
-      if (!propagationQueue.includes(edge.to)) {
+      if (!propagationQueue.includes(edge.to) && !visited.has(edge.to)) {
         propagationQueue.push(edge.to);
       }
     }
   }
 
   return steps;
+}
+
+function estimateTransitionPressureRatio(pRange: { min: number; max: number }): { peakRatio: number; width: number } {
+  const pSpan = pRange.max - pRange.min;
+  if (pSpan <= 0) return { peakRatio: 0.5, width: 0.2 };
+  if (pRange.max <= 50) return { peakRatio: 0.7, width: 0.25 };
+  if (pRange.min >= 100) return { peakRatio: 0.45, width: 0.12 };
+  if (pRange.min >= 50) return { peakRatio: 0.55, width: 0.15 };
+  return { peakRatio: 0.5, width: 0.2 };
 }
 
 function narrowRange(
@@ -376,14 +417,28 @@ function narrowRange(
     }
     case "inversely_scales": {
       if (source.value > 0) {
-        const factor = 1 / Math.sqrt(source.value);
-        const scale = factor * 100;
-        target.range.min = Math.max(target.range.min, target.range.min * (1 + strength * 0.1));
-        target.range.max = Math.min(target.range.max, target.range.max * (1 - strength * 0.05));
-        if (target.range.min > target.range.max) {
-          const mid = (target.range.min + target.range.max) / 2;
-          target.range.min = mid * 0.95;
-          target.range.max = mid * 1.05;
+        if (source.id === "phonon_softness" && target.id === "structural_stability") {
+          const softness = source.value;
+          const stability = Math.max(0.1, 1.0 - softness * 0.8);
+          target.value = stability;
+          const halfW = (target.range.max - target.range.min) / 2 * (1 - strength * 0.2);
+          target.range.min = Math.max(target.range.min, stability - halfW);
+          target.range.max = Math.min(target.range.max, stability + halfW);
+        } else if (source.id === "element_mass" && target.id === "omegaLog") {
+          const massVal = source.value;
+          const isotopeBoost = 1 / Math.sqrt(Math.max(1, massVal));
+          const boostedValue = target.value * isotopeBoost;
+          const clampedValue = Math.max(target.range.min, Math.min(target.range.max, boostedValue));
+          target.value = clampedValue;
+          const distToMin = clampedValue - target.range.min;
+          const distToMax = target.range.max - clampedValue;
+          target.range.min = target.range.min + distToMin * strength * 0.1;
+          target.range.max = target.range.max - distToMax * strength * 0.05;
+        } else {
+          const distToMin = target.value - target.range.min;
+          const distToMax = target.range.max - target.value;
+          target.range.min = target.range.min + distToMin * strength * 0.15;
+          target.range.max = target.range.max - distToMax * strength * 0.1;
         }
       }
       break;
@@ -396,7 +451,30 @@ function narrowRange(
       target.range.max = Math.min(target.range.max, center + narrowedHalf);
       break;
     }
-    case "modulates":
+    case "modulates": {
+      if (source.id === "pressure" && target.id === "phonon_softness") {
+        const P = source.value;
+        const pMax = source.range.max || 300;
+        const pRatio = P / pMax;
+        const transition = estimateTransitionPressureRatio(source.range);
+        const baseHardening = 1 - 0.4 * pRatio;
+        const softeningPeak = Math.exp(-Math.pow((pRatio - transition.peakRatio) / transition.width, 2));
+        const transferFactor = baseHardening + 1.2 * softeningPeak;
+        const scaledValue = target.value * Math.max(0.1, Math.min(2.5, transferFactor));
+        const halfWidth = (target.range.max - target.range.min) / 2;
+        const newHalf = halfWidth * (1 - strength * 0.15);
+        target.value = scaledValue;
+        target.range.min = Math.max(target.range.min, scaledValue - newHalf);
+        target.range.max = Math.min(target.range.max, scaledValue + newHalf);
+      } else {
+        const center = target.value;
+        const halfWidth = (target.range.max - target.range.min) / 2;
+        const narrowedHalf = halfWidth * (1 - strength * 0.15);
+        target.range.min = Math.max(target.range.min, center - narrowedHalf);
+        target.range.max = Math.min(target.range.max, center + narrowedHalf);
+      }
+      break;
+    }
     case "enables":
     case "transforms":
     case "correlates": {
@@ -407,15 +485,27 @@ function narrowRange(
       target.range.max = Math.min(target.range.max, center + narrowedHalf);
       break;
     }
+    case "limits": {
+      const stabilityVal = source.value;
+      const collapseThreshold = stabilityVal * 0.85;
+      if (target.range.max > collapseThreshold) {
+        target.range.max = Math.max(target.range.min + 0.01, collapseThreshold);
+      }
+      if (target.value > collapseThreshold) {
+        target.value = collapseThreshold;
+      }
+      break;
+    }
     default: {
       break;
     }
   }
 
   if (target.range.min > target.range.max) {
+    target.feasibility = 0;
     const mid = (target.range.min + target.range.max) / 2;
-    target.range.min = mid * 0.98;
-    target.range.max = mid * 1.02;
+    target.range.min = mid;
+    target.range.max = mid;
   }
 }
 
@@ -506,8 +596,8 @@ function computeFeasibilityRegions(targetTc: number, muStar: number): Feasibilit
   const regions: FeasibilityRegion[] = [];
 
   for (const regime of REGIME_CONFIGS) {
-    const lambdaSamples = 5;
-    const omegaSamples = 5;
+    const lambdaSamples = 12;
+    const omegaSamples = 12;
     let validCount = 0;
     let totalSampled = 0;
     let sumFeasibility = 0;
@@ -527,11 +617,10 @@ function computeFeasibilityRegions(targetTc: number, muStar: number): Feasibilit
           validOmegas.push(omega);
 
           let feas = 1.0;
-          if (lambda > 3.0) feas *= 0.3;
-          else if (lambda > 2.0) feas *= 0.6;
-          if (omega > 1500) feas *= 0.4;
-          else if (omega > 800) feas *= 0.7;
-          if (regime.pressureRange[0] > 100) feas *= 0.5;
+          feas *= 1 / (1 + Math.exp(5 * (lambda - 2.5)));
+          feas *= 1 / (1 + Math.exp(4 * (omega - 1200) / 1000));
+          const avgPressure = (regime.pressureRange[0] + regime.pressureRange[1]) / 2;
+          feas *= 1.0 / (1.0 + avgPressure / 100);
           sumFeasibility += feas;
         }
       }
@@ -576,6 +665,39 @@ function computeFeasibilityRegions(targetTc: number, muStar: number): Feasibilit
   return regions;
 }
 
+function sobolSequence2D(n: number): Array<[number, number]> {
+  const points: Array<[number, number]> = [];
+  const BITS = 30;
+  const SCALE = 1 << BITS;
+  const directionX: number[] = [];
+  for (let i = 0; i < BITS; i++) {
+    directionX.push(1 << (BITS - 1 - i));
+  }
+  const directionY: number[] = [];
+  directionY[0] = 1 << (BITS - 1);
+  for (let i = 1; i < BITS; i++) {
+    let v = directionY[i - 1];
+    v ^= (v >>> 1);
+    directionY.push(v);
+  }
+
+  let xGray = 0;
+  let yGray = 0;
+  for (let i = 0; i < n; i++) {
+    let c = 0;
+    let val = i;
+    while ((val & 1) !== 0) { val >>>= 1; c++; }
+    if (c >= BITS) c = BITS - 1;
+    xGray ^= directionX[c];
+    yGray ^= directionY[c];
+    points.push([xGray / SCALE, yGray / SCALE]);
+  }
+  return points;
+}
+
+const SOBOL_POINTS_PER_REGION = 24;
+const sobolCache = sobolSequence2D(SOBOL_POINTS_PER_REGION);
+
 function generateParameterCombinations(
   targetTc: number,
   muStar: number,
@@ -587,33 +709,56 @@ function generateParameterCombinations(
     const regime = REGIME_CONFIGS.find(r => r.name === region.regime);
     if (!regime) continue;
 
-    const lambdaCenter = region.center.lambda as number;
-    const omegaCenter = region.center.omegaLogK as number;
+    const lambdaMin = regime.lambdaRange[0];
+    const lambdaMax = regime.lambdaRange[1];
+    const omegaMin = regime.omegaRange[0];
+    const omegaMax = regime.omegaRange[1];
 
-    const offsets = [
-      { dl: 0, do_: 0 },
-      { dl: -0.15, do_: 50 },
-      { dl: 0.15, do_: -50 },
-      { dl: -0.3, do_: 100 },
-      { dl: 0.3, do_: -100 },
-    ];
-
-    for (const offset of offsets) {
-      const lambda = lambdaCenter + offset.dl;
-      const omega = omegaCenter + offset.do_;
-
-      if (lambda < regime.lambdaRange[0] || lambda > regime.lambdaRange[1]) continue;
-      if (omega < regime.omegaRange[0] || omega > regime.omegaRange[1]) continue;
+    for (const [u, v] of sobolCache) {
+      const lambda = lambdaMin + u * (lambdaMax - lambdaMin);
+      const omega = omegaMin + v * (omegaMax - omegaMin);
 
       const tc = mcMillanTc(lambda, omega, muStar);
       if (tc < targetTc * 0.5 || tc > targetTc * 2.0) continue;
 
-      const dosEstimate = lambda > 1.5 ? 3 + lambda * 1.5 : 1.5 + lambda * 2;
+      let dosBaseline: number;
+      let nestingEstimate: number;
+      let chargeTransferEstimate: number;
+      const rName = regime.name;
+      if (rName === "kagome-flat-band") {
+        dosBaseline = 4.0 + 2.0 * Math.random();
+        nestingEstimate = 0.7;
+        chargeTransferEstimate = 0;
+      } else if (rName === "unconventional-layered") {
+        dosBaseline = 2.5 + 1.5 * Math.random();
+        nestingEstimate = 0.6;
+        chargeTransferEstimate = 0.2;
+      } else if (rName === "superhydride" || rName === "hydride-moderate-pressure") {
+        dosBaseline = 1.5 + 1.0 * Math.random();
+        nestingEstimate = 0.3;
+        chargeTransferEstimate = 0;
+      } else if (rName === "topological-SC") {
+        dosBaseline = 2.0 + 1.0 * Math.random();
+        nestingEstimate = 0.5;
+        chargeTransferEstimate = 0.05;
+      } else if (rName === "light-element-compound") {
+        dosBaseline = 2.0 + 1.5 * Math.random();
+        nestingEstimate = 0.4;
+        chargeTransferEstimate = 0;
+      } else if (rName === "strong-coupling-metal") {
+        dosBaseline = 3.0 + 1.5 * Math.random();
+        nestingEstimate = 0.4;
+        chargeTransferEstimate = 0;
+      } else {
+        dosBaseline = 2.0 + 1.0 * Math.random();
+        nestingEstimate = 0.4;
+        chargeTransferEstimate = 0;
+      }
+      const dosEstimate = dosBaseline;
+      const avgMass = rName.includes("hydride") || rName.includes("superhydride") ? 5 : rName.includes("light") ? 15 : 50;
+      const phononSoftness = Math.min(1.0, lambda * avgMass * 0.01 / (omega * 0.001 + 0.1));
       const debyeEstimate = Math.round(omega * 1.5);
-      const phononSoftness = Math.min(1.0, lambda / (dosEstimate * 0.5));
-      const hopfieldEstimate = lambda * omega * 0.01;
-      const nestingEstimate = regime.name.includes("kagome") || regime.name.includes("layered") ? 0.7 : 0.4;
-      const chargeTransferEstimate = regime.name.includes("unconventional") ? 0.2 : 0;
+      const hopfieldEstimate = dosEstimate * omega * 0.003;
 
       let feasibility = region.feasibilityScore;
       const tcDiff = Math.abs(tc - targetTc) / targetTc;
@@ -639,8 +784,10 @@ function generateParameterCombinations(
   }
 
   combinations.sort((a, b) => {
-    const scoreA = a.feasibility * 0.5 + (1 - Math.abs(a.predictedTc - targetTc) / targetTc) * 0.5;
-    const scoreB = b.feasibility * 0.5 + (1 - Math.abs(b.predictedTc - targetTc) / targetTc) * 0.5;
+    const accuracyA = Math.max(0, 1 - Math.abs(a.predictedTc - targetTc) / targetTc);
+    const accuracyB = Math.max(0, 1 - Math.abs(b.predictedTc - targetTc) / targetTc);
+    const scoreA = a.feasibility * accuracyA;
+    const scoreB = b.feasibility * accuracyB;
     return scoreB - scoreA;
   });
 
@@ -655,6 +802,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
     description: string;
     lambda: number;
     omega: number;
+    pressureGpa: number;
     elements: string[];
     structures: string[];
     mechanisms: string[];
@@ -665,6 +813,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Ternary hydride with mixed-cation cage stabilization",
       lambda: 2.2,
       omega: 1200,
+      pressureGpa: 150,
       elements: ["H", "La", "Y", "Mg", "Ca"],
       structures: ["ternary-clathrate", "mixed-cage"],
       mechanisms: ["multi-cation stabilization", "phonon hybridization"],
@@ -675,6 +824,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Metal borohydride with coupled B-H and metal phonon modes",
       lambda: 1.8,
       omega: 900,
+      pressureGpa: 30,
       elements: ["H", "B", "Mg", "Ca", "Na", "Li"],
       structures: ["borohydride-cage", "layered-borohydride"],
       mechanisms: ["B-H stretching coupling", "cage-metal interaction"],
@@ -685,6 +835,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Infinite-layer nickelate with cuprate-analog physics",
       lambda: 1.0,
       omega: 400,
+      pressureGpa: 0,
       elements: ["Ni", "Nd", "La", "Sr", "O"],
       structures: ["infinite-layer", "NiO2-plane"],
       mechanisms: ["d-wave analog", "charge-transfer", "self-doping"],
@@ -695,6 +846,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Kagome metal near van Hove filling with flat bands",
       lambda: 1.3,
       omega: 350,
+      pressureGpa: 0,
       elements: ["V", "Nb", "Ti", "Sn", "Sb", "Ge"],
       structures: ["kagome-flat", "breathing-kagome"],
       mechanisms: ["VHS-driven coupling", "flat-band SC", "nesting-enhanced"],
@@ -705,6 +857,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Heavy-fermion compound near quantum critical point",
       lambda: 0.8,
       omega: 150,
+      pressureGpa: 0,
       elements: ["Ce", "U", "Yb", "Ir", "Rh", "Co", "Si", "Ge"],
       structures: ["ThCr2Si2", "CeCu2Si2-type"],
       mechanisms: ["spin-fluctuation", "quantum criticality", "Kondo breakdown"],
@@ -715,6 +868,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Topological insulator heterostructure with proximity-induced SC",
       lambda: 0.9,
       omega: 300,
+      pressureGpa: 0,
       elements: ["Bi", "Se", "Te", "Nb", "Pb", "Sn"],
       structures: ["heterostructure", "topological-surface"],
       mechanisms: ["proximity effect", "Majorana", "topological SC"],
@@ -725,6 +879,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "High-entropy alloy with cocktail-effect phonon engineering",
       lambda: 1.4,
       omega: 450,
+      pressureGpa: 0,
       elements: ["Nb", "Ti", "Zr", "Hf", "Ta", "Mo", "V"],
       structures: ["BCC-HEA", "FCC-HEA"],
       mechanisms: ["phonon softening", "electron scattering", "cocktail effect"],
@@ -735,6 +890,7 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
       description: "Intercalated carbon structure with graphene-like bands",
       lambda: 1.1,
       omega: 700,
+      pressureGpa: 0,
       elements: ["C", "Ca", "Li", "K", "Rb", "Mg"],
       structures: ["intercalated-graphite", "C60-fulleride"],
       mechanisms: ["sigma-band", "intercalation doping", "phonon hardening"],
@@ -747,10 +903,9 @@ function searchRareRegions(targetTc: number, muStar: number): RareRegion[] {
     if (tc < targetTc * 0.3) continue;
 
     const tcProximity = 1 - Math.min(1, Math.abs(tc - targetTc) / targetTc);
-    let feasibility = 0.5;
-    if (config.lambda > 2.5) feasibility *= 0.4;
-    else if (config.lambda > 1.5) feasibility *= 0.7;
-    if (config.omega > 1200) feasibility *= 0.5;
+    const synthesisDifficulty = 1 / (1 + config.pressureGpa / 100);
+    let feasibility = 0.5 * synthesisDifficulty;
+    if (config.omega > 1500) feasibility *= 0.7;
     feasibility *= (0.5 + 0.5 * tcProximity);
 
     rareRegions.push({
@@ -788,11 +943,13 @@ export function solveConstraintGraph(targetTc: number, muStar: number = 0.10): G
   const rareRegions = searchRareRegions(targetTc, muStarClamped);
 
   const constraintSatisfactionMap: Record<string, boolean> = {};
+  const maxNodeFeasibility = Math.max(...nodes.map(n => n.feasibility), 0.01);
+  const satisfactionThreshold = Math.max(0.15, maxNodeFeasibility * 0.5);
   for (const node of nodes) {
-    constraintSatisfactionMap[node.id] = node.feasibility > 0.4;
+    constraintSatisfactionMap[node.id] = node.feasibility >= satisfactionThreshold;
   }
 
-  const feasibleNodeCount = nodes.filter(n => n.feasibility > 0.4).length;
+  const feasibleNodeCount = nodes.filter(n => n.feasibility >= satisfactionThreshold).length;
   const globalFeasibility = Math.round((feasibleNodeCount / nodes.length) * 1000) / 1000;
 
   return {
@@ -825,12 +982,28 @@ export function getFeasibleRegions(targetTc: number = 200, muStar: number = 0.10
   const regions = computeFeasibilityRegions(targetTc, muStarClamped);
   const rareRegions = searchRareRegions(targetTc, muStarClamped);
 
-  const allLambdaMins = regions.map(r => r.ranges.lambda.min);
-  const allLambdaMaxs = regions.map(r => r.ranges.lambda.max);
-  const allOmegaMins = regions.map(r => r.ranges.omegaLogK.min);
-  const allOmegaMaxs = regions.map(r => r.ranges.omegaLogK.max);
-  const allPressureMins = regions.map(r => r.ranges.pressure.min);
-  const allPressureMaxs = regions.map(r => r.ranges.pressure.max);
+  const globalLambdaMin = REGIME_CONFIGS.reduce((m, r) => Math.min(m, r.lambdaRange[0]), Infinity);
+  const globalLambdaMax = REGIME_CONFIGS.reduce((m, r) => Math.max(m, r.lambdaRange[1]), -Infinity);
+  const globalOmegaMin = REGIME_CONFIGS.reduce((m, r) => Math.min(m, r.omegaRange[0]), Infinity);
+  const globalOmegaMax = REGIME_CONFIGS.reduce((m, r) => Math.max(m, r.omegaRange[1]), -Infinity);
+  const globalPressureMin = REGIME_CONFIGS.reduce((m, r) => Math.min(m, r.pressureRange[0]), Infinity);
+  const globalPressureMax = REGIME_CONFIGS.reduce((m, r) => Math.max(m, r.pressureRange[1]), -Infinity);
+
+  let lambdaMin = globalLambdaMin;
+  let lambdaMax = globalLambdaMax;
+  let omegaMin = globalOmegaMin;
+  let omegaMax = globalOmegaMax;
+  let pressureMin = globalPressureMin;
+  let pressureMax = globalPressureMax;
+
+  if (regions.length > 0) {
+    lambdaMin = regions.reduce((m, r) => Math.min(m, r.ranges.lambda.min), Infinity);
+    lambdaMax = regions.reduce((m, r) => Math.max(m, r.ranges.lambda.max), -Infinity);
+    omegaMin = regions.reduce((m, r) => Math.min(m, r.ranges.omegaLogK.min), Infinity);
+    omegaMax = regions.reduce((m, r) => Math.max(m, r.ranges.omegaLogK.max), -Infinity);
+    pressureMin = regions.reduce((m, r) => Math.min(m, r.ranges.pressure.min), Infinity);
+    pressureMax = regions.reduce((m, r) => Math.max(m, r.ranges.pressure.max), -Infinity);
+  }
 
   const best = regions[0];
 
@@ -841,18 +1014,9 @@ export function getFeasibleRegions(targetTc: number = 200, muStar: number = 0.10
     bestRegime: best?.regime ?? "none",
     bestFeasibility: best?.feasibilityScore ?? 0,
     parameterSpace: {
-      lambdaBounds: {
-        min: allLambdaMins.length > 0 ? Math.min(...allLambdaMins) : 0,
-        max: allLambdaMaxs.length > 0 ? Math.max(...allLambdaMaxs) : 0,
-      },
-      omegaLogBounds: {
-        min: allOmegaMins.length > 0 ? Math.min(...allOmegaMins) : 0,
-        max: allOmegaMaxs.length > 0 ? Math.max(...allOmegaMaxs) : 0,
-      },
-      pressureBounds: {
-        min: allPressureMins.length > 0 ? Math.min(...allPressureMins) : 0,
-        max: allPressureMaxs.length > 0 ? Math.max(...allPressureMaxs) : 0,
-      },
+      lambdaBounds: { min: lambdaMin, max: lambdaMax },
+      omegaLogBounds: { min: omegaMin, max: omegaMax },
+      pressureBounds: { min: pressureMin, max: pressureMax },
     },
   };
 }
@@ -867,13 +1031,20 @@ export function getConstraintGraphGuidance(targetTc: number): {
   const solution = solveConstraintGraph(targetTc);
 
   const topRegimes = solution.feasibilityRegions.slice(0, 3).map(r => r.regime);
-  const allElements = new Set<string>();
-  const allStructures = new Set<string>();
+  const elementFreq = new Map<string, number>();
+  const structureFreq = new Map<string, number>();
 
   for (const combo of solution.parameterCombinations.slice(0, 10)) {
-    for (const el of combo.elements) allElements.add(el);
-    for (const st of combo.structures) allStructures.add(st);
+    for (const el of combo.elements) elementFreq.set(el, (elementFreq.get(el) ?? 0) + 1);
+    for (const st of combo.structures) structureFreq.set(st, (structureFreq.get(st) ?? 0) + 1);
   }
+
+  const sortedElements = Array.from(elementFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([el]) => el);
+  const sortedStructures = Array.from(structureFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([st]) => st);
 
   const rareOpportunities = solution.rareRegions.slice(0, 3).map(r => ({
     id: r.id,
@@ -883,8 +1054,8 @@ export function getConstraintGraphGuidance(targetTc: number): {
 
   return {
     topRegimes,
-    preferredElements: Array.from(allElements).slice(0, 10),
-    preferredStructures: Array.from(allStructures).slice(0, 6),
+    preferredElements: sortedElements.slice(0, 10),
+    preferredStructures: sortedStructures.slice(0, 6),
     feasibility: solution.globalFeasibility,
     rareOpportunities,
   };

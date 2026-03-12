@@ -3698,6 +3698,16 @@ export function computeOmegaLogFromAlpha2F(alpha2FData: Alpha2FData): number {
   return Number.isFinite(omegaLog) ? Math.round(omegaLog * 10) / 10 : 0;
 }
 
+export interface FDPhononSummary {
+  dynamicallyStable: boolean;
+  imaginaryModeCount: number;
+  lowestFrequency: number;
+  highestFrequency: number;
+  omegaLog: number | null;
+  lambdaContribution: number | null;
+  forceConstantClampedEntries: number;
+}
+
 export async function runFullPhysicsAnalysis(
   emit: EventEmitter,
   candidate: SuperconductorCandidate
@@ -3720,6 +3730,7 @@ export async function runFullPhysicsAnalysis(
   phononDOS: PhononDOSData;
   alpha2F: Alpha2FData;
   advancedConstraints: AdvancedPhysicsConstraints;
+  fdPhononSummary: FDPhononSummary | null;
 }> {
   const formula = candidate.formula;
   const priorTc = candidate.predictedTc ?? 0;
@@ -3849,6 +3860,42 @@ export async function runFullPhysicsAnalysis(
   }
   const coupling = computeElectronPhononCoupling(electronicStructure, phononSpectrum, formula, candidatePressure);
 
+  if (dftData?.finiteDisplacementPhonons) {
+    const fdp = dftData.finiteDisplacementPhonons;
+
+    if (fdp.omegaLog != null && fdp.omegaLog > 0) {
+      const analyticalOmegaLog = coupling.omegaLog;
+      coupling.omegaLog = fdp.omegaLog;
+      emit("log", {
+        phase: "phase-10",
+        event: "FD phonon omegaLog override",
+        detail: `${formula}: coupling.omegaLog ${analyticalOmegaLog.toFixed(1)} -> ${fdp.omegaLog.toFixed(1)} cm⁻¹ (finite displacement)`,
+        dataSource: "DFT Resolver",
+      });
+    }
+
+    if (fdp.lambdaContribution != null && fdp.lambdaContribution > 0) {
+      const blendWeight = 0.3;
+      const analyticalLambda = coupling.lambda;
+      coupling.lambda = coupling.lambda * (1 - blendWeight) + fdp.lambdaContribution * blendWeight;
+      emit("log", {
+        phase: "phase-10",
+        event: "FD phonon lambda blend",
+        detail: `${formula}: coupling.lambda ${analyticalLambda.toFixed(4)} -> ${coupling.lambda.toFixed(4)} (blended ${(blendWeight * 100).toFixed(0)}% FD surrogate λ=${fdp.lambdaContribution.toFixed(4)})`,
+        dataSource: "DFT Resolver",
+      });
+    }
+
+    if (!fdp.dynamicallyStable) {
+      emit("log", {
+        phase: "phase-10",
+        event: "Dynamically unstable",
+        detail: `${formula}: finite displacement phonons show ${fdp.imaginaryModeCount} imaginary mode(s), lowestFreq=${fdp.lowestFrequency.toFixed(1)} cm⁻¹ — flagged dynamically unstable`,
+        dataSource: "DFT Resolver",
+      });
+    }
+  }
+
   const earlyPhononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);
   const phononDOS = computePhononDOS(earlyPhononDispersion, phononSpectrum.maxPhononFrequency, formula);
   emitDetail("log", {
@@ -3881,7 +3928,24 @@ export async function runFullPhysicsAnalysis(
   }
 
   let eliashberg: EliashbergResult;
-  eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
+  if (dftData?.finiteDisplacementPhonons) {
+    const fdp = dftData.finiteDisplacementPhonons;
+    const fdpHasOmegaLog = fdp.omegaLog != null && fdp.omegaLog > 0;
+    const fdpHasLambda = fdp.lambdaContribution != null && fdp.lambdaContribution > 0;
+    if (fdpHasOmegaLog || fdpHasLambda) {
+      eliashberg = predictTcEliashberg(coupling, phononSpectrum);
+      emit("log", {
+        phase: "phase-10",
+        event: "Eliashberg uses FD phonon coupling",
+        detail: `${formula}: Tc computed with FD-adjusted lambda=${coupling.lambda.toFixed(4)}, omegaLog=${coupling.omegaLog.toFixed(1)} cm⁻¹ (alpha2F bypassed in favor of FD data)`,
+        dataSource: "DFT Resolver",
+      });
+    } else {
+      eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
+    }
+  } else {
+    eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
+  }
 
   const competingPhases = evaluateCompetingPhases(formula, electronicStructure, mpSummary);
   const hasMottPhase = competingPhases.some(p => p.type === "Mott");
@@ -3981,6 +4045,30 @@ export async function runFullPhysicsAnalysis(
   if (phononSpectrum.anharmonicityIndex > 0.5) uncertaintyEstimate += 0.1;
   if (!mpSummary) uncertaintyEstimate += 0.05;
   if (dftData && dftData.dftCoverage > 0.3) uncertaintyEstimate -= dftData.dftCoverage * 0.15;
+  if (dftData?.finiteDisplacementPhonons && !dftData.finiteDisplacementPhonons.dynamicallyStable) {
+    const fdpImagCount = dftData.finiteDisplacementPhonons.imaginaryModeCount;
+    const fdpLowest = dftData.finiteDisplacementPhonons.lowestFrequency;
+    if (fdpImagCount > 0) {
+      uncertaintyEstimate += 0.2;
+      const instabilityPenalty = Math.max(0.3, 1.0 - fdpImagCount * 0.1);
+      eliashberg.predictedTc = Math.round(eliashberg.predictedTc * instabilityPenalty);
+      eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2.5)];
+      emit("log", {
+        phase: "phase-10",
+        event: "Dynamical instability Tc penalty",
+        detail: `${formula}: ${fdpImagCount} imaginary phonon mode(s), lowestFreq=${fdpLowest.toFixed(1)} cm⁻¹ — Tc penalized by ${((1 - instabilityPenalty) * 100).toFixed(0)}%`,
+        dataSource: "DFT Resolver",
+      });
+    } else {
+      uncertaintyEstimate += 0.1;
+      emit("log", {
+        phase: "phase-10",
+        event: "Dynamical instability (clamping)",
+        detail: `${formula}: flagged unstable due to force constant clamping (no physical imaginary modes), lowestFreq=${fdpLowest.toFixed(1)} cm⁻¹`,
+        dataSource: "DFT Resolver",
+      });
+    }
+  }
   uncertaintyEstimate = Math.max(uncertaintyEstimate, pairingAnalysis.uncertaintyFromMechanism);
 
   if (candidatePressure < 50 && eliashberg.predictedTc > 200) {
@@ -4130,6 +4218,20 @@ export async function runFullPhysicsAnalysis(
     dataSource: "Physics Engine",
   });
 
+  let fdPhononSummary: FDPhononSummary | null = null;
+  if (dftData?.finiteDisplacementPhonons) {
+    const fdp = dftData.finiteDisplacementPhonons;
+    fdPhononSummary = {
+      dynamicallyStable: fdp.dynamicallyStable,
+      imaginaryModeCount: fdp.imaginaryModeCount,
+      lowestFrequency: fdp.lowestFrequency,
+      highestFrequency: fdp.highestFrequency,
+      omegaLog: fdp.omegaLog,
+      lambdaContribution: fdp.lambdaContribution,
+      forceConstantClampedEntries: fdp.forceConstantClampedEntries,
+    };
+  }
+
   return {
     electronicStructure,
     phononSpectrum,
@@ -4149,5 +4251,6 @@ export async function runFullPhysicsAnalysis(
     phononDOS,
     alpha2F: alpha2FResult,
     advancedConstraints,
+    fdPhononSummary,
   };
 }

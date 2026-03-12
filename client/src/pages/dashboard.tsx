@@ -1980,6 +1980,7 @@ export default function Dashboard() {
     avgUncertaintyTrend: { cycle: number; before: number; after: number; reductionPct: number }[];
     dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number; source: string }[] };
   }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: 30000 });
+  const { data: theoryReport } = useQuery<any>({ queryKey: ["/api/theory-report"], refetchInterval: 30000 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -2933,6 +2934,92 @@ export default function Dashboard() {
           <EnergyLandscapeCard />
           <DistortionClassifierCard />
           <FeedbackLoopCard />
+
+          <Card data-testid="card-discovery-progress">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Compass className="h-4 w-4 text-primary" />
+                Causal Discovery Progress
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {theoryReport ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="disc-total-runs">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Discovery Runs</p>
+                      <p className="text-lg font-mono font-bold">{theoryReport.summary?.totalDiscoveryRuns ?? 0}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="disc-total-rules">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Causal Rules</p>
+                      <p className="text-lg font-mono font-bold">{theoryReport.summary?.totalRules ?? 0}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="disc-total-hypotheses">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Hypotheses</p>
+                      <p className="text-lg font-mono font-bold">{theoryReport.summary?.totalHypotheses ?? 0}</p>
+                    </div>
+                    <div className="p-2 bg-muted/50 rounded-md" data-testid="disc-graph-size">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Graph Nodes</p>
+                      <p className="text-lg font-mono font-bold">{theoryReport.summary?.graphNodes ?? 0}</p>
+                    </div>
+                  </div>
+
+                  {theoryReport.causal?.categoryDiscoveryProgress && Object.keys(theoryReport.causal.categoryDiscoveryProgress).length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-muted-foreground mb-2">Category Coverage</p>
+                      <div className="space-y-2">
+                        {Object.entries(theoryReport.causal.categoryDiscoveryProgress as Record<string, { variables: number; rulesDiscovered: number; coveragePercent: number }>).map(([cat, info]) => (
+                          <div key={cat} data-testid={`disc-category-${cat}`}>
+                            <div className="flex items-center justify-between text-xs mb-0.5">
+                              <span className="capitalize font-medium">{cat}</span>
+                              <span className="text-muted-foreground font-mono">{info.rulesDiscovered}/{info.variables} vars ({info.coveragePercent}%)</span>
+                            </div>
+                            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-primary rounded-full transition-all"
+                                style={{ width: `${Math.min(info.coveragePercent, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {theoryReport.symbolic && (
+                    <div className="border-t pt-2 mt-2">
+                      <p className="text-xs font-medium text-muted-foreground mb-1.5">Symbolic Discovery</p>
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="p-1.5 bg-muted/50 rounded" data-testid="disc-sym-theories">
+                          <p className="text-[9px] text-muted-foreground">Theories</p>
+                          <p className="text-sm font-mono font-bold">{theoryReport.symbolic.totalTheories ?? 0}</p>
+                        </div>
+                        <div className="p-1.5 bg-muted/50 rounded" data-testid="disc-sym-best">
+                          <p className="text-[9px] text-muted-foreground">Best Score</p>
+                          <p className="text-sm font-mono font-bold">{(theoryReport.symbolic.bestScore ?? 0).toFixed(2)}</p>
+                        </div>
+                        <div className="p-1.5 bg-muted/50 rounded" data-testid="disc-sym-features">
+                          <p className="text-[9px] text-muted-foreground">Features</p>
+                          <p className="text-sm font-mono font-bold">{theoryReport.symbolic.featureLibrarySize ?? 0}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {theoryReport.summary?.topRecommendation && (
+                    <div className="bg-green-50 dark:bg-green-950/30 rounded-md p-2 border border-green-200 dark:border-green-900" data-testid="disc-top-recommendation">
+                      <p className="text-[10px] text-green-600 dark:text-green-400 font-medium uppercase tracking-wider mb-0.5">Top Recommendation</p>
+                      <p className="text-xs text-green-800 dark:text-green-300">{theoryReport.summary.topRecommendation}</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground italic py-4" data-testid="discovery-progress-placeholder">
+                  Discovery progress will appear after running causal and symbolic physics engines
+                </p>
+              )}
+            </CardContent>
+          </Card>
 
           <Card data-testid="card-learning-insights">
             <CardHeader className="pb-2">

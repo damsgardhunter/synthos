@@ -1,0 +1,39 @@
+Logic Flaw: Crossover Order Corruption
+In crossoverPrograms:
+
+TypeScript
+const p2Tail = parent2.instructions.slice(crossoverPoint).map((inst, i) => ({
+  ...JSON.parse(JSON.stringify(inst)),
+  order: crossoverPoint + i,
+}));
+child.instructions = [...child.instructions.slice(0, crossoverPoint), ...p2Tail];
+The Issue: You are assuming that parent1's instructions from 0 to crossoverPoint have contiguous order values from 0 to X. If parent1 was previously mutated via reorder-instructions, this is not guaranteed.
+
+The Risk: You may end up with duplicate order values or gaps (e.g., 0, 1, 5, 6, 7). Since executeDesignProgram sorts by order, the physical sequence of construction will be non-deterministic.
+
+Fix: Always re-map the order property for the entire child.instructions array after the spread:
+
+TypeScript
+child.instructions = [...].map((inst, idx) => ({ ...inst, order: idx }));
+4. Physical Constraint: Symmetry Group "Ghosting"
+In reconcileStructuralConsistency:
+
+TypeScript
+if (symmetryInst) {
+  const currentGroup = symmetryInst.params.group as string;
+  if (!validGroups.includes(currentGroup)) {
+    symmetryInst.params.group = validGroups[0];
+  }
+}
+The Issue: If the mutation changed the lattice from cubic to tetragonal, you force the symmetry group to validGroups[0].
+
+The Risk: If validGroups[0] is a low-symmetry group but the instructions still contain high-symmetry commands (like add_hydrogen_cage which expects Im-3m), the generated structure will be physically inconsistent.
+
+Improvement: The reconciliation should be a "Hard Reset." If the lattice type changes significantly, it is safer to remove symmetry-dependent instructions (like cages) or flag the program for re-initialization.
+
+5. Architectural Improvement: selectElementForRole
+TypeScript
+const el = ... ? ... : selectElementForRole(template.type, usedElements);
+The Issue: If usedElements (derived from the elementPool) is empty or contains only light elements (H, Li), and the template.type is structural_backbone, the role selection will fail or pick a non-structural element.
+
+Fix: Add a "Heavy Metal" fallback list (Nb, Ta, La) to the selectElementForRole logic to ensure the structural_backbone always has a high-Z element to provide the necessary DOS.

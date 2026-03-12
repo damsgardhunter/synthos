@@ -24,6 +24,18 @@ export interface InverseCampaign {
 }
 
 const activeCampaigns = new Map<string, InverseCampaign>();
+const campaignCompletedAt = new Map<string, number>();
+const CAMPAIGN_TTL_MS = 30 * 60 * 1000;
+
+function pruneCompletedCampaigns(): void {
+  const now = Date.now();
+  for (const [id, completedTime] of campaignCompletedAt) {
+    if (now - completedTime > CAMPAIGN_TTL_MS) {
+      activeCampaigns.delete(id);
+      campaignCompletedAt.delete(id);
+    }
+  }
+}
 
 export function createCampaign(id: string, target: TargetProperties, maxCycles: number = 100): InverseCampaign {
   const bias = createInitialBias(target);
@@ -70,10 +82,12 @@ export function loadCampaign(
 }
 
 export function getCampaign(id: string): InverseCampaign | undefined {
+  pruneCompletedCampaigns();
   return activeCampaigns.get(id);
 }
 
 export function getAllActiveCampaigns(): InverseCampaign[] {
+  pruneCompletedCampaigns();
   return Array.from(activeCampaigns.values()).filter(c => c.status === "active");
 }
 
@@ -93,8 +107,9 @@ export function runInverseCycle(
 ): InverseCandidate[] {
   if (campaign.status !== "active") return [];
 
-  const freshCount = 30;
-  const refinedCount = 15;
+  const isEarlyStage = campaign.learningState.bestDistance >= 0.3;
+  const freshCount = isEarlyStage ? 40 : 30;
+  const refinedCount = isEarlyStage ? 5 : 15;
   let allCandidates: InverseCandidate[] = [];
 
   const freshCandidates = generateInverseCandidates(
@@ -127,6 +142,7 @@ export function runInverseCycle(
 
   if (campaign.cyclesRun >= campaign.maxCycles) {
     campaign.status = "completed";
+    campaignCompletedAt.set(campaign.id, Date.now());
   }
 
   return allCandidates;
@@ -181,6 +197,7 @@ export function processInverseResults(
     const range = Math.max(...last10) - Math.min(...last10);
     if (range < 0.005 && campaign.learningState.bestDistance < 0.1) {
       campaign.status = "converged";
+      campaignCompletedAt.set(campaign.id, Date.now());
     }
   }
 }

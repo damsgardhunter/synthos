@@ -1,4 +1,5 @@
 import { getEmbeddingDataset, type EmbeddingPoint } from "./discovery-landscape";
+import { getVarianceSummary } from "../learning/uncertainty-tracker";
 
 export interface DiscoveryZone {
   id: string;
@@ -41,7 +42,15 @@ interface Voxel {
 }
 
 const GRID_RESOLUTION = 8;
-const SC_TC_THRESHOLD = 20;
+let scTcThreshold = 20;
+
+export function setScTcThreshold(threshold: number): void {
+  scTcThreshold = Math.max(0.1, threshold);
+}
+
+export function getScTcThreshold(): number {
+  return scTcThreshold;
+}
 
 function buildVoxelGrid(
   points: EmbeddingPoint[],
@@ -110,7 +119,7 @@ function buildVoxelGrid(
     voxel.density = mats.length;
     voxel.avgTc = mats.reduce((s, m) => s + m.tc, 0) / mats.length;
     voxel.maxTc = Math.max(...mats.map(m => m.tc));
-    voxel.scFraction = mats.filter(m => m.tc >= SC_TC_THRESHOLD).length / mats.length;
+    voxel.scFraction = mats.filter(m => m.tc >= scTcThreshold).length / mats.length;
   }
 
   computeTcGradients(voxels, resolution);
@@ -132,18 +141,31 @@ function computeTcGradients(
       [0, 0, 1], [0, 0, -1],
     ];
 
+    let geometricDirs = 0;
+    let activeDirs = 0;
     for (const [dx, dy, dz] of dirs) {
       const nx = ix + dx, ny = iy + dy, nz = iz + dz;
-      if (nx < 0 || nx >= resolution || ny < 0 || ny >= resolution || nz < 0 || nz >= resolution) continue;
+      const inBounds = nx >= 0 && nx < resolution && ny >= 0 && ny < resolution && nz >= 0 && nz < resolution;
 
+      if (!inBounds) continue;
+
+      geometricDirs++;
       const neighborKey = `${nx}-${ny}-${nz}`;
       const neighbor = voxels.get(neighborKey);
       if (!neighbor) continue;
 
+      activeDirs++;
       const tcDiff = neighbor.avgTc - voxel.avgTc;
       gradient[0] += tcDiff * dx;
       gradient[1] += tcDiff * dy;
       gradient[2] += tcDiff * dz;
+    }
+
+    if (geometricDirs > 0 && geometricDirs < 6) {
+      const boundaryNorm = 6 / geometricDirs;
+      gradient[0] *= boundaryNorm;
+      gradient[1] *= boundaryNorm;
+      gradient[2] *= boundaryNorm;
     }
 
     voxel.tcGradient = gradient;
@@ -189,15 +211,32 @@ export function detectDiscoveryZones(maxZones: number = 20): DiscoveryZone[] {
     ix: number; iy: number; iz: number;
   }[] = [];
 
+  const medianDensity = (() => {
+    const densities = occupiedVoxels.map(v => v.density).sort((a, b) => a - b);
+    return densities.length > 0 ? densities[Math.floor(densities.length / 2)] : 1;
+  })();
+
   for (const voxel of occupiedVoxels) {
     const densityNorm = maxDensity > 0 ? voxel.density / maxDensity : 0;
-    const lowDensityScore = 1 - densityNorm;
+    const sparsityRaw = 1 - densityNorm;
+    const lowDensityScore = Math.min(0.7, sparsityRaw) * (voxel.density >= 2 ? 1.0 : 0.3);
     const tcProximity = maxTcGlobal > 0 ? voxel.avgTc / maxTcGlobal : 0;
     const gradientNorm = voxel.gradientMag / (maxTcGlobal + 1);
 
     const scFractionScore = voxel.scFraction;
+    const densityConfidence = Math.max(0, 1 - Math.abs(voxel.density - medianDensity) / Math.max(medianDensity, 1));
 
-    const score = tcProximity * 0.35 + lowDensityScore * 0.25 + gradientNorm * 0.2 + scFractionScore * 0.2;
+    const elementSet = new Set<string>();
+    for (const m of voxel.materials) {
+      for (const el of extractElements(m.formula)) {
+        elementSet.add(el);
+      }
+    }
+    const uniqueElements = elementSet.size;
+    const elementsPerMaterial = voxel.materials.length > 0 ? uniqueElements / voxel.materials.length : 0;
+    const elementDiversityScore = Math.min(1.0, elementsPerMaterial / 3.0);
+
+    const score = tcProximity * 0.35 + lowDensityScore * 0.10 + gradientNorm * 0.20 + scFractionScore * 0.20 + densityConfidence * 0.05 + elementDiversityScore * 0.10;
 
     candidates.push({
       center: voxel.center,
@@ -224,40 +263,58 @@ export function detectDiscoveryZones(maxZones: number = 20): DiscoveryZone[] {
       bounds.min[2] + (iz + 0.5) * cellSize[2],
     ];
 
-    let nearestHighTcDist = Infinity;
-    let nearestHighTc = 0;
+    let bestGradientScore = 0;
+    let bestGradientTc = 0;
+    let bestGradientMaxTc = 0;
+    let bestGradient: [number, number, number] = [0, 0, 0];
     const nearbyMats: EmbeddingPoint[] = [];
+
     for (const voxel of occupiedVoxels) {
-      const d = Math.sqrt(
-        (center[0] - voxel.center[0]) ** 2 +
-        (center[1] - voxel.center[1]) ** 2 +
-        (center[2] - voxel.center[2]) ** 2
-      );
-      if (voxel.avgTc > 30 && d < nearestHighTcDist) {
-        nearestHighTcDist = d;
-        nearestHighTc = voxel.avgTc;
-      }
+      const dx = center[0] - voxel.center[0];
+      const dy = center[1] - voxel.center[1];
+      const dz = center[2] - voxel.center[2];
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
       if (d < cellSize[0] * 2) {
         nearbyMats.push(...voxel.materials.slice(0, 3));
       }
+
+      if (voxel.gradientMag > 0.01 && d > 0) {
+        const dirToEmpty = [dx / d, dy / d, dz / d];
+        const gradNorm = [
+          voxel.tcGradient[0] / voxel.gradientMag,
+          voxel.tcGradient[1] / voxel.gradientMag,
+          voxel.tcGradient[2] / voxel.gradientMag,
+        ];
+        const alignment = dirToEmpty[0] * gradNorm[0] + dirToEmpty[1] * gradNorm[1] + dirToEmpty[2] * gradNorm[2];
+
+        if (alignment > 0.3) {
+          const distDecay = Math.exp(-d * d / (cellSize[0] * cellSize[0] * 4));
+          const gradScore = alignment * distDecay * (voxel.avgTc / (maxTcGlobal + 1));
+          if (gradScore > bestGradientScore) {
+            bestGradientScore = gradScore;
+            bestGradientTc = voxel.avgTc;
+            bestGradientMaxTc = voxel.maxTc;
+            bestGradient = [...voxel.tcGradient] as [number, number, number];
+          }
+        }
+      }
     }
 
-    if (nearbyMats.length === 0) continue;
+    if (nearbyMats.length === 0 && bestGradientScore < 0.01) continue;
 
-    const maxDist = Math.sqrt(3) * GRID_RESOLUTION * cellSize[0];
-    const proximityScore = nearestHighTcDist < Infinity ? Math.max(0, 1 - nearestHighTcDist / maxDist) * (nearestHighTc / (maxTcGlobal + 1)) : 0;
-
-    const score = proximityScore * 0.5 + 0.4 + 0.1;
+    const nearbyBonus = nearbyMats.length > 0 ? 0.15 * Math.min(1.0, nearbyMats.length / 5) : 0;
+    const score = bestGradientScore * 0.85 + nearbyBonus;
 
     candidates.push({
       center,
       score: Math.min(1, score),
-      avgTc: nearestHighTc * 0.5,
-      maxTc: nearestHighTc,
+      avgTc: bestGradientTc * 0.7,
+      maxTc: bestGradientMaxTc,
       density: 0,
       scFraction: 0,
-      gradient: [0, 0, 0],
-      gradientMag: 0,
+      gradient: bestGradient,
+      gradientMag: Math.sqrt(bestGradient[0] ** 2 + bestGradient[1] ** 2 + bestGradient[2] ** 2),
       nearbyMaterials: nearbyMats,
       ix, iy, iz,
     });
@@ -316,29 +373,13 @@ export function getZoneMap(): ZoneMap {
   const zones = detectDiscoveryZones();
 
   const totalVoxels = GRID_RESOLUTION ** 3;
-  const occupiedVoxels = new Set<string>();
+  let occupiedVoxelCount = 0;
   if (points.length > 0) {
-    const min: [number, number, number] = [Infinity, Infinity, Infinity];
-    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-    for (const p of points) {
-      for (let d = 0; d < 3; d++) {
-        min[d] = Math.min(min[d], p.position3D[d]);
-        max[d] = Math.max(max[d], p.position3D[d]);
-      }
-    }
-    for (let d = 0; d < 3; d++) {
-      if (max[d] - min[d] < 1) max[d] = min[d] + 1;
-    }
-    const cellSize = [(max[0] - min[0]) / GRID_RESOLUTION, (max[1] - min[1]) / GRID_RESOLUTION, (max[2] - min[2]) / GRID_RESOLUTION];
-    for (const p of points) {
-      const ix = Math.min(GRID_RESOLUTION - 1, Math.max(0, Math.floor((p.position3D[0] - min[0]) / cellSize[0])));
-      const iy = Math.min(GRID_RESOLUTION - 1, Math.max(0, Math.floor((p.position3D[1] - min[1]) / cellSize[1])));
-      const iz = Math.min(GRID_RESOLUTION - 1, Math.max(0, Math.floor((p.position3D[2] - min[2]) / cellSize[2])));
-      occupiedVoxels.add(`${ix}-${iy}-${iz}`);
-    }
+    const { voxels } = buildVoxelGrid(points, GRID_RESOLUTION);
+    occupiedVoxelCount = voxels.size;
   }
 
-  const coveragePercent = Math.round((occupiedVoxels.size / totalVoxels) * 100);
+  const coveragePercent = Math.round((occupiedVoxelCount / totalVoxels) * 100);
   const topZones = zones.filter(z => z.explorationPriority === "high");
 
   const suggestions: string[] = [];
@@ -371,11 +412,22 @@ export function getZoneMap(): ZoneMap {
   };
 }
 
+export interface GradientNavTarget {
+  zoneId: string;
+  center3D: [number, number, number];
+  gradientDirection: [number, number, number];
+  gradientMagnitude: number;
+  avgTc: number;
+  maxTc: number;
+  suggestedElements: string[];
+}
+
 export function getZoneSuggestions(): {
   targetZones: DiscoveryZone[];
   elementBias: Record<string, number>;
   familyBias: Record<string, number>;
   explorationVsExploitation: number;
+  gradientNavTargets: GradientNavTarget[];
 } {
   const zones = detectDiscoveryZones(10);
   const points = getEmbeddingDataset();
@@ -385,8 +437,19 @@ export function getZoneSuggestions(): {
 
   for (const zone of zones) {
     const weight = zone.zoneScore;
+
+    const elementCounts = new Map<string, number>();
+    for (const formula of zone.representativeFormulas) {
+      for (const el of extractElements(formula)) {
+        elementCounts.set(el, (elementCounts.get(el) ?? 0) + 1);
+      }
+    }
+    const totalElementOccurrences = Array.from(elementCounts.values()).reduce((s, c) => s + c, 0) || 1;
+
     for (const el of zone.suggestedElements) {
-      elementBias[el] = (elementBias[el] ?? 0) + weight;
+      const frequency = (elementCounts.get(el) ?? 0) / totalElementOccurrences;
+      const stoichiometricWeight = weight * (0.3 + 0.7 * Math.min(1.0, frequency * zone.suggestedElements.length));
+      elementBias[el] = (elementBias[el] ?? 0) + stoichiometricWeight;
     }
     for (const fam of zone.suggestedFamilies) {
       familyBias[fam] = (familyBias[fam] ?? 0) + weight;
@@ -403,12 +466,38 @@ export function getZoneSuggestions(): {
   }
 
   const highPriorityCount = zones.filter(z => z.explorationPriority === "high").length;
-  const explorationVsExploitation = points.length < 20 ? 0.8 : Math.max(0.2, 0.6 - highPriorityCount * 0.05);
+  let explorationVsExploitation = points.length < 20 ? 0.8 : Math.max(0.2, 0.6 - highPriorityCount * 0.05);
+
+  try {
+    const variance = getVarianceSummary();
+    if (variance.highUncertaintyFraction > 0.4) {
+      explorationVsExploitation = Math.max(explorationVsExploitation, 0.7);
+    } else if (variance.highUncertaintyFraction > 0.2) {
+      explorationVsExploitation = Math.max(explorationVsExploitation, 0.5);
+    } else if (variance.meanVariance > 0.3) {
+      explorationVsExploitation = Math.max(explorationVsExploitation, 0.45);
+    }
+  } catch {}
+
+  const gradientNavTargets: GradientNavTarget[] = zones
+    .filter(z => z.gradientMagnitude > 0.1 && z.explorationPriority !== "low")
+    .sort((a, b) => b.gradientMagnitude * b.zoneScore - a.gradientMagnitude * a.zoneScore)
+    .slice(0, 5)
+    .map(z => ({
+      zoneId: z.id,
+      center3D: z.center3D,
+      gradientDirection: z.gradientDirection,
+      gradientMagnitude: z.gradientMagnitude,
+      avgTc: z.avgTc,
+      maxTc: z.maxTc,
+      suggestedElements: z.suggestedElements,
+    }));
 
   return {
     targetZones: zones.filter(z => z.explorationPriority !== "low"),
     elementBias,
     familyBias,
-    explorationVsExploitation,
+    explorationVsExploitation: Math.round(explorationVsExploitation * 1000) / 1000,
+    gradientNavTargets,
   };
 }
