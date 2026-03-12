@@ -81,6 +81,56 @@ export interface DataRequest {
   generatedCount?: number;
 }
 
+const MODEL_TARGET_ALIASES: Record<string, string> = {
+  "xgboost": "xgboost",
+  "xgb": "xgboost",
+  "gradient_boost": "xgboost",
+  "gradient-boost": "xgboost",
+  "gnn": "gnn",
+  "graph_neural_net": "gnn",
+  "graph-neural-net": "gnn",
+  "lambda-regressor": "lambda-regressor",
+  "lambda_regressor": "lambda-regressor",
+  "lambda_predictor": "lambda-regressor",
+  "lambda-predictor": "lambda-regressor",
+  "phonon-surrogate": "phonon-surrogate",
+  "phonon_surrogate": "phonon-surrogate",
+  "phonon": "phonon-surrogate",
+  "tb-surrogate": "tb-surrogate",
+  "tb_surrogate": "tb-surrogate",
+  "tb-predictor": "tb-surrogate",
+  "tb_predictor": "tb-surrogate",
+};
+
+function normalizeModelTarget(raw: string): string | null {
+  return MODEL_TARGET_ALIASES[raw.toLowerCase().trim()] ?? null;
+}
+
+function repairTruncatedJSONArray(raw: string): any[] | null {
+  try {
+    const arrayMatch = raw.match(/\[\s*\{/);
+    if (!arrayMatch) return null;
+    const arrayStart = raw.indexOf("[", arrayMatch.index!);
+    let depth = 0;
+    let lastCompleteObj = -1;
+    for (let i = arrayStart; i < raw.length; i++) {
+      if (raw[i] === "{") depth++;
+      if (raw[i] === "}") {
+        depth--;
+        if (depth === 0) lastCompleteObj = i;
+      }
+    }
+    if (lastCompleteObj > arrayStart) {
+      const repaired = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
+      const parsed = JSON.parse(repaired);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 const MAX_EXPERIMENT_RECORDS = 50;
 const MAX_DATA_REQUESTS = 30;
 let experimentRecords: ExperimentRecord[] = [];
@@ -96,43 +146,46 @@ function generateExperimentId(): string {
 }
 
 function snapshotModelMetrics(diagnostics: ComprehensiveModelDiagnostics, modelTarget: string): Record<string, number> {
+  const safeNum = (v: any): number => (typeof v === "number" && Number.isFinite(v)) ? v : 0;
   switch (modelTarget) {
     case "xgboost":
       return {
-        r2: diagnostics.xgboost.r2,
-        mae: diagnostics.xgboost.mae,
-        rmse: diagnostics.xgboost.rmse,
-        datasetSize: diagnostics.xgboost.datasetSize,
-        falsePositiveRate: diagnostics.xgboost.falsePositiveRate,
-        falseNegativeRate: diagnostics.xgboost.falseNegativeRate,
+        r2: safeNum(diagnostics.xgboost?.r2),
+        mae: safeNum(diagnostics.xgboost?.mae),
+        rmse: safeNum(diagnostics.xgboost?.rmse),
+        datasetSize: safeNum(diagnostics.xgboost?.datasetSize),
+        falsePositiveRate: safeNum(diagnostics.xgboost?.falsePositiveRate),
+        falseNegativeRate: safeNum(diagnostics.xgboost?.falseNegativeRate),
       };
     case "gnn":
       return {
-        r2: diagnostics.gnn.latestR2,
-        mae: diagnostics.gnn.latestMAE,
-        rmse: diagnostics.gnn.latestRMSE,
-        datasetSize: diagnostics.gnn.datasetSize,
+        r2: safeNum(diagnostics.gnn?.latestR2),
+        mae: safeNum(diagnostics.gnn?.latestMAE),
+        rmse: safeNum(diagnostics.gnn?.latestRMSE),
+        datasetSize: safeNum(diagnostics.gnn?.datasetSize),
       };
     case "lambda-regressor":
       return {
-        r2: diagnostics.lambda.r2,
-        mae: diagnostics.lambda.mae,
-        rmse: diagnostics.lambda.rmse,
-        datasetSize: diagnostics.lambda.datasetSize,
+        r2: safeNum(diagnostics.lambda?.r2),
+        mae: safeNum(diagnostics.lambda?.mae),
+        rmse: safeNum(diagnostics.lambda?.rmse),
+        datasetSize: safeNum(diagnostics.lambda?.datasetSize),
       };
     case "phonon-surrogate":
       return {
-        omegaLogMAE: diagnostics.phononSurrogate.omegaLogMAE,
-        debyeTempMAE: diagnostics.phononSurrogate.debyeTempMAE,
-        maxFreqMAE: diagnostics.phononSurrogate.maxFreqMAE,
-        stabilityAccuracy: diagnostics.phononSurrogate.stabilityAccuracy,
-        datasetSize: diagnostics.phononSurrogate.datasetSize,
+        omegaLogMAE: safeNum(diagnostics.phononSurrogate?.omegaLogMAE),
+        debyeTempMAE: safeNum(diagnostics.phononSurrogate?.debyeTempMAE),
+        maxFreqMAE: safeNum(diagnostics.phononSurrogate?.maxFreqMAE),
+        stabilityAccuracy: safeNum(diagnostics.phononSurrogate?.stabilityAccuracy),
+        datasetSize: safeNum(diagnostics.phononSurrogate?.datasetSize),
       };
     case "tb-surrogate":
       return {
-        datasetSize: diagnostics.tbSurrogate.datasetSize,
-        predictions: diagnostics.tbSurrogate.predictions,
-        trainings: diagnostics.tbSurrogate.trainings,
+        datasetSize: safeNum(diagnostics.tbSurrogate?.datasetSize),
+        predictions: safeNum(diagnostics.tbSurrogate?.predictions),
+        trainings: safeNum(diagnostics.tbSurrogate?.trainings),
+        modelCount: safeNum(diagnostics.tbSurrogate?.modelCount),
+        avgPredictionTimeMs: safeNum(diagnostics.tbSurrogate?.avgPredictionTimeMs),
       };
     default:
       return {};
@@ -174,7 +227,7 @@ Each experiment must be one of these types:
   lambda-regressor: learningRate (0.0001-0.01), layerCount (2-8), dropoutRate (0.0-0.5), regularizationL2 (0.0001-0.1)
   phonon-surrogate: nTrees (10-200), learningRate (0.01-0.2), maxDepth (3-10)
   tb-surrogate: nTrees (10-200), learningRate (0.01-0.2), maxDepth (3-10)
-  Example: {"model": "lambda_predictor", "learning_rate": 0.0005, "layers": 5, "dropout": 0.2}
+  Example: {"model": "lambda-regressor", "learning_rate": 0.0005, "layers": 5, "dropout": 0.2}
 - expand_dataset: Add more training data from available sources
 - add_features: Enable computed features like van_hove_distance, lambda_over_omega, effective_coupling_strength, dos_lambda_product, etc.
   Use changes like {"enable_features": ["van_hove_distance", "dos_lambda_product"]}
@@ -236,34 +289,42 @@ Be specific about what parameters to change and why.`,
 
     const content = response.choices[0]?.message?.content ?? "[]";
     const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) return [];
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (!Array.isArray(parsed)) return [];
+    let parsed: any[];
+    if (jsonMatch) {
+      try {
+        const attempt = JSON.parse(jsonMatch[0]);
+        parsed = Array.isArray(attempt) ? attempt : [];
+      } catch {
+        parsed = repairTruncatedJSONArray(content) ?? [];
+      }
+    } else {
+      parsed = repairTruncatedJSONArray(content) ?? [];
+    }
+    if (parsed.length === 0) return [];
 
     const validTypes: ExperimentType[] = [
       "retrain_model", "adjust_hyperparameters", "expand_dataset",
       "add_features", "adjust_architecture", "recalibrate_uncertainty",
       "rebalance_training", "request_data",
     ];
-    const validModels = ["xgboost", "gnn", "lambda-regressor", "phonon-surrogate", "tb-surrogate"];
 
     return parsed
-      .filter((p: any) =>
-        p.model_target && validModels.includes(p.model_target) &&
-        p.experiment_type && validTypes.includes(p.experiment_type) &&
-        p.changes && typeof p.changes === "object" &&
-        p.reasoning && typeof p.reasoning === "string"
-      )
-      .slice(0, 3)
-      .map((p: any) => ({
-        model_target: p.model_target,
-        experiment_type: p.experiment_type as ExperimentType,
-        changes: p.changes,
-        reasoning: p.reasoning,
-        expected_improvement: p.expected_improvement ?? "unknown",
-        priority: Math.max(1, Math.min(3, Number(p.priority) || 2)),
-      }));
+      .map((p: any) => {
+        if (!p.model_target || !p.experiment_type || !p.changes || typeof p.changes !== "object" || !p.reasoning) return null;
+        const normalizedTarget = normalizeModelTarget(p.model_target);
+        if (!normalizedTarget) return null;
+        if (!validTypes.includes(p.experiment_type)) return null;
+        return {
+          model_target: normalizedTarget,
+          experiment_type: p.experiment_type as ExperimentType,
+          changes: p.changes,
+          reasoning: typeof p.reasoning === "string" ? p.reasoning : String(p.reasoning),
+          expected_improvement: p.expected_improvement ?? "unknown",
+          priority: Math.max(1, Math.min(3, Number(p.priority) || 2)),
+        };
+      })
+      .filter((p): p is ExperimentProposal => p !== null)
+      .slice(0, 3);
   } catch (e) {
     console.log(`[Model Experiment Controller] LLM proposal failed: ${e instanceof Error ? e.message : "unknown"}`);
     return [];
