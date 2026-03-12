@@ -247,14 +247,19 @@ const DEFAULT_SIGMAS: Record<string, number> = {
 
 export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: number; confidence: string; methods: TcMethodEstimates } {
   const entries: { method: string; tc: number; sigma: number }[] = [];
-  if (estimates.dftTc != null && estimates.dftTc > 0)
-    entries.push({ method: "dft", tc: estimates.dftTc, sigma: estimates.dftSigma ?? DEFAULT_SIGMAS.dft });
-  if (estimates.xTbTc != null && estimates.xTbTc > 0)
-    entries.push({ method: "xtb", tc: estimates.xTbTc, sigma: estimates.xTbSigma ?? DEFAULT_SIGMAS.xtb });
-  if (estimates.physicsTc != null && estimates.physicsTc > 0)
-    entries.push({ method: "physics", tc: estimates.physicsTc, sigma: estimates.physicsSigma ?? DEFAULT_SIGMAS.physics });
-  if (estimates.gbPredicted != null && estimates.gbPredicted > 0)
-    entries.push({ method: "gb", tc: estimates.gbPredicted, sigma: estimates.gbSigma ?? DEFAULT_SIGMAS.gb });
+  const validTc = (v: number | undefined | null): v is number => v != null && Number.isFinite(v) && v > 0;
+  const validSigma = (v: number | undefined | null, fallback: number): number => {
+    const s = v != null && Number.isFinite(v) && v > 0 ? v : fallback;
+    return s;
+  };
+  if (validTc(estimates.dftTc))
+    entries.push({ method: "dft", tc: estimates.dftTc, sigma: validSigma(estimates.dftSigma, DEFAULT_SIGMAS.dft) });
+  if (validTc(estimates.xTbTc))
+    entries.push({ method: "xtb", tc: estimates.xTbTc, sigma: validSigma(estimates.xTbSigma, DEFAULT_SIGMAS.xtb) });
+  if (validTc(estimates.physicsTc))
+    entries.push({ method: "physics", tc: estimates.physicsTc, sigma: validSigma(estimates.physicsSigma, DEFAULT_SIGMAS.physics) });
+  if (validTc(estimates.gbPredicted))
+    entries.push({ method: "gb", tc: estimates.gbPredicted, sigma: validSigma(estimates.gbSigma, DEFAULT_SIGMAS.gb) });
 
   if (entries.length === 0) return { reconciledTc: 0, confidence: "none", methods: estimates };
   if (entries.length === 1) {
@@ -420,8 +425,11 @@ export function parseFormulaElements(formula: string): string[] {
   cleaned = cleaned.replace(/[⁺⁻]+/g, "");
   cleaned = cleaned.replace(/[A-Z][a-z]?\d*[+\-]/g, match => match.replace(/\d*[+\-]$/, ""));
   cleaned = cleaned.replace(/[()[\]]/g, "");
+  cleaned = cleaned.replace(/(^|[\d\s])([a-z])/g, (_m, prefix, c) => prefix + c.toUpperCase());
   const matches = cleaned.match(/[A-Z][a-z]*/g);
-  return matches ? Array.from(new Set(matches)) : [];
+  if (!matches) return [];
+  const valid = matches.filter(el => getElementData(el) !== null);
+  return Array.from(new Set(valid));
 }
 
 function expandParentheses(formula: string): string {
@@ -471,38 +479,41 @@ const LAMBDA_CONVERSION = 562000;
 
 export type HydrogenBondingType = "metallic-network" | "cage-clathrate" | "covalent-molecular" | "interstitial" | "ambiguous" | "none";
 
+const NONMETALS_SET = new Set(["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"]);
+
 export function classifyHydrogenBonding(formula: string, pressureGpa: number = 0): HydrogenBondingType {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
-  const totalAtoms = getTotalAtoms(counts);
-  const hCount = counts["H"] || 0;
+  const pc = parseComposition(formula);
+  return classifyHydrogenBondingParsed(pc, pressureGpa);
+}
+
+function classifyHydrogenBondingParsed(pc: ParsedComposition, pressureGpa: number): HydrogenBondingType {
+  const hCount = pc.counts["H"] || 0;
   if (hCount === 0) return "none";
 
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
-  const metalElements = elements.filter(e => !nonmetals.includes(e));
-  const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
-  const metalFrac = metalAtomCount / totalAtoms;
+  const metalElements = pc.elements.filter(e => !NONMETALS_SET.has(e));
+  const metalAtomCount = metalElements.reduce((s, e) => s + (pc.counts[e] || 0), 0);
+  const metalFrac = metalAtomCount / pc.totalAtoms;
   const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
 
-  const cCount = counts["C"] || 0;
-  const nCount = counts["N"] || 0;
-  const oCount = counts["O"] || 0;
-  const bCount = counts["B"] || 0;
-  const cFrac = cCount / totalAtoms;
-  const nonHNonMetFrac = elements.filter(e => nonmetals.includes(e) && e !== "H")
-    .reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+  const cCount = pc.counts["C"] || 0;
+  const nCount = pc.counts["N"] || 0;
+  const oCount = pc.counts["O"] || 0;
+  const bCount = pc.counts["B"] || 0;
+  const cFrac = cCount / pc.totalAtoms;
+  const nonHNonMetFrac = pc.elements.filter(e => NONMETALS_SET.has(e) && e !== "H")
+    .reduce((s, e) => s + (pc.counts[e] || 0), 0) / pc.totalAtoms;
 
   const isOrganic = cFrac > 0.15 && hCount >= cCount;
   if (isOrganic) return "covalent-molecular";
 
-  if ((cCount + nCount + oCount + bCount) / totalAtoms > 0.15 && hRatio < 6) {
+  if ((cCount + nCount + oCount + bCount) / pc.totalAtoms > 0.15 && hRatio < 6) {
     return "covalent-molecular";
   }
 
   const avgMetalZ = metalElements.length > 0
     ? metalElements.reduce((s, e) => {
         const d = getElementData(e);
-        return s + (d ? d.atomicNumber * (counts[e] || 1) : 0);
+        return s + (d ? d.atomicNumber * (pc.counts[e] || 1) : 0);
       }, 0) / metalAtomCount
     : 0;
   const isHeavyMetal = avgMetalZ >= 38;
