@@ -772,6 +772,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `computePairingSusceptibility` results are now cached in a TTL-gated Map (120s TTL, max 500 entries with LRU eviction). Avoids redundant physics computation when the same formula is evaluated multiple times within a discovery cycle.
 - **Full Error Stack Traces (superconductor-research.ts)**:
   - All three catch blocks (top-level novel SC, inner novel SC, inverse design) now send the full error object to `console.error` for internal debugging while keeping the UI-facing event log truncated to 200 chars.
+- **Optimized Composition Novelty (superconductor-research.ts)**:
+  - `computeCompositionNovelty` no longer re-parses all training formulas on every call. Training element sets are pre-computed once at startup via `getTrainingElementIndex()`. Intersection is computed by iterating the (small) target element array against the pre-built Set, avoiding Array.from + filter + Set construction per entry. Results are cached in a bounded Map (2000 entries, FIFO eviction). Jaccard safely handles empty union via `unionSize === 0` guard.
+- **Double-Damping Fix in Inverse Design (superconductor-research.ts)**:
+  - `inverseDesignScore` now uses `pairingSusc.rawScore` (pairing quality without stability penalty) instead of `pairingSusc.score` (which already incorporates formation-energy damping). Since `gbResult.score` also accounts for stability, using the stability-adjusted `score` was double-penalizing unstable materials. `computePairingSusceptibility` now returns both `score` (stability-adjusted, for Tc estimation) and `rawScore` (pure pairing quality, for confidence/ensemble scoring).
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

@@ -709,6 +709,7 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
 
 type PairingSusceptibilityResult = {
   score: number;
+  rawScore: number;
   lambda: number;
   nestingFactor: number;
   dosAtEf: number;
@@ -804,13 +805,15 @@ export function computePairingSusceptibility(formula: string): PairingSusceptibi
   const novelty = computeCompositionNovelty(formula);
   score = 0.85 * score + 0.15 * novelty;
 
+  const rawScore = Math.min(1.0, score);
+
   const features = extractFeatures(formula);
   const fe = features.formationEnergy ?? 0;
   const stabilityFactor = fe < 0 ? 1.0 : Math.max(0.5, 1.0 - fe * 0.2);
   score *= stabilityFactor;
 
   const result: PairingSusceptibilityResult = {
-    score: Math.min(1.0, score), lambda, nestingFactor: nestingScore, dosAtEf, phononSoftness: softModeScore,
+    score: Math.min(1.0, score), rawScore, lambda, nestingFactor: nestingScore, dosAtEf, phononSoftness: softModeScore,
   };
 
   pairingSusceptibilityCache.set(formula, { result, ts: Date.now() });
@@ -824,20 +827,45 @@ export function computePairingSusceptibility(formula: string): PairingSusceptibi
   return result;
 }
 
+let _trainingElementSets: Set<string>[] | null = null;
+let _trainingElementKeys: string[][] | null = null;
+const _noveltyCache = new Map<string, number>();
+
+function getTrainingElementIndex(): { sets: Set<string>[]; keys: string[][] } {
+  if (!_trainingElementSets) {
+    _trainingElementSets = [];
+    _trainingElementKeys = [];
+    for (const entry of SUPERCON_TRAINING_DATA) {
+      const els = parseFormulaElements(entry.formula);
+      if (els.length === 0) continue;
+      const s = new Set(els);
+      _trainingElementSets.push(s);
+      _trainingElementKeys.push(els.sort());
+    }
+  }
+  return { sets: _trainingElementSets!, keys: _trainingElementKeys! };
+}
+
 export function computeCompositionNovelty(formula: string): number {
+  const cached = _noveltyCache.get(formula);
+  if (cached !== undefined) return cached;
+
   const targetElements = new Set(parseFormulaElements(formula));
   if (targetElements.size === 0) return 1;
 
+  const { sets } = getTrainingElementIndex();
+  const targetArr = Array.from(targetElements);
   let minDistance = 1;
 
-  for (const entry of SUPERCON_TRAINING_DATA) {
-    const entryElements = new Set(parseFormulaElements(entry.formula));
-    if (entryElements.size === 0) continue;
+  for (const entrySet of sets) {
+    let intersectionSize = 0;
+    for (const el of targetArr) {
+      if (entrySet.has(el)) intersectionSize++;
+    }
+    const unionSize = targetElements.size + entrySet.size - intersectionSize;
+    if (unionSize === 0) continue;
 
-    const intersectionSize = Array.from(targetElements).filter(e => entryElements.has(e)).length;
-    const unionSize = new Set(Array.from(targetElements).concat(Array.from(entryElements))).size;
-
-    const jaccard = unionSize > 0 ? 1 - intersectionSize / unionSize : 1;
+    const jaccard = 1 - intersectionSize / unionSize;
 
     if (jaccard < minDistance) {
       minDistance = jaccard;
@@ -846,7 +874,18 @@ export function computeCompositionNovelty(formula: string): number {
     if (minDistance === 0) break;
   }
 
-  return Math.max(0, Math.min(1, minDistance));
+  const result = Math.max(0, Math.min(1, minDistance));
+
+  _noveltyCache.set(formula, result);
+  if (_noveltyCache.size > 2000) {
+    const iter = _noveltyCache.keys();
+    for (let i = 0; i < 500; i++) {
+      const k = iter.next().value;
+      if (k) _noveltyCache.delete(k);
+    }
+  }
+
+  return result;
 }
 
 let totalInverseDesignGenerated = 0;
@@ -965,7 +1004,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
       };
       cappedTc = Math.round(applyAmbientTcCap(cappedTc, lambdaML, invEnforcedPressure, metallicityML, c.formula, invDesEvidence));
 
-      const inverseDesignScore = Math.min(0.95, pairingSusc.score * 0.6 + gbResult.score * 0.4);
+      const inverseDesignScore = Math.min(0.95, pairingSusc.rawScore * 0.6 + gbResult.score * 0.4);
 
       const id = `sc-invdes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
