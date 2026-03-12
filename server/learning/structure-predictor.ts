@@ -719,6 +719,27 @@ export function vegardLatticeParameter(formula: string, comp?: ParsedComposition
   return weightedSum / totalWeight;
 }
 
+const PROTOTYPE_BA_RATIOS: Record<string, number> = {
+  YBCO: 1.016,
+  cuprate: 1.0,
+  "iron-pnictide": 1.0,
+  "ThCr2Si2": 1.0,
+  Chevrel: 1.0,
+  Skutterudite: 1.0,
+  Heusler: 1.0,
+  "half-Heusler": 1.0,
+  perovskite: 1.0,
+  "anti-perovskite": 1.0,
+};
+
+function getPrototypeBAOverA(prototype: string | null): number | null {
+  if (!prototype) return null;
+  for (const [key, ratio] of Object.entries(PROTOTYPE_BA_RATIOS)) {
+    if (prototype.toLowerCase().includes(key.toLowerCase())) return ratio;
+  }
+  return null;
+}
+
 function estimateLatticeFromVolume(
   volume: number,
   nsites: number,
@@ -731,8 +752,10 @@ function estimateLatticeFromVolume(
   const vegardA = formula ? vegardLatticeParameter(formula, comp, protoMatch) : null;
 
   const protoCARatio = getPrototypeCARatio(prototype || null);
+  const protoBAOverA = getPrototypeBAOverA(prototype || null);
 
-  const volPerAtom = volume / Math.max(nsites, 1);
+  const Z = Math.max(nsites, 1);
+  const cellVol = volume;
 
   if (vegardA && protoCARatio) {
     const a = vegardA;
@@ -741,7 +764,14 @@ function estimateLatticeFromVolume(
     if (cs === "cubic") return { a, b: a, c: a };
     if (cs === "tetragonal") return { a, b: a, c };
     if (cs === "hexagonal" || cs === "trigonal") return { a, b: a, c };
-    if (cs === "orthorhombic") return { a, b: a * 1.02, c };
+    if (cs === "orthorhombic") {
+      const ba = protoBAOverA ?? 1.0;
+      if (cellVol > 0) {
+        const solvedA = Math.pow(cellVol / (ba * protoCARatio), 1 / 3);
+        return { a: solvedA, b: solvedA * ba, c: solvedA * protoCARatio };
+      }
+      return { a, b: a * ba, c };
+    }
     return { a, b: a, c };
   }
 
@@ -761,28 +791,28 @@ function estimateLatticeFromVolume(
   let a: number, b: number, c: number;
 
   if (cs === "cubic") {
-    a = Math.pow(volPerAtom, 1 / 3);
+    a = Math.pow(cellVol, 1 / 3);
     b = a;
     c = a;
   } else if (cs === "tetragonal") {
-    a = Math.pow(volPerAtom / caRatio, 1 / 3);
+    a = Math.pow(cellVol / (caRatio), 1 / 3);
     b = a;
     c = a * caRatio;
   } else if (cs === "hexagonal" || cs === "trigonal") {
-    const hexVol = volPerAtom;
-    a = Math.pow(hexVol / (caRatio * Math.sqrt(3) / 2), 1 / 3);
+    a = Math.pow(cellVol / (caRatio * Math.sqrt(3) / 2), 1 / 3);
     b = a;
     c = a * caRatio;
   } else if (cs === "orthorhombic") {
-    a = Math.pow(volPerAtom / (1.02 * caRatio), 1 / 3);
-    b = a * 1.02;
+    const ba = protoBAOverA ?? 1.02;
+    a = Math.pow(cellVol / (ba * caRatio), 1 / 3);
+    b = a * ba;
     c = a * caRatio;
   } else if (cs === "monoclinic") {
-    a = Math.pow(volPerAtom / (1.0 * caRatio), 1 / 3);
+    a = Math.pow(cellVol / (1.0 * caRatio), 1 / 3);
     b = a;
     c = a * caRatio;
   } else {
-    a = Math.pow(volPerAtom, 1 / 3);
+    a = Math.pow(cellVol, 1 / 3);
     b = a;
     c = a;
   }
