@@ -12,6 +12,12 @@ const MIN_QUEUE_SIZE = 50;
 const REFILL_BATCH_SIZE = 100;
 const IMAGINARY_PHONON_THRESHOLD_CM1 = -10.0;
 const EXPLORATION_FRACTION = 0.3;
+const JOB_STAGGER_MS = 2000;
+const STALE_CLEANUP_INTERVAL_MS = 5 * 60_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 type PipelineStage = "candidate_queue" | "dft_workers" | "phonon_workers" | "epc_workers";
 
@@ -519,6 +525,7 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 let lastLoopHeartbeat = 0;
 let loopActive = false;
 let watchdogRestarting = false;
+let lastStaleCleanup = 0;
 
 export function startDFTWorkerLoop() {
   if (workerLoopTimer) return;
@@ -529,7 +536,7 @@ export function startDFTWorkerLoop() {
     console.log("[DFT-Queue] Quantum ESPRESSO detected at pw.x, full DFT worker ready");
   }
 
-  cleanupStaleJobs().catch(() => {});
+  cleanupStaleJobs().then(() => { lastStaleCleanup = Date.now(); }).catch(() => {});
 
   console.log(`[DFT-Queue] Starting DFT worker loop (poll every 30s, max ${MAX_CONCURRENT} concurrent)`);
 
@@ -540,12 +547,19 @@ export function startDFTWorkerLoop() {
     loopActive = true;
     lastLoopHeartbeat = Date.now();
     try {
+      if (Date.now() - lastStaleCleanup > STALE_CLEANUP_INTERVAL_MS) {
+        await cleanupStaleJobs();
+        lastStaleCleanup = Date.now();
+      }
+
       await refillQueueIfLow();
 
-      const launched: Promise<boolean>[] = [];
       const slotsAvailable = MAX_CONCURRENT - activeWorkers;
+      const launched: Promise<boolean>[] = [];
       for (let i = 0; i < slotsAvailable; i++) {
+        if (i > 0) await delay(JOB_STAGGER_MS);
         launched.push(processNextJob());
+        lastLoopHeartbeat = Date.now();
       }
       const results = await Promise.all(launched);
       lastLoopHeartbeat = Date.now();
@@ -600,7 +614,11 @@ export function stopDFTWorkerLoop() {
 }
 
 export function getStageMetrics(): Record<PipelineStage, StageMetrics> {
-  return JSON.parse(JSON.stringify(stageMetrics));
+  const result = {} as Record<PipelineStage, StageMetrics>;
+  for (const key of Object.keys(stageMetrics) as PipelineStage[]) {
+    result[key] = { ...stageMetrics[key] };
+  }
+  return result;
 }
 
 export async function getDFTQueueStats() {
@@ -631,6 +649,7 @@ export async function getDFTQueueStats() {
     pipelineStages: stageMetrics,
     recentJobs: recentJobs.map(j => {
       const out = j.outputData as any;
+      const ppValid = out?.ppValidated ?? null;
       return {
         id: j.id,
         formula: j.formula,
@@ -643,14 +662,20 @@ export async function getDFTQueueStats() {
         wallTime: out?.wallTimeTotal || null,
         converged: out?.scf?.converged || false,
         totalEnergy: out?.scf?.totalEnergy || null,
+        magnetization: out?.scf?.magnetization ?? null,
         retryCount: out?.retryCount || null,
         xtbPreRelaxed: out?.xtbPreRelaxed || null,
         vcRelaxed: out?.vcRelaxed || null,
-        ppValidated: out?.ppValidated || null,
+        ppValidated: ppValid,
+        ppMissingElements: ppValid === false ? (out?.ppMissingElements ?? out?.missingPP ?? null) : null,
         rejectionReason: out?.rejectionReason || null,
         failureStage: out?.failureStage || null,
         prototypeUsed: out?.prototypeUsed || null,
         kPoints: out?.kPoints || null,
+        phononStable: out?.phonon
+          ? out.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1
+          : null,
+        lowestPhononFreq: out?.phonon?.lowestFrequency ?? null,
         error: j.errorMessage || null,
       };
     }),
