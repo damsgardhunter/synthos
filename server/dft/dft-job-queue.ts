@@ -467,9 +467,13 @@ async function refillQueueIfLow(): Promise<number> {
           ? Math.round(((candidate.uncertaintyEstimate ?? 0) * 0.6 + (candidate.discoveryScore ?? 0) * 0.4) * 100)
           : Math.round((candidate.ensembleScore ?? 0) * 100);
 
+        const numericCandidateId = typeof candidate.id === "string" && /^\d+$/.test(candidate.id)
+          ? parseInt(candidate.id, 10)
+          : typeof candidate.id === "number" ? candidate.id : null;
+
         await storage.insertDftJob({
           formula: candidate.formula,
-          candidateId: candidate.id,
+          candidateId: numericCandidateId,
           status: "queued",
           jobType: "scf",
           priority: acquisitionPriority,
