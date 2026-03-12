@@ -3597,6 +3597,7 @@ async function runPhase11_StructurePrediction() {
 
     if (shouldContinue() && cycleCount % 10 === 0) {
       const novelInFlightMarked: string[] = [];
+      const novelElementSets: string[][] = [];
       try {
         const novelVariants = await runNovelPrototypeGeneration(emit);
 
@@ -3607,6 +3608,11 @@ async function runPhase11_StructurePrediction() {
           markFormulaInFlight(novelNormalized);
           novelInFlightMarked.push(novelNormalized);
           variant.formula = novelNormalized;
+
+          if (variant.suggestedElements && variant.suggestedElements.length >= 2) {
+            novelElementSets.push(variant.suggestedElements.slice(0, 4));
+          }
+
           const existingSC = await storage.getSuperconductorByFormula(variant.formula);
           if (!existingSC) {
             const features = getCachedFeatures(variant.formula);
@@ -3651,9 +3657,47 @@ async function runPhase11_StructurePrediction() {
                 uncertaintyEstimate: 0.7,
                 verificationStage: 0,
                 dataConfidence: "low",
-              }, "motif_diffusion");
+              }, "novel_prototype");
               if (inserted) totalScCandidates++;
-            } catch (e) { console.error("[Engine] Mutation variant insert failed:", e); }
+            } catch (e) { console.error("[Engine] Novel prototype insert failed:", e); }
+          }
+        }
+
+        for (const elSet of novelElementSets) {
+          if (!shouldContinue()) break;
+          try {
+            const optResults = findOptimalRegion(elSet, emit);
+            const seeds = optResults
+              .filter(r => r.predictedTc > 10 && r.hullDistance < 0.3)
+              .map(r => r.formula)
+              .slice(0, 3);
+            for (const sf of seeds) {
+              if (!shouldContinue() || !isValidFormula(sf)) continue;
+              const sfNorm = normalizeFormula(sf);
+              if (await storage.getSuperconductorByFormula(sfNorm)) continue;
+              const sfFeatures = getCachedFeatures(sfNorm);
+              const sfGb = gbPredict(sfFeatures);
+              if (sfGb.tcPredicted >= 10) {
+                try {
+                  const sfInserted = await insertCandidateWithStabilityCheck({
+                    formula: sfNorm,
+                    predictedTc: Math.round(sfGb.tcPredicted),
+                    dataConfidence: "low",
+                    ensembleScore: Math.min(0.9, sfGb.score),
+                    verificationStage: 0,
+                    notes: `[novel-prototype-combinatorial: elements=${elSet.join("-")}, family=${classifyFamily(sfNorm)}]`,
+                  }, "novel_prototype");
+                  if (sfInserted) {
+                    totalScCandidates++;
+                    recentNewCandidates++;
+                  }
+                } catch (combErr) {
+                  console.error(`[Engine] Novel prototype combinatorial insert failed:`, combErr instanceof Error ? combErr.message.slice(0, 80) : "unknown");
+                }
+              }
+            }
+          } catch (optErr: any) {
+            emit("log", { phase: "phase-11", event: "Novel prototype combinatorial error", detail: optErr.message?.slice(0, 100), dataSource: "Novel Prototype Generator" });
           }
         }
       } catch (err: any) {

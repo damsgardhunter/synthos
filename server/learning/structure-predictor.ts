@@ -1338,6 +1338,7 @@ export interface GeneratedStructureVariant {
   crystalSystem: string;
   dimensionality: string;
   description: string;
+  suggestedElements?: string[];
 }
 
 const SC_ACTIVE_ELEMENTS = new Set([
@@ -1445,21 +1446,31 @@ function generateTopologyVariant(formula: string, _comp?: ParsedComposition): Ge
   };
 }
 
+function canonicalizeFormula(f: string): string {
+  const cts = parseFormulaCounts(f);
+  const sorted = Object.entries(cts)
+    .filter(([, n]) => typeof n === "number" && Number.isFinite(n) && n > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+  return sorted.map(([el, n]) => (n === 1 ? el : `${el}${n}`)).join("");
+}
+
 export function generateStructuralVariants(
   formula: string,
   maxVariants: number = 3
 ): GeneratedStructureVariant[] {
   const comp = parseComposition(formula);
   const variants: GeneratedStructureVariant[] = [];
-  const seenFormulas = new Set<string>([formula]);
+  const seenFormulas = new Set<string>([canonicalizeFormula(formula)]);
 
   const generators = [generateSubstitutionVariant, generateIntercalationVariant, generateTopologyVariant];
 
   for (const gen of generators) {
     if (variants.length >= maxVariants) break;
     const variant = gen(formula, comp);
-    if (variant && !seenFormulas.has(variant.formula)) {
-      seenFormulas.add(variant.formula);
+    if (!variant) continue;
+    const canon = canonicalizeFormula(variant.formula);
+    if (!seenFormulas.has(canon)) {
+      seenFormulas.add(canon);
       variants.push(variant);
     }
   }
@@ -1604,11 +1615,11 @@ Requirements:
 - dimensionality: One of 3D, quasi-2D, 2D, 1D, mixed
 - wyckoff_positions: Object mapping element roles (e.g. "metal_A", "metal_B", "anion") to Wyckoff site labels (e.g. "4a", "8c", "2b")
 - name: A short descriptive name for this prototype
-- physics_rationale: Why this structure might support superconductivity (2-3 sentences)
+- physics_rationale: ONE sentence explaining why this structure might support superconductivity
 - suggested_elements: Array of 3-5 element symbols that would be good candidates for this structure
 - coordination_numbers: Object mapping element roles to their coordination numbers (must be chemically valid, 2-12)
 
-Return JSON with these fields. Be creative but physically grounded.`,
+Return JSON with these fields. Keep physics_rationale to exactly one sentence to ensure all structural fields fit within the response.`,
         },
         {
           role: "user",
@@ -1616,7 +1627,7 @@ Return JSON with these fields. Be creative but physically grounded.`,
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 800,
+      max_completion_tokens: 600,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -1783,6 +1794,7 @@ export async function runNovelPrototypeGeneration(
       crystalSystem: proto.crystalSystem,
       dimensionality: proto.dimensionality,
       description: `Novel prototype "${proto.name}": ${proto.physicsRationale}. Design principle: ${proto.designPrinciple}`,
+      suggestedElements: proto.suggestedElements,
     });
   }
 

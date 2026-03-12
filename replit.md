@@ -698,6 +698,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `generateIntercalationVariant` now calls `matchPrototype()` to inherit the host's dimensionality, space group, and crystal system instead of hardcoding "quasi-2D/P6_3/mmc/hexagonal". 3D hosts (skutterudites, clathrates) correctly produce 3D intercalated variants with "cage" topology label.
 - **Wyckoff Position Validation (structure-predictor.ts)**:
   - `generateNovelPrototype` validates LLM-proposed Wyckoff labels against the space group. Multiplicity is cross-referenced with `LOW_SYMMETRY_MAX_MULT` table (P1→max 1, P-1→max 2). Labels with multiplicity exceeding the space group's maximum, or non-standard format, are appended with `[speculative]` tag in `NovelPrototype.wyckoffPositions`. A log event is emitted when speculative flags are applied.
+- **Canonical Formula Deduplication (structure-predictor.ts)**:
+  - `canonicalizeFormula()` normalizes formulas to alphabetically-sorted canonical form before dedup Set comparison in `generateStructuralVariants`. Prevents BaCu2O3 and Cu2BaO3 from both entering the pipeline.
+- **LLM Token Efficiency (structure-predictor.ts)**:
+  - Novel prototype prompt: `physics_rationale` limited to "ONE sentence"; `max_completion_tokens` reduced from 800→600. Ensures `coordination_numbers` and `wyckoff_positions` are never truncated.
+- **Novel Prototype Source Tagging (engine.ts)**:
+  - Novel prototype insertions now use `"novel_prototype"` generator source (was `"motif_diffusion"`). Strategy-analyzer can now track and reward structural invention as a distinct generator type.
+- **Novel Prototype → Combinatorial Pipeline (engine.ts)**:
+  - `suggestedElements` from LLM-generated novel prototypes are now fed directly into `findOptimalRegion()` to generate a fleet of combinatorial candidates in the new prototype's chemical space. Up to 3 optimal compositions per element set are inserted with `"novel_prototype"` source tag and `[novel-prototype-combinatorial]` notes.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
