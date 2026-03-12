@@ -2238,7 +2238,11 @@ function estimateSpinFluctuationTc(
   if (isIronBased) tc_sf = Math.max(tc_sf, 20 + corr * 60);
 
   const mottProx = electronic.mottProximityScore ?? 0;
-  if (mottProx > 0.5 && mottProx < 0.8) {
+  if (mottProx > 0.9) {
+    tc_sf = 0;
+  } else if (mottProx > 0.8) {
+    tc_sf *= (1.0 - (mottProx - 0.8) * 10);
+  } else if (mottProx > 0.5) {
     tc_sf *= (1 + (mottProx - 0.5) * 0.67);
   }
 
@@ -2304,13 +2308,7 @@ function estimatePlasmonicPairingTc(
   const counts = parseFormulaCounts(formula);
   const N_EF = electronic.densityOfStatesAtFermi;
 
-  const totalAtoms = getTotalAtoms(counts);
-  let totalVE = 0;
-  for (const el of elements) {
-    const data = getElementData(el);
-    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
-  }
-  const vec = totalVE / totalAtoms;
+  const vec = getVEC(elements, counts);
   const carrierDensity = vec * electronic.metallicity;
 
   const lowCarrier = carrierDensity < 3 && N_EF > 2;
@@ -2318,14 +2316,23 @@ function estimatePlasmonicPairingTc(
     return { mechanism: "plasmonic", tcEstimate: 0, confidence: 0.05, description: "No plasmonic conditions" };
   }
 
-  const plasmaStrength = N_EF / Math.max(carrierDensity, 0.5);
+  let dielectricScreening = 1.0;
+  const hasHighDielectric = elements.some(e => ["Ti", "Sr", "Ba", "Pb", "Bi"].includes(e)) &&
+    elements.includes("O");
+  if (hasHighDielectric) {
+    dielectricScreening = 0.4;
+  } else if (elements.includes("O") && elements.length >= 3) {
+    dielectricScreening = 0.7;
+  }
+
+  const plasmaStrength = N_EF / Math.max(carrierDensity, 0.5) * dielectricScreening;
   const tc_pl = Math.round(Math.min(100, plasmaStrength * 10));
 
   return {
     mechanism: "plasmonic",
     tcEstimate: Math.max(0, tc_pl),
     confidence: 0.15,
-    description: "Low carrier density with high DOS — plasmon-mediated",
+    description: `Low carrier density with high DOS — plasmon-mediated (dielectric screening=${dielectricScreening.toFixed(1)})`,
   };
 }
 
