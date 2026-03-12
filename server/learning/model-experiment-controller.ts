@@ -174,8 +174,14 @@ function clampHyperparameters(modelTarget: string, changes: Record<string, any>)
   if (!ranges) return { clamped: { ...changes }, warnings: [] };
   const clamped: Record<string, any> = {};
   const warnings: string[] = [];
+  const seenCanonical = new Map<string, string>();
   for (const [rawKey, val] of Object.entries(changes)) {
     const canonKey = HYPERPARAM_ALIASES[rawKey] ?? rawKey;
+    if (seenCanonical.has(canonKey)) {
+      warnings.push(`${rawKey} collides with ${seenCanonical.get(canonKey)} (both map to ${canonKey}), keeping first`);
+      continue;
+    }
+    seenCanonical.set(canonKey, rawKey);
     const range = ranges[canonKey];
     if (range && typeof val === "number") {
       const [lo, hi] = range;
@@ -622,27 +628,35 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
         };
         console.log(`[Model Experiment Controller] Architecture selected: ${archResult.primaryModel} (switch=${archResult.switchRecommended})`);
       } catch (e) {
-        console.log(`[Model Experiment Controller] Architecture selection failed: ${e instanceof Error ? e.message : "unknown"}`);
+        const errMsg = e instanceof Error ? e.message : "unknown";
+        record.changes = {
+          ...record.changes,
+          architecture_error: errMsg,
+          architecture_result: null,
+        };
+        console.log(`[Model Experiment Controller] Architecture selection failed: ${errMsg}`);
       }
     }
 
-    switch (experiment.model_target) {
-      case "xgboost":
-        if (experiment.experiment_type !== "request_data") await retrainXGBoostFromEvaluated();
-        break;
-      case "lambda-regressor":
-        if (experiment.experiment_type !== "request_data") trainLambdaRegressor();
-        break;
-      case "phonon-surrogate":
-        if (experiment.experiment_type !== "request_data") trainPhononSurrogate();
-        break;
-      case "tb-surrogate":
-        if (experiment.experiment_type !== "request_data") retrainTBSurrogate();
-        break;
-      case "gnn":
-        break;
-      default:
-        break;
+    if (experiment.experiment_type !== "request_data") {
+      switch (experiment.model_target) {
+        case "xgboost":
+          await retrainXGBoostFromEvaluated();
+          break;
+        case "lambda-regressor":
+          await Promise.resolve(trainLambdaRegressor());
+          break;
+        case "phonon-surrogate":
+          await Promise.resolve(trainPhononSurrogate());
+          break;
+        case "tb-surrogate":
+          await Promise.resolve(retrainTBSurrogate());
+          break;
+        case "gnn":
+          break;
+        default:
+          break;
+      }
     }
 
     const diagnosticsAfter = getComprehensiveModelDiagnostics();
