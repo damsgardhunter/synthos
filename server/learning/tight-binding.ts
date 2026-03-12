@@ -724,16 +724,7 @@ function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: numbe
   return eigenvalues;
 }
 
-const KNOWN_SK_ELEMENTS = new Set([
-  "H", "Li", "Be", "B", "C", "N", "O", "F",
-  "Na", "Mg", "Al", "Si", "P", "S", "Cl",
-  "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-  "Ga", "Ge", "As", "Se", "Br",
-  "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
-  "In", "Sn", "Sb", "Te", "I",
-  "Cs", "Ba", "La", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
-  "Tl", "Pb", "Bi",
-]);
+const KNOWN_SK_ELEMENTS = new Set(Object.keys(ELEMENTAL_DATA));
 
 function computeTbConfidence(
   elements: string[],
@@ -744,21 +735,26 @@ function computeTbConfidence(
   const structurePrototypeScore = knownPrototypes.includes(latticeType) ? 1.0 : 0.5;
 
   const elementsWithParams = elements.filter(el => KNOWN_SK_ELEMENTS.has(el));
-  const elementCoverage = elements.length > 0
+  const elementsWithData = elements.filter(el => getElementData(el) !== undefined);
+  const fullCoverage = elements.length > 0
     ? elementsWithParams.length / elements.length
     : 0;
+  const dataCoverage = elements.length > 0
+    ? elementsWithData.length / elements.length
+    : 0;
+  const elementCoverage = Math.max(fullCoverage, dataCoverage * 0.8);
 
   let orbitalCompleteness = 1.0;
   const tmElements = elements.filter(el => isTransitionMetal(el) || isRareEarth(el) || isActinide(el));
   if (tmElements.length > 0) {
-    const tmWithParams = tmElements.filter(el => KNOWN_SK_ELEMENTS.has(el));
-    const tmCoverage = tmWithParams.length / tmElements.length;
+    const tmWithData = tmElements.filter(el => getElementData(el) !== undefined);
+    const tmCoverage = tmWithData.length / tmElements.length;
     orbitalCompleteness = tmCoverage;
 
-    if (isActinide(elements[0]) || elements.some(el => isActinide(el))) {
-      orbitalCompleteness *= 0.6;
+    if (elements.some(el => isActinide(el))) {
+      orbitalCompleteness *= 0.7;
     } else if (elements.some(el => isRareEarth(el))) {
-      orbitalCompleteness *= 0.75;
+      orbitalCompleteness *= 0.8;
     }
   }
 
@@ -781,13 +777,21 @@ export function computeTightBindingBands(
   const nPerSegment = 30;
   const { kPoints, kLabels } = interpolateKPoints(path, nPerSegment);
 
-  let latticeConstant = 3.5;
+  let latticeConstant = 0;
+  let totalAtoms = 0;
   for (const el of elements) {
     const data = getElementData(el);
+    const count = counts[el] || 1;
     if (data && data.latticeConstant) {
-      latticeConstant = data.latticeConstant;
-      break;
+      latticeConstant += data.latticeConstant * count;
+      totalAtoms += count;
     }
+  }
+  if (totalAtoms > 0) {
+    latticeConstant /= totalAtoms;
+  } else {
+    const nElements = elements.length;
+    latticeConstant = nElements >= 3 ? 5.5 : nElements === 2 ? 4.5 : 3.5;
   }
 
   const bands: number[][] = [];
@@ -895,9 +899,21 @@ export function computeWannierProjection(bands: TBBandStructure): WannierProject
     avgP /= nChars;
     avgD /= nChars;
 
-    let orbType = "s";
-    if (avgD > avgS && avgD > avgP) orbType = "d";
-    else if (avgP > avgS) orbType = "p";
+    const chars = [
+      { label: "s", val: avgS },
+      { label: "p", val: avgP },
+      { label: "d", val: avgD },
+    ].sort((a, b) => b.val - a.val);
+
+    let orbType: string;
+    const total = avgS + avgP + avgD || 1;
+    const first = chars[0].val / total;
+    const second = chars[1].val / total;
+    if (first - second < 0.10 && second > 0.15) {
+      orbType = `${chars[0].label}${chars[1].label}-hybrid`;
+    } else {
+      orbType = chars[0].label;
+    }
 
     orbitalBandCharacter.push({
       orbital: `band_${b}_${orbType}`,
