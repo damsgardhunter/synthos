@@ -535,41 +535,63 @@ Respond in JSON:
     if (!content) throw new Error("No response");
 
     const parsed = JSON.parse(content);
+
+    let configs = Array.isArray(parsed.modelConfigs) ? parsed.modelConfigs.slice(0, 3).map((c: any) => ({
+      model: String(c.model || "xgboost"),
+      weight: Math.max(0, Math.min(1, Number(c.weight) || 0.5)),
+      rationale: String(c.rationale || ""),
+    })) : [{ model: "xgboost", weight: 1.0, rationale: "default" }];
+
+    const totalWeight = configs.reduce((sum: number, c: { weight: number }) => sum + c.weight, 0);
+    if (totalWeight > 0 && Math.abs(totalWeight - 1.0) > 0.001) {
+      configs = configs.map((c: { model: string; weight: number; rationale: string }) => ({
+        ...c,
+        weight: c.weight / totalWeight,
+      }));
+      console.log(`[Model LLM] Normalized ensemble weights (sum was ${totalWeight.toFixed(3)})`);
+    }
+
+    const safeSize = Number.isFinite(xgbDataset) ? xgbDataset : 0;
+    const safeFeatureCount = Number.isFinite(featureCount) ? featureCount : 0;
+
     const recommendation: ArchitectureRecommendation = {
       primaryModel: (["xgboost", "gnn", "ensemble"].includes(parsed.primaryModel) ? parsed.primaryModel : "xgboost") as any,
       reasoning: String(parsed.reasoning || ""),
       datasetCharacteristics: {
-        size: xgbDataset,
-        featureCount,
+        size: safeSize,
+        featureCount: safeFeatureCount,
         graphDataAvailable,
         diversityScore: familyDiversity,
       },
-      modelConfigs: Array.isArray(parsed.modelConfigs) ? parsed.modelConfigs.slice(0, 3).map((c: any) => ({
-        model: String(c.model || "xgboost"),
-        weight: Math.max(0, Math.min(1, Number(c.weight) || 0.5)),
-        rationale: String(c.rationale || ""),
-      })) : [{ model: "xgboost", weight: 1.0, rationale: "default" }],
+      modelConfigs: configs,
       switchRecommended: Boolean(parsed.switchRecommended),
     };
 
     architectureState = recommendation;
     lastArchitectureCheck = Date.now();
-    lastArchitectureDatasetBucket = getDatasetSizeBucket(xgbDataset);
+    lastArchitectureDatasetBucket = getDatasetSizeBucket(safeSize);
 
     console.log(`[Model LLM] Architecture recommendation: ${recommendation.primaryModel} (switch=${recommendation.switchRecommended}, bucket=${lastArchitectureDatasetBucket})`);
     return recommendation;
   } catch (e) {
-    console.log(`[Model LLM] Architecture selection failed: ${e instanceof Error ? e.message : "unknown"}`);
+    const errMsg = e instanceof Error ? e.message : "unknown";
+    const isTransient = /timeout|ECONNRESET|ENOTFOUND|429|5\d\d|network/i.test(errMsg);
+    console.log(`[Model LLM] Architecture selection failed (transient=${isTransient}): ${errMsg}`);
+
+    const safeSize = Number.isFinite(xgbDataset) ? xgbDataset : 0;
+    const safeFeatureCount = Number.isFinite(featureCount) ? featureCount : 0;
+    const safeGnnDataset = Number.isFinite(gnnDataset) ? gnnDataset : 0;
+
     const fallback: ArchitectureRecommendation = {
-      primaryModel: xgbDataset > 500 && gnnDataset > 200 ? "ensemble" : "xgboost",
-      reasoning: "Fallback: using dataset size heuristic",
-      datasetCharacteristics: { size: xgbDataset, featureCount, graphDataAvailable, diversityScore: familyDiversity },
+      primaryModel: safeSize > 500 && safeGnnDataset > 200 ? "ensemble" : "xgboost",
+      reasoning: `Fallback: ${isTransient ? "transient API failure, preserving current switch state" : "using dataset size heuristic"}`,
+      datasetCharacteristics: { size: safeSize, featureCount: safeFeatureCount, graphDataAvailable, diversityScore: familyDiversity },
       modelConfigs: [{ model: "xgboost", weight: 0.7, rationale: "default primary" }],
-      switchRecommended: false,
+      switchRecommended: isTransient && architectureState?.switchRecommended ? true : false,
     };
     architectureState = fallback;
-    lastArchitectureCheck = Date.now();
-    lastArchitectureDatasetBucket = getDatasetSizeBucket(xgbDataset);
+    lastArchitectureCheck = isTransient ? lastArchitectureCheck : Date.now();
+    lastArchitectureDatasetBucket = getDatasetSizeBucket(safeSize);
     return fallback;
   }
 }
