@@ -2604,7 +2604,12 @@ export function evaluateCompetingPhases(
     });
   }
 
-  if (elements.includes("O") && elements.length >= 3) {
+  const motifResult = formula ? detectStructuralMotifs(formula) : null;
+  const isPerovskiteMotif = motifResult ? motifResult.motifs.some(m =>
+    m.includes("Perovskite") || m.includes("perovskite") || m.includes("Ruddlesden-Popper")
+  ) : false;
+
+  if (isPerovskiteMotif && elements.includes("O") && elements.length >= 3) {
     const aElements = elements.filter(e => {
       const d = getElementData(e);
       return d && d.atomicRadius > 120 && !isTransitionMetal(e);
@@ -2637,7 +2642,8 @@ export function computeCriticalFields(
   tc: number,
   coupling: ElectronPhononCoupling,
   dimensionality: string,
-  formula?: string
+  formula?: string,
+  electronicStructure?: ElectronicStructure | null
 ): CriticalFieldResult {
   if (tc <= 0) {
     return {
@@ -2682,7 +2688,10 @@ export function computeCriticalFields(
   const xiM = coherenceLength * 1e-9;
   const Hc2Tesla = PHI0 / (2 * Math.PI * xiM * xiM);
   const hc2Raw = Math.max(0, Number.isFinite(Hc2Tesla) ? Hc2Tesla : 0);
-  const pauliLimit = 1.86 * tc * Math.sqrt(1 + 0.1 * lambda);
+  const basePauliLimit = 1.86 * tc * Math.sqrt(1 + 0.1 * lambda);
+  const topoScore = electronicStructure?.topologicalBandScore ?? 0;
+  const pauliEnhancement = topoScore > 0.5 ? 1.0 + (topoScore - 0.5) * 4.0 : 1.0;
+  const pauliLimit = basePauliLimit * Math.min(3.0, pauliEnhancement);
   const upperCriticalField = Math.min(hc2Raw, pauliLimit);
 
   let classFactor = 1.0;
@@ -3786,7 +3795,7 @@ export async function runFullPhysicsAnalysis(
     }
   }
 
-  const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality, formula);
+  const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality, formula, electronicStructure);
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
   let uncertaintyEstimate = 0.3;
