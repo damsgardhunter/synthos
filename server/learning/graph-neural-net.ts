@@ -6,6 +6,7 @@ import { storage } from "../storage";
 import { computeSymmetryEmbedding, computeSymmetryFeatureVector } from "../crystal/symmetry-subgroups";
 import { predictLambda } from "./lambda-regressor";
 import { normalizeSpaceGroup, matchPrototype } from "./structure-predictor";
+import { parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
 
 export interface NodeFeature {
   element: string;
@@ -240,17 +241,7 @@ function updateTrainingEmbeddings(trainingData: { formula: string; tc: number }[
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return parseFormulaCountsCanonical(formula);
 }
 
 function seededRandom(seed: number): () => number {

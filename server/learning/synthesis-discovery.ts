@@ -1,5 +1,5 @@
 import { getElementData, isTransitionMetal, isRareEarth, isActinide } from "./elemental-data";
-import { classifyFamily } from "./utils";
+import { classifyFamily, parseFormulaCounts } from "./utils";
 import { computeSurrogateFitness, getCurrentFitnessWeights, getExplorationWeight } from "./surrogate-fitness";
 import type { TopologicalAnalysis } from "../physics/topology-engine";
 import type { FermiSurfaceResult } from "../physics/fermi-surface-engine";
@@ -545,24 +545,7 @@ export function getEliteArchive(): { formula: string; fitness: number; classific
 }
 
 function parseFormulaElements(formula: string): string[] {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const matches = cleaned.match(/[A-Z][a-z]*/g);
-  return matches ? Array.from(new Set(matches)) : [];
-}
-
-function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return Object.keys(parseFormulaCounts(formula));
 }
 
 function randRange(min: number, max: number): number {

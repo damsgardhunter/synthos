@@ -1,4 +1,5 @@
 import { getElementData, isTransitionMetal, isRareEarth } from "./elemental-data";
+import { parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
 
 export interface PrototypeTemplate {
   name: string;
@@ -1054,19 +1055,7 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  const cleaned = formula
-    .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
-    .replace(/\s+/g, "")
-    .replace(/-/g, "");
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    if (num > 0) counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return parseFormulaCountsCanonical(formula);
 }
 
 function gcd(a: number, b: number): number {

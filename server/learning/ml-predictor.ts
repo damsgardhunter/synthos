@@ -16,7 +16,7 @@ import {
   type TcWithUncertainty,
 } from "./physics-engine";
 import { estimateFamilyPressure } from "./candidate-generator";
-import { normalizeFormula } from "./utils";
+import { normalizeFormula, parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import {
   ELEMENTAL_DATA,
@@ -355,24 +355,11 @@ const CHALCOGENS = ["O","S","Se","Te"];
 const PNICTOGENS = ["N","P","As","Sb","Bi"];
 
 function parseFormula(formula: string): string[] {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const matches = cleaned.match(/[A-Z][a-z]*/g);
-  return matches ? Array.from(new Set(matches)) : [];
+  return Object.keys(parseFormulaCountsCanonical(formula));
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(cleaned)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + num;
-  }
-  return counts;
+  return parseFormulaCountsCanonical(formula);
 }
 
 export interface DisorderContext {

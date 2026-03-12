@@ -1,16 +1,5 @@
 import { ELEMENTAL_DATA, type ElementalProperties } from "./elemental-data";
-
-function parseFormulaCounts(formula: string): Record<string, number> {
-  const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let match;
-  while ((match = regex.exec(formula)) !== null) {
-    const el = match[1];
-    const count = match[2] ? parseFloat(match[2]) : 1;
-    counts[el] = (counts[el] || 0) + count;
-  }
-  return counts;
-}
+import { parseFormulaCounts } from "./utils";
 
 interface RunningStats {
   sum: number;
