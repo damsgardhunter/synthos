@@ -123,8 +123,8 @@ function snapshotKeyMetrics(diagnostics: ComprehensiveModelDiagnostics): Record<
 }
 
 function metricsWorsened(before: Record<string, number>, after: Record<string, number>): boolean {
-  const regressionMetrics = ["r2", "stabilityAccuracy"];
-  const errorMetrics = ["mae", "rmse", "omegaLogMAE", "debyeTempMAE", "maxFreqMAE"];
+  const higherIsBetter = ["r2", "stabilityAccuracy"];
+  const lowerIsBetter = ["mae", "rmse", "omegaLogMAE", "debyeTempMAE", "maxFreqMAE"];
 
   let worseCount = 0;
   let totalChecked = 0;
@@ -133,12 +133,15 @@ function metricsWorsened(before: Record<string, number>, after: Record<string, n
     if (after[key] == null) continue;
     totalChecked++;
 
-    if (regressionMetrics.includes(key)) {
-      if (after[key] < before[key] * (1 - ROLLBACK_THRESHOLD)) {
+    if (higherIsBetter.includes(key)) {
+      const delta = before[key] - after[key];
+      const scale = Math.max(Math.abs(before[key]), 0.1);
+      if (delta / scale > ROLLBACK_THRESHOLD) {
         worseCount++;
       }
-    } else if (errorMetrics.includes(key)) {
-      if (after[key] > before[key] * (1 + ROLLBACK_THRESHOLD)) {
+    } else if (lowerIsBetter.includes(key)) {
+      const baseline = Math.max(before[key], 0.01);
+      if (after[key] > baseline * (1 + ROLLBACK_THRESHOLD)) {
         worseCount++;
       }
     }
@@ -250,6 +253,9 @@ export async function runModelImprovementCycle(
     });
   }
 
+  const preExperimentOverrides = getHyperparamOverrides(topExperiment.model_target);
+  const overridesSnapshot = preExperimentOverrides ? JSON.parse(JSON.stringify(preExperimentOverrides)) : null;
+
   const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
   const beforeModelMetrics = beforeKeyMetrics[topExperiment.model_target] ?? {};
 
@@ -290,12 +296,9 @@ export async function runModelImprovementCycle(
     });
 
     try {
-      const originalOverrides = getHyperparamOverrides(topExperiment.model_target);
-      if (originalOverrides && topExperiment.experiment_type === "adjust_hyperparameters") {
-        for (const key of Object.keys(topExperiment.changes)) {
-          delete (originalOverrides as any)[key];
-        }
-        setHyperparamOverrides(topExperiment.model_target, originalOverrides);
+      if (topExperiment.experiment_type === "adjust_hyperparameters" && overridesSnapshot != null) {
+        setHyperparamOverrides(topExperiment.model_target, overridesSnapshot);
+        console.log(`[Model Improvement Loop] Rolled back ${topExperiment.model_target} overrides to pre-experiment state`);
       }
     } catch (_e) {}
 
