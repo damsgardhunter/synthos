@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { storage } from "../storage";
 import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
-import { analyzeBondingPatterns, analyzePropertyPredictionPatterns } from "./nlp-engine";
+import { analyzeBondingPatterns, analyzePropertyPredictionPatterns, classifyMaterialApplications } from "./nlp-engine";
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
 import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB, createCampaign } from "../inverse/inverse-optimizer";
@@ -1103,6 +1103,15 @@ async function runPhase5_Prediction() {
     await addInsightsToPhase(5, insights);
     const predFormulas = mats.slice(0, 5).map(m => m.formula);
     await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas, engineTempo as InsightTempo);
+
+    if (shouldContinue() && mats.length > 0) {
+      try {
+        await classifyMaterialApplications(emit, mats.slice(0, 50));
+      } catch (err: any) {
+        emit("log", { phase: "phase-5", event: "Classification skipped", detail: err?.message?.slice(0, 150) || "unknown", dataSource: "NLP" });
+      }
+    }
+
     const phase5 = await storage.getLearningPhaseById(5);
     const totalPredInsights = (phase5?.insights ?? []).length;
     const crCount5 = await storage.getComputationalResultCount();

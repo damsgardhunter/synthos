@@ -28,6 +28,7 @@ export interface IStorage {
   getMaterials(limit?: number, offset?: number): Promise<Material[]>;
   getMaterialById(id: string): Promise<Material | undefined>;
   insertMaterial(material: InsertMaterial): Promise<Material>;
+  updateMaterialProperties(id: string, properties: Record<string, any>): Promise<void>;
   getMaterialCount(): Promise<number>;
 
   getLearningPhases(): Promise<LearningPhase[]>;
@@ -161,6 +162,12 @@ export class DatabaseStorage implements IStorage {
   async insertMaterial(material: InsertMaterial): Promise<Material> {
     const [m] = await db.insert(materials).values(material).onConflictDoNothing().returning();
     return m;
+  }
+
+  async updateMaterialProperties(id: string, properties: Record<string, any>): Promise<void> {
+    const existing = await this.getMaterialById(id);
+    const merged = { ...(existing?.properties as Record<string, any> || {}), ...properties };
+    await db.update(materials).set({ properties: merged }).where(eq(materials.id, id));
   }
 
   async getMaterialCount(): Promise<number> {

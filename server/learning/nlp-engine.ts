@@ -562,9 +562,20 @@ export async function classifyMaterialApplications(
   const results = new Map<string, string>();
   if (materials.length === 0) return results;
 
+  const unclassified = materials.filter(m => {
+    const existing = (m.properties as Record<string, any>)?.applicationCategory;
+    if (existing) {
+      results.set(m.id, existing);
+      return false;
+    }
+    return true;
+  });
+
+  if (unclassified.length === 0) return results;
+
   try {
     const classified = await batchProcess(
-      materials,
+      unclassified,
       async (mat: any) => {
         const props: string[] = [
           `Material: ${mat.name} (${mat.formula})`,
@@ -601,7 +612,27 @@ export async function classifyMaterialApplications(
     );
 
     for (const c of classified) {
-      if (c) results.set(c.id, c.category);
+      if (!c) continue;
+      results.set(c.id, c.category);
+      try {
+        await storage.updateMaterialProperties(c.id, { applicationCategory: c.category });
+      } catch (err: any) {
+        emit("log", {
+          phase: "phase-5",
+          event: "Classification persist failed",
+          detail: `Material ${c.id}: ${err?.message?.slice(0, 100) || "unknown error"}`,
+          dataSource: "Storage",
+        });
+      }
+    }
+
+    if (classified.length > 0) {
+      emit("log", {
+        phase: "phase-5",
+        event: "Materials classified",
+        detail: `Classified ${classified.length} materials into application categories`,
+        dataSource: "OpenAI NLP",
+      });
     }
   } catch (err: any) {
     emit("log", {
