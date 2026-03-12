@@ -1414,8 +1414,11 @@ export function discoverNovelSynthesisPaths(
 
   let population: NovelSynthesisRoute[] = [];
 
+  const eliteSlots = Math.min(ELITE_ARCHIVE_SIZE, Math.floor(populationSize * 0.25));
   for (const elite of eliteArchive) {
-    if (population.length < Math.min(ELITE_ARCHIVE_SIZE, Math.floor(populationSize * 0.25))) {
+    if (population.length >= eliteSlots) break;
+    population.push(genomeToRoute({ ...elite.genome }, insights, currentBestKnownTc, pressureInterp));
+    if (population.length < eliteSlots) {
       const mutated = mutateGenome(elite.genome, 0.1);
       population.push(genomeToRoute(mutated, insights, currentBestKnownTc, pressureInterp));
     }
