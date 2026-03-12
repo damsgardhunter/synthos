@@ -247,22 +247,46 @@ const MOTIF_FAMILY_MAP: Record<string, string[]> = {
 
 function parseFormulaElementsRL(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
-  const regex = /([A-Z][a-z]?)(\d*)/g;
-  let match;
-  while ((match = regex.exec(formula)) !== null) {
-    const el = match[1];
-    const num = match[2] ? parseInt(match[2]) : 1;
-    if (el) counts[el] = (counts[el] || 0) + num;
+
+  function parseSegment(segment: string, multiplier: number): void {
+    const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+    let match;
+    while ((match = regex.exec(segment)) !== null) {
+      const el = match[1];
+      if (!el) continue;
+      const num = match[2] ? parseFloat(match[2]) : 1;
+      if (num > 0) counts[el] = (counts[el] || 0) + num * multiplier;
+    }
   }
+
+  const parenRegex = /\(([^()]+)\)(\d*\.?\d*)/g;
+  let expanded = formula;
+  let safety = 0;
+  while (parenRegex.test(expanded) && safety < 10) {
+    safety++;
+    expanded = expanded.replace(/\(([^()]+)\)(\d*\.?\d*)/g, (_m, inner, mult) => {
+      const factor = mult ? parseFloat(mult) : 1;
+      if (factor === 1) return inner;
+      return inner.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_: string, el: string, n: string) => {
+        const count = n ? parseFloat(n) : 1;
+        return `${el}${count * factor}`;
+      });
+    });
+    parenRegex.lastIndex = 0;
+  }
+
+  parseSegment(expanded, 1);
   return counts;
 }
+
+const MOTIFS_BY_LENGTH = Array.from(KNOWN_SC_MOTIFS).sort((a, b) => b.length - a.length);
 
 function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
   if (!context.motifName) return 0;
   if (KNOWN_SC_MOTIFS.has(context.motifName)) return 1.0;
-  const motifArray = Array.from(KNOWN_SC_MOTIFS);
-  for (let i = 0; i < motifArray.length; i++) {
-    if (context.motifName.toLowerCase().includes(motifArray[i].toLowerCase())) return 0.7;
+  const nameLower = context.motifName.toLowerCase();
+  for (const motif of MOTIFS_BY_LENGTH) {
+    if (nameLower.includes(motif.toLowerCase())) return 0.7;
   }
   return 0.2;
 }
