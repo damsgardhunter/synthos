@@ -4,6 +4,7 @@ import { normalizeFormula } from "./utils";
 import { ELEMENTAL_DATA } from "./elemental-data";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { optimizePressureForFormula } from "./bayesian-pressure-optimizer";
+import { getEngineTempo } from "./generator-manager";
 import type { EventEmitter } from "./engine";
 
 export interface PhaseGridPoint {
@@ -415,16 +416,21 @@ export function exploreTemperatureStability(
   try {
     formationEnergy = computeMiedemaFormationEnergy(formula);
   } catch {
-    formationEnergy = -0.5;
+    formationEnergy = 0.05;
   }
 
   const decompositionTemp = estimateDecompositionTemp(formula, formationEnergy);
 
-  const avgMass = elements.reduce((s, el) => s + (ELEMENTAL_DATA[el]?.atomicMass ?? 50), 0) / elements.length;
-  const debyeTemps = elements
-    .map(el => ELEMENTAL_DATA[el]?.debyeTemperature ?? 300)
-    .filter(d => d > 0);
-  const avgDebye = debyeTemps.length > 0 ? debyeTemps.reduce((s, d) => s + d, 0) / debyeTemps.length : 300;
+  const meltingPoints = elements
+    .map(el => ELEMENTAL_DATA[el]?.meltingPoint ?? 1000)
+    .filter(mp => mp > 0);
+  let weightedMelt = 0;
+  for (const el of elements) {
+    const mp = ELEMENTAL_DATA[el]?.meltingPoint ?? 1000;
+    const frac = (counts[el] ?? 1) / (totalAtoms || 1);
+    weightedMelt += frac * mp;
+  }
+  const structuralLimit = Math.min(decompositionTemp, weightedMelt * 0.9);
 
   const stabilityProfile: { temp: number; decompositionRisk: number; phononStable: boolean }[] = [];
   let maxOperatingTemp = 0;
@@ -435,15 +441,15 @@ export function exploreTemperatureStability(
       thermalFraction > 0.7 ? 0.3 + (thermalFraction - 0.7) * (0.7 / 0.3) :
       thermalFraction * 0.3 / 0.7;
 
-    const phononStable = temp < avgDebye * 0.8;
+    const structurallyStable = temp < structuralLimit;
 
     const entropyPenalty = temp > 0 ? 0.0001 * temp * Math.log(elements.length) : 0;
     const effectiveStability = formationEnergy + entropyPenalty;
     const thermodynamicallyStable = effectiveStability < 0;
 
-    stabilityProfile.push({ temp, decompositionRisk, phononStable });
+    stabilityProfile.push({ temp, decompositionRisk, phononStable: structurallyStable });
 
-    if (decompositionRisk < 0.5 && phononStable && thermodynamicallyStable) {
+    if (decompositionRisk < 0.5 && structurallyStable && thermodynamicallyStable) {
       maxOperatingTemp = temp;
     }
   }
@@ -451,16 +457,27 @@ export function exploreTemperatureStability(
   return { maxOperatingTemp, stabilityProfile };
 }
 
+function ucbMultiplier(): number {
+  const tempo = getEngineTempo();
+  switch (tempo) {
+    case "excited": return 5;
+    case "exploring": return 15;
+    case "contemplating": return 30;
+    default: return 15;
+  }
+}
+
 export function findOptimalRegion(
   elementSet: string[],
   emit?: EventEmitter
 ): OptimalRegionResult[] {
+  const ucbMult = ucbMultiplier();
   const compMap = exploreCompositionSpace(elementSet, "coarse");
 
   const topByExploration = [...compMap.grid]
     .map(pt => ({
       ...pt,
-      explorationScore: pt.tc + Math.sqrt(pt.uncertainty) * 15,
+      explorationScore: pt.tc + Math.sqrt(pt.uncertainty) * ucbMult,
     }))
     .sort((a, b) => b.explorationScore - a.explorationScore)
     .slice(0, 15);
@@ -503,7 +520,7 @@ export function findOptimalRegion(
 
     const { maxOperatingTemp } = exploreTemperatureStability(formula);
 
-    const explorationScore = bestTc + Math.sqrt(basePred.uncertainty) * 15;
+    const explorationScore = bestTc + Math.sqrt(basePred.uncertainty) * ucbMult;
 
     results.push({
       formula,
@@ -517,16 +534,26 @@ export function findOptimalRegion(
 
   results.sort((a, b) => b.explorationScore - a.explorationScore);
 
-  if (emit && results.length > 0) {
-    const hotspotSummary = results.slice(0, 3)
-      .map(r => `${r.formula} Tc=${r.predictedTc}K@${r.optimalPressure}GPa`)
-      .join(", ");
-    emit("log", {
-      phase: "engine",
-      event: `Phase exploration: scanned ${compMap.grid.length} compositions x ${PRESSURE_STEPS_COARSE.length} pressures for {${elementSet.join(",")}}. Hot spots: [${hotspotSummary}]`,
-      detail: `Adaptive multi-dimensional scan of ${elementSet.join("-")} system. ${results.length} viable regions found. Best: ${results[0].formula} (Tc=${results[0].predictedTc}K, P=${results[0].optimalPressure}GPa, maxT=${results[0].maxOperatingTemp}K, hull=${results[0].hullDistance.toFixed(3)} eV/atom). Exploration scores include uncertainty bonus.`,
-      dataSource: "Phase Explorer",
-    });
+  if (emit) {
+    if (results.length > 0) {
+      const hotspotSummary = results.slice(0, 3)
+        .map(r => `${r.formula} Tc=${r.predictedTc}K@${r.optimalPressure}GPa`)
+        .join(", ");
+      const best = results[0];
+      emit("log", {
+        phase: "engine",
+        event: `Phase exploration: scanned ${compMap.grid.length} compositions x ${PRESSURE_STEPS_COARSE.length} pressures for {${elementSet.join(",")}}. Hot spots: [${hotspotSummary}]`,
+        detail: `Adaptive multi-dimensional scan of ${elementSet.join("-")} system (UCB=${ucbMult}, tempo=${getEngineTempo()}). ${results.length} viable regions found. Best: ${best.formula} (Tc=${best.predictedTc}K, P=${best.optimalPressure}GPa, maxT=${best.maxOperatingTemp}K, hull=${best.hullDistance.toFixed(3)} eV/atom).`,
+        dataSource: "Phase Explorer",
+      });
+    } else {
+      emit("log", {
+        phase: "engine",
+        event: `Phase exploration: scanned ${compMap.grid.length} compositions for {${elementSet.join(",")}} — no viable regions found`,
+        detail: `${elementSet.join("-")} system yielded no candidates above threshold.`,
+        dataSource: "Phase Explorer",
+      });
+    }
   }
 
   return results.slice(0, 10);

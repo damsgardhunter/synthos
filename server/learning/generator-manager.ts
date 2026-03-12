@@ -5,6 +5,10 @@ export function setEngineTempo(tempo: EngineTempo): void {
   currentTempo = tempo;
 }
 
+export function getEngineTempo(): EngineTempo {
+  return currentTempo;
+}
+
 interface GeneratorStats {
   candidatesGenerated: number;
   candidatesPassed: number;
