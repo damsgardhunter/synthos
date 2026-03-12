@@ -746,6 +746,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `passesElementCountCap` and `passesStabilityGate` moved to the top of the candidate loop, before the update-vs-insert split. Previously these gates only applied to new inserts; existing candidates being upgraded bypassed current physics validation. Now upgrades and new entries both must pass the current stability criteria, so PHYSICS_VERSION bumps immediately invalidate stale candidates.
 - **Batched DB Writes (superconductor-research.ts, storage.ts)**:
   - Candidate updates and inserts are now collected into `pendingUpdates` and `pendingInserts` arrays during the loop, then flushed in bulk after the loop completes. Updates use a new `bulkUpdateSuperconductorCandidates` method that executes in chunked transactions (25 per chunk). Inserts use the existing `bulkInsertSuperconductorCandidates`. This reduces sequential DB round-trips from O(N) to O(N/25) for a batch of 200 materials.
+- **LLM Anti-Hallucination Prompt Rework (superconductor-research.ts)**:
+  - System prompt changed from "MUST have ALL" (forcing the LLM to hallucinate success) to "identify candidates with the potential to meet these criteria." LLM now returns `theoreticalConfidence`, `meissnerConfidence`, and `zeroResistanceConfidence` (0-1) for each candidate. Candidates with all three confidences below threshold are rejected. The NN score component is damped by `0.5 + 0.5 * theoreticalConfidence`, penalizing overly optimistic predictions without discarding everything.
+- **Condensed Insight Summary with PatternMiner (superconductor-research.ts)**:
+  - `condenseInsightsWithRules()` replaces raw `allInsights.slice(-8)`. It pulls top-5 negative rules ("AVOID") and top-5 positive rules ("FAVORABLE") from `getMinedRules()`, plus early insights and recent insights. This ensures the LLM sees durable negative patterns (e.g., "element X is consistently unstable") that would otherwise be lost when early insights scroll off the 8-item window.
+- **Proportional Stagnation Threshold (engine.ts, superconductor-research.ts)**:
+  - Stagnation reset now requires a *meaningful* Tc improvement: `max(5K, currentBestTc * 3%)` instead of flat `+2K`. A 150K→151K gain no longer resets the counter. Stagnation tiers: `>3 cycles` triggers moderate pairing-focus prompt, `>8 cycles` triggers deep stagnation that tells the LLM to abandon the current chemical regime entirely.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

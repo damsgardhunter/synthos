@@ -1893,7 +1893,9 @@ async function reEvaluateTopCandidates() {
       return lambda * 0.4 + score * 0.6;
     }), 0);
 
-    if (currentBestTc > lastBestTcSeen + 2 || currentBestPairing > lastBestPairingSusc + 0.05) {
+    const tcMeaningfulGain = Math.max(5, lastBestTcSeen * 0.03);
+    const pairingMeaningfulGain = Math.max(0.05, lastBestPairingSusc * 0.05);
+    if (currentBestTc > lastBestTcSeen + tcMeaningfulGain || currentBestPairing > lastBestPairingSusc + pairingMeaningfulGain) {
       cyclesSinceTcImproved = 0;
       lastBestTcSeen = Math.max(lastBestTcSeen, currentBestTc);
       lastBestPairingSusc = Math.max(lastBestPairingSusc, currentBestPairing);

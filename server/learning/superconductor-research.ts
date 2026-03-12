@@ -8,6 +8,8 @@ import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, c
 import type { CapExtensionEvidence } from "./physics-engine";
 import { passesStabilityGate } from "./phase-diagram-engine";
 import { passesElementCountCap, estimateFamilyPressure } from "./candidate-generator";
+import { getMinedRules } from "./pattern-miner";
+import type { PatternRule } from "./pattern-miner";
 import { allenDynesTcRaw } from "./physics-engine";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 
@@ -386,6 +388,49 @@ export async function runSuperconductorResearch(
   return { generated, insights: newInsights, duplicatesSkipped };
 }
 
+function condenseInsightsWithRules(allInsights: string[]): string {
+  const rules = getMinedRules();
+
+  const negativeRules = rules
+    .filter(r => r.consequent === "low-tc" && r.confidence >= 0.6 && r.support >= 3)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 5);
+
+  const positiveRules = rules
+    .filter(r => r.consequent === "high-tc" && r.confidence >= 0.6 && r.support >= 3)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 5);
+
+  function ruleToText(r: PatternRule): string {
+    const conds = r.conditions.map(c => {
+      if (c.operator === "between") return `${c.property} in [${c.threshold.toFixed(2)}, ${c.upperThreshold?.toFixed(2)}]`;
+      return `${c.property} ${c.operator} ${c.threshold.toFixed(2)}`;
+    }).join(" AND ");
+    const family = r.family ? `[${r.family}] ` : "";
+    return `${family}${conds} -> ${r.consequent} (conf=${r.confidence.toFixed(2)}, n=${r.support})`;
+  }
+
+  const parts: string[] = [];
+
+  if (negativeRules.length > 0) {
+    parts.push("AVOID (mined negative patterns):\n" + negativeRules.map(r => "- " + ruleToText(r)).join("\n"));
+  }
+  if (positiveRules.length > 0) {
+    parts.push("FAVORABLE (mined positive patterns):\n" + positiveRules.map(r => "- " + ruleToText(r)).join("\n"));
+  }
+
+  const recentInsights = allInsights.slice(-5);
+  const earlyInsights = allInsights.length > 10
+    ? allInsights.slice(0, 3).map(i => `[early] ${i}`)
+    : [];
+  const insightLines = [...earlyInsights, ...recentInsights];
+  if (insightLines.length > 0) {
+    parts.push("Key insights:\n" + insightLines.join("\n"));
+  }
+
+  return parts.join("\n\n");
+}
+
 async function generateNovelSuperconductors(
   emit: EventEmitter,
   existingCandidates: any[],
@@ -434,16 +479,22 @@ async function generateNovelSuperconductors(
 
   const stagnationCycles = stagnationInfo?.cyclesSinceImproved ?? 0;
   const currentCeiling = stagnationInfo?.currentBestTc ?? 0;
-  const isStagnating = stagnationCycles > 5;
-  const stagnationContext = isStagnating
-    ? `\n\nCRITICAL CONTEXT: No pairing susceptibility improvement in ${stagnationCycles} cycles. Current best Tc: ${Math.round(currentCeiling)}K. Shift focus from Tc maximization to PAIRING CONDITIONS:
+  const isStagnating = stagnationCycles > 3;
+  const isDeepStagnation = stagnationCycles > 8;
+  const stagnationContext = isDeepStagnation
+    ? `\n\nCRITICAL CONTEXT: Deep stagnation — no meaningful improvement in ${stagnationCycles} cycles. Current best Tc: ${Math.round(currentCeiling)}K. ABANDON current chemical regime entirely:
+- Explore fundamentally different bonding environments and crystal chemistries
+- Consider mixed-anion systems, kagome lattices, geometric frustration motifs
+- Try unconventional pairing: spin-fluctuation near AFM QCP, excitonic in mixed-dimensional systems, topological pairing
+- Seek mixed stiff-soft bonding networks with high phonon spectral weight at moderate frequencies
+Let Tc emerge from strong pairing conditions rather than targeting a specific Tc value.`
+    : isStagnating
+      ? `\n\nCONTEXT: Marginal progress in recent cycles (${stagnationCycles} cycles since meaningful improvement). Current best Tc: ${Math.round(currentCeiling)}K. Shift focus from Tc maximization to PAIRING CONDITIONS:
 - Maximize DOS at Fermi level (>3 states/eV/atom) via flat bands, van Hove singularities, or geometric frustration
 - Optimize Fermi surface nesting for strong electron-phonon or spin-fluctuation coupling channels
 - Target materials near quantum critical points (magnetic, structural, or charge instabilities)
-- Seek mixed stiff-soft bonding networks with high phonon spectral weight at moderate frequencies
-- Consider unconventional pairing: spin-fluctuation near AFM QCP, excitonic in mixed-dimensional systems
 Let Tc emerge from strong pairing conditions rather than targeting a specific Tc value.`
-    : "";
+      : "";
 
   try {
     const response = await openai.chat.completions.create({
@@ -451,42 +502,46 @@ Let Tc emerge from strong pairing conditions rather than targeting a specific Tc
       messages: [
         {
           role: "system",
-          content: `You are the discovery module of a superconductor AI. Based on the best candidates found so far and known patterns, propose 2-3 NEW chemical formulas that could be room-temperature superconductors.
+          content: `You are the discovery module of a superconductor AI. Based on the best candidates found so far and known patterns, propose 2-3 NEW chemical formulas that have the potential to be high-temperature or room-temperature superconductors based on current theory.
 
-STRICT REQUIREMENTS - A true room-temperature superconductor MUST have ALL of these:
-1. ZERO electrical resistance (not just low resistance - absolute zero ohms below Tc). This means electrons flow with literally no energy loss.
-2. Critical temperature (Tc) >= 293K (20C, room temperature). The material must superconduct at normal room conditions.
-3. Meissner effect - complete expulsion of ALL magnetic flux from the material interior when cooled below Tc.
+CRITERIA FOR EVALUATION - A true room-temperature superconductor would need ALL of these:
+1. ZERO electrical resistance (absolute zero ohms below Tc).
+2. Critical temperature (Tc) >= 293K (20C, room temperature).
+3. Meissner effect - complete expulsion of magnetic flux below Tc.
 4. Achievable at low or ambient pressure (< 10 GPa ideal, < 50 GPa maximum acceptable).
-5. Must support Cooper pair formation through a known mechanism (phonon-mediated BCS, spin-fluctuation, charge-density wave, or unconventional).
-6. Must be thermodynamically stable or metastable - it cannot decompose at room temperature.
+5. Cooper pair formation through a known mechanism (phonon-mediated BCS, spin-fluctuation, charge-density wave, or unconventional).
+6. Thermodynamically stable or metastable at operating conditions.
+
+YOUR TASK: Identify candidates with the strongest theoretical basis for meeting these criteria. Be HONEST about uncertainty — most candidates will NOT meet all criteria. Provide your genuine theoretical assessment, not optimistic hallucinations.
 
 IMPORTANT: Do NOT claim any candidate is a "confirmed breakthrough." All candidates are THEORETICAL PREDICTIONS that would require:
 - Independent laboratory synthesis
-- Four-probe resistance measurement from 300K down to 2K showing zero resistance below Tc
-- SQUID magnetometry confirming complete Meissner effect
+- Four-probe resistance measurement showing zero resistance below Tc
+- SQUID magnetometry confirming Meissner effect
 - Reproduction by at least 2 independent research groups
-- Crystal structure verification by X-ray diffraction
 
 For each candidate, describe the synthesis pathway with exact temperatures, durations, and equipment.
 
 Return JSON with 'candidates' array:
 - 'name' (descriptive)
 - 'formula' (chemical formula)
-- 'predictedTc' (Kelvin - be realistic based on known physics)
+- 'predictedTc' (Kelvin - be realistic based on known physics, do NOT inflate to meet 293K unless theory genuinely supports it)
 - 'pressureGpa' (required pressure, 0 for ambient)
 - 'meissnerEffect' (boolean - predicted based on theory)
+- 'meissnerConfidence' (0-1, how confident the theory supports Meissner effect)
 - 'zeroResistance' (boolean - predicted based on Cooper pair mechanism)
+- 'zeroResistanceConfidence' (0-1, how confident the theory supports zero resistance)
 - 'cooperPairMechanism' (detailed description of how Cooper pairs would form)
 - 'crystalStructure' (predicted with space group if possible)
 - 'quantumCoherence' (0-1, realistic estimate)
-- 'roomTempViable' (boolean - ONLY true if Tc >= 293K AND zero resistance AND Meissner)
+- 'theoreticalConfidence' (0-1, overall confidence that this material could superconduct at the predicted Tc)
+- 'roomTempViable' (boolean - ONLY true if Tc >= 293K AND zero resistance AND Meissner AND theoreticalConfidence > 0.3)
 - 'synthesisPath' (object with 'method', 'steps' array with exact temperatures/times, 'precursors' array, 'conditions' object)
 - 'reasoning' (string under 200 chars explaining the physics of why this could work)`,
         },
         {
           role: "user",
-          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\nPatterns discovered:\n${allInsights.slice(-8).join("\n")}${stagnationContext}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n- PRIORITIZE PAIRING SUSCEPTIBILITY over raw Tc: focus on high DOS(Ef), strong nesting, favorable phonon spectral weight, and proximity to quantum critical points\n- Materials with strong pairing indicators at moderate coupling are more physically credible than extreme-lambda claims\n\nPropose novel candidates. Remember: both ZERO RESISTANCE and ROOM TEMPERATURE are required. Do not overstate confidence - these are theoretical predictions requiring experimental verification.`,
+          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\n${condenseInsightsWithRules(allInsights)}${stagnationContext}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n- PRIORITIZE PAIRING SUSCEPTIBILITY over raw Tc: focus on high DOS(Ef), strong nesting, favorable phonon spectral weight, and proximity to quantum critical points\n- Materials with strong pairing indicators at moderate coupling are more physically credible than extreme-lambda claims\n- Set theoreticalConfidence HONESTLY: most novel materials should be 0.1-0.4, only exceptionally well-supported candidates should exceed 0.5\n\nPropose novel candidates. Be honest about predicted Tc — a well-supported 50K prediction is more valuable than an unsupported 300K hallucination. Do not overstate confidence.`,
         },
       ],
       response_format: { type: "json_object" },
@@ -537,7 +592,17 @@ Return JSON with 'candidates' array:
       }
       const llmProposedTc = c.predictedTc ?? null;
 
-      const novelNNScore = c.quantumCoherence ?? 0.3;
+      const llmTheoreticalConf = Math.min(1, Math.max(0, c.theoreticalConfidence ?? 0.3));
+      const meissnerConf = Math.min(1, Math.max(0, c.meissnerConfidence ?? (c.meissnerEffect ? 0.5 : 0.1)));
+      const zeroResConf = Math.min(1, Math.max(0, c.zeroResistanceConfidence ?? (c.zeroResistance ? 0.5 : 0.1)));
+
+      if (llmTheoreticalConf < 0.1 && meissnerConf < 0.15 && zeroResConf < 0.15) {
+        emit("log", { phase: "phase-7", event: "Novel SC rejected (low LLM confidence)", detail: `${c.formula}: theoreticalConf=${llmTheoreticalConf.toFixed(2)}, meissnerConf=${meissnerConf.toFixed(2)}, zeroResConf=${zeroResConf.toFixed(2)}`, dataSource: "SC Research" });
+        continue;
+      }
+
+      const confDamping = 0.5 + 0.5 * llmTheoreticalConf;
+      const novelNNScore = (c.quantumCoherence ?? 0.3) * confDamping;
       const novelXGBScore = gbResult.score;
       const novelEnsembleScore = Math.min(0.95, novelXGBScore * 0.4 + novelNNScore * 0.6);
 
@@ -783,7 +848,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
         },
         {
           role: "user",
-          content: `Materials with highest pairing susceptibility so far:\n${JSON.stringify(topByPairing, null, 2)}\n\nKnown patterns:\n${allInsights.slice(-5).join("\n")}\n\nDo NOT generate: ${existingFormulas.join(", ")}\n\nDesign 2-3 NEW compositions optimizing for pairing susceptibility. Focus on maximizing lambda and DOS(Ef) simultaneously. All predictions are theoretical.`,
+          content: `Materials with highest pairing susceptibility so far:\n${JSON.stringify(topByPairing, null, 2)}\n\n${condenseInsightsWithRules(allInsights)}\n\nDo NOT generate: ${existingFormulas.join(", ")}\n\nDesign 2-3 NEW compositions optimizing for pairing susceptibility. Focus on maximizing lambda and DOS(Ef) simultaneously. All predictions are theoretical.`,
         },
       ],
       response_format: { type: "json_object" },
