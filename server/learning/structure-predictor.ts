@@ -5,6 +5,7 @@ import { ELEMENTAL_DATA, getElementData, getMeltingPoint, getLatticeConstant } f
 import { fetchSummary, fetchElasticity } from "./materials-project-client";
 import { computeDimensionalityScore, detectStructuralMotifs } from "./physics-engine";
 import { extractFeatures } from "./ml-predictor";
+import { passesValenceFilter } from "./candidate-generator";
 import { getCompetingPhases, assessMetastability } from "./phase-diagram-engine";
 import { predictHydrideFormation } from "./pressure-engine";
 import { IONIC_RADII } from "./crystal-prototypes";
@@ -2009,6 +2010,8 @@ function reconstructFormula(elements: string[], counts: Record<string, number>):
     .join("");
 }
 
+const INTERCALATION_ALLOWED_DIM = new Set(["quasi-2D", "2D", "3D"]);
+
 export async function runEvolutionaryStructureSearch(
   candidates: Array<{ formula: string; predictedTc: number; ensembleScore: number }>,
   emit: EventEmitter
@@ -2023,6 +2026,9 @@ export async function runEvolutionaryStructureSearch(
     for (const parent of parents) {
       const parentElements = parseFormulaElements(parent.formula);
       const parentCounts = parseFormulaCounts(parent.formula);
+      const parentProto = matchPrototype(parent.formula);
+      const parentDim = parentProto?.dimensionality || "3D";
+      const intercalationAllowed = INTERCALATION_ALLOWED_DIM.has(parentDim);
 
       for (let m = 0; m < 4; m++) {
         const elements = [...parentElements];
@@ -2052,6 +2058,7 @@ export async function runEvolutionaryStructureSearch(
             }
           }
         } else if (m === 2) {
+          if (!intercalationAllowed) continue;
           const available = EVO_INTERCALANTS.filter(i => !elements.includes(i));
           if (available.length > 0) {
             const intercalant = available[Math.floor(Math.random() * available.length)];
@@ -2059,23 +2066,33 @@ export async function runEvolutionaryStructureSearch(
             counts[intercalant] = 1 + Math.floor(Math.random() * 2);
           }
         } else {
-          const idx = Math.floor(Math.random() * elements.length);
-          const el = elements[idx];
-          const scale = 0.85 + Math.random() * 0.3;
-          counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
+          if (!intercalationAllowed) {
+            const idx = Math.floor(Math.random() * elements.length);
+            const el = elements[idx];
+            const scale = 0.85 + Math.random() * 0.3;
+            counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
+          } else {
+            const idx = Math.floor(Math.random() * elements.length);
+            const el = elements[idx];
+            const scale = 0.85 + Math.random() * 0.3;
+            counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
 
-          const elSet = new Set(elements);
-          const available = EVO_INTERCALANTS.filter(i => !elSet.has(i));
-          if (available.length > 0) {
-            const intercalant = available[Math.floor(Math.random() * available.length)];
-            if (!elSet.has(intercalant)) {
-              elements.push(intercalant);
+            const elSet = new Set(elements);
+            const available = EVO_INTERCALANTS.filter(i => !elSet.has(i));
+            if (available.length > 0) {
+              const intercalant = available[Math.floor(Math.random() * available.length)];
+              if (!elSet.has(intercalant)) {
+                elements.push(intercalant);
+              }
+              counts[intercalant] = (counts[intercalant] || 0) + 1;
             }
-            counts[intercalant] = (counts[intercalant] || 0) + 1;
           }
         }
 
         const formula = reconstructFormula(elements, counts);
+
+        if (!passesValenceFilter(formula)) continue;
+
         const dimensionalityScore = computeDimensionalityScore(formula);
         const motifResult = detectStructuralMotifs(formula);
 
@@ -2092,6 +2109,8 @@ export async function runEvolutionaryStructureSearch(
 
         mutants.push({ formula, score: mutantScore, parentTc: predictedTc });
       }
+
+      await new Promise(resolve => setImmediate(resolve));
     }
 
     const sorted = mutants.sort((a, b) => b.score - a.score).slice(0, 5);

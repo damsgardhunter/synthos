@@ -726,6 +726,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - Evolutionary mutation m===3 (scale + intercalate) now checks `Set(elements)` before pushing the intercalant. If the scaled element was already an intercalant (e.g., H in a hydride), it increments the existing count instead of creating a duplicate array entry.
 - **McMillan Tc Fitness in Evolution (structure-predictor.ts)**:
   - Each evolutionary mutant now gets a fresh Tc prediction via `extractFeatures` + McMillan equation (lambda, logOmega, muStar=0.13) instead of carrying the dead ancestor's Tc. Score weights rebalanced to 0.4 motif + 0.25 dimensionality + 0.35 Tc/400 (was 0.5/0.3/0.2 with stale Tc). Provides a valid fitness gradient for Tc improvement across generations.
+- **Valence Filter on Evolutionary Mutants (structure-predictor.ts)**:
+  - Mutants now pass through `passesValenceFilter` immediately after formula reconstruction. Stoichiometry distortions that violate charge-neutrality or steric rules (e.g., LaH7 from a ±25% scale on LaH10) are discarded before expensive feature extraction, preventing structurally collapsed candidates from wasting compute.
+- **Dimensionality-Gated Intercalation (structure-predictor.ts)**:
+  - Evolutionary mutations m===2 (pure intercalation) and m===3 (scale+intercalate) are now gated by `INTERCALATION_ALLOWED_DIM` set (quasi-2D, 2D, 3D). `matchPrototype` resolves each parent's dimensionality; dense 1D chains skip intercalation mutations entirely. m===3 for non-intercalatable parents falls back to stoichiometry scaling only.
+- **Event Loop Yielding in Evolution (structure-predictor.ts)**:
+  - `setImmediate` yield inserted after each parent's 4 mutations, preventing the 60-evaluation evolutionary loop from blocking the Node.js event loop and keeping the server responsive during structure search.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
