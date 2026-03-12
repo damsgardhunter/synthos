@@ -413,11 +413,11 @@ const adaptiveMutationState = {
   totalAdaptations: 0,
 };
 
-function extractMotifs(formula: string): string[] {
-  const elements = parseFormulaElements(formula);
-  const motifs: string[] = [];
-  for (const el of elements) motifs.push(el);
-  const sorted = [...elements].sort();
+function extractMotifs(formula: string, preParsedCounts?: Record<string, number>): string[] {
+  const counts = preParsedCounts ?? parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const motifs: string[] = elements.slice();
+  const sorted = elements.slice().sort();
   for (let i = 0; i < sorted.length; i++) {
     for (let j = i + 1; j < sorted.length; j++) {
       motifs.push(`${sorted[i]}-${sorted[j]}`);
@@ -435,7 +435,8 @@ export function recordDFTFeedbackForGA(
   verificationStage: string = "surrogate"
 ): void {
   compositionFeedback.formulaOutcomes.set(formula, result);
-  const motifs = extractMotifs(formula);
+  const counts = parseFormulaCounts(formula);
+  const motifs = extractMotifs(formula, counts);
 
   const isGood = result.tc > 20 && result.stable && result.formationEnergy < 0.5;
   const isBad = !result.stable || result.formationEnergy > 1.0 || result.tc < 1;
@@ -574,24 +575,35 @@ export function getGAEvolutionStats() {
 const ELITE_ARCHIVE_SIZE = 5;
 const eliteArchive: NovelSynthesisRoute[] = [];
 
+function insertSorted(archive: NovelSynthesisRoute[], route: NovelSynthesisRoute): void {
+  let insertAt = archive.length;
+  for (let i = 0; i < archive.length; i++) {
+    if (route.fitnessScore > archive[i].fitnessScore) {
+      insertAt = i;
+      break;
+    }
+  }
+  archive.splice(insertAt, 0, route);
+}
+
 function updateEliteArchive(route: NovelSynthesisRoute): void {
   const normFormula = normalizeFormula(route.formula);
   const existingIdx = eliteArchive.findIndex(r => normalizeFormula(r.formula) === normFormula);
   if (existingIdx >= 0) {
     if (route.fitnessScore > eliteArchive[existingIdx].fitnessScore) {
-      eliteArchive[existingIdx] = route;
+      eliteArchive.splice(existingIdx, 1);
+      insertSorted(eliteArchive, route);
     }
     return;
   }
   if (eliteArchive.length < ELITE_ARCHIVE_SIZE) {
-    eliteArchive.push(route);
-    eliteArchive.sort((a, b) => b.fitnessScore - a.fitnessScore);
+    insertSorted(eliteArchive, route);
     return;
   }
   const worstArchive = eliteArchive[eliteArchive.length - 1];
   if (route.fitnessScore > worstArchive.fitnessScore) {
-    eliteArchive[eliteArchive.length - 1] = route;
-    eliteArchive.sort((a, b) => b.fitnessScore - a.fitnessScore);
+    eliteArchive.pop();
+    insertSorted(eliteArchive, route);
   }
 }
 
