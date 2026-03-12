@@ -687,12 +687,12 @@ function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: numbe
   function countEigenvaluesBelow(x: number): number {
     let count = 0;
     let d = diag[0] - x;
-    if (Math.abs(d) < 1e-30) d = -1e-30;
+    if (Math.abs(d) < 1e-12) d = d < 0 ? -1e-12 : 1e-12;
     if (d < 0) count++;
     for (let i = 1; i < n; i++) {
-      const dSafe = Math.abs(d) < 1e-30 ? (d >= 0 ? 1e-30 : -1e-30) : d;
-      d = (diag[i] - x) - (offDiag[i - 1] * offDiag[i - 1]) / dSafe;
-      if (Math.abs(d) < 1e-30) d = -1e-30;
+      const safeD = Math.abs(d) < 1e-12 ? (d < 0 ? -1e-12 : 1e-12) : d;
+      d = (diag[i] - x) - (offDiag[i - 1] * offDiag[i - 1]) / safeD;
+      if (Math.abs(d) < 1e-12) d = d < 0 ? -1e-12 : 1e-12;
       if (d < 0) count++;
     }
     return count;
@@ -841,23 +841,28 @@ export function computeTightBindingBands(
     }
     const occupiedStates = Math.floor(totalElectrons / 2);
 
-    const kWeights = new Array(kPoints.length).fill(0);
-    for (let ki = 0; ki < kPoints.length; ki++) {
-      let dPrev = 0, dNext = 0;
-      if (ki > 0) {
-        const dp = kPoints[ki], pp = kPoints[ki - 1];
-        dPrev = Math.sqrt((dp[0]-pp[0])**2 + (dp[1]-pp[1])**2 + (dp[2]-pp[2])**2);
-      }
-      if (ki < kPoints.length - 1) {
-        const dp = kPoints[ki], np = kPoints[ki + 1];
-        dNext = Math.sqrt((dp[0]-np[0])**2 + (dp[1]-np[1])**2 + (dp[2]-np[2])**2);
-      }
-      kWeights[ki] = (dPrev + dNext) * 0.5 || 1e-6;
+    const nK = kPoints.length;
+    const segmentDistances: number[] = new Array(nK - 1);
+    for (let ki = 0; ki < nK - 1; ki++) {
+      const a = kPoints[ki], b = kPoints[ki + 1];
+      segmentDistances[ki] = Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2) || 1e-10;
+    }
+
+    const kWeights = new Array(nK).fill(0);
+    for (let ki = 0; ki < nK; ki++) {
+      if (ki > 0) kWeights[ki] += segmentDistances[ki - 1] * 0.5;
+      if (ki < nK - 1) kWeights[ki] += segmentDistances[ki] * 0.5;
     }
     let totalKWeight = 0;
-    for (let ki = 0; ki < kWeights.length; ki++) totalKWeight += kWeights[ki];
-    for (let ki = 0; ki < kWeights.length; ki++) kWeights[ki] /= totalKWeight;
+    for (let ki = 0; ki < nK; ki++) totalKWeight += kWeights[ki];
+    if (totalKWeight > 0) {
+      for (let ki = 0; ki < nK; ki++) kWeights[ki] /= totalKWeight;
+    } else {
+      const uniformW = 1.0 / nK;
+      for (let ki = 0; ki < nK; ki++) kWeights[ki] = uniformW;
+    }
 
+    const nBandsK = bands[0]?.length || 0;
     const weightedEigenvalues: { e: number; w: number }[] = [];
     for (let ki = 0; ki < bands.length; ki++) {
       const w = kWeights[ki];
@@ -867,11 +872,11 @@ export function computeTightBindingBands(
     }
     weightedEigenvalues.sort((a, b) => a.e - b.e);
 
-    const targetOccupation = occupiedStates;
+    const targetFraction = occupiedStates / (nBandsK || 1);
     let cumulativeWeight = 0;
     for (const { e, w } of weightedEigenvalues) {
       cumulativeWeight += w;
-      if (cumulativeWeight >= targetOccupation * (1 / bands[0].length)) {
+      if (cumulativeWeight >= targetFraction) {
         fermiEnergy = e;
         break;
       }
