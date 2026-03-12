@@ -7143,12 +7143,17 @@ async function runLearningCycle() {
             const mutResult = runStructuralMutations(mutationInput, emit);
 
             let mutInserted = 0;
-            const mutantFormulas = [
-              ...mutResult.distorted.filter(d => d.energyPenalty < 0.3).map(d => d.formula),
-              ...mutResult.layered.map(l => l.formula),
-              ...mutResult.vacancy.map(v => v.formula),
-              ...mutResult.strained.filter(s => Math.abs(s.strainPercent) < 5).map(s => s.formula),
-            ];
+            const sourceMap = new Map<string, { parentFormula: string; parentTc: number }>();
+            const collectSource = (items: { formula: string; parentFormula: string; parentTc: number }[]) => {
+              for (const it of items) {
+                if (!sourceMap.has(it.formula)) sourceMap.set(it.formula, { parentFormula: it.parentFormula, parentTc: it.parentTc });
+              }
+            };
+            collectSource(mutResult.distorted.filter(d => d.energyPenalty < 0.3));
+            collectSource(mutResult.layered);
+            collectSource(mutResult.vacancy);
+            collectSource(mutResult.strained.filter(s => Math.abs(s.strainPercent) < 5));
+            const mutantFormulas = [...sourceMap.keys()];
             for (const mf of mutantFormulas.slice(0, 20)) {
               if (!shouldContinue()) break;
               if (!isValidFormula(mf)) continue;
@@ -7182,7 +7187,7 @@ async function runLearningCycle() {
                       ensembleScore: Math.min(0.9, (gb.score + 0.5) / 2),
                       roomTempViable: false,
                       status: "theoretical",
-                      notes: "[structural-mutation]",
+                      notes: `[structural-mutation] parent=${sourceMap.get(mf)?.parentFormula ?? "unknown"} parentTc=${sourceMap.get(mf)?.parentTc ?? 0}`,
                       electronPhononCoupling: lambdaML || null,
                       logPhononFrequency: features.logPhononFreq ?? null,
                       coulombPseudopotential: estimateMuStar(mf),

@@ -645,6 +645,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Parent-Tc-Capped Strain-Induced Tc Changes (structural-mutator.ts)**:
   - `estimateTcChangeFromStrain` now accepts a `parentTc` parameter and caps the Tc change to ±15% of the parent Tc. Previously, a 20K superconductor under 3% compressive strain could get a +9K boost (45% increase), and linear extrapolation could push low-Tc materials into the room-temperature regime. Now a 20K material is capped at ±3K change, while a 100K cuprate can still see up to ±15K — proportional to the parent's electronic coupling strength. The strain sensitivity multipliers were also moderated (cuprate compressive 3→2, tensile 2→1.5; generic 1.5→1.0).
 
+- **Dedup Moved Inside Generator Functions (structural-mutator.ts)**:
+  - `seenFormulas` (now `seen: Set<string>`) passed directly into `generateDistortedLattices`, `generateLayeredStructures`, `generateVacancyStructures`, `generateStrainedVariants`. Dedup happens at generation time (before object allocation), eliminating redundant result arrays and post-hoc filtering in `runStructuralMutations`.
+- **Prototype Assignment Cache (structural-mutator.ts)**:
+  - `runStructuralMutations` caches `assignPrototype` results in a `Map<string, PrototypeType>` (`protoCache`). Repeated formulas skip re-parsing element data and re-running classification heuristics.
+- **MutationSource Lineage Tracking (structural-mutator.ts)**:
+  - New `MutationSource` interface (`parentFormula`, `parentTc`) extends all result types (`DistortedLattice`, `LayeredStructure`, `VacancyStructure`, `StrainedVariant`). Every mutation output carries its parent's identity. Engine.ts inserts mutations with notes containing `parent=<formula> parentTc=<value>` for strategy-analyzer meta-learning.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.

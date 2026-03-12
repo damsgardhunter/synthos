@@ -171,7 +171,12 @@ export function assignPrototype(formula: string): PrototypeType {
 
 export type StabilityTier = "stable" | "metastable" | "highly-unstable";
 
-export interface DistortedLattice {
+export interface MutationSource {
+  parentFormula: string;
+  parentTc: number;
+}
+
+export interface DistortedLattice extends MutationSource {
   formula: string;
   distortionType: string;
   magnitude: number;
@@ -265,7 +270,12 @@ function estimateDistortionEnergyFast(distortionType: string, magnitude: number,
 
 const MAX_ENERGY = 0.2;
 
-export function generateDistortedLattices(formula: string, prototype: PrototypeType): DistortedLattice[] {
+export function generateDistortedLattices(
+  formula: string,
+  prototype: PrototypeType,
+  source: MutationSource,
+  seen?: Set<string>,
+): DistortedLattice[] {
   const base = PROTOTYPE_LATTICE[prototype];
   const scaledA = computeScaledLatticeA(formula, prototype);
   const elastic = precomputeElasticData(formula);
@@ -274,11 +284,15 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
   const tetragonalDistortions = [0.10, 0.15, 0.20, 0.25, 0.30];
   for (const mag of tetragonalDistortions) {
     for (const sign of [1, -1]) {
+      const key = `distort-${formula}-tetragonal-${sign > 0 ? "+" : "-"}${mag}`;
+      if (seen?.has(key)) continue;
       const energy = estimateDistortionEnergyFast("tetragonal", mag, elastic);
       if (energy > MAX_ENERGY) continue;
+      seen?.add(key);
       const a = scaledA;
       const c = a * base.c_over_a * (1 + sign * mag);
       results.push({
+        ...source,
         formula,
         distortionType: `tetragonal c/a ${sign > 0 ? "+" : "-"}${(mag * 100).toFixed(0)}%`,
         magnitude: mag,
@@ -292,12 +306,16 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
 
   const orthoDistortions = [0.02, 0.05, 0.08, 0.10];
   for (const mag of orthoDistortions) {
+    const key = `distort-${formula}-ortho-${mag}`;
+    if (seen?.has(key)) continue;
     const energy = estimateDistortionEnergyFast("orthorhombic", mag, elastic);
     if (energy > MAX_ENERGY) continue;
+    seen?.add(key);
     const a = scaledA;
     const b = a * (1 + mag);
     const c = a * base.c_over_a;
     results.push({
+      ...source,
       formula,
       distortionType: `orthorhombic b/a +${(mag * 100).toFixed(0)}%`,
       magnitude: mag,
@@ -312,9 +330,13 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
   for (const beta of monoclinicTilts) {
     if (beta === 90) continue;
     const tiltMag = Math.abs(90 - beta);
+    const key = `distort-${formula}-mono-${beta}`;
+    if (seen?.has(key)) continue;
     const energy = estimateDistortionEnergyFast("monoclinic", tiltMag, elastic);
     if (energy > MAX_ENERGY) continue;
+    seen?.add(key);
     results.push({
+      ...source,
       formula,
       distortionType: `monoclinic beta=${beta}deg`,
       magnitude: tiltMag,
@@ -328,14 +350,19 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
   return results;
 }
 
-export interface LayeredStructure {
+export interface LayeredStructure extends MutationSource {
   formula: string;
   layerType: string;
   layerCount: number;
   dimensionality: string;
 }
 
-export function generateLayeredStructures(formula: string, prototype: PrototypeType): LayeredStructure[] {
+export function generateLayeredStructures(
+  formula: string,
+  prototype: PrototypeType,
+  source: MutationSource,
+  seen?: Set<string>,
+): LayeredStructure[] {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const results: LayeredStructure[] = [];
@@ -363,9 +390,12 @@ export function generateLayeredStructures(formula: string, prototype: PrototypeT
       const bSiteRadius = getElementData(bSite)?.atomicRadius ?? 100;
       if (aSiteRadius > bSiteRadius) {
         for (const n of [1, 2, 3]) {
-          const rpFormula = `${aSite}${n + 1}${bSite}${n}O${3 * n + 1}`;
+          const rpF = normalizeFormula(`${aSite}${n + 1}${bSite}${n}O${3 * n + 1}`);
+          if (seen?.has(rpF)) continue;
+          seen?.add(rpF);
           results.push({
-            formula: normalizeFormula(rpFormula),
+            ...source,
+            formula: rpF,
             layerType: `Ruddlesden-Popper n=${n}`,
             layerCount: n,
             dimensionality: n === 1 ? "quasi-2D" : n === 2 ? "quasi-2D" : "3D",
@@ -386,9 +416,12 @@ export function generateLayeredStructures(formula: string, prototype: PrototypeT
         const newCounts = { ...counts };
         newCounts[spacer.el] = (newCounts[spacer.el] || 0) + 2;
         newCounts[spacer.anion] = (newCounts[spacer.anion] || 0) + 2;
-        const spacerFormula = buildFormula(newCounts);
+        const spacerF = normalizeFormula(buildFormula(newCounts));
+        if (seen?.has(spacerF)) continue;
+        seen?.add(spacerF);
         results.push({
-          formula: normalizeFormula(spacerFormula),
+          ...source,
+          formula: spacerF,
           layerType: `${spacer.type} (${spacer.el}${spacer.anion})`,
           layerCount: 1,
           dimensionality: "quasi-2D",
@@ -403,9 +436,12 @@ export function generateLayeredStructures(formula: string, prototype: PrototypeT
       for (const el of Object.keys(baseCounts)) {
         baseCounts[el] = baseCounts[el] * layers;
       }
-      const scaledFormula = normalizeFormula(buildFormula(baseCounts));
+      const slF = `${normalizeFormula(buildFormula(baseCounts))}_SL${layers}`;
+      if (seen?.has(slF)) continue;
+      seen?.add(slF);
       results.push({
-        formula: `${scaledFormula}_SL${layers}`,
+        ...source,
+        formula: slF,
         layerType: `superlattice ${layers}-layer`,
         layerCount: layers,
         dimensionality: layers <= 2 ? "quasi-2D" : "3D",
@@ -416,7 +452,7 @@ export function generateLayeredStructures(formula: string, prototype: PrototypeT
   return results;
 }
 
-export interface VacancyStructure {
+export interface VacancyStructure extends MutationSource {
   formula: string;
   vacancyType: string;
   concentration: number;
@@ -451,11 +487,16 @@ function estimateVacancyFormationEnergy(element: string, concentration: number, 
   return baseEnergy * concentration * 20;
 }
 
-export function generateVacancyStructures(formula: string, prototype: PrototypeType): VacancyStructure[] {
+export function generateVacancyStructures(
+  formula: string,
+  prototype: PrototypeType,
+  source: MutationSource,
+  seen?: Set<string>,
+): VacancyStructure[] {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const results: VacancyStructure[] = [];
-  const MAX_ENERGY = 0.5;
+  const VAC_MAX_ENERGY = 0.5;
 
   const vacancyConcentrations = [0.05, 0.10, 0.15, 0.20, 0.25];
 
@@ -469,10 +510,12 @@ export function generateVacancyStructures(formula: string, prototype: PrototypeT
       if (newCount < 1) continue;
 
       const energy = estimateVacancyFormationEnergy(el, conc, formula);
-      if (energy > MAX_ENERGY) continue;
+      if (energy > VAC_MAX_ENERGY) continue;
 
       const newCounts = { ...counts, [el]: newCount };
       const vacFormula = normalizeFormula(buildFormula(newCounts));
+      if (seen?.has(vacFormula)) continue;
+      seen?.add(vacFormula);
 
       let effect = "unknown";
       if (el === "O" || el === "N") effect = "hole doping, increased carrier concentration";
@@ -481,6 +524,7 @@ export function generateVacancyStructures(formula: string, prototype: PrototypeT
       else effect = "lattice strain, phonon softening";
 
       results.push({
+        ...source,
         formula: vacFormula,
         vacancyType: `${el}-vacancy ${(conc * 100).toFixed(0)}%`,
         concentration: conc,
@@ -500,23 +544,31 @@ export function generateVacancyStructures(formula: string, prototype: PrototypeT
         const newCounts = { ...counts };
         newCounts[elA] = counts[elA] - swapCount;
         newCounts[elB] = counts[elB] + swapCount;
-        const swapFormula = buildFormula(newCounts);
+        const swapF = normalizeFormula(buildFormula(newCounts));
         newCounts[elA] = counts[elA] + swapCount;
         newCounts[elB] = counts[elB] - swapCount;
-        const reverseSwapFormula = buildFormula(newCounts);
+        const reverseF = normalizeFormula(buildFormula(newCounts));
 
-        results.push({
-          formula: normalizeFormula(swapFormula),
-          vacancyType: `anti-site ${elA}->${elB} swap`,
-          concentration: swapCount / Math.max(1, getTotalAtoms(counts)),
-          expectedEffect: `site disorder: ${elA} replaced by ${elB} at one site, modified local electronic structure`,
-        });
-        results.push({
-          formula: normalizeFormula(reverseSwapFormula),
-          vacancyType: `anti-site ${elB}->${elA} swap`,
-          concentration: swapCount / Math.max(1, getTotalAtoms(counts)),
-          expectedEffect: `site disorder: ${elB} replaced by ${elA} at one site, modified local electronic structure`,
-        });
+        if (!seen?.has(swapF)) {
+          seen?.add(swapF);
+          results.push({
+            ...source,
+            formula: swapF,
+            vacancyType: `anti-site ${elA}->${elB} swap`,
+            concentration: swapCount / Math.max(1, getTotalAtoms(counts)),
+            expectedEffect: `site disorder: ${elA} replaced by ${elB} at one site, modified local electronic structure`,
+          });
+        }
+        if (!seen?.has(reverseF)) {
+          seen?.add(reverseF);
+          results.push({
+            ...source,
+            formula: reverseF,
+            vacancyType: `anti-site ${elB}->${elA} swap`,
+            concentration: swapCount / Math.max(1, getTotalAtoms(counts)),
+            expectedEffect: `site disorder: ${elB} replaced by ${elA} at one site, modified local electronic structure`,
+          });
+        }
       }
     }
   }
@@ -524,7 +576,7 @@ export function generateVacancyStructures(formula: string, prototype: PrototypeT
   return results;
 }
 
-export interface StrainedVariant {
+export interface StrainedVariant extends MutationSource {
   formula: string;
   substrate: string;
   strainPercent: number;
@@ -572,10 +624,12 @@ const MAX_STRAIN_PERCENT = 4;
 export function generateStrainedVariants(
   formula: string,
   prototype: PrototypeType,
-  parentTc: number = 30
+  parentTc: number = 30,
+  seen?: Set<string>,
 ): StrainedVariant[] {
   const filmA = computeScaledLatticeA(formula, prototype);
   const results: StrainedVariant[] = [];
+  const source: MutationSource = { parentFormula: formula, parentTc };
 
   for (const sub of SUBSTRATES) {
     const mismatch = ((sub.latticeA - filmA) / filmA) * 100;
@@ -583,10 +637,15 @@ export function generateStrainedVariants(
 
     if (absMismatch > MAX_STRAIN_PERCENT) continue;
 
+    const key = `strain-${formula}-${sub.name}`;
+    if (seen?.has(key)) continue;
+    seen?.add(key);
+
     const strainType = mismatch > 0 ? "tensile" : "compressive";
     const tcChange = estimateTcChangeFromStrain(mismatch, formula, parentTc);
 
     results.push({
+      ...source,
       formula,
       substrate: sub.name,
       strainPercent: Math.round(mismatch * 100) / 100,
@@ -615,46 +674,31 @@ export function runStructuralMutations(
   const allLayered: LayeredStructure[] = [];
   const allVacancy: VacancyStructure[] = [];
   const allStrained: StrainedVariant[] = [];
-  const seenFormulas = new Set<string>();
+  const seen = new Set<string>();
+  const protoCache = new Map<string, PrototypeType>();
 
   for (const candidate of topCandidates) {
-    const prototype = assignPrototype(candidate.formula);
-
-    const distorted = generateDistortedLattices(candidate.formula, prototype);
-
-    for (const d of distorted) {
-      const key = `distort-${d.formula}-${d.distortionType}`;
-      if (!seenFormulas.has(key)) {
-        seenFormulas.add(key);
-        allDistorted.push(d);
-      }
-    }
-
-    const layered = generateLayeredStructures(candidate.formula, prototype);
-    for (const l of layered) {
-      if (!seenFormulas.has(l.formula)) {
-        seenFormulas.add(l.formula);
-        allLayered.push(l);
-      }
-    }
-
-    const vacancy = generateVacancyStructures(candidate.formula, prototype);
-    for (const v of vacancy) {
-      if (!seenFormulas.has(v.formula)) {
-        seenFormulas.add(v.formula);
-        allVacancy.push(v);
-      }
+    const f = candidate.formula;
+    let prototype = protoCache.get(f);
+    if (!prototype) {
+      prototype = assignPrototype(f);
+      protoCache.set(f, prototype);
     }
 
     const parentTc = candidate.predictedTc ?? 30;
-    const strained = generateStrainedVariants(candidate.formula, prototype, parentTc);
-    for (const s of strained) {
-      const key = `strain-${s.formula}-${s.substrate}`;
-      if (!seenFormulas.has(key)) {
-        seenFormulas.add(key);
-        allStrained.push(s);
-      }
-    }
+    const source: MutationSource = { parentFormula: f, parentTc };
+
+    const distorted = generateDistortedLattices(f, prototype, source, seen);
+    allDistorted.push(...distorted);
+
+    const layered = generateLayeredStructures(f, prototype, source, seen);
+    allLayered.push(...layered);
+
+    const vacancy = generateVacancyStructures(f, prototype, source, seen);
+    allVacancy.push(...vacancy);
+
+    const strained = generateStrainedVariants(f, prototype, parentTc, seen);
+    allStrained.push(...strained);
   }
 
   const totalGenerated = allDistorted.length + allLayered.length + allVacancy.length + allStrained.length;
