@@ -600,132 +600,128 @@ export async function runMultiFidelityPipeline(
   if (candidates.length > 8) {
     console.log(`[Pipeline] Truncating ${candidates.length} candidates to 8 for pipeline screening`);
   }
-  for (const candidate of candidates.slice(0, 8)) {
+  const batch = candidates.slice(0, 8);
+
+  interface FastScreenResult {
+    candidate: SuperconductorCandidate;
+    physicsData: Record<string, any>;
+    s1Data: any;
+    earlyResult: PipelineResult | null;
+  }
+
+  const fastScreenPromises = batch.map(async (candidate): Promise<FastScreenResult> => {
     const physicsData: Record<string, any> = { _currentPredictedTc: candidate.predictedTc ?? 0 };
 
     const s0 = await stage0_MLFilter(emit, candidate);
     if (!s0.passed) {
-      results.push({
-        candidateId: candidate.id,
-        formula: candidate.formula,
-        finalStage: 0,
-        passed: false,
-        failureReason: s0.reason,
-        physicsData: {},
-      });
-      continue;
+      return { candidate, physicsData: {}, s1Data: null, earlyResult: {
+        candidateId: candidate.id, formula: candidate.formula, finalStage: 0,
+        passed: false, failureReason: s0.reason, physicsData: {},
+      }};
     }
 
     const s0b = await stage0b_SynthesisPrescreen(emit, candidate);
     physicsData.synthesisPrescreen = s0b.data;
     if (!s0b.passed) {
-      results.push({
-        candidateId: candidate.id,
-        formula: candidate.formula,
-        finalStage: 0,
-        passed: false,
-        failureReason: s0b.reason,
-        physicsData,
-      });
-      continue;
+      return { candidate, physicsData, s1Data: null, earlyResult: {
+        candidateId: candidate.id, formula: candidate.formula, finalStage: 0,
+        passed: false, failureReason: s0b.reason, physicsData,
+      }};
     }
 
     const s0c = await stage0c_FastBandScreen(emit, candidate);
     physicsData.fastBandScreen = s0c.data;
     if (!s0c.passed) {
-      results.push({
-        candidateId: candidate.id,
-        formula: candidate.formula,
-        finalStage: 0,
-        passed: false,
-        failureReason: s0c.reason,
-        physicsData,
-      });
-      continue;
+      return { candidate, physicsData, s1Data: null, earlyResult: {
+        candidateId: candidate.id, formula: candidate.formula, finalStage: 0,
+        passed: false, failureReason: s0c.reason, physicsData,
+      }};
     }
 
     try {
       const tbSurr = predictTBProperties(candidate.formula);
       physicsData.tbSurrogate = tbSurr;
       if (tbSurr.lambdaProxy < 0.1 && tbSurr.dosAtEF < 0.01 && tbSurr.confidence > 0.4) {
-        results.push({
-          candidateId: candidate.id,
-          formula: candidate.formula,
-          finalStage: 0,
-          passed: false,
-          failureReason: `TB surrogate filter: lambdaProxy=${tbSurr.lambdaProxy.toFixed(3)} (<0.1), dosAtEF=${tbSurr.dosAtEF.toFixed(3)} (<0.01)`,
+        return { candidate, physicsData, s1Data: null, earlyResult: {
+          candidateId: candidate.id, formula: candidate.formula, finalStage: 0,
+          passed: false, failureReason: `TB surrogate filter: lambdaProxy=${tbSurr.lambdaProxy} (<0.1), dosAtEF=${tbSurr.dosAtEF} (<0.01)`,
           physicsData,
-        });
-        continue;
+        }};
       }
-    } catch {}
+    } catch (tbErr) {
+      const tbMsg = tbErr instanceof Error ? tbErr.message.slice(0, 80) : "unknown";
+      console.log(`[Pipeline] TB surrogate bypassed for ${candidate.formula}: ${tbMsg}`);
+      physicsData.tbSurrogate = { bypassed: true, error: tbMsg };
+    }
 
     const s1 = await stage1_ElectronicStructure(emit, candidate);
     physicsData.electronic = s1.data.electronic;
     physicsData.correlation = s1.data.correlation;
     if (!s1.passed) {
       await updateCandidatePhysics(candidate.id, physicsData, 1, s1.data);
-      results.push({
-        candidateId: candidate.id,
-        formula: candidate.formula,
-        finalStage: 1,
-        passed: false,
-        failureReason: s1.reason,
-        physicsData,
-      });
-      continue;
+      return { candidate, physicsData, s1Data: null, earlyResult: {
+        candidateId: candidate.id, formula: candidate.formula, finalStage: 1,
+        passed: false, failureReason: s1.reason, physicsData,
+      }};
     }
 
-    const s2 = await stage2_PhononCoupling(emit, candidate, s1.data);
-    physicsData.phonon = s2.data.phonon;
-    physicsData.coupling = s2.data.coupling;
-    if (!s2.passed) {
-      await updateCandidatePhysics(candidate.id, physicsData, 2, { ...s1.data, ...s2.data });
-      results.push({
-        candidateId: candidate.id,
-        formula: candidate.formula,
-        finalStage: 2,
-        passed: false,
-        failureReason: s2.reason,
-        physicsData,
-      });
-      continue;
+    return { candidate, physicsData, s1Data: s1.data, earlyResult: null };
+  });
+
+  const fastScreenResults = await Promise.all(fastScreenPromises);
+
+  const survivorsForHeavyPhysics: FastScreenResult[] = [];
+  for (const fsr of fastScreenResults) {
+    if (fsr.earlyResult) {
+      results.push(fsr.earlyResult);
+    } else {
+      survivorsForHeavyPhysics.push(fsr);
     }
+  }
 
-    const s3 = await stage3_TcPrediction(emit, candidate, s2.data, s1.data);
-    physicsData.eliashberg = s3.data.eliashberg;
-    physicsData.competingPhases = s3.data.competingPhases;
-    physicsData.criticalFields = s3.data.criticalFields;
-    if (!s3.passed) {
-      await updateCandidatePhysics(candidate.id, physicsData, 3, { ...s1.data, ...s2.data, ...s3.data });
-      results.push({
-        candidateId: candidate.id,
-        formula: candidate.formula,
-        finalStage: 3,
-        passed: false,
-        failureReason: s3.reason,
-        physicsData,
-      });
-      continue;
-    }
+  const HEAVY_CONCURRENCY = 3;
+  for (let i = 0; i < survivorsForHeavyPhysics.length; i += HEAVY_CONCURRENCY) {
+    const chunk = survivorsForHeavyPhysics.slice(i, i + HEAVY_CONCURRENCY);
+    const heavyPromises = chunk.map(async ({ candidate, physicsData, s1Data }) => {
+      const s2 = await stage2_PhononCoupling(emit, candidate, s1Data);
+      physicsData.phonon = s2.data.phonon;
+      physicsData.coupling = s2.data.coupling;
+      if (!s2.passed) {
+        await updateCandidatePhysics(candidate.id, physicsData, 2, { ...s1Data, ...s2.data });
+        return {
+          candidateId: candidate.id, formula: candidate.formula, finalStage: 2,
+          passed: false, failureReason: s2.reason, physicsData,
+        } as PipelineResult;
+      }
 
-    const cachedStructure = physicsData.synthesisPrescreen?.synthScore?.structure ?? null;
-    const s4 = await stage4_SynthesisFeasibility(emit, candidate, cachedStructure || undefined);
-    physicsData.structure = s4.data.structure;
-    physicsData.stability = s4.data.stability;
+      const s3 = await stage3_TcPrediction(emit, candidate, s2.data, s1Data);
+      physicsData.eliashberg = s3.data.eliashberg;
+      physicsData.competingPhases = s3.data.competingPhases;
+      physicsData.criticalFields = s3.data.criticalFields;
+      if (!s3.passed) {
+        await updateCandidatePhysics(candidate.id, physicsData, 3, { ...s1Data, ...s2.data, ...s3.data });
+        return {
+          candidateId: candidate.id, formula: candidate.formula, finalStage: 3,
+          passed: false, failureReason: s3.reason, physicsData,
+        } as PipelineResult;
+      }
 
-    const allPassed = s4.passed;
-    const allData = { ...s1.data, ...s2.data, ...s3.data, ...s4.data };
-    await updateCandidatePhysics(candidate.id, physicsData, 4, allData);
+      const cachedStructure = physicsData.synthesisPrescreen?.synthScore?.structure ?? null;
+      const s4 = await stage4_SynthesisFeasibility(emit, candidate, cachedStructure || undefined);
+      physicsData.structure = s4.data.structure;
+      physicsData.stability = s4.data.stability;
 
-    results.push({
-      candidateId: candidate.id,
-      formula: candidate.formula,
-      finalStage: 4,
-      passed: allPassed,
-      failureReason: s4.reason,
-      physicsData,
+      const allData = { ...s1Data, ...s2.data, ...s3.data, ...s4.data };
+      await updateCandidatePhysics(candidate.id, physicsData, 4, allData);
+
+      return {
+        candidateId: candidate.id, formula: candidate.formula, finalStage: 4,
+        passed: s4.passed, failureReason: s4.reason, physicsData,
+      } as PipelineResult;
     });
+
+    const chunkResults = await Promise.all(heavyPromises);
+    results.push(...chunkResults);
   }
 
   for (const result of results) {
