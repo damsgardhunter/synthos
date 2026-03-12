@@ -142,6 +142,7 @@ export interface IStorage {
   updateCandidateByFormulaDft(formula: string, scalarUpdates: Partial<InsertSuperconductorCandidate>, mlFeaturePatch: Record<string, any>): Promise<boolean>;
   getDftJobsByStatus(status: string): Promise<DftJob[]>;
   getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }>;
+  getDftStaleCleanupCount(): Promise<number>;
   getRecentDftJobs(limit?: number): Promise<DftJob[]>;
 }
 
@@ -825,6 +826,15 @@ export class DatabaseStorage implements IStorage {
       if (s in stats) stats[s] = (row as any).count;
     }
     return stats;
+  }
+
+  async getDftStaleCleanupCount(): Promise<number> {
+    const rows = await db.execute(sql`
+      SELECT COUNT(*)::int as count FROM dft_jobs
+      WHERE status = 'failed' AND error_message LIKE 'stale_cleanup:%'
+    `);
+    const row = ((rows as any).rows || rows)[0];
+    return (row as any)?.count ?? 0;
   }
 
   async getRecentDftJobs(limit = 20): Promise<DftJob[]> {

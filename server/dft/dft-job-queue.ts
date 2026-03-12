@@ -54,7 +54,6 @@ let totalProcessed = 0;
 let totalSucceeded = 0;
 let totalFailed = 0;
 const activeJobs = new Map<number, DftJob>();
-let staleJobsCleanedCount = 0;
 let broadcastFn: ((event: string, data: any) => void) | null = null;
 
 export function setDFTBroadcast(fn: (event: string, data: any) => void) {
@@ -390,9 +389,8 @@ async function cleanupStaleJobs() {
         await storage.updateDftJob(job.id, {
           status: "failed",
           completedAt: new Date(),
-          errorMessage: "Stale job from previous server session (max retries reached)",
+          errorMessage: "stale_cleanup: Stale job from previous server session (max retries reached)",
         } as any);
-        staleJobsCleanedCount++;
         failed++;
       }
     }
@@ -424,25 +422,16 @@ async function refillQueueIfLow(): Promise<number> {
 
     const queuedFormulas = new Set(queued.map(j => j.formula));
     let submitted = 0;
+    let refillErrors = 0;
     for (const candidate of eligible) {
       if (submitted >= REFILL_BATCH_SIZE) break;
       if (queuedFormulas.has(candidate.formula)) continue;
       if (isFormulaBlocked(candidate.formula)) continue;
 
       try {
-        const existing = await storage.getDftJobsByFormula(candidate.formula);
-        const hasActive = existing.some(j => j.status === "queued" || j.status === "running");
-        if (hasActive) continue;
-
-        const oneDayAgo = new Date(Date.now() - 24 * 3600_000);
-        const recentFailed = existing.filter(j => {
-          if (j.status !== "failed") return false;
-          if (!j.completedAt || new Date(j.completedAt) < oneDayAgo) return false;
-          const out = j.outputData as any;
-          if (out?.ppValidated === false || out?.ppValidated === null || out?.ppValidated === undefined) return false;
-          return true;
-        });
-        if (recentFailed.length >= 3) continue;
+        const { activeJob, recentValidatedFailures } = await storage.hasActiveOrRecentFailedDftJobs(candidate.formula);
+        if (activeJob) continue;
+        if (recentValidatedFailures >= 3) continue;
 
         const priority = Math.round((candidate.ensembleScore ?? 0) * 100);
         await storage.insertDftJob({
@@ -456,11 +445,16 @@ async function refillQueueIfLow(): Promise<number> {
         queuedFormulas.add(candidate.formula);
         submitted++;
         stageMetrics.candidate_queue.currentDepth++;
-      } catch {}
+      } catch (err: any) {
+        refillErrors++;
+        if (refillErrors <= 3) {
+          console.log(`[DFT-Queue] Refill insert error for ${candidate.formula}: ${err.message}`);
+        }
+      }
     }
 
-    if (submitted > 0) {
-      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (queue was ${queueSize}/${MIN_QUEUE_SIZE})`);
+    if (submitted > 0 || refillErrors > 0) {
+      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (queue was ${queueSize}/${MIN_QUEUE_SIZE})${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
     }
     return submitted;
   } catch (err: any) {
@@ -470,8 +464,9 @@ async function refillQueueIfLow(): Promise<number> {
 }
 
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
-let lastLoopRun = 0;
-let loopRunning = false;
+let lastLoopHeartbeat = 0;
+let loopActive = false;
+let watchdogRestarting = false;
 
 export function startDFTWorkerLoop() {
   if (workerLoopTimer) return;
@@ -487,8 +482,11 @@ export function startDFTWorkerLoop() {
   console.log(`[DFT-Queue] Starting DFT worker loop (poll every 30s, max ${MAX_CONCURRENT} concurrent)`);
 
   async function loop() {
-    loopRunning = true;
-    lastLoopRun = Date.now();
+    if (loopActive) {
+      return;
+    }
+    loopActive = true;
+    lastLoopHeartbeat = Date.now();
     try {
       await refillQueueIfLow();
 
@@ -498,19 +496,20 @@ export function startDFTWorkerLoop() {
         launched.push(processNextJob());
       }
       const results = await Promise.all(launched);
+      lastLoopHeartbeat = Date.now();
       const anyProcessed = results.some(r => r);
       if (anyProcessed) {
         const moreQueued = await storage.getQueuedDftJobs(1);
         if (moreQueued.length > 0) {
+          loopActive = false;
           workerLoopTimer = setTimeout(loop, 2000);
-          loopRunning = false;
           return;
         }
       }
     } catch (err: any) {
       console.log(`[DFT-Queue] Worker loop error: ${err.message}`);
     }
-    loopRunning = false;
+    loopActive = false;
     workerLoopTimer = setTimeout(loop, POLL_INTERVAL_MS);
   }
 
@@ -518,14 +517,19 @@ export function startDFTWorkerLoop() {
 
   if (!watchdogTimer) {
     watchdogTimer = setInterval(() => {
-      const elapsed = Date.now() - lastLoopRun;
-      if (!loopRunning && elapsed > POLL_INTERVAL_MS * 3 && lastLoopRun > 0) {
-        console.log(`[DFT-Queue] WATCHDOG: Worker loop appears dead (last run ${Math.round(elapsed/1000)}s ago), restarting`);
+      const elapsed = Date.now() - lastLoopHeartbeat;
+      if (elapsed > POLL_INTERVAL_MS * 3 && lastLoopHeartbeat > 0 && !watchdogRestarting) {
+        watchdogRestarting = true;
+        console.log(`[DFT-Queue] WATCHDOG: Worker loop appears dead (last heartbeat ${Math.round(elapsed/1000)}s ago), restarting`);
         if (workerLoopTimer) {
           clearTimeout(workerLoopTimer);
           workerLoopTimer = null;
         }
-        workerLoopTimer = setTimeout(loop, 1000);
+        loopActive = false;
+        workerLoopTimer = setTimeout(() => {
+          watchdogRestarting = false;
+          loop();
+        }, 1000);
       }
     }, POLL_INTERVAL_MS * 2);
   }
@@ -549,11 +553,12 @@ export function getStageMetrics(): Record<PipelineStage, StageMetrics> {
 
 export async function getDFTQueueStats() {
   const dbStats = await storage.getDftJobStats();
+  const staleCount = await storage.getDftStaleCleanupCount();
   const recentJobs = await storage.getRecentDftJobs(10);
 
   const dbSucceeded = dbStats.completed || 0;
   const dbFailed = dbStats.failed || 0;
-  const adjustedFailed = Math.max(0, dbFailed - staleJobsCleanedCount);
+  const adjustedFailed = Math.max(0, dbFailed - staleCount);
   const dbCompleted = dbSucceeded + adjustedFailed;
 
   const currentActiveFormulas = Array.from(activeJobs.values()).map(j => j.formula);
@@ -563,7 +568,7 @@ export async function getDFTQueueStats() {
     totalProcessed: dbCompleted,
     totalSucceeded: dbSucceeded,
     totalFailed: adjustedFailed,
-    staleJobsCleaned: staleJobsCleanedCount,
+    staleJobsCleaned: staleCount,
     isProcessing: activeWorkers > 0,
     activeWorkers,
     maxConcurrent: MAX_CONCURRENT,
