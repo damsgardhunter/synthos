@@ -139,6 +139,31 @@ function checkUncertaintyIncreaseTrigger(): RetrainTrigger | null {
   return null;
 }
 
+const GNN_STALE_WARN_MS = 6 * 3600_000;
+const GNN_STALE_CRITICAL_MS = 24 * 3600_000;
+
+function checkGNNStalenessTrigger(): RetrainTrigger | null {
+  const diagnostics = getComprehensiveModelDiagnostics();
+  const stalenessMs = diagnostics.gnn.modelStalenessMs;
+  if (stalenessMs > GNN_STALE_CRITICAL_MS) {
+    return {
+      type: "scheduled",
+      reasoning: `GNN ensemble stale for ${Math.round(stalenessMs / 3600_000)}h (>24h) — active learning degraded without fresh model`,
+      severity: "high",
+      metrics: { stalenessHours: Math.round(stalenessMs / 3600_000), thresholdHours: 24 },
+    };
+  }
+  if (stalenessMs > GNN_STALE_WARN_MS) {
+    return {
+      type: "scheduled",
+      reasoning: `GNN ensemble aging: ${Math.round(stalenessMs / 3600_000)}h since last retrain (warn at 6h)`,
+      severity: "medium",
+      metrics: { stalenessHours: Math.round(stalenessMs / 3600_000), thresholdHours: 6 },
+    };
+  }
+  return null;
+}
+
 function collectTriggers(): RetrainTrigger[] {
   const triggers: RetrainTrigger[] = [];
 
@@ -153,6 +178,9 @@ function collectTriggers(): RetrainTrigger[] {
 
   const uncertaintyTrigger = checkUncertaintyIncreaseTrigger();
   if (uncertaintyTrigger) triggers.push(uncertaintyTrigger);
+
+  const gnnStalenessTrigger = checkGNNStalenessTrigger();
+  if (gnnStalenessTrigger) triggers.push(gnnStalenessTrigger);
 
   if (state.consecutiveSkips >= MAX_SKIP_STREAK) {
     triggers.push({

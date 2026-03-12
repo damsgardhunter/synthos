@@ -202,6 +202,14 @@ export interface FailedMaterialSummary {
   failedAt: number;
 }
 
+export interface RootCauseCluster {
+  rootCause: "lattice_instability" | "electronic_instability" | "isolated";
+  formulas: string[];
+  reasons: string[];
+  count: number;
+  description: string;
+}
+
 export interface FailureSummaryReport {
   totalFailures: number;
   byReason: { reason: string; count: number; percentage: number }[];
@@ -212,6 +220,7 @@ export interface FailureSummaryReport {
     topFailingCrystalSystems: { system: string; count: number }[];
   };
   predictedStableActualUnstable: FailedMaterialSummary[];
+  rootCauseClusters: RootCauseCluster[];
   llmSuggestions: PrioritizedSuggestion[];
 }
 
@@ -858,6 +867,52 @@ function computeFailureSummary(): FailureSummaryReport {
     .map(([source, count]) => ({ source, count }))
     .sort((a, b) => b.count - a.count);
 
+  const LATTICE_INSTABILITY_REASONS = new Set(["unstable_phonons", "structure_collapse", "high_formation_energy"]);
+  const ELECTRONIC_INSTABILITY_REASONS = new Set(["non_metallic", "scf_divergence"]);
+  const formulaReasons = new Map<string, Set<string>>();
+  for (const entry of allEntries) {
+    if (!formulaReasons.has(entry.formula)) formulaReasons.set(entry.formula, new Set());
+    formulaReasons.get(entry.formula)!.add(entry.failureReason);
+  }
+
+  const rootCauseClusters: RootCauseCluster[] = [];
+  const latticeFormulas: string[] = [];
+  const electronicFormulas: string[] = [];
+  const latticeReasonsSeen = new Set<string>();
+  const electronicReasonsSeen = new Set<string>();
+
+  for (const [formula, reasons] of formulaReasons) {
+    const latticeReasons = [...reasons].filter(r => LATTICE_INSTABILITY_REASONS.has(r));
+    const electronicReasons = [...reasons].filter(r => ELECTRONIC_INSTABILITY_REASONS.has(r));
+    if (latticeReasons.length >= 2) {
+      latticeFormulas.push(formula);
+      for (const r of latticeReasons) latticeReasonsSeen.add(r);
+    }
+    if (electronicReasons.length >= 2 || (electronicReasons.length >= 1 && latticeReasons.length >= 1)) {
+      electronicFormulas.push(formula);
+      for (const r of electronicReasons) electronicReasonsSeen.add(r);
+    }
+  }
+
+  if (latticeFormulas.length > 0) {
+    rootCauseClusters.push({
+      rootCause: "lattice_instability",
+      formulas: latticeFormulas.slice(0, 20),
+      reasons: [...latticeReasonsSeen],
+      count: latticeFormulas.length,
+      description: `${latticeFormulas.length} formulas exhibit multiple lattice instability signals (${[...latticeReasonsSeen].join(" + ")}), suggesting the generator produces unphysical lattice constants`,
+    });
+  }
+  if (electronicFormulas.length > 0) {
+    rootCauseClusters.push({
+      rootCause: "electronic_instability",
+      formulas: electronicFormulas.slice(0, 20),
+      reasons: [...electronicReasonsSeen],
+      count: electronicFormulas.length,
+      description: `${electronicFormulas.length} formulas show coupled electronic instability (${[...electronicReasonsSeen].join(" + ")})`,
+    });
+  }
+
   const suggestions: PrioritizedSuggestion[] = [];
   const phononFailures = reasonCounts.get("unstable_phonons") || 0;
   const collapseFailures = reasonCounts.get("structure_collapse") || 0;
@@ -910,6 +965,18 @@ function computeFailureSummary(): FailureSummaryReport {
       category: "prefilter",
     });
   }
+  if (rootCauseClusters.length > 0) {
+    const latticeCluster = rootCauseClusters.find(c => c.rootCause === "lattice_instability");
+    if (latticeCluster && latticeCluster.count >= 3) {
+      const rate = totalEntries > 0 ? latticeCluster.count / totalEntries : 0;
+      suggestions.push({
+        text: `Root cause: ${latticeCluster.count} formulas share linked lattice instability (${latticeCluster.reasons.join(" + ")}) — generator may produce unphysical lattice constants`,
+        priority: rate > 0.15 ? "critical" : rate > 0.08 ? "high" : "medium",
+        impactScore: Math.round(rate * 100) / 100,
+        category: "architecture",
+      });
+    }
+  }
 
   suggestions.sort((a, b) => b.impactScore - a.impactScore);
 
@@ -923,6 +990,7 @@ function computeFailureSummary(): FailureSummaryReport {
       topFailingCrystalSystems: patterns.crystalSystems.slice(0, 5).map(s => ({ system: s.system, count: s.failureCount })),
     },
     predictedStableActualUnstable: recentStableUnstable,
+    rootCauseClusters,
     llmSuggestions: suggestions,
   };
 }
@@ -1049,7 +1117,24 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push(`  Prediction bias (impact-weighted sign)=${d.xgboost.meanResidualSign} (>0 = net overprediction, <0 = net underprediction)`);
   lines.push(`  Residual p90=${d.xgboost.absResidualPercentiles.p90}K, p95=${d.xgboost.absResidualPercentiles.p95}K`);
   if (d.xgboost.r2 < 0.5) lines.push("  ** WARNING: Low R² — model may be underfitting **");
-  if (d.xgboost.rmse > 30) lines.push("  ** WARNING: High RMSE — large prediction errors **");
+  const familyTcRanges: Record<string, { label: string; avgTc: number; acceptableRMSE: number }> = {
+    conventional: { label: "conventional (<10K)", avgTc: 5, acceptableRMSE: 3 },
+    pnictide: { label: "pnictide (10-60K)", avgTc: 35, acceptableRMSE: 10 },
+    cuprate: { label: "cuprate (30-140K)", avgTc: 90, acceptableRMSE: 20 },
+    hydride: { label: "hydride (100-300K)", avgTc: 200, acceptableRMSE: 40 },
+    boride: { label: "boride (1-40K)", avgTc: 20, acceptableRMSE: 8 },
+  };
+  for (const fb of d.familyBias) {
+    if (fb.count === 0) continue;
+    const range = familyTcRanges[fb.family];
+    if (range && fb.meanAbsError > range.acceptableRMSE) {
+      const pctError = range.avgTc > 0 ? Math.round((fb.meanAbsError / range.avgTc) * 100) : 0;
+      lines.push(`  ** WARNING: ${range.label} MAE=${fb.meanAbsError}K is ${pctError}% of avg Tc=${range.avgTc}K (acceptable <${range.acceptableRMSE}K) **`);
+    }
+  }
+  if (d.xgboost.rmse > 30 && !d.familyBias.some(fb => fb.count > 0)) {
+    lines.push("  ** WARNING: High RMSE — large prediction errors **");
+  }
   lines.push("");
 
   lines.push("## GNN Ensemble");
@@ -1098,8 +1183,7 @@ export function getModelDiagnosticsForLLM(): string {
     lines.push("## Feature Importance (XGBoost top features)");
     const topFeatures = d.featureImportance.slice(0, 15);
     for (const f of topFeatures) {
-      const bar = "=".repeat(Math.round(f.normalizedImportance * 20));
-      lines.push(`  ${f.name.padEnd(24)} ${f.normalizedImportance.toFixed(3)} ${bar}`);
+      lines.push(`  ${f.name}: ${f.normalizedImportance.toFixed(3)}`);
     }
     const isCompositionFeature = (name: string) => COMPOSITION_FEATURE_SET.has(name);
     const compFeatures = topFeatures.filter(f => isCompositionFeature(f.name));
@@ -1198,6 +1282,13 @@ export function getModelDiagnosticsForLLM(): string {
         if (f.lowestPhononFreq != null) extras.push(`lowest_freq=${f.lowestPhononFreq}`);
         if (f.formationEnergy != null) extras.push(`Ef=${f.formationEnergy}`);
         lines.push(`    ${f.formula} [${f.failureReason}] via ${f.source}${extras.length > 0 ? " | " + extras.join(", ") : ""}`);
+      }
+    }
+    if (d.failureSummary.rootCauseClusters.length > 0) {
+      lines.push("  Root cause analysis:");
+      for (const rc of d.failureSummary.rootCauseClusters) {
+        lines.push(`    ${rc.rootCause}: ${rc.count} formulas — ${rc.description}`);
+        if (rc.formulas.length > 0) lines.push(`      examples: ${rc.formulas.slice(0, 5).join(", ")}`);
       }
     }
     if (d.failureSummary.failurePatterns.topFailingElementPairs.length > 0) {
