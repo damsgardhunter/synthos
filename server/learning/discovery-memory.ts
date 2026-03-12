@@ -1,5 +1,6 @@
 import { parseFormulaElements } from "./physics-engine";
 import { classifyFamily } from "./utils";
+import { classifyStructuralMotif } from "./synthesis-discovery";
 import type { PhysicsAwareRewardContext } from "./rl-agent";
 
 export interface PatternFingerprint {
@@ -18,6 +19,7 @@ export interface PatternFingerprint {
   pressureGpa: number;
   family: string;
   tc: number;
+  structuralMotifs: string[];
 }
 
 export interface DiscoveryRecord {
@@ -229,6 +231,11 @@ export function buildFingerprint(
 
   const defaultOrbital = FAMILY_ORBITAL_DEFAULTS[family] ?? "d";
 
+  let motifs: string[] = [];
+  try {
+    motifs = classifyStructuralMotif(formula, family);
+  } catch { motifs = []; }
+
   return {
     dosLevel: physicsContext?.dosLevel ?? 0.5,
     flatBandScore: physicsContext?.flatBandScore ?? (physicsContext?.bandFlatness ?? 0),
@@ -245,6 +252,7 @@ export function buildFingerprint(
     pressureGpa: physicsContext?.pressureGpa ?? 0,
     family,
     tc,
+    structuralMotifs: motifs,
   };
 }
 
@@ -409,19 +417,29 @@ export class DiscoveryMemory {
     }
     preferredElements.sort((a, b) => b.weight - a.weight);
 
-    const familyCounts = new Map<string, { count: number; avgTc: number }>();
+    const motifCounts = new Map<string, { count: number; avgTc: number; totalTc: number }>();
     for (const r of topRecords) {
       const fam = r.fingerprint.family;
-      const entry = familyCounts.get(fam) || { count: 0, avgTc: 0 };
-      entry.avgTc = (entry.avgTc * entry.count + r.tc) / (entry.count + 1);
-      entry.count++;
-      familyCounts.set(fam, entry);
+      const famEntry = motifCounts.get(fam) || { count: 0, avgTc: 0, totalTc: 0 };
+      famEntry.totalTc += r.tc;
+      famEntry.count++;
+      famEntry.avgTc = famEntry.totalTc / famEntry.count;
+      motifCounts.set(fam, famEntry);
+
+      const motifs = r.fingerprint.structuralMotifs ?? [];
+      for (const motif of motifs) {
+        const mEntry = motifCounts.get(`motif:${motif}`) || { count: 0, avgTc: 0, totalTc: 0 };
+        mEntry.totalTc += r.tc;
+        mEntry.count++;
+        mEntry.avgTc = mEntry.totalTc / mEntry.count;
+        motifCounts.set(`motif:${motif}`, mEntry);
+      }
     }
     const preferredStructures: { structure: string; weight: number }[] = [];
-    const famEntries = Array.from(familyCounts.entries());
-    for (const [fam, data] of famEntries) {
+    const motifEntries = Array.from(motifCounts.entries());
+    for (const [name, data] of motifEntries) {
       preferredStructures.push({
-        structure: fam,
+        structure: name,
         weight: (data.count / totalRecords) * (data.avgTc / Math.max(1, topRecords[0].tc)),
       });
     }

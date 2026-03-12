@@ -2138,7 +2138,7 @@ async function runDFTEnrichment() {
         );
         recordPredictionOutcome("xgboost", candidate.formula, priorTc, gb.tcPredicted);
         incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
-        recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy }, candidate.materialClass ?? undefined);
+        recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy }, candidate.materialClass ?? undefined, dftSrc === "external" ? "dft" : "xtb");
 
         const sourceGen = candidateGeneratorSource.get(candidate.formula);
         if (sourceGen) {

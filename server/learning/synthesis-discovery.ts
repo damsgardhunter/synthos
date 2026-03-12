@@ -186,7 +186,7 @@ function initMotifRewards(): void {
 const CUPRATE_SPACERS = new Set(["Y","La","Ba","Sr","Ca","Nd","Sm","Gd","Pr","Eu","Bi","Tl","Hg","Pb"]);
 const HEXAGONAL_SPACE_GROUPS = new Set(["P6/mmm","P63/mmc","P6mm","P-6m2","P6/m","P63/mcm","P-62m"]);
 
-function classifyStructuralMotif(formula: string, materialClass: string): StructuralMotif[] {
+export function classifyStructuralMotif(formula: string, materialClass: string): StructuralMotif[] {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const mc = materialClass.toLowerCase();
@@ -282,27 +282,38 @@ function classifyStructuralMotif(formula: string, materialClass: string): Struct
   return motifs;
 }
 
+const VERIFICATION_STAGE_MULTIPLIERS: Record<string, number> = {
+  dft: 5.0,
+  "dft-external": 5.0,
+  external: 4.0,
+  xtb: 1.0,
+  surrogate: 0.3,
+};
+
 export function rewardStructuralMotif(
   formula: string,
   materialClass: string,
-  result: { tc: number; stable: boolean; formationEnergy: number }
+  result: { tc: number; stable: boolean; formationEnergy: number },
+  verificationStage: string = "surrogate"
 ): void {
   initMotifRewards();
   const motifs = classifyStructuralMotif(formula, materialClass);
   const isSuccess = result.tc > 20 && result.stable && result.formationEnergy < 0.5;
+  const stageMult = VERIFICATION_STAGE_MULTIPLIERS[verificationStage] ?? 1.0;
 
   for (const motif of motifs) {
     const entry = structuralMotifRewards.get(motif);
     if (!entry) continue;
 
     if (isSuccess) {
-      const reward = Math.min(1.0, result.tc / 200);
+      const baseReward = Math.min(1.0, result.tc / 200);
+      const reward = baseReward * stageMult;
       entry.successes++;
       entry.totalReward += reward;
       entry.weight = Math.min(3.0, entry.weight + reward * 0.15);
     } else {
       entry.failures++;
-      entry.weight = Math.max(0.2, entry.weight - 0.05);
+      entry.weight = Math.max(0.2, entry.weight - 0.05 * stageMult);
     }
     entry.totalTc += result.tc;
     entry.avgTc = entry.totalTc / (entry.successes + entry.failures);
@@ -400,7 +411,8 @@ function extractMotifs(formula: string): string[] {
 export function recordDFTFeedbackForGA(
   formula: string,
   result: { tc: number; stable: boolean; formationEnergy: number },
-  materialClass?: string
+  materialClass?: string,
+  verificationStage: string = "surrogate"
 ): void {
   compositionFeedback.formulaOutcomes.set(formula, result);
   const motifs = extractMotifs(formula);
@@ -430,7 +442,7 @@ export function recordDFTFeedbackForGA(
   }
 
   const mc = materialClass || classifyFamily(formula) || "other";
-  rewardStructuralMotif(formula, mc, result);
+  rewardStructuralMotif(formula, mc, result, verificationStage);
 }
 
 function getCompositionBias(formula: string): number {
