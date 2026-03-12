@@ -475,6 +475,16 @@ function getTotalAtoms(counts: Record<string, number>): number {
   return total > 0 ? total : 1;
 }
 
+function getVEC(elements: string[], counts: Record<string, number>): number {
+  const totalAtoms = getTotalAtoms(counts);
+  let totalVE = 0;
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
+  }
+  return totalVE / totalAtoms;
+}
+
 const LAMBDA_CONVERSION = 562000;
 
 export type HydrogenBondingType = "metallic-network" | "cage-clathrate" | "covalent-molecular" | "interstitial" | "ambiguous" | "none";
@@ -852,12 +862,7 @@ function estimateDOSatFermi(elements: string[], counts: Record<string, number>):
   }
 
   const totalAtoms = getTotalAtoms(counts);
-  let totalVE = 0;
-  for (const el of elements) {
-    const data = getElementData(el);
-    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
-  }
-  const vec = totalVE / totalAtoms;
+  const vec = getVEC(elements, counts);
 
   let wAvg = 0;
   for (const el of elements) {
@@ -1154,14 +1159,7 @@ export function computeElectronicStructure(
     .reduce((s, e) => s + (counts[e] || 0), 0);
   const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
 
-  const vec = (() => {
-    let totalVE = 0;
-    for (const el of elements) {
-      const data = getElementData(el);
-      if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
-    }
-    return totalVE / totalAtoms;
-  })();
+  const vec = getVEC(elements, counts);
 
   let fermiSurfaceTopology = "simple spherical";
   if (elements.includes("Cu") && elements.includes("O")) {
@@ -1272,7 +1270,10 @@ export function computeElectronicStructure(
       const period = data.atomicNumber <= 2 ? 1 : data.atomicNumber <= 10 ? 2 : data.atomicNumber <= 18 ? 3 : 4;
       if (period <= 2) orbitalFractions.s += weight;
       else if (period === 3) orbitalFractions.p += weight;
-      else orbitalFractions.d += weight * 0.5 + weight * 0.5;
+      else {
+        orbitalFractions.s += weight * 0.3;
+        orbitalFractions.p += weight * 0.7;
+      }
     }
   }
   if (totalOrbWeight > 0) {
