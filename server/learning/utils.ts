@@ -97,7 +97,7 @@ function expandParentheses(formula: string): string {
   return result;
 }
 
-function parseFormulaCounts(formula: string): Record<string, number> {
+export function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const counts: Record<string, number> = {};
   let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));

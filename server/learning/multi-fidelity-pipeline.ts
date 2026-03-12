@@ -14,7 +14,7 @@ import {
   predictCrystalStructure,
   evaluateConvexHullStability,
 } from "./structure-predictor";
-import { classifyFamily } from "./utils";
+import { classifyFamily, parseFormulaCounts } from "./utils";
 import { predictSynthesisFeasibility } from "../synthesis/ml-synthesis-predictor";
 import { generateRetrosynthesisRoutes } from "../synthesis/retrosynthesis-engine";
 import { computeReactionFeasibility } from "../synthesis/thermodynamic-feasibility";
@@ -117,18 +117,12 @@ export function computeSynthesisScore(formula: string): {
   structuralSimilarity: number;
   reactionComplexity: number;
 } {
+  const countMap = parseFormulaCounts(formula);
+  const formulaElements = Object.keys(countMap);
+
   const thermoResult = computeReactionFeasibility(formula, null, []);
   const thermodynamicFeasibility = Math.max(0, Math.min(1, thermoResult.overallFeasibility));
 
-  const formulaElements = Object.keys((() => {
-    const c: Record<string, number> = {};
-    const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-    let m;
-    while ((m = regex.exec(formula)) !== null) {
-      c[m[1]] = (c[m[1]] || 0) + (m[2] ? parseFloat(m[2]) : 1);
-    }
-    return c;
-  })());
   const precursorSelections = findBestPrecursors(formulaElements, "solid-state");
   const precursorResult = computePrecursorAvailabilityScore(precursorSelections);
   const precursorAvailability = Math.max(0, Math.min(1, precursorResult.overallScore));
@@ -136,13 +130,7 @@ export function computeSynthesisScore(formula: string): {
   const mlResult = predictSynthesisFeasibility(formula);
   const structuralSimilarity = Math.max(0, Math.min(1, mlResult.feasibility));
 
-  const countMap: Record<string, number> = {};
-  const cRegex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
-  let cm;
-  while ((cm = cRegex.exec(formula)) !== null) {
-    countMap[cm[1]] = (countMap[cm[1]] || 0) + (cm[2] ? parseFloat(cm[2]) : 1);
-  }
-  const nElements = Object.keys(countMap).length;
+  const nElements = formulaElements.length;
   const totalAtoms = Object.values(countMap).reduce((a, b) => a + b, 0);
   const complexityRaw = 1 - Math.min(1, (nElements - 1) * 0.15 + (totalAtoms - 2) * 0.03);
   const reactionComplexity = Math.max(0, Math.min(1, complexityRaw));
@@ -172,8 +160,13 @@ async function stage0b_SynthesisPrescreen(
   const mlPrediction = predictSynthesisFeasibility(candidate.formula);
   const retroRoutes = generateRetrosynthesisRoutes(candidate.formula);
 
+  const candidateFamily = classifyFamily(candidate.formula);
+  const directElementalBlockedFamilies = new Set(["Oxides", "Hydrides", "Cuprates"]);
+  const isHighComplexity = synthScore.reactionComplexity < 0.5;
+  const blockDirectElemental = directElementalBlockedFamilies.has(candidateFamily) || isHighComplexity;
+
   const qualityRoutes = retroRoutes.routes.filter(
-    (r: any) => r.overallScore >= 0.4 && r.type !== "direct-elemental"
+    (r: any) => r.overallScore >= 0.4 && (!blockDirectElemental || r.type !== "direct-elemental")
   );
   const hasQualityRoutes = qualityRoutes.length > 0;
   const scoreAboveThreshold = synthScore.score > 0.3;
@@ -214,7 +207,13 @@ async function stage0c_FastBandScreen(
 
   const bandPred = predictBandStructure(candidate.formula, undefined);
 
-  const isInsulating = bandPred.bandGap > 1.0;
+  const family = classifyFamily(candidate.formula);
+  const dopableFamilies = new Set(["Cuprates", "Iron-Based", "Nickelates", "Heavy-Fermion"]);
+  const hasDopingPotential = dopableFamilies.has(family)
+    || (candidate.mlFeatures as any)?.dopingIntent === true;
+  const insulatorThreshold = hasDopingPotential ? 1.0 : 0.1;
+
+  const isInsulating = bandPred.bandGap > insulatorThreshold;
   const hasMinimalDOS = bandPred.dosPredicted < 0.3;
   const hasSomePromise = bandPred.flatBandScore > 0.2
     || bandPred.nestingFromBands > 0.3
@@ -225,7 +224,7 @@ async function stage0c_FastBandScreen(
   const passed = !isInsulating && !hasMinimalDOS;
   let reason: string | null = null;
   if (isInsulating) {
-    reason = `Band surrogate predicts insulator (gap=${bandPred.bandGap.toFixed(2)}eV) — unlikely superconductor`;
+    reason = `Band surrogate predicts insulator (gap=${bandPred.bandGap.toFixed(2)}eV, threshold=${insulatorThreshold}eV for ${family}) — unlikely superconductor`;
   } else if (hasMinimalDOS) {
     reason = `Band surrogate predicts very low DOS at Fermi (${bandPred.dosPredicted.toFixed(2)}) — weak pairing potential`;
   }
