@@ -42,6 +42,8 @@ export interface UncertaintyDecomposition {
   epistemic: number;
   total: number;
   dominantSource: "aleatoric" | "epistemic" | "balanced";
+  sourceConfidence: number;
+  topEpistemicFamilies: { family: string; epistemicVariance: number; count: number }[];
 }
 
 export interface UncertaintyProposal {
@@ -179,7 +181,7 @@ export function getVarianceSummary(): {
       maxVariance: 0,
       highUncertaintyCount: 0,
       highUncertaintyFraction: 0,
-      decomposition: { aleatoric: 0, epistemic: 0, total: 0, dominantSource: "balanced" },
+      decomposition: { aleatoric: 0, epistemic: 0, total: 0, dominantSource: "balanced", sourceConfidence: 0, topEpistemicFamilies: [] },
     };
   }
 
@@ -216,16 +218,35 @@ export function getVarianceSummary(): {
   const epistemic = Math.max(0, meanVar - aleatoric);
   const total = Math.max(aleatoric + epistemic, 1e-12);
 
+  const aFrac = aleatoric / total;
+  const eFrac = epistemic / total;
+  const aFracSafe = Math.max(aFrac, 1e-10);
+  const eFracSafe = Math.max(eFrac, 1e-10);
+  const entropy = -(aFracSafe * Math.log2(aFracSafe) + eFracSafe * Math.log2(eFracSafe));
+  const sourceConfidence = Number(Math.max(0, 1 - entropy).toFixed(4));
+
   let dominantSource: "aleatoric" | "epistemic" | "balanced" = "balanced";
-  if (aleatoric / total > 0.65) dominantSource = "aleatoric";
-  else if (epistemic / total > 0.65) dominantSource = "epistemic";
+  if (sourceConfidence > 0.2) {
+    dominantSource = aFrac > eFrac ? "aleatoric" : "epistemic";
+  }
+
+  const familyEpistemic: { family: string; epistemicVariance: number; count: number }[] = [];
+  for (const [fam, varArr] of Object.entries(familyGroups)) {
+    if (varArr.length < MIN_FAMILY_SIZE) continue;
+    const famMean = varArr.reduce((a, b) => a + b, 0) / varArr.length;
+    const famWithinVar = varArr.reduce((a, b) => a + (b - famMean) ** 2, 0) / varArr.length;
+    const famEpistemic = Math.max(0, famMean - famWithinVar);
+    familyEpistemic.push({ family: fam, epistemicVariance: Number(famEpistemic.toFixed(6)), count: varArr.length });
+  }
+  familyEpistemic.sort((a, b) => b.epistemicVariance - a.epistemicVariance);
+  const topEpistemicFamilies = familyEpistemic.slice(0, 5);
 
   return {
     meanVariance: meanVar,
     maxVariance: maxVar,
     highUncertaintyCount: highUncCount,
     highUncertaintyFraction: highUncCount / recent.length,
-    decomposition: { aleatoric, epistemic, total, dominantSource },
+    decomposition: { aleatoric, epistemic, total, dominantSource, sourceConfidence, topEpistemicFamilies },
   };
 }
 
@@ -319,11 +340,13 @@ export function getVarianceByFamily(): Record<string, { count: number; meanStd: 
 }
 
 export async function proposeUncertaintyImprovements(): Promise<UncertaintyProposal[]> {
-  if (Date.now() - lastProposalTime < PROPOSAL_INTERVAL_MS && lastProposalTime > 0) {
+  const calibration = computeCalibrationCurve();
+  const eceTriggered = calibration.ece > 0.15;
+
+  if (!eceTriggered && Date.now() - lastProposalTime < PROPOSAL_INTERVAL_MS && lastProposalTime > 0) {
     return [];
   }
 
-  const calibration = computeCalibrationCurve();
   const variance = getVarianceSummary();
   const ensembleStats = getXGBEnsembleStats();
   const diagnostics = getComprehensiveModelDiagnostics();
@@ -363,10 +386,16 @@ Variance summary:
   Mean variance: ${variance.meanVariance.toFixed(4)}
   High-uncertainty fraction: ${(variance.highUncertaintyFraction * 100).toFixed(1)}%
   Aleatoric: ${variance.decomposition.aleatoric.toFixed(4)}, Epistemic: ${variance.decomposition.epistemic.toFixed(4)}
-  Dominant source: ${variance.decomposition.dominantSource}
+  Dominant source: ${variance.decomposition.dominantSource} (confidence=${variance.decomposition.sourceConfidence.toFixed(3)})
+  ECE-triggered proposal: ${eceTriggered ? "YES (ECE=" + calibration.ece.toFixed(4) + " > 0.15)" : "no"}
 
 Per-family variance:
 ${familyLines || "  No family data"}
+
+Top epistemic uncertainty families (target for data generation):
+${variance.decomposition.topEpistemicFamilies.length > 0
+    ? variance.decomposition.topEpistemicFamilies.map(f => `  ${f.family}: epistemic_var=${f.epistemicVariance.toFixed(4)}, n=${f.count}`).join("\n")
+    : "  No family-level epistemic data"}
 
 Available improvement types:
 1. ensemble_expansion: Increase ensemble size (current=${ensembleStats.ensembleSize}). Parameters: new_size (5-20)
@@ -455,7 +484,7 @@ export function getUncertaintyForLLM(): string {
     `Predictions tracked: ${vbSize}`,
     `Global mean variance: ${variance.meanVariance.toFixed(4)}`,
     `Global high uncertainty fraction: ${(variance.highUncertaintyFraction * 100).toFixed(1)}%`,
-    `Decomposition: aleatoric=${variance.decomposition.aleatoric.toFixed(4)}, epistemic=${variance.decomposition.epistemic.toFixed(4)} (${variance.decomposition.dominantSource})`,
+    `Decomposition: aleatoric=${variance.decomposition.aleatoric.toFixed(4)}, epistemic=${variance.decomposition.epistemic.toFixed(4)} (${variance.decomposition.dominantSource}, confidence=${variance.decomposition.sourceConfidence.toFixed(3)})`,
   ];
 
   if (frontier.frontierCount > 0) {
@@ -479,6 +508,13 @@ export function getUncertaintyForLLM(): string {
     lines.push("Top uncertain families:");
     for (const [fam, s] of sortedFamilies) {
       lines.push(`  ${fam}: std=${s.meanStd.toFixed(2)}, n=${s.count}`);
+    }
+  }
+
+  if (variance.decomposition.topEpistemicFamilies.length > 0) {
+    lines.push("Top epistemic families (data-starved):");
+    for (const f of variance.decomposition.topEpistemicFamilies) {
+      lines.push(`  ${f.family}: epistemic_var=${f.epistemicVariance.toFixed(4)}, n=${f.count}`);
     }
   }
 
