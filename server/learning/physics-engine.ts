@@ -3109,6 +3109,8 @@ export interface DynamicSpinSusceptibility {
   correlationLength: number;
   stonerEnhancement: number;
   isNearQCP: boolean;
+  isStableFerromagnet: boolean;
+  stonerProduct: number;
 }
 
 export function computeDynamicSpinSusceptibility(
@@ -3130,6 +3132,7 @@ export function computeDynamicSpinSusceptibility(
   const stonerProduct = stonerMax * N_EF;
   const STONER_DENOM_FLOOR = 0.05;
   const STONER_CAP = 20;
+  const isStableFerromagnet = stonerProduct >= 1.0;
   const stonerEnhancement = stonerProduct < 1.0
     ? 1 / Math.max(STONER_DENOM_FLOOR, 1 - stonerProduct)
     : 1 / STONER_DENOM_FLOOR;
@@ -3142,10 +3145,13 @@ export function computeDynamicSpinSusceptibility(
 
   const chiDynamicPeak = chiStaticPeak * 0.8;
 
-  const xiSpin = stonerProduct < 1.0
+  const is2D = electronic.fermiSurfaceTopology.includes("quasi-2D") ||
+    electronic.fermiSurfaceTopology.includes("cylindrical");
+  const xiSpin3D = stonerProduct < 1.0
     ? 1 / Math.sqrt(Math.max(STONER_DENOM_FLOOR, 1 - stonerProduct))
     : 10;
-  const correlationLength = Math.min(50, xiSpin);
+  const dimAnisotropy = is2D ? 3.0 : 1.0;
+  const correlationLength = Math.min(50, xiSpin3D * dimAnisotropy);
 
   const isNearQCP = stonerProduct > 0.7 || stonerEnhancement > 10;
 
@@ -3156,6 +3162,8 @@ export function computeDynamicSpinSusceptibility(
     correlationLength: Number(correlationLength.toFixed(3)),
     stonerEnhancement: Number(Math.min(stonerEnhancement, STONER_CAP).toFixed(3)),
     isNearQCP,
+    isStableFerromagnet,
+    stonerProduct: Number(stonerProduct.toFixed(4)),
   };
 }
 
@@ -3257,9 +3265,11 @@ export function computeInstabilityProximity(
     const match = sp.phaseName.match(/t=([\d.]+)/);
     if (match) {
       const tf = parseFloat(match[1]);
-      if (tf >= 0.82 && tf <= 0.88) structuralBoundary = Math.max(structuralBoundary, 0.8);
-      else if (tf >= 1.02 && tf <= 1.08) structuralBoundary = Math.max(structuralBoundary, 0.7);
-      else if (tf < 0.82 || tf > 1.08) structuralBoundary = Math.max(structuralBoundary, 0.3);
+      const optimalTf = 0.95;
+      const dist = Math.abs(tf - optimalTf);
+      const tfScore = Math.exp(-Math.pow(dist / 0.08, 2));
+      const boundary = 1.0 - tfScore;
+      structuralBoundary = Math.max(structuralBoundary, boundary);
     }
   }
 
@@ -3993,7 +4003,16 @@ export async function runFullPhysicsAnalysis(
     dataSource: "Physics Engine",
   });
 
-  if (spinSusceptibility.stonerEnhancement > 5 && coupling.lambda < 2.5) {
+  if (spinSusceptibility.isStableFerromagnet && coupling.lambda < 3.0) {
+    const fmPenalty = Math.max(0.02, Math.exp(-(spinSusceptibility.stonerProduct - 1.0) * 3.0));
+    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * fmPenalty);
+    emit("log", {
+      phase: "phase-10",
+      event: "Stable ferromagnet suppression",
+      detail: `${formula}: I·N(Ef)=${spinSusceptibility.stonerProduct.toFixed(3)} > 1.0 — stable ferromagnetism destroys singlet pairing (Tc penalized by ${((1 - fmPenalty) * 100).toFixed(0)}%)`,
+      dataSource: "Physics Engine",
+    });
+  } else if (spinSusceptibility.stonerEnhancement > 5 && coupling.lambda < 2.5) {
     const stonerSuppression = Math.max(0.1, 1.0 / (1.0 + (spinSusceptibility.stonerEnhancement - 5) * 0.08));
     eliashberg.predictedTc = Math.round(eliashberg.predictedTc * stonerSuppression);
     emit("log", {
