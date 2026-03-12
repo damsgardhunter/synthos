@@ -8,6 +8,7 @@ import {
   getDebyeTemperature,
 } from "./elemental-data";
 import { evaluateConvexHullStability } from "./structure-predictor";
+import { computeCompositionFeatures } from "./composition-features";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
@@ -105,8 +106,14 @@ export async function analyzeThermodynamicLandscape(
 
   const hullResult = await evaluateConvexHullStability(0, formula);
 
+  const candidatePressure = candidate?.pressureGpa ?? 0;
+
   let stabilityClass: StabilityClass;
-  const eAboveHull = hullResult.hullDistance;
+  let eAboveHull = hullResult.hullDistance;
+  if (candidatePressure > 50) {
+    const pressureStabilization = Math.min(0.3, candidatePressure * 0.001);
+    eAboveHull = Math.max(0, eAboveHull - pressureStabilization);
+  }
   if (eAboveHull <= 0.005) {
     stabilityClass = "thermodynamically-stable";
   } else if (eAboveHull <= 0.1) {
@@ -129,9 +136,17 @@ export async function analyzeThermodynamicLandscape(
   const meltingPointEstimate = meltingPoints.length > 0
     ? Math.round(meltingPoints.reduce((a, b) => a + b, 0) / meltingPoints.length)
     : 1500;
-  const bulkModulusEstimate = bulkModuli.length > 0
+  let bulkModulusEstimate = bulkModuli.length > 0
     ? Math.round(bulkModuli.reduce((a, b) => a + b, 0))
     : 100;
+  try {
+    const cf = computeCompositionFeatures(formula);
+    const bondStiffnessFactor = 1.0
+      + cf.ionicCharacter * 0.4
+      + cf.covalentCharacter * 0.3
+      - cf.metallicCharacter * 0.1;
+    bulkModulusEstimate = Math.round(bulkModulusEstimate * Math.max(0.5, bondStiffnessFactor));
+  } catch {}
 
   const decompositionBarrier = eAboveHull > 0
     ? Math.max(0.01, eAboveHull * 0.6)
@@ -192,7 +207,10 @@ export async function analyzeThermodynamicLandscape(
     : false;
 
   const meltingCelsius = meltingPointEstimate > 300 ? meltingPointEstimate - 273 : meltingPointEstimate;
-  const maxSynthesisTemp = Math.round(Math.min(1600, meltingCelsius * 0.65));
+  let maxSynthesisTemp = Math.round(Math.min(1600, meltingCelsius * 0.65));
+  if (isHydride) {
+    maxSynthesisTemp = Math.min(maxSynthesisTemp, 300);
+  }
 
   return {
     formula,
