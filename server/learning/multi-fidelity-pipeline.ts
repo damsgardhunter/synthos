@@ -451,9 +451,15 @@ async function stage3_TcPrediction(
   const competingPhases = evaluateCompetingPhases(candidate.formula, electronicData.electronic);
 
   const metalScore = electronicData.electronic?.metallicity ?? 0.5;
-  if (metalScore < 0.4) {
-    eliashberg.predictedTc = eliashberg.predictedTc * Math.max(0.02, metalScore);
+  if (metalScore < 0.2) {
+    eliashberg.predictedTc = 0;
+    eliashberg.confidenceBand = [0, 0];
+    eliashberg.metallicityClamped = true;
+  } else if (metalScore < 0.4) {
+    const scaleFactor = (metalScore - 0.2) / 0.2;
+    eliashberg.predictedTc = eliashberg.predictedTc * scaleFactor;
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
+    eliashberg.metallicityClamped = false;
   }
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
@@ -494,11 +500,12 @@ async function stage3_TcPrediction(
 
 async function stage4_SynthesisFeasibility(
   emit: EventEmitter,
-  candidate: SuperconductorCandidate
+  candidate: SuperconductorCandidate,
+  cachedStructure?: any
 ): Promise<{ passed: boolean; reason: string | null; data: any }> {
   const start = Date.now();
 
-  const structure = await predictCrystalStructure(emit, candidate.formula);
+  const structure = cachedStructure ?? await predictCrystalStructure(emit, candidate.formula);
 
   if (!structure) {
     await logComputationalResult(
@@ -561,18 +568,19 @@ async function stage4_SynthesisFeasibility(
     reason = `Enthalpy unstable at ${candidatePressure} GPa: H=${enthalpyResult.enthalpy.toFixed(3)} eV, dH=${enthalpyResult.enthalpyDifference.toFixed(3)} eV above decomposition`;
   }
 
-  const metastableScorePenalty = (passed && isMetastableByHull) ? 0.80 : 1.0;
+  const isHighPressureMaterial = optP > 10;
+  const metastableScorePenalty = (passed && isMetastableByHull && !isHighPressureMaterial) ? 0.80 : 1.0;
 
   await logComputationalResult(
     candidate.id, candidate.formula, 4, "synthesis_feasibility",
-    { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty, enthalpyResult },
+    { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, isHighPressureMaterial, metastableScorePenalty, enthalpyResult },
     passed, reason, Date.now() - start, (passed ? 0.45 : 0.7) * metastableScorePenalty
   );
 
   return {
     passed,
     reason,
-    data: { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, metastableScorePenalty, enthalpyResult },
+    data: { structure, stability, ambientPressureStable, formationEnergy, hullDistance, isMetastableByHull, isHighPressureMaterial, metastableScorePenalty, enthalpyResult },
   };
 }
 
@@ -701,7 +709,8 @@ export async function runMultiFidelityPipeline(
       continue;
     }
 
-    const s4 = await stage4_SynthesisFeasibility(emit, candidate);
+    const cachedStructure = physicsData.synthesisPrescreen?.synthScore?.structure ?? null;
+    const s4 = await stage4_SynthesisFeasibility(emit, candidate, cachedStructure || undefined);
     physicsData.structure = s4.data.structure;
     physicsData.stability = s4.data.stability;
 
