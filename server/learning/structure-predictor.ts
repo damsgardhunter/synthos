@@ -77,35 +77,10 @@ function parseFormulaCounts(formula: string): Record<string, number> {
 
 const MIEDEMA_NONMETALS = new Set(["H", "He", "C", "N", "O", "F", "Ne", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "I", "Xe", "Te", "As"]);
 
-function computeMiedemaFormationEnergy(formula: string): number {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-
-  if (elements.length < 2) return 0;
-
-  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (totalAtoms === 0) return 0;
-  const fractions: Record<string, number> = {};
-  for (const el of elements) {
-    fractions[el] = counts[el] / totalAtoms;
-  }
-
-  const hasHydrogen = elements.includes("H");
-  if (hasHydrogen) {
-    const metalEls = elements.filter(el => !MIEDEMA_NONMETALS.has(el));
-    if (metalEls.length > 0) {
-      try {
-        const hydrideResult = predictHydrideFormation(metalEls, 0);
-        if (hydrideResult && hydrideResult.stableHydrides && hydrideResult.stableHydrides.length > 0) {
-          const avgHf = hydrideResult.stableHydrides.reduce(
-            (sum: number, h: { Hf: number }) => sum + h.Hf, 0
-          ) / hydrideResult.stableHydrides.length;
-          return avgHf;
-        }
-      } catch {}
-    }
-  }
-
+function computeMiedemaCore(
+  elements: string[],
+  fractions: Record<string, number>,
+): number {
   const P = 14.1;
   const Q_P = 9.4;
   const R_P = 0;
@@ -123,12 +98,13 @@ function computeMiedemaFormationEnergy(formula: string): number {
 
       const phiA = dA.miedemaPhiStar;
       const phiB = dB.miedemaPhiStar;
-      const nwsA = dA.miedemaNws13;
-      const nwsB = dB.miedemaNws13;
+      const nwsA = Math.max(1e-6, dA.miedemaNws13 ?? 0);
+      const nwsB = Math.max(1e-6, dB.miedemaNws13 ?? 0);
       const vA = dA.miedemaV23;
       const vB = dB.miedemaV23;
 
-      if (phiA == null || phiB == null || nwsA == null || nwsB == null || vA == null || vB == null) continue;
+      if (phiA == null || phiB == null || vA == null || vB == null) continue;
+      if (dA.miedemaNws13 == null || dB.miedemaNws13 == null) continue;
 
       const deltaPhi = phiA - phiB;
       const deltaNws = nwsA - nwsB;
@@ -150,7 +126,10 @@ function computeMiedemaFormationEnergy(formula: string): number {
         Q = Q_P * 0.73;
       }
 
-      const vAvg = (vA * fractions[elA] + vB * fractions[elB]) / (fractions[elA] + fractions[elB]);
+      const fracSum = fractions[elA] + fractions[elB];
+      const vAvg = fracSum > 0
+        ? (vA * fractions[elA] + vB * fractions[elB]) / fracSum
+        : (vA + vB) / 2;
 
       let interfaceEnergy = (-P * deltaPhi * deltaPhi + Q * deltaNws * deltaNws - R_P) / nwsAvgInv;
 
@@ -169,24 +148,64 @@ function computeMiedemaFormationEnergy(formula: string): number {
   return deltaH;
 }
 
+function computeMiedemaFormationEnergy(formula: string, precomputed?: { elements: string[]; fractions: Record<string, number> }): number {
+  let elements: string[];
+  let fractions: Record<string, number>;
+
+  if (precomputed) {
+    elements = precomputed.elements;
+    fractions = precomputed.fractions;
+  } else {
+    const counts = parseFormulaCounts(formula);
+    elements = Object.keys(counts);
+    if (elements.length < 2) return 0;
+    const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+    if (totalAtoms === 0) return 0;
+    fractions = {};
+    for (const el of elements) {
+      fractions[el] = counts[el] / totalAtoms;
+    }
+  }
+
+  if (elements.length < 2) return 0;
+
+  const hasHydrogen = elements.includes("H");
+  if (hasHydrogen) {
+    const metalEls = elements.filter(el => !MIEDEMA_NONMETALS.has(el));
+    if (metalEls.length > 0) {
+      try {
+        const hydrideResult = predictHydrideFormation(metalEls, 0);
+        if (hydrideResult && hydrideResult.stableHydrides && hydrideResult.stableHydrides.length > 0) {
+          const avgHf = hydrideResult.stableHydrides.reduce(
+            (sum: number, h: { Hf: number }) => sum + h.Hf, 0
+          ) / hydrideResult.stableHydrides.length;
+          return avgHf;
+        }
+      } catch {}
+    }
+  }
+
+  return computeMiedemaCore(elements, fractions);
+}
+
 function estimateDecompositionEnergy(formula: string): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
 
   if (elements.length < 2) return 0;
 
-  const compoundEnergy = computeMiedemaFormationEnergy(formula);
-
-  if (elements.length === 2) {
-    return Math.max(0, compoundEnergy);
-  }
-
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (totalAtoms === 0) return Math.max(0, compoundEnergy);
+  if (totalAtoms === 0) return 0;
 
   const fractions: Record<string, number> = {};
   for (const el of elements) {
     fractions[el] = counts[el] / totalAtoms;
+  }
+
+  const compoundEnergy = computeMiedemaFormationEnergy(formula, { elements, fractions });
+
+  if (elements.length === 2) {
+    return Math.max(0, compoundEnergy);
   }
 
   const binaryPhases: { elA: string; elB: string; energy: number }[] = [];
@@ -194,8 +213,8 @@ function estimateDecompositionEnergy(formula: string): number {
     for (let j = i + 1; j < elements.length; j++) {
       const elA = elements[i];
       const elB = elements[j];
-      const binaryFormula = `${elA}${elB}`;
-      const binaryEnergy = computeMiedemaFormationEnergy(binaryFormula);
+      const binaryFractions: Record<string, number> = { [elA]: 0.5, [elB]: 0.5 };
+      const binaryEnergy = computeMiedemaCore([elA, elB], binaryFractions);
       if (binaryEnergy < 0) {
         binaryPhases.push({ elA, elB, energy: binaryEnergy });
       }
@@ -234,7 +253,9 @@ export async function evaluateConvexHullStability(
   formationEnergy: number;
   hullDistance: number;
   source: string;
+  mpNoveltySignal?: boolean;
 }> {
+  let mpNoveltySignal = false;
   if (formula) {
     try {
       const mpData = await fetchSummary(formula);
@@ -263,8 +284,23 @@ export async function evaluateConvexHullStability(
           hullDistance: eAboveHull,
           source: "Materials Project",
         };
+      } else {
+        mpNoveltySignal = true;
+        console.log(`[Stability] ${formula} not found in Materials Project — high novelty signal`);
       }
-    } catch {
+    } catch (mpErr: unknown) {
+      const isNetwork = mpErr instanceof Error && (
+        mpErr.message.includes("ECONNREFUSED") ||
+        mpErr.message.includes("ETIMEDOUT") ||
+        mpErr.message.includes("fetch failed") ||
+        mpErr.message.includes("rate limit")
+      );
+      if (isNetwork) {
+        console.warn(`[Stability] MP network error for ${formula}: ${mpErr instanceof Error ? mpErr.message.slice(0, 100) : "unknown"}`);
+      } else {
+        mpNoveltySignal = true;
+        console.log(`[Stability] ${formula} MP lookup failed (not network) — high novelty signal: ${mpErr instanceof Error ? mpErr.message.slice(0, 100) : "unknown"}`);
+      }
     }
 
     try {
@@ -289,10 +325,11 @@ export async function evaluateConvexHullStability(
       return {
         isStable,
         isMetastable,
-        verdict,
+        verdict: mpNoveltySignal ? `${verdict} [MP-novel]` : verdict,
         formationEnergy: miedemaFormE,
         hullDistance: eAboveHull,
         source: "Convex Hull Engine",
+        mpNoveltySignal,
       };
     } catch {
       const miedemaFormE = computeMiedemaFormationEnergy(formula);
@@ -316,10 +353,11 @@ export async function evaluateConvexHullStability(
       return {
         isStable,
         isMetastable,
-        verdict,
+        verdict: mpNoveltySignal ? `${verdict} [MP-novel]` : verdict,
         formationEnergy: miedemaFormE,
         hullDistance: effectiveDecomp,
         source: "Miedema model",
+        mpNoveltySignal,
       };
     }
   }

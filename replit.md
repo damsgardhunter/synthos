@@ -647,10 +647,16 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 
 - **Miedema Formation Energy Scaling Fix (structure-predictor.ts)**:
   - Removed erroneous `deltaH / totalAtoms` normalization. The Miedema model's `f_AB = 2*x_A*x_B` factor already accounts for concentration, so dividing by totalAtoms double-counted dilution. `deltaH` is now returned directly (already per-atom via concentration fractions).
+- **Miedema Zero-Division Guard (structure-predictor.ts)**:
+  - `nwsA` and `nwsB` now clamped to `Math.max(1e-6, ...)` before computing the harmonic mean `nwsAvgInv`, preventing `Infinity` in `interfaceEnergy` when elemental data has zero or missing `miedemaNws13`. Null-check still skips the pair entirely if either value is `null`, but zero values (corrupt data) no longer produce `Infinity`.
 - **Miedema Hydride Bypass (structure-predictor.ts)**:
   - For H-containing formulas, `computeMiedemaFormationEnergy` now delegates to `predictHydrideFormation` from pressure-engine.ts instead of using the Miedema model (notoriously poor for gaseous non-metals). Falls back to standard Miedema only if the hydride predictor returns no stable phases.
+- **Redundant Formula Parsing Eliminated (structure-predictor.ts)**:
+  - Extracted `computeMiedemaCore(elements, fractions)` as the pure pair-loop kernel. `computeMiedemaFormationEnergy` accepts optional `precomputed` arg to skip re-parsing. `estimateDecompositionEnergy` parses once and passes pre-computed fractions to the compound energy call; binary energies use `computeMiedemaCore` directly with 50/50 fractions. For a quaternary compound this reduces formula string parsing from ~7 calls to 1.
 - **Decomposition Energy Convex Hull Approximation (structure-predictor.ts)**:
   - `estimateDecompositionEnergy` now uses a greedy lowest-energy-first binary phase selection (convex hull approximation) instead of averaging all negative binary energies. Phases are sorted by formation energy (most negative first), then greedily allocated against available element fractions. This correctly identifies the lowest-energy decomposition pathway rather than diluting it across all competing phases.
+- **Materials Project Fallback Logging & Novelty Signal (structure-predictor.ts)**:
+  - Empty `catch {}` replaced with error classification: network errors (ECONNREFUSED/ETIMEDOUT/fetch failed/rate limit) logged as warnings, non-network failures (material not found / API 404) logged as novelty signals. `evaluateConvexHullStability` now returns `mpNoveltySignal: boolean` — `true` when MP has no data for the formula, indicating high chemical novelty. Verdict strings tagged with `[MP-novel]` when the signal fires.
 - **Dedup Moved Inside Generator Functions (structural-mutator.ts)**:
   - `seenFormulas` (now `seen: Set<string>`) passed directly into `generateDistortedLattices`, `generateLayeredStructures`, `generateVacancyStructures`, `generateStrainedVariants`. Dedup happens at generation time (before object allocation), eliminating redundant result arrays and post-hoc filtering in `runStructuralMutations`.
 - **Prototype Assignment Cache (structural-mutator.ts)**:
