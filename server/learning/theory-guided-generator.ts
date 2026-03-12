@@ -195,7 +195,7 @@ const safetyReset: SafetyResetState = {
   lastResetCycle: -999,
 };
 
-const EFFICIENCY_DROP_THRESHOLD = 0.4;
+const EFFICIENCY_DROP_THRESHOLD = 0.25;
 const TC_DROP_THRESHOLD = 0.25;
 const MIN_EVAL_SAMPLES = 3;
 const BLACKLIST_COOLDOWN_CYCLES = 5;
@@ -406,12 +406,15 @@ export function recordTheoryBiasOutcome(
     const tcDelta = bestTc - prev.bestTcAfter;
     cumulativeTcImpact += tcDelta;
 
+    const prevTc = Math.max(prev.bestTcAfter, 1);
+    const relativeTcImprovement = tcDelta / prevTc;
+
     for (const [gen, afterWeight] of Object.entries(generatorWeightsAfter)) {
       const beforeWeight = generatorWeightsBefore[gen] ?? afterWeight;
       const weightDelta = afterWeight - beforeWeight;
       if (Math.abs(weightDelta) > 0.01) {
         const currentScore = biasEffectivenessScores.get(gen) ?? 0;
-        const reward = tcDelta > 0 ? weightDelta * tcDelta * 0.01 : 0;
+        const reward = relativeTcImprovement > 0 ? weightDelta * relativeTcImprovement * 0.5 : 0;
         biasEffectivenessScores.set(gen, currentScore + reward);
       }
     }
@@ -437,7 +440,7 @@ export function recordPostBiasPerformance(passRate: number, bestTc: number): voi
   }
 }
 
-export function evaluateTheoryBiasSafety(): { shouldReset: boolean; reason: string; degradation: number } {
+export function evaluateTheoryBiasSafety(tempo?: string): { shouldReset: boolean; reason: string; degradation: number } {
   if (!currentBias || safetyReset.resetTriggered) {
     return { shouldReset: false, reason: "no_active_bias", degradation: 0 };
   }
@@ -459,8 +462,11 @@ export function evaluateTheoryBiasSafety(): { shouldReset: boolean; reason: stri
   }
   const tcDrop = (baselineBestTc - avgPostBestTc) / baselineBestTc;
 
-  const passRateDegraded = passRateDrop > EFFICIENCY_DROP_THRESHOLD;
-  const tcDegraded = tcDrop > TC_DROP_THRESHOLD;
+  const efficiencyThreshold = tempo === "excited" ? 0.20 : tempo === "contemplating" ? 0.35 : EFFICIENCY_DROP_THRESHOLD;
+  const tcThreshold = tempo === "excited" ? 0.15 : TC_DROP_THRESHOLD;
+
+  const passRateDegraded = passRateDrop > efficiencyThreshold;
+  const tcDegraded = tcDrop > tcThreshold;
   const degradation = Math.max(passRateDrop, tcDrop);
 
   if (passRateDegraded || tcDegraded) {

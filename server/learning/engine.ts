@@ -5669,7 +5669,7 @@ async function runAutonomousFastPath() {
       const currentPassRate = autonomousTotalScreened > 0 ? autonomousTotalPassed / autonomousTotalScreened : 0;
       recordPostBiasPerformance(currentPassRate, autonomousBestTc);
 
-      const safetyCheck = evaluateTheoryBiasSafety();
+      const safetyCheck = evaluateTheoryBiasSafety(engineTempo);
       if (safetyCheck.shouldReset) {
         const { resetBias } = resetTheoryBias();
         resetToDefaultWeights();
