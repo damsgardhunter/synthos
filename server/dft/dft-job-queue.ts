@@ -11,6 +11,7 @@ const MAX_CONCURRENT = 3;
 const MIN_QUEUE_SIZE = 50;
 const REFILL_BATCH_SIZE = 100;
 const IMAGINARY_PHONON_THRESHOLD_CM1 = -10.0;
+const EXPLORATION_FRACTION = 0.3;
 
 type PipelineStage = "candidate_queue" | "dft_workers" | "phonon_workers" | "epc_workers";
 
@@ -410,51 +411,102 @@ async function refillQueueIfLow(): Promise<number> {
 
     if (queueSize >= MIN_QUEUE_SIZE) return 0;
 
-    const candidates = await storage.getSuperconductorCandidates(REFILL_BATCH_SIZE * 3);
-    const eligible = candidates
-      .filter(c => {
-        const mlFeatures = (c.mlFeatures as Record<string, any>) ?? {};
-        if (mlFeatures.qeDFT) return false;
-        if ((c.ensembleScore ?? 0) <= 0) return false;
-        return true;
-      })
-      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+    const candidates = await storage.getSuperconductorCandidates(REFILL_BATCH_SIZE * 5);
+    const preFiltered = candidates.filter(c => {
+      const mlFeatures = (c.mlFeatures as Record<string, any>) ?? {};
+      if (mlFeatures.qeDFT) return false;
+      if ((c.ensembleScore ?? 0) <= 0) return false;
+      return true;
+    });
+
+    const formulasToCheck = preFiltered.map(c => c.formula);
+    const structureMap = await storage.getCrystalStructuresByFormulas(formulasToCheck);
+
+    const eligible = preFiltered.filter(c => {
+      const structures = structureMap.get(c.formula);
+      if (!structures || structures.length === 0) return false;
+      return true;
+    });
+
+    const exploitCount = Math.ceil(REFILL_BATCH_SIZE * (1 - EXPLORATION_FRACTION));
+    const exploreCount = REFILL_BATCH_SIZE - exploitCount;
+
+    const exploitPool = [...eligible].sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+
+    const explorePool = [...eligible].sort((a, b) => {
+      const aAcq = (a.uncertaintyEstimate ?? 0) * 0.6 + (a.discoveryScore ?? 0) * 0.4;
+      const bAcq = (b.uncertaintyEstimate ?? 0) * 0.6 + (b.discoveryScore ?? 0) * 0.4;
+      return bAcq - aAcq;
+    });
 
     const queuedFormulas = new Set(queued.map(j => j.formula));
+    const selectedFormulas = new Set<string>();
     let submitted = 0;
+    let exploitSubmitted = 0;
+    let exploreSubmitted = 0;
     let refillErrors = 0;
-    for (const candidate of eligible) {
-      if (submitted >= REFILL_BATCH_SIZE) break;
-      if (queuedFormulas.has(candidate.formula)) continue;
-      if (isFormulaBlocked(candidate.formula)) continue;
+    let skippedNoStructure = 0;
+
+    async function trySubmit(candidate: typeof eligible[0], source: "exploit" | "explore"): Promise<boolean> {
+      if (queuedFormulas.has(candidate.formula)) return false;
+      if (selectedFormulas.has(candidate.formula)) return false;
+      if (isFormulaBlocked(candidate.formula)) return false;
 
       try {
         const { activeJob, recentValidatedFailures } = await storage.hasActiveOrRecentFailedDftJobs(candidate.formula);
-        if (activeJob) continue;
-        if (recentValidatedFailures >= 3) continue;
+        if (activeJob) return false;
+        if (recentValidatedFailures >= 3) return false;
 
-        const priority = Math.round((candidate.ensembleScore ?? 0) * 100);
+        const acquisitionPriority = source === "explore"
+          ? Math.round(((candidate.uncertaintyEstimate ?? 0) * 0.6 + (candidate.discoveryScore ?? 0) * 0.4) * 100)
+          : Math.round((candidate.ensembleScore ?? 0) * 100);
+
         await storage.insertDftJob({
           formula: candidate.formula,
           candidateId: candidate.id,
           status: "queued",
           jobType: "scf",
-          priority,
-          inputData: { formula: candidate.formula, candidateId: candidate.id, requestedAt: new Date().toISOString(), source: "queue_refill" },
+          priority: acquisitionPriority,
+          inputData: {
+            formula: candidate.formula,
+            candidateId: candidate.id,
+            requestedAt: new Date().toISOString(),
+            source: `queue_refill_${source}`,
+          },
         });
         queuedFormulas.add(candidate.formula);
-        submitted++;
+        selectedFormulas.add(candidate.formula);
         stageMetrics.candidate_queue.currentDepth++;
+        return true;
       } catch (err: any) {
         refillErrors++;
         if (refillErrors <= 3) {
           console.log(`[DFT-Queue] Refill insert error for ${candidate.formula}: ${err.message}`);
         }
+        return false;
       }
     }
 
-    if (submitted > 0 || refillErrors > 0) {
-      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (queue was ${queueSize}/${MIN_QUEUE_SIZE})${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
+    for (const candidate of exploitPool) {
+      if (exploitSubmitted >= exploitCount) break;
+      if (await trySubmit(candidate, "exploit")) {
+        exploitSubmitted++;
+        submitted++;
+      }
+    }
+
+    for (const candidate of explorePool) {
+      if (exploreSubmitted >= exploreCount) break;
+      if (await trySubmit(candidate, "explore")) {
+        exploreSubmitted++;
+        submitted++;
+      }
+    }
+
+    skippedNoStructure = preFiltered.length - eligible.length;
+
+    if (submitted > 0 || refillErrors > 0 || skippedNoStructure > 0) {
+      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (${exploitSubmitted} exploit + ${exploreSubmitted} explore, queue was ${queueSize}/${MIN_QUEUE_SIZE})${skippedNoStructure > 0 ? `, ${skippedNoStructure} skipped (no structure prediction)` : ""}${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
     }
     return submitted;
   } catch (err: any) {
