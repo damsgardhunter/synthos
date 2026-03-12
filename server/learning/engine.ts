@@ -3291,6 +3291,7 @@ async function runPhase10_Physics() {
               crossEngineHub.recordInsight("pressure", candidate.formula, {
                 optimalPressure: pressureResult.optimalPressure,
                 maxTc: pressureResult.maxTc,
+                maxTcIsStable: pressureResult.maxTcIsStable,
                 retentionFraction: pressureResult.maxTc > 0 ? (candidate.predictedTc ?? 0) / pressureResult.maxTc : 0,
                 stabilizationStrategy: "pressure-scan",
                 hydridePhaseCount: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
@@ -3301,6 +3302,7 @@ async function runPhase10_Physics() {
               pressureTcCurve: {
                 optimalPressure: pressureResult.optimalPressure,
                 maxTc: pressureResult.maxTc,
+                maxTcIsStable: pressureResult.maxTcIsStable,
                 points: pressureResult.pressureTcCurve.length,
                 stablePoints: pressureResult.pressureTcCurve.filter(p => p.stable).length,
                 hydridePhases: pressureResult.hydrideFormation?.stableHydrides.length ?? 0,
@@ -3337,6 +3339,7 @@ async function runPhase10_Physics() {
               pressureTcCurve: {
                 optimalPressure: pressureResult.optimalPressure,
                 maxTc: pressureTc,
+                maxTcIsStable: pressureResult.maxTcIsStable,
                 points: pressureResult.pressureTcCurve.length,
                 stablePoints: pressureResult.pressureTcCurve.filter(p => p.stable).length,
                 pressureBoost: pressureTc > ambientTc,

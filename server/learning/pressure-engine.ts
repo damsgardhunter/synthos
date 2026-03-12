@@ -357,6 +357,14 @@ export function scanPressureTcCurve(
   const hasO = elements.includes("O");
   const isNickelate = hasNi && hasO && elements.some(e => ["La", "Nd", "Pr", "Sr", "Ba", "Ca"].includes(e));
 
+  let metallizationP = isSuperhydride ? 100 : 150;
+  if (isHydride) {
+    const hydrideInfo = predictHydrideFormation(metalElements, 200);
+    if (hydrideInfo.decompositionPressure > 0) {
+      metallizationP = Math.max(metallizationP, hydrideInfo.decompositionPressure * 0.8);
+    }
+  }
+
   let B0 = 0;
   let weightSum = 0;
   for (const el of elements) {
@@ -419,7 +427,7 @@ export function scanPressureTcCurve(
     const hardeningFactor = 1 / Math.max(0.5, Math.pow(volumeRatio, 2));
 
     let lambdaP = lambda0;
-    if (isHydride && P >= 50) {
+    if (isHydride && P >= metallizationP) {
       const pressureBoost = isSuperhydride
         ? 1.0 + Math.min(2.0, (P / 150) * 1.5)
         : 1.0 + Math.min(1.2, (P / 200) * 0.8);
@@ -441,7 +449,7 @@ export function scanPressureTcCurve(
     lambdaP = Math.max(0.05, Math.min(4.0, lambdaP));
 
     let omegaLogP = omegaLog0 * Math.pow(hardeningFactor, 0.5);
-    if (isHydride && P >= 50) {
+    if (isHydride && P >= metallizationP) {
       omegaLogP *= 1 + Math.min(0.5, P / 400);
     }
     omegaLogP = Math.max(30, Math.min(2000, omegaLogP));
@@ -486,6 +494,7 @@ export function runPressureAnalysis(
   pressureTcCurve: PressureTcPoint[];
   optimalPressure: number;
   maxTc: number;
+  maxTcIsStable: boolean;
   hydrideFormation: HydrideFormationResult | null;
 } {
   const elements = parseFormulaElements(formula);
@@ -500,32 +509,35 @@ export function runPressureAnalysis(
 
   const curve = scanPressureTcCurve(formula, pressureRange);
 
-  let maxTc = 0;
-  let optimalPressure = 0;
+  let stableMaxTc = 0;
+  let stableOptP = 0;
+  let theoreticalMaxTc = 0;
+  let theoreticalOptP = 0;
   for (const pt of curve) {
-    if (pt.Tc > maxTc && pt.stable) {
-      maxTc = pt.Tc;
-      optimalPressure = pt.pressure;
+    if (pt.Tc > theoreticalMaxTc) {
+      theoreticalMaxTc = pt.Tc;
+      theoreticalOptP = pt.pressure;
+    }
+    if (pt.Tc > stableMaxTc && pt.stable) {
+      stableMaxTc = pt.Tc;
+      stableOptP = pt.pressure;
     }
   }
-  if (maxTc === 0) {
-    for (const pt of curve) {
-      if (pt.Tc > maxTc) {
-        maxTc = pt.Tc;
-        optimalPressure = pt.pressure;
-      }
-    }
-  }
+
+  const maxTcIsStable = stableMaxTc > 0;
+  const maxTc = maxTcIsStable ? stableMaxTc : theoreticalMaxTc;
+  const optimalPressure = maxTcIsStable ? stableOptP : theoreticalOptP;
 
   let hydrideFormation: HydrideFormationResult | null = null;
   if (isHydride || metalElements.length > 0) {
     hydrideFormation = predictHydrideFormation(metalElements, optimalPressure > 0 ? optimalPressure : 150);
   }
 
+  const tcLabel = maxTcIsStable ? "stable" : "theoretical (unstable)";
   emit("log", {
     phase: "phase-10",
     event: "Pressure-Tc curve computed",
-    detail: `${formula}: optimal pressure=${optimalPressure} GPa, max Tc=${maxTc}K, ${curve.length} points, ${curve.filter(p => p.stable).length} stable${hydrideFormation ? `, ${hydrideFormation.stableHydrides.length} hydride phases` : ""}`,
+    detail: `${formula}: optimal pressure=${optimalPressure} GPa, max Tc=${maxTc}K (${tcLabel}), ${curve.length} points, ${curve.filter(p => p.stable).length} stable${hydrideFormation ? `, ${hydrideFormation.stableHydrides.length} hydride phases` : ""}`,
     dataSource: "Pressure Engine",
   });
 
@@ -533,6 +545,7 @@ export function runPressureAnalysis(
     pressureTcCurve: curve,
     optimalPressure,
     maxTc,
+    maxTcIsStable,
     hydrideFormation,
   };
 }
