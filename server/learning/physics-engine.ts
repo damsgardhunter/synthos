@@ -301,11 +301,13 @@ export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: numbe
 const HEA_EXTRA_METALS = ["Al", "Mg", "Ca", "Sr", "Ba", "Li", "Na", "K", "Ti", "Zn", "Ga", "Ge", "Sn"];
 
 function detectHighEntropyAlloyParsed(pc: ParsedComposition): boolean {
-  if (pc.metalElements.length < 4) return false;
+  if (pc.metalElements.length < 5) return false;
   const metalCounts = pc.metalElements.map(e => pc.counts[e] || 1);
   const totalMetal = metalCounts.reduce((s, n) => s + n, 0);
-  const maxFrac = Math.max(...metalCounts) / totalMetal;
-  return maxFrac <= 0.4;
+  if (totalMetal <= 0) return false;
+  const fractions = metalCounts.map(c => c / totalMetal);
+  const sConf = -fractions.reduce((s, f) => f > 0 ? s + f * Math.log(f) : s, 0);
+  return sConf >= 1.5;
 }
 
 function detectHighEntropyAlloy(formula: string): boolean {
@@ -497,19 +499,47 @@ export function classifyHydrogenBonding(formula: string, pressureGpa: number = 0
     return "covalent-molecular";
   }
 
-  if (hRatio >= 6 && metalFrac > 0.05 && pressureGpa >= 100 && nonHNonMetFrac < 0.1) {
-    return "metallic-network";
+  const avgMetalZ = metalElements.length > 0
+    ? metalElements.reduce((s, e) => {
+        const d = getElementData(e);
+        return s + (d ? d.atomicNumber * (counts[e] || 1) : 0);
+      }, 0) / metalAtomCount
+    : 0;
+  const isHeavyMetal = avgMetalZ >= 38;
+  const isLightMetal = avgMetalZ > 0 && avgMetalZ < 20;
+
+  if (hRatio >= 6 && metalFrac > 0.05 && nonHNonMetFrac < 0.1) {
+    if (isHeavyMetal && pressureGpa >= 100) {
+      return "metallic-network";
+    }
+    if (isLightMetal && pressureGpa >= 150) {
+      return "metallic-network";
+    }
+    if (!isHeavyMetal && !isLightMetal && pressureGpa >= 120) {
+      return "metallic-network";
+    }
   }
 
-  if (hRatio >= 4 && metalFrac > 0.1 && pressureGpa >= 50) {
-    return "cage-clathrate";
+  if (hRatio >= 4 && metalFrac > 0.1) {
+    if (isHeavyMetal && pressureGpa >= 50) {
+      return "cage-clathrate";
+    }
+    if (isLightMetal && pressureGpa >= 80) {
+      return "cage-clathrate";
+    }
+    if (!isHeavyMetal && !isLightMetal && pressureGpa >= 60) {
+      return "cage-clathrate";
+    }
   }
 
   if (hRatio < 3 && metalFrac > 0.3) {
     return "interstitial";
   }
 
-  if (pressureGpa < 50 && hRatio >= 4) {
+  if (hRatio >= 4 && pressureGpa < 50) {
+    return "covalent-molecular";
+  }
+  if (isLightMetal && hRatio >= 4 && pressureGpa < 80) {
     return "covalent-molecular";
   }
 
