@@ -1464,11 +1464,12 @@ export function computePhononSpectrum(
     const elTheta = elData?.debyeTemperature ?? 300;
     maxPhononFreq = elTheta * 0.695 * 1.2;
   } else {
-    const lightestMass = getLightestMass(elements);
-    const massRatio = Math.sqrt(avgMass / Math.max(lightestMass, 1));
+    const lightestMass = Math.max(getLightestMass(elements), 6.94);
+    const massRatio = Math.sqrt(avgMass / lightestMass);
     const thetaDAvg = getCompositionWeightedProperty(counts, "debyeTemperature");
     const baseOmega = thetaDAvg != null && thetaDAvg > 0 ? thetaDAvg * 0.695 : 300 * Math.sqrt(30 / Math.max(avgMass, 1)) * 0.695;
-    maxPhononFreq = baseOmega * Math.min(2.5, massRatio * 1.1);
+    const sigmoid = 2.5 / (1 + Math.exp(-1.5 * (massRatio - 1.5)));
+    maxPhononFreq = baseOmega * Math.max(0.8, sigmoid);
   }
   maxPhononFreq = Math.max(50, Math.min(5000, Math.round(maxPhononFreq)));
 
@@ -1635,12 +1636,13 @@ export function computeElectronPhononCoupling(
     }
 
     if (totalWeight > 0) {
+      const safeTotalWeight = Math.max(0.1, totalWeight);
       lambda = lambdaSum;
-      if (totalWeight < 0.5) {
+      if (safeTotalWeight < 0.5) {
         lambda = Math.max(lambda, N_EF * 0.1);
-      } else if (totalWeight < 0.99) {
-        const missingFrac = 1 - totalWeight;
-        const inferredLambda = lambda / totalWeight;
+      } else if (safeTotalWeight < 0.99) {
+        const missingFrac = 1 - safeTotalWeight;
+        const inferredLambda = lambda / safeTotalWeight;
         lambda = lambda + inferredLambda * missingFrac * 0.5;
       }
 
@@ -1716,6 +1718,11 @@ export function computeElectronPhononCoupling(
 
     if (hCount > 0 && hRatio < 4 && hRatio > 0) {
       lambda *= 0.3 + 0.175 * hRatio;
+    }
+
+    const anhIdx = phononSpectrum.anharmonicityIndex;
+    if (anhIdx > 0.2) {
+      lambda *= 1.0 - (anhIdx - 0.2) * 0.15;
     }
   } else {
     lambda = N_EF * 0.15 * (1 + phononSpectrum.anharmonicityIndex * 0.5);
