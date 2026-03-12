@@ -712,6 +712,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `runNovelPrototypeGeneration` now uses 7 stoichiometry templates (ABO3, A2BO4, AB2X3, AB3X, ABX2, A2B2X7, A3BX) instead of hardcoding count=1 for the first element. Enables generation of La2CuO4-type prototypes where the A-site has multiplicity >1.
 - **Canonical Formula Normalization in Discovery (structure-predictor.ts)**:
   - Both `runNovelPrototypeGeneration` and `runGenerativeStructureDiscovery` now canonicalize formulas via `canonicalizeFormula()` before storage lookup and insertion. Prevents BaCu2O3 vs Cu2BaO3 dedup misses.
+- **Structural Enrichment with Fractional Coordinates (structure-predictor.ts)**:
+  - `StructuralEnrichment` interface stores `wyckoffSites` (label + approximate fractional coords from `WYCKOFF_APPROX_COORDS` table + speculative flag), `coordinationNumbers`, and `needsExternalRelaxation` flag. Attached to `NovelPrototype.structuralEnrichment`. Provides the GNN with 3D coordinate seeds instead of bare Wyckoff labels. Unknown sites get [0,0,0] with speculative=true and needsExternalRelaxation=true.
+- **Wyckoff-Driven Element Count (structure-predictor.ts)**:
+  - `runNovelPrototypeGeneration` now matches the number of elements used to the number of unique Wyckoff roles defined by the LLM (instead of hardcoded slice(0,4)). Quaternary/HEA prototypes with 5 roles will use all 5 suggested elements.
+- **Parallel LLM Calls (structure-predictor.ts)**:
+  - `runNovelPrototypeGeneration` uses `Promise.all` to call `generateNovelPrototype` for both principles concurrently, cutting the structural invention phase latency roughly in half.
+- **Exploration-Mode Candidate Selection (structure-predictor.ts)**:
+  - `runGenerativeStructureDiscovery` now has a 10% probability of selecting 3 random candidates instead of the top-3 by ensembleScore. Promotes exploration of underexplored chemical space alongside the default exploitation strategy.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

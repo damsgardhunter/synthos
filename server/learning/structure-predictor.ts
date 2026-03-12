@@ -1537,6 +1537,41 @@ function isValidSpaceGroup(sg: string): boolean {
   return VALID_SPACE_GROUPS.has(sg);
 }
 
+export interface WyckoffSiteCoords {
+  label: string;
+  fractionalCoords: [number, number, number];
+  speculative: boolean;
+}
+
+export interface StructuralEnrichment {
+  spaceGroup: string;
+  crystalSystem: string;
+  latticeRatios: { a: number; b: number; c: number };
+  wyckoffSites: Record<string, WyckoffSiteCoords>;
+  coordinationNumbers?: Record<string, number>;
+  needsExternalRelaxation: boolean;
+}
+
+const WYCKOFF_APPROX_COORDS: Record<string, [number, number, number]> = {
+  "1a": [0, 0, 0],
+  "1b": [0.5, 0.5, 0.5],
+  "2a": [0, 0, 0],
+  "2b": [0.5, 0.5, 0.5],
+  "2c": [0, 0.5, 0],
+  "2d": [0.5, 0, 0.5],
+  "4a": [0, 0, 0],
+  "4b": [0.5, 0.5, 0.5],
+  "4c": [0.25, 0.25, 0.25],
+  "4d": [0.75, 0.75, 0.75],
+  "4e": [0, 0, 0.25],
+  "6b": [0, 0.5, 0.5],
+  "8c": [0.25, 0.25, 0.25],
+  "8d": [0.375, 0.375, 0.375],
+  "3a": [0, 0, 0],
+  "3b": [0, 0, 0.5],
+  "6c": [0.333, 0.667, 0.25],
+};
+
 export interface NovelPrototype {
   name: string;
   spaceGroup: string;
@@ -1548,6 +1583,7 @@ export interface NovelPrototype {
   physicsRationale: string;
   noveltyScore: number;
   suggestedElements: string[];
+  structuralEnrichment?: StructuralEnrichment;
 }
 
 function computePrototypeNoveltyScore(
@@ -1737,6 +1773,39 @@ Return JSON with these fields. Keep physics_rationale to exactly one sentence to
       return null;
     }
 
+    const wyckoffSites: Record<string, WyckoffSiteCoords> = {};
+    let needsRelax = false;
+    for (const [role, siteLabel] of Object.entries(wyckoff)) {
+      const cleanLabel = siteLabel.replace(/\s*\[speculative\]/, "");
+      const isSpec = siteLabel.includes("[speculative]");
+      const coords = WYCKOFF_APPROX_COORDS[cleanLabel];
+      if (coords) {
+        wyckoffSites[role] = { label: cleanLabel, fractionalCoords: coords, speculative: isSpec };
+      } else {
+        wyckoffSites[role] = { label: cleanLabel, fractionalCoords: [0, 0, 0], speculative: true };
+        needsRelax = true;
+      }
+    }
+
+    const parsedCoordNums: Record<string, number> = {};
+    if (coordNums && typeof coordNums === "object") {
+      for (const [role, cn] of Object.entries(coordNums)) {
+        const cnNum = Number(cn);
+        if (Number.isFinite(cnNum) && cnNum >= 2 && cnNum <= 12) {
+          parsedCoordNums[role] = cnNum;
+        }
+      }
+    }
+
+    const enrichment: StructuralEnrichment = {
+      spaceGroup: validSG,
+      crystalSystem,
+      latticeRatios,
+      wyckoffSites,
+      coordinationNumbers: Object.keys(parsedCoordNums).length > 0 ? parsedCoordNums : undefined,
+      needsExternalRelaxation: needsRelax || hasSpeculativeWyckoff,
+    };
+
     const prototype: NovelPrototype = {
       name,
       spaceGroup: validSG,
@@ -1748,6 +1817,7 @@ Return JSON with these fields. Keep physics_rationale to exactly one sentence to
       physicsRationale,
       noveltyScore,
       suggestedElements,
+      structuralEnrichment: enrichment,
     };
 
     totalNovelPrototypesGenerated++;
@@ -1781,11 +1851,14 @@ export async function runNovelPrototypeGeneration(
 
   const principles = [DESIGN_PRINCIPLES[principleIdx1], DESIGN_PRINCIPLES[principleIdx2]];
 
-  for (const principle of principles) {
-    const proto = await generateNovelPrototype(emit, principle);
+  const protos = await Promise.all(principles.map(p => generateNovelPrototype(emit, p)));
+
+  for (const proto of protos) {
     if (!proto || proto.suggestedElements.length < 2) continue;
 
-    const elements = proto.suggestedElements.slice(0, 4);
+    const wyckoffRoleCount = Object.keys(proto.wyckoffPositions).length;
+    const requiredElements = Math.max(2, Math.min(proto.suggestedElements.length, wyckoffRoleCount || 4));
+    const elements = proto.suggestedElements.slice(0, requiredElements);
     const STOICH_TEMPLATES = [
       [1, 1, 3],    // ABO3 perovskite
       [2, 1, 4],    // A2BO4 K2NiF4
@@ -1829,11 +1902,17 @@ export async function runGenerativeStructureDiscovery(
 ): Promise<GeneratedStructureVariant[]> {
   const allVariants: GeneratedStructureVariant[] = [];
 
-  const sorted = [...topCandidates]
-    .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
-    .slice(0, 3);
+  let selected: typeof topCandidates;
+  if (Math.random() < 0.1 && topCandidates.length > 3) {
+    const shuffled = [...topCandidates].sort(() => Math.random() - 0.5);
+    selected = shuffled.slice(0, 3);
+  } else {
+    selected = [...topCandidates]
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
+      .slice(0, 3);
+  }
 
-  for (const candidate of sorted) {
+  for (const candidate of selected) {
     const variants = generateStructuralVariants(candidate.formula, 2);
 
     for (const variant of variants) {
