@@ -68,11 +68,13 @@ function generateThresholds(values: number[]): number[] {
   if (values.length < 5) return [];
   const sorted = [...values].sort((a, b) => a - b);
   const percentiles = [0.2, 0.4, 0.5, 0.6, 0.8];
+  const seen = new Set<number>();
   const thresholds: number[] = [];
   for (const p of percentiles) {
     const idx = Math.floor(p * (sorted.length - 1));
     const val = sorted[idx];
-    if (Number.isFinite(val) && !thresholds.includes(val)) {
+    if (Number.isFinite(val) && !seen.has(val)) {
+      seen.add(val);
       thresholds.push(val);
     }
   }
@@ -123,6 +125,9 @@ export function mineQuantitativeRules(candidates: ScoredCandidate[]): PatternRul
     featureValues[feat] = candidates.map((c) => getFeatureValue(c.features, feat));
   }
 
+  const highTcRate = candidates.filter(c => c.isHighTc).length / candidates.length;
+  const minF1 = highTcRate > 0.85 ? 0.6 : highTcRate < 0.15 ? 0.6 : 0.5;
+
   for (const feat of TOP_FEATURES) {
     const thresholds = generateThresholds(featureValues[feat]);
 
@@ -131,11 +136,11 @@ export function mineQuantitativeRules(candidates: ScoredCandidate[]): PatternRul
         const condition: PatternRuleCondition = {
           property: feat,
           operator,
-          threshold: Math.round(threshold * 1000) / 1000,
+          threshold,
         };
 
         const result = evaluateRule([condition], candidates, "high-tc");
-        if (result.f1 > 0.5 && result.support >= 3) {
+        if (result.f1 > minF1 && result.support >= 3) {
           rules.push({
             conditions: [condition],
             consequent: "high-tc",
@@ -156,6 +161,8 @@ export function mineQuantitativeRules(candidates: ScoredCandidate[]): PatternRul
   return rules.slice(0, 20);
 }
 
+const INTERACTION_OPERATORS: (">" | "<")[] = [">", "<"];
+
 export function mineInteractionRules(candidates: ScoredCandidate[]): PatternRule[] {
   if (candidates.length < 15) return [];
 
@@ -166,6 +173,10 @@ export function mineInteractionRules(candidates: ScoredCandidate[]): PatternRule
     featureValues[feat] = candidates.map((c) => getFeatureValue(c.features, feat));
   }
 
+  const highTcRate = candidates.filter(c => c.isHighTc).length / candidates.length;
+  const minSupport = Math.max(3, Math.round(candidates.length * 0.02));
+  const minF1 = highTcRate > 0.85 ? 0.6 : highTcRate < 0.15 ? 0.6 : 0.5;
+
   for (let i = 0; i < TOP_FEATURES.length; i++) {
     const feat1 = TOP_FEATURES[i];
     const thresholds1 = generateThresholds(featureValues[feat1]);
@@ -174,26 +185,30 @@ export function mineInteractionRules(candidates: ScoredCandidate[]): PatternRule
       const feat2 = TOP_FEATURES[j];
       const thresholds2 = generateThresholds(featureValues[feat2]);
 
-      for (const t1 of thresholds1) {
-        for (const t2 of thresholds2) {
-          const conditions: PatternRuleCondition[] = [
-            { property: feat1, operator: ">", threshold: Math.round(t1 * 1000) / 1000 },
-            { property: feat2, operator: ">", threshold: Math.round(t2 * 1000) / 1000 },
-          ];
+      for (const op1 of INTERACTION_OPERATORS) {
+        for (const op2 of INTERACTION_OPERATORS) {
+          for (const t1 of thresholds1) {
+            for (const t2 of thresholds2) {
+              const conditions: PatternRuleCondition[] = [
+                { property: feat1, operator: op1, threshold: t1 },
+                { property: feat2, operator: op2, threshold: t2 },
+              ];
 
-          const result = evaluateRule(conditions, candidates, "high-tc");
-          if (result.f1 > 0.5 && result.support >= 3) {
-            rules.push({
-              conditions,
-              consequent: "high-tc",
-              confidence: result.precision,
-              f1Score: Math.round(result.f1 * 1000) / 1000,
-              support: result.support,
-              precision: Math.round(result.precision * 1000) / 1000,
-              recall: Math.round(result.recall * 1000) / 1000,
-              discoveredAt: new Date().toISOString(),
-              weight: 1.0,
-            });
+              const result = evaluateRule(conditions, candidates, "high-tc");
+              if (result.f1 > minF1 && result.support >= minSupport) {
+                rules.push({
+                  conditions,
+                  consequent: "high-tc",
+                  confidence: result.precision,
+                  f1Score: Math.round(result.f1 * 1000) / 1000,
+                  support: result.support,
+                  precision: Math.round(result.precision * 1000) / 1000,
+                  recall: Math.round(result.recall * 1000) / 1000,
+                  discoveredAt: new Date().toISOString(),
+                  weight: 1.0,
+                });
+              }
+            }
           }
         }
       }
