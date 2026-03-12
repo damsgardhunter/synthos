@@ -512,6 +512,17 @@ CRITERIA FOR EVALUATION - A true room-temperature superconductor would need ALL 
 5. Cooper pair formation through a known mechanism (phonon-mediated BCS, spin-fluctuation, charge-density wave, or unconventional).
 6. Thermodynamically stable or metastable at operating conditions.
 
+ESTABLISHED Tc BENCHMARKS by material family (use these as anchors for realistic predictions):
+- Cuprates: max ~135K ambient (HgBa2Ca2Cu3O8+d), ~165K at 30 GPa
+- Iron pnictides: max ~55K (SmFeAsO1-xFx)
+- Nickelates: max ~80K under pressure (La3Ni2O7)
+- Conventional BCS metals: max ~39K (MgB2)
+- Hydrides under extreme pressure: ~250K at 150-200 GPa (LaH10, H3S) — NOT ambient
+- Heavy fermion: max ~2K (CeCoIn5)
+- Bismuthates: max ~30K (Ba1-xKxBiO3)
+- Borocarbides: max ~23K (YNi2B2C)
+Predictions significantly exceeding the family record require extraordinary theoretical justification. Most novel materials will have Tc BELOW these records, not above.
+
 YOUR TASK: Identify candidates with the strongest theoretical basis for meeting these criteria. Be HONEST about uncertainty — most candidates will NOT meet all criteria. Provide your genuine theoretical assessment, not optimistic hallucinations.
 
 IMPORTANT: Do NOT claim any candidate is a "confirmed breakthrough." All candidates are THEORETICAL PREDICTIONS that would require:
@@ -520,7 +531,7 @@ IMPORTANT: Do NOT claim any candidate is a "confirmed breakthrough." All candida
 - SQUID magnetometry confirming Meissner effect
 - Reproduction by at least 2 independent research groups
 
-For each candidate, describe the synthesis pathway with exact temperatures, durations, and equipment.
+For each candidate, describe a plausible synthesis strategy (general method, precursors, approximate conditions). Do NOT hallucinate exact times or temperatures you are unsure of — describe the general approach and flag specific parameters as approximate.
 
 Return JSON with 'candidates' array:
 - 'name' (descriptive)
@@ -649,7 +660,7 @@ Return JSON with 'candidates' array:
           ensembleScore: novelEnsembleScore,
           roomTempViable: isActuallyRoomTemp && (c.pressureGpa ?? 999) <= 50,
           status,
-          notes: (llmProposedTc != null ? `[LLM suggested Tc=${llmProposedTc}K, physics-only Tc=${cappedTc}K (Allen-Dynes, lambda=${featureLambda.toFixed(2)})] ` : '') + verificationNotes,
+          notes: `[synthesis_origin: llm_speculative] ` + (llmProposedTc != null ? `[LLM suggested Tc=${llmProposedTc}K, physics-only Tc=${cappedTc}K (Allen-Dynes, lambda=${featureLambda.toFixed(2)})] ` : '') + verificationNotes,
           electronPhononCoupling: features.electronPhononLambda ?? null,
           logPhononFrequency: features.logPhononFreq ?? null,
           coulombPseudopotential: 0.12,
@@ -829,6 +840,14 @@ export async function generateInverseDesignCandidates(
           role: "system",
           content: `You are an inverse materials designer. Instead of predicting Tc for known compositions, you DESIGN materials that maximize specific physical properties favorable for superconductivity.
 
+ESTABLISHED Tc BENCHMARKS (anchor predictions realistically):
+- Cuprates: max ~135K ambient, ~165K at 30 GPa
+- Iron pnictides: max ~55K
+- Nickelates: max ~80K under pressure
+- Conventional BCS: max ~39K (MgB2)
+- Hydrides: ~250K at 150-200 GPa (NOT ambient)
+Exceeding these records requires extraordinary theoretical justification.
+
 TARGET PHYSICS PROPERTIES to optimize:
 1. Electron-phonon coupling lambda > 2.0 (essential for high Tc)
 2. Density of States at Fermi level > 5 states/eV/atom (high pairing susceptibility)
@@ -933,7 +952,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
           ensembleScore: inverseDesignScore,
           roomTempViable: isActuallyRoomTemp,
           status: determineStatus({ ...c, predictedTc: cappedTc, ensembleScore: inverseDesignScore, roomTempViable: isActuallyRoomTemp }),
-          notes: `[Inverse design: target=${c.inverseDesignTarget ?? "pairing susceptibility"}, PS=${pairingSusc.score.toFixed(3)}, lambda=${pairingSusc.lambda.toFixed(2)}, DOS=${pairingSusc.dosAtEf.toFixed(2)}] ${c.reasoning ?? ""}`,
+          notes: `[synthesis_origin: llm_speculative] [Inverse design: target=${c.inverseDesignTarget ?? "pairing susceptibility"}, PS=${pairingSusc.score.toFixed(3)}, lambda=${pairingSusc.lambda.toFixed(2)}, DOS=${pairingSusc.dosAtEf.toFixed(2)}] ${c.reasoning ?? ""}`,
           electronPhononCoupling: features.electronPhononLambda ?? null,
           logPhononFrequency: features.logPhononFreq ?? null,
           coulombPseudopotential: 0.12,

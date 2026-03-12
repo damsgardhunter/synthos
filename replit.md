@@ -752,6 +752,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `condenseInsightsWithRules()` replaces raw `allInsights.slice(-8)`. It pulls top-5 negative rules ("AVOID") and top-5 positive rules ("FAVORABLE") from `getMinedRules()`, plus early insights and recent insights. This ensures the LLM sees durable negative patterns (e.g., "element X is consistently unstable") that would otherwise be lost when early insights scroll off the 8-item window.
 - **Proportional Stagnation Threshold (engine.ts, superconductor-research.ts)**:
   - Stagnation reset now requires a *meaningful* Tc improvement: `max(5K, currentBestTc * 3%)` instead of flat `+2K`. A 150K→151K gain no longer resets the counter. Stagnation tiers: `>3 cycles` triggers moderate pairing-focus prompt, `>8 cycles` triggers deep stagnation that tells the LLM to abandon the current chemical regime entirely.
+- **Tc Benchmark Anchoring in LLM Prompts (superconductor-research.ts)**:
+  - Both the novel discovery and inverse design prompts now include established Tc records by family (Cuprates ~135K, Pnictides ~55K, Hydrides ~250K@150GPa, etc.). The LLM is told that exceeding these records requires extraordinary theoretical justification, anchoring predictions in known physics rather than speculative extremes. Synthesis instructions changed from "exact temperatures and times" to "plausible strategy with approximate conditions" to reduce hallucinated precision.
+- **LLM Synthesis Origin Tagging (superconductor-research.ts)**:
+  - All candidates from LLM-driven generation (novel SC and inverse design) are tagged `[synthesis_origin: llm_speculative]` in their notes field. This allows downstream modules (e.g., synthesis-reasoning.ts) to identify which synthesis paths need a second validation pass before being prioritized for real-world lab work. Non-LLM candidates (from ML pipeline) are untagged, indicating their synthesis paths are physics-derived.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
