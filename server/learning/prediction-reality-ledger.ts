@@ -178,11 +178,13 @@ export function recordPredictionVsReality(
   ledger.push(entry);
   if (ledger.length > MAX_LEDGER_SIZE) {
     ledger.splice(0, ledger.length - MAX_LEDGER_SIZE);
+    worstHeapDirty = true;
   }
 
   samplesSinceLastRetrain++;
   cachedGlobalMetricsDirty = true;
   cachedCICoverageDirty = true;
+  if (!worstHeapDirty) insertIntoWorstHeap(entry);
 
   for (const listener of [...ledgerListeners]) {
     try { listener(); } catch {}
@@ -365,7 +367,35 @@ export function computeMetricsByFamily(): FamilyMetrics[] {
 }
 
 
+const WORST_HEAP_SIZE = 20;
+let worstHeap: PredictionRealityEntry[] = [];
+let worstHeapDirty = true;
+
+function rebuildWorstHeap(): void {
+  if (!worstHeapDirty) return;
+  worstHeap = [];
+  for (const e of ledger) {
+    insertIntoWorstHeap(e);
+  }
+  worstHeapDirty = false;
+}
+
+function insertIntoWorstHeap(entry: PredictionRealityEntry): void {
+  const err = entry.error.tc_abs_error;
+  if (worstHeap.length < WORST_HEAP_SIZE) {
+    worstHeap.push(entry);
+    worstHeap.sort((a, b) => a.error.tc_abs_error - b.error.tc_abs_error);
+  } else if (err > worstHeap[0].error.tc_abs_error) {
+    worstHeap[0] = entry;
+    worstHeap.sort((a, b) => a.error.tc_abs_error - b.error.tc_abs_error);
+  }
+}
+
 export function getWorstPredictions(topN: number = 20): PredictionRealityEntry[] {
+  if (topN === WORST_HEAP_SIZE) {
+    rebuildWorstHeap();
+    return [...worstHeap].reverse();
+  }
   return [...ledger]
     .sort((a, b) => b.error.tc_abs_error - a.error.tc_abs_error)
     .slice(0, topN);
@@ -568,6 +598,7 @@ export function getImprovementTrend(windowSize: number = 5): {
   maeTrend: number[];
   r2Trend: number[];
   avgRmseChange: number;
+  ewmaRmseChange: number;
 } {
   const recent = cycleImprovementHistory.slice(-windowSize);
   const rmseTrend = recent.map(r => r.rmse);
@@ -575,20 +606,27 @@ export function getImprovementTrend(windowSize: number = 5): {
   const r2Trend = recent.map(r => r.r2);
 
   let avgRmseChange = 0;
+  let ewmaRmseChange = 0;
   if (rmseTrend.length >= 2) {
-    const changes: number[] = [];
-    for (let i = 1; i < rmseTrend.length; i++) {
-      changes.push(rmseTrend[i] - rmseTrend[i - 1]);
+    const alpha = 2 / (rmseTrend.length + 1);
+    let ewma = rmseTrend[1] - rmseTrend[0];
+    let sumChanges = ewma;
+    for (let i = 2; i < rmseTrend.length; i++) {
+      const change = rmseTrend[i] - rmseTrend[i - 1];
+      ewma = alpha * change + (1 - alpha) * ewma;
+      sumChanges += change;
     }
-    avgRmseChange = changes.reduce((s, c) => s + c, 0) / changes.length;
+    avgRmseChange = sumChanges / (rmseTrend.length - 1);
+    ewmaRmseChange = ewma;
   }
 
   return {
-    improving: avgRmseChange < 0,
+    improving: ewmaRmseChange < 0,
     rmseTrend,
     maeTrend,
     r2Trend,
     avgRmseChange,
+    ewmaRmseChange,
   };
 }
 
@@ -606,24 +644,27 @@ export function getMetricsForLLM(): string {
   const byFamily = computeMetricsByFamily();
   const trigger = checkRetrainTrigger();
 
+  const p1 = (v: number) => (v * 100).toFixed(1);
+  const k2 = (v: number) => v.toFixed(2);
+
   const lines: string[] = [
     "=== Prediction vs Reality Ledger ===",
     `Total entries: ${all.count}${all.smallSampleWarning ? " [SMALL SAMPLE WARNING: n<10, metrics unreliable]" : ""}`,
-    `Overall: RMSE=${all.rmse.toFixed(2)}K, MAE=${all.mae.toFixed(2)}K, bias=${all.bias.toFixed(2)}K, R²=${all.r2.toFixed(4)}`,
-    `Accuracy: within 10K=${(all.pct_within_10K * 100).toFixed(1)}%, within 30K=${(all.pct_within_30K * 100).toFixed(1)}%, within 50K=${(all.pct_within_50K * 100).toFixed(1)}%, within 20%=${(all.pct_within_20_percent * 100).toFixed(1)}%`,
-    `Stability: accuracy=${(all.stabilityAccuracy * 100).toFixed(1)}%, balanced=${(all.stabilityBalancedAccuracy * 100).toFixed(1)}%, F1=${all.stabilityF1.toFixed(3)}`,
-    `Max error: ${all.maxError.toFixed(1)}K, Median abs error: ${all.medianAbsError.toFixed(1)}K`,
+    `Overall: RMSE=${k2(all.rmse)}K, MAE=${k2(all.mae)}K, bias=${k2(all.bias)}K, R²=${all.r2.toFixed(4)}`,
+    `Accuracy: within10K=${p1(all.pct_within_10K)}%, within30K=${p1(all.pct_within_30K)}%, within50K=${p1(all.pct_within_50K)}%, within20%=${p1(all.pct_within_20_percent)}%`,
+    `Stability: accuracy=${p1(all.stabilityAccuracy)}%, balanced=${p1(all.stabilityBalancedAccuracy)}%, F1=${all.stabilityF1.toFixed(4)}`,
+    `MaxError: ${k2(all.maxError)}K, MedianAbsError: ${k2(all.medianAbsError)}K`,
   ];
 
   if (recent.count > 0 && recent.count !== all.count) {
-    lines.push(`Recent (last ${recent.count}): RMSE=${recent.rmse.toFixed(2)}K, MAE=${recent.mae.toFixed(2)}K, bias=${recent.bias.toFixed(2)}K`);
+    lines.push(`Recent (last ${recent.count}): RMSE=${k2(recent.rmse)}K, MAE=${k2(recent.mae)}K, bias=${k2(recent.bias)}K, R²=${recent.r2.toFixed(4)}`);
   }
 
   if (byFamily.length > 0) {
     lines.push("Per-family error:");
     for (const f of byFamily.slice(0, 5)) {
       const warn = f.smallSampleWarning ? " [small sample]" : "";
-      lines.push(`  ${f.family}: MAE=${f.mae.toFixed(2)}K, bias=${f.bias.toFixed(2)}K (n=${f.count})${warn}`);
+      lines.push(`  ${f.family}: MAE=${k2(f.mae)}K, bias=${k2(f.bias)}K, RMSE=${k2(f.rmse)}K (n=${f.count})${warn}`);
     }
   }
 
@@ -631,12 +672,12 @@ export function getMetricsForLLM(): string {
 
   if (cycleImprovementHistory.length > 0) {
     lines.push("Cycle improvement trend:");
-    const recent = cycleImprovementHistory.slice(-10);
-    for (const r of recent) {
-      lines.push(`  cycle ${r.cycle}: Tc RMSE=${r.rmse.toFixed(2)}K, R²=${r.r2.toFixed(4)}`);
+    const recentCycles = cycleImprovementHistory.slice(-10);
+    for (const r of recentCycles) {
+      lines.push(`  cycle ${r.cycle}: RMSE=${k2(r.rmse)}K, R²=${r.r2.toFixed(4)}`);
     }
     const trend = getImprovementTrend();
-    lines.push(`  Trend: ${trend.improving ? "improving" : "not improving"} (avg RMSE change=${trend.avgRmseChange.toFixed(2)}K/cycle)`);
+    lines.push(`  Trend: ${trend.improving ? "improving" : "not improving"} (EWMA RMSE change=${k2(trend.ewmaRmseChange)}K/cycle, avg=${k2(trend.avgRmseChange)}K/cycle)`);
   }
 
   return lines.join("\n");
