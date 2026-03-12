@@ -341,24 +341,37 @@ export function generateLayeredStructures(formula: string, prototype: PrototypeT
   const results: LayeredStructure[] = [];
 
   const hasO = elements.includes("O");
+  const RP_A_SITE_ELS = ["Ca", "Sr", "Ba", "La", "Y", "K", "Na", "Li", "Rb", "Cs"];
   const metalEls = elements.filter(e =>
     isTransitionMetal(e) || isRareEarth(e) || isActinide(e) ||
-    ["Ca", "Sr", "Ba", "La", "Y"].includes(e)
+    RP_A_SITE_ELS.includes(e)
   );
+  const aSiteCandidates = elements.filter(e => RP_A_SITE_ELS.includes(e) || isRareEarth(e));
   const bSiteEls = elements.filter(e => isTransitionMetal(e));
 
-  if (hasO && metalEls.length >= 1 && bSiteEls.length >= 1) {
-    const aSite = metalEls.find(e => ["Ca", "Sr", "Ba", "La", "Y"].includes(e)) || metalEls[0];
-    const bSite = bSiteEls.find(e => e !== aSite) || bSiteEls[0];
+  if (hasO && aSiteCandidates.length >= 1 && bSiteEls.length >= 1) {
+    const aSite = aSiteCandidates.sort((a, b) => {
+      const rA = getElementData(a)?.atomicRadius ?? 0;
+      const rB = getElementData(b)?.atomicRadius ?? 0;
+      return rB - rA;
+    })[0];
 
-    for (const n of [1, 2, 3]) {
-      const rpFormula = `${aSite}${n + 1}${bSite}${n}O${3 * n + 1}`;
-      results.push({
-        formula: normalizeFormula(rpFormula),
-        layerType: `Ruddlesden-Popper n=${n}`,
-        layerCount: n,
-        dimensionality: n === 1 ? "quasi-2D" : n === 2 ? "quasi-2D" : "3D",
-      });
+    const bSite = bSiteEls.find(e => e !== aSite) || bSiteEls[0];
+    if (bSite === aSite) { /* skip RP if no distinct B-site */ }
+    else {
+      const aSiteRadius = getElementData(aSite)?.atomicRadius ?? 100;
+      const bSiteRadius = getElementData(bSite)?.atomicRadius ?? 100;
+      if (aSiteRadius > bSiteRadius) {
+        for (const n of [1, 2, 3]) {
+          const rpFormula = `${aSite}${n + 1}${bSite}${n}O${3 * n + 1}`;
+          results.push({
+            formula: normalizeFormula(rpFormula),
+            layerType: `Ruddlesden-Popper n=${n}`,
+            layerCount: n,
+            dimensionality: n === 1 ? "quasi-2D" : n === 2 ? "quasi-2D" : "3D",
+          });
+        }
+      }
     }
   }
 
@@ -386,13 +399,13 @@ export function generateLayeredStructures(formula: string, prototype: PrototypeT
 
   if (elements.length >= 2) {
     for (let layers = 2; layers <= 4; layers++) {
-      const slFormula = `${formula}_SL${layers}`;
       const baseCounts = { ...counts };
       for (const el of Object.keys(baseCounts)) {
         baseCounts[el] = baseCounts[el] * layers;
       }
+      const scaledFormula = normalizeFormula(buildFormula(baseCounts));
       results.push({
-        formula: normalizeFormula(buildFormula(baseCounts)),
+        formula: `${scaledFormula}_SL${layers}`,
         layerType: `superlattice ${layers}-layer`,
         layerCount: layers,
         dimensionality: layers <= 2 ? "quasi-2D" : "3D",
@@ -471,16 +484,23 @@ export function generateVacancyStructures(formula: string, prototype: PrototypeT
         const swapCount = 1;
         const newCounts = { ...counts };
         newCounts[elA] = counts[elA] - swapCount;
+        newCounts[elB] = counts[elB] + swapCount;
+        const swapFormula = buildFormula(newCounts);
+        newCounts[elA] = counts[elA] + swapCount;
         newCounts[elB] = counts[elB] - swapCount;
-        const mixKey = `${elA}${elB}mix`;
-        newCounts[elA] += swapCount;
-        newCounts[elB] += swapCount;
+        const reverseSwapFormula = buildFormula(newCounts);
 
         results.push({
-          formula: normalizeFormula(buildFormula(newCounts)),
-          vacancyType: `anti-site ${elA}/${elB} swap`,
-          concentration: swapCount / getTotalAtoms(counts),
-          expectedEffect: `site disorder between ${elA} and ${elB}, modified local electronic structure`,
+          formula: normalizeFormula(swapFormula),
+          vacancyType: `anti-site ${elA}->${elB} swap`,
+          concentration: swapCount / Math.max(1, getTotalAtoms(counts)),
+          expectedEffect: `site disorder: ${elA} replaced by ${elB} at one site, modified local electronic structure`,
+        });
+        results.push({
+          formula: normalizeFormula(reverseSwapFormula),
+          vacancyType: `anti-site ${elB}->${elA} swap`,
+          concentration: swapCount / Math.max(1, getTotalAtoms(counts)),
+          expectedEffect: `site disorder: ${elB} replaced by ${elA} at one site, modified local electronic structure`,
         });
       }
     }

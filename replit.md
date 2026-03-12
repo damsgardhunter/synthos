@@ -632,6 +632,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `DistortedLattice` now includes a `spaceGroup` field. A `distortedSpaceGroup()` function maps (prototype, distortionType) to the correct post-distortion space group using crystallographic symmetry rules (e.g., cubic Pm-3m perovskite → tetragonal P4/mmm, orthorhombic Pnma, or monoclinic P2_1/m). This prevents "Inconsistent Symmetry" errors when the QE-DFT engine tries to run calculations on distorted structures with the wrong parent symmetry.
 - **Stability Tier Classification (structural-mutator.ts)**:
   - `MAX_ENERGY` lowered from 0.5 to 0.2 eV/atom. Each `DistortedLattice` now carries a `stabilityTier` field: "stable" (≤0.05 eV), "metastable" (≤0.15 eV), or "highly-unstable" (>0.15 eV). The log output reports the count of highly-unstable variants so researchers can assess the quality of the structural search. The tighter threshold eliminates the most unphysical structures from consuming DFT compute.
+- **Anti-site Swap Identity Bug Fix (structural-mutator.ts)**:
+  - The anti-site swap logic was subtracting 1 from elA and elB then immediately adding them back, producing a formula identical to the input. Now generates two distinct swap variants: one where elA count decreases by 1 and elB increases by 1 (A→B), and the reverse (B→A). Each represents a physically meaningful anti-site defect that changes the stoichiometry.
+- **Superlattice Formula Tag Preservation (structural-mutator.ts)**:
+  - Superlattice formulas now retain the `_SL{n}` suffix (e.g., `Mg2B4_SL2`) instead of being normalized to a plain scaled unit cell (`Mg2B4`). This preserves the structural intent so downstream GNN/DFT can distinguish a bulk crystal from a layered superlattice with the same atomic composition.
+- **Ruddlesden-Popper A-site/B-site Validation (structural-mutator.ts)**:
+  - RP phase generation now strictly validates A-site and B-site assignment. A-site candidates are restricted to alkaline-earth, alkali, and rare-earth elements — sorted by atomic radius (largest first). B-site must be a distinct transition metal. An explicit `aSiteRadius > bSiteRadius` check enforces the physical constraint that A-site cations must be larger than B-site cations. Alloys like NbTi (two similar-sized transition metals) no longer generate garbage RP formulas.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
