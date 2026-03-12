@@ -5729,7 +5729,7 @@ async function runAutonomousFastPath() {
     let filteredCandidates = novelCandidates;
     let patternFiltered = 0;
     if (activeRules.length > 0) {
-      const patternScores = screenWithPatterns(novelCandidates);
+      const patternScores = await screenWithPatterns(novelCandidates);
       const scored = patternScores.sort((a, b) => b.theoryScore - a.theoryScore);
       const beforeCount = novelCandidates.length;
       filteredCandidates = scored

@@ -49,9 +49,28 @@ const FEATURE_DISPLAY_NAMES: Record<string, string> = {
   phononSofteningIndex: "anharmonicity",
 };
 
-const TC_HIGH_THRESHOLD = 30;
+const TC_HIGH_THRESHOLD_DEFAULT = 30;
 const MIN_FAMILY_SIZE = 10;
 const WEIGHT_DECAY_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const FAMILY_TC_THRESHOLDS: Record<string, number> = {
+  "hydride": 150,
+  "cuprate": 60,
+  "iron-based": 25,
+  "heavy-fermion": 3,
+  "nickelate": 15,
+  "nitride": 12,
+  "boride": 20,
+  "carbide": 10,
+  "chalcogenide": 8,
+  "bismuthate": 20,
+  "organic": 10,
+  "oxide": 15,
+};
+
+function getFamilyTcThreshold(family: string): number {
+  return FAMILY_TC_THRESHOLDS[family] ?? TC_HIGH_THRESHOLD_DEFAULT;
+}
 
 let cachedRules: PatternRule[] = [];
 let lastMineTime = 0;
@@ -467,19 +486,39 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
     }
 
     const scored: ScoredCandidate[] = [];
+    const uncached: { id: string; features: MLFeatureVector; existingMl: Record<string, any> }[] = [];
     for (const c of allCandidates) {
       try {
-        const features = extractFeatures(c.formula);
+        const existingMl = (c.mlFeatures as Record<string, any>) ?? {};
+        const cachedFeatures = existingMl.patternMinerFeatures as MLFeatureVector | undefined;
+        const features = cachedFeatures ?? extractFeatures(c.formula);
+        if (!cachedFeatures && c.id) {
+          uncached.push({ id: c.id, features, existingMl });
+        }
+        const family = classifyFamily(c.formula);
+        const tc = c.predictedTc ?? 0;
         scored.push({
           formula: c.formula,
-          predictedTc: c.predictedTc ?? 0,
+          predictedTc: tc,
           features,
-          isHighTc: (c.predictedTc ?? 0) >= TC_HIGH_THRESHOLD,
-          family: classifyFamily(c.formula),
+          isHighTc: tc >= getFamilyTcThreshold(family),
+          family,
         });
       } catch {
         continue;
       }
+    }
+
+    if (uncached.length > 0) {
+      Promise.resolve().then(async () => {
+        for (const { id, features, existingMl } of uncached.slice(0, 100)) {
+          try {
+            await storage.updateSuperconductorCandidate(id, {
+              mlFeatures: { ...existingMl, patternMinerFeatures: features },
+            });
+          } catch {}
+        }
+      }).catch(() => {});
     }
 
     if (scored.length < 15) return cachedRules;
@@ -586,63 +625,85 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
     }
 
     const now = Date.now();
-    for (const existing of cachedRules) {
-      applyWeightDecay(existing, now);
-    }
+    const validatedSigs = new Set(validatedRules.map(r => ruleSignature(r)));
 
-    const ruleSignatures = new Set<string>();
+    const ruleSignaturesSet = new Set<string>();
     const mergedRules: PatternRule[] = [];
 
     for (const rule of validatedRules) {
       const sig = ruleSignature(rule);
-      if (!ruleSignatures.has(sig)) {
-        ruleSignatures.add(sig);
+      if (!ruleSignaturesSet.has(sig)) {
+        ruleSignaturesSet.add(sig);
         mergedRules.push(rule);
       }
     }
 
+    const lastTestSet = folds[folds.length - 1].test;
     for (const existing of cachedRules) {
       const sig = ruleSignature(existing);
-      if (!ruleSignatures.has(sig) && existing.weight >= 0.05) {
-        ruleSignatures.add(sig);
+      if (ruleSignaturesSet.has(sig)) continue;
+
+      const relevantTest = existing.family && existing.family !== "all"
+        ? lastTestSet.filter(c => c.family === existing.family)
+        : lastTestSet;
+
+      if (relevantTest.length >= 3) {
+        const retestResult = validateRule(existing, relevantTest);
+        if (retestResult.f1 < 0.3) {
+          applyWeightDecay(existing, now);
+        }
+      } else {
+        applyWeightDecay(existing, now);
+      }
+
+      if (existing.weight >= 0.05) {
+        ruleSignaturesSet.add(sig);
         mergedRules.push(existing);
       }
     }
 
+    const prevRuleCount = cachedRules.length;
     mergedRules.sort((a, b) => b.f1Score * b.weight - a.f1Score * a.weight);
     cachedRules = mergedRules.filter((r) => r.weight >= 0.05).slice(0, 30);
     lastMineTime = Date.now();
 
-    for (const rule of cachedRules.slice(0, 5)) {
-      const condStr = rule.conditions
-        .map((c) => {
-          const name = FEATURE_DISPLAY_NAMES[c.property] || c.property;
-          if (c.operator === "between")
-            return `${c.threshold} < ${name} < ${c.upperThreshold}`;
-          return `${name} ${c.operator} ${c.threshold}`;
-        })
-        .join(" AND ");
+    const newlyDiscovered = validatedRules.filter(r => {
+      const sig = ruleSignature(r);
+      return !ruleSignaturesSet.has(sig) || !cachedRules.some(cr => ruleSignature(cr) === sig && cr.discoveredAt !== r.discoveredAt);
+    });
 
-      const familyTag = rule.family && rule.family !== "all" ? ` [${rule.family}]` : "";
-      const label = rule.consequent === "high-tc" ? "High Tc" : "Low Tc";
+    if (newlyDiscovered.length > 0) {
+      for (const rule of cachedRules.slice(0, 5)) {
+        const condStr = rule.conditions
+          .map((c) => {
+            const name = FEATURE_DISPLAY_NAMES[c.property] || c.property;
+            if (c.operator === "between")
+              return `${c.threshold} < ${name} < ${c.upperThreshold}`;
+            return `${name} ${c.operator} ${c.threshold}`;
+          })
+          .join(" AND ");
+
+        const familyTag = rule.family && rule.family !== "all" ? ` [${rule.family}]` : "";
+        const label = rule.consequent === "high-tc" ? "High Tc" : "Low Tc";
+        emit("log", {
+          phase: "engine",
+          event: "Pattern rule discovered",
+          detail: `${label} when ${condStr}${familyTag} (F1=${rule.f1Score}, support=${rule.support}, weight=${rule.weight.toFixed(2)})`,
+          dataSource: "Pattern Miner",
+        });
+      }
+
+      const familyCount = new Set(cachedRules.filter(r => r.family && r.family !== "all").map(r => r.family)).size;
+      const highTcRuleCount = cachedRules.filter(r => r.consequent === "high-tc").length;
+      const lowTcRuleCount = cachedRules.filter(r => r.consequent === "low-tc").length;
+      const validationMethod = useKFold ? `${K}-fold CV` : "70/30 split";
       emit("log", {
         phase: "engine",
-        event: "Pattern rule discovered",
-        detail: `${label} when ${condStr}${familyTag} (F1=${rule.f1Score}, support=${rule.support}, weight=${rule.weight.toFixed(2)})`,
+        event: "Pattern mining complete",
+        detail: `${validatedRules.length} rules validated (${validationMethod}) from ${scored.length} candidates. ${highTcRuleCount} high-Tc + ${lowTcRuleCount} low-Tc rules across ${familyCount} families. ${cachedRules.length} active rules total.`,
         dataSource: "Pattern Miner",
       });
     }
-
-    const familyCount = new Set(cachedRules.filter(r => r.family && r.family !== "all").map(r => r.family)).size;
-    const highTcRuleCount = cachedRules.filter(r => r.consequent === "high-tc").length;
-    const lowTcRuleCount = cachedRules.filter(r => r.consequent === "low-tc").length;
-    const validationMethod = useKFold ? `${K}-fold CV` : "70/30 split";
-    emit("log", {
-      phase: "engine",
-      event: "Pattern mining complete",
-      detail: `${validatedRules.length} rules validated (${validationMethod}) from ${scored.length} candidates. ${highTcRuleCount} high-Tc + ${lowTcRuleCount} low-Tc rules across ${familyCount} families. ${cachedRules.length} active rules total.`,
-      dataSource: "Pattern Miner",
-    });
 
     return cachedRules;
   } catch (err: any) {
@@ -656,15 +717,18 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
   }
 }
 
-export function screenWithPatterns(
+const SCREEN_YIELD_BATCH = 50;
+
+export async function screenWithPatterns(
   formulas: string[]
-): { formula: string; theoryScore: number }[] {
+): Promise<{ formula: string; theoryScore: number }[]> {
   if (cachedRules.length === 0) {
     return formulas.map((f) => ({ formula: f, theoryScore: 0.5 }));
   }
 
   const candidates: ScoredCandidate[] = [];
-  for (const formula of formulas) {
+  for (let i = 0; i < formulas.length; i++) {
+    const formula = formulas[i];
     try {
       const features = extractFeatures(formula);
       candidates.push({
@@ -682,6 +746,9 @@ export function screenWithPatterns(
         isHighTc: false,
         family: "unknown",
       });
+    }
+    if ((i + 1) % SCREEN_YIELD_BATCH === 0) {
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
 
