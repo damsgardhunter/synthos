@@ -1,3 +1,15 @@
+function gcdFloat(a: number, b: number): number {
+  const eps = 1e-9;
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b > eps) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
+
 export interface PrototypeCandidate {
   formula: string;
   prototype: string;
@@ -546,16 +558,10 @@ function generateMAX(): PrototypeCandidate[] {
         for (const n of nValues) {
           const mCount = n + 1;
           const xCount = n;
-          let formula: string;
-          if (mCount === 1) {
-            formula = `${m}${a}`;
-          } else {
-            formula = `${m}${mCount}${a}`;
-          }
-          if (xCount === 1) {
-            formula += x;
-          } else {
-            formula += `${x}${xCount}`;
+          let formula = mCount === 1 ? m : `${m}${mCount}`;
+          formula += a;
+          if (xCount > 0) {
+            formula += xCount === 1 ? x : `${x}${xCount}`;
           }
           candidates.push({
             formula,
@@ -585,10 +591,20 @@ function generateLayeredNitride(): PrototypeCandidate[] {
     for (const xv of xValues) {
       for (const m of M) {
         for (const halide of X) {
-          const xStr = xv === 1.0 ? "" : `${xv}`;
-          const aComponent = xStr ? `${a}${xStr}` : a;
+          const multiplier = xv <= 0 ? 5 : Math.round(1 / gcdFloat(xv, 1.0));
+          const aCount = Math.round(xv * multiplier);
+          const mCount = multiplier;
+          const nCount = multiplier;
+          const halideCount = multiplier;
+
+          const aStr = aCount === 1 ? a : `${a}${aCount}`;
+          const mStr = mCount === 1 ? m : `${m}${mCount}`;
+          const nStr = nCount === 1 ? "N" : `N${nCount}`;
+          const hStr = halideCount === 1 ? halide : `${halide}${halideCount}`;
+          const formula = `${aStr}${mStr}${nStr}${hStr}`;
+
           candidates.push({
-            formula: `${aComponent}${m}N${halide}`,
+            formula,
             prototype: info.name,
             spaceGroup: info.spaceGroup,
             crystalSystem: info.crystalSystem,
