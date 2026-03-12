@@ -104,7 +104,10 @@ export async function analyzeThermodynamicLandscape(
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
 
-  const hullResult = await evaluateConvexHullStability(0, formula);
+  const candidateFormE = candidate?.formationEnergy ?? null;
+  const hullResult = candidateFormE !== null
+    ? { hullDistance: Math.max(0, candidateFormE * 0.15), formationEnergy: candidateFormE, source: "candidate-cached" }
+    : await evaluateConvexHullStability(0, formula);
 
   const candidatePressure = candidate?.pressureGpa ?? 0;
 
@@ -489,6 +492,7 @@ function createHydrideRoute(formula: string, landscape: ThermodynamicLandscape, 
   const hCount = counts["H"] || 0;
   const metalEls = elements.filter(e => e !== "H" && e !== "O" && e !== "N");
   const targetPressure = Math.max(50, Math.round(landscape.energyAboveHull * 500 + 100));
+  const quenchRate = landscape.estimatedQuenchRateKPerSec ?? 1e3;
 
   return {
     method: "High-Pressure Hydrogenation with Laser Heating in DAC",
@@ -500,16 +504,20 @@ function createHydrideRoute(formula: string, landscape: ThermodynamicLandscape, 
       `Hold at pressure for 1-4 hours to equilibrate hydrogen content`,
       `Characterize in situ: XRD (phase identification), Raman (H2 vibrons), electrical resistance (4-probe in DAC)`,
       `Map R(T) from 300K to 4K at target pressure to identify superconducting transition`,
-      `Attempt controlled decompression (1 GPa/hr) to determine metastability window — monitor XRD for phase retention`,
+      quenchRate > 1e5
+        ? `Quench sample to RT at high pressure (${targetPressure} GPa) before any decompression — required quench rate ~${quenchRate.toExponential(0)} K/s indicates dynamic instability at ambient pressure`
+        : `Attempt controlled decompression (1 GPa/hr) to determine metastability window — monitor XRD for phase retention`,
     ],
     temperatureProfile: `RT -> ${Math.min(2500, landscape.meltingPointEstimate)}K (laser pulse, ~1s) -> RT -> cool to 4K for R(T)`,
-    pressureProfile: `0 -> ${targetPressure} GPa (5 GPa/step) -> hold -> decompression attempt`,
+    pressureProfile: quenchRate > 1e5
+      ? `0 -> ${targetPressure} GPa (5 GPa/step) -> hold -> quench at pressure -> slow decompression attempt`
+      : `0 -> ${targetPressure} GPa (5 GPa/step) -> hold -> decompression attempt`,
     estimatedCoolingRate: "1e6 K/s (laser off; thermal mass of DAC sample ~micrograms)",
     atmosphere: "H2-rich environment from chemical hydrogen source",
     expectedYieldRange: "N/A (microgram-scale DAC experiment)",
     noveltyScore: 0.65,
     synthesisConfidence: "medium",
-    physicsJustification: `Hydrogen-rich composition (H:metal ratio = ${(hCount / Math.max(1, elements.filter(e => e !== "H").reduce((s, e) => s + (counts[e] || 0), 0))).toFixed(1)}) requires extreme pressure to overcome H2 molecular stability. Chemical H-source (ammonia borane) provides reactive atomic H at lower pressures than pure H2 loading. Laser heating overcomes kinetic barriers to form the target ${formula} stoichiometry. Controlled decompression tests whether the phase can be quench-recovered to lower pressures — bulk modulus ${landscape.bulkModulusEstimate} GPa suggests ${landscape.bulkModulusEstimate > 150 ? "reasonable" : "limited"} structural rigidity for pressure retention.`,
+    physicsJustification: `Hydrogen-rich composition (H:metal ratio = ${(hCount / Math.max(1, elements.filter(e => e !== "H").reduce((s, e) => s + (counts[e] || 0), 0))).toFixed(1)}) requires extreme pressure to overcome H2 molecular stability. Chemical H-source (ammonia borane) provides reactive atomic H at lower pressures than pure H2 loading. Laser heating overcomes kinetic barriers to form the target ${formula} stoichiometry. ${quenchRate > 1e5 ? `Required quench rate (~${quenchRate.toExponential(0)} K/s) indicates the phase is dynamically unstable at ambient pressure — sample must be quenched to RT while still under ${targetPressure} GPa before any decompression is attempted.` : `Controlled decompression tests whether the phase can be quench-recovered to lower pressures — bulk modulus ${landscape.bulkModulusEstimate} GPa suggests ${landscape.bulkModulusEstimate > 150 ? "reasonable" : "limited"} structural rigidity for pressure retention.`}`,
     source: "physics-reasoned",
     keyInnovation: `Chemical hydrogen source (ammonia borane) for enhanced hydrogenation kinetics + controlled decompression protocol to test metastable phase retention at reduced pressures`,
   };
@@ -591,12 +599,16 @@ function createThinFilmRoute(formula: string, landscape: ThermodynamicLandscape,
 
 function createReactiveMillingRoute(formula: string, landscape: ThermodynamicLandscape, elements: string[]): NovelSynthesisRoute {
   const lightEls = elements.filter(e => ["B", "C", "N"].includes(e));
+  const isNitride = lightEls.includes("N");
+  const nitrideSource = isNitride && landscape.stabilityClass !== "thermodynamically-stable"
+    ? "NaN3 (sodium azide) powder or flowing NH3 gas — molecular N2 triple-bond (945 kJ/mol) is too stable for reliable mechanochemical nitridation"
+    : "N2 gas atmosphere (10 atm)";
 
   return {
     method: "Reactive High-Energy Ball Milling under Controlled Atmosphere",
     steps: [
       `Load metal powders (${elements.filter(e => !["B", "C", "N", "O", "H"].includes(e)).join(", ")}) into WC vial with WC balls (BPR 20:1)`,
-      `For ${lightEls.join("/")} incorporation: use ${lightEls.includes("N") ? "N2 gas atmosphere (5 atm)" : lightEls.includes("B") ? "amorphous B powder mixed with metals" : "graphite powder mixed with metals"}`,
+      `For ${lightEls.join("/")} incorporation: use ${isNitride ? nitrideSource : lightEls.includes("B") ? "amorphous B powder mixed with metals" : "graphite powder mixed with metals"}`,
       `Mill at 500 rpm for 50-100 hours with temperature monitoring (pause if vial exceeds 200C)`,
       `Sample at 10h intervals: XRD to track phase evolution, particle size by laser diffraction`,
       `When target phase appears in XRD: reduce milling speed to 200 rpm for 10h (strain relief without decomposition)`,
@@ -606,7 +618,7 @@ function createReactiveMillingRoute(formula: string, landscape: ThermodynamicLan
     temperatureProfile: `RT (milling) -> ${Math.round(landscape.maxSynthesisTemp * 0.5)}C (HIP consolidation, 1h) -> RT`,
     pressureProfile: "Local impact pressure ~6 GPa (ball collisions); 200 MPa (HIP)",
     estimatedCoolingRate: "N/A (solid-state process; HIP furnace cool ~5 C/min)",
-    atmosphere: lightEls.includes("N") ? "5 atm N2" : "High-purity Ar",
+    atmosphere: isNitride ? (landscape.stabilityClass !== "thermodynamically-stable" ? "NH3 or NaN3 precursor (reactive N source)" : "10 atm N2") : "High-purity Ar",
     expectedYieldRange: "50-75% (powder losses during handling)",
     noveltyScore: 0.75,
     synthesisConfidence: "medium",
@@ -685,9 +697,10 @@ export async function learnFromReactionDatabase(formula: string): Promise<{
   }
 
   similarRoutes.sort((a, b) => b.relevance - a.relevance);
+  const topRoutes = similarRoutes.slice(0, 10);
 
   const conditionTemplates: { tempRange: string; pressureRange: string; atmosphere: string; method: string }[] = [];
-  for (const route of similarRoutes.slice(0, 5)) {
+  for (const route of topRoutes.slice(0, 5)) {
     const cond = route.conditions as any;
     if (cond) {
       conditionTemplates.push({
@@ -699,7 +712,7 @@ export async function learnFromReactionDatabase(formula: string): Promise<{
     }
   }
 
-  return { similarRoutes: similarRoutes.slice(0, 10), conditionTemplates };
+  return { similarRoutes: topRoutes, conditionTemplates };
 }
 
 export async function runSynthesisReasoning(
