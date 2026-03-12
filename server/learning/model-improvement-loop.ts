@@ -91,6 +91,12 @@ function recordMetricTrend(model: string, metric: string, cycle: number, value: 
   if (!trend) {
     trend = { model, metric, values: [] };
     metricTrends.push(trend);
+    const indexed = trendIndex.get(model);
+    if (indexed) {
+      indexed.push(trend);
+    } else {
+      trendIndex.set(model, [trend]);
+    }
   }
   trend.values.push({ cycle, value });
   if (trend.values.length > 50) {
@@ -107,9 +113,23 @@ function coefficientOfVariation(values: number[]): number {
   return sd / scale;
 }
 
+let trendIndex: Map<string, MetricTrend[]> = new Map();
+
+function rebuildTrendIndex(): void {
+  trendIndex.clear();
+  for (const t of metricTrends) {
+    const existing = trendIndex.get(t.model);
+    if (existing) {
+      existing.push(t);
+    } else {
+      trendIndex.set(t.model, [t]);
+    }
+  }
+}
+
 function detectPlateau(model: string): boolean {
-  const modelTrends = metricTrends.filter(t => t.model === model);
-  if (modelTrends.length === 0) return false;
+  const modelTrends = trendIndex.get(model);
+  if (!modelTrends || modelTrends.length === 0) return false;
 
   let plateauCount = 0;
   let checkedCount = 0;
@@ -125,6 +145,17 @@ function detectPlateau(model: string): boolean {
   }
 
   return checkedCount > 0 && plateauCount >= checkedCount;
+}
+
+function truncateAtWordBoundary(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const cut = text.lastIndexOf(" ", maxLen);
+  return (cut > maxLen * 0.6 ? text.slice(0, cut) : text.slice(0, maxLen)) + "...";
+}
+
+function safeString(value: unknown, fallback: string = "unavailable"): string {
+  if (value === undefined || value === null) return fallback;
+  return String(value);
 }
 
 function snapshotKeyMetrics(diagnostics: ComprehensiveModelDiagnostics): Record<string, Record<string, number>> {
@@ -305,7 +336,7 @@ async function runImprovementCycleInner(
     emit("log", {
       phase: "engine",
       event: "Model improvement LLM error",
-      detail: e instanceof Error ? e.message.slice(0, 150) : "unknown",
+      detail: truncateAtWordBoundary(e instanceof Error ? e.message : "unknown", 200),
       dataSource: "Model Improvement Loop",
     });
     return { ran: true };
@@ -366,7 +397,7 @@ async function runImprovementCycleInner(
   emit("log", {
     phase: "engine",
     event: "Model improvement: executing experiment",
-    detail: `${topExperiment.experiment_type} on ${topExperiment.model_target}: ${topExperiment.reasoning.slice(0, 100)}`,
+    detail: `${topExperiment.experiment_type} on ${topExperiment.model_target}: ${truncateAtWordBoundary(topExperiment.reasoning, 150)}`,
     dataSource: "Model Improvement Loop",
   });
 
@@ -378,7 +409,7 @@ async function runImprovementCycleInner(
     emit("log", {
       phase: "engine",
       event: "Model improvement: experiment failed",
-      detail: e instanceof Error ? e.message.slice(0, 150) : "unknown",
+      detail: truncateAtWordBoundary(e instanceof Error ? e.message : "unknown", 200),
       dataSource: "Model Improvement Loop",
     });
     return { ran: true };
@@ -594,24 +625,34 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
     }
   }
 
-  const activeFeatures = getActiveCustomFeatures();
-  if (activeFeatures.length > 0) {
-    lines.push(`  Active computed features (Model LLM): ${activeFeatures.map(f => f.name).join(", ")}`);
-  }
-
-  const architecture = getCurrentArchitecture();
-  if (architecture) {
-    lines.push(`  Architecture (Model LLM): ${architecture.primaryModel} (switch=${architecture.switchRecommended})`);
-    for (const mc of architecture.modelConfigs) {
-      lines.push(`    ${mc.model}: weight=${mc.weight}`);
+  try {
+    const activeFeatures = getActiveCustomFeatures();
+    if (activeFeatures && activeFeatures.length > 0) {
+      lines.push(`  Active computed features (Model LLM): ${activeFeatures.map(f => f.name).join(", ")}`);
     }
-  }
+  } catch (_e) { lines.push("  Active computed features: not yet initialized"); }
 
-  const variance = getVarianceSummary();
-  lines.push(`  Uncertainty: mean_var=${variance.meanVariance.toFixed(4)}, high_unc=${(variance.highUncertaintyFraction * 100).toFixed(1)}%, source=${variance.decomposition.dominantSource}`);
+  try {
+    const architecture = getCurrentArchitecture();
+    if (architecture) {
+      lines.push(`  Architecture (Model LLM): ${safeString(architecture.primaryModel)} (switch=${safeString(architecture.switchRecommended)})`);
+      if (architecture.modelConfigs) {
+        for (const mc of architecture.modelConfigs) {
+          lines.push(`    ${safeString(mc.model)}: weight=${safeString(mc.weight)}`);
+        }
+      }
+    }
+  } catch (_e) { lines.push("  Architecture: not yet initialized"); }
 
-  const scheduler = getSchedulerStats();
-  lines.push(`  Retrain scheduler: ${scheduler.state.totalRetrainsScheduled} retrains, ${scheduler.state.totalRetrainsSkipped} skips, ~${scheduler.state.totalComputeSaved}s saved`);
+  try {
+    const variance = getVarianceSummary();
+    lines.push(`  Uncertainty: mean_var=${variance.meanVariance.toFixed(4)}, high_unc=${(variance.highUncertaintyFraction * 100).toFixed(1)}%, source=${safeString(variance.decomposition?.dominantSource, "unknown")}`);
+  } catch (_e) { lines.push("  Uncertainty: not yet computed"); }
+
+  try {
+    const scheduler = getSchedulerStats();
+    lines.push(`  Retrain scheduler: ${scheduler.state.totalRetrainsScheduled} retrains, ${scheduler.state.totalRetrainsSkipped} skips, ~${scheduler.state.totalComputeSaved}s saved`);
+  } catch (_e) { lines.push("  Retrain scheduler: not yet initialized"); }
 
   return lines.join("\n");
 }
@@ -638,7 +679,7 @@ export async function runCombinedModelLLMCycle(
       emit("log", {
         phase: "engine",
         event: "Model LLM: architecture assessed",
-        detail: `Recommended: ${report.architectureRecommendation.primaryModel} — ${report.architectureRecommendation.reasoning.slice(0, 100)}`,
+        detail: `Recommended: ${report.architectureRecommendation.primaryModel} — ${truncateAtWordBoundary(report.architectureRecommendation.reasoning, 150)}`,
         dataSource: "Model LLM Controller",
       });
     }
@@ -657,7 +698,7 @@ export async function runCombinedModelLLMCycle(
       emit("log", {
         phase: "engine",
         event: `Retrain scheduler: ${rd.shouldRetrain ? "RETRAIN" : "SKIP"} (${rd.urgency})`,
-        detail: rd.reasoning.slice(0, 120),
+        detail: truncateAtWordBoundary(rd.reasoning, 180),
         dataSource: "Retrain Scheduler",
       });
     }
@@ -665,7 +706,7 @@ export async function runCombinedModelLLMCycle(
     emit("log", {
       phase: "engine",
       event: "Model LLM cycle error",
-      detail: e instanceof Error ? e.message.slice(0, 150) : "unknown",
+      detail: truncateAtWordBoundary(e instanceof Error ? e.message : "unknown", 200),
       dataSource: "Model LLM Controller",
     });
   }
