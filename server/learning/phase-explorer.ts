@@ -58,6 +58,34 @@ function parseFormulaToElements(formula: string): { elements: string[]; counts: 
   return { elements: Object.keys(counts), counts };
 }
 
+function gcd(a: number, b: number): number {
+  a = Math.abs(a); b = Math.abs(b);
+  while (b) { [a, b] = [b, a % b]; }
+  return a;
+}
+
+function gcdArray(arr: number[]): number {
+  return arr.reduce((g, v) => gcd(g, v), 0);
+}
+
+function fractionsToIntegerCounts(
+  fractions: number[],
+  elements: string[],
+  maxAtoms: number
+): Record<string, number> | null {
+  const raw = fractions.map(f => Math.round(f * maxAtoms));
+  if (raw.some(c => c <= 0)) return null;
+
+  const g = gcdArray(raw);
+  const reduced = g > 1 ? raw.map(c => c / g) : raw;
+
+  const counts: Record<string, number> = {};
+  for (let i = 0; i < elements.length; i++) {
+    counts[elements[i]] = reduced[i];
+  }
+  return counts;
+}
+
 function buildFormula(counts: Record<string, number>): string {
   const parts: string[] = [];
   const sorted = Object.entries(counts)
@@ -145,17 +173,18 @@ export function exploreCompositionSpace(
   const grid: PhaseGridPoint[] = [];
   const n = elementSet.length;
 
-  if (n === 2) {
-    for (let x = step; x < 1.0; x += step) {
-      const totalAtoms = 4;
-      const c1 = Math.round(x * totalAtoms);
-      const c2 = totalAtoms - c1;
-      if (c1 <= 0 || c2 <= 0) continue;
+  const STOICH_ATOMS: Record<number, number> = { 2: 20, 3: 30, 4: 20 };
+  const maxAtoms = STOICH_ATOMS[n] ?? 20;
+  const seenFormulas = new Set<string>();
 
-      const counts: Record<string, number> = {};
-      counts[elementSet[0]] = c1;
-      counts[elementSet[1]] = c2;
+  if (n === 2) {
+    for (let x = step; x <= 1.0 - step + 1e-9; x += step) {
+      const fracs = [x, 1.0 - x];
+      const counts = fractionsToIntegerCounts(fracs, elementSet, maxAtoms);
+      if (!counts) continue;
       const formula = buildFormula(counts);
+      if (seenFormulas.has(formula)) continue;
+      seenFormulas.add(formula);
 
       const pred = fastTcPredict(formula);
       grid.push({
@@ -168,22 +197,17 @@ export function exploreCompositionSpace(
       });
     }
   } else if (n === 3) {
-    for (let x = step; x < 1.0; x += step) {
-      for (let y = step; y < 1.0 - x; y += step) {
+    for (let x = step; x <= 1.0 - 2 * step + 1e-9; x += step) {
+      for (let y = step; y <= 1.0 - x - step + 1e-9; y += step) {
         const z = 1.0 - x - y;
         if (z < step / 2) continue;
 
-        const totalAtoms = 6;
-        const c1 = Math.max(1, Math.round(x * totalAtoms));
-        const c2 = Math.max(1, Math.round(y * totalAtoms));
-        const c3 = Math.max(1, totalAtoms - c1 - c2);
-        if (c3 <= 0) continue;
-
-        const counts: Record<string, number> = {};
-        counts[elementSet[0]] = c1;
-        counts[elementSet[1]] = c2;
-        counts[elementSet[2]] = c3;
+        const fracs = [x, y, z];
+        const counts = fractionsToIntegerCounts(fracs, elementSet, maxAtoms);
+        if (!counts) continue;
         const formula = buildFormula(counts);
+        if (seenFormulas.has(formula)) continue;
+        seenFormulas.add(formula);
 
         const pred = fastTcPredict(formula);
         grid.push({
@@ -197,26 +221,19 @@ export function exploreCompositionSpace(
       }
     }
   } else if (n === 4) {
-    const bigStep = Math.max(step, 0.15);
-    for (let a = bigStep; a < 0.7; a += bigStep) {
-      for (let b = bigStep; b < 0.7 - a; b += bigStep) {
-        for (let c = bigStep; c < 0.7 - a - b; c += bigStep) {
+    const bigStep = Math.max(step, 0.10);
+    for (let a = bigStep; a <= 1.0 - 3 * bigStep + 1e-9; a += bigStep) {
+      for (let b = bigStep; b <= 1.0 - a - 2 * bigStep + 1e-9; b += bigStep) {
+        for (let c = bigStep; c <= 1.0 - a - b - bigStep + 1e-9; c += bigStep) {
           const d = 1.0 - a - b - c;
           if (d < bigStep / 2) continue;
 
-          const totalAtoms = 8;
-          const c1 = Math.max(1, Math.round(a * totalAtoms));
-          const c2 = Math.max(1, Math.round(b * totalAtoms));
-          const c3 = Math.max(1, Math.round(c * totalAtoms));
-          const c4 = Math.max(1, totalAtoms - c1 - c2 - c3);
-          if (c4 <= 0) continue;
-
-          const counts: Record<string, number> = {};
-          counts[elementSet[0]] = c1;
-          counts[elementSet[1]] = c2;
-          counts[elementSet[2]] = c3;
-          counts[elementSet[3]] = c4;
+          const fracs = [a, b, c, d];
+          const counts = fractionsToIntegerCounts(fracs, elementSet, maxAtoms);
+          if (!counts) continue;
           const formula = buildFormula(counts);
+          if (seenFormulas.has(formula)) continue;
+          seenFormulas.add(formula);
 
           const pred = fastTcPredict(formula);
           grid.push({
