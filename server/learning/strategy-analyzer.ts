@@ -38,19 +38,22 @@ export async function analyzeAndEvolveStrategy(
       maxScore: number;
       pipelinePasses: number;
       totalScores: number;
+      tcValues: number[];
     }> = {};
 
     for (const c of candidates) {
       const family = classifyFamily(c.formula);
       if (!familyStats[family]) {
-        familyStats[family] = { count: 0, avgScore: 0, maxTc: 0, maxScore: 0, pipelinePasses: 0, totalScores: 0 };
+        familyStats[family] = { count: 0, avgScore: 0, maxTc: 0, maxScore: 0, pipelinePasses: 0, totalScores: 0, tcValues: [] };
       }
       const stats = familyStats[family];
       stats.count++;
+      const tc = c.predictedTc ?? 0;
       const score = c.ensembleScore ?? 0;
       stats.totalScores += score;
       stats.avgScore = stats.totalScores / stats.count;
-      if ((c.predictedTc ?? 0) > stats.maxTc) stats.maxTc = c.predictedTc ?? 0;
+      stats.tcValues.push(tc);
+      if (tc > stats.maxTc) stats.maxTc = tc;
       if (score > stats.maxScore) stats.maxScore = score;
       if ((c.verificationStage ?? 0) >= 2) stats.pipelinePasses++;
     }
@@ -90,7 +93,9 @@ export async function analyzeAndEvolveStrategy(
     const rawScores: number[] = [];
 
     for (const [family, stats] of Object.entries(familyStats)) {
-      const representativeTc = stats.maxTc;
+      const sorted = stats.tcValues.slice().sort((a, b) => b - a);
+      const topDecileN = Math.max(1, Math.ceil(sorted.length * 0.1));
+      const representativeTc = sorted.slice(0, topDecileN).reduce((s, v) => s + v, 0) / topDecileN;
       const bayesianTc = (stats.count * representativeTc + priorCount * priorTc) / (stats.count + priorCount);
       const successRate = stats.pipelinePasses / Math.max(1, stats.count);
       const explorationBonus = stats.count < 10 ? 0.1 : 0;
@@ -337,9 +342,30 @@ export async function captureConvergenceSnapshot(
     const pipelinePassRate = totalEnteredPipeline > 0 ? totalPassedAllStages / totalEnteredPipeline : 0;
 
     const allCandidatesForDiversity = await storage.getSuperconductorCandidates(500);
-    const allFamilies = new Set(allCandidatesForDiversity.map(c => classifyFamily(c.formula)));
-    allFamilies.delete("Other");
-    const familyDiversity = allFamilies.size + (allCandidatesForDiversity.some(c => classifyFamily(c.formula) === "Other") ? 1 : 0);
+    const allFamilies = new Set<string>();
+    const otherSpaceGroups = new Map<string, number>();
+    for (const c of allCandidatesForDiversity) {
+      const fam = classifyFamily(c.formula);
+      if (fam === "Other") {
+        const sg = (c as any).spaceGroup || "unknown";
+        otherSpaceGroups.set(sg, (otherSpaceGroups.get(sg) || 0) + 1);
+      } else {
+        allFamilies.add(fam);
+      }
+    }
+    let familyDiversity = allFamilies.size;
+    if (otherSpaceGroups.size > 0) {
+      let otherEntropy = 0;
+      const otherTotal = Array.from(otherSpaceGroups.values()).reduce((s, v) => s + v, 0);
+      for (const count of otherSpaceGroups.values()) {
+        const p = count / otherTotal;
+        if (p > 0) otherEntropy -= p * Math.log2(p);
+      }
+      const maxEntropy = Math.log2(Math.max(2, otherSpaceGroups.size));
+      const normalizedEntropy = maxEntropy > 0 ? otherEntropy / maxEntropy : 0;
+      const otherContribution = Math.max(1, Math.round(normalizedEntropy * Math.min(otherSpaceGroups.size, 5)));
+      familyDiversity += otherContribution;
+    }
 
     await storage.deleteConvergenceSnapshotByCycle(cycleNumber);
     const snapshotId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
