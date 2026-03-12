@@ -1442,7 +1442,7 @@ async function runPhase9_Reactions() {
     await updatePhaseStatus(9, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const topic = getNextReactionTopic();
+    const topic = await getNextReactionTopic();
     const discovered = await discoverChemicalReactions(emit, topic);
     totalReactionsLearned += discovered;
 

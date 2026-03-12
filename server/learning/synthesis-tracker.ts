@@ -1,5 +1,8 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
+import { db } from "../db";
+import { systemState } from "@shared/schema";
+import { eq } from "drizzle-orm";
 import type { Material } from "@shared/schema";
 import type { EventEmitter } from "./engine";
 
@@ -38,11 +41,12 @@ function parsePressureToGpa(raw: unknown): number | null {
   return numVal * 0.000101325;
 }
 
-function repairTruncatedSynthesisJSON(raw: string): { processes: any[] } | null {
+function repairTruncatedArrayJSON(raw: string, arrayKey: string): Record<string, any[]> | null {
   try {
-    const processesMatch = raw.match(/"processes"\s*:\s*\[/);
-    if (!processesMatch) return null;
-    const arrayStart = raw.indexOf("[", processesMatch.index!);
+    const keyPattern = new RegExp(`"${arrayKey}"\\s*:\\s*\\[`);
+    const keyMatch = raw.match(keyPattern);
+    if (!keyMatch) return null;
+    const arrayStart = raw.indexOf("[", keyMatch.index!);
     let depth = 0;
     let lastCompleteObj = -1;
 
@@ -56,9 +60,9 @@ function repairTruncatedSynthesisJSON(raw: string): { processes: any[] } | null 
 
     if (lastCompleteObj > arrayStart) {
       const repairedArray = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
-      const repaired = `{"processes": ${repairedArray}}`;
+      const repaired = `{"${arrayKey}": ${repairedArray}}`;
       const parsed = JSON.parse(repaired);
-      if (Array.isArray(parsed.processes) && parsed.processes.length > 0) return parsed;
+      if (Array.isArray(parsed[arrayKey]) && parsed[arrayKey].length > 0) return parsed;
     }
   } catch {}
   return null;
@@ -77,6 +81,12 @@ function validateSynthesisConditions(proc: any): SynthesisValidationResult {
       }
       if (tempK > SYNTHESIS_VALIDATION_BOUNDS.temperature.max) {
         rejectionReasons.push(`Synthesis temperature ${tempC}C (${tempK.toFixed(0)}K) exceeds ${SYNTHESIS_VALIDATION_BOUNDS.temperature.max}K limit`);
+      }
+      const method = String(proc.method || "").toLowerCase();
+      const isSolidState = method.includes("solid-state") || method.includes("solid state") || method.includes("sintering") || method.includes("calcination");
+      const isSolutionPhase = method.includes("sol-gel") || method.includes("hydrothermal") || method.includes("co-precipitation") || method.includes("coprecipitation") || method.includes("electrodeposition");
+      if (isSolidState && !isSolutionPhase && tempC < 300) {
+        rejectionReasons.push(`Solid-state synthesis at ${tempC}C is likely kinetically hindered — bulk diffusion requires temperatures above the Tammann temperature (~0.5*Tmelt)`);
       }
     }
   }
@@ -190,7 +200,7 @@ Return JSON with key 'processes' containing an array of objects:
     try {
       parsed = JSON.parse(content);
     } catch {
-      parsed = repairTruncatedSynthesisJSON(content);
+      parsed = repairTruncatedArrayJSON(content, "processes");
       if (parsed) {
         emit("log", { phase: "phase-8", event: "Synthesis JSON repaired", detail: `Recovered ${parsed.processes?.length ?? 0} processes from truncated response (${content.length} chars)`, dataSource: "Synthesis Engine" });
       } else {
@@ -328,13 +338,13 @@ Return JSON with 'reactions' array of objects:
     try {
       parsed = JSON.parse(content);
     } catch {
-      const truncated = content.length > 3000;
-      if (truncated) {
-        emit("log", { phase: "phase-9", event: "Reaction response truncated", detail: `Response was ${content.length} chars - may need reduced detail per reaction`, dataSource: "Reaction Engine" });
+      parsed = repairTruncatedArrayJSON(content, "reactions");
+      if (parsed) {
+        emit("log", { phase: "phase-9", event: "Reaction JSON repaired", detail: `Recovered ${parsed.reactions?.length ?? 0} reactions from truncated response (${content.length} chars)`, dataSource: "Reaction Engine" });
       } else {
         emit("log", { phase: "phase-9", event: "Reaction parse error", detail: content.slice(0, 200), dataSource: "Reaction Engine" });
+        return 0;
       }
-      return 0;
     }
 
     const reactions = parsed.reactions ?? [];
@@ -342,6 +352,15 @@ Return JSON with 'reactions' array of objects:
     for (const rxn of reactions) {
       if (!rxn.equation || !rxn.name) continue;
       const id = `rxn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      const sourceStr = String(rxn.source || "").toLowerCase();
+      const hasCitedHandbook = sourceStr.includes("crc") || sourceStr.includes("nist") || sourceStr.includes("janaf") || sourceStr.includes("handbook") || sourceStr.includes("atkins");
+      const hasQuantitativeEnergetics = rxn.energetics && (rxn.energetics.deltaH != null || rxn.energetics.deltaG != null);
+      const theoreticalConfidence: "high" | "medium" | "low" = hasCitedHandbook && hasQuantitativeEnergetics ? "high" : hasQuantitativeEnergetics ? "medium" : "low";
+
+      const enrichedEnergetics = rxn.energetics
+        ? { ...rxn.energetics, theoreticalConfidence }
+        : null;
 
       try {
         await storage.insertChemicalReaction({
@@ -352,7 +371,7 @@ Return JSON with 'reactions' array of objects:
           reactants: rxn.reactants || [],
           products: rxn.products || [],
           conditions: rxn.conditions || {},
-          energetics: rxn.energetics || null,
+          energetics: enrichedEnergetics,
           mechanism: rxn.mechanism || null,
           relevanceToSuperconductor: rxn.relevanceToSuperconductor ?? 0,
           labProcess: rxn.labProcess || null,
@@ -407,10 +426,30 @@ const REACTION_TOPICS = [
   "hydrogen evolution and oxygen evolution reactions",
   "atomic layer deposition half-reactions",
 ];
-let topicIndex = 0;
+let topicIndex = -1;
 
-export function getNextReactionTopic(): string {
+async function loadTopicIndex(): Promise<number> {
+  try {
+    const row = await db.select().from(systemState).where(eq(systemState.key, "reaction_topic_index")).limit(1);
+    if (row.length > 0 && typeof (row[0].value as any)?.index === "number") {
+      return (row[0].value as any).index;
+    }
+  } catch {}
+  return 0;
+}
+
+async function saveTopicIndex(idx: number): Promise<void> {
+  try {
+    await db.insert(systemState).values({ key: "reaction_topic_index", value: { index: idx } }).onConflictDoUpdate({ target: systemState.key, set: { value: { index: idx }, updatedAt: new Date() } });
+  } catch {}
+}
+
+export async function getNextReactionTopic(): Promise<string> {
+  if (topicIndex < 0) {
+    topicIndex = await loadTopicIndex();
+  }
   const t = REACTION_TOPICS[topicIndex % REACTION_TOPICS.length];
   topicIndex++;
+  await saveTopicIndex(topicIndex);
   return t;
 }
