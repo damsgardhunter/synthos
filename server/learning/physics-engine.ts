@@ -2402,6 +2402,19 @@ export function runUnifiedPairingAnalysis(
 
   const all = [bcs, spinFluc, excitonic, plasmonic, flatBand];
 
+  const excitonicActive = excitonic.tcEstimate > 0 && excitonic.confidence > 0.05;
+  const highCorrelation = electronic.correlationStrength > 0.7;
+  if (excitonicActive && highCorrelation) {
+    const bcsIdx = all.indexOf(bcs);
+    if (bcsIdx >= 0 && bcs.tcEstimate > 0) {
+      all[bcsIdx] = {
+        ...bcs,
+        confidence: bcs.confidence * 0.3,
+        description: bcs.description + " (suppressed: excitonic competition at high U/W)",
+      };
+    }
+  }
+
   const active = all.filter(m => m.tcEstimate > 0 && m.confidence > 0.05);
   const activeCount = active.length;
 
