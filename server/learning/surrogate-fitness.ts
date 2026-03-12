@@ -65,6 +65,13 @@ export interface FeedbackLoopStats {
   noveltySearch: { knownCompositions: number; vectorDimensions: number };
 }
 
+export interface RawCalibrationStats {
+  globalMeanAbsError: number;
+  globalOverestimateRatio: number;
+  explorationWeight: number;
+  familyCalibrations: FamilyCalibration[];
+}
+
 const MAX_EVAL_HISTORY = 500;
 const MAX_RECENT_ERRORS = 20;
 const MAX_WEIGHT_HISTORY = 50;
@@ -451,20 +458,64 @@ export function recordEvaluationResult(
   }
 }
 
+const FAMILY_TC_ERROR_THRESHOLDS: Record<string, { high: number; low: number }> = {
+  Hydride: { high: 50, low: 20 },
+  Cuprate: { high: 30, low: 10 },
+  Pnictide: { high: 20, low: 8 },
+  Intermetallic: { high: 5, low: 2 },
+  HeavyFermion: { high: 3, low: 1 },
+  Organic: { high: 5, low: 2 },
+  Other: { high: 15, low: 5 },
+};
+
+function getFamilyTcThresholds(records: EvaluationRecord[]): { high: number; low: number } {
+  const familyCounts = new Map<string, number>();
+  for (const r of records) {
+    familyCounts.set(r.family, (familyCounts.get(r.family) ?? 0) + 1);
+  }
+
+  let dominantFamily = "Other";
+  let maxCount = 0;
+  for (const [f, c] of familyCounts) {
+    if (c > maxCount) { maxCount = c; dominantFamily = f; }
+  }
+
+  return FAMILY_TC_ERROR_THRESHOLDS[dominantFamily] ?? FAMILY_TC_ERROR_THRESHOLDS.Other;
+}
+
 function adaptWeights(): void {
   adaptationCycle++;
 
-  const recent = evaluationHistory.slice(-50).filter(r => r.source !== "surrogate");
+  const recent: EvaluationRecord[] = [];
+  const startIdx = Math.max(0, evaluationHistory.length - 50);
+  for (let i = startIdx; i < evaluationHistory.length; i++) {
+    if (evaluationHistory[i].source !== "surrogate") recent.push(evaluationHistory[i]);
+  }
   if (recent.length < 10) return;
 
-  const tcErrors = recent.map(r => Math.abs(r.predictedTc - r.actualTc));
-  const meanTcError = tcErrors.reduce((s, e) => s + e, 0) / tcErrors.length;
+  let sumTcErr = 0;
+  let truePositives = 0;
+  let falsePositives = 0;
+  let falseNegatives = 0;
+  for (const r of recent) {
+    sumTcErr += Math.abs(r.predictedTc - r.actualTc);
+    if (r.predictedStable && r.actualStable) truePositives++;
+    else if (r.predictedStable && !r.actualStable) falsePositives++;
+    else if (!r.predictedStable && r.actualStable) falseNegatives++;
+  }
+  const meanTcError = sumTcErr / recent.length;
 
-  const stabilityCorrect = recent.filter(r => r.predictedStable === r.actualStable).length / recent.length;
+  const precision = (truePositives + falsePositives) > 0
+    ? truePositives / (truePositives + falsePositives) : 0.5;
+  const recall = (truePositives + falseNegatives) > 0
+    ? truePositives / (truePositives + falseNegatives) : 0.5;
+  const f1 = (precision + recall) > 0
+    ? 2 * precision * recall / (precision + recall) : 0;
 
+  const thresholds = getFamilyTcThresholds(recent);
   const lr = 0.02;
 
-  if (meanTcError > 30) {
+  if (meanTcError > thresholds.high) {
     const tcReduction = Math.min(lr, currentWeights.predictedTc - 0.20);
     if (tcReduction > 0) {
       currentWeights.predictedTc -= tcReduction;
@@ -472,7 +523,7 @@ function adaptWeights(): void {
       currentWeights.novelty = Math.min(0.20, currentWeights.novelty + tcReduction * 0.4);
       currentWeights.stability += tcReduction * 0.2;
     }
-  } else if (meanTcError < 10) {
+  } else if (meanTcError < thresholds.low) {
     const tcIncrease = Math.min(lr, 0.55 - currentWeights.predictedTc);
     if (tcIncrease > 0) {
       currentWeights.predictedTc += tcIncrease;
@@ -485,9 +536,9 @@ function adaptWeights(): void {
     }
   }
 
-  if (stabilityCorrect > 0.8) {
+  if (f1 > 0.75 && precision > 0.7) {
     currentWeights.stability = Math.min(0.35, currentWeights.stability + lr * 0.3);
-  } else if (stabilityCorrect < 0.5) {
+  } else if (precision < 0.5 || f1 < 0.4) {
     const stabReduction = Math.min(lr * 0.3, currentWeights.stability - 0.10);
     if (stabReduction > 0) {
       currentWeights.stability -= stabReduction;
@@ -561,6 +612,35 @@ export function getCalibrationStats(): FeedbackLoopStats {
       knownCompositions: kvCount,
       vectorDimensions: COMP_VECTOR_KEYS.length,
     },
+  };
+}
+
+export function getRawCalibrationStats(): RawCalibrationStats {
+  const familyCalibrations: FamilyCalibration[] = [];
+  for (const [family, acc] of familyErrorAccumulators.entries()) {
+    if (acc.count === 0) continue;
+    familyCalibrations.push({
+      family,
+      sampleCount: acc.count,
+      meanAbsError: acc.sumAbsErr / acc.count,
+      meanSignedError: acc.sumSignedErr / acc.count,
+      overestimateRatio: acc.overestimates / acc.count,
+      calibrationFactor: getFamilyCalibrationFactor(family),
+      stabilityAccuracy: acc.stableCorrect / acc.count,
+    });
+  }
+
+  const calibratedHistory = evaluationHistory.filter(r => r.source !== "surrogate");
+
+  return {
+    globalMeanAbsError: calibratedHistory.length > 0
+      ? calibratedHistory.reduce((s, r) => s + Math.abs(r.predictedTc - r.actualTc), 0) / calibratedHistory.length
+      : 0,
+    globalOverestimateRatio: calibratedHistory.length > 0
+      ? calibratedHistory.filter(r => r.predictedTc > r.actualTc * 1.2).length / calibratedHistory.length
+      : 0,
+    explorationWeight: computeExplorationWeight(),
+    familyCalibrations,
   };
 }
 
