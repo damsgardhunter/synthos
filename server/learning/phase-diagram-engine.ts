@@ -811,10 +811,21 @@ export interface StabilityGateResult {
   configurationalEntropy?: number;
 }
 
-function computeConfigurationalEntropy(formula: string): { deltaSMix: number; numElements: number; fractions: number[] } {
+interface ParsedFormulaCounts {
+  counts: Record<string, number>;
+  elements: string[];
+  totalAtoms: number;
+}
+
+function parseFormulaCached(formula: string): ParsedFormulaCounts {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  return { counts, elements, totalAtoms };
+}
+
+function computeConfigurationalEntropy(parsed: ParsedFormulaCounts): { deltaSMix: number; numElements: number; fractions: number[] } {
+  const { counts, elements, totalAtoms } = parsed;
   if (totalAtoms === 0 || elements.length < 2) {
     return { deltaSMix: 0, numElements: elements.length, fractions: [] };
   }
@@ -824,10 +835,8 @@ function computeConfigurationalEntropy(formula: string): { deltaSMix: number; nu
   return { deltaSMix, numElements: elements.length, fractions };
 }
 
-function estimateSynthesisTemperature(formula: string): number {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+function estimateSynthesisTemperature(parsed: ParsedFormulaCounts): number {
+  const { counts, elements, totalAtoms } = parsed;
   if (totalAtoms === 0 || elements.length === 0) return 1000;
 
   let weightedMeltSum = 0;
@@ -846,9 +855,9 @@ function estimateSynthesisTemperature(formula: string): number {
   return Math.max(300, Math.min(synthTemp, 3000));
 }
 
-function isEntropyStabilized(formula: string, formationEnergy: number): { qualifies: boolean; deltaSMix: number; reason: string } {
+function isEntropyStabilized(parsed: ParsedFormulaCounts, formationEnergy: number): { qualifies: boolean; deltaSMix: number; reason: string } {
   const R = 8.314;
-  const { deltaSMix, numElements } = computeConfigurationalEntropy(formula);
+  const { deltaSMix, numElements } = computeConfigurationalEntropy(parsed);
 
   if (numElements < 4) {
     return { qualifies: false, deltaSMix, reason: "fewer than 4 elements" };
@@ -862,7 +871,7 @@ function isEntropyStabilized(formula: string, formationEnergy: number): { qualif
     return { qualifies: false, deltaSMix, reason: `formation energy ${formationEnergy.toFixed(4)} eV/atom > 0.1 threshold` };
   }
 
-  const synthesisTempK = estimateSynthesisTemperature(formula);
+  const synthesisTempK = estimateSynthesisTemperature(parsed);
   const tDeltaS_eV = (deltaSMix * synthesisTempK) / 96485;
 
   if (tDeltaS_eV < Math.abs(formationEnergy)) {
@@ -890,6 +899,7 @@ function pressureHullMultiplier(pressureGpa: number): number {
 }
 
 export async function passesStabilityGate(formula: string, pressureGpa: number = 0): Promise<StabilityGateResult> {
+  const parsed = parseFormulaCached(formula);
   const compoundType = classifyCompoundType(formula);
   const miedemaApplicable = compoundType === "intermetallic" || compoundType === "pnictide";
   const formationEnergy = miedemaApplicable ? computeMiedemaFormationEnergy(formula) : 0;
@@ -918,7 +928,7 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
   }
 
   if (hullDistance > 0.20 * pMult) {
-    const entropyCheck = isEntropyStabilized(formula, formationEnergy);
+    const entropyCheck = isEntropyStabilized(parsed, formationEnergy);
     if (entropyCheck.qualifies) {
       return {
         pass: true,
@@ -944,14 +954,14 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     if (metastabilityCheck.kineticBarrier > 0.2) {
       return {
         pass: true,
-        verdict: "metastable" as any,
+        verdict: "metastable",
         reason: `exploratory-metastable (distance=${hullDistance.toFixed(4)} eV/atom, barrier=${metastabilityCheck.kineticBarrier.toFixed(3)} eV, lifetime=${metastabilityCheck.estimatedLifetime})`,
         hullDistance,
         formationEnergy,
         kineticBarrier: metastabilityCheck.kineticBarrier,
       };
     }
-    const entropyCheck = isEntropyStabilized(formula, formationEnergy);
+    const entropyCheck = isEntropyStabilized(parsed, formationEnergy);
     if (entropyCheck.qualifies) {
       return {
         pass: true,
@@ -984,7 +994,7 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
         kineticBarrier: metastabilityCheck.kineticBarrier,
       };
     }
-    const entropyCheck2 = isEntropyStabilized(formula, formationEnergy);
+    const entropyCheck2 = isEntropyStabilized(parsed, formationEnergy);
     if (entropyCheck2.qualifies) {
       return {
         pass: true,
@@ -1038,7 +1048,7 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     };
   }
 
-  const entropyCheck3 = isEntropyStabilized(formula, formationEnergy);
+  const entropyCheck3 = isEntropyStabilized(parsed, formationEnergy);
   if (entropyCheck3.qualifies) {
     return {
       pass: true,
@@ -1064,53 +1074,67 @@ const convexHullCache = new Map<string, { result: ConvexHullResult; timestamp: n
 const HULL_CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_HULL_CACHE_SIZE = 200;
 
-function getChemicalSystem(formula: string): string {
-  const elements = formula.match(/[A-Z][a-z]*/g) ?? [];
-  return [...new Set(elements)].sort().join("-");
+function hullCacheKey(formula: string, pressureGpa: number = 0): string {
+  return pressureGpa > 0 ? `${formula}@${pressureGpa}GPa` : formula;
+}
+
+function lruTouch(key: string): void {
+  const entry = convexHullCache.get(key);
+  if (entry) {
+    convexHullCache.delete(key);
+    convexHullCache.set(key, entry);
+  }
+}
+
+function lruEvict(): void {
+  if (convexHullCache.size >= MAX_HULL_CACHE_SIZE) {
+    const oldestKey = convexHullCache.keys().next().value;
+    if (oldestKey) convexHullCache.delete(oldestKey);
+  }
 }
 
 export function invalidateHullCache(formula: string): void {
-  convexHullCache.delete(formula);
+  const keysToDelete: string[] = [];
+  for (const key of convexHullCache.keys()) {
+    if (key === formula || key.startsWith(`${formula}@`)) {
+      keysToDelete.push(key);
+    }
+  }
+  for (const key of keysToDelete) {
+    convexHullCache.delete(key);
+  }
 }
 
 export async function runConvexHullAnalysis(
   emit: EventEmitter,
-  formula: string
+  formula: string,
+  pressureGpa: number = 0
 ): Promise<ConvexHullResult> {
-  const cached = convexHullCache.get(formula);
+  const cacheKey = hullCacheKey(formula, pressureGpa);
+  const cached = convexHullCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp) < HULL_CACHE_TTL_MS) {
-    emit("log", {
-      phase: "phase-11",
-      event: "Convex hull cache hit",
-      detail: `${formula}: using cached result (age=${((Date.now() - cached.timestamp) / 1000).toFixed(0)}s)`,
-      dataSource: "Phase Diagram Engine",
-    });
+    lruTouch(cacheKey);
     return cached.result;
   }
 
   const hullResult = await getCompetingPhases(formula);
   const metastability = assessMetastability(formula, hullResult.energyAboveHull, hullResult.decompositionProducts);
 
-  const decompStr = hullResult.decompositionProducts.length > 0
-    ? hullResult.decompositionProducts.join(" + ")
-    : "none";
+  if (hullResult.isOnHull || metastability.isMetastable) {
+    const decompStr = hullResult.decompositionProducts.length > 0
+      ? hullResult.decompositionProducts.join(" + ")
+      : "none";
 
-  emit("log", {
-    phase: "phase-11",
-    event: "Convex hull computed",
-    detail: `${formula}: eAboveHull=${hullResult.energyAboveHull.toFixed(4)} eV/atom, onHull=${hullResult.isOnHull}, decomposition=${decompStr}, metastable=${metastability.isMetastable}, barrier=${metastability.kineticBarrier.toFixed(3)} eV, lifetime=${metastability.estimatedLifetime}`,
-    dataSource: "Phase Diagram Engine",
-  });
-
-  if (convexHullCache.size >= MAX_HULL_CACHE_SIZE) {
-    let oldestKey = "";
-    let oldestTime = Infinity;
-    for (const [k, v] of convexHullCache) {
-      if (v.timestamp < oldestTime) { oldestTime = v.timestamp; oldestKey = k; }
-    }
-    if (oldestKey) convexHullCache.delete(oldestKey);
+    emit("log", {
+      phase: "phase-11",
+      event: "Convex hull computed",
+      detail: `${formula}${pressureGpa > 0 ? `@${pressureGpa}GPa` : ""}: eAboveHull=${hullResult.energyAboveHull.toFixed(4)} eV/atom, onHull=${hullResult.isOnHull}, decomposition=${decompStr}, metastable=${metastability.isMetastable}, barrier=${metastability.kineticBarrier.toFixed(3)} eV, lifetime=${metastability.estimatedLifetime}`,
+      dataSource: "Phase Diagram Engine",
+    });
   }
-  convexHullCache.set(formula, { result: hullResult, timestamp: Date.now() });
+
+  lruEvict();
+  convexHullCache.set(cacheKey, { result: hullResult, timestamp: Date.now() });
 
   return hullResult;
 }
