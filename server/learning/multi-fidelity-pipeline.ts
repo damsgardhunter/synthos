@@ -15,6 +15,7 @@ import {
   evaluateConvexHullStability,
 } from "./structure-predictor";
 import { classifyFamily, parseFormulaCounts } from "./utils";
+import { ELEMENTAL_DATA } from "./elemental-data";
 import { predictSynthesisFeasibility } from "../synthesis/ml-synthesis-predictor";
 import { generateRetrosynthesisRoutes } from "../synthesis/retrosynthesis-engine";
 import { computeReactionFeasibility } from "../synthesis/thermodynamic-feasibility";
@@ -27,7 +28,7 @@ import { predictPhononProperties } from "../physics/phonon-surrogate";
 import { predictTBProperties } from "../physics/tb-ml-surrogate";
 import { recordStructureFailure } from "../crystal/structure-failure-db";
 
-const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
+const FAMILY_AVG_FORMATION_ENERGY_DEFAULTS: Record<string, number> = {
   Cuprates: -1.2,
   "Heavy Fermions": -0.6,
   Pnictides: -0.8,
@@ -45,8 +46,47 @@ const FAMILY_AVG_FORMATION_ENERGY: Record<string, number> = {
   Other: -0.3,
 };
 
+const familyFormationEnergyCache: Record<string, number> = { ...FAMILY_AVG_FORMATION_ENERGY_DEFAULTS };
+let lastFormationEnergyUpdate = 0;
+const FORMATION_ENERGY_UPDATE_INTERVAL_MS = 10 * 60 * 1000;
+
+function updateFormationEnergyAverages(): void {
+  try {
+    const { getGroundTruthDataset } = require("./ground-truth-store");
+    const datapoints = getGroundTruthDataset();
+    if (!datapoints || datapoints.length < 10) return;
+
+    const familySums: Record<string, { sum: number; count: number }> = {};
+    for (const dp of datapoints) {
+      if (dp.formation_energy == null || !Number.isFinite(dp.formation_energy)) continue;
+      const family = classifyFamily(dp.formula);
+      if (!familySums[family]) familySums[family] = { sum: 0, count: 0 };
+      familySums[family].sum += dp.formation_energy;
+      familySums[family].count++;
+    }
+
+    let updated = 0;
+    for (const [family, { sum, count }] of Object.entries(familySums)) {
+      if (count >= 3) {
+        const gtAvg = sum / count;
+        const defaultVal = FAMILY_AVG_FORMATION_ENERGY_DEFAULTS[family] ?? FAMILY_AVG_FORMATION_ENERGY_DEFAULTS.Other;
+        familyFormationEnergyCache[family] = 0.6 * gtAvg + 0.4 * defaultVal;
+        updated++;
+      }
+    }
+
+    if (updated > 0) {
+      console.log(`[Pipeline] Updated formation energy averages from ground truth: ${updated} families`);
+    }
+  } catch {}
+}
+
 function getFamilyAvgFormationEnergy(family: string): number {
-  return FAMILY_AVG_FORMATION_ENERGY[family] ?? FAMILY_AVG_FORMATION_ENERGY.Other;
+  if (Date.now() - lastFormationEnergyUpdate > FORMATION_ENERGY_UPDATE_INTERVAL_MS) {
+    lastFormationEnergyUpdate = Date.now();
+    updateFormationEnergyAverages();
+  }
+  return familyFormationEnergyCache[family] ?? familyFormationEnergyCache.Other ?? -0.3;
 }
 
 export interface PipelineResult {
@@ -70,22 +110,34 @@ async function logComputationalResult(
   confidence: number
 ) {
   const id = `cr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  try {
-    await storage.insertComputationalResult({
-      id,
-      candidateId,
-      formula,
-      computationType,
-      pipelineStage: stage,
-      inputParams: { stage, candidateId },
-      results,
-      confidence,
-      computeTimeMs,
-      passed,
-      failureReason,
-    });
-  } catch (logErr) {
-    console.log(`[Pipeline] logComputationalResult failed for ${formula}: ${logErr instanceof Error ? logErr.message.slice(0, 80) : "unknown"}`);
+  const payload = {
+    id,
+    candidateId,
+    formula,
+    computationType,
+    pipelineStage: stage,
+    inputParams: { stage, candidateId },
+    results,
+    confidence,
+    computeTimeMs,
+    passed,
+    failureReason,
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await storage.insertComputationalResult(payload);
+      return;
+    } catch (logErr) {
+      const msg = logErr instanceof Error ? logErr.message.slice(0, 100) : "unknown";
+      if (attempt === 0 && /connection|timeout|ECONNRESET/i.test(msg)) {
+        await new Promise(r => setTimeout(r, 200));
+        continue;
+      }
+      console.log(`[Pipeline] logComputationalResult failed for ${formula} stage=${stage}: ${msg}`);
+      if (!passed) {
+        console.log(`[Pipeline] WARNING: Lost negative data for ${formula} (${computationType}) — active learning may miss this sample`);
+      }
+    }
   }
 }
 
@@ -99,7 +151,7 @@ async function stage0_MLFilter(
   const xgb = candidate.xgboostScore ?? 0;
 
   const passed = score > 0.55 && xgb > 0.3;
-  const reason = passed ? null : `Ensemble score ${score.toFixed(2)} or XGBoost ${xgb.toFixed(2)} below thresholds (0.55/0.3)`;
+  const reason = passed ? null : `ML filter: ensemble=${score} xgb=${xgb} below 0.55/0.3`;
 
   await logComputationalResult(
     candidate.id, candidate.formula, 0, "ML_filter",
@@ -132,7 +184,17 @@ export function computeSynthesisScore(formula: string): {
 
   const nElements = formulaElements.length;
   const totalAtoms = Object.values(countMap).reduce((a, b) => a + b, 0);
-  const complexityRaw = 1 - Math.min(1, (nElements - 1) * 0.15 + (totalAtoms - 2) * 0.03);
+
+  let volatilityPenalty = 0;
+  for (const el of formulaElements) {
+    const elData = ELEMENTAL_DATA[el];
+    if (elData?.meltingPoint != null) {
+      if (elData.meltingPoint < 100) volatilityPenalty += 0.12;
+      else if (elData.meltingPoint < 400) volatilityPenalty += 0.06;
+    }
+  }
+
+  const complexityRaw = 1 - Math.min(1, (nElements - 1) * 0.15 + (totalAtoms - 2) * 0.03 + volatilityPenalty);
   const reactionComplexity = Math.max(0, Math.min(1, complexityRaw));
 
   const score =
@@ -258,21 +320,32 @@ async function stage1_ElectronicStructure(
   const electronic = computeElectronicStructure(candidate.formula, candidate.crystalStructure);
   const correlation = assessCorrelationStrength(candidate.formula);
 
-  const isMetallic = electronic.metallicity > 0.45;
+  const HARD_METALLICITY_THRESHOLD = 0.3;
+  const SOFT_METALLICITY_THRESHOLD = 0.45;
+  const isClearlyMetallic = electronic.metallicity > SOFT_METALLICITY_THRESHOLD;
+  const isMarginallyMetallic = electronic.metallicity > HARD_METALLICITY_THRESHOLD && electronic.metallicity <= SOFT_METALLICITY_THRESHOLD;
+  const isNonMetallic = electronic.metallicity <= HARD_METALLICITY_THRESHOLD;
   const hasDOS = electronic.densityOfStatesAtFermi > 0.8;
 
-  const passed = isMetallic && hasDOS;
-  const reason = passed ? null :
-    !isMetallic ? `Non-metallic (metallicity=${electronic.metallicity.toFixed(2)}) - cannot superconduct` :
-    `Insufficient DOS at Fermi level (${electronic.densityOfStatesAtFermi.toFixed(2)})`;
+  const metallicityUncertaintyMultiplier = isMarginallyMetallic
+    ? 1.0 + (SOFT_METALLICITY_THRESHOLD - electronic.metallicity) / (SOFT_METALLICITY_THRESHOLD - HARD_METALLICITY_THRESHOLD)
+    : 1.0;
+
+  const passed = (isClearlyMetallic || isMarginallyMetallic) && hasDOS;
+  let reason: string | null = null;
+  if (isNonMetallic) {
+    reason = `Non-metallic (metallicity=${electronic.metallicity}) — below hard threshold ${HARD_METALLICITY_THRESHOLD}`;
+  } else if (!hasDOS) {
+    reason = `Insufficient DOS at Fermi level (${electronic.densityOfStatesAtFermi})`;
+  }
 
   await logComputationalResult(
     candidate.id, candidate.formula, 1, "electronic_structure",
-    { ...electronic, correlation },
-    passed, reason, Date.now() - start, passed ? 0.65 : 0.85
+    { ...electronic, correlation, marginalMetallicity: isMarginallyMetallic, metallicityUncertaintyMultiplier },
+    passed, reason, Date.now() - start, passed ? (isMarginallyMetallic ? 0.50 : 0.65) : 0.85
   );
 
-  return { passed, reason, data: { electronic, correlation } };
+  return { passed, reason, data: { electronic, correlation, marginalMetallicity: isMarginallyMetallic, metallicityUncertaintyMultiplier } };
 }
 
 async function stage2_PhononCoupling(
