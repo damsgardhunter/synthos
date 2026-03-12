@@ -1035,8 +1035,8 @@ export function computeDimensionalityScore(formula: string, spacegroup?: string 
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
   const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
-  const isKagome = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
-    (elements.includes("Sb") || elements.includes("Sn"));
+  const isKagome = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co") || elements.includes("Ti") || elements.includes("Fe")) &&
+    (elements.includes("Sb") || elements.includes("Sn") || elements.includes("Bi"));
   const hasBoronHoneycomb = elements.includes("B") && elements.some(e => isTransitionMetal(e) || isRareEarth(e));
   const isDichalcogenide = (elements.includes("Nb") || elements.includes("Ta") || elements.includes("Mo") || elements.includes("W")) &&
     (elements.includes("Se") || elements.includes("S") || elements.includes("Te"));
@@ -1098,8 +1098,8 @@ export function detectStructuralMotifs(formula: string, crystalStructure?: strin
     }
   }
 
-  if ((elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
-    (elements.includes("Sb") || elements.includes("Sn"))) {
+  if ((elements.includes("V") || elements.includes("Mn") || elements.includes("Co") || elements.includes("Ti") || elements.includes("Fe")) &&
+    (elements.includes("Sb") || elements.includes("Sn") || elements.includes("Bi"))) {
     motifs.push("Kagome net");
     motifScore = Math.max(motifScore, 0.85);
   }
@@ -1107,8 +1107,17 @@ export function detectStructuralMotifs(formula: string, crystalStructure?: strin
   if (elements.length >= 3 && elements.includes("O")) {
     const metalCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || ["Ca", "Sr", "Ba", "La", "Y"].includes(e)).length;
     if (metalCount >= 2 && oCount >= 3) {
-      motifs.push("Perovskite blocks");
-      motifScore = Math.max(motifScore, 0.6);
+      const sgNorm = crystalStructure ? crystalStructure.toLowerCase().replace(/[\s\/]/g, "") : "";
+      if (sgNorm === "pm-3m" || sgNorm === "pm3m") {
+        motifs.push("Cubic perovskite (Pm-3m)");
+        motifScore = Math.max(motifScore, 0.55);
+      } else if (sgNorm === "i4mmm" || sgNorm === "i4/mmm") {
+        motifs.push("Layered perovskite (Ruddlesden-Popper)");
+        motifScore = Math.max(motifScore, 0.75);
+      } else {
+        motifs.push("Perovskite blocks");
+        motifScore = Math.max(motifScore, 0.6);
+      }
     }
   }
 
@@ -1229,8 +1238,8 @@ export function computeElectronicStructure(
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
   const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
-  const isKagome = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
-    (elements.includes("Sb") || elements.includes("Sn"));
+  const isKagome = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co") || elements.includes("Ti") || elements.includes("Fe")) &&
+    (elements.includes("Sb") || elements.includes("Sn") || elements.includes("Bi"));
   const isDichalcogenide = (elements.includes("Nb") || elements.includes("Ta") || elements.includes("Mo") || elements.includes("W")) &&
     (elements.includes("Se") || elements.includes("S") || elements.includes("Te"));
 
@@ -1323,7 +1332,8 @@ export function computeElectronicStructure(
   let bandFlatness = Math.max(0, Math.min(1.0, 1 - wAvgForFlatness / 3.0));
 
   const avgDOS = vec / Math.max(0.5, wAvgForFlatness);
-  const dosRatio = avgDOS > 0.01 ? densityOfStatesAtFermi / avgDOS : 1.0;
+  const safeDOS = Math.max(1e-6, avgDOS);
+  const dosRatio = safeDOS > 0.01 ? densityOfStatesAtFermi / safeDOS : 1.0;
   let flatBandIndicator = 0;
   if (dosRatio > 3.0) {
     flatBandIndicator = Math.min(1.0, (dosRatio - 3.0) * 0.25 + 0.7);
@@ -2494,8 +2504,8 @@ export function evaluateCompetingPhases(
     });
   }
 
-  const isKagomeSC = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co")) &&
-    (elements.includes("Sb") || elements.includes("Sn"));
+  const isKagomeSC = (elements.includes("V") || elements.includes("Mn") || elements.includes("Co") || elements.includes("Ti") || elements.includes("Fe")) &&
+    (elements.includes("Sb") || elements.includes("Sn") || elements.includes("Bi"));
   if (isKagomeSC) {
     const nestScore = electronicStructure.nestingScore ?? 0;
     const sdwStrengthK = Math.min(1.0, 0.3 + nestScore * 0.5);
