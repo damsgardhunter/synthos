@@ -102,12 +102,13 @@ export function parseFormulaCounts(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
   let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   cleaned = expandParentheses(cleaned);
-  const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  const regex = /([A-Z][a-z]?)(\d+\.?\d*|\.\d+)?/g;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
-    const count = match[2] ? parseFloat(match[2]) : 1;
-    if (isNaN(count)) continue;
+    const raw = match[2];
+    const count = raw ? Number(raw) : 1;
+    if (!count || isNaN(count)) continue;
     counts[el] = (counts[el] || 0) + count;
   }
   return counts;

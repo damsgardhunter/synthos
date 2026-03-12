@@ -627,8 +627,10 @@ function generateId(): string {
   return `synth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const MAX_PRESSURE_GPA = 350;
+
 export function decodePressureGene(gene: number): number {
-  return Math.max(0, Math.min(350, gene * 350));
+  return Math.max(0, Math.min(MAX_PRESSURE_GPA, gene * MAX_PRESSURE_GPA));
 }
 
 function randomGenome(): SynthesisGenome {
@@ -693,7 +695,7 @@ function genomeToSynthesisVector(genome: SynthesisGenome, insights: MultiEngineI
 
   const genomePressureGpa = decodePressureGene(genome.pressureGene);
   let tempScale = 800 + genome.temperatureProfile * 1700;
-  let pressScale = Math.max(genome.pressureProfile * 300, genomePressureGpa);
+  let pressScale = Math.max(genome.pressureProfile * MAX_PRESSURE_GPA, genomePressureGpa);
   let coolRate = 1 + genome.coolingStrategy * 5000;
   let annealTime = 0.5 + genome.annealingIntensity * 100;
   let thermalCycles = Math.round(genome.thermalCycleCount * 20);
@@ -780,6 +782,49 @@ function selectAtmosphere(genome: SynthesisGenome, insights: MultiEngineInsights
   return ATMOSPHERE_OPTIONS[Math.min(idx, ATMOSPHERE_OPTIONS.length - 1)];
 }
 
+function stableOxideFormula(el: string): string {
+  const states = VALENCE_OXIDATION_STATES[el];
+  const posStates = states ? states.filter(s => s > 0) : [3];
+  const ox = posStates.length > 0 ? posStates[0] : 3;
+
+  const oCount = ox;
+  const metalCount = 2;
+  const g = gcd(metalCount, oCount);
+  const m = metalCount / g;
+  const o = oCount / g;
+  return `${m > 1 ? el + m : el}O${o > 1 ? o : ""}`;
+}
+
+function stableHalideFormula(el: string): string {
+  const states = VALENCE_OXIDATION_STATES[el];
+  const posStates = states ? states.filter(s => s > 0) : [2];
+  const ox = posStates.length > 0 ? posStates[0] : 2;
+  return `${el}Cl${ox > 1 ? ox : ""}`;
+}
+
+function stableHydrideFormula(el: string): string {
+  const states = VALENCE_OXIDATION_STATES[el];
+  const posStates = states ? states.filter(s => s > 0) : [2];
+  const ox = posStates.length > 0 ? posStates[0] : 2;
+  return `${el}H${ox > 1 ? ox : ""}`;
+}
+
+function stableCarbonateFormula(el: string): string {
+  const states = VALENCE_OXIDATION_STATES[el];
+  const posStates = states ? states.filter(s => s > 0) : [2];
+  const ox = posStates.length > 0 ? posStates[0] : 2;
+  if (ox === 1) return `${el}2CO3`;
+  if (ox === 2) return `${el}CO3`;
+  if (ox === 3) return `${el}2(CO3)3`;
+  return `${el}(CO3)${Math.floor(ox / 2)}`;
+}
+
+function gcd(a: number, b: number): number {
+  a = Math.abs(a); b = Math.abs(b);
+  while (b) { [a, b] = [b, a % b]; }
+  return a;
+}
+
 function selectPrecursors(genome: SynthesisGenome, insights: MultiEngineInsights): string[] {
   const elements = parseFormulaElements(insights.formula);
   const mc = insights.materialClass.toLowerCase();
@@ -795,14 +840,14 @@ function selectPrecursors(genome: SynthesisGenome, insights: MultiEngineInsights
     case "binary-oxide":
       for (const el of elements) {
         if (["O", "F", "Cl", "H"].includes(el)) continue;
-        precursors.push(`${el}2O3`);
+        precursors.push(stableOxideFormula(el));
       }
       if (elements.includes("O")) precursors.push("O2 gas");
       break;
     case "binary-halide":
       for (const el of elements) {
         if (["F", "Cl", "Br", "H", "O"].includes(el)) continue;
-        precursors.push(`${el}Cl2`);
+        precursors.push(stableHalideFormula(el));
       }
       break;
     case "hydride-precursor":
@@ -810,7 +855,7 @@ function selectPrecursors(genome: SynthesisGenome, insights: MultiEngineInsights
         if (el === "H") continue;
         const data = getElementData(el);
         if (data && (isTransitionMetal(el) || isRareEarth(el))) {
-          precursors.push(`${el}H2`);
+          precursors.push(stableHydrideFormula(el));
         } else {
           precursors.push(`${el} (elemental)`);
         }
@@ -820,7 +865,7 @@ function selectPrecursors(genome: SynthesisGenome, insights: MultiEngineInsights
     case "carbonate":
       for (const el of elements) {
         if (["O", "C", "H", "N"].includes(el)) continue;
-        precursors.push(`${el}CO3`);
+        precursors.push(stableCarbonateFormula(el));
       }
       break;
     default:
