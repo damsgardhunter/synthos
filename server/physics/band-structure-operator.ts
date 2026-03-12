@@ -219,7 +219,9 @@ function parseFormulaElements(formula: string): string[] {
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const cleaned = formula
+    .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
+    .replace(/\s+/g, "");
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   let match;
@@ -960,11 +962,11 @@ function computeNestingVectors(dispersion: BandDispersion): DerivedQuantities["n
   return nesting;
 }
 
-function computeTopologicalInvariants(
+async function computeTopologicalInvariants(
   dispersion: BandDispersion,
   surrogateData: BandSurrogatePrediction,
   formula: string,
-): DerivedQuantities["topologicalInvariants"] {
+): Promise<DerivedQuantities["topologicalInvariants"]> {
   let bandInversionCount = 0;
   for (let b = 0; b < dispersion.nBands - 1; b++) {
     for (let i = 1; i < dispersion.bands.length; i++) {
@@ -995,8 +997,8 @@ function computeTopologicalInvariants(
   let wilsonLoopAvailable = false;
 
   try {
-    const { computeTopologicalInvariants: computeFullTopo } = require("./topological-invariants");
-    const { computeElectronicStructure } = require("../learning/physics-engine");
+    const { computeTopologicalInvariants: computeFullTopo } = await import("./topological-invariants");
+    const { computeElectronicStructure } = await import("../learning/physics-engine");
     const electronic = computeElectronicStructure(formula, null);
     const fullTopo = computeFullTopo(formula, electronic);
 
@@ -1278,7 +1280,7 @@ function computeFermiEnergyByDOS(
   return Number(((eLo + eHi) / 2).toFixed(4));
 }
 
-export function predictBandDispersion(formula: string, prototype?: string): BandOperatorResult {
+export async function predictBandDispersion(formula: string, prototype?: string): Promise<BandOperatorResult> {
   const surrogateData = predictBandStructure(formula, prototype);
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -1378,7 +1380,7 @@ export function predictBandDispersion(formula: string, prototype?: string): Band
   const bandCurvatures = computeBandCurvatures(dispersion);
   const vhsPositions = detectVHSPositions(dispersion);
   const nestingVectors = computeNestingVectors(dispersion);
-  const topologicalInvariants = computeTopologicalInvariants(dispersion, surrogateData, formula);
+  const topologicalInvariants = await computeTopologicalInvariants(dispersion, surrogateData, formula);
 
   const derivedQuantities: DerivedQuantities = {
     effectiveMasses,

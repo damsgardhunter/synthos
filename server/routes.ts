@@ -2022,10 +2022,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/band-operator/dispersion/:formula", generalLimiter, (req, res) => {
+  app.get("/api/band-operator/dispersion/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const result = predictBandDispersion(formula);
+      const result = await predictBandDispersion(formula);
       res.json({
         formula: result.formula,
         dispersion: result.dispersion,
@@ -2037,10 +2037,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/band-operator/:formula", generalLimiter, (req, res) => {
+  app.get("/api/band-operator/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const result = predictBandDispersion(formula);
+      const result = await predictBandDispersion(formula);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to predict band structure", detail: e.message?.slice(0, 200) });
@@ -2805,10 +2805,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/correlation-engine/:formula", generalLimiter, (req, res) => {
+  app.get("/api/correlation-engine/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const analysis = estimateCorrelationEffects(formula, {});
+      const analysis = await estimateCorrelationEffects(formula, {});
       res.json({ formula, ...analysis });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to analyze correlations", detail: e.message?.slice(0, 200) });

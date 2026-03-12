@@ -270,9 +270,9 @@ function estimateElementWeightedBandwidth(elements: string[], formula: string): 
   return Math.max(0.5, wAvg);
 }
 
-function estimateBandwidthFromSurrogate(formula: string): number | null {
+async function estimateBandwidthFromSurrogate(formula: string): Promise<number | null> {
   try {
-    const { predictBandStructure } = require("./band-structure-surrogate");
+    const { predictBandStructure } = await import("./band-structure-surrogate");
     const surr = predictBandStructure(formula);
     if (surr && surr.bandwidthMin > 0) {
       return surr.bandwidthMin;
@@ -281,7 +281,7 @@ function estimateBandwidthFromSurrogate(formula: string): number | null {
   return null;
 }
 
-export function estimateCorrelationEffects(
+export async function estimateCorrelationEffects(
   formula: string,
   mlFeatures: {
     UoverW?: number;
@@ -292,7 +292,7 @@ export function estimateCorrelationEffects(
     pressureGpa?: number;
     bandwidthOverride?: number;
   },
-): CorrelationAnalysis {
+): Promise<CorrelationAnalysis> {
   const elements = parseFormulaElements(formula);
 
   const avgU = elements.reduce((sum, el) => {
@@ -307,7 +307,7 @@ export function estimateCorrelationEffects(
     let bandwidth = mlFeatures.bandwidthOverride ?? null;
 
     if (bandwidth == null) {
-      const surrogateW = estimateBandwidthFromSurrogate(formula);
+      const surrogateW = await estimateBandwidthFromSurrogate(formula);
       if (surrogateW != null && surrogateW > 0.01) {
         bandwidth = surrogateW;
       }
@@ -376,4 +376,16 @@ export function estimateCorrelationEffects(
 
 export function getCorrelationEngineStats(): CorrelationEngineStats {
   return { ...engineStats };
+}
+
+export function resetCorrelationEngineStats(): void {
+  engineStats.materialsAnalyzed = 0;
+  engineStats.regimeBreakdown = {
+    "weakly-correlated": 0,
+    "moderately-correlated": 0,
+    "strongly-correlated": 0,
+    "Mott-proximate": 0,
+  };
+  engineStats.avgCorrelationScore = 0;
+  engineStats.totalScoreSum = 0;
 }

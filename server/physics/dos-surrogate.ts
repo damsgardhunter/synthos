@@ -762,11 +762,14 @@ export function getDOSSurrogateStats(): {
 }
 
 function parseFormula(formula: string): { element: string; count: number }[] {
+  const cleaned = formula
+    .replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)))
+    .replace(/\s+/g, "");
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
   const elements: { element: string; count: number }[] = [];
   let match;
 
-  while ((match = regex.exec(formula)) !== null) {
+  while ((match = regex.exec(cleaned)) !== null) {
     const element = match[1];
     const count = match[2] ? parseFloat(match[2]) : 1;
     if (element && ELEMENTAL_DATA[element]) {

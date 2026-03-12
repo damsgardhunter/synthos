@@ -2884,7 +2884,7 @@ async function runPhase10_Physics() {
 
         let bandOperatorResult: BandOperatorResult | undefined;
         try {
-          bandOperatorResult = predictBandDispersion(
+          bandOperatorResult = await predictBandDispersion(
             candidate.formula,
             crystalInfo.prototype,
           );
@@ -3059,7 +3059,7 @@ async function runPhase10_Physics() {
           } catch (e) { console.error(`[Engine] Phase-10 disorder generation failed for ${candidate.formula}:`, e); }
 
           try {
-            const corrEffects = estimateCorrelationEffects(candidate.formula, {
+            const corrEffects = await estimateCorrelationEffects(candidate.formula, {
               UoverW: result.correlation?.ratio,
               dosAtEF: result.electronicStructure?.densityOfStatesAtFermi,
             });
@@ -6209,7 +6209,7 @@ async function runAutonomousFastPath() {
           } catch (e) { console.error(`[Engine] Defect variant generation failed for ${formula}:`, e); }
 
           try {
-            const corrEffects = estimateCorrelationEffects(formula, {
+            const corrEffects = await estimateCorrelationEffects(formula, {
               UoverW: result.physicsPred?.UoverW,
               dosAtEF: result.physicsPred?.dosAtEF,
             });

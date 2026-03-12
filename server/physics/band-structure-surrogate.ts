@@ -32,7 +32,6 @@ export interface BandSurrogatePrediction {
 const NODE_DIM = 20;
 const HIDDEN_DIM = 28;
 const EDGE_DIM = 7;
-const NUM_HEADS = 9;
 
 interface BandSurrogateWeights {
   W_msg1: number[][];
