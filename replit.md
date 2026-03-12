@@ -618,6 +618,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `strategyId` and `snapshotId` now use `crypto.randomUUID()` instead of `Math.random().toString(36)`. This eliminates collision risk in multi-branch or multi-user scenarios where multiple engine instances write to the same `research_strategies` and `convergence_snapshots` tables.
 - **Pivot Reasons Persisted to Research Log (strategy-analyzer.ts)**:
   - Strategy pivot events are now written to the `research_logs` table via `storage.insertResearchLog()` in addition to the real-time event emitter. Each log entry includes the cycle number, pivot details, and strategy summary. This enables meta-learning: the system can later query which strategy shifts actually correlated with subsequent Tc improvements or discovery breakthroughs.
+- **Composition-Scaled Lattice Constants (structural-mutator.ts)**:
+  - `PROTOTYPE_LATTICE` entries now include a `refRadius` (reference atomic radius in pm) calibrated to the prototype's canonical compound. A new `computeScaledLatticeA()` function calculates `a = baseA * (avgAtomicRadius / refRadius)` using composition-weighted atomic radii from `elemental-data.ts`. This replaces hardcoded lattice constants in `generateDistortedLattices` and `generateStrainedVariants`, so a Pb-based perovskite gets a larger `a` than an Mg-based one, preventing unphysical internal stress when structures are passed to the QE-DFT engine.
+- **Cuprate Detection Refinement (structural-mutator.ts)**:
+  - `assignPrototype` no longer classifies all Cu+O ternary compounds as "layered". It now requires the presence of a charge-reservoir element (Ba, Sr, La, Y, Ca, Tl, Bi, or Hg) alongside Cu and O. Simple copper oxides like Cu2O or CuO correctly fall through to other prototype branches (rocksalt, perovskite, etc.) instead of being misclassified as layered cuprates.
+- **Monoclinic Anharmonic Energy Correction (structural-mutator.ts)**:
+  - `estimateDistortionEnergy` for monoclinic tilts now adds a quartic anharmonic term `0.02 * (magnitude/5)^4` for tilts exceeding 5 degrees. Previously, the pure harmonic `(magnitude/5)^2` underestimated energy for large tilts, causing the engine to suggest "stable" structures at 10+ degree tilts that would represent lattice collapse. The quartic term ensures tilts beyond 5 degrees face rapidly escalating energy penalties while preserving the original harmonic behavior for small tilts.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

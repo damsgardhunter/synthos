@@ -59,19 +59,37 @@ export type PrototypeType =
   | "rocksalt" | "perovskite" | "hexagonal" | "layered"
   | "bcc" | "fcc" | "spinel" | "fluorite" | "rutile" | "pyrite" | "clathrate";
 
-const PROTOTYPE_LATTICE: Record<PrototypeType, { a: number; c_over_a: number; crystalSystem: string }> = {
-  rocksalt:   { a: 4.2,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  perovskite: { a: 3.9,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  hexagonal:  { a: 3.2,  c_over_a: 1.63, crystalSystem: "hexagonal" },
-  layered:    { a: 3.8,  c_over_a: 3.2,  crystalSystem: "tetragonal" },
-  bcc:        { a: 3.3,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  fcc:        { a: 3.6,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  spinel:     { a: 8.1,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  fluorite:   { a: 5.5,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  rutile:     { a: 4.6,  c_over_a: 0.64, crystalSystem: "tetragonal" },
-  pyrite:     { a: 5.4,  c_over_a: 1.0,  crystalSystem: "cubic" },
-  clathrate:  { a: 5.0,  c_over_a: 1.0,  crystalSystem: "cubic" },
+const PROTOTYPE_LATTICE: Record<PrototypeType, { a: number; c_over_a: number; crystalSystem: string; refRadius: number }> = {
+  rocksalt:   { a: 4.2,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 140 },
+  perovskite: { a: 3.9,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 135 },
+  hexagonal:  { a: 3.2,  c_over_a: 1.63, crystalSystem: "hexagonal",   refRadius: 120 },
+  layered:    { a: 3.8,  c_over_a: 3.2,  crystalSystem: "tetragonal",  refRadius: 130 },
+  bcc:        { a: 3.3,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 140 },
+  fcc:        { a: 3.6,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 140 },
+  spinel:     { a: 8.1,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 130 },
+  fluorite:   { a: 5.5,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 135 },
+  rutile:     { a: 4.6,  c_over_a: 0.64, crystalSystem: "tetragonal",  refRadius: 130 },
+  pyrite:     { a: 5.4,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 130 },
+  clathrate:  { a: 5.0,  c_over_a: 1.0,  crystalSystem: "cubic",      refRadius: 125 },
 };
+
+function computeScaledLatticeA(formula: string, prototype: PrototypeType): number {
+  const base = PROTOTYPE_LATTICE[prototype];
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  let weightedRadius = 0;
+  let totalWeight = 0;
+  for (const el of elements) {
+    const d = getElementData(el);
+    const radius = d?.atomicRadius ?? base.refRadius;
+    const weight = counts[el] || 1;
+    weightedRadius += radius * weight;
+    totalWeight += weight;
+  }
+  if (totalWeight === 0) return base.a;
+  const avgRadius = weightedRadius / totalWeight;
+  return base.a * (avgRadius / base.refRadius);
+}
 
 export function assignPrototype(formula: string): PrototypeType {
   const elements = parseFormulaElements(formula);
@@ -99,7 +117,9 @@ export function assignPrototype(formula: string): PrototypeType {
     const nonOCount = totalAtoms - oCount;
     const ratio = oCount / Math.max(1, nonOCount);
 
-    if (elements.includes("Cu") && elements.length >= 3) return "layered";
+    const RESERVOIR_ELS = ["Ba", "Sr", "La", "Y", "Ca", "Tl", "Bi", "Hg"];
+    const hasReservoir = RESERVOIR_ELS.some(r => elements.includes(r));
+    if (elements.includes("Cu") && hasReservoir && elements.length >= 3) return "layered";
 
     if (ratio >= 1.3 && ratio <= 1.7 && nonMetalEls.length <= 1) return "perovskite";
 
@@ -181,8 +201,12 @@ function estimateDistortionEnergy(distortionType: string, magnitude: number, for
       return 0.05 * stiffnessFactor * strainSquared * 100;
     case "orthorhombic":
       return 0.08 * stiffnessFactor * strainSquared * 100;
-    case "monoclinic":
-      return 0.12 * stiffnessFactor * (magnitude / 5) * (magnitude / 5);
+    case "monoclinic": {
+      const normalizedTilt = magnitude / 5;
+      const harmonic = normalizedTilt * normalizedTilt;
+      const anharmonic = magnitude > 5 ? 0.02 * Math.pow(normalizedTilt, 4) : 0;
+      return 0.12 * stiffnessFactor * (harmonic + anharmonic);
+    }
     default:
       return 0.1 * stiffnessFactor * strainSquared * 100;
   }
@@ -190,6 +214,7 @@ function estimateDistortionEnergy(distortionType: string, magnitude: number, for
 
 export function generateDistortedLattices(formula: string, prototype: PrototypeType): DistortedLattice[] {
   const base = PROTOTYPE_LATTICE[prototype];
+  const scaledA = computeScaledLatticeA(formula, prototype);
   const results: DistortedLattice[] = [];
   const MAX_ENERGY = 0.5;
 
@@ -197,7 +222,7 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
   for (const mag of tetragonalDistortions) {
     for (const sign of [1, -1]) {
       const caRatio = base.c_over_a * (1 + sign * mag);
-      const a = base.a;
+      const a = scaledA;
       const c = a * caRatio;
       const energy = estimateDistortionEnergy("tetragonal", mag, formula);
       if (energy <= MAX_ENERGY) {
@@ -214,7 +239,7 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
 
   const orthoDistortions = [0.02, 0.05, 0.08, 0.10];
   for (const mag of orthoDistortions) {
-    const a = base.a;
+    const a = scaledA;
     const b = a * (1 + mag);
     const c = a * base.c_over_a;
     const energy = estimateDistortionEnergy("orthorhombic", mag, formula);
@@ -239,7 +264,7 @@ export function generateDistortedLattices(formula: string, prototype: PrototypeT
         formula,
         distortionType: `monoclinic beta=${beta}deg`,
         magnitude: tiltMag,
-        latticeParams: { a: base.a, b: base.a, c: base.a * base.c_over_a, alpha: 90, beta, gamma: 90 },
+        latticeParams: { a: scaledA, b: scaledA, c: scaledA * base.c_over_a, alpha: 90, beta, gamma: 90 },
         energyPenalty: Math.round(energy * 1000) / 1000,
       });
     }
@@ -448,8 +473,7 @@ function estimateTcChangeFromStrain(strainPercent: number, formula: string): num
 }
 
 export function generateStrainedVariants(formula: string, prototype: PrototypeType): StrainedVariant[] {
-  const base = PROTOTYPE_LATTICE[prototype];
-  const filmA = base.a;
+  const filmA = computeScaledLatticeA(formula, prototype);
   const results: StrainedVariant[] = [];
 
   for (const sub of SUBSTRATES) {
