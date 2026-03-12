@@ -19,7 +19,7 @@ import type {
   InverseDesignCampaign, InsertInverseDesignCampaign,
   DftJob, InsertDftJob
 } from "@shared/schema";
-import { eq, desc, asc, sql, ilike, isNull, inArray } from "drizzle-orm";
+import { eq, desc, asc, sql, ilike, isNull, inArray, and } from "drizzle-orm";
 
 
 export interface IStorage {
@@ -136,6 +136,7 @@ export interface IStorage {
   getDftJob(id: number): Promise<DftJob | undefined>;
   getQueuedDftJobs(limit?: number): Promise<DftJob[]>;
   updateDftJob(id: number, updates: Partial<DftJob>): Promise<void>;
+  updateDftJobIfStatus(id: number, expectedStatus: string, updates: Partial<DftJob>): Promise<boolean>;
   getDftJobsByFormula(formula: string): Promise<DftJob[]>;
   getDftJobsByStatus(status: string): Promise<DftJob[]>;
   getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }>;
@@ -750,6 +751,13 @@ export class DatabaseStorage implements IStorage {
 
   async updateDftJob(id: number, updates: Partial<DftJob>): Promise<void> {
     await db.update(dftJobs).set(updates).where(eq(dftJobs.id, id));
+  }
+
+  async updateDftJobIfStatus(id: number, expectedStatus: string, updates: Partial<DftJob>): Promise<boolean> {
+    const result = await db.update(dftJobs)
+      .set(updates)
+      .where(and(eq(dftJobs.id, id), eq(dftJobs.status, expectedStatus)));
+    return (result as any).rowCount > 0;
   }
 
   async getDftJobsByFormula(formula: string): Promise<DftJob[]> {

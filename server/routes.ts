@@ -535,8 +535,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const candidates = await storage.getSuperconductorCandidates(1000);
       const total = await storage.getSuperconductorCount();
-      const dftEnriched = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "medium");
-      const dftHighCount = candidates.filter(c => c.dataConfidence === "high").length;
+      const dftEnriched = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified" || c.dataConfidence === "medium");
+      const dftHighCount = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified").length;
       const dftMediumCount = candidates.filter(c => c.dataConfidence === "medium").length;
       const analyticalCount = total - dftHighCount - dftMediumCount;
 

@@ -113,7 +113,7 @@ export async function promoteDFTJob(formula: string, newPriority: number): Promi
     if (queued.length === 0) return false;
     for (const job of queued) {
       if ((job.priority ?? 0) < newPriority) {
-        await storage.updateDftJob(job.id, { priority: newPriority } as any);
+        await storage.updateDftJobIfStatus(job.id, "queued", { priority: newPriority } as any);
         console.log(`[DFT-Queue] Promoted job #${job.id} for ${formula}: priority ${job.priority} -> ${newPriority}`);
         if (broadcastFn) {
           broadcastFn("dftJobPromoted", { jobId: job.id, formula, oldPriority: job.priority, newPriority });
@@ -149,10 +149,17 @@ async function processNextJob(): Promise<boolean> {
   const jobStartTime = Date.now();
 
   try {
-    await storage.updateDftJob(job.id, {
+    const claimed = await storage.updateDftJobIfStatus(job.id, "queued", {
       status: "running",
       startedAt: new Date(),
     } as any);
+
+    if (!claimed) {
+      console.log(`[DFT-Queue] Job #${job.id} already claimed by another worker, skipping`);
+      activeWorkers--;
+      activeJobs.delete(job.id);
+      return false;
+    }
 
     console.log(`[DFT-Queue] Processing job #${job.id}: ${job.formula} (type=${job.jobType}, workers=${activeWorkers}/${MAX_CONCURRENT})`);
 
@@ -210,7 +217,7 @@ async function processNextJob(): Promise<boolean> {
         if (candidates.length > 0) {
           const candidate = candidates[0];
           const updates: any = {
-            dataConfidence: "high",
+            dataConfidence: "dft-verified",
           };
 
           if (dftResult.scf) {

@@ -1249,7 +1249,7 @@ async function retrainGNNWithEnrichedData(
   try {
     const enrichedCandidates = enrichedSnapshot ?? await storage.getSuperconductorCandidates(100);
     for (const c of enrichedCandidates) {
-      if (c.dataConfidence === "high" || c.dataConfidence === "medium") {
+      if (c.dataConfidence === "high" || c.dataConfidence === "dft-verified" || c.dataConfidence === "medium") {
         if (seenFormulas.has(c.formula)) continue;
 
         const mlf = c.mlFeatures as Record<string, any> | null;
@@ -1334,7 +1334,7 @@ export async function runActiveLearningCycle(
   const allCandidates = await storage.getSuperconductorCandidates(200);
 
   const eligibleCandidates = allCandidates.filter(c =>
-    c.dataConfidence !== "high" &&
+    c.dataConfidence !== "high" && c.dataConfidence !== "dft-verified" &&
     (c.predictedTc ?? 0) > 5 &&
     isValidFormula(c.formula)
   );

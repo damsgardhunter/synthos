@@ -2026,7 +2026,7 @@ async function runDFTEnrichment() {
     const toEnrich: typeof candidates = [];
     for (const c of sorted) {
       if (toEnrich.length >= 12) break;
-      if (c.dataConfidence === "high") continue;
+      if (c.dataConfidence === "high" || c.dataConfidence === "dft-verified") continue;
       toEnrich.push(c);
     }
 
@@ -2051,7 +2051,7 @@ async function runDFTEnrichment() {
     }
 
     const stage1Candidates = candidates
-      .filter(c => (c.predictedTc ?? 0) > 40 && c.dataConfidence !== "high" && c.dataConfidence !== "medium")
+      .filter(c => (c.predictedTc ?? 0) > 40 && c.dataConfidence !== "high" && c.dataConfidence !== "dft-verified" && c.dataConfidence !== "medium")
       .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
     for (const c of stage1Candidates) {
       if (toEnrich.length >= 30) break;
@@ -2075,7 +2075,7 @@ async function runDFTEnrichment() {
     if (toEnrich.length === 0) return;
 
     const totalCount = await storage.getSuperconductorCount();
-    const highCount = candidates.filter(c => c.dataConfidence === "high").length;
+    const highCount = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified").length;
     const medCount = candidates.filter(c => c.dataConfidence === "medium").length;
     const coveragePct = totalCount > 0 ? ((highCount + medCount) / totalCount * 100).toFixed(1) : "0";
 
@@ -2109,7 +2109,7 @@ async function runDFTEnrichment() {
         const updates: any = {
           xgboostScore: gb.score,
           ensembleScore: ensemble,
-          dataConfidence: dftData.dftCoverage > 0.4 ? "high" : "medium",
+          dataConfidence: dftData.dftCoverage > 0.4 ? "dft-verified" : "medium",
           mlFeatures: { ...existingMl, dftConfidence: dftData.dftCoverage },
         };
 
