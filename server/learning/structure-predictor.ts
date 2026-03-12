@@ -1273,7 +1273,7 @@ export function assessDimensionality(structure: StructurePrediction): {
       scImplication = "Strongly 2D character; potential for enhanced fluctuations; Berezinskii-Kosterlitz-Thouless transition; very high anisotropy";
       break;
     case "1D":
-      scImplication = "Quasi-1D superconductivity prone to fluctuations; Peierls instability competition; unlikely for high Tc";
+      scImplication = "Quasi-1D chains risk Peierls instability and structural phase transitions; 1D character enhances nesting-driven CDW competition; may serve as coupling bridges in higher-dimensional host (e.g. Cu-O chains in YBCO) but bulk 1D Tc suppressed by fluctuations";
       break;
     default:
       scImplication = "Dimensionality unclear; standard analysis applies";
@@ -1309,7 +1309,7 @@ const CHEMICAL_SUBSTITUTION_MAP: Record<string, string[]> = {
   "As": ["P", "Sb"],
   "Se": ["S", "Te"],
   "O": ["S", "Se", "F"],
-  "H": ["Li", "Na"],
+  "H": ["F", "B"],
   "B": ["C", "N", "Al"],
   "N": ["P", "C", "B"],
 };
