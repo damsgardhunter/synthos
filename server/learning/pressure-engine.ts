@@ -48,7 +48,7 @@ function estimateDefaultBulkModulus(el: string): number {
   return 50;
 }
 
-export interface BirchMurnaghanResult {
+export interface MurnaghanResult {
   compressedVolume: number;
   compressedLattice: { a: number; b: number; c: number };
   bulkModulus: number;
@@ -81,7 +81,7 @@ export function relaxStructureAtPressure(
   formula: string,
   pressure: number,
   latticeParams?: { a: number; b: number; c: number }
-): BirchMurnaghanResult {
+): MurnaghanResult {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
@@ -123,7 +123,7 @@ export function relaxStructureAtPressure(
       if (data && data.latticeConstant) {
         V0_a += data.latticeConstant * (counts[el] || 1);
       } else if (data) {
-        V0_a += data.atomicRadius * 2.5 * (counts[el] || 1);
+        V0_a += (data.atomicRadius / 100) * 2.5 * (counts[el] || 1);
       }
     }
     V0_a = Math.max(3.0, V0_a / totalAtoms);

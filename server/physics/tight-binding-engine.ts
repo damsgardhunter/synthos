@@ -857,7 +857,7 @@ export function computeElectronPhononProxies(formula: string, fermiProps: FermiP
   };
 }
 
-function birchMurnaghanVolume(pressure: number, V0: number, B0: number, B0p: number): number {
+function murnaghanVolume(pressure: number, V0: number, B0: number, B0p: number): number {
   if (pressure <= 0 || B0 <= 0) return V0;
   const pOverB = pressure / B0;
   let eta = 1.0 - pOverB * 0.5;
@@ -912,7 +912,7 @@ function scaleHoppingForPressure(t0: number, r0: number, pressure: number, bulkM
   if (pressure <= 0) return t0;
   const V0 = r0 * r0 * r0;
   const b0p = elements ? estimateB0Prime(elements) : 4.0;
-  const V = birchMurnaghanVolume(pressure, V0, bulkModulus, b0p);
+  const V = murnaghanVolume(pressure, V0, bulkModulus, b0p);
   const rRatio = Math.cbrt(V0 / V);
   const n = (el1 && el2) ? getHoppingExponent(el1, el2) : 2.0;
   return t0 * Math.pow(rRatio, n);

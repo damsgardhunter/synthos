@@ -257,7 +257,7 @@ interface BZEvaluation {
   orbChars: { s: number; p: number; d: number; f: number }[];
 }
 
-function birchMurnaghanCompression(pressureGpa: number, K0: number = 150, K0p: number = 4.0): number {
+function murnaghanCompression(pressureGpa: number, K0: number = 150, K0p: number = 4.0): number {
   if (pressureGpa <= 0) return 1.0;
   const eta = 1 + (K0p / K0) * pressureGpa;
   const volumeRatio = Math.pow(eta, -1 / K0p);
@@ -285,7 +285,7 @@ function evaluateBZGrid(
     const hCount = counts["H"] || 0;
     const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
     const K0 = hFraction > 0.5 ? 100 : (elements.some(e => isTransitionMetal(e)) ? 180 : 150);
-    const compression = birchMurnaghanCompression(pressureGpa, K0);
+    const compression = murnaghanCompression(pressureGpa, K0);
     latticeConstant *= compression;
   }
 
@@ -1477,7 +1477,7 @@ export function computeFermiSurface(formula: string, pressureGpa: number = 0): F
       caRatio = 1.623;
     }
     if (pressureGpa > 10) {
-      const compressionFactor = birchMurnaghanCompression(pressureGpa, 100);
+      const compressionFactor = murnaghanCompression(pressureGpa, 100);
       caRatio *= (1 + 0.1 * (1 - compressionFactor));
     }
   }

@@ -99,7 +99,7 @@ function estimateBulkModulus(formula: string): number {
   return bm && bm > 0 ? bm : 100;
 }
 
-function birchMurnaghanVolumeRatio(pressure: number, K0: number, K0p: number = 4.0): number {
+function murnaghanVolumeRatio(pressure: number, K0: number, K0p: number = 4.0): number {
   if (pressure <= 0 || K0 <= 0) return 1.0;
   const pGpa = pressure;
   const eta = 1 + (K0p / K0) * pGpa;
@@ -112,7 +112,7 @@ function compressLattice(
   pressure: number,
   K0: number
 ): { a: number; b: number; c: number; alpha: number; beta: number; gamma: number } {
-  const vRatio = birchMurnaghanVolumeRatio(pressure, K0);
+  const vRatio = murnaghanVolumeRatio(pressure, K0);
   const linearScale = Math.pow(vRatio, 1 / 3);
   return {
     a: lattice.a * linearScale,
@@ -464,7 +464,7 @@ function fallbackPrediction(formula: string, pressureGPa: number): PressureStruc
   }
 
   const K0 = estimateBulkModulus(formula);
-  const vRatio = birchMurnaghanVolumeRatio(pressureGPa, K0);
+  const vRatio = murnaghanVolumeRatio(pressureGPa, K0);
   const scale = Math.pow(vRatio, 1 / 3);
   const baseLattice = 4.0;
 
