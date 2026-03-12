@@ -1893,8 +1893,17 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
 
   let tc: number;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
-  if (Math.abs(denominator) < 1e-6 || denominator <= 0) {
+  if (denominator <= 0) {
     tc = 0;
+  } else if (denominator < 0.05) {
+    const smoothWeight = denominator / 0.05;
+    const rawExponent = -1.04 * (1 + lambda) / denominator;
+    if (rawExponent < -50) {
+      tc = 0;
+    } else {
+      const rawTc = (omegaLogK / 1.2) * Math.exp(rawExponent);
+      tc = Number.isFinite(rawTc) ? rawTc * smoothWeight : 0;
+    }
   } else {
     const lambdaBar = 2.46 * (1 + 3.8 * muStar);
     const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3/2), 1/3);
@@ -1980,7 +1989,15 @@ export interface TcWithUncertainty {
 export function allenDynesTcRaw(lambda: number, omegaLog: number, muStar: number, omega2Avg?: number, isHydride?: boolean): number {
   const omegaLogK = omegaLog * 1.4388;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
-  if (Math.abs(denominator) < 1e-6 || denominator <= 0) return 0;
+  if (denominator <= 0) return 0;
+
+  if (denominator < 0.05) {
+    const smoothWeight = denominator / 0.05;
+    const rawExponent = -1.04 * (1 + lambda) / denominator;
+    if (rawExponent < -50) return 0;
+    const rawTc = (omegaLogK / 1.2) * Math.exp(rawExponent);
+    return Number.isFinite(rawTc) ? Math.max(0, rawTc * smoothWeight) : 0;
+  }
 
   const lambdaBar = 2.46 * (1 + 3.8 * muStar);
   const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 3 / 2), 1 / 3);
@@ -2060,10 +2077,16 @@ export function computeTcWithUncertainty(input: TcUncertaintyInput): TcWithUncer
 
   const N_MC = 500;
   const mcSamples: number[] = [];
+  const clampedLambdaStd = Math.min(lambdaStd, (lambda - 0.01) / 3);
+  const clampedOmegaLogStd = Math.min(omegaLogStd, (omegaLog - 1) / 3);
+  const clampedMuStarStd = Math.min(muStarStd, Math.min((muStar - 0.01) / 3, (0.3 - muStar) / 3));
+  const safeLStd = Math.max(1e-6, clampedLambdaStd);
+  const safeOStd = Math.max(1e-6, clampedOmegaLogStd);
+  const safeMStd = Math.max(1e-6, clampedMuStarStd);
   for (let i = 0; i < N_MC; i++) {
-    const lSample = lambda + lambdaStd * boxMullerNormal();
-    const oSample = omegaLog + omegaLogStd * boxMullerNormal();
-    const mSample = muStar + muStarStd * boxMullerNormal();
+    const lSample = lambda + safeLStd * boxMullerNormal();
+    const oSample = omegaLog + safeOStd * boxMullerNormal();
+    const mSample = muStar + safeMStd * boxMullerNormal();
     const tcSample = allenDynesTcRaw(
       Math.max(0.01, lSample),
       Math.max(1, oSample),
