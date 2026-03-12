@@ -806,8 +806,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - All additive boost accumulators (familyPreferences, elementBoosts, motifBiases, generatorWeightBoosts) now use `cappedAdd(current, boost, cap)` instead of unlimited `(value || 0) + boost`. Caps: family=1.5, element=1.0, motif=1.2, generator=0.8. Prevents a single chemistry (e.g., "La" from 8 theories + 15 edges) from dominating all generation, preserving diversity.
 - **Variable Name Normalization (theory-guided-generator.ts)**:
   - Added `normalizeVariableName()` with `VARIABLE_SYNONYMS` lookup table mapping 25+ physical synonyms to canonical names (e.g., "electron_phonon_coupling"→"lambda", "dos_at_ef"→"DOS_EF", "fermi_nesting"→"nesting_score"). Applied in theory loop, causal edge loop, causal rules loop, and `validateBiasedVariables`. Prevents silent bias failures when causal graph uses "electron_phonon_coupling" but lookup maps expect "lambda".
-- **Effectiveness Multiplier Floor (theory-guided-generator.ts)**:
-  - `computeEffectivenessMultiplier` now enforces `Math.max(MIN_EFFECTIVENESS_FLOOR=0.1, ...)` to prevent near-zero multiplier from completely nullifying theory guidance during low-performance periods. Ensures theories always provide at least a 10% nudge.
+- **Rebalanced Bias Weights (theory-guided-generator.ts)**:
+  - Motif weight increased from 0.25→0.35 and generator weight decreased from 0.15→0.10. Physics (structural motifs) should dictate material design more than engine tool selection. Family (0.3) and element (0.2) weights unchanged.
+- **Consolidated Effectiveness Multiplier Loop (theory-guided-generator.ts)**:
+  - Four separate `Object.keys` loops for applying `effectivenessMultiplier` consolidated into a single `for..of` over the four boost maps.
+- **Time-Weighted Effectiveness Multiplier (theory-guided-generator.ts)**:
+  - Window increased from 5→12 records. Uses exponential time-decay weighting (10-minute half-life via `exp(-ageMs / 600000)`) with a floor of 0.1 per record. Recent outcomes influence the multiplier more than stale ones. Prevents "Excited" tempo cycles (15s each) from overreacting to 75 seconds of noisy DFT results. Combined with the `MIN_EFFECTIVENESS_FLOOR=0.1`, theories always retain influence.
 - **Solid-State Kinetic Hindrance Check (synthesis-tracker.ts)**:
   - `validateSynthesisConditions` now flags solid-state synthesis methods (solid-state, sintering, calcination) at temperatures below 300C as "likely kinetically hindered" since bulk diffusion requires the Tammann temperature (~0.5*Tmelt). Solution-phase methods (sol-gel, hydrothermal, co-precipitation, electrodeposition) are exempt from this check.
 - **Theoretical Confidence Metadata for Reactions (synthesis-tracker.ts)**:

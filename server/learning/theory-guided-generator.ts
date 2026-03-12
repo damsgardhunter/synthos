@@ -242,14 +242,14 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
       const motifs = VARIABLE_TO_MOTIF_MAP[varName];
       if (motifs) {
         for (const m of motifs) {
-          motifBiases[m] = cappedAdd(motifBiases[m] || 0, importance * 0.25, MAX_MOTIF_BOOST);
+          motifBiases[m] = cappedAdd(motifBiases[m] || 0, importance * 0.35, MAX_MOTIF_BOOST);
         }
       }
 
       const generators = VARIABLE_TO_GENERATOR_MAP[varName];
       if (generators) {
         for (const gen of generators) {
-          generatorWeightBoosts[gen] = cappedAdd(generatorWeightBoosts[gen] || 0, importance * 0.15, MAX_GENERATOR_BOOST);
+          generatorWeightBoosts[gen] = cappedAdd(generatorWeightBoosts[gen] || 0, importance * 0.10, MAX_GENERATOR_BOOST);
         }
       }
     }
@@ -316,17 +316,10 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
   }
 
   const effectivenessMultiplier = computeEffectivenessMultiplier();
-  for (const key of Object.keys(generatorWeightBoosts)) {
-    generatorWeightBoosts[key] *= effectivenessMultiplier;
-  }
-  for (const key of Object.keys(familyPreferences)) {
-    familyPreferences[key] *= effectivenessMultiplier;
-  }
-  for (const key of Object.keys(elementBoosts)) {
-    elementBoosts[key] *= effectivenessMultiplier;
-  }
-  for (const key of Object.keys(motifBiases)) {
-    motifBiases[key] *= effectivenessMultiplier;
+  for (const boostMap of [generatorWeightBoosts, familyPreferences, elementBoosts, motifBiases]) {
+    for (const key of Object.keys(boostMap)) {
+      boostMap[key] *= effectivenessMultiplier;
+    }
   }
 
   confidence = Math.min(1, (sourceTheories * 0.1 + sourceCausalEdges * 0.05) * effectivenessMultiplier);
@@ -350,15 +343,22 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
 function computeEffectivenessMultiplier(): number {
   if (performanceHistory.length < 2) return 1.0;
 
-  const recent = performanceHistory.slice(-5);
-  let positiveCount = 0;
+  const recent = performanceHistory.slice(-12);
+  const now = Date.now();
+  let weightedPositive = 0;
+  let totalWeight = 0;
+
   for (const record of recent) {
+    const ageMs = now - record.biasAppliedAt;
+    const decayWeight = Math.exp(-ageMs / (10 * 60 * 1000));
+    const w = Math.max(0.1, decayWeight);
+    totalWeight += w;
     if (record.bestTcAfter > 0 && record.passRateAfter > 0.05) {
-      positiveCount++;
+      weightedPositive += w;
     }
   }
 
-  const ratio = positiveCount / recent.length;
+  const ratio = totalWeight > 0 ? weightedPositive / totalWeight : 0.5;
   return Math.max(MIN_EFFECTIVENESS_FLOOR, 0.5 + ratio);
 }
 
