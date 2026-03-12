@@ -3454,9 +3454,9 @@ export function simulatePressureEffects(
   for (const p of pressures) {
     const bwFactor = 1 + p * 0.008;
     const phononBoost = 1 + p * 0.012;
-    const lambdaDecay = Math.max(0.7, 1 - p * 0.003);
+    const lambdaFromBW = Math.max(0.5, 1.0 / bwFactor);
 
-    let adjLambda = coupling.lambda * lambdaDecay;
+    let adjLambda = coupling.lambda * lambdaFromBW;
     if (hRatio >= 6 && p >= 50) {
       adjLambda = coupling.lambda * (1 + (p - 50) * 0.005);
       adjLambda = Math.min(adjLambda, coupling.lambda * 1.8);
@@ -3610,12 +3610,21 @@ export function computeAlpha2F(
 
   const binWidth = nBins > 1 ? phononDOS.frequencies[1] - phononDOS.frequencies[0] : 1;
 
+  const maxFreq = phononDOS.frequencies[nBins - 1] || 1;
+  const debyeCutoff = maxFreq * 0.08;
+
   for (let i = 0; i < nBins; i++) {
     const omega = phononDOS.frequencies[i];
     const g = phononDOS.dos[i];
     if (omega <= 0 || g <= 0) continue;
 
-    alpha2F[i] = couplingPrefactor * g * omega * 0.01;
+    let effectiveG = g;
+    if (omega < debyeCutoff) {
+      const debyeWeight = (omega / debyeCutoff) * (omega / debyeCutoff);
+      effectiveG = g * debyeWeight;
+    }
+
+    alpha2F[i] = couplingPrefactor * effectiveG * omega * 0.01;
     alpha2F[i] = Number(alpha2F[i].toFixed(6));
 
     const lambdaContrib = 2 * alpha2F[i] / omega * binWidth;
