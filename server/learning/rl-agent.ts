@@ -539,6 +539,7 @@ export class RLChemicalSpaceAgent {
   private totalUpdates = 0;
   private elementSuccessRates: Map<string, { successes: number; total: number }> = new Map();
   private pairSuccessRates: Map<string, { successes: number; total: number; avgTc: number }> = new Map();
+  private _pairStatsCache: Map<string, { total: number; avgTc: number }> = new Map();
   private bestActionSequence: { action: RLAction; reward: number }[] = [];
   private motifPickHistory: Map<string, { count: number; lastBestTc: number }> = new Map();
   private lastKnownStagnation = 0;
@@ -1061,6 +1062,8 @@ export class RLChemicalSpaceAgent {
       this.rejectionCategoryCounts[rejectCategory] = (this.rejectionCategoryCounts[rejectCategory] || 0) + 1;
     }
 
+    this._pairStatsCache.clear();
+
     for (const el of elements) {
       const group = ELEMENT_GROUPS.find(g => (g.elements as readonly string[]).includes(el));
       if (!group) continue;
@@ -1432,17 +1435,31 @@ export class RLChemicalSpaceAgent {
       let pairSuccessBonus = 0;
       let pairCount = 0;
 
+      const pairCache = this._pairStatsCache;
+
       for (const [el1, el2] of elementPairs) {
         const key = this.makeElementPairKey(el1, el2);
-        const stats = this.pairSuccessRates.get(key);
         pairCount++;
 
-        if (!stats || stats.total < 3) {
+        let total: number;
+        let avgTc: number;
+        const cached = pairCache.get(key);
+        if (cached !== undefined) {
+          total = cached.total;
+          avgTc = cached.avgTc;
+        } else {
+          const stats = this.pairSuccessRates.get(key);
+          total = stats ? stats.total : 0;
+          avgTc = stats ? stats.avgTc : 0;
+          pairCache.set(key, { total, avgTc });
+        }
+
+        if (total < 3) {
           pairNoveltyBonus += 1.0;
         }
 
-        if (stats && stats.total >= 3 && stats.avgTc > 50) {
-          pairSuccessBonus += Math.min(1.0, stats.avgTc / 200);
+        if (total >= 3 && avgTc > 50) {
+          pairSuccessBonus += Math.min(1.0, avgTc / 200);
         }
       }
 
@@ -1594,7 +1611,8 @@ function selectThirdGroupByOrbital(orbitalPref: string, vecTarget: number): numb
   switch (orbitalPref) {
     case "d":
     case "sd":
-      if (vecTarget >= 8) return 2;
+      if (vecTarget >= 8) return 6;
+      if (vecTarget >= 6) return Math.random() < 0.6 ? 3 : 6;
       return 3;
     case "f":
       return 5;
