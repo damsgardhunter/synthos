@@ -624,6 +624,14 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `assignPrototype` no longer classifies all Cu+O ternary compounds as "layered". It now requires the presence of a charge-reservoir element (Ba, Sr, La, Y, Ca, Tl, Bi, or Hg) alongside Cu and O. Simple copper oxides like Cu2O or CuO correctly fall through to other prototype branches (rocksalt, perovskite, etc.) instead of being misclassified as layered cuprates.
 - **Monoclinic Anharmonic Energy Correction (structural-mutator.ts)**:
   - `estimateDistortionEnergy` for monoclinic tilts now adds a quartic anharmonic term `0.02 * (magnitude/5)^4` for tilts exceeding 5 degrees. Previously, the pure harmonic `(magnitude/5)^2` underestimated energy for large tilts, causing the engine to suggest "stable" structures at 10+ degree tilts that would represent lattice collapse. The quartic term ensures tilts beyond 5 degrees face rapidly escalating energy penalties while preserving the original harmonic behavior for small tilts.
+- **Hoisted Formula Parsing in Distortion Pipeline (structural-mutator.ts)**:
+  - `estimateDistortionEnergy` was called 14+ times per formula inside `generateDistortedLattices` loops, each call re-parsing the formula via regex. Now `precomputeElasticData()` runs once per formula to extract the weighted-average bulk modulus into a `PrecomputedElastic` struct, and `estimateDistortionEnergyFast()` takes the pre-computed data as argument. Eliminates ~13 redundant regex parses per formula.
+- **Pre-Filter Before Object Allocation (structural-mutator.ts)**:
+  - Energy is now computed and checked before creating the `latticeParams` object. If `energy > MAX_ENERGY`, the loop `continue`s immediately without allocating the lattice parameter object or the result entry, reducing GC pressure during high-throughput discovery cycles.
+- **Space Group Propagation (structural-mutator.ts)**:
+  - `DistortedLattice` now includes a `spaceGroup` field. A `distortedSpaceGroup()` function maps (prototype, distortionType) to the correct post-distortion space group using crystallographic symmetry rules (e.g., cubic Pm-3m perovskite → tetragonal P4/mmm, orthorhombic Pnma, or monoclinic P2_1/m). This prevents "Inconsistent Symmetry" errors when the QE-DFT engine tries to run calculations on distorted structures with the wrong parent symmetry.
+- **Stability Tier Classification (structural-mutator.ts)**:
+  - `MAX_ENERGY` lowered from 0.5 to 0.2 eV/atom. Each `DistortedLattice` now carries a `stabilityTier` field: "stable" (≤0.05 eV), "metastable" (≤0.15 eV), or "highly-unstable" (>0.15 eV). The log output reports the count of highly-unstable variants so researchers can assess the quality of the structural search. The tighter threshold eliminates the most unphysical structures from consuming DFT compute.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

@@ -169,31 +169,82 @@ export function assignPrototype(formula: string): PrototypeType {
   return "bcc";
 }
 
+export type StabilityTier = "stable" | "metastable" | "highly-unstable";
+
 export interface DistortedLattice {
   formula: string;
   distortionType: string;
   magnitude: number;
   latticeParams: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number };
+  spaceGroup: string;
   energyPenalty: number;
+  stabilityTier: StabilityTier;
 }
 
-function estimateDistortionEnergy(distortionType: string, magnitude: number, formula: string): number {
+const PROTOTYPE_SPACE_GROUPS: Record<PrototypeType, string> = {
+  rocksalt: "Fm-3m", perovskite: "Pm-3m", hexagonal: "P6_3/mmc",
+  layered: "I4/mmm", bcc: "Im-3m", fcc: "Fm-3m", spinel: "Fd-3m",
+  fluorite: "Fm-3m", rutile: "P4_2/mnm", pyrite: "Pa-3", clathrate: "Pm-3n",
+};
+
+function distortedSpaceGroup(prototype: PrototypeType, distortionType: string): string {
+  const base = PROTOTYPE_SPACE_GROUPS[prototype];
+  if (distortionType === "tetragonal") {
+    switch (prototype) {
+      case "perovskite": return "P4/mmm";
+      case "rocksalt": case "fcc": case "fluorite": return "I4/mmm";
+      case "bcc": return "I4/mmm";
+      case "spinel": return "I4_1/amd";
+      default: return base;
+    }
+  }
+  if (distortionType === "orthorhombic") {
+    switch (prototype) {
+      case "perovskite": return "Pnma";
+      case "rocksalt": case "fcc": return "Fmmm";
+      case "bcc": return "Immm";
+      default: return "Pmmm";
+    }
+  }
+  if (distortionType === "monoclinic") {
+    switch (prototype) {
+      case "perovskite": return "P2_1/m";
+      case "layered": return "C2/m";
+      default: return "P2/m";
+    }
+  }
+  return base;
+}
+
+function classifyStability(energy: number): StabilityTier {
+  if (energy <= 0.05) return "stable";
+  if (energy <= 0.15) return "metastable";
+  return "highly-unstable";
+}
+
+interface PrecomputedElastic {
+  stiffnessFactor: number;
+}
+
+function precomputeElasticData(formula: string): PrecomputedElastic {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
-  const totalAtoms = getTotalAtoms(counts);
-
   let avgBulkModulus = 0;
   let count = 0;
   for (const el of elements) {
     const d = getElementData(el);
     if (d?.bulkModulus) {
-      avgBulkModulus += d.bulkModulus * (counts[el] || 1);
-      count += (counts[el] || 1);
+      const w = counts[el] || 1;
+      avgBulkModulus += d.bulkModulus * w;
+      count += w;
     }
   }
   avgBulkModulus = count > 0 ? avgBulkModulus / count : 100;
+  return { stiffnessFactor: avgBulkModulus / 100 };
+}
 
-  const stiffnessFactor = avgBulkModulus / 100;
+function estimateDistortionEnergyFast(distortionType: string, magnitude: number, elastic: PrecomputedElastic): number {
+  const { stiffnessFactor } = elastic;
   const strainSquared = magnitude * magnitude;
 
   switch (distortionType) {
@@ -212,62 +263,66 @@ function estimateDistortionEnergy(distortionType: string, magnitude: number, for
   }
 }
 
+const MAX_ENERGY = 0.2;
+
 export function generateDistortedLattices(formula: string, prototype: PrototypeType): DistortedLattice[] {
   const base = PROTOTYPE_LATTICE[prototype];
   const scaledA = computeScaledLatticeA(formula, prototype);
+  const elastic = precomputeElasticData(formula);
   const results: DistortedLattice[] = [];
-  const MAX_ENERGY = 0.5;
 
   const tetragonalDistortions = [0.10, 0.15, 0.20, 0.25, 0.30];
   for (const mag of tetragonalDistortions) {
     for (const sign of [1, -1]) {
-      const caRatio = base.c_over_a * (1 + sign * mag);
+      const energy = estimateDistortionEnergyFast("tetragonal", mag, elastic);
+      if (energy > MAX_ENERGY) continue;
       const a = scaledA;
-      const c = a * caRatio;
-      const energy = estimateDistortionEnergy("tetragonal", mag, formula);
-      if (energy <= MAX_ENERGY) {
-        results.push({
-          formula,
-          distortionType: `tetragonal c/a ${sign > 0 ? "+" : "-"}${(mag * 100).toFixed(0)}%`,
-          magnitude: mag,
-          latticeParams: { a, b: a, c, alpha: 90, beta: 90, gamma: 90 },
-          energyPenalty: Math.round(energy * 1000) / 1000,
-        });
-      }
+      const c = a * base.c_over_a * (1 + sign * mag);
+      results.push({
+        formula,
+        distortionType: `tetragonal c/a ${sign > 0 ? "+" : "-"}${(mag * 100).toFixed(0)}%`,
+        magnitude: mag,
+        latticeParams: { a, b: a, c, alpha: 90, beta: 90, gamma: 90 },
+        spaceGroup: distortedSpaceGroup(prototype, "tetragonal"),
+        energyPenalty: Math.round(energy * 1000) / 1000,
+        stabilityTier: classifyStability(energy),
+      });
     }
   }
 
   const orthoDistortions = [0.02, 0.05, 0.08, 0.10];
   for (const mag of orthoDistortions) {
+    const energy = estimateDistortionEnergyFast("orthorhombic", mag, elastic);
+    if (energy > MAX_ENERGY) continue;
     const a = scaledA;
     const b = a * (1 + mag);
     const c = a * base.c_over_a;
-    const energy = estimateDistortionEnergy("orthorhombic", mag, formula);
-    if (energy <= MAX_ENERGY) {
-      results.push({
-        formula,
-        distortionType: `orthorhombic b/a +${(mag * 100).toFixed(0)}%`,
-        magnitude: mag,
-        latticeParams: { a, b, c, alpha: 90, beta: 90, gamma: 90 },
-        energyPenalty: Math.round(energy * 1000) / 1000,
-      });
-    }
+    results.push({
+      formula,
+      distortionType: `orthorhombic b/a +${(mag * 100).toFixed(0)}%`,
+      magnitude: mag,
+      latticeParams: { a, b, c, alpha: 90, beta: 90, gamma: 90 },
+      spaceGroup: distortedSpaceGroup(prototype, "orthorhombic"),
+      energyPenalty: Math.round(energy * 1000) / 1000,
+      stabilityTier: classifyStability(energy),
+    });
   }
 
   const monoclinicTilts = [85, 87, 89, 91, 93, 95];
   for (const beta of monoclinicTilts) {
     if (beta === 90) continue;
     const tiltMag = Math.abs(90 - beta);
-    const energy = estimateDistortionEnergy("monoclinic", tiltMag, formula);
-    if (energy <= MAX_ENERGY) {
-      results.push({
-        formula,
-        distortionType: `monoclinic beta=${beta}deg`,
-        magnitude: tiltMag,
-        latticeParams: { a: scaledA, b: scaledA, c: scaledA * base.c_over_a, alpha: 90, beta, gamma: 90 },
-        energyPenalty: Math.round(energy * 1000) / 1000,
-      });
-    }
+    const energy = estimateDistortionEnergyFast("monoclinic", tiltMag, elastic);
+    if (energy > MAX_ENERGY) continue;
+    results.push({
+      formula,
+      distortionType: `monoclinic beta=${beta}deg`,
+      magnitude: tiltMag,
+      latticeParams: { a: scaledA, b: scaledA, c: scaledA * base.c_over_a, alpha: 90, beta, gamma: 90 },
+      spaceGroup: distortedSpaceGroup(prototype, "monoclinic"),
+      energyPenalty: Math.round(energy * 1000) / 1000,
+      stabilityTier: classifyStability(energy),
+    });
   }
 
   return results;
@@ -514,16 +569,12 @@ export function runStructuralMutations(
   const allLayered: LayeredStructure[] = [];
   const allVacancy: VacancyStructure[] = [];
   const allStrained: StrainedVariant[] = [];
-  let filteredByEnergy = 0;
   const seenFormulas = new Set<string>();
 
   for (const candidate of topCandidates) {
     const prototype = assignPrototype(candidate.formula);
 
-    const distortedRaw = generateDistortedLattices(candidate.formula, prototype);
-    const distortedBefore = distortedRaw.length;
-    const distorted = distortedRaw.filter(d => d.energyPenalty <= 0.5);
-    filteredByEnergy += distortedBefore - distorted.length;
+    const distorted = generateDistortedLattices(candidate.formula, prototype);
 
     for (const d of distorted) {
       const key = `distort-${d.formula}-${d.distortionType}`;
@@ -560,12 +611,13 @@ export function runStructuralMutations(
   }
 
   const totalGenerated = allDistorted.length + allLayered.length + allVacancy.length + allStrained.length;
+  const highlyUnstableCount = allDistorted.filter(d => d.stabilityTier === "highly-unstable").length;
 
   if (emit) {
     emit("log", {
       phase: "engine",
       event: "Structural mutations complete",
-      detail: `Structural mutations: ${allDistorted.length} distorted, ${allLayered.length} layered, ${allVacancy.length} vacancy, ${allStrained.length} strained variants generated (${filteredByEnergy} filtered by energy)`,
+      detail: `Structural mutations: ${allDistorted.length} distorted (${highlyUnstableCount} highly-unstable), ${allLayered.length} layered, ${allVacancy.length} vacancy, ${allStrained.length} strained variants generated`,
       dataSource: "Structural Mutator",
     });
   }
@@ -575,7 +627,7 @@ export function runStructuralMutations(
     layered: allLayered,
     vacancy: allVacancy,
     strained: allStrained,
-    filteredByEnergy,
+    filteredByEnergy: 0,
     totalGenerated,
   };
 }
