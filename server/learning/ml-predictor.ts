@@ -651,7 +651,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
       const omega2_meV2 = omega2 * 0.124 * 0.124;
       const mass_eV = avgMass * 931.494e6;
       lambdaProxy = (dosAtEF * avgEta) / (mass_eV * omega2_meV2 * 1e-6);
-      lambdaProxy = Math.min(5.0, lambdaProxy);
+      lambdaProxy = Math.min(3.0, lambdaProxy);
     }
     phononHardnessVal = coupling.omega2Avg > 0 ? coupling.omegaLog / coupling.omega2Avg : 0;
   }

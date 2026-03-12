@@ -850,7 +850,7 @@ export function computeElectronPhononProxies(formula: string, fermiProps: FermiP
 
   return {
     hopfieldEta,
-    lambdaProxy: Math.min(5.0, Math.max(0, lambdaProxy)),
+    lambdaProxy: Math.min(3.0, Math.max(0, lambdaProxy)),
     bondStiffness,
     debyeTemperature: debyeTemp,
     avgForceConstant,

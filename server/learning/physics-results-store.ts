@@ -144,9 +144,10 @@ export function getPhysicsFeatures(formula: string): PhysicsFeatures | null {
   const maxMode = modeValues.length > 0 ? Math.max(...modeValues) : 0;
   const minMode = modeValues.length > 0 ? Math.min(...modeValues.filter(v => v > 0.001)) : 0.001;
 
-  const lambdaProxy = result.dosAtEF > 0 && result.omegaLog > 0
+  const rawLambdaProxy = result.dosAtEF > 0 && result.omegaLog > 0
     ? result.dosAtEF * result.alpha2FPeak / (result.omegaLog * 0.01)
     : 0;
+  const lambdaProxy = Math.min(3.0, Math.max(0, rawLambdaProxy));
 
   const phononHardness = result.omega2 > 0 ? result.omegaLog / result.omega2 : 0;
 
@@ -225,11 +226,11 @@ export function computeDerivedFeatures(result: PhysicsResult): DerivedFeatures {
   let couplingEfficiency = 0;
   if (result.lambda > 0.01 && result.tc > 0 && result.omegaLog > 0) {
     const adDenom = result.lambda - result.muStar * (1 + 0.62 * result.lambda);
-    if (adDenom > 0.01) {
+    if (adDenom > 0.05) {
       const expArg = -1.04 * (1 + result.lambda) / adDenom;
-      if (expArg > -50 && expArg < 50) {
+      if (expArg > -30 && expArg < 30) {
         const adVal = result.omegaLog * Math.exp(expArg);
-        couplingEfficiency = adVal > 1e-6 ? result.tc / adVal : 0;
+        couplingEfficiency = adVal > 1e-4 ? result.tc / adVal : 0;
       }
     }
   }
@@ -242,7 +243,7 @@ export function computeDerivedFeatures(result: PhysicsResult): DerivedFeatures {
     electronPhononCouplingDensity,
     spectralWeight,
     anharmonicRatio,
-    couplingEfficiency: Number.isFinite(couplingEfficiency) ? Math.min(5, Math.max(0, couplingEfficiency)) : 0,
+    couplingEfficiency: Number.isFinite(couplingEfficiency) ? Math.min(2.0, Math.max(0, couplingEfficiency)) : 0,
   };
 }
 
