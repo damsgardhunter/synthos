@@ -13,6 +13,24 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
+export interface ParsedComposition {
+  counts: Record<string, number>;
+  elements: string[];
+  fractions: Record<string, number>;
+  totalAtoms: number;
+}
+
+export function parseComposition(formula: string): ParsedComposition {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  const fractions: Record<string, number> = {};
+  for (const el of elements) {
+    fractions[el] = totalAtoms > 0 ? counts[el] / totalAtoms : 0;
+  }
+  return { counts, elements, fractions, totalAtoms };
+}
+
 export interface StructurePrediction {
   spaceGroup: string;
   crystalSystem: string;
@@ -425,9 +443,8 @@ export async function evaluateConvexHullStability(
   };
 }
 
-export function matchPrototype(formula: string): typeof KNOWN_PROTOTYPES[string] | null {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
+export function matchPrototype(formula: string, comp?: ParsedComposition): typeof KNOWN_PROTOTYPES[string] | null {
+  const { elements, counts } = comp || parseComposition(formula);
 
   const has = (el: string) => elements.includes(el);
   const hasAny = (...els: string[]) => els.some(e => has(e));
@@ -583,9 +600,8 @@ function getPrototypeCARatio(prototype: string | null): number | null {
   return null;
 }
 
-export function computeGoldschmidtTolerance(formula: string): { factor: number; prediction: string; stoichiometryValid: boolean } | null {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
+export function computeGoldschmidtTolerance(formula: string, comp?: ParsedComposition): { factor: number; prediction: string; stoichiometryValid: boolean } | null {
+  const { counts, elements } = comp || parseComposition(formula);
 
   if (elements.length < 3 || !elements.includes("O")) return null;
 
@@ -614,8 +630,11 @@ export function computeGoldschmidtTolerance(formula: string): { factor: number; 
 
   const aSite = sorted[0];
   const bSite = sorted[1];
-  const rA = (getElementData(aSite)?.atomicRadius ?? 150) / 100;
-  const rB = (getElementData(bSite)?.atomicRadius ?? 70) / 100;
+  const dataA = getElementData(aSite);
+  const dataB = getElementData(bSite);
+  if (!dataA?.atomicRadius || !dataB?.atomicRadius) return null;
+  const rA = dataA.atomicRadius / 100;
+  const rB = dataB.atomicRadius / 100;
   const rO = 1.40;
 
   const t = (rA + rO) / (Math.sqrt(2) * (rB + rO));
@@ -636,10 +655,8 @@ export function computeGoldschmidtTolerance(formula: string): { factor: number; 
   return { factor: Number(t.toFixed(4)), prediction, stoichiometryValid: true };
 }
 
-export function vegardLatticeParameter(formula: string): number | null {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+export function vegardLatticeParameter(formula: string, comp?: ParsedComposition, proto?: typeof KNOWN_PROTOTYPES[string] | null): number | null {
+  const { counts, elements, totalAtoms } = comp || parseComposition(formula);
 
   if (elements.length < 2 || totalAtoms === 0) return null;
 
@@ -674,8 +691,8 @@ export function vegardLatticeParameter(formula: string): number | null {
     const avgCation = cationRadiusSum / cationCount;
     const avgAnion = anionRadiusSum / anionCount;
 
-    const proto = matchPrototype(formula);
-    const protoName = proto?.prototype?.toLowerCase() || "";
+    const resolvedProto = proto !== undefined ? proto : matchPrototype(formula, comp);
+    const protoName = resolvedProto?.prototype?.toLowerCase() || "";
 
     if (protoName.includes("perovskite") || protoName.includes("anti-perovskite")) {
       return 2 * (avgCation * 0.4 + avgAnion * 0.6) * Math.sqrt(2);
@@ -693,7 +710,7 @@ export function vegardLatticeParameter(formula: string): number | null {
   for (const el of elements) {
     const lc = getLatticeConstant(el);
     if (lc === null) continue;
-    const frac = (counts[el] || 0) / totalAtoms;
+    const frac = counts[el] / totalAtoms;
     weightedSum += frac * lc;
     totalWeight += frac;
   }
@@ -707,9 +724,11 @@ function estimateLatticeFromVolume(
   nsites: number,
   crystalSystem: string,
   prototype?: string | null,
-  formula?: string | null
+  formula?: string | null,
+  comp?: ParsedComposition,
+  protoMatch?: typeof KNOWN_PROTOTYPES[string] | null
 ): { a: number; b: number; c: number } {
-  const vegardA = formula ? vegardLatticeParameter(formula) : null;
+  const vegardA = formula ? vegardLatticeParameter(formula, comp, protoMatch) : null;
 
   const protoCARatio = getPrototypeCARatio(prototype || null);
 
@@ -793,7 +812,8 @@ function estimateSynthesizability(
   hullDistance: number,
   formationEnergy: number,
   elements: string[],
-  formula?: string
+  formula?: string,
+  comp?: ParsedComposition
 ): { score: number; notes: string; estimatedSynthesisTemp?: number } {
   let score = 1.0;
   const notes: string[] = [];
@@ -849,10 +869,10 @@ function estimateSynthesizability(
 
   const hasH = elements.includes("H");
   if (hasH) {
-    const counts = formula ? parseFormulaCounts(formula) : {};
-    const hCount = counts["H"] || 0;
-    const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
-    const hFrac = hCount / totalAtoms;
+    const resolved = comp || (formula ? parseComposition(formula) : null);
+    const hCount = resolved?.counts["H"] || 0;
+    const resolvedTotal = resolved?.totalAtoms || 1;
+    const hFrac = hCount / resolvedTotal;
 
     if (hFrac > 0.6) {
       score -= 0.2;
@@ -887,8 +907,9 @@ export async function predictCrystalStructure(
   }
   if (!formula || formula === "[object Object]") return null;
 
-  const protoMatch = matchPrototype(formula);
-  const elements = parseFormulaElements(formula);
+  const comp = parseComposition(formula);
+  const protoMatch = matchPrototype(formula, comp);
+  const elements = comp.elements;
 
   try {
     const mpData = await fetchSummary(formula);
@@ -898,7 +919,7 @@ export async function predictCrystalStructure(
       const sg = mpData.spaceGroup || protoMatch?.spaceGroup || "P1";
 
       const proto = protoMatch?.prototype || `${cs} (${sg})`;
-      const lattice = estimateLatticeFromVolume(mpData.volume, mpData.nsites, cs, proto, formula);
+      const lattice = estimateLatticeFromVolume(mpData.volume, mpData.nsites, cs, proto, formula, comp, protoMatch);
       const angles = anglesForCrystalSystem(cs);
 
       const eAboveHull = mpData.energyAboveHull;
@@ -913,8 +934,8 @@ export async function predictCrystalStructure(
         }
       }
 
-      const tolerance = computeGoldschmidtTolerance(formula);
-      const synth = estimateSynthesizability(eAboveHull, formE, elements, formula);
+      const tolerance = computeGoldschmidtTolerance(formula, comp);
+      const synth = estimateSynthesizability(eAboveHull, formE, elements, formula, comp);
 
       const result: StructurePrediction = {
         spaceGroup: sg,
@@ -1010,8 +1031,8 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
 
     const isStable = miedemaDecomp <= 0.005;
     const isMetastable = !isStable && miedemaDecomp <= 0.15;
-    const tolerance = computeGoldschmidtTolerance(formula);
-    const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements, formula);
+    const tolerance = computeGoldschmidtTolerance(formula, comp);
+    const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements, formula, comp);
 
     const result: StructurePrediction = {
       spaceGroup: (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1",
@@ -1154,9 +1175,8 @@ export interface GeneratedStructureVariant {
   description: string;
 }
 
-function generateSubstitutionVariant(formula: string): GeneratedStructureVariant | null {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
+function generateSubstitutionVariant(formula: string, comp?: ParsedComposition): GeneratedStructureVariant | null {
+  const { elements, counts } = comp || parseComposition(formula);
 
   const substitutable = elements.filter(e => CHEMICAL_SUBSTITUTION_MAP[e] && CHEMICAL_SUBSTITUTION_MAP[e].length > 0);
   if (substitutable.length === 0) return null;
@@ -1195,9 +1215,8 @@ function generateSubstitutionVariant(formula: string): GeneratedStructureVariant
   };
 }
 
-function generateIntercalationVariant(formula: string): GeneratedStructureVariant | null {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
+function generateIntercalationVariant(formula: string, comp?: ParsedComposition): GeneratedStructureVariant | null {
+  const { elements, counts } = comp || parseComposition(formula);
 
   const availableIntercalants = INTERCALANTS.filter(i => !elements.includes(i) || (counts[i] || 0) < 4);
   if (availableIntercalants.length === 0) return null;
@@ -1226,10 +1245,7 @@ function generateIntercalationVariant(formula: string): GeneratedStructureVarian
   };
 }
 
-function generateTopologyVariant(formula: string): GeneratedStructureVariant | null {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
-
+function generateTopologyVariant(formula: string, _comp?: ParsedComposition): GeneratedStructureVariant | null {
   const topology = UNUSUAL_TOPOLOGIES[Math.floor(Math.random() * UNUSUAL_TOPOLOGIES.length)];
 
   return {
@@ -1249,6 +1265,7 @@ export function generateStructuralVariants(
   formula: string,
   maxVariants: number = 3
 ): GeneratedStructureVariant[] {
+  const comp = parseComposition(formula);
   const variants: GeneratedStructureVariant[] = [];
   const seenFormulas = new Set<string>([formula]);
 
@@ -1256,7 +1273,7 @@ export function generateStructuralVariants(
 
   for (const gen of generators) {
     if (variants.length >= maxVariants) break;
-    const variant = gen(formula);
+    const variant = gen(formula, comp);
     if (variant && !seenFormulas.has(variant.formula)) {
       seenFormulas.add(variant.formula);
       variants.push(variant);
