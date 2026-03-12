@@ -78,6 +78,34 @@ const customFeatures: ComputedFeatureDefinition[] = [];
 let architectureState: ArchitectureRecommendation | null = null;
 let lastArchitectureCheck = 0;
 const ARCHITECTURE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const ARCHITECTURE_SIZE_THRESHOLDS = [128, 256, 512, 1024, 2048, 4096];
+let lastArchitectureDatasetBucket = -1;
+
+function getDatasetSizeBucket(size: number): number {
+  for (let i = ARCHITECTURE_SIZE_THRESHOLDS.length - 1; i >= 0; i--) {
+    if (size >= ARCHITECTURE_SIZE_THRESHOLDS[i]) return i;
+  }
+  return -1;
+}
+
+function isUnconventionalProxy(f: MLFeatureVector): boolean {
+  if (f.correlationStrength > 0.5 && f.mottProximityScore > 0.3) return true;
+  if (f.dWaveSymmetry) return true;
+  if (f.orbitalDFraction > 0.4 && f.spinFluctuationStrength > 0.3) return true;
+  if (f.layeredStructure && f.correlationStrength > 0.3 && f.chargeTransferMagnitude > 0.3) return true;
+  return false;
+}
+
+function pressureDistanceToOptimal(f: MLFeatureVector): number {
+  const optimal = f.optimalPressureGpa;
+  const current = f.pressureGpa;
+  if (!Number.isFinite(optimal) || optimal <= 0) {
+    return current > 0 ? Math.log1p(current / 50) : 0;
+  }
+  const distance = Math.abs(current - optimal);
+  const normalizedDist = distance / Math.max(optimal, 1);
+  return Math.exp(-normalizedDist);
+}
 
 const COMPUTABLE_FEATURES: Record<string, {
   compute: (f: MLFeatureVector) => number;
@@ -124,8 +152,8 @@ const COMPUTABLE_FEATURES: Record<string, {
     description: "d-orbital fraction * FS nesting: d-wave pairing indicator",
   },
   pressure_lambda_interaction: {
-    compute: (f) => f.pressureGpa > 0 ? f.electronPhononLambda * Math.log1p(f.pressureGpa / 50) : f.electronPhononLambda,
-    description: "lambda scaled by pressure effect: captures pressure-induced SC",
+    compute: (f) => f.electronPhononLambda * (1 + pressureDistanceToOptimal(f)),
+    description: "lambda scaled by proximity to optimal pressure (Bayesian): peaks near P_opt, decays away",
   },
   charge_transfer_coupling: {
     compute: (f) => f.chargeTransferMagnitude * f.phononCouplingEstimate,
@@ -136,8 +164,14 @@ const COMPUTABLE_FEATURES: Record<string, {
     description: "Mott proximity * correlation: captures unconventional SC near Mott transition",
   },
   spin_phonon_competition: {
-    compute: (f) => f.spinFluctuationStrength > 0 ? f.electronPhononLambda / (1 + f.spinFluctuationStrength) : f.electronPhononLambda,
-    description: "lambda suppressed by spin fluctuations: spin-phonon competition",
+    compute: (f) => {
+      if (f.spinFluctuationStrength <= 0) return f.electronPhononLambda;
+      if (isUnconventionalProxy(f)) {
+        return f.electronPhononLambda + f.spinFluctuationStrength * f.correlationStrength;
+      }
+      return f.electronPhononLambda / (1 + f.spinFluctuationStrength);
+    },
+    description: "family-aware: spin fluctuations boost unconventional SC (cuprate/heavy-fermion) but suppress conventional BCS",
   },
   band_flatness_dos_product: {
     compute: (f) => f.bandFlatness * f.dosAtEF,
@@ -254,10 +288,19 @@ export async function proposeNewFeatures(): Promise<FeatureProposal[]> {
     .map(([name, def]) => `${name}: ${def.description}`)
     .join("\n");
 
-  const activeFeatures = customFeatures
-    .filter(c => c.enabled)
-    .map(c => c.name)
-    .join(", ") || "none";
+  const activeFeatureList = customFeatures.filter(c => c.enabled);
+  const activeFeatureNames = activeFeatureList.map(c => c.name);
+
+  const activeFeatureImportances: string[] = [];
+  for (const af of activeFeatureList) {
+    const imp = featureImportance.find(f => f.name === af.name);
+    const impStr = imp ? `importance=${imp.normalizedImportance.toFixed(3)}` : "importance=0.000 (NOT IN TOP-20)";
+    const ageMinutes = Math.round((Date.now() - af.createdAt) / 60000);
+    activeFeatureImportances.push(`  ${af.name}: ${impStr}, age=${ageMinutes}min`);
+  }
+  const activeFeatureReport = activeFeatureImportances.length > 0
+    ? activeFeatureImportances.join("\n")
+    : "  none active";
 
   const topFeatureStr = featureImportance.slice(0, 15)
     .map(f => `${f.name}: importance=${f.normalizedImportance.toFixed(3)}`)
@@ -278,7 +321,9 @@ Your job is to propose computed features that combine existing physics features 
 Current top features by importance:
 ${topFeatureStr}
 
-Currently active custom features: ${activeFeatures}
+Currently active custom features with their measured importance:
+${activeFeatureReport}
+NOTE: If an active feature has importance=0.000 or is NOT IN TOP-20, it is not helping. You should propose DISABLING it and enabling a different feature instead.
 
 Available computable features (can be enabled):
 ${availableFeatures}
@@ -287,17 +332,21 @@ Model performance: XGBoost R²=${diagnostics.xgboost.r2}, MAE=${diagnostics.xgbo
 Failed materials: ${failureSummary.totalFailures} total, ${failureSummary.predictedStableActualUnstable.length} false-stable predictions
 Top failing element pairs: ${failureSummary.failurePatterns.topFailingElementPairs.slice(0, 3).map(p => p.pair).join(", ") || "none"}
 
-Propose 1-3 features to ENABLE from the available list. Focus on:
+Propose 1-3 actions. Each action is either:
+- "enable": enable a feature from the available list
+- "disable": disable an active feature that has low/zero importance (replace with a better one)
+Focus on:
 - Features that combine underused physics signals
 - Features that could help with the failure patterns observed
-- Features that add physics knowledge the model is missing
+- Disabling features with zero measured importance before enabling new ones
 
 Respond in JSON:
 {
   "proposals": [
     {
-      "name": "feature_name_from_available_list",
-      "physicsRationale": "why this feature captures SC physics",
+      "action": "enable" or "disable",
+      "name": "feature_name",
+      "physicsRationale": "why enable/disable this feature",
       "expectedImpact": "what improvement to expect",
       "priority": 1
     }
@@ -306,7 +355,7 @@ Respond in JSON:
         },
         {
           role: "user",
-          content: "Propose features to enable based on the current model state and failure patterns.",
+          content: "Propose features to enable or disable based on the current model state and failure patterns.",
         },
       ],
     });
@@ -319,11 +368,19 @@ Respond in JSON:
       console.log(`[Model LLM] Feature proposal JSON parse failed, content length=${content.length}`);
       return [];
     }
-    const proposals = Array.isArray(parsed) ? parsed : Array.isArray(parsed.proposals) ? parsed.proposals : [];
-    if (proposals.length === 0) return [];
+    const rawProposals = Array.isArray(parsed) ? parsed : Array.isArray(parsed.proposals) ? parsed.proposals : [];
+    if (rawProposals.length === 0) return [];
 
-    return proposals
-      .filter((p: any) => p.name && COMPUTABLE_FEATURES[p.name])
+    for (const p of rawProposals) {
+      if (p.action === "disable" && p.name && activeFeatureNames.includes(p.name)) {
+        disableCustomFeature(p.name);
+        console.log(`[Model LLM] Disabled underperforming feature: ${p.name} — ${p.physicsRationale || "low importance"}`);
+      }
+    }
+
+    const enableProposals = rawProposals.filter((p: any) => (p.action === "enable" || !p.action) && p.name && COMPUTABLE_FEATURES[p.name]);
+
+    return enableProposals
       .slice(0, 3)
       .map((p: any) => ({
         name: p.name,
@@ -427,8 +484,9 @@ Respond in JSON:
 
     architectureState = recommendation;
     lastArchitectureCheck = Date.now();
+    lastArchitectureDatasetBucket = getDatasetSizeBucket(xgbDataset);
 
-    console.log(`[Model LLM] Architecture recommendation: ${recommendation.primaryModel} (switch=${recommendation.switchRecommended})`);
+    console.log(`[Model LLM] Architecture recommendation: ${recommendation.primaryModel} (switch=${recommendation.switchRecommended}, bucket=${lastArchitectureDatasetBucket})`);
     return recommendation;
   } catch (e) {
     console.log(`[Model LLM] Architecture selection failed: ${e instanceof Error ? e.message : "unknown"}`);
@@ -441,6 +499,7 @@ Respond in JSON:
     };
     architectureState = fallback;
     lastArchitectureCheck = Date.now();
+    lastArchitectureDatasetBucket = getDatasetSizeBucket(xgbDataset);
     return fallback;
   }
 }
@@ -450,7 +509,21 @@ export function getCurrentArchitecture(): ArchitectureRecommendation | null {
 }
 
 export function shouldReassessArchitecture(): boolean {
-  return Date.now() - lastArchitectureCheck > ARCHITECTURE_CHECK_INTERVAL_MS;
+  if (Date.now() - lastArchitectureCheck < ARCHITECTURE_CHECK_INTERVAL_MS) return false;
+
+  try {
+    const diagnostics = getComprehensiveModelDiagnostics();
+    const totalSize = Math.max(diagnostics.xgboost.nSamples, diagnostics.gnn.datasetSize);
+    const currentBucket = getDatasetSizeBucket(totalSize);
+    if (currentBucket > lastArchitectureDatasetBucket) {
+      console.log(`[Model LLM] Dataset crossed threshold: bucket ${lastArchitectureDatasetBucket} -> ${currentBucket} (size=${totalSize}, threshold=${ARCHITECTURE_SIZE_THRESHOLDS[currentBucket]})`);
+      return true;
+    }
+  } catch (_e) {}
+
+  if (architectureState === null) return true;
+
+  return false;
 }
 
 export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMReport> {
