@@ -50,6 +50,7 @@ export interface VanHoveSingularity {
   energy: number;
   type: "saddle" | "minimum" | "maximum";
   dosContribution: number;
+  pathLimited: boolean;
 }
 
 export interface EffectiveMass {
@@ -637,6 +638,14 @@ function parseBandsDatFile(
   return { eigenvalues, nBands, nKPoints };
 }
 
+function isTRIMPoint(kCoords: [number, number, number]): boolean {
+  const tol = 0.01;
+  return kCoords.every(c => {
+    const wrapped = ((c % 1) + 1) % 1;
+    return wrapped < tol || wrapped > 1 - tol || Math.abs(wrapped - 0.5) < tol;
+  });
+}
+
 export function isPathBreak(eigenvalues: BandEigenvalue[], ki: number): boolean {
   if (ki < 1 || ki >= eigenvalues.length) return false;
   const prev = eigenvalues[ki - 1];
@@ -739,6 +748,12 @@ function analyzeBands(
       flatBandScore: 0, diracCrossingScore: 0,
       topologicalIndicators: { bandInversionCount: 0, parityChanges: 0, diracPointCount: 0, nodalLineIndicator: 0 },
     };
+  }
+
+  for (const kpt of eigenvalues) {
+    for (let i = 0; i < kpt.energies.length; i++) {
+      kpt.energies[i] -= fermiEnergy;
+    }
   }
 
   let globalMin = Infinity;
@@ -876,6 +891,7 @@ function analyzeBands(
             energy: eCurr,
             type,
             dosContribution: Math.min(dosContrib, 100),
+            pathLimited: true,
           });
         }
       }
@@ -927,11 +943,19 @@ function analyzeBands(
   }
 
   let parityChanges = 0;
+  const trimIndices: number[] = [];
+  for (let ki = 0; ki < eigenvalues.length; ki++) {
+    const kpt = eigenvalues[ki];
+    if (isTRIMPoint(kpt.kCoords)) {
+      trimIndices.push(ki);
+    }
+  }
   for (let b = 0; b < nBands; b++) {
-    for (let ki = 1; ki < eigenvalues.length; ki++) {
-      if (isPathBreak(eigenvalues, ki)) continue;
-      const ePrev = eigenvalues[ki - 1].energies[b];
-      const eCurr = eigenvalues[ki].energies[b];
+    for (let ti = 1; ti < trimIndices.length; ti++) {
+      const kiPrev = trimIndices[ti - 1];
+      const kiCurr = trimIndices[ti];
+      const ePrev = eigenvalues[kiPrev].energies[b];
+      const eCurr = eigenvalues[kiCurr].energies[b];
       if (ePrev !== undefined && eCurr !== undefined) {
         if (Math.sign(ePrev) !== Math.sign(eCurr) && Math.abs(ePrev) > 0.01 && Math.abs(eCurr) > 0.01) {
           parityChanges++;
