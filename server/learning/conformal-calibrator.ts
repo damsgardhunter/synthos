@@ -1,4 +1,5 @@
 import { getLedgerSlice, getLedgerSize, onLedgerEntry, type PredictionRealityEntry } from "./prediction-reality-ledger";
+import { classifyFamily } from "./utils";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 import { extractFeatures } from "./ml-predictor";
@@ -68,19 +69,6 @@ let meanNCS = 0;
 let medianNCS = 0;
 let samplesSinceLastCalibration = 0;
 
-function classifyFamily(formula: string): string {
-  const f = formula.toLowerCase();
-  if (f.includes("h") && /\d/.test(f)) {
-    const hMatch = f.match(/h(\d+)/);
-    if (hMatch && parseInt(hMatch[1]) >= 3) return "hydride";
-  }
-  if (f.includes("cu") && f.includes("o")) return "cuprate";
-  if (f.includes("fe") && (f.includes("as") || f.includes("se"))) return "pnictide";
-  if (f.includes("nb") || f.includes("v3")) return "a15";
-  if (f.includes("mg") && f.includes("b")) return "mgb2-type";
-  if (f.includes("bi") && f.includes("s")) return "chalcogenide";
-  return "other";
-}
 
 function computeQuantile(sortedValues: number[], alpha: number): number {
   const n = sortedValues.length;

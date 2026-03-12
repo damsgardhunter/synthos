@@ -1,3 +1,5 @@
+import { classifyFamily } from "./utils";
+
 export interface PredictionRealityEntry {
   formula: string;
   pressure: number;
@@ -38,10 +40,14 @@ export interface PredictionRealityMetrics {
   maxError: number;
   medianAbsError: number;
   stabilityAccuracy: number;
+  stabilityBalancedAccuracy: number;
+  stabilityF1: number;
   feMAE: number | null;
   pct_within_10K: number;
   pct_within_30K: number;
   pct_within_50K: number;
+  pct_within_20_percent: number;
+  smallSampleWarning: boolean;
 }
 
 export interface FamilyMetrics {
@@ -50,6 +56,7 @@ export interface FamilyMetrics {
   rmse: number;
   mae: number;
   bias: number;
+  smallSampleWarning: boolean;
 }
 
 export interface RetrainTriggerConfig {
@@ -222,8 +229,10 @@ function computeMetricsInternal(data: PredictionRealityEntry[]): PredictionReali
   if (data.length === 0) {
     return {
       count: 0, rmse: 0, mae: 0, bias: 0, r2: 0, maxError: 0,
-      medianAbsError: 0, stabilityAccuracy: 0, feMAE: null,
+      medianAbsError: 0, stabilityAccuracy: 0, stabilityBalancedAccuracy: 0,
+      stabilityF1: 0, feMAE: null,
       pct_within_10K: 0, pct_within_30K: 0, pct_within_50K: 0,
+      pct_within_20_percent: 0, smallSampleWarning: true,
     };
   }
 
@@ -232,13 +241,15 @@ function computeMetricsInternal(data: PredictionRealityEntry[]): PredictionReali
   let sumAbsErr = 0;
   let sumSignedErr = 0;
   let maxErr = 0;
-  let stabilityCorrect = 0;
   let feSumAbs = 0;
   let feCount = 0;
   let within10 = 0;
   let within30 = 0;
   let within50 = 0;
+  let within20pct = 0;
   const absErrors: number[] = new Array(n);
+
+  let tp = 0, fp = 0, tn = 0, fn = 0;
 
   const actualMean = data.reduce((s, e) => s + e.ground_truth.Tc, 0) / n;
   let ssTot = 0;
@@ -249,7 +260,12 @@ function computeMetricsInternal(data: PredictionRealityEntry[]): PredictionReali
     sumAbsErr += e.error.tc_abs_error;
     sumSignedErr += e.error.tc_error;
     if (e.error.tc_abs_error > maxErr) maxErr = e.error.tc_abs_error;
-    if (e.error.stability_correct) stabilityCorrect++;
+
+    if (e.model_prediction.stable && e.ground_truth.stable) tp++;
+    else if (e.model_prediction.stable && !e.ground_truth.stable) fp++;
+    else if (!e.model_prediction.stable && e.ground_truth.stable) fn++;
+    else tn++;
+
     if (e.error.fe_error !== null) {
       feSumAbs += Math.abs(e.error.fe_error);
       feCount++;
@@ -257,12 +273,28 @@ function computeMetricsInternal(data: PredictionRealityEntry[]): PredictionReali
     if (e.error.tc_abs_error <= 10) within10++;
     if (e.error.tc_abs_error <= 30) within30++;
     if (e.error.tc_abs_error <= 50) within50++;
+
+    const actualTc = Math.abs(e.ground_truth.Tc);
+    if (actualTc > 0.5) {
+      if (e.error.tc_abs_error / actualTc <= 0.2) within20pct++;
+    } else {
+      if (e.error.tc_abs_error <= 1.0) within20pct++;
+    }
+
     absErrors[i] = e.error.tc_abs_error;
     ssTot += (e.ground_truth.Tc - actualMean) ** 2;
   }
 
   const medianAbsError = quickSelectMedian(absErrors);
   const r2 = ssTot > 0 ? 1 - sumSqErr / ssTot : 0;
+
+  const sensitivity = (tp + fn) > 0 ? tp / (tp + fn) : 0;
+  const specificity = (tn + fp) > 0 ? tn / (tn + fp) : 0;
+  const balancedAccuracy = (sensitivity + specificity) / 2;
+  const precision = (tp + fp) > 0 ? tp / (tp + fp) : 0;
+  const f1 = (precision + sensitivity) > 0
+    ? 2 * (precision * sensitivity) / (precision + sensitivity)
+    : 0;
 
   return {
     count: n,
@@ -272,11 +304,15 @@ function computeMetricsInternal(data: PredictionRealityEntry[]): PredictionReali
     r2,
     maxError: maxErr,
     medianAbsError,
-    stabilityAccuracy: stabilityCorrect / n,
+    stabilityAccuracy: (tp + tn) / n,
+    stabilityBalancedAccuracy: balancedAccuracy,
+    stabilityF1: f1,
     feMAE: feCount > 0 ? feSumAbs / feCount : null,
     pct_within_10K: within10 / n,
     pct_within_30K: within30 / n,
     pct_within_50K: within50 / n,
+    pct_within_20_percent: within20pct / n,
+    smallSampleWarning: n < 10,
   };
 }
 
@@ -320,25 +356,13 @@ export function computeMetricsByFamily(): FamilyMetrics[] {
       rmse: Math.sqrt(sumSq / n),
       mae: sumAbs / n,
       bias: sumSigned / n,
+      smallSampleWarning: n < 10,
     });
   }
 
   return results.sort((a, b) => b.mae - a.mae);
 }
 
-function classifyFamily(formula: string): string {
-  const f = formula.toLowerCase();
-  if (f.includes("h") && /\d/.test(f)) {
-    const hMatch = f.match(/h(\d+)/);
-    if (hMatch && parseInt(hMatch[1]) >= 3) return "hydride";
-  }
-  if (f.includes("cu") && f.includes("o")) return "cuprate";
-  if (f.includes("fe") && (f.includes("as") || f.includes("se"))) return "pnictide";
-  if (f.includes("nb") || f.includes("v3")) return "a15";
-  if (f.includes("mg") && f.includes("b")) return "mgb2-type";
-  if (f.includes("bi") && f.includes("s")) return "chalcogenide";
-  return "other";
-}
 
 export function getWorstPredictions(topN: number = 20): PredictionRealityEntry[] {
   return [...ledger]
@@ -558,10 +582,10 @@ export function getMetricsForLLM(): string {
 
   const lines: string[] = [
     "=== Prediction vs Reality Ledger ===",
-    `Total entries: ${all.count}`,
+    `Total entries: ${all.count}${all.smallSampleWarning ? " [SMALL SAMPLE WARNING: n<10, metrics unreliable]" : ""}`,
     `Overall: RMSE=${all.rmse.toFixed(2)}K, MAE=${all.mae.toFixed(2)}K, bias=${all.bias.toFixed(2)}K, R²=${all.r2.toFixed(4)}`,
-    `Accuracy: within 10K=${(all.pct_within_10K * 100).toFixed(1)}%, within 30K=${(all.pct_within_30K * 100).toFixed(1)}%, within 50K=${(all.pct_within_50K * 100).toFixed(1)}%`,
-    `Stability accuracy: ${(all.stabilityAccuracy * 100).toFixed(1)}%`,
+    `Accuracy: within 10K=${(all.pct_within_10K * 100).toFixed(1)}%, within 30K=${(all.pct_within_30K * 100).toFixed(1)}%, within 50K=${(all.pct_within_50K * 100).toFixed(1)}%, within 20%=${(all.pct_within_20_percent * 100).toFixed(1)}%`,
+    `Stability: accuracy=${(all.stabilityAccuracy * 100).toFixed(1)}%, balanced=${(all.stabilityBalancedAccuracy * 100).toFixed(1)}%, F1=${all.stabilityF1.toFixed(3)}`,
     `Max error: ${all.maxError.toFixed(1)}K, Median abs error: ${all.medianAbsError.toFixed(1)}K`,
   ];
 
@@ -572,7 +596,8 @@ export function getMetricsForLLM(): string {
   if (byFamily.length > 0) {
     lines.push("Per-family error:");
     for (const f of byFamily.slice(0, 5)) {
-      lines.push(`  ${f.family}: MAE=${f.mae.toFixed(2)}K, bias=${f.bias.toFixed(2)}K (n=${f.count})`);
+      const warn = f.smallSampleWarning ? " [small sample]" : "";
+      lines.push(`  ${f.family}: MAE=${f.mae.toFixed(2)}K, bias=${f.bias.toFixed(2)}K (n=${f.count})${warn}`);
     }
   }
 
