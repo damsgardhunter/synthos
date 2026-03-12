@@ -1,3 +1,5 @@
+import { getElementData } from "./elemental-data";
+
 function gcdFloat(a: number, b: number): number {
   const eps = 1e-9;
   a = Math.abs(a);
@@ -8,6 +10,16 @@ function gcdFloat(a: number, b: number): number {
     a = t;
   }
   return a;
+}
+
+function radiusOf(el: string): number {
+  return getElementData(el)?.atomicRadius ?? 130;
+}
+
+function sizeCompatible(candidate: string, reference: string, tolerance: number = 0.15): boolean {
+  const rCand = radiusOf(candidate);
+  const rRef = radiusOf(reference);
+  return Math.abs(rCand - rRef) / rRef <= tolerance;
 }
 
 export interface PrototypeCandidate {
@@ -475,13 +487,13 @@ function generateA15(): PrototypeCandidate[] {
 
 function generateClathrate(): PrototypeCandidate[] {
   const M = ["La", "Y", "Ca", "Sc", "Th", "Ce", "Ac"];
-  const stoichs = [6, 10];
+  const stoichs = [4, 6, 9, 10, 12];
   const info = PROTOTYPE_REGISTRY.Clathrate;
   const candidates: PrototypeCandidate[] = [];
 
   for (const m of M) {
     for (const s of stoichs) {
-      const label = s === 10 ? "Sodalite" : "Clathrate";
+      const label = s >= 10 ? "Sodalite" : "Clathrate";
       candidates.push({
         formula: `${m}H${s}`,
         prototype: label,
@@ -504,8 +516,11 @@ function generateThCr2Si2(): PrototypeCandidate[] {
   const candidates: PrototypeCandidate[] = [];
 
   for (const a of A) {
+    if (!sizeCompatible(a, "Th")) continue;
     for (const b of B) {
+      if (!sizeCompatible(b, "Cr")) continue;
       for (const c of C) {
+        if (!sizeCompatible(c, "Si")) continue;
         candidates.push({
           formula: `${a}${b}2${c}2`,
           prototype: info.name,
@@ -528,8 +543,10 @@ function generateSpinel(): PrototypeCandidate[] {
   const candidates: PrototypeCandidate[] = [];
 
   for (const a of A) {
+    if (!sizeCompatible(a, "Mg")) continue;
     for (const b of B) {
       if (a === b) continue;
+      if (!sizeCompatible(b, "Al")) continue;
       candidates.push({
         formula: `${a}${b}2O4`,
         prototype: info.name,
@@ -650,8 +667,10 @@ function generateHeusler(): PrototypeCandidate[] {
 
   for (const a of A) {
     for (const b of B) {
+      if (a === b) continue;
+      if (!sizeCompatible(b, "Ti", 0.20)) continue;
       for (const c of C) {
-        if (a === b) continue;
+        if (!sizeCompatible(c, "Si", 0.20)) continue;
         candidates.push({
           formula: `${a}2${b}${c}`,
           prototype: info.name,
@@ -694,14 +713,61 @@ export function runPrototypeGeneration(): PrototypeCandidate[] {
   return deduped;
 }
 
+const PROTOTYPE_ALIASES: Record<string, string> = {
+  "spinel": "Spinel",
+  "tetragonal spinel": "Hausmannite",
+  "sodalite": "Hauyne",
+  "molybdenite": "MoS2",
+  "mos2": "MoS2",
+  "zincblende": "CubicBoronNitride",
+  "cuau": "L1_0",
+  "ruddlesden popper": "RuddlesdenPopper",
+  "ruddlesden-popper": "RuddlesdenPopper",
+  "pyrochlore": "Pychlore",
+  "cuprate": "Cuprate1212",
+  "rock salt": "RockSalt",
+  "rocksalt": "RockSalt",
+  "rock-salt": "RockSalt",
+  "graphite": "Graphite",
+  "fluorite": "Fluorite",
+  "antifluorite": "Antifluorite",
+  "chalcopyrite": "Chalcopyrite",
+  "garnet": "Garnet",
+  "max phase": "MAX",
+  "max-phase": "MAX",
+  "heusler": "Heusler",
+  "laves": "Laves",
+  "perovskite": "Perovskite",
+  "a15": "A15",
+  "clathrate": "Clathrate",
+  "alb2": "AlB2",
+  "delafossite": "Delafossite",
+  "layered nitride": "LayeredNitride",
+};
+
 export function getPrototypeInfo(name: string): PrototypeInfo | null {
   if (PROTOTYPE_REGISTRY[name]) {
     return PROTOTYPE_REGISTRY[name];
   }
+
+  const lower = name.toLowerCase().trim();
+
+  const aliasKey = PROTOTYPE_ALIASES[lower];
+  if (aliasKey && PROTOTYPE_REGISTRY[aliasKey]) {
+    return PROTOTYPE_REGISTRY[aliasKey];
+  }
+
   for (const [, info] of Object.entries(PROTOTYPE_REGISTRY)) {
-    if (info.name.toLowerCase() === name.toLowerCase()) {
+    if (info.name.toLowerCase() === lower) {
       return info;
     }
   }
+
+  for (const [, info] of Object.entries(PROTOTYPE_REGISTRY)) {
+    if (info.name.toLowerCase().includes(lower) || lower.includes(info.name.toLowerCase())) {
+      return info;
+    }
+  }
+
   return null;
 }
