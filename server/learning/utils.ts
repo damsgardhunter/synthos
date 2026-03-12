@@ -97,10 +97,19 @@ function expandParentheses(formula: string): string {
   return result;
 }
 
+const UNICODE_SUBSCRIPT_MAP: Record<string, string> = {
+  "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+  "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
+};
+
+function replaceUnicodeSubscripts(s: string): string {
+  return s.replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (c) => UNICODE_SUBSCRIPT_MAP[c] ?? c);
+}
+
 export function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const counts: Record<string, number> = {};
-  let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = replaceUnicodeSubscripts(formula);
   cleaned = expandParentheses(cleaned);
   const regex = /([A-Z][a-z]?)(\d+\.?\d*|\.\d+)?/g;
   let match;
@@ -117,25 +126,41 @@ export function parseFormulaCounts(formula: string): Record<string, number> {
 export function getCompositionHash(formula: string): string {
   const counts = parseFormulaCounts(formula);
   const total = Object.values(counts).reduce((s, n) => s + n, 0);
-  if (total === 0) return formula;
+  if (total < 1e-6) return formula;
   const ratios = Object.entries(counts)
     .map(([el, n]) => ({ el, ratio: Math.round((n / total) * 1000) / 1000 }))
     .sort((a, b) => a.el.localeCompare(b.el));
   return ratios.map(r => `${r.el}:${r.ratio}`).join("-");
 }
 
+function integerGcd(a: number, b: number): number {
+  a = Math.abs(Math.round(a));
+  b = Math.abs(Math.round(b));
+  while (b > 0) { const t = b; b = a % b; a = t; }
+  return a;
+}
+
+function toIntegerCounts(vals: number[]): number[] {
+  const maxDec = vals.reduce((mx, v) => {
+    const s = v.toFixed(6).replace(/0+$/, "");
+    const dot = s.indexOf(".");
+    return Math.max(mx, dot >= 0 ? s.length - dot - 1 : 0);
+  }, 0);
+  const scale = Math.pow(10, Math.min(maxDec, 6));
+  return vals.map(v => Math.round(v * scale));
+}
+
 export function getPrototypeHash(formula: string): string {
   const counts = parseFormulaCounts(formula);
   const vals = Object.values(counts);
   if (vals.length === 0) return formula;
-  let g = vals[0];
-  for (let i = 1; i < vals.length; i++) {
-    let a = g, b = vals[i];
-    while (b > 0.001) { const t = b; b = a % b; a = t; }
-    g = a;
+  const intVals = toIntegerCounts(vals);
+  let g = intVals[0];
+  for (let i = 1; i < intVals.length; i++) {
+    g = integerGcd(g, intVals[i]);
   }
-  if (g < 0.001) g = 1;
-  const normalized = vals.map(v => Math.round(v / g)).sort((a, b) => a - b);
+  if (g < 1) g = 1;
+  const normalized = intVals.map(v => Math.round(v / g)).sort((a, b) => a - b);
   return normalized.join(":");
 }
 
@@ -192,7 +217,7 @@ const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);
 
 export function isValidFormula(formula: string): boolean {
   if (typeof formula !== "string") return false;
-  let cleaned = formula.replace(/[₀-₉]/g, (c) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = replaceUnicodeSubscripts(formula);
   cleaned = cleaned.replace(/[()[\]{},;δ−+\-\.x\s]/g, "");
   cleaned = cleaned.replace(/\d+/g, " ").trim();
   const elementTokens = cleaned.match(/[A-Z][a-z]?/g);
@@ -238,28 +263,29 @@ export function normalizeFormula(raw: string): string {
   const allInts = vals.every(v => Number.isInteger(v) && v >= 1);
 
   if (allInts) {
-    let g = vals[0];
+    let g = Math.round(vals[0]);
     for (let i = 1; i < vals.length; i++) {
-      let a = g, b = vals[i];
-      while (b > 0) { const t = b; b = a % b; a = t; }
-      g = a;
+      g = integerGcd(g, Math.round(vals[i]));
     }
     if (g > 1) {
-      for (const el of elements) counts[el] = counts[el] / g;
+      for (const el of elements) counts[el] = Math.round(counts[el] / g);
     }
   }
 
   vals = Object.values(counts);
   const totalAtoms = vals.reduce((s, v) => s + v, 0);
   if (totalAtoms > 50) {
-    let g2 = vals[0];
-    for (let i = 1; i < vals.length; i++) {
-      let a = g2, b = vals[i];
-      while (b > 0.001) { const t = b; b = a % b; a = t; }
-      g2 = a;
+    const elKeys = elements.slice();
+    const rawVals = elKeys.map(el => counts[el]);
+    const intVals2 = toIntegerCounts(rawVals);
+    let g2 = intVals2[0];
+    for (let i = 1; i < intVals2.length; i++) {
+      g2 = integerGcd(g2, intVals2[i]);
     }
-    if (g2 > 0.001) {
-      for (const el of elements) counts[el] = Math.round(counts[el] / g2);
+    if (g2 > 0) {
+      for (let i = 0; i < elKeys.length; i++) {
+        counts[elKeys[i]] = Math.round(intVals2[i] / g2);
+      }
     }
   }
 
