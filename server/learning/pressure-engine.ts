@@ -111,22 +111,29 @@ export function relaxStructureAtPressure(
   else B0 = 50;
   B0 = Math.max(10, B0);
 
-  const B0p = 4.0 + (elements.length - 1) * 0.3;
+  if (isHydrideComp && pressure >= 150 && B0 < 50) {
+    B0 = 50;
+  }
+
+  const B0p = Math.min(6.0, 4.0 + (elements.length - 1) * 0.3);
 
   let V0_a = 0;
   if (isVolumeDNNTrained()) {
     V0_a = predictEquilibriumLatticeConstant(formula, pressure);
   }
   if (V0_a <= 0) {
+    let V_total = 0;
     for (const el of elements) {
       const data = getElementData(el);
+      const n = counts[el] || 1;
       if (data && data.latticeConstant) {
-        V0_a += data.latticeConstant * (counts[el] || 1);
+        V_total += Math.pow(data.latticeConstant, 3) * n;
       } else if (data) {
-        V0_a += (data.atomicRadius / 100) * 2.5 * (counts[el] || 1);
+        const r_angstrom = data.atomicRadius / 100;
+        V_total += Math.pow(r_angstrom * 2.5, 3) * n;
       }
     }
-    V0_a = Math.max(3.0, V0_a / totalAtoms);
+    V0_a = Math.max(3.0, Math.cbrt(V_total / totalAtoms));
   }
 
   const a0 = latticeParams?.a ?? V0_a;
@@ -215,7 +222,8 @@ export function predictHydrideFormation(
       ? -0.3 * Math.min(1, pressure / optP)
       : -0.1 * pressure / optP;
 
-    const Hf = Hf0 + pressureStabilization - H2_DISSOCIATION * 0.01 * (1 - pressure / 300);
+    const muH2 = pressure > 1 ? H2_DISSOCIATION * 0.01 * Math.log(pressure) / Math.log(300) : H2_DISSOCIATION * 0.01;
+    const Hf = Hf0 + pressureStabilization - muH2;
 
     const hFrac = Math.min(1, Math.max(0.3, pressure / optP));
     const discreteSteps = [2, 3, 4, 6, 8, 10, 12];
