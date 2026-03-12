@@ -19,7 +19,7 @@ import type {
   InverseDesignCampaign, InsertInverseDesignCampaign,
   DftJob, InsertDftJob
 } from "@shared/schema";
-import { eq, desc, asc, sql, ilike, isNull, inArray, and } from "drizzle-orm";
+import { eq, desc, asc, sql, ilike, isNull, inArray, and, or, gt } from "drizzle-orm";
 
 
 export interface IStorage {
@@ -138,6 +138,8 @@ export interface IStorage {
   updateDftJob(id: number, updates: Partial<DftJob>): Promise<void>;
   updateDftJobIfStatus(id: number, expectedStatus: string, updates: Partial<DftJob>): Promise<boolean>;
   getDftJobsByFormula(formula: string): Promise<DftJob[]>;
+  hasActiveOrRecentFailedDftJobs(formula: string): Promise<{ activeJob: DftJob | null; recentValidatedFailures: number }>;
+  updateCandidateByFormulaDft(formula: string, scalarUpdates: Partial<InsertSuperconductorCandidate>, mlFeaturePatch: Record<string, any>): Promise<boolean>;
   getDftJobsByStatus(status: string): Promise<DftJob[]>;
   getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }>;
   getRecentDftJobs(limit?: number): Promise<DftJob[]>;
@@ -764,6 +766,47 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(dftJobs)
       .where(eq(dftJobs.formula, formula))
       .orderBy(desc(dftJobs.createdAt));
+  }
+
+  async hasActiveOrRecentFailedDftJobs(formula: string): Promise<{ activeJob: DftJob | null; recentValidatedFailures: number }> {
+    const oneDayAgo = new Date(Date.now() - 24 * 3600_000);
+    const rows = await db.select().from(dftJobs)
+      .where(and(
+        eq(dftJobs.formula, formula),
+        or(
+          inArray(dftJobs.status, ["queued", "running"]),
+          and(
+            eq(dftJobs.status, "failed"),
+            gt(dftJobs.completedAt, oneDayAgo),
+          ),
+        ),
+      ))
+      .orderBy(desc(dftJobs.createdAt));
+
+    const activeJob = rows.find(j => j.status === "queued" || j.status === "running") ?? null;
+    const recentValidatedFailures = rows.filter(j => {
+      if (j.status !== "failed") return false;
+      const out = j.outputData as any;
+      return out?.ppValidated !== false && out?.ppValidated !== null && out?.ppValidated !== undefined;
+    }).length;
+
+    return { activeJob, recentValidatedFailures };
+  }
+
+  async updateCandidateByFormulaDft(
+    formula: string,
+    scalarUpdates: Partial<InsertSuperconductorCandidate>,
+    mlFeaturePatch: Record<string, any>,
+  ): Promise<boolean> {
+    const sanitized: Record<string, any> = {};
+    for (const [key, val] of Object.entries(scalarUpdates)) {
+      sanitized[key] = typeof val === "number" && !Number.isFinite(val) ? null : val;
+    }
+    sanitized.mlFeatures = sql`COALESCE(ml_features, '{}'::jsonb) || ${JSON.stringify(mlFeaturePatch)}::jsonb`;
+    const result = await db.update(superconductorCandidates)
+      .set(sanitized)
+      .where(eq(superconductorCandidates.formula, formula));
+    return (result as any).rowCount > 0;
   }
 
   async getDftJobsByStatus(status: string): Promise<DftJob[]> {

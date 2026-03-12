@@ -3,7 +3,7 @@ import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts } fr
 import type { QEFullResult } from "./qe-worker";
 import type { DftJob } from "@shared/schema";
 import { recordStructureFailure } from "../crystal/structure-failure-db";
-import { isValidFormula } from "../learning/utils";
+import { isValidFormula, parseFormulaCounts } from "../learning/utils";
 
 const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
@@ -19,17 +19,22 @@ interface StageMetrics {
   totalSucceeded: number;
   totalFailed: number;
   avgProcessingTimeMs: number;
+  avgProcessingTimeMsPerAtom: number;
   lastProcessedAt: number | null;
 }
 
+function initStageMetrics(): StageMetrics {
+  return { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, avgProcessingTimeMsPerAtom: 0, lastProcessedAt: null };
+}
+
 const stageMetrics: Record<PipelineStage, StageMetrics> = {
-  candidate_queue: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
-  dft_workers: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
-  phonon_workers: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
-  epc_workers: { currentDepth: 0, totalProcessed: 0, totalSucceeded: 0, totalFailed: 0, avgProcessingTimeMs: 0, lastProcessedAt: null },
+  candidate_queue: initStageMetrics(),
+  dft_workers: initStageMetrics(),
+  phonon_workers: initStageMetrics(),
+  epc_workers: initStageMetrics(),
 };
 
-function updateStageMetrics(stage: PipelineStage, success: boolean, processingTimeMs: number) {
+function updateStageMetrics(stage: PipelineStage, success: boolean, processingTimeMs: number, atomCount: number = 1) {
   const m = stageMetrics[stage];
   m.totalProcessed++;
   if (success) m.totalSucceeded++;
@@ -37,6 +42,9 @@ function updateStageMetrics(stage: PipelineStage, success: boolean, processingTi
   m.lastProcessedAt = Date.now();
   const prev = m.avgProcessingTimeMs;
   m.avgProcessingTimeMs = prev === 0 ? processingTimeMs : prev * 0.8 + processingTimeMs * 0.2;
+  const perAtom = atomCount > 0 ? processingTimeMs / atomCount : processingTimeMs;
+  const prevPerAtom = m.avgProcessingTimeMsPerAtom;
+  m.avgProcessingTimeMsPerAtom = prevPerAtom === 0 ? perAtom : prevPerAtom * 0.8 + perAtom * 0.2;
 }
 
 let activeWorkers = 0;
@@ -67,23 +75,13 @@ export async function submitDFTJob(
     return null;
   }
 
-  const existing = await storage.getDftJobsByFormula(formula);
-  const activeJob = existing.find(j => j.status === "queued" || j.status === "running");
+  const { activeJob, recentValidatedFailures } = await storage.hasActiveOrRecentFailedDftJobs(formula);
   if (activeJob) {
     console.log(`[DFT-Queue] Job already queued/running for ${formula}, skipping`);
     return activeJob;
   }
-
-  const oneDayAgo = new Date(Date.now() - 24 * 3600_000);
-  const recentFailed = existing.filter(j => {
-    if (j.status !== "failed") return false;
-    if (!j.completedAt || new Date(j.completedAt) < oneDayAgo) return false;
-    const out = j.outputData as any;
-    if (out?.ppValidated === false || out?.ppValidated === null || out?.ppValidated === undefined) return false;
-    return true;
-  });
-  if (recentFailed.length >= 3) {
-    console.log(`[DFT-Queue] Formula ${formula} has ${recentFailed.length} validated recent failures, skipping`);
+  if (recentValidatedFailures >= 3) {
+    console.log(`[DFT-Queue] Formula ${formula} has ${recentValidatedFailures} validated recent failures, skipping`);
     return null;
   }
 
@@ -147,6 +145,8 @@ async function processNextJob(): Promise<boolean> {
 
   stageMetrics.dft_workers.currentDepth++;
 
+  const formulaCounts = parseFormulaCounts(job.formula);
+  const atomCount = Object.values(formulaCounts).reduce((s, v) => s + v, 0) || 1;
   const jobStartTime = Date.now();
 
   try {
@@ -189,17 +189,17 @@ async function processNextJob(): Promise<boolean> {
     const dftElapsed = Date.now() - jobStartTime;
 
     stageMetrics.dft_workers.currentDepth--;
-    updateStageMetrics("dft_workers", scfSuccess, dftElapsed);
+    updateStageMetrics("dft_workers", scfSuccess, dftElapsed, atomCount);
 
     if (scfSuccess && dftResult.phonon) {
       const phononSuccess = dftResult.phonon.converged;
       stageMetrics.phonon_workers.currentDepth++;
-      updateStageMetrics("phonon_workers", phononSuccess, dftResult.phonon.wallTimeSeconds * 1000);
+      updateStageMetrics("phonon_workers", phononSuccess, dftResult.phonon.wallTimeSeconds * 1000, atomCount);
       stageMetrics.phonon_workers.currentDepth--;
 
       stageMetrics.epc_workers.currentDepth++;
       const phononPhysicallyStable = dftResult.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1;
-      updateStageMetrics("epc_workers", phononSuccess && phononPhysicallyStable, 0);
+      updateStageMetrics("epc_workers", phononSuccess && phononPhysicallyStable, 0, atomCount);
       stageMetrics.epc_workers.currentDepth--;
     }
 
@@ -215,59 +215,55 @@ async function processNextJob(): Promise<boolean> {
       totalSucceeded++;
 
       try {
-        const candidates = await storage.getSuperconductorsByFormula(job.formula);
-        if (candidates.length > 0) {
-          const candidate = candidates[0];
-          const updates: any = {
-            dataConfidence: "dft-verified",
-          };
+        const scalarUpdates: any = {
+          dataConfidence: "dft-verified",
+        };
 
-          if (dftResult.scf) {
-            if (dftResult.scf.bandGap !== null) {
-              updates.bandGap = dftResult.scf.bandGap;
-            }
-            if (dftResult.scf.totalEnergyPerAtom) {
-              updates.formationEnergy = dftResult.scf.totalEnergyPerAtom;
-            }
+        if (dftResult.scf) {
+          if (dftResult.scf.bandGap !== null) {
+            scalarUpdates.bandGap = dftResult.scf.bandGap;
           }
+          if (dftResult.scf.totalEnergyPerAtom) {
+            scalarUpdates.formationEnergy = dftResult.scf.totalEnergyPerAtom;
+          }
+        }
 
-          const mlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
-          const bandData = dftResult.bandStructure;
-          updates.mlFeatures = {
-            ...mlFeatures,
-            qeDFT: true,
-            qeConverged: dftResult.scf?.converged || false,
-            qeTotalEnergy: dftResult.scf?.totalEnergy,
-            qeFermiEnergy: dftResult.scf?.fermiEnergy,
-            qePressure: dftResult.scf?.pressure,
-            qePhononStable: dftResult.phonon
-              ? dftResult.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1
-              : null,
-            qePhononLowestFreq: dftResult.phonon?.lowestFrequency ?? null,
-            qePhononImaginaryCount: dftResult.phonon?.imaginaryCount ?? 0,
-            qePhononFreqs: dftResult.phonon?.frequencies?.length || 0,
-            qeMagnetization: dftResult.scf?.magnetization ?? null,
-            qeIsMagnetic: dftResult.scf?.magnetization != null
-              ? Math.abs(dftResult.scf.magnetization) > 0.5
-              : null,
-            dftConfidence: 1.0,
-            qeBands: bandData?.converged || false,
-            qeBandCrossings: bandData?.bandCrossings?.length || 0,
-            qeBandInversions: bandData?.bandInversions?.length || 0,
-            qeBandGapPath: bandData?.bandGapAlongPath ?? null,
-            qeMetallicPath: bandData?.isMetallicAlongPath ?? null,
-            qeFlatBandScore: bandData?.flatBandScore ?? 0,
-            qeDiracScore: bandData?.diracCrossingScore ?? 0,
-            qeVHSCount: bandData?.vanHoveSingularities?.length || 0,
-            qeBandWidth: bandData?.bandWidth ?? 0,
-            qeBandInversionCount: bandData?.topologicalIndicators?.bandInversionCount || 0,
-            qeNodalLineIndicator: bandData?.topologicalIndicators?.nodalLineIndicator || 0,
-            qeParityChanges: bandData?.topologicalIndicators?.parityChanges || 0,
-            qeDiracPointCount: bandData?.topologicalIndicators?.diracPointCount || 0,
-          };
+        const bandData = dftResult.bandStructure;
+        const mlFeaturePatch: Record<string, any> = {
+          qeDFT: true,
+          qeConverged: dftResult.scf?.converged || false,
+          qeTotalEnergy: dftResult.scf?.totalEnergy,
+          qeFermiEnergy: dftResult.scf?.fermiEnergy,
+          qePressure: dftResult.scf?.pressure,
+          qePhononStable: dftResult.phonon
+            ? dftResult.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1
+            : null,
+          qePhononLowestFreq: dftResult.phonon?.lowestFrequency ?? null,
+          qePhononImaginaryCount: dftResult.phonon?.imaginaryCount ?? 0,
+          qePhononFreqs: dftResult.phonon?.frequencies?.length || 0,
+          qeMagnetization: dftResult.scf?.magnetization ?? null,
+          qeIsMagnetic: dftResult.scf?.magnetization != null
+            ? Math.abs(dftResult.scf.magnetization) > 0.5
+            : null,
+          dftConfidence: 1.0,
+          qeBands: bandData?.converged || false,
+          qeBandCrossings: bandData?.bandCrossings?.length || 0,
+          qeBandInversions: bandData?.bandInversions?.length || 0,
+          qeBandGapPath: bandData?.bandGapAlongPath ?? null,
+          qeMetallicPath: bandData?.isMetallicAlongPath ?? null,
+          qeFlatBandScore: bandData?.flatBandScore ?? 0,
+          qeDiracScore: bandData?.diracCrossingScore ?? 0,
+          qeVHSCount: bandData?.vanHoveSingularities?.length || 0,
+          qeBandWidth: bandData?.bandWidth ?? 0,
+          qeBandInversionCount: bandData?.topologicalIndicators?.bandInversionCount || 0,
+          qeNodalLineIndicator: bandData?.topologicalIndicators?.nodalLineIndicator || 0,
+          qeParityChanges: bandData?.topologicalIndicators?.parityChanges || 0,
+          qeDiracPointCount: bandData?.topologicalIndicators?.diracPointCount || 0,
+        };
 
-          await storage.updateSuperconductorCandidate(candidate.id, updates);
-          console.log(`[DFT-Queue] Updated candidate ${job.formula} with QE DFT results`);
+        const updated = await storage.updateCandidateByFormulaDft(job.formula, scalarUpdates, mlFeaturePatch);
+        if (updated) {
+          console.log(`[DFT-Queue] Updated candidate ${job.formula} with QE DFT results (single-query upsert)`);
         }
       } catch (err: any) {
         console.log(`[DFT-Queue] Failed to update candidate: ${err.message}`);
