@@ -383,7 +383,9 @@ function softmax(logits: number[], temperature: number = 1.0): number[] {
 }
 
 function sampleFromDistribution(probs: number[]): number {
-  const r = Math.random();
+  let sum = 0;
+  for (let i = 0; i < probs.length; i++) sum += probs[i];
+  const r = Math.random() * sum;
   let cumulative = 0;
   for (let i = 0; i < probs.length; i++) {
     cumulative += probs[i];
@@ -623,7 +625,19 @@ export class RLChemicalSpaceAgent {
     const stagnationBoost = Math.min(0.5, state.stagnationCycles * 0.02);
 
     const effectiveEpsilon = Math.min(this.epsilon + stagnationBoost, 0.5);
-    const effectiveTemperature = Math.max(this.temperature + stagnationBoost * 0.5, this.minTemperature);
+
+    const STAG_EXPLORE_PHASE = 15;
+    let effectiveTemperature: number;
+    if (state.stagnationCycles <= STAG_EXPLORE_PHASE) {
+      effectiveTemperature = Math.max(this.temperature + stagnationBoost * 0.5, this.minTemperature);
+    } else {
+      const decayCycles = state.stagnationCycles - STAG_EXPLORE_PHASE;
+      const peakTemp = this.temperature + 0.15;
+      effectiveTemperature = Math.max(
+        this.minTemperature * 0.5,
+        peakTemp * Math.exp(-0.08 * decayCycles)
+      );
+    }
 
     if (Math.random() < effectiveEpsilon) {
       const famIdx = Math.floor(Math.random() * CHEMICAL_FAMILY_ACTIONS.length);
