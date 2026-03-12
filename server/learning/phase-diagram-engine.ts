@@ -824,9 +824,31 @@ function computeConfigurationalEntropy(formula: string): { deltaSMix: number; nu
   return { deltaSMix, numElements: elements.length, fractions };
 }
 
+function estimateSynthesisTemperature(formula: string): number {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (totalAtoms === 0 || elements.length === 0) return 1000;
+
+  let weightedMeltSum = 0;
+  let minMelt = Infinity;
+  for (const el of elements) {
+    const data = getElementData(el);
+    const mp = data?.meltingPoint ?? 1000;
+    const frac = (counts[el] ?? 0) / totalAtoms;
+    weightedMeltSum += frac * mp;
+    if (mp < minMelt) minMelt = mp;
+  }
+
+  const avgMelt = weightedMeltSum;
+  const synthFraction = 0.7;
+  const synthTemp = Math.max(minMelt * 0.8, avgMelt * synthFraction);
+  return Math.max(300, Math.min(synthTemp, 3000));
+}
+
 function isEntropyStabilized(formula: string, formationEnergy: number): { qualifies: boolean; deltaSMix: number; reason: string } {
   const R = 8.314;
-  const { deltaSMix, numElements, fractions } = computeConfigurationalEntropy(formula);
+  const { deltaSMix, numElements } = computeConfigurationalEntropy(formula);
 
   if (numElements < 4) {
     return { qualifies: false, deltaSMix, reason: "fewer than 4 elements" };
@@ -840,19 +862,31 @@ function isEntropyStabilized(formula: string, formationEnergy: number): { qualif
     return { qualifies: false, deltaSMix, reason: `formation energy ${formationEnergy.toFixed(4)} eV/atom > 0.1 threshold` };
   }
 
-  const synthesisTempK = 1000;
+  const synthesisTempK = estimateSynthesisTemperature(formula);
   const tDeltaS_eV = (deltaSMix * synthesisTempK) / 96485;
+
+  if (tDeltaS_eV < Math.abs(formationEnergy)) {
+    return {
+      qualifies: false,
+      deltaSMix,
+      reason: `T·ΔS@${Math.round(synthesisTempK)}K=${tDeltaS_eV.toFixed(3)} eV/atom insufficient to overcome |ΔH|=${Math.abs(formationEnergy).toFixed(4)} eV/atom`,
+    };
+  }
+
   return {
     qualifies: true,
     deltaSMix,
-    reason: `high-entropy alloy (${numElements} elements, ΔS_mix=${(deltaSMix / R).toFixed(2)}R, T·ΔS@1000K=${tDeltaS_eV.toFixed(3)} eV/atom overcomes ΔH=${formationEnergy.toFixed(4)} eV/atom)`,
+    reason: `high-entropy alloy (${numElements} elements, ΔS_mix=${(deltaSMix / R).toFixed(2)}R, T·ΔS@${Math.round(synthesisTempK)}K=${tDeltaS_eV.toFixed(3)} eV/atom overcomes ΔH=${formationEnergy.toFixed(4)} eV/atom)`,
   };
 }
 
+const PRESSURE_MULT_CAP = 2.0;
+const ABSOLUTE_MAX_HULL_DISTANCE = 0.4;
+
 function pressureHullMultiplier(pressureGpa: number): number {
   if (pressureGpa <= 0) return 1.0;
-  if (pressureGpa >= 200) return 3.0;
-  return 1.0 + (pressureGpa / 100);
+  const raw = 1.0 + (pressureGpa / 200);
+  return Math.min(raw, PRESSURE_MULT_CAP);
 }
 
 export async function passesStabilityGate(formula: string, pressureGpa: number = 0): Promise<StabilityGateResult> {
@@ -871,6 +905,17 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
   }
 
   const pMult = pressureHullMultiplier(pressureGpa);
+
+  if (hullDistance > ABSOLUTE_MAX_HULL_DISTANCE) {
+    return {
+      pass: false,
+      verdict: "unstable",
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom exceeds absolute maximum ${ABSOLUTE_MAX_HULL_DISTANCE} eV/atom — no crystalline phase expected` +
+        (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
+      hullDistance,
+      formationEnergy,
+    };
+  }
 
   if (hullDistance > 0.20 * pMult) {
     const entropyCheck = isEntropyStabilized(formula, formationEnergy);
