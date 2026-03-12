@@ -184,6 +184,13 @@ export function parseMatdynDOS(dosContent: string): DFPTPhononDOS {
   return { frequencies, dos, totalStates, maxFrequency: maxFreq, hasImaginaryModes: hasImaginary };
 }
 
+function dynamicBinWidth(freqs: number[], i: number): number {
+  if (freqs.length < 2) return 1;
+  if (i === 0) return freqs[1] - freqs[0];
+  if (i === freqs.length - 1) return freqs[i] - freqs[i - 1];
+  return (freqs[i + 1] - freqs[i - 1]) / 2;
+}
+
 export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
   const frequencies: number[] = [];
   const alpha2F: number[] = [];
@@ -226,25 +233,26 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     }
   }
 
+  const LOW_FREQ_CUTOFF = 1.0;
+  const LOG_FLOOR = 1e-3;
+
   if (lambda === 0 && frequencies.length > 0 && alpha2F.length > 0) {
-    const binWidth = frequencies.length > 1 ? frequencies[1] - frequencies[0] : 1;
     for (let i = 0; i < frequencies.length; i++) {
-      if (frequencies[i] > 0 && alpha2F[i] > 0) {
-        lambda += 2 * alpha2F[i] / frequencies[i] * binWidth;
-      }
+      if (frequencies[i] < LOW_FREQ_CUTOFF || alpha2F[i] <= 0) continue;
+      const dw = dynamicBinWidth(frequencies, i);
+      lambda += 2 * alpha2F[i] / frequencies[i] * dw;
     }
   }
 
   if (omegaLog === 0 && lambda > 0 && frequencies.length > 0) {
-    const binWidth = frequencies.length > 1 ? frequencies[1] - frequencies[0] : 1;
     let logSum = 0;
     for (let i = 0; i < frequencies.length; i++) {
-      if (frequencies[i] > 0 && alpha2F[i] > 0) {
-        logSum += (alpha2F[i] / frequencies[i]) * Math.log(frequencies[i]) * binWidth;
-      }
+      if (frequencies[i] < LOW_FREQ_CUTOFF || alpha2F[i] <= 0) continue;
+      const dw = dynamicBinWidth(frequencies, i);
+      logSum += (alpha2F[i] / frequencies[i]) * Math.log(Math.max(frequencies[i], LOG_FLOOR)) * dw;
     }
     omegaLog = Math.exp((2 / lambda) * logSum);
-    if (!Number.isFinite(omegaLog)) omegaLog = 0;
+    if (!Number.isFinite(omegaLog) || omegaLog < 0) omegaLog = 0;
   }
 
   return {
