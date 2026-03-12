@@ -37,21 +37,16 @@ const MAX_PROFILES = 500;
 
 function evictIfNeeded(): void {
   if (profileCache.size >= MAX_PROFILES) {
-    let oldest = "";
-    let oldestTime = Infinity;
-    for (const [k, v] of profileCache) {
-      if (v.updatedAt < oldestTime) {
-        oldestTime = v.updatedAt;
-        oldest = k;
-      }
-    }
-    if (oldest) profileCache.delete(oldest);
+    const oldestKey = profileCache.keys().next().value;
+    if (oldestKey) profileCache.delete(oldestKey);
   }
 }
 
 export function buildPressureResponseProfile(formula: string): PressureResponseProfile {
   const existing = profileCache.get(formula);
   if (existing && Date.now() - existing.updatedAt < 20 * 60 * 1000) {
+    profileCache.delete(formula);
+    profileCache.set(formula, existing);
     return existing;
   }
 
@@ -130,44 +125,42 @@ export function interpolateAtPressure(formula: string, targetPressure: number): 
     };
   }
 
-  let lo = tcPts[0];
-  let hi = tcPts[tcPts.length - 1];
+  let loIdx = 0;
+  let hiIdx = tcPts.length - 1;
   for (let i = 0; i < tcPts.length - 1; i++) {
     if (tcPts[i].pressure <= targetPressure && tcPts[i + 1].pressure >= targetPressure) {
-      lo = tcPts[i];
-      hi = tcPts[i + 1];
+      loIdx = i;
+      hiIdx = i + 1;
       break;
     }
   }
 
   if (targetPressure < tcPts[0].pressure) {
-    lo = tcPts[0];
-    hi = tcPts[Math.min(1, tcPts.length - 1)];
+    loIdx = 0;
+    hiIdx = Math.min(1, tcPts.length - 1);
   } else if (targetPressure > tcPts[tcPts.length - 1].pressure) {
-    lo = tcPts[Math.max(0, tcPts.length - 2)];
-    hi = tcPts[tcPts.length - 1];
+    loIdx = Math.max(0, tcPts.length - 2);
+    hiIdx = tcPts.length - 1;
   }
 
-  const span = hi.pressure - lo.pressure;
-  const t = span > 0 ? (targetPressure - lo.pressure) / span : 0.5;
+  const span = tcPts[hiIdx].pressure - tcPts[loIdx].pressure;
+  const t = span > 0 ? (targetPressure - tcPts[loIdx].pressure) / span : 0.5;
   const clampT = Math.max(0, Math.min(1, t));
-
-  const loIdx = tcPts.indexOf(lo);
-  const hiIdx = tcPts.indexOf(hi);
 
   const loBg = bgPts[loIdx]?.bandgap ?? 0;
   const hiBg = bgPts[hiIdx]?.bandgap ?? 0;
   const loH = stabPts[loIdx]?.enthalpy ?? 0;
   const hiH = stabPts[hiIdx]?.enthalpy ?? 0;
-  const loStab = stabPts[loIdx]?.stable ?? false;
-  const hiStab = stabPts[hiIdx]?.stable ?? false;
+
+  const interpEnthalpy = loH + (hiH - loH) * clampT;
+  const enthalpyStable = interpEnthalpy < 0.025;
 
   return {
     pressure: targetPressure,
-    tc: lo.tc + (hi.tc - lo.tc) * clampT,
+    tc: tcPts[loIdx].tc + (tcPts[hiIdx].tc - tcPts[loIdx].tc) * clampT,
     bandgap: loBg + (hiBg - loBg) * clampT,
-    enthalpy: loH + (hiH - loH) * clampT,
-    enthalpyStable: loStab && hiStab,
+    enthalpy: interpEnthalpy,
+    enthalpyStable,
     interpolated: true,
   };
 }
