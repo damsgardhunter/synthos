@@ -277,19 +277,24 @@ export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: numbe
   const tcs = entries.map(e => e.tc);
   const maxTc = Math.max(...tcs);
   const minTc = Math.min(...tcs);
-  const spread = maxTc > 0 ? (maxTc - minTc) / maxTc : 0;
+  const meanTc = tcs.reduce((s, t) => s + t, 0) / tcs.length;
+  const spreadDenom = Math.max(meanTc, 1);
+  const spread = (maxTc - minTc) / spreadDenom;
 
   let reconciledTc: number;
+  const totalW = invVar.reduce((s, e) => s + e.w, 0);
   if (spread <= 0.35) {
-    const totalW = invVar.reduce((s, e) => s + e.w, 0);
     reconciledTc = invVar.reduce((s, e) => s + e.tc * e.w, 0) / totalW;
   } else {
     invVar.sort((a, b) => b.w - a.w);
     reconciledTc = invVar[0].tc;
   }
 
-  const bestEntry = invVar.reduce((a, b) => a.w > b.w ? a : b);
-  const conf = bestEntry.sigma <= 0.15 ? "high" : bestEntry.sigma <= 0.25 ? "medium" : "low";
+  const pooledVariance = 1 / totalW;
+  const pooledSigma = Math.sqrt(pooledVariance);
+  const disagreementPenalty = spread > 0.35 ? 0.15 : spread > 0.2 ? 0.05 : 0;
+  const effectiveSigma = Math.min(0.95, pooledSigma + disagreementPenalty);
+  const conf = effectiveSigma <= 0.15 ? "high" : effectiveSigma <= 0.25 ? "medium" : "low";
   return { reconciledTc: Math.round(reconciledTc), confidence: conf, methods: estimates };
 }
 
@@ -424,12 +429,13 @@ function expandParentheses(formula: string): string {
   while (result.includes("(") && iterations < 20) {
     const prev = result;
     result = result.replace(parenRegex, (_, group: string, mult: string) => {
-      const m = mult ? parseFloat(mult) : 1;
-      if (isNaN(m) || m <= 0) return group;
+      const m = (mult && mult.length > 0) ? parseFloat(mult) : 1;
+      if (isNaN(m) || !isFinite(m) || m <= 0) return group;
       if (m === 1) return group;
       return group.replace(/([A-Z][a-z]?)(\d*\.?\d*)/g, (_x: string, el: string, num: string) => {
-        const n = num ? parseFloat(num) : 1;
-        const newN = (isNaN(n) || n <= 0 ? 1 : n) * m;
+        const n = (num && num.length > 0) ? parseFloat(num) : 1;
+        const safeN = (isNaN(n) || !isFinite(n) || n <= 0) ? 1 : n;
+        const newN = safeN * m;
         return newN === 1 ? el : `${el}${newN}`;
       });
     });
