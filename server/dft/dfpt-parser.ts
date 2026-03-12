@@ -8,6 +8,7 @@ export interface DFPTAlpha2FParsed {
   omegaLog: number;
   nqPoints: number;
   source: "lambda.x" | "matdyn" | "reconstructed";
+  unstableStructure?: boolean;
 }
 
 export interface DFPTPhononDOS {
@@ -276,17 +277,25 @@ export function parseLambdaOutput(stdout: string): {
   const tc: number[] = [];
   const muStarValues: number[] = [];
 
-  const lambdaMatch = stdout.match(/lambda\s*=\s*([\d.]+)/i);
-  if (lambdaMatch) lambda = parseFloat(lambdaMatch[1]);
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
 
-  const omLogMatch = stdout.match(/omega_log\s*=\s*([\d.]+)\s*\(K\)/i) ||
-    stdout.match(/omega_log\s*=\s*([\d.]+)/i);
-  if (omLogMatch) omegaLog = parseFloat(omLogMatch[1]);
+    if (lambda === 0) {
+      const lm = trimmed.match(/lambda\s*=\s*([\d.]+)/i);
+      if (lm) lambda = parseFloat(lm[1]);
+    }
 
-  const tcMatches = stdout.matchAll(/mu\*?\s*=\s*([\d.]+)\s+Tc\s*=\s*([\d.]+)/gi);
-  for (const m of tcMatches) {
-    muStarValues.push(parseFloat(m[1]));
-    tc.push(parseFloat(m[2]));
+    if (omegaLog === 0) {
+      const om = trimmed.match(/omega_log\s*=\s*([\d.]+)/i);
+      if (om) omegaLog = parseFloat(om[1]);
+    }
+
+    const tcm = trimmed.match(/mu\*?\s*=\s*([\d.]+)\s+Tc\s*=\s*([\d.]+)/i);
+    if (tcm) {
+      muStarValues.push(parseFloat(tcm[1]));
+      tc.push(parseFloat(tcm[2]));
+    }
   }
 
   return {
@@ -321,52 +330,57 @@ export function buildDFPTJobSpec(
   };
 }
 
-export function tryLoadDFPTResults(jobDir: string, prefix: string): {
+async function tryReadFile(filePath: string): Promise<string | null> {
+  try {
+    return await fs.promises.readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+export async function tryLoadDFPTResults(jobDir: string, prefix: string): Promise<{
   alpha2F: DFPTAlpha2FParsed | null;
   phononDOS: DFPTPhononDOS | null;
   dynmat: DFPTDynmatResult[] | null;
-} {
+}> {
   let alpha2F: DFPTAlpha2FParsed | null = null;
   let phononDOS: DFPTPhononDOS | null = null;
   let dynmat: DFPTDynmatResult[] | null = null;
 
-  try {
-    const a2fFile = path.join(jobDir, `${prefix}.a2F.dat`);
-    if (fs.existsSync(a2fFile)) {
-      alpha2F = parseAlpha2FOutput(fs.readFileSync(a2fFile, "utf-8"));
-    }
-  } catch {}
+  const a2fContent = await tryReadFile(path.join(jobDir, `${prefix}.a2F.dat`));
+  if (a2fContent) {
+    alpha2F = parseAlpha2FOutput(a2fContent);
+  }
 
-  const altA2fPaths = [
-    path.join(jobDir, "a2F.dos1"),
-    path.join(jobDir, "a2F.dos"),
-    path.join(jobDir, `${prefix}.a2f`),
-  ];
   if (!alpha2F) {
+    const altA2fPaths = [
+      path.join(jobDir, "a2F.dos1"),
+      path.join(jobDir, "a2F.dos"),
+      path.join(jobDir, `${prefix}.a2f`),
+    ];
     for (const p of altA2fPaths) {
-      try {
-        if (fs.existsSync(p)) {
-          alpha2F = parseAlpha2FOutput(fs.readFileSync(p, "utf-8"));
-          if (alpha2F.frequencies.length > 0) break;
-          alpha2F = null;
-        }
-      } catch {}
+      const content = await tryReadFile(p);
+      if (content) {
+        alpha2F = parseAlpha2FOutput(content);
+        if (alpha2F.frequencies.length > 0) break;
+        alpha2F = null;
+      }
     }
   }
 
-  try {
-    const dosFile = path.join(jobDir, `${prefix}.phdos`);
-    if (fs.existsSync(dosFile)) {
-      phononDOS = parseMatdynDOS(fs.readFileSync(dosFile, "utf-8"));
-    }
-  } catch {}
+  const dosContent = await tryReadFile(path.join(jobDir, `${prefix}.phdos`));
+  if (dosContent) {
+    phononDOS = parseMatdynDOS(dosContent);
+  }
 
-  try {
-    const phOut = path.join(jobDir, "ph.out");
-    if (fs.existsSync(phOut)) {
-      dynmat = parsePhDynmatOutput(fs.readFileSync(phOut, "utf-8"));
-    }
-  } catch {}
+  const phOutContent = await tryReadFile(path.join(jobDir, "ph.out"));
+  if (phOutContent) {
+    dynmat = parsePhDynmatOutput(phOutContent);
+  }
+
+  if (alpha2F && phononDOS?.hasImaginaryModes) {
+    alpha2F.unstableStructure = true;
+  }
 
   return { alpha2F, phononDOS, dynmat };
 }
