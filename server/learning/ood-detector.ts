@@ -40,6 +40,8 @@ const GMM_COMPONENTS = 5;
 const OOD_PENALTY_SCALE = 2.0;
 const MAX_TRAINING_SAMPLES = 500;
 const FEATURE_SUBSET_SIZE = 30;
+const GMM_MAX_ITER = 50;
+const GMM_CONVERGENCE_THRESHOLD = 1e-4;
 
 let trainingMean: number[] = [];
 let trainingInvVar: number[] = [];
@@ -68,7 +70,7 @@ function featureSubset(fullFeatures: number[]): number[] {
 
 function extractOODFeatureVector(formula: string): number[] {
   const features = extractFeatures(formula);
-  const physics = [
+  const raw = [
     features.electronPhononLambda ?? 0,
     features.metallicity ?? 0,
     features.logPhononFreq ?? 0,
@@ -100,7 +102,12 @@ function extractOODFeatureVector(formula: string): number[] {
     features.avgSommerfeldGamma ?? 0,
     features.electronDensityEstimate ?? 0,
   ];
-  return physics.map(v => Number.isFinite(v) ? v : 0);
+  const result = new Array(FEATURE_SUBSET_SIZE).fill(0);
+  for (let i = 0; i < FEATURE_SUBSET_SIZE; i++) {
+    const v = raw[i];
+    result[i] = (v !== undefined && Number.isFinite(v)) ? v : 0;
+  }
+  return result;
 }
 
 function computeMahalanobis(x: number[]): number {
@@ -139,12 +146,14 @@ function computeGMMLogLikelihood(x: number[]): number {
 
 function percentileRank(value: number, sorted: number[]): number {
   if (sorted.length === 0) return 0.5;
-  let count = 0;
+  let below = 0;
+  let equal = 0;
   for (const s of sorted) {
-    if (value <= s) break;
-    count++;
+    if (s < value) below++;
+    else if (s === value) equal++;
+    else break;
   }
-  return count / sorted.length;
+  return (below + 0.5 * equal) / sorted.length;
 }
 
 function getPercentile(sorted: number[], p: number): number {
@@ -174,8 +183,13 @@ function fitGMM(data: number[][]): GMMComponent[] {
     });
   }
 
-  for (let iter = 0; iter < 20; iter++) {
+  let prevLogLikelihood = -Infinity;
+  let converged = false;
+
+  for (let iter = 0; iter < GMM_MAX_ITER; iter++) {
     const responsibilities: number[][] = [];
+    let totalLogLikelihood = 0;
+
     for (let i = 0; i < n; i++) {
       const logProbs: number[] = [];
       for (let k = 0; k < K; k++) {
@@ -192,8 +206,19 @@ function fitGMM(data: number[][]): GMMComponent[] {
       const maxLog = Math.max(...logProbs);
       const expProbs = logProbs.map(lp => Math.exp(lp - maxLog));
       const sumExp = expProbs.reduce((s, v) => s + v, 0);
+      totalLogLikelihood += maxLog + Math.log(sumExp);
       responsibilities.push(expProbs.map(e => e / sumExp));
     }
+
+    if (iter > 0) {
+      const delta = Math.abs(totalLogLikelihood - prevLogLikelihood);
+      const relDelta = delta / (Math.abs(prevLogLikelihood) + 1e-10);
+      if (relDelta < GMM_CONVERGENCE_THRESHOLD) {
+        converged = true;
+        break;
+      }
+    }
+    prevLogLikelihood = totalLogLikelihood;
 
     for (let k = 0; k < K; k++) {
       let nk = 0;
@@ -227,6 +252,10 @@ function fitGMM(data: number[][]): GMMComponent[] {
       components[k].weight = nk / n;
       components[k].logDetCov = logDet;
     }
+  }
+
+  if (!converged) {
+    console.warn(`[OOD] GMM did not converge after ${GMM_MAX_ITER} iterations (last LL=${prevLogLikelihood.toFixed(2)})`);
   }
 
   return components;
