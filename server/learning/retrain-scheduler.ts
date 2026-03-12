@@ -49,6 +49,11 @@ const decisionHistory: RetrainHistory[] = [];
 const DECISION_COOLDOWN_MS = 2 * 60 * 1000;
 const MAX_SKIP_STREAK = 10;
 
+function estimateRetrainCostSeconds(): number {
+  const evalStats = getEvaluatedDatasetStats();
+  return Math.max(5, Math.round((evalStats.totalEvaluated / 100) * 1.5));
+}
+
 const state: SchedulerState = {
   lastRetrainDatasetSize: 0,
   lastRetrainTimestamp: 0,
@@ -86,6 +91,8 @@ function checkDatasetGrowthTrigger(): RetrainTrigger | null {
   return null;
 }
 
+const HIGH_TC_FAMILIES = ["hydride", "cuprate", "nickelate"];
+
 function checkErrorSpikeTrigger(): RetrainTrigger | null {
   const diagnostics = getComprehensiveModelDiagnostics();
   const currentR2 = diagnostics.xgboost.r2;
@@ -97,6 +104,24 @@ function checkErrorSpikeTrigger(): RetrainTrigger | null {
 
   const r2Drop = state.lastRetrainR2 - currentR2;
   const maeIncrease = currentMAE / Math.max(0.01, state.lastRetrainMAE);
+
+  let frontierDegraded = false;
+  let frontierDetail = "";
+  for (const fb of diagnostics.familyBias) {
+    if (HIGH_TC_FAMILIES.includes(fb.family) && fb.count >= 5 && fb.meanAbsError > 30) {
+      frontierDegraded = true;
+      frontierDetail += `${fb.family} MAE=${fb.meanAbsError.toFixed(1)}K (n=${fb.count}, bias=${fb.bias}); `;
+    }
+  }
+
+  if (frontierDegraded) {
+    return {
+      type: "error_spike",
+      reasoning: `High-Tc frontier degradation: ${frontierDetail.trim()} Global R²=${currentR2.toFixed(4)}, MAE=${currentMAE.toFixed(2)}K`,
+      severity: "high",
+      metrics: { r2Drop, maeIncrease, currentR2, currentMAE, frontierDegraded: 1 },
+    };
+  }
 
   if (r2Drop > 0.05 || maeIncrease > 1.15) {
     return {
@@ -127,14 +152,20 @@ function checkCalibrationDriftTrigger(): RetrainTrigger | null {
 function checkUncertaintyIncreaseTrigger(): RetrainTrigger | null {
   const variance = getVarianceSummary();
   if (variance.highUncertaintyFraction > 0.4) {
+    const { epistemic, aleatoric, dominantSource } = variance.decomposition;
+    const totalVar = epistemic + aleatoric;
+    const epistemicRatio = totalVar > 0 ? epistemic / totalVar : 0.5;
+
     return {
       type: "uncertainty_increase",
-      reasoning: `${(variance.highUncertaintyFraction * 100).toFixed(1)}% of predictions have high uncertainty (threshold: 40%). Dominant source: ${variance.decomposition.dominantSource}`,
+      reasoning: `${(variance.highUncertaintyFraction * 100).toFixed(1)}% of predictions have high uncertainty (threshold: 40%). Dominant: ${dominantSource}, epistemic ratio: ${(epistemicRatio * 100).toFixed(1)}%`,
       severity: variance.highUncertaintyFraction > 0.6 ? "high" : "medium",
       metrics: {
         highUncFraction: variance.highUncertaintyFraction,
         meanVariance: variance.meanVariance,
-        epistemic: variance.decomposition.epistemic,
+        epistemic,
+        aleatoric,
+        epistemicRatio,
       },
     };
   }
@@ -231,16 +262,18 @@ export async function evaluateRetrainNeed(): Promise<RetrainDecision> {
   state.lastDecisionTimestamp = Date.now();
   const triggers = collectTriggers();
 
+  const costEstimate = estimateRetrainCostSeconds();
+
   if (triggers.length === 0) {
     state.consecutiveSkips++;
     state.totalRetrainsSkipped++;
-    state.totalComputeSaved += 15;
+    state.totalComputeSaved += costEstimate;
     return {
       shouldRetrain: false,
       triggers: [],
       reasoning: "No retrain triggers detected — model performance is stable",
       urgency: "skip",
-      estimatedBenefit: "Saved ~15s compute by skipping unnecessary retrain",
+      estimatedBenefit: `Saved ~${costEstimate}s compute by skipping unnecessary retrain`,
       timestamp: Date.now(),
     };
   }
@@ -255,6 +288,21 @@ export async function evaluateRetrainNeed(): Promise<RetrainDecision> {
       reasoning: `High-severity trigger detected: ${triggers.filter(t => t.severity === "high").map(t => t.type).join(", ")}`,
       urgency: "immediate",
       estimatedBenefit: "Critical model correction needed to prevent prediction drift",
+      timestamp: Date.now(),
+    };
+  }
+
+  const hasMediumOrHighTrigger = triggers.some(t => t.severity === "medium" || t.severity === "high");
+  if (!hasMediumOrHighTrigger) {
+    state.consecutiveSkips++;
+    state.totalRetrainsSkipped++;
+    state.totalComputeSaved += costEstimate;
+    return {
+      shouldRetrain: false,
+      triggers,
+      reasoning: `Only low-severity triggers present — skipping LLM evaluation and deferring`,
+      urgency: "deferred",
+      estimatedBenefit: `Saved ~${costEstimate}s compute + API call`,
       timestamp: Date.now(),
     };
   }
@@ -276,7 +324,7 @@ export async function evaluateRetrainNeed(): Promise<RetrainDecision> {
         {
           role: "system",
           content: `You are an ML operations scheduler deciding whether to retrain a superconductor Tc prediction model.
-Retraining costs ~15 seconds of compute. Only retrain when the benefit outweighs the cost.
+Retraining costs ~${costEstimate} seconds of compute (scales with dataset size). Only retrain when the benefit outweighs the cost.
 
 Current model state:
 - XGBoost R²=${diagnostics.xgboost.r2.toFixed(4)}, MAE=${diagnostics.xgboost.mae.toFixed(2)}K
@@ -292,8 +340,9 @@ ${triggersStr}
 Decision criteria:
 - dataset_growth >= 20%: Almost always retrain (new data available)
 - error_spike with R² drop > 0.05: Retrain urgently
+- error_spike with frontierDegraded=1: Retrain immediately (high-Tc families failing even if global R² looks stable)
 - calibration_drift with ECE > 0.15: Retrain soon
-- uncertainty_increase > 40%: Retrain if epistemic (not aleatoric)
+- uncertainty_increase > 40%: Retrain if epistemicRatio > 0.5 (epistemic = fixable by more data/training, aleatoric = irreducible noise)
 - Multiple medium triggers together: Usually retrain
 
 Respond JSON:
@@ -320,7 +369,7 @@ Respond JSON:
     } else {
       state.consecutiveSkips++;
       state.totalRetrainsSkipped++;
-      state.totalComputeSaved += 15;
+      state.totalComputeSaved += costEstimate;
     }
 
     return {
@@ -343,7 +392,7 @@ Respond JSON:
     } else {
       state.consecutiveSkips++;
       state.totalRetrainsSkipped++;
-      state.totalComputeSaved += 15;
+      state.totalComputeSaved += costEstimate;
     }
 
     return {
@@ -351,7 +400,7 @@ Respond JSON:
       triggers,
       reasoning: `Fallback: ${mediumCount} medium triggers ${shouldRetrain ? ">= 2, retraining" : "< 2, skipping"}`,
       urgency: shouldRetrain ? "soon" : "deferred",
-      estimatedBenefit: shouldRetrain ? "Multi-trigger correction" : `Saved ~15s compute`,
+      estimatedBenefit: shouldRetrain ? "Multi-trigger correction" : `Saved ~${costEstimate}s compute`,
       timestamp: Date.now(),
     };
   }
@@ -371,7 +420,7 @@ export function recordRetrainOutcome(
   };
 
   if (!actuallyRetrained) {
-    entry.computeTimeSaved = 15;
+    entry.computeTimeSaved = estimateRetrainCostSeconds();
   }
 
   if (actuallyRetrained) {
