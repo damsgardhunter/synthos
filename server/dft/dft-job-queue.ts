@@ -1,6 +1,7 @@
 import { storage } from "../storage";
 import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts } from "./qe-worker";
 import type { QEFullResult } from "./qe-worker";
+const SCF_RETRY_START_ATTEMPT = 3;
 import type { DftJob } from "@shared/schema";
 import { recordStructureFailure } from "../crystal/structure-failure-db";
 import { isValidFormula, parseFormulaCounts } from "../learning/utils";
@@ -170,8 +171,12 @@ async function processNextJob(): Promise<boolean> {
 
     let dftResult: QEFullResult;
 
+    const inputData = job.inputData as any;
+    const isRetry = job.jobType === "scf_retry";
+    const startAttempt = isRetry ? (inputData?.startAttempt ?? SCF_RETRY_START_ATTEMPT) : 0;
+
     if (isQEAvailable()) {
-      dftResult = await runFullDFT(job.formula);
+      dftResult = await runFullDFT(job.formula, { startAttempt });
     } else {
       dftResult = {
         formula: job.formula,
@@ -272,7 +277,8 @@ async function processNextJob(): Promise<boolean> {
       console.log(`[DFT-Queue] Job #${job.id} completed: ${job.formula} (${dftResult.wallTimeTotal.toFixed(1)}s)`);
     } else {
       totalFailed++;
-      console.log(`[DFT-Queue] Job #${job.id} failed: ${job.formula} — ${dftResult.error || "SCF did not converge"}`);
+      const errorDetail = dftResult.error || dftResult.scf?.error || "SCF did not converge";
+      console.log(`[DFT-Queue] Job #${job.id} failed: ${job.formula} — ${errorDetail}`);
       try {
         const hasPhysicalInstability = dftResult.phonon
           && dftResult.phonon.hasImaginary
@@ -285,14 +291,45 @@ async function processNextJob(): Promise<boolean> {
           failureReason,
           failedAt: Date.now(),
           source: "dft",
-          details: dftResult.error || dftResult.scf?.error || "SCF did not converge",
+          details: errorDetail,
           lowestPhononFreq: dftResult.phonon?.lowestFrequency,
           imaginaryModeCount: dftResult.phonon?.imaginaryCount,
         });
+
+        if (failureReason === "scf_divergence" && !isRetry) {
+          const retryJob = await storage.insertDftJob({
+            formula: job.formula,
+            candidateId: job.candidateId,
+            status: "queued",
+            jobType: "scf_retry",
+            priority: Math.max((job.priority ?? 50) - 10, 1),
+            inputData: {
+              formula: job.formula,
+              candidateId: job.candidateId,
+              requestedAt: new Date().toISOString(),
+              parentJobId: job.id,
+              startAttempt: SCF_RETRY_START_ATTEMPT,
+            },
+          });
+          console.log(`[DFT-Queue] Auto-requeued ${job.formula} as scf_retry job #${retryJob.id} (startAttempt=${SCF_RETRY_START_ATTEMPT})`);
+          if (broadcastFn) {
+            broadcastFn("dftJobQueued", { jobId: retryJob.id, formula: job.formula, priority: retryJob.priority, retry: true });
+          }
+        }
       } catch {}
+
+      if (broadcastFn) {
+        broadcastFn("dftJobFailed", {
+          jobId: job.id,
+          formula: job.formula,
+          error: errorDetail,
+          wallTime: dftResult.wallTimeTotal,
+          willRetry: !isRetry && !(dftResult.phonon?.lowestFrequency !== undefined && dftResult.phonon.lowestFrequency < IMAGINARY_PHONON_THRESHOLD_CM1),
+        });
+      }
     }
 
-    if (broadcastFn) {
+    if (scfSuccess && broadcastFn) {
       broadcastFn("dftJobCompleted", {
         jobId: job.id,
         formula: job.formula,
@@ -315,6 +352,17 @@ async function processNextJob(): Promise<boolean> {
     totalProcessed++;
     totalFailed++;
     console.log(`[DFT-Queue] Job #${job.id} error: ${err.message}`);
+
+    if (broadcastFn) {
+      broadcastFn("dftJobFailed", {
+        jobId: job.id,
+        formula: job.formula,
+        error: err.message,
+        wallTime: (Date.now() - jobStartTime) / 1000,
+        willRetry: false,
+      });
+    }
+
     return false;
   } finally {
     activeWorkers--;

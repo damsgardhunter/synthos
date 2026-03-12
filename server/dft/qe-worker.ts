@@ -2075,7 +2075,7 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
   });
 }
 
-export async function runFullDFT(formula: string): Promise<QEFullResult> {
+export async function runFullDFT(formula: string, opts?: { startAttempt?: number }): Promise<QEFullResult> {
   const startTime = Date.now();
   const result: QEFullResult = {
     formula,
@@ -2288,12 +2288,14 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
       { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
       { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
       { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.03, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
+      { mixingBeta: 0.07, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.02, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
     ];
 
+    const firstAttempt = opts?.startAttempt ?? 0;
     let scfConverged = false;
     let retryCount = 0;
 
-    for (let attempt = 0; attempt < retryConfigs.length && !scfConverged; attempt++) {
+    for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
       const params = retryConfigs[attempt];
       const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, params);
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
