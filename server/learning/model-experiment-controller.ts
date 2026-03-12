@@ -169,9 +169,25 @@ const HYPERPARAM_ALIASES: Record<string, string> = {
   bootstrap_ratio: "bootstrapRatio",
 };
 
-function clampHyperparameters(modelTarget: string, changes: Record<string, any>): { clamped: Record<string, any>; warnings: string[] } {
+function clampHyperparameters(modelTarget: string, changes: Record<string, any>, datasetSize?: number): { clamped: Record<string, any>; warnings: string[] } {
   const ranges = HYPERPARAM_RANGES[modelTarget];
   if (!ranges) return { clamped: { ...changes }, warnings: [] };
+
+  const dynamicRanges: Record<string, [number, number]> = {};
+  for (const [k, v] of Object.entries(ranges)) dynamicRanges[k] = [...v];
+  if (datasetSize != null && datasetSize > 0 && dynamicRanges["nTrees"]) {
+    const safeMax = Math.min(dynamicRanges["nTrees"][1], Math.max(dynamicRanges["nTrees"][0], datasetSize * 10));
+    if (safeMax < dynamicRanges["nTrees"][1]) {
+      dynamicRanges["nTrees"] = [dynamicRanges["nTrees"][0], safeMax];
+    }
+  }
+  if (datasetSize != null && datasetSize > 0 && dynamicRanges["maxDepth"]) {
+    const safeMaxDepth = Math.min(dynamicRanges["maxDepth"][1], Math.max(dynamicRanges["maxDepth"][0], Math.floor(Math.log2(datasetSize))));
+    if (safeMaxDepth < dynamicRanges["maxDepth"][1]) {
+      dynamicRanges["maxDepth"] = [dynamicRanges["maxDepth"][0], safeMaxDepth];
+    }
+  }
+
   const clamped: Record<string, any> = {};
   const warnings: string[] = [];
   const seenCanonical = new Map<string, string>();
@@ -182,11 +198,11 @@ function clampHyperparameters(modelTarget: string, changes: Record<string, any>)
       continue;
     }
     seenCanonical.set(canonKey, rawKey);
-    const range = ranges[canonKey];
+    const range = dynamicRanges[canonKey];
     if (range && typeof val === "number") {
       const [lo, hi] = range;
       if (val < lo || val > hi) {
-        warnings.push(`${rawKey}=${val} clamped to [${lo},${hi}]`);
+        warnings.push(`${rawKey}=${val} clamped to [${lo},${hi}]${datasetSize != null ? ` (dataset=${datasetSize})` : ""}`);
         clamped[canonKey] = Math.max(lo, Math.min(hi, val));
       } else {
         clamped[canonKey] = val;
@@ -500,7 +516,13 @@ Be specific about what parameters to change and why.`,
 
         let finalChanges = p.changes;
         if (p.experiment_type === "adjust_hyperparameters") {
-          const { clamped, warnings } = clampHyperparameters(normalizedTarget, p.changes);
+          const dsSize = normalizedTarget === "xgboost" ? currentDiagnostics.xgboost?.datasetSize
+            : normalizedTarget === "gnn" ? currentDiagnostics.gnn?.datasetSize
+            : normalizedTarget === "lambda-regressor" ? currentDiagnostics.lambda?.datasetSize
+            : normalizedTarget === "phonon-surrogate" ? currentDiagnostics.phononSurrogate?.datasetSize
+            : normalizedTarget === "tb-surrogate" ? currentDiagnostics.tbSurrogate?.datasetSize
+            : undefined;
+          const { clamped, warnings } = clampHyperparameters(normalizedTarget, p.changes, dsSize);
           if (warnings.length > 0) {
             console.log(`[Model Experiment Controller] Hyperparams clamped for ${normalizedTarget}: ${warnings.join("; ")}`);
           }
@@ -562,7 +584,8 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
 
   try {
     if (experiment.experiment_type === "adjust_hyperparameters") {
-      const { clamped, warnings } = clampHyperparameters(experiment.model_target, experiment.changes);
+      const execDatasetSize = beforeMetrics.datasetSize ?? undefined;
+      const { clamped, warnings } = clampHyperparameters(experiment.model_target, experiment.changes, execDatasetSize);
       if (warnings.length > 0) {
         console.log(`[Model Experiment Controller] Execute-time clamp: ${warnings.join("; ")}`);
       }
@@ -577,12 +600,14 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
     }
 
     if (experiment.experiment_type === "request_data") {
+      const method = experiment.changes.method ?? "tb_evaluation";
+      const maxCount = method === "qe_dft" ? 30 : method === "tb_evaluation" ? 200 : 50;
       const request: DataRequest = {
         id: `dr-${Date.now()}`,
         timestamp: Date.now(),
         family: experiment.changes.family ?? "unknown",
-        count: Math.min(experiment.changes.count ?? 20, 50),
-        method: experiment.changes.method ?? "tb_evaluation",
+        count: Math.min(Math.max(1, experiment.changes.count ?? 20), maxCount),
+        method,
         pressureVariants: experiment.changes.pressure_variants ?? false,
         pressures: experiment.changes.pressures ?? [0],
         status: "pending",
@@ -710,24 +735,26 @@ export function getExperimentStats(): {
   const running = experimentRecords.filter(r => r.status === "running");
   const proposed = experimentRecords.filter(r => r.status === "proposed");
 
-  const avgImprovementByModel: Record<string, Record<string, number>> = {};
+  const improvementSums: Record<string, Record<string, number>> = {};
+  const improvementCounts: Record<string, Record<string, number>> = {};
   for (const record of completed) {
-    if (!avgImprovementByModel[record.target_model]) {
-      avgImprovementByModel[record.target_model] = {};
+    if (!improvementSums[record.target_model]) {
+      improvementSums[record.target_model] = {};
+      improvementCounts[record.target_model] = {};
     }
     for (const [key, val] of Object.entries(record.improvement)) {
-      if (!avgImprovementByModel[record.target_model][key]) {
-        avgImprovementByModel[record.target_model][key] = 0;
-      }
-      avgImprovementByModel[record.target_model][key] += val;
+      improvementSums[record.target_model][key] = (improvementSums[record.target_model][key] ?? 0) + val;
+      improvementCounts[record.target_model][key] = (improvementCounts[record.target_model][key] ?? 0) + 1;
     }
   }
-  for (const model of Object.keys(avgImprovementByModel)) {
-    const modelCompleted = completed.filter(r => r.target_model === model).length;
-    if (modelCompleted > 0) {
-      for (const key of Object.keys(avgImprovementByModel[model])) {
-        avgImprovementByModel[model][key] = Math.round((avgImprovementByModel[model][key] / modelCompleted) * 10000) / 10000;
-      }
+  const avgImprovementByModel: Record<string, Record<string, number>> = {};
+  for (const model of Object.keys(improvementSums)) {
+    avgImprovementByModel[model] = {};
+    for (const key of Object.keys(improvementSums[model])) {
+      const count = improvementCounts[model][key];
+      avgImprovementByModel[model][key] = count > 0
+        ? Math.round((improvementSums[model][key] / count) * 10000) / 10000
+        : 0;
     }
   }
 
@@ -743,7 +770,16 @@ export function getExperimentStats(): {
     running: running.length,
     proposed: proposed.length,
     avgImprovementByModel,
-    recentExperiments: experimentRecords.slice(-10).reverse(),
+    recentExperiments: experimentRecords.slice(-10).reverse().map(r => ({
+      id: r.id,
+      timestamp: r.timestamp,
+      type: r.type,
+      target_model: r.target_model,
+      status: r.status,
+      improvement: r.improvement,
+      completedAt: r.completedAt,
+      error: r.error,
+    })) as ExperimentRecord[],
     hyperparamOverrides: overridesObj,
   };
 }
