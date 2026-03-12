@@ -1127,14 +1127,17 @@ export function computeLindhardNesting(bandResult: DFTBandStructureResult): Lind
         sj.kCoords[2] - si.kCoords[2],
       ];
 
-      const binKey = q.map(v => (Math.round(v / qBinRes) * qBinRes).toFixed(2)).join(",");
+      const bx = Math.round(q[0] / qBinRes);
+      const by = Math.round(q[1] / qBinRes);
+      const bz = Math.round(q[2] / qBinRes);
+      const binKey = `${bx},${by},${bz}`;
 
       if (chiMap.has(binKey)) {
         const entry = chiMap.get(binKey)!;
         entry.chi += Math.abs(chiContrib);
         entry.count++;
       } else {
-        chiMap.set(binKey, { q: q.map(v => Math.round(v / qBinRes) * qBinRes), chi: Math.abs(chiContrib), count: 1 });
+        chiMap.set(binKey, { q: [bx * qBinRes, by * qBinRes, bz * qBinRes], chi: Math.abs(chiContrib), count: 1 });
       }
     }
   }
