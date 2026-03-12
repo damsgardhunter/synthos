@@ -177,6 +177,11 @@ function computeUncertainRegionsFromFeatures(formula: string, baseFeatures: MLFe
   if (uncertainties.length < 3) return [];
 
   const globalAvg = uncertainties.reduce((s, u) => s + u.uncertainty, 0) / uncertainties.length;
+
+  if (globalAvg > 0.6) {
+    return [];
+  }
+
   const threshold = Math.max(globalAvg * 1.3, 0.35);
 
   const regions: UncertainPressureRegion[] = [];
@@ -451,9 +456,11 @@ export function generateAdaptivePressureSamples(formula: string, maxSamples: num
     return samples;
   }
 
+  const MAX_REGION_BUDGET = 3;
   const totalUncertainty = regions.reduce((s, r) => s + r.maxUncertainty, 0);
   for (const region of regions) {
-    const regionBudget = Math.max(1, Math.round((region.maxUncertainty / totalUncertainty) * maxSamples));
+    const rawBudget = Math.max(1, Math.round((region.maxUncertainty / totalUncertainty) * maxSamples));
+    const regionBudget = Math.min(MAX_REGION_BUDGET, rawBudget);
     const span = region.pressureEnd - region.pressureStart;
     const step = span > 0 ? Math.max(5, Math.round(span / (regionBudget + 1))) : 10;
 
