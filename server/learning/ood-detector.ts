@@ -4,6 +4,7 @@ import { computeCompositionFeatures, compositionFeatureVector } from "./composit
 import { getCalibrationState } from "./conformal-calibrator";
 
 interface OODResult {
+  formula: string | null;
   oodScore: number;
   mahalanobisDistance: number;
   mahalanobisPercentile: number;
@@ -382,8 +383,11 @@ export function computeOODScore(
     featureVec = formulaOrFeatures;
   }
 
+  const inputFormula = typeof formulaOrFeatures === "string" ? formulaOrFeatures : null;
+
   if (!oodModelReady && trainingMean.length === 0) {
     return {
+      formula: inputFormula,
       oodScore: 0.5,
       mahalanobisDistance: 0,
       mahalanobisPercentile: 0.5,
@@ -421,11 +425,6 @@ export function computeOODScore(
     0.4 * mahaScore + 0.35 * gmmScore + 0.25 * latentScore
   ));
 
-  const isOOD = oodScore > 0.3;
-  if (isOOD) oodDetectedCount++;
-
-  const oodSigmaPenalty = oodScore * OOD_PENALTY_SCALE;
-
   let oodCategory: OODResult["oodCategory"];
   if (oodScore < 0.1) oodCategory = "in-distribution";
   else if (oodScore < 0.3) oodCategory = "borderline";
@@ -433,7 +432,17 @@ export function computeOODScore(
   else if (oodScore < 0.75) oodCategory = "strong-ood";
   else oodCategory = "extreme-ood";
 
+  const isOOD = oodScore > 0.3;
+  if (isOOD) {
+    oodDetectedCount++;
+    const label = inputFormula ?? "feature-vector";
+    console.log(`[OOD] Flagged ${oodCategory}: "${label}" score=${oodScore.toFixed(4)} maha=${mahaDist.toFixed(2)} gmmLL=${gmmLL.toFixed(2)} latent=${latentDist.toFixed(3)} penalty=${(oodScore * OOD_PENALTY_SCALE).toFixed(4)}`);
+  }
+
+  const oodSigmaPenalty = oodScore * OOD_PENALTY_SCALE;
+
   return {
+    formula: inputFormula,
     oodScore: Math.round(oodScore * 10000) / 10000,
     mahalanobisDistance: Math.round(mahaDist * 1000) / 1000,
     mahalanobisPercentile: Math.round(mahaPercentile * 10000) / 10000,
