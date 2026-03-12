@@ -18,15 +18,41 @@ const PHYSICS_RULES: { pattern: RegExp; valid: boolean; reason: string }[] = [
   { pattern: /(?:insulator|semiconductor).*(?:zero|no)\s+(?:resistance|resistiv)/i, valid: false, reason: "Insulators cannot have zero resistance" },
   { pattern: /formation\s+energy.*(?:enhance|increas|boost|improv|correlat|predict|indicat).*(?:superconduct|tc|critical\s+temp|pairing)/i, valid: false, reason: "Formation energy measures thermodynamic stability, NOT superconducting tendency" },
   { pattern: /(?:low|negative|lower)\s+formation\s+energy.*(?:enhance|favor|promot|lead).*(?:superconduct|tc|higher\s+tc)/i, valid: false, reason: "Formation energy does not predict superconductivity" },
-  { pattern: /Hc2\s*[=:>]\s*[12]\d{2,}/i, valid: false, reason: "Hc2 values above 100T are physically implausible for conventional superconductors" },
 ];
 
-function validatePhysicsRules(insight: string): { valid: boolean; reason?: string } {
+const HC2_PATTERN = /Hc2\s*[=:>]\s*(\d+)/i;
+const HC2_FAMILY_THRESHOLDS: Record<string, number> = {
+  hydride: 200,
+  cuprate: 200,
+  "iron-based": 150,
+};
+const HC2_DEFAULT_THRESHOLD = 100;
+
+function detectFamilyFromText(text: string): string {
+  const lower = text.toLowerCase();
+  if (/hydride|hydrogen.rich|h\d{2,}|lah|yh|csh/i.test(lower)) return "hydride";
+  if (/cuprate|ybco|bscco|cuo|cu.o.*layer/i.test(lower)) return "cuprate";
+  if (/iron.based|pnictide|feas|fese|iron.se/i.test(lower)) return "iron-based";
+  return "";
+}
+
+function validatePhysicsRules(insight: string, family?: string): { valid: boolean; reason?: string } {
   for (const rule of PHYSICS_RULES) {
     if (rule.pattern.test(insight) && !rule.valid) {
       return { valid: false, reason: rule.reason };
     }
   }
+
+  const hc2Match = insight.match(HC2_PATTERN);
+  if (hc2Match) {
+    const hc2Val = parseInt(hc2Match[1], 10);
+    const resolvedFamily = family?.toLowerCase() || detectFamilyFromText(insight);
+    const threshold = HC2_FAMILY_THRESHOLDS[resolvedFamily] ?? HC2_DEFAULT_THRESHOLD;
+    if (hc2Val > threshold) {
+      return { valid: false, reason: `Hc2=${hc2Val}T exceeds ${threshold}T plausibility limit for ${resolvedFamily || "conventional"} superconductors` };
+    }
+  }
+
   return { valid: true };
 }
 
@@ -87,7 +113,7 @@ function isInsightSpecificEnough(insight: string): { valid: boolean; reason?: st
 
   for (const pattern of STATISTICAL_SUMMARY_PATTERNS) {
     if (pattern.test(insight)) {
-      return { valid: false, reason: `Statistical summary, not a correlation insight: "${insight.slice(0, 60)}..."` };
+      return { valid: true, reason: `[INFO:batch-summary] ${insight.slice(0, 80)}` };
     }
   }
 
@@ -124,9 +150,52 @@ function pearsonCorrelation(xs: number[], ys: number[]): number {
   return cov / Math.sqrt(varX * varY);
 }
 
+function approxPValue(r: number, n: number): number {
+  if (n <= 2 || Math.abs(r) >= 1) return 1;
+  const df = n - 2;
+  const t = r * Math.sqrt(df / (1 - r * r));
+  const x = df / (df + t * t);
+  let p = incompleteBetaApprox(df / 2, 0.5, x);
+  return Math.min(1, Math.max(0, p));
+}
+
+function incompleteBetaApprox(a: number, b: number, x: number): number {
+  if (x <= 0) return 1;
+  if (x >= 1) return 0;
+  const lnBeta = lnGammaApprox(a) + lnGammaApprox(b) - lnGammaApprox(a + b);
+  const front = Math.exp(a * Math.log(x) + b * Math.log(1 - x) - lnBeta) / a;
+  let sum = 0, term = 1;
+  for (let k = 0; k < 200; k++) {
+    sum += term;
+    term *= (k + 1 - b) * x / (k + 1 + a);
+    if (Math.abs(term) < 1e-12) break;
+  }
+  return Math.min(1, front * sum * a);
+}
+
+function lnGammaApprox(z: number): number {
+  if (z <= 0) return 0;
+  const c = [76.18009172947146, -86.50532032941678, 24.01409824083091,
+    -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+  let x = z, y = z, tmp = x + 5.5;
+  tmp -= (x + 0.5) * Math.log(tmp);
+  let ser = 1.000000000190015;
+  for (let j = 0; j < 6; j++) ser += c[j] / ++y;
+  return -tmp + Math.log(2.5066282746310005 * ser / x);
+}
+
+function significanceLabel(p: number): string {
+  if (p < 0.001) return "***";
+  if (p < 0.01) return "**";
+  if (p < 0.05) return "*";
+  return "n.s.";
+}
+
 function formatCorrelation(label: string, r: number, n: number): string | null {
   if (!Number.isFinite(r)) return `${label}: INVARIANT (zero variance in data, n=${n})`;
-  return `${label}: r=${r.toFixed(3)} (n=${n})`;
+  const p = approxPValue(r, n);
+  const sig = significanceLabel(p);
+  return `${label}: r=${r.toFixed(3)}, p=${p < 0.001 ? "<0.001" : p.toFixed(3)} ${sig} (n=${n})`;
 }
 
 function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]): string {
