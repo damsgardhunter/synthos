@@ -2,6 +2,7 @@ import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
 import { gbPredict, gbPredictWithUncertainty } from "./gradient-boost";
 import { getGNNPrediction, type GNNPrediction } from "./graph-neural-net";
 import { computeEnthalpy } from "./enthalpy-stability";
+import { normalizeFormula } from "./utils";
 
 export interface PressurePoint {
   pressureGpa: number;
@@ -21,6 +22,9 @@ export interface PressureCurve {
   points: PressurePoint[];
   optimalPressureGpa: number;
   maxTc: number;
+  isSensitive: boolean;
+  sensitivityCategory: "high" | "moderate" | "low";
+  maxDTcDP: number;
   computedAt: number;
 }
 
@@ -66,11 +70,34 @@ function pressureBandgapFactor(pressureGpa: number): number {
   return Math.exp(-pressureGpa * 0.003);
 }
 
-function predictAtPressure(formula: string, pressureGpa: number): PressurePoint {
-  const mat = { pressureGpa } as any;
-  const features = extractFeatures(formula, mat);
+const TYPICAL_VOLUME_PER_ATOM = 12;
+const EV_PER_GPA_A3 = 1 / 160.2;
+const PV_FACTOR = TYPICAL_VOLUME_PER_ATOM * EV_PER_GPA_A3;
 
-  const overridden: MLFeatureVector = { ...features, pressureGpa };
+interface CachedGNNResult {
+  valid: boolean;
+  predictedTc: number;
+  formationEnergy: number;
+  bandgap: number;
+}
+
+function fetchGNNOnce(formula: string): CachedGNNResult {
+  try {
+    const gnnResult: GNNPrediction = getGNNPrediction(formula);
+    if (Number.isFinite(gnnResult.predictedTc)) {
+      return { valid: true, predictedTc: gnnResult.predictedTc, formationEnergy: gnnResult.formationEnergy, bandgap: gnnResult.bandgap };
+    }
+  } catch {}
+  return { valid: false, predictedTc: 0, formationEnergy: 0, bandgap: 0 };
+}
+
+function predictAtPressure(
+  formula: string,
+  pressureGpa: number,
+  baseFeatures: MLFeatureVector,
+  gnn: CachedGNNResult
+): PressurePoint {
+  const overridden: MLFeatureVector = { ...baseFeatures, pressureGpa };
 
   const xgbResult = gbPredict(overridden, formula);
   const xgbTc = Math.max(0, xgbResult.tcPredicted);
@@ -78,32 +105,27 @@ function predictAtPressure(formula: string, pressureGpa: number): PressurePoint 
   let gnnTc = 0;
   let gnnFormationEnergy = 0;
   let gnnBandgap = 0;
-  let gnnValid = false;
 
-  try {
-    const gnnResult: GNNPrediction = getGNNPrediction(formula);
-    if (Number.isFinite(gnnResult.predictedTc)) {
-      const domeFactor = pressureDomeFactor(pressureGpa);
-      gnnTc = Math.max(0, gnnResult.predictedTc * domeFactor);
-      gnnFormationEnergy = gnnResult.formationEnergy * (1 + pressureGpa * 0.003);
-      gnnBandgap = Math.max(0, gnnResult.bandgap * pressureBandgapFactor(pressureGpa));
-      gnnValid = true;
-    }
-  } catch {}
+  if (gnn.valid) {
+    const domeFactor = pressureDomeFactor(pressureGpa);
+    gnnTc = Math.max(0, gnn.predictedTc * domeFactor);
+    gnnFormationEnergy = gnn.formationEnergy * (1 + pressureGpa * 0.003);
+    gnnBandgap = Math.max(0, gnn.bandgap * pressureBandgapFactor(pressureGpa));
+  }
 
   let ensembleTc: number;
-  if (gnnValid) {
+  if (gnn.valid) {
     ensembleTc = xgbTc * 0.5 + gnnTc * 0.5;
   } else {
     ensembleTc = xgbTc;
   }
 
-  const formationEnergy = gnnValid
+  const formationEnergy = gnn.valid
     ? gnnFormationEnergy
-    : (features.formationEnergy ?? 0) * (1 + pressureGpa * 0.003);
-  const bandgap = gnnValid
+    : (baseFeatures.formationEnergy ?? 0) * (1 + pressureGpa * 0.003);
+  const bandgap = gnn.valid
     ? gnnBandgap
-    : Math.max(0, (features.bandGap ?? 0) * pressureBandgapFactor(pressureGpa));
+    : Math.max(0, (baseFeatures.bandGap ?? 0) * pressureBandgapFactor(pressureGpa));
 
   let enthalpy = 0;
   let enthalpyStable = true;
@@ -112,7 +134,7 @@ function predictAtPressure(formula: string, pressureGpa: number): PressurePoint 
     enthalpy = hPoint.enthalpy;
     enthalpyStable = hPoint.isStable;
   } catch {
-    enthalpy = formationEnergy + pressureGpa * 0.006;
+    enthalpy = formationEnergy + pressureGpa * PV_FACTOR;
     enthalpyStable = enthalpy < 0.1;
   }
 
@@ -131,35 +153,75 @@ function predictAtPressure(formula: string, pressureGpa: number): PressurePoint 
 }
 
 export function predictPressureCurve(formula: string): PressureCurve {
-  const cached = pressureCurveCache.get(formula);
+  const normFormula = normalizeFormula(formula);
+  const cached = pressureCurveCache.get(normFormula);
   if (cached) return cached;
 
-  const points: PressurePoint[] = [];
+  const baseFeatures = extractFeatures(normFormula, { pressureGpa: 0 } as any);
+  const gnn = fetchGNNOnce(normFormula);
 
+  const coarsePoints: PressurePoint[] = [];
   for (let p = PRESSURE_MIN; p <= PRESSURE_MAX; p += PRESSURE_STEP) {
-    const point = predictAtPressure(formula, p);
-    points.push(point);
+    coarsePoints.push(predictAtPressure(normFormula, p, baseFeatures, gnn));
   }
+
+  const refinedPressures = new Set<number>();
+  for (let i = 1; i < coarsePoints.length; i++) {
+    const dp = coarsePoints[i].pressureGpa - coarsePoints[i - 1].pressureGpa;
+    if (dp === 0) continue;
+    const slope = Math.abs((coarsePoints[i].tc - coarsePoints[i - 1].tc) / dp);
+    if (slope > SENSITIVITY_THRESHOLD * 0.5) {
+      const pLo = coarsePoints[i - 1].pressureGpa;
+      const pHi = coarsePoints[i].pressureGpa;
+      const mid = (pLo + pHi) / 2;
+      refinedPressures.add(Math.round(mid));
+      refinedPressures.add(Math.round(pLo + (pHi - pLo) * 0.25));
+      refinedPressures.add(Math.round(pLo + (pHi - pLo) * 0.75));
+    }
+  }
+
+  const allPoints = [...coarsePoints];
+  const existingPressures = new Set(coarsePoints.map(p => p.pressureGpa));
+  for (const rp of refinedPressures) {
+    if (!existingPressures.has(rp) && rp >= PRESSURE_MIN && rp <= PRESSURE_MAX) {
+      allPoints.push(predictAtPressure(normFormula, rp, baseFeatures, gnn));
+    }
+  }
+  allPoints.sort((a, b) => a.pressureGpa - b.pressureGpa);
 
   let maxTc = 0;
   let optimalPressureGpa = 0;
-  for (const pt of points) {
+  let maxSlope = 0;
+  for (const pt of allPoints) {
     if (pt.tc > maxTc) {
       maxTc = pt.tc;
       optimalPressureGpa = pt.pressureGpa;
     }
   }
+  for (let i = 1; i < allPoints.length; i++) {
+    const dp = allPoints[i].pressureGpa - allPoints[i - 1].pressureGpa;
+    if (dp === 0) continue;
+    const slope = Math.abs((allPoints[i].tc - allPoints[i - 1].tc) / dp);
+    if (slope > maxSlope) maxSlope = slope;
+  }
+
+  let sensitivityCategory: "high" | "moderate" | "low" = "low";
+  if (maxSlope > SENSITIVITY_THRESHOLD * 2) sensitivityCategory = "high";
+  else if (maxSlope > SENSITIVITY_THRESHOLD) sensitivityCategory = "moderate";
 
   const curve: PressureCurve = {
-    formula,
-    points,
+    formula: normFormula,
+    points: allPoints,
     optimalPressureGpa,
     maxTc,
+    isSensitive: maxSlope > SENSITIVITY_THRESHOLD,
+    sensitivityCategory,
+    maxDTcDP: maxSlope,
     computedAt: Date.now(),
   };
 
   evictCacheIfNeeded();
-  pressureCurveCache.set(formula, curve);
+  pressureCurveCache.set(normFormula, curve);
 
   return curve;
 }
@@ -179,7 +241,7 @@ export function pressureSensitivity(formula: string): PressureSensitivityResult 
 
   if (points.length < 2) {
     return {
-      formula,
+      formula: curve.formula,
       avgDTcDP: 0,
       maxDTcDP: 0,
       maxDTcDPPressure: 0,
@@ -189,14 +251,13 @@ export function pressureSensitivity(formula: string): PressureSensitivityResult 
   }
 
   let totalSlope = 0;
-  let maxSlope = 0;
   let maxSlopePressure = 0;
+  let maxSlope = 0;
 
   for (let i = 1; i < points.length; i++) {
     const dp = points[i].pressureGpa - points[i - 1].pressureGpa;
     if (dp === 0) continue;
-    const dTc = points[i].tc - points[i - 1].tc;
-    const slope = Math.abs(dTc / dp);
+    const slope = Math.abs((points[i].tc - points[i - 1].tc) / dp);
     totalSlope += slope;
     if (slope > maxSlope) {
       maxSlope = slope;
@@ -204,19 +265,13 @@ export function pressureSensitivity(formula: string): PressureSensitivityResult 
     }
   }
 
-  const avgSlope = totalSlope / (points.length - 1);
-
-  let sensitivityCategory: "high" | "moderate" | "low" = "low";
-  if (maxSlope > SENSITIVITY_THRESHOLD * 2) sensitivityCategory = "high";
-  else if (maxSlope > SENSITIVITY_THRESHOLD) sensitivityCategory = "moderate";
-
   return {
-    formula,
-    avgDTcDP: avgSlope,
-    maxDTcDP: maxSlope,
+    formula: curve.formula,
+    avgDTcDP: totalSlope / (points.length - 1),
+    maxDTcDP: curve.maxDTcDP,
     maxDTcDPPressure: maxSlopePressure,
-    isSensitive: maxSlope > SENSITIVITY_THRESHOLD,
-    sensitivityCategory,
+    isSensitive: curve.isSensitive,
+    sensitivityCategory: curve.sensitivityCategory,
   };
 }
 
@@ -240,8 +295,7 @@ export function getPressureCurveStats(): PressureCurveStats {
 
   let sensitiveCount = 0;
   for (const curve of curves) {
-    const sens = pressureSensitivity(curve.formula);
-    if (sens.isSensitive) sensitiveCount++;
+    if (curve.isSensitive) sensitiveCount++;
   }
 
   const ranges = [
