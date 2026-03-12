@@ -303,52 +303,67 @@ function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]
 }
 
 function computeDatasetStatistics(materials: Material[]): string {
-  const withBG = materials.filter(m => m.bandGap !== null && m.bandGap !== undefined);
-  const withFE = materials.filter(m => m.formationEnergy !== null && m.formationEnergy !== undefined);
-  const withStab = materials.filter(m => m.stability !== null && m.stability !== undefined);
+  const bgs: number[] = [];
+  const fes: number[] = [];
+  const stabs: number[] = [];
+  const bgFePairs: { bg: number; fe: number }[] = [];
+  const bgStabPairs: { bg: number; stab: number }[] = [];
+  const feStabPairs: { fe: number; stab: number }[] = [];
+  const uniqueFormulas = new Set<string>();
+  const elementFreq: Record<string, number> = {};
+
+  for (const m of materials) {
+    const hasBG = m.bandGap != null;
+    const hasFE = m.formationEnergy != null;
+    const hasStab = m.stability != null;
+
+    if (hasBG) bgs.push(m.bandGap as number);
+    if (hasFE) fes.push(m.formationEnergy as number);
+    if (hasStab) stabs.push(m.stability as number);
+    if (hasBG && hasFE) bgFePairs.push({ bg: m.bandGap as number, fe: m.formationEnergy as number });
+    if (hasBG && hasStab) bgStabPairs.push({ bg: m.bandGap as number, stab: m.stability as number });
+    if (hasFE && hasStab) feStabPairs.push({ fe: m.formationEnergy as number, stab: m.stability as number });
+
+    const f = m.formula || "";
+    if (f && !uniqueFormulas.has(f)) {
+      uniqueFormulas.add(f);
+      const els = f.match(/[A-Z][a-z]?/g) || [];
+      for (const el of els) elementFreq[el] = (elementFreq[el] || 0) + 1;
+    }
+  }
 
   const stats: string[] = [];
   stats.push(`Sample size: n=${materials.length}`);
 
-  if (withBG.length >= 10 && withFE.length >= 10) {
-    const paired = materials.filter(m => m.bandGap != null && m.formationEnergy != null);
-    if (paired.length >= 10) {
-      const bgs = paired.map(m => m.bandGap as number);
-      const fes = paired.map(m => m.formationEnergy as number);
-      const r = pearsonCorrelation(bgs, fes);
-      const line = formatCorrelation("Correlation(band_gap, formation_energy)", r, paired.length);
-      if (line) stats.push(line);
-    }
+  if (bgFePairs.length >= 10) {
+    const r = pearsonCorrelation(bgFePairs.map(p => p.bg), bgFePairs.map(p => p.fe));
+    const line = formatCorrelation("Correlation(band_gap, formation_energy)", r, bgFePairs.length);
+    if (line) stats.push(line);
   }
 
-  if (withBG.length >= 10 && withStab.length >= 10) {
-    const paired = materials.filter(m => m.bandGap != null && m.stability != null);
-    if (paired.length >= 10) {
-      const bgs = paired.map(m => m.bandGap as number);
-      const stabs = paired.map(m => m.stability as number);
-      const r = pearsonCorrelation(bgs, stabs);
-      const line = formatCorrelation("Correlation(band_gap, stability)", r, paired.length);
-      if (line) stats.push(line);
-    }
+  if (bgStabPairs.length >= 10) {
+    const r = pearsonCorrelation(bgStabPairs.map(p => p.bg), bgStabPairs.map(p => p.stab));
+    const line = formatCorrelation("Correlation(band_gap, stability)", r, bgStabPairs.length);
+    if (line) stats.push(line);
   }
 
-  if (withFE.length >= 10 && withStab.length >= 10) {
-    const paired = materials.filter(m => m.formationEnergy != null && m.stability != null);
-    if (paired.length >= 10) {
-      const fes = paired.map(m => m.formationEnergy as number);
-      const stabs = paired.map(m => m.stability as number);
-      const r = pearsonCorrelation(fes, stabs);
-      const line = formatCorrelation("Correlation(formation_energy, stability)", r, paired.length);
-      if (line) stats.push(line);
-    }
+  if (feStabPairs.length >= 10) {
+    const r = pearsonCorrelation(feStabPairs.map(p => p.fe), feStabPairs.map(p => p.stab));
+    const line = formatCorrelation("Correlation(formation_energy, stability)", r, feStabPairs.length);
+    if (line) stats.push(line);
   }
 
-  const uniqueFormulas = new Set(materials.map(m => m.formula));
-  const elementFreq: Record<string, number> = {};
-  for (const formula of uniqueFormulas) {
-    const els = (formula || "").match(/[A-Z][a-z]?/g) || [];
-    for (const el of els) elementFreq[el] = (elementFreq[el] || 0) + 1;
+  if (bgs.length >= 10) {
+    const mean = bgs.reduce((s, v) => s + v, 0) / bgs.length;
+    const std = Math.sqrt(bgs.reduce((s, v) => s + (v - mean) ** 2, 0) / bgs.length);
+    stats.push(`Band gap: mean=${mean.toFixed(3)} eV, std=${std.toFixed(3)}, n=${bgs.length}`);
   }
+  if (fes.length >= 10) {
+    const mean = fes.reduce((s, v) => s + v, 0) / fes.length;
+    const std = Math.sqrt(fes.reduce((s, v) => s + (v - mean) ** 2, 0) / fes.length);
+    stats.push(`Formation energy: mean=${mean.toFixed(3)} eV/atom, std=${std.toFixed(3)}, n=${fes.length}`);
+  }
+
   const topElements = Object.entries(elementFreq).sort((a, b) => b[1] - a[1]).slice(0, 10);
   if (topElements.length > 0) {
     stats.push(`Most common elements (${uniqueFormulas.size} unique formulas): ${topElements.map(([el, n]) => `${el}(${n})`).join(", ")}`);
@@ -357,32 +372,62 @@ function computeDatasetStatistics(materials: Material[]): string {
   return stats.join("\n");
 }
 
+let _datasetStatsCache: { stats: string; timestamp: number; count: number } | null = null;
+const STATS_CACHE_TTL = 5 * 60 * 1000;
+
+async function getCachedDatasetStats(emit: EventEmitter, materials: Material[], phase: string): Promise<{ dataset: Material[]; dataStats: string } | null> {
+  let dataset: Material[];
+
+  if (_datasetStatsCache && Date.now() - _datasetStatsCache.timestamp < STATS_CACHE_TTL) {
+    const newMats = await storage.getMaterials(100, 0);
+    if (newMats.length > 0 && newMats.length !== _datasetStatsCache.count) {
+      const allMats = await storage.getMaterials(2000, 0);
+      dataset = allMats.length >= MIN_DATASET_FOR_INSIGHTS ? allMats : materials;
+      _datasetStatsCache = { stats: computeDatasetStatistics(dataset), timestamp: Date.now(), count: allMats.length };
+    } else {
+      dataset = materials;
+    }
+  } else {
+    const allMats = await storage.getMaterials(2000, 0);
+    dataset = allMats.length >= MIN_DATASET_FOR_INSIGHTS ? allMats : materials;
+    _datasetStatsCache = { stats: computeDatasetStatistics(dataset), timestamp: Date.now(), count: allMats.length };
+  }
+
+  if (dataset.length < 30) {
+    emit("log", {
+      phase,
+      event: "Analysis deferred",
+      detail: `Dataset too small (${dataset.length} materials, need 30+). Skipping insight generation to avoid hallucinations.`,
+      dataSource: "Statistical Analysis",
+    });
+    return null;
+  }
+
+  return { dataset, dataStats: _datasetStatsCache!.stats };
+}
+
 export async function analyzeBondingPatterns(
   emit: EventEmitter,
   materials: Material[]
 ): Promise<string[]> {
   if (materials.length === 0) return [];
 
-  const allMats = await storage.getMaterials(2000, 0);
-  const dataset = allMats.length >= MIN_DATASET_FOR_INSIGHTS ? allMats : materials;
-
-  if (dataset.length < 30) {
-    emit("log", {
-      phase: "phase-3",
-      event: "Bonding analysis deferred",
-      detail: `Dataset too small (${dataset.length} materials, need 30+). Skipping insight generation to avoid hallucinations.`,
-      dataSource: "Statistical Analysis",
-    });
-    return [];
-  }
-
-  const dataStats = computeDatasetStatistics(dataset);
+  const cached = await getCachedDatasetStats(emit, materials, "phase-3");
+  if (!cached) return [];
+  const { dataset, dataStats } = cached;
 
   let scCorrelations = "";
   try {
     const candidates = await storage.getSuperconductorCandidates(500);
     scCorrelations = computeSuperconductorCorrelations(candidates);
-  } catch (_) {}
+  } catch (err: any) {
+    emit("log", {
+      phase: "phase-3",
+      event: "Superconductor correlation fetch failed",
+      detail: `Proceeding without SC correlations: ${err?.message?.slice(0, 150) || "unknown error"}`,
+      dataSource: "Statistical Analysis",
+    });
+  }
 
   emit("log", {
     phase: "phase-3",
@@ -390,15 +435,6 @@ export async function analyzeBondingPatterns(
     detail: `Analyzing cross-property correlations across ${dataset.length} materials. ${dataStats.split("\n")[0] || ""}`,
     dataSource: "Statistical Analysis",
   });
-
-  const materialSummaries = dataset.slice(0, 100).map((m) => ({
-    name: m.name,
-    formula: m.formula,
-    spacegroup: m.spacegroup,
-    bandGap: m.bandGap,
-    formationEnergy: m.formationEnergy,
-    stability: m.stability,
-  }));
 
   try {
     const response = await openai.chat.completions.create({
@@ -414,7 +450,8 @@ CRITICAL INSTRUCTIONS:
 - Only produce insights about RELATIONSHIPS BETWEEN PROPERTIES (e.g., "Higher electron-phonon coupling λ correlates with elevated Tc in hydrides").
 - Each insight must describe a correlation, trend, or causal relationship between two or more physical properties.
 - Reference specific material families, dimensionalities, or pairing mechanisms when the data supports it.
-- Include quantitative evidence (correlation coefficients, Tc values) from the provided statistics.
+- Include quantitative evidence (correlation coefficients, Tc values, p-values) from the provided statistics.
+- Only cite correlations that are statistically significant (p < 0.05). Ignore n.s. (not significant) correlations.
 - VARY your insight topics. Rotate through these categories:
   * Phonon softening: How soft modes or anharmonic phonons in specific structures enhance Tc
   * Fermi surface nesting: Nesting vectors, topology effects on pairing strength
@@ -430,13 +467,13 @@ PHYSICS RULES:
 - Superconductivity occurs at LOW temperatures
 - Higher λ (electron-phonon coupling) generally predicts higher Tc in conventional superconductors
 - Formation energy measures THERMODYNAMIC STABILITY only. It does NOT predict or enhance superconductivity or Tc. Never claim formation energy correlates with Tc or superconducting properties.
-- Hc2 (upper critical field) for conventional superconductors is bounded by ~2*Tc Tesla (WHH limit). Do not claim Hc2 values above 100T for materials with Tc < 50K.
+- Hc2 (upper critical field) for conventional superconductors is bounded by ~2*Tc Tesla (WHH limit). For hydrides/cuprates the limit is ~200T.
 
 Return a JSON object with a single key 'insights' containing an array of 3-5 concise cross-property correlation statements (each under 120 characters).`,
         },
         {
           role: "user",
-          content: `Cross-property correlation data:\n${dataStats}\n${scCorrelations}\n\nSample materials:\n${JSON.stringify(materialSummaries.slice(0, 50), null, 2)}`,
+          content: `Cross-property correlation data (with significance levels):\n${dataStats}\n${scCorrelations}`,
         },
       ],
       response_format: { type: "json_object" },
@@ -510,26 +547,22 @@ export async function analyzePropertyPredictionPatterns(
 ): Promise<string[]> {
   if (materials.length === 0) return [];
 
-  const allMats = await storage.getMaterials(2000, 0);
-  const dataset = allMats.length >= MIN_DATASET_FOR_INSIGHTS ? allMats : materials;
-
-  if (dataset.length < 30) {
-    emit("log", {
-      phase: "phase-5",
-      event: "Prediction analysis deferred",
-      detail: `Dataset too small (${dataset.length} materials, need 30+). Skipping to avoid unreliable patterns.`,
-      dataSource: "Statistical Analysis",
-    });
-    return [];
-  }
-
-  const dataStats = computeDatasetStatistics(dataset);
+  const cached = await getCachedDatasetStats(emit, materials, "phase-5");
+  if (!cached) return [];
+  const { dataset, dataStats } = cached;
 
   let scCorrelations = "";
   try {
     const candidates = await storage.getSuperconductorCandidates(500);
     scCorrelations = computeSuperconductorCorrelations(candidates);
-  } catch (_) {}
+  } catch (err: any) {
+    emit("log", {
+      phase: "phase-5",
+      event: "Superconductor correlation fetch failed",
+      detail: `Proceeding without SC correlations: ${err?.message?.slice(0, 150) || "unknown error"}`,
+      dataSource: "Statistical Analysis",
+    });
+  }
 
   emit("log", {
     phase: "phase-5",
@@ -537,14 +570,6 @@ export async function analyzePropertyPredictionPatterns(
     detail: `Analyzing cross-property correlations across ${dataset.length} materials for predictive rules. ${dataStats.split("\n")[0] || ""}`,
     dataSource: "Statistical Analysis",
   });
-
-  const materialSummaries = dataset.slice(0, 100).map((m) => ({
-    formula: m.formula,
-    bandGap: m.bandGap,
-    formationEnergy: m.formationEnergy,
-    stability: m.stability,
-    source: m.source,
-  }));
 
   try {
     const response = await openai.chat.completions.create({
@@ -561,6 +586,7 @@ CRITICAL INSTRUCTIONS:
 - Each insight must be a predictive rule linking two or more physical properties (e.g., "Low band gap metals with λ>1.5 predict Tc above 40K in boride families").
 - Reference specific material families, element groups, or structural features when the data supports it.
 - Include quantitative thresholds from the correlation data.
+- Only cite correlations that are statistically significant (p < 0.05). Ignore n.s. (not significant) correlations.
 - VARY your insight topics across these physics categories:
   * Phonon softening effects on Tc predictions
   * Fermi surface nesting strength as a Tc predictor
@@ -582,7 +608,7 @@ Return a JSON object with 'insights' (array of 3-5 concise predictive correlatio
         },
         {
           role: "user",
-          content: `Cross-property correlation data:\n${dataStats}\n${scCorrelations}\n\nSample materials:\n${JSON.stringify(materialSummaries.slice(0, 50), null, 2)}`,
+          content: `Cross-property correlation data (with significance levels):\n${dataStats}\n${scCorrelations}`,
         },
       ],
       response_format: { type: "json_object" },
