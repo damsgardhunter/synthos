@@ -120,7 +120,7 @@ export function recordPhysicsResult(result: PhysicsResult): void {
 
   const derived = computeDerivedFeatures(result);
   derivedFeaturesCache.set(result.formula, derived);
-  for (const cb of featureRecalcCallbacks) {
+  for (const cb of [...featureRecalcCallbacks]) {
     try { cb(result.formula, derived); } catch {}
   }
 }
