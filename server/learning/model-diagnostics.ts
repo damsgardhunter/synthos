@@ -8,9 +8,11 @@ import { getPressureStructureStats } from "../crystal/pressure-structure-model";
 import { getCalibrationStats } from "./surrogate-fitness";
 import { getFailurePatterns, getFailureDBStats, getFailureEntries, type StructureFailureEntry } from "../crystal/structure-failure-db";
 import { classifyFamily } from "./utils";
+import { COMPOSITION_FEATURE_NAMES } from "./composition-features";
 
 type HealthStatus = "green" | "yellow" | "red";
 
+const COMPOSITION_FEATURE_SET = new Set(COMPOSITION_FEATURE_NAMES);
 const INFERENCE_BUFFER_SIZE = 200;
 const inferenceTimings: Map<string, { buffer: number[]; head: number; count: number }> = new Map();
 
@@ -1099,8 +1101,9 @@ export function getModelDiagnosticsForLLM(): string {
       const bar = "=".repeat(Math.round(f.normalizedImportance * 20));
       lines.push(`  ${f.name.padEnd(24)} ${f.normalizedImportance.toFixed(3)} ${bar}`);
     }
-    const physicsFeatures = topFeatures.filter(f => !f.name.startsWith("comp_") && !f.name.startsWith("frac_"));
-    const compFeatures = topFeatures.filter(f => f.name.startsWith("comp_") || f.name.startsWith("frac_"));
+    const isCompositionFeature = (name: string) => COMPOSITION_FEATURE_SET.has(name);
+    const compFeatures = topFeatures.filter(f => isCompositionFeature(f.name));
+    const physicsFeatures = topFeatures.filter(f => !isCompositionFeature(f.name));
     lines.push(`  Physics features in top 15: ${physicsFeatures.length}`);
     lines.push(`  Composition features in top 15: ${compFeatures.length}`);
 
@@ -1214,8 +1217,9 @@ export function getModelDiagnosticsForLLM(): string {
 
   if (d.benchmark.scorecards.length > 0) {
     lines.push("## Model Version Benchmarks");
+    const sortedCards = [...d.benchmark.scorecards].sort((a, b) => a.version - b.version);
     const latestByModel = new Map<string, ModelVersionScorecard>();
-    for (const sc of d.benchmark.scorecards) {
+    for (const sc of sortedCards) {
       latestByModel.set(sc.modelName, sc);
     }
     for (const [model, sc] of latestByModel) {
@@ -1402,8 +1406,9 @@ export function getBenchmarkForLLM(): string {
     return lines.join("\n");
   }
 
+  const sortedReportCards = [...report.scorecards].sort((a, b) => a.version - b.version);
   const latestByModel = new Map<string, ModelVersionScorecard[]>();
-  for (const sc of report.scorecards) {
+  for (const sc of sortedReportCards) {
     if (!latestByModel.has(sc.modelName)) latestByModel.set(sc.modelName, []);
     latestByModel.get(sc.modelName)!.push(sc);
   }
