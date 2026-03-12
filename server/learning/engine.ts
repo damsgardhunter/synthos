@@ -26,6 +26,7 @@ import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
+import { recordPhysicsResult } from "./physics-results-store";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, estimateFamilyPressure, mutatePressure, generatePressureVariants, type MassiveGenerationStats } from "./candidate-generator";
 import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
 import { scanMaterialSignals } from "./material-signal-scanner";
@@ -2316,6 +2317,56 @@ async function runPhase10_Physics() {
         const cappedPhysicsTc = physicsTc > 0
           ? applyAmbientTcCap(Math.round(physicsTc), result.coupling.lambda, candidate.pressureGpa ?? 0, result.electronicStructure.metallicity ?? 0.5, candidate.formula)
           : 0;
+
+        try {
+          const ac = result.advancedConstraints;
+          recordPhysicsResult({
+            formula: candidate.formula,
+            pressure: candidate.pressureGpa ?? 0,
+            lambda: result.coupling.lambda,
+            omegaLog: result.coupling.omegaLog,
+            tc: cappedPhysicsTc,
+            dosAtEF: result.electronicStructure.densityOfStatesAtFermi,
+            phononStable: result.phononSpectrum.phononStable ?? !result.phononSpectrum.hasImaginaryModes,
+            muStar: result.coupling.muStar,
+            omega2: result.coupling.omega2Avg,
+            gapRatio: result.eliashberg.gapRatio ?? 3.53,
+            isStrongCoupling: result.coupling.lambda > 1.5,
+            isotopeAlpha: result.eliashberg.isotopeAlpha ?? 0.5,
+            formationEnergy: null,
+            bandGap: result.electronicStructure.bandGap ?? null,
+            isMetallic: result.electronicStructure.metallicity > 0.5,
+            tier: "surrogate",
+            alpha2FPeak: result.alpha2F.integratedLambda,
+            alpha2FPeakFreq: result.alpha2F.frequencies.length > 0
+              ? result.alpha2F.frequencies[result.alpha2F.values.indexOf(Math.max(...result.alpha2F.values))] ?? 0
+              : 0,
+            modeResolvedLambda: {},
+            timestamp: Date.now(),
+            advancedConstraints: {
+              compositeScore: ac.compositeScore,
+              compositeBoost: ac.compositeBoost,
+              nestingScore: ac.fermiSurfaceNesting.score,
+              nestingStrength: ac.fermiSurfaceNesting.nestingStrength,
+              hybridizationScore: ac.orbitalHybridization.score,
+              hybridizationType: ac.orbitalHybridization.hybridizationType,
+              lifshitzProximity: ac.lifshitzProximity.score,
+              qcpScore: ac.quantumCriticalFluctuation.score,
+              qcpType: ac.quantumCriticalFluctuation.qcpType,
+              dimensionalityScore: ac.electronicDimensionality.score,
+              dimensionClass: ac.electronicDimensionality.dimensionClass,
+              anisotropy: ac.electronicDimensionality.anisotropy,
+              softModeScore: ac.phononSoftMode.score,
+              softModeStable: ac.phononSoftMode.isStable,
+              chargeTransferScore: ac.chargeTransferEnergy.score,
+              chargeTransferDelta: ac.chargeTransferEnergy.delta,
+              chargeTransferType: ac.chargeTransferEnergy.chargeTransferType,
+              polarizabilityScore: ac.latticePolarizability.score,
+              dielectricConstant: ac.latticePolarizability.dielectricConstant,
+              screeningStrength: ac.latticePolarizability.screeningStrength,
+            },
+          });
+        } catch {}
         const existingMlF = (candidate.mlFeatures as Record<string, any>) ?? {};
         const xTbTcFromPrior = (existingMlF.xTbTc as number) ?? undefined;
         const dftTcFromPrior = (existingMlF.dftTc as number) ?? undefined;

@@ -76,21 +76,21 @@ const MAX_CACHE_SIZE = 2000;
 
 class PhysicsFeatureDB {
   private records: Map<string, FeatureRecord> = new Map();
-  private accessOrder: string[] = [];
 
   private evictIfNeeded(): void {
-    while (this.records.size >= MAX_CACHE_SIZE && this.accessOrder.length > 0) {
-      const oldest = this.accessOrder.shift()!;
+    while (this.records.size >= MAX_CACHE_SIZE) {
+      const oldest = this.records.keys().next().value;
+      if (oldest === undefined) break;
       this.records.delete(oldest);
     }
   }
 
   private touch(materialId: string): void {
-    const idx = this.accessOrder.indexOf(materialId);
-    if (idx !== -1) {
-      this.accessOrder.splice(idx, 1);
+    const val = this.records.get(materialId);
+    if (val) {
+      this.records.delete(materialId);
+      this.records.set(materialId, val);
     }
-    this.accessOrder.push(materialId);
   }
 
   addFeatureRecord(record: FeatureRecord): void {

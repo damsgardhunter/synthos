@@ -19,6 +19,30 @@ export interface PhysicsResult {
   alpha2FPeakFreq: number;
   modeResolvedLambda: Record<string, number>;
   timestamp: number;
+  advancedConstraints?: AdvancedConstraintFeatures;
+}
+
+export interface AdvancedConstraintFeatures {
+  compositeScore: number;
+  compositeBoost: number;
+  nestingScore: number;
+  nestingStrength: string;
+  hybridizationScore: number;
+  hybridizationType: string;
+  lifshitzProximity: number;
+  qcpScore: number;
+  qcpType: string;
+  dimensionalityScore: number;
+  dimensionClass: string;
+  anisotropy: number;
+  softModeScore: number;
+  softModeStable: boolean;
+  chargeTransferScore: number;
+  chargeTransferDelta: number;
+  chargeTransferType: string;
+  polarizabilityScore: number;
+  dielectricConstant: number;
+  screeningStrength: string;
 }
 
 export interface PhysicsFeatures {
@@ -40,6 +64,16 @@ export interface PhysicsFeatures {
   couplingAsymmetry: number;
   tier: "full-dft" | "xtb" | "surrogate";
   hasVerifiedData: boolean;
+  lifshitzProximity: number;
+  chargeTransferDelta: number;
+  chargeTransferScore: number;
+  qcpScore: number;
+  dimensionalityScore: number;
+  anisotropy: number;
+  softModeScore: number;
+  polarizabilityScore: number;
+  dielectricConstant: number;
+  compositeBoost: number;
 }
 
 const TIER_PRIORITY: Record<string, number> = {
@@ -51,18 +85,21 @@ const TIER_PRIORITY: Record<string, number> = {
 const MAX_STORE_SIZE = 5000;
 
 const store = new Map<string, PhysicsResult>();
-const accessOrder: string[] = [];
 
 function touchAccess(formula: string) {
-  const idx = accessOrder.indexOf(formula);
-  if (idx !== -1) accessOrder.splice(idx, 1);
-  accessOrder.push(formula);
+  const val = store.get(formula);
+  if (val) {
+    store.delete(formula);
+    store.set(formula, val);
+  }
 }
 
 function evictIfNeeded() {
-  while (store.size > MAX_STORE_SIZE && accessOrder.length > 0) {
-    const oldest = accessOrder.shift()!;
+  while (store.size > MAX_STORE_SIZE) {
+    const oldest = store.keys().next().value;
+    if (oldest === undefined) break;
     store.delete(oldest);
+    derivedFeaturesCache.delete(oldest);
   }
 }
 
@@ -117,6 +154,7 @@ export function getPhysicsFeatures(formula: string): PhysicsFeatures | null {
 
   const couplingAsymmetry = minMode > 0.001 ? maxMode / minMode : maxMode > 0 ? 10.0 : 1.0;
 
+  const ac = result.advancedConstraints;
   return {
     verifiedLambda: result.lambda,
     verifiedOmegaLog: result.omegaLog,
@@ -136,6 +174,16 @@ export function getPhysicsFeatures(formula: string): PhysicsFeatures | null {
     couplingAsymmetry,
     tier: result.tier,
     hasVerifiedData: true,
+    lifshitzProximity: ac?.lifshitzProximity ?? 0,
+    chargeTransferDelta: ac?.chargeTransferDelta ?? 0,
+    chargeTransferScore: ac?.chargeTransferScore ?? 0,
+    qcpScore: ac?.qcpScore ?? 0,
+    dimensionalityScore: ac?.dimensionalityScore ?? 0,
+    anisotropy: ac?.anisotropy ?? 0,
+    softModeScore: ac?.softModeScore ?? 0,
+    polarizabilityScore: ac?.polarizabilityScore ?? 0,
+    dielectricConstant: ac?.dielectricConstant ?? 0,
+    compositeBoost: ac?.compositeBoost ?? 1.0,
   };
 }
 
