@@ -353,10 +353,27 @@ export function parseLambdaOutput(stdout: string): {
   };
 }
 
+function countFormulaAtoms(formula: string): number {
+  let total = 0;
+  const re = /[A-Z][a-z]?(\d*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(formula)) !== null) {
+    total += m[1] ? parseInt(m[1], 10) : 1;
+  }
+  return Math.max(total, 1);
+}
+
+function scaleQGrid(nAtoms: number): [number, number, number] {
+  if (nAtoms <= 2) return [6, 6, 6];
+  if (nAtoms <= 4) return [4, 4, 4];
+  if (nAtoms <= 8) return [3, 3, 3];
+  return [2, 2, 2];
+}
+
 export function buildDFPTJobSpec(
   formula: string,
   prefix: string,
-  nq: [number, number, number] = [4, 4, 4],
+  nq?: [number, number, number],
   nkDos: [number, number, number] = [20, 20, 20],
   muStar: number = 0.10
 ): {
@@ -366,14 +383,17 @@ export function buildDFPTJobSpec(
   matdynDispInput: string;
   lambdaInput: string;
   stages: string[];
+  nqUsed: [number, number, number];
 } {
+  const effectiveNq = nq ?? scaleQGrid(countFormulaAtoms(formula));
   return {
-    phInput: generatePhononGridInput(prefix, nq[0], nq[1], nq[2]),
-    q2rInput: generateQ2RInput(prefix, nq[0], nq[1], nq[2]),
+    phInput: generatePhononGridInput(prefix, effectiveNq[0], effectiveNq[1], effectiveNq[2]),
+    q2rInput: generateQ2RInput(prefix, effectiveNq[0], effectiveNq[1], effectiveNq[2]),
     matdynDosInput: generateMatdynDOSInput(prefix, nkDos[0], nkDos[1], nkDos[2]),
     matdynDispInput: generateMatdynDispersionInput(prefix),
     lambdaInput: generateLambdaInput(prefix, muStar),
     stages: ["scf", "ph.x", "q2r.x", "matdyn.x (dos)", "matdyn.x (disp)", "lambda.x"],
+    nqUsed: effectiveNq,
   };
 }
 
