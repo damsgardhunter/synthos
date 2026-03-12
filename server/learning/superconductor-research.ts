@@ -474,8 +474,31 @@ async function generateNovelSuperconductors(
     status: c.status,
   }));
 
-  const existingFormulas = sorted.slice(0, 20).map(c => c.formula);
-  const exclusionList = [...new Set(existingFormulas)].slice(0, 15).join(", ");
+  const allFormulas = existingCandidates.map(c => c.formula);
+  const formulaSet = new Set(allFormulas);
+
+  const familyCounts: Record<string, { count: number; bestTc: number; examples: string[] }> = {};
+  for (const c of existingCandidates) {
+    const fam = classifyFamily(c.formula);
+    if (!familyCounts[fam]) familyCounts[fam] = { count: 0, bestTc: 0, examples: [] };
+    familyCounts[fam].count++;
+    familyCounts[fam].bestTc = Math.max(familyCounts[fam].bestTc, c.predictedTc ?? 0);
+    if (familyCounts[fam].examples.length < 3) familyCounts[fam].examples.push(c.formula);
+  }
+
+  const exhaustedFamilies = Object.entries(familyCounts)
+    .filter(([, v]) => v.count >= 10)
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 8);
+
+  const familyExclusionLines = exhaustedFamilies.map(([fam, v]) =>
+    `- ${fam}: ${v.count} candidates explored, best Tc=${Math.round(v.bestTc)}K (e.g. ${v.examples.join(", ")})`
+  );
+
+  const topFormulaSample = [...new Set(sorted.slice(0, 8).map(c => c.formula))].join(", ");
+  const exclusionContext = familyExclusionLines.length > 0
+    ? `EXHAUSTED FAMILIES (avoid these stoichiometric regimes):\n${familyExclusionLines.join("\n")}\n\nAlso avoid these specific top formulas: ${topFormulaSample}`
+    : `Do NOT generate any of these existing formulas: ${topFormulaSample}`;
 
   const stagnationCycles = stagnationInfo?.cyclesSinceImproved ?? 0;
   const currentCeiling = stagnationInfo?.currentBestTc ?? 0;
@@ -502,61 +525,21 @@ Let Tc emerge from strong pairing conditions rather than targeting a specific Tc
       messages: [
         {
           role: "system",
-          content: `You are the discovery module of a superconductor AI. Based on the best candidates found so far and known patterns, propose 2-3 NEW chemical formulas that have the potential to be high-temperature or room-temperature superconductors based on current theory.
+          content: `You are a superconductor discovery AI. Propose 2-3 NEW formulas with potential for high-Tc superconductivity. All candidates are THEORETICAL PREDICTIONS — never say "confirmed" or "breakthrough."
 
-CRITERIA FOR EVALUATION - A true room-temperature superconductor would need ALL of these:
-1. ZERO electrical resistance (absolute zero ohms below Tc).
-2. Critical temperature (Tc) >= 293K (20C, room temperature).
-3. Meissner effect - complete expulsion of magnetic flux below Tc.
-4. Achievable at low or ambient pressure (< 10 GPa ideal, < 50 GPa maximum acceptable).
-5. Cooper pair formation through a known mechanism (phonon-mediated BCS, spin-fluctuation, charge-density wave, or unconventional).
-6. Thermodynamically stable or metastable at operating conditions.
+Tc BENCHMARKS (anchor predictions here): Cuprates ~135K ambient; Pnictides ~55K; Nickelates ~80K@pressure; BCS metals ~39K (MgB2); Hydrides ~250K@150GPa (NOT ambient); Heavy fermion ~2K; Bismuthates ~30K; Borocarbides ~23K. Exceeding family records needs extraordinary justification.
 
-ESTABLISHED Tc BENCHMARKS by material family (use these as anchors for realistic predictions):
-- Cuprates: max ~135K ambient (HgBa2Ca2Cu3O8+d), ~165K at 30 GPa
-- Iron pnictides: max ~55K (SmFeAsO1-xFx)
-- Nickelates: max ~80K under pressure (La3Ni2O7)
-- Conventional BCS metals: max ~39K (MgB2)
-- Hydrides under extreme pressure: ~250K at 150-200 GPa (LaH10, H3S) — NOT ambient
-- Heavy fermion: max ~2K (CeCoIn5)
-- Bismuthates: max ~30K (Ba1-xKxBiO3)
-- Borocarbides: max ~23K (YNi2B2C)
-Predictions significantly exceeding the family record require extraordinary theoretical justification. Most novel materials will have Tc BELOW these records, not above.
+Be HONEST about uncertainty. A well-supported 50K prediction beats an unsupported 300K hallucination. Describe plausible synthesis strategies with approximate conditions — do not hallucinate exact lab parameters.
 
-YOUR TASK: Identify candidates with the strongest theoretical basis for meeting these criteria. Be HONEST about uncertainty — most candidates will NOT meet all criteria. Provide your genuine theoretical assessment, not optimistic hallucinations.
-
-IMPORTANT: Do NOT claim any candidate is a "confirmed breakthrough." All candidates are THEORETICAL PREDICTIONS that would require:
-- Independent laboratory synthesis
-- Four-probe resistance measurement showing zero resistance below Tc
-- SQUID magnetometry confirming Meissner effect
-- Reproduction by at least 2 independent research groups
-
-For each candidate, describe a plausible synthesis strategy (general method, precursors, approximate conditions). Do NOT hallucinate exact times or temperatures you are unsure of — describe the general approach and flag specific parameters as approximate.
-
-Return JSON with 'candidates' array:
-- 'name' (descriptive)
-- 'formula' (chemical formula)
-- 'predictedTc' (Kelvin - be realistic based on known physics, do NOT inflate to meet 293K unless theory genuinely supports it)
-- 'pressureGpa' (required pressure, 0 for ambient)
-- 'meissnerEffect' (boolean - predicted based on theory)
-- 'meissnerConfidence' (0-1, how confident the theory supports Meissner effect)
-- 'zeroResistance' (boolean - predicted based on Cooper pair mechanism)
-- 'zeroResistanceConfidence' (0-1, how confident the theory supports zero resistance)
-- 'cooperPairMechanism' (detailed description of how Cooper pairs would form)
-- 'crystalStructure' (predicted with space group if possible)
-- 'quantumCoherence' (0-1, realistic estimate)
-- 'theoreticalConfidence' (0-1, overall confidence that this material could superconduct at the predicted Tc)
-- 'roomTempViable' (boolean - ONLY true if Tc >= 293K AND zero resistance AND Meissner AND theoreticalConfidence > 0.3)
-- 'synthesisPath' (object with 'method', 'steps' array with exact temperatures/times, 'precursors' array, 'conditions' object)
-- 'reasoning' (string under 200 chars explaining the physics of why this could work)`,
+Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic), 'pressureGpa', 'meissnerEffect' (bool), 'meissnerConfidence' (0-1), 'zeroResistance' (bool), 'zeroResistanceConfidence' (0-1), 'cooperPairMechanism', 'crystalStructure', 'quantumCoherence' (0-1), 'theoreticalConfidence' (0-1), 'roomTempViable' (bool, ONLY if Tc>=293K AND zeroRes AND Meissner AND conf>0.3), 'synthesisPath' (object: method, steps, precursors, conditions), 'reasoning' (<200 chars).`,
         },
         {
           role: "user",
-          content: `Best candidates so far (diverse examples from different material families):\n${JSON.stringify(bestCandidates, null, 2)}\n\n${condenseInsightsWithRules(allInsights)}${stagnationContext}\n\nIMPORTANT CONSTRAINTS:\n- Do NOT generate any of these existing formulas: ${exclusionList}\n- Generate candidates from DIFFERENT chemical families than the examples (explore pnictides, borides, nitrides, clathrate hydrides, kagome metals, heavy fermion compounds)\n- Each proposed candidate must have a genuinely novel composition not yet in our database\n- PRIORITIZE PAIRING SUSCEPTIBILITY over raw Tc: focus on high DOS(Ef), strong nesting, favorable phonon spectral weight, and proximity to quantum critical points\n- Materials with strong pairing indicators at moderate coupling are more physically credible than extreme-lambda claims\n- Set theoreticalConfidence HONESTLY: most novel materials should be 0.1-0.4, only exceptionally well-supported candidates should exceed 0.5\n\nPropose novel candidates. Be honest about predicted Tc — a well-supported 50K prediction is more valuable than an unsupported 300K hallucination. Do not overstate confidence.`,
+          content: `Top candidates:\n${JSON.stringify(bestCandidates, null, 2)}\n\n${condenseInsightsWithRules(allInsights)}${stagnationContext}\n\n${exclusionContext}\n\nCONSTRAINTS:\n- Propose genuinely novel compositions from UNDER-EXPLORED families\n- PRIORITIZE PAIRING SUSCEPTIBILITY over raw Tc: high DOS(Ef), strong nesting, favorable phonon spectral weight, proximity to quantum critical points\n- Set theoreticalConfidence HONESTLY: most materials 0.1-0.4, only exceptionally well-supported >0.5`,
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 1500,
+      max_completion_tokens: 900,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -579,8 +562,13 @@ Return JSON with 'candidates' array:
       }
       c.formula = normalizeFormula(c.formula);
 
+      if (formulaSet.has(c.formula)) {
+        continue;
+      }
+
       const existingNovel = await storage.getSuperconductorByFormula(c.formula);
       if (existingNovel) {
+        formulaSet.add(c.formula);
         continue;
       }
 

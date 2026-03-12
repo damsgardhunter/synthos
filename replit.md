@@ -756,6 +756,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - Both the novel discovery and inverse design prompts now include established Tc records by family (Cuprates ~135K, Pnictides ~55K, Hydrides ~250K@150GPa, etc.). The LLM is told that exceeding these records requires extraordinary theoretical justification, anchoring predictions in known physics rather than speculative extremes. Synthesis instructions changed from "exact temperatures and times" to "plausible strategy with approximate conditions" to reduce hallucinated precision.
 - **LLM Synthesis Origin Tagging (superconductor-research.ts)**:
   - All candidates from LLM-driven generation (novel SC and inverse design) are tagged `[synthesis_origin: llm_speculative]` in their notes field. This allows downstream modules (e.g., synthesis-reasoning.ts) to identify which synthesis paths need a second validation pass before being prioritized for real-world lab work. Non-LLM candidates (from ML pipeline) are untagged, indicating their synthesis paths are physics-derived.
+- **Family-Based Exclusion (superconductor-research.ts)**:
+  - Replaced individual formula exclusion list (capped at 15, saturated in mature runs) with family-level exclusion. The engine now classifies all existing candidates by family, identifies families with >=10 candidates as "exhausted," and tells the LLM to avoid those stoichiometric regimes entirely while listing example formulas and the family's best Tc. A fast in-memory `formulaSet` check also short-circuits DB lookups for already-known formulas.
+- **LLM Prompt Token Optimization (superconductor-research.ts)**:
+  - Static content (criteria, disclaimers, benchmarks) consolidated into a compact system prompt. User prompt trimmed to dynamic data only (candidates, insights, exclusion context, constraints). `max_completion_tokens` reduced from 1500 to 900 for the discovery prompt, matching the actual output size needed for 2-3 candidates.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
