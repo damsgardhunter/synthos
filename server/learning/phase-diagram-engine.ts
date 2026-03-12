@@ -30,16 +30,27 @@ function getTotalAtoms(counts: Record<string, number>): number {
 
 const MIEDEMA_NONMETALS = new Set(["H", "He", "C", "N", "O", "F", "Ne", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "I", "Xe", "Te", "As"]);
 
-export function computeMiedemaFormationEnergy(formula: string): number {
+interface ParsedFormula {
+  counts: Record<string, number>;
+  elements: string[];
+  totalAtoms: number;
+  fractions: Record<string, number>;
+}
+
+function parseOnce(formula: string): ParsedFormula {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
-  if (elements.length < 2) return 0;
-
-  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  const totalAtoms = getTotalAtoms(counts);
   const fractions: Record<string, number> = {};
   for (const el of elements) {
     fractions[el] = counts[el] / totalAtoms;
   }
+  return { counts, elements, totalAtoms, fractions };
+}
+
+function computeMiedemaFromParsed(parsed: ParsedFormula): number {
+  const { elements, fractions } = parsed;
+  if (elements.length < 2) return 0;
 
   const P = 14.1;
   const Q_P = 9.4;
@@ -64,9 +75,11 @@ export function computeMiedemaFormationEnergy(formula: string): number {
 
       if (phiA == null || phiB == null || nwsA == null || nwsB == null || vA == null || vB == null) continue;
 
+      const safeNwsA = Math.max(1e-6, nwsA);
+      const safeNwsB = Math.max(1e-6, nwsB);
       const deltaPhi = phiA - phiB;
-      const deltaNws = nwsA - nwsB;
-      const nwsAvgInv = 2 / (1 / nwsA + 1 / nwsB);
+      const deltaNws = safeNwsA - safeNwsB;
+      const nwsAvgInv = 2 / (1 / safeNwsA + 1 / safeNwsB);
 
       const fAB = 2 * fractions[elA] * fractions[elB];
 
@@ -103,17 +116,19 @@ export function computeMiedemaFormationEnergy(formula: string): number {
   return Math.max(-5.0, Math.min(2.0, deltaH));
 }
 
+export function computeMiedemaFormationEnergy(formula: string): number {
+  return computeMiedemaFromParsed(parseOnce(formula));
+}
+
 const OXIDE_ANIONS = new Set(["O", "F", "Cl", "Br", "I"]);
 const CHALCOGENIDE_ANIONS = new Set(["S", "Se", "Te"]);
 const PNICTIDE_ANIONS = new Set(["N", "P", "As", "Sb"]);
 
-function classifyCompoundType(formula: string): "intermetallic" | "oxide" | "chalcogenide" | "pnictide" | "mixed" {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
-  const hasOxide = elements.some(el => OXIDE_ANIONS.has(el) && (counts[el] / totalAtoms) > 0.1);
-  const hasChalc = elements.some(el => CHALCOGENIDE_ANIONS.has(el) && (counts[el] / totalAtoms) > 0.1);
-  const hasPnic = elements.some(el => PNICTIDE_ANIONS.has(el) && (counts[el] / totalAtoms) > 0.1);
+function classifyCompoundTypeParsed(parsed: ParsedFormula): "intermetallic" | "oxide" | "chalcogenide" | "pnictide" | "mixed" {
+  const { elements, fractions } = parsed;
+  const hasOxide = elements.some(el => OXIDE_ANIONS.has(el) && fractions[el] > 0.1);
+  const hasChalc = elements.some(el => CHALCOGENIDE_ANIONS.has(el) && fractions[el] > 0.1);
+  const hasPnic = elements.some(el => PNICTIDE_ANIONS.has(el) && fractions[el] > 0.1);
   if (hasOxide && (hasChalc || hasPnic)) return "mixed";
   if (hasOxide) return "oxide";
   if (hasChalc) return "chalcogenide";
@@ -121,10 +136,8 @@ function classifyCompoundType(formula: string): "intermetallic" | "oxide" | "cha
   return "intermetallic";
 }
 
-function computeIonicFormationEnergy(formula: string): number {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+function computeIonicFromParsed(parsed: ParsedFormula): number {
+  const { elements, counts, totalAtoms } = parsed;
 
   const OXIDE_ENERGIES: Record<string, number> = {
     "Li": -3.0, "Na": -2.1, "K": -1.8, "Rb": -1.7, "Cs": -1.6,
@@ -189,10 +202,8 @@ const HYDRIDE_FORMATION_ENERGIES: Record<string, number> = {
   "Al": -0.04, "Ga": 0.12,
 };
 
-function computeHydrideFormationEnergy(formula: string): number {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-  const totalAtoms = getTotalAtoms(counts);
+function computeHydrideFromParsed(parsed: ParsedFormula): number {
+  const { counts, elements, totalAtoms } = parsed;
 
   const hCount = counts["H"] ?? 0;
   const hFrac = hCount / totalAtoms;
@@ -226,41 +237,37 @@ function computeHydrideFormationEnergy(formula: string): number {
   return Math.max(-5.0, Math.min(2.0, energy));
 }
 
-function isHydrideIntermetallic(formula: string): boolean {
-  const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
-  const totalAtoms = getTotalAtoms(counts);
-  const hFrac = (counts["H"] ?? 0) / totalAtoms;
-  return elements.includes("H") && hFrac > 0.05;
+function isHydrideParsed(parsed: ParsedFormula): boolean {
+  const hFrac = (parsed.counts["H"] ?? 0) / parsed.totalAtoms;
+  return parsed.elements.includes("H") && hFrac > 0.05;
 }
 
 export function estimateFormationEnergy(formula: string): number {
-  const compType = classifyCompoundType(formula);
+  const parsed = parseOnce(formula);
+  const compType = classifyCompoundTypeParsed(parsed);
   if (compType === "intermetallic") {
-    if (isHydrideIntermetallic(formula)) {
-      return computeHydrideFormationEnergy(formula);
+    if (isHydrideParsed(parsed)) {
+      return computeHydrideFromParsed(parsed);
     }
-    return computeMiedemaFormationEnergy(formula);
+    return computeMiedemaFromParsed(parsed);
   }
-  const ionicE = computeIonicFormationEnergy(formula);
+  const ionicE = computeIonicFromParsed(parsed);
   if (compType === "mixed") {
-    const counts = parseFormulaCounts(formula);
-    const totalAtoms = getTotalAtoms(counts);
-    const elements = Object.keys(counts);
+    const { elements, fractions } = parsed;
 
     let ionicAnionFrac = 0;
     let metallicFrac = 0;
     for (const el of elements) {
-      const f = counts[el] / totalAtoms;
+      const f = fractions[el];
       if (OXIDE_ANIONS.has(el) || CHALCOGENIDE_ANIONS.has(el) || PNICTIDE_ANIONS.has(el)) {
         ionicAnionFrac += f;
       } else {
         metallicFrac += f;
       }
     }
-    const ionicWeight = Math.max(0.1, Math.min(0.9, ionicAnionFrac / (ionicAnionFrac + metallicFrac + 0.01)));
-    const miedemaE = computeMiedemaFormationEnergy(formula);
-    return ionicWeight * ionicE + (1 - ionicWeight) * miedemaE;
+    const ionicW = Math.max(0.1, Math.min(0.9, ionicAnionFrac / (ionicAnionFrac + metallicFrac + 0.01)));
+    const miedemaE = computeMiedemaFromParsed(parsed);
+    return ionicW * ionicE + (1 - ionicW) * miedemaE;
   }
   return ionicE;
 }
@@ -423,17 +430,63 @@ export function computeConvexHull(
   return { energyAboveHull, hullVertices, decompositionProducts, isOnHull };
 }
 
+const PSEUDO_BINARY_ELEMENT_LIMIT = 4;
+
+function selectPseudoBinaryAxes(
+  formula: string,
+  allElements: string[]
+): string[] {
+  if (allElements.length <= PSEUDO_BINARY_ELEMENT_LIMIT) return allElements;
+
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+
+  const sorted = allElements
+    .map(el => ({ el, frac: (counts[el] ?? 0) / totalAtoms }))
+    .sort((a, b) => b.frac - a.frac);
+
+  const majorElements = sorted.slice(0, 2).map(s => s.el);
+
+  const remainingPool = sorted.slice(2);
+  const groupA: string[] = [];
+  const groupB: string[] = [];
+
+  for (const { el } of remainingPool) {
+    const data = ELEMENTAL_DATA[el];
+    const isAnion = OXIDE_ANIONS.has(el) || CHALCOGENIDE_ANIONS.has(el) || PNICTIDE_ANIONS.has(el);
+    if (isAnion) {
+      groupA.push(el);
+    } else {
+      groupB.push(el);
+    }
+  }
+
+  const pseudoElements = [...majorElements];
+  if (groupA.length > 0) pseudoElements.push(groupA[0]);
+  if (groupB.length > 0 && pseudoElements.length < PSEUDO_BINARY_ELEMENT_LIMIT) {
+    pseudoElements.push(groupB[0]);
+  }
+  while (pseudoElements.length < Math.min(PSEUDO_BINARY_ELEMENT_LIMIT, allElements.length)) {
+    const next = remainingPool.find(s => !pseudoElements.includes(s.el));
+    if (!next) break;
+    pseudoElements.push(next.el);
+  }
+
+  return pseudoElements;
+}
+
 export async function getCompetingPhases(
   formula: string
 ): Promise<ConvexHullResult> {
-  const elements = parseFormulaElements(formula);
+  const allElements = parseFormulaElements(formula);
+  const hullElements = selectPseudoBinaryAxes(formula, allElements);
 
   const allMaterials = await storage.getMaterials(500, 0);
   const competingFormulas: { formula: string; energy: number }[] = [];
 
   for (const mat of allMaterials) {
     const matElements = parseFormulaElements(mat.formula);
-    const isSubset = matElements.every(el => elements.includes(el));
+    const isSubset = matElements.every(el => hullElements.includes(el));
     if (isSubset && mat.formula !== formula) {
       const energy = mat.formationEnergy ?? computeMiedemaFormationEnergy(mat.formula);
       competingFormulas.push({ formula: mat.formula, energy });
@@ -443,16 +496,35 @@ export async function getCompetingPhases(
   const candidates = await storage.getSuperconductorCandidates(200);
   for (const cand of candidates) {
     const candElements = parseFormulaElements(cand.formula);
-    const isSubset = candElements.every(el => elements.includes(el));
+    const isSubset = candElements.every(el => hullElements.includes(el));
     if (isSubset && cand.formula !== formula && !competingFormulas.some(cf => cf.formula === cand.formula)) {
       const energy = computeMiedemaFormationEnergy(cand.formula);
       competingFormulas.push({ formula: cand.formula, energy });
     }
   }
 
-  const result = computeConvexHull(formula, elements, competingFormulas);
+  const result = computeConvexHull(formula, hullElements, competingFormulas);
 
   return result;
+}
+
+function surrogateKineticBarrier(
+  eAboveHull: number,
+  avgMeltingPoint: number,
+  numElements: number,
+  avgMass: number
+): number {
+  if (eAboveHull <= 0) return 1.5;
+
+  const meltFactor = 0.25 * Math.log(Math.max(avgMeltingPoint, 300) / 300);
+
+  const configEntropy = numElements > 1 ? 0.05 * Math.log(numElements) : 0;
+
+  const massFactor = 0.02 * Math.log(Math.max(avgMass, 10) / 10);
+
+  const barrier = eAboveHull * 5.5 + meltFactor + configEntropy + massFactor;
+
+  return Math.max(0.05, Math.min(3.0, barrier));
 }
 
 export function assessMetastability(
@@ -463,21 +535,23 @@ export function assessMetastability(
   const counts = parseFormulaCounts(formula);
 
   let avgMeltingPoint = 0;
+  let avgMass = 0;
   let count = 0;
   for (const el of elements) {
     const data = getElementData(el);
-    if (data && data.meltingPoint) {
-      avgMeltingPoint += data.meltingPoint * (counts[el] || 1);
-      count += (counts[el] || 1);
+    const n = counts[el] || 1;
+    if (data) {
+      if (data.meltingPoint) avgMeltingPoint += data.meltingPoint * n;
+      avgMass += (data.atomicMass ?? 50) * n;
+      count += n;
     }
   }
   avgMeltingPoint = count > 0 ? avgMeltingPoint / count : 1000;
+  avgMass = count > 0 ? avgMass / count : 50;
 
   const kB = 8.617e-5;
   const attemptFrequency = 1e13;
-  const kineticBarrier = eAboveHull > 0
-    ? Math.max(0.1, Math.min(2.5, eAboveHull * 6 + 0.2 * Math.log(Math.max(avgMeltingPoint, 300) / 300)))
-    : 1.5;
+  const kineticBarrier = surrogateKineticBarrier(eAboveHull, avgMeltingPoint, elements.length, avgMass);
 
   const roomTempRate = attemptFrequency * Math.exp(-kineticBarrier / (kB * 300));
   let estimatedLifetime: string;
