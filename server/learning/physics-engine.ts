@@ -2970,6 +2970,46 @@ export interface NestingFunctionData {
   dominantInstability: string;
 }
 
+function getNestingQVectors(lattice: string): { label: string; q: [number, number, number] }[] {
+  const common: { label: string; q: [number, number, number] }[] = [
+    { label: "Γ", q: [0, 0, 0] },
+  ];
+  if (lattice === "hexagonal") {
+    return [
+      ...common,
+      { label: "M", q: [0.5, 0, 0] },
+      { label: "K", q: [1/3, 1/3, 0] },
+      { label: "A", q: [0, 0, 0.5] },
+      { label: "L", q: [0.5, 0, 0.5] },
+      { label: "H", q: [1/3, 1/3, 0.5] },
+      { label: "(2K)", q: [2/3, 2/3, 0] },
+    ];
+  }
+  if (lattice === "tetragonal") {
+    return [
+      ...common,
+      { label: "X", q: [0.5, 0, 0] },
+      { label: "M", q: [0.5, 0.5, 0] },
+      { label: "Z", q: [0, 0, 0.5] },
+      { label: "R", q: [0.5, 0, 0.5] },
+      { label: "A", q: [0.5, 0.5, 0.5] },
+      { label: "(π,π)", q: [0.5, 0.5, 0] },
+      { label: "(π,0)", q: [0.5, 0, 0] },
+      { label: "(π/2,π/2)", q: [0.25, 0.25, 0] },
+    ];
+  }
+  return [
+    ...common,
+    { label: "X", q: [0.5, 0, 0] },
+    { label: "M", q: [0.5, 0.5, 0] },
+    { label: "R", q: [0.5, 0.5, 0.5] },
+    { label: "A", q: [0.5, 0, 0.5] },
+    { label: "(π,π)", q: [0.5, 0.5, 0] },
+    { label: "(π,0)", q: [0.5, 0, 0] },
+    { label: "(π/2,π/2)", q: [0.25, 0.25, 0] },
+  ];
+}
+
 export function computeNestingFunction(
   formula: string,
   electronicStructure: ElectronicStructure
@@ -2981,23 +3021,21 @@ export function computeNestingFunction(
   const nestingScore = electronicStructure.nestingScore;
   const corr = electronicStructure.correlationStrength;
 
-  const qVectors: { label: string; q: [number, number, number] }[] = [
-    { label: "Γ", q: [0, 0, 0] },
-    { label: "X", q: [0.5, 0, 0] },
-    { label: "M", q: [0.5, 0.5, 0] },
-    { label: "R", q: [0.5, 0.5, 0.5] },
-    { label: "A", q: [0.5, 0, 0.5] },
-    { label: "(π,π)", q: [0.5, 0.5, 0] },
-    { label: "(π,0)", q: [0.5, 0, 0] },
-    { label: "(π/2,π/2)", q: [0.25, 0.25, 0] },
-  ];
+  const motifResult = detectStructuralMotifs(formula);
+  const lattice = inferLatticeType(formula, motifResult.motifs);
+  const qVectors = getNestingQVectors(lattice);
 
   const vec = getVEC(elements, counts);
 
-  const kF = Math.pow(3 * Math.PI * Math.PI * Math.max(vec, 0.5), 1 / 3) * 0.5;
+  const is2D = electronicStructure.fermiSurfaceTopology.includes("quasi-2D") ||
+    electronicStructure.fermiSurfaceTopology.includes("cylindrical");
+  const kF = is2D
+    ? Math.sqrt(2 * Math.PI * Math.max(vec, 0.5)) * 0.3
+    : Math.pow(3 * Math.PI * Math.PI * Math.max(vec, 0.5), 1 / 3) * 0.5;
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
   const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+  const isKagome = motifResult.motifs.some(m => m.includes("Kagome"));
 
   const nestingValues: number[] = [];
 
@@ -3026,6 +3064,9 @@ export function computeNestingFunction(
     if (isPnictide && (qv.label === "(π,0)" || qv.label === "(π,π)")) {
       chi0 *= (1 + corr * 1.8);
     }
+    if (isKagome && (qv.label === "K" || qv.label === "M" || qv.label === "(2K)")) {
+      chi0 *= (1 + corr * 2.0);
+    }
 
     chi0 *= (1 + nestingScore * 0.5);
 
@@ -3044,6 +3085,7 @@ export function computeNestingFunction(
   if (peakNestingValue > N_EF * 2) {
     if (peakNestingQ === "(π,π)" || peakNestingQ === "M") dominantInstability = "SDW/AFM";
     else if (peakNestingQ === "(π,0)" || peakNestingQ === "X") dominantInstability = "stripe-SDW";
+    else if (peakNestingQ === "K" || peakNestingQ === "(2K)") dominantInstability = "kagome-CDW/bond-order";
     else dominantInstability = "CDW";
   } else if (peakNestingValue > N_EF * 1.3) {
     dominantInstability = "weak-nesting";
@@ -3913,6 +3955,27 @@ export async function runFullPhysicsAnalysis(
     detail: `${formula}: Z=${manyBodyCorrections.quasiparticleWeight.toFixed(3)}, DOS renorm=${manyBodyCorrections.gwDOSRenormalization.toFixed(3)}, BW corr=${manyBodyCorrections.gwBandwidthCorrection.toFixed(3)}, vertex λ-corr=${manyBodyCorrections.vertexCorrectionLambda.toFixed(3)}, corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)}`,
     dataSource: "Physics Engine",
   });
+
+  if (eliashberg.predictedTc > 0 && Math.abs(manyBodyCorrections.vertexCorrectionLambda - 1.0) > 0.02) {
+    const preMBTc = eliashberg.predictedTc;
+    const mbTc = allenDynesTcRaw(
+      manyBodyCorrections.correctedLambda,
+      coupling.omegaLog,
+      coupling.muStar,
+      coupling.omega2Avg,
+      tcMatClass === "superhydride" || tcMatClass === "hydride-high-p" || tcMatClass === "hydride-low-p"
+    );
+    if (mbTc > 0 && Number.isFinite(mbTc)) {
+      const mbWeight = 0.3;
+      eliashberg.predictedTc = Math.round((1 - mbWeight) * eliashberg.predictedTc + mbWeight * mbTc);
+      emit("log", {
+        phase: "phase-10",
+        event: "Many-body Tc feedback applied",
+        detail: `${formula}: vertex-corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)} → Tc(MB)=${mbTc.toFixed(1)}K, blended Tc ${preMBTc}K → ${eliashberg.predictedTc}K (30% weight)`,
+        dataSource: "Physics Engine",
+      });
+    }
+  }
 
   const nestingFunction = computeNestingFunction(formula, electronicStructure);
   emit("log", {
