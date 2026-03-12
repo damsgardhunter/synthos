@@ -4789,7 +4789,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/ood/update", engineLimiter, async (_req, res) => {
     try {
-      updateOODModel();
+      await updateOODModel();
       const stats = getOODStats();
       res.json({ status: "updated", ...stats });
     } catch (e: any) {

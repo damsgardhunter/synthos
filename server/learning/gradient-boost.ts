@@ -1729,7 +1729,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   try {
     const { updateOODModel } = require("./ood-detector");
-    updateOODModel();
+    updateOODModel().catch(() => {});
   } catch {}
 
   return { retrained: true, datasetSize: X.length, newEntries: newFromEval };
@@ -1939,8 +1939,9 @@ export async function incorporateFailureData(): Promise<number> {
     if (failureExamples.length >= 10 && failureExamples.length % 10 === 0) {
       try {
         const { updateOODModel } = require("./ood-detector");
-        updateOODModel();
-        console.log(`[XGBoost] OOD model updated at ${failureExamples.length} failure examples`);
+        updateOODModel().then(() => {
+          console.log(`[XGBoost] OOD model updated at ${failureExamples.length} failure examples`);
+        }).catch(() => {});
       } catch {}
     }
   }

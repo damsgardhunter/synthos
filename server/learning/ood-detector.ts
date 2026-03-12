@@ -1,6 +1,7 @@
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
 import { computeCompositionFeatures, compositionFeatureVector } from "./composition-features";
+import { getCalibrationState } from "./conformal-calibrator";
 
 interface OODResult {
   oodScore: number;
@@ -62,7 +63,38 @@ let oodQueryCount = 0;
 let oodDetectedCount = 0;
 let featureDim = 0;
 
+let conformalLatentThreshold = 0.3;
+let conformalMahaSteepness = 3.0;
+let conformalGmmSteepness = 3.0;
+let conformalLatentSteepness = 6.0;
+
 const KEY_FEATURE_INDICES = Array.from({ length: FEATURE_SUBSET_SIZE }, (_, i) => i);
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function normalizeVector(raw: number[]): number[] {
+  const sub = featureSubset(raw);
+  const result = new Array(sub.length);
+  for (let j = 0; j < sub.length; j++) {
+    result[j] = trainingStd[j] > 1e-6 ? (sub[j] - trainingMean[j]) / trainingStd[j] : 0;
+  }
+  return result;
+}
+
+function updateConformalThresholds(): void {
+  try {
+    const cal = getCalibrationState();
+    if (cal.calibrationDatasetSize < 10) return;
+
+    const tempScale = Math.max(cal.temperatureScale, 0.1);
+    conformalLatentThreshold = Math.min(1.0, Math.max(0.1, cal.medianNonconformityScore * tempScale));
+    conformalLatentSteepness = Math.min(12, Math.max(2, cal.conformalQ95 / Math.max(cal.medianNonconformityScore, 0.01)));
+    conformalMahaSteepness = Math.min(8, Math.max(1.5, 1.5 + cal.conformalQ95));
+    conformalGmmSteepness = Math.min(8, Math.max(1.5, 1.5 + cal.conformalQ90));
+  } catch {}
+}
 
 function featureSubset(fullFeatures: number[]): number[] {
   return KEY_FEATURE_INDICES.map(i => i < fullFeatures.length ? fullFeatures[i] : 0);
@@ -261,10 +293,14 @@ function fitGMM(data: number[][]): GMMComponent[] {
   return components;
 }
 
-export function updateOODModel(): void {
+const YIELD_BATCH_SIZE = 50;
+let oodModelReady = false;
+
+export async function updateOODModel(): Promise<void> {
   const trainingVectors: number[][] = [];
 
   const step = Math.max(1, Math.floor(SUPERCON_TRAINING_DATA.length / MAX_TRAINING_SAMPLES));
+  let extracted = 0;
   for (let i = 0; i < SUPERCON_TRAINING_DATA.length; i += step) {
     try {
       const vec = extractOODFeatureVector(SUPERCON_TRAINING_DATA[i].formula);
@@ -272,6 +308,10 @@ export function updateOODModel(): void {
         trainingVectors.push(vec);
       }
     } catch {}
+    extracted++;
+    if (extracted % YIELD_BATCH_SIZE === 0) {
+      await yieldToEventLoop();
+    }
   }
 
   if (trainingVectors.length < 10) return;
@@ -303,12 +343,13 @@ export function updateOODModel(): void {
     trainingInvVar[j] = 1 / variance;
   }
 
-  const normalizedVectors = trainingVectors.map(vec => {
-    const sub = featureSubset(vec);
-    return sub.map((v, j) => trainingStd[j] > 1e-6 ? (v - trainingMean[j]) / trainingStd[j] : 0);
-  });
+  await yieldToEventLoop();
+
+  const normalizedVectors = trainingVectors.map(vec => normalizeVector(vec));
 
   gmmModel = fitGMM(normalizedVectors);
+
+  await yieldToEventLoop();
 
   trainingMahalanobisDistances = trainingVectors.map(v => computeMahalanobis(v));
   trainingMahalanobisDistances.sort((a, b) => a - b);
@@ -316,16 +357,16 @@ export function updateOODModel(): void {
   mahalanobisP95 = getPercentile(trainingMahalanobisDistances, 0.95);
   mahalanobisP99 = getPercentile(trainingMahalanobisDistances, 0.99);
 
-  gmmTrainingLogLikelihoods = normalizedVectors.map(v => {
-    const sub = featureSubset(v);
-    return computeGMMLogLikelihood(sub);
-  });
+  gmmTrainingLogLikelihoods = normalizedVectors.map(v => computeGMMLogLikelihood(v));
   gmmTrainingLogLikelihoods.sort((a, b) => a - b);
   gmmP50 = getPercentile(gmmTrainingLogLikelihoods, 0.50);
   gmmP5 = getPercentile(gmmTrainingLogLikelihoods, 0.05);
   gmmP1 = getPercentile(gmmTrainingLogLikelihoods, 0.01);
 
+  updateConformalThresholds();
+
   lastOODUpdate = Date.now();
+  oodModelReady = true;
 }
 
 export function computeOODScore(
@@ -341,33 +382,40 @@ export function computeOODScore(
     featureVec = formulaOrFeatures;
   }
 
-  if (trainingMean.length === 0) {
-    updateOODModel();
+  if (!oodModelReady && trainingMean.length === 0) {
+    return {
+      oodScore: 0.5,
+      mahalanobisDistance: 0,
+      mahalanobisPercentile: 0.5,
+      gmmLogLikelihood: 0,
+      gmmPercentile: 0.5,
+      gnnLatentDistance: gnnLatentDist ?? 0,
+      isOOD: false,
+      oodSigmaPenalty: 0,
+      oodCategory: "borderline",
+    };
   }
 
   const mahaDist = computeMahalanobis(featureVec);
   const mahaPercentile = percentileRank(mahaDist, trainingMahalanobisDistances);
 
-  const sub = featureSubset(featureVec);
-  const normSub = sub.map((v, j) =>
-    trainingStd[j] > 1e-6 ? (v - trainingMean[j]) / trainingStd[j] : 0
-  );
-  const gmmLL = gmmModel.length > 0 ? computeGMMLogLikelihood(normSub) : 0;
+  const normVec = normalizeVector(featureVec);
+  const gmmLL = gmmModel.length > 0 ? computeGMMLogLikelihood(normVec) : 0;
   const gmmPercentile = 1 - percentileRank(gmmLL, gmmTrainingLogLikelihoods);
 
   const latentDist = gnnLatentDist ?? 0;
 
   const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
   const mahaScale = Math.max(mahalanobisP95 - mahalanobisP50, 0.1);
-  const mahaScore = sigmoid(3 * (mahaDist - mahalanobisP95) / mahaScale);
+  const mahaScore = sigmoid(conformalMahaSteepness * (mahaDist - mahalanobisP95) / mahaScale);
 
   let gmmScore = 0;
   if (gmmModel.length > 0) {
     const gmmScale = Math.max(gmmP50 - gmmP5, 0.1);
-    gmmScore = sigmoid(3 * (gmmP5 - gmmLL) / gmmScale);
+    gmmScore = sigmoid(conformalGmmSteepness * (gmmP5 - gmmLL) / gmmScale);
   }
 
-  const latentScore = sigmoid(6 * (latentDist - 0.3));
+  const latentScore = sigmoid(conformalLatentSteepness * (latentDist - conformalLatentThreshold));
 
   const oodScore = Math.min(1, Math.max(0,
     0.4 * mahaScore + 0.35 * gmmScore + 0.25 * latentScore
