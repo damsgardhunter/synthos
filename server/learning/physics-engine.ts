@@ -31,7 +31,9 @@ export function getConstraintMode(): PhysicsConstraintMode {
 function softCeiling(tc: number, threshold: number, penaltyStrength: number): number {
   if (tc <= threshold) return tc;
   const excess = tc - threshold;
-  const dampened = threshold + excess / (1 + penaltyStrength * excess / threshold);
+  const safeThreshold = Math.max(threshold, 50);
+  const ratio = Math.min(excess / safeThreshold, 5.0);
+  const dampened = threshold + excess / (1 + penaltyStrength * ratio);
   return Math.round(dampened * 10) / 10;
 }
 
@@ -133,7 +135,8 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
 
   const isAmbient = pressureGpa < pressureThresholdLow;
   const isHighPressure = pressureGpa >= 50;
-  const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / (50 - pressureThresholdLow);
+  const pressureDenom = Math.max(1, 50 - pressureThresholdLow);
+  const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / pressureDenom;
 
   const extensionFactor = computeCapExtensionFactor(evidence);
 
@@ -170,32 +173,31 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     return Math.min(tc, tcCap);
   }
 
-  let baseExpectation: number;
+  let metalCeiling: number;
   if (metallicity < 0.3) {
-    baseExpectation = 30 + metallicity * 150;
+    metalCeiling = 30 + metallicity * 150;
   } else if (metallicity < 0.5) {
-    baseExpectation = 80 + (metallicity - 0.3) * 300;
-  } else if (lambda < 0.3) {
-    baseExpectation = 60 + lambda * 200;
-  } else if (lambda < 0.5) {
-    baseExpectation = 100 + (lambda - 0.3) * 300;
-  } else if (lambda < 1.0) {
-    const ambientBase = 150;
-    const hpBase = 250;
-    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
-  } else if (lambda < 1.5) {
-    const ambientBase = 200;
-    const hpBase = 350;
-    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
-  } else if (lambda < 2.5) {
-    const ambientBase = 300;
-    const hpBase = 500;
-    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
+    metalCeiling = 80 + (metallicity - 0.3) * 300;
   } else {
-    const ambientBase = 350;
-    const hpBase = 600;
-    baseExpectation = ambientBase + (hpBase - ambientBase) * pressureFactor;
+    metalCeiling = Infinity;
   }
+
+  let lambdaCeiling: number;
+  if (lambda < 0.3) {
+    lambdaCeiling = 60 + lambda * 200;
+  } else if (lambda < 0.5) {
+    lambdaCeiling = 100 + (lambda - 0.3) * 300;
+  } else if (lambda < 1.0) {
+    lambdaCeiling = 150 + (250 - 150) * pressureFactor;
+  } else if (lambda < 1.5) {
+    lambdaCeiling = 200 + (350 - 200) * pressureFactor;
+  } else if (lambda < 2.5) {
+    lambdaCeiling = 300 + (500 - 300) * pressureFactor;
+  } else {
+    lambdaCeiling = 350 + (600 - 350) * pressureFactor;
+  }
+
+  let baseExpectation = Math.min(metalCeiling, lambdaCeiling);
 
   baseExpectation += materialBonus;
   baseExpectation = Math.round(baseExpectation * extensionFactor);
