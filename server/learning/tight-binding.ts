@@ -71,14 +71,7 @@ export interface TBDOS {
   uncertaintyMultiplier: number;
 }
 
-function parseFormulaElements(formula: string): string[] {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
-  const matches = cleaned.match(/[A-Z][a-z]*/g);
-  return matches ? Array.from(new Set(matches)) : [];
-}
-
-function parseFormulaCounts(formula: string): Record<string, number> {
+function parseComposition(formula: string): { elements: string[]; counts: Record<string, number> } {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
   const counts: Record<string, number> = {};
@@ -89,7 +82,15 @@ function parseFormulaCounts(formula: string): Record<string, number> {
     const num = match[2] ? parseFloat(match[2]) : 1;
     counts[el] = (counts[el] || 0) + num;
   }
-  return counts;
+  return { elements: Object.keys(counts), counts };
+}
+
+function parseFormulaElements(formula: string): string[] {
+  return parseComposition(formula).elements;
+}
+
+function parseFormulaCounts(formula: string): Record<string, number> {
+  return parseComposition(formula).counts;
 }
 
 function getOnsiteEnergies(el: string): OnsiteEnergies {
@@ -264,18 +265,23 @@ function interpolateKPoints(path: { points: number[][]; labels: string[] }, nPer
     }
 
     for (let i = 0; i < nPerSegment; i++) {
-      const t = i / nPerSegment;
-      kPoints.push([
-        start[0] + (end[0] - start[0]) * t,
-        start[1] + (end[1] - start[1]) * t,
-        start[2] + (end[2] - start[2]) * t,
-      ]);
+      if (i === 0) {
+        kPoints.push([start[0], start[1], start[2]]);
+      } else {
+        const t = i / nPerSegment;
+        kPoints.push([
+          start[0] + (end[0] - start[0]) * t,
+          start[1] + (end[1] - start[1]) * t,
+          start[2] + (end[2] - start[2]) * t,
+        ]);
+      }
     }
 
     kLabels.push({ index: kPoints.length, label: path.labels[seg + 1] });
   }
 
-  kPoints.push(path.points[path.points.length - 1]);
+  const last = path.points[path.points.length - 1];
+  kPoints.push([last[0], last[1], last[2]]);
 
   return { kPoints, kLabels };
 }
@@ -655,8 +661,7 @@ export function computeTightBindingBands(
   formula: string,
   structure?: string | null,
 ): TBBandStructure {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
+  const { elements, counts } = parseComposition(formula);
 
   const latticeType = guessLatticeType(elements, formula);
   const path = getHighSymmetryPath(latticeType);
@@ -667,7 +672,7 @@ export function computeTightBindingBands(
   for (const el of elements) {
     const data = getElementData(el);
     if (data && data.latticeConstant) {
-      latticeConstant = data.latticeConstant / 100;
+      latticeConstant = data.latticeConstant;
       break;
     }
   }
@@ -928,7 +933,7 @@ export function computeTightBindingDOS(bands: TBBandStructure): TBDOS {
       const x = (e - eVal) / broadening;
       density += Math.exp(-0.5 * x * x) / (broadening * Math.sqrt(2 * Math.PI));
     }
-    density /= (nK * nBands || 1);
+    density /= (nK || 1);
     dos.push(Number(density.toFixed(6)));
   }
 
