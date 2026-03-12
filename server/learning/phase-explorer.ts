@@ -91,11 +91,7 @@ function buildFormula(counts: Record<string, number>): string {
   const parts: string[] = [];
   const sorted = Object.entries(counts)
     .filter(([, c]) => c > 0)
-    .sort(([a], [b]) => {
-      const enA = ELEMENTAL_DATA[a]?.paulingElectronegativity ?? 2.0;
-      const enB = ELEMENTAL_DATA[b]?.paulingElectronegativity ?? 2.0;
-      return enA - enB;
-    });
+    .sort(([a], [b]) => a.localeCompare(b));
   for (const [el, c] of sorted) {
     const rounded = Math.round(c);
     if (rounded <= 0) continue;
@@ -294,7 +290,7 @@ export function exploreCompositionSpace(
 
           const pred = fastTcPredict(formula);
           grid.push({
-            coords: [a, b, c],
+            coords: [a, b, c, d],
             formula,
             tc: pred.tc,
             stable: pred.hullDistance < 0.1,
@@ -311,7 +307,7 @@ export function exploreCompositionSpace(
   return {
     dimensions: n === 2 ? [`x(${elementSet[0]})`] :
                 n === 3 ? [`x(${elementSet[0]})`, `y(${elementSet[1]})`] :
-                [`x(${elementSet[0]})`, `y(${elementSet[1]})`, `z(${elementSet[2]})`],
+                [`x(${elementSet[0]})`, `y(${elementSet[1]})`, `z(${elementSet[2]})`, `w(${elementSet[3]})`],
     elementSet,
     grid,
     hotspots,
@@ -373,7 +369,7 @@ export function explorePressureCompositionSpace(
         tc: adjustedTc,
         stable: basePred.hullDistance < 0.15,
         hullDistance: basePred.hullDistance,
-        uncertainty: basePred.uncertainty * (1 + pressure / 500),
+        uncertainty: basePred.uncertainty * (1 + 0.3 * Math.log1p(pressure / 50)),
       });
     }
   }
@@ -479,6 +475,12 @@ export function findOptimalRegion(
     let bestTc = basePred.tc;
     let bestPressure = 0;
 
+    const bayesResult = optimizePressureForFormula(formula, 5, 20);
+    if (bayesResult.confidence > 0.3 && bayesResult.predictedTcAtOptimal > bestTc) {
+      bestTc = bayesResult.predictedTcAtOptimal;
+      bestPressure = bayesResult.optimalPressure;
+    }
+
     for (const pressure of PRESSURE_STEPS_COARSE) {
       const adjustedTc = pressureAdjustTc(basePred.tc, basePred.lambda, pressure, formula);
       if (adjustedTc > bestTc) {
@@ -488,12 +490,9 @@ export function findOptimalRegion(
     }
 
     if (bestPressure > 0) {
-      const refinePressures: number[] = [];
+      const windowHalf = Math.max(50, bestPressure * 0.3);
       const pStep = bestPressure > 50 ? 10 : 5;
-      for (let p = Math.max(0, bestPressure - 30); p <= bestPressure + 30; p += pStep) {
-        refinePressures.push(p);
-      }
-      for (const p of refinePressures) {
+      for (let p = Math.max(0, bestPressure - windowHalf); p <= bestPressure + windowHalf; p += pStep) {
         const tc = pressureAdjustTc(basePred.tc, basePred.lambda, p, formula);
         if (tc > bestTc) {
           bestTc = tc;
