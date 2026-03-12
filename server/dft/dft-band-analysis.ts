@@ -119,17 +119,37 @@ export function classifyCrossingDispersion(bandResult: DFTBandStructureResult): 
     let curvature = 0;
 
     if (localE.length >= 3) {
-      const midIdx = Math.floor(localE.length / 2);
-      const dE_left = localE[midIdx].e - localE[midIdx - 1].e;
-      const dk_left = localE[midIdx].dk - localE[midIdx - 1].dk;
-      const dE_right = localE[midIdx + 1 < localE.length ? midIdx + 1 : midIdx].e - localE[midIdx].e;
-      const dk_right = (localE[midIdx + 1 < localE.length ? midIdx + 1 : midIdx].dk - localE[midIdx].dk);
-
-      if (Math.abs(dk_left) > 1e-6 && Math.abs(dk_right) > 1e-6) {
-        const v_left = dE_left / dk_left;
-        const v_right = dE_right / dk_right;
-        velocity = (Math.abs(v_left) + Math.abs(v_right)) / 2;
-        curvature = Math.abs(v_right - v_left) / (Math.abs(dk_left + dk_right) / 2 + 1e-6);
+      let sumDk = 0, sumDk2 = 0, sumDk3 = 0, sumDk4 = 0;
+      let sumE = 0, sumDkE = 0, sumDk2E = 0;
+      for (const pt of localE) {
+        const d = pt.dk;
+        const d2 = d * d;
+        sumDk += d; sumDk2 += d2; sumDk3 += d2 * d; sumDk4 += d2 * d2;
+        sumE += pt.e; sumDkE += d * pt.e; sumDk2E += d2 * pt.e;
+      }
+      const n = localE.length;
+      const S = [
+        [n, sumDk, sumDk2],
+        [sumDk, sumDk2, sumDk3],
+        [sumDk2, sumDk3, sumDk4],
+      ];
+      const rhs = [sumE, sumDkE, sumDk2E];
+      const det = S[0][0] * (S[1][1] * S[2][2] - S[1][2] * S[2][1])
+                - S[0][1] * (S[1][0] * S[2][2] - S[1][2] * S[2][0])
+                + S[0][2] * (S[1][0] * S[2][1] - S[1][1] * S[2][0]);
+      if (Math.abs(det) > 1e-30) {
+        const bCoeff = (rhs[0] * (S[1][1] * S[2][2] - S[1][2] * S[2][1])
+                      - S[0][1] * (rhs[1] * S[2][2] - S[1][2] * rhs[2])
+                      + S[0][2] * (rhs[1] * S[2][1] - S[1][1] * rhs[2])) / det;
+        const aCoeff = (S[0][0] * (rhs[1] * S[2][2] - S[1][2] * rhs[2])
+                      - rhs[0] * (S[1][0] * S[2][2] - S[1][2] * S[2][0])
+                      + S[0][2] * (S[1][0] * rhs[2] - rhs[1] * S[2][0])) / det;
+        const cCoeff = (S[0][0] * (S[1][1] * rhs[2] - rhs[1] * S[2][1])
+                      - S[0][1] * (S[1][0] * rhs[2] - rhs[1] * S[2][0])
+                      + rhs[0] * (S[1][0] * S[2][1] - S[1][1] * S[2][0])) / det;
+        void cCoeff;
+        velocity = Math.abs(bCoeff);
+        curvature = 2 * Math.abs(aCoeff);
       }
     }
 
@@ -170,23 +190,29 @@ export function classifyCrossingDispersion(bandResult: DFTBandStructureResult): 
 
 export function detectSOCGaps(bandResult: DFTBandStructureResult): { kIndex: number; bandPair: [number, number]; gapMeV: number; atFermi: boolean }[] {
   const gaps: { kIndex: number; bandPair: [number, number]; gapMeV: number; atFermi: boolean }[] = [];
+  const MAX_BAND_OFFSET = 3;
 
   for (let ki = 0; ki < bandResult.eigenvalues.length; ki++) {
     const kpt = bandResult.eigenvalues[ki];
     for (let b = 0; b < kpt.energies.length - 1; b++) {
       const e1 = kpt.energies[b];
-      const e2 = kpt.energies[b + 1];
-      if (e1 === undefined || e2 === undefined) continue;
-      const gap = e2 - e1;
-      if (gap > 0.001 && gap < 0.15) {
-        const midE = (e1 + e2) / 2;
-        const atFermi = Math.abs(midE) < 0.3;
-        gaps.push({
-          kIndex: ki,
-          bandPair: [b, b + 1],
-          gapMeV: gap * 1000,
-          atFermi,
-        });
+      if (e1 === undefined) continue;
+
+      const upperLimit = Math.min(b + MAX_BAND_OFFSET, kpt.energies.length - 1);
+      for (let b2 = b + 1; b2 <= upperLimit; b2++) {
+        const e2 = kpt.energies[b2];
+        if (e2 === undefined) continue;
+        const gap = e2 - e1;
+        if (gap > 0.001 && gap < 0.15) {
+          const midE = (e1 + e2) / 2;
+          const atFermi = Math.abs(midE) < 0.3;
+          gaps.push({
+            kIndex: ki,
+            bandPair: [b, b2],
+            gapMeV: gap * 1000,
+            atFermi,
+          });
+        }
       }
     }
   }
@@ -206,7 +232,14 @@ export function computeFermiIsosurface(bandResult: DFTBandStructureResult): Ferm
 
   for (let b = 0; b < bandResult.nBands; b++) {
     for (let ki = 0; ki < bandResult.eigenvalues.length - 1; ki++) {
-      if (isPathBreak(bandResult.eigenvalues, ki + 1)) continue;
+      if (isPathBreak(bandResult.eigenvalues, ki + 1)) {
+        const c0 = bandResult.eigenvalues[ki].kCoords;
+        const c1 = bandResult.eigenvalues[ki + 1].kCoords;
+        const coordDist = Math.sqrt(
+          (c1[0] - c0[0]) ** 2 + (c1[1] - c0[1]) ** 2 + (c1[2] - c0[2]) ** 2
+        );
+        if (coordDist > 0.01) continue;
+      }
       const e0 = bandResult.eigenvalues[ki].energies[b];
       const e1 = bandResult.eigenvalues[ki + 1].energies[b];
       if (e0 === undefined || e1 === undefined) continue;
