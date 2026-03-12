@@ -487,21 +487,39 @@ function buildHamiltonianAtK(
     }
   }
 
-  const eigenvalues = solveEigenvaluesSymmetric(H, nOrbitals);
+  const { eigenvalues, eigenvectors } = solveEigenvaluesSymmetric(H, nOrbitals);
 
   const orbChars: { s: number; p: number; d: number }[] = [];
+  const hasEvecs = eigenvectors.length === nOrbitals;
+
+  let sCount = 0, pCount = 0, dCount = 0;
+  if (!hasEvecs) {
+    for (const atom of atomList) {
+      const hasDOrbs = isTransitionMetal(atom.el) || isRareEarth(atom.el) || isActinide(atom.el);
+      sCount += 1;
+      pCount += 3;
+      if (hasDOrbs) dCount += 5;
+    }
+  }
+
   for (let band = 0; band < nOrbitals; band++) {
+    if (!hasEvecs) {
+      const total = sCount + pCount + dCount || 1;
+      orbChars.push({ s: sCount / total, p: pCount / total, d: dCount / total });
+      continue;
+    }
     let sWeight = 0, pWeight = 0, dWeight = 0;
+    const psi = eigenvectors[band];
     for (const atom of atomList) {
       const hasDOrbs = isTransitionMetal(atom.el) || isRareEarth(atom.el) || isActinide(atom.el);
       const o = atom.orbitalStart;
-      sWeight += o < nOrbitals ? 1.0 / nOrbitals : 0;
+      if (o < nOrbitals) sWeight += psi[o] * psi[o];
       for (let p = 0; p < 3; p++) {
-        pWeight += (o + 1 + p < nOrbitals) ? 1.0 / nOrbitals : 0;
+        if (o + 1 + p < nOrbitals) pWeight += psi[o + 1 + p] * psi[o + 1 + p];
       }
       if (hasDOrbs) {
         for (let d = 0; d < 5; d++) {
-          dWeight += (o + 4 + d < nOrbitals) ? 1.0 / nOrbitals : 0;
+          if (o + 4 + d < nOrbitals) dWeight += psi[o + 4 + d] * psi[o + 4 + d];
         }
       }
     }
@@ -516,47 +534,143 @@ function buildHamiltonianAtK(
   return { eigenvalues, orbChars };
 }
 
-function solveEigenvaluesSymmetric(H: number[][], n: number): number[] {
-  if (n <= 0) return [];
-  if (n === 1) return [H[0][0]];
-
-  const eigenvalues: number[] = [];
-
-  const diag = H.map((row, i) => row[i]);
-  const offDiag: number[] = new Array(n).fill(0);
-
+function householderTridiagonalize(H: number[][], n: number): {
+  diag: number[]; offDiag: number[]; Q: number[][];
+} {
+  const A: number[][] = [];
   for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
-      if (i !== j) {
-        offDiag[i] += H[i][j] * H[i][j];
+    A[i] = new Array(n);
+    for (let j = 0; j < n; j++) A[i][j] = H[i][j];
+  }
+
+  const Q: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    Q[i] = new Array(n).fill(0);
+    Q[i][i] = 1;
+  }
+
+  for (let k = 0; k < n - 2; k++) {
+    const x: number[] = new Array(n - k - 1);
+    let sigma = 0;
+    for (let i = k + 1; i < n; i++) {
+      x[i - k - 1] = A[i][k];
+      sigma += A[i][k] * A[i][k];
+    }
+    if (sigma < 1e-30) continue;
+
+    const alpha = -Math.sign(x[0] || 1) * Math.sqrt(sigma);
+    const u0 = x[0] - alpha;
+    const uNormSq = sigma - x[0] * x[0] + u0 * u0;
+    if (Math.abs(uNormSq) < 1e-30) continue;
+
+    const v: number[] = new Array(n - k - 1);
+    v[0] = u0;
+    for (let i = 1; i < v.length; i++) v[i] = x[i];
+    const invUNormSq = 2.0 / uNormSq;
+
+    const p: number[] = new Array(n - k - 1).fill(0);
+    for (let i = 0; i < v.length; i++) {
+      for (let j = 0; j < v.length; j++) {
+        p[i] += A[i + k + 1][j + k + 1] * v[j];
+      }
+      p[i] *= invUNormSq;
+    }
+
+    let vTp = 0;
+    for (let i = 0; i < v.length; i++) vTp += v[i] * p[i];
+    const K = invUNormSq * 0.5 * vTp;
+
+    const q: number[] = new Array(v.length);
+    for (let i = 0; i < v.length; i++) q[i] = p[i] - K * v[i];
+
+    for (let i = 0; i < v.length; i++) {
+      for (let j = 0; j < v.length; j++) {
+        A[i + k + 1][j + k + 1] -= v[i] * q[j] + q[i] * v[j];
       }
     }
-    offDiag[i] = Math.sqrt(offDiag[i]);
-  }
-
-  for (let i = 0; i < n; i++) {
-    const gershgorinLow = diag[i] - offDiag[i];
-    const gershgorinHigh = diag[i] + offDiag[i];
-    eigenvalues.push((gershgorinLow + gershgorinHigh) / 2);
-  }
-
-  const tridiag = new Array(n).fill(0);
-  const offTridiag = new Array(n).fill(0);
-
-  for (let i = 0; i < n; i++) {
-    tridiag[i] = H[i][i];
-  }
-  for (let i = 0; i < n - 1; i++) {
-    let sumSq = 0;
-    for (let j = i + 1; j < n; j++) {
-      sumSq += H[j][i] * H[j][i];
+    A[k + 1][k] = alpha;
+    A[k][k + 1] = alpha;
+    for (let i = k + 2; i < n; i++) {
+      A[i][k] = 0;
+      A[k][i] = 0;
     }
-    offTridiag[i] = Math.sqrt(sumSq);
+
+    for (let j = 0; j < n; j++) {
+      let dot = 0;
+      for (let i = 0; i < v.length; i++) dot += v[i] * Q[i + k + 1][j];
+      dot *= invUNormSq;
+      for (let i = 0; i < v.length; i++) Q[i + k + 1][j] -= dot * v[i];
+    }
   }
 
-  const stEigenvalues = solveTridiagonalEigenvalues(tridiag, offTridiag, n);
+  const diag = new Array(n);
+  const offDiag = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) diag[i] = A[i][i];
+  for (let i = 0; i < n - 1; i++) offDiag[i] = A[i + 1][i];
 
-  return stEigenvalues;
+  return { diag, offDiag, Q };
+}
+
+function solveEigenvaluesSymmetric(H: number[][], n: number): { eigenvalues: number[]; eigenvectors: number[][] } {
+  if (n <= 0) return { eigenvalues: [], eigenvectors: [] };
+  if (n === 1) return { eigenvalues: [H[0][0]], eigenvectors: [[1]] };
+
+  const { diag, offDiag, Q } = householderTridiagonalize(H, n);
+  const eigenvalues = solveTridiagonalEigenvalues(diag, offDiag, n);
+
+  const eigenvectors: number[][] = [];
+  const MAX_EVEC_SIZE = 80;
+  const computeEvecs = n <= MAX_EVEC_SIZE;
+
+  if (computeEvecs) {
+    const lm = new Array(n).fill(0);
+    const lu = new Array(n).fill(0);
+
+    for (let idx = 0; idx < n; idx++) {
+      const lambda = eigenvalues[idx];
+      const z = new Array(n);
+      for (let i = 0; i < n; i++) z[i] = (i === idx % n) ? 1 : 0.01 / (n + 1);
+
+      const shift = lambda + 1e-10 * (1 + idx * 0.1);
+      lm[0] = diag[0] - shift;
+      for (let i = 1; i < n; i++) {
+        const safe = Math.abs(lm[i - 1]) < 1e-15 ? 1e-15 * (lm[i - 1] >= 0 ? 1 : -1) : lm[i - 1];
+        lu[i] = offDiag[i - 1] / safe;
+        lm[i] = (diag[i] - shift) - lu[i] * offDiag[i - 1];
+      }
+
+      for (let iter = 0; iter < 8; iter++) {
+        const w = new Array(n);
+        w[0] = z[0];
+        for (let i = 1; i < n; i++) w[i] = z[i] - lu[i] * w[i - 1];
+        const safe_last = Math.abs(lm[n - 1]) < 1e-15 ? 1e-15 : lm[n - 1];
+        z[n - 1] = w[n - 1] / safe_last;
+        for (let i = n - 2; i >= 0; i--) {
+          const safe = Math.abs(lm[i]) < 1e-15 ? 1e-15 : lm[i];
+          z[i] = (w[i] - offDiag[i] * z[i + 1]) / safe;
+        }
+
+        let norm = 0;
+        for (let i = 0; i < n; i++) norm += z[i] * z[i];
+        norm = Math.sqrt(norm) || 1;
+        for (let i = 0; i < n; i++) z[i] /= norm;
+      }
+
+      const fullVec = new Array(n).fill(0);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          fullVec[i] += Q[j][i] * z[j];
+        }
+      }
+      let norm2 = 0;
+      for (let i = 0; i < n; i++) norm2 += fullVec[i] * fullVec[i];
+      norm2 = Math.sqrt(norm2) || 1;
+      for (let i = 0; i < n; i++) fullVec[i] /= norm2;
+      eigenvectors.push(fullVec);
+    }
+  }
+
+  return { eigenvalues, eigenvectors };
 }
 
 function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: number): number[] {
