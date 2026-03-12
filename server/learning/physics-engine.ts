@@ -1472,7 +1472,9 @@ export function computePhononSpectrum(
   }
   maxPhononFreq = Math.max(50, Math.min(5000, Math.round(maxPhononFreq)));
 
-  const debyeTemperature = Math.max(50, Math.round(1.4388 * maxPhononFreq));
+  const dimScore = computeDimensionalityScore(formula);
+  const debyeMult = dimScore > 0.7 ? 1.4388 * (1.0 - (dimScore - 0.7) * 0.25) : 1.4388;
+  const debyeTemperature = Math.max(50, Math.round(debyeMult * maxPhononFreq));
 
   let logAvgFreq: number;
   const massBasedOmegaLog = 1200 / Math.sqrt(Math.max(avgMass, 1));
