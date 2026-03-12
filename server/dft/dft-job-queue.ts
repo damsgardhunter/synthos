@@ -9,6 +9,7 @@ const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
 const MIN_QUEUE_SIZE = 50;
 const REFILL_BATCH_SIZE = 100;
+const IMAGINARY_PHONON_THRESHOLD_CM1 = -10.0;
 
 type PipelineStage = "candidate_queue" | "dft_workers" | "phonon_workers" | "epc_workers";
 
@@ -197,7 +198,8 @@ async function processNextJob(): Promise<boolean> {
       stageMetrics.phonon_workers.currentDepth--;
 
       stageMetrics.epc_workers.currentDepth++;
-      updateStageMetrics("epc_workers", phononSuccess && !dftResult.phonon.hasImaginary, 0);
+      const phononPhysicallyStable = dftResult.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1;
+      updateStageMetrics("epc_workers", phononSuccess && phononPhysicallyStable, 0);
       stageMetrics.epc_workers.currentDepth--;
     }
 
@@ -238,8 +240,16 @@ async function processNextJob(): Promise<boolean> {
             qeTotalEnergy: dftResult.scf?.totalEnergy,
             qeFermiEnergy: dftResult.scf?.fermiEnergy,
             qePressure: dftResult.scf?.pressure,
-            qePhononStable: dftResult.phonon ? !dftResult.phonon.hasImaginary : null,
+            qePhononStable: dftResult.phonon
+              ? dftResult.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1
+              : null,
+            qePhononLowestFreq: dftResult.phonon?.lowestFrequency ?? null,
+            qePhononImaginaryCount: dftResult.phonon?.imaginaryCount ?? 0,
             qePhononFreqs: dftResult.phonon?.frequencies?.length || 0,
+            qeMagnetization: dftResult.scf?.magnetization ?? null,
+            qeIsMagnetic: dftResult.scf?.magnetization != null
+              ? Math.abs(dftResult.scf.magnetization) > 0.5
+              : null,
             dftConfidence: 1.0,
             qeBands: bandData?.converged || false,
             qeBandCrossings: bandData?.bandCrossings?.length || 0,
@@ -268,9 +278,11 @@ async function processNextJob(): Promise<boolean> {
       totalFailed++;
       console.log(`[DFT-Queue] Job #${job.id} failed: ${job.formula} — ${dftResult.error || "SCF did not converge"}`);
       try {
-        const hasPhonon = dftResult.phonon && dftResult.phonon.hasImaginary;
+        const hasPhysicalInstability = dftResult.phonon
+          && dftResult.phonon.hasImaginary
+          && dftResult.phonon.lowestFrequency < IMAGINARY_PHONON_THRESHOLD_CM1;
         let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "scf_divergence";
-        if (hasPhonon) failureReason = "unstable_phonons";
+        if (hasPhysicalInstability) failureReason = "unstable_phonons";
         else if (dftResult.error?.includes("geometry")) failureReason = "geometry_rejected";
         recordStructureFailure({
           formula: job.formula,
