@@ -645,6 +645,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **Parent-Tc-Capped Strain-Induced Tc Changes (structural-mutator.ts)**:
   - `estimateTcChangeFromStrain` now accepts a `parentTc` parameter and caps the Tc change to ±15% of the parent Tc. Previously, a 20K superconductor under 3% compressive strain could get a +9K boost (45% increase), and linear extrapolation could push low-Tc materials into the room-temperature regime. Now a 20K material is capped at ±3K change, while a 100K cuprate can still see up to ±15K — proportional to the parent's electronic coupling strength. The strain sensitivity multipliers were also moderated (cuprate compressive 3→2, tensile 2→1.5; generic 1.5→1.0).
 
+- **Miedema Formation Energy Scaling Fix (structure-predictor.ts)**:
+  - Removed erroneous `deltaH / totalAtoms` normalization. The Miedema model's `f_AB = 2*x_A*x_B` factor already accounts for concentration, so dividing by totalAtoms double-counted dilution. `deltaH` is now returned directly (already per-atom via concentration fractions).
+- **Miedema Hydride Bypass (structure-predictor.ts)**:
+  - For H-containing formulas, `computeMiedemaFormationEnergy` now delegates to `predictHydrideFormation` from pressure-engine.ts instead of using the Miedema model (notoriously poor for gaseous non-metals). Falls back to standard Miedema only if the hydride predictor returns no stable phases.
+- **Decomposition Energy Convex Hull Approximation (structure-predictor.ts)**:
+  - `estimateDecompositionEnergy` now uses a greedy lowest-energy-first binary phase selection (convex hull approximation) instead of averaging all negative binary energies. Phases are sorted by formation energy (most negative first), then greedily allocated against available element fractions. This correctly identifies the lowest-energy decomposition pathway rather than diluting it across all competing phases.
 - **Dedup Moved Inside Generator Functions (structural-mutator.ts)**:
   - `seenFormulas` (now `seen: Set<string>`) passed directly into `generateDistortedLattices`, `generateLayeredStructures`, `generateVacancyStructures`, `generateStrainedVariants`. Dedup happens at generation time (before object allocation), eliminating redundant result arrays and post-hoc filtering in `runStructuralMutations`.
 - **Prototype Assignment Cache (structural-mutator.ts)**:

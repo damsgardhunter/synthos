@@ -5,6 +5,7 @@ import { ELEMENTAL_DATA, getElementData, getMeltingPoint, getLatticeConstant } f
 import { fetchSummary, fetchElasticity } from "./materials-project-client";
 import { computeDimensionalityScore, detectStructuralMotifs } from "./physics-engine";
 import { getCompetingPhases, assessMetastability } from "./phase-diagram-engine";
+import { predictHydrideFormation } from "./pressure-engine";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -89,6 +90,22 @@ function computeMiedemaFormationEnergy(formula: string): number {
     fractions[el] = counts[el] / totalAtoms;
   }
 
+  const hasHydrogen = elements.includes("H");
+  if (hasHydrogen) {
+    const metalEls = elements.filter(el => !MIEDEMA_NONMETALS.has(el));
+    if (metalEls.length > 0) {
+      try {
+        const hydrideResult = predictHydrideFormation(metalEls, 0);
+        if (hydrideResult && hydrideResult.stableHydrides && hydrideResult.stableHydrides.length > 0) {
+          const avgHf = hydrideResult.stableHydrides.reduce(
+            (sum: number, h: { Hf: number }) => sum + h.Hf, 0
+          ) / hydrideResult.stableHydrides.length;
+          return avgHf;
+        }
+      } catch {}
+    }
+  }
+
   const P = 14.1;
   const Q_P = 9.4;
   const R_P = 0;
@@ -149,7 +166,7 @@ function computeMiedemaFormationEnergy(formula: string): number {
     }
   }
 
-  return deltaH / totalAtoms;
+  return deltaH;
 }
 
 function estimateDecompositionEnergy(formula: string): number {
@@ -164,9 +181,15 @@ function estimateDecompositionEnergy(formula: string): number {
     return Math.max(0, compoundEnergy);
   }
 
-  let bestBinarySum = 0;
-  let binaryCount = 0;
+  const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (totalAtoms === 0) return Math.max(0, compoundEnergy);
 
+  const fractions: Record<string, number> = {};
+  for (const el of elements) {
+    fractions[el] = counts[el] / totalAtoms;
+  }
+
+  const binaryPhases: { elA: string; elB: string; energy: number }[] = [];
   for (let i = 0; i < elements.length; i++) {
     for (let j = i + 1; j < elements.length; j++) {
       const elA = elements[i];
@@ -174,19 +197,30 @@ function estimateDecompositionEnergy(formula: string): number {
       const binaryFormula = `${elA}${elB}`;
       const binaryEnergy = computeMiedemaFormationEnergy(binaryFormula);
       if (binaryEnergy < 0) {
-        bestBinarySum += binaryEnergy;
-        binaryCount++;
+        binaryPhases.push({ elA, elB, energy: binaryEnergy });
       }
     }
   }
 
-  if (binaryCount === 0) {
+  if (binaryPhases.length === 0) {
     return Math.max(0, compoundEnergy);
   }
 
-  const avgBinaryEnergy = bestBinarySum / binaryCount;
-  const decomp = compoundEnergy - avgBinaryEnergy;
+  let bestDecompEnergy = 0;
+  const remainingFractions = { ...fractions };
 
+  const sorted = binaryPhases.sort((a, b) => a.energy - b.energy);
+  for (const phase of sorted) {
+    const availA = remainingFractions[phase.elA] ?? 0;
+    const availB = remainingFractions[phase.elB] ?? 0;
+    if (availA <= 0 || availB <= 0) continue;
+    const weight = Math.min(availA, availB);
+    bestDecompEnergy += phase.energy * weight * 2;
+    remainingFractions[phase.elA] = availA - weight;
+    remainingFractions[phase.elB] = availB - weight;
+  }
+
+  const decomp = compoundEnergy - bestDecompEnergy;
   return Math.max(0, decomp);
 }
 
