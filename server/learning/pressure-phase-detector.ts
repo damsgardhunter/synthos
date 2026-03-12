@@ -303,27 +303,19 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
     }
   }
 
-  let tcMaxIdx = 0;
-  let tcMax = curve[0]?.tc ?? 0;
-  for (let i = 1; i < curve.length; i++) {
-    if (curve[i].tc > tcMax) {
-      tcMax = curve[i].tc;
-      tcMaxIdx = i;
-    }
-  }
-
-  if (tcMaxIdx > 0 && tcMaxIdx < curve.length - 1) {
-    const leftTc = curve[tcMaxIdx - 1].tc;
-    const rightTc = curve[tcMaxIdx + 1].tc;
-    if (tcMax > leftTc + TC_ONSET_THRESHOLD && tcMax > rightTc + TC_ONSET_THRESHOLD) {
+  for (let i = 1; i < curve.length - 1; i++) {
+    const leftTc = curve[i - 1].tc;
+    const peakTc = curve[i].tc;
+    const rightTc = curve[i + 1].tc;
+    if (peakTc > leftTc + TC_ONSET_THRESHOLD && peakTc > rightTc + TC_ONSET_THRESHOLD) {
       transitions.push({
         formula,
-        pressureStart: curve[tcMaxIdx - 1].pressureGpa,
-        pressureEnd: curve[tcMaxIdx + 1].pressureGpa,
+        pressureStart: curve[i - 1].pressureGpa,
+        pressureEnd: curve[i + 1].pressureGpa,
         type: "tc_maximum",
-        confidence: Math.min(1.0, (tcMax - Math.max(leftTc, rightTc)) / 20),
-        magnitude: tcMax,
-        details: `Tc maximum: ${tcMax.toFixed(1)} K at ${curve[tcMaxIdx].pressureGpa} GPa`,
+        confidence: Math.min(1.0, (peakTc - Math.max(leftTc, rightTc)) / 20),
+        magnitude: peakTc,
+        details: `Tc local maximum: ${peakTc.toFixed(1)} K at ${curve[i].pressureGpa} GPa (neighbors: ${leftTc.toFixed(1)}, ${rightTc.toFixed(1)} K)`,
         detectedAt: now,
       });
     }
@@ -348,36 +340,25 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
   }
 
   const dHdP = computeDerivative(curve, "enthalpy");
-  for (let i = 0; i < dHdP.length; i++) {
-    const d = dHdP[i];
-    if (Math.abs(d.derivative) > 0.05) {
+  for (let i = 1; i < dHdP.length; i++) {
+    const slopeChange = Math.abs(dHdP[i].derivative - dHdP[i - 1].derivative);
+    const avgDP = (curve[i + 1].pressureGpa - curve[i - 1].pressureGpa) / 2;
+    if (avgDP <= 0) continue;
+    const d2HdP2 = slopeChange / avgDP;
+
+    if (d2HdP2 > 0.002) {
+      const isVolumeCollapse = dHdP[i].derivative < dHdP[i - 1].derivative;
+      const label = isVolumeCollapse ? "volume collapse" : "volume expansion";
       transitions.push({
         formula,
-        pressureStart: curve[i].pressureGpa,
+        pressureStart: curve[i - 1].pressureGpa,
         pressureEnd: curve[i + 1].pressureGpa,
         type: "enthalpy_discontinuity",
-        confidence: Math.min(1.0, Math.abs(d.derivative) / 0.2),
-        magnitude: Math.abs(d.derivative) * (curve[i + 1].pressureGpa - curve[i].pressureGpa),
-        details: `Enthalpy discontinuity: dH/dP = ${d.derivative.toFixed(4)} eV/GPa at ${d.pressure.toFixed(0)} GPa (H: ${curve[i].enthalpy.toFixed(3)} -> ${curve[i + 1].enthalpy.toFixed(3)} eV)`,
+        confidence: Math.min(1.0, d2HdP2 / 0.01),
+        magnitude: slopeChange,
+        details: `Enthalpy slope discontinuity (${label}): d²H/dP² = ${d2HdP2.toFixed(4)} eV/GPa² at ${dHdP[i].pressure.toFixed(0)} GPa (dH/dP: ${dHdP[i - 1].derivative.toFixed(4)} -> ${dHdP[i].derivative.toFixed(4)} eV/GPa)`,
         detectedAt: now,
       });
-    }
-
-    if (i > 0) {
-      const d2HdP2 = Math.abs(dHdP[i].derivative - dHdP[i - 1].derivative);
-      const avgDP = (curve[i + 1].pressureGpa - curve[i - 1].pressureGpa) / 2;
-      if (avgDP > 0 && d2HdP2 / avgDP > 0.002) {
-        transitions.push({
-          formula,
-          pressureStart: curve[i - 1].pressureGpa,
-          pressureEnd: curve[i + 1].pressureGpa,
-          type: "structural",
-          confidence: Math.min(1.0, (d2HdP2 / avgDP) / 0.01),
-          magnitude: d2HdP2,
-          details: `Structural transition (d²H/dP² spike): ${(d2HdP2 / avgDP).toFixed(4)} eV/GPa² at ${d.pressure.toFixed(0)} GPa`,
-          detectedAt: now,
-        });
-      }
     }
   }
 
@@ -414,12 +395,19 @@ function deduplicateTransitions(transitions: PhaseTransition[]): PhaseTransition
   const result: PhaseTransition[] = [];
   const sorted = [...transitions].sort((a, b) => a.pressureStart - b.pressureStart);
 
+  const RELATED_TYPES: Record<string, string> = {
+    structural: "enthalpy_group",
+    enthalpy_discontinuity: "enthalpy_group",
+  };
+
   for (const t of sorted) {
-    const overlap = result.find(
-      r => r.type === t.type &&
+    const tGroup = RELATED_TYPES[t.type] ?? t.type;
+    const overlap = result.find(r => {
+      const rGroup = RELATED_TYPES[r.type] ?? r.type;
+      return rGroup === tGroup &&
         Math.abs(r.pressureStart - t.pressureStart) < 30 &&
-        Math.abs(r.pressureEnd - t.pressureEnd) < 30
-    );
+        Math.abs(r.pressureEnd - t.pressureEnd) < 30;
+    });
     if (overlap) {
       if (t.confidence > overlap.confidence) {
         const idx = result.indexOf(overlap);
