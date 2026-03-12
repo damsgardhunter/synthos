@@ -1340,6 +1340,17 @@ export interface GeneratedStructureVariant {
   description: string;
 }
 
+function countsToFormula(cts: Record<string, number>): string {
+  return Object.entries(cts)
+    .filter(([, n]) => typeof n === "number" && Number.isFinite(n) && n > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([el, n]) => {
+      const rounded = Math.round(n);
+      return rounded === 1 ? el : `${el}${rounded}`;
+    })
+    .join("");
+}
+
 function generateSubstitutionVariant(formula: string, comp?: ParsedComposition): GeneratedStructureVariant | null {
   const { elements, counts } = comp || parseComposition(formula);
 
@@ -1352,20 +1363,15 @@ function generateSubstitutionVariant(formula: string, comp?: ParsedComposition):
   if (availableSubs.length === 0) return null;
 
   const newEl = availableSubs[Math.floor(Math.random() * availableSubs.length)];
-  const newCounts = { ...counts };
+  const newCounts: Record<string, number> = { ...counts };
   newCounts[newEl] = (newCounts[newEl] || 0) + (newCounts[targetEl] || 1);
   delete newCounts[targetEl];
 
-  const newFormula = Object.entries(newCounts)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([el, n]) => n === 1 ? el : `${el}${n}`)
-    .join("");
+  const newFormula = countsToFormula(newCounts);
+  if (!newFormula) return null;
 
-  const protoMatch = Object.entries(KNOWN_PROTOTYPES).find(([, v]) => {
-    const protoEls = parseFormulaElements(v.prototype);
-    return elements.some(e => protoEls.includes(e));
-  });
-  const proto = protoMatch ? protoMatch[1] : { spaceGroup: "P1", crystalSystem: "triclinic", dimensionality: "3D" };
+  const parentProto = matchPrototype(formula, comp);
+  const proto = parentProto || { spaceGroup: "P1", crystalSystem: "triclinic", dimensionality: "3D", prototype: "unknown" };
 
   return {
     formula: newFormula,
@@ -1389,13 +1395,11 @@ function generateIntercalationVariant(formula: string, comp?: ParsedComposition)
   const intercalant = availableIntercalants[Math.floor(Math.random() * availableIntercalants.length)];
   const amount = 1 + Math.floor(Math.random() * 3);
 
-  const newCounts = { ...counts };
+  const newCounts: Record<string, number> = { ...counts };
   newCounts[intercalant] = (newCounts[intercalant] || 0) + amount;
 
-  const newFormula = Object.entries(newCounts)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([el, n]) => n === 1 ? el : `${el}${n}`)
-    .join("");
+  const newFormula = countsToFormula(newCounts);
+  if (!newFormula) return null;
 
   return {
     formula: newFormula,
