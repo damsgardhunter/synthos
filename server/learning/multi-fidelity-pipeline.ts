@@ -366,26 +366,24 @@ async function stage2_PhononCoupling(
 
   const phononSurrogate = predictPhononProperties(candidate.formula, candidate.pressureGpa ?? 0);
   if (phononSurrogate.confidence > 0.4 && !phononSurrogate.phononStability && phononSurrogate.stabilityProbability < 0.3) {
+    const reason = `Phonon surrogate pre-filter: dynamically unstable (stability=${phononSurrogate.stabilityProbability})`;
     await logComputationalResult(
       candidate.id, candidate.formula, 2, "phonon_coupling",
-      { phononSurrogatePrescreen: { ...phononSurrogate } },
-      false, `Phonon surrogate pre-filter: unstable (stability=${phononSurrogate.stabilityProbability.toFixed(3)})`, Date.now() - start, 0.65
+      { phononSurrogatePrescreen: { ...phononSurrogate }, earlyExit: true },
+      false, reason, Date.now() - start, 0.65
     );
-    const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
-    const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
-    return { passed: false, reason: `Phonon surrogate pre-filter: dynamically unstable (stability=${phononSurrogate.stabilityProbability.toFixed(3)})`, data: { phonon, coupling, eliashbergPipeline: null, phononSurrogate } };
+    return { passed: false, reason, data: { phonon: null, coupling: null, eliashbergPipeline: null, phononSurrogate } };
   }
 
   const mlLambda = predictLambda(candidate.formula, candidate.pressureGpa ?? 0);
   if (mlLambda.tier === "ml-regression" && mlLambda.confidence > 0.5 && mlLambda.lambda < 0.25) {
+    const reason = `ML lambda pre-filter: lambda=${mlLambda.lambda} too low (threshold 0.25)`;
     await logComputationalResult(
       candidate.id, candidate.formula, 2, "phonon_coupling",
-      { mlLambdaPrescreen: { lambda: mlLambda.lambda, confidence: mlLambda.confidence, tier: mlLambda.tier }, phononSurrogate },
-      false, `ML lambda pre-filter: lambda=${mlLambda.lambda.toFixed(3)} too low (threshold 0.25)`, Date.now() - start, 0.7
+      { mlLambdaPrescreen: { lambda: mlLambda.lambda, confidence: mlLambda.confidence, tier: mlLambda.tier }, phononSurrogate, earlyExit: true },
+      false, reason, Date.now() - start, 0.7
     );
-    const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
-    const coupling = computeElectronPhononCoupling(electronicData.electronic, phonon, candidate.formula, candidate.pressureGpa ?? 0);
-    return { passed: false, reason: `ML lambda pre-filter: lambda=${mlLambda.lambda.toFixed(3)} too low`, data: { phonon, coupling, eliashbergPipeline: null, mlLambda, phononSurrogate } };
+    return { passed: false, reason, data: { phonon: null, coupling: null, eliashbergPipeline: null, mlLambda, phononSurrogate } };
   }
 
   const phonon = computePhononSpectrum(candidate.formula, electronicData.electronic);
@@ -438,11 +436,16 @@ async function stage3_TcPrediction(
 
   if (eliashbergPipeline && eliashbergPipeline.tcBest > 0) {
     const pipelineTc = eliashbergPipeline.tcBest;
-    const blendedTc = 0.6 * pipelineTc + 0.4 * eliashberg.predictedTc;
+    const effectiveLambda = eliashbergPipeline.lambda ?? couplingData.coupling?.lambda ?? 0;
+    const isStrongCoupling = eliashbergPipeline.isStrongCoupling || effectiveLambda > 1.5;
+    const pipelineWeight = isStrongCoupling ? 0.9 : 0.6;
+    const mcMillanWeight = 1.0 - pipelineWeight;
+    const blendedTc = pipelineWeight * pipelineTc + mcMillanWeight * eliashberg.predictedTc;
     eliashberg.predictedTc = Number(blendedTc.toFixed(1));
     eliashberg.gapRatio = eliashbergPipeline.gapRatio;
-    eliashberg.strongCouplingCorrection = eliashbergPipeline.isStrongCoupling ? 1.5 : 1.0;
+    eliashberg.strongCouplingCorrection = isStrongCoupling ? 1.5 : 1.0;
     eliashberg.confidenceBand = eliashbergPipeline.confidenceBand;
+    eliashberg.tcBlendWeights = { pipeline: pipelineWeight, mcMillan: mcMillanWeight, isStrongCoupling, effectiveLambda };
   }
 
   const competingPhases = evaluateCompetingPhases(candidate.formula, electronicData.electronic);
@@ -513,8 +516,8 @@ async function stage4_SynthesisFeasibility(
   const ambientPressureStable = optP <= 1 && optP < 50 && (stability.isStable || stability.isMetastable);
 
   const formationEnergy = stability.formationEnergy ?? 0;
-  const formationEnergyTooHigh = formationEnergy > 5.0;
-  const formationEnergyDataError = formationEnergy < -30.0;
+  const formationEnergyTooHigh = formationEnergy > 2.0;
+  const formationEnergyDataError = formationEnergy < -5.0;
 
   const family = classifyFamily(candidate.formula);
   const familyAvgFormationEnergy = getFamilyAvgFormationEnergy(family);
@@ -545,9 +548,9 @@ async function stage4_SynthesisFeasibility(
   let reason = null;
 
   if (formationEnergyDataError) {
-    reason = `Formation energy ${formationEnergy.toFixed(2)} eV/atom below -5.0 - likely data error`;
+    reason = `Formation energy ${formationEnergy} eV/atom below -5.0 — likely numerical garbage or data error`;
   } else if (formationEnergyTooHigh) {
-    reason = `Formation energy ${formationEnergy.toFixed(2)} eV/atom exceeds 2.0 eV/atom - too unstable`;
+    reason = `Formation energy ${formationEnergy} eV/atom exceeds +2.0 eV/atom — too unstable to synthesize`;
   } else if (!isSynthesizable) {
     reason = `Low synthesizability (${structure.synthesizability.toFixed(2)}) - ${structure.synthesisNotes}`;
   } else if (!isStableOrMetastable) {
