@@ -708,8 +708,15 @@ export function vegardLatticeParameter(formula: string, comp?: ParsedComposition
   let totalWeight = 0;
 
   for (const el of elements) {
-    const lc = getLatticeConstant(el);
-    if (lc === null) continue;
+    let lc = getLatticeConstant(el);
+    if (lc === null) {
+      const data = getElementData(el);
+      if (data?.atomicRadius) {
+        lc = 2 * Math.SQRT2 * (data.atomicRadius / 100);
+      } else {
+        continue;
+      }
+    }
     const frac = counts[el] / totalAtoms;
     weightedSum += frac * lc;
     totalWeight += frac;
@@ -876,18 +883,22 @@ function estimateSynthesizability(
   }
 
   let maxMeltingPoint = 0;
+  let minMeltingPoint = Infinity;
   let estimatedSynthesisTemp: number | undefined;
 
   for (const el of elements) {
     const mp = getMeltingPoint(el);
-    if (mp !== null && mp > maxMeltingPoint) {
-      maxMeltingPoint = mp;
+    if (mp !== null && mp > 0) {
+      if (mp > maxMeltingPoint) maxMeltingPoint = mp;
+      if (mp < minMeltingPoint) minMeltingPoint = mp;
     }
   }
+  if (minMeltingPoint === Infinity) minMeltingPoint = 0;
 
   if (maxMeltingPoint > 0) {
-    estimatedSynthesisTemp = Math.round(0.57 * maxMeltingPoint);
-    notes.push(`Tammann T_synth ~ ${estimatedSynthesisTemp} K (0.57 * T_melt of ${maxMeltingPoint} K)`);
+    const tammannBase = minMeltingPoint > 0 ? minMeltingPoint : maxMeltingPoint;
+    estimatedSynthesisTemp = Math.round(0.5 * tammannBase);
+    notes.push(`Tammann T_synth ~ ${estimatedSynthesisTemp} K (0.5 * T_melt of ${tammannBase} K)`);
 
     if (estimatedSynthesisTemp > 3000) {
       score -= 0.15;
@@ -913,11 +924,16 @@ function estimateSynthesizability(
     }
   }
 
+  const actinideHydrideTargets = new Set(["Th", "U", "Ac", "Pa"]);
   const radioactive = ["Tc", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu"];
   for (const el of elements) {
     if (radioactive.includes(el)) {
-      score -= 0.25;
-      notes.push(`radioactive element ${el}`);
+      if (hasH && actinideHydrideTargets.has(el)) {
+        notes.push(`actinide ${el} (handling precautions required)`);
+      } else {
+        score -= 0.25;
+        notes.push(`radioactive element ${el}`);
+      }
       break;
     }
   }
