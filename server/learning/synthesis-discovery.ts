@@ -492,6 +492,7 @@ const STAGNATION_BOOST_FACTOR = 1.2;
 const STAGNATION_MAX_RATE = 0.35;
 
 function adaptMutationRate(currentBestFitness: number): number {
+  gaAdaptationCalls++;
   if (currentBestFitness > adaptiveMutationState.lastBestFitness + 0.005) {
     adaptiveMutationState.generationsWithoutImprovement = 0;
     adaptiveMutationState.lastBestFitness = currentBestFitness;
@@ -970,16 +971,19 @@ function genomeToSteps(genome: SynthesisGenome, insights: MultiEngineInsights): 
 
   if (insights.topology && insights.topology.topologicalScore > 0.4) {
     const topoAnnealTemp = 300 + insights.topology.topologicalScore * 200;
+    const topoCoolRate = insights.topology.topologicalScore > 0.6
+      ? Math.min(sv.coolingRate, 5)
+      : Math.min(sv.coolingRate, 10);
     steps.push({
       order: steps.length + 1,
       method: "anneal",
       temperature: topoAnnealTemp,
       pressure: 0,
-      coolingRate: Math.min(sv.coolingRate, 10),
+      coolingRate: topoCoolRate,
       annealTemp: topoAnnealTemp,
       duration: 12 + genome.topologicalProtection * 36,
       atmosphere: "vacuum",
-      notes: "Slow cool for topological surface state preservation",
+      notes: `Slow cool for topological surface state preservation (${topoCoolRate} K/hr)`,
     });
   }
 
@@ -1080,7 +1084,11 @@ function computeNoveltyScore(genome: SynthesisGenome, insights: MultiEngineInsig
   }
 
   if (insights.defect && insights.defect.bestTcBoost > 0.1 && genome.dopingLevel > 0.4) {
-    novelty += 0.1;
+    const elCount = Object.keys(parseFormulaCounts(insights.formula)).length;
+    const isHEA = elCount >= 5;
+    if (!isHEA) {
+      novelty += 0.1;
+    }
   }
 
   if (genome.precursorStrategy > 0.6 && genome.reactionSequenceType > 0.5) {
@@ -1230,30 +1238,33 @@ function buildEngineContributions(insights: MultiEngineInsights): string[] {
 
   if (insights.physics) {
     contributions.push(`Physics: lambda=${insights.physics.lambda.toFixed(2)}, stability=${insights.physics.stabilityScore.toFixed(2)}`);
-    discoveryStats.engineUsage["physics"] = (discoveryStats.engineUsage["physics"] || 0) + 1;
   }
   if (insights.topology) {
     contributions.push(`Topology: score=${insights.topology.topologicalScore.toFixed(2)}, class=${insights.topology.topologicalClass}`);
-    discoveryStats.engineUsage["topology"] = (discoveryStats.engineUsage["topology"] || 0) + 1;
   }
   if (insights.fermi) {
     contributions.push(`Fermi: nesting=${insights.fermi.nestingScore.toFixed(2)}, pockets=${insights.fermi.pocketCount}`);
-    discoveryStats.engineUsage["fermi"] = (discoveryStats.engineUsage["fermi"] || 0) + 1;
   }
   if (insights.pairing) {
     contributions.push(`Pairing: mechanism=${insights.pairing.dominantMechanism}, symmetry=${insights.pairing.pairingSymmetry}`);
-    discoveryStats.engineUsage["pairing"] = (discoveryStats.engineUsage["pairing"] || 0) + 1;
   }
   if (insights.pressure) {
     contributions.push(`Pressure: optimal=${insights.pressure.optimalPressure} GPa, maxTc=${insights.pressure.maxTc.toFixed(1)}K`);
-    discoveryStats.engineUsage["pressure"] = (discoveryStats.engineUsage["pressure"] || 0) + 1;
   }
   if (insights.defect) {
     contributions.push(`Defect: dopant=${insights.defect.bestDopant}, boost=${insights.defect.bestTcBoost.toFixed(3)}`);
-    discoveryStats.engineUsage["defect"] = (discoveryStats.engineUsage["defect"] || 0) + 1;
   }
 
   return contributions;
+}
+
+function incrementEngineUsage(insights: MultiEngineInsights): void {
+  if (insights.physics) discoveryStats.engineUsage["physics"] = (discoveryStats.engineUsage["physics"] || 0) + 1;
+  if (insights.topology) discoveryStats.engineUsage["topology"] = (discoveryStats.engineUsage["topology"] || 0) + 1;
+  if (insights.fermi) discoveryStats.engineUsage["fermi"] = (discoveryStats.engineUsage["fermi"] || 0) + 1;
+  if (insights.pairing) discoveryStats.engineUsage["pairing"] = (discoveryStats.engineUsage["pairing"] || 0) + 1;
+  if (insights.pressure) discoveryStats.engineUsage["pressure"] = (discoveryStats.engineUsage["pressure"] || 0) + 1;
+  if (insights.defect) discoveryStats.engineUsage["defect"] = (discoveryStats.engineUsage["defect"] || 0) + 1;
 }
 
 function buildRationale(genome: SynthesisGenome, insights: MultiEngineInsights): string[] {
@@ -1499,6 +1510,8 @@ export function discoverNovelSynthesisPaths(
     discoveryStats.bestFitness = bestEverFitness;
     discoveryStats.bestFormula = insights.formula;
   }
+
+  incrementEngineUsage(insights);
 
   return {
     formula: insights.formula,
