@@ -228,7 +228,9 @@ export function isValidFormula(formula: string): boolean {
     }
   }
   const uniqueElements = [...new Set(elementTokens)];
-  if (uniqueElements.some(el => NOBLE_GASES.has(el))) {
+  const nobleCount = uniqueElements.filter(el => NOBLE_GASES.has(el)).length;
+  const nonNobleCount = uniqueElements.length - nobleCount;
+  if (nobleCount > 0 && nonNobleCount === 0) {
     return false;
   }
   return true;
@@ -282,9 +284,13 @@ export function normalizeFormula(raw: string): string {
     for (let i = 1; i < intVals2.length; i++) {
       g2 = integerGcd(g2, intVals2[i]);
     }
-    if (g2 > 0) {
-      for (let i = 0; i < elKeys.length; i++) {
-        counts[elKeys[i]] = Math.round(intVals2[i] / g2);
+    if (g2 > 1) {
+      const reduced = intVals2.map(v => v / g2);
+      const allExact = reduced.every(v => Number.isInteger(v));
+      if (allExact) {
+        for (let i = 0; i < elKeys.length; i++) {
+          counts[elKeys[i]] = reduced[i];
+        }
       }
     }
   }
