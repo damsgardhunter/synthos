@@ -1,6 +1,7 @@
 import { getElementData } from "./elemental-data";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
+import { getMetalElements } from "./utils";
 
 export interface FastPressureEstimate {
   formula: string;
@@ -150,39 +151,78 @@ function parseFormulaCounts(formula: string): Record<string, number> {
 function estimateBulkModulus(formula: string): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
-  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
 
-  let B0 = 0;
-  let totalWeight = 0;
+  let weightedB = 0;
+  let totalCount = 0;
 
   for (const el of elements) {
     const data = getElementData(el);
     if (!data) continue;
-    const frac = (counts[el] || 1) / totalAtoms;
+    const n = counts[el] || 1;
     const elBulk = data.bulkModulus ?? 50;
-    B0 += elBulk * frac;
-    totalWeight += frac;
+    weightedB += elBulk * n;
+    totalCount += n;
   }
 
-  return totalWeight > 0 ? Math.max(10, B0 / totalWeight) : 50;
+  return totalCount > 0 ? Math.max(10, weightedB / totalCount) : 50;
 }
 
 function pressureCorrectedRadius(el: string, r0: number, pressureGpa: number): number {
   if (pressureGpa <= 100) return r0;
-  if (el === "H") {
-    const excessP = pressureGpa - 100;
-    const collapseScale = 1.0 / (1.0 + excessP * 0.003 + Math.pow(excessP / 300, 2) * 0.5);
-    return r0 * Math.max(0.35, collapseScale);
-  }
   const excessP = pressureGpa - 100;
+  if (el === "H") {
+    const logScale = 1.0 / (1.0 + 0.18 * Math.log(1 + excessP / 20));
+    const minR = 0.25;
+    return r0 * Math.max(minR, logScale);
+  }
   const scale = 1.0 / (1.0 + excessP * 0.001);
   return r0 * Math.max(0.55, scale);
+}
+
+function inferLatticeType(elements: string[], counts: Record<string, number>, totalAtoms: number): "fcc" | "bcc" | "hcp" | "cage" | "other" {
+  const metalEls = getMetalElements(elements);
+  const metalFrac = metalEls.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+  const hFrac = (counts["H"] || 0) / totalAtoms;
+  if (hFrac > 0.6) return "cage";
+  const FCC = new Set(["Cu", "Al", "Ni", "Ag", "Au", "Pt", "Pd", "Pb", "Ca", "Sr", "Rh", "Ir"]);
+  const HCP = new Set(["Ti", "Zr", "Hf", "Mg", "Zn", "Cd", "Co", "Ru", "Os", "Y", "Sc", "La"]);
+  if (metalFrac >= 0.9 && metalEls.length <= 2) {
+    const primary = metalEls.sort((a, b) => (counts[b] || 0) - (counts[a] || 0))[0];
+    if (FCC.has(primary)) return "fcc";
+    if (HCP.has(primary)) return "hcp";
+    return "bcc";
+  }
+  if (metalFrac > 0.5) return "bcc";
+  return "other";
+}
+
+function latticeVolPerAtom(r: number, latticeType: string): number {
+  switch (latticeType) {
+    case "fcc": {
+      const a = 2 * Math.SQRT2 * r;
+      return (a * a * a) / 4;
+    }
+    case "bcc": {
+      const a = (4 * r) / Math.sqrt(3);
+      return (a * a * a) / 2;
+    }
+    case "hcp": {
+      const a = 2 * r;
+      const c = a * 1.633;
+      return (Math.sqrt(3) / 2) * a * a * c / 2;
+    }
+    case "cage":
+      return Math.pow(2.8 * r, 3);
+    default:
+      return Math.pow(2.3 * r, 3);
+  }
 }
 
 function estimateReferenceVolume(formula: string, pressureGpa: number = 0): number {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const latticeType = inferLatticeType(elements, counts, totalAtoms);
 
   let V0 = 0;
   for (const el of elements) {
@@ -191,7 +231,7 @@ function estimateReferenceVolume(formula: string, pressureGpa: number = 0): numb
       V0 += Math.pow(data.latticeConstant, 3) * (counts[el] || 1);
     } else if (data) {
       const r = pressureCorrectedRadius(el, data.atomicRadius, pressureGpa);
-      V0 += Math.pow(r * 2.5, 3) * (counts[el] || 1);
+      V0 += latticeVolPerAtom(r, latticeType) * (counts[el] || 1);
     } else {
       V0 += 30 * (counts[el] || 1);
     }
