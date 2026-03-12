@@ -222,12 +222,17 @@ export function fastPressureScreen(
     estimatedTc = 0;
   }
 
-  const compressionFactor = 1 + pressureGpa * 0.002;
-  estimatedTc *= compressionFactor;
-
   const hFrac = (counts["H"] || 0) / totalAtoms;
-  if (hFrac > 0.5 && pressureGpa >= 100) {
-    estimatedTc *= 1 + (hFrac - 0.5) * pressureGpa * 0.001;
+  const isHydride = hFrac > 0.5;
+
+  const pOpt = isHydride ? 200 : 100;
+  const sigma = isHydride ? 150 : 80;
+  const domeFactor = Math.exp(-0.5 * Math.pow((pressureGpa - pOpt) / sigma, 2));
+  const pressureBoost = 1 + domeFactor * (isHydride ? 1.5 : 0.6);
+  estimatedTc *= pressureBoost;
+
+  if (isHydride && pressureGpa >= 100) {
+    estimatedTc *= 1 + (hFrac - 0.5) * domeFactor * 0.5;
   }
 
   const estimatedBandgap = Math.max(0, 1.5 - pressureGpa * 0.01 * vol.volumeRatio);
@@ -341,26 +346,42 @@ export function recordClusterDiscovery(
 
 function rebalanceClusterWeights(): void {
   const allAnalytics = CLUSTER_DEFS.map(def => getAnalytics(def.id, def.baseWeight));
-  const totalDiscoveries = allAnalytics.reduce((s, a) => s + a.discoveryCount, 0);
-  if (totalDiscoveries < 5) return;
+  const totalScreened = allAnalytics.reduce((s, a) => s + a.totalScreened, 0);
+  if (totalScreened < 10) return;
 
-  const avgHitRate = allAnalytics.reduce((s, a) => s + a.hitRate, 0) / allAnalytics.length;
+  const totalDiscoveries = allAnalytics.reduce((s, a) => s + a.discoveryCount, 0);
+  const useDiscoveryMode = totalDiscoveries >= 5;
 
   for (const def of CLUSTER_DEFS) {
     const analytics = getAnalytics(def.id, def.baseWeight);
     if (analytics.totalScreened < 3) continue;
 
-    const hitRateRatio = avgHitRate > 0 ? analytics.hitRate / avgHitRate : 1;
-    const tcBonus = analytics.bestTcFound > 77 ? 0.2 : 0;
+    if (useDiscoveryMode) {
+      const avgHitRate = allAnalytics.reduce((s, a) => s + a.hitRate, 0) / allAnalytics.length;
+      const hitRateRatio = avgHitRate > 0 ? analytics.hitRate / avgHitRate : 1;
+      const tcBonus = analytics.bestTcFound > 77 ? 0.2 : 0;
+      const rawWeight = 0.6 + hitRateRatio * 0.5 + tcBonus;
 
-    const rawWeight = 0.6 + hitRateRatio * 0.5 + tcBonus;
-
-    if (def.id === "ambient" || def.id === "low-moderate") {
-      analytics.weight = Math.max(0.8, Math.min(2.0, rawWeight * 1.2));
-    } else if (def.id === "extreme") {
-      analytics.weight = Math.max(0.3, Math.min(1.5, rawWeight * 0.7));
+      if (def.id === "ambient" || def.id === "low-moderate") {
+        analytics.weight = Math.max(0.8, Math.min(2.0, rawWeight * 1.2));
+      } else if (def.id === "extreme") {
+        analytics.weight = Math.max(0.3, Math.min(1.5, rawWeight * 0.7));
+      } else {
+        analytics.weight = Math.max(0.4, Math.min(2.0, rawWeight));
+      }
     } else {
-      analytics.weight = Math.max(0.4, Math.min(2.0, rawWeight));
+      const failRate = 1 - analytics.hitRate;
+      const explorationPenalty = failRate * Math.min(1.0, analytics.totalScreened / 20);
+      const uncertaintyBoost = analytics.totalScreened < 10 ? 0.3 : 0;
+      const rawWeight = def.baseWeight * (1 - explorationPenalty * 0.4) + uncertaintyBoost;
+
+      if (def.id === "ambient" || def.id === "low-moderate") {
+        analytics.weight = Math.max(0.6, Math.min(2.0, rawWeight));
+      } else if (def.id === "extreme") {
+        analytics.weight = Math.max(0.2, Math.min(1.5, rawWeight));
+      } else {
+        analytics.weight = Math.max(0.3, Math.min(2.0, rawWeight));
+      }
     }
   }
 }
@@ -377,13 +398,16 @@ export function getClusterExplorationBias(): Record<string, number> {
 
 export function samplePressureFromClusters(count: number = 10): number[] {
   const bias = getClusterExplorationBias();
-  const clusterIds = Object.keys(bias);
   const weights = Object.values(bias);
+
+  if (weights.length === 0) {
+    return Array.from({ length: count }, () => Math.round(Math.random() * 350));
+  }
 
   const samples: number[] = [];
   for (let i = 0; i < count; i++) {
     let r = Math.random();
-    let selectedIdx = 0;
+    let selectedIdx = weights.length - 1;
     for (let j = 0; j < weights.length; j++) {
       r -= weights[j];
       if (r <= 0) {
