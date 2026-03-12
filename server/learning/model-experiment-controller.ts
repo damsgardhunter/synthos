@@ -10,7 +10,7 @@ import { retrainXGBoostFromEvaluated, registerHyperparamResolver } from "./gradi
 import { trainLambdaRegressor } from "./lambda-regressor";
 import { trainPhononSurrogate } from "../physics/phonon-surrogate";
 import { retrainTBSurrogate } from "../physics/tb-ml-surrogate";
-import { enableBuiltinFeature, selectArchitecture } from "./model-llm-controller";
+import { enableBuiltinFeature, selectArchitecture, getAvailableFeatureDefinitions, getActiveCustomFeatures } from "./model-llm-controller";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -131,6 +131,39 @@ function repairTruncatedJSONArray(raw: string): any[] | null {
   }
 }
 
+function buildFeatureContext(): string {
+  const available = getAvailableFeatureDefinitions();
+  const active = getActiveCustomFeatures();
+  const activeNames = new Set(active.map(f => f.name));
+  const enabledList = available.filter(f => activeNames.has(f.name));
+  const disabledList = available.filter(f => !activeNames.has(f.name));
+  const lines: string[] = [];
+  if (disabledList.length > 0) {
+    lines.push("Currently DISABLED (can be enabled via add_features):");
+    for (const f of disabledList) lines.push(`  ${f.name}: ${f.description}`);
+  }
+  if (enabledList.length > 0) {
+    lines.push("Currently ENABLED:");
+    for (const f of enabledList) lines.push(`  ${f.name}: ${f.description}`);
+  }
+  return lines.join("\n");
+}
+
+function buildFamilyArchitectureContext(diagnostics: ComprehensiveModelDiagnostics): string {
+  const lines: string[] = [];
+  lines.push("Architecture guidance by family (use familyBias and error data to decide):");
+  lines.push("  Hydrides: Eliashberg-mapped physics — GNN effective even with small data if graph features available; XGBoost needs explicit pressure features");
+  lines.push("  Cuprates: Unconventional pairing — XGBoost with physical descriptors safer (d-wave, nesting, Mott proximity); GNN may overfit without domain features");
+  lines.push("  Pnictides: Multi-band physics — ensemble (XGBoost+GNN) recommended; single model misses cross-band coupling");
+  lines.push("  Borides: Sparse data, conventional-adjacent — XGBoost preferred; ensure phonon features are weighted");
+  lines.push("  Conventional: Well-understood BCS — either model works, prioritize phonon and lambda features");
+  const datasetSize = diagnostics.xgboost.datasetSize;
+  if (datasetSize < 100) lines.push(`  Current dataset (${datasetSize} samples): Small — prefer XGBoost unless hydride-focused`);
+  else if (datasetSize < 500) lines.push(`  Current dataset (${datasetSize} samples): Medium — XGBoost with larger ensemble, or begin GNN if graph data available`);
+  else lines.push(`  Current dataset (${datasetSize} samples): Large — GNN or weighted ensemble viable`);
+  return lines.join("\n");
+}
+
 const MAX_EXPERIMENT_RECORDS = 50;
 const MAX_DATA_REQUESTS = 30;
 let experimentRecords: ExperimentRecord[] = [];
@@ -206,6 +239,9 @@ export async function proposeModelExperiments(diagnosticsReport?: string): Promi
   const report = diagnosticsReport ?? getModelDiagnosticsForLLM();
 
   try {
+    const currentDiagnostics = getComprehensiveModelDiagnostics();
+    const featureContext = buildFeatureContext();
+    const archContext = buildFamilyArchitectureContext(currentDiagnostics);
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.4,
@@ -229,12 +265,11 @@ Each experiment must be one of these types:
   tb-surrogate: nTrees (10-200), learningRate (0.01-0.2), maxDepth (3-10)
   Example: {"model": "lambda-regressor", "learning_rate": 0.0005, "layers": 5, "dropout": 0.2}
 - expand_dataset: Add more training data from available sources
-- add_features: Enable computed features like van_hove_distance, lambda_over_omega, effective_coupling_strength, dos_lambda_product, etc.
+- add_features: Enable computed features from the available list below. ONLY use feature names from this list.
   Use changes like {"enable_features": ["van_hove_distance", "dos_lambda_product"]}
-- adjust_architecture: Select between model architectures based on dataset size:
-  dataset < 100: use xgboost (gradient boosting works better with small data)
-  dataset 100-500: use xgboost with larger ensemble
-  dataset > 500 with graph data: consider gnn or ensemble weighting
+  ${featureContext}
+- adjust_architecture: Select model architecture based on family composition and dataset characteristics.
+  ${archContext}
   Use changes like {"primary_model": "xgboost", "ensemble_weights": {"xgboost": 0.7, "gnn": 0.3}}
 - recalibrate_uncertainty: Adjust uncertainty scaling
 - rebalance_training: Adjust sampling ratios for different material families
@@ -394,13 +429,22 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
 
     if (experiment.experiment_type === "add_features") {
       const featuresToEnable: string[] = experiment.changes.enable_features ?? [];
+      const availableNames = new Set(getAvailableFeatureDefinitions().map(f => f.name));
       let enabled = 0;
+      const rejected: string[] = [];
       for (const featureName of featuresToEnable) {
+        if (!availableNames.has(featureName)) {
+          rejected.push(featureName);
+          continue;
+        }
         if (enableBuiltinFeature(featureName)) {
           enabled++;
         }
       }
-      console.log(`[Model Experiment Controller] Enabled ${enabled}/${featuresToEnable.length} computed features`);
+      if (rejected.length > 0) {
+        console.log(`[Model Experiment Controller] Rejected unknown features: ${rejected.join(", ")}`);
+      }
+      console.log(`[Model Experiment Controller] Enabled ${enabled}/${featuresToEnable.length} computed features (${rejected.length} rejected as unknown)`);
     }
 
     if (experiment.experiment_type === "adjust_architecture") {
