@@ -42,6 +42,7 @@ interface ParsedComposition {
   counts: Record<string, number>;
   totalAtoms: number;
   metalElements: string[];
+  vec: number;
 }
 
 function parseComposition(formula: string): ParsedComposition {
@@ -49,7 +50,8 @@ function parseComposition(formula: string): ParsedComposition {
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
   const metalElements = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
-  return { elements, counts, totalAtoms, metalElements };
+  const vec = getVEC(elements, counts);
+  return { elements, counts, totalAtoms, metalElements, vec };
 }
 
 function computePhysicsDerivedBonusParsed(pc: ParsedComposition, lambda: number): number {
@@ -2501,15 +2503,7 @@ export function evaluateCompetingPhases(
     });
   }
 
-  const vec = (() => {
-    let totalVE = 0;
-    const totalAtoms = getTotalAtoms(counts);
-    for (const el of elements) {
-      const data = getElementData(el);
-      if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
-    }
-    return totalVE / totalAtoms;
-  })();
+  const vec = getVEC(elements, counts);
 
   const hasTM = elements.some(e => isTransitionMetal(e));
   if (hasTM && vec > 4 && vec < 7 && electronicStructure.fermiSurfaceTopology.includes("nesting")) {
@@ -2732,7 +2726,7 @@ export function computeCriticalFields(
   }
 
   return {
-    upperCriticalField: Number(upperCriticalField.toFixed(2)),
+    upperCriticalField: Number(upperCriticalField.toFixed(4)),
     lowerCriticalField: Number(lowerCriticalField.toFixed(4)),
     coherenceLength: Number(coherenceLength.toFixed(1)),
     londonPenetrationDepth: Number(londonPenetrationDepth.toFixed(1)),
@@ -2959,12 +2953,7 @@ export function computeNestingFunction(
     { label: "(π/2,π/2)", q: [0.25, 0.25, 0] },
   ];
 
-  let totalVE = 0;
-  for (const el of elements) {
-    const data = getElementData(el);
-    if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
-  }
-  const vec = totalVE / totalAtoms;
+  const vec = getVEC(elements, counts);
 
   const kF = Math.pow(3 * Math.PI * Math.PI * Math.max(vec, 0.5), 1 / 3) * 0.5;
 
@@ -3819,13 +3808,20 @@ export async function runFullPhysicsAnalysis(
   const hydrideBypassCDW = isHydrideForCDW && coupling.lambda > 1.5 && (phononSpectrum.debyeTemperature ?? 0) > 1000;
   if (instabilityProximity.cdwInstability > 0.5 && !hydrideBypassCDW) {
     const cdwOnset = Math.min(1.0, (instabilityProximity.cdwInstability - 0.5) / 0.5);
-    const cdwPenalty = Math.max(0.05, 1.0 - cdwOnset * 0.6);
-    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty);
+    let cdwPenalty = Math.max(0.05, 1.0 - cdwOnset * 0.6);
+
+    const cdwPhase = competingPhases.find(p => p.type === "CDW" && p.transitionTemp != null);
+    if (cdwPhase && cdwPhase.transitionTemp != null && cdwPhase.transitionTemp > eliashberg.predictedTc) {
+      const tRatio = Math.min(3.0, cdwPhase.transitionTemp / Math.max(1, eliashberg.predictedTc));
+      cdwPenalty *= Math.max(0.1, 1.0 - (tRatio - 1.0) * 0.25);
+    }
+
+    eliashberg.predictedTc = Math.round(eliashberg.predictedTc * cdwPenalty * 10) / 10;
     eliashberg.confidenceBand = [0, Math.round(eliashberg.predictedTc * 2)];
     emit("log", {
       phase: "phase-10",
       event: "CDW suppression applied",
-      detail: `${formula}: CDW=${instabilityProximity.cdwInstability.toFixed(2)}, lambda=${coupling.lambda.toFixed(3)} — SC suppressed by charge ordering (Tc penalized by ${((1 - cdwPenalty) * 100).toFixed(0)}%)`,
+      detail: `${formula}: CDW=${instabilityProximity.cdwInstability.toFixed(2)}, lambda=${coupling.lambda.toFixed(3)}${cdwPhase?.transitionTemp ? `, T_CDW=${cdwPhase.transitionTemp}K` : ""} — SC suppressed by charge ordering (Tc penalized by ${((1 - cdwPenalty) * 100).toFixed(0)}%)`,
       dataSource: "Physics Engine",
     });
   }
