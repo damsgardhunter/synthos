@@ -1248,6 +1248,7 @@ export class RLChemicalSpaceAgent {
         const key = this.makeElementPairKey(el, partner);
         const pairBias = this.policy.elementPairSpecific.get(key) ?? 0;
         w += pairBias;
+        w = Math.max(0.1, w);
       }
       const pairStats = this.pairSuccessRates;
       for (const partner of partnerElements) {
@@ -1256,9 +1257,10 @@ export class RLChemicalSpaceAgent {
         if (stats && stats.total >= 3) {
           const successRate = stats.successes / stats.total;
           w += (successRate - 0.3) * 0.5;
+          w = Math.max(0.1, w);
         }
       }
-      weights.set(el, Math.max(0.1, w));
+      weights.set(el, w);
     }
     return weights;
   }
@@ -1269,18 +1271,25 @@ export class RLChemicalSpaceAgent {
   ): string {
     if (elements.length === 0) return "Fe";
     if (elements.length === 1) return elements[0];
+    const ws: number[] = new Array(elements.length);
     let totalWeight = 0;
-    for (const el of elements) {
-      totalWeight += weights.get(el) ?? 1.0;
+    for (let i = 0; i < elements.length; i++) {
+      ws[i] = weights.get(elements[i]) ?? 1.0;
+      totalWeight += ws[i];
     }
     if (totalWeight <= 0 || !Number.isFinite(totalWeight)) {
       return elements[Math.floor(Math.random() * elements.length)];
     }
-    let r = Math.random() * totalWeight;
-    for (const el of elements) {
-      const w = weights.get(el) ?? 1.0;
-      r -= w;
-      if (r <= 0) return el;
+    const cumulative = new Float64Array(elements.length);
+    let sum = 0;
+    for (let i = 0; i < elements.length; i++) {
+      sum += ws[i] / totalWeight;
+      cumulative[i] = sum;
+    }
+    cumulative[elements.length - 1] = 1.0;
+    const r = Math.random();
+    for (let i = 0; i < elements.length; i++) {
+      if (r <= cumulative[i]) return elements[i];
     }
     return elements[elements.length - 1];
   }
@@ -1306,7 +1315,7 @@ export class RLChemicalSpaceAgent {
     const tcNorm = Math.min(1, safeTc / 400);
     let tcScore = tcNorm * 2.0;
     if (safeTc > safeBestBefore) {
-      const improvement = Math.min(5.0, (safeTc - safeBestBefore) / Math.max(1, safeBestBefore));
+      const improvement = Math.min(1.0, (safeTc - safeBestBefore) / Math.max(10, safeBestBefore));
       tcScore += improvement * 3.0;
     }
     if (pipelinePassed) {
