@@ -198,6 +198,7 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
   let lambda = 0;
   let omegaLog = 0;
   let nqPoints = 0;
+  let hasImaginaryModes = false;
 
   const lines = content.trim().split("\n");
 
@@ -227,11 +228,26 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     if (parts.length >= 2) {
       const freq = parseFloat(parts[0]);
       const a2f = parseFloat(parts[1]);
-      if (Number.isFinite(freq) && Number.isFinite(a2f) && freq >= 0) {
-        frequencies.push(freq);
-        alpha2F.push(Math.max(0, a2f));
+      if (!Number.isFinite(freq) || !Number.isFinite(a2f)) continue;
+      if (freq < 0) {
+        hasImaginaryModes = true;
+        continue;
       }
+      frequencies.push(freq);
+      alpha2F.push(Math.max(0, a2f));
     }
+  }
+
+  if (hasImaginaryModes) {
+    return {
+      frequencies,
+      alpha2F,
+      lambda: 0,
+      omegaLog: 0,
+      nqPoints,
+      source: frequencies.length > 0 ? "lambda.x" : "reconstructed",
+      unstableStructure: true,
+    };
   }
 
   const minLen = Math.min(frequencies.length, alpha2F.length);
@@ -277,7 +293,9 @@ export function parseLambdaOutput(stdout: string): {
   lambda: number;
   omegaLog: number;
   tc: number[];
+  tcCorrected: number[];
   muStarValues: number[];
+  strongCoupling: boolean;
 } {
   let lambda = 0;
   let omegaLog = 0;
@@ -305,11 +323,33 @@ export function parseLambdaOutput(stdout: string): {
     }
   }
 
+  const strongCoupling = lambda > 1.5;
+  const tcCorrected: number[] = [];
+
+  if (strongCoupling && omegaLog > 0) {
+    const CM1_TO_K = 1.4388;
+    const omegaLogK = omegaLog * CM1_TO_K;
+    const lambdaBar = 2.46 * (1 + 3.8 * 0.13);
+    const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
+
+    for (const muStar of muStarValues) {
+      const denom = lambda - muStar * (1 + 0.62 * lambda);
+      if (denom <= 0) { tcCorrected.push(0); continue; }
+      const exponent = -1.04 * (1 + lambda) / denom;
+      if (exponent < -50) { tcCorrected.push(0); continue; }
+      let tcAD = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+      tcAD = Math.max(0, Math.min(500, tcAD));
+      tcCorrected.push(Number(tcAD.toFixed(2)));
+    }
+  }
+
   return {
     lambda: Number(lambda.toFixed(4)),
     omegaLog: Number(omegaLog.toFixed(2)),
     tc,
+    tcCorrected: strongCoupling ? tcCorrected : tc,
     muStarValues,
+    strongCoupling,
   };
 }
 
