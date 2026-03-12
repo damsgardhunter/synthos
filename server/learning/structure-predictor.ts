@@ -29,8 +29,28 @@ export interface StructurePrediction {
   synthesisNotes: string;
 }
 
+const SG_NUMBER_TO_HM: Record<string, string> = {
+  "221": "Pm-3m", "225": "Fm-3m", "229": "Im-3m", "227": "Fd-3m",
+  "223": "Pm-3n", "204": "Im-3", "148": "R-3", "166": "R-3m",
+  "139": "I4/mmm", "129": "P4/nmm", "123": "P4/mmm", "47": "Pmmm",
+  "191": "P6/mmm", "194": "P6_3/mmc", "186": "P6_3mc", "164": "P-3m1",
+  "187": "P-6m2", "136": "P4_2/mnm", "140": "I4/mcm", "220": "I-43d",
+  "216": "F-43m", "205": "Pa-3",
+};
+
+export function normalizeSpaceGroup(sg: string): string {
+  if (!sg) return sg;
+  const trimmed = sg.trim();
+  if (SG_NUMBER_TO_HM[trimmed]) return SG_NUMBER_TO_HM[trimmed];
+  return trimmed
+    .replace(/P63\/mmc/g, "P6_3/mmc")
+    .replace(/P63mc/g, "P6_3mc")
+    .replace(/P42\/mnm/g, "P4_2/mnm");
+}
+
 const KNOWN_PROTOTYPES: Record<string, { spaceGroup: string; crystalSystem: string; prototype: string; dimensionality: string }> = {
   "perovskite": { spaceGroup: "Pm-3m", crystalSystem: "cubic", prototype: "CaTiO3", dimensionality: "3D" },
+  "anti-perovskite": { spaceGroup: "Pm-3m", crystalSystem: "cubic", prototype: "Li3OBr", dimensionality: "3D" },
   "cuprate": { spaceGroup: "I4/mmm", crystalSystem: "tetragonal", prototype: "La2CuO4", dimensionality: "quasi-2D" },
   "YBCO": { spaceGroup: "Pmmm", crystalSystem: "orthorhombic", prototype: "YBa2Cu3O7", dimensionality: "quasi-2D" },
   "rocksalt": { spaceGroup: "Fm-3m", crystalSystem: "cubic", prototype: "NaCl", dimensionality: "3D" },
@@ -44,14 +64,25 @@ const KNOWN_PROTOTYPES: Record<string, { spaceGroup: string; crystalSystem: stri
   "sodalite": { spaceGroup: "Im-3m", crystalSystem: "cubic", prototype: "LaH10", dimensionality: "3D" },
   "Laves": { spaceGroup: "Fd-3m", crystalSystem: "cubic", prototype: "MgCu2", dimensionality: "3D" },
   "diamond": { spaceGroup: "Fd-3m", crystalSystem: "cubic", prototype: "C", dimensionality: "3D" },
-  "graphite": { spaceGroup: "P63/mmc", crystalSystem: "hexagonal", prototype: "C", dimensionality: "2D" },
+  "graphite": { spaceGroup: "P6_3/mmc", crystalSystem: "hexagonal", prototype: "C", dimensionality: "2D" },
   "bismuth-selenide": { spaceGroup: "R-3m", crystalSystem: "rhombohedral", prototype: "Bi2Se3", dimensionality: "2D" },
   "Heusler": { spaceGroup: "Fm-3m", crystalSystem: "cubic", prototype: "Cu2MnAl", dimensionality: "3D" },
+  "half-Heusler": { spaceGroup: "F-43m", crystalSystem: "cubic", prototype: "LiAlSi", dimensionality: "3D" },
   "Skutterudite": { spaceGroup: "Im-3", crystalSystem: "cubic", prototype: "CoSb3", dimensionality: "3D" },
   "Chevrel": { spaceGroup: "R-3", crystalSystem: "rhombohedral", prototype: "PbMo6S8", dimensionality: "3D" },
   "K2NiF4": { spaceGroup: "I4/mmm", crystalSystem: "tetragonal", prototype: "K2NiF4", dimensionality: "quasi-2D" },
   "infinite-layer": { spaceGroup: "P4/mmm", crystalSystem: "tetragonal", prototype: "NdNiO2", dimensionality: "quasi-2D" },
   "Pyrochlore": { spaceGroup: "Fd-3m", crystalSystem: "cubic", prototype: "Cd2Re2O7", dimensionality: "3D" },
+  "T-prime": { spaceGroup: "P4/nmm", crystalSystem: "tetragonal", prototype: "Nd2CuO4", dimensionality: "quasi-2D" },
+  "1111-Type": { spaceGroup: "P4/nmm", crystalSystem: "tetragonal", prototype: "LaFeAsO", dimensionality: "quasi-2D" },
+  "CaBe2Ge2": { spaceGroup: "P4/nmm", crystalSystem: "tetragonal", prototype: "CaBe2Ge2", dimensionality: "quasi-2D" },
+  "BiS2-type": { spaceGroup: "P4/nmm", crystalSystem: "tetragonal", prototype: "LaOBiS2", dimensionality: "quasi-2D" },
+  "FeSe-11": { spaceGroup: "P4/nmm", crystalSystem: "tetragonal", prototype: "FeSe", dimensionality: "quasi-2D" },
+  "MX2": { spaceGroup: "P-3m1", crystalSystem: "hexagonal", prototype: "MoS2", dimensionality: "2D" },
+  "rutile": { spaceGroup: "P4_2/mnm", crystalSystem: "tetragonal", prototype: "TiO2", dimensionality: "3D" },
+  "pyrite": { spaceGroup: "Pa-3", crystalSystem: "cubic", prototype: "FeS2", dimensionality: "3D" },
+  "wurtzite": { spaceGroup: "P6_3mc", crystalSystem: "hexagonal", prototype: "ZnS", dimensionality: "3D" },
+  "NiAs": { spaceGroup: "P6_3/mmc", crystalSystem: "hexagonal", prototype: "NiAs", dimensionality: "3D" },
 };
 
 function parseFormulaElements(formula: string): string[] {
@@ -243,18 +274,21 @@ function estimateDecompositionEnergy(formula: string): number {
   return Math.max(0, decomp);
 }
 
-export async function evaluateConvexHullStability(
-  decompositionEnergy: number,
-  formula?: string
-): Promise<{
+export interface ConvexHullStabilityResult {
   isStable: boolean;
   isMetastable: boolean;
   verdict: string;
   formationEnergy: number;
   hullDistance: number;
   source: string;
+  confidence: number;
   mpNoveltySignal?: boolean;
-}> {
+}
+
+export async function evaluateConvexHullStability(
+  decompositionEnergy: number,
+  formula?: string
+): Promise<ConvexHullStabilityResult> {
   let mpNoveltySignal = false;
   if (formula) {
     try {
@@ -283,6 +317,7 @@ export async function evaluateConvexHullStability(
           formationEnergy: formE,
           hullDistance: eAboveHull,
           source: "Materials Project",
+          confidence: 1.0,
         };
       } else {
         mpNoveltySignal = true;
@@ -329,6 +364,7 @@ export async function evaluateConvexHullStability(
         formationEnergy: miedemaFormE,
         hullDistance: eAboveHull,
         source: "Convex Hull Engine",
+        confidence: 0.7,
         mpNoveltySignal,
       };
     } catch {
@@ -357,6 +393,7 @@ export async function evaluateConvexHullStability(
         formationEnergy: miedemaFormE,
         hullDistance: effectiveDecomp,
         source: "Miedema model",
+        confidence: 0.3,
         mpNoveltySignal,
       };
     }
@@ -383,6 +420,7 @@ export async function evaluateConvexHullStability(
     formationEnergy: -decompositionEnergy,
     hullDistance: decompositionEnergy,
     source: "decomposition energy input",
+    confidence: 0.2,
   };
 }
 
@@ -1188,7 +1226,8 @@ function computePrototypeNoveltyScore(
 
   let score = 0;
 
-  if (!knownSGs.has(spaceGroup)) {
+  const normalizedSG = normalizeSpaceGroup(spaceGroup);
+  if (!knownSGs.has(normalizedSG)) {
     score += 0.4;
   } else {
     score += 0.1;
@@ -1309,8 +1348,9 @@ Return JSON with these fields. Be creative but physically grounded.`,
     const latticeRatios = { a: latticeA, b: latticeB, c: latticeC };
     const noveltyScore = computePrototypeNoveltyScore(validSG, crystalSystem, dimensionality, latticeRatios);
 
+    const normalizedValidSG = normalizeSpaceGroup(validSG);
     const isKnownDuplicate = Object.values(KNOWN_PROTOTYPES).some(
-      p => p.spaceGroup === validSG && p.crystalSystem === crystalSystem && p.dimensionality === dimensionality
+      p => p.spaceGroup === normalizedValidSG && p.crystalSystem === crystalSystem && p.dimensionality === dimensionality
     );
 
     if (isKnownDuplicate) {
