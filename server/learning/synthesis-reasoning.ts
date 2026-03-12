@@ -616,11 +616,50 @@ function createReactiveMillingRoute(formula: string, landscape: ThermodynamicLan
   };
 }
 
+const METHOD_STOP_WORDS = new Set(["with", "and", "the", "of", "in", "for", "a", "an", "via", "by", "from"]);
+
+function normalizeMethodTokens(method: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of method.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)) {
+    if (raw.length >= 3 && !METHOD_STOP_WORDS.has(raw)) {
+      tokens.add(raw);
+    }
+  }
+  return tokens;
+}
+
+function methodTokenSimilarity(a: string, b: string): number {
+  const tokA = normalizeMethodTokens(a);
+  const tokB = normalizeMethodTokens(b);
+  if (tokA.size === 0 || tokB.size === 0) return 0;
+  let overlap = 0;
+  for (const t of tokA) {
+    if (tokB.has(t)) overlap++;
+  }
+  return overlap / Math.max(tokA.size, tokB.size);
+}
+
+const elementParseCache = new Map<string, string[]>();
+const ELEMENT_CACHE_MAX = 500;
+
+function getCachedElements(formula: string): string[] {
+  let result = elementParseCache.get(formula);
+  if (result) return result;
+  result = parseFormulaElements(formula);
+  if (elementParseCache.size >= ELEMENT_CACHE_MAX) {
+    const firstKey = elementParseCache.keys().next().value;
+    if (firstKey !== undefined) elementParseCache.delete(firstKey);
+  }
+  elementParseCache.set(formula, result);
+  return result;
+}
+
 export async function learnFromReactionDatabase(formula: string): Promise<{
   similarRoutes: { formula: string; method: string; conditions: any; relevance: number }[];
   conditionTemplates: { tempRange: string; pressureRange: string; atmosphere: string; method: string }[];
 }> {
-  const elements = parseFormulaElements(formula);
+  const elements = getCachedElements(formula);
+  const elementSet = new Set(elements);
 
   const allReactions = await storage.getChemicalReactions(100);
   const allSynthesis = await storage.getSynthesisProcesses(100);
@@ -629,8 +668,11 @@ export async function learnFromReactionDatabase(formula: string): Promise<{
 
   for (const syn of allSynthesis) {
     if (!syn.formula) continue;
-    const synElements = parseFormulaElements(syn.formula);
-    const overlap = elements.filter(e => synElements.includes(e)).length;
+    const synElements = getCachedElements(syn.formula);
+    let overlap = 0;
+    for (const e of synElements) {
+      if (elementSet.has(e)) overlap++;
+    }
     const relevance = overlap / Math.max(elements.length, synElements.length);
     if (relevance >= 0.4) {
       similarRoutes.push({
@@ -674,7 +716,7 @@ export async function runSynthesisReasoning(
 
     for (const route of routes) {
       const matchingTemplates = dbKnowledge.conditionTemplates.filter(t =>
-        t.method.toLowerCase().includes(route.method.split(":")[0].toLowerCase().trim().split(" ")[0])
+        methodTokenSimilarity(route.method, t.method) >= 0.5
       );
       if (matchingTemplates.length > 0) {
         route.synthesisConfidence = route.synthesisConfidence === "low" ? "medium" : "high";
