@@ -1090,6 +1090,12 @@ export class RLChemicalSpaceAgent {
     }
   }
 
+  private _noveltyFilter: ((formulas: string[]) => string[]) | null = null;
+
+  setNoveltyFilter(fn: (formulas: string[]) => string[]): void {
+    this._noveltyFilter = fn;
+  }
+
   generateCandidatesFromAction(action: RLAction, count: number = 20): string[] {
     const group1 = ELEMENT_GROUPS[action.elementGroup1];
     const group2 = ELEMENT_GROUPS[action.elementGroup2];
@@ -1116,11 +1122,12 @@ export class RLChemicalSpaceAgent {
       const pattern = template.pattern;
 
       if (hDensity.ratio >= 4 && !pattern.includes("H")) {
-        const hCount = Math.min(hDensity.ratio, 6);
+        const aCoeff = extractLeadingCoeff(pattern);
+        const hCount = Math.min(hDensity.ratio * aCoeff, 12);
         if (template.nElements === 2) {
-          formula = `${el1}H${hCount}`;
+          formula = aCoeff > 1 ? `${el1}${aCoeff}H${hCount}` : `${el1}H${hCount}`;
         } else {
-          formula = `${el1}${el2}H${hCount}`;
+          formula = aCoeff > 1 ? `${el1}${aCoeff}${el2}H${hCount}` : `${el1}${el2}H${hCount}`;
         }
       } else if (template.nElements === 2) {
         formula = applyBinaryPattern(el1, el2, pattern);
@@ -1140,9 +1147,20 @@ export class RLChemicalSpaceAgent {
         const g3 = ELEMENT_GROUPS[thirdGroupIdx];
         const fourthGroupIdx = selectThirdGroupByOrbital(orbConfig.orbital, Math.max(1, vecTarget.vec - 2));
         const g4 = ELEMENT_GROUPS[fourthGroupIdx];
-        const el3 = this.sampleWeightedElement(this.getWeightedElements(g3.elements, group1.elements), g3.elements);
-        const el4 = this.sampleWeightedElement(this.getWeightedElements(g4.elements, group2.elements), g4.elements);
-        if (new Set([el1, el2, el3, el4]).size < 4) continue;
+        const w3 = this.getWeightedElements(g3.elements, group1.elements);
+        const w4 = this.getWeightedElements(g4.elements, group2.elements);
+        let el3 = "";
+        let el4 = "";
+        let uniqueFound = false;
+        for (let uAttempt = 0; uAttempt < 10; uAttempt++) {
+          el3 = this.sampleWeightedElement(w3, g3.elements);
+          el4 = this.sampleWeightedElement(w4, g4.elements);
+          if (new Set([el1, el2, el3, el4]).size === 4) {
+            uniqueFound = true;
+            break;
+          }
+        }
+        if (!uniqueFound) continue;
         formula = `${el1}${el2}${el3}${el4}`;
       }
 
@@ -1173,15 +1191,14 @@ export class RLChemicalSpaceAgent {
       }
     }
 
-    try {
-      const { getAlreadyScreenedFormulas } = require("./engine");
-      const { normalizeFormula } = require("./utils");
-      const screened = getAlreadyScreenedFormulas();
-      const novel = candidates.filter(f => !screened.has(normalizeFormula(f)));
-      if (novel.length > 0) {
-        return novel;
-      }
-    } catch {}
+    if (this._noveltyFilter) {
+      try {
+        const novel = this._noveltyFilter(candidates);
+        if (novel.length > 0) {
+          return novel;
+        }
+      } catch {}
+    }
 
     return candidates;
   }
@@ -1532,6 +1549,11 @@ function selectThirdGroupByOrbital(orbitalPref: string, vecTarget: number): numb
     default:
       return Math.floor(Math.random() * ELEMENT_GROUPS.length);
   }
+}
+
+function extractLeadingCoeff(pattern: string): number {
+  const match = pattern.match(/^A(\d+)/);
+  return match ? parseInt(match[1], 10) : 1;
 }
 
 function applyBinaryPattern(el1: string, el2: string, pattern: string): string {

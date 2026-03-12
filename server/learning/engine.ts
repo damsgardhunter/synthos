@@ -642,6 +642,10 @@ export function getAlreadyScreenedFormulas(): Set<string> {
   return alreadyScreenedFormulas;
 }
 
+rlAgent.setNoveltyFilter((formulas: string[]) => {
+  return formulas.filter(f => !alreadyScreenedFormulas.has(normalizeFormula(f)));
+});
+
 const KNOWN_COMPOUNDS_RAW = [
   "MgB2", "NbTi", "Nb3Sn", "Nb3Ge", "Nb3Al", "NbN", "NbC", "V3Si", "V3Ga",
   "YBa2Cu3O7", "Bi2Sr2CaCu2O8", "Bi2Sr2Ca2Cu3O10", "Tl2Ba2CaCu2O8",
