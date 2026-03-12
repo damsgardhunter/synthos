@@ -29,6 +29,13 @@ export type ExperimentType =
 
 export type ExperimentStatus = "proposed" | "running" | "completed" | "failed";
 
+export interface TechnicalRequirement {
+  type: "data_need" | "feature_gap" | "architecture_change";
+  family?: string;
+  detail: string;
+  urgency: "low" | "medium" | "high";
+}
+
 export interface ExperimentProposal {
   model_target: string;
   experiment_type: ExperimentType;
@@ -36,6 +43,7 @@ export interface ExperimentProposal {
   reasoning: string;
   expected_improvement: string;
   priority: number;
+  technicalRequirements?: TechnicalRequirement[];
 }
 
 export interface ExperimentRecord {
@@ -129,6 +137,140 @@ function repairTruncatedJSONArray(raw: string): any[] | null {
   } catch {
     return null;
   }
+}
+
+const HYPERPARAM_RANGES: Record<string, Record<string, [number, number]>> = {
+  xgboost: {
+    nTrees: [10, 500], learningRate: [0.001, 0.3], maxDepth: [3, 12],
+    minSamples: [2, 32], ensembleSize: [1, 10], bootstrapRatio: [0.5, 1.0],
+  },
+  gnn: {
+    layerCount: [2, 8], learningRate: [0.0001, 0.01], dropoutRate: [0, 0.5],
+    epochs: [5, 50], ensembleSize: [1, 8],
+  },
+  "lambda-regressor": {
+    learningRate: [0.0001, 0.01], layerCount: [2, 8], dropoutRate: [0, 0.5],
+    regularizationL2: [0.0001, 0.1],
+  },
+  "phonon-surrogate": { nTrees: [10, 200], learningRate: [0.01, 0.2], maxDepth: [3, 10] },
+  "tb-surrogate": { nTrees: [10, 200], learningRate: [0.01, 0.2], maxDepth: [3, 10] },
+};
+
+const HYPERPARAM_ALIASES: Record<string, string> = {
+  learning_rate: "learningRate", lr: "learningRate",
+  n_trees: "nTrees", num_trees: "nTrees", trees: "nTrees",
+  max_depth: "maxDepth", depth: "maxDepth",
+  min_samples: "minSamples",
+  ensemble_size: "ensembleSize",
+  dropout: "dropoutRate", dropout_rate: "dropoutRate",
+  layers: "layerCount", layer_count: "layerCount", num_layers: "layerCount",
+  regularization: "regularizationL2", l2: "regularizationL2", regularization_l2: "regularizationL2",
+  batch_size: "batchSize",
+  bootstrap_ratio: "bootstrapRatio",
+};
+
+function clampHyperparameters(modelTarget: string, changes: Record<string, any>): { clamped: Record<string, any>; warnings: string[] } {
+  const ranges = HYPERPARAM_RANGES[modelTarget];
+  if (!ranges) return { clamped: { ...changes }, warnings: [] };
+  const clamped: Record<string, any> = {};
+  const warnings: string[] = [];
+  for (const [rawKey, val] of Object.entries(changes)) {
+    const canonKey = HYPERPARAM_ALIASES[rawKey] ?? rawKey;
+    const range = ranges[canonKey];
+    if (range && typeof val === "number") {
+      const [lo, hi] = range;
+      if (val < lo || val > hi) {
+        warnings.push(`${rawKey}=${val} clamped to [${lo},${hi}]`);
+        clamped[canonKey] = Math.max(lo, Math.min(hi, val));
+      } else {
+        clamped[canonKey] = val;
+      }
+    } else {
+      clamped[rawKey] = val;
+    }
+  }
+  return { clamped, warnings };
+}
+
+function isDuplicateExperiment(proposal: ExperimentProposal): boolean {
+  const recentWindow = experimentRecords.slice(-5);
+  for (const past of recentWindow) {
+    if (past.target_model !== proposal.model_target) continue;
+    if (past.type !== proposal.experiment_type) continue;
+    if (past.status === "completed" && Object.values(past.improvement).every(v => Math.abs(v) < 0.001)) {
+      if (changesMatch(past.changes, proposal.changes)) return true;
+    }
+    if (past.status === "failed") {
+      if (changesMatch(past.changes, proposal.changes)) return true;
+    }
+    if (past.status === "running") {
+      if (changesMatch(past.changes, proposal.changes)) return true;
+    }
+  }
+  return false;
+}
+
+function changesMatch(a: Record<string, any>, b: Record<string, any>): boolean {
+  const keysA = Object.keys(a).sort();
+  const keysB = Object.keys(b).sort();
+  if (keysA.length !== keysB.length) return false;
+  for (let i = 0; i < keysA.length; i++) {
+    if (keysA[i] !== keysB[i]) return false;
+    const va = a[keysA[i]], vb = b[keysB[i]];
+    if (typeof va === "number" && typeof vb === "number") {
+      if (Math.abs(va - vb) > 0.0001) return false;
+    } else if (JSON.stringify(va) !== JSON.stringify(vb)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function extractTechnicalRequirements(proposal: ExperimentProposal): TechnicalRequirement[] {
+  const reqs: TechnicalRequirement[] = [];
+  if (proposal.experiment_type === "request_data") {
+    const family = proposal.changes.family ?? "unknown";
+    const count = proposal.changes.count ?? 20;
+    reqs.push({
+      type: "data_need",
+      family,
+      detail: `Model requires ${count} more ${family} training samples via ${proposal.changes.method ?? "tb_evaluation"}`,
+      urgency: count >= 40 ? "high" : count >= 20 ? "medium" : "low",
+    });
+  }
+  if (proposal.experiment_type === "rebalance_training") {
+    for (const [family, ratio] of Object.entries(proposal.changes)) {
+      if (typeof ratio === "number" && ratio > 0.3) {
+        reqs.push({
+          type: "data_need",
+          family,
+          detail: `Model needs higher sampling weight (${(ratio * 100).toFixed(0)}%) for ${family}`,
+          urgency: ratio > 0.5 ? "high" : "medium",
+        });
+      }
+    }
+  }
+  if (proposal.experiment_type === "add_features") {
+    const features = proposal.changes.enable_features ?? [];
+    if (features.length > 0) {
+      reqs.push({
+        type: "feature_gap",
+        detail: `Enabling ${features.length} features: ${features.join(", ")}`,
+        urgency: features.length > 3 ? "high" : "low",
+      });
+    }
+  }
+  if (proposal.experiment_type === "adjust_architecture") {
+    const primary = proposal.changes.primary_model;
+    if (primary) {
+      reqs.push({
+        type: "architecture_change",
+        detail: `Model recommends switching to ${primary}`,
+        urgency: "medium",
+      });
+    }
+  }
+  return reqs;
 }
 
 function buildFeatureContext(): string {
@@ -343,23 +485,46 @@ Be specific about what parameters to change and why.`,
       "rebalance_training", "request_data",
     ];
 
-    return parsed
+    const proposals = parsed
       .map((p: any) => {
         if (!p.model_target || !p.experiment_type || !p.changes || typeof p.changes !== "object" || !p.reasoning) return null;
         const normalizedTarget = normalizeModelTarget(p.model_target);
         if (!normalizedTarget) return null;
         if (!validTypes.includes(p.experiment_type)) return null;
-        return {
+
+        let finalChanges = p.changes;
+        if (p.experiment_type === "adjust_hyperparameters") {
+          const { clamped, warnings } = clampHyperparameters(normalizedTarget, p.changes);
+          if (warnings.length > 0) {
+            console.log(`[Model Experiment Controller] Hyperparams clamped for ${normalizedTarget}: ${warnings.join("; ")}`);
+          }
+          finalChanges = clamped;
+        }
+
+        const proposal: ExperimentProposal = {
           model_target: normalizedTarget,
           experiment_type: p.experiment_type as ExperimentType,
-          changes: p.changes,
+          changes: finalChanges,
           reasoning: typeof p.reasoning === "string" ? p.reasoning : String(p.reasoning),
           expected_improvement: p.expected_improvement ?? "unknown",
           priority: Math.max(1, Math.min(3, Number(p.priority) || 2)),
         };
+
+        proposal.technicalRequirements = extractTechnicalRequirements(proposal);
+        return proposal;
       })
       .filter((p): p is ExperimentProposal => p !== null)
       .slice(0, 3);
+
+    const deduped = proposals.filter(p => {
+      if (isDuplicateExperiment(p)) {
+        console.log(`[Model Experiment Controller] Skipped duplicate experiment: ${p.experiment_type} on ${p.model_target}`);
+        return false;
+      }
+      return true;
+    });
+
+    return deduped;
   } catch (e) {
     console.log(`[Model Experiment Controller] LLM proposal failed: ${e instanceof Error ? e.message : "unknown"}`);
     return [];
@@ -391,19 +556,16 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
 
   try {
     if (experiment.experiment_type === "adjust_hyperparameters") {
+      const { clamped, warnings } = clampHyperparameters(experiment.model_target, experiment.changes);
+      if (warnings.length > 0) {
+        console.log(`[Model Experiment Controller] Execute-time clamp: ${warnings.join("; ")}`);
+      }
       const overrides = hyperparamOverrides.get(experiment.model_target) ?? {};
-      const c = experiment.changes;
-      if (c.nTrees != null) overrides.nTrees = Math.max(10, Math.min(500, c.nTrees));
-      if (c.learningRate != null || c.learning_rate != null) overrides.learningRate = Math.max(0.0001, Math.min(0.3, c.learningRate ?? c.learning_rate));
-      if (c.maxDepth != null) overrides.maxDepth = Math.max(3, Math.min(12, c.maxDepth));
-      if (c.minSamples != null) overrides.minSamples = Math.max(2, Math.min(32, c.minSamples));
-      if (c.ensembleSize != null) overrides.ensembleSize = Math.max(1, Math.min(10, c.ensembleSize));
-      if (c.dropoutRate != null || c.dropout != null) overrides.dropoutRate = Math.max(0, Math.min(0.5, c.dropoutRate ?? c.dropout));
-      if (c.layerCount != null || c.layers != null) overrides.layerCount = Math.max(2, Math.min(8, c.layerCount ?? c.layers));
-      if (c.regularizationL2 != null || c.regularization != null) overrides.regularizationL2 = Math.max(0.0001, Math.min(0.1, c.regularizationL2 ?? c.regularization));
-      if (c.batchSize != null) overrides.batchSize = Math.max(4, Math.min(128, c.batchSize));
-      if (c.epochs != null) overrides.epochs = Math.max(5, Math.min(50, c.epochs));
-      if (c.bootstrapRatio != null) overrides.bootstrapRatio = Math.max(0.5, Math.min(1.0, c.bootstrapRatio));
+      for (const [key, val] of Object.entries(clamped)) {
+        if (typeof val === "number") {
+          (overrides as any)[key] = val;
+        }
+      }
       hyperparamOverrides.set(experiment.model_target, overrides);
       console.log(`[Model Experiment Controller] Hyperparams updated for ${experiment.model_target}: ${JSON.stringify(overrides)}`);
     }
@@ -594,4 +756,49 @@ export function markDataRequestInProgress(id: string): void {
   if (request) {
     request.status = "in_progress";
   }
+}
+
+export function getActiveTechnicalRequirements(): TechnicalRequirement[] {
+  const recent = experimentRecords.slice(-10);
+  const allReqs: TechnicalRequirement[] = [];
+  const seen = new Set<string>();
+  for (const rec of recent) {
+    if (rec.status !== "completed" && rec.status !== "running") continue;
+    const matchingProposal = experimentRecords.find(
+      r => r.id === rec.id
+    );
+    if (!matchingProposal) continue;
+  }
+  for (const rec of recent) {
+    if (rec.type === "request_data" && (rec.status === "completed" || rec.status === "running")) {
+      const family = rec.changes.family ?? "unknown";
+      const key = `data_need:${family}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        allReqs.push({
+          type: "data_need",
+          family,
+          detail: `Model requested ${rec.changes.count ?? 20} ${family} samples`,
+          urgency: (rec.changes.count ?? 20) >= 40 ? "high" : "medium",
+        });
+      }
+    }
+    if (rec.type === "rebalance_training" && rec.status === "completed") {
+      for (const [family, ratio] of Object.entries(rec.changes)) {
+        if (typeof ratio === "number" && ratio > 0.3) {
+          const key = `data_need:rebalance:${family}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            allReqs.push({
+              type: "data_need",
+              family,
+              detail: `Rebalancing requests ${(ratio * 100).toFixed(0)}% weight for ${family}`,
+              urgency: ratio > 0.5 ? "high" : "medium",
+            });
+          }
+        }
+      }
+    }
+  }
+  return allReqs;
 }

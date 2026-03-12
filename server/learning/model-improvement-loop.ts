@@ -14,8 +14,10 @@ import {
   getHyperparamOverrides,
   setHyperparamOverrides,
   getPendingDataRequests,
+  getActiveTechnicalRequirements,
   type ExperimentProposal,
   type ExperimentRecord,
+  type TechnicalRequirement,
 } from "./model-experiment-controller";
 import {
   runModelLLMCycle,
@@ -238,6 +240,16 @@ export async function runModelImprovementCycle(
 
   const topExperiment = eligibleProposals[0];
 
+  const allTechReqs = eligibleProposals.flatMap(p => p.technicalRequirements ?? []);
+  if (allTechReqs.length > 0) {
+    emit("log", {
+      phase: "engine",
+      event: "Model improvement: technical requirements for strategy",
+      detail: allTechReqs.map(r => `${r.urgency.toUpperCase()}: ${r.detail}`).join("; ").slice(0, 200),
+      dataSource: "Model Improvement Loop",
+    });
+  }
+
   const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
   const beforeModelMetrics = beforeKeyMetrics[topExperiment.model_target] ?? {};
 
@@ -422,6 +434,15 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
     lines.push(`  Pending data requests: ${dataRequests.length}`);
     for (const dr of dataRequests.slice(0, 3)) {
       lines.push(`    ${dr.family}: ${dr.count} structures via ${dr.method}`);
+    }
+  }
+
+  const techReqs = getActiveTechnicalRequirements();
+  if (techReqs.length > 0) {
+    lines.push("  ## Model Constraints for Strategy:");
+    for (const req of techReqs) {
+      const urgTag = req.urgency === "high" ? "[HIGH]" : req.urgency === "medium" ? "[MED]" : "[LOW]";
+      lines.push(`    ${urgTag} ${req.type}${req.family ? ` (${req.family})` : ""}: ${req.detail}`);
     }
   }
 
