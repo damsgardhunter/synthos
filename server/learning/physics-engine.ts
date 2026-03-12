@@ -37,24 +37,34 @@ function softCeiling(tc: number, threshold: number, penaltyStrength: number): nu
   return Math.round(dampened * 10) / 10;
 }
 
-function computePhysicsDerivedBonus(formula: string, lambda: number): number {
-  const els = parseFormulaElements(formula);
-  const cts = parseFormulaCounts(formula);
-  const totalAtoms = getTotalAtoms(cts);
+interface ParsedComposition {
+  elements: string[];
+  counts: Record<string, number>;
+  totalAtoms: number;
+  metalElements: string[];
+}
 
-  const isCuprate = els.includes("Cu") && els.includes("O") && els.length >= 3
-    && els.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
-  const isHEA = detectHighEntropyAlloy(formula);
+function parseComposition(formula: string): ParsedComposition {
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const totalAtoms = getTotalAtoms(counts);
+  const metalElements = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
+  return { elements, counts, totalAtoms, metalElements };
+}
+
+function computePhysicsDerivedBonusParsed(pc: ParsedComposition, lambda: number): number {
+  const isCuprate = pc.elements.includes("Cu") && pc.elements.includes("O") && pc.elements.length >= 3
+    && pc.elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
+  const isHEA = detectHighEntropyAlloyParsed(pc);
 
   let bonus = 0;
   if (isCuprate && lambda > 0.5) {
-    const cuFrac = (cts["Cu"] || 0) / totalAtoms;
-    const oFrac = (cts["O"] || 0) / totalAtoms;
+    const cuFrac = (pc.counts["Cu"] || 0) / pc.totalAtoms;
+    const oFrac = (pc.counts["O"] || 0) / pc.totalAtoms;
     bonus = Math.round(cuFrac * oFrac * 200 * Math.min(lambda, 2.0));
   }
   if (isHEA && lambda > 1.0) {
-    const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
-    const entropyFactor = Math.log(Math.max(2, metalEls.length)) / Math.log(6);
+    const entropyFactor = Math.log(Math.max(2, pc.metalElements.length)) / Math.log(6);
     const heaBonus = Math.min(15, Math.round(entropyFactor * lambda * 8));
     bonus = Math.max(bonus, heaBonus);
   }
@@ -121,16 +131,15 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
   let materialBonus = 0;
   let familyName: string | null = null;
 
+  let pc: ParsedComposition | null = null;
   if (formula) {
+    pc = parseComposition(formula);
     familyName = classifyFamily(formula);
-    const cts = parseFormulaCounts(formula);
-    const els = parseFormulaElements(formula);
-    const hCount = cts["H"] || 0;
-    const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
-    const metalAtomCount = metalEls.reduce((s, e) => s + (cts[e] || 0), 0);
+    const hCount = pc.counts["H"] || 0;
+    const metalAtomCount = pc.metalElements.reduce((s, e) => s + (pc!.counts[e] || 0), 0);
     const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
     if (hRatio >= 6) pressureThresholdLow = 100;
-    materialBonus = computePhysicsDerivedBonus(formula, lambda);
+    materialBonus = computePhysicsDerivedBonusParsed(pc, lambda);
   }
 
   const highPressureAnchor = pressureThresholdLow >= 100 ? 150 : 50;
@@ -286,16 +295,16 @@ export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: numbe
 
 const HEA_EXTRA_METALS = ["Al", "Mg", "Ca", "Sr", "Ba", "Li", "Na", "K", "Ti", "Zn", "Ga", "Ge", "Sn"];
 
-function detectHighEntropyAlloy(formula: string): boolean {
-  const els = parseFormulaElements(formula);
-  const cts = parseFormulaCounts(formula);
-  const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) ||
-    HEA_EXTRA_METALS.includes(e));
-  if (metalEls.length < 4) return false;
-  const metalCounts = metalEls.map(e => cts[e] || 1);
+function detectHighEntropyAlloyParsed(pc: ParsedComposition): boolean {
+  if (pc.metalElements.length < 4) return false;
+  const metalCounts = pc.metalElements.map(e => pc.counts[e] || 1);
   const totalMetal = metalCounts.reduce((s, n) => s + n, 0);
   const maxFrac = Math.max(...metalCounts) / totalMetal;
   return maxFrac <= 0.4;
+}
+
+function detectHighEntropyAlloy(formula: string): boolean {
+  return detectHighEntropyAlloyParsed(parseComposition(formula));
 }
 import {
   ELEMENTAL_DATA,
