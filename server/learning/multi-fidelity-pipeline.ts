@@ -724,36 +724,42 @@ export async function runMultiFidelityPipeline(
     results.push(...chunkResults);
   }
 
+  const failureEntries: Parameters<typeof recordStructureFailure>[0][] = [];
   for (const result of results) {
     if (!result.passed && result.failureReason) {
-      try {
-        let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "geometry_rejected";
-        const fr = result.failureReason;
-        if (/imaginary phonon|Dynamically unstable|phonon surrogate|phonon.*unstab/i.test(fr)) {
-          failureReason = "unstable_phonons";
-        } else if (/Non-metallic|insulator|metallicity.*below/i.test(fr)) {
-          failureReason = "non_metallic";
-        } else if (/Formation energy|thermodynamically unstable|too unstable to synthesize/i.test(fr)) {
-          failureReason = "high_formation_energy";
-        } else if (/Hc2.*inconsistent|structure.*collapse|Could not predict crystal/i.test(fr)) {
-          failureReason = "structure_collapse";
-        } else if (/SCF|convergence|diverge/i.test(fr)) {
-          failureReason = "scf_divergence";
-        }
-        recordStructureFailure({
-          formula: result.formula,
-          failureReason,
-          failedAt: Date.now(),
-          source: "pipeline",
-          stage: result.finalStage,
-          details: result.failureReason,
-          bandGap: result.physicsData?.electronic?.bandGap,
-          formationEnergy: result.physicsData?.stability?.formationEnergy,
-          lowestPhononFreq: result.physicsData?.phonon?.lowestFrequency,
-          imaginaryModeCount: result.physicsData?.phonon?.imaginaryModeCount,
-        });
-      } catch {}
+      let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "geometry_rejected";
+      const fr = result.failureReason;
+      if (/imaginary phonon|Dynamically unstable|phonon surrogate|phonon.*unstab/i.test(fr)) {
+        failureReason = "unstable_phonons";
+      } else if (/Non-metallic|insulator|metallicity.*below/i.test(fr)) {
+        failureReason = "non_metallic";
+      } else if (/Formation energy|thermodynamically unstable|too unstable to synthesize/i.test(fr)) {
+        failureReason = "high_formation_energy";
+      } else if (/Hc2.*inconsistent|structure.*collapse|Could not predict crystal/i.test(fr)) {
+        failureReason = "structure_collapse";
+      } else if (/SCF|convergence|diverge/i.test(fr)) {
+        failureReason = "scf_divergence";
+      }
+      failureEntries.push({
+        formula: result.formula,
+        failureReason,
+        failedAt: Date.now(),
+        source: "pipeline",
+        stage: result.finalStage,
+        details: result.failureReason,
+        bandGap: result.physicsData?.electronic?.bandGap,
+        formationEnergy: result.physicsData?.stability?.formationEnergy,
+        lowestPhononFreq: result.physicsData?.phonon?.lowestFrequency,
+        imaginaryModeCount: result.physicsData?.phonon?.imaginaryModeCount,
+      });
     }
+  }
+  if (failureEntries.length > 0) {
+    try {
+      for (const entry of failureEntries) {
+        recordStructureFailure(entry);
+      }
+    } catch {}
   }
 
   const passedCount = results.filter(r => r.passed).length;
@@ -852,7 +858,18 @@ async function updateCandidatePhysics(
     if (allData.structure) {
       updates.decompositionEnergy = allData.structure.decompositionEnergy;
       const effP = candidate?.optimalPressureGpa ?? candidate?.pressureGpa ?? 0;
-      updates.ambientPressureStable = effP < 50 && (allData.stability?.isStable ?? false);
+      const isStableOrMeta = allData.stability?.isStable ?? false;
+      if (effP < 1) {
+        updates.ambientPressureStable = isStableOrMeta;
+        updates.pressureCategory = "ambient";
+      } else if (effP < 50) {
+        updates.ambientPressureStable = false;
+        updates.pressureCategory = "low-pressure";
+        updates.lowPressureStable = isStableOrMeta;
+      } else {
+        updates.ambientPressureStable = false;
+        updates.pressureCategory = "high-pressure";
+      }
     }
     if (allData.stability) {
       if (allData.stability.synthesizability != null) {
@@ -863,16 +880,27 @@ async function updateCandidatePhysics(
       }
     }
     if (allData.coupling) {
-      const mechanism = allData.correlation?.ratio > 0.6
-        ? "spin-fluctuation"
-        : allData.coupling.lambda > 1.5
-          ? "strong-coupling phonon-mediated"
-          : "phonon-mediated BCS";
-      updates.pairingMechanism = mechanism;
+      const lambda = allData.coupling.lambda;
+      const omegaLog = allData.coupling.omegaLog ?? 0;
+      const corrRatio = allData.correlation?.ratio ?? 0;
+
+      let mechanism: string;
+      let frequencyScale: string;
+      if (corrRatio > 0.6) {
+        mechanism = "spin-fluctuation";
+        frequencyScale = "";
+      } else if (lambda > 1.5) {
+        mechanism = "strong-coupling phonon-mediated";
+        frequencyScale = omegaLog > 500 ? " (high-frequency hydride-like)" : omegaLog > 200 ? " (intermediate-frequency)" : " (low-frequency lead-like)";
+      } else {
+        mechanism = "phonon-mediated BCS";
+        frequencyScale = omegaLog > 500 ? " (high-frequency)" : omegaLog > 200 ? " (intermediate-frequency)" : " (low-frequency)";
+      }
+      updates.pairingMechanism = mechanism + frequencyScale;
       if (!(updates as any).cooperPairMechanism) {
         (updates as any).cooperPairMechanism = mechanism === "spin-fluctuation"
-          ? `Unconventional pairing via spin-fluctuation exchange (U/W=${(allData.correlation?.ratio ?? 0).toFixed(2)})`
-          : `${mechanism} with lambda=${allData.coupling.lambda.toFixed(2)}`;
+          ? `Unconventional pairing via spin-fluctuation exchange (U/W=${corrRatio.toFixed(2)})`
+          : `${mechanism}${frequencyScale} with lambda=${lambda.toFixed(2)}, omegaLog=${omegaLog.toFixed(0)}K`;
       }
     }
 
