@@ -66,8 +66,12 @@ function checkDatasetGrowthTrigger(): RetrainTrigger | null {
   const currentSize = evalStats.totalEvaluated;
 
   if (state.lastRetrainDatasetSize === 0) {
-    state.lastRetrainDatasetSize = currentSize;
-    return null;
+    return {
+      type: "dataset_growth",
+      reasoning: `Initial baseline: dataset has ${currentSize} samples — triggering first retrain to establish ground truth`,
+      severity: "high",
+      metrics: { previousSize: 0, currentSize, growthRatio: Infinity },
+    };
   }
 
   const growthRatio = currentSize / Math.max(1, state.lastRetrainDatasetSize);
@@ -87,9 +91,7 @@ function checkErrorSpikeTrigger(): RetrainTrigger | null {
   const currentR2 = diagnostics.xgboost.r2;
   const currentMAE = diagnostics.xgboost.mae;
 
-  if (state.lastRetrainR2 === 0 && state.lastRetrainMAE === Infinity) {
-    state.lastRetrainR2 = currentR2;
-    state.lastRetrainMAE = currentMAE;
+  if (state.lastRetrainMAE === Infinity || state.lastRetrainR2 === 0) {
     return null;
   }
 
