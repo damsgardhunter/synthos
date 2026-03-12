@@ -683,10 +683,9 @@ export async function classifyMaterialApplications(
   const results = new Map<string, string>();
   if (materials.length === 0) return results;
 
-  const batch = materials.slice(0, 10);
   try {
     const classified = await batchProcess(
-      batch,
+      materials,
       async (mat) => {
         const response = await openai.chat.completions.create({
           model: "gpt-4o-mini",
