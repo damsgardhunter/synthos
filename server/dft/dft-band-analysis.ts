@@ -766,6 +766,16 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult, elements
   return pockets;
 }
 
+function stridedSample(arr: number[], maxSamples: number): number[] {
+  if (arr.length <= maxSamples) return arr;
+  const stride = Math.ceil(arr.length / maxSamples);
+  const result: number[] = [];
+  for (let i = 0; i < arr.length; i += stride) {
+    result.push(arr[i]);
+  }
+  return result;
+}
+
 export function computeDFTNesting(pockets: DFTFermiPocket[], bandResult: DFTBandStructureResult): DFTNestingAnalysis {
   if (pockets.length < 2) {
     return { vectors: [], nestingScore: 0, dominantQ: null, connectedPocketPairs: 0 };
@@ -791,8 +801,8 @@ export function computeDFTNesting(pockets: DFTFermiPocket[], bandResult: DFTBand
       const ki = crossingKPoints.get(pockets[i].index) || [];
       const kj = crossingKPoints.get(pockets[j].index) || [];
 
-      const sampleI = ki.length > 20 ? ki.slice(0, 20) : ki;
-      const sampleJ = kj.length > 20 ? kj.slice(0, 20) : kj;
+      const sampleI = stridedSample(ki, 20);
+      const sampleJ = stridedSample(kj, 20);
 
       for (const kIdxI of sampleI) {
         for (const kIdxJ of sampleJ) {
@@ -860,10 +870,15 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
   else if (avgCylindrical > 0.5) fsDim = 2.5;
   const pathDimensionality = fsDim;
 
+  const SIGMA_BAND_MIN_S_CHAR = 0.3;
+  const SIGMA_BAND_MIN_VEL_EV_ANG = 2.0;
+  const SIGMA_BAND_VEL_SCALE_EV_ANG = 8.0;
+
   let sigmaBand = 0;
   for (const pocket of pockets) {
-    if (pocket.orbitalCharacter.s > 0.3 && pocket.avgVelocity > 3.0) {
-      sigmaBand = Math.max(sigmaBand, pocket.orbitalCharacter.s + pocket.avgVelocity / 10);
+    if (pocket.orbitalCharacter.s > SIGMA_BAND_MIN_S_CHAR && pocket.avgVelocity > SIGMA_BAND_MIN_VEL_EV_ANG) {
+      const velScore = Math.min(0.5, (pocket.avgVelocity - SIGMA_BAND_MIN_VEL_EV_ANG) / SIGMA_BAND_VEL_SCALE_EV_ANG);
+      sigmaBand = Math.max(sigmaBand, pocket.orbitalCharacter.s * 0.6 + velScore + 0.1);
     }
   }
   sigmaBand = Math.min(1.0, sigmaBand);
