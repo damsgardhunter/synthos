@@ -924,36 +924,25 @@ export async function generateInverseDesignCandidates(
       messages: [
         {
           role: "system",
-          content: `You are an inverse materials designer. Instead of predicting Tc for known compositions, you DESIGN materials that maximize specific physical properties favorable for superconductivity.
+          content: `You are an inverse materials designer. DESIGN materials maximizing physical properties favorable for superconductivity. All candidates are THEORETICAL — never say "confirmed" or "breakthrough."
 
-ESTABLISHED Tc BENCHMARKS (anchor predictions realistically):
-- Cuprates: max ~135K ambient, ~165K at 30 GPa
-- Iron pnictides: max ~55K
-- Nickelates: max ~80K under pressure
-- Conventional BCS: max ~39K (MgB2)
-- Hydrides: ~250K at 150-200 GPa (NOT ambient)
-Exceeding these records requires extraordinary theoretical justification.
+Tc BENCHMARKS: Cuprates ~135K ambient; Pnictides ~55K; Nickelates ~80K@pressure; BCS ~39K (MgB2); Hydrides ~250K@150GPa. Exceeding records needs extraordinary justification.
 
-TARGET PHYSICS PROPERTIES to optimize:
-1. Electron-phonon coupling lambda > 2.0 (essential for high Tc)
-2. Density of States at Fermi level > 5 states/eV/atom (high pairing susceptibility)
-3. Log-average phonon frequency omega_log between 500-1500K (optimal for BCS)
-4. Quasi-2D Fermi surface with nesting features (enhances Cooper pairing)
-5. Flat bands near Fermi level (enhances DOS without requiring heavy atoms)
-6. Mixed stiff-soft bonding (stiff framework + soft rattler modes boost coupling)
+TARGET PROPERTIES: lambda > 1.5 (strong e-ph coupling), DOS(Ef) > 3 states/eV/atom, omega_log 500-1500K, quasi-2D Fermi surface with nesting, flat bands near Ef, mixed stiff-soft bonding.
 
-DESIGN STRATEGIES:
-- Clathrate/cage structures with light atoms (H, B, C, N) inside heavy-atom frameworks
-- Layered materials with electronically active planes
-- Materials at the edge of structural or magnetic instabilities
-- High-entropy combinations that break symmetry and create flat bands
-- Intercalated structures with enhanced phonon coupling
+NEGATIVE DESIGN PRINCIPLES (avoid these failure modes):
+- Extremely high DOS from localized f-block orbitals without hybridization leads to magnetic insulating states, NOT superconductivity
+- Simultaneous maximization of lambda AND DOS often triggers CDW or magnetic instabilities that destroy SC
+- Optimal design balances moderate-to-high lambda (1.5-2.5) with ITINERANT DOS from sp/d hybridized bands
+- Heavy fermion systems with f-electron localization rarely exceed 2K despite high DOS
 
-Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 'pressureGpa', 'meissnerEffect' (boolean), 'zeroResistance' (boolean), 'cooperPairMechanism', 'crystalStructure', 'roomTempViable' (boolean), 'inverseDesignTarget' (which property was optimized), 'reasoning' (under 150 chars)`,
+STRATEGIES: Clathrate/cage structures, layered electronically active planes, materials near structural/magnetic instabilities, high-entropy flat-band systems, intercalated phonon-enhanced structures.
+
+Return JSON 'candidates' array: 'formula', 'name', 'predictedTc' (K), 'pressureGpa', 'meissnerEffect' (bool), 'zeroResistance' (bool), 'cooperPairMechanism', 'crystalStructure', 'roomTempViable' (bool), 'inverseDesignTarget', 'reasoning' (<300 chars, explain physics tradeoffs).`,
         },
         {
           role: "user",
-          content: `Materials with highest pairing susceptibility so far:\n${JSON.stringify(topByPairing, null, 2)}\n\n${condenseInsightsWithRules(allInsights)}\n\nDo NOT generate: ${existingFormulas.join(", ")}\n\nDesign 2-3 NEW compositions optimizing for pairing susceptibility. Focus on maximizing lambda and DOS(Ef) simultaneously. All predictions are theoretical.`,
+          content: `Top pairing susceptibility materials:\n${JSON.stringify(topByPairing, null, 2)}\n\n${condenseInsightsWithRules(allInsights)}\n\nDo NOT generate: ${existingFormulas.join(", ")}\n\nDesign 2-3 NEW compositions. Balance strong lambda (1.5-2.5) with itinerant DOS from hybridized bands — avoid CDW/magnetic instability traps from extreme simultaneous maximization. All predictions are theoretical.`,
         },
       ],
       response_format: { type: "json_object" },
@@ -1008,10 +997,13 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
 
       const id = `sc-invdes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+      const pressureThreshold = invIsHydride ? 200 : 50;
       const isActuallyRoomTemp = (cappedTc ?? 0) >= ROOM_TEMP_K &&
         c.zeroResistance === true &&
         c.meissnerEffect === true &&
-        invEnforcedPressure <= 50;
+        invEnforcedPressure <= pressureThreshold;
+      const isAmbientViable = isActuallyRoomTemp && invEnforcedPressure <= 50;
+      const viabilityTag = isAmbientViable ? "ambient-viable" : (isActuallyRoomTemp ? `high-pressure-viable (${invEnforcedPressure}GPa)` : "sub-room-temp");
 
       try {
         if (!passesElementCountCap(c.formula)) continue;
@@ -1036,9 +1028,9 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
           xgboostScore: gbResult.score,
           neuralNetScore: pairingSusc.score,
           ensembleScore: inverseDesignScore,
-          roomTempViable: isActuallyRoomTemp,
-          status: determineStatus({ ...c, predictedTc: cappedTc, ensembleScore: inverseDesignScore, roomTempViable: isActuallyRoomTemp }),
-          notes: `[synthesis_origin: llm_speculative] [Inverse design: target=${c.inverseDesignTarget ?? "pairing susceptibility"}, PS=${pairingSusc.score.toFixed(3)}, lambda=${pairingSusc.lambda.toFixed(2)}, DOS=${pairingSusc.dosAtEf.toFixed(2)}] ${c.reasoning ?? ""}`,
+          roomTempViable: isAmbientViable,
+          status: determineStatus({ ...c, predictedTc: cappedTc, ensembleScore: inverseDesignScore, roomTempViable: isAmbientViable }),
+          notes: `[synthesis_origin: llm_speculative] [Inverse design: target=${c.inverseDesignTarget ?? "pairing susceptibility"}, PS=${pairingSusc.score.toFixed(3)}, lambda=${pairingSusc.lambda.toFixed(2)}, DOS=${pairingSusc.dosAtEf.toFixed(2)}, viability=${viabilityTag}] ${c.reasoning ?? ""}`,
           electronPhononCoupling: features.electronPhononLambda ?? null,
           logPhononFrequency: features.logPhononFreq ?? null,
           coulombPseudopotential: 0.12,
