@@ -1010,17 +1010,30 @@ export function getCompositionWeightedProperty(
   return totalWeight > 0 ? weightedSum / totalWeight : null;
 }
 
+export function getAtomicMass(symbol: string): number {
+  const data = ELEMENTAL_DATA[symbol];
+  if (!data) return NaN;
+  return data.atomicMass;
+}
+
 export function getAverageMass(elementCounts: Record<string, number>): number {
   let totalMass = 0;
   let totalAtoms = 0;
+  let unknownElements: string[] | null = null;
   for (const [el, count] of Object.entries(elementCounts)) {
     const data = ELEMENTAL_DATA[el];
     if (data) {
       totalMass += data.atomicMass * count;
       totalAtoms += count;
+    } else {
+      (unknownElements ??= []).push(el);
     }
   }
-  return totalAtoms > 0 ? totalMass / totalAtoms : 50;
+  if (unknownElements && totalAtoms === 0) {
+    console.warn(`[elemental-data] No atomic mass data for: ${unknownElements.join(", ")}`);
+    return NaN;
+  }
+  return totalAtoms > 0 ? totalMass / totalAtoms : NaN;
 }
 
 export function getLightestMass(elements: string[]): number {
@@ -1031,7 +1044,7 @@ export function getLightestMass(elements: string[]): number {
       lightest = data.atomicMass;
     }
   }
-  return lightest === Infinity ? 50 : lightest;
+  return lightest === Infinity ? NaN : lightest;
 }
 
 export function getMaxValenceElectrons(elements: string[]): number {

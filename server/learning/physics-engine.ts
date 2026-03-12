@@ -1482,7 +1482,8 @@ export function computePhononSpectrum(
     const elTheta = elData?.debyeTemperature ?? 300;
     maxPhononFreq = elTheta * 0.695 * 1.2;
   } else {
-    const lightestMass = Math.max(getLightestMass(elements), 6.94);
+    const rawLightest = getLightestMass(elements);
+    const lightestMass = Number.isFinite(rawLightest) ? Math.max(rawLightest, 6.94) : 6.94;
     const massRatio = Math.sqrt(avgMass / lightestMass);
     const thetaDAvg = getCompositionWeightedProperty(counts, "debyeTemperature");
     const baseOmega = thetaDAvg != null && thetaDAvg > 0 ? thetaDAvg * 0.695 : 300 * Math.sqrt(30 / Math.max(avgMass, 1)) * 0.695;
@@ -1501,7 +1502,11 @@ export function computePhononSpectrum(
   if (isHydrogenRich) {
     const hFrac = hCount / totalAtoms;
     const metalMass = elements.filter(e => e !== "H")
-      .reduce((s, e) => s + (getElementData(e)?.atomicMass ?? 50) * ((counts[e] || 1) / totalAtoms), 0);
+      .reduce((s, e) => {
+        const m = getElementData(e)?.atomicMass;
+        if (m === undefined) console.warn(`[physics-engine] Unknown atomic mass for element: ${e}`);
+        return s + (m ?? NaN) * ((counts[e] || 1) / totalAtoms);
+      }, 0);
     const effectiveMass = hFrac * 1.008 + (1 - hFrac) * Math.max(metalMass / Math.max(1 - hFrac, 0.01), 10);
     logAvgFreq = 1200 / Math.sqrt(effectiveMass);
     logAvgFreq = Math.max(logAvgFreq, 300);
@@ -2815,7 +2820,8 @@ export function computePhononDispersion(
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
   const avgMass = getAverageMass(counts);
-  const lightestMass = getLightestMass(elements);
+  const rawLightestMass = getLightestMass(elements);
+  const lightestMass = Number.isFinite(rawLightestMass) ? rawLightestMass : avgMass;
 
   const motifResult = detectStructuralMotifs(formula);
   const latticeType = inferLatticeType(formula, motifResult.motifs);
@@ -3554,7 +3560,9 @@ export function computePhononDOS(phononDispersion: PhononDispersionData, maxPhon
       const masses: Record<string, number> = {};
       for (const el of elements) {
         const data = getElementData(el);
-        masses[el] = data?.atomicMass ?? 50;
+        const mass = data?.atomicMass;
+        if (mass === undefined) console.warn(`[physics-engine] Unknown atomic mass for element: ${el}`);
+        masses[el] = mass ?? NaN;
       }
 
       const invMasses: Record<string, number> = {};
