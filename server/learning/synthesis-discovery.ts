@@ -661,13 +661,21 @@ function randomGenome(): SynthesisGenome {
   };
 }
 
+const GENOME_KEYS: readonly (keyof SynthesisGenome)[] = [
+  "precursorStrategy", "reactionSequenceType", "temperatureProfile",
+  "pressureProfile", "coolingStrategy", "atmosphereChoice",
+  "annealingIntensity", "dopingLevel", "thermalCycleCount",
+  "strainEngineering", "postProcessingType", "topologicalProtection",
+  "pressureGene",
+] as const;
+const GENOME_KEY_COUNT = GENOME_KEYS.length;
+
 function mutateGenome(g: SynthesisGenome, mutationRate: number = 0.2): SynthesisGenome {
   const result = { ...g };
-  const keys = Object.keys(result) as (keyof SynthesisGenome)[];
-  const numMutations = Math.max(1, Math.floor(keys.length * mutationRate));
+  const numMutations = Math.max(1, Math.floor(GENOME_KEY_COUNT * mutationRate));
 
   for (let i = 0; i < numMutations; i++) {
-    const key = keys[Math.floor(Math.random() * keys.length)];
+    const key = GENOME_KEYS[Math.floor(Math.random() * GENOME_KEY_COUNT)];
     if (key === "pressureGene") {
       const step = randRange(-0.03, 0.03);
       result[key] = Math.max(0, Math.min(1, result[key] + step));
@@ -680,8 +688,8 @@ function mutateGenome(g: SynthesisGenome, mutationRate: number = 0.2): Synthesis
 
 function crossoverGenomes(a: SynthesisGenome, b: SynthesisGenome): SynthesisGenome {
   const result = { ...a };
-  const keys = Object.keys(result) as (keyof SynthesisGenome)[];
-  for (const key of keys) {
+  for (let i = 0; i < GENOME_KEY_COUNT; i++) {
+    const key = GENOME_KEYS[i];
     if (Math.random() < 0.5) {
       result[key] = b[key];
     }
