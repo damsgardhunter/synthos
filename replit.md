@@ -604,6 +604,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `computeReward` pair bonus loop now uses a `_pairStatsCache` Map that caches `{total, avgTc}` lookups from `pairSuccessRates`. Within a batch of 500 candidates, repeated pair keys (e.g., La-H appears in many hydride candidates) hit the cache instead of re-traversing `pairSuccessRates`. Cache is cleared at the start of `recordElementOutcome` when underlying pair data changes, ensuring freshness.
 - **selectThirdGroupByOrbital p-Block Stabilizer Fix (rl-agent.ts)**:
   - For d/sd orbital preference with high VEC (>=8), the third element group now selects p-block-metal (group 6: Al, Ga, In, Sn, Tl, Pb, Bi) instead of alkaline-earth (group 1). p-block metals like In and Sn act as electronic stabilizers in high-VEC transition metal alloys, preventing phase separation that alkaline earths induce. For intermediate VEC (6-7), 60/40 split favors 4d-transition but includes p-block metals for diversity. Low VEC (<6) retains 4d-transition preference.
+- **Bayesian Shrinkage Normalization Fix (strategy-analyzer.ts)**:
+  - `explorationBonus` (0.1 for families with <10 candidates) is now added AFTER normalization instead of BEFORE. Previously, a family with 1 candidate and mediocre Tc could get a rawScore near 0.1 (dominated by the bonus). After normalization by maxRawScore, this family would appear disproportionately ranked. Now rawScore is purely `bayesianTc * log2(count+1) * (0.5 + 0.5*successRate)`, normalized to [0,1], then the 0.1 exploration bonus is added as a tie-breaker on the normalized scale.
+- **SQL UNION Candidate Merge (strategy-analyzer.ts, storage.ts)**:
+  - `captureConvergenceSnapshot` previously fetched top-50 by score and top-10 by Tc as separate arrays, merged them, and deduped with a Set. Now uses a single `getTopCandidatesMerged(50, 10)` storage method that issues a SQL `UNION` + `DISTINCT ON (formula)` query, pushing deduplication to the database layer. Eliminates the O(N) application-layer filter and reduces to a single DB round-trip.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

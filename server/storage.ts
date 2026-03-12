@@ -53,6 +53,7 @@ export interface IStorage {
 
   getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   getSuperconductorCandidatesByTc(limit?: number): Promise<SuperconductorCandidate[]>;
+  getTopCandidatesMerged(scoreLimit: number, tcLimit: number): Promise<SuperconductorCandidate[]>;
   getUnscoredCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   getCandidatesNeedingPhysicsRecalc(physicsVersion: number, limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
@@ -257,6 +258,18 @@ export class DatabaseStorage implements IStorage {
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
     return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.predictedTc)).limit(limit);
+  }
+
+  async getTopCandidatesMerged(scoreLimit = 50, tcLimit = 10): Promise<SuperconductorCandidate[]> {
+    const rows = await db.execute(sql`
+      SELECT DISTINCT ON (formula) * FROM (
+        (SELECT * FROM superconductor_candidates ORDER BY ensemble_score DESC NULLS LAST LIMIT ${scoreLimit})
+        UNION
+        (SELECT * FROM superconductor_candidates ORDER BY predicted_tc DESC NULLS LAST LIMIT ${tcLimit})
+      ) merged
+      ORDER BY formula, predicted_tc DESC NULLS LAST
+    `);
+    return rows.rows as unknown as SuperconductorCandidate[];
   }
 
   async getUnscoredCandidates(limit = 200): Promise<SuperconductorCandidate[]> {

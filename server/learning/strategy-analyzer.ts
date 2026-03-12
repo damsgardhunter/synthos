@@ -94,7 +94,7 @@ export async function analyzeAndEvolveStrategy(
       const bayesianTc = (stats.count * representativeTc + priorCount * priorTc) / (stats.count + priorCount);
       const successRate = stats.pipelinePasses / Math.max(1, stats.count);
       const explorationBonus = stats.count < 10 ? 0.1 : 0;
-      const rawScore = bayesianTc * Math.log2(stats.count + 1) * (0.5 + 0.5 * successRate) + explorationBonus;
+      const rawScore = bayesianTc * Math.log2(stats.count + 1) * (0.5 + 0.5 * successRate);
       rawScores.push(rawScore);
 
       adjustedFamilyStats[family] = {
@@ -113,7 +113,8 @@ export async function analyzeAndEvolveStrategy(
 
     const maxRawScore = Math.max(...rawScores, 0.001);
     for (const family of Object.keys(adjustedFamilyStats)) {
-      adjustedFamilyStats[family].familyScore = adjustedFamilyStats[family].familyScore / maxRawScore;
+      const entry = adjustedFamilyStats[family];
+      entry.familyScore = entry.familyScore / maxRawScore + entry.explorationBonus;
     }
 
     const allFamilies = new Set([
@@ -297,18 +298,9 @@ export async function captureConvergenceSnapshot(
   strategyFocus?: string
 ): Promise<void> {
   try {
-    const topCandidates = await storage.getSuperconductorCandidates(50);
-    const topByTc = await storage.getSuperconductorCandidatesByTc(10);
+    const uniqueCandidates = await storage.getTopCandidatesMerged(50, 10);
     const totalCount = await storage.getSuperconductorCount();
     const insightCount = await storage.getNovelInsightCount();
-
-    const seenFormulas = new Set<string>();
-    const merged = [...topCandidates, ...topByTc];
-    const uniqueCandidates = merged.filter(c => {
-      if (seenFormulas.has(c.formula)) return false;
-      seenFormulas.add(c.formula);
-      return true;
-    });
 
     let bestTc = 0;
     let bestPhysicsTc = 0;
