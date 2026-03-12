@@ -8,6 +8,17 @@ import { computeAdvancedConstraints, type AdvancedPhysicsConstraints } from "../
 import { validateOmegaLog } from "../physics/tc-formulas";
 import { computeOODScore } from "./ood-detector";
 
+let _mpClientCache: typeof import("./materials-project-client") | null = null;
+let _dftResolverCache: typeof import("./dft-feature-resolver") | null = null;
+async function getMPClient() {
+  if (!_mpClientCache) _mpClientCache = await import("./materials-project-client");
+  return _mpClientCache;
+}
+async function getDFTResolver() {
+  if (!_dftResolverCache) _dftResolverCache = await import("./dft-feature-resolver");
+  return _dftResolverCache;
+}
+
 export interface PhysicsConstraintMode {
   allowBeyondEmpirical: boolean;
   empiricalPenaltyStrength: number;
@@ -3699,6 +3710,11 @@ export async function runFullPhysicsAnalysis(
   advancedConstraints: AdvancedPhysicsConstraints;
 }> {
   const formula = candidate.formula;
+  const priorTc = candidate.predictedTc ?? 0;
+  const isVerbose = priorTc > 10 || (candidate.pressureGpa ?? 0) > 50;
+  const emitDetail: typeof emit = (event, data) => {
+    if (isVerbose) emit(event, data);
+  };
 
   emit("log", {
     phase: "phase-10",
@@ -3711,7 +3727,7 @@ export async function runFullPhysicsAnalysis(
   let mpElasticity: MPElasticityData | null = null;
   let dftData: DFTResolvedFeatures | null = null;
   try {
-    const mpClient = await import("./materials-project-client");
+    const mpClient = await getMPClient();
     if (mpClient.isApiAvailable()) {
       const mpData = await mpClient.fetchAllData(formula);
       mpSummary = mpData.summary;
@@ -3720,7 +3736,7 @@ export async function runFullPhysicsAnalysis(
   } catch {}
 
   try {
-    const dftResolver = await import("./dft-feature-resolver");
+    const dftResolver = await getDFTResolver();
     dftData = await dftResolver.resolveDFTFeatures(formula);
     if (dftData.dftCoverage > 0) {
       const desc = dftResolver.describeDFTSources(dftData);
@@ -3738,7 +3754,7 @@ export async function runFullPhysicsAnalysis(
 
   if (electronicStructure.flatBandIndicator > 0.3) {
     const avgDOS = electronicStructure.densityOfStatesAtFermi;
-    emit("log", {
+    emitDetail("log", {
       phase: "phase-10",
       event: "Flat band detected",
       detail: `${formula}: flatBandIndicator=${electronicStructure.flatBandIndicator.toFixed(2)}, bandFlatness=${electronicStructure.bandFlatness.toFixed(2)}, DOS(EF)=${avgDOS.toFixed(2)}, mottProximity=${electronicStructure.mottProximityScore.toFixed(2)}`,
@@ -3799,7 +3815,7 @@ export async function runFullPhysicsAnalysis(
       const cappedPhMax = rawPhMax <= 5000 ? rawPhMax : phononSpectrum.maxPhononFrequency;
       phononSpectrum.maxPhononFrequency = Math.min(5000, cappedPhMax);
       phononSpectrum.debyeTemperature = Math.max(50, Math.round(1.4388 * phononSpectrum.maxPhononFrequency));
-      emit("log", {
+      emitDetail("log", {
         phase: "phase-10",
         event: "DFT override",
         detail: `Using DFT phonon max ${phononSpectrum.maxPhononFrequency} cm⁻¹ for ${formula}, derived θ_D=${phononSpectrum.debyeTemperature}K`,
@@ -3810,7 +3826,7 @@ export async function runFullPhysicsAnalysis(
       phononSpectrum.debyeTemperature = dftData.debyeTemp.value;
       phononSpectrum.maxPhononFrequency = Math.max(50, Math.round(dftData.debyeTemp.value / 1.4388));
       if (Math.abs(analytical - dftData.debyeTemp.value) > 20) {
-        emit("log", {
+        emitDetail("log", {
           phase: "phase-10",
           event: "DFT override",
           detail: `Using DFT Debye temp ${dftData.debyeTemp.value}K for ${formula} (vs analytical ${analytical}K), derived ω_max=${phononSpectrum.maxPhononFrequency} cm⁻¹`,
@@ -3823,7 +3839,7 @@ export async function runFullPhysicsAnalysis(
 
   const earlyPhononDispersion = computePhononDispersion(formula, electronicStructure, phononSpectrum);
   const phononDOS = computePhononDOS(earlyPhononDispersion, phononSpectrum.maxPhononFrequency, formula);
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "Phonon DOS computed",
     detail: `${formula}: ${phononDOS.totalStates} states binned into ${phononDOS.frequencies.length} bins, maxFreq=${phononSpectrum.maxPhononFrequency} cm⁻¹`,
@@ -3831,7 +3847,7 @@ export async function runFullPhysicsAnalysis(
   });
 
   const alpha2FResult = computeAlpha2F(phononDOS, formula, electronicStructure);
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "alpha2F spectral function computed",
     detail: `${formula}: integratedLambda=${alpha2FResult.integratedLambda.toFixed(4)}, omegaLog(alpha2F)=${computeOmegaLogFromAlpha2F(alpha2FResult).toFixed(1)} cm⁻¹`,
@@ -3844,7 +3860,7 @@ export async function runFullPhysicsAnalysis(
     const softFraction = nSoftBranches / Math.max(1, earlyPhononDispersion.branches.length);
     const softModeOmegaLogPenalty = 1.0 - softFraction * phononSpectrum.softModeScore * 0.3;
     coupling.omegaLog = Math.round(coupling.omegaLog * Math.max(0.5, softModeOmegaLogPenalty));
-    emit("log", {
+    emitDetail("log", {
       phase: "phase-10",
       event: "Soft mode omegaLog correction",
       detail: `${formula}: ${nSoftBranches} soft branches (${(softFraction * 100).toFixed(0)}%), softScore=${phononSpectrum.softModeScore.toFixed(2)}, omegaLog corrected by ${((1 - softModeOmegaLogPenalty) * 100).toFixed(1)}%`,
@@ -3997,7 +4013,7 @@ export async function runFullPhysicsAnalysis(
     });
   }
 
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "Instability proximity computed",
     detail: `${formula}: nearest=${instabilityProximity.nearestBoundary} (${instabilityProximity.overallProximity.toFixed(2)}), QCP=${instabilityProximity.magneticQCP.toFixed(2)}, CDW=${instabilityProximity.cdwInstability.toFixed(2)}, SDW=${instabilityProximity.sdwInstability.toFixed(2)}, MIT=${instabilityProximity.metalInsulatorTransition.toFixed(2)}, chi=${instabilityProximity.magneticSusceptibilityPeak.toFixed(2)}, nesting=${instabilityProximity.fermiSurfaceNestingStrength.toFixed(2)}, DOS_peak=${instabilityProximity.dosEfPeakScore.toFixed(2)}, VHS=${instabilityProximity.vanHoveSingularityScore.toFixed(2)}, flatBand=${instabilityProximity.flatBandInstability.toFixed(2)}`,
@@ -4005,7 +4021,7 @@ export async function runFullPhysicsAnalysis(
   });
 
   const phononDispersion = earlyPhononDispersion;
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "Phonon dispersion computed",
     detail: `${formula}: ${phononDispersion.branches.length} branches along ${phononDispersion.qPath.join("-")}, imaginary=${phononDispersion.imaginaryFrequencies}, soft q-points=[${phononDispersion.softModeQPoints.join(",")}], gap=${phononDispersion.phononGap.toFixed(1)} cm⁻¹`,
@@ -4013,7 +4029,7 @@ export async function runFullPhysicsAnalysis(
   });
 
   const manyBodyCorrections = applyManyBodyCorrections(electronicStructure, coupling, formula);
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "GW many-body corrections applied",
     detail: `${formula}: Z=${manyBodyCorrections.quasiparticleWeight.toFixed(3)}, DOS renorm=${manyBodyCorrections.gwDOSRenormalization.toFixed(3)}, BW corr=${manyBodyCorrections.gwBandwidthCorrection.toFixed(3)}, vertex λ-corr=${manyBodyCorrections.vertexCorrectionLambda.toFixed(3)}, corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)}`,
@@ -4032,7 +4048,7 @@ export async function runFullPhysicsAnalysis(
     if (mbTc > 0 && Number.isFinite(mbTc)) {
       const mbWeight = 0.3;
       eliashberg.predictedTc = Math.round((1 - mbWeight) * eliashberg.predictedTc + mbWeight * mbTc);
-      emit("log", {
+      emitDetail("log", {
         phase: "phase-10",
         event: "Many-body Tc feedback applied",
         detail: `${formula}: vertex-corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)} → Tc(MB)=${mbTc.toFixed(1)}K, blended Tc ${preMBTc}K → ${eliashberg.predictedTc}K (30% weight)`,
@@ -4042,7 +4058,7 @@ export async function runFullPhysicsAnalysis(
   }
 
   const nestingFunction = computeNestingFunction(formula, electronicStructure);
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "Nesting function computed",
     detail: `${formula}: peak χ(q)=${nestingFunction.peakNestingValue.toFixed(3)} at ${nestingFunction.peakNestingQ}, avg=${nestingFunction.averageNesting.toFixed(3)}, anisotropy=${nestingFunction.nestingAnisotropy.toFixed(3)}, instability=${nestingFunction.dominantInstability}`,
@@ -4050,7 +4066,7 @@ export async function runFullPhysicsAnalysis(
   });
 
   const spinSusceptibility = computeDynamicSpinSusceptibility(formula, electronicStructure);
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "Dynamic spin susceptibility computed",
     detail: `${formula}: χ_static=${spinSusceptibility.chiStaticPeak.toFixed(2)}, χ_dynamic=${spinSusceptibility.chiDynamicPeak.toFixed(2)}, ω_sf=${spinSusceptibility.spinFluctuationEnergy.toFixed(2)} meV, ξ=${spinSusceptibility.correlationLength.toFixed(2)}a, Stoner=${spinSusceptibility.stonerEnhancement.toFixed(2)}, QCP=${spinSusceptibility.isNearQCP}`,
@@ -4095,7 +4111,7 @@ export async function runFullPhysicsAnalysis(
     });
   }
 
-  emit("log", {
+  emitDetail("log", {
     phase: "phase-10",
     event: "Advanced physics constraints evaluated",
     detail: `${formula}: nesting=${advancedConstraints.fermiSurfaceNesting.nestingStrength}(${advancedConstraints.fermiSurfaceNesting.score.toFixed(2)}), hybrid=${advancedConstraints.orbitalHybridization.hybridizationType}(${advancedConstraints.orbitalHybridization.score.toFixed(2)}), lifshitz=${advancedConstraints.lifshitzProximity.score.toFixed(2)}, QCP=${advancedConstraints.quantumCriticalFluctuation.qcpType}(${advancedConstraints.quantumCriticalFluctuation.score.toFixed(2)}), dim=${advancedConstraints.electronicDimensionality.dimensionClass}(anis=${advancedConstraints.electronicDimensionality.anisotropy.toFixed(1)}), softMode=${advancedConstraints.phononSoftMode.score.toFixed(2)}(stable=${advancedConstraints.phononSoftMode.isStable}), CT-delta=${advancedConstraints.chargeTransferEnergy.delta.toFixed(2)}(${advancedConstraints.chargeTransferEnergy.chargeTransferType}), epsilon=${advancedConstraints.latticePolarizability.dielectricConstant.toFixed(0)}(${advancedConstraints.latticePolarizability.screeningStrength})`,
