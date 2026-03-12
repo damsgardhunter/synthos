@@ -1,5 +1,6 @@
 import { isPathBreak, type DFTBandStructureResult, type BandEigenvalue, type BandCrossing, type BandInversion, type VanHoveSingularity, type EffectiveMass } from "./band-structure-calculator";
 import type { FermiSurfaceResult, FermiPocket, NestingVector, FermiSurfaceMLFeatures } from "../physics/fermi-surface-engine";
+import { getElementData, isTransitionMetal, isRareEarth, isActinide } from "../learning/elemental-data";
 
 export interface DFTFermiPocket {
   index: number;
@@ -332,9 +333,209 @@ function isCentrosymmetric(spaceGroup: string | undefined): boolean | null {
   return CENTROSYMMETRIC_SG.has(sg);
 }
 
+interface TopologyRuleContext {
+  topo: DFTTopologyFromBands;
+  maxSOCGap: number;
+  socStrength: number;
+  isMetallic: boolean;
+  linearCrossings: CrossingDispersion[];
+  weylPointCount: number;
+  nodalLineCandidates: number;
+  flatBandScore: number;
+  spaceGroup?: string;
+  crossingCount: number;
+  parityChanges: number;
+}
+
+interface TopologyRuleResult {
+  topologicalClass: string;
+  confidence: number;
+  evidence: string[];
+  chainStep: string;
+}
+
+interface TopologyRule {
+  name: string;
+  match: (ctx: TopologyRuleContext) => boolean;
+  apply: (ctx: TopologyRuleContext) => TopologyRuleResult;
+}
+
+const TOPOLOGY_RULES: TopologyRule[] = [
+  {
+    name: "strong-TI",
+    match: (ctx) => ctx.topo.hasBandInversion && ctx.maxSOCGap > 10 && ctx.socStrength > 0.2 && !ctx.isMetallic,
+    apply: (ctx) => {
+      let confidence = Math.min(0.95, 0.5 + ctx.topo.bandInversionCount * 0.1 + ctx.maxSOCGap / 200);
+      const evidence = [
+        `Band inversion with SOC gap ${ctx.maxSOCGap.toFixed(0)} meV`,
+        `${ctx.topo.bandInversionCount} band inversion(s) detected`,
+      ];
+      if (ctx.parityChanges > 3) {
+        evidence.push(`${ctx.parityChanges} parity changes (Z2 indicator)`);
+        confidence = Math.min(0.95, confidence + 0.1);
+      }
+      return { topologicalClass: "strong-topological-insulator", confidence, evidence, chainStep: "band-inversion+SOC-gap->TI" };
+    },
+  },
+  {
+    name: "topological-metal",
+    match: (ctx) => ctx.topo.hasBandInversion && ctx.maxSOCGap > 10 && ctx.socStrength > 0.15 && ctx.isMetallic,
+    apply: (ctx) => ({
+      topologicalClass: "topological-metal",
+      confidence: Math.min(0.9, 0.4 + ctx.topo.bandInversionCount * 0.1 + ctx.maxSOCGap / 300),
+      evidence: [`Metallic with band inversion and SOC gap ${ctx.maxSOCGap.toFixed(0)} meV`],
+      chainStep: "band-inversion+SOC-gap+metallic->TM",
+    }),
+  },
+  {
+    name: "Weyl-semimetal",
+    match: (ctx) => {
+      if (ctx.linearCrossings.length === 0 || !ctx.linearCrossings.some(c => Math.abs(c.energy) < 0.2)) return false;
+      return ctx.weylPointCount > 0 && ctx.socStrength > 0.1 && isCentrosymmetric(ctx.spaceGroup) === false;
+    },
+    apply: (ctx) => {
+      const evidence = [
+        `${ctx.weylPointCount} Weyl-like crossing(s) with linear dispersion`,
+        `Non-centrosymmetric space group (${ctx.spaceGroup}) allows Weyl nodes`,
+      ];
+      if (ctx.socStrength > 0.3) evidence.push("Strong SOC lifts degeneracy");
+      return {
+        topologicalClass: "Weyl-semimetal",
+        confidence: Math.min(0.9, 0.4 + ctx.weylPointCount * 0.15 + ctx.socStrength * 0.3),
+        evidence,
+        chainStep: "linear-crossing+SOC+broken-inversion->Weyl",
+      };
+    },
+  },
+  {
+    name: "Dirac-conservative",
+    match: (ctx) => {
+      if (ctx.linearCrossings.length === 0 || !ctx.linearCrossings.some(c => Math.abs(c.energy) < 0.2)) return false;
+      return ctx.weylPointCount > 0 && ctx.socStrength > 0.1 && isCentrosymmetric(ctx.spaceGroup) === null;
+    },
+    apply: (ctx) => ({
+      topologicalClass: "Dirac-semimetal",
+      confidence: Math.min(0.75, 0.3 + ctx.weylPointCount * 0.12 + ctx.socStrength * 0.2),
+      evidence: [`${ctx.weylPointCount} linear crossing(s) with SOC — classified as Dirac (space group unknown, cannot confirm broken inversion symmetry for Weyl)`],
+      chainStep: "linear-crossing+SOC+unknown-SG->Dirac-conservative",
+    }),
+  },
+  {
+    name: "Dirac-semimetal",
+    match: (ctx) => ctx.linearCrossings.length > 0 && ctx.linearCrossings.some(c => Math.abs(c.energy) < 0.2),
+    apply: (ctx) => {
+      const nearFermiLinear = ctx.linearCrossings.filter(c => Math.abs(c.energy) < 0.2);
+      const avgVel = nearFermiLinear.reduce((s, c) => s + c.velocity, 0) / nearFermiLinear.length;
+      return {
+        topologicalClass: "Dirac-semimetal",
+        confidence: Math.min(0.85, 0.35 + nearFermiLinear.length * 0.12),
+        evidence: [
+          `${nearFermiLinear.length} Dirac crossing(s) with linear dispersion near Fermi level`,
+          `Average Fermi velocity: ${avgVel.toFixed(2)} eV*A`,
+        ],
+        chainStep: "linear-crossing->Dirac",
+      };
+    },
+  },
+  {
+    name: "nodal-line-semimetal",
+    match: (ctx) => ctx.nodalLineCandidates > 0.5,
+    apply: (ctx) => {
+      const evidence = [`Nodal line indicator: ${ctx.nodalLineCandidates.toFixed(2)}`];
+      if (ctx.crossingCount > 4) evidence.push(`${ctx.crossingCount} crossings along high-symmetry path`);
+      return {
+        topologicalClass: "nodal-line-semimetal",
+        confidence: Math.min(0.85, 0.3 + ctx.nodalLineCandidates * 0.3),
+        evidence,
+        chainStep: "nodal-line-indicator->NLS",
+      };
+    },
+  },
+  {
+    name: "topological-flat-band",
+    match: (ctx) => ctx.topo.hasFlatBand && ctx.topo.flatBandCount > 0 && ctx.flatBandScore > 0.5 && ctx.topo.hasBandInversion,
+    apply: (ctx) => ({
+      topologicalClass: "topological-flat-band",
+      confidence: Math.min(0.8, 0.3 + ctx.topo.flatBandCount * 0.1 + ctx.flatBandScore * 0.3),
+      evidence: [`${ctx.topo.flatBandCount} flat band(s) with band inversion`],
+      chainStep: "flat-band+inversion->TFB",
+    }),
+  },
+  {
+    name: "flat-band-system",
+    match: (ctx) => ctx.topo.hasFlatBand && ctx.topo.flatBandCount > 0 && ctx.flatBandScore > 0.5,
+    apply: (ctx) => ({
+      topologicalClass: "flat-band-system",
+      confidence: Math.min(0.75, 0.25 + ctx.flatBandScore * 0.3),
+      evidence: [`${ctx.topo.flatBandCount} flat band(s) near Fermi level (score: ${ctx.flatBandScore.toFixed(2)})`],
+      chainStep: "flat-band->FBS",
+    }),
+  },
+  {
+    name: "weak-topological",
+    match: (ctx) => ctx.topo.hasBandInversion && ctx.socStrength > 0.1,
+    apply: (ctx) => ({
+      topologicalClass: "weak-topological",
+      confidence: Math.min(0.7, 0.2 + ctx.topo.bandInversionCount * 0.1),
+      evidence: [`${ctx.topo.bandInversionCount} band inversion(s) with moderate SOC`],
+      chainStep: "band-inversion+weak-SOC->WTI",
+    }),
+  },
+  {
+    name: "SOC-enhanced",
+    match: (ctx) => ctx.socStrength > 0.3 && ctx.topo.topologyScore > 0.2,
+    apply: (ctx) => ({
+      topologicalClass: "SOC-enhanced",
+      confidence: Math.min(0.6, 0.15 + ctx.socStrength * 0.3),
+      evidence: [`Strong SOC (${ctx.socStrength.toFixed(2)}) with topology score ${ctx.topo.topologyScore.toFixed(2)}`],
+      chainStep: "strong-SOC->SOC-enhanced",
+    }),
+  },
+];
+
+export function estimateOrbitalFractions(elements: string[]): { s: number; p: number; d: number } {
+  let sSum = 0, pSum = 0, dSum = 0;
+  let totalWeight = 0;
+
+  for (const el of elements) {
+    const data = getElementData(el);
+    if (!data) continue;
+    const ve = data.valenceElectrons || 1;
+    totalWeight += ve;
+    if (el === "H") {
+      sSum += ve;
+    } else if (["B", "C", "N", "O", "Si", "P", "S", "Se", "Te", "F", "Cl", "Br", "I"].includes(el)) {
+      pSum += ve;
+    } else if (isTransitionMetal(el)) {
+      dSum += ve;
+    } else if (isRareEarth(el) || isActinide(el)) {
+      dSum += ve;
+    } else {
+      const period = data.atomicNumber <= 2 ? 1 : data.atomicNumber <= 10 ? 2 : data.atomicNumber <= 18 ? 3 : 4;
+      if (period <= 2) sSum += ve;
+      else if (period === 3) pSum += ve;
+      else {
+        sSum += ve * 0.3;
+        pSum += ve * 0.7;
+      }
+    }
+  }
+
+  if (totalWeight > 0) {
+    sSum /= totalWeight;
+    pSum /= totalWeight;
+    dSum /= totalWeight;
+  } else {
+    sSum = 0.33;
+    pSum = 0.34;
+    dSum = 0.33;
+  }
+
+  return { s: sSum, p: pSum, d: dSum };
+}
+
 export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStrength: number, spaceGroup?: string): DFTTopologicalClassification {
   const chain: string[] = ["structure", "band-structure", "detect-crossings"];
-  const evidence: string[] = [];
 
   const crossings = classifyCrossingDispersion(bandResult);
   const socGaps = detectSOCGaps(bandResult);
@@ -342,7 +543,6 @@ export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStren
   const isosurface = computeFermiIsosurface(bandResult);
 
   const linearCrossings = crossings.filter(c => c.type === "linear");
-  const quadraticCrossings = crossings.filter(c => c.type === "quadratic");
 
   const socGapsAtFermi = socGaps.filter(g => g.atFermi);
   const maxSOCGap = socGapsAtFermi.length > 0 ? Math.max(...socGapsAtFermi.map(g => g.gapMeV)) : 0;
@@ -364,80 +564,33 @@ export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStren
 
   chain.push("classify-topology");
 
+  const ctx: TopologyRuleContext = {
+    topo,
+    maxSOCGap,
+    socStrength,
+    isMetallic: bandResult.isMetallicAlongPath,
+    linearCrossings,
+    weylPointCount,
+    nodalLineCandidates,
+    flatBandScore: bandResult.flatBandScore,
+    spaceGroup,
+    crossingCount: crossings.length,
+    parityChanges: topo.parityChanges,
+  };
+
   let topologicalClass = "trivial";
   let confidence = 0;
+  const evidence: string[] = [];
 
-  if (topo.hasBandInversion && maxSOCGap > 10 && socStrength > 0.2 && !bandResult.isMetallicAlongPath) {
-    topologicalClass = "strong-topological-insulator";
-    confidence = Math.min(0.95, 0.5 + topo.bandInversionCount * 0.1 + maxSOCGap / 200);
-    evidence.push(`Band inversion with SOC gap ${maxSOCGap.toFixed(0)} meV`);
-    evidence.push(`${topo.bandInversionCount} band inversion(s) detected`);
-    if (topo.parityChanges > 3) {
-      evidence.push(`${topo.parityChanges} parity changes (Z2 indicator)`);
-      confidence = Math.min(0.95, confidence + 0.1);
+  for (const rule of TOPOLOGY_RULES) {
+    if (rule.match(ctx)) {
+      const result = rule.apply(ctx);
+      topologicalClass = result.topologicalClass;
+      confidence = result.confidence;
+      evidence.push(...result.evidence);
+      chain.push(result.chainStep);
+      break;
     }
-    chain.push("band-inversion+SOC-gap->TI");
-  } else if (topo.hasBandInversion && maxSOCGap > 10 && socStrength > 0.15 && bandResult.isMetallicAlongPath) {
-    topologicalClass = "topological-metal";
-    confidence = Math.min(0.9, 0.4 + topo.bandInversionCount * 0.1 + maxSOCGap / 300);
-    evidence.push(`Metallic with band inversion and SOC gap ${maxSOCGap.toFixed(0)} meV`);
-    chain.push("band-inversion+SOC-gap+metallic->TM");
-  } else if (linearCrossings.length > 0 && linearCrossings.some(c => Math.abs(c.energy) < 0.2)) {
-    const nearFermiLinear = linearCrossings.filter(c => Math.abs(c.energy) < 0.2);
-
-    const centroSym = isCentrosymmetric(spaceGroup);
-    const canBeWeyl = centroSym === false;
-    const centroUnknown = centroSym === null;
-
-    if (weylPointCount > 0 && socStrength > 0.1 && canBeWeyl) {
-      topologicalClass = "Weyl-semimetal";
-      confidence = Math.min(0.9, 0.4 + weylPointCount * 0.15 + socStrength * 0.3);
-      evidence.push(`${weylPointCount} Weyl-like crossing(s) with linear dispersion`);
-      evidence.push(`Non-centrosymmetric space group (${spaceGroup}) allows Weyl nodes`);
-      if (socStrength > 0.3) evidence.push("Strong SOC lifts degeneracy");
-      chain.push("linear-crossing+SOC+broken-inversion->Weyl");
-    } else if (weylPointCount > 0 && socStrength > 0.1 && centroUnknown) {
-      topologicalClass = "Dirac-semimetal";
-      confidence = Math.min(0.75, 0.3 + weylPointCount * 0.12 + socStrength * 0.2);
-      evidence.push(`${weylPointCount} linear crossing(s) with SOC — classified as Dirac (space group unknown, cannot confirm broken inversion symmetry for Weyl)`);
-      chain.push("linear-crossing+SOC+unknown-SG->Dirac-conservative");
-    } else {
-      topologicalClass = "Dirac-semimetal";
-      confidence = Math.min(0.85, 0.35 + nearFermiLinear.length * 0.12);
-      evidence.push(`${nearFermiLinear.length} Dirac crossing(s) with linear dispersion near Fermi level`);
-      const avgVel = nearFermiLinear.reduce((s, c) => s + c.velocity, 0) / nearFermiLinear.length;
-      evidence.push(`Average Fermi velocity: ${avgVel.toFixed(2)} eV*A`);
-      chain.push("linear-crossing->Dirac");
-    }
-  } else if (nodalLineCandidates > 0.5) {
-    topologicalClass = "nodal-line-semimetal";
-    confidence = Math.min(0.85, 0.3 + nodalLineCandidates * 0.3);
-    evidence.push(`Nodal line indicator: ${nodalLineCandidates.toFixed(2)}`);
-    if (crossings.length > 4) evidence.push(`${crossings.length} crossings along high-symmetry path`);
-    chain.push("nodal-line-indicator->NLS");
-  } else if (topo.hasFlatBand && topo.flatBandCount > 0) {
-    const hasFBNearFermi = bandResult.flatBandScore > 0.5;
-    if (hasFBNearFermi && topo.hasBandInversion) {
-      topologicalClass = "topological-flat-band";
-      confidence = Math.min(0.8, 0.3 + topo.flatBandCount * 0.1 + bandResult.flatBandScore * 0.3);
-      evidence.push(`${topo.flatBandCount} flat band(s) with band inversion`);
-      chain.push("flat-band+inversion->TFB");
-    } else if (hasFBNearFermi) {
-      topologicalClass = "flat-band-system";
-      confidence = Math.min(0.75, 0.25 + bandResult.flatBandScore * 0.3);
-      evidence.push(`${topo.flatBandCount} flat band(s) near Fermi level (score: ${bandResult.flatBandScore.toFixed(2)})`);
-      chain.push("flat-band->FBS");
-    }
-  } else if (topo.hasBandInversion && socStrength > 0.1) {
-    topologicalClass = "weak-topological";
-    confidence = Math.min(0.7, 0.2 + topo.bandInversionCount * 0.1);
-    evidence.push(`${topo.bandInversionCount} band inversion(s) with moderate SOC`);
-    chain.push("band-inversion+weak-SOC->WTI");
-  } else if (socStrength > 0.3 && topo.topologyScore > 0.2) {
-    topologicalClass = "SOC-enhanced";
-    confidence = Math.min(0.6, 0.15 + socStrength * 0.3);
-    evidence.push(`Strong SOC (${socStrength.toFixed(2)}) with topology score ${topo.topologyScore.toFixed(2)}`);
-    chain.push("strong-SOC->SOC-enhanced");
   }
 
   if (topologicalClass === "trivial" && topo.topologyScore > 0.15) {
@@ -525,7 +678,7 @@ function computeChiralWinding(crossings: CrossingDispersion[], bandResult: DFTBa
   return Math.abs(signedSlopeSum) / slopeCount;
 }
 
-export function extractFermiPockets(bandResult: DFTBandStructureResult): DFTFermiPocket[] {
+export function extractFermiPockets(bandResult: DFTBandStructureResult, elements?: string[]): DFTFermiPocket[] {
   const pockets: DFTFermiPocket[] = [];
   if (!bandResult.eigenvalues.length || bandResult.nBands === 0) return pockets;
 
@@ -572,7 +725,11 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult): DFTFerm
     const bRange = bMax - bMin;
     const cylindrical = bRange < 0.3 ? 0.8 : bRange < 1.0 ? 0.5 : 0.2;
 
-    let orbChar = { s: 0.15, p: 0.25, d: 0.6 };
+    const stoichFallback = elements && elements.length > 0
+      ? estimateOrbitalFractions(elements)
+      : { s: 0.33, p: 0.34, d: 0.33 };
+
+    let orbChar = { ...stoichFallback };
 
     const fermiKpts = bandResult.eigenvalues.filter(kpt =>
       kpt.weights?.[b] && Math.abs(kpt.energies[b]) < 1.0
@@ -589,13 +746,6 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult): DFTFerm
       if (wTotal > 0.01) {
         orbChar = { s: sSum / wTotal, p: pSum / wTotal, d: dSum / wTotal };
       }
-    } else {
-      const dFrac = bandEnergies.filter(e => Math.abs(e.energy) < 2.0).length / bandEnergies.length;
-      orbChar = { s: 0.15, p: 0.25, d: Math.min(0.6, dFrac) };
-      const orbSum = orbChar.s + orbChar.p + orbChar.d;
-      orbChar.s /= orbSum;
-      orbChar.p /= orbSum;
-      orbChar.d /= orbSum;
     }
 
     pockets.push({
