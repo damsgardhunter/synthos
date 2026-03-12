@@ -713,7 +713,7 @@ function genomeToSynthesisVector(genome: SynthesisGenome, insights: MultiEngineI
 
   if (insights.topology) {
     if (insights.topology.topologicalScore > 0.5) {
-      coolRate = Math.min(coolRate, 100);
+      coolRate = Math.min(coolRate, 10);
       annealTime = Math.max(annealTime, 24);
     }
     if (insights.topology.socStrength > 0.3) {
@@ -765,11 +765,18 @@ function genomeToSynthesisVector(genome: SynthesisGenome, insights: MultiEngineI
   });
 }
 
+const HYDROGEN_SAFE_ATMOSPHERES = ["hydrogen", "argon", "forming-gas", "vacuum"];
+const OXIDIZING_ATMOSPHERES = new Set(["oxygen", "ammonia"]);
+
 function selectAtmosphere(genome: SynthesisGenome, insights: MultiEngineInsights): string {
   const mc = insights.materialClass.toLowerCase();
+  const counts = parseFormulaCounts(insights.formula);
+  const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
+  const hFraction = (counts["H"] || 0) / Math.max(1, totalAtoms);
+  const isHydrogenRich = hFraction > 0.3 || mc.includes("hydride");
 
   if (mc.includes("cuprate")) return "oxygen";
-  if (mc.includes("hydride")) return "hydrogen";
+  if (isHydrogenRich) return "hydrogen";
   if (mc.includes("nitride")) return "nitrogen";
 
   if (insights.pairing) {
@@ -779,7 +786,14 @@ function selectAtmosphere(genome: SynthesisGenome, insights: MultiEngineInsights
   }
 
   const idx = Math.floor(genome.atmosphereChoice * ATMOSPHERE_OPTIONS.length);
-  return ATMOSPHERE_OPTIONS[Math.min(idx, ATMOSPHERE_OPTIONS.length - 1)];
+  let choice = ATMOSPHERE_OPTIONS[Math.min(idx, ATMOSPHERE_OPTIONS.length - 1)];
+
+  if (isHydrogenRich && OXIDIZING_ATMOSPHERES.has(choice)) {
+    const safeIdx = Math.floor(genome.atmosphereChoice * HYDROGEN_SAFE_ATMOSPHERES.length);
+    choice = HYDROGEN_SAFE_ATMOSPHERES[Math.min(safeIdx, HYDROGEN_SAFE_ATMOSPHERES.length - 1)];
+  }
+
+  return choice;
 }
 
 function stableOxideFormula(el: string): string {
@@ -932,27 +946,29 @@ function genomeToSteps(genome: SynthesisGenome, insights: MultiEngineInsights): 
 
   if (genome.annealingIntensity > 0.3) {
     const annealTemp = sv.temperature * 0.6 + genome.annealingIntensity * sv.temperature * 0.2;
+    const clampedAnnealTemp = Math.min(annealTemp, sv.temperature * 0.8);
     steps.push({
       order: steps.length + 1,
       method: "anneal",
-      temperature: 0,
+      temperature: clampedAnnealTemp,
       pressure: 0,
       coolingRate: 0,
-      annealTemp: Math.min(annealTemp, sv.temperature * 0.8),
+      annealTemp: clampedAnnealTemp,
       duration: sv.annealTime,
       atmosphere: atmosphere,
-      notes: `Annealing for phase ordering and defect healing`,
+      notes: `Annealing at ${clampedAnnealTemp.toFixed(0)}K for phase ordering and defect healing`,
     });
   }
 
   if (insights.topology && insights.topology.topologicalScore > 0.4) {
+    const topoAnnealTemp = 300 + insights.topology.topologicalScore * 200;
     steps.push({
       order: steps.length + 1,
       method: "anneal",
-      temperature: 0,
+      temperature: topoAnnealTemp,
       pressure: 0,
-      coolingRate: Math.min(sv.coolingRate, 50),
-      annealTemp: 300 + insights.topology.topologicalScore * 200,
+      coolingRate: Math.min(sv.coolingRate, 10),
+      annealTemp: topoAnnealTemp,
       duration: 12 + genome.topologicalProtection * 36,
       atmosphere: "vacuum",
       notes: "Slow cool for topological surface state preservation",
