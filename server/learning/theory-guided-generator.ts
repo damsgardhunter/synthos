@@ -2,6 +2,38 @@ import type { DiscoveredTheory, DiscoveryFeedback } from "../theory/symbolic-phy
 import { getTheoryDatabase, generateDiscoveryFeedback } from "../theory/symbolic-physics-discovery";
 import type { CausalGraph, CausalEdge, CausalRule, DesignGuidance } from "../theory/causal-physics-discovery";
 import { getLatestGraph, getCausalRules } from "../theory/causal-physics-discovery";
+import { ELEMENTAL_DATA } from "./elemental-data";
+
+const ALKALI_Z = new Set([3, 11, 19, 37, 55, 87]);
+const ALKALINE_EARTH_Z = new Set([4, 12, 20, 38, 56, 88]);
+const LANTHANIDE_Z = new Set([57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]);
+const ACTINIDE_Z = new Set([89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103]);
+const METALLOID_Z = new Set([5, 14, 32, 33, 51, 52, 34]);
+const NONMETAL_Z = new Set([1, 6, 7, 8, 9, 15, 16, 17, 35, 53]);
+
+const _elementGroupCache = new Map<string, number | undefined>();
+
+function getElementGroupIndex(symbol: string): number | undefined {
+  if (_elementGroupCache.has(symbol)) return _elementGroupCache.get(symbol);
+
+  const data = ELEMENTAL_DATA[symbol];
+  if (!data) { _elementGroupCache.set(symbol, undefined); return undefined; }
+  const z = data.atomicNumber;
+  let idx: number | undefined;
+
+  if (ALKALI_Z.has(z)) idx = 0;
+  else if (ALKALINE_EARTH_Z.has(z)) idx = 1;
+  else if (z >= 21 && z <= 30) idx = 2;
+  else if (z >= 39 && z <= 48) idx = 3;
+  else if (z >= 72 && z <= 80) idx = 4;
+  else if (LANTHANIDE_Z.has(z) || ACTINIDE_Z.has(z)) idx = 5;
+  else if (NONMETAL_Z.has(z)) idx = 8;
+  else if (METALLOID_Z.has(z)) idx = 7;
+  else if (z >= 13) idx = 6;
+
+  _elementGroupCache.set(symbol, idx);
+  return idx;
+}
 
 export interface TheoryGeneratorBias {
   generatorWeightBoosts: Record<string, number>;
@@ -396,7 +428,7 @@ export function recordTheoryBiasOutcome(
 
   performanceHistory.push(record);
   if (performanceHistory.length > 50) {
-    performanceHistory = performanceHistory.slice(-50);
+    performanceHistory.splice(0, performanceHistory.length - 50);
   }
 
   totalBiasApplications++;
@@ -559,20 +591,8 @@ export function getRLBiasFromTheory(): {
     return { elementGroupBias, chemicalFamilyBias, hydrogenDensityBias, structureTypeBias };
   }
 
-  const ELEMENT_TO_GROUP: Record<string, number> = {
-    Li: 0, Na: 0, K: 0, Rb: 0, Cs: 0,
-    Be: 1, Mg: 1, Ca: 1, Sr: 1, Ba: 1,
-    Sc: 2, Ti: 2, V: 2, Cr: 2, Mn: 2, Fe: 2, Co: 2, Ni: 2, Cu: 2, Zn: 2,
-    Y: 3, Zr: 3, Nb: 3, Mo: 3, Ru: 3, Rh: 3, Pd: 3, Ag: 3,
-    Hf: 4, Ta: 4, W: 4, Re: 4, Os: 4, Ir: 4, Pt: 4, Au: 4,
-    La: 5, Ce: 5, Pr: 5, Nd: 5, Sm: 5, Gd: 5, Dy: 5, Er: 5, Yb: 5, Lu: 5,
-    Al: 6, Ga: 6, In: 6, Sn: 6, Tl: 6, Pb: 6, Bi: 6,
-    B: 7, Si: 7, Ge: 7, As: 7, Sb: 7, Te: 7, Se: 7,
-    H: 8, C: 8, N: 8, O: 8, F: 8, P: 8, S: 8, Cl: 8,
-  };
-
   for (const [el, boost] of Object.entries(bias.elementBoosts)) {
-    const groupIdx = ELEMENT_TO_GROUP[el];
+    const groupIdx = getElementGroupIndex(el);
     if (groupIdx !== undefined) {
       elementGroupBias[groupIdx] += boost;
     }
