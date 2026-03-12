@@ -1094,30 +1094,71 @@ function computeNoveltyScore(genome: SynthesisGenome, insights: MultiEngineInsig
   return Math.min(1.0, novelty);
 }
 
+interface PressureTcInterpolator {
+  getTcAtPressure(pressureGpa: number): number | null;
+}
+
+function buildPressureTcInterpolator(formula: string): PressureTcInterpolator {
+  let curvePoints: { pressure: number; Tc: number }[] = [];
+  try {
+    curvePoints = scanPressureTcCurve(formula, {
+      min: 0,
+      max: MAX_PRESSURE_GPA,
+      steps: 36,
+    });
+    curvePoints.sort((a, b) => a.pressure - b.pressure);
+  } catch {}
+
+  return {
+    getTcAtPressure(pressureGpa: number): number | null {
+      if (curvePoints.length === 0) return null;
+      let closest = curvePoints[0];
+      let bestDist = Math.abs(closest.pressure - pressureGpa);
+      for (let i = 1; i < curvePoints.length; i++) {
+        const dist = Math.abs(curvePoints[i].pressure - pressureGpa);
+        if (dist < bestDist) {
+          bestDist = dist;
+          closest = curvePoints[i];
+        }
+      }
+      if (bestDist > 15) return null;
+
+      let lo = -1, hi = -1;
+      for (let i = 0; i < curvePoints.length - 1; i++) {
+        if (curvePoints[i].pressure <= pressureGpa && curvePoints[i + 1].pressure >= pressureGpa) {
+          lo = i; hi = i + 1; break;
+        }
+      }
+      if (lo >= 0 && hi >= 0) {
+        const pLo = curvePoints[lo], pHi = curvePoints[hi];
+        const span = pHi.pressure - pLo.pressure;
+        if (span < 0.01) return pLo.Tc;
+        const t = (pressureGpa - pLo.pressure) / span;
+        return pLo.Tc + t * (pHi.Tc - pLo.Tc);
+      }
+      return closest.Tc > 0 ? closest.Tc : null;
+    },
+  };
+}
+
 function computeFitnessScore(
   route: { steps: SynthesisStep[]; feasibilityScore: number; noveltyScore: number },
   insights: MultiEngineInsights,
   bestKnownTc: number = 0,
-  genome?: SynthesisGenome
+  genome?: SynthesisGenome,
+  pressureInterpolator?: PressureTcInterpolator
 ): number {
   const genomePressureGpa = genome ? decodePressureGene(genome.pressureGene) : 0;
 
   let pressureTc = insights.predictedTc;
-  if (genome && genomePressureGpa > 0) {
-    try {
-      const curve = scanPressureTcCurve(insights.formula, {
-        min: Math.max(0, genomePressureGpa - 10),
-        max: genomePressureGpa + 10,
-        steps: 3,
-      });
-      const atPressure = curve.find(pt => Math.abs(pt.pressure - genomePressureGpa) <= 10);
-      if (atPressure && atPressure.Tc > 0) {
-        pressureTc = atPressure.Tc;
-      }
-    } catch {}
+  if (genome && genomePressureGpa > 0 && pressureInterpolator) {
+    const interpolated = pressureInterpolator.getTcAtPressure(genomePressureGpa);
+    if (interpolated !== null && interpolated > 0) {
+      pressureTc = interpolated;
+    }
   }
 
-  const adaptiveDenom = Math.max(100, bestKnownTc * 0.5);
+  const adaptiveDenom = Math.max(20, bestKnownTc * 0.8);
   const tcNorm = Math.min(1.0, pressureTc / adaptiveDenom);
 
   let stabilityAtPressure = 0.5;
@@ -1152,7 +1193,7 @@ function computeFitnessScore(
   const feasNorm = route.feasibilityScore;
   const novelNorm = route.noveltyScore;
 
-  const pressurePenalty = genomePressureGpa / 500;
+  const pressurePenalty = genomePressureGpa / MAX_PRESSURE_GPA;
 
   const rawFitness =
     0.4 * tcNorm +
@@ -1293,7 +1334,7 @@ function computeValenceSumError(formula: string): number {
   return bestError === Infinity ? 2.0 : bestError;
 }
 
-function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, bestKnownTc: number = 0): NovelSynthesisRoute {
+function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, bestKnownTc: number = 0, pressureInterpolator?: PressureTcInterpolator): NovelSynthesisRoute {
   const steps = genomeToSteps(genome, insights);
   const sv = genomeToSynthesisVector(genome, insights);
   const precursors = selectPrecursors(genome, insights);
@@ -1322,7 +1363,7 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
   const noveltyScore = computeNoveltyScore(genome, insights);
 
   const routeObj = { steps, feasibilityScore, noveltyScore };
-  const fitnessScore = computeFitnessScore(routeObj, insights, bestKnownTc, genome);
+  const fitnessScore = computeFitnessScore(routeObj, insights, bestKnownTc, genome, pressureInterpolator);
 
   const engineContributions = buildEngineContributions(insights);
   const rationale = buildRationale(genome, insights);
@@ -1358,22 +1399,24 @@ export function discoverNovelSynthesisPaths(
   }
   const currentBestKnownTc = discoveryStats.bestKnownTc;
 
+  const pressureInterp = buildPressureTcInterpolator(insights.formula);
+
   let population: NovelSynthesisRoute[] = [];
 
   for (const elite of eliteArchive) {
     if (population.length < Math.min(ELITE_ARCHIVE_SIZE, Math.floor(populationSize * 0.25))) {
       const mutated = mutateGenome(elite.genome, 0.1);
-      population.push(genomeToRoute(mutated, insights, currentBestKnownTc));
+      population.push(genomeToRoute(mutated, insights, currentBestKnownTc, pressureInterp));
     }
   }
 
   const basePath = optimizeSynthesisPath(insights.formula, insights.materialClass, insights.predictedTc);
   const baseGenome = randomGenome();
-  population.push(genomeToRoute(baseGenome, insights, currentBestKnownTc));
+  population.push(genomeToRoute(baseGenome, insights, currentBestKnownTc, pressureInterp));
 
   while (population.length < populationSize) {
     const genome = randomGenome();
-    population.push(genomeToRoute(genome, insights, currentBestKnownTc));
+    population.push(genomeToRoute(genome, insights, currentBestKnownTc, pressureInterp));
   }
 
   let bestEverFitness = 0;
@@ -1413,7 +1456,7 @@ export function discoverNovelSynthesisPaths(
         childGenome = randomGenome();
       }
 
-      newPop.push(genomeToRoute(childGenome, insights, currentBestKnownTc));
+      newPop.push(genomeToRoute(childGenome, insights, currentBestKnownTc, pressureInterp));
     }
 
     population = newPop;
