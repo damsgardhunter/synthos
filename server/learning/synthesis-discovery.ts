@@ -1292,7 +1292,10 @@ function buildRationale(genome: SynthesisGenome, insights: MultiEngineInsights):
   }
 
   if (insights.pressure && insights.pressure.optimalPressure > 50) {
-    rationale.push(`High-pressure synthesis at ${insights.pressure.optimalPressure} GPa followed by decompression route to retain metastable structure`);
+    const decompressionAdvice = insights.pressure.optimalPressure > 100
+      ? `; quench to <200K before decompression to freeze atoms into high-pressure lattice positions`
+      : ``;
+    rationale.push(`High-pressure synthesis at ${insights.pressure.optimalPressure} GPa followed by controlled decompression route to retain metastable structure${decompressionAdvice}`);
   }
 
   if (insights.defect && insights.defect.bestTcBoost > 0.05) {
@@ -1354,11 +1357,17 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
   const feasResult = checkSynthesisFeasibility(sv);
   let feasibilityScore = Math.max(0, 1 - feasResult.feasibilityScore / 10);
 
+  let toxicityHardReject = false;
   try {
     const gateResult = evaluateSynthesisGate(insights.formula);
     feasibilityScore = feasibilityScore * 0.4 + gateResult.compositeScore * 0.6;
     if (gateResult.chemicalDistance.toxicElements.length > 0) {
-      feasibilityScore *= (1 - gateResult.chemicalDistance.toxicityPenalty * 0.3);
+      if (gateResult.chemicalDistance.toxicityPenalty > 0.7) {
+        toxicityHardReject = true;
+        feasibilityScore *= 0.1;
+      } else {
+        feasibilityScore *= (1 - gateResult.chemicalDistance.toxicityPenalty * 0.3);
+      }
     }
     if (gateResult.chemicalDistance.isOnePot) {
       feasibilityScore = Math.min(1, feasibilityScore + 0.05);
@@ -1392,7 +1401,7 @@ function genomeToRoute(genome: SynthesisGenome, insights: MultiEngineInsights, b
     engineContributions,
     rationale,
     synthesisVector: sv,
-    classification: feasResult.classification,
+    classification: toxicityHardReject ? "hazardous" : feasResult.classification,
     decodedPressureGpa: Math.round(decodePressureGene(genome.pressureGene) * 10) / 10,
   };
 }
@@ -1484,14 +1493,17 @@ export function discoverNovelSynthesisPaths(
     bestEverFitness = population[0].fitnessScore;
   }
 
-  for (const candidate of population.slice(0, 5)) {
+  const top5 = population.slice(0, 5);
+
+  for (const candidate of top5) {
     updateEliteArchive(candidate);
   }
 
-  const topRoutes = population
-    .slice(0, 5)
-    .filter(r => r.classification !== "unrealistic" || r.fitnessScore > 0.5)
-    .filter(r => r.feasibilityScore >= HARD_GATE_THRESHOLD);
+  const topRoutes = top5.filter(r =>
+    (r.classification !== "unrealistic" || r.fitnessScore > 0.5) &&
+    r.classification !== "hazardous" &&
+    r.feasibilityScore >= HARD_GATE_THRESHOLD
+  );
 
   if (topRoutes.length === 0 && population.length > 0) {
     topRoutes.push(population[0]);
