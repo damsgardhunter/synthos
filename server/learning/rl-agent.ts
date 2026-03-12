@@ -84,6 +84,8 @@ interface RLState {
   cycleNumber: number;
 }
 
+const PNICTOGEN_ELEMENTS = new Set(["N", "P", "As", "Sb", "Bi"]);
+
 const CHEMICAL_FAMILY_ACTIONS = [
   { name: "hydride", hostGroups: [5, 1], anionGroups: [8, 9], biasStructures: [6, 7, 8, 20] },
   { name: "intermetallic", hostGroups: [2, 3, 4], anionGroups: [6, 7], biasStructures: [0, 14, 5, 21, 28, 29] },
@@ -93,6 +95,7 @@ const CHEMICAL_FAMILY_ACTIONS = [
   { name: "chalcogenide", hostGroups: [2, 3, 4], anionGroups: [7], biasStructures: [11, 8, 25] },
   { name: "kagome-metal", hostGroups: [2, 3], anionGroups: [6, 7], biasStructures: [9, 23, 30] },
   { name: "oxide-perovskite", hostGroups: [1, 5], anionGroups: [8], biasStructures: [3, 12, 34] },
+  { name: "nickelate", hostGroups: [2, 5], anionGroups: [8], biasStructures: [3, 33, 34] },
 ] as const;
 
 interface RLAction {
@@ -200,7 +203,7 @@ const KNOWN_SC_MOTIFS = new Set([
 
 const KNOWN_FAMILIES = new Set([
   "hydride", "intermetallic", "layered-pnictide", "boride",
-  "cuprate", "chalcogenide", "kagome-metal", "oxide-perovskite",
+  "cuprate", "chalcogenide", "kagome-metal", "oxide-perovskite", "nickelate",
 ]);
 
 const MOTIF_FAMILY_MAP: Record<string, string[]> = {
@@ -214,8 +217,9 @@ const MOTIF_FAMILY_MAP: Record<string, string[]> = {
   "FCC-hydride": ["hydride"],
   "layered-cuprate": ["cuprate"],
   "infinite-layer": ["cuprate"],
-  "Ruddlesden-Popper": ["cuprate", "oxide-perovskite"],
-  "nickelate": ["cuprate", "oxide-perovskite"],
+  "Ruddlesden-Popper": ["cuprate", "oxide-perovskite", "nickelate"],
+  "nickelate": ["nickelate"],
+  "infinite-layer-nickelate": ["nickelate"],
   "Heusler": ["intermetallic"],
   "Chevrel": ["chalcogenide", "intermetallic"],
   "skutterudite": ["intermetallic"],
@@ -291,13 +295,25 @@ function computeMotifValidityScore(context: PhysicsAwareRewardContext): number {
   return 0.2;
 }
 
+const MOTIF_FAMILY_MAP_LOWER = new Map<string, string[]>();
+const MOTIF_FAMILY_KEYS_BY_LENGTH: string[] = [];
+(function initMotifFamilyLookup() {
+  for (const [key, families] of Object.entries(MOTIF_FAMILY_MAP)) {
+    MOTIF_FAMILY_MAP_LOWER.set(key.toLowerCase(), families);
+    MOTIF_FAMILY_KEYS_BY_LENGTH.push(key.toLowerCase());
+  }
+  MOTIF_FAMILY_KEYS_BY_LENGTH.sort((a, b) => b.length - a.length);
+})();
+
 function findMotifFamilies(motifName: string): string[] | null {
   const exact = MOTIF_FAMILY_MAP[motifName];
   if (exact) return exact;
   const motifLower = motifName.toLowerCase();
-  for (const [key, families] of Object.entries(MOTIF_FAMILY_MAP)) {
-    if (motifLower.includes(key.toLowerCase()) || key.toLowerCase().includes(motifLower)) {
-      return families;
+  const directLower = MOTIF_FAMILY_MAP_LOWER.get(motifLower);
+  if (directLower) return directLower;
+  for (const key of MOTIF_FAMILY_KEYS_BY_LENGTH) {
+    if (motifLower.includes(key) || key.includes(motifLower)) {
+      return MOTIF_FAMILY_MAP_LOWER.get(key)!;
     }
   }
   return null;
@@ -348,6 +364,11 @@ function computeElectronCountStabilityScore(context: PhysicsAwareRewardContext):
         if (context.dElectronCount === 6) score = Math.max(score, 1.0);
         else if (context.dElectronCount >= 5 && context.dElectronCount <= 7) score = Math.max(score, 0.7);
         else score = Math.min(score, 0.3);
+      }
+      if (motifLower.includes("nickelate") || (context.chemicalFamily === "nickelate")) {
+        if (context.dElectronCount === 8 || context.dElectronCount === 9) score = Math.max(score, 1.0);
+        else if (context.dElectronCount === 7) score = Math.max(score, 0.6);
+        else score = Math.min(score, 0.2);
       }
     }
   }
@@ -486,6 +507,7 @@ export class RLChemicalSpaceAgent {
   private elementSuccessRates: Map<string, { successes: number; total: number }> = new Map();
   private pairSuccessRates: Map<string, { successes: number; total: number; avgTc: number }> = new Map();
   private bestActionSequence: { action: RLAction; reward: number }[] = [];
+  private motifPickHistory: Map<string, { count: number; lastBestTc: number }> = new Map();
 
   constructor() {
     this.policy = {
@@ -552,6 +574,7 @@ export class RLChemicalSpaceAgent {
     this.policy.chemicalFamily[2] = 0.25;
     this.policy.chemicalFamily[3] = 0.2;
     this.policy.chemicalFamily[4] = 0.3;
+    this.policy.chemicalFamily[8] = 0.25;
 
     for (const prior of KNOWN_PAIR_PRIORS) {
       const key = this.makeElementPairKey(prior.el1, prior.el2);
@@ -559,7 +582,43 @@ export class RLChemicalSpaceAgent {
     }
   }
 
+  private lastPairPriorAttenuation = 0;
+
+  private attenuatePairPriorsByMAE(): void {
+    const now = Date.now();
+    if (now - this.lastPairPriorAttenuation < 60_000) return;
+    this.lastPairPriorAttenuation = now;
+    try {
+      const { getPerFamilyBias } = require("./model-diagnostics");
+      const biases = getPerFamilyBias() as Array<{ family: string; meanAbsError: number }>;
+      const highMAEFamilies = new Set<string>();
+      for (const b of biases) {
+        if (b.meanAbsError > 40) highMAEFamilies.add(b.family.toLowerCase());
+      }
+      if (highMAEFamilies.size === 0) return;
+      const FAMILY_ELEMENT_MAP: Record<string, Set<string>> = {
+        hydride: new Set(["H"]),
+        cuprate: new Set(["Cu", "O"]),
+        nickelate: new Set(["Ni", "O"]),
+        "iron-pnictide": new Set(["Fe", "As"]),
+        "layered-pnictide": new Set(["Fe", "As", "P"]),
+        boride: new Set(["B"]),
+      };
+      for (const prior of KNOWN_PAIR_PRIORS) {
+        const key = this.makeElementPairKey(prior.el1, prior.el2);
+        for (const [famName, famElements] of Object.entries(FAMILY_ELEMENT_MAP)) {
+          if (highMAEFamilies.has(famName) && (famElements.has(prior.el1) || famElements.has(prior.el2))) {
+            const current = this.policy.elementPairSpecific.get(key) ?? prior.bias;
+            this.policy.elementPairSpecific.set(key, current * 0.7);
+            break;
+          }
+        }
+      }
+    } catch {}
+  }
+
   selectAction(state: RLState): RLAction {
+    this.attenuatePairPriorsByMAE();
     const stateFeatures = stateToFeatures(state);
     const stagnationBoost = Math.min(0.5, state.stagnationCycles * 0.02);
 
@@ -1043,6 +1102,12 @@ export class RLChemicalSpaceAgent {
         const totalAtoms = Object.values(elCounts).reduce((s, n) => s + n, 0);
         if (maxCount > 12 || totalAtoms > 20) continue;
 
+        const selectedFamily = CHEMICAL_FAMILY_ACTIONS[action.chemicalFamily];
+        if (selectedFamily.name === "layered-pnictide") {
+          const hasPnictogen = elKeys.some(e => PNICTOGEN_ELEMENTS.has(e));
+          if (!hasPnictogen) continue;
+        }
+
         const isHydride = /(?<![a-z])H(?![a-z])/.test(formula);
         if (isHydride && hydrideCount >= maxHydrides) continue;
         seen.add(formula);
@@ -1142,6 +1207,22 @@ export class RLChemicalSpaceAgent {
       motifScore = computeMotifValidityScore(physicsContext);
       const familyScore = computeFamilyConsistencyScore(physicsContext);
       motifScore = motifScore * 0.6 + familyScore * 0.4;
+
+      if (physicsContext.motifName) {
+        const history = this.motifPickHistory.get(physicsContext.motifName);
+        if (history && history.count > 3) {
+          const repeatsOverThreshold = history.count - 3;
+          const stagnationDecay = Math.max(0.3, 1.0 - repeatsOverThreshold * 0.1);
+          if (safeTc <= history.lastBestTc) {
+            motifScore *= stagnationDecay;
+          }
+        }
+        const prev = this.motifPickHistory.get(physicsContext.motifName) || { count: 0, lastBestTc: 0 };
+        this.motifPickHistory.set(physicsContext.motifName, {
+          count: prev.count + 1,
+          lastBestTc: Math.max(prev.lastBestTc, safeTc),
+        });
+      }
     }
 
     let electronTopologyScore = 0;
