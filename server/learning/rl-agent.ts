@@ -966,7 +966,9 @@ export class RLChemicalSpaceAgent {
     for (const idx of indices) {
       const exp = buffer[idx];
       const advantage = exp.reward - baseline;
-      const decay = Math.pow(this.gamma, (buffer.length - idx) / buffer.length);
+      const effectiveWindow = Math.min(buffer.length, 100);
+      const age = Math.min(buffer.length - idx, effectiveWindow);
+      const decay = Math.pow(this.gamma, age);
 
       if (exp.action.elementGroup1 >= 0 && exp.action.elementGroup1 < this.policy.elementGroup.length) {
         this.policy.elementGroup[exp.action.elementGroup1] += lr * advantage * decay;
@@ -1069,6 +1071,9 @@ export class RLChemicalSpaceAgent {
     }
 
     if (elements.length >= 2) {
+      const pairDeltas = new Map<string, number>();
+      const lr = this.learningRate * 0.3;
+
       for (let i = 0; i < elements.length; i++) {
         for (let j = i + 1; j < elements.length; j++) {
           const pair = this.makeElementPairKey(elements[i], elements[j]);
@@ -1078,19 +1083,24 @@ export class RLChemicalSpaceAgent {
           stats.avgTc = (stats.avgTc * (stats.total - 1) + safeTc) / stats.total;
           this.pairSuccessRates.set(pair, stats);
 
-          const currentBias = this.policy.elementPairSpecific.get(pair) ?? 0;
-          const lr = this.learningRate * 0.3;
+          let delta = 0;
           if (safeTc > 50) {
-            const tcBonus = Math.min(0.5, (safeTc - 50) / 400);
-            this.policy.elementPairSpecific.set(pair, currentBias + lr * tcBonus);
+            delta = lr * Math.min(0.5, (safeTc - 50) / 400);
           } else if (safeTc < 5 && stats.total > 5) {
-            this.policy.elementPairSpecific.set(pair, Math.max(-0.3, currentBias - lr * 0.1));
+            delta = -lr * 0.1;
           }
-
           if (rejectCategory === "chemistry_reject" || rejectCategory === "stability_reject") {
-            this.policy.elementPairSpecific.set(pair, Math.max(-0.5, currentBias - lr * 0.15));
+            delta -= lr * 0.15;
+          }
+          if (delta !== 0) {
+            pairDeltas.set(pair, (pairDeltas.get(pair) || 0) + delta);
           }
         }
+      }
+
+      for (const [pair, delta] of pairDeltas) {
+        const current = this.policy.elementPairSpecific.get(pair) ?? 0;
+        this.policy.elementPairSpecific.set(pair, Math.max(-0.5, Math.min(5.0, current + delta)));
       }
     }
   }

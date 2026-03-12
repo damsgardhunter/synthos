@@ -1141,7 +1141,7 @@ async function runPhase6_Discovery() {
     await updatePhaseStatus(6, "active", prevProgress, prevPredCount + totalPredictionsMade);
     if (!shouldContinue()) return;
 
-    const generated = await generateNovelFormulas(emit, allInsights.slice(-10), undefined, currentStrategyHint || undefined);
+    const generated = await generateNovelFormulas(emit, allInsights.slice(-10), undefined, currentStrategyHint || undefined, rlAgent.getStats().rejectionCategories);
     totalPredictionsMade += generated;
 
     const predCount = (await storage.getNovelPredictions()).length;

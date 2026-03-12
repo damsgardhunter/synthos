@@ -207,7 +207,8 @@ export async function generateNovelFormulas(
   emit: EventEmitter,
   insights: string[],
   targetApp?: string,
-  strategyHint?: string
+  strategyHint?: string,
+  rejectionCategories?: Record<string, number>
 ): Promise<number> {
   await loadRecentlyGenerated();
   const application = targetApp || getNextTargetApplication();
@@ -240,6 +241,21 @@ export async function generateNovelFormulas(
 
   if (chemicalSpaceExpansionMode) {
     strategyContext += `\n\nCHEMICAL SPACE EXPANSION MODE ACTIVE: The search has stagnated severely. You MUST incorporate elements rarely used in superconductor design. Specifically include at least 2 of: Sc, Hf, Zr, Ta, Re, Os, Ir, Ru, Rh, Pd, Pt, Ga, Ge, In, Tl, Cd, Ag, Au, Th, U, Ce, Pr, Nd, Sm, Eu, Gd, Dy, Er, Yb, Lu. Design ternary and quaternary compositions mixing these rare elements with known SC-active elements (Cu, Fe, Nb, B, N, H). Prioritize unexplored stoichiometries and crystal structure types (Laves phases, sigma phases, Heusler alloys, skutterudites, filled pyrochlores).`;
+  }
+
+  if (rejectionCategories) {
+    const totalRejects = Object.values(rejectionCategories).reduce((s, v) => s + v, 0);
+    if (totalRejects > 20) {
+      const sorted = Object.entries(rejectionCategories).sort((a, b) => b[1] - a[1]);
+      const topRejects = sorted.slice(0, 5).map(([cat, n]) => `${cat}: ${n}`).join(", ");
+      const chemRejects = rejectionCategories["chemistry_reject"] || 0;
+      const stabilityRejects = rejectionCategories["stability_reject"] || 0;
+      const failRate = chemRejects + stabilityRejects;
+      strategyContext += `\n\nREJECTION FEEDBACK: Out of ${totalRejects} total rejections, the top categories are: ${topRejects}.`;
+      if (failRate > totalRejects * 0.5) {
+        strategyContext += ` WARNING: Over 50% of rejections are chemistry/stability failures. The current element combinations are producing unphysical or unstable compositions. Shift toward well-established structural families (perovskites, layered cuprates, clathrate hydrides, ThCr2Si2-type) and avoid exotic multi-element combinations that lack known analogues.`;
+      }
+    }
   }
 
   let exclusionContext = "";
