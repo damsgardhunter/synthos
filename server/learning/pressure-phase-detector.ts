@@ -40,7 +40,7 @@ export interface PhaseTransitionStats {
   transitionsByType: Record<TransitionType, number>;
   avgConfidence: number;
   highConfidenceCount: number;
-  pressureRangeDistribution: { low: number; mid: number; high: number };
+  pressureRangeDistribution: { low: number; midDAC: number; highDAC: number; beyondDAC: number };
   recentTransitions: PhaseTransition[];
 }
 
@@ -94,9 +94,12 @@ function computePressureCurve(formula: string): PressureDataPoint[] {
         ? gnnResult.bandgap
         : features.bandGap ?? 0;
 
-      const stability = gnnResult
+      let stability = gnnResult
         ? gnnResult.stabilityProbability
         : features.stability ?? 0.5;
+      if (stability > 1.0 || stability < 0.0) {
+        stability = stability <= 0.05 ? 0.8 : stability <= 0.1 ? 0.5 : 0.2;
+      }
 
       const lambda = gnnResult
         ? gnnResult.lambda
@@ -203,7 +206,7 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
           pressureStart: curve[i].pressureGpa,
           pressureEnd: curve[i + 2] ? curve[i + 2].pressureGpa : pEnd,
           type: "tc_maximum",
-          confidence: Math.min(1.0, peakTc / 50),
+          confidence: Math.min(1.0, peakTc / Math.max(30, maxTcInCurve * 0.5)),
           magnitude: peakTc,
           details: `Tc dome peak: ${peakTc.toFixed(1)} K at ${peakP.toFixed(0)} GPa (dTc/dP sign change: ${dTcdP[i].derivative.toFixed(3)} -> ${dTcdP[i + 1].derivative.toFixed(3)})`,
           detectedAt: now,
@@ -256,7 +259,7 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
     const curr = curve[i];
 
     if (prev.bandgap > BANDGAP_OPEN_THRESHOLD && curr.bandgap < BANDGAP_CLOSE_THRESHOLD) {
-      const confidence = Math.min(1.0, prev.bandgap / 1.0);
+      const confidence = Math.min(1.0, prev.bandgap / 3.0);
       transitions.push({
         formula,
         pressureStart: prev.pressureGpa,
@@ -270,7 +273,7 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
     }
 
     if (prev.bandgap < BANDGAP_CLOSE_THRESHOLD && curr.bandgap > BANDGAP_OPEN_THRESHOLD) {
-      const confidence = Math.min(1.0, curr.bandgap / 1.0);
+      const confidence = Math.min(1.0, curr.bandgap / 3.0);
       transitions.push({
         formula,
         pressureStart: prev.pressureGpa,
@@ -313,7 +316,7 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
         pressureStart: curve[i - 1].pressureGpa,
         pressureEnd: curve[i + 1].pressureGpa,
         type: "tc_maximum",
-        confidence: Math.min(1.0, (peakTc - Math.max(leftTc, rightTc)) / 20),
+        confidence: Math.min(1.0, (peakTc - Math.max(leftTc, rightTc)) / Math.max(10, peakTc * 0.3)),
         magnitude: peakTc,
         details: `Tc local maximum: ${peakTc.toFixed(1)} K at ${curve[i].pressureGpa} GPa (neighbors: ${leftTc.toFixed(1)}, ${rightTc.toFixed(1)} K)`,
         detectedAt: now,
@@ -330,7 +333,7 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
         pressureStart: prev.pressureGpa,
         pressureEnd: curr.pressureGpa,
         type: "superconducting_onset",
-        confidence: Math.min(1.0, curr.tc / 20),
+        confidence: Math.min(1.0, curr.tc / Math.max(10, maxTcInCurve * 0.3)),
         magnitude: curr.tc - prev.tc,
         details: `Superconducting onset: Tc rises from ${prev.tc.toFixed(1)} to ${curr.tc.toFixed(1)} K at ${curr.pressureGpa} GPa`,
         detectedAt: now,
@@ -409,7 +412,11 @@ function deduplicateTransitions(transitions: PhaseTransition[]): PhaseTransition
         Math.abs(r.pressureEnd - t.pressureEnd) < 30;
     });
     if (overlap) {
-      if (t.confidence > overlap.confidence) {
+      const tGroup = RELATED_TYPES[t.type] ?? null;
+      const shouldReplace = tGroup === "enthalpy_group"
+        ? (t.type === "structural" && overlap.type !== "structural") || (t.confidence > overlap.confidence && t.type === overlap.type)
+        : t.confidence > overlap.confidence;
+      if (shouldReplace) {
         const idx = result.indexOf(overlap);
         result[idx] = t;
       }
@@ -448,12 +455,13 @@ export function getPhaseTransitionStats(): PhaseTransitionStats {
 
   const highConfidenceCount = allTransitions.filter(t => t.confidence > 0.7).length;
 
-  let low = 0, mid = 0, high = 0;
+  let low = 0, midDAC = 0, highDAC = 0, beyondDAC = 0;
   for (const t of allTransitions) {
     const midPressure = (t.pressureStart + t.pressureEnd) / 2;
     if (midPressure < 50) low++;
-    else if (midPressure < 200) mid++;
-    else high++;
+    else if (midPressure < 100) midDAC++;
+    else if (midPressure < 250) highDAC++;
+    else beyondDAC++;
   }
 
   const recentTransitions = [...allTransitions]
@@ -466,7 +474,7 @@ export function getPhaseTransitionStats(): PhaseTransitionStats {
     transitionsByType,
     avgConfidence: Math.round(avgConfidence * 1000) / 1000,
     highConfidenceCount,
-    pressureRangeDistribution: { low, mid, high },
+    pressureRangeDistribution: { low, midDAC, highDAC, beyondDAC },
     recentTransitions,
   };
 }
