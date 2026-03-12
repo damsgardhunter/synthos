@@ -801,22 +801,53 @@ async function updateCandidatePhysics(
     }
     if (allData.eliashberg) {
       const tcRange = allData.eliashberg.confidenceBand;
-      updates.uncertaintyEstimate = tcRange
-        ? (tcRange[1] - tcRange[0]) / (allData.eliashberg.predictedTc || 1)
+      const predictedTc = allData.eliashberg.predictedTc || 1;
+      const bandwidthCoV = tcRange
+        ? (tcRange[1] - tcRange[0]) / predictedTc
         : 0.5;
+
+      const lambda = allData.coupling?.lambda ?? 0;
+      const corrRatio = allData.correlation?.ratio ?? 0;
+      const metalScore = allData.electronic?.metallicity ?? 0.5;
+      const hasMott = allData.competingPhases?.some((p: any) => p.type === "Mott") ?? false;
+      const isMottInsulator = (hasMott && corrRatio > 0.7) || corrRatio > 0.85;
+      const isStronglyCorrelated = corrRatio > 0.7;
+      const isNonMetallic = metalScore < 0.2;
+      const isSemiMetallic = metalScore >= 0.2 && metalScore < 0.4;
+
+      let stageDiscount = stage >= 3 ? 0.0 : stage >= 2 ? 0.1 : 0.2;
+      let correlationPenalty = isStronglyCorrelated ? 0.25 : corrRatio > 0.4 ? 0.1 : 0.0;
+      let metallicityPenalty = isNonMetallic ? 0.4 : isSemiMetallic ? 0.2 : 0.0;
+      let couplingPenalty = lambda > 2.5 ? 0.15 : lambda > 1.5 ? 0.05 : 0.0;
+      let marginalMetallicityPenalty = allData.marginalMetallicity ? 0.15 : 0.0;
+      let mottPenalty = isMottInsulator ? 0.3 : 0.0;
+
+      const compositeUncertainty = Math.max(0.05, Math.min(0.95,
+        0.4 * bandwidthCoV +
+        0.15 * stageDiscount +
+        0.15 * correlationPenalty +
+        0.1 * metallicityPenalty +
+        0.1 * couplingPenalty +
+        0.05 * marginalMetallicityPenalty +
+        0.05 * mottPenalty
+      ));
+
+      updates.uncertaintyEstimate = compositeUncertainty;
+      updates.uncertaintyBreakdown = {
+        bandwidthCoV: Math.round(bandwidthCoV * 1000) / 1000,
+        stageDiscount,
+        correlationPenalty,
+        metallicityPenalty,
+        couplingPenalty,
+        marginalMetallicityPenalty,
+        mottPenalty,
+        tcBandLow: tcRange?.[0] ?? null,
+        tcBandHigh: tcRange?.[1] ?? null,
+      };
 
       let eliashbergTc = allData.eliashberg.predictedTc;
       if (Number.isFinite(eliashbergTc) && eliashbergTc > 0) {
         const currentTc = physicsData._currentPredictedTc ?? 0;
-        const lambda = allData.coupling?.lambda ?? 0;
-
-        const corrRatio = allData.correlation?.ratio ?? 0;
-        const metalScore = allData.electronic?.metallicity ?? 0.5;
-        const hasMott = allData.competingPhases?.some((p: any) => p.type === "Mott") ?? false;
-        const isMottInsulator = (hasMott && corrRatio > 0.7) || corrRatio > 0.85;
-        const isStronglyCorrelated = corrRatio > 0.7;
-        const isNonMetallic = metalScore < 0.2;
-        const isSemiMetallic = metalScore >= 0.2 && metalScore < 0.4;
 
         if (isNonMetallic) {
           eliashbergTc = 0;
