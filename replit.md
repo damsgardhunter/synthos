@@ -706,6 +706,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - Novel prototype insertions now use `"novel_prototype"` generator source (was `"motif_diffusion"`). Strategy-analyzer can now track and reward structural invention as a distinct generator type.
 - **Novel Prototype → Combinatorial Pipeline (engine.ts)**:
   - `suggestedElements` from LLM-generated novel prototypes are now fed directly into `findOptimalRegion()` to generate a fleet of combinatorial candidates in the new prototype's chemical space. Up to 3 optimal compositions per element set are inserted with `"novel_prototype"` source tag and `[novel-prototype-combinatorial]` notes.
+- **Symmetry-Enforced Lattice Ratios (structure-predictor.ts)**:
+  - After clamping LLM-proposed lattice ratios, a symmetry enforcement block forces `b=a, c=a` for cubic/rhombohedral and `b=a` for tetragonal/hexagonal/trigonal. Prevents the LLM from proposing e.g. Pm-3m with a=1.0, b=1.5, c=2.0 which would crash DFT relaxation or produce unphysical GNN embeddings.
+- **Stoichiometry Template Diversity (structure-predictor.ts)**:
+  - `runNovelPrototypeGeneration` now uses 7 stoichiometry templates (ABO3, A2BO4, AB2X3, AB3X, ABX2, A2B2X7, A3BX) instead of hardcoding count=1 for the first element. Enables generation of La2CuO4-type prototypes where the A-site has multiplicity >1.
+- **Canonical Formula Normalization in Discovery (structure-predictor.ts)**:
+  - Both `runNovelPrototypeGeneration` and `runGenerativeStructureDiscovery` now canonicalize formulas via `canonicalizeFormula()` before storage lookup and insertion. Prevents BaCu2O3 vs Cu2BaO3 dedup misses.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

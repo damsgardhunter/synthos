@@ -1655,6 +1655,17 @@ Return JSON with these fields. Keep physics_rationale to exactly one sentence to
     latticeB = Math.max(0.5, Math.min(10.0, latticeB));
     latticeC = Math.max(0.5, Math.min(10.0, latticeC));
 
+    const csLower = crystalSystem.toLowerCase();
+    if (csLower === "cubic") {
+      latticeB = latticeA;
+      latticeC = latticeA;
+    } else if (csLower === "tetragonal" || csLower === "hexagonal" || csLower === "trigonal") {
+      latticeB = latticeA;
+    } else if (csLower === "rhombohedral") {
+      latticeB = latticeA;
+      latticeC = latticeA;
+    }
+
     const validSG = isValidSpaceGroup(spaceGroup) ? spaceGroup : "P1";
 
     const WYCKOFF_PATTERN = /^(\d+)([a-zA-Z])$/;
@@ -1775,17 +1786,28 @@ export async function runNovelPrototypeGeneration(
     if (!proto || proto.suggestedElements.length < 2) continue;
 
     const elements = proto.suggestedElements.slice(0, 4);
+    const STOICH_TEMPLATES = [
+      [1, 1, 3],    // ABO3 perovskite
+      [2, 1, 4],    // A2BO4 K2NiF4
+      [1, 2, 3],    // AB2X3
+      [1, 3, 1],    // AB3X
+      [1, 1, 2],    // ABX2
+      [2, 2, 7],    // A2B2X7
+      [3, 1, 1],    // A3BX
+    ];
+    const template = STOICH_TEMPLATES[Math.floor(Math.random() * STOICH_TEMPLATES.length)];
     const formulaParts = elements.map((el, i) => {
-      const count = i === 0 ? 1 : (1 + Math.floor(Math.random() * 3));
+      const count = template[i % template.length];
       return count === 1 ? el : `${el}${count}`;
     });
     const formula = formulaParts.join("");
 
-    const existing = await storage.getSuperconductorByFormula(formula);
+    const canonFormula = canonicalizeFormula(formula);
+    const existing = await storage.getSuperconductorByFormula(canonFormula);
     if (existing) continue;
 
     results.push({
-      formula,
+      formula: canonFormula,
       parentFormula: "novel-prototype",
       variationType: "novel-prototype",
       structuralNovelty: proto.noveltyScore,
@@ -1815,6 +1837,7 @@ export async function runGenerativeStructureDiscovery(
     const variants = generateStructuralVariants(candidate.formula, 2);
 
     for (const variant of variants) {
+      variant.formula = canonicalizeFormula(variant.formula);
       const existing = await storage.getSuperconductorByFormula(variant.formula);
       if (existing) continue;
 
