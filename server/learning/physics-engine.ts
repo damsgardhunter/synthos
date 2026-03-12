@@ -866,22 +866,26 @@ function estimateDOSatFermi(elements: string[], counts: Record<string, number>):
   }
   wAvg = Math.max(1.0, wAvg);
 
-  let dos = vec / (2 * wAvg);
+  const bareDos = vec / (2 * wAvg);
+  let dos = bareDos;
+  const maxEnhancedDos = bareDos * 5.0;
 
   for (const el of elements) {
     const I = getStonerParameter(el);
     if (I !== null && I > 0) {
       const frac = (counts[el] || 1) / totalAtoms;
       const stonerProduct = I * dos;
-      if (stonerProduct < 0.95 && stonerProduct > 0) {
+      if (stonerProduct >= 0.95) {
+        dos = Math.min(dos, maxEnhancedDos);
+        break;
+      }
+      if (stonerProduct > 0) {
         const denom = 1 - stonerProduct * frac;
-        if (denom <= 0) {
-          dos = 0.2;
+        if (denom <= 0.05) {
+          dos = maxEnhancedDos;
           break;
         }
-        if (Math.abs(denom) > 1e-6) {
-          dos = dos / denom;
-        }
+        dos = Math.min(dos / denom, maxEnhancedDos);
       }
     }
   }
@@ -1037,11 +1041,11 @@ export function computeDimensionalityScore(formula: string, spacegroup?: string 
   else if (elements.some(e => ["Se", "S", "Te"].includes(e)) && elements.some(e => isTransitionMetal(e))) score = 0.5;
 
   if (spacegroup) {
-    const sg = spacegroup.toLowerCase();
-    if (sg.includes("p4/mmm") || sg.includes("i4/mmm") || sg.includes("p6/mmm")) {
+    const sg = spacegroup.toLowerCase().replace(/[\s\/]/g, "");
+    if (sg.includes("p4mmm") || sg.includes("i4mmm") || sg.includes("p6mmm")) {
       score = Math.max(score, 0.75);
     }
-    if (sg.includes("cmcm") || sg.includes("pmmm") || sg.includes("c2/m")) {
+    if (sg.includes("cmcm") || sg.includes("pmmm") || sg.includes("c2m")) {
       score = Math.max(score, 0.6);
     }
   }
