@@ -568,6 +568,7 @@ function generateMAX(): PrototypeCandidate[] {
   const nValues = [1, 2, 3];
   const info = PROTOTYPE_REGISTRY.MAX;
   const candidates: PrototypeCandidate[] = [];
+  const seen = new Set<string>();
 
   for (const m of M) {
     for (const a of A) {
@@ -580,6 +581,8 @@ function generateMAX(): PrototypeCandidate[] {
           if (xCount > 0) {
             formula += xCount === 1 ? x : `${x}${xCount}`;
           }
+          if (seen.has(formula)) continue;
+          seen.add(formula);
           candidates.push({
             formula,
             prototype: info.name,
@@ -603,6 +606,7 @@ function generateLayeredNitride(): PrototypeCandidate[] {
   const xValues = [0.2, 0.4, 0.6, 0.8, 1.0];
   const info = PROTOTYPE_REGISTRY.LayeredNitride;
   const candidates: PrototypeCandidate[] = [];
+  const seen = new Set<string>();
 
   for (const a of A) {
     for (const xv of xValues) {
@@ -620,6 +624,8 @@ function generateLayeredNitride(): PrototypeCandidate[] {
           const hStr = halideCount === 1 ? halide : `${halide}${halideCount}`;
           const formula = `${aStr}${mStr}${nStr}${hStr}`;
 
+          if (seen.has(formula)) continue;
+          seen.add(formula);
           candidates.push({
             formula,
             prototype: info.name,
@@ -715,7 +721,8 @@ export function runPrototypeGeneration(): PrototypeCandidate[] {
 
 const PROTOTYPE_ALIASES: Record<string, string> = {
   "spinel": "Spinel",
-  "tetragonal spinel": "Hausmannite",
+  "tetragonal spinel": "Spinel",
+  "spinel-type": "Spinel",
   "sodalite": "Hauyne",
   "molybdenite": "MoS2",
   "mos2": "MoS2",
@@ -735,14 +742,39 @@ const PROTOTYPE_ALIASES: Record<string, string> = {
   "garnet": "Garnet",
   "max phase": "MAX",
   "max-phase": "MAX",
+  "max": "MAX",
+  "mn+1axn": "MAX",
   "heusler": "Heusler",
+  "heusler alloy": "Heusler",
+  "full heusler": "Heusler",
+  "half heusler": "Heusler",
   "laves": "Laves",
+  "laves phase": "Laves",
+  "c15": "Laves",
+  "c14": "Laves",
   "perovskite": "Perovskite",
+  "abo3": "Perovskite",
   "a15": "A15",
+  "a15-type": "A15",
+  "a-15": "A15",
+  "cr3si": "A15",
+  "nb3sn": "A15",
   "clathrate": "Clathrate",
+  "cage clathrate": "Clathrate",
+  "cage-clathrate": "Clathrate",
+  "sodalite cage": "Clathrate",
   "alb2": "AlB2",
+  "alb2-type": "AlB2",
+  "mgb2": "AlB2",
+  "mgb2-type": "AlB2",
   "delafossite": "Delafossite",
   "layered nitride": "LayeredNitride",
+  "layered-nitride": "LayeredNitride",
+  "thcr2si2": "ThCr2Si2",
+  "thcr2si2-type": "ThCr2Si2",
+  "122": "ThCr2Si2",
+  "122-type": "ThCr2Si2",
+  "1111": "ThCr2Si2",
 };
 
 export function getPrototypeInfo(name: string): PrototypeInfo | null {

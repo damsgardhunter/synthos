@@ -570,6 +570,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - ood-detector.ts: `computeMahalanobis` uses `Math.min(sub.length, trainingMean.length, trainingInvVar.length)` for loop bound, guards each sub[i] and trainingInvVar[i] with `Number.isFinite`, and returns 0 if dist2 is non-finite.
   - ood-detector.ts: `computeGMMLogLikelihood` uses `Math.min(sub.length, comp.mean.length, comp.precision.length)` for loop bound, guards sub[i] and precision[i] with `Number.isFinite`, and clamps degenerate mahal to 0.
   - ood-detector.ts: `fitGMM` precision computation uses `Number.isFinite(rawV) && rawV > 1e-6` instead of bare `Math.max`, preventing NaN propagation from degenerate responsibility weights.
+- **Physics & Scientific Constraint Fixes**:
+  - physics-engine.ts: `classifyHydrogenBondingParsed` now returns `"ambiguous"` for light metals (Z<20) with H/M≥4 in the intermediate pressure range (50–80 GPa), recognizing this as a metastable regime where materials are neither fully covalent-molecular nor cage-clathrate. Heavy rare earths (Z≥38) still classify as cage-clathrate at lower pressures due to different bonding networks.
+  - rl-agent.ts: `PhysicsAwareRewardContext` now includes optional `stagnationCycles` field. `computePhysicsPrincipleReward` applies a stagnation-modulated motif penalty: after 10 stagnation cycles, motif validity score decays by 3% per additional cycle (floor at 0.4x), forcing the agent to explore new motifs instead of repeatedly picking the same one without Tc improvement.
+- **Prototype Generator Optimizations**:
+  - prototype-generator.ts: `generateMAX()` and `generateLayeredNitride()` now maintain inline `Set<string>` dedup by formula, eliminating duplicate object creation before the final `runPrototypeGeneration()` dedup pass. Reduces memory churn for the 4-deep nested loops.
+  - prototype-generator.ts: `PROTOTYPE_ALIASES` expanded with 30+ additional aliases covering common NLP search terms: "122"→ThCr2Si2, "abo3"→Perovskite, "cage-clathrate"→Clathrate, "mgb2"→AlB2, "a15-type"/"nb3sn"/"cr3si"→A15, "laves phase"/"c15"/"c14"→Laves, "heusler alloy"/"full heusler"/"half heusler"→Heusler, "tetragonal spinel"/"spinel-type"→Spinel, etc. Prevents NLP/strategy fallback loops when searching for prototype info with partial or alternate naming.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

@@ -187,6 +187,7 @@ export interface PhysicsAwareRewardContext {
   vecPerTM?: number;
   dElectronCount?: number;
   synthesisScore?: number;
+  stagnationCycles?: number;
 }
 
 const KNOWN_SC_MOTIFS = new Set([
@@ -494,7 +495,11 @@ function computePhysicsPrincipleReward(context: PhysicsAwareRewardContext): numb
     }
   }
 
-  const motifScore = computeMotifValidityScore(context);
+  let motifScore = computeMotifValidityScore(context);
+  if (context.stagnationCycles !== undefined && context.stagnationCycles > 10) {
+    const stagnationPenalty = Math.max(0.4, 1.0 - (context.stagnationCycles - 10) * 0.03);
+    motifScore *= stagnationPenalty;
+  }
   reward += motifScore * 0.25;
 
   const familyScore = computeFamilyConsistencyScore(context);

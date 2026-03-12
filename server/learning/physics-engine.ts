@@ -570,10 +570,14 @@ function classifyHydrogenBondingParsed(pc: ParsedComposition, pressureGpa: numbe
     return "interstitial";
   }
 
+  if (isLightMetal && hRatio >= 4 && pressureGpa >= 50 && pressureGpa < 80) {
+    return "ambiguous";
+  }
+
   if (hRatio >= 4 && pressureGpa < 50) {
     return "covalent-molecular";
   }
-  if (isLightMetal && hRatio >= 4 && pressureGpa < 80) {
+  if (isLightMetal && hRatio >= 4 && pressureGpa < 50) {
     return "covalent-molecular";
   }
 
