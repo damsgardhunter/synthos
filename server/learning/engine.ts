@@ -127,7 +127,7 @@ import { generateHeuristicRoutes, getHeuristicGeneratorStats } from "../synthesi
 import { recordStructureOutcome } from "../crystal/structure-reward-system";
 import { runStructureLearningCycle } from "../crystal/structure-learning-loop";
 import { ELEMENTAL_DATA } from "./elemental-data";
-import { runModelImprovementCycle, getModelImprovementStats } from "./model-improvement-loop";
+import { runModelImprovementCycle, runCombinedModelLLMCycle, getModelImprovementStats } from "./model-improvement-loop";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
 import { recordPredictionOutcome } from "./model-diagnostics";
 
@@ -7771,6 +7771,10 @@ async function runLearningCycle() {
       try {
         await runModelImprovementCycle(emit, cycleCount);
       } catch (e) { console.error("[Engine] Model improvement cycle failed:", e); }
+
+      try {
+        await runCombinedModelLLMCycle(emit, cycleCount);
+      } catch (e) { console.error("[Engine] Model LLM cycle failed:", e); }
 
       try {
         await captureConvergenceSnapshot(emit, cycleCount, currentStrategyHint || undefined);

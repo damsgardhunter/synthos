@@ -771,7 +771,7 @@ export async function runCombinedModelLLMCycle(
   emit: EventEmitter,
   currentCycle: number
 ): Promise<void> {
-  if (currentCycle % 10 !== 0) return;
+  if (currentCycle % 10 !== 7) return;
 
   try {
     const report = await runModelLLMCycle(currentCycle);
