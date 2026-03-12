@@ -441,16 +441,17 @@ export function identifyUncertainPressureRegions(formula: string): UncertainPres
 }
 
 export function generateAdaptivePressureSamples(formula: string, maxSamples: number = 8): AdaptivePressureSample[] {
-  const regions = identifyUncertainPressureRegions(formula);
+  const normFormula = normalizeFormula(formula);
+  const regions = identifyUncertainPressureRegions(normFormula);
   const samples: AdaptivePressureSample[] = [];
-  const existingCoverage = pressureCoverageMap.get(formula) ?? new Set<number>();
+  const existingCoverage = pressureCoverageMap.get(normFormula) ?? new Set<number>();
 
   if (regions.length === 0) {
     const defaults = [0, 50, 100, 150, 200, 250, 300, 350];
     for (const p of defaults) {
       if (samples.length >= maxSamples) break;
       if (!existingCoverage.has(p)) {
-        samples.push({ formula, pressureGpa: p, uncertainty: 0.5, reason: "uniform-coverage" });
+        samples.push({ formula: normFormula, pressureGpa: p, uncertainty: 0.5, reason: "uniform-coverage (model OOD or no uncertain regions)" });
       }
     }
     return samples;
@@ -465,10 +466,10 @@ export function generateAdaptivePressureSamples(formula: string, maxSamples: num
     const step = span > 0 ? Math.max(5, Math.round(span / (regionBudget + 1))) : 10;
 
     samples.push({
-      formula,
+      formula: normFormula,
       pressureGpa: region.peakPressure,
       uncertainty: region.maxUncertainty,
-      reason: `peak-uncertainty (${region.maxUncertainty.toFixed(3)})`,
+      reason: `peak-uncertainty (u=${region.maxUncertainty.toFixed(3)}, region ${region.pressureStart}-${region.pressureEnd} GPa)`,
     });
 
     for (let offset = step; offset <= span / 2; offset += step) {
@@ -477,11 +478,11 @@ export function generateAdaptivePressureSamples(formula: string, maxSamples: num
       const pHigh = Math.min(PRESSURE_MAX, region.peakPressure + offset);
 
       if (!existingCoverage.has(pLow) && pLow !== region.peakPressure) {
-        samples.push({ formula, pressureGpa: pLow, uncertainty: region.avgUncertainty, reason: `refine-low (region ${region.pressureStart}-${region.pressureEnd} GPa)` });
+        samples.push({ formula: normFormula, pressureGpa: pLow, uncertainty: region.avgUncertainty, reason: `refine-low (region ${region.pressureStart}-${region.pressureEnd} GPa, avg_u=${region.avgUncertainty.toFixed(3)})` });
       }
       if (samples.length >= maxSamples) break;
       if (!existingCoverage.has(pHigh) && pHigh !== region.peakPressure) {
-        samples.push({ formula, pressureGpa: pHigh, uncertainty: region.avgUncertainty, reason: `refine-high (region ${region.pressureStart}-${region.pressureEnd} GPa)` });
+        samples.push({ formula: normFormula, pressureGpa: pHigh, uncertainty: region.avgUncertainty, reason: `refine-high (region ${region.pressureStart}-${region.pressureEnd} GPa, avg_u=${region.avgUncertainty.toFixed(3)})` });
       }
     }
     if (samples.length >= maxSamples) break;
@@ -489,16 +490,17 @@ export function generateAdaptivePressureSamples(formula: string, maxSamples: num
 
   for (const s of samples) {
     pushAdaptiveSample(s);
-    if (!pressureCoverageMap.has(formula)) pressureCoverageMap.set(formula, new Set());
-    pressureCoverageMap.get(formula)!.add(s.pressureGpa);
+    if (!pressureCoverageMap.has(normFormula)) pressureCoverageMap.set(normFormula, new Set());
+    pressureCoverageMap.get(normFormula)!.add(s.pressureGpa);
   }
 
   return samples.slice(0, maxSamples);
 }
 
 export function recordPressureCoverage(formula: string, pressureGpa: number): void {
-  if (!pressureCoverageMap.has(formula)) pressureCoverageMap.set(formula, new Set());
-  pressureCoverageMap.get(formula)!.add(pressureGpa);
+  const normFormula = normalizeFormula(formula);
+  if (!pressureCoverageMap.has(normFormula)) pressureCoverageMap.set(normFormula, new Set());
+  pressureCoverageMap.get(normFormula)!.add(pressureGpa);
 }
 
 export function getPressureExplorationStats(): PressureExplorationStats {
