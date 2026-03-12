@@ -1336,88 +1336,64 @@ export function getModelDiagnosticsForLLM(): string {
   return lines.join("\n");
 }
 
+const SEVERITY_MAP: Record<number, HealthStatus> = { 0: "green", 1: "yellow", 2: "red" };
+
+function healthCheck(model: string, checks: { severity: number; reason: string }[]): ModelHealth {
+  let maxSev = 0;
+  const reasons: string[] = [];
+  for (const c of checks) {
+    if (c.severity > 0) {
+      const tag = c.severity >= 2 ? "[RED]" : "[YELLOW]";
+      reasons.push(`${tag} ${c.reason}`);
+      if (c.severity > maxSev) maxSev = c.severity;
+    }
+  }
+  if (reasons.length === 0) reasons.push("All metrics within acceptable range");
+  return { model, status: SEVERITY_MAP[maxSev] || "green", reasons };
+}
+
 export function getModelHealthSummary(): ModelHealth[] {
   const d = getComprehensiveModelDiagnostics();
   const health: ModelHealth[] = [];
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (d.xgboost.r2 < 0.3) { status = "red"; reasons.push(`Very low R²=${d.xgboost.r2}`); }
-    else if (d.xgboost.r2 < 0.6) { status = "yellow"; reasons.push(`Low R²=${d.xgboost.r2}`); }
-    if (d.xgboost.rmse > 40) { status = "red"; reasons.push(`High RMSE=${d.xgboost.rmse}K`); }
-    else if (d.xgboost.rmse > 25) { if (status === "green") status = "yellow"; reasons.push(`Elevated RMSE=${d.xgboost.rmse}K`); }
-    if (d.xgboost.falsePositiveRate > 0.15) { if (status === "green") status = "yellow"; reasons.push(`High false positive rate=${d.xgboost.falsePositiveRate}`); }
-    if (d.xgboost.nTrees === 0) { status = "red"; reasons.push("No trees trained"); }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "xgboost", status, reasons });
-  }
+  health.push(healthCheck("xgboost", [
+    { severity: d.xgboost.r2 < 0.3 ? 2 : d.xgboost.r2 < 0.6 ? 1 : 0, reason: d.xgboost.r2 < 0.3 ? `Very low R²=${d.xgboost.r2}` : `Low R²=${d.xgboost.r2}` },
+    { severity: d.xgboost.rmse > 40 ? 2 : d.xgboost.rmse > 25 ? 1 : 0, reason: d.xgboost.rmse > 40 ? `High RMSE=${d.xgboost.rmse}K` : `Elevated RMSE=${d.xgboost.rmse}K` },
+    { severity: d.xgboost.falsePositiveRate > 0.15 ? 1 : 0, reason: `High false positive rate=${d.xgboost.falsePositiveRate}` },
+    { severity: d.xgboost.nTrees === 0 ? 2 : 0, reason: "No trees trained" },
+  ]));
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (d.gnn.latestR2 < 0.2) { status = "red"; reasons.push(`Very low R²=${d.gnn.latestR2}`); }
-    else if (d.gnn.latestR2 < 0.5) { status = "yellow"; reasons.push(`Low R²=${d.gnn.latestR2}`); }
-    if (d.gnn.stale) { status = "red"; reasons.push("Model stale (>24h) — trigger retrain"); }
-    else if (d.gnn.modelStalenessMs > 12 * 3600_000) { if (status === "green") status = "yellow"; reasons.push("Model aging (>12h)"); }
-    if (d.gnn.modelVersion === 0) { status = "red"; reasons.push("No model trained"); }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "gnn", status, reasons });
-  }
+  health.push(healthCheck("gnn", [
+    { severity: d.gnn.latestR2 < 0.2 ? 2 : d.gnn.latestR2 < 0.5 ? 1 : 0, reason: d.gnn.latestR2 < 0.2 ? `Very low R²=${d.gnn.latestR2}` : `Low R²=${d.gnn.latestR2}` },
+    { severity: d.gnn.stale ? 2 : d.gnn.modelStalenessMs > 12 * 3600_000 ? 1 : 0, reason: d.gnn.stale ? "Model stale (>24h) — trigger retrain" : "Model aging (>12h)" },
+    { severity: d.gnn.modelVersion === 0 ? 2 : 0, reason: "No model trained" },
+  ]));
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (!d.lambda.datasetSize || d.lambda.datasetSize < 5) { status = "red"; reasons.push("Insufficient training data"); }
-    if (d.lambda.r2 < 0.2) { status = "red"; reasons.push(`Very low R²=${d.lambda.r2}`); }
-    else if (d.lambda.r2 < 0.5) { if (status === "green") status = "yellow"; reasons.push(`Low R²=${d.lambda.r2}`); }
-    if (d.lambda.rmse > 0.5) { if (status === "green") status = "yellow"; reasons.push(`High RMSE=${d.lambda.rmse}`); }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "lambda-regressor", status, reasons });
-  }
+  health.push(healthCheck("lambda-regressor", [
+    { severity: (!d.lambda.datasetSize || d.lambda.datasetSize < 5) ? 2 : 0, reason: "Insufficient training data" },
+    { severity: d.lambda.r2 < 0.2 ? 2 : d.lambda.r2 < 0.5 ? 1 : 0, reason: d.lambda.r2 < 0.2 ? `Very low R²=${d.lambda.r2}` : `Low R²=${d.lambda.r2}` },
+    { severity: d.lambda.rmse > 0.5 ? 1 : 0, reason: `High RMSE=${d.lambda.rmse}` },
+  ]));
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (d.phononSurrogate.datasetSize === 0) { status = "red"; reasons.push("No training data"); }
-    else if (d.phononSurrogate.datasetSize < 10) { status = "yellow"; reasons.push("Small dataset"); }
-    if (d.phononSurrogate.stabilityAccuracy < 0.5 && d.phononSurrogate.datasetSize > 0) {
-      if (status === "green") status = "yellow";
-      reasons.push(`Low stability accuracy=${d.phononSurrogate.stabilityAccuracy}`);
-    }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "phonon-surrogate", status, reasons });
-  }
+  health.push(healthCheck("phonon-surrogate", [
+    { severity: d.phononSurrogate.datasetSize === 0 ? 2 : d.phononSurrogate.datasetSize < 10 ? 1 : 0, reason: d.phononSurrogate.datasetSize === 0 ? "No training data" : "Small dataset" },
+    { severity: (d.phononSurrogate.stabilityAccuracy < 0.5 && d.phononSurrogate.datasetSize > 0) ? 1 : 0, reason: `Low stability accuracy=${d.phononSurrogate.stabilityAccuracy}` },
+  ]));
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (!d.tbSurrogate.datasetSize) { status = "yellow"; reasons.push("No training data yet"); }
-    if (d.tbSurrogate.trainings === 0) { if (status === "green") status = "yellow"; reasons.push("Never trained"); }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "tb-surrogate", status, reasons });
-  }
+  health.push(healthCheck("tb-surrogate", [
+    { severity: !d.tbSurrogate.datasetSize ? 1 : 0, reason: "No training data yet" },
+    { severity: d.tbSurrogate.trainings === 0 ? 1 : 0, reason: "Never trained" },
+  ]));
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (d.structurePredictor.datasetSize === 0) { status = "red"; reasons.push("No training data"); }
-    if (d.structurePredictor.crystalSystemAccuracy < 0.3 && d.structurePredictor.datasetSize > 0) {
-      if (status === "green") status = "yellow";
-      reasons.push(`Low crystal system accuracy=${d.structurePredictor.crystalSystemAccuracy}`);
-    }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "structure-predictor", status, reasons });
-  }
+  health.push(healthCheck("structure-predictor", [
+    { severity: d.structurePredictor.datasetSize === 0 ? 2 : 0, reason: "No training data" },
+    { severity: (d.structurePredictor.crystalSystemAccuracy < 0.3 && d.structurePredictor.datasetSize > 0) ? 1 : 0, reason: `Low crystal system accuracy=${d.structurePredictor.crystalSystemAccuracy}` },
+  ]));
 
-  {
-    const reasons: string[] = [];
-    let status: HealthStatus = "green";
-    if (!d.pressureStructure.modelTrained) { status = "yellow"; reasons.push("Model not yet trained"); }
-    if (d.pressureStructure.datasetSize === 0) { if (status === "green") status = "yellow"; reasons.push("No training data"); }
-    if (reasons.length === 0) reasons.push("All metrics within acceptable range");
-    health.push({ model: "pressure-structure", status, reasons });
-  }
+  health.push(healthCheck("pressure-structure", [
+    { severity: !d.pressureStructure.modelTrained ? 1 : 0, reason: "Model not yet trained" },
+    { severity: d.pressureStructure.datasetSize === 0 ? 1 : 0, reason: "No training data" },
+  ]));
 
   return health;
 }
