@@ -2923,7 +2923,19 @@ export function applyManyBodyCorrections(
   const Z = 1 / (1 + lambda);
   const quasiparticleWeight = Math.max(0.1, Math.min(1.0, Z));
 
-  const gwDOSRenormalization = 1 + corr * 0.3 + lambda * 0.15;
+  const metallicity = electronicStructure.metallicity;
+  let gwDOSRenormalization: number;
+  if (metallicity < 0.2) {
+    const gapSuppression = metallicity / 0.2;
+    gwDOSRenormalization = gapSuppression * (0.3 + corr * 0.1);
+  } else if (metallicity < 0.4) {
+    const crossover = (metallicity - 0.2) / 0.2;
+    const insulating = (metallicity / 0.2) * (0.3 + corr * 0.1);
+    const metallic = 1 + corr * 0.3 + lambda * 0.15;
+    gwDOSRenormalization = insulating * (1 - crossover) + metallic * crossover;
+  } else {
+    gwDOSRenormalization = 1 + corr * 0.3 + lambda * 0.15;
+  }
   const correctedDOS = N_EF * gwDOSRenormalization;
 
   const gwBandwidthCorrection = 1 - corr * 0.25 - lambda * 0.1;
