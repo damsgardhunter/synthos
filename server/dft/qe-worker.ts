@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import { selectPrototype } from "../learning/crystal-prototypes";
+import { matchPrototype } from "../learning/structure-predictor";
 import { isTransitionMetal, isRareEarth } from "../learning/elemental-data";
 import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
@@ -628,12 +629,19 @@ function estimateBOverA(elements: string[], counts: Record<string, number>): num
   return 1.0;
 }
 
-function autoKPoints(latticeA: number, cOverA?: number, minK: number = 12): string {
+function autoKPoints(latticeA: number, cOverA?: number, minK: number = 12, dimensionality?: string): string {
   const densityFactor = 60;
+  const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
+  const layeredBoost = isLayered ? 1.5 : 1.0;
+
   const kab = Math.max(minK, Math.ceil(densityFactor / latticeA));
-  if (cOverA && cOverA > 2.0) {
+  if (cOverA && cOverA > 1.5) {
     const effectiveC = latticeA * cOverA;
-    const kc = Math.max(Math.max(1, Math.ceil(minK / cOverA)), Math.ceil(densityFactor / effectiveC));
+    const baseKc = Math.ceil(densityFactor / effectiveC);
+    const kc = Math.max(
+      Math.max(1, Math.ceil(minK / cOverA)),
+      isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc
+    );
     return `  ${kab} ${kab} ${kc}  0 0 0`;
   }
   return `  ${kab} ${kab} ${kab}  0 0 0`;
@@ -2143,9 +2151,16 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
 
     let positions = generateAtomicPositions(elements, counts, formula, latticeA);
 
+    let protoDimensionality: string | undefined;
     try {
       const proto = selectPrototype(formula);
       if (proto) result.prototypeUsed = proto.template.name;
+    } catch {}
+    try {
+      const protoMatch = matchPrototype(formula);
+      if (protoMatch?.dimensionality) {
+        protoDimensionality = protoMatch.dimensionality;
+      }
     } catch {}
 
     const initRepair = repairStructureGeometry(positions, latticeA, workerPressure);
@@ -2226,7 +2241,7 @@ export async function runFullDFT(formula: string): Promise<QEFullResult> {
     }
 
     const cOverA = estimateCOverA(elements, counts);
-    result.kPoints = autoKPoints(latticeA, cOverA).trim();
+    result.kPoints = autoKPoints(latticeA, cOverA, 12, protoDimensionality).trim();
 
     result.vcRelaxed = false;
     try {

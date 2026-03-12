@@ -5,6 +5,7 @@ import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { storage } from "../storage";
 import { computeSymmetryEmbedding, computeSymmetryFeatureVector } from "../crystal/symmetry-subgroups";
 import { predictLambda } from "./lambda-regressor";
+import { normalizeSpaceGroup, matchPrototype } from "./structure-predictor";
 
 export interface NodeFeature {
   element: string;
@@ -1208,7 +1209,8 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
 
 function getSymmetryAwareFeatures(spaceGroupName?: string, fracPosition?: [number, number, number]): number[] {
   if (!spaceGroupName) return [0, 0, 0, 0, 0, 0];
-  const embedding = computeSymmetryEmbedding(spaceGroupName, fracPosition);
+  const normalized = normalizeSpaceGroup(spaceGroupName);
+  const embedding = computeSymmetryEmbedding(normalized, fracPosition);
   return computeSymmetryFeatureVector(embedding);
 }
 
@@ -2752,12 +2754,20 @@ function getEnsembleModels(): GNNWeights[] {
 
   const trainingData: TrainingSample[] = SUPERCON_TRAINING_DATA
     .filter(e => e.isSuperconductor)
-    .map(e => ({
-      formula: e.formula,
-      tc: e.tc,
-      formationEnergy: undefined,
-      structure: undefined,
-    }));
+    .map(e => {
+      const proto = matchPrototype(e.formula);
+      return {
+        formula: e.formula,
+        tc: e.tc,
+        formationEnergy: undefined,
+        structure: proto ? {
+          spaceGroup: proto.spaceGroup,
+          crystalSystem: proto.crystalSystem,
+          dimensionality: proto.dimensionality,
+        } : undefined,
+        prototype: proto?.prototype,
+      };
+    });
 
   cachedEnsembleModels = trainEnsemble(trainingData);
   modelTrainedAt = now;
