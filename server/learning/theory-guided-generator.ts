@@ -178,6 +178,7 @@ interface SafetyResetState {
   resetTriggered: boolean;
   resetCount: number;
   discardedTheoryTimestamps: number[];
+  lastResetCycle: number;
 }
 
 const safetyReset: SafetyResetState = {
@@ -191,13 +192,25 @@ const safetyReset: SafetyResetState = {
   resetTriggered: false,
   resetCount: 0,
   discardedTheoryTimestamps: [],
+  lastResetCycle: -999,
 };
 
 const EFFICIENCY_DROP_THRESHOLD = 0.4;
 const TC_DROP_THRESHOLD = 0.25;
 const MIN_EVAL_SAMPLES = 3;
+const BLACKLIST_COOLDOWN_CYCLES = 5;
 
 export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
+  const cyclesSinceReset = safetyReset.biasAppliedCycle - safetyReset.lastResetCycle;
+  if (safetyReset.resetTriggered && cyclesSinceReset < BLACKLIST_COOLDOWN_CYCLES) {
+    console.log(`[TheoryBias] Cooldown active: ${BLACKLIST_COOLDOWN_CYCLES - cyclesSinceReset} cycles remaining before re-applying theory bias`);
+    return {
+      generatorWeightBoosts: {}, familyPreferences: {}, elementBoosts: {},
+      motifBiases: {}, structuralGuidance: [], confidence: 0,
+      sourceTheories: 0, sourceCausalEdges: 0, timestamp: Date.now(),
+    };
+  }
+
   const theories = getTheoryDatabase();
   const graph = getLatestGraph();
   const rules = getCausalRules();
@@ -212,8 +225,9 @@ export function computeTheoryGeneratorBias(): TheoryGeneratorBias {
   let sourceTheories = 0;
   let sourceCausalEdges = 0;
 
+  const blacklistedTimestamps = new Set(safetyReset.discardedTheoryTimestamps);
   const topTheories = theories
-    .filter(t => t.theoryScore > 0.3 && t.dimensionallyValid)
+    .filter(t => t.theoryScore > 0.3 && t.dimensionallyValid && !blacklistedTimestamps.has(t.discoveredAt))
     .sort((a, b) => b.theoryScore - a.theoryScore)
     .slice(0, 8);
   sourceTheories = topTheories.length;
@@ -437,7 +451,12 @@ export function evaluateTheoryBiasSafety(): { shouldReset: boolean; reason: stri
   const baselinePassRate = Math.max(safetyReset.preBiasPassRate, 0.001);
   const baselineBestTc = Math.max(safetyReset.preBiasBestTc, 1);
 
-  const passRateDrop = (baselinePassRate - avgPostPassRate) / baselinePassRate;
+  let passRateDrop: number;
+  if (safetyReset.preBiasPassRate < 0.01) {
+    passRateDrop = avgPostPassRate < 0.01 ? 0 : -1;
+  } else {
+    passRateDrop = (baselinePassRate - avgPostPassRate) / baselinePassRate;
+  }
   const tcDrop = (baselineBestTc - avgPostBestTc) / baselineBestTc;
 
   const passRateDegraded = passRateDrop > EFFICIENCY_DROP_THRESHOLD;
@@ -466,6 +485,7 @@ export function resetTheoryBias(): { resetBias: TheoryGeneratorBias | null; reas
   currentBias = null;
   safetyReset.resetTriggered = true;
   safetyReset.resetCount++;
+  safetyReset.lastResetCycle = safetyReset.biasAppliedCycle;
   safetyReset.postBiasPassRates = [];
   safetyReset.postBiasBestTcs = [];
 
@@ -561,9 +581,16 @@ export function getRLBiasFromTheory(): {
 
   const hBoost = bias.elementBoosts["H"] ?? 0;
   const hydrideBoost = bias.familyPreferences["hydride"] ?? 0;
-  if (hBoost > 0.1 || hydrideBoost > 0.2) {
-    hydrogenDensityBias[2] += (hBoost + hydrideBoost) * 0.5;
-    hydrogenDensityBias[3] += (hBoost + hydrideBoost) * 0.7;
+  const combinedHBias = hBoost + hydrideBoost;
+  const intermetallicBoost = bias.familyPreferences["intermetallic"] ?? 0;
+  const heaStabilityPreferred = intermetallicBoost > hydrideBoost && hBoost < 0.15;
+
+  if (heaStabilityPreferred && hBoost > 0) {
+    hydrogenDensityBias[0] += combinedHBias * 0.3;
+    hydrogenDensityBias[1] += combinedHBias * 0.5;
+  } else if (combinedHBias > 0.1) {
+    hydrogenDensityBias[2] += combinedHBias * 0.5;
+    hydrogenDensityBias[3] += combinedHBias * 0.7;
   }
 
   const MOTIF_TO_STRUCTURE_IDX: Record<string, number[]> = {
