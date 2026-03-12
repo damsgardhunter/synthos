@@ -560,7 +560,7 @@ export default function SuperconductorLab() {
     cycleCount: number;
   }>({
     queryKey: ["/api/engine/status"],
-    refetchInterval: 10000,
+    refetchInterval: 30000,
   });
 
   const p90 = calibrationData?.absResidualPercentiles?.p90;

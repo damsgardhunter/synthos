@@ -5,7 +5,7 @@ import {
   isRareEarth,
   isActinide,
 } from "./elemental-data";
-import { predictStructure } from "../crystal/structure-predictor-ml";
+import { predictStructure, isStructurePredictorReady } from "../crystal/structure-predictor-ml";
 
 export interface SlaterKosterParams {
   ssSigma: number;
@@ -210,7 +210,7 @@ const CRYSTAL_SYSTEM_TO_LATTICE: Record<string, string> = {
 };
 
 function guessLatticeType(elements: string[], formula?: string): string {
-  if (formula) {
+  if (formula && isStructurePredictorReady()) {
     try {
       const pred = predictStructure(formula);
       if (pred && pred.confidence > 0.3 && pred.crystalSystem?.predicted) {
@@ -736,18 +736,20 @@ function computeTbConfidence(
     structurePrototypeScore = 0.75;
   }
 
-  try {
-    const pred = predictStructure(formula);
-    if (pred && pred.confidence > 0.3) {
-      const proto = pred.prototype?.predicted;
-      const protoProb = proto ? (pred.prototype.probabilities[proto] ?? 0) : 0;
-      if (protoProb > 0.5) {
-        structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.15);
-      } else if (protoProb > 0.3) {
-        structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.08);
+  if (isStructurePredictorReady()) {
+    try {
+      const pred = predictStructure(formula);
+      if (pred && pred.confidence > 0.3) {
+        const proto = pred.prototype?.predicted;
+        const protoProb = proto ? (pred.prototype.probabilities[proto] ?? 0) : 0;
+        if (protoProb > 0.5) {
+          structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.15);
+        } else if (protoProb > 0.3) {
+          structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.08);
+        }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   const elementsWithParams = elements.filter(el => KNOWN_SK_ELEMENTS.has(el));
   const elementsWithData = elements.filter(el => getElementData(el) !== undefined);

@@ -67,6 +67,7 @@ export const researchLogs = pgTable("research_logs", {
   dataSource: text("data_source"),
 }, (table) => [
   index("research_logs_timestamp_idx").on(table.timestamp),
+  index("research_logs_event_idx").on(table.event),
 ]);
 
 export const synthesisProcesses = pgTable("synthesis_processes", {

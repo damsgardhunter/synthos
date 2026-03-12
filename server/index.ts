@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { createServer } from "http";
 
 const app = express();
+app.set("trust proxy", 1);
 const httpServer = createServer(app);
 
 declare module "http" {
@@ -34,6 +35,9 @@ export function log(message: string, source = "express") {
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
+  if (path.startsWith("/api")) {
+    console.log(`[req-in] ${req.method} ${path} at ${new Date().toLocaleTimeString()}`);
+  }
   let capturedJsonResponse: Record<string, any> | undefined = undefined;
 
   const originalResJson = res.json;
@@ -47,7 +51,8 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        const jsonStr = JSON.stringify(capturedJsonResponse);
+        logLine += ` :: ${jsonStr.length > 500 ? jsonStr.slice(0, 500) + "..." : jsonStr}`;
       }
 
       log(logLine);
@@ -99,19 +104,6 @@ app.use((req, res, next) => {
   async function initializeApp() {
     try {
       await yield_();
-      const t2 = Date.now();
-      if (process.env.NODE_ENV === "production") {
-        const { serveStatic } = await import("./static");
-        serveStatic(app);
-      } else {
-        const { setupVite } = await import("./vite");
-        await setupVite(httpServer, app);
-      }
-      console.log(`[startup] vite/static: ${Date.now() - t2}ms`);
-      initialized = true;
-      log(`frontend ready on port ${port}`);
-
-      await yield_();
       const t0 = Date.now();
       const { seedDatabase } = await import("./seed");
       await yield_();
@@ -127,6 +119,19 @@ app.use((req, res, next) => {
       await registerRoutes(httpServer, app);
       console.log(`[startup] registerRoutes: ${Date.now() - t1}ms`);
 
+      await yield_();
+      const t2 = Date.now();
+      if (process.env.NODE_ENV === "production") {
+        const { serveStatic } = await import("./static");
+        serveStatic(app);
+      } else {
+        const { setupVite } = await import("./vite");
+        await setupVite(httpServer, app);
+      }
+      console.log(`[startup] vite/static: ${Date.now() - t2}ms`);
+      initialized = true;
+      log(`frontend ready on port ${port}`);
+
       app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
         const status = err.status || err.statusCode || 500;
         const message = err.message || "Internal Server Error";
@@ -138,6 +143,15 @@ app.use((req, res, next) => {
       });
 
       log(`serving on port ${port}`);
+
+      let heartbeatCount = 0;
+      const heartbeatStart = Date.now();
+      const heartbeatInterval = setInterval(() => {
+        heartbeatCount++;
+        const elapsed = ((Date.now() - heartbeatStart) / 1000).toFixed(1);
+        console.log(`[heartbeat] #${heartbeatCount} at +${elapsed}s (${new Date().toLocaleTimeString()})`);
+        if (heartbeatCount >= 40) clearInterval(heartbeatInterval);
+      }, 2000);
 
       try {
         const removed = await storageInstance.deduplicateSuperconductorCandidates();
@@ -168,7 +182,10 @@ app.use((req, res, next) => {
         const logCount = await db.execute(sql`SELECT COUNT(*) as cnt FROM research_logs`);
         const totalLogs = Number(logCount.rows[0]?.cnt ?? 0);
         if (totalLogs > 20000) {
-          await db.execute(sql`DELETE FROM research_logs WHERE timestamp < (SELECT timestamp FROM research_logs ORDER BY timestamp DESC OFFSET 10000 LIMIT 1)`);
+          const cutoffResult = await db.execute(sql`SELECT timestamp FROM research_logs ORDER BY timestamp DESC OFFSET 10000 LIMIT 1`);
+          if (cutoffResult.rows[0]?.timestamp) {
+            await db.execute(sql`DELETE FROM research_logs WHERE timestamp < ${cutoffResult.rows[0].timestamp}`);
+          }
           log(`Trimmed research_logs from ${totalLogs} to ~10000`, "startup");
         }
       } catch {}
@@ -184,7 +201,7 @@ app.use((req, res, next) => {
         } catch (err: any) {
           log(`Engine import failed: ${err.message}`, "startup");
         }
-      }, 5000);
+      }, 20000);
     } catch (err: any) {
       console.error("[startup] Fatal initialization error:", err);
     }

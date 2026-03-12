@@ -1052,11 +1052,23 @@ class TrainingPool {
 
 const trainingPool = new TrainingPool();
 let poolInitialized = false;
+let poolInitializing = false;
+let poolInitPromise: Promise<void> | null = null;
 
 let cachedTrainingSnapshot: { dataSize: number } | null = null;
 
+const FALLBACK_MODEL: GBModel = {
+  trees: [],
+  flatTrees: [],
+  learningRate: 0.1,
+  basePrediction: 20,
+  featureNames: FEATURE_NAMES,
+  trainedAt: 0,
+};
+
 function ensurePoolInitialized(): void {
   if (poolInitialized && cachedTrainingSnapshot?.dataSize === SUPERCON_TRAINING_DATA.length) return;
+  if (poolInitializing) return;
 
   const startSize = trainingPool.size;
   trainingPool.addBatch(
@@ -1070,6 +1082,57 @@ function ensurePoolInitialized(): void {
   poolInitialized = true;
 }
 
+export async function initPoolAsync(): Promise<void> {
+  if (poolInitialized || poolInitializing) return;
+  poolInitializing = true;
+
+  const entries = SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }));
+  const startTime = Date.now();
+  let added = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
+    if (i % 5 === 0) {
+      await new Promise<void>(r => setTimeout(r, 50));
+    }
+  }
+
+  poolInitialized = true;
+  poolInitializing = false;
+  cachedTrainingSnapshot = { dataSize: SUPERCON_TRAINING_DATA.length };
+  console.log(`[TrainingPool] Async init: ${trainingPool.size} cached vectors (${added} new) in ${Date.now() - startTime}ms`);
+
+  await new Promise<void>(r => setTimeout(r, 50));
+
+  try {
+    const { X, y } = trainingPool.getTrainingData();
+    if (X.length >= 10) {
+      cachedModel = trainGradientBoosting(X, y, 80, 0.08, 5);
+      cachedCalibration = computeCalibration(cachedModel);
+      logModelVersion("initial-training", X.length);
+      console.log(`[GradientBoost] Model trained with ${X.length} samples in ${Date.now() - startTime}ms`);
+
+      setTimeout(() => {
+        try {
+          cachedEnsembleXGB = trainEnsembleXGB(X, y);
+          cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+          cachedGlobalFeatureImportance = null;
+          buildFeatureImportanceCache();
+        } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
+      }, 30000);
+    }
+  } catch (e) {
+    console.error("[GradientBoost] Initial training failed:", e);
+  }
+}
+
+export function startPoolInit(): void {
+  if (!poolInitPromise) {
+    poolInitPromise = initPoolAsync();
+  }
+}
+
 function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
   ensurePoolInitialized();
   return trainingPool.getTrainingData();
@@ -1077,6 +1140,10 @@ function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[]
 
 export function getTrainedModel(): GBModel {
   if (cachedModel) return cachedModel;
+
+  if (!poolInitialized) {
+    return FALLBACK_MODEL;
+  }
 
   const { X, y } = prepareTrainingData();
 
@@ -1092,14 +1159,18 @@ export function getTrainedModel(): GBModel {
     return cachedModel;
   }
 
-  cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
+  cachedModel = trainGradientBoosting(X, y, 80, 0.08, 5);
   cachedCalibration = computeCalibration(cachedModel);
 
   if (!cachedEnsembleXGB && X.length >= 30) {
-    cachedEnsembleXGB = trainEnsembleXGB(X, y);
-    cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-    cachedGlobalFeatureImportance = null;
-    buildFeatureImportanceCache();
+    setTimeout(() => {
+      try {
+        cachedEnsembleXGB = trainEnsembleXGB(X, y);
+        cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        cachedGlobalFeatureImportance = null;
+        buildFeatureImportanceCache();
+      } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
+    }, 30000);
   }
 
   logModelVersion("initial-training", X.length);

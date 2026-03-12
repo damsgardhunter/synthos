@@ -369,7 +369,7 @@ function NextGenPipelinePanel() {
     totalRuns: number;
     totalCandidatesProcessed: number;
     pipelines: { id: string; status: string; iteration: number; bestTc: number; bestDistance: number; bestFormula: string }[];
-  }>({ queryKey: ["/api/next-gen-pipeline/stats"], refetchInterval: 8000 });
+  }>({ queryKey: ["/api/next-gen-pipeline/stats"], refetchInterval: 30000 });
 
   const defaultPipelineId = stats?.pipelines?.[0]?.id;
 
@@ -390,7 +390,7 @@ function NextGenPipelinePanel() {
   }>({
     queryKey: ["/api/next-gen-pipeline", defaultPipelineId],
     enabled: !!defaultPipelineId,
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
 
   const createMutation = useMutation({
@@ -621,7 +621,7 @@ function SelfImprovingLabPanel() {
     activeLabs: number;
     totalRuns: number;
     labs: { id: string; status: string; iteration: number; bestTc: number; bestFormula: string; strategiesEvolved: number; knowledgeEntries: number }[];
-  }>({ queryKey: ["/api/self-improving-lab/stats"], refetchInterval: 8000 });
+  }>({ queryKey: ["/api/self-improving-lab/stats"], refetchInterval: 30000 });
 
   const defaultLabId = overview?.labs?.[0]?.id;
 
@@ -646,7 +646,7 @@ function SelfImprovingLabPanel() {
   }>({
     queryKey: ["/api/self-improving-lab", defaultLabId],
     enabled: !!defaultLabId,
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
 
   const createMutation = useMutation({
@@ -1293,7 +1293,7 @@ function DFTQueuePanel() {
   const { lastMessage } = useWebSocket();
   const { data: queueStats, isLoading } = useQuery<DFTQueueStatsData>({
     queryKey: ["/api/dft-queue/stats"],
-    refetchInterval: 15000,
+    refetchInterval: 30000,
   });
 
   useEffect(() => {
@@ -2208,7 +2208,7 @@ function DesignRepresentationsPanel() {
 
   const statsQuery = useQuery<DesignReprStats>({
     queryKey: ["/api/design-representations/stats"],
-    refetchInterval: 10000,
+    refetchInterval: 30000,
   });
 
   const generateProgramMutation = useMutation({
@@ -4711,7 +4711,7 @@ function DopingEnginePanel() {
     recentResults: Array<{ base: string; variants: number; timestamp: number }>;
   }>({
     queryKey: ["/api/doping-engine/stats"],
-    refetchInterval: 15000,
+    refetchInterval: 30000,
   });
 
   const dopingQuery = useQuery<{

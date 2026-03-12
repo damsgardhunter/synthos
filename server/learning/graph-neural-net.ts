@@ -3316,7 +3316,7 @@ export function getDFTTrainingDatasetStats(): {
   };
 }
 
-setImmediate(() => {
+setTimeout(() => {
   try {
     getEnsembleModels();
     console.log(`[GNN] Pre-warmed ${ENSEMBLE_SIZE}-model ensemble at startup`);
@@ -3325,4 +3325,4 @@ setImmediate(() => {
   } catch (e: any) {
     console.error(`[GNN] Pre-warm failed: ${e?.message?.slice(0, 200)}`);
   }
-});
+}, 120000);

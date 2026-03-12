@@ -585,7 +585,7 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
     };
   }>({
     queryKey: ["/api/engine/memory"],
-    refetchInterval: 15000,
+    refetchInterval: 30000,
   });
 
   const { messages } = useWebSocket();

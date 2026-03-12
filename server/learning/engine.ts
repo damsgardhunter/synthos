@@ -8106,17 +8106,17 @@ export function initWebSocket(server: Server) {
 }
 
 async function backfillGBScores() {
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 200));
   try {
     let totalUpdated = 0;
     let totalFailed = 0;
     let batch: any[];
     do {
-      batch = await storage.getUnscoredCandidates(200);
+      batch = await storage.getUnscoredCandidates(50);
       if (batch.length === 0) break;
 
       for (let i = 0; i < batch.length; i++) {
-        if (i % 50 === 0) await yield_();
+        if (i % 5 === 0) await yield_();
         const c = batch[i];
         try {
           const features = getCachedFeatures(c.formula);
@@ -8140,7 +8140,7 @@ async function backfillGBScores() {
           totalFailed++;
         }
       }
-    } while (batch.length === 200);
+    } while (batch.length === 50);
 
     if (totalUpdated > 0 || totalFailed > 0) {
       emit("log", {
@@ -8156,17 +8156,17 @@ async function backfillGBScores() {
 const PHYSICS_VERSION = 15;
 
 async function recalculatePhysics() {
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 200));
   try {
     let totalRecalculated = 0;
-    const batchSize = 200;
+    const batchSize = 50;
 
     while (true) {
       const needsRecalc = await storage.getCandidatesNeedingPhysicsRecalc(PHYSICS_VERSION, batchSize);
       if (needsRecalc.length === 0) break;
 
       for (let i = 0; i < needsRecalc.length; i++) {
-        if (i % 50 === 0) await yield_();
+        if (i % 5 === 0) await yield_();
         const c = needsRecalc[i];
         try {
           const features = getCachedFeatures(c.formula);
@@ -8302,11 +8302,14 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Stats restore from DB failed:", e); }
 
+  const yieldLoop = () => new Promise<void>(r => setTimeout(r, 200));
+
   try {
     const allCandidates = await storage.getSuperconductorCandidates(5000);
     let preSeeded = 0;
     let featureBackfilled = 0;
-    for (const c of allCandidates) {
+    for (let i = 0; i < allCandidates.length; i++) {
+      const c = allCandidates[i];
       const norm = normalizeFormula(c.formula);
       if (!alreadyScreenedFormulas.has(norm)) {
         alreadyScreenedFormulas.add(norm);
@@ -8317,6 +8320,7 @@ export async function startEngine() {
         buildAndStoreFeatureRecord(c.formula, c.predictedTc ?? null, null, (c.ensembleScore ?? 0.3));
         featureBackfilled++;
       } catch (e) { console.error(`[Engine] Feature backfill failed for ${c.formula}:`, e); }
+      if (i % 100 === 0) await yieldLoop();
     }
     if (featureBackfilled > 0 || preSeeded > 0) {
       emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()}). Pre-seeded ${preSeeded} formulas into screened cache (total: ${alreadyScreenedFormulas.size}).`, dataSource: "Internal" });
@@ -8347,7 +8351,8 @@ export async function startEngine() {
     let topoSeeded = 0;
     let fermiSeeded = 0;
     const seenFormulas = new Set<string>();
-    for (const c of topoCandidates) {
+    for (let i = 0; i < topoCandidates.length; i++) {
+      const c = topoCandidates[i];
       if (topoSeeded >= 80 && fermiSeeded >= 80) break;
       if (seenFormulas.has(c.formula)) continue;
       seenFormulas.add(c.formula);
@@ -8372,6 +8377,7 @@ export async function startEngine() {
           fermiSeeded++;
         } catch (e) { console.error(`[Engine] Fermi cluster seed failed for ${c.formula}:`, e); }
       }
+      if (i % 10 === 0) await yieldLoop();
     }
     if (topoSeeded > 0 || fermiSeeded > 0) {
       const topoStats = getTopologyStats();
@@ -8495,6 +8501,8 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Design representation seed outer error:", e); }
 
+  await yieldLoop();
+
   try {
     const synthDataset = generateSyntheticDataset(40);
     const theories = runSymbolicPhysicsDiscovery(synthDataset);
@@ -8509,6 +8517,8 @@ export async function startEngine() {
   } catch (e: any) {
     emit("log", { phase: "engine", event: "Theory discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
   }
+
+  await yieldLoop();
 
   try {
     const gtSummaryInit = getGroundTruthSummary();

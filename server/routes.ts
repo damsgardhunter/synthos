@@ -33,7 +33,7 @@ import {
   getDesignRepresentationStats,
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
-import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount } from "./learning/gradient-boost";
+import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount, startPoolInit } from "./learning/gradient-boost";
 import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet, getGNNPrediction } from "./learning/graph-neural-net";
 import { predictPressureCurve, findOptimalPressure, pressureSensitivity, getPressureCurveStats, getPressureExplorationStats } from "./learning/pressure-aware-surrogate";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./learning/pressure-phase-detector";
@@ -412,12 +412,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/learning-phases", async (_req, res) => {
     try {
-      const phases = await storage.getLearningPhases();
-      const sanitized = phases.map(p => ({
-        ...p,
-        insights: (p.insights ?? []).map((s: string) => sanitizeForbiddenWords(s)),
-      }));
-      res.json(sanitized);
+      const result = await cache.getOrSet(CACHE_KEYS.LEARNING_PHASES, TTL.LEARNING_PHASES, async () => {
+        const phases = await storage.getLearningPhases();
+        return phases.map(p => ({
+          ...p,
+          insights: (p.insights ?? []).map((s: string) => sanitizeForbiddenWords(s)),
+        }));
+      });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch learning phases" });
     }
@@ -437,13 +439,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/research-logs", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 100, 500);
-      const logs = await storage.getResearchLogs(limit);
-      const sanitized = logs.map(log => ({
-        ...log,
-        detail: sanitizeForbiddenWords(log.detail || ""),
-        event: sanitizeForbiddenWords(log.event || ""),
-      }));
-      res.json(sanitized);
+      const cacheKey = `${CACHE_KEYS.RESEARCH_LOGS}:${limit}`;
+      const result = await cache.getOrSet(cacheKey, TTL.RESEARCH_LOGS, async () => {
+        const logs = await storage.getResearchLogs(limit);
+        return logs.map(log => ({
+          ...log,
+          detail: sanitizeForbiddenWords(log.detail || ""),
+          event: sanitizeForbiddenWords(log.event || ""),
+        }));
+      });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch research logs" });
     }
@@ -467,6 +472,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!parsed.success) return res.status(400).json({ error: parsed.error });
       const log = await storage.insertResearchLog(parsed.data);
       cache.invalidate(CACHE_KEYS.STATS);
+      cache.invalidatePrefix(CACHE_KEYS.RESEARCH_LOGS);
       res.json(log);
     } catch (e) {
       res.status(500).json({ error: "Failed to insert log" });
@@ -525,9 +531,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const rawLim = Number(req.query.limit);
       const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 200, 1000);
-      const candidates = await storage.getSuperconductorCandidates(limit);
-      const total = await storage.getSuperconductorCount();
-      res.json({ candidates, total });
+      const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}`;
+      const result = await cache.getOrSet(cacheKey, TTL.CANDIDATES, async () => {
+        const [candidates, total] = await Promise.all([
+          storage.getSuperconductorCandidates(limit),
+          storage.getSuperconductorCount(),
+        ]);
+        return { candidates, total };
+      });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch superconductor candidates" });
     }
@@ -535,48 +547,51 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/dft-status", async (_req, res) => {
     try {
-      const candidates = await storage.getSuperconductorCandidates(1000);
-      const total = await storage.getSuperconductorCount();
-      const dftEnriched = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified" || c.dataConfidence === "medium");
-      const dftHighCount = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified").length;
-      const dftMediumCount = candidates.filter(c => c.dataConfidence === "medium").length;
-      const analyticalCount = total - dftHighCount - dftMediumCount;
+      const result = await cache.getOrSet(CACHE_KEYS.DFT_STATUS, TTL.DFT_STATUS, async () => {
+        const candidates = await storage.getSuperconductorCandidates(1000);
+        const total = await storage.getSuperconductorCount();
+        const dftEnriched = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified" || c.dataConfidence === "medium");
+        const dftHighCount = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified").length;
+        const dftMediumCount = candidates.filter(c => c.dataConfidence === "medium").length;
+        const analyticalCount = total - dftHighCount - dftMediumCount;
 
-      const recentEnriched = dftEnriched
-        .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))
-        .slice(0, 10)
-        .map(c => ({
-          formula: c.formula,
-          confidence: c.dataConfidence,
-          ensembleScore: c.ensembleScore,
-          predictedTc: c.predictedTc,
-        }));
+        const recentEnriched = dftEnriched
+          .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))
+          .slice(0, 10)
+          .map(c => ({
+            formula: c.formula,
+            confidence: c.dataConfidence,
+            ensembleScore: c.ensembleScore,
+            predictedTc: c.predictedTc,
+          }));
 
-      const dftAvailable = isDFTAvailable();
-      const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
-      const xtbStats = getXTBStats();
+        const dftAvailable = isDFTAvailable();
+        const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
+        const xtbStats = getXTBStats();
 
-      res.json({
-        total,
-        dftEnrichedCount: dftEnriched.length,
-        breakdown: {
-          high: dftHighCount,
-          medium: dftMediumCount,
-          analytical: analyticalCount,
-        },
-        recentEnriched,
-        xtb: {
-          available: dftAvailable,
-          method: methodInfo?.name ?? "unavailable",
-          version: methodInfo?.version ?? "N/A",
-          level: methodInfo?.level ?? "N/A",
-          totalRuns: xtbStats.runs,
-          successfulRuns: xtbStats.successes,
-          successRate: xtbStats.runs > 0 ? (xtbStats.successes / xtbStats.runs * 100).toFixed(1) + "%" : "N/A",
-          cacheSize: xtbStats.cacheSize,
-          refElements: xtbStats.refElements,
-        },
+        return {
+          total,
+          dftEnrichedCount: dftEnriched.length,
+          breakdown: {
+            high: dftHighCount,
+            medium: dftMediumCount,
+            analytical: analyticalCount,
+          },
+          recentEnriched,
+          xtb: {
+            available: dftAvailable,
+            method: methodInfo?.name ?? "unavailable",
+            version: methodInfo?.version ?? "N/A",
+            level: methodInfo?.level ?? "N/A",
+            totalRuns: xtbStats.runs,
+            successfulRuns: xtbStats.successes,
+            successRate: xtbStats.runs > 0 ? (xtbStats.successes / xtbStats.runs * 100).toFixed(1) + "%" : "N/A",
+            cacheSize: xtbStats.cacheSize,
+            refElements: xtbStats.refElements,
+          },
+        };
       });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch DFT status" });
     }
@@ -723,8 +738,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/research-strategy", async (_req, res) => {
     try {
-      const strategy = await storage.getLatestStrategy();
-      res.json(strategy || null);
+      const result = await cache.getOrSet(CACHE_KEYS.STRATEGY_LATEST, TTL.STRATEGY, async () => {
+        const strategy = await storage.getLatestStrategy();
+        return strategy || null;
+      });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch research strategy" });
     }
@@ -733,8 +751,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/research-strategy/history", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 20, 100);
-      const history = await storage.getStrategyHistory(limit);
-      res.json(history);
+      const cacheKey = `${CACHE_KEYS.STRATEGY_HISTORY}:${limit}`;
+      const result = await cache.getOrSet(cacheKey, TTL.STRATEGY, async () => {
+        return storage.getStrategyHistory(limit);
+      });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch strategy history" });
     }
@@ -753,9 +774,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/milestones", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 20, 100);
-      const ms = await storage.getMilestones(limit);
-      const total = await storage.getMilestoneCount();
-      res.json({ milestones: ms, total });
+      const cacheKey = `${CACHE_KEYS.MILESTONES}:${limit}`;
+      const result = await cache.getOrSet(cacheKey, TTL.MILESTONES, async () => {
+        const [ms, total] = await Promise.all([
+          storage.getMilestones(limit),
+          storage.getMilestoneCount(),
+        ]);
+        return { milestones: ms, total };
+      });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch milestones" });
     }
@@ -847,72 +874,77 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/engine/memory", async (_req, res) => {
     try {
-      const strategies = await storage.getStrategyHistory(10);
-      const latestStrategy = strategies[0] ?? null;
-      const insights = await storage.getNovelInsightsOnly(50);
-      const topInsights = insights.slice(0, 5);
-      const milestones = await storage.getMilestones(20);
-      const milestoneCount = await storage.getMilestoneCount();
-      const snapshots = await storage.getConvergenceSnapshots(50);
-      const latestSnapshot = snapshots[snapshots.length - 1] ?? null;
+      console.log(`[engine/memory] START handler at ${new Date().toLocaleTimeString()}`);
+      const result = await cache.getOrSet(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, async () => {
+        console.log(`[engine/memory] cache MISS, computing...`);
+        const [strategies, insights, milestones, milestoneCount, snapshots, narratives] = await Promise.all([
+          storage.getStrategyHistory(10),
+          storage.getNovelInsightsOnly(50),
+          storage.getMilestones(20),
+          storage.getMilestoneCount(),
+          storage.getConvergenceSnapshots(50),
+          storage.getResearchLogsByEvent("cycle-narrative", 10),
+        ]);
+        const latestStrategy = strategies[0] ?? null;
+        const topInsights = insights.slice(0, 5);
+        const latestSnapshot = snapshots[snapshots.length - 1] ?? null;
 
-      const familyStats = latestStrategy?.performanceSignals
-        ? (latestStrategy.performanceSignals as any).familyStats ?? {}
-        : {};
+        const familyStats = latestStrategy?.performanceSignals
+          ? (latestStrategy.performanceSignals as any).familyStats ?? {}
+          : {};
 
-      const focusAreas = (latestStrategy?.focusAreas as any[]) ?? [];
-      const currentHypothesis = focusAreas.length > 0
-        ? { family: focusAreas[0].area, priority: focusAreas[0].priority, reasoning: focusAreas[0].reasoning }
-        : null;
+        const focusAreas = (latestStrategy?.focusAreas as any[]) ?? [];
+        const currentHypothesis = focusAreas.length > 0
+          ? { family: focusAreas[0].area, priority: focusAreas[0].priority, reasoning: focusAreas[0].reasoning }
+          : null;
 
-      const abandonedStrategies: string[] = [];
-      if (strategies.length >= 2) {
-        const latestFamilies = new Set(((strategies[0]?.focusAreas as any[]) ?? []).map((f: any) => f.area));
-        for (let i = 1; i < strategies.length; i++) {
-          const oldFamilies = ((strategies[i]?.focusAreas as any[]) ?? []).map((f: any) => f.area);
-          for (const fam of oldFamilies) {
-            if (!latestFamilies.has(fam) && !abandonedStrategies.includes(fam)) {
-              abandonedStrategies.push(fam);
+        const abandonedStrategies: string[] = [];
+        if (strategies.length >= 2) {
+          const latestFamilies = new Set(((strategies[0]?.focusAreas as any[]) ?? []).map((f: any) => f.area));
+          for (let i = 1; i < strategies.length; i++) {
+            const oldFamilies = ((strategies[i]?.focusAreas as any[]) ?? []).map((f: any) => f.area);
+            for (const fam of oldFamilies) {
+              if (!latestFamilies.has(fam) && !abandonedStrategies.includes(fam)) {
+                abandonedStrategies.push(fam);
+              }
             }
           }
         }
-      }
 
-      const narratives = await storage.getResearchLogsByEvent("cycle-narrative", 10);
+        console.log(`[engine/memory] calling getAutonomousLoopStats at ${new Date().toLocaleTimeString()}`);
+        const loopStats = await getAutonomousLoopStats();
+        console.log(`[engine/memory] getAutonomousLoopStats done at ${new Date().toLocaleTimeString()}`);
 
-      res.json({
-        currentHypothesis: currentHypothesis ? {
-          ...currentHypothesis,
-          reasoning: sanitizeForbiddenWords(currentHypothesis.reasoning || ""),
-        } : null,
-        familyStats,
-        topInsights: topInsights.map(i => ({
-          text: sanitizeForbiddenWords(i.insightText || ""),
-          noveltyScore: i.noveltyScore,
-          category: i.category,
-          discoveredAt: i.discoveredAt,
-        })),
-        abandonedStrategies,
-        milestoneCount,
-        recentMilestones: milestones.slice(0, 5).map(m => ({
-          ...m,
-          description: sanitizeForbiddenWords(m.description || ""),
-          title: sanitizeForbiddenWords(m.title || ""),
-        })),
-        totalCycles: latestSnapshot?.cycle ?? 0,
-        bestTc: latestSnapshot?.bestTc ?? 0,
-        bestScore: latestSnapshot?.bestScore ?? 0,
-        familyDiversity: latestSnapshot?.familyDiversity ?? 0,
-        pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
-        cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
-        ...(await (async () => {
-          const loopStats = await getAutonomousLoopStats();
-          return {
-            autonomousLoopStats: loopStats,
-          };
-        })()),
-        designRepresentations: getDesignRepresentationStats(),
+        return {
+          currentHypothesis: currentHypothesis ? {
+            ...currentHypothesis,
+            reasoning: sanitizeForbiddenWords(currentHypothesis.reasoning || ""),
+          } : null,
+          familyStats,
+          topInsights: topInsights.map(i => ({
+            text: sanitizeForbiddenWords(i.insightText || ""),
+            noveltyScore: i.noveltyScore,
+            category: i.category,
+            discoveredAt: i.discoveredAt,
+          })),
+          abandonedStrategies,
+          milestoneCount,
+          recentMilestones: milestones.slice(0, 5).map(m => ({
+            ...m,
+            description: sanitizeForbiddenWords(m.description || ""),
+            title: sanitizeForbiddenWords(m.title || ""),
+          })),
+          totalCycles: latestSnapshot?.cycle ?? 0,
+          bestTc: latestSnapshot?.bestTc ?? 0,
+          bestScore: latestSnapshot?.bestScore ?? 0,
+          familyDiversity: latestSnapshot?.familyDiversity ?? 0,
+          pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
+          cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
+          autonomousLoopStats: loopStats,
+          designRepresentations: getDesignRepresentationStats(),
+        };
       });
+      res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch engine memory" });
     }
@@ -3749,17 +3781,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  try {
-    initLambdaRegressor();
-  } catch {}
-
-  try {
-    initPhononSurrogate();
-  } catch {}
-
-  try {
-    initStructurePredictorML();
-  } catch {}
+  setTimeout(() => {
+    try { initLambdaRegressor(); } catch {}
+    try { initPhononSurrogate(); } catch {}
+    try { initStructurePredictorML(); } catch {}
+  }, 30000);
 
   app.get("/api/phonon-surrogate/stats", async (_req, res) => {
     try {
@@ -3929,12 +3955,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e) {
       console.error("[CrystalDiffusion] Init failed:", e);
     }
+    await new Promise(r => setTimeout(r, 2000));
     try {
       await initCrystalVAE();
     } catch (e) {
       console.error("[CrystalVAE] Init failed:", e);
     }
-  }, 5000);
+  }, 60000);
 
   app.get("/api/crystal-vae/stats", generalLimiter, async (_req, res) => {
     try {
@@ -4125,6 +4152,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   setTimeout(() => initFingerprintDB(), 3000);
+
+  // Pool init is deferred to engine start to avoid blocking server startup
 
   app.get("/api/structure-novelty/stats", generalLimiter, async (_req, res) => {
     try {
@@ -4776,8 +4805,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(400).json({ error: "Invalid formula" });
       }
       const pressureGpa = Number(req.query.pressure) || 0;
+      const cacheKey = `tc-uq:${formula}:${pressureGpa}`;
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+      const t0 = Date.now();
       const result = computePhysicsTcUQ(formula, pressureGpa);
-      res.json({ formula, pressureGpa, ...result });
+      console.log(`[tc-uq] computePhysicsTcUQ(${formula}) took ${Date.now() - t0}ms`);
+      const response = { formula, pressureGpa, ...result };
+      cache.set(cacheKey, response, 60000);
+      res.json(response);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute physics Tc UQ", detail: e.message });
     }
@@ -5359,7 +5398,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e: any) {
       console.error("[Benchmark] Startup benchmark failed:", e.message);
     }
-  }, 5000);
+  }, 90000);
 
   app.get("/api/reference-benchmark", generalLimiter, async (_req, res) => {
     try {
@@ -5367,8 +5406,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         res.json(benchmarkCache);
         return;
       }
-      const results = runReferenceBenchmark();
-      res.json({ results, computedAt: Date.now() });
+      if (!benchmarkCache) {
+        res.json({ results: [], computedAt: Date.now(), pending: true });
+        return;
+      }
+      res.json(benchmarkCache);
     } catch (e: any) {
       res.status(500).json({ error: "Benchmark failed", detail: e.message });
     }

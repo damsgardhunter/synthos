@@ -272,17 +272,17 @@ export function trainStructurePredictor(): void {
 
   if (X.length < 10) return;
 
-  const spacegroupClassifier = trainOneVsAllClassifier(X, sgLabels, 60, 0.1, 3);
-  const crystalSystemClassifier = trainOneVsAllClassifier(X, csLabels, 80, 0.1, 3);
-  const prototypeClassifier = trainOneVsAllClassifier(X, protoLabels, 60, 0.1, 3);
+  const spacegroupClassifier = trainOneVsAllClassifier(X, sgLabels, 15, 0.15, 3);
+  const crystalSystemClassifier = trainOneVsAllClassifier(X, csLabels, 20, 0.15, 3);
+  const prototypeClassifier = trainOneVsAllClassifier(X, protoLabels, 15, 0.15, 3);
 
   const latticeRegressor = {
-    a: trainGBM(X, latticeA, 100, 0.08, 4),
-    b: trainGBM(X, latticeB, 100, 0.08, 4),
-    c: trainGBM(X, latticeC, 100, 0.08, 4),
-    alpha: trainGBM(X, latticeAlpha, 60, 0.05, 3),
-    beta: trainGBM(X, latticeBeta, 60, 0.05, 3),
-    gamma: trainGBM(X, latticeGamma, 60, 0.05, 3),
+    a: trainGBM(X, latticeA, 25, 0.12, 3),
+    b: trainGBM(X, latticeB, 25, 0.12, 3),
+    c: trainGBM(X, latticeC, 25, 0.12, 3),
+    alpha: trainGBM(X, latticeAlpha, 15, 0.1, 3),
+    beta: trainGBM(X, latticeBeta, 15, 0.1, 3),
+    gamma: trainGBM(X, latticeGamma, 15, 0.1, 3),
   };
 
   const sgAcc = computeClassifierAccuracy(spacegroupClassifier, X, sgLabels);
@@ -324,12 +324,29 @@ function shouldRetrain(): boolean {
   return false;
 }
 
+let trainingInProgress = false;
+
 function ensureTrained(): void {
-  if (shouldRetrain()) {
+}
+
+export function isStructurePredictorReady(): boolean {
+  return !!models;
+}
+
+export function trainStructurePredictorBackground(): void {
+  if (models || trainingInProgress) return;
+  trainingInProgress = true;
+  setTimeout(() => {
     try {
+      console.log(`[StructurePredictor] Background training started`);
+      const t0 = Date.now();
       trainStructurePredictor();
-    } catch {}
-  }
+      console.log(`[StructurePredictor] Background training completed in ${Date.now() - t0}ms`);
+    } catch (e) {
+      console.log(`[StructurePredictor] Background training failed: ${e}`);
+    }
+    trainingInProgress = false;
+  }, 120000);
 }
 
 export function predictStructure(formula: string): StructurePredictionML {
@@ -442,7 +459,5 @@ export function getStructurePredictorStats() {
 }
 
 export function initStructurePredictorML(): void {
-  try {
-    trainStructurePredictor();
-  } catch {}
+  trainStructurePredictorBackground();
 }
