@@ -55,7 +55,7 @@ function computePhysicsDerivedBonus(formula: string, lambda: number): number {
   if (isHEA && lambda > 1.0) {
     const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
     const entropyFactor = Math.log(Math.max(2, metalEls.length)) / Math.log(6);
-    const heaBonus = Math.round(entropyFactor * lambda * 8);
+    const heaBonus = Math.min(15, Math.round(entropyFactor * lambda * 8));
     bonus = Math.max(bonus, heaBonus);
   }
   return bonus;
@@ -129,13 +129,14 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     const metalEls = els.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e));
     const metalAtomCount = metalEls.reduce((s, e) => s + (cts[e] || 0), 0);
     const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
-    if (hRatio >= 6) pressureThresholdLow = 50;
+    if (hRatio >= 6) pressureThresholdLow = 100;
     materialBonus = computePhysicsDerivedBonus(formula, lambda);
   }
 
+  const highPressureAnchor = pressureThresholdLow >= 100 ? 150 : 50;
   const isAmbient = pressureGpa < pressureThresholdLow;
-  const isHighPressure = pressureGpa >= 50;
-  const pressureDenom = Math.max(1, 50 - pressureThresholdLow);
+  const isHighPressure = pressureGpa >= highPressureAnchor;
+  const pressureDenom = Math.max(1, highPressureAnchor - pressureThresholdLow);
   const pressureFactor = isHighPressure ? 1.0 : isAmbient ? 0.0 : (pressureGpa - pressureThresholdLow) / pressureDenom;
 
   const extensionFactor = computeCapExtensionFactor(evidence);
