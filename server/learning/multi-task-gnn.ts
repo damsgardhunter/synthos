@@ -143,12 +143,13 @@ function getMultiTaskWeights(): MultiTaskWeights {
 }
 
 function extractGraphPooling(graph: CrystalGraph): number[] {
+  const poolDim = Math.floor(HIDDEN / 2);
   const nNodes = graph.nodes.length;
-  const meanPool = new Array(20).fill(0);
-  const maxPool = new Array(20).fill(-Infinity);
+  const meanPool = new Array(poolDim).fill(0);
+  const maxPool = new Array(poolDim).fill(-Infinity);
 
   for (const node of graph.nodes) {
-    for (let k = 0; k < 20; k++) {
+    for (let k = 0; k < poolDim; k++) {
       meanPool[k] += (node.embedding[k] ?? 0) / nNodes;
       maxPool[k] = Math.max(maxPool[k], node.embedding[k] ?? 0);
     }
@@ -346,7 +347,7 @@ export function computePropertyGradient(
 }
 
 function perturbElement(formula: string, element: string, delta: number): string {
-  const regex = new RegExp(`(${element})(\\d*)`, "g");
+  const regex = new RegExp(`(${element})(?![a-z])(\\d*)`, "g");
   return formula.replace(regex, (_, el, num) => {
     const count = num ? parseInt(num) : 1;
     const newCount = Math.max(1, count + delta);
@@ -360,16 +361,18 @@ const multiTaskStats = {
   propertyCorrelations: {} as Record<string, number>,
 };
 
-const correlationAccum = {
-  n: 0,
-  sumTc: 0, sumTc2: 0,
-  sumLambda: 0, sumLambda2: 0, sumTcLambda: 0,
-  sumDos: 0, sumDos2: 0, sumTcDos: 0,
-  sumMetal: 0, sumMetal2: 0, sumTcMetal: 0,
-};
+const CORR_WINDOW = 500;
+const correlationWindow: { tc: number; lambda: number; dos: number; metal: number }[] = [];
 
-function pearson(n: number, sumX: number, sumX2: number, sumY: number, sumY2: number, sumXY: number): number {
+function pearsonFromWindow(pairs: { x: number; y: number }[]): number {
+  const n = pairs.length;
   if (n < 5) return 0;
+  let sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0, sumXY = 0;
+  for (const { x, y } of pairs) {
+    sumX += x; sumY += y;
+    sumX2 += x * x; sumY2 += y * y;
+    sumXY += x * y;
+  }
   const denom = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
   if (denom < 1e-12) return 0;
   return (n * sumXY - sumX * sumY) / denom;
@@ -384,29 +387,18 @@ export function trackMultiTaskPrediction(pred: MultiTaskPrediction): void {
     const dos = Number.isFinite(pred.dosAtFermi) ? pred.dosAtFermi : 0;
     const metal = Number.isFinite(pred.metallicity) ? pred.metallicity : 0;
 
-    correlationAccum.n++;
-    correlationAccum.sumTc += tc;
-    correlationAccum.sumTc2 += tc * tc;
-    correlationAccum.sumLambda += lambda;
-    correlationAccum.sumLambda2 += lambda * lambda;
-    correlationAccum.sumTcLambda += tc * lambda;
-    correlationAccum.sumDos += dos;
-    correlationAccum.sumDos2 += dos * dos;
-    correlationAccum.sumTcDos += tc * dos;
-    correlationAccum.sumMetal += metal;
-    correlationAccum.sumMetal2 += metal * metal;
-    correlationAccum.sumTcMetal += tc * metal;
+    correlationWindow.push({ tc, lambda, dos, metal });
+    if (correlationWindow.length > CORR_WINDOW) {
+      correlationWindow.shift();
+    }
 
-    const n = correlationAccum.n;
-    multiTaskStats.propertyCorrelations["tc_lambda"] = Math.round(
-      pearson(n, correlationAccum.sumTc, correlationAccum.sumTc2, correlationAccum.sumLambda, correlationAccum.sumLambda2, correlationAccum.sumTcLambda) * 1000
-    ) / 1000;
-    multiTaskStats.propertyCorrelations["tc_dos"] = Math.round(
-      pearson(n, correlationAccum.sumTc, correlationAccum.sumTc2, correlationAccum.sumDos, correlationAccum.sumDos2, correlationAccum.sumTcDos) * 1000
-    ) / 1000;
-    multiTaskStats.propertyCorrelations["tc_metallicity"] = Math.round(
-      pearson(n, correlationAccum.sumTc, correlationAccum.sumTc2, correlationAccum.sumMetal, correlationAccum.sumMetal2, correlationAccum.sumTcMetal) * 1000
-    ) / 1000;
+    const tcLambdaPairs = correlationWindow.map(w => ({ x: w.tc, y: w.lambda }));
+    const tcDosPairs = correlationWindow.map(w => ({ x: w.tc, y: w.dos }));
+    const tcMetalPairs = correlationWindow.map(w => ({ x: w.tc, y: w.metal }));
+
+    multiTaskStats.propertyCorrelations["tc_lambda"] = Math.round(pearsonFromWindow(tcLambdaPairs) * 1000) / 1000;
+    multiTaskStats.propertyCorrelations["tc_dos"] = Math.round(pearsonFromWindow(tcDosPairs) * 1000) / 1000;
+    multiTaskStats.propertyCorrelations["tc_metallicity"] = Math.round(pearsonFromWindow(tcMetalPairs) * 1000) / 1000;
   }
 }
 
