@@ -290,3 +290,31 @@ export function sanitizeForbiddenWords(text: string): string {
   }
   return result;
 }
+
+export const NONMETALS = new Set([
+  "H", "He", "B", "C", "N", "O", "F", "Ne",
+  "Si", "P", "S", "Cl", "Ar",
+  "Ge", "As", "Se", "Br", "Kr",
+  "Te", "I", "Xe",
+  "At", "Rn",
+]);
+
+export function getMetalElements(elements: string[]): string[] {
+  return elements.filter(e => !NONMETALS.has(e));
+}
+
+export function getHydrogenMetalRatio(counts: Record<string, number>, elements: string[]): number {
+  const hCount = counts["H"] || 0;
+  const metalElements = getMetalElements(elements);
+  const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
+  return metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+}
+
+export function computeOrbitalHc2(tc: number, lambdaP: number, coherenceLengthNm: number): number {
+  const PHI0 = 2.07e-15;
+  const xiM = coherenceLengthNm * 1e-9;
+  if (xiM <= 0) return 0;
+  const orbitalLimit = PHI0 / (2 * Math.PI * xiM * xiM);
+  const pauliLimit = 1.86 * tc * Math.sqrt(1 + lambdaP);
+  return Math.min(orbitalLimit, pauliLimit);
+}

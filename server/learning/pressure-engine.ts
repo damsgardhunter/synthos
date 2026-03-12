@@ -12,6 +12,7 @@ import {
   classifyHydrogenBonding,
 } from "./physics-engine";
 import { predictEquilibriumLatticeConstant, isVolumeDNNTrained } from "../crystal/volume-predictor-dnn";
+import { getMetalElements, getHydrogenMetalRatio, computeOrbitalHc2 } from "./utils";
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   if (typeof formula !== "string") formula = String(formula ?? "");
@@ -281,7 +282,7 @@ export function assessHighPressureStability(
   const bm = relaxStructureAtPressure(formula, targetPressure);
 
   const hCount = counts["H"] || 0;
-  const hRatio = (totalAtoms - hCount) > 0 ? hCount / (totalAtoms - hCount) : 0;
+  const hRatio = getHydrogenMetalRatio(counts, elements);
 
   let phononStable = true;
   if (targetPressure > 300) {
@@ -337,19 +338,18 @@ export function assessHighPressureStability(
   };
 }
 
-export function scanPressureTcCurve(
+function scanPressureTcCurveCore(
   formula: string,
-  pressureRange: { min: number; max: number; steps: number } = { min: 0, max: 300, steps: 31 }
+  pressureRange: { min: number; max: number; steps: number },
+  explicitPressures?: number[]
 ): PressureTcPoint[] {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
 
   const hCount = counts["H"] || 0;
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
-  const metalElements = elements.filter(e => !nonmetals.includes(e));
-  const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
-  const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+  const metalElements = getMetalElements(elements);
+  const hRatio = getHydrogenMetalRatio(counts, elements);
 
   const isHydride = hCount > 0 && hRatio >= 2;
   const isSuperhydride = hRatio >= 6;
@@ -420,8 +420,9 @@ export function scanPressureTcCurve(
   const stepSize = (pMax - pMin) / Math.max(1, steps - 1);
   const result: PressureTcPoint[] = [];
 
-  for (let i = 0; i < steps; i++) {
-    const P = pMin + i * stepSize;
+  const numSteps = explicitPressures ? explicitPressures.length : steps;
+  for (let i = 0; i < numSteps; i++) {
+    const P = explicitPressures ? explicitPressures[i] : pMin + i * stepSize;
 
     const volumeRatio = Math.pow(1 + 4.0 * P / Math.max(B0, 1), -1 / 4);
     const hardeningFactor = 1 / Math.max(0.5, Math.pow(volumeRatio, 2));
@@ -472,7 +473,19 @@ export function scanPressureTcCurve(
 
     const stability = assessHighPressureStability(formula, P);
 
-    const hc2 = Tc > 0 ? 1.84 * Tc * Math.sqrt(1 + lambdaP) : 0;
+    let hc2 = 0;
+    if (Tc > 0) {
+      const bwEv = isHydride ? 3.0 : 1.5;
+      const eCharge = 1.602e-19;
+      const mEl = 9.109e-31;
+      const hbar = 1.055e-34;
+      const vF = Math.sqrt(bwEv * eCharge / mEl) / Math.sqrt(1 + lambdaP);
+      const carbotte = 1.764 * (1 + 5.3 * Math.pow(lambdaP / (lambdaP + 6), 2));
+      const delta0 = carbotte * 1.381e-23 * Tc;
+      const xiNm = delta0 > 0 ? (hbar * vF / (Math.PI * delta0)) * 1e9 : 10;
+      const xiClamped = isHydride ? Math.max(0.5, Math.min(20, xiNm)) : Math.max(1, Math.min(100, xiNm));
+      hc2 = computeOrbitalHc2(Tc, lambdaP, xiClamped);
+    }
 
     result.push({
       pressure: Math.round(P),
@@ -484,6 +497,43 @@ export function scanPressureTcCurve(
   }
 
   return result;
+}
+
+export function scanPressureTcCurve(
+  formula: string,
+  pressureRange: { min: number; max: number; steps: number } = { min: 0, max: 300, steps: 31 }
+): PressureTcPoint[] {
+  const coarse = scanPressureTcCurveCore(formula, pressureRange);
+  return refinePressureCurve(formula, coarse, pressureRange);
+}
+
+function refinePressureCurve(
+  formula: string,
+  coarseResult: PressureTcPoint[],
+  pressureRange: { min: number; max: number; steps: number },
+  maxRefinements: number = 10
+): PressureTcPoint[] {
+  if (coarseResult.length < 2) return coarseResult;
+  const gaps: { midP: number; dTc: number }[] = [];
+  for (let i = 0; i < coarseResult.length - 1; i++) {
+    const dTc = Math.abs(coarseResult[i + 1].Tc - coarseResult[i].Tc);
+    if (dTc > 20) {
+      const midP = (coarseResult[i].pressure + coarseResult[i + 1].pressure) / 2;
+      gaps.push({ midP, dTc });
+    }
+  }
+  if (gaps.length === 0) return coarseResult;
+  gaps.sort((a, b) => b.dTc - a.dTc);
+  const midpoints = gaps.slice(0, maxRefinements).map(g => g.midP);
+
+  const refinedSteps = pressureRange.steps + midpoints.length;
+  const allPressures = new Set(coarseResult.map(p => p.pressure));
+  for (const mp of midpoints) allPressures.add(Math.round(mp));
+  const sortedPressures = Array.from(allPressures).sort((a, b) => a - b);
+
+  const fineRange = { min: pressureRange.min, max: pressureRange.max, steps: sortedPressures.length };
+  const fullCurve = scanPressureTcCurveCore(formula, fineRange, sortedPressures);
+  return fullCurve;
 }
 
 export function runPressureAnalysis(
@@ -501,10 +551,8 @@ export function runPressureAnalysis(
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
   const hCount = counts["H"] || 0;
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
-  const metalElements = elements.filter(e => !nonmetals.includes(e));
-  const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
-  const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+  const metalElements = getMetalElements(elements);
+  const hRatio = getHydrogenMetalRatio(counts, elements);
   const isHydride = hCount > 0 && hRatio >= 2;
 
   const curve = scanPressureTcCurve(formula, pressureRange);

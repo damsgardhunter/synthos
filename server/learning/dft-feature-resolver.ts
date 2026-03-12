@@ -2,6 +2,7 @@ import { fetchSummary, fetchElasticity, fetchElectronicStructure, fetchThermo, f
 import type { MPSummaryData, MPElasticityData, MPElectronicStructureData, MPThermoData, MPPhononData } from "./materials-project-client";
 import { fetchAflowData, fetchAflowDFTData } from "./aflow-client";
 import type { AflowDFTData, AflowEntry } from "./aflow-client";
+import { NONMETALS, getMetalElements } from "./utils";
 import {
   getElementData,
   getCompositionWeightedProperty,
@@ -146,8 +147,7 @@ function computeAnalyticalFallbacks(formula: string): {
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0) || 1;
 
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "Te", "I", "Xe"];
-  const metalElements = elements.filter(e => !nonmetals.includes(e));
+  const metalElements = getMetalElements(elements);
   const metalFrac = metalElements.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
 
   const enValues = elements.map(e => getElementData(e)?.paulingElectronegativity ?? 1.5);
@@ -303,8 +303,7 @@ function estimateBulkModulus(elements: string[], counts: Record<string, number>)
 }
 
 function estimatePackingFraction(elements: string[], counts: Record<string, number>, totalAtoms: number): number {
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "Te", "I", "Xe"];
-  const metalElements = elements.filter(e => !nonmetals.includes(e));
+  const metalElements = getMetalElements(elements);
   const metalFrac = metalElements.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
   const hCount = counts["H"] || 0;
   const hFrac = hCount / totalAtoms;
@@ -365,8 +364,7 @@ function estimateAveragePhononFreq(debyeTemp: number, avgMass: number, isHydride
 }
 
 function estimateLatticeType(elements: string[], counts: Record<string, number>, totalCount: number): "fcc" | "bcc" | "hcp" | "layered" | "cage" | "other" {
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Se", "Br", "Kr", "Te", "I", "Xe"];
-  const metalEls = elements.filter(e => !nonmetals.includes(e));
+  const metalEls = getMetalElements(elements);
   const metalFrac = metalEls.reduce((s, e) => s + (counts[e] || 0), 0) / totalCount;
   const hFrac = (counts["H"] || 0) / totalCount;
 

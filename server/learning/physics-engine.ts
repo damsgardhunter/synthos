@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import type { EventEmitter } from "./engine";
 import type { SuperconductorCandidate } from "@shared/schema";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
-import { classifyFamily } from "./utils";
+import { classifyFamily, NONMETALS } from "./utils";
 import { computeFullTightBinding } from "./tight-binding";
 import { computeAdvancedConstraints, type AdvancedPhysicsConstraints } from "../physics/advanced-constraints";
 import { validateOmegaLog } from "../physics/tc-formulas";
@@ -922,7 +922,7 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
   }
 
   const totalAtoms = getTotalAtoms(counts);
-  const nonmetals = ["H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "Ge", "As", "Se", "Br", "Kr", "Te", "I", "Xe"];
+  const nonmetals = NONMETALS;
   const halogens = ["F", "Cl", "Br", "I"];
   const hasH = elements.includes("H");
   const hasB = elements.includes("B");
@@ -931,7 +931,7 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
   const bFrac = bCount / totalAtoms;
   const bhFrac = (bCount + hCount) / totalAtoms;
 
-  const metalElements = elements.filter(e => !nonmetals.includes(e));
+  const metalElements = elements.filter(e => !nonmetals.has(e));
   const metalAtomCount = metalElements.reduce((s, e) => s + (counts[e] || 0), 0);
   const metalFrac = metalAtomCount / totalAtoms;
   const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
@@ -948,7 +948,7 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
     return Math.max(0.05, Math.min(0.25, metalFrac * 0.8));
   }
 
-  const nonHNonMetalFrac = elements.filter(e => nonmetals.includes(e) && e !== "H")
+  const nonHNonMetalFrac = elements.filter(e => nonmetals.has(e) && e !== "H")
     .reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
   const cCount = counts["C"] || 0;
   const cFrac = cCount / totalAtoms;
@@ -964,7 +964,7 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
     const frac = (counts[el] || 1) / totalAtoms;
     const en = data.paulingElectronegativity;
 
-    if (nonmetals.includes(el)) {
+    if (nonmetals.has(el)) {
       anionEN += (en ?? 0) * frac;
       anionWeight += frac;
     } else {
@@ -976,7 +976,7 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
   if (elements.length === 1) {
     const data = getElementData(elements[0]);
     if (data) {
-      if (nonmetals.includes(elements[0])) return 0.1;
+      if (nonmetals.has(elements[0])) return 0.1;
       if (isTransitionMetal(elements[0]) || isRareEarth(elements[0]) || isActinide(elements[0])) return 0.92;
       if ((data.paulingElectronegativity ?? 0) < 1.8) return 0.90;
       return 0.5;
