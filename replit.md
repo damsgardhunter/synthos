@@ -720,6 +720,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `runNovelPrototypeGeneration` uses `Promise.all` to call `generateNovelPrototype` for both principles concurrently, cutting the structural invention phase latency roughly in half.
 - **Exploration-Mode Candidate Selection (structure-predictor.ts)**:
   - `runGenerativeStructureDiscovery` now has a 10% probability of selecting 3 random candidates instead of the top-3 by ensembleScore. Promotes exploration of underexplored chemical space alongside the default exploitation strategy.
+- **Canonical Evolutionary Formula Reconstruction (structure-predictor.ts)**:
+  - `reconstructFormula` now deduplicates elements via `Set` and sorts alphabetically before joining. Prevents malformed formulas like `LaH10H1` from duplicate intercalation, and ensures consistent ordering (Ba2Cu3O7Y→Ba2Cu3O7Y not randomized) so downstream dedup and cache lookups work correctly.
+- **Intercalation Duplicate Guard (structure-predictor.ts)**:
+  - Evolutionary mutation m===3 (scale + intercalate) now checks `Set(elements)` before pushing the intercalant. If the scaled element was already an intercalant (e.g., H in a hydride), it increments the existing count instead of creating a duplicate array entry.
+- **McMillan Tc Fitness in Evolution (structure-predictor.ts)**:
+  - Each evolutionary mutant now gets a fresh Tc prediction via `extractFeatures` + McMillan equation (lambda, logOmega, muStar=0.13) instead of carrying the dead ancestor's Tc. Score weights rebalanced to 0.4 motif + 0.25 dimensionality + 0.35 Tc/400 (was 0.5/0.3/0.2 with stale Tc). Provides a valid fitness gradient for Tc improvement across generations.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

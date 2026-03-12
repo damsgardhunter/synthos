@@ -4,6 +4,7 @@ import type { EventEmitter } from "./engine";
 import { ELEMENTAL_DATA, getElementData, getMeltingPoint, getLatticeConstant } from "./elemental-data";
 import { fetchSummary, fetchElasticity } from "./materials-project-client";
 import { computeDimensionalityScore, detectStructuralMotifs } from "./physics-engine";
+import { extractFeatures } from "./ml-predictor";
 import { getCompetingPhases, assessMetastability } from "./phase-diagram-engine";
 import { predictHydrideFormation } from "./pressure-engine";
 import { IONIC_RADII } from "./crystal-prototypes";
@@ -2001,7 +2002,11 @@ const ATOM_SWAP_MAP: Record<string, string[]> = {
 const EVO_INTERCALANTS = ["Li", "Na", "K", "H"];
 
 function reconstructFormula(elements: string[], counts: Record<string, number>): string {
-  return elements.map(e => counts[e] > 1 ? e + counts[e] : e).join("");
+  const unique = Array.from(new Set(elements)).sort((a, b) => a.localeCompare(b));
+  return unique
+    .filter(e => counts[e] > 0)
+    .map(e => counts[e] > 1 ? e + counts[e] : e)
+    .join("");
 }
 
 export async function runEvolutionaryStructureSearch(
@@ -2059,20 +2064,33 @@ export async function runEvolutionaryStructureSearch(
           const scale = 0.85 + Math.random() * 0.3;
           counts[el] = Math.max(1, Math.round((counts[el] || 1) * scale));
 
-          const available = EVO_INTERCALANTS.filter(i => !elements.includes(i));
+          const elSet = new Set(elements);
+          const available = EVO_INTERCALANTS.filter(i => !elSet.has(i));
           if (available.length > 0) {
             const intercalant = available[Math.floor(Math.random() * available.length)];
-            elements.push(intercalant);
-            counts[intercalant] = 1;
+            if (!elSet.has(intercalant)) {
+              elements.push(intercalant);
+            }
+            counts[intercalant] = (counts[intercalant] || 0) + 1;
           }
         }
 
         const formula = reconstructFormula(elements, counts);
         const dimensionalityScore = computeDimensionalityScore(formula);
         const motifResult = detectStructuralMotifs(formula);
-        const mutantScore = 0.5 * motifResult.motifScore + 0.3 * dimensionalityScore + 0.2 * (parent.predictedTc / 400);
 
-        mutants.push({ formula, score: mutantScore, parentTc: parent.predictedTc });
+        const mutantFeatures = extractFeatures(formula);
+        const lambda = mutantFeatures.electronPhononLambda ?? 0.5;
+        const logOmega = mutantFeatures.logPhononFreq ?? 2.0;
+        const muStar = 0.13;
+        const mcMillanTc = lambda > muStar
+          ? (Math.pow(10, logOmega) / 1.2) * Math.exp(-1.04 * (1 + lambda) / (lambda - muStar * (1 + 0.62 * lambda)))
+          : 0;
+        const predictedTc = Math.max(0, Math.min(300, mcMillanTc));
+
+        const mutantScore = 0.4 * motifResult.motifScore + 0.25 * dimensionalityScore + 0.35 * (predictedTc / 400);
+
+        mutants.push({ formula, score: mutantScore, parentTc: predictedTc });
       }
     }
 
