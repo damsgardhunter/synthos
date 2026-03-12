@@ -94,22 +94,33 @@ function recordMetricTrend(model: string, metric: string, cycle: number, value: 
   }
 }
 
+function coefficientOfVariation(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1);
+  const sd = Math.sqrt(variance);
+  const scale = Math.max(Math.abs(mean), 0.1);
+  return sd / scale;
+}
+
 function detectPlateau(model: string): boolean {
   const modelTrends = metricTrends.filter(t => t.model === model);
   if (modelTrends.length === 0) return false;
 
+  let plateauCount = 0;
+  let checkedCount = 0;
+
   for (const trend of modelTrends) {
     if (trend.values.length < PLATEAU_WINDOW) continue;
-    const recent = trend.values.slice(-PLATEAU_WINDOW);
-    const first = recent[0].value;
-    const last = recent[recent.length - 1].value;
-    if (first === 0) continue;
-    const relativeChange = Math.abs((last - first) / Math.max(Math.abs(first), 1));
-    if (relativeChange < PLATEAU_THRESHOLD) {
-      return true;
+    checkedCount++;
+    const recent = trend.values.slice(-PLATEAU_WINDOW).map(v => v.value);
+    const cv = coefficientOfVariation(recent);
+    if (cv < PLATEAU_THRESHOLD) {
+      plateauCount++;
     }
   }
-  return false;
+
+  return checkedCount > 0 && plateauCount >= checkedCount;
 }
 
 function snapshotKeyMetrics(diagnostics: ComprehensiveModelDiagnostics): Record<string, Record<string, number>> {
@@ -122,32 +133,53 @@ function snapshotKeyMetrics(diagnostics: ComprehensiveModelDiagnostics): Record<
   };
 }
 
+const METRIC_WEIGHTS: Record<string, number> = {
+  stabilityAccuracy: 2.0,
+  r2: 1.0,
+  mae: 1.5,
+  omegaLogMAE: 1.5,
+  debyeTempMAE: 1.0,
+  maxFreqMAE: 1.0,
+  rmse: 0.5,
+};
+
+const STABILITY_RELAXED_TC_THRESHOLD = 0.20;
+
 function metricsWorsened(before: Record<string, number>, after: Record<string, number>): boolean {
   const higherIsBetter = ["r2", "stabilityAccuracy"];
   const lowerIsBetter = ["mae", "rmse", "omegaLogMAE", "debyeTempMAE", "maxFreqMAE"];
 
-  let worseCount = 0;
-  let totalChecked = 0;
+  let worseWeight = 0;
+  let totalWeight = 0;
+
+  const stabilityImproved = before["stabilityAccuracy"] != null && after["stabilityAccuracy"] != null
+    && after["stabilityAccuracy"] > before["stabilityAccuracy"] + 0.02;
+
+  const tcThreshold = stabilityImproved ? STABILITY_RELAXED_TC_THRESHOLD : ROLLBACK_THRESHOLD;
 
   for (const key of Object.keys(before)) {
     if (after[key] == null) continue;
-    totalChecked++;
+    const weight = METRIC_WEIGHTS[key] ?? 1.0;
+    totalWeight += weight;
+
+    const isStabilityMetric = key === "stabilityAccuracy";
+    const threshold = isStabilityMetric ? ROLLBACK_THRESHOLD : tcThreshold;
 
     if (higherIsBetter.includes(key)) {
       const delta = before[key] - after[key];
       const scale = Math.max(Math.abs(before[key]), 0.1);
-      if (delta / scale > ROLLBACK_THRESHOLD) {
-        worseCount++;
+      if (delta / scale > threshold) {
+        worseWeight += weight;
       }
     } else if (lowerIsBetter.includes(key)) {
       const baseline = Math.max(before[key], 0.01);
-      if (after[key] > baseline * (1 + ROLLBACK_THRESHOLD)) {
-        worseCount++;
+      if (after[key] > baseline * (1 + threshold)) {
+        worseWeight += weight;
       }
     }
   }
 
-  return totalChecked > 0 && worseCount > totalChecked / 2;
+  return totalWeight > 0 && worseWeight > totalWeight / 2;
 }
 
 export async function runModelImprovementCycle(
