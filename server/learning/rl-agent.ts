@@ -540,6 +540,7 @@ export class RLChemicalSpaceAgent {
   private pairSuccessRates: Map<string, { successes: number; total: number; avgTc: number }> = new Map();
   private bestActionSequence: { action: RLAction; reward: number }[] = [];
   private motifPickHistory: Map<string, { count: number; lastBestTc: number }> = new Map();
+  private lastKnownStagnation = 0;
 
   constructor() {
     this.policy = {
@@ -930,8 +931,9 @@ export class RLChemicalSpaceAgent {
       this.policy.elementPairBias[action.elementGroup2][action.elementGroup1] += lr * advantageReward * 0.5;
     }
 
+    this.lastKnownStagnation = state.stagnationCycles;
     this.clampAllWeights();
-    this.applyEntropyRegularization();
+    this.applyEntropyRegularization(state.stagnationCycles);
 
     if (this.totalUpdates % 20 === 0 && this.replayBuffer.length >= 32) {
       this.replayBatch(32);
@@ -1000,7 +1002,7 @@ export class RLChemicalSpaceAgent {
     }
 
     this.clampAllWeights();
-    this.applyEntropyRegularization();
+    this.applyEntropyRegularization(this.lastKnownStagnation);
   }
 
   private clampAllWeights(): void {
@@ -1022,16 +1024,19 @@ export class RLChemicalSpaceAgent {
     }
   }
 
-  private applyEntropyRegularization(): void {
+  private applyEntropyRegularization(stagnationCycles: number): void {
+    const decayRate = stagnationCycles <= 5
+      ? 1.0
+      : stagnationCycles <= 15
+        ? 1.0 - (stagnationCycles - 5) * 0.008
+        : Math.max(0.85, 0.92 - (stagnationCycles - 15) * 0.005);
+
     const regularizeArray = (arr: number[]) => {
       if (arr.length === 0) return;
+      if (decayRate >= 1.0) return;
       const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
-      if (mean <= 0) return;
-      const threshold = mean * 3;
       for (let i = 0; i < arr.length; i++) {
-        if (arr[i] > threshold) {
-          arr[i] *= 0.9;
-        }
+        arr[i] = mean + (arr[i] - mean) * decayRate;
       }
     };
     regularizeArray(this.policy.elementGroup);
@@ -1165,7 +1170,26 @@ export class RLChemicalSpaceAgent {
       }
 
       if (layering === "quasi-2D" && !formula.includes("O") && Math.random() < 0.3) {
-        formula = formula + "O";
+        const elCts = parseFormulaElementsRL(formula);
+        const anions = Object.entries(elCts).filter(
+          ([e]) => ["N", "S", "Se", "Te", "F", "Cl", "Br", "I", "P", "As"].includes(e)
+        );
+        if (anions.length > 0) {
+          const [anionEl, anionCount] = anions[0];
+          if (anionCount >= 2) {
+            const oCount = Math.max(1, Math.round(anionCount * 0.2));
+            const remainingAnion = anionCount - oCount;
+            formula = formula.replace(
+              new RegExp(`${anionEl}${anionCount > 1 ? anionCount : ""}(?!\\d)`),
+              `${anionEl}${remainingAnion > 1 ? remainingAnion : ""}O${oCount > 1 ? oCount : ""}`
+            );
+          }
+        } else {
+          const totalAtoms = Object.values(elCts).reduce((s, n) => s + n, 0);
+          if (totalAtoms <= 6) {
+            formula = formula + "O";
+          }
+        }
       }
 
       if (!seen.has(formula)) {
