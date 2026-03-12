@@ -732,6 +732,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - Evolutionary mutations m===2 (pure intercalation) and m===3 (scale+intercalate) are now gated by `INTERCALATION_ALLOWED_DIM` set (quasi-2D, 2D, 3D). `matchPrototype` resolves each parent's dimensionality; dense 1D chains skip intercalation mutations entirely. m===3 for non-intercalatable parents falls back to stoichiometry scaling only.
 - **Event Loop Yielding in Evolution (structure-predictor.ts)**:
   - `setImmediate` yield inserted after each parent's 4 mutations, preventing the 60-evaluation evolutionary loop from blocking the Node.js event loop and keeping the server responsive during structure search.
+- **Isostructural Tc-Aware Upgrade (superconductor-research.ts)**:
+  - Isostructural duplicate check now considers both ensemble score AND Tc improvement (>10% better). A candidate with lower ensemble score but significantly higher predicted Tc is no longer silently discarded. Prevents early low-confidence models from permanently blocking better predictions.
+- **Single-Pass Ambient Tc Cap (superconductor-research.ts)**:
+  - `applyAmbientTcCap` is now called exactly once on `candidate.predictedTc`, with the result also bounded by `effectiveTcCapML` (the family ceiling). Previously the cap was applied to `candidate.predictedTc` first, then the already-capped value could be indirectly double-damped in the update logic. Now `effectiveTcCapML` is computed first and used as an upper bound.
+- **Confident Tc Downgrade Path (superconductor-research.ts)**:
+  - When a retrained model predicts significantly lower Tc but with >15% higher ensemble score (`scoreMuchHigher`), the existing Tc is now corrected downward (floored at 50% of old Tc). This prevents stale high-Tc predictions from persisting in the database when better failure data invalidates them. Log message distinguishes "Tc corrected" from "Tc upgraded".
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

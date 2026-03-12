@@ -189,10 +189,14 @@ export async function runSuperconductorResearch(
     const isostructuralMatch = existingPrototypeMap.get(protoHash);
     if (isostructuralMatch && isostructuralMatch !== formula) {
       const existingIso = await storage.getSuperconductorByFormula(isostructuralMatch);
-      if (existingIso && newScore <= (existingIso.ensembleScore ?? 0)) {
-        emit("log", { phase: "phase-7", event: "Isostructural duplicate skipped", detail: `${formula} matches prototype of ${isostructuralMatch} — skipping lower-score duplicate`, dataSource: "SC Research" });
-        duplicatesSkipped++;
-        continue;
+      if (existingIso) {
+        const isoScoreBetter = newScore > (existingIso.ensembleScore ?? 0);
+        const isoTcBetter = (candidate.predictedTc ?? 0) > (existingIso.predictedTc ?? 0) * 1.1;
+        if (!isoScoreBetter && !isoTcBetter) {
+          emit("log", { phase: "phase-7", event: "Isostructural duplicate skipped", detail: `${formula} matches prototype of ${isostructuralMatch} — no score or Tc improvement`, dataSource: "SC Research" });
+          duplicatesSkipped++;
+          continue;
+        }
       }
     }
     existingPrototypeMap.set(protoHash, formula);
@@ -204,10 +208,13 @@ export async function runSuperconductorResearch(
         ? candidate.uncertaintyEstimate * (candidate.predictedTc ?? 50)
         : undefined,
     };
-    if (candidate.predictedTc != null) {
-      candidate.predictedTc = applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula, capEvidence);
-    }
     const effectiveTcCapML = applyAmbientTcCap(9999, lambdaML, pressureML, metallicityML, formula, capEvidence);
+    if (candidate.predictedTc != null) {
+      candidate.predictedTc = Math.min(
+        applyAmbientTcCap(candidate.predictedTc, lambdaML, pressureML, metallicityML, formula, capEvidence),
+        effectiveTcCapML
+      );
+    }
 
     const existing = await storage.getSuperconductorByFormula(formula);
     if (existing) {
@@ -215,6 +222,8 @@ export async function runSuperconductorResearch(
       const existingTc = existing.predictedTc ?? 0;
       const existingLambda = existing.electronPhononCoupling ?? candidate.electronPhononCoupling ?? 0;
       const tcImproved = (newTc ?? 0) > existingTc;
+      const scoreMuchHigher = newScore > (existing.ensembleScore ?? 0) * 1.15;
+      const tcDowngradeNeeded = scoreMuchHigher && (newTc ?? 0) < existingTc;
       if (newScore > (existing.ensembleScore ?? 0) || tcImproved) {
         const updates: any = {
           ensembleScore: Math.max(newScore, existing.ensembleScore ?? 0),
@@ -228,9 +237,16 @@ export async function runSuperconductorResearch(
           let cappedUpTc = Math.min(newTc ?? 0, existingTc + tcUpCap);
           cappedUpTc = Math.min(cappedUpTc, effectiveTcCapML);
           updates.predictedTc = cappedUpTc;
+        } else if (tcDowngradeNeeded) {
+          updates.predictedTc = Math.max(newTc ?? 0, Math.round(existingTc * 0.5));
+          updates.ensembleScore = newScore;
         }
         await storage.updateSuperconductorCandidate(existing.id, updates);
-        const tcDetail = tcImproved ? `, Tc ${existingTc}K -> ${newTc}K` : "";
+        const tcDetail = tcImproved
+          ? `, Tc ${existingTc}K -> ${updates.predictedTc ?? newTc}K`
+          : tcDowngradeNeeded
+            ? `, Tc corrected ${existingTc}K -> ${updates.predictedTc}K (higher-confidence model)`
+            : "";
         emit("log", { phase: "phase-7", event: "SC candidate upgraded", detail: `${formula}: score ${(existing.ensembleScore ?? 0).toFixed(3)} -> ${Math.max(newScore, existing.ensembleScore ?? 0).toFixed(3)}${tcDetail}`, dataSource: "SC Research" });
       } else {
         duplicatesSkipped++;
