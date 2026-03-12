@@ -1,6 +1,6 @@
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
-import { gnnPredictWithUncertainty, type GNNPredictionWithUncertainty } from "./graph-neural-net";
+import { gnnPredictWithUncertainty, getGNNVersionHistory, type GNNPredictionWithUncertainty } from "./graph-neural-net";
 import { computeEnthalpy } from "./enthalpy-stability";
 
 export interface PressureDataPoint {
@@ -45,23 +45,36 @@ export interface PhaseTransitionStats {
 }
 
 const transitionCache = new Map<string, PhaseTransition[]>();
-const analysisTimestamps = new Map<string, number>();
+const cacheMetadata = new Map<string, { timestamp: number; modelVersion: number }>();
 
 const PRESSURE_STEPS = [0, 5, 10, 20, 30, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 325, 350];
 
-const DTC_DP_THRESHOLD = 0.5;
+const DTC_DP_BASE_THRESHOLD = 0.5;
 const BANDGAP_CLOSE_THRESHOLD = 0.1;
 const BANDGAP_OPEN_THRESHOLD = 0.3;
 const STABILITY_SIGN_THRESHOLD = 0.05;
 const TC_ONSET_THRESHOLD = 2.0;
 
+function getCurrentModelVersion(): number {
+  const history = getGNNVersionHistory();
+  return history.length > 0 ? history.length : 1;
+}
+
+function getScaledDtcThreshold(maxTc: number): number {
+  if (maxTc <= 0) return DTC_DP_BASE_THRESHOLD;
+  if (maxTc < 20) return 0.2;
+  if (maxTc < 50) return 0.5;
+  return 1.0;
+}
+
 function computePressureCurve(formula: string): PressureDataPoint[] {
   const curve: PressureDataPoint[] = [];
 
+  const baseFeatures = extractFeatures(formula, { pressureGpa: 0 } as any);
+
   for (const p of PRESSURE_STEPS) {
     try {
-      const matPartial = { pressureGpa: p } as any;
-      const features = extractFeatures(formula, matPartial);
+      const features = { ...baseFeatures, pressureGpa: p };
       const gb = gbPredict(features, formula);
 
       let gnnResult: GNNPredictionWithUncertainty | null = null;
@@ -159,14 +172,18 @@ export function classifyTransition(transition: Omit<PhaseTransition, "type">): T
 }
 
 export function detectPhaseTransitions(formula: string): PhaseTransition[] {
+  const currentVersion = getCurrentModelVersion();
   const cached = transitionCache.get(formula);
-  const lastAnalysis = analysisTimestamps.get(formula) ?? 0;
-  if (cached && Date.now() - lastAnalysis < 30 * 60 * 1000) {
+  const meta = cacheMetadata.get(formula);
+  if (cached && meta && meta.modelVersion === currentVersion && Date.now() - meta.timestamp < 30 * 60 * 1000) {
     return cached;
   }
 
   const curve = computePressureCurve(formula);
   if (curve.length < 3) return [];
+
+  const maxTcInCurve = Math.max(...curve.map(p => p.tc));
+  const dtcThreshold = getScaledDtcThreshold(maxTcInCurve);
 
   const transitions: PhaseTransition[] = [];
   const now = Date.now();
@@ -194,12 +211,12 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
       }
     }
 
-    if (Math.abs(d.derivative) > DTC_DP_THRESHOLD) {
-      const isLargeDrop = d.derivative < -DTC_DP_THRESHOLD;
-      const isLargeRise = d.derivative > DTC_DP_THRESHOLD;
+    if (Math.abs(d.derivative) > dtcThreshold) {
+      const isLargeDrop = d.derivative < -dtcThreshold;
+      const isLargeRise = d.derivative > dtcThreshold;
 
       const magnitude = Math.abs(d.derivative) * (pEnd - pStart);
-      const confidence = Math.min(1.0, Math.abs(d.derivative) / (DTC_DP_THRESHOLD * 5));
+      const confidence = Math.min(1.0, Math.abs(d.derivative) / (dtcThreshold * 5));
 
       const baseTransition = {
         formula,
@@ -364,10 +381,29 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
     }
   }
 
+  for (let i = 1; i < curve.length; i++) {
+    const prev = curve[i - 1];
+    const curr = curve[i];
+    if ((prev.stability < 0.5 && curr.stability >= 0.5) || (prev.stability >= 0.5 && curr.stability < 0.5)) {
+      const crossing = prev.stability < 0.5 ? "theoretical -> synthesizable" : "synthesizable -> theoretical";
+      const interpP = prev.pressureGpa + (curr.pressureGpa - prev.pressureGpa) * Math.abs(0.5 - prev.stability) / Math.abs(curr.stability - prev.stability);
+      transitions.push({
+        formula,
+        pressureStart: prev.pressureGpa,
+        pressureEnd: curr.pressureGpa,
+        type: "stability_sign_change",
+        confidence: Math.min(1.0, Math.abs(curr.stability - prev.stability) * 3),
+        magnitude: Math.abs(curr.stability - prev.stability),
+        details: `Discovery frontier: stability crosses 0.5 at ~${interpP.toFixed(0)} GPa (${crossing}: ${prev.stability.toFixed(2)} -> ${curr.stability.toFixed(2)})`,
+        detectedAt: now,
+      });
+    }
+  }
+
   const deduplicated = deduplicateTransitions(transitions);
 
   transitionCache.set(formula, deduplicated);
-  analysisTimestamps.set(formula, now);
+  cacheMetadata.set(formula, { timestamp: now, modelVersion: currentVersion });
 
   return deduplicated;
 }
@@ -449,5 +485,5 @@ export function getPhaseTransitionStats(): PhaseTransitionStats {
 
 export function clearPhaseTransitionCache(): void {
   transitionCache.clear();
-  analysisTimestamps.clear();
+  cacheMetadata.clear();
 }
