@@ -427,13 +427,28 @@ function estimateVacancyFormationEnergy(element: string, concentration: number, 
   const d = getElementData(element);
   if (!d) return 0.3;
 
-  let baseEnergy = 0.15;
+  const allElements = parseFormulaElements(formula);
+  const allCounts = parseFormulaCounts(formula);
+  let avgMeltingPt = 0;
+  let totalW = 0;
+  for (const el of allElements) {
+    const ed = getElementData(el);
+    if (ed?.meltingPoint) {
+      const w = allCounts[el] || 1;
+      avgMeltingPt += ed.meltingPoint * w;
+      totalW += w;
+    }
+  }
+  avgMeltingPt = totalW > 0 ? avgMeltingPt / totalW : 1500;
+  const cohesiveScale = avgMeltingPt / 1500;
 
-  if (d.bulkModulus && d.bulkModulus > 150) baseEnergy += 0.1;
-  if (d.meltingPoint && d.meltingPoint > 2000) baseEnergy += 0.1;
-  if (isTransitionMetal(element)) baseEnergy += 0.05;
+  let baseEnergy = 0.10 * cohesiveScale;
 
-  return baseEnergy * concentration * 40;
+  if (d.bulkModulus && d.bulkModulus > 150) baseEnergy += 0.05;
+  if (isTransitionMetal(element)) baseEnergy += 0.03;
+  if (isRareEarth(element)) baseEnergy += 0.02;
+
+  return baseEnergy * concentration * 20;
 }
 
 export function generateVacancyStructures(formula: string, prototype: PrototypeType): VacancyStructure[] {
@@ -525,29 +540,40 @@ const SUBSTRATES: { name: string; latticeA: number }[] = [
   { name: "Al2O3", latticeA: 4.758 },
 ];
 
-function estimateTcChangeFromStrain(strainPercent: number, formula: string): number {
+function estimateTcChangeFromStrain(strainPercent: number, formula: string, parentTc: number): number {
   const absStrain = Math.abs(strainPercent);
   const elements = parseFormulaElements(formula);
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3;
   const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se"));
 
+  const maxBoost = Math.max(1, parentTc * 0.15);
+
+  let rawChange: number;
   if (isCuprate) {
-    if (strainPercent < 0) return Math.round(absStrain * 3);
-    return Math.round(-absStrain * 2);
+    rawChange = strainPercent < 0
+      ? absStrain * 2
+      : -absStrain * 1.5;
+  } else if (isPnictide) {
+    rawChange = absStrain < 2
+      ? absStrain * 1.5
+      : -absStrain * 1.2;
+  } else {
+    if (absStrain < 1) rawChange = absStrain * 1.0;
+    else if (absStrain < 3) rawChange = absStrain * 0.3;
+    else rawChange = -absStrain * 0.5;
   }
 
-  if (isPnictide) {
-    if (absStrain < 2) return Math.round(absStrain * 2);
-    return Math.round(-absStrain * 1.5);
-  }
-
-  if (absStrain < 1) return Math.round(absStrain * 1.5);
-  if (absStrain < 3) return Math.round(absStrain * 0.5);
-  return Math.round(-absStrain * 0.8);
+  return Math.round(Math.max(-maxBoost, Math.min(maxBoost, rawChange)));
 }
 
-export function generateStrainedVariants(formula: string, prototype: PrototypeType): StrainedVariant[] {
+const MAX_STRAIN_PERCENT = 4;
+
+export function generateStrainedVariants(
+  formula: string,
+  prototype: PrototypeType,
+  parentTc: number = 30
+): StrainedVariant[] {
   const filmA = computeScaledLatticeA(formula, prototype);
   const results: StrainedVariant[] = [];
 
@@ -555,10 +581,10 @@ export function generateStrainedVariants(formula: string, prototype: PrototypeTy
     const mismatch = ((sub.latticeA - filmA) / filmA) * 100;
     const absMismatch = Math.abs(mismatch);
 
-    if (absMismatch > 10) continue;
+    if (absMismatch > MAX_STRAIN_PERCENT) continue;
 
     const strainType = mismatch > 0 ? "tensile" : "compressive";
-    const tcChange = estimateTcChangeFromStrain(mismatch, formula);
+    const tcChange = estimateTcChangeFromStrain(mismatch, formula, parentTc);
 
     results.push({
       formula,
@@ -620,7 +646,8 @@ export function runStructuralMutations(
       }
     }
 
-    const strained = generateStrainedVariants(candidate.formula, prototype);
+    const parentTc = candidate.predictedTc ?? 30;
+    const strained = generateStrainedVariants(candidate.formula, prototype, parentTc);
     for (const s of strained) {
       const key = `strain-${s.formula}-${s.substrate}`;
       if (!seenFormulas.has(key)) {
