@@ -265,7 +265,7 @@ export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: numbe
   if (entries.length === 1) {
     const only = entries[0];
     const conf = only.sigma <= 0.15 ? "high" : only.sigma <= 0.25 ? "medium" : "low";
-    return { reconciledTc: Math.round(only.tc), confidence: conf, methods: estimates };
+    return { reconciledTc: Math.round(only.tc * 10) / 10, confidence: conf, methods: estimates };
   }
 
   const clampedSigma = (s: number) => Math.max(0.05, Math.min(0.95, s));
@@ -300,7 +300,7 @@ export function reconcileTc(estimates: TcMethodEstimates): { reconciledTc: numbe
   const disagreementPenalty = spread > 0.35 ? 0.15 : spread > 0.2 ? 0.05 : 0;
   const effectiveSigma = Math.min(0.95, pooledSigma + disagreementPenalty);
   const conf = effectiveSigma <= 0.15 ? "high" : effectiveSigma <= 0.25 ? "medium" : "low";
-  return { reconciledTc: Math.round(reconciledTc), confidence: conf, methods: estimates };
+  return { reconciledTc: Math.round(reconciledTc * 10) / 10, confidence: conf, methods: estimates };
 }
 
 const HEA_EXTRA_METALS = ["Al", "Mg", "Ca", "Sr", "Ba", "Li", "Na", "K", "Ti", "Zn", "Ga", "Ge", "Sn"];
@@ -660,6 +660,7 @@ function computeScreenedMuStar(
   const k_TF_sq = 4 * Math.PI * N_EF;
   const screeningFactor = k_TF_sq / (k_TF_sq + 1.0);
   mu_bare *= screeningFactor;
+  mu_bare = Math.max(0.05, mu_bare);
 
   const E_F_eV = Math.max(1.0, wAvg * 0.5 + N_EF * 0.5);
   const omega_D_eV = Math.max(0.001, debyeTemperature * 8.617e-5);
@@ -1962,6 +1963,7 @@ export interface TcUncertaintyInput {
   muStar: number;
   muStarStd: number;
   omega2Avg?: number;
+  isHydride?: boolean;
 }
 
 export interface TcWithUncertainty {
@@ -2060,14 +2062,14 @@ function hydrideStrongCouplingTc(lambda: number, omegaLogK: number, muStar: numb
 }
 
 export function computeTcWithUncertainty(input: TcUncertaintyInput): TcWithUncertainty {
-  const { lambda, lambdaStd, omegaLog, omegaLogStd, muStar, muStarStd, omega2Avg } = input;
+  const { lambda, lambdaStd, omegaLog, omegaLogStd, muStar, muStarStd, omega2Avg, isHydride } = input;
 
-  const tc0 = allenDynesTcRaw(lambda, omegaLog, muStar, omega2Avg);
+  const tc0 = allenDynesTcRaw(lambda, omegaLog, muStar, omega2Avg, isHydride);
 
   const h = 1e-4;
-  const dTc_dLambda = (allenDynesTcRaw(lambda + h, omegaLog, muStar, omega2Avg) - allenDynesTcRaw(lambda - h, omegaLog, muStar, omega2Avg)) / (2 * h);
-  const dTc_dOmegaLog = (allenDynesTcRaw(lambda, omegaLog + h, muStar, omega2Avg) - allenDynesTcRaw(lambda, omegaLog - h, muStar, omega2Avg)) / (2 * h);
-  const dTc_dMuStar = (allenDynesTcRaw(lambda, omegaLog, muStar + h, omega2Avg) - allenDynesTcRaw(lambda, omegaLog, muStar - h, omega2Avg)) / (2 * h);
+  const dTc_dLambda = (allenDynesTcRaw(lambda + h, omegaLog, muStar, omega2Avg, isHydride) - allenDynesTcRaw(lambda - h, omegaLog, muStar, omega2Avg, isHydride)) / (2 * h);
+  const dTc_dOmegaLog = (allenDynesTcRaw(lambda, omegaLog + h, muStar, omega2Avg, isHydride) - allenDynesTcRaw(lambda, omegaLog - h, muStar, omega2Avg, isHydride)) / (2 * h);
+  const dTc_dMuStar = (allenDynesTcRaw(lambda, omegaLog, muStar + h, omega2Avg, isHydride) - allenDynesTcRaw(lambda, omegaLog, muStar - h, omega2Avg, isHydride)) / (2 * h);
 
   const lambdaContrib = (dTc_dLambda * lambdaStd) ** 2;
   const omegaLogContrib = (dTc_dOmegaLog * omegaLogStd) ** 2;
@@ -2092,6 +2094,7 @@ export function computeTcWithUncertainty(input: TcUncertaintyInput): TcWithUncer
       Math.max(1, oSample),
       Math.max(0.01, Math.min(0.3, mSample)),
       omega2Avg,
+      isHydride,
     );
     if (Number.isFinite(tcSample)) mcSamples.push(tcSample);
   }
@@ -2149,6 +2152,14 @@ export function computePhysicsTcUQ(formula: string, pressureGpa: number = 0): Tc
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
 
+  const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
+  const hCount = counts["H"] || 0;
+  const metalAtomCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+  const isHydride = hCount > 0 && hRatio >= 4;
+
   const lambdaStd = coupling.lambda * 0.15;
   const omegaLogStd = coupling.omegaLog * 0.10;
   const muStarStd = 0.02;
@@ -2161,6 +2172,7 @@ export function computePhysicsTcUQ(formula: string, pressureGpa: number = 0): Tc
     muStar: coupling.muStar,
     muStarStd,
     omega2Avg: coupling.omega2Avg,
+    isHydride,
   });
 }
 
