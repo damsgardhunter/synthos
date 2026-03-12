@@ -3,6 +3,7 @@ import { classifyFamily } from "./utils";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { gbPredictWithUncertainty } from "./gradient-boost";
 import { extractFeatures } from "./ml-predictor";
+import { getVarianceSummary } from "./uncertainty-tracker";
 
 export interface ConformalInterval {
   lower: number;
@@ -326,7 +327,16 @@ export function getConformalInterval(
     };
   }
 
-  const tempSigma = predictedSigma * temperatureScale;
+  let oodInflation = 1.0;
+  try {
+    const vs = getVarianceSummary();
+    const huf = vs.highUncertaintyFraction;
+    if (huf > 0.4) {
+      oodInflation = 1.0 + (huf - 0.4) * 1.5;
+    }
+  } catch {}
+
+  const tempSigma = predictedSigma * temperatureScale * oodInflation;
 
   let q: number;
   if (family && familyQuantiles.has(family)) {

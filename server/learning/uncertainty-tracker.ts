@@ -251,15 +251,11 @@ export function getVarianceSummary(): {
   const total = Math.max(aleatoric + epistemic, 1e-12);
 
   const aFrac = aleatoric / total;
-  const eFrac = epistemic / total;
-  const aFracSafe = Math.max(aFrac, 1e-10);
-  const eFracSafe = Math.max(eFrac, 1e-10);
-  const entropy = -(aFracSafe * Math.log2(aFracSafe) + eFracSafe * Math.log2(eFracSafe));
-  const sourceConfidence = Number(Math.max(0, 1 - entropy).toFixed(4));
+  const sourceConfidence = Number((Math.abs(aFrac - 0.5) * 2).toFixed(4));
 
   let dominantSource: "aleatoric" | "epistemic" | "balanced" = "balanced";
   if (sourceConfidence > 0.2) {
-    dominantSource = aFrac > eFrac ? "aleatoric" : "epistemic";
+    dominantSource = aFrac > 0.5 ? "aleatoric" : "epistemic";
   }
 
   const familyEpistemic: { family: string; epistemicVariance: number; count: number }[] = [];
