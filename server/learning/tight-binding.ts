@@ -42,6 +42,7 @@ export interface TBBandStructure {
   nOrbitals: number;
   formula: string;
   tbConfidence: number;
+  latticeType: string;
 }
 
 export interface WannierProjection {
@@ -83,14 +84,6 @@ function parseComposition(formula: string): { elements: string[]; counts: Record
     counts[el] = (counts[el] || 0) + num;
   }
   return { elements: Object.keys(counts), counts };
-}
-
-function parseFormulaElements(formula: string): string[] {
-  return parseComposition(formula).elements;
-}
-
-function parseFormulaCounts(formula: string): Record<string, number> {
-  return parseComposition(formula).counts;
 }
 
 function getOnsiteEnergies(el: string): OnsiteEnergies {
@@ -726,13 +719,35 @@ function solveTridiagonalEigenvalues(diag: number[], offDiag: number[], n: numbe
 
 const KNOWN_SK_ELEMENTS = new Set(Object.keys(ELEMENTAL_DATA));
 
+const LATTICE_COORD_NUMBER: Record<string, number> = {
+  bcc: 8, fcc: 12, hexagonal: 12, tetragonal: 8, cubic: 6,
+};
+
 function computeTbConfidence(
   elements: string[],
   latticeType: string,
   formula: string,
 ): number {
-  const knownPrototypes = ["bcc", "fcc", "hexagonal"];
-  const structurePrototypeScore = knownPrototypes.includes(latticeType) ? 1.0 : 0.5;
+  let structurePrototypeScore = 0.5;
+  const highConfLattices = ["bcc", "fcc", "hexagonal"];
+  if (highConfLattices.includes(latticeType)) {
+    structurePrototypeScore = 0.85;
+  } else if (latticeType === "tetragonal") {
+    structurePrototypeScore = 0.75;
+  }
+
+  try {
+    const pred = predictStructure(formula);
+    if (pred && pred.confidence > 0.3) {
+      const proto = pred.prototype?.predicted;
+      const protoProb = proto ? (pred.prototype.probabilities[proto] ?? 0) : 0;
+      if (protoProb > 0.5) {
+        structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.15);
+      } else if (protoProb > 0.3) {
+        structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.08);
+      }
+    }
+  } catch {}
 
   const elementsWithParams = elements.filter(el => KNOWN_SK_ELEMENTS.has(el));
   const elementsWithData = elements.filter(el => getElementData(el) !== undefined);
@@ -774,8 +789,6 @@ export function computeTightBindingBands(
 
   const latticeType = guessLatticeType(elements, formula);
   const path = getHighSymmetryPath(latticeType);
-  const nPerSegment = 30;
-  const { kPoints, kLabels } = interpolateKPoints(path, nPerSegment);
 
   let latticeConstant = 0;
   let totalAtoms = 0;
@@ -794,15 +807,29 @@ export function computeTightBindingBands(
     latticeConstant = nElements >= 3 ? 5.5 : nElements === 2 ? 4.5 : 3.5;
   }
 
+  const hasTM = elements.some(el => isTransitionMetal(el) || isRareEarth(el));
+  const hasCorrelatedOxide = hasTM && elements.includes("O");
+  const nPerSegment = hasCorrelatedOxide ? 50 : (hasTM ? 40 : 30);
+  const { kPoints, kLabels } = interpolateKPoints(path, nPerSegment);
+
   const bands: number[][] = [];
   const orbitalChars: { s: number; p: number; d: number }[][] = [];
   let nOrbitals = 0;
+  let kFailures = 0;
 
   for (let ki = 0; ki < kPoints.length; ki++) {
-    const result = buildHamiltonianAtK(kPoints[ki], elements, counts, latticeConstant, latticeType);
-    bands.push(result.eigenvalues);
-    orbitalChars.push(result.orbChars);
-    if (ki === 0) nOrbitals = result.eigenvalues.length;
+    try {
+      const result = buildHamiltonianAtK(kPoints[ki], elements, counts, latticeConstant, latticeType);
+      bands.push(result.eigenvalues);
+      orbitalChars.push(result.orbChars);
+      if (ki === 0) nOrbitals = result.eigenvalues.length;
+    } catch {
+      kFailures++;
+      if (bands.length > 0) {
+        bands.push(bands[bands.length - 1]);
+        orbitalChars.push(orbitalChars[orbitalChars.length - 1]);
+      }
+    }
   }
 
   let fermiEnergy = 0;
@@ -858,7 +885,14 @@ export function computeTightBindingBands(
     }
   }
 
-  const tbConfidence = computeTbConfidence(elements, latticeType, formula);
+  let tbConfidence = computeTbConfidence(elements, latticeType, formula);
+  if (kFailures > 0) {
+    const failRatio = kFailures / kPoints.length;
+    tbConfidence = Number((tbConfidence * (1 - failRatio)).toFixed(4));
+  }
+  if (bands.length === 0) {
+    tbConfidence = 0;
+  }
 
   return {
     kPoints,
@@ -869,6 +903,7 @@ export function computeTightBindingBands(
     nOrbitals,
     formula,
     tbConfidence,
+    latticeType,
   };
 }
 
@@ -921,7 +956,8 @@ export function computeWannierProjection(bands: TBBandStructure): WannierProject
       center: Number(center.toFixed(4)),
     });
 
-    const hopping = bandwidth / (2 * Math.max(1, 6));
+    const coordNumber = LATTICE_COORD_NUMBER[bands.latticeType] ?? 6;
+    const hopping = bandwidth / (2 * Math.max(1, coordNumber));
     effectiveHoppings.push({
       orbital: `band_${b}_${orbType}`,
       value: Number(hopping.toFixed(4)),

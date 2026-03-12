@@ -826,6 +826,16 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - Four separate `Object.keys` loops for applying `effectivenessMultiplier` consolidated into a single `for..of` over the four boost maps.
 - **Time-Weighted Effectiveness Multiplier (theory-guided-generator.ts)**:
   - Window increased from 5→12 records. Uses exponential time-decay weighting (10-minute half-life via `exp(-ageMs / 600000)`) with a floor of 0.1 per record. Recent outcomes influence the multiplier more than stale ones. Prevents "Excited" tempo cycles (15s each) from overreacting to 75 seconds of noisy DFT results. Combined with the `MIN_EFFECTIVENESS_FLOOR=0.1`, theories always retain influence.
+- **Prototype-Aware Confidence Scoring (tight-binding.ts)**:
+  - `computeTbConfidence` now uses a 3-tier base score: 0.85 for bcc/fcc/hexagonal, 0.75 for tetragonal, 0.5 for unknown lattices (was binary 1.0/0.5). Additionally queries `predictStructure` for prototype probabilities — a high-probability prototype match (>50%) adds +0.15, moderate (>30%) adds +0.08, capped at 1.0. This means "Perovskite with 70% confidence" scores higher than a generic "cubic" lattice classification. k-point failures also penalize confidence proportionally.
+- **Dynamic K-Point Density (tight-binding.ts)**:
+  - `nPerSegment` is now 50 for correlated oxides (TM+O), 40 for transition-metal compounds, 30 otherwise (was hardcoded 30). Ensures narrow d-band DOS peaks in cuprates/nickelates are properly resolved, while keeping simple sp-metals fast.
+- **Lattice-Specific Coordination Number for Effective Hoppings (tight-binding.ts)**:
+  - `computeWannierProjection` now derives the coordination number from `LATTICE_COORD_NUMBER` (bcc=8, fcc=12, hexagonal=12, tetragonal=8, cubic=6) via the new `latticeType` field on `TBBandStructure`. Replaces the hardcoded `6` that underestimated hopping for close-packed structures (fcc/hcp should divide by 12, not 6).
+- **Hamiltonian Error Resilience (tight-binding.ts)**:
+  - The k-point loop in `computeTightBindingBands` is now wrapped in try-catch. Failed k-points are filled with the previous k-point's data and counted. If all k-points fail, tbConfidence is set to 0. Partial failures reduce confidence proportionally by `(1 - failRatio)`.
+- **Dead Code Removal (tight-binding.ts)**:
+  - Removed `parseFormulaElements` and `parseFormulaCounts` wrapper functions that were dead code since `parseComposition` consolidation.
 - **Stoichiometry-Weighted Lattice Constant (tight-binding.ts)**:
   - `computeTightBindingBands` now computes a weighted average of elemental lattice constants using formula stoichiometry (e.g., LaH10 weights La×1 + H×10). Fallback when no elemental data: 5.5 Å for ternary+, 4.5 Å for binary, 3.5 Å for elemental — reflecting typical unit cell sizes for complex oxides vs simple metals.
 - **Hybridization-Aware Orbital Type Classification (tight-binding.ts)**:
