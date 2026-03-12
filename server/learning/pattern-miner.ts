@@ -491,7 +491,7 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
       try {
         const existingMl = (c.mlFeatures as Record<string, any>) ?? {};
         const cachedFeatures = existingMl.patternMinerFeatures as MLFeatureVector | undefined;
-        const features = cachedFeatures ?? extractFeatures(c.formula);
+        const features = cachedFeatures ?? await extractFeatures(c.formula);
         if (!cachedFeatures && c.id) {
           uncached.push({ id: c.id, features, existingMl });
         }
@@ -730,7 +730,7 @@ export async function screenWithPatterns(
   for (let i = 0; i < formulas.length; i++) {
     const formula = formulas[i];
     try {
-      const features = extractFeatures(formula);
+      const features = await extractFeatures(formula);
       candidates.push({
         formula,
         predictedTc: 0,

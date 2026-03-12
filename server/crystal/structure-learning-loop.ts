@@ -60,7 +60,7 @@ export async function runStructureLearningCycle(
     if (!cand.valid) continue;
     const avoid = shouldAvoidStructure(cand.formula, cand.lattice, cand.crystalSystem);
     if (avoid) continue;
-    const stability = predictStabilityScreen(cand.formula);
+    const stability = await predictStabilityScreen(cand.formula);
     if (!stability.isLikelyStable) {
       recordStructureFailure({
         formula: cand.formula,

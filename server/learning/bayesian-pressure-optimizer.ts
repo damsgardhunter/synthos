@@ -264,13 +264,13 @@ export function addPressureObservation(
   evictLRU();
 }
 
-function seedFromSurrogate(formula: string): void {
+async function seedFromSurrogate(formula: string): Promise<void> {
   if (observationStore.has(formula) && observationStore.get(formula)!.length >= 5) {
     return;
   }
 
   try {
-    const profile = buildPressureResponseProfile(formula);
+    const profile = await buildPressureResponseProfile(formula);
     for (const pt of profile.tcVsPressure) {
       const stabPt = profile.stabilityVsPressure.find(s => s.pressure === pt.pressure);
       addPressureObservation(
@@ -416,18 +416,18 @@ function quasiRandomCandidates(min: number, max: number, count: number, seed: nu
   return candidates;
 }
 
-export function optimizePressureForFormula(
+export async function optimizePressureForFormula(
   formula: string,
   nIterations: number = 5,
   nCandidatesPerIter: number = 20,
   familyPressureHint?: number
-): BayesianPressureResult {
+): Promise<BayesianPressureResult> {
   const cached = resultCache.get(formula);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
     return cached;
   }
 
-  seedFromSurrogate(formula);
+  await seedFromSurrogate(formula);
 
   const obs = observationStore.get(formula) ?? [];
   if (obs.length === 0) {
@@ -494,7 +494,7 @@ export function optimizePressureForFormula(
     }
 
     try {
-      const interp = interpolateAtPressure(formula, bestCandidate);
+      const interp = await interpolateAtPressure(formula, bestCandidate);
       const newTcNorm = interp.tc / tcRange;
       normalizedObs.push({
         formula,
@@ -546,7 +546,7 @@ export function optimizePressureForFormula(
 
   let stableAtOptimal = false;
   try {
-    const interp = interpolateAtPressure(formula, optimalPressure);
+    const interp = await interpolateAtPressure(formula, optimalPressure);
     stableAtOptimal = interp.enthalpyStable;
   } catch {}
 
@@ -575,11 +575,15 @@ export function optimizePressureForFormula(
   return result;
 }
 
-export function batchOptimizePressure(
+export async function batchOptimizePressure(
   formulas: string[],
   maxFormulas: number = 10
-): BayesianPressureResult[] {
-  return formulas.slice(0, maxFormulas).map(f => optimizePressureForFormula(f, 5, 20, estimateFamilyPressure(f)));
+): Promise<BayesianPressureResult[]> {
+  const results: BayesianPressureResult[] = [];
+  for (const f of formulas.slice(0, maxFormulas)) {
+    results.push(await optimizePressureForFormula(f, 5, 20, estimateFamilyPressure(f)));
+  }
+  return results;
 }
 
 export function getBayesianPressureStats(): BayesianPressureStats {

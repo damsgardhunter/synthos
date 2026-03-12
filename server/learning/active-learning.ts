@@ -207,7 +207,7 @@ interface RankedCandidate {
   ucbScore?: number;
   curiosityScore?: number;
   structuralDistance?: number;
-  cachedFeatures?: ReturnType<typeof extractFeatures>;
+  cachedFeatures?: Awaited<ReturnType<typeof extractFeatures>>;
 }
 
 export interface PressureCoverageStats {
@@ -552,11 +552,11 @@ function computeStabilityProbability(candidate: CandidateExt, candidatePressure:
   return Math.min(1.0, Math.max(0, stabilityProb));
 }
 
-export function selectForDFT(
+export async function selectForDFT(
   candidates: SuperconductorCandidate[],
   budget: number = 20,
   options?: { explorationMode?: boolean }
-): RankedCandidate[] {
+): Promise<RankedCandidate[]> {
   candidates = candidates.filter(c => isValidFormula(c.formula));
 
   const explore = options?.explorationMode ?? false;
@@ -577,12 +577,12 @@ export function selectForDFT(
   const kappa = computeAdaptiveAlpha();
 
   const pressureCache = new Map<string, number>();
-  const baseFeatureCache = new Map<string, ReturnType<typeof extractFeatures>>();
+  const baseFeatureCache = new Map<string, Awaited<ReturnType<typeof extractFeatures>>>();
   for (const c of candidates) {
     if (!pressureCache.has(c.formula)) {
       const p = c.pressureGpa ?? estimateFamilyPressure(c.formula);
       pressureCache.set(c.formula, p);
-      baseFeatureCache.set(c.formula, extractFeatures(c.formula, { pressureGpa: p } as any));
+      baseFeatureCache.set(c.formula, await extractFeatures(c.formula, { pressureGpa: p } as any));
     }
   }
 
@@ -628,8 +628,8 @@ export function selectForDFT(
 
     try {
       const cachedFeatures = baseFeatureCache.get(candidate.formula);
-      const features = cachedFeatures ?? extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
-      const xgbResult = gbPredictWithUncertainty(features, candidate.formula);
+      const features = cachedFeatures ?? await extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
+      const xgbResult = await gbPredictWithUncertainty(features, candidate.formula);
       xgbUncertainty = xgbResult.normalizedUncertainty;
       xgbSigmaK = xgbResult.totalStd ?? xgbResult.tcStd ?? tc * xgbUncertainty;
     } catch {}
@@ -771,7 +771,7 @@ export function selectForDFT(
     if (pressureSeenFormulas.has(ranked.candidate.formula)) continue;
     pressureSeenFormulas.add(ranked.candidate.formula);
     try {
-      const samples = generateAdaptivePressureSamples(ranked.candidate.formula, 2);
+      const samples = await generateAdaptivePressureSamples(ranked.candidate.formula, 2);
       for (const sample of samples) {
         if (pressureAdded >= pressureExplorationSlots || selected.length >= budget) break;
         selected.push({
@@ -796,7 +796,7 @@ async function runDFTEnrichmentForCandidate(
   emit: EventEmitter,
   candidate: SuperconductorCandidate,
   pressureGpa?: number,
-  cachedFeatures?: ReturnType<typeof extractFeatures>
+  cachedFeatures?: Awaited<ReturnType<typeof extractFeatures>>
 ): Promise<boolean> {
   const evalPressure = pressureGpa ?? candidate.pressureGpa ?? estimateFamilyPressure(candidate.formula);
 
@@ -827,8 +827,8 @@ async function runDFTEnrichmentForCandidate(
       recordPipelineResult(entry.lambda, entry.tc);
     }
 
-    const features = cachedFeatures ?? extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
-    const gb = gbPredict(features, candidate.formula);
+    const features = cachedFeatures ?? await extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
+    const gb = await gbPredict(features, candidate.formula);
     const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
     const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
@@ -891,7 +891,7 @@ async function runDFTEnrichmentForCandidate(
     const isMetastable = !isStable && entry.isPhononStable && formEnergy !== null && formEnergy < 0.25;
     const dftSource = entry.tier === "full-dft" ? "external" as const : "active-learning" as const;
 
-    incorporateDFTResult(
+    await incorporateDFTResult(
       candidate.formula,
       reconciledTc,
       formEnergy,
@@ -968,7 +968,7 @@ async function runDFTEnrichmentForCandidate(
       modelPred
     );
 
-    recordPredictionVsReality(
+    await recordPredictionVsReality(
       candidate.formula,
       evalPressure,
       {
@@ -1024,8 +1024,8 @@ async function runDFTEnrichmentForCandidate(
     }
     enrichmentLogCount++;
 
-    const features = extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
-    const gb = gbPredict(features);
+    const features = await extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
+    const gb = await gbPredict(features);
     const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
     const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
@@ -1052,7 +1052,7 @@ async function runDFTEnrichmentForCandidate(
     const isStable = formEnergy !== null ? formEnergy < 0.1 : false;
     const dftSource = hasExternalDFT ? "external" as const : "active-learning" as const;
 
-    incorporateDFTResult(
+    await incorporateDFTResult(
       candidate.formula,
       gb.tcPredicted,
       formEnergy,
@@ -1123,7 +1123,7 @@ async function runDFTEnrichmentForCandidate(
       fallbackModelPred
     );
 
-    recordPredictionVsReality(
+    await recordPredictionVsReality(
       candidate.formula,
       evalPressure,
       {
@@ -1185,11 +1185,11 @@ const heldOutFormulas = new Set(
     .map(e => e.formula)
 );
 
-function validateOnHeldOut(): { r2: number; mse: number } {
+async function validateOnHeldOut(): Promise<{ r2: number; mse: number }> {
   const heldOut = SUPERCON_TRAINING_DATA.filter(
     e => heldOutFormulas.has(e.formula)
   );
-  if (heldOut.length < 5) return validateModel();
+  if (heldOut.length < 5) return await validateModel();
 
   let sse = 0;
   let sst = 0;
@@ -1199,14 +1199,14 @@ function validateOnHeldOut(): { r2: number; mse: number } {
 
   for (const entry of heldOut) {
     try {
-      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
-      const result = gbPredictWithUncertainty(features, entry.formula);
+      const features = await extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+      const result = await gbPredictWithUncertainty(features, entry.formula);
       sse += (entry.tc - result.tcPredicted) ** 2;
       sst += (entry.tc - meanTc) ** 2;
       count++;
     } catch { continue; }
   }
-  if (count < 5) return validateModel();
+  if (count < 5) return await validateModel();
   return { mse: sse / count, r2: sst < 1e-6 ? 0 : 1 - sse / sst };
 }
 
@@ -1214,7 +1214,7 @@ async function retrainGNNWithEnrichedData(
   emit: EventEmitter,
   enrichedSnapshot?: SuperconductorCandidate[]
 ): Promise<{ r2Before: number; maeBefore: number; r2After: number; maeAfter: number }> {
-  const validationBefore = validateOnHeldOut();
+  const validationBefore = await validateOnHeldOut();
   const r2Before = validationBefore.r2;
   const maeBefore = Math.sqrt(validationBefore.mse);
 
@@ -1288,7 +1288,7 @@ async function retrainGNNWithEnrichedData(
 
   const xgbResult = await retrainXGBoostFromEvaluated();
 
-  const validationAfter = validateOnHeldOut();
+  const validationAfter = await validateOnHeldOut();
   const r2After = validationAfter.r2;
   const maeAfter = Math.sqrt(validationAfter.mse);
 
@@ -1349,7 +1349,7 @@ export async function runActiveLearningCycle(
     return convergenceStats;
   }
 
-  const selected = selectForDFT(eligibleCandidates, 20, { explorationMode: memory.explorationMode });
+  const selected = await selectForDFT(eligibleCandidates, 20, { explorationMode: memory.explorationMode });
 
   const avgUncertaintyBefore = selected.length > 0
     ? selected.reduce((sum, r) => sum + r.uncertainty, 0) / selected.length
@@ -1459,7 +1459,7 @@ export async function runActiveLearningCycle(
       const suggestions = suggestDisorders(candidate.formula);
       const topSuggestions = suggestions.slice(0, 2);
       let bestVariantTc = candidate.predictedTc ?? 0;
-      const baseFeatures = ranked.cachedFeatures ?? extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
+      const baseFeatures = ranked.cachedFeatures ?? await extractFeatures(candidate.formula, undefined, undefined, undefined, undefined);
 
       for (const spec of topSuggestions) {
         for (const frac of DISORDER_FRACTIONS) {
@@ -1482,8 +1482,8 @@ export async function runActiveLearningCycle(
                 dosDisorderSignal: variant.metrics.dosDisorderSignal,
               };
 
-              const features = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, disorderCtx);
-              const gb = gbPredict(features, candidate.formula);
+              const features = await extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, disorderCtx);
+              const gb = await gbPredict(features, candidate.formula);
               const variantTc = gb.tcPredicted > 0 ? gb.tcPredicted : (candidate.predictedTc ?? 0) * variant.tcModifierEstimate;
 
               if (variantTc > bestVariantTc) {
@@ -1550,8 +1550,8 @@ export async function runActiveLearningCycle(
 
           const solubilityPenalty = 1 - 0.3 * Math.min(1, radiusMismatch / 0.3) - 0.2 * Math.min(1, absValenceDiff / 3);
 
-          const features = extractFeatures(variant.resultFormula, undefined, undefined, undefined, undefined);
-          const gb = gbPredict(features, variant.resultFormula);
+          const features = await extractFeatures(variant.resultFormula, undefined, undefined, undefined, undefined);
+          const gb = await gbPredict(features, variant.resultFormula);
           const compositionTc = gb.tcPredicted;
 
           const strainPenalty = variant.relaxation ? Math.max(0, 1 - Math.abs(variant.relaxation.latticeStrain) * 5) : 1.0;
@@ -1632,7 +1632,7 @@ export async function runActiveLearningCycle(
   const pressureCandidates = selected.filter(s => s.selectionTier === "pressure-exploration" || (s.candidate.predictedTc ?? 0) > 50);
   for (const ranked of pressureCandidates.slice(0, 5)) {
     try {
-      const transitions = detectPhaseTransitions(ranked.candidate.formula);
+      const transitions = await detectPhaseTransitions(ranked.candidate.formula);
       pressureTransitionsThisCycle += transitions.length;
       if (transitions.length > 0) {
         emit("log", {
@@ -1648,8 +1648,8 @@ export async function runActiveLearningCycle(
 
   for (const ranked of selected.slice(0, 3)) {
     try {
-      predictPressureCurve(ranked.candidate.formula);
-      const optimal = findOptimalPressure(ranked.candidate.formula);
+      await predictPressureCurve(ranked.candidate.formula);
+      const optimal = await findOptimalPressure(ranked.candidate.formula);
       if (optimal.optimalPressureGpa > 0 && optimal.maxTc > 50) {
         emit("log", {
           phase: "active-learning",
@@ -1689,7 +1689,7 @@ export async function runActiveLearningCycle(
   totalEnrichedSinceLastRetrain += dftSuccessCount;
 
   const batchCycleNum = startNewBatchCycle();
-  const validationPre = validateOnHeldOut();
+  const validationPre = await validateOnHeldOut();
   const preR2 = validationPre.r2;
   const preMAE = Math.sqrt(validationPre.mse);
   const preDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
@@ -1724,7 +1724,7 @@ export async function runActiveLearningCycle(
     });
   }
 
-  const validationPost = validateOnHeldOut();
+  const validationPost = await validateOnHeldOut();
   const postR2 = validationPost.r2;
   const postMAE = Math.sqrt(validationPost.mse);
   const postDatasetSize = getEvaluatedDatasetStats().totalEvaluated;

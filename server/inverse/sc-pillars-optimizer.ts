@@ -716,11 +716,11 @@ export class PillarOptimizerContext {
 
 const defaultCtx = new PillarOptimizerContext();
 
-export function evaluatePillars(
+export async function evaluatePillars(
   formula: string,
   targets: SCPillarTargets = DEFAULT_PILLAR_TARGETS,
   options?: { maxPressureGPa?: number; ctx?: PillarOptimizerContext },
-): PillarEvaluation {
+): Promise<PillarEvaluation> {
   const ctx = options?.ctx ?? defaultCtx;
   ctx.totalEvaluated++;
 
@@ -858,8 +858,8 @@ export function evaluatePillars(
 
   let tcPredicted = 0;
   try {
-    const features = extractFeatures(formula);
-    const gb = gbPredict(features);
+    const features = await extractFeatures(formula);
+    const gb = await gbPredict(features);
     tcPredicted = gb.tcPredicted;
   } catch {}
 
@@ -1217,11 +1217,11 @@ function generateFromTemplate(template: DesignTemplate, count: number, globalSee
   return formulas;
 }
 
-export function runPillarGuidedGeneration(
+export async function runPillarGuidedGeneration(
   targets: SCPillarTargets = DEFAULT_PILLAR_TARGETS,
   candidatesPerTemplate: number = 8,
   pressureGPa?: number,
-): PillarGuidedCandidate[] {
+): Promise<PillarGuidedCandidate[]> {
   const results: PillarGuidedCandidate[] = [];
   const allFormulas: string[] = [];
   const globalSeen = new Set<string>();
@@ -1264,7 +1264,7 @@ export function runPillarGuidedGeneration(
 
   for (const formula of allFormulas) {
     try {
-      const evaluation = evaluatePillars(formula, targets, { maxPressureGPa: pressureGPa });
+      const evaluation = await evaluatePillars(formula, targets, { maxPressureGPa: pressureGPa });
       if (!evaluation.physicsValid) continue;
 
       const strengths: string[] = [];
@@ -1345,17 +1345,17 @@ const MECHANISM_TO_PILLARS: Record<string, string[]> = {
   "excitonic": ["dos", "pairingGlue", "instability"],
 };
 
-export function incorporateDFTFeedbackIntoPillars(
+export async function incorporateDFTFeedbackIntoPillars(
   formula: string,
   predictedTc: number,
   actualTc: number,
   actualStable: boolean,
   pressureGPa?: number,
   ctx: PillarOptimizerContext = defaultCtx,
-): void {
+): Promise<void> {
   let evaluation: PillarEvaluation | null = null;
   try {
-    evaluation = evaluatePillars(formula, undefined, { maxPressureGPa: pressureGPa, ctx });
+    evaluation = await evaluatePillars(formula, undefined, { maxPressureGPa: pressureGPa, ctx });
   } catch {
     return;
   }
@@ -1422,11 +1422,11 @@ export function getPillarDFTFeedbackStats(): { pillar: string; accuracy: number;
 
 let mutationGeneration = 0;
 
-export function runPillarCycle(
+export async function runPillarCycle(
   existingFormulas: string[],
   targetTc: number = 200,
   pressureGPa?: number,
-): { formulas: string[]; evaluations: PillarEvaluation[]; bestFormula: string; bestFitness: number; bestTc: number } {
+): Promise<{ formulas: string[]; evaluations: PillarEvaluation[]; bestFormula: string; bestFitness: number; bestTc: number }> {
   mutationGeneration++;
   const t = Math.max(0, Math.min(1, (targetTc - 20) / 280));
   const targets: SCPillarTargets = {
@@ -1439,12 +1439,12 @@ export function runPillarCycle(
     minHydrogenCage: 0.4 + 0.2 * t,
   };
 
-  const guided = runPillarGuidedGeneration(targets, 6, pressureGPa);
+  const guided = await runPillarGuidedGeneration(targets, 6, pressureGPa);
 
   const reEvalExisting: PillarEvaluation[] = [];
   for (const f of existingFormulas.slice(0, 10)) {
     try {
-      reEvalExisting.push(evaluatePillars(f, targets, { maxPressureGPa: pressureGPa }));
+      reEvalExisting.push(await evaluatePillars(f, targets, { maxPressureGPa: pressureGPa }));
     } catch {}
   }
 
@@ -1453,7 +1453,7 @@ export function runPillarCycle(
       try {
         const mutated = mutateTowardWeakPillar(ex, targets, pressureGPa);
         if (mutated) {
-          const mutEval = evaluatePillars(mutated, targets, { maxPressureGPa: pressureGPa });
+          const mutEval = await evaluatePillars(mutated, targets, { maxPressureGPa: pressureGPa });
           if (mutEval.compositeFitness > ex.compositeFitness) {
             const fitnessImprovement = mutEval.compositeFitness - ex.compositeFitness;
             guided.push({

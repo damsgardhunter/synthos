@@ -885,7 +885,7 @@ function computeWeightedVEC(formula: string): number {
   return atomSum > 0 ? vecSum / atomSum : 0;
 }
 
-export function rapidGBScreen(formulas: string[]): RapidScreenResult[] {
+export async function rapidGBScreen(formulas: string[]): Promise<RapidScreenResult[]> {
   const results: RapidScreenResult[] = [];
 
   for (const formula of formulas) {
@@ -893,8 +893,8 @@ export function rapidGBScreen(formulas: string[]): RapidScreenResult[] {
       const vec = computeWeightedVEC(formula);
       if (vec < 1.0 || vec > 11.0) continue;
 
-      const features = extractFeatures(formula);
-      const gb = gbPredict(features);
+      const features = await extractFeatures(formula);
+      const gb = await gbPredict(features);
       if (gb.tcPredicted >= 5) {
         results.push({
           formula,
@@ -1012,10 +1012,10 @@ export function selectSeedPairs(focusArea: string): string[][] {
   return [...focusPairs, ...biasedSubset, ...unconvSubset];
 }
 
-export function runMassiveGeneration(
+export async function runMassiveGeneration(
   topCandidates: { formula: string; predictedTc?: number }[],
   focusArea: string
-): { formulas: string[]; stats: MassiveGenerationStats } {
+): Promise<{ formulas: string[]; stats: MassiveGenerationStats }> {
   const baseFormulas = topCandidates.map(c => c.formula);
   const allGenerated = new Set<string>();
   const stats: MassiveGenerationStats = {
@@ -1203,7 +1203,7 @@ export function runMassiveGeneration(
   }
   stats.passedCompatibilityFilter = compatFiltered.length;
 
-  const screened = rapidGBScreen(compatFiltered);
+  const screened = await rapidGBScreen(compatFiltered);
   const top50 = screened.slice(0, 50);
   stats.passedPreScreen = top50.length;
 

@@ -67,15 +67,15 @@ function getScaledDtcThreshold(maxTc: number): number {
   return 1.0;
 }
 
-function computePressureCurve(formula: string): PressureDataPoint[] {
+async function computePressureCurve(formula: string): Promise<PressureDataPoint[]> {
   const curve: PressureDataPoint[] = [];
 
-  const baseFeatures = extractFeatures(formula, { pressureGpa: 0 } as any);
+  const baseFeatures = await extractFeatures(formula, { pressureGpa: 0 } as any);
 
   for (const p of PRESSURE_STEPS) {
     try {
       const features = { ...baseFeatures, pressureGpa: p };
-      const gb = gbPredict(features, formula);
+      const gb = await gbPredict(features, formula);
 
       let gnnResult: GNNPredictionWithUncertainty | null = null;
       try {
@@ -107,7 +107,7 @@ function computePressureCurve(formula: string): PressureDataPoint[] {
 
       let enthalpy = formationEnergy;
       try {
-        const hPt = computeEnthalpy(formula, p);
+        const hPt = await computeEnthalpy(formula, p);
         enthalpy = hPt.enthalpy;
       } catch {
         enthalpy = formationEnergy + p * 0.006;
@@ -174,7 +174,7 @@ export function classifyTransition(transition: Omit<PhaseTransition, "type">): T
   return "structural";
 }
 
-export function detectPhaseTransitions(formula: string): PhaseTransition[] {
+export async function detectPhaseTransitions(formula: string): Promise<PhaseTransition[]> {
   const currentVersion = getCurrentModelVersion();
   const cached = transitionCache.get(formula);
   const meta = cacheMetadata.get(formula);
@@ -182,7 +182,7 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
     return cached;
   }
 
-  const curve = computePressureCurve(formula);
+  const curve = await computePressureCurve(formula);
   if (curve.length < 3) return [];
 
   const maxTcInCurve = Math.max(...curve.map(p => p.tc));

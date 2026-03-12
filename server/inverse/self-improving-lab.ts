@@ -929,7 +929,7 @@ export function createLab(id: string, targetTc: number = 293, maxPressure: numbe
   return state;
 }
 
-export function runLabIteration(id: string): LabIterationResult | null {
+export async function runLabIteration(id: string): Promise<LabIterationResult | null> {
   const state = labs.get(id);
   if (!state || state.status === "converged" || state.status === "completed" || state.status === "paused") return null;
 
@@ -1015,9 +1015,9 @@ export function runLabIteration(id: string): LabIterationResult | null {
     const topForGrad = state.learningState.bestCandidates.slice(0, 2);
     for (const best of topForGrad) {
       try {
-        const preEval = evaluatePillars(best.formula, pillarTargets, { maxPressureGPa: state.maxPressure });
+        const preEval = await evaluatePillars(best.formula, pillarTargets, { maxPressureGPa: state.maxPressure });
         if (preEval.compositeFitness < 0.7) continue;
-        const diffResult = runDifferentiableOptimization(best.formula, target);
+        const diffResult = await runDifferentiableOptimization(best.formula, target);
         if (diffResult?.optimizedFormula && diffResult.optimizedFormula !== best.formula) {
           rawCandidates.push({
             formula: diffResult.optimizedFormula,
@@ -1097,8 +1097,8 @@ export function runLabIteration(id: string): LabIterationResult | null {
     try {
       const t0Surrogate = Date.now();
       try {
-        const features = extractFeatures(raw.formula);
-        const gb = gbPredict(features);
+        const features = await extractFeatures(raw.formula);
+        const gb = await gbPredict(features);
         const gnn = gnnPredictWithUncertainty(raw.formula);
         const gnnConf = gnn.confidence ?? 0;
         const gnnWeight = gnnConf > 0.5 ? 0.65 : gnnConf > 0.3 ? 0.45 : 0.25;
@@ -1139,7 +1139,7 @@ export function runLabIteration(id: string): LabIterationResult | null {
             minHydrogenCage: strategy.parameters.hydrogenDensity === "high" ? 0.6 : 0.3,
             preferredMotifs: ["cage", "layered", "kagome"],
           };
-          candidate.pillarEval = evaluatePillars(raw.formula, pillarTargets, { maxPressureGPa: state.maxPressure });
+          candidate.pillarEval = await evaluatePillars(raw.formula, pillarTargets, { maxPressureGPa: state.maxPressure });
         } finally { iterPillarMs += Date.now() - t0Pillar; }
       } catch {}
     } catch {

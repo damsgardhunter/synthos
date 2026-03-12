@@ -377,7 +377,7 @@ export async function proposeUncertaintyImprovements(): Promise<UncertaintyPropo
 
   const variance = getVarianceSummary();
   const ensembleStats = getXGBEnsembleStats();
-  const diagnostics = getComprehensiveModelDiagnostics();
+  const diagnostics = await getComprehensiveModelDiagnostics();
   const familyVariance = getVarianceByFamily();
 
   const familyLines = Object.entries(familyVariance)

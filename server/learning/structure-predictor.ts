@@ -2096,7 +2096,7 @@ export async function runEvolutionaryStructureSearch(
         const dimensionalityScore = computeDimensionalityScore(formula);
         const motifResult = detectStructuralMotifs(formula);
 
-        const mutantFeatures = extractFeatures(formula);
+        const mutantFeatures = await extractFeatures(formula);
         const lambda = mutantFeatures.electronPhononLambda ?? 0.5;
         const logOmega = mutantFeatures.logPhononFreq ?? 2.0;
         const muStar = 0.13;

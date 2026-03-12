@@ -400,10 +400,10 @@ function computeImprovement(before: Record<string, number>, after: Record<string
 }
 
 export async function proposeModelExperiments(diagnosticsReport?: string): Promise<ExperimentProposal[]> {
-  const report = diagnosticsReport ?? getModelDiagnosticsForLLM();
+  const report = diagnosticsReport ?? await getModelDiagnosticsForLLM();
 
   try {
-    const currentDiagnostics = getComprehensiveModelDiagnostics();
+    const currentDiagnostics = await getComprehensiveModelDiagnostics();
     const featureContext = buildFeatureContext();
     const archContext = buildFamilyArchitectureContext(currentDiagnostics);
     const response = await openai.chat.completions.create({
@@ -561,7 +561,7 @@ Be specific about what parameters to change and why.`,
 
 export async function executeExperiment(experiment: ExperimentProposal): Promise<ExperimentRecord> {
   const id = generateExperimentId();
-  const diagnosticsBefore = getComprehensiveModelDiagnostics();
+  const diagnosticsBefore = await getComprehensiveModelDiagnostics();
   const beforeMetrics = snapshotModelMetrics(diagnosticsBefore, experiment.model_target);
 
   const record: ExperimentRecord = {
@@ -684,7 +684,7 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
       }
     }
 
-    const diagnosticsAfter = getComprehensiveModelDiagnostics();
+    const diagnosticsAfter = await getComprehensiveModelDiagnostics();
     const afterMetrics = snapshotModelMetrics(diagnosticsAfter, experiment.model_target);
     const improvement = computeImprovement(beforeMetrics, afterMetrics);
 

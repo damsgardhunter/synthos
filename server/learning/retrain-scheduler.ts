@@ -93,8 +93,8 @@ function checkDatasetGrowthTrigger(): RetrainTrigger | null {
 
 const HIGH_TC_FAMILIES = ["hydride", "cuprate", "nickelate"];
 
-function checkErrorSpikeTrigger(): RetrainTrigger | null {
-  const diagnostics = getComprehensiveModelDiagnostics();
+async function checkErrorSpikeTrigger(): Promise<RetrainTrigger | null> {
+  const diagnostics = await getComprehensiveModelDiagnostics();
   const currentR2 = diagnostics.xgboost.r2;
   const currentMAE = diagnostics.xgboost.mae;
 
@@ -177,8 +177,8 @@ const GNN_STALE_CRITICAL_MS = 24 * 3600_000;
 const GNN_NEW_OUTCOMES_WARN = 50;
 const GNN_NEW_OUTCOMES_CRITICAL = 150;
 
-function checkGNNStalenessTrigger(): RetrainTrigger | null {
-  const diagnostics = getComprehensiveModelDiagnostics();
+async function checkGNNStalenessTrigger(): Promise<RetrainTrigger | null> {
+  const diagnostics = await getComprehensiveModelDiagnostics();
   const stalenessMs = diagnostics.gnn.modelStalenessMs;
   const newOutcomes = diagnostics.gnn.newOutcomesSinceLastTrain;
 
@@ -217,13 +217,13 @@ function checkGNNStalenessTrigger(): RetrainTrigger | null {
   return null;
 }
 
-function collectTriggers(): RetrainTrigger[] {
+async function collectTriggers(): Promise<RetrainTrigger[]> {
   const triggers: RetrainTrigger[] = [];
 
   const datasetTrigger = checkDatasetGrowthTrigger();
   if (datasetTrigger) triggers.push(datasetTrigger);
 
-  const errorTrigger = checkErrorSpikeTrigger();
+  const errorTrigger = await checkErrorSpikeTrigger();
   if (errorTrigger) triggers.push(errorTrigger);
 
   const calibrationTrigger = checkCalibrationDriftTrigger();
@@ -232,7 +232,7 @@ function collectTriggers(): RetrainTrigger[] {
   const uncertaintyTrigger = checkUncertaintyIncreaseTrigger();
   if (uncertaintyTrigger) triggers.push(uncertaintyTrigger);
 
-  const gnnStalenessTrigger = checkGNNStalenessTrigger();
+  const gnnStalenessTrigger = await checkGNNStalenessTrigger();
   if (gnnStalenessTrigger) triggers.push(gnnStalenessTrigger);
 
   if (state.consecutiveSkips >= MAX_SKIP_STREAK) {
@@ -260,7 +260,7 @@ export async function evaluateRetrainNeed(): Promise<RetrainDecision> {
   }
 
   state.lastDecisionTimestamp = Date.now();
-  const triggers = collectTriggers();
+  const triggers = await collectTriggers();
 
   const costEstimate = estimateRetrainCostSeconds();
 
@@ -307,7 +307,7 @@ export async function evaluateRetrainNeed(): Promise<RetrainDecision> {
     };
   }
 
-  const diagnostics = getComprehensiveModelDiagnostics();
+  const diagnostics = await getComprehensiveModelDiagnostics();
   const evalStats = getEvaluatedDatasetStats();
 
   try {

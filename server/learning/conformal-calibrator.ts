@@ -121,7 +121,7 @@ function normalQuantile(p: number): number {
   return 0;
 }
 
-function getPredictedSigmaForEntry(entry: PredictionRealityEntry): number {
+async function getPredictedSigmaForEntry(entry: PredictionRealityEntry): Promise<number> {
   if (entry.predicted_sigma != null && Number.isFinite(entry.predicted_sigma) && entry.predicted_sigma > 0) {
     return entry.predicted_sigma;
   }
@@ -140,8 +140,8 @@ function getPredictedSigmaForEntry(entry: PredictionRealityEntry): number {
     } catch {}
 
     try {
-      const features = extractFeatures(formula);
-      const xgbResult = gbPredictWithUncertainty(features, formula);
+      const features = await extractFeatures(formula);
+      const xgbResult = await gbPredictWithUncertainty(features, formula);
       if (Number.isFinite(xgbResult.totalStd) && xgbResult.totalStd > 0) {
         xgbSigma = xgbResult.totalStd;
       }
@@ -163,7 +163,7 @@ function getPredictedSigmaForEntry(entry: PredictionRealityEntry): number {
 
 const MAX_CALIBRATION_WINDOW = 1000;
 
-function buildCalibrationDataset(): CalibrationEntry[] {
+async function buildCalibrationDataset(): Promise<CalibrationEntry[]> {
   const ledgerSize = getLedgerSize();
   if (ledgerSize === 0) return [];
 
@@ -174,7 +174,7 @@ function buildCalibrationDataset(): CalibrationEntry[] {
   for (const entry of entries) {
     if (!Number.isFinite(entry.model_prediction.Tc) || !Number.isFinite(entry.ground_truth.Tc)) continue;
 
-    const predictedSigma = getPredictedSigmaForEntry(entry);
+    const predictedSigma = await getPredictedSigmaForEntry(entry);
     if (!Number.isFinite(predictedSigma) || predictedSigma <= 0) continue;
 
     const absError = Math.abs(entry.model_prediction.Tc - entry.ground_truth.Tc);
@@ -218,8 +218,8 @@ function fitTemperatureScale(entries: CalibrationEntry[]): number {
   return Math.round(bestT * 100) / 100;
 }
 
-export function recalibrateFromLedger(): CalibrationState {
-  const entries = buildCalibrationDataset();
+export async function recalibrateFromLedger(): Promise<CalibrationState> {
+  const entries = await buildCalibrationDataset();
   calibrationDataset = entries;
 
   if (entries.length < MIN_CALIBRATION_SAMPLES) {
@@ -363,10 +363,10 @@ export function getConformalInterval(
   };
 }
 
-export function notifyNewLedgerEntry(): void {
+export async function notifyNewLedgerEntry(): Promise<void> {
   samplesSinceLastCalibration++;
   if (samplesSinceLastCalibration >= RECALIBRATION_INTERVAL) {
-    recalibrateFromLedger();
+    await recalibrateFromLedger();
   }
 }
 

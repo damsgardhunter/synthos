@@ -1,5 +1,6 @@
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
-import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
+import { extractFeatures, getCachedFeatures, type MLFeatureVector } from "./ml-predictor";
+import { normalizeFormula } from "./utils";
 import { computeCompositionFeatures, compositionFeatureVector } from "./composition-features";
 import { getCalibrationState } from "./conformal-calibrator";
 
@@ -101,8 +102,21 @@ function featureSubset(fullFeatures: number[]): number[] {
   return KEY_FEATURE_INDICES.map(i => i < fullFeatures.length ? fullFeatures[i] : 0);
 }
 
-function extractOODFeatureVector(formula: string): number[] {
-  const features = extractFeatures(formula);
+function extractOODFeatureVectorSync(formula: string): number[] {
+  const normKey = normalizeFormula(formula);
+  const features = getCachedFeatures(normKey);
+  if (!features) {
+    return new Array(FEATURE_SUBSET_SIZE).fill(0);
+  }
+  return buildOODVector(features);
+}
+
+async function extractOODFeatureVectorAsync(formula: string): Promise<number[]> {
+  const features = await extractFeatures(formula);
+  return buildOODVector(features);
+}
+
+function buildOODVector(features: any): number[] {
   const raw = [
     features.electronPhononLambda,
     features.metallicity,
@@ -312,7 +326,7 @@ export async function updateOODModel(): Promise<void> {
   let extracted = 0;
   for (let i = 0; i < SUPERCON_TRAINING_DATA.length; i += step) {
     try {
-      const vec = extractOODFeatureVector(SUPERCON_TRAINING_DATA[i].formula);
+      const vec = await extractOODFeatureVectorAsync(SUPERCON_TRAINING_DATA[i].formula);
       if (vec.every(v => Number.isFinite(v))) {
         trainingVectors.push(vec);
       }
@@ -386,7 +400,7 @@ export function computeOODScore(
 
   let featureVec: number[];
   if (typeof formulaOrFeatures === "string") {
-    featureVec = extractOODFeatureVector(formulaOrFeatures);
+    featureVec = extractOODFeatureVectorSync(formulaOrFeatures);
   } else {
     featureVec = formulaOrFeatures;
   }

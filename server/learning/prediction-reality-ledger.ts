@@ -98,7 +98,7 @@ let _gnnModule: any = null;
 let _gbModule: any = null;
 let _mlModule: any = null;
 
-export function recordPredictionVsReality(
+export async function recordPredictionVsReality(
   formula: string,
   pressure: number,
   prediction: {
@@ -117,7 +117,7 @@ export function recordPredictionVsReality(
   },
   source: string,
   cycle: number
-): PredictionRealityEntry {
+): Promise<PredictionRealityEntry> {
   const tcError = prediction.Tc - reality.Tc;
   const tcAbsError = Math.abs(tcError);
   const tcSquaredError = tcError * tcError;
@@ -139,8 +139,8 @@ export function recordPredictionVsReality(
       if (Number.isFinite(gnnRes.totalStd) && gnnRes.totalStd > 0) gnnSigma = gnnRes.totalStd;
     } catch {}
     try {
-      const feats = _mlModule.extractFeatures(formula);
-      const xgbRes = _gbModule.gbPredictWithUncertainty(feats, formula);
+      const feats = await _mlModule.extractFeatures(formula);
+      const xgbRes = await _gbModule.gbPredictWithUncertainty(feats, formula);
       if (Number.isFinite(xgbRes.totalStd) && xgbRes.totalStd > 0) xgbSigma = xgbRes.totalStd;
     } catch {}
     if (gnnSigma > 0 && xgbSigma > 0) {

@@ -185,7 +185,7 @@ export async function runSuperconductorResearch(
       continue;
     }
 
-    const mlFeatures = extractFeatures(formula);
+    const mlFeatures = await extractFeatures(formula);
     const lambdaML = candidate.electronPhononCoupling ?? mlFeatures.electronPhononLambda ?? 0;
     const pressureML = candidate.pressureGpa ?? 0;
     const metallicityML = mlFeatures.metallicity ?? 0.5;
@@ -574,8 +574,8 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
       }
 
       const id = `sc-novel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const features = extractFeatures(c.formula);
-      const gbResult = gbPredict(features);
+      const features = await extractFeatures(c.formula);
+      const gbResult = await gbPredict(features);
 
       const featureLambda = features.electronPhononLambda ?? 0;
       const srHCount = (features as any).hCount ?? 0;
@@ -739,7 +739,7 @@ function getFamilyWeights(formula: string): {
   }
 }
 
-export function computePairingSusceptibility(formula: string): PairingSusceptibilityResult {
+export async function computePairingSusceptibility(formula: string): Promise<PairingSusceptibilityResult> {
   const cached = pairingSusceptibilityCache.get(formula);
   if (cached && (Date.now() - cached.ts) < PAIRING_CACHE_TTL_MS) {
     return cached.result;
@@ -807,7 +807,7 @@ export function computePairingSusceptibility(formula: string): PairingSusceptibi
 
   const rawScore = Math.min(1.0, score);
 
-  const features = extractFeatures(formula);
+  const features = await extractFeatures(formula);
   const fe = features.formationEnergy ?? 0;
   const stabilityFactor = fe < 0 ? 1.0 : Math.max(0.5, 1.0 - fe * 0.2);
   score *= stabilityFactor;
@@ -908,11 +908,12 @@ export async function generateInverseDesignCandidates(
   });
 
   const existingTop = await storage.getSuperconductorCandidates(20);
-  const topByPairing = existingTop
-    .map(c => {
-      const ps = computePairingSusceptibility(c.formula);
+  const topByPairingUnsorted = await Promise.all(existingTop
+    .map(async c => {
+      const ps = await computePairingSusceptibility(c.formula);
       return { formula: c.formula, pairingScore: ps.score, lambda: ps.lambda, dos: ps.dosAtEf };
-    })
+    }));
+  const topByPairing = topByPairingUnsorted
     .sort((a, b) => b.pairingScore - a.pairingScore)
     .slice(0, 5);
 
@@ -972,9 +973,9 @@ Return JSON 'candidates' array: 'formula', 'name', 'predictedTc' (K), 'pressureG
       const existing = await storage.getSuperconductorByFormula(c.formula);
       if (existing) continue;
 
-      const features = extractFeatures(c.formula);
-      const gbResult = gbPredict(features);
-      const pairingSusc = computePairingSusceptibility(c.formula);
+      const features = await extractFeatures(c.formula);
+      const gbResult = await gbPredict(features);
+      const pairingSusc = await computePairingSusceptibility(c.formula);
 
       const lambdaML = features.electronPhononLambda ?? 0;
       const effectiveLambda = pairingSusc.lambda > 0 ? pairingSusc.lambda : lambdaML;

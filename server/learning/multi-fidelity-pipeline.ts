@@ -535,7 +535,7 @@ async function stage4_SynthesisFeasibility(
   const candidatePressure = candidate.pressureGpa ?? 0;
   if (candidatePressure > 5) {
     try {
-      const hResult = computeEnthalpyStability(candidate.formula, candidatePressure);
+      const hResult = await computeEnthalpyStability(candidate.formula, candidatePressure);
       enthalpyResult = {
         isStable: hResult.isStable,
         isMetastable: hResult.isMetastable,

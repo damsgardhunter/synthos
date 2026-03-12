@@ -196,7 +196,7 @@ export function createPipeline(id: string, goal?: Partial<PipelineGoal>): Pipeli
   return state;
 }
 
-export function runPipelineIteration(id: string): PipelineIterationResult | null {
+export async function runPipelineIteration(id: string): Promise<PipelineIterationResult | null> {
   const state = pipelines.get(id);
   if (!state || state.status === "converged" || state.status === "completed" || state.status === "paused") return null;
 
@@ -206,7 +206,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
   state.lastIterationAt = Date.now();
 
   try {
-  return _runPipelineIterationInner(state, id, startTime);
+  return await _runPipelineIterationInner(state, id, startTime);
   } catch (e: any) {
     console.error("[NextGenPipeline] iteration error:", e?.message?.slice(0, 300));
     state.status = "idle";
@@ -214,7 +214,7 @@ export function runPipelineIteration(id: string): PipelineIterationResult | null
   }
 }
 
-function _runPipelineIterationInner(state: PipelineState, id: string, startTime: number): PipelineIterationResult {
+async function _runPipelineIterationInner(state: PipelineState, id: string, startTime: number): Promise<PipelineIterationResult> {
   const target = goalToTargetProperties(state.goal);
   const allCandidates: PipelineCandidate[] = [];
 
@@ -273,7 +273,7 @@ function _runPipelineIterationInner(state: PipelineState, id: string, startTime:
       .slice(0, 3);
     for (const best of topForGradient) {
       try {
-        const diffResult = runDifferentiableOptimization(best.formula, target);
+        const diffResult = await runDifferentiableOptimization(best.formula, target);
         if (diffResult && diffResult.optimizedFormula && diffResult.optimizedFormula !== best.formula) {
           allCandidates.push({
             formula: diffResult.optimizedFormula,
@@ -342,14 +342,14 @@ function _runPipelineIterationInner(state: PipelineState, id: string, startTime:
 
   for (const candidate of constraintPassed) {
     try {
-      candidate.pillarEvaluation = evaluatePillars(candidate.formula, pillarTargets, { maxPressureGPa: state.goal.maxPressure });
+      candidate.pillarEvaluation = await evaluatePillars(candidate.formula, pillarTargets, { maxPressureGPa: state.goal.maxPressure });
     } catch (e: any) { console.error("[NextGenPipeline] pillar eval error:", e?.message?.slice(0, 200)); }
   }
 
   for (const candidate of constraintPassed) {
     try {
-      const features = extractFeatures(candidate.formula);
-      const gb = gbPredict(features);
+      const features = await extractFeatures(candidate.formula);
+      const gb = await gbPredict(features);
       const gnn = gnnPredictWithUncertainty(candidate.formula);
 
       const ensembleTc = gb.tcPredicted * 0.35 + (gnn.tc ?? 0) * 0.65;

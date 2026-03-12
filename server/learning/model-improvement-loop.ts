@@ -454,8 +454,8 @@ async function runImprovementCycleInner(
   totalImprovementCycles++;
   lastImprovementCycleAt = Date.now();
 
-  const diagnosticsBefore = getComprehensiveModelDiagnostics();
-  const health = getModelHealthSummary();
+  const diagnosticsBefore = await getComprehensiveModelDiagnostics();
+  const health = await getModelHealthSummary();
   const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
 
   const negR2Check = detectNegativeR2(diagnosticsBefore);
@@ -564,7 +564,7 @@ async function runImprovementCycleInner(
     return { ran: false };
   }
 
-  const report = getModelDiagnosticsForLLM();
+  const report = await getModelDiagnosticsForLLM();
 
   let proposals: ExperimentProposal[] = [];
   try {
@@ -759,8 +759,8 @@ export async function runModelImprovementCycle(
   }
 }
 
-export function getModelImprovementStats(): ImprovementStats {
-  const health = getModelHealthSummary();
+export async function getModelImprovementStats(): Promise<ImprovementStats> {
+  const health = await getModelHealthSummary();
 
   return {
     totalCycles: totalImprovementCycles,
@@ -791,8 +791,8 @@ export function recordCyclePredictionOutcomes(
   }
 }
 
-export function getModelDiagnosticsSummaryForStrategy(): string {
-  const health = getModelHealthSummary();
+export async function getModelDiagnosticsSummaryForStrategy(): Promise<string> {
+  const health = await getModelHealthSummary();
   const unhealthy = health.filter(h => h.status !== "green");
 
   const lines: string[] = ["\n## ML Model Health Summary"];
@@ -805,7 +805,7 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
     }
   }
 
-  const diagnostics = getComprehensiveModelDiagnostics();
+  const diagnostics = await getComprehensiveModelDiagnostics();
   lines.push(`  XGBoost: R²=${diagnostics.xgboost.r2}, MAE=${diagnostics.xgboost.mae}K, RMSE=${diagnostics.xgboost.rmse}K`);
   lines.push(`  GNN: R²=${diagnostics.gnn.latestR2}, MAE=${diagnostics.gnn.latestMAE}K`);
   lines.push(`  Lambda: R²=${diagnostics.lambda.r2}, MAE=${diagnostics.lambda.mae}`);

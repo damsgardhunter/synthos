@@ -984,7 +984,7 @@ function buildFormula(assignment: Record<string, string>, motif: StructuralMotif
   }).join("");
 }
 
-function evaluateCandidate(formula: string): { tc: number; lambda: number; gbTc: number; score: number } | null {
+async function evaluateCandidate(formula: string): Promise<{ tc: number; lambda: number; gbTc: number; score: number } | null> {
   try {
     const electronic = computeElectronicStructure(formula, null);
     const phonon = computePhononSpectrum(formula, electronic);
@@ -1008,9 +1008,9 @@ function evaluateCandidate(formula: string): { tc: number; lambda: number; gbTc:
     let gbTc = 0;
     let gbScore = 0;
     try {
-      const features = extractFeatures(formula);
+      const features = await extractFeatures(formula);
       if (features) {
-        const gb = gbPredict(features);
+        const gb = await gbPredict(features);
         gbTc = gb.tcPredicted;
         gbScore = gb.score;
       }
@@ -1097,11 +1097,11 @@ function selectMotifs(targetTc: number, count: number): StructuralMotif[] {
   return selected;
 }
 
-export function runStructureFirstDesign(
+export async function runStructureFirstDesign(
   targetTc: number,
   motifsToTry: number = 4,
   elementsPerSite: number = 3,
-): StructureDiffusionResult[] {
+): Promise<StructureDiffusionResult[]> {
   const motifs = selectMotifs(targetTc, motifsToTry);
   const results: StructureDiffusionResult[] = [];
 
@@ -1135,7 +1135,7 @@ export function runStructureFirstDesign(
       const vecCheck = validateElectronCount(formula, motif.name);
       if (!vecCheck.valid) continue;
 
-      const result = evaluateCandidate(formula);
+      const result = await evaluateCandidate(formula);
       if (!result) continue;
 
       stats.totalCandidatesEvaluated++;
@@ -1236,12 +1236,12 @@ function generateAssignments(
   }
 }
 
-export function runStructureDiffusionCycle(
+export async function runStructureDiffusionCycle(
   targetTc: number = 200,
   motifCount: number = 3,
   elementsPerSite: number = 3,
-): { formulas: string[]; bestFormula: string; bestTc: number; motifsUsed: string[] } {
-  const results = runStructureFirstDesign(targetTc, motifCount, elementsPerSite);
+): Promise<{ formulas: string[]; bestFormula: string; bestTc: number; motifsUsed: string[] }> {
+  const results = await runStructureFirstDesign(targetTc, motifCount, elementsPerSite);
 
   const allFormulas: string[] = [];
   let bestTc = 0;

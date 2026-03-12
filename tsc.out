@@ -1,0 +1,687 @@
+client/src/components/dos-visualizer.tsx(229,11): error TS2322: Type 'unknown' is not assignable to type 'ReactNode'.
+client/src/pages/computational-physics.tsx(1293,11): error TS2339: Property 'lastMessage' does not exist on type '{ connected: boolean; messages: WSMessage[]; engineState: string; activeTasks: string[]; thoughts: ThoughtMessage[]; tempo: EngineTempo; statusMessage: string; clearMessages: () => void; }'.
+client/src/pages/computational-physics.tsx(2856,27): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+client/src/pages/research-pipeline.tsx(722,59): error TS2339: Property 'activeLearning' does not exist on type '{ inverseOptimizer?: { bestTcAcrossAll: number; activeCampaigns: number; } | undefined; }'.
+client/src/pages/research-pipeline.tsx(723,36): error TS2339: Property 'bestTc' does not exist on type '{ familyStats: Record<string, { count: number; maxTc: number; avgScore: number; }>; lastCycleCandidates: CycleCandidate[]; lastCycleFamilyCounts: Record<string, number>; autonomousLoopStats?: { ...; } | undefined; }'.
+server/crystal/crystal-graph-builder.ts(223,3): error TS2741: Property 'multiplicity' is missing in type '{ element: string; atomicNumber: number; electronegativity: number; atomicRadius: number; valenceElectrons: number; mass: number; embedding: number[]; covalentRadius: number; period: number; group: number; ... 4 more ...; fractionalPosition: { ...; }; }' but required in type 'StructureNodeFeature'.
+server/crystal/crystal-graph-builder.ts(390,3): error TS2741: Property 'edgeIndex' is missing in type '{ nodes: StructureNodeFeature[]; edges: StructureEdgeFeature[]; threeBodyFeatures: ThreeBodyFeature[]; adjacency: number[][]; ... 5 more ...; hasRealPositions: true; }' but required in type 'StructureGraph'.
+server/crystal/disorder-generator.ts(434,29): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/crystal/disorder-metrics.ts(264,24): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/crystal/distortion-detector.ts(219,49): error TS2339: Property 'symbol' does not exist on type 'AtomPosition'.
+server/crystal/distortion-detector.ts(643,29): error TS2802: Type 'Set<"regular" | "elongated" | "compressed" | "tilted">' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/crystal/generative-crystal-engine.ts(425,5): error TS2353: Object literal may only specify known properties, and 'latticeStats' does not exist in type 'GenerativeEngineStats'.
+server/crystal/structure-novelty-detector.ts(59,14): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+server/dft/dfpt-parser.ts(134,21): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/dft/dfpt-parser.ts(145,79): error TS1501: This regular expression flag is only available when targeting 'es2018' or later.
+server/dft/dft-band-analysis.ts(920,5): error TS2353: Object literal may only specify known properties, and 'fsDimensionalityIsPathEstimate' does not exist in type 'FermiSurfaceResult'.
+server/dft/dft-job-queue.ts(456,20): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+server/dft/qe-dft-engine.ts(3160,119): error TS1501: This regular expression flag is only available when targeting 'es2018' or later.
+server/dft/qe-dft-engine.ts(3738,27): error TS2322: Type 'null' is not assignable to type 'DFTResult'.
+server/dft/qe-worker.ts(184,27): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/dft/qe-worker.ts(1822,29): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/dft/qe-worker.ts(1891,19): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/dft/qe-worker.ts(1897,21): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/dft/qe-worker.ts(2492,25): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/dft/qe-worker.ts(2907,11): error TS18047: 'result.scf' is possibly 'null'.
+server/dft/quantum-engine-pipeline.ts(420,37): error TS2339: Property 'formationEnergy' does not exist on type 'XTBEnrichedFeatures'.
+server/dft/quantum-engine-pipeline.ts(423,34): error TS2339: Property 'phononStable' does not exist on type 'XTBEnrichedFeatures'.
+server/dft/quantum-engine-pipeline.ts(431,23): error TS2339: Property 'phononFrequencies' does not exist on type 'XTBEnrichedFeatures'.
+server/dft/quantum-engine-pipeline.ts(431,54): error TS2339: Property 'phononFrequencies' does not exist on type 'XTBEnrichedFeatures'.
+server/dft/quantum-engine-pipeline.ts(432,35): error TS2339: Property 'phononFrequencies' does not exist on type 'XTBEnrichedFeatures'.
+server/dft/quantum-engine-pipeline.ts(465,22): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/dft/quantum-engine-pipeline.ts(467,22): error TS2554: Expected 2-4 arguments, but got 1.
+server/dft/quantum-engine-pipeline.ts(469,28): error TS2339: Property 'frequencies' does not exist on type 'PhononSpectrum'.
+server/dft/quantum-engine-pipeline.ts(475,80): error TS18047: 'bandGap' is possibly 'null'.
+server/dft/quantum-engine-pipeline.ts(499,26): error TS2554: Expected 2-4 arguments, but got 1.
+server/dft/quantum-engine-pipeline.ts(500,24): error TS2339: Property 'frequencies' does not exist on type 'PhononSpectrum'.
+server/dft/quantum-engine-pipeline.ts(510,28): error TS2554: Expected 2-4 arguments, but got 1.
+server/dft/quantum-engine-pipeline.ts(583,7): error TS2322: Type '{ acoustic: number; lowOptical: number; midOptical: number; highOptical: number; hydrogenModes: number; dominantRange: string; }' is not assignable to type 'Record<string, number>'.
+  Property 'dominantRange' is incompatible with index signature.
+    Type 'string' is not assignable to type 'number'.
+server/inverse/design-representations.ts(1465,30): error TS2802: Type 'never[] | Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/design-representations.ts(1666,30): error TS2802: Type 'never[] | Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/design-representations.ts(1717,30): error TS2802: Type 'never[] | Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(148,25): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(505,14): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(814,21): error TS2802: Type 'MapIterator<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(825,29): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(888,27): error TS2802: Type 'MapIterator<[string, number]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(922,30): error TS2802: Type 'MapIterator<[string, number]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/differentiable-optimizer.ts(1079,17): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-generator.ts(441,35): error TS2345: Argument of type '{ temperature: number; pressure: number; coolingRate: number; annealTime: number; strain: number; }' is not assignable to parameter of type 'SynthesisVector'.
+  Type '{ temperature: number; pressure: number; coolingRate: number; annealTime: number; strain: number; }' is missing the following properties from type 'SynthesisVector': currentDensity, magneticField, thermalCycles, oxygenPressure
+server/inverse/inverse-learning.ts(141,29): error TS2802: Type 'Map<string, { totalReward: number; count: number; avgDistance: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-learning.ts(148,31): error TS2802: Type 'Map<string, { totalReward: number; count: number; avgDistance: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-learning.ts(158,32): error TS2802: Type 'Map<string, { totalReward: number; count: number; avgDistance: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-learning.ts(165,32): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-learning.ts(176,29): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-learning.ts(179,32): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-optimizer.ts(32,37): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/inverse-optimizer.ts(271,23): error TS2802: Type 'Map<string, InverseCampaign>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/next-gen-pipeline.ts(120,37): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/next-gen-pipeline.ts(277,38): error TS2339: Property 'optimizedFormula' does not exist on type 'DifferentiableResult'.
+server/inverse/next-gen-pipeline.ts(277,69): error TS2339: Property 'optimizedFormula' does not exist on type 'DifferentiableResult'.
+server/inverse/next-gen-pipeline.ts(279,33): error TS2339: Property 'optimizedFormula' does not exist on type 'DifferentiableResult'.
+server/inverse/next-gen-pipeline.ts(390,43): error TS2339: Property 'overallFitness' does not exist on type 'PillarEvaluation'.
+server/inverse/next-gen-pipeline.ts(391,43): error TS2339: Property 'overallFitness' does not exist on type 'PillarEvaluation'.
+server/inverse/next-gen-pipeline.ts(476,29): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/physics-constraint-engine.ts(311,14): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+server/inverse/self-improving-lab.ts(1007,7): error TS2353: Object literal may only specify known properties, and 'minCoupling' does not exist in type 'SCPillarTargets'.
+server/inverse/self-improving-lab.ts(1021,25): error TS2339: Property 'optimizedFormula' does not exist on type 'DifferentiableResult'.
+server/inverse/self-improving-lab.ts(1021,56): error TS2339: Property 'optimizedFormula' does not exist on type 'DifferentiableResult'.
+server/inverse/self-improving-lab.ts(1023,33): error TS2339: Property 'optimizedFormula' does not exist on type 'DifferentiableResult'.
+server/inverse/self-improving-lab.ts(1370,34): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/self-improving-lab.ts(1371,35): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/self-improving-lab.ts(1371,50): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/self-improving-lab.ts(1628,32): error TS2802: Type 'MapIterator<[string, LabState]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/self-improving-lab.ts(1664,23): error TS2802: Type 'MapIterator<GlobalKnowledgeEntry>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/self-improving-lab.ts(1675,32): error TS2802: Type 'MapIterator<[string, LabState]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/inverse/self-improving-lab.ts(1682,9): error TS7006: Parameter 'k' implicitly has an 'any' type.
+server/landscape/discovery-landscape.ts(163,26): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/landscape/discovery-landscape.ts(278,26): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/landscape/discovery-landscape.ts(383,35): error TS2802: Type 'Map<string, MaterialRecord>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/landscape/discovery-landscape.ts(714,25): error TS2802: Type 'MapIterator<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/landscape/zone-detector.ts(117,23): error TS2802: Type 'MapIterator<Voxel>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/landscape/zone-detector.ts(120,32): error TS7006: Parameter 's' implicitly has an 'any' type.
+server/landscape/zone-detector.ts(120,35): error TS7006: Parameter 'm' implicitly has an 'any' type.
+server/landscape/zone-detector.ts(121,40): error TS7006: Parameter 'm' implicitly has an 'any' type.
+server/landscape/zone-detector.ts(122,36): error TS7006: Parameter 'm' implicitly has an 'any' type.
+server/landscape/zone-detector.ts(134,23): error TS2802: Type 'MapIterator<Voxel>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/landscape/zone-detector.ts(255,21): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/active-learning.ts(625,52): error TS2339: Property 'totalSigma' does not exist on type 'UncertaintyBreakdown'.
+server/learning/active-learning.ts(718,9): error TS2322: Type 'string' is not assignable to type '"best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration" | "pure-curiosity"'.
+server/learning/active-learning.ts(1204,33): error TS2339: Property 'tcPredicted' does not exist on type 'XGBUncertaintyResult'.
+server/learning/active-learning.ts(1831,31): error TS2322: Type 'string' is not assignable to type 'number'.
+server/learning/active-learning.ts(1837,47): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.
+server/learning/conformal-calibrator.ts(285,38): error TS2802: Type 'Map<string, CalibrationEntry[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/conformal-calibrator.ts(288,12): error TS7006: Parameter 'e' implicitly has an 'any' type.
+server/learning/conformal-calibrator.ts(289,14): error TS7006: Parameter 'a' implicitly has an 'any' type.
+server/learning/conformal-calibrator.ts(289,17): error TS7006: Parameter 'b' implicitly has an 'any' type.
+server/learning/conformal-calibrator.ts(386,30): error TS2802: Type 'Map<string, { q90: number; q95: number; q99: number; count: number; ece: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/cycle-diagnostics.ts(141,13): error TS2339: Property 'status' does not exist on type '{ improving: boolean; rmseTrend: number[]; maeTrend: number[]; r2Trend: number[]; avgRmseChange: number; ewmaRmseChange: number; }'.
+server/learning/cycle-diagnostics.ts(150,29): error TS2339: Property 'recentCycles' does not exist on type '{ improving: boolean; rmseTrend: number[]; maeTrend: number[]; r2Trend: number[]; avgRmseChange: number; ewmaRmseChange: number; }'.
+server/learning/cycle-diagnostics.ts(174,30): error TS2339: Property 'sampleCount' does not exist on type 'PredictionRealityMetrics'.
+server/learning/cycle-diagnostics.ts(195,28): error TS2339: Property 'status' does not exist on type '{ improving: boolean; rmseTrend: number[]; maeTrend: number[]; r2Trend: number[]; avgRmseChange: number; ewmaRmseChange: number; }'.
+server/learning/deliberative-evaluator.ts(225,18): error TS2339: Property 'electronPhononCoupling' does not exist on type 'MLFeatureVector'.
+server/learning/deliberative-evaluator.ts(225,81): error TS2339: Property 'electronPhononCoupling' does not exist on type 'MLFeatureVector'.
+server/learning/deliberative-evaluator.ts(226,48): error TS2339: Property 'densityOfStatesAtFermi' does not exist on type 'MLFeatureVector'.
+server/learning/deliberative-evaluator.ts(235,26): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/learning/deliberative-evaluator.ts(344,43): error TS2531: Object is possibly 'null'.
+server/learning/deliberative-evaluator.ts(344,129): error TS2531: Object is possibly 'null'.
+server/learning/deliberative-evaluator.ts(396,44): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(580,25): error TS2802: Type 'MapIterator<[string, { reason: string; tc: number; lambda?: number | undefined; timestamp: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(613,25): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(815,31): error TS2802: Type 'Map<string, { consecutive: number; total: number; lastFailure: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(1259,32): error TS2304: Cannot find name 'allCandidates'.
+server/learning/engine.ts(1259,51): error TS7006: Parameter 'c' implicitly has an 'any' type.
+server/learning/engine.ts(1267,41): error TS2802: Type 'Map<string, { totalReward: number; count: number; avgDistance: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(1327,80): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(1374,72): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(1623,9): error TS2345: Argument of type '{ kineticScore: number; metastableLifetime300K: number; lifetimeString: string; stabilizationStrategies: StabilizationStrategy[]; } | null' is not assignable to parameter of type 'KineticInput | null | undefined'.
+  Type '{ kineticScore: number; metastableLifetime300K: number; lifetimeString: string; stabilizationStrategies: StabilizationStrategy[]; }' is not assignable to type 'KineticInput'.
+    Types of property 'stabilizationStrategies' are incompatible.
+      Type 'StabilizationStrategy[]' is not assignable to type '{ name: string; }[]'.
+        Property 'name' is missing in type 'StabilizationStrategy' but required in type '{ name: string; }'.
+server/learning/engine.ts(1908,29): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(2013,29): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(2119,30): error TS2339: Property 'formationEnergy' does not exist on type '{ dimensionality: string | null; pressureGpa: number | null; id: string; formula: string; name: string; status: string; notes: string | null; predictedTc: number | null; meissnerEffect: boolean | null; ... 30 more ...; dataConfidence: string | null; }'.
+server/learning/engine.ts(2136,67): error TS2339: Property 'formationEnergy' does not exist on type '{ dimensionality: string | null; pressureGpa: number | null; id: string; formula: string; name: string; status: string; notes: string | null; predictedTc: number | null; meissnerEffect: boolean | null; ... 30 more ...; dataConfidence: string | null; }'.
+server/learning/engine.ts(2142,133): error TS2339: Property 'materialClass' does not exist on type '{ dimensionality: string | null; pressureGpa: number | null; id: string; formula: string; name: string; status: string; notes: string | null; predictedTc: number | null; meissnerEffect: boolean | null; ... 30 more ...; dataConfidence: string | null; }'.
+server/learning/engine.ts(2255,13): error TS2345: Argument of type '"computation"' is not assignable to parameter of type 'ThoughtCategory'.
+server/learning/engine.ts(2297,88): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2301,81): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2306,95): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2338,49): error TS2339: Property 'phononStable' does not exist on type 'PhononSpectrum'.
+server/learning/engine.ts(2343,45): error TS2339: Property 'isotopeAlpha' does not exist on type 'EliashbergResult'.
+server/learning/engine.ts(2345,49): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2350,59): error TS2339: Property 'values' does not exist on type 'Alpha2FData'.
+server/learning/engine.ts(2350,101): error TS2339: Property 'values' does not exist on type 'Alpha2FData'.
+server/learning/engine.ts(2411,36): error TS2339: Property 'phononSofteningIndex' does not exist on type 'PhononSpectrum'.
+server/learning/engine.ts(2412,41): error TS2339: Property 'fermiSurfaceNestingScore' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2413,41): error TS2339: Property 'spinFluctuationStrength' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2416,53): error TS2339: Property 'minFrequency' does not exist on type 'PhononSpectrum'.
+server/learning/engine.ts(2546,59): error TS2339: Property 'socStrength' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(2796,57): error TS18048: 'fermiSurfaceAnalysis' is possibly 'undefined'.
+server/learning/engine.ts(2871,13): error TS2304: Cannot find name 'crystalInfo'.
+server/learning/engine.ts(2890,13): error TS2304: Cannot find name 'crystalInfo'.
+server/learning/engine.ts(3022,110): error TS2339: Property 'symmetry' does not exist on type 'UnifiedPairingResult'.
+server/learning/engine.ts(3022,157): error TS2339: Property 'dominantMechanism' does not exist on type 'UnifiedPairingResult'.
+server/learning/engine.ts(3032,64): error TS2339: Property 'fermiSurfaceNestingScore' does not exist on type 'ElectronicStructure'.
+server/learning/engine.ts(3404,33): error TS2339: Property 'pressureClassification' does not exist on type '{ pressureTcCurve: { optimalPressure: number; maxTc: number; maxTcIsStable: boolean; points: number; stablePoints: number; pressureBoost: boolean; }; }'.
+server/learning/engine.ts(3637,25): error TS2304: Cannot find name 'structInFlightMarked'.
+server/learning/engine.ts(3725,78): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(3952,15): error TS2352: Conversion of type 'CrystalAtom[]' to type 'PercolationAtom[]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type 'CrystalAtom' is missing the following properties from type 'PercolationAtom': symbol, x, y, z
+server/learning/engine.ts(4050,15): error TS2352: Conversion of type 'CrystalAtom[]' to type 'PercolationAtom[]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type 'CrystalAtom' is missing the following properties from type 'PercolationAtom': symbol, x, y, z
+server/learning/engine.ts(4173,74): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; cooperPairMechanism: string; status: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; cooperPairMechanism: string; status: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(4220,72): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(4416,29): error TS2345: Argument of type '{ routeId: any; routeName: any; method: any; feasibilityScore: any; precursors: any; steps: any; stepCount: any; maxTemperature: any; maxPressure: any; difficulty: any; estimatedYield: any; totalDuration: any; source: string; }' is not assignable to parameter of type 'NovelSynthesisRoute'.
+  Type '{ routeId: any; routeName: any; method: any; feasibilityScore: any; precursors: any; steps: any; stepCount: any; maxTemperature: any; maxPressure: any; difficulty: any; estimatedYield: any; totalDuration: any; source: string; }' is missing the following properties from type 'NovelSynthesisRoute': temperatureProfile, pressureProfile, estimatedCoolingRate, atmosphere, and 5 more.
+server/learning/engine.ts(4483,29): error TS2345: Argument of type '{ routeName: string; method: any; rule: any; precursors: any; steps: any; equation: any; temperature: any; pressure: any; atmosphere: any; difficulty: any; confidence: any; notes: any; source: string; }' is not assignable to parameter of type 'NovelSynthesisRoute'.
+  Type '{ routeName: string; method: any; rule: any; precursors: any; steps: any; equation: any; temperature: any; pressure: any; atmosphere: any; difficulty: any; confidence: any; notes: any; source: string; }' is missing the following properties from type 'NovelSynthesisRoute': temperatureProfile, pressureProfile, estimatedCoolingRate, expectedYieldRange, and 4 more.
+server/learning/engine.ts(4927,9): error TS2322: Type 'string' is not assignable to type 'number'.
+server/learning/engine.ts(4941,53): error TS2339: Property 'dominantMechanism' does not exist on type 'UnifiedPairingResult'.
+server/learning/engine.ts(4942,108): error TS2339: Property 'symmetry' does not exist on type 'UnifiedPairingResult'.
+server/learning/engine.ts(5108,33): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(5182,15): error TS2353: Object literal may only specify known properties, and 'targetPressure' does not exist in type '{ id: string; targetTc: number; status?: string | undefined; maxPressure?: number | undefined; minLambda?: number | undefined; maxHullDistance?: number | undefined; metallicRequired?: boolean | undefined; ... 11 more ...; topCandidates?: Json | undefined; }'.
+server/learning/engine.ts(5272,24): error TS18047: 'c.predictedTc' is possibly 'null'.
+server/learning/engine.ts(5651,68): error TS2345: Argument of type '{ variable: string; direction: "increase" | "decrease"; strength: number; }[]' is not assignable to parameter of type 'string[]'.
+  Type '{ variable: string; direction: "increase" | "decrease"; strength: number; }' is not assignable to type 'string'.
+server/learning/engine.ts(5652,91): error TS2339: Property 'biasedElements' does not exist on type 'DiscoveryFeedback'.
+server/learning/engine.ts(5655,72): error TS2339: Property 'biasedElements' does not exist on type 'DiscoveryFeedback'.
+server/learning/engine.ts(5927,29): error TS2802: Type 'MapIterator<[string, string[]]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(5947,31): error TS2802: Type 'MapIterator<[string, string[]]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(6092,64): error TS2554: Expected 2 arguments, but got 3.
+server/learning/engine.ts(6119,9): error TS2741: Property 'lastRetrainDatasetSize' is missing in type '{ bestTc: number; avgRecentTc: number; recentRewardTrend: number; familyDiversity: number; stagnationCycles: number; explorationBudgetUsed: number; elementSuccessEntropy: number; cycleNumber: number; }' but required in type '{ bestTc: number; avgRecentTc: number; recentRewardTrend: number; familyDiversity: number; stagnationCycles: number; explorationBudgetUsed: number; elementSuccessEntropy: number; cycleNumber: number; lastRetrainDatasetSize: number; }'.
+server/learning/engine.ts(6199,56): error TS2339: Property 'vanHoveDistance' does not exist on type 'FermiInsight'.
+server/learning/engine.ts(6503,24): error TS18047: 'r.tc' is possibly 'null'.
+server/learning/engine.ts(6505,24): error TS2352: Conversion of type 'PhysicsFeatureVector' to type 'Record<string, number>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Index signature for type 'string' is missing in type 'PhysicsFeatureVector'.
+server/learning/engine.ts(6606,137): error TS2339: Property 'totalMaterials' does not exist on type 'ClusterGuidance'.
+server/learning/engine.ts(6622,45): error TS2339: Property 'totalMaterials' does not exist on type 'ClusterGuidance'.
+server/learning/engine.ts(6622,99): error TS2339: Property 'totalMaterials' does not exist on type 'ClusterGuidance'.
+server/learning/engine.ts(7142,38): error TS2339: Property 'maxPressureGpa' does not exist on type '{ formula: string; hasStableWindow: boolean; stableRange: { start: number; end: number; } | null; windowWidth: number; minEnthalpyPressure: number; minEnthalpy: number; }'.
+server/learning/engine.ts(7142,62): error TS2339: Property 'minPressureGpa' does not exist on type '{ formula: string; hasStableWindow: boolean; stableRange: { start: number; end: number; } | null; windowWidth: number; minEnthalpyPressure: number; minEnthalpy: number; }'.
+server/learning/engine.ts(7246,40): error TS2802: Type 'MapIterator<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/engine.ts(7349,78): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(7649,72): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; crystalStructure: string; mlFeatures: any; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; crystalStructure: string; mlFeatures: any; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(7698,72): error TS2345: Argument of type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; crystalStructure: string; mlFeatures: any; notes: string; }' is not assignable to parameter of type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }'.
+  Type '{ formula: string; predictedTc: number; dataConfidence: string; ensembleScore: number; verificationStage: number; crystalStructure: string; mlFeatures: any; notes: string; }' is missing the following properties from type '{ id: string; formula: string; name: string; dimensionality?: string | null | undefined; pressureGpa?: number | null | undefined; status?: string | undefined; notes?: string | null | undefined; ... 31 more ...; dataConfidence?: string | ... 1 more ... | undefined; }': id, name
+server/learning/engine.ts(8408,11): error TS2353: Object literal may only specify known properties, and 'targetPressure' does not exist in type '{ id: string; targetTc: number; status?: string | undefined; maxPressure?: number | undefined; minLambda?: number | undefined; maxHullDistance?: number | undefined; metallicRequired?: boolean | undefined; ... 11 more ...; topCandidates?: Json | undefined; }'.
+server/learning/engine.ts(8433,11): error TS2353: Object literal may only specify known properties, and 'targetPressure' does not exist in type '{ id: string; targetTc: number; status?: string | undefined; maxPressure?: number | undefined; minLambda?: number | undefined; maxHullDistance?: number | undefined; metallicRequired?: boolean | undefined; ... 11 more ...; topCandidates?: Json | undefined; }'.
+server/learning/engine.ts(8470,51): error TS2339: Property 'id' does not exist on type 'PipelineState'.
+server/learning/engine.ts(8513,65): error TS2345: Argument of type '{ variable: string; direction: "increase" | "decrease"; strength: number; }[]' is not assignable to parameter of type 'string[]'.
+  Type '{ variable: string; direction: "increase" | "decrease"; strength: number; }' is not assignable to type 'string'.
+server/learning/engine.ts(8514,88): error TS2339: Property 'biasedElements' does not exist on type 'DiscoveryFeedback'.
+server/learning/gradient-boost.ts(1005,24): error TS2802: Type 'Map<number, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1006,24): error TS2802: Type 'Map<number, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1046,33): error TS2802: Type 'Map<string, { x: number[]; tc: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1064,23): error TS2802: Type 'MapIterator<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1304,26): error TS2802: Type 'Map<number, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1309,22): error TS2802: Type 'MapIterator<[number, number]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1359,46): error TS2339: Property 'X' does not exist on type '{ dataSize: number; }'.
+server/learning/gradient-boost.ts(1465,26): error TS2802: Type 'Map<number, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1474,30): error TS2802: Type 'Map<number, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1481,22): error TS2802: Type 'MapIterator<[number, number]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1555,7): error TS2322: Type '{ r2: number; mae: number; mse: number; rmse: number; nSamples: number; nTrees: number; percentiles: { p5: number; p10: number; p25: number; p50: number; p75: number; p90: number; p95: number; }; absResidualPercentiles: { ...; }; relativeErrorPercentiles: { ...; }; predictedVsActual: never[]; residualCount: number; }' is not assignable to type 'Omit<CalibrationData, "residuals"> & { residualCount: number; }'.
+  Property 'computedAt' is missing in type '{ r2: number; mae: number; mse: number; rmse: number; nSamples: number; nTrees: number; percentiles: { p5: number; p10: number; p25: number; p50: number; p75: number; p90: number; p95: number; }; absResidualPercentiles: { ...; }; relativeErrorPercentiles: { ...; }; predictedVsActual: never[]; residualCount: number; }' but required in type 'Omit<CalibrationData, "residuals">'.
+server/learning/gradient-boost.ts(1630,26): error TS2802: Type 'MapIterator<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1804,34): error TS2802: Type 'Map<string, EvaluatedEntry>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/gradient-boost.ts(1882,23): error TS2802: Type 'MapIterator<EvaluatedEntry>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/graph-neural-net.ts(1190,26): error TS2339: Property 'density' does not exist on type 'ElementalProperties'.
+server/learning/graph-neural-net.ts(1191,26): error TS2339: Property 'thermalConductivity' does not exist on type 'ElementalProperties'.
+server/learning/graph-neural-net.ts(1193,26): error TS2339: Property 'atomicVolume' does not exist on type 'ElementalProperties'.
+server/learning/insight-detector.ts(310,21): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/insight-detector.ts(345,27): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/insight-detector.ts(496,23): error TS2802: Type 'MapIterator<EmbeddingEntry>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/lambda-regressor.ts(98,24): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/lambda-regressor.ts(394,22): error TS2802: Type 'Set<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/material-signal-scanner.ts(574,28): error TS2802: Type 'MapIterator<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/material-signal-scanner.ts(696,30): error TS2304: Cannot find name 'dedupeKey'.
+server/learning/ml-predictor.ts(285,3): error TS2300: Duplicate identifier 'anharmonicityScore'.
+server/learning/ml-predictor.ts(356,3): error TS2300: Duplicate identifier 'anharmonicityScore'.
+server/learning/ml-predictor.ts(461,22): error TS2448: Block-scoped variable 'hydrogenRatio' used before its declaration.
+server/learning/ml-predictor.ts(461,22): error TS2454: Variable 'hydrogenRatio' is used before being assigned.
+server/learning/ml-predictor.ts(893,26): error TS2802: Type 'Map<string, { features: MLFeatureVector; timestamp: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/ml-predictor.ts(897,26): error TS2802: Type 'MapIterator<[string, { features: MLFeatureVector; timestamp: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/ml-predictor.ts(947,30): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/ml-predictor.ts(969,40): error TS2802: Type 'Map<string, { dimensionality: string; id: string; formula: string; source: string | null; predictedAt: Date | null; decompositionEnergy: number | null; prototype: string | null; ... 9 more ...; isGroundTruth: boolean | null; }[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/ml-predictor.ts(1382,38): error TS2339: Property 'stabilityScore' does not exist on type 'MLFeatureVector'.
+server/learning/model-diagnostics.ts(589,28): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(891,36): error TS2802: Type 'Map<string, Set<string>>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(908,20): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(910,108): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(917,20): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(919,102): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(1324,31): error TS2802: Type 'Map<string, ModelVersionScorecard>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-diagnostics.ts(1503,32): error TS2802: Type 'Map<string, ModelVersionScorecard[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/model-improvement-loop.ts(788,4): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+server/learning/model-llm-controller.ts(621,66): error TS7006: Parameter 'c' implicitly has an 'any' type.
+server/learning/model-llm-controller.ts(648,3): error TS2322: Type 'ArchitectureRecommendation | null' is not assignable to type 'Promise<ArchitectureRecommendation | null>'.
+  Type 'null' is not assignable to type 'Promise<ArchitectureRecommendation | null>'.
+server/learning/multi-fidelity-pipeline.ts(448,16): error TS2339: Property 'tcBlendWeights' does not exist on type 'EliashbergResult'.
+server/learning/multi-fidelity-pipeline.ts(457,16): error TS2339: Property 'metallicityClamped' does not exist on type 'EliashbergResult'.
+server/learning/multi-fidelity-pipeline.ts(462,16): error TS2339: Property 'metallicityClamped' does not exist on type 'EliashbergResult'.
+server/learning/multi-fidelity-pipeline.ts(522,26): error TS2339: Property 'optimalPressureGpa' does not exist on type '{ dimensionality: string | null; pressureGpa: number | null; id: string; formula: string; name: string; status: string; notes: string | null; predictedTc: number | null; meissnerEffect: boolean | null; ... 30 more ...; dataConfidence: string | null; }'.
+server/learning/multi-fidelity-pipeline.ts(891,31): error TS2339: Property 'optimalPressureGpa' does not exist on type '{ dimensionality: string | null; pressureGpa: number | null; id: string; formula: string; name: string; status: string; notes: string | null; predictedTc: number | null; meissnerEffect: boolean | null; ... 30 more ...; dataConfidence: string | null; }'.
+server/learning/multi-task-gnn.ts(270,70): error TS2448: Block-scoped variable 'correlationStrength' used before its declaration.
+server/learning/ood-detector.ts(316,15): error TS2339: Property 'every' does not exist on type 'Promise<number[]>'.
+server/learning/ood-detector.ts(316,21): error TS7006: Parameter 'v' implicitly has an 'any' type.
+server/learning/ood-detector.ts(317,30): error TS2345: Argument of type 'Promise<number[]>' is not assignable to parameter of type 'number[]'.
+  Type 'Promise<number[]>' is missing the following properties from type 'number[]': length, pop, push, concat, and 35 more.
+server/learning/ood-detector.ts(389,5): error TS2740: Type 'Promise<number[]>' is missing the following properties from type 'number[]': length, pop, push, concat, and 35 more.
+server/learning/pattern-miner.ts(120,22): error TS2802: Type 'Set<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/pattern-miner.ts(567,39): error TS2802: Type 'Map<string, ScoredCandidate[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/pattern-miner.ts(611,29): error TS2802: Type 'Map<string, { rule: PatternRule; f1Sum: number; precSum: number; recSum: number; foldCount: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/phase-diagram-engine.ts(903,24): error TS2552: Cannot find name 'classifyCompoundType'. Did you mean 'classifyCompoundTypeParsed'?
+server/learning/phase-diagram-engine.ts(1098,21): error TS2802: Type 'MapIterator<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/phase-explorer.ts(116,7): error TS2739: Type 'MLFeatureVector' is missing the following properties from type 'Promise<MLFeatureVector>': then, catch, finally, [Symbol.toStringTag]
+server/learning/phase-explorer.ts(122,50): error TS2345: Argument of type 'Promise<MLFeatureVector>' is not assignable to parameter of type 'MLFeatureVector'.
+  Type 'Promise<MLFeatureVector>' is missing the following properties from type 'MLFeatureVector': avgElectronegativity, maxAtomicMass, numElements, hasTransitionMetal, and 91 more.
+server/learning/phase-explorer.ts(123,38): error TS2345: Argument of type 'Promise<MLFeatureVector>' is not assignable to parameter of type 'MLFeatureVector'.
+  Type 'Promise<MLFeatureVector>' is missing the following properties from type 'MLFeatureVector': avgElectronegativity, maxAtomicMass, numElements, hasTransitionMetal, and 91 more.
+server/learning/phase-explorer.ts(385,35): error TS2802: Type 'Map<string, PhaseGridPoint[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/phase-explorer.ts(386,33): error TS7006: Parameter 'a' implicitly has an 'any' type.
+server/learning/phase-explorer.ts(386,36): error TS7006: Parameter 'b' implicitly has an 'any' type.
+server/learning/phase-explorer.ts(485,30): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/physics-results-store.ts(264,35): error TS2802: Type 'Map<string, PhysicsResult>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/prediction-reality-ledger.ts(468,5): error TS2561: Object literal may only specify known properties, but 'samplesSinceLastRetrain' does not exist in type 'RetrainTriggerState'. Did you mean to write 'samplesSinceLastTrigger'?
+server/learning/pressure-aware-surrogate.ts(238,23): error TS2345: Argument of type 'Promise<PressurePoint>' is not assignable to parameter of type 'PressurePoint'.
+  Type 'Promise<PressurePoint>' is missing the following properties from type 'PressurePoint': pressureGpa, tc, formationEnergy, bandgap, and 6 more.
+server/learning/pressure-aware-surrogate.ts(258,20): error TS2802: Type 'Set<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/pressure-aware-surrogate.ts(260,22): error TS2345: Argument of type 'Promise<PressurePoint>' is not assignable to parameter of type 'PressurePoint'.
+  Type 'Promise<PressurePoint>' is missing the following properties from type 'PressurePoint': pressureGpa, tc, formationEnergy, bandgap, and 6 more.
+server/learning/pressure-aware-surrogate.ts(308,31): error TS2339: Property 'optimalPressureGpa' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(309,18): error TS2339: Property 'maxTc' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(310,5): error TS2740: Type 'Promise<PressureCurve>' is missing the following properties from type 'PressureCurve': formula, points, optimalPressureGpa, maxTc, and 5 more.
+server/learning/pressure-aware-surrogate.ts(316,24): error TS2339: Property 'points' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(320,22): error TS2339: Property 'formula' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(345,20): error TS2339: Property 'formula' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(347,21): error TS2339: Property 'maxDTcDP' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(349,24): error TS2339: Property 'isSensitive' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(350,32): error TS2339: Property 'sensitivityCategory' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(440,16): error TS2339: Property 'uncertainRegions' does not exist on type 'Promise<PressureCurve>'.
+server/learning/pressure-aware-surrogate.ts(509,23): error TS2802: Type 'MapIterator<PressureCurve>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/pressure-property-map.ts(60,9): error TS2740: Type 'Promise<PressureCurve>' is missing the following properties from type 'PressureCurve': formula, points, optimalPressureGpa, maxTc, and 5 more.
+server/learning/rl-agent.ts(788,32): error TS2802: Type 'Map<string, { successes: number; total: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/rl-agent.ts(800,39): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/rl-agent.ts(1105,35): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/rl-agent.ts(1532,34): error TS2802: Type 'Map<string, { successes: number; total: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/rl-agent.ts(1542,33): error TS2802: Type 'Map<string, { successes: number; total: number; avgTc: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/strategy-analyzer.ts(130,31): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/strategy-analyzer.ts(371,27): error TS2802: Type 'MapIterator<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/superconductor-research.ts(183,25): error TS2339: Property 'pass' does not exist on type 'Promise<StabilityGateResult>'.
+server/learning/superconductor-research.ts(499,32): error TS2802: Type 'Set<any>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/superconductor-research.ts(639,29): error TS2339: Property 'pass' does not exist on type 'Promise<StabilityGateResult>'.
+server/learning/superconductor-research.ts(821,24): error TS2802: Type 'MapIterator<[string, { result: PairingSusceptibilityResult; ts: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/superconductor-research.ts(1012,29): error TS2339: Property 'pass' does not exist on type 'Promise<StabilityGateResult>'.
+server/learning/surrogate-fitness.ts(280,30): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/surrogate-fitness.ts(479,24): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/surrogate-fitness.ts(563,31): error TS2802: Type 'MapIterator<[string, { sumAbsErr: number; sumSignedErr: number; overestimates: number; stableCorrect: number; count: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/surrogate-fitness.ts(620,31): error TS2802: Type 'MapIterator<[string, { sumAbsErr: number; sumSignedErr: number; overestimates: number; stableCorrect: number; count: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/synthesis-discovery.ts(567,24): error TS2802: Type 'MapIterator<[string, { score: number; count: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/synthesis-discovery.ts(571,23): error TS2802: Type 'MapIterator<[string, { penalty: number; count: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/synthesis-discovery.ts(1230,36): error TS2339: Property 'uncertaintyBreakdown' does not exist on type 'Promise<SurrogateFitnessResult>'.
+server/learning/synthesis-discovery.ts(1419,5): error TS2322: Type '"practical" | "experimental" | "unrealistic" | "hazardous"' is not assignable to type '"practical" | "experimental" | "unrealistic"'.
+  Type '"hazardous"' is not assignable to type '"practical" | "experimental" | "unrealistic"'.
+server/learning/synthesis-discovery.ts(1519,5): error TS2367: This comparison appears to be unintentional because the types '"practical" | "experimental" | "unrealistic"' and '"hazardous"' have no overlap.
+server/learning/synthesis-reasoning.ts(19,24): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/synthesis-reasoning.ts(107,37): error TS2339: Property 'formationEnergy' does not exist on type '{ dimensionality: string | null; pressureGpa: number | null; id: string; formula: string; name: string; status: string; notes: string | null; predictedTc: number | null; meissnerEffect: boolean | null; ... 30 more ...; dataConfidence: string | null; }'.
+server/learning/synthesis-reasoning.ts(648,19): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/unified-training-dataset.ts(169,28): error TS2802: Type 'Map<string, UnifiedTrainingRecord>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/utils.ts(10,6): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/learning/utils.ts(232,30): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/physics/band-structure-operator.ts(1019,46): error TS2339: Property 'compatibilityCheckPassed' does not exist on type 'SymmetryIndicatorResult'.
+server/physics/eliashberg-pipeline.ts(832,24): error TS2802: Type 'MapIterator<[string, { result: EliashbergPipelineResult; timestamp: number; }]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/physics/pairing-mechanisms.ts(169,41): error TS2345: Argument of type 'string' is not assignable to parameter of type 'never'.
+server/physics/pairing-mechanisms.ts(254,33): error TS2345: Argument of type 'string' is not assignable to parameter of type 'never'.
+server/physics/synthesis-simulator.ts(717,9): error TS2741: Property 'synthesisMethod' is missing in type '{ temperature: number; pressure: number; coolingRate: number; annealTime: number; currentDensity: number; magneticField: number; thermalCycles: number; strain: number; oxygenPressure: number; }' but required in type 'Record<keyof SynthesisVector, number>'.
+server/physics/synthesis-simulator.ts(847,53): error TS2554: Expected 1 arguments, but got 2.
+server/physics/tb-ml-surrogate.ts(275,83): error TS2339: Property 'datasetSize' does not exist on type 'never'.
+server/physics/topological-invariants.ts(395,66): error TS2339: Property 'bandInversionCount' does not exist on type 'TightBindingTopology'.
+server/physics/topological-invariants.ts(498,29): error TS2339: Property 'bandInversionCount' does not exist on type 'TightBindingTopology'.
+server/physics/topological-invariants.ts(890,70): error TS2339: Property 'dosAtFermi' does not exist on type 'ElectronicStructure'.
+server/physics/topological-invariants.ts(1002,30): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/physics/topological-invariants.ts(1008,27): error TS2339: Property 'orbitalCharacter' does not exist on type 'TightBindingTopology'.
+server/physics/topological-invariants.ts(1143,30): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/physics/topological-invariants.ts(1226,41): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/physics/topological-invariants.ts(1226,93): error TS2339: Property 'bandGap' does not exist on type 'ElectronicStructure'.
+server/physics/topological-invariants.ts(1276,50): error TS2339: Property 'flatBandProximity' does not exist on type 'TightBindingTopology'.
+server/physics/topological-invariants.ts(1277,51): error TS2339: Property 'flatBandProximity' does not exist on type 'TightBindingTopology'.
+server/replit_integrations/audio/routes.ts(23,27): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/replit_integrations/audio/routes.ts(51,27): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/replit_integrations/audio/routes.ts(65,39): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/replit_integrations/batch/utils.ts(110,30): error TS2339: Property 'AbortError' does not exist on type '<T>(input: (attemptNumber: number) => T | PromiseLike<T>, options?: Options | undefined) => Promise<T>'.
+server/replit_integrations/batch/utils.ts(159,32): error TS2339: Property 'AbortError' does not exist on type '<T>(input: (attemptNumber: number) => T | PromiseLike<T>, options?: Options | undefined) => Promise<T>'.
+server/replit_integrations/chat/routes.ts(25,27): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/replit_integrations/chat/routes.ts(53,27): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/replit_integrations/chat/routes.ts(65,39): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/replit_integrations/image/client.ts(23,18): error TS18048: 'response.data' is possibly 'undefined'.
+server/replit_integrations/image/client.ts(50,23): error TS18048: 'response.data' is possibly 'undefined'.
+server/replit_integrations/image/routes.ts(20,25): error TS18048: 'response.data' is possibly 'undefined'.
+server/routes.ts(559,27): error TS2362: The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+server/routes.ts(559,41): error TS2363: The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+server/routes.ts(958,23): error TS2339: Property 'result' does not exist on type '{}'.
+server/routes.ts(958,60): error TS2339: Property 'result' does not exist on type '{}'.
+server/routes.ts(960,82): error TS2339: Property 'formula' does not exist on type '{}'.
+server/routes.ts(965,73): error TS2339: Property 'formula' does not exist on type '{}'.
+server/routes.ts(1267,32): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1271,69): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1295,22): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1296,49): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1306,21): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1307,49): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1509,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1522,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1535,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1550,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1616,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1629,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1684,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1838,21): error TS2352: Conversion of type 'PhysicsFeatureVector' to type 'Record<string, number>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Index signature for type 'string' is missing in type 'PhysicsFeatureVector'.
+server/routes.ts(1841,48): error TS2345: Argument of type '{ features: Record<string, number>; target: number | null; }[]' is not assignable to parameter of type 'DataPoint[]'.
+  Type '{ features: Record<string, number>; target: number | null; }' is not assignable to type 'DataPoint'.
+    Property 'features' is incompatible with index signature.
+      Type 'Record<string, number>' is not assignable to type 'number'.
+server/routes.ts(1920,34): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(1989,60): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2001,46): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2029,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2048,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2067,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2082,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2135,41): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2156,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2208,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2255,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2290,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2313,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2331,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2349,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2359,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2385,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2400,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2482,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2504,25): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/routes.ts(2524,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2581,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2633,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2680,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2691,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2780,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2850,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2868,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2871,18): error TS2783: 'formula' is specified more than once, so this usage will be overwritten.
+server/routes.ts(2887,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2919,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2947,44): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2956,45): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(2976,48): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3020,45): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3029,46): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3377,40): error TS2551: Property 'totalTheories' does not exist on type 'SymbolicDiscoveryStats'. Did you mean 'topTheories'?
+server/routes.ts(3386,40): error TS2551: Property 'totalTheories' does not exist on type 'SymbolicDiscoveryStats'. Did you mean 'topTheories'?
+server/routes.ts(3480,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3501,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3530,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3550,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3560,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3583,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3612,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3630,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3650,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3661,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3664,67): error TS2339: Property 'resultData' does not exist on type '{ id: number; formula: string; candidateId: number | null; status: string; jobType: string; priority: number; inputData: unknown; outputData: unknown; errorMessage: string | null; createdAt: Date | null; startedAt: Date | null; completedAt: Date | null; }'.
+server/routes.ts(3665,40): error TS2339: Property 'resultData' does not exist on type '{ id: number; formula: string; candidateId: number | null; status: string; jobType: string; priority: number; inputData: unknown; outputData: unknown; errorMessage: string | null; createdAt: Date | null; startedAt: Date | null; completedAt: Date | null; }'.
+server/routes.ts(3665,86): error TS2339: Property 'resultData' does not exist on type '{ id: number; formula: string; candidateId: number | null; status: string; jobType: string; priority: number; inputData: unknown; outputData: unknown; errorMessage: string | null; createdAt: Date | null; startedAt: Date | null; completedAt: Date | null; }'.
+server/routes.ts(3665,109): error TS2339: Property 'resultData' does not exist on type '{ id: number; formula: string; candidateId: number | null; status: string; jobType: string; priority: number; inputData: unknown; outputData: unknown; errorMessage: string | null; createdAt: Date | null; startedAt: Date | null; completedAt: Date | null; }'.
+server/routes.ts(3706,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3755,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3775,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3808,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3827,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3837,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3847,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3858,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3878,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3889,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3899,44): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3909,41): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(3919,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4028,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4074,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4192,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4220,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4236,53): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4254,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4267,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4298,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4314,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4355,44): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4370,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4384,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4406,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4443,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4457,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4471,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4495,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4809,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4822,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4873,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4919,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(4924,18): error TS2783: 'formula' is specified more than once, so this usage will be overwritten.
+server/routes.ts(5030,49): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5058,33): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5352,31): error TS2339: Property 'tcPredicted' does not exist on type 'XGBUncertaintyResult'.
+server/routes.ts(5353,27): error TS2339: Property 'meanTc' does not exist on type 'GNNPredictionWithUncertainty'.
+server/routes.ts(5360,44): error TS2339: Property 'meanLambda' does not exist on type 'GNNPredictionWithUncertainty'.
+server/routes.ts(5361,38): error TS2339: Property 'meanLambda' does not exist on type 'GNNPredictionWithUncertainty'.
+server/routes.ts(5378,45): error TS2551: Property 'tcUncertainty' does not exist on type 'GNNPredictionWithUncertainty'. Did you mean 'uncertainty'?
+server/routes.ts(5379,40): error TS2339: Property 'meanLambda' does not exist on type 'GNNPredictionWithUncertainty'.
+server/routes.ts(5448,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5555,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5574,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5584,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5598,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5612,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5627,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5641,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5655,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5691,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5703,39): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5704,40): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/routes.ts(5714,42): error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+  Type 'string[]' is not assignable to type 'string'.
+server/storage.ts(228,54): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(value: { phase: string | SQL<unknown> | Placeholder<string, any>; event: string | SQL<unknown> | Placeholder<string, any>; timestamp?: SQL<unknown> | Date | Placeholder<...> | null | undefined; detail?: string | ... 3 more ... | undefined; dataSource?: string | ... 3 more ... | undefined; }): PgInsertBase<...>', gave the following error.
+    Argument of type '{}' is not assignable to parameter of type '{ phase: string | SQL<unknown> | Placeholder<string, any>; event: string | SQL<unknown> | Placeholder<string, any>; timestamp?: SQL<unknown> | Date | Placeholder<...> | null | undefined; detail?: string | ... 3 more ... | undefined; dataSource?: string | ... 3 more ... | undefined; }'.
+      Type '{}' is missing the following properties from type '{ phase: string | SQL<unknown> | Placeholder<string, any>; event: string | SQL<unknown> | Placeholder<string, any>; timestamp?: SQL<unknown> | Date | Placeholder<...> | null | undefined; detail?: string | ... 3 more ... | undefined; dataSource?: string | ... 3 more ... | undefined; }': phase, event
+  Overload 2 of 2, '(values: { phase: string | SQL<unknown> | Placeholder<string, any>; event: string | SQL<unknown> | Placeholder<string, any>; timestamp?: SQL<unknown> | Date | Placeholder<...> | null | undefined; detail?: string | ... 3 more ... | undefined; dataSource?: string | ... 3 more ... | undefined; }[]): PgInsertBase<...>', gave the following error.
+    Argument of type '{}' is not assignable to parameter of type '{ phase: string | SQL<unknown> | Placeholder<string, any>; event: string | SQL<unknown> | Placeholder<string, any>; timestamp?: SQL<unknown> | Date | Placeholder<...> | null | undefined; detail?: string | ... 3 more ... | undefined; dataSource?: string | ... 3 more ... | undefined; }[]'.
+      Type '{}' is missing the following properties from type '{ phase: string | SQL<unknown> | Placeholder<string, any>; event: string | SQL<unknown> | Placeholder<string, any>; timestamp?: SQL<unknown> | Date | Placeholder<...> | null | undefined; detail?: string | ... 3 more ... | undefined; dataSource?: string | ... 3 more ... | undefined; }[]': length, pop, push, concat, and 35 more.
+server/storage.ts(536,26): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/storage.ts(680,65): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(value: { formula: string | SQL<unknown> | Placeholder<string, any>; validationType: string | SQL<unknown> | Placeholder<string, any>; result: string | SQL<...> | Placeholder<...>; notes?: string | ... 3 more ... | undefined; measuredTc?: number | ... 3 more ... | undefined; measuredPressure?: number | ... 3 more ... | undefined; performedAt?: SQL<...> | ... 3 more ... | undefined; }): PgInsertBase<...>', gave the following error.
+    Argument of type '{}' is not assignable to parameter of type '{ formula: string | SQL<unknown> | Placeholder<string, any>; validationType: string | SQL<unknown> | Placeholder<string, any>; result: string | SQL<unknown> | Placeholder<...>; notes?: string | ... 3 more ... | undefined; measuredTc?: number | ... 3 more ... | undefined; measuredPressure?: number | ... 3 more ... | ...'.
+      Type '{}' is missing the following properties from type '{ formula: string | SQL<unknown> | Placeholder<string, any>; validationType: string | SQL<unknown> | Placeholder<string, any>; result: string | SQL<unknown> | Placeholder<...>; notes?: string | ... 3 more ... | undefined; measuredTc?: number | ... 3 more ... | undefined; measuredPressure?: number | ... 3 more ... | ...': formula, validationType, result
+  Overload 2 of 2, '(values: { formula: string | SQL<unknown> | Placeholder<string, any>; validationType: string | SQL<unknown> | Placeholder<string, any>; result: string | SQL<...> | Placeholder<...>; notes?: string | ... 3 more ... | undefined; measuredTc?: number | ... 3 more ... | undefined; measuredPressure?: number | ... 3 more ... | undefined; performedAt?: SQL<...> | ... 3 more ... | undefined; }[]): PgInsertBase<...>', gave the following error.
+    Argument of type '{}' is not assignable to parameter of type '{ formula: string | SQL<unknown> | Placeholder<string, any>; validationType: string | SQL<unknown> | Placeholder<string, any>; result: string | SQL<unknown> | Placeholder<...>; notes?: string | ... 3 more ... | undefined; measuredTc?: number | ... 3 more ... | undefined; measuredPressure?: number | ... 3 more ... | ...'.
+      Type '{}' is missing the following properties from type '{ formula: string | SQL<unknown> | Placeholder<string, any>; validationType: string | SQL<unknown> | Placeholder<string, any>; result: string | SQL<unknown> | Placeholder<...>; notes?: string | ... 3 more ... | undefined; measuredTc?: number | ... 3 more ... | undefined; measuredPressure?: number | ... 3 more ... | ...': length, pop, push, concat, and 35 more.
+server/storage.ts(739,54): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(value: { formula: string | SQL<unknown> | Placeholder<string, any>; candidateId?: number | SQL<unknown> | Placeholder<string, any> | null | undefined; status?: string | ... 2 more ... | undefined; ... 7 more ...; completedAt?: SQL<...> | ... 3 more ... | undefined; }): PgInsertBase<...>', gave the following error.
+    Argument of type '{}' is not assignable to parameter of type '{ formula: string | SQL<unknown> | Placeholder<string, any>; candidateId?: number | SQL<unknown> | Placeholder<string, any> | null | undefined; status?: string | ... 2 more ... | undefined; ... 7 more ...; completedAt?: SQL<...> | ... 3 more ... | undefined; }'.
+      Property 'formula' is missing in type '{}' but required in type '{ formula: string | SQL<unknown> | Placeholder<string, any>; candidateId?: number | SQL<unknown> | Placeholder<string, any> | null | undefined; status?: string | ... 2 more ... | undefined; ... 7 more ...; completedAt?: SQL<...> | ... 3 more ... | undefined; }'.
+  Overload 2 of 2, '(values: { formula: string | SQL<unknown> | Placeholder<string, any>; candidateId?: number | SQL<unknown> | Placeholder<string, any> | null | undefined; status?: string | ... 2 more ... | undefined; ... 7 more ...; completedAt?: SQL<...> | ... 3 more ... | undefined; }[]): PgInsertBase<...>', gave the following error.
+    Argument of type '{}' is not assignable to parameter of type '{ formula: string | SQL<unknown> | Placeholder<string, any>; candidateId?: number | SQL<unknown> | Placeholder<string, any> | null | undefined; status?: string | ... 2 more ... | undefined; ... 7 more ...; completedAt?: SQL<...> | ... 3 more ... | undefined; }[]'.
+      Type '{}' is missing the following properties from type '{ formula: string | SQL<unknown> | Placeholder<string, any>; candidateId?: number | SQL<unknown> | Placeholder<string, any> | null | undefined; status?: string | ... 2 more ... | undefined; ... 7 more ...; completedAt?: SQL<...> | ... 3 more ... | undefined; }[]': length, pop, push, concat, and 35 more.
+server/synthesis/synthesis-analogy-engine.ts(89,28): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/synthesis/synthesis-analogy-engine.ts(90,29): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/synthesis/synthesis-analogy-engine.ts(90,38): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/synthesis/synthesis-learning-db.ts(164,29): error TS2802: Type 'Map<string, SynthesisRecord[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/synthesis/synthesis-learning-db.ts(166,32): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(168,33): error TS7006: Parameter 's' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(168,36): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(169,33): error TS7006: Parameter 's' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(169,36): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(174,40): error TS7006: Parameter 's' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(174,43): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/synthesis/synthesis-learning-db.ts(216,27): error TS2802: Type 'Map<string, { count: number; totalTc: number; bestTc: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/synthesis/synthesis-learning-db.ts(254,19): error TS2362: The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+server/synthesis/synthesis-learning-db.ts(254,19): error TS2532: Object is possibly 'undefined'.
+server/synthesis/synthesis-learning-db.ts(254,41): error TS18048: 's' is possibly 'undefined'.
+server/synthesis/synthesis-learning-db.ts(254,41): error TS2365: Operator '+' cannot be applied to types 'string | number' and 'string | number'.
+server/synthesis/synthesis-learning-db.ts(254,45): error TS18048: 'v' is possibly 'undefined'.
+server/synthesis/synthesis-learning-db.ts(258,18): error TS2362: The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.
+server/synthesis/synthesis-learning-db.ts(258,18): error TS2532: Object is possibly 'undefined'.
+server/theory/causal-physics-discovery.ts(174,9): error TS2322: Type 'MLFeatureVector' is not assignable to type 'Record<string, number>'.
+  Index signature for type 'string' is missing in type 'MLFeatureVector'.
+server/theory/causal-physics-discovery.ts(177,30): error TS2345: Argument of type 'Record<string, number>' is not assignable to parameter of type 'MLFeatureVector'.
+  Type 'Record<string, number>' is missing the following properties from type 'MLFeatureVector': avgElectronegativity, maxAtomicMass, numElements, hasTransitionMetal, and 91 more.
+server/theory/causal-physics-discovery.ts(1003,34): error TS2802: Type 'Map<string, CausalDataRecord[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1006,32): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1007,33): error TS7006: Parameter 'a' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1007,36): error TS7006: Parameter 'b' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1008,37): error TS7006: Parameter 's' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1008,40): error TS7006: Parameter 'v' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1065,32): error TS2802: Type 'Map<string, CausalDataRecord[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1068,21): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1069,31): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1076,31): error TS2802: Type 'Map<string, Map<string, number[]>>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1127,32): error TS2802: Type 'Map<string, CausalDataRecord[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1131,21): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1132,31): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/theory/causal-physics-discovery.ts(1402,30): error TS2802: Type 'Map<string, CausalMechanismHypothesis>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1416,30): error TS2802: Type 'Map<string, CausalRule>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1433,16): error TS2802: Type 'MapIterator<CausalMechanismHypothesis>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/causal-physics-discovery.ts(1436,16): error TS2802: Type 'MapIterator<CausalRule>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/symbolic-physics-discovery.ts(435,5): error TS2322: Type 'MLFeatureVector' is not assignable to type 'Record<string, number>'.
+  Index signature for type 'string' is missing in type 'MLFeatureVector'.
+server/theory/symbolic-physics-discovery.ts(440,26): error TS2345: Argument of type 'Record<string, number>' is not assignable to parameter of type 'MLFeatureVector'.
+  Type 'Record<string, number>' is missing the following properties from type 'MLFeatureVector': avgElectronegativity, maxAtomicMass, numElements, hasTransitionMetal, and 91 more.
+server/theory/symbolic-physics-discovery.ts(582,35): error TS2802: Type 'Map<MaterialFamily, PhysicsDiscoveryRecord[]>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+server/theory/symbolic-physics-discovery.ts(584,36): error TS7006: Parameter 'r' implicitly has an 'any' type.
+server/theory/symbolic-physics-discovery.ts(626,125): error TS7006: Parameter 'a' implicitly has an 'any' type.
+server/theory/symbolic-physics-discovery.ts(626,128): error TS7006: Parameter 'b' implicitly has an 'any' type.
+server/theory/symbolic-physics-discovery.ts(639,134): error TS7006: Parameter 'a' implicitly has an 'any' type.
+server/theory/symbolic-physics-discovery.ts(639,137): error TS7006: Parameter 'b' implicitly has an 'any' type.
+server/theory/symbolic-physics-discovery.ts(1100,15): error TS2339: Property 'Tc' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1100,30): error TS2339: Property 'lambda' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1100,50): error TS2339: Property 'omega_log' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1101,27): error TS2339: Property 'mu_star' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1101,53): error TS2339: Property 'lambda' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1102,27): error TS2339: Property 'lambda' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1104,52): error TS2339: Property 'mu_star' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1105,49): error TS2339: Property 'lambda' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1106,15): error TS2339: Property 'Tc' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1106,25): error TS2339: Property 'omega_log' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1106,85): error TS2339: Property 'lambda' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1107,15): error TS2339: Property 'Tc' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1107,50): error TS2339: Property 'Tc' does not exist on type 'Promise<PhysicsDiscoveryRecord>'.
+server/theory/symbolic-physics-discovery.ts(1110,20): error TS2345: Argument of type 'Promise<PhysicsDiscoveryRecord>' is not assignable to parameter of type 'PhysicsDiscoveryRecord'.
+  Type 'Promise<PhysicsDiscoveryRecord>' is missing the following properties from type 'PhysicsDiscoveryRecord': formula, lambda, DOS_EF, omega_log, and 21 more.
+server/theory/symbolic-physics-discovery.ts(1208,32): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+shared/schema.ts(279,70): error TS2322: Type 'boolean' is not assignable to type 'never'.
+shared/schema.ts(296,102): error TS2322: Type 'boolean' is not assignable to type 'never'.
+shared/schema.ts(304,80): error TS2322: Type 'boolean' is not assignable to type 'never'.
+shared/schema.ts(363,97): error TS2322: Type 'boolean' is not assignable to type 'never'.
+shared/schema.ts(417,82): error TS2322: Type 'boolean' is not assignable to type 'never'.

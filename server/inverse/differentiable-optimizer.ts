@@ -158,7 +158,7 @@ const KNOWN_SC_TC: Record<string, number> = {
   "FeSe": 8, "LiFeAs": 18, "BaFe2As2": 38,
 };
 
-function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: SynthesisVector): PhysicsOutput {
+async function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: SynthesisVector): Promise<PhysicsOutput> {
   const electronic = computeElectronicStructure(formula, null);
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressure);
@@ -206,9 +206,9 @@ function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: Synth
   let gbTc = 0;
   let gbScore = 0;
   try {
-    const features = extractFeatures(formula);
+    const features = await extractFeatures(formula);
     if (features) {
-      const gb = gbPredict(features);
+      const gb = await gbPredict(features);
       gbTc = gb.tcPredicted;
       gbScore = gb.score;
     }
@@ -276,10 +276,10 @@ function computeAnalyticMcMillanGradients(
   };
 }
 
-function computeNumericalElementGradients(
+async function computeNumericalElementGradients(
   state: MaterialState,
   baseTc: number
-): Map<string, number> {
+): Promise<Map<string, number>> {
   const gradients = new Map<string, number>();
 
   for (const el of state.elements) {
@@ -288,14 +288,14 @@ function computeNumericalElementGradients(
 
     const perturbedUp = { ...state, counts: { ...state.counts, [el]: originalCount + 1 } };
     const formulaUp = formulaFromState(perturbedUp);
-    const physUp = evaluatePhysics(formulaUp, state.pressure);
+    const physUp = await evaluatePhysics(formulaUp, state.pressure);
 
     let grad = physUp.tc - baseTc;
 
     if (originalCount > 1) {
       const perturbedDown = { ...state, counts: { ...state.counts, [el]: originalCount - 1 } };
       const formulaDown = formulaFromState(perturbedDown);
-      const physDown = evaluatePhysics(formulaDown, state.pressure);
+      const physDown = await evaluatePhysics(formulaDown, state.pressure);
       grad = (physUp.tc - physDown.tc) / 2;
     }
 
@@ -776,12 +776,12 @@ function computeLoss(physics: PhysicsOutput, target: TargetProperties, synthVec?
   return Math.min(1.0, tcLoss + lambdaLoss + metalLoss + stabilityLoss + synthLoss);
 }
 
-export function runDifferentiableOptimization(
+export async function runDifferentiableOptimization(
   initialFormula: string,
   target: TargetProperties,
   maxSteps: number = 20,
   learningRate: number = 1.0
-): DifferentiableResult {
+): Promise<DifferentiableResult> {
   let state = parseToState(initialFormula, target.maxPressure < 200 ? 0 : target.maxPressure);
   const matClass = initialFormula.includes("H") ? "hydride" : "default";
   state.synthesisVector = defaultSynthesisVector(matClass);
@@ -794,18 +794,18 @@ export function runDifferentiableOptimization(
   let adaptiveLr = learningRate;
   let prevGradNorm = 0;
 
-  const initialPhysics = evaluatePhysics(initialFormula, state.pressure, state.synthesisVector);
+  const initialPhysics = await evaluatePhysics(initialFormula, state.pressure, state.synthesisVector);
   const initialTc = initialPhysics.tc;
 
   for (let step = 0; step < maxSteps; step++) {
     const formula = formulaFromState(state);
-    const physics = evaluatePhysics(formula, state.pressure, state.synthesisVector);
+    const physics = await evaluatePhysics(formula, state.pressure, state.synthesisVector);
     const loss = computeLoss(physics, target, state.synthesisVector);
 
     const analyticGrad = computeAnalyticMcMillanGradients(
       physics.lambda, physics.omegaLog, physics.muStar
     );
-    const elementGrad = computeNumericalElementGradients(state, physics.tc);
+    const elementGrad = await computeNumericalElementGradients(state, physics.tc);
 
     const analyticNormSq = analyticGrad.dTc_dLambda ** 2 +
       analyticGrad.dTc_dOmegaLog ** 2 +
@@ -902,7 +902,7 @@ export function runDifferentiableOptimization(
           const trialState = substituteElement(state, weakest[0], replacement);
           const trialFormula = formulaFromState(trialState);
           if (trialFormula !== formula) {
-            const trialPhysics = evaluatePhysics(trialFormula, trialState.pressure, trialState.synthesisVector);
+            const trialPhysics = await evaluatePhysics(trialFormula, trialState.pressure, trialState.synthesisVector);
             const trialLoss = computeLoss(trialPhysics, target, trialState.synthesisVector);
 
             if (trialLoss < loss * 1.5) {
@@ -929,7 +929,7 @@ export function runDifferentiableOptimization(
             const trialState = substituteElement(state, targetEl, replacement);
             const trialFormula = formulaFromState(trialState);
             if (trialFormula !== formula) {
-              const trialPhysics = evaluatePhysics(trialFormula, trialState.pressure, trialState.synthesisVector);
+              const trialPhysics = await evaluatePhysics(trialFormula, trialState.pressure, trialState.synthesisVector);
               const trialLoss = computeLoss(trialPhysics, target, trialState.synthesisVector);
 
               if (trialLoss < loss * 1.5) {
@@ -956,8 +956,8 @@ export function runDifferentiableOptimization(
       const pDelta = 2.0;
       const currentFormula = formulaFromState(state);
       const currentSV = state.synthesisVector;
-      const tcAtCurrentP = evaluatePhysics(currentFormula, state.pressure, currentSV).tc;
-      const tcAtHigherP = evaluatePhysics(currentFormula, state.pressure + pDelta, currentSV).tc;
+      const tcAtCurrentP = (await evaluatePhysics(currentFormula, state.pressure, currentSV)).tc;
+      const tcAtHigherP = (await evaluatePhysics(currentFormula, state.pressure + pDelta, currentSV)).tc;
       const dTc_dP = (tcAtHigherP - tcAtCurrentP) / pDelta;
 
       if (dTc_dP > 0.01 && state.pressure < target.maxPressure) {
@@ -999,7 +999,7 @@ export function runDifferentiableOptimization(
   const finalFormula = formulaFromState(bestState);
   const improvement = initialTc > 0 ? (bestTc - initialTc) / initialTc : 0;
 
-  const bestPhysics = evaluatePhysics(finalFormula, bestState.pressure, bestState.synthesisVector);
+  const bestPhysics = await evaluatePhysics(finalFormula, bestState.pressure, bestState.synthesisVector);
   const tcConverged = bestTc >= target.targetTc * 0.95;
   const bestConstraintsMet = bestPhysics.stability >= 0.3
     && bestPhysics.lambda >= target.minLambda
@@ -1033,12 +1033,12 @@ export function runDifferentiableOptimization(
   return result;
 }
 
-export function runBatchDifferentiableOptimization(
+export async function runBatchDifferentiableOptimization(
   seedFormulas: string[],
   target: TargetProperties,
   maxSteps: number = 20
-): DifferentiableResult[] {
-  return seedFormulas.map(f => runDifferentiableOptimization(f, target, maxSteps));
+): Promise<DifferentiableResult[]> {
+  return Promise.all(seedFormulas.map(f => runDifferentiableOptimization(f, target, maxSteps)));
 }
 
 export function generateGradientSeeds(target: TargetProperties, count: number = 8): string[] {
@@ -1065,12 +1065,12 @@ export function getDifferentiableOptimizerStats(): DiffOptimizerStats {
   return { ...stats };
 }
 
-export function runGradientDescentCycle(
+export async function runGradientDescentCycle(
   target: TargetProperties,
   seedCount: number = 6,
   stepsPerSeed: number = 15,
   existingTopFormulas?: string[]
-): { results: DifferentiableResult[]; bestFormula: string; bestTc: number } {
+): Promise<{ results: DifferentiableResult[]; bestFormula: string; bestTc: number }> {
   let seeds = generateGradientSeeds(target, seedCount);
 
   if (existingTopFormulas && existingTopFormulas.length > 0) {
@@ -1079,10 +1079,10 @@ export function runGradientDescentCycle(
     seeds = [...new Set([...dbSeeds, ...generatedSeeds])].slice(0, seedCount);
   }
 
-  const standardResults = runBatchDifferentiableOptimization(seeds, target, stepsPerSeed);
-  const continuousResults = seeds.slice(0, Math.ceil(seedCount / 2)).map(
+  const standardResults = await runBatchDifferentiableOptimization(seeds, target, stepsPerSeed);
+  const continuousResults = await Promise.all(seeds.slice(0, Math.ceil(seedCount / 2)).map(
     f => runContinuousOptimization(f, target, stepsPerSeed * 2)
-  );
+  ));
 
   const crossPollinatedSeeds = continuousResults
     .filter(r => r.finalTc > 0)
@@ -1092,7 +1092,7 @@ export function runGradientDescentCycle(
     .filter(f => !seeds.includes(f));
 
   const refinedResults = crossPollinatedSeeds.length > 0
-    ? runBatchDifferentiableOptimization(crossPollinatedSeeds, target, stepsPerSeed)
+    ? await runBatchDifferentiableOptimization(crossPollinatedSeeds, target, stepsPerSeed)
     : [];
 
   const results = [...standardResults, ...continuousResults, ...refinedResults];
@@ -1193,11 +1193,11 @@ function formulaFromContinuousState(state: ContinuousState): string {
   return formulaFromState(continuousToDiscrete(state));
 }
 
-function computeContinuousGradients(
+async function computeContinuousGradients(
   state: ContinuousState,
   baseTc: number,
   target: TargetProperties
-): number[] {
+): Promise<number[]> {
   const gradients: number[] = [];
   const baseFormula = formulaFromContinuousState(state);
 
@@ -1237,10 +1237,10 @@ function computeContinuousGradients(
       continue;
     }
 
-    const physicsUp = evaluatePhysics(formulaFromContinuousState(stateUp), state.pressure);
+    const physicsUp = await evaluatePhysics(formulaFromContinuousState(stateUp), state.pressure);
     const lossUp = computeMultiObjectiveLoss(physicsUp, target, stateUp);
 
-    const physicsDown = evaluatePhysics(formulaFromContinuousState(stateDown), state.pressure);
+    const physicsDown = await evaluatePhysics(formulaFromContinuousState(stateDown), state.pressure);
     const lossDown = computeMultiObjectiveLoss(physicsDown, target, stateDown);
 
     let grad = (lossDown - lossUp) / (2 * delta);
@@ -1303,11 +1303,11 @@ function computeMultiObjectiveLoss(
   return Math.max(1e-4, rawTcLoss * 0.45 + constraintLoss - tcBonus);
 }
 
-export function runContinuousOptimization(
+export async function runContinuousOptimization(
   initialFormula: string,
   target: TargetProperties,
   maxSteps: number = 40
-): DifferentiableResult {
+): Promise<DifferentiableResult> {
   const discreteState = parseToState(initialFormula, target.maxPressure < 200 ? 0 : target.maxPressure);
   const totalAtoms = Object.values(discreteState.counts).reduce((s, n) => s + n, 0);
   const elements = discreteState.elements;
@@ -1334,15 +1334,15 @@ export function runContinuousOptimization(
   let stagnationCount = 0;
   let lastTc = 0;
 
-  const initialPhysics = evaluatePhysics(initialFormula, state.pressure);
+  const initialPhysics = await evaluatePhysics(initialFormula, state.pressure);
   const initialTc = initialPhysics.tc;
 
   for (let step = 0; step < maxSteps; step++) {
     const formula = formulaFromContinuousState(state);
-    const physics = evaluatePhysics(formula, state.pressure);
+    const physics = await evaluatePhysics(formula, state.pressure);
     const loss = computeMultiObjectiveLoss(physics, target, state);
 
-    const gradients = computeContinuousGradients(state, physics.tc, target);
+    const gradients = await computeContinuousGradients(state, physics.tc, target);
     const updates = adamStep(adam, gradients);
 
     const gradNorm = Math.sqrt(gradients.reduce((s, g) => s + g * g, 0));

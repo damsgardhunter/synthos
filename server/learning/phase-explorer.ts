@@ -104,23 +104,23 @@ function buildFormula(counts: Record<string, number>): string {
 interface FastTcResult { tc: number; uncertainty: number; hullDistance: number; lambda: number }
 const FAST_TC_FALLBACK: FastTcResult = { tc: 0, uncertainty: 50, hullDistance: 1.0, lambda: 0 };
 
-let cachedFeatures: ReturnType<typeof extractFeatures> | null = null;
+let cachedFeatures: Awaited<ReturnType<typeof extractFeatures>> | null = null;
 let cachedFeaturesFormula = "";
 
-function fastTcPredict(formula: string): FastTcResult {
+async function fastTcPredict(formula: string): Promise<FastTcResult> {
   try {
-    let features: ReturnType<typeof extractFeatures>;
+    let features: Awaited<ReturnType<typeof extractFeatures>>;
     if (cachedFeaturesFormula === formula && cachedFeatures) {
       features = cachedFeatures;
     } else {
-      features = extractFeatures(formula);
+      features = await extractFeatures(formula);
       cachedFeatures = features;
       cachedFeaturesFormula = formula;
     }
     if (!features) return FAST_TC_FALLBACK;
 
     const physicsPred = physicsPredictor.predict(features);
-    const gbResult = gbPredict(features);
+    const gbResult = await gbPredict(features);
 
     const tc = Math.max(0, gbResult.tcPredicted);
     const hullDist = physicsPred.hullDistance;
@@ -141,13 +141,13 @@ function fastTcPredict(formula: string): FastTcResult {
   }
 }
 
-function pressureAdjustTc(baseTc: number, lambda: number, pressureGpa: number, formula: string): number {
+async function pressureAdjustTc(baseTc: number, lambda: number, pressureGpa: number, formula: string): Promise<number> {
   if (pressureGpa <= 0) return baseTc;
 
   const { elements } = parseFormulaToElements(formula);
   const hasHydrogen = elements.includes("H");
 
-  const bayesResult = optimizePressureForFormula(formula, 3, 10);
+  const bayesResult = await optimizePressureForFormula(formula, 3, 10);
   const hasBayesianData = bayesResult.confidence > 0.3 && bayesResult.optimalPressure > 0;
 
   let pressureFactor = 1.0;
@@ -219,10 +219,10 @@ function estimateDecompositionTemp(formula: string, formationEnergy: number): nu
   return Math.round(Math.max(100, Math.min(decompositionTemp, 4000)));
 }
 
-export function exploreCompositionSpace(
+export async function exploreCompositionSpace(
   elementSet: string[],
   resolution: "coarse" | "fine" = "coarse"
-): PhaseMap {
+): Promise<PhaseMap> {
   const step = resolution === "coarse" ? COARSE_STEP : FINE_STEP;
   const grid: PhaseGridPoint[] = [];
   const n = elementSet.length;
@@ -240,7 +240,7 @@ export function exploreCompositionSpace(
       if (seenFormulas.has(formula)) continue;
       seenFormulas.add(formula);
 
-      const pred = fastTcPredict(formula);
+      const pred = await fastTcPredict(formula);
       grid.push({
         coords: [x],
         formula,
@@ -263,7 +263,7 @@ export function exploreCompositionSpace(
         if (seenFormulas.has(formula)) continue;
         seenFormulas.add(formula);
 
-        const pred = fastTcPredict(formula);
+        const pred = await fastTcPredict(formula);
         grid.push({
           coords: [x, y],
           formula,
@@ -289,7 +289,7 @@ export function exploreCompositionSpace(
           if (seenFormulas.has(formula)) continue;
           seenFormulas.add(formula);
 
-          const pred = fastTcPredict(formula);
+          const pred = await fastTcPredict(formula);
           grid.push({
             coords: [a, b, c, d],
             formula,
@@ -346,11 +346,11 @@ function identifyHotspots(grid: PhaseGridPoint[]): PhaseHotspot[] {
   return hotspots;
 }
 
-export function explorePressureCompositionSpace(
+export async function explorePressureCompositionSpace(
   elementSet: string[],
   pressureRange: number[] = PRESSURE_STEPS_COARSE
-): { map: PhaseMap; optimalPairs: { formula: string; pressure: number; tc: number }[] } {
-  const compMap = exploreCompositionSpace(elementSet, "coarse");
+): Promise<{ map: PhaseMap; optimalPairs: { formula: string; pressure: number; tc: number }[] }> {
+  const compMap = await exploreCompositionSpace(elementSet, "coarse");
 
   const pressureGrid: PhaseGridPoint[] = [];
 
@@ -359,10 +359,10 @@ export function explorePressureCompositionSpace(
     : compMap.grid.sort((a, b) => b.tc - a.tc).slice(0, 10).map(g => g.formula);
 
   for (const formula of formulasToScan) {
-    const basePred = fastTcPredict(formula);
+    const basePred = await fastTcPredict(formula);
 
     for (const pressure of pressureRange) {
-      const adjustedTc = pressureAdjustTc(basePred.tc, basePred.lambda, pressure, formula);
+      const adjustedTc = await pressureAdjustTc(basePred.tc, basePred.lambda, pressure, formula);
 
       pressureGrid.push({
         coords: [formulasToScan.indexOf(formula), pressure],
@@ -467,12 +467,12 @@ function ucbMultiplier(): number {
   }
 }
 
-export function findOptimalRegion(
+export async function findOptimalRegion(
   elementSet: string[],
   emit?: EventEmitter
-): OptimalRegionResult[] {
+): Promise<OptimalRegionResult[]> {
   const ucbMult = ucbMultiplier();
-  const compMap = exploreCompositionSpace(elementSet, "coarse");
+  const compMap = await exploreCompositionSpace(elementSet, "coarse");
 
   const topByExploration = [...compMap.grid]
     .map(pt => ({
@@ -487,19 +487,19 @@ export function findOptimalRegion(
   const results: OptimalRegionResult[] = [];
 
   for (const formula of uniqueFormulas.slice(0, 10)) {
-    const basePred = fastTcPredict(formula);
+    const basePred = await fastTcPredict(formula);
 
     let bestTc = basePred.tc;
     let bestPressure = 0;
 
-    const bayesResult = optimizePressureForFormula(formula, 5, 20);
+    const bayesResult = await optimizePressureForFormula(formula, 5, 20);
     if (bayesResult.confidence > 0.3 && bayesResult.predictedTcAtOptimal > bestTc) {
       bestTc = bayesResult.predictedTcAtOptimal;
       bestPressure = bayesResult.optimalPressure;
     }
 
     for (const pressure of PRESSURE_STEPS_COARSE) {
-      const adjustedTc = pressureAdjustTc(basePred.tc, basePred.lambda, pressure, formula);
+      const adjustedTc = await pressureAdjustTc(basePred.tc, basePred.lambda, pressure, formula);
       if (adjustedTc > bestTc) {
         bestTc = adjustedTc;
         bestPressure = pressure;
@@ -510,7 +510,7 @@ export function findOptimalRegion(
       const windowHalf = Math.max(50, bestPressure * 0.3);
       const pStep = bestPressure > 50 ? 10 : 5;
       for (let p = Math.max(0, bestPressure - windowHalf); p <= bestPressure + windowHalf; p += pStep) {
-        const tc = pressureAdjustTc(basePred.tc, basePred.lambda, p, formula);
+        const tc = await pressureAdjustTc(basePred.tc, basePred.lambda, p, formula);
         if (tc > bestTc) {
           bestTc = tc;
           bestPressure = p;
@@ -559,8 +559,8 @@ export function findOptimalRegion(
   return results.slice(0, 10);
 }
 
-export function getPhaseExplorationSeedFormulas(elementSet: string[]): string[] {
-  const results = findOptimalRegion(elementSet);
+export async function getPhaseExplorationSeedFormulas(elementSet: string[]): Promise<string[]> {
+  const results = await findOptimalRegion(elementSet);
   return results
     .filter(r => r.predictedTc > 10 && r.hullDistance < 0.3)
     .map(r => r.formula);

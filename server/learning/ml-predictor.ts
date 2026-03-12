@@ -40,6 +40,10 @@ import { getConformalInterval, getCalibrationState, getECE, type ConformalInterv
 import { computeOODScore } from "./ood-detector";
 export { getConfidenceBand };
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>(resolve => setImmediate(resolve));
+}
+
 export interface UnifiedCIResult {
   formula: string;
   tcMean: number;
@@ -94,11 +98,15 @@ export interface UnifiedCIResult {
   };
 }
 
-export function computeUnifiedCI(formula: string): UnifiedCIResult {
-  const gnnResult = gnnPredictWithUncertainty(formula);
-
-  const features = extractFeatures(formula);
-  const xgbResult = gbPredictWithUncertainty(features, formula);
+export async function computeUnifiedCI(formula: string): Promise<UnifiedCIResult> {
+  const [gnnResult, { features, xgbResult }] = await Promise.all([
+    Promise.resolve(gnnPredictWithUncertainty(formula)),
+    (async () => {
+      const features = await extractFeatures(formula);
+      const xgbResult = await gbPredictWithUncertainty(features, formula);
+      return { features, xgbResult };
+    })(),
+  ]);
 
   const safe = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
 
@@ -371,7 +379,7 @@ export interface DisorderContext {
   dosDisorderSignal?: number;
 }
 
-export function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext, dftData?: DFTResolvedFeatures, disorderCtx?: DisorderContext): MLFeatureVector {
+export async function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext, dftData?: DFTResolvedFeatures, disorderCtx?: DisorderContext): Promise<MLFeatureVector> {
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -409,13 +417,38 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   }
   cooperPairStrengthBase = Math.min(0.5, Math.max(0, cooperPairStrengthBase));
 
-  const electronic = computeElectronicStructure(formula, mat?.spacegroup);
-  const phonon = computePhononSpectrum(formula, electronic);
-  const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
-  const correlation = assessCorrelationStrength(formula);
-
   const candidatePressureForLambda = (mat as any)?.pressureGpa ?? 0;
-  const lambdaPrediction = predictLambda(formula, candidatePressureForLambda);
+
+  const hCount = counts["H"] || 0;
+  const metalAtomCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
+    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const hydrogenRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
+
+  const [
+    { electronic, phonon, coupling },
+    correlation,
+    lambdaPrediction,
+    _miedemaFE,
+    _tbSafe,
+    _motifs,
+    _dimScoreV2,
+  ] = await Promise.all([
+    (async () => {
+      await yieldToEventLoop();
+      const electronic = computeElectronicStructure(formula, mat?.spacegroup);
+      await yieldToEventLoop();
+      const phonon = computePhononSpectrum(formula, electronic);
+      await yieldToEventLoop();
+      const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
+      return { electronic, phonon, coupling };
+    })(),
+    yieldToEventLoop().then(() => assessCorrelationStrength(formula)),
+    yieldToEventLoop().then(() => predictLambda(formula, candidatePressureForLambda)),
+    yieldToEventLoop().then(() => { try { return computeMiedemaFormationEnergy(formula); } catch { return null as number | null; } }),
+    yieldToEventLoop().then(() => predictTBProperties(formula)),
+    yieldToEventLoop().then(() => detectStructuralMotifs(formula)),
+    yieldToEventLoop().then(() => computeDimensionalityScore(formula)),
+  ]);
   const useLambda = physics?.verifiedLambda ?? lambdaPrediction.lambda;
   const lambdaTier = physics?.verifiedLambda ? "verified" : lambdaPrediction.tier;
   const useCorrelation = physics?.correlationStrength ?? correlation.ratio;
@@ -466,11 +499,6 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     if (data) totalVE += data.valenceElectrons * (counts[el] || 1);
   }
   const valenceElectronConcentration = totalAtoms > 0 ? totalVE / totalAtoms : 0;
-
-  const hCount = counts["H"] || 0;
-  const metalAtomCount = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
-    .reduce((s, e) => s + (counts[e] || 0), 0);
-  const hydrogenRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
 
   let debyeTemp = phonon.debyeTemperature;
   const avgGamma = getCompositionWeightedProperty(counts, "sommerfeldGamma") ?? 0;
@@ -601,6 +629,7 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
 
   let optimalPressureGpa = 0;
   try {
+    await yieldToEventLoop();
     const pressureResult = simulatePressureEffects(formula, electronic, phonon, coupling);
     optimalPressureGpa = pressureResult.optimalPressure;
     if (optimalPressureGpa > candidatePressure) {
@@ -643,10 +672,9 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     phononHardnessVal = coupling.omega2Avg > 0 ? coupling.omegaLog / coupling.omega2Avg : 0;
   }
 
-  let miedemaFE: number | null = null;
-  try { miedemaFE = computeMiedemaFormationEnergy(formula); } catch { /* safe fallback */ }
+  const miedemaFE = _miedemaFE;
 
-  const tbSafe = predictTBProperties(formula);
+  const tbSafe = _tbSafe;
 
   const normalizedFormula = normalizeFormula(formula);
 
@@ -698,11 +726,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
     vanHoveProximity: electronic.vanHoveProximity ?? 0,
     bandFlatness: electronic.bandFlatness ?? 0,
     softModeScore: phonon.softModeScore ?? (phonon.softModePresent ? 0.6 : 0.2),
-    motifScore: detectStructuralMotifs(formula).motifScore,
+    motifScore: _motifs.motifScore,
     orbitalDFraction: electronic.orbitalFractions?.d ?? 0,
     mottProximityScore: electronic.mottProximityScore ?? 0,
     topologicalBandScore: electronic.topologicalBandScore ?? 0,
-    dimensionalityScoreV2: computeDimensionalityScore(formula),
+    dimensionalityScoreV2: _dimScoreV2,
     phononSofteningIndex,
     spinFluctuationStrength,
     fermiSurfaceNestingScore,
@@ -802,9 +830,11 @@ export function extractFeatures(formula: string, mat?: Partial<Material>, physic
   };
 }
 
-function xgboostPredict(features: MLFeatureVector): { score: number; tcEstimate: number; tcStd: number; tcCI95: [number, number]; reasoning: string[] } {
-  const gb = gbPredict(features);
-  const unc = gbPredictWithUncertainty(features);
+async function xgboostPredict(features: MLFeatureVector): Promise<{ score: number; tcEstimate: number; tcStd: number; tcCI95: [number, number]; reasoning: string[] }> {
+  const [gb, unc] = await Promise.all([
+    await gbPredict(features),
+    await gbPredictWithUncertainty(features),
+  ]);
 
   const safeHc2 = features.upperCriticalField != null && Number.isFinite(features.upperCriticalField) ? features.upperCriticalField : null;
   if (safeHc2 != null) {
@@ -847,7 +877,7 @@ interface PhysicsContext {
 const featureCache = new Map<string, { features: MLFeatureVector; timestamp: number }>();
 const FEATURE_CACHE_TTL_MS = 5 * 60 * 1000;
 
-function getCachedFeatures(normKey: string): MLFeatureVector | null {
+export function getCachedFeatures(normKey: string): MLFeatureVector | null {
   const entry = featureCache.get(normKey);
   if (!entry) return null;
   if (Date.now() - entry.timestamp > FEATURE_CACHE_TTL_MS) {
@@ -960,53 +990,63 @@ export async function runMLPrediction(
     });
   }
 
-  const scored: { mat: Material; features: MLFeatureVector; xgb: ReturnType<typeof xgboostPredict>; hasPhysics: boolean; hasCrystal: boolean; gnn: GNNPrediction | null }[] = [];
+  const scored: { mat: Material; features: MLFeatureVector; xgb: Awaited<ReturnType<typeof xgboostPredict>>; hasPhysics: boolean; hasCrystal: boolean; gnn: GNNPrediction | null }[] = [];
 
   let preFilterSkipped = 0;
   const matSlice = materials.slice(0, 100);
-  for (let loopIdx = 0; loopIdx < matSlice.length; loopIdx++) {
-    if (loopIdx > 0 && loopIdx % 10 === 0) {
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-    const mat = matSlice[loopIdx];
+  const BATCH_CONCURRENCY = 5;
+  for (let batchStart = 0; batchStart < matSlice.length; batchStart += BATCH_CONCURRENCY) {
+    const batchEnd = Math.min(batchStart + BATCH_CONCURRENCY, matSlice.length);
+    const batchItems = matSlice.slice(batchStart, batchEnd);
 
-    const normKey = normalizeFormula(mat.formula);
-    const physics = physicsData.get(normKey);
-    const crystal = crystalData.get(normKey);
-    let features = getCachedFeatures(normKey);
-    if (!features) {
-      features = extractFeatures(mat.formula, mat, physics, crystal);
-      setCachedFeatures(normKey, features);
+    const batchResults = await Promise.all(batchItems.map(async (mat) => {
+      const normKey = normalizeFormula(mat.formula);
+      const physics = physicsData.get(normKey);
+      const crystal = crystalData.get(normKey);
+      let features = await getCachedFeatures(normKey);
+      if (!features) {
+        features = await extractFeatures(mat.formula, mat, physics, crystal);
+        setCachedFeatures(normKey, features);
+      }
+
+      if ((features.bandGap ?? 0) > 0.5 || (features.metallicity ?? 0.5) < 0.2) {
+        return null;
+      }
+
+      const xgb = await xgboostPredict(features);
+
+      if (physics && physics.verificationStage > 0) {
+        const verifyBonus = physics.tcSource === "dft_verified" ? 0.08 : physics.tcSource === "physics_verified" ? 0.05 : 0.02;
+        xgb.score = Math.min(1, xgb.score + verifyBonus);
+        xgb.reasoning.push(`${physics.tcSource === "dft_verified" ? "DFT" : "Physics"}-verified (stage ${physics.verificationStage}): Tc=${physics.verifiedTc?.toFixed(0) ?? '?'}K`);
+      }
+      if (crystal?.isStable) {
+        xgb.score = Math.min(1, xgb.score + 0.04);
+        xgb.reasoning.push(`Crystal structure verified stable (${crystal.spaceGroup}, hull dist: ${crystal.convexHullDistance?.toFixed(3) ?? '?'})`);
+      }
+      if (physics?.competingPhases?.some((p: any) => p.suppressesSC)) {
+        xgb.score = Math.max(0, xgb.score - 0.08);
+        xgb.reasoning.push("WARNING: Competing phase identified that may suppress superconductivity");
+      }
+      if (crystal?.synthesizability != null && crystal.synthesizability < 0.3) {
+        xgb.score = Math.max(0, xgb.score - 0.05);
+        xgb.reasoning.push(`Low synthesizability (${(crystal.synthesizability * 100).toFixed(0)}%): practical challenges expected`);
+      }
+
+      xgb.score = Math.min(1, xgb.score);
+
+      return { mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal, gnn: null as GNNPrediction | null };
+    }));
+
+    for (const result of batchResults) {
+      if (result === null) {
+        preFilterSkipped++;
+      } else {
+        scored.push(result);
+      }
     }
 
-    if ((features.bandGap ?? 0) > 0.5 || (features.metallicity ?? 0.5) < 0.2) {
-      preFilterSkipped++;
-      continue;
-    }
-
-    const xgb = xgboostPredict(features);
-
-    if (physics && physics.verificationStage > 0) {
-      const verifyBonus = physics.tcSource === "dft_verified" ? 0.08 : physics.tcSource === "physics_verified" ? 0.05 : 0.02;
-      xgb.score = Math.min(1, xgb.score + verifyBonus);
-      xgb.reasoning.push(`${physics.tcSource === "dft_verified" ? "DFT" : "Physics"}-verified (stage ${physics.verificationStage}): Tc=${physics.verifiedTc?.toFixed(0) ?? '?'}K`);
-    }
-    if (crystal?.isStable) {
-      xgb.score = Math.min(1, xgb.score + 0.04);
-      xgb.reasoning.push(`Crystal structure verified stable (${crystal.spaceGroup}, hull dist: ${crystal.convexHullDistance?.toFixed(3) ?? '?'})`);
-    }
-    if (physics?.competingPhases?.some((p: any) => p.suppressesSC)) {
-      xgb.score = Math.max(0, xgb.score - 0.08);
-      xgb.reasoning.push("WARNING: Competing phase identified that may suppress superconductivity");
-    }
-    if (crystal?.synthesizability != null && crystal.synthesizability < 0.3) {
-      xgb.score = Math.max(0, xgb.score - 0.05);
-      xgb.reasoning.push(`Low synthesizability (${(crystal.synthesizability * 100).toFixed(0)}%): practical challenges expected`);
-    }
-
-    xgb.score = Math.min(1, xgb.score);
-
-    scored.push({ mat, features, xgb, hasPhysics: !!physics, hasCrystal: !!crystal, gnn: null as GNNPrediction | null });
+    await new Promise<void>(resolve => setImmediate(resolve));
   }
 
   scored.sort((a, b) => b.xgb.score - a.xgb.score);

@@ -301,10 +301,10 @@ function candidateToStructure(candidate: GeneratedCandidate): CrystalStructure {
   };
 }
 
-function scoreTcSurrogate(structure: CrystalStructure): number {
+async function scoreTcSurrogate(structure: CrystalStructure): Promise<number> {
   try {
-    const features = extractFeatures(structure.formula);
-    const result = gbPredict(features, structure.formula);
+    const features = await extractFeatures(structure.formula);
+    const result = await gbPredict(features, structure.formula);
     return Math.max(0, result.tcPredicted);
   } catch {
     return 0;
@@ -478,9 +478,9 @@ export async function generateHybridCandidates(
       if (checkGeometricValidity(mutated.lattice, mutated.formula)) {
         const shouldAvoid = await checkFailureDB(mutated.formula, mutated.lattice, mutated.crystalSystem);
         if (!shouldAvoid) {
-          const stability = predictStabilityScreen(mutated.formula);
+          const stability = await predictStabilityScreen(mutated.formula);
           if (!stability.isLikelyStable) continue;
-          const tc = scoreTcSurrogate(mutated);
+          const tc = await scoreTcSurrogate(mutated);
           mutated.predictedTc = tc;
           mutated.valid = true;
           allCandidates.push(mutated);
@@ -494,9 +494,9 @@ export async function generateHybridCandidates(
         }
       }
     } else {
-      const stability = predictStabilityScreen(structure.formula);
+      const stability = await predictStabilityScreen(structure.formula);
       if (!stability.isLikelyStable) continue;
-      const tc = scoreTcSurrogate(structure);
+      const tc = await scoreTcSurrogate(structure);
       structure.predictedTc = tc;
       allCandidates.push(structure);
       if (tc > bestTcFromML) bestTcFromML = tc;
@@ -515,7 +515,7 @@ export async function generateHybridCandidates(
       if (hasValidLattice(child.lattice) && checkGeometricValidity(child.lattice, child.formula)) {
         const shouldAvoid = await checkFailureDB(child.formula, child.lattice, child.crystalSystem);
         if (!shouldAvoid) {
-          const tc = scoreTcSurrogate(child);
+          const tc = await scoreTcSurrogate(child);
           child.predictedTc = tc;
           allCandidates.push(child);
           mutationStats.crossover.accepted++;

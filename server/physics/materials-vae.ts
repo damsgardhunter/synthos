@@ -346,10 +346,10 @@ function genomeVectorToFormula(genomeVec: number[]): string {
   return sorted.map(([el, n]) => n === 1 ? el : `${el}${n}`).join("");
 }
 
-function evaluateFormulaTc(formula: string): { tc: number; lambda: number; score: number } {
+async function evaluateFormulaTc(formula: string): Promise<{ tc: number; lambda: number; score: number }> {
   try {
-    const features = extractFeatures(formula);
-    const gb = gbPredict(features);
+    const features = await extractFeatures(formula);
+    const gb = await gbPredict(features);
     const electronic = computeElectronicStructure(formula, null);
     const phonon = computePhononSpectrum(formula, electronic);
     const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
@@ -386,13 +386,13 @@ function evaluateFormulaTc(formula: string): { tc: number; lambda: number; score
   }
 }
 
-export function runLatentSpaceInverseDesign(
+export async function runLatentSpaceInverseDesign(
   targetTc: number = 293,
   startFormula?: string,
   maxSteps: number = 50,
   learningRate: number = 0.02,
   nRestarts: number = 3,
-): InverseDesignResult {
+): Promise<InverseDesignResult> {
   let bestOverallFormula = "";
   let bestOverallTc = 0;
   let bestOverallLambda = 0;
@@ -433,7 +433,7 @@ export function runLatentSpaceInverseDesign(
         continue;
       }
 
-      const evaluation = evaluateFormulaTc(formula);
+      const evaluation = await evaluateFormulaTc(formula);
       const tcGap = Math.max(0, targetTc - evaluation.tc);
       const loss = (tcGap / targetTc) ** 2;
 
@@ -471,7 +471,7 @@ export function runLatentSpaceInverseDesign(
         const fPlus = genomeVectorToFormula(genPlus);
 
         if (fPlus && isValidFormula(fPlus)) {
-          const evalPlus = evaluateFormulaTc(fPlus);
+          const evalPlus = await evaluateFormulaTc(fPlus);
           gradients[d] = (evalPlus.tc - evaluation.tc) / delta;
         }
       }
@@ -550,11 +550,11 @@ export function runLatentSpaceInverseDesign(
   };
 }
 
-export function interpolateAndDecode(
+export async function interpolateAndDecode(
   formulaA: string,
   formulaB: string,
   nPoints: number = 5
-): { alpha: number; formula: string; tc: number }[] {
+): Promise<{ alpha: number; formula: string; tc: number }[]> {
   const latentA = encodeToLatent(formulaA);
   const latentB = encodeToLatent(formulaB);
   const results: { alpha: number; formula: string; tc: number }[] = [];
@@ -566,7 +566,7 @@ export function interpolateAndDecode(
     const formula = genomeVectorToFormula(genomeVec);
 
     if (formula && isValidFormula(formula)) {
-      const eval_ = evaluateFormulaTc(formula);
+      const eval_ = await evaluateFormulaTc(formula);
       results.push({
         alpha: Math.round(alpha * 100) / 100,
         formula,

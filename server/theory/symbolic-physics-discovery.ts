@@ -422,7 +422,7 @@ export interface PhysicsDiscoveryRecord {
   pressure_regime: string;
 }
 
-export function buildPhysicsDiscoveryRecord(formula: string): PhysicsDiscoveryRecord {
+export async function buildPhysicsDiscoveryRecord(formula: string): Promise<PhysicsDiscoveryRecord> {
   let multiScale: MultiScaleFeatures | null = null;
   let crossScale: CrossScaleCoupling | null = null;
   try {
@@ -432,12 +432,12 @@ export function buildPhysicsDiscoveryRecord(formula: string): PhysicsDiscoveryRe
 
   let features: Record<string, number> = {};
   try {
-    features = extractFeatures(formula);
+    features = await extractFeatures(formula);
   } catch {}
 
   let gb: { tcPredicted: number; score: number } = { tcPredicted: 0, score: 0 };
   try {
-    gb = gbPredict(features);
+    gb = await gbPredict(features);
   } catch {}
 
   const lambda = features.electronPhononLambda ?? multiScale?.electronic?.nesting_score ?? 0.5;
@@ -1080,7 +1080,7 @@ export function runSymbolicPhysicsDiscovery(
   return discovered.sort((a, b) => b.theoryScore - a.theoryScore);
 }
 
-export function generateSyntheticDataset(count: number = 50): PhysicsDiscoveryRecord[] {
+export async function generateSyntheticDataset(count: number = 50): Promise<PhysicsDiscoveryRecord[]> {
   const formulas = [
     "MgB2", "NbSn3", "LaH10", "YBa2Cu3O7", "FeSe", "Nb3Ge",
     "CaH6", "SrTiO3", "Bi2Sr2CaCu2O8", "LaFeAsO", "NbN", "VN",
@@ -1096,7 +1096,7 @@ export function generateSyntheticDataset(count: number = 50): PhysicsDiscoveryRe
   const records: PhysicsDiscoveryRecord[] = [];
   for (let i = 0; i < Math.min(count, formulas.length); i++) {
     try {
-      const rec = buildPhysicsDiscoveryRecord(formulas[i]);
+      const rec = await buildPhysicsDiscoveryRecord(formulas[i]);
       if (rec.Tc <= 0 && rec.lambda > 0.1 && rec.omega_log > 10) {
         const muEff = rec.mu_star * (1 + 0.62 * rec.lambda);
         const denom = rec.lambda - muEff;

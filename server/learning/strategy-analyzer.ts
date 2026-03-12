@@ -152,7 +152,7 @@ Under-explored families: ${underExplored.join(", ") || "None"}
 Recent novel insights: ${insightSummary || "None yet"}
 
 Pipeline failure patterns: ${Object.entries(failureByFamily).map(([f, n]) => `${f}: ${n} failures`).join(", ") || "No failures yet"}
-${getModelDiagnosticsSummaryForStrategy()}
+${await getModelDiagnosticsSummaryForStrategy()}
 ${previousStrategyContext}
 
 YOUR SCOPE (exploration decisions only):

@@ -392,7 +392,7 @@ export function disableCustomFeature(name: string): boolean {
 export async function proposeNewFeatures(): Promise<FeatureProposal[]> {
   const featureImportance = getGlobalFeatureImportance(20);
   const failureSummary = getFailureSummary();
-  const diagnostics = getComprehensiveModelDiagnostics();
+  const diagnostics = await getComprehensiveModelDiagnostics();
 
   const availableFeatures = Object.entries(COMPUTABLE_FEATURES)
     .map(([name, def]) => `${name}: ${def.description}`)
@@ -508,7 +508,7 @@ Respond in JSON:
 }
 
 export async function selectArchitecture(): Promise<ArchitectureRecommendation> {
-  const diagnostics = getComprehensiveModelDiagnostics();
+  const diagnostics = await getComprehensiveModelDiagnostics();
   const benchmark = getModelBenchmark();
 
   const xgbDataset = diagnostics.xgboost.nSamples;
@@ -648,11 +648,11 @@ export function getCurrentArchitecture(): ArchitectureRecommendation | null {
   return architectureState;
 }
 
-export function shouldReassessArchitecture(): boolean {
+export async function shouldReassessArchitecture(): Promise<boolean> {
   if (Date.now() - lastArchitectureCheck < ARCHITECTURE_CHECK_INTERVAL_MS) return false;
 
   try {
-    const diagnostics = getComprehensiveModelDiagnostics();
+    const diagnostics = await getComprehensiveModelDiagnostics();
     const totalSize = Math.max(diagnostics.xgboost.nSamples, diagnostics.gnn.datasetSize);
     const currentBucket = getDatasetSizeBucket(totalSize);
     if (currentBucket > lastArchitectureDatasetBucket) {
@@ -669,7 +669,7 @@ export function shouldReassessArchitecture(): boolean {
 let lastRetrainEvalDatasetSize = 0;
 
 export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMReport> {
-  const diagnosticsSummary = getModelDiagnosticsForLLM();
+  const diagnosticsSummary = await getModelDiagnosticsForLLM();
   const failedMaterialsSummary = getFailedMaterialsForLLM();
   const benchmarkSummary = getBenchmarkForLLM();
   const uncertaintySummary = getUncertaintyForLLM();
@@ -694,7 +694,7 @@ export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMRe
   }
 
   let architectureRecommendation: ArchitectureRecommendation | null = null;
-  if (shouldReassessArchitecture()) {
+  if (await shouldReassessArchitecture()) {
     try {
       architectureRecommendation = await selectArchitecture();
     } catch (e) {
@@ -712,7 +712,7 @@ export async function runModelLLMCycle(currentCycle: number): Promise<ModelLLMRe
   }
 
   let retrainDecision: RetrainDecision | null = null;
-  const diagnostics = getComprehensiveModelDiagnostics();
+  const diagnostics = await getComprehensiveModelDiagnostics();
   const currentDatasetSize = diagnostics.xgboost.nSamples;
   if (currentDatasetSize !== lastRetrainEvalDatasetSize) {
     lastRetrainEvalDatasetSize = currentDatasetSize;

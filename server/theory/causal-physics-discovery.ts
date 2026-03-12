@@ -166,15 +166,15 @@ function encodePairingSymmetry(sym: string | undefined | null): number {
   return 0;
 }
 
-export function buildCausalDataRecord(formula: string): CausalDataRecord {
+export async function buildCausalDataRecord(formula: string): Promise<CausalDataRecord> {
   let multiScale: MultiScaleFeatures | null = null;
   try { multiScale = computeMultiScaleFeatures(formula); } catch {}
 
   let features: Record<string, number> = {};
-  try { features = extractFeatures(formula); } catch {}
+  try { features = await extractFeatures(formula); } catch {}
 
   let gb: { tcPredicted: number } = { tcPredicted: 0 };
-  try { gb = gbPredict(features); } catch {}
+  try { gb = await gbPredict(features); } catch {}
 
   let pairing: PairingProfile | null = null;
   try { pairing = computePairingProfile(formula); } catch {}
@@ -1473,7 +1473,7 @@ export function runCausalDiscovery(dataset: CausalDataRecord[]): {
   return { graph, hypotheses, rules, crossFamilyValidation, designGuidance, pressureComparison };
 }
 
-export function generateCausalDataset(count: number = 60): CausalDataRecord[] {
+export async function generateCausalDataset(count: number = 60): Promise<CausalDataRecord[]> {
   const formulas = [
     "MgB2", "NbSn3", "LaH10", "YBa2Cu3O7", "FeSe", "Nb3Ge",
     "CaH6", "SrTiO3", "Bi2Sr2CaCu2O8", "LaFeAsO", "NbN", "VN",
@@ -1488,7 +1488,7 @@ export function generateCausalDataset(count: number = 60): CausalDataRecord[] {
   const records: CausalDataRecord[] = [];
   for (let i = 0; i < Math.min(count, formulas.length); i++) {
     try {
-      const rec = buildCausalDataRecord(formulas[i]);
+      const rec = await buildCausalDataRecord(formulas[i]);
       if ((rec.Tc as number) <= 0 && (rec.lambda as number) > 0.1) {
         const lam = rec.lambda as number;
         const omega = rec.phonon_freq as number;

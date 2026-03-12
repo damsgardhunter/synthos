@@ -642,12 +642,12 @@ export function invalidateDiagnosticCache(): void {
   diagnosticCache = null;
 }
 
-export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostics {
+export async function getComprehensiveModelDiagnostics(): Promise<ComprehensiveModelDiagnostics> {
   if (diagnosticCache && (Date.now() - diagnosticCache.timestamp) < DIAGNOSTIC_CACHE_TTL_MS) {
     return diagnosticCache.result;
   }
 
-  const calibration = getCalibrationData();
+  const calibration = await getCalibrationData();
   const ensembleStats = getXGBEnsembleStats();
   const versionHistory = getModelVersionHistory();
   const evalStats = getEvaluatedDatasetStats();
@@ -1107,8 +1107,8 @@ function computeBenchmarkReport(): ModelBenchmarkReport {
   };
 }
 
-export function getModelDiagnosticsForLLM(): string {
-  const d = getComprehensiveModelDiagnostics();
+export async function getModelDiagnosticsForLLM(): Promise<string> {
+  const d = await getComprehensiveModelDiagnostics();
   const lines: string[] = [];
 
   lines.push("=== MODEL DIAGNOSTICS REPORT ===");
@@ -1361,8 +1361,8 @@ function healthCheck(model: string, checks: { severity: number; reason: string }
   return { model, status: SEVERITY_MAP[maxSev] || "green", reasons };
 }
 
-export function getModelHealthSummary(): ModelHealth[] {
-  const d = getComprehensiveModelDiagnostics();
+export async function getModelHealthSummary(): Promise<ModelHealth[]> {
+  const d = await getComprehensiveModelDiagnostics();
   const health: ModelHealth[] = [];
 
   const nrmse = d.errorAnalysis.totalOutcomes > 0 ? d.errorAnalysis.overallNRMSE : null;

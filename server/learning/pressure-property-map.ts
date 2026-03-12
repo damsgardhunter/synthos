@@ -48,7 +48,7 @@ function evictIfNeeded(): void {
   }
 }
 
-export function buildPressureResponseProfile(rawFormula: string): PressureResponseProfile {
+export async function buildPressureResponseProfile(rawFormula: string): Promise<PressureResponseProfile> {
   const formula = normalizeFormula(rawFormula);
   const existing = profileCache.get(formula);
   if (existing && Date.now() - existing.updatedAt < 20 * 60 * 1000) {
@@ -57,7 +57,7 @@ export function buildPressureResponseProfile(rawFormula: string): PressureRespon
     return existing;
   }
 
-  const curve: PressureCurve = predictPressureCurve(formula);
+  const curve: PressureCurve = await predictPressureCurve(formula);
   const points: PressurePoint[] = curve.points;
 
   const tcVsPressure: { pressure: number; tc: number }[] = [];
@@ -118,8 +118,8 @@ export function buildPressureResponseProfile(rawFormula: string): PressureRespon
   return profile;
 }
 
-export function interpolateAtPressure(rawFormula: string, targetPressure: number): InterpolationResult {
-  const profile = buildPressureResponseProfile(rawFormula);
+export async function interpolateAtPressure(rawFormula: string, targetPressure: number): Promise<InterpolationResult> {
+  const profile = await buildPressureResponseProfile(rawFormula);
   const tcPts = profile.tcVsPressure;
   const bgPts = profile.bandgapVsPressure;
   const stabPts = profile.stabilityVsPressure;
@@ -184,12 +184,16 @@ export function interpolateAtPressure(rawFormula: string, targetPressure: number
   };
 }
 
-export function interpolateRange(
+export async function interpolateRange(
   rawFormula: string,
   pressures: number[]
-): InterpolationResult[] {
+): Promise<InterpolationResult[]> {
   const formula = normalizeFormula(rawFormula);
-  return pressures.map(p => interpolateAtPressure(formula, p));
+  const results: InterpolationResult[] = [];
+  for (const p of pressures) {
+    results.push(await interpolateAtPressure(formula, p));
+  }
+  return results;
 }
 
 export function getProfileCount(): number {

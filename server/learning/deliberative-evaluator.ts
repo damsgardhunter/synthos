@@ -211,7 +211,7 @@ function runChemistryReasoning(formula: string, predictedTc?: number, mlFeatures
   };
 }
 
-function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any): DeliberationStage {
+async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any): Promise<DeliberationStage> {
   const reasoning: string[] = [];
   let score = 0;
 
@@ -221,7 +221,7 @@ function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any)
   let bandGap = mlFeatures?.bandGap ?? 0;
 
   try {
-    const features = extractFeatures(formula);
+    const features = await extractFeatures(formula);
     if (features.electronPhononCoupling > 0) lambda = Math.max(lambda, features.electronPhononCoupling);
     dosAtFermi = Math.max(dosAtFermi, features.densityOfStatesAtFermi ?? 0);
   } catch {}
@@ -291,7 +291,7 @@ function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?: any)
 
   let gbTc = 0;
   try {
-    const gb = gbPredict(extractFeatures(formula));
+    const gb = await gbPredict(await extractFeatures(formula));
     gbTc = gb.tcPredicted;
     if (gbTc > 0) {
       reasoning.push(`GB model prediction: Tc=${gbTc.toFixed(1)}K`);
@@ -626,16 +626,13 @@ export async function deliberateOnCandidate(
 ): Promise<DeliberationResult> {
   const startTime = Date.now();
 
-  const [comparativeStage, syncStages] = await Promise.all([
+  const [comparativeStage, physicsStage] = await Promise.all([
     runComparativeRanking(formula, predictedTc),
-    Promise.resolve({
-      chemistry: runChemistryReasoning(formula, predictedTc, mlFeatures),
-      physics: runPhysicsMerit(formula, predictedTc, mlFeatures),
-      risk: runRiskAssessment(formula, predictedTc, mlFeatures),
-    }),
+    runPhysicsMerit(formula, predictedTc, mlFeatures),
   ]);
 
-  const { chemistry: chemistryStage, physics: physicsStage, risk: riskStage } = syncStages;
+  const chemistryStage = runChemistryReasoning(formula, predictedTc, mlFeatures);
+  const riskStage = runRiskAssessment(formula, predictedTc, mlFeatures);
   const priorStages = [chemistryStage, physicsStage, comparativeStage, riskStage];
   const selfCritiqueStage = runSelfCritique(formula, predictedTc, priorStages);
 

@@ -2184,11 +2184,11 @@ export interface DopingSearchResult {
   tcTrend: "increasing" | "decreasing" | "peaked" | "flat";
 }
 
-export function runDopingSearchLoop(
+export async function runDopingSearchLoop(
   formula: string,
   fractions: number[] = [0.02, 0.05, 0.10, 0.15, 0.20],
   maxDopants: number = SEARCH_LIMITS.maxDopantsPerMaterial
-): { results: DopingSearchResult[]; bestOverall: { formula: string; tc: number; fraction: number; dopant: string } | null; wallTimeMs: number } {
+): Promise<{ results: DopingSearchResult[]; bestOverall: { formula: string; tc: number; fraction: number; dopant: string } | null; wallTimeMs: number }> {
   const start = Date.now();
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
@@ -2350,8 +2350,8 @@ export function runDopingSearchLoop(
         : computeCarrierDensity(valenceChange, nChanged, cellVolume * supercellMult);
 
       try {
-        const features = extractFeatures(resultFormula);
-        const prediction = gbPredictWithUncertainty(features, resultFormula);
+        const features = await extractFeatures(resultFormula);
+        const prediction = await gbPredictWithUncertainty(features, resultFormula);
         const tc = prediction.tcMean ?? 0;
         const unc = prediction.totalStd ?? 0;
 
@@ -2455,8 +2455,8 @@ export function runDopingSearchLoop(
             : computeCarrierDensity(valenceChange, nChanged, cellVolume * supercellMult);
 
           try {
-            const features = extractFeatures(resultFormula);
-            const prediction = gbPredictWithUncertainty(features, resultFormula);
+            const features = await extractFeatures(resultFormula);
+            const prediction = await gbPredictWithUncertainty(features, resultFormula);
             const tc = prediction.tcMean ?? 0;
             const unc = prediction.totalStd ?? 0;
             const scSignals = detectSCSignals(formula, resultFormula);

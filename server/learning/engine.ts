@@ -23,7 +23,7 @@ import { evaluateInsightNovelty, requiresQuantitativeContent, type InsightTempo 
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
-import type { PhysicsPrediction } from "./ml-predictor";
+import type { PhysicsPrediction, MLFeatureVector } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { recordPhysicsResult } from "./physics-results-store";
@@ -226,13 +226,13 @@ function inferDimensionalityFromStructure(
   return "3D";
 }
 
-const generativeFeatureCache = new Map<string, ReturnType<typeof extractFeatures>>();
+const generativeFeatureCache = new Map<string, MLFeatureVector>();
 const MAX_GEN_FEATURE_CACHE = 500;
 
-function getCachedFeatures(formula: string): ReturnType<typeof extractFeatures> {
+async function getCachedFeatures(formula: string): Promise<MLFeatureVector> {
   const cached = generativeFeatureCache.get(formula);
   if (cached) return cached;
-  const features = extractFeatures(formula);
+  const features = await extractFeatures(formula);
   if (generativeFeatureCache.size >= MAX_GEN_FEATURE_CACHE) {
     const firstKey = generativeFeatureCache.keys().next().value;
     if (firstKey) generativeFeatureCache.delete(firstKey);
@@ -1216,9 +1216,9 @@ async function runPhase7_Superconductor() {
 
           for (const ic of inverseCandidates) {
             try {
-              const features = extractFeatures(ic.formula);
+              const features = await extractFeatures(ic.formula);
               if (!features) continue;
-              const gbResult = gbPredict(features);
+              const gbResult = await gbPredict(features);
               if (!gbResult || gbResult.tcPredicted < 3) continue;
 
               const candidateId = `inv-cand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -1277,7 +1277,7 @@ async function runPhase7_Superconductor() {
             }
             for (const r of verifiedInverseResults) {
               bayesianOptimizer.addObservation(r.formula, r.tc, r.lambda, 1);
-              incorporateSuccessData(r.formula, r.tc).catch(() => {});
+              await incorporateSuccessData(r.formula, r.tc).catch(() => {});
             }
           } catch (crossPollErr) {
             console.error(`[Engine] Inverse->RL/BO cross-pollination failed:`, crossPollErr instanceof Error ? crossPollErr.message.slice(0, 100) : "unknown");
@@ -1315,14 +1315,14 @@ async function runPhase7_Superconductor() {
         const topFormulasForGrad = topExistingForGrad.map(c => c.formula);
         const activeCampaignList = getAllActiveCampaigns();
         for (const campaign of activeCampaignList) {
-          const gradResult = runGradientDescentCycle(campaign.target, 4, 12, topFormulasForGrad);
+          const gradResult = await runGradientDescentCycle(campaign.target, 4, 12, topFormulasForGrad);
           if (gradResult.bestTc > 10) {
             for (const r of gradResult.results) {
               if (r.finalTc > 10) {
                 try {
-                  const features = extractFeatures(r.finalFormula);
+                  const features = await extractFeatures(r.finalFormula);
                   if (!features) continue;
-                  const gb = gbPredict(features);
+                  const gb = await gbPredict(features);
                   if (gb.tcPredicted >= 10) {
                     const gdInserted = await insertCandidateWithStabilityCheck({
                       formula: normalizeFormula(r.finalFormula),
@@ -1357,7 +1357,7 @@ async function runPhase7_Superconductor() {
         const existingFormulas = topExisting.map(c => c.formula);
         const targetTc = elasticTcTarget(autonomousBestTc);
         const pillarPressure = Math.max(50, ...getAllActiveCampaigns().map(c => c.target?.maxPressure ?? 50));
-        const pillarResult = runPillarCycle(existingFormulas, targetTc, pillarPressure);
+        const pillarResult = await runPillarCycle(existingFormulas, targetTc, pillarPressure);
         let pillarInserted = 0;
 
         for (const formula of pillarResult.formulas) {
@@ -1367,8 +1367,8 @@ async function runPhase7_Superconductor() {
           if (existing) continue;
 
           try {
-            const features = extractFeatures(normalized);
-            const gb = gbPredict(features);
+            const features = await extractFeatures(normalized);
+            const gb = await gbPredict(features);
             if (gb.tcPredicted >= 8) {
               const eval5 = pillarResult.evaluations.find(e => e.formula === formula);
               const inserted = await insertCandidateWithStabilityCheck({
@@ -1796,7 +1796,7 @@ async function flushCandidateWriteQueue(): Promise<number> {
         recordGeneratorOutcome(item.generatorSource, true, tc, 0.5);
       }
       if (tc > 0) {
-        incorporateSuccessData(item.payload.formula, tc).catch(() => {});
+        await incorporateSuccessData(item.payload.formula, tc).catch(() => {});
       }
       try {
         const lambda = item.payload.electronPhononCoupling ?? 0;
@@ -1937,7 +1937,7 @@ async function reEvaluateTopCandidates() {
       let newTc = computeEliashbergTc(lambda, omegaLog, muStar, reEvalFamily ?? undefined);
       if (newTc <= 0) continue;
 
-      const features = extractFeatures(candidate.formula);
+      const features = await extractFeatures(candidate.formula);
       const capEvidence: CapExtensionEvidence = {
         eliashbergLambda: lambda > 0 ? lambda : undefined,
         eliashbergTc: newTc > 0 ? newTc : undefined,
@@ -2101,8 +2101,8 @@ async function runDFTEnrichment() {
           dataSource: "DFT Resolver",
         });
 
-        const features = extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
-        const gb = gbPredict(features);
+        const features = await extractFeatures(candidate.formula, undefined, undefined, undefined, dftData);
+        const gb = await gbPredict(features);
         const nnScore = candidate.neuralNetScore ?? candidate.quantumCoherence ?? 0.3;
         const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
@@ -2128,7 +2128,7 @@ async function runDFTEnrichment() {
         const formEnergy = dftData.formationEnergy?.value ?? null;
         const dftStable = formEnergy !== null ? formEnergy < 0.5 : true;
         const dftSrc = (dftData.sources.mp || dftData.sources.aflow) ? "external" as const : "xtb" as const;
-        incorporateDFTResult(candidate.formula, gb.tcPredicted, formEnergy, dftStable, dftSrc, undefined, undefined, undefined, candidate.pressureGpa ?? 0);
+        await incorporateDFTResult(candidate.formula, gb.tcPredicted, formEnergy, dftStable, dftSrc, undefined, undefined, undefined, candidate.pressureGpa ?? 0);
 
         const priorTc = candidate.predictedTc ?? 0;
         recordEvaluationResult(
@@ -2138,7 +2138,7 @@ async function runDFTEnrichment() {
           dftSrc === "external" ? "dft" : "xtb"
         );
         recordPredictionOutcome("xgboost", candidate.formula, priorTc, gb.tcPredicted);
-        incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
+        await incorporateDFTFeedbackIntoPillars(candidate.formula, priorTc, gb.tcPredicted, dftStable);
         recordDFTFeedbackForGA(candidate.formula, { tc: gb.tcPredicted, stable: dftStable, formationEnergy: formEnergy }, candidate.materialClass ?? undefined, dftSrc === "external" ? "dft" : "xtb");
 
         const sourceGen = candidateGeneratorSource.get(candidate.formula);
@@ -2997,7 +2997,7 @@ async function runPhase10_Physics() {
         }
 
         try {
-          const trainFeatures = extractFeatures(candidate.formula);
+          const trainFeatures = await extractFeatures(candidate.formula);
           const hullDist = result.competingPhases.length > 0 ? 0.05 * result.competingPhases.length : 0.02;
           physicsPredictor.addTrainingSample(
             trainFeatures,
@@ -3078,8 +3078,8 @@ async function runPhase10_Physics() {
                         configurationalEntropy: bestDisorder.metrics.configurationalEntropy,
                         dosDisorderSignal: bestDisorder.metrics.dosDisorderSignal,
                       };
-                      const disorderFeatures = extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, dCtx);
-                      const disorderPred = gbPredict(disorderFeatures);
+                      const disorderFeatures = await extractFeatures(candidate.formula, undefined, undefined, undefined, undefined, dCtx);
+                      const disorderPred = await gbPredict(disorderFeatures);
                       disorderAwareTc = Math.max(disorderAwareTc, disorderPred.tcPredicted);
                     } catch { /* use modifier-based estimate */ }
                   }
@@ -3572,8 +3572,8 @@ async function runPhase11_StructurePrediction() {
             structInFlightMarked.push(variant.formula);
             const existingSC = await storage.getSuperconductorByFormula(variant.formula);
             if (!existingSC) {
-              const features = getCachedFeatures(variant.formula);
-              const gbResult = gbPredict(features);
+              const features = await getCachedFeatures(variant.formula);
+              const gbResult = await gbPredict(features);
               const lambdaML = features.electronPhononLambda ?? 0;
               const metallicityML = features.metallicity ?? 0.5;
               let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
@@ -3658,8 +3658,8 @@ async function runPhase11_StructurePrediction() {
 
           const existingSC = await storage.getSuperconductorByFormula(variant.formula);
           if (!existingSC) {
-            const features = getCachedFeatures(variant.formula);
-            const gbResult = gbPredict(features);
+            const features = await getCachedFeatures(variant.formula);
+            const gbResult = await gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
             let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, variant.formula);
@@ -3709,7 +3709,7 @@ async function runPhase11_StructurePrediction() {
         for (const elSet of novelElementSets) {
           if (!shouldContinue()) break;
           try {
-            const optResults = findOptimalRegion(elSet, emit);
+            const optResults = await findOptimalRegion(elSet, emit);
             const seeds = optResults
               .filter(r => r.predictedTc > 10 && r.hullDistance < 0.3)
               .map(r => r.formula)
@@ -3718,8 +3718,8 @@ async function runPhase11_StructurePrediction() {
               if (!shouldContinue() || !isValidFormula(sf)) continue;
               const sfNorm = normalizeFormula(sf);
               if (await storage.getSuperconductorByFormula(sfNorm)) continue;
-              const sfFeatures = getCachedFeatures(sfNorm);
-              const sfGb = gbPredict(sfFeatures);
+              const sfFeatures = await getCachedFeatures(sfNorm);
+              const sfGb = await gbPredict(sfFeatures);
               if (sfGb.tcPredicted >= 10) {
                 try {
                   const sfInserted = await insertCandidateWithStabilityCheck({
@@ -3780,8 +3780,8 @@ async function runPhase11_StructurePrediction() {
           if (!isValidFormula(evoFormula)) continue;
           const existingSC = await storage.getSuperconductorByFormula(evoFormula);
           if (!existingSC) {
-            const features = getCachedFeatures(evoFormula);
-            const gbResult = gbPredict(features);
+            const features = await getCachedFeatures(evoFormula);
+            const gbResult = await gbPredict(features);
             const lambdaML = features.electronPhononLambda ?? 0;
             const metallicityML = features.metallicity ?? 0.5;
             let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, evoFormula);
@@ -3852,8 +3852,8 @@ async function runPhase11_StructurePrediction() {
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
 
-          const features = getCachedFeatures(normalized);
-          const gbResult = gbPredict(features);
+          const features = await getCachedFeatures(normalized);
+          const gbResult = await gbPredict(features);
           const lambdaML = features.electronPhononLambda ?? 0;
           const metallicityML = features.metallicity ?? 0.5;
           let rawTc = estimateRawTc(lambdaML, features.logPhononFreq, undefined, normalized);
@@ -3922,7 +3922,7 @@ async function runPhase11_StructurePrediction() {
       const cdvaeInFlightMarked: string[] = [];
       try {
         const targetTcForDiffusion = elasticTcTarget(autonomousBestTc);
-        const cdvaeCrystals = runCrystalDiffusionCycle(15, targetTcForDiffusion, 25, alreadyScreenedFormulas);
+        const cdvaeCrystals = await runCrystalDiffusionCycle(15, targetTcForDiffusion, 25, alreadyScreenedFormulas);
         let cdvaeInserted = 0;
         for (const crystal of cdvaeCrystals) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -3933,8 +3933,8 @@ async function runPhase11_StructurePrediction() {
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
 
-          const features = getCachedFeatures(normalized);
-          const gbResult = gbPredict(features);
+          const features = await getCachedFeatures(normalized);
+          const gbResult = await gbPredict(features);
           const cdvaeMuStar = estimateMuStar(normalized);
           const cdvaeLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
           const cdvaePhysTc = cdvaeLambda > 0
@@ -4021,7 +4021,7 @@ async function runPhase11_StructurePrediction() {
       const distInFlightMarked: string[] = [];
       try {
         const distTarget = elasticTcTarget(autonomousBestTc);
-        const distCrystals = runDistributionBasedDiffusion(12, distTarget, 25, alreadyScreenedFormulas);
+        const distCrystals = await runDistributionBasedDiffusion(12, distTarget, 25, alreadyScreenedFormulas);
         let distInserted = 0;
         for (const crystal of distCrystals) {
           if (!isValidFormula(crystal.formula)) continue;
@@ -4031,8 +4031,8 @@ async function runPhase11_StructurePrediction() {
           distInFlightMarked.push(normalized);
           const existing = await storage.getSuperconductorByFormula(normalized);
           if (existing) continue;
-          const features = getCachedFeatures(normalized);
-          const gbResult = gbPredict(features);
+          const features = await getCachedFeatures(normalized);
+          const gbResult = await gbPredict(features);
           const distMuStar = estimateMuStar(normalized);
           const distLambda = crystal.lambda > 0 ? crystal.lambda : (features.electronPhononLambda ?? 0);
           const distPhysTc = distLambda > 0
@@ -4136,7 +4136,7 @@ async function runPhase11_StructurePrediction() {
         let vaeBestOverall: { bestTc: number; bestFormula: string; optimizationSteps: number; converged: boolean } | null = null;
         for (const vaeSeed of vaeSeeds) {
           try {
-            const vaeResult = runLatentSpaceInverseDesign(
+            const vaeResult = await runLatentSpaceInverseDesign(
               elasticTcTarget(autonomousBestTc),
               vaeSeed,
               30,
@@ -4161,8 +4161,8 @@ async function runPhase11_StructurePrediction() {
                   vaeGateFiltered++;
                   continue;
                 }
-                const features = getCachedFeatures(normalized);
-                const gbResult = gbPredict(features);
+                const features = await getCachedFeatures(normalized);
+                const gbResult = await gbPredict(features);
                 const vaeLambda = features.electronPhononLambda ?? 0;
                 const vaePhysTc = vaeLambda > 0
                   ? Math.round(computePhysicsOnlyTc(vaeLambda, features.logPhononFreq, undefined, normalized))
@@ -4204,7 +4204,7 @@ async function runPhase11_StructurePrediction() {
 
     if (shouldContinue() && cycleCount % 7 === 0) {
       try {
-        const structResult = runStructureDiffusionCycle(200, 3, 3);
+        const structResult = await runStructureDiffusionCycle(200, 3, 3);
         let structInserted = 0;
         for (const formula of structResult.formulas) {
           if (!isValidFormula(formula)) continue;
@@ -4213,8 +4213,8 @@ async function runPhase11_StructurePrediction() {
           if (existing) continue;
 
           try {
-            const features = getCachedFeatures(normalized);
-            const gbResult = gbPredict(features);
+            const features = await getCachedFeatures(normalized);
+            const gbResult = await gbPredict(features);
             if (gbResult.tcPredicted >= 10) {
               const structFirstTc = Math.round(gbResult.tcPredicted * getHydrideUnverifiedPenalty(normalized));
               const inserted = await insertCandidateWithStabilityCheck({
@@ -4620,7 +4620,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
 
-    const surrogateResult = surrogateScreen(formula, 3);
+    const surrogateResult = await surrogateScreen(formula, 3);
     const surrogateTc = Number.isFinite(surrogateResult.predictedTc) ? surrogateResult.predictedTc : 0;
     if (!surrogateResult.pass) {
       pipelineStageMetrics.surrogateRejects++;
@@ -4644,13 +4644,13 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     }
 
     const family = classifyFamily(formula);
-    const features = getCachedFeatures(formula);
+    const features = await getCachedFeatures(formula);
     if (!features) {
       pipelineStageMetrics.featureExtractionFails++;
       return { passed: false, tc: 0, reason: "feature-extraction-failed" };
     }
 
-    const gbResult = gbPredict(features);
+    const gbResult = await gbPredict(features);
     if (gbResult.tcPredicted < 5) {
       pipelineStageMetrics.gbTcRejects++;
       return { passed: false, tc: gbResult.tcPredicted, reason: "low-gb-tc" };
@@ -4662,7 +4662,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     } catch (e) { console.error(`[Autonomous] GNN prediction failed for ${formula}:`, e); }
 
     try {
-      const mtPred = multiTaskPredict(formula);
+      const mtPred = await multiTaskPredict(formula);
       trackMultiTaskPrediction(mtPred);
     } catch (e) { console.error(`[Autonomous] Multi-task prediction failed for ${formula}:`, e); }
 
@@ -5005,7 +5005,7 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
   }
 }
 
-function generateFastPathFormulas(focusArea: string): string[] {
+async function generateFastPathFormulas(focusArea: string): Promise<string[]> {
   const topCandidatesForGen: { formula: string; predictedTc?: number }[] = [];
   const scElements: Record<string, string[][]> = {
     Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Zr","C"],["Hf","C"],["Ta","C"],["W","C"]],
@@ -5019,7 +5019,7 @@ function generateFastPathFormulas(focusArea: string): string[] {
   for (const pair of basePairs) {
     topCandidatesForGen.push({ formula: pair.join(""), predictedTc: 20 });
   }
-  const { formulas, stats } = runMassiveGeneration(topCandidatesForGen, focusArea);
+  const { formulas, stats } = await runMassiveGeneration(topCandidatesForGen, focusArea);
   console.log(`Massive generation: ${stats.totalGenerated} generated, ${stats.uniqueAfterDedup} unique, ${stats.passedPreScreen} passed pre-screen`);
   return formulas;
 }
@@ -5103,7 +5103,7 @@ async function runAutonomousFastPath() {
     } catch (e) { console.error("[Engine] Top candidates fetch for generation failed:", e); }
 
     const shuffled = [...topCandidatesForGen].sort(() => Math.random() - 0.5);
-    const { formulas: massiveCandidates, stats: genStats } = runMassiveGeneration(shuffled, focusArea);
+    const { formulas: massiveCandidates, stats: genStats } = await runMassiveGeneration(shuffled, focusArea);
 
     const boCandidatePool = [...new Set([...rlCandidates, ...massiveCandidates])];
     const boSuggestions = bayesianOptimizer.suggestNextCandidates(boCandidatePool, 50, "mixed");
@@ -5125,8 +5125,8 @@ async function runAutonomousFastPath() {
           }
           if (v.seedBO && v.pressureGpa > 0) {
             try {
-              const feat = extractFeatures(v.formula);
-              const gbResult = gbPredict(feat);
+              const feat = await extractFeatures(v.formula);
+              const gbResult = await gbPredict(feat);
               if (gbResult.tcPredicted > 0) {
                 addPressureObservation(v.formula, v.pressureGpa, gbResult.tcPredicted, true, 0);
               }
@@ -5214,7 +5214,7 @@ async function runAutonomousFastPath() {
             }
           }
 
-          const gradResult = runGradientDescentCycle(campaign.target, 4, 12);
+          const gradResult = await runGradientDescentCycle(campaign.target, 4, 12);
           for (const r of gradResult.results) {
             if (r.finalTc > 10 && isValidFormula(r.finalFormula)) {
               const norm = normalizeFormula(r.finalFormula);
@@ -5241,7 +5241,7 @@ async function runAutonomousFastPath() {
     let structDiffusionCandidates: string[] = [];
     {
       try {
-        const structResult = runStructureDiffusionCycle(200, 3, 3);
+        const structResult = await runStructureDiffusionCycle(200, 3, 3);
         for (const formula of structResult.formulas) {
           if (isValidFormula(formula)) {
             const normalized = normalizeFormula(formula);
@@ -5300,8 +5300,8 @@ async function runAutonomousFastPath() {
           });
           if (eligibleProtos.length === 0) continue;
 
-          const features = getCachedFeatures(normalized);
-          const gbResult = gbPredict(features);
+          const features = await getCachedFeatures(normalized);
+          const gbResult = await gbPredict(features);
           const protoPressure = estimateFamilyPressure(normalized);
           const lambdaML = features.electronPhononLambda ?? 0;
           const metallicityML = features.metallicity ?? 0.5;
@@ -5332,7 +5332,7 @@ async function runAutonomousFastPath() {
             return { proto, gnnResult, predictedTc, siteStr };
           });
 
-          const insertResults = await Promise.allSettled(protoPayloads.map(({ proto, gnnResult, predictedTc, siteStr }) => {
+          const insertResults = await Promise.allSettled(protoPayloads.map(async ({ proto, gnnResult, predictedTc, siteStr }) => {
             const id = `sc-protoenum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             return insertCandidateWithStabilityCheck({
               id,
@@ -5454,7 +5454,7 @@ async function runAutonomousFastPath() {
     if (cycleCount % 4 === 0) {
       try {
         const cdvaeTargetTc = elasticTcTarget(autonomousBestTc);
-        const cdvaeResult = runCrystalDiffusionCycle(10, cdvaeTargetTc, 20, alreadyScreenedFormulas);
+        const cdvaeResult = await runCrystalDiffusionCycle(10, cdvaeTargetTc, 20, alreadyScreenedFormulas);
         for (const crystal of cdvaeResult) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
@@ -5481,7 +5481,7 @@ async function runAutonomousFastPath() {
     if (cycleCount % 6 === 0) {
       try {
         const distTarget = elasticTcTarget(autonomousBestTc);
-        const distResult = runDistributionBasedDiffusion(8, distTarget, 20, alreadyScreenedFormulas);
+        const distResult = await runDistributionBasedDiffusion(8, distTarget, 20, alreadyScreenedFormulas);
         for (const crystal of distResult) {
           if (!isValidFormula(crystal.formula)) continue;
           const normalized = normalizeFormula(crystal.formula);
@@ -5521,7 +5521,7 @@ async function runAutonomousFastPath() {
         let vaeBestResult: { bestFormula: string; bestTc: number; optimizationSteps: number; converged: boolean } | null = null;
         for (const seed of vaeSeeds.length > 0 ? vaeSeeds : [undefined]) {
           try {
-            const vaeResult = runLatentSpaceInverseDesign(
+            const vaeResult = await runLatentSpaceInverseDesign(
               elasticTcTarget(autonomousBestTc),
               seed,
               20, 0.02, 2,
@@ -5557,7 +5557,7 @@ async function runAutonomousFastPath() {
     let integratedCandidates: string[] = [];
     try {
       if (integratedPipelineId) {
-        const pipelineResult = runPipelineIteration(integratedPipelineId);
+        const pipelineResult = await runPipelineIteration(integratedPipelineId);
         if (pipelineResult) {
           for (const c of (pipelineResult.topCandidates ?? [])) {
             if (c.formula && isValidFormula(c.formula)) {
@@ -5578,7 +5578,7 @@ async function runAutonomousFastPath() {
 
     try {
       if (integratedLabId) {
-        const labResult = runLabIteration(integratedLabId);
+        const labResult = await runLabIteration(integratedLabId);
         if (labResult) {
           for (const c of (labResult.topCandidates ?? [])) {
             if (c.formula && isValidFormula(c.formula)) {
@@ -5642,7 +5642,7 @@ async function runAutonomousFastPath() {
 
     if (cycleCount - lastTheoryDiscoveryCycle >= 15 && cycleCount % 15 === 0) {
       try {
-        const synthDataset = generateSyntheticDataset(40);
+        const synthDataset = await generateSyntheticDataset(40);
         const theories = runSymbolicPhysicsDiscovery(synthDataset);
         lastTheoryDiscoveryCycle = cycleCount;
         if (theories.length > 0) {
@@ -5671,7 +5671,7 @@ async function runAutonomousFastPath() {
           const gtRecords: CausalDataRecord[] = [];
           for (const dp of gtData) {
             try {
-              const rec = buildCausalDataRecord(dp.formula);
+              const rec = await buildCausalDataRecord(dp.formula);
               if (dp.Tc > 0) rec.Tc = dp.Tc;
               if (dp.lambda !== null) rec.lambda = dp.lambda;
               if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
@@ -5685,13 +5685,13 @@ async function runAutonomousFastPath() {
             causalDataset = gtRecords;
             console.log(`[Engine] Causal discovery using ${gtRecords.length} ground-truth datapoints (synthetic fallback disabled)`);
           } else {
-            const synthPad = generateCausalDataset(MIN_CAUSAL_DATAPOINTS - gtRecords.length);
+            const synthPad = await generateCausalDataset(MIN_CAUSAL_DATAPOINTS - gtRecords.length);
             causalDataset = [...gtRecords, ...synthPad];
             console.log(`[Engine] Causal discovery: ${gtRecords.length} ground-truth + ${synthPad.length} synthetic = ${causalDataset.length} total`);
           }
         } else {
           console.log(`[Engine] Causal discovery deferred: only ${gtSummary.totalDatapoints} ground-truth datapoints (need ${MIN_CAUSAL_DATAPOINTS}). Using minimal synthetic dataset.`);
-          causalDataset = generateCausalDataset(Math.max(60, gtSummary.totalDatapoints));
+          causalDataset = await generateCausalDataset(Math.max(60, gtSummary.totalDatapoints));
         }
 
         const causalResult = runCausalDiscovery(causalDataset);
@@ -6089,7 +6089,7 @@ async function runAutonomousFastPath() {
             const obsStability = 1 - (result.physicsPred?.hullDistance ?? 0.2);
             bayesianOptimizer.addObservation(formula, result.tc, obsLambda, obsStability);
             if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3 && !explorationModeActive) {
-              incorporateSuccessData(formula, result.tc, { topologicalScore: hubIns.topology.topologicalScore });
+              await incorporateSuccessData(formula, result.tc, { topologicalScore: hubIns.topology.topologicalScore });
             }
           } catch (e) { console.error("[Engine] Cross-engine BO feed failed:", e); }
         }
@@ -7111,9 +7111,9 @@ async function runLearningCycle() {
             let transitionsFound = 0;
             for (const c of topCandidates.slice(0, 5)) {
               try {
-                predictPressureCurve(c.formula);
-                const optimal = findOptimalPressure(c.formula);
-                const transitions = detectPhaseTransitions(c.formula);
+                await predictPressureCurve(c.formula);
+                const optimal = await findOptimalPressure(c.formula);
+                const transitions = await detectPhaseTransitions(c.formula);
                 pressureCurvesAnalyzed++;
                 transitionsFound += transitions.length;
                 if (optimal.maxTc > 77 && optimal.optimalPressureGpa > 0) {
@@ -7138,7 +7138,7 @@ async function runLearningCycle() {
             let enthalpyStableCount = 0;
             for (const c of topCandidates.slice(0, 5)) {
               try {
-                const window = findStabilityPressureWindow(c.formula);
+                const window = await findStabilityPressureWindow(c.formula);
                 if (window && window.maxPressureGpa > window.minPressureGpa) {
                   enthalpyStableCount++;
                 }
@@ -7156,7 +7156,7 @@ async function runLearningCycle() {
             let bayesOptCount = 0;
             const pressureResults = await Promise.allSettled(
               topCandidates.slice(0, 5).map(async (c) => {
-                const profile = buildPressureResponseProfile(c.formula);
+                const profile = await buildPressureResponseProfile(c.formula);
 
                 for (const pt of profile.tcVsPressure) {
                   const stabPt = profile.stabilityVsPressure.find(s => s.pressure === pt.pressure);
@@ -7164,7 +7164,7 @@ async function runLearningCycle() {
                 }
 
                 const familyP = estimateFamilyPressure(c.formula);
-                const bayesResult = optimizePressureForFormula(c.formula, 3, 15, familyP);
+                const bayesResult = await optimizePressureForFormula(c.formula, 3, 15, familyP);
                 return { formula: c.formula, bayesResult };
               })
             );
@@ -7185,7 +7185,7 @@ async function runLearningCycle() {
             for (const c of topCandidates.slice(0, 8)) {
               try {
                 const cPressure = c.pressureGpa ?? 0;
-                const screen = fastPressureScreen(c.formula, cPressure);
+                const screen = await fastPressureScreen(c.formula, cPressure);
                 const isHit = screen.passesPrescreen && (c.predictedTc ?? 0) > 20;
                 recordClusterDiscovery(c.formula, cPressure, c.predictedTc ?? 0, isHit);
               } catch {}
@@ -7249,8 +7249,8 @@ async function runLearningCycle() {
               if (!isValidFormula(mf)) continue;
               const existing = await storage.getSuperconductorByFormula(mf);
               if (!existing) {
-                const features = getCachedFeatures(mf);
-                const gb = gbPredict(features);
+                const features = await getCachedFeatures(mf);
+                const gb = await gbPredict(features);
                 if (gb.tcPredicted >= 10) {
                   const lambdaML = features.electronPhononLambda ?? 0;
                   const metallicityML = features.metallicity ?? 0.5;
@@ -7331,7 +7331,7 @@ async function runLearningCycle() {
           };
           const elementSets = FAMILY_ELEMENT_SETS[focusFamily] || FAMILY_ELEMENT_SETS["Carbides"];
           const chosenSet = elementSets[cycleCount % elementSets.length];
-          const optimalResults = findOptimalRegion(chosenSet, emit);
+          const optimalResults = await findOptimalRegion(chosenSet, emit);
           const seedFormulas = optimalResults
             .filter(r => r.predictedTc > 10 && r.hullDistance < 0.3)
             .map(r => r.formula)
@@ -7342,8 +7342,8 @@ async function runLearningCycle() {
               if (!isValidFormula(sf)) continue;
               const existing = await storage.getSuperconductorByFormula(sf);
               if (!existing) {
-                const features = getCachedFeatures(sf);
-                const gb = gbPredict(features);
+                const features = await getCachedFeatures(sf);
+                const gb = await gbPredict(features);
                 if (gb.tcPredicted >= 10) {
                   try {
                     const inserted = await insertCandidateWithStabilityCheck({
@@ -7403,8 +7403,8 @@ async function runLearningCycle() {
           const scored: {
             pc: PrototypeCandidate;
             normalized: string;
-            features: ReturnType<typeof extractFeatures>;
-            gbResult: ReturnType<typeof gbPredict>;
+            features: Awaited<ReturnType<typeof extractFeatures>>;
+            gbResult: Awaited<ReturnType<typeof gbPredict>>;
             gnnResult: ReturnType<typeof gnnPredictWithUncertainty>;
             discoveryScore: number;
             discoveryDetails: ReturnType<typeof computeDiscoveryScore>;
@@ -7414,8 +7414,8 @@ async function runLearningCycle() {
             if (!shouldContinue()) break;
             const normalized = normalizeFormula(pc.formula);
 
-            const features = getCachedFeatures(normalized);
-            const gbResult = gbPredict(features);
+            const features = await getCachedFeatures(normalized);
+            const gbResult = await gbPredict(features);
             const protoIsClathrate = pc.prototype?.toLowerCase().includes("clathrate");
             const baseFamilyPressure = estimateFamilyPressure(normalized);
             const protoPressure = protoIsClathrate ? Math.max(150, baseFamilyPressure) : baseFamilyPressure;
@@ -7635,9 +7635,9 @@ async function runLearningCycle() {
               const normalized = normalizeFormula(struct.formula);
               const existsInDb = await storage.getSuperconductorByFormula(normalized);
               if (existsInDb) continue;
-              const features = getCachedFeatures(struct.formula);
+              const features = await getCachedFeatures(struct.formula);
               if (!features) continue;
-              const gb = gbPredict(features);
+              const gb = await gbPredict(features);
               if (gb.tcPredicted < 5) continue;
 
               const cappedTc = Math.round(gb.tcPredicted);
@@ -7685,9 +7685,9 @@ async function runLearningCycle() {
               const normalized = normalizeFormula(evoStruct.formula);
               const evoExists = await storage.getSuperconductorByFormula(normalized);
               if (evoExists || alreadyScreenedFormulas.has(normalized)) continue;
-              const features = getCachedFeatures(evoStruct.formula);
+              const features = await getCachedFeatures(evoStruct.formula);
               if (!features) continue;
-              const gb = gbPredict(features);
+              const gb = await gbPredict(features);
               if (gb.tcPredicted < 5) continue;
 
               const cappedTc = Math.round(gb.tcPredicted);
@@ -8119,8 +8119,8 @@ async function backfillGBScores() {
         if (i % 5 === 0) await yield_();
         const c = batch[i];
         try {
-          const features = getCachedFeatures(c.formula);
-          const gb = gbPredict(features);
+          const features = await getCachedFeatures(c.formula);
+          const gb = await gbPredict(features);
           const nnScore = c.quantumCoherence ?? 0.3;
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
           await storage.updateSuperconductorCandidate(c.id, {
@@ -8169,8 +8169,8 @@ async function recalculatePhysics() {
         if (i % 5 === 0) await yield_();
         const c = needsRecalc[i];
         try {
-          const features = getCachedFeatures(c.formula);
-          const gb = gbPredict(features);
+          const features = await getCachedFeatures(c.formula);
+          const gb = await gbPredict(features);
           const nnScore = c.neuralNetScore ?? c.quantumCoherence ?? 0.3;
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
 
@@ -8504,7 +8504,7 @@ export async function startEngine() {
   await yieldLoop();
 
   try {
-    const synthDataset = generateSyntheticDataset(40);
+    const synthDataset = await generateSyntheticDataset(40);
     const theories = runSymbolicPhysicsDiscovery(synthDataset);
     lastTheoryDiscoveryCycle = cycleCount;
     if (theories.length > 0) {
@@ -8530,7 +8530,7 @@ export async function startEngine() {
       const gtRecsInit: CausalDataRecord[] = [];
       for (const dp of gtDataInit) {
         try {
-          const rec = buildCausalDataRecord(dp.formula);
+          const rec = await buildCausalDataRecord(dp.formula);
           if (dp.Tc > 0) rec.Tc = dp.Tc;
           if (dp.lambda !== null) rec.lambda = dp.lambda;
           if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
@@ -8542,11 +8542,11 @@ export async function startEngine() {
       }
       causalDatasetInit = gtRecsInit.length >= MIN_CAUSAL_INIT
         ? gtRecsInit
-        : [...gtRecsInit, ...generateCausalDataset(MIN_CAUSAL_INIT - gtRecsInit.length)];
+        : [...gtRecsInit, ...await generateCausalDataset(MIN_CAUSAL_INIT - gtRecsInit.length)];
       console.log(`[Engine] Causal auto-start: ${gtRecsInit.length} GT records used`);
     } else {
       console.log(`[Engine] Causal auto-start deferred: ${gtSummaryInit.totalDatapoints}/${MIN_CAUSAL_INIT} GT datapoints. Using synthetic.`);
-      causalDatasetInit = generateCausalDataset(60);
+      causalDatasetInit = await generateCausalDataset(60);
     }
 
     const causalResult = runCausalDiscovery(causalDatasetInit);

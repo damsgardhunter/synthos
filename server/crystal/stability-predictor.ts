@@ -35,9 +35,9 @@ let totalAccepted = 0;
 const FE_THRESHOLD = 0.5;
 const PHONON_THRESHOLD = 0.3;
 
-function extractStabilityFeatures(formula: string): number[] {
+async function extractStabilityFeatures(formula: string): Promise<number[]> {
   try {
-    const mlFeatures = extractFeatures(formula);
+    const mlFeatures = await extractFeatures(formula);
     const compositionFeats = [
       mlFeatures.avgElectronegativity / 4,
       mlFeatures.maxAtomicMass / 250,
@@ -197,7 +197,7 @@ function predictWithTrees(trees: TreeNode[], basePrediction: number, learningRat
   return Number.isFinite(prediction) ? prediction : basePrediction;
 }
 
-function gatherTrainingData(): { X: number[][]; yFE: number[]; yPhonon: number[] } {
+async function gatherTrainingData(): Promise<{ X: number[][]; yFE: number[]; yPhonon: number[] }> {
   const X: number[][] = [];
   const yFE: number[] = [];
   const yPhonon: number[] = [];
@@ -205,7 +205,7 @@ function gatherTrainingData(): { X: number[][]; yFE: number[]; yPhonon: number[]
   const seedData = getTrainingData();
   for (const entry of seedData) {
     try {
-      const features = extractStabilityFeatures(entry.formula);
+      const features = await extractStabilityFeatures(entry.formula);
       if (features.some(v => !Number.isFinite(v))) continue;
       X.push(features);
       yFE.push(entry.formationEnergy);
@@ -218,7 +218,7 @@ function gatherTrainingData(): { X: number[][]; yFE: number[]; yPhonon: number[]
   const physicsResults = getAllPhysicsResults();
   for (const result of physicsResults) {
     try {
-      const features = extractStabilityFeatures(result.formula);
+      const features = await extractStabilityFeatures(result.formula);
       if (features.some(v => !Number.isFinite(v))) continue;
       X.push(features);
       yFE.push(result.formationEnergy ?? 0);
@@ -231,7 +231,7 @@ function gatherTrainingData(): { X: number[][]; yFE: number[]; yPhonon: number[]
   const failures = getFailureEntries();
   for (const entry of failures) {
     try {
-      const features = extractStabilityFeatures(entry.formula);
+      const features = await extractStabilityFeatures(entry.formula);
       if (features.some(v => !Number.isFinite(v))) continue;
       X.push(features);
       if (entry.failureReason === "high_formation_energy") {
@@ -255,8 +255,8 @@ function gatherTrainingData(): { X: number[][]; yFE: number[]; yPhonon: number[]
   return { X, yFE, yPhonon };
 }
 
-export function trainStabilityPredictor(): void {
-  const { X, yFE, yPhonon } = gatherTrainingData();
+export async function trainStabilityPredictor(): Promise<void> {
+  const { X, yFE, yPhonon } = await gatherTrainingData();
 
   if (X.length < 10) {
     cachedModel = {
@@ -285,17 +285,17 @@ export function trainStabilityPredictor(): void {
   };
 }
 
-function getModel(): StabilityModel {
+async function getModel(): Promise<StabilityModel> {
   if (!cachedModel) {
-    trainStabilityPredictor();
+    await trainStabilityPredictor();
   }
   return cachedModel!;
 }
 
-export function predictStabilityScreen(formula: string): StabilityPrediction {
+export async function predictStabilityScreen(formula: string): Promise<StabilityPrediction> {
   totalPredictions++;
-  const model = getModel();
-  const features = extractStabilityFeatures(formula);
+  const model = await getModel();
+  const features = await extractStabilityFeatures(formula);
 
   let predictedFormationEnergy: number;
   let phononStabilityProb: number;

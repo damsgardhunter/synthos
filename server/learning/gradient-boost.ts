@@ -216,8 +216,8 @@ function computePercentile(sorted: number[], p: number): number {
   return sorted[lower] + (idx - lower) * (sorted[upper] - sorted[lower]);
 }
 
-function computeCalibration(model: GBModel): CalibrationData {
-  const { X, y, formulas } = prepareTrainingData();
+async function computeCalibration(model: GBModel): Promise<CalibrationData> {
+  const { X, y, formulas } = await prepareTrainingData();
   const details: { formula: string; actual: number; predicted: number; residual: number }[] = [];
   const residuals: number[] = [];
   const actualTcs: number[] = [];
@@ -345,9 +345,16 @@ let featureMeansComputedAt = 0;
 const FEATURE_MEANS_RECOMPUTE_INTERVAL_MS = 3600_000;
 
 function getFeatureMeans(): Record<string, number> {
+  if (computedFeatureMeans) {
+    return computedFeatureMeans;
+  }
+  return STATIC_FEATURE_MEANS;
+}
+
+async function precomputeFeatureMeans(): Promise<void> {
   const now = Date.now();
   if (computedFeatureMeans && now - featureMeansComputedAt < FEATURE_MEANS_RECOMPUTE_INTERVAL_MS) {
-    return computedFeatureMeans;
+    return;
   }
   try {
     const sums: Record<string, number> = {};
@@ -357,9 +364,10 @@ function getFeatureMeans(): Record<string, number> {
       counts[key] = 0;
     }
     let processed = 0;
-    for (const entry of SUPERCON_TRAINING_DATA) {
+    for (let i = 0; i < SUPERCON_TRAINING_DATA.length; i++) {
+      const entry = SUPERCON_TRAINING_DATA[i];
       try {
-        const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+        const features = await extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
         const fAny = features as any;
         for (const key of Object.keys(STATIC_FEATURE_MEANS)) {
           const v = fAny[key];
@@ -372,6 +380,7 @@ function getFeatureMeans(): Record<string, number> {
       } catch {
         continue;
       }
+      if (i % 5 === 0) await new Promise<void>(r => setImmediate(r));
     }
     if (processed < 10) {
       computedFeatureMeans = { ...STATIC_FEATURE_MEANS };
@@ -385,9 +394,8 @@ function getFeatureMeans(): Record<string, number> {
     }
     featureMeansComputedAt = now;
     console.log(`[GradientBoost] Recomputed feature means from ${processed} training entries`);
-    return computedFeatureMeans;
   } catch {
-    return STATIC_FEATURE_MEANS;
+    if (!computedFeatureMeans) computedFeatureMeans = { ...STATIC_FEATURE_MEANS };
   }
 }
 
@@ -515,7 +523,53 @@ const STATIC_CRYSTAL_SYM_ENCODING: Record<string, number> = {
 
 let crystalSymTargetEncoding: Map<string, number> | null = null;
 
+async function precomputeCrystalSymTargetEncoding(): Promise<void> {
+  if (crystalSymTargetEncoding) return;
+  crystalSymTargetEncoding = new Map();
+  const symTcSums = new Map<string, { sum: number; count: number }>();
+  let globalSum = 0;
+  let globalCount = 0;
+  for (let i = 0; i < SUPERCON_TRAINING_DATA.length; i++) {
+    const entry = SUPERCON_TRAINING_DATA[i];
+    try {
+      const features = await extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+      const entrySym = (features as any).crystalSymmetry;
+      if (!entrySym || typeof entrySym !== "string") continue;
+      const normalized = entrySym.toLowerCase().trim();
+      const SG_MAP: Record<string, string> = {
+        cubic: "cubic", hexagonal: "hexagonal", trigonal: "trigonal",
+        tetragonal: "tetragonal", orthorhombic: "orthorhombic",
+        monoclinic: "monoclinic", triclinic: "triclinic", rhombohedral: "trigonal",
+      };
+      let category: string | null = null;
+      if (SG_MAP[normalized]) {
+        category = SG_MAP[normalized];
+      } else {
+        for (const [key, val] of Object.entries(SG_MAP)) {
+          if (normalized.includes(key)) { category = val; break; }
+        }
+      }
+      if (!category) continue;
+      const existing = symTcSums.get(category) || { sum: 0, count: 0 };
+      existing.sum += entry.tc;
+      existing.count++;
+      symTcSums.set(category, existing);
+      globalSum += entry.tc;
+      globalCount++;
+    } catch { continue; }
+    if (i % 5 === 0) await new Promise<void>(r => setImmediate(r));
+  }
+  const globalMean = globalCount > 0 ? globalSum / globalCount : 20;
+  const SMOOTHING = 10;
+  for (const [cat, data] of Array.from(symTcSums.entries())) {
+    const smoothed = (data.sum + SMOOTHING * globalMean) / (data.count + SMOOTHING);
+    crystalSymTargetEncoding.set(cat, smoothed);
+  }
+  console.log(`[GradientBoost] Crystal symmetry target encoding: ${Array.from(crystalSymTargetEncoding.entries()).map(([k, v]) => `${k}=${v.toFixed(1)}K`).join(", ")}`);
+}
+
 function getCrystalSymTargetEncoded(sym: string): number | null {
+  if (!crystalSymTargetEncoding) return null;
   const normalized = sym.toLowerCase().trim();
   const SG_LOOKUP: Record<string, string> = {
     cubic: "cubic", hexagonal: "hexagonal", trigonal: "trigonal",
@@ -968,11 +1022,11 @@ class TrainingPool {
   private formulas: string[] = [];
   private dirty = true;
 
-  add(formula: string, tc: number, pressureGPa: number = 0): boolean {
+  async add(formula: string, tc: number, pressureGPa: number = 0): Promise<boolean> {
     const key = `${formula}|${tc}`;
     if (this.featureCache.has(key)) return false;
     try {
-      const features = extractFeatures(formula, { pressureGpa: pressureGPa } as any);
+      const features = await extractFeatures(formula, { pressureGpa: pressureGPa } as any);
       const fArr = featureVectorToArray(features, formula);
       if (fArr.some(v => !Number.isFinite(v))) return false;
       this.featureCache.set(key, { x: fArr, tc });
@@ -983,10 +1037,10 @@ class TrainingPool {
     }
   }
 
-  addBatch(entries: { formula: string; tc: number; pressureGPa?: number }[]): number {
+  async addBatch(entries: { formula: string; tc: number; pressureGPa?: number }[]): Promise<number> {
     let added = 0;
     for (const e of entries) {
-      if (this.add(e.formula, e.tc, e.pressureGPa ?? 0)) added++;
+      if (await this.add(e.formula, e.tc, e.pressureGPa ?? 0)) added++;
     }
     return added;
   }
@@ -1046,12 +1100,16 @@ const FALLBACK_MODEL: GBModel = {
   trainedAt: 0,
 };
 
-function ensurePoolInitialized(): void {
-  if (poolInitialized) return;
+async function ensurePoolInitialized(): Promise<void> {
+  if (poolInitialized && cachedTrainingSnapshot?.dataSize === SUPERCON_TRAINING_DATA.length) return;
+  if (poolInitializing && poolInitPromise) {
+    await poolInitPromise;
+    return;
+  }
   if (poolInitializing) return;
 
   const startSize = trainingPool.size;
-  trainingPool.addBatch(
+  await trainingPool.addBatch(
     SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }))
   );
   const added = trainingPool.size - startSize;
@@ -1077,7 +1135,7 @@ export async function initPoolAsync(): Promise<void> {
   let added = 0;
   for (let i = 0; i < phase1.length; i++) {
     const e = phase1[i];
-    if (trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
+    if (await trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
     await new Promise<void>(r => setTimeout(r, 50));
   }
 
@@ -1086,6 +1144,11 @@ export async function initPoolAsync(): Promise<void> {
   cachedTrainingSnapshot = { dataSize: SUPERCON_TRAINING_DATA.length };
   console.log(`[TrainingPool] Phase 1: ${trainingPool.size} vectors (${added} new) in ${Date.now() - startTime}ms`);
 
+  Promise.all([
+    precomputeFeatureMeans(),
+    precomputeCrystalSymTargetEncoding(),
+  ]).catch(e => console.error("[GradientBoost] Precompute failed:", e));
+
   await new Promise<void>(r => setTimeout(r, 50));
 
   try {
@@ -1093,8 +1156,8 @@ export async function initPoolAsync(): Promise<void> {
     if (X.length >= 10) {
       const trainStart = Date.now();
       cachedModel = trainGradientBoosting(X, y, 30, 0.12, 4);
-      cachedCalibration = computeCalibration(cachedModel);
-      logModelVersion("phase1-training", X.length);
+      cachedCalibration = await computeCalibration(cachedModel);
+      await logModelVersion("phase1-training", X.length);
       console.log(`[GradientBoost] Phase 1 model: ${X.length} samples in ${Date.now() - trainStart}ms`);
     }
   } catch (e) {
@@ -1109,7 +1172,7 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
   let added = 0;
   for (let i = 0; i < remaining.length; i++) {
     const e = remaining[i];
-    if (trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
+    if (await trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
     await new Promise<void>(r => setTimeout(r, 50));
   }
   console.log(`[TrainingPool] Phase 2 backfill: ${trainingPool.size} total vectors (+${added}) in ${Date.now() - t0}ms`);
@@ -1143,8 +1206,8 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
     if (X.length >= 10) {
       const trainStart = Date.now();
       cachedModel = trainGradientBoosting(X, y, 45, 0.12, 4);
-      cachedCalibration = computeCalibration(cachedModel);
-      logModelVersion("full-training", X.length);
+      cachedCalibration = await computeCalibration(cachedModel);
+      await logModelVersion("full-training", X.length);
       console.log(`[GradientBoost] Full model: ${X.length} samples in ${Date.now() - trainStart}ms`);
 
       setTimeout(() => {
@@ -1167,14 +1230,49 @@ export function startPoolInit(): void {
   }
 }
 
-function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
-  ensurePoolInitialized();
+async function prepareTrainingData(): Promise<{ X: number[][]; y: number[]; formulas: string[] }> {
+  await ensurePoolInitialized();
   return trainingPool.getTrainingData();
 }
 
-export function getTrainedModel(): GBModel {
+export async function getTrainedModel(): Promise<GBModel> {
   if (cachedModel) return cachedModel;
-  return FALLBACK_MODEL;
+
+  if (!poolInitialized) {
+    return FALLBACK_MODEL;
+  }
+
+  const { X, y } = await prepareTrainingData();
+
+  if (X.length < 10) {
+    cachedModel = {
+      trees: [],
+      flatTrees: [],
+      learningRate: 0.1,
+      basePrediction: 20,
+      featureNames: FEATURE_NAMES,
+      trainedAt: Date.now(),
+    };
+    return cachedModel;
+  }
+
+  cachedModel = trainGradientBoosting(X, y, 80, 0.08, 5);
+  cachedCalibration = await computeCalibration(cachedModel);
+
+  if (!cachedEnsembleXGB && X.length >= 30) {
+    setTimeout(() => {
+      try {
+        cachedEnsembleXGB = trainEnsembleXGB(X, y);
+        cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        cachedGlobalFeatureImportance = null;
+        buildFeatureImportanceCache();
+      } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
+    }, 30000);
+  }
+
+  await logModelVersion("initial-training", X.length);
+
+  return cachedModel;
 }
 
 const APPLICATION_TC_TARGETS: Record<string, { target: number; range: [number, number]; label: string }> = {
@@ -1226,9 +1324,9 @@ function applicationAwareScore(tc: number, application?: string | null): number 
   return Math.max(0.05, 0.40 - undershoot * 0.5);
 }
 
-export function gbPredict(features: MLFeatureVector, formula?: string): { tcPredicted: number; score: number; reasoning: string[] } {
+export async function gbPredict(features: MLFeatureVector, formula?: string): Promise<{ tcPredicted: number; score: number; reasoning: string[] }> {
   const t0 = Date.now();
-  const model = getTrainedModel();
+  const model = await getTrainedModel();
   const x = featureVectorToArray(features, formula);
   const tcPredicted = predictWithModel(model, x);
 
@@ -1283,8 +1381,8 @@ export interface XGBUncertaintyResult {
   reasoning: string[];
 }
 
-export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: string): XGBUncertaintyResult {
-  getTrainedModel();
+export async function gbPredictWithUncertainty(features: MLFeatureVector, formula?: string): Promise<XGBUncertaintyResult> {
+  await getTrainedModel();
 
   const resolvedFormula = formula || features._sourceFormula;
   const x = featureVectorToArray(features, resolvedFormula);
@@ -1292,7 +1390,7 @@ export function gbPredictWithUncertainty(features: MLFeatureVector, formula?: st
   if (!cachedEnsembleXGB) {
     const singlePred = predictWithModel(cachedModel!, x);
     const safeTc = Number.isFinite(singlePred) ? Math.max(0, singlePred) : 0;
-    const nSamples = cachedTrainingSnapshot?.X.length ?? 0;
+    const nSamples = cachedTrainingSnapshot?.dataSize ?? 0;
     const coldStartUncertainty = nSamples < 5 ? 0.95 : nSamples < 15 ? 0.85 : nSamples < 30 ? 0.75 : 0.6;
     const coldStartStd = coldStartUncertainty * Math.max(1, safeTc + 10);
     return {
@@ -1448,12 +1546,12 @@ export function getXGBEnsembleStats() {
 
 let cachedValidation: { mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[]; forVersion: number } | null = null;
 
-export function validateModel(): { mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[] } {
+export async function validateModel(): Promise<{ mse: number; r2: number; nTrees: number; details: { formula: string; actual: number; predicted: number }[] }> {
   if (cachedValidation && cachedValidation.forVersion === modelVersion && modelVersion > 0) {
     return { mse: cachedValidation.mse, r2: cachedValidation.r2, nTrees: cachedValidation.nTrees, details: cachedValidation.details };
   }
 
-  const model = getTrainedModel();
+  const model = await getTrainedModel();
   const details: { formula: string; actual: number; predicted: number }[] = [];
   let sse = 0;
   let sst = 0;
@@ -1462,7 +1560,7 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
 
   for (const entry of SUPERCON_TRAINING_DATA) {
     try {
-      const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
+      const features = await extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
       const x = featureVectorToArray(features, entry.formula);
       if (x.some(v => !Number.isFinite(v))) continue;
       const pred = predictWithModel(model, x);
@@ -1485,7 +1583,7 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
   return result;
 }
 
-export function getCalibrationData(): Omit<CalibrationData, 'residuals'> & { residualCount: number } {
+export async function getCalibrationData(): Promise<Omit<CalibrationData, 'residuals'> & { residualCount: number }> {
   if (!cachedCalibration) {
     if (!cachedModel) {
       return {
@@ -1497,18 +1595,18 @@ export function getCalibrationData(): Omit<CalibrationData, 'residuals'> & { res
         residualCount: 0,
       };
     }
-    cachedCalibration = computeCalibration(cachedModel);
+    cachedCalibration = await computeCalibration(cachedModel);
   }
   const { residuals, ...rest } = cachedCalibration;
   return { ...rest, residualCount: residuals.length };
 }
 
-export function getConfidenceBand(predictedTc: number): { lower: number; upper: number } {
+export async function getConfidenceBand(predictedTc: number): Promise<{ lower: number; upper: number }> {
   if (!cachedCalibration) {
     if (!cachedModel) {
       return { lower: Math.max(0, predictedTc - 20), upper: predictedTc + 20 };
     }
-    cachedCalibration = computeCalibration(cachedModel);
+    cachedCalibration = await computeCalibration(cachedModel);
   }
 
   const relP90 = cachedCalibration.relativeErrorPercentiles.p90;
@@ -1553,9 +1651,9 @@ interface ModelVersionRecord {
 
 const versionHistory: ModelVersionRecord[] = [];
 
-function logModelVersion(trigger: string, datasetSize: number): ModelVersionRecord {
+async function logModelVersion(trigger: string, datasetSize: number): Promise<ModelVersionRecord> {
   modelVersion++;
-  const cal = cachedCalibration ?? computeCalibration(cachedModel!);
+  const cal = cachedCalibration ?? await computeCalibration(cachedModel!);
   const ensembleStats = getXGBEnsembleStats();
 
   let predVariance = 0;
@@ -1579,7 +1677,7 @@ function logModelVersion(trigger: string, datasetSize: number): ModelVersionReco
     const variances: number[] = [];
     for (const f of testFormulas) {
       try {
-        const features = extractFeatures(f);
+        const features = await extractFeatures(f);
         const x = featureVectorToArray(features, f);
         const result = predictEnsembleXGB(cachedEnsembleXGB, x);
         variances.push(result.std);
@@ -1728,10 +1826,10 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   datasetSize: number;
   newEntries: number;
 }> {
-  ensurePoolInitialized();
+  await ensurePoolInitialized();
 
-  trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
-  trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+  await trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+  await trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
   const existingFormulas = new Set<string>();
   for (const e of SUPERCON_TRAINING_DATA) existingFormulas.add(e.formula);
@@ -1750,7 +1848,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       pressureGPa: entry.pressureGPa,
     };
     SUPERCON_TRAINING_DATA.push(newEntry);
-    trainingPool.add(entry.formula, entry.tc, entry.pressureGPa);
+    await trainingPool.add(entry.formula, entry.tc, entry.pressureGPa);
     newFromEval++;
   }
 
@@ -1771,20 +1869,24 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
 
   invalidateModel();
   cachedModel = trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
-  cachedCalibration = computeCalibration(cachedModel);
+  await new Promise<void>(r => setImmediate(r));
+  cachedCalibration = await computeCalibration(cachedModel);
 
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    await new Promise<void>(r => setImmediate(r));
     cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    await new Promise<void>(r => setImmediate(r));
     cachedGlobalFeatureImportance = null;
     buildFeatureImportanceCache();
+    await new Promise<void>(r => setImmediate(r));
   }
 
   xgboostRetrainCount++;
   if (cycleCount != null) lastXGBoostRetrainCycle = cycleCount;
   lastRetrainCycle = Date.now();
 
-  const vr = logModelVersion("evaluated-retrain", X.length);
+  const vr = await logModelVersion("evaluated-retrain", X.length);
 
   if (shouldRetrainOnErrorRate()) {
     const correctedLR = hpLR * 0.6;
@@ -1796,14 +1898,18 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     );
     invalidateModel();
     cachedModel = trainGradientBoosting(X, y, hpTrees, correctedLR, correctedDepth);
-    cachedCalibration = computeCalibration(cachedModel);
+    await new Promise<void>(r => setImmediate(r));
+    cachedCalibration = await computeCalibration(cachedModel);
     if (X.length >= 30) {
       cachedEnsembleXGB = trainEnsembleXGB(X, y);
+      await new Promise<void>(r => setImmediate(r));
       cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+      await new Promise<void>(r => setImmediate(r));
       cachedGlobalFeatureImportance = null;
       buildFeatureImportanceCache();
+      await new Promise<void>(r => setImmediate(r));
     }
-    logModelVersion("error-rate-correction", X.length);
+    await logModelVersion("error-rate-correction", X.length);
   }
 
   try {
@@ -1852,22 +1958,22 @@ export function invalidateModel(): void {
   miedemaCache.clear();
 }
 
-export function surrogateScreen(formula: string, minTcThreshold: number = 5): {
+export async function surrogateScreen(formula: string, minTcThreshold: number = 5): Promise<{
   pass: boolean;
   predictedTc: number;
   score: number;
   reasoning: string[];
-} {
+}> {
   surrogateScreenCount++;
   try {
-    const features = extractFeatures(formula);
+    const features = await extractFeatures(formula);
 
     if (features.metallicity < 0.05) {
       surrogateRejectCount++;
       return { pass: false, predictedTc: 0, score: 0, reasoning: ["Deep insulator: metallicity < 0.05, not dopable"] };
     }
 
-    const result = gbPredict(features, formula);
+    const result = await gbPredict(features, formula);
     const predictedTc = Number.isFinite(result.tcPredicted) ? result.tcPredicted : 0;
 
     if (features.metallicity < 0.15) {
@@ -1945,10 +2051,10 @@ export async function incorporateSuccessData(formula: string, tc: number): Promi
 }
 
 export async function retrainWithAccumulatedData(): Promise<number> {
-  ensurePoolInitialized();
+  await ensurePoolInitialized();
 
-  trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
-  trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+  await trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+  await trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
   const { X, y } = trainingPool.getTrainingData();
 
@@ -1956,16 +2062,20 @@ export async function retrainWithAccumulatedData(): Promise<number> {
 
   invalidateModel();
   cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
-  cachedCalibration = computeCalibration(cachedModel);
+  await new Promise<void>(r => setImmediate(r));
+  cachedCalibration = await computeCalibration(cachedModel);
   if (X.length >= 30) {
     cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    await new Promise<void>(r => setImmediate(r));
     cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    await new Promise<void>(r => setImmediate(r));
     cachedGlobalFeatureImportance = null;
     buildFeatureImportanceCache();
+    await new Promise<void>(r => setImmediate(r));
   }
   lastRetrainCycle = Date.now();
 
-  logModelVersion("accumulated-retrain", X.length);
+  await logModelVersion("accumulated-retrain", X.length);
 
   const totalNew = successExamples.length + failureExamples.length;
   return totalNew;
@@ -1991,28 +2101,32 @@ export async function incorporateFailureData(): Promise<number> {
       isSuperconductor: false,
       pressureGPa: 0,
     });
-    trainingPool.add(formula, 0, 0);
+    await trainingPool.add(formula, 0, 0);
     added++;
   }
 
   if (added > 0) {
     invalidateModel();
-    ensurePoolInitialized();
+    await ensurePoolInitialized();
 
-    trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
+    await trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
     const { X, y } = trainingPool.getTrainingData();
 
     if (X.length >= 10) {
       cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
-      cachedCalibration = computeCalibration(cachedModel);
+      await new Promise<void>(r => setImmediate(r));
+      cachedCalibration = await computeCalibration(cachedModel);
       if (X.length >= 30) {
         cachedEnsembleXGB = trainEnsembleXGB(X, y);
+        await new Promise<void>(r => setImmediate(r));
         cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        await new Promise<void>(r => setImmediate(r));
         cachedGlobalFeatureImportance = null;
         buildFeatureImportanceCache();
+        await new Promise<void>(r => setImmediate(r));
       }
-      logModelVersion("failure-retrain", X.length);
+      await logModelVersion("failure-retrain", X.length);
     }
 
     if (failureExamples.length >= 10 && failureExamples.length % 10 === 0) {

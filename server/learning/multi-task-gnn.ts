@@ -222,7 +222,7 @@ function multiTaskCore(formula: string) {
   return { basePred, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut };
 }
 
-export function multiTaskPredict(formula: string, opts?: MultiTaskOptions): MultiTaskPrediction {
+export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions): Promise<MultiTaskPrediction> {
   const { basePred, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut } = multiTaskCore(formula);
 
   let electronic: any = null;
@@ -238,10 +238,10 @@ export function multiTaskPredict(formula: string, opts?: MultiTaskOptions): Mult
       electronic = computeElectronicStructure(formula, null);
       phonon = computePhononSpectrum(formula, electronic);
       coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
-      features = extractFeatures(formula);
+      features = await extractFeatures(formula);
     } catch {}
   } else {
-    try { features = extractFeatures(formula); } catch {}
+    try { features = await extractFeatures(formula); } catch {}
   }
 
   const bandGap = electronic
@@ -393,12 +393,12 @@ function computeMagneticMoment(formula: string, magneticOut: number[], corrStren
   return Math.max(0, sigmoid(magneticOut[0] ?? 0) * 0.5);
 }
 
-export function computePropertyGradient(
+export async function computePropertyGradient(
   formula: string,
   targetProperty: keyof MultiTaskPrediction,
   delta: number = 0.01
-): Record<string, number> {
-  const basePred = multiTaskPredict(formula, { skipPhysics: true });
+): Promise<Record<string, number>> {
+  const basePred = await multiTaskPredict(formula, { skipPhysics: true });
   const baseValue = Number(basePred[targetProperty]) || 0;
   const gradients: Record<string, number> = {};
 

@@ -100,15 +100,15 @@ function fetchGNNOnce(formula: string): CachedGNNResult {
   return { valid: false, predictedTc: 0, formationEnergy: 0, bandgap: 0 };
 }
 
-function predictAtPressure(
+async function predictAtPressure(
   formula: string,
   pressureGpa: number,
   baseFeatures: MLFeatureVector,
   gnn: CachedGNNResult
-): PressurePoint {
+): Promise<PressurePoint> {
   const overridden: MLFeatureVector = { ...baseFeatures, pressureGpa };
 
-  const xgbResult = gbPredict(overridden, formula);
+  const xgbResult = await gbPredict(overridden, formula);
   const xgbTc = Math.max(0, xgbResult.tcPredicted);
 
   let gnnTc = 0;
@@ -139,7 +139,7 @@ function predictAtPressure(
   let enthalpy = 0;
   let enthalpyStable = true;
   try {
-    const hPoint = computeEnthalpy(formula, pressureGpa);
+    const hPoint = await computeEnthalpy(formula, pressureGpa);
     enthalpy = hPoint.enthalpy;
     enthalpyStable = hPoint.isStable;
   } catch {
@@ -161,13 +161,13 @@ function predictAtPressure(
   };
 }
 
-function computeUncertainRegionsFromFeatures(formula: string, baseFeatures: MLFeatureVector): UncertainPressureRegion[] {
+async function computeUncertainRegionsFromFeatures(formula: string, baseFeatures: MLFeatureVector): Promise<UncertainPressureRegion[]> {
   const uncertainties: { pressure: number; uncertainty: number }[] = [];
 
   for (let p = 0; p <= PRESSURE_MAX; p += 20) {
     try {
       const overridden: MLFeatureVector = { ...baseFeatures, pressureGpa: p };
-      const xgbResult = gbPredictWithUncertainty(overridden, formula);
+      const xgbResult = await gbPredictWithUncertainty(overridden, formula);
       uncertainties.push({ pressure: p, uncertainty: xgbResult.normalizedUncertainty });
     } catch {
       uncertainties.push({ pressure: p, uncertainty: 0.5 });
@@ -225,17 +225,17 @@ function computeUncertainRegionsFromFeatures(formula: string, baseFeatures: MLFe
   return regions.sort((a, b) => b.maxUncertainty - a.maxUncertainty);
 }
 
-export function predictPressureCurve(formula: string): PressureCurve {
+export async function predictPressureCurve(formula: string): Promise<PressureCurve> {
   const normFormula = normalizeFormula(formula);
   const cached = pressureCurveCache.get(normFormula);
   if (cached) return cached;
 
-  const baseFeatures = extractFeatures(normFormula, { pressureGpa: 0 } as any);
+  const baseFeatures = await extractFeatures(normFormula, { pressureGpa: 0 } as Partial<import("@shared/schema").Material>);
   const gnn = fetchGNNOnce(normFormula);
 
   const coarsePoints: PressurePoint[] = [];
   for (let p = PRESSURE_MIN; p <= PRESSURE_MAX; p += PRESSURE_STEP) {
-    coarsePoints.push(predictAtPressure(normFormula, p, baseFeatures, gnn));
+    coarsePoints.push(await predictAtPressure(normFormula, p, baseFeatures, gnn));
   }
 
   const refinedPressures = new Set<number>();
@@ -257,7 +257,7 @@ export function predictPressureCurve(formula: string): PressureCurve {
   const existingPressures = new Set(coarsePoints.map(p => p.pressureGpa));
   for (const rp of refinedPressures) {
     if (!existingPressures.has(rp) && rp >= PRESSURE_MIN && rp <= PRESSURE_MAX) {
-      allPoints.push(predictAtPressure(normFormula, rp, baseFeatures, gnn));
+      allPoints.push(await predictAtPressure(normFormula, rp, baseFeatures, gnn));
     }
   }
   allPoints.sort((a, b) => a.pressureGpa - b.pressureGpa);
@@ -282,7 +282,7 @@ export function predictPressureCurve(formula: string): PressureCurve {
   if (maxSlope > SENSITIVITY_THRESHOLD * 2) sensitivityCategory = "high";
   else if (maxSlope > SENSITIVITY_THRESHOLD) sensitivityCategory = "moderate";
 
-  const uncertainRegions = computeUncertainRegionsFromFeatures(normFormula, baseFeatures);
+  const uncertainRegions = await computeUncertainRegionsFromFeatures(normFormula, baseFeatures);
 
   const curve: PressureCurve = {
     formula: normFormula,
@@ -302,8 +302,8 @@ export function predictPressureCurve(formula: string): PressureCurve {
   return curve;
 }
 
-export function findOptimalPressure(formula: string): { optimalPressureGpa: number; maxTc: number; curve: PressureCurve } {
-  const curve = predictPressureCurve(formula);
+export async function findOptimalPressure(formula: string): Promise<{ optimalPressureGpa: number; maxTc: number; curve: PressureCurve }> {
+  const curve = await predictPressureCurve(formula);
   return {
     optimalPressureGpa: curve.optimalPressureGpa,
     maxTc: curve.maxTc,
@@ -311,8 +311,8 @@ export function findOptimalPressure(formula: string): { optimalPressureGpa: numb
   };
 }
 
-export function pressureSensitivity(formula: string): PressureSensitivityResult {
-  const curve = predictPressureCurve(formula);
+export async function pressureSensitivity(formula: string): Promise<PressureSensitivityResult> {
+  const curve = await predictPressureCurve(formula);
   const points = curve.points;
 
   if (points.length < 2) {
@@ -435,14 +435,14 @@ function getRecentAdaptiveSamples(n: number): AdaptivePressureSample[] {
   return result;
 }
 
-export function identifyUncertainPressureRegions(formula: string): UncertainPressureRegion[] {
-  const curve = predictPressureCurve(formula);
+export async function identifyUncertainPressureRegions(formula: string): Promise<UncertainPressureRegion[]> {
+  const curve = await predictPressureCurve(formula);
   return curve.uncertainRegions;
 }
 
-export function generateAdaptivePressureSamples(formula: string, maxSamples: number = 8): AdaptivePressureSample[] {
+export async function generateAdaptivePressureSamples(formula: string, maxSamples: number = 8): Promise<AdaptivePressureSample[]> {
   const normFormula = normalizeFormula(formula);
-  const regions = identifyUncertainPressureRegions(normFormula);
+  const regions = await identifyUncertainPressureRegions(normFormula);
   const samples: AdaptivePressureSample[] = [];
   const existingCoverage = pressureCoverageMap.get(normFormula) ?? new Set<number>();
 

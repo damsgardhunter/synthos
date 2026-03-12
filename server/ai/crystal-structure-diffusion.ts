@@ -784,12 +784,12 @@ const diffusionStats = {
   recentResults: [] as { formula: string; tc: number; motif: string; steps: number; source: string }[],
 };
 
-export function runCrystalDiffusionCycle(
+export async function runCrystalDiffusionCycle(
   count: number = 20,
   targetTc: number = 200,
   diffusionSteps: number = 30,
   sharedScreenedSet?: Set<string>
-): DiffusedCrystal[] {
+): Promise<DiffusedCrystal[]> {
   const results: DiffusedCrystal[] = [];
   const motifs = SC_MOTIF_LIBRARY;
   const seenFormulas = new Set<string>();
@@ -878,11 +878,11 @@ export function runCrystalDiffusionCycle(
       let stabilityScore = 0.5;
 
       try {
-        const screen = surrogateScreen(formula, 2);
+        const screen = await surrogateScreen(formula, 2);
         if (!screen.pass) continue;
         predictedTc = screen.predictedTc;
 
-        const features = extractFeatures(formula);
+        const features = await extractFeatures(formula);
         lambda = features.electronPhononLambda ?? 0;
 
         const electronic = computeElectronicStructure(formula, null);
@@ -1123,12 +1123,12 @@ function scoreBasedDenoising(
   return bestConfig;
 }
 
-export function runDistributionBasedDiffusion(
+export async function runDistributionBasedDiffusion(
   count: number = 15,
   targetTc: number = 200,
   steps: number = 30,
   sharedScreenedSet?: Set<string>
-): DiffusedCrystal[] {
+): Promise<DiffusedCrystal[]> {
   const results: DiffusedCrystal[] = [];
   const seenFormulas = new Set<string>();
 
@@ -1210,11 +1210,11 @@ export function runDistributionBasedDiffusion(
       let stabilityScore = 0.5;
 
       try {
-        const screen = surrogateScreen(formula, 2);
+        const screen = await surrogateScreen(formula, 2);
         if (!screen.pass) continue;
         predictedTc = screen.predictedTc;
 
-        const features = extractFeatures(formula);
+        const features = await extractFeatures(formula);
         lambda = features.electronPhononLambda ?? 0;
 
         const electronic = computeElectronicStructure(formula, null);

@@ -322,7 +322,7 @@ export function getExplorationWeight(): number {
   return computeExplorationWeight();
 }
 
-export function computeSurrogateFitness(formula: string, crystalPrototype?: string): SurrogateFitnessResult {
+export async function computeSurrogateFitness(formula: string, crystalPrototype?: string): Promise<SurrogateFitnessResult> {
   const family = classifyFamily(formula);
 
   let gnnPred: GNNPredictionWithUncertainty | null = null;
@@ -333,8 +333,8 @@ export function computeSurrogateFitness(formula: string, crystalPrototype?: stri
   } catch {}
 
   try {
-    const features = extractFeatures(formula);
-    xgbPred = gbPredictWithUncertainty(features, formula);
+    const features = await extractFeatures(formula);
+    xgbPred = await gbPredictWithUncertainty(features, formula);
   } catch {}
 
   const gnnTc = gnnPred?.tc ?? 0;

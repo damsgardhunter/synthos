@@ -727,9 +727,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/ml-calibration", async (req, res) => {
     try {
-      const calibration = getCalibrationData();
+      const calibration = await getCalibrationData();
       const tc = req.query.tc ? Number(req.query.tc) : undefined;
-      const confidenceBand = tc !== undefined && Number.isFinite(tc) ? getConfidenceBand(tc) : undefined;
+      const confidenceBand = tc !== undefined && Number.isFinite(tc) ? await getConfidenceBand(tc) : undefined;
       res.json({ ...calibration, ...(confidenceBand ? { confidenceBand } : {}) });
     } catch (e) {
       res.status(500).json({ error: "Failed to compute ML calibration" });
@@ -1333,7 +1333,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         metallicRequired: true,
         phononStable: true,
       };
-      const result = runDifferentiableOptimization(formula, target, Number(maxSteps ?? 20));
+      const result = await runDifferentiableOptimization(formula, target, Number(maxSteps ?? 20));
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Gradient optimization failed", detail: e.message?.slice(0, 200) });
@@ -1354,7 +1354,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         metallicRequired: true,
         phononStable: true,
       };
-      const cycle = runGradientDescentCycle(target, Number(seedCount ?? 6), Number(stepsPerSeed ?? 15));
+      const cycle = await runGradientDescentCycle(target, Number(seedCount ?? 6), Number(stepsPerSeed ?? 15));
       res.json(cycle);
     } catch (e: any) {
       res.status(500).json({ error: "Batch gradient optimization failed", detail: e.message?.slice(0, 200) });
@@ -1378,7 +1378,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       const numMotifCount = Number(motifCount ?? 4);
       const numElementsPerSite = Number(elementsPerSite ?? 3);
-      const results = runStructureFirstDesign(
+      const results = await runStructureFirstDesign(
         numTargetTc,
         Number.isFinite(numMotifCount) && numMotifCount > 0 ? numMotifCount : 4,
         Number.isFinite(numElementsPerSite) && numElementsPerSite > 0 ? numElementsPerSite : 3,
@@ -1443,13 +1443,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/sc-pillars/evaluate", writeLimiter, (req, res) => {
+  app.post("/api/sc-pillars/evaluate", writeLimiter, async (req, res) => {
     try {
       const { formula, targets, maxPressureGPa } = req.body;
       if (!formula || typeof formula !== "string") {
         return res.status(400).json({ error: "formula is required" });
       }
-      const result = evaluatePillars(formula, targets ?? DEFAULT_PILLAR_TARGETS, {
+      const result = await evaluatePillars(formula, targets ?? DEFAULT_PILLAR_TARGETS, {
         maxPressureGPa: typeof maxPressureGPa === "number" ? maxPressureGPa : undefined,
       });
       res.json(result);
@@ -1458,10 +1458,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/sc-pillars/generate", writeLimiter, (req, res) => {
+  app.post("/api/sc-pillars/generate", writeLimiter, async (req, res) => {
     try {
       const { candidatesPerTemplate, targets } = req.body;
-      const result = runPillarGuidedGeneration(
+      const result = await runPillarGuidedGeneration(
         targets ?? DEFAULT_PILLAR_TARGETS,
         Number(candidatesPerTemplate ?? 6),
       );
@@ -2395,11 +2395,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/xgboost/uncertainty/:formula", generalLimiter, (req, res) => {
+  app.get("/api/xgboost/uncertainty/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const features = extractFeatures(formula);
-      const result = gbPredictWithUncertainty(features, formula);
+      const features = await extractFeatures(formula);
+      const result = await gbPredictWithUncertainty(features, formula);
       res.json({ formula, ...result });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute XGB uncertainty", detail: e.message?.slice(0, 200) });
@@ -3205,10 +3205,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/symbolic-discovery/run", writeLimiter, (req, res) => {
+  app.post("/api/symbolic-discovery/run", writeLimiter, async (req, res) => {
     try {
       const config: Partial<SymbolicDiscoveryConfig> = req.body.config ?? {};
-      const dataset = generateSyntheticDataset(50);
+      const dataset = await generateSyntheticDataset(50);
       const discovered = runSymbolicPhysicsDiscovery(dataset, config);
       const feedback = generateDiscoveryFeedback(discovered);
       res.json({
@@ -3236,9 +3236,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/physics-discovery-dataset", generalLimiter, (_req, res) => {
+  app.get("/api/physics-discovery-dataset", generalLimiter, async (_req, res) => {
     try {
-      const dataset = generateSyntheticDataset(50);
+      const dataset = await generateSyntheticDataset(50);
       res.json({
         records: dataset,
         featureCount: PHYSICS_VARIABLES.length,
@@ -3250,11 +3250,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/physics-discovery-dataset/record", writeLimiter, (req, res) => {
+  app.post("/api/physics-discovery-dataset/record", writeLimiter, async (req, res) => {
     try {
       const { formula } = req.body;
       if (!formula) return res.status(400).json({ error: "formula is required" });
-      const record = buildPhysicsDiscoveryRecord(formula);
+      const record = await buildPhysicsDiscoveryRecord(formula);
       res.json(record);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to build record", detail: e.message?.slice(0, 200) });
@@ -3398,10 +3398,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/causal-discovery/run", writeLimiter, (req, res) => {
+  app.post("/api/causal-discovery/run", writeLimiter, async (req, res) => {
     try {
       const count = req.body?.datasetSize ?? 60;
-      const dataset = generateCausalDataset(Math.min(count, 100));
+      const dataset = await generateCausalDataset(Math.min(count, 100));
       const result = runCausalDiscovery(dataset);
       res.json({
         graphNodes: result.graph.nodes.length,
@@ -3420,7 +3420,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/causal-discovery/intervene", writeLimiter, (req, res) => {
+  app.post("/api/causal-discovery/intervene", writeLimiter, async (req, res) => {
     try {
       const { formula, variable, newValue } = req.body;
       if (!formula || !variable || newValue === undefined) {
@@ -3430,7 +3430,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!graph) {
         return res.status(400).json({ error: "No causal graph discovered yet. Run discovery first." });
       }
-      const record = buildCausalDataRecord(formula);
+      const record = await buildCausalDataRecord(formula);
       const result = simulateIntervention(record, variable, newValue, graph);
       res.json(result);
     } catch (e: any) {
@@ -3438,7 +3438,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/causal-discovery/counterfactual", writeLimiter, (req, res) => {
+  app.post("/api/causal-discovery/counterfactual", writeLimiter, async (req, res) => {
     try {
       const { formula, variable, modificationPercent } = req.body;
       if (!formula || !variable || modificationPercent === undefined) {
@@ -3448,7 +3448,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!graph) {
         return res.status(400).json({ error: "No causal graph discovered yet. Run discovery first." });
       }
-      const record = buildCausalDataRecord(formula);
+      const record = await buildCausalDataRecord(formula);
       const result = runCounterfactual(record, variable, modificationPercent, graph);
       res.json(result);
     } catch (e: any) {
@@ -3456,10 +3456,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/causal-discovery/dataset", writeLimiter, (req, res) => {
+  app.post("/api/causal-discovery/dataset", writeLimiter, async (req, res) => {
     try {
       const count = req.body?.count ?? 60;
-      const dataset = generateCausalDataset(Math.min(count, 100));
+      const dataset = await generateCausalDataset(Math.min(count, 100));
       res.json({ count: dataset.length, records: dataset.slice(0, 20) });
     } catch (e: any) {
       res.status(500).json({ error: "Dataset generation failed", detail: e.message?.slice(0, 200) });
@@ -3475,12 +3475,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/pressure-curves/:formula", generalLimiter, (req, res) => {
+  app.get("/api/pressure-curves/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const curve = predictPressureCurve(formula);
-      const optimal = findOptimalPressure(formula);
-      const sensitivity = pressureSensitivity(formula);
+      const curve = await predictPressureCurve(formula);
+      const optimal = await findOptimalPressure(formula);
+      const sensitivity = await pressureSensitivity(formula);
       res.json({ curve, optimal, sensitivity });
     } catch (e: any) {
       res.status(500).json({ error: "Pressure curve failed", detail: e.message?.slice(0, 200) });
@@ -3496,10 +3496,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/phase-transitions/:formula", generalLimiter, (req, res) => {
+  app.get("/api/phase-transitions/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const transitions = detectPhaseTransitions(formula);
+      const transitions = await detectPhaseTransitions(formula);
       res.json({ formula, transitions, count: transitions.length });
     } catch (e: any) {
       res.status(500).json({ error: "Phase transition detection failed", detail: e.message?.slice(0, 200) });
@@ -3525,11 +3525,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/enthalpy/:formula", generalLimiter, (req, res) => {
+  app.get("/api/enthalpy/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const curve = computeEnthalpyPressureCurve(formula);
-      const stabilityWindow = findStabilityPressureWindow(formula);
+      const curve = await computeEnthalpyPressureCurve(formula);
+      const stabilityWindow = await findStabilityPressureWindow(formula);
       res.json({ formula, curve, stabilityWindow });
     } catch (e: any) {
       res.status(500).json({ error: "Enthalpy computation failed", detail: e.message?.slice(0, 200) });
@@ -3545,24 +3545,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/pressure-profiles/:formula", generalLimiter, (req, res) => {
+  app.get("/api/pressure-profiles/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const profile = buildPressureResponseProfile(formula);
+      const profile = await buildPressureResponseProfile(formula);
       res.json(profile);
     } catch (e: any) {
       res.status(500).json({ error: "Pressure profile failed", detail: e.message?.slice(0, 200) });
     }
   });
 
-  app.get("/api/pressure-profiles/:formula/interpolate", generalLimiter, (req, res) => {
+  app.get("/api/pressure-profiles/:formula/interpolate", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
       const pressure = parseFloat(req.query.pressure as string ?? "0");
       if (isNaN(pressure) || pressure < 0 || pressure > 400) {
         return res.status(400).json({ error: "Invalid pressure parameter (0-400 GPa)" });
       }
-      const result = interpolateAtPressure(formula, pressure);
+      const result = await interpolateAtPressure(formula, pressure);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Interpolation failed", detail: e.message?.slice(0, 200) });
@@ -3578,10 +3578,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/bayesian-pressure/:formula", generalLimiter, (req, res) => {
+  app.get("/api/bayesian-pressure/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const result = optimizePressureForFormula(formula);
+      const result = await optimizePressureForFormula(formula);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Bayesian pressure optimization failed", detail: e.message?.slice(0, 200) });
@@ -3607,17 +3607,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/pressure-screening/:formula", generalLimiter, (req, res) => {
+  app.get("/api/pressure-screening/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
       const pressure = req.query.pressure ? parseFloat(req.query.pressure as string) : undefined;
 
       if (pressure !== undefined) {
-        const result = fastPressureScreen(formula, pressure);
+        const result = await fastPressureScreen(formula, pressure);
         return res.json(result);
       }
 
-      const best = findBestScreeningPressure(formula);
+      const best = await findBestScreeningPressure(formula);
       const cluster = assignPressureCluster(best.bestPressure);
       res.json({ ...best, cluster: cluster.id, clusterLabel: cluster.label });
     } catch (e: any) {
@@ -3625,10 +3625,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/pressure-screening/:formula/sweep", generalLimiter, (req, res) => {
+  app.get("/api/pressure-screening/:formula/sweep", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const results = batchPressureScreen(formula);
+      const results = await batchPressureScreen(formula);
       res.json({ formula, results, count: results.length });
     } catch (e: any) {
       res.status(500).json({ error: "Pressure sweep failed", detail: e.message?.slice(0, 200) });
@@ -3975,10 +3975,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   }, 110000);
 
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
       console.log("[Benchmark] Running reference compound predictions on startup...");
-      runReferenceBenchmark();
+      await runReferenceBenchmark();
       console.log("[Benchmark] Reference benchmark complete.");
     } catch (e: any) {
       console.error("[Benchmark] Startup benchmark failed:", e.message);
@@ -4318,7 +4318,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!formula || formula.length === 0) {
         return res.status(400).json({ error: "Formula is required" });
       }
-      const prediction = predictStabilityScreen(formula);
+      const prediction = await predictStabilityScreen(formula);
       res.json({ formula, ...prediction });
     } catch (e) {
       res.status(500).json({ error: "Failed to predict stability" });
@@ -4526,7 +4526,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/model-diagnostics/report", generalLimiter, async (_req, res) => {
     try {
-      const report = getComprehensiveModelDiagnostics();
+      const report = await getComprehensiveModelDiagnostics();
       res.json(report);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch model diagnostics", detail: e.message });
@@ -4535,7 +4535,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/model-diagnostics/health", generalLimiter, async (_req, res) => {
     try {
-      const health = getModelHealthSummary();
+      const health = await getModelHealthSummary();
       res.json(health);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch model health", detail: e.message });
@@ -4554,7 +4554,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/model-experiments/propose", engineLimiter, async (_req, res) => {
     try {
-      const report = getModelDiagnosticsForLLM();
+      const report = await getModelDiagnosticsForLLM();
       const proposals = await proposeModelExperiments(report);
       if (proposals.length > 0) {
         const topProposal = proposals.sort((a, b) => a.priority - b.priority)[0];
@@ -4588,7 +4588,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/model-improvement/stats", generalLimiter, async (_req, res) => {
     try {
-      const stats = getModelImprovementStats();
+      const stats = await getModelImprovementStats();
       res.json(stats);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to fetch model improvement stats", detail: e.message });
@@ -4813,7 +4813,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!formula || formula.length < 2 || formula.length > 100) {
         return res.status(400).json({ error: "Invalid formula" });
       }
-      const result = computeUnifiedCI(formula);
+      const result = await computeUnifiedCI(formula);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute unified CI", detail: e.message });
@@ -4864,7 +4864,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/calibration/recalibrate", engineLimiter, async (_req, res) => {
     try {
-      const state = recalibrateFromLedger();
+      const state = await recalibrateFromLedger();
       res.json({ status: "recalibrated", ...state });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to recalibrate", detail: e.message });
@@ -4877,7 +4877,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!formula || formula.length < 2 || formula.length > 100) {
         return res.status(400).json({ error: "Invalid formula" });
       }
-      const ci = computeUnifiedCI(formula);
+      const ci = await computeUnifiedCI(formula);
       const conformalResult = {
         formula,
         rawCI95: ci.tcCI95,
@@ -5343,13 +5343,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   let benchmarkCache: { results: BenchmarkResult[]; computedAt: number } | null = null;
 
-  function runReferenceBenchmark(): BenchmarkResult[] {
+  async function runReferenceBenchmark(): Promise<BenchmarkResult[]> {
     const results: BenchmarkResult[] = [];
 
     for (const ref of REFERENCE_COMPOUNDS) {
       try {
-        const features = extractFeatures(ref.formula);
-        const xgb = gbPredictWithUncertainty(features, ref.formula);
+        const features = await extractFeatures(ref.formula);
+        const xgb = await gbPredictWithUncertainty(features, ref.formula);
         const gnn = gnnPredictWithUncertainty(ref.formula);
 
         const xgboostTc = xgb.tcPredicted ?? 0;
@@ -5430,7 +5430,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/reference-benchmark/refresh", engineLimiter, async (_req, res) => {
     try {
-      const results = runReferenceBenchmark();
+      const results = await runReferenceBenchmark();
       res.json({ results, computedAt: Date.now() });
     } catch (e: any) {
       res.status(500).json({ error: "Benchmark refresh failed", detail: e.message });
@@ -5717,7 +5717,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const formula = decodeURIComponent(req.params.formula);
       const fractions = req.body?.fractions ?? [0.02, 0.05, 0.10, 0.15, 0.20];
       const maxDopants = Math.min(4, Number(req.body?.maxDopants) || 2);
-      const result = runDopingSearchLoop(formula, fractions, maxDopants);
+      const result = await runDopingSearchLoop(formula, fractions, maxDopants);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to run doping search", detail: e.message });

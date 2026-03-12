@@ -112,12 +112,12 @@ function estimateDecompositionEnthalpy(formula: string, pressureGpa: number): nu
   return decompH;
 }
 
-export function computeEnthalpy(formula: string, pressureGpa: number): EnthalpyPoint {
+export async function computeEnthalpy(formula: string, pressureGpa: number): Promise<EnthalpyPoint> {
   const formationE = computeMiedemaFormationEnergy(formula);
 
   let features;
   try {
-    features = extractFeatures(formula, { pressureGpa } as any);
+    features = await extractFeatures(formula, { pressureGpa } as any);
   } catch {
     features = null;
   }
@@ -147,8 +147,8 @@ export function computeEnthalpy(formula: string, pressureGpa: number): EnthalpyP
   };
 }
 
-export function computeEnthalpyStability(formula: string, pressureGpa: number): EnthalpyStabilityResult {
-  const point = computeEnthalpy(formula, pressureGpa);
+export async function computeEnthalpyStability(formula: string, pressureGpa: number): Promise<EnthalpyStabilityResult> {
+  const point = await computeEnthalpy(formula, pressureGpa);
 
   const decompH = estimateDecompositionEnthalpy(formula, pressureGpa);
   const decompositionEnthalpy = point.totalEnergy + decompH;
@@ -215,7 +215,7 @@ function findRefinementPressures(points: EnthalpyPoint[]): number[] {
   return accepted;
 }
 
-export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
+export async function computeEnthalpyPressureCurve(formula: string): Promise<EnthalpyCurve> {
   const cacheKey = normalizeFormula(formula);
   const cached = enthalpyCache.get(cacheKey);
   if (cached && Date.now() - cached.computedAt < 30 * 60 * 1000) {
@@ -225,7 +225,7 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
   const points: EnthalpyPoint[] = [];
   for (const p of PRESSURE_STEPS) {
     try {
-      points.push(computeEnthalpy(formula, p));
+      points.push(await computeEnthalpy(formula, p));
     } catch {
       continue;
     }
@@ -234,7 +234,7 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
   const refinePressures = findRefinementPressures(points);
   for (const p of refinePressures.slice(0, 10)) {
     try {
-      points.push(computeEnthalpy(formula, p));
+      points.push(await computeEnthalpy(formula, p));
     } catch {
       continue;
     }
@@ -245,7 +245,7 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
   const secondPass = findRefinementPressures(points);
   for (const p of secondPass.slice(0, 5)) {
     try {
-      points.push(computeEnthalpy(formula, p));
+      points.push(await computeEnthalpy(formula, p));
     } catch {
       continue;
     }
@@ -294,15 +294,15 @@ export function computeEnthalpyPressureCurve(formula: string): EnthalpyCurve {
   return curve;
 }
 
-export function findStabilityPressureWindow(formula: string): {
+export async function findStabilityPressureWindow(formula: string): Promise<{
   formula: string;
   hasStableWindow: boolean;
   stableRange: { start: number; end: number } | null;
   windowWidth: number;
   minEnthalpyPressure: number;
   minEnthalpy: number;
-} {
-  const curve = computeEnthalpyPressureCurve(formula);
+}> {
+  const curve = await computeEnthalpyPressureCurve(formula);
 
   return {
     formula,
@@ -314,8 +314,8 @@ export function findStabilityPressureWindow(formula: string): {
   };
 }
 
-export function computeEnthalpyAtPressure(formula: string, pressureGpa: number): number {
-  const point = computeEnthalpy(formula, pressureGpa);
+export async function computeEnthalpyAtPressure(formula: string, pressureGpa: number): Promise<number> {
+  const point = await computeEnthalpy(formula, pressureGpa);
   return point.enthalpy;
 }
 

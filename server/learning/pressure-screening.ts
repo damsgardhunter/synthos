@@ -217,12 +217,12 @@ export function fastVolumeAtPressure(formula: string, pressureGpa: number, preco
   };
 }
 
-export function fastPressureScreen(
+export async function fastPressureScreen(
   formula: string,
   pressureGpa: number,
   tcThreshold: number = 10,
   precomputedCounts?: Record<string, number>
-): FastPressureEstimate {
+): Promise<FastPressureEstimate> {
   const counts = precomputedCounts ?? parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   const vol = fastVolumeAtPressure(formula, pressureGpa, counts);
@@ -230,9 +230,9 @@ export function fastPressureScreen(
   let estimatedTc = 0;
   try {
     const mat = { pressureGpa } as any;
-    const features = extractFeatures(formula, mat);
+    const features = await extractFeatures(formula, mat);
     if (features) {
-      const xgbResult = gbPredict(features, formula);
+      const xgbResult = await gbPredict(features, formula);
       if (xgbResult && Number.isFinite(xgbResult.tcPredicted)) {
         estimatedTc = Math.max(0, xgbResult.tcPredicted);
       }
@@ -283,23 +283,23 @@ export function fastPressureScreen(
   };
 }
 
-export function batchPressureScreen(
+export async function batchPressureScreen(
   formula: string,
   pressures?: number[],
   tcThreshold: number = 10
-): FastPressureEstimate[] {
+): Promise<FastPressureEstimate[]> {
   const pts = pressures ?? [0, 5, 10, 25, 50, 75, 100, 150, 200, 250, 300, 350];
   const counts = parseFormulaCounts(formula);
-  return pts.map(p => fastPressureScreen(formula, p, tcThreshold, counts));
+  return Promise.all(pts.map(p => fastPressureScreen(formula, p, tcThreshold, counts)));
 }
 
-export function findBestScreeningPressure(formula: string): {
+export async function findBestScreeningPressure(formula: string): Promise<{
   bestPressure: number;
   bestTc: number;
   bestScore: number;
   screenResults: FastPressureEstimate[];
-} {
-  const results = batchPressureScreen(formula);
+}> {
+  const results = await batchPressureScreen(formula);
   let bestIdx = 0;
   let bestScore = -1;
   for (let i = 0; i < results.length; i++) {
