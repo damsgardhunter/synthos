@@ -5,7 +5,7 @@ import { getAllPhysicsResults, getDerivedFeatures, type PhysicsResult, type Deri
 export interface UnifiedTrainingRecord {
   formula: string;
   pressure: number;
-  Tc: number;
+  Tc: number | null;
   lambda: number | null;
   omegaLog: number | null;
   dosAtEF: number | null;
@@ -21,6 +21,12 @@ export interface UnifiedTrainingRecord {
   timestamp: number;
 }
 
+const TIER_RANK: Record<string, number> = {
+  "surrogate": 1,
+  "xtb": 2,
+  "full-dft": 3,
+};
+
 export interface DatasetSnapshot {
   totalRecords: number;
   withPhysicsResults: number;
@@ -30,6 +36,7 @@ export interface DatasetSnapshot {
   tcDistribution: { min: number; max: number; mean: number; median: number; p90: number };
   featureCoverage: Record<string, number>;
   snapshotTimestamp: number;
+  deltaRecords: number;
 }
 
 const snapshotHistory: DatasetSnapshot[] = [];
@@ -41,8 +48,27 @@ let dataVersion = 0;
 let cachedDataVersion = -1;
 let cachedSnapshotVersion = -1;
 
+const derivedCache = new Map<string, DerivedFeatures | null>();
+
 export function invalidateUnifiedCache(): void {
   dataVersion++;
+}
+
+function hasPhysicsFields(rec: { lambda: number | null; omegaLog: number | null; dosAtEF: number | null }): boolean {
+  return rec.lambda !== null || rec.omegaLog !== null || rec.dosAtEF !== null;
+}
+
+function pressureKey(pressure: number): string {
+  return pressure.toFixed(2);
+}
+
+function getCachedDerived(formula: string): DerivedFeatures | null {
+  if (derivedCache.has(formula)) {
+    return derivedCache.get(formula)!;
+  }
+  const d = getDerivedFeatures(formula);
+  derivedCache.set(formula, d ?? null);
+  return d ?? null;
 }
 
 function rebuildIfDirty(): UnifiedTrainingRecord[] {
@@ -53,11 +79,12 @@ function rebuildIfDirty(): UnifiedTrainingRecord[] {
   const records = new Map<string, UnifiedTrainingRecord>();
 
   for (const sd of SUPERCON_TRAINING_DATA) {
-    const key = `${sd.formula}|0`;
+    const tc = (sd as any).tc ?? (sd as any).Tc;
+    const key = `${sd.formula}|${pressureKey(0)}`;
     records.set(key, {
       formula: sd.formula,
       pressure: 0,
-      Tc: (sd as any).tc ?? (sd as any).Tc ?? 0,
+      Tc: typeof tc === "number" ? tc : null,
       lambda: null,
       omegaLog: null,
       dosAtEF: null,
@@ -76,7 +103,7 @@ function rebuildIfDirty(): UnifiedTrainingRecord[] {
 
   const groundTruth = getGroundTruthDataset();
   for (const dp of groundTruth) {
-    const key = `${dp.formula}|${Math.round(dp.pressure)}`;
+    const key = `${dp.formula}|${pressureKey(dp.pressure)}`;
     records.set(key, {
       formula: dp.formula,
       pressure: dp.pressure,
@@ -92,16 +119,19 @@ function rebuildIfDirty(): UnifiedTrainingRecord[] {
       source: dp.source,
       tier: dp.source === "full-dft" ? "full-dft" : dp.source === "xtb" ? "xtb" : "surrogate",
       derived: null,
-      hasPhysicsResult: false,
+      hasPhysicsResult: hasPhysicsFields({ lambda: dp.lambda, omegaLog: dp.omega_log, dosAtEF: dp.DOS_EF }),
       timestamp: dp.timestamp,
     });
   }
 
   const physicsResults = getAllPhysicsResults();
   for (const pr of physicsResults) {
-    const key = `${pr.formula}|${Math.round(pr.pressure)}`;
+    const key = `${pr.formula}|${pressureKey(pr.pressure)}`;
     const existing = records.get(key);
     if (existing) {
+      const existingRank = TIER_RANK[existing.tier] ?? 0;
+      const incomingRank = TIER_RANK[pr.tier] ?? 0;
+
       existing.lambda = pr.lambda;
       existing.omegaLog = pr.omegaLog;
       existing.dosAtEF = pr.dosAtEF;
@@ -111,13 +141,15 @@ function rebuildIfDirty(): UnifiedTrainingRecord[] {
       existing.formationEnergy = pr.formationEnergy;
       existing.bandGap = pr.bandGap;
       existing.hasPhysicsResult = true;
-      existing.tier = pr.tier;
+      if (incomingRank >= existingRank) {
+        existing.tier = pr.tier;
+      }
       if (pr.tc > 0) existing.Tc = pr.tc;
     } else {
       records.set(key, {
         formula: pr.formula,
         pressure: pr.pressure,
-        Tc: pr.tc,
+        Tc: pr.tc > 0 ? pr.tc : null,
         lambda: pr.lambda,
         omegaLog: pr.omegaLog,
         dosAtEF: pr.dosAtEF,
@@ -136,10 +168,7 @@ function rebuildIfDirty(): UnifiedTrainingRecord[] {
   }
 
   for (const [, record] of records) {
-    const derived = getDerivedFeatures(record.formula);
-    if (derived) {
-      record.derived = derived;
-    }
+    record.derived = getCachedDerived(record.formula);
   }
 
   cachedDataset = Array.from(records.values());
@@ -173,7 +202,7 @@ function computeSnapshotFromDataset(dataset: UnifiedTrainingRecord[]): DatasetSn
     tierBreakdown[r.tier] = (tierBreakdown[r.tier] ?? 0) + 1;
     if (r.hasPhysicsResult) withPhysics++;
     if (r.derived) withDerived++;
-    if (r.Tc > 0) tcValues.push(r.Tc);
+    if (r.Tc !== null && r.Tc > 0) tcValues.push(r.Tc);
     if (r.lambda !== null) featureCounts.lambda++;
     if (r.omegaLog !== null) featureCounts.omegaLog++;
     if (r.dosAtEF !== null) featureCounts.dosAtEF++;
@@ -192,6 +221,10 @@ function computeSnapshotFromDataset(dataset: UnifiedTrainingRecord[]): DatasetSn
     p90: tcValues.length > 0 ? tcValues[Math.floor(n * 0.9)] : 0,
   };
 
+  const prevTotal = snapshotHistory.length > 0
+    ? snapshotHistory[snapshotHistory.length - 1].totalRecords
+    : dataset.length;
+
   const snapshot: DatasetSnapshot = {
     totalRecords: dataset.length,
     withPhysicsResults: withPhysics,
@@ -201,6 +234,7 @@ function computeSnapshotFromDataset(dataset: UnifiedTrainingRecord[]): DatasetSn
     tcDistribution: tcDist,
     featureCoverage: featureCounts,
     snapshotTimestamp: Date.now(),
+    deltaRecords: dataset.length - prevTotal,
   };
 
   cachedSnapshot = snapshot;
@@ -228,7 +262,7 @@ export function getUnifiedDatasetForLLM(): string {
   const stats = getUnifiedDatasetStats();
   const lines: string[] = [
     "=== Unified Training Dataset ===",
-    `Total records: ${stats.totalRecords}`,
+    `Total records: ${stats.totalRecords} (delta: ${stats.deltaRecords >= 0 ? "+" : ""}${stats.deltaRecords})`,
     `With physics results: ${stats.withPhysicsResults}`,
     `With derived features: ${stats.withDerivedFeatures}`,
     `Sources: ${Object.entries(stats.sourceBreakdown).map(([k, v]) => `${k}=${v}`).join(", ")}`,
@@ -244,8 +278,8 @@ export function getTrainingSlice(
 ): UnifiedTrainingRecord[] {
   let dataset = rebuildIfDirty();
   if (filter) {
-    if (filter.minTc !== undefined) dataset = dataset.filter(r => r.Tc >= filter.minTc!);
-    if (filter.maxTc !== undefined) dataset = dataset.filter(r => r.Tc <= filter.maxTc!);
+    if (filter.minTc !== undefined) dataset = dataset.filter(r => r.Tc !== null && r.Tc >= filter.minTc!);
+    if (filter.maxTc !== undefined) dataset = dataset.filter(r => r.Tc !== null && r.Tc <= filter.maxTc!);
     if (filter.source) dataset = dataset.filter(r => r.source === filter.source);
     if (filter.tier) dataset = dataset.filter(r => r.tier === filter.tier);
     if (filter.requirePhysics) dataset = dataset.filter(r => r.hasPhysicsResult);
