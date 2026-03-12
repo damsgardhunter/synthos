@@ -70,6 +70,7 @@ const MAX_RECENT_ERRORS = 20;
 const MAX_WEIGHT_HISTORY = 50;
 
 const evaluationHistory: EvaluationRecord[] = [];
+let lastRetrainEvalIndex = 0;
 const familyErrorAccumulators: Map<string, { sumAbsErr: number; sumSignedErr: number; overestimates: number; stableCorrect: number; count: number }> = new Map();
 
 let currentWeights = {
@@ -113,9 +114,35 @@ function getFamilyCalibrationFactor(family: string): number {
 
 function getGlobalCalibrationFactor(): number {
   if (evaluationHistory.length < 5) return 1.0;
-  const recent = evaluationHistory.slice(-50);
-  const meanAbsErr = recent.reduce((s, r) => s + Math.abs(r.predictedTc - r.actualTc), 0) / recent.length;
+
+  const postRetrainCount = evaluationHistory.length - lastRetrainEvalIndex;
+  const isPostRetrain = postRetrainCount > 0 && postRetrainCount < 50;
+
+  if (isPostRetrain && postRetrainCount < 5) {
+    return 1.0;
+  }
+
+  let samples: EvaluationRecord[];
+  if (isPostRetrain) {
+    samples = evaluationHistory.slice(lastRetrainEvalIndex);
+  } else {
+    samples = evaluationHistory.slice(-50);
+  }
+
+  let totalWeight = 0;
+  let weightedAbsErr = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const recency = isPostRetrain ? (1 + i) / samples.length : 1.0;
+    const w = 0.5 + 0.5 * recency;
+    weightedAbsErr += Math.abs(samples[i].predictedTc - samples[i].actualTc) * w;
+    totalWeight += w;
+  }
+  const meanAbsErr = totalWeight > 0 ? weightedAbsErr / totalWeight : 0;
   return 1.0 - Math.min(0.25, meanAbsErr / 300);
+}
+
+export function notifyModelRetrain(): void {
+  lastRetrainEvalIndex = evaluationHistory.length;
 }
 
 const COMP_VECTOR_KEYS = [
@@ -130,13 +157,46 @@ const COMP_VECTOR_KEYS = [
 const knownCompositionVectors: { formula: string; vec: number[] }[] = [];
 const MAX_KNOWN_VECTORS = 500;
 
+const COMP_VECTOR_RANGES: { min: number; max: number }[] = [];
+let _compRangesInitialized = false;
+
+function initCompVectorRanges(): void {
+  if (_compRangesInitialized) return;
+  const defaultRanges: Record<string, [number, number]> = {
+    enMean: [0.7, 3.5], enStd: [0, 1.5],
+    radiusMean: [50, 250], radiusStd: [0, 100],
+    massMean: [1, 240], massStd: [0, 120],
+    vecMean: [1, 14], vecStd: [0, 6],
+    ieMean: [3, 25], ieStd: [0, 10],
+    eaMean: [-1, 4], eaStd: [0, 3],
+    debyeMean: [50, 800], debyeStd: [0, 400],
+    bulkModMean: [1, 400], bulkModStd: [0, 200],
+    meltMean: [200, 4000], meltStd: [0, 2000],
+    density: [0.5, 25], volPerAtom: [5, 80],
+    stoner: [0, 2], hopfield: [0, 5], gruneisen: [0, 3],
+    ionic: [0, 1], covalent: [0, 1], metallic: [0, 1],
+    dFrac: [0, 1], fFrac: [0, 1], pFrac: [0, 1], sFrac: [0, 1],
+    entropy: [0, 3], pettiMean: [0, 1], pettiStd: [0, 0.5],
+  };
+  for (const key of COMP_VECTOR_KEYS) {
+    const range = defaultRanges[key] ?? [0, 1];
+    COMP_VECTOR_RANGES.push({ min: range[0], max: range[1] });
+  }
+  _compRangesInitialized = true;
+}
+
 function compositionToVector(formula: string): number[] | null {
   try {
+    initCompVectorRanges();
     const feats = computeCompositionFeatures(formula);
     const vec: number[] = [];
-    for (const key of COMP_VECTOR_KEYS) {
+    for (let i = 0; i < COMP_VECTOR_KEYS.length; i++) {
+      const key = COMP_VECTOR_KEYS[i];
       const val = (feats as any)[key];
-      vec.push(typeof val === "number" && isFinite(val) ? val : 0);
+      const raw = typeof val === "number" && isFinite(val) ? val : 0;
+      const range = COMP_VECTOR_RANGES[i];
+      const span = range.max - range.min;
+      vec.push(span > 0 ? Math.max(0, Math.min(1, (raw - range.min) / span)) : 0);
     }
     return vec;
   } catch {
@@ -164,14 +224,14 @@ function addToKnownVectors(formula: string): void {
 }
 
 function computeNoveltyScore(formula: string): number {
+  if (seenFormulas.has(formula)) return 0.05;
+
   const family = classifyFamily(formula);
   const familyCount = evaluationHistory.filter(r => r.family === family).length;
 
   let novelty = 1.0;
   if (familyCount > 20) novelty -= 0.2;
   else if (familyCount > 10) novelty -= 0.1;
-
-  if (seenFormulas.has(formula)) novelty -= 0.4;
 
   if (knownCompositionVectors.length >= 3) {
     const candidateVec = compositionToVector(formula);
@@ -180,7 +240,7 @@ function computeNoveltyScore(formula: string): number {
       distances.sort((a, b) => a - b);
       const kNearest = Math.min(5, distances.length);
       const avgNearestDist = distances.slice(0, kNearest).reduce((s, d) => s + d, 0) / kNearest;
-      const maxExpectedDist = 200;
+      const maxExpectedDist = 3.0;
       const distNovelty = Math.min(1.0, avgNearestDist / maxExpectedDist);
       novelty = 0.3 * novelty + 0.7 * distNovelty;
     }

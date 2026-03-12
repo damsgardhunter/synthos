@@ -55,7 +55,7 @@ import { buildPressureResponseProfile, getPressurePropertyMapStats } from "./pre
 import { optimizePressureForFormula, getBayesianPressureStats, addPressureObservation } from "./bayesian-pressure-optimizer";
 import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, samplePressureFromClusters } from "./pressure-screening";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
-import { recordEvaluationResult, getCalibrationStats } from "./surrogate-fitness";
+import { recordEvaluationResult, getCalibrationStats, notifyModelRetrain } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
 import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
@@ -6384,6 +6384,7 @@ async function runAutonomousFastPath() {
         if (failureTrainingData.length >= growthThreshold) {
           invalidateGNNModel();
           autonomousGNNRetrainCount++;
+          notifyModelRetrain();
           console.log(`[Engine] GNN invalidated: ${failureTrainingData.length} new failures >= ${growthThreshold} (10% of ${totalTrainingSize} training set)`);
         }
       } catch (e) { console.error("[Engine] GNN model invalidation failed:", e); }
@@ -7050,6 +7051,7 @@ async function runLearningCycle() {
             });
           }
           autonomousGNNRetrainCount += alStats.modelRetrains > 0 ? 1 : 0;
+          if (alStats.modelRetrains > 0) notifyModelRetrain();
 
           const calStats = getCalibrationStats();
           if (calStats.totalEvaluations > 0) {
