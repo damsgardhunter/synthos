@@ -658,7 +658,7 @@ export async function runMultiFidelityPipeline(
     physicsData.electronic = s1.data.electronic;
     physicsData.correlation = s1.data.correlation;
     if (!s1.passed) {
-      await updateCandidatePhysics(candidate.id, physicsData, 1, s1.data);
+      await updateCandidatePhysics(candidate.id, physicsData, 1, s1.data, candidate);
       return { candidate, physicsData, s1Data: null, earlyResult: {
         candidateId: candidate.id, formula: candidate.formula, finalStage: 1,
         passed: false, failureReason: s1.reason, physicsData,
@@ -687,7 +687,7 @@ export async function runMultiFidelityPipeline(
       physicsData.phonon = s2.data.phonon;
       physicsData.coupling = s2.data.coupling;
       if (!s2.passed) {
-        await updateCandidatePhysics(candidate.id, physicsData, 2, { ...s1Data, ...s2.data });
+        await updateCandidatePhysics(candidate.id, physicsData, 2, { ...s1Data, ...s2.data }, candidate);
         return {
           candidateId: candidate.id, formula: candidate.formula, finalStage: 2,
           passed: false, failureReason: s2.reason, physicsData,
@@ -699,7 +699,7 @@ export async function runMultiFidelityPipeline(
       physicsData.competingPhases = s3.data.competingPhases;
       physicsData.criticalFields = s3.data.criticalFields;
       if (!s3.passed) {
-        await updateCandidatePhysics(candidate.id, physicsData, 3, { ...s1Data, ...s2.data, ...s3.data });
+        await updateCandidatePhysics(candidate.id, physicsData, 3, { ...s1Data, ...s2.data, ...s3.data }, candidate);
         return {
           candidateId: candidate.id, formula: candidate.formula, finalStage: 3,
           passed: false, failureReason: s3.reason, physicsData,
@@ -712,7 +712,7 @@ export async function runMultiFidelityPipeline(
       physicsData.stability = s4.data.stability;
 
       const allData = { ...s1Data, ...s2.data, ...s3.data, ...s4.data };
-      await updateCandidatePhysics(candidate.id, physicsData, 4, allData);
+      await updateCandidatePhysics(candidate.id, physicsData, 4, allData, candidate);
 
       return {
         candidateId: candidate.id, formula: candidate.formula, finalStage: 4,
@@ -728,14 +728,17 @@ export async function runMultiFidelityPipeline(
     if (!result.passed && result.failureReason) {
       try {
         let failureReason: "unstable_phonons" | "structure_collapse" | "high_formation_energy" | "non_metallic" | "scf_divergence" | "geometry_rejected" = "geometry_rejected";
-        if (result.failureReason.includes("imaginary phonon") || result.failureReason.includes("Dynamically unstable") || result.failureReason.includes("phonon")) {
+        const fr = result.failureReason;
+        if (/imaginary phonon|Dynamically unstable|phonon surrogate|phonon.*unstab/i.test(fr)) {
           failureReason = "unstable_phonons";
-        } else if (result.failureReason.includes("Non-metallic") || result.failureReason.includes("insulator") || result.failureReason.includes("non-metallic")) {
+        } else if (/Non-metallic|insulator|metallicity.*below/i.test(fr)) {
           failureReason = "non_metallic";
-        } else if (result.failureReason.includes("Formation energy") || result.failureReason.includes("formation energy") || result.failureReason.includes("unstable")) {
+        } else if (/Formation energy|thermodynamically unstable|too unstable to synthesize/i.test(fr)) {
           failureReason = "high_formation_energy";
-        } else if (result.failureReason.includes("Hc2") || result.failureReason.includes("structure")) {
+        } else if (/Hc2.*inconsistent|structure.*collapse|Could not predict crystal/i.test(fr)) {
           failureReason = "structure_collapse";
+        } else if (/SCF|convergence|diverge/i.test(fr)) {
+          failureReason = "scf_divergence";
         }
         recordStructureFailure({
           formula: result.formula,
@@ -770,7 +773,8 @@ async function updateCandidatePhysics(
   candidateId: string,
   physicsData: Record<string, any>,
   stage: number,
-  allData: any
+  allData: any,
+  candidate?: SuperconductorCandidate
 ) {
   try {
     const updates: any = {
@@ -805,23 +809,27 @@ async function updateCandidatePhysics(
         const hasMott = allData.competingPhases?.some((p: any) => p.type === "Mott") ?? false;
         const isMottInsulator = (hasMott && corrRatio > 0.7) || corrRatio > 0.85;
         const isStronglyCorrelated = corrRatio > 0.7;
-        const isNonMetallic = metalScore < 0.4;
+        const isNonMetallic = metalScore < 0.2;
+        const isSemiMetallic = metalScore >= 0.2 && metalScore < 0.4;
 
         if (isNonMetallic) {
-          eliashbergTc = eliashbergTc * Math.max(0.02, metalScore);
+          eliashbergTc = 0;
+        } else if (isSemiMetallic) {
+          eliashbergTc = eliashbergTc * ((metalScore - 0.2) / 0.2);
         } else if (isMottInsulator) {
           eliashbergTc = eliashbergTc * 0.05;
         } else if (isStronglyCorrelated) {
           eliashbergTc = eliashbergTc * 0.3;
         }
 
-        if (currentTc > 0) {
+        if (stage >= 3) {
+          updates.predictedTc = Math.round(eliashbergTc);
+        } else if (currentTc > 0) {
           if (eliashbergTc > currentTc && !isMottInsulator && !isStronglyCorrelated && !isNonMetallic) {
             const tcCap = lambda > 2.5 ? 30 : lambda > 2.0 ? 25 : lambda > 1.5 ? 20 : lambda > 1.0 ? 15 : 10;
             updates.predictedTc = Math.round(Math.min(eliashbergTc, currentTc + tcCap));
           } else {
-            const downBlend = eliashbergTc < currentTc * 0.3 ? 0.8 : eliashbergTc < currentTc * 0.5 ? 0.7 : (lambda > 1.5 ? 0.6 : lambda > 1.0 ? 0.5 : 0.4);
-            updates.predictedTc = Math.round(currentTc * (1 - downBlend) + eliashbergTc * downBlend);
+            updates.predictedTc = Math.round(eliashbergTc);
           }
         } else {
           updates.predictedTc = Math.round(eliashbergTc);
@@ -843,7 +851,7 @@ async function updateCandidatePhysics(
     }
     if (allData.structure) {
       updates.decompositionEnergy = allData.structure.decompositionEnergy;
-      const effP = (updates as any).optimalPressureGpa ?? (updates as any).pressureGpa ?? 0;
+      const effP = candidate?.optimalPressureGpa ?? candidate?.pressureGpa ?? 0;
       updates.ambientPressureStable = effP < 50 && (allData.stability?.isStable ?? false);
     }
     if (allData.stability) {
