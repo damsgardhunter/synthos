@@ -1340,6 +1340,10 @@ export interface GeneratedStructureVariant {
   description: string;
 }
 
+const SC_ACTIVE_ELEMENTS = new Set([
+  "Cu", "Fe", "Ni", "Co", "Mn", "Ru", "Ir", "Nb", "V", "Ti",
+]);
+
 function countsToFormula(cts: Record<string, number>): string {
   return Object.entries(cts)
     .filter(([, n]) => typeof n === "number" && Number.isFinite(n) && n > 0)
@@ -1354,7 +1358,12 @@ function countsToFormula(cts: Record<string, number>): string {
 function generateSubstitutionVariant(formula: string, comp?: ParsedComposition): GeneratedStructureVariant | null {
   const { elements, counts } = comp || parseComposition(formula);
 
-  const substitutable = elements.filter(e => CHEMICAL_SUBSTITUTION_MAP[e] && CHEMICAL_SUBSTITUTION_MAP[e].length > 0);
+  const scActiveInFormula = elements.filter(e => SC_ACTIVE_ELEMENTS.has(e));
+  const substitutable = elements.filter(e =>
+    CHEMICAL_SUBSTITUTION_MAP[e] &&
+    CHEMICAL_SUBSTITUTION_MAP[e].length > 0 &&
+    !(SC_ACTIVE_ELEMENTS.has(e) && scActiveInFormula.length <= 1)
+  );
   if (substitutable.length === 0) return null;
 
   const targetEl = substitutable[Math.floor(Math.random() * substitutable.length)];
@@ -1387,7 +1396,8 @@ function generateSubstitutionVariant(formula: string, comp?: ParsedComposition):
 }
 
 function generateIntercalationVariant(formula: string, comp?: ParsedComposition): GeneratedStructureVariant | null {
-  const { elements, counts } = comp || parseComposition(formula);
+  const resolved = comp || parseComposition(formula);
+  const { elements, counts } = resolved;
 
   const availableIntercalants = INTERCALANTS.filter(i => !elements.includes(i) || (counts[i] || 0) < 4);
   if (availableIntercalants.length === 0) return null;
@@ -1401,15 +1411,20 @@ function generateIntercalationVariant(formula: string, comp?: ParsedComposition)
   const newFormula = countsToFormula(newCounts);
   if (!newFormula) return null;
 
+  const hostProto = matchPrototype(formula, resolved);
+  const hostDim = hostProto?.dimensionality || "quasi-2D";
+  const hostSg = hostProto?.spaceGroup || "P6_3/mmc";
+  const hostCs = hostProto?.crystalSystem || "hexagonal";
+
   return {
     formula: newFormula,
     parentFormula: formula,
     variationType: "intercalation",
     structuralNovelty: 0.4 + Math.random() * 0.3,
-    topology: `${intercalant} intercalation into layered host`,
-    spaceGroup: "P6_3/mmc",
-    crystalSystem: "hexagonal",
-    dimensionality: "quasi-2D",
+    topology: `${intercalant} intercalation into ${hostDim === "3D" ? "cage" : "layered"} host`,
+    spaceGroup: hostSg,
+    crystalSystem: hostCs,
+    dimensionality: hostDim,
     description: `Intercalation of ${amount} ${intercalant} atoms into ${formula}`,
   };
 }
@@ -1631,13 +1646,40 @@ Return JSON with these fields. Be creative but physically grounded.`,
 
     const validSG = isValidSpaceGroup(spaceGroup) ? spaceGroup : "P1";
 
+    const WYCKOFF_PATTERN = /^(\d+)([a-zA-Z])$/;
+    const LOW_SYMMETRY_MAX_MULT: Record<string, number> = {
+      "P1": 1, "P-1": 2,
+    };
+    const maxMult = LOW_SYMMETRY_MAX_MULT[validSG] ?? 192;
+
     const wyckoff: Record<string, string> = {};
+    let hasSpeculativeWyckoff = false;
     if (parsed.wyckoff_positions && typeof parsed.wyckoff_positions === "object") {
       for (const [role, site] of Object.entries(parsed.wyckoff_positions)) {
         if (typeof site === "string") {
-          wyckoff[role] = site;
+          const wMatch = site.match(WYCKOFF_PATTERN);
+          if (wMatch) {
+            const mult = parseInt(wMatch[1], 10);
+            if (mult > maxMult) {
+              wyckoff[role] = `${site} [speculative]`;
+              hasSpeculativeWyckoff = true;
+            } else {
+              wyckoff[role] = site;
+            }
+          } else {
+            wyckoff[role] = `${site} [speculative]`;
+            hasSpeculativeWyckoff = true;
+          }
         }
       }
+    }
+    if (hasSpeculativeWyckoff) {
+      emit("log", {
+        phase: "phase-11",
+        event: "Wyckoff positions flagged as speculative",
+        detail: `${name}: some Wyckoff labels may be incompatible with ${validSG}, flagged [speculative]`,
+        dataSource: "Novel Prototype Generator",
+      });
     }
 
     const coordNums = parsed.coordination_numbers;

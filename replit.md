@@ -692,6 +692,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
 - **MutationSource Lineage Tracking (structural-mutator.ts)**:
   - New `MutationSource` interface (`parentFormula`, `parentTc`) extends all result types (`DistortedLattice`, `LayeredStructure`, `VacancyStructure`, `StrainedVariant`). Every mutation output carries its parent's identity. Engine.ts inserts mutations with notes containing `parent=<formula> parentTc=<value>` for strategy-analyzer meta-learning.
 
+- **SC-Active Element Substitution Guard (structure-predictor.ts)**:
+  - `SC_ACTIVE_ELEMENTS` set (Cu, Fe, Ni, Co, Mn, Ru, Ir, Nb, V, Ti). `generateSubstitutionVariant` will not substitute out the sole SC-active transition metal in a formula (e.g., Cu in cuprates), preserving the pairing mechanism.
+- **Host-Aware Intercalation Dimensionality (structure-predictor.ts)**:
+  - `generateIntercalationVariant` now calls `matchPrototype()` to inherit the host's dimensionality, space group, and crystal system instead of hardcoding "quasi-2D/P6_3/mmc/hexagonal". 3D hosts (skutterudites, clathrates) correctly produce 3D intercalated variants with "cage" topology label.
+- **Wyckoff Position Validation (structure-predictor.ts)**:
+  - `generateNovelPrototype` validates LLM-proposed Wyckoff labels against the space group. Multiplicity is cross-referenced with `LOW_SYMMETRY_MAX_MULT` table (P1→max 1, P-1→max 2). Labels with multiplicity exceeding the space group's maximum, or non-standard format, are appended with `[speculative]` tag in `NovelPrototype.wyckoffPositions`. A log event is emitted when speculative flags are applied.
+
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
 - **PostgreSQL**: For persistent data storage.
