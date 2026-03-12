@@ -18,6 +18,52 @@ interface SynthesisValidationResult {
   rejectionReasons: string[];
 }
 
+function parsePressureToGpa(raw: unknown): number | null {
+  const str = String(raw).trim();
+  const numMatch = str.match(/([\d.]+)/);
+  if (!numMatch) return null;
+  const numVal = parseFloat(numMatch[1]);
+  if (isNaN(numVal)) return null;
+
+  const lower = str.toLowerCase();
+  if (lower.includes("gpa")) return numVal;
+  if (lower.includes("mpa")) return numVal * 0.001;
+  if (lower.includes("kbar")) return numVal * 0.1;
+
+  if (typeof raw === "number" || /^[\d.]+$/.test(str)) {
+    if (numVal >= 1 && numVal <= 500) return numVal;
+    return numVal * 0.000101325;
+  }
+
+  return numVal * 0.000101325;
+}
+
+function repairTruncatedSynthesisJSON(raw: string): { processes: any[] } | null {
+  try {
+    const processesMatch = raw.match(/"processes"\s*:\s*\[/);
+    if (!processesMatch) return null;
+    const arrayStart = raw.indexOf("[", processesMatch.index!);
+    let depth = 0;
+    let lastCompleteObj = -1;
+
+    for (let i = arrayStart; i < raw.length; i++) {
+      if (raw[i] === "{") depth++;
+      if (raw[i] === "}") {
+        depth--;
+        if (depth === 0) lastCompleteObj = i;
+      }
+    }
+
+    if (lastCompleteObj > arrayStart) {
+      const repairedArray = raw.substring(arrayStart, lastCompleteObj + 1) + "]";
+      const repaired = `{"processes": ${repairedArray}}`;
+      const parsed = JSON.parse(repaired);
+      if (Array.isArray(parsed.processes) && parsed.processes.length > 0) return parsed;
+    }
+  } catch {}
+  return null;
+}
+
 function validateSynthesisConditions(proc: any): SynthesisValidationResult {
   const rejectionReasons: string[] = [];
   const conditions = proc.conditions || {};
@@ -36,11 +82,10 @@ function validateSynthesisConditions(proc: any): SynthesisValidationResult {
   }
 
   if (conditions.pressure !== undefined && conditions.pressure !== null) {
-    const pressureAtm = typeof conditions.pressure === "number" ? conditions.pressure : parseFloat(conditions.pressure);
-    if (!isNaN(pressureAtm)) {
-      const pressureGpa = pressureAtm * 0.000101325;
+    const pressureGpa = parsePressureToGpa(conditions.pressure);
+    if (pressureGpa !== null) {
       if (pressureGpa < SYNTHESIS_VALIDATION_BOUNDS.pressure.min) {
-        rejectionReasons.push(`Synthesis pressure ${pressureAtm} atm is negative`);
+        rejectionReasons.push(`Synthesis pressure ${conditions.pressure} is negative`);
       }
       if (pressureGpa > SYNTHESIS_VALIDATION_BOUNDS.pressure.max) {
         rejectionReasons.push(`Synthesis pressure ${pressureGpa.toFixed(2)} GPa exceeds ${SYNTHESIS_VALIDATION_BOUNDS.pressure.max} GPa limit`);
@@ -145,13 +190,13 @@ Return JSON with key 'processes' containing an array of objects:
     try {
       parsed = JSON.parse(content);
     } catch {
-      const truncatedResponse = content.length > 3000;
-      if (truncatedResponse) {
-        emit("log", { phase: "phase-8", event: "Synthesis response truncated", detail: `Response was ${content.length} chars - increasing detail may need more tokens. Retrying with fewer materials next cycle.`, dataSource: "Synthesis Engine" });
+      parsed = repairTruncatedSynthesisJSON(content);
+      if (parsed) {
+        emit("log", { phase: "phase-8", event: "Synthesis JSON repaired", detail: `Recovered ${parsed.processes?.length ?? 0} processes from truncated response (${content.length} chars)`, dataSource: "Synthesis Engine" });
       } else {
         emit("log", { phase: "phase-8", event: "Synthesis parse error", detail: content.slice(0, 200), dataSource: "Synthesis Engine" });
+        return 0;
       }
-      return 0;
     }
 
     const processes = parsed.processes ?? [];
