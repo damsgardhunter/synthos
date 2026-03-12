@@ -235,6 +235,70 @@ export function getHighUncertaintyPredictions(topN: number = 20): PredictionVari
     .slice(0, topN);
 }
 
+export interface FrontierUncertainty {
+  globalMeanVariance: number;
+  globalHighUncFraction: number;
+  frontierCount: number;
+  frontierMeanVariance: number;
+  frontierHighUncFraction: number;
+  frontierMeanNormalized: number;
+  frontierWorstFormulas: { formula: string; predictedTc: number; normalizedUncertainty: number }[];
+}
+
+const FRONTIER_TC_THRESHOLD = 100;
+
+export function getFrontierUncertainty(): FrontierUncertainty {
+  const recent = vbRecent(500);
+  if (recent.length === 0) {
+    return {
+      globalMeanVariance: 0,
+      globalHighUncFraction: 0,
+      frontierCount: 0,
+      frontierMeanVariance: 0,
+      frontierHighUncFraction: 0,
+      frontierMeanNormalized: 0,
+      frontierWorstFormulas: [],
+    };
+  }
+
+  const globalVars = recent.map(e => e.ensembleStd ** 2);
+  const globalMeanVar = globalVars.reduce((a, b) => a + b, 0) / globalVars.length;
+  const globalHighUnc = recent.filter(e => e.normalizedUncertainty > 0.3).length / recent.length;
+
+  const frontier = recent.filter(e => e.predictedTc >= FRONTIER_TC_THRESHOLD);
+  if (frontier.length === 0) {
+    return {
+      globalMeanVariance: globalMeanVar,
+      globalHighUncFraction: globalHighUnc,
+      frontierCount: 0,
+      frontierMeanVariance: 0,
+      frontierHighUncFraction: 0,
+      frontierMeanNormalized: 0,
+      frontierWorstFormulas: [],
+    };
+  }
+
+  const frontierVars = frontier.map(e => e.ensembleStd ** 2);
+  const frontierMeanVar = frontierVars.reduce((a, b) => a + b, 0) / frontierVars.length;
+  const frontierHighUnc = frontier.filter(e => e.normalizedUncertainty > 0.3).length / frontier.length;
+  const frontierMeanNorm = frontier.reduce((a, e) => a + e.normalizedUncertainty, 0) / frontier.length;
+
+  const worstFrontier = [...frontier]
+    .sort((a, b) => b.normalizedUncertainty - a.normalizedUncertainty)
+    .slice(0, 5)
+    .map(e => ({ formula: e.formula, predictedTc: e.predictedTc, normalizedUncertainty: e.normalizedUncertainty }));
+
+  return {
+    globalMeanVariance: globalMeanVar,
+    globalHighUncFraction: globalHighUnc,
+    frontierCount: frontier.length,
+    frontierMeanVariance: frontierMeanVar,
+    frontierHighUncFraction: frontierHighUnc,
+    frontierMeanNormalized: frontierMeanNorm,
+    frontierWorstFormulas: worstFrontier,
+  };
+}
+
 export function getVarianceByFamily(): Record<string, { count: number; meanStd: number; meanNormalized: number }> {
   const groups: Record<string, PredictionVarianceEntry[]> = {};
   for (const e of vbRecent(500)) {
@@ -384,14 +448,24 @@ export function getUncertaintyForLLM(): string {
   const variance = getVarianceSummary();
   const calibration = calibrationHistory.length > 0 ? calibrationHistory[calibrationHistory.length - 1] : null;
   const byFamily = getVarianceByFamily();
+  const frontier = getFrontierUncertainty();
 
   const lines: string[] = [
     "=== Uncertainty Tracking ===",
     `Predictions tracked: ${vbSize}`,
-    `Mean variance: ${variance.meanVariance.toFixed(4)}`,
-    `High uncertainty fraction: ${(variance.highUncertaintyFraction * 100).toFixed(1)}%`,
+    `Global mean variance: ${variance.meanVariance.toFixed(4)}`,
+    `Global high uncertainty fraction: ${(variance.highUncertaintyFraction * 100).toFixed(1)}%`,
     `Decomposition: aleatoric=${variance.decomposition.aleatoric.toFixed(4)}, epistemic=${variance.decomposition.epistemic.toFixed(4)} (${variance.decomposition.dominantSource})`,
   ];
+
+  if (frontier.frontierCount > 0) {
+    lines.push(`Frontier (Tc>100K): n=${frontier.frontierCount}, mean_var=${frontier.frontierMeanVariance.toFixed(4)}, high_unc=${(frontier.frontierHighUncFraction * 100).toFixed(1)}%`);
+    if (frontier.frontierWorstFormulas.length > 0) {
+      lines.push(`  Worst frontier: ${frontier.frontierWorstFormulas.slice(0, 3).map(f => `${f.formula}(Tc=${f.predictedTc.toFixed(0)}K, unc=${f.normalizedUncertainty.toFixed(3)})`).join(", ")}`);
+    }
+  } else {
+    lines.push("Frontier: no predictions above 100K yet");
+  }
 
   if (calibration) {
     lines.push(`Calibration ECE: ${calibration.ece.toFixed(4)}, MCE: ${calibration.mce.toFixed(4)}`);

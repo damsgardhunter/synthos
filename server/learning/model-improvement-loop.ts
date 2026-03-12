@@ -24,7 +24,7 @@ import {
   getCurrentArchitecture,
   getActiveCustomFeatures,
 } from "./model-llm-controller";
-import { getUncertaintyForLLM, getVarianceSummary } from "./uncertainty-tracker";
+import { getUncertaintyForLLM, getVarianceSummary, getFrontierUncertainty } from "./uncertainty-tracker";
 import { evaluateRetrainNeed, recordRetrainOutcome, getSchedulerForLLM, getSchedulerStats } from "./retrain-scheduler";
 import type { EventEmitter } from "./engine";
 
@@ -70,6 +70,9 @@ let cooldowns: CooldownEntry[] = [];
 let plateauModels: string[] = [];
 let consecutiveNoImprovement: Map<string, number> = new Map();
 let pendingImprovementTask: Promise<{ ran: boolean; experiment?: ExperimentRecord; improvement?: Record<string, number> }> | null = null;
+let consecutivePhononMissing = 0;
+let consecutiveLambdaMissing = 0;
+const PHYSICS_FEATURE_WARNING_THRESHOLD = 5;
 
 function isOnCooldown(model: string, currentCycle: number): boolean {
   const entry = cooldowns.find(c => c.model === model);
@@ -221,12 +224,67 @@ function needsExplorationReset(model: string): boolean {
   return (consecutiveNoImprovement.get(model) ?? 0) >= CONSECUTIVE_NO_IMPROVEMENT_EXPLORE_THRESHOLD;
 }
 
+function checkPhysicsFeatureWarnings(topFeatures: { name: string; normalizedImportance: number }[]): {
+  phononMissing: boolean;
+  lambdaMissing: boolean;
+  shouldAutoTrigger: boolean;
+  missingType: "phonon" | "lambda" | "both" | null;
+} {
+  const hasPhonon = topFeatures.some(f => /phonon|omegaLog|debye/i.test(f.name));
+  const hasLambda = topFeatures.some(f => /lambda|coupling/i.test(f.name));
+
+  if (hasPhonon) consecutivePhononMissing = 0; else consecutivePhononMissing++;
+  if (hasLambda) consecutiveLambdaMissing = 0; else consecutiveLambdaMissing++;
+
+  const phononTrigger = consecutivePhononMissing >= PHYSICS_FEATURE_WARNING_THRESHOLD;
+  const lambdaTrigger = consecutiveLambdaMissing >= PHYSICS_FEATURE_WARNING_THRESHOLD;
+
+  let missingType: "phonon" | "lambda" | "both" | null = null;
+  if (phononTrigger && lambdaTrigger) missingType = "both";
+  else if (phononTrigger) missingType = "phonon";
+  else if (lambdaTrigger) missingType = "lambda";
+
+  return {
+    phononMissing: !hasPhonon,
+    lambdaMissing: !hasLambda,
+    shouldAutoTrigger: phononTrigger || lambdaTrigger,
+    missingType,
+  };
+}
+
+function buildPhysicsFeatureProposal(missingType: "phonon" | "lambda" | "both"): ExperimentProposal {
+  const featureNames: string[] = [];
+  const reasoning: string[] = [];
+
+  if (missingType === "phonon" || missingType === "both") {
+    featureNames.push("debyeTemperature", "omegaLogEstimate", "phononDOS_peak");
+    reasoning.push(`phonon features absent from top-10 for ${consecutivePhononMissing} cycles`);
+  }
+  if (missingType === "lambda" || missingType === "both") {
+    featureNames.push("lambdaEstimate", "ePh_coupling_proxy", "dosAtFermi");
+    reasoning.push(`e-ph coupling features absent from top-10 for ${consecutiveLambdaMissing} cycles`);
+  }
+
+  return {
+    model_target: "xgboost",
+    experiment_type: "add_features",
+    changes: {
+      features: featureNames,
+      reason: "stoichiometry_mining_guard",
+      force_inclusion: true,
+    },
+    reasoning: `Possible stoichiometry mining: ${reasoning.join("; ")} — forcing electronic structure descriptors`,
+    expected_improvement: "model learns physical mechanism instead of elemental correlations",
+    priority: 1,
+  };
+}
+
 function filterForExploration(proposals: ExperimentProposal[]): ExperimentProposal[] {
   const explorationTypes: Set<string> = new Set(["add_features", "request_data", "expand_dataset", "rebalance_training"]);
   const stuckModels = new Set<string>();
-  for (const [model, count] of consecutiveNoImprovement) {
+  consecutiveNoImprovement.forEach((count, model) => {
     if (count >= CONSECUTIVE_NO_IMPROVEMENT_EXPLORE_THRESHOLD) stuckModels.add(model);
-  }
+  });
   if (stuckModels.size === 0) return proposals;
 
   const explorationProposals = proposals.filter(
@@ -260,6 +318,41 @@ async function runImprovementCycleInner(
   const diagnosticsBefore = getComprehensiveModelDiagnostics();
   const health = getModelHealthSummary();
   const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
+
+  const topFeatures = getFeatureImportanceReport(10);
+  let physicsAutoTriggered = false;
+  if (topFeatures.length > 0) {
+    const physicsCheck = checkPhysicsFeatureWarnings(topFeatures);
+    if (physicsCheck.shouldAutoTrigger && physicsCheck.missingType) {
+      const physicsProposal = buildPhysicsFeatureProposal(physicsCheck.missingType);
+      emit("log", {
+        phase: "engine",
+        event: "Model improvement: stoichiometry mining guard",
+        detail: truncateAtWordBoundary(physicsProposal.reasoning, 200),
+        dataSource: "Model Improvement Loop",
+      });
+      try {
+        const record = await executeExperiment(physicsProposal);
+        totalExperimentsRun++;
+        physicsAutoTriggered = true;
+        if (physicsCheck.missingType === "phonon" || physicsCheck.missingType === "both") consecutivePhononMissing = 0;
+        if (physicsCheck.missingType === "lambda" || physicsCheck.missingType === "both") consecutiveLambdaMissing = 0;
+        for (const [model, metrics] of Object.entries(beforeKeyMetrics)) {
+          for (const [metric, value] of Object.entries(metrics)) {
+            recordMetricTrend(model, metric, currentCycle, value);
+          }
+        }
+        return { ran: true, experiment: record, improvement: record.improvement };
+      } catch (e) {
+        emit("log", {
+          phase: "engine",
+          event: "Model improvement: physics feature injection failed",
+          detail: truncateAtWordBoundary(e instanceof Error ? e.message : "unknown", 200),
+          dataSource: "Model Improvement Loop",
+        });
+      }
+    }
+  }
 
   const allGreen = health.every(h => h.status === "green");
   if (allGreen) {
@@ -577,8 +670,12 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
     lines.push("  Top features: " + topFeatures.slice(0, 5).map(f => `${f.name}(${f.normalizedImportance})`).join(", "));
     const hasPhonon = topFeatures.some(f => /phonon|omegaLog|debye/i.test(f.name));
     const hasLambda = topFeatures.some(f => /lambda|coupling/i.test(f.name));
-    if (!hasPhonon) lines.push("  ** Model ignores phonon features — consider adding Debye temperature emphasis **");
-    if (!hasLambda) lines.push("  ** Model ignores e-ph coupling — lambda features underused **");
+    if (!hasPhonon) {
+      lines.push(`  ** Model ignores phonon features (${consecutivePhononMissing} consecutive cycles) — ${consecutivePhononMissing >= PHYSICS_FEATURE_WARNING_THRESHOLD ? "AUTO-TRIGGER pending" : "consider adding Debye temperature emphasis"} **`);
+    }
+    if (!hasLambda) {
+      lines.push(`  ** Model ignores e-ph coupling (${consecutiveLambdaMissing} consecutive cycles) — ${consecutiveLambdaMissing >= PHYSICS_FEATURE_WARNING_THRESHOLD ? "AUTO-TRIGGER pending" : "lambda features underused"} **`);
+    }
   }
 
   const errorAnalysis = getErrorAnalysis();
@@ -646,7 +743,20 @@ export function getModelDiagnosticsSummaryForStrategy(): string {
 
   try {
     const variance = getVarianceSummary();
-    lines.push(`  Uncertainty: mean_var=${variance.meanVariance.toFixed(4)}, high_unc=${(variance.highUncertaintyFraction * 100).toFixed(1)}%, source=${safeString(variance.decomposition?.dominantSource, "unknown")}`);
+    const frontier = getFrontierUncertainty();
+    lines.push(`  Uncertainty (global): mean_var=${variance.meanVariance.toFixed(4)}, high_unc=${(variance.highUncertaintyFraction * 100).toFixed(1)}%, source=${safeString(variance.decomposition?.dominantSource, "unknown")}`);
+    if (frontier.frontierCount > 0) {
+      lines.push(`  Uncertainty (frontier, Tc>100K): n=${frontier.frontierCount}, mean_var=${frontier.frontierMeanVariance.toFixed(4)}, high_unc=${(frontier.frontierHighUncFraction * 100).toFixed(1)}%, mean_norm=${frontier.frontierMeanNormalized.toFixed(3)}`);
+      if (frontier.frontierWorstFormulas.length > 0) {
+        const worstStr = frontier.frontierWorstFormulas.slice(0, 3).map(f => `${f.formula}(Tc=${f.predictedTc.toFixed(0)}K, unc=${f.normalizedUncertainty.toFixed(3)})`).join(", ");
+        lines.push(`    Highest frontier uncertainty: ${worstStr}`);
+      }
+      if (frontier.frontierHighUncFraction > frontier.globalHighUncFraction * 1.5) {
+        lines.push("    ** Frontier uncertainty significantly exceeds global — high-Tc predictions unreliable **");
+      }
+    } else {
+      lines.push("  Uncertainty (frontier): no predictions above 100K yet");
+    }
   } catch (_e) { lines.push("  Uncertainty: not yet computed"); }
 
   try {
