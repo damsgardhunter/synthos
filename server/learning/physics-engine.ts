@@ -3753,8 +3753,16 @@ export async function runFullPhysicsAnalysis(
     const hydMetalAtoms = hydEls.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
       .reduce((s, e) => s + (hydCts[e] || 0), 0);
     const hydHRatio = hydMetalAtoms > 0 ? hydHCount / hydMetalAtoms : 0;
-    if (hydHRatio >= 6 && candidatePressure < 50) {
-      const suppressionFactor = Math.max(0.05, candidatePressure / 50);
+    if (hydHRatio >= 6 && candidatePressure < 20) {
+      electronicStructure.metallicity = 0;
+      emit("log", {
+        phase: "phase-10",
+        event: "Superhydride ambient suppression",
+        detail: `${formula}: H/M=${hydHRatio.toFixed(1)} at ${candidatePressure} GPa < 20 GPa — metallic phase impossible, forcing metallicity=0`,
+        dataSource: "Physics Engine",
+      });
+    } else if (hydHRatio >= 6 && candidatePressure < 50) {
+      const suppressionFactor = Math.max(0.05, (candidatePressure - 20) / 30);
       electronicStructure.metallicity = Math.min(electronicStructure.metallicity, suppressionFactor);
     } else if (hydHRatio >= 4 && candidatePressure < 30) {
       const suppressionFactor = Math.max(0.1, candidatePressure / 30);
@@ -3766,8 +3774,16 @@ export async function runFullPhysicsAnalysis(
 
   if (dftData) {
     if (dftData.phononFreqMax.value != null && dftData.phononFreqMax.source !== "analytical") {
-      let cappedPhMax = dftData.phononFreqMax.value;
-      if (cappedPhMax > 5000) cappedPhMax = cappedPhMax / 20;
+      const rawPhMax = dftData.phononFreqMax.value;
+      if (rawPhMax > 5000) {
+        emit("log", {
+          phase: "phase-10",
+          event: "DFT phonon value discarded",
+          detail: `${formula}: DFT ω_max=${rawPhMax} cm⁻¹ exceeds physical limit (5000 cm⁻¹) — likely unit error, using analytical fallback`,
+          dataSource: "DFT Resolver",
+        });
+      }
+      const cappedPhMax = rawPhMax <= 5000 ? rawPhMax : phononSpectrum.maxPhononFrequency;
       phononSpectrum.maxPhononFrequency = Math.min(5000, cappedPhMax);
       phononSpectrum.debyeTemperature = Math.max(50, Math.round(1.4388 * phononSpectrum.maxPhononFrequency));
       emit("log", {
