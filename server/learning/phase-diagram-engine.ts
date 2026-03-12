@@ -317,16 +317,11 @@ function getCompositionFractions(formula: string, elementSet: string[]): Record<
   return fractions;
 }
 
-function compositionToX(counts: Record<string, number>, total: number, elements: string[]): number {
-  if (elements.length === 2) {
-    return (counts[elements[0]] || 0) / total;
-  }
-  let x = 0;
-  for (let i = 0; i < elements.length; i++) {
-    const frac = (counts[elements[i]] || 0) / total;
-    x += frac * (i + 1);
-  }
-  return x / elements.length;
+function binaryCompositionX(counts: Record<string, number>, total: number, elA: string, elB: string): number {
+  const fracA = (counts[elA] || 0) / total;
+  const fracB = (counts[elB] || 0) / total;
+  const sum = fracA + fracB;
+  return sum > 1e-12 ? fracA / sum : 0.5;
 }
 
 function lowerConvexHull2D(points: { x: number; y: number; label: string }[]): { x: number; y: number; label: string }[] {
@@ -371,6 +366,40 @@ function interpolateHullEnergy(x: number, hull: { x: number; y: number }[]): num
   return 0;
 }
 
+function computeBinarySliceHull(
+  targetFormula: string,
+  targetFormE: number,
+  elA: string,
+  elB: string,
+  formationEnergies: { formula: string; energy: number }[]
+): { eAboveHull: number; hull: { x: number; y: number; label: string }[]; targetX: number } {
+  const targetCounts = parseFormulaCounts(targetFormula);
+  const targetTotal = getTotalAtoms(targetCounts);
+  const targetX = binaryCompositionX(targetCounts, targetTotal, elA, elB);
+
+  const refPoints: { x: number; y: number; label: string }[] = [
+    { x: 0, y: 0, label: elB },
+    { x: 1, y: 0, label: elA },
+  ];
+
+  for (const entry of formationEnergies) {
+    if (entry.formula === targetFormula) continue;
+    const entryCounts = parseFormulaCounts(entry.formula);
+    const entryTotal = getTotalAtoms(entryCounts);
+    const entryElements = Object.keys(entryCounts);
+    const relevant = entryElements.some(e => e === elA || e === elB);
+    if (!relevant) continue;
+    const x = binaryCompositionX(entryCounts, entryTotal, elA, elB);
+    refPoints.push({ x, y: entry.energy, label: entry.formula });
+  }
+
+  const hull = lowerConvexHull2D(refPoints);
+  const hullEnergy = interpolateHullEnergy(targetX, hull);
+  const eAboveHull = Math.max(0, targetFormE - hullEnergy);
+
+  return { eAboveHull, hull, targetX };
+}
+
 export function computeConvexHull(
   formula: string,
   elements: string[],
@@ -380,54 +409,75 @@ export function computeConvexHull(
     return { energyAboveHull: 0, hullVertices: [], decompositionProducts: [], isOnHull: true };
   }
 
-  const targetCounts = parseFormulaCounts(formula);
-  const targetTotal = getTotalAtoms(targetCounts);
-  const targetFormE = computeMiedemaFormationEnergy(formula);
+  const targetFormE = estimateFormationEnergy(formula);
 
-  const allPoints: { x: number; y: number; label: string }[] = [];
+  if (elements.length === 2) {
+    const result = computeBinarySliceHull(formula, targetFormE, elements[0], elements[1], formationEnergies);
+    const isOnHull = result.eAboveHull < 0.005;
 
-  for (const el of elements) {
-    const elCounts: Record<string, number> = { [el]: 1 };
-    allPoints.push({ x: compositionToX(elCounts, 1, elements), y: 0, label: el });
+    const hullVertices: HullVertex[] = result.hull.map(p => ({
+      composition: p.label,
+      energy: p.y,
+    }));
+
+    const decompositionProducts: string[] = [];
+    if (!isOnHull) {
+      for (let i = 0; i < result.hull.length - 1; i++) {
+        if (result.targetX >= result.hull[i].x && result.targetX <= result.hull[i + 1].x) {
+          if (result.hull[i].label !== formula) decompositionProducts.push(result.hull[i].label);
+          if (result.hull[i + 1].label !== formula) decompositionProducts.push(result.hull[i + 1].label);
+          break;
+        }
+      }
+      if (decompositionProducts.length === 0 && result.hull.length > 0) {
+        decompositionProducts.push(result.hull[0].label);
+      }
+    }
+
+    return { energyAboveHull: result.eAboveHull, hullVertices, decompositionProducts, isOnHull };
   }
 
-  for (const entry of formationEnergies) {
-    const entryCounts = parseFormulaCounts(entry.formula);
-    const entryTotal = getTotalAtoms(entryCounts);
-    const x = compositionToX(entryCounts, entryTotal, elements);
-    allPoints.push({ x, y: entry.energy, label: entry.formula });
+  let worstEAboveHull = 0;
+  let worstSliceHull: { x: number; y: number; label: string }[] = [];
+  let worstTargetX = 0;
+  let worstPair: [string, string] = [elements[0], elements[1]];
+
+  for (let i = 0; i < elements.length; i++) {
+    for (let j = i + 1; j < elements.length; j++) {
+      const slice = computeBinarySliceHull(
+        formula, targetFormE, elements[i], elements[j], formationEnergies
+      );
+      if (slice.eAboveHull > worstEAboveHull) {
+        worstEAboveHull = slice.eAboveHull;
+        worstSliceHull = slice.hull;
+        worstTargetX = slice.targetX;
+        worstPair = [elements[i], elements[j]];
+      }
+    }
   }
 
-  const targetX = compositionToX(targetCounts, targetTotal, elements);
-  allPoints.push({ x: targetX, y: targetFormE, label: formula });
+  const isOnHull = worstEAboveHull < 0.005;
 
-  const hull = lowerConvexHull2D(allPoints);
-
-  const hullEnergy = interpolateHullEnergy(targetX, hull);
-  const energyAboveHull = Math.max(0, targetFormE - hullEnergy);
-
-  const isOnHull = energyAboveHull < 0.005;
-
-  const hullVertices: HullVertex[] = hull.map(p => ({
+  const hullVertices: HullVertex[] = worstSliceHull.map(p => ({
     composition: p.label,
     energy: p.y,
   }));
 
   const decompositionProducts: string[] = [];
   if (!isOnHull) {
-    for (let i = 0; i < hull.length - 1; i++) {
-      if (targetX >= hull[i].x && targetX <= hull[i + 1].x) {
-        if (hull[i].label !== formula) decompositionProducts.push(hull[i].label);
-        if (hull[i + 1].label !== formula) decompositionProducts.push(hull[i + 1].label);
+    for (let i = 0; i < worstSliceHull.length - 1; i++) {
+      if (worstTargetX >= worstSliceHull[i].x && worstTargetX <= worstSliceHull[i + 1].x) {
+        if (worstSliceHull[i].label !== formula) decompositionProducts.push(worstSliceHull[i].label);
+        if (worstSliceHull[i + 1].label !== formula) decompositionProducts.push(worstSliceHull[i + 1].label);
         break;
       }
     }
-    if (decompositionProducts.length === 0 && hull.length > 0) {
-      decompositionProducts.push(hull[0].label);
+    if (decompositionProducts.length === 0 && worstSliceHull.length > 0) {
+      decompositionProducts.push(worstSliceHull[0].label);
     }
   }
 
-  return { energyAboveHull, hullVertices, decompositionProducts, isOnHull };
+  return { energyAboveHull: worstEAboveHull, hullVertices, decompositionProducts, isOnHull };
 }
 
 const PSEUDO_BINARY_ELEMENT_LIMIT = 4;
@@ -626,44 +676,84 @@ export function computePhaseDiagram(
     });
   }
 
-  const hullPoints: { x: number; y: number; label: string }[] = [];
-  for (const entry of allEntries) {
-    const counts = parseFormulaCounts(entry.formula);
-    const total = getTotalAtoms(counts);
-    const x = elementSet.length >= 2 ? compositionToX(counts, total, elementSet) : 0;
-    hullPoints.push({ x, y: entry.formationEnergy, label: entry.formula });
+  if (elementSet.length === 2) {
+    const hullPoints: { x: number; y: number; label: string }[] = [];
+    for (const entry of allEntries) {
+      const counts = parseFormulaCounts(entry.formula);
+      const total = getTotalAtoms(counts);
+      const x = binaryCompositionX(counts, total, elementSet[0], elementSet[1]);
+      hullPoints.push({ x, y: entry.formationEnergy, label: entry.formula });
+    }
+
+    const hull = lowerConvexHull2D(hullPoints);
+    const hullLabels = new Set(hull.map(h => h.label));
+
+    for (const entry of allEntries) {
+      entry.isStable = hullLabels.has(entry.formula);
+    }
+
+    const hullVertices: HullVertex[] = hull.map(p => ({ composition: p.label, energy: p.y }));
+    const phaseBoundaries: { from: string; to: string; energy: number }[] = [];
+    for (let i = 0; i < hull.length - 1; i++) {
+      phaseBoundaries.push({ from: hull[i].label, to: hull[i + 1].label, energy: (hull[i].y + hull[i + 1].y) / 2 });
+    }
+
+    return {
+      elements: elementSet,
+      stablePhases: allEntries.filter(e => e.isStable),
+      unstablePhases: allEntries.filter(e => !e.isStable),
+      hullVertices,
+      phaseBoundaries,
+    };
   }
 
-  const hull = lowerConvexHull2D(hullPoints);
-  const hullLabels = new Set(hull.map(h => h.label));
+  const stableOnAllSlices = new Set(allEntries.map(e => e.formula));
+  const allHullVertices: HullVertex[] = [];
+  const allPhaseBoundaries: { from: string; to: string; energy: number }[] = [];
 
-  for (const entry of allEntries) {
-    entry.isStable = hullLabels.has(entry.formula);
+  for (let i = 0; i < elementSet.length; i++) {
+    for (let j = i + 1; j < elementSet.length; j++) {
+      const elA = elementSet[i];
+      const elB = elementSet[j];
+
+      const slicePoints: { x: number; y: number; label: string }[] = [];
+      for (const entry of allEntries) {
+        const counts = parseFormulaCounts(entry.formula);
+        const total = getTotalAtoms(counts);
+        const x = binaryCompositionX(counts, total, elA, elB);
+        slicePoints.push({ x, y: entry.formationEnergy, label: entry.formula });
+      }
+
+      const hull = lowerConvexHull2D(slicePoints);
+      const hullLabels = new Set(hull.map(h => h.label));
+
+      for (const entry of allEntries) {
+        if (!hullLabels.has(entry.formula)) {
+          stableOnAllSlices.delete(entry.formula);
+        }
+      }
+
+      for (const p of hull) {
+        if (!allHullVertices.some(v => v.composition === p.label)) {
+          allHullVertices.push({ composition: p.label, energy: p.y });
+        }
+      }
+      for (let k = 0; k < hull.length - 1; k++) {
+        allPhaseBoundaries.push({ from: hull[k].label, to: hull[k + 1].label, energy: (hull[k].y + hull[k + 1].y) / 2 });
+      }
+    }
   }
 
-  const stablePhases = allEntries.filter(e => e.isStable);
-  const unstablePhases = allEntries.filter(e => !e.isStable);
-
-  const hullVertices: HullVertex[] = hull.map(p => ({
-    composition: p.label,
-    energy: p.y,
-  }));
-
-  const phaseBoundaries: { from: string; to: string; energy: number }[] = [];
-  for (let i = 0; i < hull.length - 1; i++) {
-    phaseBoundaries.push({
-      from: hull[i].label,
-      to: hull[i + 1].label,
-      energy: (hull[i].y + hull[i + 1].y) / 2,
-    });
+  for (const entry of allEntries) {
+    entry.isStable = stableOnAllSlices.has(entry.formula);
   }
 
   return {
     elements: elementSet,
-    stablePhases,
-    unstablePhases,
-    hullVertices,
-    phaseBoundaries,
+    stablePhases: allEntries.filter(e => e.isStable),
+    unstablePhases: allEntries.filter(e => !e.isStable),
+    hullVertices: allHullVertices,
+    phaseBoundaries: allPhaseBoundaries,
   };
 }
 
