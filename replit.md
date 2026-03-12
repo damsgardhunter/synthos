@@ -596,6 +596,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `getWeightedElements` now applies `Math.max(0.1, w)` inside both partner loops (pair bias and success rate), not just at the end. This prevents a single strongly-negative pair bias from zeroing out the accumulated weight, which would make subsequent positive biases from other partners ineffective. Each partner's contribution is now additive from a floor of 0.1, preserving the influence of all partners rather than letting one bad pairing veto the element.
 - **Improvement Scaling Cap (rl-agent.ts)**:
   - `computeReward` improvement ratio capped at 1.0 (was 5.0) and denominator floor raised to 10 (was 1). Cold-start scenario: if bestBefore=0 and agent finds Tc=100K, old code produced improvement=100 -> reward spike of +300, causing gradient explosion and permanent policy fixation. New code: improvement = min(1.0, 100/10) = 1.0 -> reward of +3.0, a strong but bounded signal that won't brainwash the agent.
+- **Van Hove Singularity Dynamic Instability Check (rl-agent.ts)**:
+  - Added `hasImaginaryModes` field to `PhysicsAwareRewardContext`. When a material has VHS proximity > 0.7 but also has imaginary phonon modes (dynamic instability, indicating CDW/SDW tendencies), the VHS bonus flips to a -0.2 penalty instead of +0.3*proximity reward. This prevents the agent from chasing high-DOS materials that are structurally unstable.
+- **Family-Aware Dimensionality Bonus (rl-agent.ts)**:
+  - Dimensionality reward is now conditional on chemical family. Hydrides get maximum bonus (+0.25) for dimensionality >= 2.5 (3D isotropic metallic networks like clathrate cages), smaller bonus (+0.1) for quasi-2D. Non-hydride families retain the original quasi-2D sweet spot (1.5-2.5). This reflects that hydride SC mechanism (high phonon-frequency hydrogen cage) benefits from 3D connectivity, unlike cuprate/pnictide d-wave pairing which requires 2D Fermi surface topology.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

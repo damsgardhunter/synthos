@@ -188,6 +188,7 @@ export interface PhysicsAwareRewardContext {
   dElectronCount?: number;
   synthesisScore?: number;
   stagnationCycles?: number;
+  hasImaginaryModes?: boolean;
 }
 
 const KNOWN_SC_MOTIFS = new Set([
@@ -1358,17 +1359,30 @@ export class RLChemicalSpaceAgent {
         topologyBonus += physicsContext.nestingScore * 0.3;
       }
       if (physicsContext.vanHoveProximity !== undefined && physicsContext.vanHoveProximity > 0.7) {
-        topologyBonus += physicsContext.vanHoveProximity * 0.3;
+        if (physicsContext.hasImaginaryModes) {
+          topologyBonus -= 0.2;
+        } else {
+          topologyBonus += physicsContext.vanHoveProximity * 0.3;
+        }
       }
       if (physicsContext.bandFlatness !== undefined && physicsContext.bandFlatness > 0.5) {
         topologyBonus += physicsContext.bandFlatness * 0.2;
       }
       if (physicsContext.dimensionality !== undefined) {
-        if (physicsContext.dimensionality >= 1.5 && physicsContext.dimensionality <= 2.5) {
-          topologyBonus += 0.2;
+        const isHydride = physicsContext.chemicalFamily === "hydride";
+        if (isHydride) {
+          if (physicsContext.dimensionality >= 2.5) {
+            topologyBonus += 0.25;
+          } else if (physicsContext.dimensionality >= 1.5) {
+            topologyBonus += 0.1;
+          }
+        } else {
+          if (physicsContext.dimensionality >= 1.5 && physicsContext.dimensionality <= 2.5) {
+            topologyBonus += 0.2;
+          }
         }
       }
-      electronTopologyScore = electronScore * 0.5 + Math.min(1, topologyBonus) * 0.5;
+      electronTopologyScore = electronScore * 0.5 + Math.min(1, Math.max(0, topologyBonus)) * 0.5;
     }
 
     const noveltyComponent = Math.min(1, noveltyBonus);
