@@ -595,6 +595,17 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
       const meissnerConf = Math.min(1, Math.max(0, c.meissnerConfidence ?? (c.meissnerEffect ? 0.5 : 0.1)));
       const zeroResConf = Math.min(1, Math.max(0, c.zeroResistanceConfidence ?? (c.zeroResistance ? 0.5 : 0.1)));
 
+      const isUnconventional = (features.correlationStrength > 0.5) ||
+        (c.cooperPairMechanism && /spin.fluctuation|unconventional|excitonic|charge.density|topological|d.wave/i.test(c.cooperPairMechanism));
+      if (isUnconventional && llmProposedTc != null && llmProposedTc > 0) {
+        const llmWeight = Math.min(0.5, llmTheoreticalConf * 0.6);
+        const physWeight = 1 - llmWeight;
+        const consensusTc = cappedTc != null && cappedTc > 0
+          ? Math.round(cappedTc * physWeight + llmProposedTc * llmWeight)
+          : Math.round(llmProposedTc * llmWeight * 0.5);
+        cappedTc = consensusTc > 0 ? consensusTc : cappedTc;
+      }
+
       if (llmTheoreticalConf < 0.1 && meissnerConf < 0.15 && zeroResConf < 0.15) {
         emit("log", { phase: "phase-7", event: "Novel SC rejected (low LLM confidence)", detail: `${c.formula}: theoreticalConf=${llmTheoreticalConf.toFixed(2)}, meissnerConf=${meissnerConf.toFixed(2)}, zeroResConf=${zeroResConf.toFixed(2)}`, dataSource: "SC Research" });
         continue;
@@ -646,9 +657,9 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
           xgboostScore: novelXGBScore,
           neuralNetScore: novelNNScore,
           ensembleScore: novelEnsembleScore,
-          roomTempViable: isActuallyRoomTemp && (c.pressureGpa ?? 999) <= 50,
+          roomTempViable: isActuallyRoomTemp,
           status,
-          notes: `[synthesis_origin: llm_speculative] ` + (llmProposedTc != null ? `[LLM suggested Tc=${llmProposedTc}K, physics-only Tc=${cappedTc}K (Allen-Dynes, lambda=${featureLambda.toFixed(2)})] ` : '') + verificationNotes,
+          notes: `[synthesis_origin: llm_speculative] ` + (llmProposedTc != null ? `[LLM suggested Tc=${llmProposedTc}K, stored Tc=${cappedTc}K${isUnconventional ? ' (consensus: physics+LLM weighted)' : ' (Allen-Dynes)'}, lambda=${featureLambda.toFixed(2)}] ` : '') + verificationNotes,
           electronPhononCoupling: features.electronPhononLambda ?? null,
           logPhononFrequency: features.logPhononFreq ?? null,
           coulombPseudopotential: 0.12,
@@ -721,9 +732,14 @@ export function computePairingSusceptibility(formula: string): {
 
   const competingPhases = evaluateCompetingPhases(formula, electronic);
   let competingOrderProx = 0;
-  if (electronic.metallicity > 0.4) {
-    const bestProx = competingPhases.reduce((mx, p) => Math.max(mx, p.strength * (p.suppressesSC ? 0.5 : 1.0)), 0);
-    competingOrderProx = Math.min(1.0, bestProx);
+  const met = electronic.metallicity;
+  if (met > 0.1) {
+    const proximityBoost = (met >= 0.1 && met <= 0.4) ? 1.3 : 1.0;
+    const bestProx = competingPhases.reduce((mx, p) => {
+      const suppressionFactor = p.suppressesSC ? 0.5 : 1.0;
+      return Math.max(mx, p.strength * suppressionFactor);
+    }, 0);
+    competingOrderProx = Math.min(1.0, bestProx * proximityBoost);
   }
 
   const orbD = electronic.orbitalFractions?.d ?? 0;
