@@ -41,7 +41,7 @@ export interface BandInversion {
   orbitalSwap: boolean;
   lowerOrbital?: OrbitalWeight;
   upperOrbital?: OrbitalWeight;
-  inversionType?: "s-p" | "p-d" | "d-f" | "p-s" | "d-p" | "f-d" | "unknown";
+  inversionType?: "s-p" | "p-d" | "d-f" | "p-s" | "d-p" | "f-d" | "s-s" | "p-p" | "d-d" | "f-f" | "s-d" | "d-s" | "s-f" | "f-s" | "p-f" | "f-p" | "unknown";
 }
 
 export interface VanHoveSingularity {
@@ -658,16 +658,35 @@ export function isPathBreak(eigenvalues: BandEigenvalue[], ki: number): boolean 
   return dk > 0.25;
 }
 
-function dominantOrbital(w: OrbitalWeight): "s" | "p" | "d" | "f" {
-  const entries: ["s" | "p" | "d" | "f", number][] = [["s", w.s], ["p", w.p], ["d", w.d], ["f", w.f]];
+type OrbitalLabel = "s" | "p" | "d" | "f";
+
+function dominantOrbital(w: OrbitalWeight): OrbitalLabel {
+  const entries: [OrbitalLabel, number][] = [["s", w.s], ["p", w.p], ["d", w.d], ["f", w.f]];
   entries.sort((a, b) => b[1] - a[1]);
   return entries[0][0];
 }
 
-function classifyInversionType(lower: "s" | "p" | "d" | "f", upper: "s" | "p" | "d" | "f"): BandInversion["inversionType"] {
+function dominantOrbitalPair(w: OrbitalWeight): [OrbitalLabel, OrbitalLabel | null] {
+  const entries: [OrbitalLabel, number][] = [["s", w.s], ["p", w.p], ["d", w.d], ["f", w.f]];
+  entries.sort((a, b) => b[1] - a[1]);
+  const top = entries[0];
+  const second = entries[1];
+  if (second[1] > 0.01 && top[1] - second[1] < 0.05) {
+    return [top[0], second[0]];
+  }
+  return [top[0], null];
+}
+
+const VALID_INVERSION_TYPES = new Set<string>([
+  "s-p", "p-d", "d-f", "p-s", "d-p", "f-d",
+  "s-s", "p-p", "d-d", "f-f",
+  "s-d", "d-s", "s-f", "f-s", "p-f", "f-p",
+]);
+
+function classifyInversionType(lower: OrbitalLabel, upper: OrbitalLabel): BandInversion["inversionType"] {
   const key = `${lower}-${upper}`;
-  const valid: BandInversion["inversionType"][] = ["s-p", "p-d", "d-f", "p-s", "d-p", "f-d"];
-  return (valid.includes(key as any) ? key : "unknown") as BandInversion["inversionType"];
+  if (VALID_INVERSION_TYPES.has(key)) return key as BandInversion["inversionType"];
+  return "unknown";
 }
 
 function estimateAnisotropicMass(
@@ -794,11 +813,15 @@ function analyzeBands(
   let bandGapAlongPath = Infinity;
   if (!isMetallicAlongPath) {
     for (const kpt of eigenvalues) {
-      const below = kpt.energies.filter(e => e < 0);
-      const above = kpt.energies.filter(e => e >= 0);
-      if (below.length > 0 && above.length > 0) {
-        const vbm = Math.max(...below);
-        const cbm = Math.min(...above);
+      let vbm = -Infinity;
+      let cbm = Infinity;
+      let hasBelow = false;
+      let hasAbove = false;
+      for (const e of kpt.energies) {
+        if (e < 0) { hasBelow = true; if (e > vbm) vbm = e; }
+        else { hasAbove = true; if (e < cbm) cbm = e; }
+      }
+      if (hasBelow && hasAbove) {
         const gap = cbm - vbm;
         if (gap < bandGapAlongPath) bandGapAlongPath = gap;
       }
@@ -834,21 +857,29 @@ function analyzeBands(
           let invType: BandInversion["inversionType"] = "unknown";
 
           if (lowerW && upperW) {
-            const lowerDom = dominantOrbital(lowerW);
-            const upperDom = dominantOrbital(upperW);
+            const [lowerDom, lowerSecond] = dominantOrbitalPair(lowerW);
+            const [upperDom, upperSecond] = dominantOrbitalPair(upperW);
             const prevKpt = eigenvalues[ki - 1];
             const prevLowerW = prevKpt.weights?.[b];
             const prevUpperW = prevKpt.weights?.[b + 1];
 
             if (prevLowerW && prevUpperW) {
-              const prevLowerDom = dominantOrbital(prevLowerW);
-              const prevUpperDom = dominantOrbital(prevUpperW);
+              const [prevLowerDom] = dominantOrbitalPair(prevLowerW);
+              const [prevUpperDom] = dominantOrbitalPair(prevUpperW);
               if (prevLowerDom !== lowerDom || prevUpperDom !== upperDom) {
                 orbSwap = true;
               }
             }
 
             invType = classifyInversionType(lowerDom, upperDom);
+            if (invType === "unknown" && lowerSecond) {
+              const alt = classifyInversionType(lowerSecond, upperDom);
+              if (alt !== "unknown") invType = alt;
+            }
+            if (invType === "unknown" && upperSecond) {
+              const alt = classifyInversionType(lowerDom, upperSecond);
+              if (alt !== "unknown") invType = alt;
+            }
           }
 
           const isNarrowGap = gapPrev > 0 && gapHere < 0.5 && gapNext > 0;
