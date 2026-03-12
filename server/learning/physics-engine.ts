@@ -1693,17 +1693,27 @@ export function computeElectronPhononCoupling(
     lambda = 0;
   } else {
     const dosRef = 2.0;
-    const bwElements = formula ? parseFormulaElements(formula) : [];
-    const bwCounts = formula ? parseFormulaCounts(formula) : {};
-    const bwTotalAtoms = getTotalAtoms(bwCounts);
+    const bwPc = formula ? parseComposition(formula) : null;
     let bwEst = 0;
-    for (const el of bwElements) {
-      const frac = (bwCounts[el] || 1) / bwTotalAtoms;
-      bwEst += estimateBandwidthW(el) * frac;
+    let maxStonerProduct = 0;
+    if (bwPc) {
+      for (const el of bwPc.elements) {
+        const frac = (bwPc.counts[el] || 1) / bwPc.totalAtoms;
+        bwEst += estimateBandwidthW(el) * frac;
+        const I = getStonerParameter(el);
+        if (I !== null && I > 0) {
+          maxStonerProduct = Math.max(maxStonerProduct, I * N_EF);
+        }
+      }
     }
     bwEst = Math.max(1.0, bwEst);
     const bwNorm = bwEst / 6.0;
     lambda = lambda * (N_EF / dosRef) / Math.max(bwNorm, 0.3);
+
+    if (maxStonerProduct > 0.9) {
+      const pairBreakingPenalty = Math.max(0.3, 1.0 - (maxStonerProduct - 0.9) * 3.0);
+      lambda *= pairBreakingPenalty;
+    }
   }
 
   lambda = Math.max(0.05, Math.min(2.5, lambda));
