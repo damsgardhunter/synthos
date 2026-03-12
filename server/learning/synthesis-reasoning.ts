@@ -35,6 +35,44 @@ function getTotalAtoms(counts: Record<string, number>): number {
   return Object.values(counts).reduce((a, b) => a + b, 0);
 }
 
+const STABLE_BINARY_PHASES: Record<string, Record<string, string>> = {
+  O: {
+    Ba: "BaO", Sr: "SrO", Ca: "CaO", Cu: "CuO", La: "La2O3", Y: "Y2O3",
+    Ti: "TiO2", Fe: "Fe2O3", Al: "Al2O3", Mg: "MgO", Zn: "ZnO", Bi: "Bi2O3",
+    Nb: "Nb2O5", Ta: "Ta2O5", Zr: "ZrO2", Hf: "HfO2", Ce: "CeO2", Mn: "MnO2",
+    Ni: "NiO", Co: "CoO", Pb: "PbO", Sn: "SnO2", V: "V2O5", W: "WO3",
+    Mo: "MoO3", Cr: "Cr2O3", Sc: "Sc2O3", Nd: "Nd2O3", Sm: "Sm2O3",
+    Eu: "Eu2O3", Gd: "Gd2O3", Th: "ThO2", U: "UO2",
+  },
+  H: {
+    La: "LaH3", Y: "YH3", Ca: "CaH2", Ba: "BaH2", Sr: "SrH2", Mg: "MgH2",
+    Ti: "TiH2", Zr: "ZrH2", Nb: "NbH", V: "VH", Pd: "PdH", Ce: "CeH3",
+    Th: "ThH2", U: "UH3", Li: "LiH", Na: "NaH", K: "KH",
+  },
+  S: {
+    Ba: "BaS", Cu: "Cu2S", Fe: "FeS", La: "La2S3", Ca: "CaS", Sr: "SrS",
+    Zn: "ZnS", Pb: "PbS", Bi: "Bi2S3", Ni: "NiS", Mo: "MoS2",
+  },
+  N: {
+    Ti: "TiN", Zr: "ZrN", Nb: "NbN", Ta: "TaN", La: "LaN", Hf: "HfN",
+    Al: "AlN", V: "VN", Cr: "CrN", Fe: "Fe4N", Th: "ThN",
+  },
+  F: {
+    Ba: "BaF2", Ca: "CaF2", Sr: "SrF2", La: "LaF3", Y: "YF3", Li: "LiF",
+    Na: "NaF", K: "KF", Bi: "BiF3", Al: "AlF3",
+  },
+  C: {
+    Ti: "TiC", Zr: "ZrC", Nb: "NbC", Ta: "TaC", W: "WC", Mo: "Mo2C",
+    V: "VC", Hf: "HfC", Fe: "Fe3C", Ca: "CaC2", Si: "SiC",
+  },
+};
+
+function resolveStableBinary(el1: string, el2: string): string | null {
+  if (STABLE_BINARY_PHASES[el2]?.[el1]) return STABLE_BINARY_PHASES[el2][el1];
+  if (STABLE_BINARY_PHASES[el1]?.[el2]) return STABLE_BINARY_PHASES[el1][el2];
+  return null;
+}
+
 export type StabilityClass = "thermodynamically-stable" | "metastable-accessible" | "metastable-difficult" | "likely-unstable";
 
 export interface ThermodynamicLandscape {
@@ -80,19 +118,17 @@ export async function analyzeThermodynamicLandscape(
   }
 
   const meltingPoints: number[] = [];
+  const bulkModuli: number[] = [];
+  const elementDataCache: Record<string, ReturnType<typeof getElementData>> = {};
   for (const el of elements) {
     const data = getElementData(el);
+    elementDataCache[el] = data;
     if (data?.meltingPoint) meltingPoints.push(data.meltingPoint);
+    if (data?.bulkModulus) bulkModuli.push(data.bulkModulus * (counts[el] / totalAtoms));
   }
   const meltingPointEstimate = meltingPoints.length > 0
     ? Math.round(meltingPoints.reduce((a, b) => a + b, 0) / meltingPoints.length)
     : 1500;
-
-  const bulkModuli: number[] = [];
-  for (const el of elements) {
-    const data = getElementData(el);
-    if (data?.bulkModulus) bulkModuli.push(data.bulkModulus * (counts[el] / totalAtoms));
-  }
   const bulkModulusEstimate = bulkModuli.length > 0
     ? Math.round(bulkModuli.reduce((a, b) => a + b, 0))
     : 100;
@@ -104,12 +140,16 @@ export async function analyzeThermodynamicLandscape(
   let estimatedQuenchRateKPerSec: number | null = null;
   if (decompositionBarrier > 0) {
     const kB = 8.617e-5;
-    const attemptFreq = 1e13;
     const targetLifetime = 3600;
     const Tsynth = meltingPointEstimate * 0.8;
     const exponent = decompositionBarrier / (kB * Tsynth);
-    if (exponent > 2) {
-      estimatedQuenchRateKPerSec = Math.round(Tsynth / (targetLifetime / Math.exp(-exponent)));
+    if (exponent > 50) {
+      estimatedQuenchRateKPerSec = 1;
+    } else if (exponent > 2) {
+      const expVal = Math.exp(-exponent);
+      estimatedQuenchRateKPerSec = expVal > 0
+        ? Math.round(Tsynth / (targetLifetime / expVal))
+        : 1;
       estimatedQuenchRateKPerSec = Math.max(1, Math.min(1e8, Math.abs(estimatedQuenchRateKPerSec)));
       if (decompositionBarrier < 0.05) estimatedQuenchRateKPerSec = Math.max(1e5, estimatedQuenchRateKPerSec);
       else if (decompositionBarrier < 0.1) estimatedQuenchRateKPerSec = Math.max(1e3, estimatedQuenchRateKPerSec);
@@ -123,7 +163,8 @@ export async function analyzeThermodynamicLandscape(
   if (elements.length >= 2 && eAboveHull > 0.01) {
     for (let i = 0; i < elements.length; i++) {
       for (let j = i + 1; j < elements.length; j++) {
-        decompositionProducts.push(`${elements[i]}${elements[j]}`);
+        const binary = resolveStableBinary(elements[i], elements[j]);
+        if (binary) decompositionProducts.push(binary);
       }
     }
     if (decompositionProducts.length > 4) {
