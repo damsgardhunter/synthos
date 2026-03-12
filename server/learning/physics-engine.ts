@@ -718,8 +718,8 @@ function getLambdaCapForClass(matClass: MaterialClass): number {
     case "iron-pnictide": return 2.5;
     case "heavy-fermion": return 1.5;
     case "hydride-low-p": return 3.5;
-    case "hydride-high-p": return 5.0;
-    case "superhydride": return 5.0;
+    case "hydride-high-p": return 4.0;
+    case "superhydride": return 4.5;
     case "light-element": return 3.0;
     case "other": return 2.5;
   }
@@ -1729,6 +1729,11 @@ export function computeElectronPhononCoupling(
   if (lambda > 4.0 && matClass !== "superhydride" && matClass !== "hydride-high-p") {
     const instabilityDamp = 1.0 - (lambda - 4.0) * 0.1;
     lambda *= Math.max(0.7, instabilityDamp);
+  }
+
+  if ((matClass === "superhydride" || matClass === "hydride-high-p") && lambda > 3.5) {
+    const latticeInstabilityPenalty = 1.0 - (lambda - 3.5) * 0.15;
+    lambda *= Math.max(0.6, latticeInstabilityPenalty);
   }
 
   const lambdaUncorrected = lambda;
