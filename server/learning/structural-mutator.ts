@@ -2,18 +2,35 @@ import { ELEMENTAL_DATA, getElementData, isTransitionMetal, isRareEarth, isActin
 import { normalizeFormula } from "./utils";
 import type { EventEmitter } from "./engine";
 
-function parseFormulaElements(formula: string): string[] {
+function titleCaseElement(el: string): string {
+  if (!el) return el;
+  return el.charAt(0).toUpperCase() + el.slice(1).toLowerCase();
+}
+
+function normalizeFormulaInput(formula: string): string {
   if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  cleaned = cleaned.replace(/[a-z]+/g, (m, offset) => {
+    if (offset === 0) return titleCaseElement(m);
+    const prev = cleaned[offset - 1];
+    if (prev && /[A-Z]/.test(prev)) return m;
+    if (prev && /[a-z]/.test(prev)) return m;
+    return titleCaseElement(m);
+  });
+  return cleaned;
+}
+
+function parseFormulaElements(formula: string): string[] {
+  const cleaned = normalizeFormulaInput(formula);
   const matches = cleaned.match(/[A-Z][a-z]*/g);
   return matches ? Array.from(new Set(matches)) : [];
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
-  if (typeof formula !== "string") formula = String(formula ?? "");
-  const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
+  const cleaned = normalizeFormulaInput(formula);
   const counts: Record<string, number> = {};
   const regex = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  regex.lastIndex = 0;
   let match;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
@@ -24,7 +41,7 @@ function parseFormulaCounts(formula: string): Record<string, number> {
 }
 
 function getTotalAtoms(counts: Record<string, number>): number {
-  return Object.values(counts).reduce((s, n) => s + n, 0) || 1;
+  return Object.values(counts).reduce((s, n) => s + n, 0);
 }
 
 function buildFormula(counts: Record<string, number>): string {
@@ -60,6 +77,8 @@ export function assignPrototype(formula: string): PrototypeType {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
+
+  if (totalAtoms === 0 || elements.length === 0) return "bcc";
 
   const hasO = elements.includes("O");
   const hasH = elements.includes("H");
