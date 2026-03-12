@@ -285,34 +285,38 @@ export function mineQuantitativeRules(candidates: ScoredCandidate[], precomputed
   const minF1 = computeMinF1(highTcRate);
   const minSupport = computeDynamicSupport(candidates.length);
 
+  const consequents: ("high-tc" | "low-tc")[] = ["high-tc", "low-tc"];
+
   for (const feat of TOP_FEATURES) {
     const thresholds = generateThresholds(featureValues[feat as string]);
 
     for (const threshold of thresholds) {
       for (const operator of [">" as const, "<" as const]) {
-        const result = evaluateRuleMatrix(
-          [feat as string], [operator], [threshold], [undefined],
-          data, true
-        );
-        if (result.f1 > minF1 && result.support >= minSupport) {
-          rules.push({
-            conditions: [{ property: feat as string, operator, threshold }],
-            consequent: "high-tc",
-            confidence: result.precision,
-            f1Score: Math.round(result.f1 * 1000) / 1000,
-            support: result.support,
-            precision: Math.round(result.precision * 1000) / 1000,
-            recall: Math.round(result.recall * 1000) / 1000,
-            discoveredAt: new Date().toISOString(),
-            weight: 1.0,
-          });
+        for (const consequent of consequents) {
+          const result = evaluateRuleMatrix(
+            [feat as string], [operator], [threshold], [undefined],
+            data, consequent === "high-tc"
+          );
+          if (result.f1 > minF1 && result.support >= minSupport) {
+            rules.push({
+              conditions: [{ property: feat as string, operator, threshold }],
+              consequent,
+              confidence: result.precision,
+              f1Score: Math.round(result.f1 * 1000) / 1000,
+              support: result.support,
+              precision: Math.round(result.precision * 1000) / 1000,
+              recall: Math.round(result.recall * 1000) / 1000,
+              discoveredAt: new Date().toISOString(),
+              weight: 1.0,
+            });
+          }
         }
       }
     }
   }
 
   rules.sort((a, b) => b.f1Score - a.f1Score);
-  return rules.slice(0, 20);
+  return rules.slice(0, 30);
 }
 
 const INTERACTION_OPERATORS: (">" | "<")[] = [">", "<"];
@@ -346,36 +350,38 @@ export function mineInteractionRules(candidates: ScoredCandidate[], precomputed?
 
       for (const op1 of INTERACTION_OPERATORS) {
         for (const op2 of INTERACTION_OPERATORS) {
-          let bestF1 = 0;
-          let bestRule: PatternRule | null = null;
+          for (const consequent of ["high-tc" as const, "low-tc" as const]) {
+            let bestF1 = 0;
+            let bestRule: PatternRule | null = null;
 
-          for (const t1 of thresholds1) {
-            for (const t2 of thresholds2) {
-              const result = evaluateRuleMatrix(
-                [feat1, feat2], [op1, op2], [t1, t2], [undefined, undefined],
-                data, true
-              );
-              if (result.f1 > minF1 && result.support >= minSupport && result.f1 > bestF1) {
-                bestF1 = result.f1;
-                bestRule = {
-                  conditions: [
-                    { property: feat1, operator: op1, threshold: t1 },
-                    { property: feat2, operator: op2, threshold: t2 },
-                  ],
-                  consequent: "high-tc",
-                  confidence: result.precision,
-                  f1Score: Math.round(result.f1 * 1000) / 1000,
-                  support: result.support,
-                  precision: Math.round(result.precision * 1000) / 1000,
-                  recall: Math.round(result.recall * 1000) / 1000,
-                  discoveredAt: new Date().toISOString(),
-                  weight: 1.0,
-                };
+            for (const t1 of thresholds1) {
+              for (const t2 of thresholds2) {
+                const result = evaluateRuleMatrix(
+                  [feat1, feat2], [op1, op2], [t1, t2], [undefined, undefined],
+                  data, consequent === "high-tc"
+                );
+                if (result.f1 > minF1 && result.support >= minSupport && result.f1 > bestF1) {
+                  bestF1 = result.f1;
+                  bestRule = {
+                    conditions: [
+                      { property: feat1, operator: op1, threshold: t1 },
+                      { property: feat2, operator: op2, threshold: t2 },
+                    ],
+                    consequent,
+                    confidence: result.precision,
+                    f1Score: Math.round(result.f1 * 1000) / 1000,
+                    support: result.support,
+                    precision: Math.round(result.precision * 1000) / 1000,
+                    recall: Math.round(result.recall * 1000) / 1000,
+                    discoveredAt: new Date().toISOString(),
+                    weight: 1.0,
+                  };
+                }
               }
             }
-          }
 
-          if (bestRule) rules.push(bestRule);
+            if (bestRule) rules.push(bestRule);
+          }
         }
       }
     }
@@ -450,7 +456,7 @@ function ruleSignature(rule: PatternRule): string {
     .map((c) => `${c.property}${c.operator}${c.threshold}${c.upperThreshold ?? ""}`)
     .sort()
     .join("|");
-  return `${rule.family ?? "all"}::${condSig}`;
+  return `${rule.family ?? "all"}::${rule.consequent}::${condSig}`;
 }
 
 export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
@@ -479,62 +485,102 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
     if (scored.length < 15) return cachedRules;
 
     const shuffled = [...scored].sort(() => Math.random() - 0.5);
-    const splitIdx = Math.floor(shuffled.length * 0.7);
-    const trainSet = shuffled.slice(0, splitIdx);
-    const testSet = shuffled.slice(splitIdx);
+    const useKFold = shuffled.length < 80;
+    const K = useKFold ? Math.min(5, Math.max(3, Math.floor(shuffled.length / 10))) : 1;
 
-    const trainData = buildFeatureMatrix(trainSet);
-    const quantRules = mineQuantitativeRules(trainSet, trainData);
-    const interRules = mineInteractionRules(trainSet, trainData);
-
-    const globalRules = [...quantRules, ...interRules];
-    for (const r of globalRules) r.family = "all";
-
-    const familyRules: PatternRule[] = [];
-    const familyGroups = new Map<string, ScoredCandidate[]>();
-    for (const c of trainSet) {
-      const existing = familyGroups.get(c.family) ?? [];
-      existing.push(c);
-      familyGroups.set(c.family, existing);
+    const folds: { train: ScoredCandidate[]; test: ScoredCandidate[] }[] = [];
+    if (useKFold) {
+      const foldSize = Math.floor(shuffled.length / K);
+      for (let f = 0; f < K; f++) {
+        const testStart = f * foldSize;
+        const testEnd = f === K - 1 ? shuffled.length : testStart + foldSize;
+        folds.push({
+          train: [...shuffled.slice(0, testStart), ...shuffled.slice(testEnd)],
+          test: shuffled.slice(testStart, testEnd),
+        });
+      }
+    } else {
+      const splitIdx = Math.floor(shuffled.length * 0.7);
+      folds.push({
+        train: shuffled.slice(0, splitIdx),
+        test: shuffled.slice(splitIdx),
+      });
     }
 
-    for (const [family, members] of familyGroups) {
-      if (members.length < MIN_FAMILY_SIZE) continue;
-      const famData = buildFeatureMatrix(members);
-      const famQuant = mineQuantitativeRules(members, famData);
-      const famInter = mineInteractionRules(members, famData);
-      for (const r of [...famQuant, ...famInter]) {
-        r.family = family;
-        familyRules.push(r);
+    const ruleScoreAccum = new Map<string, { rule: PatternRule; f1Sum: number; precSum: number; recSum: number; foldCount: number }>();
+
+    for (const { train: trainSet, test: testSet } of folds) {
+      const trainData = buildFeatureMatrix(trainSet);
+      const quantRules = mineQuantitativeRules(trainSet, trainData);
+      const interRules = mineInteractionRules(trainSet, trainData);
+
+      const globalRules = [...quantRules, ...interRules];
+      for (const r of globalRules) r.family = "all";
+
+      const familyRules: PatternRule[] = [];
+      const familyGroups = new Map<string, ScoredCandidate[]>();
+      for (const c of trainSet) {
+        const existing = familyGroups.get(c.family) ?? [];
+        existing.push(c);
+        familyGroups.set(c.family, existing);
+      }
+
+      for (const [family, members] of familyGroups) {
+        if (members.length < MIN_FAMILY_SIZE) continue;
+        const famData = buildFeatureMatrix(members);
+        const famQuant = mineQuantitativeRules(members, famData);
+        const famInter = mineInteractionRules(members, famData);
+        for (const r of [...famQuant, ...famInter]) {
+          r.family = family;
+          familyRules.push(r);
+        }
+      }
+
+      const allFoldRules = [...globalRules, ...familyRules];
+
+      for (const rule of allFoldRules) {
+        const relevantTest = rule.family && rule.family !== "all"
+          ? testSet.filter(c => c.family === rule.family)
+          : testSet;
+
+        if (relevantTest.length < 3) continue;
+
+        const testResult = validateRule(rule, relevantTest);
+        const sig = ruleSignature(rule);
+        const existing = ruleScoreAccum.get(sig);
+
+        if (existing) {
+          existing.f1Sum += testResult.f1;
+          existing.precSum += testResult.precision;
+          existing.recSum += testResult.recall;
+          existing.foldCount++;
+        } else {
+          ruleScoreAccum.set(sig, {
+            rule: { ...rule },
+            f1Sum: testResult.f1,
+            precSum: testResult.precision,
+            recSum: testResult.recall,
+            foldCount: 1,
+          });
+        }
       }
     }
-
-    const allNewRules = [...globalRules, ...familyRules];
 
     const validatedRules: PatternRule[] = [];
-    for (const rule of allNewRules) {
-      const relevantTest = rule.family && rule.family !== "all"
-        ? testSet.filter(c => c.family === rule.family)
-        : testSet;
+    const minFoldsRequired = useKFold ? Math.max(2, Math.floor(K / 2)) : 1;
 
-      if (relevantTest.length < 5) {
-        if (rule.f1Score > 0.6 && rule.support >= 3) {
-          validatedRules.push(rule);
-        }
-        continue;
-      }
+    for (const [, accum] of ruleScoreAccum) {
+      if (accum.foldCount < minFoldsRequired) continue;
 
-      const testResult = validateRule(rule, relevantTest);
-      if (testResult.f1 > 0.5 && testResult.support >= 2) {
-        rule.f1Score = Math.round(
-          ((rule.f1Score + testResult.f1) / 2) * 1000
-        ) / 1000;
-        rule.precision = Math.round(
-          ((rule.precision + testResult.precision) / 2) * 1000
-        ) / 1000;
-        rule.recall = Math.round(
-          ((rule.recall + testResult.recall) / 2) * 1000
-        ) / 1000;
+      const avgF1 = accum.f1Sum / accum.foldCount;
+      const avgPrec = accum.precSum / accum.foldCount;
+      const avgRec = accum.recSum / accum.foldCount;
+
+      if (avgF1 > 0.5) {
+        const rule = accum.rule;
+        rule.f1Score = Math.round(((rule.f1Score + avgF1) / 2) * 1000) / 1000;
+        rule.precision = Math.round(((rule.precision + avgPrec) / 2) * 1000) / 1000;
+        rule.recall = Math.round(((rule.recall + avgRec) / 2) * 1000) / 1000;
         validatedRules.push(rule);
       }
     }
@@ -578,19 +624,23 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
         .join(" AND ");
 
       const familyTag = rule.family && rule.family !== "all" ? ` [${rule.family}]` : "";
+      const label = rule.consequent === "high-tc" ? "High Tc" : "Low Tc";
       emit("log", {
         phase: "engine",
         event: "Pattern rule discovered",
-        detail: `High Tc when ${condStr}${familyTag} (F1=${rule.f1Score}, support=${rule.support}, weight=${rule.weight.toFixed(2)})`,
+        detail: `${label} when ${condStr}${familyTag} (F1=${rule.f1Score}, support=${rule.support}, weight=${rule.weight.toFixed(2)})`,
         dataSource: "Pattern Miner",
       });
     }
 
     const familyCount = new Set(cachedRules.filter(r => r.family && r.family !== "all").map(r => r.family)).size;
+    const highTcRuleCount = cachedRules.filter(r => r.consequent === "high-tc").length;
+    const lowTcRuleCount = cachedRules.filter(r => r.consequent === "low-tc").length;
+    const validationMethod = useKFold ? `${K}-fold CV` : "70/30 split";
     emit("log", {
       phase: "engine",
       event: "Pattern mining complete",
-      detail: `Mined ${quantRules.length} quantitative + ${interRules.length} interaction rules from ${scored.length} candidates. ${familyRules.length} family-specific rules across ${familyCount} families. ${validatedRules.length} validated. ${cachedRules.length} active rules total.`,
+      detail: `${validatedRules.length} rules validated (${validationMethod}) from ${scored.length} candidates. ${highTcRuleCount} high-Tc + ${lowTcRuleCount} low-Tc rules across ${familyCount} families. ${cachedRules.length} active rules total.`,
       dataSource: "Pattern Miner",
     });
 
