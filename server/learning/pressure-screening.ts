@@ -1,7 +1,7 @@
 import { getElementData } from "./elemental-data";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
-import { getMetalElements } from "./utils";
+import { getMetalElements, getElectronegativitySpread } from "./utils";
 
 export interface FastPressureEstimate {
   formula: string;
@@ -71,8 +71,27 @@ function getMergedClusters(): PressureCluster[] {
   return CLUSTER_DEFS.map(def => ({ ...def, ...getAnalytics(def.id, def.baseWeight) }));
 }
 
-const recentAssignments: { formula: string; cluster: string; tc: number }[] = [];
 const MAX_RECENT = 100;
+const recentAssignmentsBuf: { formula: string; cluster: string; tc: number }[] = new Array(MAX_RECENT);
+let raBufHead = 0;
+let raBufSize = 0;
+
+function pushRecentAssignment(entry: { formula: string; cluster: string; tc: number }): void {
+  recentAssignmentsBuf[raBufHead] = entry;
+  raBufHead = (raBufHead + 1) % MAX_RECENT;
+  if (raBufSize < MAX_RECENT) raBufSize++;
+}
+
+function getRecentAssignments(n: number): { formula: string; cluster: string; tc: number }[] {
+  const count = Math.min(n, raBufSize);
+  const result: { formula: string; cluster: string; tc: number }[] = [];
+  let idx = (raBufHead - count + MAX_RECENT) % MAX_RECENT;
+  for (let i = 0; i < count; i++) {
+    result.push(recentAssignmentsBuf[idx]);
+    idx = (idx + 1) % MAX_RECENT;
+  }
+  return result;
+}
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -235,7 +254,9 @@ export function fastPressureScreen(
     estimatedTc *= 1 + (hFrac - 0.5) * domeFactor * 0.5;
   }
 
-  const estimatedBandgap = Math.max(0, 1.5 - pressureGpa * 0.01 * vol.volumeRatio);
+  const enSpread = getElectronegativitySpread(counts);
+  const ionicResistance = 1 + enSpread * 0.8;
+  const estimatedBandgap = Math.max(0, (1.5 * ionicResistance) - pressureGpa * 0.01 * vol.volumeRatio);
 
   const volumeStability = vol.volumeRatio > 0.55 ? 1.0 : vol.volumeRatio > 0.5 ? 0.5 : 0.0;
   if (volumeStability === 0) {
@@ -338,8 +359,7 @@ export function recordClusterDiscovery(
     ? analytics.discoveryCount / analytics.totalScreened
     : 0;
 
-  recentAssignments.push({ formula, cluster: def.id, tc });
-  while (recentAssignments.length > MAX_RECENT) recentAssignments.shift();
+  pushRecentAssignment({ formula, cluster: def.id, tc });
 
   rebalanceClusterWeights();
 }
@@ -446,6 +466,6 @@ export function getPressureClusterStats(): PressureClusterStats {
     totalDiscoveries,
     mostProductiveCluster: mostProductive,
     explorationBias: getClusterExplorationBias(),
-    recentAssignments: recentAssignments.slice(-20),
+    recentAssignments: getRecentAssignments(20),
   };
 }

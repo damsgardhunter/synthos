@@ -153,6 +153,33 @@ const ELECTRONEGATIVITY: Record<string, number> = {
   Th: 1.30, Pa: 1.50, U: 1.38, Np: 1.36, Pu: 1.28, Am: 1.30, Pm: 1.13,
 };
 
+export function getElectronegativitySpread(counts: Record<string, number>): number {
+  const elements = Object.keys(counts).filter(el => ELECTRONEGATIVITY[el] !== undefined && ELECTRONEGATIVITY[el] > 0);
+  if (elements.length < 2) return 0;
+
+  let minEn = Infinity;
+  let maxEn = -Infinity;
+  for (const el of elements) {
+    const en = ELECTRONEGATIVITY[el];
+    if (en < minEn) minEn = en;
+    if (en > maxEn) maxEn = en;
+  }
+  return maxEn - minEn;
+}
+
+export function getWeightedElectronegativity(counts: Record<string, number>): number {
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const en = ELECTRONEGATIVITY[el] ?? 0;
+    if (en > 0) {
+      weightedSum += en * n;
+      totalWeight += n;
+    }
+  }
+  return totalWeight > 0 ? weightedSum / totalWeight : 2.0;
+}
+
 const VALID_ELEMENTS = new Set([
   ...Object.keys(ELECTRONEGATIVITY),
   "Rn", "Cm", "Bk", "Cf",
