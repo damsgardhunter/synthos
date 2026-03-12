@@ -56,6 +56,7 @@ export interface CrossingDispersion {
   type: "linear" | "quadratic" | "flat";
   curvature: number;
   velocity: number;
+  velocityMS: number;
   socGap: number;
 }
 
@@ -72,6 +73,7 @@ export interface DFTTopologicalClassification {
   z2Indicator: number;
   chiralWindingIndicator: number;
   classificationChain: string[];
+  socTopologyBoost: number;
 }
 
 export interface FermiIsosurfacePoint {
@@ -96,21 +98,27 @@ export function classifyCrossingDispersion(bandResult: DFTBandStructureResult): 
   const crossings: CrossingDispersion[] = [];
   if (bandResult.eigenvalues.length < 5) return crossings;
 
+  const nK = bandResult.eigenvalues.length;
+  const kDist = new Float64Array(nK);
+  for (let i = 0; i < nK; i++) {
+    kDist[i] = bandResult.eigenvalues[i].kDistance;
+  }
+
   for (const crossing of bandResult.bandCrossings) {
     const bIdx = crossing.bandIndex;
     const kFrac = crossing.kFraction;
-    const kIdx = Math.round(kFrac * (bandResult.eigenvalues.length - 1));
+    const kIdx = Math.round(kFrac * (nK - 1));
 
     const windowSize = 3;
     const lo = Math.max(0, kIdx - windowSize);
-    const hi = Math.min(bandResult.eigenvalues.length - 1, kIdx + windowSize);
+    const hi = Math.min(nK - 1, kIdx + windowSize);
 
     const localE: { dk: number; e: number }[] = [];
+    const kRef = kDist[kIdx];
     for (let i = lo; i <= hi; i++) {
       const e = bandResult.eigenvalues[i]?.energies[bIdx];
       if (e === undefined) continue;
-      const dk = bandResult.eigenvalues[i].kDistance - bandResult.eigenvalues[kIdx].kDistance;
-      localE.push({ dk, e });
+      localE.push({ dk: kDist[i] - kRef, e });
     }
 
     if (localE.length < 3) continue;
@@ -174,6 +182,7 @@ export function classifyCrossingDispersion(bandResult: DFTBandStructureResult): 
       type = "quadratic";
     }
 
+    const EV_ANG_TO_MS = 1.602176634e-19 / (1.054571817e-34 * 1e10);
     crossings.push({
       bandIndex: bIdx,
       kIndex: kIdx,
@@ -181,6 +190,7 @@ export function classifyCrossingDispersion(bandResult: DFTBandStructureResult): 
       type,
       curvature,
       velocity,
+      velocityMS: velocity * EV_ANG_TO_MS,
       socGap,
     });
   }
@@ -217,6 +227,9 @@ export function detectSOCGaps(bandResult: DFTBandStructureResult): { kIndex: num
     }
   }
 
+  if (gaps.length > 1000) {
+    gaps.length = 1000;
+  }
   gaps.sort((a, b) => a.gapMeV - b.gapMeV);
   return gaps.slice(0, 20);
 }
@@ -436,6 +449,15 @@ export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStren
     evidence.push(`Fermi isosurface: ${isosurface.sheetCount} sheets, ${isosurface.totalPoints} crossing points`);
   }
 
+  let socTopologyBoost = 0;
+  if (socGapsAtFermi.length > 0 && maxSOCGap > 5) {
+    socTopologyBoost = Math.min(0.5, maxSOCGap / 100 + socGapsAtFermi.length * 0.05);
+    if (topologicalClass !== "trivial") {
+      socTopologyBoost += 0.2;
+    }
+    socTopologyBoost = Math.min(1.0, socTopologyBoost);
+  }
+
   return {
     topologicalClass,
     confidence,
@@ -449,6 +471,7 @@ export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStren
     z2Indicator,
     chiralWindingIndicator: chiralWinding,
     classificationChain: chain,
+    socTopologyBoost,
   };
 }
 
