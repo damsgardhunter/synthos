@@ -314,6 +314,19 @@ export function normalizeFormula(raw: string): string {
   return result;
 }
 
+export interface ParsedComposition {
+  elements: string[];
+  counts: Record<string, number>;
+  totalAtoms: number;
+}
+
+export function parseComposition(formula: string): ParsedComposition {
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalAtoms = elements.reduce((s, el) => s + counts[el], 0);
+  return { elements, counts, totalAtoms };
+}
+
 export function isIsostructuralDuplicate(formulaA: string, formulaB: string): boolean {
   if (formulaA === formulaB) return true;
   return normalizeFormula(formulaA) === normalizeFormula(formulaB);

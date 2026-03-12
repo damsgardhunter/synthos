@@ -221,14 +221,25 @@ function getKPath(crystalSystem: string): HighSymmetryPath {
   return path;
 }
 
+const IBRAV_MAP: Record<string, number> = {
+  "cubic_sc": 1,
+  "cubic_fcc": 2,
+  "cubic_bcc": 3,
+  "cubic": 1,
+  "hexagonal": 4,
+  "tetragonal": 6,
+  "tetragonal_bct": 7,
+  "orthorhombic": 8,
+  "rhombohedral": 5,
+  "trigonal": 5,
+  "monoclinic": 12,
+  "triclinic": 14,
+};
+
 function crystalSystemToIbrav(system: string): number {
-  if (system === "cubic_sc") return 1;
-  if (system === "cubic_fcc") return 2;
-  if (system === "cubic_bcc") return 3;
-  if (system === "hexagonal") return 4;
-  if (system === "tetragonal") return 6;
-  if (system === "orthorhombic") return 8;
-  if (system === "monoclinic") return 12;
+  const ibrav = IBRAV_MAP[system];
+  if (ibrav !== undefined) return ibrav;
+  console.warn(`[band-structure-calculator] Unknown crystal system "${system}" — defaulting to ibrav=1 (simple cubic). k-path may not match Brillouin zone.`);
   return 1;
 }
 
