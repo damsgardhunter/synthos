@@ -6,8 +6,10 @@ export interface PressureResponseProfile {
   tcVsPressure: { pressure: number; tc: number }[];
   stabilityVsPressure: { pressure: number; stable: boolean; enthalpy: number }[];
   bandgapVsPressure: { pressure: number; bandgap: number }[];
-  peakTc: number;
-  peakTcPressure: number;
+  absolutePeakTc: number;
+  absolutePeakTcPressure: number;
+  stablePeakTc: number;
+  stablePeakTcPressure: number;
   ambientTc: number;
   lowPressureTc: number;
   updatedAt: number;
@@ -29,7 +31,7 @@ export interface PressurePropertyMapStats {
   ambientHighTcCount: number;
   lowPressureHighTcCount: number;
   profilesByPeakRange: { range: string; count: number }[];
-  recentProfiles: { formula: string; peakTc: number; peakPressure: number }[];
+  recentProfiles: { formula: string; absolutePeakTc: number; stablePeakTc: number; peakPressure: number }[];
 }
 
 const profileCache = new Map<string, PressureResponseProfile>();
@@ -67,12 +69,20 @@ export function buildPressureResponseProfile(formula: string): PressureResponseP
     bandgapVsPressure.push({ pressure: pt.pressureGpa, bandgap: pt.bandgap });
   }
 
-  let peakTc = 0;
-  let peakTcPressure = 0;
-  for (const pt of tcVsPressure) {
-    if (pt.tc > peakTc) {
-      peakTc = pt.tc;
-      peakTcPressure = pt.pressure;
+  let absolutePeakTc = 0;
+  let absolutePeakTcPressure = 0;
+  let stablePeakTc = 0;
+  let stablePeakTcPressure = 0;
+  for (let i = 0; i < tcVsPressure.length; i++) {
+    const tc = tcVsPressure[i].tc;
+    const p = tcVsPressure[i].pressure;
+    if (tc > absolutePeakTc) {
+      absolutePeakTc = tc;
+      absolutePeakTcPressure = p;
+    }
+    if (stabilityVsPressure[i]?.stable && tc > stablePeakTc) {
+      stablePeakTc = tc;
+      stablePeakTcPressure = p;
     }
   }
 
@@ -89,8 +99,10 @@ export function buildPressureResponseProfile(formula: string): PressureResponseP
     tcVsPressure,
     stabilityVsPressure,
     bandgapVsPressure,
-    peakTc,
-    peakTcPressure,
+    absolutePeakTc,
+    absolutePeakTcPressure,
+    stablePeakTc,
+    stablePeakTcPressure,
     ambientTc,
     lowPressureTc,
     updatedAt: Date.now(),
@@ -157,8 +169,8 @@ export function interpolateAtPressure(formula: string, targetPressure: number): 
 
   return {
     pressure: targetPressure,
-    tc: tcPts[loIdx].tc + (tcPts[hiIdx].tc - tcPts[loIdx].tc) * clampT,
-    bandgap: loBg + (hiBg - loBg) * clampT,
+    tc: Math.max(0, tcPts[loIdx].tc + (tcPts[hiIdx].tc - tcPts[loIdx].tc) * clampT),
+    bandgap: Math.max(0, loBg + (hiBg - loBg) * clampT),
     enthalpy: interpEnthalpy,
     enthalpyStable,
     interpolated: true,
@@ -195,8 +207,8 @@ export function getPressurePropertyMapStats(): PressurePropertyMapStats {
     };
   }
 
-  const avgPeakTc = profiles.reduce((s, p) => s + p.peakTc, 0) / profiles.length;
-  const avgPeakPressure = profiles.reduce((s, p) => s + p.peakTcPressure, 0) / profiles.length;
+  const avgPeakTc = profiles.reduce((s, p) => s + p.absolutePeakTc, 0) / profiles.length;
+  const avgPeakPressure = profiles.reduce((s, p) => s + p.absolutePeakTcPressure, 0) / profiles.length;
   const ambientHighTcCount = profiles.filter(p => p.ambientTc > 77).length;
   const lowPressureHighTcCount = profiles.filter(p => p.lowPressureTc > 77).length;
 
@@ -209,13 +221,18 @@ export function getPressurePropertyMapStats(): PressurePropertyMapStats {
 
   const profilesByPeakRange = ranges.map(r => ({
     range: r.range,
-    count: profiles.filter(p => p.peakTcPressure >= r.min && p.peakTcPressure < r.max).length,
+    count: profiles.filter(p => p.absolutePeakTcPressure >= r.min && p.absolutePeakTcPressure < r.max).length,
   }));
 
   const recentProfiles = profiles
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, 15)
-    .map(p => ({ formula: p.formula, peakTc: Math.round(p.peakTc * 10) / 10, peakPressure: p.peakTcPressure }));
+    .map(p => ({
+      formula: p.formula,
+      absolutePeakTc: Math.round(p.absolutePeakTc * 10) / 10,
+      stablePeakTc: Math.round(p.stablePeakTc * 10) / 10,
+      peakPressure: p.absolutePeakTcPressure,
+    }));
 
   return {
     totalProfiles: profiles.length,
