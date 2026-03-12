@@ -2228,7 +2228,11 @@ function estimateSpinFluctuationTc(
 
   if (spinSusc.isNearQCP) tc_sf *= 2.0;
   else if (nearQCP) tc_sf *= 1.8;
-  if (hasAFM) tc_sf *= 1.5;
+  if (hasAFM && !spinSusc.isStableFerromagnet) {
+    tc_sf *= 1.8;
+  } else if (hasAFM) {
+    tc_sf *= 1.3;
+  }
 
   if (spinSusc.correlationLength > 5) {
     tc_sf *= (1 + Math.log(spinSusc.correlationLength) * 0.15);
@@ -3187,8 +3191,15 @@ export function assessCorrelationStrength(formula: string): {
   }
 
   if (ratio === 0) {
-    if (elements.includes("H")) ratio = 0.1;
-    else {
+    const hasTM = elements.some(e => isTransitionMetal(e));
+    const hasRE = elements.some(e => isRareEarth(e));
+    const hasActinide = elements.some(e => isActinide(e));
+    const isSimpleSPMetal = !hasTM && !hasRE && !hasActinide && !elements.includes("H");
+    if (isSimpleSPMetal) {
+      ratio = 0.0;
+    } else if (elements.includes("H")) {
+      ratio = 0.1;
+    } else {
       const avgEN = getCompositionWeightedProperty(counts, "paulingElectronegativity") || 1.8;
       ratio = avgEN > 2.5 ? 0.25 : 0.15;
     }
@@ -3257,12 +3268,17 @@ export function computeInstabilityProximity(
     }
   }
   const hasAFM = competingPhases.some(p => p.type === "magnetism" && p.phaseName.includes("Antiferromagnetic"));
-  if (hasAFM) magneticQCP = Math.max(magneticQCP, 0.5);
+  const hasFM = competingPhases.some(p => p.type === "magnetism" && p.phaseName.includes("Ferromagnetic"));
+  if (hasAFM && !hasFM) {
+    magneticQCP = Math.max(magneticQCP, 0.6);
+  } else if (hasAFM) {
+    magneticQCP = Math.max(magneticQCP, 0.5);
+  }
 
   let structuralBoundary = 0;
   const structPhases = competingPhases.filter(p => p.type === "structural");
   for (const sp of structPhases) {
-    const match = sp.phaseName.match(/t=([\d.]+)/);
+    const match = sp.phaseName.match(/t=([\d.]+)/i);
     if (match) {
       const tf = parseFloat(match[1]);
       const optimalTf = 0.95;
