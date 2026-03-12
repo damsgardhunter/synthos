@@ -742,6 +742,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - Candidates with `mottProximityScore > 0.4` use relaxed thresholds: bandgap up to 1.5 eV (vs 0.5 eV default) and metallicity floor 0.08 (vs 0.2 default). This allows Mott-insulator parent phases (e.g., cuprate undoped parents) to pass through the pipeline, since they can become superconductors upon doping.
 - **ROOM_TEMP_K Constant (superconductor-research.ts, engine.ts)**:
   - All hardcoded `>= 293` room-temperature checks replaced with exported `ROOM_TEMP_K = 293` constant. Ensures consistency across `superconductor-research.ts` and `engine.ts`. The `surrogate-fitness.ts` normalization by 300 is a fitness scaling factor, not a room-temp definition — no change needed there.
+- **Stability Gates Applied to All Candidates (superconductor-research.ts)**:
+  - `passesElementCountCap` and `passesStabilityGate` moved to the top of the candidate loop, before the update-vs-insert split. Previously these gates only applied to new inserts; existing candidates being upgraded bypassed current physics validation. Now upgrades and new entries both must pass the current stability criteria, so PHYSICS_VERSION bumps immediately invalidate stale candidates.
+- **Batched DB Writes (superconductor-research.ts, storage.ts)**:
+  - Candidate updates and inserts are now collected into `pendingUpdates` and `pendingInserts` arrays during the loop, then flushed in bulk after the loop completes. Updates use a new `bulkUpdateSuperconductorCandidates` method that executes in chunked transactions (25 per chunk). Inserts use the existing `bulkInsertSuperconductorCandidates`. This reduces sequential DB round-trips from O(N) to O(N/25) for a batch of 200 materials.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

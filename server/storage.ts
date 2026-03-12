@@ -59,6 +59,7 @@ export interface IStorage {
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
   bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
+  bulkUpdateSuperconductorCandidates(batch: Array<{ id: string; updates: Partial<InsertSuperconductorCandidate> }>): Promise<number>;
   getSuperconductorCount(): Promise<number>;
   getGlobalTcStats(): Promise<{ count: number; median: number; p25: number; p75: number }>;
   getSuperconductorsByStage(stage: number, limit?: number): Promise<SuperconductorCandidate[]>;
@@ -358,6 +359,34 @@ export class DatabaseStorage implements IStorage {
       }
     }
     await db.update(superconductorCandidates).set(sanitized).where(eq(superconductorCandidates.id, id));
+  }
+
+  async bulkUpdateSuperconductorCandidates(batch: Array<{ id: string; updates: Partial<InsertSuperconductorCandidate> }>): Promise<number> {
+    if (batch.length === 0) return 0;
+    let updated = 0;
+    const CHUNK = 25;
+    for (let i = 0; i < batch.length; i += CHUNK) {
+      const chunk = batch.slice(i, i + CHUNK);
+      try {
+        await db.transaction(async (tx) => {
+          for (const { id, updates } of chunk) {
+            const sanitized: Record<string, any> = {};
+            for (const [key, val] of Object.entries(updates)) {
+              if (typeof val === "number" && !Number.isFinite(val)) {
+                sanitized[key] = null;
+              } else {
+                sanitized[key] = val;
+              }
+            }
+            await tx.update(superconductorCandidates).set(sanitized).where(eq(superconductorCandidates.id, id));
+          }
+        });
+        updated += chunk.length;
+      } catch (e: any) {
+        console.error(`[Storage] Bulk update chunk failed (${chunk.length} updates): ${e?.message?.slice(0, 120)}`);
+      }
+    }
+    return updated;
   }
 
   async getSuperconductorCount(): Promise<number> {

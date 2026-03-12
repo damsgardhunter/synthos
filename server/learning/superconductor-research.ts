@@ -159,6 +159,9 @@ export async function runSuperconductorResearch(
     }
   }
 
+  const pendingUpdates: Array<{ id: string; updates: any; logDetail: string }> = [];
+  const pendingInserts: Array<{ payload: any; logEvent: any }> = [];
+
   for (const candidate of mlResult.candidates) {
     const rawFormula = candidate.formula || "Unknown";
     if (!isValidFormula(rawFormula)) {
@@ -169,6 +172,16 @@ export async function runSuperconductorResearch(
     const formula = normalizeFormula(rawFormula);
     candidate.formula = formula;
     const newScore = candidate.ensembleScore ?? 0;
+
+    if (!passesElementCountCap(formula)) {
+      duplicatesSkipped++;
+      continue;
+    }
+    const stabilityCheck = passesStabilityGate(formula);
+    if (!stabilityCheck.pass) {
+      duplicatesSkipped++;
+      continue;
+    }
 
     const mlFeatures = extractFeatures(formula);
     const lambdaML = candidate.electronPhononCoupling ?? mlFeatures.electronPhononLambda ?? 0;
@@ -246,13 +259,16 @@ export async function runSuperconductorResearch(
           updates.predictedTc = Math.max(newTc ?? 0, Math.round(existingTc * 0.5));
           updates.ensembleScore = newScore;
         }
-        await storage.updateSuperconductorCandidate(existing.id, updates);
         const tcDetail = tcImproved
           ? `, Tc ${existingTc}K -> ${updates.predictedTc ?? newTc}K`
           : tcDowngradeNeeded
             ? `, Tc corrected ${existingTc}K -> ${updates.predictedTc}K (higher-confidence model)`
             : "";
-        emit("log", { phase: "phase-7", event: "SC candidate upgraded", detail: `${formula}: score ${(existing.ensembleScore ?? 0).toFixed(3)} -> ${Math.max(newScore, existing.ensembleScore ?? 0).toFixed(3)}${tcDetail}`, dataSource: "SC Research" });
+        pendingUpdates.push({
+          id: existing.id,
+          updates,
+          logDetail: `${formula}: score ${(existing.ensembleScore ?? 0).toFixed(3)} -> ${Math.max(newScore, existing.ensembleScore ?? 0).toFixed(3)}${tcDetail}`,
+        });
       } else {
         duplicatesSkipped++;
       }
@@ -267,13 +283,8 @@ export async function runSuperconductorResearch(
       candidate.zeroResistance === true &&
       candidate.meissnerEffect === true;
 
-    try {
-      if (!passesElementCountCap(formula)) continue;
-      const stabilityCheck = passesStabilityGate(formula);
-      if (!stabilityCheck.pass) {
-        continue;
-      }
-      await storage.insertSuperconductorCandidate({
+    pendingInserts.push({
+      payload: {
         id,
         name: candidate.name || "Unknown",
         formula,
@@ -303,10 +314,8 @@ export async function runSuperconductorResearch(
         fermiSurfaceTopology: candidate.fermiSurfaceTopology ?? null,
         uncertaintyEstimate: candidate.uncertaintyEstimate ?? null,
         verificationStage: candidate.verificationStage ?? 0,
-      });
-      generated++;
-
-      emit("prediction", {
+      },
+      logEvent: {
         type: "superconductor",
         id,
         name: candidate.name,
@@ -317,9 +326,34 @@ export async function runSuperconductorResearch(
         meissnerEffect: candidate.meissnerEffect,
         zeroResistance: candidate.zeroResistance,
         status,
-      });
+      },
+    });
+  }
+
+  if (pendingUpdates.length > 0) {
+    try {
+      await storage.bulkUpdateSuperconductorCandidates(
+        pendingUpdates.map(u => ({ id: u.id, updates: u.updates }))
+      );
+      for (const u of pendingUpdates) {
+        emit("log", { phase: "phase-7", event: "SC candidate upgraded", detail: u.logDetail, dataSource: "SC Research" });
+      }
     } catch (e: any) {
-      emit("log", { phase: "phase-7", event: "SC candidate insert error", detail: `${formula}: ${e.message?.slice(0, 100)}`, dataSource: "SC Research" });
+      emit("log", { phase: "phase-7", event: "SC batch update error", detail: `${pendingUpdates.length} updates failed: ${e.message?.slice(0, 100)}`, dataSource: "SC Research" });
+    }
+  }
+
+  if (pendingInserts.length > 0) {
+    try {
+      const insertCount = await storage.bulkInsertSuperconductorCandidates(
+        pendingInserts.map(i => i.payload)
+      );
+      generated += insertCount;
+      for (const i of pendingInserts) {
+        emit("prediction", i.logEvent);
+      }
+    } catch (e: any) {
+      emit("log", { phase: "phase-7", event: "SC batch insert error", detail: `${pendingInserts.length} inserts failed: ${e.message?.slice(0, 100)}`, dataSource: "SC Research" });
     }
   }
 
