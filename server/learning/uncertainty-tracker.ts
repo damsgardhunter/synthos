@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { getCalibrationData, getXGBEnsembleStats, getModelVersionHistory } from "./gradient-boost";
 import { getComprehensiveModelDiagnostics } from "./model-diagnostics";
+import { getLedgerSlice, getLedgerSize, type PredictionRealityEntry } from "./prediction-reality-ledger";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -107,22 +108,43 @@ export function computeCalibrationCurve(): CalibrationCurve {
   const nBins = 10;
   const bins: { predicted: number[]; actual: number[] }[] = Array.from({ length: nBins }, () => ({ predicted: [], actual: [] }));
 
+  const ledgerSize = getLedgerSize();
+  const ledgerLookup = new Map<string, PredictionRealityEntry>();
+  if (ledgerSize > 0) {
+    const startIdx = Math.max(0, ledgerSize - 1000);
+    const ledgerEntries = getLedgerSlice(startIdx, 1000);
+    for (const le of ledgerEntries) {
+      ledgerLookup.set(le.formula, le);
+    }
+  }
+
   for (const entry of recent) {
     const conf = 1 - Math.min(1, entry.normalizedUncertainty);
     const binIdx = Math.min(nBins - 1, Math.floor(conf * nBins));
     bins[binIdx].predicted.push(conf);
 
-    let actual: number;
+    let actual: number | null = null;
+
     if (entry.referenceTc != null && Number.isFinite(entry.referenceTc)) {
       const error = Math.abs(entry.predictedTc - entry.referenceTc);
-      const threshold = Math.max(Math.abs(entry.referenceTc * 0.15), 5);
-      actual = error < threshold ? 1 : 0;
-    } else {
       const ciHalfWidth = 1.645 * entry.ensembleStd;
-      actual = ciHalfWidth > 0 && entry.normalizedUncertainty < 0.5 ? 1 : 0;
+      const interval = Math.max(ciHalfWidth, 5);
+      actual = error <= interval ? 1 : 0;
+    } else {
+      const ledgerEntry = ledgerLookup.get(entry.formula);
+      if (ledgerEntry && Number.isFinite(ledgerEntry.ground_truth.Tc)) {
+        const error = Math.abs(entry.predictedTc - ledgerEntry.ground_truth.Tc);
+        const ciHalfWidth = 1.645 * entry.ensembleStd;
+        const interval = Math.max(ciHalfWidth, 5);
+        actual = error <= interval ? 1 : 0;
+      }
     }
+
+    if (actual === null) continue;
     bins[binIdx].actual.push(actual);
   }
+
+  const totalCalibrated = bins.reduce((sum, b) => sum + b.actual.length, 0);
 
   const points: CalibrationPoint[] = [];
   let eceSum = 0;
@@ -142,7 +164,7 @@ export function computeCalibrationCurve(): CalibrationCurve {
     const observedFreq = bins[i].actual.reduce((a, b) => a + b, 0) / count;
     const gap = Math.abs(expectedFreq - observedFreq);
 
-    eceSum += gap * (count / recent.length);
+    eceSum += gap * (count / Math.max(1, totalCalibrated));
     mce = Math.max(mce, gap);
 
     if (expectedFreq > observedFreq + 0.05) overconfident++;
@@ -157,7 +179,7 @@ export function computeCalibrationCurve(): CalibrationCurve {
     mce,
     overconfidentBins: overconfident,
     underconfidentBins: underconfident,
-    totalPredictions: recent.length,
+    totalPredictions: totalCalibrated,
     timestamp: Date.now(),
   };
 
@@ -196,22 +218,32 @@ export function getVarianceSummary(): {
   }
 
   const MIN_FAMILY_SIZE = 5;
+  const BROAD_FAMILIES = new Set(["other", "unknown", "misc", "unclassified"]);
   const familyGroups: Record<string, number[]> = {};
+  const familyFormulas: Record<string, Set<string>> = {};
   for (const e of recent) {
     const fam = e.family || "unknown";
-    if (fam === "other" || fam === "unknown") continue;
-    if (!familyGroups[fam]) familyGroups[fam] = [];
+    if (BROAD_FAMILIES.has(fam)) continue;
+    if (!familyGroups[fam]) {
+      familyGroups[fam] = [];
+      familyFormulas[fam] = new Set();
+    }
     familyGroups[fam].push(e.ensembleStd ** 2);
+    familyFormulas[fam].add(e.formula);
   }
 
   let withinGroupVar = 0;
   let totalWeights = 0;
-  for (const fam of Object.values(familyGroups)) {
+  for (const [famName, fam] of Object.entries(familyGroups)) {
     if (fam.length < MIN_FAMILY_SIZE) continue;
+    const nUnique = familyFormulas[famName]?.size ?? fam.length;
+    const cohesion = Math.min(1.0, MIN_FAMILY_SIZE / Math.max(1, nUnique - MIN_FAMILY_SIZE));
+    const famWeight = fam.length * (0.3 + 0.7 * cohesion);
+
     const famMean = fam.reduce((a, b) => a + b, 0) / fam.length;
     const famVar = fam.reduce((a, b) => a + (b - famMean) ** 2, 0) / fam.length;
-    withinGroupVar += famVar * fam.length;
-    totalWeights += fam.length;
+    withinGroupVar += famVar * famWeight;
+    totalWeights += famWeight;
   }
 
   const aleatoric = totalWeights > 0 ? withinGroupVar / totalWeights : meanVar * 0.5;
