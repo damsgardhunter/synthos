@@ -6,6 +6,7 @@ import { fetchSummary, fetchElasticity } from "./materials-project-client";
 import { computeDimensionalityScore, detectStructuralMotifs } from "./physics-engine";
 import { getCompetingPhases, assessMetastability } from "./phase-diagram-engine";
 import { predictHydrideFormation } from "./pressure-engine";
+import { IONIC_RADII } from "./crystal-prototypes";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -426,51 +427,121 @@ export async function evaluateConvexHullStability(
 
 export function matchPrototype(formula: string): typeof KNOWN_PROTOTYPES[string] | null {
   const elements = parseFormulaElements(formula);
+  const counts = parseFormulaCounts(formula);
 
-  if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3) {
-    if (elements.includes("Y") || elements.includes("Ba")) return KNOWN_PROTOTYPES["YBCO"];
-    return KNOWN_PROTOTYPES["cuprate"];
+  const has = (el: string) => elements.includes(el);
+  const hasAny = (...els: string[]) => els.some(e => has(e));
+
+  if (has("Ni") && has("O") && elements.length === 3 &&
+      hasAny("Nd", "Pr", "La") &&
+      (counts["Ni"] || 0) === 1 && (counts["O"] || 0) <= 2) {
+    return KNOWN_PROTOTYPES["infinite-layer"];
   }
-  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("P") || elements.includes("Se"))) {
+
+  if (has("Cu") && has("O") && elements.length >= 4 &&
+      has("Y") && has("Ba") &&
+      (counts["Cu"] || 0) >= 2) {
+    return KNOWN_PROTOTYPES["YBCO"];
+  }
+
+  if (has("Fe") && has("Se") && elements.length === 2) {
+    return KNOWN_PROTOTYPES["FeSe-11"];
+  }
+
+  if (has("Fe") && hasAny("As", "P")) {
+    if (has("O") && elements.length === 4) {
+      return KNOWN_PROTOTYPES["1111-Type"];
+    }
+    if (elements.length === 3 && hasAny("Ba", "Sr", "K", "Ca", "Cs", "Rb")) {
+      return KNOWN_PROTOTYPES["ThCr2Si2"];
+    }
     return KNOWN_PROTOTYPES["iron-pnictide"];
   }
-  if (elements.includes("H") && elements.length === 2) {
-    return KNOWN_PROTOTYPES["clathrate"];
+
+  if (has("Fe") && has("Se") && elements.length >= 3) {
+    return KNOWN_PROTOTYPES["iron-pnictide"];
   }
-  if (elements.includes("Mg") && elements.includes("B")) {
-    return KNOWN_PROTOTYPES["MgB2"];
+
+  if (has("Cu") && has("O") && elements.length >= 3) {
+    const chargeRes = ["Ba", "Sr", "La", "Y", "Ca", "Tl", "Bi", "Hg"];
+    if (chargeRes.some(e => has(e))) {
+      return KNOWN_PROTOTYPES["cuprate"];
+    }
   }
-  if (elements.includes("Nb") && elements.includes("Sn")) {
-    return KNOWN_PROTOTYPES["A15"];
-  }
-  if (elements.includes("Mo") && (elements.includes("S") || elements.includes("Se") || elements.includes("Te"))) {
-    return KNOWN_PROTOTYPES["Chevrel"];
-  }
-  if ((elements.includes("Co") || elements.includes("Rh") || elements.includes("Ir")) &&
-      (elements.includes("Sb") || elements.includes("As") || elements.includes("P")) &&
+
+  if ((has("Co") || has("Rh") || has("Ir")) &&
+      hasAny("Sb", "As", "P") &&
       elements.length === 2) {
     return KNOWN_PROTOTYPES["Skutterudite"];
   }
-  if (elements.includes("Ni") && elements.includes("O") && elements.length === 3 &&
-      (elements.includes("Nd") || elements.includes("Pr") || elements.includes("La"))) {
-    return KNOWN_PROTOTYPES["infinite-layer"];
+
+  if (has("Mo") && hasAny("S", "Se", "Te") && elements.length >= 2) {
+    if (elements.length === 2 && (counts["S"] || counts["Se"] || counts["Te"] || 0) === 2) {
+      return KNOWN_PROTOTYPES["MX2"];
+    }
+    if (elements.length === 3) {
+      return KNOWN_PROTOTYPES["Chevrel"];
+    }
   }
-  if (elements.includes("O") && elements.length === 3) {
-    return KNOWN_PROTOTYPES["perovskite"];
+
+  if (has("Bi") && hasAny("S", "Se") && has("O") && elements.length >= 4) {
+    return KNOWN_PROTOTYPES["BiS2-type"];
   }
+
+  if (has("H") && elements.length === 2) {
+    const metal = elements.find(e => e !== "H");
+    const hCount = counts["H"] || 0;
+    if (metal && hCount >= 6) return KNOWN_PROTOTYPES["clathrate"];
+    if (metal && hCount >= 10) return KNOWN_PROTOTYPES["sodalite"];
+    return KNOWN_PROTOTYPES["clathrate"];
+  }
+
+  if (has("Mg") && has("B")) {
+    return KNOWN_PROTOTYPES["MgB2"];
+  }
+
+  if (hasAny("Nb", "V", "Cr") && hasAny("Sn", "Si", "Ge", "Ga", "Al")) {
+    if (elements.length === 2) {
+      const tm = elements.find(e => ["Nb", "V", "Cr"].includes(e));
+      if (tm && (counts[tm] || 0) === 3) return KNOWN_PROTOTYPES["A15"];
+    }
+  }
+
   if (elements.length === 3 &&
-      (elements.includes("Mn") || elements.includes("Ti") || elements.includes("V")) &&
-      (elements.includes("Al") || elements.includes("Ga") || elements.includes("Sn") || elements.includes("Sb"))) {
-    return KNOWN_PROTOTYPES["Heusler"];
+      hasAny("Mn", "Ti", "V", "Fe", "Co", "Ni") &&
+      hasAny("Al", "Ga", "Sn", "Sb", "In", "Si", "Ge")) {
+    const totalNonTM = elements.filter(e => !["Mn", "Ti", "V", "Fe", "Co", "Ni"].includes(e))
+      .reduce((s, e) => s + (counts[e] || 0), 0);
+    const totalTM = elements.filter(e => ["Mn", "Ti", "V", "Fe", "Co", "Ni"].includes(e))
+      .reduce((s, e) => s + (counts[e] || 0), 0);
+    if (totalTM === 2 && totalNonTM === 1) return KNOWN_PROTOTYPES["Heusler"];
+    if (totalTM === 1 && totalNonTM === 2) return KNOWN_PROTOTYPES["half-Heusler"];
   }
-  if (elements.includes("F") && elements.length === 3 &&
-      (elements.includes("K") || elements.includes("Rb") || elements.includes("Ba") || elements.includes("Sr"))) {
+
+  if (has("O") && elements.length === 3 &&
+      hasAny("Cd", "Tl") && hasAny("Re", "Os", "Ir")) {
+    return KNOWN_PROTOTYPES["Pyrochlore"];
+  }
+
+  if (has("F") && elements.length === 3 &&
+      hasAny("K", "Rb", "Ba", "Sr")) {
     return KNOWN_PROTOTYPES["K2NiF4"];
   }
-  if (elements.includes("O") && elements.length === 3 &&
-      (elements.includes("Cd") || elements.includes("Os") || elements.includes("Tl")) &&
-      (elements.includes("Re") || elements.includes("Os") || elements.includes("Ir"))) {
-    return KNOWN_PROTOTYPES["Pyrochlore"];
+
+  if (has("O") && elements.length === 3) {
+    const nonO = elements.filter(e => e !== "O");
+    const totalMetal = nonO.reduce((s, e) => s + (counts[e] || 0), 0);
+    const oCount = counts["O"] || 0;
+    if (totalMetal === 2 && oCount === 3) {
+      return KNOWN_PROTOTYPES["perovskite"];
+    }
+    if (totalMetal === 2 && oCount === 4) {
+      return KNOWN_PROTOTYPES["spinel"];
+    }
+  }
+
+  if (has("O") && elements.length >= 3) {
+    return KNOWN_PROTOTYPES["perovskite"];
   }
 
   return null;
@@ -512,7 +583,7 @@ function getPrototypeCARatio(prototype: string | null): number | null {
   return null;
 }
 
-export function computeGoldschmidtTolerance(formula: string): { factor: number; prediction: string } | null {
+export function computeGoldschmidtTolerance(formula: string): { factor: number; prediction: string; stoichiometryValid: boolean } | null {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
 
@@ -523,8 +594,17 @@ export function computeGoldschmidtTolerance(formula: string): { factor: number; 
   if (nonO.length < 2) return null;
 
   const totalNonO = nonO.reduce((s, e) => s + (counts[e] || 0), 0);
-  const expectedOxygen = totalNonO > 0 ? oCount / totalNonO : 0;
-  if (expectedOxygen < 1.0 || expectedOxygen > 4.0) return null;
+  const metalToOxygen = totalNonO > 0 ? oCount / totalNonO : 0;
+
+  const isABO3Ratio = Math.abs(metalToOxygen - 1.5) < 0.3;
+
+  if (!isABO3Ratio) {
+    return {
+      factor: 0,
+      prediction: `non-perovskite stoichiometry (metal:O = ${totalNonO}:${oCount}, need ~2:3)`,
+      stoichiometryValid: false,
+    };
+  }
 
   const sorted = nonO.sort((a, b) => {
     const rA = getElementData(a)?.atomicRadius ?? 0;
@@ -553,7 +633,7 @@ export function computeGoldschmidtTolerance(formula: string): { factor: number; 
     prediction = "perovskite structure unlikely";
   }
 
-  return { factor: Number(t.toFixed(4)), prediction };
+  return { factor: Number(t.toFixed(4)), prediction, stoichiometryValid: true };
 }
 
 export function vegardLatticeParameter(formula: string): number | null {
@@ -562,6 +642,50 @@ export function vegardLatticeParameter(formula: string): number | null {
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
 
   if (elements.length < 2 || totalAtoms === 0) return null;
+
+  const ANION_SET = new Set(["O", "F", "Cl", "Br", "I", "S", "Se", "Te", "N", "P", "As"]);
+  const anions = elements.filter(e => ANION_SET.has(e));
+  const cations = elements.filter(e => !ANION_SET.has(e));
+  const isIonic = anions.length > 0 && cations.length > 0;
+
+  if (isIonic) {
+    let cationRadiusSum = 0;
+    let cationCount = 0;
+    let anionRadiusSum = 0;
+    let anionCount = 0;
+
+    for (const el of cations) {
+      const r = IONIC_RADII[el];
+      if (r === undefined) continue;
+      const n = counts[el] || 0;
+      cationRadiusSum += r * n;
+      cationCount += n;
+    }
+    for (const el of anions) {
+      const r = IONIC_RADII[el];
+      if (r === undefined) continue;
+      const n = counts[el] || 0;
+      anionRadiusSum += r * n;
+      anionCount += n;
+    }
+
+    if (cationCount === 0 || anionCount === 0) return null;
+
+    const avgCation = cationRadiusSum / cationCount;
+    const avgAnion = anionRadiusSum / anionCount;
+
+    const proto = matchPrototype(formula);
+    const protoName = proto?.prototype?.toLowerCase() || "";
+
+    if (protoName.includes("perovskite") || protoName.includes("anti-perovskite")) {
+      return 2 * (avgCation * 0.4 + avgAnion * 0.6) * Math.sqrt(2);
+    }
+    if (protoName.includes("fluorite") || protoName.includes("spinel")) {
+      return 4 * (avgCation + avgAnion) / Math.sqrt(3);
+    }
+
+    return 2 * (avgCation + avgAnion);
+  }
 
   let weightedSum = 0;
   let totalWeight = 0;
@@ -832,7 +956,7 @@ export async function predictCrystalStructure(
         source: "Materials Project + Structure Predictor",
       });
 
-      const toleranceInfo = tolerance ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
+      const toleranceInfo = tolerance && tolerance.stoichiometryValid ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
       emit("log", {
         phase: "phase-11",
         event: "Crystal structure predicted (MP data)",
@@ -929,7 +1053,7 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
       source: "Miedema + Structure Predictor",
     });
 
-    const toleranceInfo2 = tolerance ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
+    const toleranceInfo2 = tolerance && tolerance.stoichiometryValid ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
     emit("log", {
       phase: "phase-11",
       event: "Crystal structure predicted (Miedema)",

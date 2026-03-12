@@ -24,7 +24,7 @@ export interface PreFilterResult {
   reasons: string[];
 }
 
-const IONIC_RADII: Record<string, number> = {
+export const IONIC_RADII: Record<string, number> = {
   H: 0.25, Li: 0.76, Be: 0.45, B: 0.27, C: 0.16, N: 1.46, O: 1.40, F: 1.33,
   Na: 1.02, Mg: 0.72, Al: 0.54, Si: 0.40, P: 0.38, S: 1.84, Cl: 1.81,
   K: 1.38, Ca: 1.00, Sc: 0.75, Ti: 0.61, V: 0.54, Cr: 0.62, Mn: 0.67,
