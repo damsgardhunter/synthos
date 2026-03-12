@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import crypto from "crypto";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { classifyFamily, sanitizeForbiddenWords } from "./utils";
@@ -196,7 +197,6 @@ Respond in JSON:
     const parsed = JSON.parse(content) as { focusAreas: FocusArea[]; summary: string };
 
     const prevMap = new Map(previousFocusAreas.map(f => [f.area, f.priority]));
-    const MOMENTUM = 0.7;
 
     const focusAreas = (parsed.focusAreas || [])
       .slice(0, 5)
@@ -210,7 +210,9 @@ Respond in JSON:
         }
         const prevPriority = prevMap.get(area);
         if (prevPriority !== undefined) {
-          priority = MOMENTUM * prevPriority + (1 - MOMENTUM) * priority;
+          const isIncrease = priority > prevPriority;
+          const momentum = isIncrease ? 0.5 : 0.85;
+          priority = momentum * prevPriority + (1 - momentum) * priority;
         }
         return {
           area,
@@ -224,7 +226,7 @@ Respond in JSON:
 
     const performanceSignals = { familyStats, failureByFamily, underExplored, insightCount: recentInsights.length };
 
-    const strategyId = `strat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const strategyId = `strat-${crypto.randomUUID()}`;
     await storage.insertResearchStrategy({
       id: strategyId,
       cycle: cycleNumber,
@@ -268,12 +270,21 @@ Respond in JSON:
       }
 
       if (pivots.length > 0) {
+        const pivotDetail = pivots.join(". ") + ".";
         emit("log", {
           phase: "engine",
           event: "Strategy pivot",
-          detail: pivots.join(". ") + ".",
+          detail: pivotDetail,
           dataSource: "Strategy Analyzer",
         });
+        try {
+          await storage.insertResearchLog({
+            phase: "strategy",
+            event: "Strategy pivot",
+            detail: `Cycle ${cycleNumber}: ${pivotDetail} Summary: ${summary}`,
+            dataSource: "Strategy Analyzer",
+          });
+        } catch {}
       }
     }
 
@@ -368,7 +379,7 @@ export async function captureConvergenceSnapshot(
     }
 
     await storage.deleteConvergenceSnapshotByCycle(cycleNumber);
-    const snapshotId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const snapshotId = `conv-${crypto.randomUUID()}`;
     await storage.insertConvergenceSnapshot({
       id: snapshotId,
       cycle: cycleNumber,
