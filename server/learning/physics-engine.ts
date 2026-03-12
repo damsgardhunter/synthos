@@ -2456,8 +2456,10 @@ export function evaluateCompetingPhases(
       const data = getElementData(magEl);
       const S_eff = data ? Math.min(data.valenceElectrons * 0.3, 2.5) : 1.5;
       const z_coord = 8;
-      const J_exchange = (stonerI || 0.5) * 0.1;
-      const T_mag = Math.round(2 * z_coord * J_exchange * S_eff * (S_eff + 1) / (3 * 8.617e-5) * 0.01);
+      const J_eV = (stonerI || 0.5) * 0.1;
+      const kB_eV = 8.617e-5;
+      const mftCorrection = 0.01;
+      const T_mag = Math.round(2 * z_coord * J_eV * S_eff * (S_eff + 1) / (3 * kB_eV) * mftCorrection);
 
       const cuprateType = elements.includes("Cu") && elements.includes("O");
       const ironPnictide = magEl === "Fe" && (elements.includes("As") || elements.includes("P") || elements.includes("Se"));
