@@ -707,12 +707,14 @@ function estimateAnisotropicMass(
     Math.abs(dkVec[2] / dkMag),
   ];
 
-  const mx = dirFrac[0] > 0.3 ? pathMass : pathMass * (1.0 + 0.5 * (1.0 - dirFrac[0]));
-  const my = dirFrac[1] > 0.3 ? pathMass : pathMass * (1.0 + 0.5 * (1.0 - dirFrac[1]));
-  const mz = dirFrac[2] > 0.3 ? pathMass : pathMass * (1.0 + 0.5 * (1.0 - dirFrac[2]));
-
   const clamp = (v: number) => Math.sign(v) * Math.max(0.01, Math.min(50, Math.abs(v)));
-  return [clamp(mx), clamp(my), clamp(mz)];
+  const clampedPath = clamp(pathMass);
+
+  return [
+    dirFrac[0] > 0.3 ? clampedPath : NaN,
+    dirFrac[1] > 0.3 ? clampedPath : NaN,
+    dirFrac[2] > 0.3 ? clampedPath : NaN,
+  ];
 }
 
 function analyzeBands(
@@ -824,32 +826,33 @@ function analyzeBands(
           const gapPrev = eUpperPrev - eLowerPrev;
           const gapNext = eUpperNext - eLowerNext;
 
-          if (gapPrev > 0 && gapHere < 0.05 && gapNext > 0) {
-            const kpt = eigenvalues[ki];
-            const lowerW = kpt.weights?.[b];
-            const upperW = kpt.weights?.[b + 1];
+          const kpt = eigenvalues[ki];
+          const lowerW = kpt.weights?.[b];
+          const upperW = kpt.weights?.[b + 1];
 
-            let orbSwap = gapHere < 0;
-            let invType: BandInversion["inversionType"] = "unknown";
+          let orbSwap = gapHere < 0;
+          let invType: BandInversion["inversionType"] = "unknown";
 
-            if (lowerW && upperW) {
-              const lowerDom = dominantOrbital(lowerW);
-              const upperDom = dominantOrbital(upperW);
-              const prevKpt = eigenvalues[ki - 1];
-              const prevLowerW = prevKpt.weights?.[b];
-              const prevUpperW = prevKpt.weights?.[b + 1];
+          if (lowerW && upperW) {
+            const lowerDom = dominantOrbital(lowerW);
+            const upperDom = dominantOrbital(upperW);
+            const prevKpt = eigenvalues[ki - 1];
+            const prevLowerW = prevKpt.weights?.[b];
+            const prevUpperW = prevKpt.weights?.[b + 1];
 
-              if (prevLowerW && prevUpperW) {
-                const prevLowerDom = dominantOrbital(prevLowerW);
-                const prevUpperDom = dominantOrbital(prevUpperW);
-                if (prevLowerDom !== lowerDom || prevUpperDom !== upperDom) {
-                  orbSwap = true;
-                }
+            if (prevLowerW && prevUpperW) {
+              const prevLowerDom = dominantOrbital(prevLowerW);
+              const prevUpperDom = dominantOrbital(prevUpperW);
+              if (prevLowerDom !== lowerDom || prevUpperDom !== upperDom) {
+                orbSwap = true;
               }
-
-              invType = classifyInversionType(lowerDom, upperDom);
             }
 
+            invType = classifyInversionType(lowerDom, upperDom);
+          }
+
+          const isNarrowGap = gapPrev > 0 && gapHere < 0.5 && gapNext > 0;
+          if (orbSwap || (isNarrowGap && gapHere < 0.05)) {
             bandInversions.push({
               kLabel: kpt.kLabel || `k${ki}`,
               kIndex: ki,
