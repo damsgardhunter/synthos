@@ -141,24 +141,44 @@ function checkUncertaintyIncreaseTrigger(): RetrainTrigger | null {
 
 const GNN_STALE_WARN_MS = 6 * 3600_000;
 const GNN_STALE_CRITICAL_MS = 24 * 3600_000;
+const GNN_NEW_OUTCOMES_WARN = 50;
+const GNN_NEW_OUTCOMES_CRITICAL = 150;
 
 function checkGNNStalenessTrigger(): RetrainTrigger | null {
   const diagnostics = getComprehensiveModelDiagnostics();
   const stalenessMs = diagnostics.gnn.modelStalenessMs;
+  const newOutcomes = diagnostics.gnn.newOutcomesSinceLastTrain;
+
+  if (newOutcomes >= GNN_NEW_OUTCOMES_CRITICAL) {
+    return {
+      type: "scheduled",
+      reasoning: `GNN has ${newOutcomes} unevaluated outcomes since last train (>${GNN_NEW_OUTCOMES_CRITICAL}) — model operating on severely outdated data`,
+      severity: "high",
+      metrics: { newOutcomes, stalenessHours: Math.round(stalenessMs / 3600_000) },
+    };
+  }
   if (stalenessMs > GNN_STALE_CRITICAL_MS) {
     return {
       type: "scheduled",
-      reasoning: `GNN ensemble stale for ${Math.round(stalenessMs / 3600_000)}h (>24h) — active learning degraded without fresh model`,
+      reasoning: `GNN ensemble stale for ${Math.round(stalenessMs / 3600_000)}h (>24h), ${newOutcomes} new outcomes — active learning degraded without fresh model`,
       severity: "high",
-      metrics: { stalenessHours: Math.round(stalenessMs / 3600_000), thresholdHours: 24 },
+      metrics: { stalenessHours: Math.round(stalenessMs / 3600_000), thresholdHours: 24, newOutcomes },
+    };
+  }
+  if (newOutcomes >= GNN_NEW_OUTCOMES_WARN) {
+    return {
+      type: "scheduled",
+      reasoning: `GNN has ${newOutcomes} new outcomes since last train (>${GNN_NEW_OUTCOMES_WARN}) — consider retraining to incorporate recent data`,
+      severity: "medium",
+      metrics: { newOutcomes, stalenessHours: Math.round(stalenessMs / 3600_000) },
     };
   }
   if (stalenessMs > GNN_STALE_WARN_MS) {
     return {
       type: "scheduled",
-      reasoning: `GNN ensemble aging: ${Math.round(stalenessMs / 3600_000)}h since last retrain (warn at 6h)`,
+      reasoning: `GNN ensemble aging: ${Math.round(stalenessMs / 3600_000)}h since last retrain (warn at 6h), ${newOutcomes} new outcomes`,
       severity: "medium",
-      metrics: { stalenessHours: Math.round(stalenessMs / 3600_000), thresholdHours: 6 },
+      metrics: { stalenessHours: Math.round(stalenessMs / 3600_000), thresholdHours: 6, newOutcomes },
     };
   }
   return null;

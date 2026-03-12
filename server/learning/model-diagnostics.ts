@@ -98,6 +98,7 @@ interface GNNDiagnostics {
   latestRMSE: number;
   predictionCount: number;
   modelStalenessMs: number;
+  newOutcomesSinceLastTrain: number;
   stale: boolean;
 }
 
@@ -701,16 +702,22 @@ export function getComprehensiveModelDiagnostics(): ComprehensiveModelDiagnostic
   const gnnStalenessMs = latestGNN ? Date.now() - latestGNN.trainedAt : 0;
   const gnnIsStale = gnnStalenessMs > GNN_STALENESS_THRESHOLD_MS;
 
+  const gnnTrainedAt = latestGNN?.trainedAt ?? 0;
+  const newOutcomesSinceLastTrain = gnnTrainedAt > 0
+    ? getOutcomes().filter(o => o.timestamp > gnnTrainedAt).length
+    : 0;
+
   const gnn: GNNDiagnostics = {
     ensembleSize: ENSEMBLE_SIZE,
     modelVersion: getGNNModelVersion(),
     datasetSize: dftDatasetStats.totalSize,
-    trainedAt: latestGNN?.trainedAt ?? 0,
+    trainedAt: gnnTrainedAt,
     latestR2: latestGNN?.r2 ?? 0,
     latestMAE: latestGNN?.mae ?? 0,
     latestRMSE: latestGNN?.rmse ?? 0,
     predictionCount: dftDatasetStats.totalSize,
     modelStalenessMs: gnnStalenessMs,
+    newOutcomesSinceLastTrain,
     stale: gnnIsStale,
   };
 
@@ -1140,8 +1147,9 @@ export function getModelDiagnosticsForLLM(): string {
   lines.push("## GNN Ensemble");
   lines.push(`  Version=${d.gnn.modelVersion} | Ensemble=${d.gnn.ensembleSize} models`);
   lines.push(`  R²=${d.gnn.latestR2} | MAE=${d.gnn.latestMAE}K | RMSE=${d.gnn.latestRMSE}K`);
-  lines.push(`  Dataset=${d.gnn.datasetSize} | Staleness=${Math.round(d.gnn.modelStalenessMs / 60000)}min | Stale=${d.gnn.stale}`);
+  lines.push(`  Dataset=${d.gnn.datasetSize} | Staleness=${Math.round(d.gnn.modelStalenessMs / 60000)}min | NewOutcomes=${d.gnn.newOutcomesSinceLastTrain} | Stale=${d.gnn.stale}`);
   if (d.gnn.stale) lines.push("  ** WARNING: Model is stale (>24h) — retrain recommended **");
+  if (d.gnn.newOutcomesSinceLastTrain >= 50) lines.push(`  ** WARNING: ${d.gnn.newOutcomesSinceLastTrain} new outcomes since last train — model may be operating on outdated data **`);
   lines.push("");
 
   lines.push("## Lambda Regressor");
@@ -1315,7 +1323,8 @@ export function getModelDiagnosticsForLLM(): string {
     }
     for (const [model, sc] of latestByModel) {
       const metricStr = Object.entries(sc.metrics).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(4) : v}`).join(", ");
-      const hpStr = Object.entries(sc.hyperparameters).map(([k, v]) => `${k}=${v}`).join(", ");
+      const hpAll = Object.entries(sc.hyperparameters);
+      const hpStr = hpAll.slice(0, 5).map(([k, v]) => `${k}=${v}`).join(", ") + (hpAll.length > 5 ? ` (+${hpAll.length - 5} more)` : "");
       lines.push(`  ${model} v${sc.version}: ${metricStr}`);
       lines.push(`    hyperparams: ${hpStr} | dataset=${sc.datasetSize} | inference=${sc.inferenceSpeedMs}ms (${sc.computeEnvironment})`);
     }
@@ -1356,16 +1365,23 @@ export function getModelHealthSummary(): ModelHealth[] {
   const d = getComprehensiveModelDiagnostics();
   const health: ModelHealth[] = [];
 
+  const nrmse = d.errorAnalysis.totalOutcomes > 0 ? d.errorAnalysis.overallNRMSE : null;
+  const nrmseSeverity = nrmse !== null ? (nrmse > 0.5 ? 2 : nrmse > 0.3 ? 1 : 0) : 0;
+  const nrmseReason = nrmse !== null
+    ? `NRMSE=${(nrmse * 100).toFixed(1)}% — ${nrmse > 0.5 ? "predictions unusable relative to Tc scale" : "elevated error relative to Tc scale"}`
+    : "";
   health.push(healthCheck("xgboost", [
     { severity: d.xgboost.r2 < 0.3 ? 2 : d.xgboost.r2 < 0.6 ? 1 : 0, reason: d.xgboost.r2 < 0.3 ? `Very low R²=${d.xgboost.r2}` : `Low R²=${d.xgboost.r2}` },
-    { severity: d.xgboost.rmse > 40 ? 2 : d.xgboost.rmse > 25 ? 1 : 0, reason: d.xgboost.rmse > 40 ? `High RMSE=${d.xgboost.rmse}K` : `Elevated RMSE=${d.xgboost.rmse}K` },
+    { severity: nrmseSeverity, reason: nrmseReason },
     { severity: d.xgboost.falsePositiveRate > 0.15 ? 1 : 0, reason: `High false positive rate=${d.xgboost.falsePositiveRate}` },
     { severity: d.xgboost.nTrees === 0 ? 2 : 0, reason: "No trees trained" },
   ]));
 
+  const gnnOutcomeSev = d.gnn.newOutcomesSinceLastTrain >= 150 ? 2 : d.gnn.newOutcomesSinceLastTrain >= 50 ? 1 : 0;
   health.push(healthCheck("gnn", [
     { severity: d.gnn.latestR2 < 0.2 ? 2 : d.gnn.latestR2 < 0.5 ? 1 : 0, reason: d.gnn.latestR2 < 0.2 ? `Very low R²=${d.gnn.latestR2}` : `Low R²=${d.gnn.latestR2}` },
     { severity: d.gnn.stale ? 2 : d.gnn.modelStalenessMs > 12 * 3600_000 ? 1 : 0, reason: d.gnn.stale ? "Model stale (>24h) — trigger retrain" : "Model aging (>12h)" },
+    { severity: gnnOutcomeSev, reason: `${d.gnn.newOutcomesSinceLastTrain} new outcomes since last train — model may be operating on outdated data` },
     { severity: d.gnn.modelVersion === 0 ? 2 : 0, reason: "No model trained" },
   ]));
 
@@ -1375,9 +1391,13 @@ export function getModelHealthSummary(): ModelHealth[] {
     { severity: d.lambda.rmse > 0.5 ? 1 : 0, reason: `High RMSE=${d.lambda.rmse}` },
   ]));
 
+  const phononStabAcc = d.phononSurrogate.stabilityAccuracy;
+  const phononStabSev = d.phononSurrogate.datasetSize > 0
+    ? (phononStabAcc < 0.7 ? 2 : phononStabAcc < 0.85 ? 1 : 0)
+    : 0;
   health.push(healthCheck("phonon-surrogate", [
     { severity: d.phononSurrogate.datasetSize === 0 ? 2 : d.phononSurrogate.datasetSize < 10 ? 1 : 0, reason: d.phononSurrogate.datasetSize === 0 ? "No training data" : "Small dataset" },
-    { severity: (d.phononSurrogate.stabilityAccuracy < 0.5 && d.phononSurrogate.datasetSize > 0) ? 1 : 0, reason: `Low stability accuracy=${d.phononSurrogate.stabilityAccuracy}` },
+    { severity: phononStabSev, reason: phononStabAcc < 0.7 ? `Stability accuracy=${phononStabAcc} (<0.7) — near random, wastes DFT compute on unstable candidates` : `Stability accuracy=${phononStabAcc} (<0.85) — significant false-stable rate` },
   ]));
 
   health.push(healthCheck("tb-surrogate", [
@@ -1490,7 +1510,9 @@ export function getBenchmarkForLLM(): string {
     }
     lines.push(`    inference speed: ${latest.inferenceSpeedMs} ms (${latest.computeEnvironment})`);
     lines.push(`    dataset: ${latest.datasetSize} samples`);
-    lines.push(`    hyperparameters: ${JSON.stringify(latest.hyperparameters)}`);
+    const hpEntries = Object.entries(latest.hyperparameters);
+    const hpSummary = hpEntries.slice(0, 5).map(([k, v]) => `${k}=${v}`).join(", ");
+    lines.push(`    hyperparameters: ${hpSummary}${hpEntries.length > 5 ? ` (+${hpEntries.length - 5} more)` : ""}`);
   }
 
   if (report.versionComparisons.length > 0) {
