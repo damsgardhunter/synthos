@@ -1112,6 +1112,7 @@ export async function predictCrystalStructure(
         synthesizability: result.synthesizability,
         synthesisNotes: result.synthesisNotes,
         source: "Materials Project + Structure Predictor",
+        isGroundTruth: true,
       });
 
       const toleranceInfo = tolerance && tolerance.stoichiometryValid ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
@@ -1233,6 +1234,7 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
       synthesizability: result.synthesizability,
       synthesisNotes: result.synthesisNotes,
       source: "Miedema + Structure Predictor",
+      isGroundTruth: false,
     });
 
     const toleranceInfo2 = tolerance && tolerance.stoichiometryValid ? `, Goldschmidt t=${tolerance.factor} (${tolerance.prediction})` : "";
@@ -1284,11 +1286,13 @@ export function assessDimensionality(structure: StructurePrediction): {
 
 export async function runStructurePredictionBatch(
   emit: EventEmitter,
-  formulas: string[]
+  formulas: string[],
+  batchSize?: number
 ): Promise<number> {
   let predicted = 0;
+  const limit = batchSize ?? formulas.length;
 
-  for (const formula of formulas.slice(0, 3)) {
+  for (const formula of formulas.slice(0, limit)) {
     const result = await predictCrystalStructure(emit, formula);
     if (result) predicted++;
     await new Promise(r => setTimeout(r, 500));

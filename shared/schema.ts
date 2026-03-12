@@ -166,6 +166,7 @@ export const crystalStructures = pgTable("crystal_structures", {
   synthesizability: real("synthesizability"),
   synthesisNotes: text("synthesis_notes"),
   source: text("source"),
+  isGroundTruth: boolean("is_ground_truth").default(false),
   predictedAt: timestamp("predicted_at").defaultNow(),
 }, (table) => [
   index("crystal_structures_formula_idx").on(table.formula),
