@@ -234,10 +234,17 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     }
   }
 
+  const minLen = Math.min(frequencies.length, alpha2F.length);
+  if (frequencies.length !== alpha2F.length) {
+    console.warn(`[DFPT] frequencies/alpha2F length mismatch: ${frequencies.length} vs ${alpha2F.length}, truncating to ${minLen}`);
+    frequencies.length = minLen;
+    alpha2F.length = minLen;
+  }
+
   const LOW_FREQ_CUTOFF = 1.0;
   const LOG_FLOOR = 1e-3;
 
-  if (lambda === 0 && frequencies.length > 0 && alpha2F.length > 0) {
+  if (lambda === 0 && minLen > 0) {
     for (let i = 0; i < frequencies.length; i++) {
       if (frequencies[i] < LOW_FREQ_CUTOFF || alpha2F[i] <= 0) continue;
       const dw = dynamicBinWidth(frequencies, i);
