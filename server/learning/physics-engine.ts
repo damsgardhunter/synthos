@@ -2746,6 +2746,34 @@ export interface PhononDispersionData {
   phononGap: number;
 }
 
+function inferLatticeType(formula: string, motifs: string[]): "hexagonal" | "tetragonal" | "cubic" | "generic" {
+  const elements = parseFormulaElements(formula);
+
+  const isKagome = motifs.some(m => m.includes("Kagome"));
+  const isBoride = motifs.some(m => m.includes("honeycomb"));
+  const isMgB2Type = elements.includes("Mg") && elements.includes("B");
+  if (isKagome || isBoride || isMgB2Type) return "hexagonal";
+
+  const isCuprate = elements.includes("Cu") && elements.includes("O") && elements.length >= 3
+    && elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e));
+  const isPnictide = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
+  const isLayeredPerovskite = motifs.some(m => m.includes("Ruddlesden-Popper") || m.includes("I4/mmm"));
+  if (isCuprate || isPnictide || isLayeredPerovskite) return "tetragonal";
+
+  const isCubicPerovskite = motifs.some(m => m.includes("Cubic perovskite"));
+  const isHClathrate = motifs.some(m => m.includes("H cage/clathrate"));
+  if (isCubicPerovskite || isHClathrate) return "cubic";
+
+  return "generic";
+}
+
+const Q_PATHS: Record<string, string[]> = {
+  hexagonal: ["Γ", "M", "K", "Γ", "A"],
+  tetragonal: ["Γ", "X", "M", "Γ", "Z"],
+  cubic: ["Γ", "X", "M", "Γ", "R"],
+  generic: ["Γ", "X", "M", "Γ"],
+};
+
 export function computePhononDispersion(
   formula: string,
   electronicStructure: ElectronicStructure,
@@ -2757,7 +2785,10 @@ export function computePhononDispersion(
   const avgMass = getAverageMass(counts);
   const lightestMass = getLightestMass(elements);
 
-  const qPath = ["Γ", "X", "M", "Γ"];
+  const motifResult = detectStructuralMotifs(formula);
+  const latticeType = inferLatticeType(formula, motifResult.motifs);
+  const qPath = Q_PATHS[latticeType];
+  const nSegments = qPath.length - 1;
   const nQPoints = 20;
   const nAtoms = Math.max(1, Math.round(totalAtoms));
   const nAcoustic = 3;
@@ -2792,14 +2823,10 @@ export function computePhononDispersion(
     for (let qi = 0; qi < nQPoints; qi++) {
       const qFrac = qi / (nQPoints - 1);
 
-      let segmentPhase: number;
-      if (qi < nQPoints / 3) {
-        segmentPhase = (qi / (nQPoints / 3)) * Math.PI;
-      } else if (qi < (2 * nQPoints) / 3) {
-        segmentPhase = ((qi - nQPoints / 3) / (nQPoints / 3)) * Math.PI;
-      } else {
-        segmentPhase = ((qi - 2 * nQPoints / 3) / (nQPoints / 3)) * Math.PI;
-      }
+      const segLen = nQPoints / nSegments;
+      const segIdx = Math.min(nSegments - 1, Math.floor(qi / segLen));
+      const segPos = (qi - segIdx * segLen) / segLen;
+      const segmentPhase = segPos * Math.PI;
 
       let freq: number;
       if (isAcoustic) {
@@ -2830,8 +2857,8 @@ export function computePhononDispersion(
 
       if (freq < 0) {
         imaginaryCount++;
-        const segIdx = Math.floor(qFrac * 3);
-        const segLabel = segIdx === 0 ? "Γ-X" : segIdx === 1 ? "X-M" : "M-Γ";
+        const softSegIdx = Math.min(nSegments - 1, Math.floor(qFrac * nSegments));
+        const segLabel = `${qPath[softSegIdx]}-${qPath[softSegIdx + 1]}`;
         if (!softModeQPoints.includes(segLabel)) softModeQPoints.push(segLabel);
       }
 
@@ -3692,6 +3719,20 @@ export async function runFullPhysicsAnalysis(
     detail: `${formula}: integratedLambda=${alpha2FResult.integratedLambda.toFixed(4)}, omegaLog(alpha2F)=${computeOmegaLogFromAlpha2F(alpha2FResult).toFixed(1)} cm⁻¹`,
     dataSource: "Physics Engine",
   });
+
+  if (earlyPhononDispersion.softModeQPoints.length > 0 && phononSpectrum.softModePresent) {
+    const softBranches = earlyPhononDispersion.branches.filter(b => b.isSoft);
+    const nSoftBranches = softBranches.length;
+    const softFraction = nSoftBranches / Math.max(1, earlyPhononDispersion.branches.length);
+    const softModeOmegaLogPenalty = 1.0 - softFraction * phononSpectrum.softModeScore * 0.3;
+    coupling.omegaLog = Math.round(coupling.omegaLog * Math.max(0.5, softModeOmegaLogPenalty));
+    emit("log", {
+      phase: "phase-10",
+      event: "Soft mode omegaLog correction",
+      detail: `${formula}: ${nSoftBranches} soft branches (${(softFraction * 100).toFixed(0)}%), softScore=${phononSpectrum.softModeScore.toFixed(2)}, omegaLog corrected by ${((1 - softModeOmegaLogPenalty) * 100).toFixed(1)}%`,
+      dataSource: "Physics Engine",
+    });
+  }
 
   let eliashberg: EliashbergResult;
   eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
