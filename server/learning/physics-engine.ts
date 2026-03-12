@@ -2201,6 +2201,7 @@ function estimateSpinFluctuationTc(
 
   let stonerMax = 0;
   for (const el of elements) {
+    if (!isTransitionMetal(el) && !isRareEarth(el)) continue;
     const I = getStonerParameter(el);
     if (I !== null) stonerMax = Math.max(stonerMax, I * N_EF);
   }
@@ -2351,7 +2352,11 @@ function estimateFlatBandTc(
   }
 
   const lambda = coupling.lambda;
-  const tc_fb = Math.round(wAvg * 11604 * Math.sqrt(Math.max(0.1, lambda)) * 0.01);
+
+  const mottProx = electronic.mottProximityScore ?? 0;
+  const mottPenalty = mottProx > 0.7 ? 1.0 - (mottProx - 0.7) * 1.5 : 1.0;
+
+  const tc_fb = Math.round(wAvg * 11604 * Math.max(0.1, lambda) * 0.01 * Math.max(0.1, mottPenalty));
 
   const isKagome = elements.length >= 2 && electronic.fermiSurfaceTopology.includes("nesting");
 
@@ -2359,7 +2364,7 @@ function estimateFlatBandTc(
     mechanism: "flat-band",
     tcEstimate: Math.max(0, Math.min(400, tc_fb * (isKagome ? 1.5 : 1.0))),
     confidence: isKagome ? 0.35 : 0.25,
-    description: isKagome ? "Kagome-type flat band with geometric frustration" : `Narrow bandwidth (W=${wAvg.toFixed(1)}eV) with high DOS`,
+    description: isKagome ? "Kagome-type flat band with geometric frustration" : `Narrow bandwidth (W=${wAvg.toFixed(1)}eV) with high DOS, Mott proximity=${mottProx.toFixed(2)}`,
   };
 }
 
@@ -2384,19 +2389,31 @@ export function runUnifiedPairingAnalysis(
 
   const all = [bcs, spinFluc, excitonic, plasmonic, flatBand];
 
-  const weightedAll = all.map(m => ({
-    ...m,
-    effectiveTc: m.tcEstimate * m.confidence,
-  }));
+  const active = all.filter(m => m.tcEstimate > 0 && m.confidence > 0.05);
+  const activeCount = active.length;
 
-  weightedAll.sort((a, b) => b.effectiveTc - a.effectiveTc);
-  const dominant = weightedAll[0];
+  if (activeCount === 0) {
+    return {
+      dominant: bcs,
+      all,
+      enhancedTc: bcs.tcEstimate,
+      uncertaintyFromMechanism: 0.5,
+    };
+  }
 
-  const activeCount = all.filter(m => m.tcEstimate > 0).length;
-  let enhancedTc = dominant.tcEstimate;
-  const secondary = weightedAll[1];
-  if (secondary && secondary.tcEstimate > 0 && secondary.mechanism !== dominant.mechanism) {
-    enhancedTc = Math.round(enhancedTc + secondary.tcEstimate * 0.15);
+  const totalConfidence = active.reduce((s, m) => s + m.confidence, 0);
+  const blendedTc = active.reduce((s, m) => s + m.tcEstimate * m.confidence, 0) / totalConfidence;
+
+  const sorted = [...active].sort((a, b) =>
+    (b.confidence - a.confidence) || (b.tcEstimate - a.tcEstimate)
+  );
+  const dominant = sorted[0];
+
+  let enhancedTc: number;
+  if (activeCount >= 2) {
+    enhancedTc = Math.round((0.6 * dominant.tcEstimate + 0.4 * blendedTc) * 10) / 10;
+  } else {
+    enhancedTc = dominant.tcEstimate;
   }
 
   const uncertaintyFromMechanism = activeCount > 2 ? 0.4 : (dominant.confidence > 0.5 ? 0.2 : 0.35);
@@ -2534,6 +2551,7 @@ export function evaluateCompetingPhases(
   if (isPnictide) {
     let stonerMax = 0;
     for (const el of elements) {
+      if (!isTransitionMetal(el) && !isRareEarth(el)) continue;
       const I = getStonerParameter(el);
       if (I !== null) stonerMax = Math.max(stonerMax, I * electronicStructure.densityOfStatesAtFermi);
     }
@@ -3016,6 +3034,7 @@ export function computeDynamicSpinSusceptibility(
 
   let stonerMax = 0;
   for (const el of elements) {
+    if (!isTransitionMetal(el) && !isRareEarth(el)) continue;
     const I = getStonerParameter(el);
     if (I !== null) stonerMax = Math.max(stonerMax, I);
   }
