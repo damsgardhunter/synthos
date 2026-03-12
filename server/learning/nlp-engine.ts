@@ -57,6 +57,25 @@ const STATISTICAL_SUMMARY_PATTERNS: RegExp[] = [
 ];
 
 const QUANTITATIVE_PATTERN = /\d+\.?\d*\s*(?:eV|K|GPa|%|nm|cm|T\b|meV|A\b|Å)/i;
+const KNOWN_ELEMENTS = new Set([
+  "H","He","Li","Be","B","C","N","O","F","Ne","Na","Mg","Al","Si","P","S","Cl","Ar",
+  "K","Ca","Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn","Ga","Ge","As","Se","Br","Kr",
+  "Rb","Sr","Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd","In","Sn","Sb","Te","I","Xe",
+  "Cs","Ba","La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg","Tl","Pb","Bi","Po","At","Rn",
+  "Fr","Ra","Ac","Th","Pa","U","Np","Pu","Am",
+]);
+
+function isValidChemicalFormula(text: string): boolean {
+  const elMatches = text.match(/[A-Z][a-z]?/g);
+  if (!elMatches || elMatches.length < 2) return false;
+  let validCount = 0;
+  for (const el of elMatches) {
+    if (KNOWN_ELEMENTS.has(el)) validCount++;
+  }
+  return validCount >= 2 && validCount / elMatches.length >= 0.5;
+}
+
 const SPECIFIC_MATERIAL_PATTERN = /[A-Z][a-z]?\d*[A-Z][a-z]?\d*/;
 
 function isInsightSpecificEnough(insight: string): { valid: boolean; reason?: string } {
@@ -73,7 +92,8 @@ function isInsightSpecificEnough(insight: string): { valid: boolean; reason?: st
   }
 
   const hasNumber = QUANTITATIVE_PATTERN.test(insight);
-  const hasMaterial = SPECIFIC_MATERIAL_PATTERN.test(insight);
+  const rawMatch = insight.match(SPECIFIC_MATERIAL_PATTERN);
+  const hasMaterial = rawMatch ? isValidChemicalFormula(rawMatch[0]) : false;
   const hasCorrelation = /correlat|predict|increas|decreas|higher|lower|stronger|weaker/i.test(insight);
 
   if (!hasNumber && !hasMaterial && !hasCorrelation) {
@@ -91,7 +111,7 @@ const MIN_DATASET_FOR_INSIGHTS = 100;
 
 function pearsonCorrelation(xs: number[], ys: number[]): number {
   const n = xs.length;
-  if (n < 5) return 0;
+  if (n < 5) return NaN;
   const avgX = xs.reduce((s, v) => s + v, 0) / n;
   const avgY = ys.reduce((s, v) => s + v, 0) / n;
   let cov = 0, varX = 0, varY = 0;
@@ -100,7 +120,13 @@ function pearsonCorrelation(xs: number[], ys: number[]): number {
     varX += (xs[i] - avgX) ** 2;
     varY += (ys[i] - avgY) ** 2;
   }
-  return varX > 0 && varY > 0 ? cov / Math.sqrt(varX * varY) : 0;
+  if (varX < 1e-12 || varY < 1e-12) return NaN;
+  return cov / Math.sqrt(varX * varY);
+}
+
+function formatCorrelation(label: string, r: number, n: number): string | null {
+  if (!Number.isFinite(r)) return `${label}: INVARIANT (zero variance in data, n=${n})`;
+  return `${label}: r=${r.toFixed(3)} (n=${n})`;
 }
 
 function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]): string {
@@ -116,7 +142,7 @@ function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]
     const r = pearsonCorrelation(lambdas, tcs);
     const avgLambdaHighTc = withLambdaAndTc.filter(c => (c.predictedTc ?? 0) > 30).map(c => c.electronPhononCoupling as number);
     const avgLambdaLowTc = withLambdaAndTc.filter(c => (c.predictedTc ?? 0) <= 30).map(c => c.electronPhononCoupling as number);
-    stats.push(`Correlation(electron_phonon_coupling λ, predicted_Tc): r=${r.toFixed(3)} (n=${withLambdaAndTc.length})`);
+    stats.push(formatCorrelation("Correlation(electron_phonon_coupling λ, predicted_Tc)", r, withLambdaAndTc.length)!);
     if (avgLambdaHighTc.length > 0) stats.push(`  Mean λ for Tc>30K: ${(avgLambdaHighTc.reduce((s,v) => s+v, 0) / avgLambdaHighTc.length).toFixed(3)}`);
     if (avgLambdaLowTc.length > 0) stats.push(`  Mean λ for Tc≤30K: ${(avgLambdaLowTc.reduce((s,v) => s+v, 0) / avgLambdaLowTc.length).toFixed(3)}`);
   }
@@ -126,7 +152,7 @@ function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]
     const stabs = withStabAndTc.map(c => c.stabilityScore as number);
     const tcs = withStabAndTc.map(c => c.predictedTc as number);
     const r = pearsonCorrelation(stabs, tcs);
-    stats.push(`Correlation(stability_score, predicted_Tc): r=${r.toFixed(3)} (n=${withStabAndTc.length})`);
+    stats.push(formatCorrelation("Correlation(stability_score, predicted_Tc)", r, withStabAndTc.length)!);
   }
 
   const withCorrAndTc = candidates.filter(c => c.correlationStrength != null && c.predictedTc != null);
@@ -134,7 +160,7 @@ function computeSuperconductorCorrelations(candidates: SuperconductorCandidate[]
     const corrs = withCorrAndTc.map(c => c.correlationStrength as number);
     const tcs = withCorrAndTc.map(c => c.predictedTc as number);
     const r = pearsonCorrelation(corrs, tcs);
-    stats.push(`Correlation(correlation_strength, predicted_Tc): r=${r.toFixed(3)} (n=${withCorrAndTc.length})`);
+    stats.push(formatCorrelation("Correlation(correlation_strength, predicted_Tc)", r, withCorrAndTc.length)!);
   }
 
   const dimensionGroups: Record<string, number[]> = {};
@@ -221,7 +247,8 @@ function computeDatasetStatistics(materials: Material[]): string {
       const bgs = paired.map(m => m.bandGap as number);
       const fes = paired.map(m => m.formationEnergy as number);
       const r = pearsonCorrelation(bgs, fes);
-      stats.push(`Correlation(band_gap, formation_energy): r=${r.toFixed(3)} (n=${paired.length})`);
+      const line = formatCorrelation("Correlation(band_gap, formation_energy)", r, paired.length);
+      if (line) stats.push(line);
     }
   }
 
@@ -231,7 +258,8 @@ function computeDatasetStatistics(materials: Material[]): string {
       const bgs = paired.map(m => m.bandGap as number);
       const stabs = paired.map(m => m.stability as number);
       const r = pearsonCorrelation(bgs, stabs);
-      stats.push(`Correlation(band_gap, stability): r=${r.toFixed(3)} (n=${paired.length})`);
+      const line = formatCorrelation("Correlation(band_gap, stability)", r, paired.length);
+      if (line) stats.push(line);
     }
   }
 
@@ -241,18 +269,20 @@ function computeDatasetStatistics(materials: Material[]): string {
       const fes = paired.map(m => m.formationEnergy as number);
       const stabs = paired.map(m => m.stability as number);
       const r = pearsonCorrelation(fes, stabs);
-      stats.push(`Correlation(formation_energy, stability): r=${r.toFixed(3)} (n=${paired.length})`);
+      const line = formatCorrelation("Correlation(formation_energy, stability)", r, paired.length);
+      if (line) stats.push(line);
     }
   }
 
+  const uniqueFormulas = new Set(materials.map(m => m.formula));
   const elementFreq: Record<string, number> = {};
-  for (const m of materials) {
-    const els = (m.formula || "").match(/[A-Z][a-z]?/g) || [];
+  for (const formula of uniqueFormulas) {
+    const els = (formula || "").match(/[A-Z][a-z]?/g) || [];
     for (const el of els) elementFreq[el] = (elementFreq[el] || 0) + 1;
   }
   const topElements = Object.entries(elementFreq).sort((a, b) => b[1] - a[1]).slice(0, 10);
   if (topElements.length > 0) {
-    stats.push(`Most common elements: ${topElements.map(([el, n]) => `${el}(${n})`).join(", ")}`);
+    stats.push(`Most common elements (${uniqueFormulas.size} unique formulas): ${topElements.map(([el, n]) => `${el}(${n})`).join(", ")}`);
   }
 
   return stats.join("\n");
