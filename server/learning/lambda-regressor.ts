@@ -74,14 +74,14 @@ const LAMBDA_FEATURE_NAMES = [
   "orbitalDFraction",
 ];
 
-const LAMBDA_ENSEMBLE_SIZE = 3;
+const LAMBDA_ENSEMBLE_SIZE = 2;
 const MIN_RETRAIN_SAMPLES = 20;
 const RETRAIN_INTERVAL_MS = 30 * 60 * 1000;
 
 let lambdaEnsemble: LambdaEnsemble | null = null;
 let lastPhysicsStoreSize = 0;
 let totalPredictions = 0;
-let tierBreakdown = { "verified-dfpt": 0, "ml-regression": 0, "physics-engine": 0 };
+let tierBreakdown: Record<string, number> = { "verified-dfpt": 0, "ml-regression": 0, "physics-engine": 0, "heuristic": 0 };
 let retrainCount = 0;
 let lastRetrainTime = 0;
 let predictionErrors: { predicted: number; actual: number; formula: string }[] = [];
@@ -436,12 +436,13 @@ function bootstrapSample(X: number[][], y: number[], rng: () => number): { X: nu
   return { X: bsX, y: bsY, oobIndices };
 }
 
-function buildTrainingData(): { X: number[][]; y: number[]; formulas: string[] } {
+async function buildTrainingDataAsync(): Promise<{ X: number[][]; y: number[]; formulas: string[] }> {
   const X: number[][] = [];
   const y: number[] = [];
   const formulas: string[] = [];
   const keyIndex = new Map<string, number>();
 
+  let count = 0;
   for (const entry of SUPERCON_TRAINING_DATA) {
     if (entry.lambda == null || entry.lambda <= 0) continue;
     try {
@@ -458,6 +459,7 @@ function buildTrainingData(): { X: number[][]; y: number[]; formulas: string[] }
     } catch {
       continue;
     }
+    if (++count % 10 === 0) await new Promise<void>(r => setTimeout(r, 20));
   }
 
   const physicsResults = getAllPhysicsResults();
@@ -486,6 +488,8 @@ function buildTrainingData(): { X: number[][]; y: number[]; formulas: string[] }
     } catch {
       continue;
     }
+    if (count % 10 === 0) await new Promise<void>(r => setTimeout(r, 20));
+    count++;
   }
 
   return { X, y, formulas };
@@ -514,16 +518,17 @@ function computeMetrics(model: LambdaGBModel, X: number[][], y: number[]): { r2:
   };
 }
 
-export function trainLambdaRegressor(): void {
-  const { X, y, formulas } = buildTrainingData();
+export async function trainLambdaRegressor(): Promise<void> {
+  const { X, y, formulas } = await buildTrainingDataAsync();
   if (X.length < 5) return;
 
   const models: LambdaGBModel[] = [];
   for (let i = 0; i < LAMBDA_ENSEMBLE_SIZE; i++) {
     const rng = seededRng(ENSEMBLE_SEEDS[i] + X.length);
     const { X: bsX, y: bsY } = bootstrapSample(X, y, rng);
-    const model = trainLambdaGBM(bsX, bsY, 150, 0.08, 4, ENSEMBLE_SEEDS[i]);
+    const model = trainLambdaGBM(bsX, bsY, 80, 0.10, 4, ENSEMBLE_SEEDS[i]);
     models.push(model);
+    await new Promise<void>(r => setTimeout(r, 10));
   }
 
   const metrics = computeMetrics(models[0], X, y);
@@ -576,9 +581,9 @@ export function predictLambda(formula: string, pressure: number = 0): LambdaPred
     };
   }
 
-  if (shouldRetrain() && !isTraining) {
+  if (shouldRetrain() && !isTraining && lambdaEnsemble !== null) {
     isTraining = true;
-    try { trainLambdaRegressor(); } catch {} finally { isTraining = false; }
+    trainLambdaRegressor().catch(() => {}).finally(() => { isTraining = false; });
   }
 
   if (lambdaEnsemble && lambdaEnsemble.models.length > 0) {
@@ -610,6 +615,17 @@ export function predictLambda(formula: string, pressure: number = 0): LambdaPred
         };
       }
     } catch {}
+  }
+
+  if (!lambdaEnsemble) {
+    tierBreakdown["heuristic"]++;
+    return {
+      lambda: 0.5,
+      uncertainty: 0.4,
+      tier: "heuristic",
+      confidence: 0.1,
+      features: {},
+    };
   }
 
   try {
@@ -686,8 +702,8 @@ export function getLambdaRegressorStats() {
   };
 }
 
-export function initLambdaRegressor(): void {
+export async function initLambdaRegressor(): Promise<void> {
   try {
-    trainLambdaRegressor();
+    await trainLambdaRegressor();
   } catch {}
 }

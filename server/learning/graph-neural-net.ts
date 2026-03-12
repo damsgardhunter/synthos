@@ -3325,4 +3325,4 @@ setTimeout(() => {
   } catch (e: any) {
     console.error(`[GNN] Pre-warm failed: ${e?.message?.slice(0, 200)}`);
   }
-}, 120000);
+}, 150000);

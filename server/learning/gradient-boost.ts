@@ -393,8 +393,8 @@ function getFeatureMeans(): Record<string, number> {
 
 const FEATURE_MEANS = new Proxy(STATIC_FEATURE_MEANS, {
   get(_target, prop: string) {
-    const means = getFeatureMeans();
-    return means[prop];
+    if (computedFeatureMeans) return computedFeatureMeans[prop];
+    return STATIC_FEATURE_MEANS[prop];
   },
   has(_target, prop: string) {
     return prop in STATIC_FEATURE_MEANS;
@@ -404,7 +404,8 @@ const FEATURE_MEANS = new Proxy(STATIC_FEATURE_MEANS, {
   },
   getOwnPropertyDescriptor(_target, prop: string) {
     if (prop in STATIC_FEATURE_MEANS) {
-      return { configurable: true, enumerable: true, value: getFeatureMeans()[prop] };
+      const v = computedFeatureMeans ? computedFeatureMeans[prop] : STATIC_FEATURE_MEANS[prop];
+      return { configurable: true, enumerable: true, value: v };
     }
     return undefined;
   }
@@ -506,50 +507,15 @@ function getCachedMiedemaEnergy(formula: string): number {
   }
 }
 
+const STATIC_CRYSTAL_SYM_ENCODING: Record<string, number> = {
+  cubic: 35.0, hexagonal: 28.0, trigonal: 25.0,
+  tetragonal: 40.0, orthorhombic: 30.0,
+  monoclinic: 22.0, triclinic: 18.0,
+};
+
 let crystalSymTargetEncoding: Map<string, number> | null = null;
 
 function getCrystalSymTargetEncoded(sym: string): number | null {
-  if (!crystalSymTargetEncoding) {
-    crystalSymTargetEncoding = new Map();
-    const symTcSums = new Map<string, { sum: number; count: number }>();
-    let globalSum = 0;
-    let globalCount = 0;
-    for (const entry of SUPERCON_TRAINING_DATA) {
-      try {
-        const features = extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
-        const entrySym = (features as any).crystalSymmetry;
-        if (!entrySym || typeof entrySym !== "string") continue;
-        const normalized = entrySym.toLowerCase().trim();
-        const SG_MAP: Record<string, string> = {
-          cubic: "cubic", hexagonal: "hexagonal", trigonal: "trigonal",
-          tetragonal: "tetragonal", orthorhombic: "orthorhombic",
-          monoclinic: "monoclinic", triclinic: "triclinic", rhombohedral: "trigonal",
-        };
-        let category: string | null = null;
-        if (SG_MAP[normalized]) {
-          category = SG_MAP[normalized];
-        } else {
-          for (const [key, val] of Object.entries(SG_MAP)) {
-            if (normalized.includes(key)) { category = val; break; }
-          }
-        }
-        if (!category) continue;
-        const existing = symTcSums.get(category) || { sum: 0, count: 0 };
-        existing.sum += entry.tc;
-        existing.count++;
-        symTcSums.set(category, existing);
-        globalSum += entry.tc;
-        globalCount++;
-      } catch { continue; }
-    }
-    const globalMean = globalCount > 0 ? globalSum / globalCount : 20;
-    const SMOOTHING = 10;
-    for (const [cat, data] of Array.from(symTcSums.entries())) {
-      const smoothed = (data.sum + SMOOTHING * globalMean) / (data.count + SMOOTHING);
-      crystalSymTargetEncoding.set(cat, smoothed);
-    }
-    console.log(`[GradientBoost] Crystal symmetry target encoding: ${Array.from(crystalSymTargetEncoding.entries()).map(([k, v]) => `${k}=${v.toFixed(1)}K`).join(", ")}`);
-  }
   const normalized = sym.toLowerCase().trim();
   const SG_LOOKUP: Record<string, string> = {
     cubic: "cubic", hexagonal: "hexagonal", trigonal: "trigonal",
@@ -565,7 +531,8 @@ function getCrystalSymTargetEncoded(sym: string): number | null {
     }
   }
   if (!category) return null;
-  return crystalSymTargetEncoding.get(category) ?? null;
+  if (crystalSymTargetEncoding) return crystalSymTargetEncoding.get(category) ?? null;
+  return STATIC_CRYSTAL_SYM_ENCODING[category] ?? null;
 }
 
 function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
@@ -734,20 +701,20 @@ function findBestSplitForSubset(
     totalSum += residuals[idx];
   }
 
-  for (let i = 1; i < n; i++) {
-    const keyVal = vals[i];
-    const keyRes = res[i];
-    const keyIdx = sortIdx[i];
-    let j = i - 1;
-    while (j >= 0 && vals[j] > keyVal) {
-      vals[j + 1] = vals[j];
-      res[j + 1] = res[j];
-      sortIdx[j + 1] = sortIdx[j];
-      j--;
-    }
-    vals[j + 1] = keyVal;
-    res[j + 1] = keyRes;
-    sortIdx[j + 1] = keyIdx;
+  const order = Array.from({ length: n }, (_, i) => i);
+  order.sort((a, b) => vals[a] - vals[b]);
+  const tmpVals = new Float64Array(n);
+  const tmpRes = new Float64Array(n);
+  const tmpIdx = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    tmpVals[i] = vals[order[i]];
+    tmpRes[i] = res[order[i]];
+    tmpIdx[i] = sortIdx[order[i]];
+  }
+  for (let i = 0; i < n; i++) {
+    vals[i] = tmpVals[i];
+    res[i] = tmpRes[i];
+    sortIdx[i] = tmpIdx[i];
   }
 
   const totalMeanSq = (totalSum * totalSum) / n;
@@ -815,7 +782,20 @@ function buildTree(
   let bestLeftIdx: number[] = [];
   let bestRightIdx: number[] = [];
 
-  for (let fi = 0; fi < nFeatures; fi++) {
+  const maxFeaturesPerSplit = Math.min(nFeatures, Math.max(8, Math.ceil(Math.sqrt(nFeatures))));
+  const featureIndices: number[] = [];
+  if (maxFeaturesPerSplit >= nFeatures) {
+    for (let i = 0; i < nFeatures; i++) featureIndices.push(i);
+  } else {
+    const all = Array.from({ length: nFeatures }, (_, i) => i);
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    for (let i = 0; i < maxFeaturesPerSplit; i++) featureIndices.push(all[i]);
+  }
+
+  for (const fi of featureIndices) {
     const split = findBestSplitForSubset(X, residuals, indices, fi, minSamples);
     if (split.improvement > 0 && split.improvement > bestImprovement && split.leftIndices.length >= minSamples && split.rightIndices.length >= minSamples) {
       bestImprovement = split.improvement;
@@ -1067,7 +1047,7 @@ const FALLBACK_MODEL: GBModel = {
 };
 
 function ensurePoolInitialized(): void {
-  if (poolInitialized && cachedTrainingSnapshot?.dataSize === SUPERCON_TRAINING_DATA.length) return;
+  if (poolInitialized) return;
   if (poolInitializing) return;
 
   const startSize = trainingPool.size;
@@ -1086,32 +1066,86 @@ export async function initPoolAsync(): Promise<void> {
   if (poolInitialized || poolInitializing) return;
   poolInitializing = true;
 
-  const entries = SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }));
+  const allEntries = SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }));
   const startTime = Date.now();
-  let added = 0;
 
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
+  const PHASE1_SIZE = 15;
+  const shuffled = [...allEntries].sort(() => Math.random() - 0.5);
+  const phase1 = shuffled.slice(0, PHASE1_SIZE);
+  const phase2 = shuffled.slice(PHASE1_SIZE);
+
+  let added = 0;
+  for (let i = 0; i < phase1.length; i++) {
+    const e = phase1[i];
     if (trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
-    if (i % 5 === 0) {
-      await new Promise<void>(r => setTimeout(r, 50));
-    }
+    await new Promise<void>(r => setTimeout(r, 50));
   }
 
   poolInitialized = true;
   poolInitializing = false;
   cachedTrainingSnapshot = { dataSize: SUPERCON_TRAINING_DATA.length };
-  console.log(`[TrainingPool] Async init: ${trainingPool.size} cached vectors (${added} new) in ${Date.now() - startTime}ms`);
+  console.log(`[TrainingPool] Phase 1: ${trainingPool.size} vectors (${added} new) in ${Date.now() - startTime}ms`);
 
   await new Promise<void>(r => setTimeout(r, 50));
 
   try {
     const { X, y } = trainingPool.getTrainingData();
     if (X.length >= 10) {
-      cachedModel = trainGradientBoosting(X, y, 80, 0.08, 5);
+      const trainStart = Date.now();
+      cachedModel = trainGradientBoosting(X, y, 30, 0.12, 4);
       cachedCalibration = computeCalibration(cachedModel);
-      logModelVersion("initial-training", X.length);
-      console.log(`[GradientBoost] Model trained with ${X.length} samples in ${Date.now() - startTime}ms`);
+      logModelVersion("phase1-training", X.length);
+      console.log(`[GradientBoost] Phase 1 model: ${X.length} samples in ${Date.now() - trainStart}ms`);
+    }
+  } catch (e) {
+    console.error("[GradientBoost] Phase 1 training failed:", e);
+  }
+
+  backfillPool(phase2, startTime);
+}
+
+async function backfillPool(remaining: { formula: string; tc: number; pressureGPa: number }[], t0: number): Promise<void> {
+  await new Promise<void>(r => setTimeout(r, 360000));
+  let added = 0;
+  for (let i = 0; i < remaining.length; i++) {
+    const e = remaining[i];
+    if (trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
+    await new Promise<void>(r => setTimeout(r, 50));
+  }
+  console.log(`[TrainingPool] Phase 2 backfill: ${trainingPool.size} total vectors (+${added}) in ${Date.now() - t0}ms`);
+
+  try {
+    const { X } = trainingPool.getTrainingData();
+    if (X.length >= 10) {
+      const featureNames = Object.keys(STATIC_FEATURE_MEANS);
+      const sums: Record<string, number> = {};
+      const counts: Record<string, number> = {};
+      for (const key of featureNames) { sums[key] = 0; counts[key] = 0; }
+      for (const row of X) {
+        for (let fi = 0; fi < featureNames.length && fi < row.length; fi++) {
+          const v = row[fi];
+          if (Number.isFinite(v)) { sums[featureNames[fi]] += v; counts[featureNames[fi]]++; }
+        }
+      }
+      computedFeatureMeans = { ...STATIC_FEATURE_MEANS };
+      for (const key of featureNames) {
+        if (counts[key] > 10) computedFeatureMeans[key] = sums[key] / counts[key];
+      }
+      featureMeansComputedAt = Date.now();
+      console.log(`[GradientBoost] Feature means computed from ${X.length} pool vectors`);
+    }
+  } catch {}
+
+  await new Promise<void>(r => setTimeout(r, 200));
+
+  try {
+    const { X, y } = trainingPool.getTrainingData();
+    if (X.length >= 10) {
+      const trainStart = Date.now();
+      cachedModel = trainGradientBoosting(X, y, 45, 0.12, 4);
+      cachedCalibration = computeCalibration(cachedModel);
+      logModelVersion("full-training", X.length);
+      console.log(`[GradientBoost] Full model: ${X.length} samples in ${Date.now() - trainStart}ms`);
 
       setTimeout(() => {
         try {
@@ -1120,10 +1154,10 @@ export async function initPoolAsync(): Promise<void> {
           cachedGlobalFeatureImportance = null;
           buildFeatureImportanceCache();
         } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
-      }, 30000);
+      }, 45000);
     }
   } catch (e) {
-    console.error("[GradientBoost] Initial training failed:", e);
+    console.error("[GradientBoost] Full training failed:", e);
   }
 }
 
@@ -1140,42 +1174,7 @@ function prepareTrainingData(): { X: number[][]; y: number[]; formulas: string[]
 
 export function getTrainedModel(): GBModel {
   if (cachedModel) return cachedModel;
-
-  if (!poolInitialized) {
-    return FALLBACK_MODEL;
-  }
-
-  const { X, y } = prepareTrainingData();
-
-  if (X.length < 10) {
-    cachedModel = {
-      trees: [],
-      flatTrees: [],
-      learningRate: 0.1,
-      basePrediction: 20,
-      featureNames: FEATURE_NAMES,
-      trainedAt: Date.now(),
-    };
-    return cachedModel;
-  }
-
-  cachedModel = trainGradientBoosting(X, y, 80, 0.08, 5);
-  cachedCalibration = computeCalibration(cachedModel);
-
-  if (!cachedEnsembleXGB && X.length >= 30) {
-    setTimeout(() => {
-      try {
-        cachedEnsembleXGB = trainEnsembleXGB(X, y);
-        cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-        cachedGlobalFeatureImportance = null;
-        buildFeatureImportanceCache();
-      } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
-    }, 30000);
-  }
-
-  logModelVersion("initial-training", X.length);
-
-  return cachedModel;
+  return FALLBACK_MODEL;
 }
 
 const APPLICATION_TC_TARGETS: Record<string, { target: number; range: [number, number]; label: string }> = {
@@ -1487,20 +1486,29 @@ export function validateModel(): { mse: number; r2: number; nTrees: number; deta
 }
 
 export function getCalibrationData(): Omit<CalibrationData, 'residuals'> & { residualCount: number } {
-  getTrainedModel();
   if (!cachedCalibration) {
-    const model = getTrainedModel();
-    cachedCalibration = computeCalibration(model);
+    if (!cachedModel) {
+      return {
+        r2: 0, mae: 0, mse: 0, rmse: 0, nSamples: 0, nTrees: 0,
+        percentiles: { p5: 0, p10: 0, p25: 0, p50: 0, p75: 0, p90: 0, p95: 0 },
+        absResidualPercentiles: { p50: 0, p75: 0, p90: 0, p95: 0 },
+        relativeErrorPercentiles: { p50: 0, p75: 0, p90: 0, p95: 0 },
+        predictedVsActual: [],
+        residualCount: 0,
+      };
+    }
+    cachedCalibration = computeCalibration(cachedModel);
   }
   const { residuals, ...rest } = cachedCalibration;
   return { ...rest, residualCount: residuals.length };
 }
 
 export function getConfidenceBand(predictedTc: number): { lower: number; upper: number } {
-  getTrainedModel();
   if (!cachedCalibration) {
-    const model = getTrainedModel();
-    cachedCalibration = computeCalibration(model);
+    if (!cachedModel) {
+      return { lower: Math.max(0, predictedTc - 20), upper: predictedTc + 20 };
+    }
+    cachedCalibration = computeCalibration(cachedModel);
   }
 
   const relP90 = cachedCalibration.relativeErrorPercentiles.p90;

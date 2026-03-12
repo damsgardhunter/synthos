@@ -150,7 +150,7 @@ app.use((req, res, next) => {
         heartbeatCount++;
         const elapsed = ((Date.now() - heartbeatStart) / 1000).toFixed(1);
         console.log(`[heartbeat] #${heartbeatCount} at +${elapsed}s (${new Date().toLocaleTimeString()})`);
-        if (heartbeatCount >= 40) clearInterval(heartbeatInterval);
+        if (heartbeatCount >= 60) clearInterval(heartbeatInterval);
       }, 2000);
 
       try {
@@ -201,7 +201,7 @@ app.use((req, res, next) => {
         } catch (err: any) {
           log(`Engine import failed: ${err.message}`, "startup");
         }
-      }, 20000);
+      }, 400000);
     } catch (err: any) {
       console.error("[startup] Fatal initialization error:", err);
     }

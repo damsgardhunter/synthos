@@ -18,13 +18,29 @@ MatSci-∞ is an AI-powered supercomputer platform accelerating the discovery of
 - **AI**: OpenAI gpt-4o-mini (via Replit AI Integrations)
 - **Real-time**: WebSocket (ws)
 
-### Structure Predictor ML Training Guard
-- `structure-predictor-ml.ts` trains 9 ML models (3 classifiers + 6 GBM regressors) which blocks the Node.js event loop for ~40-80s
-- Training is deferred via `trainStructurePredictorBackground()` using `setTimeout(120000)` — runs 2 minutes after startup
-- `predictStructure()` calls in `tight-binding.ts` are guarded by `isStructurePredictorReady()` — models are skipped until trained
-- `initStructurePredictorML()` (called from routes.ts at 30s) delegates to `trainStructurePredictorBackground()`
-- Tree counts reduced ~4x (classifiers: 15 trees, GBM regressors: 25 trees) to minimize blocking duration
-- Result: `computePhysicsTcUQ(MgB2)` responds in ~60ms instead of 181,000ms
+### Startup Initialization Timeline
+Heavy initializers are staggered to avoid event loop blocking:
+- **+20s**: Pool init Phase 1 (15 entries, ~25s) — trains quick GBM model
+- **+90s**: CrystalDiffusion DDPM (100 epochs, ~2s)
+- **+110s**: Crystal-VAE (50+ epochs, ~2s)
+- **+130s**: Benchmark reference predictions
+- **+150s**: GNN 5-model ensemble warmup (~100s blocking, unavoidable)
+- **+380s**: Phase 2 pool backfill (~498 entries, async with 50ms yields)
+- **+400s**: Learning engine auto-start (xTB health ~60s execSync, backfill scores, recalculate physics)
+- **+600s**: Lambda regressor (async with yields every 10 entries)
+- **+660s**: Phonon surrogate
+- **+720s**: Structure predictor ML
+
+### Event Loop Protection
+- `extractFeatures()` in ml-predictor.ts calls 3 expensive physics functions (~0.3s/call)
+- `predictLambda()` returns heuristic fallback (lambda=0.5) until lambda ensemble trains at +600s
+- `FEATURE_MEANS` Proxy returns static values until pool backfill computes them
+- `getCrystalSymTargetEncoded()` uses `STATIC_CRYSTAL_SYM_ENCODING` without iterating training data
+- `getTrainedModel()` returns `FALLBACK_MODEL` until pool trains a real model
+- Phase 1 and Phase 2 yield `setTimeout(r, 50)` between each entry
+- Lambda regressor `buildTrainingDataAsync()` yields every 10 entries with 20ms pauses
+- First 150s: fully responsive API (<50ms). GNN blocks +150s to ~+270s (~75s). Responsive again until +380s.
+- Engine start at +400s blocks ~120s (xTB health 60s + backfill/recalc).
 
 ### Core Architectural Decisions
 - **Dynamic Module Loading**: `server/index.ts` initializes quickly, dynamically loading heavier modules post-startup to ensure rapid port availability.

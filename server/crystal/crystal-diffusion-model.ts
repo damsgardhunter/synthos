@@ -14,9 +14,9 @@ const BETA_MIN = 0.0001;
 const BETA_MAX = 0.02;
 const FEATURE_DIM = 53;
 const TIME_EMBED_DIM = 16;
-const HIDDEN_DIM = 128;
-const TRAIN_EPOCHS = 500;
-const LEARNING_RATE = 0.001;
+const HIDDEN_DIM = 64;
+const TRAIN_EPOCHS = 100;
+const LEARNING_RATE = 0.003;
 
 interface DiffusionWeights {
   w1: number[][];
@@ -280,6 +280,8 @@ function addNoise(x: number[], t: number): { noisy: number[]; noise: number[] } 
   return { noisy, noise };
 }
 
+const MINI_BATCH_SIZE = 32;
+
 function trainStep(
   weights: DiffusionWeights,
   dataPoints: number[][],
@@ -292,7 +294,13 @@ function trainStep(
   const gradW2: number[][] = weights.w2.map(row => new Array(row.length).fill(0));
   const gradB2: number[] = new Array(weights.b2.length).fill(0);
 
-  for (const x of dataPoints) {
+  const batchSize = Math.min(MINI_BATCH_SIZE, dataPoints.length);
+  const batch: number[][] = [];
+  for (let i = 0; i < batchSize; i++) {
+    batch.push(dataPoints[Math.floor(Math.random() * dataPoints.length)]);
+  }
+
+  for (const x of batch) {
     const t = Math.floor(Math.random() * T_STEPS);
     const { noisy, noise } = addNoise(x, t);
 
@@ -329,7 +337,7 @@ function trainStep(
     }
   }
 
-  const n = dataPoints.length;
+  const n = batchSize;
   const clipVal = 1.0;
 
   for (let i = 0; i < weights.w1.length; i++) {
@@ -466,13 +474,13 @@ export async function initDiffusionModel(): Promise<void> {
     const loss = trainStep(scoreNetwork, trainingFeatures, lr);
     trainingLossHistory.push(loss);
 
-    if (epoch > 0 && epoch % 100 === 0) {
+    if (epoch > 0 && epoch % 25 === 0) {
       lr *= 0.9;
     }
 
-    if (epoch % 50 === 0) await yield_();
+    if (epoch % 5 === 0) await yield_();
 
-    if (epoch % 100 === 0) {
+    if (epoch % 25 === 0) {
       console.log(`[CrystalDiffusion] Epoch ${epoch}/${TRAIN_EPOCHS}, loss=${loss.toFixed(6)}, lr=${lr.toFixed(6)}`);
     }
   }

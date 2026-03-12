@@ -4,13 +4,13 @@ import { buildGraphFromStructure, getGraphFeatureVector } from "./crystal-graph-
 
 const LATENT_DIM = 32;
 const HIDDEN_DIM = 64;
-const NUM_EPOCHS = 300;
-const LEARNING_RATE = 0.001;
+const NUM_EPOCHS = 80;
+const LEARNING_RATE = 0.002;
 const MOMENTUM = 0.85;
 const FREE_BITS = 0.1;
-const BETA_CYCLES = 4;
+const BETA_CYCLES = 2;
 const BETA_MAX = 0.8;
-const WARMUP_EPOCHS = 60;
+const WARMUP_EPOCHS = 15;
 const KL_MIN_TARGET = 2.0;
 const KL_PULL_STRENGTH = 0.05;
 const ENCODER_CATCHUP_INTERVAL = 25;
@@ -544,7 +544,7 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
   }
 
   for (let epoch = 0; epoch < NUM_EPOCHS; epoch++) {
-    if (epoch % 20 === 0) await yield_();
+    if (epoch % 3 === 0) await yield_();
     const beta = computeBeta(epoch);
 
     let totalLoss = 0;
@@ -553,10 +553,11 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
     let totalActiveDims = 0;
     const lr = LEARNING_RATE * Math.max(0.05, 1.0 - epoch / (NUM_EPOCHS * 1.5));
 
-    const indices = Array.from({ length: encodedInputs.length }, (_, i) => i);
-    for (let j = indices.length - 1; j > 0; j--) {
-      const k = Math.floor(Math.random() * (j + 1));
-      [indices[j], indices[k]] = [indices[k], indices[j]];
+    const VAE_BATCH_SIZE = 32;
+    const indices: number[] = [];
+    const batchCount = Math.min(VAE_BATCH_SIZE, encodedInputs.length);
+    for (let b = 0; b < batchCount; b++) {
+      indices.push(Math.floor(Math.random() * encodedInputs.length));
     }
 
     const isEncoderCatchup = epoch > WARMUP_EPOCHS &&

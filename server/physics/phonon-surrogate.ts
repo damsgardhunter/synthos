@@ -432,10 +432,10 @@ export function trainPhononSurrogate(): void {
   const yMaxFreq = rows.map(r => r.maxPhononFreq);
   const yStability = rows.map(r => r.phononStable);
 
-  const omegaLogModel = trainGBM(X, yOmegaLog, 120, 0.08, 4);
-  const debyeTempModel = trainGBM(X, yDebyeTemp, 120, 0.08, 4);
-  const maxFreqModel = trainGBM(X, yMaxFreq, 120, 0.08, 4);
-  const stabilityModel = trainGBM(X, yStability, 100, 0.05, 3);
+  const omegaLogModel = trainGBM(X, yOmegaLog, 60, 0.12, 4);
+  const debyeTempModel = trainGBM(X, yDebyeTemp, 60, 0.12, 4);
+  const maxFreqModel = trainGBM(X, yMaxFreq, 60, 0.12, 4);
+  const stabilityModel = trainGBM(X, yStability, 50, 0.08, 3);
 
   const omegaLogMAE = computeMAE(omegaLogModel, X, yOmegaLog);
   const meanOmegaLog = yOmegaLog.reduce((s, v) => s + v, 0) / yOmegaLog.length;
@@ -477,7 +477,7 @@ function shouldRetrain(): boolean {
 export function predictPhononProperties(formula: string, pressure: number = 0): PhononSurrogatePrediction {
   totalPredictions++;
 
-  if (shouldRetrain()) {
+  if (shouldRetrain() && surrogateModels !== null) {
     try { trainPhononSurrogate(); } catch {}
   }
 

@@ -3782,10 +3782,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   setTimeout(() => {
-    try { initLambdaRegressor(); } catch {}
+    try { startPoolInit(); } catch {}
+  }, 20000);
+
+  setTimeout(async () => {
+    try { await initLambdaRegressor(); } catch {}
+  }, 600000);
+
+  setTimeout(() => {
     try { initPhononSurrogate(); } catch {}
+  }, 660000);
+
+  setTimeout(() => {
     try { initStructurePredictorML(); } catch {}
-  }, 30000);
+  }, 720000);
 
   app.get("/api/phonon-surrogate/stats", async (_req, res) => {
     try {
@@ -3955,13 +3965,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e) {
       console.error("[CrystalDiffusion] Init failed:", e);
     }
-    await new Promise(r => setTimeout(r, 2000));
+  }, 90000);
+
+  setTimeout(async () => {
     try {
       await initCrystalVAE();
     } catch (e) {
       console.error("[CrystalVAE] Init failed:", e);
     }
-  }, 60000);
+  }, 110000);
+
+  setTimeout(() => {
+    try {
+      console.log("[Benchmark] Running reference compound predictions on startup...");
+      runReferenceBenchmark();
+      console.log("[Benchmark] Reference benchmark complete.");
+    } catch (e: any) {
+      console.error("[Benchmark] Startup benchmark failed:", e.message);
+    }
+  }, 130000);
 
   app.get("/api/crystal-vae/stats", generalLimiter, async (_req, res) => {
     try {
@@ -5389,16 +5411,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     benchmarkCache = { results, computedAt: Date.now() };
     return results;
   }
-
-  setTimeout(() => {
-    try {
-      console.log("[Benchmark] Running reference compound predictions on startup...");
-      runReferenceBenchmark();
-      console.log("[Benchmark] Reference benchmark complete.");
-    } catch (e: any) {
-      console.error("[Benchmark] Startup benchmark failed:", e.message);
-    }
-  }, 90000);
 
   app.get("/api/reference-benchmark", generalLimiter, async (_req, res) => {
     try {

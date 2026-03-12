@@ -336,17 +336,15 @@ export function isStructurePredictorReady(): boolean {
 export function trainStructurePredictorBackground(): void {
   if (models || trainingInProgress) return;
   trainingInProgress = true;
-  setTimeout(() => {
-    try {
-      console.log(`[StructurePredictor] Background training started`);
-      const t0 = Date.now();
-      trainStructurePredictor();
-      console.log(`[StructurePredictor] Background training completed in ${Date.now() - t0}ms`);
-    } catch (e) {
-      console.log(`[StructurePredictor] Background training failed: ${e}`);
-    }
-    trainingInProgress = false;
-  }, 120000);
+  try {
+    console.log(`[StructurePredictor] Background training started`);
+    const t0 = Date.now();
+    trainStructurePredictor();
+    console.log(`[StructurePredictor] Background training completed in ${Date.now() - t0}ms`);
+  } catch (e) {
+    console.log(`[StructurePredictor] Background training failed: ${e}`);
+  }
+  trainingInProgress = false;
 }
 
 export function predictStructure(formula: string): StructurePredictionML {
