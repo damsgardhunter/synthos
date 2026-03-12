@@ -70,12 +70,11 @@ export function computeMiedemaFormationEnergy(formula: string): number {
 
       const fAB = 2 * fractions[elA] * fractions[elB];
 
-      const isTransitionA = (dA.atomicNumber >= 21 && dA.atomicNumber <= 30) ||
-                            (dA.atomicNumber >= 39 && dA.atomicNumber <= 48) ||
-                            (dA.atomicNumber >= 72 && dA.atomicNumber <= 80);
-      const isTransitionB = (dB.atomicNumber >= 21 && dB.atomicNumber <= 30) ||
-                            (dB.atomicNumber >= 39 && dB.atomicNumber <= 48) ||
-                            (dB.atomicNumber >= 72 && dB.atomicNumber <= 80);
+      const isDorFBlock = (z: number) =>
+        (z >= 21 && z <= 30) || (z >= 39 && z <= 48) || (z >= 72 && z <= 80) ||
+        (z >= 57 && z <= 71) || (z >= 89 && z <= 103);
+      const isTransitionA = isDorFBlock(dA.atomicNumber);
+      const isTransitionB = isDorFBlock(dB.atomicNumber);
 
       let Q = Q_P;
       if (isTransitionA && isTransitionB) {
@@ -142,25 +141,36 @@ function computeIonicFormationEnergy(formula: string): number {
   let ionicEnergy = 0;
   let ionicWeight = 0;
 
-  const anionFrac = elements
-    .filter(e => OXIDE_ANIONS.has(e) || CHALCOGENIDE_ANIONS.has(e) || PNICTIDE_ANIONS.has(e))
-    .reduce((s, e) => s + counts[e] / totalAtoms, 0);
-
-  const hasChalcogenide = elements.includes("S") || elements.includes("Se") || elements.includes("Te");
+  const anionElements = elements.filter(
+    e => OXIDE_ANIONS.has(e) || CHALCOGENIDE_ANIONS.has(e) || PNICTIDE_ANIONS.has(e)
+  );
+  const anionFrac = anionElements.reduce((s, e) => s + counts[e] / totalAtoms, 0);
 
   for (const el of elements) {
     if (OXIDE_ANIONS.has(el) || CHALCOGENIDE_ANIONS.has(el) || PNICTIDE_ANIONS.has(el)) continue;
-    const data = ELEMENTAL_DATA[el];
-    if (!data) continue;
+    const cationData = ELEMENTAL_DATA[el];
+    if (!cationData) continue;
 
     const frac = counts[el] / totalAtoms;
-    let pairEnergy = OXIDE_ENERGIES[el] ?? -1.5;
+    const basePairEnergy = OXIDE_ENERGIES[el] ?? -1.5;
+    const cationEN = cationData.paulingElectronegativity ?? 1.5;
 
-    if (hasChalcogenide) {
-      pairEnergy *= 0.65;
+    let weightedPairEnergy = 0;
+    let anionWeightSum = 0;
+
+    for (const anEl of anionElements) {
+      const anionData = ELEMENTAL_DATA[anEl];
+      const anionEN = anionData?.paulingElectronegativity ?? 3.0;
+      const deltaChi = Math.abs(anionEN - cationEN);
+      const ionicityFactor = 0.5 + 0.5 * deltaChi / 2.5;
+      const anionW = counts[anEl] / totalAtoms;
+      weightedPairEnergy += anionW * basePairEnergy * ionicityFactor;
+      anionWeightSum += anionW;
     }
 
-    ionicEnergy += frac * pairEnergy * anionFrac * 2;
+    const effectivePairEnergy = anionWeightSum > 0 ? weightedPairEnergy / anionWeightSum : basePairEnergy;
+
+    ionicEnergy += frac * effectivePairEnergy * anionFrac * 2;
     ionicWeight += frac;
   }
 
@@ -234,8 +244,23 @@ export function estimateFormationEnergy(formula: string): number {
   }
   const ionicE = computeIonicFormationEnergy(formula);
   if (compType === "mixed") {
+    const counts = parseFormulaCounts(formula);
+    const totalAtoms = getTotalAtoms(counts);
+    const elements = Object.keys(counts);
+
+    let ionicAnionFrac = 0;
+    let metallicFrac = 0;
+    for (const el of elements) {
+      const f = counts[el] / totalAtoms;
+      if (OXIDE_ANIONS.has(el) || CHALCOGENIDE_ANIONS.has(el) || PNICTIDE_ANIONS.has(el)) {
+        ionicAnionFrac += f;
+      } else {
+        metallicFrac += f;
+      }
+    }
+    const ionicWeight = Math.max(0.1, Math.min(0.9, ionicAnionFrac / (ionicAnionFrac + metallicFrac + 0.01)));
     const miedemaE = computeMiedemaFormationEnergy(formula);
-    return 0.4 * miedemaE + 0.6 * ionicE;
+    return ionicWeight * ionicE + (1 - ionicWeight) * miedemaE;
   }
   return ionicE;
 }
