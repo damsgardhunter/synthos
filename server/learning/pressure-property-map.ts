@@ -1,5 +1,6 @@
 import { predictPressureCurve, type PressureCurve, type PressurePoint } from "./pressure-aware-surrogate";
 import { computeEnthalpyStability } from "./enthalpy-stability";
+import { normalizeFormula } from "./utils";
 
 export interface PressureResponseProfile {
   formula: string;
@@ -22,6 +23,7 @@ export interface InterpolationResult {
   enthalpy: number;
   enthalpyStable: boolean;
   interpolated: boolean;
+  units: { tc: "K"; bandgap: "eV"; enthalpy: "eV/atom"; pressure: "GPa" };
 }
 
 export interface PressurePropertyMapStats {
@@ -34,6 +36,8 @@ export interface PressurePropertyMapStats {
   recentProfiles: { formula: string; absolutePeakTc: number; stablePeakTc: number; peakPressure: number }[];
 }
 
+const INTERP_UNITS = { tc: "K" as const, bandgap: "eV" as const, enthalpy: "eV/atom" as const, pressure: "GPa" as const };
+
 const profileCache = new Map<string, PressureResponseProfile>();
 const MAX_PROFILES = 500;
 
@@ -44,7 +48,8 @@ function evictIfNeeded(): void {
   }
 }
 
-export function buildPressureResponseProfile(formula: string): PressureResponseProfile {
+export function buildPressureResponseProfile(rawFormula: string): PressureResponseProfile {
+  const formula = normalizeFormula(rawFormula);
   const existing = profileCache.get(formula);
   if (existing && Date.now() - existing.updatedAt < 20 * 60 * 1000) {
     profileCache.delete(formula);
@@ -113,14 +118,14 @@ export function buildPressureResponseProfile(formula: string): PressureResponseP
   return profile;
 }
 
-export function interpolateAtPressure(formula: string, targetPressure: number): InterpolationResult {
-  const profile = buildPressureResponseProfile(formula);
+export function interpolateAtPressure(rawFormula: string, targetPressure: number): InterpolationResult {
+  const profile = buildPressureResponseProfile(rawFormula);
   const tcPts = profile.tcVsPressure;
   const bgPts = profile.bandgapVsPressure;
   const stabPts = profile.stabilityVsPressure;
 
   if (tcPts.length === 0) {
-    return { pressure: targetPressure, tc: 0, bandgap: 0, enthalpy: 0, enthalpyStable: false, interpolated: false };
+    return { pressure: targetPressure, tc: 0, bandgap: 0, enthalpy: 0, enthalpyStable: false, interpolated: false, units: INTERP_UNITS };
   }
 
   const exact = tcPts.find(p => p.pressure === targetPressure);
@@ -134,6 +139,7 @@ export function interpolateAtPressure(formula: string, targetPressure: number): 
       enthalpy: st?.enthalpy ?? 0,
       enthalpyStable: st?.stable ?? false,
       interpolated: false,
+      units: INTERP_UNITS,
     };
   }
 
@@ -174,13 +180,15 @@ export function interpolateAtPressure(formula: string, targetPressure: number): 
     enthalpy: interpEnthalpy,
     enthalpyStable,
     interpolated: true,
+    units: INTERP_UNITS,
   };
 }
 
 export function interpolateRange(
-  formula: string,
+  rawFormula: string,
   pressures: number[]
 ): InterpolationResult[] {
+  const formula = normalizeFormula(rawFormula);
   return pressures.map(p => interpolateAtPressure(formula, p));
 }
 
