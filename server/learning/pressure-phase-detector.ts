@@ -174,10 +174,27 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
   const dTcdP = computeDerivative(curve, "tc");
   for (let i = 0; i < dTcdP.length; i++) {
     const d = dTcdP[i];
-    if (Math.abs(d.derivative) > DTC_DP_THRESHOLD) {
-      const pStart = i > 0 ? curve[i].pressureGpa : curve[0].pressureGpa;
-      const pEnd = curve[Math.min(i + 1, curve.length - 1)].pressureGpa;
+    const pStart = curve[i].pressureGpa;
+    const pEnd = curve[i + 1].pressureGpa;
 
+    if (i < dTcdP.length - 1 && dTcdP[i].derivative > 0 && dTcdP[i + 1].derivative < 0) {
+      const peakP = curve[i + 1].pressureGpa;
+      const peakTc = curve[i + 1].tc;
+      if (peakTc > TC_ONSET_THRESHOLD) {
+        transitions.push({
+          formula,
+          pressureStart: curve[i].pressureGpa,
+          pressureEnd: curve[i + 2] ? curve[i + 2].pressureGpa : pEnd,
+          type: "tc_maximum",
+          confidence: Math.min(1.0, peakTc / 50),
+          magnitude: peakTc,
+          details: `Tc dome peak: ${peakTc.toFixed(1)} K at ${peakP.toFixed(0)} GPa (dTc/dP sign change: ${dTcdP[i].derivative.toFixed(3)} -> ${dTcdP[i + 1].derivative.toFixed(3)})`,
+          detectedAt: now,
+        });
+      }
+    }
+
+    if (Math.abs(d.derivative) > DTC_DP_THRESHOLD) {
       const isLargeDrop = d.derivative < -DTC_DP_THRESHOLD;
       const isLargeRise = d.derivative > DTC_DP_THRESHOLD;
 
@@ -313,23 +330,37 @@ export function detectPhaseTransitions(formula: string): PhaseTransition[] {
     }
   }
 
-  for (let i = 1; i < curve.length; i++) {
-    const prev = curve[i - 1];
-    const curr = curve[i];
-    const dP = curr.pressureGpa - prev.pressureGpa;
-    if (dP <= 0) continue;
-    const dHdP = (curr.enthalpy - prev.enthalpy) / dP;
-    if (Math.abs(dHdP) > 0.05) {
+  const dHdP = computeDerivative(curve, "enthalpy");
+  for (let i = 0; i < dHdP.length; i++) {
+    const d = dHdP[i];
+    if (Math.abs(d.derivative) > 0.05) {
       transitions.push({
         formula,
-        pressureStart: prev.pressureGpa,
-        pressureEnd: curr.pressureGpa,
+        pressureStart: curve[i].pressureGpa,
+        pressureEnd: curve[i + 1].pressureGpa,
         type: "enthalpy_discontinuity",
-        confidence: Math.min(1.0, Math.abs(dHdP) / 0.2),
-        magnitude: Math.abs(curr.enthalpy - prev.enthalpy),
-        details: `Enthalpy discontinuity: dH/dP = ${dHdP.toFixed(4)} eV/GPa at ${curr.pressureGpa} GPa (H: ${prev.enthalpy.toFixed(3)} -> ${curr.enthalpy.toFixed(3)} eV)`,
+        confidence: Math.min(1.0, Math.abs(d.derivative) / 0.2),
+        magnitude: Math.abs(d.derivative) * (curve[i + 1].pressureGpa - curve[i].pressureGpa),
+        details: `Enthalpy discontinuity: dH/dP = ${d.derivative.toFixed(4)} eV/GPa at ${d.pressure.toFixed(0)} GPa (H: ${curve[i].enthalpy.toFixed(3)} -> ${curve[i + 1].enthalpy.toFixed(3)} eV)`,
         detectedAt: now,
       });
+    }
+
+    if (i > 0) {
+      const d2HdP2 = Math.abs(dHdP[i].derivative - dHdP[i - 1].derivative);
+      const avgDP = (curve[i + 1].pressureGpa - curve[i - 1].pressureGpa) / 2;
+      if (avgDP > 0 && d2HdP2 / avgDP > 0.002) {
+        transitions.push({
+          formula,
+          pressureStart: curve[i - 1].pressureGpa,
+          pressureEnd: curve[i + 1].pressureGpa,
+          type: "structural",
+          confidence: Math.min(1.0, (d2HdP2 / avgDP) / 0.01),
+          magnitude: d2HdP2,
+          details: `Structural transition (d²H/dP² spike): ${(d2HdP2 / avgDP).toFixed(4)} eV/GPa² at ${d.pressure.toFixed(0)} GPa`,
+          detectedAt: now,
+        });
+      }
     }
   }
 
