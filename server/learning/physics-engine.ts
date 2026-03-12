@@ -893,7 +893,7 @@ function estimateDOSatFermi(elements: string[], counts: Record<string, number>):
   return Math.max(0.1, Math.min(10, dos));
 }
 
-function estimateMetallicity(elements: string[], counts: Record<string, number>, mpData?: MPSummaryData | null): number {
+function estimateMetallicity(elements: string[], counts: Record<string, number>, mpData?: MPSummaryData | null, pressureGpa: number = 0): number {
   if (mpData) {
     if (mpData.isMetallic) return Math.max(0.7, 1.0 - mpData.bandGap * 0.1);
     if (mpData.bandGap > 3.0) return 0.05;
@@ -1003,6 +1003,10 @@ function estimateMetallicity(elements: string[], counts: Record<string, number>,
     if (isPureSuperhydride) {
       const metalPresence = metalAtomCount / totalAtoms;
       metallicity = Math.max(metallicity, 0.65 + metalPresence * 0.2);
+      if (pressureGpa >= 400) {
+        const hMetallization = Math.min(0.95, 0.80 + (pressureGpa - 400) * 0.0003);
+        metallicity = Math.max(metallicity, hMetallization);
+      }
     } else if (hasH && hRatio >= 2 && !isOrganic) {
       if (bFrac < 0.3 && metalFrac >= 0.15) {
         const metalPresence = metalAtomCount / totalAtoms;
@@ -1714,7 +1718,9 @@ export function computeElectronPhononCoupling(
     const bwNorm = bwEst / 6.0;
     lambda = lambda * (N_EF / dosRef) / Math.max(bwNorm, 0.3);
 
-    if (maxStonerProduct > 0.9) {
+    if (maxStonerProduct >= 1.0) {
+      lambda *= 0.05;
+    } else if (maxStonerProduct > 0.9) {
       const pairBreakingPenalty = Math.max(0.3, 1.0 - (maxStonerProduct - 0.9) * 3.0);
       lambda *= pairBreakingPenalty;
     }
