@@ -56,6 +56,9 @@ const MAX_LLM_CALLS_PER_CYCLE = 3;
 const ROLLBACK_THRESHOLD = 0.10;
 const PLATEAU_WINDOW = 5;
 const PLATEAU_THRESHOLD = 0.01;
+const CONSECUTIVE_NO_IMPROVEMENT_EXPLORE_THRESHOLD = 5;
+const LOW_DATASET_THRESHOLD = 200;
+const HIGH_UNCERTAINTY_FRACTION_THRESHOLD = 0.25;
 
 let totalImprovementCycles = 0;
 let totalExperimentsRun = 0;
@@ -66,6 +69,7 @@ let metricTrends: MetricTrend[] = [];
 let cooldowns: CooldownEntry[] = [];
 let plateauModels: string[] = [];
 let consecutiveNoImprovement: Map<string, number> = new Map();
+let pendingImprovementTask: Promise<{ ran: boolean; experiment?: ExperimentRecord; improvement?: Record<string, number> }> | null = null;
 
 function isOnCooldown(model: string, currentCycle: number): boolean {
   const entry = cooldowns.find(c => c.model === model);
@@ -182,22 +186,81 @@ function metricsWorsened(before: Record<string, number>, after: Record<string, n
   return totalWeight > 0 && worseWeight > totalWeight / 2;
 }
 
-export async function runModelImprovementCycle(
+function needsExplorationReset(model: string): boolean {
+  return (consecutiveNoImprovement.get(model) ?? 0) >= CONSECUTIVE_NO_IMPROVEMENT_EXPLORE_THRESHOLD;
+}
+
+function filterForExploration(proposals: ExperimentProposal[]): ExperimentProposal[] {
+  const explorationTypes: Set<string> = new Set(["add_features", "request_data", "expand_dataset", "rebalance_training"]);
+  const stuckModels = new Set<string>();
+  for (const [model, count] of consecutiveNoImprovement) {
+    if (count >= CONSECUTIVE_NO_IMPROVEMENT_EXPLORE_THRESHOLD) stuckModels.add(model);
+  }
+  if (stuckModels.size === 0) return proposals;
+
+  const explorationProposals = proposals.filter(
+    p => stuckModels.has(p.model_target) ? explorationTypes.has(p.experiment_type) : true
+  );
+  if (explorationProposals.length > 0) return explorationProposals;
+  return proposals;
+}
+
+function shouldRunGreenExpansion(diagnostics: ComprehensiveModelDiagnostics): string | null {
+  const variance = getVarianceSummary();
+  if (variance.highUncertaintyFraction < HIGH_UNCERTAINTY_FRACTION_THRESHOLD) return null;
+
+  const smallModels: { model: string; size: number }[] = [];
+  if (diagnostics.xgboost.datasetSize < LOW_DATASET_THRESHOLD) smallModels.push({ model: "xgboost", size: diagnostics.xgboost.datasetSize });
+  if (diagnostics.gnn.datasetSize < LOW_DATASET_THRESHOLD) smallModels.push({ model: "gnn", size: diagnostics.gnn.datasetSize });
+  if (diagnostics.lambda.datasetSize < LOW_DATASET_THRESHOLD) smallModels.push({ model: "lambda-regressor", size: diagnostics.lambda.datasetSize });
+
+  if (smallModels.length === 0) return null;
+  smallModels.sort((a, b) => a.size - b.size);
+  return smallModels[0].model;
+}
+
+async function runImprovementCycleInner(
   emit: EventEmitter,
   currentCycle: number
 ): Promise<{ ran: boolean; experiment?: ExperimentRecord; improvement?: Record<string, number> }> {
-  if (currentCycle % CYCLE_FREQUENCY !== 0) {
-    return { ran: false };
-  }
-
   totalImprovementCycles++;
   lastImprovementCycleAt = Date.now();
 
   const diagnosticsBefore = getComprehensiveModelDiagnostics();
   const health = getModelHealthSummary();
+  const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
 
   const allGreen = health.every(h => h.status === "green");
   if (allGreen) {
+    const expansionTarget = shouldRunGreenExpansion(diagnosticsBefore);
+    if (expansionTarget) {
+      const variance = getVarianceSummary();
+      emit("log", {
+        phase: "engine",
+        event: "Model improvement: green expansion",
+        detail: `All models green but high uncertainty (${(variance.highUncertaintyFraction * 100).toFixed(1)}%) — requesting data for ${expansionTarget}`,
+        dataSource: "Model Improvement Loop",
+      });
+      const expansionProposal: ExperimentProposal = {
+        model_target: expansionTarget,
+        experiment_type: "expand_dataset",
+        changes: { reason: "high_uncertainty_frontier", target_dataset_growth: 50 },
+        reasoning: `Models healthy but ${(variance.highUncertaintyFraction * 100).toFixed(0)}% of predictions have high uncertainty — expand training data`,
+        expected_improvement: "reduced uncertainty in frontier regions",
+        priority: 3,
+      };
+      try {
+        const record = await executeExperiment(expansionProposal);
+        totalExperimentsRun++;
+        for (const [model, metrics] of Object.entries(beforeKeyMetrics)) {
+          for (const [metric, value] of Object.entries(metrics)) {
+            recordMetricTrend(model, metric, currentCycle, value);
+          }
+        }
+        return { ran: true, experiment: record, improvement: record.improvement };
+      } catch (_e) {}
+    }
+
     emit("log", {
       phase: "engine",
       event: "Model improvement skipped",
@@ -205,8 +268,7 @@ export async function runModelImprovementCycle(
       dataSource: "Model Improvement Loop",
     });
 
-    const keyMetrics = snapshotKeyMetrics(diagnosticsBefore);
-    for (const [model, metrics] of Object.entries(keyMetrics)) {
+    for (const [model, metrics] of Object.entries(beforeKeyMetrics)) {
       for (const [metric, value] of Object.entries(metrics)) {
         recordMetricTrend(model, metric, currentCycle, value);
       }
@@ -259,6 +321,8 @@ export async function runModelImprovementCycle(
     return { ran: true };
   }
 
+  proposals = filterForExploration(proposals);
+
   const eligibleProposals = proposals
     .filter(p => !isOnCooldown(p.model_target, currentCycle))
     .sort((a, b) => a.priority - b.priority);
@@ -285,10 +349,18 @@ export async function runModelImprovementCycle(
     });
   }
 
+  if (needsExplorationReset(topExperiment.model_target)) {
+    emit("log", {
+      phase: "engine",
+      event: "Model improvement: exploration reset",
+      detail: `${topExperiment.model_target} has ${consecutiveNoImprovement.get(topExperiment.model_target)} consecutive no-improvement cycles — forcing exploration`,
+      dataSource: "Model Improvement Loop",
+    });
+  }
+
   const preExperimentOverrides = getHyperparamOverrides(topExperiment.model_target);
   const overridesSnapshot = preExperimentOverrides ? JSON.parse(JSON.stringify(preExperimentOverrides)) : null;
 
-  const beforeKeyMetrics = snapshotKeyMetrics(diagnosticsBefore);
   const beforeModelMetrics = beforeKeyMetrics[topExperiment.model_target] ?? {};
 
   emit("log", {
@@ -314,9 +386,7 @@ export async function runModelImprovementCycle(
 
   setCooldown(topExperiment.model_target, currentCycle);
 
-  const diagnosticsAfter = getComprehensiveModelDiagnostics();
-  const afterKeyMetrics = snapshotKeyMetrics(diagnosticsAfter);
-  const afterModelMetrics = afterKeyMetrics[topExperiment.model_target] ?? {};
+  const afterModelMetrics = record.after_metrics;
 
   if (metricsWorsened(beforeModelMetrics, afterModelMetrics)) {
     totalRollbacksPerformed++;
@@ -370,7 +440,11 @@ export async function runModelImprovementCycle(
     }
   }
 
-  for (const [model, metrics] of Object.entries(afterKeyMetrics)) {
+  const updatedKeyMetrics = { ...beforeKeyMetrics };
+  if (record.status === "completed" && Object.keys(afterModelMetrics).length > 0) {
+    updatedKeyMetrics[topExperiment.model_target] = afterModelMetrics;
+  }
+  for (const [model, metrics] of Object.entries(updatedKeyMetrics)) {
     for (const [metric, value] of Object.entries(metrics)) {
       recordMetricTrend(model, metric, currentCycle, value);
     }
@@ -388,6 +462,33 @@ export async function runModelImprovementCycle(
     experiment: record,
     improvement: record.improvement,
   };
+}
+
+export async function runModelImprovementCycle(
+  emit: EventEmitter,
+  currentCycle: number
+): Promise<{ ran: boolean; experiment?: ExperimentRecord; improvement?: Record<string, number> }> {
+  if (currentCycle % CYCLE_FREQUENCY !== 0) {
+    return { ran: false };
+  }
+
+  if (pendingImprovementTask != null) {
+    emit("log", {
+      phase: "engine",
+      event: "Model improvement: previous cycle still running",
+      detail: "Skipping to avoid blocking main loop",
+      dataSource: "Model Improvement Loop",
+    });
+    return { ran: false };
+  }
+
+  pendingImprovementTask = runImprovementCycleInner(emit, currentCycle);
+  try {
+    const result = await pendingImprovementTask;
+    return result;
+  } finally {
+    pendingImprovementTask = null;
+  }
 }
 
 export function getModelImprovementStats(): ImprovementStats {
