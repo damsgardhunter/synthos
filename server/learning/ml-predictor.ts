@@ -1356,7 +1356,7 @@ export async function runMLPrediction(
           xgboostScore: c.xgb.score,
           neuralNetScore: null,
           ensembleScore,
-          roomTempViable: finalTc >= 293 && fbPressure < 50 && !isCorrelatedFB,
+          roomTempViable: finalTc >= 293 && fbPressure < 50 && !isCorrelatedFB, // 293K = ROOM_TEMP_K
           status: "theoretical",
           notes: `[XGBoost-only fallback: NN skipped]${isCorrelatedFB ? ' [correlated: Allen-Dynes unreliable]' : ''} ${c.xgb.reasoning[0] || ""}`,
           electronPhononCoupling: c.features.electronPhononLambda,

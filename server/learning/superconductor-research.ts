@@ -16,6 +16,8 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
 });
 
+export const ROOM_TEMP_K = 293;
+
 const VERIFICATION_CHECKLIST = [
   "zero_resistance_confirmed",
   "room_temperature_confirmed",
@@ -34,7 +36,7 @@ function determineStatus(candidate: any): string {
   const hasMeissner = candidate.meissnerEffect === true;
   const ensembleScore = candidate.ensembleScore ?? 0;
 
-  const isRoomTemp = tc >= 293;
+  const isRoomTemp = tc >= ROOM_TEMP_K;
   const isLowPressure = pressure <= 50;
   const isAmbientPressure = pressure <= 1;
 
@@ -77,8 +79,8 @@ function buildVerificationNotes(candidate: any): string {
     failures.push("MISSING: Zero electrical resistance not confirmed - fundamental SC requirement");
   }
 
-  if (tc >= 293) {
-    checks.push(`Room temperature: Tc=${tc}K >= 293K (20C)`);
+  if (tc >= ROOM_TEMP_K) {
+    checks.push(`Room temperature: Tc=${tc}K >= ${ROOM_TEMP_K}K (20C)`);
   } else if (tc > 0) {
     failures.push(`NOT room temperature: Tc=${tc}K < 293K required`);
   } else {
@@ -173,14 +175,17 @@ export async function runSuperconductorResearch(
     const pressureML = candidate.pressureGpa ?? 0;
     const metallicityML = mlFeatures.metallicity ?? 0.5;
 
-    if (mlFeatures.bandGap !== null && mlFeatures.bandGap > 0.5) {
-      emit("log", { phase: "phase-7", event: "SC candidate rejected (insulator)", detail: `${formula}: bandGap=${mlFeatures.bandGap.toFixed(2)} eV > 0.5 eV — superconductors must be metallic`, dataSource: "SC Research" });
+    const hasMottDopingPotential = (mlFeatures.mottProximityScore ?? 0) > 0.4;
+    const bandGapThreshold = hasMottDopingPotential ? 1.5 : 0.5;
+    if (mlFeatures.bandGap !== null && mlFeatures.bandGap > bandGapThreshold) {
+      emit("log", { phase: "phase-7", event: "SC candidate rejected (insulator)", detail: `${formula}: bandGap=${mlFeatures.bandGap.toFixed(2)} eV > ${bandGapThreshold} eV${hasMottDopingPotential ? " (Mott parent, relaxed threshold)" : ""} — superconductors must be metallic`, dataSource: "SC Research" });
       duplicatesSkipped++;
       continue;
     }
 
-    if (mlFeatures.metallicity < 0.2) {
-      emit("log", { phase: "phase-7", event: "SC candidate rejected (non-metallic)", detail: `${formula}: metallicity=${mlFeatures.metallicity.toFixed(2)} < 0.2 — insufficient metallicity for superconductivity`, dataSource: "SC Research" });
+    const metallicityFloor = hasMottDopingPotential ? 0.08 : 0.2;
+    if (mlFeatures.metallicity < metallicityFloor) {
+      emit("log", { phase: "phase-7", event: "SC candidate rejected (non-metallic)", detail: `${formula}: metallicity=${mlFeatures.metallicity.toFixed(2)} < ${metallicityFloor}${hasMottDopingPotential ? " (Mott parent, relaxed)" : ""} — insufficient metallicity for superconductivity`, dataSource: "SC Research" });
       duplicatesSkipped++;
       continue;
     }
@@ -258,7 +263,7 @@ export async function runSuperconductorResearch(
     const status = determineStatus(candidate);
     const verificationNotes = buildVerificationNotes(candidate);
 
-    const isActuallyRoomTemp = (candidate.predictedTc ?? 0) >= 293 &&
+    const isActuallyRoomTemp = (candidate.predictedTc ?? 0) >= ROOM_TEMP_K &&
       candidate.zeroResistance === true &&
       candidate.meissnerEffect === true;
 
@@ -324,7 +329,7 @@ export async function runSuperconductorResearch(
 
   if (generated > 0) {
     const roomTempCount = mlResult.candidates.filter(c =>
-      (c.predictedTc ?? 0) >= 293 && c.zeroResistance === true && c.meissnerEffect === true
+      (c.predictedTc ?? 0) >= ROOM_TEMP_K && c.zeroResistance === true && c.meissnerEffect === true
     ).length;
     emit("log", {
       phase: "phase-7",
@@ -502,7 +507,7 @@ Return JSON with 'candidates' array:
       const novelXGBScore = gbResult.score;
       const novelEnsembleScore = Math.min(0.95, novelXGBScore * 0.4 + novelNNScore * 0.6);
 
-      const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
+      const isActuallyRoomTemp = (cappedTc ?? 0) >= ROOM_TEMP_K &&
         c.zeroResistance === true &&
         c.meissnerEffect === true &&
         effectivePressure <= 50;
@@ -799,7 +804,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
 
       const id = `sc-invdes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      const isActuallyRoomTemp = (cappedTc ?? 0) >= 293 &&
+      const isActuallyRoomTemp = (cappedTc ?? 0) >= ROOM_TEMP_K &&
         c.zeroResistance === true &&
         c.meissnerEffect === true &&
         invEnforcedPressure <= 50;

@@ -4,7 +4,7 @@ import { storage } from "../storage";
 import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns, classifyMaterialApplications } from "./nlp-engine";
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
-import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount } from "./superconductor-research";
+import { runSuperconductorResearch, generateInverseDesignCandidates, getInverseDesignCount, ROOM_TEMP_K } from "./superconductor-research";
 import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSerializableCampaignState, getInverseDesignStats as getInverseOptimizerStats, loadCampaign, restoreCampaignsFromDB, createCampaign } from "../inverse/inverse-optimizer";
 import { getNextGenPipelineStats as getNextGenPipelineStatsForEngine } from "../inverse/next-gen-pipeline";
 import { getAllLabStats as getSelfImprovingLabStatsForEngine } from "../inverse/self-improving-lab";
@@ -8141,7 +8141,7 @@ async function recalculatePhysics() {
             newTc = Math.round(applyAmbientTcCap(newTc, featureLambda, recalcPressure, metalScore, c.formula));
           }
 
-          const isRoomTemp = (newTc ?? 0) >= 293 &&
+          const isRoomTemp = (newTc ?? 0) >= ROOM_TEMP_K &&
             c.zeroResistance === true &&
             c.meissnerEffect === true &&
             recalcPressure <= 50;

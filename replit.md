@@ -738,6 +738,10 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - `applyAmbientTcCap` is now called exactly once on `candidate.predictedTc`, with the result also bounded by `effectiveTcCapML` (the family ceiling). Previously the cap was applied to `candidate.predictedTc` first, then the already-capped value could be indirectly double-damped in the update logic. Now `effectiveTcCapML` is computed first and used as an upper bound.
 - **Confident Tc Downgrade Path (superconductor-research.ts)**:
   - When a retrained model predicts significantly lower Tc but with >15% higher ensemble score (`scoreMuchHigher`), the existing Tc is now corrected downward (floored at 50% of old Tc). This prevents stale high-Tc predictions from persisting in the database when better failure data invalidates them. Log message distinguishes "Tc corrected" from "Tc upgraded".
+- **Mott-Parent Bandgap Relaxation (superconductor-research.ts)**:
+  - Candidates with `mottProximityScore > 0.4` use relaxed thresholds: bandgap up to 1.5 eV (vs 0.5 eV default) and metallicity floor 0.08 (vs 0.2 default). This allows Mott-insulator parent phases (e.g., cuprate undoped parents) to pass through the pipeline, since they can become superconductors upon doping.
+- **ROOM_TEMP_K Constant (superconductor-research.ts, engine.ts)**:
+  - All hardcoded `>= 293` room-temperature checks replaced with exported `ROOM_TEMP_K = 293` constant. Ensures consistency across `superconductor-research.ts` and `engine.ts`. The `surrogate-fitness.ts` normalization by 300 is a fitness scaling factor, not a room-temp definition — no change needed there.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).
