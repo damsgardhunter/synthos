@@ -43,6 +43,46 @@ interface MultiTaskWeights {
 const HIDDEN = 28;
 const HEADS = 6;
 
+const propertyNormStats = {
+  tc: { mean: 50, std: 60 },
+  bandGap: { mean: 1.5, std: 1.5 },
+  dosAtFermi: { mean: 5, std: 5 },
+  bulkModulus: { mean: 150, std: 100 },
+  shearModulus: { mean: 60, std: 40 },
+  debyeTemp: { mean: 350, std: 200 },
+  magneticMoment: { mean: 1.0, std: 1.5 },
+  omegaLog: { mean: 200, std: 150 },
+  n: 0,
+};
+
+function updatePropertyNormStats(pred: {
+  predictedTc: number; bandGap: number; dosAtFermi: number;
+  bulkModulus: number; shearModulus: number; debyeTemp: number;
+  magneticMoment: number; omegaLog: number;
+}): void {
+  const alpha = propertyNormStats.n < 50 ? 0.1 : 0.02;
+  propertyNormStats.n++;
+
+  for (const [key, val] of [
+    ["tc", pred.predictedTc], ["bandGap", pred.bandGap], ["dosAtFermi", pred.dosAtFermi],
+    ["bulkModulus", pred.bulkModulus], ["shearModulus", pred.shearModulus],
+    ["debyeTemp", pred.debyeTemp], ["magneticMoment", pred.magneticMoment],
+    ["omegaLog", pred.omegaLog],
+  ] as [keyof typeof propertyNormStats, number][]) {
+    const stat = propertyNormStats[key] as { mean: number; std: number };
+    if (!stat || typeof val !== "number" || !Number.isFinite(val)) continue;
+    const diff = val - stat.mean;
+    stat.mean += alpha * diff;
+    stat.std = Math.max(1e-6, Math.sqrt((1 - alpha) * stat.std * stat.std + alpha * diff * diff));
+  }
+}
+
+function zNorm(value: number, key: keyof typeof propertyNormStats): number {
+  const stat = propertyNormStats[key] as { mean: number; std: number };
+  if (!stat || stat.std < 1e-6) return 0;
+  return Math.max(-3, Math.min(3, (value - stat.mean) / stat.std));
+}
+
 function initMatrix(rows: number, cols: number, scale?: number): number[][] {
   const heScale = scale ?? Math.sqrt(2.0 / cols);
   const m: number[][] = [];
@@ -210,7 +250,7 @@ export function multiTaskPredict(formula: string): MultiTaskPrediction {
     ? phonon.debyeTemperature
     : Math.max(100, Math.abs(phononOut[0] ?? 300) * 200 + 300);
 
-  const magneticMoment = computeMagneticMoment(formula, magneticOut);
+  const magneticMoment = computeMagneticMoment(formula, magneticOut, correlationStrength);
 
   const omegaLog = coupling
     ? coupling.omegaLog
@@ -228,24 +268,41 @@ export function multiTaskPredict(formula: string): MultiTaskPrediction {
     ? features.correlationStrength ?? sigmoid(topoOut[1] ?? 0) * 0.5
     : sigmoid(topoOut[1] ?? 0) * 0.5;
 
-  const dimensionality = features
-    ? features.dimensionality ?? 3
-    : 2 + sigmoid(topoOut[2] ?? 0);
+  let dimensionality: number;
+  if (features && features.dimensionality != null) {
+    dimensionality = features.dimensionality;
+  } else {
+    const dimLogits = [
+      topoOut[2] ?? -1.0,
+      (topoOut[2] ?? 0) * 0.5 + (topoOut[3] ?? 0) * 0.3,
+      (topoOut[2] ?? 0) * -0.3 + 1.0,
+    ];
+    const maxLogit = Math.max(...dimLogits);
+    const exps = dimLogits.map(l => Math.exp(l - maxLogit));
+    const sumExps = exps.reduce((a, b) => a + b, 0);
+    const probs = exps.map(e => e / sumExps);
+    dimensionality = 1 * probs[0] + 2 * probs[1] + 3 * probs[2];
+  }
 
   const topologicalIndex = sigmoid(topoOut[3] ?? 0) * 0.3;
 
+  updatePropertyNormStats({
+    predictedTc: basePred.predictedTc, bandGap, dosAtFermi,
+    bulkModulus, shearModulus, debyeTemp, magneticMoment, omegaLog,
+  });
+
   const propertyVector = [
     basePred.formationEnergy,
-    basePred.predictedTc / 100,
+    zNorm(basePred.predictedTc, "tc"),
     basePred.lambda,
-    bandGap / 5,
-    dosAtFermi / 20,
+    zNorm(bandGap, "bandGap"),
+    zNorm(dosAtFermi, "dosAtFermi"),
     metallicity,
-    bulkModulus / 500,
-    shearModulus / 200,
-    debyeTemp / 2000,
-    magneticMoment / 5,
-    omegaLog / 500,
+    zNorm(bulkModulus, "bulkModulus"),
+    zNorm(shearModulus, "shearModulus"),
+    zNorm(debyeTemp, "debyeTemp"),
+    zNorm(magneticMoment, "magneticMoment"),
+    zNorm(omegaLog, "omegaLog"),
     muStar,
     nestingStrength,
     correlationStrength,
@@ -296,7 +353,7 @@ function computeAvgBulkModulus(formula: string): number {
   return totalCount > 0 ? totalBulk / totalCount : 0;
 }
 
-function computeMagneticMoment(formula: string, magneticOut: number[]): number {
+function computeMagneticMoment(formula: string, magneticOut: number[], corrStrength?: number): number {
   const regex = /([A-Z][a-z]?)(\d*)/g;
   let match;
   let hasMagnetic = false;
@@ -309,7 +366,12 @@ function computeMagneticMoment(formula: string, magneticOut: number[]): number {
   }
 
   if (hasMagnetic) {
-    return Math.max(0, Math.abs(magneticOut[0] ?? 0) * 3 + 1.5);
+    let baseMoment = Math.max(0, Math.abs(magneticOut[0] ?? 0) * 3 + 1.5);
+    if (corrStrength != null && corrStrength < 0.3) {
+      const delocalPenalty = corrStrength / 0.3;
+      baseMoment *= delocalPenalty;
+    }
+    return baseMoment;
   }
   return Math.max(0, sigmoid(magneticOut[0] ?? 0) * 0.5);
 }
