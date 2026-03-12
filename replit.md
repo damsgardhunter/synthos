@@ -563,6 +563,13 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - rl-agent.ts: `hydrogenDensity[0]` prior raised from 0.0 to 0.05 in `initializePriors`, preventing the agent from completely ignoring conventional ambient-pressure intermetallics in favor of high-pressure hydrides.
   - rl-agent.ts: Tempo-adaptive epsilon decay — `setEngineTempo(tempo)` method adjusts `epsilonDecay`: excited→0.995 (fast exploitation), contemplating→0.9999 (slow decay, sustained exploration), exploring→baseline 0.9995. Called from engine.ts `updateTempo()` on every tempo transition.
   - rl-agent.ts: `lastRetrainDatasetSize` added to `RLState` (optional). `stateToFeatures` now emits 9 features (was 8) with `datasetStaleness = min(1, size/2000)`. When staleness < 0.3 (model trained on small/stale data), epsilon receives a +0.02 boost per update to encourage exploration until the model has more data to exploit. Wired in engine.ts from `getSchedulerStats().state.lastRetrainDatasetSize`.
+- **Numerical Robustness Fixes (rl-agent.ts + ood-detector.ts)**:
+  - rl-agent.ts: `softmax` hardened — empty array guard, degenerate-sum fallback to uniform distribution, compensated renormalization pass corrects cumulative floating-point drift when `|sum - 1.0| > 1e-10`.
+  - rl-agent.ts: `sampleWeightedElement` hardened — empty/single element early returns, `totalWeight <= 0` or non-finite guard falls back to uniform random selection instead of always returning the last element.
+  - ood-detector.ts: `extractOODFeatureVector` now guards each raw feature index against array bounds (`i < raw.length`) before access, and applies `Number.isFinite` + null check per element. Always returns exactly `FEATURE_SUBSET_SIZE` (30) elements.
+  - ood-detector.ts: `computeMahalanobis` uses `Math.min(sub.length, trainingMean.length, trainingInvVar.length)` for loop bound, guards each sub[i] and trainingInvVar[i] with `Number.isFinite`, and returns 0 if dist2 is non-finite.
+  - ood-detector.ts: `computeGMMLogLikelihood` uses `Math.min(sub.length, comp.mean.length, comp.precision.length)` for loop bound, guards sub[i] and precision[i] with `Number.isFinite`, and clamps degenerate mahal to 0.
+  - ood-detector.ts: `fitGMM` precision computation uses `Number.isFinite(rawV) && rawV > 1e-6` instead of bare `Math.max`, preventing NaN propagation from degenerate responsibility weights.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

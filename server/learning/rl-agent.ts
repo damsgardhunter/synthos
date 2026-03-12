@@ -377,10 +377,26 @@ function computeElectronCountStabilityScore(context: PhysicsAwareRewardContext):
 }
 
 function softmax(logits: number[], temperature: number = 1.0): number[] {
+  if (logits.length === 0) return [];
   const maxLogit = Math.max(...logits);
   const exps = logits.map(l => Math.exp((l - maxLogit) / temperature));
-  const sum = exps.reduce((a, b) => a + b, 0);
-  return exps.map(e => e / sum);
+  let sum = 0;
+  for (let i = 0; i < exps.length; i++) sum += exps[i];
+  if (sum <= 0 || !Number.isFinite(sum)) {
+    const uniform = 1 / logits.length;
+    return new Array(logits.length).fill(uniform);
+  }
+  const result = new Array(exps.length);
+  let compensatedSum = 0;
+  for (let i = 0; i < exps.length; i++) {
+    result[i] = exps[i] / sum;
+    compensatedSum += result[i];
+  }
+  if (Math.abs(compensatedSum - 1.0) > 1e-10) {
+    const correction = 1.0 / compensatedSum;
+    for (let i = 0; i < result.length; i++) result[i] *= correction;
+  }
+  return result;
 }
 
 function sampleFromDistribution(probs: number[]): number {
@@ -1195,7 +1211,15 @@ export class RLChemicalSpaceAgent {
     weights: Map<string, number>,
     elements: readonly string[]
   ): string {
-    const totalWeight = Array.from(weights.values()).reduce((a, b) => a + b, 0);
+    if (elements.length === 0) return "Fe";
+    if (elements.length === 1) return elements[0];
+    let totalWeight = 0;
+    for (const el of elements) {
+      totalWeight += weights.get(el) ?? 1.0;
+    }
+    if (totalWeight <= 0 || !Number.isFinite(totalWeight)) {
+      return elements[Math.floor(Math.random() * elements.length)];
+    }
     let r = Math.random() * totalWeight;
     for (const el of elements) {
       const w = weights.get(el) ?? 1.0;

@@ -104,41 +104,41 @@ function featureSubset(fullFeatures: number[]): number[] {
 function extractOODFeatureVector(formula: string): number[] {
   const features = extractFeatures(formula);
   const raw = [
-    features.electronPhononLambda ?? 0,
-    features.metallicity ?? 0,
-    features.logPhononFreq ?? 0,
-    features.debyeTemperature ?? 0,
-    features.correlationStrength ?? 0,
-    features.valenceElectronConcentration ?? 0,
-    features.avgElectronegativity ?? 0,
-    features.enSpread ?? 0,
-    features.hydrogenRatio ?? 0,
-    features.avgAtomicRadius ?? 0,
-    features.avgBulkModulus ?? 0,
-    features.numElements ?? 0,
-    features.cooperPairStrength ?? 0,
-    features.dimensionalityScore ?? 0,
-    features.meissnerPotential ?? 0,
-    features.dosAtEF ?? 0,
-    features.orbitalDFraction ?? 0,
-    features.nestingScore ?? 0,
-    features.vanHoveProximity ?? 0,
-    features.bandFlatness ?? 0,
-    features.softModeScore ?? 0,
-    features.connectivityIndex ?? 0,
-    features.phononSpectralCentroid ?? 0,
-    features.phononSpectralWidth ?? 0,
-    features.bondStiffnessVariance ?? 0,
-    features.chargeTransferMagnitude ?? 0,
-    features.pettiforNumber ?? 0,
-    features.maxAtomicMass ?? 0,
-    features.avgSommerfeldGamma ?? 0,
-    features.electronDensityEstimate ?? 0,
+    features.electronPhononLambda,
+    features.metallicity,
+    features.logPhononFreq,
+    features.debyeTemperature,
+    features.correlationStrength,
+    features.valenceElectronConcentration,
+    features.avgElectronegativity,
+    features.enSpread,
+    features.hydrogenRatio,
+    features.avgAtomicRadius,
+    features.avgBulkModulus,
+    features.numElements,
+    features.cooperPairStrength,
+    features.dimensionalityScore,
+    features.meissnerPotential,
+    features.dosAtEF,
+    features.orbitalDFraction,
+    features.nestingScore,
+    features.vanHoveProximity,
+    features.bandFlatness,
+    features.softModeScore,
+    features.connectivityIndex,
+    features.phononSpectralCentroid,
+    features.phononSpectralWidth,
+    features.bondStiffnessVariance,
+    features.chargeTransferMagnitude,
+    features.pettiforNumber,
+    features.maxAtomicMass,
+    features.avgSommerfeldGamma,
+    features.electronDensityEstimate,
   ];
   const result = new Array(FEATURE_SUBSET_SIZE).fill(0);
   for (let i = 0; i < FEATURE_SUBSET_SIZE; i++) {
-    const v = raw[i];
-    result[i] = (v !== undefined && Number.isFinite(v)) ? v : 0;
+    const v = i < raw.length ? raw[i] : undefined;
+    result[i] = (v !== undefined && v !== null && Number.isFinite(v)) ? v : 0;
   }
   return result;
 }
@@ -147,11 +147,14 @@ function computeMahalanobis(x: number[]): number {
   if (trainingMean.length === 0) return 0;
   const sub = featureSubset(x);
   let dist2 = 0;
-  for (let i = 0; i < sub.length && i < trainingMean.length; i++) {
-    const diff = sub[i] - trainingMean[i];
-    dist2 += diff * diff * trainingInvVar[i];
+  const dim = Math.min(sub.length, trainingMean.length, trainingInvVar.length);
+  for (let i = 0; i < dim; i++) {
+    const s = Number.isFinite(sub[i]) ? sub[i] : 0;
+    const diff = s - trainingMean[i];
+    const iv = Number.isFinite(trainingInvVar[i]) ? trainingInvVar[i] : 1;
+    dist2 += diff * diff * iv;
   }
-  return Math.sqrt(Math.max(0, dist2));
+  return Number.isFinite(dist2) ? Math.sqrt(Math.max(0, dist2)) : 0;
 }
 
 function computeGMMLogLikelihood(x: number[]): number {
@@ -160,14 +163,18 @@ function computeGMMLogLikelihood(x: number[]): number {
   const logProbs: number[] = [];
 
   for (const comp of gmmModel) {
+    const dim = Math.min(sub.length, comp.mean.length, comp.precision.length);
     let logP = Math.log(Math.max(comp.weight, 1e-10));
     logP -= 0.5 * comp.logDetCov;
-    logP -= 0.5 * sub.length * Math.log(2 * Math.PI);
+    logP -= 0.5 * dim * Math.log(2 * Math.PI);
     let mahal = 0;
-    for (let i = 0; i < sub.length && i < comp.mean.length; i++) {
-      const diff = sub[i] - comp.mean[i];
-      mahal += diff * diff * comp.precision[i];
+    for (let i = 0; i < dim; i++) {
+      const s = Number.isFinite(sub[i]) ? sub[i] : 0;
+      const diff = s - comp.mean[i];
+      const p = Number.isFinite(comp.precision[i]) ? comp.precision[i] : 1;
+      mahal += diff * diff * p;
     }
+    if (!Number.isFinite(mahal)) mahal = 0;
     logP -= 0.5 * mahal;
     logProbs.push(logP);
   }
@@ -275,7 +282,8 @@ function fitGMM(data: number[][]): GMMComponent[] {
       let logDet = 0;
       const precision = new Array(d).fill(0);
       for (let j = 0; j < d; j++) {
-        const v = Math.max(newVar[j] / nk, 1e-6);
+        const rawV = newVar[j] / nk;
+        const v = (Number.isFinite(rawV) && rawV > 1e-6) ? rawV : 1e-6;
         precision[j] = 1 / v;
         logDet += Math.log(v);
       }
