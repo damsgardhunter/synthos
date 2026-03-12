@@ -17,6 +17,14 @@ export interface PressurePoint {
   gnnBandgap: number;
 }
 
+export interface UncertainPressureRegion {
+  pressureStart: number;
+  pressureEnd: number;
+  avgUncertainty: number;
+  maxUncertainty: number;
+  peakPressure: number;
+}
+
 export interface PressureCurve {
   formula: string;
   points: PressurePoint[];
@@ -25,6 +33,7 @@ export interface PressureCurve {
   isSensitive: boolean;
   sensitivityCategory: "high" | "moderate" | "low";
   maxDTcDP: number;
+  uncertainRegions: UncertainPressureRegion[];
   computedAt: number;
 }
 
@@ -152,6 +161,65 @@ function predictAtPressure(
   };
 }
 
+function computeUncertainRegionsFromFeatures(formula: string, baseFeatures: MLFeatureVector): UncertainPressureRegion[] {
+  const uncertainties: { pressure: number; uncertainty: number }[] = [];
+
+  for (let p = 0; p <= PRESSURE_MAX; p += 20) {
+    try {
+      const overridden: MLFeatureVector = { ...baseFeatures, pressureGpa: p };
+      const xgbResult = gbPredictWithUncertainty(overridden, formula);
+      uncertainties.push({ pressure: p, uncertainty: xgbResult.normalizedUncertainty });
+    } catch {
+      uncertainties.push({ pressure: p, uncertainty: 0.5 });
+    }
+  }
+
+  if (uncertainties.length < 3) return [];
+
+  const globalAvg = uncertainties.reduce((s, u) => s + u.uncertainty, 0) / uncertainties.length;
+  const threshold = Math.max(globalAvg * 1.3, 0.35);
+
+  const regions: UncertainPressureRegion[] = [];
+  let regionStart = -1;
+  let regionPoints: { pressure: number; uncertainty: number }[] = [];
+
+  for (let i = 0; i < uncertainties.length; i++) {
+    if (uncertainties[i].uncertainty >= threshold) {
+      if (regionStart < 0) {
+        regionStart = uncertainties[i].pressure;
+        regionPoints = [];
+      }
+      regionPoints.push(uncertainties[i]);
+    } else if (regionStart >= 0) {
+      const maxU = regionPoints.reduce((m, p) => Math.max(m, p.uncertainty), 0);
+      const peakP = regionPoints.find(p => p.uncertainty === maxU)!.pressure;
+      regions.push({
+        pressureStart: regionStart,
+        pressureEnd: regionPoints[regionPoints.length - 1].pressure,
+        avgUncertainty: regionPoints.reduce((s, p) => s + p.uncertainty, 0) / regionPoints.length,
+        maxUncertainty: maxU,
+        peakPressure: peakP,
+      });
+      regionStart = -1;
+      regionPoints = [];
+    }
+  }
+
+  if (regionStart >= 0 && regionPoints.length > 0) {
+    const maxU = regionPoints.reduce((m, p) => Math.max(m, p.uncertainty), 0);
+    const peakP = regionPoints.find(p => p.uncertainty === maxU)!.pressure;
+    regions.push({
+      pressureStart: regionStart,
+      pressureEnd: regionPoints[regionPoints.length - 1].pressure,
+      avgUncertainty: regionPoints.reduce((s, p) => s + p.uncertainty, 0) / regionPoints.length,
+      maxUncertainty: maxU,
+      peakPressure: peakP,
+    });
+  }
+
+  return regions.sort((a, b) => b.maxUncertainty - a.maxUncertainty);
+}
+
 export function predictPressureCurve(formula: string): PressureCurve {
   const normFormula = normalizeFormula(formula);
   const cached = pressureCurveCache.get(normFormula);
@@ -209,6 +277,8 @@ export function predictPressureCurve(formula: string): PressureCurve {
   if (maxSlope > SENSITIVITY_THRESHOLD * 2) sensitivityCategory = "high";
   else if (maxSlope > SENSITIVITY_THRESHOLD) sensitivityCategory = "moderate";
 
+  const uncertainRegions = computeUncertainRegionsFromFeatures(normFormula, baseFeatures);
+
   const curve: PressureCurve = {
     formula: normFormula,
     points: allPoints,
@@ -217,6 +287,7 @@ export function predictPressureCurve(formula: string): PressureCurve {
     isSensitive: maxSlope > SENSITIVITY_THRESHOLD,
     sensitivityCategory,
     maxDTcDP: maxSlope,
+    uncertainRegions,
     computedAt: Date.now(),
   };
 
@@ -322,14 +393,6 @@ export function getPressureCurveStats(): PressureCurveStats {
   };
 }
 
-export interface UncertainPressureRegion {
-  pressureStart: number;
-  pressureEnd: number;
-  avgUncertainty: number;
-  maxUncertainty: number;
-  peakPressure: number;
-}
-
 export interface AdaptivePressureSample {
   formula: string;
   pressureGpa: number;
@@ -345,68 +408,31 @@ export interface PressureExplorationStats {
   recentSamples: AdaptivePressureSample[];
 }
 
-const adaptiveSamplesHistory: AdaptivePressureSample[] = [];
 const MAX_ADAPTIVE_HISTORY = 200;
+const adaptiveSamplesRing = new Array<AdaptivePressureSample>(MAX_ADAPTIVE_HISTORY);
+let ringHead = 0;
+let ringCount = 0;
 const pressureCoverageMap = new Map<string, Set<number>>();
 
+function pushAdaptiveSample(sample: AdaptivePressureSample): void {
+  adaptiveSamplesRing[ringHead] = sample;
+  ringHead = (ringHead + 1) % MAX_ADAPTIVE_HISTORY;
+  if (ringCount < MAX_ADAPTIVE_HISTORY) ringCount++;
+}
+
+function getRecentAdaptiveSamples(n: number): AdaptivePressureSample[] {
+  const count = Math.min(n, ringCount);
+  const result: AdaptivePressureSample[] = [];
+  for (let i = 0; i < count; i++) {
+    const idx = (ringHead - count + i + MAX_ADAPTIVE_HISTORY) % MAX_ADAPTIVE_HISTORY;
+    result.push(adaptiveSamplesRing[idx]);
+  }
+  return result;
+}
+
 export function identifyUncertainPressureRegions(formula: string): UncertainPressureRegion[] {
-  const uncertainties: { pressure: number; uncertainty: number }[] = [];
-
-  for (let p = 0; p <= PRESSURE_MAX; p += 20) {
-    try {
-      const mat = { pressureGpa: p } as any;
-      const features = extractFeatures(formula, mat);
-      const xgbResult = gbPredictWithUncertainty(features, formula);
-      uncertainties.push({ pressure: p, uncertainty: xgbResult.normalizedUncertainty });
-    } catch {
-      uncertainties.push({ pressure: p, uncertainty: 0.5 });
-    }
-  }
-
-  if (uncertainties.length < 3) return [];
-
-  const globalAvg = uncertainties.reduce((s, u) => s + u.uncertainty, 0) / uncertainties.length;
-  const threshold = Math.max(globalAvg * 1.3, 0.35);
-
-  const regions: UncertainPressureRegion[] = [];
-  let regionStart = -1;
-  let regionPoints: { pressure: number; uncertainty: number }[] = [];
-
-  for (let i = 0; i < uncertainties.length; i++) {
-    if (uncertainties[i].uncertainty >= threshold) {
-      if (regionStart < 0) {
-        regionStart = uncertainties[i].pressure;
-        regionPoints = [];
-      }
-      regionPoints.push(uncertainties[i]);
-    } else if (regionStart >= 0) {
-      const maxU = regionPoints.reduce((m, p) => Math.max(m, p.uncertainty), 0);
-      const peakP = regionPoints.find(p => p.uncertainty === maxU)!.pressure;
-      regions.push({
-        pressureStart: regionStart,
-        pressureEnd: regionPoints[regionPoints.length - 1].pressure,
-        avgUncertainty: regionPoints.reduce((s, p) => s + p.uncertainty, 0) / regionPoints.length,
-        maxUncertainty: maxU,
-        peakPressure: peakP,
-      });
-      regionStart = -1;
-      regionPoints = [];
-    }
-  }
-
-  if (regionStart >= 0 && regionPoints.length > 0) {
-    const maxU = regionPoints.reduce((m, p) => Math.max(m, p.uncertainty), 0);
-    const peakP = regionPoints.find(p => p.uncertainty === maxU)!.pressure;
-    regions.push({
-      pressureStart: regionStart,
-      pressureEnd: regionPoints[regionPoints.length - 1].pressure,
-      avgUncertainty: regionPoints.reduce((s, p) => s + p.uncertainty, 0) / regionPoints.length,
-      maxUncertainty: maxU,
-      peakPressure: peakP,
-    });
-  }
-
-  return regions.sort((a, b) => b.maxUncertainty - a.maxUncertainty);
+  const curve = predictPressureCurve(formula);
+  return curve.uncertainRegions;
 }
 
 export function generateAdaptivePressureSamples(formula: string, maxSamples: number = 8): AdaptivePressureSample[] {
@@ -455,11 +481,10 @@ export function generateAdaptivePressureSamples(formula: string, maxSamples: num
   }
 
   for (const s of samples) {
-    adaptiveSamplesHistory.push(s);
+    pushAdaptiveSample(s);
     if (!pressureCoverageMap.has(formula)) pressureCoverageMap.set(formula, new Set());
     pressureCoverageMap.get(formula)!.add(s.pressureGpa);
   }
-  while (adaptiveSamplesHistory.length > MAX_ADAPTIVE_HISTORY) adaptiveSamplesHistory.shift();
 
   return samples.slice(0, maxSamples);
 }
@@ -470,10 +495,16 @@ export function recordPressureCoverage(formula: string, pressureGpa: number): vo
 }
 
 export function getPressureExplorationStats(): PressureExplorationStats {
-  const allRegions: UncertainPressureRegion[] = [];
-  for (const formula of pressureCurveCache.keys()) {
-    allRegions.push(...identifyUncertainPressureRegions(formula));
+  let totalRegions = 0;
+  let totalUncertainty = 0;
+  for (const curve of pressureCurveCache.values()) {
+    totalRegions += curve.uncertainRegions.length;
+    for (const r of curve.uncertainRegions) {
+      totalUncertainty += r.avgUncertainty;
+    }
   }
+
+  const allSamples = getRecentAdaptiveSamples(ringCount);
 
   const ranges = [
     { range: "0-50 GPa", min: 0, max: 50 },
@@ -484,15 +515,25 @@ export function getPressureExplorationStats(): PressureExplorationStats {
     { range: "250-350 GPa", min: 250, max: 350 },
   ];
 
+  const distCounts = new Array(ranges.length).fill(0);
+  for (const s of allSamples) {
+    for (let i = 0; i < ranges.length; i++) {
+      if (s.pressureGpa >= ranges[i].min && s.pressureGpa < ranges[i].max) {
+        distCounts[i]++;
+        break;
+      }
+    }
+  }
+
   return {
-    totalRegionsIdentified: allRegions.length,
-    totalAdaptiveSamples: adaptiveSamplesHistory.length,
-    avgRegionUncertainty: allRegions.length > 0 ? allRegions.reduce((s, r) => s + r.avgUncertainty, 0) / allRegions.length : 0,
-    pressureFocusDistribution: ranges.map(r => ({
+    totalRegionsIdentified: totalRegions,
+    totalAdaptiveSamples: ringCount,
+    avgRegionUncertainty: totalRegions > 0 ? totalUncertainty / totalRegions : 0,
+    pressureFocusDistribution: ranges.map((r, i) => ({
       range: r.range,
-      sampleCount: adaptiveSamplesHistory.filter(s => s.pressureGpa >= r.min && s.pressureGpa < r.max).length,
+      sampleCount: distCounts[i],
     })),
-    recentSamples: adaptiveSamplesHistory.slice(-20),
+    recentSamples: getRecentAdaptiveSamples(20),
   };
 }
 
