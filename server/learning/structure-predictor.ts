@@ -31,6 +31,18 @@ export function parseComposition(formula: string): ParsedComposition {
   return { counts, elements, fractions, totalAtoms };
 }
 
+export interface GoldschmidtResult {
+  factor: number;
+  prediction: string;
+  stoichiometryValid: boolean;
+}
+
+export interface StructuralHint {
+  source: string;
+  hint: string;
+  severity: "info" | "warning" | "critical";
+}
+
 export interface StructurePrediction {
   spaceGroup: string;
   crystalSystem: string;
@@ -46,6 +58,8 @@ export interface StructurePrediction {
   convexHullDistance: number;
   synthesizability: number;
   synthesisNotes: string;
+  goldschmidtTolerance?: GoldschmidtResult | null;
+  structuralHints?: StructuralHint[];
 }
 
 const SG_NUMBER_TO_HM: Record<string, string> = {
@@ -655,6 +669,80 @@ export function computeGoldschmidtTolerance(formula: string, comp?: ParsedCompos
   return { factor: Number(t.toFixed(4)), prediction, stoichiometryValid: true };
 }
 
+function buildStructuralHints(
+  tolerance: GoldschmidtResult | null,
+  crystalSystem: string,
+  dimensionality: string,
+  prototype: string,
+  elements: string[]
+): StructuralHint[] {
+  const hints: StructuralHint[] = [];
+
+  if (tolerance && tolerance.stoichiometryValid) {
+    const t = tolerance.factor;
+    if (t > 1.05) {
+      hints.push({
+        source: "goldschmidt",
+        hint: `t=${t.toFixed(4)} > 1.05: favor hexagonal polytypes (e.g. 2H, 4H, 6H) over cubic perovskite during relaxation`,
+        severity: "warning",
+      });
+    } else if (t >= 0.95) {
+      hints.push({
+        source: "goldschmidt",
+        hint: `t=${t.toFixed(4)}: ideal cubic perovskite expected, start relaxation from Pm-3m`,
+        severity: "info",
+      });
+    } else if (t >= 0.85) {
+      hints.push({
+        source: "goldschmidt",
+        hint: `t=${t.toFixed(4)}: expect octahedral tilting, initialize with Pnma or R-3c distortion`,
+        severity: "info",
+      });
+    } else if (t >= 0.75) {
+      hints.push({
+        source: "goldschmidt",
+        hint: `t=${t.toFixed(4)}: strongly distorted, consider ilmenite (R-3) or LiNbO3-type as starting structure`,
+        severity: "warning",
+      });
+    } else if (t > 0) {
+      hints.push({
+        source: "goldschmidt",
+        hint: `t=${t.toFixed(4)} < 0.75: perovskite structure unlikely, explore alternative ABO3 polymorphs`,
+        severity: "critical",
+      });
+    }
+  }
+
+  const cs = crystalSystem.toLowerCase();
+  if ((cs === "hexagonal" || cs === "trigonal") && dimensionality === "quasi-2D") {
+    hints.push({
+      source: "dimensionality",
+      hint: "quasi-2D layered hexagonal/trigonal: use anisotropic k-mesh with boosted c*-axis sampling",
+      severity: "info",
+    });
+  }
+
+  const hasH = elements.includes("H");
+  const protoLc = prototype.toLowerCase();
+  if (hasH && (protoLc.includes("hydride") || protoLc.includes("clathrate"))) {
+    hints.push({
+      source: "prototype",
+      hint: "hydrogen clathrate/cage structure: ensure H sublattice is fully relaxed before computing Tc",
+      severity: "info",
+    });
+  }
+
+  if (protoLc.includes("infinite-layer")) {
+    hints.push({
+      source: "prototype",
+      hint: "infinite-layer cuprate: apical-oxygen-free, use P4/mmm starting symmetry",
+      severity: "info",
+    });
+  }
+
+  return hints;
+}
+
 export function vegardLatticeParameter(formula: string, comp?: ParsedComposition, proto?: typeof KNOWN_PROTOTYPES[string] | null): number | null {
   const { counts, elements, totalAtoms } = comp || parseComposition(formula);
 
@@ -982,6 +1070,7 @@ export async function predictCrystalStructure(
 
       const tolerance = computeGoldschmidtTolerance(formula, comp);
       const synth = estimateSynthesizability(eAboveHull, formE, elements, formula, comp);
+      const hints = buildStructuralHints(tolerance, cs, dim, proto, elements);
 
       const result: StructurePrediction = {
         spaceGroup: sg,
@@ -1002,6 +1091,8 @@ export async function predictCrystalStructure(
         convexHullDistance: eAboveHull,
         synthesizability: synth.score,
         synthesisNotes: synth.notes,
+        goldschmidtTolerance: tolerance,
+        structuralHints: hints,
       };
 
       const id = `cs-${Date.now()}-${formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8)}`;
@@ -1080,9 +1171,15 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
     const tolerance = computeGoldschmidtTolerance(formula, comp);
     const synth = estimateSynthesizability(miedemaDecomp, miedemaFormE, elements, formula, comp);
 
+    const miedemaSg = (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1";
+    const miedemaCs = (typeof parsed.crystalSystem === "string" && parsed.crystalSystem) || protoMatch?.crystalSystem || "triclinic";
+    const miedemaProto = (typeof parsed.prototype === "string" && parsed.prototype) || protoMatch?.prototype || "unknown";
+    const miedemaDim = (typeof parsed.dimensionality === "string" && parsed.dimensionality) || protoMatch?.dimensionality || "3D";
+    const hints = buildStructuralHints(tolerance, miedemaCs, miedemaDim, miedemaProto, elements);
+
     const result: StructurePrediction = {
-      spaceGroup: (typeof parsed.spaceGroup === "string" && parsed.spaceGroup) || protoMatch?.spaceGroup || "P1",
-      crystalSystem: (typeof parsed.crystalSystem === "string" && parsed.crystalSystem) || protoMatch?.crystalSystem || "triclinic",
+      spaceGroup: miedemaSg,
+      crystalSystem: miedemaCs,
       latticeParams: {
         a: toNum(parsed.latticeA, 4.0),
         b: toNum(parsed.latticeB, 4.0),
@@ -1091,14 +1188,16 @@ Return JSON with fields: spaceGroup, crystalSystem, latticeA, latticeB, latticeC
         beta: toNum(parsed.beta, 90),
         gamma: toNum(parsed.gamma, 90),
       },
-      prototype: (typeof parsed.prototype === "string" && parsed.prototype) || protoMatch?.prototype || "unknown",
-      dimensionality: (typeof parsed.dimensionality === "string" && parsed.dimensionality) || protoMatch?.dimensionality || "3D",
+      prototype: miedemaProto,
+      dimensionality: miedemaDim,
       isStable,
       isMetastable,
       decompositionEnergy: miedemaDecomp,
       convexHullDistance: miedemaDecomp,
       synthesizability: synth.score,
       synthesisNotes: synth.notes,
+      goldschmidtTolerance: tolerance,
+      structuralHints: hints,
     };
 
     const id = `cs-${Date.now()}-${formula.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8)}`;

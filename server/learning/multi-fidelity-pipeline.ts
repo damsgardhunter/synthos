@@ -901,6 +901,12 @@ async function updateCandidatePhysics(
         updates.ambientPressureStable = false;
         updates.pressureCategory = "high-pressure";
       }
+      if (allData.structure.goldschmidtTolerance) {
+        (updates as any).goldschmidtTolerance = allData.structure.goldschmidtTolerance;
+      }
+      if (allData.structure.structuralHints?.length > 0) {
+        (updates as any).structuralHints = allData.structure.structuralHints;
+      }
     }
     if (allData.stability) {
       if (allData.stability.synthesizability != null) {
