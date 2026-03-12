@@ -373,12 +373,17 @@ export function computeSurrogateFitness(formula: string, crystalPrototype?: stri
   const globalCalFactor = getGlobalCalibrationFactor();
   const calibrationFactor = (familyCalFactor + globalCalFactor) / 2;
 
-  const tcComponent = currentWeights.predictedTc * predictedTcNorm * calibrationFactor;
-  const fitness = tcComponent +
-    currentWeights.stability * stabilityScore +
+  const modelDependentFitness =
+    currentWeights.predictedTc * predictedTcNorm +
+    currentWeights.stability * stabilityScore;
+
+  const modelIndependentFitness =
     currentWeights.synthesis * synthesisScore +
     currentWeights.novelty * noveltyScore +
-    currentWeights.uncertainty * uncertaintyBonus +
+    currentWeights.uncertainty * uncertaintyBonus;
+
+  const fitness = modelDependentFitness * calibrationFactor +
+    modelIndependentFitness +
     explorationBonus;
 
   seenFormulas.add(formula);
@@ -460,18 +465,35 @@ function adaptWeights(): void {
   const lr = 0.02;
 
   if (meanTcError > 30) {
-    currentWeights.predictedTc = Math.max(0.20, currentWeights.predictedTc - lr);
-    currentWeights.uncertainty = Math.min(0.15, currentWeights.uncertainty + lr * 0.5);
-    currentWeights.stability = Math.min(0.35, currentWeights.stability + lr * 0.5);
+    const tcReduction = Math.min(lr, currentWeights.predictedTc - 0.20);
+    if (tcReduction > 0) {
+      currentWeights.predictedTc -= tcReduction;
+      currentWeights.uncertainty = Math.min(0.15, currentWeights.uncertainty + tcReduction * 0.4);
+      currentWeights.novelty = Math.min(0.20, currentWeights.novelty + tcReduction * 0.4);
+      currentWeights.stability += tcReduction * 0.2;
+    }
   } else if (meanTcError < 10) {
-    currentWeights.predictedTc = Math.min(0.55, currentWeights.predictedTc + lr);
-    currentWeights.uncertainty = Math.max(0.02, currentWeights.uncertainty - lr * 0.3);
+    const tcIncrease = Math.min(lr, 0.55 - currentWeights.predictedTc);
+    if (tcIncrease > 0) {
+      currentWeights.predictedTc += tcIncrease;
+      const shrinkPool = currentWeights.uncertainty + currentWeights.novelty;
+      if (shrinkPool > 0.05) {
+        const shrinkRatio = Math.min(tcIncrease, shrinkPool - 0.05) / shrinkPool;
+        currentWeights.uncertainty *= (1 - shrinkRatio);
+        currentWeights.novelty *= (1 - shrinkRatio);
+      }
+    }
   }
 
   if (stabilityCorrect > 0.8) {
     currentWeights.stability = Math.min(0.35, currentWeights.stability + lr * 0.3);
   } else if (stabilityCorrect < 0.5) {
-    currentWeights.stability = Math.max(0.10, currentWeights.stability - lr * 0.3);
+    const stabReduction = Math.min(lr * 0.3, currentWeights.stability - 0.10);
+    if (stabReduction > 0) {
+      currentWeights.stability -= stabReduction;
+      currentWeights.novelty += stabReduction * 0.5;
+      currentWeights.uncertainty += stabReduction * 0.5;
+    }
   }
 
   const total = Object.values(currentWeights).reduce((s, w) => s + w, 0);
