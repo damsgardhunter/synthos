@@ -236,7 +236,14 @@ async function stage0b_SynthesisPrescreen(
 
   const passed = (scoreAboveThreshold && mlAboveMinimum) || hasQualityRoutes;
   const reason = passed ? null :
-    `No plausible synthesis: score=${synthScore.score.toFixed(2)} (threshold 0.3), ML feasibility=${mlPrediction.feasibility.toFixed(2)} (threshold 0.2), quality retro routes=${qualityRoutes.length}`;
+    `No plausible synthesis: score=${synthScore.score} (threshold 0.3), ML feasibility=${mlPrediction.feasibility} (threshold 0.2), quality retro routes=${qualityRoutes.length}`;
+
+  const bestRouteScore = retroRoutes.bestRoute?.overallScore ?? 0;
+  const mlConfidence = mlPrediction.confidence ?? 0.5;
+  const derivedConfidence = passed
+    ? 0.3 * mlConfidence + 0.3 * synthScore.score + 0.2 * bestRouteScore + 0.2 * Math.min(1, qualityRoutes.length / 3)
+    : 0.5 * mlConfidence + 0.3 * (1 - synthScore.score) + 0.2 * (1 - bestRouteScore);
+  const clampedConfidence = Math.max(0.1, Math.min(0.95, derivedConfidence));
 
   await logComputationalResult(
     candidate.id, candidate.formula, 0, "synthesis_prescreen",
@@ -247,11 +254,13 @@ async function stage0b_SynthesisPrescreen(
       structuralSimilarity: synthScore.structuralSimilarity,
       reactionComplexity: synthScore.reactionComplexity,
       mlFeasibility: mlPrediction.feasibility,
+      mlConfidence,
       retroRoutes: retroRoutes.totalRoutes,
       qualityRoutes: qualityRoutes.length,
       bestRoute: retroRoutes.bestRoute?.equation ?? null,
+      bestRouteScore,
     },
-    passed, reason, Date.now() - start, passed ? 0.6 : 0.85
+    passed, reason, Date.now() - start, clampedConfidence
   );
 
   return {
