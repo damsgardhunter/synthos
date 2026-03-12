@@ -111,8 +111,9 @@ export function parseFormulaCounts(formula: string): Record<string, number> {
   const counts: Record<string, number> = {};
   let cleaned = replaceUnicodeSubscripts(formula);
   cleaned = expandParentheses(cleaned);
-  const regex = /([A-Z][a-z]?)(\d+\.?\d*|\.\d+)?/g;
   let match;
+  const regex = /([A-Z][a-z]?)(\d+\.?\d*|\.\d+)?/g;
+  regex.lastIndex = 0;
   while ((match = regex.exec(cleaned)) !== null) {
     const el = match[1];
     const raw = match[2];
@@ -197,13 +198,14 @@ export function getWeightedElectronegativity(counts: Record<string, number>): nu
   let totalWeight = 0;
   let weightedSum = 0;
   for (const [el, n] of Object.entries(counts)) {
-    const en = ELECTRONEGATIVITY[el] ?? 0;
-    if (en > 0) {
+    const en = ELECTRONEGATIVITY[el];
+    if (en !== undefined && en > 0) {
       weightedSum += en * n;
       totalWeight += n;
     }
   }
-  return totalWeight > 0 ? weightedSum / totalWeight : 2.0;
+  if (totalWeight === 0) return NaN;
+  return weightedSum / totalWeight;
 }
 
 const VALID_ELEMENTS = new Set([
@@ -314,41 +316,21 @@ export function normalizeFormula(raw: string): string {
 
 export function isIsostructuralDuplicate(formulaA: string, formulaB: string): boolean {
   if (formulaA === formulaB) return true;
-  const countsA = parseFormulaCounts(formulaA);
-  const countsB = parseFormulaCounts(formulaB);
-  const elsA = Object.keys(countsA).sort();
-  const elsB = Object.keys(countsB).sort();
-  if (elsA.length !== elsB.length) return false;
-
-  function gcdReduce(vals: number[]): number[] {
-    if (vals.length === 0) return vals;
-    let g = vals[0];
-    for (let i = 1; i < vals.length; i++) {
-      let a = g, b = vals[i];
-      while (b > 0.001) { const t = b; b = a % b; a = t; }
-      g = a;
-    }
-    if (g < 0.001) g = 1;
-    return vals.map(v => Math.round(v / g));
-  }
-
-  const valsA = gcdReduce(elsA.map(el => countsA[el]).sort((a, b) => a - b));
-  const valsB = gcdReduce(elsB.map(el => countsB[el]).sort((a, b) => a - b));
-  return valsA.every((v, i) => v === valsB[i]);
+  return normalizeFormula(formulaA) === normalizeFormula(formulaB);
 }
 
-const FORBIDDEN_WORDS: [RegExp, string][] = [
-  [/\bbreakthrough\b/gi, "notable finding"],
-  [/\bconfirmed\b/gi, "verified"],
-  [/\bbreakthroughs\b/gi, "notable findings"],
-];
+const FORBIDDEN_WORD_MAP: Record<string, string> = {
+  "breakthrough": "notable finding",
+  "breakthroughs": "notable findings",
+  "confirmed": "verified",
+};
+
+const FORBIDDEN_REGEX = /\b(breakthroughs?|confirmed)\b/gi;
 
 export function sanitizeForbiddenWords(text: string): string {
-  let result = text;
-  for (const [pattern, replacement] of FORBIDDEN_WORDS) {
-    result = result.replace(pattern, replacement);
-  }
-  return result;
+  return text.replace(FORBIDDEN_REGEX, (match) => {
+    return FORBIDDEN_WORD_MAP[match.toLowerCase()] ?? match;
+  });
 }
 
 export const NONMETALS = new Set([

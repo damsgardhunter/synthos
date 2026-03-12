@@ -1,5 +1,5 @@
 import { getGroundTruthDataset, getGroundTruthSummary, type GroundTruthDatapoint } from "./ground-truth-store";
-import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
+import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { getAllPhysicsResults, getDerivedFeatures, type PhysicsResult, type DerivedFeatures } from "./physics-results-store";
 
 export interface UnifiedTrainingRecord {
@@ -79,12 +79,11 @@ function rebuildIfDirty(): UnifiedTrainingRecord[] {
   const records = new Map<string, UnifiedTrainingRecord>();
 
   for (const sd of SUPERCON_TRAINING_DATA) {
-    const tc = (sd as any).tc ?? (sd as any).Tc;
     const key = `${sd.formula}|${pressureKey(0)}`;
     records.set(key, {
       formula: sd.formula,
       pressure: 0,
-      Tc: typeof tc === "number" ? tc : null,
+      Tc: sd.tc,
       lambda: null,
       omegaLog: null,
       dosAtEF: null,
