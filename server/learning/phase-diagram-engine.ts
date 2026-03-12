@@ -2,6 +2,9 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
 
+const STABILITY_TOLERANCE_MEV = 25;
+const STABILITY_TOLERANCE = STABILITY_TOLERANCE_MEV / 1000;
+
 function parseFormulaElements(formula: string): string[] {
   if (typeof formula !== "string") formula = String(formula ?? "");
   const cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
@@ -299,12 +302,19 @@ export interface PhaseDiagramEntry {
   isStable: boolean;
 }
 
+export interface PhaseBoundary {
+  from: string;
+  to: string;
+  energy: number;
+  reactionEnthalpy: number;
+}
+
 export interface PhaseDiagramResult {
   elements: string[];
   stablePhases: PhaseDiagramEntry[];
   unstablePhases: PhaseDiagramEntry[];
   hullVertices: HullVertex[];
-  phaseBoundaries: { from: string; to: string; energy: number }[];
+  phaseBoundaries: PhaseBoundary[];
 }
 
 function getCompositionFractions(formula: string, elementSet: string[]): Record<string, number> {
@@ -413,7 +423,7 @@ export function computeConvexHull(
 
   if (elements.length === 2) {
     const result = computeBinarySliceHull(formula, targetFormE, elements[0], elements[1], formationEnergies);
-    const isOnHull = result.eAboveHull < 0.005;
+    const isOnHull = result.eAboveHull < STABILITY_TOLERANCE;
 
     const hullVertices: HullVertex[] = result.hull.map(p => ({
       composition: p.label,
@@ -456,7 +466,7 @@ export function computeConvexHull(
     }
   }
 
-  const isOnHull = worstEAboveHull < 0.005;
+  const isOnHull = worstEAboveHull < STABILITY_TOLERANCE;
 
   const hullVertices: HullVertex[] = worstSliceHull.map(p => ({
     composition: p.label,
@@ -481,6 +491,42 @@ export function computeConvexHull(
 }
 
 const PSEUDO_BINARY_ELEMENT_LIMIT = 4;
+
+interface CachedCompetingPhases {
+  materialEntries: { formula: string; energy: number; elements: string[] }[];
+  candidateEntries: { formula: string; energy: number; elements: string[] }[];
+  builtAt: number;
+}
+
+let competingPhasesCache: CachedCompetingPhases | null = null;
+const COMPETING_PHASES_CACHE_TTL_MS = 60_000;
+
+async function getOrBuildCompetingPhasesCache(): Promise<CachedCompetingPhases> {
+  const now = Date.now();
+  if (competingPhasesCache && (now - competingPhasesCache.builtAt) < COMPETING_PHASES_CACHE_TTL_MS) {
+    return competingPhasesCache;
+  }
+
+  const allMaterials = await storage.getMaterials(500, 0);
+  const materialEntries = allMaterials.map(mat => ({
+    formula: mat.formula,
+    energy: mat.formationEnergy ?? estimateFormationEnergy(mat.formula),
+    elements: parseFormulaElements(mat.formula),
+  }));
+
+  const candidates = await storage.getSuperconductorCandidates(200);
+  const seenFormulas = new Set(materialEntries.map(m => m.formula));
+  const candidateEntries = candidates
+    .filter(c => !seenFormulas.has(c.formula))
+    .map(cand => ({
+      formula: cand.formula,
+      energy: estimateFormationEnergy(cand.formula),
+      elements: parseFormulaElements(cand.formula),
+    }));
+
+  competingPhasesCache = { materialEntries, candidateEntries, builtAt: now };
+  return competingPhasesCache;
+}
 
 function selectPseudoBinaryAxes(
   formula: string,
@@ -530,32 +576,24 @@ export async function getCompetingPhases(
 ): Promise<ConvexHullResult> {
   const allElements = parseFormulaElements(formula);
   const hullElements = selectPseudoBinaryAxes(formula, allElements);
+  const hullSet = new Set(hullElements);
 
-  const allMaterials = await storage.getMaterials(500, 0);
+  const cache = await getOrBuildCompetingPhasesCache();
   const competingFormulas: { formula: string; energy: number }[] = [];
 
-  for (const mat of allMaterials) {
-    const matElements = parseFormulaElements(mat.formula);
-    const isSubset = matElements.every(el => hullElements.includes(el));
-    if (isSubset && mat.formula !== formula) {
-      const energy = mat.formationEnergy ?? computeMiedemaFormationEnergy(mat.formula);
-      competingFormulas.push({ formula: mat.formula, energy });
+  for (const entry of cache.materialEntries) {
+    if (entry.formula !== formula && entry.elements.every(el => hullSet.has(el))) {
+      competingFormulas.push({ formula: entry.formula, energy: entry.energy });
     }
   }
 
-  const candidates = await storage.getSuperconductorCandidates(200);
-  for (const cand of candidates) {
-    const candElements = parseFormulaElements(cand.formula);
-    const isSubset = candElements.every(el => hullElements.includes(el));
-    if (isSubset && cand.formula !== formula && !competingFormulas.some(cf => cf.formula === cand.formula)) {
-      const energy = computeMiedemaFormationEnergy(cand.formula);
-      competingFormulas.push({ formula: cand.formula, energy });
+  for (const entry of cache.candidateEntries) {
+    if (entry.formula !== formula && entry.elements.every(el => hullSet.has(el))) {
+      competingFormulas.push({ formula: entry.formula, energy: entry.energy });
     }
   }
 
-  const result = computeConvexHull(formula, hullElements, competingFormulas);
-
-  return result;
+  return computeConvexHull(formula, hullElements, competingFormulas);
 }
 
 function surrogateKineticBarrier(
@@ -632,7 +670,7 @@ export function assessMetastability(
     }
   }
 
-  const isMetastable = eAboveHull > 0.005 && eAboveHull <= 0.2 && kineticBarrier > 0.5;
+  const isMetastable = eAboveHull > STABILITY_TOLERANCE && eAboveHull <= 0.2 && kineticBarrier > 0.5;
 
   let decompositionPathway: string[];
   if (hullDecompositionProducts && hullDecompositionProducts.length > 0) {
@@ -693,9 +731,12 @@ export function computePhaseDiagram(
     }
 
     const hullVertices: HullVertex[] = hull.map(p => ({ composition: p.label, energy: p.y }));
-    const phaseBoundaries: { from: string; to: string; energy: number }[] = [];
+    const phaseBoundaries: PhaseBoundary[] = [];
     for (let i = 0; i < hull.length - 1; i++) {
-      phaseBoundaries.push({ from: hull[i].label, to: hull[i + 1].label, energy: (hull[i].y + hull[i + 1].y) / 2 });
+      const dx = hull[i + 1].x - hull[i].x;
+      const midEnergy = (hull[i].y + hull[i + 1].y) / 2;
+      const reactionEnthalpy = dx > 1e-12 ? (hull[i + 1].y - hull[i].y) / dx : 0;
+      phaseBoundaries.push({ from: hull[i].label, to: hull[i + 1].label, energy: midEnergy, reactionEnthalpy });
     }
 
     return {
@@ -709,7 +750,7 @@ export function computePhaseDiagram(
 
   const stableOnAllSlices = new Set(allEntries.map(e => e.formula));
   const allHullVertices: HullVertex[] = [];
-  const allPhaseBoundaries: { from: string; to: string; energy: number }[] = [];
+  const allPhaseBoundaries: PhaseBoundary[] = [];
 
   for (let i = 0; i < elementSet.length; i++) {
     for (let j = i + 1; j < elementSet.length; j++) {
@@ -739,7 +780,10 @@ export function computePhaseDiagram(
         }
       }
       for (let k = 0; k < hull.length - 1; k++) {
-        allPhaseBoundaries.push({ from: hull[k].label, to: hull[k + 1].label, energy: (hull[k].y + hull[k + 1].y) / 2 });
+        const dx = hull[k + 1].x - hull[k].x;
+        const midEnergy = (hull[k].y + hull[k + 1].y) / 2;
+        const reactionEnthalpy = dx > 1e-12 ? (hull[k + 1].y - hull[k].y) / dx : 0;
+        allPhaseBoundaries.push({ from: hull[k].label, to: hull[k + 1].label, energy: midEnergy, reactionEnthalpy });
       }
     }
   }
@@ -917,7 +961,7 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     };
   }
 
-  if (hullDistance <= 0.005) {
+  if (hullDistance <= STABILITY_TOLERANCE) {
     return {
       pass: true,
       verdict: "stable",
