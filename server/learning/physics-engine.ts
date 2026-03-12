@@ -568,36 +568,34 @@ function isHydrideForLambda(matClass: MaterialClass): boolean {
 }
 
 function classifyMaterialForLambda(formula: string, pressureGpa: number = 0): MaterialClass {
-  const elements = parseFormulaElements(formula);
-  const counts = parseFormulaCounts(formula);
-  const totalAtoms = getTotalAtoms(counts);
-  const hCount = counts["H"] || 0;
-  const metalAtoms = elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e))
-    .reduce((s, e) => s + (counts[e] || 0), 0);
+  const pc = parseComposition(formula);
+  const hCount = pc.counts["H"] || 0;
+  const metalAtoms = pc.elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e))
+    .reduce((s, e) => s + (pc.counts[e] || 0), 0);
   const hRatio = metalAtoms > 0 ? hCount / metalAtoms : 0;
 
-  if (elements.includes("Cu") && elements.includes("O") && elements.length >= 3 &&
-      elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e))) {
+  if (pc.elements.includes("Cu") && pc.elements.includes("O") && pc.elements.length >= 3 &&
+      pc.elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Bi", "Tl", "Hg"].includes(e))) {
     return "cuprate";
   }
-  if (elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"))) {
+  if (pc.elements.includes("Fe") && (pc.elements.includes("As") || pc.elements.includes("Se") || pc.elements.includes("P"))) {
     return "iron-pnictide";
   }
-  if (elements.some(e => isRareEarth(e) || isActinide(e)) &&
-      elements.some(e => isTransitionMetal(e)) && elements.length >= 3 &&
-      !elements.includes("H")) {
-    const reOrAct = elements.filter(e => isRareEarth(e) || isActinide(e));
+  if (pc.elements.some(e => isRareEarth(e) || isActinide(e)) &&
+      pc.elements.some(e => isTransitionMetal(e)) && pc.elements.length >= 3 &&
+      !pc.elements.includes("H")) {
+    const reOrAct = pc.elements.filter(e => isRareEarth(e) || isActinide(e));
     if (reOrAct.length > 0) return "heavy-fermion";
   }
   if (hCount > 0 && hRatio >= 6 && pressureGpa >= 100) return "superhydride";
   if (hCount > 0 && hRatio >= 4 && pressureGpa >= 50) return "hydride-high-p";
   if (hCount > 0 && hRatio >= 2) return "hydride-low-p";
 
-  const lightEls = elements.filter(e => {
+  const lightEls = pc.elements.filter(e => {
     const d = getElementData(e);
     return d && d.atomicMass < 15 && e !== "H";
   });
-  const lightFrac = lightEls.reduce((s, e) => s + (counts[e] || 0), 0) / totalAtoms;
+  const lightFrac = lightEls.reduce((s, e) => s + (pc.counts[e] || 0), 0) / pc.totalAtoms;
   if (lightFrac > 0.3) return "light-element";
 
   return "conventional-metal";
@@ -782,13 +780,14 @@ export function estimateBandwidthW(el: string): number {
 function invertMcMillanLambda(tc: number, thetaD: number, muStar: number): number {
   if (tc <= 0 || thetaD <= 0) return 0;
   const omegaLogK = thetaD * 0.60;
+  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
   let lambdaLow = 0.05;
   let lambdaHigh = 6.0;
-  for (let i = 0; i < 80; i++) {
+  for (let i = 0; i < 30; i++) {
     const lambdaMid = (lambdaLow + lambdaHigh) / 2;
+    if (lambdaHigh - lambdaLow < 1e-8) break;
     const denom = lambdaMid - muStar * (1 + 0.62 * lambdaMid);
     if (denom <= 0) { lambdaLow = lambdaMid; continue; }
-    const lambdaBar = 2.46 * (1 + 3.8 * muStar);
     const f1 = Math.pow(1 + Math.pow(lambdaMid / lambdaBar, 3 / 2), 1 / 3);
     const exponent = -1.04 * (1 + lambdaMid) / denom;
     const tcCalc = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
