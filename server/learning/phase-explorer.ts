@@ -3,6 +3,7 @@ import { gbPredict } from "./gradient-boost";
 import { normalizeFormula } from "./utils";
 import { ELEMENTAL_DATA } from "./elemental-data";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
+import { optimizePressureForFormula } from "./bayesian-pressure-optimizer";
 import type { EventEmitter } from "./engine";
 
 export interface PhaseGridPoint {
@@ -103,22 +104,43 @@ function buildFormula(counts: Record<string, number>): string {
   return parts.join("");
 }
 
-function fastTcPredict(formula: string): { tc: number; uncertainty: number; hullDistance: number; lambda: number } {
+interface FastTcResult { tc: number; uncertainty: number; hullDistance: number; lambda: number }
+const FAST_TC_FALLBACK: FastTcResult = { tc: 0, uncertainty: 50, hullDistance: 1.0, lambda: 0 };
+
+let cachedFeatures: ReturnType<typeof extractFeatures> | null = null;
+let cachedFeaturesFormula = "";
+
+function fastTcPredict(formula: string): FastTcResult {
   try {
-    const features = extractFeatures(formula);
-    if (!features) return { tc: 0, uncertainty: 50, hullDistance: 1.0, lambda: 0 };
+    let features: ReturnType<typeof extractFeatures>;
+    if (cachedFeaturesFormula === formula && cachedFeatures) {
+      features = cachedFeatures;
+    } else {
+      features = extractFeatures(formula);
+      cachedFeatures = features;
+      cachedFeaturesFormula = formula;
+    }
+    if (!features) return FAST_TC_FALLBACK;
 
     const physicsPred = physicsPredictor.predict(features);
     const gbResult = gbPredict(features);
 
     const tc = Math.max(0, gbResult.tcPredicted);
     const hullDist = physicsPred.hullDistance;
-    const avgUncertainty = (physicsPred.lambdaUncertainty + physicsPred.dosUncertainty +
-      physicsPred.omegaUncertainty + physicsPred.hullUncertainty) / 4;
 
-    return { tc, uncertainty: avgUncertainty, hullDistance: hullDist, lambda: physicsPred.lambda };
+    const uncertainties = [
+      physicsPred.lambdaUncertainty,
+      physicsPred.dosUncertainty,
+      physicsPred.omegaUncertainty,
+      physicsPred.hullUncertainty,
+    ];
+    const maxUncertainty = Math.max(...uncertainties);
+    const avgUncertainty = uncertainties.reduce((s, u) => s + u, 0) / uncertainties.length;
+    const explorationUncertainty = 0.6 * maxUncertainty + 0.4 * avgUncertainty;
+
+    return { tc, uncertainty: explorationUncertainty, hullDistance: hullDist, lambda: physicsPred.lambda };
   } catch {
-    return { tc: 0, uncertainty: 50, hullDistance: 1.0, lambda: 0 };
+    return FAST_TC_FALLBACK;
   }
 }
 
@@ -128,17 +150,26 @@ function pressureAdjustTc(baseTc: number, lambda: number, pressureGpa: number, f
   const { elements } = parseFormulaToElements(formula);
   const hasHydrogen = elements.includes("H");
 
+  const bayesResult = optimizePressureForFormula(formula, 3, 10);
+  const hasBayesianData = bayesResult.confidence > 0.3 && bayesResult.optimalPressure > 0;
+
   let pressureFactor = 1.0;
 
-  if (hasHydrogen) {
+  if (hasBayesianData) {
+    const pOpt = bayesResult.optimalPressure;
+    const peakFactor = hasHydrogen ? 2.8 : 1.5;
+    const sigma = hasHydrogen ? pOpt * 0.4 : pOpt * 0.5;
+    const deviation = pressureGpa - pOpt;
+    pressureFactor = 1.0 + (peakFactor - 1.0) * Math.exp(-(deviation * deviation) / (2 * sigma * sigma));
+  } else if (hasHydrogen) {
     if (pressureGpa < 100) {
       pressureFactor = 1.0 + pressureGpa * 0.005;
     } else if (pressureGpa < 200) {
-      pressureFactor = 1.5 + (pressureGpa - 100) * 0.008;
+      pressureFactor = 1.5 + (pressureGpa - 100) * 0.006;
     } else {
-      pressureFactor = 2.3 + (pressureGpa - 200) * 0.004;
+      pressureFactor = 2.1 + (pressureGpa - 200) * 0.002;
     }
-    pressureFactor = Math.min(pressureFactor, 3.5);
+    pressureFactor = Math.min(pressureFactor, 2.8);
   } else {
     if (pressureGpa < 50) {
       pressureFactor = 1.0 + pressureGpa * 0.003;
@@ -155,14 +186,40 @@ function pressureAdjustTc(baseTc: number, lambda: number, pressureGpa: number, f
 }
 
 function estimateDecompositionTemp(formula: string, formationEnergy: number): number {
-  const { elements } = parseFormulaToElements(formula);
+  const { elements, counts } = parseFormulaToElements(formula);
+  const totalAtoms = Object.values(counts).reduce((s, c) => s + c, 0);
+
   const meltingPoints = elements
     .map(el => ELEMENTAL_DATA[el]?.meltingPoint ?? 1000)
     .filter(mp => mp > 0);
   const minMelt = Math.min(...meltingPoints);
 
-  const stabFactor = formationEnergy < -1.0 ? 0.8 : formationEnergy < -0.3 ? 0.6 : formationEnergy < 0 ? 0.4 : 0.2;
-  return Math.round(minMelt * stabFactor);
+  let weightedAvgMelt = 0;
+  for (const el of elements) {
+    const mp = ELEMENTAL_DATA[el]?.meltingPoint ?? 1000;
+    const frac = (counts[el] ?? 1) / (totalAtoms || 1);
+    weightedAvgMelt += frac * mp;
+  }
+
+  const deltaH_eV = Math.abs(formationEnergy);
+  const kB_eV = 8.617e-5;
+  const lindemannTemp = deltaH_eV / (3 * kB_eV);
+
+  const compoundMeltEstimate = Math.max(weightedAvgMelt * 0.85, minMelt * 1.2);
+
+  let decompositionTemp: number;
+  if (formationEnergy < -0.5) {
+    decompositionTemp = Math.min(lindemannTemp, compoundMeltEstimate * 1.1);
+  } else if (formationEnergy < -0.1) {
+    const enthalpy_weight = 0.5;
+    decompositionTemp = enthalpy_weight * lindemannTemp + (1 - enthalpy_weight) * compoundMeltEstimate * 0.7;
+  } else if (formationEnergy < 0) {
+    decompositionTemp = compoundMeltEstimate * 0.4;
+  } else {
+    decompositionTemp = compoundMeltEstimate * 0.15;
+  }
+
+  return Math.round(Math.max(100, Math.min(decompositionTemp, 4000)));
 }
 
 export function exploreCompositionSpace(
