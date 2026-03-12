@@ -74,6 +74,11 @@ export interface MultiEngineInsights {
     bestTcBoost: number;
     optimalDefectType: string;
   };
+
+  thermodynamic?: {
+    estimatedQuenchRateKPerSec: number | null;
+    maxSynthesisTemp: number;
+  };
 }
 
 export interface SynthesisGenome {
@@ -1203,6 +1208,16 @@ function computeFitnessScore(
 
   const pressurePenalty = genomePressureGpa / MAX_PRESSURE_GPA;
 
+  let quenchRatePenalty = 0;
+  if (genome && insights.thermodynamic?.estimatedQuenchRateKPerSec) {
+    const requiredRate = insights.thermodynamic.estimatedQuenchRateKPerSec;
+    const genomeCoolRate = 1 + genome.coolingStrategy * 5000;
+    if (genomeCoolRate < requiredRate) {
+      const deficit = Math.log10(requiredRate / genomeCoolRate);
+      quenchRatePenalty = Math.min(0.15, deficit * 0.05);
+    }
+  }
+
   const rawFitness =
     0.4 * tcNorm +
     0.3 * stabilityAtPressure +
@@ -1217,7 +1232,7 @@ function computeFitnessScore(
 
   const compositionBias = getCompositionBias(insights.formula);
 
-  return Math.max(0, Math.min(1.0, rawFitness - pressurePenalty + engineBonus + surrogateExplorationBonus + compositionBias));
+  return Math.max(0, Math.min(1.0, rawFitness - pressurePenalty - quenchRatePenalty + engineBonus + surrogateExplorationBonus + compositionBias));
 }
 
 let gaAdaptationCalls = 0;

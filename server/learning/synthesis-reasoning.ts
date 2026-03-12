@@ -136,6 +136,9 @@ export async function analyzeThermodynamicLandscape(
   const meltingPointEstimate = meltingPoints.length > 0
     ? Math.round(meltingPoints.reduce((a, b) => a + b, 0) / meltingPoints.length)
     : 1500;
+  const minConstituentMeltingPoint = meltingPoints.length > 0
+    ? Math.min(...meltingPoints)
+    : 1500;
   let bulkModulusEstimate = bulkModuli.length > 0
     ? Math.round(bulkModuli.reduce((a, b) => a + b, 0))
     : 100;
@@ -207,7 +210,8 @@ export async function analyzeThermodynamicLandscape(
     : false;
 
   const meltingCelsius = meltingPointEstimate > 300 ? meltingPointEstimate - 273 : meltingPointEstimate;
-  let maxSynthesisTemp = Math.round(Math.min(1600, meltingCelsius * 0.65));
+  const minMeltCelsius = minConstituentMeltingPoint > 300 ? minConstituentMeltingPoint - 273 : minConstituentMeltingPoint;
+  let maxSynthesisTemp = Math.round(Math.min(1600, meltingCelsius * 0.65, minMeltCelsius * 0.9));
   if (isHydride) {
     maxSynthesisTemp = Math.min(maxSynthesisTemp, 300);
   }
@@ -254,48 +258,56 @@ const PROCESSING_TECHNIQUES = {
     coolingRates: "1e5 - 1e6 K/s",
     applicability: "metastable alloys, amorphous phases",
     maxTemp: 3000,
+    isHighPressureRequired: false,
   },
   mechanicalAlloying: {
     name: "High-Energy Ball Milling",
     coolingRates: "N/A (solid state)",
     applicability: "HEA, nanocrystalline, metastable intermetallics",
     maxTemp: 500,
+    isHighPressureRequired: false,
   },
   arcMelting: {
     name: "Arc Melting with Splat Quenching",
     coolingRates: "1e4 - 1e5 K/s",
     applicability: "refractory alloys, HEA, intermetallics",
     maxTemp: 4000,
+    isHighPressureRequired: false,
   },
   sputtering: {
     name: "Magnetron Sputtering (Thin Film)",
     coolingRates: "1e8 - 1e10 K/s effective",
     applicability: "metastable thin films, epitaxial phases",
     maxTemp: 1500,
+    isHighPressureRequired: false,
   },
   highPressureSynthesis: {
     name: "Diamond Anvil Cell / Multi-Anvil Press",
     coolingRates: "Variable (1-1000 K/s)",
     applicability: "hydrides, high-pressure phases, dense polymorphs",
     maxPressure: 300,
+    isHighPressureRequired: true,
   },
   solGel: {
     name: "Sol-Gel with Controlled Calcination",
     coolingRates: "1-10 K/min",
     applicability: "oxides, cuprates, perovskites",
     maxTemp: 1200,
+    isHighPressureRequired: false,
   },
   laserAblation: {
     name: "Pulsed Laser Deposition (PLD)",
     coolingRates: "1e9 - 1e11 K/s effective",
     applicability: "epitaxial thin films, metastable oxides",
     maxTemp: 3500,
+    isHighPressureRequired: false,
   },
   electrodeposition: {
     name: "Electrochemical Deposition",
     coolingRates: "N/A (room temperature)",
     applicability: "metallic alloys, HEA thin films, nanostructured metals",
     maxTemp: 100,
+    isHighPressureRequired: false,
   },
 };
 
