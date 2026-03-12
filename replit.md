@@ -766,6 +766,12 @@ MatSci-∞ is an AI-powered supercomputer platform dedicated to accelerating the
   - The `roomTempViable` DB field now uses `effectivePressure` (which incorporates the heuristic pressure enforcement for hydrides/etc.) instead of the raw LLM-claimed `c.pressureGpa`. Previously a hydride forced to 150 GPa by the heuristic but claimed as 0 GPa by the LLM could be incorrectly flagged as room-temp viable. The `isActuallyRoomTemp` check already used `effectivePressure`, so the redundant and buggy secondary check was removed.
 - **Competing Order Evaluation in Low-Metallicity Regime (superconductor-research.ts)**:
   - `computePairingSusceptibility` now evaluates competing magnetic orders for metallicity > 0.1 (was > 0.4). Materials in the 0.1–0.4 metallicity range — Mott-parent phases, doped antiferromagnets — receive a 1.3x proximity boost to the competing order score, reflecting that SC/AFM competition is fiercest near the metal-insulator boundary. This correctly captures cuprate/pnictide physics where superconductivity emerges from suppressed magnetic order.
+- **Family-Dependent Pairing Susceptibility Weights (superconductor-research.ts)**:
+  - `computePairingSusceptibility` scoring weights are now family-specific via `getFamilyWeights()`. Hydrides up-weight lambda (0.28) and softModeScore (0.14) since phonon coupling is the primary driver. Cuprates up-weight vanHoveProx (0.14), competingOrder (0.16), and nesting (0.16) to capture the d-wave, strong-correlation physics. Pnictides strongly up-weight nesting (0.20) as the primary Tc driver. Nickelates balance nesting, competing order, and vanHove. Default weights remain unchanged for unclassified families.
+- **Pairing Susceptibility Cache (superconductor-research.ts)**:
+  - `computePairingSusceptibility` results are now cached in a TTL-gated Map (120s TTL, max 500 entries with LRU eviction). Avoids redundant physics computation when the same formula is evaluated multiple times within a discovery cycle.
+- **Full Error Stack Traces (superconductor-research.ts)**:
+  - All three catch blocks (top-level novel SC, inner novel SC, inverse design) now send the full error object to `console.error` for internal debugging while keeping the UI-facing event log truncated to 200 chars.
 
 ## External Dependencies
 - **OpenAI**: For gpt-4o-mini (NLP,  ML refinement, knowledge base sourcing).

@@ -382,6 +382,7 @@ export async function runSuperconductorResearch(
       generated += novelResult;
     }
   } catch (err: any) {
+    console.error(`[SC Research] Top-level novel SC error:`, err);
     emit("log", { phase: "phase-7", event: "Novel SC generation error", detail: err.message?.slice(0, 200), dataSource: "SC Research" });
   }
 
@@ -699,19 +700,50 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
       });
     }
   } catch (err: any) {
+    console.error(`[SC Research] Novel SC generation error:`, err);
     emit("log", { phase: "phase-7", event: "Novel SC generation error", detail: err.message?.slice(0, 200), dataSource: "SC Research" });
   }
 
   return generated;
 }
 
-export function computePairingSusceptibility(formula: string): {
+type PairingSusceptibilityResult = {
   score: number;
   lambda: number;
   nestingFactor: number;
   dosAtEf: number;
   phononSoftness: number;
+};
+
+const pairingSusceptibilityCache = new Map<string, { result: PairingSusceptibilityResult; ts: number }>();
+const PAIRING_CACHE_TTL_MS = 120_000;
+
+function getFamilyWeights(formula: string): {
+  wLambda: number; wDos: number; wNesting: number; wCompeting: number;
+  wSoftMode: number; wVanHove: number; wBandFlat: number; wDim: number;
+  wOrbital: number; wMet: number;
 } {
+  const family = classifyFamily(formula);
+  switch (family) {
+    case "Hydrides":
+      return { wLambda: 0.28, wDos: 0.16, wNesting: 0.08, wCompeting: 0.08, wSoftMode: 0.14, wVanHove: 0.06, wBandFlat: 0.05, wDim: 0.04, wOrbital: 0.04, wMet: 0.07 };
+    case "Cuprates":
+      return { wLambda: 0.12, wDos: 0.14, wNesting: 0.16, wCompeting: 0.16, wSoftMode: 0.06, wVanHove: 0.14, wBandFlat: 0.06, wDim: 0.06, wOrbital: 0.06, wMet: 0.04 };
+    case "Pnictides":
+      return { wLambda: 0.14, wDos: 0.14, wNesting: 0.20, wCompeting: 0.14, wSoftMode: 0.08, wVanHove: 0.10, wBandFlat: 0.05, wDim: 0.05, wOrbital: 0.06, wMet: 0.04 };
+    case "Nickelates":
+      return { wLambda: 0.14, wDos: 0.15, wNesting: 0.15, wCompeting: 0.15, wSoftMode: 0.07, wVanHove: 0.12, wBandFlat: 0.06, wDim: 0.06, wOrbital: 0.06, wMet: 0.04 };
+    default:
+      return { wLambda: 0.22, wDos: 0.15, wNesting: 0.14, wCompeting: 0.12, wSoftMode: 0.10, wVanHove: 0.08, wBandFlat: 0.05, wDim: 0.05, wOrbital: 0.05, wMet: 0.04 };
+  }
+}
+
+export function computePairingSusceptibility(formula: string): PairingSusceptibilityResult {
+  const cached = pairingSusceptibilityCache.get(formula);
+  if (cached && (Date.now() - cached.ts) < PAIRING_CACHE_TTL_MS) {
+    return cached.result;
+  }
+
   const electronic = computeElectronicStructure(formula);
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
@@ -746,17 +778,19 @@ export function computePairingSusceptibility(formula: string): {
   const orbP = electronic.orbitalFractions?.p ?? 0;
   const orbitalCharScore = Math.min(1.0, orbD * 0.7 + orbP * 0.5);
 
+  const w = getFamilyWeights(formula);
+
   let score = (
-    Math.min(1.0, lambda / 2.5) * 0.22 +
-    dosWithPenalty * 0.15 +
-    nestingScore * 0.14 +
-    competingOrderProx * 0.12 +
-    softModeScore * 0.10 +
-    vanHoveProx * 0.08 +
-    bandFlat * 0.05 +
-    dimScore * 0.05 +
-    orbitalCharScore * 0.05 +
-    (electronic.metallicity > 0.7 ? 0.04 : electronic.metallicity * 0.04)
+    Math.min(1.0, lambda / 2.5) * w.wLambda +
+    dosWithPenalty * w.wDos +
+    nestingScore * w.wNesting +
+    competingOrderProx * w.wCompeting +
+    softModeScore * w.wSoftMode +
+    vanHoveProx * w.wVanHove +
+    bandFlat * w.wBandFlat +
+    dimScore * w.wDim +
+    orbitalCharScore * w.wOrbital +
+    (electronic.metallicity > 0.7 ? w.wMet : electronic.metallicity * w.wMet)
   );
 
   if (mottProx > 0.5 && mottProx < 0.8) {
@@ -775,10 +809,19 @@ export function computePairingSusceptibility(formula: string): {
   const stabilityFactor = fe < 0 ? 1.0 : Math.max(0.5, 1.0 - fe * 0.2);
   score *= stabilityFactor;
 
-  const nestingFactor = nestingScore;
-  const phononSoftness = softModeScore;
+  const result: PairingSusceptibilityResult = {
+    score: Math.min(1.0, score), lambda, nestingFactor: nestingScore, dosAtEf, phononSoftness: softModeScore,
+  };
 
-  return { score: Math.min(1.0, score), lambda, nestingFactor, dosAtEf, phononSoftness };
+  pairingSusceptibilityCache.set(formula, { result, ts: Date.now() });
+  if (pairingSusceptibilityCache.size > 500) {
+    const oldest = [...pairingSusceptibilityCache.entries()]
+      .sort((a, b) => a[1].ts - b[1].ts)
+      .slice(0, 100);
+    for (const [key] of oldest) pairingSusceptibilityCache.delete(key);
+  }
+
+  return result;
 }
 
 export function computeCompositionNovelty(formula: string): number {
@@ -995,6 +1038,7 @@ Return JSON with 'candidates' array: 'formula', 'name', 'predictedTc' (Kelvin), 
       });
     }
   } catch (err: any) {
+    console.error(`[SC Research] Inverse design error:`, err);
     emit("log", { phase: "phase-7", event: "Inverse design error", detail: err.message?.slice(0, 200), dataSource: "Inverse Design" });
   }
 
