@@ -157,7 +157,7 @@ async function trainEnsembleXGB(X: number[][], y: number[]): Promise<GBEnsemble>
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
     const nTrees = overrides.nTrees ?? (isOffloaded ? 100 : 300);
-    const model = trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
+    const model = await trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
     await new Promise<void>(r => setImmediate(r)); // yield between each XGB model
   }
@@ -181,7 +181,7 @@ async function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
     const nTrees = overrides.nTrees ?? (isOffloaded ? 70 : 200);
-    const model = trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
+    const model = await trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
     await new Promise<void>(r => setImmediate(r)); // yield between each variance model
   }
@@ -891,7 +891,7 @@ function predictTree(tree: TreeNode | number, x: number[]): number {
   return predictTree(tree.right, x);
 }
 
-function trainGradientBoosting(
+async function trainGradientBoosting(
   X: number[][],
   y: number[],
   nEstimators: number = 200,
@@ -947,6 +947,8 @@ function trainGradientBoosting(
   let prevTrainMSE = yVariance;
 
   for (let iter = 0; iter < nEstimators; iter++) {
+    if (iter > 0 && iter % 10 === 0) await new Promise<void>(r => setImmediate(r)); // yield every 10 trees
+
     const residuals = trainY.map((yi, i) => yi - trainPredictions[i]);
 
     const residualMSE = residuals.reduce((s, r) => s + r * r, 0) / nTrain;
@@ -1166,7 +1168,7 @@ export async function initPoolAsync(): Promise<void> {
     const { X, y } = trainingPool.getTrainingData();
     if (X.length >= 10) {
       const trainStart = Date.now();
-      cachedModel = trainGradientBoosting(X, y, 30, 0.12, 4);
+      cachedModel = await trainGradientBoosting(X, y, 30, 0.12, 4);
       cachedCalibration = await computeCalibration(cachedModel);
       await logModelVersion("phase1-training", X.length);
       console.log(`[GradientBoost] Phase 1 model: ${X.length} samples in ${Date.now() - trainStart}ms`);
@@ -1217,7 +1219,7 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
     const { X, y } = trainingPool.getTrainingData();
     if (X.length >= 10) {
       const trainStart = Date.now();
-      cachedModel = trainGradientBoosting(X, y, 45, 0.12, 4);
+      cachedModel = await trainGradientBoosting(X, y, 45, 0.12, 4);
       cachedCalibration = await computeCalibration(cachedModel);
       await logModelVersion("full-training", X.length);
       console.log(`[GradientBoost] Full model: ${X.length} samples in ${Date.now() - trainStart}ms`);
@@ -1268,7 +1270,7 @@ export async function getTrainedModel(): Promise<GBModel> {
     return cachedModel;
   }
 
-  cachedModel = trainGradientBoosting(X, y, 80, 0.08, 5);
+  cachedModel = await trainGradientBoosting(X, y, 80, 0.08, 5);
   cachedCalibration = await computeCalibration(cachedModel);
 
   if (!cachedEnsembleXGB && X.length >= 30) {
@@ -1880,7 +1882,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   const hpDepth = hp.maxDepth ?? 6;
 
   invalidateModel();
-  cachedModel = trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
+  cachedModel = await trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
   await new Promise<void>(r => setImmediate(r));
   cachedCalibration = await computeCalibration(cachedModel);
 
@@ -1907,7 +1909,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       `depth ${hpDepth}->${correctedDepth}, minSamples +3 to ${correctedMinSamples}`
     );
     invalidateModel();
-    cachedModel = trainGradientBoosting(X, y, hpTrees, correctedLR, correctedDepth);
+    cachedModel = await trainGradientBoosting(X, y, hpTrees, correctedLR, correctedDepth);
     await new Promise<void>(r => setImmediate(r));
     cachedCalibration = await computeCalibration(cachedModel);
     if (X.length >= 30) {
@@ -2071,7 +2073,7 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   if (X.length < 10) return 0;
 
   invalidateModel();
-  cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
+  cachedModel = await trainGradientBoosting(X, y, 300, 0.05, 6);
   await new Promise<void>(r => setImmediate(r));
   cachedCalibration = await computeCalibration(cachedModel);
   if (X.length >= 30) {
@@ -2124,7 +2126,7 @@ export async function incorporateFailureData(): Promise<number> {
     const { X, y } = trainingPool.getTrainingData();
 
     if (X.length >= 10) {
-      cachedModel = trainGradientBoosting(X, y, 300, 0.05, 6);
+      cachedModel = await trainGradientBoosting(X, y, 300, 0.05, 6);
       await new Promise<void>(r => setImmediate(r));
       cachedCalibration = await computeCalibration(cachedModel);
       if (X.length >= 30) {
