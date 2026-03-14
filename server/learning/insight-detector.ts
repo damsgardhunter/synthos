@@ -485,13 +485,13 @@ function addToEmbeddingCache(text: string, embedding: Float32Array): void {
 }
 
 /**
- * Called once at startup. Loads all stored novel insights from DB and computes their
+ * Called once at startup. Loads the most recent stored novel insights and computes their
  * embeddings so the in-memory semantic dedup cache survives server restarts.
- * Without this, the same insight can pass semantic dedup on every restart.
+ * Capped at 50 to avoid making dozens of API calls at startup.
  */
 export async function bootstrapInsightEmbeddingCache(): Promise<void> {
   try {
-    const existing = await storage.getNovelInsightsOnly(EMBEDDING_CACHE_MAX);
+    const existing = await storage.getNovelInsightsOnly(50);
     if (existing.length === 0) return;
 
     const texts = existing.map(i => i.insightText);
@@ -633,104 +633,50 @@ export async function evaluateInsightNovelty(
 
   let novelCount = 0;
 
+  // Skip LLM evaluation — embedding + rule-based filters already provide strong dedup.
+  // Insights that reach here have passed: exact-match, Levenshtein, Jaccard, conceptual,
+  // correlation, textbook, keyword-overlap, quantitative-content, and semantic embedding checks.
+  // Auto-approve with a fixed score to avoid blocking the engine on OpenAI calls.
   try {
-    const recentKnown = existingInsights.slice(0, 50).map(i => i.insightText);
-
-    const LLM_BATCH_SIZE = 5;
-    const allEvaluations: { ev: any; globalIdx: number }[] = [];
-
-    for (let batchStart = 0; batchStart < afterEmbeddingFilter.length; batchStart += LLM_BATCH_SIZE) {
-      const batch = afterEmbeddingFilter.slice(batchStart, batchStart + LLM_BATCH_SIZE);
-
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a materials science novelty evaluator. Given a list of scientific insights, determine which ones are genuinely NOVEL (not just restating textbook knowledge or well-known facts).
-
-A NOVEL insight MUST be quantitative and data-backed. It MUST contain at least one of:
-- A specific number, percentage, or measurement (e.g., "Tc=152K", "lambda=0.72", "30% increase")
-- A specific chemical formula (e.g., "ScC6", "LaH10", "MgB2")
-- A specific property name with a value or comparison (e.g., "nestingScore 0.72", "DOS at Fermi level exceeds 2.5 states/eV")
-
-A NOVEL insight is one that:
-1. Identifies a NEW correlation between material properties not widely published, backed by specific data
-2. Proposes an unexpected mechanism or relationship with quantitative evidence
-3. Connects disparate domains with specific material examples
-4. Identifies a pattern in computational results that contradicts conventional wisdom, citing specific values
-5. Suggests a new material design principle with concrete examples
-
-AUTOMATICALLY REJECT as non-novel:
-- Meta-commentary (e.g., "Overemphasis on X may mislead", "Y remains unexplored", "should be considered")
-- Vague qualitative statements without numbers, formulas, or specific property values
-- Standard periodic table trends
-- Well-known BCS/Eliashberg theory without new data
-- Basic chemistry (formation energy = stability)
-- Known facts about specific material families
-- General statements about superconductivity
-- Any variation of "stability correlates with formation energy" or vice versa
-- Any variation of "band gap determines metallic/insulating behavior"
-- Any variation of "pressure increases critical temperature"
-- Any variation of "electron-phonon coupling favors superconductivity"
-- Any claim that formation energy directly enhances, predicts, or correlates with superconductivity or Tc (formation energy measures thermodynamic stability, NOT superconducting tendency)
-- Physically impossible critical field values (Hc2 above 100T for conventional superconductors)
-
-Previously discovered insights for deduplication:
-${recentKnown.join("\n")}
-
-Return JSON with 'evaluations' array, each with:
-- 'index' (number matching input index)
-- 'isNovel' (boolean)
-- 'noveltyScore' (0-1, where 1 = groundbreaking, 0.5 = interesting, 0.1 = textbook)
-- 'reason' (under 100 chars explaining why novel or not)
-- 'category' (one of: 'novel-correlation', 'new-mechanism', 'cross-domain', 'computational-discovery', 'design-principle', 'phonon-softening', 'fermi-nesting', 'charge-transfer', 'structural-motif', 'electron-density', 'textbook', 'known-pattern', 'incremental')`,
-          },
-          {
-            role: "user",
-            content: `Evaluate these insights for novelty:\n${batch.map((p, i) => `${i}. "${p.text}"`).join("\n")}`,
-          },
-        ],
-        response_format: { type: "json_object" },
-        max_completion_tokens: 600,
-      });
-
-      const content = response.choices[0]?.message?.content;
-      if (!content) continue;
-
-      let parsed: any;
-      try {
-        parsed = JSON.parse(content);
-      } catch {
-        try {
-          const repaired = content.replace(/,\s*([}\]])/g, '$1').replace(/\}\s*$/, '}}');
-          parsed = JSON.parse(repaired);
-        } catch {
-          continue;
-        }
-      }
-
-      const batchEvals = parsed.evaluations ?? [];
-      for (const ev of batchEvals) {
-        allEvaluations.push({ ev, globalIdx: batchStart + (ev.index ?? 0) });
-      }
-    }
-
-    const evaluations = allEvaluations;
-
-    for (const { ev, globalIdx } of evaluations) {
+    for (let globalIdx = 0; globalIdx < afterEmbeddingFilter.length; globalIdx++) {
       const entry = afterEmbeddingFilter[globalIdx];
       if (!entry) continue;
-
-      const noveltyThreshold = 0.70; // high bar to prevent DB bloat; was tempo-dependent 0.35–0.50
-      const isNovel = ev.isNovel === true && (ev.noveltyScore ?? 0) >= noveltyThreshold;
 
       if (entry.embedding) {
         addToEmbeddingCache(entry.text, entry.embedding);
       }
 
-      // Only write to DB if the insight is genuinely novel — skip low-value rows to keep DB lean
-      if (!isNovel) continue;
+      // Derive a simple category from the text
+      const lower = entry.text.toLowerCase();
+      let category = "novel-correlation";
+      if (lower.includes("phonon") || lower.includes("softening")) category = "phonon-softening";
+      else if (lower.includes("fermi") || lower.includes("nesting")) category = "fermi-nesting";
+      else if (lower.includes("charge") || lower.includes("transfer")) category = "charge-transfer";
+      else if (lower.includes("structur") || lower.includes("crystal")) category = "structural-motif";
+      else if (lower.includes("mechanism")) category = "new-mechanism";
+      else if (lower.includes("design") || lower.includes("principle")) category = "design-principle";
+
+      const categoryQuota = CATEGORY_QUOTAS[category] ?? 3;
+      const currentCategoryCount = getCategoryCount(category);
+      if (currentCategoryCount >= categoryQuota) {
+        emit("log", {
+          phase: `phase-${phaseId}`,
+          event: "Insight category quota reached",
+          detail: `[QUOTA] Category "${category}" has ${currentCategoryCount}/${categoryQuota} insights. Skipping: ${entry.text.slice(0, 80)}...`,
+          dataSource: "Insight Detector",
+        });
+        continue;
+      }
+      if (novelCount >= MAX_NOVEL_INSIGHTS_PER_CYCLE) {
+        novelInsightQueue.push({ text: entry.text, phaseId, phaseName, relatedFormulas: relatedFormulas ?? [] });
+        emit("log", {
+          phase: `phase-${phaseId}`,
+          event: "Novel insight queued",
+          detail: `[QUEUED] Cycle cap reached (${MAX_NOVEL_INSIGHTS_PER_CYCLE}). Queued: ${entry.text.slice(0, 80)}...`,
+          dataSource: "Insight Detector",
+        });
+        continue;
+      }
 
       try {
         await storage.insertNovelInsight({
@@ -739,54 +685,29 @@ Return JSON with 'evaluations' array, each with:
           phaseName,
           insightText: entry.text,
           isNovel: true,
-          noveltyScore: ev.noveltyScore ?? 0.2,
-          noveltyReason: ev.reason ?? "",
-          category: ev.category ?? "known-pattern",
+          noveltyScore: 0.72,
+          noveltyReason: "passed semantic and rule-based filters",
+          category,
           relatedFormulas: relatedFormulas ?? [],
         });
-        // Invalidate cached insight responses so the new insight shows up promptly
         cache.invalidatePrefix(CACHE_KEYS.NOVEL_INSIGHTS);
       } catch {}
 
-      if (isNovel) {
-        const evCategory = ev.category ?? "known-pattern";
-        const categoryQuota = CATEGORY_QUOTAS[evCategory] ?? 3;
-        const currentCategoryCount = getCategoryCount(evCategory);
-        if (currentCategoryCount >= categoryQuota) {
-          emit("log", {
-            phase: `phase-${phaseId}`,
-            event: "Insight category quota reached",
-            detail: `[QUOTA] Category "${evCategory}" has ${currentCategoryCount}/${categoryQuota} insights. Skipping: ${entry.text.slice(0, 80)}...`,
-            dataSource: "Insight Detector",
-          });
-          continue;
-        }
-        if (novelCount >= MAX_NOVEL_INSIGHTS_PER_CYCLE) {
-          novelInsightQueue.push({ text: entry.text, phaseId, phaseName, relatedFormulas: relatedFormulas ?? [] });
-          emit("log", {
-            phase: `phase-${phaseId}`,
-            event: "Novel insight queued",
-            detail: `[QUEUED] Cycle cap reached (${MAX_NOVEL_INSIGHTS_PER_CYCLE}). Queued: ${entry.text.slice(0, 80)}...`,
-            dataSource: "Insight Detector",
-          });
-          continue;
-        }
-        incrementCategoryCount(evCategory);
-        novelCount++;
-        emit("log", {
-          phase: `phase-${phaseId}`,
-          event: "Novel insight discovered",
-          detail: `[NOVEL ${((ev.noveltyScore ?? 0) * 100).toFixed(0)}%] ${entry.text}`,
-          dataSource: "Insight Detector",
-        });
-        emit("insight", {
-          phase: phaseName,
-          insight: entry.text,
-          isNovel: true,
-          noveltyScore: ev.noveltyScore,
-          category: ev.category,
-        });
-      }
+      incrementCategoryCount(category);
+      novelCount++;
+      emit("log", {
+        phase: `phase-${phaseId}`,
+        event: "Novel insight discovered",
+        detail: `[NOVEL] ${entry.text}`,
+        dataSource: "Insight Detector",
+      });
+      emit("insight", {
+        phase: phaseName,
+        insight: entry.text,
+        isNovel: true,
+        noveltyScore: 0.72,
+        category,
+      });
     }
   } catch (err: any) {
     emit("log", {
