@@ -5,7 +5,7 @@
  */
 import { db } from "../server/db";
 import { storage } from "../server/storage";
-import { runFullDFT, isQEAvailable } from "../server/dft/qe-worker";
+import { runFullDFT } from "../server/dft/qe-worker";
 
 const POLL_INTERVAL_MS = 15_000;
 const MAX_CONCURRENT = 4; // 4 × 8 threads = 32 vCPUs
@@ -106,10 +106,8 @@ async function claimAndRunJob(): Promise<boolean> {
 }
 
 export async function startDFTLoop(): Promise<void> {
-  if (!isQEAvailable()) {
-    console.warn("[DFT-GCP] WARNING: Quantum ESPRESSO pw.x not found — DFT jobs will fail");
-  }
   console.log(`[DFT-GCP] Worker started — max ${MAX_CONCURRENT} concurrent jobs, poll every ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`[DFT-GCP] QE_BIN_DIR=${process.env.QE_BIN_DIR ?? "(auto)"}`);
 
   while (running) {
     try {
