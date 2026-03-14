@@ -1,0 +1,32 @@
+[Unit]
+Description=Quantum Alchemy Engine — GCP Worker (DFT + GNN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/quantum-alchemy
+EnvironmentFile=/etc/quantum-alchemy.env
+
+# tsx runs TypeScript directly — no build step needed
+ExecStart=/usr/bin/npx tsx gcp-worker/index.ts
+
+# Graceful shutdown: SIGTERM then SIGKILL after 35s
+TimeoutStopSec=35
+KillMode=control-group
+KillSignal=SIGTERM
+
+Restart=always
+RestartSec=10
+
+# Allow large GNN weight blobs in the journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quantum-alchemy-gcp
+
+# Increase open file limit for Postgres connections + QE tmp files
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
