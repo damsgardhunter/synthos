@@ -1,8 +1,8 @@
-import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { IS_WINDOWS, killProcessGracefully, spawnQE } from "./platform-utils";
 
-const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
+const QE_BIN_DIR = process.env.QE_BIN_DIR ?? (IS_WINDOWS ? "/usr/bin" : "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin");
 const BANDS_TIMEOUT_MS = 300_000;
 
 export interface KPointOnPath {
@@ -443,7 +443,7 @@ function mergeOrbitalWeights(eigenvalues: BandEigenvalue[], orbWeights: OrbitalW
 
 function runQEBands(binary: string, inputFile: string, workDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
-    const proc = spawn(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
+    const proc = spawnQE(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
 
@@ -454,7 +454,7 @@ function runQEBands(binary: string, inputFile: string, workDir: string): Promise
     proc.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
 
     const timeout = setTimeout(() => {
-      proc.kill("SIGKILL");
+      killProcessGracefully(proc);
       resolve({ stdout, stderr: stderr + "\nTIMEOUT: Band structure calculation exceeded time limit", exitCode: -1 });
     }, BANDS_TIMEOUT_MS);
 
@@ -1082,7 +1082,7 @@ export async function computeDFTBandStructure(
 
     console.log(`[BandCalc] Running pw.x bands for ${formula}`);
     const pwResult = await runQEBands(
-      path.join(QE_BIN_DIR, "pw.x"),
+      path.posix.join(QE_BIN_DIR, "pw.x"),
       bandsInputFile,
       jobDir,
     );
@@ -1102,7 +1102,7 @@ export async function computeDFTBandStructure(
 
     console.log(`[BandCalc] Running bands.x post-processing for ${formula}`);
     const bandsXResult = await runQEBands(
-      path.join(QE_BIN_DIR, "bands.x"),
+      path.posix.join(QE_BIN_DIR, "bands.x"),
       bandsPostFile,
       jobDir,
     );
@@ -1121,7 +1121,7 @@ export async function computeDFTBandStructure(
 
     if (parsed.eigenvalues.length > 0 && parsed.nBands > 0) {
       try {
-        const projwfcBin = path.join(QE_BIN_DIR, "projwfc.x");
+        const projwfcBin = path.posix.join(QE_BIN_DIR, "projwfc.x");
         if (fs.existsSync(projwfcBin)) {
           const projInput = generateProjwfcInput(formula);
           const projInputFile = path.join(jobDir, "projwfc.in");

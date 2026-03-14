@@ -19,7 +19,7 @@ import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity, matchPrototype } from "./structure-predictor";
 import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
-import { evaluateInsightNovelty, requiresQuantitativeContent, type InsightTempo } from "./insight-detector";
+import { evaluateInsightNovelty, requiresQuantitativeContent, bootstrapInsightEmbeddingCache, type InsightTempo } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
@@ -48,7 +48,7 @@ import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-gen
 import { enumeratePrototypesForFormula, type PrototypeEnumResult } from "./crystal-prototypes";
 import { generatePrototypeFreeStructures, getLatticeGeneratorStats, seedEvoPopulation, addToEvoPopulation, runEvolutionaryGeneration, getEvoPopulationSummary, type GeneratedStructure } from "../crystal/lattice-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { runActiveLearningCycle, getActiveLearningStats } from "./active-learning";
+import { runActiveLearningCycle, getActiveLearningStats, runModelBenchmarks, startGCPWeightPoller } from "./active-learning";
 import { predictPressureCurve, findOptimalPressure, getPressureCurveStats } from "./pressure-aware-surrogate";
 import { findStabilityPressureWindow, getEnthalpyStats } from "./enthalpy-stability";
 import { buildPressureResponseProfile, getPressurePropertyMapStats } from "./pressure-property-map";
@@ -486,6 +486,14 @@ let wss: WebSocketServer | null = null;
 let state: EngineState = "stopped";
 let cycleTimer: ReturnType<typeof setTimeout> | null = null;
 let cycleCount = 0;
+
+// Minimum converged DFT/xTB samples before insight discovery runs.
+// Below this threshold the GNN is unreliable, so insights are noise and bloat the DB.
+const MIN_DFT_FOR_INSIGHTS = 50;
+function hasSufficientDFTData(): boolean {
+  const s = getEvaluatedDatasetStats();
+  return (s.bySource.dft + s.bySource.xtb) >= MIN_DFT_FOR_INSIGHTS;
+}
 let totalMaterialsFetched = 0;
 let totalInsightsGenerated = 0;
 let totalPredictionsMade = 0;
@@ -1052,7 +1060,9 @@ async function runPhase3_Bonding() {
     await addInsightsToPhase(3, insights);
     if (!shouldContinue()) return;
     const formulas = mats.slice(0, 5).map(m => m.formula);
-    await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas, engineTempo as InsightTempo);
+    if (hasSufficientDFTData()) {
+      await evaluateInsightNovelty(emit, insights, 3, "Chemical Bonding", formulas, engineTempo as InsightTempo);
+    }
     if (!shouldContinue()) return;
     const phase3 = await storage.getLearningPhaseById(3);
     const totalBondingInsights = (phase3?.insights ?? []).length;
@@ -1072,11 +1082,10 @@ async function runPhase4_Materials() {
     await updatePhaseStatus(4, "active", 0, 0);
     if (!shouldContinue()) return;
 
-    const [oqmdCount, elementCount, knownCount] = await Promise.all([
-      fetchOQMDMaterials(emit, 10, getNextOQMDOffset()),
-      fetchElementFocusedMaterials(emit),
-      fetchKnownMaterials(emit),
-    ]);
+    // Sequential fetches to avoid simultaneous OQMD + 2x OpenAI calls crashing the network
+    const oqmdCount = await fetchOQMDMaterials(emit, 10, getNextOQMDOffset());
+    const elementCount = await fetchElementFocusedMaterials(emit);
+    const knownCount = await fetchKnownMaterials(emit);
     if (!shouldContinue()) return;
 
     const total = oqmdCount + elementCount + knownCount;
@@ -1108,7 +1117,9 @@ async function runPhase5_Prediction() {
 
     await addInsightsToPhase(5, insights);
     const predFormulas = mats.slice(0, 5).map(m => m.formula);
-    await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas, engineTempo as InsightTempo);
+    if (hasSufficientDFTData()) {
+      await evaluateInsightNovelty(emit, insights, 5, "Property Prediction", predFormulas, engineTempo as InsightTempo);
+    }
 
     if (shouldContinue() && mats.length > 0) {
       try {
@@ -1141,7 +1152,10 @@ async function runPhase6_Discovery() {
     await updatePhaseStatus(6, "active", prevProgress, prevPredCount + totalPredictionsMade);
     if (!shouldContinue()) return;
 
-    const generated = await generateNovelFormulas(emit, allInsights.slice(-10), undefined, currentStrategyHint || undefined, rlAgent.getStats().rejectionCategories);
+    let generated = 0;
+    if (hasSufficientDFTData()) {
+      generated = await generateNovelFormulas(emit, allInsights.slice(-10), undefined, currentStrategyHint || undefined, rlAgent.getStats().rejectionCategories);
+    }
     totalPredictionsMade += generated;
 
     const predCount = (await storage.getNovelPredictions()).length;
@@ -1184,7 +1198,9 @@ async function runPhase7_Superconductor() {
 
     await addInsightsToPhase(7, result.insights);
     if (!shouldContinue()) return;
-    await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research", undefined, engineTempo as InsightTempo);
+    if (hasSufficientDFTData()) {
+      await evaluateInsightNovelty(emit, result.insights, 7, "Superconductor Research", undefined, engineTempo as InsightTempo);
+    }
     if (!shouldContinue()) return;
 
     if (cycleCount % 5 === 0 && shouldContinue()) {
@@ -1818,7 +1834,11 @@ function scheduleWriteQueueFlush(): void {
   if (writeQueueFlushTimer) return;
   writeQueueFlushTimer = setTimeout(async () => {
     writeQueueFlushTimer = null;
-    await flushCandidateWriteQueue();
+    try {
+      await flushCandidateWriteQueue();
+    } catch (err: any) {
+      console.error("[Engine] flushCandidateWriteQueue error:", err?.message);
+    }
   }, WRITE_QUEUE_FLUSH_INTERVAL_MS);
 }
 
@@ -7222,6 +7242,15 @@ async function runLearningCycle() {
         }
       }
 
+      // ── Reference benchmark: GNN + XGBoost + Ensemble every 10 cycles ──────
+      if (state === "running" && cycleCount % 10 === 0) {
+        try {
+          await runModelBenchmarks(emit, cycleCount);
+        } catch (benchErr: any) {
+          console.error("[Benchmark] Failed:", benchErr?.message?.slice(0, 120));
+        }
+      }
+
       if (state === "running" && cycleCount % 10 === 0) {
         try {
           const topForMutation = await storage.getSuperconductorCandidatesByTc(10);
@@ -8110,10 +8139,15 @@ async function backfillGBScores() {
   try {
     let totalUpdated = 0;
     let totalFailed = 0;
+    let batchNum = 0;
     let batch: any[];
     do {
       batch = await storage.getUnscoredCandidates(50);
       if (batch.length === 0) break;
+      batchNum++;
+      if (batchNum === 1) {
+        emit("log", { phase: "engine", event: "GB score backfill running", detail: `Scoring unscored candidates with gradient boosting model...`, dataSource: "Internal" });
+      }
 
       for (let i = 0; i < batch.length; i++) {
         if (i % 5 === 0) await yield_();
@@ -8161,9 +8195,14 @@ async function recalculatePhysics() {
     let totalRecalculated = 0;
     const batchSize = 50;
 
+    let physBatchNum = 0;
     while (true) {
       const needsRecalc = await storage.getCandidatesNeedingPhysicsRecalc(PHYSICS_VERSION, batchSize);
       if (needsRecalc.length === 0) break;
+      physBatchNum++;
+      if (physBatchNum === 1) {
+        emit("log", { phase: "engine", event: "Physics recalculation running", detail: `Recalculating Tc and ensemble scores for candidates on physics version ${PHYSICS_VERSION}...`, dataSource: "Internal" });
+      }
 
       for (let i = 0; i < needsRecalc.length; i++) {
         if (i % 5 === 0) await yield_();
@@ -8243,6 +8282,13 @@ export async function startEngine() {
   if (state === "running") return getStatus();
   state = "running";
   broadcast("engineState", { state: "running" });
+
+  // Restore the in-memory semantic dedup cache from DB so insights already
+  // seen before the last restart don't slip through as "novel" again.
+  bootstrapInsightEmbeddingCache().catch(() => {});
+
+  // Background poller: applies GNN weights from GCP when training jobs complete.
+  startGCPWeightPoller();
 
   setCuriosityProvider(() => {
     const stats = getGeneratorCompetitionStats();
@@ -8377,7 +8423,7 @@ export async function startEngine() {
           fermiSeeded++;
         } catch (e) { console.error(`[Engine] Fermi cluster seed failed for ${c.formula}:`, e); }
       }
-      if (i % 10 === 0) await yieldLoop();
+      if (i % 5 === 0) await yieldLoop();
     }
     if (topoSeeded > 0 || fermiSeeded > 0) {
       const topoStats = getTopologyStats();
@@ -8571,7 +8617,8 @@ export async function startEngine() {
   });
 
   if (!isRunningCycle) {
-    setTimeout(runLearningCycle, 2000);
+    // Longer delay so startup I/O (topology seeding, feature backfill, etc.) fully settles
+    setTimeout(runLearningCycle, 8000);
   }
   return getStatus();
 }

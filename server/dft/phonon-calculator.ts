@@ -4,14 +4,15 @@ import * as os from "os";
 import * as path from "path";
 import { promisify } from "util";
 import { getElementData } from "../learning/elemental-data";
+import { binaryPath, getTempSubdir } from "./platform-utils";
 
 const execAsync = promisify(exec);
 
 const PROJECT_ROOT = path.resolve(process.cwd());
-const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
+const XTB_BIN = binaryPath(path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
-const WORK_DIR = "/tmp/dft_calculations";
+const WORK_DIR = getTempSubdir("dft_calculations");
 const DEFAULT_DISPLACEMENT_DELTA = 0.015;
 const BOHR_TO_ANG = 0.529177210903;
 const AMU_TO_ELECTRONMASS = 1822.888486209;
@@ -154,7 +155,7 @@ function runXTBSinglePoint(atoms: AtomPosition[], parentCalcDir: string, label: 
       ...process.env as Record<string, string>,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "512M",
     };
 
@@ -272,7 +273,7 @@ function runXTBSinglePointAsync(atoms: AtomPosition[], parentCalcDir: string, la
       ...process.env as Record<string, string>,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "512M",
     };
 

@@ -65,6 +65,29 @@ function connectWS() {
   ws.onopen = () => {
     reconnectAttempts = 0;
     updateState({ connected: true });
+    // Seed the activity feed with recent log history so it's not empty on connect/reconnect
+    fetch("/api/research-logs?limit=20")
+      .then((r) => r.json())
+      .then((logs: any[]) => {
+        if (!Array.isArray(logs) || logs.length === 0) return;
+        // Convert DB log format to WSMessage format, oldest first
+        const historical: WSMessage[] = logs.reverse().map((log) => ({
+          type: "log",
+          data: { phase: log.phase, event: log.event, detail: log.detail, dataSource: log.dataSource },
+          timestamp: log.timestamp ?? new Date().toISOString(),
+        }));
+        // Merge: historical first, then any live messages already received, deduplicate by timestamp+event
+        const seen = new Set<string>();
+        const merged = [...historical, ...globalState.messages].filter((m) => {
+          const key = `${m.timestamp}::${m.data?.event ?? m.type}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        globalState.messages = merged.slice(-100);
+        notifyListeners();
+      })
+      .catch(() => {});
   };
 
   ws.onmessage = (event) => {

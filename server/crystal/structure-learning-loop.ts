@@ -147,13 +147,14 @@ export async function runStructureLearningCycle(
       retrainedModels.push("structure-predictor-ml");
     } catch {}
 
+    // Stagger VAE and diffusion model training so they don't compete for the event loop simultaneously
     try {
-      initCrystalVAE();
+      setTimeout(() => { initCrystalVAE().catch(() => {}); }, 5000);
       retrainedModels.push("crystal-vae");
     } catch {}
 
     try {
-      initDiffusionModel();
+      setTimeout(() => { initDiffusionModel().catch(() => {}); }, 15000);
       retrainedModels.push("crystal-diffusion-model");
     } catch {}
 

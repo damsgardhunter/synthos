@@ -4,7 +4,7 @@ import {
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
   researchStrategies, convergenceSnapshots, milestones,
-  experimentalValidations, inverseDesignCampaigns, dftJobs
+  experimentalValidations, inverseDesignCampaigns, dftJobs, gnnTrainingJobs
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -17,7 +17,8 @@ import type {
   InsertResearchStrategy, InsertConvergenceSnapshot, InsertMilestone,
   ExperimentalValidation, InsertExperimentalValidation,
   InverseDesignCampaign, InsertInverseDesignCampaign,
-  DftJob, InsertDftJob
+  DftJob, InsertDftJob,
+  GnnTrainingJob, InsertGnnTrainingJob
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike, isNull, inArray, and, or, gt } from "drizzle-orm";
 
@@ -61,6 +62,7 @@ export interface IStorage {
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
   bulkUpdateSuperconductorCandidates(batch: Array<{ id: string; updates: Partial<InsertSuperconductorCandidate> }>): Promise<number>;
   getSuperconductorCount(): Promise<number>;
+  getConfidenceBreakdown(): Promise<{ high: number; medium: number; total: number; recentEnriched: Pick<SuperconductorCandidate, 'formula' | 'dataConfidence' | 'ensembleScore' | 'predictedTc'>[] }>;
   getGlobalTcStats(): Promise<{ count: number; median: number; p25: number; p75: number }>;
   getSuperconductorsByStage(stage: number, limit?: number): Promise<SuperconductorCandidate[]>;
 
@@ -136,6 +138,12 @@ export interface IStorage {
   getDftJob(id: number): Promise<DftJob | undefined>;
   getQueuedDftJobs(limit?: number): Promise<DftJob[]>;
   updateDftJob(id: number, updates: Partial<DftJob>): Promise<void>;
+
+  insertGnnTrainingJob(job: InsertGnnTrainingJob): Promise<GnnTrainingJob>;
+  getGnnTrainingJob(id: number): Promise<GnnTrainingJob | undefined>;
+  getQueuedGnnTrainingJob(): Promise<GnnTrainingJob | undefined>;
+  updateGnnTrainingJob(id: number, updates: Partial<GnnTrainingJob>): Promise<void>;
+  getLatestCompletedGnnJob(): Promise<GnnTrainingJob | undefined>;
   updateDftJobIfStatus(id: number, expectedStatus: string, updates: Partial<DftJob>): Promise<boolean>;
   getDftJobsByFormula(formula: string): Promise<DftJob[]>;
   hasActiveOrRecentFailedDftJobs(formula: string): Promise<{ activeJob: DftJob | null; recentValidatedFailures: number }>;
@@ -398,6 +406,37 @@ export class DatabaseStorage implements IStorage {
     return Number(count);
   }
 
+  async getConfidenceBreakdown(): Promise<{ high: number; medium: number; total: number; recentEnriched: Pick<SuperconductorCandidate, 'formula' | 'dataConfidence' | 'ensembleScore' | 'predictedTc'>[] }> {
+    const [counts, recent] = await Promise.all([
+      db.select({
+        confidence: superconductorCandidates.dataConfidence,
+        count: sql<number>`count(*)`,
+      })
+        .from(superconductorCandidates)
+        .groupBy(superconductorCandidates.dataConfidence),
+      db.select({
+        formula: superconductorCandidates.formula,
+        dataConfidence: superconductorCandidates.dataConfidence,
+        ensembleScore: superconductorCandidates.ensembleScore,
+        predictedTc: superconductorCandidates.predictedTc,
+      })
+        .from(superconductorCandidates)
+        .where(sql`${superconductorCandidates.dataConfidence} IN ('high','dft-verified','medium')`)
+        .orderBy(sql`${superconductorCandidates.id} DESC`)
+        .limit(10),
+    ]);
+
+    let high = 0, medium = 0, total = 0;
+    for (const row of counts) {
+      const n = Number(row.count);
+      total += n;
+      if (row.confidence === 'high' || row.confidence === 'dft-verified') high += n;
+      else if (row.confidence === 'medium') medium += n;
+    }
+
+    return { high, medium, total, recentEnriched: recent };
+  }
+
   async getGlobalTcStats(): Promise<{ count: number; median: number; p25: number; p75: number }> {
     const rows = await db.select({ tc: superconductorCandidates.predictedTc })
       .from(superconductorCandidates)
@@ -522,7 +561,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getNovelInsightCount(): Promise<number> {
-    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(novelInsights);
+    // Use Postgres's fast statistics estimate (instant) instead of COUNT(*) (full scan)
+    try {
+      const [row] = await db.execute(sql`
+        SELECT reltuples::bigint AS estimate
+        FROM pg_class
+        WHERE relname = 'novel_insights'
+      `);
+      const est = Number((row as any)?.estimate ?? 0);
+      if (est >= 0) return est;
+    } catch {}
+    // Fallback: capped count so we never do a full scan
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(novelInsights).limit(10000);
     return Number(count);
   }
 
@@ -841,6 +891,36 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(dftJobs)
       .orderBy(desc(dftJobs.createdAt))
       .limit(limit);
+  }
+
+  async insertGnnTrainingJob(job: InsertGnnTrainingJob): Promise<GnnTrainingJob> {
+    const [row] = await db.insert(gnnTrainingJobs).values(job).returning();
+    return row;
+  }
+
+  async getGnnTrainingJob(id: number): Promise<GnnTrainingJob | undefined> {
+    const [row] = await db.select().from(gnnTrainingJobs).where(eq(gnnTrainingJobs.id, id));
+    return row;
+  }
+
+  async getQueuedGnnTrainingJob(): Promise<GnnTrainingJob | undefined> {
+    const [row] = await db.select().from(gnnTrainingJobs)
+      .where(eq(gnnTrainingJobs.status, "queued"))
+      .orderBy(asc(gnnTrainingJobs.createdAt))
+      .limit(1);
+    return row;
+  }
+
+  async updateGnnTrainingJob(id: number, updates: Partial<GnnTrainingJob>): Promise<void> {
+    await db.update(gnnTrainingJobs).set(updates).where(eq(gnnTrainingJobs.id, id));
+  }
+
+  async getLatestCompletedGnnJob(): Promise<GnnTrainingJob | undefined> {
+    const [row] = await db.select().from(gnnTrainingJobs)
+      .where(eq(gnnTrainingJobs.status, "done"))
+      .orderBy(desc(gnnTrainingJobs.completedAt))
+      .limit(1);
+    return row;
   }
 }
 

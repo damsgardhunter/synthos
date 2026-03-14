@@ -22,6 +22,9 @@ export interface ElementalProperties {
   meltingPoint: number | null;
   latticeConstant: number | null;
   pressureDebyeTemp?: number | null;
+  density?: number | null;
+  thermalConductivity?: number | null;
+  atomicVolume?: number | null;
 }
 
 export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
@@ -254,7 +257,8 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
     atomicRadius: 134, pettiforScale: 52, valenceElectrons: 5,
     paulingElectronegativity: 1.63, electronAffinity: 0.525, firstIonizationEnergy: 6.746,
     elementalTc: 5.40,
-    meltingPoint: 2183, latticeConstant: 3.02
+    meltingPoint: 2183, latticeConstant: 3.02,
+    density: 6.11, thermalConductivity: 30.7, atomicVolume: 8.35
   },
   Cr: {
     symbol: "Cr", atomicNumber: 24, atomicMass: 51.996,
@@ -988,8 +992,117 @@ export const ELEMENTAL_DATA: Record<string, ElementalProperties> = {
   },
 };
 
+// density (g/cm³), thermalConductivity (W/m·K), atomicVolume (cm³/mol)
+const ELEMENT_PHYSICAL_DATA: Record<string, { density: number; thermalConductivity: number; atomicVolume: number }> = {
+  H:  { density: 0.090,  thermalConductivity: 0.180,  atomicVolume: 11.42 },
+  He: { density: 0.179,  thermalConductivity: 0.152,  atomicVolume: 27.20 },
+  Li: { density: 0.534,  thermalConductivity: 84.8,   atomicVolume: 13.00 },
+  Be: { density: 1.848,  thermalConductivity: 200.0,  atomicVolume: 4.88  },
+  B:  { density: 2.340,  thermalConductivity: 27.0,   atomicVolume: 4.62  },
+  C:  { density: 2.267,  thermalConductivity: 119.0,  atomicVolume: 5.29  },
+  N:  { density: 1.251,  thermalConductivity: 0.026,  atomicVolume: 17.30 },
+  O:  { density: 1.429,  thermalConductivity: 0.027,  atomicVolume: 14.00 },
+  F:  { density: 1.696,  thermalConductivity: 0.028,  atomicVolume: 17.10 },
+  Ne: { density: 0.900,  thermalConductivity: 0.049,  atomicVolume: 16.90 },
+  Na: { density: 0.971,  thermalConductivity: 142.0,  atomicVolume: 23.70 },
+  Mg: { density: 1.738,  thermalConductivity: 156.0,  atomicVolume: 14.00 },
+  Al: { density: 2.698,  thermalConductivity: 237.0,  atomicVolume: 10.00 },
+  Si: { density: 2.329,  thermalConductivity: 150.0,  atomicVolume: 12.10 },
+  P:  { density: 1.823,  thermalConductivity: 0.236,  atomicVolume: 17.00 },
+  S:  { density: 2.067,  thermalConductivity: 0.269,  atomicVolume: 15.50 },
+  Cl: { density: 3.214,  thermalConductivity: 0.009,  atomicVolume: 18.70 },
+  Ar: { density: 1.784,  thermalConductivity: 0.018,  atomicVolume: 24.20 },
+  K:  { density: 0.862,  thermalConductivity: 102.5,  atomicVolume: 45.40 },
+  Ca: { density: 1.550,  thermalConductivity: 201.0,  atomicVolume: 26.20 },
+  Sc: { density: 2.985,  thermalConductivity: 15.8,   atomicVolume: 15.00 },
+  Ti: { density: 4.507,  thermalConductivity: 21.9,   atomicVolume: 10.60 },
+  V:  { density: 6.110,  thermalConductivity: 30.7,   atomicVolume: 8.35  },
+  Cr: { density: 7.150,  thermalConductivity: 93.9,   atomicVolume: 7.23  },
+  Mn: { density: 7.300,  thermalConductivity: 7.81,   atomicVolume: 7.39  },
+  Fe: { density: 7.874,  thermalConductivity: 80.4,   atomicVolume: 7.11  },
+  Co: { density: 8.900,  thermalConductivity: 100.0,  atomicVolume: 6.67  },
+  Ni: { density: 8.908,  thermalConductivity: 90.9,   atomicVolume: 6.59  },
+  Cu: { density: 8.960,  thermalConductivity: 401.0,  atomicVolume: 7.11  },
+  Zn: { density: 7.134,  thermalConductivity: 116.0,  atomicVolume: 9.16  },
+  Ga: { density: 5.907,  thermalConductivity: 40.6,   atomicVolume: 11.80 },
+  Ge: { density: 5.323,  thermalConductivity: 60.2,   atomicVolume: 13.60 },
+  As: { density: 5.727,  thermalConductivity: 50.2,   atomicVolume: 13.10 },
+  Se: { density: 4.809,  thermalConductivity: 0.520,  atomicVolume: 16.50 },
+  Br: { density: 3.102,  thermalConductivity: 0.122,  atomicVolume: 19.80 },
+  Kr: { density: 3.749,  thermalConductivity: 0.009,  atomicVolume: 38.90 },
+  Rb: { density: 1.532,  thermalConductivity: 58.2,   atomicVolume: 55.90 },
+  Sr: { density: 2.630,  thermalConductivity: 35.4,   atomicVolume: 34.50 },
+  Y:  { density: 4.472,  thermalConductivity: 17.2,   atomicVolume: 19.90 },
+  Zr: { density: 6.511,  thermalConductivity: 22.6,   atomicVolume: 14.00 },
+  Nb: { density: 8.570,  thermalConductivity: 53.7,   atomicVolume: 10.80 },
+  Mo: { density: 10.22,  thermalConductivity: 138.0,  atomicVolume: 9.38  },
+  Tc: { density: 11.00,  thermalConductivity: 50.6,   atomicVolume: 8.63  },
+  Ru: { density: 12.37,  thermalConductivity: 117.0,  atomicVolume: 8.17  },
+  Rh: { density: 12.41,  thermalConductivity: 150.0,  atomicVolume: 8.28  },
+  Pd: { density: 12.02,  thermalConductivity: 71.8,   atomicVolume: 8.85  },
+  Ag: { density: 10.50,  thermalConductivity: 429.0,  atomicVolume: 10.30 },
+  Cd: { density: 8.650,  thermalConductivity: 96.6,   atomicVolume: 13.00 },
+  In: { density: 7.310,  thermalConductivity: 81.8,   atomicVolume: 15.80 },
+  Sn: { density: 7.265,  thermalConductivity: 66.8,   atomicVolume: 16.30 },
+  Sb: { density: 6.697,  thermalConductivity: 24.4,   atomicVolume: 18.20 },
+  Te: { density: 6.240,  thermalConductivity: 3.00,   atomicVolume: 20.50 },
+  I:  { density: 4.933,  thermalConductivity: 0.449,  atomicVolume: 25.70 },
+  Xe: { density: 5.894,  thermalConductivity: 0.006,  atomicVolume: 37.30 },
+  Cs: { density: 1.873,  thermalConductivity: 35.9,   atomicVolume: 70.90 },
+  Ba: { density: 3.594,  thermalConductivity: 18.4,   atomicVolume: 39.00 },
+  La: { density: 6.145,  thermalConductivity: 13.4,   atomicVolume: 22.60 },
+  Ce: { density: 6.770,  thermalConductivity: 11.4,   atomicVolume: 20.70 },
+  Pr: { density: 6.770,  thermalConductivity: 12.5,   atomicVolume: 20.80 },
+  Nd: { density: 7.010,  thermalConductivity: 16.5,   atomicVolume: 20.60 },
+  Pm: { density: 7.264,  thermalConductivity: 17.9,   atomicVolume: 20.20 },
+  Sm: { density: 7.520,  thermalConductivity: 13.3,   atomicVolume: 20.00 },
+  Eu: { density: 5.244,  thermalConductivity: 13.9,   atomicVolume: 28.90 },
+  Gd: { density: 7.900,  thermalConductivity: 10.6,   atomicVolume: 19.90 },
+  Tb: { density: 8.229,  thermalConductivity: 11.1,   atomicVolume: 19.30 },
+  Dy: { density: 8.550,  thermalConductivity: 10.7,   atomicVolume: 19.00 },
+  Ho: { density: 8.795,  thermalConductivity: 16.2,   atomicVolume: 18.70 },
+  Er: { density: 9.066,  thermalConductivity: 14.5,   atomicVolume: 18.40 },
+  Tm: { density: 9.321,  thermalConductivity: 16.9,   atomicVolume: 18.10 },
+  Yb: { density: 6.966,  thermalConductivity: 38.5,   atomicVolume: 24.80 },
+  Lu: { density: 9.841,  thermalConductivity: 16.4,   atomicVolume: 17.80 },
+  Hf: { density: 13.31,  thermalConductivity: 23.0,   atomicVolume: 13.40 },
+  Ta: { density: 16.65,  thermalConductivity: 57.5,   atomicVolume: 10.90 },
+  W:  { density: 19.25,  thermalConductivity: 173.0,  atomicVolume: 9.53  },
+  Re: { density: 21.02,  thermalConductivity: 47.9,   atomicVolume: 8.86  },
+  Os: { density: 22.59,  thermalConductivity: 87.6,   atomicVolume: 8.42  },
+  Ir: { density: 22.56,  thermalConductivity: 147.0,  atomicVolume: 8.52  },
+  Pt: { density: 21.45,  thermalConductivity: 71.6,   atomicVolume: 9.10  },
+  Au: { density: 19.30,  thermalConductivity: 318.0,  atomicVolume: 10.20 },
+  Hg: { density: 13.53,  thermalConductivity: 8.30,   atomicVolume: 14.80 },
+  Tl: { density: 11.85,  thermalConductivity: 46.1,   atomicVolume: 17.20 },
+  Pb: { density: 11.34,  thermalConductivity: 35.3,   atomicVolume: 18.30 },
+  Bi: { density: 9.780,  thermalConductivity: 7.97,   atomicVolume: 21.30 },
+  Po: { density: 9.320,  thermalConductivity: 20.0,   atomicVolume: 22.40 },
+  At: { density: 7.000,  thermalConductivity: 2.0,    atomicVolume: 22.00 },
+  Rn: { density: 9.730,  thermalConductivity: 0.004,  atomicVolume: 50.50 },
+  Fr: { density: 1.870,  thermalConductivity: 15.0,   atomicVolume: 45.00 },
+  Ra: { density: 5.000,  thermalConductivity: 18.6,   atomicVolume: 45.20 },
+  Ac: { density: 10.07,  thermalConductivity: 12.0,   atomicVolume: 22.50 },
+  Th: { density: 11.72,  thermalConductivity: 54.0,   atomicVolume: 19.90 },
+  Pa: { density: 15.37,  thermalConductivity: 47.0,   atomicVolume: 15.00 },
+  U:  { density: 19.05,  thermalConductivity: 27.5,   atomicVolume: 12.50 },
+  Np: { density: 20.25,  thermalConductivity: 6.30,   atomicVolume: 11.60 },
+  Pu: { density: 19.86,  thermalConductivity: 6.74,   atomicVolume: 12.30 },
+  Am: { density: 13.67,  thermalConductivity: 10.0,   atomicVolume: 17.60 },
+  Cm: { density: 13.51,  thermalConductivity: 10.0,   atomicVolume: 18.30 },
+};
+
 export function getElementData(symbol: string): ElementalProperties | null {
-  return ELEMENTAL_DATA[symbol] ?? null;
+  const base = ELEMENTAL_DATA[symbol];
+  if (!base) return null;
+  const phys = ELEMENT_PHYSICAL_DATA[symbol];
+  if (!phys) return base;
+  return {
+    ...base,
+    density: base.density ?? phys.density,
+    thermalConductivity: base.thermalConductivity ?? phys.thermalConductivity,
+    atomicVolume: base.atomicVolume ?? phys.atomicVolume,
+  };
 }
 
 export function getCompositionWeightedProperty(

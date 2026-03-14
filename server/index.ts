@@ -62,6 +62,14 @@ app.use((req, res, next) => {
   next();
 });
 
+process.on("uncaughtException", (err) => {
+  console.error("[process] uncaughtException:", err?.message, err?.stack?.slice(0, 800));
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[process] unhandledRejection:", reason instanceof Error ? reason.message : reason);
+});
+
 (async () => {
   const port = parseInt(process.env.PORT || "5000", 10);
 
@@ -188,6 +196,12 @@ app.use((req, res, next) => {
           }
           log(`Trimmed research_logs from ${totalLogs} to ~10000`, "startup");
         }
+      } catch {}
+
+      try {
+        const purged = await db.execute(sql`DELETE FROM novel_insights WHERE novelty_score < 0.35 OR is_novel = false`);
+        const purgedCount = purged.rowCount ?? 0;
+        if (purgedCount > 0) log(`Purged ${purgedCount} low-quality novel_insights rows (novelty_score < 0.35 or is_novel=false)`, "startup");
       } catch {}
 
       setTimeout(async () => {

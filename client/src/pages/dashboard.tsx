@@ -1892,7 +1892,7 @@ export default function Dashboard() {
   const { data: novelInsightData } = useQuery<{
     insights: { id: string; insightText: string; noveltyScore: number | null; category: string | null; phaseName: string; discoveredAt: string }[];
     total: number;
-  }>({ queryKey: ["/api/novel-insights", "recent"], refetchInterval: 30000 });
+  }>({ queryKey: ["/api/novel-insights"], refetchInterval: 30000 });
   const { data: crossEngineStats } = useQuery<{
     totalFormulas: number;
     totalInsightsRecorded: number;
@@ -2016,7 +2016,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dft-status"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights", "recent"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
     }
     const hasStrategy = ws.messages.some((m) => m.type === "strategyUpdate");
     if (hasStrategy) {

@@ -7,11 +7,12 @@ interface CandidateExt extends SuperconductorCandidate {
   stability?: number;
 }
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE, addDFTTrainingResult, getDFTTrainingDataset, logGNNVersion, getGNNModelVersion } from "./graph-neural-net";
+import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE, addDFTTrainingResult, getDFTTrainingDataset, logGNNVersion, getGNNModelVersion, applySerializedWeights } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import { extractFeatures } from "./ml-predictor";
 import { gbPredict, gbPredictWithUncertainty, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats } from "./gradient-boost";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
+import { fetchCachedFormationEnergies } from "./materials-project-client";
 import { computeDiscoveryScore } from "./family-filters";
 import { recordEvaluationResult } from "./surrogate-fitness";
 import { generateAdaptivePressureSamples, recordPressureCoverage, findOptimalPressure, predictPressureCurve } from "./pressure-aware-surrogate";
@@ -552,6 +553,11 @@ function computeStabilityProbability(candidate: CandidateExt, candidatePressure:
   return Math.min(1.0, Math.max(0, stabilityProb));
 }
 
+/** Returns `val` if it is a finite number, otherwise `fallback`. Prevents NaN/Infinity propagation. */
+function finiteOr(val: number | null | undefined, fallback: number): number {
+  return typeof val === "number" && Number.isFinite(val) ? val : fallback;
+}
+
 export async function selectForDFT(
   candidates: SuperconductorCandidate[],
   budget: number = 20,
@@ -571,8 +577,8 @@ export async function selectForDFT(
     ? convergenceStats.bestTcFromLoop
     : trainingDataMaxTc;
 
-  const maxPredictedTc = Math.max(...candidates.map(c => c.predictedTc ?? 0), 0);
-  const tcScale = Math.max(maxPredictedTc, bestTcSoFar, 50);
+  const maxPredictedTc = finiteOr(Math.max(...candidates.map(c => finiteOr(c.predictedTc, 0)), 0), 0);
+  const tcScale = Math.max(finiteOr(maxPredictedTc, 0), finiteOr(bestTcSoFar, 0), 50);
 
   const kappa = computeAdaptiveAlpha();
 
@@ -604,82 +610,91 @@ export async function selectForDFT(
     oodScore: number;
   }[] = [];
 
-  for (const candidate of candidates) {
-    const tc = candidate.predictedTc ?? 0;
-    const normalizedTc = Math.min(1.0, Math.max(0, tc / tcScale));
-    const candidatePressure = pressureCache.get(candidate.formula)!;
-    const defaultSigmaK = tc * 0.3;
-
-    let gnnUncertainty = candidate.uncertaintyEstimate ?? 0.5;
-    let gnnSigmaK = defaultSigmaK;
-    let xgbUncertainty = 0.5;
-    let xgbSigmaK = defaultSigmaK;
-    let embeddingUncertainty = 0.5;
-    let oodScoreVal = 0;
-    let oodIsOOD = false;
-
+  for (let ci = 0; ci < candidates.length; ci++) {
+    // Yield every 10 candidates so HTTP requests aren't starved
+    if (ci > 0 && ci % 10 === 0) await new Promise<void>(r => setImmediate(r));
+    const candidate = candidates[ci];
     try {
-      const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
-      gnnUncertainty = Math.max(gnnUncertainty, gnnResult.uncertainty);
-      if (gnnResult.uncertaintyBreakdown) {
-        gnnSigmaK = gnnResult.uncertaintyBreakdown.totalSigma ?? tc * gnnUncertainty;
-      }
-    } catch {}
+      const tc = finiteOr(candidate.predictedTc, 0);
+      const normalizedTc = finiteOr(Math.min(1.0, Math.max(0, tc / tcScale)), 0);
+      const candidatePressure = finiteOr(pressureCache.get(candidate.formula), 0);
+      const defaultSigmaK = tc * 0.3;
 
-    try {
-      const cachedFeatures = baseFeatureCache.get(candidate.formula);
-      const features = cachedFeatures ?? await extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
-      const xgbResult = await gbPredictWithUncertainty(features, candidate.formula);
-      xgbUncertainty = xgbResult.normalizedUncertainty;
-      xgbSigmaK = xgbResult.totalStd ?? xgbResult.tcStd ?? tc * xgbUncertainty;
-    } catch {}
+      let gnnUncertainty = finiteOr(candidate.uncertaintyEstimate, 0.5);
+      let gnnSigmaK = defaultSigmaK;
+      let xgbUncertainty = 0.5;
+      let xgbSigmaK = defaultSigmaK;
+      let embeddingUncertainty = 0.5;
+      let oodScoreVal = 0;
+      let oodIsOOD = false;
 
-    try {
-      embeddingUncertainty = estimateStructureUncertainty(computeStructureEmbedding(candidate.formula));
-    } catch {}
+      try {
+        const gnnResult = gnnPredictWithUncertainty(candidate.formula, undefined, candidatePressure);
+        gnnUncertainty = finiteOr(Math.max(gnnUncertainty, gnnResult.uncertainty), gnnUncertainty);
+        if (gnnResult.uncertaintyBreakdown) {
+          gnnSigmaK = finiteOr(gnnResult.uncertaintyBreakdown.totalSigma, tc * gnnUncertainty);
+        }
+      } catch {}
 
-    try {
-      const ood = computeOODScore(candidate.formula);
-      oodScoreVal = ood.oodScore;
-      oodIsOOD = ood.isOOD;
-    } catch {}
+      try {
+        const cachedFeatures = baseFeatureCache.get(candidate.formula);
+        const features = cachedFeatures ?? await extractFeatures(candidate.formula, { pressureGpa: candidatePressure } as any);
+        const xgbResult = await gbPredictWithUncertainty(features, candidate.formula);
+        xgbUncertainty = finiteOr(xgbResult.normalizedUncertainty, 0.5);
+        xgbSigmaK = finiteOr(xgbResult.totalStd ?? xgbResult.tcStd, tc * xgbUncertainty);
+      } catch {}
 
-    const sigmaRaw = Math.sqrt(0.5 * gnnSigmaK * gnnSigmaK + 0.5 * xgbSigmaK * xgbSigmaK);
-    let combinedUncertainty = 0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty;
-    if (oodIsOOD) combinedUncertainty = Math.min(1.0, combinedUncertainty * (1 + oodScoreVal));
+      try {
+        embeddingUncertainty = finiteOr(estimateStructureUncertainty(computeStructureEmbedding(candidate.formula)), 0.5);
+      } catch {}
 
-    const stabilityProbability = computeStabilityProbability(candidate, candidatePressure);
-    const noveltyScore = computeNoveltyScore(candidate);
-    const structuralDistance = computeStructuralDistanceFromTrainingSet(candidate.formula);
-    const eiScore = computeExpectedImprovement(tc, sigmaRaw, bestTcSoFar, tcScale);
-    const ucbScore = computeUCB(tc, sigmaRaw, kappa, tcScale);
-    const curiosityScore = computeCuriosityScore(structuralDistance, combinedUncertainty, oodScoreVal, noveltyScore);
+      try {
+        const ood = computeOODScore(candidate.formula);
+        oodScoreVal = finiteOr(ood.oodScore, 0);
+        oodIsOOD = ood.isOOD;
+      } catch {}
 
-    const acquisitionScore =
-      0.30 * eiScore +
-      0.25 * ucbScore +
-      0.20 * combinedUncertainty +
-      0.10 * curiosityScore +
-      0.10 * normalizedTc +
-      0.05 * stabilityProbability;
+      const sigmaRaw = finiteOr(Math.sqrt(0.5 * gnnSigmaK * gnnSigmaK + 0.5 * xgbSigmaK * xgbSigmaK), defaultSigmaK);
+      let combinedUncertainty = finiteOr(0.35 * gnnUncertainty + 0.35 * xgbUncertainty + 0.3 * embeddingUncertainty, 0.5);
+      if (oodIsOOD) combinedUncertainty = Math.min(1.0, combinedUncertainty * (1 + oodScoreVal));
 
-    scored.push({
-      candidate,
-      normalizedTc,
-      predictedTcRaw: tc,
-      sigmaRaw,
-      gnnUncertainty,
-      xgbUncertainty,
-      combinedUncertainty,
-      stabilityProbability,
-      noveltyScore,
-      acquisitionScore,
-      eiScore,
-      ucbScore,
-      curiosityScore,
-      structuralDistance,
-      oodScore: oodScoreVal,
-    });
+      const stabilityProbability = finiteOr(computeStabilityProbability(candidate, candidatePressure), 0.5);
+      const noveltyScore = finiteOr(computeNoveltyScore(candidate), 0);
+      const structuralDistance = finiteOr(computeStructuralDistanceFromTrainingSet(candidate.formula), 0);
+      const eiScore = finiteOr(computeExpectedImprovement(tc, sigmaRaw, bestTcSoFar, tcScale), 0);
+      const ucbScore = finiteOr(computeUCB(tc, sigmaRaw, kappa, tcScale), 0);
+      const curiosityScore = finiteOr(computeCuriosityScore(structuralDistance, combinedUncertainty, oodScoreVal, noveltyScore), 0);
+
+      const acquisitionScore = finiteOr(
+        0.30 * eiScore +
+        0.25 * ucbScore +
+        0.20 * combinedUncertainty +
+        0.10 * curiosityScore +
+        0.10 * normalizedTc +
+        0.05 * stabilityProbability,
+        0,
+      );
+
+      scored.push({
+        candidate,
+        normalizedTc,
+        predictedTcRaw: tc,
+        sigmaRaw,
+        gnnUncertainty,
+        xgbUncertainty,
+        combinedUncertainty,
+        stabilityProbability,
+        noveltyScore,
+        acquisitionScore,
+        eiScore,
+        ucbScore,
+        curiosityScore,
+        structuralDistance,
+        oodScore: oodScoreVal,
+      });
+    } catch (err: any) {
+      console.warn(`[selectForDFT] Skipping candidate ${candidate.formula}: ${err?.message}`);
+    }
   }
 
   const selected: RankedCandidate[] = [];
@@ -1218,12 +1233,17 @@ async function retrainGNNWithEnrichedData(
   const r2Before = validationBefore.r2;
   const maeBefore = Math.sqrt(validationBefore.mse);
 
+  const superconFormulas = SUPERCON_TRAINING_DATA
+    .filter(e => !heldOutFormulas.has(e.formula))
+    .map(e => e.formula);
+  const cachedFE = await fetchCachedFormationEnergies(superconFormulas);
+
   const trainingData = SUPERCON_TRAINING_DATA
     .filter(e => !heldOutFormulas.has(e.formula))
     .map(e => ({
       formula: e.formula,
       tc: e.tc,
-      formationEnergy: undefined as number | undefined,
+      formationEnergy: cachedFE.get(e.formula),
       structure: undefined,
       prototype: undefined as string | undefined,
     }));
@@ -1244,6 +1264,31 @@ async function retrainGNNWithEnrichedData(
       prototype: dftRecord.prototype,
     });
     dftMergeCount++;
+  }
+
+  // Include cached MP materials as structure/feature-enriched samples (tc=0
+  // acts as a negative/normal-metal label helping the model distinguish
+  // non-superconducting metallic phases from high-Tc candidates).
+  let mpMergeCount = 0;
+  try {
+    const { fetchGNNSeedData } = await import("../learning/materials-project-client");
+    const mpRecords = await fetchGNNSeedData();
+    const superconTcMap = new Map(SUPERCON_TRAINING_DATA.map(e => [e.formula, e.tc]));
+    for (const mp of mpRecords) {
+      if (seenFormulas.has(mp.formula)) continue;
+      seenFormulas.add(mp.formula);
+      trainingData.push({
+        formula: mp.formula,
+        tc: superconTcMap.get(mp.formula) ?? 0,
+        formationEnergy: mp.formationEnergy ?? undefined,
+        structure: undefined,
+        prototype: undefined,
+      });
+      mpMergeCount++;
+    }
+  } catch { /* MP cache unavailable — skip silently */ }
+  if (mpMergeCount > 0) {
+    console.log(`[ActiveLearning] Training payload: +${mpMergeCount} MP cached records (total ${trainingData.length})`);
   }
 
   try {
@@ -1278,9 +1323,25 @@ async function retrainGNNWithEnrichedData(
   const dftDatasetForVersion = getDFTTrainingDataset();
   const dftCount = dftDatasetForVersion.length;
 
-  const ensembleModels = await trainEnsembleAsync(trainingData);
-  invalidateGNNModel();
-  setCachedEnsemble(ensembleModels, trainingData);
+  if (process.env.OFFLOAD_GNN_TO_GCP === "true") {
+    // Fire-and-forget: dispatch to GCP and continue immediately.
+    // A background poller (startGCPWeightPoller) applies weights when GCP finishes.
+    const dftSamples = getDFTTrainingDataset().length;
+    storage.insertGnnTrainingJob({
+      status: "queued",
+      trainingData: trainingData as any,
+      datasetSize: trainingData.length,
+      dftSamples,
+    }).then(job => {
+      console.log(`[ActiveLearning] GNN training job #${job.id} dispatched to GCP (${trainingData.length} samples) — continuing cycle`);
+    }).catch(err => {
+      console.warn(`[ActiveLearning] Failed to dispatch GNN job to GCP: ${err.message}`);
+    });
+  } else {
+    const ensembleModels = await trainEnsembleAsync(trainingData);
+    invalidateGNNModel();
+    setCachedEnsemble(ensembleModels, trainingData);
+  }
 
   logGNNVersion("active-learning-retrain", trainingData.length, dftCount, enrichedCount);
 
@@ -1772,7 +1833,7 @@ export async function runActiveLearningCycle(
     timestamp: Date.now(),
     candidatesSelected: selected.length,
     dftSuccesses: dftSuccessCount,
-    dftFailures: selected.length - dftSuccessCount,
+    dftFailures: pipelineCrashCount,
     avgGnnUncertainty: Math.round(avgGnnUnc * 1000) / 1000,
     avgXgbUncertainty: Math.round(avgXgbUnc * 1000) / 1000,
     avgCombinedUncertainty: Math.round(avgUncertaintyBefore * 1000) / 1000,
@@ -1854,8 +1915,128 @@ export async function runActiveLearningCycle(
   return convergenceStats;
 }
 
+// ─── Reference benchmark suite ───────────────────────────────────────────────
+// Fixed set of well-known superconductors covering major families.
+// Run every 10 cycles so all three models are evaluated against ground truth.
+const BENCHMARK_MATERIALS = [
+  { formula: "Nb",         tc: 9.25,  family: "elemental",   pressureGPa: 0 },
+  { formula: "Pb",         tc: 7.2,   family: "elemental",   pressureGPa: 0 },
+  { formula: "MgB2",       tc: 39.0,  family: "boride",      pressureGPa: 0 },
+  { formula: "NbN",        tc: 16.0,  family: "nitride",     pressureGPa: 0 },
+  { formula: "Nb3Sn",      tc: 18.3,  family: "A15",         pressureGPa: 0 },
+  { formula: "V3Si",       tc: 17.1,  family: "A15",         pressureGPa: 0 },
+  { formula: "YBa2Cu3O7",  tc: 92.0,  family: "cuprate",     pressureGPa: 0 },
+  { formula: "FeSe",       tc: 8.5,   family: "iron-based",  pressureGPa: 0 },
+  { formula: "BaFe2As2",   tc: 22.0,  family: "iron-based",  pressureGPa: 0 },
+  { formula: "NbTi",       tc: 9.8,   family: "alloy",       pressureGPa: 0 },
+];
+
+function benchmarkStats(preds: { actual: number; predicted: number }[]): { mae: number; r2: number } {
+  if (preds.length === 0) return { mae: 999, r2: -1 };
+  const n = preds.length;
+  const meanActual = preds.reduce((s, p) => s + p.actual, 0) / n;
+  let sse = 0, sst = 0, absErrSum = 0;
+  for (const p of preds) {
+    sse += (p.predicted - p.actual) ** 2;
+    sst += (p.actual - meanActual) ** 2;
+    absErrSum += Math.abs(p.predicted - p.actual);
+  }
+  return {
+    mae: Math.round(absErrSum / n * 10) / 10,
+    r2:  Math.round((sst > 1e-6 ? 1 - sse / sst : 0) * 10000) / 10000,
+  };
+}
+
+export async function runModelBenchmarks(emit: EventEmitter, cycle: number): Promise<void> {
+  const gnnPreds:  { formula: string; actual: number; predicted: number }[] = [];
+  const xgbPreds:  { formula: string; actual: number; predicted: number }[] = [];
+  const ensPreds:  { formula: string; actual: number; predicted: number }[] = [];
+
+  for (const ref of BENCHMARK_MATERIALS) {
+    await new Promise<void>(r => setImmediate(r)); // yield between each to avoid blocking
+
+    let gnnTc: number | null = null;
+    try {
+      const g = gnnPredictWithUncertainty(ref.formula, undefined, ref.pressureGPa);
+      gnnTc = g.tc;
+      gnnPreds.push({ formula: ref.formula, actual: ref.tc, predicted: gnnTc });
+    } catch { /* model not ready yet */ }
+
+    try {
+      const features = await extractFeatures(ref.formula, { pressureGpa: ref.pressureGPa } as any);
+      const xgb = await gbPredict(features, ref.formula);
+      const xgbTc = xgb.tcPredicted;
+      xgbPreds.push({ formula: ref.formula, actual: ref.tc, predicted: xgbTc });
+
+      // Ensemble: average GNN + XGBoost (skip ensemble entry if GNN isn't ready)
+      if (gnnTc != null) {
+        ensPreds.push({ formula: ref.formula, actual: ref.tc, predicted: (gnnTc + xgbTc) / 2 });
+      }
+    } catch { /* feature extraction failed */ }
+  }
+
+  const gnnS = benchmarkStats(gnnPreds);
+  const xgbS = benchmarkStats(xgbPreds);
+  const ensS = benchmarkStats(ensPreds);
+
+  const perMaterial = BENCHMARK_MATERIALS
+    .map(ref => {
+      const g = gnnPreds.find(p => p.formula === ref.formula);
+      const x = xgbPreds.find(p => p.formula === ref.formula);
+      const e = ensPreds.find(p => p.formula === ref.formula);
+      const parts = [`${ref.formula}(${ref.tc}K)`];
+      if (g) parts.push(`gnn=${g.predicted.toFixed(1)}`);
+      if (x) parts.push(`xgb=${x.predicted.toFixed(1)}`);
+      if (e) parts.push(`ens=${e.predicted.toFixed(1)}`);
+      return parts.join(" ");
+    })
+    .join(" | ");
+
+  const detail = [
+    `GNN  R²=${gnnS.r2.toFixed(4)} MAE=${gnnS.mae}K (n=${gnnPreds.length})`,
+    `XGB  R²=${xgbS.r2.toFixed(4)} MAE=${xgbS.mae}K (n=${xgbPreds.length})`,
+    `Ens  R²=${ensS.r2.toFixed(4)} MAE=${ensS.mae}K (n=${ensPreds.length})`,
+    perMaterial,
+  ].join(" || ");
+
+  console.log(`[Benchmark] Cycle ${cycle} — ${detail}`);
+  emit("log", {
+    phase: "active-learning",
+    event: `Model benchmark (cycle ${cycle})`,
+    detail,
+    dataSource: "Model Benchmark",
+  });
+}
+
 function parseFormulaCountsLocal(formula: string): Record<string, number> {
   return parseFormulaCounts(formula);
+}
+
+/**
+ * Background poller: checks every 30s for completed GCP GNN jobs and applies
+ * the weights locally. Call once at engine startup when OFFLOAD_GNN_TO_GCP=true.
+ */
+export function startGCPWeightPoller(): void {
+  if (process.env.OFFLOAD_GNN_TO_GCP !== "true") return;
+
+  let lastAppliedJobId = 0;
+
+  async function poll() {
+    try {
+      const job = await storage.getLatestCompletedGnnJob();
+      if (job && job.id > lastAppliedJobId && job.weights) {
+        lastAppliedJobId = job.id;
+        const td = (job.trainingData as any[]) ?? [];
+        applySerializedWeights(job.weights as any, td.map((t: any) => ({ formula: t.formula, tc: t.tc })));
+        logGNNVersion("gcp-retrain", job.datasetSize ?? td.length, job.dftSamples ?? 0, 0);
+        console.log(`[GCP-Poller] Applied GNN weights from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}`);
+      }
+    } catch { /* silent */ }
+    setTimeout(poll, 30_000);
+  }
+
+  setTimeout(poll, 30_000);
+  console.log("[GCP-Poller] Background GNN weight poller started (30s interval)");
 }
 
 function generateDopedVariantsForAL(formula: string, maxVariants: number): DopingSpec[] {

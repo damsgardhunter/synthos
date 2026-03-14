@@ -1,7 +1,8 @@
-import { execSync, spawn } from "child_process";
+import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import { IS_WINDOWS, binaryPath, getTempSubdir, toWslPath, killProcessGracefully, spawnQE } from "./platform-utils";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { matchPrototype } from "../learning/structure-predictor";
 import { isTransitionMetal, isRareEarth, ELEMENTAL_DATA, getElementData } from "../learning/elemental-data";
@@ -9,14 +10,33 @@ import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
 import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
 
-const QE_BIN_DIR = "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
-const QE_WORK_DIR = "/tmp/qe_calculations";
-const QE_PSEUDO_DIR = "/tmp/qe_pseudo";
+// Resolve the QE binary directory at startup.
+// On Windows (WSL2): probe for conda-forge QE 7.x install first (~/miniforge3/bin),
+// then fall back to apt install (/usr/bin).
+// On Linux/production: use Nix store path or QE_BIN_DIR env var.
+function resolveQEBinDir(): string {
+  if (process.env.QE_BIN_DIR) return process.env.QE_BIN_DIR;
+  if (!IS_WINDOWS) return "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
+  try {
+    const home = execSync('wsl.exe -d Ubuntu -- bash -c "echo $HOME"',
+      { encoding: "utf8", timeout: 5000 }).trim().replace(/\r/g, "");
+    const condaDir = `${home}/miniforge3/bin`;
+    const found = execSync(`wsl.exe -d Ubuntu -- bash -c "test -f '${condaDir}/pw.x' && echo yes || echo no"`,
+      { encoding: "utf8", timeout: 5000 }).trim().replace(/\r/g, "");
+    if (found === "yes") return condaDir;
+  } catch { /* fall through */ }
+  return "/usr/bin"; // apt quantum-espresso package fallback
+}
+const QE_BIN_DIR = resolveQEBinDir();
+const QE_WORK_DIR = getTempSubdir("qe_calculations");
+const QE_PSEUDO_DIR = getTempSubdir("qe_pseudo");
+// When QE runs inside WSL on Windows, paths in the input file must use the /mnt/... form
+const QE_PSEUDO_DIR_INPUT = IS_WINDOWS ? toWslPath(QE_PSEUDO_DIR) : QE_PSEUDO_DIR;
 const QE_TIMEOUT_MS = 600_000;
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const PP_SOURCE_DIR = path.join(PROJECT_ROOT, "server/dft/pseudo");
-const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
+const XTB_BIN = binaryPath(path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 
@@ -441,6 +461,35 @@ function approximateHermitianEigenvalues(
   return eigenvalues;
 }
 
+// GFN2-xTB single-point energies for isolated neutral atoms (in Hartree).
+// Source: xTB reference calculations with --gfn 2 --sp.
+// These are the values that make formation-like energies well-behaved.
+const GFN2_ATOMIC_REF: Record<string, number> = {
+  H: -0.393_749, He: -1.718_344,
+  Li: -0.188_155, Be: -0.966_432, B: -2.459_449, C: -3.741_225,
+  N: -5.764_075, O: -4.768_053, F: -5.834_508, Ne: -6.820_688,
+  Na: -0.261_836, Mg: -0.888_816, Al: -1.783_405, Si: -3.083_040,
+  P: -4.529_353, S: -3.867_572, Cl: -4.469_341, Ar: -6.186_688,
+  K: -0.219_538, Ca: -0.754_494, Sc: -2.614_937, Ti: -4.196_648,
+  V: -6.097_289, Cr: -5.697_460, Mn: -7.620_613, Fe: -9.153_591,
+  Co: -8.898_965, Ni: -8.666_012, Cu: -4.588_018, Zn: -1.755_420,
+  Ga: -2.128_279, Ge: -3.518_424, As: -5.038_513, Se: -4.476_157,
+  Br: -5.117_131, Kr: -6.989_271,
+  Rb: -0.204_093, Sr: -0.697_613, Y: -2.459_204, Zr: -4.120_024,
+  Nb: -5.842_013, Mo: -5.462_007, Tc: -7.244_500, Ru: -8.832_344,
+  Rh: -8.505_524, Pd: -7.969_177, Ag: -4.023_944, Cd: -1.564_340,
+  In: -1.818_785, Sn: -3.162_282, Sb: -4.619_468, Te: -4.125_285,
+  I: -4.742_513, Xe: -6.571_015,
+  Cs: -0.190_612, Ba: -0.665_960, La: -2.275_637,
+  Ce: -2.338_793, Pr: -2.393_862, Nd: -2.464_419, Pm: -2.549_010,
+  Sm: -2.623_527, Eu: -2.700_039, Gd: -2.789_577, Tb: -2.869_080,
+  Dy: -2.944_525, Ho: -3.019_945, Er: -3.097_490, Tm: -3.178_100,
+  Yb: -3.247_670, Lu: -3.341_840,
+  Hf: -5.015_060, Ta: -6.892_620, W: -6.650_160, Re: -8.563_000,
+  Os: -10.332_060, Ir: -9.975_440, Pt: -9.274_560, Au: -4.852_580,
+  Hg: -2.002_540, Tl: -1.903_490, Pb: -3.322_700, Bi: -4.738_550,
+};
+
 function runXTBStabilityCheck(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
@@ -461,7 +510,7 @@ function runXTBStabilityCheck(
       ...process.env,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "1G",
     };
 
@@ -491,9 +540,8 @@ function runXTBStabilityCheck(
     let refEPerAtom = 0;
     let hasRef = true;
     for (const el of elements) {
-      const zVal = getZValence(el);
-      if (!zVal) { hasRef = false; break; }
-      const atomicE = -(zVal * 0.5);
+      const atomicE = GFN2_ATOMIC_REF[el];
+      if (atomicE === undefined) { hasRef = false; break; }
       refEPerAtom += atomicE * (elCounts[el] / totalAtoms);
     }
 
@@ -501,7 +549,7 @@ function runXTBStabilityCheck(
     let basis: string;
     if (hasRef) {
       const formationLike = (ePerAtomHa - refEPerAtom) * HA_TO_EV;
-      isStable = formationLike < 0.5;
+      isStable = formationLike < 2.0;
       basis = `relative (Ef-like=${formationLike.toFixed(3)} eV/atom)`;
     } else {
       isStable = ePerAtomEv < -1.0;
@@ -774,6 +822,13 @@ const PP_DOWNLOAD_URLS: Record<string, string> = {
   Zr: "https://pseudopotentials.quantum-espresso.org/upf_files/Zr.pbe-spn-kjpaw_psl.1.0.0.UPF",
   Nb: "https://pseudopotentials.quantum-espresso.org/upf_files/Nb.pbe-spn-kjpaw_psl.1.0.0.UPF",
   Mo: "https://pseudopotentials.quantum-espresso.org/upf_files/Mo.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Tc: "https://pseudopotentials.quantum-espresso.org/upf_files/Tc.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ru: "https://pseudopotentials.quantum-espresso.org/upf_files/Ru.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Rh: "https://pseudopotentials.quantum-espresso.org/upf_files/Rh.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Pd: "https://pseudopotentials.quantum-espresso.org/upf_files/Pd.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ag: "https://pseudopotentials.quantum-espresso.org/upf_files/Ag.pbe-nd-kjpaw_psl.1.0.0.UPF",
+  Pt: "https://pseudopotentials.quantum-espresso.org/upf_files/Pt.pbe-spdn-kjpaw_psl.1.0.0.UPF",
+  Au: "https://pseudopotentials.quantum-espresso.org/upf_files/Au.pbe-nd-kjpaw_psl.1.0.0.UPF",
   La: "https://pseudopotentials.quantum-espresso.org/upf_files/La.pbe-spfn-kjpaw_psl.1.0.0.UPF",
   Ce: "https://pseudopotentials.quantum-espresso.org/upf_files/Ce.pbe-spdn-kjpaw_psl.1.0.0.UPF",
   Ba: "https://pseudopotentials.quantum-espresso.org/upf_files/Ba.pbe-spn-kjpaw_psl.1.0.0.UPF",
@@ -830,7 +885,7 @@ function ensurePseudopotential(element: string): string {
     lockFd = fs.openSync(lockFile, "wx");
   } catch {
     for (let wait = 0; wait < 15; wait++) {
-      execSync("sleep 1", { timeout: 5000 });
+      execSync(IS_WINDOWS ? "timeout /t 1 /nobreak >nul 2>&1" : "sleep 1", { timeout: 5000 });
       if (fs.existsSync(ppFile) && validatePseudopotential(ppFile) && validateSemicorePP(element, ppFile)) {
         return ppFile;
       }
@@ -857,12 +912,34 @@ function ensurePseudopotential(element: string): string {
       try { fs.unlinkSync(ppFile); } catch {}
     }
 
+    // Check project pseudo dir
     const sourceFile = path.join(PP_SOURCE_DIR, `${element}.UPF`);
     if (fs.existsSync(sourceFile) && validatePseudopotential(sourceFile) && validateSemicorePP(element, sourceFile)) {
       fs.copyFileSync(sourceFile, tmpFile);
       fs.renameSync(tmpFile, ppFile);
       console.log(`[QE-Worker] Copied valid PP for ${element} from repo (${fs.statSync(ppFile).size} bytes)`);
       return ppFile;
+    }
+
+    // On Windows: also check WSL system pseudo dirs (apt-installed QE pseudopotentials)
+    if (IS_WINDOWS) {
+      const wslPseudoDirs = ["/usr/share/espresso/pseudo", "/usr/share/espresso/sssp/efficiency", "/usr/share/espresso/sssp"];
+      for (const wslDir of wslPseudoDirs) {
+        try {
+          const listing = execSync(`wsl.exe -d Ubuntu -- bash -c "ls '${wslDir}' 2>/dev/null"`, { encoding: "utf8", timeout: 5000 })
+            .split("\n").map(f => f.trim().replace(/\r/g, "")).filter(Boolean);
+          const match = listing.find(f => f.startsWith(element + ".") && (f.endsWith(".UPF") || f.endsWith(".upf")));
+          if (match) {
+            execSync(`wsl.exe -d Ubuntu -- bash -c "cp '${wslDir}/${match}' '${toWslPath(tmpFile)}'"`, { timeout: 10000 });
+            if (fs.existsSync(tmpFile) && validatePseudopotential(tmpFile) && validateSemicorePP(element, tmpFile)) {
+              fs.renameSync(tmpFile, ppFile);
+              console.log(`[QE-Worker] Copied valid PP for ${element} from WSL ${wslDir} (${fs.statSync(ppFile).size} bytes)`);
+              return ppFile;
+            }
+            try { fs.unlinkSync(tmpFile); } catch {}
+          }
+        } catch {}
+      }
     }
 
     const urls = [PP_DOWNLOAD_URLS[element], PP_FALLBACK_URLS[element]].filter(Boolean);
@@ -1146,7 +1223,7 @@ function generateSCFInput(
   restart_mode = 'from_scratch',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  pseudo_dir = '${QE_PSEUDO_DIR}',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = 1.0d-2,
@@ -2102,7 +2179,7 @@ function tryXTBPreRelaxation(
       ...process.env as Record<string, string>,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "512M",
     };
 
@@ -2254,7 +2331,7 @@ function generateSCFInputWithParams(
   restart_mode = 'from_scratch',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  pseudo_dir = '${QE_PSEUDO_DIR}',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = ${forcConvThr},
@@ -2341,7 +2418,7 @@ function generateVCRelaxInput(
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  pseudo_dir = '${QE_PSEUDO_DIR}',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = 1.0d-3,
@@ -2538,7 +2615,10 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
 
 function runQECommand(binary: string, inputFile: string, workDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
-    const proc = spawn(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"] });
+    // On Windows, wsl.exe does not reliably forward Node.js piped stdin to the inner
+    // process. Use bash -c file-redirection instead so I/O stays within WSL.
+    const wslInputFile = IS_WINDOWS ? toWslPath(inputFile) : undefined;
+    const proc = spawnQE(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"], wslInputFile });
     let stdout = "";
     let stderr = "";
     let resolved = false;
@@ -2556,12 +2636,15 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
       }
     }
 
-    const inputStream = fs.createReadStream(inputFile);
-    inputStream.on("error", (err: Error) => {
-      stderr += `\nInput file error: ${err.message}`;
-      try { proc.stdin.end(); } catch {}
-    });
-    inputStream.pipe(proc.stdin).on("error", () => {});
+    let inputStream: ReturnType<typeof fs.createReadStream> | null = null;
+    if (!IS_WINDOWS) {
+      inputStream = fs.createReadStream(inputFile);
+      inputStream.on("error", (err: Error) => {
+        stderr += `\nInput file error: ${err.message}`;
+        try { proc.stdin?.end(); } catch {}
+      });
+      inputStream.pipe(proc.stdin!).on("error", () => {});
+    }
 
     proc.stdout.on("data", (data: Buffer) => { stdout += data.toString(); });
     proc.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
@@ -2571,12 +2654,12 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
     let killTimeout: ReturnType<typeof setTimeout> | null = null;
     const timeout = setTimeout(() => {
       if (resolved) return;
-      try { proc.kill("SIGTERM"); } catch {}
+      killProcessGracefully(proc);
       killTimeout = setTimeout(() => {
         if (resolved) return;
         resolved = true;
-        try { proc.kill("SIGKILL"); } catch {}
-        try { inputStream.destroy(); } catch {}
+        try { proc.kill(); } catch {}
+        try { inputStream?.destroy(); } catch {}
         resolve({ stdout, stderr: stderr + "\nTIMEOUT: QE calculation exceeded time limit", exitCode: -1 });
       }, 2000);
     }, QE_TIMEOUT_MS);
@@ -2591,7 +2674,7 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
       resolved = true;
       clearTimeout(timeout);
       if (killTimeout) clearTimeout(killTimeout);
-      try { inputStream.destroy(); } catch {}
+      try { inputStream?.destroy(); } catch {}
       resolve({ stdout, stderr: stderr + `\n${err.message}`, exitCode: -1 });
     });
   });
@@ -2777,7 +2860,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       fs.writeFileSync(vcRelaxFile, vcRelaxInput);
 
       const vcResult = await runQECommand(
-        path.join(QE_BIN_DIR, "pw.x"),
+        path.posix.join(QE_BIN_DIR, "pw.x"),
         vcRelaxFile,
         jobDir,
       );
@@ -2836,7 +2919,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${convInfo}${smearInfo})`);
 
       const scfResult = await runQECommand(
-        path.join(QE_BIN_DIR, "pw.x"),
+        path.posix.join(QE_BIN_DIR, "pw.x"),
         scfInputFile,
         jobDir,
       );
@@ -2937,7 +3020,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Starting phonon calculation for ${formula}`);
 
       const phResult = await runQECommand(
-        path.join(QE_BIN_DIR, "ph.x"),
+        path.posix.join(QE_BIN_DIR, "ph.x"),
         phInputFile,
         jobDir,
       );
@@ -2976,6 +3059,19 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
 export function isQEAvailable(): boolean {
   try {
+    if (IS_WINDOWS) {
+      // On Windows, QE lives inside WSL2 Ubuntu — probe via wsl.exe + bash
+      // Check configured dir first, then common fallback locations
+      const candidates = [QE_BIN_DIR, "/usr/bin", "/usr/local/bin"].filter((v, i, a) => Boolean(v) && a.indexOf(v) === i);
+      for (const dir of candidates) {
+        const result = execSync(
+          `wsl.exe -d Ubuntu -- bash -c "test -f '${dir}/pw.x' && echo yes || echo no"`,
+          { encoding: "utf8", timeout: 5000 },
+        ).trim().replace(/\r/g, "");
+        if (result === "yes") return true;
+      }
+      return false;
+    }
     const pwx = path.join(QE_BIN_DIR, "pw.x");
     return fs.existsSync(pwx);
   } catch {

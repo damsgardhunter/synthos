@@ -526,7 +526,7 @@ export async function relaxInterface(
         ...process.env as Record<string, string>,
         XTBHOME: XTB_HOME,
         XTBPATH: XTB_PARAM,
-        OMP_NUM_THREADS: "1",
+        OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
         OMP_STACKSIZE: "512M",
       };
 

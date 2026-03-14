@@ -347,7 +347,12 @@ const writeLimiter = rateLimit({
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   initWebSocket(httpServer);
 
+  // Start the DFT worker immediately on startup — no R² gating.
   startDFTWorkerLoop();
+
+  // Warm the DB connection immediately so the first API requests on page load
+  // don't hit a Neon cold-start timeout. Fire-and-forget; don't block registration.
+  storage.getLearningPhases().catch(() => {});
 
   app.use("/api", generalLimiter);
 
@@ -420,8 +425,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }));
       });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch learning phases" });
+    } catch (e: any) {
+      console.error("[learning-phases] ERROR:", e?.message, e?.stack?.slice(0, 500));
+      res.status(500).json({ error: "Failed to fetch learning phases", detail: e?.message });
     }
   });
 
@@ -449,8 +455,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }));
       });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch research logs" });
+    } catch (e: any) {
+      console.error("[research-logs] ERROR:", e?.message, e?.stack?.slice(0, 500));
+      res.status(500).json({ error: "Failed to fetch research logs", detail: e?.message });
     }
   });
 
@@ -547,37 +554,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/dft-status", async (_req, res) => {
     try {
-      const result = await cache.getOrSet(CACHE_KEYS.DFT_STATUS, TTL.DFT_STATUS, async () => {
-        const candidates = await storage.getSuperconductorCandidates(1000);
-        const total = await storage.getSuperconductorCount();
-        const dftEnriched = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified" || c.dataConfidence === "medium");
-        const dftHighCount = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified").length;
-        const dftMediumCount = candidates.filter(c => c.dataConfidence === "medium").length;
-        const analyticalCount = total - dftHighCount - dftMediumCount;
-
-        const recentEnriched = dftEnriched
-          .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))
-          .slice(0, 10)
-          .map(c => ({
-            formula: c.formula,
-            confidence: c.dataConfidence,
-            ensembleScore: c.ensembleScore,
-            predictedTc: c.predictedTc,
-          }));
+      const result = await cache.getOrSetStale(CACHE_KEYS.DFT_STATUS, TTL.DFT_STATUS, async () => {
+        const breakdown = await storage.getConfidenceBreakdown();
+        const analyticalCount = breakdown.total - breakdown.high - breakdown.medium;
 
         const dftAvailable = isDFTAvailable();
         const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
         const xtbStats = getXTBStats();
 
         return {
-          total,
-          dftEnrichedCount: dftEnriched.length,
+          total: breakdown.total,
+          dftEnrichedCount: breakdown.high + breakdown.medium,
           breakdown: {
-            high: dftHighCount,
-            medium: dftMediumCount,
+            high: breakdown.high,
+            medium: breakdown.medium,
             analytical: analyticalCount,
           },
-          recentEnriched,
+          recentEnriched: breakdown.recentEnriched.map(c => ({
+            formula: c.formula,
+            confidence: c.dataConfidence,
+            ensembleScore: c.ensembleScore,
+            predictedTc: c.predictedTc,
+          })),
           xtb: {
             available: dftAvailable,
             method: methodInfo?.name ?? "unavailable",
@@ -592,8 +590,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         };
       });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch DFT status" });
+    } catch (e: any) {
+      console.error("[dft-status] ERROR:", e?.message, e?.stack?.slice(0, 500));
+      res.status(500).json({ error: "Failed to fetch DFT status", detail: e?.message });
     }
   });
 
@@ -806,15 +805,37 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/novel-insights", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 200, 1000);
+      const limit = Math.min(Number(req.query.limit) || 20, 200);
       const novelOnly = req.query.novelOnly === "true";
-      const insights = novelOnly
-        ? await storage.getNovelInsightsOnly(limit)
-        : await storage.getNovelInsights(limit);
-      const total = await storage.getNovelInsightCount();
-      res.json({ insights, total });
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch novel insights" });
+      const cacheKey = `${CACHE_KEYS.NOVEL_INSIGHTS}:${novelOnly ? "novel" : "all"}:${limit}`;
+      const result = await cache.getOrSet(cacheKey, TTL.NOVEL_INSIGHTS, async () => {
+        const [insights, total] = await Promise.all([
+          novelOnly ? storage.getNovelInsightsOnly(limit) : storage.getNovelInsights(limit),
+          storage.getNovelInsightCount(),
+        ]);
+        return { insights, total };
+      });
+      res.json(result);
+    } catch (e: any) {
+      console.error("[novel-insights] ERROR:", e?.message, e?.stack?.slice(0, 500));
+      res.status(500).json({ error: "Failed to fetch novel insights", detail: e?.message });
+    }
+  });
+
+  // Alias used by some dashboard queries
+  app.get("/api/novel-insights/recent", async (_req, res) => {
+    try {
+      const result = await cache.getOrSet(
+        `${CACHE_KEYS.NOVEL_INSIGHTS}:recent`,
+        TTL.NOVEL_INSIGHTS,
+        async () => {
+          const insights = await storage.getNovelInsightsOnly(20);
+          return { insights, total: insights.length };
+        }
+      );
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch recent novel insights", detail: e?.message });
     }
   });
 
@@ -875,7 +896,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/engine/memory", async (_req, res) => {
     try {
       console.log(`[engine/memory] START handler at ${new Date().toLocaleTimeString()}`);
-      const result = await cache.getOrSet(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, async () => {
+      const result = await cache.getOrSetStale(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, async () => {
         console.log(`[engine/memory] cache MISS, computing...`);
         const [strategies, insights, milestones, milestoneCount, snapshots, narratives] = await Promise.all([
           storage.getStrategyHistory(10),
@@ -945,8 +966,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         };
       });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch engine memory" });
+    } catch (e: any) {
+      console.error("[engine-memory] ERROR:", e?.message, e?.stack?.slice(0, 500));
+      res.status(500).json({ error: "Failed to fetch engine memory", detail: e?.message });
     }
   });
 
@@ -3661,8 +3683,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const formula = decodeURIComponent(req.params.formula);
       const existingJobs = await storage.getDftJobsByFormula(formula);
       const existing = existingJobs.length > 0 ? existingJobs[0] : null;
-      if (existing && existing.status === "completed" && existing.resultData) {
-        const parsed = typeof existing.resultData === "string" ? JSON.parse(existing.resultData) : existing.resultData;
+      if (existing && existing.status === "completed" && existing.outputData) {
+        const parsed = typeof existing.outputData === "string" ? JSON.parse(existing.outputData) : existing.outputData;
         const mod = await getEliashbergModule();
         const surrogateResult = mod.runEliashbergPipeline(formula, 0);
         res.json({
@@ -3965,7 +3987,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e) {
       console.error("[CrystalDiffusion] Init failed:", e);
     }
-  }, 90000);
+  }, 70000);  // T+70s — well before VAE at T+130s
 
   setTimeout(async () => {
     try {
@@ -3973,7 +3995,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e) {
       console.error("[CrystalVAE] Init failed:", e);
     }
-  }, 110000);
+  }, 130000);  // T+130s — 60s after diffusion model
 
   setTimeout(async () => {
     try {
@@ -3983,7 +4005,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e: any) {
       console.error("[Benchmark] Startup benchmark failed:", e.message);
     }
-  }, 130000);
+  }, 250000);  // T+250s — 60s after GNN pre-warm at T+190s
 
   app.get("/api/crystal-vae/stats", generalLimiter, async (_req, res) => {
     try {
@@ -5352,16 +5374,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const xgb = await gbPredictWithUncertainty(features, ref.formula);
         const gnn = gnnPredictWithUncertainty(ref.formula);
 
-        const xgboostTc = xgb.tcPredicted ?? 0;
-        const gnnTc = gnn.meanTc ?? 0;
+        const xgboostTc = xgb.tcMean ?? 0;
+        const gnnTc = gnn.tc ?? 0;
         const ensembleTc = (xgboostTc * 0.4 + gnnTc * 0.6);
 
         const tcError = Math.abs(ensembleTc - ref.textbook.tc);
         const tcErrorPercent = ref.textbook.tc > 0 ? (tcError / ref.textbook.tc) * 100 : 0;
 
         let lambdaError: number | null = null;
-        if (ref.textbook.lambda > 0 && gnn.meanLambda > 0) {
-          lambdaError = Math.abs(gnn.meanLambda - ref.textbook.lambda);
+        if (ref.textbook.lambda > 0 && gnn.lambda > 0) {
+          lambdaError = Math.abs(gnn.lambda - ref.textbook.lambda);
         }
 
         let rating = "poor";
@@ -5378,8 +5400,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             xgboostTc: Math.round(xgboostTc * 10) / 10,
             xgboostScore: Math.round((xgb.score ?? 0) * 1000) / 1000,
             gnnTc: Math.round(gnnTc * 10) / 10,
-            gnnUncertainty: Math.round((gnn.tcUncertainty ?? 0) * 10) / 10,
-            gnnLambda: Math.round((gnn.meanLambda ?? 0) * 1000) / 1000,
+            gnnUncertainty: Math.round((gnn.uncertainty ?? 0) * 10) / 10,
+            gnnLambda: Math.round((gnn.lambda ?? 0) * 1000) / 1000,
             ensembleTc: Math.round(ensembleTc * 10) / 10,
             reasoning: (xgb.reasoning ?? []).slice(0, 5),
           },

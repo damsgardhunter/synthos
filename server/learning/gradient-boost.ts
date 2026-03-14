@@ -147,21 +147,24 @@ const ENSEMBLE_LEARNING_RATES = [0.04, 0.05, 0.06, 0.05, 0.04];
 
 const FEATURE_SUBSAMPLE_RATIO = 0.7;
 
-function trainEnsembleXGB(X: number[][], y: number[]): GBEnsemble {
+async function trainEnsembleXGB(X: number[][], y: number[]): Promise<GBEnsemble> {
   const overrides = getXGBoostHyperparamOverrides();
+  // When GCP handles full GNN training, use a lighter local surrogate to avoid blocking the event loop
+  const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
   const models: GBModel[] = [];
   for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
     const { X: bsX, y: bsY } = bootstrapSample(X, y);
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const nTrees = overrides.nTrees ?? 300;
+    const nTrees = overrides.nTrees ?? (isOffloaded ? 100 : 300);
     const model = trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
+    await new Promise<void>(r => setImmediate(r)); // yield between each XGB model
   }
   return { models, trainedAt: Date.now() };
 }
 
-function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble: GBEnsemble): GBEnsemble {
+async function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble: GBEnsemble): Promise<GBEnsemble> {
   const LOG_EPSILON = 1e-6;
   const logSquaredResiduals: number[] = [];
   for (let i = 0; i < X.length; i++) {
@@ -171,14 +174,16 @@ function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble: GBEn
   }
 
   const overrides = getXGBoostHyperparamOverrides();
+  const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
   const models: GBModel[] = [];
   for (let i = 0; i < XGB_ENSEMBLE_SIZE; i++) {
     const { X: bsX, y: bsY } = bootstrapSample(X, logSquaredResiduals);
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const nTrees = overrides.nTrees ?? 200;
+    const nTrees = overrides.nTrees ?? (isOffloaded ? 70 : 200);
     const model = trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
+    await new Promise<void>(r => setImmediate(r)); // yield between each variance model
   }
   return { models, trainedAt: Date.now(), isLogVariance: true };
 }
@@ -680,6 +685,11 @@ function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
     sanitize((f as any).disorderSiteMixingEntropy, 0),
     sanitize((f as any).disorderConfigEntropy, 0),
     sanitize((f as any).disorderDosSignal, 0),
+    sanitize((f as any).familyBoride, 0),
+    sanitize((f as any).familyA15, 0),
+    sanitize((f as any).familyPnictide, 0),
+    sanitize((f as any).familyChalcogenide, 0),
+    sanitize((f as any).familyHeavyFermion, 0),
   ];
 
   let compFeatures: number[] = [];
@@ -716,6 +726,7 @@ const PHYSICS_FEATURE_NAMES = [
   "dosAtEF_tb", "bandFlatness_tb", "lambdaProxy_tb",
   "disorderVacancyFrac", "disorderBondVar", "disorderLatticeStrain",
   "disorderSiteMixEntropy", "disorderConfigEntropy", "disorderDosSignal",
+  "familyBoride", "familyA15", "familyPnictide", "familyChalcogenide", "familyHeavyFermion",
 ];
 
 const FEATURE_NAMES = [...PHYSICS_FEATURE_NAMES, ...COMPOSITION_FEATURE_NAMES];
@@ -1168,12 +1179,13 @@ export async function initPoolAsync(): Promise<void> {
 }
 
 async function backfillPool(remaining: { formula: string; tc: number; pressureGPa: number }[], t0: number): Promise<void> {
-  await new Promise<void>(r => setTimeout(r, 360000));
+  // Short delay to let startup I/O settle, then backfill remaining entries with event-loop yields
+  await new Promise<void>(r => setTimeout(r, 30000));
   let added = 0;
   for (let i = 0; i < remaining.length; i++) {
     const e = remaining[i];
     if (await trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
-    await new Promise<void>(r => setTimeout(r, 50));
+    await new Promise<void>(r => setImmediate(r));
   }
   console.log(`[TrainingPool] Phase 2 backfill: ${trainingPool.size} total vectors (+${added}) in ${Date.now() - t0}ms`);
 
@@ -1210,10 +1222,10 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
       await logModelVersion("full-training", X.length);
       console.log(`[GradientBoost] Full model: ${X.length} samples in ${Date.now() - trainStart}ms`);
 
-      setTimeout(() => {
+      setTimeout(async () => {
         try {
-          cachedEnsembleXGB = trainEnsembleXGB(X, y);
-          cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+          cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+          cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
           cachedGlobalFeatureImportance = null;
           buildFeatureImportanceCache();
         } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
@@ -1260,10 +1272,10 @@ export async function getTrainedModel(): Promise<GBModel> {
   cachedCalibration = await computeCalibration(cachedModel);
 
   if (!cachedEnsembleXGB && X.length >= 30) {
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
-        cachedEnsembleXGB = trainEnsembleXGB(X, y);
-        cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+        cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
         cachedGlobalFeatureImportance = null;
         buildFeatureImportanceCache();
       } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
@@ -1657,7 +1669,7 @@ async function logModelVersion(trigger: string, datasetSize: number): Promise<Mo
   const ensembleStats = getXGBEnsembleStats();
 
   let predVariance = 0;
-  if (cachedEnsembleXGB) {
+  if (cachedEnsembleXGB && datasetSize >= 500 && xgboostRetrainCount >= 10) {
     const benchmarks = ["MgB2", "NbSn3", "YBa2Cu3O7", "LaH10", "FeSe"];
 
     const frontierFormulas: string[] = [];
@@ -1873,10 +1885,8 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   cachedCalibration = await computeCalibration(cachedModel);
 
   if (X.length >= 30) {
-    cachedEnsembleXGB = trainEnsembleXGB(X, y);
-    await new Promise<void>(r => setImmediate(r));
-    cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-    await new Promise<void>(r => setImmediate(r));
+    cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+    cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
     cachedGlobalFeatureImportance = null;
     buildFeatureImportanceCache();
     await new Promise<void>(r => setImmediate(r));
@@ -1901,9 +1911,9 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     await new Promise<void>(r => setImmediate(r));
     cachedCalibration = await computeCalibration(cachedModel);
     if (X.length >= 30) {
-      cachedEnsembleXGB = trainEnsembleXGB(X, y);
+      cachedEnsembleXGB = await trainEnsembleXGB(X, y);
       await new Promise<void>(r => setImmediate(r));
-      cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+      cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
       await new Promise<void>(r => setImmediate(r));
       cachedGlobalFeatureImportance = null;
       buildFeatureImportanceCache();
@@ -2065,9 +2075,9 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   await new Promise<void>(r => setImmediate(r));
   cachedCalibration = await computeCalibration(cachedModel);
   if (X.length >= 30) {
-    cachedEnsembleXGB = trainEnsembleXGB(X, y);
+    cachedEnsembleXGB = await trainEnsembleXGB(X, y);
     await new Promise<void>(r => setImmediate(r));
-    cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
     await new Promise<void>(r => setImmediate(r));
     cachedGlobalFeatureImportance = null;
     buildFeatureImportanceCache();
@@ -2118,9 +2128,9 @@ export async function incorporateFailureData(): Promise<number> {
       await new Promise<void>(r => setImmediate(r));
       cachedCalibration = await computeCalibration(cachedModel);
       if (X.length >= 30) {
-        cachedEnsembleXGB = trainEnsembleXGB(X, y);
+        cachedEnsembleXGB = await trainEnsembleXGB(X, y);
         await new Promise<void>(r => setImmediate(r));
-        cachedVarianceEnsembleXGB = trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
         await new Promise<void>(r => setImmediate(r));
         cachedGlobalFeatureImportance = null;
         buildFeatureImportanceCache();

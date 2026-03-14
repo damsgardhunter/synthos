@@ -356,6 +356,11 @@ export interface MLFeatureVector {
   anharmonicityScore: number;
   maxAtomicNumber: number;
   feasibilityScore: number;
+  familyBoride: number;
+  familyA15: number;
+  familyPnictide: number;
+  familyChalcogenide: number;
+  familyHeavyFermion: number;
   _sourceFormula?: string;
 }
 
@@ -406,6 +411,31 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
   const dWaveSymmetry = hasCu && hasO && elements.length >= 3;
   const sg = mat?.spacegroup ?? "";
   const layeredStructure = sg.includes("P4") || sg.includes("Pmmm") || sg.includes("I4") || sg.includes("R-3m") || sg.includes("P63/mmc") || sg.includes("P6/mmm") || sg.includes("C2/m") || sg.includes("Cmcm");
+
+  const hasBoron = elements.includes("B");
+  const hasIron = elements.includes("Fe");
+  const hasNickel = elements.includes("Ni");
+
+  // Boride: has B + transition metal, no oxygen (MgB2, NbB2 type)
+  const familyBoride = (hasBoron && hasTransitionMetal && !hasO) ? 1 : 0;
+
+  // A15: exactly 2 elements, 3:1 ratio with transition metal (Nb3Sn, V3Si, etc.)
+  const familyA15 = (() => {
+    if (Object.keys(counts).length !== 2) return 0;
+    const vals = Object.values(counts) as number[];
+    const [a, b] = vals[0] > vals[1] ? [vals[0], vals[1]] : [vals[1], vals[0]];
+    if (a === 3 && b === 1 && hasTransitionMetal) return 1;
+    return 0;
+  })();
+
+  // Pnictide: iron + pnictogen (As or P) — FeAs, FeSe-As-type
+  const familyPnictide = (hasIron && hasPnictogen) ? 1 : 0;
+
+  // Chalcogenide: iron + chalcogen but not oxygen (FeSe, FeTe type)
+  const familyChalcogenide = (hasIron && hasChalcogen && !hasO) ? 1 : 0;
+
+  // Heavy fermion: rare earth + (Ni or Cu or In) — CeCoIn5, UBe13 etc.
+  const familyHeavyFermion = (hasRareEarth && (hasNickel || hasCu)) ? 1 : 0;
 
   let cooperPairStrengthBase = (hasTransitionMetal ? 0.15 : 0) + (hasHydrogen ? 0.1 : 0) +
     (dWaveSymmetry ? 0.1 : 0) + (layeredStructure ? 0.05 : 0) + (enSpread > 1.5 ? 0.05 : 0);
@@ -826,6 +856,11 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
       return dosNorm * 0.20 + electronic.metallicity * 0.15 + lam * 0.25 + electronic.nestingScore * 0.15 + corrBonus + electronic.vanHoveProximity * 0.10;
     })(),
     anharmonicityScore,
+    familyBoride,
+    familyA15,
+    familyPnictide,
+    familyChalcogenide,
+    familyHeavyFermion,
     _sourceFormula: normalizedFormula,
   };
 }

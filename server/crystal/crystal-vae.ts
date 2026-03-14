@@ -415,7 +415,8 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
 
   trainingHistory = [];
 
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+  // Use a real delay so the event loop can process I/O between epochs
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 5));
 
   function computeBeta(epoch: number): number {
     if (epoch < WARMUP_EPOCHS) {
@@ -544,7 +545,7 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
   }
 
   for (let epoch = 0; epoch < NUM_EPOCHS; epoch++) {
-    if (epoch % 3 === 0) await yield_();
+    await yield_(); // yield every epoch so the event loop can breathe
     const beta = computeBeta(epoch);
 
     let totalLoss = 0;

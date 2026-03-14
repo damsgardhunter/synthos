@@ -469,7 +469,7 @@ export async function initDiffusionModel(): Promise<void> {
   trainingLossHistory = [];
   let lr = LEARNING_RATE;
 
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 5));
   for (let epoch = 0; epoch < TRAIN_EPOCHS; epoch++) {
     const loss = trainStep(scoreNetwork, trainingFeatures, lr);
     trainingLossHistory.push(loss);
@@ -478,7 +478,7 @@ export async function initDiffusionModel(): Promise<void> {
       lr *= 0.9;
     }
 
-    if (epoch % 5 === 0) await yield_();
+    await yield_(); // yield every epoch with real delay so the event loop isn't starved
 
     if (epoch % 25 === 0) {
       console.log(`[CrystalDiffusion] Epoch ${epoch}/${TRAIN_EPOCHS}, loss=${loss.toFixed(6)}, lr=${lr.toFixed(6)}`);

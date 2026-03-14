@@ -5,6 +5,7 @@ interface CacheEntry<T> {
 
 class MemoryCache {
   private store = new Map<string, CacheEntry<any>>();
+  private inflight = new Map<string, Promise<any>>();
 
   get<T>(key: string): T | undefined {
     const entry = this.store.get(key);
@@ -14,6 +15,16 @@ class MemoryCache {
       return undefined;
     }
     return entry.data as T;
+  }
+
+  getStale<T>(key: string): T | undefined {
+    return (this.store.get(key)?.data as T) ?? undefined;
+  }
+
+  isExpired(key: string): boolean {
+    const entry = this.store.get(key);
+    if (!entry) return true;
+    return Date.now() > entry.expiresAt;
   }
 
   set<T>(key: string, data: T, ttlMs: number): void {
@@ -37,9 +48,45 @@ class MemoryCache {
   async getOrSet<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
     const cached = this.get<T>(key);
     if (cached !== undefined) return cached;
-    const data = await fetcher();
-    this.set(key, data, ttlMs);
-    return data;
+
+    const existing = this.inflight.get(key);
+    if (existing) return existing as Promise<T>;
+
+    const promise = fetcher().then(data => {
+      this.set(key, data, ttlMs);
+      this.inflight.delete(key);
+      return data;
+    }).catch(err => {
+      this.inflight.delete(key);
+      throw err;
+    });
+
+    this.inflight.set(key, promise);
+    return promise;
+  }
+
+  // Returns stale data immediately if available while refreshing in background.
+  // Only blocks on the very first ever fetch (no stale data exists yet).
+  async getOrSetStale<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
+    const stale = this.getStale<T>(key);
+    const expired = this.isExpired(key);
+
+    if (stale !== undefined && !expired) return stale;
+
+    if (stale !== undefined && expired) {
+      // Serve stale immediately; refresh in background (deduplicated)
+      if (!this.inflight.has(key)) {
+        const promise = fetcher().then(data => {
+          this.set(key, data, ttlMs);
+          this.inflight.delete(key);
+          return data;
+        }).catch(() => { this.inflight.delete(key); });
+        this.inflight.set(key, promise);
+      }
+      return stale;
+    }
+
+    return this.getOrSet(key, ttlMs, fetcher);
   }
 
   clear(): void {
@@ -57,7 +104,7 @@ export const TTL = {
   RESEARCH_LOGS: 15 * 1000,
   LEARNING_PHASES: 30 * 1000,
   DFT_STATUS: 30 * 1000,
-  ENGINE_MEMORY: 30 * 1000,
+  ENGINE_MEMORY: 5 * 60 * 1000,
   CANDIDATES: 20 * 1000,
   STRATEGY: 30 * 1000,
   MILESTONES: 60 * 1000,

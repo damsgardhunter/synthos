@@ -149,6 +149,7 @@ export const superconductorCandidates = pgTable("superconductor_candidates", {
 }, (table) => [
   index("sc_candidates_predicted_tc_idx").on(table.predictedTc),
   index("sc_candidates_ensemble_score_idx").on(table.ensembleScore),
+  index("sc_candidates_data_confidence_idx").on(table.dataConfidence),
 ]);
 
 export const crystalStructures = pgTable("crystal_structures", {
@@ -204,6 +205,7 @@ export const novelInsights = pgTable("novel_insights", {
   discoveredAt: timestamp("discovered_at").defaultNow(),
 }, (table) => [
   index("novel_insights_discovered_at_idx").on(table.discoveredAt),
+  index("novel_insights_is_novel_idx").on(table.isNovel, table.discoveredAt),
 ]);
 
 export const researchStrategies = pgTable("research_strategies", {
@@ -268,6 +270,7 @@ export const dftJobs = pgTable("dft_jobs", {
   inputData: jsonb("input_data"),
   outputData: jsonb("output_data"),
   errorMessage: text("error_message"),
+  workerNode: varchar("worker_node", { length: 20 }),  // "local" | "gcp"
   createdAt: timestamp("created_at").defaultNow(),
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),
@@ -278,6 +281,29 @@ export const dftJobs = pgTable("dft_jobs", {
 
 export const insertDftJobSchema = createInsertSchema(dftJobs).omit({ id: true, createdAt: true, startedAt: true, completedAt: true });
 export type DftJob = typeof dftJobs.$inferSelect;
+
+// GNN training jobs dispatched to the GCP worker
+export const gnnTrainingJobs = pgTable("gnn_training_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  status: varchar("status", { length: 20 }).notNull().default("queued"), // queued | running | done | failed
+  trainingData: jsonb("training_data").notNull(), // TrainingSample[]
+  weights: jsonb("weights"),                      // GNNWeights[] when done
+  r2: real("r2"),
+  mae: real("mae"),
+  rmse: real("rmse"),
+  datasetSize: integer("dataset_size"),
+  dftSamples: integer("dft_samples"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+}, (table) => [
+  index("gnn_training_jobs_status_idx").on(table.status, table.createdAt),
+]);
+
+export const insertGnnTrainingJobSchema = createInsertSchema(gnnTrainingJobs).omit({ id: true, createdAt: true, startedAt: true, completedAt: true });
+export type GnnTrainingJob = typeof gnnTrainingJobs.$inferSelect;
+export type InsertGnnTrainingJob = z.infer<typeof insertGnnTrainingJobSchema>;
 export type InsertDftJob = z.infer<typeof insertDftJobSchema>;
 
 export const experimentalValidations = pgTable("experimental_validations", {

@@ -3,6 +3,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { promisify } from "util";
+import { binaryPath, getTempSubdir } from "./platform-utils";
 
 const execFileAsync = promisify(execFile);
 import { getElementData } from "../learning/elemental-data";
@@ -15,10 +16,10 @@ import { normalizeFormula } from "../learning/utils";
 import { getGroundTruthDataset } from "../learning/ground-truth-store";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
-const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
+const XTB_BIN = binaryPath(path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
 const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
 const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
-const WORK_DIR = "/tmp/dft_calculations";
+const WORK_DIR = getTempSubdir("dft_calculations");
 const TIMEOUT_MS = 60_000;
 
 export interface OptimizationResult {
@@ -3381,7 +3382,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
       ...process.env as Record<string, string>,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "512M",
     };
 
@@ -3576,7 +3577,7 @@ export async function runLandscapeExploration(formula: string): Promise<EnergyLa
         ...process.env as Record<string, string>,
         XTBHOME: XTB_HOME,
         XTBPATH: XTB_PARAM,
-        OMP_NUM_THREADS: "1",
+        OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
         OMP_STACKSIZE: "512M",
       };
 
@@ -3772,7 +3773,7 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
       ...process.env,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "512M",
     };
 
@@ -3941,7 +3942,7 @@ async function computeElementalEnergy(element: string): Promise<number | null> {
       ...process.env,
       XTBHOME: XTB_HOME,
       XTBPATH: XTB_PARAM,
-      OMP_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
       OMP_STACKSIZE: "512M",
     };
 
@@ -4067,7 +4068,7 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
     ...process.env as Record<string, string>,
     XTBHOME: XTB_HOME,
     XTBPATH: XTB_PARAM,
-    OMP_NUM_THREADS: "1",
+    OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
     OMP_STACKSIZE: "1G",
   };
   try {
@@ -4458,7 +4459,7 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
     ...process.env,
     XTBHOME: XTB_HOME,
     XTBPATH: XTB_PARAM,
-    OMP_NUM_THREADS: "1",
+    OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
     OMP_STACKSIZE: "100M",
   };
 
@@ -4576,7 +4577,7 @@ export async function runXTBAnharmonicProbe(formula: string): Promise<Anharmonic
     ...process.env as Record<string, string>,
     XTBHOME: XTB_HOME,
     XTBPATH: XTB_PARAM,
-    OMP_NUM_THREADS: "1",
+    OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
     OMP_STACKSIZE: "512M",
   };
 
@@ -4677,7 +4678,7 @@ export async function runXTBMDSampling(formula: string, temperatureK: number = 3
     ...process.env as Record<string, string>,
     XTBHOME: XTB_HOME,
     XTBPATH: XTB_PARAM,
-    OMP_NUM_THREADS: "1",
+    OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? "6",
     OMP_STACKSIZE: "512M",
   };
 

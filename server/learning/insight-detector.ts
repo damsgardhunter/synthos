@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import crypto from "crypto";
 import { storage } from "../storage";
+import { cache, CACHE_KEYS } from "../cache";
 import type { EventEmitter } from "./engine";
 import { sanitizeForbiddenWords } from "./utils";
 
@@ -391,7 +392,7 @@ function isCorrelationDuplicate(text: string, existingTexts: string[]): boolean 
   return false;
 }
 
-const ROLLING_WINDOW_SIZE = 100;
+const ROLLING_WINDOW_SIZE = 500;
 const EMBEDDING_CACHE_MAX = 2000;
 const SEMANTIC_DUP_THRESHOLD = 0.75;
 const DIRECTION_CHECK_LOW = 0.70;
@@ -482,6 +483,32 @@ function addToEmbeddingCache(text: string, embedding: Float32Array): void {
   }
 }
 
+/**
+ * Called once at startup. Loads all stored novel insights from DB and computes their
+ * embeddings so the in-memory semantic dedup cache survives server restarts.
+ * Without this, the same insight can pass semantic dedup on every restart.
+ */
+export async function bootstrapInsightEmbeddingCache(): Promise<void> {
+  try {
+    const existing = await storage.getNovelInsightsOnly(EMBEDDING_CACHE_MAX);
+    if (existing.length === 0) return;
+
+    const texts = existing.map(i => i.insightText);
+    const embeddings = await computeInsightEmbeddingsBatch(texts);
+
+    let loaded = 0;
+    for (let i = 0; i < texts.length; i++) {
+      if (embeddings[i]) {
+        addToEmbeddingCache(texts[i], embeddings[i]!);
+        loaded++;
+      }
+    }
+    console.log(`[InsightDetector] Bootstrapped embedding cache: ${loaded}/${existing.length} insights loaded`);
+  } catch (err: any) {
+    console.warn(`[InsightDetector] Bootstrap failed: ${err?.message?.slice(0, 100)}`);
+  }
+}
+
 function extractDirectionFromText(text: string): string {
   const lower = text.toLowerCase();
   for (const dir of CORRELATION_DIRECTIONS) {
@@ -561,89 +588,22 @@ export async function evaluateInsightNovelty(
     }
 
     if (isDuplicateByJaccard(lower, existingTexts) || isConceptualDuplicate(lower, existingTexts)) {
-      try {
-        await storage.insertNovelInsight({
-          id: insightId(text, phaseId),
-          phaseId,
-          phaseName,
-          insightText: text,
-          isNovel: false,
-          noveltyScore: 0.12,
-          noveltyReason: "Duplicate detected via semantic/concept similarity",
-          category: "known-pattern",
-          relatedFormulas: relatedFormulas ?? [],
-        });
-      } catch {}
       continue;
     }
 
     if (isCorrelationDuplicate(lower, existingTexts)) {
-      try {
-        await storage.insertNovelInsight({
-          id: insightId(text, phaseId),
-          phaseId,
-          phaseName,
-          insightText: text,
-          isNovel: false,
-          noveltyScore: 0.1,
-          noveltyReason: "Duplicate correlation pair (same property_X ↔ property_Y already recorded)",
-          category: "known-pattern",
-          relatedFormulas: relatedFormulas ?? [],
-        });
-      } catch {}
       continue;
     }
 
     if (isTextbookKnowledge(text)) {
-      try {
-        await storage.insertNovelInsight({
-          id: insightId(text, phaseId),
-          phaseId,
-          phaseName,
-          insightText: text,
-          isNovel: false,
-          noveltyScore: 0.1,
-          noveltyReason: "Restates well-known textbook knowledge",
-          category: "textbook",
-          relatedFormulas: relatedFormulas ?? [],
-        });
-      } catch {}
       continue;
     }
 
     if (hasKeywordOverlap(lower, existingTexts)) {
-      try {
-        await storage.insertNovelInsight({
-          id: insightId(text, phaseId),
-          phaseId,
-          phaseName,
-          insightText: text,
-          isNovel: false,
-          noveltyScore: 0.15,
-          noveltyReason: "Semantically similar to existing insight (keyword overlap)",
-          category: "known-pattern",
-          relatedFormulas: relatedFormulas ?? [],
-        });
-      } catch {}
       continue;
     }
 
     if (!requiresQuantitativeContent(text)) {
-      try {
-        await storage.insertNovelInsight({
-          id: insightId(text, phaseId),
-          phaseId,
-          phaseName,
-          insightText: text,
-          isNovel: false,
-          noveltyScore: 0.05,
-          noveltyReason: isMetaCommentary(text)
-            ? "Rejected: meta-commentary without actionable content"
-            : "Rejected: lacks quantitative content (no numbers, formulas, or specific properties)",
-          category: "known-pattern",
-          relatedFormulas: relatedFormulas ?? [],
-        });
-      } catch {}
       continue;
     }
 
@@ -660,21 +620,8 @@ export async function evaluateInsightNovelty(
     const candidate = potentiallyNovel[ci];
     const embedding = batchEmbeddings[ci];
     if (embedding) {
-      const { isDuplicate, bestSimilarity, matchText } = isSemanticDuplicate(embedding, candidate.text);
+      const { isDuplicate } = isSemanticDuplicate(embedding, candidate.text);
       if (isDuplicate) {
-        try {
-          await storage.insertNovelInsight({
-            id: insightId(candidate.text, phaseId),
-            phaseId,
-            phaseName,
-            insightText: candidate.text,
-            isNovel: false,
-            noveltyScore: 0.08,
-            noveltyReason: `Semantic duplicate (cosine=${bestSimilarity.toFixed(3)}) of: "${matchText.slice(0, 60)}..."`,
-            category: "known-pattern",
-            relatedFormulas: relatedFormulas ?? [],
-          });
-        } catch {}
         continue;
       }
     }
@@ -774,12 +721,15 @@ Return JSON with 'evaluations' array, each with:
       const entry = afterEmbeddingFilter[globalIdx];
       if (!entry) continue;
 
-      const noveltyThreshold = tempo === "contemplating" ? 0.30 : tempo === "excited" ? 0.45 : 0.40;
+      const noveltyThreshold = 0.70; // high bar to prevent DB bloat; was tempo-dependent 0.35–0.50
       const isNovel = ev.isNovel === true && (ev.noveltyScore ?? 0) >= noveltyThreshold;
 
       if (entry.embedding) {
         addToEmbeddingCache(entry.text, entry.embedding);
       }
+
+      // Only write to DB if the insight is genuinely novel — skip low-value rows to keep DB lean
+      if (!isNovel) continue;
 
       try {
         await storage.insertNovelInsight({
@@ -787,12 +737,14 @@ Return JSON with 'evaluations' array, each with:
           phaseId,
           phaseName,
           insightText: entry.text,
-          isNovel,
+          isNovel: true,
           noveltyScore: ev.noveltyScore ?? 0.2,
           noveltyReason: ev.reason ?? "",
           category: ev.category ?? "known-pattern",
           relatedFormulas: relatedFormulas ?? [],
         });
+        // Invalidate cached insight responses so the new insight shows up promptly
+        cache.invalidatePrefix(CACHE_KEYS.NOVEL_INSIGHTS);
       } catch {}
 
       if (isNovel) {

@@ -2346,7 +2346,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   }
 
   const lr = 0.001;
-  const epochs = 8;
+  // Fewer epochs for larger datasets: they converge faster and take longer per epoch.
+  // >400 samples → 3 epochs, 200-400 → 5 epochs, <200 → 8 epochs.
+  const epochs = trainingData.length > 400 ? 3 : trainingData.length > 200 ? 5 : 8;
   const batchSize = Math.min(32, trainingData.length);
 
   const graphCache = new Map<string, CrystalGraph>();
@@ -2430,9 +2432,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const nN = graph.nodes.length;
 
         const tcTarget = sample.tc / 300;
-        const feTarget = sample.formationEnergy ?? 0;
+        const hasFormationEnergy = sample.formationEnergy != null;
+        const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
         const tcError = pred.predictedTc / 300 - tcTarget;
-        const feError = pred.formationEnergy - feTarget;
+        const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
 
         const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;
         const phononPred = pred.phononStability ? 1.0 : 0.0;
@@ -2442,7 +2445,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const confError = pred.confidence - confTarget;
 
         const lambdaTarget = lambdaTargets.has(idx) ? lambdaTargets.get(idx)!
-          : (sample.tc > 0 ? Math.min(4.0, sample.tc / 50) : 0.1);
+          : (sample.tc > 0 ? Math.min(4.0, 0.3 + Math.sqrt(sample.tc / 40)) : 0.1);
         const lambdaError = pred.lambda - lambdaTarget;
 
         const bgTarget = (sample as any).bandgap ?? (sample.tc > 0 ? 0 : 1.5);
@@ -2457,12 +2460,13 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const heteroLossTc = (tcError * tcError) / tcVarNorm + Math.log(tcVarNorm);
         const heteroLossLambda = (lambdaError * lambdaError) / lambdaVarNorm + Math.log(lambdaVarNorm);
 
-        const loss = tcError * tcError + 0.1 * feError * feError + 0.1 * heteroLossTc + 0.05 * heteroLossLambda;
+        const feWeight = hasFormationEnergy ? 0.1 : 0.0;
+        const loss = tcError * tcError + feWeight * feError * feError + 0.1 * heteroLossTc + 0.05 * heteroLossLambda;
         totalLoss += loss;
         totalSamples++;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
-        dLdOut[0] = clipGrad(2 * feError * 0.1);
+        dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
         dLdOut[1] = clipGrad(2 * phononError * 0.05);
         dLdOut[2] = clipGrad(2 * tcError + 0.1 * 2 * tcError / tcVarNorm);
         dLdOut[3] = clipGrad(2 * confError * 0.05);
@@ -2750,6 +2754,7 @@ function getEnsembleModels(): GNNWeights[] {
       return {
         formula: e.formula,
         tc: e.tc,
+        lambda: (e as any).lambda ?? undefined,
         formationEnergy: undefined,
         structure: proto ? {
           spaceGroup: proto.spaceGroup,
@@ -2868,6 +2873,19 @@ export function invalidateGNNModel(): void {
   cachedEnsembleModels = null;
   modelTrainedAt = 0;
   gnnPredictionCache.clear();
+}
+
+/**
+ * Apply serialized weights received from the GCP worker back into the local ensemble.
+ * `serialized` is the `weights` JSONB array stored in gnn_training_jobs.
+ */
+export function applySerializedWeights(
+  serialized: GNNWeights[],
+  trainingData?: { formula: string; tc: number }[],
+): void {
+  if (!serialized || serialized.length === 0) return;
+  invalidateGNNModel();
+  setCachedEnsemble(serialized, trainingData);
 }
 
 export function setCachedEnsemble(models: GNNWeights[], trainingData?: { formula: string; tc: number }[]): void {
@@ -3160,7 +3178,7 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
     totalStd: Math.round(s(totalTcStd) * 100) / 100,
   };
   const elapsed = Date.now() - t0;
-  try { const { recordInferenceTime } = require("./model-diagnostics"); recordInferenceTime("gnn", elapsed); } catch {}
+  try { import("./model-diagnostics").then(m => m.recordInferenceTime("gnn", elapsed)).catch(() => {}); } catch {}
   return result;
 }
 
@@ -3316,13 +3334,143 @@ export function getDFTTrainingDatasetStats(): {
   };
 }
 
-setTimeout(() => {
+setTimeout(async () => {
+  // When GNN training is offloaded to GCP, skip local startup training entirely.
+  // The GCP worker handles all ensemble training; local server just applies weights.
+  if (process.env.OFFLOAD_GNN_TO_GCP === "true") {
+    console.log("[GNN] OFFLOAD_GNN_TO_GCP=true — skipping local startup training, GCP handles GNN");
+    return;
+  }
   try {
-    getEnsembleModels();
-    console.log(`[GNN] Pre-warmed ${ENSEMBLE_SIZE}-model ensemble at startup`);
-    const superconCount = SUPERCON_TRAINING_DATA.filter(e => e.isSuperconductor).length;
-    logGNNVersion("startup", superconCount, 0, 0);
+    // Build a Tc + lambda lookup from SUPERCON for cross-referencing with MP data
+    const superconTcMap = new Map<string, { tc: number; lambda?: number }>();
+    for (const e of SUPERCON_TRAINING_DATA) {
+      superconTcMap.set(e.formula, { tc: e.tc, lambda: (e as any).lambda ?? undefined });
+    }
+    const superconFormulas = new Set(SUPERCON_TRAINING_DATA.map(e => e.formula));
+
+    // --- Seed dftTrainingDataset with all SUPERCON superconductors ---
+    let superconSeeded = 0;
+    for (const e of SUPERCON_TRAINING_DATA) {
+      if (e.isSuperconductor && e.tc > 0) {
+        const extras: Record<string, any> = {};
+        if ((e as any).lambda != null) extras.lambda = (e as any).lambda;
+        if (addDFTTrainingResult({ formula: e.formula, tc: e.tc, source: "supercon", ...extras })) superconSeeded++;
+      }
+    }
+
+    // Helper: build TrainingSample[] from SUPERCON + cached formation energies
+    const buildSuperconSamples = async (): Promise<TrainingSample[]> => {
+      const { fetchCachedFormationEnergies } = await import("./materials-project-client");
+      const cachedFE = await fetchCachedFormationEnergies(SUPERCON_TRAINING_DATA.map(e => e.formula));
+      return SUPERCON_TRAINING_DATA.map(e => {
+        const proto = matchPrototype(e.formula);
+        return {
+          formula: e.formula,
+          tc: e.tc,
+          lambda: (e as any).lambda ?? undefined,
+          formationEnergy: cachedFE.get(e.formula),
+          structure: proto ? {
+            spaceGroup: proto.spaceGroup,
+            crystalSystem: proto.crystalSystem,
+            dimensionality: proto.dimensionality,
+          } : undefined,
+          prototype: proto?.prototype,
+        };
+      });
+    }
+
+    // Helper: merge new MP records into dftTrainingDataset and extend a training set
+    const mergeMPRecords = (
+      mpRecords: { formula: string; bandGap: number | null; formationEnergy: number | null }[],
+      base: TrainingSample[],
+    ): { merged: TrainingSample[]; seeded: number } => {
+      let seeded = 0;
+      const seen = new Set(base.map(t => t.formula));
+      for (const mp of mpRecords) {
+        const known = superconTcMap.get(mp.formula);
+        const tc = known?.tc ?? 0;
+        if (addDFTTrainingResult({
+          formula: mp.formula, tc, source: "external",
+          bandGap: mp.bandGap, formationEnergy: mp.formationEnergy,
+          ...(known?.lambda != null ? { lambda: known.lambda } : {}),
+        })) seeded++;
+      }
+      // Add any dftTrainingDataset entries with tc > 0 not already in base
+      const extra: TrainingSample[] = [];
+      for (const rec of dftTrainingDataset) {
+        if (seen.has(rec.formula) || superconFormulas.has(rec.formula) || rec.tc <= 0) continue;
+        extra.push({ formula: rec.formula, tc: rec.tc, formationEnergy: rec.formationEnergy ?? undefined });
+        seen.add(rec.formula);
+      }
+      return { merged: [...base, ...extra], seeded };
+    }
+
+    // =====================================================================
+    // Phase 1: Train on full SUPERCON dataset (with cached formation energies)
+    // =====================================================================
+    const superconSamples = await buildSuperconSamples();
+    let currentTrainingData = superconSamples;
+
+    let ensembleModels = await trainEnsembleAsync(currentTrainingData);
+    invalidateGNNModel();
+    setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
+    const v1 = logGNNVersion("startup-supercon", currentTrainingData.length, dftTrainingDataset.length, 0);
+    console.log(`[GNN] Phase 1 (SUPERCON N=${currentTrainingData.length}): R²=${v1.r2}`);
+
+    // Yield so other event loop work (HTTP, DFT, etc.) can proceed between phases
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // =====================================================================
+    // Phase 2: Pull MP batch 1 (DB cache + up to 500 from API) if R² ≤ 0
+    // =====================================================================
+    if (v1.r2 <= 0) {
+      let mpSeeded1 = 0;
+      try {
+        const { fetchGNNSeedData } = await import("./materials-project-client");
+        const mpRecords1 = await fetchGNNSeedData();
+        const result1 = mergeMPRecords(mpRecords1, currentTrainingData);
+        currentTrainingData = result1.merged;
+        mpSeeded1 = result1.seeded;
+      } catch (mpErr: any) {
+        console.warn(`[GNN] Phase 2 MP fetch failed: ${mpErr?.message?.slice(0, 100)}`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 300));
+      ensembleModels = await trainEnsembleAsync(currentTrainingData);
+      invalidateGNNModel();
+      setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
+      const v2 = logGNNVersion("startup-mp-batch1", currentTrainingData.length, dftTrainingDataset.length, mpSeeded1);
+      console.log(`[GNN] Phase 2 (MP batch1 +${mpSeeded1}, N=${currentTrainingData.length}): R²=${v2.r2}`);
+
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      // ==================================================================
+      // Phase 3: Fetch next 500 from MP API (skip=500) if R² still ≤ 0
+      // ==================================================================
+      if (v2.r2 <= 0) {
+        let mpSeeded2 = 0;
+        try {
+          const { fetchMPBatchFromAPI } = await import("./materials-project-client");
+          const mpRecords2 = await fetchMPBatchFromAPI(500, 500);
+          const result2 = mergeMPRecords(mpRecords2, currentTrainingData);
+          currentTrainingData = result2.merged;
+          mpSeeded2 = result2.seeded;
+        } catch (mpErr: any) {
+          console.warn(`[GNN] Phase 3 MP fetch failed: ${mpErr?.message?.slice(0, 100)}`);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 300));
+        ensembleModels = await trainEnsembleAsync(currentTrainingData);
+        invalidateGNNModel();
+        setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
+        const v3 = logGNNVersion("startup-mp-batch2", currentTrainingData.length, dftTrainingDataset.length, mpSeeded1 + mpSeeded2);
+        console.log(`[GNN] Phase 3 (MP batch2 +${mpSeeded2}, N=${currentTrainingData.length}): R²=${v3.r2}`);
+      }
+    }
+
+    console.log(`[GNN] Startup warm-up complete: N=${currentTrainingData.length}, SUPERCON=${superconSeeded}, dftDataset=${dftTrainingDataset.length}`);
   } catch (e: any) {
     console.error(`[GNN] Pre-warm failed: ${e?.message?.slice(0, 200)}`);
   }
-}, 150000);
+}, 190000);  // T+190s — 60s after CrystalVAE at T+130s; benchmark runs at T+250s

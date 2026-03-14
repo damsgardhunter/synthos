@@ -15,6 +15,11 @@ const EXPLORATION_FRACTION = 0.3;
 const JOB_STAGGER_MS = 2000;
 const STALE_CLEANUP_INTERVAL_MS = 5 * 60_000;
 
+// Stability gate: reject any candidate whose best-known convex hull distance
+// exceeds this threshold (eV/atom above the hull). Prevents wasting SCF compute
+// on thermodynamically unstable structures that are very unlikely to be real.
+const STABILITY_GATE_EV_ATOM = 0.1;
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -72,6 +77,7 @@ export async function submitDFTJob(
   candidateId: number | null,
   priority: number = 50,
   jobType: string = "scf",
+  skipStabilityGate: boolean = false,
 ): Promise<DftJob | null> {
   if (!isValidFormula(formula)) {
     console.log(`[DFT-Queue] Formula ${formula} rejected: invalid or contains noble gas`);
@@ -80,6 +86,19 @@ export async function submitDFTJob(
   if (isFormulaBlocked(formula)) {
     console.log(`[DFT-Queue] Formula ${formula} blocked due to repeated failures, skipping`);
     return null;
+  }
+
+  // Stability gate: skip if best convex hull distance exceeds threshold
+  if (!skipStabilityGate) {
+    const structureMap = await storage.getCrystalStructuresByFormulas([formula]);
+    const structures = structureMap.get(formula) ?? [];
+    if (structures.length > 0) {
+      const bestHullDist = Math.min(...structures.map(s => s.convexHullDistance ?? Infinity));
+      if (bestHullDist > STABILITY_GATE_EV_ATOM) {
+        console.log(`[DFT-Queue] Formula ${formula} rejected by stability gate: hull dist ${bestHullDist.toFixed(3)} eV/atom > ${STABILITY_GATE_EV_ATOM}`);
+        return null;
+      }
+    }
   }
 
   const { activeJob, recentValidatedFailures } = await storage.hasActiveOrRecentFailedDftJobs(formula);
@@ -428,9 +447,17 @@ async function refillQueueIfLow(): Promise<number> {
     const formulasToCheck = preFiltered.map(c => c.formula);
     const structureMap = await storage.getCrystalStructuresByFormulas(formulasToCheck);
 
+    let skippedUnstable = 0;
     const eligible = preFiltered.filter(c => {
       const structures = structureMap.get(c.formula);
       if (!structures || structures.length === 0) return false;
+      // Stability gate: only queue candidates whose best structure is close enough
+      // to the convex hull. Null hull distance means unknown — allow through.
+      const bestHullDist = Math.min(...structures.map(s => s.convexHullDistance ?? 0));
+      if (bestHullDist > STABILITY_GATE_EV_ATOM) {
+        skippedUnstable++;
+        return false;
+      }
       return true;
     });
 
@@ -513,10 +540,10 @@ async function refillQueueIfLow(): Promise<number> {
       }
     }
 
-    skippedNoStructure = preFiltered.length - eligible.length;
+    skippedNoStructure = preFiltered.length - eligible.length - skippedUnstable;
 
-    if (submitted > 0 || refillErrors > 0 || skippedNoStructure > 0) {
-      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (${exploitSubmitted} exploit + ${exploreSubmitted} explore, queue was ${queueSize}/${MIN_QUEUE_SIZE})${skippedNoStructure > 0 ? `, ${skippedNoStructure} skipped (no structure prediction)` : ""}${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
+    if (submitted > 0 || refillErrors > 0 || skippedNoStructure > 0 || skippedUnstable > 0) {
+      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (${exploitSubmitted} exploit + ${exploreSubmitted} explore, queue was ${queueSize}/${MIN_QUEUE_SIZE})${skippedNoStructure > 0 ? `, ${skippedNoStructure} skipped (no structure)` : ""}${skippedUnstable > 0 ? `, ${skippedUnstable} rejected by stability gate (hull dist > ${STABILITY_GATE_EV_ATOM} eV/atom)` : ""}${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
     }
     return submitted;
   } catch (err: any) {
@@ -533,6 +560,23 @@ let lastStaleCleanup = 0;
 
 export function startDFTWorkerLoop() {
   if (workerLoopTimer) return;
+
+  // When DFT is offloaded to GCP, the local server only submits jobs; the GCP
+  // worker picks them up via the shared Neon DB queue. Skip local processing
+  // but still run the queue refill loop so GCP always has work to pick up.
+  if (process.env.OFFLOAD_DFT_TO_GCP === "true") {
+    console.log("[DFT-Queue] OFFLOAD_DFT_TO_GCP=true — running queue-refill only (GCP worker handles calculations)");
+    async function gcpRefillLoop() {
+      try {
+        await refillQueueIfLow();
+      } catch (err: any) {
+        console.warn("[DFT-Queue] GCP refill error:", err.message);
+      }
+      setTimeout(gcpRefillLoop, 60_000);
+    }
+    setTimeout(gcpRefillLoop, 5_000); // first refill after 5s
+    return;
+  }
 
   if (!isQEAvailable()) {
     console.log("[DFT-Queue] WARNING: Quantum ESPRESSO pw.x not found, DFT queue will run but calculations may fail");
@@ -588,7 +632,7 @@ export function startDFTWorkerLoop() {
   if (!watchdogTimer) {
     watchdogTimer = setInterval(() => {
       const elapsed = Date.now() - lastLoopHeartbeat;
-      if (elapsed > POLL_INTERVAL_MS * 3 && lastLoopHeartbeat > 0 && !watchdogRestarting) {
+      if (elapsed > 10 * 60 * 1000 && lastLoopHeartbeat > 0 && !watchdogRestarting) {
         watchdogRestarting = true;
         console.log(`[DFT-Queue] WATCHDOG: Worker loop appears dead (last heartbeat ${Math.round(elapsed/1000)}s ago), restarting`);
         if (workerLoopTimer) {
@@ -601,7 +645,7 @@ export function startDFTWorkerLoop() {
           loop();
         }, 1000);
       }
-    }, POLL_INTERVAL_MS * 2);
+    }, 5 * 60 * 1000);
   }
 }
 
@@ -649,6 +693,7 @@ export async function getDFTQueueStats() {
     currentFormula: currentActiveFormulas[0] || null,
     activeFormulas: currentActiveFormulas,
     qeAvailable: isQEAvailable(),
+    stabilityGateEvAtom: STABILITY_GATE_EV_ATOM,
     stageFailures: getStageFailureCounts(),
     pipelineStages: stageMetrics,
     recentJobs: recentJobs.map(j => {
