@@ -16,6 +16,7 @@ import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+  timeout: 60_000,
 });
 
 export const ROOM_TEMP_K = 293;

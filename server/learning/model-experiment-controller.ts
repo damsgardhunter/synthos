@@ -15,6 +15,7 @@ import { enableBuiltinFeature, selectArchitecture, getAvailableFeatureDefinition
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+  timeout: 60_000,
 });
 
 export type ExperimentType =
