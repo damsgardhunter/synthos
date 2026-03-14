@@ -8322,8 +8322,11 @@ export async function startEngine() {
     emit("log", { phase: "engine", event: "xTB health check failed", detail: e.message, dataSource: "xTB Health Check" });
   }
 
+  console.log("[Engine] startup: backfillGBScores...");
   await backfillGBScores();
+  console.log("[Engine] startup: recalculatePhysics...");
   await recalculatePhysics();
+  console.log("[Engine] startup: restoring campaigns...");
 
   try {
     const dbCampaigns = await storage.getInverseDesignCampaigns();
@@ -8335,6 +8338,7 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Campaign restoration failed:", e); }
 
+  console.log("[Engine] startup: restoring stats from DB...");
   try {
     const scCount = await storage.getSuperconductorCount();
     autonomousTotalScreened = Math.max(autonomousTotalScreened, scCount * 3);
@@ -8350,6 +8354,7 @@ export async function startEngine() {
 
   const yieldLoop = () => new Promise<void>(r => setTimeout(r, 200));
 
+  console.log("[Engine] startup: feature DB backfill...");
   try {
     const allCandidates = await storage.getSuperconductorCandidates(5000);
     let preSeeded = 0;
@@ -8373,6 +8378,7 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Feature DB backfill outer error:", e); }
 
+  console.log("[Engine] startup: seeding Bayesian optimizer...");
   try {
     const topForBO = await storage.getSuperconductorCandidatesByTc(50);
     let boSeeded = 0;
@@ -8392,6 +8398,7 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] BO seeding from DB failed:", e); }
 
+  console.log("[Engine] startup: topology & Fermi cluster seeding...");
   try {
     const topoCandidates = await storage.getSuperconductorCandidatesByTc(100);
     let topoSeeded = 0;
@@ -8431,6 +8438,7 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Topology/Fermi seed outer error:", e); }
 
+  console.log("[Engine] startup: creating inverse design campaigns...");
   try {
     const activeCampaigns = getAllActiveCampaigns();
     if (activeCampaigns.length === 0) {
@@ -8498,6 +8506,7 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Inverse campaign auto-create failed:", e); }
 
+  console.log("[Engine] startup: creating pipelines & design lab...");
   try {
     const existingPipelines = getAllPipelines();
     if (existingPipelines.length === 0) {
@@ -8549,6 +8558,7 @@ export async function startEngine() {
 
   await yieldLoop();
 
+  console.log("[Engine] startup: theory discovery...");
   try {
     const synthDataset = await generateSyntheticDataset(40);
     const theories = runSymbolicPhysicsDiscovery(synthDataset);
@@ -8566,6 +8576,7 @@ export async function startEngine() {
 
   await yieldLoop();
 
+  console.log("[Engine] startup: causal discovery...");
   try {
     const gtSummaryInit = getGroundTruthSummary();
     const MIN_CAUSAL_INIT = 500;
@@ -8609,6 +8620,7 @@ export async function startEngine() {
     emit("log", { phase: "engine", event: "Causal discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
   }
 
+  console.log("[Engine] startup: all subsystems initialized — starting learning cycle in 8s");
   emit("log", {
     phase: "engine",
     event: "Learning engine started",
