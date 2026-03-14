@@ -8285,7 +8285,8 @@ export async function startEngine() {
 
   // Restore the in-memory semantic dedup cache from DB so insights already
   // seen before the last restart don't slip through as "novel" again.
-  bootstrapInsightEmbeddingCache().catch(() => {});
+  // Delayed 90s so it doesn't compete with XGBoost deferred ensemble (starts at 45s).
+  setTimeout(() => bootstrapInsightEmbeddingCache().catch(() => {}), 90_000);
 
   // Background poller: applies GNN weights from GCP when training jobs complete.
   startGCPWeightPoller();
