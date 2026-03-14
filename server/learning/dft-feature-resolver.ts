@@ -442,15 +442,20 @@ async function fetchAllDFTSources(formula: string): Promise<RawDFTSources> {
   const mpAvailable = isApiAvailable();
   const normalizedFormula = normalizeFormula(formula);
 
-  // Sequential fetches to avoid 7 simultaneous API calls that can crash the network layer
+  // Parallel fetches — each has its own AbortSignal timeout (15-20s), so total time
+  // is bounded by the slowest call rather than the sum of all calls.
   let mpFailed = false;
-  const mpSummary = mpAvailable ? await fetchSummary(normalizedFormula).catch(() => { mpFailed = true; return null; }) : null;
-  const mpElasticity = mpAvailable ? await fetchElasticity(normalizedFormula).catch(() => null) : null;
-  const mpElectronic = mpAvailable ? await fetchElectronicStructure(normalizedFormula).catch(() => { mpFailed = true; return null; }) : null;
-  const mpThermo = mpAvailable ? await fetchThermo(normalizedFormula).catch(() => null) : null;
-  const mpPhonon = mpAvailable ? await fetchPhonon(normalizedFormula).catch(() => null) : null;
-  const aflowResult = await fetchAflowData(normalizedFormula).catch(() => ({ entries: [], queryFormula: normalizedFormula, source: "AFLOW" as const }));
-  const aflowDFT = await fetchAflowDFTData(normalizedFormula).catch(() => null);
+  const [
+    mpSummary, mpElasticity, mpElectronic, mpThermo, mpPhonon, aflowResult, aflowDFT,
+  ] = await Promise.all([
+    mpAvailable ? fetchSummary(normalizedFormula).catch(() => { mpFailed = true; return null; }) : Promise.resolve(null),
+    mpAvailable ? fetchElasticity(normalizedFormula).catch(() => null) : Promise.resolve(null),
+    mpAvailable ? fetchElectronicStructure(normalizedFormula).catch(() => { mpFailed = true; return null; }) : Promise.resolve(null),
+    mpAvailable ? fetchThermo(normalizedFormula).catch(() => null) : Promise.resolve(null),
+    mpAvailable ? fetchPhonon(normalizedFormula).catch(() => null) : Promise.resolve(null),
+    fetchAflowData(normalizedFormula).catch(() => ({ entries: [], queryFormula: normalizedFormula, source: "AFLOW" as const })),
+    fetchAflowDFTData(normalizedFormula).catch(() => null),
+  ]);
 
   const partial = mpAvailable && mpFailed && (mpSummary == null && mpElectronic == null);
 

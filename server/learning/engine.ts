@@ -2046,7 +2046,7 @@ async function runDFTEnrichment() {
 
     const toEnrich: typeof candidates = [];
     for (const c of sorted) {
-      if (toEnrich.length >= 12) break;
+      if (toEnrich.length >= 4) break;
       if (c.dataConfidence === "high" || c.dataConfidence === "dft-verified") continue;
       toEnrich.push(c);
     }
@@ -2055,7 +2055,7 @@ async function runDFTEnrichment() {
       .filter(c => !c.dataConfidence || c.dataConfidence === "analytical")
       .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
     for (const c of analyticalCandidates) {
-      if (toEnrich.length >= 20) break;
+      if (toEnrich.length >= 6) break;
       if (!toEnrich.some(e => e.id === c.id)) {
         toEnrich.push(c);
       }
@@ -2065,7 +2065,7 @@ async function runDFTEnrichment() {
       .filter(c => (c.ensembleScore ?? 0) > 0.7 && (!c.dataConfidence || c.dataConfidence === "analytical"))
       .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
     for (const c of highScoreAnalytical) {
-      if (toEnrich.length >= 25) break;
+      if (toEnrich.length >= 8) break;
       if (!toEnrich.some(e => e.id === c.id)) {
         toEnrich.push(c);
       }
@@ -2075,7 +2075,7 @@ async function runDFTEnrichment() {
       .filter(c => (c.predictedTc ?? 0) > 40 && c.dataConfidence !== "high" && c.dataConfidence !== "dft-verified" && c.dataConfidence !== "medium")
       .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
     for (const c of stage1Candidates) {
-      if (toEnrich.length >= 30) break;
+      if (toEnrich.length >= 8) break;
       if (!toEnrich.some(e => e.id === c.id)) {
         toEnrich.push(c);
       }
