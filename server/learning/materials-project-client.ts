@@ -393,18 +393,187 @@ export async function fetchAllData(formula: string): Promise<{
   electronicStructure: MPElectronicStructureData | null;
   thermo: MPThermoData | null;
 }> {
-  const [summary, elasticity, magnetism, phonon, electronicStructure, thermo] = await Promise.all([
-    fetchSummary(formula),
-    fetchElasticity(formula),
-    fetchMagnetism(formula),
-    fetchPhonon(formula),
-    fetchElectronicStructure(formula),
-    fetchThermo(formula),
-  ]);
+  // Sequential fetches to avoid hammering the MP API with 6 simultaneous requests
+  const summary = await fetchSummary(formula);
+  const elasticity = await fetchElasticity(formula);
+  const magnetism = await fetchMagnetism(formula);
+  const phonon = await fetchPhonon(formula);
+  const electronicStructure = await fetchElectronicStructure(formula);
+  const thermo = await fetchThermo(formula);
 
   return { summary, elasticity, magnetism, phonon, electronicStructure, thermo };
 }
 
 export function isApiAvailable(): boolean {
   return !!getApiKey();
+}
+
+export async function fetchCachedFormationEnergies(formulas: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  for (const formula of formulas) {
+    const cached = await getCachedData(formula, "summary");
+    if (cached && (cached as MPSummaryData).formationEnergyPerAtom != null) {
+      result.set(formula, (cached as MPSummaryData).formationEnergyPerAtom);
+    }
+  }
+  return result;
+}
+
+/**
+ * Fetches a paginated batch of metallic materials directly from the MP API.
+ * Used for progressive GNN augmentation: call with skip=0 for batch 1, skip=500 for batch 2, etc.
+ * Caches each result in the DB so future startups don't re-fetch.
+ */
+export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<MPGNNSeedRecord[]> {
+  const results: MPGNNSeedRecord[] = [];
+  if (!getApiKey()) {
+    console.log(`[MP-Batch] No API key available, skipping batch fetch (skip=${skip})`);
+    return results;
+  }
+  try {
+    const data = await mpFetch("/materials/summary/", {
+      is_metal: "True",
+      fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,crystal_system,nsites,is_metal",
+      _limit: String(limit),
+      _skip: String(skip),
+      _sort_fields: "energy_above_hull",
+    });
+    if (!data?.data) return results;
+    for (const item of data.data) {
+      const formula = normalizeFormula(item.formula_pretty ?? "");
+      if (!formula) continue;
+      const rec: MPGNNSeedRecord = {
+        formula,
+        bandGap: item.band_gap ?? null,
+        formationEnergy: item.formation_energy_per_atom ?? null,
+        spaceGroup: item.symmetry?.symbol ?? null,
+        crystalSystem: item.crystal_system ?? null,
+        isMetallic: item.is_metal ?? true,
+      };
+      results.push(rec);
+      const cacheEntry: MPSummaryData = {
+        mpId: item.material_id ?? "",
+        formula,
+        bandGap: rec.bandGap ?? 0,
+        formationEnergyPerAtom: rec.formationEnergy ?? 0,
+        energyAboveHull: item.energy_above_hull ?? 0,
+        isStable: (item.energy_above_hull ?? 999) < 0.05,
+        spaceGroup: rec.spaceGroup ?? "",
+        crystalSystem: rec.crystalSystem ?? "",
+        volume: 0,
+        density: 0,
+        nsites: item.nsites ?? 1,
+        magneticOrdering: "",
+        totalMagnetization: 0,
+        isMetallic: rec.isMetallic,
+        efermi: null,
+      };
+      setCachedData(formula, "summary", cacheEntry, item.material_id).catch(() => {});
+    }
+    console.log(`[MP-Batch] Fetched ${results.length} records from API (skip=${skip}, limit=${limit})`);
+  } catch (err: any) {
+    console.warn(`[MP-Batch] API fetch failed (skip=${skip}): ${err?.message?.slice(0, 100)}`);
+  }
+  return results;
+}
+
+export interface MPGNNSeedRecord {
+  formula: string;
+  bandGap: number | null;
+  formationEnergy: number | null;
+  spaceGroup: string | null;
+  crystalSystem: string | null;
+  isMetallic: boolean;
+}
+
+/**
+ * Loads MP summary data for GNN pre-seeding at startup.
+ * Step 1: reads all cached "summary" rows from the local DB (instant, no API call).
+ * Step 2: if the API key is set and the cache has fewer than 400 entries, bulk-fetches
+ *         up to 500 metallic materials from the MP API and stores them in the cache.
+ * Returns de-duplicated records suitable for passing to addDFTTrainingResult.
+ */
+export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
+  const seen = new Map<string, MPGNNSeedRecord>();
+
+  // --- Step 1: read all cached summary rows from DB ---
+  try {
+    const rows = await db
+      .select()
+      .from(mpMaterialCache)
+      .where(eq(mpMaterialCache.dataType, "summary"))
+      .limit(2000);
+
+    for (const row of rows) {
+      const d = row.data as MPSummaryData;
+      if (!d || typeof d !== "object") continue;
+      seen.set(row.formula, {
+        formula: row.formula,
+        bandGap: typeof d.bandGap === "number" ? d.bandGap : null,
+        formationEnergy: typeof d.formationEnergyPerAtom === "number" ? d.formationEnergyPerAtom : null,
+        spaceGroup: d.spaceGroup ?? null,
+        crystalSystem: d.crystalSystem ?? null,
+        isMetallic: d.isMetallic ?? false,
+      });
+    }
+    console.log(`[MP-GNNSeed] Loaded ${seen.size} cached MP summaries from DB`);
+  } catch (err: any) {
+    console.warn(`[MP-GNNSeed] DB cache load failed: ${err?.message?.slice(0, 100)}`);
+  }
+
+  // --- Step 2: bulk-fetch from MP API if we need more ---
+  if (seen.size < 400 && getApiKey()) {
+    try {
+      const data = await mpFetch("/materials/summary/", {
+        is_metal: "True",
+        fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,crystal_system,nsites,is_metal",
+        _limit: "500",
+        _sort_fields: "energy_above_hull",
+      });
+
+      if (data?.data) {
+        let fetched = 0;
+        for (const item of data.data) {
+          const formula = normalizeFormula(item.formula_pretty ?? "");
+          if (!formula || seen.has(formula)) continue;
+
+          const rec: MPGNNSeedRecord = {
+            formula,
+            bandGap: item.band_gap ?? null,
+            formationEnergy: item.formation_energy_per_atom ?? null,
+            spaceGroup: item.symmetry?.symbol ?? null,
+            crystalSystem: item.crystal_system ?? null,
+            isMetallic: item.is_metal ?? true,
+          };
+          seen.set(formula, rec);
+
+          // Cache the result so future startups use it from DB
+          const cacheEntry: MPSummaryData = {
+            mpId: item.material_id ?? "",
+            formula,
+            bandGap: rec.bandGap ?? 0,
+            formationEnergyPerAtom: rec.formationEnergy ?? 0,
+            energyAboveHull: item.energy_above_hull ?? 0,
+            isStable: (item.energy_above_hull ?? 999) < 0.05,
+            spaceGroup: rec.spaceGroup ?? "",
+            crystalSystem: rec.crystalSystem ?? "",
+            volume: 0,
+            density: 0,
+            nsites: item.nsites ?? 1,
+            magneticOrdering: "",
+            totalMagnetization: 0,
+            isMetallic: rec.isMetallic,
+            efermi: null,
+          };
+          setCachedData(formula, "summary", cacheEntry, item.material_id).catch(() => {});
+          fetched++;
+        }
+        console.log(`[MP-GNNSeed] Fetched ${fetched} new MP materials from API (total: ${seen.size})`);
+      }
+    } catch (err: any) {
+      console.warn(`[MP-GNNSeed] API bulk-fetch failed: ${err?.message?.slice(0, 100)}`);
+    }
+  }
+
+  return Array.from(seen.values());
 }
