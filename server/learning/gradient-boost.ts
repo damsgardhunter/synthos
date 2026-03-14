@@ -947,7 +947,10 @@ async function trainGradientBoosting(
   let prevTrainMSE = yVariance;
 
   for (let iter = 0; iter < nEstimators; iter++) {
-    if (iter > 0 && iter % 10 === 0) await new Promise<void>(r => setImmediate(r)); // yield every 10 trees
+    if (iter > 0 && iter % 10 === 0) {
+      await new Promise<void>(r => setImmediate(r)); // yield every 10 trees
+      if (iter % 20 === 0) process.stdout.write(`\r[GradientBoost] Training... tree ${iter}/${nEstimators} (${X.length} samples)`);
+    }
 
     const residuals = trainY.map((yi, i) => yi - trainPredictions[i]);
 
@@ -1168,10 +1171,11 @@ export async function initPoolAsync(): Promise<void> {
     const { X, y } = trainingPool.getTrainingData();
     if (X.length >= 10) {
       const trainStart = Date.now();
+      console.log(`[GradientBoost] Phase 1 training — ${X.length} samples, 30 trees...`);
       cachedModel = await trainGradientBoosting(X, y, 30, 0.12, 4);
       cachedCalibration = await computeCalibration(cachedModel);
       await logModelVersion("phase1-training", X.length);
-      console.log(`[GradientBoost] Phase 1 model: ${X.length} samples in ${Date.now() - trainStart}ms`);
+      console.log(`[GradientBoost] Phase 1 model ready in ${Date.now() - trainStart}ms`);
     }
   } catch (e) {
     console.error("[GradientBoost] Phase 1 training failed:", e);
@@ -1219,15 +1223,22 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
     const { X, y } = trainingPool.getTrainingData();
     if (X.length >= 10) {
       const trainStart = Date.now();
+      console.log(`[GradientBoost] Phase 2 (full) training — ${X.length} samples, 45 trees...`);
       cachedModel = await trainGradientBoosting(X, y, 45, 0.12, 4);
       cachedCalibration = await computeCalibration(cachedModel);
       await logModelVersion("full-training", X.length);
-      console.log(`[GradientBoost] Full model: ${X.length} samples in ${Date.now() - trainStart}ms`);
+      console.log(`[GradientBoost] Phase 2 model ready in ${Date.now() - trainStart}ms`);
 
       setTimeout(async () => {
         try {
+          const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
+          console.log(`[GradientBoost] Deferred ensemble training — ${X.length} samples, ${isOffloaded ? "100" : "300"} trees × 5 models + variance ensemble...`);
+          const ensStart = Date.now();
           cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+          console.log(`[GradientBoost] Mean ensemble done in ${Date.now() - ensStart}ms, training variance ensemble...`);
+          const varStart = Date.now();
           cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+          console.log(`[GradientBoost] Variance ensemble done in ${Date.now() - varStart}ms — XGBoost fully ready`);
           cachedGlobalFeatureImportance = null;
           buildFeatureImportanceCache();
         } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
@@ -1882,13 +1893,21 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   const hpDepth = hp.maxDepth ?? 6;
 
   invalidateModel();
+  console.log(`[XGBoost] Retrain #${xgboostRetrainCount + 1} — ${X.length} samples, ${hpTrees} trees (lr=${hpLR}, depth=${hpDepth})...`);
+  const retrainStart = Date.now();
   cachedModel = await trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
   await new Promise<void>(r => setImmediate(r));
   cachedCalibration = await computeCalibration(cachedModel);
+  console.log(`[XGBoost] Base model done in ${Date.now() - retrainStart}ms`);
 
   if (X.length >= 30) {
+    console.log(`[XGBoost] Training mean ensemble (${X.length} samples)...`);
+    const ensStart = Date.now();
     cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+    console.log(`[XGBoost] Mean ensemble done in ${Date.now() - ensStart}ms, training variance ensemble...`);
+    const varStart = Date.now();
     cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+    console.log(`[XGBoost] Variance ensemble done in ${Date.now() - varStart}ms`);
     cachedGlobalFeatureImportance = null;
     buildFeatureImportanceCache();
     await new Promise<void>(r => setImmediate(r));
