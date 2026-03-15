@@ -24,7 +24,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor } from "./ml-predictor";
 import type { PhysicsPrediction, MLFeatureVector } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider } from "./gradient-boost";
+import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider, startGCPXGBPoller } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { recordPhysicsResult } from "./physics-results-store";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, estimateFamilyPressure, mutatePressure, generatePressureVariants, type MassiveGenerationStats } from "./candidate-generator";
@@ -61,7 +61,8 @@ import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast } from "
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBasedDiffusion, getDistributionDiffusionStats } from "../ai/crystal-structure-diffusion";
 import { multiTaskPredict, trackMultiTaskPrediction, getMultiTaskStats } from "./multi-task-gnn";
-import { runLatentSpaceInverseDesign, trainVAE, getVAEStats, encodeToLatent } from "../physics/materials-vae";
+import { runLatentSpaceInverseDesign, getVAEStats, encodeToLatent } from "../physics/materials-vae";
+import { spawnMLTraining, startMLResultPoller } from "../workers/ml-training-bridge";
 import { analyzeTopology, trackTopologyResult, getTopologyStats, type TopologicalAnalysis } from "../physics/topology-engine";
 import { computeTopologicalInvariants, trackInvariantResult } from "../physics/topological-invariants";
 import { computePairingProfile, type PairingProfile } from "../physics/pairing-mechanisms";
@@ -487,10 +488,27 @@ let state: EngineState = "stopped";
 let cycleTimer: ReturnType<typeof setTimeout> | null = null;
 let cycleCount = 0;
 
-// Minimum converged DFT/xTB samples before insight discovery runs.
-// Below this threshold the GNN is unreliable, so insights are noise and bloat the DB.
+// Cached DB-derived stats for getAutonomousLoopStats().
+// Updated every 10 min in the background so API calls never block on Neon.
+let _cachedAllTimeStats: { pipelineStages: { count: number; passed: number }[] } | null = null;
+let _cachedDbBestTc = 0;
+let _cachedDFTQueueStats: any = null;
+async function _refreshLoopDbCache() {
+  try { _cachedAllTimeStats = await storage.getStats(); } catch {}
+  try {
+    const top = await storage.getSuperconductorCandidatesByTc(1);
+    if (top.length > 0) _cachedDbBestTc = top[0].predictedTc ?? 0;
+  } catch {}
+  try { _cachedDFTQueueStats = await getDFTQueueStats(); } catch {}
+}
+
+// Temporarily disabled: novel insight novelty evaluation (OpenAI embeddings + DB queries)
+// adds 60-90s per cycle. Re-enable once active learning cycles are stable.
+// To re-enable: change ENABLE_INSIGHT_NOVELTY to true.
+const ENABLE_INSIGHT_NOVELTY = false;
 const MIN_DFT_FOR_INSIGHTS = 50;
 function hasSufficientDFTData(): boolean {
+  if (!ENABLE_INSIGHT_NOVELTY) return false;
   const s = getEvaluatedDatasetStats();
   return (s.bySource.dft + s.bySource.xtb) >= MIN_DFT_FOR_INSIGHTS;
 }
@@ -2093,7 +2111,11 @@ async function runDFTEnrichment() {
       }
     }
 
-    if (toEnrich.length === 0) return;
+    // Cap at 4 candidates per cycle — resolveDFTFeatures makes 7 parallel HTTP requests
+    // per candidate (MP + AFLOW, ~15s each), so 13 candidates × 15s = 3+ min per cycle.
+    const enrichBatch = toEnrich.slice(0, 4);
+
+    if (enrichBatch.length === 0) return;
 
     const totalCount = await storage.getSuperconductorCount();
     const highCount = candidates.filter(c => c.dataConfidence === "high" || c.dataConfidence === "dft-verified").length;
@@ -2101,15 +2123,17 @@ async function runDFTEnrichment() {
     const coveragePct = totalCount > 0 ? ((highCount + medCount) / totalCount * 100).toFixed(1) : "0";
 
     broadcastThought(
-      `DFT coverage at ${coveragePct}% -- enriching next batch of ${toEnrich.length} candidates...`,
+      `DFT coverage at ${coveragePct}% -- enriching next batch of ${enrichBatch.length} candidates...`,
       "strategy"
     );
 
     let enriched = 0;
-    for (const candidate of toEnrich) {
+    for (const candidate of enrichBatch) {
       if (!shouldContinue()) break;
       try {
-        const dftData = await resolveDFTFeatures(candidate.formula);
+        // skipXTB=true: inline xTB would block the cycle for 30-90s per candidate.
+        // The DFT queue (qe-worker.ts) handles xTB enrichment asynchronously.
+        const dftData = await resolveDFTFeatures(candidate.formula, candidate.pressureGpa ?? 0, true);
         dftEnrichmentTracker.set(candidate.id, currentCycle);
         if (dftData.dftCoverage === 0) continue;
 
@@ -2227,8 +2251,8 @@ async function runDFTEnrichment() {
     }
 
     try {
-      const allCandidates = await storage.getSuperconductorCandidates(5000);
-      const scoredCandidates = allCandidates
+      // Reuse already-fetched candidates rather than re-querying 1000+ rows from Neon
+      const scoredCandidates = candidates
         .filter(c => (c.ensembleScore ?? 0) > 0)
         .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
 
@@ -4145,7 +4169,7 @@ async function runPhase11_StructurePrediction() {
           }
         }
         if (topFormulas.length >= 50) {
-          trainVAE(topFormulas, 10);
+          spawnMLTraining("train-materials-vae", { formulas: topFormulas, epochs: 10 }).catch(() => {});
         }
         const vaeSeeds = topFormulas.length >= 3
           ? [topFormulas[0], topFormulas[Math.floor(topFormulas.length / 2)], topFormulas[Math.min(topFormulas.length - 1, 9)]]
@@ -6691,23 +6715,18 @@ function sanitizeStatsNumeric(obj: any, key?: string): any {
   return obj;
 }
 
-export async function getAutonomousLoopStats() {
+export function getAutonomousLoopStats() {
   const elapsedHours = (Date.now() - autonomousStartTime) / 3600000;
   const alStats = getActiveLearningStats();
   const xtbStats = getXTBStats();
-  const allTimeStats = await storage.getStats().catch(() => null);
+  // Use cached DB values — updated every 10 min in background so this never blocks.
+  const allTimeStats = _cachedAllTimeStats;
   const allTimePipelineTotal = allTimeStats ? allTimeStats.pipelineStages.reduce((s: number, p: any) => s + (p.count || 0), 0) : 0;
   const allTimePipelinePassed = allTimeStats ? allTimeStats.pipelineStages.reduce((s: number, p: any) => s + (p.passed || 0), 0) : 0;
 
   const reconciledScreened = Math.max(autonomousTotalScreened, allTimePipelineTotal);
   const reconciledPassed = Math.max(autonomousTotalPassed, allTimePipelinePassed);
-
-  let dbBestTc = 0;
-  try {
-    const topCandidates = await storage.getSuperconductorCandidatesByTc(1);
-    if (topCandidates.length > 0) dbBestTc = topCandidates[0].predictedTc ?? 0;
-  } catch {} 
-  const reconciledBestTc = Math.max(autonomousBestTc, dbBestTc);
+  const reconciledBestTc = Math.max(autonomousBestTc, _cachedDbBestTc);
 
   const rawStats = {
     totalScreened: reconciledScreened,
@@ -6773,7 +6792,7 @@ export async function getAutonomousLoopStats() {
     },
     lastCycleCandidates,
     lastCycleFamilyCounts,
-    qeDFT: await getDFTQueueStats().catch(() => null),
+    qeDFT: _cachedDFTQueueStats,
     integratedSubsystems: {
       pipelineId: integratedPipelineId,
       labId: integratedLabId,
@@ -8150,7 +8169,7 @@ async function backfillGBScores() {
       }
 
       for (let i = 0; i < batch.length; i++) {
-        if (i % 5 === 0) await yield_();
+        await new Promise<void>(r => setTimeout(r, 0)); // yield after every candidate — getCachedFeatures blocks ~350ms
         const c = batch[i];
         try {
           const features = await getCachedFeatures(c.formula);
@@ -8205,7 +8224,7 @@ async function recalculatePhysics() {
       }
 
       for (let i = 0; i < needsRecalc.length; i++) {
-        if (i % 5 === 0) await yield_();
+        await new Promise<void>(r => setTimeout(r, 0)); // yield after every candidate
         const c = needsRecalc[i];
         try {
           const features = await getCachedFeatures(c.formula);
@@ -8285,11 +8304,21 @@ export async function startEngine() {
 
   // Restore the in-memory semantic dedup cache from DB so insights already
   // seen before the last restart don't slip through as "novel" again.
-  // Delayed 90s so it doesn't compete with XGBoost deferred ensemble (starts at 45s).
-  setTimeout(() => bootstrapInsightEmbeddingCache().catch(() => {}), 90_000);
+  // Delayed 3 min: lets XGBoost (45s) and the first engine cycle (~60-90s) finish
+  // before adding another DB-heavy operation that would saturate the connection pool.
+  setTimeout(() => bootstrapInsightEmbeddingCache().catch(() => {}), 180_000);
 
   // Background poller: applies GNN weights from GCP when training jobs complete.
   startGCPWeightPoller();
+  // Background poller: applies XGBoost models from GCP when training jobs complete.
+  startGCPXGBPoller();
+  // Background poller: applies crystal VAE / diffusion / materials-VAE weights from GCP.
+  startMLResultPoller();
+
+  // Prime the DB stats cache immediately and refresh every 10 min.
+  // getAutonomousLoopStats() reads these in-memory — no Neon hit on API calls.
+  _refreshLoopDbCache().catch(() => {});
+  setInterval(() => _refreshLoopDbCache().catch(() => {}), 10 * 60 * 1000);
 
   setCuriosityProvider(() => {
     const stats = getGeneratorCompetitionStats();
@@ -8323,10 +8352,13 @@ export async function startEngine() {
     emit("log", { phase: "engine", event: "xTB health check failed", detail: e.message, dataSource: "xTB Health Check" });
   }
 
-  console.log("[Engine] startup: backfillGBScores...");
-  await backfillGBScores();
-  console.log("[Engine] startup: recalculatePhysics...");
-  await recalculatePhysics();
+  setTimeout(() => {
+    console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
+    backfillGBScores()
+      .then(() => recalculatePhysics())
+      .then(() => console.log("[Engine] background: backfillGBScores + recalculatePhysics done"))
+      .catch(e => console.error("[Engine] background score/physics recalc failed:", e));
+  }, 900_000);
   console.log("[Engine] startup: restoring campaigns...");
 
   try {
@@ -8353,286 +8385,205 @@ export async function startEngine() {
     }
   } catch (e) { console.error("[Engine] Stats restore from DB failed:", e); }
 
-  const yieldLoop = () => new Promise<void>(r => setTimeout(r, 200));
-
-  console.log("[Engine] startup: feature DB backfill...");
-  try {
-    const allCandidates = await storage.getSuperconductorCandidates(5000);
-    let preSeeded = 0;
-    let featureBackfilled = 0;
-    for (let i = 0; i < allCandidates.length; i++) {
-      const c = allCandidates[i];
-      const norm = normalizeFormula(c.formula);
-      if (!alreadyScreenedFormulas.has(norm)) {
-        alreadyScreenedFormulas.add(norm);
-        preSeeded++;
-      }
-      if (featureBackfilled >= 100) continue;
-      try {
-        buildAndStoreFeatureRecord(c.formula, c.predictedTc ?? null, null, (c.ensembleScore ?? 0.3));
-        featureBackfilled++;
-      } catch (e) { console.error(`[Engine] Feature backfill failed for ${c.formula}:`, e); }
-      if (i % 100 === 0) await yieldLoop();
-    }
-    if (featureBackfilled > 0 || preSeeded > 0) {
-      emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Loaded ${featureBackfilled} candidate feature records for hypothesis engine (dataset size: ${getDatasetSize()}). Pre-seeded ${preSeeded} formulas into screened cache (total: ${alreadyScreenedFormulas.size}).`, dataSource: "Internal" });
-    }
-  } catch (e) { console.error("[Engine] Feature DB backfill outer error:", e); }
-
-  console.log("[Engine] startup: seeding Bayesian optimizer...");
-  try {
-    const topForBO = await storage.getSuperconductorCandidatesByTc(50);
-    let boSeeded = 0;
-    for (const c of topForBO) {
-      try {
-        const vs = (c as any).verificationStage ?? 0;
-        if (vs < 1) continue;
-        const tc = c.predictedTc ?? 0;
-        const lambda = c.electronPhononCoupling ?? 0.5;
-        const score = c.ensembleScore ?? 0.3;
-        bayesianOptimizer.addObservation(c.formula, tc, lambda, score);
-        boSeeded++;
-      } catch (e) { /* skip */ }
-    }
-    if (boSeeded > 0) {
-      emit("log", { phase: "engine", event: "Bayesian optimizer seeded from DB", detail: `Loaded ${boSeeded} observations into BO. Stats: ${bayesianOptimizer.getStats().observationCount} obs, best Tc=${bayesianOptimizer.getStats().bestTc}K`, dataSource: "Internal" });
-    }
-  } catch (e) { console.error("[Engine] BO seeding from DB failed:", e); }
-
-  console.log("[Engine] startup: topology & Fermi cluster seeding...");
-  try {
-    const topoCandidates = await storage.getSuperconductorCandidatesByTc(100);
-    let topoSeeded = 0;
-    let fermiSeeded = 0;
-    const seenFormulas = new Set<string>();
-    for (let i = 0; i < topoCandidates.length; i++) {
-      const c = topoCandidates[i];
-      if (topoSeeded >= 80 && fermiSeeded >= 80) break;
-      if (seenFormulas.has(c.formula)) continue;
-      seenFormulas.add(c.formula);
-      if (topoSeeded < 80) {
-        try {
-          const electronic = computeElectronicStructure(c.formula);
-          const cInfo = extractCrystalInfo(c.crystalStructure);
-          const topoResult = analyzeTopology(
-            c.formula,
-            electronic,
-            cInfo.lattice,
-            cInfo.prototype
-          );
-          trackTopologyResult(topoResult);
-          topoSeeded++;
-        } catch (e) { console.error(`[Engine] Topology seed failed for ${c.formula}:`, e); }
-      }
-      if (fermiSeeded < 80) {
-        try {
-          const fsResult = computeFermiSurface(c.formula);
-          assignToCluster(c.formula, fsResult, c.predictedTc ?? 0);
-          fermiSeeded++;
-        } catch (e) { console.error(`[Engine] Fermi cluster seed failed for ${c.formula}:`, e); }
-      }
-      if (i % 5 === 0) await yieldLoop();
-    }
-    if (topoSeeded > 0 || fermiSeeded > 0) {
-      const topoStats = getTopologyStats();
-      emit("log", { phase: "engine", event: "Topology & Fermi clusters seeded", detail: `Analyzed ${topoSeeded} candidates: ${topoStats.totalTopological} topological, ${topoStats.totalTSC} TSC. Fermi clusters: ${fermiSeeded} assigned.`, dataSource: "Internal" });
-    }
-  } catch (e) { console.error("[Engine] Topology/Fermi seed outer error:", e); }
-
-  console.log("[Engine] startup: creating inverse design campaigns...");
-  try {
-    const activeCampaigns = getAllActiveCampaigns();
-    if (activeCampaigns.length === 0) {
-      const scCount = await storage.getSuperconductorCount();
-      if (scCount >= 20) {
-        const topCandidates = await storage.getSuperconductorCandidatesByTc(5);
-        const currentBestTc = topCandidates[0]?.predictedTc ?? 100;
-
-        const campaign200 = createCampaign(`auto-200K-${Date.now()}`, {
-          targetTc: 200,
-          maxPressure: 50,
-          minLambda: 0.5,
-          maxHullDistance: 0.3,
-          metallicRequired: true,
-          phononStable: true,
-          preferredElements: ["Nb", "Ti", "B", "C", "N"],
-        }, 200);
-        await storage.insertInverseDesignCampaign({
-          id: campaign200.id,
-          targetTc: 200,
-          targetPressure: 0,
-          status: "active",
-          cyclesRun: 0,
-          bestTcAchieved: 0,
-          bestDistance: 1,
-          candidatesGenerated: 0,
-          candidatesPassedPipeline: 0,
-          learningState: {} as any,
-          convergenceHistory: [],
-          topCandidates: [],
-        });
-
-        const targetHighTc = Math.max(300, Math.round(currentBestTc * 1.5));
-        const campaign300 = createCampaign(`auto-${targetHighTc}K-${Date.now()}`, {
-          targetTc: targetHighTc,
-          maxPressure: 50,
-          minLambda: 1.0,
-          maxHullDistance: 0.5,
-          metallicRequired: true,
-          phononStable: true,
-          preferredElements: ["La", "Y", "H", "Ca", "B"],
-        }, 200);
-        await storage.insertInverseDesignCampaign({
-          id: campaign300.id,
-          targetTc: targetHighTc,
-          targetPressure: 0,
-          status: "active",
-          cyclesRun: 0,
-          bestTcAchieved: 0,
-          bestDistance: 1,
-          candidatesGenerated: 0,
-          candidatesPassedPipeline: 0,
-          learningState: {} as any,
-          convergenceHistory: [],
-          topCandidates: [],
-        });
-
-        emit("log", {
-          phase: "inverse-optimizer",
-          event: "Auto-created inverse design campaigns",
-          detail: `Created 2 campaigns targeting ${200}K and ${targetHighTc}K with ${scCount} existing candidates as seed data`,
-          dataSource: "Inverse Optimizer",
-        });
-      }
-    }
-  } catch (e) { console.error("[Engine] Inverse campaign auto-create failed:", e); }
-
-  console.log("[Engine] startup: creating pipelines & design lab...");
-  try {
-    const existingPipelines = getAllPipelines();
-    if (existingPipelines.length === 0) {
-      const pipelineId = `integrated-pipeline-${Date.now()}`;
-      createPipeline(pipelineId, {
-        targetTc: 293,
-        maxPressure: 50,
-        minLambda: 0.8,
-        metallicRequired: true,
-        phononStable: true,
-        preferredElements: ["La", "Y", "H", "Ca", "B", "Nb"],
-      });
-      integratedPipelineId = pipelineId;
-      emit("log", { phase: "engine", event: "Inverse design pipeline auto-started", detail: `Created integrated pipeline ${pipelineId} targeting 293K`, dataSource: "Integrated Subsystems" });
-    } else {
-      integratedPipelineId = existingPipelines[0].id;
-    }
-  } catch (e: any) {
-    emit("log", { phase: "engine", event: "Pipeline auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
-  }
-
-  try {
-    const labId = `integrated-lab-${Date.now()}`;
-    createLab(labId, 293, 50, 1000);
-    integratedLabId = labId;
-    emit("log", { phase: "engine", event: "Design lab auto-started", detail: `Created integrated design lab ${labId} with 8 strategies targeting 293K`, dataSource: "Integrated Subsystems" });
-  } catch (e: any) {
-    emit("log", { phase: "engine", event: "Design lab auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
-  }
-
-  try {
-    const strategyTypes = ["hydride-cage-optimizer", "layered-intercalation", "light-element-phonon"] as const;
-    let reprGenerated = 0;
-    for (const st of strategyTypes) {
-      try {
-        const prog = generateDesignProgram(st, ["La", "Y", "H", "Ca", "B", "Nb", "Ti"]);
-        const result = executeDesignProgram(prog);
-        if (result.formula && isValidFormula(result.formula)) {
-          registerProgram(prog, result.predictedTc ?? 0);
-          alreadyScreenedFormulas.add(normalizeFormula(result.formula));
-          reprGenerated++;
-        }
-      } catch (e) { console.error("[Engine] Design representation seed failed:", e); }
-    }
-    if (reprGenerated > 0) {
-      emit("log", { phase: "engine", event: "Design representations seeded", detail: `Generated ${reprGenerated} initial design programs from 3 strategy types`, dataSource: "Integrated Subsystems" });
-    }
-  } catch (e) { console.error("[Engine] Design representation seed outer error:", e); }
-
-  await yieldLoop();
-
-  console.log("[Engine] startup: theory discovery...");
-  try {
-    const synthDataset = await generateSyntheticDataset(40);
-    const theories = runSymbolicPhysicsDiscovery(synthDataset);
-    lastTheoryDiscoveryCycle = cycleCount;
-    if (theories.length > 0) {
-      const allTheories = getTheoryDatabase();
-      const feedback = generateDiscoveryFeedback(allTheories);
-      const { valid: validBiasVars2 } = validateBiasedVariables(feedback.biasedVariables ?? []);
-      theoryFeedbackBias = { biasedVariables: validBiasVars2, biasedElements: feedback.biasedElements ?? [] };
-      emit("log", { phase: "engine", event: "Theory discovery auto-started", detail: `Initial run: ${theories.length} theories discovered, top score=${theories[0]?.theoryScore?.toFixed(3)}`, dataSource: "Integrated Subsystems" });
-    }
-  } catch (e: any) {
-    emit("log", { phase: "engine", event: "Theory discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
-  }
-
-  await yieldLoop();
-
-  console.log("[Engine] startup: causal discovery...");
-  try {
-    const gtSummaryInit = getGroundTruthSummary();
-    const MIN_CAUSAL_INIT = 500;
-    let causalDatasetInit: CausalDataRecord[];
-
-    if (gtSummaryInit.totalDatapoints >= MIN_CAUSAL_INIT) {
-      const gtDataInit = getGroundTruthDataset();
-      const gtRecsInit: CausalDataRecord[] = [];
-      for (const dp of gtDataInit) {
-        try {
-          const rec = await buildCausalDataRecord(dp.formula);
-          if (dp.Tc > 0) rec.Tc = dp.Tc;
-          if (dp.lambda !== null) rec.lambda = dp.lambda;
-          if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
-          if (dp.omega_log !== null) rec.phonon_freq = dp.omega_log;
-          if (dp.mu_star !== null) rec.mu_star = dp.mu_star;
-          rec.pressure = dp.pressure;
-          gtRecsInit.push(rec);
-        } catch {}
-      }
-      causalDatasetInit = gtRecsInit.length >= MIN_CAUSAL_INIT
-        ? gtRecsInit
-        : [...gtRecsInit, ...await generateCausalDataset(MIN_CAUSAL_INIT - gtRecsInit.length)];
-      console.log(`[Engine] Causal auto-start: ${gtRecsInit.length} GT records used`);
-    } else {
-      console.log(`[Engine] Causal auto-start deferred: ${gtSummaryInit.totalDatapoints}/${MIN_CAUSAL_INIT} GT datapoints. Using synthetic.`);
-      causalDatasetInit = await generateCausalDataset(60);
-    }
-
-    const causalResult = runCausalDiscovery(causalDatasetInit);
-    lastCausalDiscoveryCycle = cycleCount;
-    if (causalResult.designGuidance.length > 0) {
-      causalDesignGuidance = causalResult.designGuidance.map(g => ({
-        variable: g.variable,
-        direction: g.direction,
-        causalImpactOnTc: g.causalImpactOnTc,
-      }));
-    }
-    emit("log", { phase: "engine", event: "Causal discovery auto-started", detail: `Initial run: ${causalResult.graph.edges.length} causal edges, ${causalResult.hypotheses.length} mechanism hypotheses, ${causalResult.rules.length} causal rules, ${causalResult.designGuidance.length} design guidance vars. Dataset=${causalDatasetInit.length} (GT=${gtSummaryInit.totalDatapoints})`, dataSource: "Integrated Subsystems" });
-  } catch (e: any) {
-    emit("log", { phase: "engine", event: "Causal discovery auto-start skipped", detail: e.message?.slice(0, 150), dataSource: "Integrated Subsystems" });
-  }
-
-  console.log("[Engine] startup: all subsystems initialized — starting learning cycle in 8s");
+  // ── Start learning cycles immediately ──────────────────────────────────────
+  // All subsystem seeding (topology, BO, theory, causal, campaigns) is deferred
+  // to background tasks so the learning cycle can begin without any blocking wait.
+  console.log("[Engine] startup: essential init done — learning cycle starts in 3s, subsystems seeding in background");
   emit("log", {
     phase: "engine",
     event: "Learning engine started",
-    detail: `Balanced learning: resuming from cycle ${cycleCount}. All subsystems initialized: pipeline, design lab, representations, theory discovery, causal discovery.`,
+    detail: `Resuming from cycle ${cycleCount}. Subsystems (topology, BO, theory, causal, campaigns) seeding in background.`,
     dataSource: "Internal",
   });
 
   if (!isRunningCycle) {
-    // Longer delay so startup I/O (topology seeding, feature backfill, etc.) fully settles
-    setTimeout(runLearningCycle, 8000);
+    setTimeout(runLearningCycle, 3000);
   }
+
+  // ── Background: deferred subsystem seeding (non-blocking, runs after first cycle) ──
+  setTimeout(async () => {
+    const yieldLoop = () => new Promise<void>(r => setTimeout(r, 200));
+
+    // Formula cache pre-seeding (fast — only Set.add, no CPU)
+    try {
+      const allCandidates = await storage.getSuperconductorCandidates(100);
+      let preSeeded = 0;
+      for (let i = 0; i < allCandidates.length; i++) {
+        const c = allCandidates[i];
+        const norm = normalizeFormula(c.formula);
+        if (!alreadyScreenedFormulas.has(norm)) {
+          alreadyScreenedFormulas.add(norm);
+          preSeeded++;
+        }
+        if (i % 20 === 0) await yieldLoop();
+      }
+      if (preSeeded > 0) {
+        emit("log", { phase: "engine", event: "Feature DB backfilled", detail: `Pre-seeded ${preSeeded} formulas into screened cache (total: ${alreadyScreenedFormulas.size}).`, dataSource: "Internal" });
+      }
+    } catch (e) { console.error("[Engine] bg feature backfill error:", e); }
+
+    // Bayesian optimizer seeding
+    try {
+      const topForBO = await storage.getSuperconductorCandidatesByTc(50);
+      let boSeeded = 0;
+      for (const c of topForBO) {
+        try {
+          const vs = (c as any).verificationStage ?? 0;
+          if (vs < 1) continue;
+          bayesianOptimizer.addObservation(c.formula, c.predictedTc ?? 0, c.electronPhononCoupling ?? 0.5, c.ensembleScore ?? 0.3);
+          boSeeded++;
+        } catch { /* skip */ }
+      }
+      if (boSeeded > 0) {
+        emit("log", { phase: "engine", event: "Bayesian optimizer seeded from DB", detail: `Loaded ${boSeeded} observations. Best Tc=${bayesianOptimizer.getStats().bestTc}K`, dataSource: "Internal" });
+      }
+    } catch (e) { console.error("[Engine] bg BO seeding error:", e); }
+
+    await yieldLoop();
+
+    // Topology & Fermi cluster seeding (CPU-heavy — capped at 20 each to stay fast)
+    try {
+      const topoCandidates = await storage.getSuperconductorCandidatesByTc(30);
+      let topoSeeded = 0;
+      let fermiSeeded = 0;
+      const seenFormulas = new Set<string>();
+      for (let i = 0; i < topoCandidates.length; i++) {
+        const c = topoCandidates[i];
+        if (topoSeeded >= 20 && fermiSeeded >= 20) break;
+        if (seenFormulas.has(c.formula)) continue;
+        seenFormulas.add(c.formula);
+        if (topoSeeded < 20) {
+          try {
+            const electronic = computeElectronicStructure(c.formula);
+            const cInfo = extractCrystalInfo(c.crystalStructure);
+            trackTopologyResult(analyzeTopology(c.formula, electronic, cInfo.lattice, cInfo.prototype));
+            topoSeeded++;
+          } catch { /* skip */ }
+        }
+        if (fermiSeeded < 20) {
+          try {
+            assignToCluster(c.formula, computeFermiSurface(c.formula), c.predictedTc ?? 0);
+            fermiSeeded++;
+          } catch { /* skip */ }
+        }
+        if (i % 5 === 0) await yieldLoop();
+      }
+      if (topoSeeded > 0 || fermiSeeded > 0) {
+        const topoStats = getTopologyStats();
+        emit("log", { phase: "engine", event: "Topology & Fermi clusters seeded", detail: `${topoSeeded} topology, ${fermiSeeded} Fermi clusters (${topoStats.totalTopological} topological total)`, dataSource: "Internal" });
+      }
+    } catch (e) { console.error("[Engine] bg topology/Fermi error:", e); }
+
+    await yieldLoop();
+
+    // Inverse design campaigns
+    try {
+      const activeCampaigns = getAllActiveCampaigns();
+      if (activeCampaigns.length === 0) {
+        const scCount = await storage.getSuperconductorCount();
+        if (scCount >= 20) {
+          const topCandidates = await storage.getSuperconductorCandidatesByTc(5);
+          const currentBestTc = topCandidates[0]?.predictedTc ?? 100;
+          const campaign200 = createCampaign(`auto-200K-${Date.now()}`, { targetTc: 200, maxPressure: 50, minLambda: 0.5, maxHullDistance: 0.3, metallicRequired: true, phononStable: true, preferredElements: ["Nb", "Ti", "B", "C", "N"] }, 200);
+          await storage.insertInverseDesignCampaign({ id: campaign200.id, targetTc: 200, targetPressure: 0, status: "active", cyclesRun: 0, bestTcAchieved: 0, bestDistance: 1, candidatesGenerated: 0, candidatesPassedPipeline: 0, learningState: {} as any, convergenceHistory: [], topCandidates: [] });
+          const targetHighTc = Math.max(300, Math.round(currentBestTc * 1.5));
+          const campaign300 = createCampaign(`auto-${targetHighTc}K-${Date.now()}`, { targetTc: targetHighTc, maxPressure: 50, minLambda: 1.0, maxHullDistance: 0.5, metallicRequired: true, phononStable: true, preferredElements: ["La", "Y", "H", "Ca", "B"] }, 200);
+          await storage.insertInverseDesignCampaign({ id: campaign300.id, targetTc: targetHighTc, targetPressure: 0, status: "active", cyclesRun: 0, bestTcAchieved: 0, bestDistance: 1, candidatesGenerated: 0, candidatesPassedPipeline: 0, learningState: {} as any, convergenceHistory: [], topCandidates: [] });
+          emit("log", { phase: "inverse-optimizer", event: "Auto-created inverse design campaigns", detail: `Created campaigns targeting 200K and ${targetHighTc}K`, dataSource: "Inverse Optimizer" });
+        }
+      }
+    } catch (e) { console.error("[Engine] bg inverse campaigns error:", e); }
+
+    // Pipelines & design lab
+    try {
+      const existingPipelines = getAllPipelines();
+      if (existingPipelines.length === 0) {
+        const pipelineId = `integrated-pipeline-${Date.now()}`;
+        createPipeline(pipelineId, { targetTc: 293, maxPressure: 50, minLambda: 0.8, metallicRequired: true, phononStable: true, preferredElements: ["La", "Y", "H", "Ca", "B", "Nb"] });
+        integratedPipelineId = pipelineId;
+      } else {
+        integratedPipelineId = existingPipelines[0].id;
+      }
+      const labId = `integrated-lab-${Date.now()}`;
+      createLab(labId, 293, 50, 1000);
+      integratedLabId = labId;
+    } catch { /* skip */ }
+
+    // Design representations
+    try {
+      const strategyTypes = ["hydride-cage-optimizer", "layered-intercalation", "light-element-phonon"] as const;
+      for (const st of strategyTypes) {
+        try {
+          const prog = generateDesignProgram(st, ["La", "Y", "H", "Ca", "B", "Nb", "Ti"]);
+          const result = executeDesignProgram(prog);
+          if (result.formula && isValidFormula(result.formula)) {
+            registerProgram(prog, result.predictedTc ?? 0);
+            alreadyScreenedFormulas.add(normalizeFormula(result.formula));
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+
+    await yieldLoop();
+
+    // Theory discovery (deferred — 40 async records + sync algorithm)
+    try {
+      const synthDataset = await generateSyntheticDataset(40);
+      const theories = runSymbolicPhysicsDiscovery(synthDataset);
+      lastTheoryDiscoveryCycle = cycleCount;
+      if (theories.length > 0) {
+        const allTheories = getTheoryDatabase();
+        const feedback = generateDiscoveryFeedback(allTheories);
+        const { valid: validBiasVars2 } = validateBiasedVariables(feedback.biasedVariables ?? []);
+        theoryFeedbackBias = { biasedVariables: validBiasVars2, biasedElements: feedback.biasedElements ?? [] };
+        emit("log", { phase: "engine", event: "Theory discovery initialized", detail: `${theories.length} theories discovered, top score=${theories[0]?.theoryScore?.toFixed(3)}`, dataSource: "Integrated Subsystems" });
+      }
+    } catch (e: any) {
+      console.error("[Engine] bg theory discovery error:", e.message?.slice(0, 150));
+    }
+
+    await yieldLoop();
+
+    // Causal discovery (deferred — capped at 60 records)
+    try {
+      const gtSummaryInit = getGroundTruthSummary();
+      const MIN_CAUSAL_INIT = 500;
+      let causalDatasetInit: CausalDataRecord[];
+      if (gtSummaryInit.totalDatapoints >= MIN_CAUSAL_INIT) {
+        const gtDataInit = getGroundTruthDataset();
+        const gtRecsInit: CausalDataRecord[] = [];
+        for (const dp of gtDataInit.slice(0, 50)) {
+          try {
+            const rec = await buildCausalDataRecord(dp.formula);
+            if (dp.Tc > 0) rec.Tc = dp.Tc;
+            if (dp.lambda !== null) rec.lambda = dp.lambda;
+            if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
+            if (dp.omega_log !== null) rec.phonon_freq = dp.omega_log;
+            if (dp.mu_star !== null) rec.mu_star = dp.mu_star;
+            rec.pressure = dp.pressure;
+            gtRecsInit.push(rec);
+          } catch {}
+        }
+        const syntheticNeeded = Math.max(0, 60 - gtRecsInit.length);
+        causalDatasetInit = syntheticNeeded > 0
+          ? [...gtRecsInit, ...await generateCausalDataset(syntheticNeeded)]
+          : gtRecsInit;
+      } else {
+        causalDatasetInit = await generateCausalDataset(60);
+      }
+      const causalResult = runCausalDiscovery(causalDatasetInit);
+      lastCausalDiscoveryCycle = cycleCount;
+      if (causalResult.designGuidance.length > 0) {
+        causalDesignGuidance = causalResult.designGuidance.map(g => ({ variable: g.variable, direction: g.direction, causalImpactOnTc: g.causalImpactOnTc }));
+      }
+      emit("log", { phase: "engine", event: "Causal discovery initialized", detail: `${causalResult.graph.edges.length} causal edges, ${causalResult.designGuidance.length} design guidance vars. Dataset=${causalDatasetInit.length}`, dataSource: "Integrated Subsystems" });
+    } catch (e: any) {
+      console.error("[Engine] bg causal discovery error:", e.message?.slice(0, 150));
+    }
+
+    console.log("[Engine] background subsystem seeding complete");
+  }, 15000); // Run 15s after startup — well after first learning cycle begins
+
   return getStatus();
 }
 

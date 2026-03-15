@@ -6,12 +6,17 @@ const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   max: 10,
   // Recycle idle connections after 10s — well before Neon terminates them (~60s TCP idle).
-  // This prevents pg-pool from reusing dead sockets and getting "connection terminated" errors.
   idleTimeoutMillis: 10000,
-  // Neon serverless cold-starts can take 10-20s — give it 30s to wake up.
-  connectionTimeoutMillis: 30000,
+  // Fail fast on connection — don't hold the event loop for 30s on a cold Neon.
+  connectionTimeoutMillis: 10000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 5000,
+});
+
+// Kill any query taking longer than 8s at the DB level so slow Neon queries
+// can't hold a pool connection and starve other requests.
+pool.on("connect", (client) => {
+  client.query("SET statement_timeout = 8000").catch(() => {});
 });
 
 pool.on("error", (err) => {

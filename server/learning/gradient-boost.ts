@@ -891,7 +891,7 @@ function predictTree(tree: TreeNode | number, x: number[]): number {
   return predictTree(tree.right, x);
 }
 
-async function trainGradientBoosting(
+export async function trainGradientBoosting(
   X: number[][],
   y: number[],
   nEstimators: number = 200,
@@ -1185,13 +1185,22 @@ export async function initPoolAsync(): Promise<void> {
 }
 
 async function backfillPool(remaining: { formula: string; tc: number; pressureGPa: number }[], t0: number): Promise<void> {
+  // When training is offloaded to GCP, skip local backfill entirely.
+  // GCP handles XGB training; local server only needs Phase 1 (15 samples) for immediate predictions.
+  if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+    console.log("[TrainingPool] OFFLOAD_XGB_TO_GCP=true — skipping phase 2 backfill, GCP handles training");
+    return;
+  }
   // Short delay to let startup I/O settle, then backfill remaining entries with event-loop yields
   await new Promise<void>(r => setTimeout(r, 30000));
   let added = 0;
   for (let i = 0; i < remaining.length; i++) {
     const e = remaining[i];
     if (await trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
-    await new Promise<void>(r => setImmediate(r));
+    // Yield every entry with a real timer tick (not just setImmediate) so the
+    // event loop can process keepalive pings and incoming HTTP requests between
+    // each heavy extractFeatures call (~350ms each).
+    await new Promise<void>(r => setTimeout(r, 0));
   }
   console.log(`[TrainingPool] Phase 2 backfill: ${trainingPool.size} total vectors (+${added}) in ${Date.now() - t0}ms`);
 
@@ -1231,16 +1240,21 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
 
       setTimeout(async () => {
         try {
-          const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
-          console.log(`[GradientBoost] Deferred ensemble training — ${X.length} samples, ${isOffloaded ? "100" : "300"} trees × 5 models + variance ensemble...`);
-          const ensStart = Date.now();
-          cachedEnsembleXGB = await trainEnsembleXGB(X, y);
-          console.log(`[GradientBoost] Mean ensemble done in ${Date.now() - ensStart}ms, training variance ensemble...`);
-          const varStart = Date.now();
-          cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-          console.log(`[GradientBoost] Variance ensemble done in ${Date.now() - varStart}ms — XGBoost fully ready`);
-          cachedGlobalFeatureImportance = null;
-          buildFeatureImportanceCache();
+          if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+            console.log(`[GradientBoost] OFFLOAD_XGB_TO_GCP=true — dispatching deferred ensemble to GCP (${X.length} samples)`);
+            dispatchXGBJobToGCP(X, y).catch(err => console.warn("[GradientBoost] GCP XGB dispatch failed:", err.message));
+          } else {
+            const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
+            console.log(`[GradientBoost] Deferred ensemble training — ${X.length} samples, ${isOffloaded ? "100" : "300"} trees × 5 models + variance ensemble...`);
+            const ensStart = Date.now();
+            cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+            console.log(`[GradientBoost] Mean ensemble done in ${Date.now() - ensStart}ms, training variance ensemble...`);
+            const varStart = Date.now();
+            cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+            console.log(`[GradientBoost] Variance ensemble done in ${Date.now() - varStart}ms — XGBoost fully ready`);
+            cachedGlobalFeatureImportance = null;
+            buildFeatureImportanceCache();
+          }
         } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
       }, 45000);
     }
@@ -1901,16 +1915,21 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   console.log(`[XGBoost] Base model done in ${Date.now() - retrainStart}ms`);
 
   if (X.length >= 30) {
-    console.log(`[XGBoost] Training mean ensemble (${X.length} samples)...`);
-    const ensStart = Date.now();
-    cachedEnsembleXGB = await trainEnsembleXGB(X, y);
-    console.log(`[XGBoost] Mean ensemble done in ${Date.now() - ensStart}ms, training variance ensemble...`);
-    const varStart = Date.now();
-    cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-    console.log(`[XGBoost] Variance ensemble done in ${Date.now() - varStart}ms`);
-    cachedGlobalFeatureImportance = null;
-    buildFeatureImportanceCache();
-    await new Promise<void>(r => setImmediate(r));
+    if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+      console.log(`[XGBoost] OFFLOAD_XGB_TO_GCP=true — dispatching ensemble retrain to GCP (${X.length} samples)`);
+      dispatchXGBJobToGCP(X, y).catch(err => console.warn("[XGBoost] GCP dispatch failed:", err.message));
+    } else {
+      console.log(`[XGBoost] Training mean ensemble (${X.length} samples)...`);
+      const ensStart = Date.now();
+      cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+      console.log(`[XGBoost] Mean ensemble done in ${Date.now() - ensStart}ms, training variance ensemble...`);
+      const varStart = Date.now();
+      cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+      console.log(`[XGBoost] Variance ensemble done in ${Date.now() - varStart}ms`);
+      cachedGlobalFeatureImportance = null;
+      buildFeatureImportanceCache();
+      await new Promise<void>(r => setImmediate(r));
+    }
   }
 
   xgboostRetrainCount++;
@@ -1932,13 +1951,17 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     await new Promise<void>(r => setImmediate(r));
     cachedCalibration = await computeCalibration(cachedModel);
     if (X.length >= 30) {
-      cachedEnsembleXGB = await trainEnsembleXGB(X, y);
-      await new Promise<void>(r => setImmediate(r));
-      cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-      await new Promise<void>(r => setImmediate(r));
-      cachedGlobalFeatureImportance = null;
-      buildFeatureImportanceCache();
-      await new Promise<void>(r => setImmediate(r));
+      if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+        dispatchXGBJobToGCP(X, y).catch(() => {});
+      } else {
+        cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+        await new Promise<void>(r => setImmediate(r));
+        cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
+        await new Promise<void>(r => setImmediate(r));
+        cachedGlobalFeatureImportance = null;
+        buildFeatureImportanceCache();
+        await new Promise<void>(r => setImmediate(r));
+      }
     }
     await logModelVersion("error-rate-correction", X.length);
   }
@@ -2208,4 +2231,52 @@ export function maybePersistSurrogateMetrics(): void {
   if (surrogateScreenCount - lastMetricsPersistCount >= METRICS_PERSIST_INTERVAL) {
     persistSurrogateMetrics().catch(() => {});
   }
+}
+
+// ── GCP XGBoost offload ───────────────────────────────────────────────────────
+
+async function dispatchXGBJobToGCP(X: number[][], y: number[]): Promise<void> {
+  const job = await storage.insertXgbTrainingJob({
+    status: "queued",
+    featuresX: X as any,
+    labelsY: y as any,
+    datasetSize: X.length,
+  });
+  console.log(`[XGBoost] Dispatched training job #${job.id} to GCP (${X.length} samples)`);
+}
+
+/**
+ * Background poller: checks every 30s for completed GCP XGB jobs and applies
+ * the model weights locally. Call once at engine startup when OFFLOAD_XGB_TO_GCP=true.
+ */
+export function startGCPXGBPoller(): void {
+  if (process.env.OFFLOAD_XGB_TO_GCP !== "true") return;
+
+  let lastAppliedJobId = 0;
+
+  async function poll() {
+    try {
+      const job = await storage.getLatestCompletedXgbJob();
+      if (job && job.id > lastAppliedJobId) {
+        lastAppliedJobId = job.id;
+        if (job.model) {
+          cachedModel = job.model as any;
+          cachedCalibration = await computeCalibration(cachedModel!);
+        }
+        if (job.ensembleXGB) {
+          cachedEnsembleXGB = job.ensembleXGB as any;
+        }
+        if (job.varianceEnsembleXGB) {
+          cachedVarianceEnsembleXGB = job.varianceEnsembleXGB as any;
+          cachedGlobalFeatureImportance = null;
+          buildFeatureImportanceCache();
+        }
+        console.log(`[GCP-XGB-Poller] Applied XGBoost models from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}, N=${job.datasetSize ?? "?"}`);
+      }
+    } catch { /* silent */ }
+    setTimeout(poll, 30_000);
+  }
+
+  setTimeout(poll, 30_000);
+  console.log("[GCP-XGB-Poller] Background XGBoost weight poller started (30s interval)");
 }

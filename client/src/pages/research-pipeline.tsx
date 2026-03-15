@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { queryClient } from "@/lib/queryClient";
+import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot, Milestone } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -576,16 +577,19 @@ interface CycleCandidate {
 }
 
 function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (family: string) => void; selectedFamily?: string | null }) {
+  const ri30 = useStartupSafeInterval(30000);
   const { data: memory, isLoading: memLoading } = useQuery<{
     familyStats: Record<string, { count: number; maxTc: number; avgScore: number }>;
     lastCycleCandidates: CycleCandidate[];
     lastCycleFamilyCounts: Record<string, number>;
+    bestTc?: number;
     autonomousLoopStats?: {
       inverseOptimizer?: { bestTcAcrossAll: number; activeCampaigns: number };
+      activeLearning?: { bestTcFromLoop: number };
     };
   }>({
     queryKey: ["/api/engine/memory"],
-    refetchInterval: 30000,
+    refetchInterval: ri30,
   });
 
   const { messages } = useWebSocket();
@@ -803,9 +807,10 @@ interface CycleNarrative {
 }
 
 function CycleJournal() {
+  const ri30 = useStartupSafeInterval(30000);
   const { data: memory } = useQuery<{ cycleNarratives: CycleNarrative[] }>({
     queryKey: ["/api/engine/memory"],
-    refetchInterval: 30000,
+    refetchInterval: ri30,
   });
 
   const narratives = memory?.cycleNarratives ?? [];

@@ -3392,10 +3392,10 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
       return null;
     }
 
-    const output = execSync(
+    const output = await execShellAsync(
       cmd,
       { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
-    ).toString();
+    );
 
     const optInfo = parseOptimizationOutput(output);
 
@@ -3582,7 +3582,7 @@ export async function runLandscapeExploration(formula: string): Promise<EnergyLa
       };
 
       const cmd = `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`;
-      const output = execSync(cmd, { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }).toString();
+      const output = await execShellAsync(cmd, { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 });
 
       const optInfo = parseOptimizationOutput(output);
       const optEnergy = parseXTBEnergy(output) ?? 0;
@@ -3777,10 +3777,10 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
       OMP_STACKSIZE: "512M",
     };
 
-    const output = execSync(
+    const output = await execShellAsync(
       `cd ${calcDir} && ${XTB_BIN} ${xyzPath} --gfn 2 --sp 2>&1`,
       { timeout: TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
-    ).toString();
+    );
 
     const parsed = parseXtbOutput(output);
     Object.assign(result, parsed);
@@ -4091,10 +4091,10 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
         const preOptResult = validateAndFixStructure(initialAtoms, formula);
         if (preOptResult && preOptResult.atoms.length >= 2) {
           writeXYZ(preOptResult.atoms, path.join(preOptDir, "input.xyz"), `${formula} pre-opt`);
-          const optOut = execSync(
-            `${XTB_BIN} input.xyz --gfn 2 --opt tight --iterations 200 2>&1`,
-            { cwd: preOptDir, timeout: TIMEOUT_MS, env, maxBuffer: 50 * 1024 * 1024 }
-          ).toString();
+          const optOut = await execShellAsync(
+            `cd ${preOptDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight --iterations 200 2>&1`,
+            { timeout: TIMEOUT_MS, env, maxBuffer: 50 * 1024 * 1024 }
+          );
           if (optOut.includes("converged")) {
             const optXYZ = path.join(preOptDir, "xtbopt.xyz");
             if (fs.existsSync(optXYZ)) {
@@ -4126,10 +4126,10 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
 
     writeXYZ(atoms, path.join(calcDir, "input.xyz"), `${formula} phonon check (${prototype})`);
 
-    const output = execSync(
-      `${XTB_BIN} input.xyz --gfn 2 --hess --iterations 200 2>&1`,
-      { cwd: calcDir, timeout: TIMEOUT_MS * 2, env, maxBuffer: 50 * 1024 * 1024 }
-    ).toString();
+    const output = await execShellAsync(
+      `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --hess --iterations 200 2>&1`,
+      { timeout: TIMEOUT_MS * 2, env, maxBuffer: 50 * 1024 * 1024 }
+    );
 
     const frequencies: number[] = [];
     const freqSection = output.match(/projected vibrational frequencies[\s\S]*?(?=\n\n|\nreduced masses)/);
@@ -4232,10 +4232,10 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
     dftLog(`[DFT] ${formula}: xTB --hess failed, using analytical phonon fallback: ${err instanceof Error ? err.message.slice(0, 100) : String(err).slice(0, 100)}`);
 
     try {
-      const optOutput = execSync(
-        `${XTB_BIN} input.xyz --gfn 2 --opt tight --iterations 200 2>&1`,
-        { cwd: calcDir, timeout: TIMEOUT_MS, env, maxBuffer: 20 * 1024 * 1024 }
-      ).toString();
+      const optOutput = await execShellAsync(
+        `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight --iterations 200 2>&1`,
+        { timeout: TIMEOUT_MS, env, maxBuffer: 20 * 1024 * 1024 }
+      );
 
       const converged = optOutput.includes("GEOMETRY OPTIMIZATION CONVERGED") || optOutput.includes("normal termination");
       const counts = parseFormula(formula);
@@ -4624,10 +4624,10 @@ export async function runXTBAnharmonicProbe(formula: string): Promise<Anharmonic
       writeXYZ(displaced, path.join(stepDir, "input.xyz"), `${formula} displacement=${scale}`);
 
       try {
-        const output = execSync(
-          `${XTB_BIN} input.xyz --gfn 2 --sp 2>&1`,
-          { cwd: stepDir, timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
-        ).toString();
+        const output = await execShellAsync(
+          `cd ${stepDir} && ${XTB_BIN} input.xyz --gfn 2 --sp 2>&1`,
+          { timeout: OPT_TIMEOUT_MS, env, maxBuffer: 10 * 1024 * 1024 }
+        );
 
         const gradMatch = output.match(/GRADIENT NORM\s+([-\d.]+)/);
 
@@ -4705,9 +4705,9 @@ export async function runXTBMDSampling(formula: string, temperatureK: number = 3
   fs.writeFileSync(path.join(calcDir, "md.inp"), mdInput);
 
   try {
-    execSync(
-      `${XTB_BIN} input.xyz --gfn 2 --md --input md.inp 2>&1`,
-      { cwd: calcDir, timeout: 45000, env, maxBuffer: 20 * 1024 * 1024 }
+    await execShellAsync(
+      `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --md --input md.inp 2>&1`,
+      { timeout: 45000, env, maxBuffer: 20 * 1024 * 1024 }
     );
 
     const trajPath = path.join(calcDir, "xtb.trj");

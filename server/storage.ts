@@ -4,7 +4,7 @@ import {
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
   researchStrategies, convergenceSnapshots, milestones,
-  experimentalValidations, inverseDesignCampaigns, dftJobs, gnnTrainingJobs
+  experimentalValidations, inverseDesignCampaigns, dftJobs, gnnTrainingJobs, xgbTrainingJobs, mlTrainingJobs
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
@@ -18,7 +18,9 @@ import type {
   ExperimentalValidation, InsertExperimentalValidation,
   InverseDesignCampaign, InsertInverseDesignCampaign,
   DftJob, InsertDftJob,
-  GnnTrainingJob, InsertGnnTrainingJob
+  GnnTrainingJob, InsertGnnTrainingJob,
+  XgbTrainingJob, InsertXgbTrainingJob,
+  MlTrainingJob, InsertMlTrainingJob
 } from "@shared/schema";
 import { eq, desc, asc, sql, ilike, isNull, inArray, and, or, gt } from "drizzle-orm";
 
@@ -144,6 +146,16 @@ export interface IStorage {
   getQueuedGnnTrainingJob(): Promise<GnnTrainingJob | undefined>;
   updateGnnTrainingJob(id: number, updates: Partial<GnnTrainingJob>): Promise<void>;
   getLatestCompletedGnnJob(): Promise<GnnTrainingJob | undefined>;
+
+  insertXgbTrainingJob(job: InsertXgbTrainingJob): Promise<XgbTrainingJob>;
+  updateXgbTrainingJob(id: number, updates: Partial<XgbTrainingJob>): Promise<void>;
+  getLatestCompletedXgbJob(): Promise<XgbTrainingJob | undefined>;
+
+  insertMlTrainingJob(job: InsertMlTrainingJob): Promise<MlTrainingJob>;
+  updateMlTrainingJob(id: number, updates: Partial<MlTrainingJob>): Promise<void>;
+  getQueuedMlTrainingJob(taskType: string): Promise<MlTrainingJob | undefined>;
+  getLatestCompletedMlJob(taskType: string): Promise<MlTrainingJob | undefined>;
+  cancelStaleMlJobs(taskType: string): Promise<void>;
   updateDftJobIfStatus(id: number, expectedStatus: string, updates: Partial<DftJob>): Promise<boolean>;
   getDftJobsByFormula(formula: string): Promise<DftJob[]>;
   hasActiveOrRecentFailedDftJobs(formula: string): Promise<{ activeJob: DftJob | null; recentValidatedFailures: number }>;
@@ -921,6 +933,58 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(gnnTrainingJobs.completedAt))
       .limit(1);
     return row;
+  }
+
+  async insertXgbTrainingJob(job: InsertXgbTrainingJob): Promise<XgbTrainingJob> {
+    const [row] = await db.insert(xgbTrainingJobs).values(job).returning();
+    return row;
+  }
+
+  async updateXgbTrainingJob(id: number, updates: Partial<XgbTrainingJob>): Promise<void> {
+    await db.update(xgbTrainingJobs).set(updates).where(eq(xgbTrainingJobs.id, id));
+  }
+
+  async getLatestCompletedXgbJob(): Promise<XgbTrainingJob | undefined> {
+    const [row] = await db.select().from(xgbTrainingJobs)
+      .where(eq(xgbTrainingJobs.status, "done"))
+      .orderBy(desc(xgbTrainingJobs.completedAt))
+      .limit(1);
+    return row;
+  }
+
+  async insertMlTrainingJob(job: InsertMlTrainingJob): Promise<MlTrainingJob> {
+    const [row] = await db.insert(mlTrainingJobs).values(job).returning();
+    return row;
+  }
+
+  async updateMlTrainingJob(id: number, updates: Partial<MlTrainingJob>): Promise<void> {
+    await db.update(mlTrainingJobs).set(updates).where(eq(mlTrainingJobs.id, id));
+  }
+
+  async getQueuedMlTrainingJob(taskType: string): Promise<MlTrainingJob | undefined> {
+    const [row] = await db.select().from(mlTrainingJobs)
+      .where(and(eq(mlTrainingJobs.status, "queued"), eq(mlTrainingJobs.taskType, taskType)))
+      .orderBy(asc(mlTrainingJobs.createdAt))
+      .limit(1);
+    return row;
+  }
+
+  async getLatestCompletedMlJob(taskType: string): Promise<MlTrainingJob | undefined> {
+    const [row] = await db.select().from(mlTrainingJobs)
+      .where(and(eq(mlTrainingJobs.status, "done"), eq(mlTrainingJobs.taskType, taskType)))
+      .orderBy(desc(mlTrainingJobs.completedAt))
+      .limit(1);
+    return row;
+  }
+
+  async cancelStaleMlJobs(taskType: string): Promise<void> {
+    // Cancel any queued/running jobs older than 10 minutes (stuck jobs)
+    await db.update(mlTrainingJobs)
+      .set({ status: "failed", errorMessage: "cancelled — superseded by newer job" })
+      .where(and(
+        eq(mlTrainingJobs.taskType, taskType),
+        or(eq(mlTrainingJobs.status, "queued"), eq(mlTrainingJobs.status, "running")),
+      ));
   }
 }
 

@@ -17,6 +17,8 @@
 
 import { startDFTLoop, stopDFTLoop } from "./dft-loop";
 import { startGNNLoop, stopGNNLoop } from "./gnn-loop";
+import { startXGBLoop, stopXGBLoop } from "./xgb-loop";
+import { startMLLoop, stopMLLoop } from "./ml-loop";
 
 // Default OMP_NUM_THREADS: 4 concurrent QE jobs × 8 threads each = 32 vCPUs
 if (!process.env.OMP_NUM_THREADS) {
@@ -25,11 +27,15 @@ if (!process.env.OMP_NUM_THREADS) {
 
 const ENABLE_DFT = process.env.ENABLE_DFT_WORKER !== "false";
 const ENABLE_GNN = process.env.ENABLE_GNN_WORKER !== "false";
+const ENABLE_XGB = process.env.ENABLE_XGB_WORKER !== "false";
+const ENABLE_ML  = process.env.ENABLE_ML_WORKER  !== "false";
 
 console.log("=".repeat(60));
 console.log("  Quantum Alchemy Engine — GCP Worker");
 console.log(`  DFT loop : ${ENABLE_DFT ? "ENABLED" : "disabled"}`);
 console.log(`  GNN loop : ${ENABLE_GNN ? "ENABLED" : "disabled"}`);
+console.log(`  XGB loop : ${ENABLE_XGB ? "ENABLED" : "disabled"}`);
+console.log(`  ML  loop : ${ENABLE_ML  ? "ENABLED" : "disabled"}`);
 console.log(`  OMP_NUM_THREADS = ${process.env.OMP_NUM_THREADS}`);
 console.log(`  QE_BIN_DIR      = ${process.env.QE_BIN_DIR ?? "(auto)"}`);
 console.log("=".repeat(60));
@@ -38,6 +44,8 @@ const loops: Promise<void>[] = [];
 
 if (ENABLE_DFT) loops.push(startDFTLoop());
 if (ENABLE_GNN) loops.push(startGNNLoop());
+if (ENABLE_XGB) loops.push(startXGBLoop());
+if (ENABLE_ML)  loops.push(startMLLoop());
 
 if (loops.length === 0) {
   console.error("No workers enabled — set ENABLE_DFT_WORKER=true or ENABLE_GNN_WORKER=true");
@@ -48,6 +56,8 @@ function shutdown(signal: string) {
   console.log(`\n[GCP-Worker] Received ${signal} — shutting down gracefully...`);
   stopDFTLoop();
   stopGNNLoop();
+  stopXGBLoop();
+  stopMLLoop();
   // Allow in-flight jobs ~30s to finish
   setTimeout(() => {
     console.log("[GCP-Worker] Shutdown complete");

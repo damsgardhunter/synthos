@@ -306,6 +306,48 @@ export type GnnTrainingJob = typeof gnnTrainingJobs.$inferSelect;
 export type InsertGnnTrainingJob = z.infer<typeof insertGnnTrainingJobSchema>;
 export type InsertDftJob = z.infer<typeof insertDftJobSchema>;
 
+export const xgbTrainingJobs = pgTable("xgb_training_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  status: varchar("status", { length: 20 }).notNull().default("queued"), // queued | running | done | failed
+  featuresX: jsonb("features_x").notNull(),   // number[][] training features
+  labelsY: jsonb("labels_y").notNull(),        // number[] training labels
+  datasetSize: integer("dataset_size"),
+  model: jsonb("model"),                        // GBModel when done
+  ensembleXGB: jsonb("ensemble_xgb"),           // GBEnsemble (mean) when done
+  varianceEnsembleXGB: jsonb("variance_ensemble_xgb"), // GBEnsemble (variance) when done
+  r2: real("r2"),
+  mae: real("mae"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+}, (table) => [
+  index("xgb_training_jobs_status_idx").on(table.status, table.createdAt),
+]);
+
+export const insertXgbTrainingJobSchema = createInsertSchema(xgbTrainingJobs).omit({ id: true, createdAt: true, startedAt: true, completedAt: true });
+export type XgbTrainingJob = typeof xgbTrainingJobs.$inferSelect;
+export type InsertXgbTrainingJob = z.infer<typeof insertXgbTrainingJobSchema>;
+
+// ML model training jobs — offloaded to GCP (crystal VAE, diffusion model, materials VAE)
+export const mlTrainingJobs = pgTable("ml_training_jobs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  taskType: varchar("task_type", { length: 50 }).notNull(), // 'train-materials-vae' | 'init-crystal-vae' | 'init-diffusion-model'
+  status: varchar("status", { length: 20 }).notNull().default("queued"), // queued | running | done | failed
+  inputData: jsonb("input_data"),       // { formulas?: string[], epochs?: number, dataset?: CrystalStructureEntry[] }
+  outputWeights: jsonb("output_weights"), // serialized trained weights/state
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+}, (table) => [
+  index("ml_training_jobs_status_idx").on(table.status, table.taskType, table.createdAt),
+]);
+
+export const insertMlTrainingJobSchema = createInsertSchema(mlTrainingJobs).omit({ id: true, createdAt: true, startedAt: true, completedAt: true });
+export type MlTrainingJob = typeof mlTrainingJobs.$inferSelect;
+export type InsertMlTrainingJob = z.infer<typeof insertMlTrainingJobSchema>;
+
 export const experimentalValidations = pgTable("experimental_validations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   formula: text("formula").notNull(),

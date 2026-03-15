@@ -274,7 +274,8 @@ const pipelineStats = {
 
 export async function runQuantumEnginePipeline(
   formula: string,
-  pressureGpa: number = 0
+  pressureGpa: number = 0,
+  skipXTB: boolean = false
 ): Promise<QuantumEngineResult> {
   const startTime = Date.now();
   const steps: QuantumEngineStep[] = [];
@@ -409,7 +410,8 @@ export async function runQuantumEnginePipeline(
     }
   }
 
-  if (!scfConverged) {
+  if (!scfConverged && !skipXTB) {
+    // skipXTB=true: inline xTB takes 30-90s per formula; DFT queue handles it asynchronously.
     const xtbStart = Date.now();
     try {
       const xtbResult = await runXTBEnrichment(formula, pressureGpa);

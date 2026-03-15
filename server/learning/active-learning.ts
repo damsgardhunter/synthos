@@ -819,7 +819,8 @@ async function runDFTEnrichmentForCandidate(
   let usedQuantumPipeline = false;
 
   try {
-    quantumResult = await runQuantumEnginePipeline(candidate.formula, evalPressure);
+    // skipXTB=true: inline xTB takes 30-90s per formula; DFT queue handles it asynchronously.
+    quantumResult = await runQuantumEnginePipeline(candidate.formula, evalPressure, true);
     usedQuantumPipeline = true;
     quantumEnginePipelineStats.fullPipelineRuns++;
 
@@ -1023,7 +1024,8 @@ async function runDFTEnrichmentForCandidate(
   quantumEnginePipelineStats.fallbackRuns++;
 
   try {
-    const dftData = await resolveDFTFeatures(candidate.formula, evalPressure);
+    // skipXTB=true: inline xTB takes 30-90s; DFT queue handles it asynchronously.
+    const dftData = await resolveDFTFeatures(candidate.formula, evalPressure, true);
 
     const desc = describeDFTSources(dftData);
     const hasExternalData = dftData.sources.mp || dftData.sources.aflow;

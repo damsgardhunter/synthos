@@ -578,11 +578,12 @@ export async function interpolateAndDecode(
   return results;
 }
 
-export function trainVAE(formulas: string[], epochs: number = 20): void {
+export async function trainVAE(formulas: string[], epochs: number = 20): Promise<void> {
   const w = getVAEWeights();
   const lr = 0.0005;
 
   for (let epoch = 0; epoch < epochs; epoch++) {
+    await new Promise<void>(r => setImmediate(r)); // yield each epoch so event loop breathes
     let totalLoss = 0;
     const batchSize = Math.min(16, formulas.length);
 
@@ -648,3 +649,6 @@ export function getVAEStats() {
   }
   return { ...vaeStats, beta: vaeBeta };
 }
+
+export function exportMaterialsVAEWeights(): VAEWeights | null { return vaeWeights; }
+export function importMaterialsVAEWeights(w: VAEWeights | null): void { if (w) vaeWeights = w; }

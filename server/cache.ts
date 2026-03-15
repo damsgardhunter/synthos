@@ -98,18 +98,19 @@ export const cache = new MemoryCache();
 
 export const TTL = {
   ELEMENTS: 60 * 60 * 1000,
-  STATS: 30 * 1000,
+  STATS: 3 * 60 * 1000,          // was 30s — DB hit every 30s was causing 1.1s delays
   CRYSTAL_STRUCTURES_BY_FORMULA: 5 * 60 * 1000,
   COMPUTATIONAL_RESULTS_BY_FORMULA: 5 * 60 * 1000,
-  RESEARCH_LOGS: 15 * 1000,
-  LEARNING_PHASES: 30 * 1000,
-  DFT_STATUS: 30 * 1000,
+  RESEARCH_LOGS: 60 * 1000,      // was 15s
+  LEARNING_PHASES: 3 * 60 * 1000, // was 30s
+  DFT_STATUS: 2 * 60 * 1000,     // was 30s
   ENGINE_MEMORY: 5 * 60 * 1000,
-  CANDIDATES: 20 * 1000,
-  STRATEGY: 30 * 1000,
-  MILESTONES: 60 * 1000,
-  NOVEL_INSIGHTS: 30 * 1000,
-  CONVERGENCE: 30 * 1000,
+  CANDIDATES: 2 * 60 * 1000,     // was 20s
+  STRATEGY: 3 * 60 * 1000,       // was 30s
+  MILESTONES: 5 * 60 * 1000,     // was 60s
+  NOVEL_INSIGHTS: 20 * 60 * 1000, // 20min — data only changes when ENABLE_INSIGHT_NOVELTY=true
+  THEORY_REPORT: 20 * 60 * 1000,  // 20min — in-memory causal/symbolic stats, changes slowly
+  CONVERGENCE: 2 * 60 * 1000,    // was 30s
 };
 
 export const CACHE_KEYS = {
@@ -125,6 +126,7 @@ export const CACHE_KEYS = {
   STRATEGY_HISTORY: "strategy-history",
   MILESTONES: "milestones",
   NOVEL_INSIGHTS: "novel-insights",
+  THEORY_REPORT: "theory-report",
   CONVERGENCE: "convergence",
   crystalStructuresByFormula: (formula: string) => `crystal-structures:${formula}`,
   computationalResultsByFormula: (formula: string) => `computational-results:${formula}`,

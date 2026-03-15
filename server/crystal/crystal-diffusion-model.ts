@@ -15,7 +15,7 @@ const BETA_MAX = 0.02;
 const FEATURE_DIM = 53;
 const TIME_EMBED_DIM = 16;
 const HIDDEN_DIM = 64;
-const TRAIN_EPOCHS = 100;
+const TRAIN_EPOCHS = 30;
 const LEARNING_RATE = 0.003;
 
 interface DiffusionWeights {
@@ -280,7 +280,7 @@ function addNoise(x: number[], t: number): { noisy: number[]; noise: number[] } 
   return { noisy, noise };
 }
 
-const MINI_BATCH_SIZE = 32;
+const MINI_BATCH_SIZE = 16;
 
 function trainStep(
   weights: DiffusionWeights,
@@ -469,16 +469,16 @@ export async function initDiffusionModel(): Promise<void> {
   trainingLossHistory = [];
   let lr = LEARNING_RATE;
 
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 5));
+  const yield_ = () => new Promise<void>(r => setImmediate(r));
   for (let epoch = 0; epoch < TRAIN_EPOCHS; epoch++) {
     const loss = trainStep(scoreNetwork, trainingFeatures, lr);
     trainingLossHistory.push(loss);
 
-    if (epoch > 0 && epoch % 25 === 0) {
+    if (epoch > 0 && epoch % 10 === 0) {
       lr *= 0.9;
     }
 
-    await yield_(); // yield every epoch with real delay so the event loop isn't starved
+    await yield_(); // yield every epoch so the event loop can breathe
 
     if (epoch % 25 === 0) {
       console.log(`[CrystalDiffusion] Epoch ${epoch}/${TRAIN_EPOCHS}, loss=${loss.toFixed(6)}, lr=${lr.toFixed(6)}`);
@@ -555,4 +555,14 @@ export function getDiffusionModelStats(): DiffusionModelStats {
 export function runTrainedDiffusionCycle(count: number = 3): GeneratedCrystalStructure[] {
   if (!trained) return [];
   return sampleStructures(count);
+}
+
+export function exportDiffusionState(): { weights: DiffusionWeights | null; trained: boolean; lossHistory: number[] } {
+  return { weights: scoreNetwork, trained, lossHistory: trainingLossHistory };
+}
+export function importDiffusionState(state: { weights: DiffusionWeights | null; trained: boolean; lossHistory: number[] }): void {
+  if (!state) return;
+  scoreNetwork = state.weights;
+  trained = state.trained;
+  trainingLossHistory = state.lossHistory;
 }

@@ -516,6 +516,15 @@ export function getTrainingData(): CrystalStructureEntry[] {
   return [...dataset];
 }
 
+/** Populate the in-memory dataset from a serialized array (used by GCP worker after receiving job input). */
+export function seedDatasetFromArray(entries: CrystalStructureEntry[]): void {
+  for (const entry of entries) {
+    if (!dataset.find(e => e.formula === entry.formula)) {
+      dataset.push(entry);
+    }
+  }
+}
+
 export function getEntriesByPrototype(prototype: string): CrystalStructureEntry[] {
   return dataset.filter(e => e.prototype.toLowerCase().includes(prototype.toLowerCase()));
 }

@@ -226,7 +226,7 @@ export default function DOSVisualizer() {
             </Button>
           </div>
 
-          {stats && (
+          {!!stats && (
             <div className="flex gap-4 mt-3 text-xs text-muted-foreground">
               <span>{(stats as any).dosBins} energy bins</span>
               <span>{(stats as any).orbitalChannels?.join(", ")} channels</span>

@@ -444,8 +444,12 @@ export async function computeInsightEmbedding(text: string): Promise<Float32Arra
 async function computeInsightEmbeddingsBatch(texts: string[]): Promise<(Float32Array | null)[]> {
   if (texts.length === 0) return [];
   if (texts.length === 1) {
-    const single = await computeInsightEmbedding(texts[0]);
-    return [single];
+    try {
+      const single = await computeInsightEmbedding(texts[0]);
+      return [single];
+    } catch {
+      return [null];
+    }
   }
   try {
     const BATCH_SIZE = 50;
@@ -463,11 +467,9 @@ async function computeInsightEmbeddingsBatch(texts: string[]): Promise<(Float32A
     }
     return results;
   } catch {
-    const results: (Float32Array | null)[] = [];
-    for (const text of texts) {
-      results.push(await computeInsightEmbedding(text));
-    }
-    return results;
+    // Batch failed — return nulls rather than retrying individually (each would also time out,
+    // turning N insights into N × 60s = potentially minutes of blocking).
+    return new Array(texts.length).fill(null);
   }
 }
 

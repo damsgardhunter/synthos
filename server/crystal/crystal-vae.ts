@@ -4,7 +4,7 @@ import { buildGraphFromStructure, getGraphFeatureVector } from "./crystal-graph-
 
 const LATENT_DIM = 32;
 const HIDDEN_DIM = 64;
-const NUM_EPOCHS = 80;
+const NUM_EPOCHS = 25;
 const LEARNING_RATE = 0.002;
 const MOMENTUM = 0.85;
 const FREE_BITS = 0.1;
@@ -415,8 +415,7 @@ async function trainVAE(dataset: CrystalStructureEntry[]): Promise<void> {
 
   trainingHistory = [];
 
-  // Use a real delay so the event loop can process I/O between epochs
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 5));
+  const yield_ = () => new Promise<void>(r => setImmediate(r));
 
   function computeBeta(epoch: number): number {
     if (epoch < WARMUP_EPOCHS) {
@@ -931,4 +930,17 @@ export async function initCrystalVAE(): Promise<void> {
   } catch (err) {
     console.error("Failed to initialize Crystal VAE:", err);
   }
+}
+
+export function exportCrystalVAEState(): any {
+  return { model, trainingHistory, trained, savedInputMeans, savedInputStds, encodedTrainingData };
+}
+export function importCrystalVAEState(state: any): void {
+  if (!state) return;
+  model = state.model;
+  trainingHistory = state.trainingHistory ?? [];
+  trained = state.trained ?? false;
+  savedInputMeans = state.savedInputMeans ?? [];
+  savedInputStds = state.savedInputStds ?? [];
+  encodedTrainingData = state.encodedTrainingData ?? [];
 }

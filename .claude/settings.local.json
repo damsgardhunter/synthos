@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl -d Ubuntu -- bash -c \"ls /usr/share/espresso/pseudo/ | grep -E ''^\\(Pd|Ni|F|Cr|Na|Pt\\)\\\\.'' 2>&1\")",
+      "Bash(wsl -d Ubuntu -- bash -c \"ls /usr/share/espresso/pseudo/ | grep -E ''^\\(Pd|F|Na\\)\\\\.'' 2>&1; ls /usr/share/espresso/pseudo/ | grep -E ''^\\(Pd|F\\\\.|Na\\\\.\\)'' 2>&1\")",
+      "Bash(wsl -d Ubuntu -- bash -c \"dpkg -l | grep quantum-espresso-data-sssp 2>&1; ls /usr/share/espresso/sssp/ 2>/dev/null | head -20 || echo ''no sssp dir yet''\")",
+      "Bash(wsl.exe -d Ubuntu -e bash -c \"head -5 /mnt/c/Users/hunte/Quantum-Alchemy-Engine/server/dft/pseudo/Ag.UPF && wc -c /mnt/c/Users/hunte/Quantum-Alchemy-Engine/server/dft/pseudo/Ag.UPF\")",
+      "Bash(wsl.exe -d Ubuntu -e bash -c \"/usr/bin/pw.x -input /tmp/qe_ag.in > /tmp/qe_ag_out.txt 2>&1; echo exit=$? tail -5 /tmp/qe_ag_out.txt\")",
+      "Bash(wsl.exe -d Ubuntu -e bash -c \"grep -n ''total energy\\\\|buffer overflow\\\\|lmaxx\\\\|Error\\\\|error\\\\|end of file'' /tmp/qe_ag_out.txt | head -10\")",
+      "Bash(wsl.exe -d Ubuntu -e bash -c \"wc -l /tmp/qe_ag_out.txt; cat /tmp/qe_ag_out.txt\")",
+      "Bash(npx tsc --noEmit)",
+      "Bash(git commit:*)",
+      "Bash(git push origin main)",
+      "mcp__Neon__list_projects",
+      "Bash(curl -s --max-time 5 http://localhost:4000/api/stats)",
+      "Bash(cmd //c \"taskkill /F /PID 236052\")",
+      "Bash(cmd //c \"taskkill /F /PID 260852\")",
+      "Bash(netstat -ano)",
+      "Read(//tmp/**)",
+      "Bash(grep -n \"runMultiFidelityPipeline\\\\|async.*runMultiFidelity\\\\|function runMultiFidelity\" server/learning/engine.ts server/crystal/*.ts server/dft/*.ts)",
+      "Bash(npx tsx --env-file=.env -e \":*)"
+    ]
+  }
+}

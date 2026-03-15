@@ -505,7 +505,7 @@ function resolve<T>(
   return { value: fallback, source: fallbackSource };
 }
 
-export async function resolveDFTFeatures(formula: string, pressureGpa: number = 0): Promise<DFTResolvedFeatures> {
+export async function resolveDFTFeatures(formula: string, pressureGpa: number = 0, skipXTB = false): Promise<DFTResolvedFeatures> {
   const raw = await fetchAllDFTSources(formula);
 
   const analytical = computeAnalyticalFallbacks(formula);
@@ -514,7 +514,7 @@ export async function resolveDFTFeatures(formula: string, pressureGpa: number = 
   const hasPartialExternal = hasExternalData && !(raw.mpElectronic != null && raw.mpThermo != null);
 
   let xtbData: XTBEnrichedFeatures | null = null;
-  if ((!hasExternalData || hasPartialExternal) && isDFTAvailable()) {
+  if (!skipXTB && (!hasExternalData || hasPartialExternal) && isDFTAvailable()) {
     const preFilter = estimatePhononStability(formula);
     if (!preFilter.stable) {
       console.log(`[DFT] ${formula}: Pre-filter rejected (score=${preFilter.score.toFixed(2)}): ${preFilter.reasons.join("; ")}`);

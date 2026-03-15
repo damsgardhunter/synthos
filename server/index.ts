@@ -215,7 +215,7 @@ process.on("unhandledRejection", (reason) => {
         } catch (err: any) {
           log(`Engine import failed: ${err.message}`, "startup");
         }
-      }, 400000);
+      }, 15000);
     } catch (err: any) {
       console.error("[startup] Fatal initialization error:", err);
     }

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { queryClient } from "@/lib/queryClient";
+import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, SynthesisProcess, ChemicalReaction } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -537,6 +538,7 @@ function ReactionCard({ reaction }: { reaction: ChemicalReaction }) {
 }
 
 export default function SuperconductorLab() {
+  const ri30 = useStartupSafeInterval(30000);
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
     queryKey: ["/api/superconductor-candidates"],
   });
@@ -560,7 +562,7 @@ export default function SuperconductorLab() {
     cycleCount: number;
   }>({
     queryKey: ["/api/engine/status"],
-    refetchInterval: 30000,
+    refetchInterval: ri30,
   });
 
   const p90 = calibrationData?.absResidualPercentiles?.p90;

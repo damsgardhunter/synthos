@@ -417,7 +417,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/learning-phases", async (_req, res) => {
     try {
-      const result = await cache.getOrSet(CACHE_KEYS.LEARNING_PHASES, TTL.LEARNING_PHASES, async () => {
+      const result = await cache.getOrSetStale(CACHE_KEYS.LEARNING_PHASES, TTL.LEARNING_PHASES, async () => {
         const phases = await storage.getLearningPhases();
         return phases.map(p => ({
           ...p,
@@ -446,7 +446,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const limit = Math.min(Number(req.query.limit) || 100, 500);
       const cacheKey = `${CACHE_KEYS.RESEARCH_LOGS}:${limit}`;
-      const result = await cache.getOrSet(cacheKey, TTL.RESEARCH_LOGS, async () => {
+      const result = await cache.getOrSetStale(cacheKey, TTL.RESEARCH_LOGS, async () => {
         const logs = await storage.getResearchLogs(limit);
         return logs.map(log => ({
           ...log,
@@ -463,10 +463,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/stats", async (_req, res) => {
     try {
-      const cached = cache.get(CACHE_KEYS.STATS);
-      if (cached) return res.json(cached);
-      const stats = await storage.getStats();
-      cache.set(CACHE_KEYS.STATS, stats, TTL.STATS);
+      const stats = await cache.getOrSetStale(CACHE_KEYS.STATS, TTL.STATS, () => storage.getStats());
       res.json(stats);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch stats" });
@@ -808,12 +805,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const limit = Math.min(Number(req.query.limit) || 20, 200);
       const novelOnly = req.query.novelOnly === "true";
       const cacheKey = `${CACHE_KEYS.NOVEL_INSIGHTS}:${novelOnly ? "novel" : "all"}:${limit}`;
-      const result = await cache.getOrSet(cacheKey, TTL.NOVEL_INSIGHTS, async () => {
-        const [insights, total] = await Promise.all([
-          novelOnly ? storage.getNovelInsightsOnly(limit) : storage.getNovelInsights(limit),
-          storage.getNovelInsightCount(),
-        ]);
-        return { insights, total };
+      const result = await cache.getOrSetStale(cacheKey, TTL.NOVEL_INSIGHTS, async () => {
+        // Retry once on transient Neon connection errors
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const [insights, total] = await Promise.all([
+              novelOnly ? storage.getNovelInsightsOnly(limit) : storage.getNovelInsights(limit),
+              storage.getNovelInsightCount(),
+            ]);
+            return { insights, total };
+          } catch (err: any) {
+            if (attempt === 0 && err?.message?.includes("Connection terminated")) {
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            throw err;
+          }
+        }
       });
       res.json(result);
     } catch (e: any) {
@@ -895,16 +903,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/engine/memory", async (_req, res) => {
     try {
-      console.log(`[engine/memory] START handler at ${new Date().toLocaleTimeString()}`);
       const result = await cache.getOrSetStale(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, async () => {
-        console.log(`[engine/memory] cache MISS, computing...`);
-        const [strategies, insights, milestones, milestoneCount, snapshots, narratives] = await Promise.all([
-          storage.getStrategyHistory(10),
-          storage.getNovelInsightsOnly(50),
-          storage.getMilestones(20),
-          storage.getMilestoneCount(),
-          storage.getConvergenceSnapshots(50),
-          storage.getResearchLogsByEvent("cycle-narrative", 10),
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("engine/memory DB timeout")), 9000)
+        );
+        const [strategies, insights, milestones, milestoneCount, snapshots, narratives] = await Promise.race([
+          Promise.all([
+            storage.getStrategyHistory(10),
+            storage.getNovelInsightsOnly(50),
+            storage.getMilestones(20),
+            storage.getMilestoneCount(),
+            storage.getConvergenceSnapshots(50),
+            storage.getResearchLogsByEvent("cycle-narrative", 10),
+          ]),
+          timeout,
         ]);
         const latestStrategy = strategies[0] ?? null;
         const topInsights = insights.slice(0, 5);
@@ -932,9 +944,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           }
         }
 
-        console.log(`[engine/memory] calling getAutonomousLoopStats at ${new Date().toLocaleTimeString()}`);
-        const loopStats = await getAutonomousLoopStats();
-        console.log(`[engine/memory] getAutonomousLoopStats done at ${new Date().toLocaleTimeString()}`);
+        const loopStats = getAutonomousLoopStats();
 
         return {
           currentHypothesis: currentHypothesis ? {
@@ -3363,6 +3373,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/theory-report", generalLimiter, (_req, res) => {
     try {
+      const cached = cache.get(CACHE_KEYS.THEORY_REPORT);
+      if (cached) return res.json(cached);
+
       const causalStats = getCausalDiscoveryStats();
       const symbolicStats = getSymbolicDiscoveryStats();
       const graph = getLatestGraph();
@@ -3384,7 +3397,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         };
       }
 
-      res.json({
+      const result = {
         causal: {
           totalRuns: causalStats.totalRuns,
           graphSize: causalStats.latestGraphSize,
@@ -3414,7 +3427,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             ? guidance[0].recommendation
             : "Run causal discovery to generate recommendations",
         },
-      });
+      };
+      cache.set(CACHE_KEYS.THEORY_REPORT, result, TTL.THEORY_REPORT);
+      res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to generate theory report", detail: e.message?.slice(0, 200) });
     }

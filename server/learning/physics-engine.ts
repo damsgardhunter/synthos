@@ -3761,7 +3761,8 @@ export async function runFullPhysicsAnalysis(
 
   try {
     const dftResolver = await getDFTResolver();
-    dftData = await dftResolver.resolveDFTFeatures(formula);
+    // skipXTB=true: inline xTB takes 30-90s; DFT queue handles it asynchronously.
+    dftData = await dftResolver.resolveDFTFeatures(formula, candidate.pressureGpa ?? 0, true);
     if (dftData.dftCoverage > 0) {
       const desc = dftResolver.describeDFTSources(dftData);
       emit("log", {

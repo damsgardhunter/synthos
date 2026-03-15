@@ -2,8 +2,7 @@ import { generateHybridCandidates, getHybridGeneratorStats, type CrystalStructur
 import { getFailureDBStats, shouldAvoidStructure, recordStructureFailure, type FailureReason } from "./structure-failure-db";
 import { getDatasetStats, getTrainingData } from "./crystal-structure-dataset";
 import { trainStructurePredictor, getStructurePredictorStats } from "./structure-predictor-ml";
-import { initCrystalVAE } from "./crystal-vae";
-import { initDiffusionModel } from "./crystal-diffusion-model";
+import { spawnMLTraining } from "../workers/ml-training-bridge";
 import { runQuantumEnginePipeline } from "../dft/quantum-engine-pipeline";
 import { predictStabilityScreen } from "./stability-predictor";
 
@@ -82,7 +81,8 @@ export async function runStructureLearningCycle(
 
   for (const cand of validCandidates.slice(0, 5)) {
     try {
-      const result = await runQuantumEnginePipeline(cand.formula, targetPressure ?? 0);
+      // skipXTB=true: inline xTB takes 30-90s per formula; DFT queue handles it asynchronously.
+      const result = await runQuantumEnginePipeline(cand.formula, targetPressure ?? 0, true);
       const entry = result.entry;
 
       if (entry.scfConverged && entry.tc > 0 && entry.isMetallic) {
@@ -141,20 +141,20 @@ export async function runStructureLearningCycle(
   const retrainedModels: string[] = [];
 
   const growth = datasetSizeAfter - lastRetrainDatasetSize;
-  if (growth >= RETRAIN_THRESHOLD || (totalCycles === 1 && datasetSizeAfter > 0)) {
+  if (growth >= RETRAIN_THRESHOLD) {
     try {
       trainStructurePredictor();
       retrainedModels.push("structure-predictor-ml");
     } catch {}
 
-    // Stagger VAE and diffusion model training so they don't compete for the event loop simultaneously
+    // Stagger VAE and diffusion model training in worker threads so they never block the event loop
     try {
-      setTimeout(() => { initCrystalVAE().catch(() => {}); }, 5000);
+      setTimeout(() => { spawnMLTraining("init-crystal-vae").catch(() => {}); }, 5000);
       retrainedModels.push("crystal-vae");
     } catch {}
 
     try {
-      setTimeout(() => { initDiffusionModel().catch(() => {}); }, 15000);
+      setTimeout(() => { spawnMLTraining("init-diffusion-model").catch(() => {}); }, 15000);
       retrainedModels.push("crystal-diffusion-model");
     } catch {}
 
