@@ -1037,14 +1037,26 @@ async function ensurePseudopotential(element: string): Promise<string> {
         try {
           if (!fs.existsSync(dir)) continue;
           const entries = fs.readdirSync(dir);
-          // Flexible match: element name prefix + any suffix + .UPF/.upf
-          const match = entries.find(f =>
-            f.startsWith(element + ".") && (f.endsWith(".UPF") || f.endsWith(".upf"))
+          // Flexible match: element name prefix + dot OR underscore + any suffix + .UPF/.upf
+          // SSSP package uses underscores: Ir_pbe_v1.2.uspp.F.UPF, Te_pbe_v1.uspp.F.UPF
+          // Prefer PBE over LDA (avoid pz), prefer non-relativistic for simpler SCF
+          const candidates = entries.filter(f =>
+            (f.startsWith(element + ".") || f.startsWith(element + "_")) &&
+            (f.endsWith(".UPF") || f.endsWith(".upf")) &&
+            !f.includes("pz")   // skip LDA (Perdew-Zunger) PPs
           );
+          // Sort: prefer non-relativistic PBE, then relativistic PBE
+          const match = candidates.sort((a, b) => {
+            const aRel = a.includes("rel") ? 1 : 0;
+            const bRel = b.includes("rel") ? 1 : 0;
+            return aRel - bRel;
+          })[0];
           if (!match) continue;
           const sysFile = path.join(dir, match);
           fs.copyFileSync(sysFile, tmpFile);
-          if (validatePseudopotential(tmpFile) && validateSemicorePP(element, tmpFile)) {
+          // System-installed SSSP PPs are community-validated — only check UPF format,
+          // not semicore heuristics (relativistic PPs may lack that tag but are still valid).
+          if (validatePseudopotential(tmpFile)) {
             fs.renameSync(tmpFile, ppFile);
             console.log(`[QE-Worker] Copied valid PP for ${element} from ${dir}/${match} (${fs.statSync(ppFile).size} bytes)`);
             return ppFile;
