@@ -123,9 +123,18 @@ function normalizeFormula(formula: string): string {
   return formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
 }
 
-/** Returns true if the formula string is a chemical-system notation (e.g. "Fe-C") rather than a proper compound formula. MP API cannot use these as formula filters. */
-function isChemSys(formula: string): boolean {
-  return /^[A-Z][a-z]?(-[A-Z][a-z]?)+$/.test(formula);
+/**
+ * Returns true if the formula is not a plain inorganic compound formula that
+ * the MP API can handle. Rejects:
+ *  - Chemical-system notation: "Fe-C"
+ *  - Polymer / repeat notation: "(C5H8)n", "(AB)x"
+ *  - Any formula containing parentheses, brackets, or non-element characters
+ */
+function isInvalidMPFormula(formula: string): boolean {
+  if (/[-()[\]{}]/.test(formula)) return true;      // hyphens, brackets
+  if (/[a-z]$/.test(formula)) return true;           // ends with lowercase (polymer 'n', 'x', …)
+  if (!/^([A-Z][a-z]?\d*)+$/.test(formula)) return true; // not purely Element+digits
+  return false;
 }
 
 async function mpFetch(endpoint: string, params: Record<string, string> = {}, attempt = 1): Promise<any | null> {
@@ -180,7 +189,7 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
   if (cached) return cached as MPSummaryData;
 
   const normalizedFormula = normalizeFormula(formula);
-  if (isChemSys(normalizedFormula)) return null; // chem-sys notation not valid as formula filter
+  if (isInvalidMPFormula(normalizedFormula)) return null;
 
   const data = await mpFetch("/materials/summary/", {
     formula: normalizedFormula,
