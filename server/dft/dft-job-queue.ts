@@ -19,7 +19,10 @@ const STALE_CLEANUP_INTERVAL_MS = 5 * 60_000;
 // Stability gate: reject any candidate whose best-known convex hull distance
 // exceeds this threshold (eV/atom above the hull). Prevents wasting SCF compute
 // on thermodynamically unstable structures that are very unlikely to be real.
-const STABILITY_GATE_EV_ATOM = 0.1;
+// 0.1 eV/atom was too strict — many novel hypothetical superconductors sit 0.1-0.3 eV/atom
+// above the convex hull (metastable but synthesisable under pressure or at low T).
+// 0.3 eV/atom is the standard threshold used in high-throughput screening literature.
+const STABILITY_GATE_EV_ATOM = 0.3;
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));

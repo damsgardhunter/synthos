@@ -604,7 +604,10 @@ export async function relaxInterface(
         fs.rmSync(calcDir, { recursive: true, force: true });
       } catch {}
     } catch (e: any) {
-      console.log(`[InterfaceRelax] xTB failed for ${film}/${substrate}: ${e?.message?.slice(0, 200)}`);
+      const stdout = e?.stdout?.toString?.()?.slice(0, 400) ?? "";
+      const stderr = e?.stderr?.toString?.()?.slice(0, 400) ?? "";
+      const msg = e?.message?.slice(0, 200) ?? "";
+      console.log(`[InterfaceRelax] xTB failed for ${film}/${substrate}: ${msg}${stdout ? `\n  stdout: ${stdout}` : ""}${stderr ? `\n  stderr: ${stderr}` : ""}`);
     }
   }
 
