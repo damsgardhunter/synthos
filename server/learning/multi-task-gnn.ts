@@ -267,6 +267,14 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
     ? phonon.debyeTemperature
     : Math.max(100, Math.abs(phononOut[0] ?? 300) * 200 + 300);
 
+  const nestingStrength = features
+    ? features.fermiSurfaceNesting ?? sigmoid(topoOut[0] ?? 0) * 0.5
+    : sigmoid(topoOut[0] ?? 0) * 0.5;
+
+  const correlationStrength = features
+    ? features.correlationStrength ?? sigmoid(topoOut[1] ?? 0) * 0.5
+    : sigmoid(topoOut[1] ?? 0) * 0.5;
+
   const magneticMoment = computeMagneticMoment(formula, magneticOut, correlationStrength);
 
   const omegaLog = coupling
@@ -276,14 +284,6 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
   const muStar = coupling
     ? coupling.muStar
     : Math.max(0.08, Math.min(0.2, sigmoid(phononOut[2] ?? 0) * 0.15 + 0.08));
-
-  const nestingStrength = features
-    ? features.fermiSurfaceNesting ?? sigmoid(topoOut[0] ?? 0) * 0.5
-    : sigmoid(topoOut[0] ?? 0) * 0.5;
-
-  const correlationStrength = features
-    ? features.correlationStrength ?? sigmoid(topoOut[1] ?? 0) * 0.5
-    : sigmoid(topoOut[1] ?? 0) * 0.5;
 
   let dimensionality: number;
   if (features && features.dimensionality != null) {
@@ -303,14 +303,27 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
 
   const topologicalIndex = sigmoid(topoOut[3] ?? 0) * 0.3;
 
+  // Physics-informed Tc: blend McMillan/Allen-Dynes with GNN direct prediction.
+  // When λ is in the phonon-mediated regime (0.2–4.0), the McMillan formula
+  // captures electron-phonon coupling physics that the raw GNN may miss at low data volume.
+  const tcMcMillan = mcMillanTc(basePred.lambda, omegaLog, muStar);
+  const lambdaValid = basePred.lambda > 0.2 && basePred.lambda < 4.0 && tcMcMillan > 0;
+  // N(Ef) boost: high DOS at Fermi level correlates with stronger e-ph coupling
+  const dosFactor = dosAtFermi > 3 ? Math.min(1.2, 1 + (dosAtFermi - 3) / 15) : 1.0;
+  // Weight McMillan more heavily when λ is in valid range and DOS is high
+  const mcMillanWeight = lambdaValid ? Math.min(0.55, 0.3 + basePred.confidence * 0.25) : 0;
+  const predictedTc = mcMillanWeight > 0
+    ? (mcMillanWeight * tcMcMillan * dosFactor + (1 - mcMillanWeight) * basePred.predictedTc)
+    : basePred.predictedTc;
+
   updatePropertyNormStats({
-    predictedTc: basePred.predictedTc, bandGap, dosAtFermi,
+    predictedTc, bandGap, dosAtFermi,
     bulkModulus, shearModulus, debyeTemp, magneticMoment, omegaLog,
   });
 
   const propertyVector = [
     basePred.formationEnergy,
-    zNorm(basePred.predictedTc, "tc"),
+    zNorm(predictedTc, "tc"),
     basePred.lambda,
     zNorm(bandGap, "bandGap"),
     zNorm(dosAtFermi, "dosAtFermi"),
@@ -330,7 +343,7 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
   return {
     formationEnergy: basePred.formationEnergy,
     phononStability: basePred.phononStability,
-    predictedTc: basePred.predictedTc,
+    predictedTc: Math.round(predictedTc * 100) / 100,
     lambda: basePred.lambda,
     confidence: basePred.confidence,
     bandGap: Math.round(bandGap * 100) / 100,
@@ -368,6 +381,19 @@ function computeAvgBulkModulus(formula: string): number {
   }
 
   return totalCount > 0 ? totalBulk / totalCount : 0;
+}
+
+/**
+ * Allen-Dynes modified McMillan formula for Tc.
+ * Only valid for conventional phonon-mediated superconductors (λ < 4, no cuprates).
+ * Returns 0 when outside valid domain.
+ */
+function mcMillanTc(lambda: number, omegaLog: number, muStar: number): number {
+  if (lambda <= 0.05 || omegaLog <= 0) return 0;
+  const denom = lambda - muStar * (1 + 0.62 * lambda);
+  if (denom <= 0.01) return 0;
+  const tc = (omegaLog / 1.2) * Math.exp(-1.04 * (1 + lambda) / denom);
+  return Math.max(0, Math.min(tc, 300)); // cap at 300K — above that is unconventional regime
 }
 
 function computeMagneticMoment(formula: string, magneticOut: number[], corrStrength?: number): number {

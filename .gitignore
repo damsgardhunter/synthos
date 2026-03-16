@@ -6,3 +6,5 @@ vite.config.ts.*
 *.tar.gz
 server/dft/xtb-dist/
 server/dft/pseudo/
+".env" 
+".env" 

@@ -584,7 +584,11 @@ export async function selectForDFT(
 
   const pressureCache = new Map<string, number>();
   const baseFeatureCache = new Map<string, Awaited<ReturnType<typeof extractFeatures>>>();
-  for (const c of candidates) {
+  for (let _fi = 0; _fi < candidates.length; _fi++) {
+    // Yield every 20 candidates — extractFeatures is ~350ms synchronous per call,
+    // so 200 candidates × 350ms = 70s without yields would starve heartbeat timers.
+    if (_fi > 0 && _fi % 20 === 0) await new Promise<void>(r => setTimeout(r, 0));
+    const c = candidates[_fi];
     if (!pressureCache.has(c.formula)) {
       const p = c.pressureGpa ?? estimateFamilyPressure(c.formula);
       pressureCache.set(c.formula, p);
@@ -611,8 +615,8 @@ export async function selectForDFT(
   }[] = [];
 
   for (let ci = 0; ci < candidates.length; ci++) {
-    // Yield every 10 candidates so HTTP requests aren't starved
-    if (ci > 0 && ci % 10 === 0) await new Promise<void>(r => setImmediate(r));
+    // Yield every 10 candidates — use setTimeout (not setImmediate) so timer callbacks fire
+    if (ci > 0 && ci % 10 === 0) await new Promise<void>(r => setTimeout(r, 0));
     const candidate = candidates[ci];
     try {
       const tc = finiteOr(candidate.predictedTc, 0);
@@ -1214,7 +1218,11 @@ async function validateOnHeldOut(): Promise<{ r2: number; mse: number }> {
   const allTc = heldOut.map(e => e.tc);
   const meanTc = allTc.reduce((s, v) => s + v, 0) / allTc.length;
 
-  for (const entry of heldOut) {
+  for (let _vi = 0; _vi < heldOut.length; _vi++) {
+    // Yield every 10 entries — extractFeatures is ~350ms synchronous per call,
+    // so 77 entries without yields = 27s of timer starvation.
+    if (_vi > 0 && _vi % 10 === 0) await new Promise<void>(r => setTimeout(r, 0));
+    const entry = heldOut[_vi];
     try {
       const features = await extractFeatures(entry.formula, { pressureGpa: entry.pressureGPa ?? 0 } as any);
       const result = await gbPredictWithUncertainty(features, entry.formula);
@@ -1442,13 +1450,18 @@ export async function runActiveLearningCycle(
     (c.predictedTc ?? 0) > 5 &&
     isValidFormula(c.formula)
   );
+  // Fall back to all valid candidates when the non-selected pool is too small,
+  // so before/after uncertainty is always computed from a real sample.
+  const uncPool = heldOutPoolForUnc.length >= 3
+    ? heldOutPoolForUnc
+    : allCandidates.filter(c => isValidFormula(c.formula));
   let heldOutUncBefore = avgUncertaintyBefore;
-  if (heldOutPoolForUnc.length >= 10) {
+  if (uncPool.length >= 3) {
     let totalBefore = 0;
-    const sampleN = Math.min(50, heldOutPoolForUnc.length);
-    const stepN = heldOutPoolForUnc.length / sampleN;
+    const sampleN = Math.min(50, uncPool.length);
+    const stepN = uncPool.length / sampleN;
     for (let i = 0; i < sampleN; i++) {
-      const c = heldOutPoolForUnc[Math.floor(i * stepN)];
+      const c = uncPool[Math.floor(i * stepN)];
       try {
         totalBefore += gnnPredictWithUncertainty(c.formula).uncertainty;
       } catch { totalBefore += 0.5; }
@@ -1801,12 +1814,12 @@ export async function runActiveLearningCycle(
   }
 
   let avgUncertaintyAfter = heldOutUncBefore;
-  if (heldOutPoolForUnc.length >= 10) {
+  if (uncPool.length >= 3) {
     let totalUncertaintyAfter = 0;
-    const sampleSize = Math.min(50, heldOutPoolForUnc.length);
-    const step = heldOutPoolForUnc.length / sampleSize;
+    const sampleSize = Math.min(50, uncPool.length);
+    const step = uncPool.length / sampleSize;
     for (let i = 0; i < sampleSize; i++) {
-      const c = heldOutPoolForUnc[Math.floor(i * step)];
+      const c = uncPool[Math.floor(i * step)];
       try {
         totalUncertaintyAfter += gnnPredictWithUncertainty(c.formula).uncertainty;
       } catch {
@@ -2039,6 +2052,70 @@ export function startGCPWeightPoller(): void {
 
   setTimeout(poll, 30_000);
   console.log("[GCP-Poller] Background GNN weight poller started (30s interval)");
+}
+
+// Cycles through cached MP materials in 50-record batches so the GNN sees
+// fresh structural diversity every 5 engine cycles instead of only at AL time.
+// Reads from the mp_material_cache DB table (populated by GCP GNN loop) so we
+// benefit from the GCP-built 10k-record cache without hammering the live API.
+let _mpRefreshOffset = 0;
+
+export async function refreshMPTrainingData(): Promise<number> {
+  try {
+    const { db } = await import("../db");
+
+    // Read a batch from the DB cache populated by the GCP GNN loop.
+    // Uses raw SQL to avoid drizzle ORM version skew.
+    const result = await db.execute(
+      `SELECT formula, data FROM mp_material_cache
+       ORDER BY id
+       LIMIT 50 OFFSET ${_mpRefreshOffset}`
+    );
+    const fetched: Array<{ formula: string; data: any }> =
+      ((result as any).rows ?? (Array.isArray(result) ? result : [])) as any;
+
+    if (fetched.length === 0) {
+      // DB cache empty or exhausted — fall back to live API and reset offset
+      _mpRefreshOffset = 0;
+      const { fetchMPBatchFromAPI } = await import("./materials-project-client");
+      const apiRecords = await fetchMPBatchFromAPI(50, 0);
+      console.log(`[MP-Refresh] DB cache empty at offset ${_mpRefreshOffset}, API fallback: ${apiRecords.length} records`);
+      if (apiRecords.length === 0) return 0;
+      const superconTcMap = new Map(SUPERCON_TRAINING_DATA.map(e => [e.formula, e.tc]));
+      let added = 0;
+      for (const rec of apiRecords) {
+        const tc = superconTcMap.get(rec.formula) ?? 0;
+        if (addDFTTrainingResult({ formula: rec.formula, tc, source: "external", bandGap: rec.bandGap, formationEnergy: rec.formationEnergy })) added++;
+      }
+      console.log(`[MP-Refresh] API fallback: ${added}/${apiRecords.length} new records added to GNN dataset`);
+      return added;
+    }
+
+    _mpRefreshOffset += fetched.length;
+
+    const superconTcMap = new Map(SUPERCON_TRAINING_DATA.map(e => [e.formula, e.tc]));
+    let added = 0;
+    for (const row of fetched) {
+      const d = row.data as any;
+      const formula = row.formula;
+      if (!formula) continue;
+      const tc = superconTcMap.get(formula) ?? 0;
+      const wasNew = addDFTTrainingResult({
+        formula,
+        tc,
+        source: "external",
+        bandGap: typeof d?.bandGap === "number" ? d.bandGap : (typeof d?.band_gap === "number" ? d.band_gap : null),
+        formationEnergy: typeof d?.formationEnergyPerAtom === "number" ? d.formationEnergyPerAtom : (typeof d?.formation_energy_per_atom === "number" ? d.formation_energy_per_atom : null),
+      });
+      if (wasNew) added++;
+    }
+
+    console.log(`[MP-Refresh] offset=${_mpRefreshOffset}: fetched=${fetched.length}, new=${added} added to GNN dataset`);
+    return added;
+  } catch (err: any) {
+    console.warn(`[MP-Refresh] Failed: ${err?.message?.slice(0, 120)}`);
+    return 0;
+  }
 }
 
 function generateDopedVariantsForAL(formula: string, maxVariants: number): DopingSpec[] {
