@@ -5345,6 +5345,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         notes: "A15 structure, used in MRI magnets and particle accelerators",
       },
     },
+    {
+      formula: "LaH10",
+      name: "Lanthanum Decahydride",
+      family: "Hydride",
+      textbook: {
+        tc: 250.0,
+        lambda: 3.5,
+        omegaLog: 900,
+        crystalSystem: "cubic",
+        spaceGroup: "Fm-3m",
+        yearDiscovered: 2019,
+        pressureGpa: 170,
+        pairingMechanism: "Conventional (phonon-mediated, high-pressure)",
+        notes: "Record high-Tc hydride at 170 GPa, hydrogen-cage clathrate structure",
+      },
+    },
   ];
 
   interface BenchmarkResult {

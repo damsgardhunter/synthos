@@ -42,18 +42,26 @@ async function trainEnsemble(X: number[][], y: number[]) {
   return { models, trainedAt: Date.now(), isLogVariance: false };
 }
 
+// Mirror of predictFlat + predictWithModel from gradient-boost.ts.
+// FlatTree format: { nodes: {featureIndex, threshold, leftChild, rightChild}[], leafValues: number[] }
+// Leaf nodes use negative indices: leafValues[-(idx+1)]
 function rawTreePredict(m: any, row: number[]): number {
+  const px: number[] = m.featureMask ? m.featureMask.map((fi: number) => row[fi] ?? 0) : row;
   let pred = m.basePrediction;
-  for (const tree of m.flatTrees) {
-    let node = 0;
-    while (true) {
-      const t = tree[node];
-      if (t.isLeaf) { pred += m.learningRate * t.value; break; }
-      const fv = row[t.featureIndex] ?? 0;
-      node = fv <= t.threshold ? t.left : t.right;
+  if (m.flatTrees && m.flatTrees.length > 0) {
+    for (const flat of m.flatTrees) {
+      if (!flat.nodes || flat.nodes.length === 0) continue;
+      let idx = 0;
+      while (idx >= 0) {
+        const node = flat.nodes[idx];
+        if (!node) break;
+        idx = (px[node.featureIndex] ?? 0) <= node.threshold ? node.leftChild : node.rightChild;
+      }
+      const treeVal = flat.leafValues[-(idx + 1)];
+      if (!Number.isFinite(treeVal)) continue;
+      pred += m.learningRate * treeVal;
     }
   }
-  // Un-transform log1p(Tc) → Tc if the model was trained with log-transform
   return m.logTransformed ? Math.max(0, Math.expm1(pred)) : Math.max(0, pred);
 }
 
