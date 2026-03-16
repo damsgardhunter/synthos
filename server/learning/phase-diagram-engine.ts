@@ -817,11 +817,15 @@ interface ParsedFormulaCounts {
   totalAtoms: number;
 }
 
-function parseFormulaCached(formula: string): ParsedFormulaCounts {
+function parseFormulaCached(formula: string): ParsedFormulaCounts & { fractions: Record<string, number> } {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
-  return { counts, elements, totalAtoms };
+  const fractions: Record<string, number> = {};
+  for (const el of elements) {
+    fractions[el] = totalAtoms > 0 ? counts[el] / totalAtoms : 0;
+  }
+  return { counts, elements, totalAtoms, fractions };
 }
 
 function computeConfigurationalEntropy(parsed: ParsedFormulaCounts): { deltaSMix: number; numElements: number; fractions: number[] } {

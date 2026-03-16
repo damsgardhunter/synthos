@@ -91,6 +91,7 @@ interface GBModel {
   featureNames: string[];
   featureMask?: number[];
   trainedAt: number;
+  logTransformed?: boolean; // targets trained with log1p(tc), predictions need expm1
 }
 
 let cachedModel: GBModel | null = null;
@@ -929,9 +930,11 @@ export async function trainGradientBoosting(
   const trainIndices = shuffledIndices.slice(valSize);
 
   const trainX = trainIndices.map(i => projX[i]);
-  const trainY = trainIndices.map(i => y[i]);
+  // Log-transform targets: Tc spans 0–300K with median ~0.5K (heavily skewed).
+  // log1p compresses the range and lets trees learn the exponential lambda→Tc relationship.
+  const trainY = trainIndices.map(i => Math.log1p(Math.max(0, y[i])));
   const valX = valIdxArr.map(i => projX[i]);
-  const valY = valIdxArr.map(i => y[i]);
+  const valY = valIdxArr.map(i => Math.log1p(Math.max(0, y[i])));
 
   const nTrain = trainX.length;
   const allTrainIndices = Array.from({ length: nTrain }, (_, i) => i);
@@ -999,6 +1002,7 @@ export async function trainGradientBoosting(
     featureNames: FEATURE_NAMES,
     featureMask,
     trainedAt: Date.now(),
+    logTransformed: true,
   };
 }
 
@@ -1019,8 +1023,9 @@ function predictWithModel(model: GBModel, x: number[]): number {
       prediction += model.learningRate * treeVal;
     }
   }
-  if (!Number.isFinite(prediction)) return model.basePrediction;
-  return Math.max(0, prediction);
+  if (!Number.isFinite(prediction)) return model.logTransformed ? Math.expm1(Math.max(0, model.basePrediction)) : model.basePrediction;
+  // Un-transform log1p(Tc) → Tc
+  return model.logTransformed ? Math.max(0, Math.expm1(prediction)) : Math.max(0, prediction);
 }
 
 function getTreeFeatureImportance(tree: TreeNode | number): Map<number, number> {
@@ -1042,13 +1047,24 @@ class TrainingPool {
   private formulas: string[] = [];
   private dirty = true;
 
-  async add(formula: string, tc: number, pressureGPa: number = 0): Promise<boolean> {
+  async add(formula: string, tc: number, pressureGPa: number = 0, knownPhysics?: { lambda?: number; omegaLog?: number }): Promise<boolean> {
     const key = `${formula}|${tc}`;
     if (this.featureCache.has(key)) return false;
     try {
       const features = await extractFeatures(formula, { pressureGpa: pressureGPa } as any);
       const fArr = featureVectorToArray(features, formula);
       if (fArr.some(v => !Number.isFinite(v))) return false;
+      // Override heuristic feature values with verified physics where available.
+      // This is critical: extractFeatures() computes lambda from heuristics (~0.07 for MgB2),
+      // but the known lambda=0.87 gives XGBoost correct signal to learn the lambda→Tc relationship.
+      if (knownPhysics?.lambda != null && knownPhysics.lambda > 0) {
+        const li = PHYSICS_FEATURE_NAMES.indexOf("lambda");
+        if (li >= 0) fArr[li] = knownPhysics.lambda;
+      }
+      if (knownPhysics?.omegaLog != null && knownPhysics.omegaLog > 0) {
+        const oi = PHYSICS_FEATURE_NAMES.indexOf("omegaLog");
+        if (oi >= 0) fArr[oi] = knownPhysics.omegaLog;
+      }
       this.featureCache.set(key, { x: fArr, tc });
       this.dirty = true;
       return true;
@@ -1057,10 +1073,11 @@ class TrainingPool {
     }
   }
 
-  async addBatch(entries: { formula: string; tc: number; pressureGPa?: number }[]): Promise<number> {
+  async addBatch(entries: { formula: string; tc: number; pressureGPa?: number; lambda?: number; omegaLog?: number }[]): Promise<number> {
     let added = 0;
     for (const e of entries) {
-      if (await this.add(e.formula, e.tc, e.pressureGPa ?? 0)) added++;
+      const known = (e.lambda != null || e.omegaLog != null) ? { lambda: e.lambda, omegaLog: e.omegaLog } : undefined;
+      if (await this.add(e.formula, e.tc, e.pressureGPa ?? 0, known)) added++;
     }
     return added;
   }
@@ -1137,7 +1154,11 @@ export async function initPoolAsync(): Promise<void> {
   if (poolInitialized || poolInitializing) return;
   poolInitializing = true;
 
-  const allEntries = SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }));
+  // Only include confirmed superconductors (tc > 0) — non-superconductors bias Tc regression toward zero.
+  // Carry known lambda/omegaLog so the feature vector uses verified values instead of heuristics.
+  const allEntries = SUPERCON_TRAINING_DATA
+    .filter(e => e.isSuperconductor && e.tc > 0)
+    .map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0, lambda: e.lambda }));
   const startTime = Date.now();
 
   const PHASE1_SIZE = 15;
@@ -1148,7 +1169,7 @@ export async function initPoolAsync(): Promise<void> {
   let added = 0;
   for (let i = 0; i < phase1.length; i++) {
     const e = phase1[i];
-    if (await trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
+    if (await trainingPool.add(e.formula, e.tc, e.pressureGPa, e.lambda != null ? { lambda: e.lambda } : undefined)) added++;
     await new Promise<void>(r => setTimeout(r, 50));
   }
 
@@ -1187,7 +1208,7 @@ export async function initPoolAsync(): Promise<void> {
   backfillPool(phase2, startTime);
 }
 
-async function backfillPool(remaining: { formula: string; tc: number; pressureGPa: number }[], t0: number): Promise<void> {
+async function backfillPool(remaining: { formula: string; tc: number; pressureGPa: number; lambda?: number }[], t0: number): Promise<void> {
   const offloadToGCP = process.env.OFFLOAD_XGB_TO_GCP === "true";
   // Always backfill the full dataset — even when offloading to GCP, we need the complete
   // feature matrix to dispatch to GCP so it trains on 500+ samples, not just the 15 from Phase 1.
@@ -1200,7 +1221,7 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
   let added = 0;
   for (let i = 0; i < remaining.length; i++) {
     const e = remaining[i];
-    if (await trainingPool.add(e.formula, e.tc, e.pressureGPa)) added++;
+    if (await trainingPool.add(e.formula, e.tc, e.pressureGPa, e.lambda != null ? { lambda: e.lambda } : undefined)) added++;
     // Yield every entry with a real timer tick (not just setImmediate) so the
     // event loop can process keepalive pings and incoming HTTP requests between
     // each heavy extractFeatures call (~350ms each).
@@ -1208,18 +1229,21 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
   }
   console.log(`[TrainingPool] Phase 2 backfill: ${trainingPool.size} total vectors (+${added}) in ${Date.now() - t0}ms`);
 
-  // Load extended MP dataset (negative examples + structural diversity)
+  // Load extended MP dataset — only include confirmed superconductors (tc > 0).
+  // The tc=0 negative examples contaminate Tc regression, pulling predictions toward zero.
+  // Non-SC screening is handled by the lambda/DOS prefilter, not by XGBoost Tc values.
   try {
     const extended = await getExtendedTrainingData();
-    if (extended.length > 0) {
+    const superconductingExtended = extended.filter(e => e.isSuperconductor && e.tc > 0);
+    if (superconductingExtended.length > 0) {
       const extStart = Date.now();
       let extAdded = 0;
-      for (const e of extended) {
+      for (const e of superconductingExtended) {
         if (trainingPool.hasFormula(e.formula)) continue;
         if (await trainingPool.add(e.formula, e.tc, e.pressureGPa ?? 0)) extAdded++;
         await new Promise<void>(r => setTimeout(r, 0)); // yield per entry
       }
-      console.log(`[TrainingPool] Extended dataset: +${extAdded} entries in ${Date.now() - extStart}ms (pool: ${trainingPool.size})`);
+      console.log(`[TrainingPool] Extended dataset: +${extAdded} superconducting entries in ${Date.now() - extStart}ms (pool: ${trainingPool.size})`);
     }
   } catch (err: any) {
     console.warn(`[TrainingPool] Extended dataset load failed: ${err?.message?.slice(0, 120)}`);
@@ -1250,7 +1274,7 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
   await new Promise<void>(r => setTimeout(r, 200));
 
   try {
-    const { X, y } = trainingPool.getTrainingData();
+    const { X, y, formulas } = trainingPool.getTrainingData();
     if (X.length >= 10) {
       const trainStart = Date.now();
       console.log(`[GradientBoost] Phase 2 (full) training — ${X.length} samples, 45 trees...`);
@@ -1263,7 +1287,7 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
         try {
           if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
             console.log(`[GradientBoost] OFFLOAD_XGB_TO_GCP=true — dispatching deferred ensemble to GCP (${X.length} samples)`);
-            dispatchXGBJobToGCP(X, y).catch(err => console.warn("[GradientBoost] GCP XGB dispatch failed:", err.message));
+            dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP XGB dispatch failed:", err.message));
           } else {
             const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
             console.log(`[GradientBoost] Deferred ensemble training — ${X.length} samples, ${isOffloaded ? "100" : "300"} trees × 5 models + variance ensemble...`);
@@ -1916,7 +1940,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     cachedTrainingSnapshot = null;
   }
 
-  const { X, y } = trainingPool.getTrainingData();
+  const { X, y, formulas } = trainingPool.getTrainingData();
 
   if (X.length < 10) {
     return { retrained: false, datasetSize: X.length, newEntries: newFromEval };
@@ -1938,7 +1962,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   if (X.length >= 30) {
     if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
       console.log(`[XGBoost] OFFLOAD_XGB_TO_GCP=true — dispatching ensemble retrain to GCP (${X.length} samples)`);
-      dispatchXGBJobToGCP(X, y).catch(err => console.warn("[XGBoost] GCP dispatch failed:", err.message));
+      dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[XGBoost] GCP dispatch failed:", err.message));
     } else {
       console.log(`[XGBoost] Training mean ensemble (${X.length} samples)...`);
       const ensStart = Date.now();
@@ -1973,7 +1997,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     cachedCalibration = await computeCalibration(cachedModel);
     if (X.length >= 30) {
       if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
-        dispatchXGBJobToGCP(X, y).catch(() => {});
+        dispatchXGBJobToGCP(X, y, formulas).catch(() => {});
       } else {
         cachedEnsembleXGB = await trainEnsembleXGB(X, y);
         await new Promise<void>(r => setImmediate(r));
@@ -2256,7 +2280,7 @@ export function maybePersistSurrogateMetrics(): void {
 
 // ── GCP XGBoost offload ───────────────────────────────────────────────────────
 
-async function dispatchXGBJobToGCP(X: number[][], y: number[]): Promise<void> {
+async function dispatchXGBJobToGCP(X: number[][], y: number[], formulas?: string[]): Promise<void> {
   const job = await storage.insertXgbTrainingJob({
     status: "queued",
     featuresX: X as any,
@@ -2264,6 +2288,28 @@ async function dispatchXGBJobToGCP(X: number[][], y: number[]): Promise<void> {
     datasetSize: X.length,
   });
   console.log(`[XGBoost] Dispatched training job #${job.id} to GCP (${X.length} samples)`);
+
+  // Co-dispatch a GNN training job with the same formula+Tc pairs so both models
+  // train on the same data and stay in sync.
+  if (formulas && formulas.length > 0 && process.env.OFFLOAD_GNN_TO_GCP === "true") {
+    const gnnTrainingData = formulas.map((formula, i) => ({
+      formula,
+      tc: y[i] ?? 0,
+      formationEnergy: undefined as number | undefined,
+      structure: undefined as any,
+      prototype: undefined as string | undefined,
+    }));
+    storage.insertGnnTrainingJob({
+      status: "queued",
+      trainingData: gnnTrainingData as any,
+      datasetSize: gnnTrainingData.length,
+      dftSamples: 0,
+    }).then(gnnJob => {
+      console.log(`[XGBoost] Co-dispatched GNN training job #${gnnJob.id} (${gnnTrainingData.length} samples)`);
+    }).catch(err => {
+      console.warn(`[XGBoost] GNN co-dispatch failed: ${err.message}`);
+    });
+  }
 }
 
 /**

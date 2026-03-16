@@ -42,22 +42,25 @@ async function trainEnsemble(X: number[][], y: number[]) {
   return { models, trainedAt: Date.now(), isLogVariance: false };
 }
 
+function rawTreePredict(m: any, row: number[]): number {
+  let pred = m.basePrediction;
+  for (const tree of m.flatTrees) {
+    let node = 0;
+    while (true) {
+      const t = tree[node];
+      if (t.isLeaf) { pred += m.learningRate * t.value; break; }
+      const fv = row[t.featureIndex] ?? 0;
+      node = fv <= t.threshold ? t.left : t.right;
+    }
+  }
+  // Un-transform log1p(Tc) → Tc if the model was trained with log-transform
+  return m.logTransformed ? Math.max(0, Math.expm1(pred)) : Math.max(0, pred);
+}
+
 async function trainVarianceEnsemble(X: number[][], y: number[], meanEnsemble: any) {
   // Predict mean for each sample, compute residuals, fit variance ensemble on log(residuals²)
   const meanPreds = X.map(row => {
-    const preds = meanEnsemble.models.map((m: any) => {
-      let pred = m.basePrediction;
-      for (const tree of m.flatTrees) {
-        let node = 0;
-        while (true) {
-          const t = tree[node];
-          if (t.isLeaf) { pred += m.learningRate * t.value; break; }
-          const fv = row[t.featureIndex] ?? 0;
-          node = fv <= t.threshold ? t.left : t.right;
-        }
-      }
-      return pred;
-    });
+    const preds = meanEnsemble.models.map((m: any) => rawTreePredict(m, row));
     return preds.reduce((a: number, b: number) => a + b, 0) / preds.length;
   });
 
@@ -77,19 +80,7 @@ function computeMetrics(ensemble: any, X: number[][], y: number[]): { r2: number
   const meanActual = y.reduce((a, b) => a + b, 0) / y.length;
   let ssTot = 0, ssRes = 0, sumAbs = 0;
   for (let i = 0; i < X.length; i++) {
-    const preds = ensemble.models.map((m: any) => {
-      let pred = m.basePrediction;
-      for (const tree of m.flatTrees) {
-        let node = 0;
-        while (true) {
-          const t = tree[node];
-          if (t.isLeaf) { pred += m.learningRate * t.value; break; }
-          const fv = X[i][t.featureIndex] ?? 0;
-          node = fv <= t.threshold ? t.left : t.right;
-        }
-      }
-      return pred;
-    });
+    const preds = ensemble.models.map((m: any) => rawTreePredict(m, X[i]));
     const pred = preds.reduce((a: number, b: number) => a + b, 0) / preds.length;
     ssTot += (y[i] - meanActual) ** 2;
     ssRes += (y[i] - pred) ** 2;
