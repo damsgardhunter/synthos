@@ -143,9 +143,11 @@ async function mpFetch(endpoint: string, params: Record<string, string> = {}): P
 
     if (!response.ok) {
       if (response.status === 429) {
-        console.log("[MP API] Rate limited, will use fallback");
+        console.warn("[MP API] Rate limited (429)");
       } else if (response.status === 403) {
-        console.log("[MP API] Invalid API key");
+        console.warn("[MP API] Forbidden (403) — check MATERIALS_PROJECT_API_KEY");
+      } else {
+        console.warn(`[MP API] HTTP ${response.status} for ${url.pathname}`);
       }
       return null;
     }
@@ -438,7 +440,14 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
       _skip: String(skip),
       _sort_fields: "energy_above_hull",
     });
-    if (!data?.data) return results;
+    if (!data) {
+      console.warn(`[MP-Batch] mpFetch returned null for skip=${skip} — API key invalid, network error, or rate limit`);
+      return results;
+    }
+    if (!data.data) {
+      console.warn(`[MP-Batch] Unexpected response shape (no .data field): ${JSON.stringify(data).slice(0, 200)}`);
+      return results;
+    }
     for (const item of data.data) {
       const formula = normalizeFormula(item.formula_pretty ?? "");
       if (!formula) continue;
