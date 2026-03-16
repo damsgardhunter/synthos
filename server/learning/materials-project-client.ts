@@ -424,21 +424,13 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
     return results;
   }
   try {
-    const data = await mpFetch("/materials/summary/", {
-      is_metal: "true",
-      _limit: String(limit),
-      _skip: String(skip),
-    });
-    if (!data) {
-      console.warn(`[MP-Batch] mpFetch returned null for skip=${skip} — API key invalid, network error, or rate limit`);
+    const items = await fetchMetallicSummaryBatch(limit, skip);
+    if (!items.length) {
+      console.warn(`[MP-Batch] No records returned for skip=${skip}`);
       return results;
     }
-    if (!data.data) {
-      console.warn(`[MP-Batch] Unexpected response shape (no .data field): ${JSON.stringify(data).slice(0, 200)}`);
-      return results;
-    }
-    console.log(`[MP-Batch] API returned ${data.data.length} raw records (skip=${skip}); sample keys: ${data.data[0] ? Object.keys(data.data[0]).join(",") : "none"}`);
-    for (const item of data.data) {
+    console.log(`[MP-Batch] API returned ${items.length} full records (skip=${skip})`);
+    for (const item of items) {
       const formula = normalizeFormula(item.formula_pretty ?? "");
       if (!formula) continue;
       const rec: MPGNNSeedRecord = {
@@ -474,6 +466,34 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
     console.warn(`[MP-Batch] API fetch failed (skip=${skip}): ${err?.message?.slice(0, 100)}`);
   }
   return results;
+}
+
+/**
+ * The is_metal filter only returns material_id by default.
+ * Step 1: get IDs via is_metal filter, Step 2: batch-fetch full summary by material_ids.
+ */
+async function fetchMetallicSummaryBatch(limit: number, skip: number): Promise<any[]> {
+  const idData = await mpFetch("/materials/summary/", {
+    is_metal: "true",
+    _limit: String(limit),
+    _skip: String(skip),
+  });
+  if (!idData?.data?.length) return [];
+
+  const ids: string[] = idData.data.map((r: any) => r.material_id).filter(Boolean);
+  if (!ids.length) return [];
+
+  // Batch-fetch full records in chunks of 100
+  const all: any[] = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const fullData = await mpFetch("/materials/summary/", {
+      material_ids: chunk.join(","),
+      _limit: String(chunk.length),
+    });
+    if (fullData?.data) all.push(...fullData.data);
+  }
+  return all;
 }
 
 export interface MPGNNSeedRecord {
@@ -523,15 +543,12 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
   // --- Step 2: bulk-fetch from MP API if we need more ---
   if (seen.size < 400 && getApiKey()) {
     try {
-      const data = await mpFetch("/materials/summary/", {
-        is_metal: "true",
-        _limit: "500",
-      });
+      const items = await fetchMetallicSummaryBatch(500, 0);
+      console.log(`[MP-GNNSeed] API returned ${items.length} full records`);
 
-      if (data?.data) {
-        console.log(`[MP-GNNSeed] API returned ${data.data.length} raw records; sample keys: ${data.data[0] ? Object.keys(data.data[0]).join(",") : "none"}`);
+      if (items.length > 0) {
         let fetched = 0;
-        for (const item of data.data) {
+        for (const item of items) {
           const formula = normalizeFormula(item.formula_pretty ?? "");
           if (!formula || seen.has(formula)) continue;
 
