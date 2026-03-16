@@ -1,4 +1,5 @@
 import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
+import { getExtendedTrainingData } from "./extended-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { computeCompositionFeatures, compositionFeatureVector, COMPOSITION_FEATURE_NAMES } from "./composition-features";
@@ -1187,11 +1188,12 @@ export async function initPoolAsync(): Promise<void> {
 }
 
 async function backfillPool(remaining: { formula: string; tc: number; pressureGPa: number }[], t0: number): Promise<void> {
-  // When training is offloaded to GCP, skip local backfill entirely.
-  // GCP handles XGB training; local server only needs Phase 1 (15 samples) for immediate predictions.
-  if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
-    console.log("[TrainingPool] OFFLOAD_XGB_TO_GCP=true — skipping phase 2 backfill, GCP handles training");
-    return;
+  const offloadToGCP = process.env.OFFLOAD_XGB_TO_GCP === "true";
+  // Always backfill the full dataset — even when offloading to GCP, we need the complete
+  // feature matrix to dispatch to GCP so it trains on 500+ samples, not just the 15 from Phase 1.
+  // Only the local ensemble training is skipped; dispatch happens after backfill completes.
+  if (offloadToGCP) {
+    console.log("[TrainingPool] OFFLOAD_XGB_TO_GCP=true — backfilling pool so full dataset is dispatched to GCP");
   }
   // Short delay to let startup I/O settle, then backfill remaining entries with event-loop yields
   await new Promise<void>(r => setTimeout(r, 30000));
@@ -1205,6 +1207,23 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
     await new Promise<void>(r => setTimeout(r, 0));
   }
   console.log(`[TrainingPool] Phase 2 backfill: ${trainingPool.size} total vectors (+${added}) in ${Date.now() - t0}ms`);
+
+  // Load extended MP dataset (negative examples + structural diversity)
+  try {
+    const extended = await getExtendedTrainingData();
+    if (extended.length > 0) {
+      const extStart = Date.now();
+      let extAdded = 0;
+      for (const e of extended) {
+        if (trainingPool.hasFormula(e.formula)) continue;
+        if (await trainingPool.add(e.formula, e.tc, e.pressureGPa ?? 0)) extAdded++;
+        await new Promise<void>(r => setTimeout(r, 0)); // yield per entry
+      }
+      console.log(`[TrainingPool] Extended dataset: +${extAdded} entries in ${Date.now() - extStart}ms (pool: ${trainingPool.size})`);
+    }
+  } catch (err: any) {
+    console.warn(`[TrainingPool] Extended dataset load failed: ${err?.message?.slice(0, 120)}`);
+  }
 
   try {
     const { X } = trainingPool.getTrainingData();
