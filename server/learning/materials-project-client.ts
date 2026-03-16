@@ -169,9 +169,8 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
 
   const data = await mpFetch("/materials/summary/", {
     formula: normalizedFormula,
-    fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,is_stable,symmetry,volume,density,nsites,ordering,total_magnetization,is_metal,efermi",
+    fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,is_stable,symmetry,volume,density,nsites,total_magnetization,is_metal",
     _limit: "1",
-    _sort_fields: "energy_above_hull",
   });
 
   if (!data?.data?.length) return null;
@@ -296,7 +295,7 @@ export async function fetchElectronicStructure(formula: string): Promise<MPElect
 
   const data = await mpFetch("/materials/electronic_structure/", {
     formula: normalizedFormula,
-    fields: "material_id,dos,band_gap,efermi,is_metal,bandstructure",
+    fields: "material_id,band_gap,efermi,is_metal",
     _limit: "1",
   });
 
@@ -304,41 +303,12 @@ export async function fetchElectronicStructure(formula: string): Promise<MPElect
 
   const entry = data.data[0];
 
-  let dosAtFermi: number | null = null;
-  if (entry.dos && entry.dos.total && entry.efermi != null) {
-    try {
-      const totalDos = entry.dos.total;
-      if (totalDos.densities && totalDos.energies) {
-        const energies = totalDos.energies;
-        const densities = totalDos.densities;
-        let closestIdx = 0;
-        let closestDist = Math.abs(energies[0] - entry.efermi);
-        for (let i = 1; i < energies.length; i++) {
-          const dist = Math.abs(energies[i] - entry.efermi);
-          if (dist < closestDist) {
-            closestDist = dist;
-            closestIdx = i;
-          }
-        }
-        dosAtFermi = densities[closestIdx] ?? null;
-      }
-    } catch {
-      dosAtFermi = null;
-    }
-  }
-
-  let bandStructureType: string | null = null;
-  if (entry.bandstructure) {
-    bandStructureType = entry.band_gap > 0 ? "indirect" : "metallic";
-    if (entry.bandstructure.is_direct) {
-      bandStructureType = "direct";
-    }
-  } else if (entry.band_gap != null) {
-    bandStructureType = entry.band_gap > 0 ? (entry.is_metal ? "metallic" : "indirect") : "metallic";
-  }
+  const bandStructureType: string | null = entry.band_gap != null
+    ? (entry.band_gap > 0 ? (entry.is_metal ? "metallic" : "indirect") : "metallic")
+    : null;
 
   const result: MPElectronicStructureData = {
-    dosAtFermi,
+    dosAtFermi: null,
     bandStructureType,
     fermiEnergy: entry.efermi ?? null,
     bandGap: entry.band_gap ?? null,
@@ -357,9 +327,8 @@ export async function fetchThermo(formula: string): Promise<MPThermoData | null>
 
   const data = await mpFetch("/materials/thermo/", {
     formula: normalizedFormula,
-    fields: "material_id,energy_above_hull,debye_temperature,formation_energy_per_atom,is_stable,uncorrected_energy_per_atom",
+    fields: "material_id,energy_above_hull,formation_energy_per_atom,is_stable,uncorrected_energy_per_atom",
     _limit: "1",
-    _sort_fields: "energy_above_hull",
   });
 
   if (!data?.data?.length) return null;
@@ -434,11 +403,10 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
   }
   try {
     const data = await mpFetch("/materials/summary/", {
-      is_metal: "True",
-      fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,crystal_system,nsites,is_metal",
+      is_metal: "true",
+      fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,nsites,is_metal",
       _limit: String(limit),
       _skip: String(skip),
-      _sort_fields: "energy_above_hull",
     });
     if (!data) {
       console.warn(`[MP-Batch] mpFetch returned null for skip=${skip} — API key invalid, network error, or rate limit`);
@@ -456,7 +424,7 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
         bandGap: item.band_gap ?? null,
         formationEnergy: item.formation_energy_per_atom ?? null,
         spaceGroup: item.symmetry?.symbol ?? null,
-        crystalSystem: item.crystal_system ?? null,
+        crystalSystem: item.symmetry?.crystal_system ?? null,
         isMetallic: item.is_metal ?? true,
       };
       results.push(rec);
@@ -534,10 +502,9 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
   if (seen.size < 400 && getApiKey()) {
     try {
       const data = await mpFetch("/materials/summary/", {
-        is_metal: "True",
-        fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,crystal_system,nsites,is_metal",
+        is_metal: "true",
+        fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,nsites,is_metal",
         _limit: "500",
-        _sort_fields: "energy_above_hull",
       });
 
       if (data?.data) {
@@ -551,7 +518,7 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
             bandGap: item.band_gap ?? null,
             formationEnergy: item.formation_energy_per_atom ?? null,
             spaceGroup: item.symmetry?.symbol ?? null,
-            crystalSystem: item.crystal_system ?? null,
+            crystalSystem: item.symmetry?.crystal_system ?? null,
             isMetallic: item.is_metal ?? true,
           };
           seen.set(formula, rec);
