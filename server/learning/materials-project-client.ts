@@ -123,6 +123,11 @@ function normalizeFormula(formula: string): string {
   return formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
 }
 
+/** Returns true if the formula string is a chemical-system notation (e.g. "Fe-C") rather than a proper compound formula. MP API cannot use these as formula filters. */
+function isChemSys(formula: string): boolean {
+  return /^[A-Z][a-z]?(-[A-Z][a-z]?)+$/.test(formula);
+}
+
 async function mpFetch(endpoint: string, params: Record<string, string> = {}, attempt = 1): Promise<any | null> {
   const apiKey = getApiKey();
   if (!apiKey) return null;
@@ -175,6 +180,7 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
   if (cached) return cached as MPSummaryData;
 
   const normalizedFormula = normalizeFormula(formula);
+  if (isChemSys(normalizedFormula)) return null; // chem-sys notation not valid as formula filter
 
   const data = await mpFetch("/materials/summary/", {
     formula: normalizedFormula,
@@ -244,10 +250,12 @@ export async function fetchMagnetism(formula: string): Promise<MPMagnetismData |
   const cached = await getCachedData(formula, "magnetism");
   if (cached) return cached as MPMagnetismData;
 
-  const normalizedFormula = normalizeFormula(formula);
+  // Magnetism endpoint rejects formula; look up material_id first
+  const summary = await fetchSummary(formula);
+  if (!summary?.mpId) return null;
 
   const data = await mpFetch("/materials/magnetism/", {
-    formula: normalizedFormula,
+    material_ids: summary.mpId,
     _limit: "1",
   });
 
@@ -261,7 +269,7 @@ export async function fetchMagnetism(formula: string): Promise<MPMagnetismData |
     types: entry.types ?? [],
   };
 
-  await setCachedData(formula, "magnetism", result, entry.material_id);
+  await setCachedData(formula, "magnetism", result, summary.mpId);
   return result;
 }
 
