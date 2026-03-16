@@ -15,10 +15,12 @@
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { classifyFamily } from "./utils";
 import { fetchMPBatchFromAPI } from "./materials-project-client";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR  = path.join(__dirname, "cache");
 const CACHE_FILE = path.join(CACHE_DIR, "extended-dataset.json");
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
