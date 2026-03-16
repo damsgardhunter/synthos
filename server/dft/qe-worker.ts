@@ -911,6 +911,8 @@ const PP_GBRV_URLS: Record<string, string> = {
   Ag: `${GBRV_BASE}/ag_pbe_v1.4.uspp.F.UPF`,
   Cd: `${GBRV_BASE}/cd_pbe_v1.uspp.F.UPF`,
   Te: `${GBRV_BASE}/te_pbe_v1.uspp.F.UPF`,
+  Rh: `${GBRV_BASE}/rh_pbe_v1.4.uspp.F.UPF`,
+  Pd: `${GBRV_BASE}/pd_pbe_v1.4.uspp.F.UPF`,
   Ir: `${GBRV_BASE}/ir_pbe_v1.2.uspp.F.UPF`,
   Pt: `${GBRV_BASE}/pt_pbe_v1.4.uspp.F.UPF`,
   Au: `${GBRV_BASE}/au_pbe_v1.uspp.F.UPF`,
@@ -947,17 +949,26 @@ const PP_FALLBACK_URLS: Record<string, string> = {
   Th: `${QE_BASE}/Th.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
 };
 
-function downloadPPToTemp(url: string, tmpFile: string): boolean {
+async function downloadPPToTemp(url: string, tmpFile: string): Promise<boolean> {
+  // Try Node.js fetch first — works on GCP where curl may be blocked or misconfigured
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    if (res.ok) {
+      const buf = Buffer.from(await res.arrayBuffer());
+      fs.writeFileSync(tmpFile, buf);
+      if (fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 10000) return true;
+    }
+  } catch {}
+  // Fallback to curl
   try {
     execSync(`curl -sL --max-time 25 -o "${tmpFile}" "${url}"`, { timeout: 30000 });
-    return fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 10000;
-  } catch {
-    try { fs.unlinkSync(tmpFile); } catch {}
-    return false;
-  }
+    if (fs.existsSync(tmpFile) && fs.statSync(tmpFile).size > 10000) return true;
+  } catch {}
+  try { fs.unlinkSync(tmpFile); } catch {}
+  return false;
 }
 
-function ensurePseudopotential(element: string): string {
+async function ensurePseudopotential(element: string): Promise<string> {
   if (!fs.existsSync(QE_PSEUDO_DIR)) {
     fs.mkdirSync(QE_PSEUDO_DIR, { recursive: true });
   }
@@ -1037,7 +1048,7 @@ function ensurePseudopotential(element: string): string {
       try {
         const mirror = url!.includes("github") ? "pslibrary" : url!.includes("rutgers") ? "GBRV" : "QE";
         console.log(`[QE-Worker] Downloading PP for ${element} from ${mirror}...`);
-        if (!downloadPPToTemp(url!, tmpFile)) {
+        if (!await downloadPPToTemp(url!, tmpFile)) {
           console.log(`[QE-Worker] Download from ${mirror} failed for ${element} (${url})`);
           continue;
         }
@@ -2839,7 +2850,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
   try {
     for (const el of elements) {
       try {
-        ensurePseudopotential(el);
+        await ensurePseudopotential(el);
       } catch (ppErr: any) {
         result.error = ppErr.message;
         result.ppValidated = false;

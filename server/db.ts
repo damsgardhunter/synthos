@@ -7,8 +7,8 @@ const pool = new pg.Pool({
   max: 10,
   // Recycle idle connections after 10s — well before Neon terminates them (~60s TCP idle).
   idleTimeoutMillis: 10000,
-  // Fail fast on connection — don't hold the event loop for 30s on a cold Neon.
-  connectionTimeoutMillis: 10000,
+  // Give Neon up to 20s to cold-start before failing.
+  connectionTimeoutMillis: 20000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 5000,
 });
@@ -36,10 +36,10 @@ pool.connect().then(client => {
   console.warn("[DB] Startup warm-up failed (Neon may be cold-starting):", err.message);
 });
 
-// Keepalive ping every 4 minutes to prevent Neon compute from suspending mid-session.
-// Neon suspends after 5 minutes of inactivity — this keeps it warm.
+// Keepalive ping every 2 minutes — Neon suspends after 5 min inactivity;
+// 2 min gives a comfortable margin even if one ping is missed.
 setInterval(() => {
   pool.query("SELECT 1").catch(err => {
     console.warn("[DB] Keepalive ping failed:", err.message);
   });
-}, 4 * 60 * 1000);
+}, 2 * 60 * 1000);
