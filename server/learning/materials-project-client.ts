@@ -6,34 +6,163 @@ import { eq, and } from "drizzle-orm";
 // MP API filter queries (is_metal, material_ids) only return material_id with no other fields,
 // so we fall back to per-formula fetchSummary using this list.
 const METALLIC_SEED_FORMULAS: string[] = [
-  // Elemental metals
-  "Nb","Mo","V","Ta","W","Ti","Re","Ru","Os","Tc","Zr","Hf","Cr","Mn","Fe","Co","Ni","Cu","Zn","Al","Ga","In","Sn","Pb","Bi",
-  // Binary superconductors
-  "NbN","NbC","TaN","TaC","MoN","MoC","VN","VC","WC","TiN","TiC","ZrN","ZrC","HfN","HfC",
-  "MgB2","MgB4","CaB6","AlB2","LiB",
-  "Nb3Sn","Nb3Al","Nb3Ge","V3Si","V3Ga","Mo3Re","Ti3Sn",
-  "PdH","PdH2","TiH2","ZrH2","NbH","LaH3","YH3","CeH3",
-  "La3In","La3Tl","YPd2","LaPd2","NbPd3","MoPd3",
-  "FeSe","FeS","FeTe","FeAs","LiFeAs",
-  "BaPbO3","BaBiO3","SrTiO3","Nb2O5","V2O5",
-  // Cuprates (simplified)
-  "CuO","La2CuO4","NdCeO4","YBa2Cu3O7",
-  // Heavy fermion
-  "UPt3","URu2Si2","CeCoIn5","CeRhIn5","UBe13","PuCoGa5",
-  // Other
-  "InSn","InPb","GaIn","BiPb","BiTl","SbSn","SbPb",
-  "MoS2","WS2","TaS2","NbS2","TiS2","ZrS2","HfS2",
-  "LaRh3","LaRu2","YRh3","CeRu2","LuRu2","GdRu2",
-  "CaC6","KC8","RbC8","CsC8","LiC6","NaC6",
-  "Ba2PbO4","Sr2RuO4","Ca2RuO4","Ba2SnO4",
-  "K3Bi","Rb3Bi","Cs3Bi","K3Sb","Rb3Sb",
-  "RbCsSb","Cs3Sb","K2CsSb",
-  "LaB6","CeB6","YbB6","SmB6","EuB6","GdB6",
-  "Tl2Ba2CaCu2O8","Bi2Sr2CaCu2O8","Bi2Sr2Ca2Cu3O10",
-  "MoRe","NbRe","WRe","TcRe","OsRe",
-  "PbTe","PbS","PbSe","SnTe","SnSe","GeTe","GeSe",
+  // --- Elemental metals ---
+  "Li","Na","K","Rb","Cs","Be","Mg","Ca","Sr","Ba",
+  "Sc","Y","La","Ce","Pr","Nd","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+  "Ti","Zr","Hf","V","Nb","Ta","Cr","Mo","W","Mn","Tc","Re",
+  "Fe","Co","Ni","Cu","Zn","Ru","Rh","Pd","Ag","Cd",
+  "Os","Ir","Pt","Au","Hg","Tl","Al","Ga","In","Sn","Pb","Bi","Ge","Sb","As","Se","Te",
+
+  // --- Binary nitrides/carbides (hard superconductors) ---
+  "NbN","NbC","TaN","TaC","MoN","MoC","VN","VC","WC","WN",
+  "TiN","TiC","ZrN","ZrC","HfN","HfC","ScN","YN","LaN",
+  "CrN","CrC","MnN","FeN","CoN","NiN","CuN",
+  "CeN","PrN","NdN","GdN","TbN","DyN","HoN","ErN","TmN","YbN","LuN",
+  "Mo2C","W2C","V2C","Nb2C","Ta2C","Cr3C2","Fe3C","Mn3C",
+  "Si3N4","BN","AlN","GaN","InN",
+
+  // --- Borides ---
+  "MgB2","MgB4","AlB2","CaB6","LaB6","CeB6","PrB6","NdB6","SmB6","EuB6",
+  "GdB6","TbB6","DyB6","HoB6","ErB6","TmB6","YbB6","LuB6",
+  "TiB2","ZrB2","HfB2","VB2","NbB2","TaB2","CrB2","MoB2","WB2",
+  "FeB","Fe2B","CoB","Co2B","NiB","Ni3B","NiB3","LiB",
+
+  // --- A15 intermetallics (high-Tc conventional SCs) ---
+  "Nb3Sn","Nb3Al","Nb3Ge","Nb3Ga","Nb3Si","Nb3Pt","Nb3Au","Nb3Sb","Nb3Os",
+  "V3Si","V3Ga","V3Ge","V3As","V3Sb","V3Sn","V3In",
+  "Mo3Re","Mo3Os","Mo3Ir","Mo3Pt","Mo3Al","Mo3Ga",
+  "Cr3Si","Cr3Ge","Cr3As","Cr3Os",
+  "W3Os","W3Re","W3Ir","Ti3Sn","Ti3Al",
+
+  // --- Laves phases (AB2) ---
+  "TiFe2","TiCo2","TiNi2","TiMn2","TiCr2",
+  "ZrFe2","ZrCo2","ZrNi2","ZrMn2","ZrCr2",
+  "HfFe2","HfCo2","HfNi2",
+  "YFe2","YCo2","YNi2","YMn2","YAl2",
+  "GdFe2","GdCo2","GdNi2","SmFe2","NdFe2","CeFe2",
+  "LaFe2","LaAl2","GdAl2","CeAl2","ThFe2","ThNi2","ThCo2",
+  "MgCu2","MgNi2","MgZn2","CaAl2","SrAl2","BaAl2",
+
+  // --- Heusler alloys ---
+  "Cu2MnAl","Cu2MnIn","Cu2MnSn","Cu2FeAl","Cu2FeSn",
+  "Ni2MnGa","Ni2MnAl","Ni2MnIn","Ni2MnSn","Ni2MnSb",
+  "Co2MnSi","Co2MnGe","Co2MnSn","Co2MnGa","Co2MnAl",
+  "Co2FeSi","Co2FeGe","Co2FeAl","Co2CrAl","Co2CrGa",
+  "PdMnSb","PtMnSb","NiMnSb","CoMnSb","FeMnSb",
+
+  // --- Hydrides ---
+  "PdH","PdH2","TiH2","ZrH2","NbH","HfH2","VH","VH2",
+  "LaH3","YH3","CeH3","PrH3","NdH3","GdH3","TbH3",
+  "DyH3","HoH3","ErH3","TmH3","LuH3","SmH3","EuH2",
+  "LaH10","YH10","CeH9","PrH9","ThH10","LaH6","YH6","CaH6","BaH6","SrH6","MgH6",
+  "ScH3","ScH6","ThH4","UH3",
+
+  // --- Silicides ---
+  "Mg2Si","Mg2Ge","Mg2Sn","FeSi","FeSi2","Fe3Si",
+  "CoSi","CoSi2","NiSi","NiSi2","Ni3Si","PtSi","PdSi",
+  "CrSi2","MoSi2","WSi2","TiSi2","ZrSi2","HfSi2","NbSi2","TaSi2","VSi2",
+  "CaSi2","BaSi2","SrSi2","LaSi","CeSi","NdSi","SmSi",
+
+  // --- Phosphides (topological semimetals + SCs) ---
+  "NbP","TaP","WP","MoP","CrP","TiP","ZrP","HfP",
+  "FeP","CoP","NiP","RhP","IrP","PdP","PtP",
+  "InP","GaP","AlP","BP",
+
+  // --- Dichalcogenides (CDW + SC) ---
+  "MoS2","WS2","MoSe2","WSe2","MoTe2","WTe2",
+  "NbSe2","TaSe2","NbS2","TaS2","TiSe2","TiS2",
+  "ZrSe2","ZrS2","HfSe2","HfS2","VSe2","VTe2",
+  "CrSe2","CrTe2","PtSe2","PdSe2","PtS2","PdS2",
+  "IrSe2","RhSe2","CoSe2","NiSe2","FeSe2","FeS2","ReS2","ReSe2",
+
+  // --- Tellurides / selenides ---
   "Bi2Te3","Bi2Se3","Sb2Te3","As2Te3",
-  "InAs","InSb","GaAs","GaSb","AlAs","AlSb",
+  "PbTe","PbS","PbSe","SnTe","SnSe","GeTe","GeSe",
+  "HgTe","HgSe","HgS","CdTe","CdSe","CdS","ZnTe","ZnSe","ZnS",
+  "In2Te3","Tl2Te3","Ag2Te","Ag2Se","Ag2S","Cu2Se","Cu2S",
+
+  // --- Skutterudites ---
+  "CoSb3","RhSb3","IrSb3","CoAs3","CoP3","RhAs3","IrAs3","NiP3","PdAs3","PtSb3",
+
+  // --- Iron-based superconductors ---
+  "FeSe","FeS","FeTe","FeAs","LiFeAs",
+  "LaFeAsO","NdFeAsO","SmFeAsO","PrFeAsO","CeFeAsO","GdFeAsO",
+  "BaFe2As2","SrFe2As2","CaFe2As2","EuFe2As2",
+  "Fe3GaTe2","Fe3GeTe2","Fe3SnTe2",
+
+  // --- Cuprate superconductors ---
+  "CuO","La2CuO4","Nd2CuO4","Sm2CuO4","Eu2CuO4","Gd2CuO4","Pr2CuO4",
+  "YBa2Cu3O7","NdBa2Cu3O7","EuBa2Cu3O7","GdBa2Cu3O7",
+  "Bi2Sr2CuO6","Bi2Sr2CaCu2O8","Bi2Sr2Ca2Cu3O10",
+  "Tl2Ba2CuO6","Tl2Ba2CaCu2O8","Tl2Ba2Ca2Cu3O10",
+  "HgBa2CuO4","HgBa2CaCu2O6","HgBa2Ca2Cu3O8",
+
+  // --- Heavy fermion compounds ---
+  "UPt3","UPd2Al3","UNi2Al3","URu2Si2","UBe13","UPd3",
+  "CeCu2Si2","CeCu2Ge2","CeNi2Ge2","CeRu2Si2","CeRu2Ge2",
+  "CeCoIn5","CeRhIn5","CeIrIn5","PuCoGa5","PuRhGa5",
+  "YbRh2Si2","YbCu2Si2","YbNi2Ge2",
+
+  // --- Graphite intercalation compounds ---
+  "CaC6","KC8","RbC8","CsC8","LiC6","NaC6","SrC6","BaC6",
+
+  // --- Alkali fullerides ---
+  "K3C60","Rb3C60","Cs3C60","RbCs2C60","K2RbC60",
+
+  // --- Perovskite oxides (metallic) ---
+  "SrTiO3","BaTiO3","KTaO3","SrVO3","CaVO3","BaVO3",
+  "BaMoO3","SrMoO3","CaMoO3","SrRuO3","CaRuO3","BaRuO3",
+  "LaTiO3","YTiO3","LaCrO3","LaFeO3","LaCoO3","LaNiO3","LaMnO3",
+  "BaPbO3","BaBiO3","SrPbO3","Ba2PbO4","Ba2SnO4",
+  "Sr2RuO4","Ca2RuO4","Sr3Ru2O7","Ca3Ru2O7",
+
+  // --- Simple metallic oxides ---
+  "IrO2","RuO2","OsO2","RhO2","ReO3","WO3","MoO3","VO2","V2O3",
+  "TiO","TiO2","NbO","NbO2","Nb2O5","V2O5","Ta2O5","Cr2O3","MnO2","FeO","Fe3O4","CoO","NiO","CuO",
+
+  // --- Antimonides ---
+  "NiSb","CoSb","FeSb","MnSb","CrSb","VSb","NbSb","TaSb",
+  "PdSb","PtSb","RhSb","IrSb","OsSb","ReSb",
+  "InSb","GaSb","AlSb","ZnSb","CdSb",
+
+  // --- Other binary intermetallics ---
+  "La3In","La3Tl","YPd2","LaPd2","NbPd3","MoPd3",
+  "LaRh3","LaRu2","YRh3","CeRu2","LuRu2","GdRu2",
+  "MoRe","NbRe","WRe","OsRe","TcRe",
+  "InSn","InPb","GaIn","BiPb","BiTl","SbSn","SbPb",
+  "NiAl","Ni3Al","NiAl3","FeAl","Fe3Al","CoAl","Co3Al",
+  "PdAl","PtAl","IrAl","RhAl","TiAl","Ti3Al","TiAl3",
+  "ZrAl2","HfAl2","NbAl3","TaAl3","MoAl","WAl",
+  "Cu3Au","CuAu","CuAu3","Pd3Fe","Pd3Co","Pd3Mn","Pd3Cr",
+  "Pt3Fe","Pt3Co","Pt3Mn","Pt3Cr","Pt3Ti","Pt3Zr",
+  "FePt","FePd","CoPt","MnPt","MnPd",
+
+  // --- Alkali-metal pnictides (electrides/SCs) ---
+  "K3Bi","Rb3Bi","Cs3Bi","K3Sb","Rb3Sb","Cs3Sb",
+  "RbCsSb","K2CsSb","Na3Bi","Li3Bi","Li3As","Na3As",
+
+  // --- Topological semimetals ---
+  "TaAs","NbAs","TaP","NbP","WTe2","MoTe2",
+  "Cd3As2","ZrSiS","ZrSiSe","ZrSiTe","ZrSnSe",
+  "TlBiSe2","TlBiTe2","TlBiS2",
+
+  // --- Bismuthates ---
+  "BaBiO3","BaBi3","Ba2BiO4","BaBi2O6",
+
+  // --- Rare-earth intermetallics ---
+  "SmCo5","SmCo3","Sm2Co17","Sm2Co7",
+  "NdFe14B","NdFe11Ti","SmFe11Ti",
+  "GdFe2","GdCo5","GdNi5","TbFe2","DyFe2","HoFe2","ErFe2",
+  "CeRu4Sn6","CeOs4Sn12","LuRu4Sn6",
+  "YbFe4Sb12","LaFe4Sb12","CeOs4Sb12","PrOs4Sb12",
+
+  // --- Organic-adjacent / cage compounds ---
+  "CoAs3","NiAs","NiAs2","CoAs2","FeAs2","MnAs",
+
+  // --- Additional chalcogenides + ternaries ---
+  "Cu2ZnSnS4","Cu2ZnSnSe4","Cu2ZnGeS4","Cu2CdSnS4",
+  "AgGaS2","AgGaSe2","AgInS2","AgInSe2","CuGaS2","CuInS2","CuInSe2",
+  "ZnGeAs2","CdGeAs2","ZnSiAs2","CdSiAs2",
 ];
 
 const MP_API_BASE = "https://api.materialsproject.org";
