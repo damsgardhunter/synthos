@@ -1999,7 +1999,7 @@ function buildStructureFromPrototype(
   return { atoms, latticeVecs: currentVecs };
 }
 
-function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPosition[]; proto: string } {
+function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPosition[]; proto: string; latticeVecs: LatticeVectors } {
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
   const a = estimateLatticeParam(elements, counts);
@@ -2041,7 +2041,7 @@ function buildGenericStructure(counts: Record<string, number>): { atoms: AtomPos
     }
   }
 
-  return { atoms, proto: "generic-cluster" };
+  return { atoms, proto: "generic-cluster", latticeVecs: genericVecs };
 }
 
 interface StructuralValidationConfig {
@@ -2062,7 +2062,7 @@ const STRUCTURAL_VALIDATION_CONFIG: StructuralValidationConfig = {
   scaleFactorMax: 2.0,
   volLowerFraction: 0.5,
   volUpperFraction: 2.0,
-  maxScaleAttempts: 5,
+  maxScaleAttempts: 8,
   minVolumePerAtom: 10.0,
   minVolumePerAtomHydride: 8.0,
   minDistFraction: 0.6,
@@ -2837,8 +2837,17 @@ function computeHardFloor(el1: string, el2: string, pressureGPa: number): number
     radiusFrac = 0.60;
     absoluteMin = 0.55;
   } else {
-    ambientFloor = 1.8;
-    radiusFrac = 0.55;
+    // For covalent light elements (B, C, N, O, Si, P, S, etc.), the 1.8Å ambient
+    // floor is too strict — it rejects valid B-B (~1.67Å) and C-C (~1.54Å) bonds.
+    // Use a radius-based floor instead (65% of covalent sum).
+    const COVALENT_LIGHT = new Set(["B","C","N","O","P","S","Si","Ge","As","Se","Te"]);
+    if (COVALENT_LIGHT.has(el1) && COVALENT_LIGHT.has(el2)) {
+      radiusFrac = 0.65;
+      ambientFloor = Math.max(sumR * radiusFrac, 0.80);
+    } else {
+      ambientFloor = 1.8;
+      radiusFrac = 0.55;
+    }
     absoluteMin = 0.80;
   }
 
@@ -2895,7 +2904,11 @@ function validateAndFixStructure(
 
   for (let attempt = 0; attempt < cfg.maxScaleAttempts; attempt++) {
     const { minDist, minRatio } = cached;
-    const volume = computeBoundingVolume(current);
+    // Use lattice determinant for cell volume — computeBoundingVolume (bounding box of
+    // atom positions + padding) does not scale correctly with the scale factor, causing
+    // the loop to overshoot and oscillate between too-large and too-small states.
+    // lattice3x3Det scales exactly as factor³ so the loop converges in ≤2 steps.
+    const volume = Math.abs(lattice3x3Det(currentVecs));
     const volumePerAtom = volume / nAtoms;
 
     const distOk = minRatio >= cfg.minRatioThreshold;
@@ -2936,7 +2949,7 @@ function validateAndFixStructure(
     return null;
   }
 
-  const volume = computeBoundingVolume(current);
+  const volume = Math.abs(lattice3x3Det(currentVecs));
   const volumePerAtom = volume / nAtoms;
 
   if (cached.minRatio < cfg.minRatioThreshold || volumePerAtom < minVol * pressureVolShrink - 0.1) {
@@ -2947,9 +2960,11 @@ function validateAndFixStructure(
   return { atoms: current, latticeVecs: currentVecs };
 }
 
-function checkVolumeRatioForAtoms(atoms: AtomPosition[], counts: Record<string, number>, label: string, formula: string): boolean {
+function checkVolumeRatioForAtoms(atoms: AtomPosition[], counts: Record<string, number>, label: string, formula: string, latticeVecs?: LatticeVectors): boolean {
   if (atoms.length < 2) return false;
-  const volume = computeBoundingVolume(atoms);
+  // Use lattice det when available — bounding box of atoms inflates due to covalent padding
+  // and atom drift from jitter expansion, causing false 5-12x ratio failures.
+  const volume = latticeVecs ? Math.abs(lattice3x3Det(latticeVecs)) : computeBoundingVolume(atoms);
   const expectedVol = computeExpectedVolume(counts);
   const { valid, ratio } = validateVolumeRatio(volume, expectedVol);
   if (!valid) {
@@ -3017,7 +3032,7 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
     const deduped = deduplicateSites(atomPositions);
     const vResult = validateAndFixStructure(deduped, formula, pressureGPa);
     if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
-    if (!checkVolumeRatioForAtoms(vResult.atoms, counts, chemProto.templateName, formula)) {
+    if (!checkVolumeRatioForAtoms(vResult.atoms, counts, chemProto.templateName, formula, vResult.latticeVecs)) {
       return { atoms: [], prototype: "rejected-volume-ratio" };
     }
     prototypeSuccesses++;
@@ -3057,7 +3072,7 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
     if (atoms.length >= 2) {
       const vResult = validateAndFixStructure(atoms, formula, pressureGPa, built.latticeVecs);
       if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
-      if (!checkVolumeRatioForAtoms(vResult.atoms, counts, protoMatch.proto.name, formula)) {
+      if (!checkVolumeRatioForAtoms(vResult.atoms, counts, protoMatch.proto.name, formula, vResult.latticeVecs)) {
         return { atoms: [], prototype: "rejected-volume-ratio" };
       }
       prototypeSuccesses++;
@@ -3088,7 +3103,7 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
     if (atoms.length >= 2) {
       const vResult = validateAndFixStructure(atoms, formula, pressureGPa, scaledBuilt.latticeVecs);
       if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
-      if (!checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, scaledMatch.proto.name + "-scaled", formula)) {
+      if (!checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, scaledMatch.proto.name + "-scaled", formula, vResult.latticeVecs)) {
         return { atoms: [], prototype: "rejected-volume-ratio" };
       }
       prototypeSuccesses++;
@@ -3104,7 +3119,7 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
     if (atoms.length >= 2) {
       const vResult = validateAndFixStructure(atoms, formula, pressureGPa, chemBuilt.latticeVecs);
       if (vResult) {
-        if (checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, chemMatch.proto.name + "-chem", formula)) {
+        if (checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, chemMatch.proto.name + "-chem", formula, vResult.latticeVecs)) {
           prototypeSuccesses++;
           chemistryMatchSuccesses++;
           dftLog(`[DFT] ${formula}: Chemistry-based prototype match → ${chemMatch.proto.name}`);
@@ -3114,10 +3129,10 @@ function generateCrystalStructure(formula: string, pressureGPa: number = 0): { a
     }
   }
 
-  const { atoms, proto } = buildGenericStructure(scaledCounts);
-  const vResult = validateAndFixStructure(atoms, formula, pressureGPa);
+  const { atoms, proto, latticeVecs: genericVecs } = buildGenericStructure(scaledCounts);
+  const vResult = validateAndFixStructure(atoms, formula, pressureGPa, genericVecs);
   if (!vResult) return { atoms: [], prototype: "rejected-overlap" };
-  if (!checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, proto, formula)) {
+  if (!checkVolumeRatioForAtoms(vResult.atoms, scaledCounts, proto, formula, vResult.latticeVecs)) {
     return { atoms: [], prototype: "rejected-volume-ratio" };
   }
   prototypeSuccesses++;
