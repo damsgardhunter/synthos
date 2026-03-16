@@ -912,6 +912,8 @@ const PP_GBRV_URLS: Record<string, string> = {
   Cd: `${GBRV_BASE}/cd_pbe_v1.uspp.F.UPF`,
   Te: `${GBRV_BASE}/te_pbe_v1.uspp.F.UPF`,
   Ir: `${GBRV_BASE}/ir_pbe_v1.2.uspp.F.UPF`,
+  Pt: `${GBRV_BASE}/pt_pbe_v1.4.uspp.F.UPF`,
+  Au: `${GBRV_BASE}/au_pbe_v1.uspp.F.UPF`,
   Yb: `${GBRV_BASE}/yb_pbe_v1.uspp.F.UPF`,
 };
 
@@ -940,6 +942,8 @@ const PP_FALLBACK_URLS: Record<string, string> = {
   La: `${QE_BASE}/La.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
   Ce: `${QE_BASE}/Ce.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
   Pb: `${QE_BASE}/Pb.pbe-dn-kjpaw_psl.1.0.0.UPF`,
+  Pt: `${QE_BASE}/Pt.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
+  Au: `${QE_BASE}/Au.pbe-nd-kjpaw_psl.1.0.0.UPF`,
   Th: `${QE_BASE}/Th.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
 };
 
