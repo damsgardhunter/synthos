@@ -1,5 +1,6 @@
 import { storage } from "../storage";
-import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts } from "./qe-worker";
+import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts, scheduleQEAvailabilityProbe } from "./qe-worker";
+export { scheduleQEAvailabilityProbe };
 import type { QEFullResult } from "./qe-worker";
 const SCF_RETRY_START_ATTEMPT = 3;
 import type { DftJob } from "@shared/schema";

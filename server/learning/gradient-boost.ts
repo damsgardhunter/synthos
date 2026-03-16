@@ -385,7 +385,9 @@ async function precomputeFeatureMeans(): Promise<void> {
       } catch {
         continue;
       }
-      if (i % 5 === 0) await new Promise<void>(r => setImmediate(r));
+      // Yield after every entry with setTimeout (not setImmediate) so timer callbacks
+      // (heartbeat, keepalive) can fire. setImmediate starves timers in long chains.
+      await new Promise<void>(r => setTimeout(r, 0));
     }
     if (processed < 10) {
       computedFeatureMeans = { ...STATIC_FEATURE_MEANS };
@@ -562,7 +564,8 @@ async function precomputeCrystalSymTargetEncoding(): Promise<void> {
       globalSum += entry.tc;
       globalCount++;
     } catch { continue; }
-    if (i % 5 === 0) await new Promise<void>(r => setImmediate(r));
+    // Yield after every entry with setTimeout so heartbeat timers can fire
+    await new Promise<void>(r => setTimeout(r, 0));
   }
   const globalMean = globalCount > 0 ? globalSum / globalCount : 20;
   const SMOOTHING = 10;
@@ -948,7 +951,7 @@ export async function trainGradientBoosting(
 
   for (let iter = 0; iter < nEstimators; iter++) {
     if (iter > 0 && iter % 10 === 0) {
-      await new Promise<void>(r => setImmediate(r)); // yield every 10 trees
+      await new Promise<void>(r => setTimeout(r, 0)); // yield every 10 trees — setTimeout not setImmediate (setImmediate starves timer callbacks)
       if (iter % 20 === 0) process.stdout.write(`\r[GradientBoost] Training... tree ${iter}/${nEstimators} (${X.length} samples)`);
     }
 
@@ -1123,17 +1126,10 @@ async function ensurePoolInitialized(): Promise<void> {
     return;
   }
   if (poolInitializing) return;
-
-  const startSize = trainingPool.size;
-  await trainingPool.addBatch(
-    SUPERCON_TRAINING_DATA.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 }))
-  );
-  const added = trainingPool.size - startSize;
-  if (added > 0 || !poolInitialized) {
-    console.log(`[TrainingPool] Synced: ${trainingPool.size} cached vectors (${added} new from ${SUPERCON_TRAINING_DATA.length} entries)`);
-  }
-  cachedTrainingSnapshot = { dataSize: SUPERCON_TRAINING_DATA.length };
-  poolInitialized = true;
+  // Pool not yet started (startPoolInit not called yet — it's deferred 75s after startup).
+  // Adding ALL training data here would block for 26+ minutes (700+ entries × extractFeatures).
+  // Return early and wait for the scheduled pool init to run.
+  if (!poolInitialized && !poolInitializing) return;
 }
 
 export async function initPoolAsync(): Promise<void> {
@@ -1160,10 +1156,16 @@ export async function initPoolAsync(): Promise<void> {
   cachedTrainingSnapshot = { dataSize: SUPERCON_TRAINING_DATA.length };
   console.log(`[TrainingPool] Phase 1: ${trainingPool.size} vectors (${added} new) in ${Date.now() - startTime}ms`);
 
-  Promise.all([
-    precomputeFeatureMeans(),
-    precomputeCrystalSymTargetEncoding(),
-  ]).catch(e => console.error("[GradientBoost] Precompute failed:", e));
+  // Defer expensive precomputation — each function iterates over ALL SUPERCON_TRAINING_DATA
+  // (~700+ entries × ~2.3s extractFeatures each = 26+ minutes of event-loop blocking).
+  // Defer 10 minutes so the first learning cycles (target: 2 complete by ~2min) run undisturbed.
+  // When OFFLOAD_XGB_TO_GCP=true, GCP handles full model training so local precompute is lower priority.
+  setTimeout(() => {
+    Promise.all([
+      precomputeFeatureMeans(),
+      precomputeCrystalSymTargetEncoding(),
+    ]).catch(e => console.error("[GradientBoost] Precompute failed:", e));
+  }, 600_000); // 10 minutes after Phase 1 completes
 
   await new Promise<void>(r => setTimeout(r, 50));
 

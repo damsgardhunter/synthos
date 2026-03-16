@@ -900,7 +900,7 @@ function pressureHullMultiplier(pressureGpa: number): number {
 
 export async function passesStabilityGate(formula: string, pressureGpa: number = 0): Promise<StabilityGateResult> {
   const parsed = parseFormulaCached(formula);
-  const compoundType = classifyCompoundType(formula);
+  const compoundType = classifyCompoundTypeParsed(parsed);
   const miedemaApplicable = compoundType === "intermetallic" || compoundType === "pnictide";
   const formationEnergy = miedemaApplicable ? computeMiedemaFormationEnergy(formula) : 0;
   let hullDistance: number;

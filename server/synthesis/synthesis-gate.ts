@@ -15,6 +15,11 @@ export interface ChemicalDistanceResult {
   isOnePot: boolean;
 }
 
+export interface PhysicsInput {
+  hullDistanceEv?: number;
+  requiredPressureGpa?: number;
+}
+
 export interface SynthesisGateResult {
   pass: boolean;
   compositeScore: number;
@@ -22,9 +27,17 @@ export interface SynthesisGateResult {
   chemicalDistance: ChemicalDistanceResult;
   graphPathCost: number | null;
   rejectionReasons: string[];
+  pressureFlag: string | null;
   classification: "trivial" | "one-pot" | "multi-step" | "complex" | "impractical";
   deprioritize: boolean;
 }
+
+// Hard maximum hull distance above convex hull. Anything beyond this is
+// thermodynamically too unstable for automated route generation.
+export const MAX_HULL_DISTANCE_EV = 0.2;
+
+// Pressure above which a DAC (diamond-anvil cell) synthesis path is required.
+const HIGH_PRESSURE_THRESHOLD_GPA = 50;
 
 interface SynthesisGateStats {
   totalEvaluated: number;
@@ -300,6 +313,7 @@ export function evaluateSynthesisGate(
   formula: string,
   kineticInput?: KineticInput | null,
   noveltyInput?: NoveltyInput | null,
+  physicsInput?: PhysicsInput | null,
 ): SynthesisGateResult {
   stats.totalEvaluated++;
 
@@ -350,6 +364,29 @@ export function evaluateSynthesisGate(
 
   const rejectionReasons: string[] = [];
 
+  // ── Physics-based hard gates ────────────────────────────────────────────────
+  // Hull distance cutoff: materials more than MAX_HULL_DISTANCE_EV above the
+  // convex hull are too thermodynamically unstable for automated route planning.
+  if (physicsInput?.hullDistanceEv !== undefined && physicsInput.hullDistanceEv > MAX_HULL_DISTANCE_EV) {
+    rejectionReasons.push(
+      `Hull distance too high: ${physicsInput.hullDistanceEv.toFixed(3)} eV/atom > ${MAX_HULL_DISTANCE_EV} eV/atom max`,
+    );
+  }
+
+  // Pressure mismatch: flag or reject if the physics engine requires high-pressure
+  // synthesis (e.g. DAC) but the synthesis path assumes ambient conditions.
+  let pressureFlag: string | null = null;
+  if (physicsInput?.requiredPressureGpa !== undefined && physicsInput.requiredPressureGpa > HIGH_PRESSURE_THRESHOLD_GPA) {
+    const isHighPressureMethod = chemDist.preferredMethod === "high-pressure";
+    if (!isHighPressureMethod) {
+      rejectionReasons.push(
+        `Pressure mismatch: physics requires ${physicsInput.requiredPressureGpa.toFixed(0)} GPa but synthesis route is ambient-pressure — reclassify as High-Pressure Path (DAC)`,
+      );
+    }
+    pressureFlag = `High-Pressure Path (DAC): ${physicsInput.requiredPressureGpa.toFixed(0)} GPa required`;
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   if (mlResult.feasibility < HARD_GATE_THRESHOLD) {
     rejectionReasons.push(`ML feasibility too low: ${mlResult.feasibility.toFixed(3)}`);
   }
@@ -399,6 +436,7 @@ export function evaluateSynthesisGate(
     chemicalDistance: chemDist,
     graphPathCost,
     rejectionReasons,
+    pressureFlag,
     classification,
     deprioritize,
   };

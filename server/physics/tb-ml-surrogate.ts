@@ -211,8 +211,11 @@ function generateTrainingData(): { formulas: string[]; X: number[][]; Y: Map<str
   return { formulas, X, Y };
 }
 
-function trainAllModels(X: number[][], Y: Map<string, number[]>): TBSurrogateModels {
+function trainAllModels(X: number[][], Y: Map<string, number[]>, quickInit = false): TBSurrogateModels {
   const models = new Map<string, GBMModel>();
+  // quickInit: use 8 trees (fast startup) instead of 40 (full quality).
+  // Full retrains use 40 trees. This reduces blocking from ~21s to ~4s.
+  const nTrees = quickInit ? 8 : 40;
 
   for (const targetName of TARGET_NAMES) {
     const y = Y.get(targetName)!;
@@ -220,7 +223,7 @@ function trainAllModels(X: number[][], Y: Map<string, number[]>): TBSurrogateMod
       models.set(targetName, { trees: [], learningRate: 0.05, basePrediction: y.length > 0 ? y.reduce((s, v) => s + v, 0) / y.length : 0 });
       continue;
     }
-    const model = trainGBM(X, y, 40, 0.08, 3);
+    const model = trainGBM(X, y, nTrees, 0.08, 3);
     models.set(targetName, model);
   }
 
@@ -253,9 +256,9 @@ function trainImmediate(maxSamples?: number): void {
         const full = Y.get(name)!;
         Ysub.set(name, full.filter((_, i) => i % step === 0));
       }
-      surrogateModels = trainAllModels(Xsub, Ysub);
+      surrogateModels = trainAllModels(Xsub, Ysub, true); // quickInit=true: 8 trees instead of 40 (~4s not 21s)
     } else {
-      surrogateModels = trainAllModels(X, Y);
+      surrogateModels = trainAllModels(X, Y, true);
     }
     console.log(`[TB-ML Surrogate] Immediate init: ${surrogateModels.datasetSize} samples (limit=${limit})`);
   } catch (e) {
@@ -268,6 +271,9 @@ function trainImmediate(maxSamples?: number): void {
 function deferInit(): void {
   if (initDeferred) return;
   initDeferred = true;
+  // Delay 300s — by then tbPropertiesCache is warm (learning cycles populate it),
+  // so generateTrainingData is fast (cache hits). Time budgets on computeBandStructure/DOS
+  // also cap per-formula cost if cache is cold.
   setTimeout(() => {
     try {
       if (!surrogateModels) {
@@ -277,13 +283,16 @@ function deferInit(): void {
     } catch (e) {
       console.log(`[TB-ML Surrogate] Deferred init failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
-  }, 10000);
+  }, 300_000);
 }
 
 function ensureModels(): TBSurrogateModels | null {
   if (surrogateModels) return surrogateModels;
-  trainImmediate(25);
-  return surrogateModels;
+  // Do NOT call trainImmediate here — computeTBProperties inside generateTrainingData
+  // takes ~0.9s per formula × 23 samples = 21s of synchronous blocking on first use.
+  // Instead, trigger the deferred background init (10s delay) and return null (defaults).
+  deferInit();
+  return null;
 }
 
 export function predictTBProperties(formula: string): TBSurrogateTarget & { confidence: number; source: "surrogate" } {

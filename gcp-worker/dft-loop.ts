@@ -6,6 +6,8 @@
 import { db } from "../server/db";
 import { storage } from "../server/storage";
 import { runFullDFT } from "../server/dft/qe-worker";
+import * as fs from "fs";
+import * as path from "path";
 
 const POLL_INTERVAL_MS = 15_000;
 const MAX_CONCURRENT = 4; // 4 × 8 threads = 32 vCPUs
@@ -108,6 +110,25 @@ async function claimAndRunJob(): Promise<boolean> {
 export async function startDFTLoop(): Promise<void> {
   console.log(`[DFT-GCP] Worker started — max ${MAX_CONCURRENT} concurrent jobs, poll every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[DFT-GCP] QE_BIN_DIR=${process.env.QE_BIN_DIR ?? "(auto)"}`);
+
+  // Probe for pw.x before starting the job loop. Failing early with a clear
+  // message is better than silently failing 1000+ jobs with ENOENT.
+  const searchDirs = [
+    process.env.QE_BIN_DIR,
+    "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin",
+    "/usr/bin",
+    "/usr/local/bin",
+  ].filter(Boolean) as string[];
+  const pwxDir = searchDirs.find(d => fs.existsSync(path.join(d, "pw.x")));
+  if (!pwxDir) {
+    console.error(`[DFT-GCP] FATAL: pw.x not found (searched: ${searchDirs.map(d => d + "/pw.x").join(", ")})`);
+    console.error(`[DFT-GCP] Install Quantum ESPRESSO: sudo apt-get install -y quantum-espresso`);
+    console.error(`[DFT-GCP] Or set QE_BIN_DIR=/path/to/bin in /etc/quantum-alchemy.env`);
+    console.error(`[DFT-GCP] DFT worker disabled — GNN/XGB loops will continue`);
+    return;
+  }
+  if (!process.env.QE_BIN_DIR) process.env.QE_BIN_DIR = pwxDir;
+  console.log(`[DFT-GCP] pw.x found at ${pwxDir} — ready to process DFT jobs`);
 
   while (running) {
     try {

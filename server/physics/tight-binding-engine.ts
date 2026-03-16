@@ -589,8 +589,10 @@ export function computeBandStructure(formula: string, nPoints: number = 30, cust
   kpoints.push(path.points[path.points.length - 1]);
 
   const energies: number[][] = [];
-  for (const k of kpoints) {
-    const H = buildHamiltonian(graph, k);
+  const bsLoopStart = Date.now();
+  for (let ki = 0; ki < kpoints.length; ki++) {
+    if (ki > 0 && (Date.now() - bsLoopStart) > 30) break;
+    const H = buildHamiltonian(graph, kpoints[ki]);
     const evals = diagonalizeHamiltonian(H);
     energies.push(evals);
   }
@@ -635,9 +637,11 @@ export function computeDOS(formula: string, nKpoints: number = 12, nBins: number
 
   const allEigenvalues: number[] = [];
   const nk = Math.min(nKpoints, 20);
-  for (let ix = 0; ix < nk; ix++) {
+  const dosLoopStart = Date.now();
+  outer: for (let ix = 0; ix < nk; ix++) {
     for (let iy = 0; iy < nk; iy++) {
       for (let iz = 0; iz < nk; iz++) {
+        if ((ix + iy + iz) > 0 && (Date.now() - dosLoopStart) > 30) break outer;
         const k = [(ix + 0.5) / nk, (iy + 0.5) / nk, (iz + 0.5) / nk];
         const H = buildHamiltonian(graph, k);
         const evals = diagonalizeHamiltonian(H);

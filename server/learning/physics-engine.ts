@@ -3776,6 +3776,9 @@ export async function runFullPhysicsAnalysis(
 
   const correlation = assessCorrelationStrength(formula);
   const electronicStructure = computeElectronicStructure(formula, candidate.crystalStructure, mpSummary);
+  // Yield after the heaviest sync call (~120ms tight-binding) so heartbeat timers can fire
+  // before the remaining synchronous physics computations (~50ms).
+  await new Promise<void>(r => setTimeout(r, 0));
 
   if (electronicStructure.flatBandIndicator > 0.3) {
     const avgDOS = electronicStructure.densityOfStatesAtFermi;

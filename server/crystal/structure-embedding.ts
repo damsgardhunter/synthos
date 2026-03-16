@@ -47,7 +47,7 @@ function deferInit(): void {
   if (initDeferred) return;
   initDeferred = true;
   setTimeout(() => {
-    try { initStructureEmbedding(); } catch {}
+    initStructureEmbedding().catch(() => {});
   }, 5000);
 }
 
@@ -131,7 +131,7 @@ function buildInputVector(formula: string): number[] {
   return [...graphVec, ...compVec];
 }
 
-function trainAutoencoder(data: number[][], epochs: number = 50, lr: number = 0.005): AutoencoderWeights {
+async function trainAutoencoder(data: number[][], epochs: number = 50, lr: number = 0.005): Promise<AutoencoderWeights> {
   const weights: AutoencoderWeights = {
     encoderW1: initWeights(HIDDEN_DIM, INPUT_DIM),
     encoderB1: initBias(HIDDEN_DIM),
@@ -144,6 +144,9 @@ function trainAutoencoder(data: number[][], epochs: number = 50, lr: number = 0.
   };
 
   for (let epoch = 0; epoch < epochs; epoch++) {
+    // Yield every 3 epochs so heartbeat timers and DB keepalives can fire
+    if (epoch > 0 && epoch % 3 === 0) await new Promise<void>(r => setTimeout(r, 0));
+
     let totalLoss = 0;
 
     for (const input of data) {
@@ -309,7 +312,7 @@ function silhouetteScore(points: number[][], assignments: number[], k: number): 
   return validCount > 0 ? totalScore / validCount : 0;
 }
 
-export function initStructureEmbedding(): void {
+export async function initStructureEmbedding(): Promise<void> {
   if (initialized) return;
   initialized = true;
 
@@ -319,7 +322,10 @@ export function initStructureEmbedding(): void {
     const trainingVectors: number[][] = [];
     const formulas: string[] = [];
 
-    for (const entry of seedData) {
+    for (let ei = 0; ei < seedData.length; ei++) {
+      // Yield every 20 entries — buildGraphFromStructure (Voronoi + 3-body) can be slow on large cells
+      if (ei > 0 && ei % 20 === 0) await new Promise<void>(r => setTimeout(r, 0));
+      const entry = seedData[ei];
       try {
         let graphVec: number[];
         if (entry.atomicPositions && entry.atomicPositions.length > 0) {
@@ -346,7 +352,7 @@ export function initStructureEmbedding(): void {
       return;
     }
 
-    autoencoderWeights = trainAutoencoder(trainingVectors, 15, 0.005);
+    autoencoderWeights = await trainAutoencoder(trainingVectors, 15, 0.005);
 
     for (let i = 0; i < formulas.length; i++) {
       const emb = encode(trainingVectors[i], autoencoderWeights);
@@ -354,7 +360,7 @@ export function initStructureEmbedding(): void {
       embeddingCache.set(formulas[i], emb);
     }
 
-    clusterStructures();
+    await clusterStructures();
 
     console.log(`[StructureEmbedding] Initialized with ${trainingEmbeddings.size} embeddings, ${currentClustering?.k ?? 0} clusters`);
   } catch (err) {
@@ -388,7 +394,7 @@ export function computeStructureEmbedding(formula: string): number[] {
   return embedding;
 }
 
-export function clusterStructures(): ClusteringResult {
+export async function clusterStructures(): Promise<ClusteringResult> {
   if (!initialized) deferInit();
 
   const allEmbeddings: number[][] = [];
@@ -418,6 +424,7 @@ export function clusterStructures(): ClusteringResult {
   const maxK = Math.min(10, Math.floor(allEmbeddings.length / 2));
 
   for (let k = 3; k <= maxK; k++) {
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between kMeans runs — silhouetteScore is O(n²)
     const result = kMeans(allEmbeddings, k);
     const score = silhouetteScore(allEmbeddings, result.assignments, k);
     if (score > bestScore) {

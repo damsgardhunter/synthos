@@ -293,6 +293,10 @@ export async function runQuantumEnginePipeline(
 
   let tier: "full-dft" | "xtb" | "surrogate" = "surrogate";
 
+  // Yield before any synchronous physics work so heartbeat timers (and DB keepalives)
+  // can fire between sequential pipeline calls in the active-learning loop.
+  await new Promise<void>(r => setTimeout(r, 0));
+
   let dosFilterResult: ReturnType<typeof dosPrefilter> | null = null;
   let dosAnalysis: DOSSurrogateResult | null = null;
   try {
@@ -330,7 +334,10 @@ export async function runQuantumEnginePipeline(
     surrogateElec = computeElectronicStructure(formula);
   } catch {}
 
-  const qeAvailable = isQEAvailable();
+  // When DFT is offloaded to GCP, skip local QE entirely — GCP handles all DFT.
+  // Running QE locally would block the event loop for 5-30 min per formula.
+  const offloadedToGCP = process.env.OFFLOAD_DFT_TO_GCP === "true";
+  const qeAvailable = !offloadedToGCP && isQEAvailable();
 
   if (qeAvailable) {
     const dftStart = Date.now();

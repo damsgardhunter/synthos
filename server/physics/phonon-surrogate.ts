@@ -422,7 +422,7 @@ function computeAccuracy(model: GBModel, X: number[][], y: number[]): number {
   return Math.round((correct / X.length) * 1000) / 1000;
 }
 
-export function trainPhononSurrogate(): void {
+export async function trainPhononSurrogate(): Promise<void> {
   const rows = buildTrainingData();
   if (rows.length < 10) return;
 
@@ -432,10 +432,16 @@ export function trainPhononSurrogate(): void {
   const yMaxFreq = rows.map(r => r.maxPhononFreq);
   const yStability = rows.map(r => r.phononStable);
 
+  // Yield between each heavy GBM training call (60-tree models on large datasets
+  // can take 1-5s each, freezing the event loop without explicit yields).
   const omegaLogModel = trainGBM(X, yOmegaLog, 60, 0.12, 4);
+  await new Promise<void>(r => setTimeout(r, 0));
   const debyeTempModel = trainGBM(X, yDebyeTemp, 60, 0.12, 4);
+  await new Promise<void>(r => setTimeout(r, 0));
   const maxFreqModel = trainGBM(X, yMaxFreq, 60, 0.12, 4);
+  await new Promise<void>(r => setTimeout(r, 0));
   const stabilityModel = trainGBM(X, yStability, 50, 0.08, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
 
   const omegaLogMAE = computeMAE(omegaLogModel, X, yOmegaLog);
   const meanOmegaLog = yOmegaLog.reduce((s, v) => s + v, 0) / yOmegaLog.length;
@@ -478,7 +484,9 @@ export function predictPhononProperties(formula: string, pressure: number = 0): 
   totalPredictions++;
 
   if (shouldRetrain() && surrogateModels !== null) {
-    try { trainPhononSurrogate(); } catch {}
+    // Fire-and-forget: trainPhononSurrogate is now async with yields between
+    // heavy GBM training calls. Don't block the prediction path.
+    trainPhononSurrogate().catch(() => {});
   }
 
   if (surrogateModels) {
@@ -553,7 +561,5 @@ export function getPhononSurrogateStats() {
 }
 
 export function initPhononSurrogate(): void {
-  try {
-    trainPhononSurrogate();
-  } catch {}
+  trainPhononSurrogate().catch(() => {});
 }

@@ -41,7 +41,9 @@ import { computeOODScore } from "./ood-detector";
 export { getConfidenceBand };
 
 function yieldToEventLoop(): Promise<void> {
-  return new Promise<void>(resolve => setImmediate(resolve));
+  // Use setTimeout(0) not setImmediate — setImmediate chains starve timer callbacks
+  // (heartbeat, keepalive pings). setTimeout forces a return to the timers phase.
+  return new Promise<void>(resolve => setTimeout(resolve, 0));
 }
 
 export interface UnifiedCIResult {
@@ -1030,7 +1032,11 @@ export async function runMLPrediction(
 
   let preFilterSkipped = 0;
   const matSlice = materials.slice(0, 100);
-  const BATCH_CONCURRENCY = 5;
+  const batchLoopStart = Date.now();
+  // Reduced from 5→1: concurrent extractFeatures calls each block 200ms in computeElectronicStructure.
+  // With 5 concurrent, 5×200ms=1s microtask blocks prevent heartbeat timers from firing.
+  // With 1, the 7 yields inside extractFeatures give heartbeats enough gaps to fire every ~200ms.
+  const BATCH_CONCURRENCY = 1;
   for (let batchStart = 0; batchStart < matSlice.length; batchStart += BATCH_CONCURRENCY) {
     const batchEnd = Math.min(batchStart + BATCH_CONCURRENCY, matSlice.length);
     const batchItems = matSlice.slice(batchStart, batchEnd);
@@ -1041,7 +1047,10 @@ export async function runMLPrediction(
       const crystal = crystalData.get(normKey);
       let features = await getCachedFeatures(normKey);
       if (!features) {
+        const _t0 = Date.now();
         features = await extractFeatures(mat.formula, mat, physics, crystal);
+        const _elapsed = Date.now() - _t0;
+        if (_elapsed > 300) console.log(`[ML] Slow extractFeatures: ${mat.formula} took ${_elapsed}ms`);
         setCachedFeatures(normKey, features);
       }
 
@@ -1082,15 +1091,16 @@ export async function runMLPrediction(
       }
     }
 
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => setTimeout(resolve, 0)); // setTimeout not setImmediate — setImmediate starves timer callbacks
   }
+  console.log(`[ML] Batch scoring done: ${scored.length} scored, ${preFilterSkipped} filtered in ${Date.now() - batchLoopStart}ms`);
 
   scored.sort((a, b) => b.xgb.score - a.xgb.score);
 
   const GNN_INFERENCE_LIMIT = 15;
   for (let i = 0; i < Math.min(GNN_INFERENCE_LIMIT, scored.length); i++) {
     if (i > 0 && i % 5 === 0) {
-      await new Promise<void>(resolve => setImmediate(resolve));
+      await new Promise<void>(resolve => setTimeout(resolve, 0)); // setTimeout not setImmediate — setImmediate starves timer callbacks
     }
     const entry = scored[i];
     try {
@@ -1144,7 +1154,7 @@ export async function runMLPrediction(
     });
   }
 
-  await new Promise<void>(resolve => setImmediate(resolve));
+  await new Promise<void>(resolve => setTimeout(resolve, 0)); // setTimeout not setImmediate — setImmediate starves timer callbacks
 
   try {
     const candidateSummaries = topCandidates.map(c => {
@@ -1199,6 +1209,7 @@ export async function runMLPrediction(
 
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => abortController.abort(), 25000);
+    console.log(`[ML] OpenAI call starting for ${topCandidates.length} candidates`);
 
     let response;
     try {
@@ -1220,6 +1231,7 @@ export async function runMLPrediction(
     } finally {
       clearTimeout(timeoutId);
     }
+    console.log(`[ML] OpenAI response received`);
 
     const content = response.choices[0]?.message?.content;
     if (!content) return { candidates, insights };

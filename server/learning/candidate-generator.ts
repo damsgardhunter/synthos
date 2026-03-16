@@ -614,10 +614,16 @@ function passesCompatibilityFilter(formula: string): boolean {
   return true;
 }
 
-export function generateElementSubstitutions(baseFormulas: string[], count: number = 200): string[] {
+export async function generateElementSubstitutions(baseFormulas: string[], count: number = 200): Promise<string[]> {
   const results = new Set<string>();
 
-  for (const base of baseFormulas) {
+  for (let bi = 0; bi < baseFormulas.length; bi++) {
+    // Yield every 10 base formulas so timer callbacks (heartbeat, keepalive) can fire.
+    // generateElementSubstitutions can run for many seconds across hundreds of seeds.
+    if (bi > 0 && bi % 10 === 0) {
+      await new Promise<void>(r => setTimeout(r, 0));
+    }
+    const base = baseFormulas[bi];
     const counts = parseFormulaCounts(base);
     const elements = fisherYatesShuffle(Object.keys(counts));
 
@@ -889,6 +895,7 @@ export async function rapidGBScreen(formulas: string[]): Promise<RapidScreenResu
   const results: RapidScreenResult[] = [];
 
   for (const formula of formulas) {
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between candidates
     try {
       const vec = computeWeightedVEC(formula);
       if (vec < 1.0 || vec > 11.0) continue;
@@ -1049,7 +1056,7 @@ export async function runMassiveGeneration(
   for (const bf of baseFormulas) seedSet.add(bf);
   const allSeeds = Array.from(seedSet).filter(f => passesElementCountCap(f));
 
-  const substitutions = generateElementSubstitutions(allSeeds, 400);
+  const substitutions = await generateElementSubstitutions(allSeeds, 400); // async: yields every 10 seeds
   for (const f of substitutions) allGenerated.add(f);
 
   const sorted = topCandidates
@@ -1064,6 +1071,7 @@ export async function runMassiveGeneration(
 
   const doped = generateRandomDopedVariants(allSeeds.slice(0, 20), DOPANT_ELEMENTS, 200);
   for (const f of doped) allGenerated.add(f);
+  await new Promise<void>(r => setTimeout(r, 0)); // yield
 
   const topSCFormulas = sorted.slice(0, 10).map(c => c.formula);
   const knownSCRaw = [
@@ -1093,6 +1101,7 @@ export async function runMassiveGeneration(
   const fractionalSeeds = Array.from(fractionalSeedSet);
   const fractionalDoped = generateFractionalDopedVariants(fractionalSeeds, 150);
   for (const f of fractionalDoped) allGenerated.add(f);
+  await new Promise<void>(r => setTimeout(r, 0)); // yield
 
   const PROTO_TEMPLATES: { name: string; slots: string[][]; stoichs: number[][] }[] = [
     { name: "AlB2", slots: [["Mg", "Ca", "Ti", "Zr", "Nb", "Ta"], ["B"]], stoichs: [[1,2]] },
@@ -1181,6 +1190,7 @@ export async function runMassiveGeneration(
     const canonFamily = canonicalize(formula);
     if (passesElementCountCap(canonFamily)) allGenerated.add(canonFamily);
   }
+  await new Promise<void>(r => setTimeout(r, 0)); // yield after proto + family loops
 
   stats.totalGenerated = allGenerated.size;
 
@@ -1188,7 +1198,9 @@ export async function runMassiveGeneration(
   stats.uniqueAfterDedup = uniqueFormulas.length;
 
   const valenceFiltered: string[] = [];
-  for (const f of uniqueFormulas) {
+  for (let vi = 0; vi < uniqueFormulas.length; vi++) {
+    if (vi > 0 && vi % 50 === 0) await new Promise<void>(r => setTimeout(r, 0)); // yield every 50
+    const f = uniqueFormulas[vi];
     if (passesValenceFilter(f) && passesCompositionComplexityFilter(f)) {
       valenceFiltered.push(f);
     }
@@ -1196,12 +1208,15 @@ export async function runMassiveGeneration(
   stats.passedValenceFilter = valenceFiltered.length;
 
   const compatFiltered: string[] = [];
-  for (const f of valenceFiltered) {
+  for (let ci = 0; ci < valenceFiltered.length; ci++) {
+    if (ci > 0 && ci % 50 === 0) await new Promise<void>(r => setTimeout(r, 0)); // yield every 50
+    const f = valenceFiltered[ci];
     if (passesCompatibilityFilter(f) && hasSuperconductingPotential(f)) {
       compatFiltered.push(f);
     }
   }
   stats.passedCompatibilityFilter = compatFiltered.length;
+  await new Promise<void>(r => setTimeout(r, 0)); // yield before GB screen
 
   const screened = await rapidGBScreen(compatFiltered);
   const top50 = screened.slice(0, 50);

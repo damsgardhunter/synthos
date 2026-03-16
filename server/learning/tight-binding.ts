@@ -840,7 +840,8 @@ export function computeTightBindingBands(
 
   const hasTM = elements.some(el => isTransitionMetal(el) || isRareEarth(el));
   const hasCorrelatedOxide = hasTM && elements.includes("O");
-  const nPerSegment = hasCorrelatedOxide ? 50 : (hasTM ? 40 : 30);
+  // Reduced from 50/40/30 to prevent event-loop freeze — TB is synchronous
+  const nPerSegment = hasCorrelatedOxide ? 20 : (hasTM ? 15 : 12);
   const { kPoints, kLabels } = interpolateKPoints(path, nPerSegment);
 
   const bands: number[][] = [];
@@ -848,7 +849,11 @@ export function computeTightBindingBands(
   let nOrbitals = 0;
   let kFailures = 0;
 
+  // Hard time budget: abort after 100ms total to keep event loop responsive.
+  // Check every iteration so a single slow diagonalization can't blow the budget.
+  const tbLoopStart = Date.now();
   for (let ki = 0; ki < kPoints.length; ki++) {
+    if (ki > 0 && (Date.now() - tbLoopStart) > 100) break;
     try {
       const result = buildHamiltonianAtK(kPoints[ki], elements, counts, latticeConstant, latticeType);
       bands.push(result.eigenvalues);

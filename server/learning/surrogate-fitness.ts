@@ -112,7 +112,9 @@ function getFamilyCalibrationFactor(family: string): number {
   } else if (overestimateRatio > 0.5 && meanAbsErr > 15) {
     return 0.75;
   } else if (meanAbsErr > 50) {
-    return 0.7;
+    // High-MAE families (e.g. Hydrides) get a pessimism factor > 1.0 so the
+    // optimizer stops chasing inflated Tc predictions until GNN MAE improves.
+    return 1.2;
   } else if (meanAbsErr < 5 && overestimateRatio < 0.3) {
     return 1.1;
   }

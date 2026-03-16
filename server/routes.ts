@@ -203,14 +203,14 @@ import {
   initStructurePredictorML,
 } from "./crystal/structure-predictor-ml";
 import {
-  initCrystalVAE, getCrystalVAEStats, generateNovelCrystal,
+  getCrystalVAEStats, generateNovelCrystal,
   interpolateCrystals, encodeFormula,
 } from "./crystal/crystal-vae";
 import {
-  initDiffusionModel,
   sampleStructures as diffusionSampleStructures,
   getDiffusionModelStats,
 } from "./crystal/crystal-diffusion-model";
+import { spawnMLTraining } from "./workers/ml-training-bridge";
 import {
   generateCandidates as generativeCrystalGenerate,
   getGenerativeEngineStats,
@@ -3820,7 +3820,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   setTimeout(() => {
     try { startPoolInit(); } catch {}
-  }, 20000);
+  }, 75_000); // Delay to 75s — Phase 1 pool init blocks ~35s per item, avoid competing with first 2 cycles
 
   setTimeout(async () => {
     try { await initLambdaRegressor(); } catch {}
@@ -3996,21 +3996,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  setTimeout(async () => {
-    try {
-      await initDiffusionModel();
-    } catch (e) {
-      console.error("[CrystalDiffusion] Init failed:", e);
-    }
-  }, 70000);  // T+70s — well before VAE at T+130s
+  setTimeout(() => {
+    spawnMLTraining("init-diffusion-model").catch(() => {});
+  }, 70000);  // T+70s — off main thread via GCP/worker
 
-  setTimeout(async () => {
-    try {
-      await initCrystalVAE();
-    } catch (e) {
-      console.error("[CrystalVAE] Init failed:", e);
-    }
-  }, 130000);  // T+130s — 60s after diffusion model
+  setTimeout(() => {
+    spawnMLTraining("init-crystal-vae").catch(() => {});
+  }, 130000);  // T+130s — off main thread via GCP/worker
 
   setTimeout(async () => {
     try {

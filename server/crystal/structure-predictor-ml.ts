@@ -235,7 +235,7 @@ function computeRegressorMAE(model: GBModel, X: number[][], y: number[]): number
   return Math.round((totalErr / X.length) * 10000) / 10000;
 }
 
-export function trainStructurePredictor(): void {
+export async function trainStructurePredictor(): Promise<void> {
   const dataset = getTrainingData();
   if (dataset.length < 10) return;
 
@@ -272,18 +272,30 @@ export function trainStructurePredictor(): void {
 
   if (X.length < 10) return;
 
+  // Yield to timers between each heavy synchronous training call so heartbeats
+  // and DB keepalives can fire. Each trainOneVsAllClassifier / trainGBM call
+  // is O(n·trees) synchronous computation that can take 1-5s per call.
   const spacegroupClassifier = trainOneVsAllClassifier(X, sgLabels, 15, 0.15, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
   const crystalSystemClassifier = trainOneVsAllClassifier(X, csLabels, 20, 0.15, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
   const prototypeClassifier = trainOneVsAllClassifier(X, protoLabels, 15, 0.15, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
 
-  const latticeRegressor = {
-    a: trainGBM(X, latticeA, 25, 0.12, 3),
-    b: trainGBM(X, latticeB, 25, 0.12, 3),
-    c: trainGBM(X, latticeC, 25, 0.12, 3),
-    alpha: trainGBM(X, latticeAlpha, 15, 0.1, 3),
-    beta: trainGBM(X, latticeBeta, 15, 0.1, 3),
-    gamma: trainGBM(X, latticeGamma, 15, 0.1, 3),
-  };
+  const lA = trainGBM(X, latticeA, 25, 0.12, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const lB = trainGBM(X, latticeB, 25, 0.12, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const lC = trainGBM(X, latticeC, 25, 0.12, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const lAlpha = trainGBM(X, latticeAlpha, 15, 0.1, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const lBeta = trainGBM(X, latticeBeta, 15, 0.1, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const lGamma = trainGBM(X, latticeGamma, 15, 0.1, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+
+  const latticeRegressor = { a: lA, b: lB, c: lC, alpha: lAlpha, beta: lBeta, gamma: lGamma };
 
   const sgAcc = computeClassifierAccuracy(spacegroupClassifier, X, sgLabels);
   const csAcc = computeClassifierAccuracy(crystalSystemClassifier, X, csLabels);
@@ -336,15 +348,18 @@ export function isStructurePredictorReady(): boolean {
 export function trainStructurePredictorBackground(): void {
   if (models || trainingInProgress) return;
   trainingInProgress = true;
-  try {
-    console.log(`[StructurePredictor] Background training started`);
-    const t0 = Date.now();
-    trainStructurePredictor();
-    console.log(`[StructurePredictor] Background training completed in ${Date.now() - t0}ms`);
-  } catch (e) {
-    console.log(`[StructurePredictor] Background training failed: ${e}`);
-  }
-  trainingInProgress = false;
+  const t0 = Date.now();
+  console.log(`[StructurePredictor] Background training started`);
+  trainStructurePredictor()
+    .then(() => {
+      console.log(`[StructurePredictor] Background training completed in ${Date.now() - t0}ms`);
+    })
+    .catch((e) => {
+      console.log(`[StructurePredictor] Background training failed: ${e}`);
+    })
+    .finally(() => {
+      trainingInProgress = false;
+    });
 }
 
 export function predictStructure(formula: string): StructurePredictionML {

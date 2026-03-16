@@ -748,7 +748,9 @@ function validateSemicorePP(element: string, ppPath: string): boolean {
     if (zValMatch) {
       const ppZVal = parseFloat(zValMatch[1]);
       const expectedZ = getZValence(element);
-      if (ppZVal > 0 && expectedZ > 0 && ppZVal < expectedZ * 0.6) {
+      // Threshold: 0.5 to allow GBRV-style PPs where outer d+s electrons only
+    // (e.g. Ir GBRV has 9 vs pslibrary 17 — 9/17=0.53 passes, 5/17=0.29 fails)
+    if (ppZVal > 0 && expectedZ > 0 && ppZVal < expectedZ * 0.5) {
         console.log(`[QE-Worker] WARNING: PP for ${element} has z_valence=${ppZVal} but expected ~${expectedZ} (semicore likely missing). Re-downloading.`);
         return false;
       }
@@ -810,8 +812,10 @@ cleanupPseudoDir();
 
 // GitHub pslibrary is the primary source — the QE website is often unreliable/down.
 // QE website kept as fallback only.
+// GBRV (Garrity-Bennett-Rabe-Vanderbilt) ultrasoft PPs from Rutgers as tertiary source.
 const GH_BASE = "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS";
 const QE_BASE = "https://pseudopotentials.quantum-espresso.org/upf_files";
+const GBRV_BASE = "https://www.physics.rutgers.edu/gbrv/pbe";
 
 const PP_DOWNLOAD_URLS: Record<string, string> = {
   H:  `${GH_BASE}/H.pbe-kjpaw_psl.1.0.0.UPF`,
@@ -893,6 +897,17 @@ const PP_DOWNLOAD_URLS: Record<string, string> = {
   Bi: `${GH_BASE}/Bi.pbe-dn-kjpaw_psl.1.0.0.UPF`,
   Th: `${GH_BASE}/Th.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
   U:  `${GH_BASE}/U.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
+};
+
+// GBRV Vanderbilt ultrasoft PPs — tertiary source for elements where QE website fails.
+// Filenames use lowercase symbols. These are USPP (pseudo_type="US"), z_valence
+// for 5d metals may be smaller (outer d+s only) — threshold lowered to 0.5 above.
+const PP_GBRV_URLS: Record<string, string> = {
+  Ag: `${GBRV_BASE}/ag_pbe_v1.4.uspp.F.UPF`,
+  Cd: `${GBRV_BASE}/cd_pbe_v1.uspp.F.UPF`,
+  Te: `${GBRV_BASE}/te_pbe_v1.uspp.F.UPF`,
+  Ir: `${GBRV_BASE}/ir_pbe_v1.2.uspp.F.UPF`,
+  Yb: `${GBRV_BASE}/yb_pbe_v1.uspp.F.UPF`,
 };
 
 // QE website as fallback (often unreliable)
@@ -1008,13 +1023,13 @@ function ensurePseudopotential(element: string): string {
       }
     }
 
-    const urls = [PP_DOWNLOAD_URLS[element], PP_FALLBACK_URLS[element]].filter(Boolean);
+    const urls = [PP_DOWNLOAD_URLS[element], PP_FALLBACK_URLS[element], PP_GBRV_URLS[element]].filter(Boolean);
     for (const url of urls) {
       try {
-        const mirror = url!.includes("github") ? "pslibrary" : "QE";
+        const mirror = url!.includes("github") ? "pslibrary" : url!.includes("rutgers") ? "GBRV" : "QE";
         console.log(`[QE-Worker] Downloading PP for ${element} from ${mirror}...`);
         if (!downloadPPToTemp(url!, tmpFile)) {
-          console.log(`[QE-Worker] Download from ${mirror} failed for ${element}`);
+          console.log(`[QE-Worker] Download from ${mirror} failed for ${element} (${url})`);
           continue;
         }
         if (!validatePseudopotential(tmpFile)) {

@@ -48,7 +48,7 @@ import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-gen
 import { enumeratePrototypesForFormula, type PrototypeEnumResult } from "./crystal-prototypes";
 import { generatePrototypeFreeStructures, getLatticeGeneratorStats, seedEvoPopulation, addToEvoPopulation, runEvolutionaryGeneration, getEvoPopulationSummary, type GeneratedStructure } from "../crystal/lattice-generator";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
-import { runActiveLearningCycle, getActiveLearningStats, runModelBenchmarks, startGCPWeightPoller } from "./active-learning";
+import { runActiveLearningCycle, getActiveLearningStats, runModelBenchmarks, startGCPWeightPoller, refreshMPTrainingData } from "./active-learning";
 import { predictPressureCurve, findOptimalPressure, getPressureCurveStats } from "./pressure-aware-surrogate";
 import { findStabilityPressureWindow, getEnthalpyStats } from "./enthalpy-stability";
 import { buildPressureResponseProfile, getPressurePropertyMapStats } from "./pressure-property-map";
@@ -57,7 +57,7 @@ import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, sa
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
 import { recordEvaluationResult, getCalibrationStats, notifyModelRetrain } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
-import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast } from "../dft/dft-job-queue";
+import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast, scheduleQEAvailabilityProbe } from "../dft/dft-job-queue";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBasedDiffusion, getDistributionDiffusionStats } from "../ai/crystal-structure-diffusion";
 import { multiTaskPredict, trackMultiTaskPrediction, getMultiTaskStats } from "./multi-task-gnn";
@@ -526,6 +526,7 @@ let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
 let isRunningCycle = false;
+const _engineStartMs = Date.now(); // For cycle timing diagnostics
 const materialMetadataCache = {
   materialCount: -1,
   scCandidateCount: -1,
@@ -1205,6 +1206,7 @@ async function runPhase7_Superconductor() {
       familyCounts: Object.keys(currentFamilyCounts).length > 0 ? currentFamilyCounts : undefined,
       stagnationInfo: lastBestTcSeen > 0 ? { cyclesSinceImproved: cyclesSinceTcImproved, currentBestTc: lastBestTcSeen } : undefined,
     });
+    console.log(`[Engine] Cycle #${cycleCount} phase7: runSuperconductorResearch returned at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
     if (!shouldContinue()) return;
     phase7Offset += 200;
     totalScCandidates += result.generated;
@@ -1664,6 +1666,10 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           uncertaintyEstimate: candidateData.uncertaintyEstimate ?? 0.5,
           gnnUncertainty: (candidateData as any).gnnUncertainty ?? undefined,
         },
+        {
+          hullDistanceEv: stabilityResult.hullDistance,
+          requiredPressureGpa: candidateData.pressureGpa ?? 0,
+        },
       );
       if (!synthesisGateResult.pass) {
         emit("log", {
@@ -1680,6 +1686,14 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
           phase: "engine",
           event: "Synthesis gate deprioritized",
           detail: `${candidateData.formula}: compositeScore=${synthesisGateResult.compositeScore.toFixed(3)}, class=${synthesisGateResult.classification} — low synthesis feasibility, will be deprioritized`,
+          dataSource: "Synthesis Gate",
+        });
+      }
+      if (synthesisGateResult.pressureFlag) {
+        emit("log", {
+          phase: "engine",
+          event: "High-pressure synthesis path",
+          detail: `${candidateData.formula}: ${synthesisGateResult.pressureFlag}`,
           dataSource: "Synthesis Gate",
         });
       }
@@ -5687,7 +5701,8 @@ async function runAutonomousFastPath() {
     if (cycleCount - lastTheoryDiscoveryCycle >= 15 && cycleCount % 15 === 0) {
       try {
         const synthDataset = await generateSyntheticDataset(40);
-        const theories = runSymbolicPhysicsDiscovery(synthDataset);
+        // Reduced config: 20 gen × 60 pop to limit event-loop block (was 60gen × 100pop)
+        const theories = runSymbolicPhysicsDiscovery(synthDataset, { generations: 20, populationSize: 60 });
         lastTheoryDiscoveryCycle = cycleCount;
         if (theories.length > 0) {
           const allTheories = getTheoryDatabase();
@@ -6434,6 +6449,9 @@ async function runAutonomousFastPath() {
       const enrichStart = Date.now();
       let enriched = 0;
       for (const task of enrichmentQueue) {
+        // Yield after each candidate — computeElectronicStructure/Fermi/topo are sync CPU-heavy
+        // and will block heartbeat timers if not interleaved with setTimeout yields.
+        await new Promise<void>(r => setTimeout(r, 0));
         try {
           const electronic = computeElectronicStructure(task.formula);
           const topoResult = analyzeTopology(task.formula, electronic);
@@ -6848,6 +6866,7 @@ async function runLearningCycle() {
   recentNewCandidates = 0;
   recentTcImproved = false;
   recentLogCache.clear();
+  console.log(`[Engine] Cycle #${cycleCount} START at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
   await syncMaterialMetadataCache();
   broadcast("cycleStart", { cycle: cycleCount });
 
@@ -7520,6 +7539,7 @@ async function runLearningCycle() {
             const batch = topProto.slice(batchStart, batchStart + PROTO_CONCURRENCY);
 
             const batchResults = await Promise.allSettled(batch.map(async (entry) => {
+              await new Promise<void>(r => setTimeout(r, 0)); // yield before sync physics
               const { pc, normalized, features, gbResult, gnnResult, discoveryScore } = entry;
 
               let protoTopoScore = 0;
@@ -7638,6 +7658,13 @@ async function runLearningCycle() {
             dataSource: "Prototype Generator",
           });
         }
+      }
+
+      // Refresh GNN training data with a fresh MP batch every 5 cycles (fire-and-forget).
+      // Cycles through 2000 MP materials in 50-record windows so the GNN sees
+      // new structural diversity between Active Learning retrains.
+      if (state === "running" && cycleCount % 5 === 0) {
+        refreshMPTrainingData().catch(() => {});
       }
 
       if (state === "running" && cycleCount >= 12 && cycleCount % 25 === 12) {
@@ -8125,6 +8152,7 @@ async function runLearningCycle() {
     }
 
     isRunningCycle = false;
+    console.log(`[Engine] Cycle #${cycleCount} END at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
     broadcast("cycleEnd", { cycle: cycleCount });
 
     if (state === "running") {
@@ -8340,17 +8368,24 @@ export async function startEngine() {
     await ensureFeatureStateLoaded();
   } catch (e) { console.error("[Engine] Feature state restore failed:", e); }
 
-  try {
-    const xtbHealth = await checkXTBHealth();
-    emit("log", {
-      phase: "engine",
-      event: "xTB health check",
-      detail: `xTB ${xtbHealth.available ? "v" + xtbHealth.version : "NOT FOUND"}. Opt: ${xtbHealth.canOptimize ? "OK" : "FAIL"}. Hess: ${xtbHealth.canHess ? "OK" : "FAIL"}${xtbHealth.error ? ". Error: " + xtbHealth.error : ""}`,
-      dataSource: "xTB Health Check",
-    });
-  } catch (e: any) {
-    emit("log", { phase: "engine", event: "xTB health check failed", detail: e.message, dataSource: "xTB Health Check" });
-  }
+  // QE availability probe deferred — now uses execFileAsync (non-blocking).
+  // The cached result starts as false; this updates it 90s after startup.
+  scheduleQEAvailabilityProbe(90_000);
+
+  // xTB health check deferred to background — now uses execFileAsync (non-blocking)
+  setTimeout(async () => {
+    try {
+      const xtbHealth = await checkXTBHealth();
+      emit("log", {
+        phase: "engine",
+        event: "xTB health check",
+        detail: `xTB ${xtbHealth.available ? "v" + xtbHealth.version : "NOT FOUND"}. Opt: ${xtbHealth.canOptimize ? "OK" : "FAIL"}. Hess: ${xtbHealth.canHess ? "OK" : "FAIL"}${xtbHealth.error ? ". Error: " + xtbHealth.error : ""}`,
+        dataSource: "xTB Health Check",
+      });
+    } catch (e: any) {
+      emit("log", { phase: "engine", event: "xTB health check failed", detail: e.message, dataSource: "xTB Health Check" });
+    }
+  }, 120_000); // Run 2min after startup — well after first two cycles complete
 
   setTimeout(() => {
     console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
@@ -8359,19 +8394,23 @@ export async function startEngine() {
       .then(() => console.log("[Engine] background: backfillGBScores + recalculatePhysics done"))
       .catch(e => console.error("[Engine] background score/physics recalc failed:", e));
   }, 900_000);
-  console.log("[Engine] startup: restoring campaigns...");
+  console.log("[Engine] startup: restoring campaigns...", Date.now());
 
   try {
+    console.log("[Engine] startup: getInverseDesignCampaigns start", Date.now());
     const dbCampaigns = await storage.getInverseDesignCampaigns();
+    console.log("[Engine] startup: getInverseDesignCampaigns done, count=", dbCampaigns.length, Date.now());
     if (dbCampaigns.length > 0) {
+      console.log("[Engine] startup: restoreCampaignsFromDB start", Date.now());
       const restored = await restoreCampaignsFromDB(dbCampaigns as any);
+      console.log("[Engine] startup: restoreCampaignsFromDB done, restored=", restored, Date.now());
       if (restored > 0) {
         emit("log", { phase: "inverse-optimizer", event: "Campaigns restored", detail: `${restored} inverse design campaigns restored from database` });
       }
     }
   } catch (e) { console.error("[Engine] Campaign restoration failed:", e); }
 
-  console.log("[Engine] startup: restoring stats from DB...");
+  console.log("[Engine] startup: restoring stats from DB...", Date.now());
   try {
     const scCount = await storage.getSuperconductorCount();
     autonomousTotalScreened = Math.max(autonomousTotalScreened, scCount * 3);
@@ -8400,7 +8439,11 @@ export async function startEngine() {
     setTimeout(runLearningCycle, 3000);
   }
 
-  // ── Background: deferred subsystem seeding (non-blocking, runs after first cycle) ──
+  // ── Background: deferred subsystem seeding ──────────────────────────────────
+  // Delayed 60s so the first two learning cycles complete without competition.
+  // Topology/Fermi seeding does synchronous CPU work (computeElectronicStructure,
+  // analyzeTopology, computeFermiSurface) that blocks the event loop for ~1-2s per
+  // candidate × up to 30 candidates = 23s of heartbeat gaps at startup.
   setTimeout(async () => {
     const yieldLoop = () => new Promise<void>(r => setTimeout(r, 200));
 
@@ -8466,7 +8509,7 @@ export async function startEngine() {
             fermiSeeded++;
           } catch { /* skip */ }
         }
-        if (i % 5 === 0) await yieldLoop();
+        await yieldLoop(); // yield after every candidate — computeFermiSurface alone takes 80-230ms
       }
       if (topoSeeded > 0 || fermiSeeded > 0) {
         const topoStats = getTopologyStats();
@@ -8524,65 +8567,13 @@ export async function startEngine() {
       }
     } catch { /* skip */ }
 
-    await yieldLoop();
-
-    // Theory discovery (deferred — 40 async records + sync algorithm)
-    try {
-      const synthDataset = await generateSyntheticDataset(40);
-      const theories = runSymbolicPhysicsDiscovery(synthDataset);
-      lastTheoryDiscoveryCycle = cycleCount;
-      if (theories.length > 0) {
-        const allTheories = getTheoryDatabase();
-        const feedback = generateDiscoveryFeedback(allTheories);
-        const { valid: validBiasVars2 } = validateBiasedVariables(feedback.biasedVariables ?? []);
-        theoryFeedbackBias = { biasedVariables: validBiasVars2, biasedElements: feedback.biasedElements ?? [] };
-        emit("log", { phase: "engine", event: "Theory discovery initialized", detail: `${theories.length} theories discovered, top score=${theories[0]?.theoryScore?.toFixed(3)}`, dataSource: "Integrated Subsystems" });
-      }
-    } catch (e: any) {
-      console.error("[Engine] bg theory discovery error:", e.message?.slice(0, 150));
-    }
-
-    await yieldLoop();
-
-    // Causal discovery (deferred — capped at 60 records)
-    try {
-      const gtSummaryInit = getGroundTruthSummary();
-      const MIN_CAUSAL_INIT = 500;
-      let causalDatasetInit: CausalDataRecord[];
-      if (gtSummaryInit.totalDatapoints >= MIN_CAUSAL_INIT) {
-        const gtDataInit = getGroundTruthDataset();
-        const gtRecsInit: CausalDataRecord[] = [];
-        for (const dp of gtDataInit.slice(0, 50)) {
-          try {
-            const rec = await buildCausalDataRecord(dp.formula);
-            if (dp.Tc > 0) rec.Tc = dp.Tc;
-            if (dp.lambda !== null) rec.lambda = dp.lambda;
-            if (dp.DOS_EF !== null) rec.DOS_EF = dp.DOS_EF;
-            if (dp.omega_log !== null) rec.phonon_freq = dp.omega_log;
-            if (dp.mu_star !== null) rec.mu_star = dp.mu_star;
-            rec.pressure = dp.pressure;
-            gtRecsInit.push(rec);
-          } catch {}
-        }
-        const syntheticNeeded = Math.max(0, 60 - gtRecsInit.length);
-        causalDatasetInit = syntheticNeeded > 0
-          ? [...gtRecsInit, ...await generateCausalDataset(syntheticNeeded)]
-          : gtRecsInit;
-      } else {
-        causalDatasetInit = await generateCausalDataset(60);
-      }
-      const causalResult = runCausalDiscovery(causalDatasetInit);
-      lastCausalDiscoveryCycle = cycleCount;
-      if (causalResult.designGuidance.length > 0) {
-        causalDesignGuidance = causalResult.designGuidance.map(g => ({ variable: g.variable, direction: g.direction, causalImpactOnTc: g.causalImpactOnTc }));
-      }
-      emit("log", { phase: "engine", event: "Causal discovery initialized", detail: `${causalResult.graph.edges.length} causal edges, ${causalResult.designGuidance.length} design guidance vars. Dataset=${causalDatasetInit.length}`, dataSource: "Integrated Subsystems" });
-    } catch (e: any) {
-      console.error("[Engine] bg causal discovery error:", e.message?.slice(0, 150));
-    }
+    // Theory discovery and causal discovery are NOT run at startup — they are CPU-intensive
+    // synchronous algorithms (100-pop × 60-gen symbolic regression, full causal graph analysis)
+    // that would freeze the event loop for 10-15 seconds. They run via the normal cycle
+    // scheduler (every 15 and 20 cycles respectively) once the engine is warmed up.
 
     console.log("[Engine] background subsystem seeding complete");
-  }, 15000); // Run 15s after startup — well after first learning cycle begins
+  }, 60_000); // Run 60s after startup — after first two learning cycles complete (~45s)
 
   return getStatus();
 }

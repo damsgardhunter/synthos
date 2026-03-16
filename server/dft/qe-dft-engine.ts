@@ -3,7 +3,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { promisify } from "util";
-import { binaryPath, getTempSubdir } from "./platform-utils";
+import { IS_WINDOWS, binaryPath, getTempSubdir, toWslPath } from "./platform-utils";
 
 const execFileAsync = promisify(execFile);
 import { getElementData } from "../learning/elemental-data";
@@ -3209,6 +3209,35 @@ function uniqueCalcId(prefix: string): string {
 }
 
 async function execShellAsync(cmd: string, options: { timeout?: number; env?: NodeJS.ProcessEnv; maxBuffer?: number }): Promise<string> {
+  if (IS_WINDOWS) {
+    // xTB is a Linux binary — route through WSL2.
+    // Convert Windows absolute paths (e.g. C:\Users\...) to WSL /mnt/... paths in both
+    // the command string and any single-path env var values (e.g. XTBHOME, XTBPATH).
+    // Also strip .exe from binary names — WSL doesn't use it for Linux ELFs.
+    const wslCmd = cmd
+      .replace(/[A-Za-z]:\\[^ "&'|<>]*/g, (m) => toWslPath(m))
+      .replace(/\.exe\b/g, "");
+
+    const wslEnv: NodeJS.ProcessEnv = {};
+    if (options.env) {
+      for (const [k, v] of Object.entries(options.env as Record<string, string>)) {
+        // Convert single Windows paths (not PATH/PATHEXT which contain semicolon-separated lists)
+        if (v && !v.includes(";") && /^[A-Za-z]:\\/.test(v)) {
+          wslEnv[k] = toWslPath(v);
+        } else {
+          wslEnv[k] = v;
+        }
+      }
+    }
+
+    const { stdout } = await execFileAsync("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", wslCmd], {
+      timeout: options.timeout,
+      env: wslEnv,
+      maxBuffer: options.maxBuffer,
+    });
+    return stdout;
+  }
+
   const { stdout } = await execFileAsync("/bin/sh", ["-c", cmd], {
     timeout: options.timeout,
     env: options.env as NodeJS.ProcessEnv,
@@ -3387,7 +3416,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
     };
 
     const cmd = `cd ${calcDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`;
-    if (!cmd.includes("/xtb ")) {
+    if (!cmd.includes("xtb")) {
       dftLog(`[DFT] WARNING: Geometry optimization command malformed: ${cmd.slice(0, 200)}`, "info");
       return null;
     }
@@ -4442,6 +4471,8 @@ export function getXTBStats() {
 let xtbHealthy = false;
 
 export async function checkXTBHealth(): Promise<{ available: boolean; version: string; canOptimize: boolean; canHess: boolean; error?: string }> {
+  // All child_process calls here use execFileAsync (non-blocking) to avoid freezing the event loop.
+  // Previously used execSync which blocked the event loop for up to 85s (15s + 30s + 40s timeouts × 2 retries).
   const MAX_RETRIES = 2;
   const VERSION_TIMEOUT = 15000;
   const OPT_TIMEOUT = 30000;
@@ -4467,7 +4498,13 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
     result.error = undefined;
 
     try {
-      const versionOutput = execSync(`${XTB_BIN} --version 2>&1`, { timeout: VERSION_TIMEOUT, env }).toString();
+      let versionOutput: string;
+      try {
+        const vRes = await execFileAsync(XTB_BIN, ["--version"], { timeout: VERSION_TIMEOUT, env });
+        versionOutput = vRes.stdout + vRes.stderr;
+      } catch (e: any) {
+        versionOutput = (e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "");
+      }
       const vMatch = versionOutput.match(/xtb version (\S+)/);
       result.version = vMatch ? vMatch[1] : "unknown";
       result.available = true;
@@ -4480,40 +4517,45 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
       fs.writeFileSync(path.join(testDir, "input.xyz"), h2Xyz);
 
       try {
-        const optOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`, { timeout: OPT_TIMEOUT, env }).toString();
+        let optOut: string;
+        try {
+          const oRes = await execFileAsync(XTB_BIN, ["input.xyz", "--gfn", "2", "--opt", "tight"], { cwd: testDir, timeout: OPT_TIMEOUT, env });
+          optOut = oRes.stdout + oRes.stderr;
+        } catch (e: any) {
+          optOut = (e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "");
+        }
         if (optOut.includes("normal termination")) {
           result.canOptimize = true;
           console.log(`[xTB-Health] Geometry optimization: OK`);
-        } else {
-          console.log(`[xTB-Health] Geometry optimization: completed but no normal termination marker`);
-          result.canOptimize = optOut.includes("TOTAL ENERGY");
-        }
-      } catch (e: any) {
-        const msg = e.stdout?.toString() || e.message || "";
-        if (msg.includes("TOTAL ENERGY")) {
+        } else if (optOut.includes("TOTAL ENERGY")) {
           result.canOptimize = true;
           console.log(`[xTB-Health] Geometry optimization: OK (non-zero exit but energy computed)`);
         } else {
-          console.log(`[xTB-Health] Geometry optimization: FAILED (attempt ${attempt}) — ${msg.slice(0, 200)}`);
+          console.log(`[xTB-Health] Geometry optimization: FAILED (attempt ${attempt}) — ${optOut.slice(0, 200)}`);
         }
+      } catch (e: any) {
+        console.log(`[xTB-Health] Geometry optimization: FAILED (attempt ${attempt}) — ${e.message?.slice(0, 200)}`);
       }
 
       try {
-        const hessOut = execSync(`cd ${testDir} && ${XTB_BIN} input.xyz --gfn 2 --hess 2>&1`, { timeout: HESS_TIMEOUT, env }).toString();
+        let hessOut: string;
+        try {
+          const hRes = await execFileAsync(XTB_BIN, ["input.xyz", "--gfn", "2", "--hess"], { cwd: testDir, timeout: HESS_TIMEOUT, env });
+          hessOut = hRes.stdout + hRes.stderr;
+        } catch (e: any) {
+          hessOut = (e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "");
+        }
         if (hessOut.includes("projected vibrational frequencies") || hessOut.includes("normal termination")) {
           result.canHess = true;
           console.log(`[xTB-Health] Hessian calculation: OK`);
-        } else {
-          console.log(`[xTB-Health] Hessian calculation: completed but missing expected output`);
-        }
-      } catch (e: any) {
-        const msg = e.stdout?.toString() || e.message || "";
-        if (msg.includes("vibrational frequencies")) {
+        } else if (hessOut.includes("vibrational frequencies")) {
           result.canHess = true;
           console.log(`[xTB-Health] Hessian calculation: OK (non-zero exit but frequencies computed)`);
         } else {
-          console.log(`[xTB-Health] Hessian calculation: FAILED (attempt ${attempt}) — ${msg.slice(0, 200)}`);
+          console.log(`[xTB-Health] Hessian calculation: FAILED (attempt ${attempt}) — ${hessOut.slice(0, 200)}`);
         }
+      } catch (e: any) {
+        console.log(`[xTB-Health] Hessian calculation: FAILED (attempt ${attempt}) — ${e.message?.slice(0, 200)}`);
       }
 
       try { fs.rmSync(testDir, { recursive: true, force: true }); } catch {}

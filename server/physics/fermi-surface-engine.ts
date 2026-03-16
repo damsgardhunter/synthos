@@ -268,6 +268,7 @@ function evaluateBZGrid(
   formula: string,
   gridPoints: number[][],
   pressureGpa: number = 0,
+  maxMs: number = 150,
 ): { evaluations: BZEvaluation[]; fermiEnergy: number; nOrbitals: number } {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -303,7 +304,11 @@ function evaluateBZGrid(
 
   const evaluations: BZEvaluation[] = [];
 
+  // Hard time budget: abort after maxMs to keep event loop responsive.
+  // Without this, a 24³ fine grid × 128-orbital diagonalization blocks for 8+ seconds.
+  const bzLoopStart = Date.now();
   for (const kpt of gridPoints) {
+    if (evaluations.length > 0 && (Date.now() - bzLoopStart) > maxMs) break;
     const result = buildHamiltonianAtKForFS(kpt, elements, counts, latticeConstant, nOrbitals, formula);
     evaluations.push({
       k: kpt,
@@ -1486,7 +1491,8 @@ export function computeFermiSurface(formula: string, pressureGpa: number = 0): F
   const FINE_GRID = 24;
 
   const screenGridPoints = generateBZGrid(latticeType, SCREENING_GRID, caRatio);
-  const screenResult = evaluateBZGrid(formula, screenGridPoints, pressureGpa);
+  // 80ms budget: keeps total computeFermiSurface ≤ 230ms so a batch of 5 candidates stays < 2s heartbeat
+  const screenResult = evaluateBZGrid(formula, screenGridPoints, pressureGpa, 80);
   const screenPockets = detectFermiPockets(screenResult.evaluations, screenResult.fermiEnergy, screenResult.nOrbitals);
 
   const significantScreenPockets = screenPockets.filter(p => p.volume >= 0.005);
@@ -1503,7 +1509,8 @@ export function computeFermiSurface(formula: string, pressureGpa: number = 0): F
 
   if (needsFineGrid) {
     const fineGridPoints = generateBZGrid(latticeType, FINE_GRID, caRatio);
-    const fineResult = evaluateBZGrid(formula, fineGridPoints, pressureGpa);
+    // 150ms budget: 288 IBZ k-points × 30ms = 8640ms without budget → 8+ second freeze
+    const fineResult = evaluateBZGrid(formula, fineGridPoints, pressureGpa, 150);
     evaluations = fineResult.evaluations;
     fermiEnergy = fineResult.fermiEnergy;
     nOrbitals = fineResult.nOrbitals;
