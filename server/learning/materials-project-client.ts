@@ -491,7 +491,13 @@ async function fetchMetallicSummaryBatch(limit: number, skip: number): Promise<a
       material_ids: chunk.join(","),
       _limit: String(chunk.length),
     });
-    if (fullData?.data) all.push(...fullData.data);
+    if (fullData?.data) {
+      if (i === 0 && fullData.data[0]) {
+        const sample = fullData.data[0];
+        console.log(`[MP-Batch] Sample record keys: ${Object.keys(sample).join(",")} | formula_pretty=${sample.formula_pretty} | formula=${sample.formula}`);
+      }
+      all.push(...fullData.data);
+    }
   }
   return all;
 }
