@@ -15,6 +15,11 @@ const WORK_DIR = getTempSubdir("disorder-work");
 
 function execXtbCmd(cmd: string, opts: { timeout: number; env: Record<string, string>; maxBuffer?: number }): string {
   if (IS_WINDOWS) {
+    // Native Windows binary (.exe) — run directly; path translation to /mnt/... would break it
+    if (XTB_BIN.endsWith(".exe")) {
+      return execSync(cmd, opts).toString();
+    }
+    // Linux ELF — route through WSL with path translation
     const wslCmd = cmd.replace(/[A-Za-z]:\\[^ "&'|<>]*/g, (m) => toWslPath(m));
     return execSync(`wsl.exe -d Ubuntu -- bash -c "${wslCmd.replace(/"/g, '\\"')}"`, opts).toString();
   }

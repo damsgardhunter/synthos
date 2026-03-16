@@ -27,9 +27,13 @@ const OPT_TIMEOUT_MS = 45_000;
 // Cross-platform shell executor: routes through WSL2 on Windows so Linux xTB binary works.
 function execXtbCmd(cmd: string, opts: { timeout: number; env: Record<string, string>; maxBuffer: number }): string {
   if (IS_WINDOWS) {
-    // Convert all Windows paths in the command to WSL /mnt/... paths
+    // Native Windows binary (.exe) — run directly. Routing through WSL would translate
+    // all paths to /mnt/c/... which a PE-format Windows xtb.exe cannot resolve.
+    if (XTB_BIN.endsWith(".exe")) {
+      return execSync(cmd, { timeout: opts.timeout, maxBuffer: opts.maxBuffer, env: opts.env }).toString();
+    }
+    // Linux ELF binary (e.g. from xtb-dist/) — route through WSL, translating paths
     const wslCmd = cmd.replace(/[A-Za-z]:\\[^ "&'|<>]*/g, (m) => toWslPath(m));
-    // Translate XTBHOME/XTBPATH env vars to WSL paths so xTB can find its param files
     const wslHome = opts.env.XTBHOME ? toWslPath(opts.env.XTBHOME) : "";
     const wslPath = opts.env.XTBPATH ? toWslPath(opts.env.XTBPATH) : "";
     const envPrefix = [
@@ -159,9 +163,11 @@ function isXtbAvailable(): boolean {
       _xtbAvailableCache = false;
       return false;
     }
-    // On Windows the file exists as a Windows path, but xTB runs through WSL.
-    // Verify the binary is actually executable inside WSL before committing to it.
-    if (IS_WINDOWS) {
+    if (IS_WINDOWS && XTB_BIN.endsWith(".exe")) {
+      // Native Windows binary — test directly without WSL
+      execSync(`"${XTB_BIN}" --version`, { timeout: 8000, stdio: "pipe" });
+    } else if (IS_WINDOWS) {
+      // Linux ELF binary — verify it runs inside WSL
       const wslBin = toWslPath(XTB_BIN);
       execSync(`wsl.exe -d Ubuntu -- bash -c "test -x '${wslBin}' && '${wslBin}' --version"`, {
         timeout: 8000,
