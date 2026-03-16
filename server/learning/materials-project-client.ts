@@ -413,7 +413,6 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
   try {
     const data = await mpFetch("/materials/summary/", {
       is_metal: "true",
-      fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,nsites,is_metal",
       _limit: String(limit),
       _skip: String(skip),
     });
@@ -512,7 +511,6 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
     try {
       const data = await mpFetch("/materials/summary/", {
         is_metal: "true",
-        fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,symmetry,nsites,is_metal",
         _limit: "500",
       });
 
