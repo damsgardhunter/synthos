@@ -1064,6 +1064,42 @@ async function ensurePseudopotential(element: string): Promise<string> {
           try { fs.unlinkSync(tmpFile); } catch {}
         } catch {}
       }
+
+      // Last-resort Linux fallback: extract SSSP .deb from repo root without sudo.
+      // `dpkg -x <deb> <dir>` extracts to a local directory — no privileges needed.
+      try {
+        const debFile = path.join(PROJECT_ROOT, "quantum-espresso-data-sssp_1.3.0-2_all.deb");
+        if (fs.existsSync(debFile)) {
+          const extractDir = path.join(PP_SOURCE_DIR, ".sssp-extract");
+          if (!fs.existsSync(path.join(extractDir, "usr"))) {
+            console.log(`[QE-Worker] Extracting SSSP .deb to ${extractDir} (no sudo needed)...`);
+            fs.mkdirSync(extractDir, { recursive: true });
+            execSync(`dpkg -x "${debFile}" "${extractDir}"`, { timeout: 30000, stdio: "pipe" });
+          }
+          // SSSP installs to usr/share/espresso/pseudo/ inside the extract dir
+          const ssspDir = path.join(extractDir, "usr/share/espresso/pseudo");
+          if (fs.existsSync(ssspDir)) {
+            const entries = fs.readdirSync(ssspDir);
+            const candidates = entries.filter(f =>
+              (f.startsWith(element + ".") || f.startsWith(element + "_")) &&
+              (f.endsWith(".UPF") || f.endsWith(".upf")) &&
+              !f.includes("pz")
+            );
+            const match = candidates.sort((a, b) => (a.includes("rel") ? 1 : 0) - (b.includes("rel") ? 1 : 0))[0];
+            if (match) {
+              fs.copyFileSync(path.join(ssspDir, match), tmpFile);
+              if (validatePseudopotential(tmpFile)) {
+                fs.renameSync(tmpFile, ppFile);
+                console.log(`[QE-Worker] Copied PP for ${element} from extracted SSSP .deb (${match})`);
+                return ppFile;
+              }
+              try { fs.unlinkSync(tmpFile); } catch {}
+            }
+          }
+        }
+      } catch (debErr: any) {
+        console.warn(`[QE-Worker] SSSP .deb extract failed for ${element}: ${debErr?.message?.slice(0, 120)}`);
+      }
     }
 
     // On Windows: also check WSL system pseudo dirs (apt-installed QE pseudopotentials)
