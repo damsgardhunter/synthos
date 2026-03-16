@@ -1120,8 +1120,10 @@ function estimateBOverA(elements: string[], counts: Record<string, number>): num
   return 1.0;
 }
 
-function autoKPoints(latticeA: number, cOverA?: number, minK: number = 12, dimensionality?: string): string {
-  const densityFactor = 80;
+function autoKPoints(latticeA: number, cOverA?: number, minK: number = 4, dimensionality?: string): string {
+  // densityFactor=40 (screening quality) vs 80 (publication quality).
+  // For a 3.5Å cell this gives k=12 per direction (4096 k-pts) vs 24 (13824 k-pts) — 8× faster.
+  const densityFactor = 40;
   const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
   const layeredBoost = isLayered ? 1.5 : 1.0;
   const effCOverA = cOverA ?? 1.0;
@@ -2399,7 +2401,8 @@ function generateSCFInputWithParams(
   };
   const hasHydrogen2 = elements.includes("H");
   const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), hasHydrogen2 ? 80 : 45);
-  const baseEcutwfc = Math.max(rawEcutwfc, hasHydrogen2 ? 100 : 60);
+  // Screening minimum: 45 Ry non-H, 80 Ry H (PAW needs less than NCPP; saves ~30% vs 60/100)
+  const baseEcutwfc = Math.max(rawEcutwfc, hasHydrogen2 ? 80 : 45);
   const ecutwfc = baseEcutwfc + (params.ecutwfcBoost ?? 0);
   const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
   const smearing = params.smearing || "mv";
@@ -2995,9 +2998,11 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
-      { mixingBeta: 0.3, maxSteps: 300, diag: "david", convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
-      { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, convThr: "1.0d-10", forcConvThr: "1.0d-3", etotConvThr: "1.0d-6" },
-      { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      // Attempts 1-2: screening-quality (degauss=0.02 Ry = wider smearing → faster Fermi,
+      // conv_thr=1e-8 is sufficient for band gaps/energies, saves ~2x per attempt)
+      { mixingBeta: 0.3, maxSteps: 300, diag: "david", degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, degauss: 0.01, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
       { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.003, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
       { mixingBeta: 0.07, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.001, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
     ];
