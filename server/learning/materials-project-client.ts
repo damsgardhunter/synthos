@@ -123,7 +123,7 @@ function normalizeFormula(formula: string): string {
   return formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));
 }
 
-async function mpFetch(endpoint: string, params: Record<string, string> = {}): Promise<any | null> {
+async function mpFetch(endpoint: string, params: Record<string, string> = {}, attempt = 1): Promise<any | null> {
   const apiKey = getApiKey();
   if (!apiKey) return null;
 
@@ -138,7 +138,7 @@ async function mpFetch(endpoint: string, params: Record<string, string> = {}): P
         "X-API-KEY": apiKey,
         "Accept": "application/json",
       },
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(30000),
     });
 
     if (!response.ok) {
@@ -154,8 +154,15 @@ async function mpFetch(endpoint: string, params: Record<string, string> = {}): P
 
     return await response.json();
   } catch (err: any) {
-    if (err?.name !== "AbortError") {
-      console.log(`[MP API] Request failed: ${err?.message || "unknown"}`);
+    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+      console.warn(`[MP API] Timeout (30s) for ${endpoint} (attempt ${attempt})`);
+    } else {
+      const cause = err?.cause?.message || err?.cause?.code || "";
+      console.warn(`[MP API] Request failed for ${endpoint} (attempt ${attempt}): ${err?.message || "unknown"}${cause ? ` (cause: ${cause})` : ""}`);
+    }
+    if (attempt < 3) {
+      await new Promise(r => setTimeout(r, attempt * 3000));
+      return mpFetch(endpoint, params, attempt + 1);
     }
     return null;
   }
