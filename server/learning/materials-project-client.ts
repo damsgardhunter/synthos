@@ -178,7 +178,6 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
 
   const data = await mpFetch("/materials/summary/", {
     formula: normalizedFormula,
-    fields: "material_id,formula_pretty,band_gap,formation_energy_per_atom,energy_above_hull,is_stable,symmetry,volume,density,nsites,total_magnetization,is_metal",
     _limit: "1",
   });
 
@@ -211,11 +210,12 @@ export async function fetchElasticity(formula: string): Promise<MPElasticityData
   const cached = await getCachedData(formula, "elasticity");
   if (cached) return cached as MPElasticityData;
 
-  const normalizedFormula = normalizeFormula(formula);
+  // Elasticity endpoint rejects both formula and fields; look up material_id first
+  const summary = await fetchSummary(formula);
+  if (!summary?.mpId) return null;
 
   const data = await mpFetch("/materials/elasticity/", {
-    formula: normalizedFormula,
-    fields: "material_id,bulk_modulus,shear_modulus,young_modulus,poisson_ratio",
+    material_ids: summary.mpId,
     _limit: "1",
   });
 
@@ -236,7 +236,7 @@ export async function fetchElasticity(formula: string): Promise<MPElasticityData
     shearModulusReuss: sm.reuss ?? sm.vrh ?? 0,
   };
 
-  await setCachedData(formula, "elasticity", result, entry.material_id);
+  await setCachedData(formula, "elasticity", result, summary.mpId);
   return result;
 }
 
@@ -248,7 +248,6 @@ export async function fetchMagnetism(formula: string): Promise<MPMagnetismData |
 
   const data = await mpFetch("/materials/magnetism/", {
     formula: normalizedFormula,
-    fields: "material_id,ordering,total_magnetization,total_magnetization_normalized_formula_units,types",
     _limit: "1",
   });
 
@@ -274,7 +273,6 @@ export async function fetchPhonon(formula: string): Promise<MPPhononData | null>
 
   const data = await mpFetch("/materials/phonon/", {
     formula: normalizedFormula,
-    fields: "material_id,last_phonon_freq,ph_bs,ph_dos",
     _limit: "1",
   });
 
@@ -304,7 +302,6 @@ export async function fetchElectronicStructure(formula: string): Promise<MPElect
 
   const data = await mpFetch("/materials/electronic_structure/", {
     formula: normalizedFormula,
-    fields: "material_id,band_gap,efermi,is_metal",
     _limit: "1",
   });
 
@@ -336,7 +333,6 @@ export async function fetchThermo(formula: string): Promise<MPThermoData | null>
 
   const data = await mpFetch("/materials/thermo/", {
     formula: normalizedFormula,
-    fields: "material_id,energy_above_hull,formation_energy_per_atom,is_stable,uncorrected_energy_per_atom",
     _limit: "1",
   });
 
