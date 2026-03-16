@@ -2,14 +2,24 @@ import { getElementData } from "../learning/elemental-data";
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { binaryPath, getTempSubdir, IS_WINDOWS, toWslPath } from "../dft/platform-utils";
 import { computeDisorderMetrics, recordMetricsAnalysis, extractMLFeatures, type DisorderMetrics } from "./disorder-metrics";
 import { checkValenceSumRule } from "../physics/advanced-constraints";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
-const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
-const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
-const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
-const WORK_DIR = path.join(PROJECT_ROOT, "server/dft/disorder-work");
+// XTB_BIN: use env override (set XTB_BIN=/usr/bin/xtb on GCP where xtb-dist isn't deployed)
+const XTB_BIN = binaryPath(process.env.XTB_BIN ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
+const XTB_HOME = process.env.XTBHOME ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist");
+const XTB_PARAM = process.env.XTBPATH ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
+const WORK_DIR = getTempSubdir("disorder-work");
+
+function execXtbCmd(cmd: string, opts: { timeout: number; env: Record<string, string>; maxBuffer?: number }): string {
+  if (IS_WINDOWS) {
+    const wslCmd = cmd.replace(/[A-Za-z]:\\[^ "&'|<>]*/g, (m) => toWslPath(m));
+    return execSync(`wsl.exe -d Ubuntu -- bash -c "${wslCmd.replace(/"/g, '\\"')}"`, opts).toString();
+  }
+  return execSync(cmd, opts).toString();
+}
 
 function isXtbAvailable(): boolean {
   try {
@@ -564,7 +574,7 @@ function introduceAmorphousXtbMD(
     fs.writeFileSync(path.join(calcDir, "md_heat.inp"), mdInput);
 
     const heatCmd = `cd ${calcDir} && ${XTB_BIN} structure.xyz --gfn 2 --md --input md_heat.inp 2>&1`;
-    const heatOutput = execSync(heatCmd, {
+    const heatOutput = execXtbCmd(heatCmd, {
       timeout: 60000,
       env,
       maxBuffer: 10 * 1024 * 1024,
@@ -608,7 +618,7 @@ function introduceAmorphousXtbMD(
 
       const quenchCmd = `cd ${calcDir} && ${XTB_BIN} quench.xyz --gfn 2 --md --input md_quench.inp 2>&1`;
       try {
-        execSync(quenchCmd, { timeout: 45000, env, maxBuffer: 10 * 1024 * 1024 });
+        execXtbCmd(quenchCmd, { timeout: 45000, env, maxBuffer: 10 * 1024 * 1024 });
       } catch {}
 
       let finalAtoms: Array<{ element: string; x: number; y: number; z: number }> | null = null;

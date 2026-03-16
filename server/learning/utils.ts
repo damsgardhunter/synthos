@@ -18,7 +18,9 @@ const REGEX_FAMILIES: Record<string, RegExp> = {
   "Cuprates": /(?:La|Y|Ba|Sr|Bi|Tl|Hg|Ca|Nd|Pr|Sm|Eu|Gd).*Cu.*O|cuprate|YBCO|BSCCO/i,
   "Heavy Fermions": /(?:Ce|Yb|U|Pu|Np)(?:In|Co|Rh|Ir|Pd|Pt|Ni|Cu|Al|Ga|Ge|Si|Sn|Sb|Bi)\d|CeCoIn|UPt|UBe|CeCu/i,
   "Pnictides": /Fe.*As|Ba.*Fe.*As|Sr.*Fe.*As|La.*Fe.*As|Fe.*P(?:[^btdm]|$)|pnictide/i,
-  "Chalcogenides": /(?:Fe|Nb|Ta|Mo|W|Bi|Sb|Cu|Cd|Zn|Sn|Pb|In|Ga|Ti|Zr|Hf|V|Cr|Mn|Co|Ni|Pd|Pt|Re|Ir)(?:Se|Te)\d*|FeSe|FeTe|NbSe|TaSe|chalcogenide/i,
+  // Allow digits between metal and chalcogen (e.g. Fe2La2Te5, Nb2Se3) and include
+  // rare-earths + alkaline-earths that the old pattern missed entirely.
+  "Chalcogenides": /(?:Fe|Nb|Ta|Mo|W|Bi|Sb|Cu|Cd|Zn|Sn|Pb|In|Ga|Ti|Zr|Hf|V|Cr|Mn|Co|Ni|Pd|Pt|Re|Ir|La|Ce|Pr|Nd|Sm|Eu|Gd|Tb|Dy|Ho|Er|Tm|Yb|Lu|Y|Ba|Sr|Ca|Ge|Ag|Rh|Ru|Os|Au|Tl)\d*(?:Se|Te)|FeSe|FeTe|NbSe|TaSe|chalcogenide/i,
   "Silicides": /(?:Fe|Co|Ni|Mn|Cr|V|Ti|Nb|Mo|W|Ru|Os|Ir|Pt|Pd|Re)Si\d|silicide|FeSi|CoSi|MnSi/i,
   "Phosphides": /(?:Fe|Co|Ni|Mn|Ga|In|Zn|Cd|Al|B)P\d*(?:[^btdm]|$)|phosphide|GaP|InP/i,
   "Intermetallics": /(?:Nb|V|Nb|Ta).*(?:Sn|Ge|Si|Ga|Al)|Nb.*Ti|NbSn|V3Si|Nb3Ge|Nb3Al|intermetallic/i,
@@ -51,6 +53,15 @@ export function classifyFamily(formula: string): string {
   const hasPnictideAnion = PNICTIDE_ANION.some(el => has(el));
   const hasSpacer = PNICTIDE_SPACER.some(el => has(el));
   if (hasPnictideTM && hasPnictideAnion && (hasSpacer || elements.length >= 3)) return "Pnictides";
+
+  // Chalcogenide count-based fallback: catches multi-element formulas that the
+  // regex misses (e.g. Fe2La2Te5 where metal and chalcogen aren't adjacent in string).
+  const CHALCOGEN_TM = ["Fe","Co","Ni","Mn","Cr","V","Ti","Nb","Ta","Mo","W","Cu","Bi","Pb",
+    "Sn","In","Ge","Zr","Hf","Re","Ir","Pd","Pt","Ru","Rh","Os","La","Ce","Pr","Nd","Sm",
+    "Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu","Y","Ba","Sr","Ca","Zn","Cd","Ag","Ga","Sb","Tl"];
+  const hasSeTe = has("Se") || has("Te");
+  const hasChalcTM = CHALCOGEN_TM.some(el => has(el));
+  if (hasSeTe && hasChalcTM) return "Chalcogenides";
 
   if (has("H") && hasMetal && !has("O") && !has("S") && !has("Se") && elements.length <= 3) return "Hydrides";
   if (has("S") && hasMetal && !has("O") && !has("Se") && !has("Te") && elements.length >= 3) return "Sulfides";

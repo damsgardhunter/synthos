@@ -9,9 +9,10 @@ import { binaryPath, getTempSubdir } from "./platform-utils";
 const execAsync = promisify(exec);
 
 const PROJECT_ROOT = path.resolve(process.cwd());
-const XTB_BIN = binaryPath(path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
-const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
-const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
+// XTB_BIN: set XTB_BIN=/usr/bin/xtb on GCP (xtb-dist/ is gitignored and not deployed there)
+const XTB_BIN = binaryPath(process.env.XTB_BIN ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
+const XTB_HOME = process.env.XTBHOME ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist");
+const XTB_PARAM = process.env.XTBPATH ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 const WORK_DIR = getTempSubdir("dft_calculations");
 const DEFAULT_DISPLACEMENT_DELTA = 0.015;
 const BOHR_TO_ANG = 0.529177210903;

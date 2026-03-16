@@ -54,13 +54,18 @@ const QE_WORK_DIR = getTempSubdir("qe_calculations");
 const QE_PSEUDO_DIR = getTempSubdir("qe_pseudo");
 // When QE runs inside WSL on Windows, paths in the input file must use the /mnt/... form
 const QE_PSEUDO_DIR_INPUT = IS_WINDOWS ? toWslPath(QE_PSEUDO_DIR) : QE_PSEUDO_DIR;
-const QE_TIMEOUT_MS = 600_000;
+// 10 min was too short for complex hydrides (CeH10, ReRuH6) on GCP.
+// Default 30 min; override via QE_TIMEOUT_MS env var (e.g. 3600000 for 60 min).
+const QE_TIMEOUT_MS = parseInt(process.env.QE_TIMEOUT_MS ?? "1800000", 10);
+// QE graceful-stop margin: QE writes output and exits cleanly 60s before Node kills it.
+const QE_MAX_SECONDS = Math.floor(QE_TIMEOUT_MS / 1000) - 60;
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const PP_SOURCE_DIR = path.join(PROJECT_ROOT, "server/dft/pseudo");
-const XTB_BIN = binaryPath(path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
-const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
-const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
+// XTB_BIN: set XTB_BIN=/usr/bin/xtb on GCP (xtb-dist/ is gitignored and not deployed there)
+const XTB_BIN = binaryPath(process.env.XTB_BIN ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
+const XTB_HOME = process.env.XTBHOME ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist");
+const XTB_PARAM = process.env.XTBPATH ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
 
 function fracDistAngstrom(
   fdx: number, fdy: number, fdz: number,
@@ -1309,6 +1314,7 @@ function generateSCFInput(
   tstress = .true.,
   forc_conv_thr = 1.0d-2,
   etot_conv_thr = 1.0d-4,
+  max_seconds = ${QE_MAX_SECONDS},
 /
 &SYSTEM
   ibrav = 0,
@@ -2430,6 +2436,7 @@ function generateSCFInputWithParams(
   tstress = .true.,
   forc_conv_thr = ${forcConvThr},
   etot_conv_thr = ${etotConvThr},
+  max_seconds = ${QE_MAX_SECONDS},
 /
 &SYSTEM
   ibrav = 0,
@@ -2518,6 +2525,7 @@ function generateVCRelaxInput(
   forc_conv_thr = 1.0d-3,
   etot_conv_thr = 1.0d-5,
   nstep = 100,
+  max_seconds = ${QE_MAX_SECONDS},
 /
 &SYSTEM
   ibrav = 0,

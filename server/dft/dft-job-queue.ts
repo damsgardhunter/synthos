@@ -84,6 +84,15 @@ export async function submitDFTJob(
     console.log(`[DFT-Queue] Formula ${formula} rejected: invalid or contains noble gas`);
     return null;
   }
+
+  // Atom count pre-filter — mirrors qe-worker limit of 16 atoms
+  const formulaAtomCounts = parseFormulaCounts(formula);
+  const formulaTotalAtoms = Object.values(formulaAtomCounts).reduce((s, v) => s + v, 0);
+  if (formulaTotalAtoms > 16) {
+    console.log(`[DFT-Queue] Formula ${formula} rejected: ${formulaTotalAtoms} atoms > 16 atom limit`);
+    return null;
+  }
+
   if (isFormulaBlocked(formula)) {
     console.log(`[DFT-Queue] Formula ${formula} blocked due to repeated failures, skipping`);
     return null;
@@ -396,6 +405,30 @@ async function processNextJob(): Promise<boolean> {
   }
 }
 
+async function cleanupOverstoichiometricJobs() {
+  try {
+    const queued = await storage.getDftJobsByStatus("queued");
+    let cancelled = 0;
+    for (const job of queued) {
+      const counts = parseFormulaCounts(job.formula);
+      const total = Object.values(counts).reduce((s, v) => s + v, 0);
+      if (total > 16) {
+        await storage.updateDftJob(job.id, {
+          status: "failed",
+          completedAt: new Date(),
+          errorMessage: `Pre-filter rejected: Too many atoms (${total}), max 16`,
+        } as any);
+        cancelled++;
+      }
+    }
+    if (cancelled > 0) {
+      console.log(`[DFT-Queue] Cancelled ${cancelled} queued overstoichiometric jobs (>16 atoms)`);
+    }
+  } catch (err: any) {
+    console.log(`[DFT-Queue] Overstoichiometric cleanup error: ${err.message}`);
+  }
+}
+
 async function cleanupStaleJobs() {
   try {
     const staleRunning = await storage.getDftJobsByStatus("running");
@@ -442,6 +475,10 @@ async function refillQueueIfLow(): Promise<number> {
       const mlFeatures = (c.mlFeatures as Record<string, any>) ?? {};
       if (mlFeatures.qeDFT) return false;
       if ((c.ensembleScore ?? 0) <= 0) return false;
+      // Atom count gate — don't queue overstoichiometric formulas that QE will reject
+      const counts = parseFormulaCounts(c.formula);
+      const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
+      if (totalAtoms > 16) return false;
       return true;
     });
 
@@ -567,6 +604,9 @@ export function startDFTWorkerLoop() {
   // but still run the queue refill loop so GCP always has work to pick up.
   if (process.env.OFFLOAD_DFT_TO_GCP === "true") {
     console.log("[DFT-Queue] OFFLOAD_DFT_TO_GCP=true — running queue-refill only (GCP worker handles calculations)");
+    // One-time cleanup of any overstoichiometric jobs already in the queue
+    cleanupOverstoichiometricJobs().catch(() => {});
+
     async function gcpRefillLoop() {
       try {
         await refillQueueIfLow();
@@ -586,6 +626,7 @@ export function startDFTWorkerLoop() {
   }
 
   cleanupStaleJobs().then(() => { lastStaleCleanup = Date.now(); }).catch(() => {});
+  cleanupOverstoichiometricJobs().catch(() => {});
 
   console.log(`[DFT-Queue] Starting DFT worker loop (poll every 30s, max ${MAX_CONCURRENT} concurrent)`);
 

@@ -13,6 +13,13 @@
  *   PSEUDO_DIR            — Pseudopotential directory
  *   ENABLE_DFT_WORKER     — "true" to run DFT loop (default: true)
  *   ENABLE_GNN_WORKER     — "true" to run GNN loop (default: true)
+ *
+ * xTB setup on GCP (xtb-dist/ is gitignored — install system xTB instead):
+ *   sudo apt-get install -y xtb          # or: conda install -c conda-forge xtb
+ *   Then add to /etc/quantum-alchemy.env:
+ *   XTB_BIN=/usr/bin/xtb
+ *   XTBHOME=/usr/share/xtb
+ *   XTBPATH=/usr/share/xtb
  */
 
 import { startDFTLoop, stopDFTLoop } from "./dft-loop";

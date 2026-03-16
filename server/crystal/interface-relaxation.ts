@@ -1,6 +1,7 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { binaryPath, getTempSubdir, IS_WINDOWS, toWslPath } from "../dft/platform-utils";
 import { getElementData } from "../learning/elemental-data";
 import type {
   HeterostructureResult,
@@ -16,11 +17,21 @@ import {
 } from "./heterostructure-generator";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
-const XTB_BIN = path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb");
-const XTB_HOME = path.join(PROJECT_ROOT, "server/dft/xtb-dist");
-const XTB_PARAM = path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
-const WORK_DIR = "/tmp/interface_relaxations";
+// XTB_BIN: use env override (set XTB_BIN=/usr/bin/xtb on GCP where xtb-dist isn't deployed)
+const XTB_BIN = binaryPath(process.env.XTB_BIN ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/bin/xtb"));
+const XTB_HOME = process.env.XTBHOME ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist");
+const XTB_PARAM = process.env.XTBPATH ?? path.join(PROJECT_ROOT, "server/dft/xtb-dist/share/xtb");
+const WORK_DIR = getTempSubdir("interface_relaxations");
 const OPT_TIMEOUT_MS = 45_000;
+
+// Cross-platform shell executor: routes through WSL2 on Windows so Linux xTB binary works.
+function execXtbCmd(cmd: string, opts: { timeout: number; env: Record<string, string>; maxBuffer: number }): string {
+  if (IS_WINDOWS) {
+    const wslCmd = cmd.replace(/[A-Za-z]:\\[^ "&'|<>]*/g, (m) => toWslPath(m));
+    return execSync(`wsl.exe -d Ubuntu -- bash -c "${wslCmd.replace(/"/g, '\\"')}"`, opts).toString();
+  }
+  return execSync(cmd, opts).toString();
+}
 
 export interface AtomCharge {
   element: string;
@@ -531,11 +542,11 @@ export async function relaxInterface(
       };
 
       const cmd = `cd ${calcDir} && ${XTB_BIN} interface.xyz --gfn 2 --opt crude 2>&1`;
-      const output = execSync(cmd, {
+      const output = execXtbCmd(cmd, {
         timeout: OPT_TIMEOUT_MS,
         env,
         maxBuffer: 10 * 1024 * 1024,
-      }).toString();
+      });
 
       if (output.includes("normal termination of xtb")) {
         xtbConverged = true;
