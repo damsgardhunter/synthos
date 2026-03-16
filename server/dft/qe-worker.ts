@@ -1022,6 +1022,38 @@ async function ensurePseudopotential(element: string): Promise<string> {
       return ppFile;
     }
 
+    // On Linux/GCP: check PSEUDO_DIR env var and system-installed PP directories
+    // (e.g. `sudo dpkg -i quantum-espresso-data-sssp_*.deb` installs to /usr/share/espresso/pseudo/)
+    if (!IS_WINDOWS) {
+      const linuxSearchDirs: string[] = [];
+      if (process.env.PSEUDO_DIR) linuxSearchDirs.push(process.env.PSEUDO_DIR);
+      linuxSearchDirs.push(
+        "/usr/share/espresso/pseudo",
+        "/usr/share/quantum-espresso/pseudo",
+        "/usr/local/share/espresso/pseudo",
+        "/opt/quantum-espresso/pseudo",
+      );
+      for (const dir of linuxSearchDirs) {
+        try {
+          if (!fs.existsSync(dir)) continue;
+          const entries = fs.readdirSync(dir);
+          // Flexible match: element name prefix + any suffix + .UPF/.upf
+          const match = entries.find(f =>
+            f.startsWith(element + ".") && (f.endsWith(".UPF") || f.endsWith(".upf"))
+          );
+          if (!match) continue;
+          const sysFile = path.join(dir, match);
+          fs.copyFileSync(sysFile, tmpFile);
+          if (validatePseudopotential(tmpFile) && validateSemicorePP(element, tmpFile)) {
+            fs.renameSync(tmpFile, ppFile);
+            console.log(`[QE-Worker] Copied valid PP for ${element} from ${dir}/${match} (${fs.statSync(ppFile).size} bytes)`);
+            return ppFile;
+          }
+          try { fs.unlinkSync(tmpFile); } catch {}
+        } catch {}
+      }
+    }
+
     // On Windows: also check WSL system pseudo dirs (apt-installed QE pseudopotentials)
     if (IS_WINDOWS) {
       const wslPseudoDirs = ["/usr/share/espresso/pseudo", "/usr/share/espresso/sssp/efficiency", "/usr/share/espresso/sssp"];
@@ -1071,7 +1103,11 @@ async function ensurePseudopotential(element: string): Promise<string> {
       }
     }
 
-    throw new Error(`No valid pseudopotential for ${element} — need a verified UPF file in ${PP_SOURCE_DIR}/${element}.UPF`);
+    throw new Error(
+      `No valid pseudopotential for ${element} — all download sources failed. ` +
+      `Fix: sudo dpkg -i quantum-espresso-data-sssp_*.deb  (installs to /usr/share/espresso/pseudo/), ` +
+      `or place a verified UPF file at ${PP_SOURCE_DIR}/${element}.UPF`
+    );
   } finally {
     if (lockFd !== null) {
       try { fs.closeSync(lockFd); } catch {}
