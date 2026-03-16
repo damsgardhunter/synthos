@@ -142,12 +142,14 @@ async function mpFetch(endpoint: string, params: Record<string, string> = {}, at
     });
 
     if (!response.ok) {
+      let body = "";
+      try { body = await response.text(); } catch {}
       if (response.status === 429) {
-        console.warn("[MP API] Rate limited (429)");
+        console.warn(`[MP API] Rate limited (429): ${body.slice(0, 300)}`);
       } else if (response.status === 403) {
-        console.warn("[MP API] Forbidden (403) — check MATERIALS_PROJECT_API_KEY");
+        console.warn(`[MP API] Forbidden (403) — check API key: ${body.slice(0, 300)}`);
       } else {
-        console.warn(`[MP API] HTTP ${response.status} for ${url.pathname}`);
+        console.warn(`[MP API] HTTP ${response.status} for ${url.pathname}?${url.searchParams}: ${body.slice(0, 500)}`);
       }
       return null;
     }
