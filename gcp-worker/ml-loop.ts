@@ -11,7 +11,7 @@
  */
 import { db } from "../server/db";
 import { mlTrainingJobs } from "@shared/schema";
-import { eq, and, or } from "drizzle-orm";
+import { eq, and, or, sql } from "drizzle-orm";
 import { seedDatasetFromArray } from "../server/crystal/crystal-structure-dataset";
 import { trainVAE as trainMaterialsVAE, exportMaterialsVAEWeights } from "../server/physics/materials-vae";
 import { initCrystalVAE, exportCrystalVAEState } from "../server/crystal/crystal-vae";
@@ -70,11 +70,11 @@ async function processJob(id: number, taskType: TaskType, inputData: any): Promi
       outputWeights = exportDiffusionState();
     }
 
+    const weightsJson = JSON.stringify(outputWeights);
     await db.execute(
-      `UPDATE ml_training_jobs
-       SET status = 'done', output_weights = $1::jsonb, completed_at = NOW()
-       WHERE id = $2`,
-      [JSON.stringify(outputWeights), id]
+      sql`UPDATE ml_training_jobs
+          SET status = 'done', output_weights = ${weightsJson}::jsonb, completed_at = NOW()
+          WHERE id = ${id}`
     );
 
     const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
@@ -82,11 +82,11 @@ async function processJob(id: number, taskType: TaskType, inputData: any): Promi
 
   } catch (err: any) {
     console.error(`[ML-GCP] Job #${id} '${taskType}' failed: ${err.message}`);
+    const errMsg = err.message?.slice(0, 1000) ?? "unknown error";
     await db.execute(
-      `UPDATE ml_training_jobs
-       SET status = 'failed', error_message = $1, completed_at = NOW()
-       WHERE id = $2`,
-      [err.message?.slice(0, 1000) ?? "unknown error", id]
+      sql`UPDATE ml_training_jobs
+          SET status = 'failed', error_message = ${errMsg}, completed_at = NOW()
+          WHERE id = ${id}`
     );
   }
 }
