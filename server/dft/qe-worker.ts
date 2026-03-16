@@ -1,4 +1,6 @@
-import { execSync } from "child_process";
+import { execSync, execFile } from "child_process";
+import { promisify } from "util";
+const execFileAsync = promisify(execFile);
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
@@ -10,13 +12,26 @@ import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
 import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
 
-// Resolve the QE binary directory at startup.
+// Resolve the QE binary directory lazily (on first DFT call).
+// Running execSync WSL probes at module-load time would block the Node.js event loop
+// for up to 10s during server startup — so we defer to first use instead.
 // On Windows (WSL2): probe for conda-forge QE 7.x install first (~/miniforge3/bin),
 // then fall back to apt install (/usr/bin).
 // On Linux/production: use Nix store path or QE_BIN_DIR env var.
 function resolveQEBinDir(): string {
   if (process.env.QE_BIN_DIR) return process.env.QE_BIN_DIR;
-  if (!IS_WINDOWS) return "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin";
+  if (!IS_WINDOWS) {
+    // Try Nix store first, then fall back to system paths (apt/conda installs on GCP/Linux)
+    const candidates = [
+      "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin",
+      "/usr/bin",
+      "/usr/local/bin",
+    ];
+    for (const dir of candidates) {
+      if (fs.existsSync(path.join(dir, "pw.x"))) return dir;
+    }
+    return candidates[0]; // default — will fail clearly with ENOENT if none found
+  }
   try {
     const home = execSync('wsl.exe -d Ubuntu -- bash -c "echo $HOME"',
       { encoding: "utf8", timeout: 5000 }).trim().replace(/\r/g, "");
@@ -27,7 +42,14 @@ function resolveQEBinDir(): string {
   } catch { /* fall through */ }
   return "/usr/bin"; // apt quantum-espresso package fallback
 }
-const QE_BIN_DIR = resolveQEBinDir();
+let _qeBinDir: string | null = null;
+// Lazy getter — first call runs the WSL probe (execSync), subsequent calls return cached value.
+// This defers the 5-10s startup block to when DFT is first actually requested.
+function getQEBinDir(): string {
+  if (_qeBinDir !== null) return _qeBinDir;
+  _qeBinDir = resolveQEBinDir();
+  return _qeBinDir;
+}
 const QE_WORK_DIR = getTempSubdir("qe_calculations");
 const QE_PSEUDO_DIR = getTempSubdir("qe_pseudo");
 // When QE runs inside WSL on Windows, paths in the input file must use the /mnt/... form
@@ -840,6 +862,37 @@ const PP_DOWNLOAD_URLS: Record<string, string> = {
   Bi: "https://pseudopotentials.quantum-espresso.org/upf_files/Bi.pbe-dn-kjpaw_psl.1.0.0.UPF",
   Sn: "https://pseudopotentials.quantum-espresso.org/upf_files/Sn.pbe-dn-kjpaw_psl.1.0.0.UPF",
   Te: "https://pseudopotentials.quantum-espresso.org/upf_files/Te.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  // Halogens
+  Cl: "https://pseudopotentials.quantum-espresso.org/upf_files/Cl.pbe-n-kjpaw_psl.1.0.0.UPF",
+  Br: "https://pseudopotentials.quantum-espresso.org/upf_files/Br.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  I:  "https://pseudopotentials.quantum-espresso.org/upf_files/I.pbe-n-kjpaw_psl.0.2.UPF",
+  // Lanthanides (4f-electron elements — frozen-f-core PAW)
+  Pr: "https://pseudopotentials.quantum-espresso.org/upf_files/Pr.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Nd: "https://pseudopotentials.quantum-espresso.org/upf_files/Nd.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Sm: "https://pseudopotentials.quantum-espresso.org/upf_files/Sm.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Eu: "https://pseudopotentials.quantum-espresso.org/upf_files/Eu.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Gd: "https://pseudopotentials.quantum-espresso.org/upf_files/Gd.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Tb: "https://pseudopotentials.quantum-espresso.org/upf_files/Tb.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Dy: "https://pseudopotentials.quantum-espresso.org/upf_files/Dy.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Ho: "https://pseudopotentials.quantum-espresso.org/upf_files/Ho.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Er: "https://pseudopotentials.quantum-espresso.org/upf_files/Er.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Tm: "https://pseudopotentials.quantum-espresso.org/upf_files/Tm.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Yb: "https://pseudopotentials.quantum-espresso.org/upf_files/Yb.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Lu: "https://pseudopotentials.quantum-espresso.org/upf_files/Lu.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  // Actinides
+  U:  "https://pseudopotentials.quantum-espresso.org/upf_files/U.pbe-spfn-kjpaw_psl.1.0.0.UPF",
+  // Alkali/alkaline-earth metals
+  Rb: "https://pseudopotentials.quantum-espresso.org/upf_files/Rb.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Cs: "https://pseudopotentials.quantum-espresso.org/upf_files/Cs.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  // Remaining transition metals
+  Re: "https://pseudopotentials.quantum-espresso.org/upf_files/Re.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Os: "https://pseudopotentials.quantum-espresso.org/upf_files/Os.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  Ir: "https://pseudopotentials.quantum-espresso.org/upf_files/Ir.pbe-spn-kjpaw_psl.1.0.0.UPF",
+  // Other
+  In: "https://pseudopotentials.quantum-espresso.org/upf_files/In.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Cd: "https://pseudopotentials.quantum-espresso.org/upf_files/Cd.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Tl: "https://pseudopotentials.quantum-espresso.org/upf_files/Tl.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  Hg: "https://pseudopotentials.quantum-espresso.org/upf_files/Hg.pbe-dn-kjpaw_psl.1.0.0.UPF",
 };
 
 const PP_FALLBACK_URLS: Record<string, string> = {
@@ -855,6 +908,23 @@ const PP_FALLBACK_URLS: Record<string, string> = {
   Ti: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Ti.pbe-spn-kjpaw_psl.1.0.0.UPF",
   Nb: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Nb.pbe-spn-kjpaw_psl.1.0.0.UPF",
   Pb: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Pb.pbe-dn-kjpaw_psl.1.0.0.UPF",
+  // Lanthanide GitHub fallbacks
+  I:  "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/I.pbe-n-kjpaw_psl.0.2.UPF",
+  Pr: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Pr.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Nd: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Nd.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Sm: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Sm.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Eu: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Eu.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Gd: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Gd.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Tb: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Tb.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Dy: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Dy.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Ho: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Ho.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Er: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Er.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Tm: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Tm.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Yb: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Yb.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  Lu: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Lu.pbe-spdfn-kjpaw_psl.1.0.0.UPF",
+  U:  "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/U.pbe-spfn-kjpaw_psl.1.0.0.UPF",
+  Ce: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Ce.pbe-spdn-kjpaw_psl.1.0.0.UPF",
+  Th: "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS/Th.pbe-spfn-kjpaw_psl.1.0.0.UPF",
 };
 
 function downloadPPToTemp(url: string, tmpFile: string): boolean {
@@ -2860,7 +2930,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       fs.writeFileSync(vcRelaxFile, vcRelaxInput);
 
       const vcResult = await runQECommand(
-        path.posix.join(QE_BIN_DIR, "pw.x"),
+        path.posix.join(getQEBinDir(), "pw.x"),
         vcRelaxFile,
         jobDir,
       );
@@ -2919,7 +2989,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${convInfo}${smearInfo})`);
 
       const scfResult = await runQECommand(
-        path.posix.join(QE_BIN_DIR, "pw.x"),
+        path.posix.join(getQEBinDir(), "pw.x"),
         scfInputFile,
         jobDir,
       );
@@ -3020,7 +3090,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Starting phonon calculation for ${formula}`);
 
       const phResult = await runQECommand(
-        path.posix.join(QE_BIN_DIR, "ph.x"),
+        path.posix.join(getQEBinDir(), "ph.x"),
         phInputFile,
         jobDir,
       );
@@ -3057,24 +3127,34 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
   return result;
 }
 
+// Cached QE availability — probed in background to avoid blocking event loop.
+// Default false; updated by scheduleQEAvailabilityProbe() called from startEngine().
+let _qeAvailable = false;
+
 export function isQEAvailable(): boolean {
-  try {
-    if (IS_WINDOWS) {
-      // On Windows, QE lives inside WSL2 Ubuntu — probe via wsl.exe + bash
-      // Check configured dir first, then common fallback locations
-      const candidates = [QE_BIN_DIR, "/usr/bin", "/usr/local/bin"].filter((v, i, a) => Boolean(v) && a.indexOf(v) === i);
-      for (const dir of candidates) {
-        const result = execSync(
-          `wsl.exe -d Ubuntu -- bash -c "test -f '${dir}/pw.x' && echo yes || echo no"`,
-          { encoding: "utf8", timeout: 5000 },
-        ).trim().replace(/\r/g, "");
-        if (result === "yes") return true;
+  return _qeAvailable; // always fast — never runs execSync
+}
+
+// Call once from startEngine() with a safe delay (e.g. 90s) to probe after startup settles.
+// The execSync WSL probes (3 candidates × 5s timeout) run inside the timer callback —
+// they block the event loop once but only after the critical startup window has passed.
+export function scheduleQEAvailabilityProbe(delayMs = 90_000): void {
+  // Use async exec to avoid blocking the event loop during the WSL probe.
+  setTimeout(async () => {
+    try {
+      if (IS_WINDOWS) {
+        const candidates = [getQEBinDir(), "/usr/bin", "/usr/local/bin"].filter((v, i, a) => Boolean(v) && a.indexOf(v) === i);
+        for (const dir of candidates) {
+          try {
+            const { stdout } = await execFileAsync("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", `test -f '${dir}/pw.x' && echo yes || echo no`], { timeout: 5000 });
+            if (stdout.trim().replace(/\r/g, "") === "yes") { _qeAvailable = true; return; }
+          } catch { /* not found in this dir */ }
+        }
+        _qeAvailable = false;
+      } else {
+        const pwx = path.join(getQEBinDir(), "pw.x");
+        _qeAvailable = fs.existsSync(pwx);
       }
-      return false;
-    }
-    const pwx = path.join(QE_BIN_DIR, "pw.x");
-    return fs.existsSync(pwx);
-  } catch {
-    return false;
-  }
+    } catch { _qeAvailable = false; }
+  }, delayMs);
 }
