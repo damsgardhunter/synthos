@@ -437,6 +437,7 @@ export async function fetchMPBatchFromAPI(limit: number, skip: number): Promise<
       console.warn(`[MP-Batch] Unexpected response shape (no .data field): ${JSON.stringify(data).slice(0, 200)}`);
       return results;
     }
+    console.log(`[MP-Batch] API returned ${data.data.length} raw records (skip=${skip}); sample keys: ${data.data[0] ? Object.keys(data.data[0]).join(",") : "none"}`);
     for (const item of data.data) {
       const formula = normalizeFormula(item.formula_pretty ?? "");
       if (!formula) continue;
@@ -528,6 +529,7 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
       });
 
       if (data?.data) {
+        console.log(`[MP-GNNSeed] API returned ${data.data.length} raw records; sample keys: ${data.data[0] ? Object.keys(data.data[0]).join(",") : "none"}`);
         let fetched = 0;
         for (const item of data.data) {
           const formula = normalizeFormula(item.formula_pretty ?? "");
