@@ -16,26 +16,38 @@ const MP_MAX_CACHE = 10_000;        // stop fetching after this many cached reco
 const MP_SKIP_STATE_KEY = "mp_batch_skip";
 let running = true;
 
+// In-memory skip counter — primary source of truth. DB write is best-effort.
+let _mpSkip = 0;
+let _mpSkipLoaded = false;
+
 // ── MP progressive fetch ─────────────────────────────────────────────────────
 
 async function getMPSkip(): Promise<number> {
+  if (_mpSkipLoaded) return _mpSkip;
   try {
     const rows = await db.execute(
       `SELECT value FROM system_state WHERE key = '${MP_SKIP_STATE_KEY}'`
     );
     const row = (rows as any).rows?.[0] ?? (Array.isArray(rows) ? rows[0] : undefined);
-    return Number((row?.value as any)?.skip ?? 0);
+    _mpSkip = Number((row?.value as any)?.skip ?? 0);
   } catch {
-    return 0;
+    // DB not yet available — start from 0
   }
+  _mpSkipLoaded = true;
+  return _mpSkip;
 }
 
 async function setMPSkip(skip: number): Promise<void> {
-  await db.execute(
-    `INSERT INTO system_state (key, value, updated_at)
-     VALUES ('${MP_SKIP_STATE_KEY}', '{"skip":${skip}}', NOW())
-     ON CONFLICT (key) DO UPDATE SET value = '{"skip":${skip}}', updated_at = NOW()`
-  );
+  _mpSkip = skip; // always update in-memory immediately
+  try {
+    await db.execute(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('${MP_SKIP_STATE_KEY}', '{"skip":${skip}}', NOW())
+       ON CONFLICT (key) DO UPDATE SET value = '{"skip":${skip}}', updated_at = NOW()`
+    );
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] setMPSkip DB write failed (using in-memory ${skip}): ${err.message?.slice(0,80)}`);
+  }
 }
 
 async function getCachedMPCount(): Promise<number> {
@@ -108,6 +120,30 @@ function computeMetrics(
   return { r2, mae, rmse };
 }
 
+// ── MP augmentation (Tc=0 contrast examples) ─────────────────────────────────
+
+async function loadMPContrastSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
+  try {
+    const rows = await db.execute(
+      `SELECT formula, data FROM mp_material_cache WHERE data_type = 'summary' LIMIT 2000`
+    );
+    const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    const samples: TrainingSample[] = [];
+    for (const row of items) {
+      const formula = row.formula as string;
+      if (!formula || existingFormulas.has(formula)) continue;
+      const d = row.data as any;
+      if (!d) continue;
+      // Only use metallic materials with near-zero band gap as Tc=0 contrast examples
+      if ((d.bandGap ?? 1) > 0.1) continue;
+      samples.push({ formula, tc: 0, formationEnergy: d.formationEnergyPerAtom ?? undefined, structure: undefined, prototype: undefined });
+    }
+    return samples;
+  } catch {
+    return [];
+  }
+}
+
 // ── Job processing ────────────────────────────────────────────────────────────
 
 async function processNextGnnJob(): Promise<boolean> {
@@ -128,10 +164,18 @@ async function processNextGnnJob(): Promise<boolean> {
   if (!job) return false;
 
   const jobId: number = job.id;
-  const trainingData: TrainingSample[] = job.training_data as TrainingSample[];
+  let trainingData: TrainingSample[] = job.training_data as TrainingSample[];
   const datasetSize: number = job.dataset_size ?? trainingData.length;
 
-  console.log(`[GNN-GCP] Starting training job #${jobId} — ${datasetSize} samples`);
+  // Augment with MP metallic materials (Tc=0) so GNN learns contrast with SCs
+  const existingFormulas = new Set(trainingData.map(s => s.formula));
+  const mpContrast = await loadMPContrastSamples(existingFormulas);
+  if (mpContrast.length > 0) {
+    trainingData = [...trainingData, ...mpContrast];
+    console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpContrast.length} MP contrast samples (Tc=0) — total ${trainingData.length}`);
+  }
+
+  console.log(`[GNN-GCP] Starting training job #${jobId} — ${datasetSize} SC samples + ${mpContrast.length} MP contrast`);
   const startMs = Date.now();
 
   try {
