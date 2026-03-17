@@ -16,22 +16,18 @@ const EXPLORATION_FRACTION = 0.3;
 const JOB_STAGGER_MS = 2000;
 const STALE_CLEANUP_INTERVAL_MS = 5 * 60_000;
 
-// Two-tier stability gate (eV/atom above convex hull):
+// Stability gate for the EXPLOIT pool only (eV/atom above convex hull):
+//   0.5 eV/atom — strict; Miedema ±0.2 eV/atom error means up to 0.5 eV is
+//   plausibly stable. Only high-confidence exploit candidates are gated here.
 //
-//   EXPLOIT gate (0.5 eV/atom): strict — candidates here have the highest ML scores
-//   and should be close to known-stable structures; Miedema ±0.2 eV/atom error means
-//   anything up to 0.5 eV is plausibly stable.
+// The EXPLORE pool has NO hull-distance gate:
+//   Exploration deliberately targets uncertain / metastable regions. Miedema
+//   estimates systematically over-penalise novel phases (A15, high-pressure
+//   hydrides, Laves) by 0.3–0.8 eV/atom. Applying any hard gate to explore
+//   causes complete queue starvation. DFT itself is the stability filter.
 //
-//   EXPLORE gate (1.5 eV/atom): relaxed — exploration intentionally targets uncertain,
-//   possibly metastable regions. Metastable A15/Laves/hydride phases routinely sit
-//   0.5–1.5 eV above hull on analytical estimates but are synthesisable under pressure.
-//   Setting a hard exploit-level gate here causes complete queue starvation when all
-//   candidates land 0.5–1.5 eV on Miedema estimates alone.
-//
-//   Both gates admit null hull distance (unknown) — analytical estimates may never
-//   have run for novel formulas.
-const STABILITY_GATE_EV_ATOM = 0.5;           // exploit pool gate
-const EXPLORE_STABILITY_GATE_EV_ATOM = 1.5;   // explore pool gate
+//   Null hull distance (unknown) is always admitted in both pools.
+const STABILITY_GATE_EV_ATOM = 0.5; // exploit pool only; explore pool is ungated
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -498,10 +494,10 @@ async function refillQueueIfLow(): Promise<number> {
     const formulasToCheck = preFiltered.map(c => c.formula);
     const structureMap = await storage.getCrystalStructuresByFormulas(formulasToCheck);
 
-    // Build two-tier pools using separate stability gates.
-    // Exploit pool: strict gate (STABILITY_GATE_EV_ATOM) — only queue high-confidence candidates.
-    // Explore pool: relaxed gate (EXPLORE_STABILITY_GATE_EV_ATOM) — include metastable candidates
-    //   whose true stability is uncertain (Miedema estimates have ±0.2 eV/atom error).
+    // Build two pools with separate stability policies.
+    // Exploit pool: strict gate (STABILITY_GATE_EV_ATOM = 0.5 eV/atom).
+    // Explore pool: NO gate — DFT is the stability filter; Miedema overestimates
+    //               metastable phase instability by 0.3–0.8 eV/atom.
     let skippedUnstable = 0;
 
     const exploitPool: typeof preFiltered = [];
@@ -513,12 +509,13 @@ async function refillQueueIfLow(): Promise<number> {
       // Null hull distance = unknown → treat as 0 (allow through)
       const bestHullDist = Math.min(...structures.map(s => s.convexHullDistance ?? 0));
       if (bestHullDist <= STABILITY_GATE_EV_ATOM) {
-        exploitPool.push(c);
+        exploitPool.push(c); // passes strict gate → eligible for both pools
         explorePool.push(c);
-      } else if (bestHullDist <= EXPLORE_STABILITY_GATE_EV_ATOM) {
-        explorePool.push(c); // explore only — too metastable for high-priority exploit
       } else {
-        skippedUnstable++;  // beyond explore gate — skip entirely
+        // Above exploit gate: only explore (no upper hull-distance limit for explore)
+        explorePool.push(c);
+        // Count as "unstable for exploit" for diagnostic logging
+        skippedUnstable++;
       }
     }
 
@@ -609,7 +606,15 @@ async function refillQueueIfLow(): Promise<number> {
     skippedNoStructure = preFiltered.length - withStructure;
 
     if (submitted > 0 || refillErrors > 0 || skippedNoStructure > 0 || skippedUnstable > 0) {
-      console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (${exploitSubmitted} exploit + ${exploreSubmitted} explore, queue was ${queueSize}/${MIN_QUEUE_SIZE})${skippedNoStructure > 0 ? `, ${skippedNoStructure} skipped (no structure)` : ""}${skippedUnstable > 0 ? `, ${skippedUnstable} rejected by stability gate (hull dist > ${STABILITY_GATE_EV_ATOM} eV/atom)` : ""}${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
+      console.log(
+        `[DFT-Queue] Refilled queue with ${submitted} candidates ` +
+        `(${exploitSubmitted} exploit + ${exploreSubmitted} explore, queue was ${queueSize}/${MIN_QUEUE_SIZE})` +
+        (skippedNoStructure > 0 ? `, ${skippedNoStructure} skipped (no structure)` : "") +
+        (skippedUnstable > 0
+          ? `, ${skippedUnstable} above exploit gate (>${STABILITY_GATE_EV_ATOM} eV/atom hull, explore-eligible)`
+          : "") +
+        (refillErrors > 0 ? `, ${refillErrors} insert errors` : ""),
+      );
     }
     return submitted;
   } catch (err: any) {
