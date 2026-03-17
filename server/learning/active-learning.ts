@@ -1241,7 +1241,11 @@ async function retrainGNNWithEnrichedData(
   emit: EventEmitter,
   enrichedSnapshot?: SuperconductorCandidate[]
 ): Promise<{ r2Before: number; maeBefore: number; r2After: number; maeAfter: number }> {
-  const validationBefore = await validateOnHeldOut();
+  // When GNN is offloaded to GCP, skip the held-out validation passes — they run
+  // extractFeatures() synchronously on ~100 samples (35s each pass, 70s total) and
+  // the local GNN weights are stale anyway. GCP logs the real metrics.
+  const gcpMode = process.env.OFFLOAD_GNN_TO_GCP === "true";
+  const validationBefore = gcpMode ? { r2: 0, mse: 0 } : await validateOnHeldOut();
   const r2Before = validationBefore.r2;
   const maeBefore = Math.sqrt(validationBefore.mse);
 
@@ -1403,7 +1407,7 @@ async function retrainGNNWithEnrichedData(
 
   const xgbResult = await retrainXGBoostFromEvaluated();
 
-  const validationAfter = await validateOnHeldOut();
+  const validationAfter = gcpMode ? { r2: 0, mse: 0 } : await validateOnHeldOut();
   const r2After = validationAfter.r2;
   const maeAfter = Math.sqrt(validationAfter.mse);
 
