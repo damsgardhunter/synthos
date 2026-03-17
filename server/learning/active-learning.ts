@@ -22,6 +22,7 @@ import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResu
 import { isXTBHealthy } from "../dft/qe-dft-engine";
 import { getElementData } from "./elemental-data";
 import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
+import { matchPrototype } from "./structure-predictor";
 import { runInterfaceDiscoveryForActiveLearning, getInterfaceRelaxationStats } from "../crystal/interface-relaxation";
 import { computeStructureEmbedding, estimateStructureUncertainty } from "../crystal/structure-embedding";
 import { computeOODScore } from "./ood-detector";
@@ -1251,13 +1252,16 @@ async function retrainGNNWithEnrichedData(
 
   const trainingData = SUPERCON_TRAINING_DATA
     .filter(e => !heldOutFormulas.has(e.formula))
-    .map(e => ({
-      formula: e.formula,
-      tc: e.tc,
-      formationEnergy: cachedFE.get(e.formula),
-      structure: undefined,
-      prototype: undefined as string | undefined,
-    }));
+    .map(e => {
+      const proto = matchPrototype(e.formula);
+      return {
+        formula: e.formula,
+        tc: e.tc,
+        formationEnergy: cachedFE.get(e.formula),
+        structure: proto ? { spaceGroup: proto.spaceGroup, crystalSystem: proto.crystalSystem, dimensionality: proto.dimensionality } : undefined,
+        prototype: proto?.prototype,
+      };
+    });
 
   const seenFormulas = new Set(trainingData.map(t => t.formula));
 
@@ -1825,7 +1829,7 @@ export async function runActiveLearningCycle(
       detail: `${retrainReason} | enriched=${totalEnrichedSinceLastRetrain} GT=${getGroundTruthSummary().totalDatapoints} ledger=${computeMetrics().count}`,
       dataSource: "Active Learning",
     });
-    const preRetrainSnapshot = await storage.getSuperconductorCandidates(100);
+    const preRetrainSnapshot = await storage.getSuperconductorCandidates(5000);
     retrainResult = await retrainGNNWithEnrichedData(emit, preRetrainSnapshot);
     convergenceStats.modelRetrains++;
     totalEnrichedSinceLastRetrain = 0;

@@ -3856,13 +3856,17 @@ setTimeout(async () => {
       await new Promise(resolve => setTimeout(resolve, 300));
 
       // ==================================================================
-      // Phase 3: Fetch next 500 from MP API (skip=500) if R² still ≤ 0
+      // Phase 3: Fetch next MP batch (skip=1000) if R² still ≤ 0
+      // Skip retraining entirely if no new samples are added — avoids
+      // wasting 60-90s retraining on exactly the same dataset as Phase 2.
       // ==================================================================
       if (v2.r2 <= 0) {
         let mpSeeded2 = 0;
+        const prevN = currentTrainingData.length;
         try {
           const { fetchMPBatchFromAPI } = await import("./materials-project-client");
-          const mpRecords2 = await fetchMPBatchFromAPI(500, 500);
+          // Use skip=1000 to get a batch the GCP progressive fetcher hasn't cached yet
+          const mpRecords2 = await fetchMPBatchFromAPI(500, 1000);
           const result2 = mergeMPRecords(mpRecords2, currentTrainingData);
           currentTrainingData = result2.merged;
           mpSeeded2 = result2.seeded;
@@ -3870,12 +3874,16 @@ setTimeout(async () => {
           console.warn(`[GNN] Phase 3 MP fetch failed: ${mpErr?.message?.slice(0, 100)}`);
         }
 
-        await new Promise(resolve => setTimeout(resolve, 300));
-        ensembleModels = await trainEnsembleAsync(currentTrainingData);
-        invalidateGNNModel();
-        setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
-        const v3 = logGNNVersion("startup-mp-batch2", currentTrainingData.length, dftTrainingDataset.length, mpSeeded1 + mpSeeded2);
-        console.log(`[GNN] Phase 3 (MP batch2 +${mpSeeded2}, N=${currentTrainingData.length}): R²=${v3.r2}`);
+        if (currentTrainingData.length > prevN) {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          ensembleModels = await trainEnsembleAsync(currentTrainingData);
+          invalidateGNNModel();
+          setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
+          const v3 = logGNNVersion("startup-mp-batch2", currentTrainingData.length, dftTrainingDataset.length, mpSeeded1 + mpSeeded2);
+          console.log(`[GNN] Phase 3 (MP batch2 +${mpSeeded2}, N=${currentTrainingData.length}): R²=${v3.r2}`);
+        } else {
+          console.log(`[GNN] Phase 3 skipped — no new samples added (mpSeeded=${mpSeeded2}, N=${currentTrainingData.length} unchanged)`);
+        }
       }
     }
 

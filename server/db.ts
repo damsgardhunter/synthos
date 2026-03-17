@@ -15,10 +15,11 @@ const pool = new pg.Pool({
   keepAliveInitialDelayMillis: 5_000,
 });
 
-// Kill any query taking longer than 8s at the DB level so slow Neon queries
-// can't hold a pool connection and starve other requests.
+// Kill any query taking longer than 15s at the DB level so slow Neon queries
+// can't hold a pool connection and starve other requests. 15s (not 8s) because
+// Neon cold-start can add 10-15s of latency to the first query on a new connection.
 pool.on("connect", (client) => {
-  client.query("SET statement_timeout = 8000").catch(() => {});
+  client.query("SET statement_timeout = 15000").catch(() => {});
 });
 
 pool.on("error", (err) => {
@@ -56,22 +57,26 @@ pool.connect().then(client => {
   console.warn("[DB] Startup warm-up failed (Neon may be cold-starting):", err.message);
 });
 
-// Keepalive ping every 60s — Neon suspends after 5 min inactivity on serverless.
-// On failure, immediately retry with a fresh connection to wake Neon back up.
+// Keepalive ping every 45s — Neon suspends after 5 min inactivity on serverless.
+// On failure, retry up to 3× with backoff so a single cold-start (30-60s) doesn't
+// leave the pool dead until the next ping cycle 60s later.
 async function keepalivePing(): Promise<void> {
   try {
     await pool.query("SELECT 1");
   } catch (err: any) {
-    console.warn("[DB] Keepalive ping failed:", err.message);
-    // Attempt a fresh connection so Neon wakes before the next real query needs it.
-    try {
-      const client = await pool.connect();
-      await client.query("SELECT 1");
-      client.release();
-      console.log("[DB] Keepalive reconnect succeeded");
-    } catch (err2: any) {
-      console.warn("[DB] Keepalive reconnect also failed:", err2.message);
+    console.warn("[DB] Keepalive ping failed:", err.message?.slice(0, 80));
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await new Promise(r => setTimeout(r, attempt * 5000)); // 5s, 10s, 15s
+      try {
+        const client = await pool.connect();
+        await client.query("SELECT 1");
+        client.release();
+        console.log(`[DB] Keepalive reconnect succeeded (attempt ${attempt})`);
+        return;
+      } catch (err2: any) {
+        console.warn(`[DB] Keepalive reconnect attempt ${attempt}/3 failed: ${err2.message?.slice(0, 80)}`);
+      }
     }
   }
 }
-setInterval(keepalivePing, 60 * 1000);
+setInterval(keepalivePing, 45 * 1000);
