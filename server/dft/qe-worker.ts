@@ -2256,7 +2256,7 @@ function softValidateGeometry(
       fdz -= Math.round(fdz);
       const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, 1.0, gammaRad);
       const dMin = minPairDistance(positions[i].element, positions[j].element) * pressureDistScale;
-      if (dist < dMin) {
+      if (dist < dMin - 1e-3) {
         return {
           valid: false,
           reason: `Atoms ${positions[i].element}(${i}) and ${positions[j].element}(${j}) too close: ${dist.toFixed(3)} A < d_min ${dMin.toFixed(3)} A${isHighPressure ? ` (pressure-scaled @${pressureGPa}GPa)` : ` [0.7*(${COVALENT_RADIUS[positions[i].element] ?? 1.4}+${COVALENT_RADIUS[positions[j].element] ?? 1.4})]`}`,

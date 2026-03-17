@@ -581,12 +581,26 @@ export async function relaxInterface(
         OMP_STACKSIZE: "512M",
       };
 
-      const cmd = `cd ${calcDir} && ${XTB_BIN} interface.xyz --gfn 2 --opt crude 2>&1`;
-      const output = execXtbCmd(cmd, {
-        timeout: OPT_TIMEOUT_MS,
-        env,
-        maxBuffer: 10 * 1024 * 1024,
-      });
+      // Try GFN-FF first (force-field, handles lanthanides/actinides robustly).
+      // Fall back to GFN2-xTB tight-binding if GFN-FF is not available or fails.
+      let output = "";
+      let gfnffOk = false;
+      try {
+        output = execXtbCmd(`cd ${calcDir} && ${XTB_BIN} interface.xyz --gfnff --opt crude 2>&1`, {
+          timeout: OPT_TIMEOUT_MS,
+          env,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        gfnffOk = output.includes("normal termination of xtb");
+      } catch { /* fall through to GFN2 */ }
+
+      if (!gfnffOk) {
+        output = execXtbCmd(`cd ${calcDir} && ${XTB_BIN} interface.xyz --gfn 2 --opt crude 2>&1`, {
+          timeout: OPT_TIMEOUT_MS,
+          env,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+      }
 
       if (output.includes("normal termination of xtb")) {
         xtbConverged = true;

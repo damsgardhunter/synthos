@@ -1290,6 +1290,7 @@ async function runPhase7_Superconductor() {
 
           try {
             const ls = campaign.learningState;
+            const allCandidates = await storage.getSuperconductorCandidates(200);
             const verifiedInverseResults = inverseResults.filter(r => {
               if (!r.passedPipeline || r.tc <= 3) return false;
               const existing = allCandidates.find(c => c.formula === r.formula);
@@ -2579,6 +2580,7 @@ async function runPhase10_Physics() {
           },
         };
 
+        const crystalInfo = extractCrystalInfo(candidate.crystalStructure);
         let topoAnalysis: TopologicalAnalysis | undefined;
         try {
           const mlFeaturesForDFT = (candidate.mlFeatures as Record<string, any>) ?? {};
@@ -2672,7 +2674,6 @@ async function runPhase10_Physics() {
             }
           }
 
-          const crystalInfo = extractCrystalInfo(candidate.crystalStructure);
           topoAnalysis = analyzeTopology(
             candidate.formula,
             electronicForTopo,

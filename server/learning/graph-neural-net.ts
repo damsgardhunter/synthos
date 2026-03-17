@@ -45,6 +45,7 @@ export interface CrystalGraph {
   formula: string;
   prototype?: string;
   pressureGpa?: number;
+  globalFeatures?: number[]; // 6-dim: VEC, mean d-occ, mean EN, mean Debye, size mismatch, nElements
 }
 
 function buildEdgeIndex(nodes: NodeFeature[], edges: EdgeFeature[]): (EdgeFeature | null)[] {
@@ -191,13 +192,14 @@ export interface GNNPredictionWithUncertainty {
 
 const NODE_DIM = 32;
 const HIDDEN_DIM = 48;
-const EDGE_DIM = 24;
+const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
+const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
+const GLOBAL_COMP_DIM = 6;               // VEC, mean d-occ, mean EN, mean Debye, size mismatch, nElements
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
 const MC_DROPOUT_RATE = 0.1;
-const N_GAUSSIAN_BASIS = 20;
 const GAUSSIAN_START = 0.5;
 const GAUSSIAN_END = 6.0;
 const GAUSSIAN_STEP = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
@@ -1030,8 +1032,9 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
   }
 
   const edgeIndex = buildEdgeIndex(nodes, edges);
-  const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, prototype });
-  return { nodes, edges, threeBodyFeatures, adjacency, edgeIndex, formula, prototype, pressureGpa };
+  const globalFeatures = computeGlobalCompositionFeatures(rawCounts);
+  const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, prototype, globalFeatures });
+  return { nodes, edges, threeBodyFeatures, adjacency, edgeIndex, formula, prototype, pressureGpa, globalFeatures };
 }
 
 function computeStressDescriptor(atomicNumber: number, bulkModulus: number, mass: number): number {
@@ -1188,7 +1191,8 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
     block,
     Math.min(1.0, (data?.meltingPoint ?? 1000) / 4000),
     Math.min(1.0, (data?.density ?? 5) / 25),
-    Math.min(1.0, (data?.thermalConductivity ?? 50) / 500),
+    // λ_proxy: peaks for half-filled d-shells (BCS SCs) — replaces thermalConductivity (redundant with Debye)
+    dOcc > 0 ? dOcc * (1 - Math.abs(dOcc - 0.5)) * Math.min(1.0, (data?.debyeTemperature ?? 300) / 800) : 0,
     Math.min(1.0, Math.abs(data?.electronAffinity ?? 0) / 4.0),
     Math.min(1.0, (data?.atomicVolume ?? 15) / 80),
     en > 2.0 ? 1.0 : en > 1.5 ? 0.5 : 0.0,
@@ -1203,6 +1207,57 @@ function getSymmetryAwareFeatures(spaceGroupName?: string, fracPosition?: [numbe
   const normalized = normalizeSpaceGroup(spaceGroupName);
   const embedding = computeSymmetryEmbedding(normalized, fracPosition);
   return computeSymmetryFeatureVector(embedding);
+}
+
+// ── Global composition feature helpers ───────────────────────────────────────
+
+function computeVEC(counts: Record<string, number>): number {
+  let totalAtoms = 0, totalVE = 0;
+  for (const [el, n] of Object.entries(counts)) {
+    const data = getElementData(el);
+    totalVE += n * (data?.valenceElectrons ?? 0);
+    totalAtoms += n;
+  }
+  return totalAtoms > 0 ? totalVE / totalAtoms : 0;
+}
+
+function computeAtomicMismatch(counts: Record<string, number>): number {
+  const els = Object.entries(counts);
+  if (els.length <= 1) return 0;
+  const total = els.reduce((s, [, n]) => s + n, 0);
+  if (total <= 0) return 0;
+  const rBar = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.atomicRadius ?? 130), 0);
+  if (rBar <= 0) return 0;
+  const delta2 = els.reduce((s, [el, n]) => {
+    const r = getElementData(el)?.atomicRadius ?? 130;
+    return s + (n / total) * (1 - r / rBar) ** 2;
+  }, 0);
+  return Math.sqrt(Math.max(0, delta2));
+}
+
+// Computes GLOBAL_COMP_DIM (6) composition-level features injected at the MLP head.
+// These encode information the GNN cannot infer from per-node features alone.
+function computeGlobalCompositionFeatures(counts: Record<string, number>): number[] {
+  const els = Object.entries(counts);
+  if (els.length === 0) return new Array(GLOBAL_COMP_DIM).fill(0);
+  const total = els.reduce((s, [, n]) => s + n, 0);
+  if (total <= 0) return new Array(GLOBAL_COMP_DIM).fill(0);
+
+  const meanEN    = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.paulingElectronegativity ?? 1.5), 0);
+  const meanD     = els.reduce((s, [el, n]) => s + (n / total) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0);
+  const vec       = computeVEC(counts);
+  const meanDebye = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.debyeTemperature ?? 300), 0);
+  const mismatch  = computeAtomicMismatch(counts);
+  const nElements = els.length;
+
+  return [
+    meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
+    meanD,                                  // [1] mean d-orbital filling — BCS coupling proxy
+    vec / 8.0,                              // [2] valence electron concentration — strongest empirical SC predictor
+    Math.min(1.0, meanDebye / 2000),        // [3] mean Debye temperature — phonon frequency proxy
+    Math.min(1.0, mismatch * 5),            // [4] atomic size mismatch δ — lattice distortion (suppresses Tc)
+    Math.min(1.0, nElements / 5.0),         // [5] compound complexity
+  ];
 }
 
 export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number): CrystalGraph {
@@ -1376,7 +1431,8 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
   }
 
   const edgeIndex = buildEdgeIndex(nodes, edges);
-  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, pressureGpa };
+  const globalFeatures = computeGlobalCompositionFeatures(rawCounts);
+  const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, pressureGpa, globalFeatures };
   partialGraph.threeBodyFeatures = compute3BodyFeatures(partialGraph);
   return partialGraph;
 }
@@ -2025,7 +2081,12 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     pooled[k] += pressureNorm * (weights.W_pressure[k] ?? 0);
   }
 
-  const z1 = vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1);
+  // Concat global composition features (VEC, mean d-occ, EN, Debye, size mismatch, nEl) before MLP head.
+  // These encode compound-level physics the node aggregation cannot recover on its own.
+  const compFeats = graph.globalFeatures ?? new Array(GLOBAL_COMP_DIM).fill(0);
+  const pooledWithComp = [...pooled, ...compFeats];
+
+  const z1 = vecAdd(matVecMul(weights.W_mlp1, pooledWithComp), weights.b_mlp1);
   const h1 = z1.map(v => v >= 0 ? v : 0.01 * v);
   if (dropoutRng) {
     const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
@@ -2173,7 +2234,12 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     pooled[k] += pressureNorm * (weights.W_pressure[k] ?? 0);
   }
 
-  const z1 = vecAdd(matVecMul(weights.W_mlp1, pooled), weights.b_mlp1);
+  // Concat global composition features so W_mlp1 can learn their contribution.
+  // Stored in cache.pooled so the backward pass correctly computes dW_mlp1.
+  const compFeats = graph.globalFeatures ?? new Array(GLOBAL_COMP_DIM).fill(0);
+  const pooledWithComp = [...pooled, ...compFeats];
+
+  const z1 = vecAdd(matVecMul(weights.W_mlp1, pooledWithComp), weights.b_mlp1);
   const h1 = z1.map(v => v >= 0 ? v : 0.01 * v);
   const latentEmbedding = [...h1];
   const out = vecAdd(matVecMul(weights.W_mlp2, h1), weights.b_mlp2);
@@ -2215,7 +2281,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   };
 
   const cache: GNNForwardCache = {
-    pooled: [...pooled],
+    pooled: [...pooledWithComp], // includes comp features so gradW1 is computed correctly
     z1: [...z1],
     h1: [...h1],
     outRaw: [...out],
@@ -2263,7 +2329,7 @@ function initWeights(rng: () => number): GNNWeights {
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
     residual_gates: [0.5, 0.5, 0.5, 0.5],
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
-    W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
+    W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng),
     b_mlp1: initVector(HIDDEN_DIM),
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng),
     b_mlp2: initVector(OUTPUT_DIM),
@@ -2393,7 +2459,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       const batchStart = batch * batchSize;
       const batchEnd = Math.min(batchStart + batchSize, trainingData.length);
 
-      const pooledLen = HIDDEN_DIM * 2;
+      const pooledLen = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM; // matches pooledWithComp in cache
       const batchSize_actual = batchEnd - batchStart;
       const clipGrad = (g: number) => { const v = Number.isFinite(g) ? g : 0; return Math.max(-1, Math.min(1, v)); };
 
