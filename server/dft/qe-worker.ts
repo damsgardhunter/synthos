@@ -523,6 +523,11 @@ function runXTBStabilityCheck(
   workDir: string,
   pressureGpa: number = 0,
 ): { stable: boolean; ePerAtom: number; basis: string } | null {
+  // xTB is parameterised for ambient conditions — compressed interatomic distances
+  // at high pressure fall outside its valid range and produce spuriously large
+  // repulsive energies (~20-30 eV/atom) that would incorrectly reject valid
+  // high-pressure superconductor candidates. Skip the filter above 50 GPa.
+  if (pressureGpa > 50) return null;
   try {
     const posElements = Array.from(new Set(positions.map(p => p.element)));
     const scale = pressureGpa > 0 ? computePressureScale(pressureGpa, posElements) : 1.0;
