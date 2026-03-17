@@ -2554,7 +2554,7 @@ function graphCacheKey(formula: string, prototype?: string, structure?: any): st
   return `${formula}::s:${structureHash(structure)}`;
 }
 
-export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights): GNNWeights {
+export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights, maxPretrainEpochs = 15): GNNWeights {
   const rng = seededRandom(42);
   const weights = preInitWeights ?? initWeights(rng);
 
@@ -2630,7 +2630,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   // (every sample with a formation energy). This gives better node representations
   // before the harder Tc regression task begins — analogous to ImageNet pretraining.
   const feSamples = trainingData.map((s, i) => i).filter(i => trainingData[i].formationEnergy != null);
-  const PRETRAIN_EPOCHS = feSamples.length >= 20 ? 15 : 0;
+  const PRETRAIN_EPOCHS = feSamples.length >= 20 ? maxPretrainEpochs : 0;
   if (PRETRAIN_EPOCHS > 0) {
     console.log(`[GNN] FE pretraining: ${PRETRAIN_EPOCHS} epochs on ${feSamples.length} samples with formation energy`);
     for (let preEpoch = 0; preEpoch < PRETRAIN_EPOCHS; preEpoch++) {
@@ -3246,17 +3246,22 @@ export function trainEnsemble(trainingData: TrainingSample[]): GNNWeights[] {
   return models;
 }
 
-export async function trainEnsembleAsync(trainingData: TrainingSample[]): Promise<GNNWeights[]> {
+export async function trainEnsembleAsync(
+  trainingData: TrainingSample[],
+  nModels = ENSEMBLE_SIZE,
+  maxPretrainEpochs = 15,
+): Promise<GNNWeights[]> {
   const { train, validation } = splitTrainValidation(trainingData);
   heldOutValidationSet = validation;
 
   const models: GNNWeights[] = [];
-  for (let i = 0; i < ENSEMBLE_SIZE; i++) {
+  const n = Math.min(nModels, ENSEMBLE_SIZE);
+  for (let i = 0; i < n; i++) {
     const rng = seededRandom(ENSEMBLE_SEEDS[i]);
     const w = initWeights(rng);
     const bootstrapRng = seededRandom(ENSEMBLE_SEEDS[i] + 31);
     const bootstrapped = bootstrapSample(train, BOOTSTRAP_RATIOS[i], bootstrapRng);
-    const trained = trainGNNSurrogate(bootstrapped, w);
+    const trained = trainGNNSurrogate(bootstrapped, w, maxPretrainEpochs);
     models.push(trained);
     await new Promise(resolve => setImmediate(resolve));
   }
@@ -3818,15 +3823,29 @@ setTimeout(async () => {
 
     // =====================================================================
     // Phase 1: Train on full SUPERCON dataset (with cached formation energies)
+    // Train a single model with reduced FE pretraining (~8s) so the event
+    // loop stays responsive. GCP will build the full 5-model ensemble.
     // =====================================================================
+    const gcpMode = process.env.OFFLOAD_GNN_TO_GCP === "true";
     const superconSamples = await buildSuperconSamples();
     let currentTrainingData = superconSamples;
 
-    let ensembleModels = await trainEnsembleAsync(currentTrainingData);
+    // Quick startup model: 1 member, 5 FE epochs → ~8s instead of ~85s.
+    // GCP will replace it with a full 5-model ensemble shortly after.
+    let ensembleModels = await trainEnsembleAsync(currentTrainingData, 1, 5);
     invalidateGNNModel();
     setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
     const v1 = logGNNVersion("startup-supercon", currentTrainingData.length, dftTrainingDataset.length, 0);
     console.log(`[GNN] Phase 1 (SUPERCON N=${currentTrainingData.length}): R²=${v1.r2}`);
+
+    // If GCP offloading is active, skip phases 2-3 — GCP will train a full
+    // ensemble with the same (and richer) dataset. Blocking the event loop
+    // for 3+ extra minutes adds no value when GCP returns results in ~3 min.
+    if (gcpMode) {
+      console.log(`[GNN] GCP mode — skipping startup phases 2-3 (GCP will train full ensemble)`);
+      console.log(`[GNN] Startup warm-up complete: N=${currentTrainingData.length}, SUPERCON=${superconSeeded}, dftDataset=${dftTrainingDataset.length}`);
+      return;
+    }
 
     // Yield so other event loop work (HTTP, DFT, etc.) can proceed between phases
     await new Promise(resolve => setTimeout(resolve, 300));
