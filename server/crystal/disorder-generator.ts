@@ -5,6 +5,7 @@ import * as path from "path";
 import { binaryPath, getTempSubdir, IS_WINDOWS, toWslPath } from "../dft/platform-utils";
 import { computeDisorderMetrics, recordMetricsAnalysis, extractMLFeatures, type DisorderMetrics } from "./disorder-metrics";
 import { checkValenceSumRule } from "../physics/advanced-constraints";
+import { classifyFamily } from "../learning/utils";
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 // XTB_BIN: use env override (set XTB_BIN=/usr/bin/xtb on GCP where xtb-dist isn't deployed)
@@ -714,6 +715,9 @@ function estimateFormationEnergy(
   return Math.max(0.1, Math.min(6.0, Ef));
 }
 
+// Magnetic elements act as pair-breakers (Abrikosov-Gorkov theory) in conventional SCs
+const MAGNETIC_PAIR_BREAKERS = new Set(["Mn", "Cr", "Fe", "Co", "Ni", "Eu", "Gd", "Tb", "Dy", "Ho", "Er"]);
+
 function estimateTcModifier(
   disorderType: DisorderType,
   element: string,
@@ -722,50 +726,102 @@ function estimateTcModifier(
 ): number {
   const comp = parseFormula(baseFormula);
   const elements = Object.keys(comp);
+  const family = classifyFamily(baseFormula);
 
   const isCuprate = elements.includes("Cu") && elements.includes("O") &&
     elements.some(e => ["La", "Y", "Ba", "Sr", "Bi", "Ca"].includes(e));
   const isIronBased = elements.includes("Fe") &&
     elements.some(e => ["As", "Se", "Te", "P"].includes(e));
+  const isHydride = family === "Hydrides" ||
+    (elements.includes("H") && elements.some(e => ["La", "Y", "Ce", "Ca", "Ba", "Sr", "Mg", "Sc", "Lu"].includes(e)));
+  const isA15 = family === "Intermetallics" &&
+    elements.some(e => ["Nb", "V", "Mo", "W", "Cr", "Ta"].includes(e)) &&
+    elements.some(e => ["Sn", "Si", "Ge", "Al", "Ga", "Pt", "Au"].includes(e));
+  const isMgB2like = (elements.includes("Mg") && elements.includes("B")) ||
+    family === "Borocarbides";
+  const isChalcogenide = family === "Chalcogenides" || family === "Layered-chalcogenide";
+  const isMagneticPairBreaker = MAGNETIC_PAIR_BREAKERS.has(element);
+
+  // For A15: identify the minority site (e.g. Sn in Nb3Sn)
+  const sortedByCount = Object.entries(comp).sort((a, b) => a[1] - b[1]);
+  const minoritySite = sortedByCount[0]?.[0] ?? "";
 
   let modifier = 1.0;
 
   switch (disorderType) {
-    case "vacancy":
+    case "vacancy": {
       if (element === "O" && isCuprate) {
+        // Oxygen vacancies in cuprates: dome-shaped — optimal doping is key
         modifier = fraction <= 0.05 ? 1.0 + fraction * 3.0 : 1.15 - (fraction - 0.05) * 4.0;
+      } else if (element === "H" && isHydride) {
+        // H vacancies kill hydride Tc (H is the superconducting mediator)
+        modifier = 1.0 - fraction * 4.0;
+      } else if (element === "B" && isMgB2like) {
+        // B-B network critical for MgB2 σ-band superconductivity
+        modifier = 1.0 - fraction * 3.0;
+      } else if (isA15 && element !== minoritySite) {
+        // Vacating the majority metal chain in A15 (Nb in Nb3Sn): very damaging
+        modifier = 1.0 - fraction * 2.5;
       } else {
+        // Generic: vacancies reduce metallicity and DOS at Fermi
         modifier = 1.0 - fraction * 1.5;
       }
       break;
-
-    case "substitution":
+    }
+    case "substitution": {
       if (isCuprate && element === "La") {
         modifier = fraction <= 0.15 ? 1.0 + fraction * 2.0 : 1.3 - (fraction - 0.15) * 2.0;
       } else if (isIronBased && element === "Fe") {
         modifier = fraction <= 0.08 ? 1.0 + fraction * 3.5 : 1.28 - (fraction - 0.08) * 3.0;
+      } else if (isHydride && element === "H") {
+        // More H: raises Tc (hydrides near optimal H content)
+        modifier = 1.0 + fraction * 1.5;
+      } else if (isA15 && element === minoritySite) {
+        // Substituting minority site (Sn in Nb3Sn): significant effect
+        modifier = 1.0 - fraction * 1.8;
+      } else if (isMgB2like && element === "B") {
+        // B substitution disrupts MgB2 2-gap structure
+        modifier = 1.0 - fraction * 2.5;
+      } else if (isChalcogenide && ["Se", "Te", "S"].includes(element)) {
+        // Se/Te substitution in FeSe-FeTe: can optimise Tc (FeSe0.5Te0.5 peak ~15 K)
+        modifier = fraction <= 0.5 ? 1.0 + fraction * 0.4 : 1.2 - (fraction - 0.5) * 1.5;
+      } else if (isMagneticPairBreaker) {
+        // Magnetic impurities: Abrikosov-Gorkov pair-breaking, exponential Tc suppression
+        modifier = Math.exp(-fraction * 4.0);
       } else {
-        modifier = 1.0 + fraction * 0.5 * (fraction < 0.1 ? 1 : -1);
+        // Generic: substitution disrupts periodicity, moderate Tc reduction
+        modifier = 1.0 - fraction * 1.2;
       }
       break;
-
-    case "interstitial":
+    }
+    case "interstitial": {
       if (element === "H") {
-        modifier = 1.0 + fraction * 2.0;
+        // H interstitials enhance conventional phonon-mediated SC (increases λ)
+        modifier = isHydride ? 1.0 + fraction * 1.5 : 1.0 + fraction * 2.0;
       } else if (element === "O" && !isCuprate) {
+        // Oxygen interstitials in non-cuprates: oxidation disrupts metallicity
         modifier = 1.0 - fraction * 0.8;
+      } else if (isMagneticPairBreaker) {
+        modifier = Math.exp(-fraction * 2.5);
       } else {
         modifier = 1.0 + fraction * 0.3;
       }
       break;
-
-    case "site-mixing":
-      modifier = 1.0 - fraction * 0.8;
+    }
+    case "site-mixing": {
+      // Site mixing breaks sublattice order — more damaging in ordered phases (A15, borides)
+      if (isA15 || isMgB2like) {
+        modifier = 1.0 - fraction * 2.0;
+      } else {
+        modifier = 1.0 - fraction * 0.8;
+      }
       break;
-
-    case "amorphous":
+    }
+    case "amorphous": {
+      // Amorphisation: phonon scattering increases, Cooper pairs decohere
       modifier = fraction <= 0.3 ? 1.0 - fraction * 0.5 : 0.85 - (fraction - 0.3) * 1.5;
       break;
+    }
   }
 
   return Math.max(0.3, Math.min(1.5, modifier));
