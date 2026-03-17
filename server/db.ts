@@ -4,13 +4,15 @@ import * as schema from "@shared/schema";
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,
-  // Recycle idle connections after 8s — well before any network/Neon TCP idle timeout.
-  idleTimeoutMillis: 8000,
+  max: 10,
+  // Keep idle connections for 2 minutes — longer than the 60s keepalive ping interval
+  // so there's always a live connection in the pool and pg-pool never needs to open
+  // a new TCP connection mid-poll (which risks ETIMEDOUT on Neon cold-start).
+  idleTimeoutMillis: 120_000,
   // Give Neon up to 60s to cold-start; Neon free-tier can take 30-45s after suspension.
-  connectionTimeoutMillis: 60000,
+  connectionTimeoutMillis: 60_000,
   keepAlive: true,
-  keepAliveInitialDelayMillis: 5000,
+  keepAliveInitialDelayMillis: 5_000,
 });
 
 // Kill any query taking longer than 8s at the DB level so slow Neon queries
@@ -34,11 +36,14 @@ export function isConnectionError(err: any): boolean {
   const msg: string = (err?.message ?? String(err ?? "")).toLowerCase();
   return msg.includes("connection terminated") ||
     msg.includes("connection timeout") ||
+    msg.includes("etimedout") ||
+    msg.includes("timeout") ||
     msg.includes("econnreset") ||
     msg.includes("econnrefused") ||
     msg.includes("socket hang up") ||
     msg.includes("the client is closed") ||
-    msg.includes("connection ended unexpectedly");
+    msg.includes("connection ended unexpectedly") ||
+    err?.constructor?.name === "AggregateError";
 }
 
 // Warm the pool at startup so the first API calls don't hit a cold Neon connection.
