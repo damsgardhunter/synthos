@@ -5,7 +5,7 @@
  * models back to the DB. The local server polls for completed jobs and applies
  * the weights without any local training overhead.
  */
-import { db } from "../server/db";
+import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
 import { trainGradientBoosting } from "../server/learning/gradient-boost";
 
@@ -175,7 +175,7 @@ export async function startXGBLoop(): Promise<void> {
         ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
         : (err != null ? String(err) : "unknown");
       console.error(`[XGB-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      await new Promise(r => setTimeout(r, isConnectionError(err) ? 5000 : POLL_INTERVAL_MS));
     }
   }
 }

@@ -9,7 +9,7 @@
  * Trained weights are serialized and written back to output_weights so the
  * local server can poll, deserialize, and apply them without any local CPU cost.
  */
-import { db } from "../server/db";
+import { db, isConnectionError } from "../server/db";
 import { mlTrainingJobs } from "@shared/schema";
 import { eq, and, or, sql } from "drizzle-orm";
 import { seedDatasetFromArray } from "../server/crystal/crystal-structure-dataset";
@@ -108,7 +108,8 @@ export async function startMLLoop(): Promise<void> {
         ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
         : (err != null ? String(err) : "unknown");
       console.error(`[ML-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      // Connection errors resolve once pg-pool opens a fresh connection — retry quickly.
+      await new Promise(r => setTimeout(r, isConnectionError(err) ? 5000 : POLL_INTERVAL_MS));
     }
   }
 }

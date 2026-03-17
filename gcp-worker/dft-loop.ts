@@ -3,7 +3,7 @@
  * Polls dft_jobs for queued jobs, runs Quantum ESPRESSO, writes results back.
  * Mirrors the logic in server/dft/dft-job-queue.ts processNextJob().
  */
-import { db } from "../server/db";
+import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
 import { runFullDFT } from "../server/dft/qe-worker";
 import * as fs from "fs";
@@ -141,8 +141,11 @@ export async function startDFTLoop(): Promise<void> {
       const anyStarted = results.some(Boolean);
       await new Promise(r => setTimeout(r, anyStarted ? 2000 : POLL_INTERVAL_MS));
     } catch (err: any) {
-      console.error(`[DFT-GCP] Loop error: ${err.message}`);
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      const msg = err instanceof Error
+        ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
+        : (err != null ? String(err) : "unknown");
+      console.error(`[DFT-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
+      await new Promise(r => setTimeout(r, isConnectionError(err) ? 5000 : POLL_INTERVAL_MS));
     }
   }
 }
