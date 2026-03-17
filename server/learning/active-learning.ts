@@ -19,6 +19,7 @@ import { generateAdaptivePressureSamples, recordPressureCoverage, findOptimalPre
 import { detectPhaseTransitions } from "./pressure-phase-detector";
 import { estimateFamilyPressure } from "./candidate-generator";
 import { runQuantumEnginePipeline, getQuantumEngineStats, type QuantumEngineResult } from "../dft/quantum-engine-pipeline";
+import { isXTBHealthy } from "../dft/qe-dft-engine";
 import { getElementData } from "./elemental-data";
 import { scoreFormulaNovelty } from "../crystal/structure-novelty-detector";
 import { runInterfaceDiscoveryForActiveLearning, getInterfaceRelaxationStats } from "../crystal/interface-relaxation";
@@ -823,8 +824,9 @@ async function runDFTEnrichmentForCandidate(
   let usedQuantumPipeline = false;
 
   try {
-    // skipXTB=true: inline xTB takes 30-90s per formula; DFT queue handles it asynchronously.
-    quantumResult = await runQuantumEnginePipeline(candidate.formula, evalPressure, true);
+    // Run xTB when the health check confirms it's available; skip otherwise.
+    // Health check uses execShellAsync (WSL-aware) so this correctly reflects reality on Windows.
+    quantumResult = await runQuantumEnginePipeline(candidate.formula, evalPressure, !isXTBHealthy());
     usedQuantumPipeline = true;
     quantumEnginePipelineStats.fullPipelineRuns++;
 
@@ -1028,8 +1030,7 @@ async function runDFTEnrichmentForCandidate(
   quantumEnginePipelineStats.fallbackRuns++;
 
   try {
-    // skipXTB=true: inline xTB takes 30-90s; DFT queue handles it asynchronously.
-    const dftData = await resolveDFTFeatures(candidate.formula, evalPressure, true);
+    const dftData = await resolveDFTFeatures(candidate.formula, evalPressure, !isXTBHealthy());
 
     const desc = describeDFTSources(dftData);
     const hasExternalData = dftData.sources.mp || dftData.sources.aflow;

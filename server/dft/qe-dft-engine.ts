@@ -4454,12 +4454,10 @@ export async function runXTBEnrichment(formula: string, pressureGpa: number = 0)
 }
 
 export function isDFTAvailable(): boolean {
-  try {
-    if (xtbHealthy) return true;
-    return fs.existsSync(XTB_BIN);
-  } catch {
-    return false;
-  }
+  // xtbHealthy is set by checkXTBHealth() which runs through WSL/execShellAsync.
+  // Don't fall back to fs.existsSync(XTB_BIN): on Windows, XTB_BIN points to an ELF
+  // binary that Node can see but cannot execute — only WSL can run it.
+  return xtbHealthy;
 }
 
 export function getDFTMethodInfo(): { name: string; version: string; level: string } {
@@ -4487,8 +4485,8 @@ export function getXTBStats() {
 let xtbHealthy = false;
 
 export async function checkXTBHealth(): Promise<{ available: boolean; version: string; canOptimize: boolean; canHess: boolean; error?: string }> {
-  // All child_process calls here use execFileAsync (non-blocking) to avoid freezing the event loop.
-  // Previously used execSync which blocked the event loop for up to 85s (15s + 30s + 40s timeouts × 2 retries).
+  // All calls use execShellAsync so Windows routes through WSL — execFileAsync runs the PE binary
+  // directly, bypassing WSL, and fails for Linux ELF binaries accessed via wsl.exe.
   const MAX_RETRIES = 2;
   const VERSION_TIMEOUT = 15000;
   const OPT_TIMEOUT = 30000;
@@ -4516,8 +4514,8 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
     try {
       let versionOutput: string;
       try {
-        const vRes = await execFileAsync(XTB_BIN, ["--version"], { timeout: VERSION_TIMEOUT, env });
-        versionOutput = vRes.stdout + vRes.stderr;
+        // Route through execShellAsync — on Windows this goes via WSL, correctly running the ELF binary.
+        versionOutput = await execShellAsync(`${XTB_BIN} --version 2>&1`, { timeout: VERSION_TIMEOUT, env });
       } catch (e: any) {
         versionOutput = (e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "");
       }
@@ -4535,8 +4533,8 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
       try {
         let optOut: string;
         try {
-          const oRes = await execFileAsync(XTB_BIN, ["input.xyz", "--gfn", "2", "--opt", "tight"], { cwd: testDir, timeout: OPT_TIMEOUT, env });
-          optOut = oRes.stdout + oRes.stderr;
+          // cd into testDir inside the shell command so execShellAsync can convert the Windows path to /mnt/...
+          optOut = await execShellAsync(`cd "${testDir}" && ${XTB_BIN} input.xyz --gfn 2 --opt tight 2>&1`, { timeout: OPT_TIMEOUT, env });
         } catch (e: any) {
           optOut = (e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "");
         }
@@ -4556,8 +4554,7 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
       try {
         let hessOut: string;
         try {
-          const hRes = await execFileAsync(XTB_BIN, ["input.xyz", "--gfn", "2", "--hess"], { cwd: testDir, timeout: HESS_TIMEOUT, env });
-          hessOut = hRes.stdout + hRes.stderr;
+          hessOut = await execShellAsync(`cd "${testDir}" && ${XTB_BIN} input.xyz --gfn 2 --hess 2>&1`, { timeout: HESS_TIMEOUT, env });
         } catch (e: any) {
           hessOut = (e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "");
         }

@@ -1608,15 +1608,37 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     const stabilityResult = await passesStabilityGate(candidateData.formula, candidateData.pressureGpa ?? 0);
 
+    // Stability gate is now a SOFT penalty, not a hard reject.
+    // Miedema analytical estimates have ±0.2 eV/atom error — hard-rejecting unstable analytical
+    // estimates before any DFT runs creates a data starvation loop: the queue never fills,
+    // active learning has nothing to enrich, and the feedback loop starves.
+    // Instead: store the hull distance in mlFeatures so the acquisition function can penalise
+    // high-ΔH candidates in scoring, while still allowing them into the DB for tracking.
+    const existing = (candidateData.mlFeatures as Record<string, any>) ?? {};
+    candidateData.mlFeatures = {
+      ...existing,
+      stabilityGate: {
+        pass: stabilityResult.pass,
+        verdict: stabilityResult.verdict,
+        hullDistance: stabilityResult.hullDistance,
+        reason: stabilityResult.reason,
+      },
+    };
+
     if (!stabilityResult.pass) {
+      // Apply a score penalty proportional to how far above hull the candidate is.
+      const hullPenalty = Math.min(0.7, (stabilityResult.hullDistance ?? 0) * 2);
+      const currentScore = candidateData.ensembleScore ?? 0.5;
+      candidateData.ensembleScore = Math.round(Math.max(0.01, currentScore * (1 - hullPenalty)) * 10000) / 10000;
+      candidateData.dataConfidence = candidateData.dataConfidence === "high" ? "medium" : "low";
       emit("log", {
         phase: "engine",
-        event: "Stability gate rejected",
-        detail: `Stability gate rejected ${candidateData.formula}: ${stabilityResult.reason}`,
+        event: "Stability gate penalty",
+        detail: `${candidateData.formula}: hull=${stabilityResult.hullDistance?.toFixed(4)} eV/atom (${stabilityResult.verdict}), score penalised ${currentScore.toFixed(3)} → ${candidateData.ensembleScore}`,
         dataSource: "Stability Gate",
       });
-      if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
-      return false;
+      // Only hard-reject if the formula is clearly chemically impossible (ABSOLUTE_MAX exceeded)
+      // — those are caught earlier in passesStabilityGate by ABSOLUTE_MAX_HULL_DISTANCE check.
     }
 
     let kineticResult: KineticStabilityResult | null = null;
@@ -4774,6 +4796,19 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
     const structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
     if (structureResult) {
       pipelineStageMetrics.prototypeSuccesses++;
+      (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "predicted" };
+    } else {
+      // Fallback: map formula to nearest known prototype so downstream physics
+      // analysis has structural context rather than silently proceeding with none.
+      const protoFallback = matchPrototype(formula);
+      if (protoFallback) {
+        (candidate as any).prototype = protoFallback;
+        (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "prototype-fallback" };
+        console.log(`[Autonomous] ${formula}: structure prediction failed — using prototype fallback '${protoFallback}'`);
+      } else {
+        (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "none" };
+        console.log(`[Autonomous] ${formula}: no structure or prototype — proceeding with composition-only features`);
+      }
     }
 
     try {

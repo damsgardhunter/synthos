@@ -894,7 +894,9 @@ function isEntropyStabilized(parsed: ParsedFormulaCounts, formationEnergy: numbe
 }
 
 const PRESSURE_MULT_CAP = 2.0;
-const ABSOLUTE_MAX_HULL_DISTANCE = 0.4;
+// Widened from 0.4: Miedema estimates have ±0.2 eV/atom error; Materials Project lists
+// compounds up to 0.5 eV/atom above hull as "potentially synthesizable under special conditions."
+const ABSOLUTE_MAX_HULL_DISTANCE = 0.6;
 
 function pressureHullMultiplier(pressureGpa: number): number {
   if (pressureGpa <= 0) return 1.0;
@@ -931,7 +933,11 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     };
   }
 
-  if (hullDistance > 0.20 * pMult) {
+  // Thresholds widened from (0.20/0.15/0.10) to (0.35/0.25/0.15) eV/atom.
+  // Miedema analytical estimates have ±0.2 eV/atom uncertainty — the old tight thresholds
+  // rejected most valid candidates before any real DFT could evaluate them.
+
+  if (hullDistance > 0.35 * pMult) {
     const entropyCheck = isEntropyStabilized(parsed, formationEnergy);
     if (entropyCheck.qualifies) {
       return {
@@ -946,14 +952,14 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > ${(0.20 * pMult).toFixed(3)} threshold${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ""}` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > ${(0.35 * pMult).toFixed(3)} threshold${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ""}` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,
     };
   }
 
-  if (hullDistance > 0.15 * pMult) {
+  if (hullDistance > 0.25 * pMult) {
     const metastabilityCheck = assessMetastability(formula, hullDistance);
     if (metastabilityCheck.kineticBarrier > 0.2) {
       return {
@@ -979,14 +985,14 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > ${(0.15 * pMult).toFixed(3)}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ""}, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.2 eV` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > ${(0.25 * pMult).toFixed(3)}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ""}, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.2 eV` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,
     };
   }
 
-  if (hullDistance > 0.1 * pMult) {
+  if (hullDistance > 0.15 * pMult) {
     const metastabilityCheck = assessMetastability(formula, hullDistance);
     if (metastabilityCheck.kineticBarrier > 0.3) {
       return {
@@ -1012,7 +1018,7 @@ export async function passesStabilityGate(formula: string, pressureGpa: number =
     return {
       pass: false,
       verdict: "unstable",
-      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > ${(0.1 * pMult).toFixed(3)}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ""}, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.3 eV` +
+      reason: `hull distance ${hullDistance.toFixed(4)} eV/atom > ${(0.15 * pMult).toFixed(3)}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ""}, kinetic barrier ${metastabilityCheck.kineticBarrier.toFixed(3)} eV <= 0.3 eV` +
         (decompositionProducts.length > 0 ? `, decomposes to ${decompositionProducts.join("+")}` : ""),
       hullDistance,
       formationEnergy,
