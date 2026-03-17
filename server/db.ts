@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "@shared/schema";
+import { isMainThread } from "worker_threads";
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -50,36 +51,42 @@ export function isConnectionError(err: any): boolean {
     err?.constructor?.name === "AggregateError";
 }
 
-// Warm the pool at startup so the first API calls don't hit a cold Neon connection.
-pool.connect().then(client => {
-  client.query("SELECT 1").then(() => {
-    console.log("[DB] Neon connection warmed up");
-    client.release();
-  }).catch(() => client.release());
-}).catch(err => {
-  console.warn("[DB] Startup warm-up failed (Neon may be cold-starting):", err.message);
-});
+// Only run warm-up and keepalive in the main thread — worker threads (GNN training)
+// load this module transitively but do pure in-memory computation and don't need
+// a live DB connection. Skipping these in workers prevents Neon from being
+// overwhelmed with 5 simultaneous cold-start connection attempts.
+if (isMainThread) {
+  // Warm the pool at startup so the first API calls don't hit a cold Neon connection.
+  pool.connect().then(client => {
+    client.query("SELECT 1").then(() => {
+      console.log("[DB] Neon connection warmed up");
+      client.release();
+    }).catch(() => client.release());
+  }).catch(err => {
+    console.warn("[DB] Startup warm-up failed (Neon may be cold-starting):", err.message);
+  });
 
-// Keepalive ping every 45s — Neon suspends after 5 min inactivity on serverless.
-// On failure, retry up to 3× with backoff so a single cold-start (30-60s) doesn't
-// leave the pool dead until the next ping cycle 60s later.
-async function keepalivePing(): Promise<void> {
-  try {
-    await pool.query("SELECT 1");
-  } catch (err: any) {
-    console.warn("[DB] Keepalive ping failed:", err.message?.slice(0, 80));
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      await new Promise(r => setTimeout(r, attempt * 5000)); // 5s, 10s, 15s
-      try {
-        const client = await pool.connect();
-        await client.query("SELECT 1");
-        client.release();
-        console.log(`[DB] Keepalive reconnect succeeded (attempt ${attempt})`);
-        return;
-      } catch (err2: any) {
-        console.warn(`[DB] Keepalive reconnect attempt ${attempt}/3 failed: ${err2.message?.slice(0, 80)}`);
+  // Keepalive ping every 45s — Neon suspends after 5 min inactivity on serverless.
+  // On failure, retry up to 3× with backoff so a single cold-start (30-60s) doesn't
+  // leave the pool dead until the next ping cycle 60s later.
+  async function keepalivePing(): Promise<void> {
+    try {
+      await pool.query("SELECT 1");
+    } catch (err: any) {
+      console.warn("[DB] Keepalive ping failed:", err.message?.slice(0, 80));
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await new Promise(r => setTimeout(r, attempt * 5000)); // 5s, 10s, 15s
+        try {
+          const client = await pool.connect();
+          await client.query("SELECT 1");
+          client.release();
+          console.log(`[DB] Keepalive reconnect succeeded (attempt ${attempt})`);
+          return;
+        } catch (err2: any) {
+          console.warn(`[DB] Keepalive reconnect attempt ${attempt}/3 failed: ${err2.message?.slice(0, 80)}`);
+        }
       }
     }
   }
+  setInterval(keepalivePing, 45 * 1000);
 }
-setInterval(keepalivePing, 45 * 1000);
