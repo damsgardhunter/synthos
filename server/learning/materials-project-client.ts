@@ -1,6 +1,6 @@
 import { db } from "../db";
 import { mpMaterialCache } from "@shared/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 
 // Curated list of metallic and superconductor compounds to seed MP lookups.
 // MP API filter queries (is_metal, material_ids) only return material_id with no other fields,
@@ -586,12 +586,27 @@ export function isApiAvailable(): boolean {
 
 export async function fetchCachedFormationEnergies(formulas: string[]): Promise<Map<string, number>> {
   const result = new Map<string, number>();
-  for (const formula of formulas) {
-    const cached = await getCachedData(formula, "summary");
-    if (cached && (cached as MPSummaryData).formationEnergyPerAtom != null) {
-      result.set(formula, (cached as MPSummaryData).formationEnergyPerAtom);
+  if (formulas.length === 0) return result;
+
+  // Single bulk query instead of one round-trip per formula (was 7000+ queries = 5-10min).
+  const normalized = formulas.map(normalizeFormula);
+  try {
+    // Batch in chunks of 500 to stay under pg parameter limits
+    const CHUNK = 500;
+    for (let i = 0; i < normalized.length; i += CHUNK) {
+      const chunk = normalized.slice(i, i + CHUNK);
+      const rows = await db
+        .select({ formula: mpMaterialCache.formula, data: mpMaterialCache.data })
+        .from(mpMaterialCache)
+        .where(and(inArray(mpMaterialCache.formula, chunk), eq(mpMaterialCache.dataType, "summary")));
+      for (const row of rows) {
+        const d = row.data as MPSummaryData | null;
+        if (d?.formationEnergyPerAtom != null) {
+          result.set(row.formula, d.formationEnergyPerAtom);
+        }
+      }
     }
-  }
+  } catch { /* DB unavailable — return empty map */ }
   return result;
 }
 
