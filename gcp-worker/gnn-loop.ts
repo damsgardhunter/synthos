@@ -19,6 +19,8 @@ let running = true;
 // In-memory skip counter — primary source of truth. DB write is best-effort.
 let _mpSkip = 0;
 let _mpSkipLoaded = false;
+// Mutex: prevents concurrent GNN job completions from each firing a duplicate MP fetch.
+let _mpFetchInProgress = false;
 
 // ── MP progressive fetch ─────────────────────────────────────────────────────
 
@@ -63,6 +65,12 @@ async function getCachedMPCount(): Promise<number> {
 }
 
 async function fetchNextMPBatch(): Promise<void> {
+  // Mutex: if a fetch is already in progress (e.g. from a concurrent GNN job completion), skip.
+  if (_mpFetchInProgress) {
+    console.log(`[GNN-GCP] MP fetch already in progress — skipping duplicate`);
+    return;
+  }
+  _mpFetchInProgress = true;
   try {
     const cached = await getCachedMPCount();
     if (cached >= MP_MAX_CACHE) {
@@ -86,6 +94,8 @@ async function fetchNextMPBatch(): Promise<void> {
     console.log(`[GNN-GCP] MP batch done: +${records.length} records cached (total ~${cached + records.length}, next skip=${skip + records.length})`);
   } catch (err: any) {
     console.warn(`[GNN-GCP] MP batch fetch failed: ${err.message}`);
+  } finally {
+    _mpFetchInProgress = false;
   }
 }
 
@@ -228,7 +238,8 @@ export async function startGNNLoop(): Promise<void> {
       const processed = await processNextGnnJob();
       await new Promise(r => setTimeout(r, processed ? 1000 : POLL_INTERVAL_MS));
     } catch (err: any) {
-      console.error(`[GNN-GCP] Loop error: ${err.message}`);
+      const msg = err instanceof Error ? (err.stack ?? err.message) : String(err ?? "unknown");
+      console.error(`[GNN-GCP] Loop error: ${msg}`);
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     }
   }

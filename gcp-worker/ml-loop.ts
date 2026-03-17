@@ -104,7 +104,10 @@ export async function startMLLoop(): Promise<void> {
         await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
       }
     } catch (err: any) {
-      console.error(`[ML-GCP] Loop error: ${err.message}`);
+      const msg = err instanceof Error
+        ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
+        : (err != null ? String(err) : "unknown");
+      console.error(`[ML-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     }
   }

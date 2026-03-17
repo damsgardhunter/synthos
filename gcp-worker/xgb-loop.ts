@@ -171,7 +171,10 @@ export async function startXGBLoop(): Promise<void> {
       const processed = await processNextXgbJob();
       await new Promise(r => setTimeout(r, processed ? 1000 : POLL_INTERVAL_MS));
     } catch (err: any) {
-      console.error(`[XGB-GCP] Loop error: ${err.message}`);
+      const msg = err instanceof Error
+        ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
+        : (err != null ? String(err) : "unknown");
+      console.error(`[XGB-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     }
   }
