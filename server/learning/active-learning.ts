@@ -1351,6 +1351,37 @@ async function retrainGNNWithEnrichedData(
     console.warn("[ActiveLearning] QE dataset load failed:", e?.message?.slice(0, 100));
   }
 
+  // Load the full ingested SuperCon database (up to 33,000 verified entries) —
+  // populated by startSuperConIngestion() at startup. This replaces the static
+  // 512-entry supercon-dataset.ts as the primary SC training source once ingested.
+  let superconDbMergeCount = 0;
+  try {
+    const { loadSuperConDBEntries } = await import("./supercon-db-ingestion");
+    const dbEntries = await loadSuperConDBEntries(20_000);
+    for (const entry of dbEntries) {
+      if (!entry.formula || seenFormulas.has(entry.formula)) continue;
+      const tc = Number(entry.tc) || 0;
+      if (tc <= 0) continue;
+      seenFormulas.add(entry.formula);
+      const proto = matchPrototype(entry.formula);
+      trainingData.push({
+        formula: entry.formula,
+        tc,
+        formationEnergy: undefined,
+        structure: entry.spaceGroup || entry.crystalSystem
+          ? { spaceGroup: entry.spaceGroup ?? undefined, crystalSystem: entry.crystalSystem ?? undefined, dimensionality: undefined }
+          : proto ? { spaceGroup: proto.spaceGroup, crystalSystem: proto.crystalSystem, dimensionality: proto.dimensionality } : undefined,
+        prototype: proto?.prototype,
+      });
+      superconDbMergeCount++;
+    }
+    if (superconDbMergeCount > 0) {
+      console.log(`[ActiveLearning] Training payload: +${superconDbMergeCount} SuperCon DB entries (total ${trainingData.length})`);
+    }
+  } catch (e: any) {
+    console.warn("[ActiveLearning] SuperCon DB load failed:", e?.message?.slice(0, 100));
+  }
+
   try {
     const enrichedCandidates = enrichedSnapshot ?? await storage.getSuperconductorCandidates(5000);
     for (const c of enrichedCandidates) {
@@ -1377,6 +1408,57 @@ async function retrainGNNWithEnrichedData(
       }
     }
   } catch (e: any) { console.error("[ActiveLearning] enrichment error:", e?.message?.slice(0, 200)); }
+
+  // Enrich training samples that lack structural data using the COD structure cache.
+  // Looks up each sample's element set in cod_structure_cache and fills spaceGroup/crystalSystem
+  // so the GNN feature extractor has richer symmetry information for more samples.
+  try {
+    const { db: codDb } = await import("../db");
+    const { codStructureCache: codCacheTable } = await import("@shared/schema");
+    const codRows = await codDb.select({
+      elements: codCacheTable.elements,
+      spaceGroupSymbol: codCacheTable.spaceGroupSymbol,
+      spaceGroupNumber: codCacheTable.spaceGroupNumber,
+      crystalSystem: codCacheTable.crystalSystem,
+    }).from(codCacheTable).limit(50_000);
+
+    // Map: sorted-elements-key → most-frequent {spaceGroup, crystalSystem} in COD
+    const codCount = new Map<string, Map<string, number>>();
+    for (const row of codRows) {
+      if (!row.elements || !row.crystalSystem) continue;
+      const key = (row.elements as string[]).slice().sort().join(",");
+      if (!codCount.has(key)) codCount.set(key, new Map());
+      const label = `${row.spaceGroupSymbol ?? `SG${row.spaceGroupNumber}`}|${row.crystalSystem}`;
+      codCount.get(key)!.set(label, (codCount.get(key)!.get(label) ?? 0) + 1);
+    }
+    const codMap = new Map<string, { spaceGroup: string; crystalSystem: string }>();
+    for (const [key, counts] of codCount) {
+      let bestLabel = "", bestCount = 0;
+      for (const [label, n] of counts) {
+        if (n > bestCount) { bestLabel = label; bestCount = n; }
+      }
+      const [spaceGroup, crystalSystem] = bestLabel.split("|");
+      codMap.set(key, { spaceGroup, crystalSystem });
+    }
+
+    let codEnrichedCount = 0;
+    for (const sample of trainingData) {
+      if (sample.structure?.spaceGroup) continue; // already has structural info
+      try {
+        const key = Object.keys(parseFormulaCounts(sample.formula)).sort().join(",");
+        const cod = codMap.get(key);
+        if (cod) {
+          sample.structure = { spaceGroup: cod.spaceGroup, crystalSystem: cod.crystalSystem, dimensionality: undefined };
+          codEnrichedCount++;
+        }
+      } catch { /* skip malformed formula */ }
+    }
+    if (codEnrichedCount > 0) {
+      console.log(`[ActiveLearning] COD enrichment: ${codEnrichedCount}/${trainingData.length} samples enriched with spaceGroup/crystalSystem`);
+    }
+  } catch (e: any) {
+    console.warn("[ActiveLearning] COD structural enrichment failed:", e?.message?.slice(0, 100));
+  }
 
   const superconCount = SUPERCON_TRAINING_DATA.filter(e => !heldOutFormulas.has(e.formula)).length;
   const enrichedCount = trainingData.length - superconCount;

@@ -692,8 +692,157 @@ function generateHeusler(): PrototypeCandidate[] {
   return candidates;
 }
 
+// ── NaCl / Rock-salt (SG 225, Fm-3m) ─────────────────────────────────────────
+// Covers proven binary SC nitrides, carbides, and borides: NbN (16K), TiN (5.6K),
+// VN (8.4K), NbC (11K), TaC (10K), MoN (12K), ZrN (10K).
+function generateRockSalt(): PrototypeCandidate[] {
+  const metals = ["Nb", "Ti", "V", "Ta", "Mo", "Zr", "Hf", "W", "Cr", "La", "Y"];
+  const anions  = ["N", "C", "B"];
+  const info = PROTOTYPE_REGISTRY.RockSalt ?? {
+    name: "NaCl-B1", spaceGroup: "Fm-3m", crystalSystem: "cubic", dimensionality: "3D",
+  };
+  return metals.flatMap(m => anions.map(x => ({
+    formula: `${m}${x}`,
+    prototype: info.name,
+    spaceGroup: info.spaceGroup,
+    crystalSystem: info.crystalSystem,
+    dimensionality: info.dimensionality ?? "3D",
+    siteAssignment: { A: [m], B: [x] },
+  })));
+}
+
+// ── FeSe-type (SG 129, P4/nmm) ────────────────────────────────────────────────
+// Iron pnictides / chalcogenides: FeSe (9K), FeAs analogues.
+function generateFeSeType(): PrototypeCandidate[] {
+  const A = ["Fe", "Co", "Ni", "Cu", "Mn"];
+  const B = ["Se", "Te", "S", "P", "As"];
+  const info = PROTOTYPE_REGISTRY.FeSeType ?? {
+    name: "FeSe-type", spaceGroup: "P4/nmm", crystalSystem: "tetragonal", dimensionality: "2D",
+  };
+  return A.flatMap(a => B.map(b => ({
+    formula: `${a}${b}`,
+    prototype: info.name,
+    spaceGroup: info.spaceGroup,
+    crystalSystem: info.crystalSystem,
+    dimensionality: info.dimensionality ?? "2D",
+    siteAssignment: { A: [a], B: [b] },
+  })));
+}
+
+// ── Hydrides: H3S-type (Im-3m, SG 229) & AH10 clathrate (Fm-3m, SG 225) ─────
+// H3S ~200K, LaH10 ~250K, YH9 ~250K (at pressure). Highest-Tc systems known.
+function generateHydrides(): PrototypeCandidate[] {
+  const clathrate10 = ["La", "Y", "Ce", "Th", "Pr", "Nd"];
+  const clathrate9  = ["Y", "La"];
+  const h3s         = ["S", "Se", "Te", "P"];
+  const info10 = PROTOTYPE_REGISTRY.LaH10Type ?? {
+    name: "LaH10-clathrate", spaceGroup: "Fm-3m", crystalSystem: "cubic", dimensionality: "3D",
+  };
+  const infoH3 = PROTOTYPE_REGISTRY.H3SType ?? {
+    name: "H3S-type", spaceGroup: "Im-3m", crystalSystem: "cubic", dimensionality: "3D",
+  };
+  return [
+    ...clathrate10.map(m => ({
+      formula: `${m}H10`,
+      prototype: info10.name,
+      spaceGroup: info10.spaceGroup,
+      crystalSystem: info10.crystalSystem,
+      dimensionality: info10.dimensionality ?? "3D",
+      siteAssignment: { A: [m], H: ["H"] },
+    })),
+    ...clathrate9.map(m => ({
+      formula: `${m}H9`,
+      prototype: info10.name,
+      spaceGroup: info10.spaceGroup,
+      crystalSystem: info10.crystalSystem,
+      dimensionality: info10.dimensionality ?? "3D",
+      siteAssignment: { A: [m], H: ["H"] },
+    })),
+    ...h3s.map(x => ({
+      formula: `H3${x}`,
+      prototype: infoH3.name,
+      spaceGroup: infoH3.spaceGroup,
+      crystalSystem: infoH3.crystalSystem,
+      dimensionality: infoH3.dimensionality ?? "3D",
+      siteAssignment: { A: ["H"], B: [x] },
+    })),
+  ];
+}
+
+// ── NiAs-type (SG 194, P6_3/mmc) ─────────────────────────────────────────────
+// Layered AB chalcogenides: NbSe2, TaS2, TiS2, VS2 intercalation SCs.
+function generateNiAsType(): PrototypeCandidate[] {
+  const A = ["Nb", "Ta", "Ti", "Zr", "Hf", "V", "Cr", "Fe", "Co", "Ni"];
+  const B = ["Se", "S", "Te"];
+  const info = PROTOTYPE_REGISTRY.NickelArsenide ?? {
+    name: "NiAs-type", spaceGroup: "P63/mmc", crystalSystem: "hexagonal", dimensionality: "3D",
+  };
+  return A.flatMap(a => B.map(b => ({
+    formula: `${a}${b}`,
+    prototype: info.name,
+    spaceGroup: info.spaceGroup,
+    crystalSystem: info.crystalSystem,
+    dimensionality: info.dimensionality ?? "3D",
+    siteAssignment: { A: [a], B: [b] },
+  })));
+}
+
+// ── CdI2-type (SG 164, P-3m1) ────────────────────────────────────────────────
+// Layered dichalcogenides: TaS2 (4K), TiS2, NbSe2 analogues.
+function generateCdI2Type(): PrototypeCandidate[] {
+  const A = ["Nb", "Ta", "Ti", "Zr", "Hf", "V", "Mo", "W", "Re"];
+  const B = ["Se", "S", "Te"];
+  const info = PROTOTYPE_REGISTRY.CadmiumIodide ?? {
+    name: "CdI2-type", spaceGroup: "P-3m1", crystalSystem: "hexagonal", dimensionality: "2D",
+  };
+  return A.flatMap(a => B.map(b => ({
+    formula: `${a}${b}2`,
+    prototype: info.name,
+    spaceGroup: info.spaceGroup,
+    crystalSystem: info.crystalSystem,
+    dimensionality: info.dimensionality ?? "2D",
+    siteAssignment: { A: [a], B: [b] },
+  })));
+}
+
+// ── Cu3Au-type / L1_2 (SG 221, Pm-3m) ────────────────────────────────────────
+// Ordered intermetallics with AB3 stoichiometry.
+function generateCu3AuType(): PrototypeCandidate[] {
+  const A = ["La", "Y", "Ce", "Pr", "Nd", "Sm", "Gd", "Dy", "Er", "Yb", "In", "Tl", "Sn", "Pb"];
+  const B = ["Pd", "Pt", "Rh", "Ir", "Au", "Ni", "Cu"];
+  const info = PROTOTYPE_REGISTRY.Cu3Au ?? {
+    name: "Cu3Au-type", spaceGroup: "Pm-3m", crystalSystem: "cubic", dimensionality: "3D",
+  };
+  return A.flatMap(a => B.map(b => ({
+    formula: `${a}${b}3`,
+    prototype: info.name,
+    spaceGroup: info.spaceGroup,
+    crystalSystem: info.crystalSystem,
+    dimensionality: info.dimensionality ?? "3D",
+    siteAssignment: { A: [a], B: [b] },
+  })));
+}
+
+// ── Fulleride A3C60 (SG 225, Fm-3m) ──────────────────────────────────────────
+// Alkali-doped C60 SCs: K3C60 (18K), Rb3C60 (29K), Cs3C60 (38K).
+function generateFullerides(): PrototypeCandidate[] {
+  const alkali = ["K", "Rb", "Cs", "Na"];
+  const info = PROTOTYPE_REGISTRY.Fulleride ?? {
+    name: "Fulleride-K3C60", spaceGroup: "Fm-3m", crystalSystem: "cubic", dimensionality: "3D",
+  };
+  return alkali.map(a => ({
+    formula: `${a}3C60`,
+    prototype: info.name,
+    spaceGroup: info.spaceGroup,
+    crystalSystem: info.crystalSystem,
+    dimensionality: info.dimensionality ?? "3D",
+    siteAssignment: { A: [a], C: ["C"] },
+  }));
+}
+
 export function runPrototypeGeneration(): PrototypeCandidate[] {
   const all: PrototypeCandidate[] = [
+    // Original 10 families
     ...generateAlB2(),
     ...generatePerovskite(),
     ...generateA15(),
@@ -704,6 +853,14 @@ export function runPrototypeGeneration(): PrototypeCandidate[] {
     ...generateLayeredNitride(),
     ...generateLaves(),
     ...generateHeusler(),
+    // Extended families covering SGs 225, 129, 229, 194, 164, 221
+    ...generateRockSalt(),   // NbN/TiN/VN family (SG 225, proven SCs)
+    ...generateFeSeType(),   // FeSe/FeAs pnictides (SG 129)
+    ...generateHydrides(),   // H3S/LaH10 hydrides (SG 229, 225 — highest known Tc)
+    ...generateNiAsType(),   // NbSe2/TaS2 intercalation SCs (SG 194)
+    ...generateCdI2Type(),   // Layered dichalcogenides (SG 164)
+    ...generateCu3AuType(),  // Intermetallic A-site rare earths (SG 221)
+    ...generateFullerides(), // Alkali fullerides K3C60/Rb3C60 (SG 225)
   ];
 
   const seen = new Set<string>();

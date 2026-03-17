@@ -134,6 +134,7 @@ import { ensureFeatureStateLoaded } from "./model-llm-controller";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
 import { recordPredictionOutcome } from "./model-diagnostics";
 import { checkFormulaNovelty } from "./cod-client";
+import { systematicSGSweep, getSpaceGroupCoverageReport } from "./space-group-explorer";
 
 function derivePairingSymmetry(mechanism: string | null | undefined, dWaveFlag?: boolean): string {
   const mech = (mechanism ?? "").toLowerCase();
@@ -7231,22 +7232,30 @@ async function runLearningCycle() {
             const topCandidates = await storage.getSuperconductorCandidates(10);
             let pressureCurvesAnalyzed = 0;
             let transitionsFound = 0;
-            for (const c of topCandidates.slice(0, 5)) {
-              try {
+            // Run per-candidate pressure curve + transition analysis concurrently —
+            // each formula is independent so sequential for...await was serialising
+            // ~56 predictAtPressure awaits × 5 formulas for no reason.
+            const curveResults = await Promise.allSettled(
+              topCandidates.slice(0, 5).map(async (c) => {
                 await predictPressureCurve(c.formula);
                 const optimal = await findOptimalPressure(c.formula);
                 const transitions = await detectPhaseTransitions(c.formula);
-                pressureCurvesAnalyzed++;
-                transitionsFound += transitions.length;
-                if (optimal.maxTc > 77 && optimal.optimalPressureGpa > 0) {
-                  emit("log", {
-                    phase: "engine",
-                    event: "Pressure-Tc curve",
-                    detail: `${c.formula}: peak Tc=${optimal.maxTc.toFixed(1)}K at ${optimal.optimalPressureGpa} GPa${transitions.length > 0 ? `, ${transitions.length} phase transition(s)` : ''}`,
-                    dataSource: "Pressure Surrogate",
-                  });
-                }
-              } catch { /* skip */ }
+                return { formula: c.formula, optimal, transitions };
+              })
+            );
+            for (const r of curveResults) {
+              if (r.status === "rejected") continue;
+              const { optimal, transitions } = r.value;
+              pressureCurvesAnalyzed++;
+              transitionsFound += transitions.length;
+              if (optimal.maxTc > 77 && optimal.optimalPressureGpa > 0) {
+                emit("log", {
+                  phase: "engine",
+                  event: "Pressure-Tc curve",
+                  detail: `${r.value.formula}: peak Tc=${optimal.maxTc.toFixed(1)}K at ${optimal.optimalPressureGpa} GPa${transitions.length > 0 ? `, ${transitions.length} phase transition(s)` : ''}`,
+                  dataSource: "Pressure Surrogate",
+                });
+              }
             }
             const pcStats = getPressureCurveStats();
             const ptStats = getPhaseTransitionStats();
@@ -7258,13 +7267,14 @@ async function runLearningCycle() {
             });
 
             let enthalpyStableCount = 0;
-            for (const c of topCandidates.slice(0, 5)) {
-              try {
-                const window = await findStabilityPressureWindow(c.formula);
-                if (window && window.maxPressureGpa > window.minPressureGpa) {
-                  enthalpyStableCount++;
-                }
-              } catch { /* skip */ }
+            // Run stability window checks concurrently — also independent per formula
+            const enthalpyResults = await Promise.allSettled(
+              topCandidates.slice(0, 5).map(c => findStabilityPressureWindow(c.formula))
+            );
+            for (const r of enthalpyResults) {
+              if (r.status === "fulfilled" && r.value && r.value.maxPressureGpa > r.value.minPressureGpa) {
+                enthalpyStableCount++;
+              }
             }
             const hStats = getEnthalpyStats();
             emit("log", {
@@ -7304,14 +7314,15 @@ async function runLearningCycle() {
                 }
               }
             }
-            for (const c of topCandidates.slice(0, 8)) {
-              try {
+            // fastPressureScreen is independent per candidate — run concurrently
+            await Promise.allSettled(
+              topCandidates.slice(0, 8).map(async (c) => {
                 const cPressure = c.pressureGpa ?? 0;
                 const screen = await fastPressureScreen(c.formula, cPressure);
                 const isHit = screen.passesPrescreen && (c.predictedTc ?? 0) > 20;
                 recordClusterDiscovery(c.formula, cPressure, c.predictedTc ?? 0, isHit);
-              } catch {}
-            }
+              })
+            );
 
             const mapStats = getPressurePropertyMapStats();
             const bpStats = getBayesianPressureStats();
@@ -8472,6 +8483,52 @@ export async function startEngine() {
       .then(() => console.log("[Engine] background: backfillGBScores + recalculatePhysics done"))
       .catch(e => console.error("[Engine] background score/physics recalc failed:", e));
   }, 900_000);
+
+  // ── Background: systematic space-group sweep ─────────────────────────────────
+  // Runs once at startup (15 min delay) then every 6 hours. Generates prototype
+  // formula candidates across all 230 crystallographic space groups (in SC-relevance
+  // order) and submits them to the autonomous discovery cycle. Covers the full 230-SG
+  // landscape beyond the manually-coded families in the main learning cycle.
+  (async function scheduleSGSweep() {
+    const initialDelay = 15 * 60 * 1000;   // 15 min — after startup settles
+    const repeatInterval = 6 * 60 * 60 * 1000; // 6 hours
+
+    async function runSGSweep() {
+      if (state !== "running") return;
+      try {
+        const coverage = getSpaceGroupCoverageReport();
+        const coveredSGs = Object.values(coverage.coveredByCrystalSystem).reduce((s, v) => s + v.withPrototype, 0);
+        console.log(
+          `[Engine] SG sweep: ${coverage.totalPrototypes} prototypes, ${coveredSGs}/230 SGs covered.` +
+          ` High-relevance gaps: [${coverage.uncoveredHighRelevance.slice(0, 8).join(",")}${coverage.uncoveredHighRelevance.length > 8 ? "..." : ""}]`,
+        );
+
+        // Pull formula candidates from the full prototype generator (all families).
+        const { runPrototypeGeneration: runSGProtoGen } = await import("./prototype-generator");
+        const candidates = runSGProtoGen();
+        console.log(`[Engine] SG sweep: evaluating ${candidates.length} prototype formula candidates`);
+
+        let submitted = 0;
+        for (const candidate of candidates) {
+          if (state !== "running") break;
+          try {
+            await runAutonomousDiscoveryCycle(candidate.formula);
+            submitted++;
+          } catch { /* non-fatal */ }
+          // Yield every 5 candidates so the event loop stays alive
+          if (submitted % 5 === 0) {
+            await new Promise(r => setTimeout(r, 100));
+          }
+        }
+        console.log(`[Engine] SG sweep complete: ${submitted}/${candidates.length} candidates evaluated`);
+      } catch (e: any) {
+        console.warn("[Engine] SG sweep failed:", e?.message?.slice(0, 100));
+      }
+      setTimeout(runSGSweep, repeatInterval);
+    }
+
+    setTimeout(runSGSweep, initialDelay);
+  })();
   console.log("[Engine] startup: restoring campaigns...", Date.now());
 
   try {
