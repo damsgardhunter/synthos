@@ -4802,9 +4802,10 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       // analysis has structural context rather than silently proceeding with none.
       const protoFallback = matchPrototype(formula);
       if (protoFallback) {
-        (candidate as any).prototype = protoFallback;
+        (candidate as any).prototype = protoFallback.prototype;
+        (candidate as any).crystalStructure = `${protoFallback.spaceGroup} (${protoFallback.crystalSystem})`;
         (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "prototype-fallback" };
-        console.log(`[Autonomous] ${formula}: structure prediction failed — using prototype fallback '${protoFallback}'`);
+        console.log(`[Autonomous] ${formula}: structure prediction failed — using prototype fallback '${protoFallback.prototype}'`);
       } else {
         (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "none" };
         console.log(`[Autonomous] ${formula}: no structure or prototype — proceeding with composition-only features`);

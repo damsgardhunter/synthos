@@ -21,8 +21,11 @@ const STALE_CLEANUP_INTERVAL_MS = 5 * 60_000;
 // on thermodynamically unstable structures that are very unlikely to be real.
 // 0.1 eV/atom was too strict — many novel hypothetical superconductors sit 0.1-0.3 eV/atom
 // above the convex hull (metastable but synthesisable under pressure or at low T).
-// 0.3 eV/atom is the standard threshold used in high-throughput screening literature.
-const STABILITY_GATE_EV_ATOM = 0.3;
+// 0.3 eV/atom is the standard threshold used in high-throughput screening literature, but
+// Miedema analytical estimates have ±0.2 eV/atom error — hard-rejecting at 0.3 causes data
+// starvation when all candidates land 0.3-0.5 eV above hull on analytical estimates alone.
+// Raised to 0.5 eV/atom so DFT can validate candidates that analytical methods overestimate.
+const STABILITY_GATE_EV_ATOM = 0.5;
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -106,7 +109,8 @@ export async function submitDFTJob(
     const structureMap = await storage.getCrystalStructuresByFormulas([formula]);
     const structures = structureMap.get(formula) ?? [];
     if (structures.length > 0) {
-      const bestHullDist = Math.min(...structures.map(s => s.convexHullDistance ?? Infinity));
+      // Null hull distance means unknown — allow through (same policy as bulk refill loop).
+      const bestHullDist = Math.min(...structures.map(s => s.convexHullDistance ?? 0));
       if (bestHullDist > STABILITY_GATE_EV_ATOM) {
         console.log(`[DFT-Queue] Formula ${formula} rejected by stability gate: hull dist ${bestHullDist.toFixed(3)} eV/atom > ${STABILITY_GATE_EV_ATOM}`);
         return null;
