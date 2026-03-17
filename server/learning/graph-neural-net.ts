@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { ELEMENTAL_DATA, getElementData } from "./elemental-data";
+import { ELEMENTAL_DATA, getElementData, isTransitionMetal } from "./elemental-data";
 import { extractFeatures } from "./ml-predictor";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { storage } from "../storage";
@@ -45,7 +45,7 @@ export interface CrystalGraph {
   formula: string;
   prototype?: string;
   pressureGpa?: number;
-  globalFeatures?: number[]; // 6-dim: VEC, mean d-occ, mean EN, mean Debye, size mismatch, nElements
+  globalFeatures?: number[]; // 13-dim: VEC, mean d-occ, mean EN, mean Debye, size mismatch, nElements, stdEN, hasH, tmFrac, cfgEntropy, maxENdiff, meanMass, stdRadius
 }
 
 function buildEdgeIndex(nodes: NodeFeature[], edges: EdgeFeature[]): (EdgeFeature | null)[] {
@@ -195,7 +195,7 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 6;               // VEC, mean d-occ, mean EN, mean Debye, size mismatch, nElements
+const GLOBAL_COMP_DIM = 13;              // original 6 + 7 XGBoost-inspired: stdEN, hasH, tmFrac, cfgEntropy, maxENdiff, meanMass, stdRadius
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
@@ -1237,20 +1237,54 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (6) composition-level features injected at the MLP head.
-// These encode information the GNN cannot infer from per-node features alone.
+// Computes GLOBAL_COMP_DIM (13) composition-level features injected at the MLP head.
+// Original 6 features + 7 XGBoost-inspired features the message-passing layers cannot recover.
 function computeGlobalCompositionFeatures(counts: Record<string, number>): number[] {
   const els = Object.entries(counts);
   if (els.length === 0) return new Array(GLOBAL_COMP_DIM).fill(0);
   const total = els.reduce((s, [, n]) => s + n, 0);
   if (total <= 0) return new Array(GLOBAL_COMP_DIM).fill(0);
 
-  const meanEN    = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.paulingElectronegativity ?? 1.5), 0);
+  // --- original 6 ---
+  const enValues  = els.map(([el, n]) => ({ w: n / total, v: getElementData(el)?.paulingElectronegativity ?? 1.5 }));
+  const meanEN    = enValues.reduce((s, { w, v }) => s + w * v, 0);
   const meanD     = els.reduce((s, [el, n]) => s + (n / total) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0);
   const vec       = computeVEC(counts);
   const meanDebye = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.debyeTemperature ?? 300), 0);
   const mismatch  = computeAtomicMismatch(counts);
   const nElements = els.length;
+
+  // --- 7 XGBoost-inspired additions ---
+  // [6] std of Pauling EN — high spread → large ionicity gap (cuprate-like or hydride-like)
+  const stdEN = Math.sqrt(enValues.reduce((s, { w, v }) => s + w * (v - meanEN) ** 2, 0));
+
+  // [7] binary: formula contains hydrogen (hydride superconductors are a separate class at high P)
+  const hasHydrogen = counts["H"] ? 1.0 : 0.0;
+
+  // [8] fraction of stoichiometric weight from transition metals (d-electron BCS coupling density)
+  const tmWeight = els.reduce((s, [el, n]) => s + (isTransitionMetal(el) ? n : 0), 0);
+  const transitionMetalFraction = tmWeight / total;
+
+  // [9] configurational (mixing) entropy −Σ x_i ln(x_i), normalized by ln(N_max=6)
+  // captures HEA / medium-entropy alloy superconductors
+  const cfgEntropy = els.reduce((s, [, n]) => {
+    const x = n / total;
+    return s + (x > 0 ? -x * Math.log(x) : 0);
+  }, 0) / Math.log(Math.max(nElements, 2));
+
+  // [10] max pairwise EN difference — ionicity extremes (e.g. Na vs F = 3.16 - 0.93 = 2.23)
+  const enList = els.map(([el]) => getElementData(el)?.paulingElectronegativity ?? 1.5);
+  const maxENdiff = enList.length > 1
+    ? Math.max(...enList) - Math.min(...enList)
+    : 0;
+
+  // [11] mean atomic mass — heavier atoms → lower Debye freq → conventional BCS weakened
+  const meanMass = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.atomicMass ?? 50), 0);
+
+  // [12] std of atomic radius — additional lattice strain signal beyond scalar mismatch
+  const radii  = els.map(([el, n]) => ({ w: n / total, v: getElementData(el)?.atomicRadius ?? 130 }));
+  const meanR  = radii.reduce((s, { w, v }) => s + w * v, 0);
+  const stdRadius = Math.sqrt(radii.reduce((s, { w, v }) => s + w * (v - meanR) ** 2, 0));
 
   return [
     meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
@@ -1259,6 +1293,13 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>): numbe
     Math.min(1.0, meanDebye / 2000),        // [3] mean Debye temperature — phonon frequency proxy
     Math.min(1.0, mismatch * 5),            // [4] atomic size mismatch δ — lattice distortion (suppresses Tc)
     Math.min(1.0, nElements / 5.0),         // [5] compound complexity
+    Math.min(1.0, stdEN / 2.0),             // [6] EN heterogeneity — cuprate/hydride indicator
+    hasHydrogen,                            // [7] hydrogen flag — hydride SC class separator
+    transitionMetalFraction,               // [8] TM fraction — d-electron BCS coupling density
+    Math.min(1.0, cfgEntropy),              // [9] configurational entropy — HEA/entropy alloy signal
+    Math.min(1.0, maxENdiff / 3.5),         // [10] max EN spread — ionicity extremes
+    Math.min(1.0, meanMass / 200),          // [11] mean atomic mass — phonon mass scale
+    Math.min(1.0, stdRadius / 80),          // [12] radius std — lattice strain heterogeneity
   ];
 }
 

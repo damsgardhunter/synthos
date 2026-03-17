@@ -83,9 +83,10 @@ const PREFERRED_METHODS_BY_FAMILY: Record<string, string> = {
 };
 
 const ONE_POT_METHODS = new Set(["solid-state", "arc-melting", "ball-milling", "sputtering"]);
+const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);
 
-const HARD_GATE_THRESHOLD = 0.2;
-const DEPRIORITIZE_THRESHOLD = 0.35;
+const HARD_GATE_THRESHOLD = 0.38;
+const DEPRIORITIZE_THRESHOLD = 0.52;
 
 const stats: SynthesisGateStats = {
   totalEvaluated: 0,
@@ -359,10 +360,34 @@ export function evaluateSynthesisGate(
     )) * 10000
   ) / 10000;
 
-  const chemDistThreshold = 0.8 + noveltyBonus * 0.5;
-  const stepThreshold = 8 + (noveltyBonus > 0.05 ? 2 : 0);
+  const chemDistThreshold = 0.6 + noveltyBonus * 0.3;
+  const stepThreshold = 6 + (noveltyBonus > 0.05 ? 1 : 0);
 
   const rejectionReasons: string[] = [];
+
+  // ── Chemistry hard gates (catch obviously nonsensical formulas) ─────────────
+  const counts = parseFormulaCounts(formula);
+  const elements = Object.keys(counts);
+  const totalFormulaAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+
+  const nobleInFormula = elements.filter(el => NOBLE_GASES.has(el));
+  if (nobleInFormula.length > 0) {
+    rejectionReasons.push(`Noble gas elements not chemically bondable: ${nobleInFormula.join(", ")}`);
+  }
+
+  if (elements.length > 6) {
+    rejectionReasons.push(`Too many distinct elements: ${elements.length} > 6 (synthesis impractical)`);
+  }
+
+  const maxCount = Math.max(...Object.values(counts));
+  if (maxCount > 15) {
+    rejectionReasons.push(`Extreme stoichiometry: single element count ${maxCount} > 15`);
+  }
+
+  if (totalFormulaAtoms > 30) {
+    rejectionReasons.push(`Formula unit too large: ${totalFormulaAtoms} atoms > 30`);
+  }
+  // ────────────────────────────────────────────────────────────────────────────
 
   // ── Physics-based hard gates ────────────────────────────────────────────────
   // Hull distance cutoff: materials more than MAX_HULL_DISTANCE_EV above the
@@ -403,7 +428,7 @@ export function evaluateSynthesisGate(
     rejectionReasons.push(`Severe toxicity hazard: ${chemDist.toxicElements.join(", ")}`);
   }
 
-  if (chemDist.precursorAvailability < 0.2) {
+  if (chemDist.precursorAvailability < 0.30) {
     rejectionReasons.push(`Precursors unavailable: avail=${chemDist.precursorAvailability.toFixed(3)}`);
   }
 

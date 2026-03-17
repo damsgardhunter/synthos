@@ -685,6 +685,111 @@ export class BayesianOptimizer {
     return selected;
   }
 
+  // Generates novel candidate formulas by exploring the neighbourhood of the
+  // best observed compounds, then scores them with the GP acquisition function.
+  // This makes BO a true proposer rather than just a ranker of external pools.
+  generateCandidates(nCandidates: number = 20): AcquisitionResult[] {
+    if (this.observations.length < 3) return [];
+
+    // Isoelectronic / isovalent substitution groups — swapping within a group
+    // preserves the broad chemical class while exploring new compositions.
+    const SUB_GROUPS: string[][] = [
+      ["Li","Na","K","Rb","Cs"],
+      ["Be","Mg","Ca","Sr","Ba"],
+      ["Sc","Y","La"],
+      ["Ti","Zr","Hf"],
+      ["V","Nb","Ta"],
+      ["Cr","Mo","W"],
+      ["Mn","Re"],
+      ["Fe","Ru","Os"],
+      ["Co","Rh","Ir"],
+      ["Ni","Pd","Pt"],
+      ["Cu","Ag","Au"],
+      ["B","Al","Ga","In","Tl"],
+      ["C","Si","Ge","Sn","Pb"],
+      ["N","P","As","Sb","Bi"],
+      ["O","S","Se","Te"],
+      ["F","Cl","Br"],
+    ];
+
+    // Elements commonly found in high-Tc environments — used for addition moves.
+    const HIGH_TC_ADJACENT = [
+      "H","B","C","N","O","S","Se","Te","As","P","F",
+      "Cu","Fe","Nb","La","Ba","Sr","Ca","K",
+    ];
+
+    function buildFormula(counts: Record<string, number>): string {
+      return Object.entries(counts)
+        .filter(([, c]) => c > 0)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([el, c]) => c === 1 ? el : `${el}${c}`)
+        .join("");
+    }
+
+    // Seed from the top observed formulas (by Tc).
+    const topObs = [...this.observations]
+      .sort((a, b) => b.tc - a.tc)
+      .slice(0, Math.min(8, this.observations.length));
+
+    const candidates = new Set<string>();
+
+    for (const obs of topObs) {
+      const counts = parseFormula(obs.formula);
+      const elements = Object.keys(counts);
+
+      // 1. Element substitution within the same chemical family
+      for (const el of elements) {
+        const group = SUB_GROUPS.find(g => g.includes(el));
+        if (!group) continue;
+        for (const sub of group) {
+          if (sub === el || !SC_ELEMENTS.includes(sub)) continue;
+          const nc = { ...counts, [sub]: counts[el] };
+          delete nc[el];
+          candidates.add(buildFormula(nc));
+        }
+      }
+
+      // 2. Stoichiometry walk — nudge each element count by ±1
+      for (const el of elements) {
+        for (const delta of [-1, 1]) {
+          const newCount = (counts[el] || 1) + delta;
+          if (newCount < 1 || newCount > 8) continue;
+          candidates.add(buildFormula({ ...counts, [el]: newCount }));
+        }
+      }
+
+      // 3. Element addition (only for binary/ternary seeds to keep complexity down)
+      if (elements.length <= 3) {
+        for (const add of HIGH_TC_ADJACENT) {
+          if (elements.includes(add)) continue;
+          candidates.add(buildFormula({ ...counts, [add]: 1 }));
+          candidates.add(buildFormula({ ...counts, [add]: 2 }));
+        }
+      }
+
+      // 4. Element removal — simplify to find promising sub-compounds
+      if (elements.length >= 3) {
+        for (const drop of elements) {
+          const nc = { ...counts };
+          delete nc[drop];
+          if (Object.keys(nc).length >= 2) candidates.add(buildFormula(nc));
+        }
+      }
+    }
+
+    // Filter to chemically valid formulas before acquisition scoring.
+    const pool = [...candidates].filter(f => {
+      const c = parseFormula(f);
+      const els = Object.keys(c);
+      const total = Object.values(c).reduce((s, n) => s + n, 0);
+      return els.length >= 2 && els.length <= 5 && total <= 12 &&
+        els.every(el => SC_ELEMENTS.includes(el));
+    });
+
+    if (pool.length === 0) return [];
+    return this.suggestNextCandidates(pool, nCandidates, "mixed");
+  }
+
   getStats(): {
     observationCount: number;
     bestTc: number;

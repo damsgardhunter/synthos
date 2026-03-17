@@ -443,8 +443,12 @@ export function recordDFTFeedbackForGA(
   const counts = parseFormulaCounts(formula);
   const motifs = extractMotifs(formula, counts);
 
-  const isGood = result.tc > 20 && result.stable && result.formationEnergy < 0.5;
-  const isBad = !result.stable || result.formationEnergy > 1.0 || result.tc < 1;
+  // formationEnergy is often null when no DFT data is available.
+  // Use a conservative fallback (0.3 eV/atom = mildly stable) so null never
+  // silently blocks motif classification via JS null-comparison quirks.
+  const fe = result.formationEnergy ?? 0.3;
+  const isGood = result.tc > 10 && result.stable && fe < 0.5;
+  const isBad = !result.stable || fe > 1.0 || result.tc < 1;
 
   for (const motif of motifs) {
     if (isGood) {
@@ -457,8 +461,8 @@ export function recordDFTFeedbackForGA(
     if (isBad) {
       const existing = compositionFeedback.badMotifs.get(motif) || { penalty: 0, count: 0 };
       let penalty = 0;
-      if (result.formationEnergy > 1.0) penalty += 0.3;
-      if (result.formationEnergy > 2.0) penalty += 0.2;
+      if (fe > 1.0) penalty += 0.3;
+      if (fe > 2.0) penalty += 0.2;
       if (!result.stable) penalty += 0.3;
       if (result.tc < 1) penalty += 0.2;
       existing.penalty = (existing.penalty * existing.count + penalty) / (existing.count + 1);

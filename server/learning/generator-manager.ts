@@ -54,11 +54,11 @@ export interface GeneratorAllocationInfo {
 const MINIMUM_WEIGHT_FLOOR = 0.05;
 
 const DEFAULT_ALLOCATIONS: Record<string, number> = {
-  structure_diffusion: 0.25,
+  structure_diffusion: 0.20,
   rl: 0.20,
   bo_exploration: 0.15,
   motif_diffusion: 0.15,
-  inverse_design: 0.10,
+  inverse_design: 0.15,
   massive_combinatorial: 0.10,
   random_exploration: 0.05,
 };

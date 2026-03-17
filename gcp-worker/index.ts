@@ -47,12 +47,21 @@ console.log(`  OMP_NUM_THREADS = ${process.env.OMP_NUM_THREADS}`);
 console.log(`  QE_BIN_DIR      = ${process.env.QE_BIN_DIR ?? "(auto)"}`);
 console.log("=".repeat(60));
 
+// Stagger loop starts to avoid saturating the Neon connection pool.
+// All loops fire their first DB poll at startup; launching them simultaneously
+// exhausts pg-pool and causes ETIMEDOUT errors on the initial poll.
+// GNN goes first (it has a warmup phase), others are delayed so they start
+// after the pool has settled.
+function delay(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 const loops: Promise<void>[] = [];
 
-if (ENABLE_DFT) loops.push(startDFTLoop());
 if (ENABLE_GNN) loops.push(startGNNLoop());
-if (ENABLE_XGB) loops.push(startXGBLoop());
-if (ENABLE_ML)  loops.push(startMLLoop());
+if (ENABLE_DFT) loops.push(delay(3_000).then(() => startDFTLoop()));
+if (ENABLE_XGB) loops.push(delay(6_000).then(() => startXGBLoop()));
+if (ENABLE_ML)  loops.push(delay(9_000).then(() => startMLLoop()));
 
 if (loops.length === 0) {
   console.error("No workers enabled — set ENABLE_DFT_WORKER=true or ENABLE_GNN_WORKER=true");

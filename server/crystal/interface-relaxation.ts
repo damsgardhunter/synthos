@@ -563,7 +563,18 @@ export async function relaxInterface(
   let relaxedAtoms: Array<{ element: string; x: number; y: number; z: number }> | null = null;
   let charges: AtomCharge[] = [];
 
-  if (isXtbAvailable() && structure.totalAtoms <= 60 && structure.totalAtoms >= 2) {
+  // GFN2-xTB and GFN-FF in the bundled Windows xtb.exe lack reliable parameters
+  // for lanthanides (La–Lu, Z=57–71) and actinides (Ac–Lr, Z=89–103).
+  // On Linux (GCP) the system xTB is newer and handles these elements correctly.
+  const interfaceElements = new Set(structure.atoms.map(a => a.element));
+  const LANTHANIDES_ACTINIDES = new Set([
+    "La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+    "Ac","Th","Pa","U","Np","Pu","Am","Cm","Bk","Cf","Es","Fm","Md","No","Lr",
+  ]);
+  const hasUnsupportedElement = IS_WINDOWS && XTB_BIN.endsWith(".exe") &&
+    [...interfaceElements].some(el => LANTHANIDES_ACTINIDES.has(el));
+
+  if (isXtbAvailable() && !hasUnsupportedElement && structure.totalAtoms <= 60 && structure.totalAtoms >= 2) {
     try {
       fs.mkdirSync(WORK_DIR, { recursive: true });
       const calcId = `iface_${film}_${substrate}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, "_");

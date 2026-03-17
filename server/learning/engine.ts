@@ -5199,7 +5199,10 @@ async function runAutonomousFastPath() {
     const shuffled = [...topCandidatesForGen].sort(() => Math.random() - 0.5);
     const { formulas: massiveCandidates, stats: genStats } = await runMassiveGeneration(shuffled, focusArea);
 
-    const boCandidatePool = [...new Set([...rlCandidates, ...massiveCandidates])];
+    // Let the BO propose its own formulas (neighbourhood exploration around best
+    // observed compounds) rather than only ranking what other generators produced.
+    const boProposed = bayesianOptimizer.generateCandidates(30).map(s => s.formula);
+    const boCandidatePool = [...new Set([...rlCandidates, ...massiveCandidates, ...boProposed])];
     const boSuggestions = bayesianOptimizer.suggestNextCandidates(boCandidatePool, 50, "mixed");
     const boTopFormulas = boSuggestions.map(s => s.formula);
 
