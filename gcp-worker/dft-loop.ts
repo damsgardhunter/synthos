@@ -126,11 +126,30 @@ export async function startDFTLoop(): Promise<void> {
 
   // Probe for pw.x before starting the job loop. Failing early with a clear
   // message is better than silently failing 1000+ jobs with ENOENT.
+  // Search /nix/store dynamically — the hash segment changes per QE version/rebuild.
+  const nixQEBins: string[] = (() => {
+    try {
+      if (!fs.existsSync("/nix/store")) return [];
+      return fs.readdirSync("/nix/store")
+        .filter(e => e.includes("quantum-espresso"))
+        .map(e => `/nix/store/${e}/bin`)
+        .filter(d => { try { return fs.existsSync(path.join(d, "pw.x")); } catch { return false; } });
+    } catch { return []; }
+  })();
+
   const searchDirs = [
     process.env.QE_BIN_DIR,
-    "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin",
+    ...nixQEBins,
     "/usr/bin",
     "/usr/local/bin",
+    "/opt/conda/bin",
+    "/opt/miniconda3/bin",
+    "/opt/miniforge3/bin",
+    "/root/miniforge3/bin",
+    "/root/miniconda3/bin",
+    "/opt/quantum-espresso/bin",
+    "/opt/qe/bin",
+    "/opt/espresso/bin",
   ].filter(Boolean) as string[];
   const pwxDir = searchDirs.find(d => fs.existsSync(path.join(d, "pw.x")));
   if (!pwxDir) {

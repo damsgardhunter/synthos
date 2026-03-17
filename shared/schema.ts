@@ -492,6 +492,49 @@ export const systemState = pgTable("system_state", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// Full SuperCon database entries (NIMS SuperCon + Hamidieh CSV + other open sources).
+// Ingested by supercon-db-ingestion.ts in the background; never blocks the event loop.
+export const superconExternalEntries = pgTable("supercon_external_entries", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  tc: real("tc"),                        // Critical temperature (K); null = unknown
+  isSuperconductor: boolean("is_superconductor").notNull().default(true),
+  source: varchar("source", { length: 40 }).notNull(), // 'nims' | 'hamidieh' | 'local-csv' | 'manual'
+  externalId: text("external_id"),       // Row ID / compound ID in the source DB
+  spaceGroup: text("space_group"),
+  crystalSystem: text("crystal_system"),
+  family: text("family"),
+  lambda: real("lambda"),               // Electron-phonon coupling (if available)
+  pressureGpa: real("pressure_gpa").notNull().default(0),
+  rawData: jsonb("raw_data"),            // Original row stored for provenance
+  importedAt: timestamp("imported_at").defaultNow(),
+}, (table) => [
+  uniqueIndex("supercon_ext_formula_source_idx").on(table.formula, table.source, table.externalId),
+  index("supercon_ext_tc_idx").on(table.tc),
+  index("supercon_ext_source_idx").on(table.source),
+]);
+
+export type SuperconExternalEntry = typeof superconExternalEntries.$inferSelect;
+
+// COD (Crystallography Open Database) structural data cache, keyed by space group + elements.
+export const codStructureCache = pgTable("cod_structure_cache", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  codId: integer("cod_id").notNull().unique(),
+  formula: text("formula").notNull(),
+  spaceGroupNumber: integer("space_group_number").notNull(),
+  spaceGroupSymbol: text("space_group_symbol"),
+  crystalSystem: text("crystal_system"),
+  elements: text("elements").array().notNull(), // sorted element list for fast lookup
+  a: real("a"), b: real("b"), c: real("c"),
+  alpha: real("alpha"), beta: real("beta"), gamma: real("gamma"),
+  volumePerAtom: real("volume_per_atom"),
+  rawData: jsonb("raw_data"),
+  fetchedAt: timestamp("fetched_at").defaultNow(),
+}, (table) => [
+  index("cod_sg_number_idx").on(table.spaceGroupNumber),
+  index("cod_crystal_system_idx").on(table.crystalSystem),
+]);
+
 export type SystemState = typeof systemState.$inferSelect;
 
 export * from "./models/chat";

@@ -3,12 +3,92 @@
  * Polls gnn_training_jobs for queued jobs, trains the full GNN ensemble,
  * writes weights back, then fetches the next batch of MP data so each
  * subsequent training cycle has a progressively richer dataset.
+ *
+ * On the dedicated GNN GCP instance all 5 ensemble members train in parallel
+ * via worker_threads (trainEnsembleParallel), cutting wall time by ~5×.
+ * Falls back to sequential trainEnsemble if any worker thread fails.
  */
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
-import { trainEnsemble, GNNPredict, buildCrystalGraph } from "../server/learning/graph-neural-net";
+import { Worker } from "worker_threads";
+import { fileURLToPath } from "url";
+import path from "path";
+import {
+  trainEnsemble, GNNPredict, buildCrystalGraph,
+  ENSEMBLE_SIZE, ENSEMBLE_SEEDS, BOOTSTRAP_RATIOS,
+  splitTrainValidation,
+} from "../server/learning/graph-neural-net";
 import type { TrainingSample } from "../server/learning/graph-neural-net";
+import type { GNNWeights } from "../server/learning/graph-neural-net";
 import { fetchMPBatchFromAPI } from "../server/learning/materials-project-client";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
+
+// ── Parallel ensemble training via worker threads ────────────────────────────
+// Each of the 5 ensemble models trains in its own worker thread so the full
+// ensemble is trained in the time it takes to train one model sequentially.
+
+function spawnModelWorker(
+  trainingData: TrainingSample[],
+  modelIndex: number,
+  maxPretrainEpochs: number,
+): Promise<GNNWeights> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(WORKER_SCRIPT, {
+      // Inherit tsx loader flags so the .ts worker file is transpiled correctly.
+      execArgv: process.execArgv,
+      workerData: {
+        trainingData,
+        seed: ENSEMBLE_SEEDS[modelIndex],
+        bootstrapRatio: BOOTSTRAP_RATIOS[modelIndex],
+        maxPretrainEpochs,
+        modelIndex,
+      },
+    });
+    worker.once("message", (msg: { ok: boolean; model?: GNNWeights; error?: string }) => {
+      if (msg.ok && msg.model) {
+        resolve(msg.model);
+      } else {
+        reject(new Error(msg.error ?? `Worker ${modelIndex} returned no model`));
+      }
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (code !== 0) reject(new Error(`Worker ${modelIndex} exited with code ${code}`));
+    });
+  });
+}
+
+async function trainEnsembleParallel(
+  trainingData: TrainingSample[],
+  maxPretrainEpochs = 15,
+): Promise<GNNWeights[]> {
+  const n = Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length);
+  console.log(`[GNN-GCP] Launching ${n} worker threads for parallel ensemble training`);
+
+  // Fan out: all n models start simultaneously
+  const promises = Array.from({ length: n }, (_, i) =>
+    spawnModelWorker(trainingData, i, maxPretrainEpochs).catch((err: Error) => {
+      console.warn(`[GNN-GCP] Worker ${i} failed (${err.message}) — will use sequential fallback for this model`);
+      return null;
+    }),
+  );
+
+  const results = await Promise.all(promises);
+  const models = results.filter((m): m is GNNWeights => m !== null);
+
+  if (models.length === 0) {
+    console.warn("[GNN-GCP] All worker threads failed — falling back to sequential trainEnsemble");
+    return trainEnsemble(trainingData);
+  }
+
+  if (models.length < n) {
+    console.warn(`[GNN-GCP] Only ${models.length}/${n} workers succeeded — ensemble will be smaller`);
+  }
+
+  return models;
+}
 
 const POLL_INTERVAL_MS = 10_000;
 const MP_BATCH_SIZE = 500;          // records per progressive fetch
@@ -100,23 +180,26 @@ async function fetchNextMPBatch(): Promise<void> {
 }
 
 // ── Metrics ──────────────────────────────────────────────────────────────────
+// IMPORTANT: always pass a HELD-OUT split — never the training set.
+// Evaluating on training data gives inflated R² that is meaningless for
+// assessing generalisation quality.
 
 function computeMetrics(
-  models: any[],
-  trainingData: TrainingSample[],
-): { r2: number; mae: number; rmse: number } {
-  if (models.length === 0 || trainingData.length === 0) return { r2: 0, mae: 0, rmse: 0 };
+  models: GNNWeights[],
+  evalData: TrainingSample[],
+): { r2: number; mae: number; rmse: number; n: number } {
+  if (models.length === 0 || evalData.length === 0) return { r2: 0, mae: 0, rmse: 0, n: 0 };
 
-  const actuals = trainingData.map(d => d.tc);
+  const actuals = evalData.map(d => d.tc);
   const meanActual = actuals.reduce((a, b) => a + b, 0) / actuals.length;
 
   let ssTot = 0, ssRes = 0, sumAbs = 0, sumSq = 0, counted = 0;
-  for (const sample of trainingData) {
+  for (const sample of evalData) {
     try {
       const graph = buildCrystalGraph(sample.formula, sample.structure);
       const preds = models.map(m => GNNPredict(graph, m).predictedTc);
       const pred = preds.reduce((a, b) => a + b, 0) / preds.length;
-      if (!Number.isFinite(pred)) continue; // skip overflow predictions
+      if (!Number.isFinite(pred)) continue;
       const diff = sample.tc - pred;
       ssTot += (sample.tc - meanActual) ** 2;
       ssRes += diff ** 2;
@@ -126,11 +209,11 @@ function computeMetrics(
     } catch { /* skip malformed samples */ }
   }
 
-  if (counted === 0) return { r2: 0, mae: 0, rmse: 0 };
+  if (counted === 0) return { r2: 0, mae: 0, rmse: 0, n: 0 };
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
   const mae = sumAbs / counted;
   const rmse = Math.sqrt(sumSq / counted);
-  return { r2, mae, rmse };
+  return { r2, mae, rmse, n: counted };
 }
 
 // ── QE dataset augmentation (DFT-verified SC samples) ────────────────────────
@@ -230,31 +313,53 @@ async function processNextGnnJob(): Promise<boolean> {
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpContrast.length} MP contrast samples (Tc=0) — total ${trainingData.length}`);
   }
 
-  console.log(`[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${qeSamples.length} QE + ${mpContrast.length} MP contrast`);
+  // Split BEFORE training so validation data is never seen by the models.
+  // SC samples (Tc>0) are stratified: 80% train / 20% val.
+  // MP contrast (Tc=0) goes entirely into training — we validate on SC targets only.
+  const scSamples  = trainingData.filter(s => s.tc > 0);
+  const nonScSamples = trainingData.filter(s => s.tc === 0);
+  const { train: scTrain, validation: scVal } = splitTrainValidation(scSamples, 0.20, 42);
+  const trainSet = [...scTrain, ...nonScSamples];
+  const valSet   = scVal; // held-out SC samples only — these are the discovery targets
+
+  console.log(
+    `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${qeSamples.length} QE + ${mpContrast.length} MP contrast` +
+    ` | train=${trainSet.length} val=${valSet.length} (SC holdout)`
+  );
   const startMs = Date.now();
 
   try {
-    const models = trainEnsemble(trainingData);
-    const { r2, mae, rmse } = computeMetrics(models, trainingData);
+    const models = await trainEnsembleParallel(trainSet);
+
+    // Evaluate on HELD-OUT validation set — these R²/MAE/RMSE are honest.
+    const valMetrics = valSet.length >= 5
+      ? computeMetrics(models, valSet)
+      : { r2: 0, mae: 0, rmse: 0, n: 0 };
+    // Also compute training-set metrics separately so overfitting is visible.
+    const trainMetrics = computeMetrics(models, scTrain.slice(0, 200)); // sample to avoid slow eval
+    const { r2, mae, rmse, n: valN } = valMetrics;
     const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
 
-    // trainEnsemble() is synchronous and can block the event loop for 30+ seconds,
-    // during which keepalive pings can't fire and Neon TCP connections go stale.
-    // Yield here to let the event loop breathe, then warm the pool before writing.
+    // trainEnsembleParallel() uses worker threads and awaits them, so the event
+    // loop stays responsive throughout. Still yield briefly and warm the DB pool
+    // before writing since worker threads may have let idle connections go stale.
     await new Promise(r => setTimeout(r, 50));
     try { await db.execute("SELECT 1"); } catch { /* ignore — pool will reconnect */ }
 
     await storage.updateGnnTrainingJob(jobId, {
       status: "done",
       weights: models as any,
-      r2,
-      mae,
-      rmse,
+      r2,    // validation R²  (honest — not training-set)
+      mae,   // validation MAE
+      rmse,  // validation RMSE
       completedAt: new Date(),
     });
 
     console.log(
-      `[GNN-GCP] Job #${jobId} complete in ${wallSec}s — R²=${r2.toFixed(3)}, MAE=${mae.toFixed(2)}, RMSE=${rmse.toFixed(2)}, N=${datasetSize}`
+      `[GNN-GCP] Job #${jobId} complete in ${wallSec}s` +
+      ` | VAL(n=${valN}): R²=${r2.toFixed(3)} MAE=${mae.toFixed(1)}K RMSE=${rmse.toFixed(1)}K` +
+      ` | TRAIN(sample): R²=${trainMetrics.r2.toFixed(3)} MAE=${trainMetrics.mae.toFixed(1)}K` +
+      ` | overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}`
     );
 
     // Fetch next MP batch after every successful training job so the next

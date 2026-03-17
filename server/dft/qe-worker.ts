@@ -18,19 +18,44 @@ import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureRe
 // On Windows (WSL2): probe for conda-forge QE 7.x install first (~/miniforge3/bin),
 // then fall back to apt install (/usr/bin).
 // On Linux/production: use Nix store path or QE_BIN_DIR env var.
+// Search /nix/store for any quantum-espresso installation (hash changes per version/rebuild).
+function findNixQEBins(): string[] {
+  try {
+    if (!fs.existsSync("/nix/store")) return [];
+    return fs.readdirSync("/nix/store")
+      .filter(e => e.includes("quantum-espresso"))
+      .map(e => `/nix/store/${e}/bin`)
+      .filter(d => {
+        try { return fs.existsSync(path.join(d, "pw.x")); } catch { return false; }
+      });
+  } catch { return []; }
+}
+
 function resolveQEBinDir(): string {
   if (process.env.QE_BIN_DIR) return process.env.QE_BIN_DIR;
   if (!IS_WINDOWS) {
-    // Try Nix store first, then fall back to system paths (apt/conda installs on GCP/Linux)
+    // Try Nix store (glob-based — hash changes per QE version/rebuild), then apt/conda/custom installs.
     const candidates = [
-      "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin",
+      ...findNixQEBins(),
+      // System package managers (apt, yum, dnf)
       "/usr/bin",
       "/usr/local/bin",
+      // Conda/mamba installs (root or user)
+      "/opt/conda/bin",
+      "/opt/miniconda3/bin",
+      "/opt/miniforge3/bin",
+      "/root/miniforge3/bin",
+      "/root/miniconda3/bin",
+      // Common manual install prefixes on GCP/HPC
+      "/opt/quantum-espresso/bin",
+      "/opt/qe/bin",
+      "/opt/espresso/bin",
     ];
     for (const dir of candidates) {
-      if (fs.existsSync(path.join(dir, "pw.x"))) return dir;
+      if (dir && fs.existsSync(path.join(dir, "pw.x"))) return dir;
     }
-    return candidates[0]; // default — will fail clearly with ENOENT if none found
+    // Return a meaningful fallback that will fail with ENOENT (not a misleading path)
+    return "/usr/bin";
   }
   try {
     const home = execSync('wsl.exe -d Ubuntu -- bash -c "echo $HOME"',

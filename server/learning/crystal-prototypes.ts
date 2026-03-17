@@ -1052,6 +1052,334 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       return elements.some(e => isRareEarth(e) || isTransitionMetal(e)) && elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi"].includes(e));
     },
   },
+
+  // ── Elemental structures (BCC / FCC / HCP) ───────────────────────────────
+  // Critical for modelling the 30+ elemental superconductors in the training set.
+
+  {
+    name: "BCC-W",
+    spaceGroup: "Im-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "bcc-corner" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "bcc-body" },
+    ],
+    stoichiometryRatio: [1],
+    coordination: [8],
+    chemistryRules: (elements) => {
+      if (elements.length !== 1) return false;
+      return ["W", "Mo", "Cr", "Fe", "Nb", "Ta", "V", "Ba", "K", "Na", "Li", "Rb", "Cs", "Eu", "Yb"].includes(elements[0]);
+    },
+  },
+  {
+    name: "FCC-Cu",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "fcc-corner" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.0, role: "fcc-face-1" },
+      { label: "A", x: 0.5, y: 0.0, z: 0.5, role: "fcc-face-2" },
+      { label: "A", x: 0.0, y: 0.5, z: 0.5, role: "fcc-face-3" },
+    ],
+    stoichiometryRatio: [1],
+    coordination: [12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 1) return false;
+      return ["Cu", "Ni", "Pd", "Pt", "Au", "Ag", "Al", "Ca", "Sr", "Pb", "Ce", "La", "Pr", "Nd",
+              "Rh", "Ir", "Th", "Yb", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Lu"].includes(elements[0]);
+    },
+  },
+  {
+    name: "HCP-elemental",
+    spaceGroup: "P6_3/mmc",
+    latticeType: "hexagonal",
+    cOverA: 1.633,  // ideal HCP
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "hcp-site-1" },
+      { label: "A", x: 0.333, y: 0.667, z: 0.5, role: "hcp-site-2" },
+    ],
+    stoichiometryRatio: [1],
+    coordination: [12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 1) return false;
+      return ["Ti", "Zr", "Hf", "Mg", "Co", "Os", "Ru", "Re", "Tc", "Y", "Sc", "Tl", "Be",
+              "Cd", "Zn", "Lu", "Tm", "Er", "Ho", "Dy", "Tb", "Gd", "Sm", "Nd", "Pr"].includes(elements[0]);
+    },
+  },
+
+  // ── Orthorhombic prototypes (SG 16-74) — previously missing entirely ──────
+
+  {
+    // FeB-type: many binary intermetallics (NbB, TaB, VB, CrB, MoB, WB, etc.)
+    // Space group 62 (Pnma). Commonly seen for TM borides and carbides.
+    name: "FeB-Pnma",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",  // approximate as tetragonal for site generation
+    cOverA: 1.15,
+    sites: [
+      { label: "A", x: 0.18, y: 0.25, z: 0.12, role: "TM-chain" },
+      { label: "A", x: 0.32, y: 0.75, z: 0.62, role: "TM-chain" },
+      { label: "A", x: 0.68, y: 0.25, z: 0.88, role: "TM-chain" },
+      { label: "A", x: 0.82, y: 0.75, z: 0.38, role: "TM-chain" },
+      { label: "B", x: 0.03, y: 0.25, z: 0.60, role: "pnictogen" },
+      { label: "B", x: 0.47, y: 0.75, z: 0.10, role: "pnictogen" },
+      { label: "B", x: 0.53, y: 0.25, z: 0.40, role: "pnictogen" },
+      { label: "B", x: 0.97, y: 0.75, z: 0.90, role: "pnictogen" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [7, 9],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Nb", "Ta", "V", "Cr", "Mo", "W", "Fe", "Mn", "Re", "Ti", "Zr", "Hf"].includes(e));
+      const hasSp = elements.some(e => ["B", "C", "N", "P", "Si", "Ge", "Al"].includes(e));
+      return hasTM && hasSp;
+    },
+  },
+  {
+    // CrB-type (Cmcm, SG 63): many rare-earth diborides, CrB, MoB high-Tc phases
+    name: "CrB-Cmcm",
+    spaceGroup: "Cmcm",
+    latticeType: "tetragonal",
+    cOverA: 2.5,
+    sites: [
+      { label: "A", x: 0.0, y: 0.15, z: 0.25, role: "TM-zigzag" },
+      { label: "A", x: 0.0, y: 0.85, z: 0.75, role: "TM-zigzag" },
+      { label: "B", x: 0.0, y: 0.44, z: 0.25, role: "sp-chain" },
+      { label: "B", x: 0.0, y: 0.56, z: 0.75, role: "sp-chain" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [7, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => isTransitionMetal(e) || isRareEarth(e));
+      const hasSp = elements.some(e => ["B", "C", "N", "Si", "P", "Ge", "Al"].includes(e));
+      return hasTM && hasSp;
+    },
+  },
+  {
+    // GdFeO3-type (Pbnm/Pnma, SG 62): distorted perovskite — manganites, nickelates
+    // Many oxide superconductors (RNiO3, RMnO3) adopt this structure under pressure
+    name: "GdFeO3-Pbnm",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 1.41,
+    sites: [
+      { label: "A", x: 0.06, y: 0.25, z: 0.98, role: "A-site-large" },
+      { label: "A", x: 0.44, y: 0.75, z: 0.48, role: "A-site-large" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "B-site-TM" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.0, role: "B-site-TM" },
+      { label: "O", x: 0.1, y: 0.46, z: 0.1, role: "apical-O" },
+      { label: "O", x: 0.7, y: 0.04, z: 0.3, role: "equatorial-O" },
+    ],
+    stoichiometryRatio: [1, 1, 3],
+    coordination: [8, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasRE = elements.some(e => isRareEarth(e) || ["Bi", "Pb", "Ba", "Sr", "Ca"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Ni", "Mn", "Co", "Cr", "Ru", "Cu"].includes(e));
+      return hasRE && hasTM && elements.includes("O");
+    },
+  },
+  {
+    // Cu2Sb / PbFCl-type (P4/nmm, SG 129): parent structure for iron pnictide 122-type
+    // Also parent of many SC chalcogenides: Cu2SbSe2, Cu2SbS2
+    name: "Cu2Sb-P4nmm",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 1.85,
+    sites: [
+      { label: "A", x: 0.25, y: 0.25, z: 0.0, role: "Cu-square-net" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.0, role: "Cu-square-net" },
+      { label: "B", x: 0.25, y: 0.75, z: 0.30, role: "Cu-tetrahedral" },
+      { label: "B", x: 0.75, y: 0.25, z: 0.70, role: "Cu-tetrahedral" },
+      { label: "C", x: 0.75, y: 0.25, z: 0.27, role: "Sb-layer" },
+      { label: "C", x: 0.25, y: 0.75, z: 0.73, role: "Sb-layer" },
+    ],
+    stoichiometryRatio: [2, 1],
+    coordination: [4, 8],
+    chemistryRules: (elements) => {
+      if (elements.length < 2 || elements.length > 3) return false;
+      const hasTM = elements.some(e => ["Cu", "Ag", "Ni", "Fe", "Co", "Mn"].includes(e));
+      const hasSp = elements.some(e => ["Sb", "As", "Bi", "P", "Sn", "Ge", "Se", "Te", "S"].includes(e));
+      return hasTM && hasSp;
+    },
+  },
+
+  // ── Trigonal/Rhombohedral (SG 143-167) — expanded coverage ──────────────
+
+  {
+    // Bi2Te3-type (R-3m, SG 166): topological insulators, thermoelectrics, SC under pressure
+    // Quintuple-layer structure: Te-Bi-Te-Bi-Te stacking with van der Waals gap
+    name: "Bi2Te3-R3m",
+    spaceGroup: "R-3m",
+    latticeType: "hexagonal",
+    cOverA: 6.85,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Te-vdW" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.40, role: "Bi-inner" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.21, role: "Te-inner" },
+    ],
+    stoichiometryRatio: [1, 2, 2],
+    coordination: [6, 6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasPnictogen = elements.some(e => ["Bi", "Sb", "As"].includes(e));
+      const hasChalcogen = elements.some(e => ["Te", "Se", "S"].includes(e));
+      return hasPnictogen && hasChalcogen;
+    },
+  },
+  {
+    // MnP-type (Pnma, SG 62): many binary TM phosphides/arsenides — MnAs, FeP, CrAs
+    // Different Pnma prototype from FeB; MnP has zigzag chains vs FeB has linear
+    name: "MnP-Pnma",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 1.6,
+    sites: [
+      { label: "A", x: 0.0, y: 0.2, z: 0.06, role: "TM-helical" },
+      { label: "A", x: 0.5, y: 0.3, z: 0.44, role: "TM-helical" },
+      { label: "A", x: 0.0, y: 0.8, z: 0.94, role: "TM-helical" },
+      { label: "A", x: 0.5, y: 0.7, z: 0.56, role: "TM-helical" },
+      { label: "B", x: 0.2, y: 0.0, z: 0.39, role: "pnictogen" },
+      { label: "B", x: 0.3, y: 0.5, z: 0.11, role: "pnictogen" },
+      { label: "B", x: 0.8, y: 0.0, z: 0.61, role: "pnictogen" },
+      { label: "B", x: 0.7, y: 0.5, z: 0.89, role: "pnictogen" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [6, 7],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Mn", "Fe", "Cr", "Co", "Ni", "Ru", "Rh"].includes(e));
+      const hasPn = elements.some(e => ["As", "P", "Sb", "S", "Se", "Te"].includes(e));
+      return hasTM && hasPn;
+    },
+  },
+
+  // ── Monoclinic (SG 3-15) — previously missing entirely ───────────────────
+
+  {
+    // C2/m (SG 12): very common for layered SC and complex oxides.
+    // Includes: FeSe polymorphs, β-FeSe, many ternary oxychalcogenides, REFeAsO-related
+    name: "C2m-monoclinic",
+    spaceGroup: "C2/m",
+    latticeType: "tetragonal",  // approximate as quasi-tetragonal for site generation
+    cOverA: 1.8,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal-1" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.0, role: "metal-2" },
+      { label: "B", x: 0.25, y: 0.25, z: 0.5, role: "anion-1" },
+      { label: "B", x: 0.75, y: 0.75, z: 0.5, role: "anion-2" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length < 2 || elements.length > 4) return false;
+      return elements.some(e => isTransitionMetal(e) || isRareEarth(e));
+    },
+  },
+
+  // ── High-symmetry cubic — superconducting pyrochlore / spinel ────────────
+
+  {
+    // Spinel AB2X4 (Fd-3m, SG 227): superconducting spinels CuRh2Se4, CuV2S4, LiTi2O4
+    // Distinct from Laves-C15 (also Fd-3m) by stoichiometry and site occupancy
+    name: "Spinel-AB2X4",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.125, y: 0.125, z: 0.125, role: "tetrahedral-A" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "octahedral-B-1" },
+      { label: "B", x: 0.5, y: 0.75, z: 0.75, role: "octahedral-B-2" },
+      { label: "X", x: 0.25, y: 0.25, z: 0.25, role: "anion-1" },
+      { label: "X", x: 0.25, y: 0.75, z: 0.75, role: "anion-2" },
+      { label: "X", x: 0.75, y: 0.25, z: 0.75, role: "anion-3" },
+      { label: "X", x: 0.75, y: 0.75, z: 0.25, role: "anion-4" },
+    ],
+    stoichiometryRatio: [1, 2, 4],
+    coordination: [4, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      const hasAnion = elements.some(e => ["O", "S", "Se", "Te", "N"].includes(e));
+      const hasAsite = elements.some(e => ["Cu", "Zn", "Mg", "Fe", "Co", "Ni", "Li", "Mn", "Cd"].includes(e));
+      return hasTM && hasAnion && hasAsite;
+    },
+  },
+  {
+    // Pyrochlore A2B2O7 (Fd-3m, SG 227): KOs2O6 (Tc≈9.6 K), Cd2Re2O7, superconducting pyrochlores
+    name: "Pyrochlore-A2B2O7",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "A-16d" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-16c" },
+      { label: "O", x: 0.31, y: 0.125, z: 0.125, role: "O-48f" },
+      { label: "O", x: 0.375, y: 0.375, z: 0.375, role: "O-8b" },
+    ],
+    stoichiometryRatio: [2, 2, 7],
+    coordination: [8, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasA = elements.some(e => ["K", "Na", "Cs", "Rb", "Ca", "Cd", "Bi", "Pb", "Tl", "Y", "La"].includes(e));
+      const hasB = elements.some(e => ["Os", "Re", "Ir", "Ru", "Mo", "W", "Nb", "Ta", "Ti", "Zr"].includes(e));
+      return hasA && hasB && elements.includes("O");
+    },
+  },
+  {
+    // CsCl-B2 (Pm-3m, SG 221): CsCl, TlBr, AuCd ordered alloys, many binary SC phases
+    // Distinguished from Perovskite by 2-atom basis rather than 5
+    name: "CsCl-B2",
+    spaceGroup: "Pm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "corner" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "body-center" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [8, 8],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Distinct from Perovskite — binary only, at least one non-anion
+      const noAnion = !elements.some(e => ["O", "F"].includes(e));
+      const hasMetal = elements.some(e => isTransitionMetal(e) || ["Cs", "Tl", "Au", "Al", "Ag", "Cd", "In", "Cu"].includes(e));
+      return noAnion && hasMetal;
+    },
+  },
+
+  // ── MAX-phase (P6_3/mmc, SG 194): Ti2AlC, Ti3SiC2, Nb2AlC — layered ternaries ──
+
+  {
+    // MAX-phase Mn+1AXn: M = early TM, A = A-group, X = C or N
+    // Superconducting examples: Mo2GaC (Tc~4 K), Nb2SnC (Tc~7.8 K)
+    name: "MAX-phase-M2AX",
+    spaceGroup: "P6_3/mmc",
+    latticeType: "hexagonal",
+    cOverA: 4.0,
+    sites: [
+      { label: "M", x: 0.333, y: 0.667, z: 0.085, role: "TM-layer-1" },
+      { label: "M", x: 0.667, y: 0.333, z: 0.915, role: "TM-layer-2" },
+      { label: "M", x: 0.333, y: 0.667, z: 0.585, role: "TM-layer-3" },
+      { label: "M", x: 0.667, y: 0.333, z: 0.415, role: "TM-layer-4" },
+      { label: "A", x: 0.333, y: 0.667, z: 0.25, role: "A-layer" },
+      { label: "A", x: 0.667, y: 0.333, z: 0.75, role: "A-layer" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.0, role: "X-interstitial-1" },
+      { label: "X", x: 0.0, y: 0.0, z: 0.5, role: "X-interstitial-2" },
+    ],
+    stoichiometryRatio: [2, 1, 1],
+    coordination: [6, 9, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasTM = elements.some(e => ["Ti", "Zr", "Hf", "V", "Nb", "Ta", "Cr", "Mo", "W"].includes(e));
+      const hasA = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Pb", "P", "As", "S"].includes(e));
+      const hasX = elements.some(e => ["C", "N"].includes(e));
+      return hasTM && hasA && hasX;
+    },
+  },
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {

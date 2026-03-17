@@ -24,6 +24,11 @@ import {
   isActinide,
 } from "../learning/elemental-data";
 import { classifyFamily } from "../learning/utils";
+import {
+  classifySCMechanism,
+  empiricalTcPnictide,
+  empiricalTcChalcogenide,
+} from "./tc-formulas";
 
 export interface ModeResolvedLambda {
   acoustic: number;
@@ -436,6 +441,20 @@ function buildAlpha2FSpectralFunction(
   };
 }
 
+/**
+ * Allen-Dynes (1975) formula with strong-coupling correction factors f1, f2.
+ * Applicable to conventional phonon-mediated (BCS) superconductors only.
+ * For unconventional families (cuprates, heavy fermions, nickelates) this
+ * formula is NOT physically valid — use classifySCMechanism() to gate.
+ *
+ * Tc = (ω_log / 1.2) · f1 · f2 · exp( −1.04(1+λ) / (λ − μ*(1 + 0.62λ)) )
+ * f1 = (1 + (λ/λ̄)^(3/2))^(1/3),   λ̄ = 2.46(1 + 3.8μ*)
+ * f2 = 1 + (ω₂/ω_log − 1)·λ²/(λ² + Λ₂²)
+ *
+ * @see P. B. Allen & R. C. Dynes, Phys. Rev. B 12, 905 (1975)
+ * @see W. L. McMillan, Phys. Rev. 167, 331 (1968)
+ * @see J. P. Carbotte, Rev. Mod. Phys. 62, 1027 (1990)
+ */
 function computeAllenDynesTc(
   lambda: number,
   omegaLog: number,
@@ -483,6 +502,21 @@ function computeAllenDynesTc(
   };
 }
 
+/**
+ * Linearised Eliashberg gap equation solved on Matsubara frequencies to
+ * determine Tc as the temperature at which the gap function Δ(iωₙ) is
+ * self-consistent. Iterates to convergence using the α²F(ω) spectral function.
+ *
+ * The gap equation (Matsubara form):
+ *   Δ(iωₙ) = π kB T Σₘ [ λ(iωₙ − iωₘ) − μ* ] · Δ(iωₘ) / |ωₘ|
+ *
+ * BCS weak-coupling limit: 2Δ₀ / kB Tc = 3.528 (BCS 1957).
+ * Strong-coupling deviations: ratio → 4.3 for λ ~ 2 (Carbotte 1990).
+ *
+ * @see G. M. Eliashberg, Zh. Eksp. Teor. Fiz. 38, 966 (1960) [JETP 11, 696 (1960)]
+ * @see J. Bardeen, L. N. Cooper & J. R. Schrieffer, Phys. Rev. 108, 1175 (1957) — BCS gap ratio
+ * @see J. P. Carbotte, Rev. Mod. Phys. 62, 1027 (1990) — strong-coupling gap ratios
+ */
 function solveEliashbergGapEquation(
   alpha2FSpec: Alpha2FSpectralFunction,
   muStar: number,
@@ -739,7 +773,7 @@ export function runEliashbergPipeline(
 
   const muStarSweep = sweepMuStarGapEquation(alpha2FSpec, muStar, gapTrialTc);
 
-  const tcBest = Math.max(allenDynes.tc, gapSolution.tc);
+  let tcBest = Math.max(allenDynes.tc, gapSolution.tc);
 
   const isotopeEffect = computeIsotopeEffect(formula, alpha2FSpec, alpha2FSpec.integratedLambda);
 
@@ -784,6 +818,50 @@ export function runEliashbergPipeline(
       `for high-pressure hydride (H-ratio=${hRatioPipe.toFixed(1)}, P=${pressureGpa} GPa). ` +
       `Confidence band widened by ${(surrogateAnharmonicUncertainty * 100).toFixed(0)}%. DFPT verification recommended.`
     );
+  }
+
+  // --- Family classification gate: BCS vs. unconventional ---
+  // Allen-Dynes (1975) / McMillan (1968) apply only to phonon-mediated BCS superconductors.
+  // For unconventional families, suppress the Tc result or switch to empirical scaling.
+  const scFamily = classifyFamily(formula);
+  const scGate = classifySCMechanism(scFamily);
+
+  if (scGate.tcApproach === "suppress") {
+    // Fundamentally unconventional: discard phonon Tc, retain in tcAllenDynes field for reference
+    confidence = "low";
+    warnings.push(
+      `[UNCONVENTIONAL SC — Allen-Dynes SUPPRESSED] Family "${scFamily}" (${scGate.mechanism}): ` +
+      `phonon-mediated Tc formulas (Allen-Dynes 1975; McMillan 1968) are NOT physically applicable. ` +
+      `${scGate.suppressionNote ?? ""} ` +
+      `tcBest set to 0 K; tcAllenDynes retained as reference only.`,
+    );
+    tcBest = 0;
+  } else if (scGate.tcApproach === "empirical-scaling") {
+    // Partially unconventional: replace with empirical Tc, widen confidence band
+    let empirical: { tc: number; range: [number, number]; note: string } | null = null;
+    if (scFamily === "Pnictides" || scFamily === "Layered-pnictide") {
+      empirical = empiricalTcPnictide(formula);
+    } else if (scFamily === "Chalcogenides" || scFamily === "Layered-chalcogenide") {
+      empirical = empiricalTcChalcogenide(formula);
+    }
+
+    if (empirical) {
+      warnings.push(
+        `[UNCONVENTIONAL SC — empirical Tc] Family "${scFamily}" (${scGate.mechanism}): ` +
+        `Allen-Dynes phonon-Tc replaced by empirical estimate ${empirical.tc.toFixed(1)} K ` +
+        `(range ${empirical.range[0].toFixed(1)}–${empirical.range[1].toFixed(1)} K). ` +
+        `${empirical.note}`,
+      );
+      tcBest = empirical.tc;
+    } else {
+      warnings.push(
+        `[UNCONVENTIONAL SC — approximate] Family "${scFamily}" (${scGate.mechanism}): ` +
+        `Allen-Dynes phonon-Tc is approximate; actual pairing mechanism may differ significantly. ` +
+        `Confidence reduced. Ref: Allen & Dynes, PRB 12, 905 (1975).`,
+      );
+    }
+    if (confidence === "high") confidence = "medium";
+    else if (confidence === "medium") confidence = "low";
   }
 
   const baseUncertaintyFrac = confidence === "high" ? 0.15 : confidence === "medium" ? 0.25 : 0.40;
@@ -964,7 +1042,7 @@ export function runEliashbergFromAlpha2FFile(
   gapTrialTcDfpt = Math.max(1, gapTrialTcDfpt);
 
   const gapSolution = solveEliashbergGapEquation(alpha2FSpec, muStar, gapTrialTcDfpt);
-  const tcBest = Math.max(allenDynes.tc, gapSolution.tc);
+  let tcBest = Math.max(allenDynes.tc, gapSolution.tc);
   const isotopeEffect = computeIsotopeEffect(formula, alpha2FSpec, integratedLambda);
 
   const dfptWarnings: string[] = [];
@@ -997,6 +1075,46 @@ export function runEliashbergFromAlpha2FFile(
       `(H-ratio=${hRatioDfpt.toFixed(1)}, P=${pressureGpa} GPa). ` +
       `Raw harmonic value: ${coupling.lambdaUncorrected.toFixed(4)}.`
     );
+  }
+
+  // --- Family classification gate: BCS vs. unconventional (DFPT tier) ---
+  const dfptScFamily = classifyFamily(formula);
+  const dfptGate = classifySCMechanism(dfptScFamily);
+
+  if (dfptGate.tcApproach === "suppress") {
+    dfptConfidence = "low";
+    dfptWarnings.push(
+      `[UNCONVENTIONAL SC — Allen-Dynes SUPPRESSED] Family "${dfptScFamily}" (${dfptGate.mechanism}): ` +
+      `phonon-mediated Tc formulas (Allen-Dynes 1975; McMillan 1968) are NOT physically applicable. ` +
+      `${dfptGate.suppressionNote ?? ""} ` +
+      `tcBest set to 0 K; tcAllenDynes retained as reference only.`,
+    );
+    tcBest = 0;
+  } else if (dfptGate.tcApproach === "empirical-scaling") {
+    let dfptEmpirical: { tc: number; range: [number, number]; note: string } | null = null;
+    if (dfptScFamily === "Pnictides" || dfptScFamily === "Layered-pnictide") {
+      dfptEmpirical = empiricalTcPnictide(formula);
+    } else if (dfptScFamily === "Chalcogenides" || dfptScFamily === "Layered-chalcogenide") {
+      dfptEmpirical = empiricalTcChalcogenide(formula);
+    }
+
+    if (dfptEmpirical) {
+      dfptWarnings.push(
+        `[UNCONVENTIONAL SC — empirical Tc] Family "${dfptScFamily}" (${dfptGate.mechanism}): ` +
+        `Allen-Dynes phonon-Tc replaced by empirical estimate ${dfptEmpirical.tc.toFixed(1)} K ` +
+        `(range ${dfptEmpirical.range[0].toFixed(1)}–${dfptEmpirical.range[1].toFixed(1)} K). ` +
+        `${dfptEmpirical.note}`,
+      );
+      tcBest = dfptEmpirical.tc;
+    } else {
+      dfptWarnings.push(
+        `[UNCONVENTIONAL SC — approximate] Family "${dfptScFamily}" (${dfptGate.mechanism}): ` +
+        `Allen-Dynes phonon-Tc is approximate; actual pairing mechanism may differ significantly. ` +
+        `Confidence reduced. Ref: Allen & Dynes, PRB 12, 905 (1975).`,
+      );
+    }
+    if (dfptConfidence === "high") dfptConfidence = "medium";
+    else if (dfptConfidence === "medium") dfptConfidence = "low";
   }
 
   const dfptUncFrac = dfptConfidence === "high" ? 0.10 : dfptConfidence === "medium" ? 0.20 : 0.35;

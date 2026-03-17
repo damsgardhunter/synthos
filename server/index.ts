@@ -215,7 +215,11 @@ process.on("unhandledRejection", (reason) => {
         } catch (err: any) {
           log(`Engine import failed: ${err.message}`, "startup");
         }
-      }, 15000);
+      // Delay engine start by 45s so that:
+      //   • Neon DB connection pool is fully warmed up
+      //   • Startup DB cleanup queries have all completed
+      //   • Vite HMR is stable before the engine fires its first DB burst
+      }, 45000);
 
       // Eval harness: deferred test-set load at T+90s (after models initialize)
       setTimeout(async () => {

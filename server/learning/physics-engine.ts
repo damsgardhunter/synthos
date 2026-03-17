@@ -1884,7 +1884,12 @@ export function computeElectronPhononCoupling(
   };
 }
 
-export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: PhononSpectrum, alpha2FData?: Alpha2FData): EliashbergResult {
+export function predictTcEliashberg(
+  coupling: ElectronPhononCoupling,
+  phonon?: PhononSpectrum,
+  alpha2FData?: Alpha2FData,
+  matClass?: MaterialClass,
+): EliashbergResult {
   let effectiveLambda = coupling.lambda;
   let effectiveOmegaLog = coupling.omegaLog;
   const { muStar } = coupling;
@@ -1914,6 +1919,68 @@ export function predictTcEliashberg(coupling: ElectronPhononCoupling, phonon?: P
   const lambda = effectiveLambda;
   const omegaLog = effectiveOmegaLog;
   const omegaLogK = omegaLog * 1.4388;
+
+  // -----------------------------------------------------------------------
+  // Cuprates: phonon Allen-Dynes is physically invalid.
+  // Pairing is d-wave spin-fluctuation; μ* and ω_log must be reinterpreted.
+  // Use Monthoux-Scalapino spin-fluctuation formula.
+  // -----------------------------------------------------------------------
+  if (matClass === "cuprate") {
+    // Spin-fluctuation energy scale: ~2.5× phonon ω_log in cuprates
+    const omegaSfK = omegaLogK * 2.5;
+    const lambdaSf = lambda * 1.4;           // d-wave spin-fluctuation coupling
+    const muStarDwave = muStar * 0.10;       // d-wave Coulomb cancellation
+    const denomSf = lambdaSf - muStarDwave * (1 + 0.62 * lambdaSf);
+    let tc = 0;
+    if (denomSf > 0 && omegaSfK > 0) {
+      const exp = -1.15 * (1 + lambdaSf) / denomSf;
+      if (exp >= -50) tc = Math.max(0, Math.min(185, (omegaSfK / 1.5) * Math.exp(exp)));
+    }
+    tc = Number.isFinite(tc) ? tc : 0;
+    const uncertainty = tc * 0.45;  // High uncertainty: doping level unknown
+    return {
+      predictedTc: Math.round(tc * 10) / 10,
+      gapRatio: 2 * 2.14,     // 2Δ/kTc ≈ 4.28 for d-wave (vs 3.53 BCS)
+      isotropicGap: false,     // d-wave is anisotropic by definition
+      strongCouplingCorrection: 1.0,
+      confidenceBand: [Math.max(0, Math.round(tc - uncertainty)), Math.round(tc + uncertainty)],
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Heavy fermions: phonon Allen-Dynes is physically invalid.
+  // Pairing is spin/multipolar-fluctuation mediated near a magnetic QCP.
+  // Mass renormalization (m*/m ~ 10–1000) suppresses Tc to 0.1–20 K range.
+  // -----------------------------------------------------------------------
+  if (matClass === "heavy-fermion") {
+    const lambdaCrit = 0.25;
+    const omegaSfK = omegaLogK * 0.40;      // HF spin fluctuations much softer than phonons
+    const qcpProximity = Math.min(3.0, lambda / Math.max(lambdaCrit, 0.01));
+    const lambdaQcp = lambda * 0.60 * qcpProximity;
+    const muStarQcp = muStar * 0.35;
+    const denomQcp = lambdaQcp - muStarQcp * (1 + 0.62 * lambdaQcp);
+    let tc = 0;
+    if (lambda > lambdaCrit && denomQcp > 0 && omegaSfK > 0) {
+      const massEst = Math.max(10, 80 / (lambda + 0.1));
+      const massSuppression = Math.pow(massEst, -0.30);
+      const exp = -1.04 * (1 + lambdaQcp) / denomQcp;
+      if (exp >= -50) tc = Math.max(0, Math.min(25, (omegaSfK / 1.2) * massSuppression * Math.exp(exp)));
+    }
+    tc = Number.isFinite(tc) ? tc : 0;
+    const uncertainty = tc * 0.60;  // Very high uncertainty: Kondo scale unknown
+    return {
+      predictedTc: Math.round(tc * 100) / 100,
+      gapRatio: 2 * 1.764,   // Assume BCS-like gap ratio as a placeholder
+      isotropicGap: false,    // HF pairing typically p- or d-wave
+      strongCouplingCorrection: 1.0,
+      confidenceBand: [Math.max(0, Math.round(tc * 10 - uncertainty * 10) / 10), Math.round((tc + uncertainty) * 10) / 10],
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Conventional Allen-Dynes path (phonon-mediated BCS, hydrides,
+  // iron pnictides with empirical-scaling flag, and unknowns)
+  // -----------------------------------------------------------------------
 
   let tc: number;
   const denominator = lambda - muStar * (1 + 0.62 * lambda);
@@ -2261,8 +2328,25 @@ function estimateSpinFluctuationTc(
 
   const isCuprate = elements.includes("Cu") && elements.includes("O");
   const isIronBased = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("P"));
-  if (isCuprate) tc_sf = Math.max(tc_sf, 50 + corr * 100);
-  if (isIronBased) tc_sf = Math.max(tc_sf, 20 + corr * 60);
+
+  if (isCuprate) {
+    // Cuprate Tc estimate via AFM spin-fluctuation d-wave pairing.
+    // chiStaticPeak ∝ Stoner enhancement → stronger AFM → stronger d-wave pairing.
+    // corr > 0.80 activates Mott suppression (underdoped regime).
+    // Physical range: LSCO ~38 K, YBCO ~92 K, Bi-2212 ~95 K, Hg-1201 ~135 K.
+    // Replaces crude hardcoded floor that had no physical basis.
+    const mottPenalty = Math.max(0, corr - 0.80) * 3.0;
+    const cuprateEstimate = Math.max(0, Math.min(165,
+      (spinSusc.chiStaticPeak * 5 + 15) * (1 - mottPenalty)
+    ));
+    tc_sf = Math.max(tc_sf, cuprateEstimate);
+  }
+
+  if (isIronBased) {
+    // Pnictide Tc bounded by empirical s±-wave Tc range (5–55 K).
+    // Higher correlation and AFM proximity → stronger spin-fluctuation pairing.
+    tc_sf = Math.max(tc_sf, Math.min(55, 10 + corr * 60));
+  }
 
   const mottProx = electronic.mottProximityScore ?? 0;
   if (mottProx > 0.9) {
@@ -3932,13 +4016,17 @@ export async function runFullPhysicsAnalysis(
     });
   }
 
+  // Classify material class early so predictTcEliashberg can route cuprates and
+  // heavy fermions to their physically appropriate (non-Allen-Dynes) Tc formulas.
+  const eliashbergMatClass = classifyMaterialForLambda(formula, candidatePressure);
+
   let eliashberg: EliashbergResult;
   if (dftData?.finiteDisplacementPhonons) {
     const fdp = dftData.finiteDisplacementPhonons;
     const fdpHasOmegaLog = fdp.omegaLog != null && fdp.omegaLog > 0;
     const fdpHasLambda = fdp.lambdaContribution != null && fdp.lambdaContribution > 0;
     if (fdpHasOmegaLog || fdpHasLambda) {
-      eliashberg = predictTcEliashberg(coupling, phononSpectrum);
+      eliashberg = predictTcEliashberg(coupling, phononSpectrum, undefined, eliashbergMatClass);
       emit("log", {
         phase: "phase-10",
         event: "Eliashberg uses FD phonon coupling",
@@ -3946,10 +4034,10 @@ export async function runFullPhysicsAnalysis(
         dataSource: "DFT Resolver",
       });
     } else {
-      eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
+      eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult, eliashbergMatClass);
     }
   } else {
-    eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult);
+    eliashberg = predictTcEliashberg(coupling, phononSpectrum, alpha2FResult, eliashbergMatClass);
   }
 
   const competingPhases = evaluateCompetingPhases(formula, electronicStructure, mpSummary);

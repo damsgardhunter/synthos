@@ -7703,7 +7703,10 @@ async function runLearningCycle() {
       // Refresh GNN training data with a fresh MP batch every 5 cycles (fire-and-forget).
       // Cycles through 2000 MP materials in 50-record windows so the GNN sees
       // new structural diversity between Active Learning retrains.
-      if (state === "running" && cycleCount % 5 === 0) {
+      // Defer MP training data refresh until the system has stabilised (cycle 10+).
+      // Early cycles are still building the DB; firing API fetches at cycles 5/10
+      // would compete with phase queries and flood the serialised MP rate limiter.
+      if (state === "running" && cycleCount >= 10 && cycleCount % 5 === 0) {
         refreshMPTrainingData().catch(() => {});
       }
 
@@ -8201,7 +8204,13 @@ async function runLearningCycle() {
     }).catch(() => {});
 
     if (state === "running") {
-      cycleTimer = setTimeout(runLearningCycle, cycleIntervalMs);
+      // Startup ramp: keep at least 30s between cycles for the first 5 cycles
+      // so background seeding (T+60s) and DB warm-up aren't competing with back-
+      // to-back cycle launches when the system is still settling.
+      const _nextIntervalMs = cycleCount <= 5
+        ? Math.max(cycleIntervalMs, 30_000)
+        : cycleIntervalMs;
+      cycleTimer = setTimeout(runLearningCycle, _nextIntervalMs);
     }
   }
 }
@@ -8481,7 +8490,9 @@ export async function startEngine() {
   });
 
   if (!isRunningCycle) {
-    setTimeout(runLearningCycle, 3000);
+    // 10s delay: lets the engine's own startup logging, campaign restoration,
+    // and Neon DB warm-up finish before the first cycle hits the DB hard.
+    setTimeout(runLearningCycle, 10000);
   }
 
   // ── Background: deferred subsystem seeding ──────────────────────────────────

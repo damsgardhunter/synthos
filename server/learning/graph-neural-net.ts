@@ -2533,7 +2533,7 @@ function cloneWeights(w: GNNWeights): GNNWeights {
   };
 }
 
-interface TrainingSample {
+export interface TrainingSample {
   formula: string;
   tc: number;
   formationEnergy?: number;
@@ -2570,7 +2570,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   const epochs = Math.max(10, Math.min(40, Math.ceil(6000 / trainingData.length)));
   const batchSize = Math.min(64, trainingData.length);
 
-  // Adam state for MLP head weights (graph layers use simple SGD at lower lr).
+  // Adam state for MLP head weights and graph layer weights.
   const adamBeta1 = 0.9, adamBeta2 = 0.999, adamEps = 1e-8;
   let adamStep = 0;
   const mkAdam = (rows: number, cols: number) => ({
@@ -2584,6 +2584,27 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   const adamB2  = mkAdamVec(OUTPUT_DIM);
   const adamW2v = mkAdam(OUTPUT_DIM, HIDDEN_DIM);
   const adamB2v = mkAdamVec(OUTPUT_DIM);
+  // Adam state for graph layer weights — replaces plain SGD (lr*0.3) for better
+  // convergence on the dedicated GCP GNN instance.  Each matrix entry gets its
+  // own adaptive moment estimates, yielding faster convergence and less sensitivity
+  // to the 3× lower graph LR relative to the MLP head.
+  const mkAdamMatG = (mat: number[][]) => ({
+    m: mat.map(r => new Array(r.length).fill(0)),
+    v: mat.map(r => new Array(r.length).fill(0)),
+  });
+  const mkAdamVecG = (n: number) => ({ m: new Array(n).fill(0), v: new Array(n).fill(0) });
+  const graphAdam = {
+    msg:       [weights.W_message, weights.W_message2, weights.W_message3, weights.W_message4].map(mkAdamMatG),
+    upd:       [weights.W_update,  weights.W_update2,  weights.W_update3,  weights.W_update4 ].map(mkAdamMatG),
+    convGate:  mkAdamMatG(weights.W_conv_gate),
+    convValue: mkAdamMatG(weights.W_conv_value),
+    inputProj: mkAdamMatG(weights.W_input_proj),
+    bConvGate:  mkAdamVecG(HIDDEN_DIM),
+    bConvValue: mkAdamVecG(HIDDEN_DIM),
+    bInputProj: mkAdamVecG(HIDDEN_DIM),
+    pressure:   mkAdamVecG(HIDDEN_DIM),
+    gates:      mkAdamVecG(weights.residual_gates.length),
+  };
 
   const graphCache = new Map<string, CrystalGraph>();
   const origEmbeddings = new Map<string, number[][]>();
@@ -3080,35 +3101,50 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       adamUpdateVec(weights.b_mlp2_var, gradB2v, adamB2v, weights.b_mlp2_var.length);
       adamUpdate(weights.W_mlp1, gradW1, adamW1, HIDDEN_DIM, pooledLen);
       adamUpdateVec(weights.b_mlp1, gradB1, adamB1, HIDDEN_DIM);
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        weights.W_pressure[k] -= lr * gradPressure[k] * invN;
-      }
-
+      // Graph layer AdamW — lr * 0.3 keeps graph weights conservative relative
+      // to the MLP head, preventing early over-fitting on small datasets.
       const graphLR = lr * 0.3;
-      const applyGraphGrad = (wMat: number[][], grad: number[][]) => {
-        for (let i = 0; i < wMat.length; i++)
-          for (let j = 0; j < wMat[i].length; j++)
-            wMat[i][j] -= graphLR * grad[i][j] * invN;
+      const adamUpdateGraph = (
+        w: number[][], g: number[][], am: { m: number[][]; v: number[][] }
+      ) => {
+        for (let i = 0; i < w.length; i++)
+          for (let j = 0; j < w[i].length; j++) {
+            const gi = g[i][j] * invN;
+            am.m[i][j] = adamBeta1 * am.m[i][j] + (1 - adamBeta1) * gi;
+            am.v[i][j] = adamBeta2 * am.v[i][j] + (1 - adamBeta2) * gi * gi;
+            w[i][j] -= graphLR * (am.m[i][j] / bc1) / (Math.sqrt(am.v[i][j] / bc2) + adamEps);
+            w[i][j] *= (1 - graphLR * WEIGHT_DECAY);
+          }
+      };
+      const adamUpdateGraphVec = (
+        w: number[], g: number[], av: { m: number[]; v: number[] }
+      ) => {
+        for (let i = 0; i < w.length; i++) {
+          const gi = g[i] * invN;
+          av.m[i] = adamBeta1 * av.m[i] + (1 - adamBeta1) * gi;
+          av.v[i] = adamBeta2 * av.v[i] + (1 - adamBeta2) * gi * gi;
+          w[i] -= graphLR * (av.m[i] / bc1) / (Math.sqrt(av.v[i] / bc2) + adamEps);
+          w[i] *= (1 - graphLR * WEIGHT_DECAY);
+        }
       };
       const wMsgMats = [weights.W_message, weights.W_message2, weights.W_message3, weights.W_message4];
-      const wUpdMats = [weights.W_update, weights.W_update2, weights.W_update3, weights.W_update4];
+      const wUpdMats = [weights.W_update,  weights.W_update2,  weights.W_update3,  weights.W_update4 ];
       for (let li = 0; li < GNN_MSG_LAYERS; li++) {
-        applyGraphGrad(wMsgMats[li], graphGrads.dW_msg[li]);
-        applyGraphGrad(wUpdMats[li], graphGrads.dW_upd[li]);
+        adamUpdateGraph(wMsgMats[li], graphGrads.dW_msg[li], graphAdam.msg[li]);
+        adamUpdateGraph(wUpdMats[li], graphGrads.dW_upd[li], graphAdam.upd[li]);
       }
-      applyGraphGrad(weights.W_conv_gate, graphGrads.dW_conv_gate);
-      applyGraphGrad(weights.W_conv_value, graphGrads.dW_conv_value);
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        weights.b_conv_gate[k] -= graphLR * graphGrads.db_conv_gate[k] * invN;
-        weights.b_conv_value[k] -= graphLR * graphGrads.db_conv_value[k] * invN;
-      }
-      applyGraphGrad(weights.W_input_proj, graphGrads.dW_input_proj);
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        weights.b_input_proj[k] -= graphLR * graphGrads.db_input_proj[k] * invN;
-      }
-
+      adamUpdateGraph(weights.W_conv_gate,  graphGrads.dW_conv_gate,  graphAdam.convGate);
+      adamUpdateGraph(weights.W_conv_value, graphGrads.dW_conv_value, graphAdam.convValue);
+      adamUpdateGraphVec(weights.b_conv_gate,  graphGrads.db_conv_gate,  graphAdam.bConvGate);
+      adamUpdateGraphVec(weights.b_conv_value, graphGrads.db_conv_value, graphAdam.bConvValue);
+      adamUpdateGraph(weights.W_input_proj,    graphGrads.dW_input_proj, graphAdam.inputProj);
+      adamUpdateGraphVec(weights.b_input_proj, graphGrads.db_input_proj, graphAdam.bInputProj);
+      adamUpdateGraphVec(weights.W_pressure,   gradPressure,             graphAdam.pressure);
       for (let g = 0; g < weights.residual_gates.length; g++) {
-        weights.residual_gates[g] -= lr * graphGrads.dGates[g] * invN;
+        const gi = graphGrads.dGates[g] * invN;
+        graphAdam.gates.m[g] = adamBeta1 * graphAdam.gates.m[g] + (1 - adamBeta1) * gi;
+        graphAdam.gates.v[g] = adamBeta2 * graphAdam.gates.v[g] + (1 - adamBeta2) * gi * gi;
+        weights.residual_gates[g] -= graphLR * (graphAdam.gates.m[g] / bc1) / (Math.sqrt(graphAdam.gates.v[g] / bc2) + adamEps);
         weights.residual_gates[g] = Math.max(-3, Math.min(3, weights.residual_gates[g]));
       }
     }
@@ -3178,7 +3214,7 @@ function getEnsembleModels(): GNNWeights[] {
 
 let heldOutValidationSet: TrainingSample[] = [];
 
-function splitTrainValidation(data: TrainingSample[], valFraction: number = 0.2, seed: number = 42): {
+export function splitTrainValidation(data: TrainingSample[], valFraction: number = 0.2, seed: number = 42): {
   train: TrainingSample[];
   validation: TrainingSample[];
 } {
@@ -3213,8 +3249,8 @@ export function getHeldOutValidationSet(): TrainingSample[] {
   return [...heldOutValidationSet];
 }
 
-const ENSEMBLE_SEEDS = [42, 7919, 104729, 15485863, 32452843];
-const BOOTSTRAP_RATIOS = [0.75, 0.80, 0.85, 0.80, 0.75];
+export const ENSEMBLE_SEEDS = [42, 7919, 104729, 15485863, 32452843];
+export const BOOTSTRAP_RATIOS = [0.75, 0.80, 0.85, 0.80, 0.75];
 
 function bootstrapSample(data: TrainingSample[], ratio: number, rng: () => number): TrainingSample[] {
   const n = Math.max(1, Math.floor(data.length * ratio));
@@ -3271,6 +3307,24 @@ export async function trainEnsembleAsync(
   }
 
   return models;
+}
+
+/**
+ * Train one member of the GNN ensemble on a bootstrap sample of `trainingData`.
+ * Called by gnn-worker-thread.ts so each of the 5 ensemble models can train
+ * in a separate worker thread on the dedicated GNN GCP instance.
+ */
+export function trainSingleEnsembleModel(
+  trainingData: TrainingSample[],
+  seed: number,
+  bootstrapRatio: number,
+  maxPretrainEpochs = 15,
+): GNNWeights {
+  const rng = seededRandom(seed);
+  const w = initWeights(rng);
+  const bootstrapRng = seededRandom(seed + 31);
+  const bootstrapped = bootstrapSample(trainingData, bootstrapRatio, bootstrapRng);
+  return trainGNNSurrogate(bootstrapped, w, maxPretrainEpochs);
 }
 
 export function getGNNModel(): GNNWeights {

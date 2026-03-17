@@ -320,7 +320,17 @@ function isInvalidMPFormula(formula: string): boolean {
   return false;
 }
 
-async function mpFetch(endpoint: string, params: Record<string, string> = {}, attempt = 1): Promise<any | null> {
+// ── MP API global serial rate-limiter ────────────────────────────────────────
+// All outbound MP API calls are serialised through this fence so concurrent
+// callers (concurrent phases, AL cycle, MP refresh) never burst the remote
+// server. The 500ms gap limits throughput to ≤2 req/s and eliminates 429
+// errors regardless of how many callers enqueue simultaneously.
+let _mpApiFence: Promise<void> = Promise.resolve();
+const _MP_CALL_GAP_MS = 500;
+
+// Raw HTTP function — called only from the serialised mpFetch wrapper below.
+// Retries are handled inline here (with their own delays) inside the held slot.
+async function _mpFetchRaw(endpoint: string, params: Record<string, string> = {}, attempt = 1): Promise<any | null> {
   const apiKey = getApiKey();
   if (!apiKey) return null;
 
@@ -361,10 +371,23 @@ async function mpFetch(endpoint: string, params: Record<string, string> = {}, at
     }
     if (attempt < 3) {
       await new Promise(r => setTimeout(r, attempt * 3000));
-      return mpFetch(endpoint, params, attempt + 1);
+      return _mpFetchRaw(endpoint, params, attempt + 1);
     }
     return null;
   }
+}
+
+// Public entry-point: enqueues the request on the serial fence so calls from
+// all concurrent callers are spaced ≥_MP_CALL_GAP_MS apart.
+function mpFetch(endpoint: string, params: Record<string, string> = {}): Promise<any | null> {
+  let ownResolve!: (v: any | null) => void;
+  const ownPromise = new Promise<any | null>(r => { ownResolve = r; });
+  _mpApiFence = _mpApiFence.catch(() => { /* ignore previous errors */ }).then(
+    () => _mpFetchRaw(endpoint, params)
+      .then(ownResolve, () => ownResolve(null))
+      .then(() => new Promise<void>(r => setTimeout(r, _MP_CALL_GAP_MS)))
+  );
+  return ownPromise;
 }
 
 export async function fetchSummary(formula: string): Promise<MPSummaryData | null> {
@@ -653,7 +676,9 @@ async function fetchSeedFormulaSlice(limit: number, skip: number): Promise<MPSum
       const s = await fetchSummary(formula);
       if (s) results.push(s);
     } catch {}
-    await new Promise(r => setTimeout(r, 100)); // gentle rate limiting
+    // 500ms between formulas so this loop doesn't saturate the serial MP fence
+    // with back-to-back requests faster than the rate-limiter can drain them.
+    await new Promise(r => setTimeout(r, 500));
   }
   return results;
 }
@@ -722,7 +747,9 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
             fetched++;
           }
         } catch {}
-        await new Promise(r => setTimeout(r, 100));
+        // 500ms inter-formula gap — consistent with fetchSeedFormulaSlice and
+        // the global MP rate-limiter so the fence queue doesn't grow unbounded.
+        await new Promise(r => setTimeout(r, 500));
       }
       console.log(`[MP-GNNSeed] Fetched ${fetched} new MP materials via formula lookup (total: ${seen.size})`);
     } catch (err: any) {

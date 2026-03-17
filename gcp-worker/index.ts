@@ -26,6 +26,8 @@ import { startDFTLoop, stopDFTLoop } from "./dft-loop";
 import { startGNNLoop, stopGNNLoop } from "./gnn-loop";
 import { startXGBLoop, stopXGBLoop } from "./xgb-loop";
 import { startMLLoop, stopMLLoop } from "./ml-loop";
+import { startSuperConIngestion } from "../server/learning/supercon-db-ingestion";
+import { startCODCachePopulation, printSpaceGroupCoverage } from "../server/learning/space-group-explorer";
 
 // Default OMP_NUM_THREADS: 4 concurrent QE jobs × 8 threads each = 32 vCPUs
 if (!process.env.OMP_NUM_THREADS) {
@@ -46,6 +48,18 @@ console.log(`  ML  loop : ${ENABLE_ML  ? "ENABLED" : "disabled"}`);
 console.log(`  OMP_NUM_THREADS = ${process.env.OMP_NUM_THREADS}`);
 console.log(`  QE_BIN_DIR      = ${process.env.QE_BIN_DIR ?? "(auto)"}`);
 console.log("=".repeat(60));
+
+// Print space group coverage at startup (informational only — no I/O).
+printSpaceGroupCoverage();
+
+// Start background data ingestion tasks (non-blocking — fire-and-forget).
+// These run at lowest priority, yielding every 80 ms between batches.
+// SuperCon: ingests ~33k entries from local CSV / NIMS API / Hamidieh fallback.
+// COD:      pre-populates structural data cache for high-relevance space groups.
+delay(15_000).then(() => {
+  startSuperConIngestion();
+  startCODCachePopulation(5);  // SGs with relevance score ≥ 5
+});
 
 // Stagger loop starts to avoid saturating the Neon connection pool.
 // All loops fire their first DB poll at startup; launching them simultaneously
