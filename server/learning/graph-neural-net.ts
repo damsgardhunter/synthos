@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { isMainThread } from "worker_threads";
 import { ELEMENTAL_DATA, getElementData, isTransitionMetal } from "./elemental-data";
 import { extractFeatures } from "./ml-predictor";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
@@ -3799,7 +3800,9 @@ export function getDFTTrainingDatasetStats(): {
   };
 }
 
-setTimeout(async () => {
+// Worker threads load this module for trainSingleEnsembleModel only.
+// The startup warm-up (DB queries, MP fetches, ESM imports) must not run in them.
+if (isMainThread) setTimeout(async () => {
   // When GNN training is offloaded to GCP, skip local startup training entirely.
   // The GCP worker handles all ensemble training; local server just applies weights.
   if (process.env.OFFLOAD_GNN_TO_GCP === "true") {

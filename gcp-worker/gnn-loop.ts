@@ -315,7 +315,8 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
       });
     }
     return samples;
-  } catch {
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] loadQEDatasetSamples failed: ${err.message?.slice(0, 120)}`);
     return [];
   }
 }
@@ -342,7 +343,8 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
       samples.push({ formula, tc: 0, formationEnergy: d.formationEnergyPerAtom ?? undefined, structure: undefined, prototype: undefined });
     }
     return samples;
-  } catch {
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] loadMPContrastSamples failed: ${err.message?.slice(0, 120)}`);
     return [];
   }
 }
@@ -371,6 +373,16 @@ async function processNextGnnJob(): Promise<boolean> {
   const datasetSize: number = job.dataset_size ?? trainingData.length;
 
   const existingFormulas = new Set(trainingData.map(s => s.formula));
+
+  // Pre-warm the Neon connection before augmentation queries. Neon may cold-start
+  // after inactivity; a failed warm-up here causes silent empty results below.
+  try {
+    await db.execute("SELECT 1");
+  } catch (warmErr: any) {
+    console.warn(`[GNN-GCP] DB pre-warm failed for job #${jobId}: ${warmErr.message?.slice(0, 80)} — augmentation queries may return empty`);
+    // Small delay to let the pool recover before continuing
+    await new Promise(r => setTimeout(r, 3000));
+  }
 
   // Augment with DFT-verified SC entries from quantum_engine_dataset
   const qeSamples = await loadQEDatasetSamples(existingFormulas);
