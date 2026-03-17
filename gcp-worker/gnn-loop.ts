@@ -4,7 +4,7 @@
  * writes weights back, then fetches the next batch of MP data so each
  * subsequent training cycle has a progressively richer dataset.
  */
-import { db } from "../server/db";
+import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
 import { trainEnsemble, GNNPredict, buildCrystalGraph } from "../server/learning/graph-neural-net";
 import type { TrainingSample } from "../server/learning/graph-neural-net";
@@ -199,6 +199,12 @@ async function processNextGnnJob(): Promise<boolean> {
     const { r2, mae, rmse } = computeMetrics(models, trainingData);
     const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
 
+    // trainEnsemble() is synchronous and can block the event loop for 30+ seconds,
+    // during which keepalive pings can't fire and Neon TCP connections go stale.
+    // Yield here to let the event loop breathe, then warm the pool before writing.
+    await new Promise(r => setTimeout(r, 50));
+    try { await db.execute("SELECT 1"); } catch { /* ignore — pool will reconnect */ }
+
     await storage.updateGnnTrainingJob(jobId, {
       status: "done",
       weights: models as any,
@@ -218,7 +224,8 @@ async function processNextGnnJob(): Promise<boolean> {
     fetchNextMPBatch().catch(() => {});
 
   } catch (err: any) {
-    console.error(`[GNN-GCP] Job #${jobId} failed: ${err.message}`);
+    const jobErrMsg = err instanceof Error ? (err.message || err.constructor?.name || "(empty Error)") : String(err ?? "unknown");
+    console.error(`[GNN-GCP] Job #${jobId} failed: ${jobErrMsg}`);
     await storage.updateGnnTrainingJob(jobId, {
       status: "failed",
       errorMessage: err.message?.slice(0, 1000) ?? "unknown error",
@@ -240,9 +247,11 @@ export async function startGNNLoop(): Promise<void> {
       const processed = await processNextGnnJob();
       await new Promise(r => setTimeout(r, processed ? 1000 : POLL_INTERVAL_MS));
     } catch (err: any) {
-      const msg = err instanceof Error ? (err.stack ?? err.message) : String(err ?? "unknown");
-      console.error(`[GNN-GCP] Loop error: ${msg}`);
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      const msg = err instanceof Error
+        ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
+        : (err != null ? String(err) : "unknown");
+      console.error(`[GNN-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
+      await new Promise(r => setTimeout(r, isConnectionError(err) ? 5000 : POLL_INTERVAL_MS));
     }
   }
 }
