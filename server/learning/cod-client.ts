@@ -326,3 +326,88 @@ export async function getCODPrototypeParams(spaceGroupNumber: number): Promise<{
 export function getCODCifUrl(codId: number): string {
   return `${COD_CIF_BASE}/${codId}.cif`;
 }
+
+// ── Novelty screening ─────────────────────────────────────────────────────────
+
+export interface NoveltyResult {
+  /** True if the formula appears in COD or the MP cache — i.e. it is a known compound. */
+  isKnown: boolean;
+  /** Human-readable summary of where the match was found, or "not found in COD/MP". */
+  reason: string;
+  /** Number of matching entries across both databases. */
+  matchCount: number;
+}
+
+/**
+ * Check whether a formula is already in the known-compound databases (COD + MP cache).
+ *
+ * Strategy:
+ *   1. Normalise the formula to a canonical element set.
+ *   2. Check `cod_structure_cache` for any entry whose element list matches.
+ *   3. Check `mp_material_cache` for any entry with the same formula string.
+ *
+ * "Same element set" (not strict stoichiometry) is deliberately conservative: if
+ * Cu2O appears in COD under any stoichiometry we want to flag it as known so that
+ * only truly unexplored compositions pass screening.
+ *
+ * @param formula   Hill-notation formula string, e.g. "LaH10" or "CuO2Ba"
+ * @returns NoveltyResult with isKnown flag and human-readable reason
+ */
+export async function checkFormulaNovelty(formula: string): Promise<NoveltyResult> {
+  const elements = elementsFromFormula(formula);
+  if (elements.length === 0) {
+    return { isKnown: false, reason: "could not parse elements from formula", matchCount: 0 };
+  }
+
+  // 1. Check COD structure cache by element containment
+  let codMatches = 0;
+  let codExample = "";
+  try {
+    const elLiteral = `'{${elements.map(e => `"${e}"`).join(",")}}'::text[]`;
+    const rows = await db.execute(
+      `SELECT formula, space_group_number, crystal_system
+       FROM cod_structure_cache
+       WHERE elements = ${elLiteral}
+       LIMIT 5` as any
+    ) as any;
+    const dbRows: any[] = rows.rows ?? (Array.isArray(rows) ? rows : []);
+    codMatches = dbRows.length;
+    if (codMatches > 0) {
+      codExample = `${dbRows[0].formula} (SG ${dbRows[0].space_group_number}, ${dbRows[0].crystal_system})`;
+    }
+  } catch { /* COD cache not available — not fatal */ }
+
+  // 2. Check MP material cache by formula string
+  let mpMatches = 0;
+  try {
+    // Escape single quotes in formula to prevent SQL injection before inlining
+    const safeFormula = formula.replace(/'/g, "''");
+    const rows = await db.execute(
+      `SELECT formula FROM mp_material_cache
+       WHERE formula = '${safeFormula}' AND data_type = 'summary'
+       LIMIT 3` as any
+    ) as any;
+    const dbRows: any[] = rows.rows ?? (Array.isArray(rows) ? rows : []);
+    mpMatches = dbRows.length;
+  } catch { /* MP cache not available — not fatal */ }
+
+  const totalMatches = codMatches + mpMatches;
+
+  if (totalMatches === 0) {
+    return {
+      isKnown: false,
+      reason: `not found in COD (${elements.join("")} element set) or MP cache`,
+      matchCount: 0,
+    };
+  }
+
+  const parts: string[] = [];
+  if (codMatches > 0) parts.push(`${codMatches} COD entries (e.g. ${codExample})`);
+  if (mpMatches > 0) parts.push(`${mpMatches} MP cache entries`);
+
+  return {
+    isKnown: true,
+    reason: `found in ${parts.join(" + ")}`,
+    matchCount: totalMatches,
+  };
+}

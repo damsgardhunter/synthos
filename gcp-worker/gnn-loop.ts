@@ -216,6 +216,69 @@ function computeMetrics(
   return { r2, mae, rmse, n: counted };
 }
 
+// ── CI95 calibration check ────────────────────────────────────────────────────
+// A well-calibrated model should have ~95% of true Tc values fall inside its
+// predicted 95% confidence interval. We check this empirically on the held-out
+// SC validation set and log it after every training job.
+
+function computeCalibration(
+  models: GNNWeights[],
+  valData: TrainingSample[],
+): { coverage: number; meanWidth: number; n: number } {
+  if (models.length === 0 || valData.length === 0) return { coverage: 0, meanWidth: 0, n: 0 };
+
+  let inside = 0, totalWidth = 0, counted = 0;
+  for (const sample of valData) {
+    try {
+      const graph = buildCrystalGraph(sample.formula, sample.structure);
+      const preds = models.map(m => GNNPredict(graph, m).predictedTc);
+      const meanTc = preds.reduce((a, b) => a + b, 0) / preds.length;
+
+      // Ensemble variance (epistemic uncertainty)
+      const variance = preds.reduce((s, p) => s + (p - meanTc) ** 2, 0) / preds.length;
+      const ensembleStd = Math.sqrt(variance);
+
+      // CI95: mean ± 1.96σ  (Gaussian approximation)
+      const lo = meanTc - 1.96 * ensembleStd;
+      const hi = meanTc + 1.96 * ensembleStd;
+
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
+      if (sample.tc >= lo && sample.tc <= hi) inside++;
+      totalWidth += hi - lo;
+      counted++;
+    } catch { /* skip malformed samples */ }
+  }
+
+  if (counted === 0) return { coverage: 0, meanWidth: 0, n: 0 };
+  return {
+    coverage: inside / counted,   // empirical fraction — should be ~0.95
+    meanWidth: totalWidth / counted,
+    n: counted,
+  };
+}
+
+async function storeCalibrationMetric(
+  jobId: number,
+  coverage: number,
+  meanWidth: number,
+  n: number,
+): Promise<void> {
+  try {
+    await db.execute(
+      `INSERT INTO system_metrics (metric_name, metric_value, metadata, recorded_at)
+       VALUES (
+         'gnn_ci95_coverage',
+         ${coverage.toFixed(4)},
+         '{"jobId":${jobId},"meanWidthK":${meanWidth.toFixed(2)},"n":${n}}',
+         NOW()
+       )` as any
+    );
+  } catch (err: any) {
+    // system_metrics may not exist yet — not fatal
+    console.warn(`[GNN-GCP] Could not store calibration metric: ${err.message?.slice(0, 80)}`);
+  }
+}
+
 // ── QE dataset augmentation (DFT-verified SC samples) ────────────────────────
 
 async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
@@ -337,6 +400,11 @@ async function processNextGnnJob(): Promise<boolean> {
       : { r2: 0, mae: 0, rmse: 0, n: 0 };
     // Also compute training-set metrics separately so overfitting is visible.
     const trainMetrics = computeMetrics(models, scTrain.slice(0, 200)); // sample to avoid slow eval
+    // CI95 calibration: empirical fraction of true Tc values inside the predicted interval.
+    // A well-calibrated ensemble should yield ~0.95; values << 0.95 mean intervals are too narrow.
+    const calibration = valSet.length >= 5
+      ? computeCalibration(models, valSet)
+      : { coverage: 0, meanWidth: 0, n: 0 };
     const { r2, mae, rmse, n: valN } = valMetrics;
     const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
 
@@ -358,12 +426,26 @@ async function processNextGnnJob(): Promise<boolean> {
       completedAt: new Date(),
     } as any);
 
+    const coverageStr = calibration.n > 0
+      ? `CI95-cov=${(calibration.coverage * 100).toFixed(1)}% width=${calibration.meanWidth.toFixed(1)}K`
+      : "CI95-cov=N/A";
+
     console.log(
       `[GNN-GCP] Job #${jobId} complete in ${wallSec}s` +
       ` | VAL(n=${valN}): R²=${r2.toFixed(3)} MAE=${mae.toFixed(1)}K RMSE=${rmse.toFixed(1)}K` +
       ` | TRAIN(sample): R²=${trainMetrics.r2.toFixed(3)} MAE=${trainMetrics.mae.toFixed(1)}K` +
-      ` | overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}`
+      ` | overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}` +
+      ` | ${coverageStr}`
     );
+
+    if (calibration.n > 0) {
+      if (calibration.coverage < 0.80) {
+        console.warn(`[GNN-GCP] ⚠ CI95 under-coverage (${(calibration.coverage * 100).toFixed(1)}%) — ensemble uncertainty is underestimated`);
+      } else if (calibration.coverage > 0.99) {
+        console.warn(`[GNN-GCP] ⚠ CI95 over-coverage (${(calibration.coverage * 100).toFixed(1)}%) — ensemble intervals are too wide`);
+      }
+      await storeCalibrationMetric(jobId, calibration.coverage, calibration.meanWidth, calibration.n);
+    }
 
     // Fetch next MP batch after every successful training job so the next
     // cycle's training payload is richer. Cached in mp_material_cache — the

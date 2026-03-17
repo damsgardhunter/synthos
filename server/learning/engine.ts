@@ -133,6 +133,7 @@ import { runModelImprovementCycle, runCombinedModelLLMCycle, getModelImprovement
 import { ensureFeatureStateLoaded } from "./model-llm-controller";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
 import { recordPredictionOutcome } from "./model-diagnostics";
+import { checkFormulaNovelty } from "./cod-client";
 
 function derivePairingSymmetry(mechanism: string | null | undefined, dWaveFlag?: boolean): string {
   const mech = (mechanism ?? "").toLowerCase();
@@ -1838,7 +1839,30 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       notes: `${existingNotes} ${stabilityNote}${kineticNote}${deliberationNote}${pressureNote}`.trim(),
     };
 
-    queueCandidateWrite(finalPayload, generatorSource);
+    // Novelty screening: check if this formula's element set is already in COD / MP cache.
+    // This is a non-blocking annotation — we never hard-reject for being "known" because:
+    //   (a) a known compound under new pressure/stoichiometry may still be novel,
+    //   (b) even known compounds provide useful training data.
+    // The result is stored in noveltyScore and noveltyReason so the UI can flag confirmed
+    // re-discoveries vs. genuinely unexplored compositions.
+    let noveltyAnnotation: { noveltyScore?: number; noveltyReason?: string } = {};
+    try {
+      const nov = await checkFormulaNovelty(finalPayload.formula);
+      noveltyAnnotation = {
+        noveltyScore: nov.isKnown ? 0.0 : 1.0,
+        noveltyReason: nov.reason,
+      };
+      if (nov.isKnown) {
+        emit("log", {
+          phase: "engine",
+          event: "Known compound detected",
+          detail: `${finalPayload.formula}: ${nov.reason} (matchCount=${nov.matchCount}) — annotated, not rejected`,
+          dataSource: "Novelty Screener (COD/MP)",
+        });
+      }
+    } catch { /* novelty check is best-effort */ }
+
+    queueCandidateWrite({ ...finalPayload, ...noveltyAnnotation }, generatorSource);
 
     return true;
   } catch (err: any) {

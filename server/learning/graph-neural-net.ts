@@ -2658,7 +2658,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       const preLr = LR_INIT * (0.5 + 0.5 * Math.cos(Math.PI * preEpoch / PRETRAIN_EPOCHS));
       // Shuffle FE samples
       for (let i = feSamples.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(rng() * (i + 1));
         [feSamples[i], feSamples[j]] = [feSamples[j], feSamples[i]];
       }
       const prePooledLen = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
