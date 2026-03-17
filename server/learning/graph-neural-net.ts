@@ -2567,8 +2567,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
 
   const LR_INIT = 0.001;
   // Scale epochs so smaller datasets (~100 samples) still get enough gradient steps.
-  // Target ~600 gradient steps: N=100→38, N=300→13, N=500→10, N=800→10 (min).
-  const epochs = Math.max(10, Math.min(40, Math.ceil(6000 / trainingData.length)));
+  // Target ~1200 gradient steps: N=100→80, N=440→27, N=800→15, N=1200→10 (min).
+  const epochs = Math.max(15, Math.min(60, Math.ceil(12000 / trainingData.length)));
   const batchSize = Math.min(64, trainingData.length);
 
   // Adam state for MLP head weights and graph layer weights.

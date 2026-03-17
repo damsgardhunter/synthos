@@ -406,11 +406,14 @@ async function processNextGnnJob(): Promise<boolean> {
   const scSamples  = trainingData.filter(s => s.tc > 0);
   const nonScSamples = trainingData.filter(s => s.tc === 0);
   const { train: scTrain, validation: scVal } = splitTrainValidation(scSamples, 0.20, 42);
-  const trainSet = [...scTrain, ...nonScSamples];
+  // Cap Tc=0 contrast samples to at most 1× SC training count to prevent
+  // the model from collapsing to predict 0 (contrast imbalance was 2.4:1).
+  const cappedNonSc = nonScSamples.slice(0, scTrain.length);
+  const trainSet = [...scTrain, ...cappedNonSc];
   const valSet   = scVal; // held-out SC samples only — these are the discovery targets
 
   console.log(
-    `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${qeSamples.length} QE + ${mpContrast.length} MP contrast` +
+    `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${qeSamples.length} QE + ${mpContrast.length} MP contrast (capped ${cappedNonSc.length})` +
     ` | train=${trainSet.length} val=${valSet.length} (SC holdout)`
   );
   const startMs = Date.now();
