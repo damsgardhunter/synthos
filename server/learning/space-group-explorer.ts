@@ -106,9 +106,8 @@ export function getPrototypesForSG(sgNumber: number): string[] {
         "Pm-3n": 223, "P6/mmm": 191, "I4/mmm": 139, "Fm-3m": 225, "Pm-3m": 221,
         "P6_3/mmc": 194, "Im-3m": 229, "Fd-3m": 227, "Im-3": 204, "R-3": 148,
         "P4/mmm": 123, "Pa-3": 205, "P4/nmm": 129, "I4/mcm": 140, "F-43m": 216,
-        "Im-3m": 229, "R-3m": 166, "P-3m1": 164, "P4_2/mnm": 136, "Pnma": 62,
+        "R-3m": 166, "P-3m1": 164, "P4_2/mnm": 136, "Pnma": 62,
         "Cmcm": 63, "C2/m": 12, "P6_3mc": 186, "P-6m2": 190, "I-43d": 220,
-        "P6/mmm": 191, "P4/mmm": 123,
       };
       return sgMap[t.spaceGroup] === sgNumber;
     })

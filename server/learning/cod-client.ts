@@ -85,10 +85,12 @@ const ELEMENT_REGEX = /([A-Z][a-z]?)(\d*\.?\d*)/g;
 
 function elementsFromFormula(formula: string): string[] {
   const elements = new Set<string>();
-  for (const [, el] of formula.matchAll(ELEMENT_REGEX)) {
-    if (el) elements.add(el);
+  let m: RegExpExecArray | null;
+  const re = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+  while ((m = re.exec(formula)) !== null) {
+    if (m[1]) elements.add(m[1]);
   }
-  return [...elements].sort();
+  return Array.from(elements).sort();
 }
 
 // ── API helpers ───────────────────────────────────────────────────────────────
@@ -241,11 +243,9 @@ export async function fetchCODByElements(
   // Check if we have these elements in the cache via array overlap
   // (Drizzle doesn't support array containment directly; use raw SQL)
   try {
+    const elLiteral = `'{${sorted.map(e => `"${e}"`).join(",")}}'::text[]`;
     const rows = await db.execute(
-      `SELECT * FROM cod_structure_cache
-       WHERE elements @> $1::text[]
-       LIMIT $2`,
-      [sorted, maxResults],
+      `SELECT * FROM cod_structure_cache WHERE elements @> ${elLiteral} LIMIT ${maxResults}` as any,
     ) as any;
     const dbRows = (rows.rows ?? rows) as any[];
     if (dbRows.length >= 3) {
