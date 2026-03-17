@@ -18,19 +18,32 @@ let activeWorkers = 0;
 let running = true;
 
 async function claimAndRunJob(): Promise<boolean> {
-  // Atomically claim the oldest queued job for this worker
-  const rows = await db.execute(
-    `UPDATE dft_jobs
-     SET status = 'running', worker_node = '${WORKER_NODE}', started_at = NOW()
-     WHERE id = (
-       SELECT id FROM dft_jobs
-       WHERE status = 'queued'
-       ORDER BY priority DESC, created_at ASC
-       LIMIT 1
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING id, formula, job_type, input_data`
-  );
+  // Atomically claim the oldest queued job for this worker.
+  // Retry up to 3× with backoff — GNN training can block the event loop for
+  // 60-90s, leaving all pool connections stale. The first attempt after
+  // unblocking may time out while pg-pool is reconnecting.
+  let rows: any;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      rows = await db.execute(
+        `UPDATE dft_jobs
+         SET status = 'running', worker_node = '${WORKER_NODE}', started_at = NOW()
+         WHERE id = (
+           SELECT id FROM dft_jobs
+           WHERE status = 'queued'
+           ORDER BY priority DESC, created_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED
+         )
+         RETURNING id, formula, job_type, input_data`
+      );
+      break; // success
+    } catch (err: any) {
+      if (!isConnectionError(err) || attempt === 3) throw err;
+      console.warn(`[DFT-GCP] DB claim attempt ${attempt}/3 failed (${err.message?.slice(0, 60)}) — retrying in ${attempt * 5}s`);
+      await new Promise(r => setTimeout(r, attempt * 5000));
+    }
+  }
 
   const job = (rows as any).rows?.[0] ?? (Array.isArray(rows) ? rows[0] : undefined);
   if (!job) return false;
