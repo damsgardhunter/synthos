@@ -2089,13 +2089,22 @@ export function startGCPWeightPoller(): void {
 
   async function poll() {
     try {
-      const job = await storage.getLatestCompletedGnnJob();
-      if (job && job.id > lastAppliedJobId && job.weights) {
-        lastAppliedJobId = job.id;
-        const td = (job.trainingData as any[]) ?? [];
-        applySerializedWeights(job.weights as any, td.map((t: any) => ({ formula: t.formula, tc: t.tc })));
-        logGNNVersion("gcp-retrain", job.datasetSize ?? td.length, job.dftSamples ?? 0, 0);
-        console.log(`[GCP-Poller] Applied GNN weights from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}`);
+      // Lightweight pre-check: only pull the full GNN weights (potentially 1-2 MB)
+      // when there is actually a new completed job to apply.
+      const { db: gnnDb } = await import("../db");
+      const idCheck = await gnnDb.execute(
+        `SELECT id FROM gnn_training_jobs WHERE status = 'done' ORDER BY completed_at DESC LIMIT 1`
+      );
+      const latestId: number | undefined = ((idCheck as any).rows?.[0] ?? (Array.isArray(idCheck) ? idCheck[0] : undefined))?.id;
+      if (latestId && latestId > lastAppliedJobId) {
+        const job = await storage.getLatestCompletedGnnJob();
+        if (job && job.id > lastAppliedJobId && job.weights) {
+          lastAppliedJobId = job.id;
+          const td = (job.trainingData as any[]) ?? [];
+          applySerializedWeights(job.weights as any, td.map((t: any) => ({ formula: t.formula, tc: t.tc })));
+          logGNNVersion("gcp-retrain", job.datasetSize ?? td.length, job.dftSamples ?? 0, 0);
+          console.log(`[GCP-Poller] Applied GNN weights from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}`);
+        }
       }
     } catch { /* silent */ }
     setTimeout(poll, 30_000);

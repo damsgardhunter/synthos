@@ -1951,10 +1951,17 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   const hpLR = hp.learningRate ?? 0.05;
   const hpDepth = hp.maxDepth ?? 6;
 
+  const gcpXgbMode = process.env.OFFLOAD_XGB_TO_GCP === "true";
+  // In GCP mode, GCP trains the full 300-tree base model and ensemble.
+  // Train a lightweight 50-tree placeholder locally so scoring works immediately;
+  // the GCP poller overwrites cachedModel once GCP finishes (~45-60s later).
+  const localTrees = gcpXgbMode ? 50 : hpTrees;
+  const localLR = gcpXgbMode ? 0.1 : hpLR;
+
   invalidateModel();
-  console.log(`[XGBoost] Retrain #${xgboostRetrainCount + 1} — ${X.length} samples, ${hpTrees} trees (lr=${hpLR}, depth=${hpDepth})...`);
+  console.log(`[XGBoost] Retrain #${xgboostRetrainCount + 1} — ${X.length} samples, ${localTrees} trees (lr=${localLR}, depth=${hpDepth})${gcpXgbMode ? " [local placeholder; GCP trains full model]" : ""}...`);
   const retrainStart = Date.now();
-  cachedModel = await trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
+  cachedModel = await trainGradientBoosting(X, y, localTrees, localLR, hpDepth);
   await new Promise<void>(r => setImmediate(r));
   cachedCalibration = await computeCalibration(cachedModel);
   console.log(`[XGBoost] Base model done in ${Date.now() - retrainStart}ms`);
@@ -2337,22 +2344,30 @@ export function startGCPXGBPoller(): void {
 
   async function poll() {
     try {
-      const job = await storage.getLatestCompletedXgbJob();
-      if (job && job.id > lastAppliedJobId) {
-        lastAppliedJobId = job.id;
-        if (job.model) {
-          cachedModel = job.model as any;
-          cachedCalibration = await computeCalibration(cachedModel!);
+      // Lightweight pre-check: fetch only the job ID to avoid loading multi-MB
+      // model blobs (ensembleXGB, varianceEnsembleXGB) on every poll tick.
+      const idCheck = await db.execute(
+        `SELECT id FROM xgb_training_jobs WHERE status = 'done' ORDER BY completed_at DESC LIMIT 1`
+      );
+      const latestId: number | undefined = ((idCheck as any).rows?.[0] ?? (Array.isArray(idCheck) ? idCheck[0] : undefined))?.id;
+      if (latestId && latestId > lastAppliedJobId) {
+        const job = await storage.getLatestCompletedXgbJob();
+        if (job && job.id > lastAppliedJobId) {
+          lastAppliedJobId = job.id;
+          if (job.model) {
+            cachedModel = job.model as any;
+            cachedCalibration = await computeCalibration(cachedModel!);
+          }
+          if (job.ensembleXGB) {
+            cachedEnsembleXGB = job.ensembleXGB as any;
+          }
+          if (job.varianceEnsembleXGB) {
+            cachedVarianceEnsembleXGB = job.varianceEnsembleXGB as any;
+            cachedGlobalFeatureImportance = null;
+            buildFeatureImportanceCache();
+          }
+          console.log(`[GCP-XGB-Poller] Applied XGBoost models from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}, N=${job.datasetSize ?? "?"}`);
         }
-        if (job.ensembleXGB) {
-          cachedEnsembleXGB = job.ensembleXGB as any;
-        }
-        if (job.varianceEnsembleXGB) {
-          cachedVarianceEnsembleXGB = job.varianceEnsembleXGB as any;
-          cachedGlobalFeatureImportance = null;
-          buildFeatureImportanceCache();
-        }
-        console.log(`[GCP-XGB-Poller] Applied XGBoost models from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}, N=${job.datasetSize ?? "?"}`);
       }
     } catch { /* silent */ }
     setTimeout(poll, 30_000);

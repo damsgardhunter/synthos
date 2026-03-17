@@ -945,11 +945,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getLatestCompletedXgbJob(): Promise<XgbTrainingJob | undefined> {
-    const [row] = await db.select().from(xgbTrainingJobs)
+    // Exclude features_x and labels_y — they are large blobs (1-2 MB) needed only
+    // by the GCP worker for training. The local poller only needs the model weights.
+    const [row] = await db.select({
+      id: xgbTrainingJobs.id,
+      status: xgbTrainingJobs.status,
+      model: xgbTrainingJobs.model,
+      ensembleXGB: xgbTrainingJobs.ensembleXGB,
+      varianceEnsembleXGB: xgbTrainingJobs.varianceEnsembleXGB,
+      r2: xgbTrainingJobs.r2,
+      mae: xgbTrainingJobs.mae,
+      datasetSize: xgbTrainingJobs.datasetSize,
+      errorMessage: xgbTrainingJobs.errorMessage,
+      createdAt: xgbTrainingJobs.createdAt,
+      startedAt: xgbTrainingJobs.startedAt,
+      completedAt: xgbTrainingJobs.completedAt,
+    }).from(xgbTrainingJobs)
       .where(eq(xgbTrainingJobs.status, "done"))
       .orderBy(desc(xgbTrainingJobs.completedAt))
       .limit(1);
-    return row;
+    return row as XgbTrainingJob | undefined;
   }
 
   async insertMlTrainingJob(job: InsertMlTrainingJob): Promise<MlTrainingJob> {
