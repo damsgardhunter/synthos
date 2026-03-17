@@ -227,7 +227,9 @@ const OMEGA_LOG_SCALE = 500;              // 6 composition + 7 XGBoost-inspired 
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
-const MC_DROPOUT_RATE = 0.1;
+const MC_DROPOUT_RATE = 0.25;
+const GNN_MSG_LAYERS = 2;         // active message-passing layers (2 = less overfit for small datasets)
+const WEIGHT_DECAY = 1e-4;        // AdamW L2 regularization
 const GAUSSIAN_START = 0.5;
 const GAUSSIAN_END = 6.0;
 const GAUSSIAN_STEP = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
@@ -2156,33 +2158,35 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
-  const residual2 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
-  if (dropoutRng) {
-    for (const node of graph.nodes) {
-      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+  if (GNN_MSG_LAYERS >= 3) {
+    const residual2 = saveResidual(graph.nodes);
+    attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+    if (dropoutRng) {
+      for (const node of graph.nodes) {
+        node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+      }
+    }
+    const g2 = sigmoid(gates[2] ?? 0);
+    for (let i = 0; i < graph.nodes.length; i++) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
+      }
     }
   }
 
-  const g2 = sigmoid(gates[2] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
+  if (GNN_MSG_LAYERS >= 4) {
+    const residual3 = saveResidual(graph.nodes);
+    attentionMessagePassingLayer(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+    if (dropoutRng) {
+      for (const node of graph.nodes) {
+        node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+      }
     }
-  }
-
-  const residual3 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
-  if (dropoutRng) {
-    for (const node of graph.nodes) {
-      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
-    }
-  }
-
-  const g3 = sigmoid(gates[3] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
+    const g3 = sigmoid(gates[3] ?? 0);
+    for (let i = 0; i < graph.nodes.length; i++) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
+      }
     }
   }
 
@@ -2313,23 +2317,27 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     }
   }
 
-  const residual2 = saveResidual(graph.nodes);
-  const { cache: ac2 } = attnMessagePassCached(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
-  attnCaches.push(ac2);
-  const g2 = sigmoid(gates[2] ?? 0);
-  for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
+  if (GNN_MSG_LAYERS >= 3) {
+    const residual2 = saveResidual(graph.nodes);
+    const { cache: ac2 } = attnMessagePassCached(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+    attnCaches.push(ac2);
+    const g2 = sigmoid(gates[2] ?? 0);
+    for (let i = 0; i < nNodes; i++) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
+      }
     }
   }
 
-  const residual3 = saveResidual(graph.nodes);
-  const { cache: ac3 } = attnMessagePassCached(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
-  attnCaches.push(ac3);
-  const g3 = sigmoid(gates[3] ?? 0);
-  for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
+  if (GNN_MSG_LAYERS >= 4) {
+    const residual3 = saveResidual(graph.nodes);
+    const { cache: ac3 } = attnMessagePassCached(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+    attnCaches.push(ac3);
+    const g3 = sigmoid(gates[3] ?? 0);
+    for (let i = 0; i < nNodes; i++) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
+      }
     }
   }
 
@@ -2712,7 +2720,6 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       while (lo < mainstream.length && out < indices.length) indices[out++] = mainstream[lo++];
       while (hi < hiTcBucket.length && out < indices.length) indices[out++] = hiTcBucket[hi++];
     }
-    }
 
     const numBatches = Math.ceil(trainingData.length / batchSize);
 
@@ -2928,12 +2935,14 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
 
         const gateVals = weights.residual_gates.map(g => sigmoid(g));
 
-        const layerWeights: { W_msg: number[][]; W_upd: number[][]; useLeaky: boolean; gateIdx: number }[] = [
+        const allLayerWeights: { W_msg: number[][]; W_upd: number[][]; useLeaky: boolean; gateIdx: number }[] = [
           { W_msg: weights.W_message4, W_upd: weights.W_update4, useLeaky: false, gateIdx: 3 },
           { W_msg: weights.W_message3, W_upd: weights.W_update3, useLeaky: false, gateIdx: 2 },
           { W_msg: weights.W_message2, W_upd: weights.W_update2, useLeaky: false, gateIdx: 1 },
         ];
-        const layerCacheIndices = [3, 2, 1];
+        // Only backprop through layers that were actually run in the forward pass
+        const layerWeights = allLayerWeights.slice(4 - GNN_MSG_LAYERS);
+        const layerCacheIndices = layerWeights.map(lw => lw.gateIdx);
 
         let dLdCur = dLdNodeEmb;
         for (let li = 0; li < layerWeights.length; li++) {
@@ -2952,7 +2961,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
 
           const { dW_update, dW_message, dLdInput } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky);
 
-          const gradIdx = 3 - li;
+          const gradIdx = lw.gateIdx;
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
               for (let c = 0; c < dst[r].length; c++)
@@ -3045,6 +3054,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
             am.m[i][j] = adamBeta1 * am.m[i][j] + (1 - adamBeta1) * gi;
             am.v[i][j] = adamBeta2 * am.v[i][j] + (1 - adamBeta2) * gi * gi;
             w[i][j] -= lr * (am.m[i][j] / bc1) / (Math.sqrt(am.v[i][j] / bc2) + adamEps);
+            w[i][j] *= (1 - lr * WEIGHT_DECAY);
           }
         }
       };
@@ -3056,6 +3066,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           av.m[i] = adamBeta1 * av.m[i] + (1 - adamBeta1) * gi;
           av.v[i] = adamBeta2 * av.v[i] + (1 - adamBeta2) * gi * gi;
           w[i] -= lr * (av.m[i] / bc1) / (Math.sqrt(av.v[i] / bc2) + adamEps);
+          w[i] *= (1 - lr * WEIGHT_DECAY);
         }
       };
 
@@ -3077,7 +3088,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       };
       const wMsgMats = [weights.W_message, weights.W_message2, weights.W_message3, weights.W_message4];
       const wUpdMats = [weights.W_update, weights.W_update2, weights.W_update3, weights.W_update4];
-      for (let li = 0; li < 4; li++) {
+      for (let li = 0; li < GNN_MSG_LAYERS; li++) {
         applyGraphGrad(wMsgMats[li], graphGrads.dW_msg[li]);
         applyGraphGrad(wUpdMats[li], graphGrads.dW_upd[li]);
       }
