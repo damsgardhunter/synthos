@@ -56,12 +56,9 @@ interface CODApiRow {
   a?: number | string;
   b?: number | string;
   c?: number | string;
-  alpha?: number | string;  // some responses use full name
+  alpha?: number | string;
   beta?: number | string;
   gamma?: number | string;
-  al?: number | string;     // COD API shorthand
-  be?: number | string;
-  ga?: number | string;
   vol?: number | string;
   Z?: number | string;  // formula units per cell
   nelem?: number | string;
@@ -131,9 +128,9 @@ function parseCODRow(row: CODApiRow): CODEntry | null {
     a,
     b,
     c,
-    alpha: parseNum(row.alpha ?? row.al),
-    beta: parseNum(row.beta ?? row.be),
-    gamma: parseNum(row.gamma ?? row.ga),
+    alpha: parseNum(row.alpha),
+    beta: parseNum(row.beta),
+    gamma: parseNum(row.gamma),
     volumePerAtom,
   };
 }
@@ -207,7 +204,8 @@ export async function fetchCODBySpaceGroup(
   let page = 0;
 
   while (results.length < maxResults) {
-    const url = `${COD_API}?format=json&sg=${spaceGroupNumber}&limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`;
+    // COD API: `sg` expects an H-M symbol string; to search by integer use `sgNumber`.
+    const url = `${COD_API}?format=json&sgNumber=${spaceGroupNumber}&limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`;
     try {
       const response = await rateLimitedFetch(url);
       if (!response.ok) {
