@@ -25,34 +25,57 @@ import { fetchMPBatchFromAPI } from "../server/learning/materials-project-client
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
 
-// Build execArgv for worker threads with an explicit tsx ESM loader.
-// We cannot rely on process.execArgv propagation: on GCP the main process is
-// started by systemd/tsx and execArgv may be empty or missing the loader flag,
-// causing worker_threads to reject the .ts file with "Unknown file extension".
+// Build execArgv for worker threads that correctly loads TypeScript files.
 //
-// IMPORTANT: flags like --require, --loader, --import take a VALUE argument as
-// the next token. A simple element-level filter strips the value (e.g. "tsx/cjs")
-// but leaves the bare flag, which Node.js rejects with "requires an argument".
-// We must skip flag+value pairs together.
-const LOADER_FLAGS = new Set(["--require", "-r", "--loader", "--import"]);
+// Strategy: copy the parent process's own tsx loader flags verbatim.
+// The parent is already running .ts files successfully, so whatever flags it
+// used (--require tsx/cjs, --loader tsx/esm, --import tsx/esm, etc.) are the
+// right ones for this environment. We must NOT substitute a different loader
+// variant (e.g. replacing --require tsx/cjs with --import tsx/esm) because
+// CJS and ESM loaders are not interchangeable — the wrong one silently fails
+// to register and workers get "Unknown file extension .ts".
+//
+// If no tsx loader is found in the parent (e.g. process was started some other
+// way), fall back to --import tsx/esm (Node 18.19+) then --loader tsx (older).
+const PAIR_FLAGS = new Set(["--require", "-r", "--loader", "--import"]);
+
 function buildWorkerExecArgv(): string[] {
-  const result: string[] = ["--import", "tsx/esm"];
   const args = process.execArgv;
+
+  // Collect tsx loader pairs from parent
+  const tsxLoaderFlags: string[] = [];
+  const otherFlags: string[] = [];
+
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (LOADER_FLAGS.has(a)) {
-      // Skip this flag AND its value argument — we've already added tsx/esm above
+    const nextVal = args[i + 1];
+
+    if (PAIR_FLAGS.has(a) && nextVal) {
+      if (nextVal.includes("tsx")) {
+        tsxLoaderFlags.push(a, nextVal);  // keep pair: e.g. ["--require", "tsx/cjs"]
+      } else {
+        otherFlags.push(a, nextVal);      // non-tsx pair — keep as-is
+      }
       i++;
-      continue;
+    } else if (a.startsWith("--loader=") || a.startsWith("--import=") || a.startsWith("--require=")) {
+      if (a.includes("tsx")) {
+        tsxLoaderFlags.push(a);           // inline form: --loader=tsx
+      } else {
+        otherFlags.push(a);
+      }
+    } else {
+      otherFlags.push(a);
     }
-    // Skip inline loader flags (--loader=tsx, --import=tsx/esm, --require=tsx/cjs)
-    if (a.startsWith("--loader=") || a.startsWith("--import=") || a.startsWith("--require=")) continue;
-    // Skip anything else that references tsx
-    if (a.includes("tsx")) continue;
-    result.push(a);
   }
-  return result;
+
+  // Prefer parent's own tsx flags; fall back if none found
+  const loaderFlags = tsxLoaderFlags.length > 0
+    ? tsxLoaderFlags
+    : ["--import", "tsx/esm"];   // fallback for environments where tsx sets no execArgv
+
+  return [...loaderFlags, ...otherFlags];
 }
+
 const workerExecArgv = buildWorkerExecArgv();
 
 // ── Parallel ensemble training via worker threads ────────────────────────────
