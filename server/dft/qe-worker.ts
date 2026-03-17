@@ -717,7 +717,9 @@ function validatePseudopotential(filePath: string): boolean {
     const readPos = Math.max(0, stats.size - 256);
     fs.readSync(fd2, tail, 0, 256, readPos);
     fs.closeSync(fd2);
-    if (!tail.toString("utf-8").includes("</UPF>")) return false;
+    // UPF v1 files end with </PP_RHOATOM>; UPF v2 files end with </UPF>
+    const tailStr = tail.toString("utf-8");
+    if (!tailStr.includes("</UPF>") && !tailStr.includes("</PP_RHOATOM>")) return false;
     return true;
   } catch {
     return false;
