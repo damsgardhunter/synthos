@@ -29,13 +29,31 @@ const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
 // We cannot rely on process.execArgv propagation: on GCP the main process is
 // started by systemd/tsx and execArgv may be empty or missing the loader flag,
 // causing worker_threads to reject the .ts file with "Unknown file extension".
-// Construct from scratch: tsx/esm loader first, then any non-loader parent flags.
-const workerExecArgv: string[] = [
-  "--import", "tsx/esm",
-  ...process.execArgv.filter(
-    (a) => !a.includes("tsx") && !a.includes("--loader") && !a.startsWith("--import"),
-  ),
-];
+//
+// IMPORTANT: flags like --require, --loader, --import take a VALUE argument as
+// the next token. A simple element-level filter strips the value (e.g. "tsx/cjs")
+// but leaves the bare flag, which Node.js rejects with "requires an argument".
+// We must skip flag+value pairs together.
+const LOADER_FLAGS = new Set(["--require", "-r", "--loader", "--import"]);
+function buildWorkerExecArgv(): string[] {
+  const result: string[] = ["--import", "tsx/esm"];
+  const args = process.execArgv;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (LOADER_FLAGS.has(a)) {
+      // Skip this flag AND its value argument — we've already added tsx/esm above
+      i++;
+      continue;
+    }
+    // Skip inline loader flags (--loader=tsx, --import=tsx/esm, --require=tsx/cjs)
+    if (a.startsWith("--loader=") || a.startsWith("--import=") || a.startsWith("--require=")) continue;
+    // Skip anything else that references tsx
+    if (a.includes("tsx")) continue;
+    result.push(a);
+  }
+  return result;
+}
+const workerExecArgv = buildWorkerExecArgv();
 
 // ── Parallel ensemble training via worker threads ────────────────────────────
 // Each of the 5 ensemble models trains in its own worker thread so the full
