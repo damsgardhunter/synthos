@@ -171,7 +171,7 @@ function predictGBM(model: GBMModel, x: number[]): number {
   return Number.isFinite(pred) ? pred : model.basePrediction;
 }
 
-function generateTrainingData(): { formulas: string[]; X: number[][]; Y: Map<string, number[]> } {
+function generateTrainingData(maxFormulas = 70): { formulas: string[]; X: number[][]; Y: Map<string, number[]> } {
   const formulas: string[] = [];
   const X: number[][] = [];
   const Y = new Map<string, number[]>();
@@ -184,7 +184,9 @@ function generateTrainingData(): { formulas: string[]; X: number[][]; Y: Map<str
   const physicsResults = getAllPhysicsResults();
   const physicsFormulas = physicsResults.slice(0, 20).map(r => r.formula);
 
-  const allFormulas = Array.from(new Set([...seedFormulas, ...physicsFormulas]));
+  // Cap total formulas to avoid long synchronous blocking. computeTBProperties
+  // takes ~0.9s per formula; processing 70 = 63s freeze, maxFormulas=10 → ~9s max.
+  const allFormulas = Array.from(new Set([...seedFormulas, ...physicsFormulas])).slice(0, maxFormulas);
 
   for (const formula of allFormulas) {
     try {
@@ -242,25 +244,13 @@ function trainAllModels(X: number[][], Y: Map<string, number[]>, quickInit = fal
 let initDeferred = false;
 let initInProgress = false;
 
-function trainImmediate(maxSamples?: number): void {
+function trainImmediate(maxFormulas?: number): void {
   if (initInProgress) return;
   initInProgress = true;
   try {
-    const { X, Y } = generateTrainingData();
-    const limit = maxSamples ?? X.length;
-    if (X.length > limit) {
-      const step = Math.ceil(X.length / limit);
-      const Xsub = X.filter((_, i) => i % step === 0);
-      const Ysub = new Map<string, number[]>();
-      for (const name of TARGET_NAMES) {
-        const full = Y.get(name)!;
-        Ysub.set(name, full.filter((_, i) => i % step === 0));
-      }
-      surrogateModels = trainAllModels(Xsub, Ysub, true); // quickInit=true: 8 trees instead of 40 (~4s not 21s)
-    } else {
-      surrogateModels = trainAllModels(X, Y, true);
-    }
-    console.log(`[TB-ML Surrogate] Immediate init: ${surrogateModels.datasetSize} samples (limit=${limit})`);
+    const { X, Y } = generateTrainingData(maxFormulas);
+    surrogateModels = trainAllModels(X, Y, true); // quickInit=true: 8 trees instead of 40
+    console.log(`[TB-ML Surrogate] Immediate init: ${surrogateModels.datasetSize} samples`);
   } catch (e) {
     console.log(`[TB-ML Surrogate] Immediate init failed: ${e instanceof Error ? e.message : "unknown"}`);
   } finally {
@@ -271,19 +261,18 @@ function trainImmediate(maxSamples?: number): void {
 function deferInit(): void {
   if (initDeferred) return;
   initDeferred = true;
-  // Delay 300s — by then tbPropertiesCache is warm (learning cycles populate it),
-  // so generateTrainingData is fast (cache hits). Time budgets on computeBandStructure/DOS
-  // also cap per-formula cost if cache is cold.
+  // Delay 600s — let learning cycles warm the physics cache first.
+  // Use maxFormulas=10 to cap synchronous computeTBProperties calls to ~9s (not 63s).
   setTimeout(() => {
     try {
       if (!surrogateModels) {
-        trainImmediate();
+        trainImmediate(10);
         console.log(`[TB-ML Surrogate] Deferred init complete: ${surrogateModels?.datasetSize ?? 0} samples`);
       }
     } catch (e) {
       console.log(`[TB-ML Surrogate] Deferred init failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
-  }, 300_000);
+  }, 600_000);
 }
 
 function ensureModels(): TBSurrogateModels | null {
