@@ -204,6 +204,9 @@ const GAUSSIAN_START = 0.5;
 const GAUSSIAN_END = 6.0;
 const GAUSSIAN_STEP = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
 const GAUSSIAN_WIDTH = GAUSSIAN_STEP;
+// Log-scale Tc normalisation: log1p(Tc) / log1p(300) maps 0–300K → 0–1
+// with proportional spacing. Replacing the old linear /300 encoding.
+const TC_LOG_SCALE = Math.log1p(300); // ≈ 5.707
 
 let cachedEnsembleModels: GNNWeights[] | null = null;
 let modelTrainedAt = 0;
@@ -2104,7 +2107,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
+  const predictedTcRaw = Math.max(0, Math.expm1(Math.max(0, sf(out[2] ?? 0)) * TC_LOG_SCALE));
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2122,7 +2125,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     dosProxy: Math.round(dosProxyRaw * 1000) / 1000,
     stabilityProbability: Math.round(stabilityProbRaw * 1000) / 1000,
     latentEmbedding: safeLatent,
-    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * 300 * 300, 1)) * 1000) / 1000,
+    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * TC_LOG_SCALE * TC_LOG_SCALE * 100, 1)) * 1000) / 1000,
     lambdaVar: Math.round(Math.max(0.001, sf(lambdaVarNorm, 0.01)) * 1000) / 1000,
     formationEnergyVar: Math.round(Math.max(0.001, sf(feVarNorm, 0.01)) * 1000) / 1000,
     bandgapVar: Math.round(Math.max(0.001, sf(bgVarNorm, 0.01)) * 1000) / 1000,
@@ -2253,7 +2256,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
+  const predictedTcRaw = Math.max(0, Math.expm1(Math.max(0, sf(out[2] ?? 0)) * TC_LOG_SCALE));
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2274,7 +2277,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     dosProxy: Math.round(dosProxyRaw * 1000) / 1000,
     stabilityProbability: Math.round(stabilityProbRaw * 1000) / 1000,
     latentEmbedding: safeLatent,
-    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * 300 * 300, 1)) * 1000) / 1000,
+    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * TC_LOG_SCALE * TC_LOG_SCALE * 100, 1)) * 1000) / 1000,
     lambdaVar: Math.round(Math.max(0.001, sf(lambdaVarNorm, 0.01)) * 1000) / 1000,
     formationEnergyVar: Math.round(Math.max(0.001, sf(feVarNorm, 0.01)) * 1000) / 1000,
     bandgapVar: Math.round(Math.max(0.001, sf(bgVarNorm, 0.01)) * 1000) / 1000,
@@ -2411,11 +2414,26 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     return weights;
   }
 
-  const lr = 0.001;
-  // Fewer epochs for larger datasets: they converge faster and take longer per epoch.
-  // >400 samples → 3 epochs, 200-400 → 5 epochs, <200 → 8 epochs.
-  const epochs = trainingData.length > 400 ? 3 : trainingData.length > 200 ? 5 : 8;
-  const batchSize = Math.min(32, trainingData.length);
+  const LR_INIT = 0.001;
+  // More epochs at all sizes — 78 gradient steps (old 3-epoch limit) is insufficient.
+  // Cosine LR decay within trainSingleModel handles lr scheduling per-epoch.
+  const epochs = 10;
+  const batchSize = Math.min(64, trainingData.length);
+
+  // Adam state for MLP head weights (graph layers use simple SGD at lower lr).
+  const adamBeta1 = 0.9, adamBeta2 = 0.999, adamEps = 1e-8;
+  let adamStep = 0;
+  const mkAdam = (rows: number, cols: number) => ({
+    m: Array.from({ length: rows }, () => new Array(cols).fill(0)),
+    v: Array.from({ length: rows }, () => new Array(cols).fill(0)),
+  });
+  const mkAdamVec = (n: number) => ({ m: new Array(n).fill(0), v: new Array(n).fill(0) });
+  const adamW1  = mkAdam(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM);
+  const adamB1  = mkAdamVec(HIDDEN_DIM);
+  const adamW2  = mkAdam(OUTPUT_DIM, HIDDEN_DIM);
+  const adamB2  = mkAdamVec(OUTPUT_DIM);
+  const adamW2v = mkAdam(OUTPUT_DIM, HIDDEN_DIM);
+  const adamB2v = mkAdamVec(OUTPUT_DIM);
 
   const graphCache = new Map<string, CrystalGraph>();
   const origEmbeddings = new Map<string, number[][]>();
@@ -2445,6 +2463,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   const indices = Array.from({ length: trainingData.length }, (_, i) => i);
 
   for (let epoch = 0; epoch < epochs; epoch++) {
+    // Cosine LR decay: LR_INIT → LR_INIT/10 over the training run.
+    const lr = LR_INIT * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * epoch / epochs)));
     let totalLoss = 0;
     let totalSamples = 0;
 
@@ -2497,10 +2517,15 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const { pred, cache } = GNNPredictForTraining(graph, weights);
         const nN = graph.nodes.length;
 
-        const tcTarget = sample.tc / 300;
+        // Log-normalised target: log1p(Tc)/TC_LOG_SCALE → [0,1] with balanced gradient weights.
+        const tcTarget = Math.log1p(Math.max(0, sample.tc)) / TC_LOG_SCALE;
         const hasFormationEnergy = sample.formationEnergy != null;
         const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
-        const tcError = pred.predictedTc / 300 - tcTarget;
+        // Convert predicted Tc back to log-space for the loss (avoids back-computing log).
+        const predTcLog = Math.log1p(Math.max(0, pred.predictedTc)) / TC_LOG_SCALE;
+        const tcError = predTcLog - tcTarget;
+        // 2× weight for SC samples (Tc>0) to counteract 60/40 contrast imbalance.
+        const scWeight = sample.tc > 0 ? 2.0 : 1.0;
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
 
         const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;
@@ -2527,14 +2552,18 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const heteroLossLambda = (lambdaError * lambdaError) / lambdaVarNorm + Math.log(lambdaVarNorm);
 
         const feWeight = hasFormationEnergy ? 0.1 : 0.0;
-        const loss = tcError * tcError + feWeight * feError * feError + 0.1 * heteroLossTc + 0.05 * heteroLossLambda;
+        const loss = scWeight * (tcError * tcError + 0.1 * heteroLossTc) + feWeight * feError * feError + 0.05 * heteroLossLambda;
         totalLoss += loss;
         totalSamples++;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
         dLdOut[1] = clipGrad(2 * phononError * 0.05);
-        dLdOut[2] = clipGrad(2 * tcError + 0.1 * 2 * tcError / tcVarNorm);
+        // Chain rule: d(loss)/d(out[2]) = d(loss)/d(predTcLog) * d(predTcLog)/d(predictedTc) * d(predictedTc)/d(out[2])
+        // d(predTcLog)/d(predictedTc) = 1/(1+predictedTc) / TC_LOG_SCALE
+        // d(predictedTc)/d(out[2]) = TC_LOG_SCALE * exp(out[2]*TC_LOG_SCALE) = predictedTc+1
+        // These cancel: d/d(out[2]) = d(loss)/d(predTcLog)  (chain rule simplifies to just tcError gradient)
+        dLdOut[2] = clipGrad(scWeight * (2 * tcError + 0.1 * 2 * tcError / tcVarNorm));
         dLdOut[3] = clipGrad(2 * confError * 0.05);
         dLdOut[4] = clipGrad(2 * lambdaError * 0.1 + 0.05 * 2 * lambdaError / lambdaVarNorm);
         dLdOut[5] = clipGrad(2 * bgError * 0.05);
@@ -2725,29 +2754,43 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       }
 
       const invN = 1.0 / batchSize_actual;
-      for (let i = 0; i < weights.W_mlp2.length; i++) {
-        for (let j = 0; j < weights.W_mlp2[i].length; j++) {
-          weights.W_mlp2[i][j] -= lr * gradW2[i][j] * invN;
+      adamStep++;
+      const bc1 = 1 - Math.pow(adamBeta1, adamStep);
+      const bc2 = 1 - Math.pow(adamBeta2, adamStep);
+      const adamUpdate = (
+        w: number[][], g: number[][], am: { m: number[][]; v: number[][] }, rows: number, cols: number
+      ) => {
+        for (let i = 0; i < rows; i++) {
+          for (let j = 0; j < cols; j++) {
+            const gi = g[i][j] * invN;
+            am.m[i][j] = adamBeta1 * am.m[i][j] + (1 - adamBeta1) * gi;
+            am.v[i][j] = adamBeta2 * am.v[i][j] + (1 - adamBeta2) * gi * gi;
+            w[i][j] -= lr * (am.m[i][j] / bc1) / (Math.sqrt(am.v[i][j] / bc2) + adamEps);
+          }
         }
-        weights.b_mlp2[i] -= lr * gradB2[i] * invN;
-      }
-      for (let i = 0; i < weights.W_mlp2_var.length; i++) {
-        for (let j = 0; j < weights.W_mlp2_var[i].length; j++) {
-          weights.W_mlp2_var[i][j] -= lr * gradW2v[i][j] * invN;
+      };
+      const adamUpdateVec = (
+        w: number[], g: number[], av: { m: number[]; v: number[] }, n: number
+      ) => {
+        for (let i = 0; i < n; i++) {
+          const gi = g[i] * invN;
+          av.m[i] = adamBeta1 * av.m[i] + (1 - adamBeta1) * gi;
+          av.v[i] = adamBeta2 * av.v[i] + (1 - adamBeta2) * gi * gi;
+          w[i] -= lr * (av.m[i] / bc1) / (Math.sqrt(av.v[i] / bc2) + adamEps);
         }
-        weights.b_mlp2_var[i] -= lr * gradB2v[i] * invN;
-      }
-      for (let i = 0; i < HIDDEN_DIM; i++) {
-        for (let j = 0; j < pooledLen; j++) {
-          weights.W_mlp1[i][j] -= lr * gradW1[i][j] * invN;
-        }
-        weights.b_mlp1[i] -= lr * gradB1[i] * invN;
-      }
+      };
+
+      adamUpdate(weights.W_mlp2, gradW2, adamW2, weights.W_mlp2.length, weights.W_mlp2[0].length);
+      adamUpdateVec(weights.b_mlp2, gradB2, adamB2, weights.b_mlp2.length);
+      adamUpdate(weights.W_mlp2_var, gradW2v, adamW2v, weights.W_mlp2_var.length, weights.W_mlp2_var[0].length);
+      adamUpdateVec(weights.b_mlp2_var, gradB2v, adamB2v, weights.b_mlp2_var.length);
+      adamUpdate(weights.W_mlp1, gradW1, adamW1, HIDDEN_DIM, pooledLen);
+      adamUpdateVec(weights.b_mlp1, gradB1, adamB1, HIDDEN_DIM);
       for (let k = 0; k < HIDDEN_DIM; k++) {
         weights.W_pressure[k] -= lr * gradPressure[k] * invN;
       }
 
-      const graphLR = lr * 0.1;
+      const graphLR = lr * 0.3;
       const applyGraphGrad = (wMat: number[][], grad: number[][]) => {
         for (let i = 0; i < wMat.length; i++)
           for (let j = 0; j < wMat[i].length; j++)

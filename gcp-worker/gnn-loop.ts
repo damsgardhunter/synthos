@@ -138,8 +138,7 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
       `SELECT formula, data FROM mp_material_cache WHERE data_type = 'summary' LIMIT 2000`
     );
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
-    // Cap at 1.5× SC count so contrast examples don't overwhelm the superconductor signal
-    const maxContrast = Math.ceil(scCount * 1.5);
+    const maxContrast = scCount;  // 1:1 cap — avoids 60/40 Tc=0 majority diluting SC signal
     const samples: TrainingSample[] = [];
     for (const row of items) {
       if (samples.length >= maxContrast) break;
