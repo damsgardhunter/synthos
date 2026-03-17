@@ -3396,11 +3396,12 @@ setTimeout(async () => {
           ...(known?.lambda != null ? { lambda: known.lambda } : {}),
         })) seeded++;
       }
-      // Add any dftTrainingDataset entries with tc > 0 not already in base
+      // Add DFT dataset entries not already in base — include tc=0 as contrast examples
+      // (non-SCs and failed candidates teach the GNN that most metals don't superconduct)
       const extra: TrainingSample[] = [];
       for (const rec of dftTrainingDataset) {
-        if (seen.has(rec.formula) || superconFormulas.has(rec.formula) || rec.tc <= 0) continue;
-        extra.push({ formula: rec.formula, tc: rec.tc, formationEnergy: rec.formationEnergy ?? undefined });
+        if (seen.has(rec.formula) || superconFormulas.has(rec.formula)) continue;
+        extra.push({ formula: rec.formula, tc: Math.max(0, rec.tc ?? 0), formationEnergy: rec.formationEnergy ?? undefined });
         seen.add(rec.formula);
       }
       return { merged: [...base, ...extra], seeded };
