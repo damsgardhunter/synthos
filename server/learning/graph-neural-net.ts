@@ -3397,9 +3397,12 @@ setTimeout(async () => {
         })) seeded++;
       }
       // Add DFT dataset entries not already in base — include tc=0 as contrast examples
-      // (non-SCs and failed candidates teach the GNN that most metals don't superconduct)
+      // (non-SCs and failed candidates teach the GNN that most metals don't superconduct).
+      // Cap at 1.5× SC count to avoid drowning out the superconductor signal.
+      const maxContrast = Math.ceil(base.length * 1.5);
       const extra: TrainingSample[] = [];
       for (const rec of dftTrainingDataset) {
+        if (extra.length >= maxContrast) break;
         if (seen.has(rec.formula) || superconFormulas.has(rec.formula)) continue;
         extra.push({ formula: rec.formula, tc: Math.max(0, rec.tc ?? 0), formationEnergy: rec.formationEnergy ?? undefined });
         seen.add(rec.formula);

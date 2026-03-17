@@ -122,19 +122,21 @@ function computeMetrics(
 
 // ── MP augmentation (Tc=0 contrast examples) ─────────────────────────────────
 
-async function loadMPContrastSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
+async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
   try {
     const rows = await db.execute(
       `SELECT formula, data FROM mp_material_cache WHERE data_type = 'summary' LIMIT 2000`
     );
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    // Cap at 1.5× SC count so contrast examples don't overwhelm the superconductor signal
+    const maxContrast = Math.ceil(scCount * 1.5);
     const samples: TrainingSample[] = [];
     for (const row of items) {
+      if (samples.length >= maxContrast) break;
       const formula = row.formula as string;
       if (!formula || existingFormulas.has(formula)) continue;
       const d = row.data as any;
       if (!d) continue;
-      // Only use metallic materials with near-zero band gap as Tc=0 contrast examples
       if ((d.bandGap ?? 1) > 0.1) continue;
       samples.push({ formula, tc: 0, formationEnergy: d.formationEnergyPerAtom ?? undefined, structure: undefined, prototype: undefined });
     }
@@ -169,7 +171,7 @@ async function processNextGnnJob(): Promise<boolean> {
 
   // Augment with MP metallic materials (Tc=0) so GNN learns contrast with SCs
   const existingFormulas = new Set(trainingData.map(s => s.formula));
-  const mpContrast = await loadMPContrastSamples(existingFormulas);
+  const mpContrast = await loadMPContrastSamples(existingFormulas, trainingData.length);
   if (mpContrast.length > 0) {
     trainingData = [...trainingData, ...mpContrast];
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpContrast.length} MP contrast samples (Tc=0) — total ${trainingData.length}`);
